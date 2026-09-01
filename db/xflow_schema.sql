@@ -110,9 +110,9 @@ CREATE TABLE IF NOT EXISTS xflow_artifacts (
 -- 决策、原因、outcome、trace 关联；绝不含 token/payload/凭证等敏感字段。
 CREATE TABLE IF NOT EXISTS xflow_audit_events (
     id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    request_id   VARCHAR(128) NOT NULL DEFAULT ''  COMMENT '请求关联 ID（不可信为身份）',
+    request_id   VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL DEFAULT ''  COMMENT '请求关联 ID（不可信为身份）',
     principal    VARCHAR(255) NOT NULL DEFAULT ''  COMMENT '服务端注入的主体',
-    tenant_id    VARCHAR(128) NOT NULL DEFAULT ''  COMMENT '租户',
+    namespace    VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL DEFAULT ''  COMMENT '租户',
     operation    VARCHAR(64)  NOT NULL DEFAULT ''  COMMENT '操作词汇 (workflow.create 等)',
     resource     VARCHAR(255) NOT NULL DEFAULT ''  COMMENT '资源描述',
     workflow_id  VARCHAR(255) NOT NULL DEFAULT ''  COMMENT '工作流 ID',
@@ -133,10 +133,13 @@ CREATE TABLE IF NOT EXISTS xflow_audit_events (
     -- written inline by the authz wrapper or by the crash-safe reconcile
     -- worker), or 'receipt' (the T4 dead-letter replay receipt projection).
     -- Admission/outcome rows for the same RequestID are joinable on
-    -- (tenant_id, request_id); the phase column lets the reconcile worker's
+    -- (namespace, request_id); the phase column lets the reconcile worker's
     -- pending scan index "admitted but no outcome" efficiently and makes the
     -- append-only one-row-per-phase contract explicit.
-    phase            VARCHAR(16)  NOT NULL DEFAULT ''  COMMENT '事件阶段 admission/outcome/receipt',
+    phase            VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL DEFAULT '' COMMENT '事件阶段 admission/outcome/receipt',
+    -- Application-owned nullable idempotency key. Historical rows remain
+    -- NULL; only newly written eligible outcome rows receive a key.
+    phase_key        VARCHAR(320) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NULL DEFAULT NULL COMMENT '应用写入的 outcome 幂等键；历史行可为 NULL',
     node_id         VARCHAR(255) NOT NULL DEFAULT ''  COMMENT 'receipt 关联：节点名',
     activation_id   VARCHAR(64)  NOT NULL DEFAULT ''  COMMENT 'receipt 关联：activation',
     entry_id        VARCHAR(255) NOT NULL DEFAULT ''  COMMENT 'receipt 关联：dead-letter entry',
@@ -147,23 +150,9 @@ CREATE TABLE IF NOT EXISTS xflow_audit_events (
     INDEX idx_outcome (outcome),
     INDEX idx_ts (ts),
     INDEX idx_receipt_audit_id (receipt_audit_id),
-    INDEX idx_tenant_request_phase (tenant_id, request_id, phase),
-    -- Idempotency for outcome-phase rows: at most one outcome row per
-    -- (tenant_id, request_id). Expressed via a generated column that is NULL
-    -- unless phase='outcome' (and request_id is set), so admission rows
-    -- (phase='admission', written once per request) and receipt projection
-    -- rows (phase='receipt', deduped by ReceiptAuditID via
-    -- AppendAuditIfAbsent) do NOT collide under the UNIQUE index — only the
-    -- T9 reconcile worker's outcome appends are idempotency-guarded. MySQL
-    -- permits multiple NULLs. A concurrent/duplicate outcome append for the
-    -- same RequestID violates this index and is treated as appended=false by
-    -- the worker (check-then-append + unique index = crash-safe idempotency
-    -- across leader switches).
-    phase_key VARCHAR(320) GENERATED ALWAYS AS (
-        CASE WHEN phase = 'outcome' AND request_id <> ''
-             THEN CONCAT(tenant_id, '|', request_id, '|', phase)
-             ELSE NULL END
-    ) STORED COMMENT '幂等键：仅 outcome 行 (tenant_id, request_id)；NULL 跳过其他行',
+    INDEX idx_namespace_request_phase (namespace, request_id, phase),
+    -- MySQL permits multiple NULLs in a UNIQUE index, so historical rows can
+    -- remain unkeyed while application-written outcome keys stay unique.
     UNIQUE INDEX uk_phase_key (phase_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -194,37 +183,486 @@ DELIMITER ;
 CALL xflow_add_receipt_audit_columns();
 DROP PROCEDURE IF EXISTS xflow_add_receipt_audit_columns;
 
--- T9 audit-phase column + idempotency index. CREATE TABLE IF NOT EXISTS is a
--- no-op on a pre-existing table, so the phase column, the (tenant, request,
--- phase) scan index, and the generated phase_key unique index are back-filled
--- here via an INFORMATION_SCHEMA guard (MySQL lacks ADD COLUMN IF NOT EXISTS).
--- The generated phase_key is NULL for rows with empty phase/request_id so
--- admission rows that legitimately share an empty tuple do not collide under
--- the UNIQUE index. Idempotent: re-applying the schema is always safe.
-DROP PROCEDURE IF EXISTS xflow_add_phase_column;
+-- T9 audit-phase migration.
+--
+-- BREAKING / OFFLINE MIGRATION: stop every audit writer before applying this
+-- block, apply the complete schema, deploy the new binary everywhere, and only
+-- then restart writers. Old and new audit writers must never run concurrently;
+-- mixed-version operation is unsupported. The migration preserves every audit
+-- row and fails closed rather than deleting, truncating, or silently rewriting
+-- conflicting idempotency keys.
+--
+-- CREATE TABLE IF NOT EXISTS is a no-op for upgraded deployments, so every
+-- column and index has its own INFORMATION_SCHEMA guard. Ordering is
+-- intentional: a legacy generated phase_key can depend on tenant_id and must be
+-- replaced before tenant_id is renamed or dropped. Historical outcome groups
+-- are then backfilled with the exact application hash on one canonical row.
+
+DROP PROCEDURE IF EXISTS xflow_ensure_audit_phase;
 DELIMITER $$
-CREATE PROCEDURE xflow_add_phase_column()
+CREATE PROCEDURE xflow_ensure_audit_phase()
 BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+    DECLARE v_exists INT DEFAULT 0;
+    DECLARE v_data_type VARCHAR(64) DEFAULT '';
+    DECLARE v_length BIGINT DEFAULT 0;
+    DECLARE v_nullable VARCHAR(3) DEFAULT '';
+    DECLARE v_default VARCHAR(64) DEFAULT NULL;
+    DECLARE v_collation VARCHAR(64) DEFAULT '';
+
+    SELECT COUNT(*) INTO v_exists
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'xflow_audit_events'
+      AND COLUMN_NAME = 'phase';
+
+    IF v_exists = 0 THEN
+        ALTER TABLE xflow_audit_events
+            ADD COLUMN phase VARCHAR(16)
+                CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin
+                NOT NULL DEFAULT ''
+                COMMENT '事件阶段 admission/outcome/receipt' AFTER outcome;
+    ELSE
+        UPDATE xflow_audit_events SET phase = '' WHERE phase IS NULL;
+
+        SELECT DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE,
+               COLUMN_DEFAULT, COALESCE(COLLATION_NAME, '')
+          INTO v_data_type, v_length, v_nullable, v_default, v_collation
+        FROM INFORMATION_SCHEMA.COLUMNS
         WHERE TABLE_SCHEMA = DATABASE()
           AND TABLE_NAME = 'xflow_audit_events'
-          AND COLUMN_NAME = 'phase'
-    ) THEN
-        ALTER TABLE xflow_audit_events
-            ADD COLUMN phase VARCHAR(16) NOT NULL DEFAULT '' COMMENT '事件阶段 admission/outcome/receipt' AFTER outcome,
-            ADD COLUMN phase_key VARCHAR(320) GENERATED ALWAYS AS (
-                CASE WHEN phase = 'outcome' AND request_id <> ''
-                     THEN CONCAT(tenant_id, '|', request_id, '|', phase)
-                     ELSE NULL END
-            ) STORED COMMENT '幂等键：仅 outcome 行 (tenant_id, request_id)；NULL 跳过其他行',
-            ADD INDEX idx_tenant_request_phase (tenant_id, request_id, phase),
-            ADD UNIQUE INDEX uk_phase_key (phase_key);
+          AND COLUMN_NAME = 'phase';
+
+        IF v_data_type <> 'varchar'
+           OR v_length <> 16
+           OR v_nullable <> 'NO'
+           OR NOT (v_default <=> '')
+           OR v_collation <> 'utf8mb4_0900_bin' THEN
+            ALTER TABLE xflow_audit_events
+                MODIFY COLUMN phase VARCHAR(16)
+                    CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin
+                    NOT NULL DEFAULT ''
+                    COMMENT '事件阶段 admission/outcome/receipt';
+        END IF;
     END IF;
 END$$
 DELIMITER ;
-CALL xflow_add_phase_column();
-DROP PROCEDURE IF EXISTS xflow_add_phase_column;
+CALL xflow_ensure_audit_phase();
+DROP PROCEDURE IF EXISTS xflow_ensure_audit_phase;
+
+-- Assert before any legacy generated column/index can be removed. Dynamic SQL
+-- lets the guard run on intermediate schemas where phase_key does not exist yet.
+DROP PROCEDURE IF EXISTS xflow_assert_audit_phase_keys_unique;
+DELIMITER $$
+CREATE PROCEDURE xflow_assert_audit_phase_keys_unique()
+BEGIN
+    DECLARE v_exists INT DEFAULT 0;
+
+    SELECT COUNT(*) INTO v_exists
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'xflow_audit_events'
+      AND COLUMN_NAME = 'phase_key';
+
+    IF v_exists = 1 THEN
+        SET @xflow_duplicate_phase_keys = 0;
+        SET @xflow_duplicate_phase_key_sql =
+            'SELECT COUNT(*) INTO @xflow_duplicate_phase_keys FROM (SELECT phase_key FROM xflow_audit_events WHERE phase_key IS NOT NULL GROUP BY phase_key HAVING COUNT(*) > 1) AS duplicate_keys';
+        PREPARE xflow_duplicate_phase_key_stmt FROM @xflow_duplicate_phase_key_sql;
+        EXECUTE xflow_duplicate_phase_key_stmt;
+        DEALLOCATE PREPARE xflow_duplicate_phase_key_stmt;
+
+        IF @xflow_duplicate_phase_keys > 0 THEN
+            SIGNAL SQLSTATE '45000'
+                SET MESSAGE_TEXT = 'xflow_audit_events contains duplicate non-NULL phase_key values';
+        END IF;
+
+        SET @xflow_duplicate_phase_keys = NULL;
+        SET @xflow_duplicate_phase_key_sql = NULL;
+    END IF;
+END$$
+DELIMITER ;
+CALL xflow_assert_audit_phase_keys_unique();
+DROP PROCEDURE IF EXISTS xflow_assert_audit_phase_keys_unique;
+
+DROP PROCEDURE IF EXISTS xflow_ensure_audit_phase_key;
+DELIMITER $$
+CREATE PROCEDURE xflow_ensure_audit_phase_key()
+BEGIN
+    DECLARE v_exists INT DEFAULT 0;
+    DECLARE v_data_type VARCHAR(64) DEFAULT '';
+    DECLARE v_length BIGINT DEFAULT 0;
+    DECLARE v_nullable VARCHAR(3) DEFAULT '';
+    DECLARE v_default VARCHAR(320) DEFAULT NULL;
+    DECLARE v_extra VARCHAR(255) DEFAULT '';
+    DECLARE v_collation VARCHAR(64) DEFAULT '';
+
+    SELECT COUNT(*) INTO v_exists
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'xflow_audit_events'
+      AND COLUMN_NAME = 'phase_key';
+
+    IF v_exists = 0 THEN
+        ALTER TABLE xflow_audit_events
+            ADD COLUMN phase_key VARCHAR(320)
+                CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin
+                NULL DEFAULT NULL
+                COMMENT '应用写入的 outcome 幂等键；历史行可为 NULL' AFTER phase;
+    ELSE
+        SELECT DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE,
+               COLUMN_DEFAULT, EXTRA, COALESCE(COLLATION_NAME, '')
+          INTO v_data_type, v_length, v_nullable, v_default, v_extra, v_collation
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_audit_events'
+          AND COLUMN_NAME = 'phase_key';
+
+        IF UPPER(v_extra) LIKE '%GENERATED%' THEN
+            -- The generated expression is not audit data. Its values disappear
+            -- with the expression, then the canonical backfill below recreates
+            -- one application-compatible key per exact historical identity.
+            IF EXISTS (
+                SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = 'xflow_audit_events'
+                  AND INDEX_NAME = 'uk_phase_key'
+            ) THEN
+                ALTER TABLE xflow_audit_events DROP INDEX uk_phase_key;
+            END IF;
+
+            ALTER TABLE xflow_audit_events DROP COLUMN phase_key;
+            ALTER TABLE xflow_audit_events
+                ADD COLUMN phase_key VARCHAR(320)
+                    CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin
+                    NULL DEFAULT NULL
+                    COMMENT '应用写入的 outcome 幂等键；历史行可为 NULL' AFTER phase;
+        ELSEIF v_data_type <> 'varchar'
+            OR v_length <> 320
+            OR v_nullable <> 'YES'
+            OR v_default IS NOT NULL
+            OR v_collation <> 'utf8mb4_0900_bin' THEN
+            -- Preserve every ordinary-column key. Unsafe narrowing or invalid
+            -- values make ALTER fail closed instead of clearing data.
+            ALTER TABLE xflow_audit_events
+                MODIFY COLUMN phase_key VARCHAR(320)
+                    CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin
+                    NULL DEFAULT NULL
+                    COMMENT '应用写入的 outcome 幂等键；历史行可为 NULL';
+        END IF;
+    END IF;
+END$$
+DELIMITER ;
+CALL xflow_ensure_audit_phase_key();
+DROP PROCEDURE IF EXISTS xflow_ensure_audit_phase_key;
+
+-- Remove the obsolete name independently. It can survive an earlier column
+-- rename even though its indexed column has already become namespace.
+DROP PROCEDURE IF EXISTS xflow_drop_legacy_audit_phase_index;
+DELIMITER $$
+CREATE PROCEDURE xflow_drop_legacy_audit_phase_index()
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_audit_events'
+          AND INDEX_NAME = 'idx_tenant_request_phase'
+    ) THEN
+        ALTER TABLE xflow_audit_events DROP INDEX idx_tenant_request_phase;
+    END IF;
+END$$
+DELIMITER ;
+CALL xflow_drop_legacy_audit_phase_index();
+DROP PROCEDURE IF EXISTS xflow_drop_legacy_audit_phase_index;
+
+DROP PROCEDURE IF EXISTS xflow_canonicalize_audit_identity;
+DELIMITER $$
+CREATE PROCEDURE xflow_canonicalize_audit_identity()
+BEGIN
+    DECLARE v_has_tenant INT DEFAULT 0;
+    DECLARE v_has_namespace INT DEFAULT 0;
+    DECLARE v_has_request INT DEFAULT 0;
+    DECLARE v_data_type VARCHAR(64) DEFAULT '';
+    DECLARE v_length BIGINT DEFAULT 0;
+    DECLARE v_nullable VARCHAR(3) DEFAULT '';
+    DECLARE v_default VARCHAR(512) DEFAULT NULL;
+    DECLARE v_collation VARCHAR(64) DEFAULT '';
+
+    SELECT COUNT(*) INTO v_has_tenant
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'xflow_audit_events'
+      AND COLUMN_NAME = 'tenant_id';
+
+    SELECT COUNT(*) INTO v_has_namespace
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'xflow_audit_events'
+      AND COLUMN_NAME = 'namespace';
+
+    IF v_has_tenant = 1 AND v_has_namespace = 0 THEN
+        ALTER TABLE xflow_audit_events RENAME COLUMN tenant_id TO namespace;
+    ELSEIF v_has_tenant = 1 AND v_has_namespace = 1 THEN
+        -- Dynamic SQL keeps tenant_id references out of executions where the
+        -- legacy column no longer exists. CAST(... AS BINARY) plus byte length
+        -- prevents case, accent, or trailing-space equivalence from merging
+        -- distinct identities.
+        SET @xflow_namespace_conflicts = 0;
+        SET @xflow_namespace_sql =
+            'SELECT COUNT(*) INTO @xflow_namespace_conflicts FROM xflow_audit_events WHERE OCTET_LENGTH(namespace) > 0 AND OCTET_LENGTH(tenant_id) > 0 AND CAST(namespace AS BINARY) <> CAST(tenant_id AS BINARY)';
+        PREPARE xflow_namespace_stmt FROM @xflow_namespace_sql;
+        EXECUTE xflow_namespace_stmt;
+        DEALLOCATE PREPARE xflow_namespace_stmt;
+
+        IF @xflow_namespace_conflicts > 0 THEN
+            SIGNAL SQLSTATE '45000'
+                SET MESSAGE_TEXT = 'xflow_audit_events tenant_id/namespace conflict';
+        END IF;
+
+        SET @xflow_namespace_sql =
+            'UPDATE xflow_audit_events SET namespace = tenant_id WHERE (namespace IS NULL OR OCTET_LENGTH(namespace) = 0) AND tenant_id IS NOT NULL';
+        PREPARE xflow_namespace_stmt FROM @xflow_namespace_sql;
+        EXECUTE xflow_namespace_stmt;
+        DEALLOCATE PREPARE xflow_namespace_stmt;
+
+        ALTER TABLE xflow_audit_events DROP COLUMN tenant_id;
+    ELSEIF v_has_tenant = 0 AND v_has_namespace = 0 THEN
+        ALTER TABLE xflow_audit_events
+            ADD COLUMN namespace VARCHAR(128)
+                CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin
+                NOT NULL DEFAULT '' COMMENT '租户' AFTER principal;
+    END IF;
+
+    UPDATE xflow_audit_events SET namespace = '' WHERE namespace IS NULL;
+
+    SELECT DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE,
+           COLUMN_DEFAULT, COALESCE(COLLATION_NAME, '')
+      INTO v_data_type, v_length, v_nullable, v_default, v_collation
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'xflow_audit_events'
+      AND COLUMN_NAME = 'namespace';
+
+    IF v_data_type <> 'varchar'
+       OR v_length <> 128
+       OR v_nullable <> 'NO'
+       OR NOT (v_default <=> '')
+       OR v_collation <> 'utf8mb4_0900_bin' THEN
+        ALTER TABLE xflow_audit_events
+            MODIFY COLUMN namespace VARCHAR(128)
+                CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin
+                NOT NULL DEFAULT '' COMMENT '租户';
+    END IF;
+
+    SELECT COUNT(*) INTO v_has_request
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'xflow_audit_events'
+      AND COLUMN_NAME = 'request_id';
+
+    IF v_has_request = 0 THEN
+        ALTER TABLE xflow_audit_events
+            ADD COLUMN request_id VARCHAR(128)
+                CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin
+                NOT NULL DEFAULT ''
+                COMMENT '请求关联 ID（不可信为身份）' AFTER id;
+    ELSE
+        UPDATE xflow_audit_events SET request_id = '' WHERE request_id IS NULL;
+
+        SELECT DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE,
+               COLUMN_DEFAULT, COALESCE(COLLATION_NAME, '')
+          INTO v_data_type, v_length, v_nullable, v_default, v_collation
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_audit_events'
+          AND COLUMN_NAME = 'request_id';
+
+        IF v_data_type <> 'varchar'
+           OR v_length <> 128
+           OR v_nullable <> 'NO'
+           OR NOT (v_default <=> '')
+           OR v_collation <> 'utf8mb4_0900_bin' THEN
+            ALTER TABLE xflow_audit_events
+                MODIFY COLUMN request_id VARCHAR(128)
+                    CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin
+                    NOT NULL DEFAULT ''
+                    COMMENT '请求关联 ID（不可信为身份）';
+        END IF;
+    END IF;
+
+    SET @xflow_namespace_sql = NULL;
+    SET @xflow_namespace_conflicts = NULL;
+END$$
+DELIMITER ;
+CALL xflow_canonicalize_audit_identity();
+DROP PROCEDURE IF EXISTS xflow_canonicalize_audit_identity;
+
+-- Backfill exactly one canonical row (MIN(id)) for each byte-exact historical
+-- outcome identity that has no existing key. This byte stream is identical to
+-- auditPhaseKey in store/sqlstore/audit_repo.go:
+--   domain "xflow:audit-phase-key:v1\\0";
+--   uint64 big-endian byte length + raw bytes for namespace, request_id,
+--   and literal "outcome"; SHA-256 encoded as lowercase hexadecimal.
+DROP PROCEDURE IF EXISTS xflow_backfill_audit_phase_keys;
+DELIMITER $$
+CREATE PROCEDURE xflow_backfill_audit_phase_keys()
+BEGIN
+    DECLARE v_candidate_duplicates BIGINT DEFAULT 0;
+    DECLARE v_existing_conflicts BIGINT DEFAULT 0;
+
+    DROP TEMPORARY TABLE IF EXISTS xflow_audit_phase_backfill;
+    CREATE TEMPORARY TABLE xflow_audit_phase_backfill (
+        id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+        phase_key VARCHAR(64) NOT NULL
+    ) ENGINE=InnoDB;
+
+    INSERT INTO xflow_audit_phase_backfill (id, phase_key)
+    SELECT canonical.id,
+           LOWER(SHA2(CONCAT(
+               UNHEX('78666c6f773a61756469742d70686173652d6b65793a763100'),
+               UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(canonical.namespace AS BINARY))), 16, '0')),
+               CAST(canonical.namespace AS BINARY),
+               UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(canonical.request_id AS BINARY))), 16, '0')),
+               CAST(canonical.request_id AS BINARY),
+               UNHEX('0000000000000007'),
+               CAST('outcome' AS BINARY)
+           ), 256))
+    FROM xflow_audit_events AS canonical
+    INNER JOIN (
+        SELECT MIN(id) AS id
+        FROM xflow_audit_events
+        WHERE phase = 'outcome'
+          AND OCTET_LENGTH(namespace) > 0
+          AND OCTET_LENGTH(request_id) > 0
+        GROUP BY CAST(namespace AS BINARY), CAST(request_id AS BINARY)
+        HAVING COUNT(phase_key) = 0
+    ) AS identity ON identity.id = canonical.id;
+
+    SELECT COUNT(*) INTO v_candidate_duplicates
+    FROM (
+        SELECT phase_key
+        FROM xflow_audit_phase_backfill
+        GROUP BY phase_key
+        HAVING COUNT(*) > 1
+    ) AS duplicate_candidates;
+
+    SELECT COUNT(*) INTO v_existing_conflicts
+    FROM xflow_audit_phase_backfill AS candidate
+    INNER JOIN xflow_audit_events AS existing
+        ON existing.phase_key = candidate.phase_key;
+
+    IF v_candidate_duplicates > 0 OR v_existing_conflicts > 0 THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'xflow audit phase-key backfill conflicts with an existing key';
+    END IF;
+
+    UPDATE xflow_audit_events AS target
+    INNER JOIN xflow_audit_phase_backfill AS candidate
+        ON candidate.id = target.id
+    SET target.phase_key = candidate.phase_key
+    WHERE target.phase_key IS NULL;
+
+    DROP TEMPORARY TABLE xflow_audit_phase_backfill;
+END$$
+DELIMITER ;
+CALL xflow_backfill_audit_phase_keys();
+DROP PROCEDURE IF EXISTS xflow_backfill_audit_phase_keys;
+
+DROP PROCEDURE IF EXISTS xflow_ensure_audit_join_index;
+DELIMITER $$
+CREATE PROCEDURE xflow_ensure_audit_join_index()
+BEGIN
+    DECLARE v_parts INT DEFAULT 0;
+    DECLARE v_non_unique INT DEFAULT 1;
+    DECLARE v_columns TEXT DEFAULT '';
+    DECLARE v_prefix_parts INT DEFAULT 0;
+    DECLARE v_index_type VARCHAR(32) DEFAULT '';
+    DECLARE v_visible VARCHAR(3) DEFAULT '';
+
+    SELECT COUNT(*), COALESCE(MIN(NON_UNIQUE), 1),
+           COALESCE(GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX), ''),
+           COALESCE(SUM(SUB_PART IS NOT NULL), 0),
+           COALESCE(MIN(INDEX_TYPE), ''), COALESCE(MIN(IS_VISIBLE), '')
+      INTO v_parts, v_non_unique, v_columns, v_prefix_parts,
+           v_index_type, v_visible
+    FROM INFORMATION_SCHEMA.STATISTICS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'xflow_audit_events'
+      AND INDEX_NAME = 'idx_namespace_request_phase';
+
+    IF v_parts > 0
+       AND (v_parts <> 3 OR v_non_unique <> 1
+            OR v_columns <> 'namespace,request_id,phase'
+            OR v_prefix_parts <> 0 OR v_index_type <> 'BTREE'
+            OR v_visible <> 'YES') THEN
+        ALTER TABLE xflow_audit_events DROP INDEX idx_namespace_request_phase;
+        SET v_parts = 0;
+    END IF;
+
+    IF v_parts = 0 THEN
+        ALTER TABLE xflow_audit_events
+            ADD INDEX idx_namespace_request_phase
+                (namespace, request_id, phase) USING BTREE;
+    END IF;
+END$$
+DELIMITER ;
+CALL xflow_ensure_audit_join_index();
+DROP PROCEDURE IF EXISTS xflow_ensure_audit_join_index;
+
+DROP PROCEDURE IF EXISTS xflow_ensure_audit_phase_key_index;
+DELIMITER $$
+CREATE PROCEDURE xflow_ensure_audit_phase_key_index()
+BEGIN
+    DECLARE v_parts INT DEFAULT 0;
+    DECLARE v_non_unique INT DEFAULT 1;
+    DECLARE v_columns TEXT DEFAULT '';
+    DECLARE v_prefix_parts INT DEFAULT 0;
+    DECLARE v_index_type VARCHAR(32) DEFAULT '';
+    DECLARE v_visible VARCHAR(3) DEFAULT '';
+    DECLARE v_duplicate_keys BIGINT DEFAULT 0;
+
+    -- Detect corruption before either dropping a malformed named index or
+    -- creating the unique index. Never erase keys to make DDL succeed.
+    SELECT COUNT(*) INTO v_duplicate_keys
+    FROM (
+        SELECT phase_key
+        FROM xflow_audit_events
+        WHERE phase_key IS NOT NULL
+        GROUP BY phase_key
+        HAVING COUNT(*) > 1
+    ) AS duplicate_keys;
+
+    IF v_duplicate_keys > 0 THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'xflow_audit_events contains duplicate non-NULL phase_key values';
+    END IF;
+
+    SELECT COUNT(*), COALESCE(MIN(NON_UNIQUE), 1),
+           COALESCE(GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX), ''),
+           COALESCE(SUM(SUB_PART IS NOT NULL), 0),
+           COALESCE(MIN(INDEX_TYPE), ''), COALESCE(MIN(IS_VISIBLE), '')
+      INTO v_parts, v_non_unique, v_columns, v_prefix_parts,
+           v_index_type, v_visible
+    FROM INFORMATION_SCHEMA.STATISTICS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'xflow_audit_events'
+      AND INDEX_NAME = 'uk_phase_key';
+
+    IF v_parts > 0
+       AND (v_parts <> 1 OR v_non_unique <> 0
+            OR v_columns <> 'phase_key' OR v_prefix_parts <> 0
+            OR v_index_type <> 'BTREE' OR v_visible <> 'YES') THEN
+        ALTER TABLE xflow_audit_events DROP INDEX uk_phase_key;
+        SET v_parts = 0;
+    END IF;
+
+    IF v_parts = 0 THEN
+        ALTER TABLE xflow_audit_events
+            ADD UNIQUE INDEX uk_phase_key (phase_key) USING BTREE;
+    END IF;
+END$$
+DELIMITER ;
+CALL xflow_ensure_audit_phase_key_index();
+DROP PROCEDURE IF EXISTS xflow_ensure_audit_phase_key_index;
 
 -- supply 版本溯源列。CREATE TABLE IF NOT EXISTS 对已存在的表是 no-op，
 -- 故用 INFORMATION_SCHEMA 守卫补列（MySQL 无 ADD COLUMN IF NOT EXISTS）。

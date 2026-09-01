@@ -2,19 +2,25 @@ package sqlstore
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/xbcio/xflow/store"
 )
 
 // auditRepo implements store.AuditAppender against the SQL backend. Audit
-// rows are append-only: AppendAudit inserts one row and never updates or
-// deletes. The insert is the durability boundary — callers (the apiserver
-// admission-audit check) fail-closed when this returns an error.
+// rows are append-only: AppendAudit never updates or deletes. Admission and
+// receipt events always insert one row; outcome events use the same
+// one-row-per-identity idempotency guard as AppendOutcomeIfAbsent. The insert
+// is the durability boundary — callers (the apiserver admission-audit check)
+// fail-closed when this returns an error.
 type auditRepo struct {
 	db *gorm.DB
 }
@@ -27,6 +33,16 @@ func (r *auditRepo) AppendAudit(ctx context.Context, rec *store.AuditRecord) err
 		return fmt.Errorf("append audit: nil record")
 	}
 	d := toDBAudit(rec)
+	if d.PhaseKey != nil {
+		appended, err := r.createOutcomeIfAbsent(ctx, d)
+		if err := wrapDBErr("append audit", err); err != nil {
+			return err
+		}
+		if appended {
+			rec.ID = d.ID
+		}
+		return nil
+	}
 	if err := wrapDBErr("append audit", r.db.WithContext(ctx).Create(d).Error); err != nil {
 		return err
 	}
@@ -119,12 +135,34 @@ func toDBAudit(r *store.AuditRecord) *dbAuditEvent {
 		TraceID:        r.TraceID,
 		Timestamp:      r.Timestamp,
 		Phase:          r.Phase,
+		PhaseKey:       auditPhaseKey(r.Namespace, r.RequestID, r.Phase),
 		NodeID:         r.NodeID,
 		ActivationID:   r.ActivationID,
 		EntryID:        r.EntryID,
 		ReceiptAuditID: r.ReceiptAuditID,
 		Revision:       r.Revision,
 	}
+}
+
+// auditPhaseKey returns a fixed-size, collision-resistant key for the only
+// phase that requires uniqueness. Length-prefixing each identity component
+// avoids delimiter ambiguity, while hashing keeps arbitrary-length and
+// arbitrary-byte input safe for the indexed VARCHAR column.
+func auditPhaseKey(namespace, requestID, phase string) *string {
+	if phase != store.AuditPhaseOutcome || namespace == "" || requestID == "" {
+		return nil
+	}
+
+	h := sha256.New()
+	h.Write([]byte("xflow:audit-phase-key:v1\x00"))
+	var size [8]byte
+	for _, part := range [...]string{namespace, requestID, phase} {
+		binary.BigEndian.PutUint64(size[:], uint64(len(part)))
+		h.Write(size[:])
+		h.Write([]byte(part))
+	}
+	key := hex.EncodeToString(h.Sum(nil))
+	return &key
 }
 
 func fromDBAudit(d *dbAuditEvent) *store.AuditRecord {
@@ -195,44 +233,61 @@ LIMIT ?`, store.AuditPhaseAdmission, store.AuditOutcomeAdmitted, before, afterSe
 // AppendOutcomeIfAbsent idempotently appends an outcome-phase audit row. It
 // is the T9 reconcile worker's settle path: before appending, it checks that
 // no outcome row already exists for the same (namespace, request_id,
-// phase="outcome"). A duplicate (e.g. a concurrent worker or a leader
-// switch racing two sweeps) is caught by the check-then-append here AND by
-// the unique uk_phase_key index on the generated phase_key column, so the
-// duplicate insert surfaces as gorm.ErrDuplicatedKey and is reported as
-// appended=false rather than an error.
+// phase="outcome"). The pre-lookup recognizes historical outcome rows whose
+// phase_key is NULL. INSERT ... ON CONFLICT DO NOTHING plus the unique
+// uk_phase_key index closes the race between concurrent writers without
+// relying on dialect-specific duplicate-error translation.
 //
 // The row's Phase is forced to "outcome" so the idempotency key is stable
-// regardless of caller. A record with an empty RequestID has no idempotency
-// key and is always appended (it cannot be a reconcile outcome).
+// regardless of caller. A record with an empty Namespace or RequestID has no
+// idempotency key and is always appended (it cannot be a reconcile outcome).
 func (r *auditRepo) AppendOutcomeIfAbsent(ctx context.Context, rec *store.AuditRecord) (bool, error) {
 	if rec == nil {
 		return false, fmt.Errorf("append outcome if absent: nil record")
 	}
 	rec.Phase = store.AuditPhaseOutcome
-	if rec.RequestID != "" && rec.Namespace != "" {
-		var existing dbAuditEvent
-		err := r.db.WithContext(ctx).
-			Where("namespace = ? AND request_id = ? AND phase = ?", rec.Namespace, rec.RequestID, store.AuditPhaseOutcome).
-			First(&existing).Error
-		if err == nil {
-			return false, nil
-		}
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return false, wrapDBErr("append outcome if absent: lookup", err)
-		}
-	}
 	d := toDBAudit(rec)
-	if err := r.db.WithContext(ctx).Create(d).Error; err != nil {
-		// A duplicate-key violation (concurrent insert between our check and
-		// create) means another worker appended the outcome first; treat it
-		// as a benign idempotent skip, not an error.
-		if errors.Is(err, gorm.ErrDuplicatedKey) {
-			return false, nil
-		}
-		return false, wrapDBErr("append outcome if absent", err)
+	appended, err := r.createOutcomeIfAbsent(ctx, d)
+	if err := wrapDBErr("append outcome if absent", err); err != nil {
+		return false, err
 	}
-	rec.ID = d.ID
-	return true, nil
+	if appended {
+		rec.ID = d.ID
+	}
+	return appended, nil
+}
+
+// createOutcomeIfAbsent is shared by the inline AppendAudit outcome path and
+// the reconcile worker. The lookup is required even with uk_phase_key because
+// migrated historical outcome rows may intentionally retain a NULL key. The
+// unique key and conflict-ignore insert are still required to make a lookup
+// miss safe under concurrent writers.
+func (r *auditRepo) createOutcomeIfAbsent(ctx context.Context, d *dbAuditEvent) (bool, error) {
+	if d.PhaseKey == nil {
+		result := r.db.WithContext(ctx).Create(d)
+		return result.RowsAffected == 1, result.Error
+	}
+
+	var existing dbAuditEvent
+	lookup := r.db.WithContext(ctx).
+		Select("id").
+		Where("namespace = ? AND request_id = ? AND phase = ?", d.Namespace, d.RequestID, store.AuditPhaseOutcome).
+		Limit(1).
+		Find(&existing)
+	if lookup.Error != nil {
+		return false, lookup.Error
+	}
+	if lookup.RowsAffected != 0 {
+		return false, nil
+	}
+
+	result := r.db.WithContext(ctx).
+		Clauses(clause.OnConflict{DoNothing: true}).
+		Create(d)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected == 1, nil
 }
 
 // CountUnreconciledAdmissions returns the total count of pending admissions

@@ -16,10 +16,14 @@ import (
 // carries identity (subject/namespace), operation, resource ids, decision,
 // reason, and trace correlation ids — none of which are secrets.
 type dbAuditEvent struct {
-	ID          uint64    `gorm:"column:id;primaryKey;autoIncrement"`
-	RequestID   string    `gorm:"column:request_id;type:varchar(128)"`
+	ID uint64 `gorm:"column:id;primaryKey;autoIncrement"`
+	// RequestID, Namespace, Phase, and PhaseKey form the outcome identity
+	// contract. Keep their full MySQL definitions here as well as in
+	// db/xflow_schema.sql so development/test AutoMigrate calls cannot weaken
+	// byte-exact comparisons by restoring the database's default collation.
+	RequestID   string    `gorm:"column:request_id;type:varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;not null;default:'';index:idx_namespace_request_phase,priority:2"`
 	Principal   string    `gorm:"column:principal;type:varchar(255)"`
-	Namespace   string    `gorm:"column:namespace;type:varchar(128)"`
+	Namespace   string    `gorm:"column:namespace;type:varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;not null;default:'';index:idx_namespace_request_phase,priority:1"`
 	Operation   string    `gorm:"column:operation;type:varchar(64)"`
 	Resource    string    `gorm:"column:resource;type:varchar(255)"`
 	WorkflowID  string    `gorm:"column:workflow_id;type:varchar(255)"`
@@ -31,10 +35,11 @@ type dbAuditEvent struct {
 	Timestamp   time.Time `gorm:"column:ts"`
 	CreatedAt   time.Time `gorm:"column:created_at;autoCreateTime:milli"`
 	// Phase is the immutable audit phase (T9): admission / outcome / receipt.
-	// The generated phase_key column (NULL for empty phase/request_id) is the
-	// unique idempotency key for outcome rows; it is computed by MySQL and is
-	// intentionally absent from this struct so GORM never writes it.
-	Phase string `gorm:"column:phase;type:varchar(16);default:''"`
+	Phase string `gorm:"column:phase;type:varchar(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;not null;default:'';index:idx_namespace_request_phase,priority:3"`
+	// PhaseKey is the nullable, Go-generated idempotency key for outcome rows.
+	// Admission/receipt rows and rows without a complete identity store NULL,
+	// allowing them to coexist under the outcome-only unique index.
+	PhaseKey *string `gorm:"column:phase_key;type:varchar(320) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;uniqueIndex:uk_phase_key"`
 	// Receipt correlation fields (T4 dead-letter receipt projector; T9
 	// outcome-phase worker reuses them). Populated only by the receipt
 	// projector; admission/outcome rows leave them empty. ReceiptAuditID is

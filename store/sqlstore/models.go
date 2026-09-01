@@ -225,7 +225,7 @@ type dbArtifactBlob struct {
 func (dbArtifactBlob) TableName() string { return "xflow_artifact_blobs" }
 
 // dbArtifact is the GORM persistence type for the xflow_artifacts table — the
-// tenant-scoped identity layer that binds (namespace, filename, version) to a
+// namespace-scoped identity layer that binds (namespace, filename, version) to a
 // content hash. The binding is immutable once created.
 type dbArtifact struct {
 	ID          uint64    `gorm:"column:id;primaryKey;autoIncrement"`

@@ -9,7 +9,6 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	"github.com/xbcio/xflow/service/crypto/supplyenc"
 	"github.com/xbcio/xflow/store"
 )
 
@@ -19,7 +18,7 @@ type supplyRepo struct {
 	// atRest, when non-nil, encrypts the content column. Nil keeps the
 	// pre-encryption behaviour byte for byte, so the feature can be rolled out
 	// without changing what an existing deployment stores.
-	atRest *supplyenc.AtRest
+	atRest SupplyEncryption
 }
 
 var _ store.Supplies = (*supplyRepo)(nil)
@@ -67,14 +66,10 @@ func (r *supplyRepo) GetSupply(ctx context.Context, namespace, name string) (*st
 	// content_hash column (schema default is '').
 	//
 	// Encryption is one case this happens to cover, not the reason it exists:
-	// supplyenc.Open decides "this is pre-encryption plaintext" purely from
-	// IsEncrypted's cheap prefix check on the stored bytes, so corruption that
-	// destroys that prefix (front truncation, or a row shorter than 20 bytes)
-	// makes Open return the mangled bytes as "plaintext" with a nil error —
-	// undetectable inside supplyenc, since it has no way to know what the
-	// original content was. This check closes that residual gap as a side
-	// effect, but it applies equally, and for the same reason, when atRest is
-	// nil and no encryption is involved at all.
+	// an at-rest implementation may identify pre-encryption plaintext from an
+	// envelope prefix, so corruption that destroys that prefix can make Open
+	// return mangled bytes as plaintext. The hash closes that residual gap, but
+	// it applies equally when atRest is nil and no encryption is involved.
 	if out.ContentHash != "" && out.ContentHash != store.ContentHash(out.Content) {
 		return nil, fmt.Errorf("get supply %q/%q: content hash mismatch, stored content may be corrupted", namespace, name)
 	}

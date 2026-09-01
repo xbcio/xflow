@@ -2,19 +2,75 @@
 // It is a thin dialect entry point over the dialect-agnostic sqlstore core:
 // it opens a MySQL connection, configures the pool, and returns a
 // *sqlstore.Provider. Callers who already hold a *gorm.DB (or want another
-// dialect) should use sqlstore.New directly.
+// dialect) should use sqlstore.New directly -- this is the documented,
+// supported embedding path (see sdk/xflow/cluster.go's own example), not an
+// edge case.
+//
+// This package's init() below registers this package's MySQL-specific
+// transient-error classification (a deadlock, error 1213) with sqlstore's
+// dialect-agnostic core via sqlstore.RegisterTransientClassifier, so
+// store/sqlstore/errors.go itself never needs to import this package's
+// driver. Registration happens purely from this package being imported --
+// NOT from New running -- specifically so that a caller who constructs its
+// own *gorm.DB and calls sqlstore.New directly (never touching this
+// package's New) still gets MySQL-deadlock classification, as long as it
+// imports this package (even as a blank import, `_
+// "github.com/xbcio/xflow/store/sqlstore/mysqlstore"`) somewhere in its
+// binary. This used to be gated on New running instead; that gated an entire
+// class of legitimate embedders out of classification entirely -- see
+// store/sqlstore/errors.go's RegisterTransientClassifier doc comment for the
+// full retraction.
 package mysqlstore
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
 	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/gorm"
 
-	"github.com/xbcio/xflow/service/crypto/supplyenc"
+	mysqldriver "github.com/go-sql-driver/mysql"
+
 	"github.com/xbcio/xflow/store/sqlstore"
 )
+
+// mysqlErrDeadlock is the MySQL server error number for "Deadlock found when
+// trying to get lock; try restarting transaction" (ER_LOCK_DEADLOCK). It is
+// the only error number isMySQLDeadlock classifies as safe to retry. Lock
+// wait timeout (1205) is deliberately not included: it can reflect a
+// long-running transaction rather than a genuine deadlock, and retrying it
+// blindly can make contention worse rather than resolve it.
+const mysqlErrDeadlock = 1213
+
+// isMySQLDeadlock is this package's store/sqlstore.RegisterTransientClassifier
+// predicate: it recognizes a MySQL deadlock (error 1213) via errors.As
+// against *mysqldriver.MySQLError, not a substring match. Registered under
+// the dialect name "mysql" by init() below.
+//
+// Registering this unconditionally at import time (rather than gating it on
+// a live connection) is safe for any deployment that never opens a MySQL
+// connection: isMySQLDeadlock can only ever match a *mysqldriver.MySQLError
+// with this specific error number, a value that can only originate from a
+// real MySQL driver error in the first place. A deployment that never talks
+// to MySQL will never produce one, so this predicate is completely inert for
+// it regardless of whether it is registered.
+func isMySQLDeadlock(err error) bool {
+	var mysqlErr *mysqldriver.MySQLError
+	return errors.As(err, &mysqlErr) && mysqlErr.Number == mysqlErrDeadlock
+}
+
+// init registers isMySQLDeadlock with sqlstore's dialect-agnostic core the
+// moment this package is imported -- the same idiom database/sql driver
+// packages use (e.g. `import _ "github.com/go-sql-driver/mysql"` registering
+// itself with database/sql.Register from its own init()). This is what makes
+// a bare blank import of this package (with no call to New at all) enough to
+// wire MySQL-deadlock classification into any *sqlstore.Provider built
+// however the caller likes, including via sqlstore.New(db) directly over the
+// caller's own *gorm.DB.
+func init() {
+	sqlstore.RegisterTransientClassifier("mysql", isMySQLDeadlock)
+}
 
 // Option configures the MySQL connection pool and GORM behavior.
 type Option func(*config)
@@ -36,12 +92,9 @@ func defaultConfig() *config {
 		maxOpenConns:    25,
 		maxIdleConns:    5,
 		connMaxLifetime: 5 * time.Minute,
-		// TranslateError maps MySQL duplicate-key (1062) and not-found errors
-		// to gorm.ErrDuplicatedKey / gorm.ErrRecordNotFound so the
-		// dialect-agnostic sqlstore core can branch on sentinels. Required by
-		// the T9 audit reconcile worker's idempotent AppendOutcomeIfAbsent,
-		// which treats a duplicate outcome insert (concurrent worker / leader
-		// switch racing two sweeps) as a benign idempotent skip.
+		// TranslateError normalizes common MySQL failures for callers. Audit
+		// outcome idempotency does not depend on this setting: it uses an
+		// explicit conflict-ignore insert and RowsAffected instead.
 		gormCfg: &gorm.Config{TranslateError: true},
 	}
 }
@@ -87,9 +140,9 @@ func WithGormConfig(cfg *gorm.Config) Option {
 // pool, which is a different type from sqlstore.Option, so this collects the
 // underlying sqlstore.WithSupplyEncryption option and forwards it to
 // sqlstore.New at the end of New.
-func WithSupplyEncryption(a *supplyenc.AtRest) Option {
+func WithSupplyEncryption(encryption sqlstore.SupplyEncryption) Option {
 	return func(c *config) {
-		c.sqlstoreOpts = append(c.sqlstoreOpts, sqlstore.WithSupplyEncryption(a))
+		c.sqlstoreOpts = append(c.sqlstoreOpts, sqlstore.WithSupplyEncryption(encryption))
 	}
 }
 

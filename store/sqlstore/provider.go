@@ -2,10 +2,12 @@ package sqlstore
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"reflect"
 
 	"gorm.io/gorm"
 
-	"github.com/xbcio/xflow/service/crypto/supplyenc"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/store/objectstore"
 )
@@ -31,21 +33,47 @@ var (
 	_ store.Transactor = (*Provider)(nil)
 )
 
+// SupplyEncryption is the minimal at-rest transform required by the supply
+// repository. Key management, envelope formats, and concrete cryptography stay
+// outside the storage layer.
+type SupplyEncryption interface {
+	Seal(plaintext []byte) ([]byte, error)
+	Open(stored []byte) ([]byte, error)
+}
+
 // options holds construction-time settings for New. It stays unexported: the
 // only supported way to configure it is through an Option function, so adding
 // a new option never breaks existing call sites.
 type options struct {
-	supplyAtRest *supplyenc.AtRest
+	supplyAtRest SupplyEncryption
 }
 
 // Option configures a Provider at construction time.
 type Option func(*options)
 
 // WithSupplyEncryption enables at-rest encryption of the supply content
-// column. When omitted (or a nil AtRest is passed), supply content is stored
-// and read back exactly as it was before encryption existed.
-func WithSupplyEncryption(a *supplyenc.AtRest) Option {
-	return func(o *options) { o.supplyAtRest = a }
+// column. When omitted or passed a nil implementation (including a typed nil),
+// supply content is stored and read back exactly as it was before encryption
+// existed.
+func WithSupplyEncryption(encryption SupplyEncryption) Option {
+	return func(o *options) {
+		o.supplyAtRest = normalizeSupplyEncryption(encryption)
+	}
+}
+
+func normalizeSupplyEncryption(encryption SupplyEncryption) SupplyEncryption {
+	if encryption == nil {
+		return nil
+	}
+
+	value := reflect.ValueOf(encryption)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		if value.IsNil() {
+			return nil
+		}
+	}
+	return encryption
 }
 
 // New creates a Provider from an already-configured *gorm.DB. The caller owns
@@ -74,6 +102,25 @@ func New(db *gorm.DB, opts ...Option) *Provider {
 // code should prefer the per-domain repo methods.
 func (p *Provider) DB() *gorm.DB {
 	return p.db
+}
+
+// CheckReadiness verifies that the underlying SQL connection pool can reach
+// the database, honoring cancellation and deadlines from the probe request.
+func (p *Provider) CheckReadiness(ctx context.Context) error {
+	if p == nil || p.db == nil {
+		return errors.New("sqlstore: database is not configured")
+	}
+	sqlDB, err := p.db.DB()
+	if err != nil {
+		return fmt.Errorf("sqlstore: resolve database connection: %w", err)
+	}
+	if sqlDB == nil {
+		return errors.New("sqlstore: database connection is not configured")
+	}
+	if err := sqlDB.PingContext(ctx); err != nil {
+		return fmt.Errorf("sqlstore: ping database: %w", err)
+	}
+	return nil
 }
 
 // ArtifactObjects returns the objectstore.Store backed by xflow_artifact_blobs.
