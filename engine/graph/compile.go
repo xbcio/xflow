@@ -245,7 +245,7 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	if err := buildDependencyEdges(def, depPorts, g, nil); err != nil {
 		return nil, err
 	}
-	if err := projectNodeBodies(def, g); err != nil {
+	if err := projectNodeBodies(def, g, nil); err != nil {
 		return nil, err
 	}
 	if err := compileGroups(g, def); err != nil {
@@ -371,18 +371,62 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 // Indexing g.nodes by def.Nodes' index is sound because registerNodes appends
 // one NodeMeta per def.Nodes entry in order and rejects duplicate names, so the
 // two stay 1:1 — the same identity g.SupplyRefsFor(i) already relies on.
-func projectNodeBodies(def *types.WorkflowDef, g *Graph) error {
+// extraVisibleSupplies widens every body projected by this pass with supply
+// names the ENCLOSING scope already grants. It is nil on Compile's own pass,
+// where g.supplyRefs is authoritative and needs no widening.
+//
+// It is not nil inside compileTrusted, where g.supplyRefs cannot be
+// authoritative: a group's projected Def carries only member NodeDefs and only
+// member-to-member edges, and a supply node may not be a group member at all,
+// so buildDependencyEdges finds no dependency edges and leaves g.supplyRefs
+// empty for every node. A grouped map's body would then be reprojected with no
+// visible supplies — clearing deploy-time validation and failing on the first
+// batch of the first execution, reported as a group deadline rather than as the
+// validation error it is.
+//
+// Widening by the enclosing group's flat list rather than per member is not a
+// loosening: buildDependencyEdges already passes that same flat list to
+// validateSupplyUsage for every node of this graph, so a body inherits exactly
+// what the node enclosing it already had.
+func projectNodeBodies(def *types.WorkflowDef, g *Graph, extraVisibleSupplies []string) error {
 	for i, nd := range def.Nodes {
 		if !declaresSubgraphBody(nd.Parameters) {
 			continue
 		}
-		body, err := ProjectNodeBodyPackage(nd.Name, nd.Parameters, g.SupplyRefsFor(i), projectedWorkflowContext(g))
+		visible := unionSupplyNames(g.SupplyRefsFor(i), extraVisibleSupplies)
+		body, err := ProjectNodeBodyPackage(nd.Name, nd.Parameters, visible, projectedWorkflowContext(g))
 		if err != nil {
 			return err
 		}
 		g.nodes[i].Body = body
 	}
 	return assertFanOutNodesResolved(def, g)
+}
+
+// unionSupplyNames merges two supply-name sets into one sorted, de-duplicated
+// slice.
+//
+// It returns own untouched when there is nothing to add, so Compile's own pass
+// — which always passes nil — produces byte-identical body packages to before
+// this parameter existed. That keeps PackageHash from moving for every workflow
+// that has no group, which would otherwise fence and rebalance all of them.
+func unionSupplyNames(own, extra []string) []string {
+	if len(extra) == 0 {
+		return own
+	}
+	seen := make(map[string]struct{}, len(own)+len(extra))
+	for _, n := range own {
+		seen[n] = struct{}{}
+	}
+	for _, n := range extra {
+		seen[n] = struct{}{}
+	}
+	out := make([]string, 0, len(seen))
+	for n := range seen {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // assertFanOutNodesResolved is projectNodeBodies' post-condition: every fan-out

@@ -472,7 +472,15 @@ func compileTrusted(def *types.WorkflowDef, visibleSupplies, visibleOuterNodes [
 	// no compileGroups call here (a projected package's Def carries only member
 	// NodeDefs, never nested Groups), so the pass slots in right where Compile
 	// would otherwise call compileGroups.
-	if err := projectNodeBodies(def, g); err != nil {
+	//
+	// visibleSupplies must be threaded in, unlike in Compile: the ordering alone
+	// is not what makes Compile's pass correct — it is that Compile runs against
+	// the OUTER graph, where g.supplyRefs carries the map node's dependency edge.
+	// This Def cannot carry that edge (a supply node is never a group member and
+	// buildPackageConnections keeps only member-to-member edges), so without the
+	// widening the body is reprojected with no visible supplies and every batch
+	// of a grouped map fails validation at runtime.
+	if err := projectNodeBodies(def, g, visibleSupplies); err != nil {
 		return nil, err
 	}
 	// buildNodesRefs with skipCrossBranchWarning=true: projected packages are

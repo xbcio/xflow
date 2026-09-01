@@ -69,8 +69,14 @@ const bodyExitPort = "main"
 // runtime surprise — the same reason the body's shape rules are enforced in
 // validateNodeBody.
 //
-// visibleSupplies is the parent map node's OWN visible-supply set — the sorted
-// names g.SupplyRefsFor(mapNodeIdx) returns after buildDependencyEdges has run.
+// visibleSupplies is the set of supply names the body's members may read. On
+// the outer Compile pass it is the parent map node's OWN set — the sorted names
+// g.SupplyRefsFor(mapNodeIdx) returns after buildDependencyEdges has run. When
+// the map node is a group member the body is reprojected inside compileTrusted,
+// whose Def structurally cannot carry the dependency edge, and projectNodeBodies
+// unions in the enclosing group's VisibleSupplies there; see its doc for why
+// that is not a loosening.
+//
 // A body member has no dependency edges of its own (it is never a top-level
 // node in the outer graph), so without this the projected package's Def has no
 // way to tell CompileProjectedPackage's validateSupplyUsage that a body member
