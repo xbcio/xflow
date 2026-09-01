@@ -15,6 +15,10 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
+    // The editor suite performs several full React/AntD rerenders. Running the
+    // four DOM-heavy files concurrently can starve Vitest's 5s per-test timer
+    // on a cold CI worker, so keep file execution deterministic and serial.
+    fileParallelism: false,
     globals: true,
     setupFiles: ["./vitest.setup.ts"],
     include: [
@@ -22,6 +26,18 @@ export default defineConfig({
       "apps/*/src/**/*.test.tsx",
       "packages/*/src/**/*.test.ts",
       "packages/*/src/**/*.test.tsx"
-    ]
+    ],
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "html", "json-summary"],
+      include: ["packages/*/src/**/*.{ts,tsx}"],
+      exclude: ["**/*.test.{ts,tsx}", "**/*.d.ts"],
+      thresholds: {
+        statements: 90,
+        branches: 70,
+        functions: 80,
+        lines: 90
+      }
+    }
   }
 });
