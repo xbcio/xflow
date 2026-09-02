@@ -20,6 +20,7 @@ type config struct {
 	resourcePool  types.ResourcePool
 	artifactCode  func(ctx context.Context, digest string) ([]byte, error)
 	registry      *execution.Registry
+	logger        engine.Logger
 }
 
 // WithConcurrency sets the number of in-memory queue consumer goroutines. Default is 4.
@@ -40,6 +41,24 @@ func WithQueueCapacity(n int) Option {
 	return func(c *config) {
 		if n > 0 {
 			c.queueCapacity = n
+		}
+	}
+}
+
+// WithQueueLogger installs the logger the in-memory queue uses to report tasks
+// it drops: one that failed with a permanent error, and one that exhausted its
+// transient retries. Both paths end in a bare return, so without a logger a
+// task disappears with no record anywhere that it existed.
+//
+// It is an option rather than a default because the queue sits below the
+// logging layer — engine.Logger is an interface the caller supplies. Callers
+// that already hold one (service/apiserver's Config.Logger, which the
+// distributed backend beside it has always received) should pass it; the
+// no-logger behaviour is unchanged for those that do not.
+func WithQueueLogger(l engine.Logger) Option {
+	return func(c *config) {
+		if l != nil {
+			c.logger = l
 		}
 	}
 }
@@ -92,9 +111,12 @@ func New(opts ...Option) *Backend {
 		reg = execution.NewRegistry()
 	}
 
+	q := newMemoryQueueWithCapacity(cfg.concurrency, cfg.queueCapacity)
+	q.SetLogger(cfg.logger)
+
 	return &Backend{
 		state:            newMemoryState(),
-		queue:            newMemoryQueueWithCapacity(cfg.concurrency, cfg.queueCapacity),
+		queue:            q,
 		registry:         reg,
 		workflowRegistry: newWorkflowRegistry(),
 		triggerRuntime:   newTriggerPrimitives(),

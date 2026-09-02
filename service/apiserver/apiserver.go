@@ -319,7 +319,14 @@ func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 
 	useRedis := cfg.RedisConfig != nil || cfg.RedisAddr != ""
 	if !useRedis {
-		ccfg.Backend = backendlocal.New(backendlocal.WithConcurrency(cfg.Concurrency))
+		ccfg.Backend = backendlocal.New(
+			backendlocal.WithConcurrency(cfg.Concurrency),
+			// The same cfg.Logger the distributed branch below has always
+			// received. Without it the in-memory queue drops permanently-failed
+			// and retry-exhausted tasks with no record at all, so a single-node
+			// deployment loses the diagnostics its Redis-backed sibling keeps.
+			backendlocal.WithQueueLogger(cfg.Logger),
+		)
 		// In-memory EntryActivation store so the node-generic reconciler runs and
 		// register/deregister derive activations even on the single-node path.
 		ccfg.EntryActivationStore = control.NewMemoryEntryActivationStore()
