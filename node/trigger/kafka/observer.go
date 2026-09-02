@@ -173,10 +173,44 @@ const discardLogInterval = 30 * time.Second
 //
 // The key space is partitioned by CONVENTION, not by construction: callers
 // build "topic\x00<discriminator>\x00<partition>" and today's discriminators
-// (admission_<state>, overflow, and the schema reasons schema/schema_fail/
-// dead_letter) happen not to overlap. A new discriminator that collides with
-// an existing one would silently reintroduce the cross-caller suppression
-// this scoping exists to remove, and nothing here would report it.
+// happen not to overlap. A new discriminator that collides with an existing
+// one would silently reintroduce the cross-caller suppression this scoping
+// exists to remove, and nothing here would report it.
+//
+// That makes the inventory below load-bearing: it is the whole of the
+// no-collision argument. Re-derive it rather than trusting it — the criterion
+// is every non-test call site of discardLog.allow, and the discriminator is
+// the second \x00-separated segment each one builds. Today that is four sites
+// yielding seven discriminators:
+//
+//	entryseed.go  "admission_" + state   admission_error,
+//	                                     admission_deterministic_error
+//	aggregate.go  "overflow"             (shed under on_overflow=drop)
+//	aggregate.go  "stuck_batch"
+//	schema.go     reason                 schema, schema_fail, dead_letter
+//
+// Note that entryseed.go's state is NOT OnBatchAdmission's five-value enum:
+// the log fires only on the failure paths, so accepted/duplicate/conflict
+// reach the metric and never reach this map. Reading the metric's enum as the
+// key inventory overstates it by three.
+//
+// Only two segments are variables (entryseed.go's state, schema.go's reason)
+// and both are closed enums built in this package — every call site passes a
+// literal except entryseed.go:293-295, which picks between those same two
+// values. schema.go passes err.Error() as the log's action, not into the key,
+// so no free-text error ever reaches this map.
+//
+// The same enumeration bounds the maps: every key component is bounded (topic
+// x seven discriminators x the partition assignment), so last/suppressed grow
+// with the assignment and not with traffic. An earlier note in this tree
+// claimed they were unbounded insert-only maps; that was wrong, and the
+// enumeration above is why.
+//
+// The same enumeration bounds the maps: every key component is bounded (topic
+// x seven discriminators x the partition assignment), so last/suppressed grow
+// with the assignment and not with traffic. An earlier note in this tree
+// claimed they were unbounded insert-only maps; that was wrong, and the
+// enumeration above is why.
 type discardLogger struct {
 	mu   sync.Mutex
 	last map[string]time.Time
