@@ -160,9 +160,23 @@ func obs() Observer { return *observer.Load() }
 // so a deployment without --metrics-addr is not blind.
 const discardLogInterval = 30 * time.Second
 
-// discardLogger throttles discard logs per topic+reason and reports how many
-// were suppressed since the last emission, so a throttled log never
-// understates the volume.
+// discardLogger throttles discard logs per key and reports how many were
+// suppressed since the last emission, so a throttled log never understates
+// the volume.
+//
+// Every caller's key ends in the partition, because the goroutines that log
+// here run one per partition: a key without it lets one partition hold the
+// gate for the whole interval while the partition/offset printed belong to
+// whichever call won the race. The suppressed count is scoped the same way,
+// so it counts this partition's suppressions rather than a cross-partition
+// mix.
+//
+// The key space is partitioned by CONVENTION, not by construction: callers
+// build "topic\x00<discriminator>\x00<partition>" and today's discriminators
+// (admission_<state>, overflow, and the schema reasons schema/schema_fail/
+// dead_letter) happen not to overlap. A new discriminator that collides with
+// an existing one would silently reintroduce the cross-caller suppression
+// this scoping exists to remove, and nothing here would report it.
 type discardLogger struct {
 	mu   sync.Mutex
 	last map[string]time.Time

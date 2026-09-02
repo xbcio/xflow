@@ -666,6 +666,67 @@ func TestLogBatchAdmission_TruncatesCause(t *testing.T) {
 	}
 }
 
+// TestLogBatchAdmission_DifferentPartitionsBothLogged pins that the throttle
+// key includes partition, not just topic+state.
+//
+// Before the fix, logBatchAdmission's discardLog key was topic+"\x00admission_"+state
+// with no partition. Since discardLogInterval is 30s, once one partition's
+// admission failure won that shared gate, every OTHER partition of the same
+// topic failing within the next 30s was silently swallowed — and the only
+// partition/start_offset/end_offset that ever reached the log belonged to
+// whichever call happened to win the race, not to whatever an operator was
+// chasing. A real incident with 8 different partitions failing read as "the
+// same partition retrying" because of exactly this. Reverting the key to
+// drop the partition component must turn this test red.
+func TestLogBatchAdmission_DifferentPartitionsBothLogged(t *testing.T) {
+	buf := captureAdmissionLog(t)
+
+	// Same topic, same state, two different partitions, well inside the 30s
+	// throttle window (these two calls are effectively simultaneous).
+	logBatchAdmission("multi-part", 1, 100, 105, 6, "error", "boom-from-partition-1")
+	logBatchAdmission("multi-part", 2, 200, 205, 6, "error", "boom-from-partition-2")
+
+	got := buf.String()
+	for _, want := range []string{
+		"partition=1", "start_offset=100", "end_offset=105", "boom-from-partition-1",
+		"partition=2", "start_offset=200", "end_offset=205", "boom-from-partition-2",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("admission log is missing %q; a topic-only throttle key would "+
+				"let partition 2's failure be silently suppressed by partition 1's, "+
+				"which is the bug this test pins.\nlog:\n%s", want, got)
+		}
+	}
+}
+
+// TestLogInvalidMessage_DifferentPartitionsBothLogged is the same pin as
+// TestLogBatchAdmission_DifferentPartitionsBothLogged, for the OTHER throttled
+// log line that prints a per-call partition/offset: logInvalidMessage
+// (schema.go). Its callers (perMessageRuntime.worker and partitionAggregator)
+// run one goroutine PER PARTITION, so two different partitions of one topic
+// discarding invalid messages within the same 30s window is the ordinary
+// case, not a corner case. A topic+reason-only key would let one partition's
+// line suppress the other's, printing an offset that belongs to whichever
+// partition happened to win.
+func TestLogInvalidMessage_DifferentPartitionsBothLogged(t *testing.T) {
+	buf := captureAdmissionLog(t)
+
+	logInvalidMessage(Message{Topic: "multi-part-invalid", Partition: 1, Offset: 11}, "schema", "message discarded")
+	logInvalidMessage(Message{Topic: "multi-part-invalid", Partition: 2, Offset: 22}, "schema", "message discarded")
+
+	got := buf.String()
+	for _, want := range []string{
+		"partition=1", "offset=11",
+		"partition=2", "offset=22",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("invalid-message log is missing %q; a topic+reason-only throttle "+
+				"key would let partition 2's line be suppressed by partition 1's.\nlog:\n%s",
+				want, got)
+		}
+	}
+}
+
 // entrySeedGroupExecTestRuntime is entrySeedTestRuntime PLUS ExecuteGroup, so
 // it satisfies types.TriggerRuntime, types.EntrySeedRuntime AND
 // types.GroupExecRuntime all at once — exactly the shape of the production

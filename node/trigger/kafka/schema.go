@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -133,8 +134,17 @@ type invalidMessageHandler interface {
 // value: a malformed record is still production traffic and may carry
 // credentials or PII. Topic/partition/offset are enough to fetch the record
 // deliberately with a separate tool.
+//
+// The throttle key includes partition. Callers run one goroutine per
+// partition (perMessageRuntime.worker and partitionAggregator both key by
+// partitionKey{topic, partition}), so several partitions of one topic can be
+// discarding invalid messages concurrently; a topic-only key would let one of
+// them win the gate for 30s while the printed partition/offset — the whole
+// point of this line — belonged to whichever call happened to get there
+// first, same defect as logBatchAdmission.
 func logInvalidMessage(msg Message, reason, action string) {
-	emit, count := discardLog.allow(time.Now(), msg.Topic+"\x00"+reason)
+	emit, count := discardLog.allow(time.Now(),
+		msg.Topic+"\x00"+reason+"\x00"+strconv.Itoa(msg.Partition))
 	if !emit {
 		return
 	}

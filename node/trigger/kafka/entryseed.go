@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/xbcio/xflow/types"
@@ -96,8 +97,17 @@ func admissionReasonForOutcome(outcome string) string {
 // engine's own error text, not the record — but a guest that quotes its input
 // in an error message will put that fragment here, so treat this line with the
 // same trust as a stack trace and keep it bounded.
+//
+// The throttle key includes partition. Without it, every partition of a topic
+// shared one gate: when several partitions were failing admission at once,
+// the log line that got through carried whichever partition's call happened
+// to win the race, while the offsets printed belonged only to that call — an
+// operator reading "partition 3" while 0..7 were all failing had no way to
+// know the other seven existed. occurrences is scoped the same way, so it
+// counts suppressions for THIS partition+state, not a cross-partition mix.
 func logBatchAdmission(topic string, partition int, first, last int64, count int, state, cause string) {
-	emit, occurrences := discardLog.allow(time.Now(), topic+"\x00admission_"+state)
+	emit, occurrences := discardLog.allow(time.Now(),
+		topic+"\x00admission_"+state+"\x00"+strconv.Itoa(partition))
 	if !emit {
 		return
 	}

@@ -649,7 +649,14 @@ func (a *partitionAggregator) run() {
 	}
 	reportOverflow := func(msg Message) {
 		overflowDropped++
-		if emit, count := discardLog.allow(time.Now(), msg.Topic+"\x00overflow"); emit {
+		// Keyed by partition, not just topic: aggregators run one per partition
+		// (see aggregators map[partitionKey]*partitionAggregator), so a
+		// topic-only key would let one overflowing partition's throttle gate
+		// suppress the log line for a DIFFERENT partition of the same topic
+		// that overflowed within the same window — the exact defect this
+		// package's admission log had (see logBatchAdmission).
+		if emit, count := discardLog.allow(time.Now(),
+			msg.Topic+"\x00overflow\x00"+strconv.Itoa(msg.Partition)); emit {
 			slog.Warn("kafka aggregate buffer at cap; DISCARDING messages "+
 				"(they are not redelivered — a later commit sweeps past them)",
 				"topic", msg.Topic,
