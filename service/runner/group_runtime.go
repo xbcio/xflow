@@ -39,6 +39,30 @@ func WithGroupArtifactCodeResolver(fn func(ctx context.Context, digest string) (
 	return func(r *GroupRuntime) { r.artifactCode = fn }
 }
 
+// WithGroupQueueLogger installs the logger the per-attempt inner backend's
+// queue uses to report a task it could not dispatch.
+//
+// Without it that trouble is invisible in a way the outer result cannot
+// compensate for. A task the queue cannot hand off never commits, so the inner
+// execution never reaches a terminal state and subgraph.Executor's WaitDone
+// blocks until the deadline; every such cause therefore arrives at the caller
+// as the single string "deadline exceeded"
+// (execution/subgraph/subgraph.go:321), which reads as "the work was too slow"
+// when the truth is "the work never ran".
+//
+// The reachable case is not a drop but an endless requeue. Node-level failures
+// commit through CommitTaskResult and surface with their own classification
+// (execution/dispatcher.go:158,161), so what reaches the queue as an error is
+// the infrastructure-level set — of which a missing handler is the ordinary
+// one, and Registry.Get returns it as a bare error (execution/registry.go:258)
+// that ClassifyExecutorFailure maps to ExecutorFailureUnknown and HandleTask
+// returns verbatim. The queue then treats it as transient and retries it up to
+// transientRequeueMax (1000) times before dropping. This logger is the only
+// place any of that is written down.
+func WithGroupQueueLogger(l engine.Logger) GroupRuntimeOption {
+	return func(r *GroupRuntime) { r.queueLogger = l }
+}
+
 // WithGroupHooks makes the nodes inside a group member observable. See
 // subgraph.WithHooks: the hooks must write their own metric family, because one
 // outer execution produces one inner execution per group attempt.
@@ -58,6 +82,7 @@ type GroupRuntime struct {
 	artifactCode          func(ctx context.Context, digest string) ([]byte, error)
 	mapConcurrencyLimiter *subgraph.MapConcurrencyLimiter
 	hooks                 engine.Hooks
+	queueLogger           engine.Logger
 	executor              *subgraph.Executor
 }
 
@@ -88,6 +113,12 @@ func NewGroupRuntime(reg *execution.Registry, cache *PackageCache, opts ...Group
 			local.WithRegistry(reg),
 			local.WithConcurrency(1),
 			local.WithQueueCapacity(embeddedSubgraphQueueCapacity),
+		}
+		// Read r.queueLogger inside the closure for the same reason as
+		// r.artifactCode below: the closure runs per attempt, so an option
+		// applied after this point must still reach every backend it builds.
+		if r.queueLogger != nil {
+			backendOpts = append(backendOpts, local.WithQueueLogger(r.queueLogger))
 		}
 		// Read r.artifactCode inside the closure, not at construction: the
 		// closure is what every attempt (and every nested map body, which reuses

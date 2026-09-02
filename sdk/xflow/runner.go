@@ -203,7 +203,8 @@ type runnerOptions struct {
 type RunnerOption func(*runnerOptions)
 
 // WithRunnerLogger sets the logger used by the supply gate, activation tracker,
-// and runner service. Defaults to slog.Default().
+// runner service, and the queues of the per-attempt/per-map-item backends the
+// group and subgraph runtimes build. Defaults to slog.Default().
 func WithRunnerLogger(l *slog.Logger) RunnerOption {
 	return func(o *runnerOptions) { o.logger = l }
 }
@@ -555,6 +556,10 @@ func buildRunnerServiceConfig(cfg RunnerConfig, opts ...RunnerOption) (runnersvc
 			runnersvc.WithSuspendDisabled(),
 			runnersvc.WithGroupMapConcurrencyLimiter(mapConcurrencyLimiter),
 			runnersvc.WithGroupArtifactCodeResolver(artifactCode),
+			// o.logger is non-nil by this point (defaulted to slog.Default()
+			// above), so every runner gets these dispatch failures on the
+			// record rather than only the ones that opted in.
+			runnersvc.WithGroupQueueLogger(newSlogLogger(o.logger)),
 		}, groupHookOpts...)...)
 
 	svcCfg := runnersvc.Config{
@@ -576,6 +581,7 @@ func buildRunnerServiceConfig(cfg RunnerConfig, opts ...RunnerOption) (runnersvc
 			append([]runnersvc.SubgraphRuntimeOption{
 				runnersvc.WithSubgraphMapConcurrencyLimiter(mapConcurrencyLimiter),
 				runnersvc.WithSubgraphArtifactCodeResolver(artifactCode),
+				runnersvc.WithSubgraphQueueLogger(newSlogLogger(o.logger)),
 			}, subgraphHookOpts...)...),
 		ArtifactCodeResolver: artifactCode,
 		SupportsEncryption:   true,

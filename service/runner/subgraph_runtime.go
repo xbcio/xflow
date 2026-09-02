@@ -26,6 +26,19 @@ type subgraphRuntimeConfig struct {
 	artifactCode          func(ctx context.Context, digest string) ([]byte, error)
 	mapConcurrencyLimiter *subgraph.MapConcurrencyLimiter
 	hooks                 engine.Hooks
+	queueLogger           engine.Logger
+}
+
+// WithSubgraphQueueLogger installs the logger the per-item inner backend's
+// queue uses to report a task it could not dispatch. See WithGroupQueueLogger
+// for why the outer result cannot substitute: such a task never commits, so the
+// item's execution stalls to its deadline and reaches the caller as
+// "deadline exceeded" with the real cause erased.
+//
+// This runtime builds one backend per map item, so on a workload whose members
+// are map bodies these are the queues that carry essentially all the work.
+func WithSubgraphQueueLogger(l engine.Logger) SubgraphRuntimeOption {
+	return func(c *subgraphRuntimeConfig) { c.queueLogger = l }
 }
 
 // WithSubgraphArtifactCodeResolver installs the digest -> script bytes resolver
@@ -88,6 +101,9 @@ func NewSubgraphRuntime(reg *execution.Registry, cache *PackageCache, opts ...Su
 		}
 		if cfg.artifactCode != nil {
 			backendOpts = append(backendOpts, local.WithArtifactCodeResolver(cfg.artifactCode))
+		}
+		if cfg.queueLogger != nil {
+			backendOpts = append(backendOpts, local.WithQueueLogger(cfg.queueLogger))
 		}
 		return local.New(backendOpts...)
 	}, execOpts...)
