@@ -301,9 +301,21 @@ body 的 span 仍没有真正的 OTel parent」——查证时发现缺口比记
 豁免 / handler 不走 inline 分支 / `continue_on_error` 恒 true / 失败项被丢弃 /
 逐项根去掉 `$` 前缀。
 
-`ErrNoMapBody` 因此只剩一条可达路径——`compileTrusted`（投影包走的受信路径，
-不跑 `validateNodeBody`）。判据下沉之后这条路径连「可达」都不再成立，守卫随之
-上移到编译期（见下一节），`ErrNoMapBody` 本身已删除。
+`ErrNoMapBody` 因此在**编译期**这条线上只剩一条路径——`compileTrusted`（投影包
+走的受信路径，不跑 `validateNodeBody`）。判据下沉之后这条路径连「可达」都不再
+成立，守卫随之上移到编译期（见下一节）。
+
+**订正（2026-09-02）**：本段原先的收尾写的是「`ErrNoMapBody` 本身已删除」。这句话
+在写下的那一刻就是假的，不是后来变旧的——写下它的提交 `94a54f7` 根本没有动过
+`execution/subgraph/map_body.go`，在它自己的树上该文件 `:64` 仍然是
+`errors.New("batch body request carries no package")`。这个错误此后不但没有被删，
+反而被 `435a66f` 提升成了命名哨兵，今天活在 `execution/subgraph/map_body.go:31`，
+可达点在同文件 `:90`，并有 `map_body_no_body_test.go`（`:45`、`:81`）两条测试钉着。
+
+之所以要留下这条订正而不是把那句话一删了事：「已删除」这个说法把
+`ErrNoMapBody` 排除出了后续所有排查的视野，而它恰恰是**运行期**那条线的终点。
+编译期收紧只关掉了编译期那条路——快照解码进来的图从来不过 `validateNodeBody`，
+它走的是 `Graph.UnmarshalJSON` 里的 fail-closed 守卫，两者是不同的门。
 
 ### 扩展判据从嗅 payload 改为读编译期投影的 body + 标记键彻底移除（原 P2-6，2026-08-11 修复）
 

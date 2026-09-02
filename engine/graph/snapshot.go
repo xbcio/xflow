@@ -604,7 +604,18 @@ func (g *Graph) UnmarshalJSON(data []byte) error {
 			continue
 		}
 		if n.Body == nil {
-			return fmt.Errorf("graph snapshot: node %q: %w", n.Name, ErrBodySnapshotMissingPackage)
+			return fmt.Errorf("graph snapshot: node %q: body absent: %w", n.Name, ErrBodySnapshotMissingPackage)
+		}
+		// The wire object can arrive present but hollow: NodeBodyPackage.Package
+		// has no json tag of its own, so a hand-edited or truncated snapshot that
+		// keeps "body":{"Hash":"..."} while dropping "Package" decodes into a
+		// non-nil *NodeBodyPackage whose Package is nil. n.Body == nil above does
+		// not catch this shape — it only catches the wire field missing outright.
+		// Both shapes are the same failure (BodyAt has nothing to return), so both
+		// share ErrBodySnapshotMissingPackage; only the wording differs, to tell
+		// an operator whether the object was dropped entirely or arrived gutted.
+		if n.Body.Package == nil {
+			return fmt.Errorf("graph snapshot: node %q: body present but its package is nil: %w", n.Name, ErrBodySnapshotMissingPackage)
 		}
 	}
 	g.graphHash = sf.GraphHash
