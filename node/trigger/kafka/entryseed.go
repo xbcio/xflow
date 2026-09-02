@@ -268,9 +268,25 @@ func seedEntryBatchViaGroupExec(ctx context.Context, in *types.TriggerActivateIn
 		"messages":     messageDataList(messages, valueJSON),
 	})
 	if err != nil {
-		obs().OnBatchAdmission(ctx, topic, "error", admissionReasonExecuteGroup)
+		// The group could not be RUN at all. Read the classification the
+		// producer attached rather than assuming the failure is environmental:
+		// a permanent error here means the package failed validation or
+		// compilation, so the redelivered batch carries the identical package
+		// to the identical consumer and fails identically.
+		//
+		// Both exits withhold the commit, so this changes no offsets — what it
+		// changes is what an operator sees. Folded into "error" alongside a
+		// broker blip, a permanently broken deploy is a blip that never stops,
+		// and the deterministic_error signal that exists to name exactly this
+		// condition stays silent on the one path that reaches it before the
+		// group ever runs.
+		state := "error"
+		if types.IsPermanent(err) {
+			state = "deterministic_error"
+		}
+		obs().OnBatchAdmission(ctx, topic, state, admissionReasonExecuteGroup)
 		logBatchAdmission(topic, first.Partition, first.Offset, last.Offset,
-			len(messages), "error", "ExecuteGroup: "+err.Error())
+			len(messages), state, "ExecuteGroup: "+err.Error())
 		return false
 	}
 	if execRes.Outcome != "success" {

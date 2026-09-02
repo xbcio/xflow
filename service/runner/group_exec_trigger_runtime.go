@@ -2,6 +2,8 @@ package runner
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/xbcio/xflow/engine/graph"
@@ -61,7 +63,7 @@ func (g *groupExecTriggerRuntime) ExecuteGroup(ctx context.Context, input map[st
 		SuspendDisabled: true,
 	})
 	if err != nil {
-		return types.GroupExecResult{}, err
+		return types.GroupExecResult{}, classifyGroupExecError(err)
 	}
 	exits := make([]types.BoundaryExit, len(res.Exits))
 	for i, ex := range res.Exits {
@@ -81,4 +83,31 @@ func (g *groupExecTriggerRuntime) ExecuteGroup(ctx context.Context, input map[st
 		// and subgraph.Result never marks it — no filtering is needed here.
 		Deterministic: res.Permanent,
 	}, nil
+}
+
+// classifyGroupExecError marks the deterministic error shapes ExecuteSubgraph
+// can return with types.ErrPermanent, so the Kafka batch path can tell a broken
+// package apart from a blip.
+//
+// The classification has to happen HERE rather than at the consumer.
+// node/trigger/kafka does not import execution/subgraph and so cannot name
+// these types at all; types.ErrPermanent is the vocabulary both layers already
+// share, and is the same property GroupExecResult.Deterministic reports for the
+// case where the group DID run.
+//
+// Why an allowlist and not a blanket "every error out of ExecuteSubgraph is
+// permanent": that blanket happens to be true today — Executor.Execute has
+// exactly one error return, the package cache's Resolve
+// (execution/subgraph/subgraph.go:145-148), and each shape Resolve produces is
+// a property of the package itself, so redelivering the batch re-runs the
+// identical package and fails identically. But it would become a lie the first
+// time Execute grows a second error return, and nothing would say so. An
+// unrecognised error keeps the transient reading, which is the one whose only
+// cost is a retry.
+func classifyGroupExecError(err error) error {
+	var validation *subgraph.PackageValidationError
+	if errors.Is(err, subgraph.ErrPackageMissing) || errors.As(err, &validation) {
+		return fmt.Errorf("%w: %w", types.ErrPermanent, err)
+	}
+	return err
 }

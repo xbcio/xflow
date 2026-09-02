@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -770,5 +771,52 @@ func TestKafkaAggregate_EntrySeedRecordsConflict(t *testing.T) {
 	_, _, admissions := o.snapshot()
 	if len(admissions) == 0 || admissions[0] != "conflict" {
 		t.Fatalf("admissions = %v, want \"conflict\"", admissions)
+	}
+}
+
+// TestSeedKafkaEntryBatchViaGroupExec_ErrorClassificationReachesAdmission
+// pins the classification on the pre-run failure path.
+//
+// The two arms differ ONLY in whether the ExecuteGroup error is marked
+// types.ErrPermanent, and both withhold the commit — so behaviour is identical
+// and the observer label is the entire observable difference. That is exactly
+// why it is worth a test: a package that will never compile and a broker that
+// blinked were reported with the same "error" state, which makes a broken
+// deploy indistinguishable from a transient one on the only surface an
+// operator has. The producer that sets the mark is
+// service/runner.classifyGroupExecError.
+//
+// state+reason are asserted together, per admissionPairs' own note: asserting
+// on state alone is the blind spot the reason label was added to close.
+func TestSeedKafkaEntryBatchViaGroupExec_ErrorClassificationReachesAdmission(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"transient", errors.New("dial tcp: connection refused"), "error/execute_group"},
+		{
+			"permanent",
+			fmt.Errorf("%w: package validation failed: handler not available", types.ErrPermanent),
+			"deterministic_error/execute_group",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := &recordingBatchObserver{}
+			SetObserver(o)
+			defer SetObserver(nil)
+
+			rt := &mockGroupExecRuntime{execErr: tc.err}
+			in := &types.TriggerActivateInput{NodeName: "trig", WorkflowID: "wf", Params: map[string]any{}}
+			msgs := []Message{{Topic: "t", Partition: 0, Offset: 1}}
+
+			if seedEntryBatchViaGroupExec(context.Background(), in, rt, msgs, false) {
+				t.Fatal("an ExecuteGroup error must never commit the offset, whatever its classification")
+			}
+			got := o.admissionPairs()
+			if len(got) != 1 || got[0] != tc.want {
+				t.Fatalf("admissions = %v, want exactly [%s]", got, tc.want)
+			}
+		})
 	}
 }

@@ -161,3 +161,84 @@ func TestGroupExecTriggerRuntime_DeterministicFromMemberClassification(t *testin
 		})
 	}
 }
+
+// TestGroupExecTriggerRuntime_UnrunnableGroupIsPermanent covers the OTHER half
+// of the deterministic/transient split: not "the group ran and failed"
+// (Deterministic on the result, above) but "the group could not be run at all",
+// which leaves via the error return and therefore carries no result to hold a
+// flag.
+//
+// The consumer that reads this is node/trigger/kafka's batch admission
+// (entryseed.go, seedEntryBatchViaGroupExec). Before the classification, it
+// reported a package that will never compile with the same "error" state as a
+// broker blip — so a permanently broken deploy looked, on the dashboard, like a
+// transient one that simply never cleared.
+func TestGroupExecTriggerRuntime_UnrunnableGroupIsPermanent(t *testing.T) {
+	reg := execution.NewRegistry() // deliberately empty
+	cache := NewPackageCache(PackageCacheConfig{MaxEntries: 10})
+	groupRT := NewGroupRuntime(reg, cache, WithSuspendDisabled())
+
+	// A package REQUIRING a handler this runner does not have. validatePackage
+	// (execution/subgraph/cache.go:162) rejects it before anything runs, which
+	// is the shape a runner one deploy behind the control plane produces.
+	pkg := &graph.SubgraphPackage{
+		Version:   1,
+		GroupName: "g",
+		EntryNode: "a",
+		Def: &types.WorkflowDef{
+			Name: "g",
+			Nodes: []types.NodeDef{
+				{Name: "a", Type: "test.absent", Version: 1},
+				{Name: "__collector_a_main", Type: graph.NodeTypeGroupExit, Version: 1},
+			},
+			Connections: types.Connections{
+				"a": {"main": types.PortConnections{Targets: []types.Connection{{Node: "__collector_a_main"}}}},
+			},
+		},
+		Exits:        []graph.SubgraphPackageExit{{CollectorNode: "__collector_a_main", SrcNode: "a", Port: "main"}},
+		Requirements: []graph.Requirement{{NodeType: "test.absent", NodeVersion: 1}},
+	}
+	hash, err := graph.ComputePackageHash(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	adapter := &groupExecTriggerRuntime{
+		HTTPEntrySeedRuntime: &protocol.HTTPEntrySeedRuntime{},
+		runtime:              groupRT,
+		pkg:                  pkg,
+		packageHash:          hash,
+	}
+
+	_, execErr := adapter.ExecuteGroup(context.Background(), map[string]any{"batch": "b1"})
+	if execErr == nil {
+		t.Fatal("a package whose required handler is absent must not execute")
+	}
+	if !types.IsPermanent(execErr) {
+		t.Fatalf("ExecuteGroup error = %v, want it marked types.ErrPermanent; "+
+			"unmarked, the Kafka batch path reports a package that can never "+
+			"compile as a transient failure", execErr)
+	}
+	// The original cause must survive the wrapping: it is the only thing that
+	// says WHICH handler is missing, and the admission log prints err.Error().
+	if !strings.Contains(execErr.Error(), "test.absent") {
+		t.Fatalf("ExecuteGroup error = %q, want it to still name the missing handler", execErr)
+	}
+}
+
+// TestClassifyGroupExecError_UnrecognisedStaysTransient pins the allowlist's
+// deliberate default. classifyGroupExecError marks only the shapes it can
+// name; anything else keeps the transient reading, whose only cost is a retry.
+// A blanket "every error out of ExecuteSubgraph is permanent" would pass every
+// test above and would silently be wrong the first time Execute grows a second
+// error return.
+func TestClassifyGroupExecError_UnrecognisedStaysTransient(t *testing.T) {
+	blip := errors.New("dial tcp: connection refused")
+	if got := classifyGroupExecError(blip); types.IsPermanent(got) {
+		t.Fatalf("classifyGroupExecError(%v) was marked permanent; an unrecognised "+
+			"error must keep the transient reading", blip)
+	}
+	if classifyGroupExecError(nil) != nil {
+		t.Fatal("classifyGroupExecError(nil) must stay nil")
+	}
+}
