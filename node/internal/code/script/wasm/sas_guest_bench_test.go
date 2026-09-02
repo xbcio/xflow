@@ -11,13 +11,13 @@
 //
 // Both the modules and the fixture come from outside this module, by path:
 //
-//	# in the SAS repo, dump the exact fixture bytes:
+//	# in the guest's own repo, dump the exact fixture bytes:
 //	XFLOW_DUMP_FIXTURE_PATH=/tmp/steady-fixture.ndjson \
 //	  go test ./pkg/xflow -run '^TestDumpSteadyFixture$' -count=1
 //
 //	# then here:
-//	XFLOW_BENCH_DECODE_WASM=<sas>/guest-decode.wasm \
-//	XFLOW_BENCH_CLEAN_WASM=<sas>/guest-clean.wasm \
+//	XFLOW_BENCH_DECODE_WASM=<guests>/guest-decode.wasm \
+//	XFLOW_BENCH_CLEAN_WASM=<guests>/guest-clean.wasm \
 //	XFLOW_BENCH_FIXTURE=/tmp/steady-fixture.ndjson \
 //	  go test ./node/internal/code/script/wasm -run '^$' \
 //	    -bench BenchmarkSASGuest -benchtime 200x
@@ -116,7 +116,7 @@ func benchFixtureRecords(b testing.TB) [][]byte {
 	b.Helper()
 	path := os.Getenv(benchFixtureEnv)
 	if path == "" {
-		b.Skipf("set %s=<ndjson> (see TestDumpSteadyFixture in the SAS repo) to benchmark on the real distribution", benchFixtureEnv)
+		b.Skipf("set %s=<ndjson> (see the fixture-dump test in the guest's own repo) to benchmark on the real distribution", benchFixtureEnv)
 	}
 	f, err := os.Open(path)
 	if err != nil {
@@ -1145,15 +1145,14 @@ func BenchmarkSASGuest_DecodeAB(b *testing.B) {
 // emitting a single number derived from what it parsed. Arm A is the production
 // artifact. B/A is then the fraction of decode that stage N and everything
 // before it accounts for, measured in wazero rather than natively -- which
-// matters, because the existing native analysis in
-// cmd/guest/decode/prefilter_bench_test.go and scanfloor_bench_test.go concluded
-// a hand-rolled extractor was not worth it, and both of its instruments are the
+// matters, because the earlier native analysis of the same guest concluded a
+// hand-rolled extractor was not worth it, and both of its instruments are the
 // shape that got the sign wrong on the clean guest.
 //
-// THE ARM-B SOURCE IS NOT COMMITTED. It was written into the SAS working tree as
-// a `floorprobe`-tagged eval, built, measured, and removed; neither
-// cmd/guest/decode/eval_floor.go nor the build tag exists in that repo today
-// (checked 2026-08-25). The numbers it produced are quoted in
+// THE ARM-B SOURCE IS NOT COMMITTED, HERE OR ANYWHERE. It was written as a
+// `floorprobe`-tagged eval in the guest's own tree, built, measured, and then
+// removed; neither that eval nor the build tag survives. The numbers it
+// produced are quoted in
 // BenchmarkSASGuest_DecodeEnvelopeAB and are the reason the envelope change was
 // made, so they were not wasted -- but rerunning this benchmark means
 // re-authoring the probe first, and its stage boundaries are then yours, not the
@@ -1225,7 +1224,7 @@ func BenchmarkSASGuest_DecodeFloor(b *testing.B) {
 // BenchmarkSASGuest_CleanFloor prices the phases INSIDE the clean guest.
 //
 // The same instrument as BenchmarkSASGuest_DecodeFloor, pointed at the other
-// guest. Its arm-B source is likewise NOT committed in the SAS repo -- see the
+// guest. Its arm-B source is likewise NOT committed anywhere -- see the
 // note on DecodeFloor; re-authoring it is the first step of any rerun.
 //
 // The motivating split quoted here previously -- clean plus the host hand-off at

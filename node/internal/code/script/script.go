@@ -75,7 +75,7 @@ func (n *ScriptNode) Credentials(names ...string) *ScriptNode {
 //
 // Without it every script receives every root, and BuildExprEnv publishes the
 // node's input TWICE — flattened at the top level and again under $input — so a
-// guest that reads one of them pays for both. Measured on the SAS traffic
+// guest that reads one of them pays for both. Measured on a production traffic
 // pipeline: the clean node's payload was 2.96x the raw Kafka record, of which
 // 67.7% was two copies of a $item it never reads. The cost is not the marshal
 // (~1%); it is the guest rebuilding those objects inside the sandbox, where the
@@ -517,7 +517,7 @@ var engineRoots = map[string]bool{
 //	Roots("$item", "tags")  →  env["$item"], env["tags"];  no $input at all
 //	Roots("$input")         →  env["$input"] whole;        nothing flattened
 //
-// The second form is for a guest that reads input.Data wholesale (SAS's clean
+// The second form is for a guest that reads input.Data wholesale (a clean-stage
 // guest does). Mixing them — declaring "$input" alongside named keys — keeps
 // $input whole and drops the flattened duplicates, since $input already contains
 // them.
@@ -594,7 +594,7 @@ const wasmScriptLanguage = "wasm"
 // The verdict is deliberately not "registration returned nil". See
 // wasm.SupplyConfiguredByDigest: registration succeeds against a module that has
 // never been handed content, and that module then evaluates every record against
-// no rules at all. That is not a crash, it is silent pass-through -- for the SAS
+// no rules at all. That is not a crash, it is silent pass-through -- for a cleansing
 // pipeline it means the credential a clean rule exists to strip is never
 // stripped.
 //
@@ -664,7 +664,7 @@ func batchRecords(data map[string]any) ([]any, bool) {
 }
 
 // countHits counts results whose "tags" is a non-empty list. Only hits travel
-// downstream to SAS, so this is the number that matters for the hit-rate metric:
+// downstream to the consumer, so this is the number that matters for the hit-rate metric:
 // a rule set that stops matching anything is otherwise indistinguishable from an
 // idle topic.
 func countHits(results []any) int {

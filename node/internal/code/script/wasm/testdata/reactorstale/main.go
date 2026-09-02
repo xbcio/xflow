@@ -2,7 +2,7 @@
 // detail first, leaving out_len pointing at the previous call's successful
 // output.
 //
-// It reproduces a defect found in production. SAS's decode guest returned
+// It reproduces a defect found in production. A production decode guest returned
 // ERR_OUTPUT bare when a message serialised past its limit; out_len is only
 // assigned by writeOut, so it still held the length of the LAST SUCCESSFUL
 // message. The host read that, and logged one message's full request/response

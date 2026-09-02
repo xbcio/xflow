@@ -17,7 +17,7 @@ import (
 // across the ABI boundary, and dropped — leaving only Error()'s per-code text,
 // which is the same five sentences no matter what actually went wrong.
 //
-// Measured cost of that gap: against live SAS traffic, 93.6% of batch
+// Measured cost of that gap: against live production traffic, 93.6% of batch
 // admissions failed with "wasm reactor: input decode failed" and nothing could
 // say which of the guest's four errDecode branches produced it.
 //
@@ -127,7 +127,7 @@ func logEvalDetail(op string, code int32, detail []byte) {
 // to log whatever it gets would print one message's payload as another message's
 // failure reason.
 //
-// SAS's decode guest did exactly this on ERR_OUTPUT, and the first run with
+// A production decode guest did exactly this on ERR_OUTPUT, and the first run with
 // logging enabled produced 23 lines whose "reason" was a serialised request and
 // response body. Wrong content attributed to the wrong call, and live traffic in
 // a log line.

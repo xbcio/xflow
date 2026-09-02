@@ -36,7 +36,7 @@ const CacheMaxBytesEnv = "XFLOW_WASM_CACHE_MAX_BYTES"
 // Nothing in wazero evicts: filecache.Add writes one file per compiled module
 // and the only Delete is the one wazero itself never calls, so a directory that
 // sees repeated guest rebuilds grows without limit. Measured on a development
-// machine, ~30 MB per rebuild of the SAS decode guest took this directory to
+// machine, ~30 MB per rebuild of a production decode guest took this directory to
 // 20 GB. That is not merely wasted space — filling the host disk puts the podman
 // VM into read-only mode, at which point Kafka and MySQL become unreachable and
 // integration tests SKIP SILENTLY while still exiting 0.

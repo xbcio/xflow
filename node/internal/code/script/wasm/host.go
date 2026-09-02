@@ -526,7 +526,7 @@ func (h *reactorHost) seedSourceDrivenByKey(key string) {
 // Why the sum and not this engine's own size: xflow_wasm_instance_total is a
 // gauge carrying only a "state" label, so each report REPLACES the series.
 // Reporting per-engine made the series read "the last engine to swap" — with
-// SAS's two modules resident it read one pool's width while two pools existed
+// two production modules resident it read one pool's width while two pools existed
 // (a live run read 8 with 14-20 goroutines observed inside wazero on an 8-core
 // machine). That is worse than no metric: a missing number makes an operator
 // look, and a plausible-but-wrong one makes them stop looking. An entire round
@@ -599,7 +599,7 @@ func (h *reactorHost) engineSnapshot() []*reactorEngine {
 // The max, not this engine's own age, for the reason spelled out on
 // reportReadyInstances: the metric is a gauge with no module-identity label, so
 // each report REPLACES the series. Reporting per-engine made it "whichever
-// module executed most recently" — with SAS's two modules resident and traffic
+// module executed most recently" — with two production modules resident and traffic
 // interleaved, consecutive scrapes alternated between them. A module whose
 // source froze hours ago was therefore visible in only about half of the
 // scrapes, which is worse than either always or never: an alert on it flaps,

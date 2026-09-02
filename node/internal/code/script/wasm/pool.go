@@ -38,7 +38,7 @@ var reactorABIVersion int32 = 1
 // may serve before it is proactively recycled.
 //
 // It is a BACKSTOP, not the working bound. recycleMemoryHighWater is what
-// actually retires instances on SAS-shaped traffic; this count exists for a
+// actually retires instances on production-shaped traffic; this count exists for a
 // guest whose memory never climbs at all, so that no instance runs unboundedly
 // long without a fresh start.
 //
@@ -65,7 +65,7 @@ const maxEvalsPerInstance = 8_000
 // mark of everything the guest's Go heap has ever needed at once. That makes it
 // the one signal that measures the resource actually being exhausted, rather
 // than a proxy for it — and the proxies do not work. TestGuestMemoryCeiling
-// swept the real SAS apisix distribution, one freshly built runtime per size
+// swept a real apisix access-log distribution, one freshly built runtime per size
 // bucket, and neither eval count nor cumulative bytes separates the survivors
 // from the traps:
 //
