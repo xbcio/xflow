@@ -205,12 +205,6 @@ const discardLogInterval = 30 * time.Second
 // with the assignment and not with traffic. An earlier note in this tree
 // claimed they were unbounded insert-only maps; that was wrong, and the
 // enumeration above is why.
-//
-// The same enumeration bounds the maps: every key component is bounded (topic
-// x seven discriminators x the partition assignment), so last/suppressed grow
-// with the assignment and not with traffic. An earlier note in this tree
-// claimed they were unbounded insert-only maps; that was wrong, and the
-// enumeration above is why.
 type discardLogger struct {
 	mu   sync.Mutex
 	last map[string]time.Time
