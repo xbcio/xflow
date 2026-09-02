@@ -60,7 +60,54 @@ type SubgraphPackage struct {
 	// through $supplies.<name>. Only the names travel: the content is fetched by
 	// the runner at activation time and deliberately stays out of the package, so
 	// PackageHash does not move when a supply's content changes.
+	//
+	// This is the FLAT union across every member -- the fallback used when
+	// NodeSupplyRefs is nil (see that field's doc). It stays the primary,
+	// always-populated field rather than being replaced by NodeSupplyRefs
+	// because most groups have exactly one supply shared by every member, where
+	// the flat union already IS the per-node truth; NodeSupplyRefs exists only
+	// to correct the cases where it is not.
 	VisibleSupplies []string `json:"visible_supplies,omitempty"`
+	// NodeSupplyRefs narrows VisibleSupplies to what each INDIVIDUAL member
+	// actually declared a dependency edge to, keyed by member node name. It
+	// exists because a projected package's Def structurally cannot carry a
+	// dependency edge (a supply node is never a group member, so
+	// buildPackageConnections keeps only member-to-member edges) -- without
+	// SOME name list threaded through, CompileProjectedPackage's
+	// validateSupplyUsage would see g.supplyRefs empty for every member and
+	// reject a legitimate $supplies reference outright. VisibleSupplies alone
+	// closes that gap, but it closes it too WIDE: it is the union across every
+	// member, so a member that references $supplies.<name> only inside a body
+	// it owns would pass validation against a sibling's edge to that name
+	// rather than its own -- the flattening erases which member actually
+	// declared what. NodeSupplyRefs is the per-node record that lets a
+	// consumer recover that distinction; see compileTrusted's and
+	// projectNodeBodies' visibleSuppliesForNode calls, which look up this map
+	// before ever falling back to the flat list.
+	//
+	// nil, and therefore omitted from the JSON entirely, whenever it would not
+	// narrow anything -- i.e. every member's own ref set already equals the
+	// flat union (buildNodeSupplyRefs' doc has the exact condition). That is
+	// the overwhelmingly common case (one supply shared by the whole group, or
+	// no supply at all), and PackageHash = sha256(json.Marshal(pkg)) must not
+	// move for it: a new field without omitempty would fence every group in
+	// every workflow the moment this shipped, not just the ones this actually
+	// changes behavior for.
+	//
+	// Once populated, it holds an entry for EVERY member, not just the ones
+	// whose own set differs from the flat union. A missing key, once this map
+	// is non-nil, means "this member declared zero edges of its own" --
+	// leaving a homogeneous member out to save bytes would make it read as
+	// zero-access the moment any sibling makes the map non-nil, which is a
+	// correctness bug, not an optimization.
+	//
+	// encoding/json sorts map[string]... keys before marshaling -- a
+	// documented guarantee of the encoding/json package, not an
+	// implementation detail that could change under it -- so this field does
+	// not need its own key-ordering pass for ComputePackageHash to stay
+	// deterministic. Pinned directly by
+	// TestNodeSupplyRefs_JSONKeyOrderIsDeterministic.
+	NodeSupplyRefs map[string][]string `json:"node_supply_refs,omitempty"`
 	// VisibleOuterNodes is the sorted set of OUTER-graph node names the members
 	// may read through $nodes['<name>']. It exists for the same reason
 	// VisibleSupplies does, one root over: this package is compiled on its own by
@@ -199,6 +246,10 @@ func ProjectGroupPackage(g *Graph, unitIdx int) (*SubgraphPackage, string, error
 	// Names only -- see the VisibleSupplies field doc for why content must
 	// never enter the package.
 	visibleSupplies := buildVisibleSupplies(g, memberSet)
+	// nodeSupplyRefs is nil unless some member's own edges are a STRICT SUBSET
+	// of the flat union -- see buildNodeSupplyRefs' doc for the exact condition
+	// and why that keeps PackageHash stable for the common (homogeneous) case.
+	nodeSupplyRefs := buildNodeSupplyRefs(g, memberSet, visibleSupplies)
 
 	pkg := &SubgraphPackage{
 		Version:         SubgraphPackageVersion,
@@ -208,6 +259,7 @@ func ProjectGroupPackage(g *Graph, unitIdx int) (*SubgraphPackage, string, error
 		Exits:           exits,
 		Requirements:    reqs,
 		VisibleSupplies: visibleSupplies,
+		NodeSupplyRefs:  nodeSupplyRefs,
 	}
 
 	hash, err := ComputePackageHash(pkg)
@@ -333,6 +385,96 @@ func buildVisibleSupplies(g *Graph, memberSet map[int]bool) []string {
 	return names
 }
 
+// buildNodeSupplyRefs reports every member's OWN sorted supply-name set, keyed
+// by member name, but ONLY when at least one member's own set differs from
+// the flat union flatVisible -- otherwise it returns nil.
+//
+// It is all-or-nothing across the group, not per-member, because
+// visibleSuppliesForNode's contract is: nil map falls back to flat for every
+// node, but once the map is non-nil, a key ABSENT from it means "this node's
+// own set is empty" -- never "fall back to flat". A homogeneous member
+// (its own set already equals flatVisible) would therefore be silently
+// stripped of its real access the moment the map is populated for ANY
+// heterogeneous sibling, unless that homogeneous member's entry is written
+// too. Recording every member once heterogeneity is detected anywhere in the
+// group is what keeps that from happening.
+//
+// Returns nil -- and therefore SubgraphPackage.NodeSupplyRefs stays omitted
+// from the JSON, and PackageHash does not move -- when every member's own set
+// equals flatVisible. That is deliberate: the flat field alone is already the
+// correct per-node answer in that case, and the overwhelming majority of
+// groups (one supply, read by every member, or no supply at all) are exactly
+// this case.
+func buildNodeSupplyRefs(g *Graph, memberSet map[int]bool, flatVisible []string) map[string][]string {
+	own := make(map[int][]string, len(memberSet))
+	homogeneous := true
+	for idx := range memberSet {
+		o := sortedSupplyNames(g.supplyRefs[idx])
+		own[idx] = o
+		if !equalStringSlices(o, flatVisible) {
+			homogeneous = false
+		}
+	}
+	if homogeneous {
+		return nil
+	}
+	refs := make(map[string][]string, len(memberSet))
+	for idx, o := range own {
+		refs[g.nodes[idx].Name] = o
+	}
+	return refs
+}
+
+// sortedSupplyNames returns a sorted copy of names, or nil for an empty input
+// -- matching buildVisibleSupplies' nil-for-empty convention so
+// equalStringSlices(nil, nil) correctly reports "no own refs" as equal to "no
+// flat refs" rather than needing a separate empty-vs-nil case.
+func sortedSupplyNames(names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	out := append([]string(nil), names...)
+	sort.Strings(out)
+	return out
+}
+
+// equalStringSlices reports whether a and b hold the same strings in the same
+// order. Both g.supplyRefs entries and VisibleSupplies are already sorted, so
+// an order-sensitive comparison is correct here and does not need its own sort
+// step.
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// visibleSuppliesForNode is the per-node lookup validateSupplyUsage and
+// projectNodeBodies use in place of a flat, every-node-gets-everything name
+// list.
+//
+// nodeSupplyRefs == nil means "no package-level narrowing exists for this
+// compile" -- either this is an ungrouped Compile() (which never builds the
+// map at all) or every member's own set already equalled the flat union (see
+// buildNodeSupplyRefs) -- so falling back to flat is correct for EVERY node,
+// not a loosening.
+//
+// Once nodeSupplyRefs is non-nil, a name absent from it for a given node means
+// "this node's own set is empty", NOT "fall back to flat": that per-key
+// fallback is exactly the flattening this fix removes. A node with a genuinely
+// empty own set and a nil map entry both correctly resolve to nil here.
+func visibleSuppliesForNode(name string, nodeSupplyRefs map[string][]string, flat []string) []string {
+	if nodeSupplyRefs == nil {
+		return flat
+	}
+	return nodeSupplyRefs[name]
+}
+
 func buildPackageRequirements(g *Graph, memberSet map[int]bool) []Requirement {
 	type reqKey struct {
 		nodeType    string
@@ -388,7 +530,7 @@ func CompileProjectedPackage(pkg *SubgraphPackage) (*Graph, error) {
 	if pkg.Def == nil {
 		return nil, fmt.Errorf("group package has nil Def")
 	}
-	return compileTrusted(pkg.Def, pkg.VisibleSupplies, pkg.VisibleOuterNodes)
+	return compileTrusted(pkg.Def, pkg.VisibleSupplies, pkg.VisibleOuterNodes, pkg.NodeSupplyRefs)
 }
 
 // compileTrusted is the internal compilation path that skips the reserved-type
@@ -403,11 +545,21 @@ func CompileProjectedPackage(pkg *SubgraphPackage) (*Graph, error) {
 // at projection time -- is what lets a member's $supplies.<name> reference
 // pass validation.
 //
+// nodeSupplyRefs is the per-node correction to that widening: visibleSupplies
+// is the union across every member, so using it alone for every node would let
+// a member read a sibling's supply merely because SOME member declared an
+// edge to it. When nodeSupplyRefs is non-nil, visibleSuppliesForNode looks up
+// each node's OWN set there instead and only falls back to visibleSupplies
+// when the map itself is nil (see that function's doc). nodeSupplyRefs is nil
+// for every ungrouped Compile() call and for any group where it would not
+// narrow anything, which is what keeps this a strict tightening rather than a
+// behavior change for those cases.
+//
 // visibleOuterNodes does the same for $nodes: a body member may read the map
 // node's upstream ancestors, and those names exist in the OUTER graph only.
 // Without the list, buildNodesRefs rejects them as nonexistent. Both lists are
 // widenings of a validation set, never sources of data.
-func compileTrusted(def *types.WorkflowDef, visibleSupplies, visibleOuterNodes []string) (*Graph, error) {
+func compileTrusted(def *types.WorkflowDef, visibleSupplies, visibleOuterNodes []string, nodeSupplyRefs map[string][]string) (*Graph, error) {
 	if def == nil {
 		return nil, fmt.Errorf("workflow definition is nil")
 	}
@@ -461,7 +613,7 @@ func compileTrusted(def *types.WorkflowDef, visibleSupplies, visibleOuterNodes [
 	if err != nil {
 		return nil, err
 	}
-	if err := buildDependencyEdges(def, depPorts, g, visibleSupplies); err != nil {
+	if err := buildDependencyEdges(def, depPorts, g, visibleSupplies, nodeSupplyRefs); err != nil {
 		return nil, err
 	}
 	// A group member that is itself an xflow.map node needs its body projected
@@ -480,7 +632,12 @@ func compileTrusted(def *types.WorkflowDef, visibleSupplies, visibleOuterNodes [
 	// buildPackageConnections keeps only member-to-member edges), so without the
 	// widening the body is reprojected with no visible supplies and every batch
 	// of a grouped map fails validation at runtime.
-	if err := projectNodeBodies(def, g, visibleSupplies); err != nil {
+	//
+	// nodeSupplyRefs is forwarded for the same reason it is forwarded to
+	// buildDependencyEdges above: the map node whose body is being projected
+	// here is itself one of the members, and its OWN visible set (not the flat
+	// union) is what a sibling-owned supply must not leak into.
+	if err := projectNodeBodies(def, g, visibleSupplies, nodeSupplyRefs); err != nil {
 		return nil, err
 	}
 	// buildNodesRefs with skipCrossBranchWarning=true: projected packages are

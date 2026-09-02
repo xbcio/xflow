@@ -35,10 +35,17 @@ type dependencyPort struct {
 //   - def.DependencyEdges: the deprecated top-level form, where Node is the
 //     consumer declaring what it depends on (Supply) -- the reverse mapping.
 //
+// nodeSupplyRefs is forwarded unchanged to validateSupplyUsage; see that
+// function's doc for its semantics. It has nothing to do with g.supplyRefs
+// above despite the similar name: g.supplyRefs is derived from THIS graph's
+// own edges, nodeSupplyRefs is the per-node correction a caller supplies from
+// OUTSIDE this graph (the enclosing group's own analysis) for the projected
+// case where this Def cannot carry those edges at all.
+//
 // It runs after buildEdges so buildEdges has already rejected any supply node
 // that also appears as an endpoint of a data edge (see ErrSupplyInDataflow),
 // and before buildUnits so no invalid graph reaches the unit pass.
-func buildDependencyEdges(def *types.WorkflowDef, depPorts []dependencyPort, g *Graph, extraAllowedSupplies []string) error {
+func buildDependencyEdges(def *types.WorkflowDef, depPorts []dependencyPort, g *Graph, extraAllowedSupplies []string, nodeSupplyRefs map[string][]string) error {
 	if g.supplyIndexes == nil {
 		g.supplyIndexes = map[string]int{}
 	}
@@ -50,7 +57,7 @@ func buildDependencyEdges(def *types.WorkflowDef, depPorts []dependencyPort, g *
 	}
 
 	if len(depPorts) == 0 && len(def.DependencyEdges) == 0 {
-		return validateSupplyUsage(g, extraAllowedSupplies)
+		return validateSupplyUsage(g, extraAllowedSupplies, nodeSupplyRefs)
 	}
 
 	refs := make(map[int]map[string]struct{}, len(depPorts)+len(def.DependencyEdges))
@@ -116,7 +123,7 @@ func buildDependencyEdges(def *types.WorkflowDef, depPorts []dependencyPort, g *
 		sort.Strings(names)
 		g.supplyRefs[consumerIdx] = names
 	}
-	return validateSupplyUsage(g, extraAllowedSupplies)
+	return validateSupplyUsage(g, extraAllowedSupplies, nodeSupplyRefs)
 }
 
 // suppliesRefPattern matches a static $supplies.<name> dotted reference. The
@@ -295,7 +302,19 @@ func firstInvalidDotSupplyName(v any) string {
 // dependency edges at all, only the flattened VisibleSupplies name list)
 // re-establishes what validateSupplyUsage needs to see. It is nil for the
 // ordinary Compile path.
-func validateSupplyUsage(g *Graph, extraAllowedSupplies []string) error {
+//
+// nodeSupplyRefs is the per-node correction to that widening. extraAllowedSupplies
+// is a FLAT union across every member of the enclosing group -- correct for a
+// member that legitimately shares access with its siblings, but too wide for
+// one that does not: without nodeSupplyRefs, a member with zero dependency
+// edges of its own would be validated against every OTHER member's edges too,
+// letting it read (and its body's members read, via projectNodeBodies'
+// parallel use of the same lookup) a sibling-declared supply it was never
+// granted. When nodeSupplyRefs is non-nil, this function looks up each node's
+// OWN entry via visibleSuppliesForNode instead of using extraAllowedSupplies
+// directly; see that function's doc for the nil-map-vs-missing-key distinction
+// that makes the correction actually hold once triggered.
+func validateSupplyUsage(g *Graph, extraAllowedSupplies []string, nodeSupplyRefs map[string][]string) error {
 	for i := range g.nodes {
 		params := g.nodes[i].Parameters
 		if len(params) == 0 {
@@ -319,7 +338,7 @@ func validateSupplyUsage(g *Graph, extraAllowedSupplies []string) error {
 		for _, name := range g.supplyRefs[i] {
 			declared[name] = true
 		}
-		for _, name := range extraAllowedSupplies {
+		for _, name := range visibleSuppliesForNode(g.nodes[i].Name, nodeSupplyRefs, extraAllowedSupplies) {
 			declared[name] = true
 		}
 		for _, ref := range refs {

@@ -242,10 +242,10 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := buildDependencyEdges(def, depPorts, g, nil); err != nil {
+	if err := buildDependencyEdges(def, depPorts, g, nil, nil); err != nil {
 		return nil, err
 	}
-	if err := projectNodeBodies(def, g, nil); err != nil {
+	if err := projectNodeBodies(def, g, nil, nil); err != nil {
 		return nil, err
 	}
 	if err := compileGroups(g, def); err != nil {
@@ -385,15 +385,25 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 // validation error it is.
 //
 // Widening by the enclosing group's flat list rather than per member is not a
-// loosening: buildDependencyEdges already passes that same flat list to
-// validateSupplyUsage for every node of this graph, so a body inherits exactly
-// what the node enclosing it already had.
-func projectNodeBodies(def *types.WorkflowDef, g *Graph, extraVisibleSupplies []string) error {
+// loosening in the homogeneous case: buildDependencyEdges already passes that
+// same flat list to validateSupplyUsage for every node of this graph when
+// nodeSupplyRefs is nil, so a body inherits exactly what the node enclosing it
+// already had. nodeSupplyRefs corrects the heterogeneous case: it is the SAME
+// per-node map buildDependencyEdges consults for the enclosing member's OWN
+// $supplies references, and it must be consulted again here for the SAME
+// reason -- a map node is one member among several, and its body's supply
+// visibility must track its own declared edges, not the group's flat union.
+// Without this, a member with zero supply edges of its own could still
+// project a body that reads a sibling-declared supply, because
+// unionSupplyNames would be fed the flat list instead of that member's
+// (possibly empty) own entry.
+func projectNodeBodies(def *types.WorkflowDef, g *Graph, extraVisibleSupplies []string, nodeSupplyRefs map[string][]string) error {
 	for i, nd := range def.Nodes {
 		if !declaresSubgraphBody(nd.Parameters) {
 			continue
 		}
-		visible := unionSupplyNames(g.SupplyRefsFor(i), extraVisibleSupplies)
+		ownExtra := visibleSuppliesForNode(nd.Name, nodeSupplyRefs, extraVisibleSupplies)
+		visible := unionSupplyNames(g.SupplyRefsFor(i), ownExtra)
 		body, err := ProjectNodeBodyPackage(nd.Name, nd.Parameters, visible, projectedWorkflowContext(g))
 		if err != nil {
 			return err
