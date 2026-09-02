@@ -3,6 +3,8 @@ package kafka
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -249,3 +251,134 @@ func TestKafkaAggregateShedMessagesAreSilentlySkipped(t *testing.T) {
 // errShedProbeDownstream is the failure the probe's downstream returns while it
 // is meant to be failing.
 var errShedProbeDownstream = errors.New("downstream unavailable (shed probe)")
+
+// TestReportOverflow_DifferentPartitionsBothLogged pins that reportOverflow's
+// throttle key (aggregate.go, inside partitionAggregator.run) includes
+// partition, not just topic.
+//
+// aggregators run one goroutine per partitionKey{topic, partition} (see
+// aggregateRuntime.aggregators), so two different partitions of the same
+// topic overflowing within the 30s throttle window is the ordinary case for a
+// busy topic, not a corner case. Before the key included partition, whichever
+// partition's overflow won discardLog's gate first suppressed the OTHER
+// partition's line for the rest of the window — and the partition/
+// dropped_since_last_success printed on the line that DID get through
+// belonged only to the winner, not to whatever an operator was chasing.
+// Reverting the key to drop the partition segment must turn this test red.
+//
+// Driven at the partitionAggregator level rather than through the full
+// Trigger/consumer stack (contrast TestKafkaAggregateShedMessagesAreSilentlySkipped):
+// with MaxSize=1 and a one-slot emitSem, maxRetained works out to
+// 1*(maxBufferedBatches+1) = 5, so the 6th message submitted to a partition's
+// channel is deterministically the one reportOverflow sees, with no timing
+// dependency on flush intervals or a failing downstream recovering.
+func TestReportOverflow_DifferentPartitionsBothLogged(t *testing.T) {
+	// Unlike captureAdmissionLog's callers, this test drives TWO real
+	// partitionAggregator goroutines, each capable of calling slog.Warn (and
+	// therefore writing into the capture buffer) at the same time the test
+	// goroutine polls it. A plain strings.Builder is not safe for that — its
+	// own doc says so — so this test needs its own mutex-guarded capture
+	// rather than captureAdmissionLog's bare *strings.Builder.
+	buf := newSyncLogBuffer(t)
+
+	fake := triggertest.NewFakeRuntime()
+	fake.SetEmitFunc(func(context.Context, types.WorkflowID, string, *types.TriggerEvent) (types.ExecutionID, error) {
+		return "", errOverflowProbeDownstream
+	})
+
+	rt := &aggregateRuntime{
+		in:          &types.TriggerActivateInput{NodeName: "trig", WorkflowID: "wf-overflow", Runtime: fake},
+		cfg:         AggregateConfig{MaxSize: 1, FlushInterval: time.Hour, OnOverflow: onOverflowDiscard},
+		emitSem:     make(chan struct{}, 1),
+		closeDone:   make(chan struct{}),
+		aggregators: make(map[partitionKey]*partitionAggregator),
+		baseCtx:     context.Background(),
+	}
+
+	const topic = "overflow-multi-part"
+	key1 := partitionKey{topic: topic, partition: 1}
+	key2 := partitionKey{topic: topic, partition: 2}
+	agg1 := rt.aggregator(key1)
+	agg2 := rt.aggregator(key2)
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		rt.close(closeCtx)
+	})
+
+	// Six messages per partition: the first five fill the retained bound
+	// (maxRetained=5), the sixth is the one reportOverflow drops. Sent from a
+	// single goroutine, alternating partitions, since each partition's
+	// aggregator drains its own channel independently — this does not rely on
+	// any ordering guarantee between the two partitions.
+	const perPartition = 6
+	for i := 0; i < perPartition; i++ {
+		agg1.ch <- Message{Topic: topic, Partition: 1, Offset: int64(i)}
+		agg2.ch <- Message{Topic: topic, Partition: 2, Offset: int64(i + 1000)}
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		got := buf.String()
+		if strings.Contains(got, "partition=1") && strings.Contains(got, "partition=2") {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	got := buf.String()
+	for _, want := range []string{"topic=" + topic, "partition=1", "partition=2"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("overflow log is missing %q; a topic-only throttle key would let "+
+				"partition 2's overflow be silently suppressed by partition 1's, which is "+
+				"the bug this test pins.\nlog:\n%s", want, got)
+		}
+	}
+}
+
+// errOverflowProbeDownstream is the failure this probe's downstream returns on
+// every attempt, so every batch retries (and none ever drains the retained
+// bound by succeeding).
+var errOverflowProbeDownstream = errors.New("downstream unavailable (overflow probe)")
+
+// syncLogBuffer is a mutex-guarded log sink for tests that, unlike
+// captureAdmissionLog's callers, have more than one goroutine able to log
+// concurrently. strings.Builder documents itself as unsafe for concurrent
+// use; without this wrapper two partitionAggregator goroutines writing at
+// once (or the test goroutine polling String() while either writes) is a
+// genuine data race, not a theoretical one — this is exactly what -race
+// caught the first time this test was written against a bare *strings.Builder.
+type syncLogBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *syncLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// newSyncLogBuffer redirects the default slog logger into a concurrency-safe
+// buffer for the duration of the test and gives the test a fresh
+// discardLogger, same as captureAdmissionLog, so a throttle key populated by
+// an earlier test cannot suppress this test's lines.
+func newSyncLogBuffer(t *testing.T) *syncLogBuffer {
+	t.Helper()
+	buf := &syncLogBuffer{}
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, nil)))
+	prevThrottle := discardLog
+	discardLog = &discardLogger{last: map[string]time.Time{}, suppressed: map[string]int{}}
+	t.Cleanup(func() {
+		slog.SetDefault(prevLogger)
+		discardLog = prevThrottle
+	})
+	return buf
+}
