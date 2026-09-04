@@ -270,3 +270,80 @@ jobs:
 
       - name: Validate OpenAPI contract
         run: make validate-openapi
+
+  per-commit-build:
+    name: Per-Commit Build
+    # Only meaningful on a PR: the range is the PR's own commits. On a push to
+    # main the range would be empty or the whole history.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # fetch-depth: 0 is required — the default depth of 1 cannot see the
+      # PR's base, so the range would be unresolvable. secret-scan.yml does
+      # the same for the same reason.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Why this gate exists: a 2026-09-04 sweep of the then-unpushed range
+      # found 85 of 327 commits could not `go build ./...` on their own — one
+      # contiguous run, healed by ced1e002dd78, whose own message records the
+      # cause. Every one of them came from committing a consumer file while
+      # its field definitions stayed uncommitted in the worktree, which `git
+      # add <file>` makes easy and no existing check could catch: CI only ever
+      # built the tip.
+      #
+      # Each commit is built from `git archive | tar -x` into a temp dir rather
+      # than by checking it out, so the checkout stays put and a failure leaves
+      # nothing to clean up.
+      - name: Build every commit in the PR range
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          # Above this many commits the gate reports and stops instead of
+          # burning the runner. Raise deliberately, not reflexively.
+          MAX_COMMITS: 30
+        run: |
+          commits="$(git rev-list --reverse "$BASE_SHA"..HEAD)"
+          total="$(printf '%s\n' "$commits" | grep -c . || true)"
+          echo "PR range $BASE_SHA..HEAD contains $total commit(s)"
+
+          if [ "$total" -eq 0 ]; then
+            echo "Nothing to check."
+            exit 0
+          fi
+
+          # A silent cap reads as "everything passed". Say what was skipped.
+          if [ "$total" -gt "$MAX_COMMITS" ]; then
+            echo "::warning::$total commits exceeds MAX_COMMITS=$MAX_COMMITS;" \
+                 "checking only the last $MAX_COMMITS. The earlier" \
+                 "$((total - MAX_COMMITS)) commit(s) were NOT built individually."
+            commits="$(printf '%s\n' "$commits" | tail -n "$MAX_COMMITS")"
+          fi
+
+          failed=0
+          for c in $commits; do
+            subject="$(git log -1 --format='%s' "$c")"
+            dir="$(mktemp -d)"
+            git archive "$c" | tar -x -C "$dir"
+            if ( cd "$dir" && go build ./... ) 2>&1 | sed "s|^|    |"; then
+              echo "OK          ${c:0:12}  $subject"
+            else
+              echo "::error::commit ${c:0:12} does not build on its own: $subject"
+              echo "BUILD_FAIL  ${c:0:12}  $subject"
+              failed=$((failed + 1))
+            fi
+            rm -rf "$dir"
+          done
+
+          echo "----"
+          echo "$failed of $(printf '%s\n' "$commits" | grep -c . || true) checked commit(s) failed to build."
+          [ "$failed" -eq 0 ]
