@@ -88,6 +88,11 @@ func wasmGuestBytes(t *testing.T) []byte {
 		if err != nil {
 			t.Fatalf("mkdir temp: %v", err)
 		}
+		// See node/internal/code/script/wasm_supply_seam_test.go for the full
+		// reasoning: the bytes land in seamGuestWasm, so the dir dies with this
+		// closure. defer rather than t.Cleanup because sync.Once outlives the t
+		// that happened to enter it first.
+		defer func() { _ = os.RemoveAll(dir) }()
 		out := filepath.Join(dir, "reactorseam.wasm")
 		cmd := exec.Command("go", "build", "-buildmode=c-shared", "-o", out,
 			"../../node/internal/code/script/wasm/testdata/reactorseam/main.go")

@@ -53,6 +53,14 @@ func ensureSeamGuestBuilt(t *testing.T) {
 		if err != nil {
 			t.Fatalf("mkdir temp: %v", err)
 		}
+		// The guest bytes are read into seamGuestWasm below, so the directory is
+		// dead weight once this closure returns. defer, not t.Cleanup: sync.Once
+		// runs once but t belongs to whichever test got here first, so a Cleanup
+		// would outlive the Once by however many tests follow. Without this the
+		// build leaked one multi-MB dir per run into TMPDIR -- 398 of them had
+		// accumulated before anyone noticed. Sibling wasm/wasm_test.go:47 already
+		// does the equivalent from TestMain.
+		defer func() { _ = os.RemoveAll(dir) }()
 		out := filepath.Join(dir, "reactorseam.wasm")
 		cmd := exec.Command("go", "build", "-buildmode=c-shared", "-o", out,
 			"./wasm/testdata/reactorseam/main.go")
