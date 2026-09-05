@@ -43,8 +43,10 @@ import (
 	"github.com/xbcio/xflow/service/crypto/masterkey"
 	"github.com/xbcio/xflow/service/crypto/supplyenc"
 	"github.com/xbcio/xflow/store"
+	"github.com/xbcio/xflow/store/sqlstore"
 	"github.com/xbcio/xflow/store/sqlstore/mysqlstore"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 type serverConfig struct {
@@ -444,6 +446,12 @@ func runServer(cfg serverConfig) error {
 	// G0/prod-preview projection and is NOT authoritative — production must
 	// configure --mysql-dsn. See docs/design/RELEASE-GATES.md §4.
 	var sqlStore store.Store
+	// enrollDB is the same *gorm.DB the SQL store.Store above is built on
+	// (Provider.DB()), lifted to this outer scope so the registrationCodeStore /
+	// issuedIdentityStore wiring below — which needs a *gorm.DB, not a
+	// store.Store — can reach it without opening a second connection pool.
+	// nil in the in-memory (--mysql-dsn unset) case, same as sqlStore.
+	var enrollDB *gorm.DB
 	// artifactStore serves GET/HEAD /v1/artifacts/{digest}. It needs the two
 	// concrete artifact repos rather than the store.Store interface (object
 	// storage cannot join a MySQL transaction, so those repos are deliberately
@@ -460,6 +468,7 @@ func runServer(cfg serverConfig) error {
 			return fmt.Errorf("open mysql store: %w", err)
 		}
 		sqlStore = p
+		enrollDB = p.DB()
 		artifactStore = store.NewArtifactStore(p.ArtifactObjects(), p.ArtifactIndex())
 		audit = apiserver.NewSQLAuditSink(p)
 		durableAudit = true
@@ -487,23 +496,26 @@ func runServer(cfg serverConfig) error {
 	}
 
 	// registrationCodeStore / issuedIdentityStore back the runner enrollment
-	// endpoint. Both are constructed here, in one place, so Task 7's
-	// --mysql-dsn branch has a single pair of variables to swap for a
-	// SQL-backed implementation rather than several scattered nil checks.
+	// endpoint. Both are constructed here, in one place, so there is a single
+	// pair of variables regardless of which implementation backs them.
 	//
-	// Unconditionally in-memory today, regardless of --mysql-dsn: unlike the
-	// execution store and audit sink above, these two stores do not yet look
-	// at cfg.mysqlDSN at all — Task 7 is what wires that branch in. Running
-	// --enroll together with --mysql-dsn does not make issued identities
-	// durable; every runner enrolled before a restart must re-enroll after
-	// one, on every deployment, mysql-dsn or not.
+	// SQL-backed when --mysql-dsn is set (Task 7): issued runner identities
+	// then survive a server restart, using the same *gorm.DB connection pool
+	// as the durable execution store above (enrollDB, aliased from
+	// sqlStore's Provider.DB()) rather than opening a second one.
+	// In-memory otherwise (dev only): every enrolled runner must re-enroll
+	// after a restart.
 	var registrationCodeStore control.RegistrationCodeStore
 	var issuedIdentityStore control.IssuedIdentityStore
 	if cfg.enroll {
-		registrationCodeStore = control.NewMemoryRegistrationCodeStore()
-		issuedIdentityStore = control.NewMemoryIssuedIdentityStore()
+		if enrollDB != nil {
+			registrationCodeStore = sqlstore.NewRegistrationCodeStore(enrollDB)
+			issuedIdentityStore = sqlstore.NewIssuedIdentityStore(enrollDB)
+		} else {
+			registrationCodeStore = control.NewMemoryRegistrationCodeStore()
+			issuedIdentityStore = control.NewMemoryIssuedIdentityStore()
+		}
 	}
-	warnIfEnrollStoresIgnoreMySQLDSN(cfg)
 
 	// The assembly lives in sdk/xflow, not here. Every option below is a
 	// translation of a flag; the wiring those options drive — supply wire
@@ -619,11 +631,11 @@ func runServer(cfg serverConfig) error {
 // which do switch on cfg.mysqlDSN — so this combination silently does not
 // persist issued runner identities across a restart unless the operator is
 // told here.
-func warnIfEnrollStoresIgnoreMySQLDSN(cfg serverConfig) {
-	if cfg.enroll && cfg.mysqlDSN != "" {
-		log.Println("xflow-server: WARNING --enroll uses in-memory registration-code/issued-identity stores regardless of --mysql-dsn (Task 7 adds SQL backing); issued runner identities do not survive a restart and every runner must re-enroll after one")
-	}
-}
+// warnIfEnrollStoresIgnoreMySQLDSN and its call site were removed here: Task 7
+// wired --mysql-dsn through to registrationCodeStore / issuedIdentityStore
+// (see the enrollDB-gated construction above), so the warning it printed —
+// "in-memory regardless of --mysql-dsn" — would now be a false statement to
+// an operator every time --enroll and --mysql-dsn are combined.
 
 func buildLogger(cfg serverConfig) (engine.Logger, error) {
 	var zapCfg zap.Config

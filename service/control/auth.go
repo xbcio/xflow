@@ -10,7 +10,6 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/xbcio/xflow/namespace"
 	"gopkg.in/yaml.v3"
 )
 
@@ -49,54 +48,9 @@ type TransportInfo struct {
 	SourceIP string
 }
 
-// RunnerPolicy is the effective set of permissions bound to an authenticated
-// runner. Cached on the runnerState so the dispatcher can filter node types
-// without touching the policy store on every Assign.
-type RunnerPolicy struct {
-	// Name identifies the matched policy entry for logging. Not
-	// security-relevant — the token match is what proves identity.
-	Name string
-	// IDPrefix is the required prefix of the runner's self-declared ID.
-	IDPrefix string
-	// AllowedNodeTypes is the set of node types this runner may execute.
-	// A single "*" entry means all node types.
-	AllowedNodeTypes []string
-	// AllowedNamespaces is the set of namespaces this runner may join. A single
-	// "*" entry means all namespaces. An empty set means the default namespace
-	// only — the same meaning canServeNamespace already gives an empty set, so
-	// one "empty" cannot mean "everything" in the policy layer and "default
-	// only" in the filter layer.
-	AllowedNamespaces []string
-}
-
-// Allows reports whether the policy permits the given node type. Called from
-// the dispatcher's Assign hot path — kept O(N) with N ~= handful of types.
-func (p RunnerPolicy) Allows(nodeType string) bool {
-	for _, t := range p.AllowedNodeTypes {
-		if t == "*" || t == nodeType {
-			return true
-		}
-	}
-	return false
-}
-
-// AllowsNamespace reports whether the policy permits joining ns. An empty
-// AllowedNamespaces means the default namespace only, matching
-// canServeNamespace's treatment of an empty namespace set.
-func (p RunnerPolicy) AllowsNamespace(ns namespace.Namespace) bool {
-	if ns == "" {
-		ns = namespace.Default
-	}
-	if len(p.AllowedNamespaces) == 0 {
-		return ns == namespace.Default
-	}
-	for _, a := range p.AllowedNamespaces {
-		if a == "*" || namespace.Namespace(a) == ns {
-			return true
-		}
-	}
-	return false
-}
+// RunnerPolicy is now defined in store/enroll.go (see store_types.go for the
+// alias); it moved because RegistrationCode.Policy() returns one and
+// IssuedIdentity.Scope embeds one, and store must not import service/control.
 
 // Authenticator resolves credentials to a RunnerPolicy. Register runs at
 // registration time; Ongoing runs on every heartbeat / poll / report so

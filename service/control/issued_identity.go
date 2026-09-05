@@ -4,47 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"sync"
-	"time"
 )
-
-// IssuedIdentity is a server-issued runner credential. It is the dynamic
-// equivalent of a PolicyEntry (auth.go:137): same shape — id + token + scope —
-// but minted by enroll instead of hand-written into runners.yaml.
-//
-// The static file path is untouched. The two coexist behind MultiAuthenticator.
-type IssuedIdentity struct {
-	RunnerID  string
-	TokenHash [32]byte
-	// Scope is the policy this identity grants, copied from the registration
-	// code at issue time. Revoking the code later does NOT narrow an already
-	// issued identity — the two are independently revocable by design, so an
-	// operator rotating a leaked code does not knock every runner offline.
-	Scope    RunnerPolicy
-	CodeID   string
-	IssuedAt time.Time
-}
-
-// clone returns a copy of id whose Scope's AllowedNodeTypes / AllowedNamespaces
-// slices do not alias id's. IssuedIdentity crosses the store boundary by
-// value, but the struct copy alone leaves RunnerPolicy's two slice fields
-// pointing at the original backing arrays; without this, a caller mutating a
-// returned identity's scope would mutate the store's internal state without
-// holding its lock. Mirrors RegistrationCode.clone() (registration_code.go) —
-// append([]string(nil), nil...) yields nil, so the nil-vs-empty distinction
-// survives the clone.
-func (id IssuedIdentity) clone() IssuedIdentity {
-	id.Scope.AllowedNodeTypes = append([]string(nil), id.Scope.AllowedNodeTypes...)
-	id.Scope.AllowedNamespaces = append([]string(nil), id.Scope.AllowedNamespaces...)
-	return id
-}
-
-// IssuedIdentityStore persists identities minted by enroll.
-type IssuedIdentityStore interface {
-	Issue(ctx context.Context, id IssuedIdentity) error
-	// Lookup returns the identity for runnerID. Absent → (zero, false, nil).
-	Lookup(ctx context.Context, runnerID string) (IssuedIdentity, bool, error)
-	List(ctx context.Context) ([]IssuedIdentity, error)
-}
 
 // MemoryIssuedIdentityStore is the in-process implementation.
 type MemoryIssuedIdentityStore struct {
@@ -64,7 +24,7 @@ func (s *MemoryIssuedIdentityStore) Issue(_ context.Context, id IssuedIdentity) 
 	// Clone on the way in too: otherwise the caller retains a reference to the
 	// same backing arrays now held by the store and could mutate stored state
 	// without the lock.
-	s.byID[id.RunnerID] = id.clone()
+	s.byID[id.RunnerID] = id.Clone()
 	return nil
 }
 
@@ -75,7 +35,7 @@ func (s *MemoryIssuedIdentityStore) Lookup(_ context.Context, runnerID string) (
 	if !ok {
 		return IssuedIdentity{}, false, nil
 	}
-	return id.clone(), true, nil
+	return id.Clone(), true, nil
 }
 
 func (s *MemoryIssuedIdentityStore) List(_ context.Context) ([]IssuedIdentity, error) {
@@ -83,7 +43,7 @@ func (s *MemoryIssuedIdentityStore) List(_ context.Context) ([]IssuedIdentity, e
 	defer s.mu.RUnlock()
 	out := make([]IssuedIdentity, 0, len(s.byID))
 	for _, id := range s.byID {
-		out = append(out, id.clone())
+		out = append(out, id.Clone())
 	}
 	return out, nil
 }

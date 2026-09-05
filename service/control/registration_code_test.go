@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/store"
+	"github.com/xbcio/xflow/store/storecontract"
 )
 
 func TestGenerateRegistrationCodeHasAtLeast32BytesOfEntropy(t *testing.T) {
@@ -230,4 +232,14 @@ func TestEnrollAuditRecordsBothOutcomes(t *testing.T) {
 	if len(other) != 0 {
 		t.Fatalf("audit for unrelated code returned %d rows, want 0", len(other))
 	}
+}
+
+// TestMemoryRegistrationCodeStoreSatisfiesContract holds the in-memory
+// implementation to the same cross-implementation contract store/sqlstore's
+// SQL implementation is held to (store/sqlstore/registration_code_repo_test.go).
+// Both must agree, or dev and production disagree about what "revoked" means.
+func TestMemoryRegistrationCodeStoreSatisfiesContract(t *testing.T) {
+	storecontract.RunRegistrationCodeStoreContract(t, func(t *testing.T) store.RegistrationCodeStore {
+		return NewMemoryRegistrationCodeStore()
+	})
 }

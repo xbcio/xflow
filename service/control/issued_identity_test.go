@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/store"
+	"github.com/xbcio/xflow/store/storecontract"
 )
 
 func issueTestIdentity(t *testing.T, st IssuedIdentityStore, runnerID, token string, scope RunnerPolicy) {
@@ -363,4 +365,13 @@ func TestMemoryIssuedIdentityStoreClonePreservesNilSlices(t *testing.T) {
 	if list[0].Scope.AllowedNamespaces != nil {
 		t.Fatalf("List: AllowedNamespaces = %#v, want nil", list[0].Scope.AllowedNamespaces)
 	}
+}
+
+// TestMemoryIssuedIdentityStoreSatisfiesContract holds the in-memory
+// implementation to the same cross-implementation contract store/sqlstore's
+// SQL implementation is held to (store/sqlstore/registration_code_repo_test.go).
+func TestMemoryIssuedIdentityStoreSatisfiesContract(t *testing.T) {
+	storecontract.RunIssuedIdentityStoreContract(t, func(t *testing.T) store.IssuedIdentityStore {
+		return NewMemoryIssuedIdentityStore()
+	})
 }
