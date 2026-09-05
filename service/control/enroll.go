@@ -27,12 +27,20 @@ func (c *Core) Enroll(ctx context.Context, req protocol.EnrollRequest, info Tran
 		// told apart from a wrong guess.
 		return protocol.EnrollResponse{}, ErrEnrollRejected
 	}
-	// The limiter buckets by source. An empty SourceIP would merge every
-	// unattributable caller into one bucket: ten failures anywhere would lock out
-	// all of them, and one success anywhere would clear all of their counters.
-	// This endpoint is unauthenticated and the limiter is its only brute-force
-	// control, so refuse rather than bucket. Reaching here with an empty SourceIP
-	// means enroll was wired onto a transport that does not populate it.
+	// The limiter buckets by source. An empty SourceIP has no source to bucket
+	// by, and every enrollLimiter method (Allow/RecordFailure/RecordSuccess)
+	// short-circuits to a no-op on "" — so an empty SourceIP does not merge
+	// into a shared bucket, it silently bypasses the limiter entirely. This
+	// endpoint is unauthenticated and the limiter is its only brute-force
+	// control, so refuse rather than let any caller skip it.
+	//
+	// An empty SourceIP is not only "enroll was wired onto a transport that
+	// doesn't populate it" (a future caller passing a zero-value TransportInfo).
+	// sourceIPOf (the HTTP runner face's populator) can itself legitimately
+	// return "" — on an empty or malformed RemoteAddr, on a Unix domain socket
+	// listener (RemoteAddr commonly "" or "@"), or on a RemoteAddr with an
+	// empty host such as ":1234". Whatever the cause, there is no attributable
+	// source, so refuse.
 	if info.SourceIP == "" {
 		c.auditEnroll(ctx, "", false, "missing source ip", "", "")
 		return protocol.EnrollResponse{}, ErrEnrollRejected

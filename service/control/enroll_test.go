@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -153,8 +154,44 @@ func TestEnrollAuditsBothOutcomesWithSourceIP(t *testing.T) {
 	}
 }
 
+// countingRegistrationCodeStore wraps a RegistrationCodeStore and counts
+// ResolveByPlaintext calls. It exists only in test code — MemoryRegistrationCodeStore
+// (the production type) is not touched — so a test can prove the store was
+// never consulted, which "the error looked right" cannot distinguish from
+// "the store was asked and said no again".
+type countingRegistrationCodeStore struct {
+	RegistrationCodeStore
+	resolveCalls atomic.Int64
+}
+
+func (c *countingRegistrationCodeStore) ResolveByPlaintext(ctx context.Context, plaintext string) (RegistrationCode, error) {
+	c.resolveCalls.Add(1)
+	return c.RegistrationCodeStore.ResolveByPlaintext(ctx, plaintext)
+}
+
 func TestEnrollLockoutBlocksBeforeTouchingTheStore(t *testing.T) {
-	core, _, _, _ := enrollFixture(t, []string{"sas"}, []string{"*"})
+	inner := NewMemoryRegistrationCodeStore()
+	ids := NewMemoryIssuedIdentityStore()
+	id, plaintext, err := GenerateRegistrationCode()
+	if err != nil {
+		t.Fatalf("GenerateRegistrationCode: %v", err)
+	}
+	if err := inner.Create(context.Background(), RegistrationCode{
+		ID:                id,
+		CodeHash:          HashSecret(plaintext),
+		AllowedNamespaces: []string{"sas"},
+		AllowedNodeTypes:  []string{"*"},
+		CreatedAt:         time.Unix(1700000000, 0).UTC(),
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	codes := &countingRegistrationCodeStore{RegistrationCodeStore: inner}
+	core := &Core{
+		registrationCodes: codes,
+		issuedIdentities:  ids,
+		enrollLimiter:     newEnrollLimiter(defaultEnrollFailureLimit, defaultEnrollLockout),
+	}
+
 	const ip = "10.0.0.7"
 	for i := 0; i < defaultEnrollFailureLimit; i++ {
 		if _, err := core.Enroll(context.Background(), protocol.EnrollRequest{
@@ -163,15 +200,42 @@ func TestEnrollLockoutBlocksBeforeTouchingTheStore(t *testing.T) {
 			t.Fatalf("attempt %d unexpectedly succeeded", i+1)
 		}
 	}
+	callsBeforeLockout := codes.resolveCalls.Load()
+	if callsBeforeLockout != int64(defaultEnrollFailureLimit) {
+		t.Fatalf("resolveCalls after %d failing attempts = %d, want %d (one store lookup per attempt while unlocked)",
+			defaultEnrollFailureLimit, callsBeforeLockout, defaultEnrollFailureLimit)
+	}
+
 	// The next attempt is rejected by the limiter. It must look identical to a
 	// normal rejection — a distinct "you are locked out" reply is itself a
 	// signal that the prior guesses were being counted.
-	_, err := core.Enroll(context.Background(), protocol.EnrollRequest{
+	_, err = core.Enroll(context.Background(), protocol.EnrollRequest{
 		RegistrationCode: "wrong", Namespaces: []string{"sas"},
 	}, TransportInfo{SourceIP: ip})
 	if !errors.Is(err, ErrEnrollRejected) {
 		t.Fatalf("locked-out err = %v, want ErrEnrollRejected", err)
 	}
+	if got := codes.resolveCalls.Load(); got != callsBeforeLockout {
+		t.Fatalf("resolveCalls after the locked-out attempt = %d, want unchanged at %d — the store must not be touched once locked out",
+			got, callsBeforeLockout)
+	}
+
+	// The bearing-weight assertion: a REAL, in-scope code — one that would
+	// succeed outside the lockout window — must ALSO be rejected while this
+	// source is locked out. Without this, none of the assertions above can
+	// tell "the limiter blocked it" apart from "the code was wrong anyway":
+	// every attempt so far used the code "wrong".
+	_, err = core.Enroll(context.Background(), protocol.EnrollRequest{
+		RegistrationCode: plaintext, Namespaces: []string{"sas"},
+	}, TransportInfo{SourceIP: ip})
+	if !errors.Is(err, ErrEnrollRejected) {
+		t.Fatalf("locked-out err for a VALID, in-scope code = %v, want ErrEnrollRejected — the limiter must block even a correct code", err)
+	}
+	if got := codes.resolveCalls.Load(); got != callsBeforeLockout {
+		t.Fatalf("resolveCalls after a valid-code attempt during lockout = %d, want unchanged at %d — the limiter must block before the store is asked",
+			got, callsBeforeLockout)
+	}
+
 	// A different source is unaffected.
 	if _, err := core.Enroll(context.Background(), protocol.EnrollRequest{
 		RegistrationCode: "wrong", Namespaces: []string{"sas"},
@@ -190,11 +254,29 @@ func TestEnrollDisabledWhenNoCodeStoreConfigured(t *testing.T) {
 }
 
 func TestHTTPTransportInfoCarriesSourceIP(t *testing.T) {
-	r := httptest.NewRequest(http.MethodPost, protocol.EnrollPath, strings.NewReader("{}"))
-	r.RemoteAddr = "192.0.2.10:54321"
-	info := httpTransportInfo(r)
-	if info.SourceIP != "192.0.2.10" {
-		t.Fatalf("SourceIP = %q, want 192.0.2.10 (port must be stripped so the limiter buckets by host)", info.SourceIP)
+	// The empty-output cases ("" and ":1234") pin exactly when sourceIPOf
+	// legitimately returns "" — the contract the enroll empty-SourceIP guard
+	// and its comment depend on (service/control/enroll.go, server.go).
+	cases := []struct {
+		name       string
+		remoteAddr string
+		want       string
+	}{
+		{"ipv4", "192.0.2.10:54321", "192.0.2.10"},
+		{"ipv6 loopback", "[::1]:54321", "::1"},
+		{"ipv6 global", "[2001:db8::1]:8080", "2001:db8::1"},
+		{"empty RemoteAddr", "", ""},
+		{"empty host with port", ":1234", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, protocol.EnrollPath, strings.NewReader("{}"))
+			r.RemoteAddr = tc.remoteAddr
+			info := httpTransportInfo(r)
+			if info.SourceIP != tc.want {
+				t.Fatalf("RemoteAddr = %q: SourceIP = %q, want %q", tc.remoteAddr, info.SourceIP, tc.want)
+			}
+		})
 	}
 }
 
@@ -255,8 +337,17 @@ func TestHandleEnrollRejectionsAreByteIdentical(t *testing.T) {
 	defer malformedSrv.Close()
 	malformedStatus, malformedBody := post(t, malformedSrv, `{not json`)
 
-	statuses := []int{unknownStatus, revokedStatus, scopeStatus, malformedStatus}
-	bodies := []string{unknownBody, revokedBody, scopeBody, malformedBody}
+	oversizedSrv, _ := newSrv(t, false)
+	defer oversizedSrv.Close()
+	// One byte over the MaxBytesReader cap shared with HandleReportMetrics
+	// (protocol.MaxRunnerMetricsBytes). Otherwise well-formed JSON, so this
+	// proves the size cap itself produces the same rejection — not merely
+	// that a large body happens to fail to parse.
+	oversizedPayload := `{"registration_code":"` + strings.Repeat("a", protocol.MaxRunnerMetricsBytes+1) + `"}`
+	oversizedStatus, oversizedBody := post(t, oversizedSrv, oversizedPayload)
+
+	statuses := []int{unknownStatus, revokedStatus, scopeStatus, malformedStatus, oversizedStatus}
+	bodies := []string{unknownBody, revokedBody, scopeBody, malformedBody, oversizedBody}
 	for i := range statuses {
 		if statuses[i] != statuses[0] {
 			t.Fatalf("rejection statuses differ: %v", statuses)

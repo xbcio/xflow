@@ -346,8 +346,14 @@ func (s *Server) HandleEnroll(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	// This is the one endpoint in the runner protocol that requires no
+	// credential to reach, so an unbounded body read here is a
+	// memory-exhaustion surface open to anyone. Same cap and shape as
+	// HandleReportMetrics's MaxBytesReader — reusing the existing limit
+	// rather than inventing a new number.
+	limited := http.MaxBytesReader(w, r.Body, int64(protocol.MaxRunnerMetricsBytes))
 	var req protocol.EnrollRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(limited).Decode(&req); err != nil {
 		// A malformed body is still a rejected enrollment attempt as far as the
 		// caller can tell. Reporting "bad JSON" separately would distinguish
 		// "your request was well-formed but wrong" from "your request was
@@ -391,6 +397,13 @@ func httpTransportInfo(r *http.Request) TransportInfo {
 // sourceIPOf strips the port from RemoteAddr. X-Forwarded-For is deliberately
 // ignored: it is caller-controlled, so honoring it would let anyone reset
 // their own enroll lockout by rotating a header value.
+//
+// It can return "": r == nil; RemoteAddr == "" (net.SplitHostPort errors, and
+// the empty string is returned as-is); RemoteAddr with an empty host, e.g.
+// ":1234" (SplitHostPort succeeds and yields host == ""); and Unix domain
+// socket listeners, which commonly report RemoteAddr as "" or "@". Callers
+// that bucket by SourceIP (the enroll rate limiter) must treat "" as "no
+// source to bucket by" and refuse rather than share one bucket.
 func sourceIPOf(r *http.Request) string {
 	if r == nil {
 		return ""
