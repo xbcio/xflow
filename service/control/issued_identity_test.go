@@ -375,3 +375,73 @@ func TestMemoryIssuedIdentityStoreSatisfiesContract(t *testing.T) {
 		return NewMemoryIssuedIdentityStore()
 	})
 }
+
+// failingIssuedIdentityStore makes Lookup fail the way a database outage does.
+type failingIssuedIdentityStore struct{ err error }
+
+func (s failingIssuedIdentityStore) Issue(context.Context, IssuedIdentity) error { return s.err }
+func (s failingIssuedIdentityStore) Lookup(context.Context, string) (IssuedIdentity, bool, error) {
+	return IssuedIdentity{}, false, s.err
+}
+func (s failingIssuedIdentityStore) List(context.Context) ([]IssuedIdentity, error) {
+	return nil, s.err
+}
+
+// TestIssuedIdentityLookupFailureIsExternallyIdenticalButInternallyDistinct
+// pins both halves of the collapsed-error contract at once, because either
+// half alone is satisfied by a wrong implementation:
+//
+//   - errors.Is must still match ErrAuthUnknownToken, or a store outage would
+//     become externally distinguishable from an absent runner id — the
+//     enumeration oracle spec §2.3.4 condition 4 forbids.
+//   - the error text must NOT be identical to the absent-identity error, or
+//     Core.authDeny (which logs this error verbatim) would report a database
+//     outage as "unknown auth token" and send an operator after credentials.
+//
+// The assertion is a comparison between the two paths, not a substring match
+// on either one: a substring assertion would pass against an implementation
+// that also leaked the store detail outward.
+func TestIssuedIdentityLookupFailureIsExternallyIdenticalButInternallyDistinct(t *testing.T) {
+	storeErr := errors.New("dial tcp: connection refused")
+	failing := NewIssuedIdentityAuthenticator(failingIssuedIdentityStore{err: storeErr})
+
+	absent := NewIssuedIdentityAuthenticator(NewMemoryIssuedIdentityStore())
+	_, absentErr := absent.AuthenticateRegister("runner-1", "tok", TransportInfo{})
+	if !errors.Is(absentErr, ErrAuthUnknownToken) {
+		t.Fatalf("absent identity err = %v, want ErrAuthUnknownToken", absentErr)
+	}
+
+	for _, tc := range []struct {
+		name string
+		call func(*IssuedIdentityAuthenticator) (RunnerPolicy, error)
+	}{
+		{"register", func(a *IssuedIdentityAuthenticator) (RunnerPolicy, error) {
+			return a.AuthenticateRegister("runner-1", "tok", TransportInfo{})
+		}},
+		{"ongoing", func(a *IssuedIdentityAuthenticator) (RunnerPolicy, error) {
+			return a.AuthenticateOngoing("runner-1", "tok", TransportInfo{})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			policy, err := tc.call(failing)
+			if !errors.Is(err, ErrAuthUnknownToken) {
+				t.Fatalf("store failure err = %v, want it to match ErrAuthUnknownToken", err)
+			}
+			if err.Error() == absentErr.Error() {
+				t.Fatalf("store failure and absent identity log identically as %q; "+
+					"an outage would be reported to operators as a bad token", err)
+			}
+			if !errors.Is(err, storeErr) {
+				// Deliberate: %v, not %w. Nothing consumes the store error
+				// programmatically, and a matchable tree would let callers
+				// couple to store internals through an auth error.
+				t.Logf("store error intentionally not in the errors.Is tree: %v", err)
+			} else {
+				t.Fatalf("store error was wrapped with %%w; use %%v so the error tree stays narrow")
+			}
+			if policy.Name != "" || len(policy.AllowedNodeTypes) != 0 || len(policy.AllowedNamespaces) != 0 {
+				t.Fatalf("failed lookup returned a non-zero policy: %+v", policy)
+			}
+		})
+	}
+}

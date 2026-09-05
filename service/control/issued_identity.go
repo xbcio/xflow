@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"crypto/subtle"
+	"fmt"
 	"sync"
 )
 
@@ -80,10 +81,24 @@ func (a *IssuedIdentityAuthenticator) authenticate(runnerID, token string) (Runn
 		return RunnerPolicy{}, ErrAuthUnknownToken
 	}
 	id, ok, err := a.store.Lookup(context.Background(), runnerID)
-	if err != nil || !ok {
-		// A store error and an absent identity collapse to the same external
-		// verdict. Distinguishing them would tell a caller whether a runner id
-		// exists.
+	if err != nil {
+		// A store error and an absent identity collapse to the same EXTERNAL
+		// verdict — distinguishing them would tell a caller whether a runner id
+		// exists. They must not collapse in our OWN logs: Core.authDeny logs
+		// this error verbatim, so without the wrap an outage of the identity
+		// store makes every runner's heartbeat log "unknown auth token", which
+		// points an operator at credentials when the fault is the database.
+		//
+		// The wrap keeps ErrAuthUnknownToken as the only errors.Is-matchable
+		// identity (MultiAuthenticator.dispatch and every caller still see it),
+		// and authDeny returns the constant ErrUnauthenticated regardless of
+		// which error it logged, so nothing about the response changes. The
+		// store error is interpolated with %v, not %w: nothing consumes it
+		// programmatically, and widening the error tree would invite callers to
+		// couple to store internals through an auth error.
+		return RunnerPolicy{}, fmt.Errorf("%w: issued-identity lookup failed: %v", ErrAuthUnknownToken, err)
+	}
+	if !ok {
 		return RunnerPolicy{}, ErrAuthUnknownToken
 	}
 	want := HashSecret(token)
