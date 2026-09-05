@@ -19,6 +19,14 @@ const (
 	// unauthenticated endpoint reachable from arbitrary (including IPv6)
 	// source addresses, that is a standing memory-exhaustion vector.
 	enrollLimiterSweepThreshold = 1024
+
+	// enrollLimiterSweepCooldown gates how often RecordFailure is willing to
+	// pay for a full O(n) walk of l.state. Without it, sustained load that
+	// keeps the map oversized (more arrivals than reclaimable entries) would
+	// make every single RecordFailure call walk the whole map while holding
+	// the one mutex every other request needs — a fix for one resource
+	// exhaustion vector must not become a CPU/latency amplifier itself.
+	enrollLimiterSweepCooldown = time.Minute
 )
 
 // enrollLimiter throttles failed enroll attempts per source IP. The enroll
@@ -29,11 +37,12 @@ const (
 // now is injectable because a lockout test that sleeps for the real window is
 // both unrunnable in CI and flaky.
 type enrollLimiter struct {
-	mu      sync.Mutex
-	state   map[string]*enrollFailState
-	max     int
-	lockFor time.Duration
-	now     func() time.Time
+	mu        sync.Mutex
+	state     map[string]*enrollFailState
+	max       int
+	lockFor   time.Duration
+	now       func() time.Time
+	lastSweep time.Time
 }
 
 type enrollFailState struct {
@@ -42,12 +51,18 @@ type enrollFailState struct {
 	lastFail   time.Time
 }
 
-// idleStale reports whether st has never triggered a lockout and has gone
-// quiet for at least the lockout window. Such an entry is safe to reclaim
-// unconditionally — it carries no active (or ever-active) lockout, so
-// deleting it cannot prematurely lift a block.
-func idleStale(st *enrollFailState, now time.Time, lockFor time.Duration) bool {
-	return st.lockedTill.IsZero() && now.Sub(st.lastFail) >= lockFor
+// reclaimable reports whether an entry can be dropped without changing what
+// Allow would decide for that source. Two cases qualify: a counter that has
+// gone idle past the lockout window without ever reaching the limit, and a
+// lockout that has already expired (the very next Allow for that source would
+// delete it and admit anyway, so reclaiming it here changes nothing). An
+// entry still inside its lockout window is never reclaimable — dropping it
+// would hand the source a fresh budget mid-lockout.
+func reclaimable(st *enrollFailState, now time.Time, lockFor time.Duration) bool {
+	if !st.lockedTill.IsZero() {
+		return !now.Before(st.lockedTill)
+	}
+	return now.Sub(st.lastFail) >= lockFor
 }
 
 func newEnrollLimiter(max int, lockFor time.Duration) *enrollLimiter {
@@ -75,8 +90,8 @@ func (l *enrollLimiter) Allow(sourceIP string) bool {
 	if now.Before(st.lockedTill) {
 		return false
 	}
-	if !st.lockedTill.IsZero() || idleStale(st, now, l.lockFor) {
-		// Either the lockout elapsed, or the source went idle past the window
+	if reclaimable(st, now, l.lockFor) {
+		// The lockout elapsed, or the source went idle past the window
 		// without ever reaching the limit. Drop the entry entirely so the
 		// source gets a fresh budget; leaving fails at max would let one
 		// further failure re-lock immediately and the window would never
@@ -104,20 +119,23 @@ func (l *enrollLimiter) RecordFailure(sourceIP string) {
 	if st.fails >= l.max {
 		st.lockedTill = now.Add(l.lockFor)
 	}
-	if len(l.state) > enrollLimiterSweepThreshold {
+	if len(l.state) > enrollLimiterSweepThreshold && now.Sub(l.lastSweep) >= enrollLimiterSweepCooldown {
 		l.sweep(now)
+		l.lastSweep = now
 	}
 }
 
-// sweep walks the map once and evicts every entry that is both un-locked-out
-// (it never reached the failure limit) and idle-stale (quiet for at least the
-// lockout window). It runs synchronously inside RecordFailure's own critical
-// section — there is no goroutine, no timer, no Close(). Lazy per-key
-// eviction in Allow cannot bound the map by itself, because the source that
-// never calls Allow again is precisely the source that never triggers it.
+// sweep walks the map once and evicts every reclaimable entry — one that
+// never reached the failure limit and has gone idle past the lockout window,
+// or one whose lockout has already expired. It runs synchronously inside
+// RecordFailure's own critical section — there is no goroutine, no timer, no
+// Close(). Lazy per-key eviction in Allow cannot bound the map by itself,
+// because the source that never calls Allow again is precisely the source
+// that never triggers it. An entry still inside an active lockout is never
+// touched: reclaimable returns false for it, by construction.
 func (l *enrollLimiter) sweep(now time.Time) {
 	for ip, st := range l.state {
-		if idleStale(st, now, l.lockFor) {
+		if reclaimable(st, now, l.lockFor) {
 			delete(l.state, ip)
 		}
 	}

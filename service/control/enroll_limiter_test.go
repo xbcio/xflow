@@ -16,6 +16,15 @@ func stateLen(l *enrollLimiter) int {
 	return len(l.state)
 }
 
+// hasEntry reports whether sourceIP still has a tracked entry, read under the
+// same mutex the limiter itself uses.
+func hasEntry(l *enrollLimiter, sourceIP string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, ok := l.state[sourceIP]
+	return ok
+}
+
 // fakeClock lets the lockout-expiry test run in microseconds. A test that
 // actually sleeps for the 15-minute window is both unrunnable and flaky.
 type fakeClock struct{ t time.Time }
@@ -159,6 +168,67 @@ func TestLimiterSweepBoundsMapGrowth(t *testing.T) {
 	l.RecordFailure("10.0.0.99")
 	if got := stateLen(l); got != 1 {
 		t.Fatalf("map was not swept after crossing the threshold: got %d entries, want 1 (only the fresh source)", got)
+	}
+}
+
+// TestLimiterSweepHasCooldown proves the sweep does not turn into a per-call
+// O(n) amplifier under sustained load: once a sweep has run, RecordFailure
+// must skip the walk until enrollLimiterSweepCooldown has elapsed, even if
+// len(l.state) is still over the threshold and even if entries have already
+// become reclaimable.
+func TestLimiterSweepHasCooldown(t *testing.T) {
+	// A short lockFor lets entries become idle-stale quickly, while the
+	// sweep cooldown (a package constant, independent of lockFor) still
+	// gates how often the map actually gets walked.
+	l, clk := newTestLimiter(10, 5*time.Second)
+
+	for i := 0; i <= enrollLimiterSweepThreshold; i++ {
+		l.RecordFailure(fmt.Sprintf("10.%d.%d.%d", i/65536, (i/256)%256, i%256))
+	}
+	if got := stateLen(l); got != enrollLimiterSweepThreshold+1 {
+		t.Fatalf("test setup did not cross the sweep threshold: got %d entries", got)
+	}
+
+	clk.advance(5 * time.Second) // every setup entry is now idle-stale (lockFor elapsed)
+	l.RecordFailure("10.0.0.91")
+	if got := stateLen(l); got != enrollLimiterSweepThreshold+2 {
+		t.Fatalf("a sweep ran inside the cooldown window: got %d entries, want %d (nothing reclaimed yet)", got, enrollLimiterSweepThreshold+2)
+	}
+
+	clk.advance(enrollLimiterSweepCooldown) // cooldown elapsed since the first sweep
+	l.RecordFailure("10.0.0.92")
+	if got := stateLen(l); got != 1 {
+		t.Fatalf("sweep did not run once the cooldown elapsed: got %d entries, want 1 (only the newest source)", got)
+	}
+}
+
+// TestSweepPreservesActiveLockout is the one property that could make this
+// whole fix worse than not having it at all: if a sweep ever reclaimed a
+// source still inside its lockout window, an attacker could clear their own
+// block simply by inflating the map with unrelated sources. It must be a
+// contract, not an inspection result.
+func TestSweepPreservesActiveLockout(t *testing.T) {
+	l, _ := newTestLimiter(10, 15*time.Minute)
+	const lockedIP = "10.0.0.55"
+	for i := 0; i < 10; i++ {
+		l.RecordFailure(lockedIP)
+	}
+	if !hasEntry(l, lockedIP) {
+		t.Fatal("test setup failed to lock out lockedIP")
+	}
+
+	// Cross the sweep threshold with fresh, unrelated sources so a sweep
+	// actually runs on the very next over-threshold call: the cooldown is
+	// zero-valued until the first sweep, so this crossing is unconditional.
+	for i := 0; i <= enrollLimiterSweepThreshold; i++ {
+		l.RecordFailure(fmt.Sprintf("10.6.%d.%d", i/256, i%256))
+	}
+
+	if l.Allow(lockedIP) {
+		t.Fatal("an active lockout must survive a sweep triggered by unrelated sources")
+	}
+	if !hasEntry(l, lockedIP) {
+		t.Fatal("lockedIP's own entry must not be dropped by a sweep of unrelated sources")
 	}
 }
 
