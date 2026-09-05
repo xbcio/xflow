@@ -197,6 +197,9 @@ func (id IssuedIdentity) Clone() IssuedIdentity {
 type IssuedIdentityStore interface {
 	Issue(ctx context.Context, id IssuedIdentity) error
 	// Lookup returns the identity for runnerID. Absent → (zero, false, nil).
+	// A storage or decode failure → (zero, false, err); callers must not read
+	// that as "absent" — control.IssuedIdentityAuthenticator relies on the
+	// distinction to tell an outage apart from a wrong token in its logs.
 	Lookup(ctx context.Context, runnerID string) (IssuedIdentity, bool, error)
 	List(ctx context.Context) ([]IssuedIdentity, error)
 }
