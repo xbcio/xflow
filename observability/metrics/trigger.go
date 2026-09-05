@@ -174,8 +174,8 @@ func (t TriggerMetrics) OnConsumptionBlocked(ctx context.Context, topic string, 
 	}), v)
 }
 
-// OnOffsetCommit records the broker round trip that advances the committed
-// offset: how long it blocked, and how many offsets it carried.
+// OnOffsetCommit records the call that advances the committed offset: how long
+// it blocked, and how many offsets it carried.
 //
 // This is the only metric in this file that measures WAITING rather than work.
 // Everything else here counts or sizes something the pipeline did; a profile
@@ -186,13 +186,21 @@ func (t TriggerMetrics) OnConsumptionBlocked(ctx context.Context, topic string, 
 // one is the execution layer's commit, carries no topic or partition, and its
 // value tracked execution_completed_total{status="success"} exactly.
 //
-// Two series, because duration alone cannot tell which knob matters. Duration
-// with size distinguishes a per-round-trip cost, where raising the aggregate's
-// max_size raises throughput because each commit carries more messages, from a
-// cost that scales with the offsets committed, where raising it changes
-// nothing. Size goes through ObserveCount for the same reason
+// The duration is NOT a broker round trip, despite the name. Under
+// CommitInterval: 0 all partitions of a Reader queue their commits onto one
+// channel drained by one goroutine, so this is queueing plus the round trip —
+// see OnOffsetCommit's comment in the kafka trigger package for the mechanism
+// and the first measurement. An operator reading this as network latency will
+// go looking at the brokers, which is the wrong place.
+//
+// Two series, because duration alone cannot tell which knob matters. The first
+// run showed commits completing at 7.12/s process-wide — the serial goroutine's
+// ceiling, independent of partition count — while mean size was 165 against a
+// max_size of 100, because a partition stuck in the queue keeps buffering.
+// Throughput is the product of those two, and only the second is reachable from
+// config. Size goes through ObserveCount for the same reason
 // xflow_trigger_batch_size does: ObserveBytes' buckets start at 1 KiB and a
-// count bounded by max_size would land entirely in the first one.
+// count in the hundreds would land entirely in the first one.
 //
 // result is on the duration series only. An errored commit's duration is the
 // number an operator wants separated — a timeout at aggregateCommitTimeout

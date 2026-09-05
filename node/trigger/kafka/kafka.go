@@ -657,11 +657,15 @@ func emitMessage(ctx context.Context, in *types.TriggerActivateInput, msg Messag
 // observation lives here rather than at the call sites: a commit added later
 // through a fourth path is measured without anyone remembering to measure it.
 //
-// The timing brackets ONLY the broker round trip. The two early returns above
-// it are not commits and must not be reported as instant ones — an empty
-// message set is a no-op, and a consumer without messageCommitter (every test
-// fake that does not model offsets) would otherwise flood the histogram with
-// zero-duration samples and make the real distribution unreadable.
+// The timing brackets ONLY the CommitMessages call. Note what that call is
+// under kafka-go: with CommitInterval: 0 it enqueues onto a Reader-wide channel
+// and waits for a single serial goroutine to run the RPC, so the sample is
+// queueing behind sibling partitions plus the round trip, not the round trip.
+// The two early returns above it are not commits and must not be reported as
+// instant ones — an empty message set is a no-op, and a consumer without
+// messageCommitter (every test fake that does not model offsets) would
+// otherwise flood the histogram with zero-duration samples and make the real
+// distribution unreadable.
 func commitMessages(ctx context.Context, consumer Consumer, messages ...Message) error {
 	if len(messages) == 0 {
 		return nil

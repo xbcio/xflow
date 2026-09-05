@@ -94,9 +94,16 @@ type Observer interface {
 	// are closed enums built in this package; neither is ever derived from a
 	// message or from a runtime's free-text error.
 	OnBatchAdmission(ctx context.Context, topic, state, reason string)
-	// OnOffsetCommit reports one broker round trip that advanced the committed
-	// offset. result is "ok" or "error"; messages is how many offsets that single
-	// round trip carried; d is the wall time the caller spent blocked in it.
+	// OnOffsetCommit reports one call that advanced the committed offset.
+	// result is "ok" or "error"; messages is how many offsets that call carried;
+	// d is the wall time the caller spent blocked in it.
+	//
+	// d is NOT the broker round trip, and reading it as one leads to the wrong
+	// fix. Under CommitInterval: 0 every partition's CommitMessages hands its
+	// request to a single shared channel (Reader.commits) drained by a single
+	// goroutine (commitLoopImmediate), which blocks on a full CommitOffsets RPC
+	// before taking the next request. d therefore covers QUEUEING BEHIND EVERY
+	// OTHER PARTITION plus the round trip, and the queue is the larger term.
 	//
 	// It exists because this hop had no instrumentation at all, and it turned out
 	// to be the pacer. Every other trigger metric measures work — batch size,
@@ -106,10 +113,19 @@ type Observer interface {
 	// it was a stack dump. A commit cycle inferred from the batch release rate is
 	// a division, not a measurement; this is the measurement.
 	//
-	// messages is reported alongside the duration because the two together
-	// separate the two hypotheses a duration alone cannot: a commit whose cost is
-	// per-round-trip (raise max_size and throughput rises with it) from one whose
-	// cost scales with the offsets it carries (raise max_size and nothing moves).
+	// The first measurement, over 411 s against an 18-partition topic: 2927
+	// commits, 6569.8 s summed, mean 2.24 s. That sum is 88.8% of the 7398
+	// partition-seconds available, against 325.2 s of total wasm evaluation in
+	// the same run — the pipeline spent 20x longer waiting here than computing.
+	//
+	// messages is reported alongside the duration because a duration alone cannot
+	// tell a per-round-trip cost from one that scales with the offsets carried.
+	// The measurement said neither: commits completed at 7.12/s process-wide,
+	// which is the serial goroutine's ceiling and is INDEPENDENT OF PARTITION
+	// COUNT. Mean size was 165 — already above max_size=100, because a partition
+	// blocked in the queue keeps buffering and its next commit carries the
+	// backlog. So throughput is 7.12 x size, and size is the only term a config
+	// knob reaches; raising commit CONCURRENCY needs more than one Reader.
 	//
 	// No partition label, unlike OnConsumerLag and OnConsumptionBlocked. Those
 	// are gauges, where one Set per partition under a shared label set would let

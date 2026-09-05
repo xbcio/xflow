@@ -74,18 +74,26 @@ func installCommitObserver(t *testing.T) *commitObserver {
 	return o
 }
 
-// TestCommitMessagesReportsTheBrokerRoundTrip pins that OnOffsetCommit carries
-// a duration that actually brackets the CommitMessages call, plus the topic,
-// the offset count and an "ok" result.
+// TestCommitMessagesReportsTheTimeSpentCommitting pins that OnOffsetCommit
+// carries a duration that actually brackets the CommitMessages call, plus the
+// topic, the offset count and an "ok" result.
+//
+// "the time spent committing", not "the round trip": this fake implements
+// messageCommitter directly, so it measures the same span the real path does
+// while skipping what dominates that span in production. Under kafka-go a
+// commit queues onto one Reader-wide channel served by one goroutine, and the
+// first live measurement put 88.8% of all partition-time inside this call. The
+// unit test cannot reproduce that and should not pretend to; it pins the
+// bracket, and the integration run supplies the magnitude.
 //
 // The duration lower bound is the load-bearing assertion. Every other field can
-// be produced by an implementation that reports before or after the round trip
+// be produced by an implementation that reports before or after the call
 // instead of around it, and such an implementation would report a duration near
 // zero — which is precisely the reading that would have kept this hop looking
 // free. A lower bound only: an upper bound would turn a busy machine into a
 // test failure, and this suite already has timing assertions that behave that
 // way under load.
-func TestCommitMessagesReportsTheBrokerRoundTrip(t *testing.T) {
+func TestCommitMessagesReportsTheTimeSpentCommitting(t *testing.T) {
 	o := installCommitObserver(t)
 	const delay = 30 * time.Millisecond
 	consumer := newPausingCommitter(delay, nil)
