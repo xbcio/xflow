@@ -121,6 +121,17 @@ type Config struct {
 	IssuedIdentities  IssuedIdentityStore
 }
 
+// EnrollDeclared reports whether both enrollment stores are present. It is
+// exported so callers outside this package can ask "is enrollment configured"
+// without re-deriving the same two-nil check — sdk/xflow's runner-auth
+// posture gate (NewServer) is the first such caller: it must accept
+// WithServerEnroll(...) as a declared posture using this exact predicate,
+// not a hand-written `codes != nil && ids != nil` of its own, or the two
+// packages could silently disagree about what "enrollment is on" means.
+func EnrollDeclared(codes RegistrationCodeStore, ids IssuedIdentityStore) bool {
+	return codes != nil && ids != nil
+}
+
 // enrollConfigured reports whether enrollment is turned on. Both stores are
 // required: one without the other cannot issue an identity that anything can
 // later authenticate. This is one function rather than the condition written
@@ -129,8 +140,9 @@ type Config struct {
 // identities but exposes no enroll endpoint (or the reverse) is a half-wired
 // state each site would consider correct on its own.
 func enrollConfigured(cfg Config) bool {
-	return cfg.RegistrationCodes != nil && cfg.IssuedIdentities != nil
+	return EnrollDeclared(cfg.RegistrationCodes, cfg.IssuedIdentities)
 }
+
 
 type redisClientProvider interface {
 	RedisClient() redis.Cmdable
@@ -265,7 +277,16 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	// before the enroll-issued authenticator ever gets a chance to count.
 	if enrollConfigured(cfg) {
 		issued := NewIssuedIdentityAuthenticator(cfg.IssuedIdentities)
-		if cfg.Auth != nil {
+		// IsConfigured, not a plain nil check: cfg.Auth is frequently
+		// DisabledAuthenticator{} (cmd/server's default when --auth-policy is
+		// empty), which is non-nil. MultiAuthenticator.dispatch returns the
+		// first member that succeeds, and DisabledAuthenticator always
+		// succeeds — composing it in front of (or alongside) issued would make
+		// the whole authenticator permissive for every runner, silently
+		// defeating enrollment. An enroll-only deployment (the case this
+		// exists for) must end up with issued alone, not
+		// Multi(DisabledAuthenticator{}, issued).
+		if IsConfigured(cfg.Auth) {
 			cfg.Auth = NewMultiAuthenticator(cfg.Auth, issued)
 		} else {
 			cfg.Auth = issued

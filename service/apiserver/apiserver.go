@@ -46,7 +46,15 @@ type Config struct {
 	Artifacts   *store.ArtifactStore
 	Concurrency int
 	Auth        control.Authenticator
-	Logger      engine.Logger
+	// RegistrationCodes / IssuedIdentities turn on the runner enrollment
+	// endpoint (/v1/runners/enroll). Both must be non-nil for enrollment to be
+	// live — control.NewControlPlane treats this pair as a single decision
+	// (control.enrollConfigured) and passing only one through here would leave
+	// the endpoint mounted with nothing behind it, or an authenticator with
+	// nothing to authenticate against.
+	RegistrationCodes control.RegistrationCodeStore
+	IssuedIdentities  control.IssuedIdentityStore
+	Logger            engine.Logger
 	Metrics     *metrics.Metrics
 	// Tracer, when non-nil, enables OTel HTTP middleware and wires distributed
 	// tracing through the runner dispatch/commit path. Nil means no tracing.
@@ -307,7 +315,10 @@ const entryActivationStoreTTL = 24 * time.Hour
 func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 	ccfg := control.Config{
 		Auth:                    cfg.Auth,
+		RegistrationCodes:       cfg.RegistrationCodes,
+		IssuedIdentities:        cfg.IssuedIdentities,
 		Logger:                  cfg.Logger,
+
 		Metrics:                 cfg.Metrics,
 		Tracer:                  cfg.Tracer,
 		Supplies:                cfg.Supplies,

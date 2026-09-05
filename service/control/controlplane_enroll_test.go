@@ -90,7 +90,42 @@ func TestEnrollOnlyServerStartsUnderRequireRunnerAuth(t *testing.T) {
 	}
 }
 
-// newTestControlPlaneWithEnroll builds a real ControlPlane through
+// TestEnrollCompositionIgnoresDisabledAuthenticator pins a composition bug
+// found while wiring cmd/server through to enrollment: cfg.Auth is frequently
+// DisabledAuthenticator{} (cmd/server's buildAuthenticator default when
+// --auth-policy is empty — exactly the case an operator running --enroll
+// alone hits), and DisabledAuthenticator{} is a non-nil Authenticator that
+// always succeeds. MultiAuthenticator.dispatch returns the first member that
+// succeeds, so composing NewMultiAuthenticator(DisabledAuthenticator{}, issued)
+// — which a plain `cfg.Auth != nil` check would do — produces an authenticator
+// that accepts every runner regardless of enrollment, silently defeating the
+// whole feature. The composition must use IsConfigured(cfg.Auth), which is
+// false for DisabledAuthenticator{}, so an enroll-only deployment ends up with
+// the issued-identity authenticator alone.
+func TestEnrollCompositionIgnoresDisabledAuthenticator(t *testing.T) {
+	ids := NewMemoryIssuedIdentityStore()
+	cp, err := NewControlPlane(Config{
+		Backend:           backendlocal.New(),
+		Auth:              DisabledAuthenticator{},
+		RegistrationCodes: NewMemoryRegistrationCodeStore(),
+		IssuedIdentities:  ids,
+	})
+	if err != nil {
+		t.Fatalf("NewControlPlane: %v", err)
+	}
+
+	auth := cp.Authenticator()
+	if _, ok := auth.(*IssuedIdentityAuthenticator); !ok {
+		t.Fatalf("Authenticator() = %T, want *IssuedIdentityAuthenticator (DisabledAuthenticator must not be composed in)", auth)
+	}
+	// A runner that was never enrolled must be rejected, not waved through by
+	// a leftover DisabledAuthenticator member.
+	if _, err := auth.AuthenticateRegister("never-enrolled", "some-token", TransportInfo{}); err == nil {
+		t.Fatal("an unenrolled runner was authenticated; DisabledAuthenticator leaked into the composed authenticator")
+	}
+}
+
+
 // NewControlPlane, wiring codes/ids into Config so the exercised paths are
 // production wiring rather than field assignment on a test-only struct. Either
 // argument may be nil to exercise the "enroll not configured" behavior.

@@ -486,6 +486,20 @@ func runServer(cfg serverConfig) error {
 		log.Printf("xflow-server: using distributed backend (redis=%s)", cfg.redis)
 	}
 
+	// registrationCodeStore / issuedIdentityStore back the runner enrollment
+	// endpoint. Both are constructed here, in one place, so Task 7's
+	// --mysql-dsn branch has a single pair of variables to swap for a
+	// SQL-backed implementation rather than several scattered nil checks.
+	// In-memory today: identities issued by enroll do not survive a restart,
+	// which is acceptable for the first shipped version and matches every
+	// other in-memory store this binary falls back to without --mysql-dsn.
+	var registrationCodeStore control.RegistrationCodeStore
+	var issuedIdentityStore control.IssuedIdentityStore
+	if cfg.enroll {
+		registrationCodeStore = control.NewMemoryRegistrationCodeStore()
+		issuedIdentityStore = control.NewMemoryIssuedIdentityStore()
+	}
+
 	// The assembly lives in sdk/xflow, not here. Every option below is a
 	// translation of a flag; the wiring those options drive — supply wire
 	// encryption, the audit reconcile worker and its leader gate, the module
@@ -522,6 +536,9 @@ func runServer(cfg serverConfig) error {
 	}
 	if cfg.enableRunnerMetricsProxy {
 		serverOpts = append(serverOpts, xflowsdk.WithServerRunnerMetricsProxy())
+	}
+	if cfg.enroll {
+		serverOpts = append(serverOpts, xflowsdk.WithServerEnroll(registrationCodeStore, issuedIdentityStore))
 	}
 	if cfg.management {
 		serverOpts = append(serverOpts, xflowsdk.WithServerManagement())
@@ -764,7 +781,7 @@ func validateProduction(mode string, deps productionDeps) error {
 		return fmt.Errorf("production mode requires a master encryption key (XFLOW_MASTER_KEY or --master-key-file); without it supply content is stored in plaintext. Generate with: openssl rand -base64 32")
 	}
 	if !deps.runnerAuthConfigured {
-		return fmt.Errorf("production mode requires runner protocol authentication (--auth-policy); without it any runner can register and claim work")
+		return fmt.Errorf("production mode requires runner protocol authentication (--auth-policy or --enroll); without it any runner can register and claim work")
 	}
 	return nil
 }

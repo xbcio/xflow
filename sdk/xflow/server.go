@@ -53,14 +53,17 @@ type ServerConfig struct {
 	Store store.Store
 }
 
-// ErrRunnerAuthPostureUndeclared is returned by NewServer when neither
-// WithServerAuth nor WithServerInsecureNoRunnerAuth was supplied, or when
-// WithServerAuth was supplied but with control.DisabledAuthenticator{} — a
-// non-nil Authenticator that is not "configured" per control.IsConfigured, and
-// so does not count as declaring a posture either.
+// ErrRunnerAuthPostureUndeclared is returned by NewServer when none of
+// WithServerAuth, WithServerInsecureNoRunnerAuth or WithServerEnroll was
+// supplied, or when WithServerAuth was supplied but with
+// control.DisabledAuthenticator{} — a non-nil Authenticator that is not
+// "configured" per control.IsConfigured, and so does not count as declaring a
+// posture either.
 var ErrRunnerAuthPostureUndeclared = errors.New(
 	"xflow: runner-protocol auth posture not declared: pass WithServerAuth(...) with a configured authenticator " +
-		"to authenticate runners, or WithServerInsecureNoRunnerAuth() to run without runner auth on purpose")
+		"to authenticate runners, WithServerEnroll(...) to authenticate them via enrollment, or " +
+		"WithServerInsecureNoRunnerAuth() to run without runner auth on purpose")
+
 
 type serverConfig struct {
 	auth                control.Authenticator
@@ -81,6 +84,13 @@ type serverConfig struct {
 	// the runner protocol without authentication. Set only by
 	// WithServerInsecureNoRunnerAuth; see NewServer's posture gate.
 	insecureNoRunnerAuth bool
+	// registrationCodes / issuedIdentities turn on the runner enrollment
+	// endpoint. Set only by WithServerEnroll; see control.EnrollDeclared for
+	// the shared "is enrollment on" predicate this pair feeds both here (the
+	// posture gate) and in control.NewControlPlane (composing the
+	// authenticator, mounting the endpoint).
+	registrationCodes control.RegistrationCodeStore
+	issuedIdentities  control.IssuedIdentityStore
 
 	tracer                   tracing.Tracer
 	concurrency              int
@@ -119,6 +129,27 @@ func WithServerAuth(auth control.Authenticator) ServerOption {
 // anything other than loopback should supply a real Authenticator instead.
 func WithServerInsecureNoRunnerAuth() ServerOption {
 	return func(c *serverConfig) { c.insecureNoRunnerAuth = true }
+}
+
+// WithServerEnroll turns on the runner enrollment endpoint
+// (/v1/runners/enroll) and counts as declaring the runner-auth posture on its
+// own: NewServer's posture gate accepts codes+ids in place of WithServerAuth
+// or WithServerInsecureNoRunnerAuth.
+//
+// Both stores must be non-nil together — control.EnrollDeclared is the single
+// predicate this option, NewServer's posture gate, and
+// control.NewControlPlane's authenticator composition all agree on, so no two
+// of them can end up disagreeing about whether enrollment is on. Passing
+// either as nil is equivalent to not calling this option at all.
+//
+// codes and ids are typically control.NewMemoryRegistrationCodeStore() /
+// control.NewMemoryIssuedIdentityStore() for a single-process deployment; a
+// SQL-DSN-backed pair is the durable equivalent for a multi-replica one.
+func WithServerEnroll(codes control.RegistrationCodeStore, ids control.IssuedIdentityStore) ServerOption {
+	return func(c *serverConfig) {
+		c.registrationCodes = codes
+		c.issuedIdentities = ids
+	}
 }
 
 // WithServerLogger sets the logger used by the engine, dispatcher, and
@@ -345,7 +376,17 @@ func NewServer(cfg ServerConfig, opts ...ServerOption) (*Server, error) {
 	for _, o := range opts {
 		o(sc)
 	}
-	if !control.IsConfigured(sc.auth) && !sc.insecureNoRunnerAuth {
+	// Enrollment is a third valid posture, alongside a configured Authenticator
+	// and the explicit insecure escape hatch: an enroll-only deployment (no
+	// runners.yaml, no static token) authenticates every runner through
+	// enroll-issued identities once control.NewControlPlane composes them in,
+	// so failing this gate on such a deployment would make it impossible to
+	// start at all despite having real runner auth. control.EnrollDeclared is
+	// the same predicate control.NewControlPlane uses to decide whether to
+	// compose — deliberately not a local `!= nil && != nil` here, so this gate
+	// and that composition cannot drift apart on what "enrollment is on" means.
+	enrollDeclared := control.EnrollDeclared(sc.registrationCodes, sc.issuedIdentities)
+	if !control.IsConfigured(sc.auth) && !sc.insecureNoRunnerAuth && !enrollDeclared {
 		return nil, ErrRunnerAuthPostureUndeclared
 	}
 	// Deliberately asymmetric with the check above: this one asks "did the
@@ -451,6 +492,8 @@ func buildServerAPIConfig(cfg ServerConfig, sc *serverConfig) apiserver.Config {
 		Supplies:            supplies,
 		Artifacts:           sc.artifacts,
 		Auth:                sc.auth,
+		RegistrationCodes:   sc.registrationCodes,
+		IssuedIdentities:    sc.issuedIdentities,
 		WorkflowAuth:        sc.workflowAuth,
 		RequireWorkflowAuth: sc.requireWorkflowAuth,
 		PrincipalAuth:       sc.principalAuth,
