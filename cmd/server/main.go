@@ -490,15 +490,20 @@ func runServer(cfg serverConfig) error {
 	// endpoint. Both are constructed here, in one place, so Task 7's
 	// --mysql-dsn branch has a single pair of variables to swap for a
 	// SQL-backed implementation rather than several scattered nil checks.
-	// In-memory today: identities issued by enroll do not survive a restart,
-	// which is acceptable for the first shipped version and matches every
-	// other in-memory store this binary falls back to without --mysql-dsn.
+	//
+	// Unconditionally in-memory today, regardless of --mysql-dsn: unlike the
+	// execution store and audit sink above, these two stores do not yet look
+	// at cfg.mysqlDSN at all — Task 7 is what wires that branch in. Running
+	// --enroll together with --mysql-dsn does not make issued identities
+	// durable; every runner enrolled before a restart must re-enroll after
+	// one, on every deployment, mysql-dsn or not.
 	var registrationCodeStore control.RegistrationCodeStore
 	var issuedIdentityStore control.IssuedIdentityStore
 	if cfg.enroll {
 		registrationCodeStore = control.NewMemoryRegistrationCodeStore()
 		issuedIdentityStore = control.NewMemoryIssuedIdentityStore()
 	}
+	warnIfEnrollStoresIgnoreMySQLDSN(cfg)
 
 	// The assembly lives in sdk/xflow, not here. Every option below is a
 	// translation of a flag; the wiring those options drive — supply wire
@@ -605,6 +610,19 @@ func runServer(cfg serverConfig) error {
 
 	// Run starts the reconcile worker along with the transports.
 	return srv.Run(ctx)
+}
+
+// warnIfEnrollStoresIgnoreMySQLDSN logs an operator-visible warning when
+// --enroll is combined with --mysql-dsn. registrationCodeStore and
+// issuedIdentityStore are unconditionally in-memory until Task 7 adds a
+// SQL-backed implementation — unlike the execution store and audit sink,
+// which do switch on cfg.mysqlDSN — so this combination silently does not
+// persist issued runner identities across a restart unless the operator is
+// told here.
+func warnIfEnrollStoresIgnoreMySQLDSN(cfg serverConfig) {
+	if cfg.enroll && cfg.mysqlDSN != "" {
+		log.Println("xflow-server: WARNING --enroll uses in-memory registration-code/issued-identity stores regardless of --mysql-dsn (Task 7 adds SQL backing); issued runner identities do not survive a restart and every runner must re-enroll after one")
+	}
 }
 
 func buildLogger(cfg serverConfig) (engine.Logger, error) {

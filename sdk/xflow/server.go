@@ -398,6 +398,22 @@ func NewServer(cfg ServerConfig, opts ...ServerOption) (*Server, error) {
 	if sc.auth != nil && sc.insecureNoRunnerAuth {
 		return nil, errors.New("xflow: WithServerAuth and WithServerInsecureNoRunnerAuth are mutually exclusive")
 	}
+	// insecureNoRunnerAuth is purely a posture declaration — it has no effect
+	// beyond this check and the one above (control.EnrollDeclared already
+	// decides what actually gets composed into the runner-protocol
+	// authenticator). So WithServerEnroll(...) + WithServerInsecureNoRunnerAuth()
+	// does not fail loudly: control.NewControlPlane still composes the
+	// issued-identity authenticator and the server ends up enroll-only, a
+	// stricter outcome than the caller asked for, not a hole. But that is
+	// exactly backwards from every other contradiction this function catches
+	// — it silently resolves to a narrower posture at runtime instead of
+	// failing at startup, and a runner meant to ride in on
+	// WithServerInsecureNoRunnerAuth() alone starts getting rejected once
+	// requests actually arrive, not when the process comes up. Reject the
+	// combination here so the caller finds out at startup instead.
+	if enrollDeclared && sc.insecureNoRunnerAuth {
+		return nil, errors.New("xflow: WithServerEnroll and WithServerInsecureNoRunnerAuth are mutually exclusive")
+	}
 
 	apiCfg := buildServerAPIConfig(cfg, sc)
 	// The management module is registered through an apiserver Option rather

@@ -21,7 +21,7 @@ var ErrEnrollRejected = errors.New("enrollment rejected")
 // yet. Its defenses are the code's 32 bytes of entropy, the per-source failure
 // lockout, and the fact that every rejection looks the same from outside.
 func (c *Core) Enroll(ctx context.Context, req protocol.EnrollRequest, info TransportInfo) (protocol.EnrollResponse, error) {
-	if c == nil || c.registrationCodes == nil || c.issuedIdentities == nil {
+	if c == nil || !EnrollDeclared(c.registrationCodes, c.issuedIdentities) {
 		// Enroll was not configured on this server. Same external error as a bad
 		// code: whether the feature is on is not something a caller needs to be
 		// told apart from a wrong guess.
