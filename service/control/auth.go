@@ -38,6 +38,15 @@ var (
 type TransportInfo struct {
 	TLSPeerCN  string
 	TLSPeerSAN []string
+	// SourceIP is the peer host with the port stripped. It is what the enroll
+	// rate limiter buckets on; bucketing on host:port would give an attacker a
+	// fresh budget per outbound connection, which is no limit at all.
+	//
+	// Behind a load balancer this is the balancer's address unless the balancer
+	// is configured to preserve the client address. Trusting a caller-supplied
+	// X-Forwarded-For here would let anyone reset their own lockout by editing
+	// a header, so it is deliberately not read.
+	SourceIP string
 }
 
 // RunnerPolicy is the effective set of permissions bound to an authenticated

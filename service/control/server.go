@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -332,10 +333,11 @@ func overrideTokenFromHeader(r *http.Request, dst *string) {
 }
 
 // httpTransportInfo extracts TLS peer identity from the request when the
-// connection is a verified client mTLS session. Returns an empty struct on
-// plaintext HTTP so the authenticator's mTLS branch will reject.
+// connection is a verified client mTLS session. SourceIP is always populated
+// (empty TLS fields on plaintext HTTP so the authenticator's mTLS branch will
+// reject).
 func httpTransportInfo(r *http.Request) TransportInfo {
-	info := TransportInfo{}
+	info := TransportInfo{SourceIP: sourceIPOf(r)}
 	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 		return info
 	}
@@ -343,6 +345,20 @@ func httpTransportInfo(r *http.Request) TransportInfo {
 	info.TLSPeerCN = cert.Subject.String()
 	info.TLSPeerSAN = append(info.TLSPeerSAN, cert.DNSNames...)
 	return info
+}
+
+// sourceIPOf strips the port from RemoteAddr. X-Forwarded-For is deliberately
+// ignored: it is caller-controlled, so honoring it would let anyone reset
+// their own enroll lockout by rotating a header value.
+func sourceIPOf(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
