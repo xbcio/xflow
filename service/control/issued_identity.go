@@ -150,15 +150,25 @@ func NewMultiAuthenticator(auths ...Authenticator) *MultiAuthenticator {
 	return &MultiAuthenticator{auths: kept}
 }
 
-// Members exposes the composed authenticators so IsConfigured can see through
-// the wrapper. Without this, a composite holding only DisabledAuthenticator
-// would report as configured and RequireRunnerAuth would pass on a server that
-// accepts every runner.
+// Members exposes the composed authenticators for callers outside this
+// package (e.g. future wiring or introspection). It returns a copy, not
+// m.auths itself: m.auths is read by dispatch on every in-flight runner
+// request, and handing out the live slice would let a caller mutate
+// (`members[0] = x`) this MultiAuthenticator's own dispatch order/membership
+// out from under those readers — the same shared-backing-array defect this
+// task closed for IssuedIdentity.Scope, one level up.
+//
+// IsConfigured (auth.go), being in the same package, ranges over m.auths
+// directly instead of calling this — it runs on the artifact module's
+// per-request path (module_artifact.go), and that path should not pay for an
+// allocation just to work around an exported-API hazard it doesn't have.
 func (m *MultiAuthenticator) Members() []Authenticator {
 	if m == nil {
 		return nil
 	}
-	return m.auths
+	out := make([]Authenticator, len(m.auths))
+	copy(out, m.auths)
+	return out
 }
 
 func (m *MultiAuthenticator) AuthenticateRegister(runnerID, token string, info TransportInfo) (RunnerPolicy, error) {

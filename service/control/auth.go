@@ -128,13 +128,26 @@ func (DisabledAuthenticator) AuthenticateOngoing(string, string, TransportInfo) 
 //
 // A MultiAuthenticator is configured when at least one of its members is — a
 // composite that holds only DisabledAuthenticator still accepts every
-// runner, and RequireRunnerAuth must not be fooled by the wrapper.
+// runner, and RequireRunnerAuth must not be fooled by the wrapper. This
+// ranges over m.auths directly rather than calling m.Members() (which
+// returns a defensive copy): IsConfigured runs on the artifact module's
+// per-request path (module_artifact.go), and this function lives in the same
+// package as MultiAuthenticator, so reaching into the field is both legal and
+// free of that copy's allocation.
 func IsConfigured(auth Authenticator) bool {
 	if auth == nil {
 		return false
 	}
 	if m, ok := auth.(*MultiAuthenticator); ok {
-		for _, member := range m.Members() {
+		if m == nil {
+			// A typed-nil *MultiAuthenticator boxed into the interface: the same
+			// trap this function's own doc comment warns about, one layer up.
+			// Guarding here (cheap, no allocation) instead of delegating to
+			// Members()'s nil-receiver check is what lets this loop read m.auths
+			// directly.
+			return false
+		}
+		for _, member := range m.auths {
 			if IsConfigured(member) {
 				return true
 			}

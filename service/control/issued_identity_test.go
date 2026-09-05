@@ -212,3 +212,155 @@ func TestMultiAuthenticatorIsConfigured(t *testing.T) {
 		t.Fatal("a composite containing a real authenticator must count as configured")
 	}
 }
+
+// TestMultiAuthenticatorDryRunSuppressionSurvivesReversedOrder is the mirror
+// of TestMultiAuthenticatorPreservesDryRunSuppression with the two members
+// swapped: a plain error ahead of the dry-run member must not stop dispatch
+// from remembering and returning the dry-run denial. Order must not matter —
+// otherwise composing a dry-run file store *after* another authenticator
+// (rather than before it, the only order the sibling test covers) would
+// silently turn dry-run into enforcing.
+func TestMultiAuthenticatorDryRunSuppressionSurvivesReversedOrder(t *testing.T) {
+	dryRun := stubAuth{policy: permissivePolicy, err: dryRunDenial(ErrAuthUnknownToken)}
+	m := NewMultiAuthenticator(stubAuth{err: ErrAuthMissingToken}, dryRun)
+
+	got, err := m.AuthenticateRegister("r", "t", TransportInfo{})
+	if !IsDryRunDenial(err) {
+		t.Fatalf("err = %v, want a dry-run denial so the caller still allows the request", err)
+	}
+	if !got.Allows("anything") {
+		t.Fatalf("dry-run must yield the permissive policy, got %+v", got)
+	}
+}
+
+// TestMultiAuthenticatorTwoDryRunDenialsKeepsTheFirst pins dispatch's choice
+// when more than one member is dry-run-denying: it remembers the FIRST
+// dry-run denial and discards later ones. This choice is arbitrary — every
+// dry-run denial is equally "let the request through and log", so keeping the
+// last instead would not be wrong — this test exists only to force a human
+// to notice and re-decide if the behavior ever changes, not to claim
+// first-wins is the one correct answer.
+func TestMultiAuthenticatorTwoDryRunDenialsKeepsTheFirst(t *testing.T) {
+	first := stubAuth{policy: RunnerPolicy{Name: "first-dryrun"}, err: dryRunDenial(ErrAuthUnknownToken)}
+	second := stubAuth{policy: RunnerPolicy{Name: "second-dryrun"}, err: dryRunDenial(ErrAuthMissingToken)}
+	m := NewMultiAuthenticator(first, second)
+
+	got, err := m.AuthenticateRegister("r", "t", TransportInfo{})
+	if !IsDryRunDenial(err) {
+		t.Fatalf("err = %v, want a dry-run denial", err)
+	}
+	if got.Name != "first-dryrun" {
+		t.Fatalf("policy = %q, want the first dry-run member's (%q)", got.Name, "first-dryrun")
+	}
+}
+
+// TestMultiAuthenticatorDispatchWithNoMembers covers the true
+// zero-real-members path, in every shape that reaches it: no arguments at
+// all, arguments that the constructor's nil filter reduces to an empty
+// slice, and a nil *MultiAuthenticator itself. TestMultiAuthenticatorSkipsNilMembers
+// always leaves one real member behind, so none of these shapes was
+// previously exercised by any test.
+//
+// The nil-receiver case is not just belt-and-suspenders: for the first two
+// cases, dispatch's fast-path guard (`m == nil || len(m.auths) == 0`) is
+// externally unobservable on its own — deleting it still falls through the
+// empty loop to `lastErr`'s zero-value initialization, which already equals
+// ErrAuthUnknownToken, so the returned value is identical either way. Only a
+// nil receiver makes the guard's removal observable, because without it
+// `m.auths` dereferences a nil pointer instead of returning a value.
+func TestMultiAuthenticatorDispatchWithNoMembers(t *testing.T) {
+	cases := map[string]*MultiAuthenticator{
+		"no arguments":              NewMultiAuthenticator(),
+		"all-nil filtered to empty": NewMultiAuthenticator(nil, nil),
+		"nil receiver":              (*MultiAuthenticator)(nil),
+	}
+	for name, m := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := m.AuthenticateRegister("r", "t", TransportInfo{}); !errors.Is(err, ErrAuthUnknownToken) {
+				t.Fatalf("AuthenticateRegister err = %v, want ErrAuthUnknownToken", err)
+			}
+			if _, err := m.AuthenticateOngoing("r", "t", TransportInfo{}); !errors.Is(err, ErrAuthUnknownToken) {
+				t.Fatalf("AuthenticateOngoing err = %v, want ErrAuthUnknownToken", err)
+			}
+		})
+	}
+}
+
+// TestMultiAuthenticatorMembersReturnsACopy proves Members() hands out a copy,
+// not the live m.auths backing array: mutating every element of the returned
+// slice must not change which authenticators dispatch actually consults on
+// the next call. A test that only compared lengths would not catch Members()
+// returning the live slice — overwriting elements in place doesn't change the
+// length — so this asserts dispatch's observable behavior instead.
+func TestMultiAuthenticatorMembersReturnsACopy(t *testing.T) {
+	want := RunnerPolicy{Name: "real"}
+	m := NewMultiAuthenticator(stubAuth{err: ErrAuthUnknownToken}, stubAuth{policy: want})
+
+	members := m.Members()
+	if len(members) != 2 {
+		t.Fatalf("Members() length = %d, want 2", len(members))
+	}
+	for i := range members {
+		members[i] = stubAuth{policy: RunnerPolicy{Name: "tampered"}}
+	}
+
+	got, err := m.AuthenticateRegister("r", "t", TransportInfo{})
+	if err != nil {
+		t.Fatalf("AuthenticateRegister: %v", err)
+	}
+	if got.Name != "real" {
+		t.Fatalf("policy = %q, want %q — mutating the slice from Members() leaked into dispatch's own state", got.Name, "real")
+	}
+}
+
+// TestMemoryIssuedIdentityStoreClonePreservesNilSlices pins the nil-vs-empty
+// half of clone()'s contract that TestMemoryIssuedIdentityStoreReturnsDefensiveCopies
+// leaves unexercised (that test only ever feeds non-empty slices in): a nil
+// AllowedNodeTypes / AllowedNamespaces going into Issue must still be nil
+// coming out of Lookup and List, not an empty non-nil slice. The reverse
+// direction — a non-nil empty slice collapsing to nil — is the established,
+// already-accepted RegistrationCode.clone() convention and is not asserted
+// here.
+func TestMemoryIssuedIdentityStoreClonePreservesNilSlices(t *testing.T) {
+	ctx := context.Background()
+	st := NewMemoryIssuedIdentityStore()
+	id := IssuedIdentity{
+		RunnerID:  "runner-1",
+		TokenHash: HashSecret("tok-secret"),
+		Scope:     RunnerPolicy{Name: "n"}, // AllowedNodeTypes / AllowedNamespaces left nil
+		CodeID:    "code-1",
+		IssuedAt:  time.Unix(1700000000, 0).UTC(),
+	}
+	if id.Scope.AllowedNodeTypes != nil || id.Scope.AllowedNamespaces != nil {
+		t.Fatal("test setup: expected nil slices before Issue")
+	}
+
+	if err := st.Issue(ctx, id); err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	got, ok, err := st.Lookup(ctx, "runner-1")
+	if err != nil || !ok {
+		t.Fatalf("Lookup: err=%v ok=%v", err, ok)
+	}
+	if got.Scope.AllowedNodeTypes != nil {
+		t.Fatalf("Lookup: AllowedNodeTypes = %#v, want nil", got.Scope.AllowedNodeTypes)
+	}
+	if got.Scope.AllowedNamespaces != nil {
+		t.Fatalf("Lookup: AllowedNamespaces = %#v, want nil", got.Scope.AllowedNamespaces)
+	}
+
+	list, err := st.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("List returned %d identities, want 1", len(list))
+	}
+	if list[0].Scope.AllowedNodeTypes != nil {
+		t.Fatalf("List: AllowedNodeTypes = %#v, want nil", list[0].Scope.AllowedNodeTypes)
+	}
+	if list[0].Scope.AllowedNamespaces != nil {
+		t.Fatalf("List: AllowedNamespaces = %#v, want nil", list[0].Scope.AllowedNamespaces)
+	}
+}
