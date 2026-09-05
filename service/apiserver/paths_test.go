@@ -128,6 +128,7 @@ var guardSamples = []guardSample{
 	{"PathArtifactByDigest", PathArtifactByDigest, http.MethodGet, "/v1/artifacts/sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
 
 	{"PathManagementLeader", PathManagementLeader, http.MethodGet, "/v1/management/leader"},
+	{"PathManagementRunners", PathManagementRunners, http.MethodGet, "/v1/management/runners"},
 	{"PathManagementRunnerByID", PathManagementRunnerByID, http.MethodGet, "/v1/management/runners/r-1"},
 	{"PathManagementExecByID", PathManagementExecByID, http.MethodGet, "/v1/management/executions/ex-1"},
 	{"PathManagementDeadLetters", PathManagementDeadLetters, http.MethodGet, "/v1/management/dead-letters/ex-1"},

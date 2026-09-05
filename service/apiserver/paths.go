@@ -29,6 +29,7 @@ const (
 	PathArtifactByDigest = "/v1/artifacts/{digest}"
 
 	PathManagementLeader      = "/v1/management/leader"
+	PathManagementRunners     = "/v1/management/runners"
 	PathManagementRunnerByID  = "/v1/management/runners/{id}"
 	PathManagementExecByID    = "/v1/management/executions/{id}"
 	PathManagementDeadLetters = "/v1/management/dead-letters/{execID}"
@@ -71,6 +72,7 @@ var UserFacingPaths = []string{
 	PathArtifactByDigest,
 
 	PathManagementLeader,
+	PathManagementRunners,
 	PathManagementRunnerByID,
 	PathManagementExecByID,
 	PathManagementDeadLetters,

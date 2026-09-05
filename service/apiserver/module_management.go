@@ -20,16 +20,17 @@ import (
 )
 
 // managementModule mounts the ops management HTTP API: leader status,
-// single-runner lookup, single-execution inspect, dead-letter list/replay,
-// registration-code create/list/revoke/audit, and the process
-// liveness/readiness probes. It is opt-in (registered only via
-// WithManagement) because it exposes runner directory, execution state,
-// and dead-letter operations that must sit behind authz.
+// single-runner lookup and (when supported) runner listing,
+// single-execution inspect, dead-letter list/replay, registration-code
+// create/list/revoke/audit, and the process liveness/readiness probes. It is
+// opt-in (registered only via WithManagement) because it exposes runner
+// directory, execution state, and dead-letter operations that must sit
+// behind authz.
 //
-// Per R1, the underlying runner directory and store interfaces expose no list
-// API, so this module intentionally provides no listing endpoints for
-// runners/executions — only single-resource lookups, leader status, dead-letter
-// operations, and health probes.
+// Per R1 the underlying store interface exposes no list API, so this module
+// provides no execution listing. Runner listing IS exposed, but only when the
+// configured directory structurally supports enumeration; otherwise the route
+// answers 501 rather than pretending the fleet is empty.
 type managementModule struct {
 	authzHolder
 	cp  *control.ControlPlane
@@ -66,10 +67,28 @@ type managementModule struct {
 	// server", reached without touching the mount condition.
 	codes  control.RegistrationCodeStore
 	issued control.IssuedIdentityStore
+	// runners is the structural probe result for GET PathManagementRunners
+	// (see runnerLister below). Nil means the configured directory does not
+	// support enumeration, and the route answers 501 rather than an empty list.
+	runners runnerLister
+}
+
+// runnerLister is the structural probe for a runner directory that can
+// enumerate. The concrete directory does not implement it today; the interface
+// exists so the route can answer honestly either way, and so a directory that
+// grows the capability lights the route up without further plumbing.
+type runnerLister interface {
+	ListRunners(ctx context.Context) ([]string, error)
 }
 
 func newManagementModule(cp *control.ControlPlane) *managementModule {
-	return &managementModule{cp: cp, eng: cp.Engine()}
+	m := &managementModule{cp: cp, eng: cp.Engine()}
+	if dir := cp.RunnerDirectory(); dir != nil {
+		if l, ok := dir.(runnerLister); ok {
+			m.runners = l
+		}
+	}
+	return m
 }
 
 func (m *managementModule) Name() string { return "management" }
@@ -92,6 +111,19 @@ func (m *managementModule) RegisterHTTP(mux *http.ServeMux) {
 		mux.HandleFunc("GET "+PathManagementRunnerByID, m.authzWrap(OpManagementRunnerRead, false, m.handleRunner, func(r *http.Request) (string, string, string, string) {
 			id := r.PathValue("id")
 			return "management/runner/" + id, "", "", ""
+		}))
+		// Runner listing (Task 9): its own Op/scope, separate from
+		// OpManagementRunnerRead — a token that may look up one known runner
+		// should not thereby be able to enumerate the whole fleet. The handler
+		// itself decides 200 vs 501 depending on whether the configured runner
+		// directory structurally supports enumeration (m.runners); that
+		// decision must NOT gate whether the route is mounted, or an
+		// unauthenticated caller would get a different status than an
+		// authenticated one hitting an unsupported backend, which is exactly
+		// the kind of authz-wrapper bypass TestEveryProtectedUserPathRejectsUnauthenticated
+		// exists to catch.
+		mux.HandleFunc("GET "+PathManagementRunners, m.authzWrap(OpManagementRunnerList, false, m.handleListRunners, func(*http.Request) (string, string, string, string) {
+			return "management/runners", "", "", ""
 		}))
 		// Namespace boundary (Task 7.3): the execution-inspect route injects the
 		// verified principal's Namespace into the request context. Inspect reads
@@ -282,9 +314,10 @@ func (m *managementModule) handleLeader(w http.ResponseWriter, r *http.Request) 
 	writeData(w, r, http.StatusOK, leaderResponse{IsLeader: m.cp.IsLeader()})
 }
 
-// handleRunner looks up a single runner snapshot by id. The runner directory
-// has no list API, so listing is intentionally unsupported. The id is the {id}
-// path value the mux matched.
+// handleRunner looks up a single runner snapshot by id. See handleListRunners
+// for the separate listing route, which is only supported when the configured
+// directory implements runnerLister. The id is the {id} path value the mux
+// matched.
 func (m *managementModule) handleRunner(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodGet) {
 		return
@@ -305,6 +338,86 @@ func (m *managementModule) handleRunner(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeData(w, r, http.StatusOK, snap)
+}
+
+// runnerListItem is the JSON projection for one entry in GET
+// PathManagementRunners.
+type runnerListItem struct {
+	RunnerID string `json:"runner_id"`
+	// Enrolled reports whether this runner's credential came from the enrollment
+	// endpoint rather than a static policy file. It is what tells an operator
+	// which half of the fleet a revoked registration code would affect.
+	Enrolled bool `json:"enrolled"`
+}
+
+// handleListRunners enumerates the runner directory, when the configured
+// directory structurally supports it (m.runners != nil — see runnerLister).
+//
+// Two distinct "this doesn't work" conditions live in this handler and they
+// are deliberately NOT unified (Task 9 addendum Ruling 6):
+//   - m.runners == nil: the runner directory does not implement runnerLister.
+//     This is spec §2.3.2's mandated 501 runner_listing_unsupported — the
+//     feature exists (single-runner lookup does work) but this backend cannot
+//     answer "list them all". Returning an empty array here would make "no
+//     runners online" and "this backend cannot answer" the same picture, and
+//     those are exactly the two cases an operator needs to tell apart.
+//   - m.issued.List returning an error (see below): a different question
+//     ("who among them enrolled") that this backend also cannot answer, for a
+//     different reason (a corrupted issued-identity row, not a missing
+//     capability). It gets its own 500, not folded into the 501 above.
+//
+// This is unlike registrationCodeUnavailable's 404 (m.codes == nil): that 404
+// means the registration-code feature is not configured on this server at
+// all. The 501 here means the feature IS configured but the directory
+// implementation cannot enumerate. Different conditions, kept separate.
+func (m *managementModule) handleListRunners(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+	if m.runners == nil {
+		// Not "no runners" — "this backend cannot answer the question". The two
+		// must not collapse into the same response.
+		writeFail(w, r, http.StatusNotImplemented, "runner_listing_unsupported",
+			"the configured runner directory does not support enumeration")
+		return
+	}
+	ids, err := m.runners.ListRunners(r.Context())
+	if err != nil {
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	enrolled := map[string]bool{}
+	if m.issued != nil {
+		list, err := m.issued.List(r.Context())
+		if err != nil {
+			// Not "nobody is enrolled" -- "we cannot tell who is enrolled".
+			// Reporting enrolled:false for the whole fleet here would misinform
+			// the exact decision this field exists to inform (which runners a
+			// revoked registration code affects). Same principle as the 501
+			// above: a question we cannot answer must not be answered wrongly
+			// (Task 9 addendum Ruling 4). This is a distinct failure mode from
+			// m.issued == nil below: List erroring means the store IS
+			// configured but a row in it is corrupt (store.ErrEnrollScopeCorrupted
+			// after Task 7's fix) and cannot be trusted, not that enrollment
+			// data is genuinely absent.
+			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+			return
+		}
+		for _, id := range list {
+			enrolled[id.RunnerID] = true
+		}
+	}
+	// m.issued == nil (this server has no issued-identity store configured at
+	// all) falls through with enrolled left empty -- every runner reports
+	// false. That is a true value, not a degraded one: without an
+	// issued-identity store there genuinely are no enroll-issued runners to
+	// report, unlike the List-error case above where the data exists but
+	// cannot be read.
+	out := make([]runnerListItem, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, runnerListItem{RunnerID: id, Enrolled: enrolled[id]})
+	}
+	writeData(w, r, http.StatusOK, out)
 }
 
 // handleExecution inspects a single execution by id. It delegates to

@@ -606,6 +606,43 @@ paths:
         default:
           $ref: "#/components/responses/DefaultError"
 
+  /v1/management/runners:
+    get:
+      operationId: listRunners
+      summary: Enumerate the runner directory
+      description: |
+        Lists every runner id known to the directory, with whether each was
+        issued its credential through the enrollment endpoint (`enrolled:
+        true`) or a static policy file (`enrolled: false`). This is what tells
+        an operator which runners a revoked registration code would affect.
+
+        Returns 501 `runner_listing_unsupported` when the configured runner
+        directory does not structurally support enumeration, rather than an
+        empty array — an empty list and "this backend cannot answer" must
+        stay visibly distinct.
+      tags: [Management]
+      parameters:
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: Runner list.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/RunnerListItem"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
   /v1/management/runners/{id}:
     get:
       operationId: getRunner
@@ -1243,6 +1280,19 @@ components:
     NodeStatus:
       type: string
       enum: [pending, running, committing, success, failed, skipped, suspended, continued, canceled, waiting]
+
+    RunnerListItem:
+      type: object
+      description: One entry in the runner directory listing.
+      required: [runner_id, enrolled]
+      properties:
+        runner_id:
+          type: string
+        enrolled:
+          type: boolean
+          description: |
+            Whether this runner's credential came from the enrollment endpoint
+            rather than a static policy file.
 
     RunnerSnapshot:
       type: object

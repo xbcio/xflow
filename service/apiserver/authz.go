@@ -105,6 +105,11 @@ const (
 	// token can be granted runner read without leader read and vice-versa.
 	OpManagementLeaderRead = "management.leader.read"
 	OpManagementRunnerRead = "management.runner.read"
+	// OpManagementRunnerList enumerates the runner directory. It is a separate
+	// scope from OpManagementRunnerRead on purpose: a token that may inspect one
+	// runner it already knows about should not thereby be able to enumerate the
+	// whole fleet.
+	OpManagementRunnerList = "management.runner.list"
 	// There is no OpSupplyWrite: PUT /v1/supplies/{name} is sealed (Z.5). The
 	// write path is in-process only (sdk/xflow.Server.UpdateSupply). Re-adding
 	// the operation without re-adding the route would be harmless; re-adding
@@ -153,6 +158,8 @@ func scopeForOperation(op string) string {
 		return "management.leader.read"
 	case OpManagementRunnerRead:
 		return "management.runner.read"
+	case OpManagementRunnerList:
+		return "management.runner.list"
 	case OpSupplyRead:
 		return "supply.read"
 	case OpArtifactRead:
