@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/service/protocol"
 )
@@ -180,19 +181,50 @@ func TestCoreEnrollAgreesWithEnrollDeclaredAcrossStoreCombos(t *testing.T) {
 			codes, ids := newStores(c.withCodes, c.withIDs)
 			want := EnrollDeclared(codes, ids)
 
+			// The request code has to differ by combo, or the "declared" half
+			// of this test asserts nothing. Every rejection Enroll can produce
+			// is the same ErrEnrollRejected by design (see ErrEnrollRejected's
+			// doc comment), so with a junk code a declared Core and an
+			// undeclared one are indistinguishable from out here — asserting
+			// "err != nil" on the declared side would be satisfied by a gate
+			// that rejects everything. Only a code that really exists in the
+			// store can show the gate let the request THROUGH to the lookup.
+			reqCode := "no-such-code-in-any-store"
+			if want {
+				id, plaintext, err := GenerateRegistrationCode()
+				if err != nil {
+					t.Fatalf("GenerateRegistrationCode: %v", err)
+				}
+				if err := codes.Create(context.Background(), RegistrationCode{
+					ID: id, CodeHash: HashSecret(plaintext),
+					AllowedNamespaces: []string{"*"}, AllowedNodeTypes: []string{"*"},
+					CreatedAt: time.Unix(1700000000, 0).UTC(),
+				}); err != nil {
+					t.Fatalf("Create: %v", err)
+				}
+				reqCode = plaintext
+			}
+
 			core := &Core{
 				registrationCodes: codes,
 				issuedIdentities:  ids,
 				enrollLimiter:     newEnrollLimiter(defaultEnrollFailureLimit, defaultEnrollLockout),
 			}
 			_, err := core.Enroll(context.Background(), protocol.EnrollRequest{
-				RegistrationCode: "irrelevant-in-this-combo",
+				RegistrationCode: reqCode,
 			}, TransportInfo{SourceIP: "10.0.0.1"})
 
 			// "not declared" must reject; this is the half that also protects
 			// a partially-configured Core from reaching a nil store below.
 			if !want && err == nil {
 				t.Fatalf("EnrollDeclared(codes=%v, ids=%v) = false, but Core.Enroll succeeded — the per-request gate is more permissive than the shared predicate", c.withCodes, c.withIDs)
+			}
+			// "declared" must NOT be rejected by the gate. A valid code is the
+			// only probe that can tell "the gate passed me on" apart from
+			// "the gate stopped me", so this is the half that goes red if the
+			// per-request gate ever becomes STRICTER than the shared predicate.
+			if want && err != nil {
+				t.Fatalf("EnrollDeclared(codes=%v, ids=%v) = true and the code is valid, but Core.Enroll rejected it: %v — the per-request gate is stricter than the shared predicate", c.withCodes, c.withIDs, err)
 			}
 		})
 	}
