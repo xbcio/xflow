@@ -10,6 +10,15 @@ import (
 const (
 	defaultEnrollFailureLimit = 10
 	defaultEnrollLockout      = 15 * time.Minute
+
+	// enrollLimiterSweepThreshold caps how large l.state may grow before
+	// RecordFailure performs an opportunistic sweep. Lazy per-key eviction in
+	// Allow cannot bound the map on its own: a source that fails below the
+	// limit and never comes back is exactly the source that never calls
+	// Allow again, so it never triggers its own eviction. On an
+	// unauthenticated endpoint reachable from arbitrary (including IPv6)
+	// source addresses, that is a standing memory-exhaustion vector.
+	enrollLimiterSweepThreshold = 1024
 )
 
 // enrollLimiter throttles failed enroll attempts per source IP. The enroll
@@ -30,6 +39,15 @@ type enrollLimiter struct {
 type enrollFailState struct {
 	fails      int
 	lockedTill time.Time
+	lastFail   time.Time
+}
+
+// idleStale reports whether st has never triggered a lockout and has gone
+// quiet for at least the lockout window. Such an entry is safe to reclaim
+// unconditionally — it carries no active (or ever-active) lockout, so
+// deleting it cannot prematurely lift a block.
+func idleStale(st *enrollFailState, now time.Time, lockFor time.Duration) bool {
+	return st.lockedTill.IsZero() && now.Sub(st.lastFail) >= lockFor
 }
 
 func newEnrollLimiter(max int, lockFor time.Duration) *enrollLimiter {
@@ -53,13 +71,17 @@ func (l *enrollLimiter) Allow(sourceIP string) bool {
 	if st == nil {
 		return true
 	}
-	if l.now().Before(st.lockedTill) {
+	now := l.now()
+	if now.Before(st.lockedTill) {
 		return false
 	}
-	if !st.lockedTill.IsZero() {
-		// The lockout elapsed. Drop the entry entirely so the source gets a
-		// fresh budget; leaving fails at max would let one further failure
-		// re-lock immediately and the window would never really expire.
+	if !st.lockedTill.IsZero() || idleStale(st, now, l.lockFor) {
+		// Either the lockout elapsed, or the source went idle past the window
+		// without ever reaching the limit. Drop the entry entirely so the
+		// source gets a fresh budget; leaving fails at max would let one
+		// further failure re-lock immediately and the window would never
+		// really expire — and leaving a stale sub-limit entry around forever
+		// would grow the map without bound.
 		delete(l.state, sourceIP)
 	}
 	return true
@@ -71,14 +93,33 @@ func (l *enrollLimiter) RecordFailure(sourceIP string) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	now := l.now()
 	st := l.state[sourceIP]
 	if st == nil {
 		st = &enrollFailState{}
 		l.state[sourceIP] = st
 	}
 	st.fails++
+	st.lastFail = now
 	if st.fails >= l.max {
-		st.lockedTill = l.now().Add(l.lockFor)
+		st.lockedTill = now.Add(l.lockFor)
+	}
+	if len(l.state) > enrollLimiterSweepThreshold {
+		l.sweep(now)
+	}
+}
+
+// sweep walks the map once and evicts every entry that is both un-locked-out
+// (it never reached the failure limit) and idle-stale (quiet for at least the
+// lockout window). It runs synchronously inside RecordFailure's own critical
+// section — there is no goroutine, no timer, no Close(). Lazy per-key
+// eviction in Allow cannot bound the map by itself, because the source that
+// never calls Allow again is precisely the source that never triggers it.
+func (l *enrollLimiter) sweep(now time.Time) {
+	for ip, st := range l.state {
+		if idleStale(st, now, l.lockFor) {
+			delete(l.state, ip)
+		}
 	}
 }
 
