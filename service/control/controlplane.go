@@ -110,6 +110,26 @@ type Config struct {
 	// Zero leaves every runner on its own default; negative suspends reporting
 	// fleet-wide without restarting anything.
 	MetricsReportInterval time.Duration
+	// RegistrationCodes / IssuedIdentities turn on the enrollment endpoint
+	// (§2.3.1). Both must be non-nil; either nil leaves enroll off and every
+	// attempt gets the standard rejection.
+	//
+	// Enrollment does NOT replace Auth. When both are set, NewControlPlane
+	// composes them with MultiAuthenticator so a runners.yaml runner and an
+	// enrolled runner authenticate through the same Core.
+	RegistrationCodes RegistrationCodeStore
+	IssuedIdentities  IssuedIdentityStore
+}
+
+// enrollConfigured reports whether enrollment is turned on. Both stores are
+// required: one without the other cannot issue an identity that anything can
+// later authenticate. This is one function rather than the condition written
+// twice because the two call sites — composing the authenticator and mounting
+// the endpoint — must never disagree. A server that authenticates enrolled
+// identities but exposes no enroll endpoint (or the reverse) is a half-wired
+// state each site would consider correct on its own.
+func enrollConfigured(cfg Config) bool {
+	return cfg.RegistrationCodes != nil && cfg.IssuedIdentities != nil
 }
 
 type redisClientProvider interface {
@@ -236,6 +256,21 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	if cfg.Backend == nil {
 		return nil, errors.New("control: Config.Backend is required")
 	}
+	// Enrollment-issued identities authenticate through the same Authenticator
+	// seam as runners.yaml. Composing here (rather than at each call site) is
+	// what makes ControlPlane.Authenticator() — the one the namespace-declaration
+	// check reads — see both populations. This MUST happen before the
+	// IsConfigured gate below: otherwise a server whose only runner auth is
+	// enrollment (cfg.Auth == nil) would be rejected by RequireRunnerAuth
+	// before the enroll-issued authenticator ever gets a chance to count.
+	if enrollConfigured(cfg) {
+		issued := NewIssuedIdentityAuthenticator(cfg.IssuedIdentities)
+		if cfg.Auth != nil {
+			cfg.Auth = NewMultiAuthenticator(cfg.Auth, issued)
+		} else {
+			cfg.Auth = issued
+		}
+	}
 	// Runner-protocol auth fail-closed. A nil or explicitly-disabled Auth
 	// falls back to the permissive DisabledAuthenticator (every runner
 	// allowed) — DisabledAuthenticator{} is a non-nil Authenticator, so this
@@ -301,6 +336,9 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	var serverOpts []ServerOption
 	if cfg.Auth != nil {
 		serverOpts = append(serverOpts, WithAuthenticator(cfg.Auth))
+	}
+	if enrollConfigured(cfg) {
+		serverOpts = append(serverOpts, WithEnroll(cfg.RegistrationCodes, cfg.IssuedIdentities))
 	}
 	if cfg.Logger != nil {
 		serverOpts = append(serverOpts, WithControlLogger(cfg.Logger))

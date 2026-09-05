@@ -78,6 +78,10 @@ type serverConfig struct {
 	// authDryRun logs auth violations but lets the request proceed. Meant for
 	// the rollout window between adding runners.yaml and enforcing it.
 	authDryRun bool
+	// enroll turns on the runner enrollment endpoint. Registration codes are
+	// created through the management API; this flag only decides whether the
+	// endpoint exists.
+	enroll bool
 	// apiAuthToken, when non-empty, enables BearerTokenAuth on the workflow/
 	// control API (/v1/workflows, /v1/executions/*). The same token must be
 	// supplied by callers in the Authorization: Bearer <token> header. When set
@@ -175,6 +179,7 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	fs.IntVar(&cfg.concurrency, "concurrency", cfg.concurrency, "Queue consumer concurrency")
 	fs.StringVar(&cfg.authPolicy, "auth-policy", "", "Path to runners.yaml (empty = auth disabled)")
 	fs.BoolVar(&cfg.authDryRun, "auth-dry-run", false, "Log auth violations but let requests through (rollout aid)")
+	fs.BoolVar(&cfg.enroll, "enroll", false, "Enable the runner enrollment endpoint (/v1/runners/enroll)")
 	fs.StringVar(&cfg.apiAuthToken, "api-auth-token", "", "Static bearer token for workflow API authentication (sets Authorization: Bearer guard on /v1/workflows and /v1/executions/*); single-namespace → default namespace. For multi-namespace use --auth-tokens-file.")
 	fs.StringVar(&cfg.authTokensFile, "auth-tokens-file", "", "JSON file of [{token,subject,namespace,scopes}] mappings; each token binds to its own namespace (multi-namespace). Takes precedence over --api-auth-token. File must be 0600.")
 	fs.BoolVar(&cfg.requireAPIAuth, "require-api-auth", false, "Fail to start if no workflow API authenticator is configured (production fail-closed)")
@@ -563,7 +568,7 @@ func runServer(cfg serverConfig) error {
 		reconciler:           rec,
 		singleToken:          singleToken,
 		masterKey:            supplyAtRest != nil,
-		runnerAuthConfigured: cfg.authPolicy != "",
+		runnerAuthConfigured: runnerAuthConfigured(cfg),
 	}); err != nil {
 		return err
 	}
@@ -603,6 +608,15 @@ func buildLogger(cfg serverConfig) (engine.Logger, error) {
 		return nil, err
 	}
 	return obslogger.NewZapLogger(log), nil
+}
+
+// runnerAuthConfigured reports whether the runner protocol has a real
+// authenticator. Either a static policy file or the enrollment endpoint counts:
+// an enroll-only production server is a supported deployment, and keying the
+// gate on --auth-policy alone would push operators into creating an empty
+// policy file just to start — auth theater that passes the check.
+func runnerAuthConfigured(cfg serverConfig) bool {
+	return cfg.authPolicy != "" || cfg.enroll
 }
 
 // buildAuthenticator resolves the runner-protocol authenticator from CLI
