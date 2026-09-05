@@ -381,6 +381,19 @@ func (m *managementModule) handleListRunners(w http.ResponseWriter, r *http.Requ
 			"the configured runner directory does not support enumeration")
 		return
 	}
+	// This is a third distinct failure mode, alongside the two documented above
+	// this function: the directory structurally supports enumeration (we got
+	// past the m.runners == nil check) but answering THIS call failed -- e.g. a
+	// transient backend outage. That is "the directory itself cannot answer
+	// right now", not "the directory has zero runners"; degrading it to an
+	// empty list (fix1 mutation drill: swapping this branch for
+	// writeData(w, r, http.StatusOK, []runnerListItem{}) reproduces exactly
+	// that regression) would silently manufacture the "nothing is online"
+	// picture this handler's 501 branch exists to avoid. Generic 500 + no
+	// err.Error() in the body, same as the m.issued.List branch below (org
+	// security policy §7: production exceptions return a generic message,
+	// detail stays server-side) -- TestRunnersListReturns500WhenListRunnersFails
+	// pins both the status and the no-leak requirement.
 	ids, err := m.runners.ListRunners(r.Context())
 	if err != nil {
 		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
