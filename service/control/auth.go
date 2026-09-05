@@ -125,8 +125,20 @@ func (DisabledAuthenticator) AuthenticateOngoing(string, string, TransportInfo) 
 // runner-declared X-Xflow-Namespace header) MUST use this rather than
 // `auth != nil`, or disabling auth silently makes the declaration trusted
 // unconditionally — the opposite of fail-closed.
+//
+// A MultiAuthenticator is configured when at least one of its members is — a
+// composite that holds only DisabledAuthenticator still accepts every
+// runner, and RequireRunnerAuth must not be fooled by the wrapper.
 func IsConfigured(auth Authenticator) bool {
 	if auth == nil {
+		return false
+	}
+	if m, ok := auth.(*MultiAuthenticator); ok {
+		for _, member := range m.Members() {
+			if IsConfigured(member) {
+				return true
+			}
+		}
 		return false
 	}
 	_, disabled := auth.(DisabledAuthenticator)
