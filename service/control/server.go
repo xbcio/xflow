@@ -78,6 +78,20 @@ func WithAuthenticator(a Authenticator) ServerOption {
 	}
 }
 
+// WithEnroll turns on the enrollment endpoint. Passing a nil store leaves it
+// off — enroll is opt-in, and a server that never calls this rejects every
+// attempt with the standard message.
+func WithEnroll(codes RegistrationCodeStore, ids IssuedIdentityStore) ServerOption {
+	return func(s *Server) {
+		if codes == nil || ids == nil {
+			return
+		}
+		s.core.registrationCodes = codes
+		s.core.issuedIdentities = ids
+		s.core.enrollLimiter = newEnrollLimiter(defaultEnrollFailureLimit, defaultEnrollLockout)
+	}
+}
+
 // WithControlLogger sets the logger used for auth decisions and other
 // runner-protocol diagnostics. Optional.
 func WithControlLogger(l engine.Logger) ServerOption {
