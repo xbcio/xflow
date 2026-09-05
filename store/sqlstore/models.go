@@ -259,11 +259,11 @@ func (dbRegistrationCode) TableName() string { return "xflow_registration_codes"
 // caller; this table is the only place it survives.
 type dbEnrollAudit struct {
 	ID       uint64    `gorm:"column:id;primaryKey;autoIncrement"`
-	CodeID   string    `gorm:"column:code_id;size:64;index:idx_enroll_audit_code"`
+	CodeID   string    `gorm:"column:code_id;size:64;not null;index:idx_enroll_audit_code"`
 	Success  bool      `gorm:"column:success;not null"`
-	Reason   string    `gorm:"column:reason;size:255"`
-	RunnerID string    `gorm:"column:runner_id;size:128"`
-	SourceIP string    `gorm:"column:source_ip;size:64"`
+	Reason   string    `gorm:"column:reason;size:255;not null"`
+	RunnerID string    `gorm:"column:runner_id;size:128;not null"`
+	SourceIP string    `gorm:"column:source_ip;size:64;not null"`
 	At       time.Time `gorm:"column:at;not null"`
 }
 
@@ -294,7 +294,7 @@ type dbIssuedIdentity struct {
 	IDPrefix        string     `gorm:"column:id_prefix;type:varchar(64);not null"`
 	ScopeNamespaces string     `gorm:"column:scope_namespaces;type:text"`
 	ScopeNodeTypes  string     `gorm:"column:scope_node_types;type:text"`
-	CodeID          string     `gorm:"column:code_id;size:64;index:idx_issued_identity_code"`
+	CodeID          string     `gorm:"column:code_id;size:64;not null;index:idx_issued_identity_code"`
 	IssuedAt        *time.Time `gorm:"column:issued_at"`
 }
 

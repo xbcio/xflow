@@ -1,14 +1,18 @@
 package sqlstore
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/store/storecontract"
 )
@@ -79,4 +83,70 @@ func TestSQLIssuedIdentityStoreSatisfiesContract(t *testing.T) {
 		db := newEnrollTestDB(t)
 		return NewIssuedIdentityStore(db)
 	})
+}
+
+// TestResolveByPlaintextRejectsCorruptedScope pins Ruling U: a registration
+// code whose allowed_namespaces column has been damaged into unparseable JSON
+// must fail closed, not fall back to an empty scope.
+//
+// Why this matters more than an ordinary "bad input" case: RunnerPolicy.
+// AllowsNamespace treats an EMPTY AllowedNamespaces as "default namespace
+// only" -- a WIDER grant than the "team-a"-only scope this code actually
+// carries. So decodeList silently returning nil on a JSON error (the old
+// behavior) does not fail closed at all on the namespace axis: it turns a
+// damaged column into a code that grants default-namespace enroll it was
+// never scoped for. This test writes corrupt JSON directly via raw SQL --
+// bypassing encodeList entirely, the way a botched migration or manual row
+// edit would -- and then proves both (a) ResolveByPlaintext refuses to hand
+// back a usable code at all, and (b) if it ever regressed to handing one
+// back, that code would carry exactly the widened grant described above.
+func TestResolveByPlaintextRejectsCorruptedScope(t *testing.T) {
+	db := newEnrollTestDB(t)
+	st := NewRegistrationCodeStore(db)
+	ctx := context.Background()
+
+	id, plaintext, err := store.GenerateRegistrationCode()
+	if err != nil {
+		t.Fatalf("GenerateRegistrationCode: %v", err)
+	}
+	if err := st.Create(ctx, store.RegistrationCode{
+		ID:                id,
+		CodeHash:          store.HashSecret(plaintext),
+		AllowedNamespaces: []string{"team-a"},
+		AllowedNodeTypes:  []string{"*"},
+		CreatedAt:         time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Corrupt the column with raw SQL. "{" is a syntactically incomplete JSON
+	// value -- json.Unmarshal rejects it, unlike "" (the legitimate empty
+	// state) or "null" (a legitimate empty list).
+	if err := db.Exec(
+		"UPDATE xflow_registration_codes SET allowed_namespaces = ? WHERE id = ?", "{", id,
+	).Error; err != nil {
+		t.Fatalf("corrupt allowed_namespaces: %v", err)
+	}
+
+	got, err := st.ResolveByPlaintext(ctx, plaintext)
+	if err == nil {
+		// This branch is exactly the regression Ruling U forbids: a
+		// team-a-scoped code silently came back usable, and because its
+		// AllowedNamespaces decoded to nil, it now also grants the default
+		// namespace -- a namespace the original scope never listed.
+		t.Fatalf(
+			"ResolveByPlaintext returned no error for a corrupted allowed_namespaces column; "+
+				"got = %+v, AllowsNamespace(default) = %v -- corrupted scope must not silently widen access",
+			got, got.Policy().AllowsNamespace(namespace.Default),
+		)
+	}
+	if !errors.Is(err, store.ErrEnrollScopeCorrupted) {
+		t.Fatalf("err = %v, want errors.Is(err, store.ErrEnrollScopeCorrupted)", err)
+	}
+
+	// List() walks the same rowToRegistrationCode conversion and must refuse
+	// the same way rather than silently omitting the damaged row.
+	if _, err := st.List(ctx); !errors.Is(err, store.ErrEnrollScopeCorrupted) {
+		t.Fatalf("List err = %v, want errors.Is(err, store.ErrEnrollScopeCorrupted)", err)
+	}
 }

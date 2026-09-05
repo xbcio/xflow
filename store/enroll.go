@@ -44,6 +44,22 @@ var (
 	// ErrRegistrationCodeNotFound is a management-face error (revoking an id
 	// that does not exist). It never reaches the enroll path.
 	ErrRegistrationCodeNotFound = errors.New("store: registration code not found")
+
+	// ErrEnrollScopeCorrupted means a persisted scope column — a registration
+	// code's AllowedNamespaces/AllowedNodeTypes, or an issued identity's
+	// Scope.AllowedNamespaces/AllowedNodeTypes — failed to decode as JSON. It
+	// must never be conflated with ErrRegistrationCodeUnknown or
+	// ErrRegistrationCodeNotFound: those two mean "no such code", but this one
+	// means the code (or identity) DOES exist and its data is damaged. On the
+	// namespace axis those are not equivalent outcomes —
+	// RunnerPolicy.AllowsNamespace treats an empty AllowedNamespaces as
+	// "default namespace only", which is a WIDER grant than most non-empty
+	// scopes ever set. A store that decoded a corrupted column to nil (the
+	// way "not found" would suggest) would silently turn storage corruption
+	// into a privilege escalation on the very next enroll. Implementations
+	// must return this error rather than substitute a zero-value scope, and
+	// callers must propagate it rather than swallow it.
+	ErrEnrollScopeCorrupted = errors.New("store: enroll scope data corrupted")
 )
 
 // HashSecret is the one-way transform applied to every credential this

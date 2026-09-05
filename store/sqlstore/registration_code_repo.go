@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/xbcio/xflow/store"
@@ -26,20 +27,36 @@ func encodeList(list []string) string {
 	}
 	b, err := json.Marshal(list)
 	if err != nil {
+		// Unreachable: json.Marshal on a []string cannot fail (no cycles, no
+		// unsupported types, no channels/funcs to reject). Kept as a defensive
+		// fallback rather than a panic so a future refactor that widens list's
+		// element type does not turn an edge case into a crash; decodeList's
+		// error path below is the one that actually matters (Ruling U).
 		return "[]"
 	}
 	return string(b)
 }
 
-func decodeList(s string) []string {
+// decodeList reverses encodeList. s == "" is the legitimate empty state —
+// either encodeList's own "[]" was never written (a row created before this
+// column existed) or the column is genuinely empty — and returns (nil, nil).
+//
+// Any other unparseable content is corruption, not emptiness, and must not be
+// swallowed into nil: RunnerPolicy.AllowsNamespace treats an empty
+// AllowedNamespaces as "default namespace only", which is a WIDER grant than
+// most non-empty scopes ever set. Silently returning nil on a JSON error
+// would turn a damaged allowed_namespaces column into a privilege escalation
+// on the very next enroll (Ruling U). Callers must propagate the error
+// instead of falling back to a zero-value list.
+func decodeList(s string) ([]string, error) {
 	if s == "" {
-		return nil
+		return nil, nil
 	}
 	var out []string
 	if err := json.Unmarshal([]byte(s), &out); err != nil {
-		return nil
+		return nil, fmt.Errorf("%w: %v", store.ErrEnrollScopeCorrupted, err)
 	}
-	return out
+	return out, nil
 }
 
 func (r *registrationCodeRepo) Create(ctx context.Context, code store.RegistrationCode) error {
@@ -68,7 +85,10 @@ func (r *registrationCodeRepo) ResolveByPlaintext(ctx context.Context, plaintext
 	if err != nil {
 		return store.RegistrationCode{}, err
 	}
-	code := rowToRegistrationCode(row)
+	code, err := rowToRegistrationCode(row)
+	if err != nil {
+		return store.RegistrationCode{}, err
+	}
 	if subtle.ConstantTimeCompare(want[:], code.CodeHash[:]) != 1 {
 		// Defense in depth against a column type that silently truncates or
 		// pads: the WHERE clause matched but the bytes did not.
@@ -80,16 +100,24 @@ func (r *registrationCodeRepo) ResolveByPlaintext(ctx context.Context, plaintext
 	return code, nil
 }
 
-func rowToRegistrationCode(row dbRegistrationCode) store.RegistrationCode {
+func rowToRegistrationCode(row dbRegistrationCode) (store.RegistrationCode, error) {
+	namespaces, err := decodeList(row.AllowedNamespaces)
+	if err != nil {
+		return store.RegistrationCode{}, fmt.Errorf("registration code %s: allowed_namespaces: %w", row.ID, err)
+	}
+	nodeTypes, err := decodeList(row.AllowedNodeTypes)
+	if err != nil {
+		return store.RegistrationCode{}, fmt.Errorf("registration code %s: allowed_node_types: %w", row.ID, err)
+	}
 	code := store.RegistrationCode{
 		ID:                row.ID,
-		AllowedNamespaces: decodeList(row.AllowedNamespaces),
-		AllowedNodeTypes:  decodeList(row.AllowedNodeTypes),
+		AllowedNamespaces: namespaces,
+		AllowedNodeTypes:  nodeTypes,
 		Revoked:           row.Revoked,
 		CreatedAt:         row.CreatedAt,
 	}
 	copy(code.CodeHash[:], row.CodeHash)
-	return code
+	return code, nil
 }
 
 func (r *registrationCodeRepo) List(ctx context.Context) ([]store.RegistrationCode, error) {
@@ -99,7 +127,11 @@ func (r *registrationCodeRepo) List(ctx context.Context) ([]store.RegistrationCo
 	}
 	out := make([]store.RegistrationCode, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, rowToRegistrationCode(row))
+		code, err := rowToRegistrationCode(row)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, code)
 	}
 	return out, nil
 }
@@ -180,27 +212,39 @@ func (r *issuedIdentityRepo) Lookup(ctx context.Context, runnerID string) (store
 	if err != nil {
 		return store.IssuedIdentity{}, false, err
 	}
-	return rowToIssuedIdentity(row), true, nil
+	id, err := rowToIssuedIdentity(row)
+	if err != nil {
+		return store.IssuedIdentity{}, false, err
+	}
+	return id, true, nil
 }
 
-func rowToIssuedIdentity(row dbIssuedIdentity) store.IssuedIdentity {
+func rowToIssuedIdentity(row dbIssuedIdentity) (store.IssuedIdentity, error) {
 	var issuedAt time.Time
 	if row.IssuedAt != nil {
 		issuedAt = *row.IssuedAt
+	}
+	namespaces, err := decodeList(row.ScopeNamespaces)
+	if err != nil {
+		return store.IssuedIdentity{}, fmt.Errorf("issued identity %s: scope_namespaces: %w", row.RunnerID, err)
+	}
+	nodeTypes, err := decodeList(row.ScopeNodeTypes)
+	if err != nil {
+		return store.IssuedIdentity{}, fmt.Errorf("issued identity %s: scope_node_types: %w", row.RunnerID, err)
 	}
 	id := store.IssuedIdentity{
 		RunnerID: row.RunnerID,
 		Scope: store.RunnerPolicy{
 			Name:              row.RunnerID,
 			IDPrefix:          row.IDPrefix,
-			AllowedNamespaces: decodeList(row.ScopeNamespaces),
-			AllowedNodeTypes:  decodeList(row.ScopeNodeTypes),
+			AllowedNamespaces: namespaces,
+			AllowedNodeTypes:  nodeTypes,
 		},
 		CodeID:   row.CodeID,
 		IssuedAt: issuedAt,
 	}
 	copy(id.TokenHash[:], row.TokenHash)
-	return id
+	return id, nil
 }
 
 func (r *issuedIdentityRepo) List(ctx context.Context) ([]store.IssuedIdentity, error) {
@@ -210,7 +254,11 @@ func (r *issuedIdentityRepo) List(ctx context.Context) ([]store.IssuedIdentity, 
 	}
 	out := make([]store.IssuedIdentity, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, rowToIssuedIdentity(row))
+		id, err := rowToIssuedIdentity(row)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, id)
 	}
 	return out, nil
 }
