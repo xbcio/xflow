@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// TestEnrollRequestJSONFieldNames pins the wire vocabulary for EnrollRequest
-// and EnrollResponse. The runner side (a separate plan) and any hand-written
+// TestEnrollJSONFieldNames pins the wire vocabulary for EnrollRequest and
+// EnrollResponse. The runner side (a separate plan) and any hand-written
 // curl must agree on these exact field names; renaming one is a breaking
 // protocol change.
 //
@@ -24,7 +24,7 @@ import (
 // combination was tried and captured in the task-4 report before this
 // scope was fixed by controller ruling. All three — the constant, the list
 // entry, and Client.Enroll — move to Task 5 together.
-func TestEnrollRequestJSONFieldNames(t *testing.T) {
+func TestEnrollJSONFieldNames(t *testing.T) {
 	b, err := json.Marshal(EnrollRequest{
 		RegistrationCode: "c",
 		ProposedRunnerID: "p",
@@ -52,6 +52,21 @@ func TestEnrollRequestJSONFieldNames(t *testing.T) {
 	for _, want := range []string{`"runner_id":"r"`, `"token":"t"`} {
 		if !strings.Contains(string(b), want) {
 			t.Fatalf("EnrollResponse JSON %s missing %s", b, want)
+		}
+	}
+
+	// omitempty only changes the output when the field IS the zero value, so
+	// the population above (every field non-zero) can never observe it in
+	// either direction. Marshal a request that leaves the three optional
+	// fields unset and assert each of their keys individually — checking
+	// only one would leave the other two exactly as unpinned as before.
+	b, err = json.Marshal(EnrollRequest{RegistrationCode: "c"})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	for _, key := range []string{`"proposed_runner_id"`, `"namespaces"`, `"node_types"`} {
+		if strings.Contains(string(b), key) {
+			t.Fatalf("EnrollRequest JSON %s: zero-value field %s should have been omitted", b, key)
 		}
 	}
 }
