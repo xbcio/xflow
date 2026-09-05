@@ -334,6 +334,7 @@ func activatePerMessage(ctx context.Context, in *types.TriggerActivateInput, cfg
 	runCtx, cancel := context.WithCancel(ctx)
 	rt := &perMessageRuntime{
 		runCtx:              runCtx,
+		baseCtx:             context.WithoutCancel(runCtx),
 		in:                  in,
 		consumer:            consumer,
 		buffer:              cfg.MaxInflight,
@@ -382,7 +383,15 @@ func activatePerMessage(ctx context.Context, in *types.TriggerActivateInput, cfg
 // committing before a lower one caused the lower message to be skipped on
 // rebalance. Per-partition serial commit preserves at-least-once ordering.
 type perMessageRuntime struct {
-	runCtx    context.Context
+	runCtx context.Context
+	// baseCtx is runCtx with its cancellation removed, for the same reason
+	// aggregateRuntime.baseCtx exists (see the comment there): the commit paths
+	// below must not be cut short when runCtx is canceled, which is why they
+	// reached for context.Background() — but Background also drops the namespace
+	// that observability/metrics reads off the context for every label set, so
+	// every commit made here was filed under the default namespace. WithoutCancel
+	// keeps the values without restoring the Done channel.
+	baseCtx   context.Context
 	in        *types.TriggerActivateInput
 	consumer  Consumer
 	buffer    int
@@ -595,7 +604,7 @@ func (w *partitionWorker) run() {
 			// durable.
 			if w.rt.messageSchema != nil && !validateMessageSchema(msg, w.rt.messageSchema) {
 				if handleInvalidMessage(w.rt.runCtx, w.rt, msg) {
-					_ = commitMessages(context.Background(), w.rt.consumer, msg)
+					_ = commitMessages(w.rt.baseCtx, w.rt.consumer, msg)
 				}
 			} else if w.rt.entrySeed {
 				// Entry-seed mode: admission drives the seed, which commits the
@@ -603,7 +612,7 @@ func (w *partitionWorker) run() {
 				// double-commit here.
 				_ = seedEntryBatch(w.rt.runCtx, w.rt.in, w.rt.consumer, msg)
 			} else if emitMessage(w.rt.runCtx, w.rt.in, msg) {
-				_ = commitMessages(context.Background(), w.rt.consumer, msg)
+				_ = commitMessages(w.rt.baseCtx, w.rt.consumer, msg)
 			}
 		case <-idleTimer.C:
 			// No message for the idle window: assume the partition was revoked
@@ -641,6 +650,18 @@ func emitMessage(ctx context.Context, in *types.TriggerActivateInput, msg Messag
 	return true
 }
 
+// commitMessages advances the committed offset for messages, and is the single
+// layer every commit path in this package passes through — the aggregate
+// batch commit (aggregate.go), the entry-seed per-message commit
+// (entryseed.go) and both legacy per-message paths below. That is why the
+// observation lives here rather than at the call sites: a commit added later
+// through a fourth path is measured without anyone remembering to measure it.
+//
+// The timing brackets ONLY the broker round trip. The two early returns above
+// it are not commits and must not be reported as instant ones — an empty
+// message set is a no-op, and a consumer without messageCommitter (every test
+// fake that does not model offsets) would otherwise flood the histogram with
+// zero-duration samples and make the real distribution unreadable.
 func commitMessages(ctx context.Context, consumer Consumer, messages ...Message) error {
 	if len(messages) == 0 {
 		return nil
@@ -649,7 +670,18 @@ func commitMessages(ctx context.Context, consumer Consumer, messages ...Message)
 	if !ok {
 		return nil
 	}
-	return committer.CommitMessages(ctx, messages...)
+	start := time.Now()
+	err := committer.CommitMessages(ctx, messages...)
+	result := "ok"
+	if err != nil {
+		result = "error"
+	}
+	// messages[0].Topic, not a topic threaded down from the runtime: a commit set
+	// is built from one partition's buffer, so every element carries the same
+	// topic. Reading it from the payload keeps this function's signature free of
+	// a parameter that exists only for a label.
+	obs().OnOffsetCommit(ctx, messages[0].Topic, result, len(messages), time.Since(start))
+	return err
 }
 
 func singleEvent(nodeName string, msg Message) *types.TriggerEvent {

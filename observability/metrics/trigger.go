@@ -19,6 +19,8 @@ const (
 	metricTriggerConsumerLag         = "xflow_trigger_consumer_lag"
 	metricTriggerLastFetchTimestamp  = "xflow_trigger_last_fetch_timestamp_seconds"
 	metricTriggerConsumptionBlocked  = "xflow_trigger_consumption_blocked"
+	metricTriggerOffsetCommit        = "xflow_trigger_offset_commit_duration_seconds"
+	metricTriggerOffsetCommitSize    = "xflow_trigger_offset_commit_size"
 )
 
 // TriggerMetrics observes trigger message-handling outcomes.
@@ -170,6 +172,39 @@ func (t TriggerMetrics) OnConsumptionBlocked(ctx context.Context, topic string, 
 	t.Metrics.Set(metricTriggerConsumptionBlocked, withNamespace(ctx, map[string]string{
 		"topic": topic, "partition": strconv.Itoa(partition),
 	}), v)
+}
+
+// OnOffsetCommit records the broker round trip that advances the committed
+// offset: how long it blocked, and how many offsets it carried.
+//
+// This is the only metric in this file that measures WAITING rather than work.
+// Everything else here counts or sizes something the pipeline did; a profile
+// built from those alone accounted for ~111 ms of real work per batch while the
+// pipeline released ~1.03 batches per second per partition, and the missing
+// 9-35x was this hop. It was previously invisible in a way worth naming:
+// xflow_commit_outcomes_total sounds like it covers this and does not — that
+// one is the execution layer's commit, carries no topic or partition, and its
+// value tracked execution_completed_total{status="success"} exactly.
+//
+// Two series, because duration alone cannot tell which knob matters. Duration
+// with size distinguishes a per-round-trip cost, where raising the aggregate's
+// max_size raises throughput because each commit carries more messages, from a
+// cost that scales with the offsets committed, where raising it changes
+// nothing. Size goes through ObserveCount for the same reason
+// xflow_trigger_batch_size does: ObserveBytes' buckets start at 1 KiB and a
+// count bounded by max_size would land entirely in the first one.
+//
+// result is on the duration series only. An errored commit's duration is the
+// number an operator wants separated — a timeout at aggregateCommitTimeout
+// would otherwise drag the success distribution's tail with it — whereas the
+// size of a failed commit is the size of the batch that will simply be retried.
+func (t TriggerMetrics) OnOffsetCommit(ctx context.Context, topic, result string, messages int, d time.Duration) {
+	t.Metrics.Observe(metricTriggerOffsetCommit, withNamespace(ctx, map[string]string{
+		"topic": topic, "result": result,
+	}), d)
+	t.Metrics.ObserveCount(metricTriggerOffsetCommitSize, withNamespace(ctx, map[string]string{
+		"topic": topic,
+	}), messages)
 }
 
 var _ kafkatrigger.Observer = TriggerMetrics{}

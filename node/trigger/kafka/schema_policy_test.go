@@ -59,15 +59,18 @@ func (o *recordingObserver) OnConsumptionBlocked(_ context.Context, topic string
 	o.mu.Unlock()
 }
 
-// OnConsumerLag, OnBatchFlushed, OnBatchFlushOutcome and OnBatchAdmission are
-// no-ops here: this fake only asserts on discard/dead-letter behavior (Task 4's
-// batch metrics are covered by recordingBatchObserver in
+// OnConsumerLag, OnBatchFlushed, OnBatchFlushOutcome, OnBatchAdmission and
+// OnOffsetCommit are no-ops here: this fake only asserts on discard/dead-letter
+// behavior (Task 4's batch metrics are covered by recordingBatchObserver in
 // kafka_entry_seed_batch_test.go, lag by recordingLagObserver in
-// consumer_lag_test.go).
+// consumer_lag_test.go, commit timing by commitObserver in
+// offset_commit_metric_test.go).
 func (o *recordingObserver) OnConsumerLag(context.Context, string, int, int64, time.Time) {}
 func (o *recordingObserver) OnBatchFlushed(context.Context, string, string, int)          {}
 func (o *recordingObserver) OnBatchFlushOutcome(context.Context, string, string, string)  {}
 func (o *recordingObserver) OnBatchAdmission(context.Context, string, string, string)     {}
+func (o *recordingObserver) OnOffsetCommit(context.Context, string, string, int, time.Duration) {
+}
 
 func (o *recordingObserver) wakeLocked() {
 	close(o.notify)

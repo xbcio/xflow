@@ -94,6 +94,31 @@ type Observer interface {
 	// are closed enums built in this package; neither is ever derived from a
 	// message or from a runtime's free-text error.
 	OnBatchAdmission(ctx context.Context, topic, state, reason string)
+	// OnOffsetCommit reports one broker round trip that advanced the committed
+	// offset. result is "ok" or "error"; messages is how many offsets that single
+	// round trip carried; d is the wall time the caller spent blocked in it.
+	//
+	// It exists because this hop had no instrumentation at all, and it turned out
+	// to be the pacer. Every other trigger metric measures work — batch size,
+	// admission latency, node duration — so a profile could account for ~111 ms
+	// of real work per batch while the pipeline released only ~1.03 batches per
+	// second per partition. The missing 9-35x was here, and the only way to see
+	// it was a stack dump. A commit cycle inferred from the batch release rate is
+	// a division, not a measurement; this is the measurement.
+	//
+	// messages is reported alongside the duration because the two together
+	// separate the two hypotheses a duration alone cannot: a commit whose cost is
+	// per-round-trip (raise max_size and throughput rises with it) from one whose
+	// cost scales with the offsets it carries (raise max_size and nothing moves).
+	//
+	// No partition label, unlike OnConsumerLag and OnConsumptionBlocked. Those
+	// are gauges, where one Set per partition under a shared label set would let
+	// the last writer erase the others. This is a histogram: samples from every
+	// partition merge instead of overwriting, and the merged distribution answers
+	// the question the metric was added for. A per-partition breakdown would
+	// multiply the bucket series by the assignment to isolate a single slow
+	// partition — worth adding when that becomes the question, not before.
+	OnOffsetCommit(ctx context.Context, topic, result string, messages int, d time.Duration)
 }
 
 type noopObserver struct{}
@@ -105,6 +130,8 @@ func (noopObserver) OnConsumptionBlocked(context.Context, string, int, bool)    
 func (noopObserver) OnBatchFlushed(context.Context, string, string, int)          {}
 func (noopObserver) OnBatchFlushOutcome(context.Context, string, string, string)  {}
 func (noopObserver) OnBatchAdmission(context.Context, string, string, string)     {}
+func (noopObserver) OnOffsetCommit(context.Context, string, string, int, time.Duration) {
+}
 
 // observer holds the installed Observer as an atomic pointer rather than a
 // mutex-guarded variable because obs() sits on the per-message path, which runs

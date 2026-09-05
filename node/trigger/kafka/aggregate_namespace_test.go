@@ -73,6 +73,9 @@ func (r *namespaceRecorder) OnBatchFlushOutcome(ctx context.Context, _, _, _ str
 func (r *namespaceRecorder) OnBatchAdmission(ctx context.Context, _, _, _ string) {
 	r.record("OnBatchAdmission", ctx)
 }
+func (r *namespaceRecorder) OnOffsetCommit(ctx context.Context, _, _ string, _ int, _ time.Duration) {
+	r.record("OnOffsetCommit", ctx)
+}
 
 // TestKafkaAggregateReportsUnderTheActivationNamespace pins that the aggregate
 // trigger's observations are filed under the namespace the trigger was
