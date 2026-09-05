@@ -198,14 +198,37 @@ func (ScopeAuthorizer) Authorize(_ context.Context, req AuthorizationRequest) (D
 //     server-issued namespace is never allowed. This is fail-closed: every
 //     authenticated principal must carry a namespace (the authenticator normalizes
 //     empty to namespace.Default).
+//
 //  2. The operation's required scope (same as ScopeAuthorizer).
+//
 //  3. When the route layer resolved ResourceNamespace (the target resource's
 //     namespace), it must equal Principal.Namespace — defense in depth against
-//     cross-namespace access. ResourceNamespace is optional: management endpoints
-//     that cannot resolve the resource namespace without a chicken-and-egg store
-//     lookup leave it empty and rely on the namespace-scoped store read
-//     (Inject-in-context → cross-namespace read resolves to not-found → 404) as
-//     the authoritative IDOR defense (see module_management.go handleExecution).
+//     cross-namespace access. ResourceNamespace is optional: MOST management
+//     endpoints that cannot resolve the resource namespace without a
+//     chicken-and-egg store lookup leave it empty and rely on the
+//     namespace-scoped store read (Inject-in-context → cross-namespace read
+//     resolves to not-found → 404) as the authoritative IDOR defense (see
+//     module_management.go handleExecution).
+//
+//     Exception (Task 8 fix1 Important-3): the four registration-code
+//     operations (OpRegistrationCodeCreate/List/Revoke/Audit) ALSO leave
+//     ResourceNamespace empty, but NOT for that reason and NOT with that
+//     defense. Registration-code management is a deliberate platform-level
+//     global operation — spec §2.3.4 requires listing ALL registration codes,
+//     not a namespace-scoped subset — and registration_code_repo.go's
+//     List/Revoke/EnrollAudit read by id or unconditionally (Find(&rows),
+//     Where("id = ?"), Where("code_id = ?")), never filtered by namespace;
+//     xflow_registration_codes has no owning-namespace column at all
+//     (AllowedNamespaces is the scope a code GRANTS, not who it BELONGS to).
+//     So for these four operations there is no namespace-scoped store read
+//     standing behind the empty ResourceNamespace — the boundary is the scope
+//     itself (management.registration_code.*), full stop. Do not add a
+//     namespace ceiling check to these four operations or a namespace filter
+//     to the registration-code store to make this comment's general rule
+//     literally true again; that would conflict with the global-listing
+//     design deliberately made here. See the field/route comments in
+//     module_management.go for the matching note and the trust assumption
+//     this places on scope-granting policy.
 type NamespaceAwareAuthorizer struct{}
 
 // Authorize returns Allow iff the principal carries a non-empty namespace, holds

@@ -21,8 +21,9 @@ import (
 
 // managementModule mounts the ops management HTTP API: leader status,
 // single-runner lookup, single-execution inspect, dead-letter list/replay,
-// and the process liveness/readiness probes. It is opt-in (registered only
-// via WithManagement) because it exposes runner directory, execution state,
+// registration-code create/list/revoke/audit, and the process
+// liveness/readiness probes. It is opt-in (registered only via
+// WithManagement) because it exposes runner directory, execution state,
 // and dead-letter operations that must sit behind authz.
 //
 // Per R1, the underlying runner directory and store interfaces expose no list
@@ -110,6 +111,34 @@ func (m *managementModule) RegisterHTTP(mux *http.ServeMux) {
 		// version of it. So the mount is gated on principalAuth alone (never on
 		// m.codes/m.issued — see the struct field comment above for why), and
 		// principalAuth==nil leaves these routes genuinely unregistered → 404.
+		//
+		// Namespace boundary (Task 8 fix1 Important-3): all four leave
+		// ResourceNamespace empty in their authzWrap resolver funcs below, and
+		// — unlike handleExecution's cross-namespace-read-404 pattern — there is
+		// NO namespace-scoped store read backing that emptiness here.
+		// Registration-code management is a deliberate platform-level global
+		// operation (spec §2.3.4: list ALL codes); the store reads by id or
+		// unconditionally, and xflow_registration_codes carries no owning
+		// namespace column (AllowedNamespaces is what a code GRANTS, not who it
+		// belongs to). The entire boundary for these four operations is the
+		// scope check (management.registration_code.create/list/revoke/audit)
+		// itself — see the matching note on NamespaceAwareAuthorizer in
+		// authz.go. Do not add a namespace ceiling check here or a namespace
+		// filter to the store; that would conflict with the global-listing
+		// design.
+		//
+		// Trust assumption this places on scope-granting policy (confirmed
+		// against cmd/server/main.go's auth-tokens-file loader): that file is
+		// free-form JSON binding a token to an arbitrary (Namespace, Scopes)
+		// pair — nothing in code stops an operator from granting
+		// management.registration_code.create to a token whose Namespace is a
+		// single tenant, and that token could then mint a code with
+		// allowed_namespaces:["*"]. These four scopes must only ever be granted
+		// to platform administrators, never to a tenant-scoped principal; the
+		// boundary is entirely in how scopes are provisioned, not enforced in
+		// this code. That gap in operator configuration is a separate,
+		// deliberately out-of-scope concern for this fix (tracked for final
+		// review), not something this comment claims is closed.
 		mux.HandleFunc("POST "+PathManagementRegistrationCodes, m.authzWrap(OpRegistrationCodeCreate, true, m.handleCreateRegistrationCode, func(*http.Request) (string, string, string, string) {
 			return "management/registration-codes", "", "", ""
 		}))

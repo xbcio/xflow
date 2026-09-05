@@ -3,6 +3,7 @@ package apiserver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/service/control"
+	"github.com/xbcio/xflow/store"
 )
 
 func TestRegistrationCodeOpsHaveScopes(t *testing.T) {
@@ -251,4 +253,187 @@ func TestRegistrationCodeRoutesAbsentWithoutPrincipalAuth(t *testing.T) {
 	defer h.srv.Close()
 	h.doJSON(t, http.MethodPost, PathManagementRegistrationCodes, `{}`, http.StatusNotFound)
 	h.doJSON(t, http.MethodGet, PathManagementRegistrationCodes, "", http.StatusNotFound)
+}
+
+// failingRegistrationCodeStoreListErr is a control.RegistrationCodeStore test
+// double whose List always fails, wrapping store.ErrEnrollScopeCorrupted to
+// mimic the real failure mode a corrupted scope column produces (Task 7). Its
+// other methods are never exercised by the one test that uses it and return
+// zero values.
+type failingRegistrationCodeStoreListErr struct {
+	// uniqueDetail is baked into the wrapped error text. The test asserts this
+	// exact string never reaches the HTTP response body — proving the handler
+	// does not forward err.Error() to the caller, not merely that it returns
+	// 500 (a 500 that echoes err.Error() is still a 500).
+	uniqueDetail string
+}
+
+func (s failingRegistrationCodeStoreListErr) Create(context.Context, control.RegistrationCode) error {
+	return nil
+}
+
+func (s failingRegistrationCodeStoreListErr) ResolveByPlaintext(context.Context, string) (control.RegistrationCode, error) {
+	return control.RegistrationCode{}, nil
+}
+
+func (s failingRegistrationCodeStoreListErr) List(context.Context) ([]control.RegistrationCode, error) {
+	return nil, fmt.Errorf("registrationCodeStore: scope column decode failed (%s): %w", s.uniqueDetail, store.ErrEnrollScopeCorrupted)
+}
+
+func (s failingRegistrationCodeStoreListErr) Revoke(context.Context, string) error { return nil }
+
+func (s failingRegistrationCodeStoreListErr) AppendEnrollAudit(context.Context, control.EnrollAuditRecord) error {
+	return nil
+}
+
+func (s failingRegistrationCodeStoreListErr) EnrollAudit(context.Context, string) ([]control.EnrollAuditRecord, error) {
+	return nil, nil
+}
+
+// TestListRegistrationCodesStoreFailureIsGeneric pins fix1 Important-1: a List
+// failure (e.g. store.ErrEnrollScopeCorrupted, the "one bad scope row poisons
+// the whole page" contract Task 7 gave List) must surface as a generic 500,
+// never as an empty list (that would hide storage corruption from the one
+// surface an operator could act on it from — see the handler's own comment)
+// and never with the underlying error text in the body (org security policy
+// §7: production exceptions return a generic message, detail stays
+// server-side).
+func TestListRegistrationCodesStoreFailureIsGeneric(t *testing.T) {
+	const uniqueDetail = "xzq-9f3c1b-storage-detail-that-must-not-leak"
+	m := newManagementModule(fakeControlPlaneForAuthz(t))
+	m.codes = failingRegistrationCodeStoreListErr{uniqueDetail: uniqueDetail}
+	m.principalAuth = staticPrincipalAuth{principal: Principal{
+		Subject:   "ops",
+		Namespace: "namespaceA",
+		Scopes:    []string{"management.registration_code.list"},
+	}}
+	m.authorizer = ScopeAuthorizer{}
+	m.audit = NewInMemoryAuditSink()
+	mux := http.NewServeMux()
+	m.RegisterHTTP(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+PathManagementRegistrationCodes, strings.NewReader(""))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", PathManagementRegistrationCodes, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	body := string(data)
+
+	// 1. Status is 500.
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body = %q", resp.StatusCode, body)
+	}
+
+	// 2. The envelope's stable code is internal_error.
+	var env struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatalf("unmarshal %q: %v", body, err)
+	}
+	if env.Code != "internal_error" {
+		t.Fatalf("code = %q, want internal_error; body = %q", env.Code, body)
+	}
+
+	// 3. The response body must not contain the original error text — neither
+	// the sentinel's own message nor the unique detail this test's double
+	// baked into the wrapped error. A body that echoed err.Error() would still
+	// be a 500 with code internal_error, so this is the assertion that
+	// actually has teeth (fix1 Important-1's own framing).
+	if strings.Contains(body, store.ErrEnrollScopeCorrupted.Error()) {
+		t.Fatalf("response body leaked the sentinel error text: %q", body)
+	}
+	if strings.Contains(body, uniqueDetail) {
+		t.Fatalf("response body leaked the store's internal error detail: %q", body)
+	}
+}
+
+// TestRegistrationCodeHandlersAnswer404WithoutStore pins fix1 Important-2:
+// registrationCodeUnavailable (the nil-store branch each of the four handlers
+// opens with) must answer 404 route_not_found, for all four handlers. The
+// server here has PrincipalAuth configured (so RegisterHTTP's `if
+// m.principalAuth != nil` mounts the four routes) but leaves
+// RegistrationCodes/IssuedIdentities unset — the same shape
+// paths_test.go's newFullGuardMux builds for the dead-constant/behavioral
+// guards, but constructed independently here through the public New +
+// WithManagement API so this test does not touch that shared fixture (fix1
+// instructions explicitly forbid editing newFullGuardMux itself).
+//
+// The request is authenticated AND fully scoped, not anonymous: an
+// unauthenticated request would be rejected by authzWrap's 401 before ever
+// reaching the handler, which would prove authn works but say nothing about
+// this nil-store branch. Reaching 404 here requires passing straight through
+// authzWrap into registrationCodeUnavailable.
+func TestRegistrationCodeHandlersAnswer404WithoutStore(t *testing.T) {
+	srv, err := New(Config{
+		PrincipalAuth: staticPrincipalAuth{principal: Principal{
+			Subject:   "ops",
+			Namespace: "namespaceA",
+			Scopes: []string{
+				"management.registration_code.create",
+				"management.registration_code.list",
+				"management.registration_code.revoke",
+				"management.registration_code.audit",
+			},
+		}},
+		Authorizer: ScopeAuthorizer{},
+		AuditSink:  NewInMemoryAuditSink(),
+		// RegistrationCodes / IssuedIdentities deliberately left unset (nil).
+	}, WithManagement())
+	if err != nil {
+		t.Fatalf("apiserver.New: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	cases := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{"create", http.MethodPost, PathManagementRegistrationCodes},
+		{"list", http.MethodGet, PathManagementRegistrationCodes},
+		{"revoke", http.MethodDelete, "/v1/management/registration-codes/rc-1"},
+		{"audit", http.MethodGet, "/v1/management/registration-codes/rc-1/audit"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest(tc.method, ts.URL+tc.path, strings.NewReader(""))
+			if err != nil {
+				t.Fatalf("NewRequest %s %s: %v", tc.method, tc.path, err)
+			}
+			resp, err := ts.Client().Do(req)
+			if err != nil {
+				t.Fatalf("%s %s: %v", tc.method, tc.path, err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			data, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("read body for %s %s: %v", tc.method, tc.path, err)
+			}
+			body := string(data)
+			if resp.StatusCode != http.StatusNotFound {
+				t.Fatalf("%s %s: status = %d, want 404; body = %q", tc.method, tc.path, resp.StatusCode, body)
+			}
+			var env struct {
+				Code string `json:"code"`
+			}
+			if err := json.Unmarshal(data, &env); err != nil {
+				t.Fatalf("unmarshal %q: %v", body, err)
+			}
+			if env.Code != "route_not_found" {
+				t.Fatalf("%s %s: code = %q, want route_not_found; body = %q", tc.method, tc.path, env.Code, body)
+			}
+		})
+	}
 }

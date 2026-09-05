@@ -750,6 +750,9 @@ paths:
         enroll endpoint to obtain a signed identity. The plaintext code is
         returned exactly once, in this response; it is never recoverable
         afterwards, including from the list endpoint below.
+
+        Platform-level global operation: not scoped to the caller's
+        namespace. Grant this scope only to platform administrators.
       tags: [Management]
       parameters:
         - $ref: "#/components/parameters/XRequestId"
@@ -783,6 +786,10 @@ paths:
         Lists minted registration codes. Neither the plaintext code nor its
         hash is ever included — only the id, scope, revocation status, and
         creation time.
+
+        Platform-level global operation: returns ALL registration codes
+        across every namespace, not scoped to the caller's namespace. Grant
+        this scope only to platform administrators.
       tags: [Management]
       parameters:
         - $ref: "#/components/parameters/XRequestId"
@@ -815,6 +822,11 @@ paths:
         enroll endpoint. Already-issued runner identities are unaffected;
         revoking a code does not revoke identities minted from it. Revoking
         an unknown id is a 404, not a silent success.
+
+        Platform-level global operation: not scoped to the caller's
+        namespace — any registration code id may be revoked regardless of
+        which namespace(s) it grants. Grant this scope only to platform
+        administrators.
       tags: [Management]
       parameters:
         - $ref: "#/components/parameters/RegistrationCodeId"
@@ -849,6 +861,9 @@ paths:
       description: |
         Returns every enroll attempt (successful or failed) recorded against
         this registration code id, oldest first.
+
+        Platform-level global operation: not scoped to the caller's
+        namespace. Grant this scope only to platform administrators.
       tags: [Management]
       parameters:
         - $ref: "#/components/parameters/RegistrationCodeId"
