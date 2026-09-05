@@ -221,6 +221,18 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 		mgmt := newManagementModule(s.cp)
 		mgmt.metrics = cfg.Metrics
 		mgmt.ready = s.readiness
+		// Registration-code management API (Task 8): post-construction field
+		// injection, same shape as metrics/ready above. This is deliberately NOT
+		// a newManagementModule(cp, codes, issued) signature change — that
+		// constructor has 8 call sites today (1 production + 7 tests across
+		// deadletter_http_test.go, envelope_migration_test.go,
+		// deadletter_unified_test.go, management_scope_test.go), none of which
+		// need or want a registration-code store. A signature change would force
+		// every one of them to grow two more nil arguments for no behavioral
+		// reason; setting the fields here after construction touches none of
+		// them. See Task 8 addendum Ruling Q.
+		mgmt.codes = cfg.RegistrationCodes
+		mgmt.issued = cfg.IssuedIdentities
 		if cfg.PrincipalAuth != nil {
 			mgmt.principalAuth = cfg.PrincipalAuth
 			mgmt.authorizer = cfg.Authorizer

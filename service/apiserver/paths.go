@@ -34,6 +34,13 @@ const (
 	PathManagementDeadLetters = "/v1/management/dead-letters/{execID}"
 	PathManagementDLReplay    = "/v1/management/dead-letters/{execID}/replay"
 
+	// PathManagementRegistrationCodes serves both POST (create) and GET (list) —
+	// the two are disambiguated by method, not by a separate path constant. See
+	// Task 8 addendum Ruling A: Produces is three Path* constants, not four.
+	PathManagementRegistrationCodes     = "/v1/management/registration-codes"
+	PathManagementRegistrationCodeByID  = "/v1/management/registration-codes/{id}"
+	PathManagementRegistrationCodeAudit = "/v1/management/registration-codes/{id}/audit"
+
 	PathHealthz = "/healthz"
 	PathReadyz  = "/readyz"
 )
@@ -68,6 +75,10 @@ var UserFacingPaths = []string{
 	PathManagementExecByID,
 	PathManagementDeadLetters,
 	PathManagementDLReplay,
+
+	PathManagementRegistrationCodes,
+	PathManagementRegistrationCodeByID,
+	PathManagementRegistrationCodeAudit,
 
 	PathHealthz,
 	PathReadyz,

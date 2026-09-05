@@ -44,6 +44,27 @@ type managementModule struct {
 	dlMgr     *control.DeadLetterManager
 	dlMgrOnce sync.Once
 	ready     ReadinessChecker
+	// codes / issued back the registration-code management API (create / list /
+	// revoke / audit). Whether these four routes are MOUNTED depends only on
+	// m.principalAuth (see RegisterHTTP) — never on codes/issued being non-nil.
+	//
+	// That is deliberate, not an oversight (Task 8 addendum Ruling W): the
+	// production dead-constant guard (paths_test.go newFullGuardMux) builds a
+	// PrincipalAuth-only server with no registration-code store configured at
+	// all, and TestUserFacingPathsHaveMuxRegistration requires every
+	// UserFacingPaths entry to resolve to an actually-registered route on THAT
+	// mux. Gating registration on codes/issued would make the three new routes
+	// vanish there, and the only "fix" for that red — dropping the paths back
+	// out of UserFacingPaths — would silently reopen the exact dead-constant
+	// hole the guard exists to catch (and nothing would ever catch THAT,
+	// addendum Ruling 4: there is no guard in the reverse direction).
+	//
+	// So instead: nil codes means the routes exist and are reachable by an
+	// authorized caller, but every handler answers 404 route_not_found itself.
+	// Same externally observed behavior as "the feature does not exist on this
+	// server", reached without touching the mount condition.
+	codes  control.RegistrationCodeStore
+	issued control.IssuedIdentityStore
 }
 
 func newManagementModule(cp *control.ControlPlane) *managementModule {
@@ -79,6 +100,27 @@ func (m *managementModule) RegisterHTTP(mux *http.ServeMux) {
 		mux.HandleFunc("GET "+PathManagementExecByID, m.authzWrap(OpManagementRead, false, m.handleExecution, func(r *http.Request) (string, string, string, string) {
 			id := r.PathValue("id")
 			return "management/execution/" + id, "", id, ""
+		}))
+		// Registration-code CRUD + audit (Task 8). Unlike leader/runner/exec
+		// above, these four have NO bare fallback in the else branch below, and
+		// unlike dead-letters they do not self-wrap unconditionally either: per
+		// the Task 8 addendum (Ruling Y, security-critical), a server with no
+		// PrincipalAuthenticator configured must not expose an endpoint that
+		// mints runner credentials at all — not even a bare (unauthenticated)
+		// version of it. So the mount is gated on principalAuth alone (never on
+		// m.codes/m.issued — see the struct field comment above for why), and
+		// principalAuth==nil leaves these routes genuinely unregistered → 404.
+		mux.HandleFunc("POST "+PathManagementRegistrationCodes, m.authzWrap(OpRegistrationCodeCreate, true, m.handleCreateRegistrationCode, func(*http.Request) (string, string, string, string) {
+			return "management/registration-codes", "", "", ""
+		}))
+		mux.HandleFunc("GET "+PathManagementRegistrationCodes, m.authzWrap(OpRegistrationCodeList, false, m.handleListRegistrationCodes, func(*http.Request) (string, string, string, string) {
+			return "management/registration-codes", "", "", ""
+		}))
+		mux.HandleFunc("DELETE "+PathManagementRegistrationCodeByID, m.authzWrap(OpRegistrationCodeRevoke, true, m.handleRevokeRegistrationCode, func(r *http.Request) (string, string, string, string) {
+			return "management/registration-codes/" + r.PathValue("id"), "", "", ""
+		}))
+		mux.HandleFunc("GET "+PathManagementRegistrationCodeAudit, m.authzWrap(OpRegistrationCodeAudit, false, m.handleRegistrationCodeAudit, func(r *http.Request) (string, string, string, string) {
+			return "management/registration-codes/" + r.PathValue("id") + "/audit", "", "", ""
 		}))
 	} else {
 		mux.HandleFunc("GET "+PathManagementLeader, m.handleLeader)
@@ -531,4 +573,155 @@ func (m *managementModule) deadLetterAuditSink(observer engine.OutboxObserver) e
 		// audit trail.
 		fmt.Fprintln(os.Stderr, line)
 	})
+}
+
+// registrationCodeUnavailable answers 404 route_not_found when this server was
+// built without a registration-code store. The route IS mounted (see
+// RegisterHTTP's field comment on codes/issued for why), so an authorized
+// caller reaches this function rather than a genuinely-missing pattern; the
+// response is the same 404 either way, which is the honest answer for a
+// feature that does not exist on this server.
+func registrationCodeUnavailable(w http.ResponseWriter, r *http.Request) {
+	writeFail(w, r, http.StatusNotFound, "route_not_found", "route not found")
+}
+
+type registrationCodeCreateRequest struct {
+	AllowedNamespaces []string `json:"allowed_namespaces"`
+	AllowedNodeTypes  []string `json:"allowed_node_types"`
+}
+
+// registrationCodeCreateResponse is the ONLY place the plaintext code ever
+// appears. It is not recoverable afterwards — not from the list endpoint, not
+// from the database.
+type registrationCodeCreateResponse struct {
+	ID   string `json:"id"`
+	Code string `json:"code"`
+}
+
+// registrationCodeView is the list projection. It deliberately carries neither
+// the plaintext nor the hash: publishing sha256(code) would make every code
+// offline-crackable by anyone who can read the list.
+type registrationCodeView struct {
+	ID                string   `json:"id"`
+	AllowedNamespaces []string `json:"allowed_namespaces"`
+	AllowedNodeTypes  []string `json:"allowed_node_types"`
+	Revoked           bool     `json:"revoked"`
+	CreatedAt         string   `json:"created_at"`
+}
+
+type enrollAuditView struct {
+	Success  bool   `json:"success"`
+	Reason   string `json:"reason,omitempty"`
+	RunnerID string `json:"runner_id,omitempty"`
+	SourceIP string `json:"source_ip,omitempty"`
+	At       string `json:"at"`
+}
+
+func (m *managementModule) handleCreateRegistrationCode(w http.ResponseWriter, r *http.Request) {
+	if m.codes == nil {
+		registrationCodeUnavailable(w, r)
+		return
+	}
+	var req registrationCodeCreateRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	id, plaintext, err := control.GenerateRegistrationCode()
+	if err != nil {
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	code := control.RegistrationCode{
+		ID:                id,
+		CodeHash:          control.HashSecret(plaintext),
+		AllowedNamespaces: req.AllowedNamespaces,
+		AllowedNodeTypes:  req.AllowedNodeTypes,
+		CreatedAt:         time.Now().UTC(),
+	}
+	if err := m.codes.Create(r.Context(), code); err != nil {
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	writeData(w, r, http.StatusOK, registrationCodeCreateResponse{ID: id, Code: plaintext})
+}
+
+func (m *managementModule) handleListRegistrationCodes(w http.ResponseWriter, r *http.Request) {
+	if m.codes == nil {
+		registrationCodeUnavailable(w, r)
+		return
+	}
+	list, err := m.codes.List(r.Context())
+	if err != nil {
+		// store.ErrEnrollScopeCorrupted (a scope column that failed to decode)
+		// or any other store failure must not reach the caller as err.Error() —
+		// that could echo internal storage detail (org security policy §7:
+		// production exceptions return a generic message, detail stays
+		// server-side). This is deliberately NOT swallowed into an empty list:
+		// a corrupted row failing the WHOLE list is the store's contract (Task
+		// 7), and turning that into a silent empty page would hide the
+		// corruption from the one surface an operator could act on it from.
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	out := make([]registrationCodeView, 0, len(list))
+	for _, c := range list {
+		out = append(out, registrationCodeView{
+			ID:                c.ID,
+			AllowedNamespaces: c.AllowedNamespaces,
+			AllowedNodeTypes:  c.AllowedNodeTypes,
+			Revoked:           c.Revoked,
+			CreatedAt:         c.CreatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	writeData(w, r, http.StatusOK, out)
+}
+
+func (m *managementModule) handleRevokeRegistrationCode(w http.ResponseWriter, r *http.Request) {
+	if m.codes == nil {
+		registrationCodeUnavailable(w, r)
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeFail(w, r, http.StatusNotFound, "registration_code_not_found", "registration code not found")
+		return
+	}
+	err := m.codes.Revoke(r.Context(), id)
+	if errors.Is(err, control.ErrRegistrationCodeNotFound) {
+		writeFail(w, r, http.StatusNotFound, "registration_code_not_found", "registration code not found")
+		return
+	}
+	if err != nil {
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	writeData(w, r, http.StatusOK, map[string]string{"id": id, "status": "revoked"})
+}
+
+func (m *managementModule) handleRegistrationCodeAudit(w http.ResponseWriter, r *http.Request) {
+	if m.codes == nil {
+		registrationCodeUnavailable(w, r)
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeFail(w, r, http.StatusNotFound, "registration_code_not_found", "registration code not found")
+		return
+	}
+	records, err := m.codes.EnrollAudit(r.Context(), id)
+	if err != nil {
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	out := make([]enrollAuditView, 0, len(records))
+	for _, rec := range records {
+		out = append(out, enrollAuditView{
+			Success:  rec.Success,
+			Reason:   rec.Reason,
+			RunnerID: rec.RunnerID,
+			SourceIP: rec.SourceIP,
+			At:       rec.At.UTC().Format(time.RFC3339),
+		})
+	}
+	writeData(w, r, http.StatusOK, out)
 }

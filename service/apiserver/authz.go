@@ -120,6 +120,17 @@ const (
 	// MUST also appear in scopeForOperation or the route is silently
 	// unreachable.
 	OpArtifactRead = "artifact.read"
+	// Registration-code operations mint, list, revoke, and audit the credentials
+	// runners enroll with. Each gets its own scope: minting a code is strictly
+	// more privileged than reading the list, and an ops dashboard that only
+	// displays codes should not be able to create them.
+	//
+	// Like every operation here, each MUST also appear in scopeForOperation or
+	// the route is silently unreachable.
+	OpRegistrationCodeCreate = "management.registration_code.create"
+	OpRegistrationCodeList   = "management.registration_code.list"
+	OpRegistrationCodeRevoke = "management.registration_code.revoke"
+	OpRegistrationCodeAudit  = "management.registration_code.audit"
 )
 
 // scopeForOperation maps an operation to the scope it requires. A principal
@@ -146,6 +157,14 @@ func scopeForOperation(op string) string {
 		return "supply.read"
 	case OpArtifactRead:
 		return "artifact.read"
+	case OpRegistrationCodeCreate:
+		return "management.registration_code.create"
+	case OpRegistrationCodeList:
+		return "management.registration_code.list"
+	case OpRegistrationCodeRevoke:
+		return "management.registration_code.revoke"
+	case OpRegistrationCodeAudit:
+		return "management.registration_code.audit"
 	default:
 		return ""
 	}
