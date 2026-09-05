@@ -120,6 +120,66 @@ func TestResolveByPlaintextRejectsRevoked(t *testing.T) {
 	}
 }
 
+// TestMemoryStoreReturnsDefensiveCopies proves the store never hands out a
+// RegistrationCode whose AllowedNamespaces / AllowedNodeTypes slices alias its
+// internal backing arrays — in either direction. Without this, a caller
+// mutating a slice on a stored/returned value would corrupt store state
+// without ever holding s.mu, which is a data race under concurrent access.
+func TestMemoryStoreReturnsDefensiveCopies(t *testing.T) {
+	ctx := context.Background()
+	st := NewMemoryRegistrationCodeStore()
+	code, plaintext := newTestCode(t, []string{"sas"}, []string{"kafka.trigger"})
+
+	if err := st.Create(ctx, code); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Mutating the caller's own slice after Create must not reach the store:
+	// Create must clone on the way in.
+	code.AllowedNamespaces[0] = "mutated-after-create"
+	code.AllowedNodeTypes[0] = "mutated-after-create"
+
+	list, err := st.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if list[0].AllowedNamespaces[0] != "sas" {
+		t.Fatalf("Create aliased the caller's slice: List returned %q, want %q", list[0].AllowedNamespaces[0], "sas")
+	}
+	if list[0].AllowedNodeTypes[0] != "kafka.trigger" {
+		t.Fatalf("Create aliased the caller's slice: List returned %q, want %q", list[0].AllowedNodeTypes[0], "kafka.trigger")
+	}
+
+	// Mutating a slice returned by List must not affect a later List call:
+	// List must clone on the way out.
+	list[0].AllowedNamespaces[0] = "mutated-via-list"
+	list[0].AllowedNodeTypes[0] = "mutated-via-list"
+	again, err := st.List(ctx)
+	if err != nil {
+		t.Fatalf("List (again): %v", err)
+	}
+	if again[0].AllowedNamespaces[0] != "sas" {
+		t.Fatalf("List returned an aliased slice: second List returned %q, want %q", again[0].AllowedNamespaces[0], "sas")
+	}
+	if again[0].AllowedNodeTypes[0] != "kafka.trigger" {
+		t.Fatalf("List returned an aliased slice: second List returned %q, want %q", again[0].AllowedNodeTypes[0], "kafka.trigger")
+	}
+
+	// Mutating a slice returned by ResolveByPlaintext must not affect a later
+	// ResolveByPlaintext call: it must clone on the way out too.
+	got, err := st.ResolveByPlaintext(ctx, plaintext)
+	if err != nil {
+		t.Fatalf("ResolveByPlaintext: %v", err)
+	}
+	got.AllowedNamespaces[0] = "mutated-via-resolve"
+	gotAgain, err := st.ResolveByPlaintext(ctx, plaintext)
+	if err != nil {
+		t.Fatalf("ResolveByPlaintext (again): %v", err)
+	}
+	if gotAgain.AllowedNamespaces[0] != "sas" {
+		t.Fatalf("ResolveByPlaintext returned an aliased slice: second call returned %q, want %q", gotAgain.AllowedNamespaces[0], "sas")
+	}
+}
+
 func TestPolicyEnforcesNamespaceAndNodeTypeScope(t *testing.T) {
 	code := RegistrationCode{
 		ID:                "code-1",

@@ -51,6 +51,19 @@ type RegistrationCode struct {
 	CreatedAt         time.Time
 }
 
+// clone returns a copy of c whose AllowedNamespaces / AllowedNodeTypes slices
+// do not alias c's. RegistrationCode is handed across the store boundary by
+// value, but the struct copy alone leaves the two slice fields pointing at
+// the original backing arrays; without this, a caller mutating a returned
+// entry's slice would mutate the store's internal state without holding its
+// lock. append([]string(nil), nil...) yields nil, so the nil-vs-empty
+// distinction survives the clone.
+func (c RegistrationCode) clone() RegistrationCode {
+	c.AllowedNamespaces = append([]string(nil), c.AllowedNamespaces...)
+	c.AllowedNodeTypes = append([]string(nil), c.AllowedNodeTypes...)
+	return c
+}
+
 // Policy projects the code's scope onto RunnerPolicy so the enroll path reuses
 // RunnerPolicy.Allows / AllowsNamespace (auth.go:65,77) instead of
 // reimplementing scope matching. Two implementations of "is this allowed" would
@@ -124,7 +137,10 @@ func NewMemoryRegistrationCodeStore() *MemoryRegistrationCodeStore {
 func (s *MemoryRegistrationCodeStore) Create(_ context.Context, code RegistrationCode) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.codes = append(s.codes, code)
+	// Clone on the way in too: otherwise the caller retains a reference to the
+	// same backing arrays now held by the store and could mutate stored state
+	// without the lock.
+	s.codes = append(s.codes, code.clone())
 	return nil
 }
 
@@ -150,14 +166,16 @@ func (s *MemoryRegistrationCodeStore) ResolveByPlaintext(_ context.Context, plai
 	if found.Revoked {
 		return RegistrationCode{}, ErrRegistrationCodeRevoked
 	}
-	return found, nil
+	return found.clone(), nil
 }
 
 func (s *MemoryRegistrationCodeStore) List(_ context.Context) ([]RegistrationCode, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]RegistrationCode, len(s.codes))
-	copy(out, s.codes)
+	for i, c := range s.codes {
+		out[i] = c.clone()
+	}
 	return out, nil
 }
 
