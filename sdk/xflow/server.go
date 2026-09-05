@@ -64,7 +64,6 @@ var ErrRunnerAuthPostureUndeclared = errors.New(
 		"to authenticate runners, WithServerEnroll(...) to authenticate them via enrollment, or " +
 		"WithServerInsecureNoRunnerAuth() to run without runner auth on purpose")
 
-
 type serverConfig struct {
 	auth                control.Authenticator
 	logger              engine.Logger

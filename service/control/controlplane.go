@@ -143,7 +143,6 @@ func enrollConfigured(cfg Config) bool {
 	return EnrollDeclared(cfg.RegistrationCodes, cfg.IssuedIdentities)
 }
 
-
 type redisClientProvider interface {
 	RedisClient() redis.Cmdable
 }

@@ -125,7 +125,6 @@ func TestEnrollCompositionIgnoresDisabledAuthenticator(t *testing.T) {
 	}
 }
 
-
 // NewControlPlane, wiring codes/ids into Config so the exercised paths are
 // production wiring rather than field assignment on a test-only struct. Either
 // argument may be nil to exercise the "enroll not configured" behavior.

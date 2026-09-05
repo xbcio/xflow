@@ -55,7 +55,7 @@ type Config struct {
 	RegistrationCodes control.RegistrationCodeStore
 	IssuedIdentities  control.IssuedIdentityStore
 	Logger            engine.Logger
-	Metrics     *metrics.Metrics
+	Metrics           *metrics.Metrics
 	// Tracer, when non-nil, enables OTel HTTP middleware and wires distributed
 	// tracing through the runner dispatch/commit path. Nil means no tracing.
 	Tracer tracing.Tracer
@@ -318,7 +318,6 @@ func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 		RegistrationCodes:       cfg.RegistrationCodes,
 		IssuedIdentities:        cfg.IssuedIdentities,
 		Logger:                  cfg.Logger,
-
 		Metrics:                 cfg.Metrics,
 		Tracer:                  cfg.Tracer,
 		Supplies:                cfg.Supplies,
