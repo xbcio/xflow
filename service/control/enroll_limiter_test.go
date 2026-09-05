@@ -154,8 +154,19 @@ func TestLimiterSweepBoundsMapGrowth(t *testing.T) {
 
 	// Fill the map past the sweep threshold with sources that fail once each
 	// and never return — exactly the vector that never self-evicts via Allow.
+	//
+	// The bulk sources live in 10.8.0.0/16, not 10.0.0.0/24, so that the
+	// "fresh source" literal below cannot be one of them. That constraint is
+	// not cosmetic: test/security's TestTrackedFilesHaveNoInternalIPs allows
+	// only 10.0.0.x as a written-out address, so the one address a reader
+	// actually sees has to come from that /24 — which means the generated
+	// thousand must stay out of it. Collapsing this back to "10.%d.%d.%d"
+	// puts 10.0.0.1 inside the generated set, and the collision does not fail
+	// loudly: RecordFailure on an already-present stale entry refreshes it
+	// instead of creating one, so the post-sweep count can still land on 1
+	// while proving nothing.
 	for i := 0; i <= enrollLimiterSweepThreshold; i++ {
-		l.RecordFailure(fmt.Sprintf("10.%d.%d.%d", i/65536, (i/256)%256, i%256))
+		l.RecordFailure(fmt.Sprintf("10.8.%d.%d", i/256, i%256))
 	}
 	if got := stateLen(l); got <= enrollLimiterSweepThreshold {
 		t.Fatalf("test setup did not actually cross the sweep threshold: got %d entries", got)
@@ -165,7 +176,7 @@ func TestLimiterSweepBoundsMapGrowth(t *testing.T) {
 
 	// One more failure from a fresh source pushes len(l.state) back over the
 	// threshold and must trigger the opportunistic sweep.
-	l.RecordFailure("10.0.0.99")
+	l.RecordFailure("10.0.0.1")
 	if got := stateLen(l); got != 1 {
 		t.Fatalf("map was not swept after crossing the threshold: got %d entries, want 1 (only the fresh source)", got)
 	}
@@ -182,21 +193,23 @@ func TestLimiterSweepHasCooldown(t *testing.T) {
 	// gates how often the map actually gets walked.
 	l, clk := newTestLimiter(10, 5*time.Second)
 
+	// Same 10.8.0.0/16-vs-10.0.0.x split as TestLimiterSweepBoundsMapGrowth:
+	// the two literals below have to be absent from this generated set.
 	for i := 0; i <= enrollLimiterSweepThreshold; i++ {
-		l.RecordFailure(fmt.Sprintf("10.%d.%d.%d", i/65536, (i/256)%256, i%256))
+		l.RecordFailure(fmt.Sprintf("10.8.%d.%d", i/256, i%256))
 	}
 	if got := stateLen(l); got != enrollLimiterSweepThreshold+1 {
 		t.Fatalf("test setup did not cross the sweep threshold: got %d entries", got)
 	}
 
 	clk.advance(5 * time.Second) // every setup entry is now idle-stale (lockFor elapsed)
-	l.RecordFailure("10.0.0.91")
+	l.RecordFailure("10.0.0.1")
 	if got := stateLen(l); got != enrollLimiterSweepThreshold+2 {
 		t.Fatalf("a sweep ran inside the cooldown window: got %d entries, want %d (nothing reclaimed yet)", got, enrollLimiterSweepThreshold+2)
 	}
 
 	clk.advance(enrollLimiterSweepCooldown) // cooldown elapsed since the first sweep
-	l.RecordFailure("10.0.0.92")
+	l.RecordFailure("10.0.0.2")
 	if got := stateLen(l); got != 1 {
 		t.Fatalf("sweep did not run once the cooldown elapsed: got %d entries, want 1 (only the newest source)", got)
 	}
@@ -209,7 +222,7 @@ func TestLimiterSweepHasCooldown(t *testing.T) {
 // contract, not an inspection result.
 func TestSweepPreservesActiveLockout(t *testing.T) {
 	l, _ := newTestLimiter(10, 15*time.Minute)
-	const lockedIP = "10.0.0.55"
+	const lockedIP = "10.0.0.1"
 	for i := 0; i < 10; i++ {
 		l.RecordFailure(lockedIP)
 	}
@@ -275,7 +288,7 @@ func TestLimiterConcurrentAccess(t *testing.T) {
 	// review ruling), so any such assertion would be flaky by construction.
 	// This block exists purely to give -race something to find if the
 	// locking is wrong, and to prove nothing panics under contention.
-	sharedIPs := []string{"10.0.0.21", "10.0.0.22", "10.0.0.23"}
+	sharedIPs := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}
 	for i := 0; i < 20; i++ {
 		ip := sharedIPs[i%len(sharedIPs)]
 		wg.Add(1)
