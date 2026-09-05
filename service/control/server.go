@@ -338,6 +338,33 @@ func (s *Server) HandleReportMetrics(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// HandleEnroll serves the unauthenticated enrollment endpoint. Every rejection
+// — unknown code, revoked code, out-of-scope, rate-limited, and "enroll is not
+// configured" — returns the same status and the same body.
+func (s *Server) HandleEnroll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req protocol.EnrollRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// A malformed body is still a rejected enrollment attempt as far as the
+		// caller can tell. Reporting "bad JSON" separately would distinguish
+		// "your request was well-formed but wrong" from "your request was
+		// malformed", which is a small oracle but an oracle.
+		writeError(w, http.StatusForbidden, "enrollment rejected")
+		return
+	}
+	resp, err := s.core.Enroll(r.Context(), req, httpTransportInfo(r))
+	if err != nil {
+		writeError(w, http.StatusForbidden, "enrollment rejected")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
 // overrideTokenFromHeader gives Authorization: Bearer priority over the body
 // AuthToken field. Header transport is preferred per the spec.
 func overrideTokenFromHeader(r *http.Request, dst *string) {

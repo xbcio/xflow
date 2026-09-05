@@ -1,5 +1,11 @@
 package protocol
 
+import "context"
+
+// EnrollPath is the unauthenticated enrollment endpoint. A runner that has no
+// identity yet posts a registration code here and receives one back.
+const EnrollPath = "/v1/runners/enroll"
+
 // EnrollRequest is what a not-yet-identified runner sends.
 type EnrollRequest struct {
 	// RegistrationCode travels in the body, never in a header: an Authorization
@@ -21,4 +27,14 @@ type EnrollRequest struct {
 type EnrollResponse struct {
 	RunnerID string `json:"runner_id"`
 	Token    string `json:"token"`
+}
+
+// Enroll exchanges a registration code for a runner identity. It deliberately
+// carries no bearer token: at this point the caller has nothing to bear.
+func (c *Client) Enroll(ctx context.Context, req EnrollRequest) (EnrollResponse, error) {
+	var resp EnrollResponse
+	if err := c.post(ctx, EnrollPath, req, &resp); err != nil {
+		return EnrollResponse{}, err
+	}
+	return resp, nil
 }

@@ -1,7 +1,11 @@
 package protocol
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -68,5 +72,59 @@ func TestEnrollJSONFieldNames(t *testing.T) {
 		if strings.Contains(string(b), key) {
 			t.Fatalf("EnrollRequest JSON %s: zero-value field %s should have been omitted", b, key)
 		}
+	}
+}
+
+func TestEnrollPathIsInRunnerFacingPaths(t *testing.T) {
+	for _, p := range RunnerFacingPaths {
+		if p == EnrollPath {
+			return
+		}
+	}
+	t.Fatalf("EnrollPath %q missing from RunnerFacingPaths; the dead-constant guard exists to catch exactly this", EnrollPath)
+}
+
+func TestEnrollSendsCodeInBodyAndNoAuthorizationHeader(t *testing.T) {
+	var (
+		gotPath string
+		gotAuth string
+		gotBody []byte
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(EnrollResponse{RunnerID: "runner-abc", Token: "tok-xyz"})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, srv.Client())
+	resp, err := c.Enroll(context.Background(), EnrollRequest{
+		RegistrationCode: "the-secret-code",
+		ProposedRunnerID: "hint-only",
+		Namespaces:       []string{"sas"},
+		NodeTypes:        []string{"kafka.trigger"},
+	})
+	if err != nil {
+		t.Fatalf("Enroll: %v", err)
+	}
+	if resp.RunnerID != "runner-abc" || resp.Token != "tok-xyz" {
+		t.Fatalf("response = %+v, want the server-issued identity", resp)
+	}
+	if gotPath != EnrollPath {
+		t.Fatalf("path = %q, want %q", gotPath, EnrollPath)
+	}
+	// The runner has no credential at enroll time. Sending one would be a lie,
+	// and putting the registration code in the Authorization header would leak
+	// it into every proxy access log along the way (spec §2.3.1).
+	if gotAuth != "" {
+		t.Fatalf("Authorization header = %q, want empty on the unauthenticated enroll call", gotAuth)
+	}
+	if !strings.Contains(string(gotBody), "the-secret-code") {
+		t.Fatalf("body %q does not carry the registration code", gotBody)
+	}
+	if strings.Contains(gotAuth, "the-secret-code") {
+		t.Fatal("registration code leaked into the Authorization header")
 	}
 }
