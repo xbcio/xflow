@@ -1,11 +1,17 @@
 package control
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
+	"net/url"
+	"reflect"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -310,32 +316,89 @@ func TestHandleEnrollRejectionsAreByteIdentical(t *testing.T) {
 		return httptest.NewServer(mux), plaintext
 	}
 
-	post := func(t *testing.T, srv *httptest.Server, body string) (int, string) {
+	// rawPost sends the request over its own raw TCP connection and hand-parses
+	// the status line and headers with textproto — it deliberately does NOT use
+	// srv.Client(). That matters for more than the obvious reason: even a bare
+	// net/http.ReadResponse (no http.Client involved at all) routes through
+	// net/http/transfer.go's readTransfer, which — as an implementation detail
+	// of deciding whether the connection can be reused — calls shouldClose with
+	// removeCloseHeader=true and DELETES a "Connection: close" response header
+	// from the parsed Header map before handing it back. So the only way to
+	// observe that header at all from Go's standard library is to parse the
+	// wire bytes without ever constructing an *http.Response: read the status
+	// line and run textproto.Reader.ReadMIMEHeader() directly.
+	rawPost := func(t *testing.T, srv *httptest.Server, body string) (status int, headers http.Header, respBody string) {
 		t.Helper()
-		resp, err := srv.Client().Post(srv.URL+protocol.EnrollPath, "application/json", strings.NewReader(body))
+		u, err := url.Parse(srv.URL)
 		if err != nil {
-			t.Fatalf("post: %v", err)
+			t.Fatalf("parse srv.URL: %v", err)
 		}
-		defer resp.Body.Close()
-		b, _ := io.ReadAll(resp.Body)
-		return resp.StatusCode, string(b)
+		conn, err := net.Dial("tcp", u.Host)
+		if err != nil {
+			t.Fatalf("dial %s: %v", u.Host, err)
+		}
+		defer conn.Close()
+
+		// Deliberately no "Connection: close" on the OUTGOING request: the
+		// server would echo a client-requested close on every response
+		// (including the four that must stay clean), erasing the very
+		// asymmetry this test exists to catch. Read exactly Content-Length
+		// bytes of body below instead of relying on EOF.
+		req := "POST " + protocol.EnrollPath + " HTTP/1.1\r\n" +
+			"Host: " + u.Host + "\r\n" +
+			"Content-Type: application/json\r\n" +
+			"Content-Length: " + strconv.Itoa(len(body)) + "\r\n" +
+			"\r\n" + body
+		if _, err := io.WriteString(conn, req); err != nil {
+			t.Fatalf("write request: %v", err)
+		}
+
+		br := bufio.NewReader(conn)
+		tp := textproto.NewReader(br)
+		statusLine, err := tp.ReadLine()
+		if err != nil {
+			t.Fatalf("read status line: %v", err)
+		}
+		fields := strings.SplitN(statusLine, " ", 3)
+		if len(fields) < 2 {
+			t.Fatalf("malformed status line %q", statusLine)
+		}
+		status, err = strconv.Atoi(fields[1])
+		if err != nil {
+			t.Fatalf("status line %q: %v", statusLine, err)
+		}
+		mimeHeader, err := tp.ReadMIMEHeader()
+		if err != nil {
+			t.Fatalf("read headers: %v", err)
+		}
+		headers = http.Header(mimeHeader)
+
+		n, err := strconv.Atoi(headers.Get("Content-Length"))
+		if err != nil {
+			t.Fatalf("response has no usable Content-Length: %v (headers=%v)", err, headers)
+		}
+		bodyBytes := make([]byte, n)
+		if _, err := io.ReadFull(br, bodyBytes); err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		return status, headers, string(bodyBytes)
 	}
 
 	unknownSrv, _ := newSrv(t, false)
 	defer unknownSrv.Close()
-	unknownStatus, unknownBody := post(t, unknownSrv, `{"registration_code":"nope","namespaces":["sas"]}`)
+	unknownStatus, unknownHeaders, unknownBody := rawPost(t, unknownSrv, `{"registration_code":"nope","namespaces":["sas"]}`)
 
 	revokedSrv, revokedCode := newSrv(t, true)
 	defer revokedSrv.Close()
-	revokedStatus, revokedBody := post(t, revokedSrv, `{"registration_code":"`+revokedCode+`","namespaces":["sas"]}`)
+	revokedStatus, revokedHeaders, revokedBody := rawPost(t, revokedSrv, `{"registration_code":"`+revokedCode+`","namespaces":["sas"]}`)
 
 	scopeSrv, scopeCode := newSrv(t, false)
 	defer scopeSrv.Close()
-	scopeStatus, scopeBody := post(t, scopeSrv, `{"registration_code":"`+scopeCode+`","namespaces":["other"]}`)
+	scopeStatus, scopeHeaders, scopeBody := rawPost(t, scopeSrv, `{"registration_code":"`+scopeCode+`","namespaces":["other"]}`)
 
 	malformedSrv, _ := newSrv(t, false)
 	defer malformedSrv.Close()
-	malformedStatus, malformedBody := post(t, malformedSrv, `{not json`)
+	malformedStatus, malformedHeaders, malformedBody := rawPost(t, malformedSrv, `{not json`)
 
 	oversizedSrv, _ := newSrv(t, false)
 	defer oversizedSrv.Close()
@@ -344,7 +407,7 @@ func TestHandleEnrollRejectionsAreByteIdentical(t *testing.T) {
 	// proves the size cap itself produces the same rejection — not merely
 	// that a large body happens to fail to parse.
 	oversizedPayload := `{"registration_code":"` + strings.Repeat("a", protocol.MaxRunnerMetricsBytes+1) + `"}`
-	oversizedStatus, oversizedBody := post(t, oversizedSrv, oversizedPayload)
+	oversizedStatus, oversizedHeaders, oversizedBody := rawPost(t, oversizedSrv, oversizedPayload)
 
 	statuses := []int{unknownStatus, revokedStatus, scopeStatus, malformedStatus, oversizedStatus}
 	bodies := []string{unknownBody, revokedBody, scopeBody, malformedBody, oversizedBody}
@@ -358,5 +421,84 @@ func TestHandleEnrollRejectionsAreByteIdentical(t *testing.T) {
 	}
 	if statuses[0] != http.StatusForbidden {
 		t.Fatalf("rejection status = %d, want 403", statuses[0])
+	}
+
+	// --- Header dimension (Ruling K, task-5-fix2-instructions.md) ---
+	//
+	// unknown / revoked / scope / malformed must carry IDENTICAL header sets
+	// (Date excluded — it changes every second and is not a signal) and MUST
+	// NOT carry a "Connection" header at all. oversized is the one accepted
+	// exception: it is allowed to differ from the other four by EXACTLY one
+	// extra header, "Connection: close" — nothing else.
+	//
+	// Why this one exception is acceptable: HandleEnroll reads the body
+	// through http.MaxBytesReader (server.go). The instant a read trips that
+	// cap, net/http's maxBytesReader.Read synchronously calls the response's
+	// requestTooLarge(), which unconditionally does
+	// w.Header().Set("Connection", "close") and marks the connection for
+	// closing after the reply — see net/http/request.go (maxBytesReader.Read)
+	// and net/http/server.go ((*response).requestTooLarge). This fires the
+	// moment the cap is exceeded, regardless of how many bytes are actually
+	// left unread on the wire; it is not the generic
+	// maxPostHandlerReadBytes/256KiB drain-on-return heuristic, and it is not
+	// particular to this handler's choice of cap size. The header only tells
+	// the caller "your request body was too large" — information the caller
+	// already possesses, since it chose the body size — and it does not
+	// distinguish unknown/revoked/out-of-scope/rate-limited from each other.
+	// The contract this test protects (no oracle for CREDENTIAL validity) is
+	// untouched.
+	//
+	// Why it cannot be designed away by switching readers: an independent,
+	// same-machine A/B probe (two live handlers, raw TCP client, varying body
+	// size — see task-5-fix2-instructions.md, Ruling K) measured
+	// http.MaxBytesReader against the review's suggested alternative,
+	// io.LimitReader plus a manual over-limit check:
+	//
+	//   body size          | http.MaxBytesReader   | io.LimitReader (manual)
+	//   -------------------|------------------------|---------------------------
+	//   normal (40 B)      | no Connection header  | no Connection header
+	//   cap + 1 KiB        | Connection: close      | no Connection header
+	//   cap + 2 MiB        | Connection: close      | Connection: close
+	//
+	// io.LimitReader does not remove the oracle; it only makes it dependent
+	// on how far over the cap the body is. A "cap + 1 KiB" probe test would
+	// go green against io.LimitReader while a "cap + 2 MiB" request still
+	// leaks the exact same bit — a regression disguised as a fix. The only
+	// way to remove the oracle entirely is to read an oversized body to
+	// completion before rejecting it, which reintroduces the unbounded-read
+	// memory-exhaustion surface this cap exists to close. So server.go keeps
+	// http.MaxBytesReader unchanged, and this test pins the leak as an
+	// explicit, narrow, documented exception instead of chasing it away.
+	stripDate := func(h http.Header) http.Header {
+		clone := h.Clone()
+		clone.Del("Date")
+		return clone
+	}
+
+	frontHeaders := []struct {
+		name string
+		h    http.Header
+	}{
+		{"unknown", stripDate(unknownHeaders)},
+		{"revoked", stripDate(revokedHeaders)},
+		{"scope", stripDate(scopeHeaders)},
+		{"malformed", stripDate(malformedHeaders)},
+	}
+	for _, f := range frontHeaders {
+		if got := f.h.Values("Connection"); len(got) != 0 {
+			t.Fatalf("%s: Connection header = %v, want none — a non-oversized rejection must never carry it", f.name, got)
+		}
+		if !reflect.DeepEqual(f.h, frontHeaders[0].h) {
+			t.Fatalf("%s: headers = %v, want identical to %s's %v", f.name, f.h, frontHeaders[0].name, frontHeaders[0].h)
+		}
+	}
+
+	oversizedH := stripDate(oversizedHeaders)
+	if got := oversizedH.Values("Connection"); len(got) != 1 || got[0] != "close" {
+		t.Fatalf("oversized: Connection header = %v, want exactly [%q]", got, "close")
+	}
+	oversizedH.Del("Connection")
+	if !reflect.DeepEqual(oversizedH, frontHeaders[0].h) {
+		t.Fatalf("oversized headers (Connection removed) = %v, want identical to %s's %v", oversizedH, frontHeaders[0].name, frontHeaders[0].h)
 	}
 }
