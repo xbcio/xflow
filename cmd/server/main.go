@@ -624,19 +624,6 @@ func runServer(cfg serverConfig) error {
 	return srv.Run(ctx)
 }
 
-// warnIfEnrollStoresIgnoreMySQLDSN logs an operator-visible warning when
-// --enroll is combined with --mysql-dsn. registrationCodeStore and
-// issuedIdentityStore are unconditionally in-memory until Task 7 adds a
-// SQL-backed implementation — unlike the execution store and audit sink,
-// which do switch on cfg.mysqlDSN — so this combination silently does not
-// persist issued runner identities across a restart unless the operator is
-// told here.
-// warnIfEnrollStoresIgnoreMySQLDSN and its call site were removed here: Task 7
-// wired --mysql-dsn through to registrationCodeStore / issuedIdentityStore
-// (see the enrollDB-gated construction above), so the warning it printed —
-// "in-memory regardless of --mysql-dsn" — would now be a false statement to
-// an operator every time --enroll and --mysql-dsn are combined.
-
 func buildLogger(cfg serverConfig) (engine.Logger, error) {
 	var zapCfg zap.Config
 	switch cfg.logFormat {
