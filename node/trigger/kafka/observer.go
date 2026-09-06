@@ -98,12 +98,21 @@ type Observer interface {
 	// result is "ok" or "error"; messages is how many offsets that call carried;
 	// d is the wall time the caller spent blocked in it.
 	//
-	// d is NOT the broker round trip, and reading it as one leads to the wrong
-	// fix. Under CommitInterval: 0 every partition's CommitMessages hands its
-	// request to a single shared channel (Reader.commits) drained by a single
-	// goroutine (commitLoopImmediate), which blocks on a full CommitOffsets RPC
-	// before taking the next request. d therefore covers QUEUEING BEHIND EVERY
-	// OTHER PARTITION plus the round trip, and the queue is the larger term.
+	// d is NOT a plain broker round trip, and reading it as one leads to the
+	// wrong fix. A commit here goes through commitCoalescer, so d covers the
+	// wait for whatever merged RPC is currently in flight plus the one this
+	// caller ends up in. Measured against the reference cluster that is about
+	// 1.5x the round trip — 179 ms against a 118 ms trip — rather than the
+	// queue-behind-every-sibling term it used to be.
+	//
+	// It used to be exactly that, and the history matters because it is what
+	// this metric was added to find. Under CommitInterval: 0 kafka-go hands
+	// every partition's commit to one shared channel (Reader.commits) drained by
+	// one goroutine (commitLoopImmediate) that blocks on a full CommitOffsets
+	// RPC before taking the next request, so d covered QUEUEING BEHIND EVERY
+	// OTHER PARTITION and the queue was the larger term by an order of
+	// magnitude. commitCoalescer removes the queue by merging those callers into
+	// shared RPCs; see commit_coalescer.go.
 	//
 	// It exists because this hop had no instrumentation at all, and it turned out
 	// to be the pacer. Every other trigger metric measures work — batch size,
@@ -113,19 +122,47 @@ type Observer interface {
 	// it was a stack dump. A commit cycle inferred from the batch release rate is
 	// a division, not a measurement; this is the measurement.
 	//
-	// The first measurement, over 411 s against an 18-partition topic: 2927
-	// commits, 6569.8 s summed, mean 2.24 s. That sum is 88.8% of the 7398
-	// partition-seconds available, against 325.2 s of total wasm evaluation in
-	// the same run — the pipeline spent 20x longer waiting here than computing.
+	// The first measurement, over 411 s against an 18-partition topic and BEFORE
+	// coalescing: 2927 commits, 6569.8 s summed, mean 2.24 s. That sum is 88.8%
+	// of the 7398 partition-seconds available, against 325.2 s of total wasm
+	// evaluation in the same run — the pipeline spent 20x longer waiting here
+	// than computing.
 	//
 	// messages is reported alongside the duration because a duration alone cannot
 	// tell a per-round-trip cost from one that scales with the offsets carried.
-	// The measurement said neither: commits completed at 7.12/s process-wide,
-	// which is the serial goroutine's ceiling and is INDEPENDENT OF PARTITION
-	// COUNT. Mean size was 165 — already above max_size=100, because a partition
-	// blocked in the queue keeps buffering and its next commit carries the
-	// backlog. So throughput is 7.12 x size, and size is the only term a config
-	// knob reaches; raising commit CONCURRENCY needs more than one Reader.
+	// Pre-coalescing the measurement said neither: commits completed at 7.12/s
+	// process-wide, which was the serial goroutine's ceiling and was INDEPENDENT
+	// OF PARTITION COUNT. Mean size was 165 — already above max_size=100, because
+	// a partition blocked in the queue keeps buffering and its next commit
+	// carries the backlog. A mean size that stays well above max_size is
+	// therefore a signal that callers are backing up again.
+	//
+	// A four-arm run against the same cluster measured both candidate fixes,
+	// holding 18 concurrent committers fixed and with nothing evaluated in
+	// between. Supply was 4100-4800 msg/s throughout, so no arm ran out of input:
+	//
+	//	arm              mean      max      consumed    queue depth
+	//	readers=1        2.049 s   2.367 s   878 msg/s     17.3
+	//	readers=1+merge    179 ms    277 ms  1172 msg/s      1.5
+	//	readers=6          138 ms    593 ms  1257 msg/s      1.2
+	//	readers=18         124 ms    515 ms  1367 msg/s      1.1
+	//
+	// The 18-Reader arm has a queue depth of one, so its ~118 ms median is the
+	// round trip itself; the earlier ~140 ms was back-derived from a rate and
+	// came out about 20% high. The 1-Reader arm's mean divided by that trip is
+	// 17.3 — the queue held essentially every caller, which is what a saturated
+	// serial server looks like, and it is arrived at independently of the caller
+	// count rather than fitted to it.
+	//
+	// Merging on one Reader took 86% of what eighteen Readers took, with the best
+	// tail of the four, which is why the shipped fix is the coalescer and not a
+	// Reader pool. Spreading Readers would also have meant N group members on a
+	// shared cluster and a partition-to-Reader map that has to survive a
+	// rebalance, against a kafka-go commit path that validates no ownership.
+	//
+	// No arm exceeded 32% of supply, and that ceiling is the probe's own: it
+	// fetches and commits in one goroutine, which the aggregator does not. These
+	// numbers bound the commit hop and say nothing about the pipeline's ceiling.
 	//
 	// No partition label, unlike OnConsumerLag and OnConsumptionBlocked. Those
 	// are gauges, where one Set per partition under a shared label set would let

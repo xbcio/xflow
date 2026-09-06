@@ -186,21 +186,31 @@ func (t TriggerMetrics) OnConsumptionBlocked(ctx context.Context, topic string, 
 // one is the execution layer's commit, carries no topic or partition, and its
 // value tracked execution_completed_total{status="success"} exactly.
 //
-// The duration is NOT a broker round trip, despite the name. Under
-// CommitInterval: 0 all partitions of a Reader queue their commits onto one
-// channel drained by one goroutine, so this is queueing plus the round trip —
-// see OnOffsetCommit's comment in the kafka trigger package for the mechanism
-// and the first measurement. An operator reading this as network latency will
-// go looking at the brokers, which is the wrong place.
+// The duration is NOT a plain broker round trip, despite the name. A commit
+// goes through the trigger's commit coalescer, so this covers the wait for the
+// merged call currently in flight plus the one this caller joins — about 1.5x
+// the trip on the cluster this was measured against (179 ms against 118 ms).
+// Before that coalescer existed it was far worse: kafka-go serialized every
+// partition of a Reader onto one commit goroutine, so the figure was dominated
+// by queueing and its mean was 2.24 s. See OnOffsetCommit's comment in the
+// kafka trigger package for the mechanism and the measurements. Either way, an
+// operator reading this as network latency will go looking at the brokers,
+// which is the wrong place: a p50 in the seconds means callers are backing up,
+// not that the broker is sick.
 //
-// Two series, because duration alone cannot tell which knob matters. The first
-// run showed commits completing at 7.12/s process-wide — the serial goroutine's
-// ceiling, independent of partition count — while mean size was 165 against a
-// max_size of 100, because a partition stuck in the queue keeps buffering.
-// Throughput is the product of those two, and only the second is reachable from
-// config. Size goes through ObserveCount for the same reason
+// Two series, because duration alone cannot tell which knob matters. Size is
+// the other half: a mean well above the configured max_size means partitions
+// are buffering while they wait here, which is the shape the pre-coalescer
+// pipeline showed (mean 165 against max_size 100 while commits completed at
+// 7.12/s process-wide). Size goes through ObserveCount for the same reason
 // xflow_trigger_batch_size does: ObserveBytes' buckets start at 1 KiB and a
 // count in the hundreds would land entirely in the first one.
+//
+// One caveat specific to coalescing, because it inflates the error series: a
+// merged call carries several partitions, and kafka-go returns a single error
+// if ANY of them is rejected, discarding which. So one bad partition reports as
+// an error for every caller it was batched with. Read a nonzero error rate as
+// "at least one partition is failing", not as a count of failing partitions.
 //
 // result is on the duration series only. An errored commit's duration is the
 // number an operator wants separated — a timeout at aggregateCommitTimeout

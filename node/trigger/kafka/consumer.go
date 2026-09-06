@@ -159,6 +159,12 @@ type kafkaGoConsumer struct {
 	reader      *kafkago.Reader
 	connections *kafkaConnTracker
 
+	// commits merges the per-partition flush workers' commit calls into shared
+	// broker round trips. See commit_coalescer.go for why this hop needed one:
+	// kafka-go serializes every partition of a Reader onto a single commit
+	// goroutine, which made this the pipeline's pacer.
+	commits *commitCoalescer
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -176,13 +182,19 @@ func newKafkaGoConsumer(cfg ConsumerConfig) (Consumer, error) {
 	}
 	connections := newKafkaConnTracker(readerCfg.Dialer)
 	ctx, cancel := context.WithCancel(context.Background())
+	reader := kafkago.NewReader(readerCfg)
 	consumer := &kafkaGoConsumer{
-		reader:      kafkago.NewReader(readerCfg),
+		reader:      reader,
 		connections: connections,
-		ctx:         ctx,
-		cancel:      cancel,
-		messages:    make(chan Message, readerCfg.QueueCapacity),
-		done:        make(chan struct{}),
+		// ctx, not context.Background: Close cancels it, and a merged call left
+		// on a context Close cannot reach would outlive the Reader. kafka-go's
+		// commitLoopImmediate stops answering requests once the Reader closes,
+		// so such a call would never return and would take Close with it.
+		commits:  newCommitCoalescer(ctx, reader.CommitMessages),
+		ctx:      ctx,
+		cancel:   cancel,
+		messages: make(chan Message, readerCfg.QueueCapacity),
+		done:     make(chan struct{}),
 	}
 	go consumer.run()
 	return consumer, nil
@@ -312,6 +324,13 @@ func (c *kafkaGoConsumer) Close() error {
 			c.closeErr = <-readerClosed
 		}
 		c.connections.close()
+		// After the reader is down, not before. The coalescer may be parked in a
+		// merged CommitMessages, and by this point three separate things have
+		// released it: c.cancel above, Reader.Close, and connections.interrupt on
+		// the slow path. Waiting for it ahead of that protection would put an
+		// unbounded wait in front of the very escape hatch that exists because
+		// kafka-go can hang here.
+		c.commits.wait()
 		<-c.done
 	})
 	return c.closeErr
@@ -326,7 +345,21 @@ func (c *kafkaGoConsumer) CommitMessages(ctx context.Context, messages ...Messag
 			Offset:    msg.Offset,
 		})
 	}
-	return c.reader.CommitMessages(ctx, commits...)
+	// Through the coalescer rather than straight to the Reader. Callers are the
+	// per-partition flush workers, so each call carries one partition and up to
+	// eighteen of them arrive at once; kafka-go would run those as eighteen
+	// serialized round trips.
+	//
+	// Merging is invisible above this line in the sense that a caller still gets
+	// exactly one error for its own offsets — but that error is now SHARED with
+	// whoever it was batched with, which is a real change in meaning rather than
+	// a transparent optimization. commit_coalescer.go's error-fan comment carries
+	// the argument; do not restate it here, because a second copy is a second
+	// thing to keep true. An earlier version of this comment claimed the merged
+	// call is "one RPC that the broker accepts or rejects as a whole", and that
+	// is false: the broker decides per partition, and kafka-go is what collapses
+	// the reply.
+	return c.commits.commitMessages(ctx, commits...)
 }
 
 func (c *kafkaGoConsumer) run() {
