@@ -531,7 +531,6 @@ func runServer(cfg serverConfig) error {
 	// the rest in nil checks would reintroduce, one `if` at a time, the same
 	// per-field transcription this refactor removes.
 	serverOpts := []xflowsdk.ServerOption{
-		xflowsdk.WithServerAuth(auth),
 		xflowsdk.WithServerLogger(logger),
 		xflowsdk.WithServerMetrics(m),
 		xflowsdk.WithServerMetricsAddr(cfg.metricsAddr, cfg.metricsPath),
@@ -553,6 +552,19 @@ func runServer(cfg serverConfig) error {
 	}
 	if cfg.enableRunnerMetricsProxy {
 		serverOpts = append(serverOpts, xflowsdk.WithServerRunnerMetricsProxy())
+	}
+	// Runner-auth posture. buildAuthenticator returns DisabledAuthenticator{}
+	// for an empty --auth-policy, which control.IsConfigured rejects — so
+	// passing it unconditionally made NewServer fail with
+	// ErrRunnerAuthPostureUndeclared, whose remedy names SDK options an
+	// operator of this binary cannot reach. Declaring the posture in the
+	// binary's own terms instead means --mode=dev starts, and --mode=production
+	// reaches the gate below, which answers in flag names.
+	switch runnerAuthPostureFor(auth, cfg.enroll) {
+	case posturePolicy:
+		serverOpts = append(serverOpts, xflowsdk.WithServerAuth(auth))
+	case postureInsecure:
+		serverOpts = append(serverOpts, xflowsdk.WithServerInsecureNoRunnerAuth())
 	}
 	if cfg.enroll {
 		serverOpts = append(serverOpts, xflowsdk.WithServerEnroll(registrationCodeStore, issuedIdentityStore))
@@ -632,6 +644,37 @@ func buildLogger(cfg serverConfig) (engine.Logger, error) {
 		return nil, err
 	}
 	return obslogger.NewZapLogger(log), nil
+}
+
+// runnerAuthPosture names which of the SDK's three runner-auth declarations
+// this binary's flags amount to. NewServer requires exactly one of them and
+// rejects combinations: WithServerAuth conflicts with
+// WithServerInsecureNoRunnerAuth on `sc.auth != nil` — note, not on
+// IsConfigured, so handing it a DisabledAuthenticator still counts as a
+// conflict — and WithServerEnroll conflicts with it as well. Deciding once,
+// here, is what keeps that invariant checkable.
+type runnerAuthPosture int
+
+const (
+	// posturePolicy: --auth-policy loaded a real policy store.
+	posturePolicy runnerAuthPosture = iota
+	// postureEnroll: --enroll declares the posture on its own; runners obtain
+	// identities at enrollment time, so no authenticator is passed.
+	postureEnroll
+	// postureInsecure: neither is set. The SDK requires this to be said out
+	// loud rather than inferred from a permissive default.
+	postureInsecure
+)
+
+func runnerAuthPostureFor(auth control.Authenticator, enroll bool) runnerAuthPosture {
+	switch {
+	case control.IsConfigured(auth):
+		return posturePolicy
+	case enroll:
+		return postureEnroll
+	default:
+		return postureInsecure
+	}
 }
 
 // buildAuthenticator resolves the runner-protocol authenticator from CLI

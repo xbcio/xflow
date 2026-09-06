@@ -131,6 +131,16 @@ Authorizer、AuditSink、Store 是否可做 audit reconcile。**看不出来的*
 项翻成自己的 flag 名（`explainProductionGate`）。新增 requirement 时，
 `apiserver.AllProductionRequirements` 是两侧穷尽性测试的判据。
 
+**runner 认证姿态是另一条必须翻译的边界。** SDK 要求每个 server 三选一显式声明
+（`WithServerAuth` / `WithServerEnroll` / `WithServerInsecureNoRunnerAuth`），且三者
+互斥——注意互斥判据是 `sc.auth != nil` 而非 `IsConfigured`，所以传一个
+`DisabledAuthenticator{}` 既过不了姿态门禁，又会与「显式声明不安全」冲突。
+而 `buildAuthenticator` 在 `--auth-policy` 为空时返回的正是
+`DisabledAuthenticator{}`。因此 `cmd/server` 先用 `runnerAuthPostureFor` 把 flag 组合
+判成三态之一，再映射到对应选项。少了这一步，二进制在任何模式下都启动不了，且
+给运维吐的是它根本够不着的 SDK 选项名——这类「内层错误原样透出门面」的报错，
+错的不是 fail-closed，是收件人。
+
 **运维**：KEK（`XFLOW_MASTER_KEY` 或 `--master-key-file`）只由 `cmd/server` 加载；
 `cmd/runner` 完全不涉及 KEK。`--mode=production`（经 `apiserver.New` 的生产姿态校验强制）
 下缺少 KEK 会导致 server **启动即退出**——进程不拉起，依赖它的管道会中断，现象
