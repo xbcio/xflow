@@ -50,6 +50,11 @@ func TestVerifyCommandPrintsResolvedRunnerID(t *testing.T) {
 	cmd.SetArgs([]string{
 		"verify",
 		"--server", server.URL,
+		// --transport http is required, not incidental: the default is grpc
+		// (defaultRunnerConfig), and verify now honours it. Before it did,
+		// this test passed while probing a transport the runner would not
+		// have used.
+		"--transport", "http",
 		"--concurrency", "1",
 		"--cap", "xflow.function",
 	})

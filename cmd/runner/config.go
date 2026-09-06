@@ -530,7 +530,7 @@ func sampleRunnerConfigYAML() string {
     - "xflow.function"
 
 server:
-  # transport: "http" (default) or "grpc"
+  # transport: "http" or "grpc" (default: grpc, see defaultRunnerConfig)
   transport: "http"
   url: "http://localhost:8080"
   grpc_target: "localhost:9090"

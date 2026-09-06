@@ -185,7 +185,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		Concurrency:        r.config.Concurrency,
 		Capabilities:       r.config.Capabilities,
 		Labels:             r.config.Labels,
-		Namespaces:         namespaceStrings(r.config.Namespaces),
+		Namespaces:         NamespaceStrings(r.config.Namespaces),
 		Activations:        inventory,
 		SupportsEncryption: r.config.SupportsEncryption,
 	})
@@ -611,7 +611,13 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-func namespaceStrings(namespaces []namespace.Namespace) []string {
+// NamespaceStrings renders the namespaces a runner serves for the wire, where
+// an empty list means the default namespace rather than "none". Exported
+// because a runner's registration is not the only thing that has to spell this
+// out the same way — sdk/xflow.VerifyRunner registers with the same payload,
+// and a second copy of the empty-means-default rule is how a preflight that
+// passes ends up describing a runner the server would route differently.
+func NamespaceStrings(namespaces []namespace.Namespace) []string {
 	if len(namespaces) == 0 {
 		return []string{string(namespace.Default)}
 	}

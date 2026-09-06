@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -52,6 +53,10 @@ func TestVerifyCommandRegistersAndHeartbeats(t *testing.T) {
 	cmd.SetArgs([]string{
 		"verify",
 		"--server", server.URL,
+		// See TestVerifyCommandPrintsResolvedRunnerID: the default transport
+		// is grpc, so an httptest server only sees this command once the
+		// transport is declared.
+		"--transport", "http",
 		"--id", "runner-verify",
 		"--concurrency", "2",
 		"--cap", "xflow.function,xflow.http",
@@ -76,8 +81,23 @@ func TestVerifyCommandRegistersAndHeartbeats(t *testing.T) {
 	if registered.RunnerID != "runner-verify" || registered.Concurrency != 2 {
 		t.Fatalf("registered = %+v", registered)
 	}
-	if len(registered.Capabilities) != 2 {
-		t.Fatalf("registered capabilities = %+v", registered.Capabilities)
+	// Three, not the two --cap named: the SDK appends xflow.group carrying
+	// group.exec.v1, exactly as it does for a real session. A group unit is
+	// routed on that feature, so a preflight that registered only the two
+	// declared node types would report a runner the server would assign
+	// differently from the one that actually starts.
+	if len(registered.Capabilities) != 3 {
+		t.Fatalf("registered capabilities = %+v, want the two declared plus xflow.group",
+			registered.Capabilities)
+	}
+	var groupFeatures []string
+	for _, c := range registered.Capabilities {
+		if c.NodeType == "xflow.group" {
+			groupFeatures = c.Features
+		}
+	}
+	if !slices.Contains(groupFeatures, "group.exec.v1") {
+		t.Fatalf("xflow.group features = %v, want group.exec.v1", groupFeatures)
 	}
 	if got := registered.Labels["mode"]; got != "remote" {
 		t.Fatalf("registered label mode = %q, want remote", got)

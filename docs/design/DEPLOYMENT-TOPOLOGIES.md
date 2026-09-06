@@ -141,6 +141,18 @@ Authorizer、AuditSink、Store 是否可做 audit reconcile。**看不出来的*
 给运维吐的是它根本够不着的 SDK 选项名——这类「内层错误原样透出门面」的报错，
 错的不是 fail-closed，是收件人。
 
+**`xflow-runner verify` 与 `run` 必须走同一条路。** verify 的全部价值在于回答「这台
+runner 起来之后会怎样」，所以它一旦用不同的方式连接，回答的就是另一台 runner。
+它曾自建 `protocol.NewClient(serverURL, http.DefaultClient)` 并手抄一份注册报文，于是
+`--transport` / `--grpc-target` / `--token` / `--tls-*` / `--namespace` 全被丢弃：对
+mTLS 控制面恒失败（假阴性，且恰在最需要预检的部署），对开了认证的 server 报 401，
+而 **runner 默认 transport 是 grpc**（`defaultRunnerConfig`），旧 verify 却始终探 HTTP
+——两个端口都开着时它是**假阳性**，验的不是 run 会走的那条路。现在核心下沉为
+`sdk/xflow.VerifyRunner`，与 `NewRunner` 共用 `newRunnerProtocolClient` 和同一组报文翻译
+函数（含 `runnersvc.NamespaceStrings` 的「空即 default」规则），`cmd/runner` 只做 flag →
+`RunnerConfig` 的翻译。判据不是「verify 里有没有读 TLS 配置」，而是**它有没有第二份
+副本**——副本不会跟着改。
+
 **运维**：KEK（`XFLOW_MASTER_KEY` 或 `--master-key-file`）只由 `cmd/server` 加载；
 `cmd/runner` 完全不涉及 KEK。`--mode=production`（经 `apiserver.New` 的生产姿态校验强制）
 下缺少 KEK 会导致 server **启动即退出**——进程不拉起，依赖它的管道会中断，现象
