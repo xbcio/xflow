@@ -46,8 +46,16 @@ type Config struct {
 	Artifacts   *store.ArtifactStore
 	Concurrency int
 	Auth        control.Authenticator
-	Logger      engine.Logger
-	Metrics     *metrics.Metrics
+	// RegistrationCodes / IssuedIdentities turn on the runner enrollment
+	// endpoint (/v1/runners/enroll). Both must be non-nil for enrollment to be
+	// live — control.NewControlPlane treats this pair as a single decision
+	// (control.enrollConfigured) and passing only one through here would leave
+	// the endpoint mounted with nothing behind it, or an authenticator with
+	// nothing to authenticate against.
+	RegistrationCodes control.RegistrationCodeStore
+	IssuedIdentities  control.IssuedIdentityStore
+	Logger            engine.Logger
+	Metrics           *metrics.Metrics
 	// Tracer, when non-nil, enables OTel HTTP middleware and wires distributed
 	// tracing through the runner dispatch/commit path. Nil means no tracing.
 	Tracer tracing.Tracer
@@ -213,6 +221,18 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 		mgmt := newManagementModule(s.cp)
 		mgmt.metrics = cfg.Metrics
 		mgmt.ready = s.readiness
+		// Registration-code management API (Task 8): post-construction field
+		// injection, same shape as metrics/ready above. This is deliberately NOT
+		// a newManagementModule(cp, codes, issued) signature change — that
+		// constructor has 8 call sites today (1 production + 7 tests across
+		// deadletter_http_test.go, envelope_migration_test.go,
+		// deadletter_unified_test.go, management_scope_test.go), none of which
+		// need or want a registration-code store. A signature change would force
+		// every one of them to grow two more nil arguments for no behavioral
+		// reason; setting the fields here after construction touches none of
+		// them. See Task 8 addendum Ruling Q.
+		mgmt.codes = cfg.RegistrationCodes
+		mgmt.issued = cfg.IssuedIdentities
 		if cfg.PrincipalAuth != nil {
 			mgmt.principalAuth = cfg.PrincipalAuth
 			mgmt.authorizer = cfg.Authorizer
@@ -307,6 +327,8 @@ const entryActivationStoreTTL = 24 * time.Hour
 func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 	ccfg := control.Config{
 		Auth:                    cfg.Auth,
+		RegistrationCodes:       cfg.RegistrationCodes,
+		IssuedIdentities:        cfg.IssuedIdentities,
 		Logger:                  cfg.Logger,
 		Metrics:                 cfg.Metrics,
 		Tracer:                  cfg.Tracer,

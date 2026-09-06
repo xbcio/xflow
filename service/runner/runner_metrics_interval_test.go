@@ -198,9 +198,40 @@ func TestRunnerFirstBeatAppliesInterval(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("beat 1 did not fire within 2s")
 	}
-	// Assert immediately — no ticker beat has fired yet (ticker is 1s away).
-	if got := reporter.currentInterval(); got != 20*time.Second {
-		t.Fatalf("after beat 1: interval = %v, want 20s (first-beat site not working)", got)
+	// Same apply-after-return race as the ticker test, so this waits too — but
+	// only for 800ms: beat 2 fires at 1s and would apply 60s, and a poll that
+	// outlived it could not tell "the first-beat site works" from "the ticker
+	// site cleaned up after it".
+	awaitInterval(t, reporter, 20*time.Second, 800*time.Millisecond, "after beat 1 (first-beat site not working)")
+}
+
+// awaitInterval waits for the reporter to reach want, up to within.
+//
+// The wait is not slack in the assertion. phasedIntervalClient signals its
+// beat-done channels from a defer inside Heartbeat — that is, when the fake
+// client RETURNS — while runner.applyMetricsInterval runs in the caller, after
+// that return. Reading currentInterval() the instant the channel fires
+// therefore races the apply, and on a loaded machine it loses: this pair of
+// tests passed 10/10 in isolation and 3/3 as a package while failing inside a
+// full-suite `go test ./...` run, which is the only context where the runner
+// goroutine is descheduled long enough for the window to open.
+//
+// A deleted call site still fails: the interval never becomes want, so the
+// deadline expires and the stale value is what gets reported. within must stay
+// below the heartbeat interval of any test whose NEXT beat would apply a
+// different value, or the poll could observe that one instead.
+func awaitInterval(t *testing.T, r *MetricsReporter, want, within time.Duration, what string) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		got := r.currentInterval()
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: interval = %v, want %v", what, got, want)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -245,8 +276,7 @@ func TestRunnerTickerBeatAppliesInterval(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("beat 2 did not fire within 2s")
 	}
-	// The ticker branch must have applied 60s.
-	if got := reporter.currentInterval(); got != 60*time.Second {
-		t.Fatalf("after beat 2: interval = %v, want 60s (ticker-branch site not working)", got)
-	}
+	// The ticker branch must have applied 60s. Every later beat returns 60s
+	// too, so there is no competing value and the window can be generous.
+	awaitInterval(t, reporter, 60*time.Second, 2*time.Second, "after beat 2 (ticker-branch site not working)")
 }

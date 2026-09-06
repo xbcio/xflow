@@ -23,6 +23,11 @@ const (
 	// are ~11 KB at 200 rules, so 1 MiB is a hundredfold margin; the cap exists
 	// to bound a malicious or runaway reporter, not to constrain normal use.
 	// Over-limit requests are rejected with 413 and never decoded.
+	//
+	// It has a second consumer despite the name: control.HandleEnroll caps the
+	// unauthenticated enroll body with it too, deliberately reusing this limit
+	// rather than inventing a second number for a much smaller payload. Change
+	// the value with that endpoint in mind, not the metrics one alone.
 	MaxRunnerMetricsBytes = 1 << 20
 
 	// ReportMetricsContentType is the delimited-protobuf MetricFamily stream

@@ -20,6 +20,8 @@ type RunnerHTTPHandler interface {
 	// gRPC is not a target deployment shape (cross-cloud goes through the Relay
 	// Gateway), so the gRPC transport never carries this call.
 	HandleReportMetrics(http.ResponseWriter, *http.Request)
+	// HandleEnroll serves the unauthenticated enrollment endpoint.
+	HandleEnroll(http.ResponseWriter, *http.Request)
 }
 
 func RegisterRunnerRoutes(mux *http.ServeMux, handler RunnerHTTPHandler) {
@@ -30,6 +32,7 @@ func RegisterRunnerRoutes(mux *http.ServeMux, handler RunnerHTTPHandler) {
 	mux.HandleFunc(RenewLeasePath, handler.HandleRenewLease)
 	mux.HandleFunc(ActivationAckPath, handler.HandleActivationAck)
 	mux.HandleFunc(ReportMetricsPath, handler.HandleReportMetrics)
+	mux.HandleFunc(EnrollPath, handler.HandleEnroll)
 }
 
 // RunnerFacingPaths enumerates every runner-facing HTTP path constant this
@@ -50,4 +53,5 @@ var RunnerFacingPaths = []string{
 	RenewLeasePath,
 	ActivationAckPath,
 	ReportMetricsPath,
+	EnrollPath,
 }

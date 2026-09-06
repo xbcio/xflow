@@ -20,15 +20,17 @@ import (
 )
 
 // managementModule mounts the ops management HTTP API: leader status,
-// single-runner lookup, single-execution inspect, dead-letter list/replay,
-// and the process liveness/readiness probes. It is opt-in (registered only
-// via WithManagement) because it exposes runner directory, execution state,
-// and dead-letter operations that must sit behind authz.
+// single-runner lookup and (when supported) runner listing,
+// single-execution inspect, dead-letter list/replay, registration-code
+// create/list/revoke/audit, and the process liveness/readiness probes. It is
+// opt-in (registered only via WithManagement) because it exposes runner
+// directory, execution state, and dead-letter operations that must sit
+// behind authz.
 //
-// Per R1, the underlying runner directory and store interfaces expose no list
-// API, so this module intentionally provides no listing endpoints for
-// runners/executions — only single-resource lookups, leader status, dead-letter
-// operations, and health probes.
+// Per R1 the underlying store interface exposes no list API, so this module
+// provides no execution listing. Runner listing IS exposed, but only when the
+// configured directory structurally supports enumeration; otherwise the route
+// answers 501 rather than pretending the fleet is empty.
 type managementModule struct {
 	authzHolder
 	cp  *control.ControlPlane
@@ -44,10 +46,49 @@ type managementModule struct {
 	dlMgr     *control.DeadLetterManager
 	dlMgrOnce sync.Once
 	ready     ReadinessChecker
+	// codes / issued back the registration-code management API (create / list /
+	// revoke / audit). Whether these four routes are MOUNTED depends only on
+	// m.principalAuth (see RegisterHTTP) — never on codes/issued being non-nil.
+	//
+	// That is deliberate, not an oversight (Task 8 addendum Ruling W): the
+	// production dead-constant guard (paths_test.go newFullGuardMux) builds a
+	// PrincipalAuth-only server with no registration-code store configured at
+	// all, and TestUserFacingPathsHaveMuxRegistration requires every
+	// UserFacingPaths entry to resolve to an actually-registered route on THAT
+	// mux. Gating registration on codes/issued would make the three new routes
+	// vanish there, and the only "fix" for that red — dropping the paths back
+	// out of UserFacingPaths — would silently reopen the exact dead-constant
+	// hole the guard exists to catch (and nothing would ever catch THAT,
+	// addendum Ruling 4: there is no guard in the reverse direction).
+	//
+	// So instead: nil codes means the routes exist and are reachable by an
+	// authorized caller, but every handler answers 404 route_not_found itself.
+	// Same externally observed behavior as "the feature does not exist on this
+	// server", reached without touching the mount condition.
+	codes  control.RegistrationCodeStore
+	issued control.IssuedIdentityStore
+	// runners is the structural probe result for GET PathManagementRunners
+	// (see runnerLister below). Nil means the configured directory does not
+	// support enumeration, and the route answers 501 rather than an empty list.
+	runners runnerLister
+}
+
+// runnerLister is the structural probe for a runner directory that can
+// enumerate. The concrete directory does not implement it today; the interface
+// exists so the route can answer honestly either way, and so a directory that
+// grows the capability lights the route up without further plumbing.
+type runnerLister interface {
+	ListRunners(ctx context.Context) ([]string, error)
 }
 
 func newManagementModule(cp *control.ControlPlane) *managementModule {
-	return &managementModule{cp: cp, eng: cp.Engine()}
+	m := &managementModule{cp: cp, eng: cp.Engine()}
+	if dir := cp.RunnerDirectory(); dir != nil {
+		if l, ok := dir.(runnerLister); ok {
+			m.runners = l
+		}
+	}
+	return m
 }
 
 func (m *managementModule) Name() string { return "management" }
@@ -71,6 +112,19 @@ func (m *managementModule) RegisterHTTP(mux *http.ServeMux) {
 			id := r.PathValue("id")
 			return "management/runner/" + id, "", "", ""
 		}))
+		// Runner listing (Task 9): its own Op/scope, separate from
+		// OpManagementRunnerRead — a token that may look up one known runner
+		// should not thereby be able to enumerate the whole fleet. The handler
+		// itself decides 200 vs 501 depending on whether the configured runner
+		// directory structurally supports enumeration (m.runners); that
+		// decision must NOT gate whether the route is mounted, or an
+		// unauthenticated caller would get a different status than an
+		// authenticated one hitting an unsupported backend, which is exactly
+		// the kind of authz-wrapper bypass TestEveryProtectedUserPathRejectsUnauthenticated
+		// exists to catch.
+		mux.HandleFunc("GET "+PathManagementRunners, m.authzWrap(OpManagementRunnerList, false, m.handleListRunners, func(*http.Request) (string, string, string, string) {
+			return "management/runners", "", "", ""
+		}))
 		// Namespace boundary (Task 7.3): the execution-inspect route injects the
 		// verified principal's Namespace into the request context. Inspect reads
 		// from the principal's namespace namespace; a cross-namespace execID resolves
@@ -79,6 +133,55 @@ func (m *managementModule) RegisterHTTP(mux *http.ServeMux) {
 		mux.HandleFunc("GET "+PathManagementExecByID, m.authzWrap(OpManagementRead, false, m.handleExecution, func(r *http.Request) (string, string, string, string) {
 			id := r.PathValue("id")
 			return "management/execution/" + id, "", id, ""
+		}))
+		// Registration-code CRUD + audit (Task 8). Unlike leader/runner/exec
+		// above, these four have NO bare fallback in the else branch below, and
+		// unlike dead-letters they do not self-wrap unconditionally either: per
+		// the Task 8 addendum (Ruling Y, security-critical), a server with no
+		// PrincipalAuthenticator configured must not expose an endpoint that
+		// mints runner credentials at all — not even a bare (unauthenticated)
+		// version of it. So the mount is gated on principalAuth alone (never on
+		// m.codes/m.issued — see the struct field comment above for why), and
+		// principalAuth==nil leaves these routes genuinely unregistered → 404.
+		//
+		// Namespace boundary (Task 8 fix1 Important-3): all four leave
+		// ResourceNamespace empty in their authzWrap resolver funcs below, and
+		// — unlike handleExecution's cross-namespace-read-404 pattern — there is
+		// NO namespace-scoped store read backing that emptiness here.
+		// Registration-code management is a deliberate platform-level global
+		// operation (spec §2.3.4: list ALL codes); the store reads by id or
+		// unconditionally, and xflow_registration_codes carries no owning
+		// namespace column (AllowedNamespaces is what a code GRANTS, not who it
+		// belongs to). The entire boundary for these four operations is the
+		// scope check (management.registration_code.create/list/revoke/audit)
+		// itself — see the matching note on NamespaceAwareAuthorizer in
+		// authz.go. Do not add a namespace ceiling check here or a namespace
+		// filter to the store; that would conflict with the global-listing
+		// design.
+		//
+		// Trust assumption this places on scope-granting policy (confirmed
+		// against cmd/server/main.go's auth-tokens-file loader): that file is
+		// free-form JSON binding a token to an arbitrary (Namespace, Scopes)
+		// pair — nothing in code stops an operator from granting
+		// management.registration_code.create to a token whose Namespace is a
+		// single tenant, and that token could then mint a code with
+		// allowed_namespaces:["*"]. These four scopes must only ever be granted
+		// to platform administrators, never to a tenant-scoped principal; the
+		// boundary is entirely in how scopes are provisioned, not enforced in
+		// this code. That gap in operator configuration is a separate,
+		// deliberately out-of-scope concern for this fix (tracked for final
+		// review), not something this comment claims is closed.
+		mux.HandleFunc("POST "+PathManagementRegistrationCodes, m.authzWrap(OpRegistrationCodeCreate, true, m.handleCreateRegistrationCode, func(*http.Request) (string, string, string, string) {
+			return "management/registration-codes", "", "", ""
+		}))
+		mux.HandleFunc("GET "+PathManagementRegistrationCodes, m.authzWrap(OpRegistrationCodeList, false, m.handleListRegistrationCodes, func(*http.Request) (string, string, string, string) {
+			return "management/registration-codes", "", "", ""
+		}))
+		mux.HandleFunc("DELETE "+PathManagementRegistrationCodeByID, m.authzWrap(OpRegistrationCodeRevoke, true, m.handleRevokeRegistrationCode, func(r *http.Request) (string, string, string, string) {
+			return "management/registration-codes/" + r.PathValue("id"), "", "", ""
+		}))
+		mux.HandleFunc("GET "+PathManagementRegistrationCodeAudit, m.authzWrap(OpRegistrationCodeAudit, false, m.handleRegistrationCodeAudit, func(r *http.Request) (string, string, string, string) {
+			return "management/registration-codes/" + r.PathValue("id") + "/audit", "", "", ""
 		}))
 	} else {
 		mux.HandleFunc("GET "+PathManagementLeader, m.handleLeader)
@@ -211,9 +314,10 @@ func (m *managementModule) handleLeader(w http.ResponseWriter, r *http.Request) 
 	writeData(w, r, http.StatusOK, leaderResponse{IsLeader: m.cp.IsLeader()})
 }
 
-// handleRunner looks up a single runner snapshot by id. The runner directory
-// has no list API, so listing is intentionally unsupported. The id is the {id}
-// path value the mux matched.
+// handleRunner looks up a single runner snapshot by id. See handleListRunners
+// for the separate listing route, which is only supported when the configured
+// directory implements runnerLister. The id is the {id} path value the mux
+// matched.
 func (m *managementModule) handleRunner(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodGet) {
 		return
@@ -234,6 +338,99 @@ func (m *managementModule) handleRunner(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeData(w, r, http.StatusOK, snap)
+}
+
+// runnerListItem is the JSON projection for one entry in GET
+// PathManagementRunners.
+type runnerListItem struct {
+	RunnerID string `json:"runner_id"`
+	// Enrolled reports whether this runner's credential came from the enrollment
+	// endpoint rather than a static policy file. It is what tells an operator
+	// which half of the fleet a revoked registration code would affect.
+	Enrolled bool `json:"enrolled"`
+}
+
+// handleListRunners enumerates the runner directory, when the configured
+// directory structurally supports it (m.runners != nil — see runnerLister).
+//
+// Two distinct "this doesn't work" conditions live in this handler and they
+// are deliberately NOT unified (Task 9 addendum Ruling 6):
+//   - m.runners == nil: the runner directory does not implement runnerLister.
+//     This is spec §2.3.2's mandated 501 runner_listing_unsupported — the
+//     feature exists (single-runner lookup does work) but this backend cannot
+//     answer "list them all". Returning an empty array here would make "no
+//     runners online" and "this backend cannot answer" the same picture, and
+//     those are exactly the two cases an operator needs to tell apart.
+//   - m.issued.List returning an error (see below): a different question
+//     ("who among them enrolled") that this backend also cannot answer, for a
+//     different reason (a corrupted issued-identity row, not a missing
+//     capability). It gets its own 500, not folded into the 501 above.
+//
+// This is unlike registrationCodeUnavailable's 404 (m.codes == nil): that 404
+// means the registration-code feature is not configured on this server at
+// all. The 501 here means the feature IS configured but the directory
+// implementation cannot enumerate. Different conditions, kept separate.
+func (m *managementModule) handleListRunners(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+	if m.runners == nil {
+		// Not "no runners" — "this backend cannot answer the question". The two
+		// must not collapse into the same response.
+		writeFail(w, r, http.StatusNotImplemented, "runner_listing_unsupported",
+			"the configured runner directory does not support enumeration")
+		return
+	}
+	// This is a third distinct failure mode, alongside the two documented above
+	// this function: the directory structurally supports enumeration (we got
+	// past the m.runners == nil check) but answering THIS call failed -- e.g. a
+	// transient backend outage. That is "the directory itself cannot answer
+	// right now", not "the directory has zero runners"; degrading it to an
+	// empty list (fix1 mutation drill: swapping this branch for
+	// writeData(w, r, http.StatusOK, []runnerListItem{}) reproduces exactly
+	// that regression) would silently manufacture the "nothing is online"
+	// picture this handler's 501 branch exists to avoid. Generic 500 + no
+	// err.Error() in the body, same as the m.issued.List branch below (org
+	// security policy §7: production exceptions return a generic message,
+	// detail stays server-side) -- TestRunnersListReturns500WhenListRunnersFails
+	// pins both the status and the no-leak requirement.
+	ids, err := m.runners.ListRunners(r.Context())
+	if err != nil {
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	enrolled := map[string]bool{}
+	if m.issued != nil {
+		list, err := m.issued.List(r.Context())
+		if err != nil {
+			// Not "nobody is enrolled" -- "we cannot tell who is enrolled".
+			// Reporting enrolled:false for the whole fleet here would misinform
+			// the exact decision this field exists to inform (which runners a
+			// revoked registration code affects). Same principle as the 501
+			// above: a question we cannot answer must not be answered wrongly
+			// (Task 9 addendum Ruling 4). This is a distinct failure mode from
+			// m.issued == nil below: List erroring means the store IS
+			// configured but a row in it is corrupt (store.ErrEnrollScopeCorrupted
+			// after Task 7's fix) and cannot be trusted, not that enrollment
+			// data is genuinely absent.
+			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+			return
+		}
+		for _, id := range list {
+			enrolled[id.RunnerID] = true
+		}
+	}
+	// m.issued == nil (this server has no issued-identity store configured at
+	// all) falls through with enrolled left empty -- every runner reports
+	// false. That is a true value, not a degraded one: without an
+	// issued-identity store there genuinely are no enroll-issued runners to
+	// report, unlike the List-error case above where the data exists but
+	// cannot be read.
+	out := make([]runnerListItem, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, runnerListItem{RunnerID: id, Enrolled: enrolled[id]})
+	}
+	writeData(w, r, http.StatusOK, out)
 }
 
 // handleExecution inspects a single execution by id. It delegates to
@@ -531,4 +728,155 @@ func (m *managementModule) deadLetterAuditSink(observer engine.OutboxObserver) e
 		// audit trail.
 		fmt.Fprintln(os.Stderr, line)
 	})
+}
+
+// registrationCodeUnavailable answers 404 route_not_found when this server was
+// built without a registration-code store. The route IS mounted (see
+// RegisterHTTP's field comment on codes/issued for why), so an authorized
+// caller reaches this function rather than a genuinely-missing pattern; the
+// response is the same 404 either way, which is the honest answer for a
+// feature that does not exist on this server.
+func registrationCodeUnavailable(w http.ResponseWriter, r *http.Request) {
+	writeFail(w, r, http.StatusNotFound, "route_not_found", "route not found")
+}
+
+type registrationCodeCreateRequest struct {
+	AllowedNamespaces []string `json:"allowed_namespaces"`
+	AllowedNodeTypes  []string `json:"allowed_node_types"`
+}
+
+// registrationCodeCreateResponse is the ONLY place the plaintext code ever
+// appears. It is not recoverable afterwards — not from the list endpoint, not
+// from the database.
+type registrationCodeCreateResponse struct {
+	ID   string `json:"id"`
+	Code string `json:"code"`
+}
+
+// registrationCodeView is the list projection. It deliberately carries neither
+// the plaintext nor the hash: publishing sha256(code) would make every code
+// offline-crackable by anyone who can read the list.
+type registrationCodeView struct {
+	ID                string   `json:"id"`
+	AllowedNamespaces []string `json:"allowed_namespaces"`
+	AllowedNodeTypes  []string `json:"allowed_node_types"`
+	Revoked           bool     `json:"revoked"`
+	CreatedAt         string   `json:"created_at"`
+}
+
+type enrollAuditView struct {
+	Success  bool   `json:"success"`
+	Reason   string `json:"reason,omitempty"`
+	RunnerID string `json:"runner_id,omitempty"`
+	SourceIP string `json:"source_ip,omitempty"`
+	At       string `json:"at"`
+}
+
+func (m *managementModule) handleCreateRegistrationCode(w http.ResponseWriter, r *http.Request) {
+	if m.codes == nil {
+		registrationCodeUnavailable(w, r)
+		return
+	}
+	var req registrationCodeCreateRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	id, plaintext, err := control.GenerateRegistrationCode()
+	if err != nil {
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	code := control.RegistrationCode{
+		ID:                id,
+		CodeHash:          control.HashSecret(plaintext),
+		AllowedNamespaces: req.AllowedNamespaces,
+		AllowedNodeTypes:  req.AllowedNodeTypes,
+		CreatedAt:         time.Now().UTC(),
+	}
+	if err := m.codes.Create(r.Context(), code); err != nil {
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	writeData(w, r, http.StatusOK, registrationCodeCreateResponse{ID: id, Code: plaintext})
+}
+
+func (m *managementModule) handleListRegistrationCodes(w http.ResponseWriter, r *http.Request) {
+	if m.codes == nil {
+		registrationCodeUnavailable(w, r)
+		return
+	}
+	list, err := m.codes.List(r.Context())
+	if err != nil {
+		// store.ErrEnrollScopeCorrupted (a scope column that failed to decode)
+		// or any other store failure must not reach the caller as err.Error() —
+		// that could echo internal storage detail (org security policy §7:
+		// production exceptions return a generic message, detail stays
+		// server-side). This is deliberately NOT swallowed into an empty list:
+		// a corrupted row failing the WHOLE list is the store's contract (Task
+		// 7), and turning that into a silent empty page would hide the
+		// corruption from the one surface an operator could act on it from.
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	out := make([]registrationCodeView, 0, len(list))
+	for _, c := range list {
+		out = append(out, registrationCodeView{
+			ID:                c.ID,
+			AllowedNamespaces: c.AllowedNamespaces,
+			AllowedNodeTypes:  c.AllowedNodeTypes,
+			Revoked:           c.Revoked,
+			CreatedAt:         c.CreatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	writeData(w, r, http.StatusOK, out)
+}
+
+func (m *managementModule) handleRevokeRegistrationCode(w http.ResponseWriter, r *http.Request) {
+	if m.codes == nil {
+		registrationCodeUnavailable(w, r)
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeFail(w, r, http.StatusNotFound, "registration_code_not_found", "registration code not found")
+		return
+	}
+	err := m.codes.Revoke(r.Context(), id)
+	if errors.Is(err, control.ErrRegistrationCodeNotFound) {
+		writeFail(w, r, http.StatusNotFound, "registration_code_not_found", "registration code not found")
+		return
+	}
+	if err != nil {
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	writeData(w, r, http.StatusOK, map[string]string{"id": id, "status": "revoked"})
+}
+
+func (m *managementModule) handleRegistrationCodeAudit(w http.ResponseWriter, r *http.Request) {
+	if m.codes == nil {
+		registrationCodeUnavailable(w, r)
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeFail(w, r, http.StatusNotFound, "registration_code_not_found", "registration code not found")
+		return
+	}
+	records, err := m.codes.EnrollAudit(r.Context(), id)
+	if err != nil {
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	out := make([]enrollAuditView, 0, len(records))
+	for _, rec := range records {
+		out = append(out, enrollAuditView{
+			Success:  rec.Success,
+			Reason:   rec.Reason,
+			RunnerID: rec.RunnerID,
+			SourceIP: rec.SourceIP,
+			At:       rec.At.UTC().Format(time.RFC3339),
+		})
+	}
+	writeData(w, r, http.StatusOK, out)
 }

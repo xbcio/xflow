@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -74,6 +75,20 @@ func WithAuthenticator(a Authenticator) ServerOption {
 		if a != nil {
 			s.core.auth = a
 		}
+	}
+}
+
+// WithEnroll turns on the enrollment endpoint. Passing a nil store leaves it
+// off — enroll is opt-in, and a server that never calls this rejects every
+// attempt with the standard message.
+func WithEnroll(codes RegistrationCodeStore, ids IssuedIdentityStore) ServerOption {
+	return func(s *Server) {
+		if codes == nil || ids == nil {
+			return
+		}
+		s.core.registrationCodes = codes
+		s.core.issuedIdentities = ids
+		s.core.enrollLimiter = newEnrollLimiter(defaultEnrollFailureLimit, defaultEnrollLockout)
 	}
 }
 
@@ -323,6 +338,39 @@ func (s *Server) HandleReportMetrics(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// HandleEnroll serves the unauthenticated enrollment endpoint. Every rejection
+// — unknown code, revoked code, out-of-scope, rate-limited, and "enroll is not
+// configured" — returns the same status and the same body.
+func (s *Server) HandleEnroll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	// This is the one endpoint in the runner protocol that requires no
+	// credential to reach, so an unbounded body read here is a
+	// memory-exhaustion surface open to anyone. Same cap and shape as
+	// HandleReportMetrics's MaxBytesReader — reusing the existing limit
+	// rather than inventing a new number.
+	limited := http.MaxBytesReader(w, r.Body, int64(protocol.MaxRunnerMetricsBytes))
+	var req protocol.EnrollRequest
+	if err := json.NewDecoder(limited).Decode(&req); err != nil {
+		// A malformed body is still a rejected enrollment attempt as far as the
+		// caller can tell. Reporting "bad JSON" separately would distinguish
+		// "your request was well-formed but wrong" from "your request was
+		// malformed", which is a small oracle but an oracle.
+		writeError(w, http.StatusForbidden, "enrollment rejected")
+		return
+	}
+	resp, err := s.core.Enroll(r.Context(), req, httpTransportInfo(r))
+	if err != nil {
+		writeError(w, http.StatusForbidden, "enrollment rejected")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
 // overrideTokenFromHeader gives Authorization: Bearer priority over the body
 // AuthToken field. Header transport is preferred per the spec.
 func overrideTokenFromHeader(r *http.Request, dst *string) {
@@ -332,10 +380,11 @@ func overrideTokenFromHeader(r *http.Request, dst *string) {
 }
 
 // httpTransportInfo extracts TLS peer identity from the request when the
-// connection is a verified client mTLS session. Returns an empty struct on
-// plaintext HTTP so the authenticator's mTLS branch will reject.
+// connection is a verified client mTLS session. SourceIP is always populated
+// (empty TLS fields on plaintext HTTP so the authenticator's mTLS branch will
+// reject).
 func httpTransportInfo(r *http.Request) TransportInfo {
-	info := TransportInfo{}
+	info := TransportInfo{SourceIP: sourceIPOf(r)}
 	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 		return info
 	}
@@ -343,6 +392,27 @@ func httpTransportInfo(r *http.Request) TransportInfo {
 	info.TLSPeerCN = cert.Subject.String()
 	info.TLSPeerSAN = append(info.TLSPeerSAN, cert.DNSNames...)
 	return info
+}
+
+// sourceIPOf strips the port from RemoteAddr. X-Forwarded-For is deliberately
+// ignored: it is caller-controlled, so honoring it would let anyone reset
+// their own enroll lockout by rotating a header value.
+//
+// It can return "": r == nil; RemoteAddr == "" (net.SplitHostPort errors, and
+// the empty string is returned as-is); RemoteAddr with an empty host, e.g.
+// ":1234" (SplitHostPort succeeds and yields host == ""); and Unix domain
+// socket listeners, which commonly report RemoteAddr as "" or "@". Callers
+// that bucket by SourceIP (the enroll rate limiter) must treat "" as "no
+// source to bucket by" and refuse rather than share one bucket.
+func sourceIPOf(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {

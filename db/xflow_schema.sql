@@ -105,6 +105,49 @@ CREATE TABLE IF NOT EXISTS xflow_artifacts (
     INDEX idx_content_hash (content_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- 注册码。明文永不落库，只存 sha256 的 32 字节原文（不是 hex）。
+-- code_hash 必须是 BINARY(32)：任何会截断或补齐的列类型都会让此后每一次
+-- 查找都对不上，而且是静默对不上。
+CREATE TABLE IF NOT EXISTS xflow_registration_codes (
+    id                 VARCHAR(64)  NOT NULL              COMMENT '注册码 ID',
+    code_hash          BINARY(32)   NOT NULL              COMMENT 'sha256(明文)，原始 32 字节，非 hex',
+    allowed_namespaces TEXT                                COMMENT '允许的 namespace JSON 数组；"*" 表示不限',
+    allowed_node_types TEXT                                COMMENT '允许的节点类型 JSON 数组；"*" 表示不限',
+    revoked            TINYINT(1)   NOT NULL DEFAULT 0    COMMENT '是否已吊销',
+    created_at         DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    PRIMARY KEY (id),
+    UNIQUE INDEX uk_code_hash (code_hash)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 每一次 enroll 尝试，成功与失败都记。reason 是服务端理由，故意不回给调用方，
+-- 这张表是它唯一的落脚处；不记失败，暴力破解就在服务端完全不可见。
+CREATE TABLE IF NOT EXISTS xflow_enroll_audit (
+    id         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    code_id    VARCHAR(64)     NOT NULL DEFAULT ''  COMMENT '关联的注册码 ID；未解析出码时为空',
+    success    TINYINT(1)      NOT NULL              COMMENT '本次尝试是否成功',
+    reason     VARCHAR(255)    NOT NULL DEFAULT ''  COMMENT '服务端拒绝理由，绝不回传调用方',
+    runner_id  VARCHAR(128)    NOT NULL DEFAULT ''  COMMENT '签发成功时的 runner ID',
+    source_ip  VARCHAR(64)     NOT NULL DEFAULT ''  COMMENT '来源 IP，限流按此分桶',
+    at         DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    INDEX idx_enroll_audit_code (code_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- enroll 签发出的 runner 身份。与注册码各自独立吊销：吊销一张泄漏的码，
+-- 不应该把靠它上线的每个 runner 一起打掉。
+-- id_prefix 对应 RunnerPolicy 的第四个字段；enroll 今天从不写非空值，但列
+-- 必须存在，否则将来注册码一旦带上 id_prefix 上限，本表会静默丢弃它。
+CREATE TABLE IF NOT EXISTS xflow_issued_identities (
+    runner_id        VARCHAR(128) NOT NULL              COMMENT 'enroll 生成的 runner ID',
+    token_hash       BINARY(32)   NOT NULL              COMMENT 'sha256(token)，原始 32 字节，非 hex',
+    id_prefix        VARCHAR(64)  NOT NULL DEFAULT ''  COMMENT 'RunnerPolicy.IDPrefix；enroll 今天恒为空',
+    scope_namespaces TEXT                                COMMENT '签发时确定的 namespace 范围 JSON 数组',
+    scope_node_types TEXT                                COMMENT '签发时确定的节点类型范围 JSON 数组',
+    code_id          VARCHAR(64)  NOT NULL DEFAULT ''  COMMENT '签发所用的注册码 ID',
+    issued_at        DATETIME(3)  NULL                  COMMENT '签发时间；契约测试允许零值，故列可空，语义同 last_fetch_at',
+    PRIMARY KEY (runner_id),
+    INDEX idx_issued_identity_code (code_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- 授权 / 变更审计事件（append-only，不可变）
 -- B3 durable audit sink 的权威 reconcile 目标。仅记录身份、操作、资源 ID、
 -- 决策、原因、outcome、trace 关联；绝不含 token/payload/凭证等敏感字段。

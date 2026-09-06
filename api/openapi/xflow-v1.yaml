@@ -606,6 +606,43 @@ paths:
         default:
           $ref: "#/components/responses/DefaultError"
 
+  /v1/management/runners:
+    get:
+      operationId: listRunners
+      summary: Enumerate the runner directory
+      description: |
+        Lists every runner id known to the directory, with whether each was
+        issued its credential through the enrollment endpoint (`enrolled:
+        true`) or a static policy file (`enrolled: false`). This is what tells
+        an operator which runners a revoked registration code would affect.
+
+        Returns 501 `runner_listing_unsupported` when the configured runner
+        directory does not structurally support enumeration, rather than an
+        empty array — an empty list and "this backend cannot answer" must
+        stay visibly distinct.
+      tags: [Management]
+      parameters:
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: Runner list.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/RunnerListItem"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
   /v1/management/runners/{id}:
     get:
       operationId: getRunner
@@ -741,6 +778,153 @@ paths:
         default:
           $ref: "#/components/responses/DefaultError"
 
+  /v1/management/registration-codes:
+    post:
+      operationId: createRegistrationCode
+      summary: Mint a runner registration code
+      description: |
+        Mints a one-time-use registration code a runner presents to the
+        enroll endpoint to obtain a signed identity. The plaintext code is
+        returned exactly once, in this response; it is never recoverable
+        afterwards, including from the list endpoint below.
+
+        Platform-level global operation: not scoped to the caller's
+        namespace. Grant this scope only to platform administrators.
+      tags: [Management]
+      parameters:
+        - $ref: "#/components/parameters/XRequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegistrationCodeCreateRequest"
+      responses:
+        "200":
+          description: The newly minted code (plaintext, one-time).
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/RegistrationCodeCreateResponse"
+        default:
+          $ref: "#/components/responses/DefaultError"
+    get:
+      operationId: listRegistrationCodes
+      summary: List registration codes
+      description: |
+        Lists minted registration codes. Neither the plaintext code nor its
+        hash is ever included — only the id, scope, revocation status, and
+        creation time.
+
+        Platform-level global operation: returns ALL registration codes
+        across every namespace, not scoped to the caller's namespace. Grant
+        this scope only to platform administrators.
+      tags: [Management]
+      parameters:
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: Registration code list.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/RegistrationCodeView"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/management/registration-codes/{id}:
+    delete:
+      operationId: revokeRegistrationCode
+      summary: Revoke a registration code
+      description: |
+        Revokes a registration code so it can no longer be redeemed by the
+        enroll endpoint. Already-issued runner identities are unaffected;
+        revoking a code does not revoke identities minted from it. Revoking
+        an unknown id is a 404, not a silent success.
+
+        Platform-level global operation: not scoped to the caller's
+        namespace — any registration code id may be revoked regardless of
+        which namespace(s) it grants. Grant this scope only to platform
+        administrators.
+      tags: [Management]
+      parameters:
+        - $ref: "#/components/parameters/RegistrationCodeId"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: Revocation acknowledged.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                          status:
+                            type: string
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/management/registration-codes/{id}/audit:
+    get:
+      operationId: getRegistrationCodeAudit
+      summary: Read the enroll audit trail for a registration code
+      description: |
+        Returns every enroll attempt (successful or failed) recorded against
+        this registration code id, oldest first.
+
+        Platform-level global operation: not scoped to the caller's
+        namespace. Grant this scope only to platform administrators.
+      tags: [Management]
+      parameters:
+        - $ref: "#/components/parameters/RegistrationCodeId"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: Enroll audit records.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/EnrollAuditView"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
   /healthz:
     get:
       operationId: healthz
@@ -846,6 +1030,13 @@ components:
       in: path
       required: true
       description: Execution id whose dead-letters to list/replay.
+      schema:
+        type: string
+    RegistrationCodeId:
+      name: id
+      in: path
+      required: true
+      description: Registration code id.
       schema:
         type: string
     XRequestId:
@@ -1090,6 +1281,19 @@ components:
       type: string
       enum: [pending, running, committing, success, failed, skipped, suspended, continued, canceled, waiting]
 
+    RunnerListItem:
+      type: object
+      description: One entry in the runner directory listing.
+      required: [runner_id, enrolled]
+      properties:
+        runner_id:
+          type: string
+        enrolled:
+          type: boolean
+          description: |
+            Whether this runner's credential came from the enrollment endpoint
+            rather than a static policy file.
+
     RunnerSnapshot:
       type: object
       description: Read-only registration and liveness view of one runner.
@@ -1229,6 +1433,80 @@ components:
           type: string
         activation_id:
           type: string
+
+    RegistrationCodeCreateRequest:
+      type: object
+      description: |
+        The scope granted to runners that enroll with the minted code
+        (store.RunnerPolicy). Both fields are optional; an empty list means
+        "no restriction" and is honored by RunnerPolicy.AllowsNamespace at
+        enroll time.
+      properties:
+        allowed_namespaces:
+          type: array
+          items:
+            type: string
+        allowed_node_types:
+          type: array
+          items:
+            type: string
+
+    RegistrationCodeCreateResponse:
+      type: object
+      description: |
+        The ONLY place the plaintext code ever appears in this API. It is not
+        recoverable afterwards — not from the list endpoint, not from the
+        database (only its hash is persisted).
+      required: [id, code]
+      properties:
+        id:
+          type: string
+        code:
+          type: string
+          description: One-time plaintext registration code. Not returned again.
+
+    RegistrationCodeView:
+      type: object
+      description: |
+        The list projection of a registration code. Deliberately carries
+        neither the plaintext nor its hash: publishing sha256(code) would make
+        every code offline-crackable by anyone who can read the list.
+      required: [id, revoked, created_at]
+      properties:
+        id:
+          type: string
+        allowed_namespaces:
+          type: array
+          items:
+            type: string
+        allowed_node_types:
+          type: array
+          items:
+            type: string
+        revoked:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    EnrollAuditView:
+      type: object
+      description: One recorded enroll attempt (successful or failed) against a registration code.
+      required: [success, at]
+      properties:
+        success:
+          type: boolean
+        reason:
+          type: string
+          description: Present only on a failed attempt.
+        runner_id:
+          type: string
+          description: Present only on a successful attempt.
+        source_ip:
+          type: string
+        at:
+          type: string
+          format: date-time
 
     WorkflowDef:
       type: object

@@ -43,8 +43,10 @@ import (
 	"github.com/xbcio/xflow/service/crypto/masterkey"
 	"github.com/xbcio/xflow/service/crypto/supplyenc"
 	"github.com/xbcio/xflow/store"
+	"github.com/xbcio/xflow/store/sqlstore"
 	"github.com/xbcio/xflow/store/sqlstore/mysqlstore"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 type serverConfig struct {
@@ -78,6 +80,10 @@ type serverConfig struct {
 	// authDryRun logs auth violations but lets the request proceed. Meant for
 	// the rollout window between adding runners.yaml and enforcing it.
 	authDryRun bool
+	// enroll turns on the runner enrollment endpoint. Registration codes are
+	// created through the management API; this flag only decides whether the
+	// endpoint exists.
+	enroll bool
 	// apiAuthToken, when non-empty, enables BearerTokenAuth on the workflow/
 	// control API (/v1/workflows, /v1/executions/*). The same token must be
 	// supplied by callers in the Authorization: Bearer <token> header. When set
@@ -175,6 +181,7 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	fs.IntVar(&cfg.concurrency, "concurrency", cfg.concurrency, "Queue consumer concurrency")
 	fs.StringVar(&cfg.authPolicy, "auth-policy", "", "Path to runners.yaml (empty = auth disabled)")
 	fs.BoolVar(&cfg.authDryRun, "auth-dry-run", false, "Log auth violations but let requests through (rollout aid)")
+	fs.BoolVar(&cfg.enroll, "enroll", false, "Enable the runner enrollment endpoint (/v1/runners/enroll)")
 	fs.StringVar(&cfg.apiAuthToken, "api-auth-token", "", "Static bearer token for workflow API authentication (sets Authorization: Bearer guard on /v1/workflows and /v1/executions/*); single-namespace → default namespace. For multi-namespace use --auth-tokens-file.")
 	fs.StringVar(&cfg.authTokensFile, "auth-tokens-file", "", "JSON file of [{token,subject,namespace,scopes}] mappings; each token binds to its own namespace (multi-namespace). Takes precedence over --api-auth-token. File must be 0600.")
 	fs.BoolVar(&cfg.requireAPIAuth, "require-api-auth", false, "Fail to start if no workflow API authenticator is configured (production fail-closed)")
@@ -439,6 +446,12 @@ func runServer(cfg serverConfig) error {
 	// G0/prod-preview projection and is NOT authoritative — production must
 	// configure --mysql-dsn. See docs/design/RELEASE-GATES.md §4.
 	var sqlStore store.Store
+	// enrollDB is the same *gorm.DB the SQL store.Store above is built on
+	// (Provider.DB()), lifted to this outer scope so the registrationCodeStore /
+	// issuedIdentityStore wiring below — which needs a *gorm.DB, not a
+	// store.Store — can reach it without opening a second connection pool.
+	// nil in the in-memory (--mysql-dsn unset) case, same as sqlStore.
+	var enrollDB *gorm.DB
 	// artifactStore serves GET/HEAD /v1/artifacts/{digest}. It needs the two
 	// concrete artifact repos rather than the store.Store interface (object
 	// storage cannot join a MySQL transaction, so those repos are deliberately
@@ -455,6 +468,7 @@ func runServer(cfg serverConfig) error {
 			return fmt.Errorf("open mysql store: %w", err)
 		}
 		sqlStore = p
+		enrollDB = p.DB()
 		artifactStore = store.NewArtifactStore(p.ArtifactObjects(), p.ArtifactIndex())
 		audit = apiserver.NewSQLAuditSink(p)
 		durableAudit = true
@@ -479,6 +493,28 @@ func runServer(cfg serverConfig) error {
 		log.Printf("xflow-server: using distributed backend (mode=%s addrs=%d master=%q tls=%v db=%d)", redisConfig.Mode, len(redisConfig.Addrs), redisConfig.MasterName, redisConfig.TLSConfig != nil, redisConfig.DB)
 	} else if cfg.redis != "" {
 		log.Printf("xflow-server: using distributed backend (redis=%s)", cfg.redis)
+	}
+
+	// registrationCodeStore / issuedIdentityStore back the runner enrollment
+	// endpoint. Both are constructed here, in one place, so there is a single
+	// pair of variables regardless of which implementation backs them.
+	//
+	// SQL-backed when --mysql-dsn is set (Task 7): issued runner identities
+	// then survive a server restart, using the same *gorm.DB connection pool
+	// as the durable execution store above (enrollDB, aliased from
+	// sqlStore's Provider.DB()) rather than opening a second one.
+	// In-memory otherwise (dev only): every enrolled runner must re-enroll
+	// after a restart.
+	var registrationCodeStore control.RegistrationCodeStore
+	var issuedIdentityStore control.IssuedIdentityStore
+	if cfg.enroll {
+		if enrollDB != nil {
+			registrationCodeStore = sqlstore.NewRegistrationCodeStore(enrollDB)
+			issuedIdentityStore = sqlstore.NewIssuedIdentityStore(enrollDB)
+		} else {
+			registrationCodeStore = control.NewMemoryRegistrationCodeStore()
+			issuedIdentityStore = control.NewMemoryIssuedIdentityStore()
+		}
 	}
 
 	// The assembly lives in sdk/xflow, not here. Every option below is a
@@ -517,6 +553,9 @@ func runServer(cfg serverConfig) error {
 	}
 	if cfg.enableRunnerMetricsProxy {
 		serverOpts = append(serverOpts, xflowsdk.WithServerRunnerMetricsProxy())
+	}
+	if cfg.enroll {
+		serverOpts = append(serverOpts, xflowsdk.WithServerEnroll(registrationCodeStore, issuedIdentityStore))
 	}
 	if cfg.management {
 		serverOpts = append(serverOpts, xflowsdk.WithServerManagement())
@@ -563,7 +602,7 @@ func runServer(cfg serverConfig) error {
 		reconciler:           rec,
 		singleToken:          singleToken,
 		masterKey:            supplyAtRest != nil,
-		runnerAuthConfigured: cfg.authPolicy != "",
+		runnerAuthConfigured: runnerAuthConfigured(cfg),
 	}); err != nil {
 		return err
 	}
@@ -603,6 +642,15 @@ func buildLogger(cfg serverConfig) (engine.Logger, error) {
 		return nil, err
 	}
 	return obslogger.NewZapLogger(log), nil
+}
+
+// runnerAuthConfigured reports whether the runner protocol has a real
+// authenticator. Either a static policy file or the enrollment endpoint counts:
+// an enroll-only production server is a supported deployment, and keying the
+// gate on --auth-policy alone would push operators into creating an empty
+// policy file just to start — auth theater that passes the check.
+func runnerAuthConfigured(cfg serverConfig) bool {
+	return cfg.authPolicy != "" || cfg.enroll
 }
 
 // buildAuthenticator resolves the runner-protocol authenticator from CLI
@@ -750,7 +798,7 @@ func validateProduction(mode string, deps productionDeps) error {
 		return fmt.Errorf("production mode requires a master encryption key (XFLOW_MASTER_KEY or --master-key-file); without it supply content is stored in plaintext. Generate with: openssl rand -base64 32")
 	}
 	if !deps.runnerAuthConfigured {
-		return fmt.Errorf("production mode requires runner protocol authentication (--auth-policy); without it any runner can register and claim work")
+		return fmt.Errorf("production mode requires runner protocol authentication (--auth-policy or --enroll); without it any runner can register and claim work")
 	}
 	return nil
 }

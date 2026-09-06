@@ -2,6 +2,7 @@ package xflow
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/xbcio/xflow/namespace"
@@ -88,6 +89,40 @@ func TestNewServerRejectsDisabledAuthenticatorPlusInsecure(t *testing.T) {
 	if err == nil {
 		t.Fatal("NewServer accepted WithServerAuth(DisabledAuthenticator{}) together with WithServerInsecureNoRunnerAuth()")
 	}
+}
+
+// TestNewServerRejectsEnrollPlusInsecure pins fix2 review item 3:
+// WithServerEnroll(...) + WithServerInsecureNoRunnerAuth() is two
+// contradictory postures declared at once, exactly like
+// WithServerAuth + WithServerInsecureNoRunnerAuth above. insecureNoRunnerAuth
+// has no effect beyond the two posture checks in NewServer (verified: it is
+// read nowhere else in this package), so without this check the combination
+// would not fail at startup — it would silently resolve to enroll-only at
+// runtime, and a runner that expected to ride in on the insecure posture
+// alone would start getting rejected once real requests arrive instead of
+// the caller finding out immediately.
+func TestNewServerRejectsEnrollPlusInsecure(t *testing.T) {
+	codes := control.NewMemoryRegistrationCodeStore()
+	ids := control.NewMemoryIssuedIdentityStore()
+	_, err := NewServer(ServerConfig{}, WithServerEnroll(codes, ids), WithServerInsecureNoRunnerAuth())
+	if err == nil {
+		t.Fatal("NewServer accepted WithServerEnroll(...) together with WithServerInsecureNoRunnerAuth()")
+	}
+	// The error text must name the two conflicting options specifically — an
+	// operator debugging a startup failure should not have to guess which two
+	// of NewServer's several options are the contradiction.
+	if got := err.Error(); !containsAll(got, "WithServerEnroll", "WithServerInsecureNoRunnerAuth") {
+		t.Fatalf("error = %q, want it to name both WithServerEnroll and WithServerInsecureNoRunnerAuth", got)
+	}
+}
+
+func containsAll(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if !strings.Contains(s, sub) {
+			return false
+		}
+	}
+	return true
 }
 
 // TestStaticTokenAuthenticatorRejectsEmptyInputs pins the observable behavior

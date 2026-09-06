@@ -153,16 +153,31 @@ func storesFor(db *gorm.DB) store.Set {
 	}
 }
 
+// autoMigrateModels is the model list AutoMigrate applies. It is a
+// package-level var — not inlined into AutoMigrate — so
+// schema_pairing_test.go can reflect over it and assert, in both directions,
+// that it stays in lockstep with db/xflow_schema.sql's CREATE TABLE
+// statements. Without that pairing test, a model added here but not there
+// would go unnoticed: CI seeds a fresh database from db/xflow_schema.sql and
+// then calls AutoMigrate on top of it, and GORM's AutoMigrate only ever adds
+// columns/tables, never removes them — so a missing CREATE TABLE is silently
+// patched over in CI while production (which never runs AutoMigrate; see the
+// doc comment below) would be missing the table entirely.
+var autoMigrateModels = []any{
+	&dbExecution{},
+	&dbNode{},
+	&dbSignal{},
+	&dbAuditEvent{},
+	&dbSupply{},
+	&dbArtifactBlob{},
+	&dbArtifact{},
+	&dbRegistrationCode{},
+	&dbEnrollAudit{},
+	&dbIssuedIdentity{},
+}
+
 // AutoMigrate creates or updates tables. Use only for development/testing;
 // production schema is managed via db/xflow_schema.sql.
 func AutoMigrate(db *gorm.DB) error {
-	return db.AutoMigrate(
-		&dbExecution{},
-		&dbNode{},
-		&dbSignal{},
-		&dbAuditEvent{},
-		&dbSupply{},
-		&dbArtifactBlob{},
-		&dbArtifact{},
-	)
+	return db.AutoMigrate(autoMigrateModels...)
 }

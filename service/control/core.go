@@ -127,6 +127,12 @@ type Core struct {
 	// metrics at. Zero means "no opinion" — the runner keeps its local default.
 	// Negative suspends reporting fleet-wide.
 	metricsReportInterval time.Duration
+	// registrationCodes / issuedIdentities / enrollLimiter are the enroll path
+	// (spec §2.3.1). All three nil means enroll is off and every attempt gets
+	// the standard rejection.
+	registrationCodes RegistrationCodeStore
+	issuedIdentities  IssuedIdentityStore
+	enrollLimiter     *enrollLimiter
 }
 
 // leaseRecoveryEngine is deliberately optional so custom EngineFacade test

@@ -10,7 +10,6 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/xbcio/xflow/namespace"
 	"gopkg.in/yaml.v3"
 )
 
@@ -38,56 +37,20 @@ var (
 type TransportInfo struct {
 	TLSPeerCN  string
 	TLSPeerSAN []string
+	// SourceIP is the peer host with the port stripped. It is what the enroll
+	// rate limiter buckets on; bucketing on host:port would give an attacker a
+	// fresh budget per outbound connection, which is no limit at all.
+	//
+	// Behind a load balancer this is the balancer's address unless the balancer
+	// is configured to preserve the client address. Trusting a caller-supplied
+	// X-Forwarded-For here would let anyone reset their own lockout by editing
+	// a header, so it is deliberately not read.
+	SourceIP string
 }
 
-// RunnerPolicy is the effective set of permissions bound to an authenticated
-// runner. Cached on the runnerState so the dispatcher can filter node types
-// without touching the policy store on every Assign.
-type RunnerPolicy struct {
-	// Name identifies the matched policy entry for logging. Not
-	// security-relevant — the token match is what proves identity.
-	Name string
-	// IDPrefix is the required prefix of the runner's self-declared ID.
-	IDPrefix string
-	// AllowedNodeTypes is the set of node types this runner may execute.
-	// A single "*" entry means all node types.
-	AllowedNodeTypes []string
-	// AllowedNamespaces is the set of namespaces this runner may join. A single
-	// "*" entry means all namespaces. An empty set means the default namespace
-	// only — the same meaning canServeNamespace already gives an empty set, so
-	// one "empty" cannot mean "everything" in the policy layer and "default
-	// only" in the filter layer.
-	AllowedNamespaces []string
-}
-
-// Allows reports whether the policy permits the given node type. Called from
-// the dispatcher's Assign hot path — kept O(N) with N ~= handful of types.
-func (p RunnerPolicy) Allows(nodeType string) bool {
-	for _, t := range p.AllowedNodeTypes {
-		if t == "*" || t == nodeType {
-			return true
-		}
-	}
-	return false
-}
-
-// AllowsNamespace reports whether the policy permits joining ns. An empty
-// AllowedNamespaces means the default namespace only, matching
-// canServeNamespace's treatment of an empty namespace set.
-func (p RunnerPolicy) AllowsNamespace(ns namespace.Namespace) bool {
-	if ns == "" {
-		ns = namespace.Default
-	}
-	if len(p.AllowedNamespaces) == 0 {
-		return ns == namespace.Default
-	}
-	for _, a := range p.AllowedNamespaces {
-		if a == "*" || namespace.Namespace(a) == ns {
-			return true
-		}
-	}
-	return false
-}
+// RunnerPolicy is now defined in store/enroll.go (see store_types.go for the
+// alias); it moved because RegistrationCode.Policy() returns one and
+// IssuedIdentity.Scope embeds one, and store must not import service/control.
 
 // Authenticator resolves credentials to a RunnerPolicy. Register runs at
 // registration time; Ongoing runs on every heartbeat / poll / report so
@@ -125,8 +88,33 @@ func (DisabledAuthenticator) AuthenticateOngoing(string, string, TransportInfo) 
 // runner-declared X-Xflow-Namespace header) MUST use this rather than
 // `auth != nil`, or disabling auth silently makes the declaration trusted
 // unconditionally — the opposite of fail-closed.
+//
+// A MultiAuthenticator is configured when at least one of its members is — a
+// composite that holds only DisabledAuthenticator still accepts every
+// runner, and RequireRunnerAuth must not be fooled by the wrapper. This
+// ranges over m.auths directly rather than calling m.Members() (which
+// returns a defensive copy): IsConfigured runs on the artifact module's
+// per-request path (module_artifact.go), and this function lives in the same
+// package as MultiAuthenticator, so reaching into the field is both legal and
+// free of that copy's allocation.
 func IsConfigured(auth Authenticator) bool {
 	if auth == nil {
+		return false
+	}
+	if m, ok := auth.(*MultiAuthenticator); ok {
+		if m == nil {
+			// A typed-nil *MultiAuthenticator boxed into the interface: the same
+			// trap this function's own doc comment warns about, one layer up.
+			// Guarding here (cheap, no allocation) instead of delegating to
+			// Members()'s nil-receiver check is what lets this loop read m.auths
+			// directly.
+			return false
+		}
+		for _, member := range m.auths {
+			if IsConfigured(member) {
+				return true
+			}
+		}
 		return false
 	}
 	_, disabled := auth.(DisabledAuthenticator)
