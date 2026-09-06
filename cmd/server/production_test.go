@@ -1,141 +1,130 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/xbcio/xflow/service/apiserver"
-	"github.com/xbcio/xflow/service/control"
 )
 
-// realReconciler is the same worker type the SDK hands back, so "present" in
-// these tests means the thing production actually gets.
-func realReconciler() reconciler {
-	return reconcilerOrNil(control.NewAuditReconcileWorker(nil, nil, control.AuditReconcileConfig{}))
+// The production posture itself is enforced and tested in service/apiserver
+// (production.go / production_test.go), the one layer this binary and every
+// SDK embedder both pass through. What remains this binary's job, and what is
+// tested here, is the two-way translation across that boundary: deriving the
+// declaration from how the flags built things, and turning the requirements
+// the gate reports back into flag names.
+
+// TestProductionDeclarationDerivesEachFact pins the derivation. A field
+// hard-coded to true would disable the corresponding check with nothing else
+// in the system to notice.
+func TestProductionDeclarationDerivesEachFact(t *testing.T) {
+	multiToken := apiserver.NewBearerPrincipalAuthMulti(nil)
+	single := apiserver.NewBearerPrincipalAuth("tok", "op", []string{"workflow"})
+
+	t.Run("all present", func(t *testing.T) {
+		got := productionDeclaration(multiToken, false, true, true)
+		if !got.DurableAudit || !got.MultiTokenPrincipalAuth || !got.SupplyEncryptionAtRest {
+			t.Fatalf("fully-configured server declared %+v, want all true", got)
+		}
+	})
+
+	// --mysql-dsn unset: the audit sink is in-memory and forgets every
+	// mutation on restart. Declaring it durable would defeat the check.
+	t.Run("no durable audit", func(t *testing.T) {
+		if got := productionDeclaration(multiToken, false, false, true); got.DurableAudit {
+			t.Fatal("declared DurableAudit with no durable store")
+		}
+	})
+
+	// --api-auth-token: one shared token that self-grants every scope.
+	t.Run("single shared token", func(t *testing.T) {
+		if got := productionDeclaration(single, true, true, true); got.MultiTokenPrincipalAuth {
+			t.Fatal("declared MultiTokenPrincipalAuth for the single-token path")
+		}
+	})
+
+	// No principal authenticator at all: there is nothing to call multi-token.
+	t.Run("no principal auth", func(t *testing.T) {
+		if got := productionDeclaration(nil, false, true, true); got.MultiTokenPrincipalAuth {
+			t.Fatal("declared MultiTokenPrincipalAuth with no authenticator")
+		}
+	})
+
+	// No KEK: supply content lands in the store as plaintext, and supply
+	// content carries credentials. A silent downgrade would look identical to
+	// a working server from the outside — the same principle as on_invalid:
+	// a config that asked for encryption is never quietly given none.
+	t.Run("no master key", func(t *testing.T) {
+		if got := productionDeclaration(multiToken, false, true, false); got.SupplyEncryptionAtRest {
+			t.Fatal("declared SupplyEncryptionAtRest with no master key loaded")
+		}
+	})
 }
 
-// TestValidateProductionRequiresEachComponent proves Task 8 blocker 3:
-// production mode fails closed when any one of PrincipalAuthenticator,
-// Authorizer, durable AuditSink, or Reconciler is missing. Each subtest omits
-// exactly one and asserts validateProduction returns an error.
-func TestValidateProductionRequiresEachComponent(t *testing.T) {
-	auth := apiserver.NewBearerPrincipalAuth("tok", "op", []string{"workflow"})
-	durableAudit := apiserver.NewSQLAuditSink(nil) // non-nil; durableAudit flag is the real gate
-	// Note: durableAudit=false below isolates the "durability" requirement from
-	// the "presence" requirement.
-
-	base := productionDeps{
-		principalAuth:        auth,
-		authorizer:           apiserver.NamespaceAwareAuthorizer{},
-		auditSink:            durableAudit,
-		durableAudit:         true,
-		reconciler:           realReconciler(),
-		masterKey:            true,
-		runnerAuthConfigured: true,
+// TestProductionFlagHintsAreExhaustive fails when a requirement is added to
+// apiserver without a flag hint here. Without it the omission surfaces as a
+// blank "set:" line at start-up, in front of the operator least able to guess.
+func TestProductionFlagHintsAreExhaustive(t *testing.T) {
+	all := apiserver.AllProductionRequirements()
+	if len(all) == 0 {
+		t.Fatal("apiserver.AllProductionRequirements is empty")
 	}
-	if err := validateProduction("production", base); err != nil {
-		t.Fatalf("baseline production = %v, want nil (all components present)", err)
+	for _, r := range all {
+		if strings.TrimSpace(productionFlagHint[r]) == "" {
+			t.Errorf("requirement %q has no flag hint in productionFlagHint", r)
+		}
 	}
-
-	// Missing PrincipalAuthenticator.
-	if err := validateProduction("production", func(d productionDeps) productionDeps {
-		d.principalAuth = nil
-		return d
-	}(base)); err == nil {
-		t.Fatal("missing PrincipalAuth: want error, got nil")
-	}
-
-	// Missing Authorizer.
-	if err := validateProduction("production", func(d productionDeps) productionDeps {
-		d.authorizer = nil
-		return d
-	}(base)); err == nil {
-		t.Fatal("missing Authorizer: want error, got nil")
-	}
-
-	// Missing AuditSink.
-	if err := validateProduction("production", func(d productionDeps) productionDeps {
-		d.auditSink = nil
-		return d
-	}(base)); err == nil {
-		t.Fatal("missing AuditSink: want error, got nil")
-	}
-
-	// Non-durable (in-memory) AuditSink — production requires durable.
-	if err := validateProduction("production", func(d productionDeps) productionDeps {
-		d.auditSink = apiserver.NewInMemoryAuditSink()
-		d.durableAudit = false
-		return d
-	}(base)); err == nil {
-		t.Fatal("non-durable AuditSink: want error, got nil")
-	}
-
-	// Missing Reconciler.
-	if err := validateProduction("production", func(d productionDeps) productionDeps {
-		d.reconciler = nil
-		return d
-	}(base)); err == nil {
-		t.Fatal("missing Reconciler: want error, got nil")
-	}
-
-	// Missing runner protocol authenticator (--auth-policy unconfigured).
-	// DisabledAuthenticator{} is a non-nil Authenticator, so this must be
-	// caught by a dedicated field, not a nil check on an authenticator.
-	if err := validateProduction("production", func(d productionDeps) productionDeps {
-		d.runnerAuthConfigured = false
-		return d
-	}(base)); err == nil {
-		t.Fatal("missing runner auth: want error, got nil")
-	} else if !strings.Contains(err.Error(), "--auth-policy") {
-		t.Fatalf("missing runner auth error = %v, want it to mention --auth-policy", err)
+	if len(productionFlagHint) != len(all) {
+		t.Errorf("productionFlagHint has %d entries, apiserver reports %d requirements",
+			len(productionFlagHint), len(all))
 	}
 }
 
-// TestValidateProductionRejectsSingleToken proves Task 8 blocker 4: production
-// forbids the single-token --api-auth-token path (one token must not
-// self-grant operator scopes); production requires --auth-tokens-file.
-func TestValidateProductionRejectsSingleToken(t *testing.T) {
-	auth := apiserver.NewBearerPrincipalAuth("tok", "op", []string{"workflow"})
-	deps := productionDeps{
-		principalAuth: auth,
-		authorizer:    apiserver.NamespaceAwareAuthorizer{},
-		auditSink:     apiserver.NewSQLAuditSink(nil),
-		durableAudit:  true,
-		reconciler:    realReconciler(),
-		singleToken:   true,
+// TestExplainProductionGateNamesFlags proves the operator gets a flag, not
+// just a requirement slug, for every unmet requirement — and gets all of them
+// in one message rather than one per restart.
+func TestExplainProductionGateNamesFlags(t *testing.T) {
+	gate := &apiserver.ProductionGateError{Unmet: apiserver.AllProductionRequirements()}
+
+	msg := explainProductionGate(gate).Error()
+	for _, r := range apiserver.AllProductionRequirements() {
+		if !strings.Contains(msg, string(r)) {
+			t.Errorf("message does not name requirement %q:\n%s", r, msg)
+		}
+		if !strings.Contains(msg, productionFlagHint[r]) {
+			t.Errorf("message does not carry the flag hint for %q:\n%s", r, msg)
+		}
 	}
-	if err := validateProduction("production", deps); err == nil {
-		t.Fatal("single-token in production: want error, got nil")
+	// The escape hatch must be discoverable from the failure itself.
+	if !strings.Contains(msg, "--mode=dev") {
+		t.Errorf("message does not mention --mode=dev:\n%s", msg)
 	}
 }
 
-// TestValidateProductionDevAllowsInMemoryAndAnonymous proves dev mode is the
-// explicit escape hatch: an in-memory audit sink + no authenticator is allowed
-// (the caller prints the stderr warning separately).
-func TestValidateProductionDevAllowsInMemoryAndAnonymous(t *testing.T) {
-	deps := productionDeps{
-		principalAuth: nil,
-		authorizer:    nil,
-		auditSink:     apiserver.NewInMemoryAuditSink(),
-		durableAudit:  false,
-		reconciler:    nil,
+// Anything that is not a posture failure must reach the operator unchanged —
+// a translator that swallowed, say, a Redis dial error would turn every
+// start-up failure into a misleading configuration complaint.
+func TestExplainProductionGatePassesOtherErrorsThrough(t *testing.T) {
+	orig := errors.New("dial redis: connection refused")
+	if got := explainProductionGate(orig); got != orig {
+		t.Fatalf("explainProductionGate rewrote an unrelated error: %v", got)
 	}
-	if err := validateProduction("dev", deps); err != nil {
-		t.Fatalf("dev mode = %v, want nil (dev allows in-memory + anonymous)", err)
+	if explainProductionGate(nil) != nil {
+		t.Fatal("explainProductionGate(nil) is not nil")
 	}
 }
 
-// TestValidateProductionEmptyModeTreatedAsNonProduction proves an unset mode is
-// not production-enforced (parseServerConfig defaults --mode to production, so
-// this only happens when the function is called directly with a garbage value).
-func TestValidateProductionEmptyModeIsNotEnforced(t *testing.T) {
-	// An empty mode string is neither "production" nor "dev"; validateProduction
-	// treats anything != "production" as non-production (no enforcement). The
-	// parse layer rejects empty/unknown modes, so this path is only reachable
-	// via direct call — documented behavior is: production is opt-out only via
-	// an explicit non-production mode.
-	if err := validateProduction("", productionDeps{}); err != nil {
-		t.Fatalf("empty mode = %v, want nil (not enforced)", err)
+// The translated message references flag names only. A bearer token reaching
+// it would be written to stderr and to whatever collects this process's logs.
+func TestExplainProductionGateDoesNotLeakTokens(t *testing.T) {
+	gate := &apiserver.ProductionGateError{Unmet: apiserver.AllProductionRequirements()}
+	msg := explainProductionGate(gate).Error()
+
+	for _, secret := range []string{"secret-tok-xyz", "Bearer "} {
+		if strings.Contains(msg, secret) {
+			t.Fatalf("message contains %q:\n%s", secret, msg)
+		}
 	}
 }
 
@@ -165,19 +154,5 @@ func TestParseServerConfigSupportsDevMode(t *testing.T) {
 func TestParseServerConfigRejectsUnknownMode(t *testing.T) {
 	if _, err := parseServerConfig([]string{"-memory", "-mode", "staging"}); err == nil {
 		t.Fatal("parseServerConfig(-mode staging) = nil, want error")
-	}
-}
-
-// TestValidateProductionErrorMessagesDoNotLeakTokens is a belt-and-suspenders
-// check that the production validation error messages never embed a bearer
-// token (they reference flag names only).
-func TestValidateProductionErrorMessagesDoNotLeakTokens(t *testing.T) {
-	deps := productionDeps{principalAuth: apiserver.NewBearerPrincipalAuth("secret-tok-xyz", "op", []string{"workflow"})}
-	err := validateProduction("production", deps)
-	if err == nil {
-		t.Fatal("want error, got nil")
-	}
-	if strings.Contains(err.Error(), "secret-tok-xyz") {
-		t.Fatalf("validation error leaked token: %v", err)
 	}
 }

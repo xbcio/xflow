@@ -101,16 +101,38 @@ SDK 作为**瘦客户端**：自己不执行节点、不需要 Redis，通过网
 `Server.Run` 自行监听 HTTP/gRPC/metrics 地址。
 
 `cmd/server` **就是** `xflow.NewServer` 的调用方：它只做 flag/文件解析、
-master key 加载、mysqlstore/artifactStore 构造、tracing provider 生命周期、
-生产姿态校验（`validateProduction`）和信号处理，装配本身全部经 SDK。这条
+master key 加载、mysqlstore/artifactStore 构造、tracing provider 生命周期和
+信号处理，装配本身全部经 SDK。这条
 约束是有代价换来的 —— 此前两条路径各自组 `apiserver.Config`，SDK 那条漏掉了
 workflow API 认证器（`/v1/workflows` 对所有可达调用方开放，而提交的
 workflow 会在每个已连接 runner 上执行）、supply 传输层加密和 audit
 reconciler。三处都不报错，只是静默降级。新增 `apiserver.Config` 字段时必须
 同时给出 `WithServer*` 选项，否则嵌入式宿主拿不到。
 
+**生产姿态校验同理落在 `apiserver.New`**（`service/apiserver/production.go`），
+不在任何一个门面里。`cmd/server` 和 SDK 嵌入者都经过 `apiserver.New`，所以两
+条路径拿到的是同一份强制，而不是两份需要人工同步的清单。开启方式：
+`cmd/server` 用 `--mode=production`（默认），SDK 嵌入者用
+`xflow.WithServerProduction(apiserver.ProductionDeclaration{...})`。
+
+校验分两类。**能自查的**直接读 `apiserver.Config`：runner 协议认证
+（`control.IsConfigured`，或 enroll 的两个 store 齐备）、PrincipalAuthenticator、
+Authorizer、AuditSink、Store 是否可做 audit reconcile。**看不出来的**由调用方
+在 `ProductionDeclaration` 里声明：AuditSink 是否持久、PrincipalAuthenticator
+是否为多 token 注册表（而非一把共享 token）、Store 构造时是否带了 supply 静态
+加密。这三项记录的是调用方**怎么构造**依赖，不是依赖自身暴露的属性——
+`NewBearerPrincipalAuth` 和 `NewBearerPrincipalAuthMulti` 返回同一个类型，静态
+加密是 store 的构造选项而 `store.Store` 接口不暴露它；改用类型嗅探会让所有自
+定义实现因「不认识」而被拒。声明为假话即等于关掉对应那条检查，所以它属于代码
+评审要看的东西，和它描述的那段装配放在一起看。
+
+不满足时返回 `*apiserver.ProductionGateError`，一次性列出**全部**未满足项而非
+第一项（否则一次生产部署会退化成 N 轮「启动—修—重启」）；`cmd/server` 再把每
+项翻成自己的 flag 名（`explainProductionGate`）。新增 requirement 时，
+`apiserver.AllProductionRequirements` 是两侧穷尽性测试的判据。
+
 **运维**：KEK（`XFLOW_MASTER_KEY` 或 `--master-key-file`）只由 `cmd/server` 加载；
-`cmd/runner` 完全不涉及 KEK。`--mode=production`（通过 `validateProduction` 强制）
+`cmd/runner` 完全不涉及 KEK。`--mode=production`（经 `apiserver.New` 的生产姿态校验强制）
 下缺少 KEK 会导致 server **启动即退出**——进程不拉起，依赖它的管道会中断，现象
 像管道本身出问题而非 server 报错。`--mode=dev`（默认）只打 stderr 警告，不阻止
 启动。生产环境及使用 `--mode=production` 的集成测试环境，须在启动 server 前设置

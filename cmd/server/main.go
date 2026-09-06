@@ -557,6 +557,17 @@ func runServer(cfg serverConfig) error {
 	if cfg.enroll {
 		serverOpts = append(serverOpts, xflowsdk.WithServerEnroll(registrationCodeStore, issuedIdentityStore))
 	}
+	// Production posture (Task 8 blocker 3), enforced by apiserver.New — the
+	// one layer both this binary and every SDK embedder pass through. The
+	// declaration carries the three facts that layer cannot see for itself:
+	// they describe how the dependencies below were BUILT, not anything the
+	// built objects expose. Everything else the gate checks (principal auth,
+	// authorizer, audit sink, runner auth, reconcilable store) it reads
+	// directly off the config it is handed.
+	if cfg.mode == "production" {
+		serverOpts = append(serverOpts, xflowsdk.WithServerProduction(
+			productionDeclaration(principalAuth, singleToken, durableAudit, supplyAtRest != nil)))
+	}
 	if cfg.management {
 		serverOpts = append(serverOpts, xflowsdk.WithServerManagement())
 		// Gate /v1/management/* with the workflow API authenticator when
@@ -578,34 +589,13 @@ func runServer(cfg serverConfig) error {
 		Store:       sqlStore,
 	}, serverOpts...)
 	if err != nil {
-		return err
+		// Rewrite the production posture error into this binary's flags. The
+		// gate itself lives in apiserver, which is also what an SDK embedder
+		// passes through, so both get the same enforcement and each gets
+		// remediation in a vocabulary it has.
+		return explainProductionGate(err)
 	}
 
-	// Reconciler (T9): the crash-safe audit reconcile worker, built and run by
-	// the SDK. It scans admitted mutations that never received a post-handler
-	// outcome (e.g. a crash between a successful mutation and its outcome audit
-	// append), consults authoritative state WITHOUT re-executing the mutation,
-	// and appends the missing outcome idempotently. Nil (dev) when no durable
-	// audit store is configured; production requires a non-nil one so a
-	// mis-config fails closed.
-	rec := reconcilerOrNil(srv.Reconciler())
-
-	// Task 8 blocker 3: production posture enforcement. Production fails
-	// closed when any of PrincipalAuthenticator, Authorizer, durable AuditSink,
-	// or Reconciler is missing. Dev allows the in-memory audit sink, single-
-	// token, and anonymous auth with a loud stderr warning.
-	if err := validateProduction(cfg.mode, productionDeps{
-		principalAuth:        principalAuth,
-		authorizer:           apiserver.NamespaceAwareAuthorizer{},
-		auditSink:            audit,
-		durableAudit:         durableAudit,
-		reconciler:           rec,
-		singleToken:          singleToken,
-		masterKey:            supplyAtRest != nil,
-		runnerAuthConfigured: runnerAuthConfigured(cfg),
-	}); err != nil {
-		return err
-	}
 	if cfg.mode == "dev" {
 		fmt.Fprintln(os.Stderr, "xflow-server: WARNING --mode=dev: in-memory audit / single-token / anonymous auth are non-production; do not run in production")
 	}
@@ -642,15 +632,6 @@ func buildLogger(cfg serverConfig) (engine.Logger, error) {
 		return nil, err
 	}
 	return obslogger.NewZapLogger(log), nil
-}
-
-// runnerAuthConfigured reports whether the runner protocol has a real
-// authenticator. Either a static policy file or the enrollment endpoint counts:
-// an enroll-only production server is a supported deployment, and keying the
-// gate on --auth-policy alone would push operators into creating an empty
-// policy file just to start — auth theater that passes the check.
-func runnerAuthConfigured(cfg serverConfig) bool {
-	return cfg.authPolicy != "" || cfg.enroll
 }
 
 // buildAuthenticator resolves the runner-protocol authenticator from CLI
@@ -722,98 +703,56 @@ func loadAuthTokenMappings(cfg serverConfig) ([]apiserver.TokenPrincipalMapping,
 	return out, nil
 }
 
-// reconciler is a leader-gated background loop that durably settles
-// admission/outcome audit for mutations that did not reconcile before a
-// process exit (e.g. a crash between a successful mutation and its outcome
-// audit append). The real crash-safe worker
-// (service/control.AuditReconcileWorker) is built and run by the SDK; this
-// interface exists so validateProduction can require its presence — production
-// fails closed on a nil reconciler.
-type reconciler interface {
-	Run(ctx context.Context) error
-}
-
-// productionDeps bundles the production-required components so validateProduction
-// can assert each is present in a single, testable call.
-type productionDeps struct {
-	principalAuth apiserver.PrincipalAuthenticator
-	authorizer    apiserver.Authorizer
-	auditSink     apiserver.AuditSink
-	durableAudit  bool // auditSink is backed by a durable store (SQL)
-	reconciler    reconciler
-	// singleToken indicates the PrincipalAuthenticator was built from the
-	// single-token --api-auth-token path (no multi-namespace registry). Production
-	// forbids this: one static token must not self-grant operator scopes
-	// (Task 8 blocker 4). Production requires --auth-tokens-file.
-	singleToken bool
-	// masterKey reports whether a usable master encryption key was loaded.
-	masterKey bool
-	// runnerAuthConfigured reports whether the runner protocol authenticator
-	// was built from --auth-policy rather than defaulting to
-	// control.DisabledAuthenticator{}. DisabledAuthenticator is a non-nil
-	// Authenticator, so a nil check on the authenticator itself cannot tell
-	// "configured" apart from "explicitly disabled" — this field is set at the
-	// one call site that knows which one buildAuthenticator returned.
-	runnerAuthConfigured bool
-}
-
-// validateProduction enforces the Task 8 blocker 3 production posture. In
-// production mode it fails closed when any of the following is missing:
-//   - PrincipalAuthenticator (production must use --auth-tokens-file so a
-//     single token cannot self-grant all scopes; the single-token
-//     --api-auth-token path is dev-only),
-//   - Authorizer (default-deny per operation+resource),
-//   - durable AuditSink (admission audit persisted before mutations; the
-//     in-memory sink is dev-only and not authoritative),
-//   - Reconciler (the T8 seam; T9 provides the crash-safe worker).
-//   - a master encryption key (XFLOW_MASTER_KEY or --master-key-file); without
-//     it supply content would be stored in plaintext.
-//   - a configured runner protocol authenticator (--auth-policy); without it
-//     the runner-facing endpoints accept any runner via
-//     control.DisabledAuthenticator{}, which is a non-nil Authenticator and so
-//     does not trip NewServer's own posture check.
+// productionDeclaration derives the three facts apiserver's production gate
+// cannot observe for itself from how this binary built its dependencies.
 //
-// dev mode allows every combination above (in-memory audit, single-token,
-// anonymous) and is expected to print a stderr warning at startup.
-func validateProduction(mode string, deps productionDeps) error {
-	if mode != "production" {
-		return nil
+// It is a function rather than a struct literal at the call site so it can be
+// tested: a declaration is only worth what its derivation is worth, and
+// hard-coding any field to true would silently disable the corresponding
+// check with nothing to catch it.
+func productionDeclaration(principalAuth apiserver.PrincipalAuthenticator, singleToken, durableAudit, masterKeyLoaded bool) apiserver.ProductionDeclaration {
+	return apiserver.ProductionDeclaration{
+		DurableAudit: durableAudit,
+		// A nil principalAuth is caught by the gate's own principal-auth
+		// requirement; declaring "multi-token" for something that does not
+		// exist would be a claim about nothing.
+		MultiTokenPrincipalAuth: principalAuth != nil && !singleToken,
+		SupplyEncryptionAtRest:  masterKeyLoaded,
 	}
-	if deps.principalAuth == nil {
-		return fmt.Errorf("production mode requires a PrincipalAuthenticator (--auth-tokens-file); --api-auth-token is dev-only")
-	}
-	if deps.singleToken {
-		return fmt.Errorf("production mode requires --auth-tokens-file (multi-namespace token→principal/scopes registry); --api-auth-token is dev-only")
-	}
-	if deps.authorizer == nil {
-		return fmt.Errorf("production mode requires an Authorizer")
-	}
-	if deps.auditSink == nil || !deps.durableAudit {
-		return fmt.Errorf("production mode requires a durable AuditSink (--mysql-dsn); the in-memory sink is dev-only")
-	}
-	if deps.reconciler == nil {
-		return fmt.Errorf("production mode requires a Reconciler (T8 seam; T9 provides the crash-safe worker)")
-	}
-	if !deps.masterKey {
-		return fmt.Errorf("production mode requires a master encryption key (XFLOW_MASTER_KEY or --master-key-file); without it supply content is stored in plaintext. Generate with: openssl rand -base64 32")
-	}
-	if !deps.runnerAuthConfigured {
-		return fmt.Errorf("production mode requires runner protocol authentication (--auth-policy or --enroll); without it any runner can register and claim work")
-	}
-	return nil
 }
 
-// reconcilerOrNil converts the SDK's concrete worker into the productionDeps
-// interface field, mapping a nil pointer to a nil interface.
+// productionFlagHint maps each production requirement to the flags that
+// satisfy it here. apiserver states requirements in front-end-neutral terms
+// because an embedded host has no flags; this is where they become the
+// vocabulary of THIS binary's operator. TestProductionFlagHintsAreExhaustive
+// keeps it in step with apiserver.AllProductionRequirements.
+var productionFlagHint = map[apiserver.ProductionRequirement]string{
+	apiserver.RequireRunnerAuth:              "--auth-policy or --enroll",
+	apiserver.RequirePrincipalAuth:           "--auth-tokens-file",
+	apiserver.RequireMultiTokenPrincipalAuth: "--auth-tokens-file (--api-auth-token is a single shared token and is dev-only)",
+	apiserver.RequireAuthorizer:              "no flag: this binary always wires one, so reaching this is a bug worth reporting",
+	apiserver.RequireAuditSink:               "--mysql-dsn",
+	apiserver.RequireDurableAudit:            "--mysql-dsn (the in-memory sink is dev-only)",
+	apiserver.RequireAuditReconciler:         "--mysql-dsn",
+	apiserver.RequireSupplyEncryptionAtRest:  "XFLOW_MASTER_KEY or --master-key-file (generate with: openssl rand -base64 32)",
+}
+
+// explainProductionGate rewrites apiserver's production posture error into
+// this binary's terms: every unmet requirement, why it matters, and the flag
+// that fixes it. Any other error passes through untouched.
 //
-// Assigning the pointer directly would defeat the production check: a nil
-// *AuditReconcileWorker stored in an interface is not a nil interface, so
-// `deps.reconciler != nil` would be true for an absent worker and a production
-// server with a durable audit sink and nothing to settle its crash-orphaned
-// admissions would start clean.
-func reconcilerOrNil(w *control.AuditReconcileWorker) reconciler {
-	if w == nil {
-		return nil
+// The operator sees the whole list, not the first item — a server that named
+// one missing piece per start would turn a fresh production deploy into a
+// sequence of start-fix-restart cycles.
+func explainProductionGate(err error) error {
+	var gate *apiserver.ProductionGateError
+	if !errors.As(err, &gate) {
+		return err
 	}
-	return w
+	var b strings.Builder
+	fmt.Fprintf(&b, "xflow-server: --mode=production is not satisfied (%d requirement(s)); pass --mode=dev to run without them:", len(gate.Unmet))
+	for _, r := range gate.Unmet {
+		fmt.Fprintf(&b, "\n  - %s\n      why:  %s\n      set:  %s", r, r.Reason(), productionFlagHint[r])
+	}
+	return errors.New(b.String())
 }

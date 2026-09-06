@@ -111,6 +111,16 @@ type Config struct {
 	// deployments that have no external dependency to probe.
 	ReadinessChecker ReadinessChecker
 
+	// Production turns on the production posture gate in New: the server
+	// refuses to start unless every ProductionRequirement is met. Off by
+	// default so dev servers and embedded tests keep working; front ends are
+	// expected to default it ON and make dev the explicit opt-out, so that a
+	// forgotten setting fails closed.
+	Production bool
+	// ProductionDeclaration states the facts the gate cannot observe for
+	// itself. Ignored unless Production is set. See ProductionDeclaration.
+	ProductionDeclaration ProductionDeclaration
+
 	// Transport configuration. Stage 1 declares but does not use these.
 	HTTPAddr    string
 	GRPCAddr    string
@@ -180,6 +190,13 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 		if cfg.AuditSink == nil {
 			return nil, errors.New("apiserver: PrincipalAuth requires an AuditSink (mutations must be audited before execution)")
 		}
+	}
+
+	// Production posture (fail-closed). Runs before anything is constructed so
+	// a mis-configured production server never reaches a listening state, and
+	// reports every unmet requirement at once rather than one per restart.
+	if err := validateProductionPosture(cfg); err != nil {
+		return nil, err
 	}
 
 	s := &APIServer{cfg: cfg, timeouts: defaultHTTPTimeouts()}

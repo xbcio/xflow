@@ -91,6 +91,11 @@ type serverConfig struct {
 	registrationCodes control.RegistrationCodeStore
 	issuedIdentities  control.IssuedIdentityStore
 
+	// production / productionDecl feed apiserver's production posture gate.
+	// Set only by WithServerProduction.
+	production     bool
+	productionDecl apiserver.ProductionDeclaration
+
 	tracer                   tracing.Tracer
 	concurrency              int
 	enableRunnerMetricsProxy bool
@@ -232,6 +237,35 @@ func WithServerPrincipalAuth(auth apiserver.PrincipalAuthenticator, authz apiser
 		c.principalAuth = auth
 		c.authorizer = authz
 		c.auditSink = sink
+	}
+}
+
+// WithServerProduction turns on the production posture gate: NewServer refuses
+// to return a server unless every apiserver.ProductionRequirement is met, and
+// reports all the unmet ones at once as an *apiserver.ProductionGateError.
+//
+// Without it an embedded server is a dev server — it will happily run with no
+// principal authentication, an in-memory audit sink that forgets every mutation
+// on restart, and supply content stored in plaintext. Those defaults exist so
+// tests and local runs need no setup; this option is how a deployment says it
+// is not one of those.
+//
+// decl carries the three facts the gate cannot check for itself, because they
+// describe how the caller BUILT a dependency rather than anything the
+// dependency exposes: whether the audit sink is durable, whether the principal
+// authenticator is a multi-token registry rather than one shared token, and
+// whether the store was built with supply encryption at rest. Declaring a fact
+// that is not true defeats the corresponding check — the declaration is an
+// assertion by the embedder, and belongs in code review alongside the wiring it
+// describes.
+//
+// The gate lives in apiserver rather than here so that this SDK and cmd/server,
+// which are both façades over apiserver.New, cannot drift apart on what
+// production means.
+func WithServerProduction(decl apiserver.ProductionDeclaration) ServerOption {
+	return func(c *serverConfig) {
+		c.production = true
+		c.productionDecl = decl
 	}
 }
 
@@ -456,8 +490,14 @@ func NewServer(cfg ServerConfig, opts ...ServerOption) (*Server, error) {
 // nil is returned when the store is absent or does not implement the reconcile
 // scans — in both cases there are no durable admissions to settle, so a worker
 // would scan nothing. Callers that require one (production) should check.
+//
+// The "can this store be reconciled" question is answered by
+// apiserver.AuditReconcilable, the same predicate the production posture gate
+// uses. One function, two call sites: a server that passed the gate and then
+// built no worker would have a pending-audit backlog nothing ever drains, and
+// each site would consider itself correct.
 func newAuditReconciler(st store.Store, api *apiserver.APIServer, sc *serverConfig) *control.AuditReconcileWorker {
-	if st == nil {
+	if !apiserver.AuditReconcilable(st) {
 		return nil
 	}
 	ar, ok := st.(store.AuditReconciler)
@@ -514,15 +554,21 @@ func buildServerAPIConfig(cfg ServerConfig, sc *serverConfig) apiserver.Config {
 		PrincipalAuth:       sc.principalAuth,
 		Authorizer:          sc.authorizer,
 		AuditSink:           sc.auditSink,
-		Logger:              sc.logger,
-		Metrics:             sc.metrics,
-		HTTPAddr:            sc.httpAddr,
-		GRPCAddr:            sc.grpcAddr,
-		MetricsAddr:         sc.metricsAddr,
-		MetricsPath:         sc.metricsPath,
-		TLS:                 sc.tls,
-		Tracer:              sc.tracer,
-		Concurrency:         sc.concurrency,
+
+		// Production posture. Off unless WithServerProduction was passed, so
+		// embedders and tests that never declare it are untouched.
+		Production:            sc.production,
+		ProductionDeclaration: sc.productionDecl,
+
+		Logger:      sc.logger,
+		Metrics:     sc.metrics,
+		HTTPAddr:    sc.httpAddr,
+		GRPCAddr:    sc.grpcAddr,
+		MetricsAddr: sc.metricsAddr,
+		MetricsPath: sc.metricsPath,
+		TLS:         sc.tls,
+		Tracer:      sc.tracer,
+		Concurrency: sc.concurrency,
 
 		EnableRunnerMetricsProxy: sc.enableRunnerMetricsProxy,
 		RunnerMetricsInterval:    sc.runnerMetricsInterval,
