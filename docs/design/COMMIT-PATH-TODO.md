@@ -15,7 +15,7 @@ cyclic 是有测试无生产流量的路径；对接之后它承重。
 
 ## 由来
 
-`29a635e`（2026-07-16，"add atomic commit, outbox, and observers"）引入原子提交 +
+`f0fd0a0`（2026-07-16，"add atomic commit, outbox, and observers"）引入原子提交 +
 outbox，把提交路径一分为二：新的 `commitAcyclicTaskResult` 让终态写入与下游投递意图
 落在一个受栅栏的事务里；旧路径原封不动改名为 `commitLegacyTaskResult`。
 

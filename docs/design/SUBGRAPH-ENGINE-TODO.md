@@ -61,7 +61,7 @@ expression + 真 body 读作 body 形态、二选一两侧、非子图 body、ex
 多个 worker 可以同时对同一 execution 调 `FlushOutbox`，各自 `ListOutbox` 到同一条
 未 ack 的条目、各自 enqueue、各自 ack，body 因此被多跑。修复前实测：800 项的 map 在
 `concurrency=4` 下 body 跑了 826～1110 次，`concurrency=1` 下精确 800 次。扇出死锁
-修复（f3eb35a）把这个窗口放大过——每次 flush 变短，两个 worker 撞上同一批条目的
+修复（86baa88）把这个窗口放大过——每次 flush 变短，两个 worker 撞上同一批条目的
 机会变多（同样 800 项从 826 涨到 1004～1110）。
 
 本条原先记着「**这在契约内**，不是缺陷，当前无需求驱动」。契约那半仍然对——投递
@@ -76,7 +76,7 @@ expression + 真 body 读作 body 形态、二选一两侧、非子图 body、ex
 「body 存在 ⇔ ready 成员存在」等价关系不受影响。死掉的投递方留下的条目在租约失效后
 自然重新可取，at-least-once 因此完好。
 
-**「列出即租约」曾是这里的方案，实测有害，已推翻（802275d → 本次）。** 让读取顺手取
+**「列出即租约」曾是这里的方案，实测有害，已推翻（e1f6f50 → 本次）。** 让读取顺手取
 租约，等于让每一个只想看一眼的调用方都把条目从投递路径上藏走：`test/integration/` 里
 20 处只读探针传的是 `time.Now().Add(time.Second)`，而租约钟就是调用方传进来的 `before`,
 于是条目对生产的 `FlushOutbox` 也隐身 31 秒。四个集成回归由此而来（提交后队列中断不被
@@ -126,7 +126,7 @@ store 端比对 score 相等才续。少了这一步，一个卡住超过 TTL、
 
 同期发现了一个真缺陷但与节流无关：`FlushOutbox` 跑在 queue worker 协程上，而
 `memoryQueue.Enqueue` 满了会阻塞，于是**扇出宽过队列缓冲就是永久死锁**（默认
-`concurrency=4` 下四个 400 批次的并行 map 就够）。已在 `f3eb35a` 单独修复：
+`concurrency=4` 下四个 400 批次的并行 map 就够）。已在 `86baa88` 单独修复：
 `FlushOutbox` 改走可选的 `TryEnqueue`，满了把剩余意图留在 outbox 等下一轮且
 **不消耗投递预算**。回归测试 `backend/providers/local/fanout_backpressure_test.go`。
 
@@ -187,7 +187,7 @@ outbox、不动 Lua：
 consumer 的 `Queues` 置 nil → 批次任务 10s 内一条都收不到；`queueFor` 恒返回
 `default` → pending 键断言红。
 
-### `ProjectSubgraphPackage` → `ProjectGroupPackage`（2026-08-11 `bc1fb02`）
+### `ProjectSubgraphPackage` → `ProjectGroupPackage`（2026-08-11 `af5a8ad`）
 
 它投影的是 **group** 包（入参是 `unitIdx`，断言 `Kind == UnitGroup`），与
 `xflow.subgraph` 这个节点类型无关——后者的投影入口是 `ProjectNodeBodyPackage`。
@@ -197,7 +197,7 @@ consumer 的 `Queues` 置 nil → 批次任务 10s 内一条都收不到；`queu
 汇合在同一个 `execution/subgraph.Executor`（该执行器分不出 group 和 map body），
 但来源与用途不同。
 
-本条曾以「改名会动到公开 API，未做」挂在 P2。`bc1fb02` 跨 9 个文件一次改完，
+本条曾以「改名会动到公开 API，未做」挂在 P2。`af5a8ad` 跨 9 个文件一次改完，
 **未留别名**——`ProjectSubgraphPackage` 现在全树零引用。
 
 ### group / batch 租约根本不带 W3C TraceCarrier（2026-08-13 修复）
@@ -306,10 +306,10 @@ body 的 span 仍没有真正的 OTel parent」——查证时发现缺口比记
 成立，守卫随之上移到编译期（见下一节）。
 
 **订正（2026-09-02）**：本段原先的收尾写的是「`ErrNoMapBody` 本身已删除」。这句话
-在写下的那一刻就是假的，不是后来变旧的——写下它的提交 `cccc929` 根本没有动过
+在写下的那一刻就是假的，不是后来变旧的——写下它的提交 `0a333b5` 根本没有动过
 `execution/subgraph/map_body.go`，在它自己的树上该文件 `:64` 仍然是
 `errors.New("batch body request carries no package")`。这个错误此后不但没有被删，
-反而被 `ecc86c3` 提升成了命名哨兵，今天活在 `execution/subgraph/map_body.go:31`，
+反而被 `cd0497b` 提升成了命名哨兵，今天活在 `execution/subgraph/map_body.go:31`，
 可达点在同文件 `:90`，并有 `map_body_no_body_test.go`（`:45`、`:81`）两条测试钉着。
 
 之所以要留下这条订正而不是把那句话一删了事：「已删除」这个说法把
@@ -435,7 +435,7 @@ body 给值判据看**。所以这张表是三个字面量，各有一条值看�
 
 ### TS 侧 `experimental_expand?` 声明滞后（原 P2-8，2026-08-06 修复）
 
-Go 侧编译门控已在 `5a58eeb` 移除，`web/packages/xflow-core/src/index.ts:44` 的
+Go 侧编译门控已在 `f037d9e` 移除，`web/packages/xflow-core/src/index.ts:44` 的
 `WorkflowOptions.experimental_expand?` 是唯一残留声明（`dist/` 为构建产物，重新
 构建即消失）。已删除。无运行时影响。
 
@@ -518,7 +518,7 @@ apiserver+control plane+runner 三进程路径，用真实成员节点 handler
 
 原记录说「把 `xflow.map` 放进 `SubgraphPackage` 会在包校验阶段被拒，报
 `handler not available: type=xflow.map version=1`」，并建议「加显式的编译期拒绝
-比递归接线便宜得多」。**该建议未被采纳，实际走了递归接线那条路**（`c679f0c`），
+比递归接线便宜得多」。**该建议未被采纳，实际走了递归接线那条路**（`e37842e`），
 因为实测发现挡路的是两个各自独立、单独一个就足以让 group 挂住的缺陷，而非
 一个能力表问题：
 
@@ -597,7 +597,7 @@ group 成员、跑在内层还是外层引擎无关。
 `ErrGroupLeaseNotActive` 重新传播
 
 仅在 `BuildGroupLease` 报告 lease 存活时才可达，当前测试覆盖不到。先于本分支存在
-（`a092c76`）。**group 重试（Milestone B）落地时再处理。**
+（`9a4030e`）。**group 重试（Milestone B）落地时再处理。**
 
 当前代码位置：`service/control/group_control_loop.go:130-153`
 （`ErrGroupLeaseAlreadyActive` 分支；`recoverGroupLease` 失败时若返回
@@ -627,7 +627,7 @@ Milestone B 的占位符在 `engine/group_exec.go:59`（`Attempt: 1` 注释明�
 | P2-5 | map 专属判断写死 `xflow.map`；`xflow.http` 带请求体读不回来 | `engine/graph/compile.go`（`declaresSubgraphBody`），`engine/graph/subgraph_body_criterion_test.go` |
 | P2-6 | 扩展判据嗅 payload；标记键 `_loop`/`_split` 未移除 | `engine/expansion_criterion_test.go`，`engine/expand.go`（`g.BodyAt` 判据） |
 | P2-7 | `TransformSpec` 无消费者；两侧空 expression 判定不一致 | `types/transform.go`（`ParseTransformSpec`），`types/transform_test.go` |
-| P2-8 | `ProjectSubgraphPackage` 名字有歧义 | `bc1fb02`（重命名为 `ProjectGroupPackage`） |
+| P2-8 | `ProjectSubgraphPackage` 名字有歧义 | `af5a8ad`（重命名为 `ProjectGroupPackage`） |
 | P2-9 | `dependency.go` 的 `_ = supplyIdx` | `engine/graph/dependency.go`（已改为丢弃并加注释） |
 | group/batch carrier 缺失 | 租约不带 W3C TraceCarrier | `service/control/lease_trace_carrier_test.go`，`service/control/core.go`（`startDispatchSpan`） |
 | trace 断链 | body/group 成员 trace 身份在子执行处断 | `backend/providers/local/local_subgraph_trace_test.go`，`engine/subgraph_lease_test.go` |

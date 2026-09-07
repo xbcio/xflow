@@ -31,11 +31,11 @@ worktree 中，从未进 git，穷尽检索后确认无法恢复。这 10 条按
 | # | 内容 | 处置 |
 |---|---|---|
 | 1 | Task 6 `DependsOn` 不去重 | 编译期 map 兜住（`dependency.go:58-61`），不改语义 |
-| 2 | Task 15 `UnregisterConsumer` 不翻转 accepted | `c00c35a` 把 readiness 改成派生合取而消除 |
-| 3 | Task 15 `Registry.Ready` 与 `IsReady` 分叉 | `80856d8` 把 `Ready` 重写为基于 `IsReady` |
-| 4 | Task 17 doom 的 timeout 分类无承重测试 | `b2606a4` 已修 |
-| 5 | Task 17 `OnPoolSwap` 注释列了不存在的 `source_error` | `b2606a4` 已修 |
-| 6 | Task 17 `node/wasm_observer_test.go` gofmt | `b2606a4` 已修 |
+| 2 | Task 15 `UnregisterConsumer` 不翻转 accepted | `af706ae` 把 readiness 改成派生合取而消除 |
+| 3 | Task 15 `Registry.Ready` 与 `IsReady` 分叉 | `a5d3b60` 把 `Ready` 重写为基于 `IsReady` |
+| 4 | Task 17 doom 的 timeout 分类无承重测试 | `4844771` 已修 |
+| 5 | Task 17 `OnPoolSwap` 注释列了不存在的 `source_error` | `4844771` 已修 |
+| 6 | Task 17 `node/wasm_observer_test.go` gofmt | `4844771` 已修 |
 | 7 | hash 稳定性测试只查前缀不钉死字面值 | 已修：`engine/graph/snapshot_supply_test.go:73`（`graphHashPayload`）与 `sdk/xflow/supply_identity_test.go:30`（`runtimeHashPayload`）均改为钉死字面值 |
 
 ## 已关闭（保留索引）
