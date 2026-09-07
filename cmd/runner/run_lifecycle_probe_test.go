@@ -88,39 +88,62 @@ func TestRunRunnerServesLifecycleProbesOverMetricsAddr(t *testing.T) {
 	const maxAttempts = 3
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		addr := freeLoopbackAddr(t)
-		ctx, cancel := context.WithCancel(context.Background())
-		done := make(chan error, 1)
-		go func() {
-			done <- executeRootWithOptions(commandOptions{
-				runFunc: func(cfg runnerConfig) error {
-					return runRunner(ctx, cfg)
-				},
-				out: &bytes.Buffer{},
-				err: &bytes.Buffer{},
-			}, "run", "--server", "http://server:8080", "--metrics-addr", addr, "--allow-plaintext")
-		}()
-
-		if err := waitForHTTPServer(client, addr, 2*time.Second); err != nil {
+		if err := probeAttempt(t, client, freeLoopbackAddr(t)); err != nil {
 			// Most likely lost the bind race for this port to something else in
 			// the window between freeLoopbackAddr's Close and ListenAndServe.
-			// Cancel, drain the goroutine, and retry on a fresh address rather
-			// than flaking outright.
+			// Retry on a fresh address rather than flaking outright.
 			lastErr = err
-			cancel()
-			<-done
 			continue
-		}
-
-		assertLifecycleProbes(t, client, addr)
-
-		cancel()
-		if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
-			t.Fatalf("runRunner returned %v, want nil or context.Canceled after cancellation", err)
 		}
 		return
 	}
 	t.Fatalf("metrics server never accepted a connection after %d attempts: %v", maxAttempts, lastErr)
+}
+
+// probeAttempt runs one attempt against addr: it starts runRunner in the
+// background, waits for its metrics listener to come up, and — if it does —
+// asserts the lifecycle probes against it. It returns nil once the probe
+// assertions have run, or the wait error when the listener never came up (the
+// caller retries on a fresh address in that case).
+//
+// The cancel-and-drain of the background runRunner goroutine lives in a
+// single deferred closure so it runs exactly once, on every exit from this
+// function — including the runtime.Goexit that t.Fatalf performs inside
+// assertLifecycleProbes. Previously that cleanup was two bare statements
+// (cancel() then <-done) after the assertLifecycleProbes call: on exactly the
+// regression this test exists to catch, assertLifecycleProbes's t.Fatalf
+// unwinds past those statements without running them, so the stubbed Run
+// stays parked on <-ctx.Done(), runRunner never returns, its deferred
+// metricsServer.Shutdown never runs, and a goroutine plus the bound TCP port
+// leak for the rest of the test binary's life. Using t.Errorf (not
+// t.Fatalf) inside this deferred function avoids calling FailNow while a
+// Goexit unwind from assertLifecycleProbes may already be in flight.
+func probeAttempt(t *testing.T, client *http.Client, addr string) error {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- executeRootWithOptions(commandOptions{
+			runFunc: func(cfg runnerConfig) error {
+				return runRunner(ctx, cfg)
+			},
+			out: &bytes.Buffer{},
+			err: &bytes.Buffer{},
+		}, "run", "--server", "http://server:8080", "--metrics-addr", addr, "--allow-plaintext")
+	}()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("runRunner returned %v, want nil or context.Canceled after cancellation", err)
+		}
+	}()
+
+	if err := waitForHTTPServer(client, addr, 2*time.Second); err != nil {
+		return err
+	}
+
+	assertLifecycleProbes(t, client, addr)
+	return nil
 }
 
 func assertLifecycleProbes(t *testing.T, client *http.Client, addr string) {

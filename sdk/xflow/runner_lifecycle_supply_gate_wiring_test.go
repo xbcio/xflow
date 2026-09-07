@@ -64,7 +64,13 @@ func (s *lifecycleObserverSpy) snapshot() (wiredCalled, wiredPresent bool, fetch
 func TestWireSupplyGateObserverReachesTheLifecycleObserverOnFetch(t *testing.T) {
 	spy := &lifecycleObserverSpy{}
 	cfg, err := buildRunnerServiceConfig(RunnerConfig{
-		ServerURL:    "http://server:8080",
+		// 127.0.0.1:1 removes DNS resolution from this test's assertion: the
+		// bare hostname "server" used elsewhere in this package could
+		// resolve and have something answer on :8080 in some environments,
+		// making the "error" assertion below flaky. Port 1 on loopback is
+		// never listening, so the connection is refused immediately and
+		// deterministically, with no name lookup involved.
+		ServerURL:    "http://127.0.0.1:1",
 		Capabilities: []string{"xflow.trigger.kafka"},
 	}, WithRunnerLifecycleObserver(spy))
 	if err != nil {
@@ -116,7 +122,7 @@ func TestWireSupplyGateObserverReachesTheLifecycleObserverOnFetch(t *testing.T) 
 func TestWireSupplyGateObserverReportsGateAbsent(t *testing.T) {
 	spy := &lifecycleObserverSpy{}
 	cfg, err := buildRunnerServiceConfig(RunnerConfig{
-		ServerURL:    "http://server:8080",
+		ServerURL:    "http://127.0.0.1:1",
 		Capabilities: []string{"xflow.function"},
 	}, WithRunnerLifecycleObserver(spy))
 	if err != nil {
