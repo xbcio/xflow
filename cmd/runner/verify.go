@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	xflowsdk "github.com/xbcio/xflow/sdk/xflow"
 	"github.com/spf13/cobra"
+	xflowsdk "github.com/xbcio/xflow/sdk/xflow"
 )
 
 func newVerifyCommand(opts commandOptions, cfg *runnerConfig) *cobra.Command {

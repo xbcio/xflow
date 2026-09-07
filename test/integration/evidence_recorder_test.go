@@ -14,11 +14,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/test/integration/internal/evidence"
 	"github.com/xbcio/xflow/types"
-	"github.com/google/uuid"
-	"github.com/redis/go-redis/v9"
 
 	_ "github.com/go-sql-driver/mysql"
 )

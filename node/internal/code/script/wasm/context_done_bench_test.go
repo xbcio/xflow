@@ -36,9 +36,9 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/xbcio/xflow/node/internal/code/script/engine"
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
+	"github.com/xbcio/xflow/node/internal/code/script/engine"
 )
 
 // hostWithContextDone builds a reactorHost whose wazero runtime is configured

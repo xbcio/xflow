@@ -11,13 +11,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
-	"github.com/redis/go-redis/v9"
 )
 
 var errPerfQueueUnavailable = errors.New("performance queue unavailable")

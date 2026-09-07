@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
-	"github.com/google/uuid"
 )
 
 // ErrSignalConsumed is returned when a signal revocation fails because the

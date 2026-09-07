@@ -24,13 +24,13 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/service/protocol/runnerpb"
 	"github.com/xbcio/xflow/types"
-	"github.com/redis/go-redis/v9"
 )
 
 // --- shared helpers ---------------------------------------------------

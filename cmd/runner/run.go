@@ -13,14 +13,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/observability/tracing"
 	xflowsdk "github.com/xbcio/xflow/sdk/xflow"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
-	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 )
 
 const (

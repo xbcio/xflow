@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
-	"github.com/redis/go-redis/v9"
 )
 
 const defaultLeaseRepairBatch = 256

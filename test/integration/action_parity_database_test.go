@@ -13,12 +13,12 @@ import (
 	"sync/atomic"
 	"testing"
 
+	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
-	mysqldriver "github.com/go-sql-driver/mysql"
 	"google.golang.org/grpc"
 )
 

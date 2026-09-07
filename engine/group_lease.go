@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
-	"github.com/google/uuid"
 )
 
 // GroupLeasePayload carries the full context a remote runner needs to execute a

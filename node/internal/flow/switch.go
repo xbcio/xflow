@@ -6,10 +6,10 @@ import (
 
 	"github.com/xbcio/xflow/types"
 
+	"github.com/spf13/cast"
 	"github.com/xbcio/xflow/exprx"
 	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/registry"
-	"github.com/spf13/cast"
 )
 
 // SwitchRule defines a single routing rule for SwitchNode.

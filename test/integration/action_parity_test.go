@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/xbcio/xflow/backend/providers/distributed"
 	backendlocal "github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/engine"
@@ -18,7 +19,6 @@ import (
 	"github.com/xbcio/xflow/service/protocol"
 	runnersvc "github.com/xbcio/xflow/service/runner"
 	"github.com/xbcio/xflow/types"
-	"github.com/redis/go-redis/v9"
 )
 
 // action_parity_test.go implements the A3 three-topology action-error parity

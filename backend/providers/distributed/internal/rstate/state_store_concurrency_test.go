@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 	"github.com/xbcio/xflow/backend/internal/statestoretest"
 	"github.com/xbcio/xflow/engine"
-	"github.com/redis/go-redis/v9"
 )
 
 func TestRedisStateStore_Concurrency(t *testing.T) {

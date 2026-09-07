@@ -13,8 +13,8 @@ import (
 	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/registry"
 
-	"github.com/xbcio/xflow/types"
 	"github.com/spf13/cast"
+	"github.com/xbcio/xflow/types"
 )
 
 const defaultWebhookMaxBodyBytes = int64(1 << 20)

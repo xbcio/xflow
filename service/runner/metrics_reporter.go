@@ -9,11 +9,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xbcio/xflow/observability/metrics"
-	"github.com/xbcio/xflow/service/protocol"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
+	"github.com/xbcio/xflow/observability/metrics"
+	"github.com/xbcio/xflow/service/protocol"
 	"google.golang.org/protobuf/proto"
 )
 

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/redis/go-redis/v9"
+	"github.com/xbcio/xflow/backend/providers/distributed"
 )
 
 func TestRedisLeaderElectionRealRedis(t *testing.T) {

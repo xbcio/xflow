@@ -13,9 +13,9 @@ import (
 
 	"github.com/expr-lang/expr"
 	"github.com/expr-lang/expr/vm"
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/types"
-	lru "github.com/hashicorp/golang-lru/v2"
 )
 
 // DefaultExprCacheSize bounds the compiled-expression LRU cache. Expressions

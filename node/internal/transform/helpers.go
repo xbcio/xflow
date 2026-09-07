@@ -3,9 +3,9 @@ package transform
 import (
 	"fmt"
 
+	"github.com/spf13/cast"
 	"github.com/xbcio/xflow/exprx"
 	"github.com/xbcio/xflow/types"
-	"github.com/spf13/cast"
 )
 
 func cloneData(input *types.Input) map[string]any {

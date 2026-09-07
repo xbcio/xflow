@@ -8,9 +8,9 @@ import (
 	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/registry"
 
-	"github.com/xbcio/xflow/types"
 	cronlib "github.com/robfig/cron/v3"
 	"github.com/spf13/cast"
+	"github.com/xbcio/xflow/types"
 )
 
 // Node is the xflow.trigger.cron trigger: it emits one event per cron

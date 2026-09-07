@@ -8,9 +8,9 @@ import (
 
 	"time"
 
+	"github.com/spf13/cast"
 	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/registry"
-	"github.com/spf13/cast"
 )
 
 // WaitNodeType is the canonical type identifier for the wait node.

@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xbcio/xflow/node/internal/utils/conv"
 	"github.com/spf13/cast"
+	"github.com/xbcio/xflow/node/internal/utils/conv"
 
 	"github.com/xbcio/xflow/types"
 )

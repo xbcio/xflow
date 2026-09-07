@@ -5,11 +5,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/xbcio/xflow/backend/internal/statestoretest"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
-	"github.com/redis/go-redis/v9"
 )
 
 // TestRedisReleaseOutboxDoesNotResurrectAnAckedEntry inspects the ready ZSET

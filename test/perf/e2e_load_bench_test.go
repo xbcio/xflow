@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	redis "github.com/redis/go-redis/v9"
 	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
@@ -23,7 +24,6 @@ import (
 	"github.com/xbcio/xflow/service/protocol"
 	runnersvc "github.com/xbcio/xflow/service/runner"
 	"github.com/xbcio/xflow/types"
-	redis "github.com/redis/go-redis/v9"
 )
 
 type loadHandler struct{}

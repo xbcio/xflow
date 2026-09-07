@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/spf13/cast"
 	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/types"
-	"github.com/spf13/cast"
 )
 
 // SortField describes one sort key for SortNode.

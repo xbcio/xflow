@@ -11,10 +11,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/xbcio/xflow/node/internal/code/script/engine"
-	"github.com/xbcio/xflow/types"
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
+	"github.com/xbcio/xflow/node/internal/code/script/engine"
+	"github.com/xbcio/xflow/types"
 )
 
 // Reactor ABI error codes. Must stay in sync with testdata/reactor/main.go and

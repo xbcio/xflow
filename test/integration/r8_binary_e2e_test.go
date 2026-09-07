@@ -29,9 +29,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/types"
-	"github.com/redis/go-redis/v9"
 )
 
 // r8Token is a test-only bearer token written to the production auth-tokens

@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xbcio/xflow/namespace"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/xbcio/xflow/namespace"
 )
 
 // CounterSink is the narrow metrics boundary shared by concrete exporters.

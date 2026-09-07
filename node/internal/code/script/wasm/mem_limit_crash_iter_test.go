@@ -44,9 +44,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/node/internal/code/script/engine"
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
+	"github.com/xbcio/xflow/node/internal/code/script/engine"
 )
 
 // TestMemLimitCrashIter verifies that a successful eval at the production

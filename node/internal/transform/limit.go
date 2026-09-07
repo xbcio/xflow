@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/spf13/cast"
 	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/types"
-	"github.com/spf13/cast"
 )
 
 // LimitNode implements xflow.transform.limit — keeps the first max items.

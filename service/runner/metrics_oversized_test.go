@@ -9,9 +9,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/xbcio/xflow/service/protocol"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	"github.com/xbcio/xflow/service/protocol"
 )
 
 // TestReporterDropsAnOversizedSnapshotLocallyAndKeepsReporting drives

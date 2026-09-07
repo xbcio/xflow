@@ -9,11 +9,11 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/xbcio/xflow/node/internal/code/script/engine"
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 	"github.com/tetratelabs/wazero/sys"
+	"github.com/xbcio/xflow/node/internal/code/script/engine"
 )
 
 // DefaultWasmModuleCacheSize bounds the compiled-wasm-module LRU cache. wasm

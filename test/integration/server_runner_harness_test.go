@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/observability/metrics"
@@ -19,7 +20,6 @@ import (
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/store/sqlstore"
 	"github.com/xbcio/xflow/store/sqlstore/mysqlstore"
-	"github.com/redis/go-redis/v9"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )

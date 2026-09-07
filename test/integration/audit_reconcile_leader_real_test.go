@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/store"
-	"github.com/redis/go-redis/v9"
 )
 
 // TestAuditReconcileWorkerLeaderGatedRealRedis proves the T9 worker's leader

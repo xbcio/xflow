@@ -3,9 +3,9 @@ package evidence
 import (
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/types"
-	"github.com/google/uuid"
 )
 
 // SchemaVersion is the current envelope schema version.

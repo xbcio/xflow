@@ -8,11 +8,11 @@ import (
 
 	"slices"
 
+	"github.com/spf13/cast"
 	"github.com/xbcio/xflow/exprx"
 	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/internal/utils/conv"
 	"github.com/xbcio/xflow/node/registry"
-	"github.com/spf13/cast"
 )
 
 // SplitNode implements xflow.split — fans out one execution per item in a collection.

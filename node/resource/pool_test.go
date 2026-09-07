@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/types"
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/xbcio/xflow/types"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"

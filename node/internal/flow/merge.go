@@ -6,9 +6,9 @@ import (
 
 	"github.com/xbcio/xflow/types"
 
+	"github.com/spf13/cast"
 	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/registry"
-	"github.com/spf13/cast"
 )
 
 // MergeNode implements xflow.merge — fan-in synchronisation node.

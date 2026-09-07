@@ -12,10 +12,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/xbcio/xflow/node/internal/code/script/engine"
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
+	"github.com/xbcio/xflow/node/internal/code/script/engine"
 )
 
 // EngineIdleTTLEnv overrides how long a compiled wasm module may sit unused

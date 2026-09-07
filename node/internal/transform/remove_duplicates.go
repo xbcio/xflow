@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/spf13/cast"
 	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/types"
-	"github.com/spf13/cast"
 )
 
 // RemoveDuplicatesNode implements xflow.transform.remove_duplicates — keeps

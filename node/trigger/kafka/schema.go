@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/xbcio/xflow/node/internal/utils/conv"
 	"github.com/spf13/cast"
+	"github.com/xbcio/xflow/node/internal/utils/conv"
 )
 
 // MessageSchema defines a simple required-fields schema for Kafka message

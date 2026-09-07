@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 
-	"github.com/xbcio/xflow/namespace"
 	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/xbcio/xflow/namespace"
 )
 
 // DefaultArtifactCodeCacheSize bounds the resolved-artifact cache. Entries are
