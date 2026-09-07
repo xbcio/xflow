@@ -118,9 +118,22 @@ func resolveRunnerIdentity(ctx context.Context, cfg runnerConfig, store identity
 // always dials cfg.serverURL over HTTP, independent of --transport, because
 // no gRPC enroll client exists anywhere in the tree (see the enroll endpoint
 // comment above). A config-time gate keyed on --transport therefore cannot
-// see this call coming; the only place that reliably knows "an HTTP request
-// carrying the registration code is about to be made" is here, inside
-// resolveRunnerIdentity, gated on cfg.registrationCode being non-empty.
+// see this call coming; the gate this function implements is instead keyed
+// on cfg.registrationCode being non-empty, which is true at both of this
+// function's call sites regardless of --transport.
+//
+// It has two call sites, both intentional, neither a substitute for the
+// other. validateRunnerConfig (config.go) calls it during config validation
+// — reached by every subcommand that shares bindRunnerFlags, including
+// `config validate` and `verify` — so that a registration code paired with a
+// plaintext --server fails the same "does this config even make sense"
+// check that catches every other malformed value, rather than passing a
+// preflight and only then crash-looping in `run`. resolveRunnerIdentity
+// (this file) calls it again immediately before the HTTP client goes out:
+// that is the one call site that actually knows enrollment is happening now,
+// with the live cfg.serverURL and registration code in hand, so it stays as
+// the last word before the network — config validation checking first does
+// not make it safe to remove the check that runs right before the dial.
 //
 // The registration code is never included in the returned error: it is a
 // reusable credential, and an error string routinely ends up in logs.

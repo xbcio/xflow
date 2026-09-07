@@ -499,6 +499,17 @@ func validateRunnerConfig(cfg runnerConfig) error {
 		return err
 	}
 
+	// A configured registration code means this run will, at enrollment time,
+	// send an HTTP request carrying that code regardless of --transport (see
+	// validateEnrollTransportSecurity). Config validation can already see that
+	// coming, so it applies the same gate here instead of waiting for
+	// resolveRunnerIdentity to hit it moments before dialing out.
+	if strings.TrimSpace(cfg.registrationCode) != "" {
+		if err := validateEnrollTransportSecurity(cfg); err != nil {
+			return err
+		}
+	}
+
 	// Build the store to validate its configuration; the value is discarded.
 	// Doing it here means a bad --identity-store/--identity-file combination
 	// fails at config resolution, the same place every other malformed value

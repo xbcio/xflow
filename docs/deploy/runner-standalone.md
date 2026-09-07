@@ -18,7 +18,7 @@ runner 的身份（`runner_id` + `token`）来自入册（enrollment），由 `c
 runner 默认拒绝在没有任何 TLS 材料的情况下启动，因为 bearer token 会明文过网。该门禁分两处，判据略有不同：
 
 - **常规启动**（`cmd/runner/config.go` 的 `validateTransportSecurity`）：`--transport=http` 时，`https://` 的 `--server` 即视为已加密；`--transport=grpc` 时没有 URL scheme 可看，只认 TLS 材料——`--tls-server-ca` / `--tls-client-cert` / `--tls-client-key` **三者任一非空**就放行。注意这只是"会不会明文过网"的门禁，不是 mTLS 的配置要求：真要做 mTLS，`--tls-client-cert` 与 `--tls-client-key` 必须成对配齐，但那是服务端握手的要求，门禁本身并不检查。两种 transport 下都可以用 `--allow-plaintext` 显式放行。
-- **入册请求**（`cmd/runner/enroll.go` 的 `validateEnrollTransportSecurity`）：由于入册请求固定走 HTTP（见上一节），这里单独判 `--server` 的 scheme 必须是 `https://`，否则同样要求 `--allow-plaintext`。这一判据独立于 `--transport`：一个 `--transport=grpc` 且已配好 gRPC TLS 材料的 runner，如果 `--server` 仍是 `http://` 且没有 `--allow-plaintext`，入册这一步依然会被拒绝。
+- **入册门禁**（`validateEnrollTransportSecurity`，定义在 `cmd/runner/enroll.go`）：由于入册请求固定走 HTTP（见上一节），这里单独判 `--server` 的 scheme 必须是 `https://`，否则同样要求 `--allow-plaintext`。这一判据独立于 `--transport`：一个 `--transport=grpc` 且已配好 gRPC TLS 材料的 runner，如果 `--server` 仍是 `http://` 且没有 `--allow-plaintext`，配置了 `--registration-code` 时就会被拒绝。这条门禁在两个时刻各执行一次：只要配置了 `--registration-code`，`cmd/runner/config.go` 的 `validateRunnerConfig` 就会先调它一次——这一步是 `config validate`、`verify`、`run` 三个子命令共用的配置校验，因此 `config validate`/`verify` 现在会和 `run` 一样拒绝"grpc 传输已配 TLS，但入册用的 `--server` 仍是明文且带着注册码"这种组合，不会再放行一个必然在 `run` 时崩溃的配置；`cmd/runner/enroll.go` 的 `resolveRunnerIdentity` 会在真正发出入册请求前再调它一次，作为发请求前的最后一道防线，这一处不受前一处校验过与否影响。**若未配置 `--registration-code`，配置校验阶段不会触发这条门禁**——因为这次运行本来就不会入册；`--allow-plaintext` 对两个调用点同时生效。
 
 `--allow-plaintext` 一旦打开，对两处门禁同时生效，因为它绕开的是"是否需要 TLS"这个判断本身，不是分别配置。
 

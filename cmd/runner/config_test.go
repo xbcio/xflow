@@ -942,6 +942,95 @@ func TestValidateRunnerConfigRejectsPlaintextGRPCWithoutOptIn(t *testing.T) {
 	}
 }
 
+// The four tests below pin the enroll plaintext gate at `config validate`
+// (and, by sharing validateRunnerConfig, at `verify`). A grpc runner with TLS
+// material configured satisfies validateTransportSecurity on its own — that
+// gate never looks at --server's scheme under grpc — but enrollment always
+// dials --server over plain HTTP regardless of --transport, so a plaintext
+// --server paired with a configured --registration-code must still be
+// refused here, before `run` would crash-loop on the same combination.
+
+// TestConfigValidateRejectsPlaintextEnrollUnderGRPCTransport is the core
+// regression case: --transport=grpc with TLS material configured used to
+// sail through validateTransportSecurity even though --registration-code
+// means this run will enroll over plaintext HTTP.
+func TestConfigValidateRejectsPlaintextEnrollUnderGRPCTransport(t *testing.T) {
+	err := executeRootWithOptions(commandOptions{
+		out: &bytes.Buffer{},
+		err: &bytes.Buffer{},
+	}, "config", "validate",
+		"--transport", "grpc",
+		"--grpc-target", "host:9090",
+		"--tls-server-ca", "/path/ca.pem",
+		"--server", "http://internal-controlplane:8080",
+		"--registration-code", "XXXX",
+	)
+	if err == nil {
+		t.Fatal("config validate accepted a plaintext --server with a configured --registration-code under --transport=grpc")
+	}
+	if !strings.Contains(err.Error(), "refusing to enroll") {
+		t.Fatalf("error = %q, want it to name the enroll gate (\"refusing to enroll\")", err.Error())
+	}
+}
+
+// TestConfigValidateAcceptsHTTPSEnrollUnderGRPCTransport is the same
+// combination with an https:// --server, which the enroll gate must accept.
+func TestConfigValidateAcceptsHTTPSEnrollUnderGRPCTransport(t *testing.T) {
+	err := executeRootWithOptions(commandOptions{
+		out: &bytes.Buffer{},
+		err: &bytes.Buffer{},
+	}, "config", "validate",
+		"--transport", "grpc",
+		"--grpc-target", "host:9090",
+		"--tls-server-ca", "/path/ca.pem",
+		"--server", "https://internal-controlplane:8080",
+		"--registration-code", "XXXX",
+	)
+	if err != nil {
+		t.Fatalf("config validate rejected an https:// --server with a configured --registration-code: %v", err)
+	}
+}
+
+// TestConfigValidateAcceptsPlaintextEnrollWithAllowPlaintext confirms the
+// gate still honors the same --allow-plaintext opt-out as every other
+// transport-security check in this file.
+func TestConfigValidateAcceptsPlaintextEnrollWithAllowPlaintext(t *testing.T) {
+	err := executeRootWithOptions(commandOptions{
+		out: &bytes.Buffer{},
+		err: &bytes.Buffer{},
+	}, "config", "validate",
+		"--transport", "grpc",
+		"--grpc-target", "host:9090",
+		"--tls-server-ca", "/path/ca.pem",
+		"--server", "http://internal-controlplane:8080",
+		"--registration-code", "XXXX",
+		"--allow-plaintext",
+	)
+	if err != nil {
+		t.Fatalf("config validate rejected a plaintext --server with --allow-plaintext set: %v", err)
+	}
+}
+
+// TestConfigValidateIgnoresEnrollGateWithoutRegistrationCode is the core
+// contrast with TestConfigValidateRejectsPlaintextEnrollUnderGRPCTransport:
+// the same plaintext --server under --transport=grpc must pass when no
+// --registration-code is configured, pinning that the gate is conditional on
+// an enrollment actually being about to happen, not unconditional.
+func TestConfigValidateIgnoresEnrollGateWithoutRegistrationCode(t *testing.T) {
+	err := executeRootWithOptions(commandOptions{
+		out: &bytes.Buffer{},
+		err: &bytes.Buffer{},
+	}, "config", "validate",
+		"--transport", "grpc",
+		"--grpc-target", "host:9090",
+		"--tls-server-ca", "/path/ca.pem",
+		"--server", "http://internal-controlplane:8080",
+	)
+	if err != nil {
+		t.Fatalf("config validate rejected a config with no --registration-code: %v", err)
+	}
+}
+
 // TestValidateRunnerConfigRejectsHTTPPlaintextEvenWithTLSMaterial pins the
 // hole where TLS material configured for an http:// URL used to satisfy the
 // gate on its own. Go's http.Transport only consults TLSClientConfig when
