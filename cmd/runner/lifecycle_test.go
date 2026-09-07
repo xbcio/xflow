@@ -72,8 +72,14 @@ func TestLifecycleStateFailsFastWhenSupplyEncryptionIsRequiredButAbsent(t *testi
 	if s.Fatal() == nil {
 		t.Fatal("Fatal() is nil after the callback fired")
 	}
-	if ready, _ := s.Ready(); ready {
+	s.OnHeartbeat(context.Background(), true)
+	ready, why := s.Ready()
+	if ready {
 		t.Fatal("a runner in a fatal state reported ready")
+	}
+	if why != s.Fatal().Error() {
+		t.Fatalf("Ready() reason = %q, want the fatal reason %q -- the fatal case "+
+			"must win over every other not-ready reason", why, s.Fatal().Error())
 	}
 }
 

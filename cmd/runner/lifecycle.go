@@ -49,7 +49,9 @@ func (s *lifecycleState) OnRegistered(_ context.Context, runnerID string, supply
 	if s.requireSupplyEncryption && !supplyKeyIssued && s.fatal == nil {
 		err = fmt.Errorf(
 			"runner %q registered but the server issued no supply encryption key, "+
-				"and --require-supply-encryption is set: supply content would be fetched in the clear",
+				"and --require-supply-encryption is set: supply content would be fetched in the clear; "+
+				"configure a supply encryption key on the control plane, "+
+				"or drop --require-supply-encryption to accept the risk",
 			runnerID)
 		s.fatal = err
 		fire = s.onFatal

@@ -283,9 +283,12 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 	}
 
 	err = runner.Run(runCtx)
-	// A fatal startup condition cancels runCtx, so Run returns a context
-	// error that describes the cancellation rather than the reason for it.
-	// The reason is what an operator needs, so it wins.
+	// A fatal startup condition cancels runCtx; Run's reconnect loop treats a
+	// cancelled context as a clean stop, so it returns nil here regardless of
+	// what actually went wrong (sdk/xflow/runner.go's runWithReconnect has
+	// three exits and all three return nil). err therefore carries none of
+	// the reason, which is why lifecycle.Fatal() is not redundant with it and
+	// must win.
 	if fatal := lifecycle.Fatal(); fatal != nil {
 		return fatal
 	}
