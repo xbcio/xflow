@@ -282,7 +282,7 @@ vet:
 	# Build-tagged files are excluded from the default build config, so
 	# `go vet ./...` above cannot see them and `go build ./...` cannot either.
 	# Without one pass per tag a tagged suite rots silently: test/stress
-	# stopped compiling at e8c1436 (an unused import left behind when the
+	# stopped compiling at 92bd8fb (an unused import left behind when the
 	# durable group suspend subsystem was removed) and nothing reported it,
 	# because no Makefile target and no workflow ever built that package.
 	# Add a pass here whenever you introduce a build tag.

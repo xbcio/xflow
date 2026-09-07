@@ -100,7 +100,7 @@ xflow 采用分层发布门槛，不再用单个测试替代完整 release gate�
 
 > leader election、hash tag 或 namespace 单独存在都不等同于 control-plane HA 或多租户隔离。本轮 G0/G1 修复不得顺带宣称 G2。
 >
-> **SUBGRAPH / Node Group 口径**：原 P1-3“`xflow.map` 不能作为 group 成员”已由 `e37842e` 修复，并由 `SUBGRAPH-ENGINE-TODO.md` 的关闭索引确认；当前 MAP workstream 是 runner 级并发预算、queue/wiring 与 cancel/timeout 判定的后续资源治理，现阶段只有 dirty-tree validation，不能当作 clean-SHA 发布证据，也不重新打开 P1-3。Node Group 在这些剩余限制收口前仍为 Experimental。
+> **SUBGRAPH / Node Group 口径**：原 P1-3“`xflow.map` 不能作为 group 成员”已由 `3cfa1db` 修复，并由 `SUBGRAPH-ENGINE-TODO.md` 的关闭索引确认；当前 MAP workstream 是 runner 级并发预算、queue/wiring 与 cancel/timeout 判定的后续资源治理，现阶段只有 dirty-tree validation，不能当作 clean-SHA 发布证据，也不重新打开 P1-3。Node Group 在这些剩余限制收口前仍为 Experimental。
 
 #### G2 control-plane HA 承诺与边界声明
 

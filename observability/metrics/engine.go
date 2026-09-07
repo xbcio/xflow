@@ -72,7 +72,7 @@ const (
 //
 // The bookkeeping around node start times -- the tombstone ring, the age sweep,
 // the re-lease overwrite -- is subtle enough that a second copy of it for
-// sub-executions would be a second place for the leak in be1f7ba to come back.
+// sub-executions would be a second place for the leak in a6cbd29 to come back.
 // The two families differ only in what they are called.
 type engineMetricNames struct {
 	nodeStarted        string

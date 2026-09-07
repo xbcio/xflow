@@ -552,7 +552,7 @@ func writeJSONLines(w io.Writer, value any) error {
 // Entries is []engine.OutboxEntry, the SAME type the management endpoint
 // GET /v1/management/dead-letters/{execID} serializes, so the CLI's stdout
 // JSONL field names follow engine.OutboxEntry's wire shape (snake_case json
-// tags). A change to that type's tags — like 7069cae adding snake_case —
+// tags). A change to that type's tags — like 2f5a787 adding snake_case —
 // shifts the CLI output in lockstep; CLI tests assert on the snake_case keys.
 type deadLetterListResponse struct {
 	Entries    []engine.OutboxEntry `json:"entries"`

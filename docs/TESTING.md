@@ -228,7 +228,7 @@ gate and is not the focused G1 evidence entry.
 
 `test/security/` carries no build tag, so `go list ./...` picks it up and `make test` already runs it — it needs no dedicated target. `test/stress/` is gated by the `stress` build tag and runs via `make test-stress`.
 
-Build-tagged files are invisible to both `go build ./...` and `go vet ./...`, so a suite behind a tag can stop compiling without anything reporting it — `test/stress/` did exactly that (an unused import left behind by `e8c1436`, unnoticed because no target ever built it). `make vet` therefore runs one extra pass per tag; add a pass there whenever you add a tag.
+Build-tagged files are invisible to both `go build ./...` and `go vet ./...`, so a suite behind a tag can stop compiling without anything reporting it — `test/stress/` did exactly that (an unused import left behind by `92bd8fb`, unnoticed because no target ever built it). `make vet` therefore runs one extra pass per tag; add a pass there whenever you add a tag.
 
 ## Engine Core Unit Tests (zero IO deps)
 

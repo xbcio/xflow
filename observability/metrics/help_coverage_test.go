@@ -148,7 +148,7 @@ func TestEveryMetricNameInThisPackageHasHelpText(t *testing.T) {
 // The three are named rather than counted because this paragraph has gone
 // stale once already: it used to say the whole family had "zero production
 // callers of NewGroupMetrics anywhere in the repo", which stopped being true
-// when 204daf2/b598cb6 wired package_cache and the six lease/commit names.
+// when 3b56699/b7b264f wired package_cache and the six lease/commit names.
 // A claim about specific names fails loudly when someone greps them; a claim
 // about a count keeps reading as true long after it isn't.
 func TestEveryMetricHelpEntryHasEmitter(t *testing.T) {

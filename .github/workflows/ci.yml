@@ -296,7 +296,7 @@ jobs:
 
       # Why this gate exists: a 2026-09-04 sweep of the then-unpushed range
       # found 85 of 327 commits could not `go build ./...` on their own — one
-      # contiguous run, healed by eb401fc683f8, whose own message records the
+      # contiguous run, healed by 5520a01b77f9, whose own message records the
       # cause. Every one of them came from committing a consumer file while
       # its field definitions stayed uncommitted in the worktree, which `git
       # add <file>` makes easy and no existing check could catch: CI only ever
