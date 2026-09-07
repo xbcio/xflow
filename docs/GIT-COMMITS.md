@@ -67,9 +67,10 @@ context, not a bullet list of what the diff touched. If a design decision
 genuinely needs to be recorded, it goes in a `.claude/` doc or `docs/design/`,
 where it stays readable and editable; a commit message is neither.
 
-Commits already in history with a body are grandfathered exceptions, not a
-license to add more. `git log` currently shows many of them — it is a record of
-what happened, not a statement of the convention. Do not pattern-match on it.
+History was rewritten to this convention, so no commit in `git log` has a body.
+The 666 bodies that existed before are archived in
+[docs/history/commit-notes.md](history/commit-notes.md) so their reasoning is
+not lost. That file is a record of what happened, not a template to copy.
 
 ## Examples
 
@@ -79,13 +80,14 @@ Real commits from this repo's history — all single-line, all body-free:
 feat(runner): report activation failures through a callback          (59)
 docs(supply): record that a declined activation now self-heals       (62)
 feat(control): per-key jittered backoff for activation redispatch    (65)
-feat(control): fence and redispatch an activation a runner declined  (67)
+feat(control): redispatch an activation a runner declined            (57)
 test(supply): prove a declined activation self-heals without a restart (70)
 ```
 
 ## Counter-examples
 
-All from this repo. Each violates a rule above:
+All from this repo's pre-rewrite history. The rewrite replaced them, so they
+are no longer in `git log`. Each violates a rule above:
 
 ```
 fix(runner): make the panic-recovery ack test actually wait for the panic, document fire-and-forget ack shutdown
