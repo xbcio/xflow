@@ -68,9 +68,8 @@ genuinely needs to be recorded, it goes in a `.claude/` doc or `docs/design/`,
 where it stays readable and editable; a commit message is neither.
 
 History was rewritten to this convention, so no commit in `git log` has a body.
-The 666 bodies that existed before are archived in
-[docs/history/commit-notes.md](history/commit-notes.md) so their reasoning is
-not lost. That file is a record of what happened, not a template to copy.
+Nothing was lost that belonged there: reasoning that is still worth keeping
+lives in `docs/design/` or `.claude/`, where it can be edited as it ages.
 
 ## Examples
 
