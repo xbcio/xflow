@@ -38,6 +38,10 @@ type runnerConfigFile struct {
 		Report         *bool   `yaml:"report"`          // ship metrics to the server
 		ReportInterval *string `yaml:"report_interval"` // local reporting cadence
 	} `yaml:"metrics"`
+	Identity struct {
+		Store *string `yaml:"store"` // "ephemeral" (default) or "file"
+		File  *string `yaml:"file"`
+	} `yaml:"identity"`
 	// Credentials holds named credential maps (driver/dsn, token/base_url, …)
 	// consumed by resource-aware nodes via input.Credential(name). String leaves
 	// are expanded via os.Expand at load time so secrets are sourced from the
@@ -81,6 +85,7 @@ func defaultRunnerConfig() runnerConfig {
 		heartbeatInterval:     "5s",
 		pollWait:              "1s",
 		reportMetricsInterval: "15s",
+		identityStoreKind:     identityStoreEphemeral,
 	}
 }
 
@@ -149,6 +154,12 @@ func loadRunnerConfigFromBytes(data []byte) (runnerConfig, error) {
 	}
 	if file.Metrics.ReportInterval != nil {
 		cfg.reportMetricsInterval = *file.Metrics.ReportInterval
+	}
+	if file.Identity.Store != nil {
+		cfg.identityStoreKind = *file.Identity.Store
+	}
+	if file.Identity.File != nil {
+		cfg.identityFile = *file.Identity.File
 	}
 
 	if len(file.Credentials) > 0 {
@@ -274,6 +285,15 @@ func applyLookupEnvOverrides(cfg runnerConfig, lookupEnv func(string) (string, b
 	if v, ok := lookupEnv("XFLOW_RUNNER_TLS_CLIENT_KEY"); ok {
 		cfg.tlsClientKey = v
 	}
+	if v, ok := lookupEnv("XFLOW_RUNNER_IDENTITY_STORE"); ok {
+		cfg.identityStoreKind = v
+	}
+	if v, ok := lookupEnv("XFLOW_RUNNER_IDENTITY_FILE"); ok {
+		cfg.identityFile = v
+	}
+	if v, ok := lookupEnv("XFLOW_RUNNER_REGISTRATION_CODE"); ok {
+		cfg.registrationCode = v
+	}
 
 	cfg.capabilities = parseCapabilities(cfg.capRaw)
 	cfg.labels = parseLabels(cfg.labelRaw)
@@ -379,6 +399,14 @@ func validateRunnerConfig(cfg runnerConfig) error {
 		return err
 	}
 
+	// Build the store to validate its configuration; the value is discarded.
+	// Doing it here means a bad --identity-store/--identity-file combination
+	// fails at config resolution, the same place every other malformed value
+	// fails, rather than at the first enrollment attempt.
+	if _, err := newIdentityStore(cfg); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -466,6 +494,15 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 	if base.changed["tls-client-key"] {
 		cfg.tlsClientKey = base.tlsClientKey
 	}
+	if base.changed["identity-store"] {
+		cfg.identityStoreKind = base.identityStoreKind
+	}
+	if base.changed["identity-file"] {
+		cfg.identityFile = base.identityFile
+	}
+	if base.changed["registration-code"] {
+		cfg.registrationCode = base.registrationCode
+	}
 	if base.changed["metrics-addr"] {
 		cfg.metricsAddr = base.metricsAddr
 	}
@@ -540,6 +577,13 @@ poll:
 
 heartbeat:
   interval: "5s"
+
+# identity:
+#   # "ephemeral" (default) keeps the enrolled identity in memory only;
+#   # "file" persists it so a restart reuses the same runner ID and token
+#   # instead of consuming another registration code.
+#   store: "file"
+#   file: "/var/lib/xflow/runner-identity.json"
 
 # Credentials: named maps consumed by resource-aware nodes via
 # input.Credential(name). String leaves are env-expanded at load time

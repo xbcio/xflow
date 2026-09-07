@@ -54,6 +54,15 @@ type runnerConfig struct {
 	tlsServerCA   string
 	tlsClientCert string
 	tlsClientKey  string
+	// identityStoreKind / identityFile select where this runner keeps the
+	// identity it was issued at enrollment. "ephemeral" (the default) keeps it
+	// in memory only, which is byte-identical to the pre-enrollment behavior:
+	// nothing is written to disk unless asked.
+	identityStoreKind string
+	identityFile      string
+	// registrationCode bootstraps enrollment when no identity is stored yet.
+	// Never logged.
+	registrationCode string
 	// tracing
 	traceMode     string
 	traceEndpoint string
@@ -113,6 +122,9 @@ func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
 	cmd.Flags().StringVar(&cfg.tlsServerCA, "tls-server-ca", cfg.tlsServerCA, "Path to server CA bundle (enables TLS)")
 	cmd.Flags().StringVar(&cfg.tlsClientCert, "tls-client-cert", cfg.tlsClientCert, "Path to client TLS certificate (enables mTLS)")
 	cmd.Flags().StringVar(&cfg.tlsClientKey, "tls-client-key", cfg.tlsClientKey, "Path to client TLS private key")
+	cmd.Flags().StringVar(&cfg.identityStoreKind, "identity-store", cfg.identityStoreKind, "Where to keep the enrolled identity: ephemeral or file")
+	cmd.Flags().StringVar(&cfg.identityFile, "identity-file", cfg.identityFile, "Path to the identity file (--identity-store=file)")
+	cmd.Flags().StringVar(&cfg.registrationCode, "registration-code", cfg.registrationCode, "One-time registration code used to enroll when no identity is stored (prefer XFLOW_RUNNER_REGISTRATION_CODE)")
 	cmd.Flags().StringVar(&cfg.traceMode, "trace", "disabled", "Tracing mode: disabled|stdout|otlp")
 	cmd.Flags().StringVar(&cfg.traceEndpoint, "trace-endpoint", "localhost:4317", "OTLP collector gRPC endpoint (--trace=otlp)")
 	cmd.Flags().BoolVar(&cfg.traceInsecure, "trace-insecure", false, "Disable TLS verification for OTLP connection")
