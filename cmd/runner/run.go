@@ -231,11 +231,13 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 	// cross-domain runner — the one case that cannot be scraped — the one case
 	// that also cannot report.
 	m := metrics.New()
+	lifecycle := newLifecycleState()
 
 	runner, err := newRunnerService(sdkCfg,
 		xflowsdk.WithRunnerTracer(tracer),
 		xflowsdk.WithRunnerMetrics(m),
-		xflowsdk.WithRunnerLogger(slog.Default()))
+		xflowsdk.WithRunnerLogger(slog.Default()),
+		xflowsdk.WithRunnerLifecycleObserver(lifecycle))
 	if err != nil {
 		return err
 	}
@@ -251,7 +253,14 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 	}
 
 	if cfg.metricsAddr != "" {
-		metricsServer := &http.Server{Addr: cfg.metricsAddr, Handler: m.Handler()}
+		// One listener for all three: an operator who exposed the scrape port
+		// has exposed the probes, and a second port is one more thing to get
+		// wrong in a NetworkPolicy. Probes are therefore unavailable when
+		// --metrics-addr is empty — documented, not silent.
+		probeMux := http.NewServeMux()
+		probeMux.Handle("GET /metrics", m.Handler())
+		registerLifecycleProbes(probeMux, lifecycle)
+		metricsServer := &http.Server{Addr: cfg.metricsAddr, Handler: probeMux}
 		go func() {
 			if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				slog.Error("metrics server failed", "error", err)

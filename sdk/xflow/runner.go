@@ -192,11 +192,12 @@ type RunnerConfig struct {
 }
 
 type runnerOptions struct {
-	logger           *slog.Logger
-	tracer           tracing.Tracer
-	metrics          *metrics.Metrics
-	artifactResolver func(ctx context.Context, digest string) ([]byte, error)
-	nodeRegistry     *execution.Registry
+	logger            *slog.Logger
+	tracer            tracing.Tracer
+	metrics           *metrics.Metrics
+	artifactResolver  func(ctx context.Context, digest string) ([]byte, error)
+	nodeRegistry      *execution.Registry
+	lifecycleObserver runnersvc.LifecycleObserver
 }
 
 // RunnerOption configures a Runner.
@@ -241,6 +242,15 @@ func WithRunnerArtifactResolver(fn func(ctx context.Context, digest string) ([]b
 // registry.Register write to.
 func WithRunnerNodeRegistry(reg *execution.Registry) RunnerOption {
 	return func(o *runnerOptions) { o.nodeRegistry = reg }
+}
+
+// WithRunnerLifecycleObserver installs an observer for the runner's
+// registration / heartbeat / supply-readiness transitions, which is what a host
+// process needs to answer a liveness or readiness probe. Runner.Run does not
+// return until the connection ends, so these transitions are otherwise
+// invisible from outside.
+func WithRunnerLifecycleObserver(o runnersvc.LifecycleObserver) RunnerOption {
+	return func(opts *runnerOptions) { opts.lifecycleObserver = o }
 }
 
 // Runner is an embeddable xflow execution-plane runner. It connects to a
@@ -585,6 +595,7 @@ func buildRunnerServiceConfig(cfg RunnerConfig, opts ...RunnerOption) (runnersvc
 			}, subgraphHookOpts...)...),
 		ArtifactCodeResolver: artifactCode,
 		SupportsEncryption:   true,
+		LifecycleObserver:    o.lifecycleObserver,
 	}
 	if cfg.HeartbeatInterval > 0 {
 		svcCfg.HeartbeatInterval = cfg.HeartbeatInterval
@@ -608,6 +619,7 @@ func buildRunnerServiceConfig(cfg RunnerConfig, opts ...RunnerOption) (runnersvc
 		return runnersvc.Config{}, err
 	}
 	wireRunnerMetrics(&svcCfg, o)
+	wireSupplyGateObserver(&svcCfg, o)
 	return svcCfg, nil
 }
 
@@ -677,15 +689,68 @@ func wireRunnerMetrics(svcCfg *runnersvc.Config, o *runnerOptions) {
 	if o.metrics == nil {
 		return
 	}
-	if svcCfg.SupplyGate != nil {
-		svcCfg.SupplyGate.SetObserver(metrics.NewSupplyMetrics(o.metrics))
-	}
 	// The node execution timeout observer reports runner-detected timeouts, the
 	// abandoned-goroutine gauge, and per-invocation duration. Without it a
 	// runner that is shedding work on deadline looks identical to one that is
 	// simply idle — the tasks end as failures on the server with nothing here
 	// to say the deadline is what ended them.
 	svcCfg.TimeoutObserver = metrics.NewNodeTimeoutMetrics(o.metrics)
+}
+
+// wireSupplyGateObserver fills the supply gate's single observer slot.
+//
+// SupplyGate.SetObserver panics on a second non-nil install, deliberately, so
+// two live observers cannot silently drop one side. That means metrics and the
+// lifecycle observer cannot each install their own — they are fanned out
+// through one value here. cmd/runner always passes WithRunnerMetrics, so this
+// is the ordinary case, not a corner one.
+func wireSupplyGateObserver(svcCfg *runnersvc.Config, o *runnerOptions) {
+	if o.lifecycleObserver != nil {
+		// Reported even when there is no gate: a runner that hosts no triggers
+		// must not sit un-ready forever waiting for a fetch that cannot happen.
+		o.lifecycleObserver.OnSupplyGateWired(svcCfg.SupplyGate != nil)
+	}
+	if svcCfg.SupplyGate == nil {
+		return
+	}
+	fanout := supplyGateFanout{lifecycle: o.lifecycleObserver}
+	if o.metrics != nil {
+		fanout.metrics = metrics.NewSupplyMetrics(o.metrics)
+	}
+	if fanout.metrics == nil && fanout.lifecycle == nil {
+		return
+	}
+	svcCfg.SupplyGate.SetObserver(fanout)
+}
+
+// supplyGateFanout forwards gate observations to the metrics observer and, for
+// the one event a readiness probe cares about, to the lifecycle observer. The
+// two gauge-shaped callbacks stay metrics-only: readiness is a latch on "a
+// fetch succeeded at least once", not a live gauge.
+type supplyGateFanout struct {
+	metrics   runnersvc.SupplyGateObserver
+	lifecycle runnersvc.LifecycleObserver
+}
+
+func (f supplyGateFanout) OnSupplyFetch(ctx context.Context, name, result string) {
+	if f.metrics != nil {
+		f.metrics.OnSupplyFetch(ctx, name, result)
+	}
+	if f.lifecycle != nil {
+		f.lifecycle.OnSupplyFetch(ctx, name, result)
+	}
+}
+
+func (f supplyGateFanout) OnSupplyNotReady(ctx context.Context, workflow, supplyName string, notReady bool) {
+	if f.metrics != nil {
+		f.metrics.OnSupplyNotReady(ctx, workflow, supplyName, notReady)
+	}
+}
+
+func (f supplyGateFanout) OnSupplyServingUnavailable(ctx context.Context, name string, serving bool) {
+	if f.metrics != nil {
+		f.metrics.OnSupplyServingUnavailable(ctx, name, serving)
+	}
 }
 
 // installProcessObservers installs the observers that live in process-global
