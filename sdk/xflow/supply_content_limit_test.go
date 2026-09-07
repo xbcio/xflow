@@ -13,7 +13,7 @@ import (
 //
 // 这个数字曾经是被封掉的 HTTP PUT /v1/supplies/{name} 的 413 阈值
 // (service/apiserver/module_supply.go 的旧 maxSupplyContentBytes = 1 << 20，
-// 已在 7fea4af 随 handlePut 一起删除)。1<<20 == 1,048,576。
+// 已在 dbc78c5 随 handlePut 一起删除)。1<<20 == 1,048,576。
 
 // TestUpdateSupplyContentSizeBoundary 分别驱动 UpdateSupply 本身，而不是只测
 // checkSupplyContentSize：如果哪天有人在 UpdateSupply 里漏调守卫，这条必须能

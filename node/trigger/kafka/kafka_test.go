@@ -518,7 +518,7 @@ func kafkaMessagesFromEvent(t *testing.T, event *types.TriggerEvent) []map[strin
 func kafkaIntegrationBrokers(t *testing.T) []string {
 	t.Helper()
 	// XFLOW_TEST_KAFKA_BROKERS, not XFLOW_KAFKA_BROKERS. This helper predates the
-	// repo's convention by a week (15cddf1 added it; 18e4bf1 standardised the
+	// repo's convention by a week (e1ce28e added it; aef97c4 standardised the
 	// name in the integration harness) and was never updated, so
 	// TestKafkaTriggerConsumesRealKafka — the only test in this package that
 	// drives a live broker end to end, all 18 others use fakes — has skipped on

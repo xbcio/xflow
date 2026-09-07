@@ -128,8 +128,8 @@ Operations: `lease_acquired`, `lease_expired`, `committed`, `admission_accepted`
 ## 6. Suspend/Resume (Signal Journal) — 已移除
 
 > **组级持久化挂起已从代码库中删除。** 完整实现保留在提交
-> `a7be3fb feat(engine): implement durable group suspend/resume (Milestone I)`
-> 里（含 `3268d11` 那个只有真 Redis 才暴露的 `cjson.null` 修复），要恢复是
+> `3590948 feat(engine): implement durable group suspend/resume (Milestone I)`
+> 里（含 `dbd166f` 那个只有真 Redis 才暴露的 `cjson.null` 修复），要恢复是
 > `git show`，不是重写。
 >
 > 删除的理由不是「没写完」，而是**写完的那部分不是难的那部分**。两个后端的
@@ -225,7 +225,7 @@ items listed below under §12.1. What remains open is in §12.2.
 
 ### 12.1 Closed follow-ups
 
-- **P1-3 map-as-group-member is closed by `552a67e`.** MAP members now retain their projected body through compile/snapshot and execute that body inside the group runtime. Current MAP work is runner-level resource governance (limiter/queue/wiring plus cancel/deadline verdict closure); it does not reopen P1-3.
+- **P1-3 map-as-group-member is closed by `c679f0c`.** MAP members now retain their projected body through compile/snapshot and execute that body inside the group runtime. Current MAP work is runner-level resource governance (limiter/queue/wiring plus cancel/deadline verdict closure); it does not reopen P1-3.
 - **gRPC register carries the activation inventory.** `RegisterRequest`
   (`service/protocol/runnerpb/runner.proto`) has a repeated
   `ActivationInventoryItem`, mapped both ways by `RegisterRequestToProto` /

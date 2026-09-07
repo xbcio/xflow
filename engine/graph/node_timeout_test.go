@@ -87,7 +87,7 @@ func TestSnapshotRoundTripPreservesTimeout(t *testing.T) {
 // tag typo (missing omitempty on wireNodeMeta.Timeout, or carrying a resolved
 // default into NodeMeta) moves every already-persisted graph's hash and
 // invalidates them all. The expected hash below was captured from the parent
-// commit (6c94184) by running this exact def through Compile BEFORE the
+// commit (f5998cb) by running this exact def through Compile BEFORE the
 // NodeMeta.Timeout field was added -- it is a pinned literal, not recomputed
 // from current code. A test that recomputes the expected hash from the current
 // codebase proves nothing.
@@ -108,7 +108,7 @@ func TestUnsetTimeoutDoesNotChangeGraphHash(t *testing.T) {
 	}
 	const wantHash = "sha256:9a205c7fa88aa3b46788936f5aae62d1e526dae04e26344bfd3a68a9bd9dedab"
 	if g.Hash() != wantHash {
-		t.Fatalf("hash = %q, want %q (pinned at parent commit 6c94184 before NodeMeta.Timeout "+
+		t.Fatalf("hash = %q, want %q (pinned at parent commit f5998cb before NodeMeta.Timeout "+
 			"existed); an unset Timeout must keep omitempty and leave every pre-existing graph's "+
 			"hash unchanged", g.Hash(), wantHash)
 	}
