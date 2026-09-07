@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"sync"
 )
@@ -26,14 +27,54 @@ type lifecycleState struct {
 	supplyGateKnown   bool
 	supplyGatePresent bool
 	supplyFetched     bool
+	// requireSupplyEncryption turns "the server issued no supply key" into a
+	// startup failure. Off by default: a control plane with no supply
+	// encryptor configured is a legitimate deployment.
+	requireSupplyEncryption bool
+	supplyKeyIssued         bool
+	fatal                   error
+	onFatal                 func(error)
 }
 
 func newLifecycleState() *lifecycleState { return &lifecycleState{} }
 
-func (s *lifecycleState) OnRegistered(_ context.Context, _ string, _ bool) {
+func (s *lifecycleState) OnRegistered(_ context.Context, runnerID string, supplyKeyIssued bool) {
+	s.mu.Lock()
+	s.registered = true
+	s.supplyKeyIssued = supplyKeyIssued
+	var (
+		fire func(error)
+		err  error
+	)
+	if s.requireSupplyEncryption && !supplyKeyIssued && s.fatal == nil {
+		err = fmt.Errorf(
+			"runner %q registered but the server issued no supply encryption key, "+
+				"and --require-supply-encryption is set: supply content would be fetched in the clear",
+			runnerID)
+		s.fatal = err
+		fire = s.onFatal
+	}
+	s.mu.Unlock()
+	// Called outside the lock: onFatal cancels the run context, and a
+	// cancellation callback must never run while holding a lock the observer
+	// methods on the heartbeat path also take.
+	if fire != nil {
+		fire(err)
+	}
+}
+
+// SetOnFatal installs the callback that ends the run. Call before Run starts.
+func (s *lifecycleState) SetOnFatal(fn func(error)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.registered = true
+	s.onFatal = fn
+}
+
+// Fatal returns the unrecoverable startup condition, if one was detected.
+func (s *lifecycleState) Fatal() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fatal
 }
 
 func (s *lifecycleState) OnHeartbeat(_ context.Context, ok bool) {
@@ -69,6 +110,8 @@ func (s *lifecycleState) Ready() (bool, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch {
+	case s.fatal != nil:
+		return false, s.fatal.Error()
 	case !s.registered:
 		return false, "not registered with the control plane"
 	case !s.heartbeatOK:

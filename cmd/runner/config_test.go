@@ -969,3 +969,91 @@ func TestValidateRunnerConfigRejectsHTTPPlaintextEvenWithTLSMaterial(t *testing.
 		t.Fatalf("validateRunnerConfig with --allow-plaintext: %v", err)
 	}
 }
+
+// The --require-supply-encryption flag, its env override, and the YAML
+// security.require_supply_encryption key are the three ways to set
+// requireSupplyEncryption; a wiring point that silently fails to reach the
+// field is how the fail-fast in lifecycle.go ends up never armed.
+
+func TestResolveRunnerConfigFlagSetsRequireSupplyEncryption(t *testing.T) {
+	base := defaultRunnerConfig()
+	base.allowPlaintext = true
+	base.requireSupplyEncryption = true
+	base.changed = map[string]bool{"allow-plaintext": true, "require-supply-encryption": true}
+
+	got, err := resolveRunnerConfig(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.requireSupplyEncryption {
+		t.Fatal("requireSupplyEncryption = false, want true from --require-supply-encryption")
+	}
+}
+
+func TestApplyLookupEnvOverridesRequireSupplyEncryption(t *testing.T) {
+	cfg := defaultRunnerConfig()
+	got := applyLookupEnvOverrides(cfg, func(key string) (string, bool) {
+		if key == "XFLOW_RUNNER_REQUIRE_SUPPLY_ENCRYPTION" {
+			return "true", true
+		}
+		return "", false
+	})
+	if !got.requireSupplyEncryption {
+		t.Fatal("requireSupplyEncryption = false, want true from XFLOW_RUNNER_REQUIRE_SUPPLY_ENCRYPTION=true")
+	}
+}
+
+// A malformed XFLOW_RUNNER_REQUIRE_SUPPLY_ENCRYPTION must not be silently
+// dropped: an operator who mistypes the value must be told, not left
+// believing the fail-fast is armed when it never applied.
+func TestResolveRunnerConfigRejectsInvalidEnvRequireSupplyEncryption(t *testing.T) {
+	t.Setenv("XFLOW_RUNNER_REQUIRE_SUPPLY_ENCRYPTION", "notabool")
+	t.Setenv("XFLOW_RUNNER_SERVER", "https://control.example")
+
+	base := defaultRunnerConfig()
+	_, err := resolveRunnerConfig(base)
+	if err == nil || !strings.Contains(err.Error(), "XFLOW_RUNNER_REQUIRE_SUPPLY_ENCRYPTION") {
+		t.Fatalf("error = %v, want containing %q", err, "XFLOW_RUNNER_REQUIRE_SUPPLY_ENCRYPTION")
+	}
+}
+
+func TestLoadRunnerConfigFromYAML_SecurityRequireSupplyEncryption(t *testing.T) {
+	data := []byte(`
+security:
+  require_supply_encryption: true
+`)
+	cfg, err := loadRunnerConfigFromBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.requireSupplyEncryption {
+		t.Fatal("requireSupplyEncryption = false, want true from security.require_supply_encryption in the file")
+	}
+}
+
+func TestResolveRunnerConfigFlagBeatsYAMLForRequireSupplyEncryption(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runner.yaml")
+	data := []byte(`
+server:
+  url: http://file-server:8080
+security:
+  require_supply_encryption: true
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	base := defaultRunnerConfig()
+	base.configPath = path
+	base.allowPlaintext = true
+	base.requireSupplyEncryption = false
+	base.changed = map[string]bool{"allow-plaintext": true, "require-supply-encryption": true}
+
+	got, err := resolveRunnerConfig(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.requireSupplyEncryption {
+		t.Fatal("requireSupplyEncryption = true, want false: the explicit flag (false) must beat the YAML file (true)")
+	}
+}

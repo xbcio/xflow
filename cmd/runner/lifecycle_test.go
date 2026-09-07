@@ -58,6 +58,44 @@ func TestLifecycleStateFailedHeartbeatRevokesReadiness(t *testing.T) {
 	}
 }
 
+func TestLifecycleStateFailsFastWhenSupplyEncryptionIsRequiredButAbsent(t *testing.T) {
+	s := newLifecycleState()
+	s.requireSupplyEncryption = true
+
+	var got error
+	s.SetOnFatal(func(err error) { got = err })
+
+	s.OnRegistered(context.Background(), "runner-1", false)
+	if got == nil {
+		t.Fatal("registration without a supply key did not trip the fatal callback under --require-supply-encryption")
+	}
+	if s.Fatal() == nil {
+		t.Fatal("Fatal() is nil after the callback fired")
+	}
+	if ready, _ := s.Ready(); ready {
+		t.Fatal("a runner in a fatal state reported ready")
+	}
+}
+
+func TestLifecycleStateAcceptsAnIssuedSupplyKey(t *testing.T) {
+	s := newLifecycleState()
+	s.requireSupplyEncryption = true
+	s.SetOnFatal(func(error) { t.Error("fatal callback fired despite an issued supply key") })
+	s.OnRegistered(context.Background(), "runner-1", true)
+	if s.Fatal() != nil {
+		t.Fatalf("Fatal() = %v, want nil", s.Fatal())
+	}
+}
+
+func TestLifecycleStateIgnoresAMissingKeyWhenNotRequired(t *testing.T) {
+	s := newLifecycleState()
+	s.SetOnFatal(func(error) { t.Error("fatal callback fired without --require-supply-encryption") })
+	s.OnRegistered(context.Background(), "runner-1", false)
+	if s.Fatal() != nil {
+		t.Fatalf("Fatal() = %v, want nil", s.Fatal())
+	}
+}
+
 func TestLifecycleProbeHandlers(t *testing.T) {
 	s := newLifecycleState()
 	mux := http.NewServeMux()

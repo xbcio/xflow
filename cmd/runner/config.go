@@ -43,7 +43,8 @@ type runnerConfigFile struct {
 		File  *string `yaml:"file"`
 	} `yaml:"identity"`
 	Security struct {
-		AllowPlaintext *bool `yaml:"allow_plaintext"`
+		AllowPlaintext          *bool `yaml:"allow_plaintext"`
+		RequireSupplyEncryption *bool `yaml:"require_supply_encryption"`
 	} `yaml:"security"`
 	// Credentials holds named credential maps (driver/dsn, token/base_url, …)
 	// consumed by resource-aware nodes via input.Credential(name). String leaves
@@ -167,6 +168,9 @@ func loadRunnerConfigFromBytes(data []byte) (runnerConfig, error) {
 	if file.Security.AllowPlaintext != nil {
 		cfg.allowPlaintext = *file.Security.AllowPlaintext
 	}
+	if file.Security.RequireSupplyEncryption != nil {
+		cfg.requireSupplyEncryption = *file.Security.RequireSupplyEncryption
+	}
 
 	if len(file.Credentials) > 0 {
 		// Copy first so we never mutate the yaml-parsed map.
@@ -234,6 +238,7 @@ var runnerConfigIssueOrder = []string{
 	"heartbeat-interval",
 	"poll-wait",
 	"allow-plaintext",
+	"require-supply-encryption",
 }
 
 func applyEnvOverrides(cfg runnerConfig, getenv func(string) string) runnerConfig {
@@ -309,6 +314,16 @@ func applyLookupEnvOverrides(cfg runnerConfig, lookupEnv func(string) (string, b
 		} else {
 			clearRunnerConfigIssue(&cfg, "allow-plaintext")
 			cfg.allowPlaintext = b
+		}
+	}
+	if v, ok := lookupEnv("XFLOW_RUNNER_REQUIRE_SUPPLY_ENCRYPTION"); ok {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			setRunnerConfigIssue(&cfg, "require-supply-encryption",
+				fmt.Errorf("XFLOW_RUNNER_REQUIRE_SUPPLY_ENCRYPTION must be a valid boolean: %w", err))
+		} else {
+			clearRunnerConfigIssue(&cfg, "require-supply-encryption")
+			cfg.requireSupplyEncryption = b
 		}
 	}
 
@@ -568,6 +583,10 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 		clearRunnerConfigIssue(&cfg, "allow-plaintext")
 		cfg.allowPlaintext = base.allowPlaintext
 	}
+	if base.changed["require-supply-encryption"] {
+		clearRunnerConfigIssue(&cfg, "require-supply-encryption")
+		cfg.requireSupplyEncryption = base.requireSupplyEncryption
+	}
 	if base.changed["metrics-addr"] {
 		cfg.metricsAddr = base.metricsAddr
 	}
@@ -654,6 +673,9 @@ heartbeat:
 #   # A plaintext control-plane connection ships the runner token in the clear.
 #   # The runner refuses to start on one unless this is set.
 #   allow_plaintext: false
+#   # Exit if the control plane issues no supply encryption key at
+#   # registration, rather than fetching supply content in the clear.
+#   require_supply_encryption: false
 
 # Credentials: named maps consumed by resource-aware nodes via
 # input.Credential(name). String leaves are env-expanded at load time

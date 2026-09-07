@@ -68,6 +68,9 @@ type runnerConfig struct {
 	// refuses to start, because its bearer token would cross the wire in the
 	// clear.
 	allowPlaintext bool
+	// requireSupplyEncryption refuses to keep running if the control plane
+	// issued no supply encryption key at registration.
+	requireSupplyEncryption bool
 	// tracing
 	traceMode     string
 	traceEndpoint string
@@ -131,6 +134,7 @@ func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
 	cmd.Flags().StringVar(&cfg.identityFile, "identity-file", cfg.identityFile, "Path to the identity file (--identity-store=file)")
 	cmd.Flags().StringVar(&cfg.registrationCode, "registration-code", cfg.registrationCode, "One-time code used to enroll when no identity is stored; enrollment dials --server over HTTP regardless of --transport (prefer XFLOW_RUNNER_REGISTRATION_CODE)")
 	cmd.Flags().BoolVar(&cfg.allowPlaintext, "allow-plaintext", cfg.allowPlaintext, "Permit an unencrypted control-plane connection (no TLS material configured)")
+	cmd.Flags().BoolVar(&cfg.requireSupplyEncryption, "require-supply-encryption", cfg.requireSupplyEncryption, "Exit if the control plane issues no supply encryption key at registration")
 	cmd.Flags().StringVar(&cfg.traceMode, "trace", "disabled", "Tracing mode: disabled|stdout|otlp")
 	cmd.Flags().StringVar(&cfg.traceEndpoint, "trace-endpoint", "localhost:4317", "OTLP collector gRPC endpoint (--trace=otlp)")
 	cmd.Flags().BoolVar(&cfg.traceInsecure, "trace-insecure", false, "Disable TLS verification for OTLP connection")
@@ -232,6 +236,10 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 	// that also cannot report.
 	m := metrics.New()
 	lifecycle := newLifecycleState()
+	lifecycle.requireSupplyEncryption = cfg.requireSupplyEncryption
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	lifecycle.SetOnFatal(func(error) { cancelRun() })
 
 	runner, err := newRunnerService(sdkCfg,
 		xflowsdk.WithRunnerTracer(tracer),
@@ -274,7 +282,14 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 		}()
 	}
 
-	return runner.Run(ctx)
+	err = runner.Run(runCtx)
+	// A fatal startup condition cancels runCtx, so Run returns a context
+	// error that describes the cancellation rather than the reason for it.
+	// The reason is what an operator needs, so it wins.
+	if fatal := lifecycle.Fatal(); fatal != nil {
+		return fatal
+	}
+	return err
 }
 
 // toSDKRunnerConfig converts the resolved CLI/YAML config into the SDK's shape.
