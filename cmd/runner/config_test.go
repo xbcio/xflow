@@ -1031,6 +1031,39 @@ func TestConfigValidateIgnoresEnrollGateWithoutRegistrationCode(t *testing.T) {
 	}
 }
 
+// TestConfigValidateIgnoresEnrollGateWhenIdentityAlreadyStored pins the
+// regression round 1 introduced: resolveRunnerIdentity (enroll.go) checks
+// store.Load() before it ever looks at cfg.registrationCode, and returns
+// immediately on a stored identity without reaching the enroll gate at all.
+// A runner that already enrolled, with --identity-store=file pointing at a
+// valid identity file, and a stale --registration-code still sitting in its
+// environment (nothing forces it to be cleared on restart) never dials out
+// to enroll and must not be rejected by config validation either — even
+// though its --server is plaintext and its --registration-code is set, the
+// conjunction with "no stored identity" is false, so the gate must not fire.
+func TestConfigValidateIgnoresEnrollGateWhenIdentityAlreadyStored(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "identity.json")
+	if err := os.WriteFile(path, []byte(`{"runner_id":"stored-runner","token":"stored-token"}`), 0o600); err != nil {
+		t.Fatalf("seed identity file: %v", err)
+	}
+
+	err := executeRootWithOptions(commandOptions{
+		out: &bytes.Buffer{},
+		err: &bytes.Buffer{},
+	}, "config", "validate",
+		"--transport", "grpc",
+		"--grpc-target", "host:9090",
+		"--tls-server-ca", "/path/ca.pem",
+		"--server", "http://internal-controlplane:8080",
+		"--registration-code", "XXXX",
+		"--identity-store", "file",
+		"--identity-file", path,
+	)
+	if err != nil {
+		t.Fatalf("config validate rejected a config with an already-stored identity: %v", err)
+	}
+}
+
 // TestValidateRunnerConfigRejectsHTTPPlaintextEvenWithTLSMaterial pins the
 // hole where TLS material configured for an http:// URL used to satisfy the
 // gate on its own. Go's http.Transport only consults TLSClientConfig when

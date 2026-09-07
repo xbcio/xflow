@@ -499,23 +499,45 @@ func validateRunnerConfig(cfg runnerConfig) error {
 		return err
 	}
 
-	// A configured registration code means this run will, at enrollment time,
-	// send an HTTP request carrying that code regardless of --transport (see
-	// validateEnrollTransportSecurity). Config validation can already see that
-	// coming, so it applies the same gate here instead of waiting for
-	// resolveRunnerIdentity to hit it moments before dialing out.
-	if strings.TrimSpace(cfg.registrationCode) != "" {
-		if err := validateEnrollTransportSecurity(cfg); err != nil {
-			return err
-		}
+	// Build the store to validate its configuration; also reused just below to
+	// decide whether the enroll gate applies. Building it here means a bad
+	// --identity-store/--identity-file combination fails at config resolution,
+	// the same place every other malformed value fails, rather than at the
+	// first enrollment attempt.
+	store, err := newIdentityStore(cfg)
+	if err != nil {
+		return err
 	}
 
-	// Build the store to validate its configuration; the value is discarded.
-	// Doing it here means a bad --identity-store/--identity-file combination
-	// fails at config resolution, the same place every other malformed value
-	// fails, rather than at the first enrollment attempt.
-	if _, err := newIdentityStore(cfg); err != nil {
-		return err
+	// A configured registration code means this run *may*, at enrollment time,
+	// send an HTTP request carrying that code regardless of --transport (see
+	// validateEnrollTransportSecurity) — but only if resolveRunnerIdentity
+	// (enroll.go) does not find a stored identity first: it checks store.Load()
+	// before the registration code, and returns immediately on a hit without
+	// ever reaching the enroll gate, so a runner that already enrolled and
+	// still has --registration-code sitting in its environment (a stale
+	// registration code is common: nothing forces it to be cleared on
+	// restart) never dials out and never needs this gate. Keying config
+	// validation on the registration code alone would misjudge exactly that
+	// case as an upcoming plaintext enrollment and refuse a deployment that
+	// `run` handles correctly. So this must mirror resolveRunnerIdentity's own
+	// two-part test, in the same order: read the store only when a
+	// registration code is configured (config validate stays host-state-free
+	// on the common path of no registration code — an identity file that is
+	// corrupt or too permissive with no registration code configured still
+	// only surfaces in `run`, not here; that gap predates this gate and is
+	// intentionally left alone), and skip the gate when the store already
+	// holds an identity.
+	if strings.TrimSpace(cfg.registrationCode) != "" {
+		_, ok, err := store.Load()
+		if err != nil {
+			return err
+		}
+		if !ok {
+			if err := validateEnrollTransportSecurity(cfg); err != nil {
+				return err
+			}
+		}
 	}
 
 	return nil
