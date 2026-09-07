@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ type runnerConfigFile struct {
 		Capabilities *[]string         `yaml:"capabilities"`
 		Labels       map[string]string `yaml:"labels"`
 		Namespaces   *[]string         `yaml:"namespaces"`
+		AutoLabels   *bool             `yaml:"auto_labels"`
 	} `yaml:"runner"`
 	Server struct {
 		URL        *string `yaml:"url"`
@@ -90,6 +92,7 @@ func defaultRunnerConfig() runnerConfig {
 		pollWait:              "1s",
 		reportMetricsInterval: "15s",
 		identityStoreKind:     identityStoreEphemeral,
+		autoLabels:            true,
 	}
 }
 
@@ -143,6 +146,9 @@ func loadRunnerConfigFromBytes(data []byte) (runnerConfig, error) {
 	}
 	if file.Runner.Namespaces != nil {
 		cfg.namespaceRaw = *file.Runner.Namespaces
+	}
+	if file.Runner.AutoLabels != nil {
+		cfg.autoLabels = *file.Runner.AutoLabels
 	}
 	if file.Poll.Wait != nil {
 		cfg.pollWait = *file.Poll.Wait
@@ -239,6 +245,7 @@ var runnerConfigIssueOrder = []string{
 	"poll-wait",
 	"allow-plaintext",
 	"require-supply-encryption",
+	"auto-labels",
 }
 
 func applyEnvOverrides(cfg runnerConfig, getenv func(string) string) runnerConfig {
@@ -326,6 +333,16 @@ func applyLookupEnvOverrides(cfg runnerConfig, lookupEnv func(string) (string, b
 			cfg.requireSupplyEncryption = b
 		}
 	}
+	if v, ok := lookupEnv("XFLOW_RUNNER_AUTO_LABELS"); ok {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			setRunnerConfigIssue(&cfg, "auto-labels",
+				fmt.Errorf("XFLOW_RUNNER_AUTO_LABELS must be a valid boolean: %w", err))
+		} else {
+			clearRunnerConfigIssue(&cfg, "auto-labels")
+			cfg.autoLabels = b
+		}
+	}
 
 	cfg.capabilities = parseCapabilities(cfg.capRaw)
 	cfg.labels = parseLabels(cfg.labelRaw)
@@ -349,6 +366,50 @@ func parseLabels(raw []string) map[string]string {
 		labels[key] = value
 	}
 	return labels
+}
+
+// detectRunnerLabels derives labels from the process environment so a fleet is
+// selectable by where it runs without every deployment restating it in its
+// config. Standard library only — no cloud metadata call, no new dependency,
+// nothing that can hang at startup.
+//
+// The xflow.io/ prefix keeps these out of the flat namespace an operator's own
+// labels live in, so an auto key can be added later without colliding with a
+// name someone already used.
+func detectRunnerLabels() map[string]string {
+	labels := map[string]string{
+		"xflow.io/os":   runtime.GOOS,
+		"xflow.io/arch": runtime.GOARCH,
+		"xflow.io/env":  "bare",
+	}
+	// The kubelet injects KUBERNETES_SERVICE_HOST into every pod, so its
+	// presence is the cheapest in-cluster signal that needs no API access.
+	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
+		labels["xflow.io/env"] = "kubernetes"
+	}
+	// A hostname that cannot be read is not a startup failure: it costs one
+	// label, not the process.
+	if host, err := os.Hostname(); err == nil && strings.TrimSpace(host) != "" {
+		labels["xflow.io/hostname"] = host
+	}
+	return labels
+}
+
+// mergeRunnerLabels overlays manual labels on detected ones. Manual wins: an
+// operator who writes a label meant to override what the environment says.
+// Neither argument is mutated.
+func mergeRunnerLabels(auto, manual map[string]string) map[string]string {
+	if len(auto) == 0 && len(manual) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(auto)+len(manual))
+	for k, v := range auto {
+		out[k] = v
+	}
+	for k, v := range manual {
+		out[k] = v
+	}
+	return out
 }
 
 func splitCSV(raw string) []string {
@@ -587,6 +648,10 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 		clearRunnerConfigIssue(&cfg, "require-supply-encryption")
 		cfg.requireSupplyEncryption = base.requireSupplyEncryption
 	}
+	if base.changed["auto-labels"] {
+		clearRunnerConfigIssue(&cfg, "auto-labels")
+		cfg.autoLabels = base.autoLabels
+	}
 	if base.changed["metrics-addr"] {
 		cfg.metricsAddr = base.metricsAddr
 	}
@@ -599,6 +664,12 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 
 	cfg.capabilities = parseCapabilities(cfg.capRaw)
 	cfg.labels = parseLabels(cfg.labelRaw)
+	if cfg.autoLabels {
+		// Merged here, not in toSDKRunnerConfig: validateRunnerConfig below
+		// checks every label key/value, and a detected label must face the
+		// same check a hand-written one does.
+		cfg.labels = mergeRunnerLabels(detectRunnerLabels(), cfg.labels)
+	}
 	cfg.namespaces = parseNamespaces(cfg.namespaceRaw)
 	if err := firstRunnerConfigIssue(cfg); err != nil {
 		return runnerConfig{}, err
@@ -649,6 +720,7 @@ func sampleRunnerConfigYAML() string {
     mode: "remote"
   capabilities:
     - "xflow.function"
+  # auto_labels: true   # adds xflow.io/os, /arch, /env, /hostname
 
 server:
   # transport: "http" or "grpc" (default: grpc, see defaultRunnerConfig)

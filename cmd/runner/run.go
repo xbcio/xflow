@@ -45,6 +45,8 @@ type runnerConfig struct {
 	namespaces        []namespace.Namespace
 	heartbeatInterval string
 	pollWait          string
+	// autoLabels adds environment-derived xflow.io/* labels to the manual set.
+	autoLabels bool
 	// token is the runner's bearer token (matched against the server's
 	// runners.yaml policy). Empty means "no auth", which the server accepts
 	// only when running with --auth-mode disabled or dry-run.
@@ -124,6 +126,7 @@ func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
 	cmd.Flags().StringVar(&cfg.capRaw, "cap", cfg.capRaw, "Comma-separated node type capabilities")
 	cmd.Flags().StringArrayVar(&cfg.labelRaw, "label", cfg.labelRaw, "Runner label as key=value; repeatable")
 	cmd.Flags().StringArrayVar(&cfg.namespaceRaw, "namespace", cfg.namespaceRaw, "Namespace this runner serves; repeatable (default: default)")
+	cmd.Flags().BoolVar(&cfg.autoLabels, "auto-labels", cfg.autoLabels, "Add environment-derived xflow.io/* labels (os, arch, env, hostname)")
 	cmd.Flags().StringVar(&cfg.heartbeatInterval, "heartbeat-interval", cfg.heartbeatInterval, "Heartbeat interval")
 	cmd.Flags().StringVar(&cfg.pollWait, "poll-wait", cfg.pollWait, "Poll wait duration when no task is available")
 	cmd.Flags().StringVar(&cfg.token, "token", cfg.token, "Runner bearer token (prefer XFLOW_RUNNER_TOKEN env)")

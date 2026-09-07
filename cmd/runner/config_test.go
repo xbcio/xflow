@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1055,5 +1056,137 @@ security:
 	}
 	if got.requireSupplyEncryption {
 		t.Fatal("requireSupplyEncryption = true, want false: the explicit flag (false) must beat the YAML file (true)")
+	}
+}
+
+// detectRunnerLabels / mergeRunnerLabels / --auto-labels wiring.
+//
+// The runtime package (not a hardcoded string) is what must produce
+// xflow.io/os and xflow.io/arch, so a query filtering on either key sees the
+// value for the process that is actually running, not a copy-pasted literal.
+
+func TestDetectRunnerLabels(t *testing.T) {
+	got := detectRunnerLabels()
+	for _, key := range []string{"xflow.io/os", "xflow.io/arch"} {
+		if got[key] == "" {
+			t.Fatalf("detectRunnerLabels()[%q] is empty; want a value from the runtime package", key)
+		}
+	}
+	if got["xflow.io/os"] != runtime.GOOS || got["xflow.io/arch"] != runtime.GOARCH {
+		t.Fatalf("detectRunnerLabels() = %v, want GOOS/GOARCH verbatim", got)
+	}
+	if _, ok := got["xflow.io/env"]; !ok {
+		t.Fatal("detectRunnerLabels() has no xflow.io/env key; the label must always be present so a query can filter on it")
+	}
+}
+
+func TestDetectRunnerLabelsMarksKubernetes(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+	if got := detectRunnerLabels(); got["xflow.io/env"] != "kubernetes" {
+		t.Fatalf("xflow.io/env = %q inside a pod, want kubernetes", got["xflow.io/env"])
+	}
+}
+
+func TestMergeRunnerLabelsManualWins(t *testing.T) {
+	auto := map[string]string{"xflow.io/os": "linux", "xflow.io/env": "bare"}
+	manual := map[string]string{"xflow.io/env": "staging", "team": "core"}
+	got := mergeRunnerLabels(auto, manual)
+	if got["xflow.io/env"] != "staging" {
+		t.Fatalf("xflow.io/env = %q, want the manual value: an operator override must win", got["xflow.io/env"])
+	}
+	if got["xflow.io/os"] != "linux" || got["team"] != "core" {
+		t.Fatalf("merged labels = %v, want both sides preserved", got)
+	}
+	// Neither input may be mutated: resolveRunnerConfig runs more than once in
+	// tests, and a mutated auto map would leak between runs.
+	if auto["xflow.io/env"] != "bare" {
+		t.Fatal("mergeRunnerLabels mutated its auto argument")
+	}
+}
+
+func TestResolveRunnerConfigDisablesAutoLabels(t *testing.T) {
+	base := defaultRunnerConfig()
+	base.allowPlaintext = true
+	base.autoLabels = false
+	base.changed = map[string]bool{"auto-labels": true, "allow-plaintext": true}
+
+	cfg, err := resolveRunnerConfig(base)
+	if err != nil {
+		t.Fatalf("resolveRunnerConfig: %v", err)
+	}
+	if _, ok := cfg.labels["xflow.io/os"]; ok {
+		t.Fatalf("labels = %v, want no auto-detected keys with --auto-labels=false", cfg.labels)
+	}
+}
+
+// The following two tests are not in the original brief for this feature.
+// They exist because a test suite that only ever exercises the feature
+// switched ON cannot tell a real wiring point from a hardcoded constant --
+// this plan has hit that exact defect before. Both directions (env, YAML)
+// must be able to turn autoLabels off, and an explicit flag must still beat a
+// YAML file that turned it off.
+
+// XFLOW_RUNNER_AUTO_LABELS=false must actually suppress the merge in
+// resolveRunnerConfig, not just flip a field nothing reads.
+func TestResolveRunnerConfigEnvDisablesAutoLabels(t *testing.T) {
+	t.Setenv("XFLOW_RUNNER_AUTO_LABELS", "false")
+
+	base := defaultRunnerConfig()
+	base.allowPlaintext = true
+	base.changed = map[string]bool{"allow-plaintext": true}
+
+	got, err := resolveRunnerConfig(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key := range got.labels {
+		if strings.HasPrefix(key, "xflow.io/") {
+			t.Fatalf("labels = %v, want no xflow.io/* keys with XFLOW_RUNNER_AUTO_LABELS=false", got.labels)
+		}
+	}
+}
+
+// runner.auto_labels: false in the YAML file must suppress the merge on its
+// own, and an explicit --auto-labels flag must still beat that YAML value:
+// the same flag-over-file precedence every other security-relevant setting
+// in this file has.
+func TestLoadRunnerConfigFromYAML_RunnerAutoLabelsDisables(t *testing.T) {
+	data := []byte(`
+runner:
+  auto_labels: false
+`)
+	cfg, err := loadRunnerConfigFromBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.autoLabels {
+		t.Fatal("autoLabels = true, want false from runner.auto_labels: false in the file")
+	}
+}
+
+func TestResolveRunnerConfigFlagBeatsYAMLForAutoLabels(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runner.yaml")
+	data := []byte(`
+server:
+  url: http://file-server:8080
+runner:
+  auto_labels: false
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	base := defaultRunnerConfig()
+	base.configPath = path
+	base.allowPlaintext = true
+	base.autoLabels = true
+	base.changed = map[string]bool{"allow-plaintext": true, "auto-labels": true}
+
+	got, err := resolveRunnerConfig(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got.labels["xflow.io/os"]; !ok {
+		t.Fatal("labels missing xflow.io/os: the explicit --auto-labels=true flag must beat the YAML file's auto_labels: false")
 	}
 }
