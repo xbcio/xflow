@@ -47,7 +47,7 @@ runner 默认拒绝在没有任何 TLS 材料的情况下启动，因为 bearer 
 
 - `--require-supply-encryption`：默认关闭。开启后，如果 runner 成功注册但控制面在注册响应里没有签发供应加密密钥，视为致命错误——runner 会把这个错误记为 `lifecycleState.fatal`（此时 `/readyz` 恒 503，原因是这条错误文案本身），并取消运行上下文使进程退出，而不是继续以明文方式拉取供应内容。默认关闭是因为"控制面没配供应加密器"本身是一种合法部署形态。
 - `xflow-runner verify` 子命令做同样的检查，但发生在启动之前：它复用与 `run` 完全相同的配置翻译路径（`toSDKRunnerConfig` + `xflowsdk.VerifyRunner`），如果 `--require-supply-encryption` 与实际注册结果不符，会在终端直接报错退出，而不是等到进程跑起来再 CrashLoopBackOff。
-- **但 `verify` 不加载已持久化的身份，也不会入册。** 它的 `RunE` 只调 `resolveRunnerConfig` + `verifyRunner`；`newIdentityStore` / `resolveRunnerIdentity` 只出现在 `run` 的路径上（`cmd/runner/run.go:201-205`）。因此在 `--registration-code` / `--identity-store=file` 这类部署下，`verify` 用的是配置里原始的 `--id`/`--token`（往往是空 token），与 `run` 实际使用的入册身份**不是同一个**——`verify` 通过不代表 `run` 认得过，反之亦然。
+- **但 `verify` 不加载已持久化的身份，也不会入册。** 它的 `RunE` 只调 `resolveRunnerConfig` + `verifyRunner`；`resolveRunnerIdentity`（唯一会**采纳**已存身份、也是唯一会入册的那个函数）只出现在 `run` 的路径上（`cmd/runner/run.go:201-205`）。注意 `newIdentityStore` 本身有两个调用点：除了 `run.go:201`，`validateRunnerConfig`（`cmd/runner/config.go:507`）也会构建一个，因此 `verify` 与 `config validate` 在配了 `--registration-code` 时确实会读一次身份文件——但那只是为了判断"有没有已存身份"以决定入册门禁是否适用（见上一节的合取判据），读到的身份不会被采纳为运行身份。因此在 `--registration-code` / `--identity-store=file` 这类部署下，`verify` 用的仍是配置里原始的 `--id`/`--token`（往往是空 token），与 `run` 实际使用的入册身份**不是同一个**——`verify` 通过不代表 `run` 认得过，反之亦然。
   **这是有意的取舍，不是待修的缺口**：`resolveRunnerIdentity` 在本地没有身份时会真的发起入册，而注册码是一次性的；让一次预检烧掉运维手里的注册码，比"预检身份与运行时身份不同"更糟。所以 `verify` 能验的是**连接与配置**（transport、TLS 材料、控制面可达性、`--require-supply-encryption`），不包括身份鉴权。身份能不能用，只能以 `run` 自身的启动结果为准。
 
 ## ActivationReplicas 与 HPA 的手工同步
