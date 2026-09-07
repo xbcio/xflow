@@ -1,25 +1,74 @@
 #!/usr/bin/env sh
-# Enforces Conventional Commits: https://www.conventionalcommits.org
+# Enforces docs/GIT-COMMITS.md.
+#
+# 与旧版的差别（旧版正是历史违规能进来的原因）：
+#   1. type 收到 8 种 —— 旧版放行 perf/build/revert，文档不认
+#   2. 长度含 `type(scope): ` 前缀且上限 70 —— 旧版只数冒号后、上限 100
+#   3. 拒绝 body —— 旧版 `head -1` 只看第一行，后面写什么都放行
+#   4. 拒绝非 ASCII —— 旧版无此检查，227 条中文 subject 由此进入历史
+#   5. scope 只许小写 —— 旧版 [a-zA-Z0-9_/-] 允许大写
 set -e
 
 MSG_FILE="$1"
-MSG=$(cat "$MSG_FILE")
 
-PATTERN='^(feat|fix|docs|style|refactor|perf|test|chore|ci|build|revert)(\([a-zA-Z0-9_/-]+\))?(!)?: .{1,100}$'
+# 去掉注释行与尾部空行；剩下的**全部**都要检查，不只第一行。
+BODY=$(grep -v '^#' "$MSG_FILE" | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}')
+SUBJECT=$(printf '%s\n' "$BODY" | head -1)
 
-# Strip comment lines before checking
-FIRST_LINE=$(echo "$MSG" | grep -v '^#' | head -1)
-
-if ! echo "$FIRST_LINE" | grep -qE "$PATTERN"; then
+fail() {
   echo ""
-  echo "  ✗ commit message does not follow Conventional Commits"
+  echo "  ✗ $1"
   echo ""
   echo "  Format:  <type>(<scope>): <description>"
   echo "  Example: feat(engine): add retry policy for failed tasks"
   echo ""
-  echo "  Allowed types: feat fix docs style refactor perf test chore ci build revert"
+  echo "  Types:   feat fix refactor test docs chore style ci"
+  echo "  Limit:   70 chars including the \"type(scope): \" prefix"
+  echo "  Body:    not allowed"
   echo ""
-  echo "  Got: $FIRST_LINE"
+  echo "  Got: $SUBJECT"
   echo ""
   exit 1
+}
+
+if [ "$(printf '%s\n' "$BODY" | wc -l)" -gt 1 ]; then
+  fail "commit message has a body; write a single subject line"
 fi
+
+# LC_ALL=C 让 grep 按字节判定，非 ASCII 字节即命中。
+if printf '%s' "$SUBJECT" | LC_ALL=C grep -q '[^ -~]'; then
+  fail "commit message contains non-ASCII characters; write it in English"
+fi
+
+# 按字符数（此处 = 字节数，已确保纯 ASCII），含前缀。
+if [ "$(printf '%s' "$SUBJECT" | wc -c)" -gt 70 ]; then
+  fail "subject is $(printf '%s' "$SUBJECT" | wc -c | tr -d ' ') chars; hard limit is 70 including the prefix"
+fi
+
+PATTERN='^(feat|fix|refactor|test|docs|chore|style|ci)(\([a-z0-9_/-]+\))?(!)?: [a-z].*[^.]$'
+if ! printf '%s' "$SUBJECT" | grep -qE "$PATTERN"; then
+  fail "subject does not follow Conventional Commits (lowercase verb start, no trailing period)"
+fi
+
+for token in ' and ' ',' ' + ' ';'; do
+  case "$SUBJECT" in
+    *"$token"*)
+      fail "subject joins two things with \"$token\"; that is two commits"
+      ;;
+  esac
+done
+
+# Vague labels. A mechanical check cannot judge specificity in general, but the
+# phrases below are the ones this history actually accumulated: they name the
+# process that produced the change instead of the change itself. Every one of
+# them required opening the diff to learn what the commit did.
+for phrase in 'update stuff' 'misc ' 'review findings' 'nits' \
+              'review comments' 'various ' 'minor fixes' 'small fixes' \
+              'some fixes' 'address feedback' 'apply feedback' 'and more' \
+              ' etc' 'as discussed' 'per review'; do
+  case "$SUBJECT" in
+    *"$phrase"*)
+      fail "\"$(echo "$phrase" | sed 's/^ *//;s/ *$//')\" names the process, not the change; say what changed"
+      ;;
+  esac
+done

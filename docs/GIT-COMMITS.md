@@ -38,6 +38,8 @@ what changed without opening the diff.
 a title, not a sentence you can keep extending. If it does not fit, the commit
 is usually too big — shorten the change, not the words.
 
+Write it in English, ASCII only. The hook rejects a non-ASCII subject.
+
 ## One commit, one change
 
 A commit does one thing. If a session ends up bundling unrelated fixes —
