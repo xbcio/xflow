@@ -19,7 +19,11 @@ func newVerifyControlPlane(t *testing.T, supplyKey string) *httptest.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc(protocol.RegisterRunnerPath, func(w http.ResponseWriter, r *http.Request) {
 		writeJSONBody(w, protocol.RegisterRunnerResponse{
-			RunnerID:  "verify-probe",
+			// Deliberately different from any cfg.RunnerID used below: if
+			// VerifyResult.RunnerID ever started echoing the server's value
+			// instead of the request's, a fake that happened to reuse the
+			// same string for both would hide it.
+			RunnerID:  "server-echoed-id",
 			SessionID: "session-1",
 			SupplyKey: supplyKey,
 		})
@@ -56,6 +60,9 @@ func TestVerifyRunnerReportsWhetherASupplyKeyWasIssued(t *testing.T) {
 	if res.RunnerID != cfg.RunnerID {
 		t.Fatalf("RunnerID = %q, want %q", res.RunnerID, cfg.RunnerID)
 	}
+	if res.SessionID != "session-1" {
+		t.Fatalf("SessionID = %q, want %q", res.SessionID, "session-1")
+	}
 }
 
 // TestVerifyRunnerReportsASupplyKeyWasIssued is the positive half. Without
@@ -82,5 +89,8 @@ func TestVerifyRunnerReportsASupplyKeyWasIssued(t *testing.T) {
 	}
 	if res.RunnerID != cfg.RunnerID {
 		t.Fatalf("RunnerID = %q, want %q", res.RunnerID, cfg.RunnerID)
+	}
+	if res.SessionID != "session-1" {
+		t.Fatalf("SessionID = %q, want %q", res.SessionID, "session-1")
 	}
 }
