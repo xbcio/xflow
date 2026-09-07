@@ -151,23 +151,24 @@ func TestRunnersListReturns500WhenListRunnersFails(t *testing.T) {
 	}
 }
 
-// TestNewManagementModuleRunnerProbeDefaultsToNil pins fix1 review finding
-// (table row 1), negative half: newRunnerListTestServer always overwrites
-// m.runners immediately after newManagementModule, so nothing in this suite
-// previously asserted the structural probe's OWN result. This test builds a
-// managementModule the same way (fakeControlPlaneForAuthz, i.e. a
-// local-backend control plane with no RunnerDirectory override, which
-// defaults to control.NewMemoryRunnerDirectory per selectRunnerDirectory) and
-// checks m.runners without touching it afterward: today no shipped
-// RunnerDirectory implementation satisfies runnerLister, so the probe must
-// leave m.runners nil. Flipping newManagementModule's `ok` check (or deleting
-// the probe block entirely) would not be caught by this test alone -- see
-// TestNewManagementModuleRunnerProbeWiresListableDirectory for the half that
-// catches that.
-func TestNewManagementModuleRunnerProbeDefaultsToNil(t *testing.T) {
+// TestNewManagementModuleRunnerProbeWiresTheDefaultDirectory verifies that
+// newManagementModule wires m.runners when the default RunnerDirectory
+// satisfies runnerLister. Before MemoryRunnerDirectory grew ListRunners this
+// test asserted the opposite — that no shipped directory satisfied
+// runnerLister, so m.runners stayed nil and the route answered 501. The
+// default directory satisfies it now, so the probe must wire it and the
+// route must answer an honest empty list.
+func TestNewManagementModuleRunnerProbeWiresTheDefaultDirectory(t *testing.T) {
 	m := newManagementModule(fakeControlPlaneForAuthz(t))
-	if m.runners != nil {
-		t.Fatalf("m.runners = %#v, want nil: no shipped RunnerDirectory implementation satisfies runnerLister today", m.runners)
+	if m.runners == nil {
+		t.Fatal("m.runners = nil, want non-nil: MemoryRunnerDirectory implements runnerLister")
+	}
+	ids, err := m.runners.ListRunners(context.Background())
+	if err != nil {
+		t.Fatalf("ListRunners: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("ListRunners on a fresh control plane = %v, want empty", ids)
 	}
 }
 

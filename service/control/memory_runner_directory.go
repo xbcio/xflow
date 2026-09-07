@@ -413,6 +413,25 @@ func (d *MemoryRunnerDirectory) ListLiveRunners(_ context.Context) []RunnerSnaps
 	return out
 }
 
+// ListRunners returns the IDs of every registered runner. It implements the
+// apiserver's runnerLister for the runner-list management endpoint.
+//
+// Unlike ListLiveRunners this returns bare IDs and never fails — an in-memory
+// map read cannot error — but the signature matches RedisRunnerDirectory's,
+// whose backend can.
+func (d *MemoryRunnerDirectory) ListRunners(_ context.Context) ([]string, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	out := make([]string, 0, len(d.runners))
+	for id, state := range d.runners {
+		if state == nil {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out, nil
+}
+
 // LookupLease returns the server-authoritative finalized lease for one
 // (runner, session, lease-identity) triple. It is the namespace authority on the
 // report path: the lease JSON echoed by the runner is unsigned and mutable, so

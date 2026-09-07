@@ -3,6 +3,8 @@ package control
 import (
 	"context"
 	"errors"
+	"reflect"
+	"sort"
 	"testing"
 	"time"
 
@@ -758,5 +760,46 @@ func TestListLiveRunners_EmptyDirectory(t *testing.T) {
 	runners := dir.ListLiveRunners(ctx)
 	if runners != nil {
 		t.Errorf("ListLiveRunners() = %v, want nil for empty directory", runners)
+	}
+}
+
+func TestRedisRunnerDirectoryListRunners(t *testing.T) {
+	redisServer, rdb := newRedisRunnerDirectoryTestClient(t)
+	d := NewRedisRunnerDirectory(rdb)
+	ctx := context.Background()
+
+	ids, err := d.ListRunners(ctx)
+	if err != nil {
+		t.Fatalf("ListRunners on an empty directory: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("ListRunners on an empty directory = %v, want empty", ids)
+	}
+
+	for _, id := range []string{"runner-a", "runner-b"} {
+		if _, err := d.Register(ctx, RegisterRunnerRequest{
+			RunnerID:     id,
+			Capacity:     1,
+			Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+		}); err != nil {
+			t.Fatalf("Register(%s): %v", id, err)
+		}
+	}
+
+	ids, err = d.ListRunners(ctx)
+	if err != nil {
+		t.Fatalf("ListRunners: %v", err)
+	}
+	sort.Strings(ids)
+	if !reflect.DeepEqual(ids, []string{"runner-a", "runner-b"}) {
+		t.Fatalf("ListRunners = %v, want [runner-a runner-b]", ids)
+	}
+
+	// A down backend must be distinguishable from "zero runners registered".
+	// ListLiveRunners cannot make that distinction — it returns nil either
+	// way — which is exactly why ListRunners does not delegate to it.
+	redisServer.Close()
+	if _, err := d.ListRunners(ctx); err == nil {
+		t.Fatal("ListRunners against a closed Redis returned nil error; a down backend must not look like an empty fleet")
 	}
 }

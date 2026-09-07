@@ -886,6 +886,22 @@ func (d *RedisRunnerDirectory) ListLiveRunners(ctx context.Context) []RunnerSnap
 	return out
 }
 
+// ListRunners returns the IDs of every registered runner. It implements the
+// apiserver's runnerLister for the runner-list management endpoint.
+//
+// It deliberately does not call ListLiveRunners: that method swallows every
+// Redis error and returns nil either way, which would make a down Redis look
+// identical to zero registered runners. The management endpoint has to draw
+// that distinction (500 vs. an empty 200), so this issues its own HKeys and
+// propagates the error.
+func (d *RedisRunnerDirectory) ListRunners(ctx context.Context) ([]string, error) {
+	ids, err := d.rdb.HKeys(ctx, d.keys.runnerSession).Result()
+	if err != nil {
+		return nil, fmt.Errorf("list runners: %w", err)
+	}
+	return ids, nil
+}
+
 // hmgetString safely extracts a string from an HMGet result slice. HMGet
 // returns nil interface{} elements for fields that do not exist in the hash.
 func hmgetString(vals []interface{}, i int) string {

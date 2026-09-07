@@ -83,7 +83,11 @@ type runnerLister interface {
 
 func newManagementModule(cp *control.ControlPlane) *managementModule {
 	m := &managementModule{cp: cp, eng: cp.Engine()}
-	if dir := cp.RunnerDirectory(); dir != nil {
+	// isNilValue, not dir != nil: RunnerDirectory returns an interface, and a
+	// nil *MemoryRunnerDirectory stored in it is a non-nil interface that
+	// passes dir != nil and then panics inside ListRunners. Same guard
+	// AuditReconcilable uses, for the same reason.
+	if dir := cp.RunnerDirectory(); !isNilValue(dir) {
 		if l, ok := dir.(runnerLister); ok {
 			m.runners = l
 		}
