@@ -177,7 +177,7 @@ func TestRunCommandPropagatesTLSAndTokenFlagsToTheSDK(t *testing.T) {
 	})
 	defer restore()
 
-	runCommand(t, "run", "--server", "http://server:8080",
+	runCommand(t, "run", "--server", "https://server:8080",
 		"--tls-server-ca", "/etc/xflow/ca.pem",
 		"--tls-client-cert", "/etc/xflow/client.pem",
 		"--tls-client-key", "/etc/xflow/client.key",
@@ -198,7 +198,7 @@ func TestRunCommandTLSFlagBeatsTheEnvironment(t *testing.T) {
 	})
 	defer restore()
 
-	runCommand(t, "run", "--server", "http://server:8080", "--tls-server-ca", "/from/flag.pem")
+	runCommand(t, "run", "--server", "https://server:8080", "--tls-server-ca", "/from/flag.pem")
 }
 
 // And with no flag the environment still applies.
@@ -213,7 +213,7 @@ func TestRunCommandTLSEnvAppliesWithoutAFlag(t *testing.T) {
 	})
 	defer restore()
 
-	runCommand(t, "run", "--server", "http://server:8080")
+	runCommand(t, "run", "--server", "https://server:8080")
 }
 
 // XFLOW_ARTIFACT_CACHE_DIR is the operator's only control over where fetched

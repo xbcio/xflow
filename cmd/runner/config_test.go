@@ -855,6 +855,66 @@ func TestValidateRunnerConfigRejectsPlaintextWithoutOptIn(t *testing.T) {
 	}
 }
 
+// The security.allow_plaintext YAML key and the XFLOW_RUNNER_ALLOW_PLAINTEXT
+// env var are the only two ways to opt into a plaintext connection outside
+// of the --allow-plaintext flag itself; a config opt-out that silently fails
+// to parse in either direction is a hazard the width of this whole gate.
+
+func TestLoadRunnerConfigFromYAML_SecurityAllowPlaintext(t *testing.T) {
+	data := []byte(`
+security:
+  allow_plaintext: true
+`)
+	cfg, err := loadRunnerConfigFromBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.allowPlaintext {
+		t.Fatal("allowPlaintext = false, want true from security.allow_plaintext in the file")
+	}
+}
+
+func TestLoadRunnerConfigFromYAML_SecurityAllowPlaintextAbsentDefaultsFalse(t *testing.T) {
+	data := []byte(`
+runner:
+  id: "r"
+`)
+	cfg, err := loadRunnerConfigFromBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.allowPlaintext {
+		t.Fatal("allowPlaintext = true with no security section present, want false (the safe default)")
+	}
+}
+
+func TestApplyLookupEnvOverridesAllowPlaintext(t *testing.T) {
+	cfg := defaultRunnerConfig()
+	got := applyLookupEnvOverrides(cfg, func(key string) (string, bool) {
+		if key == "XFLOW_RUNNER_ALLOW_PLAINTEXT" {
+			return "true", true
+		}
+		return "", false
+	})
+	if !got.allowPlaintext {
+		t.Fatal("allowPlaintext = false, want true from XFLOW_RUNNER_ALLOW_PLAINTEXT=true")
+	}
+}
+
+// A malformed XFLOW_RUNNER_ALLOW_PLAINTEXT must not be silently dropped: an
+// operator who mistypes the value must be told, not left believing the
+// runner is honouring a setting it never applied.
+func TestResolveRunnerConfigRejectsInvalidEnvAllowPlaintext(t *testing.T) {
+	t.Setenv("XFLOW_RUNNER_ALLOW_PLAINTEXT", "notabool")
+	t.Setenv("XFLOW_RUNNER_SERVER", "https://control.example")
+
+	base := defaultRunnerConfig()
+	_, err := resolveRunnerConfig(base)
+	if err == nil || !strings.Contains(err.Error(), "XFLOW_RUNNER_ALLOW_PLAINTEXT") {
+		t.Fatalf("error = %v, want containing %q", err, "XFLOW_RUNNER_ALLOW_PLAINTEXT")
+	}
+}
+
 func TestValidateRunnerConfigAcceptsTLSWithoutOptIn(t *testing.T) {
 	cfg := defaultRunnerConfig()
 	cfg.transport = transportHTTP
@@ -878,5 +938,34 @@ func TestValidateRunnerConfigRejectsPlaintextGRPCWithoutOptIn(t *testing.T) {
 	cfg.transport = transportGRPC
 	if err := validateRunnerConfig(cfg); err == nil {
 		t.Fatal("validateRunnerConfig accepted a grpc runner with no TLS material and no --allow-plaintext")
+	}
+}
+
+// TestValidateRunnerConfigRejectsHTTPPlaintextEvenWithTLSMaterial pins the
+// hole where TLS material configured for an http:// URL used to satisfy the
+// gate on its own. Go's http.Transport only consults TLSClientConfig when
+// the URL scheme is https (see sdk/xflow/runner.go's newRunnerHTTPClient);
+// for a plain http:// URL the material is silently ignored and the token
+// still crosses the wire in the clear, so hasTLSMaterial must not short-
+// circuit the http branch — only an https:// scheme or --allow-plaintext may.
+func TestValidateRunnerConfigRejectsHTTPPlaintextEvenWithTLSMaterial(t *testing.T) {
+	cfg := defaultRunnerConfig()
+	cfg.transport = transportHTTP
+	cfg.serverURL = "http://control.example:8080"
+	cfg.tlsServerCA = "/etc/xflow/ca.pem"
+
+	err := validateRunnerConfig(cfg)
+	if err == nil {
+		t.Fatal("validateRunnerConfig accepted an http:// server with a configured CA; " +
+			"the CA is never consulted by Go's http.Transport for a plain http:// URL, " +
+			"so this connection is still plaintext")
+	}
+	if !strings.Contains(err.Error(), "allow-plaintext") {
+		t.Fatalf("error %q does not name the flag that would allow this; an operator cannot act on it", err)
+	}
+
+	cfg.allowPlaintext = true
+	if err := validateRunnerConfig(cfg); err != nil {
+		t.Fatalf("validateRunnerConfig with --allow-plaintext: %v", err)
 	}
 }

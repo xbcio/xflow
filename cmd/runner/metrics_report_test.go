@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 
 	xflowsdk "github.com/xbcio/xflow/sdk/xflow"
@@ -106,5 +107,12 @@ func TestRunCommandRejectsABadReportInterval(t *testing.T) {
 		"--report-metrics-interval", "not-a-duration", "--allow-plaintext")
 	if err == nil {
 		t.Fatal("an unparseable --report-metrics-interval was accepted")
+	}
+	// Pin the cause, not just its presence: a gate inserted ahead of this one
+	// (as happened once already — see the transport-security gate) could
+	// satisfy err == nil trivially for an unrelated reason and mask this
+	// rejection without a single test failing.
+	if !strings.Contains(err.Error(), "report metrics interval") {
+		t.Fatalf("error = %q, want it to name the report metrics interval as the cause", err)
 	}
 }

@@ -450,9 +450,6 @@ func validateTransportSecurity(cfg runnerConfig) error {
 	hasTLSMaterial := strings.TrimSpace(cfg.tlsServerCA) != "" ||
 		strings.TrimSpace(cfg.tlsClientCert) != "" ||
 		strings.TrimSpace(cfg.tlsClientKey) != ""
-	if hasTLSMaterial {
-		return nil
-	}
 	if cfg.transport == transportHTTP {
 		if u, err := url.Parse(cfg.serverURL); err == nil && u.Scheme == "https" {
 			return nil
@@ -463,6 +460,9 @@ func validateTransportSecurity(cfg runnerConfig) error {
 				"configure --tls-server-ca (and --tls-client-cert/--tls-client-key for mTLS), "+
 				"use an https:// URL, or pass --allow-plaintext to accept the risk",
 			cfg.serverURL)
+	}
+	if hasTLSMaterial {
+		return nil
 	}
 	return errors.New(
 		"refusing to start: no TLS material is configured for the grpc transport, " +
