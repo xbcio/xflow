@@ -28,8 +28,9 @@ metrics:
 	}
 
 	// A changed flag wins over the file.
-	cfg.changed = map[string]bool{"report-metrics-interval": true}
+	cfg.changed = map[string]bool{"report-metrics-interval": true, "allow-plaintext": true}
 	cfg.reportMetricsInterval = "30s"
+	cfg.allowPlaintext = true
 	resolved, err := resolveRunnerConfig(cfg)
 	if err != nil {
 		t.Fatalf("resolveRunnerConfig: %v", err)
@@ -68,7 +69,7 @@ func TestReportMetricsFlagReachesTheSDK(t *testing.T) {
 	defer restore()
 
 	runCommand(t, "run", "--server", "http://server:8080", "--transport", "http",
-		"--report-metrics", "--report-metrics-interval", "20s")
+		"--report-metrics", "--report-metrics-interval", "20s", "--allow-plaintext")
 }
 
 // Without the flag the SDK must see reporting off — byte-identical behaviour to
@@ -82,7 +83,7 @@ func TestNoReportMetricsFlagLeavesReportingOff(t *testing.T) {
 	})
 	defer restore()
 
-	runCommand(t, "run", "--server", "http://server:8080")
+	runCommand(t, "run", "--server", "http://server:8080", "--allow-plaintext")
 }
 
 // A bad interval must be rejected before the runner starts, not silently
@@ -102,7 +103,7 @@ func TestRunCommandRejectsABadReportInterval(t *testing.T) {
 		out: &bytes.Buffer{},
 		err: &bytes.Buffer{},
 	}, "run", "--server", "http://server:8080", "--report-metrics",
-		"--report-metrics-interval", "not-a-duration")
+		"--report-metrics-interval", "not-a-duration", "--allow-plaintext")
 	if err == nil {
 		t.Fatal("an unparseable --report-metrics-interval was accepted")
 	}

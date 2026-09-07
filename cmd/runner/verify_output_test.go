@@ -57,6 +57,7 @@ func TestVerifyCommandPrintsResolvedRunnerID(t *testing.T) {
 		"--transport", "http",
 		"--concurrency", "1",
 		"--cap", "xflow.function",
+		"--allow-plaintext",
 	})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)

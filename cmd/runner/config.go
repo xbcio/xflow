@@ -42,6 +42,9 @@ type runnerConfigFile struct {
 		Store *string `yaml:"store"` // "ephemeral" (default) or "file"
 		File  *string `yaml:"file"`
 	} `yaml:"identity"`
+	Security struct {
+		AllowPlaintext *bool `yaml:"allow_plaintext"`
+	} `yaml:"security"`
 	// Credentials holds named credential maps (driver/dsn, token/base_url, …)
 	// consumed by resource-aware nodes via input.Credential(name). String leaves
 	// are expanded via os.Expand at load time so secrets are sourced from the
@@ -161,6 +164,9 @@ func loadRunnerConfigFromBytes(data []byte) (runnerConfig, error) {
 	if file.Identity.File != nil {
 		cfg.identityFile = *file.Identity.File
 	}
+	if file.Security.AllowPlaintext != nil {
+		cfg.allowPlaintext = *file.Security.AllowPlaintext
+	}
 
 	if len(file.Credentials) > 0 {
 		// Copy first so we never mutate the yaml-parsed map.
@@ -227,6 +233,7 @@ var runnerConfigIssueOrder = []string{
 	"namespace",
 	"heartbeat-interval",
 	"poll-wait",
+	"allow-plaintext",
 }
 
 func applyEnvOverrides(cfg runnerConfig, getenv func(string) string) runnerConfig {
@@ -293,6 +300,16 @@ func applyLookupEnvOverrides(cfg runnerConfig, lookupEnv func(string) (string, b
 	}
 	if v, ok := lookupEnv("XFLOW_RUNNER_REGISTRATION_CODE"); ok {
 		cfg.registrationCode = v
+	}
+	if v, ok := lookupEnv("XFLOW_RUNNER_ALLOW_PLAINTEXT"); ok {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			setRunnerConfigIssue(&cfg, "allow-plaintext",
+				fmt.Errorf("XFLOW_RUNNER_ALLOW_PLAINTEXT must be a valid boolean: %w", err))
+		} else {
+			clearRunnerConfigIssue(&cfg, "allow-plaintext")
+			cfg.allowPlaintext = b
+		}
 	}
 
 	cfg.capabilities = parseCapabilities(cfg.capRaw)
@@ -399,6 +416,10 @@ func validateRunnerConfig(cfg runnerConfig) error {
 		return err
 	}
 
+	if err := validateTransportSecurity(cfg); err != nil {
+		return err
+	}
+
 	// Build the store to validate its configuration; the value is discarded.
 	// Doing it here means a bad --identity-store/--identity-file combination
 	// fails at config resolution, the same place every other malformed value
@@ -408,6 +429,46 @@ func validateRunnerConfig(cfg runnerConfig) error {
 	}
 
 	return nil
+}
+
+// validateTransportSecurity refuses a control-plane connection that carries no
+// transport encryption unless the operator opted in.
+//
+// The gate lives here, not in sdk/xflow's buildRunnerTLSConfig, on purpose:
+// an embedded runner shares its host's connection policy and its host's
+// judgement, while a standalone runner process is the one that ships a bearer
+// token to a remote control plane with nothing else guarding it. Only the
+// standalone profile gets the hard stop.
+//
+// "Encrypted" means either an https server URL (http transport) or at least one
+// piece of TLS material (either transport). A gRPC runner has no URL scheme to
+// read, so the material is its only signal.
+func validateTransportSecurity(cfg runnerConfig) error {
+	if cfg.allowPlaintext {
+		return nil
+	}
+	hasTLSMaterial := strings.TrimSpace(cfg.tlsServerCA) != "" ||
+		strings.TrimSpace(cfg.tlsClientCert) != "" ||
+		strings.TrimSpace(cfg.tlsClientKey) != ""
+	if hasTLSMaterial {
+		return nil
+	}
+	if cfg.transport == transportHTTP {
+		if u, err := url.Parse(cfg.serverURL); err == nil && u.Scheme == "https" {
+			return nil
+		}
+		return fmt.Errorf(
+			"refusing to start: --server %q is plaintext and no TLS material is configured, "+
+				"so the runner token would cross the network in the clear; "+
+				"configure --tls-server-ca (and --tls-client-cert/--tls-client-key for mTLS), "+
+				"use an https:// URL, or pass --allow-plaintext to accept the risk",
+			cfg.serverURL)
+	}
+	return errors.New(
+		"refusing to start: no TLS material is configured for the grpc transport, " +
+			"so the runner token would cross the network in the clear; " +
+			"configure --tls-server-ca (and --tls-client-cert/--tls-client-key for mTLS), " +
+			"or pass --allow-plaintext to accept the risk")
 }
 
 func validatePositiveDuration(name, raw string) error {
@@ -503,6 +564,10 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 	if base.changed["registration-code"] {
 		cfg.registrationCode = base.registrationCode
 	}
+	if base.changed["allow-plaintext"] {
+		clearRunnerConfigIssue(&cfg, "allow-plaintext")
+		cfg.allowPlaintext = base.allowPlaintext
+	}
 	if base.changed["metrics-addr"] {
 		cfg.metricsAddr = base.metricsAddr
 	}
@@ -584,6 +649,11 @@ heartbeat:
 #   # instead of consuming another registration code.
 #   store: "file"
 #   file: "/var/lib/xflow/runner-identity.json"
+
+# security:
+#   # A plaintext control-plane connection ships the runner token in the clear.
+#   # The runner refuses to start on one unless this is set.
+#   allow_plaintext: false
 
 # Credentials: named maps consumed by resource-aware nodes via
 # input.Credential(name). String leaves are env-expanded at load time

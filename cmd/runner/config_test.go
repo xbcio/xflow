@@ -68,7 +68,7 @@ server:
 		out: &bytes.Buffer{},
 		err: &bytes.Buffer{},
 	})
-	cmd.SetArgs([]string{"run", "--config", path})
+	cmd.SetArgs([]string{"run", "--config", path, "--allow-plaintext"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ server:
 	err := executeRootWithOptions(commandOptions{
 		out: &out,
 		err: &bytes.Buffer{},
-	}, "--config", path, "config", "validate")
+	}, "--config", path, "config", "validate", "--allow-plaintext")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,6 +187,7 @@ heartbeat:
 	base.capRaw = "xflow.function"
 	base.heartbeatInterval = "11s"
 	base.pollWait = "4s"
+	base.allowPlaintext = true
 	base.changed = map[string]bool{
 		"server":             true,
 		"id":                 true,
@@ -194,6 +195,7 @@ heartbeat:
 		"cap":                true,
 		"heartbeat-interval": true,
 		"poll-wait":          true,
+		"allow-plaintext":    true,
 	}
 
 	got, err := resolveRunnerConfig(base)
@@ -406,6 +408,8 @@ func TestResolveRunnerConfigUsesCLIFlagWhenEnvOverrideIsEmptyOrInvalid(t *testin
 
 			base := defaultRunnerConfig()
 			tt.apply(&base)
+			base.allowPlaintext = true
+			base.changed["allow-plaintext"] = true
 
 			got, err := resolveRunnerConfig(base)
 			if err != nil {
@@ -732,7 +736,7 @@ credentials:
 	})
 	defer restore()
 
-	runCommand(t, "run", "--config", path)
+	runCommand(t, "run", "--config", path, "--allow-plaintext")
 }
 
 func TestLoadRunnerConfigNamespaces(t *testing.T) {
@@ -791,7 +795,8 @@ server:
 	base := defaultRunnerConfig()
 	base.configPath = path
 	base.namespaceRaw = []string{"namespace-cli"}
-	base.changed = map[string]bool{"namespace": true}
+	base.allowPlaintext = true
+	base.changed = map[string]bool{"namespace": true, "allow-plaintext": true}
 
 	got, err := resolveRunnerConfig(base)
 	if err != nil {
@@ -828,5 +833,50 @@ func TestRunCommandPropagatesNamespacesToTheSDK(t *testing.T) {
 	defer restore()
 
 	runCommand(t, "run", "--server", "http://server:8080",
-		"--namespace", "namespace-a", "--namespace", "namespace-b")
+		"--namespace", "namespace-a", "--namespace", "namespace-b", "--allow-plaintext")
+}
+
+func TestValidateRunnerConfigRejectsPlaintextWithoutOptIn(t *testing.T) {
+	cfg := defaultRunnerConfig()
+	cfg.transport = transportHTTP
+	cfg.serverURL = "http://control.example:8080"
+
+	err := validateRunnerConfig(cfg)
+	if err == nil {
+		t.Fatal("validateRunnerConfig accepted an http:// server with no TLS material and no --allow-plaintext")
+	}
+	if !strings.Contains(err.Error(), "allow-plaintext") {
+		t.Fatalf("error %q does not name the flag that would allow this; an operator cannot act on it", err)
+	}
+
+	cfg.allowPlaintext = true
+	if err := validateRunnerConfig(cfg); err != nil {
+		t.Fatalf("validateRunnerConfig with --allow-plaintext: %v", err)
+	}
+}
+
+func TestValidateRunnerConfigAcceptsTLSWithoutOptIn(t *testing.T) {
+	cfg := defaultRunnerConfig()
+	cfg.transport = transportHTTP
+	cfg.serverURL = "https://control.example"
+	if err := validateRunnerConfig(cfg); err != nil {
+		t.Fatalf("https server URL: %v", err)
+	}
+
+	// A grpc-transport runner has no URL scheme to inspect, so the TLS
+	// material is the only signal. Configured CA => allowed.
+	cfg = defaultRunnerConfig()
+	cfg.transport = transportGRPC
+	cfg.tlsServerCA = "/etc/xflow/ca.pem"
+	if err := validateRunnerConfig(cfg); err != nil {
+		t.Fatalf("grpc with a server CA: %v", err)
+	}
+}
+
+func TestValidateRunnerConfigRejectsPlaintextGRPCWithoutOptIn(t *testing.T) {
+	cfg := defaultRunnerConfig()
+	cfg.transport = transportGRPC
+	if err := validateRunnerConfig(cfg); err == nil {
+		t.Fatal("validateRunnerConfig accepted a grpc runner with no TLS material and no --allow-plaintext")
+	}
 }

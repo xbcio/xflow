@@ -125,6 +125,7 @@ func TestVerifyUsesToken(t *testing.T) {
 		"--id", "runner-token",
 		"--concurrency", "1",
 		"--cap", "xflow.function",
+		"--allow-plaintext",
 	})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("verify failed against a server requiring the token it was given: %v\n"+
@@ -153,6 +154,7 @@ func TestVerifyRegistersDeclaredNamespaces(t *testing.T) {
 		"--id", "runner-ns",
 		"--concurrency", "1",
 		"--cap", "xflow.function",
+		"--allow-plaintext",
 	})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
@@ -184,6 +186,7 @@ func TestVerifyDefaultsNamespacesToDefault(t *testing.T) {
 		"--id", "runner-ns-default",
 		"--concurrency", "1",
 		"--cap", "xflow.function",
+		"--allow-plaintext",
 	})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
@@ -210,6 +213,7 @@ func TestVerifyReportsSupportsEncryption(t *testing.T) {
 		"--id", "runner-enc",
 		"--concurrency", "1",
 		"--cap", "xflow.function",
+		"--allow-plaintext",
 	})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
@@ -257,6 +261,7 @@ func TestVerifyHeartbeatCarriesRegisteredSession(t *testing.T) {
 		"--id", "runner-sess",
 		"--concurrency", "1",
 		"--cap", "xflow.function",
+		"--allow-plaintext",
 	})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
@@ -295,6 +300,7 @@ func TestVerifyRejectsGRPCTransportWithoutAServer(t *testing.T) {
 		"--id", "runner-grpc",
 		"--concurrency", "1",
 		"--cap", "xflow.function",
+		"--allow-plaintext",
 	})
 	err := cmd.Execute()
 	if err == nil {

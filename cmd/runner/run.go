@@ -63,6 +63,11 @@ type runnerConfig struct {
 	// registrationCode bootstraps enrollment when no identity is stored yet.
 	// Never logged.
 	registrationCode string
+	// allowPlaintext opts out of the transport-security gate. Without it a
+	// runner whose control-plane connection carries no TLS material at all
+	// refuses to start, because its bearer token would cross the wire in the
+	// clear.
+	allowPlaintext bool
 	// tracing
 	traceMode     string
 	traceEndpoint string
@@ -125,6 +130,7 @@ func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
 	cmd.Flags().StringVar(&cfg.identityStoreKind, "identity-store", cfg.identityStoreKind, "Where to keep the enrolled identity: ephemeral or file")
 	cmd.Flags().StringVar(&cfg.identityFile, "identity-file", cfg.identityFile, "Path to the identity file (--identity-store=file)")
 	cmd.Flags().StringVar(&cfg.registrationCode, "registration-code", cfg.registrationCode, "One-time registration code used to enroll when no identity is stored (prefer XFLOW_RUNNER_REGISTRATION_CODE)")
+	cmd.Flags().BoolVar(&cfg.allowPlaintext, "allow-plaintext", cfg.allowPlaintext, "Permit an unencrypted control-plane connection (no TLS material configured)")
 	cmd.Flags().StringVar(&cfg.traceMode, "trace", "disabled", "Tracing mode: disabled|stdout|otlp")
 	cmd.Flags().StringVar(&cfg.traceEndpoint, "trace-endpoint", "localhost:4317", "OTLP collector gRPC endpoint (--trace=otlp)")
 	cmd.Flags().BoolVar(&cfg.traceInsecure, "trace-insecure", false, "Disable TLS verification for OTLP connection")

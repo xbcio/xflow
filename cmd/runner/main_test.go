@@ -25,6 +25,7 @@ func TestNewRootCommandRunCommandParsesExistingFlags(t *testing.T) {
 		"--id", "runner-1",
 		"--concurrency", "2",
 		"--cap", "xflow.function,xflow.http",
+		"--allow-plaintext",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -52,6 +53,7 @@ func TestNewRootCommandRunCommandParsesLabels(t *testing.T) {
 		"--id", "runner-1",
 		"--label", "mode=remote",
 		"--label", "env=prod",
+		"--allow-plaintext",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -76,6 +78,7 @@ func TestNewRootCommandRunCommandParsesLegacySingleDashFlags(t *testing.T) {
 		"-id", "runner-1",
 		"-concurrency", "2",
 		"-cap", "xflow.function,xflow.http",
+		"--allow-plaintext",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -97,7 +100,7 @@ func TestNewRootCommandDefaultsToRunCommandWithLegacySingleDashFlag(t *testing.T
 		},
 		out: &bytes.Buffer{},
 		err: &bytes.Buffer{},
-	}, "-id", "runner-root")
+	}, "-id", "runner-root", "--allow-plaintext")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,6 +124,7 @@ func TestExecuteRootRunCommandParsesLegacySingleDashFlags(t *testing.T) {
 		"-id", "runner-1",
 		"-concurrency", "2",
 		"-cap", "xflow.function,xflow.http",
+		"--allow-plaintext",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -142,7 +146,7 @@ func TestExecuteRootDefaultsToRunCommandWithLegacySingleDashFlag(t *testing.T) {
 		},
 		out: &bytes.Buffer{},
 		err: &bytes.Buffer{},
-	}, "-id", "runner-root")
+	}, "-id", "runner-root", "--allow-plaintext")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,6 +175,7 @@ func TestCLIFlagsOverrideEnvironment(t *testing.T) {
 		"--id", "flag-runner",
 		"--concurrency", "2",
 		"--cap", "xflow.function",
+		"--allow-plaintext",
 	)
 	if err != nil {
 		t.Fatal(err)
