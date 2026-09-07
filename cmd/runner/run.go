@@ -113,7 +113,7 @@ func newRunCommand(opts commandOptions, cfg *runnerConfig) *cobra.Command {
 }
 
 func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
-	cmd.Flags().StringVar(&cfg.serverURL, "server", cfg.serverURL, "xflow-server base URL (http transport)")
+	cmd.Flags().StringVar(&cfg.serverURL, "server", cfg.serverURL, "xflow-server base URL; carries task traffic under --transport=http, and always carries enrollment even under --transport=grpc")
 	cmd.Flags().StringVar(&cfg.transport, "transport", cfg.transport, "Runner Protocol transport: http or grpc")
 	cmd.Flags().StringVar(&cfg.grpcTarget, "grpc-target", cfg.grpcTarget, "xflow-server gRPC target host:port (grpc transport)")
 	cmd.Flags().StringVar(&cfg.runnerID, "id", cfg.runnerID, "Runner ID")
@@ -129,7 +129,7 @@ func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
 	cmd.Flags().StringVar(&cfg.tlsClientKey, "tls-client-key", cfg.tlsClientKey, "Path to client TLS private key")
 	cmd.Flags().StringVar(&cfg.identityStoreKind, "identity-store", cfg.identityStoreKind, "Where to keep the enrolled identity: ephemeral or file")
 	cmd.Flags().StringVar(&cfg.identityFile, "identity-file", cfg.identityFile, "Path to the identity file (--identity-store=file)")
-	cmd.Flags().StringVar(&cfg.registrationCode, "registration-code", cfg.registrationCode, "One-time registration code used to enroll when no identity is stored (prefer XFLOW_RUNNER_REGISTRATION_CODE)")
+	cmd.Flags().StringVar(&cfg.registrationCode, "registration-code", cfg.registrationCode, "One-time code used to enroll when no identity is stored; enrollment dials --server over HTTP regardless of --transport (prefer XFLOW_RUNNER_REGISTRATION_CODE)")
 	cmd.Flags().BoolVar(&cfg.allowPlaintext, "allow-plaintext", cfg.allowPlaintext, "Permit an unencrypted control-plane connection (no TLS material configured)")
 	cmd.Flags().StringVar(&cfg.traceMode, "trace", "disabled", "Tracing mode: disabled|stdout|otlp")
 	cmd.Flags().StringVar(&cfg.traceEndpoint, "trace-endpoint", "localhost:4317", "OTLP collector gRPC endpoint (--trace=otlp)")
