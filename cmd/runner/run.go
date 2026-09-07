@@ -189,6 +189,17 @@ var newRunnerService = func(cfg xflowsdk.RunnerConfig, opts ...xflowsdk.RunnerOp
 // deliberately leaves to its host: the tracer provider's lifecycle and the
 // local scrape listener.
 func runRunner(ctx context.Context, cfg runnerConfig) error {
+	// Identity is settled before anything else: it rewrites cfg.runnerID and
+	// cfg.token, and every client built below reads them.
+	store, err := newIdentityStore(cfg)
+	if err != nil {
+		return err
+	}
+	cfg, err = resolveRunnerIdentity(ctx, cfg, store)
+	if err != nil {
+		return err
+	}
+
 	sdkCfg, err := toSDKRunnerConfig(cfg)
 	if err != nil {
 		return err

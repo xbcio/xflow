@@ -907,6 +907,18 @@ func newRunnerHTTPClient(cfg RunnerConfig, timeout time.Duration) (*http.Client,
 	return c, nil
 }
 
+// NewRunnerHTTPClient builds an *http.Client honoring cfg's TLS material
+// (TLSServerCA / TLSClientCert / TLSClientKey) — the same client every internal
+// runner subsystem uses to reach the control plane.
+//
+// Exported for a host that needs its own one-shot call to that same origin
+// before a Runner exists to make it through: cmd/runner's enrollment bootstrap
+// runs before registration, and hand-rolling a second copy of this wiring is
+// how the two drift until one of them quietly stops presenting a client cert.
+func NewRunnerHTTPClient(cfg RunnerConfig, timeout time.Duration) (*http.Client, error) {
+	return newRunnerHTTPClient(cfg, timeout)
+}
+
 // newRunnerArtifactResolver builds the digest -> script bytes resolver every
 // script execution path shares: a read-through cache serving from local disk
 // and falling back to GET /v1/artifacts/{digest} on the control plane.
