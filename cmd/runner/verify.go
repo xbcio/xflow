@@ -58,8 +58,9 @@ func verifyRunner(ctx context.Context, cfg runnerConfig) (xflowsdk.VerifyResult,
 		// Returns the populated res, not VerifyResult{}, deliberately: the
 		// error text below reads res.RunnerID. The current caller ignores res
 		// on a non-nil error, so this is not yet load-bearing, but keep it if
-		// you touch this branch — it's the only reason res isn't zeroed here
-		// like the other three return sites in this file and VerifyRunner.
+		// you touch this branch — every other error return in this file and in
+		// VerifyRunner zeroes the result, so this one reads like a mistake
+		// until you reach the error text.
 		return res, fmt.Errorf(
 			"--require-supply-encryption is set but the control plane issued no supply encryption key for runner %q",
 			res.RunnerID)
