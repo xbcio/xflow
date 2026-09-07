@@ -19,10 +19,12 @@ func newVerifyCommand(opts commandOptions, cfg *runnerConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := verifyRunner(cmd.Context(), resolved); err != nil {
+			res, err := verifyRunner(cmd.Context(), resolved)
+			if err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(opts.out, "runner verified: %s\n", resolved.runnerID)
+			_, err = fmt.Fprintf(opts.out, "runner verified: %s (supply encryption: %v)\n",
+				res.RunnerID, res.SupplyKeyIssued)
 			return err
 		},
 	}
@@ -39,10 +41,23 @@ func newVerifyCommand(opts commandOptions, cfg *runnerConfig) *cobra.Command {
 // one, so verify's verdict described a runner that would never start. The
 // translation below is the same toSDKRunnerConfig the run command uses, which
 // is what keeps the two commands answering about the same runner.
-func verifyRunner(ctx context.Context, cfg runnerConfig) error {
+func verifyRunner(ctx context.Context, cfg runnerConfig) (xflowsdk.VerifyResult, error) {
 	sdkCfg, err := toSDKRunnerConfig(cfg)
 	if err != nil {
-		return err
+		return xflowsdk.VerifyResult{}, err
 	}
-	return xflowsdk.VerifyRunner(ctx, sdkCfg)
+	res, err := xflowsdk.VerifyRunner(ctx, sdkCfg)
+	if err != nil {
+		return xflowsdk.VerifyResult{}, err
+	}
+	// The same assertion --require-supply-encryption makes at run time, made
+	// here instead so it fails on an operator's terminal rather than in a
+	// CrashLoopBackOff. Keeping the two rules textually adjacent is why this
+	// lives in verifyRunner and not in the RunE closure.
+	if cfg.requireSupplyEncryption && !res.SupplyKeyIssued {
+		return res, fmt.Errorf(
+			"--require-supply-encryption is set but the control plane issued no supply encryption key for runner %q",
+			res.RunnerID)
+	}
+	return res, nil
 }
