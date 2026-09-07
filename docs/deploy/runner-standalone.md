@@ -7,7 +7,7 @@
 runner 的身份（`runner_id` + `token`）来自入册（enrollment），由 `cmd/runner/identity.go` 与 `cmd/runner/enroll.go` 实现。
 
 - `--identity-store=ephemeral`（默认）：身份只保存在内存里，进程重启后会丢失，需要重新入册（消耗一个新的注册码）。
-- `--identity-store=file --identity-file=<path>`：身份以 JSON 持久化到 `<path>`，重启后复用，不会再消耗注册码。文件权限要求 0600；`fileIdentityStore.Load` 会拒绝加载任何 group/other 可读（`mode & 0o077 != 0`）的身份文件，并报错要求手工收紧权限，而不是静默忽略权限问题。
+- `--identity-store=file --identity-file=<path>`：身份以 JSON 持久化到 `<path>`，重启后复用，不会再消耗注册码。写入时按 0600 创建；加载时 `fileIdentityStore.Load` 会拒绝任何 group/other 可读的身份文件（判据是 `mode & 0o077 != 0`，因此 0600 与 0400 都可接受），并报错要求手工收紧权限，而不是静默忽略权限问题。
 - `--registration-code`（或 `XFLOW_RUNNER_REGISTRATION_CODE`）：仅在身份存储里**还没有**身份时才会被使用（`resolveRunnerIdentity` 的优先级：已存身份 > 注册码 > 都没有则维持原样，即走已配置的静态 `--id`/`--token`）。**注册码是一次性的**：只要使用 `ephemeral` 存储（或每次重启都清空 `--identity-file`），每次重启都要一个新码；只有 `--identity-store=file` 且文件持久化在磁盘上才能免去这一步。
 - **入册后 `--id` 不生效。** `--id`（即 `ProposedRunnerID`）只作为审计提示随入册请求一起发给服务端；服务端文档明确写了永不采纳这个提议 ID（否则"以已存在的 ID 入册"就是身份接管路径）。入册成功后，`cfg.runnerID` 会被服务端签发的 ID 整体覆盖。
   **`--id` 在未入册路径下仍然生效**：如果既没有已存身份、也没有配置 `--registration-code`（纯静态 `--id` + `--token` 部署，或走 YAML 显式将 `runner.id` 置空），`--id` 的值会原样作为 `runnerID` 使用；后者（YAML 里显式 `id: ""`）还会触发 `cmd/runner/run.go` 的 `runWithSignals` 里的兜底：`cfg.runnerID == ""` 时自动填 `fmt.Sprintf("runner-%d", os.Getpid())`。
@@ -17,7 +17,7 @@ runner 的身份（`runner_id` + `token`）来自入册（enrollment），由 `c
 
 runner 默认拒绝在没有任何 TLS 材料的情况下启动，因为 bearer token 会明文过网。该门禁分两处，判据略有不同：
 
-- **常规启动**（`cmd/runner/config.go` 的 `validateTransportSecurity`）：`--transport=http` 时，`https://` 的 `--server` 视为已加密；`--transport=grpc` 时没有 URL scheme 可看，只认 TLS 材料（`--tls-server-ca` / `--tls-client-cert` / `--tls-client-key` 三者任一非空即可，mTLS 再加 `--tls-client-cert`/`--tls-client-key`）。两种 transport 下都可以用 `--allow-plaintext` 显式放行。
+- **常规启动**（`cmd/runner/config.go` 的 `validateTransportSecurity`）：`--transport=http` 时，`https://` 的 `--server` 即视为已加密；`--transport=grpc` 时没有 URL scheme 可看，只认 TLS 材料——`--tls-server-ca` / `--tls-client-cert` / `--tls-client-key` **三者任一非空**就放行。注意这只是"会不会明文过网"的门禁，不是 mTLS 的配置要求：真要做 mTLS，`--tls-client-cert` 与 `--tls-client-key` 必须成对配齐，但那是服务端握手的要求，门禁本身并不检查。两种 transport 下都可以用 `--allow-plaintext` 显式放行。
 - **入册请求**（`cmd/runner/enroll.go` 的 `validateEnrollTransportSecurity`）：由于入册请求固定走 HTTP（见上一节），这里单独判 `--server` 的 scheme 必须是 `https://`，否则同样要求 `--allow-plaintext`。这一判据独立于 `--transport`：一个 `--transport=grpc` 且已配好 gRPC TLS 材料的 runner，如果 `--server` 仍是 `http://` 且没有 `--allow-plaintext`，入册这一步依然会被拒绝。
 
 `--allow-plaintext` 一旦打开，对两处门禁同时生效，因为它绕开的是"是否需要 TLS"这个判断本身，不是分别配置。
@@ -40,6 +40,8 @@ runner 默认拒绝在没有任何 TLS 材料的情况下启动，因为 bearer 
 
 - `--require-supply-encryption`：默认关闭。开启后，如果 runner 成功注册但控制面在注册响应里没有签发供应加密密钥，视为致命错误——runner 会把这个错误记为 `lifecycleState.fatal`（此时 `/readyz` 恒 503，原因是这条错误文案本身），并取消运行上下文使进程退出，而不是继续以明文方式拉取供应内容。默认关闭是因为"控制面没配供应加密器"本身是一种合法部署形态。
 - `xflow-runner verify` 子命令做同样的检查，但发生在启动之前：它复用与 `run` 完全相同的配置翻译路径（`toSDKRunnerConfig` + `xflowsdk.VerifyRunner`），如果 `--require-supply-encryption` 与实际注册结果不符，会在终端直接报错退出，而不是等到进程跑起来再 CrashLoopBackOff。
+- **但 `verify` 不加载已持久化的身份，也不会入册。** 它的 `RunE` 只调 `resolveRunnerConfig` + `verifyRunner`；`newIdentityStore` / `resolveRunnerIdentity` 只出现在 `run` 的路径上（`cmd/runner/run.go:201-205`）。因此在 `--registration-code` / `--identity-store=file` 这类部署下，`verify` 用的是配置里原始的 `--id`/`--token`（往往是空 token），与 `run` 实际使用的入册身份**不是同一个**——`verify` 通过不代表 `run` 认得过，反之亦然。
+  **这是有意的取舍，不是待修的缺口**：`resolveRunnerIdentity` 在本地没有身份时会真的发起入册，而注册码是一次性的；让一次预检烧掉运维手里的注册码，比"预检身份与运行时身份不同"更糟。所以 `verify` 能验的是**连接与配置**（transport、TLS 材料、控制面可达性、`--require-supply-encryption`），不包括身份鉴权。身份能不能用，只能以 `run` 自身的启动结果为准。
 
 ## ActivationReplicas 与 HPA 的手工同步
 
