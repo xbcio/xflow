@@ -397,7 +397,10 @@ func detectRunnerLabels() map[string]string {
 
 // mergeRunnerLabels overlays manual labels on detected ones. Manual wins: an
 // operator who writes a label meant to override what the environment says.
-// Neither argument is mutated.
+// An explicit empty value (e.g. --label xflow.io/os=) still wins the merge,
+// but validateRunnerConfig then rejects the empty value outright rather than
+// clearing the label — refuse-to-start, not silently-dropped-label, is the
+// safer failure here. Neither argument is mutated.
 func mergeRunnerLabels(auto, manual map[string]string) map[string]string {
 	if len(auto) == 0 && len(manual) == 0 {
 		return nil

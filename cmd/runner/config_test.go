@@ -1078,12 +1078,35 @@ func TestDetectRunnerLabels(t *testing.T) {
 	if _, ok := got["xflow.io/env"]; !ok {
 		t.Fatal("detectRunnerLabels() has no xflow.io/env key; the label must always be present so a query can filter on it")
 	}
+	// detectRunnerLabels only sets xflow.io/hostname when os.Hostname() itself
+	// succeeds and is non-blank (it fails open otherwise: one missing label,
+	// not a startup failure). Calling os.Hostname() here mirrors that same
+	// contract instead of asserting the key merely exists, which would pass
+	// even if the label were written under the wrong key.
+	if host, err := os.Hostname(); err == nil && strings.TrimSpace(host) != "" {
+		if got["xflow.io/hostname"] != host {
+			t.Fatalf("xflow.io/hostname = %q, want %q from os.Hostname()", got["xflow.io/hostname"], host)
+		}
+	}
 }
 
 func TestDetectRunnerLabelsMarksKubernetes(t *testing.T) {
 	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
 	if got := detectRunnerLabels(); got["xflow.io/env"] != "kubernetes" {
 		t.Fatalf("xflow.io/env = %q inside a pod, want kubernetes", got["xflow.io/env"])
+	}
+}
+
+// TestDetectRunnerLabelsDefaultEnvIsBare pins the actual default value, not
+// just the key's presence: a build that silently changed "bare" to any other
+// string would still satisfy TestDetectRunnerLabels above. The env var is
+// cleared (not left to the ambient process environment) so this cannot go
+// red for the unrelated reason that the test runner itself happens to be
+// executing inside a pod.
+func TestDetectRunnerLabelsDefaultEnvIsBare(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	if got := detectRunnerLabels(); got["xflow.io/env"] != "bare" {
+		t.Fatalf("xflow.io/env = %q, want bare when not running in a pod", got["xflow.io/env"])
 	}
 }
 
