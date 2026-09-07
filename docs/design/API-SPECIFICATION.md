@@ -578,7 +578,7 @@ workflow_registry.go:26-41`）。唯一实现 `workflowreg.Registry` 是纯 Redi
   描述，不进 OpenAPI——它不是给外部调用的契约
 - **CI 校验：契约声明的路径 ⊆ 已注册路由。** 「契约里有、实现里没有」不允许存在
   ——`/workflow-definitions` 全套就是这个状态的产物：一份 CI 校验通过、还生成过 TS
-  类型（`web/.../openapi-types.ts`，已随 `605c4bb` 删除）、却零实现的契约，与真实
+  类型（`web/.../openapi-types.ts`，已随 `c88732b` 删除）、却零实现的契约，与真实
   实现和前端客户端三方互不相认。该校验已落地为
   `api/openapi/openapi_test.go` 的 `TestContractPathsAreAllRegistered`：契约每条
   path 必须出现在 `service/apiserver.UserFacingPaths` 集合中（前半，子集关系）；

@@ -81,7 +81,7 @@ func serveRawBody(t *testing.T, body []byte) *apiDeadLetterClient {
 //
 // The at-cap arm is the other side: a body of exactly the cap must decode. The
 // check is `>`, not `>=`, and the two are not interchangeable — objectstore's
-// HTTPStore shipped with exactly that off-by-one (fixed in 4c89bc4), where a
+// HTTPStore shipped with exactly that off-by-one (fixed in facf2c1), where a
 // 16 MiB artifact the server would happily store was one no runner could fetch
 // back.
 func TestAPIDeadLetterClientResponseByteCeiling(t *testing.T) {

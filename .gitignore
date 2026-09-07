@@ -92,7 +92,7 @@ data/
 /server
 /xflow
 
-# 截图/图片：曾有一张整屏截图带人名与内部运维台被提交并公开（91eafd0）
+# 截图/图片：曾有一张整屏截图带人名与内部运维台被提交并公开（b7773fa）
 .claude/*.png
 .claude/*.jpg
 .claude/*.jpeg
