@@ -76,6 +76,7 @@ func (c *Core) Enroll(ctx context.Context, req protocol.EnrollRequest, info Tran
 	}
 	runnerID = "runner-" + runnerID
 
+	now := time.Now().UTC()
 	issued := IssuedIdentity{
 		RunnerID:  runnerID,
 		TokenHash: HashSecret(token),
@@ -84,7 +85,12 @@ func (c *Core) Enroll(ctx context.Context, req protocol.EnrollRequest, info Tran
 		// the code's full ceiling.
 		Scope:    issuedScope(code, req, runnerID),
 		CodeID:   code.ID,
-		IssuedAt: time.Now().UTC(),
+		IssuedAt: now,
+	}
+	// c.identityTTL == 0 (the default) leaves ExpiresAt zero, meaning "never
+	// expires" — the pre-feature behavior. Only WithIdentityTTL turns this on.
+	if c.identityTTL > 0 {
+		issued.ExpiresAt = now.Add(c.identityTTL)
 	}
 	if err := c.issuedIdentities.Issue(ctx, issued); err != nil {
 		c.auditEnroll(ctx, code.ID, false, "identity persist failed", runnerID, info.SourceIP)
@@ -93,7 +99,11 @@ func (c *Core) Enroll(ctx context.Context, req protocol.EnrollRequest, info Tran
 
 	c.enrollLimiter.RecordSuccess(info.SourceIP)
 	c.auditEnroll(ctx, code.ID, true, "", runnerID, info.SourceIP)
-	return protocol.EnrollResponse{RunnerID: runnerID, Token: token}, nil
+	resp := protocol.EnrollResponse{RunnerID: runnerID, Token: token}
+	if !issued.ExpiresAt.IsZero() {
+		resp.ExpiresAt = issued.ExpiresAt.Format(time.RFC3339)
+	}
+	return resp, nil
 }
 
 // enrollScopeReason returns a non-empty server-side reason when the request asks

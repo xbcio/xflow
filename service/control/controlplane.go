@@ -119,6 +119,12 @@ type Config struct {
 	// enrolled runner authenticate through the same Core.
 	RegistrationCodes RegistrationCodeStore
 	IssuedIdentities  IssuedIdentityStore
+	// IdentityTTL is how long a newly enrolled identity authenticates before
+	// it must renew (see WithIdentityTTL). Zero (the default) means never
+	// expires — the pre-feature behavior. Only the HTTP Core receives this:
+	// enroll has no gRPC endpoint (grpc_server.go has no Enroll method), so
+	// there is nothing on that transport for a TTL to affect.
+	IdentityTTL time.Duration
 }
 
 // EnrollDeclared reports whether both enrollment stores are present. It is
@@ -360,6 +366,9 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	if enrollConfigured(cfg) {
 		serverOpts = append(serverOpts, WithEnroll(cfg.RegistrationCodes, cfg.IssuedIdentities))
 	}
+	// WithIdentityTTL no-ops for cfg.IdentityTTL <= 0, so this is unconditional
+	// like the other options above that guard internally.
+	serverOpts = append(serverOpts, WithIdentityTTL(cfg.IdentityTTL))
 	if cfg.Logger != nil {
 		serverOpts = append(serverOpts, WithControlLogger(cfg.Logger))
 	}

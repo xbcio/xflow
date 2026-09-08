@@ -27,6 +27,11 @@ type EnrollRequest struct {
 type EnrollResponse struct {
 	RunnerID string `json:"runner_id"`
 	Token    string `json:"token"`
+	// ExpiresAt is RFC3339 UTC, or empty when the identity never expires. It is
+	// an appended field: a runner built before it existed unmarshals the same
+	// response and simply ignores it, which is what makes rolling the server
+	// ahead of the fleet safe.
+	ExpiresAt string `json:"expires_at,omitempty"`
 }
 
 // Enroll exchanges a registration code for a runner identity. It deliberately

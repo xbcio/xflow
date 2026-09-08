@@ -596,6 +596,32 @@ func TestParseServerConfigRunnerMetricsIntervalFlag(t *testing.T) {
 	}
 }
 
+func TestParseServerConfigRunnerIdentityTTLFlag(t *testing.T) {
+	// Positive: flag set to 24h → cfg field must be 24h.
+	cfg, err := parseServerConfig([]string{"-memory", "-runner-identity-ttl", "24h"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.runnerIdentityTTL != 24*time.Hour {
+		t.Fatalf("runnerIdentityTTL = %v, want 24h", cfg.runnerIdentityTTL)
+	}
+
+	// Negative: flag absent → cfg field must be 0 (never expires, the default).
+	cfg2, err := parseServerConfig([]string{"-memory"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg2.runnerIdentityTTL != 0 {
+		t.Fatalf("runnerIdentityTTL = %v, want 0 when flag is absent", cfg2.runnerIdentityTTL)
+	}
+}
+
+func TestParseServerConfigRejectsNegativeRunnerIdentityTTL(t *testing.T) {
+	if _, err := parseServerConfig([]string{"-memory", "-runner-identity-ttl", "-1h"}); err == nil {
+		t.Fatal("parseServerConfig() error = nil, want error for negative --runner-identity-ttl")
+	}
+}
+
 // TestResolveBackendTargetMemoryOverridesRedis pins the --memory safety net.
 //
 // Nothing executed it before: grep -rn "runServer(" --include="*.go" . finds

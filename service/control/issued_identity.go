@@ -98,12 +98,26 @@ func (s *MemoryIssuedIdentityStore) Renew(_ context.Context, runnerID string, ex
 // implementation is either an in-memory map read or a single primary-key row
 // read; widening the interface would touch every existing authenticator and
 // every call site for no behavioral gain.
-type IssuedIdentityAuthenticator struct{ store IssuedIdentityStore }
+type IssuedIdentityAuthenticator struct {
+	store IssuedIdentityStore
+	// now is injected so expiry can be tested without sleeping. nil means
+	// time.Now, which is the shape service/control's enrollLimiter already
+	// uses; there is no repo-wide Clock interface and inventing one for this
+	// single call site would be a bigger change than the feature.
+	now func() time.Time
+}
 
 var _ Authenticator = (*IssuedIdentityAuthenticator)(nil)
 
 func NewIssuedIdentityAuthenticator(store IssuedIdentityStore) *IssuedIdentityAuthenticator {
 	return &IssuedIdentityAuthenticator{store: store}
+}
+
+func (a *IssuedIdentityAuthenticator) clock() time.Time {
+	if a == nil || a.now == nil {
+		return time.Now().UTC()
+	}
+	return a.now().UTC()
 }
 
 func (a *IssuedIdentityAuthenticator) AuthenticateRegister(runnerID, token string, _ TransportInfo) (RunnerPolicy, error) {
@@ -144,6 +158,21 @@ func (a *IssuedIdentityAuthenticator) authenticate(runnerID, token string) (Runn
 	}
 	want := HashSecret(token)
 	if subtle.ConstantTimeCompare(want[:], id.TokenHash[:]) != 1 {
+		return RunnerPolicy{}, ErrAuthUnknownToken
+	}
+	// Lifecycle checks run AFTER the constant-time compare, never before: a
+	// pre-compare check would answer "does this runner id exist and is it
+	// live?" to a caller holding no valid token at all.
+	//
+	// Both rejections reuse ErrAuthUnknownToken verbatim. Naming the real
+	// reason here would tell an attacker holding a leaked-but-expired token
+	// that the token was once real, and would tell an attacker holding
+	// nothing which runner ids exist.
+	now := a.clock()
+	if !id.RevokedAt.IsZero() {
+		return RunnerPolicy{}, ErrAuthUnknownToken
+	}
+	if !id.ExpiresAt.IsZero() && !id.ExpiresAt.After(now) {
 		return RunnerPolicy{}, ErrAuthUnknownToken
 	}
 	return id.Scope, nil

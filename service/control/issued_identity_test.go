@@ -391,6 +391,70 @@ func (s failingIssuedIdentityStore) Renew(context.Context, string, time.Time) er
 	return s.err
 }
 
+// TestAuthenticateRejectsExpiredAndRevokedByteIdentically pins R7: an expired
+// identity, a revoked identity, and a token nobody ever issued must be
+// indistinguishable from outside. Any difference — a different error, a
+// different message, a different latency class — turns the authentication
+// endpoint into an oracle for which runner ids exist.
+func TestAuthenticateRejectsExpiredAndRevokedByteIdentically(t *testing.T) {
+	base := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	newAuth := func(t *testing.T, id IssuedIdentity) *IssuedIdentityAuthenticator {
+		t.Helper()
+		st := NewMemoryIssuedIdentityStore()
+		if err := st.Issue(context.Background(), id); err != nil {
+			t.Fatalf("issue: %v", err)
+		}
+		a := NewIssuedIdentityAuthenticator(st)
+		a.now = func() time.Time { return base }
+		return a
+	}
+
+	live := IssuedIdentity{
+		RunnerID: "r", TokenHash: HashSecret("tok"), CodeID: "c",
+		IssuedAt: base.Add(-time.Hour), ExpiresAt: base.Add(time.Hour),
+	}
+	expired := live
+	expired.ExpiresAt = base.Add(-time.Minute)
+	revoked := live
+	revoked.RevokedAt = base.Add(-time.Minute)
+	noExpiry := live
+	noExpiry.ExpiresAt = time.Time{}
+
+	// The live and never-expiring identities authenticate.
+	for name, id := range map[string]IssuedIdentity{"live": live, "no expiry": noExpiry} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := newAuth(t, id).authenticate("r", "tok"); err != nil {
+				t.Fatalf("authenticate = %v, want nil", err)
+			}
+		})
+	}
+
+	// Every rejection is the same error value AND the same string.
+	unknown := NewIssuedIdentityAuthenticator(NewMemoryIssuedIdentityStore())
+	unknown.now = func() time.Time { return base }
+	_, wantErr := unknown.authenticate("nobody", "tok")
+	for name, id := range map[string]IssuedIdentity{"expired": expired, "revoked": revoked} {
+		t.Run(name, func(t *testing.T) {
+			_, err := newAuth(t, id).authenticate("r", "tok")
+			if !errors.Is(err, ErrAuthUnknownToken) {
+				t.Fatalf("err = %v, want ErrAuthUnknownToken", err)
+			}
+			if err.Error() != wantErr.Error() {
+				t.Fatalf("err string = %q, want byte-identical to the unknown-token\n"+
+					"rejection %q — a distinct message is an existence oracle",
+					err.Error(), wantErr.Error())
+			}
+		})
+	}
+
+	// Expiry is strictly in the past: exactly-at-expiry is expired.
+	atExpiry := live
+	atExpiry.ExpiresAt = base
+	if _, err := newAuth(t, atExpiry).authenticate("r", "tok"); !errors.Is(err, ErrAuthUnknownToken) {
+		t.Fatalf("identity expiring exactly now authenticated; want rejected")
+	}
+}
+
 // TestIssuedIdentityLookupFailureIsExternallyIdenticalButInternallyDistinct
 // pins both halves of the collapsed-error contract at once, because either
 // half alone is satisfied by a wrong implementation:

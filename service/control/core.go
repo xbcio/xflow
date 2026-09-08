@@ -133,6 +133,12 @@ type Core struct {
 	registrationCodes RegistrationCodeStore
 	issuedIdentities  IssuedIdentityStore
 	enrollLimiter     *enrollLimiter
+	// identityTTL is how long a newly issued identity authenticates for. Zero
+	// means "never expires", which is the pre-feature behavior and the
+	// default: switching a running fleet onto a TTL must be a deliberate act
+	// (WithIdentityTTL), never something an upgrade does to it. Unexported,
+	// like every other Core field, so a ServerOption is the only way in.
+	identityTTL time.Duration
 }
 
 // leaseRecoveryEngine is deliberately optional so custom EngineFacade test

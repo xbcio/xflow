@@ -242,6 +242,41 @@ func TestNewControlPlaneWiresPollWait(t *testing.T) {
 	}
 }
 
+// TestNewControlPlaneWiresIdentityTTL proves Config.IdentityTTL actually
+// reaches the HTTP Core's identityTTL field, through the four-hop chain
+// documented on Config.IdentityTTL (Config -> the WithIdentityTTL
+// ServerOption appended alongside WithEnroll -> Core). Zero is the default
+// AND the value a broken wiring chain would silently produce, so a passing
+// green here with a non-zero configured value is the only thing that tells
+// the two apart — see Core.identityTTL's doc comment.
+//
+// gRPC's Core deliberately does NOT get it: grpc_server.go has no Enroll
+// method, so there is nothing there for a TTL to affect.
+func TestNewControlPlaneWiresIdentityTTL(t *testing.T) {
+	cp, err := NewControlPlane(Config{Backend: backendlocal.New(), IdentityTTL: 24 * time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cp.httpServer.core.identityTTL != 24*time.Hour {
+		t.Fatalf("httpServer.core.identityTTL = %v, want 24h", cp.httpServer.core.identityTTL)
+	}
+}
+
+// TestNewControlPlaneDefaultIdentityTTLIsZero pins the deliberate default:
+// an unset Config.IdentityTTL must leave the Core's identityTTL at zero
+// (never expires), not some other "off" sentinel — Enroll's `c.identityTTL >
+// 0` check and Renew's already-expired check both depend on zero meaning
+// exactly this.
+func TestNewControlPlaneDefaultIdentityTTLIsZero(t *testing.T) {
+	cp, err := NewControlPlane(Config{Backend: backendlocal.New()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cp.httpServer.core.identityTTL != 0 {
+		t.Fatalf("httpServer.core.identityTTL = %v, want 0 (never expires)", cp.httpServer.core.identityTTL)
+	}
+}
+
 // TestNewControlPlaneActivatesRedisLeaderElection guards against a regression
 // where *distributed.Backend only exposed leader election via a
 // LeaderElector() getter rather than satisfying backend.LeaderElector itself.

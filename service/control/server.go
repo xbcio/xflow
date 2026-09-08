@@ -92,6 +92,19 @@ func WithEnroll(codes RegistrationCodeStore, ids IssuedIdentityStore) ServerOpti
 	}
 }
 
+// WithIdentityTTL sets how long a newly enrolled identity authenticates
+// before it must renew. Zero (the default) means the identity never expires,
+// which is the pre-feature behavior: switching a running fleet onto a TTL
+// must be a deliberate act, not something an upgrade does to it.
+func WithIdentityTTL(d time.Duration) ServerOption {
+	return func(s *Server) {
+		if d <= 0 {
+			return
+		}
+		s.core.identityTTL = d
+	}
+}
+
 // WithControlLogger sets the logger used for auth decisions and other
 // runner-protocol diagnostics. Optional.
 func WithControlLogger(l engine.Logger) ServerOption {

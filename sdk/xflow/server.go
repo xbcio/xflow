@@ -90,6 +90,10 @@ type serverConfig struct {
 	// authenticator, mounting the endpoint).
 	registrationCodes control.RegistrationCodeStore
 	issuedIdentities  control.IssuedIdentityStore
+	// identityTTL is how long a newly enrolled identity authenticates before
+	// it must renew. Zero means never expires. Set only by
+	// WithServerIdentityTTL.
+	identityTTL time.Duration
 
 	// production / productionDecl feed apiserver's production posture gate.
 	// Set only by WithServerProduction.
@@ -154,6 +158,17 @@ func WithServerEnroll(codes control.RegistrationCodeStore, ids control.IssuedIde
 		c.registrationCodes = codes
 		c.issuedIdentities = ids
 	}
+}
+
+// WithServerIdentityTTL sets how long a newly enrolled identity authenticates
+// before it must renew (see control.WithIdentityTTL). Zero (the default)
+// means the identity never expires, which is the pre-feature behavior:
+// switching a running fleet onto a TTL must be a deliberate act, not
+// something an upgrade does to it. Meaningful only alongside WithServerEnroll
+// — an identity is issued (and therefore has a TTL to stamp) only when
+// enrollment is on.
+func WithServerIdentityTTL(d time.Duration) ServerOption {
+	return func(c *serverConfig) { c.identityTTL = d }
 }
 
 // WithServerLogger sets the logger used by the engine, dispatcher, and
@@ -549,6 +564,7 @@ func buildServerAPIConfig(cfg ServerConfig, sc *serverConfig) apiserver.Config {
 		Auth:                sc.auth,
 		RegistrationCodes:   sc.registrationCodes,
 		IssuedIdentities:    sc.issuedIdentities,
+		IdentityTTL:         sc.identityTTL,
 		WorkflowAuth:        sc.workflowAuth,
 		RequireWorkflowAuth: sc.requireWorkflowAuth,
 		PrincipalAuth:       sc.principalAuth,

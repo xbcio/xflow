@@ -2,6 +2,7 @@ package xflow
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -92,5 +93,73 @@ func TestNewServerRejectsEnrollWithMismatchedStores(t *testing.T) {
 	}
 	if !errors.Is(err, ErrRunnerAuthPostureUndeclared) {
 		t.Fatalf("want ErrRunnerAuthPostureUndeclared, got %v", err)
+	}
+}
+
+// TestNewServerReachesIdentityTTLEndToEnd is TestNewServerReachesEnrollEndToEnd's
+// sibling for WithServerIdentityTTL: it proves the value travels the same
+// chain one field further — sdk/xflow's serverConfig.identityTTL ->
+// buildServerAPIConfig -> apiserver.Config.IdentityTTL ->
+// apiserver.buildControlPlane's ccfg -> control.Config.IdentityTTL ->
+// control.NewControlPlane's WithIdentityTTL(cfg.IdentityTTL) -> the HTTP
+// Core's identityTTL -> Core.Enroll's ExpiresAt stamp -> the response body.
+//
+// A zero-value assertion here would not distinguish "wired" from "the four
+// intermediate hops all silently drop it", because zero is ALSO the untouched
+// default (see Core.identityTTL's doc comment) — so this asserts a non-zero,
+// specific TTL produced a response ExpiresAt in the expected window.
+func TestNewServerReachesIdentityTTLEndToEnd(t *testing.T) {
+	codes := control.NewMemoryRegistrationCodeStore()
+	ids := control.NewMemoryIssuedIdentityStore()
+	id, plaintext, err := control.GenerateRegistrationCode()
+	if err != nil {
+		t.Fatalf("GenerateRegistrationCode: %v", err)
+	}
+	if err := codes.Create(context.Background(), control.RegistrationCode{
+		ID: id, CodeHash: control.HashSecret(plaintext),
+		AllowedNamespaces: []string{"*"}, AllowedNodeTypes: []string{"*"},
+		CreatedAt: time.Unix(1700000000, 0).UTC(),
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	const ttl = 24 * time.Hour
+	srv, err := NewServer(ServerConfig{}, WithServerEnroll(codes, ids), WithServerIdentityTTL(ttl))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	before := time.Now().UTC()
+	resp, err := ts.Client().Post(ts.URL+protocol.EnrollPath, "application/json",
+		strings.NewReader(`{"registration_code":"`+plaintext+`","namespaces":["sas"]}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d body = %q, want 200", resp.StatusCode, body)
+	}
+	var got protocol.EnrollResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.ExpiresAt == "" {
+		t.Fatal("EnrollResponse.ExpiresAt is empty; want it stamped from WithServerIdentityTTL — " +
+			"the passthrough chain from sdk/xflow to control.Core dropped the TTL")
+	}
+	expiresAt, err := time.Parse(time.RFC3339, got.ExpiresAt)
+	if err != nil {
+		t.Fatalf("ExpiresAt = %q not RFC3339: %v", got.ExpiresAt, err)
+	}
+	after := time.Now().UTC()
+	// RFC3339 (via time.Format's default) truncates to whole seconds, so widen
+	// the window by a second on each side rather than asserting sub-second
+	// precision the wire format cannot carry.
+	if expiresAt.Before(before.Add(ttl).Add(-time.Second)) || expiresAt.After(after.Add(ttl).Add(time.Second)) {
+		t.Fatalf("ExpiresAt = %v, want within [%v, %v]", expiresAt, before.Add(ttl), after.Add(ttl))
 	}
 }
