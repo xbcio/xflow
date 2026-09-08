@@ -137,11 +137,14 @@ type RegistrationCode struct {
 	AllowedNamespaces []string
 	AllowedNodeTypes  []string
 	// OwnerNamespace is the namespace whose principal minted this code, and is
-	// the only namespace that may list, revoke, or audit it. Empty means
-	// platform-owned: rows created before this field existed backfill to "",
-	// and "" is visible only under OwnerScope{All: true}. That is deliberately
-	// fail-closed — a legacy row silently becoming visible to whichever tenant
-	// asked first is the bug this field exists to prevent.
+	// the only namespace that may list, revoke, or audit it. "" marks a row
+	// written before this field existed — NOT "platform-owned": no code path
+	// writes "" today (the authenticator normalizes an empty principal
+	// namespace to namespace.Default before it ever reaches here), so such a
+	// row is visible only under OwnerScope{All: true}, i.e. only to a
+	// principal holding the corresponding *_global scope. That is
+	// deliberately fail-closed — a legacy row silently becoming visible to
+	// whichever tenant asked first is the bug this field exists to prevent.
 	OwnerNamespace string
 	Revoked        bool
 	CreatedAt      time.Time

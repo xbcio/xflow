@@ -165,6 +165,25 @@ func TestLoadAuthTokenMappingsRejectsMissingFields(t *testing.T) {
 	}
 }
 
+// TestLoadAuthTokenMappingsRejectsWildcardNamespace is the regression test for
+// fix1b: a token mapping with namespace "*" must fail loudly at startup, not
+// silently at request time. Without this check, such a mapping produces a
+// principal whose Namespace is the literal string "*"; apiserver's
+// resolveRequestedNamespaces (service/apiserver/module_management.go) is the
+// first code path that puts a principal's own namespace on the *policy* side
+// of RunnerPolicy.AllowsNamespace, where "*" means match everything — so an
+// unvalidated "*" namespace here would let that token mint a registration
+// code with AllowedNamespaces covering every namespace on the server (the
+// exact H1 privilege escalation the ceiling exists to close).
+func TestLoadAuthTokenMappingsRejectsWildcardNamespace(t *testing.T) {
+	path := writeTokenFile(t, "tokens.json",
+		`[{"token":"tok-a","subject":"op-a","namespace":"*","scopes":["management.registration_code.create"]}]`,
+		0600)
+	if _, err := loadAuthTokenMappings(serverConfig{authTokensFile: path}); err == nil {
+		t.Fatal("loadAuthTokenMappings() error = nil, want error for namespace \"*\"")
+	}
+}
+
 func TestLoadAuthTokenMappingsNilWhenUnset(t *testing.T) {
 	mappings, err := loadAuthTokenMappings(serverConfig{})
 	if err != nil {

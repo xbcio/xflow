@@ -517,3 +517,100 @@ func TestRegistrationCodeHandlersAnswer404WithoutStore(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveRequestedNamespacesRejectsWildcardPrincipalNamespace is the
+// regression test for the H1 reopening this fix (1a) closes: a principal
+// namespace of "*" — reachable only through a misconfigured token file, since
+// namespace.Validate rejects "*" everywhere else it is checked — must not
+// reach RunnerPolicy.AllowsNamespace's policy side, where "*" means match
+// everything. If the guard in resolveRequestedNamespaces is removed or
+// weakened to a bare `p.Namespace == "*"` string check (which would miss every
+// OTHER illegal character), this test fails: a tenant principal with an
+// illegal namespace of "*" would get back the full requested set instead of
+// an error.
+func TestResolveRequestedNamespacesRejectsWildcardPrincipalNamespace(t *testing.T) {
+	p := Principal{
+		Subject:   "tenant",
+		Namespace: "*",
+		Scopes:    []string{"management.registration_code.create"},
+	}
+	got, err := resolveRequestedNamespaces(p, []string{"namespaceA", "namespaceB"})
+	if err == nil {
+		t.Fatalf("resolveRequestedNamespaces(namespace=*) error = nil, want error; got namespaces = %v", got)
+	}
+	if got != nil {
+		t.Fatalf("resolveRequestedNamespaces(namespace=*) namespaces = %v, want nil on error", got)
+	}
+}
+
+// TestResolveRequestedNamespacesRejectsWildcardPrincipalNamespaceGlobal covers
+// the create_global branch named explicitly in the fix1 brief: a _global
+// operator never builds a ceiling from p.Namespace, but
+// handleCreateRegistrationCode still stamps OwnerNamespace: p.Namespace
+// regardless of branch, so an illegal owner value must be rejected here too,
+// before it can be persisted.
+func TestResolveRequestedNamespacesRejectsWildcardPrincipalNamespaceGlobal(t *testing.T) {
+	p := Principal{
+		Subject:   "platform-op",
+		Namespace: "*",
+		Scopes:    []string{"management.registration_code.create_global"},
+	}
+	got, err := resolveRequestedNamespaces(p, []string{"namespaceA"})
+	if err == nil {
+		t.Fatalf("resolveRequestedNamespaces(namespace=*, global) error = nil, want error; got namespaces = %v", got)
+	}
+	if got != nil {
+		t.Fatalf("resolveRequestedNamespaces(namespace=*, global) namespaces = %v, want nil on error", got)
+	}
+}
+
+// TestCreateRegistrationCodeGlobalRejectsEmptyNamespaces is the regression
+// test for fix2: the create_global branch must not silently persist an empty
+// AllowedNamespaces when the operator omits allowed_namespaces from the
+// request body. Unlike the tenant branch (which has a safe default — the
+// caller's own namespace), a _global creator has no such default, so an
+// omission must be a 400 bad_request naming what is missing, never a 200 that
+// stores an empty (default-namespace-only) grant.
+func TestCreateRegistrationCodeGlobalRejectsEmptyNamespaces(t *testing.T) {
+	codes := control.NewMemoryRegistrationCodeStore()
+	m := newManagementModule(fakeControlPlaneForAuthz(t))
+	m.codes = codes
+	m.principalAuth = staticPrincipalAuth{principal: Principal{
+		Subject:   "platform-op",
+		Namespace: "namespaceA",
+		// _global is additive, not an alternative route-admission scope
+		// (authz.go's ScopeRegistrationCodeCreateGlobal comment): the base
+		// scope is still required to reach the handler at all.
+		Scopes: []string{
+			"management.registration_code.create",
+			"management.registration_code.create_global",
+		},
+	}}
+	m.authorizer = ScopeAuthorizer{}
+	m.audit = NewInMemoryAuditSink()
+	mux := http.NewServeMux()
+	m.RegisterHTTP(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	h := &registrationCodeTestServer{srv: srv, codes: codes}
+	body := h.doJSON(t, http.MethodPost, PathManagementRegistrationCodes, `{}`, http.StatusBadRequest)
+
+	var env struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal([]byte(body), &env); err != nil {
+		t.Fatalf("unmarshal %q: %v", body, err)
+	}
+	if env.Code != "bad_request" {
+		t.Fatalf("code = %q, want bad_request; body = %q", env.Code, body)
+	}
+
+	list, err := codes.List(context.Background(), control.OwnerScope{All: true})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("stored %d codes, want 0 — the rejected request must not persist anything", len(list))
+	}
+}

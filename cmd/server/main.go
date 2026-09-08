@@ -34,6 +34,7 @@ import (
 
 	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	obslogger "github.com/xbcio/xflow/observability/logger"
 	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/observability/tracing"
@@ -738,6 +739,16 @@ func loadAuthTokenMappings(cfg serverConfig) ([]apiserver.TokenPrincipalMapping,
 	for _, r := range raw {
 		if r.Token == "" || r.Subject == "" || r.Namespace == "" {
 			return nil, fmt.Errorf("auth-tokens-file: each mapping requires token, subject, and namespace")
+		}
+		// namespace.Validate rejects "*" along with every other Redis-key-schema
+		// character. Skipping this here would let a mapping like
+		// {"namespace":"*", ...} reach resolveRequestedNamespaces, which is the
+		// first code path that puts a principal's own namespace on the policy
+		// side of RunnerPolicy.AllowsNamespace — where "*" means match
+		// everything, reopening H1 (an unbounded registration-code ceiling).
+		// Reject it loudly at startup instead of silently at request time.
+		if err := namespace.Validate(namespace.Namespace(r.Namespace)); err != nil {
+			return nil, fmt.Errorf("auth-tokens-file: namespace %q is not a legal namespace name: %w", r.Namespace, err)
 		}
 		out = append(out, apiserver.TokenPrincipalMapping{
 			Token: r.Token, Subject: r.Subject, Namespace: r.Namespace, Scopes: r.Scopes,

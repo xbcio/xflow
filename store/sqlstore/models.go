@@ -249,8 +249,10 @@ type dbRegistrationCode struct {
 	AllowedNamespaces string `gorm:"column:allowed_namespaces;type:text"`
 	AllowedNodeTypes  string `gorm:"column:allowed_node_types;type:text"`
 	// OwnerNamespace mirrors store.RegistrationCode.OwnerNamespace. NOT NULL
-	// with a "" default so rows written before this column existed read back
-	// as platform-owned, which is the fail-closed reading.
+	// with a "" default; "" marks a row written before this column existed —
+	// no code path writes "" today — and such a row is visible only to a
+	// principal holding the corresponding _global scope, which is the
+	// fail-closed reading.
 	OwnerNamespace string    `gorm:"column:owner_namespace;size:64;not null;default:''"`
 	Revoked        bool      `gorm:"column:revoked;not null;default:false"`
 	CreatedAt      time.Time `gorm:"column:created_at;not null"`

@@ -807,6 +807,13 @@ func (m *managementModule) handleCreateRegistrationCode(w http.ResponseWriter, r
 	}
 	requested, err := resolveRequestedNamespaces(p, req.AllowedNamespaces)
 	if err != nil {
+		if errors.Is(err, errRegistrationCodeMissingNamespaces) {
+			// A malformed request body, not a scope violation: the caller is
+			// entitled to mint a global code, it just didn't say for which
+			// namespaces. That is bad_request, not namespace_forbidden.
+			writeFail(w, r, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
 		// The reason is a client-side scope error, not internal state, so it is
 		// safe to name the offending namespace back. It is one the caller sent.
 		writeFail(w, r, http.StatusForbidden, "namespace_forbidden", err.Error())
@@ -832,6 +839,13 @@ func (m *managementModule) handleCreateRegistrationCode(w http.ResponseWriter, r
 	writeData(w, r, http.StatusOK, registrationCodeCreateResponse{ID: id, Code: plaintext})
 }
 
+// errRegistrationCodeMissingNamespaces is the sentinel a _global creator hits
+// when it omits allowed_namespaces. Distinct from every other error this
+// function returns (all namespace_forbidden-worthy) so the handler can answer
+// 400 bad_request instead — this is a malformed request body, not a scope
+// violation the caller lacks the right to make.
+var errRegistrationCodeMissingNamespaces = errors.New("allowed_namespaces is required for a global registration code")
+
 // resolveRequestedNamespaces enforces the ceiling: a code may never grant a
 // namespace its creator does not itself hold.
 //
@@ -845,11 +859,34 @@ func (m *managementModule) handleCreateRegistrationCode(w http.ResponseWriter, r
 // namespace.Namespace("*") against the principal's single allowed namespace, so
 // a wildcard request is simply a namespace nobody is named, and is rejected by
 // the ordinary path. It is not special-cased, which is why it cannot be
-// special-cased wrong.
+// special-cased wrong — PROVIDED p.Namespace itself is a legal namespace name.
+// That proviso is the guard immediately below: p.Namespace comes from a token
+// file (cmd/server's loadAuthTokenMappings), and unlike every other reader of
+// a principal's namespace, this function is the first to place p.Namespace on
+// the *policy* side of AllowsNamespace. On the policy side "*" means match
+// everything, so an unvalidated p.Namespace of "*" would hand a tenant
+// principal a ceiling of "everything" — H1 again, through the one string this
+// fix forgot to re-check. namespace.Validate rejects "*" along with every
+// other illegal character, and covers the create_global branch too: that
+// branch never builds a ceiling, but handleCreateRegistrationCode still
+// stamps OwnerNamespace: p.Namespace regardless of branch, so an illegal
+// value must not reach either branch.
 func resolveRequestedNamespaces(p Principal, requested []string) ([]string, error) {
+	if err := namespace.Validate(namespace.Namespace(p.Namespace)); err != nil {
+		return nil, fmt.Errorf("principal namespace %q is not a legal namespace name: %w", p.Namespace, err)
+	}
 	if p.HasScope(ScopeRegistrationCodeCreateGlobal) {
 		// A platform operator may mint anything, including "*". Everything else
 		// still has to be a legal namespace name.
+		if len(requested) == 0 {
+			// Unlike the tenant branch below, there is no safe default to fill
+			// in here: the tenant default is "my own namespace", but a _global
+			// creator has no namespace-of-its-own reading to fall back to, and
+			// silently expanding an omission to "*" is exactly the implicit
+			// maximal grant this whole fix exists to eliminate. Make the
+			// operator say what it wants.
+			return nil, errRegistrationCodeMissingNamespaces
+		}
 		for _, ns := range requested {
 			if ns == "*" {
 				continue
@@ -859,9 +896,6 @@ func resolveRequestedNamespaces(p Principal, requested []string) ([]string, erro
 			}
 		}
 		return append([]string(nil), requested...), nil
-	}
-	if p.Namespace == "" {
-		return nil, errors.New("principal has no namespace and no global scope")
 	}
 	if len(requested) == 0 {
 		// Empty is NOT a safe default: AllowsNamespace reads an empty

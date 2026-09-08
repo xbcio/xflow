@@ -113,7 +113,7 @@ CREATE TABLE IF NOT EXISTS xflow_registration_codes (
     code_hash          BINARY(32)   NOT NULL              COMMENT 'sha256(明文)，原始 32 字节，非 hex',
     allowed_namespaces TEXT                                COMMENT '允许的 namespace JSON 数组；"*" 表示不限',
     allowed_node_types TEXT                                COMMENT '允许的节点类型 JSON 数组；"*" 表示不限',
-    owner_namespace    VARCHAR(64)  NOT NULL DEFAULT ''    COMMENT '铸造该注册码的主体所属 namespace，空串表示平台所有',
+    owner_namespace    VARCHAR(64)  NOT NULL DEFAULT ''    COMMENT '铸造该注册码的主体所属 namespace；空串表示此列新增前写入的行，仅持有对应 _global scope 的主体可见（fail-closed 读法）',
     revoked            TINYINT(1)   NOT NULL DEFAULT 0    COMMENT '是否已吊销',
     created_at         DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     PRIMARY KEY (id),
@@ -752,7 +752,7 @@ BEGIN
     ) THEN
         ALTER TABLE xflow_registration_codes
             ADD COLUMN owner_namespace VARCHAR(64) NOT NULL DEFAULT ''
-                COMMENT '铸造该注册码的主体所属 namespace，空串表示平台所有' AFTER allowed_node_types;
+                COMMENT '铸造该注册码的主体所属 namespace；空串表示此列新增前写入的行，仅持有对应 _global scope 的主体可见（fail-closed 读法）' AFTER allowed_node_types;
     END IF;
 END$$
 DELIMITER ;
