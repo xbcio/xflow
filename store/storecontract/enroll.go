@@ -272,6 +272,25 @@ func RunIssuedIdentityStoreContract(t *testing.T, factory func(t *testing.T) sto
 		if !reflect.DeepEqual(got.Scope, want.Scope) {
 			t.Fatalf("Scope did not round-trip completely:\n got  = %+v\n want = %+v", got.Scope, want.Scope)
 		}
+		// Widen the comparison beyond Scope to the rest of IssuedIdentity's
+		// fields too: a store that round-tripped Scope correctly but dropped
+		// IssuedAt/ExpiresAt/RevokedAt would still pass every assertion above.
+		// Time fields compare via Equal rather than DeepEqual/==: a SQL round
+		// trip can change time.Time's internal representation (monotonic
+		// reading, Location pointer identity) without changing the instant it
+		// represents, and DeepEqual would false-fail on that.
+		if got.RunnerID != want.RunnerID {
+			t.Fatalf("RunnerID = %q, want %q", got.RunnerID, want.RunnerID)
+		}
+		if !got.IssuedAt.Equal(want.IssuedAt) {
+			t.Fatalf("IssuedAt = %v, want %v", got.IssuedAt, want.IssuedAt)
+		}
+		if !got.ExpiresAt.Equal(want.ExpiresAt) {
+			t.Fatalf("ExpiresAt = %v, want %v", got.ExpiresAt, want.ExpiresAt)
+		}
+		if !got.RevokedAt.Equal(want.RevokedAt) {
+			t.Fatalf("RevokedAt = %v, want %v", got.RevokedAt, want.RevokedAt)
+		}
 	})
 
 	t.Run("absent lookup", func(t *testing.T) {
@@ -294,6 +313,81 @@ func RunIssuedIdentityStoreContract(t *testing.T, factory func(t *testing.T) sto
 		}
 		if len(list) != 2 {
 			t.Fatalf("List len = %d, want 2", len(list))
+		}
+	})
+
+	t.Run("lifecycle fields round-trip", func(t *testing.T) {
+		s := factory(t)
+		ctx := context.Background()
+		exp := time.Now().UTC().Add(time.Hour).Truncate(time.Millisecond)
+		id := store.IssuedIdentity{
+			RunnerID:  "runner-lifecycle",
+			TokenHash: store.HashSecret("tok"),
+			CodeID:    "code-1",
+			IssuedAt:  time.Now().UTC().Truncate(time.Millisecond),
+			ExpiresAt: exp,
+		}
+		if err := s.Issue(ctx, id); err != nil {
+			t.Fatalf("issue: %v", err)
+		}
+		got, ok, err := s.Lookup(ctx, "runner-lifecycle")
+		if err != nil || !ok {
+			t.Fatalf("lookup: ok=%v err=%v", ok, err)
+		}
+		if !got.ExpiresAt.Equal(exp) {
+			t.Fatalf("ExpiresAt = %v, want %v", got.ExpiresAt, exp)
+		}
+		if !got.RevokedAt.IsZero() {
+			t.Fatalf("RevokedAt = %v, want zero", got.RevokedAt)
+		}
+
+		// Renewal extends and only extends.
+		next := exp.Add(time.Hour)
+		if err := s.Renew(ctx, "runner-lifecycle", next); err != nil {
+			t.Fatalf("renew: %v", err)
+		}
+		got, _, _ = s.Lookup(ctx, "runner-lifecycle")
+		if !got.ExpiresAt.Equal(next) {
+			t.Fatalf("ExpiresAt after renew = %v, want %v", got.ExpiresAt, next)
+		}
+		if got.TokenHash != store.HashSecret("tok") {
+			t.Fatalf("renew rotated the token hash; R9 says it must not")
+		}
+
+		// Revocation is a state: the second call is a nil no-op.
+		if err := s.Revoke(ctx, "runner-lifecycle"); err != nil {
+			t.Fatalf("revoke: %v", err)
+		}
+		if err := s.Revoke(ctx, "runner-lifecycle"); err != nil {
+			t.Fatalf("second revoke = %v, want nil", err)
+		}
+		got, _, _ = s.Lookup(ctx, "runner-lifecycle")
+		if got.RevokedAt.IsZero() {
+			t.Fatalf("RevokedAt still zero after revoke")
+		}
+
+		// A revoked identity cannot renew itself back.
+		if err := s.Renew(ctx, "runner-lifecycle", next.Add(time.Hour)); !errors.Is(err, store.ErrIssuedIdentityNotFound) {
+			t.Fatalf("renew after revoke = %v, want ErrIssuedIdentityNotFound", err)
+		}
+
+		// Neither can an already-expired one.
+		past := store.IssuedIdentity{
+			RunnerID:  "runner-expired",
+			TokenHash: store.HashSecret("tok2"),
+			CodeID:    "code-1",
+			IssuedAt:  time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Millisecond),
+			ExpiresAt: time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond),
+		}
+		if err := s.Issue(ctx, past); err != nil {
+			t.Fatalf("issue expired: %v", err)
+		}
+		if err := s.Renew(ctx, "runner-expired", time.Now().UTC().Add(time.Hour)); !errors.Is(err, store.ErrIssuedIdentityNotFound) {
+			t.Fatalf("renew of expired = %v, want ErrIssuedIdentityNotFound", err)
+		}
+
+		if err := s.Revoke(ctx, "no-such-runner"); !errors.Is(err, store.ErrIssuedIdentityNotFound) {
+			t.Fatalf("revoke unknown = %v, want ErrIssuedIdentityNotFound", err)
 		}
 	})
 }

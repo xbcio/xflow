@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/service/control"
@@ -272,7 +273,8 @@ func (s *stubRunnerLister) ListRunners(context.Context) ([]string, error) {
 }
 
 // stubIssuedIdentityLister is a minimal control.IssuedIdentityStore test
-// double. Only List is exercised by this file; Issue/Lookup are unused stubs.
+// double. Only List is exercised by this file; Issue/Lookup/Revoke/Renew are
+// unused stubs.
 type stubIssuedIdentityLister struct {
 	ids []string
 	err error
@@ -295,6 +297,14 @@ func (s *stubIssuedIdentityLister) List(context.Context) ([]store.IssuedIdentity
 		out = append(out, store.IssuedIdentity{RunnerID: id})
 	}
 	return out, nil
+}
+
+func (s *stubIssuedIdentityLister) Revoke(context.Context, string) error {
+	return errors.New("stubIssuedIdentityLister: Revoke not implemented")
+}
+
+func (s *stubIssuedIdentityLister) Renew(context.Context, string, time.Time) error {
+	return errors.New("stubIssuedIdentityLister: Renew not implemented")
 }
 
 // runnerListTestServer builds a managementModule wired with principalAuth

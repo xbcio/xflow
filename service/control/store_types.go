@@ -34,6 +34,12 @@ var (
 	// that does not exist). It never reaches the enroll path.
 	ErrRegistrationCodeNotFound = store.ErrRegistrationCodeNotFound
 
+	// ErrIssuedIdentityNotFound is returned when a lifecycle operation names a
+	// runner with no issued identity. It is an operator-facing error on the
+	// management path; it must never be surfaced on the runner-facing
+	// authentication path, where every failure looks like ErrAuthUnknownToken.
+	ErrIssuedIdentityNotFound = store.ErrIssuedIdentityNotFound
+
 	// HashSecret is the one-way transform applied to every credential this
 	// package's stores persist — registration codes and issued runner tokens
 	// alike.

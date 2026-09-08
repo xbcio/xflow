@@ -225,6 +225,16 @@ func (r *issuedIdentityRepo) Issue(ctx context.Context, id store.IssuedIdentity)
 	if !id.IssuedAt.IsZero() {
 		issuedAt = &id.IssuedAt
 	}
+	var expires *time.Time
+	if !id.ExpiresAt.IsZero() {
+		t := id.ExpiresAt.UTC()
+		expires = &t
+	}
+	var revoked *time.Time
+	if !id.RevokedAt.IsZero() {
+		t := id.RevokedAt.UTC()
+		revoked = &t
+	}
 	return r.db.WithContext(ctx).Save(&dbIssuedIdentity{
 		RunnerID:        id.RunnerID,
 		TokenHash:       id.TokenHash[:],
@@ -233,6 +243,8 @@ func (r *issuedIdentityRepo) Issue(ctx context.Context, id store.IssuedIdentity)
 		ScopeNodeTypes:  encodeList(id.Scope.AllowedNodeTypes),
 		CodeID:          id.CodeID,
 		IssuedAt:        issuedAt,
+		ExpiresAt:       expires,
+		RevokedAt:       revoked,
 	}).Error
 }
 
@@ -276,6 +288,12 @@ func rowToIssuedIdentity(row dbIssuedIdentity) (store.IssuedIdentity, error) {
 		CodeID:   row.CodeID,
 		IssuedAt: issuedAt,
 	}
+	if row.ExpiresAt != nil {
+		id.ExpiresAt = row.ExpiresAt.UTC()
+	}
+	if row.RevokedAt != nil {
+		id.RevokedAt = row.RevokedAt.UTC()
+	}
 	copy(id.TokenHash[:], row.TokenHash)
 	return id, nil
 }
@@ -294,4 +312,54 @@ func (r *issuedIdentityRepo) List(ctx context.Context) ([]store.IssuedIdentity, 
 		out = append(out, id)
 	}
 	return out, nil
+}
+
+// Revoke stamps revoked_at. Revoking an already-revoked identity is a no-op
+// that returns nil: revocation is a state, not an event, and an operator
+// retrying after a timeout must not see a spurious failure.
+func (r *issuedIdentityRepo) Revoke(ctx context.Context, runnerID string) error {
+	now := time.Now().UTC()
+	res := r.db.WithContext(ctx).Model(&dbIssuedIdentity{}).
+		Where("runner_id = ? AND revoked_at IS NULL", runnerID).
+		Update("revoked_at", now)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		// Zero rows is either "no such runner" or "already revoked". Distinguish
+		// them, because already-revoked must be a nil no-op while missing must
+		// be an error.
+		var n int64
+		if err := r.db.WithContext(ctx).Model(&dbIssuedIdentity{}).
+			Where("runner_id = ?", runnerID).Count(&n).Error; err != nil {
+			return err
+		}
+		if n == 0 {
+			return store.ErrIssuedIdentityNotFound
+		}
+	}
+	return nil
+}
+
+// Renew extends expires_at. The WHERE clause is the whole enforcement: an
+// identity that is revoked, or whose expires_at has already passed, matches
+// zero rows and cannot renew itself back to life.
+func (r *issuedIdentityRepo) Renew(ctx context.Context, runnerID string, expiresAt time.Time) error {
+	now := time.Now().UTC()
+	var next *time.Time
+	if !expiresAt.IsZero() {
+		t := expiresAt.UTC()
+		next = &t
+	}
+	res := r.db.WithContext(ctx).Model(&dbIssuedIdentity{}).
+		Where("runner_id = ? AND revoked_at IS NULL", runnerID).
+		Where("expires_at IS NULL OR expires_at > ?", now).
+		Update("expires_at", next)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return store.ErrIssuedIdentityNotFound
+	}
+	return nil
 }

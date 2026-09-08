@@ -145,6 +145,8 @@ CREATE TABLE IF NOT EXISTS xflow_issued_identities (
     scope_node_types TEXT                                COMMENT '签发时确定的节点类型范围 JSON 数组',
     code_id          VARCHAR(64)  NOT NULL DEFAULT ''  COMMENT '签发所用的注册码 ID',
     issued_at        DATETIME(3)  NULL                  COMMENT '签发时间；契约测试允许零值，故列可空，语义同 last_fetch_at',
+    expires_at       DATETIME(3)  NULL                  COMMENT '身份失效时间，NULL 表示永不过期',
+    revoked_at       DATETIME(3)  NULL                  COMMENT '身份被吊销的时间，NULL 表示未吊销',
     PRIMARY KEY (runner_id),
     INDEX idx_issued_identity_code (code_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -758,3 +760,46 @@ END$$
 DELIMITER ;
 CALL xflow_add_registration_code_owner_column();
 DROP PROCEDURE IF EXISTS xflow_add_registration_code_owner_column;
+
+-- 已签发身份的过期/吊销列。CREATE TABLE IF NOT EXISTS 对已存在的表是 no-op，
+-- 故用 INFORMATION_SCHEMA 守卫补列（MySQL 无 ADD COLUMN IF NOT EXISTS）。
+-- 两列各自独立守卫：任意中间态（比如两列分批合入）都必须能收敛，而不是
+-- 一个 IF 守两条 ADD COLUMN 导致中间态直接 ALTER 失败并中断整个脚本。
+DROP PROCEDURE IF EXISTS xflow_add_issued_identity_expires_at_column;
+DELIMITER $$
+CREATE PROCEDURE xflow_add_issued_identity_expires_at_column()
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_issued_identities'
+          AND COLUMN_NAME = 'expires_at'
+    ) THEN
+        ALTER TABLE xflow_issued_identities
+            ADD COLUMN expires_at DATETIME(3) NULL
+                COMMENT '身份失效时间，NULL 表示永不过期' AFTER issued_at;
+    END IF;
+END$$
+DELIMITER ;
+CALL xflow_add_issued_identity_expires_at_column();
+DROP PROCEDURE IF EXISTS xflow_add_issued_identity_expires_at_column;
+
+DROP PROCEDURE IF EXISTS xflow_add_issued_identity_revoked_at_column;
+DELIMITER $$
+CREATE PROCEDURE xflow_add_issued_identity_revoked_at_column()
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_issued_identities'
+          AND COLUMN_NAME = 'revoked_at'
+    ) THEN
+        ALTER TABLE xflow_issued_identities
+            ADD COLUMN revoked_at DATETIME(3) NULL
+                COMMENT '身份被吊销的时间，NULL 表示未吊销' AFTER expires_at;
+    END IF;
+END$$
+DELIMITER ;
+CALL xflow_add_issued_identity_revoked_at_column();
+DROP PROCEDURE IF EXISTS xflow_add_issued_identity_revoked_at_column;
+

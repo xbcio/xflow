@@ -302,6 +302,11 @@ type dbIssuedIdentity struct {
 	ScopeNodeTypes  string     `gorm:"column:scope_node_types;type:text"`
 	CodeID          string     `gorm:"column:code_id;size:64;not null;index:idx_issued_identity_code"`
 	IssuedAt        *time.Time `gorm:"column:issued_at"`
+	// ExpiresAt / RevokedAt are pointers for the same reason IssuedAt above is:
+	// MySQL 8 strict mode (NO_ZERO_DATE) rejects '0000-00-00', so "no expiry"
+	// and "not revoked" must be NULL rather than a zero timestamp.
+	ExpiresAt *time.Time `gorm:"column:expires_at"`
+	RevokedAt *time.Time `gorm:"column:revoked_at"`
 }
 
 func (dbIssuedIdentity) TableName() string { return "xflow_issued_identities" }

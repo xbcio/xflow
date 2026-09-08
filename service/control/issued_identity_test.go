@@ -386,6 +386,10 @@ func (s failingIssuedIdentityStore) Lookup(context.Context, string) (IssuedIdent
 func (s failingIssuedIdentityStore) List(context.Context) ([]IssuedIdentity, error) {
 	return nil, s.err
 }
+func (s failingIssuedIdentityStore) Revoke(context.Context, string) error { return s.err }
+func (s failingIssuedIdentityStore) Renew(context.Context, string, time.Time) error {
+	return s.err
+}
 
 // TestIssuedIdentityLookupFailureIsExternallyIdenticalButInternallyDistinct
 // pins both halves of the collapsed-error contract at once, because either

@@ -60,6 +60,12 @@ var (
 	// must return this error rather than substitute a zero-value scope, and
 	// callers must propagate it rather than swallow it.
 	ErrEnrollScopeCorrupted = errors.New("store: enroll scope data corrupted")
+
+	// ErrIssuedIdentityNotFound is returned when a lifecycle operation names a
+	// runner with no issued identity. It is an operator-facing error on the
+	// management path; it must never be surfaced on the runner-facing
+	// authentication path, where every failure looks like ErrAuthUnknownToken.
+	ErrIssuedIdentityNotFound = errors.New("store: issued identity not found")
 )
 
 // HashSecret is the one-way transform applied to every credential this
@@ -235,6 +241,22 @@ type IssuedIdentity struct {
 	Scope    RunnerPolicy
 	CodeID   string
 	IssuedAt time.Time
+	// ExpiresAt is when this identity stops authenticating. The zero value
+	// means "never" and is what every identity issued before the server grew a
+	// TTL carries, so turning the feature on does not retroactively lock out a
+	// running fleet.
+	//
+	// Domain types carry a value time.Time and read the zero value as "none";
+	// the DB rows use *time.Time and NULL for the same state. The two are
+	// converted at the repo boundary, because MySQL 8 strict mode rejects
+	// '0000-00-00' outright (the same reason dbIssuedIdentity.IssuedAt is
+	// already a pointer).
+	ExpiresAt time.Time
+	// RevokedAt is when an operator killed this identity. Zero means live.
+	// Revocation is separate from the registration code's own Revoked flag:
+	// revoking a code does not narrow identities already issued from it, by
+	// design, so revoking one runner needs its own switch.
+	RevokedAt time.Time
 }
 
 // Clone returns a copy of id whose Scope's AllowedNodeTypes / AllowedNamespaces
@@ -262,6 +284,15 @@ type IssuedIdentityStore interface {
 	// distinction to tell an outage apart from a wrong token in its logs.
 	Lookup(ctx context.Context, runnerID string) (IssuedIdentity, bool, error)
 	List(ctx context.Context) ([]IssuedIdentity, error)
+	// Revoke stamps RevokedAt. Revoking an already-revoked identity is a no-op
+	// that returns nil: revocation is a state, not an event, and an operator
+	// retrying after a timeout must not see a spurious failure.
+	Revoke(ctx context.Context, runnerID string) error
+	// Renew extends ExpiresAt. It does NOT touch the token, the runner id, or
+	// the scope — see the design's R9. Renewing an identity that is already
+	// expired or revoked returns ErrIssuedIdentityNotFound: an expired identity
+	// that can renew itself makes expiry theater.
+	Renew(ctx context.Context, runnerID string, expiresAt time.Time) error
 }
 
 // RunnerPolicy is the effective set of permissions bound to an authenticated

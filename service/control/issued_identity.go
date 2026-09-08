@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // MemoryIssuedIdentityStore is the in-process implementation.
@@ -47,6 +48,46 @@ func (s *MemoryIssuedIdentityStore) List(_ context.Context) ([]IssuedIdentity, e
 		out = append(out, id.Clone())
 	}
 	return out, nil
+}
+
+// Revoke stamps RevokedAt. Revoking an already-revoked identity is a no-op
+// that returns nil: revocation is a state, not an event, and an operator
+// retrying after a timeout must not see a spurious failure.
+func (s *MemoryIssuedIdentityStore) Revoke(_ context.Context, runnerID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id, ok := s.byID[runnerID]
+	if !ok {
+		return ErrIssuedIdentityNotFound
+	}
+	if !id.RevokedAt.IsZero() {
+		return nil
+	}
+	id.RevokedAt = time.Now().UTC()
+	s.byID[runnerID] = id
+	return nil
+}
+
+// Renew extends ExpiresAt. It does NOT touch the token, the runner id, or the
+// scope. Renewing an identity that is already expired or revoked returns
+// ErrIssuedIdentityNotFound: an expired identity that can renew itself makes
+// expiry theater.
+func (s *MemoryIssuedIdentityStore) Renew(_ context.Context, runnerID string, expiresAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id, ok := s.byID[runnerID]
+	if !ok {
+		return ErrIssuedIdentityNotFound
+	}
+	if !id.RevokedAt.IsZero() {
+		return ErrIssuedIdentityNotFound
+	}
+	if !id.ExpiresAt.IsZero() && !id.ExpiresAt.After(time.Now().UTC()) {
+		return ErrIssuedIdentityNotFound
+	}
+	id.ExpiresAt = expiresAt
+	s.byID[runnerID] = id
+	return nil
 }
 
 // IssuedIdentityAuthenticator authenticates runners holding an enroll-issued
