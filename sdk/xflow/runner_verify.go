@@ -8,6 +8,17 @@ import (
 	runnersvc "github.com/xbcio/xflow/service/runner"
 )
 
+// VerifyResult is what a preflight learned about this runner's connection.
+// It exists because the answer "did the control plane issue a supply
+// encryption key" is only observable at registration, and verify is the one
+// command whose whole job is to answer questions like it before a deployment
+// commits.
+type VerifyResult struct {
+	RunnerID        string
+	SessionID       string
+	SupplyKeyIssued bool
+}
+
 // VerifyRunner performs a one-shot preflight against the control plane: it
 // connects exactly as NewRunner would, registers, and heartbeats once. It
 // starts no lease loop and hosts no triggers, so it is safe to run against a
@@ -38,10 +49,10 @@ import (
 // newRunnerProtocolClient with NewRunner, and builds the payload from the same
 // translation helpers buildRunnerServiceConfig uses. Fields added to the
 // registration reach both paths or neither.
-func VerifyRunner(ctx context.Context, cfg RunnerConfig) error {
+func VerifyRunner(ctx context.Context, cfg RunnerConfig) (VerifyResult, error) {
 	client, cleanup, err := newRunnerProtocolClient(cfg)
 	if err != nil {
-		return err
+		return VerifyResult{}, err
 	}
 	defer cleanup()
 
@@ -60,15 +71,21 @@ func VerifyRunner(ctx context.Context, cfg RunnerConfig) error {
 		SupportsEncryption: true,
 	})
 	if err != nil {
-		return err
+		return VerifyResult{}, err
 	}
 
-	_, err = client.Heartbeat(ctx, protocol.HeartbeatRequest{
+	if _, err = client.Heartbeat(ctx, protocol.HeartbeatRequest{
 		RunnerID:  cfg.RunnerID,
 		SessionID: registered.SessionID,
 		Capacity:  cfg.Concurrency,
 		InFlight:  0,
 		Timestamp: time.Now().Unix(),
-	})
-	return err
+	}); err != nil {
+		return VerifyResult{}, err
+	}
+	return VerifyResult{
+		RunnerID:        cfg.RunnerID,
+		SessionID:       registered.SessionID,
+		SupplyKeyIssued: registered.SupplyKey != "",
+	}, nil
 }

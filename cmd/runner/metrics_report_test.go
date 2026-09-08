@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 
 	xflowsdk "github.com/xbcio/xflow/sdk/xflow"
@@ -28,8 +29,9 @@ metrics:
 	}
 
 	// A changed flag wins over the file.
-	cfg.changed = map[string]bool{"report-metrics-interval": true}
+	cfg.changed = map[string]bool{"report-metrics-interval": true, "allow-plaintext": true}
 	cfg.reportMetricsInterval = "30s"
+	cfg.allowPlaintext = true
 	resolved, err := resolveRunnerConfig(cfg)
 	if err != nil {
 		t.Fatalf("resolveRunnerConfig: %v", err)
@@ -68,7 +70,7 @@ func TestReportMetricsFlagReachesTheSDK(t *testing.T) {
 	defer restore()
 
 	runCommand(t, "run", "--server", "http://server:8080", "--transport", "http",
-		"--report-metrics", "--report-metrics-interval", "20s")
+		"--report-metrics", "--report-metrics-interval", "20s", "--allow-plaintext")
 }
 
 // Without the flag the SDK must see reporting off — byte-identical behaviour to
@@ -82,7 +84,7 @@ func TestNoReportMetricsFlagLeavesReportingOff(t *testing.T) {
 	})
 	defer restore()
 
-	runCommand(t, "run", "--server", "http://server:8080")
+	runCommand(t, "run", "--server", "http://server:8080", "--allow-plaintext")
 }
 
 // A bad interval must be rejected before the runner starts, not silently
@@ -102,8 +104,15 @@ func TestRunCommandRejectsABadReportInterval(t *testing.T) {
 		out: &bytes.Buffer{},
 		err: &bytes.Buffer{},
 	}, "run", "--server", "http://server:8080", "--report-metrics",
-		"--report-metrics-interval", "not-a-duration")
+		"--report-metrics-interval", "not-a-duration", "--allow-plaintext")
 	if err == nil {
 		t.Fatal("an unparseable --report-metrics-interval was accepted")
+	}
+	// Pin the cause, not just its presence: a gate inserted ahead of this one
+	// (as happened once already — see the transport-security gate) could
+	// satisfy err == nil trivially for an unrelated reason and mask this
+	// rejection without a single test failing.
+	if !strings.Contains(err.Error(), "report metrics interval") {
+		t.Fatalf("error = %q, want it to name the report metrics interval as the cause", err)
 	}
 }

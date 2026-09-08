@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -68,7 +69,7 @@ server:
 		out: &bytes.Buffer{},
 		err: &bytes.Buffer{},
 	})
-	cmd.SetArgs([]string{"run", "--config", path})
+	cmd.SetArgs([]string{"run", "--config", path, "--allow-plaintext"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +97,7 @@ server:
 	err := executeRootWithOptions(commandOptions{
 		out: &out,
 		err: &bytes.Buffer{},
-	}, "--config", path, "config", "validate")
+	}, "--config", path, "config", "validate", "--allow-plaintext")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,6 +188,7 @@ heartbeat:
 	base.capRaw = "xflow.function"
 	base.heartbeatInterval = "11s"
 	base.pollWait = "4s"
+	base.allowPlaintext = true
 	base.changed = map[string]bool{
 		"server":             true,
 		"id":                 true,
@@ -194,6 +196,7 @@ heartbeat:
 		"cap":                true,
 		"heartbeat-interval": true,
 		"poll-wait":          true,
+		"allow-plaintext":    true,
 	}
 
 	got, err := resolveRunnerConfig(base)
@@ -406,6 +409,8 @@ func TestResolveRunnerConfigUsesCLIFlagWhenEnvOverrideIsEmptyOrInvalid(t *testin
 
 			base := defaultRunnerConfig()
 			tt.apply(&base)
+			base.allowPlaintext = true
+			base.changed["allow-plaintext"] = true
 
 			got, err := resolveRunnerConfig(base)
 			if err != nil {
@@ -732,7 +737,7 @@ credentials:
 	})
 	defer restore()
 
-	runCommand(t, "run", "--config", path)
+	runCommand(t, "run", "--config", path, "--allow-plaintext")
 }
 
 func TestLoadRunnerConfigNamespaces(t *testing.T) {
@@ -791,7 +796,8 @@ server:
 	base := defaultRunnerConfig()
 	base.configPath = path
 	base.namespaceRaw = []string{"namespace-cli"}
-	base.changed = map[string]bool{"namespace": true}
+	base.allowPlaintext = true
+	base.changed = map[string]bool{"namespace": true, "allow-plaintext": true}
 
 	got, err := resolveRunnerConfig(base)
 	if err != nil {
@@ -828,5 +834,504 @@ func TestRunCommandPropagatesNamespacesToTheSDK(t *testing.T) {
 	defer restore()
 
 	runCommand(t, "run", "--server", "http://server:8080",
-		"--namespace", "namespace-a", "--namespace", "namespace-b")
+		"--namespace", "namespace-a", "--namespace", "namespace-b", "--allow-plaintext")
+}
+
+func TestValidateRunnerConfigRejectsPlaintextWithoutOptIn(t *testing.T) {
+	cfg := defaultRunnerConfig()
+	cfg.transport = transportHTTP
+	cfg.serverURL = "http://control.example:8080"
+
+	err := validateRunnerConfig(cfg)
+	if err == nil {
+		t.Fatal("validateRunnerConfig accepted an http:// server with no TLS material and no --allow-plaintext")
+	}
+	if !strings.Contains(err.Error(), "allow-plaintext") {
+		t.Fatalf("error %q does not name the flag that would allow this; an operator cannot act on it", err)
+	}
+
+	cfg.allowPlaintext = true
+	if err := validateRunnerConfig(cfg); err != nil {
+		t.Fatalf("validateRunnerConfig with --allow-plaintext: %v", err)
+	}
+}
+
+// The security.allow_plaintext YAML key and the XFLOW_RUNNER_ALLOW_PLAINTEXT
+// env var are the only two ways to opt into a plaintext connection outside
+// of the --allow-plaintext flag itself; a config opt-out that silently fails
+// to parse in either direction is a hazard the width of this whole gate.
+
+func TestLoadRunnerConfigFromYAML_SecurityAllowPlaintext(t *testing.T) {
+	data := []byte(`
+security:
+  allow_plaintext: true
+`)
+	cfg, err := loadRunnerConfigFromBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.allowPlaintext {
+		t.Fatal("allowPlaintext = false, want true from security.allow_plaintext in the file")
+	}
+}
+
+func TestLoadRunnerConfigFromYAML_SecurityAllowPlaintextAbsentDefaultsFalse(t *testing.T) {
+	data := []byte(`
+runner:
+  id: "r"
+`)
+	cfg, err := loadRunnerConfigFromBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.allowPlaintext {
+		t.Fatal("allowPlaintext = true with no security section present, want false (the safe default)")
+	}
+}
+
+func TestApplyLookupEnvOverridesAllowPlaintext(t *testing.T) {
+	cfg := defaultRunnerConfig()
+	got := applyLookupEnvOverrides(cfg, func(key string) (string, bool) {
+		if key == "XFLOW_RUNNER_ALLOW_PLAINTEXT" {
+			return "true", true
+		}
+		return "", false
+	})
+	if !got.allowPlaintext {
+		t.Fatal("allowPlaintext = false, want true from XFLOW_RUNNER_ALLOW_PLAINTEXT=true")
+	}
+}
+
+// A malformed XFLOW_RUNNER_ALLOW_PLAINTEXT must not be silently dropped: an
+// operator who mistypes the value must be told, not left believing the
+// runner is honouring a setting it never applied.
+func TestResolveRunnerConfigRejectsInvalidEnvAllowPlaintext(t *testing.T) {
+	t.Setenv("XFLOW_RUNNER_ALLOW_PLAINTEXT", "notabool")
+	t.Setenv("XFLOW_RUNNER_SERVER", "https://control.example")
+
+	base := defaultRunnerConfig()
+	_, err := resolveRunnerConfig(base)
+	if err == nil || !strings.Contains(err.Error(), "XFLOW_RUNNER_ALLOW_PLAINTEXT") {
+		t.Fatalf("error = %v, want containing %q", err, "XFLOW_RUNNER_ALLOW_PLAINTEXT")
+	}
+}
+
+func TestValidateRunnerConfigAcceptsTLSWithoutOptIn(t *testing.T) {
+	cfg := defaultRunnerConfig()
+	cfg.transport = transportHTTP
+	cfg.serverURL = "https://control.example"
+	if err := validateRunnerConfig(cfg); err != nil {
+		t.Fatalf("https server URL: %v", err)
+	}
+
+	// A grpc-transport runner has no URL scheme to inspect, so the TLS
+	// material is the only signal. Configured CA => allowed.
+	cfg = defaultRunnerConfig()
+	cfg.transport = transportGRPC
+	cfg.tlsServerCA = "/etc/xflow/ca.pem"
+	if err := validateRunnerConfig(cfg); err != nil {
+		t.Fatalf("grpc with a server CA: %v", err)
+	}
+}
+
+func TestValidateRunnerConfigRejectsPlaintextGRPCWithoutOptIn(t *testing.T) {
+	cfg := defaultRunnerConfig()
+	cfg.transport = transportGRPC
+	if err := validateRunnerConfig(cfg); err == nil {
+		t.Fatal("validateRunnerConfig accepted a grpc runner with no TLS material and no --allow-plaintext")
+	}
+}
+
+// The four tests below pin the enroll plaintext gate at `config validate`
+// (and, by sharing validateRunnerConfig, at `verify`). A grpc runner with TLS
+// material configured satisfies validateTransportSecurity on its own — that
+// gate never looks at --server's scheme under grpc — but enrollment always
+// dials --server over plain HTTP regardless of --transport, so a plaintext
+// --server paired with a configured --registration-code must still be
+// refused here, before `run` would crash-loop on the same combination.
+
+// TestConfigValidateRejectsPlaintextEnrollUnderGRPCTransport is the core
+// regression case: --transport=grpc with TLS material configured used to
+// sail through validateTransportSecurity even though --registration-code
+// means this run will enroll over plaintext HTTP.
+func TestConfigValidateRejectsPlaintextEnrollUnderGRPCTransport(t *testing.T) {
+	err := executeRootWithOptions(commandOptions{
+		out: &bytes.Buffer{},
+		err: &bytes.Buffer{},
+	}, "config", "validate",
+		"--transport", "grpc",
+		"--grpc-target", "host:9090",
+		"--tls-server-ca", "/path/ca.pem",
+		"--server", "http://internal-controlplane:8080",
+		"--registration-code", "XXXX",
+	)
+	if err == nil {
+		t.Fatal("config validate accepted a plaintext --server with a configured --registration-code under --transport=grpc")
+	}
+	if !strings.Contains(err.Error(), "refusing to enroll") {
+		t.Fatalf("error = %q, want it to name the enroll gate (\"refusing to enroll\")", err.Error())
+	}
+}
+
+// TestConfigValidateAcceptsHTTPSEnrollUnderGRPCTransport is the same
+// combination with an https:// --server, which the enroll gate must accept.
+func TestConfigValidateAcceptsHTTPSEnrollUnderGRPCTransport(t *testing.T) {
+	err := executeRootWithOptions(commandOptions{
+		out: &bytes.Buffer{},
+		err: &bytes.Buffer{},
+	}, "config", "validate",
+		"--transport", "grpc",
+		"--grpc-target", "host:9090",
+		"--tls-server-ca", "/path/ca.pem",
+		"--server", "https://internal-controlplane:8080",
+		"--registration-code", "XXXX",
+	)
+	if err != nil {
+		t.Fatalf("config validate rejected an https:// --server with a configured --registration-code: %v", err)
+	}
+}
+
+// TestConfigValidateAcceptsPlaintextEnrollWithAllowPlaintext confirms the
+// gate still honors the same --allow-plaintext opt-out as every other
+// transport-security check in this file.
+func TestConfigValidateAcceptsPlaintextEnrollWithAllowPlaintext(t *testing.T) {
+	err := executeRootWithOptions(commandOptions{
+		out: &bytes.Buffer{},
+		err: &bytes.Buffer{},
+	}, "config", "validate",
+		"--transport", "grpc",
+		"--grpc-target", "host:9090",
+		"--tls-server-ca", "/path/ca.pem",
+		"--server", "http://internal-controlplane:8080",
+		"--registration-code", "XXXX",
+		"--allow-plaintext",
+	)
+	if err != nil {
+		t.Fatalf("config validate rejected a plaintext --server with --allow-plaintext set: %v", err)
+	}
+}
+
+// TestConfigValidateIgnoresEnrollGateWithoutRegistrationCode is the core
+// contrast with TestConfigValidateRejectsPlaintextEnrollUnderGRPCTransport:
+// the same plaintext --server under --transport=grpc must pass when no
+// --registration-code is configured, pinning that the gate is conditional on
+// an enrollment actually being about to happen, not unconditional.
+func TestConfigValidateIgnoresEnrollGateWithoutRegistrationCode(t *testing.T) {
+	err := executeRootWithOptions(commandOptions{
+		out: &bytes.Buffer{},
+		err: &bytes.Buffer{},
+	}, "config", "validate",
+		"--transport", "grpc",
+		"--grpc-target", "host:9090",
+		"--tls-server-ca", "/path/ca.pem",
+		"--server", "http://internal-controlplane:8080",
+	)
+	if err != nil {
+		t.Fatalf("config validate rejected a config with no --registration-code: %v", err)
+	}
+}
+
+// TestConfigValidateIgnoresEnrollGateWhenIdentityAlreadyStored pins the
+// regression round 1 introduced: resolveRunnerIdentity (enroll.go) checks
+// store.Load() before it ever looks at cfg.registrationCode, and returns
+// immediately on a stored identity without reaching the enroll gate at all.
+// A runner that already enrolled, with --identity-store=file pointing at a
+// valid identity file, and a stale --registration-code still sitting in its
+// environment (nothing forces it to be cleared on restart) never dials out
+// to enroll and must not be rejected by config validation either — even
+// though its --server is plaintext and its --registration-code is set, the
+// conjunction with "no stored identity" is false, so the gate must not fire.
+func TestConfigValidateIgnoresEnrollGateWhenIdentityAlreadyStored(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "identity.json")
+	if err := os.WriteFile(path, []byte(`{"runner_id":"stored-runner","token":"stored-token"}`), 0o600); err != nil {
+		t.Fatalf("seed identity file: %v", err)
+	}
+
+	err := executeRootWithOptions(commandOptions{
+		out: &bytes.Buffer{},
+		err: &bytes.Buffer{},
+	}, "config", "validate",
+		"--transport", "grpc",
+		"--grpc-target", "host:9090",
+		"--tls-server-ca", "/path/ca.pem",
+		"--server", "http://internal-controlplane:8080",
+		"--registration-code", "XXXX",
+		"--identity-store", "file",
+		"--identity-file", path,
+	)
+	if err != nil {
+		t.Fatalf("config validate rejected a config with an already-stored identity: %v", err)
+	}
+}
+
+// TestValidateRunnerConfigRejectsHTTPPlaintextEvenWithTLSMaterial pins the
+// hole where TLS material configured for an http:// URL used to satisfy the
+// gate on its own. Go's http.Transport only consults TLSClientConfig when
+// the URL scheme is https (see sdk/xflow/runner.go's newRunnerHTTPClient);
+// for a plain http:// URL the material is silently ignored and the token
+// still crosses the wire in the clear, so hasTLSMaterial must not short-
+// circuit the http branch — only an https:// scheme or --allow-plaintext may.
+func TestValidateRunnerConfigRejectsHTTPPlaintextEvenWithTLSMaterial(t *testing.T) {
+	cfg := defaultRunnerConfig()
+	cfg.transport = transportHTTP
+	cfg.serverURL = "http://control.example:8080"
+	cfg.tlsServerCA = "/etc/xflow/ca.pem"
+
+	err := validateRunnerConfig(cfg)
+	if err == nil {
+		t.Fatal("validateRunnerConfig accepted an http:// server with a configured CA; " +
+			"the CA is never consulted by Go's http.Transport for a plain http:// URL, " +
+			"so this connection is still plaintext")
+	}
+	if !strings.Contains(err.Error(), "allow-plaintext") {
+		t.Fatalf("error %q does not name the flag that would allow this; an operator cannot act on it", err)
+	}
+
+	cfg.allowPlaintext = true
+	if err := validateRunnerConfig(cfg); err != nil {
+		t.Fatalf("validateRunnerConfig with --allow-plaintext: %v", err)
+	}
+}
+
+// The --require-supply-encryption flag, its env override, and the YAML
+// security.require_supply_encryption key are the three ways to set
+// requireSupplyEncryption; a wiring point that silently fails to reach the
+// field is how the fail-fast in lifecycle.go ends up never armed.
+
+func TestResolveRunnerConfigFlagSetsRequireSupplyEncryption(t *testing.T) {
+	base := defaultRunnerConfig()
+	base.allowPlaintext = true
+	base.requireSupplyEncryption = true
+	base.changed = map[string]bool{"allow-plaintext": true, "require-supply-encryption": true}
+
+	got, err := resolveRunnerConfig(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.requireSupplyEncryption {
+		t.Fatal("requireSupplyEncryption = false, want true from --require-supply-encryption")
+	}
+}
+
+func TestApplyLookupEnvOverridesRequireSupplyEncryption(t *testing.T) {
+	cfg := defaultRunnerConfig()
+	got := applyLookupEnvOverrides(cfg, func(key string) (string, bool) {
+		if key == "XFLOW_RUNNER_REQUIRE_SUPPLY_ENCRYPTION" {
+			return "true", true
+		}
+		return "", false
+	})
+	if !got.requireSupplyEncryption {
+		t.Fatal("requireSupplyEncryption = false, want true from XFLOW_RUNNER_REQUIRE_SUPPLY_ENCRYPTION=true")
+	}
+}
+
+// A malformed XFLOW_RUNNER_REQUIRE_SUPPLY_ENCRYPTION must not be silently
+// dropped: an operator who mistypes the value must be told, not left
+// believing the fail-fast is armed when it never applied.
+func TestResolveRunnerConfigRejectsInvalidEnvRequireSupplyEncryption(t *testing.T) {
+	t.Setenv("XFLOW_RUNNER_REQUIRE_SUPPLY_ENCRYPTION", "notabool")
+	t.Setenv("XFLOW_RUNNER_SERVER", "https://control.example")
+
+	base := defaultRunnerConfig()
+	_, err := resolveRunnerConfig(base)
+	if err == nil || !strings.Contains(err.Error(), "XFLOW_RUNNER_REQUIRE_SUPPLY_ENCRYPTION") {
+		t.Fatalf("error = %v, want containing %q", err, "XFLOW_RUNNER_REQUIRE_SUPPLY_ENCRYPTION")
+	}
+}
+
+func TestLoadRunnerConfigFromYAML_SecurityRequireSupplyEncryption(t *testing.T) {
+	data := []byte(`
+security:
+  require_supply_encryption: true
+`)
+	cfg, err := loadRunnerConfigFromBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.requireSupplyEncryption {
+		t.Fatal("requireSupplyEncryption = false, want true from security.require_supply_encryption in the file")
+	}
+}
+
+func TestResolveRunnerConfigFlagBeatsYAMLForRequireSupplyEncryption(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runner.yaml")
+	data := []byte(`
+server:
+  url: http://file-server:8080
+security:
+  require_supply_encryption: true
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	base := defaultRunnerConfig()
+	base.configPath = path
+	base.allowPlaintext = true
+	base.requireSupplyEncryption = false
+	base.changed = map[string]bool{"allow-plaintext": true, "require-supply-encryption": true}
+
+	got, err := resolveRunnerConfig(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.requireSupplyEncryption {
+		t.Fatal("requireSupplyEncryption = true, want false: the explicit flag (false) must beat the YAML file (true)")
+	}
+}
+
+// detectRunnerLabels / mergeRunnerLabels / --auto-labels wiring.
+//
+// The runtime package (not a hardcoded string) is what must produce
+// xflow.io/os and xflow.io/arch, so a query filtering on either key sees the
+// value for the process that is actually running, not a copy-pasted literal.
+
+func TestDetectRunnerLabels(t *testing.T) {
+	got := detectRunnerLabels()
+	for _, key := range []string{"xflow.io/os", "xflow.io/arch"} {
+		if got[key] == "" {
+			t.Fatalf("detectRunnerLabels()[%q] is empty; want a value from the runtime package", key)
+		}
+	}
+	if got["xflow.io/os"] != runtime.GOOS || got["xflow.io/arch"] != runtime.GOARCH {
+		t.Fatalf("detectRunnerLabels() = %v, want GOOS/GOARCH verbatim", got)
+	}
+	if _, ok := got["xflow.io/env"]; !ok {
+		t.Fatal("detectRunnerLabels() has no xflow.io/env key; the label must always be present so a query can filter on it")
+	}
+	// detectRunnerLabels only sets xflow.io/hostname when os.Hostname() itself
+	// succeeds and is non-blank (it fails open otherwise: one missing label,
+	// not a startup failure). Calling os.Hostname() here mirrors that same
+	// contract instead of asserting the key merely exists, which would pass
+	// even if the label were written under the wrong key.
+	if host, err := os.Hostname(); err == nil && strings.TrimSpace(host) != "" {
+		if got["xflow.io/hostname"] != host {
+			t.Fatalf("xflow.io/hostname = %q, want %q from os.Hostname()", got["xflow.io/hostname"], host)
+		}
+	}
+}
+
+func TestDetectRunnerLabelsMarksKubernetes(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+	if got := detectRunnerLabels(); got["xflow.io/env"] != "kubernetes" {
+		t.Fatalf("xflow.io/env = %q inside a pod, want kubernetes", got["xflow.io/env"])
+	}
+}
+
+// TestDetectRunnerLabelsDefaultEnvIsBare pins the actual default value, not
+// just the key's presence: a build that silently changed "bare" to any other
+// string would still satisfy TestDetectRunnerLabels above. The env var is
+// cleared (not left to the ambient process environment) so this cannot go
+// red for the unrelated reason that the test runner itself happens to be
+// executing inside a pod.
+func TestDetectRunnerLabelsDefaultEnvIsBare(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	if got := detectRunnerLabels(); got["xflow.io/env"] != "bare" {
+		t.Fatalf("xflow.io/env = %q, want bare when not running in a pod", got["xflow.io/env"])
+	}
+}
+
+func TestMergeRunnerLabelsManualWins(t *testing.T) {
+	auto := map[string]string{"xflow.io/os": "linux", "xflow.io/env": "bare"}
+	manual := map[string]string{"xflow.io/env": "staging", "team": "core"}
+	got := mergeRunnerLabels(auto, manual)
+	if got["xflow.io/env"] != "staging" {
+		t.Fatalf("xflow.io/env = %q, want the manual value: an operator override must win", got["xflow.io/env"])
+	}
+	if got["xflow.io/os"] != "linux" || got["team"] != "core" {
+		t.Fatalf("merged labels = %v, want both sides preserved", got)
+	}
+	// Neither input may be mutated: resolveRunnerConfig runs more than once in
+	// tests, and a mutated auto map would leak between runs.
+	if auto["xflow.io/env"] != "bare" {
+		t.Fatal("mergeRunnerLabels mutated its auto argument")
+	}
+}
+
+func TestResolveRunnerConfigDisablesAutoLabels(t *testing.T) {
+	base := defaultRunnerConfig()
+	base.allowPlaintext = true
+	base.autoLabels = false
+	base.changed = map[string]bool{"auto-labels": true, "allow-plaintext": true}
+
+	cfg, err := resolveRunnerConfig(base)
+	if err != nil {
+		t.Fatalf("resolveRunnerConfig: %v", err)
+	}
+	if _, ok := cfg.labels["xflow.io/os"]; ok {
+		t.Fatalf("labels = %v, want no auto-detected keys with --auto-labels=false", cfg.labels)
+	}
+}
+
+// The following two tests are not in the original brief for this feature.
+// They exist because a test suite that only ever exercises the feature
+// switched ON cannot tell a real wiring point from a hardcoded constant --
+// this plan has hit that exact defect before. Both directions (env, YAML)
+// must be able to turn autoLabels off, and an explicit flag must still beat a
+// YAML file that turned it off.
+
+// XFLOW_RUNNER_AUTO_LABELS=false must actually suppress the merge in
+// resolveRunnerConfig, not just flip a field nothing reads.
+func TestResolveRunnerConfigEnvDisablesAutoLabels(t *testing.T) {
+	t.Setenv("XFLOW_RUNNER_AUTO_LABELS", "false")
+
+	base := defaultRunnerConfig()
+	base.allowPlaintext = true
+	base.changed = map[string]bool{"allow-plaintext": true}
+
+	got, err := resolveRunnerConfig(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key := range got.labels {
+		if strings.HasPrefix(key, "xflow.io/") {
+			t.Fatalf("labels = %v, want no xflow.io/* keys with XFLOW_RUNNER_AUTO_LABELS=false", got.labels)
+		}
+	}
+}
+
+// runner.auto_labels: false in the YAML file must suppress the merge on its
+// own, and an explicit --auto-labels flag must still beat that YAML value:
+// the same flag-over-file precedence every other security-relevant setting
+// in this file has.
+func TestLoadRunnerConfigFromYAML_RunnerAutoLabelsDisables(t *testing.T) {
+	data := []byte(`
+runner:
+  auto_labels: false
+`)
+	cfg, err := loadRunnerConfigFromBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.autoLabels {
+		t.Fatal("autoLabels = true, want false from runner.auto_labels: false in the file")
+	}
+}
+
+func TestResolveRunnerConfigFlagBeatsYAMLForAutoLabels(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runner.yaml")
+	data := []byte(`
+server:
+  url: http://file-server:8080
+runner:
+  auto_labels: false
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	base := defaultRunnerConfig()
+	base.configPath = path
+	base.allowPlaintext = true
+	base.autoLabels = true
+	base.changed = map[string]bool{"allow-plaintext": true, "auto-labels": true}
+
+	got, err := resolveRunnerConfig(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got.labels["xflow.io/os"]; !ok {
+		t.Fatal("labels missing xflow.io/os: the explicit --auto-labels=true flag must beat the YAML file's auto_labels: false")
+	}
 }

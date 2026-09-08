@@ -114,6 +114,35 @@ type Config struct {
 	// goroutine gauge, per-invocation duration). nil leaves the executor with
 	// a no-op observer so behavior is byte-identical to before this feature.
 	TimeoutObserver execution.TimeoutObserver
+	// LifecycleObserver, when set, receives the connection-lifecycle
+	// transitions a host process needs to answer a liveness/readiness probe.
+	// Run is the only exported method, so without this a host cannot tell
+	// "connected and heartbeating" from "started and failing to register" —
+	// both look like a process that has not returned yet. nil leaves behavior
+	// byte-identical to before this feature.
+	LifecycleObserver LifecycleObserver
+}
+
+// LifecycleObserver receives the runner's connection-lifecycle transitions.
+// Implementations must be non-blocking: every method is called on the
+// registration or heartbeat path.
+type LifecycleObserver interface {
+	// OnRegistered fires once per successful registration, before the
+	// heartbeat loop starts. supplyKeyIssued reports whether the server
+	// returned a supply encryption key, which is the only place that answer
+	// is observable outside this package.
+	OnRegistered(ctx context.Context, runnerID string, supplyKeyIssued bool)
+	// OnHeartbeat fires for every heartbeat attempt, true for success. The
+	// first call is the first beat, before the ticker starts.
+	OnHeartbeat(ctx context.Context, ok bool)
+	// OnSupplyGateWired fires once during assembly, reporting whether this
+	// runner has a supply readiness gate at all. A runner that hosts no
+	// triggers has none, and must not be held un-ready waiting for a supply
+	// fetch that will never happen.
+	OnSupplyGateWired(present bool)
+	// OnSupplyFetch mirrors SupplyGateObserver.OnSupplyFetch. result is "ok"
+	// or "error".
+	OnSupplyFetch(ctx context.Context, name, result string)
 }
 
 type Runner struct {
@@ -202,6 +231,10 @@ func (r *Runner) Run(ctx context.Context) error {
 		} else {
 			r.installSupplyKey(key)
 		}
+	}
+
+	if r.config.LifecycleObserver != nil {
+		r.config.LifecycleObserver.OnRegistered(ctx, r.config.RunnerID, registerResp.SupplyKey != "")
 	}
 
 	// Wire the ack callback with this session's ID now that it is known. Safe
@@ -489,6 +522,14 @@ func (r *Runner) executeAndReport(ctx context.Context, sessionID string, lease *
 	}
 }
 
+// observeHeartbeat forwards a heartbeat attempt's outcome to the lifecycle
+// observer, when one is configured.
+func (r *Runner) observeHeartbeat(ctx context.Context, ok bool) {
+	if r.config.LifecycleObserver != nil {
+		r.config.LifecycleObserver.OnHeartbeat(ctx, ok)
+	}
+}
+
 // heartbeatLoop sends heartbeats on its own ticker, independent of task
 // execution. A heartbeat failure signals the run to exit so the caller can
 // reconnect. Activation directives piggybacked on the heartbeat response are
@@ -497,9 +538,11 @@ func (r *Runner) executeAndReport(ctx context.Context, sessionID string, lease *
 func (r *Runner) heartbeatLoop(ctx context.Context, sessionID string, inFlight *atomic.Int32, signalError func(error)) {
 	resp, err := r.heartbeat(ctx, sessionID, int(inFlight.Load()))
 	if err != nil {
+		r.observeHeartbeat(ctx, false)
 		signalError(err)
 		return
 	}
+	r.observeHeartbeat(ctx, true)
 	r.processActivations(ctx, resp)
 	r.processSupplyHints(ctx, resp)
 	r.processSupplyKeyRotation(resp)
@@ -514,9 +557,11 @@ func (r *Runner) heartbeatLoop(ctx context.Context, sessionID string, inFlight *
 		case <-ticker.C:
 			resp, err := r.heartbeat(ctx, sessionID, int(inFlight.Load()))
 			if err != nil {
+				r.observeHeartbeat(ctx, false)
 				signalError(err)
 				return
 			}
+			r.observeHeartbeat(ctx, true)
 			r.processActivations(ctx, resp)
 			r.processSupplyHints(ctx, resp)
 			r.processSupplyKeyRotation(resp)

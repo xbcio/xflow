@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ type runnerConfigFile struct {
 		Capabilities *[]string         `yaml:"capabilities"`
 		Labels       map[string]string `yaml:"labels"`
 		Namespaces   *[]string         `yaml:"namespaces"`
+		AutoLabels   *bool             `yaml:"auto_labels"`
 	} `yaml:"runner"`
 	Server struct {
 		URL        *string `yaml:"url"`
@@ -38,6 +40,14 @@ type runnerConfigFile struct {
 		Report         *bool   `yaml:"report"`          // ship metrics to the server
 		ReportInterval *string `yaml:"report_interval"` // local reporting cadence
 	} `yaml:"metrics"`
+	Identity struct {
+		Store *string `yaml:"store"` // "ephemeral" (default) or "file"
+		File  *string `yaml:"file"`
+	} `yaml:"identity"`
+	Security struct {
+		AllowPlaintext          *bool `yaml:"allow_plaintext"`
+		RequireSupplyEncryption *bool `yaml:"require_supply_encryption"`
+	} `yaml:"security"`
 	// Credentials holds named credential maps (driver/dsn, token/base_url, …)
 	// consumed by resource-aware nodes via input.Credential(name). String leaves
 	// are expanded via os.Expand at load time so secrets are sourced from the
@@ -81,6 +91,8 @@ func defaultRunnerConfig() runnerConfig {
 		heartbeatInterval:     "5s",
 		pollWait:              "1s",
 		reportMetricsInterval: "15s",
+		identityStoreKind:     identityStoreEphemeral,
+		autoLabels:            true,
 	}
 }
 
@@ -135,6 +147,9 @@ func loadRunnerConfigFromBytes(data []byte) (runnerConfig, error) {
 	if file.Runner.Namespaces != nil {
 		cfg.namespaceRaw = *file.Runner.Namespaces
 	}
+	if file.Runner.AutoLabels != nil {
+		cfg.autoLabels = *file.Runner.AutoLabels
+	}
 	if file.Poll.Wait != nil {
 		cfg.pollWait = *file.Poll.Wait
 	}
@@ -149,6 +164,18 @@ func loadRunnerConfigFromBytes(data []byte) (runnerConfig, error) {
 	}
 	if file.Metrics.ReportInterval != nil {
 		cfg.reportMetricsInterval = *file.Metrics.ReportInterval
+	}
+	if file.Identity.Store != nil {
+		cfg.identityStoreKind = *file.Identity.Store
+	}
+	if file.Identity.File != nil {
+		cfg.identityFile = *file.Identity.File
+	}
+	if file.Security.AllowPlaintext != nil {
+		cfg.allowPlaintext = *file.Security.AllowPlaintext
+	}
+	if file.Security.RequireSupplyEncryption != nil {
+		cfg.requireSupplyEncryption = *file.Security.RequireSupplyEncryption
 	}
 
 	if len(file.Credentials) > 0 {
@@ -216,6 +243,9 @@ var runnerConfigIssueOrder = []string{
 	"namespace",
 	"heartbeat-interval",
 	"poll-wait",
+	"allow-plaintext",
+	"require-supply-encryption",
+	"auto-labels",
 }
 
 func applyEnvOverrides(cfg runnerConfig, getenv func(string) string) runnerConfig {
@@ -274,6 +304,45 @@ func applyLookupEnvOverrides(cfg runnerConfig, lookupEnv func(string) (string, b
 	if v, ok := lookupEnv("XFLOW_RUNNER_TLS_CLIENT_KEY"); ok {
 		cfg.tlsClientKey = v
 	}
+	if v, ok := lookupEnv("XFLOW_RUNNER_IDENTITY_STORE"); ok {
+		cfg.identityStoreKind = v
+	}
+	if v, ok := lookupEnv("XFLOW_RUNNER_IDENTITY_FILE"); ok {
+		cfg.identityFile = v
+	}
+	if v, ok := lookupEnv("XFLOW_RUNNER_REGISTRATION_CODE"); ok {
+		cfg.registrationCode = v
+	}
+	if v, ok := lookupEnv("XFLOW_RUNNER_ALLOW_PLAINTEXT"); ok {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			setRunnerConfigIssue(&cfg, "allow-plaintext",
+				fmt.Errorf("XFLOW_RUNNER_ALLOW_PLAINTEXT must be a valid boolean: %w", err))
+		} else {
+			clearRunnerConfigIssue(&cfg, "allow-plaintext")
+			cfg.allowPlaintext = b
+		}
+	}
+	if v, ok := lookupEnv("XFLOW_RUNNER_REQUIRE_SUPPLY_ENCRYPTION"); ok {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			setRunnerConfigIssue(&cfg, "require-supply-encryption",
+				fmt.Errorf("XFLOW_RUNNER_REQUIRE_SUPPLY_ENCRYPTION must be a valid boolean: %w", err))
+		} else {
+			clearRunnerConfigIssue(&cfg, "require-supply-encryption")
+			cfg.requireSupplyEncryption = b
+		}
+	}
+	if v, ok := lookupEnv("XFLOW_RUNNER_AUTO_LABELS"); ok {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			setRunnerConfigIssue(&cfg, "auto-labels",
+				fmt.Errorf("XFLOW_RUNNER_AUTO_LABELS must be a valid boolean: %w", err))
+		} else {
+			clearRunnerConfigIssue(&cfg, "auto-labels")
+			cfg.autoLabels = b
+		}
+	}
 
 	cfg.capabilities = parseCapabilities(cfg.capRaw)
 	cfg.labels = parseLabels(cfg.labelRaw)
@@ -297,6 +366,53 @@ func parseLabels(raw []string) map[string]string {
 		labels[key] = value
 	}
 	return labels
+}
+
+// detectRunnerLabels derives labels from the process environment so a fleet is
+// selectable by where it runs without every deployment restating it in its
+// config. Standard library only — no cloud metadata call, no new dependency,
+// nothing that can hang at startup.
+//
+// The xflow.io/ prefix keeps these out of the flat namespace an operator's own
+// labels live in, so an auto key can be added later without colliding with a
+// name someone already used.
+func detectRunnerLabels() map[string]string {
+	labels := map[string]string{
+		"xflow.io/os":   runtime.GOOS,
+		"xflow.io/arch": runtime.GOARCH,
+		"xflow.io/env":  "bare",
+	}
+	// The kubelet injects KUBERNETES_SERVICE_HOST into every pod, so its
+	// presence is the cheapest in-cluster signal that needs no API access.
+	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
+		labels["xflow.io/env"] = "kubernetes"
+	}
+	// A hostname that cannot be read is not a startup failure: it costs one
+	// label, not the process.
+	if host, err := os.Hostname(); err == nil && strings.TrimSpace(host) != "" {
+		labels["xflow.io/hostname"] = host
+	}
+	return labels
+}
+
+// mergeRunnerLabels overlays manual labels on detected ones. Manual wins: an
+// operator who writes a label meant to override what the environment says.
+// An explicit empty value (e.g. --label xflow.io/os=) still wins the merge,
+// but validateRunnerConfig then rejects the empty value outright rather than
+// clearing the label — refuse-to-start, not silently-dropped-label, is the
+// safer failure here. Neither argument is mutated.
+func mergeRunnerLabels(auto, manual map[string]string) map[string]string {
+	if len(auto) == 0 && len(manual) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(auto)+len(manual))
+	for k, v := range auto {
+		out[k] = v
+	}
+	for k, v := range manual {
+		out[k] = v
+	}
+	return out
 }
 
 func splitCSV(raw string) []string {
@@ -379,7 +495,92 @@ func validateRunnerConfig(cfg runnerConfig) error {
 		return err
 	}
 
+	if err := validateTransportSecurity(cfg); err != nil {
+		return err
+	}
+
+	// Build the store to validate its configuration; also reused just below to
+	// decide whether the enroll gate applies. Building it here means a bad
+	// --identity-store/--identity-file combination fails at config resolution,
+	// the same place every other malformed value fails, rather than at the
+	// first enrollment attempt.
+	store, err := newIdentityStore(cfg)
+	if err != nil {
+		return err
+	}
+
+	// A configured registration code means this run *may*, at enrollment time,
+	// send an HTTP request carrying that code regardless of --transport (see
+	// validateEnrollTransportSecurity) — but only if resolveRunnerIdentity
+	// (enroll.go) does not find a stored identity first: it checks store.Load()
+	// before the registration code, and returns immediately on a hit without
+	// ever reaching the enroll gate, so a runner that already enrolled and
+	// still has --registration-code sitting in its environment (a stale
+	// registration code is common: nothing forces it to be cleared on
+	// restart) never dials out and never needs this gate. Keying config
+	// validation on the registration code alone would misjudge exactly that
+	// case as an upcoming plaintext enrollment and refuse a deployment that
+	// `run` handles correctly. So this must mirror resolveRunnerIdentity's own
+	// two-part test, in the same order: read the store only when a
+	// registration code is configured (config validate stays host-state-free
+	// on the common path of no registration code — an identity file that is
+	// corrupt or too permissive with no registration code configured still
+	// only surfaces in `run`, not here; that gap predates this gate and is
+	// intentionally left alone), and skip the gate when the store already
+	// holds an identity.
+	if strings.TrimSpace(cfg.registrationCode) != "" {
+		_, ok, err := store.Load()
+		if err != nil {
+			return err
+		}
+		if !ok {
+			if err := validateEnrollTransportSecurity(cfg); err != nil {
+				return err
+			}
+		}
+	}
+
 	return nil
+}
+
+// validateTransportSecurity refuses a control-plane connection that carries no
+// transport encryption unless the operator opted in.
+//
+// The gate lives here, not in sdk/xflow's buildRunnerTLSConfig, on purpose:
+// an embedded runner shares its host's connection policy and its host's
+// judgement, while a standalone runner process is the one that ships a bearer
+// token to a remote control plane with nothing else guarding it. Only the
+// standalone profile gets the hard stop.
+//
+// "Encrypted" means either an https server URL (http transport) or at least one
+// piece of TLS material (either transport). A gRPC runner has no URL scheme to
+// read, so the material is its only signal.
+func validateTransportSecurity(cfg runnerConfig) error {
+	if cfg.allowPlaintext {
+		return nil
+	}
+	hasTLSMaterial := strings.TrimSpace(cfg.tlsServerCA) != "" ||
+		strings.TrimSpace(cfg.tlsClientCert) != "" ||
+		strings.TrimSpace(cfg.tlsClientKey) != ""
+	if cfg.transport == transportHTTP {
+		if u, err := url.Parse(cfg.serverURL); err == nil && u.Scheme == "https" {
+			return nil
+		}
+		return fmt.Errorf(
+			"refusing to start: --server %q is plaintext and no TLS material is configured, "+
+				"so the runner token would cross the network in the clear; "+
+				"configure --tls-server-ca (and --tls-client-cert/--tls-client-key for mTLS), "+
+				"use an https:// URL, or pass --allow-plaintext to accept the risk",
+			cfg.serverURL)
+	}
+	if hasTLSMaterial {
+		return nil
+	}
+	return errors.New(
+		"refusing to start: no TLS material is configured for the grpc transport, " +
+			"so the runner token would cross the network in the clear; " +
+			"configure --tls-server-ca (and --tls-client-cert/--tls-client-key for mTLS), " +
+			"or pass --allow-plaintext to accept the risk")
 }
 
 func validatePositiveDuration(name, raw string) error {
@@ -466,6 +667,27 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 	if base.changed["tls-client-key"] {
 		cfg.tlsClientKey = base.tlsClientKey
 	}
+	if base.changed["identity-store"] {
+		cfg.identityStoreKind = base.identityStoreKind
+	}
+	if base.changed["identity-file"] {
+		cfg.identityFile = base.identityFile
+	}
+	if base.changed["registration-code"] {
+		cfg.registrationCode = base.registrationCode
+	}
+	if base.changed["allow-plaintext"] {
+		clearRunnerConfigIssue(&cfg, "allow-plaintext")
+		cfg.allowPlaintext = base.allowPlaintext
+	}
+	if base.changed["require-supply-encryption"] {
+		clearRunnerConfigIssue(&cfg, "require-supply-encryption")
+		cfg.requireSupplyEncryption = base.requireSupplyEncryption
+	}
+	if base.changed["auto-labels"] {
+		clearRunnerConfigIssue(&cfg, "auto-labels")
+		cfg.autoLabels = base.autoLabels
+	}
 	if base.changed["metrics-addr"] {
 		cfg.metricsAddr = base.metricsAddr
 	}
@@ -478,6 +700,12 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 
 	cfg.capabilities = parseCapabilities(cfg.capRaw)
 	cfg.labels = parseLabels(cfg.labelRaw)
+	if cfg.autoLabels {
+		// Merged here, not in toSDKRunnerConfig: validateRunnerConfig below
+		// checks every label key/value, and a detected label must face the
+		// same check a hand-written one does.
+		cfg.labels = mergeRunnerLabels(detectRunnerLabels(), cfg.labels)
+	}
 	cfg.namespaces = parseNamespaces(cfg.namespaceRaw)
 	if err := firstRunnerConfigIssue(cfg); err != nil {
 		return runnerConfig{}, err
@@ -528,6 +756,7 @@ func sampleRunnerConfigYAML() string {
     mode: "remote"
   capabilities:
     - "xflow.function"
+  # auto_labels: true   # adds xflow.io/os, /arch, /env, /hostname
 
 server:
   # transport: "http" or "grpc" (default: grpc, see defaultRunnerConfig)
@@ -540,6 +769,21 @@ poll:
 
 heartbeat:
   interval: "5s"
+
+# identity:
+#   # "ephemeral" (default) keeps the enrolled identity in memory only;
+#   # "file" persists it so a restart reuses the same runner ID and token
+#   # instead of consuming another registration code.
+#   store: "file"
+#   file: "/var/lib/xflow/runner-identity.json"
+
+# security:
+#   # A plaintext control-plane connection ships the runner token in the clear.
+#   # The runner refuses to start on one unless this is set.
+#   allow_plaintext: false
+#   # Exit if the control plane issues no supply encryption key at
+#   # registration, rather than fetching supply content in the clear.
+#   require_supply_encryption: false
 
 # Credentials: named maps consumed by resource-aware nodes via
 # input.Credential(name). String leaves are env-expanded at load time

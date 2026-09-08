@@ -3,6 +3,8 @@ package control
 import (
 	"context"
 	"errors"
+	"reflect"
+	"sort"
 	"testing"
 	"time"
 
@@ -528,5 +530,37 @@ func TestMemoryRunnerDirectoryDefaultNamespaceBackCompat(t *testing.T) {
 	claim := mustClaimAssignment(t, ctx, dir, session)
 	if claim.Assignment.Namespace != namespace.Default {
 		t.Fatalf("namespace = %q, want default", claim.Assignment.Namespace)
+	}
+}
+
+func TestMemoryRunnerDirectoryListRunners(t *testing.T) {
+	d := NewMemoryRunnerDirectory()
+	ctx := context.Background()
+
+	ids, err := d.ListRunners(ctx)
+	if err != nil {
+		t.Fatalf("ListRunners on an empty directory: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("ListRunners on an empty directory = %v, want empty", ids)
+	}
+
+	for _, id := range []string{"runner-a", "runner-b"} {
+		if _, err := d.Register(ctx, RegisterRunnerRequest{
+			RunnerID:     id,
+			Capacity:     1,
+			Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+		}); err != nil {
+			t.Fatalf("Register(%s): %v", id, err)
+		}
+	}
+
+	ids, err = d.ListRunners(ctx)
+	if err != nil {
+		t.Fatalf("ListRunners: %v", err)
+	}
+	sort.Strings(ids)
+	if !reflect.DeepEqual(ids, []string{"runner-a", "runner-b"}) {
+		t.Fatalf("ListRunners = %v, want [runner-a runner-b]", ids)
 	}
 }

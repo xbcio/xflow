@@ -45,6 +45,8 @@ type runnerConfig struct {
 	namespaces        []namespace.Namespace
 	heartbeatInterval string
 	pollWait          string
+	// autoLabels adds environment-derived xflow.io/* labels to the manual set.
+	autoLabels bool
 	// token is the runner's bearer token (matched against the server's
 	// runners.yaml policy). Empty means "no auth", which the server accepts
 	// only when running with --auth-mode disabled or dry-run.
@@ -54,6 +56,23 @@ type runnerConfig struct {
 	tlsServerCA   string
 	tlsClientCert string
 	tlsClientKey  string
+	// identityStoreKind / identityFile select where this runner keeps the
+	// identity it was issued at enrollment. "ephemeral" (the default) keeps it
+	// in memory only, which is byte-identical to the pre-enrollment behavior:
+	// nothing is written to disk unless asked.
+	identityStoreKind string
+	identityFile      string
+	// registrationCode bootstraps enrollment when no identity is stored yet.
+	// Never logged.
+	registrationCode string
+	// allowPlaintext opts out of the transport-security gate. Without it a
+	// runner whose control-plane connection carries no TLS material at all
+	// refuses to start, because its bearer token would cross the wire in the
+	// clear.
+	allowPlaintext bool
+	// requireSupplyEncryption refuses to keep running if the control plane
+	// issued no supply encryption key at registration.
+	requireSupplyEncryption bool
 	// tracing
 	traceMode     string
 	traceEndpoint string
@@ -99,7 +118,7 @@ func newRunCommand(opts commandOptions, cfg *runnerConfig) *cobra.Command {
 }
 
 func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
-	cmd.Flags().StringVar(&cfg.serverURL, "server", cfg.serverURL, "xflow-server base URL (http transport)")
+	cmd.Flags().StringVar(&cfg.serverURL, "server", cfg.serverURL, "xflow-server base URL; carries task traffic under --transport=http, and always carries enrollment even under --transport=grpc")
 	cmd.Flags().StringVar(&cfg.transport, "transport", cfg.transport, "Runner Protocol transport: http or grpc")
 	cmd.Flags().StringVar(&cfg.grpcTarget, "grpc-target", cfg.grpcTarget, "xflow-server gRPC target host:port (grpc transport)")
 	cmd.Flags().StringVar(&cfg.runnerID, "id", cfg.runnerID, "Runner ID")
@@ -107,12 +126,18 @@ func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
 	cmd.Flags().StringVar(&cfg.capRaw, "cap", cfg.capRaw, "Comma-separated node type capabilities")
 	cmd.Flags().StringArrayVar(&cfg.labelRaw, "label", cfg.labelRaw, "Runner label as key=value; repeatable")
 	cmd.Flags().StringArrayVar(&cfg.namespaceRaw, "namespace", cfg.namespaceRaw, "Namespace this runner serves; repeatable (default: default)")
+	cmd.Flags().BoolVar(&cfg.autoLabels, "auto-labels", cfg.autoLabels, "Add environment-derived xflow.io/* labels (os, arch, env, hostname)")
 	cmd.Flags().StringVar(&cfg.heartbeatInterval, "heartbeat-interval", cfg.heartbeatInterval, "Heartbeat interval")
 	cmd.Flags().StringVar(&cfg.pollWait, "poll-wait", cfg.pollWait, "Poll wait duration when no task is available")
 	cmd.Flags().StringVar(&cfg.token, "token", cfg.token, "Runner bearer token (prefer XFLOW_RUNNER_TOKEN env)")
 	cmd.Flags().StringVar(&cfg.tlsServerCA, "tls-server-ca", cfg.tlsServerCA, "Path to server CA bundle (enables TLS)")
 	cmd.Flags().StringVar(&cfg.tlsClientCert, "tls-client-cert", cfg.tlsClientCert, "Path to client TLS certificate (enables mTLS)")
 	cmd.Flags().StringVar(&cfg.tlsClientKey, "tls-client-key", cfg.tlsClientKey, "Path to client TLS private key")
+	cmd.Flags().StringVar(&cfg.identityStoreKind, "identity-store", cfg.identityStoreKind, "Where to keep the enrolled identity: ephemeral or file")
+	cmd.Flags().StringVar(&cfg.identityFile, "identity-file", cfg.identityFile, "Path to the identity file (--identity-store=file)")
+	cmd.Flags().StringVar(&cfg.registrationCode, "registration-code", cfg.registrationCode, "One-time code used to enroll when no identity is stored; enrollment dials --server over HTTP regardless of --transport (prefer XFLOW_RUNNER_REGISTRATION_CODE)")
+	cmd.Flags().BoolVar(&cfg.allowPlaintext, "allow-plaintext", cfg.allowPlaintext, "Permit an unencrypted control-plane connection (no TLS material configured)")
+	cmd.Flags().BoolVar(&cfg.requireSupplyEncryption, "require-supply-encryption", cfg.requireSupplyEncryption, "Exit if the control plane issues no supply encryption key at registration")
 	cmd.Flags().StringVar(&cfg.traceMode, "trace", "disabled", "Tracing mode: disabled|stdout|otlp")
 	cmd.Flags().StringVar(&cfg.traceEndpoint, "trace-endpoint", "localhost:4317", "OTLP collector gRPC endpoint (--trace=otlp)")
 	cmd.Flags().BoolVar(&cfg.traceInsecure, "trace-insecure", false, "Disable TLS verification for OTLP connection")
@@ -171,6 +196,17 @@ var newRunnerService = func(cfg xflowsdk.RunnerConfig, opts ...xflowsdk.RunnerOp
 // deliberately leaves to its host: the tracer provider's lifecycle and the
 // local scrape listener.
 func runRunner(ctx context.Context, cfg runnerConfig) error {
+	// Identity is settled before anything else: it rewrites cfg.runnerID and
+	// cfg.token, and every client built below reads them.
+	store, err := newIdentityStore(cfg)
+	if err != nil {
+		return err
+	}
+	cfg, err = resolveRunnerIdentity(ctx, cfg, store)
+	if err != nil {
+		return err
+	}
+
 	sdkCfg, err := toSDKRunnerConfig(cfg)
 	if err != nil {
 		return err
@@ -202,11 +238,17 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 	// cross-domain runner — the one case that cannot be scraped — the one case
 	// that also cannot report.
 	m := metrics.New()
+	lifecycle := newLifecycleState()
+	lifecycle.requireSupplyEncryption = cfg.requireSupplyEncryption
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	lifecycle.SetOnFatal(func(error) { cancelRun() })
 
 	runner, err := newRunnerService(sdkCfg,
 		xflowsdk.WithRunnerTracer(tracer),
 		xflowsdk.WithRunnerMetrics(m),
-		xflowsdk.WithRunnerLogger(slog.Default()))
+		xflowsdk.WithRunnerLogger(slog.Default()),
+		xflowsdk.WithRunnerLifecycleObserver(lifecycle))
 	if err != nil {
 		return err
 	}
@@ -222,7 +264,14 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 	}
 
 	if cfg.metricsAddr != "" {
-		metricsServer := &http.Server{Addr: cfg.metricsAddr, Handler: m.Handler()}
+		// One listener for all three: an operator who exposed the scrape port
+		// has exposed the probes, and a second port is one more thing to get
+		// wrong in a NetworkPolicy. Probes are therefore unavailable when
+		// --metrics-addr is empty — documented, not silent.
+		probeMux := http.NewServeMux()
+		probeMux.Handle("GET /metrics", m.Handler())
+		registerLifecycleProbes(probeMux, lifecycle)
+		metricsServer := &http.Server{Addr: cfg.metricsAddr, Handler: probeMux}
 		go func() {
 			if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				slog.Error("metrics server failed", "error", err)
@@ -236,7 +285,17 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 		}()
 	}
 
-	return runner.Run(ctx)
+	err = runner.Run(runCtx)
+	// A fatal startup condition cancels runCtx; Run's reconnect loop treats a
+	// cancelled context as a clean stop, so it returns nil here regardless of
+	// what actually went wrong (sdk/xflow/runner.go's runWithReconnect has
+	// three exits and all three return nil). err therefore carries none of
+	// the reason, which is why lifecycle.Fatal() is not redundant with it and
+	// must win.
+	if fatal := lifecycle.Fatal(); fatal != nil {
+		return fatal
+	}
+	return err
 }
 
 // toSDKRunnerConfig converts the resolved CLI/YAML config into the SDK's shape.

@@ -131,5 +131,5 @@ resource_pool:
 	})
 	defer restore()
 
-	runCommand(t, "run", "--config", path)
+	runCommand(t, "run", "--config", path, "--allow-plaintext")
 }

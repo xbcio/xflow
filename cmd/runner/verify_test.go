@@ -61,6 +61,7 @@ func TestVerifyCommandRegistersAndHeartbeats(t *testing.T) {
 		"--concurrency", "2",
 		"--cap", "xflow.function,xflow.http",
 		"--label", "mode=remote",
+		"--allow-plaintext",
 	})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)

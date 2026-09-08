@@ -89,7 +89,7 @@ poll:
 	})
 	defer restore()
 
-	runCommand(t, "run", "--config", path, "--heartbeat-interval", "11s", "--poll-wait", "4s")
+	runCommand(t, "run", "--config", path, "--heartbeat-interval", "11s", "--poll-wait", "4s", "--allow-plaintext")
 }
 
 // --cap is the only way an operator names the node types this runner claims,
@@ -114,7 +114,7 @@ func TestRunCommandPropagatesCapabilitiesToTheSDK(t *testing.T) {
 	})
 	defer restore()
 
-	runCommand(t, "run", "--server", "http://server:8080", "--cap", "xflow.map,xflow.function")
+	runCommand(t, "run", "--server", "http://server:8080", "--cap", "xflow.map,xflow.function", "--allow-plaintext")
 }
 
 // Labels are what a node-level RunnerSelector matches against, so a runner that
@@ -128,7 +128,7 @@ func TestRunCommandPropagatesLabelsToTheSDK(t *testing.T) {
 	})
 	defer restore()
 
-	runCommand(t, "run", "--server", "http://server:8080", "--label", "env=test", "--label", "app=sas")
+	runCommand(t, "run", "--server", "http://server:8080", "--label", "env=test", "--label", "app=sas", "--allow-plaintext")
 }
 
 // The transport fields decide which protocol client the SDK builds; sending the
@@ -144,7 +144,7 @@ func TestRunCommandPropagatesTransportToTheSDK(t *testing.T) {
 	defer restore()
 
 	runCommand(t, "run", "--server", "http://server:8080",
-		"--transport", "grpc", "--grpc-target", "server:9090")
+		"--transport", "grpc", "--grpc-target", "server:9090", "--allow-plaintext")
 }
 
 // resolveRunnerConfig re-loads the config from disk and then copies each changed
@@ -177,7 +177,7 @@ func TestRunCommandPropagatesTLSAndTokenFlagsToTheSDK(t *testing.T) {
 	})
 	defer restore()
 
-	runCommand(t, "run", "--server", "http://server:8080",
+	runCommand(t, "run", "--server", "https://server:8080",
 		"--tls-server-ca", "/etc/xflow/ca.pem",
 		"--tls-client-cert", "/etc/xflow/client.pem",
 		"--tls-client-key", "/etc/xflow/client.key",
@@ -198,7 +198,7 @@ func TestRunCommandTLSFlagBeatsTheEnvironment(t *testing.T) {
 	})
 	defer restore()
 
-	runCommand(t, "run", "--server", "http://server:8080", "--tls-server-ca", "/from/flag.pem")
+	runCommand(t, "run", "--server", "https://server:8080", "--tls-server-ca", "/from/flag.pem")
 }
 
 // And with no flag the environment still applies.
@@ -213,7 +213,7 @@ func TestRunCommandTLSEnvAppliesWithoutAFlag(t *testing.T) {
 	})
 	defer restore()
 
-	runCommand(t, "run", "--server", "http://server:8080")
+	runCommand(t, "run", "--server", "https://server:8080")
 }
 
 // XFLOW_ARTIFACT_CACHE_DIR is the operator's only control over where fetched
@@ -231,7 +231,7 @@ func TestRunCommandPropagatesTheArtifactCacheDirToTheSDK(t *testing.T) {
 	})
 	defer restore()
 
-	runCommand(t, "run", "--server", "http://server:8080")
+	runCommand(t, "run", "--server", "http://server:8080", "--allow-plaintext")
 }
 
 // XFLOW_ARTIFACT_CACHE_MAX_BYTES is the operator's only control over
@@ -252,7 +252,7 @@ func TestRunCommandPropagatesTheArtifactCacheMaxBytesToTheSDK(t *testing.T) {
 	})
 	defer restore()
 
-	runCommand(t, "run", "--server", "http://server:8080")
+	runCommand(t, "run", "--server", "http://server:8080", "--allow-plaintext")
 }
 
 // A malformed XFLOW_ARTIFACT_CACHE_MAX_BYTES must not take the runner down
@@ -271,7 +271,7 @@ func TestRunCommandToleratesMalformedArtifactCacheMaxBytes(t *testing.T) {
 	})
 	defer restore()
 
-	runCommand(t, "run", "--server", "http://server:8080")
+	runCommand(t, "run", "--server", "http://server:8080", "--allow-plaintext")
 }
 
 // A negative XFLOW_ARTIFACT_CACHE_MAX_BYTES is NOT a malformed value: unlike
@@ -296,7 +296,7 @@ func TestRunCommandPropagatesNegativeArtifactCacheMaxBytesToTheSDK(t *testing.T)
 	})
 	defer restore()
 
-	runCommand(t, "run", "--server", "http://server:8080")
+	runCommand(t, "run", "--server", "http://server:8080", "--allow-plaintext")
 }
 
 // An XFLOW_ARTIFACT_CACHE_MAX_BYTES value outside int64's range IS a parse
@@ -315,7 +315,7 @@ func TestRunCommandToleratesOverflowingArtifactCacheMaxBytes(t *testing.T) {
 	})
 	defer restore()
 
-	runCommand(t, "run", "--server", "http://server:8080")
+	runCommand(t, "run", "--server", "http://server:8080", "--allow-plaintext")
 }
 
 // --metrics-addr never reaches xflowsdk.RunnerConfig — runRunner opens the
@@ -342,7 +342,7 @@ func TestRunCommandPropagatesMetricsAddrFlag(t *testing.T) {
 		out: &bytes.Buffer{},
 		err: &bytes.Buffer{},
 	})
-	cmd.SetArgs([]string{"run", "--server", "http://server:8080", "--metrics-addr", ":9099"})
+	cmd.SetArgs([]string{"run", "--server", "http://server:8080", "--metrics-addr", ":9099", "--allow-plaintext"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}
