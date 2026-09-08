@@ -788,8 +788,18 @@ paths:
         returned exactly once, in this response; it is never recoverable
         afterwards, including from the list endpoint below.
 
-        Platform-level global operation: not scoped to the caller's
-        namespace. Grant this scope only to platform administrators.
+        Requires the `management.registration_code.create` scope.
+
+        The code's `allowed_namespaces` may never exceed the caller's own
+        namespace grant: a request naming `*`, or naming any namespace other
+        than the caller's, is rejected with 403 `namespace_forbidden`.
+        Omitting `allowed_namespaces` stores the caller's own namespace
+        explicitly — it is not left empty, because an empty set means "the
+        default namespace" to the enrollment path.
+
+        A principal that additionally holds
+        `management.registration_code.create_global` is a platform operator
+        and is exempt from the ceiling; it may mint `*`.
       tags: [Management]
       parameters:
         - $ref: "#/components/parameters/XRequestId"
@@ -824,9 +834,12 @@ paths:
         hash is ever included — only the id, scope, revocation status, and
         creation time.
 
-        Platform-level global operation: returns ALL registration codes
-        across every namespace, not scoped to the caller's namespace. Grant
-        this scope only to platform administrators.
+        Requires the `management.registration_code.list` scope. By default
+        the caller sees only registration codes owned by its own namespace.
+        A principal that additionally holds
+        `management.registration_code.list_global` is a platform operator
+        and sees every registration code across every namespace, including
+        codes minted before per-namespace ownership existed.
       tags: [Management]
       parameters:
         - $ref: "#/components/parameters/XRequestId"
@@ -860,10 +873,14 @@ paths:
         revoking a code does not revoke identities minted from it. Revoking
         an unknown id is a 404, not a silent success.
 
-        Platform-level global operation: not scoped to the caller's
-        namespace — any registration code id may be revoked regardless of
-        which namespace(s) it grants. Grant this scope only to platform
-        administrators.
+        Requires the `management.registration_code.revoke` scope. By default
+        the caller may only revoke a code owned by its own namespace;
+        revoking an id owned by another namespace is a 404, indistinguishable
+        from an unknown id. A principal that additionally holds
+        `management.registration_code.revoke_global` is a platform operator
+        and may revoke any registration code id regardless of which
+        namespace(s) it grants, including codes minted before per-namespace
+        ownership existed.
       tags: [Management]
       parameters:
         - $ref: "#/components/parameters/RegistrationCodeId"
@@ -899,8 +916,14 @@ paths:
         Returns every enroll attempt (successful or failed) recorded against
         this registration code id, oldest first.
 
-        Platform-level global operation: not scoped to the caller's
-        namespace. Grant this scope only to platform administrators.
+        Requires the `management.registration_code.audit` scope. By default
+        the caller may only read the audit trail for a code owned by its own
+        namespace; requesting the audit for an id owned by another namespace
+        is a 404, indistinguishable from an unknown id. A principal that
+        additionally holds `management.registration_code.audit_global` is a
+        platform operator and may read the audit trail for any registration
+        code id, including codes minted before per-namespace ownership
+        existed.
       tags: [Management]
       parameters:
         - $ref: "#/components/parameters/RegistrationCodeId"

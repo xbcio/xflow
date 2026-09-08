@@ -98,6 +98,38 @@ func newRegistrationCodeTestServerNoAuth(t *testing.T) *registrationCodeTestServ
 	return &registrationCodeTestServer{srv: httptest.NewServer(mux), codes: codes}
 }
 
+// newGlobalRegistrationCodeTestServer builds the same module as
+// newRegistrationCodeTestServer, but the principal additionally holds all
+// four `_global` scopes. _global is additive, not an alternative
+// route-admission scope (authz.go's ScopeRegistrationCodeCreateGlobal
+// comment): the base scope is still required to reach the handler at all, so
+// both the base and the _global scopes must be present.
+func newGlobalRegistrationCodeTestServer(t *testing.T) *registrationCodeTestServer {
+	t.Helper()
+	codes := control.NewMemoryRegistrationCodeStore()
+	m := newManagementModule(fakeControlPlaneForAuthz(t))
+	m.codes = codes
+	m.principalAuth = staticPrincipalAuth{principal: Principal{
+		Subject:   "platform-op",
+		Namespace: "namespaceA",
+		Scopes: []string{
+			"management.registration_code.create",
+			"management.registration_code.list",
+			"management.registration_code.revoke",
+			"management.registration_code.audit",
+			"management.registration_code.create_global",
+			"management.registration_code.list_global",
+			"management.registration_code.revoke_global",
+			"management.registration_code.audit_global",
+		},
+	}}
+	m.authorizer = ScopeAuthorizer{}
+	m.audit = NewInMemoryAuditSink()
+	mux := http.NewServeMux()
+	m.RegisterHTTP(mux)
+	return &registrationCodeTestServer{srv: httptest.NewServer(mux), codes: codes}
+}
+
 // doJSON sends method/path (optionally with a JSON body), asserts the response
 // status is wantStatus, and returns the raw response body.
 func (h *registrationCodeTestServer) doJSON(t *testing.T, method, path, body string, wantStatus int) string {
@@ -154,7 +186,7 @@ func TestCreateRegistrationCodeReturnsPlaintextExactlyOnce(t *testing.T) {
 	defer h.srv.Close()
 
 	body := h.doJSON(t, http.MethodPost, PathManagementRegistrationCodes,
-		`{"allowed_namespaces":["sas"],"allowed_node_types":["kafka.trigger"]}`, http.StatusOK)
+		`{"allowed_namespaces":["namespaceA"],"allowed_node_types":["kafka.trigger"]}`, http.StatusOK)
 
 	var created struct {
 		Data struct {
@@ -189,7 +221,7 @@ func TestRevokeRegistrationCode(t *testing.T) {
 	h := newRegistrationCodeTestServer(t)
 	defer h.srv.Close()
 
-	body := h.doJSON(t, http.MethodPost, PathManagementRegistrationCodes, `{"allowed_namespaces":["sas"]}`, http.StatusOK)
+	body := h.doJSON(t, http.MethodPost, PathManagementRegistrationCodes, `{"allowed_namespaces":["namespaceA"]}`, http.StatusOK)
 	var created struct {
 		Data struct {
 			ID string `json:"id"`
@@ -213,7 +245,7 @@ func TestRegistrationCodeAuditIsReadable(t *testing.T) {
 	h := newRegistrationCodeTestServer(t)
 	defer h.srv.Close()
 
-	body := h.doJSON(t, http.MethodPost, PathManagementRegistrationCodes, `{"allowed_namespaces":["sas"]}`, http.StatusOK)
+	body := h.doJSON(t, http.MethodPost, PathManagementRegistrationCodes, `{"allowed_namespaces":["namespaceA"]}`, http.StatusOK)
 	var created struct {
 		Data struct {
 			ID   string `json:"id"`
@@ -572,28 +604,8 @@ func TestResolveRequestedNamespacesRejectsWildcardPrincipalNamespaceGlobal(t *te
 // omission must be a 400 bad_request naming what is missing, never a 200 that
 // stores an empty (default-namespace-only) grant.
 func TestCreateRegistrationCodeGlobalRejectsEmptyNamespaces(t *testing.T) {
-	codes := control.NewMemoryRegistrationCodeStore()
-	m := newManagementModule(fakeControlPlaneForAuthz(t))
-	m.codes = codes
-	m.principalAuth = staticPrincipalAuth{principal: Principal{
-		Subject:   "platform-op",
-		Namespace: "namespaceA",
-		// _global is additive, not an alternative route-admission scope
-		// (authz.go's ScopeRegistrationCodeCreateGlobal comment): the base
-		// scope is still required to reach the handler at all.
-		Scopes: []string{
-			"management.registration_code.create",
-			"management.registration_code.create_global",
-		},
-	}}
-	m.authorizer = ScopeAuthorizer{}
-	m.audit = NewInMemoryAuditSink()
-	mux := http.NewServeMux()
-	m.RegisterHTTP(mux)
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	h := &registrationCodeTestServer{srv: srv, codes: codes}
+	h := newGlobalRegistrationCodeTestServer(t)
+	defer h.srv.Close()
 	body := h.doJSON(t, http.MethodPost, PathManagementRegistrationCodes, `{}`, http.StatusBadRequest)
 
 	var env struct {
@@ -606,7 +618,7 @@ func TestCreateRegistrationCodeGlobalRejectsEmptyNamespaces(t *testing.T) {
 		t.Fatalf("code = %q, want bad_request; body = %q", env.Code, body)
 	}
 
-	list, err := codes.List(context.Background(), control.OwnerScope{All: true})
+	list, err := h.codes.List(context.Background(), control.OwnerScope{All: true})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
