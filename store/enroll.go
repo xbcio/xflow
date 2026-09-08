@@ -97,8 +97,10 @@ var ErrOwnerScopeUnset = errors.New("store: owner scope not set")
 //
 // All is reserved for platform operators holding a *_global scope. Namespace
 // is the tenant case: it matches rows whose OwnerNamespace equals it, and
-// nothing else — in particular it does NOT match the platform-owned rows whose
-// OwnerNamespace is "".
+// nothing else — in particular it does NOT match the legacy rows whose
+// OwnerNamespace is "", written before that field existed. See the
+// OwnerNamespace field doc below: "" is not "platform-owned", it is "unknown",
+// and only All: true can read it.
 type OwnerScope struct {
 	// All grants visibility over every row regardless of OwnerNamespace.
 	All bool

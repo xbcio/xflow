@@ -152,7 +152,7 @@ func RunRegistrationCodeStoreContract(t *testing.T, factory func(t *testing.T) s
 		mk("code-legacy", "")
 
 		// A tenant scope sees exactly its own row — not the other tenant's, and
-		// not the legacy platform-owned row.
+		// not the legacy row whose OwnerNamespace predates the column.
 		got, err := s.List(ctx, store.OwnerScope{Namespace: "nsA"})
 		if err != nil {
 			t.Fatalf("list nsA: %v", err)
