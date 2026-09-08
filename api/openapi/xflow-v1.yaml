@@ -799,7 +799,12 @@ paths:
 
         A principal that additionally holds
         `management.registration_code.create_global` is a platform operator
-        and is exempt from the ceiling; it may mint `*`.
+        and is exempt from the ceiling; it may mint `*`. The omission rule
+        above does NOT extend to it: a global creator that omits
+        `allowed_namespaces` is rejected with 400 `bad_request`, because it
+        has no namespace-of-its-own reading to fall back to and defaulting
+        the omission to `*` would be the implicit maximal grant this ceiling
+        exists to eliminate.
       tags: [Management]
       parameters:
         - $ref: "#/components/parameters/XRequestId"
