@@ -109,6 +109,7 @@ func startSubgraphRunner(t *testing.T, runnerBin, httpURL, id, caps string) *r8P
 		"--server", httpURL,
 		"--transport", "http",
 		"--id", id,
+		"--token", r8RunnerToken,
 		"--cap", caps,
 		"--poll-wait", "50ms",
 		"--concurrency", "2",

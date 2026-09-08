@@ -163,6 +163,61 @@ func r8MasterKeyFile(t *testing.T) string {
 	return path
 }
 
+// r8RunnerToken is the bearer token every e2e runner presents to the server's
+// runner protocol. Fixed rather than random so a failing run is reproducible;
+// it authorizes nothing beyond the throwaway server the test just started.
+//
+// Note this is NOT the same credential as writeR8TokensFile's: that one is API
+// auth (--auth-tokens-file, for callers of the HTTP API), this one is
+// runner-protocol auth (--auth-policy, for processes claiming work). Production
+// mode requires both, and conflating them is what left these tests red.
+const r8RunnerToken = "r8-e2e-runner-token"
+
+// r8RunnerPolicyFile writes the runners.yaml that --auth-policy loads.
+//
+// Production mode is unsatisfiable without it: apiserver's gate accepts either
+// control.IsConfigured(Auth) or an enrollment declaration, and a server started
+// with neither refuses to boot with "runner-auth ... set: --auth-policy or
+// --enroll". Enrollment is the heavier of the two — it would make every e2e
+// mint a registration code before it could start a runner — so these tests take
+// the policy path and hand each runner a static token.
+//
+// id_prefix is a strings.HasPrefix match and cannot be empty, so every prefix
+// the e2e runners use needs an entry. An e2e that introduces a new prefix and
+// forgets to add it here fails at runner registration with an ID-prefix denial,
+// NOT at server startup — the server comes up fine and the runner never claims
+// work, which reads like a dispatch bug.
+//
+// allowed_node_types is "*" because the caps vary per test and none of them is
+// what these tests are about. allowed_namespaces is left empty, which the
+// policy layer defines as "the default namespace only" — exactly what the
+// submitter token is bound to.
+func r8RunnerPolicyFile(t *testing.T) string {
+	t.Helper()
+	const policy = `version: 1
+runners:
+  - name: r8-e2e
+    id_prefix: "r8-"
+    token: "` + r8RunnerToken + `"
+    allowed_node_types: ["*"]
+  - name: metrics-e2e
+    id_prefix: "runner-"
+    token: "` + r8RunnerToken + `"
+    allowed_node_types: ["*"]
+  - name: subgraph-e2e
+    id_prefix: "sg-"
+    token: "` + r8RunnerToken + `"
+    allowed_node_types: ["*"]
+`
+	path := filepath.Join(t.TempDir(), "runners.yaml")
+	// 0600: the store refuses to load a world/group-readable policy file
+	// because it may hold plaintext tokens.
+	if err := os.WriteFile(path, []byte(policy), 0o600); err != nil {
+		t.Fatalf("write runner policy file: %v", err)
+	}
+	return path
+}
+
 // startR8Server builds and starts the production server binary, polling
 // /readyz until it is ready (or fails fast). Returns the HTTP base URL, a
 // captured output buffer, and a stop function.
@@ -174,6 +229,7 @@ func startR8Server(t *testing.T, serverBin, addr, redisAddr, dsn, tokensFile str
 		"-redis", redisAddr,
 		"-mysql-dsn", dsn,
 		"-auth-tokens-file", tokensFile,
+		"-auth-policy", r8RunnerPolicyFile(t),
 		"-master-key-file", r8MasterKeyFile(t),
 		"-require-api-auth",
 		"-management",
@@ -228,10 +284,15 @@ type r8Process struct {
 	out *safeBuffer
 }
 
-// startR8Runner starts the production runner binary against the server. The
-// runner-protocol auth on the server is DisabledAuthenticator (no -auth-policy),
-// so no -token is needed; the runner serves the default namespace, matching the
-// submitter token's namespace binding.
+// startR8Runner starts the production runner binary against the server. It
+// presents r8RunnerToken, which the --auth-policy the server loaded binds to the
+// "r8-" id prefix and the default namespace — matching the submitter token's
+// namespace binding.
+//
+// This used to say runner-protocol auth was DisabledAuthenticator and no token
+// was needed. That stopped being true when production mode began requiring an
+// explicit runner-auth posture; the comment outlived the premise and the test
+// went red at server startup, not here.
 func startR8Runner(t *testing.T, runnerBin, httpURL, id string) *r8Process {
 	t.Helper()
 	out := &safeBuffer{}
@@ -239,6 +300,7 @@ func startR8Runner(t *testing.T, runnerBin, httpURL, id string) *r8Process {
 		"--server", httpURL,
 		"--transport", "http",
 		"--id", id,
+		"--token", r8RunnerToken,
 		"--cap", "xflow.function,xflow.http,xflow.script",
 		"--poll-wait", "50ms",
 		"--concurrency", "1",
