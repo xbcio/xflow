@@ -180,6 +180,13 @@ CREATE TABLE IF NOT EXISTS xflow_audit_events (
     -- pending scan index "admitted but no outcome" efficiently and makes the
     -- append-only one-row-per-phase contract explicit.
     phase            VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL DEFAULT '' COMMENT '事件阶段 admission/outcome/receipt',
+    -- Resource version number (the revision supply wrote); never the content
+    -- itself. Also back-filled onto pre-existing tables by the guarded
+    -- ALTER below (xflow_add_audit_revision_column) — that guard stays for
+    -- upgraded deployments; this literal column is what a fresh CREATE TABLE
+    -- gets immediately, keeping it visible to the schema-pairing test's
+    -- CREATE-TABLE-body parser instead of only appearing after a later ALTER.
+    revision         BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '资源版本号（supply 写入后的 revision）；绝不记内容',
     -- Application-owned nullable idempotency key. Historical rows remain
     -- NULL; only newly written eligible outcome rows receive a key.
     phase_key        VARCHAR(320) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NULL DEFAULT NULL COMMENT '应用写入的 outcome 幂等键；历史行可为 NULL',
