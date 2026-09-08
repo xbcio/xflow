@@ -809,7 +809,9 @@ func (m *managementModule) handleListRegistrationCodes(w http.ResponseWriter, r 
 		registrationCodeUnavailable(w, r)
 		return
 	}
-	list, err := m.codes.List(r.Context())
+	// TODO(Task 2): narrow to the caller's principal. All:true here keeps the
+	// pre-change behavior exactly while Task 1 lands the store contract.
+	list, err := m.codes.List(r.Context(), control.OwnerScope{All: true})
 	if err != nil {
 		// store.ErrEnrollScopeCorrupted (a scope column that failed to decode)
 		// or any other store failure must not reach the caller as err.Error() —
@@ -845,7 +847,9 @@ func (m *managementModule) handleRevokeRegistrationCode(w http.ResponseWriter, r
 		writeFail(w, r, http.StatusNotFound, "registration_code_not_found", "registration code not found")
 		return
 	}
-	err := m.codes.Revoke(r.Context(), id)
+	// TODO(Task 2): narrow to the caller's principal. All:true here keeps the
+	// pre-change behavior exactly while Task 1 lands the store contract.
+	err := m.codes.Revoke(r.Context(), id, control.OwnerScope{All: true})
 	if errors.Is(err, control.ErrRegistrationCodeNotFound) {
 		writeFail(w, r, http.StatusNotFound, "registration_code_not_found", "registration code not found")
 		return
@@ -867,7 +871,9 @@ func (m *managementModule) handleRegistrationCodeAudit(w http.ResponseWriter, r 
 		writeFail(w, r, http.StatusNotFound, "registration_code_not_found", "registration code not found")
 		return
 	}
-	records, err := m.codes.EnrollAudit(r.Context(), id)
+	// TODO(Task 2): narrow to the caller's principal. All:true here keeps the
+	// pre-change behavior exactly while Task 1 lands the store contract.
+	records, err := m.codes.EnrollAudit(r.Context(), id, control.OwnerScope{All: true})
 	if err != nil {
 		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 		return

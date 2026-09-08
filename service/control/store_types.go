@@ -18,6 +18,7 @@ type (
 	RegistrationCodeStore = store.RegistrationCodeStore
 	IssuedIdentityStore   = store.IssuedIdentityStore
 	RunnerPolicy          = store.RunnerPolicy
+	OwnerScope            = store.OwnerScope
 )
 
 var (

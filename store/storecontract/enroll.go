@@ -13,6 +13,7 @@ package storecontract
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -78,13 +79,13 @@ func RunRegistrationCodeStoreContract(t *testing.T, factory func(t *testing.T) s
 	t.Run("revoked code", func(t *testing.T) {
 		st := factory(t)
 		id, plaintext := mk(t, st, []string{"sas"})
-		if err := st.Revoke(ctx, id); err != nil {
+		if err := st.Revoke(ctx, id, store.OwnerScope{All: true}); err != nil {
 			t.Fatalf("Revoke: %v", err)
 		}
 		if _, err := st.ResolveByPlaintext(ctx, plaintext); err != store.ErrRegistrationCodeRevoked {
 			t.Fatalf("err = %v, want ErrRegistrationCodeRevoked", err)
 		}
-		if err := st.Revoke(ctx, "no-such-id"); err != store.ErrRegistrationCodeNotFound {
+		if err := st.Revoke(ctx, "no-such-id", store.OwnerScope{All: true}); err != store.ErrRegistrationCodeNotFound {
 			t.Fatalf("Revoke(missing) = %v, want ErrRegistrationCodeNotFound", err)
 		}
 	})
@@ -92,7 +93,7 @@ func RunRegistrationCodeStoreContract(t *testing.T, factory func(t *testing.T) s
 	t.Run("list never exposes plaintext", func(t *testing.T) {
 		st := factory(t)
 		_, plaintext := mk(t, st, []string{"sas"})
-		list, err := st.List(ctx)
+		list, err := st.List(ctx, store.OwnerScope{All: true})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -117,7 +118,7 @@ func RunRegistrationCodeStoreContract(t *testing.T, factory func(t *testing.T) s
 				t.Fatalf("AppendEnrollAudit: %v", err)
 			}
 		}
-		got, err := st.EnrollAudit(ctx, id)
+		got, err := st.EnrollAudit(ctx, id, store.OwnerScope{All: true})
 		if err != nil {
 			t.Fatalf("EnrollAudit: %v", err)
 		}
@@ -131,6 +132,85 @@ func RunRegistrationCodeStoreContract(t *testing.T, factory func(t *testing.T) s
 			t.Fatalf("success record did not round-trip: %+v", got[1])
 		}
 	})
+
+	t.Run("owner scope isolates namespaces", func(t *testing.T) {
+		s := factory(t)
+		ctx := context.Background()
+		mk := func(id, owner string) {
+			t.Helper()
+			if err := s.Create(ctx, store.RegistrationCode{
+				ID:             id,
+				CodeHash:       store.HashSecret("plaintext-" + id),
+				OwnerNamespace: owner,
+				CreatedAt:      time.Now().UTC(),
+			}); err != nil {
+				t.Fatalf("create %s: %v", id, err)
+			}
+		}
+		mk("code-a", "nsA")
+		mk("code-b", "nsB")
+		mk("code-legacy", "")
+
+		// A tenant scope sees exactly its own row — not the other tenant's, and
+		// not the legacy platform-owned row.
+		got, err := s.List(ctx, store.OwnerScope{Namespace: "nsA"})
+		if err != nil {
+			t.Fatalf("list nsA: %v", err)
+		}
+		if len(got) != 1 || got[0].ID != "code-a" {
+			t.Fatalf("nsA list = %v, want exactly [code-a]", ids(got))
+		}
+
+		// The platform scope sees all three, legacy row included.
+		all, err := s.List(ctx, store.OwnerScope{All: true})
+		if err != nil {
+			t.Fatalf("list all: %v", err)
+		}
+		if len(all) != 3 {
+			t.Fatalf("platform list = %v, want 3 rows", ids(all))
+		}
+
+		// Cross-namespace revoke is not-found, and is genuinely a no-op.
+		if err := s.Revoke(ctx, "code-b", store.OwnerScope{Namespace: "nsA"}); !errors.Is(err, store.ErrRegistrationCodeNotFound) {
+			t.Fatalf("cross-namespace revoke err = %v, want ErrRegistrationCodeNotFound", err)
+		}
+		after, err := s.List(ctx, store.OwnerScope{Namespace: "nsB"})
+		if err != nil {
+			t.Fatalf("list nsB: %v", err)
+		}
+		if len(after) != 1 || after[0].Revoked {
+			t.Fatalf("code-b revoked by a cross-namespace call: %+v", after)
+		}
+
+		// Cross-namespace audit is not-found, not an empty list.
+		if _, err := s.EnrollAudit(ctx, "code-b", store.OwnerScope{Namespace: "nsA"}); !errors.Is(err, store.ErrRegistrationCodeNotFound) {
+			t.Fatalf("cross-namespace audit err = %v, want ErrRegistrationCodeNotFound", err)
+		}
+
+		// The zero scope is a caller bug on every method, and fails closed.
+		if _, err := s.List(ctx, store.OwnerScope{}); !errors.Is(err, store.ErrOwnerScopeUnset) {
+			t.Fatalf("zero-scope list err = %v, want ErrOwnerScopeUnset", err)
+		}
+		if err := s.Revoke(ctx, "code-a", store.OwnerScope{}); !errors.Is(err, store.ErrOwnerScopeUnset) {
+			t.Fatalf("zero-scope revoke err = %v, want ErrOwnerScopeUnset", err)
+		}
+		if _, err := s.EnrollAudit(ctx, "code-a", store.OwnerScope{}); !errors.Is(err, store.ErrOwnerScopeUnset) {
+			t.Fatalf("zero-scope audit err = %v, want ErrOwnerScopeUnset", err)
+		}
+		// Both selectors set is equally a bug.
+		if _, err := s.List(ctx, store.OwnerScope{All: true, Namespace: "nsA"}); !errors.Is(err, store.ErrOwnerScopeUnset) {
+			t.Fatalf("over-specified scope err = %v, want ErrOwnerScopeUnset", err)
+		}
+	})
+}
+
+// ids extracts the ID field of each code, for compact test failure messages.
+func ids(codes []store.RegistrationCode) []string {
+	out := make([]string, 0, len(codes))
+	for _, c := range codes {
+		out = append(out, c.ID)
+	}
+	return out
 }
 
 // RunIssuedIdentityStoreContract holds both IssuedIdentityStore implementations

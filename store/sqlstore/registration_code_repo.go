@@ -65,6 +65,7 @@ func (r *registrationCodeRepo) Create(ctx context.Context, code store.Registrati
 		CodeHash:          code.CodeHash[:],
 		AllowedNamespaces: encodeList(code.AllowedNamespaces),
 		AllowedNodeTypes:  encodeList(code.AllowedNodeTypes),
+		OwnerNamespace:    code.OwnerNamespace,
 		Revoked:           code.Revoked,
 		CreatedAt:         code.CreatedAt,
 	}).Error
@@ -113,6 +114,7 @@ func rowToRegistrationCode(row dbRegistrationCode) (store.RegistrationCode, erro
 		ID:                row.ID,
 		AllowedNamespaces: namespaces,
 		AllowedNodeTypes:  nodeTypes,
+		OwnerNamespace:    row.OwnerNamespace,
 		Revoked:           row.Revoked,
 		CreatedAt:         row.CreatedAt,
 	}
@@ -120,9 +122,16 @@ func rowToRegistrationCode(row dbRegistrationCode) (store.RegistrationCode, erro
 	return code, nil
 }
 
-func (r *registrationCodeRepo) List(ctx context.Context) ([]store.RegistrationCode, error) {
+func (r *registrationCodeRepo) List(ctx context.Context, scope store.OwnerScope) ([]store.RegistrationCode, error) {
+	if err := scope.Validate(); err != nil {
+		return nil, err
+	}
+	q := r.db.WithContext(ctx).Model(&dbRegistrationCode{})
+	if !scope.All {
+		q = q.Where("owner_namespace = ?", scope.Namespace)
+	}
 	var rows []dbRegistrationCode
-	if err := r.db.WithContext(ctx).Order("created_at ASC, id ASC").Find(&rows).Error; err != nil {
+	if err := q.Order("created_at ASC, id ASC").Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := make([]store.RegistrationCode, 0, len(rows))
@@ -136,12 +145,22 @@ func (r *registrationCodeRepo) List(ctx context.Context) ([]store.RegistrationCo
 	return out, nil
 }
 
-func (r *registrationCodeRepo) Revoke(ctx context.Context, id string) error {
-	res := r.db.WithContext(ctx).Model(&dbRegistrationCode{}).
-		Where("id = ?", id).Update("revoked", true)
+func (r *registrationCodeRepo) Revoke(ctx context.Context, id string, scope store.OwnerScope) error {
+	if err := scope.Validate(); err != nil {
+		return err
+	}
+	q := r.db.WithContext(ctx).Model(&dbRegistrationCode{}).Where("id = ?", id)
+	if !scope.All {
+		q = q.Where("owner_namespace = ?", scope.Namespace)
+	}
+	res := q.Update("revoked", true)
 	if res.Error != nil {
 		return res.Error
 	}
+	// Zero rows covers three cases that must be indistinguishable from
+	// outside: no such id, an id owned by another namespace, and an id already
+	// revoked. Revoking twice being reported as not-found is the accepted cost
+	// of not building an existence oracle.
 	if res.RowsAffected == 0 {
 		return store.ErrRegistrationCodeNotFound
 	}
@@ -159,7 +178,21 @@ func (r *registrationCodeRepo) AppendEnrollAudit(ctx context.Context, rec store.
 	}).Error
 }
 
-func (r *registrationCodeRepo) EnrollAudit(ctx context.Context, codeID string) ([]store.EnrollAuditRecord, error) {
+func (r *registrationCodeRepo) EnrollAudit(ctx context.Context, codeID string, scope store.OwnerScope) ([]store.EnrollAuditRecord, error) {
+	if err := scope.Validate(); err != nil {
+		return nil, err
+	}
+	own := r.db.WithContext(ctx).Model(&dbRegistrationCode{}).Where("id = ?", codeID)
+	if !scope.All {
+		own = own.Where("owner_namespace = ?", scope.Namespace)
+	}
+	var n int64
+	if err := own.Count(&n).Error; err != nil {
+		return nil, err
+	}
+	if n == 0 {
+		return nil, store.ErrRegistrationCodeNotFound
+	}
 	var rows []dbEnrollAudit
 	if err := r.db.WithContext(ctx).Where("code_id = ?", codeID).Order("id ASC").Find(&rows).Error; err != nil {
 		return nil, err

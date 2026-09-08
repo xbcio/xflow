@@ -65,24 +65,40 @@ func (s *MemoryRegistrationCodeStore) ResolveByPlaintext(_ context.Context, plai
 	return found.Clone(), nil
 }
 
-func (s *MemoryRegistrationCodeStore) List(_ context.Context) ([]RegistrationCode, error) {
+func (s *MemoryRegistrationCodeStore) List(_ context.Context, scope OwnerScope) ([]RegistrationCode, error) {
+	if err := scope.Validate(); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make([]RegistrationCode, len(s.codes))
-	for i, c := range s.codes {
-		out[i] = c.Clone()
+	out := make([]RegistrationCode, 0, len(s.codes))
+	for _, c := range s.codes {
+		if !scope.Matches(c.OwnerNamespace) {
+			continue
+		}
+		out = append(out, c.Clone())
 	}
 	return out, nil
 }
 
-func (s *MemoryRegistrationCodeStore) Revoke(_ context.Context, id string) error {
+func (s *MemoryRegistrationCodeStore) Revoke(_ context.Context, id string, scope OwnerScope) error {
+	if err := scope.Validate(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i := range s.codes {
-		if s.codes[i].ID == id {
-			s.codes[i].Revoked = true
-			return nil
+		if s.codes[i].ID != id {
+			continue
 		}
+		// Out of scope reports not-found rather than forbidden: a distinct
+		// error would turn this endpoint into an existence oracle for other
+		// tenants' code ids.
+		if !scope.Matches(s.codes[i].OwnerNamespace) {
+			return ErrRegistrationCodeNotFound
+		}
+		s.codes[i].Revoked = true
+		return nil
 	}
 	return ErrRegistrationCodeNotFound
 }
@@ -94,9 +110,26 @@ func (s *MemoryRegistrationCodeStore) AppendEnrollAudit(_ context.Context, rec E
 	return nil
 }
 
-func (s *MemoryRegistrationCodeStore) EnrollAudit(_ context.Context, codeID string) ([]EnrollAuditRecord, error) {
+func (s *MemoryRegistrationCodeStore) EnrollAudit(_ context.Context, codeID string, scope OwnerScope) ([]EnrollAuditRecord, error) {
+	if err := scope.Validate(); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	// The audit rows carry no namespace of their own; the code they belong to
+	// is the authority. A codeID outside scope — or one with no code row at
+	// all — is not-found, not an empty list: an empty list would tell the
+	// caller "this id exists and has no attempts".
+	owned := false
+	for _, c := range s.codes {
+		if c.ID == codeID {
+			owned = scope.Matches(c.OwnerNamespace)
+			break
+		}
+	}
+	if !owned {
+		return nil, ErrRegistrationCodeNotFound
+	}
 	out := make([]EnrollAuditRecord, 0, len(s.audit))
 	for _, rec := range s.audit {
 		if rec.CodeID == codeID {

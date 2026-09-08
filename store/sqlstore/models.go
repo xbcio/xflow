@@ -244,12 +244,16 @@ func (dbArtifact) TableName() string { return "xflow_artifacts" }
 // truncating column type would corrupt every future lookup rather than fail
 // loudly. Keep it BINARY(32).
 type dbRegistrationCode struct {
-	ID                string    `gorm:"column:id;primaryKey;size:64"`
-	CodeHash          []byte    `gorm:"column:code_hash;type:binary(32);not null;uniqueIndex:uk_code_hash"`
-	AllowedNamespaces string    `gorm:"column:allowed_namespaces;type:text"`
-	AllowedNodeTypes  string    `gorm:"column:allowed_node_types;type:text"`
-	Revoked           bool      `gorm:"column:revoked;not null;default:false"`
-	CreatedAt         time.Time `gorm:"column:created_at;not null"`
+	ID                string `gorm:"column:id;primaryKey;size:64"`
+	CodeHash          []byte `gorm:"column:code_hash;type:binary(32);not null;uniqueIndex:uk_code_hash"`
+	AllowedNamespaces string `gorm:"column:allowed_namespaces;type:text"`
+	AllowedNodeTypes  string `gorm:"column:allowed_node_types;type:text"`
+	// OwnerNamespace mirrors store.RegistrationCode.OwnerNamespace. NOT NULL
+	// with a "" default so rows written before this column existed read back
+	// as platform-owned, which is the fail-closed reading.
+	OwnerNamespace string    `gorm:"column:owner_namespace;size:64;not null;default:''"`
+	Revoked        bool      `gorm:"column:revoked;not null;default:false"`
+	CreatedAt      time.Time `gorm:"column:created_at;not null"`
 }
 
 func (dbRegistrationCode) TableName() string { return "xflow_registration_codes" }

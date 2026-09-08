@@ -146,7 +146,7 @@ func TestResolveByPlaintextRejectsCorruptedScope(t *testing.T) {
 
 	// List() walks the same rowToRegistrationCode conversion and must refuse
 	// the same way rather than silently omitting the damaged row.
-	if _, err := st.List(ctx); !errors.Is(err, store.ErrEnrollScopeCorrupted) {
+	if _, err := st.List(ctx, store.OwnerScope{All: true}); !errors.Is(err, store.ErrEnrollScopeCorrupted) {
 		t.Fatalf("List err = %v, want errors.Is(err, store.ErrEnrollScopeCorrupted)", err)
 	}
 }

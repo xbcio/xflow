@@ -85,6 +85,46 @@ func GenerateRegistrationCode() (id string, plaintext string, err error) {
 		nil
 }
 
+// ErrOwnerScopeUnset is returned when a store method receives a zero-value
+// OwnerScope. The zero value is not "everything" and is not "the default
+// namespace" — it is a caller bug, and it must fail closed. A bare string
+// parameter with "" meaning "all rows" is the same fail-open shape as the
+// privilege escalation this type exists to close.
+var ErrOwnerScopeUnset = errors.New("store: owner scope not set")
+
+// OwnerScope narrows a registration-code read or write to the rows one caller
+// may see. Exactly one of All or Namespace must be set.
+//
+// All is reserved for platform operators holding a *_global scope. Namespace
+// is the tenant case: it matches rows whose OwnerNamespace equals it, and
+// nothing else — in particular it does NOT match the platform-owned rows whose
+// OwnerNamespace is "".
+type OwnerScope struct {
+	// All grants visibility over every row regardless of OwnerNamespace.
+	All bool
+	// Namespace is the single namespace whose rows are visible.
+	Namespace string
+}
+
+// Validate reports whether exactly one of the two selectors is set.
+func (s OwnerScope) Validate() error {
+	if s.All == (s.Namespace != "") {
+		// Both set, or neither set. Both are caller bugs.
+		return ErrOwnerScopeUnset
+	}
+	return nil
+}
+
+// Matches reports whether a row owned by owner is visible under s. Call
+// Validate first; Matches on an invalid scope reports false, which is the
+// fail-closed direction but is not a substitute for the error.
+func (s OwnerScope) Matches(owner string) bool {
+	if s.All {
+		return true
+	}
+	return s.Namespace != "" && s.Namespace == owner
+}
+
 // RegistrationCode is a reusable enrollment credential. The plaintext is
 // returned exactly once, from the management create endpoint, and is never
 // persisted anywhere.
@@ -96,8 +136,15 @@ type RegistrationCode struct {
 	// RunnerPolicy's own convention.
 	AllowedNamespaces []string
 	AllowedNodeTypes  []string
-	Revoked           bool
-	CreatedAt         time.Time
+	// OwnerNamespace is the namespace whose principal minted this code, and is
+	// the only namespace that may list, revoke, or audit it. Empty means
+	// platform-owned: rows created before this field existed backfill to "",
+	// and "" is visible only under OwnerScope{All: true}. That is deliberately
+	// fail-closed — a legacy row silently becoming visible to whichever tenant
+	// asked first is the bug this field exists to prevent.
+	OwnerNamespace string
+	Revoked        bool
+	CreatedAt      time.Time
 }
 
 // Clone returns a copy of c whose AllowedNamespaces / AllowedNodeTypes slices
@@ -153,10 +200,18 @@ type RegistrationCodeStore interface {
 	// ResolveByPlaintext returns the non-revoked code whose hash matches
 	// plaintext. Comparison must be constant-time against every stored code.
 	ResolveByPlaintext(ctx context.Context, plaintext string) (RegistrationCode, error)
-	List(ctx context.Context) ([]RegistrationCode, error)
-	Revoke(ctx context.Context, id string) error
+	// List returns the codes visible under scope. An invalid scope returns
+	// ErrOwnerScopeUnset and no rows.
+	List(ctx context.Context, scope OwnerScope) ([]RegistrationCode, error)
+	// Revoke marks the code revoked. A code that exists but is outside scope
+	// returns ErrRegistrationCodeNotFound — byte-identical to a code that does
+	// not exist, so the endpoint cannot be used to probe for other tenants'
+	// code ids.
+	Revoke(ctx context.Context, id string, scope OwnerScope) error
 	AppendEnrollAudit(ctx context.Context, rec EnrollAuditRecord) error
-	EnrollAudit(ctx context.Context, codeID string) ([]EnrollAuditRecord, error)
+	// EnrollAudit returns the attempts against codeID, or
+	// ErrRegistrationCodeNotFound when codeID is outside scope.
+	EnrollAudit(ctx context.Context, codeID string, scope OwnerScope) ([]EnrollAuditRecord, error)
 }
 
 // IssuedIdentity is a server-issued runner credential. It is the dynamic

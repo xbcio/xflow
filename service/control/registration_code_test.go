@@ -67,7 +67,7 @@ func TestStoredRecordNeverContainsPlaintext(t *testing.T) {
 	if err := st.Create(ctx, code); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	list, err := st.List(ctx)
+	list, err := st.List(ctx, OwnerScope{All: true})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -111,13 +111,13 @@ func TestResolveByPlaintextRejectsRevoked(t *testing.T) {
 	if err := st.Create(ctx, code); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := st.Revoke(ctx, code.ID); err != nil {
+	if err := st.Revoke(ctx, code.ID, OwnerScope{All: true}); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
 	if _, err := st.ResolveByPlaintext(ctx, plaintext); err != ErrRegistrationCodeRevoked {
 		t.Fatalf("revoked code err = %v, want ErrRegistrationCodeRevoked", err)
 	}
-	if err := st.Revoke(ctx, "no-such-id"); err != ErrRegistrationCodeNotFound {
+	if err := st.Revoke(ctx, "no-such-id", OwnerScope{All: true}); err != ErrRegistrationCodeNotFound {
 		t.Fatalf("Revoke(missing) = %v, want ErrRegistrationCodeNotFound", err)
 	}
 }
@@ -140,7 +140,7 @@ func TestMemoryStoreReturnsDefensiveCopies(t *testing.T) {
 	code.AllowedNamespaces[0] = "mutated-after-create"
 	code.AllowedNodeTypes[0] = "mutated-after-create"
 
-	list, err := st.List(ctx)
+	list, err := st.List(ctx, OwnerScope{All: true})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestMemoryStoreReturnsDefensiveCopies(t *testing.T) {
 	// List must clone on the way out.
 	list[0].AllowedNamespaces[0] = "mutated-via-list"
 	list[0].AllowedNodeTypes[0] = "mutated-via-list"
-	again, err := st.List(ctx)
+	again, err := st.List(ctx, OwnerScope{All: true})
 	if err != nil {
 		t.Fatalf("List (again): %v", err)
 	}
@@ -206,6 +206,15 @@ func TestPolicyEnforcesNamespaceAndNodeTypeScope(t *testing.T) {
 func TestEnrollAuditRecordsBothOutcomes(t *testing.T) {
 	ctx := context.Background()
 	st := NewMemoryRegistrationCodeStore()
+	// EnrollAudit now checks the code row's ownership before returning
+	// attempts (OwnerScope), so the code being audited must exist.
+	if err := st.Create(ctx, RegistrationCode{
+		ID:        "code-1",
+		CodeHash:  HashSecret("plaintext-code-1"),
+		CreatedAt: time.Unix(1700000000, 0).UTC(),
+	}); err != nil {
+		t.Fatalf("Create code-1: %v", err)
+	}
 	at := time.Unix(1700000000, 0).UTC()
 	for _, rec := range []EnrollAuditRecord{
 		{CodeID: "code-1", Success: false, Reason: "unknown code", SourceIP: "10.0.0.1", At: at},
@@ -215,7 +224,7 @@ func TestEnrollAuditRecordsBothOutcomes(t *testing.T) {
 			t.Fatalf("AppendEnrollAudit: %v", err)
 		}
 	}
-	got, err := st.EnrollAudit(ctx, "code-1")
+	got, err := st.EnrollAudit(ctx, "code-1", OwnerScope{All: true})
 	if err != nil {
 		t.Fatalf("EnrollAudit: %v", err)
 	}
@@ -225,12 +234,11 @@ func TestEnrollAuditRecordsBothOutcomes(t *testing.T) {
 	if got[0].Success || !got[1].Success {
 		t.Fatalf("audit order/outcome wrong: %+v", got)
 	}
-	other, err := st.EnrollAudit(ctx, "code-2")
-	if err != nil {
-		t.Fatalf("EnrollAudit(other): %v", err)
-	}
-	if len(other) != 0 {
-		t.Fatalf("audit for unrelated code returned %d rows, want 0", len(other))
+	// "code-2" has no code row at all, so it must be reported as not-found,
+	// not as an empty audit list — an empty list would tell the caller "this
+	// id exists and has no attempts".
+	if _, err := st.EnrollAudit(ctx, "code-2", OwnerScope{All: true}); err != ErrRegistrationCodeNotFound {
+		t.Fatalf("EnrollAudit(other) err = %v, want ErrRegistrationCodeNotFound", err)
 	}
 }
 

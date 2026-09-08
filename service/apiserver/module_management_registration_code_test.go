@@ -276,17 +276,19 @@ func (s failingRegistrationCodeStoreListErr) ResolveByPlaintext(context.Context,
 	return control.RegistrationCode{}, nil
 }
 
-func (s failingRegistrationCodeStoreListErr) List(context.Context) ([]control.RegistrationCode, error) {
+func (s failingRegistrationCodeStoreListErr) List(context.Context, control.OwnerScope) ([]control.RegistrationCode, error) {
 	return nil, fmt.Errorf("registrationCodeStore: scope column decode failed (%s): %w", s.uniqueDetail, store.ErrEnrollScopeCorrupted)
 }
 
-func (s failingRegistrationCodeStoreListErr) Revoke(context.Context, string) error { return nil }
+func (s failingRegistrationCodeStoreListErr) Revoke(context.Context, string, control.OwnerScope) error {
+	return nil
+}
 
 func (s failingRegistrationCodeStoreListErr) AppendEnrollAudit(context.Context, control.EnrollAuditRecord) error {
 	return nil
 }
 
-func (s failingRegistrationCodeStoreListErr) EnrollAudit(context.Context, string) ([]control.EnrollAuditRecord, error) {
+func (s failingRegistrationCodeStoreListErr) EnrollAudit(context.Context, string, control.OwnerScope) ([]control.EnrollAuditRecord, error) {
 	return nil, nil
 }
 

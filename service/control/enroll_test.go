@@ -90,8 +90,8 @@ func TestEnrollRejectionsAreIndistinguishable(t *testing.T) {
 	}, TransportInfo{SourceIP: "10.0.0.1"})
 
 	revokedCore, revokedCodes, _, revokedCode := enrollFixture(t, []string{"sas"}, []string{"*"})
-	list, _ := revokedCodes.List(context.Background())
-	if err := revokedCodes.Revoke(context.Background(), list[0].ID); err != nil {
+	list, _ := revokedCodes.List(context.Background(), OwnerScope{All: true})
+	if err := revokedCodes.Revoke(context.Background(), list[0].ID, OwnerScope{All: true}); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
 	_, revokedErr := revokedCore.Enroll(context.Background(), protocol.EnrollRequest{
@@ -123,7 +123,7 @@ func TestEnrollRejectionsAreIndistinguishable(t *testing.T) {
 
 func TestEnrollAuditsBothOutcomesWithSourceIP(t *testing.T) {
 	core, codes, _, code := enrollFixture(t, []string{"sas"}, []string{"*"})
-	list, _ := codes.List(context.Background())
+	list, _ := codes.List(context.Background(), OwnerScope{All: true})
 	codeID := list[0].ID
 
 	if _, err := core.Enroll(context.Background(), protocol.EnrollRequest{
@@ -137,7 +137,7 @@ func TestEnrollAuditsBothOutcomesWithSourceIP(t *testing.T) {
 		t.Fatalf("in-scope enroll must succeed: %v", err)
 	}
 
-	audit, err := codes.EnrollAudit(context.Background(), codeID)
+	audit, err := codes.EnrollAudit(context.Background(), codeID, OwnerScope{All: true})
 	if err != nil {
 		t.Fatalf("EnrollAudit: %v", err)
 	}
@@ -305,8 +305,8 @@ func TestHandleEnrollRejectionsAreByteIdentical(t *testing.T) {
 		t.Helper()
 		core, codes, _, plaintext := enrollFixture(t, []string{"sas"}, []string{"*"})
 		if revoke {
-			list, _ := codes.List(context.Background())
-			if err := codes.Revoke(context.Background(), list[0].ID); err != nil {
+			list, _ := codes.List(context.Background(), OwnerScope{All: true})
+			if err := codes.Revoke(context.Background(), list[0].ID, OwnerScope{All: true}); err != nil {
 				t.Fatalf("Revoke: %v", err)
 			}
 		}
