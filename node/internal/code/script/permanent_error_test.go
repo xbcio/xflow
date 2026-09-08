@@ -62,32 +62,88 @@ func failWith(t *testing.T, err error) {
 	})
 }
 
-// permanentFault mirrors how the wasm reactor marks a host trap: the original
-// error's text stays the message, and the sentinel rides in the unwrap chain so
-// types.IsPermanent finds it without a *types.ClassifiedError.
+// permanentFault is a failure that classifies itself permanent and says nothing
+// about which record is to blame -- an engine that decided its own state is
+// unusable, not that one input was bad.
+//
+// It deliberately does NOT implement engine.RecordSkippable. It used to be
+// described as mirroring the wasm reactor's host trap, and that stopped being
+// true when *permanentHostFault gained RecordSkippable: a real trap is now
+// permanent AND skippable, and takes the skip branch. Leaving this double
+// described as a trap would have kept these two tests green while they pinned
+// behaviour the type they claimed to mirror no longer has -- see
+// permanentSkippableFault below for the shape a trap actually makes.
 type permanentFault struct{ err error }
 
 func (e *permanentFault) Error() string   { return e.err.Error() }
 func (e *permanentFault) Unwrap() []error { return []error{e.err, types.ErrPermanent} }
 
-// TestScript_PermanentEngineErrorStaysPermanent is the load-bearing assertion
-// for the Kafka batch path.
+// permanentSkippableFault mirrors what the wasm reactor's *permanentHostFault
+// is after the trap fix: permanent (redelivering these bytes traps identically)
+// AND record-skippable (the instance was torn down and rebuilt before the error
+// escaped, so the blame stops at this record).
+type permanentSkippableFault struct{ err error }
+
+func (e *permanentSkippableFault) Error() string         { return e.err.Error() }
+func (e *permanentSkippableFault) Unwrap() []error       { return []error{e.err, types.ErrPermanent} }
+func (e *permanentSkippableFault) RecordSkippable() bool { return true }
+
+// TestScript_SkippableOutranksPermanenceOnSingleRecordPath pins the branch
+// ORDER inside script.go's single-record error handler, which is the only thing
+// that makes the trap fix reachable.
 //
-// A wasm host trap is deterministic: the same bytes trap the same way on every
-// redelivery. The reactor marks it types.IsPermanent for exactly that reason.
-// But the marker only matters if it survives to engine.buildEffectiveClassification,
-// which reads the error the node returned. If the node instead flattens the
-// failure into &Output{Port: "error", Data: {"error": err.Error()}}, the engine
-// rebuilds it via outputPortRetryError's errors.New(msg) -- a fresh error with
-// an empty unwrap chain. Classification then comes back Classified:false,
-// GroupExecResult.Deterministic stays false, and the Kafka batch is refused and
-// redelivered forever: one malformed message stalls the partition and every
-// message queued behind it.
+// A wasm host trap satisfies both predicates. Whichever check runs first wins,
+// and for a while the permanence check did: it returned the error at
+// script.go's IsPermanent branch and the skip branch below it never ran. Every
+// test still passed, because they all called the classifier directly instead of
+// driving this handler -- the classifier was right and the wiring was dead.
 //
-// So the node must return a permanently-classified engine error AS an error,
-// not as error-port data.
+// Skipping is what keeps the partition moving. Returning the error does not:
+// entryseed.go's admission check declines to admit a failed group on BOTH
+// branches, so a permanently-classified trap parks the commit frontier exactly
+// as an unclassified one does, the aggregate buffer overflows, and the measured
+// cost was tens of thousands of discarded messages against the one this drops.
+func TestScript_SkippableOutranksPermanenceOnSingleRecordPath(t *testing.T) {
+	failWith(t, &permanentSkippableFault{
+		err: fmt.Errorf("wasm reactor: eval: wasm error: unreachable"),
+	})
+
+	h, _ := registry.Lookup("xflow.script")
+	b := node.Script(`whatever`).Language("js").Runtime(failRuntime)
+	out, err := h.Execute(context.Background(), &types.Input{Params: b.RawParams().(map[string]any)})
+
+	if err != nil {
+		t.Fatalf("a record-skippable host trap was returned as a node error "+
+			"instead of skipping the record: the map body item fails, the group "+
+			"fails, entryseed.go refuses the batch on either branch, and the "+
+			"partition's commit frontier parks until an operator intervenes. "+
+			"err = %v", err)
+	}
+	if out == nil || out.Port != "main" {
+		t.Fatalf("a skipped record must report success on the main port so the "+
+			"offsets advance; got port=%q", portOf(out))
+	}
+	if len(out.Data) != 0 {
+		t.Errorf("a skipped record must carry no data, or the trap's record is "+
+			"indistinguishable from one that matched no rule: %v", out.Data)
+	}
+}
+
+// TestScript_PermanentEngineErrorStaysPermanent is the counter-case that keeps
+// the skip branch from swallowing everything permanent.
+//
+// A failure that classifies itself permanent WITHOUT declaring a record to
+// blame is the node failing, not a record being rejected. It must travel AS an
+// error: the error port flattens a failure into Output.Data["error"], and
+// engine/outputPortRetryError rebuilds it via errors.New(msg) -- a fresh error
+// with an empty unwrap chain. Classification then comes back Classified:false
+// and GroupExecResult.Deterministic stays false, so a failure that cannot
+// succeed on retry gets reported as retryable.
+//
+// The trap case deliberately does NOT come here any more; see
+// TestScript_SkippableOutranksPermanenceOnSingleRecordPath.
 func TestScript_PermanentEngineErrorStaysPermanent(t *testing.T) {
-	failWith(t, &permanentFault{err: fmt.Errorf("wasm reactor: eval: wasm error: unreachable")})
+	failWith(t, &permanentFault{err: fmt.Errorf("engine state unusable: compile cache corrupt")})
 
 	h, _ := registry.Lookup("xflow.script")
 	b := node.Script(`whatever`).Language("js").Runtime(failRuntime)
@@ -96,13 +152,14 @@ func TestScript_PermanentEngineErrorStaysPermanent(t *testing.T) {
 	if err == nil {
 		t.Fatalf("a permanently-classified engine failure was flattened into "+
 			"error-port output (port=%q), so the engine rebuilds it as a bare "+
-			"errors.New and the Kafka batch is redelivered forever", portOf(out))
+			"errors.New and reports a hopeless failure as retryable", portOf(out))
 	}
 	if !types.IsPermanent(err) {
 		t.Errorf("the returned error lost its permanent classification: %v", err)
 	}
-	// The wasm stack trace is the only thing naming WHICH guest bug fired.
-	if !errorContains(err, "unreachable") {
+	// The engine's own detail is the only thing naming WHAT failed; an operator
+	// reading a log line sees err.Error(), not the unwrap chain.
+	if !errorContains(err, "compile cache corrupt") {
 		t.Errorf("the engine's diagnostic detail was dropped: %v", err)
 	}
 }
@@ -110,8 +167,13 @@ func TestScript_PermanentEngineErrorStaysPermanent(t *testing.T) {
 // TestScript_PermanentBatchErrorStaysPermanent covers the batch path, which the
 // Kafka trigger actually takes and which duplicates the single-record path's
 // error handling rather than sharing it.
+//
+// The batch path has no skip branch, deliberately: down here "skip" would mean
+// dropping the whole batch, and a short results array is indistinguishable from
+// a batch where no record matched. Both batch implementations already skip
+// per-record internally, so a record-skippable error never reaches this handler.
 func TestScript_PermanentBatchErrorStaysPermanent(t *testing.T) {
-	failWith(t, &permanentFault{err: fmt.Errorf("wasm reactor: eval: wasm error: unreachable")})
+	failWith(t, &permanentFault{err: fmt.Errorf("engine state unusable: compile cache corrupt")})
 
 	h, _ := registry.Lookup("xflow.script")
 	b := node.Script(`whatever`).Language("js").Runtime(failRuntime)

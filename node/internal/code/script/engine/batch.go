@@ -1,12 +1,56 @@
 package engine
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 // BatchEngine is an optional capability: an engine that can evaluate a slice of
 // records in one call. ScriptNode type-asserts for it and falls back to
 // ExecuteBatchSerial when absent.
 type BatchEngine interface {
 	ExecuteBatch(ctx context.Context, src Source, records []any, globals map[string]any) ([]any, error)
+}
+
+// RecordSkippable is implemented by an error that condemns exactly ONE record
+// rather than the engine instance, the batch, or the node. The canonical case is
+// a guest-classified per-record failure (bad input JSON, oversized output) where
+// the runtime is still healthy and the next record will evaluate fine.
+//
+// It lives in this package, below both callers, because the batch path and the
+// single-record path MUST agree on it. They did not, and the divergence cost a
+// production pipeline: the wasm reactor's ExecuteBatch skipped an oversized
+// record and carried on, while the identical error on the single-record path
+// (script.go, which is what a map body's item takes -- one record per item never
+// has the {messages:[...]} shape that selects the batch path) fell through to the
+// error port. engine/commit.go's outputPortRetryError then rebuilt it as
+// errors.New, stripping the unwrap chain, so the node failed unclassified, the
+// Kafka batch was never admitted, its offsets never advanced, and the partition
+// stalled behind one record until the aggregate buffer overflowed. Measured:
+// 14 of 18 partitions dead, 188 822 messages discarded, keep-up 3.5%.
+//
+// One interface, two callers, so a future code cannot be skippable on one path
+// and fatal on the other. Adding a code means changing RecordSkippable's
+// implementation once.
+type RecordSkippable interface {
+	error
+	// RecordSkippable reports whether only this record is condemned.
+	RecordSkippable() bool
+}
+
+// IsRecordSkippable reports whether err condemns a single record rather than the
+// batch or the engine instance. It matches anywhere in the unwrap chain, so
+// wrapping an error on the way out does not change the verdict.
+//
+// Everything unrecognised is NOT skippable. That default is deliberate: an
+// unknown error is more likely a host or infrastructure failure, where skipping
+// would silently shorten the result, than a per-record fault.
+func IsRecordSkippable(err error) bool {
+	var rs RecordSkippable
+	if !errors.As(err, &rs) {
+		return false
+	}
+	return rs.RecordSkippable()
 }
 
 // BuildRecordGlobals constructs the per-record expression environment by

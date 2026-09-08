@@ -343,21 +343,27 @@ func stripConfig(globals map[string]any) map[string]any {
 // infrastructure failure, or context cancellation — continuing would produce a
 // silently short result or evaluate against a suspect instance).
 //
-// Only a *reactorEvalError with a non-doom code is skippable. Those codes are
-// guest-classified per-record failures (errDecode, errUnconfigured, errConfig,
-// errOutput) where evalFromPool returned the instance to the pool unharmed.
-// Everything else — bare fmt.Errorf from alloc/write/eval traps (doomed=true in
-// evalOnce but consumed by evalFromPool before we see it), errEval itself, or
-// any error from borrow/config/encode — is batch-fatal.
+// It is a thin alias over engine.IsRecordSkippable and holds no verdict of its
+// own. That is the point: this used to decide skippability locally while
+// script.go's single-record path decided it separately, and the two disagreed on
+// errOutput — the batch path skipped the record, the single-record path let it
+// stall a Kafka partition. Routing both through one function makes that class of
+// divergence unrepresentable.
+//
+// Two things are skippable, for two different reasons (see their RecordSkippable
+// methods): a *reactorEvalError with a non-doom code, where the guest rejected
+// one record and the instance never suffered; and a *permanentHostFault, where
+// the guest trapped on this record's bytes and the instance was already torn
+// down and replaced by evalFromPool before the error got here.
+//
+// NOT skippable: errEval (the guest may hold polluted globals — a statement
+// about the instance, not the record), and a bare error from a ctx-cancelled
+// eval. That last one is the important asymmetry, and it needs no code here:
+// classifyHostFault only stamps permanentHostFault when ctx.Err() is nil, so a
+// timeout stays a bare error and stays fatal. Skipping it would discard records
+// that never ran.
 func isBatchSkippable(err error) bool {
-	var evalErr *reactorEvalError
-	if !errors.As(err, &evalErr) {
-		// Not a guest-classified error at all: host-side trap, borrow failure,
-		// config error, encode error, etc. All batch-fatal.
-		return false
-	}
-	// errEval is the doom code (pool.go:87). The instance was torn down.
-	return evalErr.code != errEval
+	return engine.IsRecordSkippable(err)
 }
 
 // ExecuteBatch evaluates each record through the reactor pool in a host-side
@@ -372,9 +378,11 @@ func isBatchSkippable(err error) bool {
 //
 // A record whose eval fails is SKIPPED, not fatal: one malformed record must not
 // invalidate the whole batch (the same rule the guest applies internally, see
-// compiledRule.matches). A doomed instance IS fatal — that is a host-level
-// failure, and letting the batch fail means the offsets stay uncommitted and
-// Kafka redelivers, which is clean because nothing downstream has run yet.
+// compiledRule.matches). A record that TRAPS the guest is skipped too, since
+// evalFromPool dooms and replaces the instance before returning, so the next
+// record borrows a clean one. What stays fatal is a failure that says nothing
+// about this record: a ctx cancellation, a borrow failure, a config error, or
+// errEval, where the guest may be sitting on polluted globals.
 func (f *reactorFacade) ExecuteBatch(ctx context.Context, src engine.Source, records []any, globals map[string]any) ([]any, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -393,8 +401,8 @@ func (f *reactorFacade) ExecuteBatch(ctx context.Context, src engine.Source, rec
 			if isBatchSkippable(err) {
 				continue
 			}
-			// Batch-fatal: doomed instance (alloc/write/eval trap or errEval),
-			// context cancellation, borrow failure, config error, etc.
+			// Batch-fatal: ctx cancellation, borrow failure, config error, or
+			// errEval. Not traps — those are per-record; see isBatchSkippable.
 			return nil, err
 		}
 		out = append(out, res)

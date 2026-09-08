@@ -13,21 +13,23 @@ import (
 // TestReactorHostTrapClassification pins how a host-side wasm trap is
 // classified for retry purposes.
 //
-// This is the question the Kafka batch path turns on. A trap dooms the
-// instance, so isBatchSkippable makes it batch-fatal and the error propagates
-// out of ExecuteBatch. Downstream, node/trigger/kafka/entryseed.go reads
-// GroupExecResult.Deterministic to decide between committing the offset (skip
-// the batch) and refusing to admit (redeliver). That flag traces back to
-// engine.buildEffectiveClassification, which only sets Permanent when the error
-// carries a *types.ClassifiedError or wraps types.ErrPermanent.
+// This is the question the Kafka batch path turns on. A trap is a property of
+// the input: redelivering the same bytes traps identically, forever. So it must
+// carry types.ErrPermanent, and it must be skippable per-record.
 //
-// A trap driven by a malformed message is deterministic: redelivering the same
-// bytes traps identically, forever. If the error carries no classification, the
-// batch is treated as transient and Kafka redelivers it in a loop -- the
-// partition stops advancing, and every later message behind it is stuck too.
+// The skippable half is the one measured in production. On 2026-09-07, against
+// the real cluster, 5 of 18 partitions stalled on `wasm error: unreachable` --
+// the same batch retried 16-22 times at identical offsets, never advancing,
+// until the aggregate buffer overflowed and discarded up to 19 846 messages on a
+// single partition. Refusing the skip is not the safe side: BOTH branches of
+// entryseed.go's admission check decline to admit a failed batch, so an
+// unskipped trap parks the commit frontier permanently.
 //
-// This test does not assert which answer is correct; it records which answer
-// the code actually gives, so the classification cannot change unnoticed.
+// This test used to assert the opposite, on the rationale that skipping would
+// "continue on a doomed instance". That rationale was false: evalFromPool
+// borrows per call and calls e.doom on the failing instance BEFORE returning
+// the error, so the next record cannot receive it. The assertion was pinning a
+// stall as if it were a contract.
 func TestReactorHostTrapClassification(t *testing.T) {
 	e, ok := engine.Lookup("wasm", "wazero-reactor")
 	if !ok {
@@ -42,11 +44,10 @@ func TestReactorHostTrapClassification(t *testing.T) {
 	}
 	t.Logf("trap error: %v", err)
 
-	// Guard the premise: a trap must not be mistaken for a per-record guest
-	// rejection, or it would be silently skipped rather than classified at all.
-	if isBatchSkippable(err) {
-		t.Fatal("a host trap was classified as skippable: the batch would " +
-			"drop the record and continue on a doomed instance")
+	if !isBatchSkippable(err) {
+		t.Fatal("a host trap is not skippable: the batch fails, entryseed.go " +
+			"declines to admit it on either branch, and the partition's commit " +
+			"frontier parks until an operator intervenes")
 	}
 
 	var ce *types.ClassifiedError
@@ -78,13 +79,18 @@ func TestReactorHostTrapClassification(t *testing.T) {
 // the trap case from overreaching.
 //
 // A timeout dooms the instance exactly like a trap does, and surfaces through
-// the same bare fmt.Errorf in evalOnce. But it is environmental: a loaded host,
-// a slow disk, a deadline set too tight. Redelivering that batch can well
+// the same fmt.Errorf in evalOnce. But it is environmental: a loaded host, a
+// slow disk, a deadline set too tight. Redelivering that batch can well
 // succeed, so it must NOT be marked permanent -- doing so would commit the
 // offset and silently discard real messages.
 //
-// Whatever distinguishes traps from timeouts has to be finer than "the instance
-// was doomed".
+// Since traps became record-skippable, this test carries a second and heavier
+// duty: it is the only thing proving the skip verdict follows ctx.Err() rather
+// than the error text. Both cases produce a wazero call error on a closed
+// module, and the strings can be indistinguishable. If skippability were ever
+// decided by matching "unreachable" or "module closed", this test flips and the
+// trap test does not -- which is precisely the pair that would otherwise let a
+// cancelled batch be silently dropped as N per-record faults.
 func TestReactorTimeoutIsNotPermanent(t *testing.T) {
 	e, ok := engine.Lookup("wasm", "wazero-reactor")
 	if !ok {
@@ -104,6 +110,12 @@ func TestReactorTimeoutIsNotPermanent(t *testing.T) {
 		t.Errorf("a canceled/timed-out eval was marked permanent: the Kafka "+
 			"batch would be committed and its messages discarded, though a "+
 			"retry could have succeeded. err = %v", err)
+	}
+	if isBatchSkippable(err) {
+		t.Errorf("a canceled eval was classified as a per-record fault: every "+
+			"remaining record would be 'skipped' for a reason that had nothing "+
+			"to do with it, the batch would report success, and the offsets "+
+			"would advance past records that never ran. err = %v", err)
 	}
 }
 

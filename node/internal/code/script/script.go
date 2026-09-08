@@ -314,8 +314,24 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 				return nil, types.NewTransientError("script.timeout", batchErr.Error())
 			}
 			if types.IsPermanent(batchErr) {
-				// Same split as the single-record path below, and this is the
-				// path that motivates it: the Kafka trigger delivers batches.
+				// Same split as the single-record path below, minus its skip
+				// branch, and the asymmetry is deliberate rather than an
+				// oversight waiting to be tidied up.
+				//
+				// Down there, "skip" drops one record. Here it would drop the
+				// whole batch, which is a different act wearing the same name --
+				// and nobody downstream could tell the difference, because a
+				// short results array looks exactly like a batch where no record
+				// matched a rule.
+				//
+				// It also cannot trigger. Both batch implementations already skip
+				// per-record internally and return nil: the wasm reactor's
+				// ExecuteBatch consults engine.IsRecordSkippable per record, and
+				// ExecuteBatchSerial `continue`s past every non-ctx error. So a
+				// record-skippable error reaching this line would mean a
+				// BatchEngine that does not, and treating that as batch-fatal is
+				// the honest reading -- we do not know which records it stands
+				// for.
 				return nil, batchErr
 			}
 			return &types.Output{Data: map[string]any{"error": batchErr.Error()}, Port: "error"}, nil
@@ -349,7 +365,6 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 
 	result, err := eng.Execute(ctx, src, globals, engine.DefaultHelpers())
 	if err != nil {
-		observeExecute(ctx, language, runtime, "error", time.Since(start))
 		// If the per-execution context expired (deadline or cancellation), the
 		// failure is a transient system condition regardless of how the runtime
 		// surfaces it: goja raises an Interrupt error, while qjs/wazero wrap
@@ -359,27 +374,70 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 		// deterministic outcome and is routed via the explicit "error" port
 		// (engine/outputPortRetryError), preserving existing OnError routing.
 		if ctx.Err() != nil {
+			observeExecute(ctx, language, runtime, "error", time.Since(start))
 			return nil, types.NewTransientError("script.timeout", err.Error())
 		}
-		// ...unless the engine classified the failure as permanent itself. A
-		// wasm host trap does: the guest hit an unreachable or an out-of-bounds
-		// access on these exact bytes, and redelivering them traps identically.
+		// A per-record failure condemns THIS record and nothing else: the engine
+		// instance is either still healthy or was already torn down and replaced
+		// before the error got here, so the next record evaluates on a clean one.
+		// Drop the record and report success, which is exactly what the batch
+		// path (engine.ExecuteBatchSerial and the wasm reactor's ExecuteBatch)
+		// does with the identical error -- both `continue` past it.
+		//
+		// This branch exists because those two paths disagreed, and the
+		// disagreement was invisible in tests: a map body's item always takes
+		// THIS path (one record per item never has the {messages:[...]} shape
+		// that selects the batch path above), so the batch path's skip never ran
+		// in the deployment that mattered. The stall is not hypothetical -- it is
+		// what an oversized cleaned record did to 14 of 18 Kafka partitions.
+		//
+		// Ordered ABOVE the permanence check, and that order is load-bearing. A
+		// wasm host trap is BOTH permanent and record-skippable, because the two
+		// verdicts answer different questions: permanence says "redelivering
+		// these bytes cannot help", skippability adds "and the blame stops at
+		// this record". When both hold, skipping strictly dominates -- it
+		// advances the offsets and keeps the partition alive, whereas returning
+		// the error accomplishes none of what the branch below is for:
+		// entryseed.go's admission check declines to admit a failed group on BOTH
+		// of its branches, so a permanently-classified trap parks the commit
+		// frontier exactly as an unclassified one does. With the permanence check
+		// first, this branch was dead for the very error that motivated it, and
+		// every test still passed because they exercise the classifier directly
+		// rather than through this ordering.
+		//
+		// Returning main with no data rather than routing to the error port is
+		// what makes this a skip instead of a failure. The cost is real and is
+		// why the metric below is not optional: a dropped record is
+		// indistinguishable downstream from a record that matched no rule. Only
+		// outcome="skipped" tells them apart.
+		//
+		// No ArtifactUseCollector.Record here, for the reason the batch path
+		// states: an attestation claims this node produced a business row from
+		// that digest, and a skipped record produces no such row.
+		if engine.IsRecordSkippable(err) {
+			observeExecute(ctx, language, runtime, "skipped", time.Since(start))
+			return &types.Output{Data: map[string]any{}, Port: "main"}, nil
+		}
+		// ...unless the engine classified the failure as permanent itself AND did
+		// not confine the blame to one record. What reaches here says "these
+		// bytes will never succeed" without naming a record to drop, so it is the
+		// node that failed rather than a record that was rejected.
 		//
 		// That classification only reaches the engine if it travels AS an error.
 		// The error port flattens a failure into Output.Data["error"], and
-		// engine/outputPortRetryError rebuilds it with errors.New(msg) -- a
-		// fresh error with an empty unwrap chain. buildEffectiveClassification
-		// then reports Classified:false, GroupExecResult.Deterministic stays
-		// false, and the Kafka batch path refuses to admit the batch: the broker
-		// redelivers the same bytes forever, the partition stops advancing, and
-		// every message queued behind it stalls with it.
+		// engine/outputPortRetryError rebuilds it with errors.New(msg) -- a fresh
+		// error with an empty unwrap chain. buildEffectiveClassification then
+		// reports Classified:false and GroupExecResult.Deterministic stays false,
+		// so a failure that cannot succeed on retry is reported as retryable.
 		//
 		// Only permanence changes lanes. An unclassified throw and a
 		// self-declared transient failure both keep the error port, so workflows
 		// that branch on it are unaffected.
 		if types.IsPermanent(err) {
+			observeExecute(ctx, language, runtime, "error", time.Since(start))
 			return nil, err
 		}
+		observeExecute(ctx, language, runtime, "error", time.Since(start))
 		return &types.Output{Data: map[string]any{"error": err.Error()}, Port: "error"}, nil
 	}
 	// Pre-flight check: if the context already expired (e.g. a parent cancelled

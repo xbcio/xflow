@@ -71,10 +71,21 @@ func TestIsBatchSkippable(t *testing.T) {
 		{"errOutput", &reactorEvalError{code: errOutput}, true},
 		// Guest-classified, doom code: NOT skippable.
 		{"errEval (doom)", &reactorEvalError{code: errEval}, false},
-		// Host-side bare errors (alloc trap, write OOB, eval trap): NOT skippable.
-		{"alloc trap", fmt.Errorf("wasm reactor: alloc: %w", fmt.Errorf("trap")), false},
-		{"write OOB", fmt.Errorf("wasm reactor: write input out of range"), false},
-		{"eval trap", fmt.Errorf("wasm reactor: eval: %w", fmt.Errorf("trap")), false},
+		// Host traps as evalOnce actually produces them. classifyHostFault
+		// stamps permanentHostFault whenever ctx is still alive, so THIS is the
+		// shape a malformed record makes in production -- the bare-error cases
+		// below never occur on a live context, and a table that only had them
+		// was testing a shape the code cannot emit.
+		{"alloc trap (live ctx)", &permanentHostFault{err: fmt.Errorf("wasm reactor: alloc: %w", fmt.Errorf("trap"))}, true},
+		{"eval trap (live ctx)", &permanentHostFault{err: fmt.Errorf("wasm reactor: eval: %w", fmt.Errorf("unreachable"))}, true},
+		{"write OOB", &permanentHostFault{err: fmt.Errorf("wasm reactor: write input out of range")}, true},
+		{"wrapped eval trap", fmt.Errorf("outer: %w", &permanentHostFault{err: fmt.Errorf("trap")}), true},
+		// The same traps with a DEAD ctx: classifyHostFault leaves them bare, so
+		// they stay fatal. These two groups differ only in whether the context
+		// was alive, which is the entire distinction between "this record is
+		// poison" and "we were shut down mid-batch".
+		{"alloc trap (dead ctx)", fmt.Errorf("wasm reactor: alloc: %w", fmt.Errorf("trap")), false},
+		{"eval trap (dead ctx)", fmt.Errorf("wasm reactor: eval: %w", fmt.Errorf("trap")), false},
 		// Wrapped guest error (errors.As must unwrap): skippable.
 		{"wrapped errDecode", fmt.Errorf("outer: %w", &reactorEvalError{code: errDecode}), true},
 		// Wrapped doom: NOT skippable.

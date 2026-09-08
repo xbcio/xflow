@@ -284,6 +284,33 @@ func (e *permanentHostFault) Error() string { return e.err.Error() }
 // wrapped underneath.
 func (e *permanentHostFault) Unwrap() []error { return []error{e.err, types.ErrPermanent} }
 
+// RecordSkippable implements engine.RecordSkippable: a permanent host fault
+// condemns the record that caused it, not the ones behind it.
+//
+// This follows from what classifyHostFault already decided rather than adding a
+// second opinion. A permanentHostFault exists only when the context did NOT kill
+// the call, and that leaves exactly the cases its own doc names: a trap is a
+// property of the input, so the same bytes reproduce it on every redelivery.
+// The instance is torn down and rebuilt either way (constraint #4), so the next
+// record evaluates on a clean instance and nothing about it is inferable from
+// the one that died.
+//
+// Deliberately NOT symmetric with reactorEvalError, which stays fatal on
+// errEval: there the guest returned -4 cleanly and may be sitting on polluted
+// globals, which is a statement about the INSTANCE. A trap is a statement about
+// the RECORD.
+//
+// What this costs, stated plainly: a guest OOM driven by host memory pressure
+// rather than by the record also lands here, and skipping it discards a record
+// that was never bad. That trade was taken knowingly, because refusing the skip
+// is not the safe side -- it stalls the partition's commit frontier (both
+// branches of entryseed.go's admission check decline to admit), the aggregate
+// buffer overflows, and the measured cost on 2026-09-07 was 19 846 messages
+// discarded on one partition against the 1 this drops. The skip is counted as
+// outcome="skipped", so a systemic fault shows up as a skip rate near 100%
+// instead of hiding; a silent version of this fix would not be worth having.
+func (e *permanentHostFault) RecordSkippable() bool { return true }
+
 // readOut copies the guest's output buffer. n<0 asks the guest for the length
 // via out_len (used for error detail, where the failing call's return value was
 // an error code rather than a length); n>=0 reads exactly n bytes. The returned
@@ -354,6 +381,21 @@ func (e *reactorEvalError) Error() string {
 		return fmt.Sprintf("wasm reactor: error code %d", e.code)
 	}
 }
+
+// RecordSkippable implements engine.RecordSkippable: every code except errEval
+// condemns one record while leaving the instance usable, so the caller may drop
+// that record and continue.
+//
+// errEval is the doom code (see the const block above). The guest panicked
+// mid-evaluation, evalFromPool tore the instance down, and nothing about the
+// remaining records can be inferred from a torn-down instance -- so it is NOT
+// skippable and must fail whatever is running.
+//
+// Both the batch loop (reactor.go's ExecuteBatch) and the single-record path
+// (script.go) route through engine.IsRecordSkippable to reach this one method.
+// Before it existed they each carried their own verdict and disagreed; see the
+// RecordSkippable interface doc for what that cost.
+func (e *reactorEvalError) RecordSkippable() bool { return e.code != errEval }
 
 // activePool is the set of instances for one config generation. A config change
 // builds a whole new activePool and swaps the pointer (B-plan, docs §6.3), so a
