@@ -255,6 +255,84 @@ func TestRegistrationCodeRoutesAbsentWithoutPrincipalAuth(t *testing.T) {
 	h.doJSON(t, http.MethodGet, PathManagementRegistrationCodes, "", http.StatusNotFound)
 }
 
+// TestCreateRegistrationCodeRejectsNamespacesAbovePrincipal is the regression
+// test for the H1 privilege-escalation chain: a tenant principal holding only
+// management.registration_code.create could mint a code whose
+// AllowedNamespaces said "*", enroll a runner with it, and reach every
+// namespace on the server.
+func TestCreateRegistrationCodeRejectsNamespacesAbovePrincipal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"wildcard", `{"allowed_namespaces":["*"]}`},
+		{"another tenant", `{"allowed_namespaces":["namespaceB"]}`},
+		{"own plus another", `{"allowed_namespaces":["namespaceA","namespaceB"]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRegistrationCodeTestServer(t)
+			defer h.srv.Close()
+			body := h.doJSON(t, http.MethodPost, PathManagementRegistrationCodes, tc.body, http.StatusForbidden)
+			if strings.Contains(body, "\"code\"") && strings.Contains(body, "eyJ") {
+				t.Fatalf("rejected request still returned a plaintext code: %s", body)
+			}
+		})
+	}
+}
+
+// TestCreateRegistrationCodeFillsEmptyNamespacesWithPrincipal pins the empty-set
+// trap. RunnerPolicy.AllowsNamespace treats an empty AllowedNamespaces as "the
+// default namespace ONLY" — which for a principal in namespaceA is a grant it
+// does not hold. Empty must therefore be filled in explicitly, never stored as
+// empty.
+func TestCreateRegistrationCodeFillsEmptyNamespacesWithPrincipal(t *testing.T) {
+	h := newRegistrationCodeTestServer(t)
+	defer h.srv.Close()
+
+	h.doJSON(t, http.MethodPost, PathManagementRegistrationCodes, `{}`, http.StatusOK)
+
+	list, err := h.codes.List(context.Background(), control.OwnerScope{All: true})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("stored %d codes, want 1", len(list))
+	}
+	if got := list[0].AllowedNamespaces; len(got) != 1 || got[0] != "namespaceA" {
+		t.Fatalf("AllowedNamespaces = %v, want [namespaceA] — an empty slice would\n"+
+			"grant the default namespace, which this principal does not hold", got)
+	}
+	if list[0].OwnerNamespace != "namespaceA" {
+		t.Fatalf("OwnerNamespace = %q, want namespaceA", list[0].OwnerNamespace)
+	}
+}
+
+// TestRegistrationCodeReadsAreNamespaceScoped covers the other three
+// endpoints. There is no /foreign/revoke route; cross-namespace revocation is
+// exercised the same way any other revoke is (DELETE .../{id}), the only
+// difference being that {id} names a code minted by a different namespace.
+func TestRegistrationCodeReadsAreNamespaceScoped(t *testing.T) {
+	h := newRegistrationCodeTestServer(t)
+	defer h.srv.Close()
+
+	if err := h.codes.Create(context.Background(), control.RegistrationCode{
+		ID:             "foreign",
+		CodeHash:       control.HashSecret("foreign-plaintext"),
+		OwnerNamespace: "namespaceB",
+		CreatedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	listBody := h.doJSON(t, http.MethodGet, PathManagementRegistrationCodes, "", http.StatusOK)
+	if strings.Contains(listBody, "foreign") {
+		t.Fatalf("list leaked another namespace's code: %s", listBody)
+	}
+
+	h.doJSON(t, http.MethodDelete, "/v1/management/registration-codes/foreign", "", http.StatusNotFound)
+	h.doJSON(t, http.MethodGet, "/v1/management/registration-codes/foreign/audit", "", http.StatusNotFound)
+}
+
 // failingRegistrationCodeStoreListErr is a control.RegistrationCodeStore test
 // double whose List always fails, wrapping store.ErrEnrollScopeCorrupted to
 // mimic the real failure mode a corrupted scope column produces (Task 7). Its

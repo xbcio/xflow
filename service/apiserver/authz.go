@@ -136,6 +136,27 @@ const (
 	OpRegistrationCodeList   = "management.registration_code.list"
 	OpRegistrationCodeRevoke = "management.registration_code.revoke"
 	OpRegistrationCodeAudit  = "management.registration_code.audit"
+
+	// The *_global scopes are additive capabilities layered on top of the four
+	// operations above, NOT alternatives to them: the route still requires the
+	// base scope, and _global only widens what the handler will do once the
+	// route lets the request through. They are therefore deliberately absent
+	// from scopeForOperation — a scope there would make _global a second way to
+	// reach the route, which is the opposite of the intent.
+	//
+	// Holding the base scope alone confines the principal to its own namespace:
+	// it may mint codes only for that namespace, and may list, revoke, and
+	// audit only the codes it minted. Adding _global lifts that confinement for
+	// that one operation.
+	//
+	// A dedicated scope is how a platform operator is expressed, because the
+	// alternative — overloading Principal.Namespace with a magic value — would
+	// change what Namespace means for every other authorization decision in
+	// this file.
+	ScopeRegistrationCodeCreateGlobal = "management.registration_code.create_global"
+	ScopeRegistrationCodeListGlobal   = "management.registration_code.list_global"
+	ScopeRegistrationCodeRevokeGlobal = "management.registration_code.revoke_global"
+	ScopeRegistrationCodeAuditGlobal  = "management.registration_code.audit_global"
 )
 
 // scopeForOperation maps an operation to the scope it requires. A principal
@@ -217,25 +238,29 @@ func (ScopeAuthorizer) Authorize(_ context.Context, req AuthorizationRequest) (D
 //     resolves to not-found → 404) as the authoritative IDOR defense (see
 //     module_management.go handleExecution).
 //
-//     Exception (Task 8 fix1 Important-3): the four registration-code
-//     operations (OpRegistrationCodeCreate/List/Revoke/Audit) ALSO leave
-//     ResourceNamespace empty, but NOT for that reason and NOT with that
-//     defense. Registration-code management is a deliberate platform-level
-//     global operation — spec §2.3.4 requires listing ALL registration codes,
-//     not a namespace-scoped subset — and registration_code_repo.go's
-//     List/Revoke/EnrollAudit read by id or unconditionally (Find(&rows),
-//     Where("id = ?"), Where("code_id = ?")), never filtered by namespace;
-//     xflow_registration_codes has no owning-namespace column at all
-//     (AllowedNamespaces is the scope a code GRANTS, not who it BELONGS to).
-//     So for these four operations there is no namespace-scoped store read
-//     standing behind the empty ResourceNamespace — the boundary is the scope
-//     itself (management.registration_code.*), full stop. Do not add a
-//     namespace ceiling check to these four operations or a namespace filter
-//     to the registration-code store to make this comment's general rule
-//     literally true again; that would conflict with the global-listing
-//     design deliberately made here. See the field/route comments in
-//     module_management.go for the matching note and the trust assumption
-//     this places on scope-granting policy.
+//     Exception (Task 8 fix1 Important-3, superseded in the ceiling below):
+//     the four registration-code operations (OpRegistrationCodeCreate/
+//     List/Revoke/Audit) ALSO leave ResourceNamespace empty, but NOT for that
+//     reason and NOT with that defense. There is no namespace-scoped store
+//     read standing behind the empty ResourceNamespace here the way there is
+//     for handleExecution; the boundary is the scope check
+//     (management.registration_code.*) plus one more layer added by the H1
+//     fix (Task 2): the store is namespace-owner-scoped
+//     (store.OwnerScope/RegistrationCode.OwnerNamespace), and the handlers
+//     project the requesting principal onto that scope via ownerScopeFor
+//     rather than defaulting to "see everything". Holding the base scope
+//     alone confines a principal to the codes it minted for its own
+//     namespace; holding the matching *_global scope
+//     (ScopeRegistrationCodeCreateGlobal/ListGlobal/RevokeGlobal/AuditGlobal)
+//     is what lifts that confinement and restores the platform-wide,
+//     list-ALL-codes behavior spec §2.3.4 describes. So this is deliberately
+//     NOT the general ResourceNamespace-equality rule above — it is a
+//     per-row owner check performed downstream in the store, gated by a
+//     second scope rather than by Principal.Namespace equality — but it is
+//     also no longer the scope-alone, no-ceiling boundary the pre-Task-2
+//     comment described. See the field/route comments in
+//     module_management.go and ownerScopeFor/resolveRequestedNamespaces for
+//     the matching implementation.
 type NamespaceAwareAuthorizer struct{}
 
 // Authorize returns Allow iff the principal carries a non-empty namespace, holds

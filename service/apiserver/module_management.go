@@ -14,6 +14,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/types"
@@ -148,33 +149,24 @@ func (m *managementModule) RegisterHTTP(mux *http.ServeMux) {
 		// m.codes/m.issued — see the struct field comment above for why), and
 		// principalAuth==nil leaves these routes genuinely unregistered → 404.
 		//
-		// Namespace boundary (Task 8 fix1 Important-3): all four leave
-		// ResourceNamespace empty in their authzWrap resolver funcs below, and
-		// — unlike handleExecution's cross-namespace-read-404 pattern — there is
-		// NO namespace-scoped store read backing that emptiness here.
-		// Registration-code management is a deliberate platform-level global
-		// operation (spec §2.3.4: list ALL codes); the store reads by id or
-		// unconditionally, and xflow_registration_codes carries no owning
-		// namespace column (AllowedNamespaces is what a code GRANTS, not who it
-		// belongs to). The entire boundary for these four operations is the
-		// scope check (management.registration_code.create/list/revoke/audit)
-		// itself — see the matching note on NamespaceAwareAuthorizer in
-		// authz.go. Do not add a namespace ceiling check here or a namespace
-		// filter to the store; that would conflict with the global-listing
-		// design.
-		//
-		// Trust assumption this places on scope-granting policy (confirmed
-		// against cmd/server/main.go's auth-tokens-file loader): that file is
-		// free-form JSON binding a token to an arbitrary (Namespace, Scopes)
-		// pair — nothing in code stops an operator from granting
-		// management.registration_code.create to a token whose Namespace is a
-		// single tenant, and that token could then mint a code with
-		// allowed_namespaces:["*"]. These four scopes must only ever be granted
-		// to platform administrators, never to a tenant-scoped principal; the
-		// boundary is entirely in how scopes are provisioned, not enforced in
-		// this code. That gap in operator configuration is a separate,
-		// deliberately out-of-scope concern for this fix (tracked for final
-		// review), not something this comment claims is closed.
+		// Namespace boundary (Task 8 fix1 Important-3, superseded by Task 2's H1
+		// fix): all four leave ResourceNamespace empty in their authzWrap
+		// resolver funcs below, and — unlike handleExecution's
+		// cross-namespace-read-404 pattern — there is no namespace-scoped
+		// store read backing that emptiness via ResourceNamespace equality.
+		// The boundary instead runs through the store's own owner scoping
+		// (store.OwnerScope / RegistrationCode.OwnerNamespace, landed by Task
+		// 1): each handler below projects the requesting principal onto an
+		// OwnerScope via ownerScopeFor, so a tenant principal sees, revokes,
+		// and audits only the codes it minted, and create stamps
+		// OwnerNamespace with the principal's own namespace. A principal
+		// additionally holding the matching *_global scope
+		// (ScopeRegistrationCodeCreateGlobal/ListGlobal/RevokeGlobal/
+		// AuditGlobal) gets OwnerScope{All: true} instead — the platform-wide,
+		// list-ALL-codes behavior spec §2.3.4 describes. Do not remove
+		// ownerScopeFor's per-handler call or the ceiling check in
+		// resolveRequestedNamespaces to "simplify back" to a bare scope check;
+		// that is the H1 privilege-escalation path this fix closes.
 		mux.HandleFunc("POST "+PathManagementRegistrationCodes, m.authzWrap(OpRegistrationCodeCreate, true, m.handleCreateRegistrationCode, func(*http.Request) (string, string, string, string) {
 			return "management/registration-codes", "", "", ""
 		}))
@@ -776,13 +768,48 @@ type enrollAuditView struct {
 	At       string `json:"at"`
 }
 
+// ownerScopeFor projects the request's principal onto the store's OwnerScope.
+// The bool reports whether a principal was present at all; false means the
+// route ran without authz middleware, which is a wiring bug and must be a 500
+// rather than a silent widening.
+func ownerScopeFor(r *http.Request, globalScope string) (control.OwnerScope, bool) {
+	p, ok := principalFromRequest(r)
+	if !ok {
+		return control.OwnerScope{}, false
+	}
+	if p.HasScope(globalScope) {
+		return control.OwnerScope{All: true}, true
+	}
+	// A principal with no namespace and no _global scope can see nothing. That
+	// is fail-closed on purpose: OwnerScope{} would be rejected downstream by
+	// Validate, so this returns the same false the missing-principal case does
+	// and the caller turns it into a 500 — an unroutable configuration, not an
+	// empty page that looks like "you have no codes".
+	if p.Namespace == "" {
+		return control.OwnerScope{}, false
+	}
+	return control.OwnerScope{Namespace: p.Namespace}, true
+}
+
 func (m *managementModule) handleCreateRegistrationCode(w http.ResponseWriter, r *http.Request) {
 	if m.codes == nil {
 		registrationCodeUnavailable(w, r)
 		return
 	}
+	p, ok := principalFromRequest(r)
+	if !ok {
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
 	var req registrationCodeCreateRequest
 	if !decodeJSON(w, r, &req) {
+		return
+	}
+	requested, err := resolveRequestedNamespaces(p, req.AllowedNamespaces)
+	if err != nil {
+		// The reason is a client-side scope error, not internal state, so it is
+		// safe to name the offending namespace back. It is one the caller sent.
+		writeFail(w, r, http.StatusForbidden, "namespace_forbidden", err.Error())
 		return
 	}
 	id, plaintext, err := control.GenerateRegistrationCode()
@@ -793,7 +820,8 @@ func (m *managementModule) handleCreateRegistrationCode(w http.ResponseWriter, r
 	code := control.RegistrationCode{
 		ID:                id,
 		CodeHash:          control.HashSecret(plaintext),
-		AllowedNamespaces: req.AllowedNamespaces,
+		OwnerNamespace:    p.Namespace,
+		AllowedNamespaces: requested,
 		AllowedNodeTypes:  req.AllowedNodeTypes,
 		CreatedAt:         time.Now().UTC(),
 	}
@@ -804,14 +832,69 @@ func (m *managementModule) handleCreateRegistrationCode(w http.ResponseWriter, r
 	writeData(w, r, http.StatusOK, registrationCodeCreateResponse{ID: id, Code: plaintext})
 }
 
+// resolveRequestedNamespaces enforces the ceiling: a code may never grant a
+// namespace its creator does not itself hold.
+//
+// The allow decision reuses RunnerPolicy.AllowsNamespace by projecting the
+// principal into a one-element policy, rather than comparing strings here. Two
+// implementations of "is this namespace allowed" would drift, and the drift
+// would be a privilege escalation — the same reasoning RegistrationCode.Policy
+// documents.
+//
+// Note what the projection does to "*": AllowsNamespace compares
+// namespace.Namespace("*") against the principal's single allowed namespace, so
+// a wildcard request is simply a namespace nobody is named, and is rejected by
+// the ordinary path. It is not special-cased, which is why it cannot be
+// special-cased wrong.
+func resolveRequestedNamespaces(p Principal, requested []string) ([]string, error) {
+	if p.HasScope(ScopeRegistrationCodeCreateGlobal) {
+		// A platform operator may mint anything, including "*". Everything else
+		// still has to be a legal namespace name.
+		for _, ns := range requested {
+			if ns == "*" {
+				continue
+			}
+			if err := namespace.Validate(namespace.Namespace(ns)); err != nil {
+				return nil, fmt.Errorf("namespace %q is not a legal namespace name", ns)
+			}
+		}
+		return append([]string(nil), requested...), nil
+	}
+	if p.Namespace == "" {
+		return nil, errors.New("principal has no namespace and no global scope")
+	}
+	if len(requested) == 0 {
+		// Empty is NOT a safe default: AllowsNamespace reads an empty
+		// AllowedNamespaces as "the default namespace ONLY", which is a grant
+		// this principal does not hold unless it happens to BE the default
+		// namespace. Fill it in explicitly.
+		return []string{p.Namespace}, nil
+	}
+	ceiling := control.RunnerPolicy{AllowedNamespaces: []string{p.Namespace}}
+	for _, ns := range requested {
+		if ns != "*" {
+			if err := namespace.Validate(namespace.Namespace(ns)); err != nil {
+				return nil, fmt.Errorf("namespace %q is not a legal namespace name", ns)
+			}
+		}
+		if !ceiling.AllowsNamespace(namespace.Namespace(ns)) {
+			return nil, fmt.Errorf("namespace %q exceeds the caller's own namespace grant", ns)
+		}
+	}
+	return append([]string(nil), requested...), nil
+}
+
 func (m *managementModule) handleListRegistrationCodes(w http.ResponseWriter, r *http.Request) {
 	if m.codes == nil {
 		registrationCodeUnavailable(w, r)
 		return
 	}
-	// TODO(Task 2): narrow to the caller's principal. All:true here keeps the
-	// pre-change behavior exactly while Task 1 lands the store contract.
-	list, err := m.codes.List(r.Context(), control.OwnerScope{All: true})
+	scope, ok := ownerScopeFor(r, ScopeRegistrationCodeListGlobal)
+	if !ok {
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	list, err := m.codes.List(r.Context(), scope)
 	if err != nil {
 		// store.ErrEnrollScopeCorrupted (a scope column that failed to decode)
 		// or any other store failure must not reach the caller as err.Error() —
@@ -847,9 +930,12 @@ func (m *managementModule) handleRevokeRegistrationCode(w http.ResponseWriter, r
 		writeFail(w, r, http.StatusNotFound, "registration_code_not_found", "registration code not found")
 		return
 	}
-	// TODO(Task 2): narrow to the caller's principal. All:true here keeps the
-	// pre-change behavior exactly while Task 1 lands the store contract.
-	err := m.codes.Revoke(r.Context(), id, control.OwnerScope{All: true})
+	scope, ok := ownerScopeFor(r, ScopeRegistrationCodeRevokeGlobal)
+	if !ok {
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	err := m.codes.Revoke(r.Context(), id, scope)
 	if errors.Is(err, control.ErrRegistrationCodeNotFound) {
 		writeFail(w, r, http.StatusNotFound, "registration_code_not_found", "registration code not found")
 		return
@@ -871,9 +957,16 @@ func (m *managementModule) handleRegistrationCodeAudit(w http.ResponseWriter, r 
 		writeFail(w, r, http.StatusNotFound, "registration_code_not_found", "registration code not found")
 		return
 	}
-	// TODO(Task 2): narrow to the caller's principal. All:true here keeps the
-	// pre-change behavior exactly while Task 1 lands the store contract.
-	records, err := m.codes.EnrollAudit(r.Context(), id, control.OwnerScope{All: true})
+	scope, ok := ownerScopeFor(r, ScopeRegistrationCodeAuditGlobal)
+	if !ok {
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	records, err := m.codes.EnrollAudit(r.Context(), id, scope)
+	if errors.Is(err, control.ErrRegistrationCodeNotFound) {
+		writeFail(w, r, http.StatusNotFound, "registration_code_not_found", "registration code not found")
+		return
+	}
 	if err != nil {
 		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
