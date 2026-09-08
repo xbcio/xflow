@@ -64,6 +64,7 @@ data/
 # Claude Code local files
 .claude/worktrees/
 .claude/plans/
+.claude/sdd/
 .claude/superpowers/
 .claude/mockups/
 .claude/settings.local.json
