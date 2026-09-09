@@ -3,10 +3,12 @@ package control
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/store/storecontract"
 )
@@ -391,12 +393,28 @@ func (s failingIssuedIdentityStore) Renew(context.Context, string, time.Time) er
 	return s.err
 }
 
-// TestAuthenticateRejectsExpiredAndRevokedByteIdentically pins R7: an expired
-// identity, a revoked identity, and a token nobody ever issued must be
-// indistinguishable from outside. Any difference — a different error, a
-// different message, a different latency class — turns the authentication
-// endpoint into an oracle for which runner ids exist.
-func TestAuthenticateRejectsExpiredAndRevokedByteIdentically(t *testing.T) {
+// TestAuthenticateRejectsExpiredAndRevokedIdenticallyToCallers pins R7 at the
+// place R7 actually lives.
+//
+// This test used to be named ...ByteIdentically and asserted that the expired,
+// revoked and unknown-token rejections produced byte-identical err.Error()
+// strings. That assertion was stricter than the invariant it named, and it was
+// stricter in a direction that cost the operator: authenticate's error text
+// never reaches a caller — Core.authDeny logs it and returns the
+// ErrUnauthenticated constant, which is the only thing either transport ever
+// renders (server.go writeRunnerError, grpc_server.go runnerStatus) — so
+// equal strings bought no external indistinguishability, while distinct
+// strings buy an operator the difference between "your fleet's TTL lapsed" and
+// "someone is knocking with a bad token". The same file's
+// TestIssuedIdentityLookupFailureIsExternallyIdenticalButInternallyDistinct
+// had already established that exact shape for the store-failure path.
+//
+// So the R7 boundary is: identical error VALUE (errors.Is) and identical
+// TRANSPORT-VISIBLE result (authDeny's ErrUnauthenticated); distinct
+// server-side log text. This test asserts all three, and the third in the
+// negative direction — the three log strings must differ pairwise, so a
+// regression that reverts 1a's wraps fails here rather than passing silently.
+func TestAuthenticateRejectsExpiredAndRevokedIdenticallyToCallers(t *testing.T) {
 	base := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
 	newAuth := func(t *testing.T, id IssuedIdentity) *IssuedIdentityAuthenticator {
 		t.Helper()
@@ -409,8 +427,13 @@ func TestAuthenticateRejectsExpiredAndRevokedByteIdentically(t *testing.T) {
 		return a
 	}
 
+	// The secret is spelled out in full rather than as "tok" so the
+	// no-caller-values assertion below is not trivially satisfied — "tok" is a
+	// substring of "unknown auth token" and would make that check unfailable.
+	const secret = "s3cret-runner-token"
+
 	live := IssuedIdentity{
-		RunnerID: "r", TokenHash: HashSecret("tok"), CodeID: "c",
+		RunnerID: "r", TokenHash: HashSecret(secret), CodeID: "c",
 		IssuedAt: base.Add(-time.Hour), ExpiresAt: base.Add(time.Hour),
 	}
 	expired := live
@@ -423,34 +446,103 @@ func TestAuthenticateRejectsExpiredAndRevokedByteIdentically(t *testing.T) {
 	// The live and never-expiring identities authenticate.
 	for name, id := range map[string]IssuedIdentity{"live": live, "no expiry": noExpiry} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := newAuth(t, id).authenticate("r", "tok"); err != nil {
+			if _, err := newAuth(t, id).authenticate("r", secret); err != nil {
 				t.Fatalf("authenticate = %v, want nil", err)
 			}
 		})
 	}
 
-	// Every rejection is the same error value AND the same string.
 	unknown := NewIssuedIdentityAuthenticator(NewMemoryIssuedIdentityStore())
 	unknown.now = func() time.Time { return base }
-	_, wantErr := unknown.authenticate("nobody", "tok")
-	for name, id := range map[string]IssuedIdentity{"expired": expired, "revoked": revoked} {
-		t.Run(name, func(t *testing.T) {
-			_, err := newAuth(t, id).authenticate("r", "tok")
-			if !errors.Is(err, ErrAuthUnknownToken) {
-				t.Fatalf("err = %v, want ErrAuthUnknownToken", err)
+	_, unknownErr := unknown.authenticate("nobody", secret)
+
+	_, expiredErr := newAuth(t, expired).authenticate("r", secret)
+	_, revokedErr := newAuth(t, revoked).authenticate("r", secret)
+
+	rejections := []struct {
+		name string
+		err  error
+	}{
+		{"unknown", unknownErr},
+		{"expired", expiredErr},
+		{"revoked", revokedErr},
+	}
+
+	// (1) Same error VALUE. ErrAuthUnknownToken stays the single matchable
+	// identity on all three paths; a second sentinel would let a caller (or a
+	// future transport mapping) tell them apart programmatically.
+	for _, tc := range rejections {
+		if !errors.Is(tc.err, ErrAuthUnknownToken) {
+			t.Fatalf("%s rejection err = %v, want errors.Is ErrAuthUnknownToken", tc.name, tc.err)
+		}
+	}
+
+	// (2) Same CALLER-VISIBLE result. This is R7's real landing point and the
+	// original test never covered it: it stopped at authenticate and never
+	// drove authDeny, the one hop that decides what a caller receives. Feed all
+	// three through authDeny and require the identical ErrUnauthenticated
+	// value. An implementation that "helpfully" propagated the wrapped auth
+	// error out of authDeny would still satisfy assertion (1) — it wraps
+	// ErrAuthUnknownToken, not ErrUnauthenticated — and would sail past the
+	// old byte-comparison too, because that comparison never looked here.
+	core := &Core{}
+	for _, tc := range rejections {
+		got := core.authDeny(context.Background(), "r", secret, "heartbeat", TransportInfo{}, tc.err)
+		if got != ErrUnauthenticated {
+			t.Fatalf("authDeny(%s) = %v (%T), want the ErrUnauthenticated constant itself; "+
+				"anything else leaks the rejection reason to the caller through "+
+				"writeRunnerError/runnerStatus, which render err.Error() on the "+
+				"ErrUnauthenticated branch", tc.name, got, got)
+		}
+		if !errors.Is(got, ErrUnauthenticated) {
+			t.Fatalf("authDeny(%s) result does not match ErrUnauthenticated: %v", tc.name, got)
+		}
+	}
+
+	// (3) Distinct SERVER-SIDE text. The inverse of the old assertion, and the
+	// guard on 1a: authDeny logs the error verbatim, so collapsing these three
+	// strings makes a fleet-wide TTL lapse read exactly like a bad-token flood
+	// and sends the operator to credential distribution instead of
+	// --runner-identity-ttl. A regression that reverts either wrap to a bare
+	// `return ErrAuthUnknownToken` makes the reverted path equal "unknown" here
+	// and fails this loop.
+	for i := 0; i < len(rejections); i++ {
+		for j := i + 1; j < len(rejections); j++ {
+			a, b := rejections[i], rejections[j]
+			if a.err.Error() == b.err.Error() {
+				t.Fatalf("%s and %s both log as %q; an operator reading auth_denied "+
+					"cannot tell a lapsed identity TTL from a bad token, which is the "+
+					"whole reason these are wrapped", a.name, b.name, a.err.Error())
 			}
-			if err.Error() != wantErr.Error() {
-				t.Fatalf("err string = %q, want byte-identical to the unknown-token\n"+
-					"rejection %q — a distinct message is an existence oracle",
-					err.Error(), wantErr.Error())
+		}
+	}
+
+	// The reasons must stay free of caller-supplied values and of the expiry
+	// timestamp. authDeny logs the runner id in its own field, and a timestamp
+	// would be indirect evidence that this runner id was once real — plus a
+	// disclosure surface the day one of these strings is mistakenly wired onto
+	// an outward path. The runner id "r" is not probed as a substring here
+	// because it is one character and matches almost any English word; the
+	// token and the timestamps are the values that would actually hurt.
+	for _, tc := range rejections {
+		for _, forbidden := range []string{
+			secret,
+			base.String(),
+			base.Format(time.RFC3339),
+			expired.ExpiresAt.Format(time.RFC3339),
+			revoked.RevokedAt.Format(time.RFC3339),
+		} {
+			if strings.Contains(tc.err.Error(), forbidden) {
+				t.Fatalf("%s rejection message %q contains %q, which must not appear in it",
+					tc.name, tc.err.Error(), forbidden)
 			}
-		})
+		}
 	}
 
 	// Expiry is strictly in the past: exactly-at-expiry is expired.
 	atExpiry := live
 	atExpiry.ExpiresAt = base
-	if _, err := newAuth(t, atExpiry).authenticate("r", "tok"); !errors.Is(err, ErrAuthUnknownToken) {
+	if _, err := newAuth(t, atExpiry).authenticate("r", secret); !errors.Is(err, ErrAuthUnknownToken) {
 		t.Fatalf("identity expiring exactly now authenticated; want rejected")
 	}
 }
@@ -511,5 +603,164 @@ func TestIssuedIdentityLookupFailureIsExternallyIdenticalButInternallyDistinct(t
 				t.Fatalf("failed lookup returned a non-zero policy: %+v", policy)
 			}
 		})
+	}
+}
+
+// capturedLog is one logger call: the event name plus its key/value args
+// flattened the way Core.authDeny passes them.
+type capturedLog struct {
+	msg  string
+	args []any
+}
+
+func (e capturedLog) field(key string) (any, bool) {
+	for i := 0; i+1 < len(e.args); i += 2 {
+		if k, ok := e.args[i].(string); ok && k == key {
+			return e.args[i+1], true
+		}
+	}
+	return nil, false
+}
+
+// logCapturingLogger records Error calls. It satisfies engine.Logger, the
+// interface Core.logger holds (mirrors controlplane_test.go's
+// warnCapturingLogger, which captures the other half of the surface).
+type logCapturingLogger struct{ entries []capturedLog }
+
+func (l *logCapturingLogger) Debug(string, ...any)  {}
+func (l *logCapturingLogger) Debugf(string, ...any) {}
+func (l *logCapturingLogger) Info(string, ...any)   {}
+func (l *logCapturingLogger) Infof(string, ...any)  {}
+func (l *logCapturingLogger) Warn(string, ...any)   {}
+func (l *logCapturingLogger) Warnf(string, ...any)  {}
+func (l *logCapturingLogger) Error(msg string, args ...any) {
+	l.entries = append(l.entries, capturedLog{msg: msg, args: append([]any(nil), args...)})
+}
+func (l *logCapturingLogger) Errorf(string, ...any) {}
+func (l *logCapturingLogger) Panic(string, ...any)  {}
+func (l *logCapturingLogger) Panicf(string, ...any) {}
+
+// TestAuthDeniedLogNamesTheLifecycleReason drives the whole rejection through a
+// real Core — authenticator, authDeny, logger — and asserts the thing an
+// operator actually reads.
+//
+// Every other test in this file stops at authenticate() and inspects a returned
+// error. That leaves the delivery mechanism untested: authDeny is free to log
+// something other than the error it was handed (a fixed string, a
+// TokenFingerprint, nothing at all) and every authenticate-level assertion
+// still passes. This test closes that gap from the other end: it reads the
+// auth_denied event's err field and requires the reason to be legible there,
+// while requiring the value returned to the caller to remain the
+// ErrUnauthenticated constant.
+func TestAuthDeniedLogNamesTheLifecycleReason(t *testing.T) {
+	base := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	// Spelled out in full: "tok" is a substring of "unknown auth token", so a
+	// short token would make the "token never reaches the log" check unfailable.
+	const secret = "s3cret-runner-token"
+
+	live := IssuedIdentity{
+		RunnerID: "runner-1", TokenHash: HashSecret(secret), CodeID: "c",
+		IssuedAt: base.Add(-time.Hour), ExpiresAt: base.Add(time.Hour),
+	}
+	expired := live
+	expired.ExpiresAt = base.Add(-time.Minute)
+	revoked := live
+	revoked.RevokedAt = base.Add(-time.Minute)
+
+	for _, tc := range []struct {
+		name     string
+		identity IssuedIdentity
+		// wantSubstr is the reason word an operator greps for. It must be
+		// absent from the plain unknown-token rejection, which the loop below
+		// also checks, so "unknown auth token" alone cannot satisfy it.
+		wantSubstr string
+	}{
+		{"expired", expired, "expired"},
+		{"revoked", revoked, "revoked"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := NewMemoryIssuedIdentityStore()
+			if err := st.Issue(context.Background(), tc.identity); err != nil {
+				t.Fatalf("issue: %v", err)
+			}
+			auth := NewIssuedIdentityAuthenticator(st)
+			auth.now = func() time.Time { return base }
+
+			logger := &logCapturingLogger{}
+			core := &Core{auth: auth, logger: logger}
+
+			_, err := core.heartbeat(context.Background(), protocol.HeartbeatRequest{
+				RunnerID:  "runner-1",
+				SessionID: "s-1",
+				Capacity:  1,
+				AuthToken: secret,
+			}, TransportInfo{})
+
+			// The caller learns nothing beyond "unauthenticated".
+			if err != ErrUnauthenticated {
+				t.Fatalf("heartbeat err = %v (%T), want the ErrUnauthenticated constant", err, err)
+			}
+
+			var denied *capturedLog
+			for i := range logger.entries {
+				if logger.entries[i].msg == "auth_denied" {
+					denied = &logger.entries[i]
+					break
+				}
+			}
+			if denied == nil {
+				t.Fatalf("no auth_denied event logged; entries = %+v", logger.entries)
+			}
+			raw, ok := denied.field("err")
+			if !ok {
+				t.Fatalf("auth_denied carries no err field: %+v", denied.args)
+			}
+			logged, ok := raw.(error)
+			if !ok {
+				t.Fatalf("auth_denied err field = %#v, want an error", raw)
+			}
+			if !strings.Contains(logged.Error(), tc.wantSubstr) {
+				t.Fatalf("auth_denied logged err=%q, which does not name %q; an operator "+
+					"reading this cannot tell a lapsed/revoked identity from a bad token "+
+					"and will go audit credential distribution instead of "+
+					"--runner-identity-ttl and the renewal loop",
+					logged.Error(), tc.wantSubstr)
+			}
+			// The log line still identifies the same failure class, so existing
+			// alerting on "unknown auth token" keeps matching.
+			if !errors.Is(logged, ErrAuthUnknownToken) {
+				t.Fatalf("auth_denied logged err=%v, which no longer matches ErrAuthUnknownToken", logged)
+			}
+			// And the token itself is never in the log (org policy blacklist);
+			// authDeny logs a fingerprint in its own field instead.
+			if strings.Contains(logged.Error(), secret) {
+				t.Fatalf("auth_denied logged err=%q, which contains the token", logged.Error())
+			}
+		})
+	}
+
+	// Control: the unknown-token rejection must NOT contain either reason word,
+	// otherwise the assertions above would be satisfied by a message that says
+	// everything on every path and distinguishes nothing.
+	logger := &logCapturingLogger{}
+	core := &Core{auth: NewIssuedIdentityAuthenticator(NewMemoryIssuedIdentityStore()), logger: logger}
+	if _, err := core.heartbeat(context.Background(), protocol.HeartbeatRequest{
+		RunnerID: "runner-1", SessionID: "s-1", Capacity: 1, AuthToken: secret,
+	}, TransportInfo{}); err != ErrUnauthenticated {
+		t.Fatalf("unknown-token heartbeat err = %v, want ErrUnauthenticated", err)
+	}
+	if len(logger.entries) == 0 {
+		t.Fatal("unknown-token rejection logged nothing")
+	}
+	raw, _ := logger.entries[0].field("err")
+	unknownText := ""
+	if e, ok := raw.(error); ok {
+		unknownText = e.Error()
+	}
+	for _, word := range []string{"expired", "revoked"} {
+		if strings.Contains(unknownText, word) {
+			t.Fatalf("unknown-token rejection logs %q, which already contains %q; "+
+				"the lifecycle reasons are then indistinguishable from it", unknownText, word)
+		}
 	}
 }
