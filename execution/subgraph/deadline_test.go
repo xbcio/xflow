@@ -220,6 +220,171 @@ func TestGroupTimeoutCancelsRunningMembers(t *testing.T) {
 	}
 }
 
+// TestExpiredGroupDeadlineIsReportedNotDiscarded pins the misclassification an
+// already-passed deadline used to produce. Measured on the pre-fix code, this
+// exact request returned:
+//
+//	outcome=failed  permanent=true  error="node.timeout: node execution exceeded its deadline"
+//
+// Every part of that is wrong for a timeout, and the permanent=true is the part
+// with teeth: MapBodyExecutor.runItem carries it into the item's error, and
+// completeAtomic reads types.IsPermanent(cause) to decide retry-vs-skip. An
+// environmental deadline was therefore SKIPPED rather than retried.
+//
+// The res.Permanent assertion is the one that discriminates -- it was verified
+// to redden when the guard is removed. res.Outcome does too. handler.started is
+// deliberately NOT a discriminator: the inner engine rejects the member at the
+// lease stage, so started==0 holds both before and after the fix. It is kept as
+// a standing contract (an expired request must never reach user code) rather
+// than as evidence for this fix, so that a future change which moves the check
+// after Submit is caught here.
+func TestExpiredGroupDeadlineIsReportedNotDiscarded(t *testing.T) {
+	handler := &sleepHandler{duration: 5 * time.Second}
+	ex := deadlineTestExecutor(t, handler)
+
+	pkg := buildSingleMemberPackage(t, -1) // member opts out of its own timeout
+	hash, err := graph.ComputePackageHash(pkg)
+	if err != nil {
+		t.Fatalf("compute package hash: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	res, err := ex.Execute(ctx, Request{
+		Package:     pkg,
+		PackageHash: hash,
+		Input:       &types.Input{Data: map[string]any{"seed": 1}},
+		// Already in the past when Execute is entered.
+		Deadline: time.Now().Add(-time.Second),
+	})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	if res.Outcome != OutcomeTimeout {
+		t.Fatalf("outcome = %v, want %v -- an expired deadline is a timeout, not a "+
+			"licence to run unbounded", res.Outcome, OutcomeTimeout)
+	}
+	// The regression guard for the naive fix. Handing the expired instant to
+	// context.WithDeadline yields an already-Done context, Submit then fails, and
+	// Submit's failure path stamps Permanent: true ("the submission never
+	// started"). Result.Permanent is documented as never true for a timeout, and
+	// downstream completeAtomic reads exactly this flag to decide retry-vs-skip:
+	// a permanent timeout would be skipped instead of retried.
+	if res.Permanent {
+		t.Fatal("Permanent = true for a timeout -- a deadline is environmental, so " +
+			"the same input may well succeed on the next attempt")
+	}
+	if handler.started.Load() != 0 {
+		t.Fatalf("member started %d time(s) -- an expired request must not reach "+
+			"user code (standing contract, not this fix's discriminator)",
+			handler.started.Load())
+	}
+	if elapsed > time.Second {
+		t.Fatalf("took %v for an already-expired deadline, want near-immediate", elapsed)
+	}
+}
+
+// TestExpiredDeadlineIsRejectedBeforeCompiling pins the FIRST of Execute's two
+// expiry checks -- the one before cache.Resolve. Mutation testing found it
+// entirely uncovered: deleting it left the whole package green, because the
+// second check (after Resolve) catches the same request and produces an
+// identical Result. The two guards mask each other, so no assertion on the
+// returned Result can tell them apart.
+//
+// What distinguishes them is the work in between. The first guard exists so an
+// already-late request "does not pay for a compile it cannot use"; that claim is
+// only falsifiable by observing whether the compile happened. cache.Known() is
+// exactly that observation -- Resolve fills the cache on its success path and
+// only there, so an empty cache after Execute proves Resolve never compiled.
+//
+// The cache is deliberately fresh and the package deliberately absent from it,
+// so a hit cannot substitute for a miss and make this vacuously green.
+func TestExpiredDeadlineIsRejectedBeforeCompiling(t *testing.T) {
+	handler := &sleepHandler{duration: 5 * time.Second}
+	reg := execution.NewRegistry()
+	reg.RegisterGlobal("test.sleep", handler)
+	cache := NewPackageCache(PackageCacheConfig{MaxEntries: 4, MaxPackageBytes: 1 << 20})
+	ex := NewExecutor(reg, cache, func() Backend {
+		return local.New(local.WithRegistry(reg), local.WithConcurrency(1))
+	})
+
+	pkg := buildSingleMemberPackage(t, -1)
+	hash, err := graph.ComputePackageHash(pkg)
+	if err != nil {
+		t.Fatalf("compute package hash: %v", err)
+	}
+	if n := len(cache.Known()); n != 0 {
+		t.Fatalf("cache started with %d entries, want 0 -- the discriminator "+
+			"below only means anything on a cold cache", n)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	res, err := ex.Execute(ctx, Request{
+		Package:     pkg,
+		PackageHash: hash,
+		Input:       &types.Input{Data: map[string]any{"seed": 1}},
+		Deadline:    time.Now().Add(-time.Second),
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res.Outcome != OutcomeTimeout {
+		t.Fatalf("outcome = %v, want %v", res.Outcome, OutcomeTimeout)
+	}
+	if known := cache.Known(); len(known) != 0 {
+		t.Fatalf("cache holds %d package(s) after an already-expired request, want 0 "+
+			"-- the deadline was checked only AFTER Resolve, so the request paid for "+
+			"a compile whose result it then threw away", len(known))
+	}
+}
+
+// TestExpiredDeadlineResultBoundaries covers the three shapes the guard has to
+// tell apart. The zero case is the one that would break every existing caller
+// if it were folded in with "expired": sdk/xflow and SubgraphRuntime both build
+// their MapBodyExecutor with no deadline at all, so treating a zero time.Time
+// as "already passed" would time out every in-process map body.
+func TestExpiredDeadlineResultBoundaries(t *testing.T) {
+	tests := []struct {
+		name        string
+		deadline    time.Time
+		wantExpired bool
+	}{
+		{name: "zero means no deadline", deadline: time.Time{}, wantExpired: false},
+		{name: "future has budget left", deadline: time.Now().Add(time.Minute), wantExpired: false},
+		{name: "past is expired", deadline: time.Now().Add(-time.Nanosecond), wantExpired: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res, expired := expiredDeadlineResult(tt.deadline)
+			if expired != tt.wantExpired {
+				t.Fatalf("expired = %v, want %v", expired, tt.wantExpired)
+			}
+			if !expired {
+				return
+			}
+			if res.Outcome != OutcomeTimeout {
+				t.Fatalf("outcome = %v, want %v", res.Outcome, OutcomeTimeout)
+			}
+			// The same condition noticed at a different moment must not read as a
+			// different failure: this is the string the post-execution switch
+			// produces for a context deadline.
+			if res.Error != "deadline exceeded" {
+				t.Fatalf("error = %q, want %q to match the post-execution wording",
+					res.Error, "deadline exceeded")
+			}
+			if res.Permanent {
+				t.Fatal("Permanent = true for a timeout")
+			}
+		})
+	}
+}
+
 // TestZeroGroupDeadlineLeavesMemberBoundsIntact: a group with no timeout still
 // bounds its members by their own (or the global default).
 func TestZeroGroupDeadlineLeavesMemberBoundsIntact(t *testing.T) {

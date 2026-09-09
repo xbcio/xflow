@@ -135,9 +135,58 @@ func NewExecutor(reg *execution.Registry, cache *PackageCache, newBackend func()
 	return e
 }
 
+// expiredDeadlineResult reports the verdict for a deadline that has already
+// passed, or ok=false when there is time left (or no deadline was given).
+//
+// It exists because both deadline guards below were written as
+// `req.Deadline.After(time.Now())`, so an already-late request skipped the
+// lease TTL and skipped the context deadline. When those guards were written
+// (d57c04d) that inverted the constraint into its own absence -- the later a
+// batch arrived, the longer it was allowed to run.
+//
+// That is no longer the symptom. dc4343c added engine.WithOuterDeadline, which
+// is passed UNCONDITIONALLY below and clamps every lease the inner engine issues
+// (engine/lease.go:120 tests only IsZero, not expiry). An expired deadline
+// therefore reaches the members and kills them immediately -- the unbounded run
+// was closed as a side effect, without either guard being touched.
+//
+// What was left is a MISCLASSIFICATION, which is what this function fixes: the
+// members die of the outer clamp, the inner execution reports failure, and
+// Execute returns OutcomeFailed for what is squarely a timeout. That distinction
+// is load-bearing one hop further out. MapBodyExecutor.runItem turns the result
+// into the item's error via itemFailure, which carries res.Permanent through to
+// completeAtomic's types.IsPermanent(cause) retry decision -- so a timeout
+// wearing a failed member's permanent classification is SKIPPED rather than
+// retried, which is precisely backwards for an environmental condition.
+//
+// The obvious alternative -- handing the expired instant to
+// context.WithDeadline -- makes that worse rather than better: the context is
+// already Done, Submit fails, and Submit's failure path stamps Permanent: true
+// on the reasoning that "the submission never started, so re-submitting fails
+// identically". That reasoning does not hold for a timeout, and
+// Result.Permanent is documented as never true for one. So the check has to
+// happen BEFORE the work and report the timeout directly.
+//
+// The message matches the one the post-execution switch uses for a context
+// deadline, so the same condition does not read as two different failures
+// depending on when it was noticed.
+func expiredDeadlineResult(deadline time.Time) (Result, bool) {
+	if deadline.IsZero() || deadline.After(time.Now()) {
+		return Result{}, false
+	}
+	return Result{Outcome: OutcomeTimeout, Error: "deadline exceeded"}, true
+}
+
 // Execute compiles (or fetches from cache) req.Package, runs it to completion
 // on a fresh backend, and returns its collected boundary exits.
 func (e *Executor) Execute(ctx context.Context, req Request) (Result, error) {
+	// Checked before Resolve so an already-late request does not pay for a
+	// compile it cannot use. Checked again after it, because a slow compile can
+	// consume the remaining budget on its own.
+	if result, expired := expiredDeadlineResult(req.Deadline); expired {
+		return result, nil
+	}
+
 	payload := &engine.GroupLeasePayload{
 		PackageHash: req.PackageHash,
 		Package:     req.Package,
@@ -145,6 +194,17 @@ func (e *Executor) Execute(ctx context.Context, req Request) (Result, error) {
 	compiled, pkg, err := e.cache.Resolve(payload, e.inventoryFromRegistry())
 	if err != nil {
 		return Result{}, err
+	}
+
+	// The second of the two checks the entry comment describes. A cold cache
+	// compiles the package here, and a package big enough to matter can spend
+	// the whole remaining budget doing it -- at which point every bound built
+	// below would be computed from an instant that has already passed. Reported
+	// here rather than left to the two guards further down, because those guards
+	// react to an expired deadline by omitting the bound, which is the very
+	// inversion this function exists to close.
+	if result, expired := expiredDeadlineResult(req.Deadline); expired {
+		return result, nil
 	}
 
 	// Pre-allocate inner execution ID.
@@ -217,6 +277,17 @@ func (e *Executor) Execute(ctx context.Context, req Request) (Result, error) {
 	if req.SuspendDisabled {
 		engineOpts = append(engineOpts, engine.WithSuspendDisabled(nil))
 	}
+	// This guard and the context one below are now backstops, not the deadline's
+	// enforcement. Both omit their bound when the deadline has passed, which on
+	// its own is the inversion expiredDeadlineResult documents; the two checks
+	// above are what make an expired deadline unreachable here. What is left for
+	// these to absorb is the sub-millisecond window between the second check and
+	// this line, where computing a negative TTL or handing an already-Done
+	// context to Submit would misreport a timeout as a permanent failure.
+	//
+	// After() on a zero Deadline is false, so "no deadline" and "expired
+	// deadline" both fall through -- the second condition below is redundant
+	// with that, and kept only because it states the no-deadline case out loud.
 	if req.Deadline.After(time.Now()) {
 		ttl := time.Until(req.Deadline)
 		engineOpts = append(engineOpts, engine.WithDefaultLeaseTTL(ttl))
