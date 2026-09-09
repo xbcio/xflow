@@ -218,6 +218,8 @@ func mpStartReportingRunner(t *testing.T, runnerBin, httpURL, id string) *r8Proc
 		"--heartbeat-interval", "1s",
 		"--report-metrics",
 		"--report-metrics-interval", "1s",
+		// See startR8Runner for why the plaintext opt-out is required here.
+		"--allow-plaintext",
 	)
 	cmd.Stdout, cmd.Stderr = out, out
 	if err := cmd.Start(); err != nil {

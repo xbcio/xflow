@@ -293,6 +293,17 @@ type r8Process struct {
 // was needed. That stopped being true when production mode began requiring an
 // explicit runner-auth posture; the comment outlived the premise and the test
 // went red at server startup, not here.
+// --allow-plaintext is load-bearing, not boilerplate. validateTransportSecurity
+// refuses to start a standalone runner that would ship its bearer token over an
+// unencrypted link, and every process e2e here dials 127.0.0.1 over plain http.
+// Without the opt-out the runner exits before it registers, and the test spends
+// its whole timeout waiting for a process that is already dead -- which is how
+// this was found. The token never leaves the loopback interface, so accepting
+// the risk is honest here; giving these tests TLS material would test the
+// harness instead of the feature.
+//
+// TestRunnerRefusesPlaintextByDefault is what keeps the gate itself covered on a
+// real binary once all three harnesses opt out.
 func startR8Runner(t *testing.T, runnerBin, httpURL, id string) *r8Process {
 	t.Helper()
 	out := &safeBuffer{}
@@ -304,6 +315,7 @@ func startR8Runner(t *testing.T, runnerBin, httpURL, id string) *r8Process {
 		"--cap", "xflow.function,xflow.http,xflow.script",
 		"--poll-wait", "50ms",
 		"--concurrency", "1",
+		"--allow-plaintext",
 	)
 	cmd.Stdout = out
 	cmd.Stderr = out

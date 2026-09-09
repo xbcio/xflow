@@ -113,6 +113,8 @@ func startSubgraphRunner(t *testing.T, runnerBin, httpURL, id, caps string) *r8P
 		"--cap", caps,
 		"--poll-wait", "50ms",
 		"--concurrency", "2",
+		// See startR8Runner for why the plaintext opt-out is required here.
+		"--allow-plaintext",
 	)
 	cmd.Stdout = out
 	cmd.Stderr = out
