@@ -294,7 +294,7 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 	if rc, start, warnMsg, warnErr := decideIdentityRenewal(cfg, store); warnErr != nil {
 		slog.Warn(warnMsg, "runner_id", cfg.runnerID, "error", warnErr)
 	} else if start {
-		go runIdentityRenewal(runCtx, rc, cfg.runnerID, cfg.token, slog.Default())
+		go startIdentityRenewal(runCtx, rc, cfg.runnerID, cfg.token, slog.Default())
 	}
 
 	err = runner.Run(runCtx)
@@ -521,6 +521,14 @@ func decideIdentityRenewal(cfg runnerConfig, store identityStore) (rc renewClien
 	}
 	return client, true, "", nil
 }
+
+// startIdentityRenewal is the seam runRunner actually calls, following the
+// newRunnerService precedent above: the wiring block that decides *whether*
+// to launch runIdentityRenewal has no test of its own, only decideIdentityRenewal
+// (the pure function feeding it) does. Swapping this var lets a test observe
+// that the goroutine was launched -- or wasn't -- without waiting on a real
+// renewal loop.
+var startIdentityRenewal = runIdentityRenewal
 
 // runIdentityRenewal keeps this runner's issued identity alive.
 //
