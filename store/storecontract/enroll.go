@@ -370,6 +370,18 @@ func RunIssuedIdentityStoreContract(t *testing.T, factory func(t *testing.T) sto
 		if err := s.Renew(ctx, "runner-lifecycle", next.Add(time.Hour)); !errors.Is(err, store.ErrIssuedIdentityNotFound) {
 			t.Fatalf("renew after revoke = %v, want ErrIssuedIdentityNotFound", err)
 		}
+		// The rejected renew must not have moved ExpiresAt. A "write first,
+		// check second" implementation would still return
+		// ErrIssuedIdentityNotFound here (revoked lookups are hidden) while
+		// having already advanced the row — the assertion above alone cannot
+		// see that, only a follow-up Lookup can.
+		afterRevokedRenew, _, err := s.Lookup(ctx, "runner-lifecycle")
+		if err != nil {
+			t.Fatalf("lookup after rejected renew: %v", err)
+		}
+		if !afterRevokedRenew.ExpiresAt.Equal(next) {
+			t.Fatalf("rejected renew on revoked identity moved ExpiresAt: got %v, want %v (unchanged)", afterRevokedRenew.ExpiresAt, next)
+		}
 
 		// Neither can an already-expired one.
 		past := store.IssuedIdentity{
@@ -384,6 +396,14 @@ func RunIssuedIdentityStoreContract(t *testing.T, factory func(t *testing.T) sto
 		}
 		if err := s.Renew(ctx, "runner-expired", time.Now().UTC().Add(time.Hour)); !errors.Is(err, store.ErrIssuedIdentityNotFound) {
 			t.Fatalf("renew of expired = %v, want ErrIssuedIdentityNotFound", err)
+		}
+		// Same non-mutation requirement for the expired case.
+		afterExpiredRenew, _, err := s.Lookup(ctx, "runner-expired")
+		if err != nil {
+			t.Fatalf("lookup after rejected renew: %v", err)
+		}
+		if !afterExpiredRenew.ExpiresAt.Equal(past.ExpiresAt) {
+			t.Fatalf("rejected renew on expired identity moved ExpiresAt: got %v, want %v (unchanged)", afterExpiredRenew.ExpiresAt, past.ExpiresAt)
 		}
 
 		if err := s.Revoke(ctx, "no-such-runner"); !errors.Is(err, store.ErrIssuedIdentityNotFound) {
