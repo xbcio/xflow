@@ -777,10 +777,12 @@ heartbeat:
 #   store: "file"
 #   file: "/var/lib/xflow/runner-identity.json"
 
-# security:
-#   # A plaintext control-plane connection ships the runner token in the clear.
-#   # The runner refuses to start on one unless this is set.
-#   allow_plaintext: false
+security:
+  # The url above is plaintext http, which would ship the runner token in the
+  # clear, so the runner refuses to start unless this is set. It is true here
+  # only because the sample points at localhost. Switch url to https:// and
+  # delete this line before aiming a runner at anything off the machine.
+  allow_plaintext: true
 #   # Exit if the control plane issues no supply encryption key at
 #   # registration, rather than fetching supply content in the clear.
 #   require_supply_encryption: false

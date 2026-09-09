@@ -198,8 +198,20 @@ func TestConfigSamplePrintsYAML(t *testing.T) {
 	if !strings.Contains(out.String(), "runner:") || !strings.Contains(out.String(), "server:") {
 		t.Fatalf("sample output = %q", out.String())
 	}
-	if _, err := loadRunnerConfigFromBytes(out.Bytes()); err != nil {
+	cfg, err := loadRunnerConfigFromBytes(out.Bytes())
+	if err != nil {
 		t.Fatalf("sample is not parseable: %v", err)
+	}
+	// Parseable is not the bar. A sample that parses but is refused at startup
+	// is worse than no sample: the reader copies it verbatim, gets a hard stop,
+	// and has no reason to suspect the sample itself. That is exactly what
+	// happened -- validateTransportSecurity landed while the sample still
+	// advertised a plaintext localhost url with allow_plaintext commented out.
+	//
+	// This assertion is what keeps the two locked together: changing the gate
+	// or the sample without the other reddens here.
+	if err := validateTransportSecurity(cfg); err != nil {
+		t.Fatalf("sample would be refused at startup by validateTransportSecurity: %v", err)
 	}
 }
 
