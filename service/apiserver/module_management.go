@@ -454,6 +454,14 @@ func (m *managementModule) handleListRunners(w http.ResponseWriter, r *http.Requ
 // mounting never depends on m.issued being non-nil), but this backend cannot
 // perform the operation at all, which is a different fact than "no such
 // runner".
+//
+// The route registers "" as its resource namespace, which permanently disables
+// NamespaceAwareAuthorizer's own ceiling for it, so ownership is enforced here
+// and in the store instead: ownerScopeFor confines a tenant principal to the
+// identities issued from its own namespace's codes, and only
+// ScopeManagementRunnerRevokeIdentityGlobal lifts that. Removing either half
+// reopens a cross-tenant DoS — one tenant knocking another's entire fleet
+// offline.
 func (m *managementModule) handleRevokeRunnerIdentity(w http.ResponseWriter, r *http.Request) {
 	if m.issued == nil {
 		writeFail(w, r, http.StatusNotImplemented, "not_implemented",
@@ -465,7 +473,12 @@ func (m *managementModule) handleRevokeRunnerIdentity(w http.ResponseWriter, r *
 		writeFail(w, r, http.StatusNotFound, "runner_not_found", "runner not found")
 		return
 	}
-	err := m.issued.Revoke(r.Context(), runnerID)
+	scope, ok := ownerScopeFor(r, ScopeManagementRunnerRevokeIdentityGlobal)
+	if !ok {
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	err := m.issued.Revoke(r.Context(), runnerID, scope)
 	if errors.Is(err, control.ErrIssuedIdentityNotFound) {
 		writeFail(w, r, http.StatusNotFound, "runner_not_found", "runner not found")
 		return
@@ -477,7 +490,7 @@ func (m *managementModule) handleRevokeRunnerIdentity(w http.ResponseWriter, r *
 	// The runner id is an operator-supplied identifier, not a credential, so
 	// logging it is fine. The raw token never appears anywhere in this
 	// package; the store holds only its hash (TokenHash).
-	slog.Info("runner identity revoked", "runner_id", runnerID)
+	slog.Info("runner identity revoked", "runner_id", runnerID, "owner_scope_all", scope.All)
 	writeData(w, r, http.StatusOK, map[string]string{"runner_id": runnerID, "status": "revoked"})
 }
 

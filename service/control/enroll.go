@@ -83,9 +83,14 @@ func (c *Core) Enroll(ctx context.Context, req protocol.EnrollRequest, info Tran
 		// The issued scope is the code's scope, narrowed to what the runner
 		// actually asked for. A runner that asks for one namespace does not get
 		// the code's full ceiling.
-		Scope:    issuedScope(code, req, runnerID),
-		CodeID:   code.ID,
-		IssuedAt: now,
+		Scope:  issuedScope(code, req, runnerID),
+		CodeID: code.ID,
+		// Snapshot the code's owner so revoking this identity later stays
+		// inside one tenant. Copied, not joined through CodeID: the identity
+		// outlives the code by design (see IssuedIdentity.Scope), so a deleted
+		// code must not erase who owns the runner.
+		OwnerNamespace: code.OwnerNamespace,
+		IssuedAt:       now,
 	}
 	// c.identityTTL == 0 (the default) leaves ExpiresAt zero, meaning "never
 	// expires" — the pre-feature behavior. Only WithIdentityTTL turns this on.

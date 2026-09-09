@@ -321,11 +321,12 @@ func RunIssuedIdentityStoreContract(t *testing.T, factory func(t *testing.T) sto
 		ctx := context.Background()
 		exp := time.Now().UTC().Add(time.Hour).Truncate(time.Millisecond)
 		id := store.IssuedIdentity{
-			RunnerID:  "runner-lifecycle",
-			TokenHash: store.HashSecret("tok"),
-			CodeID:    "code-1",
-			IssuedAt:  time.Now().UTC().Truncate(time.Millisecond),
-			ExpiresAt: exp,
+			RunnerID:       "runner-lifecycle",
+			TokenHash:      store.HashSecret("tok"),
+			CodeID:         "code-1",
+			OwnerNamespace: "nsA",
+			IssuedAt:       time.Now().UTC().Truncate(time.Millisecond),
+			ExpiresAt:      exp,
 		}
 		if err := s.Issue(ctx, id); err != nil {
 			t.Fatalf("issue: %v", err)
@@ -339,6 +340,14 @@ func RunIssuedIdentityStoreContract(t *testing.T, factory func(t *testing.T) sto
 		}
 		if !got.RevokedAt.IsZero() {
 			t.Fatalf("RevokedAt = %v, want zero", got.RevokedAt)
+		}
+		// OwnerNamespace must survive the round trip. The revoke predicate is
+		// enforced in SQL and never reads this field back, so a repo that
+		// dropped it from rowToIssuedIdentity would still pass every scope
+		// assertion below while silently reporting every identity as
+		// unowned.
+		if got.OwnerNamespace != "nsA" {
+			t.Fatalf("OwnerNamespace = %q, want nsA", got.OwnerNamespace)
 		}
 
 		// Renewal extends and only extends.
@@ -355,10 +364,11 @@ func RunIssuedIdentityStoreContract(t *testing.T, factory func(t *testing.T) sto
 		}
 
 		// Revocation is a state: the second call is a nil no-op.
-		if err := s.Revoke(ctx, "runner-lifecycle"); err != nil {
+		nsA := store.OwnerScope{Namespace: "nsA"}
+		if err := s.Revoke(ctx, "runner-lifecycle", nsA); err != nil {
 			t.Fatalf("revoke: %v", err)
 		}
-		if err := s.Revoke(ctx, "runner-lifecycle"); err != nil {
+		if err := s.Revoke(ctx, "runner-lifecycle", nsA); err != nil {
 			t.Fatalf("second revoke = %v, want nil", err)
 		}
 		got, _, _ = s.Lookup(ctx, "runner-lifecycle")
@@ -406,8 +416,96 @@ func RunIssuedIdentityStoreContract(t *testing.T, factory func(t *testing.T) sto
 			t.Fatalf("rejected renew on expired identity moved ExpiresAt: got %v, want %v (unchanged)", afterExpiredRenew.ExpiresAt, past.ExpiresAt)
 		}
 
-		if err := s.Revoke(ctx, "no-such-runner"); !errors.Is(err, store.ErrIssuedIdentityNotFound) {
+		if err := s.Revoke(ctx, "no-such-runner", nsA); !errors.Is(err, store.ErrIssuedIdentityNotFound) {
 			t.Fatalf("revoke unknown = %v, want ErrIssuedIdentityNotFound", err)
+		}
+	})
+
+	// Revocation is namespace-scoped. Without this, any principal holding the
+	// revoke scope could knock any tenant's entire fleet offline — a
+	// cross-tenant DoS. The scope predicate lives in the store, not only in the
+	// HTTP handler, so both implementations are held to it here.
+	t.Run("revoke is confined to the owning namespace", func(t *testing.T) {
+		s := factory(t)
+		ctx := context.Background()
+		mk := func(runnerID, owner string) {
+			t.Helper()
+			err := s.Issue(ctx, store.IssuedIdentity{
+				RunnerID:       runnerID,
+				TokenHash:      store.HashSecret(runnerID),
+				CodeID:         "code-1",
+				OwnerNamespace: owner,
+				IssuedAt:       time.Now().UTC().Truncate(time.Millisecond),
+			})
+			if err != nil {
+				t.Fatalf("issue %s: %v", runnerID, err)
+			}
+		}
+		mk("runner-a", "nsA")
+		mk("runner-b", "nsB")
+		mk("runner-legacy", "")
+
+		nsA := store.OwnerScope{Namespace: "nsA"}
+		nsB := store.OwnerScope{Namespace: "nsB"}
+		all := store.OwnerScope{All: true}
+
+		// A zero scope is a caller bug, not "everything".
+		if err := s.Revoke(ctx, "runner-a", store.OwnerScope{}); !errors.Is(err, store.ErrOwnerScopeUnset) {
+			t.Fatalf("zero-scope revoke = %v, want ErrOwnerScopeUnset", err)
+		}
+		if err := s.Revoke(ctx, "runner-a", store.OwnerScope{All: true, Namespace: "nsA"}); !errors.Is(err, store.ErrOwnerScopeUnset) {
+			t.Fatalf("over-specified scope revoke = %v, want ErrOwnerScopeUnset", err)
+		}
+
+		// B may not revoke A's runner, and the refusal is reported as
+		// not-found: a distinct error would make this an existence oracle for
+		// other tenants' runner ids.
+		if err := s.Revoke(ctx, "runner-a", nsB); !errors.Is(err, store.ErrIssuedIdentityNotFound) {
+			t.Fatalf("cross-tenant revoke = %v, want ErrIssuedIdentityNotFound", err)
+		}
+		// The refusal must be a refusal, not just a misleading error code. Only
+		// a Lookup can tell "rejected" from "revoked it anyway, then said no".
+		gotA, ok, err := s.Lookup(ctx, "runner-a")
+		if err != nil || !ok {
+			t.Fatalf("lookup runner-a: ok=%v err=%v", ok, err)
+		}
+		if !gotA.RevokedAt.IsZero() {
+			t.Fatalf("cross-tenant revoke went through: RevokedAt = %v, want zero", gotA.RevokedAt)
+		}
+
+		// An owner_namespace of "" means "unknown", NOT "everyone's". No tenant
+		// scope matches it; only All: true can revoke such a legacy row.
+		if err := s.Revoke(ctx, "runner-legacy", nsA); !errors.Is(err, store.ErrIssuedIdentityNotFound) {
+			t.Fatalf("tenant revoke of legacy row = %v, want ErrIssuedIdentityNotFound", err)
+		}
+		gotLegacy, _, _ := s.Lookup(ctx, "runner-legacy")
+		if !gotLegacy.RevokedAt.IsZero() {
+			t.Fatalf("tenant revoked a legacy row: RevokedAt = %v, want zero", gotLegacy.RevokedAt)
+		}
+
+		// The owner itself is still allowed, so the guard above is a scope
+		// check and not a blanket refusal.
+		if err := s.Revoke(ctx, "runner-a", nsA); err != nil {
+			t.Fatalf("owner revoke: %v", err)
+		}
+		gotA, _, _ = s.Lookup(ctx, "runner-a")
+		if gotA.RevokedAt.IsZero() {
+			t.Fatalf("owner revoke did not stamp RevokedAt")
+		}
+
+		// And a platform principal reaches both the other tenant's row and the
+		// legacy one — otherwise legacy identities would be unrevokable.
+		if err := s.Revoke(ctx, "runner-b", all); err != nil {
+			t.Fatalf("global revoke of nsB runner: %v", err)
+		}
+		if err := s.Revoke(ctx, "runner-legacy", all); err != nil {
+			t.Fatalf("global revoke of legacy runner: %v", err)
+		}
+		for _, id := range []string{"runner-b", "runner-legacy"} {
+			got, _, _ := s.Lookup(ctx, id)
+			if got.RevokedAt.IsZero() {
+				t.Fatalf("global revoke of %s did not stamp RevokedAt", id)
+			}
 		}
 	})
 }

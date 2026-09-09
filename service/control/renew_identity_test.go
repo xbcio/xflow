@@ -172,7 +172,10 @@ func TestRenewIdentityCannotRenewAnotherRunner(t *testing.T) {
 // line of defense, not IssuedIdentityStore.Renew.
 func TestRenewIdentityRevokedTokenCannotAuthenticate(t *testing.T) {
 	core, ids, token := renewIdentityFixture(t, time.Hour, "runner-a")
-	if err := ids.Revoke(context.Background(), "runner-a"); err != nil {
+	// All: true because this fixture's identity carries no OwnerNamespace, and
+	// an unowned row is reachable only by a platform scope. What this test is
+	// about is the revoked token, not who may revoke it.
+	if err := ids.Revoke(context.Background(), "runner-a", OwnerScope{All: true}); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
 

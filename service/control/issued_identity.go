@@ -50,14 +50,24 @@ func (s *MemoryIssuedIdentityStore) List(_ context.Context) ([]IssuedIdentity, e
 	return out, nil
 }
 
-// Revoke stamps RevokedAt. Revoking an already-revoked identity is a no-op
-// that returns nil: revocation is a state, not an event, and an operator
-// retrying after a timeout must not see a spurious failure.
-func (s *MemoryIssuedIdentityStore) Revoke(_ context.Context, runnerID string) error {
+// Revoke stamps RevokedAt on the identity owned by scope. Revoking an
+// already-revoked identity is a no-op that returns nil: revocation is a state,
+// not an event, and an operator retrying after a timeout must not see a
+// spurious failure.
+func (s *MemoryIssuedIdentityStore) Revoke(_ context.Context, runnerID string, scope OwnerScope) error {
+	if err := scope.Validate(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	id, ok := s.byID[runnerID]
 	if !ok {
+		return ErrIssuedIdentityNotFound
+	}
+	// Out of scope reports not-found rather than forbidden: a distinct error
+	// would turn this endpoint into an existence oracle for other tenants'
+	// runner ids. Mirrors MemoryRegistrationCodeStore.Revoke.
+	if !scope.Matches(id.OwnerNamespace) {
 		return ErrIssuedIdentityNotFound
 	}
 	if !id.RevokedAt.IsZero() {

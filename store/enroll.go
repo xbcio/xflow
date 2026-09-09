@@ -238,9 +238,23 @@ type IssuedIdentity struct {
 	// code at issue time. Revoking the code later does NOT narrow an already
 	// issued identity — the two are independently revocable by design, so an
 	// operator rotating a leaked code does not knock every runner offline.
-	Scope    RunnerPolicy
-	CodeID   string
-	IssuedAt time.Time
+	Scope  RunnerPolicy
+	CodeID string
+	// OwnerNamespace is the namespace that owned the registration code this
+	// identity was minted from, snapshotted at issue time. It is the only
+	// namespace that may revoke this identity.
+	//
+	// It is a snapshot, not a join through CodeID, for the same reason Scope
+	// above is: the identity is independent of the code once issued, so
+	// deleting the code must not erase who owns the runner.
+	//
+	// "" carries the same meaning as RegistrationCode.OwnerNamespace's "" —
+	// "unknown", NOT "platform-owned". It marks a row issued before this field
+	// existed, and only OwnerScope{All: true} matches it. A legacy runner
+	// silently becoming revocable by whichever tenant asked first is the exact
+	// cross-tenant hole this field closes.
+	OwnerNamespace string
+	IssuedAt       time.Time
 	// ExpiresAt is when this identity stops authenticating. The zero value
 	// means "never" and is what every identity issued before the server grew a
 	// TTL carries, so turning the feature on does not retroactively lock out a
@@ -284,10 +298,16 @@ type IssuedIdentityStore interface {
 	// distinction to tell an outage apart from a wrong token in its logs.
 	Lookup(ctx context.Context, runnerID string) (IssuedIdentity, bool, error)
 	List(ctx context.Context) ([]IssuedIdentity, error)
-	// Revoke stamps RevokedAt. Revoking an already-revoked identity is a no-op
-	// that returns nil: revocation is a state, not an event, and an operator
-	// retrying after a timeout must not see a spurious failure.
-	Revoke(ctx context.Context, runnerID string) error
+	// Revoke stamps RevokedAt on the identity owned by scope. Revoking an
+	// already-revoked identity is a no-op that returns nil: revocation is a
+	// state, not an event, and an operator retrying after a timeout must not
+	// see a spurious failure.
+	//
+	// An identity outside scope is reported as ErrIssuedIdentityNotFound, the
+	// same verdict as one that does not exist. Distinguishing the two would
+	// turn this endpoint into an existence oracle for other tenants' runner
+	// ids, which mirrors registrationCodeRepo.Revoke's own choice.
+	Revoke(ctx context.Context, runnerID string, scope OwnerScope) error
 	// Renew extends ExpiresAt. It does NOT touch the token, the runner id, or
 	// the scope — see the design's R9. Renewing an identity that is already
 	// expired or revoked returns ErrIssuedIdentityNotFound: an expired identity

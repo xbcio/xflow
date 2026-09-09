@@ -242,6 +242,7 @@ func (r *issuedIdentityRepo) Issue(ctx context.Context, id store.IssuedIdentity)
 		ScopeNamespaces: encodeList(id.Scope.AllowedNamespaces),
 		ScopeNodeTypes:  encodeList(id.Scope.AllowedNodeTypes),
 		CodeID:          id.CodeID,
+		OwnerNamespace:  id.OwnerNamespace,
 		IssuedAt:        issuedAt,
 		ExpiresAt:       expires,
 		RevokedAt:       revoked,
@@ -285,8 +286,9 @@ func rowToIssuedIdentity(row dbIssuedIdentity) (store.IssuedIdentity, error) {
 			AllowedNamespaces: namespaces,
 			AllowedNodeTypes:  nodeTypes,
 		},
-		CodeID:   row.CodeID,
-		IssuedAt: issuedAt,
+		CodeID:         row.CodeID,
+		OwnerNamespace: row.OwnerNamespace,
+		IssuedAt:       issuedAt,
 	}
 	if row.ExpiresAt != nil {
 		id.ExpiresAt = row.ExpiresAt.UTC()
@@ -314,14 +316,25 @@ func (r *issuedIdentityRepo) List(ctx context.Context) ([]store.IssuedIdentity, 
 	return out, nil
 }
 
-// Revoke stamps revoked_at. Revoking an already-revoked identity is a no-op
-// that returns nil: revocation is a state, not an event, and an operator
-// retrying after a timeout must not see a spurious failure.
-func (r *issuedIdentityRepo) Revoke(ctx context.Context, runnerID string) error {
+// Revoke stamps revoked_at on the identity owned by scope. Revoking an
+// already-revoked identity is a no-op that returns nil: revocation is a state,
+// not an event, and an operator retrying after a timeout must not see a
+// spurious failure.
+//
+// An identity outside scope reports ErrIssuedIdentityNotFound, the same verdict
+// as one that does not exist, so this endpoint is not an existence oracle for
+// other tenants' runner ids.
+func (r *issuedIdentityRepo) Revoke(ctx context.Context, runnerID string, scope store.OwnerScope) error {
+	if err := scope.Validate(); err != nil {
+		return err
+	}
 	now := time.Now().UTC()
-	res := r.db.WithContext(ctx).Model(&dbIssuedIdentity{}).
-		Where("runner_id = ? AND revoked_at IS NULL", runnerID).
-		Update("revoked_at", now)
+	q := r.db.WithContext(ctx).Model(&dbIssuedIdentity{}).
+		Where("runner_id = ? AND revoked_at IS NULL", runnerID)
+	if !scope.All {
+		q = q.Where("owner_namespace = ?", scope.Namespace)
+	}
+	res := q.Update("revoked_at", now)
 	if res.Error != nil {
 		return res.Error
 	}
@@ -329,9 +342,18 @@ func (r *issuedIdentityRepo) Revoke(ctx context.Context, runnerID string) error 
 		// Zero rows is either "no such runner" or "already revoked". Distinguish
 		// them, because already-revoked must be a nil no-op while missing must
 		// be an error.
+		//
+		// The COUNT carries the same scope predicate as the UPDATE above, and
+		// must keep carrying it: an unscoped COUNT would find another tenant's
+		// row, report n > 0, and return nil — telling the caller "that runner
+		// exists and is already revoked" about a runner it may not even see.
 		var n int64
-		if err := r.db.WithContext(ctx).Model(&dbIssuedIdentity{}).
-			Where("runner_id = ?", runnerID).Count(&n).Error; err != nil {
+		cq := r.db.WithContext(ctx).Model(&dbIssuedIdentity{}).
+			Where("runner_id = ?", runnerID)
+		if !scope.All {
+			cq = cq.Where("owner_namespace = ?", scope.Namespace)
+		}
+		if err := cq.Count(&n).Error; err != nil {
 			return err
 		}
 		if n == 0 {

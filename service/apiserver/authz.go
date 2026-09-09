@@ -166,6 +166,16 @@ const (
 	ScopeRegistrationCodeListGlobal   = "management.registration_code.list_global"
 	ScopeRegistrationCodeRevokeGlobal = "management.registration_code.revoke_global"
 	ScopeRegistrationCodeAuditGlobal  = "management.registration_code.audit_global"
+
+	// Same additive shape, one level down: OpManagementRunnerRevokeIdentity
+	// alone confines a principal to revoking identities issued from its own
+	// namespace's registration codes, and this scope lifts that confinement.
+	//
+	// It is also the only way to revoke an identity whose owner_namespace is ""
+	// — a row issued before that column existed. Such a row is "unknown owner",
+	// not "everyone's", so no tenant scope matches it. Without this scope those
+	// identities would be unrevokable.
+	ScopeManagementRunnerRevokeIdentityGlobal = "management.runner.revoke_identity_global"
 )
 
 // scopeForOperation maps an operation to the scope it requires. A principal

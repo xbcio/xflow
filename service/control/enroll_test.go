@@ -81,6 +81,67 @@ func TestEnrollIssuesAServerGeneratedIdentity(t *testing.T) {
 	}
 }
 
+// TestEnrollSnapshotsTheCodeOwnerNamespace pins the one jump nothing else
+// covers: code.OwnerNamespace -> IssuedIdentity.OwnerNamespace at issue time.
+//
+// The store contract already proves the field survives a round trip, and the
+// apiserver tests already prove revoke honors it -- but both seed the field by
+// hand. If Enroll stopped writing it, every newly issued identity would carry
+// "" ("unknown owner"), which no tenant scope matches, so every tenant would
+// silently lose the ability to revoke its OWN runners. That is fail-closed
+// rather than a leak, which is exactly why it would ship unnoticed: nothing
+// goes red, the endpoint just quietly stops working for everyone but platform
+// operators.
+//
+// The second half revokes through the tenant scope on purpose. Asserting the
+// string alone would pass even if enroll wrote a namespace that OwnerScope
+// could never match; driving the real Revoke is what proves the snapshot is
+// the same value the authorization predicate compares against.
+func TestEnrollSnapshotsTheCodeOwnerNamespace(t *testing.T) {
+	ctx := context.Background()
+	codes := NewMemoryRegistrationCodeStore()
+	ids := NewMemoryIssuedIdentityStore()
+	codeID, plaintext, err := GenerateRegistrationCode()
+	if err != nil {
+		t.Fatalf("GenerateRegistrationCode: %v", err)
+	}
+	err = codes.Create(ctx, RegistrationCode{
+		ID:                codeID,
+		CodeHash:          HashSecret(plaintext),
+		OwnerNamespace:    "nsA",
+		AllowedNamespaces: []string{"sas"},
+		AllowedNodeTypes:  []string{"kafka.trigger"},
+		CreatedAt:         time.Unix(1700000000, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	core := &Core{
+		registrationCodes: codes,
+		issuedIdentities:  ids,
+		enrollLimiter:     newEnrollLimiter(defaultEnrollFailureLimit, defaultEnrollLockout),
+	}
+
+	resp, err := core.Enroll(ctx, protocol.EnrollRequest{
+		RegistrationCode: plaintext,
+		Namespaces:       []string{"sas"},
+		NodeTypes:        []string{"kafka.trigger"},
+	}, TransportInfo{SourceIP: "10.0.0.1"})
+	if err != nil {
+		t.Fatalf("Enroll: %v", err)
+	}
+	stored, ok, err := ids.Lookup(ctx, resp.RunnerID)
+	if err != nil || !ok {
+		t.Fatalf("Lookup: ok=%v err=%v", ok, err)
+	}
+	if stored.OwnerNamespace != "nsA" {
+		t.Fatalf("OwnerNamespace = %q, want nsA copied from the code", stored.OwnerNamespace)
+	}
+	if err := ids.Revoke(ctx, resp.RunnerID, OwnerScope{Namespace: "nsA"}); err != nil {
+		t.Fatalf("owner cannot revoke the identity its own code issued: %v", err)
+	}
+}
+
 func TestEnrollRejectionsAreIndistinguishable(t *testing.T) {
 	// Unknown / revoked / out-of-scope must produce the SAME external error.
 	// Anything else lets a prober enumerate which codes exist (spec §2.3.4).

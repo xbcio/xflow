@@ -144,6 +144,7 @@ CREATE TABLE IF NOT EXISTS xflow_issued_identities (
     scope_namespaces TEXT                                COMMENT '签发时确定的 namespace 范围 JSON 数组',
     scope_node_types TEXT                                COMMENT '签发时确定的节点类型范围 JSON 数组',
     code_id          VARCHAR(64)  NOT NULL DEFAULT ''  COMMENT '签发所用的注册码 ID',
+    owner_namespace  VARCHAR(64)  NOT NULL DEFAULT ''  COMMENT '签发时快照的归属 namespace；空串表示该字段存在之前写入的历史行，仅 *_global 可见',
     issued_at        DATETIME(3)  NULL                  COMMENT '签发时间；契约测试允许零值，故列可空，语义同 last_fetch_at',
     expires_at       DATETIME(3)  NULL                  COMMENT '身份失效时间，NULL 表示永不过期',
     revoked_at       DATETIME(3)  NULL                  COMMENT '身份被吊销的时间，NULL 表示未吊销',
@@ -802,4 +803,26 @@ END$$
 DELIMITER ;
 CALL xflow_add_issued_identity_revoked_at_column();
 DROP PROCEDURE IF EXISTS xflow_add_issued_identity_revoked_at_column;
+
+-- 已签发身份的归属列。缺了它，吊销端点的越权过滤（WHERE owner_namespace = ?）
+-- 在老部署上直接报 SQL 错误；而在补上之前，任何持有吊销 scope 的主体都能吊销
+-- 其它租户的 runner。历史行留空串，按 fail-closed 读法只有 *_global 可见。
+DROP PROCEDURE IF EXISTS xflow_add_issued_identity_owner_column;
+DELIMITER $$
+CREATE PROCEDURE xflow_add_issued_identity_owner_column()
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_issued_identities'
+          AND COLUMN_NAME = 'owner_namespace'
+    ) THEN
+        ALTER TABLE xflow_issued_identities
+            ADD COLUMN owner_namespace VARCHAR(64) NOT NULL DEFAULT ''
+                COMMENT '签发时快照的归属 namespace；空串表示该字段存在之前写入的历史行，仅 *_global 可见' AFTER code_id;
+    END IF;
+END$$
+DELIMITER ;
+CALL xflow_add_issued_identity_owner_column();
+DROP PROCEDURE IF EXISTS xflow_add_issued_identity_owner_column;
 

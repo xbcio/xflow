@@ -299,7 +299,7 @@ func (s *stubIssuedIdentityLister) List(context.Context) ([]store.IssuedIdentity
 	return out, nil
 }
 
-func (s *stubIssuedIdentityLister) Revoke(context.Context, string) error {
+func (s *stubIssuedIdentityLister) Revoke(context.Context, string, store.OwnerScope) error {
 	return errors.New("stubIssuedIdentityLister: Revoke not implemented")
 }
 
@@ -402,13 +402,22 @@ type runnerRevokeIdentityTestServer struct {
 
 func newRunnerRevokeIdentityTestServer(t *testing.T) *runnerRevokeIdentityTestServer {
 	t.Helper()
+	return newRunnerRevokeIdentityTestServerAs(t, "namespaceA")
+}
+
+// newRunnerRevokeIdentityTestServerAs varies the principal so the ownership
+// cases can be driven: ns is the principal's namespace and extraScopes are
+// layered on top of the base operation scope (the only one that matters today
+// is ScopeManagementRunnerRevokeIdentityGlobal).
+func newRunnerRevokeIdentityTestServerAs(t *testing.T, ns string, extraScopes ...string) *runnerRevokeIdentityTestServer {
+	t.Helper()
 	m := newManagementModule(fakeControlPlaneForAuthz(t))
 	issued := control.NewMemoryIssuedIdentityStore()
 	m.issued = issued
 	m.principalAuth = staticPrincipalAuth{principal: Principal{
 		Subject:   "ops",
-		Namespace: "namespaceA",
-		Scopes:    []string{scopeForOperation(OpManagementRunnerRevokeIdentity)},
+		Namespace: ns,
+		Scopes:    append([]string{scopeForOperation(OpManagementRunnerRevokeIdentity)}, extraScopes...),
 	}}
 	m.authorizer = ScopeAuthorizer{}
 	m.audit = NewInMemoryAuditSink()
@@ -457,7 +466,7 @@ func TestRevokeRunnerIdentitySuccess(t *testing.T) {
 	h := newRunnerRevokeIdentityTestServer(t)
 	defer h.srv.Close()
 	ctx := context.Background()
-	if err := h.issued.Issue(ctx, control.IssuedIdentity{RunnerID: "runner-1"}); err != nil {
+	if err := h.issued.Issue(ctx, control.IssuedIdentity{RunnerID: "runner-1", OwnerNamespace: "namespaceA"}); err != nil {
 		t.Fatalf("seed Issue: %v", err)
 	}
 	body := h.doJSON(t, http.MethodPost, "/v1/management/runners/runner-1/revoke-identity", "", http.StatusOK)
@@ -495,11 +504,93 @@ func TestRevokeRunnerIdentityRepeatIsNoop(t *testing.T) {
 	h := newRunnerRevokeIdentityTestServer(t)
 	defer h.srv.Close()
 	ctx := context.Background()
-	if err := h.issued.Issue(ctx, control.IssuedIdentity{RunnerID: "runner-2"}); err != nil {
+	if err := h.issued.Issue(ctx, control.IssuedIdentity{RunnerID: "runner-2", OwnerNamespace: "namespaceA"}); err != nil {
 		t.Fatalf("seed Issue: %v", err)
 	}
 	h.doJSON(t, http.MethodPost, "/v1/management/runners/runner-2/revoke-identity", "", http.StatusOK)
 	h.doJSON(t, http.MethodPost, "/v1/management/runners/runner-2/revoke-identity", "", http.StatusOK)
+}
+
+// TestRevokeRunnerIdentityRefusesOtherNamespace is the regression guard for the
+// cross-tenant DoS this endpoint shipped with: the route registers "" as its
+// resource namespace, which permanently disables NamespaceAwareAuthorizer's
+// ceiling, so for a while ANY principal holding the revoke scope could knock
+// ANY tenant's entire fleet offline.
+//
+// The 404 alone is not the assertion. A handler that revoked first and reported
+// not-found afterwards would produce the same status, so the store is read back
+// directly -- that read is what makes this test a refusal test rather than a
+// status-code test.
+func TestRevokeRunnerIdentityRefusesOtherNamespace(t *testing.T) {
+	h := newRunnerRevokeIdentityTestServerAs(t, "namespaceB")
+	defer h.srv.Close()
+	ctx := context.Background()
+	if err := h.issued.Issue(ctx, control.IssuedIdentity{RunnerID: "runner-a", OwnerNamespace: "namespaceA"}); err != nil {
+		t.Fatalf("seed Issue: %v", err)
+	}
+	// Not-found, not forbidden: a distinct code would make this endpoint an
+	// existence oracle for other tenants' runner ids.
+	body := h.doJSON(t, http.MethodPost, "/v1/management/runners/runner-a/revoke-identity", "", http.StatusNotFound)
+	if !strings.Contains(body, `"runner_not_found"`) {
+		t.Fatalf("body %q missing expected error code runner_not_found", body)
+	}
+	id, ok, err := h.issued.Lookup(ctx, "runner-a")
+	if err != nil || !ok {
+		t.Fatalf("Lookup after refused revoke: ok=%v err=%v", ok, err)
+	}
+	if !id.RevokedAt.IsZero() {
+		t.Fatal("a namespaceB principal revoked a namespaceA runner; the cross-tenant DoS is open")
+	}
+}
+
+// TestRevokeRunnerIdentityGlobalScopeReachesOtherNamespace is the other half of
+// the pair: without it, the refusal above could be satisfied by a handler that
+// simply never revokes anything.
+func TestRevokeRunnerIdentityGlobalScopeReachesOtherNamespace(t *testing.T) {
+	h := newRunnerRevokeIdentityTestServerAs(t, "namespaceB", ScopeManagementRunnerRevokeIdentityGlobal)
+	defer h.srv.Close()
+	ctx := context.Background()
+	if err := h.issued.Issue(ctx, control.IssuedIdentity{RunnerID: "runner-a", OwnerNamespace: "namespaceA"}); err != nil {
+		t.Fatalf("seed Issue: %v", err)
+	}
+	h.doJSON(t, http.MethodPost, "/v1/management/runners/runner-a/revoke-identity", "", http.StatusOK)
+	id, _, _ := h.issued.Lookup(ctx, "runner-a")
+	if id.RevokedAt.IsZero() {
+		t.Fatal("global scope did not actually revoke; RevokedAt is still zero")
+	}
+}
+
+// TestRevokeRunnerIdentityLegacyRowNeedsGlobalScope pins the "" case. An
+// identity issued before OwnerNamespace existed carries "", which means
+// "unknown owner", NOT "everyone's" -- so no tenant may revoke it, and the
+// platform scope is the only way to reach it. Reading "" as public is exactly
+// the fail-open shape the ownership column exists to prevent.
+func TestRevokeRunnerIdentityLegacyRowNeedsGlobalScope(t *testing.T) {
+	seed := func(h *runnerRevokeIdentityTestServer) {
+		t.Helper()
+		err := h.issued.Issue(context.Background(), control.IssuedIdentity{RunnerID: "runner-legacy"})
+		if err != nil {
+			t.Fatalf("seed Issue: %v", err)
+		}
+	}
+
+	tenant := newRunnerRevokeIdentityTestServerAs(t, "namespaceA")
+	defer tenant.srv.Close()
+	seed(tenant)
+	tenant.doJSON(t, http.MethodPost, "/v1/management/runners/runner-legacy/revoke-identity", "", http.StatusNotFound)
+	id, _, _ := tenant.issued.Lookup(context.Background(), "runner-legacy")
+	if !id.RevokedAt.IsZero() {
+		t.Fatal("a tenant principal revoked an unowned legacy identity")
+	}
+
+	platform := newRunnerRevokeIdentityTestServerAs(t, "namespaceA", ScopeManagementRunnerRevokeIdentityGlobal)
+	defer platform.srv.Close()
+	seed(platform)
+	platform.doJSON(t, http.MethodPost, "/v1/management/runners/runner-legacy/revoke-identity", "", http.StatusOK)
+	id, _, _ = platform.issued.Lookup(context.Background(), "runner-legacy")
+	if id.RevokedAt.IsZero() {
+		t.Fatal("global scope cannot revoke a legacy identity; such rows would be unrevokable")
+	}
 }
 
 // TestRevokeRunnerIdentityNotImplementedWhenStoreNil pins the m.issued == nil

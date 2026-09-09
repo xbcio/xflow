@@ -301,6 +301,7 @@ type dbIssuedIdentity struct {
 	ScopeNamespaces string     `gorm:"column:scope_namespaces;type:text"`
 	ScopeNodeTypes  string     `gorm:"column:scope_node_types;type:text"`
 	CodeID          string     `gorm:"column:code_id;size:64;not null;index:idx_issued_identity_code"`
+	OwnerNamespace  string     `gorm:"column:owner_namespace;size:64;not null;default:''"`
 	IssuedAt        *time.Time `gorm:"column:issued_at"`
 	// ExpiresAt / RevokedAt are pointers for the same reason IssuedAt above is:
 	// MySQL 8 strict mode (NO_ZERO_DATE) rejects '0000-00-00', so "no expiry"
