@@ -89,7 +89,22 @@
 上述三点各有定向变异用例把守（`service/control`、`service/apiserver`、`store/storecontract`
 三处），逐处变异 7/7 同轴命中。
 
-### 2. 身份过期/被吊销导致的认证失败，在服务端自己的日志里也无法与「token 不对」区分
+### 2. ~~身份过期/被吊销导致的认证失败，在服务端自己的日志里也无法与「token 不对」区分~~ 已修
+
+> **已修**，见 `fix(control): name the lifecycle rejection reason in the server's own auth log`。
+> 过期与吊销两条路径现在各 wrap 一层原因说明（`unknown auth token: issued identity expired`
+> / `unknown auth token: issued identity was revoked`），照存储查询失败那条的先例。
+> 本条保留原文，因为它是这个区分为什么存在的**唯一记录**：读不到这段的人，很容易在某次
+> 「统一错误消息」的重构里把三条字符串重新拍平，那等于把下面这个缺口原样打开。
+>
+> 同时要注意的边界（原文「注意不要顺手改错地方」一段说的正是这个）：R7 的对外不可区分
+> **不由这三个字符串保证**，而由 `Core.authDeny` 在硬拒绝时返回 `ErrUnauthenticated`
+> 常量保证——两个 transport 的映射（`server.go` 的 `writeRunnerError`、`grpc_server.go`
+> 的 `runnerStatus`）都只渲染那个常量。所以「日志里可区分」与「对外不可区分」互不冲突。
+> 落点测试：`TestAuthenticateRejectsExpiredAndRevokedIdenticallyToCallers`（三条
+> `errors.Is` 相同、三次 `authDeny` 返回同一常量、三条日志字符串两两不同）与
+> `TestAuthDeniedLogNamesTheLifecycleReason`（走真实 `Core.heartbeat`，断言
+> `auth_denied` 的 `err` 字段点名原因）。
 
 `service/control/issued_identity.go` 的 `authenticate` 在四条拒绝路径上返回的 error：
 
@@ -205,9 +220,12 @@ if rc, start, warnMsg, warnErr := decideIdentityRenewal(cfg, store); warnErr != 
 与 token 必须同时指向同一条记录才能通过。
 
 （同一个函数里还有两条相关的既定形状：生命周期检查刻意排在常数时间比较**之后**，且过期与
-吊销两种拒绝都复用 `ErrAuthUnknownToken` 原样返回。前者避免向不持有效 token 的调用方回答
-「这个 runner id 存在吗」，后者是 R7「过期与未知 token 对外不可区分」。改动 `authenticate`
-时这两条都不能松。）
+吊销两种拒绝都以 `ErrAuthUnknownToken` 作为唯一 `errors.Is` 可匹配的身份——但各自 wrap 了
+一层只进服务端日志的原因说明（见上方「待办 §2 已修」）。前者避免向不持有效 token 的调用方
+回答「这个 runner id 存在吗」；后者的 R7「过期与未知 token 对外不可区分」由 `authDeny` 硬拒绝
+时返回的 `ErrUnauthenticated` 常量保证，不由错误消息的字面相同保证。改动 `authenticate` 时
+这两条都不能松：wrap 里可以写原因，但不能引入第二个可匹配的 sentinel，也不能把原因写进
+任何到达调用方的响应。）
 
 *代价：* 若将来认证方式改成「只验 token、不绑 runner id」（例如为了支持 token 与 runner id
 解耦的部署），这条推理会失效，续期端点会退化成一条**横向提权通道**：A 的 token 可以续 B 的
