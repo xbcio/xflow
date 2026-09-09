@@ -1,0 +1,270 @@
+# RUNNER 身份生命周期 遗留项
+
+`feat/registration-code-ceiling-and-identity-lifecycle`(9 tasks，已 fast-forward 合入 main）
+交付后未做的事，以及本次刻意不做的事。按「不做会怎样」排序，不按工作量。
+
+**本文件自带背景，因为设计文档不在库里。** 本次的 spec 位于
+`.claude/specs/2026-09-08-registration-code-ceiling-and-identity-lifecycle-design.md`，
+该路径被 `.gitignore` 忽略且从未跟踪——工作区一旦清理，其中的裁定即永久丢失。下面
+「已知且接受的代价」一节是那份 spec §7 的完整转录，不是摘要。
+
+本次交付的两件事：
+
+- **H1 收口**——注册码的 scope 天花板。创建注册码时，请求的 namespace 集合被 principal
+  自己的授权夹住；四个端点全部收口。落点 `service/apiserver/module_management.go` 的
+  `resolveRequestedNamespaces`。
+- **签发身份的生命周期**——`IssuedIdentity` 新增 `expires_at` / `revoked_at` 两列，
+  认证时落闸（`service/control`），新增平台侧吊销端点与 runner 自助续期端点，
+  runner 侧在到期前自动续期（`cmd/runner`）。
+
+---
+
+## 仓库状态：main 上有 10 个未走本计划 review 循环的提交
+
+**这不是遗留项，是一笔需要知情的账。** 合入 main 的 25 个提交里，只有 15 个走过本计划的
+逐任务 review 循环（14 个任务提交 + 1 个收尾的配置样例修正）。另外 10 个是在本计划执行
+期间由本会话之外的写入者提交到同一分支上的，它们**随本次 fast-forward 一起进了 main**，
+且从未经过本计划的任何一轮 review。
+
+**批次一（六个，`fbc71f8`..`0dd26cb`）**——与本计划无关，落点 `Makefile`、
+`backend/providers/local/*`、`execution/subgraph/*`、`node/internal/code/script/*`、
+`test/integration/*`。这批是可分离的：把它们从 main 上摘掉不会破坏本计划的任何功能，
+代价是一次 rebase 会重写 12 个 SHA。
+
+**批次二（四个，`d246d584`..`c7d6bc3`）**——全部是本计划 T8 明文门禁的下游：
+
+| 提交 | 落点 | 做了什么 |
+|---|---|---|
+| `d246d584` | `test/integration/` 三个 e2e | 给三个真进程 harness 补 `--allow-plaintext` |
+| `870eac1` | `test/integration/runner_plaintext_gate_e2e_test.go` | **新增**一条真二进制的门禁 e2e |
+| `cb1da42` | `Makefile` | 让 `make run-runner` 过门禁 |
+| `c7d6bc3` | `cmd/runner/config.go`、`main_test.go` | 让配置样例过门禁 |
+
+**这批不可与 T8 分离**：去掉它们而保留 T8，main 的 integration 套件会红。
+
+其中 `870eac1` 值得单独看一眼——它补的正是本计划自己漏掉的那类覆盖。T8 加了明文门禁却
+一次也没在真二进制上驱动过它，而 `make test` **不覆盖 integration 套件**
+（`//go:build integration`），所以本计划的九轮 review 全程看不见这个洞。
+
+两批都已随合并进入 main。若要拆分，只有批次一是安全的。
+
+**一个值得记下的连锁**：批次二的 `c7d6bc3` 当初让配置样例过明文门禁的办法，是给样例加一句
+生效的 `allow_plaintext: true`。收尾时这句被改掉了（`3eee28f`）——样例现在靠 `https` scheme
+过门禁，`security:` 块整体注释掉，`url` 是 `https://REPLACE-ME:8080`。理由见下方
+「配置样例为何不能直接跑」。
+
+---
+
+## 待办
+
+按「不做会怎样」排序。
+
+### 1. 吊销端点没有 per-namespace 隔离（跨租户 DoS 通道）
+
+`POST /v1/management/runners/{id}/revoke-identity`（常量
+`apiserver.PathManagementRunnerRevokeIdentity`）是平台级操作。持有
+`management.runner.revoke_identity` scope 的调用方可以吊销**任意** namespace 下任意 runner
+的身份；服务端不校验目标 runner 的签发身份属于哪个租户。
+
+**不做会怎样：** 任何持有该 scope 的 principal——哪怕本意只服务一个租户——事实上拥有跨租户
+吊销能力。若该 scope 将来被误发给租户级 principal，即是一条完整的横向 DoS 通道：一个租户
+可以把另一个租户的整支 runner 机群踢下线。
+
+**收口方法已知：** 给 `IssuedIdentity` 补一个归属列，按本计划 T5 已经用过的
+`store.OwnerScope` 模式收口。没在本次做，是因为它属于另一个变更的范围。
+
+### 2. 身份过期/被吊销导致的认证失败，在服务端自己的日志里也无法与「token 不对」区分
+
+`service/control/issued_identity.go` 的 `authenticate` 在四条拒绝路径上返回的 error：
+
+| 拒绝原因 | `authDeny` 记进 `auth_denied` 的 `err` |
+|---|---|
+| 存储查询失败 | `unknown auth token: issued-identity lookup failed: <真实错误>` |
+| **身份已被吊销** | `unknown auth token` |
+| **身份已过期** | `unknown auth token` |
+| token 不匹配 | `unknown auth token` |
+
+查询失败那条被刻意 wrap 过（wrap 保留 `errors.Is(err, ErrAuthUnknownToken)` 可匹配性，
+只在日志里多带信息），理由写在代码注释里：不 wrap 的话，身份存储一次故障会让每个 runner
+的心跳都记成「unknown auth token」，把运维指向凭证而故障其实在数据库。
+
+**过期与吊销这两条没有享受同样的待遇**，它们是裸 `return RunnerPolicy{}, ErrAuthUnknownToken`。
+
+**不做会怎样：** 一支机群的身份因 TTL 到期而集体失效时，服务端日志是一片
+`auth_denied ... err="unknown auth token"`——与「有人拿着错 token 来敲门」逐字相同。运维会
+去查凭证分发，而真正该看的是 `--runner-identity-ttl` 和续期循环有没有在跑。**这个缺口正是
+本次 TTL 特性的直接下游**：没有 TTL 就没有「身份过期」这种事，有了 TTL 才需要能看见它。
+
+**注意不要顺手改错地方：** 对外响应不可区分是刻意的（R7，见下方「已知且接受的代价」中
+「只能续自己」一条的括注）。可改的只有服务端内部日志，改法照查询失败那条已有的先例——
+wrap 一层，`ErrAuthUnknownToken` 仍是唯一 `errors.Is` 可匹配的身份，`authDeny` 返回的
+`ErrUnauthenticated` 常量一个字节都不变。
+
+### 3. `runServer` 零测试覆盖（本计划扩大了它）
+
+`--runner-identity-ttl` flag 一路穿过 `runServer` 接到 Core 字段，而 `runServer` 本身在此
+之前就没有任何测试覆盖，本次也没有为它新增。
+
+**不做会怎样：** flag 到 Core 字段这一段接线只有编译期保证——类型对得上就算通过。如果接线
+接错了（例如把 TTL 错接到另一个无关字段），没有任何测试会红。
+
+这个缺口先于本计划存在，但本计划扩大了它的表面积：现在有一个安全相关的值走这条无守卫的路。
+
+### 4. 注册码本身仍没有过期机制
+
+注册码只有 `Revoked`，没有 `ExpiresAt`。本次刻意不引入（本次的过期机制加在**签发身份**上，
+不在注册码上）。
+
+**不做会怎样：** 一枚签发出去的注册码永久有效直到有人手动吊销。它同时还是**可复用**的
+（enroll 成功后不消费、不标记，这是既有设计），所以一枚泄漏的注册码可以被无限次用来
+注册新 runner，且没有时间上限。
+
+需另立条目。
+
+### 5. `decideIdentityRenewal` 与真实接线之间隔着一个未被驱动的分支
+
+`cmd/runner/renew_test.go` 只驱动这个纯函数本身、断言它返回的四个值，没有驱动 `runRunner`
+全程去观察续期 goroutine 是否真的按判定结果被启动或不被启动。
+
+判定与启动之间的实际距离（`cmd/runner/run.go:294-297`）：
+
+```go
+if rc, start, warnMsg, warnErr := decideIdentityRenewal(cfg, store); warnErr != nil {
+    slog.Warn(warnMsg, "runner_id", cfg.runnerID, "error", warnErr)
+} else if start {
+    go runIdentityRenewal(runCtx, rc, cfg.runnerID, cfg.token, slog.Default())
+}
+```
+
+**不做会怎样：** 若将来有人在这个 `if/else if` 里再加一个条件（例如误加一个提前 return，
+或者把 `else if start` 写成别的判据），`decideIdentityRenewal` 自身的单元测试仍然全绿——
+它测的是纯函数的返回值，不是这个分支有没有照返回值行事。
+
+**本次记档不修的理由：** 修它需要一条驱动 `runRunner` 全程（起真实 goroutine、断言其存在
+或不存在）的测试，成本远超这几行代码本身的风险。列在待办而非「已接受的代价」里，是因为
+一旦这个分支开始生长，成本收益比会翻转。
+
+### 6. 若将来放宽注册码 list 的归属，须重新评估投影
+
+`registrationCodeView` 的列表投影历史上会披露其它租户的 scope。本次收口后这个问题自然消失，
+但该消失依赖于「list 只返回自己拥有的注册码」这条前提。
+
+**不做会怎样：** 若将来为了运营视图放宽 list 归属（例如允许平台角色列出全部注册码），
+这条披露会原样回来，而当前没有任何测试守住它。
+
+---
+
+## 已知且接受的代价（不打算改）
+
+以下是本计划实施期间产出的裁定，每条附代价。与上面「待办」不矛盾：一条缺口可以同时出现在
+两处——待办说明何时它不再可接受，这里说明现状为何可接受。
+
+### `--runner-identity-ttl` 默认 0 = 永不过期，且这必须是刻意动作
+
+把一支正在跑的机群从「不过期」切到「有 TTL」只能靠运维显式加这个 flag；升级本身（不加
+任何 flag）不会让任何已签发身份开始过期。
+
+*代价：* 想要「默认就有有效期」的场景（例如合规要求身份定期轮换）在今天的默认值下拿不到，
+必须显式配置，且没有任何门禁提醒运维去配置它。
+
+*为何可接受：* 反方向的错误更贵——一次不加 flag 的常规升级让整支机群的身份在 TTL 后集体
+失效，是一次全面停机。
+
+### runner 面不进 OpenAPI 契约
+
+整个 `/v1/runners/*`（含新增的 `POST /v1/runners/renew-identity`，常量
+`protocol.RenewIdentityPath`）按 spec §0.1/§10 不进 `api/openapi/xflow-v1.yaml`。身份续期
+端点只有 Go doc comment。`TestContractPathsAreAllRegistered` 的覆盖范围本就不含 runner 面
+路径——**这不是本次遗漏**。
+
+*代价：* 第三方 runner 实现者只能读源码或 doc comment 得知续期端点的请求/响应形状；没有
+机器可读的契约能在该端点变更时给他们提前预警。
+
+### 「只能续自己」是认证方式换来的，不是一次显式比较
+
+这条不变式由 `AuthenticateOngoing(runnerID, token, TransportInfo)` 的**成对认证**保证，
+而不是续期 handler 里一次显式的 `renewRunnerID == authenticatedRunnerID` 比较。成对的含义
+落在 `service/control/issued_identity.go` 的 `authenticate`：先 `Lookup(ctx, runnerID)` 取出
+**那一条**记录，再 `subtle.ConstantTimeCompare(HashSecret(token), id.TokenHash)`——runnerID
+与 token 必须同时指向同一条记录才能通过。
+
+（同一个函数里还有两条相关的既定形状：生命周期检查刻意排在常数时间比较**之后**，且过期与
+吊销两种拒绝都复用 `ErrAuthUnknownToken` 原样返回。前者避免向不持有效 token 的调用方回答
+「这个 runner id 存在吗」，后者是 R7「过期与未知 token 对外不可区分」。改动 `authenticate`
+时这两条都不能松。）
+
+*代价：* 若将来认证方式改成「只验 token、不绑 runner id」（例如为了支持 token 与 runner id
+解耦的部署），这条推理会失效，续期端点会退化成一条**横向提权通道**：A 的 token 可以续 B 的
+身份。
+
+> **给未来重构者：** 依赖的那条回归测试——A 用 A 的 token 试图续 B 的身份，必须被拒——
+> 必须在任何认证方式重构中保留，且必须继续通过。它是这条不变式唯一的守卫。
+
+### 静态 `--token` 部署不启动续期循环
+
+判据是 `store.Load()` 返回的 `ok`。身份来自静态文件而非 enroll 得到的 `ExpiresAt` 时，
+续期循环不启动。
+
+*代价：* 若不做这条区分，静态 token 部署会每隔约 30 秒打一条 Warn 日志直到进程死亡——因为
+它的身份文件里从来没有 `ExpiresAt` 可续。这是既定裁定不是遗漏；错误方向是「让静态 token
+也去续期」，那会向一个不支持续期语义的凭证源发起注定失败的请求。
+
+### 明文 `--server` 下不启动续期循环，并记一条 Warn
+
+指显式用 `--allow-plaintext` 放行明文的部署（未放行时会在更早阶段拒绝启动）。
+
+*代价：* 明文部署若同时打开了服务端 TTL，其 runner 的身份会在 TTL 到期后失效死亡，而不是
+靠明文续期机制续活——因为续期请求本身会把 token 亮在明文链路上，与 R7「过期与未知 token
+对外不可区分」这条防线的精神相悖。出口是在 `--allow-plaintext` 之外再加密（TLS），而不是
+放宽这条限制。
+
+### 签发身份 `Revoke` 的 UPDATE-then-COUNT 非原子
+
+**先分清是哪一个 `Revoke`。** `store/sqlstore/registration_code_repo.go` 这个文件里住着两个
+repo，各有一个 `Revoke`：
+
+- `registrationCodeRepo.Revoke`——`RowsAffected == 0` 直接返回 `ErrRegistrationCodeNotFound`，
+  **没有** COUNT 补偿。「不存在」「属于别的 namespace」「已经吊销过」三种情况对外不可区分，
+  这是刻意的：不建存在性预言机。这条不在本节讨论范围内。
+- `issuedIdentityRepo.Revoke`——**本节说的是这一个。** 它先
+  `UPDATE ... WHERE runner_id = ? AND revoked_at IS NULL`，若 `RowsAffected == 0` 再补一次
+  `COUNT` 来区分「该 runner 不存在」（返回 `ErrIssuedIdentityNotFound`）与「已被吊销」
+  （返回 nil，幂等 no-op）。这两条语句之间若发生同一 `runner_id` 的并发删除+重建，
+  分类可能出错。
+
+**不修的理由：** 吊销是运维手动动作，不是高并发路径；正确修法需要引入事务或
+`SELECT ... FOR UPDATE`，复杂度远超收益。
+
+*代价：* 极端并发下一次吊销调用可能把「不存在」误报成「已吊销成功」，或反之——但**两种
+误报都不会让一个已经被吊销的身份重新通过认证**。落闸本身不受这个竞态影响，受影响的只是
+该次 API 调用返回给调用方的状态描述是否精确。
+
+### 注册码可复用
+
+enroll 成功后不消费、不标记。这是既有设计，本次不改。与上面「待办 §4」配合读：可复用
+**且**无过期，是同一枚泄漏注册码的两个放大器。
+
+---
+
+## 配置样例为何不能直接跑
+
+`cmd/runner` 的 `config sample` 输出的 `url` 是 `https://REPLACE-ME:8080`，`security:` 块
+整体注释掉。**样例故意不能以出厂形态运行。**
+
+一个能直接跑的默认值只有两种选法，都更坏：
+
+- **明文 http url** —— 要让它过门禁就得配一句生效的 `allow_plaintext: true`。读者把 url
+  改成真实主机、漏看旁边那行，就会把 runner token 明文送上网。`validateTransportSecurity`
+  **没有 loopback 豁免**，抓不到这个错配。
+- **能跑的 https url** —— 指不到任何真实地址，等于还是要改。
+
+所以样例选择「问你要主机」而不是猜。两种忘记之中，只有一种会告诉你它发生了：
+
+| 忘记什么 | 后果 |
+|---|---|
+| 忘记取消注释 `allow_plaintext` | 启动时硬停，**立刻可见** |
+| 把 url 挪离 loopback 后忘记重新注释掉 | 凭证静默泄漏，**永远不可见** |
+
+样例默认倒向前者。两条测试守卫锁住这个形状（`cmd/runner/main_test.go`）：一条断言样例能通过
+`validateTransportSecurity`，另一条断言它**不是靠** `allow_plaintext` 通过的。两条守卫落在
+不同行、互不掩蔽——变异验证过。
