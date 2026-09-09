@@ -384,6 +384,28 @@ func (s *Server) HandleEnroll(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+// HandleRenewIdentity serves the runner-facing identity renewal endpoint. It
+// runs behind the same authenticator as every other ongoing runner endpoint
+// (see Core.renewIdentity), so by the time renewIdentity returns success the
+// token has already been proven to belong to req.RunnerID — this handler adds
+// no authorization logic of its own, exactly like HandleHeartbeat.
+func (s *Server) HandleRenewIdentity(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	var req protocol.RenewIdentityRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	overrideTokenFromHeader(r, &req.AuthToken)
+	resp, err := s.core.renewIdentity(r.Context(), req, httpTransportInfo(r))
+	if err != nil {
+		writeRunnerError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // overrideTokenFromHeader gives Authorization: Bearer priority over the body
 // AuthToken field. Header transport is preferred per the spec.
 func overrideTokenFromHeader(r *http.Request, dst *string) {

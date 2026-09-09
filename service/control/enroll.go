@@ -106,6 +106,47 @@ func (c *Core) Enroll(ctx context.Context, req protocol.EnrollRequest, info Tran
 	return resp, nil
 }
 
+// renewIdentity extends the caller's own issued identity by identityTTL.
+//
+// The caller is the authenticated runner, not an operator: AuthenticateOngoing
+// already proved the token matches req.RunnerID and that the identity is
+// neither revoked nor expired — IssuedIdentityAuthenticator.authenticate
+// checks RevokedAt and ExpiresAt right after the constant-time token compare,
+// and this is the exact same authenticator every other ongoing runner
+// endpoint (heartbeat, poll, etc.) runs behind. That is the whole reason an
+// already-revoked or already-expired identity cannot renew itself: it cannot
+// get past authentication to reach this method. IssuedIdentityStore.Renew's
+// own revoked/expired guard is a second, defense-in-depth layer for the rare
+// race where the identity is revoked between the authentication check above
+// and the store write below — it is not the first line of defense.
+//
+// This is also why "runner A renews runner B" needs no id comparison anywhere
+// in this method: AuthenticateOngoing authenticates the (runnerID, token)
+// pair as a unit, so a token that authenticates at all can only ever prove
+// req.RunnerID is the identity that token belongs to. There is no second,
+// independently-authenticated id in scope to compare it against.
+func (c *Core) renewIdentity(ctx context.Context, req protocol.RenewIdentityRequest, info TransportInfo) (protocol.RenewIdentityResponse, error) {
+	if req.RunnerID == "" {
+		return protocol.RenewIdentityResponse{}, ErrRunnerIDRequired
+	}
+	_, authErr := c.authn().AuthenticateOngoing(req.RunnerID, req.AuthToken, info)
+	if err := c.authDeny(ctx, req.RunnerID, req.AuthToken, "renew_identity", info, authErr); err != nil {
+		return protocol.RenewIdentityResponse{}, err
+	}
+	// No issued-identity store configured, or no TTL configured: there is
+	// nothing to extend. Reporting a zero expiry (rather than an error) is what
+	// tells a well-behaved runner to stop its renewal loop entirely, the same
+	// signal Enroll sends when it issues an identity with no ExpiresAt.
+	if c.issuedIdentities == nil || c.identityTTL <= 0 {
+		return protocol.RenewIdentityResponse{}, nil
+	}
+	next := time.Now().UTC().Add(c.identityTTL)
+	if err := c.issuedIdentities.Renew(ctx, req.RunnerID, next); err != nil {
+		return protocol.RenewIdentityResponse{}, normalizeRunnerError(err, c.logger, "renew_identity")
+	}
+	return protocol.RenewIdentityResponse{ExpiresAt: next.Format(time.RFC3339)}, nil
+}
+
 // enrollScopeReason returns a non-empty server-side reason when the request asks
 // for more than the code permits. Scope matching goes through RunnerPolicy so
 // enroll and ongoing auth cannot disagree about what a scope means.

@@ -29,6 +29,7 @@ func (stubRunnerHandler) HandleRenewLease(http.ResponseWriter, *http.Request)   
 func (stubRunnerHandler) HandleActivationAck(http.ResponseWriter, *http.Request)  {}
 func (stubRunnerHandler) HandleReportMetrics(http.ResponseWriter, *http.Request)  {}
 func (stubRunnerHandler) HandleEnroll(http.ResponseWriter, *http.Request)         {}
+func (stubRunnerHandler) HandleRenewIdentity(http.ResponseWriter, *http.Request)  {}
 
 // runnerPathConst is one runner-facing path string constant read from source.
 type runnerPathConst struct {

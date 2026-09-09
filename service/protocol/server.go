@@ -22,6 +22,9 @@ type RunnerHTTPHandler interface {
 	HandleReportMetrics(http.ResponseWriter, *http.Request)
 	// HandleEnroll serves the unauthenticated enrollment endpoint.
 	HandleEnroll(http.ResponseWriter, *http.Request)
+	// HandleRenewIdentity serves the runner-facing endpoint an already-enrolled
+	// runner calls to extend its own issued identity before it expires.
+	HandleRenewIdentity(http.ResponseWriter, *http.Request)
 }
 
 func RegisterRunnerRoutes(mux *http.ServeMux, handler RunnerHTTPHandler) {
@@ -33,6 +36,7 @@ func RegisterRunnerRoutes(mux *http.ServeMux, handler RunnerHTTPHandler) {
 	mux.HandleFunc(ActivationAckPath, handler.HandleActivationAck)
 	mux.HandleFunc(ReportMetricsPath, handler.HandleReportMetrics)
 	mux.HandleFunc(EnrollPath, handler.HandleEnroll)
+	mux.HandleFunc(RenewIdentityPath, handler.HandleRenewIdentity)
 }
 
 // RunnerFacingPaths enumerates every runner-facing HTTP path constant this
@@ -54,4 +58,5 @@ var RunnerFacingPaths = []string{
 	ActivationAckPath,
 	ReportMetricsPath,
 	EnrollPath,
+	RenewIdentityPath,
 }
