@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -477,6 +478,26 @@ func TestAuthenticateRejectsExpiredAndRevokedIdenticallyToCallers(t *testing.T) 
 		}
 	}
 
+	// (1b) ...and it is the ONLY sentinel in the tree. Assertion (1) alone is
+	// satisfied by a wrap that names two matchable errors —
+	// fmt.Errorf("%w: %w", ErrAuthUnknownToken, ErrIdentityExpired) still
+	// errors.Is-matches ErrAuthUnknownToken — and that second sentinel is
+	// precisely what the brief forbids and what issued_identity.go's comment
+	// claims does not exist: it would let a caller, or a future transport
+	// mapping, tell the three rejections apart programmatically and rebuild
+	// the oracle R7 closes. Walking to the leaves is what makes this fail;
+	// an errors.Is check against a named second sentinel could not, because
+	// the whole point is that no such name exists to check against yet.
+	for _, tc := range rejections {
+		leaves := errorTreeLeaves(tc.err)
+		if len(leaves) != 1 || leaves[0] != ErrAuthUnknownToken {
+			t.Fatalf("%s rejection error tree has %d matchable leaf error(s) %v; want exactly "+
+				"one, ErrAuthUnknownToken. A second sentinel makes the rejections "+
+				"distinguishable by errors.Is, which is the oracle R7 forbids",
+				tc.name, len(leaves), leaves)
+		}
+	}
+
 	// (2) Same CALLER-VISIBLE result. This is R7's real landing point and the
 	// original test never covered it: it stopped at authenticate and never
 	// drove authDeny, the one hop that decides what a caller receives. Feed all
@@ -517,24 +538,45 @@ func TestAuthenticateRejectsExpiredAndRevokedIdenticallyToCallers(t *testing.T) 
 		}
 	}
 
-	// The reasons must stay free of caller-supplied values and of the expiry
-	// timestamp. authDeny logs the runner id in its own field, and a timestamp
-	// would be indirect evidence that this runner id was once real — plus a
-	// disclosure surface the day one of these strings is mistakenly wired onto
-	// an outward path. The runner id "r" is not probed as a substring here
-	// because it is one character and matches almost any English word; the
-	// token and the timestamps are the values that would actually hurt.
+	// The reasons must stay free of caller-supplied values and of every
+	// lifecycle timestamp. authDeny logs the runner id in its own field, and a
+	// timestamp would be indirect evidence that this runner id was once real —
+	// plus a disclosure surface the day one of these strings is mistakenly
+	// wired onto an outward path. The runner id "r" is not probed as a
+	// substring here because it is one character and matches almost any English
+	// word; the token and the timestamps are the values that would actually
+	// hurt. (The 1d test probes a realistic runner id against the logged text.)
+	//
+	// Each timestamp is probed in EVERY rendering a careless author actually
+	// reaches for, not just RFC3339. The single most likely form of this
+	// regression is
+	//
+	//	fmt.Errorf("%w: issued identity expired at %v", ErrAuthUnknownToken, id.ExpiresAt)
+	//
+	// where %v on a time.Time yields time.Time.String() — a format an
+	// RFC3339-only list misses entirely, so the leak lands and the package
+	// stays green.
+	forbidden := []string{secret}
+	for _, ts := range []time.Time{
+		base,
+		live.IssuedAt,
+		live.ExpiresAt,
+		expired.ExpiresAt,
+		revoked.RevokedAt,
+	} {
+		forbidden = append(forbidden,
+			ts.String(), // what %v and %s produce
+			ts.Format(time.RFC3339),
+			ts.Format(time.RFC3339Nano),
+			ts.Format(time.RFC1123),
+			strconv.FormatInt(ts.Unix(), 10),
+		)
+	}
 	for _, tc := range rejections {
-		for _, forbidden := range []string{
-			secret,
-			base.String(),
-			base.Format(time.RFC3339),
-			expired.ExpiresAt.Format(time.RFC3339),
-			revoked.RevokedAt.Format(time.RFC3339),
-		} {
-			if strings.Contains(tc.err.Error(), forbidden) {
+		for _, bad := range forbidden {
+			if strings.Contains(tc.err.Error(), bad) {
 				t.Fatalf("%s rejection message %q contains %q, which must not appear in it",
-					tc.name, tc.err.Error(), forbidden)
+					tc.name, tc.err.Error(), bad)
 			}
 		}
 	}
@@ -622,6 +664,43 @@ func (e capturedLog) field(key string) (any, bool) {
 	return nil, false
 }
 
+// findLogEntry returns the first captured entry whose event name is msg, or
+// nil. Both the positive and the control path in
+// TestAuthDeniedLogNamesTheLifecycleReason go through it so neither can drift
+// into reading a positional entry that happens to be something else.
+func findLogEntry(entries []capturedLog, msg string) *capturedLog {
+	for i := range entries {
+		if entries[i].msg == msg {
+			return &entries[i]
+		}
+	}
+	return nil
+}
+
+// errorTreeLeaves flattens err's wrap tree down to the errors that carry no
+// wrapped error of their own — i.e. the set of sentinels errors.Is can match
+// against. It understands both single-error wrapping (fmt.Errorf with one %w)
+// and Go 1.20 multi-error wrapping (several %w verbs), because the mutation it
+// exists to catch is the latter.
+func errorTreeLeaves(err error) []error {
+	if err == nil {
+		return nil
+	}
+	switch u := err.(type) {
+	case interface{ Unwrap() error }:
+		if inner := u.Unwrap(); inner != nil {
+			return errorTreeLeaves(inner)
+		}
+	case interface{ Unwrap() []error }:
+		var out []error
+		for _, inner := range u.Unwrap() {
+			out = append(out, errorTreeLeaves(inner)...)
+		}
+		return out
+	}
+	return []error{err}
+}
+
 // logCapturingLogger records Error calls. It satisfies engine.Logger, the
 // interface Core.logger holds (mirrors controlplane_test.go's
 // warnCapturingLogger, which captures the other half of the surface).
@@ -701,13 +780,7 @@ func TestAuthDeniedLogNamesTheLifecycleReason(t *testing.T) {
 				t.Fatalf("heartbeat err = %v (%T), want the ErrUnauthenticated constant", err, err)
 			}
 
-			var denied *capturedLog
-			for i := range logger.entries {
-				if logger.entries[i].msg == "auth_denied" {
-					denied = &logger.entries[i]
-					break
-				}
-			}
+			denied := findLogEntry(logger.entries, "auth_denied")
 			if denied == nil {
 				t.Fatalf("no auth_denied event logged; entries = %+v", logger.entries)
 			}
@@ -731,10 +804,17 @@ func TestAuthDeniedLogNamesTheLifecycleReason(t *testing.T) {
 			if !errors.Is(logged, ErrAuthUnknownToken) {
 				t.Fatalf("auth_denied logged err=%v, which no longer matches ErrAuthUnknownToken", logged)
 			}
-			// And the token itself is never in the log (org policy blacklist);
-			// authDeny logs a fingerprint in its own field instead.
-			if strings.Contains(logged.Error(), secret) {
-				t.Fatalf("auth_denied logged err=%q, which contains the token", logged.Error())
+			// Neither the token (org policy blacklist) nor the runner id may
+			// appear in the reason text. authDeny logs a token fingerprint and
+			// the runner id in their own fields, so repeating either here adds
+			// nothing for an operator while widening what the string carries if
+			// it is ever wired outward.
+			for _, bad := range []string{secret, "runner-1"} {
+				if strings.Contains(logged.Error(), bad) {
+					t.Fatalf("auth_denied logged err=%q, which contains %q; authDeny already "+
+						"carries the token fingerprint and the runner id in their own fields",
+						logged.Error(), bad)
+				}
 			}
 		})
 	}
@@ -749,13 +829,26 @@ func TestAuthDeniedLogNamesTheLifecycleReason(t *testing.T) {
 	}, TransportInfo{}); err != ErrUnauthenticated {
 		t.Fatalf("unknown-token heartbeat err = %v, want ErrUnauthenticated", err)
 	}
-	if len(logger.entries) == 0 {
-		t.Fatal("unknown-token rejection logged nothing")
+	// Located by event name and with every lookup checked, exactly like the
+	// positive path above. Reading entries[0] and discarding the ok flags would
+	// make this whole control group vacuous the day anything logs an Error
+	// before the deny: unknownText would silently be "" and the exclusion loop
+	// below would pass without examining anything.
+	denied := findLogEntry(logger.entries, "auth_denied")
+	if denied == nil {
+		t.Fatalf("unknown-token rejection logged no auth_denied event; entries = %+v", logger.entries)
 	}
-	raw, _ := logger.entries[0].field("err")
-	unknownText := ""
-	if e, ok := raw.(error); ok {
-		unknownText = e.Error()
+	raw, ok := denied.field("err")
+	if !ok {
+		t.Fatalf("unknown-token auth_denied carries no err field: %+v", denied.args)
+	}
+	loggedUnknown, ok := raw.(error)
+	if !ok {
+		t.Fatalf("unknown-token auth_denied err field = %#v, want an error", raw)
+	}
+	unknownText := loggedUnknown.Error()
+	if unknownText == "" {
+		t.Fatal("unknown-token auth_denied logged an empty err string")
 	}
 	for _, word := range []string{"expired", "revoked"} {
 		if strings.Contains(unknownText, word) {
