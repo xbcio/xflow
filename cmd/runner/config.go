@@ -761,7 +761,13 @@ func sampleRunnerConfigYAML() string {
 server:
   # transport: "http" or "grpc" (default: grpc, see defaultRunnerConfig)
   transport: "http"
-  url: "http://localhost:8080"
+  # REPLACE-ME is deliberate: this sample does not run as-shipped. A working
+  # default here would have to pick between an http url (which ships the runner
+  # token in the clear) and an https one (which cannot point anywhere real
+  # anyway), so it asks for the host instead of guessing. Keep the https scheme
+  # unless you also uncomment security.allow_plaintext below -- the runner
+  # refuses to start on a plaintext control plane without it.
+  url: "https://REPLACE-ME:8080"
   grpc_target: "localhost:9090"
 
 poll:
@@ -777,12 +783,15 @@ heartbeat:
 #   store: "file"
 #   file: "/var/lib/xflow/runner-identity.json"
 
-security:
-  # The url above is plaintext http, which would ship the runner token in the
-  # clear, so the runner refuses to start unless this is set. It is true here
-  # only because the sample points at localhost. Switch url to https:// and
-  # delete this line before aiming a runner at anything off the machine.
-  allow_plaintext: true
+# security:
+#   # Set this only when the url above is plaintext http, and only when that
+#   # url is a loopback address. The runner refuses to start on a plaintext
+#   # control plane rather than ship its token in the clear; this accepts that
+#   # risk. It is commented out on purpose: forgetting to uncomment it is a
+#   # hard stop at startup, while forgetting to re-comment it after moving the
+#   # url off loopback is a silent credential leak. Only one of those two
+#   # mistakes tells you it happened, so the sample defaults to that one.
+#   allow_plaintext: true
 #   # Exit if the control plane issues no supply encryption key at
 #   # registration, rather than fetching supply content in the clear.
 #   require_supply_encryption: false

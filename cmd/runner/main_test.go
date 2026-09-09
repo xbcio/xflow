@@ -213,6 +213,17 @@ func TestConfigSamplePrintsYAML(t *testing.T) {
 	if err := validateTransportSecurity(cfg); err != nil {
 		t.Fatalf("sample would be refused at startup by validateTransportSecurity: %v", err)
 	}
+	// Passing the gate is not enough either, because there are two ways to pass
+	// it and only one of them is safe to ship. The sample previously passed by
+	// carrying allow_plaintext: true next to a plaintext url -- a reader who
+	// edited the url to a real host and missed the adjacent line would have
+	// shipped the runner token in the clear, and validateTransportSecurity has
+	// no loopback exemption that would catch the mismatch. So assert the sample
+	// passes on the https scheme rather than on the opt-out: allow_plaintext
+	// must not be live in shipped copy, whatever the url happens to say.
+	if cfg.allowPlaintext {
+		t.Fatal("sample ships a live allow_plaintext: true; it must stay commented out so enabling it is an active choice")
+	}
 }
 
 func TestConfigValidateRejectsInvalidFlagConfig(t *testing.T) {
