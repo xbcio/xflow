@@ -35,6 +35,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -3337,6 +3338,110 @@ func g1ValidateArtifact(art *g1Artifact) error {
 	return g1ValidateArtifactForMode(art, true)
 }
 
+type parsedGoVersion struct {
+	major            int
+	minor            int
+	patch            int
+	prereleaseRank   int
+	prereleaseNumber int
+}
+
+const (
+	goVersionBeta = iota
+	goVersionRC
+	goVersionRelease
+)
+
+// goVersionAtLeast compares release-style Go versions numerically. It fails
+// closed when either value cannot be parsed (including runtime.Version's
+// "devel +hash" form): provenance must prove that the compiler met the minimum,
+// and an unknown version cannot provide that evidence.
+func goVersionAtLeast(actual, required string) bool {
+	actualVersion, actualOK := parseGoVersion(actual)
+	requiredVersion, requiredOK := parseGoVersion(required)
+	if !actualOK || !requiredOK {
+		return false
+	}
+
+	actualParts := [...]int{actualVersion.major, actualVersion.minor, actualVersion.patch}
+	requiredParts := [...]int{requiredVersion.major, requiredVersion.minor, requiredVersion.patch}
+	for i := range actualParts {
+		if actualParts[i] != requiredParts[i] {
+			return actualParts[i] > requiredParts[i]
+		}
+	}
+	if actualVersion.prereleaseRank != requiredVersion.prereleaseRank {
+		return actualVersion.prereleaseRank > requiredVersion.prereleaseRank
+	}
+	return actualVersion.prereleaseNumber >= requiredVersion.prereleaseNumber
+}
+
+func parseGoVersion(value string) (parsedGoVersion, bool) {
+	if !strings.HasPrefix(value, "go") {
+		return parsedGoVersion{}, false
+	}
+
+	remainder := value[len("go"):]
+	major, remainder, ok := parseGoVersionNumber(remainder)
+	if !ok || len(remainder) == 0 || remainder[0] != '.' {
+		return parsedGoVersion{}, false
+	}
+	minor, remainder, ok := parseGoVersionNumber(remainder[1:])
+	if !ok {
+		return parsedGoVersion{}, false
+	}
+
+	version := parsedGoVersion{
+		major:          major,
+		minor:          minor,
+		prereleaseRank: goVersionRelease,
+	}
+	if len(remainder) > 0 && remainder[0] == '.' {
+		version.patch, remainder, ok = parseGoVersionNumber(remainder[1:])
+		if !ok {
+			return parsedGoVersion{}, false
+		}
+	}
+
+	switch {
+	case remainder == "":
+		// A missing patch is the initial release, so go1.25 equals go1.25.0.
+	case strings.HasPrefix(remainder, "beta"):
+		version.prereleaseRank = goVersionBeta
+		version.prereleaseNumber, remainder, ok = parseGoVersionNumber(remainder[len("beta"):])
+		if !ok || remainder != "" {
+			return parsedGoVersion{}, false
+		}
+	case strings.HasPrefix(remainder, "rc"):
+		version.prereleaseRank = goVersionRC
+		version.prereleaseNumber, remainder, ok = parseGoVersionNumber(remainder[len("rc"):])
+		if !ok || remainder != "" {
+			return parsedGoVersion{}, false
+		}
+	case strings.HasPrefix(remainder, "-") && len(remainder) > 1:
+		// A custom toolchain suffix does not change the numeric base version.
+	default:
+		return parsedGoVersion{}, false
+	}
+
+	return version, true
+}
+
+func parseGoVersionNumber(value string) (int, string, bool) {
+	end := 0
+	for end < len(value) && value[end] >= '0' && value[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return 0, value, false
+	}
+	number, err := strconv.Atoi(value[:end])
+	if err != nil {
+		return 0, value, false
+	}
+	return number, value[end:], true
+}
+
 // g1ValidateArtifactForMode keeps ordinary integration runs useful on a dirty
 // developer tree while preserving the clean-tree requirement for release
 // evidence. Every non-provenance semantic check is identical in both modes.
@@ -3367,8 +3472,8 @@ func g1ValidateArtifactForMode(art *g1Artifact, strictEvidence bool) error {
 	} else if generatedAt.Location() != time.UTC || generatedAt.Format(time.RFC3339) != art.GeneratedAt {
 		problem("provenance: generated_at=%q must be canonical UTC RFC3339", art.GeneratedAt)
 	}
-	if art.GoVersion != g1RequiredGoVersion {
-		problem("provenance: go_version=%q, want %q", art.GoVersion, g1RequiredGoVersion)
+	if !goVersionAtLeast(art.GoVersion, g1RequiredGoVersion) {
+		problem("provenance: go_version=%q, want at least %q", art.GoVersion, g1RequiredGoVersion)
 	}
 	if strings.TrimSpace(art.OS) == "" {
 		problem("provenance: os is empty")
@@ -3670,7 +3775,7 @@ func TestG1ArtifactProvenanceValidation(t *testing.T) {
 		{name: "commit sha", mutate: func(art *g1Artifact) { art.CommitSHA = strings.ToUpper(art.CommitSHA) }},
 		{name: "dirty worktree", mutate: func(art *g1Artifact) { art.FullWorktreeClean = false }},
 		{name: "non-UTC generated at", mutate: func(art *g1Artifact) { art.GeneratedAt = "2026-08-30T08:00:00+08:00" }},
-		{name: "Go version", mutate: func(art *g1Artifact) { art.GoVersion = "go1.25.1" }},
+		{name: "Go version", mutate: func(art *g1Artifact) { art.GoVersion = "go1.24.9" }},
 		{name: "OS", mutate: func(art *g1Artifact) { art.OS = " " }},
 	}
 	for _, tc := range tests {

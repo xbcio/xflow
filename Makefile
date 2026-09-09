@@ -682,6 +682,16 @@ import uuid
 
 
 SCHEMA_VERSION = 1
+# 这里是严格相等，而 Go 侧 g1ValidateArtifactForMode 是 goVersionAtLeast（>=）——
+# 两者不矛盾，因为前置条件不同：本校验只在 make test-g0-evidence-required 里跑，
+# 而那个 target 依赖 check-go，check-go 已经把 GOVERSION/GOTOOLCHAIN/go.mod 三处
+# 全部钉死等于 go$(GO_VERSION)，所以此处取不到别的值，严格相等是纵深防御。
+# Go 侧要放宽，是因为 go test 直跑没有这道钉子。
+# 值必须由 Makefile 顶部的 GO_VERSION 变量派生（本行不写 make 变量语法：define 块的
+# 注释同样会被 make 展开，写了就会在生成的 Python 里变成一个失去指代的裸版本号）。
+# 写死字面量的话，改 GO_VERSION 时 check-go 会跟着走而这里不会，于是 check-go 先打印
+# "Go toolchain OK"，再由本校验以看不懂的理由失败。
+REQUIRED_GO_VERSION = "go$(GO_VERSION)"
 REQUIRED_METRICS = {
     "xflow_lease_acquire_duration_seconds",
     "xflow_audit_reconcile_scan_total",
@@ -794,8 +804,8 @@ try:
     datetime.datetime.strptime(generated_at, "%Y-%m-%dT%H:%M:%SZ")
 except (TypeError, ValueError):
     fail("generated_at must be UTC RFC3339 with a trailing Z")
-if document.get("go_version") != "go1.25.0":
-    fail("go_version must equal go1.25.0")
+if document.get("go_version") != REQUIRED_GO_VERSION:
+    fail("go_version must equal " + REQUIRED_GO_VERSION)
 os_name = nonempty(document.get("os"), "os")
 if "/" not in os_name or os_name.startswith("/") or os_name.endswith("/"):
     fail("os must identify GOOS/GOARCH")
