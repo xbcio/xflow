@@ -377,6 +377,119 @@ func resolveBackendTarget(memory bool, redisAddr string, redisConfig *distribute
 	return "", nil, redisAddr != "" || redisConfig != nil
 }
 
+// serverDeps carries the dependencies buildServerOptions needs but does not
+// build itself: everything runServer constructs earlier in its body (logger,
+// tracer, authenticators, audit sink, enrollment stores, ...) arrives here
+// through this struct rather than being re-derived from cfg, so there is one
+// place — runServer — that decides how each dependency gets built.
+type serverDeps struct {
+	logger                engine.Logger
+	m                     *metrics.Metrics
+	tracer                tracing.Tracer
+	workflowAuth          apiserver.WorkflowAuthenticator
+	principalAuth         apiserver.PrincipalAuthenticator
+	audit                 apiserver.AuditSink
+	artifactStore         *store.ArtifactStore
+	auth                  control.Authenticator
+	registrationCodeStore control.RegistrationCodeStore
+	issuedIdentityStore   control.IssuedIdentityStore
+	singleToken           bool
+	durableAudit          bool
+	supplyAtRest          *supplyenc.AtRest
+}
+
+// buildServerOptions translates cfg and deps into the xflowsdk.ServerOption
+// slice that runServer hands to xflowsdk.NewServer. It is split out of
+// runServer so a test can drive it directly: xflowsdk.serverConfig is
+// unexported and *Server has no accessor for identity TTL (or most of the
+// other options), so the only way to check what an option slice actually
+// does is to feed it to NewServer and observe behaviour — which requires
+// this exact assembly, not a hand-rolled stand-in for it.
+func buildServerOptions(cfg serverConfig, deps serverDeps) []xflowsdk.ServerOption {
+	// The assembly lives in sdk/xflow, not here. Every option below is a
+	// translation of a flag; the wiring those options drive — supply wire
+	// encryption, the audit reconcile worker and its leader gate, the module
+	// set — is the SDK's, so an embedded host and this binary cannot end up
+	// with different postures. Before this, they did: an SDK server had no
+	// workflow-API authenticator at all, left supply content unencrypted on the
+	// runner hop, and built no reconciler.
+	//
+	// Options are passed unconditionally wherever the zero value already means
+	// "off" — a nil metrics registry, an empty artifact store, an unset address.
+	// The conditionals below are only the ones a flag genuinely gates. Wrapping
+	// the rest in nil checks would reintroduce, one `if` at a time, the same
+	// per-field transcription this refactor removes.
+	serverOpts := []xflowsdk.ServerOption{
+		xflowsdk.WithServerLogger(deps.logger),
+		xflowsdk.WithServerMetrics(deps.m),
+		xflowsdk.WithServerMetricsAddr(cfg.metricsAddr, cfg.metricsPath),
+		xflowsdk.WithServerTracer(deps.tracer),
+		xflowsdk.WithServerConcurrency(cfg.concurrency),
+		xflowsdk.WithServerWorkflowAuth(deps.workflowAuth, cfg.requireAPIAuth),
+		xflowsdk.WithServerPrincipalAuth(deps.principalAuth, apiserver.NamespaceAwareAuthorizer{}, deps.audit),
+		xflowsdk.WithServerArtifacts(deps.artifactStore),
+		xflowsdk.WithServerHTTPAddr(cfg.addr),
+		xflowsdk.WithServerGRPCAddr(cfg.grpcAddr),
+		xflowsdk.WithServerTLS(cfg.tlsCert, cfg.tlsKey, cfg.tlsClientCA),
+		xflowsdk.WithServerSupplyKeyRotation(cfg.supplyKeyRotation),
+		// The two runner-metrics flags are deliberately unbound:
+		// --enable-runner-metrics-proxy opens the inbox, --runner-metrics-interval
+		// annotates every heartbeat response. A negative interval suspends
+		// reporting fleet-wide, which is exactly the case an operator reaches
+		// for while the inbox is off.
+		xflowsdk.WithServerRunnerMetricsInterval(cfg.runnerMetricsInterval),
+	}
+	if cfg.enableRunnerMetricsProxy {
+		serverOpts = append(serverOpts, xflowsdk.WithServerRunnerMetricsProxy())
+	}
+	// Runner-auth posture. buildAuthenticator returns DisabledAuthenticator{}
+	// for an empty --auth-policy, which control.IsConfigured rejects — so
+	// passing it unconditionally made NewServer fail with
+	// ErrRunnerAuthPostureUndeclared, whose remedy names SDK options an
+	// operator of this binary cannot reach. Declaring the posture in the
+	// binary's own terms instead means --mode=dev starts, and --mode=production
+	// reaches the gate below, which answers in flag names.
+	switch runnerAuthPostureFor(deps.auth, cfg.enroll) {
+	case posturePolicy:
+		serverOpts = append(serverOpts, xflowsdk.WithServerAuth(deps.auth))
+	case postureInsecure:
+		serverOpts = append(serverOpts, xflowsdk.WithServerInsecureNoRunnerAuth())
+	}
+	if cfg.enroll {
+		serverOpts = append(serverOpts, xflowsdk.WithServerEnroll(deps.registrationCodeStore, deps.issuedIdentityStore))
+	}
+	// Unconditional: cfg.runnerIdentityTTL defaults to (and is validated to be
+	// no less than) zero, and zero has no observable effect unless --enroll is
+	// also set (there is no issued identity to stamp an expiry on otherwise).
+	serverOpts = append(serverOpts, xflowsdk.WithServerIdentityTTL(cfg.runnerIdentityTTL))
+	// Production posture (Task 8 blocker 3), enforced by apiserver.New — the
+	// one layer both this binary and every SDK embedder pass through. The
+	// declaration carries the three facts that layer cannot see for itself:
+	// they describe how the dependencies below were BUILT, not anything the
+	// built objects expose. Everything else the gate checks (principal auth,
+	// authorizer, audit sink, runner auth, reconcilable store) it reads
+	// directly off the config it is handed.
+	if cfg.mode == "production" {
+		serverOpts = append(serverOpts, xflowsdk.WithServerProduction(
+			productionDeclaration(deps.principalAuth, deps.singleToken, deps.durableAudit, deps.supplyAtRest != nil)))
+	}
+	if cfg.management {
+		serverOpts = append(serverOpts, xflowsdk.WithServerManagement())
+		// Gate /v1/management/* with the workflow API authenticator when
+		// configured; /healthz and /readyz stay open for probes. When no
+		// token is set the management surface is open (dev / behind an
+		// external gateway) — log a warning so production mis-config is loud.
+		if deps.workflowAuth != nil {
+			serverOpts = append(serverOpts,
+				xflowsdk.WithServerHTTPMiddleware(apiserver.ManagementAuthMiddleware(deps.workflowAuth)))
+			log.Println("xflow-server: management module enabled; /v1/management/* gated by --api-auth-token")
+		} else {
+			log.Println("xflow-server: WARNING management module enabled without --api-auth-token; /v1/management/* is open (dev only)")
+		}
+	}
+	return serverOpts
+}
+
 func runServer(cfg serverConfig) error {
 	logger, err := buildLogger(cfg)
 	if err != nil {
@@ -529,87 +642,21 @@ func runServer(cfg serverConfig) error {
 		}
 	}
 
-	// The assembly lives in sdk/xflow, not here. Every option below is a
-	// translation of a flag; the wiring those options drive — supply wire
-	// encryption, the audit reconcile worker and its leader gate, the module
-	// set — is the SDK's, so an embedded host and this binary cannot end up
-	// with different postures. Before this, they did: an SDK server had no
-	// workflow-API authenticator at all, left supply content unencrypted on the
-	// runner hop, and built no reconciler.
-	//
-	// Options are passed unconditionally wherever the zero value already means
-	// "off" — a nil metrics registry, an empty artifact store, an unset address.
-	// The conditionals below are only the ones a flag genuinely gates. Wrapping
-	// the rest in nil checks would reintroduce, one `if` at a time, the same
-	// per-field transcription this refactor removes.
-	serverOpts := []xflowsdk.ServerOption{
-		xflowsdk.WithServerLogger(logger),
-		xflowsdk.WithServerMetrics(m),
-		xflowsdk.WithServerMetricsAddr(cfg.metricsAddr, cfg.metricsPath),
-		xflowsdk.WithServerTracer(tracer),
-		xflowsdk.WithServerConcurrency(cfg.concurrency),
-		xflowsdk.WithServerWorkflowAuth(workflowAuth, cfg.requireAPIAuth),
-		xflowsdk.WithServerPrincipalAuth(principalAuth, apiserver.NamespaceAwareAuthorizer{}, audit),
-		xflowsdk.WithServerArtifacts(artifactStore),
-		xflowsdk.WithServerHTTPAddr(cfg.addr),
-		xflowsdk.WithServerGRPCAddr(cfg.grpcAddr),
-		xflowsdk.WithServerTLS(cfg.tlsCert, cfg.tlsKey, cfg.tlsClientCA),
-		xflowsdk.WithServerSupplyKeyRotation(cfg.supplyKeyRotation),
-		// The two runner-metrics flags are deliberately unbound:
-		// --enable-runner-metrics-proxy opens the inbox, --runner-metrics-interval
-		// annotates every heartbeat response. A negative interval suspends
-		// reporting fleet-wide, which is exactly the case an operator reaches
-		// for while the inbox is off.
-		xflowsdk.WithServerRunnerMetricsInterval(cfg.runnerMetricsInterval),
-	}
-	if cfg.enableRunnerMetricsProxy {
-		serverOpts = append(serverOpts, xflowsdk.WithServerRunnerMetricsProxy())
-	}
-	// Runner-auth posture. buildAuthenticator returns DisabledAuthenticator{}
-	// for an empty --auth-policy, which control.IsConfigured rejects — so
-	// passing it unconditionally made NewServer fail with
-	// ErrRunnerAuthPostureUndeclared, whose remedy names SDK options an
-	// operator of this binary cannot reach. Declaring the posture in the
-	// binary's own terms instead means --mode=dev starts, and --mode=production
-	// reaches the gate below, which answers in flag names.
-	switch runnerAuthPostureFor(auth, cfg.enroll) {
-	case posturePolicy:
-		serverOpts = append(serverOpts, xflowsdk.WithServerAuth(auth))
-	case postureInsecure:
-		serverOpts = append(serverOpts, xflowsdk.WithServerInsecureNoRunnerAuth())
-	}
-	if cfg.enroll {
-		serverOpts = append(serverOpts, xflowsdk.WithServerEnroll(registrationCodeStore, issuedIdentityStore))
-	}
-	// Unconditional: cfg.runnerIdentityTTL defaults to (and is validated to be
-	// no less than) zero, and zero has no observable effect unless --enroll is
-	// also set (there is no issued identity to stamp an expiry on otherwise).
-	serverOpts = append(serverOpts, xflowsdk.WithServerIdentityTTL(cfg.runnerIdentityTTL))
-	// Production posture (Task 8 blocker 3), enforced by apiserver.New — the
-	// one layer both this binary and every SDK embedder pass through. The
-	// declaration carries the three facts that layer cannot see for itself:
-	// they describe how the dependencies below were BUILT, not anything the
-	// built objects expose. Everything else the gate checks (principal auth,
-	// authorizer, audit sink, runner auth, reconcilable store) it reads
-	// directly off the config it is handed.
-	if cfg.mode == "production" {
-		serverOpts = append(serverOpts, xflowsdk.WithServerProduction(
-			productionDeclaration(principalAuth, singleToken, durableAudit, supplyAtRest != nil)))
-	}
-	if cfg.management {
-		serverOpts = append(serverOpts, xflowsdk.WithServerManagement())
-		// Gate /v1/management/* with the workflow API authenticator when
-		// configured; /healthz and /readyz stay open for probes. When no
-		// token is set the management surface is open (dev / behind an
-		// external gateway) — log a warning so production mis-config is loud.
-		if workflowAuth != nil {
-			serverOpts = append(serverOpts,
-				xflowsdk.WithServerHTTPMiddleware(apiserver.ManagementAuthMiddleware(workflowAuth)))
-			log.Println("xflow-server: management module enabled; /v1/management/* gated by --api-auth-token")
-		} else {
-			log.Println("xflow-server: WARNING management module enabled without --api-auth-token; /v1/management/* is open (dev only)")
-		}
-	}
+	serverOpts := buildServerOptions(cfg, serverDeps{
+		logger:                logger,
+		m:                     m,
+		tracer:                tracer,
+		workflowAuth:          workflowAuth,
+		principalAuth:         principalAuth,
+		audit:                 audit,
+		artifactStore:         artifactStore,
+		auth:                  auth,
+		registrationCodeStore: registrationCodeStore,
+		issuedIdentityStore:   issuedIdentityStore,
+		singleToken:           singleToken,
+		durableAudit:          durableAudit,
+		supplyAtRest:          supplyAtRest,
+	})
 
 	srv, err := xflowsdk.NewServer(xflowsdk.ServerConfig{
 		RedisAddr:   redisAddr, // legacy single-node path
