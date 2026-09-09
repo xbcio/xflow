@@ -152,7 +152,11 @@ wrap 一层，`ErrAuthUnknownToken` 仍是唯一 `errors.Is` 可匹配的身份�
 
 需另立条目。
 
-### 5. `decideIdentityRenewal` 与真实接线之间隔着一个未被驱动的分支
+### 5. ~~`decideIdentityRenewal` 与真实接线之间隔着一个未被驱动的分支~~ 已修
+
+> **已修**，见 `test(runner): drive runRunner's identity-renewal wiring branch`。
+> 本条保留原文，因为它是 `startIdentityRenewal` seam 为什么存在的**唯一记录**：读不到这段的
+> 人，很容易把这个变量当成一层无意义的间接而内联掉，那等于把下面这条分支重新变回不可观测。
 
 `cmd/runner/renew_test.go` 只驱动这个纯函数本身、断言它返回的四个值，没有驱动 `runRunner`
 全程去观察续期 goroutine 是否真的按判定结果被启动或不被启动。
@@ -173,7 +177,13 @@ if rc, start, warnMsg, warnErr := decideIdentityRenewal(cfg, store); warnErr != 
 
 **本次记档不修的理由：** 修它需要一条驱动 `runRunner` 全程（起真实 goroutine、断言其存在
 或不存在）的测试，成本远超这几行代码本身的风险。列在待办而非「已接受的代价」里，是因为
-一旦这个分支开始生长，成本收益比会翻转。
+一旦这个分支开始生长，成本收益比会翻转。这个判断后来翻转了：成本比估计的低得多，落地只是
+一个包级 seam（`var startIdentityRenewal = runIdentityRenewal`，照 `newRunnerService` 的既有
+先例）加三条驱动 `runRunner` 全程的用例（已签发身份+https、无已签发身份、已签发身份+明文被拒
+三种分支结果各一条），没有触碰 `decideIdentityRenewal` 本身或 `runRunner` 的其它结构。三条
+用例都用变异验证过：把 `else if start` 反转、在分支前插一个提前 return、把
+`go startIdentityRenewal(...)` 整行删掉，三种变异都能让对应用例变红，随后各自还原并重新
+确认全绿。
 
 ### 6. 若将来放宽注册码 list 的归属，须重新评估投影
 
