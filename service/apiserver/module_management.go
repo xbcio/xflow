@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"reflect"
@@ -69,6 +70,16 @@ type managementModule struct {
 	// server", reached without touching the mount condition.
 	codes  control.RegistrationCodeStore
 	issued control.IssuedIdentityStore
+	// registrationCodeTTL is the deployment ceiling on how long a newly minted
+	// registration code may live. Zero means no ceiling, which is what a server
+	// upgraded without the flag carries — see resolveRegistrationCodeExpiry on
+	// why that default has to be the passive one.
+	//
+	// It applies at MINT time only. Enforcement of an already-minted code's
+	// deadline lives in RegistrationCodeStore.ResolveByPlaintext, which needs
+	// no configuration at all, so lowering this value never retroactively
+	// shortens a code already in someone's hands.
+	registrationCodeTTL time.Duration
 	// runners is the structural probe result for GET PathManagementRunners
 	// (see runnerLister below). Nil means the configured directory does not
 	// support enumeration, and the route answers 501 rather than an empty list.
@@ -804,6 +815,14 @@ func registrationCodeUnavailable(w http.ResponseWriter, r *http.Request) {
 type registrationCodeCreateRequest struct {
 	AllowedNamespaces []string `json:"allowed_namespaces"`
 	AllowedNodeTypes  []string `json:"allowed_node_types"`
+	// ExpiresInSeconds is the requested lifetime. A pointer because absent and
+	// 0 are different requests: absent means "use the deployment default",
+	// while 0 explicitly asks for a code that never expires — and under a
+	// deployment ceiling that is a request the server must refuse rather than
+	// silently reinterpret. Seconds rather than a duration string ("24h")
+	// because the OpenAPI contract has no unambiguous duration type and a
+	// third-party client should not have to reimplement Go's parser.
+	ExpiresInSeconds *int64 `json:"expires_in_seconds,omitempty"`
 }
 
 // registrationCodeCreateResponse is the ONLY place the plaintext code ever
@@ -823,6 +842,11 @@ type registrationCodeView struct {
 	AllowedNodeTypes  []string `json:"allowed_node_types"`
 	Revoked           bool     `json:"revoked"`
 	CreatedAt         string   `json:"created_at"`
+	// ExpiresAt is omitted for a code that never expires, mirroring the
+	// domain's zero value. There is deliberately no computed "expired" boolean
+	// beside it: a second representation of the same fact is a second thing
+	// that can drift from ResolveByPlaintext's verdict.
+	ExpiresAt string `json:"expires_at,omitempty"`
 }
 
 type enrollAuditView struct {
@@ -889,19 +913,93 @@ func (m *managementModule) handleCreateRegistrationCode(w http.ResponseWriter, r
 		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
+	now := time.Now().UTC()
+	expiresAt, err := resolveRegistrationCodeExpiry(now, m.registrationCodeTTL, req.ExpiresInSeconds)
+	if err != nil {
+		// 400, not 403: because the ceiling clamps _global creators too, there
+		// is no principal for whom this same request would succeed. 403 would
+		// wrongly imply "ask for a bigger scope"; the only way through is for
+		// an operator to change --registration-code-ttl, which is a deployment
+		// action, not an authorization one.
+		writeFail(w, r, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
 	code := control.RegistrationCode{
 		ID:                id,
 		CodeHash:          control.HashSecret(plaintext),
 		OwnerNamespace:    p.Namespace,
 		AllowedNamespaces: requested,
 		AllowedNodeTypes:  req.AllowedNodeTypes,
-		CreatedAt:         time.Now().UTC(),
+		CreatedAt:         now,
+		ExpiresAt:         expiresAt,
 	}
 	if err := m.codes.Create(r.Context(), code); err != nil {
 		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 	writeData(w, r, http.StatusOK, registrationCodeCreateResponse{ID: id, Code: plaintext})
+}
+
+// maxRegistrationCodeTTLSeconds is where seconds stop fitting in a
+// time.Duration (~292 years). It is an overflow guard, not a policy: a
+// requested lifetime beyond it would wrap negative and mint a code that is
+// already expired, which reads as "the server ignored my request".
+const maxRegistrationCodeTTLSeconds = int64(math.MaxInt64) / int64(time.Second)
+
+// resolveRegistrationCodeExpiry enforces the deployment ceiling on how long a
+// newly minted code may live, and returns the absolute deadline to persist.
+// The zero time means "never expires".
+//
+// ceiling <= 0 means no deployment ceiling, and MUST leave an absent request
+// as "never": that is what makes a plain upgrade — new binary, no new flag —
+// change nothing about codes minted before or after it. The reverse default
+// would silently start expiring every code an operator mints the day they
+// upgrade.
+//
+// Requests over the ceiling are REFUSED, not silently clamped down to it. A
+// caller that asked for 90 days and got 24 hours without being told has a
+// code that dies two months before it expects to, and nothing in the response
+// says so. resolveRequestedNamespaces makes the same choice on the namespace
+// axis for the same reason.
+//
+// An explicit 0 under a ceiling is likewise refused rather than reinterpreted:
+// 0 means "never expires", the deployment has declared that no such code may
+// be minted, and rewriting the request into the ceiling would hide the fact
+// that the caller asked for something else entirely.
+//
+// This function does not look at the principal. That is the point: a holder of
+// registration_code.create_global is clamped exactly like a tenant, so the
+// only way to widen the ceiling is to change the flag — an auditable operator
+// action on the host, not a scope someone can be granted.
+func resolveRegistrationCodeExpiry(now time.Time, ceiling time.Duration, requestedSeconds *int64) (time.Time, error) {
+	if requestedSeconds == nil {
+		if ceiling <= 0 {
+			return time.Time{}, nil
+		}
+		return now.Add(ceiling).UTC(), nil
+	}
+	req := *requestedSeconds
+	if req < 0 {
+		return time.Time{}, fmt.Errorf("expires_in_seconds must not be negative, got %d", req)
+	}
+	if req == 0 {
+		if ceiling <= 0 {
+			return time.Time{}, nil
+		}
+		return time.Time{}, fmt.Errorf(
+			"expires_in_seconds 0 requests a code that never expires, but this server caps registration code lifetime at %s",
+			ceiling)
+	}
+	if req > maxRegistrationCodeTTLSeconds {
+		return time.Time{}, fmt.Errorf("expires_in_seconds %d is out of range", req)
+	}
+	want := time.Duration(req) * time.Second
+	if ceiling > 0 && want > ceiling {
+		return time.Time{}, fmt.Errorf(
+			"expires_in_seconds %d exceeds this server's registration code lifetime cap of %s",
+			req, ceiling)
+	}
+	return now.Add(want).UTC(), nil
 }
 
 // errRegistrationCodeMissingNamespaces is the sentinel a _global creator hits
@@ -1008,13 +1106,17 @@ func (m *managementModule) handleListRegistrationCodes(w http.ResponseWriter, r 
 	}
 	out := make([]registrationCodeView, 0, len(list))
 	for _, c := range list {
-		out = append(out, registrationCodeView{
+		view := registrationCodeView{
 			ID:                c.ID,
 			AllowedNamespaces: c.AllowedNamespaces,
 			AllowedNodeTypes:  c.AllowedNodeTypes,
 			Revoked:           c.Revoked,
 			CreatedAt:         c.CreatedAt.UTC().Format(time.RFC3339),
-		})
+		}
+		if !c.ExpiresAt.IsZero() {
+			view.ExpiresAt = c.ExpiresAt.UTC().Format(time.RFC3339)
+		}
+		out = append(out, view)
 	}
 	writeData(w, r, http.StatusOK, out)
 }

@@ -824,10 +824,14 @@ paths:
       operationId: createRegistrationCode
       summary: Mint a runner registration code
       description: |
-        Mints a one-time-use registration code a runner presents to the
-        enroll endpoint to obtain a signed identity. The plaintext code is
-        returned exactly once, in this response; it is never recoverable
-        afterwards, including from the list endpoint below.
+        Mints a registration code a runner presents to the enroll endpoint to
+        obtain a signed identity. The plaintext code is returned exactly once,
+        in this response; it is never recoverable afterwards, including from
+        the list endpoint below.
+
+        The code itself is REUSABLE: a successful enroll does not consume it,
+        so one code can enroll a whole fleet. Bound its blast radius with
+        `expires_in_seconds` and by revoking it once the fleet is up.
 
         Requires the `management.registration_code.create` scope.
 
@@ -857,7 +861,7 @@ paths:
               $ref: "#/components/schemas/RegistrationCodeCreateRequest"
       responses:
         "200":
-          description: The newly minted code (plaintext, one-time).
+          description: The newly minted code. The plaintext is returned only here.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
@@ -1507,9 +1511,9 @@ components:
       type: object
       description: |
         The scope granted to runners that enroll with the minted code
-        (store.RunnerPolicy). Both fields are optional; an empty list means
-        "no restriction" and is honored by RunnerPolicy.AllowsNamespace at
-        enroll time.
+        (store.RunnerPolicy), plus the code's own lifetime. All fields are
+        optional; an empty list means "no restriction" and is honored by
+        RunnerPolicy.AllowsNamespace at enroll time.
       properties:
         allowed_namespaces:
           type: array
@@ -1519,6 +1523,22 @@ components:
           type: array
           items:
             type: string
+        expires_in_seconds:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            How long the minted code stays usable. Omit it to take the
+            deployment default (`--registration-code-ttl`); pass 0 to ask for
+            a code that never expires.
+
+            The deployment value is a CEILING, not just a default: a request
+            longer than it — including 0, which asks for no expiry at all —
+            is rejected with 400 rather than silently clamped, so a caller
+            never walks away believing it got a lifetime it did not get. The
+            ceiling binds `registration_code.create_global` holders exactly
+            as it binds tenants; widening it is a deployment action, not an
+            authorization one.
 
     RegistrationCodeCreateResponse:
       type: object
@@ -1532,7 +1552,10 @@ components:
           type: string
         code:
           type: string
-          description: One-time plaintext registration code. Not returned again.
+          description: |
+            Plaintext registration code. Returned only here, never again —
+            but usable for as many enrollments as its lifetime allows.
+
 
     RegistrationCodeView:
       type: object
@@ -1557,6 +1580,14 @@ components:
         created_at:
           type: string
           format: date-time
+        expires_at:
+          type: string
+          format: date-time
+          description: |
+            When the code stops being accepted by enroll. Absent means it
+            never expires. There is deliberately no computed `expired`
+            boolean beside it: a second representation of the same fact is a
+            second thing that can drift from the server's own verdict.
 
     EnrollAuditView:
       type: object

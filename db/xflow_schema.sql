@@ -116,6 +116,7 @@ CREATE TABLE IF NOT EXISTS xflow_registration_codes (
     owner_namespace    VARCHAR(64)  NOT NULL DEFAULT ''    COMMENT '铸造该注册码的主体所属 namespace；空串表示此列新增前写入的行，仅持有对应 _global scope 的主体可见（fail-closed 读法）',
     revoked            TINYINT(1)   NOT NULL DEFAULT 0    COMMENT '是否已吊销',
     created_at         DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    expires_at         DATETIME(3)  NULL                   COMMENT '注册码失效时间，NULL 表示永不过期。与 revoked 相互独立：吊销是运维动作，过期是铸造时定下的期限',
     PRIMARY KEY (id),
     UNIQUE INDEX uk_code_hash (code_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -826,3 +827,25 @@ DELIMITER ;
 CALL xflow_add_issued_identity_owner_column();
 DROP PROCEDURE IF EXISTS xflow_add_issued_identity_owner_column;
 
+
+-- 注册码的过期列。缺了它，老部署上 ResolveByPlaintext 读取 expires_at 会直接
+-- 报 SQL 错误。历史行留 NULL，读作「永不过期」——这是刻意的：升级本身不得让
+-- 任何已发出去的注册码失效，那会是一次全面的 enroll 停机。
+DROP PROCEDURE IF EXISTS xflow_add_registration_code_expires_at_column;
+DELIMITER $$
+CREATE PROCEDURE xflow_add_registration_code_expires_at_column()
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_registration_codes'
+          AND COLUMN_NAME = 'expires_at'
+    ) THEN
+        ALTER TABLE xflow_registration_codes
+            ADD COLUMN expires_at DATETIME(3) NULL
+                COMMENT '注册码失效时间，NULL 表示永不过期' AFTER created_at;
+    END IF;
+END$$
+DELIMITER ;
+CALL xflow_add_registration_code_expires_at_column();
+DROP PROCEDURE IF EXISTS xflow_add_registration_code_expires_at_column;

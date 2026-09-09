@@ -163,3 +163,33 @@ func TestNewServerReachesIdentityTTLEndToEnd(t *testing.T) {
 		t.Fatalf("ExpiresAt = %v, want within [%v, %v]", expiresAt, before.Add(ttl), after.Add(ttl))
 	}
 }
+
+// TestNewServerReachesRegistrationCodeTTL is the sibling wiring assertion for
+// WithServerRegistrationCodeTTL. It stops one hop short of
+// TestNewServerReachesIdentityTTLEndToEnd's response-body check because the
+// ceiling's observable effect lives behind the management API's principal
+// auth, and standing that up here would test apiserver's authz rather than
+// this package's passthrough. The remaining hop —
+// apiserver.Config.RegistrationCodeTTL -> managementModule.registrationCodeTTL
+// -> handleCreateRegistrationCode — is covered inside apiserver by
+// TestCreateRegistrationCodeAppliesDeploymentCeiling.
+//
+// The asserted value is non-zero and specific for the same reason its sibling
+// gives: zero is also the untouched default, so a zero assertion could not
+// tell "wired" from "silently dropped".
+func TestNewServerReachesRegistrationCodeTTL(t *testing.T) {
+	const ttl = 36 * time.Hour
+	sc := &serverConfig{}
+	WithServerRegistrationCodeTTL(ttl)(sc)
+	got := buildServerAPIConfig(ServerConfig{}, sc)
+	if got.RegistrationCodeTTL != ttl {
+		t.Fatalf("RegistrationCodeTTL = %v, want %v; the option did not reach apiserver.Config",
+			got.RegistrationCodeTTL, ttl)
+	}
+
+	// The default must stay passive: an embedder that never names the option
+	// gets no ceiling, so upgrading this SDK cannot start expiring codes.
+	if zero := buildServerAPIConfig(ServerConfig{}, &serverConfig{}); zero.RegistrationCodeTTL != 0 {
+		t.Fatalf("default RegistrationCodeTTL = %v, want 0", zero.RegistrationCodeTTL)
+	}
+}

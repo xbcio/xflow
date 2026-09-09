@@ -118,3 +118,30 @@ func ExampleDeadLetterReplayResponse(outcome, auditID, executionID, nodeID, acti
 		ActivationID: activationID,
 	}
 }
+
+// ExampleRegistrationCodeCreateRequest builds a registrationCodeCreateRequest
+// (POST /v1/management/registration-codes). expiresInSeconds is a pointer in
+// the real type — absent and 0 are different requests — so the contract test
+// can exercise both the "asked for a lifetime" and the "took the deployment
+// default" shapes against the same schema.
+func ExampleRegistrationCodeCreateRequest(namespaces, nodeTypes []string, expiresInSeconds *int64) any {
+	return registrationCodeCreateRequest{
+		AllowedNamespaces: namespaces,
+		AllowedNodeTypes:  nodeTypes,
+		ExpiresInSeconds:  expiresInSeconds,
+	}
+}
+
+// ExampleRegistrationCodeView builds a registrationCodeView (GET
+// /v1/management/registration-codes). Carries neither the plaintext nor the
+// hash, which is the property the schema exists to pin down.
+func ExampleRegistrationCodeView(id, createdAt, expiresAt string, namespaces, nodeTypes []string, revoked bool) any {
+	return registrationCodeView{
+		ID:                id,
+		AllowedNamespaces: namespaces,
+		AllowedNodeTypes:  nodeTypes,
+		Revoked:           revoked,
+		CreatedAt:         createdAt,
+		ExpiresAt:         expiresAt,
+	}
+}

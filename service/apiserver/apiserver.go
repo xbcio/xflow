@@ -58,8 +58,13 @@ type Config struct {
 	// it must renew. Zero (the default) means never expires. See
 	// control.Config.IdentityTTL, which this threads to verbatim.
 	IdentityTTL time.Duration
-	Logger      engine.Logger
-	Metrics     *metrics.Metrics
+	// RegistrationCodeTTL caps how long a registration code minted through the
+	// management API may live. Zero (the default) means no cap. Unlike
+	// IdentityTTL this is a management-face concern only — it is consumed when
+	// a code is created and never reaches control.Config.
+	RegistrationCodeTTL time.Duration
+	Logger              engine.Logger
+	Metrics             *metrics.Metrics
 	// Tracer, when non-nil, enables OTel HTTP middleware and wires distributed
 	// tracing through the runner dispatch/commit path. Nil means no tracing.
 	Tracer tracing.Tracer
@@ -254,6 +259,7 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 		// them. See Task 8 addendum Ruling Q.
 		mgmt.codes = cfg.RegistrationCodes
 		mgmt.issued = cfg.IssuedIdentities
+		mgmt.registrationCodeTTL = cfg.RegistrationCodeTTL
 		if cfg.PrincipalAuth != nil {
 			mgmt.principalAuth = cfg.PrincipalAuth
 			mgmt.authorizer = cfg.Authorizer

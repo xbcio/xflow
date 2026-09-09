@@ -173,7 +173,31 @@ wrap 一层，`ErrAuthUnknownToken` 仍是唯一 `errors.Is` 可匹配的身份�
 
 这个缺口先于本计划存在，但本计划扩大了它的表面积：现在有一个安全相关的值走这条无守卫的路。
 
-### 4. 注册码本身仍没有过期机制
+### 4. ~~注册码本身仍没有过期机制~~ 已修（过期部分）
+
+> **已修（过期部分）**，见 `feat(enroll): give registration codes a lifetime`。本条保留原文，
+> 因为它记录的是**两个放大器**（可复用 + 无过期），而本次只拆掉了后一个——读不到原文的人
+> 会以为「注册码有过期了」就等于「泄漏的注册码不再是无限放大器」，那不是本次做的事。
+> 可复用仍然成立，见下方「已知且接受的代价」中「注册码可复用」一条。
+>
+> 落点：`RegistrationCode.ExpiresAt` + `IsExpired(now)`（零值＝永不过期，所以升级不会追溯
+> 作废任何已发出的码）；过期判定放在 `ResolveByPlaintext` 内、**常量时间比对之后**，与
+> `Revoked` 同一处——两处生命周期检查分家的话，后来的读者找到一处就不会再去找另一处。
+> 两个 store 实现由 `store/storecontract` 的四条共享用例夹住，其中一条钉死「既吊销又过期
+> 报 `ErrRegistrationCodeRevoked`」：对外这两种拒绝不可区分（`Core.Enroll` 统一收敛成
+> `ErrEnrollRejected`，不给存在性预言机），但审计 `reason` 里必须可区分，那是运维唯一
+> 能看见的记录。
+>
+> 时限来源是 `--registration-code-ttl`，它既是默认值**也是天花板**：create 请求只能往短里
+> 收，要更长（含显式 `expires_in_seconds: 0`＝永不过期）一律 400 而不是静默夹到天花板——
+> 被夹的调用方会以为自己拿到了请求的时限。天花板同样约束 `registration_code.create_global`
+> 持有者，所以放宽它是一次**主机上的运维动作**（改 flag、进程可见），不是一个能被授予的
+> scope。接线链每一跳都有测试守住（flag → `WithServerRegistrationCodeTTL` →
+> `apiserver.Config` → `managementModule`），因为末两跳是构造后字段注入，断掉的话所有
+> handler 测试仍然全绿。
+>
+> 顺带修正了一处 **OpenAPI 与实现不符**：spec 原先把注册码描述成 one-time-use，而实现从来
+> 是无限复用。现在如实写明可复用，并指向 `expires_in_seconds` 与吊销作为限制爆炸半径的手段。
 
 注册码只有 `Revoked`，没有 `ExpiresAt`。本次刻意不引入（本次的过期机制加在**签发身份**上，
 不在注册码上）。
@@ -319,6 +343,11 @@ repo，各有一个 `Revoke`：
 
 enroll 成功后不消费、不标记。这是既有设计，本次不改。与上面「待办 §4」配合读：可复用
 **且**无过期，是同一枚泄漏注册码的两个放大器。
+
+§4 的过期部分已修，所以第二个放大器现在有了时间上限——但**只在部署设了
+`--registration-code-ttl` 或调用方自己传了 `expires_in_seconds` 时才有**。默认仍是永不过期，
+因为让升级追溯作废已发出的码是更坏的一种意外。可复用本身一个字节都没变：在码的有效期内，
+一枚泄漏的注册码仍然能注册任意多个 runner。
 
 ---
 

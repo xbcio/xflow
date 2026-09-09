@@ -91,6 +91,17 @@ type serverConfig struct {
 	// something an upgrade of this binary does to it. Meaningful only
 	// alongside --enroll.
 	runnerIdentityTTL time.Duration
+	// registrationCodeTTL caps how long a registration code minted through the
+	// management API may live. Zero (the default) means no cap, for the same
+	// reason runnerIdentityTTL's zero does: an upgrade of this binary must not
+	// silently start expiring codes an operator mints on the day they deploy
+	// it. Meaningful only alongside --management (codes are minted there).
+	//
+	// It is a ceiling, not merely a default: a create request may ask for a
+	// shorter lifetime, never a longer one, and a registration_code.create_global
+	// holder is clamped exactly like a tenant. Raising it is therefore an
+	// auditable act on this host, not a scope someone can be granted.
+	registrationCodeTTL time.Duration
 	// apiAuthToken, when non-empty, enables BearerTokenAuth on the workflow/
 	// control API (/v1/workflows, /v1/executions/*). The same token must be
 	// supplied by callers in the Authorization: Bearer <token> header. When set
@@ -191,6 +202,8 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	fs.BoolVar(&cfg.enroll, "enroll", false, "Enable the runner enrollment endpoint (/v1/runners/enroll)")
 	fs.DurationVar(&cfg.runnerIdentityTTL, "runner-identity-ttl", 0,
 		"How long an enrolled runner identity authenticates before it must renew (0 disables expiry)")
+	fs.DurationVar(&cfg.registrationCodeTTL, "registration-code-ttl", 0,
+		"Ceiling on the lifetime of a registration code minted via the management API; also its default (0 disables expiry)")
 	fs.StringVar(&cfg.apiAuthToken, "api-auth-token", "", "Static bearer token for workflow API authentication (sets Authorization: Bearer guard on /v1/workflows and /v1/executions/*); single-namespace → default namespace. For multi-namespace use --auth-tokens-file.")
 	fs.StringVar(&cfg.authTokensFile, "auth-tokens-file", "", "JSON file of [{token,subject,namespace,scopes}] mappings; each token binds to its own namespace (multi-namespace). Takes precedence over --api-auth-token. File must be 0600.")
 	fs.BoolVar(&cfg.requireAPIAuth, "require-api-auth", false, "Fail to start if no workflow API authenticator is configured (production fail-closed)")
@@ -242,6 +255,9 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	}
 	if cfg.runnerIdentityTTL < 0 {
 		return serverConfig{}, fmt.Errorf("--runner-identity-ttl must not be negative")
+	}
+	if cfg.registrationCodeTTL < 0 {
+		return serverConfig{}, fmt.Errorf("--registration-code-ttl must not be negative")
 	}
 	// Backwards compatibility: when no Redis address and no HA topology flags
 	// are provided, default to the in-memory backend.
@@ -462,6 +478,9 @@ func buildServerOptions(cfg serverConfig, deps serverDeps) []xflowsdk.ServerOpti
 	// no less than) zero, and zero has no observable effect unless --enroll is
 	// also set (there is no issued identity to stamp an expiry on otherwise).
 	serverOpts = append(serverOpts, xflowsdk.WithServerIdentityTTL(cfg.runnerIdentityTTL))
+	// Unconditional for the same reason: zero is a no-op ceiling, and the flag
+	// is validated to be no less than zero.
+	serverOpts = append(serverOpts, xflowsdk.WithServerRegistrationCodeTTL(cfg.registrationCodeTTL))
 	// Production posture (Task 8 blocker 3), enforced by apiserver.New — the
 	// one layer both this binary and every SDK embedder pass through. The
 	// declaration carries the three facts that layer cannot see for itself:

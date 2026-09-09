@@ -12,13 +12,29 @@ import (
 	"gorm.io/gorm"
 )
 
-type registrationCodeRepo struct{ db *gorm.DB }
+type registrationCodeRepo struct {
+	db *gorm.DB
+	// now is injected so code expiry can be tested at the exact boundary
+	// without sleeping, and so this store and MemoryRegistrationCodeStore
+	// agree on where "now" comes from. Deliberately NOT the database clock:
+	// pushing the predicate into SQL (WHERE expires_at > NOW()) would make the
+	// two implementations disagree the moment the app and DB hosts drift, and
+	// the storecontract test could no longer hold them to one answer.
+	now func() time.Time
+}
 
 var _ store.RegistrationCodeStore = (*registrationCodeRepo)(nil)
 
 // NewRegistrationCodeStore returns the SQL-backed registration code store.
 func NewRegistrationCodeStore(db *gorm.DB) store.RegistrationCodeStore {
 	return &registrationCodeRepo{db: db}
+}
+
+func (r *registrationCodeRepo) clock() time.Time {
+	if r == nil || r.now == nil {
+		return time.Now().UTC()
+	}
+	return r.now().UTC()
 }
 
 func encodeList(list []string) string {
@@ -60,6 +76,11 @@ func decodeList(s string) ([]string, error) {
 }
 
 func (r *registrationCodeRepo) Create(ctx context.Context, code store.RegistrationCode) error {
+	var expires *time.Time
+	if !code.ExpiresAt.IsZero() {
+		t := code.ExpiresAt.UTC()
+		expires = &t
+	}
 	return r.db.WithContext(ctx).Create(&dbRegistrationCode{
 		ID:                code.ID,
 		CodeHash:          code.CodeHash[:],
@@ -68,6 +89,7 @@ func (r *registrationCodeRepo) Create(ctx context.Context, code store.Registrati
 		OwnerNamespace:    code.OwnerNamespace,
 		Revoked:           code.Revoked,
 		CreatedAt:         code.CreatedAt,
+		ExpiresAt:         expires,
 	}).Error
 }
 
@@ -98,6 +120,12 @@ func (r *registrationCodeRepo) ResolveByPlaintext(ctx context.Context, plaintext
 	if code.Revoked {
 		return store.RegistrationCode{}, store.ErrRegistrationCodeRevoked
 	}
+	// Expiry is evaluated in Go against the injected clock, not pushed into the
+	// WHERE clause above — see the `now` field's doc on why the database clock
+	// is the wrong authority here.
+	if code.IsExpired(r.clock()) {
+		return store.RegistrationCode{}, store.ErrRegistrationCodeExpired
+	}
 	return code, nil
 }
 
@@ -119,6 +147,9 @@ func rowToRegistrationCode(row dbRegistrationCode) (store.RegistrationCode, erro
 		CreatedAt:         row.CreatedAt,
 	}
 	copy(code.CodeHash[:], row.CodeHash)
+	if row.ExpiresAt != nil {
+		code.ExpiresAt = row.ExpiresAt.UTC()
+	}
 	return code, nil
 }
 

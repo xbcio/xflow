@@ -256,6 +256,11 @@ type dbRegistrationCode struct {
 	OwnerNamespace string    `gorm:"column:owner_namespace;size:64;not null;default:''"`
 	Revoked        bool      `gorm:"column:revoked;not null;default:false"`
 	CreatedAt      time.Time `gorm:"column:created_at;not null"`
+	// ExpiresAt mirrors store.RegistrationCode.ExpiresAt. It is *time.Time and
+	// the column is NULL-able because the domain's zero value means "never
+	// expires" and MySQL 8 strict mode rejects '0000-00-00' outright — the
+	// same split dbIssuedIdentity.ExpiresAt already carries.
+	ExpiresAt *time.Time `gorm:"column:expires_at"`
 }
 
 func (dbRegistrationCode) TableName() string { return "xflow_registration_codes" }

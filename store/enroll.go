@@ -33,13 +33,14 @@ import (
 const registrationCodeBytes = 32
 
 var (
-	// These two are server-side distinctions ONLY. They are written to the
-	// audit trail, and Core.Enroll collapses both of them into the single
+	// These three are server-side distinctions ONLY. They are written to the
+	// audit trail, and Core.Enroll collapses all of them into the single
 	// external control.ErrEnrollRejected. Spec §2.3.4 item 4: a prober must not
-	// be able to learn that a code exists but is revoked, or that a lookup
-	// simply failed to find one.
+	// be able to learn that a code exists but is revoked, that it exists but has
+	// expired, or that a lookup simply failed to find one.
 	ErrRegistrationCodeUnknown = errors.New("store: registration code not recognized")
 	ErrRegistrationCodeRevoked = errors.New("store: registration code revoked")
+	ErrRegistrationCodeExpired = errors.New("store: registration code expired")
 
 	// ErrRegistrationCodeNotFound is a management-face error (revoking an id
 	// that does not exist). It never reaches the enroll path.
@@ -156,6 +157,37 @@ type RegistrationCode struct {
 	OwnerNamespace string
 	Revoked        bool
 	CreatedAt      time.Time
+	// ExpiresAt is when this code stops being accepted by enroll. The zero
+	// value means "never" and is what every code minted before the server grew
+	// a registration-code TTL carries, so turning the feature on does not
+	// retroactively invalidate codes already handed out.
+	//
+	// Expiry and Revoked are independent: revocation is an operator killing a
+	// specific code, expiry is a deadline the code was born with. Neither
+	// implies the other, and ResolveByPlaintext reports them as distinct
+	// server-side reasons (both collapse to one external verdict).
+	//
+	// Domain types carry a value time.Time and read the zero value as "none";
+	// the DB rows use *time.Time and NULL for the same state, converted at the
+	// repo boundary — the same split IssuedIdentity.ExpiresAt documents, and
+	// for the same reason (MySQL 8 strict mode rejects '0000-00-00').
+	ExpiresAt time.Time
+}
+
+// IsExpired reports whether the code's deadline has passed as of now. A zero
+// ExpiresAt is never expired.
+//
+// The predicate lives here, on the domain type, rather than in each store:
+// two implementations of "is this code still usable" would drift, and the
+// drift would be a privilege escalation — the same reasoning Policy()
+// documents one type over.
+//
+// The boundary is "not After", so a code is expired at the exact instant it
+// comes due rather than one tick later. That matches
+// IssuedIdentityAuthenticator's identical check verbatim; the two lifetimes
+// must not disagree about what "now" means at the boundary.
+func (c RegistrationCode) IsExpired(now time.Time) bool {
+	return !c.ExpiresAt.IsZero() && !c.ExpiresAt.After(now)
 }
 
 // Clone returns a copy of c whose AllowedNamespaces / AllowedNodeTypes slices
@@ -208,8 +240,15 @@ type EnrollAuditRecord struct {
 // same contract test (store/storecontract.RunRegistrationCodeStoreContract).
 type RegistrationCodeStore interface {
 	Create(ctx context.Context, code RegistrationCode) error
-	// ResolveByPlaintext returns the non-revoked code whose hash matches
-	// plaintext. Comparison must be constant-time against every stored code.
+	// ResolveByPlaintext returns the non-revoked, unexpired code whose hash
+	// matches plaintext. Comparison must be constant-time against every stored
+	// code.
+	//
+	// Expiry is enforced HERE rather than in Core.Enroll so that an expired
+	// code never escapes the storage boundary at all: a future caller that
+	// forgets to re-check would otherwise fail open. That is the same placement
+	// Revoked already has, and the two must stay together — a reader who finds
+	// one check here will not go looking for the other elsewhere.
 	ResolveByPlaintext(ctx context.Context, plaintext string) (RegistrationCode, error)
 	// List returns the codes visible under scope. An invalid scope returns
 	// ErrOwnerScopeUnset and no rows.

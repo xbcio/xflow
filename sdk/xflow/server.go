@@ -94,6 +94,14 @@ type serverConfig struct {
 	// it must renew. Zero means never expires. Set only by
 	// WithServerIdentityTTL.
 	identityTTL time.Duration
+	// registrationCodeTTL caps how long a registration code minted through the
+	// management API may live. Zero means no cap. Set only by
+	// WithServerRegistrationCodeTTL.
+	//
+	// Unlike identityTTL this never reaches control.Config: it is consumed when
+	// a code is created, and enforcement of an already-minted deadline lives in
+	// the store.
+	registrationCodeTTL time.Duration
 
 	// production / productionDecl feed apiserver's production posture gate.
 	// Set only by WithServerProduction.
@@ -169,6 +177,19 @@ func WithServerEnroll(codes control.RegistrationCodeStore, ids control.IssuedIde
 // enrollment is on.
 func WithServerIdentityTTL(d time.Duration) ServerOption {
 	return func(c *serverConfig) { c.identityTTL = d }
+}
+
+// WithServerRegistrationCodeTTL caps how long a registration code minted
+// through the management API may live. Zero (the default) means no cap, which
+// is the pre-feature behavior: an upgrade must not silently start expiring
+// codes an operator mints the day they deploy it.
+//
+// The cap is a ceiling, not just a default — a create request may ask for a
+// shorter lifetime but a longer one is refused, and the refusal applies to a
+// registration_code.create_global holder exactly as it does to a tenant. The
+// only way to widen it is to change this value, which is a deployment action.
+func WithServerRegistrationCodeTTL(d time.Duration) ServerOption {
+	return func(c *serverConfig) { c.registrationCodeTTL = d }
 }
 
 // WithServerLogger sets the logger used by the engine, dispatcher, and
@@ -565,6 +586,7 @@ func buildServerAPIConfig(cfg ServerConfig, sc *serverConfig) apiserver.Config {
 		RegistrationCodes:   sc.registrationCodes,
 		IssuedIdentities:    sc.issuedIdentities,
 		IdentityTTL:         sc.identityTTL,
+		RegistrationCodeTTL: sc.registrationCodeTTL,
 		WorkflowAuth:        sc.workflowAuth,
 		RequireWorkflowAuth: sc.requireWorkflowAuth,
 		PrincipalAuth:       sc.principalAuth,

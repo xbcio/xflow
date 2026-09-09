@@ -50,6 +50,98 @@ func RunRegistrationCodeStoreContract(t *testing.T, factory func(t *testing.T) s
 		return id, plaintext
 	}
 
+	// mkExpiring is mk with a deadline. The offset is relative to real wall
+	// time rather than a fixed instant because a store's clock is not
+	// injectable through the RegistrationCodeStore interface — and should not
+	// be, since the interface is what production uses. The offsets below are
+	// hours, far outside any plausible clock skew between the test process and
+	// a database host, so these subtests are about the DIRECTION of the
+	// comparison, not its precision. The exact boundary (expired at the very
+	// instant it comes due) is pinned by RegistrationCode.IsExpired's own unit
+	// test, where the clock is a parameter.
+	mkExpiring := func(t *testing.T, st store.RegistrationCodeStore, offset time.Duration) (string, string, time.Time) {
+		t.Helper()
+		id, plaintext, err := store.GenerateRegistrationCode()
+		if err != nil {
+			t.Fatalf("GenerateRegistrationCode: %v", err)
+		}
+		expires := time.Now().UTC().Add(offset).Truncate(time.Millisecond)
+		err = st.Create(ctx, store.RegistrationCode{
+			ID: id, CodeHash: store.HashSecret(plaintext),
+			AllowedNamespaces: []string{"sas"}, AllowedNodeTypes: []string{"*"},
+			CreatedAt: time.Unix(1700000000, 0).UTC(),
+			ExpiresAt: expires,
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		return id, plaintext, expires
+	}
+
+	t.Run("expired code", func(t *testing.T) {
+		st := factory(t)
+		_, plaintext, _ := mkExpiring(t, st, -time.Hour)
+		if _, err := st.ResolveByPlaintext(ctx, plaintext); err != store.ErrRegistrationCodeExpired {
+			t.Fatalf("err = %v, want ErrRegistrationCodeExpired", err)
+		}
+	})
+
+	t.Run("unexpired code resolves and its deadline round-trips", func(t *testing.T) {
+		st := factory(t)
+		id, plaintext, want := mkExpiring(t, st, time.Hour)
+		got, err := st.ResolveByPlaintext(ctx, plaintext)
+		if err != nil {
+			t.Fatalf("ResolveByPlaintext: %v", err)
+		}
+		if got.ID != id {
+			t.Fatalf("id = %q, want %q", got.ID, id)
+		}
+		// A column that silently drops the deadline would let this code
+		// outlive its ceiling forever, and the "expired code" subtest above
+		// would still pass — it only proves the comparison runs, not that the
+		// value survived the round trip.
+		if !got.ExpiresAt.Equal(want) {
+			t.Fatalf("ExpiresAt = %v, want %v", got.ExpiresAt, want)
+		}
+		if got.IsExpired(time.Now().UTC()) {
+			t.Fatal("a code an hour out reported itself expired")
+		}
+	})
+
+	t.Run("zero deadline never expires", func(t *testing.T) {
+		st := factory(t)
+		// mk leaves ExpiresAt zero — the shape every code minted before this
+		// feature carries. It must keep resolving, and must not come back
+		// carrying some substituted non-zero deadline (a NOT NULL column with
+		// a default would do exactly that, and would silently kill every
+		// legacy code the day the store started reading the column).
+		_, plaintext := mk(t, st, []string{"sas"})
+		got, err := st.ResolveByPlaintext(ctx, plaintext)
+		if err != nil {
+			t.Fatalf("ResolveByPlaintext: %v", err)
+		}
+		if !got.ExpiresAt.IsZero() {
+			t.Fatalf("ExpiresAt = %v, want zero", got.ExpiresAt)
+		}
+	})
+
+	t.Run("revoked outranks expired", func(t *testing.T) {
+		st := factory(t)
+		// Both implementations must agree on which reason a code that is both
+		// revoked AND expired reports. The two verdicts are indistinguishable
+		// to the enrolling caller — Core.Enroll collapses them into one
+		// ErrEnrollRejected — but they are NOT indistinguishable in the audit
+		// trail, which is the only record an operator has of why a fleet
+		// stopped enrolling. Revocation is the deliberate act, so it wins.
+		id, plaintext, _ := mkExpiring(t, st, -time.Hour)
+		if err := st.Revoke(ctx, id, store.OwnerScope{All: true}); err != nil {
+			t.Fatalf("Revoke: %v", err)
+		}
+		if _, err := st.ResolveByPlaintext(ctx, plaintext); err != store.ErrRegistrationCodeRevoked {
+			t.Fatalf("err = %v, want ErrRegistrationCodeRevoked", err)
+		}
+	})
+
 	t.Run("resolve returns the created code", func(t *testing.T) {
 		st := factory(t)
 		id, plaintext := mk(t, st, []string{"sas"})

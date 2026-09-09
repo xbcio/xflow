@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"sync"
+	"time"
 )
 
 // ErrRegistrationScopeDenied would be returned when a registration code does
@@ -22,12 +23,25 @@ type MemoryRegistrationCodeStore struct {
 	mu    sync.RWMutex
 	codes []RegistrationCode
 	audit []EnrollAuditRecord
+	// now is injected so code expiry can be tested at the exact boundary
+	// without sleeping. nil means time.Now, which is the shape
+	// IssuedIdentityAuthenticator already uses; there is no repo-wide Clock
+	// interface and inventing one for these two call sites would be a bigger
+	// change than the feature.
+	now func() time.Time
 }
 
 var _ RegistrationCodeStore = (*MemoryRegistrationCodeStore)(nil)
 
 func NewMemoryRegistrationCodeStore() *MemoryRegistrationCodeStore {
 	return &MemoryRegistrationCodeStore{}
+}
+
+func (s *MemoryRegistrationCodeStore) clock() time.Time {
+	if s == nil || s.now == nil {
+		return time.Now().UTC()
+	}
+	return s.now().UTC()
 }
 
 func (s *MemoryRegistrationCodeStore) Create(_ context.Context, code RegistrationCode) error {
@@ -59,8 +73,14 @@ func (s *MemoryRegistrationCodeStore) ResolveByPlaintext(_ context.Context, plai
 	if !matched {
 		return RegistrationCode{}, ErrRegistrationCodeUnknown
 	}
+	// Both lifecycle checks run AFTER the full constant-time scan, never
+	// inside it: short-circuiting on a revoked or expired entry would restore
+	// exactly the position-dependent timing the scan exists to erase.
 	if found.Revoked {
 		return RegistrationCode{}, ErrRegistrationCodeRevoked
+	}
+	if found.IsExpired(s.clock()) {
+		return RegistrationCode{}, ErrRegistrationCodeExpired
 	}
 	return found.Clone(), nil
 }

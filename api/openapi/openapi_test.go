@@ -234,6 +234,54 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 				}}},
 			},
 		},
+		{
+			name:   "registration code create request",
+			schema: "RegistrationCodeCreateRequest",
+			value: apiserver.ExampleRegistrationCodeCreateRequest(
+				[]string{"team-a"}, []string{"http.request"}, ptrInt64(86400),
+			),
+		},
+		{
+			// The absent-lifetime shape. expires_in_seconds is a pointer with
+			// omitempty precisely so "take the deployment default" and "never
+			// expires" (an explicit 0) stay distinguishable on the wire; a
+			// non-pointer field would collapse them and this case would look
+			// identical to the one above with 0.
+			//
+			// The lists stay non-nil here on purpose. A nil []string marshals
+			// to null, which these array schemas reject — a real, pre-existing
+			// gap on the scope axis (Clone() returns nil for an empty list, so
+			// a code minted with no namespaces really does serialize null).
+			// That gap is not this change's to close; pinning it here would
+			// only bury it inside an expiry test.
+			name:   "registration code create request (no lifetime)",
+			schema: "RegistrationCodeCreateRequest",
+			value: apiserver.ExampleRegistrationCodeCreateRequest(
+				[]string{"team-a"}, []string{"http.request"}, nil,
+			),
+		},
+		{
+			name:   "registration code view",
+			schema: "RegistrationCodeView",
+			value: apiserver.ExampleRegistrationCodeView(
+				"rc-01H8XG",
+				now.Format(time.RFC3339),
+				now.Add(24*time.Hour).Format(time.RFC3339),
+				[]string{"team-a"}, []string{"http.request"}, false,
+			),
+		},
+		{
+			// A code that never expires omits expires_at entirely. Pinned
+			// separately because the required list must NOT have grown to
+			// include it — a schema that demands expires_at would reject every
+			// code minted on a deployment without a lifetime ceiling.
+			name:   "registration code view (never expires)",
+			schema: "RegistrationCodeView",
+			value: apiserver.ExampleRegistrationCodeView(
+				"rc-01H8XH", now.Format(time.RFC3339), "",
+				[]string{"team-a"}, []string{"http.request"}, true,
+			),
+		},
 	}
 
 	for _, tc := range cases {
@@ -422,3 +470,6 @@ func TestContractPathsAreAllRegistered(t *testing.T) {
 		}
 	}
 }
+
+// ptrInt64 exists because a *int64 field cannot be given a literal inline.
+func ptrInt64(v int64) *int64 { return &v }
