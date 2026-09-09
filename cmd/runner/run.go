@@ -478,9 +478,10 @@ func renewClientFor(cfg runnerConfig) (renewClient, error) {
 // decideIdentityRenewal is the gate runRunner asks before starting the
 // renewal loop. It is a pure decision function -- no goroutine, no logging --
 // specifically so the gate itself is directly assertable in a unit test
-// without standing up a full runRunner: a mutation that deletes or weakens
-// any one of its checks must turn a test red here, not only pass silently
-// through an untested wiring block.
+// without standing up a full runRunner: a mutation that deletes or weakens any
+// one of its checks must turn a test red here. Whether the wiring block acts
+// on this function's verdict is a separate question, covered separately via
+// the startIdentityRenewal seam below.
 //
 // Returns:
 //   - start=true, rc set: the caller should launch runIdentityRenewal(rc, ...).
@@ -523,11 +524,16 @@ func decideIdentityRenewal(cfg runnerConfig, store identityStore) (rc renewClien
 }
 
 // startIdentityRenewal is the seam runRunner actually calls, following the
-// newRunnerService precedent above: the wiring block that decides *whether*
-// to launch runIdentityRenewal has no test of its own, only decideIdentityRenewal
-// (the pure function feeding it) does. Swapping this var lets a test observe
-// that the goroutine was launched -- or wasn't -- without waiting on a real
-// renewal loop.
+// newRunnerService precedent above. The wiring block decides *whether* to
+// launch runIdentityRenewal, and that decision is invisible to
+// decideIdentityRenewal's unit tests -- those assert the pure function's
+// return values, not that the branch acts on them. Swapping this var lets a
+// test observe that the goroutine was launched -- or wasn't -- without waiting
+// on a real renewal loop.
+//
+// Do not inline this back into a direct runIdentityRenewal call: it is the
+// only handle run_identity_renewal_wiring_test.go has on that branch, and
+// removing it would reopen the gap silently.
 var startIdentityRenewal = runIdentityRenewal
 
 // runIdentityRenewal keeps this runner's issued identity alive.
