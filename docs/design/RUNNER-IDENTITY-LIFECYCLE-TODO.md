@@ -59,7 +59,12 @@
 
 按「不做会怎样」排序。
 
-### 1. 吊销端点没有 per-namespace 隔离（跨租户 DoS 通道）
+### 1. ~~吊销端点没有 per-namespace 隔离（跨租户 DoS 通道）~~ 已修
+
+> **已修**，见 `fix(enroll): confine identity revocation to the owning namespace`。
+> 本条保留原文，因为它是 `owner_namespace` 列与
+> `management.runner.revoke_identity_global` scope 存在的**唯一理由**：读不到这段的人，
+> 很容易把这两样当成冗余而删掉，那等于把下面这条通道原样打开。
 
 `POST /v1/management/runners/{id}/revoke-identity`（常量
 `apiserver.PathManagementRunnerRevokeIdentity`）是平台级操作。持有
@@ -70,8 +75,19 @@
 吊销能力。若该 scope 将来被误发给租户级 principal，即是一条完整的横向 DoS 通道：一个租户
 可以把另一个租户的整支 runner 机群踢下线。
 
-**收口方法已知：** 给 `IssuedIdentity` 补一个归属列，按本计划 T5 已经用过的
-`store.OwnerScope` 模式收口。没在本次做，是因为它属于另一个变更的范围。
+**实际修法：** `IssuedIdentity` 新增 `OwnerNamespace`，在 enroll 时从注册码**快照**过来
+（不是按 `CodeID` JOIN——身份一经签发就独立于注册码，删码不能抹掉归属）。吊销时
+`ownerScopeFor` 把 principal 投影成 `store.OwnerScope`，store 层用它做谓词。三处要点：
+
+1. **越权报 not-found 而非 forbidden**——否则该端点成了别的租户 runner id 的存在性预言机。
+2. **`owner_namespace = ""` 是「归属未知」不是「归属所有人」**——该列存在之前写入的历史行只有
+   `*_global` 能吊销。读成「公开」就是 fail-open。
+3. **`RowsAffected == 0` 的 COUNT 补偿必须带上和 UPDATE 同一个 scope 谓词**——无谓词的 COUNT
+   会数到别的租户的行，`n > 0` 于是返回 nil，等于告诉调用方「那个 runner 存在且已吊销」，
+   而它根本无权看见该 runner。这是整个修复里最容易在重构中丢掉的一处。
+
+上述三点各有定向变异用例把守（`service/control`、`service/apiserver`、`store/storecontract`
+三处），逐处变异 7/7 同轴命中。
 
 ### 2. 身份过期/被吊销导致的认证失败，在服务端自己的日志里也无法与「token 不对」区分
 
