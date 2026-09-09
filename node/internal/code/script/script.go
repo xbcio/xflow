@@ -309,8 +309,16 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 			results, batchErr = engine.ExecuteBatchSerial(ctx, eng, src, records, globals)
 		}
 		if batchErr != nil {
-			observeExecute(ctx, language, runtime, "error", time.Since(start))
+			// Outcome is decided PER BRANCH rather than once up front, so
+			// "timeout" and "permanent" get their own label instead of both
+			// collapsing into the generic "error" a plain script failure also
+			// reports. Without that split, xflow_script_execute_total{outcome="error"}
+			// mixes three causes an operator needs to tell apart: a deadline
+			// that a retry could clear, a node that will never succeed on any
+			// retry, and a script's own deterministic reject -- and averaging
+			// them together answers none of the three questions.
 			if ctx.Err() != nil {
+				observeExecute(ctx, language, runtime, "timeout", time.Since(start))
 				return nil, types.NewTransientError("script.timeout", batchErr.Error())
 			}
 			if types.IsPermanent(batchErr) {
@@ -332,8 +340,10 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 				// BatchEngine that does not, and treating that as batch-fatal is
 				// the honest reading -- we do not know which records it stands
 				// for.
+				observeExecute(ctx, language, runtime, "permanent", time.Since(start))
 				return nil, batchErr
 			}
+			observeExecute(ctx, language, runtime, "error", time.Since(start))
 			return &types.Output{Data: map[string]any{"error": batchErr.Error()}, Port: "error"}, nil
 		}
 		data := map[string]any{
@@ -374,7 +384,11 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 		// deterministic outcome and is routed via the explicit "error" port
 		// (engine/outputPortRetryError), preserving existing OnError routing.
 		if ctx.Err() != nil {
-			observeExecute(ctx, language, runtime, "error", time.Since(start))
+			// Own outcome label, not "error": a deadline is a transient system
+			// condition a retry can clear, and folding it into the generic
+			// error count would hide how often scripts are actually timing out
+			// behind ordinary script-level failures.
+			observeExecute(ctx, language, runtime, "timeout", time.Since(start))
 			return nil, types.NewTransientError("script.timeout", err.Error())
 		}
 		// A per-record failure condemns THIS record and nothing else: the engine
@@ -434,7 +448,11 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 		// self-declared transient failure both keep the error port, so workflows
 		// that branch on it are unaffected.
 		if types.IsPermanent(err) {
-			observeExecute(ctx, language, runtime, "error", time.Since(start))
+			// Own outcome label, not "error": this is the node failing outright
+			// (redelivery cannot help), which is a different operational signal
+			// than a script's own deterministic reject on the error port -- see
+			// the batch path's identical split above.
+			observeExecute(ctx, language, runtime, "permanent", time.Since(start))
 			return nil, err
 		}
 		observeExecute(ctx, language, runtime, "error", time.Since(start))
@@ -444,7 +462,7 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 	// before the engine started, or a very tight deadline), classify as timeout
 	// instead of accepting a result from a raced engine execution.
 	if ctx.Err() != nil {
-		observeExecute(ctx, language, runtime, "error", time.Since(start))
+		observeExecute(ctx, language, runtime, "timeout", time.Since(start))
 		return nil, types.NewTransientError("script.timeout", ctx.Err().Error())
 	}
 	data := engine.MapResult(result)
