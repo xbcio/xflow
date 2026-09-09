@@ -41,14 +41,16 @@ func TestOnErrorActionParity(t *testing.T) {
 			parityCase: parityCase{
 				Name: "onerror_stop",
 				Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
-					return types.NodeDef{
-							Name:    "source",
-							Type:    srcStop,
-							OnError: string(types.OnErrorStop),
-						}, func(reg engine.HandlerRegistrar) {
-							reg.RegisterGlobal(srcStop, &onErrorSourceHandler{nodeType: srcStop, mode: "permanent"})
-							reg.RegisterGlobal(dstStop, onErrorDownstreamHandler{nodeType: dstStop})
-						}, nil
+					def := types.NodeDef{
+						Name:    "source",
+						Type:    srcStop,
+						OnError: string(types.OnErrorStop),
+					}
+					register := func(reg engine.HandlerRegistrar) {
+						reg.RegisterGlobal(srcStop, &onErrorSourceHandler{nodeType: srcStop, mode: "permanent"})
+						reg.RegisterGlobal(dstStop, onErrorDownstreamHandler{nodeType: dstStop})
+					}
+					return def, register, nil
 				},
 				MaxAttempts:    1,
 				WantAttempt:    1,
@@ -64,14 +66,16 @@ func TestOnErrorActionParity(t *testing.T) {
 			parityCase: parityCase{
 				Name: "onerror_error_output",
 				Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
-					return types.NodeDef{
-							Name:    "source",
-							Type:    srcErrorOutput,
-							OnError: string(types.OnErrorOutput),
-						}, func(reg engine.HandlerRegistrar) {
-							reg.RegisterGlobal(srcErrorOutput, &onErrorSourceHandler{nodeType: srcErrorOutput, mode: "business"})
-							reg.RegisterGlobal(dstErrorOutput, onErrorDownstreamHandler{nodeType: dstErrorOutput})
-						}, nil
+					def := types.NodeDef{
+						Name:    "source",
+						Type:    srcErrorOutput,
+						OnError: string(types.OnErrorOutput),
+					}
+					register := func(reg engine.HandlerRegistrar) {
+						reg.RegisterGlobal(srcErrorOutput, &onErrorSourceHandler{nodeType: srcErrorOutput, mode: "business"})
+						reg.RegisterGlobal(dstErrorOutput, onErrorDownstreamHandler{nodeType: dstErrorOutput})
+					}
+					return def, register, nil
 				},
 				MaxAttempts: 1,
 				WantAttempt: 1,
@@ -92,14 +96,16 @@ func TestOnErrorActionParity(t *testing.T) {
 			parityCase: parityCase{
 				Name: "onerror_main_output",
 				Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
-					return types.NodeDef{
-							Name:    "source",
-							Type:    srcMainOutput,
-							OnError: string(types.OnErrorMainOutput),
-						}, func(reg engine.HandlerRegistrar) {
-							reg.RegisterGlobal(srcMainOutput, &onErrorSourceHandler{nodeType: srcMainOutput, mode: "business"})
-							reg.RegisterGlobal(dstMainOutput, onErrorDownstreamHandler{nodeType: dstMainOutput})
-						}, nil
+					def := types.NodeDef{
+						Name:    "source",
+						Type:    srcMainOutput,
+						OnError: string(types.OnErrorMainOutput),
+					}
+					register := func(reg engine.HandlerRegistrar) {
+						reg.RegisterGlobal(srcMainOutput, &onErrorSourceHandler{nodeType: srcMainOutput, mode: "business"})
+						reg.RegisterGlobal(dstMainOutput, onErrorDownstreamHandler{nodeType: dstMainOutput})
+					}
+					return def, register, nil
 				},
 				MaxAttempts: 1,
 				WantAttempt: 1,
@@ -120,14 +126,16 @@ func TestOnErrorActionParity(t *testing.T) {
 			parityCase: parityCase{
 				Name: "onerror_continue",
 				Build: func() (types.NodeDef, func(engine.HandlerRegistrar), func() int) {
-					return types.NodeDef{
-							Name:    "source",
-							Type:    srcContinue,
-							OnError: string(types.OnErrorContinue),
-						}, func(reg engine.HandlerRegistrar) {
-							reg.RegisterGlobal(srcContinue, &onErrorSourceHandler{nodeType: srcContinue, mode: "permanent"})
-							reg.RegisterGlobal(dstContinue, onErrorDownstreamHandler{nodeType: dstContinue})
-						}, nil
+					def := types.NodeDef{
+						Name:    "source",
+						Type:    srcContinue,
+						OnError: string(types.OnErrorContinue),
+					}
+					register := func(reg engine.HandlerRegistrar) {
+						reg.RegisterGlobal(srcContinue, &onErrorSourceHandler{nodeType: srcContinue, mode: "permanent"})
+						reg.RegisterGlobal(dstContinue, onErrorDownstreamHandler{nodeType: dstContinue})
+					}
+					return def, register, nil
 				},
 				MaxAttempts: 1,
 				WantAttempt: 1,
