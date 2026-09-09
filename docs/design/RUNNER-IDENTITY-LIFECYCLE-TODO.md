@@ -131,7 +131,39 @@
 wrap 一层，`ErrAuthUnknownToken` 仍是唯一 `errors.Is` 可匹配的身份，`authDeny` 返回的
 `ErrUnauthenticated` 常量一个字节都不变。
 
-### 3. `runServer` 零测试覆盖（本计划扩大了它）
+### 3. ~~`runServer` 零测试覆盖（本计划扩大了它）~~ 已修（部分）
+
+> **已修（部分）**，见 `refactor(server): extract buildServerOptions from runServer` /
+> `test(server): guard the --runner-identity-ttl wiring hop`。本条保留原文，因为它记录了
+> 缺口的完整形状，而修法只补上了其中一跳——读不到原文的人会以为「有测试了」就等于
+> 「`runServer` 被测过了」，那不是本次做的事。
+>
+> **缺口的实际形状是两头有覆盖、中间没有：** `TestParseServerConfigRunnerIdentityTTLFlag`
+> （`cmd/server/main_test.go`）早就证明了 `--runner-identity-ttl` 落到
+> `cfg.runnerIdentityTTL`；`sdk/xflow/server_enroll_test.go` 的
+> `TestNewServerReachesIdentityTTLEndToEnd` 证明了 `WithServerIdentityTTL` 一直传到
+> `EnrollResponse.ExpiresAt`。没人守的是中间那一跳——`cfg.runnerIdentityTTL` 到
+> `WithServerIdentityTTL(...)` 这次调用本身,把 TTL 错接到另一个同类型字段（例如
+> `cfg.runnerMetricsInterval`）编译照样通过,全仓库测试照样全绿。
+>
+> **修法：** 把 `cmd/server/main.go` 里原来在 `runServer` 内联的选项装配块（原 545–612
+> 行,从 `serverOpts := []xflowsdk.ServerOption{` 到 `cfg.management` 分支结束）原样提成
+> `buildServerOptions(cfg serverConfig, deps serverDeps) []xflowsdk.ServerOption`，`deps`
+> 装那块代码闭包捕获的、由 `runServer` 更早处构造好的依赖（logger、metrics、tracer、
+> workflow/principal 认证器、audit sink、artifact store、runner 认证器、注册码/签发身份
+> 两个 store、`singleToken`/`durableAudit` 两个布尔、`supplyAtRest`）。纯搬运，零行为变化,
+> `cfg.management` 分支里原有的两句 `log.Println` 原样带过去。新测试
+> `cmd/server/server_options_test.go` 从真实 argv 出发——`parseServerConfig` 走
+> `-mode dev -memory -enroll -runner-identity-ttl 24h`——喂给 `buildServerOptions`,再把
+> 拿到的 options 交给真正的 `xflowsdk.NewServer`（纯内存,不绑端口),对 enroll 端点发一个
+> HTTP POST,断言 `EnrollResponse.ExpiresAt` 落在期望窗口内；配套的反向用例去掉
+> `-runner-identity-ttl` 后断言 `ExpiresAt` 为空,防止把 TTL 硬编码成 24h 也能通过主用例。
+> 三处定向变异（改接别的字段 / 删掉整行 / 硬编码 24h）逐一验证过会让对应用例变红。
+>
+> **`runServer` 本身仍然没有被任何测试整体调用过**——本次只守住了选项装配这一段
+> （`buildServerOptions`）。`runServer` 剩下的部分（logger/tracer/认证器/store 的构造、
+> production 门禁触发前的分支选择、`NewServer` 调用之后的 HTTP/gRPC 启动与优雅关闭）
+> 仍然只有编译期保证。下一次有人往 `runServer` 里加接线,这条覆盖不会自动跟上。
 
 `--runner-identity-ttl` flag 一路穿过 `runServer` 接到 Core 字段，而 `runServer` 本身在此
 之前就没有任何测试覆盖，本次也没有为它新增。
@@ -140,6 +172,7 @@ wrap 一层，`ErrAuthUnknownToken` 仍是唯一 `errors.Is` 可匹配的身份�
 接错了（例如把 TTL 错接到另一个无关字段），没有任何测试会红。
 
 这个缺口先于本计划存在，但本计划扩大了它的表面积：现在有一个安全相关的值走这条无守卫的路。
+
 
 ### 4. 注册码本身仍没有过期机制
 
