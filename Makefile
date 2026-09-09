@@ -302,9 +302,13 @@ run-server:
 	XFLOW_HTTP_ADDR=$(or $(HTTP_ADDR),:8080) \
 	go run ./cmd/server
 
+# --allow-plaintext is required, not optional: this target dials the local
+# run-server above over an unencrypted link, and the runner refuses to start on
+# one rather than ship its token in the clear. Without it this target exits
+# immediately with "refusing to start". The token stays on loopback here.
 run-runner:
 	XFLOW_REDIS_ADDR=$(or $(REDIS_ADDR),localhost:6379) \
-	go run ./cmd/runner
+	go run ./cmd/runner --allow-plaintext
 
 # ── Database ───────────────────────────────────────────────────────────────────
 
