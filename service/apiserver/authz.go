@@ -110,6 +110,15 @@ const (
 	// runner it already knows about should not thereby be able to enumerate the
 	// whole fleet.
 	OpManagementRunnerList = "management.runner.list"
+	// OpManagementRunnerRevokeIdentity kills one runner's issued identity. It is
+	// the answer to a stolen token — renewal deliberately does not rotate the
+	// token (design R9), because a thief can renew too. Separate from the
+	// registration-code revoke: revoking a code does not narrow identities
+	// already issued from it.
+	//
+	// Like every operation here, it MUST also appear in scopeForOperation or
+	// the route is silently unreachable.
+	OpManagementRunnerRevokeIdentity = "management.runner.revoke_identity"
 	// There is no OpSupplyWrite: PUT /v1/supplies/{name} is sealed (Z.5). The
 	// write path is in-process only (sdk/xflow.Server.UpdateSupply). Re-adding
 	// the operation without re-adding the route would be harmless; re-adding
@@ -181,6 +190,8 @@ func scopeForOperation(op string) string {
 		return "management.runner.read"
 	case OpManagementRunnerList:
 		return "management.runner.list"
+	case OpManagementRunnerRevokeIdentity:
+		return "management.runner.revoke_identity"
 	case OpSupplyRead:
 		return "supply.read"
 	case OpArtifactRead:

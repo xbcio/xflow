@@ -28,12 +28,19 @@ const (
 	PathSupplyByName     = "/v1/supplies/{name}"
 	PathArtifactByDigest = "/v1/artifacts/{digest}"
 
-	PathManagementLeader      = "/v1/management/leader"
-	PathManagementRunners     = "/v1/management/runners"
-	PathManagementRunnerByID  = "/v1/management/runners/{id}"
-	PathManagementExecByID    = "/v1/management/executions/{id}"
-	PathManagementDeadLetters = "/v1/management/dead-letters/{execID}"
-	PathManagementDLReplay    = "/v1/management/dead-letters/{execID}/replay"
+	PathManagementLeader     = "/v1/management/leader"
+	PathManagementRunners    = "/v1/management/runners"
+	PathManagementRunnerByID = "/v1/management/runners/{id}"
+	// PathManagementRunnerRevokeIdentity kills one runner's issued identity
+	// (T6). It reuses the {id} wildcard name PathManagementRunnerByID already
+	// uses, rather than {runnerID} — the two are read by different mux
+	// registrations, and the wildcard NAME in the registration pattern must
+	// match r.PathValue's argument byte-for-byte or PathValue silently returns
+	// "" with no compile error, no panic, and no log.
+	PathManagementRunnerRevokeIdentity = "/v1/management/runners/{id}/revoke-identity"
+	PathManagementExecByID             = "/v1/management/executions/{id}"
+	PathManagementDeadLetters          = "/v1/management/dead-letters/{execID}"
+	PathManagementDLReplay             = "/v1/management/dead-letters/{execID}/replay"
 
 	// PathManagementRegistrationCodes serves both POST (create) and GET (list) —
 	// the two are disambiguated by method, not by a separate path constant. See
@@ -74,6 +81,7 @@ var UserFacingPaths = []string{
 	PathManagementLeader,
 	PathManagementRunners,
 	PathManagementRunnerByID,
+	PathManagementRunnerRevokeIdentity,
 	PathManagementExecByID,
 	PathManagementDeadLetters,
 	PathManagementDLReplay,

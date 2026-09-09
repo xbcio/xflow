@@ -364,3 +364,174 @@ func (h *runnerListTestServer) doJSON(t *testing.T, method, path, body string, w
 	}
 	return got
 }
+
+func TestRunnerRevokeIdentityOpHasScope(t *testing.T) {
+	if scopeForOperation(OpManagementRunnerRevokeIdentity) == "" {
+		t.Fatal("scopeForOperation(OpManagementRunnerRevokeIdentity) is empty; the route is unreachable")
+	}
+}
+
+// TestRunnerRevokeIdentityPathIsInUserFacingPaths mirrors
+// TestRunnerPathIsInUserFacingPaths above: paths_test.go's guardSamples and
+// the OpenAPI contract guard both only check the OPPOSITE direction
+// (UserFacingPaths subset of guardSamples / contract). Without this test,
+// dropping PathManagementRunnerRevokeIdentity back out of UserFacingPaths
+// would go undetected.
+func TestRunnerRevokeIdentityPathIsInUserFacingPaths(t *testing.T) {
+	for _, p := range UserFacingPaths {
+		if p == PathManagementRunnerRevokeIdentity {
+			return
+		}
+	}
+	t.Fatalf("%q missing from UserFacingPaths; nothing else in this package guards the Path*-to-UserFacingPaths direction", PathManagementRunnerRevokeIdentity)
+}
+
+// runnerRevokeIdentityTestServer wires a managementModule with principalAuth
+// holding OpManagementRunnerRevokeIdentity's scope and a REAL
+// control.MemoryIssuedIdentityStore (not a stub): the store's own Revoke/
+// Lookup semantics are already covered by service/control's tests, and using
+// the real implementation here lets this file assert the one thing that IS
+// this task's job -- that the HTTP handler actually calls Revoke and reports
+// the right status -- via a genuine read-after-write, not a hand-rolled
+// double that could silently diverge from the real contract (e.g. corrections
+// #9's required "read the store directly after the HTTP call" assertion).
+type runnerRevokeIdentityTestServer struct {
+	srv    *httptest.Server
+	issued *control.MemoryIssuedIdentityStore
+}
+
+func newRunnerRevokeIdentityTestServer(t *testing.T) *runnerRevokeIdentityTestServer {
+	t.Helper()
+	m := newManagementModule(fakeControlPlaneForAuthz(t))
+	issued := control.NewMemoryIssuedIdentityStore()
+	m.issued = issued
+	m.principalAuth = staticPrincipalAuth{principal: Principal{
+		Subject:   "ops",
+		Namespace: "namespaceA",
+		Scopes:    []string{scopeForOperation(OpManagementRunnerRevokeIdentity)},
+	}}
+	m.authorizer = ScopeAuthorizer{}
+	m.audit = NewInMemoryAuditSink()
+	mux := http.NewServeMux()
+	m.RegisterHTTP(mux)
+	return &runnerRevokeIdentityTestServer{srv: httptest.NewServer(mux), issued: issued}
+}
+
+func (h *runnerRevokeIdentityTestServer) doJSON(t *testing.T, method, path, body string, wantStatus int) string {
+	t.Helper()
+	var reader *strings.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	} else {
+		reader = strings.NewReader("")
+	}
+	req, err := http.NewRequest(method, h.srv.URL+path, reader)
+	if err != nil {
+		t.Fatalf("NewRequest %s %s: %v", method, path, err)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := h.srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body for %s %s: %v", method, path, err)
+	}
+	got := string(data)
+	if resp.StatusCode != wantStatus {
+		t.Fatalf("%s %s: status = %d, want %d; body = %q", method, path, resp.StatusCode, wantStatus, got)
+	}
+	return got
+}
+
+// TestRevokeRunnerIdentitySuccess is the load-bearing positive case: a real,
+// seeded runner id revoked through the HTTP surface must (a) answer 200 and
+// (b) leave the store's own RevokedAt non-zero -- corrections #9's "read the
+// store directly" requirement, and the test whose wildcard-name mutation
+// (corrections #4) must turn red.
+func TestRevokeRunnerIdentitySuccess(t *testing.T) {
+	h := newRunnerRevokeIdentityTestServer(t)
+	defer h.srv.Close()
+	ctx := context.Background()
+	if err := h.issued.Issue(ctx, control.IssuedIdentity{RunnerID: "runner-1"}); err != nil {
+		t.Fatalf("seed Issue: %v", err)
+	}
+	body := h.doJSON(t, http.MethodPost, "/v1/management/runners/runner-1/revoke-identity", "", http.StatusOK)
+	if !strings.Contains(body, `"runner_id":"runner-1"`) || !strings.Contains(body, `"status":"revoked"`) {
+		t.Fatalf("body %q missing expected runner_id/status fields", body)
+	}
+	id, ok, err := h.issued.Lookup(ctx, "runner-1")
+	if err != nil {
+		t.Fatalf("Lookup after revoke: %v", err)
+	}
+	if !ok {
+		t.Fatal("Lookup after revoke: runner-1 not found")
+	}
+	if id.RevokedAt.IsZero() {
+		t.Fatal("RevokedAt is zero after a successful revoke-identity call; the handler did not actually call Revoke")
+	}
+}
+
+// TestRevokeRunnerIdentityUnknownRunner pins the 404 branch for a runner id
+// the store has never heard of.
+func TestRevokeRunnerIdentityUnknownRunner(t *testing.T) {
+	h := newRunnerRevokeIdentityTestServer(t)
+	defer h.srv.Close()
+	body := h.doJSON(t, http.MethodPost, "/v1/management/runners/no-such-runner/revoke-identity", "", http.StatusNotFound)
+	if !strings.Contains(body, `"runner_not_found"`) {
+		t.Fatalf("body %q missing expected error code runner_not_found", body)
+	}
+}
+
+// TestRevokeRunnerIdentityRepeatIsNoop pins T4's contract: revoking an
+// already-revoked identity is a no-op that returns nil, not
+// ErrIssuedIdentityNotFound, so a retrying operator sees 200 twice rather than
+// a spurious failure on the second call.
+func TestRevokeRunnerIdentityRepeatIsNoop(t *testing.T) {
+	h := newRunnerRevokeIdentityTestServer(t)
+	defer h.srv.Close()
+	ctx := context.Background()
+	if err := h.issued.Issue(ctx, control.IssuedIdentity{RunnerID: "runner-2"}); err != nil {
+		t.Fatalf("seed Issue: %v", err)
+	}
+	h.doJSON(t, http.MethodPost, "/v1/management/runners/runner-2/revoke-identity", "", http.StatusOK)
+	h.doJSON(t, http.MethodPost, "/v1/management/runners/runner-2/revoke-identity", "", http.StatusOK)
+}
+
+// TestRevokeRunnerIdentityNotImplementedWhenStoreNil pins the m.issued == nil
+// branch: the route is mounted regardless (RegisterHTTP never gates mounting
+// on m.issued being non-nil, see the managementModule struct field comment),
+// but a server with no issued-identity store configured cannot perform the
+// operation and must say so honestly rather than answering as if the runner
+// were simply unknown.
+func TestRevokeRunnerIdentityNotImplementedWhenStoreNil(t *testing.T) {
+	m := newManagementModule(fakeControlPlaneForAuthz(t))
+	m.issued = nil
+	m.principalAuth = staticPrincipalAuth{principal: Principal{
+		Subject:   "ops",
+		Namespace: "namespaceA",
+		Scopes:    []string{scopeForOperation(OpManagementRunnerRevokeIdentity)},
+	}}
+	m.authorizer = ScopeAuthorizer{}
+	m.audit = NewInMemoryAuditSink()
+	mux := http.NewServeMux()
+	m.RegisterHTTP(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/management/runners/runner-1/revoke-identity", strings.NewReader(""))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("POST revoke-identity: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNotImplemented)
+	}
+}

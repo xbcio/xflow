@@ -670,6 +670,47 @@ paths:
         default:
           $ref: "#/components/responses/DefaultError"
 
+  /v1/management/runners/{id}/revoke-identity:
+    post:
+      operationId: revokeRunnerIdentity
+      summary: Revoke a runner's issued identity
+      description: |
+        Revokes one runner's issued identity, taking effect on its next
+        authenticated call. Requires `management.runner.revoke_identity`.
+
+        This is a PLATFORM-LEVEL operation with no per-namespace confinement.
+        An issued identity's scope is a set of namespaces, not a single owner,
+        so "may this tenant revoke this runner" has no single correct answer —
+        intersection would let one tenant kill another's runner, containment
+        would be no confinement at all. Until that is designed, grant this
+        scope to platform operators only.
+      tags: [Management]
+      parameters:
+        - $ref: "#/components/parameters/RunnerId"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: Revocation acknowledged.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          runner_id:
+                            type: string
+                          status:
+                            type: string
+        default:
+          $ref: "#/components/responses/DefaultError"
+
   /v1/management/executions/{id}:
     get:
       operationId: inspectExecutionManagement

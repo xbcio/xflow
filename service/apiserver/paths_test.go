@@ -130,6 +130,7 @@ var guardSamples = []guardSample{
 	{"PathManagementLeader", PathManagementLeader, http.MethodGet, "/v1/management/leader"},
 	{"PathManagementRunners", PathManagementRunners, http.MethodGet, "/v1/management/runners"},
 	{"PathManagementRunnerByID", PathManagementRunnerByID, http.MethodGet, "/v1/management/runners/r-1"},
+	{"PathManagementRunnerRevokeIdentity", PathManagementRunnerRevokeIdentity, http.MethodPost, "/v1/management/runners/r-1/revoke-identity"},
 	{"PathManagementExecByID", PathManagementExecByID, http.MethodGet, "/v1/management/executions/ex-1"},
 	{"PathManagementDeadLetters", PathManagementDeadLetters, http.MethodGet, "/v1/management/dead-letters/ex-1"},
 	{"PathManagementDLReplay", PathManagementDLReplay, http.MethodPost, "/v1/management/dead-letters/ex-1/replay"},

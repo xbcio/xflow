@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"reflect"
@@ -178,6 +179,19 @@ func (m *managementModule) RegisterHTTP(mux *http.ServeMux) {
 		}))
 		mux.HandleFunc("GET "+PathManagementRegistrationCodeAudit, m.authzWrap(OpRegistrationCodeAudit, false, m.handleRegistrationCodeAudit, func(r *http.Request) (string, string, string, string) {
 			return "management/registration-codes/" + r.PathValue("id") + "/audit", "", "", ""
+		}))
+		// Runner identity revocation (Task 6): kills one runner's issued
+		// identity so its next authenticated call is rejected by T5's gate in
+		// IssuedIdentityAuthenticator.authenticate(). Like the registration-code
+		// routes above (and for the same reason, Ruling Y) this has NO bare
+		// fallback in the else branch below: a server with no
+		// PrincipalAuthenticator configured must not expose an unauthenticated
+		// way to kill a runner's credential. The mount is gated on
+		// principalAuth alone, never on m.issued being non-nil (see the struct
+		// field comment above) — a nil store leaves the route reachable but
+		// its handler answers not_implemented.
+		mux.HandleFunc("POST "+PathManagementRunnerRevokeIdentity, m.authzWrap(OpManagementRunnerRevokeIdentity, true, m.handleRevokeRunnerIdentity, func(r *http.Request) (string, string, string, string) {
+			return "management/runners/" + r.PathValue("id") + "/revoke-identity", "", "", ""
 		}))
 	} else {
 		mux.HandleFunc("GET "+PathManagementLeader, m.handleLeader)
@@ -427,6 +441,44 @@ func (m *managementModule) handleListRunners(w http.ResponseWriter, r *http.Requ
 		out = append(out, runnerListItem{RunnerID: id, Enrolled: enrolled[id]})
 	}
 	writeData(w, r, http.StatusOK, out)
+}
+
+// handleRevokeRunnerIdentity kills a runner's issued identity, so its next
+// authenticated call is rejected by T5's gate in
+// IssuedIdentityAuthenticator.authenticate() (RevokedAt is checked there,
+// after the constant-time token compare). This handler does not re-prove that
+// gate — it only drives the store call and reports the HTTP outcome.
+//
+// A nil m.issued (server has no issued-identity store configured) answers 501
+// rather than 404: the route IS mounted (see RegisterHTTP's comment on why
+// mounting never depends on m.issued being non-nil), but this backend cannot
+// perform the operation at all, which is a different fact than "no such
+// runner".
+func (m *managementModule) handleRevokeRunnerIdentity(w http.ResponseWriter, r *http.Request) {
+	if m.issued == nil {
+		writeFail(w, r, http.StatusNotImplemented, "not_implemented",
+			"issued identity store is not configured")
+		return
+	}
+	runnerID := r.PathValue("id")
+	if runnerID == "" {
+		writeFail(w, r, http.StatusNotFound, "runner_not_found", "runner not found")
+		return
+	}
+	err := m.issued.Revoke(r.Context(), runnerID)
+	if errors.Is(err, control.ErrIssuedIdentityNotFound) {
+		writeFail(w, r, http.StatusNotFound, "runner_not_found", "runner not found")
+		return
+	}
+	if err != nil {
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	// The runner id is an operator-supplied identifier, not a credential, so
+	// logging it is fine. The raw token never appears anywhere in this
+	// package; the store holds only its hash (TokenHash).
+	slog.Info("runner identity revoked", "runner_id", runnerID)
+	writeData(w, r, http.StatusOK, map[string]string{"runner_id": runnerID, "status": "revoked"})
 }
 
 // handleExecution inspects a single execution by id. It delegates to
