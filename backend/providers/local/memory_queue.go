@@ -55,6 +55,19 @@ type memoryQueue struct {
 	concurrency int
 	wg          sync.WaitGroup
 	stopCh      chan struct{}
+
+	// mu 用于保护 stopped，且每一次后台重试/延迟 goroutine 的 wg.Add(1)
+	// 都必须在持有 mu 的情况下发生。sync.WaitGroup 自身文档（以及其运行时
+	// 自检——已实测验证：本队列在未加此保护的版本上，在一次 EnqueueDelayed
+	// 与 Stop 并发的压力测试的第一轮试验中就会 panic："sync: WaitGroup is
+	// reused before previous Wait has returned" / "Add called concurrently
+	// with Wait"）都禁止正在进行的 Add 与 Wait 并发。Stop() 先取得 mu、
+	// 置位 stopped，然后才 close(stopCh) 并调用 wg.Wait —— 因此任何将要
+	// 发生的 Add，要么已经在持有 mu 的情况下完成（严格早于 Stop 的
+	// wg.Wait），要么被直接拒绝（观察到 stopped 为 true，完全不发生
+	// Add）。无论哪种情况，wg.Add 都不可能与 wg.Wait 并发。
+	mu      sync.Mutex
+	stopped bool
 }
 
 func newMemoryQueue(concurrency int) *memoryQueue {
@@ -192,20 +205,47 @@ func (q *memoryQueue) dispatch(env queueEnvelope) {
 		q.logger.Errorf("requeueing task after transient dispatch failure: exec=%s node=%s attempt=%d delay=%s err=%v",
 			env.task.ExecutionID, env.task.NodeName, env.transientTries, delay, err)
 	}
-	// Track the requeue goroutine in wg so Stop waits for pending retries.
-	q.wg.Add(1)
+	// 把这个重新入队的 goroutine 记录进 wg，这样 Stop 会等待未完成的重试。
+	if !q.beginBackground() {
+		// Stop 已经开始：不会再有任何 worker 去消费重新投递的任务，
+		// 这次重试永远不可能被服务到。在此记录日志，而不是静默丢弃——
+		// 之前的做法是零痕迹丢弃，这正是上面「耗尽重试次数/永久性错误」
+		// 两个分支特意通过记录日志来避免的同一种「静默 continue」模式。
+		if q.logger != nil {
+			q.logger.Error("dropping task: queue stopped before transient retry could be scheduled",
+				"exec", string(env.task.ExecutionID),
+				"node", env.task.NodeName,
+				"attempt", env.transientTries,
+			)
+		}
+		return
+	}
 	go func(env queueEnvelope, delay time.Duration) {
 		defer q.wg.Done()
 		timer := time.NewTimer(delay)
 		defer timer.Stop()
 		select {
 		case <-q.stopCh:
+			if q.logger != nil {
+				q.logger.Error("dropping task: queue stopped before transient retry delay elapsed",
+					"exec", string(env.task.ExecutionID),
+					"node", env.task.NodeName,
+					"attempt", env.transientTries,
+				)
+			}
 			return
 		case <-timer.C:
 		}
 		select {
 		case q.laneFor(env.task) <- env:
 		case <-q.stopCh:
+			if q.logger != nil {
+				q.logger.Error("dropping task: queue stopped before transient retry could be redelivered",
+					"exec", string(env.task.ExecutionID),
+					"node", env.task.NodeName,
+					"attempt", env.transientTries,
+				)
+			}
 		}
 	}(env, delay)
 }
@@ -223,8 +263,36 @@ func transientBackoff(attempt int) time.Duration {
 	return d
 }
 
-// Stop signals all queue consumers to exit and waits for them to drain.
+// beginBackground 为一个后台重试/延迟 goroutine 向 wg 注册，但仅在 Stop
+// 尚未开始时才会注册。当队列已经在停止过程中时返回 false，此时调用方绝不能
+// 再启动该 goroutine —— 即使启动了，它也只会白白等完延迟，最终落到下面的
+// stopCh 分支上被丢弃，与其立即丢弃相比只是多了一段无意义的等待。
+//
+// 这正是让 Stop 可以与 EnqueueDelayed / 瞬时失败重试的重新入队安全地并发
+// 调用的机制：为何在此处对每一次 Add 加门禁就能消除与 Stop 的 Wait 之间的
+// 竞态，见 struct 上 mu 字段的文档注释。
+func (q *memoryQueue) beginBackground() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.stopped {
+		return false
+	}
+	q.wg.Add(1)
+	return true
+}
+
+// Stop 通知所有队列消费者退出，并等待它们全部退出。
+//
+// 在 close(stopCh)/wait 之前，先在持有 mu 的情况下置位 stopped，这一步是
+// 承重的而非装饰性的：正是它阻止了 beginBackground 在下面的 wg.Wait 期间
+// 并发地调用 wg.Add（见 struct 上 mu 字段的文档注释）。Stop 的返回也是本
+// 队列唯一可观察的"已完全静止"信号——已验证：wg.Wait 要等到每一个 worker
+// goroutine（来自 Start）以及每一个被 beginBackground 记录过的重试/延迟
+// goroutine 都调用过其 deferred wg.Done 之后，才会返回。
 func (q *memoryQueue) Stop() {
+	q.mu.Lock()
+	q.stopped = true
+	q.mu.Unlock()
 	close(q.stopCh)
 	q.wg.Wait()
 }
@@ -274,21 +342,35 @@ func (q *memoryQueue) TryEnqueue(_ context.Context, t *engine.Task) error {
 func (q *memoryQueue) EnqueueDelayed(_ context.Context, t *engine.Task, delay time.Duration) error {
 	env := queueEnvelope{task: t}
 	lane := q.laneFor(t)
-	// Track the delayed goroutine in wg so Stop waits for it instead of
-	// silently dropping scheduled tasks.
-	q.wg.Add(1)
+	// 把这个延迟 goroutine 记录进 wg，这样 Stop 会等待它完成，
+	// 而不是静默丢弃已排定的任务。
+	if !q.beginBackground() {
+		return errors.New("local: queue stopped")
+	}
 	go func() {
 		defer q.wg.Done()
 		timer := time.NewTimer(delay)
 		defer timer.Stop()
 		select {
 		case <-q.stopCh:
+			if q.logger != nil {
+				q.logger.Error("dropping delayed task: queue stopped before delay elapsed",
+					"exec", string(t.ExecutionID),
+					"node", t.NodeName,
+				)
+			}
 			return
 		case <-timer.C:
 		}
 		select {
 		case lane <- env:
 		case <-q.stopCh:
+			if q.logger != nil {
+				q.logger.Error("dropping delayed task: queue stopped before redelivery",
+					"exec", string(t.ExecutionID),
+					"node", t.NodeName,
+				)
+			}
 		}
 	}()
 	return nil
