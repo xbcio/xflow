@@ -285,6 +285,18 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 		}()
 	}
 
+	// The renewal loop needs the protocol client, which the SDK owns, plus
+	// the identity store, the run context, and the server URL -- runRunner is
+	// the only place that holds all four at once. decideIdentityRenewal is
+	// the gate; every one of its "do not start" outcomes fails open (at most
+	// a Warn), because none of them is a reason an already-valid identity
+	// should stop serving traffic.
+	if rc, start, warnMsg, warnErr := decideIdentityRenewal(cfg, store); warnErr != nil {
+		slog.Warn(warnMsg, "runner_id", cfg.runnerID, "error", warnErr)
+	} else if start {
+		go runIdentityRenewal(runCtx, rc, cfg.runnerID, cfg.token, slog.Default())
+	}
+
 	err = runner.Run(runCtx)
 	// A fatal startup condition cancels runCtx; Run's reconnect loop treats a
 	// cancelled context as a clean stop, so it returns nil here regardless of
@@ -391,4 +403,212 @@ func runWithSignals(cfg runnerConfig) error {
 		cfg.runnerID = fmt.Sprintf("runner-%d", os.Getpid())
 	}
 	return runRunner(ctx, cfg)
+}
+
+// renewClient is the seam the renewal loop is tested through. cmd/runner has
+// no business dialing a real server in a unit test.
+type renewClient interface {
+	RenewIdentity(context.Context, protocol.RenewIdentityRequest) (protocol.RenewIdentityResponse, error)
+}
+
+// renewOutcome is why renewOnce returned. The three cases must stay distinct:
+// collapsing "the server reports no expiry" into "the call failed" would
+// retire the renewal loop on the first transient error and let the identity
+// lapse silently -- the exact failure this whole task exists to prevent.
+type renewOutcome int
+
+const (
+	renewOK       renewOutcome = iota // ExpiresAt is valid and in the future
+	renewNoExpiry                     // server issues no expiry; retire the loop
+	renewFailed                       // transient; keep the loop, retry later
+	renewAborted                      // context done; unwind
+)
+
+// renewRetryWait is how long to wait after a failed renewal when no expiry is
+// known yet (or after a deadline has lapsed -- see runIdentityRenewal).
+// Without a deadline to divide, there is nothing to derive a cadence from, so
+// this is the one fixed interval in the loop. A package-level var, not a
+// const, so a test can shrink it instead of waiting on a real 30s clock.
+var renewRetryWait = 30 * time.Second
+
+// renewMinWait is the floor the TTL/3 cadence is never allowed to fall below
+// for a deadline still in the future. A package-level var for the same
+// testability reason as renewRetryWait.
+var renewMinWait = time.Second
+
+// runnerHasIssuedIdentity reports whether store holds an identity obtained
+// through enrollment, as opposed to a static --token configuration. Only an
+// issued identity has anything on the server to renew: a runner started with
+// --id/--token has never enrolled, RenewIdentity would fail against it every
+// time, and renewFailed deliberately never retires the loop -- so running it
+// unconditionally would warn every 30s forever on every statically configured
+// deployment in the fleet. store.Load() is side-effect-free and safe to call
+// again here after resolveRunnerIdentity already called it once.
+func runnerHasIssuedIdentity(store identityStore) (bool, error) {
+	_, hasIssued, err := store.Load()
+	return hasIssued, err
+}
+
+// renewClientFor builds the HTTP protocol client the renewal loop calls
+// through.
+//
+// This mirrors the client sdk/xflow's newRunnerProtocolClient builds for the
+// HTTP transport -- TLS material via NewRunnerHTTPClient, then WithToken --
+// and NOT the enrollment client (resolveRunnerIdentity, above), which has no
+// token to attach because enrollment is the one call made before a token
+// exists. Renewal already holds one, and an already-enrolled runner's request
+// must carry it or the server authenticates against an empty string and
+// renewal fails every time with no crash and no red test to catch it.
+func renewClientFor(cfg runnerConfig) (renewClient, error) {
+	sdkCfg, err := toSDKRunnerConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	httpClient, err := xflowsdk.NewRunnerHTTPClient(sdkCfg, enrollHTTPTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("renew: build http client: %w", err)
+	}
+	client := protocol.NewClient(cfg.serverURL, httpClient)
+	if cfg.token != "" {
+		client = client.WithToken(cfg.token)
+	}
+	return client, nil
+}
+
+// decideIdentityRenewal is the gate runRunner asks before starting the
+// renewal loop. It is a pure decision function -- no goroutine, no logging --
+// specifically so the gate itself is directly assertable in a unit test
+// without standing up a full runRunner: a mutation that deletes or weakens
+// any one of its checks must turn a test red here, not only pass silently
+// through an untested wiring block.
+//
+// Returns:
+//   - start=true, rc set: the caller should launch runIdentityRenewal(rc, ...).
+//   - start=false, warnErr=nil: a silent no-op (the static --token case:
+//     nothing on the server to renew, and warning every 30s forever on every
+//     such deployment would be noise, not signal).
+//   - start=false, warnErr!=nil: the caller should log warnMsg with warnErr,
+//     then proceed to run the rest of the runner unaffected -- none of these
+//     checks failing is a reason an already-valid identity should stop
+//     serving traffic.
+func decideIdentityRenewal(cfg runnerConfig, store identityStore) (rc renewClient, start bool, warnMsg string, warnErr error) {
+	hasIssued, herr := runnerHasIssuedIdentity(store)
+	if herr != nil {
+		// Unable to tell whether this identity was issued; the identity is
+		// valid right now regardless, so stay quiet rather than guess.
+		return nil, false, "runner identity renewal disabled: cannot determine whether an identity was issued", herr
+	}
+	if !hasIssued {
+		// Only an issued identity can be renewed. A runner configured with a
+		// static --token has nothing on the server to extend, and running
+		// the loop for it would log a warning every 30s forever --
+		// renewFailed deliberately never retires the loop.
+		return nil, false, "", nil
+	}
+	if verr := validateEnrollTransportSecurity(cfg); verr != nil {
+		// Reusing enrollment's gate: it judges only the URL scheme against
+		// --allow-plaintext, never the registration code. Its message is
+		// written for enrollment though, so do not surface it as the
+		// headline here.
+		return nil, false, "runner identity renewal disabled: renewing over a plaintext --server would send the runner token in the clear; use https or --allow-plaintext", verr
+	}
+	client, cerr := renewClientFor(cfg)
+	if cerr != nil {
+		// A renewal client that cannot be built is not a reason to refuse to
+		// run: taking the fleet down over a mis-typed TLS path would turn a
+		// config error into an outage.
+		return nil, false, "runner identity renewal disabled: cannot build renewal client", cerr
+	}
+	return client, true, "", nil
+}
+
+// runIdentityRenewal keeps this runner's issued identity alive.
+//
+// It lives here, in package main, and not in service/runner's heartbeat loop,
+// for a structural reason: runRunner is the only place that holds the
+// identity store, the run context, and the server URL at the same time. The
+// heartbeat loop is a layer below and cannot reach any of them.
+//
+// The first call happens immediately at startup rather than after one tick.
+// That single call does three jobs the local identity file cannot do: it
+// returns the authoritative ExpiresAt (which the file deliberately does not
+// store -- identity file schema is unchanged by this task), it proves the
+// identity has not been revoked while this runner was down, and -- when the
+// server reports no expiry at all -- it retires the loop.
+func runIdentityRenewal(ctx context.Context, c renewClient, runnerID, token string, log *slog.Logger) {
+	var deadline time.Time
+	for {
+		next, outcome := renewOnce(ctx, c, runnerID, token, log)
+		switch outcome {
+		case renewAborted:
+			return
+		case renewNoExpiry:
+			// Nothing to renew, ever. Exiting is not an error path -- it is
+			// the configuration the whole fleet runs in until an operator
+			// sets --runner-identity-ttl.
+			log.Info("runner identity has no expiry; renewal loop disabled")
+			return
+		case renewOK:
+			deadline = next
+		case renewFailed:
+			// Keep the previous deadline. The identity is still valid until
+			// it, so one failure is not fatal; taking the runner down over a
+			// transient server error would turn a blip into an outage.
+		}
+
+		// Renew once validity drops below a third of the remaining window, so
+		// a transient outage has two more attempts before the identity
+		// lapses.
+		wait := renewRetryWait
+		if !deadline.IsZero() {
+			// A deadline in the past must not drive the cadence: time.Until
+			// goes negative, and a naive clamp to renewMinWait would make a
+			// fleet whose identities have all lapsed hammer the server once
+			// per runner per second, forever -- Renew (T4) refuses an
+			// already-expired identity by design, so every one of those
+			// calls fails and deadline never moves. Falling back to
+			// renewRetryWait instead: the identity is already invalid, so
+			// there is nothing left to renew "in time" for.
+			if remaining := time.Until(deadline); remaining > 0 {
+				wait = remaining / 3
+				if wait < renewMinWait {
+					wait = renewMinWait
+				}
+			}
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+// renewOnce performs one renewal attempt.
+//
+// The log line carries the runner id and the error and nothing else -- never
+// the token, which exists on this side only inside the protocol client.
+func renewOnce(ctx context.Context, c renewClient, runnerID, token string, log *slog.Logger) (time.Time, renewOutcome) {
+	resp, err := c.RenewIdentity(ctx, protocol.RenewIdentityRequest{RunnerID: runnerID, AuthToken: token})
+	if ctx.Err() != nil {
+		return time.Time{}, renewAborted
+	}
+	if err != nil {
+		log.Warn("runner identity renewal failed", "runner_id", runnerID, "error", err)
+		return time.Time{}, renewFailed
+	}
+	if resp.ExpiresAt == "" {
+		return time.Time{}, renewNoExpiry
+	}
+	t, perr := time.Parse(time.RFC3339, resp.ExpiresAt)
+	if perr != nil {
+		// An unparsable expiry is a server bug, not a "no expiry" signal.
+		// Treating it as the latter would disable renewal on a typo.
+		log.Warn("runner identity renewal returned an unparsable expiry",
+			"runner_id", runnerID, "value", resp.ExpiresAt, "error", perr)
+		return time.Time{}, renewFailed
+	}
+	return t.UTC(), renewOK
 }
