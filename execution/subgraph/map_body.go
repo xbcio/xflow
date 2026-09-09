@@ -2,6 +2,7 @@ package subgraph
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -167,9 +168,42 @@ func (x *MapBodyExecutor) runItem(ctx context.Context, req engine.BatchBodyReque
 	case OutcomeSuccess:
 		itemResult.Data = exitsAsItemResult(res.Exits)
 	default:
-		itemResult.Err = fmt.Errorf("%s: %s", res.Outcome, res.Error)
+		itemResult.Err = itemFailure(res)
 	}
 	return itemResult, nil
+}
+
+// itemFailure turns a failed sub-execution into the item's error, carrying
+// res.Permanent across rather than flattening it into text.
+//
+// The flag is the whole reason Result.Permanent exists ("so a caller can decide
+// retry-vs-skip from a flag the failing node set, rather than by matching
+// keywords against Error"), and this is the one hop where it would otherwise be
+// dropped: BatchResultForCommit returns the first failed item's Err as the
+// BATCH's error, and completeAtomic then asks types.IsPermanent(cause) whether
+// to retry. An unmarked error is transient by default, so a body item that
+// fails identically every time — a bad rule, a malformed package — used to be
+// re-run to MaxAttempts instead of failing once.
+//
+// It returns *types.ClassifiedError rather than errors.Join(types.ErrPermanent,
+// err) because the message is user-visible: batchResultData writes Err.Error()
+// into each failed item's _error slot in the map node's output. errors.Join
+// renders as two lines, which would change that field's contents for every
+// permanent failure. ClassifiedError.Error() with an empty Code returns Message
+// verbatim, so the text is byte-identical to what the fmt.Errorf produced.
+//
+// Code is deliberately left empty for that reason — setting it would prepend
+// "code: " to the same user-visible string.
+func itemFailure(res Result) error {
+	message := fmt.Sprintf("%s: %s", res.Outcome, res.Error)
+	if !res.Permanent {
+		return errors.New(message)
+	}
+	return &types.ClassifiedError{
+		Kind:      types.ErrorKindPermanent,
+		Message:   message,
+		Permanent: true,
+	}
 }
 
 // executeConcurrently runs up to req.BodyConcurrency of the batch's items at
