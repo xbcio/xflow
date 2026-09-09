@@ -174,16 +174,34 @@ func (a *IssuedIdentityAuthenticator) authenticate(runnerID, token string) (Runn
 	// pre-compare check would answer "does this runner id exist and is it
 	// live?" to a caller holding no valid token at all.
 	//
-	// Both rejections reuse ErrAuthUnknownToken verbatim. Naming the real
-	// reason here would tell an attacker holding a leaked-but-expired token
-	// that the token was once real, and would tell an attacker holding
-	// nothing which runner ids exist.
+	// Both rejections wrap ErrAuthUnknownToken with the real reason, exactly
+	// like the lookup-failure branch above. The line between "externally
+	// identical" and "internally distinct" is drawn at Core.authDeny, not
+	// here: authDeny logs this error verbatim but returns the ErrUnauthenticated
+	// constant on every hard denial, and both transports render that constant
+	// (server.go's writeRunnerError, grpc_server.go's runnerStatus) — so no
+	// caller can observe these strings, and R7's "expired is indistinguishable
+	// from unknown from outside" is untouched. What changes is only the server's
+	// own log: without the wrap, a fleet whose identities all expire at the same
+	// TTL boundary logs a wall of "unknown auth token", pointing an operator at
+	// credential distribution when the answer is --runner-identity-ttl and the
+	// renewal loop.
+	//
+	// The reasons carry no runner id, token, namespace or expiry timestamp. An
+	// expiry timestamp would be indirect evidence that this runner id was once
+	// real, and would become a disclosure surface the day someone mistakenly
+	// wires one of these strings onto an outward path. authDeny already logs
+	// the runner id in its own field.
+	//
+	// Neither reason introduces a second errors.Is-matchable sentinel: %w is
+	// used only for ErrAuthUnknownToken, which stays the single matchable
+	// identity for MultiAuthenticator.dispatch and every caller.
 	now := a.clock()
 	if !id.RevokedAt.IsZero() {
-		return RunnerPolicy{}, ErrAuthUnknownToken
+		return RunnerPolicy{}, fmt.Errorf("%w: issued identity was revoked", ErrAuthUnknownToken)
 	}
 	if !id.ExpiresAt.IsZero() && !id.ExpiresAt.After(now) {
-		return RunnerPolicy{}, ErrAuthUnknownToken
+		return RunnerPolicy{}, fmt.Errorf("%w: issued identity expired", ErrAuthUnknownToken)
 	}
 	return id.Scope, nil
 }
