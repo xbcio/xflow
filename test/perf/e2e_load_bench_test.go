@@ -33,7 +33,15 @@ func (loadHandler) Execute(_ context.Context, input *types.Input) (*types.Output
 	return &types.Output{Data: map[string]any{"claim_id": input.Data["claim_id"]}}, nil
 }
 
-// requireRedisLoad pings Redis and skips the test if unreachable.
+// requireRedisLoad pings Redis, skipping the test when Redis is unreachable.
+// Under XFLOW_REQUIRE_REDIS_INTEGRATION=1 (CI gating mode) it fails the test
+// instead, so a missing dependency cannot be mistaken for a passing gate.
+// test/perf is a separate package from test/integration (different build tag,
+// no shared import), so this cannot simply call requireRedis from
+// harness.go; without its own upgrade branch here, setting
+// XFLOW_REQUIRE_REDIS_INTEGRATION=1 would have no effect on this file and a
+// -tags perf run could report "ok" for a load test that never actually ran.
+// Shape mirrors test/integration/harness.go:requireRedis.
 func requireRedisLoad(t *testing.T) string {
 	t.Helper()
 	addr := os.Getenv("XFLOW_TEST_REDIS_ADDR")
@@ -45,6 +53,11 @@ func requireRedisLoad(t *testing.T) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := c.Ping(ctx).Err(); err != nil {
+		// addr never embeds a credential (unlike the MySQL DSN case in
+		// harness.go), so it is safe to print here.
+		if os.Getenv("XFLOW_REQUIRE_REDIS_INTEGRATION") == "1" {
+			t.Fatalf("XFLOW_REQUIRE_REDIS_INTEGRATION=1: redis unavailable at %s: %v (set XFLOW_TEST_REDIS_ADDR)", addr, err)
+		}
 		t.Skipf("redis unavailable at %s: %v (set XFLOW_TEST_REDIS_ADDR)", addr, err)
 	}
 	return addr

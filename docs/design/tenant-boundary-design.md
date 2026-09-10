@@ -175,16 +175,50 @@ Dead-letter store 从 context 取得 namespace。manager list/replay 使用 prin
   registry 也无前缀/条件查询（`backend/workflow_registry.go:232-247`）。
   够不着时的诚实退化是「撤销只对新激活生效」并在页面写明，不是假装立即生效。
 
-**待办 2：artifact 存储层没有防御性 namespace 归一化。**
+**决议（2026-09-10 复核）：artifact 存储层不做防御性 namespace 归一化——这是有意不做，不是待办。**
 
-supply 侧有对称的 `normSupplyNS`（`store/sqlstore/supply.go:26-33`，读写双向调用，
-注释自述是为修「写 default、读空串 → 恒 not found」打的补丁）；
-**artifact 侧搜不到等价函数**——`store/sqlstore/artifact.go` 的 `Put`/`Bind`/`HasReference`
-对传入字符串原样精确匹配，不做空串兜底。当前不出问题只因两侧调用方在上层各自归一化好了
-（写路径 `sdk/xflow/artifact_resolve.go:55,119` 用已被 `builder.build()` 兜底的 `def.Namespace`；
-读路径用 `namespace.FromContext`，两者都恒非空）。
-**任何绕过这两个入口、直接拿裸字符串调 `ArtifactStore.Put`/`HasReference` 的新代码都会重演 supply 那个 bug。**
-是结构隐患，不是已发生故障。
+此前本节把「artifact 侧没有 `normSupplyNS` 等价物」记为结构隐患。复核后结论相反：
+**在 artifact 层加 `"" → "default"` 归一化会放松租户隔离，因此不能加。**
+
+*事实核对（与此前描述一致的部分）*：`store/sqlstore/artifact.go` 中所有按 namespace 匹配的位置
+——`Bind`（:174 的 SELECT ... FOR UPDATE 与 :184 的 INSERT）、`HasReference`（:224）、
+`latestRowPredicate`（:267 的关联子查询）、`ListLatestVersions`（:281）、`ListVersions`（:297）
+——一律对传入字符串原样精确匹配，确实没有 `normSupplyNS` 的等价物。
+（`CountReferences`（:238）不带 namespace，是 GC 的全局引用计数，按设计跨 namespace。）
+
+*为什么不能对称过来*：
+
+1. **`HasReference` 是授权谓词，不是查找键。** 它是 `GET /v1/artifacts/{digest}` 唯一的准入判定
+   （`service/apiserver/module_artifact.go:218`）。把入参 `""` 改写成 `"default"`，等于让
+   「没有 namespace 的调用者」获得 default 租户的全部 artifact 读权限——这是 fail-open。
+   supply 的 `normSupplyNS` 归一化的是一个 (namespace, name) 查找键，性质不同。
+2. **写侧归一化会把「不可达的孤儿行」变成「default 租户可读的行」。**
+   `sdk/xflow/artifact_resolve.go:112-116` 已明确记录：无 namespace 的 Put 落下 `namespace = ''`
+   的行，任何调用者的 namespace 都匹配不上，故一律 404。那是 fail-closed，是安全的失败方向。
+   若 `Bind` 归一化，这类行改为落在 `default` 下，`HasReference("default", digest)` 即可命中——
+   **原本匹配不上的行变成匹配得上，是隔离的净放松。**
+3. **与 `OwnerNamespace` 的既定语义直接冲突。** `store/enroll.go:148-157` 规定
+   `OwnerNamespace == ""` 表示「未知」而非「平台所有」，只有 `OwnerScope{All: true}` 能看见；
+   `store/enroll.go:95-100` 进一步声明「裸 string 参数用 `""` 表示放行，正是本类型要关掉的
+   fail-open 形状」。artifact 层把 `""` 折叠成一个真实租户，与该约束同向违反。
+4. **仓库里已有测试钉住相反的不变量。**
+   `test/integration/sqlstore_artifact_test.go:704-720`（`TestArtifactListIsNamespaceScoped`
+   的 "empty namespace is an exact match, never a wildcard" 子测试）断言空 namespace 查询
+   返回的行必须 `Namespace == ""`；加归一化后返回的是 `"default"` 的行，该断言即失败。
+   `store/sqlstore/artifact.go:273-276` 的注释也已写明同一条规则。
+
+*所谓「缺口」在今天不可达*：读路径的兜底不在调用方，而在类型自身——
+`namespace.FromContext`（`namespace/namespace.go`）对未设置或空值一律返回 `Default`，
+`""` 结构上到不了 `HasReference`。写路径 `def.Namespace` 由 `builder.build()`（`sdk/xflow/builder.go:353-356`）
+兜底为 `"default"`，HTTP 注册再以认证 principal 覆盖（`service/apiserver/module_control.go:514,906`）。
+`ListLatestVersions`/`ListVersions` 至今没有生产调用方，只被测试调用。
+
+*supply 为什么需要而 artifact 不需要*：`Server.UpdateSupply`/`UpdateSupplyCAS`
+（`sdk/xflow/server.go:837-839,904-906`）是把 `ns string` 直接暴露给 SDK 用户的 API，`""` 是合法入参，
+故必须在读写两侧对称归一化。artifact 没有这样的裸字符串公开入口。
+
+*若将来真出现裸字符串入口*：正确做法是在**入口处**要求 `namespace.Namespace` 强类型参数、
+或按 `OwnerScope` 那样对零值 fail-closed 报错，**而不是**在存储层静默折叠 `""`。
 
 **现状备注**：生产代码里没有一处调用 `WorkflowBuilder.Namespace(...)`
 （`sdk/xflow/builder.go:167` 是唯一入口，非测试文件零命中），

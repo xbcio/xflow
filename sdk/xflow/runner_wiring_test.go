@@ -3,8 +3,10 @@ package xflow
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/engine"
+	kafkatrigger "github.com/xbcio/xflow/node/trigger/kafka"
 	"github.com/xbcio/xflow/observability/metrics"
 )
 
@@ -227,12 +229,71 @@ func TestNewRunnerLeavesTheTimeoutObserverUnsetWithoutMetrics(t *testing.T) {
 	}
 }
 
-// Not covered here: the Kafka trigger observer (kafkatrigger.SetObserver in
-// wireRunnerMetrics). Its only read-back is the package-private obs(), and its
-// only driver is the package-private newConsumer seam, so asserting it from
-// outside node/trigger/kafka would mean adding a getter that exists only for
-// this test. cmd/runner's copy of the same line is untested for the same
-// reason. If that package ever grows a legitimate public seam, wire this in.
+// The Kafka trigger observer is installed by installProcessObservers, not by
+// wireRunnerMetrics: it lives in a process-global slot (kafkatrigger's atomic
+// observer pointer) alongside supply.Default's and the wasm/script observers,
+// released only by Runner.Close. Its data path has no public seam: obs() is
+// package-private and its only driver is the package-private newConsumer, so
+// reading back a recorded sample from outside node/trigger/kafka would mean
+// adding a getter that exists only for this test.
+//
+// SetObserver's install-once guard IS already a public seam, though — it
+// panics on a second non-nil install specifically so two live installs can
+// never silently drop one side's observations. That panic is a side effect
+// this test can observe without adding anything: if NewRunner wired a real
+// observer, a second SetObserver call from outside the package must panic;
+// if the wiring line ever regresses to passing nil, the slot stays in its
+// no-op/uninstalled state and the same call goes quiet.
+func TestNewRunnerWiresTheKafkaTriggerObserver(t *testing.T) {
+	// Defend against a leftover install from another test/process state before
+	// asserting anything: SetObserver(nil) always succeeds and clears
+	// observerInstalled, regardless of prior state.
+	kafkatrigger.SetObserver(nil)
+
+	r, err := NewRunner(RunnerConfig{
+		ServerURL:    "http://127.0.0.1:1",
+		Token:        "t",
+		RunnerID:     "kafka-observer-probe",
+		Capabilities: []string{"xflow.trigger.kafka"},
+	}, WithRunnerMetrics(metrics.New()))
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	defer func() {
+		if err := r.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	}()
+
+	func() {
+		defer func() {
+			if rec := recover(); rec == nil {
+				t.Error("kafkatrigger.SetObserver did not panic on a second " +
+					"non-nil install; NewRunner did not wire a live Kafka trigger " +
+					"observer, so every discard, dead-letter, lag sample and batch " +
+					"admission this runner's Kafka trigger sees is invisible")
+			}
+		}()
+		kafkatrigger.SetObserver(probeKafkaObserver{})
+	}()
+}
+
+// probeKafkaObserver is a minimal kafkatrigger.Observer used only to probe
+// SetObserver's install-once guard from outside the package; none of its
+// methods are ever expected to be called by this test.
+type probeKafkaObserver struct{}
+
+func (probeKafkaObserver) OnMessageDiscarded(context.Context, string, string)    {}
+func (probeKafkaObserver) OnMessageDeadLettered(context.Context, string, string) {}
+func (probeKafkaObserver) OnConsumerLag(context.Context, string, int, int64, time.Time) {
+}
+func (probeKafkaObserver) OnConsumptionBlocked(context.Context, string, int, bool) {}
+func (probeKafkaObserver) OnBatchFlushed(context.Context, string, string, int)     {}
+func (probeKafkaObserver) OnBatchFlushOutcome(context.Context, string, string, string) {
+}
+func (probeKafkaObserver) OnBatchAdmission(context.Context, string, string, string) {}
+func (probeKafkaObserver) OnOffsetCommit(context.Context, string, string, int, time.Duration) {
+}
 
 func TestRunnerMapBatchConcurrencyRejectsNegativeValues(t *testing.T) {
 	_, err := buildRunnerServiceConfig(RunnerConfig{
