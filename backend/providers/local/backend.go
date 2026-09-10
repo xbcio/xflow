@@ -68,7 +68,6 @@ func WithQueueLogger(l engine.Logger) Option {
 // invocations. Default is nil: resource-aware nodes (DatabaseNode/GRPCNode)
 // error at runtime when invoked without a pool — production deployments
 // should always inject a pool.
-// See .claude/specs/resource-pool.md.
 func WithResourcePool(p types.ResourcePool) Option {
 	return func(c *config) { c.resourcePool = p }
 }

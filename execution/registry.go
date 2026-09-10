@@ -10,8 +10,7 @@ import (
 )
 
 // VersionPolicy controls what Registry.Get does when the workflow pins a
-// specific handler version but that version is not registered. See
-// .claude/specs/handler-version.md.
+// specific handler version but that version is not registered.
 type VersionPolicy int
 
 const (

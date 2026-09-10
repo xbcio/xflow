@@ -132,7 +132,6 @@ func WithConsumer(enabled bool) Option {
 // disabled) can leave it nil. Default is nil: resource-aware nodes
 // (DatabaseNode/GRPCNode) error at runtime when invoked without a pool —
 // production deployments should always inject a pool.
-// See .claude/specs/resource-pool.md.
 func WithResourcePool(p types.ResourcePool) Option {
 	return func(c *config) { c.resourcePool = p }
 }
@@ -144,10 +143,13 @@ func WithArtifactCodeResolver(fn func(ctx context.Context, digest string) ([]byt
 }
 
 // WithAuditObserver installs an external observer for audit-store dual-write
-// outcomes. Per .claude/specs/dual-write-contract.md, Redis is the system
-// of record and the sqlstore audit trail is best-effort; this observer is the
-// hook for ops/metrics to count and reconcile audit failures. Composes with
-// the built-in atomic counters reachable via (*Backend).AuditStats().
+// outcomes. Redis is the system of record for scheduling state; the sqlstore
+// audit trail is a best-effort mirror written after the Redis commit, and a
+// failed audit write is logged/counted but never rolls back or blocks the
+// Redis path (see the "Redis as system of record" section of
+// internal/rstate/doc.go). This observer is the hook for ops/metrics to count
+// and reconcile audit failures. Composes with the built-in atomic counters
+// reachable via (*Backend).AuditStats().
 func WithAuditObserver(obs AuditObserver) Option {
 	return func(c *config) {
 		if obs != nil {
@@ -262,8 +264,10 @@ func (b *Backend) WorkflowRegistry() backend.WorkflowRegistry { return b.workflo
 func (b *Backend) TriggerPrimitives() backend.TriggerPrimitives { return b.triggerRuntime }
 
 // AuditStats returns a point-in-time snapshot of audit-store dual-write
-// outcomes (ok and failed counts keyed by op). See
-// .claude/specs/dual-write-contract.md.
+// outcomes (ok and failed counts keyed by op). Redis is the system of record
+// for scheduling state; these counters track only the best-effort sqlstore
+// audit mirror, so a nonzero Failed count means the audit trail has drifted
+// from Redis for that op, not that scheduling correctness was affected.
 func (b *Backend) AuditStats() AuditStats { return b.state.AuditStats() }
 
 // RedisClient exposes the Redis command capability required by optional

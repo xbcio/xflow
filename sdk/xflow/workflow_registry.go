@@ -23,8 +23,9 @@ type HandlerLocator struct {
 // ErrMissingHandlerVersions is returned by AddWorkflow when the workflow
 // references node types/versions that no handler currently satisfies. The
 // pre-check is always strict regardless of WithVersionPolicy: at registration
-// time all handlers should be known. See
-// .claude/specs/handler-version.md.
+// time all handlers should be known, and silently falling back here would
+// only defer the failure to first task dispatch instead of catching it at
+// registration.
 type ErrMissingHandlerVersions struct {
 	Missing []HandlerLocator
 }

@@ -7,8 +7,6 @@
 // realizes via Lua scripts and the memory backend realizes via mutex
 // discipline. Default `go test ./...` skips these cases; run them with
 // `make test-concurrency` (build tag `concurrency`, -race, -count=3).
-//
-// Spec: .claude/specs/lua-concurrency-tests.md
 package statestoretest
 
 import (
