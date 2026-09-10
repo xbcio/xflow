@@ -174,7 +174,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := runServer(cfg); err != nil {
+	if err := runServer(context.Background(), cfg); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -509,7 +509,15 @@ func buildServerOptions(cfg serverConfig, deps serverDeps) []xflowsdk.ServerOpti
 	return serverOpts
 }
 
-func runServer(cfg serverConfig) error {
+// runServer builds every dependency from cfg, assembles the server and blocks
+// in srv.Run until shutdown.
+//
+// ctx is the parent of the signal context installed below, and is the only
+// reason this takes a context at all: main passes context.Background(), which
+// never cancels, so the production lifecycle is still driven purely by
+// SIGINT/SIGTERM. A test passes a cancellable ctx so it can drive the same
+// graceful-shutdown path without sending the test binary a real signal.
+func runServer(ctx context.Context, cfg serverConfig) error {
 	logger, err := buildLogger(cfg)
 	if err != nil {
 		return err
@@ -701,7 +709,9 @@ func runServer(cfg serverConfig) error {
 	// HTTP server drains in-flight requests, gRPC GracefulStops, and the
 	// control plane's background goroutines (dispatcher, lease sweeper,
 	// leader election) exit cleanly instead of being killed mid-transition.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// Rooted at the caller's ctx so cancelling that drives the identical
+	// drain; main's ctx never cancels, leaving signals as the only trigger.
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	// Run starts the reconcile worker along with the transports.
