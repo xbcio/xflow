@@ -22,14 +22,18 @@ type (
 )
 
 var (
-	// These three are server-side distinctions ONLY. They are written to the
+	// These four are server-side distinctions ONLY. They are written to the
 	// audit trail, and Core.Enroll collapses all of them into the single
 	// external ErrEnrollRejected. Spec §2.3.4 item 4: a prober must not be
 	// able to learn that a code exists but is revoked, that it exists but has
-	// expired, or that a lookup simply failed to find one.
+	// expired, that its uses are spent, or that a lookup simply failed to find one.
 	ErrRegistrationCodeUnknown = store.ErrRegistrationCodeUnknown
 	ErrRegistrationCodeRevoked = store.ErrRegistrationCodeRevoked
 	ErrRegistrationCodeExpired = store.ErrRegistrationCodeExpired
+
+	// ErrRegistrationCodeExhausted comes from Consume, not ResolveByPlaintext:
+	// the use count is state a lookup must not mutate.
+	ErrRegistrationCodeExhausted = store.ErrRegistrationCodeExhausted
 
 	// ErrRegistrationCodeNotFound is a management-face error (revoking an id
 	// that does not exist). It never reaches the enroll path.

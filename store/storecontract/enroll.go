@@ -142,6 +142,106 @@ func RunRegistrationCodeStoreContract(t *testing.T, factory func(t *testing.T) s
 		}
 	})
 
+	// mkCapped is mk with a use ceiling.
+	mkCapped := func(t *testing.T, st store.RegistrationCodeStore, maxUses int) (string, string) {
+		t.Helper()
+		id, plaintext, err := store.GenerateRegistrationCode()
+		if err != nil {
+			t.Fatalf("GenerateRegistrationCode: %v", err)
+		}
+		err = st.Create(ctx, store.RegistrationCode{
+			ID: id, CodeHash: store.HashSecret(plaintext),
+			AllowedNamespaces: []string{"sas"}, AllowedNodeTypes: []string{"*"},
+			CreatedAt: time.Unix(1700000000, 0).UTC(),
+			MaxUses:   maxUses,
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		return id, plaintext
+	}
+
+	t.Run("consume spends the ceiling exactly once per call", func(t *testing.T) {
+		st := factory(t)
+		id, plaintext := mkCapped(t, st, 2)
+		for i := 0; i < 2; i++ {
+			if err := st.Consume(ctx, id); err != nil {
+				t.Fatalf("Consume #%d: %v, want nil", i+1, err)
+			}
+		}
+		if err := st.Consume(ctx, id); !errors.Is(err, store.ErrRegistrationCodeExhausted) {
+			t.Fatalf("Consume #3 = %v, want ErrRegistrationCodeExhausted; the ceiling "+
+				"is the only thing bounding how many runners one leaked code can enroll", err)
+		}
+		// Exhaustion is enforced at Consume, NOT at lookup: the code still
+		// resolves. That is what keeps ResolveByPlaintext a pure read, and it
+		// is why the rejection reason reaches the audit trail from the enroll
+		// path rather than from the storage boundary.
+		if _, err := st.ResolveByPlaintext(ctx, plaintext); err != nil {
+			t.Fatalf("ResolveByPlaintext after exhaustion = %v, want nil: exhaustion "+
+				"must not leak into the lookup path", err)
+		}
+	})
+
+	t.Run("zero max uses never exhausts", func(t *testing.T) {
+		st := factory(t)
+		// mk leaves MaxUses zero — the shape every code minted before this
+		// feature carries, and the default for new ones. Enrolling a whole
+		// fleet from one code is published behaviour; a store that read 0 as
+		// "no uses left" would break every existing deployment on upgrade.
+		id, _ := mk(t, st, []string{"sas"})
+		for i := 0; i < 5; i++ {
+			if err := st.Consume(ctx, id); err != nil {
+				t.Fatalf("Consume #%d on an uncapped code = %v, want nil", i+1, err)
+			}
+		}
+	})
+
+	t.Run("consume reports the counter through list", func(t *testing.T) {
+		st := factory(t)
+		id, _ := mkCapped(t, st, 3)
+		if err := st.Consume(ctx, id); err != nil {
+			t.Fatalf("Consume: %v", err)
+		}
+		list, err := st.List(ctx, store.OwnerScope{All: true})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		var got store.RegistrationCode
+		for _, c := range list {
+			if c.ID == id {
+				got = c
+			}
+		}
+		// A repo that persisted the increment but dropped either column on the
+		// way out would leave the ceiling working and the operator blind to how
+		// much of it is spent — and the exhaustion subtest above would still pass.
+		if got.MaxUses != 3 || got.UseCount != 1 {
+			t.Fatalf("MaxUses/UseCount = %d/%d, want 3/1", got.MaxUses, got.UseCount)
+		}
+	})
+
+	t.Run("revoked code cannot be consumed", func(t *testing.T) {
+		st := factory(t)
+		// Revocation is re-checked at Consume rather than trusted from the
+		// caller's earlier resolve: the scope check runs in between, and a code
+		// revoked in that window must not still enroll a runner.
+		id, _ := mkCapped(t, st, 5)
+		if err := st.Revoke(ctx, id, store.OwnerScope{All: true}); err != nil {
+			t.Fatalf("Revoke: %v", err)
+		}
+		if err := st.Consume(ctx, id); !errors.Is(err, store.ErrRegistrationCodeRevoked) {
+			t.Fatalf("Consume(revoked) = %v, want ErrRegistrationCodeRevoked", err)
+		}
+	})
+
+	t.Run("consume of an unknown id is not found", func(t *testing.T) {
+		st := factory(t)
+		if err := st.Consume(ctx, "no-such-code"); !errors.Is(err, store.ErrRegistrationCodeUnknown) {
+			t.Fatalf("Consume(unknown) = %v, want ErrRegistrationCodeUnknown", err)
+		}
+	})
+
 	t.Run("resolve returns the created code", func(t *testing.T) {
 		st := factory(t)
 		id, plaintext := mk(t, st, []string{"sas"})

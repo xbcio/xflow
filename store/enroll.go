@@ -33,14 +33,23 @@ import (
 const registrationCodeBytes = 32
 
 var (
-	// These three are server-side distinctions ONLY. They are written to the
+	// These four are server-side distinctions ONLY. They are written to the
 	// audit trail, and Core.Enroll collapses all of them into the single
 	// external control.ErrEnrollRejected. Spec §2.3.4 item 4: a prober must not
 	// be able to learn that a code exists but is revoked, that it exists but has
-	// expired, or that a lookup simply failed to find one.
+	// expired, that its uses are spent, or that a lookup simply failed to find one.
 	ErrRegistrationCodeUnknown = errors.New("store: registration code not recognized")
 	ErrRegistrationCodeRevoked = errors.New("store: registration code revoked")
 	ErrRegistrationCodeExpired = errors.New("store: registration code expired")
+
+	// ErrRegistrationCodeExhausted means the code is valid in every other
+	// respect but has already been used MaxUses times. Unlike the three above
+	// it is reported by Consume, not by ResolveByPlaintext: the use count is
+	// state a lookup must not mutate, so the check lives where the increment
+	// does. Reaching it proves the caller already presented a live, in-scope
+	// code, so surfacing it in the audit trail discloses nothing a prober
+	// could not already infer.
+	ErrRegistrationCodeExhausted = errors.New("store: registration code uses exhausted")
 
 	// ErrRegistrationCodeNotFound is a management-face error (revoking an id
 	// that does not exist). It never reaches the enroll path.
@@ -172,6 +181,22 @@ type RegistrationCode struct {
 	// repo boundary — the same split IssuedIdentity.ExpiresAt documents, and
 	// for the same reason (MySQL 8 strict mode rejects '0000-00-00').
 	ExpiresAt time.Time
+	// MaxUses is the ceiling on how many runners this code may enroll. The zero
+	// value means "unlimited", which is what every code minted before this field
+	// existed carries — so, exactly like ExpiresAt, turning the feature on does
+	// not retroactively kill codes already handed out. Unlimited is also the
+	// default for newly minted codes, because enrolling a whole fleet from one
+	// code is the published behaviour of this credential, not an accident.
+	//
+	// MaxUses and ExpiresAt bound the two independent dimensions of a leaked
+	// code's blast radius: how long it works, and how many runners it can make.
+	// Setting one does not bound the other.
+	MaxUses int
+	// UseCount is how many runners this code has enrolled. It is advanced only
+	// by Consume, never by ResolveByPlaintext — a lookup that mutated state
+	// would burn a slot on every enroll the scope check later rejects, and would
+	// make the read path unsafe to call from anywhere else.
+	UseCount int
 }
 
 // IsExpired reports whether the code's deadline has passed as of now. A zero
@@ -188,6 +213,18 @@ type RegistrationCode struct {
 // must not disagree about what "now" means at the boundary.
 func (c RegistrationCode) IsExpired(now time.Time) bool {
 	return !c.ExpiresAt.IsZero() && !c.ExpiresAt.After(now)
+}
+
+// IsExhausted reports whether the code has already been used its full MaxUses
+// times. A zero MaxUses is never exhausted.
+//
+// The comparison is >=, not ==, so a row whose UseCount somehow overshot the
+// ceiling (a MaxUses lowered after the fact, say) reads as exhausted rather
+// than as unlimited again. The predicate lives on the domain type for the same
+// reason IsExpired does: two implementations of "is this code still usable"
+// would drift, and the drift would be a privilege escalation.
+func (c RegistrationCode) IsExhausted() bool {
+	return c.MaxUses > 0 && c.UseCount >= c.MaxUses
 }
 
 // Clone returns a copy of c whose AllowedNamespaces / AllowedNodeTypes slices
@@ -250,6 +287,29 @@ type RegistrationCodeStore interface {
 	// Revoked already has, and the two must stay together — a reader who finds
 	// one check here will not go looking for the other elsewhere.
 	ResolveByPlaintext(ctx context.Context, plaintext string) (RegistrationCode, error)
+	// Consume claims one use of the code, returning ErrRegistrationCodeExhausted
+	// when none is left. A code with MaxUses == 0 is unlimited and Consume only
+	// advances its counter.
+	//
+	// It must be atomic: two concurrent enrolls against a code with one use left
+	// must not both succeed. Implementations do this with a single conditional
+	// UPDATE whose WHERE clause carries the ceiling, never a read-then-write.
+	//
+	// Revocation is re-checked here rather than trusted from the caller's prior
+	// ResolveByPlaintext, because that lookup and this call are separated by the
+	// scope check: a code revoked in between must not still enroll a runner, and
+	// such a race reports ErrRegistrationCodeRevoked. Expiry is deliberately NOT
+	// re-checked — the deadline was already enforced at the storage boundary,
+	// and re-reading the clock here would let a code that resolved a microsecond
+	// before its deadline fail with a different reason than the one the audit
+	// trail already recorded.
+	//
+	// Which of the three refusals comes back is a best-effort classification for
+	// the audit trail only; the refusal itself is what the single UPDATE
+	// guarantees. All three collapse into one external ErrEnrollRejected, so a
+	// misclassification under concurrency costs an imprecise audit reason and
+	// nothing else.
+	Consume(ctx context.Context, id string) error
 	// List returns the codes visible under scope. An invalid scope returns
 	// ErrOwnerScopeUnset and no rows.
 	List(ctx context.Context, scope OwnerScope) ([]RegistrationCode, error)

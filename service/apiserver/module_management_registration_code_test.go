@@ -386,6 +386,10 @@ func (s failingRegistrationCodeStoreListErr) ResolveByPlaintext(context.Context,
 	return control.RegistrationCode{}, nil
 }
 
+func (s failingRegistrationCodeStoreListErr) Consume(context.Context, string) error {
+	return nil
+}
+
 func (s failingRegistrationCodeStoreListErr) List(context.Context, control.OwnerScope) ([]control.RegistrationCode, error) {
 	return nil, fmt.Errorf("registrationCodeStore: scope column decode failed (%s): %w", s.uniqueDetail, store.ErrEnrollScopeCorrupted)
 }

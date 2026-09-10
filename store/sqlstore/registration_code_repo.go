@@ -90,6 +90,8 @@ func (r *registrationCodeRepo) Create(ctx context.Context, code store.Registrati
 		Revoked:           code.Revoked,
 		CreatedAt:         code.CreatedAt,
 		ExpiresAt:         expires,
+		MaxUses:           code.MaxUses,
+		UseCount:          code.UseCount,
 	}).Error
 }
 
@@ -129,6 +131,60 @@ func (r *registrationCodeRepo) ResolveByPlaintext(ctx context.Context, plaintext
 	return code, nil
 }
 
+// Consume claims one use of the code. The WHERE clause is the whole
+// enforcement: a code that is revoked, or whose use_count has already reached
+// max_uses, matches zero rows and cannot enroll another runner. Because the
+// read and the increment are one statement, two concurrent enrolls racing for
+// the last remaining use cannot both win — which is the entire point of the
+// column. A read-then-write, or a transaction wrapped around a SELECT, would
+// both be strictly weaker here.
+//
+// `max_uses = 0 OR use_count < max_uses` is the unlimited case and the bounded
+// case in one predicate; it must stay in SQL rather than move into Go, or the
+// atomicity above is lost.
+func (r *registrationCodeRepo) Consume(ctx context.Context, id string) error {
+	res := r.db.WithContext(ctx).Model(&dbRegistrationCode{}).
+		Where("id = ? AND revoked = ?", id, false).
+		Where("max_uses = 0 OR use_count < max_uses").
+		UpdateColumn("use_count", gorm.Expr("use_count + 1"))
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return r.classifyConsumeRefusal(ctx, id)
+	}
+	return nil
+}
+
+// classifyConsumeRefusal names why Consume's UPDATE matched nothing, for the
+// audit trail. The refusal itself already happened — this read cannot undo or
+// weaken it, and every answer it can give collapses into the same external
+// ErrEnrollRejected. So it is deliberately a plain read with no locking: under
+// a concurrent revoke or a concurrent enroll the reason may name the state a
+// moment after the refusal rather than at it, and an imprecise audit line is
+// the whole cost.
+//
+// It never returns nil. A row that looks usable by the time we re-read it was
+// still refused, and reporting success here would enroll a runner the UPDATE
+// declined to count.
+func (r *registrationCodeRepo) classifyConsumeRefusal(ctx context.Context, id string) error {
+	var row dbRegistrationCode
+	err := r.db.WithContext(ctx).Where("id = ?", id).Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return store.ErrRegistrationCodeUnknown
+	}
+	if err != nil {
+		// The classifying read failed, not the consume. Report exhaustion, the
+		// reason the UPDATE's predicate makes overwhelmingly likely, rather than
+		// leaking a database error into an audit reason.
+		return store.ErrRegistrationCodeExhausted
+	}
+	if row.Revoked {
+		return store.ErrRegistrationCodeRevoked
+	}
+	return store.ErrRegistrationCodeExhausted
+}
+
 func rowToRegistrationCode(row dbRegistrationCode) (store.RegistrationCode, error) {
 	namespaces, err := decodeList(row.AllowedNamespaces)
 	if err != nil {
@@ -145,6 +201,8 @@ func rowToRegistrationCode(row dbRegistrationCode) (store.RegistrationCode, erro
 		OwnerNamespace:    row.OwnerNamespace,
 		Revoked:           row.Revoked,
 		CreatedAt:         row.CreatedAt,
+		MaxUses:           row.MaxUses,
+		UseCount:          row.UseCount,
 	}
 	copy(code.CodeHash[:], row.CodeHash)
 	if row.ExpiresAt != nil {

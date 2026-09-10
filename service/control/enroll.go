@@ -66,6 +66,25 @@ func (c *Core) Enroll(ctx context.Context, req protocol.EnrollRequest, info Tran
 		return protocol.EnrollResponse{}, ErrEnrollRejected
 	}
 
+	// Claim a use of the code BEFORE issuing anything. The order is deliberate
+	// and fail-closed: a crash between this and Issue burns one slot without
+	// enrolling a runner — visible in use_count and recoverable by minting a new
+	// code — whereas issuing first and counting after would silently overissue
+	// past the ceiling on exactly the crash the ceiling exists to survive.
+	//
+	// It runs after the scope check for the same reason it is not folded into
+	// ResolveByPlaintext: a request the scope check will reject must not spend
+	// one of the code's uses.
+	if err := c.registrationCodes.Consume(ctx, code.ID); err != nil {
+		// The reason is named in the audit trail and nowhere else; the caller
+		// gets the same ErrEnrollRejected every other rejection returns. That is
+		// not an existence oracle: reaching this line already proved the caller
+		// holds a live, in-scope code.
+		c.enrollLimiter.RecordFailure(info.SourceIP)
+		c.auditEnroll(ctx, code.ID, false, err.Error(), "", info.SourceIP)
+		return protocol.EnrollResponse{}, ErrEnrollRejected
+	}
+
 	// The runner id is generated here and nowhere else. req.ProposedRunnerID is
 	// read only for the audit trail; letting it decide the id would turn enroll
 	// into "become any runner you can name".

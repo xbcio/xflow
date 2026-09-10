@@ -829,9 +829,11 @@ paths:
         in this response; it is never recoverable afterwards, including from
         the list endpoint below.
 
-        The code itself is REUSABLE: a successful enroll does not consume it,
-        so one code can enroll a whole fleet. Bound its blast radius with
-        `expires_in_seconds` and by revoking it once the fleet is up.
+        The code is REUSABLE by default: a successful enroll does not consume
+        it, so one code can enroll a whole fleet. Bound its blast radius on
+        both axes — `expires_in_seconds` caps how long it works,
+        `max_uses` caps how many runners it can make — and revoke it once the
+        fleet is up.
 
         Requires the `management.registration_code.create` scope.
 
@@ -1554,6 +1556,25 @@ components:
             ceiling binds `registration_code.create_global` holders exactly
             as it binds tenants; widening it is a deployment action, not an
             authorization one.
+        max_uses:
+          type: integer
+          minimum: 0
+          default: 0
+          description: |
+            How many runners this code may enroll in total. 0 (the default,
+            and what omitting it means) is unlimited, because enrolling a
+            whole fleet from one code is this credential's published
+            behaviour — turning that off by default would break every
+            existing deployment.
+
+            Unlike `expires_in_seconds` there is no deployment ceiling on
+            this axis, so absent and an explicit 0 are the same request. A
+            negative value is rejected with 400 rather than clamped to 0:
+            clamping would turn an obviously malformed request into the
+            widest possible outcome, silently.
+
+            The two limits are independent. Setting one does not bound the
+            other, and neither replaces revocation.
 
     RegistrationCodeCreateResponse:
       type: object
@@ -1569,7 +1590,8 @@ components:
           type: string
           description: |
             Plaintext registration code. Returned only here, never again —
-            but usable for as many enrollments as its lifetime allows.
+            but usable for as many enrollments as its lifetime and `max_uses`
+            allow.
 
 
     RegistrationCodeView:
@@ -1578,7 +1600,7 @@ components:
         The list projection of a registration code. Deliberately carries
         neither the plaintext nor its hash: publishing sha256(code) would make
         every code offline-crackable by anyone who can read the list.
-      required: [id, revoked, created_at, allowed_namespaces, allowed_node_types]
+      required: [id, revoked, created_at, allowed_namespaces, allowed_node_types, max_uses, use_count]
       properties:
         id:
           type: string
@@ -1611,6 +1633,24 @@ components:
             never expires. There is deliberately no computed `expired`
             boolean beside it: a second representation of the same fact is a
             second thing that can drift from the server's own verdict.
+        max_uses:
+          type: integer
+          description: |
+            The code's enrollment ceiling; 0 means unlimited. Always present,
+            including the 0 an uncapped code carries — omitting it would make
+            "unlimited" indistinguishable from a server too old to have the
+            field.
+        use_count:
+          type: integer
+          description: |
+            How many runners this code has already enrolled. Always present,
+            and always meaningful: it counts up even for an uncapped code, so
+            it is the record of how widely a code has been used regardless of
+            whether a ceiling was ever set.
+
+            Compare it against `max_uses` to see how much of the ceiling is
+            spent. There is deliberately no computed `exhausted` boolean, for
+            the same reason there is no `expired` one.
 
     EnrollAuditView:
       type: object

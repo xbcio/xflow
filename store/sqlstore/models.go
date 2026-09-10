@@ -261,6 +261,12 @@ type dbRegistrationCode struct {
 	// expires" and MySQL 8 strict mode rejects '0000-00-00' outright — the
 	// same split dbIssuedIdentity.ExpiresAt already carries.
 	ExpiresAt *time.Time `gorm:"column:expires_at"`
+	// MaxUses/UseCount bound how many runners one code may enroll. 0 max_uses
+	// means unlimited, so the NOT NULL DEFAULT 0 is also the migration story:
+	// rows written before these columns existed read back as unbounded, exactly
+	// as they behaved.
+	MaxUses  int `gorm:"column:max_uses;not null;default:0"`
+	UseCount int `gorm:"column:use_count;not null;default:0"`
 }
 
 func (dbRegistrationCode) TableName() string { return "xflow_registration_codes" }

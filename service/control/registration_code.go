@@ -85,6 +85,38 @@ func (s *MemoryRegistrationCodeStore) ResolveByPlaintext(_ context.Context, plai
 	return found.Clone(), nil
 }
 
+// Consume claims one use of the code. It takes the write lock, not the read
+// lock ResolveByPlaintext uses: this is the one place on the enroll path that
+// mutates stored state, and holding the write lock across the check and the
+// increment is what makes two concurrent enrolls racing for the last use
+// unable to both win. The SQL implementation gets the same guarantee from a
+// single conditional UPDATE.
+//
+// Lookup is by ID, so there is no constant-time concern here — the caller
+// already proved possession of the plaintext through ResolveByPlaintext, and
+// the id it returned is not attacker-supplied.
+func (s *MemoryRegistrationCodeStore) Consume(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.codes {
+		if s.codes[i].ID != id {
+			continue
+		}
+		// Re-checked here rather than trusted from the earlier resolve: the
+		// scope check runs in between, and a code revoked in that window must
+		// not still enroll a runner.
+		if s.codes[i].Revoked {
+			return ErrRegistrationCodeRevoked
+		}
+		if s.codes[i].IsExhausted() {
+			return ErrRegistrationCodeExhausted
+		}
+		s.codes[i].UseCount++
+		return nil
+	}
+	return ErrRegistrationCodeUnknown
+}
+
 func (s *MemoryRegistrationCodeStore) List(_ context.Context, scope OwnerScope) ([]RegistrationCode, error) {
 	if err := scope.Validate(); err != nil {
 		return nil, err

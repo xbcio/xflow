@@ -117,6 +117,8 @@ CREATE TABLE IF NOT EXISTS xflow_registration_codes (
     revoked            TINYINT(1)   NOT NULL DEFAULT 0    COMMENT '是否已吊销',
     created_at         DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     expires_at         DATETIME(3)  NULL                   COMMENT '注册码失效时间，NULL 表示永不过期。与 revoked 相互独立：吊销是运维动作，过期是铸造时定下的期限',
+    max_uses           INT          NOT NULL DEFAULT 0     COMMENT '该码最多可注册多少个 runner；0 表示不限。与 expires_at 各自约束一枚泄漏码爆炸半径的一个维度（能用多久 / 能造多少），设一个不约束另一个',
+    use_count          INT          NOT NULL DEFAULT 0     COMMENT '已注册的 runner 数。只由 enroll 前的条件 UPDATE 推进，查询路径绝不写它',
     PRIMARY KEY (id),
     UNIQUE INDEX uk_code_hash (code_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -849,3 +851,36 @@ END$$
 DELIMITER ;
 CALL xflow_add_registration_code_expires_at_column();
 DROP PROCEDURE IF EXISTS xflow_add_registration_code_expires_at_column;
+
+
+-- 注册码的使用次数上限与已用计数。缺了它们，老部署上 enroll 的条件 UPDATE 会
+-- 直接报 SQL 错误。两列都 NOT NULL DEFAULT 0，历史行因此读作「不限次数」——与
+-- 它们此前的实际行为逐字一致。升级不得凭空给已发出去的码套上一个上限。
+DROP PROCEDURE IF EXISTS xflow_add_registration_code_use_columns;
+DELIMITER $$
+CREATE PROCEDURE xflow_add_registration_code_use_columns()
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_registration_codes'
+          AND COLUMN_NAME = 'max_uses'
+    ) THEN
+        ALTER TABLE xflow_registration_codes
+            ADD COLUMN max_uses INT NOT NULL DEFAULT 0
+                COMMENT '该码最多可注册多少个 runner；0 表示不限' AFTER expires_at;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_registration_codes'
+          AND COLUMN_NAME = 'use_count'
+    ) THEN
+        ALTER TABLE xflow_registration_codes
+            ADD COLUMN use_count INT NOT NULL DEFAULT 0
+                COMMENT '已注册的 runner 数' AFTER max_uses;
+    END IF;
+END$$
+DELIMITER ;
+CALL xflow_add_registration_code_use_columns();
+DROP PROCEDURE IF EXISTS xflow_add_registration_code_use_columns;

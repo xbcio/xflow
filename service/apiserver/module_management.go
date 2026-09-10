@@ -823,6 +823,16 @@ type registrationCodeCreateRequest struct {
 	// because the OpenAPI contract has no unambiguous duration type and a
 	// third-party client should not have to reimplement Go's parser.
 	ExpiresInSeconds *int64 `json:"expires_in_seconds,omitempty"`
+	// MaxUses caps how many runners this code may enroll. 0 (and absent) means
+	// unlimited, which is the default because enrolling a whole fleet from one
+	// code is this credential's published behaviour.
+	//
+	// A plain int rather than ExpiresInSeconds' pointer: there is no deployment
+	// ceiling on this axis, so absent and an explicit 0 are the same request and
+	// nothing needs to tell them apart. If a ceiling is ever added, this must
+	// become a pointer at the same time — under a ceiling, "use the default" and
+	// "I want unlimited" stop being the same thing.
+	MaxUses int `json:"max_uses,omitempty"`
 }
 
 // registrationCodeCreateResponse is the ONLY place the plaintext code ever
@@ -850,6 +860,12 @@ type registrationCodeView struct {
 	// beside it: a second representation of the same fact is a second thing
 	// that can drift from ResolveByPlaintext's verdict.
 	ExpiresAt string `json:"expires_at,omitempty"`
+	// MaxUses/UseCount are always present, including the 0/0 an uncapped code
+	// carries: omitting them would make "unlimited" indistinguishable from a
+	// server too old to have the field, and an operator reading this list to
+	// decide whether a code is spent needs both numbers or neither.
+	MaxUses  int `json:"max_uses"`
+	UseCount int `json:"use_count"`
 }
 
 // newRegistrationCodeView projects a stored code onto its wire shape.
@@ -876,6 +892,8 @@ func newRegistrationCodeView(c control.RegistrationCode) registrationCodeView {
 		AllowedNodeTypes:  emptyIfNil(c.AllowedNodeTypes),
 		Revoked:           c.Revoked,
 		CreatedAt:         c.CreatedAt.UTC().Format(time.RFC3339),
+		MaxUses:           c.MaxUses,
+		UseCount:          c.UseCount,
 	}
 	if !c.ExpiresAt.IsZero() {
 		view.ExpiresAt = c.ExpiresAt.UTC().Format(time.RFC3339)
@@ -969,6 +987,13 @@ func (m *managementModule) handleCreateRegistrationCode(w http.ResponseWriter, r
 		writeFail(w, r, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
+	if req.MaxUses < 0 {
+		// Refused rather than clamped to 0. Clamping would turn "cap this at -1,
+		// obviously a bug in my client" into a code with no cap at all — the
+		// widest possible outcome, silently, from a request that was malformed.
+		writeFail(w, r, http.StatusBadRequest, "bad_request", "max_uses must not be negative")
+		return
+	}
 	code := control.RegistrationCode{
 		ID:                id,
 		CodeHash:          control.HashSecret(plaintext),
@@ -977,6 +1002,7 @@ func (m *managementModule) handleCreateRegistrationCode(w http.ResponseWriter, r
 		AllowedNodeTypes:  req.AllowedNodeTypes,
 		CreatedAt:         now,
 		ExpiresAt:         expiresAt,
+		MaxUses:           req.MaxUses,
 	}
 	if err := m.codes.Create(r.Context(), code); err != nil {
 		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
