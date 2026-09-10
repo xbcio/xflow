@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -26,8 +25,6 @@ import (
 	"github.com/xbcio/xflow/service/protocol"
 	runnersvc "github.com/xbcio/xflow/service/runner"
 	"github.com/xbcio/xflow/types"
-
-	"github.com/redis/go-redis/v9"
 )
 
 // registryTriggerLookupE2E adapts the global node registry's LookupTrigger to
@@ -415,18 +412,14 @@ func TestReplicatedRemoteTriggerHosting_Memory(t *testing.T) {
 }
 
 func TestRemoteTriggerHosting_Redis(t *testing.T) {
-	addr := os.Getenv("XFLOW_TEST_REDIS_ADDR")
-	if addr == "" {
-		t.Skip("XFLOW_TEST_REDIS_ADDR not set; skipping Redis-backed remote trigger hosting e2e")
-	}
-	rdb := redis.NewClient(&redis.Options{Addr: addr})
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := rdb.Ping(ctx).Err(); err != nil {
-		_ = rdb.Close()
-		t.Skipf("Redis at %s unreachable: %v", addr, err)
-	}
-	_ = rdb.Close()
+	// Gate through the package's own requireRedis (harness.go) rather than a
+	// hand-rolled os.Getenv + t.Skip. The version here previously had no
+	// escalation branch, so XFLOW_REQUIRE_REDIS_INTEGRATION=1 could not turn
+	// an unreachable Redis red — this file's whole Redis-backed e2e would
+	// report ok when the dependency was simply absent. requireRedis also falls
+	// back to REDIS_PORT / localhost:6379 when XFLOW_TEST_REDIS_ADDR is unset,
+	// so this now runs in the same situations as every other test here.
+	addr := requireRedis(t)
 
 	be, err := distributed.New(addr, nil, distributed.WithConsumer(false))
 	if err != nil {

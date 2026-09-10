@@ -53,6 +53,32 @@ func envOrDefault(key, def string) string {
 	return def
 }
 
+// probeMySQLEndpoint describes where probeMySQLDSN points, WITHOUT the
+// credential: the DSN embeds MYSQL_ROOT_PASSWORD, and skip text reaches CI
+// artifacts and terminal scrollback (test/integration/harness.go:88-92 makes
+// the same call for its own message). A caller-supplied XFLOW_TEST_MYSQL_DSN
+// is named rather than parsed, so that password stays one parsing bug further
+// from the log.
+func probeMySQLEndpoint() string {
+	if os.Getenv("XFLOW_TEST_MYSQL_DSN") != "" {
+		return "the DSN in $XFLOW_TEST_MYSQL_DSN"
+	}
+	return "127.0.0.1:" + envOrDefault("MYSQL_PORT", "3306")
+}
+
+// skipOrFailProbeMySQL skips, or fails under XFLOW_REQUIRE_MYSQL_INTEGRATION=1,
+// mirroring test/integration/harness.go's requireMySQL. Without the escalation
+// branch, the only coverage execSelect / execInsert / execInsertMany /
+// execUpdate / execDelete have against a real parser vanishes into a reported
+// ok whenever MySQL is down. Callers must pass an endpoint, never a DSN.
+func skipOrFailProbeMySQL(t *testing.T, format string, args ...any) {
+	t.Helper()
+	if os.Getenv("XFLOW_REQUIRE_MYSQL_INTEGRATION") == "1" {
+		t.Fatalf("XFLOW_REQUIRE_MYSQL_INTEGRATION=1: "+format, args...)
+	}
+	t.Skipf(format, args...)
+}
+
 // stubSQLPool implements types.ResourcePool by handing back one pre-opened
 // *sql.DB regardless of the requested driver/dsn. DatabaseNode never sees the
 // difference: acquireSQL only cares that pool.SQL(...) returns a *sql.DB, and
@@ -83,13 +109,14 @@ func requireMySQLProbe(t *testing.T) (*sql.DB, string) {
 	dsn := probeMySQLDSN()
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
-		t.Skipf("mysql dsn unusable: %v", err)
+		skipOrFailProbeMySQL(t, "mysql dsn unusable: %v", err)
 	}
 	pingCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := db.PingContext(pingCtx); err != nil {
 		_ = db.Close()
-		t.Skipf("mysql unavailable at %s: %v (run `make env-up && make env-migrate` for real-DB coverage)", dsn, err)
+		skipOrFailProbeMySQL(t, "mysql unavailable at %s: %v (run `make env-up && make env-migrate` for real-DB coverage)",
+			probeMySQLEndpoint(), err)
 	}
 
 	const table = "xflow_action_dbnode_probe"

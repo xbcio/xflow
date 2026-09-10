@@ -42,23 +42,55 @@ func envOrDefault(key, def string) string {
 	return def
 }
 
+// enrollMySQLEndpoint describes where enrollTestDSN points, WITHOUT the
+// credential. Every skip/fail message below prints this instead of the DSN,
+// which embeds MYSQL_ROOT_PASSWORD — test output reaches CI artifacts and
+// terminal scrollback, and test/integration/harness.go:88-92 already made this
+// call for its own message.
+//
+// A caller-supplied XFLOW_TEST_MYSQL_DSN is named rather than parsed: pulling a
+// host out of an arbitrary DSN would put that password one parsing bug away
+// from the log.
+func enrollMySQLEndpoint() string {
+	if os.Getenv("XFLOW_TEST_MYSQL_DSN") != "" {
+		return "the DSN in $XFLOW_TEST_MYSQL_DSN"
+	}
+	return "127.0.0.1:" + envOrDefault("MYSQL_PORT", "3306")
+}
+
+// skipOrFailEnrollMySQL skips, or fails under XFLOW_REQUIRE_MYSQL_INTEGRATION=1,
+// mirroring test/integration/harness.go's requireMySQL. Without the escalation
+// branch these contract runs are invisible to CI's required mode: MySQL goes
+// down, they report skip, the suite reports ok, and the real-DB half of the
+// registration-code / issued-identity contracts silently does not run.
+// Callers must pass an endpoint, never a DSN.
+func skipOrFailEnrollMySQL(t *testing.T, format string, args ...any) {
+	t.Helper()
+	if os.Getenv("XFLOW_REQUIRE_MYSQL_INTEGRATION") == "1" {
+		t.Fatalf("XFLOW_REQUIRE_MYSQL_INTEGRATION=1: "+format, args...)
+	}
+	t.Skipf(format, args...)
+}
+
 // newEnrollTestDB opens a real local MySQL connection, runs AutoMigrate (safe
 // to call repeatedly: additive only), truncates the three enroll tables so
 // each contract subtest's factory(t) call gets a fresh, empty store, and
-// skips with an explicit reason if MySQL is unreachable — never silently.
+// skips with an explicit reason if MySQL is unreachable — never silently, and
+// never echoing the DSN.
 func newEnrollTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	dsn := enrollTestDSN()
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{Logger: gormlogger.Default.LogMode(gormlogger.Silent)})
 	if err != nil {
-		t.Skipf("mysql unavailable at %s (run `make env-up` / podman test env for real-DB coverage): %v", dsn, err)
+		skipOrFailEnrollMySQL(t, "mysql unavailable at %s (run `make env-up` / podman test env for real-DB coverage): %v",
+			enrollMySQLEndpoint(), err)
 	}
 	sqlDB, err := db.DB()
 	if err != nil {
-		t.Skipf("mysql unavailable at %s: resolve *sql.DB: %v", dsn, err)
+		skipOrFailEnrollMySQL(t, "mysql unavailable at %s: resolve *sql.DB: %v", enrollMySQLEndpoint(), err)
 	}
 	if err := sqlDB.Ping(); err != nil {
-		t.Skipf("mysql unavailable at %s: ping: %v", dsn, err)
+		skipOrFailEnrollMySQL(t, "mysql unavailable at %s: ping: %v", enrollMySQLEndpoint(), err)
 	}
 	if err := AutoMigrate(db); err != nil {
 		t.Fatalf("AutoMigrate: %v", err)

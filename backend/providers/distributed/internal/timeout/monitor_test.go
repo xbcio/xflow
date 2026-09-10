@@ -47,10 +47,20 @@ import (
 // realRedisOrSkip connects to XFLOW_TEST_REDIS_ADDR (the podman test env
 // documented in docs/TESTING.md), skipping cleanly when unset or unreachable
 // so this file never silently no-ops in a way that reads as a pass.
+//
+// "Never silently" needs the escalation branch to be true, which this helper
+// originally lacked: under XFLOW_REQUIRE_REDIS_INTEGRATION=1 it now FAILS
+// instead of skipping, matching test/integration/harness.go's requireRedis and
+// rstate's realRedisAddr. Without it, CI's required mode could not tell "the
+// monitor's Redis-facing branches passed" from "they never ran" — and since
+// every test in this package needs real Redis, that is the whole file.
 func realRedisOrSkip(t *testing.T) redis.Cmdable {
 	t.Helper()
 	addr := os.Getenv("XFLOW_TEST_REDIS_ADDR")
 	if addr == "" {
+		if os.Getenv("XFLOW_REQUIRE_REDIS_INTEGRATION") == "1" {
+			t.Fatal("XFLOW_REQUIRE_REDIS_INTEGRATION=1: XFLOW_TEST_REDIS_ADDR not set (use 127.0.0.1:6380)")
+		}
 		t.Skip("XFLOW_TEST_REDIS_ADDR unset; set 127.0.0.1:6380 for the podman env")
 	}
 	rdb := redis.NewClient(&redis.Options{Addr: addr})
@@ -58,6 +68,9 @@ func realRedisOrSkip(t *testing.T) redis.Cmdable {
 	defer cancel()
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		_ = rdb.Close()
+		if os.Getenv("XFLOW_REQUIRE_REDIS_INTEGRATION") == "1" {
+			t.Fatalf("XFLOW_REQUIRE_REDIS_INTEGRATION=1: redis unavailable at %s: %v (run `make env-up`)", addr, err)
+		}
 		t.Skipf("redis at %s unreachable: %v", addr, err)
 	}
 	t.Cleanup(func() { _ = rdb.Close() })

@@ -237,7 +237,7 @@ script」），且 `terminalExecutionError` 让 `CyclicFinalError` 优先于节�
 `WaitDone` 与 `Inspect` 两条路径给出**相同**原因，并反向断言没有任何节点携带 error
 （那正是本场景成立的前提）。
 
-## 可能的收敛形状（仍开放，现已无阻塞）
+## 可能的收敛形状（错误分支已收敛，入口合一仍开放）
 
 三层：入口合一，扩展分支用 `taskResultExpands` 分流（判据已在 2026-08-11 下沉为编译期
 可答，前提具备）；错误分支删掉零差异的那一份；`...WithClassification` 保留两个实现，
@@ -247,21 +247,23 @@ script」），且 `terminalExecutionError` 让 `CyclicFinalError` 优先于节�
 `...WithClassification` 那一对的分歧收窄成「两个完成协议各一套字段」，`Validate` 把
 边界钉住了。也就是说这个候选现在可以直接做，不再被待决问题挡住。
 
-**当前重复代码位置（2026-08-18 核实）**：
+**错误分支的重复已于 2026-08-30 消除**（`62d68a0`，2026-09-10 复核）。原文此处曾记录
+「`engine/atomic_commit.go:63` 与 `engine/commit.go:213` 两函数逐字相同」——那一段已经
+不再成立，公共前置逻辑（retry + publishRetryReceipt + ApplyOnError +
+buildEffectiveClassification）提取为 `engine/atomic_commit.go:83` 的
+`commitNodeErrorOutcome`，两个 `...WithClassification` 实现按原计划保留，通过
+`engine/atomic_commit.go:73` 的 `nodeErrorCommitFunc` 作为参数传入。`commitAcyclicNodeError`
+（`engine/atomic_commit.go:63`）与 `commitLegacyNodeError`（`engine/commit.go:242`）现在
+各自只剩一行委托。
 
-- `engine/atomic_commit.go:63`：`commitAcyclicNodeError`
-- `engine/commit.go:213`：`commitLegacyNodeError`
-
-两函数逐字相同（签名一致、体一致），唯一差异是最后一行分别调用
-`commitAcyclicNodeWithClassification` 与 `commitLegacyNodeWithClassification`。
-合并方式：提取公共前置逻辑（retry 尝试 + ApplyOnError + classification 计算），
-保留两个 `...WithClassification` 实现（它们真的不同：`AdvanceTask` 机制 vs
-`CyclicOutbox` 机制）。
+三层里仍未做的是**入口合一**（`taskResultExpands` 分流）；`...WithClassification` 保留
+两份是设计结论，不是欠账。
 
 ## 已关闭（保留索引）
 
 | 条目 | 关闭时间 | 关闭位置 |
 |---|---|---|
+| 错误分支重复：`commitAcyclicNodeError` / `commitLegacyNodeError` 逐字相同 | 2026-08-30（`62d68a0`） | `engine/atomic_commit.go:73` `nodeErrorCommitFunc`、`:83` `commitNodeErrorOutcome`；两个调用点各剩一行委托 |
 | `CommitNodeRequest.Fatal` 一字段两义 | 2026-08-14 | `engine/atomic.go`（协议文档）；`CommitNodeRequest.Validate()` 交叉校验；`rstate/commit_graph_type_test.go`，`local/commit_graph_type_test.go` |
 | 待决问题 1：cyclic 终局 `Fatal` vs `CyclicComplete` | 2026-08-14 | 保持 `CyclicComplete`；`engine/atomic.go` 写明 `Fatal` 仅剩无环终局义 |
 | 待决问题 2：分布式 × cyclic 成色 | 2026-08-13 | `test/integration/cyclic_reliability_process_test.go`，`test/integration/cyclic_reliability_real_test.go` |

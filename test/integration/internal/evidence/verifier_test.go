@@ -590,9 +590,6 @@ func TestVerifyRejectsInvalidArtifacts(t *testing.T) {
 		{
 			name: "duplicate event ID across producers",
 			mutate: func(env *Envelope) {
-				if len(env.Raw.RuntimeEvents) == 0 {
-					t.Skip("no runtime events to duplicate")
-				}
 				dup := env.Raw.RuntimeEvents[0]
 				dup.Meta.ProducerID = "other-producer"
 				env.Raw.RuntimeEvents = append(env.Raw.RuntimeEvents, dup)
@@ -624,6 +621,16 @@ func TestVerifyRejectsInvalidArtifacts(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			env := validEnvelope()
 			markAllRequired(env)
+			// Fixture invariant, asserted before any mutation: several cases
+			// below index or filter Raw.RuntimeEvents, and an empty slice makes
+			// them mutate nothing while still expecting Verify to reject. The
+			// "duplicate event ID across producers" case used to guard itself
+			// with a t.Skip here — on the OUTER t, which would have skipped the
+			// whole parent test, and which read as ok either way.
+			if len(env.Raw.RuntimeEvents) == 0 {
+				t.Fatal("validEnvelope() produced no runtime events; the mutation cases below " +
+					"would silently exercise nothing")
+			}
 			tc.mutate(env)
 
 			prov := defaultFakeProvenance()

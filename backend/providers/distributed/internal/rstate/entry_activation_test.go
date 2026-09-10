@@ -2,7 +2,6 @@ package rstate
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
@@ -31,21 +30,15 @@ func TestMiniredisEntryActivationContract(t *testing.T) {
 
 // TestRedisEntryActivationContract runs the shared EntryActivationStore contract
 // against a real Redis instance when XFLOW_TEST_REDIS_ADDR is set.
+//
+// It gates through the package-wide realRedisAddr rather than its own
+// os.Getenv + t.Skip. The hand-rolled gate it used to carry had no escalation
+// branch, so under XFLOW_REQUIRE_REDIS_INTEGRATION=1 an unreachable Redis
+// reported skip and the suite reported ok — and this is one of the six real-
+// Redis contract tests realRedisAddr's own doc comment names as having been
+// bitten by exactly that.
 func TestRedisEntryActivationContract(t *testing.T) {
-	addr := os.Getenv("XFLOW_TEST_REDIS_ADDR")
-	if addr == "" {
-		t.Skip("XFLOW_TEST_REDIS_ADDR unset; set 127.0.0.1:6380 for the podman env")
-	}
-	// Skip cleanly when the addr is set but the server is unreachable (the
-	// podman env may be down) rather than failing every subtest.
-	probe := redis.NewClient(&redis.Options{Addr: addr})
-	pctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := probe.Ping(pctx).Err(); err != nil {
-		_ = probe.Close()
-		t.Skipf("redis at %s unreachable: %v", addr, err)
-	}
-	_ = probe.Close()
+	addr := realRedisAddr(t)
 	statestoretest.RunEntryActivationContract(t, func(t *testing.T) engine.EntryActivationStore {
 		return NewEntryActivationStore(freshRealRedis(t, addr), time.Minute)
 	})

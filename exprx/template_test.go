@@ -46,8 +46,20 @@ func TestRenderTemplateErrorDoesNotEchoTheValue(t *testing.T) {
 		Params: map[string]any{"secret": "s3cr3t-token-value"},
 	}, nil)
 	_, err := RenderTemplate("${{ $params.secret.nonexistent.deeper }}", env)
+	// This used to be a t.Skip("expr tolerated this; pick another failing
+	// form"), which meant the one assertion in the test — that a failing
+	// evaluation does not put the secret in the error — died silently the
+	// moment expr stopped rejecting this expression. A skip reads as ok, so
+	// nothing would have said the leak check was no longer running.
+	//
+	// $params.secret is a string; indexing it with .nonexistent must fail in
+	// any expr version, and the whole point of the test is what the failure
+	// says. If a future expr does tolerate it, that is a real change to
+	// investigate, not something to step around.
 	if err == nil {
-		t.Skip("expr tolerated this; pick another failing form")
+		t.Fatal("expected ${{ $params.secret.nonexistent.deeper }} to fail: a string has no " +
+			"such field. If expr now tolerates it, this test's leak assertion has no failure " +
+			"to inspect — pick another failing form rather than letting it pass vacuously")
 	}
 	if strings.Contains(err.Error(), "s3cr3t") {
 		t.Errorf("error must not echo the value; got %q", err.Error())

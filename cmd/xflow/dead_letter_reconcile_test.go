@@ -18,11 +18,25 @@ import (
 
 // testMySQLDSN resolves a DSN for the local test MySQL (see
 // test/env/docker-compose.yml: localhost:3306, db "xflow", root password
-// "xflow") and skips the test when it is unreachable, matching the
-// requireMySQL skip convention used by test/integration/harness.go. This
-// keeps runReconcile's only real-infra dependency from breaking `go test
-// ./cmd/...` on a machine that never brought up the local test environment
+// "xflow") and skips the test when it is unreachable. This keeps
+// runReconcile's only real-infra dependency from breaking `go test ./cmd/...`
+// on a machine that never brought up the local test environment
 // (`make env-up && make env-migrate`).
+//
+// It follows test/integration/harness.go's requireMySQL in both respects that
+// matter, because this helper previously followed neither:
+//
+//   - Under XFLOW_REQUIRE_MYSQL_INTEGRATION=1 it FAILS instead of skipping.
+//     A hand-rolled gate with no escalation branch is invisible to CI's
+//     required mode: the dependency goes down, the test reports skip, the
+//     suite reports ok, and nobody learns that reconcile's only real-DB
+//     coverage did not run. This repo has already been bitten by exactly that
+//     shape once (see the note at the top of
+//     backend/providers/distributed/internal/rstate/deadletter_replay_test.go's
+//     realRedisAddr).
+//   - Neither branch echoes the DSN. It embeds MYSQL_ROOT_PASSWORD, and skip
+//     text lands in CI artifacts and terminal scrollback; harness.go:88-92
+//     makes the same point about its own message.
 func testMySQLDSN(t *testing.T) string {
 	t.Helper()
 	dsn := envOr("XFLOW_TEST_MYSQL_DSN", "")
@@ -34,15 +48,40 @@ func testMySQLDSN(t *testing.T) string {
 	}
 	sqlDB, err := sql.Open("mysql", dsn)
 	if err != nil {
-		t.Skipf("mysql dsn unusable: %v", err)
+		skipOrFailMySQL(t, "mysql dsn unusable: %v", err)
 	}
 	defer sqlDB.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := sqlDB.PingContext(ctx); err != nil {
-		t.Skipf("mysql unavailable at %s: %v (run `make env-up && make env-migrate` for real-DB reconcile coverage)", dsn, err)
+		skipOrFailMySQL(t, "mysql unavailable at %s: %v (run `make env-up && make env-migrate` for real-DB reconcile coverage)",
+			mysqlEndpoint(), err)
 	}
 	return dsn
+}
+
+// mysqlEndpoint describes where testMySQLDSN points, without the credential.
+//
+// When the DSN came from XFLOW_TEST_MYSQL_DSN its shape is caller-supplied and
+// unknown, so the variable is NAMED rather than parsed: extracting a host from
+// an arbitrary DSN would put someone else's password one parsing bug away from
+// the test log, and the operator who set the variable already knows what is in
+// it.
+func mysqlEndpoint() string {
+	if envOr("XFLOW_TEST_MYSQL_DSN", "") != "" {
+		return "the DSN in $XFLOW_TEST_MYSQL_DSN"
+	}
+	return "127.0.0.1:" + envOr("MYSQL_PORT", "3306")
+}
+
+// skipOrFailMySQL skips, or fails under XFLOW_REQUIRE_MYSQL_INTEGRATION=1.
+// Callers must pass an endpoint, never a DSN.
+func skipOrFailMySQL(t *testing.T, format string, args ...any) {
+	t.Helper()
+	if envOr("XFLOW_REQUIRE_MYSQL_INTEGRATION", "") == "1" {
+		t.Fatalf("XFLOW_REQUIRE_MYSQL_INTEGRATION=1: "+format, args...)
+	}
+	t.Skipf(format, args...)
 }
 
 // seedReplayReceipt writes a raw Redis replay-receipt hash in the exact shape
