@@ -296,9 +296,12 @@ func (e *Engine) commitLegacyNodeWithClassification(ctx context.Context, lease *
 		StoreOutput:  true,
 		Port:         port,
 		Error:        errMsg,
-		// The graph is cyclic by construction here — line 189 above redirected
-		// every acyclic graph to commitAcyclicNode. Stating it explicitly is what
-		// keeps the backend from having to reload the graph and guess.
+		// The graph is cyclic by construction here — the !AllowCycles redirect
+		// near the top of this function sent every acyclic graph to
+		// commitAcyclicNode. Naming the redirect rather than its line number:
+		// the number this comment used to carry had been wrong for three
+		// refactors. Stating AllowCycles explicitly is what keeps the backend
+		// from having to reload the graph and guess.
 		AllowCycles: true,
 		// Fatal is intentionally NOT set for the cyclic path: the backend cyclic
 		// finalization is driven by CyclicComplete (above), and the Fatal flag is
