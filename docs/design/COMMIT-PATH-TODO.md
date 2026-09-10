@@ -132,7 +132,7 @@ local 侧同形：`entry.snap.Graph != nil && !entry.snap.Graph.AllowCycles()`�
   图上播种（local `memory_state.go:117-120`；rstate `state_execution.go:151` 与
   `entry_admission.go:162`），Redis 于是把它建成 -1 → `remaining <= 0` → **误判执行完成**。
 
-修法：`engine` 本来就握着图（`commit.go:56`/`:137`/`:169`/`:269` 四处路由都在读
+修法：`engine` 本来就握着图（`commit.go:56`/`:137`/`:169`/`:248` 四处路由都在读
 `g.AllowCycles()`），把它直接放进请求，后端不再推导。承重测试各后端一条，均已反向复验
 （改回旧推导即红，失败形态正是「OutboxIDs 为空」）：
 
