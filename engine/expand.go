@@ -38,12 +38,15 @@ func expandsIntoSubExecutions(g *graph.Graph, nodeIdx int) bool {
 // criterion read off the graph has to say it.
 //
 // Measured: dropping the narrowing changes no observable behaviour today. A
-// failing map then reaches commitLegacyTaskResult instead, whose error branch
-// runs the same retry budget and OnError strategy and whose commit redirects
-// back to commitAcyclicNode for any acyclic graph — the two paths converge. The
-// narrowing is kept because that convergence is incidental: it holds only as
-// long as the legacy path keeps mirroring the acyclic one, and a failure has no
-// business entering an expansion path to begin with.
+// failing map then reaches commitLegacyTaskResult instead, and since both entry
+// points now delegate to one shared verdict sequence
+// (commitTaskResultWithStrategy), its error branch is not merely the same shape
+// as the acyclic one — it is the same code. The terminal commit then redirects
+// back to commitAcyclicNode for any acyclic graph, so the two paths converge.
+// The narrowing is kept because the last leg of that convergence is still
+// incidental: it rests on commitLegacyNodeWithClassification's !AllowCycles
+// redirect rather than on anything structural, and a failure has no business
+// entering an expansion path to begin with.
 func taskResultExpands(g *graph.Graph, lease *TaskLease, result TaskResult) bool {
 	if result.Error != nil || result.Output == nil || result.Output.Error != nil {
 		return false

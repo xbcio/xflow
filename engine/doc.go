@@ -65,30 +65,39 @@
 //	      ├─ subgraph payload? ──► CommitSubgraphResult (fan-out barrier)
 //	      │
 //	      ├─ cyclic graph? ──────► commitLegacyTaskResult
-//	      │                              │
-//	      │                        planCyclicDownstream (reads graph, no IO)
-//	      │                              │
-//	      │                        CommitLeasedNode (fenced, +CyclicOutbox)
-//	      │                              │
-//	      │                        FlushOutbox
-//	      │
+//	      │                                  │
 //	      └─ acyclic graph ───────► commitAcyclicTaskResult
-//	                                      │
-//	                             ApplyOnError (errorpolicy.go)
-//	                             four strategies: stop / error_output /
-//	                             main_output / continue
-//	                                      │
-//	                             AtomicStateStore.CommitNode (fenced)
-//	                               ┌─ LeaseToken check (stale → reject)
-//	                               ├─ persist terminal node status + output
-//	                               ├─ decrement downstream in-degree counter
-//	                               └─ append OutboxEntry for each ready unit
-//	                                      │
-//	                             FlushOutbox
-//	                               ┌─ LeaseOutbox → lease each entry
-//	                               ├─ outboxLeaseKeeper (renews OutboxDeliveryLeaseTTL/3)
-//	                               ├─ Enqueue / EnqueueDelayed
-//	                               └─ AckOutbox
+//	                                         │
+//	Both entry points are thin: each builds a taskResultCommitStrategy naming the
+//	three steps where its path differs, then delegates to the one shared verdict
+//	sequence.
+//	                                         │
+//	      commitTaskResultWithStrategy
+//	            ├─ error / exhausted error-port ─► strategy.commitError
+//	            │        └─ commitNodeErrorOutcome: retry → ApplyOnError
+//	            │           (errorpolicy.go; four strategies: stop /
+//	            │           error_output / main_output / continue) → classify
+//	            │           → terminal committer
+//	            ├─ node has a projected body ────► strategy.commitExpand
+//	            │        ├─ legacy:  ClaimTaskLease → expandLoopSplit
+//	            │        └─ acyclic: refuseAcyclicExpansion (backstop, not a
+//	            │                    second decision about what expands)
+//	            └─ otherwise ───────────────────► strategy.commitNode (success)
+//	                                         │
+//	      terminal committers
+//	            ├─ cyclic:  planCyclicDownstream (reads graph, no IO)
+//	            │           → CommitLeasedNode (fenced, +CyclicOutbox)
+//	            └─ acyclic: AtomicStateStore.CommitNode (fenced)
+//	                          ┌─ LeaseToken check (stale → reject)
+//	                          ├─ persist terminal node status + output
+//	                          ├─ decrement downstream in-degree counter
+//	                          └─ append OutboxEntry for each ready unit
+//	                                         │
+//	                                    FlushOutbox
+//	                                      ┌─ LeaseOutbox → lease each entry
+//	                                      ├─ outboxLeaseKeeper (renews OutboxDeliveryLeaseTTL/3)
+//	                                      ├─ Enqueue / EnqueueDelayed
+//	                                      └─ AckOutbox
 //
 // # Durable outbox and at-least-once delivery
 //
