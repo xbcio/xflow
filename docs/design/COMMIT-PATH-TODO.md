@@ -3,12 +3,20 @@
 2026-08-11 在移除扩展标记键（见 [SUBGRAPH-ENGINE-TODO.md](./SUBGRAPH-ENGINE-TODO.md)）时
 顺带查实的结构问题。
 
-**仍开放的条目**：「可能的收敛形状」节描述的去重重构（删掉 `commitAcyclicNodeError`/
+**仍开放的条目**：~~「可能的收敛形状」节描述的去重重构（删掉 `commitAcyclicNodeError`/
 `commitLegacyNodeError` 的逐字重复）。所有阻塞问题（待决问题 1-3）已于 2026-08-14
-全部答出；重构现在可以直接做，无需再等任何前提条件。
+全部答出；重构现在可以直接做，无需再等任何前提条件。~~ **已于 2026-08-30（`62d68a0`）完成**，
+现在仍开放的只剩同一节里的**入口合一**（`taskResultExpands` 分流）。
+
+> 上面加删除线的两句是本文档最早把「错误分支去重」标记为仍开放的地方。正文（「可能的
+> 收敛形状」「已关闭（保留索引）」两节）早就记录它在
+> `refactor(engine): extract shared node error commit pipeline`（`62d68a0`，2026-08-30）
+> 里做完了，但抬头没跟着改，于是抬头与正文自相矛盾。保留原话而不是直接删掉，是因为只看
+> 抬头这几句的人需要知道这里曾经断言过什么、又是怎么被更正的。
 
 **已关闭的条目**（本文件其余各节均为已关闭）：`CommitNodeRequest.Fatal` 一字段两义、
-后端猜图类型静默丢下游、cyclic × suspend 零覆盖、失败原因读回面只有 SQL 审计行。
+后端猜图类型静默丢下游、cyclic × suspend 零覆盖、失败原因读回面只有 SQL 审计行、
+错误分支重复（`commitAcyclicNodeError`/`commitLegacyNodeError`）。
 
 触发它变重要的外部事件：**漏洞审批流将对接 cyclic 模式，且走分布式部署**。在此之前
 cyclic 是有测试无生产流量的路径；对接之后它承重。
@@ -36,7 +44,7 @@ legacy 上的只剩 cyclic 与扩展。
 | `commitAcyclicTaskResult` / `commitLegacyTaskResult` | 仅扩展分支不同（一边 claim + `expandLoopSplit`，一边报错做 backstop） |
 | `commitAcyclicNodeWithClassification` / `commitLegacyNodeWithClassification` | 真的不同，见下 |
 
-而且结构本身在自证重复：`commitLegacyNodeWithClassification`（`engine/commit.go:189`）
+而且结构本身在自证重复：`commitLegacyNodeWithClassification`（`engine/commit.go:255`）
 第一行就是
 
 ```go
@@ -112,7 +120,7 @@ local 侧同形：`entry.snap.Graph != nil && !entry.snap.Graph.AllowCycles()`�
   图上播种（local `memory_state.go:117-120`；rstate `state_execution.go:151` 与
   `entry_admission.go:162`），Redis 于是把它建成 -1 → `remaining <= 0` → **误判执行完成**。
 
-修法：`engine` 本来就握着图（`commit.go:53`/`:80`/`:189` 三处路由都在读
+修法：`engine` 本来就握着图（`commit.go:56`/`:137`/`:169`/`:269` 四处路由都在读
 `g.AllowCycles()`），把它直接放进请求，后端不再推导。承重测试各后端一条，均已反向复验
 （改回旧推导即红，失败形态正是「OutboxIDs 为空」）：
 
