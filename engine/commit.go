@@ -183,60 +183,39 @@ func (e *Engine) CommitTaskFailure(ctx context.Context, lease *TaskLease, failur
 // Ordinary terminal transitions use a backend-owned token fence directly,
 // avoiding a long-lived committing state. Suspend and expansion retain the
 // explicit claim protocol because they have additional coordination state.
+//
+// The verdict sequence itself lives in commitTaskResultWithStrategy, shared
+// with commitAcyclicTaskResult; this function only names the three steps where
+// the legacy path differs.
 func (e *Engine) commitLegacyTaskResult(ctx context.Context, lease *TaskLease, g *graph.Graph, result TaskResult) (CommitOutcome, error) {
-	task := &lease.Task
-	meta := g.NodeAt(task.NodeIdx)
-	if result.Error != nil || (result.Output != nil && result.Output.Error != nil) {
-		var businessErr *types.Error
-		if result.Output != nil {
-			businessErr = result.Output.Error
-		}
-		return e.commitLegacyNodeError(ctx, lease, meta, result.Error, result.Output, businessErr)
-	}
-	if retryErr := outputPortRetryError(result.Output); retryErr != nil {
-		retried, err := e.tryRetryWithAttempt(ctx, task, meta, retryErr, lease.Attempt, lease.LeaseToken)
-		if err != nil {
-			return CommitOutcomeTransientError, fmt.Errorf("retry node %q/%q: %w", task.ExecutionID, task.NodeName, err)
-		}
-		if retried {
-			// Mirror commitLegacyNodeError / the acyclic path: record a retry
-			// evidence receipt so the runtime evidence buffer does not drop a
-			// retry event on the cyclic error-port retry branch.
-			e.publishRetryReceipt(ctx, task, lease.Attempt)
-			return CommitOutcomeAccepted, nil
-		}
-		// Retry budget exhausted: the explicit error-port output is a terminal
-		// failure. Apply the node's OnError strategy rather than committing it
-		// as a success on the error port.
-		return e.commitLegacyNodeError(ctx, lease, meta, retryErr, result.Output, nil)
-	}
+	return e.commitTaskResultWithStrategy(ctx, lease, g, result, taskResultCommitStrategy{
+		commitError:  e.commitLegacyNodeError,
+		commitExpand: e.expandLegacyTaskResult,
+		commitNode:   e.commitLegacyNode,
+	})
+}
 
-	data := map[string]any{}
-	if result.Output != nil && result.Output.Data != nil {
-		data = result.Output.Data
+// expandLegacyTaskResult is the legacy path's commitExpand step, and unlike its
+// acyclic counterpart (refuseAcyclicExpansion) it is the real protocol: claim
+// the lease, short-circuit a node a prior attempt already terminalized, then
+// hand the payload to expandLoopSplit. The parent node is deliberately NOT
+// committed terminal here — the expansion barrier does that once the children
+// finish.
+func (e *Engine) expandLegacyTaskResult(ctx context.Context, lease *TaskLease, g *graph.Graph, data map[string]any) (CommitOutcome, error) {
+	node, claimed, err := e.state.ClaimTaskLease(ctx, lease)
+	if err != nil {
+		return CommitOutcomeTransientError, err
 	}
-	if expandsIntoSubExecutions(g, task.NodeIdx) {
-		node, claimed, err := e.state.ClaimTaskLease(ctx, lease)
-		if err != nil {
-			return CommitOutcomeTransientError, err
-		}
-		if !claimed {
-			return CommitOutcomeStaleToken, ErrInvalidLeaseToken
-		}
-		if types.IsTerminalNodeStatus(node.Status) {
-			return CommitOutcomeDuplicateTerminal, nil
-		}
-		if err := e.expandLoopSplit(ctx, lease, g, data); err != nil {
-			return CommitOutcomeTransientError, err
-		}
-		return CommitOutcomeAccepted, nil
+	if !claimed {
+		return CommitOutcomeStaleToken, ErrInvalidLeaseToken
 	}
-
-	port := "main"
-	if result.Output != nil && result.Output.Port != "" {
-		port = result.Output.Port
+	if types.IsTerminalNodeStatus(node.Status) {
+		return CommitOutcomeDuplicateTerminal, nil
 	}
-	return e.commitLegacyNode(ctx, lease, types.NodeStatusSuccess, data, port, "", false)
+	if err := e.expandLoopSplit(ctx, lease, g, data); err != nil {
+		return CommitOutcomeTransientError, err
+	}
+	return CommitOutcomeAccepted, nil
 }
 
 func (e *Engine) commitLegacyNodeError(ctx context.Context, lease *TaskLease, meta graph.NodeMeta, systemErr error, output *types.Output, businessErr *types.Error) (CommitOutcome, error) {
