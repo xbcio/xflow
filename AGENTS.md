@@ -67,12 +67,22 @@ places:
 Both are gitignored, so these documents never enter version control. They are
 process artifacts, not published material.
 
-Do not create a third location. `.claude/specs/`, `.claude/plans/`, and
-`docs/superpowers/` are historical paths that have been consolidated into the
-two above; their ignore rules survive only to catch a tool that still writes
-the old path. Do not put these documents under `docs/design/`, which is
-reserved for human-maintained architecture docs that ARE tracked, alongside
-user-facing references (`docs/dsl-samples/`, `docs/references/`).
+Do not create a third location. Six of them had accumulated before the
+2026-09-10 consolidation — `.claude/specs/`, `.claude/plans/`,
+`.claude/docs/specs/`, `.claude/decisions/`, `.claude/superpowers/{specs,plans}`
+(with a nested `superpowers/superpowers/` copy), and
+`docs/superpowers/{specs,plans,notes}`. Their ignore rules survive only to
+catch a tool that still writes an old path. Do not put these documents under
+`docs/design/`, which is reserved for human-maintained architecture docs that
+ARE tracked, alongside user-facing references (`docs/dsl-samples/`,
+`docs/references/`).
+
+Two things are deliberately not swept into these directories. An ADR is a
+durable public record of a decision the code now embodies, not a process
+artifact: ADRs are tracked, live in `docs/design/`, and are named
+`ADR-<id>-<topic>.md`. And `.claude/superpowers/sdd/` is per-run execution
+scratch owned by the orchestration tooling (task briefs, review diffs, the
+progress ledger a run resumes from); it stays where the tooling expects it.
 
 One consequence worth stating: whoever clones this repository does not get
 `docs/specs/` or `docs/plans/`, so a tracked file citing a path under them
@@ -80,13 +90,15 @@ gives that reader a dead link. Do not add new such citations; when tracked
 code or a tracked doc needs to lean on one of these documents, promote the
 content it needs into the tracked file itself.
 
-Known outstanding violations, not yet resolved: `docs/design/RELEASE-GATES.md`
-leans on a `docs/specs/` roadmap for its P0 Exit Gate criteria (marked inline),
-and ten comments in production Go and the Makefile still cite four specs
-(`lua-concurrency-tests.md`, `resource-pool.md`, `dual-write-contract.md`,
-`handler-version.md`) that `06ed35c` deleted outright — those pointers have
-resolved to nothing since then and need their content recovered from history
-or the comment rewritten.
+Known outstanding violations: nine comments in production Go and tests cite
+five specs and plans that exist in a working tree but never ship — for example
+`module_artifact.go` and three test files on the artifact-namespace
+authorization design. Unlike the ten pointers that `06ed35c` had left
+resolving to nothing (since repaired by inlining the rule each comment
+borrowed, or dropping the citation where the prose was already complete),
+these nine still resolve for whoever has the file. That makes them the milder
+failure and the easier one to leave alone; they are dead links all the same
+for anyone who clones.
 
 ## Git Commits
 

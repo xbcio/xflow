@@ -59,11 +59,13 @@ docs/plans.worktrees
 docs/specs/
 docs/plans/
 
-# 历史位置，目录已清空并迁入 docs/specs|plans。规则保留，防止旧工具或旧
-# 会话按老路径写入时悄悄入库。
+# 历史位置，目录已清空并迁入 docs/specs|plans（ADR 迁入 docs/design）。规则
+# 保留，防止旧工具或旧会话按老路径写入时悄悄入库。
 docs/superpowers
 .claude/plans/
 .claude/specs/
+.claude/docs/
+.claude/decisions/
 .worktrees/
 bin/
 data/
