@@ -47,7 +47,7 @@ xflow 采用分层发布门槛，不再用单个测试替代完整 release gate�
 
 ## 2. 达成状态
 
-> **状态口径（2026-08-27）**：下方带日期的 G0/G1 闭合记录只签署当时的 clean-SHA 候选，历史闭合事实继续有效；后续代码变化不会自动继承该签署。当前候选必须按 `docs/specs/2026-08-24-xflow-completion-roadmap-todo.md` P0.6 / P0 Exit Gate，在同一 clean SHA 重新签出 G0/G1 evidence 后，才能宣称该候选通过。**该路径被 `.gitignore` 忽略、不随仓库分发**，所以本节引用的 P0 Exit Gate 判据对 clone 本仓库的人不可见——这条依赖是既有缺口，真正的修法是把判据本身抄进本文件。
+> **状态口径（2026-08-27）**：下方带日期的 G0/G1 闭合记录只签署当时的 clean-SHA 候选，历史闭合事实继续有效；后续代码变化不会自动继承该签署。当前候选必须按本文档「Clean-SHA 重签规程与 P0 Exit Gate」一节，在同一 clean SHA 重新签出 G0/G1 evidence 后，才能宣称该候选通过。
 
 > **2026-07-24 重签（以此为准，覆盖 2026-07-23 复审回退）**：已按修订版设计 §14.3 顺序完成重实现并验真——EventID 改 crypto/rand UUIDv4（跨进程唯一）；raw runtime event 以 `CollectedRuntimeEvidenceEvent`+`EvidenceRecordMeta` 包络（verifier 校验 `Meta.ExecutionID==Event.ExecutionID`）；`make test-g0-evidence-required` run_id 改随机 UUIDv4（非 commit SHA）；运行时查询 Redis `INFO server`/MySQL `SELECT VERSION()` 写入 typed `environment_observations`；verifier 强制 `relevant_tree_clean==true`（不再 mismatch-only）、environment 非空且来自 typed record 且一致、`required_rows==observed_rows>0`、`suite_records` 非空（由 test2json 流解析）、A0 每场景 `handler_invocations>0` 且引用 counter snapshot（OSKillSIGKILL phase-B 例外改 `system_task_delivery>=1`）、`run_identity` 一致性、`looksLikeCommitSHA` 拒绝 SHA 作 run_id；A0 commit-then-flush 改真 counting handler + 生产 commit 路径（非 direct `BuildTaskLease+CommitTaskResult`）、删固定 `QueueDeliveries:1`/`RecoveryTimeMS:0`/自报 `Pass:true`/synthetic os-kill artifact 行；A3 `db_deadlock`→`db_lock_wait`（MySQL 1205 lock-wait-timeout）命名修正（local-fake 真 1213 保留 `db_deadlock` 独立 contract）；新增 11 个 adversarial verifier 负例。在新 clean SHA `a75c483` 重跑 `make test-g0-evidence-required` verifier PASS：`environment{redis=8.6.2,mysql=9.7.1}`（运行时查询非空）、`suite{exit=0,skip=0,dropped=0,required_rows=20,observed_rows=20}`、`raw.suite_records` 非空、20 derived（5 A0 + 15 A3）、5 A0 `handler_invocations` 实测（commit-then-flush=1 / queue-handoff=2 / ack-loss=1 / request-loss=6 / os-kill-sigkill=0+system_task_delivery 协议观测 + accepted_commit/applied_advance receipt）、`source.commit_sha=a75c483`、`source.relevant_tree_clean=true`、`source_recomputed=true`、`suite_recomputed=true`、`verification.passed=true`、sidecar SHA-256 digest 匹配。§9.1 `go build ./...` + `go vet ./...` + engine/control/runner `-race` 全绿。G0 重新标为本地 PASS（evidence artifact 绑定 SHA `a75c483`，即 gate 运行时的 relevant-tree-clean 提交；后续 docs/cleanup commit 不在 `RelevantSourcePaths` 内，不改变 evidence 语义，故不以 HEAD SHA 为准）。**2026-07-24 Minor 清理后重跑**：解决最终审查 5 个非阻塞 Minor（checkA0 counter `HandlerName` introspection 关闭既有信任边界、删 `required_rows<=0` 死守卫、`checkEnvironmentIntegrity` 跨 run 过滤与 `recomputeEnvironment` 一致、`newRuntimeEventID` 简化为无参以符 spec §4.3.1、docs "current SHA" 措辞修正），在 SHA `5370565` 重跑 `make test-g0-evidence-required` verifier PASS，A0 counter `handler_name` 实测匹配 production delegate（commit-then-flush=`test.fault` / ack-loss=request-loss=`test.a0.start` / queue-handoff=`queue-handoff-consumer`，OSKillSIGKILL 仍走 `system_task_delivery`），artifact 绑定 `03c079c`（`test/integration/testdata/evidence/evidence-aee46488-e7e9-4cd2-879c-27d8b72bfd71.json` 中 `commit_sha=03c079c4c0baca7775038a06471cb191b6cd5e9b`、`verification.passed=true`、`relevant_tree_clean=true`；原 `5370565` 为 2026-07-24 Minor 清理时运行的 SHA，该 docs commit 不在 `RelevantSourcePaths` 内，不影响 evidence 语义）、20/20 rows、suite_records 非空、`verification.passed=true`。external CI/release signoff 仍 pending（§14.3 step 7）。下文 2026-07-23 复审回退与 `ca8ff0b` 表述均为历史记录，状态以此 2026-07-24 重签为准。
 
@@ -123,6 +123,27 @@ G2 control-plane HA 的承诺范围与限制（映射 §4 反声明，在 G2 整
 | 项 | 状态 | 说明 |
 |---|---|---|
 | D1 采集与审批工作流分离 | 🟡 架构/采样就绪，容量基线未完成 | 两条独立参考架构、`make perf-sample`、p50/p95/p99 和结构化 `perf.metric` 已实现；`.github/workflows/perf-sample.yml` 已配置每日/手动非门槛采样与 artifact 上传，但当前 release evidence 未附可核验成功 run/artifact。受控 host 报告仍是空模板；**两拓扑多样本报告填实前只能称“架构与采样准备完成”**。审批始终使用 durable mode，不得用 transient 数据承诺审批产能 |
+
+### Clean-SHA 重签规程与 P0 Exit Gate
+
+> 本节是上文「状态口径」与各 G0/G1 历史闭合记录中「clean-SHA 重签」引用的判据来源。任一带日期的 G0/G1 闭合只对当时签出的 clean SHA 有效；新候选要重新宣称 G0/G1 通过，必须先完成下述重签规程，并使该 clean SHA 同时满足 P0 Exit Gate。
+
+**重签规程**（新候选宣称 G0/G1 通过前必须完成）：
+
+1. 目标 SHA 必须是独立 clean worktree：不与并发会话共享同一 Redis/MySQL 实例、不复用固定 artifact 路径，避免 worktree 因并发写入而非 clean、或 evidence 被交叉污染；
+2. 在该 clean SHA 上运行并重新签出 G0 evidence verifier（`make test-g0-evidence-required`）；
+3. 在同一 clean SHA 上重跑：默认测试、required integration、G0/G1 evidence target（`make test-g0-evidence-required` / `make test-g1-evidence-required`）、核心 API 定向 race、OpenAPI 校验与 Web CI；
+4. 产出的 artifact 必须记录：commit SHA、`dirty=false`、Go 1.25 工具链版本、环境拓扑与结果摘要。
+
+**P0 Exit Gate**（在上述重签之外，同一 clean SHA 还须满足以下全部条件，才能整体判定 P0 通过、进而使 G0/G1 候选可宣称过闸）：
+
+- clean worktree；
+- Go build/vet/非 race 与默认 race gate 全绿；
+- API `PUT` identity 与 `/readyz` 语义全绿；
+- durable activation projection 的 outbox/recovery 已在同一 clean SHA 上验证；
+- Web CI 全绿；
+- required 真实 integration 全绿（无 skip）；
+- G0/G1 artifacts 绑定同一 clean SHA。
 
 ## 3. G1 部署承诺与限制
 
