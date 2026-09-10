@@ -33,9 +33,8 @@ const runnerIDHeaderName = "X-Xflow-Runner-Id"
 // namespace.FromContext). The server
 // (service/apiserver/module_artifact.go) trusts this declaration only when
 // its own runner-protocol authenticator is configured AND the declared
-// namespace is present in the caller's RunnerPolicy.AllowedNamespaces — see
-// docs/specs/2026-08-30-runner-artifact-namespace-authorization-design.md
-// §5. Exported so the server package references the exact same constant
+// namespace is present in the caller's RunnerPolicy.AllowedNamespaces.
+// Exported so the server package references the exact same constant
 // instead of re-typing the literal.
 const NamespaceHeader = "X-Xflow-Namespace"
 
