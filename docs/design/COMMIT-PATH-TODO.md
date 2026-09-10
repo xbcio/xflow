@@ -6,17 +6,24 @@
 **仍开放的条目**：~~「可能的收敛形状」节描述的去重重构（删掉 `commitAcyclicNodeError`/
 `commitLegacyNodeError` 的逐字重复）。所有阻塞问题（待决问题 1-3）已于 2026-08-14
 全部答出；重构现在可以直接做，无需再等任何前提条件。~~ **已于 2026-08-30（`62d68a0`）完成**，
-现在仍开放的只剩同一节里的**入口合一**（`taskResultExpands` 分流）。
+~~现在仍开放的只剩同一节里的**入口合一**（`taskResultExpands` 分流）~~ **已于 2026-09-10
+（`b591a0e`/`d3cf8cd`）完成**。本文件目前没有仍开放的条目。
 
 > 上面加删除线的两句是本文档最早把「错误分支去重」标记为仍开放的地方。正文（「可能的
 > 收敛形状」「已关闭（保留索引）」两节）早就记录它在
 > `refactor(engine): extract shared node error commit pipeline`（`62d68a0`，2026-08-30）
 > 里做完了，但抬头没跟着改，于是抬头与正文自相矛盾。保留原话而不是直接删掉，是因为只看
 > 抬头这几句的人需要知道这里曾经断言过什么、又是怎么被更正的。
+>
+> 2026-09-10 同一个抬头又晚了一步：「入口合一」在
+> `refactor(engine): merge the two task-result commit entries into one`（`b591a0e`）里
+> 做完后，这里仍写着「仍开放」，直到本次一并订正——实际修法与三条裁定见「可能的收敛
+> 形状」节末尾的引用块。
 
 **已关闭的条目**（本文件其余各节均为已关闭）：`CommitNodeRequest.Fatal` 一字段两义、
 后端猜图类型静默丢下游、cyclic × suspend 零覆盖、失败原因读回面只有 SQL 审计行、
-错误分支重复（`commitAcyclicNodeError`/`commitLegacyNodeError`）。
+错误分支重复（`commitAcyclicNodeError`/`commitLegacyNodeError`）、入口合一
+（`commitAcyclicTaskResult`/`commitLegacyTaskResult`）。
 
 触发它变重要的外部事件：**漏洞审批流将对接 cyclic 模式，且走分布式部署**。在此之前
 cyclic 是有测试无生产流量的路径；对接之后它承重。
@@ -44,14 +51,19 @@ legacy 上的只剩 cyclic 与扩展。
 | `commitAcyclicTaskResult` / `commitLegacyTaskResult` | 仅扩展分支不同（一边 claim + `expandLoopSplit`，一边报错做 backstop） |
 | `commitAcyclicNodeWithClassification` / `commitLegacyNodeWithClassification` | 真的不同，见下 |
 
-而且结构本身在自证重复：`commitLegacyNodeWithClassification`（`engine/commit.go:255`）
-第一行就是
+而且结构本身在自证重复：`commitLegacyNodeWithClassification`（`engine/commit.go:234`）
+~~第一行就是~~ 开篇其实先是 `loadActiveGraph`（`:236`）与 `!active` 检查，**真正的第一个
+判据**才是
 
 ```go
-if !g.AllowCycles() {
+if !g.AllowCycles() {   // engine/commit.go:248
     return e.commitAcyclicNode(...)   // 折回新路径
 }
 ```
+
+——这处更正与「可能的收敛形状」节的第一条裁定互相印证：正因为真正的第一行是
+`loadActiveGraph` 这次 liveness 探测，把终态/错误提交器收敛到 legacy 那份才会给每个
+无环提交加回它。
 
 即**走进 legacy 的无环图，提交那一步又回到 acyclic**。所谓两条路，实际是「一条主路 +
 一个 cyclic 分叉」，外面却各包了一套完整且逐字重复的前置逻辑。
@@ -245,7 +257,7 @@ script」），且 `terminalExecutionError` 让 `CyclicFinalError` 优先于节�
 `WaitDone` 与 `Inspect` 两条路径给出**相同**原因，并反向断言没有任何节点携带 error
 （那正是本场景成立的前提）。
 
-## 可能的收敛形状（错误分支已收敛，入口合一仍开放）
+## 可能的收敛形状（错误分支已收敛，~~入口合一仍开放~~ 已修）
 
 三层：入口合一，扩展分支用 `taskResultExpands` 分流（判据已在 2026-08-11 下沉为编译期
 可答，前提具备）；错误分支删掉零差异的那一份；`...WithClassification` 保留两个实现，
@@ -258,20 +270,50 @@ script」），且 `terminalExecutionError` 让 `CyclicFinalError` 优先于节�
 **错误分支的重复已于 2026-08-30 消除**（`62d68a0`，2026-09-10 复核）。原文此处曾记录
 「`engine/atomic_commit.go:63` 与 `engine/commit.go:213` 两函数逐字相同」——那一段已经
 不再成立，公共前置逻辑（retry + publishRetryReceipt + ApplyOnError +
-buildEffectiveClassification）提取为 `engine/atomic_commit.go:83` 的
+buildEffectiveClassification）提取为 `engine/atomic_commit.go:167` 的
 `commitNodeErrorOutcome`，两个 `...WithClassification` 实现按原计划保留，通过
-`engine/atomic_commit.go:73` 的 `nodeErrorCommitFunc` 作为参数传入。`commitAcyclicNodeError`
-（`engine/atomic_commit.go:63`）与 `commitLegacyNodeError`（`engine/commit.go:242`）现在
+`engine/atomic_commit.go:152` 的 `nodeErrorCommitFunc` 作为参数传入。`commitAcyclicNodeError`
+（`engine/atomic_commit.go:142`）与 `commitLegacyNodeError`（`engine/commit.go:221`）现在
 各自只剩一行委托。
 
-三层里仍未做的是**入口合一**（`taskResultExpands` 分流）；`...WithClassification` 保留
-两份是设计结论，不是欠账。
+三层里~~仍未做的是**入口合一**（`taskResultExpands` 分流）~~ **已于 2026-09-10（`b591a0e`）
+完成**；`...WithClassification` 保留两份仍是设计结论，不是欠账。
+
+> **已修**，见 `refactor(engine): merge the two task-result commit entries into one`
+> （`b591a0e`）及其配套的文档同步提交 `refactor(engine): sync commit-path docs with the
+> merged entry`（`d3cf8cd`）。新增 `taskResultCommitStrategy`（`engine/atomic_commit.go:75`，
+> 三字段 `commitError`/`commitExpand`/`commitNode`）与两条路共享的判定序列
+> `commitTaskResultWithStrategy`（`engine/atomic_commit.go:87`：error 分支 → error-port
+> retry 分支 → data 提取 → 扩展分支 → 终态成功提交）。`commitAcyclicTaskResult`
+> （`engine/atomic_commit.go:20`）与 `commitLegacyTaskResult`（`engine/commit.go:190`）现在
+> 各自退化成「构造 strategy + 委托」，函数名、签名、调用点都没变。acyclic 侧的 backstop
+> 提成命名方法 `refuseAcyclicExpansion`（`engine/atomic_commit.go:41`）；legacy 侧的真扩展
+> 协议提成 `expandLegacyTaskResult`（`engine/commit.go:204`）。
+>
+> 保留原文而不是直接删掉，是因为下面三条裁定是这次合并**为什么长成这个样子**的唯一记录，
+> 读不到它们的人很容易在下次重构里把它们当冗余拆掉：
+>
+> - **终态提交器与 error 提交器必须是参数，不得收敛到 legacy 那一份。**
+>   `commitLegacyNodeWithClassification`（`engine/commit.go:234`）开头就是
+>   `loadActiveGraph`（`:236`），收敛过去等于给每个无环提交加回一次 liveness 探测——正是
+>   提交 `abaacdf` 拆掉的东西。守卫：`engine/commit_status_probe_test.go` 的
+>   `TestAcyclicCommitDoesNotProbeExecutionStatus`。
+> - **共享序列里的扩展判断保留 `expandsIntoSubExecutions`，没有换成 `taskResultExpands`。**
+>   走到那一行时 error 与 retry-port 分支都已提前返回，两个谓词只差一个条件
+>   `result.Output == nil`。换过去会同时改两条路：acyclic 侧让 `refuseAcyclicExpansion`
+>   变不可达，legacy 侧把「ClaimTaskLease + 空 data 扩展」变成「按普通成功提交」。
+> - **`refuseAcyclicExpansion` 是可达分支不是死代码。** 带 body 的节点，handler 返回
+>   `(nil, nil)`，就会走到它。守卫：`engine/atomic_commit_backstop_test.go`。顺带记一条
+>   已知疑虑（本次刻意不处理）：它返回 `CommitOutcomeTransientError`，而这个标签也用于
+>   真正的瞬时后端故障、暗示可重试；但 `(nil, nil)` 是确定性的，重试不自愈。分类是否
+>   合适留待日后。
 
 ## 已关闭（保留索引）
 
 | 条目 | 关闭时间 | 关闭位置 |
 |---|---|---|
-| 错误分支重复：`commitAcyclicNodeError` / `commitLegacyNodeError` 逐字相同 | 2026-08-30（`62d68a0`） | `engine/atomic_commit.go:73` `nodeErrorCommitFunc`、`:83` `commitNodeErrorOutcome`；两个调用点各剩一行委托 |
+| 入口合一：`commitAcyclicTaskResult` / `commitLegacyTaskResult` 各自退化为构造 strategy + 委托 | 2026-09-10（`b591a0e`/`d3cf8cd`） | `engine/atomic_commit.go:75` `taskResultCommitStrategy`、`:87` `commitTaskResultWithStrategy`；`:41` `refuseAcyclicExpansion`；`engine/commit.go:204` `expandLegacyTaskResult` |
+| 错误分支重复：`commitAcyclicNodeError` / `commitLegacyNodeError` 逐字相同 | 2026-08-30（`62d68a0`） | `engine/atomic_commit.go:152` `nodeErrorCommitFunc`、`:167` `commitNodeErrorOutcome`；两个调用点各剩一行委托 |
 | `CommitNodeRequest.Fatal` 一字段两义 | 2026-08-14 | `engine/atomic.go`（协议文档）；`CommitNodeRequest.Validate()` 交叉校验；`rstate/commit_graph_type_test.go`，`local/commit_graph_type_test.go` |
 | 待决问题 1：cyclic 终局 `Fatal` vs `CyclicComplete` | 2026-08-14 | 保持 `CyclicComplete`；`engine/atomic.go` 写明 `Fatal` 仅剩无环终局义 |
 | 待决问题 2：分布式 × cyclic 成色 | 2026-08-13 | `test/integration/cyclic_reliability_process_test.go`，`test/integration/cyclic_reliability_real_test.go` |
