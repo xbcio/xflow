@@ -184,10 +184,10 @@ func (env *cyclicReliabilityEnv) commitStart(t *testing.T, ctx context.Context, 
 }
 
 // TestCyclicReliabilityRealRedis verifies the A0 production-readiness gap
-// (docs/specs/2026-07-17-server-production-readiness-design.md §A0) against
-// a real Redis instance: durable cyclic outbox retention across queue outages,
-// background OutboxDispatcher auto-replay after process rebuild, fenced
-// duplicate-commit safety, and atomic terminal-branch finalization.
+// against a real Redis instance: durable cyclic outbox retention across
+// queue outages, background OutboxDispatcher auto-replay after process
+// rebuild, fenced duplicate-commit safety, and atomic terminal-branch
+// finalization.
 func TestCyclicReliabilityRealRedis(t *testing.T) {
 	addr := requireRedis(t)
 
