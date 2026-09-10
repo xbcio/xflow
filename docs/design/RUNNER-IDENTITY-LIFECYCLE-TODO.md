@@ -57,7 +57,12 @@
 
 ## 待办
 
-按「不做会怎样」排序。
+按「不做会怎样」排序。**六条现已全部结案**——§4 只结了「过期」那一半（可复用是刻意保留的，
+理由见下方「已知且接受的代价」中同名条目），§6 结的方式是加守卫而不是消除披露（那条披露
+本身是 `list_global` 这个 scope 的用途，不是缺陷）。
+
+六条都保留了原文。留着不是为了存档：修法只说做了什么，原文说的是那个洞为什么值得堵——
+读不到后者的人，很容易在下一次重构里把守卫当成冗余而删掉。
 
 ### 1. ~~吊销端点没有 per-namespace 隔离（跨租户 DoS 通道）~~ 已修
 
@@ -131,12 +136,12 @@
 wrap 一层，`ErrAuthUnknownToken` 仍是唯一 `errors.Is` 可匹配的身份，`authDeny` 返回的
 `ErrUnauthenticated` 常量一个字节都不变。
 
-### 3. ~~`runServer` 零测试覆盖（本计划扩大了它）~~ 已修（部分）
+### 3. ~~`runServer` 零测试覆盖（本计划扩大了它）~~ 已修
 
-> **已修（部分）**，见 `refactor(server): extract buildServerOptions from runServer` /
+> **已修，分两轮。第一轮**见 `refactor(server): extract buildServerOptions from runServer` /
 > `test(server): guard the --runner-identity-ttl wiring hop`。本条保留原文，因为它记录了
-> 缺口的完整形状，而修法只补上了其中一跳——读不到原文的人会以为「有测试了」就等于
-> 「`runServer` 被测过了」，那不是本次做的事。
+> 缺口的完整形状，而第一轮只补上了其中一跳——读不到原文的人会以为「有测试了」就等于
+> 「`runServer` 被测过了」，那不是第一轮做的事。
 >
 > **缺口的实际形状是两头有覆盖、中间没有：** `TestParseServerConfigRunnerIdentityTTLFlag`
 > （`cmd/server/main_test.go`）早就证明了 `--runner-identity-ttl` 落到
@@ -160,10 +165,45 @@ wrap 一层，`ErrAuthUnknownToken` 仍是唯一 `errors.Is` 可匹配的身份�
 > `-runner-identity-ttl` 后断言 `ExpiresAt` 为空，防止把 TTL 硬编码成 24h 也能通过主用例。
 > 三处定向变异（改接别的字段 / 删掉整行 / 硬编码 24h）逐一验证过会让对应用例变红。
 >
-> **`runServer` 本身仍然没有被任何测试整体调用过**——本次只守住了选项装配这一段
+> **`runServer` 本身仍然没有被任何测试整体调用过**——第一轮只守住了选项装配这一段
 > （`buildServerOptions`）。`runServer` 剩下的部分（logger/tracer/认证器/store 的构造、
 > production 门禁触发前的分支选择、`NewServer` 调用之后的 HTTP/gRPC 启动与优雅关闭）
 > 仍然只有编译期保证。下一次有人往 `runServer` 里加接线，这条覆盖不会自动跟上。
+>
+> **第二轮把这一段也补上了**，见 `refactor(server): root runServer's signal context in a caller ctx`
+> 与 `test(server): add the first tests that call runServer itself`。
+>
+> 挡路的从来不是「测试难写」，而是两处具体的不可驱动：`runServer` 自己造
+> `signal.NotifyContext(context.Background(), ...)`，外部没有任何办法取消它；而
+> `srv.Run(ctx)` 会真绑两个端口并阻塞。修法是把 ctx 提成参数、让 signal context 挂在
+> 它下面。`main` 传 `context.Background()`——永不取消，所以生产的关闭仍然只由
+> SIGINT/SIGTERM 驱动，行为一个字节没变；测试传一个可取消的 ctx，就能驱动同一条优雅
+> 关闭路径，而不必给测试进程发真信号。
+>
+> 两条用例（`cmd/server/run_server_test.go`）都从真实 argv 出发，各走 `xflowsdk.NewServer`
+> 的一条出口：
+>
+> - **起得来、关得掉**——`-mode dev -memory -management` 真绑 loopback 端口，轮询
+>   `/readyz` 直到 `"ready":true`（不是睡一个猜的间隔；`/readyz` 是 apiserver 唯一对外的
+>   就绪信号，且只住在 management 模块里，`-management` 因此是必需的），然后 cancel，
+>   断言返回值**恰好是 nil**。不是「nil 或 `context.Canceled`」：`main` 对非 nil 会
+>   `log.Fatal`，把取消本身当错误返回就等于让每次正常 SIGTERM 都以失败退出。
+> - **production 门禁**——`-mode production` 缺 `--auth-tokens-file` 与 `--mysql-dsn`，
+>   断言错误里点名这两个 flag。apiserver 自己的 `ProductionGateError` 只说「production
+>   posture not met」、一个 flag 名都不提，所以断言 flag 名正是在证明 `runServer` 仍然把
+>   这个错误路由过 `explainProductionGate`——拿到裸错误的运维知道缺什么，但不知道该敲什么。
+>
+> 端口一律由内核分配（先绑 `:0` 读出地址再放掉，交给服务端），不硬编码——`apiserver.Run`
+> 把配置地址直接交给 `ListenAndServe`、从不公布实际拿到的地址，所以只能这样先占后放。
+> 代价是一个固有的 TOCTOU 竞态，用三次换地址重试兜住，而不是让它偶发变红。
+>
+> 五处定向变异逐一验证过。其中「把 `explainProductionGate(err)` 换成 `return err`」只让
+> 新的门禁用例变红、既有的 `TestExplainProductionGateNamesFlags` 保持绿——这个**唯一性**
+> 才是这条覆盖确实补了新洞、而不是重复既有覆盖的证据。
+>
+> **仍然没被覆盖的两处，不要读成「`cmd/server` 已经测全了」：** `main()` 自己不可从测试
+> 驱动（它 `log.Fatal`），以及 `runServer` 里所有非 dev/内存的分支——mysql store、OTLP
+> tracer、文件认证器这些只在生产配置下才构造的路径，仍然只有编译期保证。
 
 `--runner-identity-ttl` flag 一路穿过 `runServer` 接到 Core 字段，而 `runServer` 本身在此
 之前就没有任何测试覆盖，本次也没有为它新增。
@@ -241,7 +281,29 @@ if rc, start, warnMsg, warnErr := decideIdentityRenewal(cfg, store); warnErr != 
 `go startIdentityRenewal(...)` 整行删掉，三种变异都能让对应用例变红，随后各自还原并重新
 确认全绿。
 
-### 6. 若将来放宽注册码 list 的归属，须重新评估投影
+### 6. ~~若将来放宽注册码 list 的归属，须重新评估投影~~ 已加守卫
+
+> **已加守卫**，见 `test(apiserver): pin what a global registration-code list discloses`。
+> 本条保留原文，因为它是那条守卫为什么存在的**唯一记录**。
+>
+> **先纠正原文的一处事实：那个「将来」不是将来。** `management.registration_code.list_global`
+> 这个 scope（常量 `apiserver.ScopeRegistrationCodeListGlobal`）今天就在代码里，持有它的
+> 调用方现在就能列出全部租户的注册码，连同每条的 `allowed_namespaces`。原文说的
+> 「本次收口后这个问题自然消失」只对**不持**该 scope 的调用方成立。
+>
+> **这不是「已修」，因为它不该被修。** 那个 scope 的全部目的就是一个跨租户的平台视图；
+> 把披露收窄掉等于把 scope 变成一个没有用途的空壳。变的只是它从「没人守」变成「一改就红，
+> 且红里写着为什么」。
+>
+> 新用例种两个不同租户的码（`namespaceA`，以及 `allowed_namespaces` 为
+> `namespaceB-secret-scope` 的 `namespaceB`），用 `list_global` 列出，断言两条都在**且**
+> 外租户那个 scope 名以明文出现在响应体里。它与既有的
+> `TestRegistrationCodeReadsAreNamespaceScoped` 构成一对：非 global 看不见外租户，
+> global 全看得见。两条一起才说清楚投影的形状，单看任何一条都会读成另一种设计。
+>
+> **两个方向的改动都会撞红：** 把 `list_global` 收窄成只返回自己拥有的码，或者从
+> `newRegistrationCodeView` 里删掉 `AllowedNamespaces` 字段。前者破坏这个 scope 的用途，
+> 后者悄悄改变平台视图能看见的东西。失败消息会把人指回本节。
 
 `registrationCodeView` 的列表投影历史上会披露其它租户的 scope。本次收口后这个问题自然消失，
 但该消失依赖于「list 只返回自己拥有的注册码」这条前提。
