@@ -442,13 +442,13 @@ type graphHashPayload struct {
 // particular UnitCount/UnitInDegreeAt, which size the durable Redis
 // remaining/in-degree counters) always matches what Compile would have
 // produced, instead of silently degrading to zero units after a JSON
-// round-trip (see .claude/plans F9).
+// round-trip (see docs/plans F9).
 //
 // Nodes uses wireNodeMeta (not NodeMeta directly) so decode can distinguish a
 // true legacy snapshot (no node carries group_idx/GroupIdx at all — compiled
 // before groups existed) from a modern grouped-or-ungrouped snapshot (every
 // node explicitly carries the field, possibly -1). See T1 in
-// .claude/plans/2026-07-27-node-group-milestone-b.md: a legacy snapshot must
+// docs/plans/2026-07-27-node-group-milestone-b.md: a legacy snapshot must
 // degrade to a 1:1 unit mapping, while a snapshot that already has grouped
 // nodes (some GroupIdx >= 0) but somehow lost its Groups/units data must fail
 // closed instead of silently rebuilding an incorrect ungrouped topology.

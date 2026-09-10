@@ -57,13 +57,36 @@ golangci-lint run        # Lint
 
 ## AI-Generated Documentation Placement
 
-AI-generated/maintained design docs, specs, and review reports go under an
-appropriate `.claude/` subdirectory (e.g. `.claude/specs/`), never under
-`docs/`. `docs/` is reserved for human-maintained architecture docs
-(`docs/design/`) and user-facing references (`docs/dsl-samples/`,
-`docs/references/`). `.claude/` is gitignored, so these docs never enter
-version control; follow the existing `.claude/specs/` naming convention:
-`YYYY-MM-DD-<topic>-design.md`.
+Agent-produced design docs, specs, plans, and review reports go in exactly two
+places:
+
+- `docs/specs/` — designs and specs, named `YYYY-MM-DD-<topic>-design.md`
+- `docs/plans/` — implementation plans and their working notes, named
+  `YYYY-MM-DD-<topic>-plan.md`
+
+Both are gitignored, so these documents never enter version control. They are
+process artifacts, not published material.
+
+Do not create a third location. `.claude/specs/`, `.claude/plans/`, and
+`docs/superpowers/` are historical paths that have been consolidated into the
+two above; their ignore rules survive only to catch a tool that still writes
+the old path. Do not put these documents under `docs/design/`, which is
+reserved for human-maintained architecture docs that ARE tracked, alongside
+user-facing references (`docs/dsl-samples/`, `docs/references/`).
+
+One consequence worth stating: whoever clones this repository does not get
+`docs/specs/` or `docs/plans/`, so a tracked file citing a path under them
+gives that reader a dead link. Do not add new such citations; when tracked
+code or a tracked doc needs to lean on one of these documents, promote the
+content it needs into the tracked file itself.
+
+Known outstanding violations, not yet resolved: `docs/design/RELEASE-GATES.md`
+leans on a `docs/specs/` roadmap for its P0 Exit Gate criteria (marked inline),
+and ten comments in production Go and the Makefile still cite four specs
+(`lua-concurrency-tests.md`, `resource-pool.md`, `dual-write-contract.md`,
+`handler-version.md`) that `06ed35c` deleted outright — those pointers have
+resolved to nothing since then and need their content recovered from history
+or the comment rewritten.
 
 ## Git Commits
 

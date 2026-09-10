@@ -23,7 +23,7 @@ import (
 )
 
 // This file pins the runner-artifact-namespace-authorization design
-// (docs/superpowers/specs/2026-08-30-runner-artifact-namespace-authorization-design.md)
+// (docs/specs/2026-08-30-runner-artifact-namespace-authorization-design.md)
 // §6 tests 1-3, against a real control-plane server backed by real Redis and
 // real MySQL (mirrors embedded_server_artifact_e2e_test.go's harness). Test 4
 // (auth-disabled must not trust the declaration) and test 5 (SetNamespace

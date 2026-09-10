@@ -4,7 +4,7 @@
 交付后未做的事，以及本次刻意不做的事。按「不做会怎样」排序，不按工作量。
 
 **本文件自带背景，因为设计文档不在库里。** 本次的 spec 位于
-`.claude/specs/2026-09-08-registration-code-ceiling-and-identity-lifecycle-design.md`，
+`docs/specs/2026-09-08-registration-code-ceiling-and-identity-lifecycle-design.md`，
 该路径被 `.gitignore` 忽略且从未跟踪——工作区一旦清理，其中的裁定即永久丢失。下面
 「已知且接受的代价」一节是那份 spec §7 的完整转录，不是摘要。
 

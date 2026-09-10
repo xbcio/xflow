@@ -26,7 +26,7 @@ import (
 // the union of namespaces it may ever serve, but any single task lease belongs
 // to exactly one of them, and without this declaration a runner would use its
 // broad principal namespace to read another namespace's artifacts (the gap
-// docs/superpowers/specs/2026-08-30-runner-artifact-namespace-authorization-design.md
+// docs/specs/2026-08-30-runner-artifact-namespace-authorization-design.md
 // exists to close). The declared namespace is trusted ONLY when runnerAuth is
 // a genuinely configured Authenticator (control.IsConfigured) AND that
 // authenticator's AuthenticateOngoing verdict for the caller's runner ID +

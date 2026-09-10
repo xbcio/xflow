@@ -14,7 +14,7 @@ func IsPermanent(err error) bool {
 }
 
 // ErrorKind classifies the source of a failure for retry and routing policy.
-// See .claude/specs/2026-07-17-error-taxonomy-design.md for the full matrix.
+// The four kinds below are the whole taxonomy; each carries its own rule.
 type ErrorKind string
 
 const (

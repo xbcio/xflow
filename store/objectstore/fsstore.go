@@ -76,7 +76,7 @@ type FSStore struct {
 	// task in namespace B on the SAME runner would be served D from disk with
 	// zero requests to origin — silently defeating the server's per-tenant
 	// HasReference check (module_artifact.go) no matter how correct that
-	// check is. See docs/superpowers/specs/2026-08-30-runner-artifact-namespace-authorization-design.md
+	// check is. See docs/specs/2026-08-30-runner-artifact-namespace-authorization-design.md
 	// §2(c)/§5.4. Only that call site sets this field; every other FSStore
 	// construction in this repository leaves it false.
 	PartitionByNamespace bool

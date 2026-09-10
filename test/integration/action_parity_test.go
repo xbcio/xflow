@@ -22,7 +22,7 @@ import (
 )
 
 // action_parity_test.go implements the A3 three-topology action-error parity
-// matrix (.claude/specs/2026-07-18-sdk-server-production-readiness-remediation-design.md
+// matrix (docs/specs/2026-07-18-sdk-server-production-readiness-remediation-design.md
 // §6.4). The same classified-error fixture runs across three topologies:
 //
 //   - local embedded — in-memory backend + engine + embedded dispatcher
