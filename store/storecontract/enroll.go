@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -218,6 +219,73 @@ func RunRegistrationCodeStoreContract(t *testing.T, factory func(t *testing.T) s
 		// much of it is spent — and the exhaustion subtest above would still pass.
 		if got.MaxUses != 3 || got.UseCount != 1 {
 			t.Fatalf("MaxUses/UseCount = %d/%d, want 3/1", got.MaxUses, got.UseCount)
+		}
+	})
+
+	t.Run("concurrent consume cannot overshoot the ceiling", func(t *testing.T) {
+		st := factory(t)
+		const ceiling, workers = 8, 32
+		id, _ := mkCapped(t, st, ceiling)
+
+		// The barrier is the whole point. Started without one, the goroutines
+		// mostly serialize on their own scheduling and the interleaving this
+		// test exists to catch is never even attempted — the test would pass
+		// against a read-then-write implementation and prove nothing.
+		release := make(chan struct{})
+		errs := make([]error, workers)
+		var wg sync.WaitGroup
+		wg.Add(workers)
+		for i := 0; i < workers; i++ {
+			go func(i int) {
+				defer wg.Done()
+				<-release
+				// Each worker owns its own slot, so the test adds no
+				// synchronization of its own between the calls it measures.
+				errs[i] = st.Consume(ctx, id)
+			}(i)
+		}
+		close(release)
+		wg.Wait()
+
+		granted, exhausted := 0, 0
+		for i, err := range errs {
+			switch {
+			case err == nil:
+				granted++
+			case errors.Is(err, store.ErrRegistrationCodeExhausted):
+				exhausted++
+			default:
+				t.Fatalf("worker %d: Consume = %v, want nil or ErrRegistrationCodeExhausted", i, err)
+			}
+		}
+		// This is the assertion the column exists for: a ceiling that only
+		// holds when requests arrive one at a time is not a ceiling. An
+		// implementation that reads the counter and then writes it back —
+		// including one that moved `max_uses = 0 OR use_count < max_uses` out
+		// of SQL and into Go, which the repo comment warns against — grants
+		// more than ceiling here while passing every other subtest above.
+		if granted != ceiling {
+			t.Fatalf("%d of %d concurrent Consume calls were granted, want exactly %d: "+
+				"the read and the increment must be one atomic step, or a leaked code "+
+				"enrolls more runners than its ceiling allows", granted, workers, ceiling)
+		}
+		if exhausted != workers-ceiling {
+			t.Fatalf("%d calls reported exhausted, want %d: every call past the ceiling "+
+				"must be refused for the stated reason, not merely refused", exhausted, workers-ceiling)
+		}
+
+		// The persisted counter must agree with what the callers were told. A
+		// store that granted exactly ceiling uses but recorded a different
+		// number leaves the operator reading a use_count that never matched
+		// how many runners the code actually minted.
+		list, err := st.List(ctx, store.OwnerScope{All: true})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		for _, c := range list {
+			if c.ID == id && c.UseCount != ceiling {
+				t.Fatalf("UseCount = %d after %d concurrent consumes, want %d", c.UseCount, workers, ceiling)
+			}
 		}
 	})
 
