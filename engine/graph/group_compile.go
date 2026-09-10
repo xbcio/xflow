@@ -32,6 +32,9 @@ func compileGroups(g *Graph, def *types.WorkflowDef) error {
 		if err := validateGroupOnError(gd.Name, gd.OnError); err != nil {
 			return err
 		}
+		if err := validateGroupRetry(gd.Name, gd.Retry); err != nil {
+			return err
+		}
 		meta, err := compileOneGroup(g, gd, len(g.groups))
 		if err != nil {
 			return fmt.Errorf("group %q: %w", gd.Name, err)
@@ -78,6 +81,38 @@ func validateGroupOnError(name, onErr string) error {
 			"(only %q, %q, %q are supported on a group)",
 			name, onErr, "", types.OnErrorStop, types.OnErrorContinue)
 	}
+}
+
+// validateGroupRetry rejects GroupDef.Retry outright: no runtime code
+// enforces it.
+//
+// GroupDef.Retry's doc comment (types/group.go) promises "组级 retry = 从入口
+// 整组重跑" (group-level retry means re-running the whole group from its
+// entry), but compileOneGroup only copies the value from GroupDef into
+// GroupMeta (this file, a few lines below) and nothing ever reads
+// GroupMeta.Retry back out. There is no loop that compares the group's
+// attempt count against Retry.MaxAttempts: engine/group_exec.go's own comment
+// on executeGroup says enforcement "belongs to a future milestone" — the
+// group's Attempt is only ever used as a lease fencing token
+// (engine/group_lease.go), never checked against a limit, unlike the
+// node-level path where atomic_commit.go compares attempt against
+// settings.MaxAttempts before allowing another try.
+//
+// Accepting the field and silently ignoring it is the failure mode this
+// rejects, for the same reason validateGroupOnError rejects unimplemented
+// on_error values: an operator who writes `retry: {max_attempts: 3}` on a
+// group gets a clean compile and zero behavior change, and will only
+// discover the group never retries when it fails in production and nobody
+// reran it. A compile error is the cheaper time to find that out.
+func validateGroupRetry(name string, retry *types.RetrySettings) error {
+	if retry == nil {
+		return nil
+	}
+	return fmt.Errorf("group %q: retry is not supported on a group: "+
+		"group-level retry (re-running the whole group from its entry) has no "+
+		"runtime enforcement yet, so this setting would compile but never take "+
+		"effect; configure retry on the individual member node(s) instead",
+		name)
 }
 
 func compileOneGroup(g *Graph, gd types.GroupDef, groupIdx int) (GroupMeta, error) {

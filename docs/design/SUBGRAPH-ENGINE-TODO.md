@@ -602,8 +602,13 @@ group 成员、跑在内层还是外层引擎无关。
 当前代码位置：`service/control/group_control_loop.go:130-153`
 （`ErrGroupLeaseAlreadyActive` 分支；`recoverGroupLease` 失败时若返回
 `ErrGroupLeaseNotActive` 会走 line 152-153 requeue 而非 drop）。
-Milestone B 的占位符在 `engine/group_exec.go:59`（`Attempt: 1` 注释明确标注
-「attempt increment belongs to Milestone B」）。
+Milestone B 的占位符在 `engine/group_exec.go:52-59`。**注意本文此前引用的注释原文
+「attempt increment belongs to Milestone B」在代码里已不存在**——attempt 递增本身早已做完
+（两个后端都在 `AcquireGroupLease` 里回写真实计数，`statestoretest/group_state_contract.go`
+有「连续过期必须精确 +1」的契约测试）。今天那条注释说的是另一回事：留给未来里程碑的是
+`GroupMeta.Retry.MaxAttempts` 的**执行**——耗尽预算时该重派发还是终结执行。
+在它落地之前，group 上配 `Retry` 会被编译期拒绝（`engine/graph/group_compile.go`），
+以免一个零效果的配置让运维以为组会自动重跑。
 
 ### `buildVisibleSupplies` 自身不做授权检查
 
