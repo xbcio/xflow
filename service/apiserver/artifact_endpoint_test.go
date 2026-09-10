@@ -514,8 +514,7 @@ func TestArtifactEndpointOverHTTPStore(t *testing.T) {
 	}
 }
 
-// TestArtifactEndpointAuthDisabledIgnoresDeclaredNamespace is design §6 test 4
-// (docs/specs/2026-08-30-runner-artifact-namespace-authorization-design.md):
+// TestArtifactEndpointAuthDisabledIgnoresDeclaredNamespace is design §6 test 4:
 // a caller declaring X-Xflow-Namespace must NOT be trusted when the module's
 // runnerAuth is not a genuinely configured control.Authenticator -- neither
 // when it is left nil (the zero value newArtifactModule produces) nor when it
