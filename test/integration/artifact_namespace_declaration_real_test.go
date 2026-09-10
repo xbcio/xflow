@@ -22,15 +22,32 @@ import (
 	"github.com/xbcio/xflow/store/objectstore"
 )
 
-// This file pins the runner-artifact-namespace-authorization design
-// (docs/specs/2026-08-30-runner-artifact-namespace-authorization-design.md)
-// §6 tests 1-3, against a real control-plane server backed by real Redis and
-// real MySQL (mirrors embedded_server_artifact_e2e_test.go's harness). Test 4
-// (auth-disabled must not trust the declaration) and test 5 (SetNamespace
-// actually receives lease.Namespace) do not need real infrastructure and live
-// elsewhere: test 5 in execution/runner_test.go
+// This file pins the runner-artifact-namespace-authorization design's §6
+// acceptance set, against a real control-plane server backed by real Redis
+// and real MySQL (mirrors embedded_server_artifact_e2e_test.go's harness).
+// The three cases that need real infrastructure live here:
+//
+//   - test 1, over-privileged read: runner token bound to A, task declaring B,
+//     digest referenced only by A -> must be 404
+//     (TestArtifactDeclaredNamespaceDeniesOverPrivilegedRead).
+//   - test 2, multi-namespace positive control: policy allows both A and B,
+//     task declaring B, digest referenced by B -> must be 200
+//     (TestArtifactDeclaredNamespaceAllowsMultiNamespaceRunner). Without it,
+//     test 1 would also pass for an implementation that denies everything.
+//   - test 3, cache does not cross tenants: the same runner fetches digest D
+//     under A (succeeds), then under B -> must fail with
+//     objectstore.ErrNotFound (HTTPStore's mapping of the server's 404) AND
+//     must actually have reached origin again; without asserting that the
+//     origin hit count went up, the test would be proving something about the
+//     cache rather than about authorization
+//     (TestArtifactRunnerCacheDoesNotCrossNamespaces).
+//
+// Test 4 (auth-disabled must not trust the declaration) and test 5
+// (SetNamespace actually receives lease.Namespace) do not need real
+// infrastructure and live elsewhere: test 5 in execution/runner_test.go
 // (TestRunner_LeaseNamespaceInjectedIntoContext), test 4 as an in-memory
-// apiserver unit test.
+// apiserver unit test (service/apiserver's
+// TestArtifactEndpointAuthDisabledIgnoresDeclaredNamespace).
 
 // newArtifactNamespaceServer builds a real control-plane server whose
 // principal (BearerPrincipalAuth) is bound to principalNS, and whose
