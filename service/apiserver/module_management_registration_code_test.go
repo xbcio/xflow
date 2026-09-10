@@ -626,3 +626,68 @@ func TestCreateRegistrationCodeGlobalRejectsEmptyNamespaces(t *testing.T) {
 		t.Fatalf("stored %d codes, want 0 — the rejected request must not persist anything", len(list))
 	}
 }
+
+// TestListRegistrationCodesGlobalScopeDisclosesForeignAllowedNamespaces pins a
+// DELIBERATE property, not a bug: RUNNER-IDENTITY-LIFECYCLE-TODO.md §6 records
+// that registrationCodeView's list projection has historically disclosed
+// other tenants' scope, that the H1 namespace-scoping fix made this harmless
+// ONLY because "list returns exclusively the codes the caller owns" now holds
+// for every non-_global caller (TestRegistrationCodeReadsAreNamespaceScoped
+// pins that half), and that nothing pinned the other half: a caller holding
+// list_global is intentionally handed every owner's codes, AllowedNamespaces
+// included, in plaintext.
+//
+// This test exists so that the day someone either (a) widens list_global-like
+// visibility to a broader role "for an operations view", or (b) tries to
+// delete AllowedNamespaces from registrationCodeView because it looks like a
+// leak, they hit a red test first — one whose comment already explains why
+// the disclosure is here and what §6 says it costs to remove the "list_global
+// only" guard. It must NOT be "fixed" by narrowing what list_global returns:
+// that scope's entire purpose is a platform-wide view across tenants.
+func TestListRegistrationCodesGlobalScopeDisclosesForeignAllowedNamespaces(t *testing.T) {
+	h := newGlobalRegistrationCodeTestServer(t)
+	defer h.srv.Close()
+
+	// The caller's own namespace (namespaceA, per
+	// newGlobalRegistrationCodeTestServer) gets one code; a different tenant
+	// (namespaceB) gets another, with an AllowedNamespaces value distinctive
+	// enough that finding it in the response body cannot be a coincidence.
+	if err := h.codes.Create(context.Background(), control.RegistrationCode{
+		ID:                "code-tenant-a",
+		CodeHash:          control.HashSecret("plaintext-a"),
+		OwnerNamespace:    "namespaceA",
+		AllowedNamespaces: []string{"namespaceA"},
+		CreatedAt:         time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed namespaceA code: %v", err)
+	}
+	if err := h.codes.Create(context.Background(), control.RegistrationCode{
+		ID:                "code-tenant-b",
+		CodeHash:          control.HashSecret("plaintext-b"),
+		OwnerNamespace:    "namespaceB",
+		AllowedNamespaces: []string{"namespaceB-secret-scope"},
+		CreatedAt:         time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed namespaceB code: %v", err)
+	}
+
+	listBody := h.doJSON(t, http.MethodGet, PathManagementRegistrationCodes, "", http.StatusOK)
+
+	if !strings.Contains(listBody, "code-tenant-a") {
+		t.Fatalf("global list is missing the caller's own code: %s", listBody)
+	}
+	if !strings.Contains(listBody, "code-tenant-b") {
+		t.Fatalf("global list is missing the foreign tenant's code — a list_global "+
+			"caller must see every owner's codes, not just its own: %s", listBody)
+	}
+	// The load-bearing assertion: the foreign code's AllowedNamespaces appears
+	// in plaintext in a global list response. This is the exact cross-tenant
+	// scope disclosure §6 describes, made visible on purpose so the cost of
+	// ever widening list's audience beyond list_global is not invisible.
+	if !strings.Contains(listBody, "namespaceB-secret-scope") {
+		t.Fatalf("global list did not disclose the foreign code's allowed_namespaces: %s\n"+
+			"either newRegistrationCodeView stopped populating AllowedNamespaces, or "+
+			"handleListRegistrationCodes stopped granting list_global the full store — "+
+			"re-read RUNNER-IDENTITY-LIFECYCLE-TODO.md §6 before changing either one", listBody)
+	}
+}
