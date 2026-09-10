@@ -90,15 +90,18 @@ gives that reader a dead link. Do not add new such citations; when tracked
 code or a tracked doc needs to lean on one of these documents, promote the
 content it needs into the tracked file itself.
 
-Known outstanding violations: nine comments in production Go and tests cite
-five specs and plans that exist in a working tree but never ship — for example
-`module_artifact.go` and three test files on the artifact-namespace
-authorization design. Unlike the ten pointers that `06ed35c` had left
-resolving to nothing (since repaired by inlining the rule each comment
-borrowed, or dropping the citation where the prose was already complete),
-these nine still resolve for whoever has the file. That makes them the milder
-failure and the easier one to leave alone; they are dead links all the same
-for anyone who clones.
+No tracked file cites a path under these two directories any more, with one
+deliberate exception: `docs/design/RUNNER-IDENTITY-LIFECYCLE-TODO.md` names
+the spec it came from, but only to say that path is gitignored and the
+rulings are therefore transcribed in full below it. That is the shape to
+copy if you ever need provenance — name the source, say it does not ship,
+and inline what the reader needs.
+
+A related habit survives and is worth knowing about before you follow one:
+several comments cite a bare `design §6.1`, `§4.2`, `§7.1`. These are not
+paths, so they are not dead links, but nothing says which design, and at
+least one (`service/apiserver/module_artifact.go`'s `§6.3`, added in
+`3546d45`) matches no section in any candidate document.
 
 ## Git Commits
 
