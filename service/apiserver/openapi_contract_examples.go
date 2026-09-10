@@ -1,7 +1,10 @@
 package apiserver
 
 import (
+	"time"
+
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -135,13 +138,20 @@ func ExampleRegistrationCodeCreateRequest(namespaces, nodeTypes []string, expire
 // ExampleRegistrationCodeView builds a registrationCodeView (GET
 // /v1/management/registration-codes). Carries neither the plaintext nor the
 // hash, which is the property the schema exists to pin down.
-func ExampleRegistrationCodeView(id, createdAt, expiresAt string, namespaces, nodeTypes []string, revoked bool) any {
-	return registrationCodeView{
+//
+// It takes a domain RegistrationCode and runs it through the handler's own
+// newRegistrationCodeView rather than filling the view's fields directly.
+// That is the whole point: the projection is where nil slices become `[]` and
+// where a zero ExpiresAt becomes an absent key, so an example that bypassed it
+// would validate a shape no handler ever writes — and the nil-slice case,
+// which is the one that broke the contract, would be untestable from here.
+func ExampleRegistrationCodeView(id string, createdAt, expiresAt time.Time, namespaces, nodeTypes []string, revoked bool) any {
+	return newRegistrationCodeView(control.RegistrationCode{
 		ID:                id,
 		AllowedNamespaces: namespaces,
 		AllowedNodeTypes:  nodeTypes,
 		Revoked:           revoked,
 		CreatedAt:         createdAt,
 		ExpiresAt:         expiresAt,
-	}
+	})
 }

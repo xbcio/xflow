@@ -1511,18 +1511,33 @@ components:
       type: object
       description: |
         The scope granted to runners that enroll with the minted code
-        (store.RunnerPolicy), plus the code's own lifetime. All fields are
-        optional; an empty list means "no restriction" and is honored by
-        RunnerPolicy.AllowsNamespace at enroll time.
+        (store.RunnerPolicy), plus the code's own lifetime.
       properties:
         allowed_namespaces:
           type: array
           items:
             type: string
+          description: |
+            Namespaces runners enrolled with this code may join. It is capped
+            by the caller's own namespace grant: naming one outside it is 403.
+
+            Omitting it is NOT "no restriction". A caller holding only
+            `registration_code.create` gets its own namespace filled in; a
+            `registration_code.create_global` holder gets 400, because that
+            principal has no namespace-of-its-own to fall back on and
+            expanding an omission to `*` would be an implicit maximal grant.
         allowed_node_types:
           type: array
           items:
             type: string
+          description: |
+            Node types runners enrolled with this code may execute. `["*"]`
+            means all of them.
+
+            Omitting it is NOT "no restriction" either — it is the opposite.
+            The list is persisted as sent, and `RunnerPolicy.Allows` reports
+            false for every node type when it is empty, so a code minted
+            without this field enrolls runners that can execute nothing.
         expires_in_seconds:
           type: integer
           format: int64
@@ -1563,7 +1578,7 @@ components:
         The list projection of a registration code. Deliberately carries
         neither the plaintext nor its hash: publishing sha256(code) would make
         every code offline-crackable by anyone who can read the list.
-      required: [id, revoked, created_at]
+      required: [id, revoked, created_at, allowed_namespaces, allowed_node_types]
       properties:
         id:
           type: string
@@ -1571,10 +1586,18 @@ components:
           type: array
           items:
             type: string
+          description: |
+            Always present, `[]` rather than `null` when the code grants
+            nothing. Required so a generated client can type it as a plain
+            array; the server normalizes at the projection boundary.
         allowed_node_types:
           type: array
           items:
             type: string
+          description: |
+            Always present, `[]` rather than `null`. An empty list is not "no
+            restriction": `RunnerPolicy.Allows` reports false for every node
+            type, so a runner enrolled with such a code can execute nothing.
         revoked:
           type: boolean
         created_at:

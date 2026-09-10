@@ -247,13 +247,6 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 			// expires" (an explicit 0) stay distinguishable on the wire; a
 			// non-pointer field would collapse them and this case would look
 			// identical to the one above with 0.
-			//
-			// The lists stay non-nil here on purpose. A nil []string marshals
-			// to null, which these array schemas reject — a real, pre-existing
-			// gap on the scope axis (Clone() returns nil for an empty list, so
-			// a code minted with no namespaces really does serialize null).
-			// That gap is not this change's to close; pinning it here would
-			// only bury it inside an expiry test.
 			name:   "registration code create request (no lifetime)",
 			schema: "RegistrationCodeCreateRequest",
 			value: apiserver.ExampleRegistrationCodeCreateRequest(
@@ -264,9 +257,7 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 			name:   "registration code view",
 			schema: "RegistrationCodeView",
 			value: apiserver.ExampleRegistrationCodeView(
-				"rc-01H8XG",
-				now.Format(time.RFC3339),
-				now.Add(24*time.Hour).Format(time.RFC3339),
+				"rc-01H8XG", now, now.Add(24*time.Hour),
 				[]string{"team-a"}, []string{"http.request"}, false,
 			),
 		},
@@ -278,8 +269,23 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 			name:   "registration code view (never expires)",
 			schema: "RegistrationCodeView",
 			value: apiserver.ExampleRegistrationCodeView(
-				"rc-01H8XH", now.Format(time.RFC3339), "",
+				"rc-01H8XH", now, time.Time{},
 				[]string{"team-a"}, []string{"http.request"}, true,
+			),
+		},
+		{
+			// Nil scope lists. This is the shape that broke the contract: the
+			// create handler persists allowed_node_types verbatim and the
+			// field is optional, so a code minted without it holds a nil slice
+			// — which marshals to `null`, not `[]`, and the array schemas
+			// reject it. Both fields are in RegistrationCodeView's required
+			// list, so dropping the projection's normalization fails this case
+			// twice over: null against `type: array`, and (once the key is
+			// gone entirely) a missing required property.
+			name:   "registration code view (nil scope lists)",
+			schema: "RegistrationCodeView",
+			value: apiserver.ExampleRegistrationCodeView(
+				"rc-01H8XJ", now, time.Time{}, nil, nil, false,
 			),
 		},
 	}

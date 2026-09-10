@@ -836,6 +836,9 @@ type registrationCodeCreateResponse struct {
 // registrationCodeView is the list projection. It deliberately carries neither
 // the plaintext nor the hash: publishing sha256(code) would make every code
 // offline-crackable by anyone who can read the list.
+//
+// Build it with newRegistrationCodeView, never by literal: the two slice
+// fields need normalizing and a literal is exactly how that gets skipped.
 type registrationCodeView struct {
 	ID                string   `json:"id"`
 	AllowedNamespaces []string `json:"allowed_namespaces"`
@@ -847,6 +850,48 @@ type registrationCodeView struct {
 	// beside it: a second representation of the same fact is a second thing
 	// that can drift from ResolveByPlaintext's verdict.
 	ExpiresAt string `json:"expires_at,omitempty"`
+}
+
+// newRegistrationCodeView projects a stored code onto its wire shape.
+//
+// It exists for the two slice fields. A nil []string marshals to JSON `null`,
+// not `[]`, and the OpenAPI schema declares both as arrays — so a code whose
+// AllowedNodeTypes was never set (the create handler persists req.AllowedNodeTypes
+// verbatim, and that field is optional) serialized a body the published
+// contract rejects. RegistrationCode.Clone() preserves nil rather than
+// widening it to empty, deliberately and correctly, so the normalization has
+// to happen here, at the boundary where "no elements" stops being a Go
+// distinction and becomes a wire one.
+//
+// The two are NOT interchangeable on the wire even though they are in Go: a
+// generated client that types the field as a non-nullable array fails to
+// decode `null`, and one that types it as nullable forces every caller to
+// handle a state the server never means. `[]` is the honest encoding of "this
+// code allows nothing" — which, for AllowedNodeTypes, is exactly what
+// RunnerPolicy.Allows reports for an empty set.
+func newRegistrationCodeView(c control.RegistrationCode) registrationCodeView {
+	view := registrationCodeView{
+		ID:                c.ID,
+		AllowedNamespaces: emptyIfNil(c.AllowedNamespaces),
+		AllowedNodeTypes:  emptyIfNil(c.AllowedNodeTypes),
+		Revoked:           c.Revoked,
+		CreatedAt:         c.CreatedAt.UTC().Format(time.RFC3339),
+	}
+	if !c.ExpiresAt.IsZero() {
+		view.ExpiresAt = c.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+	return view
+}
+
+// emptyIfNil returns s, or an empty non-nil slice when s is nil, so the field
+// marshals to `[]` rather than `null`. It does not copy: the caller owns a
+// cloned RegistrationCode already (both stores clone on the way out), and the
+// view is marshaled and discarded.
+func emptyIfNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }
 
 type enrollAuditView struct {
@@ -1106,17 +1151,7 @@ func (m *managementModule) handleListRegistrationCodes(w http.ResponseWriter, r 
 	}
 	out := make([]registrationCodeView, 0, len(list))
 	for _, c := range list {
-		view := registrationCodeView{
-			ID:                c.ID,
-			AllowedNamespaces: c.AllowedNamespaces,
-			AllowedNodeTypes:  c.AllowedNodeTypes,
-			Revoked:           c.Revoked,
-			CreatedAt:         c.CreatedAt.UTC().Format(time.RFC3339),
-		}
-		if !c.ExpiresAt.IsZero() {
-			view.ExpiresAt = c.ExpiresAt.UTC().Format(time.RFC3339)
-		}
-		out = append(out, view)
+		out = append(out, newRegistrationCodeView(c))
 	}
 	writeData(w, r, http.StatusOK, out)
 }
