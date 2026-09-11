@@ -5,11 +5,7 @@ package perf
 import (
 	"context"
 	"fmt"
-	"net"
-	"os"
 	"sort"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -47,92 +43,6 @@ import (
 // pacer" from wasm/admission/sink cost, which is exactly what is needed to
 // answer it — but it means the throughput figure here is a ceiling for the
 // trigger alone, not an end-to-end pipeline number.
-
-// realKafkaBrokersT resolves the broker list for a *testing.T (the existing
-// realKafkaBrokers in kafka_helpers_test.go takes *testing.B). Under
-// XFLOW_REQUIRE_KAFKA_INTEGRATION=1 an unreachable broker fails the test
-// instead of skipping it, so a missing dependency cannot be misread as a
-// passing (or silently absent) measurement.
-func realKafkaBrokersT(t *testing.T) []string {
-	t.Helper()
-	raw := os.Getenv("XFLOW_TEST_KAFKA_BROKERS")
-	if raw == "" {
-		raw = "localhost:9092"
-	}
-	parts := strings.Split(raw, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if s := strings.TrimSpace(p); s != "" {
-			out = append(out, s)
-		}
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	c, err := kafka.DialContext(ctx, "tcp", out[0])
-	if err != nil {
-		if os.Getenv("XFLOW_REQUIRE_KAFKA_INTEGRATION") == "1" {
-			t.Fatalf("XFLOW_REQUIRE_KAFKA_INTEGRATION=1: kafka unavailable at %s: %v", out[0], err)
-		}
-		t.Skipf("kafka unavailable: %v", err)
-	}
-	_ = c.Close()
-	return out
-}
-
-func createTopicT(t *testing.T, broker, topic string, partitions int) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	conn, err := kafka.DialContext(ctx, "tcp", broker)
-	if err != nil {
-		t.Fatalf("dial kafka broker: %v", err)
-	}
-	controller, err := conn.Controller()
-	if err != nil {
-		_ = conn.Close()
-		t.Fatalf("get kafka controller: %v", err)
-	}
-	_ = conn.Close()
-	controllerConn, err := kafka.DialContext(ctx, "tcp", net.JoinHostPort(controller.Host, strconv.Itoa(controller.Port)))
-	if err != nil {
-		t.Fatalf("dial kafka controller: %v", err)
-	}
-	defer controllerConn.Close()
-	if err := controllerConn.CreateTopics(kafka.TopicConfig{
-		Topic:             topic,
-		NumPartitions:     partitions,
-		ReplicationFactor: 1,
-	}); err != nil {
-		t.Fatalf("create kafka topic %q: %v", topic, err)
-	}
-	t.Cleanup(func() { deleteTopicT(t, broker, topic) })
-}
-
-func deleteTopicT(t *testing.T, broker, topic string) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	conn, err := kafka.DialContext(ctx, "tcp", broker)
-	if err != nil {
-		t.Logf("leaked kafka topic %q: dial broker: %v", topic, err)
-		return
-	}
-	controller, err := conn.Controller()
-	_ = conn.Close()
-	if err != nil {
-		t.Logf("leaked kafka topic %q: resolve controller: %v", topic, err)
-		return
-	}
-	controllerConn, err := kafka.DialContext(ctx, "tcp", net.JoinHostPort(controller.Host, strconv.Itoa(controller.Port)))
-	if err != nil {
-		t.Logf("leaked kafka topic %q: dial controller: %v", topic, err)
-		return
-	}
-	defer controllerConn.Close()
-	if err := controllerConn.DeleteTopics(topic); err != nil {
-		t.Errorf("leaked kafka topic %q: broker answered but refused the delete: %v", topic, err)
-	}
-}
 
 // commitSampleReal is one OnOffsetCommit observation.
 type commitSampleReal struct {
@@ -273,7 +183,7 @@ func TestKafkaTriggerCommitThroughputReal(t *testing.T) {
 		t.Skip("skip real-Kafka commit throughput test in short mode")
 	}
 
-	brokers := realKafkaBrokersT(t)
+	brokers := realKafkaBrokers(t)
 
 	arms := []commitLoadArm{
 		// Matches docs/xflow-verification-findings.md §1.5's reported supply
@@ -305,7 +215,7 @@ func runKafkaCommitLoad(t *testing.T, brokers []string, arm commitLoadArm) {
 
 	topic := fmt.Sprintf("xflow-perf-commit-%d", time.Now().UnixNano())
 	group := topic + "-g"
-	createTopicT(t, brokers[0], topic, partitionCount)
+	createTopic(t, brokers[0], topic, partitionCount)
 
 	obs := &commitStatsObserver{}
 	kafkatrigger.SetObserver(obs)

@@ -14,8 +14,13 @@ import (
 	"github.com/segmentio/kafka-go"
 )
 
-func realKafkaBrokers(b *testing.B) []string {
-	b.Helper()
+// realKafkaBrokers resolves the broker list, skipping when Kafka is
+// unreachable. Under XFLOW_REQUIRE_KAFKA_INTEGRATION=1 the skip escalates to a
+// failure, matching test/integration/harness.go: everything under
+// //go:build perf is invisible to a default `go test ./...`, so a skip here is
+// a silent one and a gating run must be able to tell "measured" from "absent".
+func realKafkaBrokers(tb testing.TB) []string {
+	tb.Helper()
 	raw := os.Getenv("XFLOW_TEST_KAFKA_BROKERS")
 	if raw == "" {
 		raw = "localhost:9092"
@@ -31,7 +36,10 @@ func realKafkaBrokers(b *testing.B) []string {
 	defer cancel()
 	c, err := kafka.DialContext(ctx, "tcp", out[0])
 	if err != nil {
-		b.Skipf("kafka unavailable: %v", err)
+		if os.Getenv("XFLOW_REQUIRE_KAFKA_INTEGRATION") == "1" {
+			tb.Fatalf("XFLOW_REQUIRE_KAFKA_INTEGRATION=1: kafka unavailable at %s: %v", out[0], err)
+		}
+		tb.Skipf("kafka unavailable: %v", err)
 	}
 	_ = c.Close()
 	return out
@@ -41,25 +49,25 @@ func realKafkaBrokers(b *testing.B) []string {
 // mirroring the pattern in test/integration/kafka_helpers.go — including that
 // helper's cleanup: the base name is timestamped, so without a delete each run
 // of this benchmark adds three more permanent topics to the broker's log.
-func createTopic(b *testing.B, broker, topic string, partitions int) {
-	b.Helper()
+func createTopic(tb testing.TB, broker, topic string, partitions int) {
+	tb.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	conn, err := kafka.DialContext(ctx, "tcp", broker)
 	if err != nil {
-		b.Fatalf("dial kafka broker: %v", err)
+		tb.Fatalf("dial kafka broker: %v", err)
 	}
 	controller, err := conn.Controller()
 	if err != nil {
 		_ = conn.Close()
-		b.Fatalf("get kafka controller: %v", err)
+		tb.Fatalf("get kafka controller: %v", err)
 	}
 	_ = conn.Close()
 
 	controllerConn, err := kafka.DialContext(ctx, "tcp", net.JoinHostPort(controller.Host, strconv.Itoa(controller.Port)))
 	if err != nil {
-		b.Fatalf("dial kafka controller: %v", err)
+		tb.Fatalf("dial kafka controller: %v", err)
 	}
 	defer controllerConn.Close()
 
@@ -68,12 +76,12 @@ func createTopic(b *testing.B, broker, topic string, partitions int) {
 		NumPartitions:     partitions,
 		ReplicationFactor: 1,
 	}); err != nil {
-		b.Fatalf("create kafka topic %q: %v", topic, err)
+		tb.Fatalf("create kafka topic %q: %v", topic, err)
 	}
 	// Armed only after the create succeeded — see deleteKafkaTopic in
 	// test/integration/kafka_helpers.go for why the two failure modes below are
 	// reported differently.
-	b.Cleanup(func() { deleteTopic(b, broker, topic) })
+	tb.Cleanup(func() { deleteTopic(tb, broker, topic) })
 }
 
 // deleteTopic removes a topic created by createTopic. An unreachable broker is
@@ -81,30 +89,30 @@ func createTopic(b *testing.B, broker, topic string, partitions int) {
 // a broker that answers and refuses the delete fails the benchmark, because
 // that is what a misconfigured delete.topic.enable=false looks like and it
 // would otherwise leave createTopic promising a cleanup it never did.
-func deleteTopic(b *testing.B, broker, topic string) {
-	b.Helper()
+func deleteTopic(tb testing.TB, broker, topic string) {
+	tb.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	conn, err := kafka.DialContext(ctx, "tcp", broker)
 	if err != nil {
-		b.Logf("leaked kafka topic %q: dial broker: %v", topic, err)
+		tb.Logf("leaked kafka topic %q: dial broker: %v", topic, err)
 		return
 	}
 	controller, err := conn.Controller()
 	_ = conn.Close()
 	if err != nil {
-		b.Logf("leaked kafka topic %q: resolve controller: %v", topic, err)
+		tb.Logf("leaked kafka topic %q: resolve controller: %v", topic, err)
 		return
 	}
 	controllerConn, err := kafka.DialContext(ctx, "tcp", net.JoinHostPort(controller.Host, strconv.Itoa(controller.Port)))
 	if err != nil {
-		b.Logf("leaked kafka topic %q: dial controller: %v", topic, err)
+		tb.Logf("leaked kafka topic %q: dial controller: %v", topic, err)
 		return
 	}
 	defer controllerConn.Close()
 
 	if err := controllerConn.DeleteTopics(topic); err != nil {
-		b.Errorf("leaked kafka topic %q: broker answered but refused the delete: %v", topic, err)
+		tb.Errorf("leaked kafka topic %q: broker answered but refused the delete: %v", topic, err)
 	}
 }
