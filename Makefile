@@ -334,6 +334,8 @@ proto-tools: check-go
 # proto/proto-check/check-proto-tools stay reproducible regardless of
 # whatever protoc a host package manager (e.g. Homebrew) currently offers.
 # Idempotent: skips the download if the pinned binary is already present.
+# Checksums via sha256sum (GNU coreutils) or shasum (macOS/BSD), whichever
+# exists; with neither the target aborts rather than installing unverified.
 fetch-protoc:
 	@if [ -x "$(PROTOC_BIN)" ] && [ "$$($(PROTOC_BIN) --version)" = "libprotoc $(PROTOC_VERSION)" ]; then \
 		echo "protoc $(PROTOC_VERSION) already present at $(PROTOC_BIN)"; \
@@ -352,7 +354,14 @@ fetch-protoc:
 	url="https://github.com/protocolbuffers/protobuf/releases/download/v$(PROTOC_VERSION)/protoc-$(PROTOC_VERSION)-$$plat.zip"; \
 	echo "Fetching $$url"; \
 	curl -fsSL -o "$$tmp/protoc.zip" "$$url"; \
-	echo "$$sha  $$tmp/protoc.zip" | shasum -a 256 -c -; \
+	if command -v sha256sum >/dev/null 2>&1; then \
+		echo "$$sha  $$tmp/protoc.zip" | sha256sum -c -; \
+	elif command -v shasum >/dev/null 2>&1; then \
+		echo "$$sha  $$tmp/protoc.zip" | shasum -a 256 -c -; \
+	else \
+		echo "ERROR: need sha256sum or shasum to verify the download; refusing to install unverified protoc"; \
+		exit 1; \
+	fi; \
 	rm -rf $(PROTOC_TOOLCHAIN_DIR); \
 	mkdir -p $(PROTOC_TOOLCHAIN_DIR); \
 	unzip -oq "$$tmp/protoc.zip" -d $(PROTOC_TOOLCHAIN_DIR); \
