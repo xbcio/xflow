@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"sort"
 	"strconv"
 	"time"
 
@@ -25,9 +26,9 @@ var (
 // EntryActivationStore is a Redis-backed engine.EntryActivationStore. Modern
 // activation hashes share a workflow-scoped Redis Cluster hash tag with the
 // workflow revision watermark. Legacy activation-scoped hashes remain readable
-// during migration. Assign and Fence are single Lua CAS transitions on the
-// selected hash, giving atomic first-writer-wins semantics with monotonic
-// generation fencing.
+// during migration. Assignment transitions always CAS the modern hash; when
+// only a legacy hash exists, its snapshot is promoted and transitioned in that
+// same modern-slot Lua operation.
 type EntryActivationStore struct {
 	rdb redis.UniversalClient
 	ttl time.Duration
@@ -99,78 +100,94 @@ func (s *EntryActivationStore) legacyKeyFor(k engine.EntryActivationKey) string 
 	return entryActivationRedisKey(k.Namespace, k.WorkflowID, k.WorkflowVersion, k.EntryUnitID, k.ReplicaIndex)
 }
 
-// assignEntryActivationLua atomically claims an activation. It is a no-op
-// (returns 0) when the activation does not exist or when the supplied generation
-// does not strictly exceed the stored generation.
+// prepareEntryActivationTransitionLua initializes a missing modern hash from a
+// legacy snapshot before applying an assignment transition. The snapshot is
+// passed as arguments, not as another key, so every script touches only the
+// modern activation slot and remains Redis Cluster safe. A return value of -1
+// means neither a modern hash nor a legacy snapshot was available.
 //
-// KEYS: 1=activation hash
-// ARGV: 1=runnerID 2=sessionID 3=generation 4=leaseDeadlineUnixNano 5=ttl_s
-// Returns 1 on success, 0 on rejection.
-var assignEntryActivationLua = redis.NewScript(`
+// ARGV: 1=ttl_s 2=legacyFieldCount 3..=legacy field/value pairs, followed by
+// transition-specific arguments. transition_arg is the first such argument.
+const prepareEntryActivationTransitionLua = `
+local ttl = tonumber(ARGV[1])
+local legacy_field_count = tonumber(ARGV[2])
+local transition_arg = 3 + legacy_field_count * 2
 if redis.call('EXISTS', KEYS[1]) == 0 then
-    return 0
+    if legacy_field_count == 0 then
+        return -1
+    end
+    for i = 3, transition_arg - 1, 2 do
+        redis.call('HSET', KEYS[1], ARGV[i], ARGV[i + 1])
+    end
+    redis.call('EXPIRE', KEYS[1], ttl)
 end
+`
+
+// assignEntryActivationLua atomically promotes and claims an activation. It is
+// a no-op (returns 0) when the supplied generation does not strictly exceed the
+// stored generation.
+//
+// KEYS: 1=modern activation hash
+// Transition ARGV: runnerID, sessionID, generation, leaseDeadlineUnixNano
+// Returns 1 on success, 0 on rejection, -1 when the activation does not exist.
+var assignEntryActivationLua = redis.NewScript(prepareEntryActivationTransitionLua + `
 local cur = tonumber(redis.call('HGET', KEYS[1], 'generation') or '0')
-local gen = tonumber(ARGV[3])
+local gen = tonumber(ARGV[transition_arg + 2])
 if gen <= cur then
     return 0
 end
 local pkg = redis.call('HGET', KEYS[1], 'package_hash') or ''
 redis.call('HSET', KEYS[1],
-    'runner_id', ARGV[1],
-    'session_id', ARGV[2],
-    'generation', ARGV[3],
-    'lease_deadline', ARGV[4],
+    'runner_id', ARGV[transition_arg],
+    'session_id', ARGV[transition_arg + 1],
+    'generation', ARGV[transition_arg + 2],
+    'lease_deadline', ARGV[transition_arg + 3],
     'assigned_package_hash', pkg)
-redis.call('EXPIRE', KEYS[1], tonumber(ARGV[5]))
+redis.call('EXPIRE', KEYS[1], ttl)
 return 1
 `)
 
-// fenceEntryActivationLua invalidates the current owner and raises the
-// generation floor to at least the supplied generation. No-op when absent.
+// fenceEntryActivationLua atomically promotes an activation, invalidates its
+// current owner, and raises the generation floor to at least the supplied
+// generation.
 //
-// KEYS: 1=activation hash
-// ARGV: 1=generation 2=ttl_s
-var fenceEntryActivationLua = redis.NewScript(`
-if redis.call('EXISTS', KEYS[1]) == 0 then
-    return 0
-end
+// KEYS: 1=modern activation hash
+// Transition ARGV: generation
+// Returns 1 on success, -1 when the activation does not exist.
+var fenceEntryActivationLua = redis.NewScript(prepareEntryActivationTransitionLua + `
 local cur = tonumber(redis.call('HGET', KEYS[1], 'generation') or '0')
-local gen = tonumber(ARGV[1])
+local gen = tonumber(ARGV[transition_arg])
 if gen > cur then
-    redis.call('HSET', KEYS[1], 'generation', ARGV[1])
+    redis.call('HSET', KEYS[1], 'generation', ARGV[transition_arg])
 end
 redis.call('HSET', KEYS[1],
     'runner_id', '',
     'session_id', '',
     'lease_deadline', '0',
     'assigned_package_hash', '')
-redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+redis.call('EXPIRE', KEYS[1], ttl)
 return 1
 `)
 
-// renewEntryActivationLua extends the lease deadline of the current owner
-// WITHOUT advancing the generation. Generation-gated: succeeds (returns 1) only
-// when the supplied generation EQUALS the stored generation and an owner is set.
-// No-op (returns 0) when the activation does not exist, is unowned, or the
-// generation does not match.
+// renewEntryActivationLua atomically promotes an activation and extends the
+// current owner's lease without advancing the generation. Generation-gated: it
+// succeeds only when the supplied generation equals the stored generation and
+// an owner is set.
 //
-// KEYS: 1=activation hash
-// ARGV: 1=generation 2=leaseDeadlineUnixNano 3=ttl_s
-var renewEntryActivationLua = redis.NewScript(`
-if redis.call('EXISTS', KEYS[1]) == 0 then
-    return 0
-end
+// KEYS: 1=modern activation hash
+// Transition ARGV: generation, leaseDeadlineUnixNano
+// Returns 1 on success, 0 on rejection, -1 when the activation does not exist.
+var renewEntryActivationLua = redis.NewScript(prepareEntryActivationTransitionLua + `
 local cur = tonumber(redis.call('HGET', KEYS[1], 'generation') or '0')
-local gen = tonumber(ARGV[1])
+local gen = tonumber(ARGV[transition_arg])
 if gen ~= cur then
     return 0
 end
 if (redis.call('HGET', KEYS[1], 'runner_id') or '') == '' then
     return 0
 end
-redis.call('HSET', KEYS[1], 'lease_deadline', ARGV[2])
-redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
+redis.call('HSET', KEYS[1], 'lease_deadline', ARGV[transition_arg + 1])
+redis.call('EXPIRE', KEYS[1], ttl)
 return 1
 `)
 
@@ -516,76 +533,77 @@ func (s *EntryActivationStore) workflowRevision(ctx context.Context, ns namespac
 	return revision, nil
 }
 
-// storageKeyForExisting chooses the modern layout when present and otherwise
-// falls back to the legacy layout. The checks are intentionally separate:
-// modern and legacy keys do not share a Redis Cluster slot.
-func (s *EntryActivationStore) storageKeyForExisting(ctx context.Context, key engine.EntryActivationKey) (string, error) {
-	modern := s.keyFor(key)
-	exists, err := s.rdb.Exists(ctx, modern).Result()
+const entryActivationTransitionAbsent int64 = -1
+
+// runEntryActivationTransition takes the modern-only fast path first. If the
+// modern hash is absent, it reads the legacy hash and retries with that snapshot
+// as script arguments. Upsert and the retry both mutate the same modern key, so
+// Redis serializes them even though the legacy read came from another slot.
+func (s *EntryActivationStore) runEntryActivationTransition(
+	ctx context.Context,
+	key engine.EntryActivationKey,
+	script *redis.Script,
+	transitionArgs ...any,
+) (int64, error) {
+	modernKey := s.keyFor(key)
+	result, err := script.Run(ctx, s.rdb, []string{modernKey}, s.entryActivationTransitionArgs(nil, transitionArgs...)...).Int64()
+	if err != nil || result != entryActivationTransitionAbsent {
+		return result, err
+	}
+
+	legacyKey := s.legacyKeyFor(key)
+	legacyFields, err := s.rdb.HGetAll(ctx, legacyKey).Result()
 	if err != nil {
-		return "", fmt.Errorf("check entry activation %q: %w", modern, err)
+		return 0, fmt.Errorf("read legacy entry activation for transition %q: %w", legacyKey, err)
 	}
-	if exists != 0 {
-		return modern, nil
-	}
-	legacy := s.legacyKeyFor(key)
-	exists, err = s.rdb.Exists(ctx, legacy).Result()
-	if err != nil {
-		return "", fmt.Errorf("check legacy entry activation %q: %w", legacy, err)
-	}
-	if exists != 0 {
-		return legacy, nil
-	}
-	return modern, nil
+	return script.Run(ctx, s.rdb, []string{modernKey}, s.entryActivationTransitionArgs(legacyFields, transitionArgs...)...).Int64()
 }
 
-// Assign atomically claims the activation via a single Lua CAS. First-writer-
-// wins and monotonic: succeeds only when gen strictly exceeds the stored
-// generation.
-func (s *EntryActivationStore) Assign(ctx context.Context, key engine.EntryActivationKey, runnerID, sessionID string, gen uint64, deadline time.Time) (bool, error) {
-	storageKey, err := s.storageKeyForExisting(ctx, key)
-	if err != nil {
-		return false, err
+func (s *EntryActivationStore) entryActivationTransitionArgs(legacyFields map[string]string, transitionArgs ...any) []any {
+	fieldNames := make([]string, 0, len(legacyFields))
+	for name := range legacyFields {
+		fieldNames = append(fieldNames, name)
 	}
-	res, err := assignEntryActivationLua.Run(ctx, s.rdb,
-		[]string{storageKey},
-		runnerID, sessionID, gen, deadlineToNano(deadline), int(s.ttl.Seconds()),
-	).Int64()
+	sort.Strings(fieldNames)
+
+	args := make([]any, 0, 2+len(fieldNames)*2+len(transitionArgs))
+	args = append(args, int(s.ttl.Seconds()), len(fieldNames))
+	for _, name := range fieldNames {
+		args = append(args, name, legacyFields[name])
+	}
+	return append(args, transitionArgs...)
+}
+
+// Assign atomically claims the modern activation hash. On first access to a
+// legacy-only activation, promotion and assignment happen in the same Lua CAS.
+// First-writer-wins and monotonic: gen must strictly exceed the stored value.
+func (s *EntryActivationStore) Assign(ctx context.Context, key engine.EntryActivationKey, runnerID, sessionID string, gen uint64, deadline time.Time) (bool, error) {
+	result, err := s.runEntryActivationTransition(ctx, key, assignEntryActivationLua,
+		runnerID, sessionID, gen, deadlineToNano(deadline),
+	)
 	if err != nil {
 		return false, fmt.Errorf("assign entry activation: %w", err)
 	}
-	return res == 1, nil
+	return result == 1, nil
 }
 
-// Renew extends the lease deadline of the current owner without advancing the
-// generation, via a single Lua CAS. Generation-gated: succeeds only when gen
-// equals the stored generation and an owner is set.
+// Renew atomically extends the lease on the modern activation hash. On first
+// access to a legacy-only activation, promotion and renewal happen in the same
+// Lua CAS. The generation must equal the stored value and an owner must exist.
 func (s *EntryActivationStore) Renew(ctx context.Context, key engine.EntryActivationKey, gen uint64, deadline time.Time) (bool, error) {
-	storageKey, err := s.storageKeyForExisting(ctx, key)
-	if err != nil {
-		return false, err
-	}
-	res, err := renewEntryActivationLua.Run(ctx, s.rdb,
-		[]string{storageKey},
-		gen, deadlineToNano(deadline), int(s.ttl.Seconds()),
-	).Int64()
+	result, err := s.runEntryActivationTransition(ctx, key, renewEntryActivationLua,
+		gen, deadlineToNano(deadline),
+	)
 	if err != nil {
 		return false, fmt.Errorf("renew entry activation: %w", err)
 	}
-	return res == 1, nil
+	return result == 1, nil
 }
 
-// Fence invalidates the current owner and raises the generation floor via a
-// single Lua CAS. No-op when the activation does not exist.
+// Fence atomically promotes a legacy-only activation into the modern hash,
+// invalidates its owner, and raises its generation floor.
 func (s *EntryActivationStore) Fence(ctx context.Context, key engine.EntryActivationKey, gen uint64) error {
-	storageKey, err := s.storageKeyForExisting(ctx, key)
-	if err != nil {
-		return err
-	}
-	if _, err := fenceEntryActivationLua.Run(ctx, s.rdb,
-		[]string{storageKey},
-		gen, int(s.ttl.Seconds()),
-	).Result(); err != nil {
+	if _, err := s.runEntryActivationTransition(ctx, key, fenceEntryActivationLua, gen); err != nil {
 		return fmt.Errorf("fence entry activation: %w", err)
 	}
 	return nil
