@@ -103,20 +103,32 @@ subtest"——是主动选择，不是疏漏。但它选错了对象：required 
 
 ### 4. `COMMIT-PATH-TODO.md` 的开放项已完成但未标记 ✅ 已完成
 
-`COMMIT-PATH-TODO.md:240-260` 说 `commitAcyclicNodeError`（`engine/atomic_commit.go:63`）
-与 `commitLegacyNodeError`（`engine/commit.go:213`）「逐字相同」待去重，并给出合并方式
-「提取公共前置逻辑」。
+`COMMIT-PATH-TODO.md:240-260` 说 `commitAcyclicNodeError`（当时记作
+`engine/atomic_commit.go:63`）与 `commitLegacyNodeError`（当时记作 `engine/commit.go:213`）
+「逐字相同」待去重，并给出合并方式「提取公共前置逻辑」。上面两个行号是**当时那份文档
+的原话转述**，不是活指针，不随代码更新——留着是为了让人能对上被更正的是哪一句。
 
-**该重构已经做完了**：`engine/atomic_commit.go:73` 的 `nodeErrorCommitFunc` 类型 +
-`engine/atomic_commit.go:83-96` 的 `commitNodeErrorOutcome` 正是那个公共前置逻辑，
-两个函数现在各是一行委托（`atomic_commit.go:63-65`、`commit.go:241-243`）。
+**该重构已经做完了**：`engine/atomic_commit.go` 的 `nodeErrorCommitFunc` 类型 +
+同文件的 `commitNodeErrorOutcome` 正是那个公共前置逻辑，两个函数现在各是一行委托。
 文档的行号现在指向委托后的新形态，读者会被误导去找一份不存在的重复。
 
 只改文档，代码无需再动。
 
 **实际改法**：`COMMIT-PATH-TODO.md` 的「可能的收敛形状」一节改写为「错误分支已收敛，
-入口合一仍开放」，并在「已关闭」表补一行指向 `62d68a0`（2026-08-30）。三层收敛里
-仍未做的只剩入口合一（`taskResultExpands` 分流）。
+入口合一仍开放」，并在「已关闭」表补一行指向 `62d68a0`（2026-08-30）。
+
+> **2026-09-10 更新：这条「实际改法」自己也过期了。** 上面写的「三层收敛里仍未做的只剩
+> 入口合一（`taskResultExpands` 分流）」在
+> `refactor(engine): merge the two task-result commit entries into one`（`b591a0e`）里
+> 做完了，`COMMIT-PATH-TODO.md` 随后由 `6a320ac` 收口，现自陈「本文件目前没有仍开放的
+> 条目」。保留原句不删，是因为本节记的就是「文档落后于代码」这类账——这条自己变成同一
+> 类账的样本，比一句被悄悄改掉的话更有说明力。
+>
+> 另外记一笔：那句「用 `taskResultExpands` 分流」照字面做会改掉生产行为。实际合并**没有**
+> 换这个谓词，理由见 `COMMIT-PATH-TODO.md` 收口引用块里的第二条裁定。
+>
+> 本节原先的四处行号（`atomic_commit.go:73`/`:83-96`/`:63-65`、`commit.go:241-243`）已随
+> 这次合并全部漂移，现已改为指符号名。行号会漂，符号名不会——这正是本节要说的那件事。
 
 ---
 
