@@ -130,7 +130,7 @@ end
 // KEYS: 1=modern activation hash
 // Transition ARGV: runnerID, sessionID, generation, leaseDeadlineUnixNano
 // Returns 1 on success, 0 on rejection, -1 when the activation does not exist.
-var assignEntryActivationLua = redis.NewScript(prepareEntryActivationTransitionLua + `
+const assignEntryActivationLuaSrc = prepareEntryActivationTransitionLua + `
 local cur = tonumber(redis.call('HGET', KEYS[1], 'generation') or '0')
 local gen = tonumber(ARGV[transition_arg + 2])
 if gen <= cur then
@@ -145,7 +145,9 @@ redis.call('HSET', KEYS[1],
     'assigned_package_hash', pkg)
 redis.call('EXPIRE', KEYS[1], ttl)
 return 1
-`)
+`
+
+var assignEntryActivationLua = redis.NewScript(assignEntryActivationLuaSrc)
 
 // fenceEntryActivationLua atomically promotes an activation, invalidates its
 // current owner, and raises the generation floor to at least the supplied
@@ -154,7 +156,7 @@ return 1
 // KEYS: 1=modern activation hash
 // Transition ARGV: generation
 // Returns 1 on success, -1 when the activation does not exist.
-var fenceEntryActivationLua = redis.NewScript(prepareEntryActivationTransitionLua + `
+const fenceEntryActivationLuaSrc = prepareEntryActivationTransitionLua + `
 local cur = tonumber(redis.call('HGET', KEYS[1], 'generation') or '0')
 local gen = tonumber(ARGV[transition_arg])
 if gen > cur then
@@ -167,7 +169,9 @@ redis.call('HSET', KEYS[1],
     'assigned_package_hash', '')
 redis.call('EXPIRE', KEYS[1], ttl)
 return 1
-`)
+`
+
+var fenceEntryActivationLua = redis.NewScript(fenceEntryActivationLuaSrc)
 
 // renewEntryActivationLua atomically promotes an activation and extends the
 // current owner's lease without advancing the generation. Generation-gated: it
@@ -177,7 +181,7 @@ return 1
 // KEYS: 1=modern activation hash
 // Transition ARGV: generation, leaseDeadlineUnixNano
 // Returns 1 on success, 0 on rejection, -1 when the activation does not exist.
-var renewEntryActivationLua = redis.NewScript(prepareEntryActivationTransitionLua + `
+const renewEntryActivationLuaSrc = prepareEntryActivationTransitionLua + `
 local cur = tonumber(redis.call('HGET', KEYS[1], 'generation') or '0')
 local gen = tonumber(ARGV[transition_arg])
 if gen ~= cur then
@@ -189,7 +193,9 @@ end
 redis.call('HSET', KEYS[1], 'lease_deadline', ARGV[transition_arg + 1])
 redis.call('EXPIRE', KEYS[1], ttl)
 return 1
-`)
+`
+
+var renewEntryActivationLua = redis.NewScript(renewEntryActivationLuaSrc)
 
 // Redis Lua numbers are IEEE-754 doubles and cannot exactly represent all
 // uint64 registry revisions. Compare normalized decimal strings by length and
@@ -227,14 +233,16 @@ end
 //
 // KEYS: 1=workflow watermark
 // ARGV: 1=registry revision
-var advanceEntryActivationWorkflowRevisionLua = redis.NewScript(compareUint64DecimalLua + `
+const advanceEntryActivationWorkflowRevisionLuaSrc = compareUint64DecimalLua + `
 local incoming = normalize_uint64(ARGV[1])
 local current = normalize_uint64(redis.call('GET', KEYS[1]) or '0')
 if compare_uint64(incoming, current) > 0 then
     redis.call('SET', KEYS[1], incoming)
 end
 return current
-`)
+`
+
+var advanceEntryActivationWorkflowRevisionLua = redis.NewScript(advanceEntryActivationWorkflowRevisionLuaSrc)
 
 // upsertEntryActivationLua atomically compares the workflow watermark and the
 // activation revision before writing desired-state fields. Watermark and record
@@ -249,7 +257,7 @@ return current
 //	16..20=legacy assignment defaults, 21=legacy registry revision
 //
 // Returns 1 when applied, 0 when rejected as stale.
-var upsertEntryActivationLua = redis.NewScript(compareUint64DecimalLua + `
+const upsertEntryActivationLuaSrc = compareUint64DecimalLua + `
 local incoming = normalize_uint64(ARGV[1])
 local watermark = normalize_uint64(redis.call('GET', KEYS[1]) or '0')
 if compare_uint64(incoming, watermark) < 0 then
@@ -302,7 +310,9 @@ if existed == 0 then
 end
 redis.call('EXPIRE', KEYS[2], tonumber(ARGV[2]))
 return 1
-`)
+`
+
+var upsertEntryActivationLua = redis.NewScript(upsertEntryActivationLuaSrc)
 
 // AdvanceWorkflowRevision monotonically advances the workflow-wide
 // desired-state watermark before a manager lists or upserts activation keys.
