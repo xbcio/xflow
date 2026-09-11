@@ -26,7 +26,9 @@
 形态。但「等 filter 落地再接」把一处**当下就已经存在的分歧**留在了原地。
 
 **分歧**：编译期 `validateNodeBody` 判的是 `"expression"` **键是否存在**，
-`xflow.map` 的 handler（`map.go:70`）判的是**值是否非空**。于是
+`xflow.map` 的 handler（当时记作 `map.go:70`——**这是记录当时旧代码的历史引用，不是活
+指针**；修复重写了那段逻辑，今天同一行是 `Concurrency` 的文档注释，照这个行号去找会
+对错地方）判的是**值是否非空**。于是
 `expression: ""` 两侧读法相反。
 
 对 `xflow.map` 这个分歧被**掩盖**了：它同时在 `fanOutNodeTypes` 里，规则 3 按**值**
@@ -210,7 +212,7 @@ consumer 的 `Queues` 置 nil → 批次任务 10s 内一条都收不到；`queu
 span 块内，而 `isGroupTask` / `isBatchTask` 两个分支在到达该块**之前就 return 了**——
 它们各自走 `dispatchGroupLease` / `dispatchSubgraphLease`，两处都不开 span、不注入。
 
-于是 runner 侧 `service/runner/runner.go:367` 的
+于是 runner 侧 `service/runner/runner.go` 里 `tracing.ExtractCarrier` 那一处的
 `execCtx := tracing.ExtractCarrier(ctx, lease.TraceCarrier)` 拿到空 map，
 `xflow.task.execute` 以**根 span** 起头。所以修复前的真实状态不是「内层成员断链、
 外层 group span 还在」，而是**整个远端 group / map 批次任务从工作流 trace 上整体脱落**。
@@ -309,7 +311,7 @@ body 的 span 仍没有真正的 OTel parent」——查证时发现缺口比记
 在写下的那一刻就是假的，不是后来变旧的——写下它的提交 `4f2a1bb` 根本没有动过
 `execution/subgraph/map_body.go`，在它自己的树上该文件 `:64` 仍然是
 `errors.New("batch body request carries no package")`。这个错误此后不但没有被删，
-反而被 `b7b94fc` 提升成了命名哨兵，今天活在 `execution/subgraph/map_body.go:31`，
+反而被 `b7b94fc` 提升成了命名哨兵，今天活在 `execution/subgraph/map_body.go` 的 `ErrNoMapBody`，
 可达点在同文件 `:90`，并有 `map_body_no_body_test.go`（`:45`、`:81`）两条测试钉着。
 
 之所以要留下这条订正而不是把那句话一删了事：「已删除」这个说法把
@@ -376,7 +378,7 @@ fail-closed 守卫、嵌套禁令的递归检查，三处调的是同一个函�
 
 值判据对本仓库出现过的每一种 body 取值都能区分（已实测）：http 的 object body
 解出空 `Type`，string / array body 根本解不动，只有真 body 到得了 `"xflow.subgraph"`。
-而 `xflow.subgraph` 在顶层是被拒绝的（`compile.go:144`），作者不刻意写在 body 里
+而 `xflow.subgraph` 在顶层是被拒绝的（`compile.go` 的 `buildNodes`，见其拒绝顶层 `xflow.subgraph` 的分支），作者不刻意写在 body 里
 就产不出这个形状。
 
 #### 顺手关掉的 P0：`xflow.http` 带 JSON 请求体的图存下去读不回来
@@ -441,7 +443,7 @@ Go 侧编译门控已在 `a617f62` 移除，`web/packages/xflow-core/src/index.t
 
 ### `engine/graph/dependency.go` 的 `_ = supplyIdx`（原 P2-9，2026-08-06 修复）
 
-已验证确为纯装饰而非漏掉的校验：`compile.go:285` 在构造 `depPorts` 之前就强制了
+已验证确为纯装饰而非漏掉的校验：`compile.go` 的 `buildEdges` 在构造 `depPorts` 之前就强制了
 `Kind == NodeKindSupply`，所以 `buildDependencyEdges` 里那次查找只需存在性。
 改为丢弃返回值并加注释说明「为何此分支无 Kind 校验而下方旧式分支有」——旧式形态的
 supply 名直接来自定义、未经校验，两者不对称是有理由的。
@@ -614,9 +616,9 @@ Milestone B 的占位符在 `engine/group_exec.go:52-59`。**注意本文此前�
 
 它依赖「`ProjectGroupPackage` 只在父图 `Compile()` 成功后才可达」这一不变量，而
 `Compile()` 已跑过逐成员授权检查。C1 的修复为它加了第二个调用方
-（`ProjectNodeBodyPackage`，`engine/graph/compile.go:378`），该不变量对新调用方同样
+（`ProjectNodeBodyPackage`，由 `engine/graph/compile.go` 调用），该不变量对新调用方同样
 成立——**但仍然没有强制手段**。将来若有调用方从未完全校验的图上做投影，会重新引入
-跨成员 supply 泄漏且无测试拦截。函数定义：`engine/graph/subgraph_package.go:318`。
+跨成员 supply 泄漏且无测试拦截。函数定义：`engine/graph/subgraph_package.go` 的 `buildVisibleSupplies`。
 
 ## 已关闭（保留索引）
 
