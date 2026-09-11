@@ -1,5 +1,5 @@
 .PHONY: all build test test-verbose test-examples test-concurrency test-script-wasm test-coverage lint fmt vet tidy clean run-server run-runner install-hooks \
-        check-go check-proto-tools proto proto-check proto-tools \
+        check-go check-proto-tools proto proto-check proto-tools fetch-protoc \
         env-up env-down env-reset env-logs env-migrate env-ready test-integration test-integration-required test-g0-evidence-required test-g1-evidence-required test-perf perf-sample test-soak \
         web-install web-lint web-typecheck web-test web-test-coverage web-check-boundaries web-check-production-fixtures web-build web-e2e web-e2e-preview web-ci web-all validate-openapi
 
@@ -24,6 +24,11 @@ PROTOC_GEN_GO_VERSION := v1.36.11
 PROTOC_GEN_GO_GRPC_VERSION := v1.6.2
 PROTOC_GEN_GO_VERSION_NO_V := $(patsubst v%,%,$(PROTOC_GEN_GO_VERSION))
 PROTOC_GEN_GO_GRPC_VERSION_NO_V := $(patsubst v%,%,$(PROTOC_GEN_GO_GRPC_VERSION))
+# Pinned protoc binary fetched by `make fetch-protoc`; check-proto-tools,
+# proto, and proto-check prefer this over whatever protoc is on PATH so
+# generation stays reproducible across host package managers.
+PROTOC_TOOLCHAIN_DIR := bin/protoc-$(PROTOC_VERSION)
+PROTOC_BIN := $(PROTOC_TOOLCHAIN_DIR)/bin/protoc
 
 # ── Toolchain baseline ─────────────────────────────────────────────────────────
 
@@ -325,12 +330,44 @@ proto-tools: check-go
 	$(GO) install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
 	$(GO) install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION)
 
+# Download and checksum-verify the pinned protoc binary into bin/, so
+# proto/proto-check/check-proto-tools stay reproducible regardless of
+# whatever protoc a host package manager (e.g. Homebrew) currently offers.
+# Idempotent: skips the download if the pinned binary is already present.
+fetch-protoc:
+	@if [ -x "$(PROTOC_BIN)" ] && [ "$$($(PROTOC_BIN) --version)" = "libprotoc $(PROTOC_VERSION)" ]; then \
+		echo "protoc $(PROTOC_VERSION) already present at $(PROTOC_BIN)"; \
+		exit 0; \
+	fi; \
+	os="$$(uname -s)"; arch="$$(uname -m)"; \
+	case "$$os-$$arch" in \
+		Darwin-arm64) plat=osx-aarch_64; sha=193289af0470c6a1aada357d4fba0bbf8d78bfaac8b5e42ca30af2ef75583de2 ;; \
+		Darwin-x86_64) plat=osx-x86_64; sha=537d73604a344ded6fc94e98e07e529d4fe3e4a0b09e59905353950fafc2a1f7 ;; \
+		Linux-x86_64) plat=linux-x86_64; sha=6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 ;; \
+		Linux-aarch64) plat=linux-aarch_64; sha=01bf9d08808c7f96678b63f4bd8efa559bb4f83d5a7a270d5edaf507f9d5d9cf ;; \
+		*) echo "ERROR: no pinned protoc $(PROTOC_VERSION) binary known for $$os-$$arch"; exit 1 ;; \
+	esac; \
+	set -e; \
+	tmp="$$(mktemp -d)"; trap 'rm -rf "$$tmp"' EXIT; \
+	url="https://github.com/protocolbuffers/protobuf/releases/download/v$(PROTOC_VERSION)/protoc-$(PROTOC_VERSION)-$$plat.zip"; \
+	echo "Fetching $$url"; \
+	curl -fsSL -o "$$tmp/protoc.zip" "$$url"; \
+	echo "$$sha  $$tmp/protoc.zip" | shasum -a 256 -c -; \
+	rm -rf $(PROTOC_TOOLCHAIN_DIR); \
+	mkdir -p $(PROTOC_TOOLCHAIN_DIR); \
+	unzip -oq "$$tmp/protoc.zip" -d $(PROTOC_TOOLCHAIN_DIR); \
+	chmod +x $(PROTOC_BIN); \
+	echo "protoc $(PROTOC_VERSION) installed at $(PROTOC_BIN)"
+
 # Validate protoc and Go plugin versions. protoc 35.1 reports as "libprotoc 35.1"
-# while generated Go headers render it as "protoc v7.35.1".
+# while generated Go headers render it as "protoc v7.35.1". Prefers the
+# pinned binary from `make fetch-protoc` over PATH when present.
 check-proto-tools:
-	@protoc_version="$$(protoc --version 2>/dev/null || true)"; \
+	@protoc_bin="$(PROTOC_BIN)"; [ -x "$$protoc_bin" ] || protoc_bin=protoc; \
+	protoc_version="$$($$protoc_bin --version 2>/dev/null || true)"; \
 	if [ "$$protoc_version" != "libprotoc $(PROTOC_VERSION)" ]; then \
-		echo "ERROR: protoc $$protoc_version, expected libprotoc $(PROTOC_VERSION)"; \
+		echo "ERROR: protoc ($$protoc_bin) $$protoc_version, expected libprotoc $(PROTOC_VERSION)"; \
+		echo "Run 'make fetch-protoc' to install the pinned binary into bin/."; \
 		exit 1; \
 	fi; \
 	gen_go_version="$$(protoc-gen-go --version 2>/dev/null | awk '{print $$2}')"; \
@@ -343,11 +380,12 @@ check-proto-tools:
 		$(PROTOC_GEN_GO_GRPC_VERSION)|$(PROTOC_GEN_GO_GRPC_VERSION_NO_V)) ;; \
 		*) echo "ERROR: protoc-gen-go-grpc $$gen_grpc_version, expected $(PROTOC_GEN_GO_GRPC_VERSION)"; exit 1 ;; \
 	esac; \
-	echo "Protobuf tools OK: $$protoc_version, protoc-gen-go $$gen_go_version, protoc-gen-go-grpc $$gen_grpc_version"
+	echo "Protobuf tools OK: $$protoc_version ($$protoc_bin), protoc-gen-go $$gen_go_version, protoc-gen-go-grpc $$gen_grpc_version"
 
 # Regenerate gRPC stubs from .proto sources. Requires pinned protoc + plugins on PATH.
 proto: check-proto-tools
-	protoc \
+	@protoc_bin="$(PROTOC_BIN)"; [ -x "$$protoc_bin" ] || protoc_bin=protoc; \
+	"$$protoc_bin" \
 		--go_out=. --go_opt=module=github.com/xbcio/xflow \
 		--go-grpc_out=. --go-grpc_opt=module=github.com/xbcio/xflow \
 		service/protocol/runnerpb/runner.proto
@@ -356,9 +394,10 @@ proto: check-proto-tools
 # checked-in stubs without touching service/protocol/runnerpb/*.pb.go.
 proto-check: check-proto-tools
 	@set -e; \
+	protoc_bin="$(PROTOC_BIN)"; [ -x "$$protoc_bin" ] || protoc_bin=protoc; \
 	tmp="$$(mktemp -d)"; \
 	trap 'rm -rf "$$tmp"' EXIT; \
-	protoc \
+	"$$protoc_bin" \
 		--go_out="$$tmp" --go_opt=module=github.com/xbcio/xflow \
 		--go-grpc_out="$$tmp" --go-grpc_opt=module=github.com/xbcio/xflow \
 		service/protocol/runnerpb/runner.proto; \

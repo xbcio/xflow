@@ -105,8 +105,17 @@ Install the Go plugins with:
 make proto-tools
 ```
 
-`make proto-tools` does not install `protoc`; install protoc 35.1 separately and
-confirm with:
+`make proto-tools` does not install `protoc`. Fetch and checksum-verify the
+pinned binary into `bin/` (macOS arm64/x86_64 and Linux x86_64/arm64 are
+supported) with:
+
+```bash
+make fetch-protoc
+```
+
+`check-proto-tools`, `proto`, and `proto-check` automatically prefer the
+pinned binary in `bin/` over whatever `protoc` is on `PATH`. If your platform
+isn't covered, install protoc 35.1 separately and confirm with:
 
 ```bash
 protoc --version
