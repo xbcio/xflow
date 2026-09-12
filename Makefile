@@ -145,27 +145,53 @@ fi; \
 echo "==> integration assignment verified: $$integration_test_count tests exactly once across $(INTEGRATION_TEST_SHARDS) shards"
 endef
 
+# Splits an already-computed `all_packages` into `packages` (the parallel
+# fan-out) and `redis_packages` (serialized), given `script_package`.
+#
+# Packages that reach the real Redis at XFLOW_TEST_REDIS_ADDR must not run
+# concurrently with each other: rstate's freshRealRedis calls FlushDB, which is
+# global to the database, so a neighbour package loses its keys mid-test. With
+# the address exported, running the five of them concurrently failed 5 of 10
+# trials (trigger lock renew, timeout key processing, control-plane runner
+# directory); at -p=1 it failed 0 of 10. The set is detected rather than listed
+# so a new real-Redis package cannot silently reopen the hole, and intersected
+# with `go list ./...` so build-tagged packages (integration, perf, soak) drop
+# out of an untagged run instead of failing `go list`.
+define SPLIT_TEST_PACKAGES
+module="$$($(GO) list -m)" || exit 1; \
+redis_dirs="$$(grep -rl XFLOW_TEST_REDIS_ADDR --include='*.go' \
+	--exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.claude . \
+	| xargs -n1 dirname | sort -u | sed 's|^\./||')"; \
+if [ -z "$$redis_dirs" ]; then echo "ERROR: no package reads XFLOW_TEST_REDIS_ADDR; the serial-group detector is stale" >&2; exit 1; fi; \
+redis_candidates="$$(printf '%s\n' "$$redis_dirs" | sed "s|^|$$module/|" | tr '\n' ' ')"; \
+redis_packages="$$(printf '%s\n' "$$all_packages" | awk -v redis="$$redis_candidates" \
+	'BEGIN { n = split(redis, r, " "); for (i = 1; i <= n; i++) if (r[i] != "") keep[r[i]] = 1 } $$0 in keep')"; \
+if [ -z "$$redis_packages" ]; then echo "ERROR: found real-Redis dirs ($$redis_dirs) but none is a package in this build; the module path or their build tags changed" >&2; exit 1; fi; \
+packages="$$(printf '%s\n' "$$all_packages" | awk -v script_package="$$script_package" -v redis="$$redis_candidates" \
+	'BEGIN { n = split(redis, r, " "); for (i = 1; i <= n; i++) if (r[i] != "") skip[r[i]] = 1 } \
+	 $$0 != script_package && $$0 != script_package "/js" && $$0 != script_package "/wasm" && !($$0 in skip)')" || exit 1; \
+if [ -z "$$packages" ]; then echo "ERROR: ordinary test package list is empty" >&2; exit 1; fi
+endef
+
 # The script seam and WASM packages compile several real wasip1 guests. Running
 # them in the same package fan-out as the rest of ./... can starve their bounded
 # execution contexts under -race. Run the ordinary packages first, then serialize
 # the focused script/WASM gate; every package remains covered by make test.
+define RUN_ORDINARY_TEST_PACKAGES
+all_packages="$$($(GO) list ./...)" || exit 1; \
+script_package="$$($(GO) list $(SCRIPT_PACKAGE_ROOT))" || exit 1; \
+$(call SPLIT_TEST_PACKAGES); \
+$(GO) test $$packages -race -count=1 -timeout 5m $(1) && \
+$(GO) test -p=1 $$redis_packages -race -count=1 -timeout 5m $(1)
+endef
+
 test: check-go
-	@all_packages="$$($(GO) list ./...)" || exit 1; \
-	script_package="$$($(GO) list $(SCRIPT_PACKAGE_ROOT))" || exit 1; \
-	packages="$$(printf '%s\n' "$$all_packages" | awk -v script_package="$$script_package" \
-		'$$0 != script_package && $$0 != script_package "/js" && $$0 != script_package "/wasm"')" || exit 1; \
-	if [ -z "$$packages" ]; then echo "ERROR: ordinary test package list is empty" >&2; exit 1; fi; \
-	$(GO) test $$packages -race -count=1 -timeout 5m
+	@$(call RUN_ORDINARY_TEST_PACKAGES,)
 	$(GO) test -p=1 $(SCRIPT_JS_PACKAGES) -race -count=1 -timeout 5m
 	@$(call RUN_WASM_TEST_SHARDS,)
 
 test-verbose: check-go
-	@all_packages="$$($(GO) list ./...)" || exit 1; \
-	script_package="$$($(GO) list $(SCRIPT_PACKAGE_ROOT))" || exit 1; \
-	packages="$$(printf '%s\n' "$$all_packages" | awk -v script_package="$$script_package" \
-		'$$0 != script_package && $$0 != script_package "/js" && $$0 != script_package "/wasm"')" || exit 1; \
-	if [ -z "$$packages" ]; then echo "ERROR: ordinary test package list is empty" >&2; exit 1; fi; \
-	$(GO) test $$packages -race -count=1 -timeout 5m -v
+	@$(call RUN_ORDINARY_TEST_PACKAGES,-v)
 	$(GO) test -p=1 $(SCRIPT_JS_PACKAGES) -race -count=1 -timeout 5m -v
 	@$(call RUN_WASM_TEST_SHARDS,-v)
 
@@ -173,9 +199,12 @@ test-examples: check-go
 	$(GO) test ./sdk/examples/ -race -count=1 -v -timeout 30s
 
 # Concurrency stress suite. Gated behind the `concurrency` build tag so the
-# default `make test` stays fast.
+# default `make test` stays fast. The tag only adds files, so each package's
+# ordinary real-Redis tests run here too: -p=1 for the same reason the ordinary
+# fan-out serializes them, and -count=3 widens the window rstate's FlushDB would
+# otherwise wipe.
 test-concurrency: check-go
-	$(GO) test -tags=concurrency ./backend/providers/local/ ./backend/providers/distributed/... -race -count=3 -timeout 5m
+	$(GO) test -p=1 -tags=concurrency ./backend/providers/local/ ./backend/providers/distributed/... -race -count=3 -timeout 5m
 
 # Group entry-admission stress suite. Gated behind the `stress` build tag, so
 # like test-concurrency it stays out of the default `make test`. It needs no
@@ -214,13 +243,14 @@ test-coverage: check-go
 	merged="$$(mktemp "$$profile_dir/.xflow-coverage.XXXXXX")"; \
 	all_packages="$$($(GO) list ./...)"; \
 	script_package="$$($(GO) list $(SCRIPT_PACKAGE_ROOT))"; \
-	packages="$$(printf '%s\n' "$$all_packages" | awk -v script_package="$$script_package" \
-		'$$0 != script_package && $$0 != script_package "/js" && $$0 != script_package "/wasm"')"; \
-	if [ -z "$$packages" ]; then echo "ERROR: ordinary coverage package list is empty" >&2; exit 1; fi; \
+	$(call SPLIT_TEST_PACKAGES); \
 	ordinary_profile="$$tmpdir/ordinary.out"; \
+	redis_profile="$$tmpdir/redis.out"; \
 	script_profile="$$tmpdir/script-js.out"; \
 	echo "==> coverage: ordinary packages (5m timeout)"; \
 	$(GO) test $$packages -race -count=1 -timeout 5m -covermode=atomic -coverprofile="$$ordinary_profile"; \
+	echo "==> coverage: real-Redis packages (serialized, 5m timeout)"; \
+	$(GO) test -p=1 $$redis_packages -race -count=1 -timeout 5m -covermode=atomic -coverprofile="$$redis_profile"; \
 	echo "==> coverage: script/JS packages (serialized, 5m timeout)"; \
 	$(GO) test -p=1 $(SCRIPT_JS_PACKAGES) -race -count=1 -timeout 5m -covermode=atomic -coverprofile="$$script_profile"; \
 	wasm_list="$$($(GO) test $(WASM_PACKAGE) -count=1 -list '^(Test|Fuzz|Example)')"; \
@@ -261,7 +291,7 @@ test-coverage: check-go
 				location = order[i]; \
 				printf "%s %s %.0f\n", location, statement_count[location], coverage_count[location]; \
 			} \
-		}' "$$ordinary_profile" "$$script_profile" "$$tmpdir"/wasm-*.out > "$$merged"; then \
+		}' "$$ordinary_profile" "$$redis_profile" "$$script_profile" "$$tmpdir"/wasm-*.out > "$$merged"; then \
 		echo "ERROR: coverage profiles are malformed or have incompatible blocks" >&2; \
 		exit 1; \
 	fi; \
