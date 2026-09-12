@@ -40,7 +40,10 @@ func benchStateStore(b *testing.B, addr string, skipOnErr bool) {
 	b.Helper()
 	bk, err := distributed.New(addr, nil, distributed.WithConsumer(false))
 	if err != nil {
-		if skipOnErr {
+		// Reachability is already gated by realRedisAddr; this second branch
+		// covers a backend that refuses to build for some other reason. Under
+		// XFLOW_REQUIRE_REDIS_INTEGRATION=1 it must not degrade to a skip.
+		if skipOnErr && os.Getenv("XFLOW_REQUIRE_REDIS_INTEGRATION") != "1" {
 			b.Skipf("redis not reachable at %s: %v", addr, err)
 			return
 		}
@@ -80,11 +83,8 @@ func BenchmarkStateStoreMiniredis(b *testing.B) {
 
 // BenchmarkStateStoreRealRedis measures CreateExecution+GetExecution against a
 // real Redis instance.  Set XFLOW_TEST_REDIS_ADDR (e.g. localhost:6380) before
-// running; the benchmark is skipped when the address is unreachable.
+// running; the benchmark is skipped when the address is unreachable, or fails
+// under XFLOW_REQUIRE_REDIS_INTEGRATION=1.
 func BenchmarkStateStoreRealRedis(b *testing.B) {
-	addr := os.Getenv("XFLOW_TEST_REDIS_ADDR")
-	if addr == "" {
-		addr = "localhost:6379"
-	}
-	benchStateStore(b, addr, true)
+	benchStateStore(b, realRedisAddr(b), true)
 }
