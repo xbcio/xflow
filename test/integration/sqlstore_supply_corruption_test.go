@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"encoding/base64"
 	"testing"
 
 	"github.com/xbcio/xflow/store"
@@ -28,13 +29,16 @@ func TestGetSupplyDetectsCorruptedContent(t *testing.T) {
 		t.Fatalf("PutSupply: %v", err)
 	}
 
-	// Corrupt the stored column directly, bypassing the repo. Front-truncate
-	// far enough that IsEncrypted's prefix check no longer recognizes an
-	// envelope, so Open takes the "it's plaintext" passthrough path and
-	// returns the garbage bytes with a nil error.
+	// Corrupt the stored column directly, bypassing the repo. The physical
+	// column is base64 text, so preserve a valid encoding: Scan must return raw
+	// garbage for this test to exercise Open and the content_hash check rather
+	// than reject malformed base64 first. Front-truncate far enough that
+	// IsEncrypted's prefix check no longer recognizes an envelope, so Open takes
+	// the "it's plaintext" passthrough path and returns the garbage bytes with a
+	// nil error.
 	if err := p.DB().Exec(
-		"UPDATE xflow_supplies SET content = 'garbage' WHERE namespace = ? AND name = ?",
-		"ns", name,
+		"UPDATE xflow_supplies SET content = ? WHERE namespace = ? AND name = ?",
+		base64.StdEncoding.EncodeToString([]byte("garbage")), "ns", name,
 	).Error; err != nil {
 		t.Fatalf("corrupt stored content: %v", err)
 	}
@@ -62,11 +66,11 @@ func TestGetSupplyDetectsCorruptedContentWithoutEncryption(t *testing.T) {
 		t.Fatalf("PutSupply: %v", err)
 	}
 
-	// Corrupt the stored column directly, bypassing the repo, so content no
-	// longer matches the content_hash recorded alongside it.
+	// Corrupt the stored column directly, bypassing the repo, with valid base64
+	// so content no longer matches the content_hash recorded alongside it.
 	if err := p.DB().Exec(
-		"UPDATE xflow_supplies SET content = 'garbage' WHERE namespace = ? AND name = ?",
-		"ns", name,
+		"UPDATE xflow_supplies SET content = ? WHERE namespace = ? AND name = ?",
+		base64.StdEncoding.EncodeToString([]byte("garbage")), "ns", name,
 	).Error; err != nil {
 		t.Fatalf("corrupt stored content: %v", err)
 	}

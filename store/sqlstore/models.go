@@ -1,18 +1,69 @@
 package sqlstore
 
 import (
+	"database/sql/driver"
+	"encoding/base64"
+	"fmt"
 	"time"
 
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
 )
 
+// b64Bytes is a []byte persisted as base64 text.
+//
+// The columns behind it are LONGTEXT, not a blob type: the deployment's schema
+// review rejects blob columns outright. Encoding happens at the database/sql
+// boundary via driver.Valuer/sql.Scanner so callers keep handling raw bytes.
+//
+// The backing column MUST be COLLATE utf8mb4_bin. base64 is case-sensitive;
+// under a _ci collation two different payloads can compare equal, which would
+// silently corrupt any lookup or uniqueness constraint over the column.
+type b64Bytes []byte
+
+// Value returns "" rather than nil for empty input: both columns are NOT NULL.
+func (b b64Bytes) Value() (driver.Value, error) {
+	if len(b) == 0 {
+		return "", nil
+	}
+	return base64.StdEncoding.EncodeToString(b), nil
+}
+
+func (b *b64Bytes) Scan(src any) error {
+	switch v := src.(type) {
+	case nil:
+		*b = nil
+		return nil
+	case string:
+		return b.decode(v)
+	case []byte:
+		return b.decode(string(v))
+	default:
+		return fmt.Errorf("sqlstore: cannot scan %T into b64Bytes", src)
+	}
+}
+
+func (b *b64Bytes) decode(s string) error {
+	if s == "" {
+		*b = nil
+		return nil
+	}
+	raw, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		// Do not include the column value in the error: for xflow_supplies it
+		// is ciphertext of something that may be a credential.
+		return fmt.Errorf("sqlstore: decode base64 column: %w", err)
+	}
+	*b = raw
+	return nil
+}
+
 // dbSupply is the GORM persistence type for store.SupplyResource.
 type dbSupply struct {
 	ID          uint64     `gorm:"column:id;primaryKey;autoIncrement"`
 	Namespace   string     `gorm:"column:namespace;type:varchar(64);uniqueIndex:uk_ns_name"`
 	Name        string     `gorm:"column:name;type:varchar(255);uniqueIndex:uk_ns_name"`
-	Content     []byte     `gorm:"column:content;type:mediumblob"`
+	Content     b64Bytes   `gorm:"column:content;type:LONGTEXT COLLATE utf8mb4_bin;not null"`
 	ContentType string     `gorm:"column:content_type;type:varchar(128)"`
 	Revision    uint64     `gorm:"column:revision"`
 	ContentHash string     `gorm:"column:content_hash;type:varchar(80)"`
@@ -33,7 +84,7 @@ func fromDBSupply(d *dbSupply) *store.SupplyResource {
 	return &store.SupplyResource{
 		Namespace:   d.Namespace,
 		Name:        d.Name,
-		Content:     d.Content,
+		Content:     []byte(d.Content),
 		ContentType: d.ContentType,
 		Revision:    d.Revision,
 		ContentHash: d.ContentHash,
@@ -217,7 +268,7 @@ func fromDBSignals(ds []*dbSignal) []*store.SignalRecord {
 // string, not an auto-increment id, because addressing is by content hash.
 type dbArtifactBlob struct {
 	ContentHash string    `gorm:"column:content_hash;type:varchar(80);primaryKey"`
-	Content     []byte    `gorm:"column:content;type:mediumblob"`
+	Content     b64Bytes  `gorm:"column:content;type:LONGTEXT COLLATE utf8mb4_bin;not null"`
 	SizeBytes   uint64    `gorm:"column:size_bytes"`
 	CreatedAt   time.Time `gorm:"column:created_at;autoCreateTime:milli"`
 }

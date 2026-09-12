@@ -132,7 +132,7 @@ func (r *supplyRepo) PutSupply(ctx context.Context, rec *store.SupplyResource, i
 			ID:          cur.ID,
 			Namespace:   rec.Namespace,
 			Name:        rec.Name,
-			Content:     storedContent,
+			Content:     b64Bytes(storedContent),
 			ContentType: rec.ContentType,
 			Revision:    curRev + 1,
 			ContentHash: contentHash,
@@ -142,6 +142,10 @@ func (r *supplyRepo) PutSupply(ctx context.Context, rec *store.SupplyResource, i
 		}
 		if found {
 			if err := tx.Model(&dbSupply{}).Where("id = ?", cur.ID).Updates(map[string]any{
+				// next.Content is b64Bytes: Updates(map) bypasses GORM's schema, so the
+				// base64 encoding here depends entirely on database/sql finding driver.Valuer
+				// on the value's static type. Do NOT substitute rec.Content or a []byte
+				// conversion — either one silently writes raw bytes into a text column.
 				"content":       next.Content,
 				"content_type":  next.ContentType,
 				"revision":      next.Revision,

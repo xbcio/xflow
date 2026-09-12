@@ -7,6 +7,7 @@ import (
 	"reflect"
 
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/store/objectstore"
@@ -25,6 +26,24 @@ type Provider struct {
 	*supplyRepo
 	artifactBlobs *artifactBlobRepo
 	artifactIndex *artifactIndexRepo
+}
+
+// parameterizedSQLLogger preserves the caller's GORM logger while ensuring
+// bound values never get interpolated into SQL traces. sqlstore binds base64
+// artifact content and supply ciphertext, neither of which belongs in logs.
+//
+// LogMode must retain this wrapper because GORM's Debug method replaces its
+// logger with the result of LogMode.
+type parameterizedSQLLogger struct {
+	gormlogger.Interface
+}
+
+func (l parameterizedSQLLogger) LogMode(level gormlogger.LogLevel) gormlogger.Interface {
+	return parameterizedSQLLogger{Interface: l.Interface.LogMode(level)}
+}
+
+func (parameterizedSQLLogger) ParamsFilter(_ context.Context, sql string, _ ...interface{}) (string, []interface{}) {
+	return sql, nil
 }
 
 // compile-time interface checks
@@ -83,6 +102,14 @@ func New(db *gorm.DB, opts ...Option) *Provider {
 	o := &options{}
 	for _, opt := range opts {
 		opt(o)
+	}
+	// Protect all Provider construction paths, including callers that use
+	// sqlstore.New directly with a GORM logger configured to interpolate SQL
+	// parameters. Session preserves the caller's connection and logger sink.
+	if db != nil {
+		db = db.Session(&gorm.Session{
+			Logger: parameterizedSQLLogger{Interface: db.Logger},
+		})
 	}
 	return &Provider{
 		db:            db,
@@ -159,8 +186,8 @@ func storesFor(db *gorm.DB) store.Set {
 // that it stays in lockstep with db/xflow_schema.sql's CREATE TABLE
 // statements. Without that pairing test, a model added here but not there
 // would go unnoticed: CI seeds a fresh database from db/xflow_schema.sql and
-// then calls AutoMigrate on top of it, and GORM's AutoMigrate only ever adds
-// columns/tables, never removes them — so a missing CREATE TABLE is silently
+// then calls AutoMigrate on top of it. AutoMigrate can add missing
+// columns/tables but never removes them, so a missing CREATE TABLE is silently
 // patched over in CI while production (which never runs AutoMigrate; see the
 // doc comment below) would be missing the table entirely.
 var autoMigrateModels = []any{

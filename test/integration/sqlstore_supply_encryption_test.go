@@ -5,6 +5,7 @@ package integration
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"testing"
 	"time"
@@ -40,18 +41,23 @@ func newSQLStoreProviderWithSupplyEncryption(t *testing.T, a *supplyenc.AtRest) 
 	return p
 }
 
-// rawSupplyContent reads the content column without going through supplyRepo,
-// so it observes exactly what is on disk. Asserting on the repo's output would
-// prove nothing: it decrypts.
+// rawSupplyContent reads and decodes the base64 content column without going
+// through supplyRepo. Asserting on the repo's output would prove nothing: it
+// decrypts. Decoding here lets callers inspect the stored plaintext or
+// encryption envelope rather than its text representation.
 func rawSupplyContent(t *testing.T, p *sqlstore.Provider, namespace, name string) []byte {
 	t.Helper()
 	row := p.DB().Raw(
 		"SELECT content FROM xflow_supplies WHERE namespace = ? AND name = ?",
 		namespace, name,
 	).Row()
-	var content []byte
-	if err := row.Scan(&content); err != nil {
+	var encoded string
+	if err := row.Scan(&encoded); err != nil {
 		t.Fatalf("read raw content column: %v", err)
+	}
+	content, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decode base64 content column: %v", err)
 	}
 	return content
 }

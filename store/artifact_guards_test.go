@@ -81,8 +81,8 @@ func (c *countingObjects) HeadObject(_ context.Context, key string) (*objectstor
 //
 //   - Only asserting that oversize content is rejected leaves `>` free to
 //     become `>=`, which silently makes the real limit 16 MiB minus one byte —
-//     a cap that rejects exactly the artifact a caller sized to fit the
-//     MEDIUMBLOB column the constant is documented to match.
+//     a cap that rejects exactly the largest artifact allowed by
+//     MaxArtifactBytes.
 //   - Only asserting that at-cap content is accepted leaves the whole check
 //     deletable.
 //
@@ -90,10 +90,9 @@ func (c *countingObjects) HeadObject(_ context.Context, key string) (*objectstor
 // computed here rather than trusted from the caller, and MaxArtifactBytes is
 // the only thing bounding that decision's memory cost. Removing it means an
 // artifact upload sizes the server's heap, and the failure surfaces as an OOM
-// in an unrelated request rather than as a rejected Put. The blob then also
-// exceeds the MEDIUMBLOB column and fails at the SQL layer with a driver
-// error, after the bytes have already been hashed and written to the object
-// store — the accept/reject decision must happen before any of that.
+// in an unrelated request rather than as a rejected Put. The upload can then
+// reach object storage before a backend-specific size or transport limit
+// surfaces — the accept/reject decision must happen before any of that.
 func TestPutEnforcesMaxArtifactBytesAtTheBoundary(t *testing.T) {
 	ctx := context.Background()
 
@@ -104,7 +103,7 @@ func TestPutEnforcesMaxArtifactBytesAtTheBoundary(t *testing.T) {
 		ref, err := as.Put(ctx, make([]byte, MaxArtifactBytes), ArtifactMeta{Filename: "atcap.wasm"})
 		if err != nil {
 			t.Fatalf("Put of exactly MaxArtifactBytes (%d) failed: %v; the ceiling is "+
-				"off by one and rejects the largest artifact the MEDIUMBLOB column holds",
+				"off by one and rejects an artifact exactly at MaxArtifactBytes",
 				int64(MaxArtifactBytes), err)
 		}
 		if ref.Size != MaxArtifactBytes {

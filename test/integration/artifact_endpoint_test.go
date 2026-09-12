@@ -261,7 +261,8 @@ func TestArtifactEndpointMySQLOverHTTPStore(t *testing.T) {
 }
 
 // TestArtifactEndpointMySQLHeadSelectsNoContent pins that a HEAD through the
-// HTTP route does not pull the multi-MiB BLOB out of MySQL. The repo-level test
+// HTTP route does not pull the multi-MiB base64-encoded LONGTEXT content out of
+// MySQL. The repo-level test
 // asserts the same about HeadObject's SQL; this one asserts the route reaches
 // that method rather than falling back to a Get whose body it discards — which
 // would be invisible in the response and cost a full column read per HEAD.

@@ -5,6 +5,7 @@ package integration
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -279,8 +280,9 @@ func TestArtifactCrossNamespace(t *testing.T) {
 // positives from "content_hash" or "content_type") nor uses a star.
 //
 // The star check is the one that matters: dropping the .Select(...) clause makes
-// GORM emit `SELECT *`, which pulls the 16 MiB BLOB while containing no
-// substring a "does it mention content" test would match. A column-name check
+// GORM emit `SELECT *`, which pulls the base64-encoded LONGTEXT content (up to
+// 22.4 MiB for an at-cap artifact) while containing no substring a "does it
+// mention content" test would match. A column-name check
 // alone therefore passes on exactly the regression it exists to catch.
 func TestArtifactHeadObjectNoContent(t *testing.T) {
 	dsn := requireMySQL(t)
@@ -318,8 +320,8 @@ func TestArtifactHeadObjectNoContent(t *testing.T) {
 //
 // Both checks are load-bearing and neither subsumes the other: naming the column
 // is the obvious regression, while `SELECT *` (what GORM emits the moment the
-// .Select(...) clause is dropped) pulls the same 16 MiB while containing no
-// "content" substring at all.
+// .Select(...) clause is dropped) pulls the same base64-encoded LONGTEXT
+// content while containing no "content" substring at all.
 func assertNoBlobContentSelected(t *testing.T, captured []string) {
 	t.Helper()
 	found := false
@@ -583,7 +585,7 @@ func readBlobRow(t *testing.T, db *gorm.DB, digest string) string {
 	t.Helper()
 	var row struct {
 		ContentHash string
-		Content     []byte
+		Content     string
 		SizeBytes   uint64
 		CreatedAt   time.Time
 	}
@@ -594,7 +596,11 @@ func readBlobRow(t *testing.T, db *gorm.DB, digest string) string {
 		Take(&row).Error; err != nil {
 		t.Fatalf("readBlobRow: %v", err)
 	}
-	return fmt.Sprintf("%s|%d|%d|%x", row.ContentHash, row.SizeBytes, row.CreatedAt.UnixNano(), row.Content)
+	content, err := base64.StdEncoding.DecodeString(row.Content)
+	if err != nil {
+		t.Fatalf("readBlobRow: decode base64 content: %v", err)
+	}
+	return fmt.Sprintf("%s|%d|%d|%x", row.ContentHash, row.SizeBytes, row.CreatedAt.UnixNano(), content)
 }
 
 // readIdentityRows snapshots every identity row referencing digest, ordered so

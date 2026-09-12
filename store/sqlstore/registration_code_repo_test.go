@@ -72,11 +72,10 @@ func skipOrFailEnrollMySQL(t *testing.T, format string, args ...any) {
 	t.Skipf(format, args...)
 }
 
-// newEnrollTestDB opens a real local MySQL connection, runs AutoMigrate (safe
-// to call repeatedly: additive only), truncates the three enroll tables so
-// each contract subtest's factory(t) call gets a fresh, empty store, and
-// skips with an explicit reason if MySQL is unreachable — never silently, and
-// never echoing the DSN.
+// newEnrollTestDB opens a real local MySQL connection, runs AutoMigrate, then
+// truncates the three enroll tables so each contract subtest's factory(t) call
+// gets a fresh, empty store. It skips with an explicit reason if MySQL is
+// unreachable — never silently, and never echoing the DSN.
 func newEnrollTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	dsn := enrollTestDSN()

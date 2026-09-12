@@ -786,9 +786,10 @@ var ErrSupplyContentTooLarge = errors.New("xflow: supply content exceeds size li
 // (spec appendix Z.5). Sealing the HTTP verb removed the only place this
 // bound was checked; without reinstating it here the two surviving SDK write
 // paths (this method and UpdateSupplyIfMatch) accept content of any size —
-// unbounded through memstore, and bounded only by the sqlstore MEDIUMBLOB
-// column (16 MiB) through sqlstore, which turns a deliberate policy rejection
-// into an opaque driver error at 16x the intended limit. Supply content is
+// unbounded through memstore and, through sqlstore's base64-encoded LONGTEXT,
+// constrained only by deployment-specific database and packet limits. That
+// turns a deliberate policy rejection into a late, opaque persistence error.
+// Supply content is
 // pulled into runner memory at run time — this is a runtime constraint, not
 // transport-layer courtesy, so it belongs at the SDK boundary regardless of
 // which store backs it.

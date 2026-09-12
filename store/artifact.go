@@ -14,9 +14,10 @@ import (
 	"github.com/xbcio/xflow/store/objectstore"
 )
 
-// MaxArtifactBytes caps a single artifact at 16 MiB, matching the MEDIUMBLOB
-// column that backs the authoritative store and the max_allowed_packet the
-// deployment already requires for xflow_supplies.
+// MaxArtifactBytes caps a single raw artifact at 16 MiB. The authoritative SQL
+// store persists artifact bytes as base64 in LONGTEXT, so the largest artifact
+// encodes to 22,369,624 bytes. Deployments must set max_allowed_packet to at
+// least 32 MiB to accommodate the encoded value and protocol overhead.
 const MaxArtifactBytes = 16 << 20
 
 // MaxVersionBytes caps a version at the width of the version column
@@ -255,9 +256,9 @@ func (s *ArtifactStore) Put(ctx context.Context, content []byte, meta ArtifactMe
 // process, not once per message.
 //
 // Verification requires the whole body, so Open buffers rather than streams.
-// Every backend already does: sqlstore reads the MEDIUMBLOB into memory,
-// objectstore.ReadThrough buffers the origin response to write it through to
-// cache, and MaxArtifactBytes bounds all of it at 16 MiB.
+// Every backend already does: sqlstore reads and decodes the base64 LONGTEXT
+// content into memory, objectstore.ReadThrough buffers the origin response to
+// write it through to cache, and MaxArtifactBytes bounds all of it at 16 MiB.
 func (s *ArtifactStore) Open(ctx context.Context, digest string) (io.ReadCloser, ArtifactRef, error) {
 	if err := ValidateDigest(digest); err != nil {
 		return nil, ArtifactRef{}, err

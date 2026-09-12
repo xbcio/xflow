@@ -65,12 +65,14 @@ CREATE TABLE IF NOT EXISTS xflow_signals (
 
 -- supply 内容快照（namespace 内具名、可变、带版本）
 -- content 是平台不解释的字节；它不是 secret，禁止存放凭证。
+-- content 使用 LONGTEXT 而非 blob：下游 schema 审核拒绝 blob 类型。应用层将
+-- 字节 base64 编码；utf8mb4_bin 是强制的，以保持 base64 的大小写敏感性。
 -- revision 每次写入 +1（即使内容未变）用于写侧 CAS；content_hash 供读侧比较。
 CREATE TABLE IF NOT EXISTS xflow_supplies (
     id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
     namespace     VARCHAR(64)     NOT NULL              COMMENT '租户/命名空间，服务端注入',
     name          VARCHAR(255)    NOT NULL              COMMENT 'supply 节点名，namespace 内唯一',
-    content       MEDIUMBLOB      NOT NULL              COMMENT '不透明内容字节',
+    content       LONGTEXT        COLLATE utf8mb4_bin NOT NULL COMMENT '不透明内容字节的 base64 编码',
     content_type  VARCHAR(128)    NOT NULL DEFAULT ''   COMMENT '建议性 MIME，平台不据此解析',
     revision      BIGINT UNSIGNED NOT NULL DEFAULT 0    COMMENT '单调递增，写侧 CAS',
     content_hash  VARCHAR(80)     NOT NULL DEFAULT ''   COMMENT 'sha256:<hex>，读侧比较',
@@ -84,9 +86,11 @@ CREATE TABLE IF NOT EXISTS xflow_supplies (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 字节层：全局按内容寻址，不可变，跨 namespace 去重
+-- content 使用 LONGTEXT 而非 blob：下游 schema 审核拒绝 blob 类型。应用层将
+-- 字节 base64 编码；utf8mb4_bin 是强制的，以保持 base64 的大小写敏感性。
 CREATE TABLE IF NOT EXISTS xflow_artifact_blobs (
     content_hash VARCHAR(80)     NOT NULL              COMMENT 'sha256:<hex>，全局去重键',
-    content      MEDIUMBLOB      NOT NULL              COMMENT '资源原始字节；平台不解释',
+    content      LONGTEXT        COLLATE utf8mb4_bin NOT NULL COMMENT '资源原始字节的 base64 编码；平台不解释',
     size_bytes   BIGINT UNSIGNED NOT NULL              COMMENT '字节数，取回后校验完整性',
     created_at   DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '首次上传时间',
     PRIMARY KEY (content_hash)

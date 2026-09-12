@@ -14,6 +14,8 @@ podman 拉起的 Redis / Kafka / MySQL，供 `test/integration/` 与 `test/perf/
     make env-ready        # 等待 Redis / MySQL / Kafka 协议就绪
     make env-migrate      # 灌入 db/xflow_schema.sql（幂等）
 
+> ⚠️ `make env-migrate` 只会创建缺失表，不会转换已有旧版 `MEDIUMBLOB` 表。可丢弃的本地/测试库若已写入 `xflow_supplies.content` 或 `xflow_artifact_blobs.content` 的原始二进制数据，请先重置或重建后再初始化；全新数据库无需额外操作。不要将此重置方式用于生产数据。
+
 ## 停止 / 重置
 
     make env-down         # 停止，保留 volume（数据留存，下次复用）

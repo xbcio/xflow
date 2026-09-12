@@ -179,9 +179,9 @@ func autoMigrateColumns(t *testing.T) map[string]map[string]bool {
 // pairing guard. Table-level equality already holds (see the sibling test);
 // this catches the failure mode that one lets through: a field added to a
 // model and not to db/xflow_schema.sql. CI seeds from the schema file and then
-// runs AutoMigrate, and GORM only ever ADDS columns — so the missing column is
-// silently patched in CI while production, which only ever applies the schema
-// file, does not have it at all.
+// runs AutoMigrate, which can add missing columns but never removes them — so
+// the missing column is silently patched in CI while production, which only
+// ever applies the schema file, does not have it at all.
 func TestAutoMigrateModelsMatchSchemaFileColumns(t *testing.T) {
 	fileCols := schemaTableColumns(t)
 	modelCols := autoMigrateColumns(t)
@@ -201,5 +201,54 @@ func TestAutoMigrateModelsMatchSchemaFileColumns(t *testing.T) {
 				t.Errorf("column %s.%s exists in db/xflow_schema.sql but not on the GORM model", table, c)
 			}
 		}
+	}
+}
+
+// schemaColumnDeclaration returns a column's declaration from one named CREATE
+// TABLE body. Scoping the search to that body prevents same-named columns in
+// other tables from satisfying a schema guard.
+func schemaColumnDeclaration(t *testing.T, schemaText, table, column string) string {
+	t.Helper()
+	tablePattern := regexp.MustCompile(`(?ims)^CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+` + "`?" + regexp.QuoteMeta(table) + "`?" + `\s*\((.*?)^\)\s*ENGINE\s*=`)
+	tableMatch := tablePattern.FindStringSubmatch(schemaText)
+	if tableMatch == nil {
+		t.Fatalf("schema has no CREATE TABLE definition for %q", table)
+	}
+
+	columnPattern := regexp.MustCompile(`(?im)^\s*` + "`?" + regexp.QuoteMeta(column) + "`?" + `\s+([^,\r\n]+)`)
+	columnMatch := columnPattern.FindStringSubmatch(tableMatch[1])
+	if columnMatch == nil {
+		t.Fatalf("schema has no declaration for %s.%s", table, column)
+	}
+	return columnMatch[1]
+}
+
+func TestBase64ContentColumnsUseLongtextBinaryCollation(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "db", "xflow_schema.sql"))
+	if err != nil {
+		t.Fatalf("read schema file: %v", err)
+	}
+
+	collation := regexp.MustCompile(`(?i)\bCOLLATE\s+utf8mb4_bin\b`)
+	notNull := regexp.MustCompile(`(?i)\bNOT\s+NULL\b`)
+	for _, tc := range []struct {
+		table string
+	}{
+		{table: "xflow_supplies"},
+		{table: "xflow_artifact_blobs"},
+	} {
+		t.Run(tc.table, func(t *testing.T) {
+			declaration := schemaColumnDeclaration(t, string(raw), tc.table, "content")
+			fields := strings.Fields(declaration)
+			if len(fields) == 0 || !strings.EqualFold(fields[0], "LONGTEXT") {
+				t.Errorf("%s.content declaration %q does not start with LONGTEXT", tc.table, declaration)
+			}
+			if !collation.MatchString(declaration) {
+				t.Errorf("%s.content declaration %q does not include COLLATE utf8mb4_bin", tc.table, declaration)
+			}
+			if !notNull.MatchString(declaration) {
+				t.Errorf("%s.content declaration %q does not include NOT NULL", tc.table, declaration)
+			}
+		})
 	}
 }

@@ -68,13 +68,13 @@ func (r *artifactBlobRepo) PutObject(ctx context.Context, key string, body io.Re
 
 	row := dbArtifactBlob{
 		ContentHash: digest,
-		Content:     content,
+		Content:     b64Bytes(content),
 		SizeBytes:   uint64(size),
 	}
 
 	if opts.IfNoneMatch {
 		// INSERT ... ON DUPLICATE KEY UPDATE (no-op update) avoids rewriting
-		// the 16 MiB BLOB when the row already exists. RowsAffected == 0 means
+		// the at-cap base64-encoded content column when the row already exists. RowsAffected == 0 means
 		// the row existed — signal deduplication via ErrPreconditionFailed.
 		result := r.db.WithContext(ctx).
 			Clauses(clause.OnConflict{DoNothing: true}).
@@ -118,14 +118,14 @@ func (r *artifactBlobRepo) GetObject(ctx context.Context, key string) (io.ReadCl
 		ETag:         row.ContentHash,
 		LastModified: row.CreatedAt,
 	}
-	return io.NopCloser(bytes.NewReader(row.Content)), obj, nil
+	return io.NopCloser(bytes.NewReader([]byte(row.Content))), obj, nil
 }
 
 func (r *artifactBlobRepo) HeadObject(ctx context.Context, key string) (*objectstore.Object, error) {
 	digest := digestFromKey(key)
 	var row dbArtifactBlob
 	// Explicitly select only metadata columns — NEVER the content column.
-	// This is a hard requirement: HeadObject must not pull multi-MiB BLOBs.
+	// This is a hard requirement: HeadObject must not pull the multi-MiB content column.
 	err := r.db.WithContext(ctx).
 		Select("content_hash", "size_bytes", "created_at").
 		Where("content_hash = ?", digest).

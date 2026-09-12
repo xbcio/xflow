@@ -228,6 +228,7 @@ groups:
 
 - [ ] `--redis` 指向可恢复 Redis（持久化开启，RDB/AOF），非 `--memory`；若用 HA 模式，见下方额外检查项
 - [ ] `--mysql-dsn` 配置，指向生产 MySQL（`parseTime=true`）；启用持久化执行状态与 SQL 审计 sink
+- [ ] MySQL 配置 `max_allowed_packet >= 32 MiB`：16 MiB 原始 artifact 经 base64 编码后为 22,369,624 字节；32 MiB 为编码值及协议开销留出余量，`store.MaxArtifactBytes` 保持 16 MiB，不要修改
 - [ ] `--mode=production`（默认值，确认未改为 `dev`）；production 模式要求 `--auth-tokens-file`、`--mysql-dsn` 与 Reconciler，否则启动失败
 - [ ] `--auth-tokens-file` 配置（多租户/production 必设）；`--api-auth-token` 单 token 在 production 模式下被拒绝启动
 - [ ] `--auth-policy` 配置 runners.yaml，token 为高熵随机值，未硬编码
