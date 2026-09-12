@@ -44,10 +44,21 @@ const stripGlobals = `(function(){
 func (qjsEngine) Name() string { return "js/qjs" }
 
 func (qjsEngine) Execute(ctx context.Context, src engine.Source, globals map[string]any, h engine.Helpers) (result any, err error) {
-	// TODO(metrics): emit before/after counters and timers when the project
-	// metrics middleware lands:
+	// TODO(metrics): the precondition this list used to name — "when the
+	// project metrics middleware lands" — has been satisfied for a while:
+	// script.Observer is wired to observability/metrics.ScriptMetrics through
+	// node.SetScriptObserver.
+	//
+	// The execute duration and the abort path are already emitted by that seam
+	// labelled runtime="qjs", as OnScriptExecute with outcome "main" on success
+	// and "timeout"/"error"/"permanent" on failure, so do not add a second
+	// timer for them. The one thing that seam cannot express is the cause split
+	// below — outcome collapses a ctx cancellation and a guest panic into
+	// timeout vs error.
+	//
+	// What is still missing needs an engine-level observer this package does
+	// not have (the wasm package has one; this one does not):
 	//   - script_qjs_runtime_new_duration_seconds (qjs.New cost; cold-start indicator)
-	//   - script_qjs_execute_duration_seconds    (rt.Eval window)
 	//   - script_qjs_abort_total{cause=ctx|panic} (recover path)
 	if ctx == nil {
 		ctx = context.Background()

@@ -125,13 +125,24 @@ func (p *pooledVM) cleanup() bool {
 }
 
 func (e *gojaEngine) Execute(ctx context.Context, src engine.Source, globals map[string]any, h engine.Helpers) (any, error) {
-	// TODO(metrics): emit before/after counters and timers when the project
-	// metrics middleware lands:
+	// TODO(metrics): the precondition this list used to name — "when the
+	// project metrics middleware lands" — has been satisfied for a while:
+	// script.Observer is wired to observability/metrics.ScriptMetrics through
+	// node.SetScriptObserver.
+	//
+	// Two of the five signals it listed are already emitted by that seam,
+	// labelled runtime="goja", so do not add a second timer for them: the
+	// execute duration and the ctx-cancelled path arrive as OnScriptExecute —
+	// outcome="main" on success, "timeout" when ctx expired, "error" or
+	// "permanent" otherwise. Note the duration is measured around the whole
+	// script.Execute, so it includes compile and pool get.
+	//
+	// What is still missing is everything below the engine boundary, and
+	// unlike the wasm package this one exposes no observer of its own to
+	// report it through. Adding that seam is the actual remaining work:
 	//   - script_goja_compile_total{result=hit|miss} (e.programs LRU)
 	//   - script_goja_compile_duration_seconds       (goja.Compile only)
 	//   - script_goja_pool_get_total{result=hit|miss} (warm vs cold VM)
-	//   - script_goja_execute_duration_seconds       (RunProgram window)
-	//   - script_goja_interrupt_total                (ctx-cancelled path)
 	//
 	// src.Digest is ignored: JS sources are kilobytes, so keying the program
 	// cache by content costs a comparison this engine cannot measure. The digest
