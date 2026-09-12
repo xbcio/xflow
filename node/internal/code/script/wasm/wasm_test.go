@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -184,15 +185,19 @@ func TestWasm_InFlightTimeout(t *testing.T) {
 // output. Compiling fresh every time and reusing a cached module produce the
 // same result and the same (absent) error for a guest that compiles cleanly, so
 // no edit to the cache could turn that red — including deleting the cache
-// lookup outright. The hit/miss counters that would have made it observable
-// from outside are still a TODO in wazero.go, and the one real probe
-// (Observer.OnModuleCompile) is wired into the reactor host path, which this
-// test does not use.
+// lookup outright.
 //
-// So the check has to be a white-box one. Two things are asserted: the cache is
-// keyed by the sha256 of the bytes actually compiled — wazero.go's own comment
-// states this is a requirement, not an implementation detail — and the compiled
-// module handed back is the same object across iterations.
+// The hit/miss sequence is now observable from outside the package, because
+// wazero.go reports it through obs().OnModuleCompile like the reactor path
+// does, so that is asserted black-box. Two white-box checks stay, because no
+// observer can express them: the cache is keyed by the sha256 of the bytes
+// actually compiled — wazero.go's own comment states this is a requirement,
+// not an implementation detail — and the compiled module handed back is the
+// same object across iterations.
+//
+// The engine is the process-wide registered one and ten test sites execute
+// this same guest, so the entry is evicted first. Without that, whether the
+// first call is a miss depends on test ordering.
 func TestWasm_ModuleCacheHit(t *testing.T) {
 	we, ok := newWasm(t).(*wazeroEngine)
 	if !ok {
@@ -202,6 +207,11 @@ func TestWasm_ModuleCacheHit(t *testing.T) {
 	code := b64(echoWasm)
 	sum := sha256.Sum256(echoWasm)
 	key := hex.EncodeToString(sum[:])
+	we.compiled.c.Remove(key)
+
+	rec := &recordingObserver{}
+	SetObserver(rec)
+	defer SetObserver(nil)
 
 	var first wazero.CompiledModule
 	for i := range 3 {
@@ -224,6 +234,53 @@ func TestWasm_ModuleCacheHit(t *testing.T) {
 			t.Fatalf("iteration %d: cached module identity changed (%p -> %p); the guest "+
 				"was recompiled instead of served from cache", i, first, cm)
 		}
+	}
+
+	want := []string{"miss", "hit", "hit"}
+	got := rec.compileResults()
+	if !slices.Equal(got, want) {
+		t.Errorf("OnModuleCompile sequence = %v, want %v; a run of all misses means the "+
+			"cache lookup no longer serves warm calls", got, want)
+	}
+}
+
+// TestWasm_DigestServesWarmCallWithoutDecodingCode pins the digest fast path:
+// a known digest names the compiled module directly, so Execute must never look
+// at src.Code. Until now only a benchmark (module_resolution_bench_test.go)
+// exercised this branch, so deleting it would have cost throughput silently
+// while every test stayed green.
+//
+// src.Code is deliberately not valid base64. Taking the fast path ignores it;
+// falling through to decodeCode fails, which is what makes the assertion bite.
+func TestWasm_DigestServesWarmCallWithoutDecodingCode(t *testing.T) {
+	we, ok := newWasm(t).(*wazeroEngine)
+	if !ok {
+		t.Fatalf("engine.Lookup(\"wasm\", \"wazero\") returned %T, want *wazeroEngine", newWasm(t))
+	}
+	sum := sha256.Sum256(echoWasm)
+	key := hex.EncodeToString(sum[:])
+	we.compiled.c.Remove(key)
+
+	rec := &recordingObserver{}
+	SetObserver(rec)
+	defer SetObserver(nil)
+
+	// Prime the cache through the ordinary content path.
+	if _, err := we.Execute(context.Background(), engine.Code(b64(echoWasm)),
+		map[string]any{"$input": map[string]any{"n": float64(0)}}, engine.DefaultHelpers()); err != nil {
+		t.Fatalf("priming call: %v", err)
+	}
+
+	warm := engine.Source{Code: "not-valid-base64!!", Digest: "sha256:" + key}
+	if _, err := we.Execute(context.Background(), warm,
+		map[string]any{"$input": map[string]any{"n": float64(1)}}, engine.DefaultHelpers()); err != nil {
+		t.Fatalf("warm digest call: %v; the digest did not resolve to the cached module, "+
+			"so Execute fell through and tried to decode src.Code", err)
+	}
+
+	want := []string{"miss", "hit"}
+	if got := rec.compileResults(); !slices.Equal(got, want) {
+		t.Errorf("OnModuleCompile sequence = %v, want %v", got, want)
 	}
 }
 

@@ -98,6 +98,7 @@ func (e *wazeroEngine) compile(ctx context.Context, wasmBytes []byte) (wazero.Co
 	key := hex.EncodeToString(sum[:])
 
 	if cm, ok := e.compiled.c.Get(key); ok {
+		obs().OnModuleCompile(ctx, "hit")
 		return cm, nil
 	}
 
@@ -108,13 +109,17 @@ func (e *wazeroEngine) compile(ctx context.Context, wasmBytes []byte) (wazero.Co
 	// LRU.Add is thread-safe; concurrent compilers of the same module may both
 	// compile but only one entry is retained (the other is closed on eviction).
 	e.compiled.c.Add(key, cm)
+	obs().OnModuleCompile(ctx, "miss")
 	return cm, nil
 }
 
 func (e *wazeroEngine) Execute(ctx context.Context, src engine.Source, globals map[string]any, _ engine.Helpers) (any, error) {
-	// TODO(metrics): emit before/after counters and timers when the project
-	// metrics middleware lands:
-	//   - script_wasm_compile_total{result=hit|miss} (sha256 LRU)
+	// Module cache hit/miss goes to obs().OnModuleCompile, the same hook the
+	// reactor path reports through, so this cache is observable from outside
+	// the package rather than only by reaching into e.compiled.
+	//
+	// TODO(metrics): the remaining three need an Observer method each before
+	// they can be emitted; observability/metrics.ScriptMetrics is the sink.
 	//   - script_wasm_compile_duration_seconds       (CompileModule only)
 	//   - script_wasm_execute_duration_seconds       (InstantiateModule window)
 	//   - script_wasm_exit_total{code=...}           (guest exit codes)
@@ -136,6 +141,7 @@ func (e *wazeroEngine) Execute(ctx context.Context, src engine.Source, globals m
 	if src.Digest != "" {
 		if key, ok := moduleKeyFromDigest(src.Digest); ok {
 			if cm, hit := e.compiled.c.Get(key); hit {
+				obs().OnModuleCompile(ctx, "hit")
 				return e.run(ctx, cm, globals)
 			}
 		}
