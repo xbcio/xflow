@@ -8,6 +8,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/xbcio/xflow/backend/providers/distributed/internal/redisx"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
@@ -52,26 +53,20 @@ func (s *Store) ScanReplayReceipts(ctx context.Context, fn func(engine.ReplayRec
 
 func (s *Store) scanReplayReceiptsForNamespace(ctx context.Context, t namespace.Namespace, fn func(engine.ReplayReceipt) error) error {
 	pattern := fmt.Sprintf(replayReceiptScanPattern, t)
-	var cursor uint64
-	for {
-		keys, next, err := s.rdb.Scan(ctx, cursor, pattern, 256).Result()
-		if err != nil && err != redis.Nil {
-			return fmt.Errorf("scan replay receipts for namespace %q: %w", t, err)
+	keys, err := redisx.ScanAll(ctx, s.rdb, pattern, 256)
+	if err != nil && err != redis.Nil {
+		return fmt.Errorf("scan replay receipts for namespace %q: %w", t, err)
+	}
+	for _, key := range keys {
+		r, ok := decodeReplayReceiptKey(key, t)
+		if !ok {
+			continue
 		}
-		for _, key := range keys {
-			r, ok := decodeReplayReceiptKey(key, t)
-			if !ok {
-				continue
-			}
-			if err := s.decodeAndEmitReceipt(ctx, key, r, fn); err != nil {
-				return err
-			}
-		}
-		cursor = next
-		if cursor == 0 {
-			return nil
+		if err := s.decodeAndEmitReceipt(ctx, key, r, fn); err != nil {
+			return err
 		}
 	}
+	return nil
 }
 
 // decodeReplayReceiptKey splitsxflow:ns:<namespace>:exec:{<id>}:replay:receipt:<requestID>

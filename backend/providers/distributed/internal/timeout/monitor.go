@@ -10,6 +10,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/xbcio/xflow/backend/providers/distributed/internal/redisx"
 	"github.com/xbcio/xflow/backend/providers/distributed/internal/rstate"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
@@ -130,28 +131,16 @@ func (m *Monitor) processTimeouts(ctx context.Context, now time.Time) {
 }
 
 func (m *Monitor) processTimeoutsForNamespace(ctx context.Context, t namespace.Namespace, now time.Time, nowUnix string) {
-	var cursor uint64
-	seen := make(map[string]struct{})
 	pattern := fmt.Sprintf(timeoutKeyPattern, t)
-	for {
-		keys, next, err := m.rdb.Scan(ctx, cursor, pattern, timeoutScanCount).Result()
-		if err != nil && err != redis.Nil {
-			if m.logger != nil {
-				m.logger.Error("timeout monitor: scan timeout keys failed", "namespace", string(t), "error", err)
-			}
-			return
+	keys, err := redisx.ScanAll(ctx, m.rdb, pattern, timeoutScanCount)
+	if err != nil && err != redis.Nil {
+		if m.logger != nil {
+			m.logger.Error("timeout monitor: scan timeout keys failed", "namespace", string(t), "error", err)
 		}
-		for _, key := range keys {
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			m.processTimeoutKey(ctx, t, key, now, nowUnix)
-		}
-		cursor = next
-		if cursor == 0 {
-			return
-		}
+		return
+	}
+	for _, key := range keys {
+		m.processTimeoutKey(ctx, t, key, now, nowUnix)
 	}
 }
 

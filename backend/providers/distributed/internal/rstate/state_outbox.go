@@ -11,6 +11,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/xbcio/xflow/backend/providers/distributed/internal/redisx"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
@@ -416,62 +417,48 @@ func (s *Store) oldestOutboxCreatedAt(ctx context.Context, bodyKey string, membe
 }
 
 func (s *Store) scanOutboxMetricsForNamespace(ctx context.Context, t namespace.Namespace, snapshot *engine.OutboxMetricsSnapshot) error {
-	var cursor uint64
-	for {
-		keys, next, err := s.rdb.Scan(ctx, cursor, execScanPattern(t, "outbox:ready"), 128).Result()
+	keys, err := redisx.ScanAll(ctx, s.rdb, execScanPattern(t, "outbox:ready"), 128)
+	if err != nil {
+		return fmt.Errorf("scan pending outbox indexes: %w", err)
+	}
+	for _, key := range keys {
+		count, err := s.rdb.ZCard(ctx, key).Result()
 		if err != nil {
-			return fmt.Errorf("scan pending outbox indexes: %w", err)
+			return fmt.Errorf("count pending outbox %q: %w", key, err)
 		}
-		for _, key := range keys {
-			count, err := s.rdb.ZCard(ctx, key).Result()
-			if err != nil {
-				return fmt.Errorf("count pending outbox %q: %w", key, err)
-			}
-			snapshot.Pending += int(count)
-			if count == 0 {
-				continue
-			}
-			head, err := s.rdb.ZRangeArgs(ctx, redis.ZRangeArgs{
-				Key: key, Start: "-inf", Stop: "+inf", ByScore: true,
-				Offset: 0, Count: outboxMetricsHeadCap,
-			}).Result()
-			if err != nil {
-				return fmt.Errorf("read pending outbox head %q: %w", key, err)
-			}
-			if len(head) == 0 {
-				continue
-			}
-			oldestAt, err := s.oldestOutboxCreatedAt(ctx, outboxBodyKeyFromReadyKey(key), head)
-			if err != nil {
-				return err
-			}
-			if !oldestAt.IsZero() && (snapshot.OldestPendingAt.IsZero() || oldestAt.Before(snapshot.OldestPendingAt)) {
-				snapshot.OldestPendingAt = oldestAt
-			}
+		snapshot.Pending += int(count)
+		if count == 0 {
+			continue
 		}
-		cursor = next
-		if cursor == 0 {
-			break
+		head, err := s.rdb.ZRangeArgs(ctx, redis.ZRangeArgs{
+			Key: key, Start: "-inf", Stop: "+inf", ByScore: true,
+			Offset: 0, Count: outboxMetricsHeadCap,
+		}).Result()
+		if err != nil {
+			return fmt.Errorf("read pending outbox head %q: %w", key, err)
+		}
+		if len(head) == 0 {
+			continue
+		}
+		oldestAt, err := s.oldestOutboxCreatedAt(ctx, outboxBodyKeyFromReadyKey(key), head)
+		if err != nil {
+			return err
+		}
+		if !oldestAt.IsZero() && (snapshot.OldestPendingAt.IsZero() || oldestAt.Before(snapshot.OldestPendingAt)) {
+			snapshot.OldestPendingAt = oldestAt
 		}
 	}
 
-	cursor = 0
-	for {
-		keys, next, err := s.rdb.Scan(ctx, cursor, execScanPattern(t, "outbox:dead"), 128).Result()
+	keys, err = redisx.ScanAll(ctx, s.rdb, execScanPattern(t, "outbox:dead"), 128)
+	if err != nil {
+		return fmt.Errorf("scan dead-letter outbox indexes: %w", err)
+	}
+	for _, key := range keys {
+		count, err := s.rdb.ZCard(ctx, key).Result()
 		if err != nil {
-			return fmt.Errorf("scan dead-letter outbox indexes: %w", err)
+			return fmt.Errorf("count dead-letter outbox %q: %w", key, err)
 		}
-		for _, key := range keys {
-			count, err := s.rdb.ZCard(ctx, key).Result()
-			if err != nil {
-				return fmt.Errorf("count dead-letter outbox %q: %w", key, err)
-			}
-			snapshot.DeadLettered += int(count)
-		}
-		cursor = next
-		if cursor == 0 {
-			break
-		}
+		snapshot.DeadLettered += int(count)
 	}
 	return nil
 }
@@ -504,23 +491,16 @@ func (s *Store) ListOutboxExecutions(ctx context.Context, limit int) ([]types.Ex
 }
 
 func (s *Store) scanOutboxExecutionsForNamespace(ctx context.Context, t namespace.Namespace, limit int, ids map[types.ExecutionID]struct{}) error {
-	var cursor uint64
-	for len(ids) < limit {
-		keys, next, err := s.rdb.Scan(ctx, cursor, execScanPattern(t, "outbox:ready"), 128).Result()
-		if err != nil {
-			return fmt.Errorf("scan outbox indexes: %w", err)
+	keys, err := redisx.ScanAll(ctx, s.rdb, execScanPattern(t, "outbox:ready"), 128)
+	if err != nil {
+		return fmt.Errorf("scan outbox indexes: %w", err)
+	}
+	for _, key := range keys {
+		id, ok := executionIDFromKey(key)
+		if ok {
+			ids[id] = struct{}{}
 		}
-		for _, key := range keys {
-			id, ok := executionIDFromKey(key)
-			if ok {
-				ids[id] = struct{}{}
-			}
-			if len(ids) >= limit {
-				break
-			}
-		}
-		cursor = next
-		if cursor == 0 {
+		if len(ids) >= limit {
 			break
 		}
 	}

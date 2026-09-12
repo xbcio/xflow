@@ -12,6 +12,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/xbcio/xflow/backend/providers/distributed/internal/redisx"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
@@ -468,39 +469,32 @@ func (s *EntryActivationStore) List(ctx context.Context, ns namespace.Namespace)
 	}
 	records := make(map[engine.EntryActivationKey]scannedEntryActivation)
 	for _, pattern := range patterns {
-		var cursor uint64
-		for {
-			keys, next, err := s.rdb.Scan(ctx, cursor, pattern, 100).Result()
+		keys, err := redisx.ScanAll(ctx, s.rdb, pattern, 100)
+		if err != nil {
+			return nil, fmt.Errorf("scan entry activations: %w", err)
+		}
+		for _, redisKey := range keys {
+			fields, err := s.rdb.HGetAll(ctx, redisKey).Result()
 			if err != nil {
-				return nil, fmt.Errorf("scan entry activations: %w", err)
+				return nil, fmt.Errorf("read entry activation %q: %w", redisKey, err)
 			}
-			for _, redisKey := range keys {
-				fields, err := s.rdb.HGetAll(ctx, redisKey).Result()
-				if err != nil {
-					return nil, fmt.Errorf("read entry activation %q: %w", redisKey, err)
-				}
-				if len(fields) == 0 {
-					continue
-				}
-				act, err := decodeEntryActivation(fields)
-				if err != nil {
-					return nil, err
-				}
-				// A legacy namespace containing Redis glob metacharacters can make
-				// its old scan pattern over-inclusive. Trust the stored identity.
-				if act.Namespace != ns {
-					continue
-				}
-				identity := entryActivationKeyFromActivation(act)
-				modern := redisKey == s.keyFor(identity)
-				previous, exists := records[identity]
-				if !exists || modern && !previous.modern {
-					records[identity] = scannedEntryActivation{activation: act, modern: modern}
-				}
+			if len(fields) == 0 {
+				continue
 			}
-			cursor = next
-			if cursor == 0 {
-				break
+			act, err := decodeEntryActivation(fields)
+			if err != nil {
+				return nil, err
+			}
+			// A legacy namespace containing Redis glob metacharacters can make
+			// its old scan pattern over-inclusive. Trust the stored identity.
+			if act.Namespace != ns {
+				continue
+			}
+			identity := entryActivationKeyFromActivation(act)
+			modern := redisKey == s.keyFor(identity)
+			previous, exists := records[identity]
+			if !exists || modern && !previous.modern {
+				records[identity] = scannedEntryActivation{activation: act, modern: modern}
 			}
 		}
 	}

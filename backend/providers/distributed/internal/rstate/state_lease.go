@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/xbcio/xflow/backend/providers/distributed/internal/redisx"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/store"
@@ -173,141 +175,134 @@ func (s *Store) ListExpiredLeases(ctx context.Context, before time.Time) (expire
 }
 
 func (s *Store) scanExpiredLeasesForNamespace(ctx context.Context, t namespace.Namespace, before time.Time, max string, scanCount int64, seenIndexes map[string]struct{}, out *[]engine.ExpiredLease) error {
-	var cursor uint64
-	for len(*out) < leaseIndexBatchLimit {
-		indexKeys, next, err := s.rdb.Scan(ctx, cursor, execScanPattern(t, "leases"), scanCount).Result()
-		if err != nil {
-			return fmt.Errorf("scan lease indexes: %w", err)
+	indexKeys, err := redisx.ScanAll(ctx, s.rdb, execScanPattern(t, "leases"), scanCount)
+	if err != nil {
+		return fmt.Errorf("scan lease indexes: %w", err)
+	}
+	for _, indexKey := range indexKeys {
+		if _, seen := seenIndexes[indexKey]; seen {
+			continue
 		}
-		for _, indexKey := range indexKeys {
-			if _, seen := seenIndexes[indexKey]; seen {
+		seenIndexes[indexKey] = struct{}{}
+		indexNamespace, indexExecID, validIndex := parseNamespaceExecKey(indexKey)
+		if !validIndex || indexNamespace != t {
+			continue
+		}
+
+		remaining := leaseIndexBatchLimit - len(*out)
+		members, err := s.rdb.ZRangeArgs(ctx, redis.ZRangeArgs{
+			Key: indexKey, Start: "-inf", Stop: max, ByScore: true, Offset: 0, Count: int64(remaining),
+		}).Result()
+		if err != nil {
+			return fmt.Errorf("list expired leases for %q: %w", indexExecID, err)
+		}
+		for _, member := range members {
+			execID, nodeName, ok := splitLeaseMember(member)
+			if !ok || execID != indexExecID {
+				if err := s.rdb.ZRem(ctx, indexKey, member).Err(); err != nil {
+					return fmt.Errorf("prune malformed lease index member %q: %w", member, err)
+				}
 				continue
 			}
-			seenIndexes[indexKey] = struct{}{}
-			indexNamespace, indexExecID, validIndex := parseNamespaceExecKey(indexKey)
-			if !validIndex || indexNamespace != t {
-				continue
-			}
 
-			remaining := leaseIndexBatchLimit - len(*out)
-			members, err := s.rdb.ZRangeArgs(ctx, redis.ZRangeArgs{
-				Key: indexKey, Start: "-inf", Stop: max, ByScore: true, Offset: 0, Count: int64(remaining),
-			}).Result()
-			if err != nil {
-				return fmt.Errorf("list expired leases for %q: %w", indexExecID, err)
-			}
-			for _, member := range members {
-				execID, nodeName, ok := splitLeaseMember(member)
-				if !ok || execID != indexExecID {
-					if err := s.rdb.ZRem(ctx, indexKey, member).Err(); err != nil {
-						return fmt.Errorf("prune malformed lease index member %q: %w", member, err)
-					}
-					continue
+			// Group leases share this ZSET with node leases but encode
+			// their member as "<execID>|group:<unitIdx>". They must be
+			// recognized BEFORE the node lookup below: a group member has
+			// no node status key, so the redis.Nil branch would classify
+			// it as a terminal node with a stale index entry and ZREM the
+			// only record that the unit was ever leased — stranding the
+			// unit in "running" forever, since AcquireGroupLease refuses
+			// to re-acquire a running unit.
+			if unitIdx, isGroup := parseGroupLeaseMember(nodeName); isGroup {
+				if err := s.appendExpiredGroupLease(ctx, t, execID, unitIdx, indexKey, member, out); err != nil {
+					return err
 				}
-
-				// Group leases share this ZSET with node leases but encode
-				// their member as "<execID>|group:<unitIdx>". They must be
-				// recognized BEFORE the node lookup below: a group member has
-				// no node status key, so the redis.Nil branch would classify
-				// it as a terminal node with a stale index entry and ZREM the
-				// only record that the unit was ever leased — stranding the
-				// unit in "running" forever, since AcquireGroupLease refuses
-				// to re-acquire a running unit.
-				if unitIdx, isGroup := parseGroupLeaseMember(nodeName); isGroup {
-					if err := s.appendExpiredGroupLease(ctx, t, execID, unitIdx, indexKey, member, out); err != nil {
-						return err
-					}
-					if len(*out) == leaseIndexBatchLimit {
-						break
-					}
-					continue
-				}
-
-				status, err := s.rdb.Get(ctx, nodeStatusKey(t, execID, nodeName)).Result()
-				if err == redis.Nil || (err == nil && status != string(types.NodeStatusRunning) && status != string(types.NodeStatusCommitting) && status != string(types.NodeStatusWaiting)) {
-					if removeErr := s.rdb.ZRem(ctx, indexKey, member).Err(); removeErr != nil {
-						return fmt.Errorf("prune stale lease %q/%q: %w", execID, nodeName, removeErr)
-					}
-					continue
-				}
-				if err != nil {
-					return fmt.Errorf("read node status %q/%q: %w", execID, nodeName, err)
-				}
-
-				meta, err := s.rdb.HGetAll(ctx, nodeMetaKey(t, execID, nodeName)).Result()
-				if err != nil {
-					return fmt.Errorf("read node meta %q/%q: %w", execID, nodeName, err)
-				}
-				if meta["lease_token"] == "" {
-					if removeErr := s.rdb.ZRem(ctx, indexKey, member).Err(); removeErr != nil {
-						return fmt.Errorf("prune tokenless lease %q/%q: %w", execID, nodeName, removeErr)
-					}
-					continue
-				}
-
-				var deadlineMs, issuedAtMs, leaseTTLms int64
-				parseInt64(meta["lease_deadline_ms"], func(value int64) { deadlineMs = value })
-				parseInt64(meta["lease_issued_at_ms"], func(value int64) { issuedAtMs = value })
-				parseInt64(meta["lease_ttl_ms"], func(value int64) { leaseTTLms = value })
-				if deadlineMs <= 0 && issuedAtMs > 0 && leaseTTLms > 0 {
-					// Compatibility with leases written before lease_deadline_ms was
-					// introduced. The repaired index is then based on the same
-					// durable metadata, not its prior ZSET score.
-					deadlineMs = issuedAtMs + leaseTTLms
-				}
-				if deadlineMs > before.UnixMilli() {
-					// Use fenced Lua to prevent resurrecting a member that was
-					// concurrently ZREMed by commitNodeLua. The script validates
-					// that the node is still non-terminal and the lease token
-					// has not changed before writing the corrected score.
-					_ = repairLeaseIndexLua.Run(ctx, s.rdb,
-						[]string{
-							nodeStatusKey(t, execID, nodeName),
-							nodeMetaKey(t, execID, nodeName),
-							indexKey,
-						},
-						float64(deadlineMs), member, meta["lease_token"],
-					).Err()
-					continue
-				}
-
-				lease := engine.ExpiredLease{
-					ExecutionID: execID,
-					NodeName:    nodeName,
-					UnitIdx:     engine.UnitIdxUnknown,
-					LeaseID:     engine.LeaseID(meta["lease_id"]),
-					LeaseToken:  engine.LeaseToken(meta["lease_token"]),
-					Namespace:   t,
-				}
-				if issuedAtMs > 0 {
-					lease.IssuedAt = time.UnixMilli(issuedAtMs).UTC()
-				}
-				if leaseTTLms > 0 {
-					lease.TTL = time.Duration(leaseTTLms) * time.Millisecond
-				}
-				parseInt64(meta["node_idx"], func(value int64) { lease.NodeIdx = int(value) })
-				parseInt64(meta["unit_idx"], func(value int64) { lease.UnitIdx = int(value) })
-				parseInt64(meta["activation_id"], func(value int64) { lease.ActivationID = int(value) })
-				parseInt64(meta["auto_depth"], func(value int64) { lease.AutoDepth = int(value) })
-				parseInt64(meta["lease_task_type"], func(value int64) { lease.TaskType = engine.TaskType(value) })
-				if rawPayload := meta["lease_payload"]; rawPayload != "" {
-					var payload types.SignalPayload
-					if err := json.Unmarshal([]byte(rawPayload), &payload); err != nil {
-						return fmt.Errorf("decode expired lease payload %q/%q: %w", execID, nodeName, err)
-					}
-					lease.Payload = &payload
-				}
-				*out = append(*out, lease)
 				if len(*out) == leaseIndexBatchLimit {
 					break
 				}
+				continue
 			}
+
+			status, err := s.rdb.Get(ctx, nodeStatusKey(t, execID, nodeName)).Result()
+			if err == redis.Nil || (err == nil && status != string(types.NodeStatusRunning) && status != string(types.NodeStatusCommitting) && status != string(types.NodeStatusWaiting)) {
+				if removeErr := s.rdb.ZRem(ctx, indexKey, member).Err(); removeErr != nil {
+					return fmt.Errorf("prune stale lease %q/%q: %w", execID, nodeName, removeErr)
+				}
+				continue
+			}
+			if err != nil {
+				return fmt.Errorf("read node status %q/%q: %w", execID, nodeName, err)
+			}
+
+			meta, err := s.rdb.HGetAll(ctx, nodeMetaKey(t, execID, nodeName)).Result()
+			if err != nil {
+				return fmt.Errorf("read node meta %q/%q: %w", execID, nodeName, err)
+			}
+			if meta["lease_token"] == "" {
+				if removeErr := s.rdb.ZRem(ctx, indexKey, member).Err(); removeErr != nil {
+					return fmt.Errorf("prune tokenless lease %q/%q: %w", execID, nodeName, removeErr)
+				}
+				continue
+			}
+
+			var deadlineMs, issuedAtMs, leaseTTLms int64
+			parseInt64(meta["lease_deadline_ms"], func(value int64) { deadlineMs = value })
+			parseInt64(meta["lease_issued_at_ms"], func(value int64) { issuedAtMs = value })
+			parseInt64(meta["lease_ttl_ms"], func(value int64) { leaseTTLms = value })
+			if deadlineMs <= 0 && issuedAtMs > 0 && leaseTTLms > 0 {
+				// Compatibility with leases written before lease_deadline_ms was
+				// introduced. The repaired index is then based on the same
+				// durable metadata, not its prior ZSET score.
+				deadlineMs = issuedAtMs + leaseTTLms
+			}
+			if deadlineMs > before.UnixMilli() {
+				// Use fenced Lua to prevent resurrecting a member that was
+				// concurrently ZREMed by commitNodeLua. The script validates
+				// that the node is still non-terminal and the lease token
+				// has not changed before writing the corrected score.
+				_ = repairLeaseIndexLua.Run(ctx, s.rdb,
+					[]string{
+						nodeStatusKey(t, execID, nodeName),
+						nodeMetaKey(t, execID, nodeName),
+						indexKey,
+					},
+					float64(deadlineMs), member, meta["lease_token"],
+				).Err()
+				continue
+			}
+
+			lease := engine.ExpiredLease{
+				ExecutionID: execID,
+				NodeName:    nodeName,
+				UnitIdx:     engine.UnitIdxUnknown,
+				LeaseID:     engine.LeaseID(meta["lease_id"]),
+				LeaseToken:  engine.LeaseToken(meta["lease_token"]),
+				Namespace:   t,
+			}
+			if issuedAtMs > 0 {
+				lease.IssuedAt = time.UnixMilli(issuedAtMs).UTC()
+			}
+			if leaseTTLms > 0 {
+				lease.TTL = time.Duration(leaseTTLms) * time.Millisecond
+			}
+			parseInt64(meta["node_idx"], func(value int64) { lease.NodeIdx = int(value) })
+			parseInt64(meta["unit_idx"], func(value int64) { lease.UnitIdx = int(value) })
+			parseInt64(meta["activation_id"], func(value int64) { lease.ActivationID = int(value) })
+			parseInt64(meta["auto_depth"], func(value int64) { lease.AutoDepth = int(value) })
+			parseInt64(meta["lease_task_type"], func(value int64) { lease.TaskType = engine.TaskType(value) })
+			if rawPayload := meta["lease_payload"]; rawPayload != "" {
+				var payload types.SignalPayload
+				if err := json.Unmarshal([]byte(rawPayload), &payload); err != nil {
+					return fmt.Errorf("decode expired lease payload %q/%q: %w", execID, nodeName, err)
+				}
+				lease.Payload = &payload
+			}
+			*out = append(*out, lease)
 			if len(*out) == leaseIndexBatchLimit {
 				break
 			}
 		}
-		cursor = next
-		if cursor == 0 {
+		if len(*out) == leaseIndexBatchLimit {
 			break
 		}
 	}

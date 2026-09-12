@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/xbcio/xflow/backend/providers/distributed/internal/redisx"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
@@ -92,12 +94,17 @@ func (s *Store) repairLeaseIndexForNamespace(ctx context.Context, t namespace.Na
 	if limit <= 0 {
 		return 0, nil
 	}
-	cursor := s.leaseRepairCursor[t]
-	keys, next, err := s.rdb.Scan(ctx, cursor, execScanPattern(t, "node:*:status"), int64(limit)).Result()
+	keys, next, err := redisx.ScanPage(
+		ctx,
+		s.rdb,
+		s.leaseRepairCursors[t],
+		execScanPattern(t, "node:*:status"),
+		int64(limit),
+	)
 	if err != nil {
 		return 0, fmt.Errorf("scan lease repair candidates: %w", err)
 	}
-	s.leaseRepairCursor[t] = next
+	s.leaseRepairCursors[t] = next
 
 	reconciled := 0
 	for _, statusKey := range keys {

@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/xbcio/xflow/backend/providers/distributed/internal/redisx"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/namespace"
@@ -36,13 +38,13 @@ type Store struct {
 	transientMu   sync.RWMutex
 	execTransient map[types.ExecutionID]transientMark
 
-	// leaseRepairCursor advances a bounded reconciliation scan across node
-	// status keys, one cursor per namespace so a multi-namespace store never lets
-	// one namespace's scan progress starve another. The mutex prevents
-	// concurrent control-plane maintenance loops from repeatedly scanning the
-	// same Redis page.
-	leaseRepairMu     sync.Mutex
-	leaseRepairCursor map[namespace.Namespace]uint64
+	// leaseRepairCursors advance a bounded reconciliation scan across node
+	// status keys, with one node-local cursor per Redis master and namespace.
+	// This prevents both cross-master cursor reuse and one namespace's progress
+	// from starving another. The mutex prevents concurrent maintenance loops
+	// from repeatedly scanning the same Redis pages.
+	leaseRepairMu      sync.Mutex
+	leaseRepairCursors map[namespace.Namespace]redisx.Cursors
 
 	// Audit-trail observability — Redis is system-of-record; the store/sqlstore
 	// audit trail is best-effort. auditWrite routes failures through these
@@ -66,16 +68,16 @@ type Store struct {
 
 func New(rdb redis.UniversalClient, db store.Store, execTTL time.Duration) *Store {
 	s := &Store{
-		rdb:               rdb,
-		db:                db,
-		execTTL:           execTTL,
-		graphs:            make(map[types.ExecutionID]*graph.Graph),
-		execTTLs:          make(map[types.ExecutionID]time.Duration),
-		execTransient:     make(map[types.ExecutionID]transientMark),
-		leaseRepairCursor: make(map[namespace.Namespace]uint64),
-		audit:             noopAuditObserver{},
-		auditCounters:     &auditCounters{},
-		cursorKey:         newCursorSigningKey(),
+		rdb:                rdb,
+		db:                 db,
+		execTTL:            execTTL,
+		graphs:             make(map[types.ExecutionID]*graph.Graph),
+		execTTLs:           make(map[types.ExecutionID]time.Duration),
+		execTransient:      make(map[types.ExecutionID]transientMark),
+		leaseRepairCursors: make(map[namespace.Namespace]redisx.Cursors),
+		audit:              noopAuditObserver{},
+		auditCounters:      &auditCounters{},
+		cursorKey:          newCursorSigningKey(),
 	}
 	// The default namespace is registered lazily on the first durable execution
 	// create, and listNamespaces also defensively includes the default namespace, so
