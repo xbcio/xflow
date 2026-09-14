@@ -3052,6 +3052,10 @@ func g1MetricFamilyCoverage(body []byte, required []string) (observed, missing [
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse Prometheus metrics: %w", err)
 	}
+	// G1 artifacts distinguish an empty coverage gap ([]) from an unknown one
+	// (null), so successful scans always return concrete slices.
+	observed = make([]string, 0, len(required))
+	missing = make([]string, 0, len(required))
 	for _, name := range required {
 		if family, ok := families[name]; ok && len(family.GetMetric()) > 0 {
 			observed = append(observed, name)
@@ -3829,6 +3833,17 @@ func TestG1ArtifactMetricFamiliesRequireAll(t *testing.T) {
 	observed, missing, err := g1MetricFamilyCoverage([]byte(body.String()), required)
 	if err != nil || len(missing) != 0 || len(observed) != len(required) {
 		t.Fatalf("complete coverage: observed=%v missing=%v err=%v", observed, missing, err)
+	}
+	encoded, err := json.Marshal(g1MetricsScrape{MissingFamilies: missing})
+	if err != nil {
+		t.Fatalf("marshal complete metric coverage: %v", err)
+	}
+	var artifact map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &artifact); err != nil {
+		t.Fatalf("unmarshal complete metric coverage: %v", err)
+	}
+	if got := string(artifact["missing_families"]); got != "[]" {
+		t.Fatalf("complete coverage missing_families JSON = %s, want []", got)
 	}
 
 	observed, missing, err = g1MetricFamilyCoverage([]byte("# HELP xflow_lease_acquire_duration_seconds test\n# TYPE xflow_lease_acquire_duration_seconds counter\nxflow_lease_acquire_duration_seconds 1\n"), required)
