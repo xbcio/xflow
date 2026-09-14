@@ -1,7 +1,7 @@
-// Package runnerapp provides the standalone-process front end for an XFlow
+// Package runner provides the standalone-process front end for an XFlow
 // runner. It resolves the documented YAML, environment, and CLI inputs before
 // creating the execution runtime through xflow.NewRunner.
-package runnerapp
+package runner
 
 import (
 	"fmt"

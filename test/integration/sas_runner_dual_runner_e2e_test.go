@@ -37,7 +37,7 @@ const sasDualRunnerSinkType = "xflow.sas.sink"
 // runner and the standalone sas-runner process. The test deliberately builds
 // the sibling process against this checkout through an ephemeral GOWORK: the
 // production module files remain untouched, while the binary exercises the
-// current runnerapp profile and SDK assembly rather than a released xflow
+// current runner profile and SDK assembly rather than a released xflow
 // version from the module cache.
 func TestSASRunnerDualRunnerE2E(t *testing.T) {
 	xflowRoot := sasDualRunnerRepoRoot(t)

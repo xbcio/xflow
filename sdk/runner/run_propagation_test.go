@@ -1,4 +1,4 @@
-package runnerapp
+package runner
 
 import (
 	"os"

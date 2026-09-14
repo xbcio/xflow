@@ -448,7 +448,7 @@ Go 侧编译门控已在 `a617f62` 移除，`web/packages/xflow-core/src/index.t
 改为丢弃返回值并加注释说明「为何此分支无 Kind 校验而下方旧式分支有」——旧式形态的
 supply 名直接来自定义、未经校验，两者不对称是有理由的。
 
-### `service/runnerapp/run.go` 从未装配 `GroupRuntime`（原 P0-1，2026-08-06 修复）
+### `sdk/xflow/runner.go` 从未装配 `GroupRuntime`（原 P0-1，2026-08-06 修复）
 
 **本文件先前记录的故障机制是错的，实测后更正。** 原记录说「生产 runner 二进制收到
 group lease 必然失败」，理由是 `runner.go:359` 的 `r.config.GroupRuntime != nil`
@@ -498,7 +498,7 @@ group)" 此前没有实现：`seedKafkaEntryBatchMessages` 把原始 Kafka 消�
 | 控制面丢弃已投影的包 | `service/control/entry_activation_manager.go` | 重新投影并挂到 directive 上，哈希以 `ProjectSubgraphPackage` 返回值为准 |
 | runner 拿 `"xflow.group"` 查 trigger handler | `service/runner/trigger_activation_handler.go` | 新增 `activateGroup`：定位包内自身的 trigger 入口节点，用 `groupExecTriggerRuntime` 承接 `ExecuteGroup`，走 `GroupRuntime.ExecuteRequest` 真跑内层引擎 |
 
-`service/runnerapp/run.go` 的构造顺序缺陷（`runnerServiceConfig` 先建 handler 再建
+`sdk/xflow/runner.go` 的构造顺序缺陷（`buildRunnerServiceConfig` 先建 handler 再建
 `GroupRuntime`，导致 `WithGroupRuntime` 传空）在同一计划的 Task 8 里一并修掉:
 现在先建 `GroupRuntime` 再传给 handler。
 
@@ -626,7 +626,7 @@ Milestone B 的占位符在 `engine/group_exec.go:52-59`。**注意本文此前�
 
 | 原编号 | 条目 | 关闭位置 |
 |---|---|---|
-| P0-1 | `service/runnerapp/run.go` 未装配 `GroupRuntime` | `engine/group_exec.go`，`service/runnerapp/run.go`（无条件装配） |
+| P0-1 | `sdk/xflow/runner.go` 未装配 `GroupRuntime` | `engine/group_exec.go`，`sdk/xflow/runner.go`（无条件装配） |
 | P0-1/P0-2 | trigger-group runner 侧本地执行不存在；e2e 伪造 exits | `test/integration/j_trigger_group_local_execution_e2e_test.go` |
 | P1-3 | `xflow.map` 不能作为 group 成员 | `execution/subgraph/map_in_group_test.go`，`engine/graph/map_member_body_test.go` |
 | P1-4 | 队头阻塞：批次与普通节点任务共用队列 | `backend/providers/local/memory_queue.go:44`（`batchCh`），`backend/providers/distributed/internal/queue/asynq/transport.go:35` |

@@ -1,4 +1,4 @@
-package runnerapp
+package runner
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 )
 
 // TestStandaloneRunnerLinksGenericPipelineBuiltins protects the import chain a
-// standalone host gets from runnerapp -> sdk/xflow. Do not import node or any
+// standalone host gets from runner -> sdk/xflow. Do not import node or any
 // individual builtin package here: doing so would register the handlers in the
 // test itself and hide a missing production link.
 func TestStandaloneRunnerLinksGenericPipelineBuiltins(t *testing.T) {

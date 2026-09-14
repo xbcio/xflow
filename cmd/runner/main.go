@@ -4,11 +4,11 @@ import (
 	"log"
 	"os"
 
-	"github.com/xbcio/xflow/service/runnerapp"
+	"github.com/xbcio/xflow/sdk/runner"
 )
 
 func main() {
-	if err := runnerapp.Execute(os.Args[1:]...); err != nil {
+	if err := runner.Execute(os.Args[1:]...); err != nil {
 		log.Fatal(err)
 	}
 }

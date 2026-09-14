@@ -72,7 +72,7 @@ func TestNewRunnerWiresAndAdvertisesGroupExecution(t *testing.T) {
 	}
 }
 
-// The ordering constraint service/runnerapp/run.go:253-266 records in prose: the
+// The ordering constraint in buildRunnerServiceConfig (sdk/xflow/runner.go)
 // GroupRuntime must exist BEFORE the TriggerActivationHandler is built, because
 // a runner that both hosts triggers and executes groups needs the SAME instance
 // in both places. Building it afterwards meant the handler could never see it
