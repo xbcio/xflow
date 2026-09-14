@@ -10,43 +10,17 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
 )
 
-// TestRedisRunnerDirectoryPersistsPolledLabelsForLaterPolls drives the two
-// label-aware branches of ClaimForRunner against a real Redis:
-// the HSet refresh at redis_runner_directory.go:279 and the RunnerSelector
-// filter at :306.
-//
-// Neither has ever run against Redis. All five tests in runner_labels_test.go
-// build NewMemoryRunnerDirectory(), whose labels live in a Go map, and
-// runner_selector_test.go:40 calls MatchLabels directly with two literal maps.
-// So the parts this exercises — that a poll's labels are marshalled, written to
-// the runnerLabels hash under the runner's ID, and read back by
-// runnerForClaim:943 on a later poll — had no coverage in either directory
-// implementation.
-//
-// The third poll is where the teeth are. Dropping the HSet entirely would not
-// break the second poll: effectiveLabels is a local variable, already set from
-// req.Labels, so this poll routes correctly whether or not the write happens.
-// The write only matters to the NEXT poll, and a runner sends Labels on the
-// polls where they changed, not on every one. So the failure mode being pinned
-// is a runner that routes correctly once and then stops matching its own
-// selector — which looks like a scheduling problem, not a persistence one.
-//
-// Measured against all ten packages whose test-inclusive dependency closure
-// contains service/control, with XFLOW_TEST_REDIS_ADDR set so this test really
-// ran rather than skipping, and each mutation also run with this file removed:
-//
-//   - the HSet at :279 removed: the direct read below goes red first, since it
-//     runs earlier. The third poll was then measured on its own, with that read
-//     deleted, and reddens by itself ("claimed nothing") — so the behavioural
-//     assertion carries the teeth this comment credits it with, rather than
-//     riding on the storage one. Without this file the whole scope stays green.
-//   - the MatchLabels filter at :306 removed: the first poll goes red (it
-//     claims an assignment whose selector it does not satisfy); without this
-//     file the whole scope stays green.
-func TestRedisRunnerDirectoryPersistsPolledLabelsForLaterPolls(t *testing.T) {
+// TestRedisRunnerDirectoryRegisterSnapshotSurvivesForgedPollMetadata proves
+// that registration, rather than a subsequent Poll request, remains the
+// routing authority in real Redis. A local runner can forge the labels and
+// capabilities of the standalone workload in its Poll payload, but that must
+// neither overwrite the stored registration snapshot nor make it eligible for
+// that workload's tasks.
+func TestRedisRunnerDirectoryRegisterSnapshotSurvivesForgedPollMetadata(t *testing.T) {
 	addr := os.Getenv("XFLOW_TEST_REDIS_ADDR")
 	if addr == "" {
 		if os.Getenv("XFLOW_REQUIRE_REDIS_INTEGRATION") == "1" {
@@ -64,78 +38,106 @@ func TestRedisRunnerDirectoryPersistsPolledLabelsForLaterPolls(t *testing.T) {
 	}
 
 	directory := newRealRedisRunnerDirectory(t, rdb)
-	// Registered with no labels at all, which is the honest starting state: a
-	// runner that has not yet reported any. Register stores "{}" for it.
-	session := registerRedisDirectoryRunner(t, ctx, directory, "runner-labels", 3)
-
-	north := func() *types.RunnerSelector {
-		return &types.RunnerSelector{
-			Mode:        types.RunnerSelectorModeRequired,
-			MatchLabels: map[string]string{"zone": "cn-north"},
-		}
-	}
-
-	first := redisDirectoryTestAssignment("exec-labels/node-a/activation-1")
-	first.Routing.RunnerSelector = north()
-	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, first)
-
-	// Poll 1: the runner reports no labels, so it does not satisfy the
-	// selector and must be handed nothing.
-	if claim, ok, err := directory.ClaimForRunner(ctx, labelledClaimRequest(session, 3, nil)); err != nil {
-		t.Fatalf("ClaimForRunner() unlabelled error = %v", err)
-	} else if ok {
-		t.Fatalf("an unlabelled runner claimed %q, whose selector requires zone=cn-north: "+
-			"the selector filter did not run", claim.Assignment.AssignmentID)
-	}
-
-	// Poll 2: the runner reports the label. It should claim, and it would
-	// claim even if the write below never happened.
-	claimed := mustClaim(t, ctx, directory, labelledClaimRequest(session, 3, map[string]string{"zone": "cn-north"}))
-	if claimed.Assignment.AssignmentID != first.AssignmentID {
-		t.Fatalf("claimed %q, want %q", claimed.Assignment.AssignmentID, first.AssignmentID)
-	}
-
-	// Name the storage location too, so a failure below says which of the two
-	// halves broke rather than only that routing stopped working.
-	stored, err := rdb.HGet(ctx, directory.keys.runnerLabels, session.RunnerID).Result()
+	registeredLabels := map[string]string{"workload": "local"}
+	registeredCapabilities := []protocol.Capability{{NodeType: "xflow.sas.sink"}}
+	session, err := directory.Register(ctx, RegisterRunnerRequest{
+		RunnerID:     "runner-registration-snapshot",
+		Capacity:     3,
+		Labels:       registeredLabels,
+		Capabilities: registeredCapabilities,
+		// Allow both node types so this test proves capability matching rather
+		// than passing only because policy blocks xflow.map.
+		Policy: RunnerPolicy{AllowedNodeTypes: []string{"xflow.sas.sink", "xflow.map"}},
+		Now:    time.Now(),
+	})
 	if err != nil {
-		t.Fatalf("HGet(%s, %s) = %v, want the labels this poll reported",
-			directory.keys.runnerLabels, session.RunnerID, err)
-	}
-	var decoded map[string]string
-	if err := json.Unmarshal([]byte(stored), &decoded); err != nil {
-		t.Fatalf("stored labels %q are not a JSON object: %v", stored, err)
-	}
-	if decoded["zone"] != "cn-north" {
-		t.Fatalf("stored labels = %v, want zone=cn-north", decoded)
+		t.Fatalf("Register() error = %v", err)
 	}
 
-	// Poll 3: no labels reported this time, which is the normal steady state.
-	// The runner must still match, because the directory is supposed to
-	// remember what it said last time.
-	second := redisDirectoryTestAssignment("exec-labels/node-b/activation-1")
-	second.Routing.RunnerSelector = north()
-	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, second)
-
-	claimed = mustClaim(t, ctx, directory, labelledClaimRequest(session, 3, nil))
-	if claimed.Assignment.AssignmentID != second.AssignmentID {
-		t.Fatalf("claimed %q, want %q", claimed.Assignment.AssignmentID, second.AssignmentID)
+	forgedPoll := ClaimRequest{
+		RunnerID:     session.RunnerID,
+		SessionID:    session.SessionID,
+		Capacity:     99,
+		Labels:       map[string]string{"workload": "sas-runner"},
+		Capabilities: []protocol.Capability{{NodeType: "xflow.map"}},
+		Now:          time.Now(),
 	}
 
-	// And the remembered labels must still be able to say no. A refresh that
-	// stored something over-permissive would pass every assertion above.
-	third := redisDirectoryTestAssignment("exec-labels/node-c/activation-1")
-	third.Routing.RunnerSelector = &types.RunnerSelector{
-		Mode:        types.RunnerSelectorModeRequired,
-		MatchLabels: map[string]string{"zone": "cn-south"},
-	}
-	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, third)
-
-	if claim, ok, err := directory.ClaimForRunner(ctx, labelledClaimRequest(session, 3, nil)); err != nil {
-		t.Fatalf("ClaimForRunner() mismatched-selector error = %v", err)
+	// First issue the forged metadata with no assignment available, then inspect
+	// Redis directly. This pins the persisted authority, not just the current
+	// claim result.
+	if _, ok, err := directory.ClaimForRunner(ctx, forgedPoll); err != nil {
+		t.Fatalf("ClaimForRunner() forged metadata error = %v", err)
 	} else if ok {
-		t.Fatalf("a zone=cn-north runner claimed %q, which requires zone=cn-south",
-			claim.Assignment.AssignmentID)
+		t.Fatal("ClaimForRunner() claimed an assignment from an empty queue")
+	}
+
+	storedLabelsRaw, err := rdb.HGet(ctx, directory.keys.runnerLabels, session.RunnerID).Result()
+	if err != nil {
+		t.Fatalf("HGet(%s, %s) labels: %v", directory.keys.runnerLabels, session.RunnerID, err)
+	}
+	var storedLabels map[string]string
+	if err := json.Unmarshal([]byte(storedLabelsRaw), &storedLabels); err != nil {
+		t.Fatalf("decode stored labels %q: %v", storedLabelsRaw, err)
+	}
+	if !reflect.DeepEqual(storedLabels, registeredLabels) {
+		t.Fatalf("stored labels = %v, want registered snapshot %v", storedLabels, registeredLabels)
+	}
+
+	storedCapabilitiesRaw, err := rdb.HGet(ctx, directory.keys.runnerCapabilities, session.RunnerID).Result()
+	if err != nil {
+		t.Fatalf("HGet(%s, %s) capabilities: %v", directory.keys.runnerCapabilities, session.RunnerID, err)
+	}
+	var storedCapabilities []protocol.Capability
+	if err := json.Unmarshal([]byte(storedCapabilitiesRaw), &storedCapabilities); err != nil {
+		t.Fatalf("decode stored capabilities %q: %v", storedCapabilitiesRaw, err)
+	}
+	if !reflect.DeepEqual(storedCapabilities, registeredCapabilities) {
+		t.Fatalf("stored capabilities = %v, want registered snapshot %v", storedCapabilities, registeredCapabilities)
+	}
+
+	wrongWorkload := redisDirectoryTestAssignment("exec-labels/wrong-workload/activation-1")
+	wrongWorkload.Routing.NodeType = "xflow.sas.sink"
+	wrongWorkload.Routing.RunnerSelector = &types.RunnerSelector{
+		Mode:        types.RunnerSelectorModeRequired,
+		MatchLabels: map[string]string{"workload": "sas-runner"},
+	}
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, wrongWorkload)
+	if claim, ok, err := directory.ClaimForRunner(ctx, forgedPoll); err != nil {
+		t.Fatalf("ClaimForRunner() wrong-workload error = %v", err)
+	} else if ok {
+		t.Fatalf("local runner claimed %q after forging workload=sas-runner", claim.Assignment.AssignmentID)
+	}
+
+	wrongCapability := redisDirectoryTestAssignment("exec-labels/wrong-capability/activation-1")
+	wrongCapability.Routing.NodeType = "xflow.map"
+	wrongCapability.Routing.RunnerSelector = &types.RunnerSelector{
+		Mode:        types.RunnerSelectorModeRequired,
+		MatchLabels: map[string]string{"workload": "local"},
+	}
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, wrongCapability)
+	if claim, ok, err := directory.ClaimForRunner(ctx, forgedPoll); err != nil {
+		t.Fatalf("ClaimForRunner() wrong-capability error = %v", err)
+	} else if ok {
+		t.Fatalf("runner without xflow.map claimed %q after forging that capability", claim.Assignment.AssignmentID)
+	}
+
+	matching := redisDirectoryTestAssignment("exec-labels/matching-registration/activation-1")
+	matching.Routing.NodeType = "xflow.sas.sink"
+	matching.Routing.RunnerSelector = &types.RunnerSelector{
+		Mode:        types.RunnerSelectorModeRequired,
+		MatchLabels: map[string]string{"workload": "local"},
+	}
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, matching)
+	claim, ok, err := directory.ClaimForRunner(ctx, forgedPoll)
+	if err != nil {
+		t.Fatalf("ClaimForRunner() matching-registration error = %v", err)
+	}
+	if !ok {
+		t.Fatal("registered local runner did not claim its matching assignment")
+	}
+	if claim.Assignment.AssignmentID != matching.AssignmentID {
+		t.Fatalf("claimed %q, want matching registered assignment %q", claim.Assignment.AssignmentID, matching.AssignmentID)
 	}
 }
 
@@ -198,24 +200,4 @@ func TestRedisRunnerDirectoryCleanupDeletesEveryKeyItCreates(t *testing.T) {
 				"newRedisRunnerDirectoryKeys does not build", key)
 		}
 	}
-}
-
-func labelledClaimRequest(session RunnerSession, capacity int, labels map[string]string) ClaimRequest {
-	req := redisDirectoryClaimRequest(session, capacity)
-	req.Labels = labels
-	return req
-}
-
-func mustClaim(t *testing.T, ctx context.Context, directory *RedisRunnerDirectory, req ClaimRequest) Claim {
-	t.Helper()
-
-	claim, ok, err := directory.ClaimForRunner(ctx, req)
-	if err != nil {
-		t.Fatalf("ClaimForRunner() error = %v", err)
-	}
-	if !ok {
-		t.Fatal("ClaimForRunner() claimed nothing, want the queued assignment: " +
-			"the runner's labels satisfy its selector")
-	}
-	return claim
 }

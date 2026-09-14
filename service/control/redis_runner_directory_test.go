@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"sort"
@@ -280,13 +281,141 @@ func claimRedisDirectoryAssignment(t *testing.T, ctx context.Context, directory 
 	return claim
 }
 
-func redisDirectoryClaimRequest(session RunnerSession, capacity int) ClaimRequest {
+func redisDirectoryClaimRequest(session RunnerSession, _ int) ClaimRequest {
 	return ClaimRequest{
-		RunnerID:     session.RunnerID,
-		SessionID:    session.SessionID,
-		Capacity:     capacity,
-		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
-		Now:          time.Unix(11, 0),
+		RunnerID:  session.RunnerID,
+		SessionID: session.SessionID,
+		Now:       time.Unix(11, 0),
+	}
+}
+
+// TestRedisRunnerDirectoryIgnoresPollRoutingMetadata ensures durable routing
+// uses only the registration snapshot. It models a local SAS sink runner
+// forging the standalone workload's metadata in a Poll request.
+func TestRedisRunnerDirectoryIgnoresPollRoutingMetadata(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	dir := NewRedisRunnerDirectory(rdb)
+	registeredLabels := map[string]string{"workload": "local"}
+	registeredCapabilities := []protocol.Capability{
+		{NodeType: "xflow.sas.sink"},
+		{NodeType: "xflow.group", Features: []string{engine.FeatureGroupExecV1}},
+	}
+	session, err := dir.Register(ctx, RegisterRunnerRequest{
+		RunnerID:     "local-runner",
+		Capacity:     1,
+		Labels:       registeredLabels,
+		Capabilities: registeredCapabilities,
+		Policy: RunnerPolicy{AllowedNodeTypes: []string{
+			"xflow.group",
+			"xflow.sas.sink",
+		}},
+		Now: time.Unix(10, 0),
+	})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	wrongWorkload := redisDirectoryTestAssignment("exec-1/collection-workload/activation-1")
+	wrongWorkload.Routing = engine.TaskRouting{
+		NodeType: "xflow.group",
+		Requirements: []engine.CapabilityRequirement{{
+			NodeType: "xflow.group", Feature: engine.FeatureGroupExecV1,
+		}},
+		RunnerSelector: &types.RunnerSelector{
+			Mode:        types.RunnerSelectorModeRequired,
+			MatchLabels: map[string]string{"workload": "sas-runner"},
+		},
+	}
+	wrongCapability := redisDirectoryTestAssignment("exec-1/collection-capability/activation-1")
+	wrongCapability.Routing = engine.TaskRouting{
+		NodeType: "xflow.group",
+		Requirements: []engine.CapabilityRequirement{
+			{NodeType: "xflow.group", Feature: engine.FeatureGroupExecV1},
+			{NodeType: "xflow.map"},
+		},
+		RunnerSelector: &types.RunnerSelector{
+			Mode:        types.RunnerSelectorModeRequired,
+			MatchLabels: map[string]string{"workload": "local"},
+		},
+	}
+	localSink := redisDirectoryTestAssignment("exec-1/local-sink/activation-1")
+	localSink.Routing = engine.TaskRouting{
+		NodeType: "xflow.sas.sink",
+		Requirements: []engine.CapabilityRequirement{{
+			NodeType: "xflow.sas.sink",
+		}},
+		RunnerSelector: &types.RunnerSelector{
+			Mode:        types.RunnerSelectorModeRequired,
+			MatchLabels: map[string]string{"workload": "local"},
+		},
+	}
+	for _, assignment := range []Assignment{wrongWorkload, wrongCapability, localSink} {
+		mustEnqueueRedisDirectoryAssignment(t, ctx, dir, assignment)
+	}
+
+	claim, ok, err := dir.ClaimForRunner(ctx, ClaimRequest{
+		RunnerID:  session.RunnerID,
+		SessionID: session.SessionID,
+		// Compatibility-only fields must not replace the persisted snapshot.
+		Capacity: 99,
+		Labels: map[string]string{
+			"workload": "sas-runner",
+		},
+		Capabilities: []protocol.Capability{
+			{NodeType: "xflow.sas.sink"},
+			{NodeType: "xflow.group", Features: []string{engine.FeatureGroupExecV1}},
+			{NodeType: "xflow.map"},
+			{NodeType: "xflow.script"},
+		},
+		Now: time.Unix(11, 0),
+	})
+	if err != nil {
+		t.Fatalf("ClaimForRunner: %v", err)
+	}
+	if !ok {
+		t.Fatal("local runner did not claim its eligible sink assignment")
+	}
+	if claim.Assignment.AssignmentID != localSink.AssignmentID {
+		t.Fatalf("forged poll claimed %q, want only local sink %q", claim.Assignment.AssignmentID, localSink.AssignmentID)
+	}
+	if _, err := rdb.ZScore(ctx, dir.keys.claimsExpiry, string(claim.ClaimID)).Result(); err != nil {
+		t.Fatalf("claim expiry was not recorded for %q: %v", claim.ClaimID, err)
+	}
+
+	snapshot, ok := dir.Runner(ctx, session.RunnerID)
+	if !ok {
+		t.Fatal("runner not found after poll")
+	}
+	if !reflect.DeepEqual(snapshot.Labels, registeredLabels) {
+		t.Errorf("snapshot labels after forged poll = %#v, want %#v", snapshot.Labels, registeredLabels)
+	}
+	if !reflect.DeepEqual(snapshot.Capabilities, registeredCapabilities) {
+		t.Errorf("snapshot capabilities after forged poll = %#v, want %#v", snapshot.Capabilities, registeredCapabilities)
+	}
+
+	storedLabels, err := rdb.HGet(ctx, dir.keys.runnerLabels, session.RunnerID).Result()
+	if err != nil {
+		t.Fatalf("HGet registered labels: %v", err)
+	}
+	var decodedLabels map[string]string
+	if err := json.Unmarshal([]byte(storedLabels), &decodedLabels); err != nil {
+		t.Fatalf("decode registered labels %q: %v", storedLabels, err)
+	}
+	if !reflect.DeepEqual(decodedLabels, registeredLabels) {
+		t.Errorf("persisted labels after forged poll = %#v, want %#v", decodedLabels, registeredLabels)
+	}
+
+	storedCapabilities, err := rdb.HGet(ctx, dir.keys.runnerCapabilities, session.RunnerID).Result()
+	if err != nil {
+		t.Fatalf("HGet registered capabilities: %v", err)
+	}
+	var decodedCapabilities []protocol.Capability
+	if err := json.Unmarshal([]byte(storedCapabilities), &decodedCapabilities); err != nil {
+		t.Fatalf("decode registered capabilities %q: %v", storedCapabilities, err)
+	}
+	if !reflect.DeepEqual(decodedCapabilities, registeredCapabilities) {
+		t.Errorf("persisted capabilities after forged poll = %#v, want %#v", decodedCapabilities, registeredCapabilities)
 	}
 }
 

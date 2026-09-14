@@ -195,16 +195,10 @@ func (d *MemoryRunnerDirectory) ClaimForRunner(_ context.Context, req ClaimReque
 		return Claim{}, false, err
 	}
 
-	// Capacity is the authoritative total, written only by Register/Heartbeat.
-	// A poll must not overwrite it with a client-supplied remainder — that would
-	// both corrupt the snapshot and double-count in-flight work already tracked
-	// by activeClaims + finalizedLease. Capabilities and labels may still refresh per poll.
-	if req.Capabilities != nil {
-		state.snapshot.Capabilities = cloneCapabilities(req.Capabilities)
-	}
-	if req.Labels != nil {
-		state.snapshot.Labels = cloneLabels(req.Labels)
-	}
+	// Register owns routing metadata and Heartbeat owns capacity observations.
+	// Poll is deliberately not allowed to refresh either: labels and capabilities
+	// decide which workload a runner may claim, so accepting them here would let
+	// an authenticated runner impersonate a differently entitled workload.
 	if state.headroom() <= 0 {
 		return Claim{}, false, nil
 	}
@@ -386,6 +380,7 @@ func (d *MemoryRunnerDirectory) Runner(_ context.Context, runnerID string) (Runn
 		return RunnerSnapshot{}, false
 	}
 	snapshot := state.snapshot
+	snapshot.Labels = cloneLabels(snapshot.Labels)
 	snapshot.Capabilities = cloneCapabilities(snapshot.Capabilities)
 	snapshot.Namespaces = normalizeRunnerNamespaces(snapshot.Namespaces)
 	return snapshot, true

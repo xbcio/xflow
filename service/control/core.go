@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/xbcio/xflow/backend"
@@ -34,6 +35,7 @@ var (
 	ErrRunnerSessionRequired = errors.New("runner_id and session_id are required")
 	ErrConcurrencyRequired   = errors.New("runner_id and concurrency are required")
 	ErrInvalidNamespace      = errors.New("invalid namespace")
+	ErrInvalidCapability     = errors.New("invalid runner capability")
 	ErrRunnerNotFound        = errors.New("runner not found")
 	ErrLeaseRequired         = errors.New("runner_id, session_id and lease are required")
 	ErrEngineNotConfigured   = errors.New("engine not configured")
@@ -274,6 +276,24 @@ func (c *Core) register(ctx context.Context, req protocol.RegisterRunnerRequest,
 			return protocol.RegisterRunnerResponse{}, fmt.Errorf("%w: policy %q does not grant namespace %q", ErrAuthNamespaceDenied, policy.Name, t)
 		}
 	}
+	// A capability declaration is not advisory metadata: it is persisted in the
+	// runner directory and used by routing. Validate its shape before policy
+	// matching so a wildcard policy cannot authorize an empty node type, then
+	// require each declared type to be inside the authenticated policy's grant.
+	for _, capability := range req.Capabilities {
+		if strings.TrimSpace(capability.NodeType) == "" {
+			return protocol.RegisterRunnerResponse{}, ErrInvalidCapability
+		}
+		if !policy.Allows(capability.NodeType) {
+			c.observeAuth(ctx, "register", "deny_capability")
+			if c.logger != nil {
+				c.logger.Error("auth_denied",
+					"op", "register", "reason", "capability_not_granted",
+					"runner", req.RunnerID, "policy", policy.Name, "node_type", capability.NodeType)
+			}
+			return protocol.RegisterRunnerResponse{}, fmt.Errorf("%w: policy %q does not grant node type %q", ErrAuthCapabilityDenied, policy.Name, capability.NodeType)
+		}
+	}
 	session, err := c.runners.Register(ctx, RegisterRunnerRequest{
 		RunnerID:     req.RunnerID,
 		Capacity:     req.Concurrency,
@@ -434,9 +454,6 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 		claim, ok, err := c.runners.ClaimForRunner(ctx, ClaimRequest{
 			RunnerID:       req.RunnerID,
 			SessionID:      req.SessionID,
-			Capacity:       req.Capacity,
-			Labels:         req.Labels,
-			Capabilities:   req.Capabilities,
 			ActiveLeaseIDs: req.ActiveLeaseIDs,
 			Now:            time.Now(),
 		})
@@ -952,10 +969,13 @@ func normalizeRunnerError(err error, logger engine.Logger, op string) error {
 		errors.Is(err, ErrRunnerSessionRequired),
 		errors.Is(err, ErrConcurrencyRequired),
 		errors.Is(err, ErrInvalidNamespace),
+		errors.Is(err, ErrInvalidCapability),
 		errors.Is(err, ErrRunnerNotFound),
 		errors.Is(err, ErrLeaseRequired),
 		errors.Is(err, ErrEngineNotConfigured),
 		errors.Is(err, ErrUnauthenticated),
+		errors.Is(err, ErrAuthNamespaceDenied),
+		errors.Is(err, ErrAuthCapabilityDenied),
 		errors.Is(err, ErrRunnerSessionStale),
 		errors.Is(err, ErrMissingWorkflowVersion),
 		errors.Is(err, engine.ErrInvalidLeaseToken):

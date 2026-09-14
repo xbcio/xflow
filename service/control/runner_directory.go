@@ -103,12 +103,19 @@ type HeartbeatRequest struct {
 }
 
 // ClaimRequest asks the directory for the next compatible assignment for a
-// specific runner session.
+// specific runner session. Routing metadata is fixed at registration: the
+// directory always uses that snapshot for capacity, labels, and capabilities.
 type ClaimRequest struct {
-	RunnerID     string
-	SessionID    string
-	Capacity     int
-	Labels       map[string]string
+	RunnerID  string
+	SessionID string
+	// Deprecated: retained for source compatibility with older directory callers.
+	// Capacity is ignored; Register and Heartbeat own capacity accounting.
+	Capacity int
+	// Deprecated: retained for source compatibility. Labels are ignored; routing
+	// uses the labels accepted at Register.
+	Labels map[string]string
+	// Deprecated: retained for source compatibility. Capabilities are ignored;
+	// routing uses the capabilities accepted at Register.
 	Capabilities []protocol.Capability
 	Now          time.Time
 	// ActiveLeaseIDs are the leases this runner is executing right now. Lease

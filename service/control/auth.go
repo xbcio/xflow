@@ -13,9 +13,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Authentication sentinels. Wrapping keeps callers from having to know the
-// specific policy denial reason — every failure path becomes 401 /
-// codes.Unauthenticated at the transport layer.
+// Authentication and registration-entitlement sentinels. Identity-proof
+// failures map to 401 / codes.Unauthenticated; authenticated runners denied a
+// requested namespace or capability map to 403 / codes.PermissionDenied.
 var (
 	ErrAuthMissingToken   = errors.New("missing auth token")
 	ErrAuthUnknownToken   = errors.New("unknown auth token")
@@ -29,6 +29,11 @@ var (
 	// ErrAuthIDPrefixDenied or ErrAuthUnknownToken: "who you are" and "what
 	// you may join" are different questions with different remediations.
 	ErrAuthNamespaceDenied = errors.New("runner not authorized for requested namespace")
+	// ErrAuthCapabilityDenied is returned when an authenticated runner declares
+	// a node type outside its policy at register time. The declaration is stored
+	// in the runner directory and can influence routing, so it must be an
+	// entitlement-checked value rather than merely advisory metadata.
+	ErrAuthCapabilityDenied = errors.New("runner not authorized for declared capability")
 )
 
 // TransportInfo carries transport-layer identity extracted by the HTTP or

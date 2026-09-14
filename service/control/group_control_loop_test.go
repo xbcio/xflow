@@ -162,10 +162,8 @@ func TestGroupPollDispatchesBuildGroupLease(t *testing.T) {
 
 	core := &Core{engine: fake, runners: dir, pollWait: time.Second}
 	resp, err := core.pollTask(ctx, protocol.PollTaskRequest{
-		RunnerID:     session.RunnerID,
-		SessionID:    session.SessionID,
-		Capacity:     1,
-		Capabilities: []protocol.Capability{{NodeType: "xflow.group", Features: []string{"group.exec.v1"}}},
+		RunnerID:  session.RunnerID,
+		SessionID: session.SessionID,
 	}, TransportInfo{})
 	if err != nil {
 		t.Fatalf("pollTask() error = %v", err)
@@ -226,10 +224,8 @@ func TestGroupPollRecoversOnAlreadyActive(t *testing.T) {
 
 	core := &Core{engine: fake, runners: dir, pollWait: time.Second}
 	resp, err := core.pollTask(ctx, protocol.PollTaskRequest{
-		RunnerID:     session.RunnerID,
-		SessionID:    session.SessionID,
-		Capacity:     1,
-		Capabilities: []protocol.Capability{{NodeType: "xflow.group", Features: []string{"group.exec.v1"}}},
+		RunnerID:  session.RunnerID,
+		SessionID: session.SessionID,
 	}, TransportInfo{})
 	if err != nil {
 		t.Fatalf("pollTask() error = %v", err)
@@ -454,10 +450,8 @@ func TestGroupPollFinalizeResponseLossReplay(t *testing.T) {
 	failDir := &failingFinalizeRunnerDirectory{RunnerDirectory: dir, failures: 1}
 	core := &Core{engine: fake, runners: failDir, pollWait: time.Second}
 	req := protocol.PollTaskRequest{
-		RunnerID:     session.RunnerID,
-		SessionID:    session.SessionID,
-		Capacity:     1,
-		Capabilities: []protocol.Capability{{NodeType: "xflow.group", Features: []string{"group.exec.v1"}}},
+		RunnerID:  session.RunnerID,
+		SessionID: session.SessionID,
 	}
 
 	// First poll: BuildGroupLease succeeds but FinalizeClaim fails → error.
@@ -787,10 +781,8 @@ func TestHTTPGroupPollReturnsGroupPayloadJSON(t *testing.T) {
 
 	var resp protocol.PollTaskResponse
 	postJSON(t, server.URL+protocol.PollTaskPath, protocol.PollTaskRequest{
-		RunnerID:     session.RunnerID,
-		SessionID:    session.SessionID,
-		Capacity:     1,
-		Capabilities: []protocol.Capability{{NodeType: "xflow.group", Features: []string{"group.exec.v1"}}},
+		RunnerID:  session.RunnerID,
+		SessionID: session.SessionID,
 	}, http.StatusOK, &resp)
 	if resp.Lease == nil {
 		t.Fatal("HTTP poll: nil lease")
@@ -873,7 +865,6 @@ func TestGroupPollReplayAfterCommitDropsAssignment(t *testing.T) {
 	resp, err := core.pollTask(ctx, protocol.PollTaskRequest{
 		RunnerID:  "runner-grp",
 		SessionID: "session-grp",
-		Capacity:  1,
 	}, TransportInfo{})
 	if err != nil {
 		t.Fatalf("replay pollTask() error = %v, want nil (a post-commit replay "+

@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -41,7 +42,7 @@ func TestLabelRegistration_MemoryDirectory(t *testing.T) {
 	_ = session
 }
 
-func TestLabelPollRefresh_MemoryDirectory(t *testing.T) {
+func TestPollMetadataDoesNotRefreshRegistration_MemoryDirectory(t *testing.T) {
 	ctx := context.Background()
 	dir := NewMemoryRunnerDirectory()
 
@@ -50,20 +51,21 @@ func TestLabelPollRefresh_MemoryDirectory(t *testing.T) {
 		Capacity:     2,
 		Labels:       map[string]string{"region": "us-east-1"},
 		Capabilities: []protocol.Capability{{NodeType: "http.request"}},
-		Policy:       RunnerPolicy{AllowedNodeTypes: []string{"http.request"}},
+		Policy:       RunnerPolicy{AllowedNodeTypes: []string{"http.request", "xflow.script"}},
 		Now:          time.Unix(10, 0),
 	})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
-	// Poll with updated labels.
+	// Poll metadata is compatibility-only. It must not alter the registration
+	// snapshot even when its values would describe another workload.
 	_, _, _ = dir.ClaimForRunner(ctx, ClaimRequest{
 		RunnerID:     "runner-1",
 		SessionID:    session.SessionID,
-		Capacity:     2,
+		Capacity:     99,
 		Labels:       map[string]string{"region": "eu-west-1", "tier": "premium"},
-		Capabilities: []protocol.Capability{{NodeType: "http.request"}},
+		Capabilities: []protocol.Capability{{NodeType: "xflow.script"}},
 		Now:          time.Unix(11, 0),
 	})
 
@@ -71,15 +73,14 @@ func TestLabelPollRefresh_MemoryDirectory(t *testing.T) {
 	if !ok {
 		t.Fatal("runner not found")
 	}
-	if snap.Labels["region"] != "eu-west-1" {
-		t.Errorf("Labels[region] = %q after poll refresh, want eu-west-1", snap.Labels["region"])
+	if snap.Labels["region"] != "us-east-1" {
+		t.Errorf("Labels[region] = %q after poll, want registered us-east-1", snap.Labels["region"])
 	}
-	if snap.Labels["tier"] != "premium" {
-		t.Errorf("Labels[tier] = %q after poll refresh, want premium", snap.Labels["tier"])
+	if _, exists := snap.Labels["tier"]; exists {
+		t.Error("poll-only label tier was persisted into the registration snapshot")
 	}
-	// Old key removed (replaced entirely).
-	if _, exists := snap.Labels["pool"]; exists {
-		t.Error("old label 'pool' should not exist after full replacement")
+	if len(snap.Capabilities) != 1 || snap.Capabilities[0].NodeType != "http.request" {
+		t.Errorf("Capabilities after poll = %v, want only registered http.request", snap.Capabilities)
 	}
 }
 
@@ -254,5 +255,152 @@ func TestLabelSelectorClaim_MemoryDirectory(t *testing.T) {
 	}
 	if claim.Assignment.AssignmentID != match.AssignmentID {
 		t.Fatalf("claimed %q, want %q", claim.Assignment.AssignmentID, match.AssignmentID)
+	}
+}
+
+// TestMemoryRunnerDirectoryRunnerReturnsIndependentLabels protects the
+// registration snapshot from in-process callers of Runner. Poll routing uses
+// that snapshot, so returning its map directly would make it mutable outside
+// the directory even after poll input itself became untrusted.
+func TestMemoryRunnerDirectoryRunnerReturnsIndependentLabels(t *testing.T) {
+	ctx := context.Background()
+	dir := NewMemoryRunnerDirectory()
+
+	_, err := dir.Register(ctx, RegisterRunnerRequest{
+		RunnerID:     "runner-1",
+		Capacity:     1,
+		Labels:       map[string]string{"workload": "local"},
+		Capabilities: []protocol.Capability{{NodeType: "xflow.sas.sink"}},
+		Policy:       RunnerPolicy{AllowedNodeTypes: []string{"xflow.sas.sink"}},
+		Now:          time.Unix(10, 0),
+	})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	snapshot, ok := dir.Runner(ctx, "runner-1")
+	if !ok {
+		t.Fatal("runner not found")
+	}
+	snapshot.Labels["workload"] = "sas-runner"
+	snapshot.Labels["injected"] = "true"
+
+	after, ok := dir.Runner(ctx, "runner-1")
+	if !ok {
+		t.Fatal("runner not found after mutation")
+	}
+	if got := after.Labels["workload"]; got != "local" {
+		t.Errorf("registered workload after caller mutation = %q, want local", got)
+	}
+	if _, exists := after.Labels["injected"]; exists {
+		t.Error("caller-mutated label leaked into registration snapshot")
+	}
+}
+
+// TestPollMetadataCannotEscapeRegistrationSnapshot_MemoryDirectory models the
+// SAS topology: a local sink runner may run xflow.group, but it must not claim
+// collection work merely by reporting the standalone workload's labels or
+// capabilities in a Poll request.
+func TestPollMetadataCannotEscapeRegistrationSnapshot_MemoryDirectory(t *testing.T) {
+	ctx := context.Background()
+	dir := NewMemoryRunnerDirectory()
+	registeredCapabilities := []protocol.Capability{
+		{NodeType: "xflow.sas.sink"},
+		{NodeType: "xflow.group", Features: []string{engine.FeatureGroupExecV1}},
+	}
+	session, err := dir.Register(ctx, RegisterRunnerRequest{
+		RunnerID:     "local-runner",
+		Capacity:     1,
+		Labels:       map[string]string{"workload": "local"},
+		Capabilities: registeredCapabilities,
+		Policy: RunnerPolicy{AllowedNodeTypes: []string{
+			"xflow.group",
+			"xflow.sas.sink",
+		}},
+		Now: time.Unix(10, 0),
+	})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	wrongWorkload := Assignment{
+		AssignmentID: "exec-1/collection-workload/activation-1",
+		Routing: engine.TaskRouting{
+			NodeType: "xflow.group",
+			Requirements: []engine.CapabilityRequirement{{
+				NodeType: "xflow.group", Feature: engine.FeatureGroupExecV1,
+			}},
+			RunnerSelector: &types.RunnerSelector{
+				Mode:        types.RunnerSelectorModeRequired,
+				MatchLabels: map[string]string{"workload": "sas-runner"},
+			},
+		},
+	}
+	wrongCapability := Assignment{
+		AssignmentID: "exec-1/collection-capability/activation-1",
+		Routing: engine.TaskRouting{
+			NodeType: "xflow.group",
+			Requirements: []engine.CapabilityRequirement{
+				{NodeType: "xflow.group", Feature: engine.FeatureGroupExecV1},
+				{NodeType: "xflow.map"},
+			},
+			RunnerSelector: &types.RunnerSelector{
+				Mode:        types.RunnerSelectorModeRequired,
+				MatchLabels: map[string]string{"workload": "local"},
+			},
+		},
+	}
+	localSink := Assignment{
+		AssignmentID: "exec-1/local-sink/activation-1",
+		Routing: engine.TaskRouting{
+			NodeType: "xflow.sas.sink",
+			Requirements: []engine.CapabilityRequirement{{
+				NodeType: "xflow.sas.sink",
+			}},
+			RunnerSelector: &types.RunnerSelector{
+				Mode:        types.RunnerSelectorModeRequired,
+				MatchLabels: map[string]string{"workload": "local"},
+			},
+		},
+	}
+	for _, assignment := range []Assignment{wrongWorkload, wrongCapability, localSink} {
+		mustEnqueueAssignment(t, ctx, dir, assignment)
+	}
+
+	claim, ok, err := dir.ClaimForRunner(ctx, ClaimRequest{
+		RunnerID:  session.RunnerID,
+		SessionID: session.SessionID,
+		// These are intentionally a forged standalone-runner Poll payload.
+		Capacity: 99,
+		Labels: map[string]string{
+			"workload": "sas-runner",
+		},
+		Capabilities: []protocol.Capability{
+			{NodeType: "xflow.sas.sink"},
+			{NodeType: "xflow.group", Features: []string{engine.FeatureGroupExecV1}},
+			{NodeType: "xflow.map"},
+			{NodeType: "xflow.script"},
+		},
+		Now: time.Unix(11, 0),
+	})
+	if err != nil {
+		t.Fatalf("ClaimForRunner: %v", err)
+	}
+	if !ok {
+		t.Fatal("local runner did not claim its eligible sink assignment")
+	}
+	if claim.Assignment.AssignmentID != localSink.AssignmentID {
+		t.Fatalf("forged poll claimed %q, want only local sink %q", claim.Assignment.AssignmentID, localSink.AssignmentID)
+	}
+
+	snapshot, ok := dir.Runner(ctx, session.RunnerID)
+	if !ok {
+		t.Fatal("runner not found after poll")
+	}
+	if got := snapshot.Labels["workload"]; got != "local" {
+		t.Errorf("registered workload after forged poll = %q, want local", got)
+	}
+	if !reflect.DeepEqual(snapshot.Capabilities, registeredCapabilities) {
+		t.Errorf("registered capabilities after forged poll = %#v, want %#v", snapshot.Capabilities, registeredCapabilities)
 	}
 }

@@ -357,3 +357,76 @@ func TestGRPCRegisterRejectedWithoutTokenReturnsUnauthenticated(t *testing.T) {
 		t.Fatalf("status code = %v, want Unauthenticated", got)
 	}
 }
+
+func TestGRPCRegisterRejectsUnauthorizedCapability(t *testing.T) {
+	store := newGRPCRegisterPolicyStore(t, []string{"xflow.function"}, nil)
+	dir := NewMemoryRunnerDirectory()
+	client := startGRPCTestServer(t, &fakeControlEngine{}, dir, WithGRPCAuthenticator(store)).WithToken("secret")
+
+	_, err := client.Register(context.Background(), protocol.RegisterRunnerRequest{
+		RunnerID:     "runner-1",
+		Concurrency:  1,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.script"}},
+	})
+	assertGRPCRegisterError(t, err, codes.PermissionDenied, ErrAuthCapabilityDenied.Error())
+
+	if _, ok := dir.Runner(context.Background(), "runner-1"); ok {
+		t.Fatal("unauthorized-capability runner was registered")
+	}
+}
+
+func TestGRPCRegisterRejectsUnauthorizedNamespaceWithPermissionDenied(t *testing.T) {
+	store := newGRPCRegisterPolicyStore(t, []string{"xflow.function"}, []string{"team-a"})
+	client := startGRPCTestServer(t, &fakeControlEngine{}, NewMemoryRunnerDirectory(), WithGRPCAuthenticator(store)).WithToken("secret")
+
+	_, err := client.Register(context.Background(), protocol.RegisterRunnerRequest{
+		RunnerID:     "runner-1",
+		Concurrency:  1,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+		Namespaces:   []string{"team-b"},
+	})
+	assertGRPCRegisterError(t, err, codes.PermissionDenied, ErrAuthNamespaceDenied.Error())
+}
+
+func TestGRPCRegisterRejectsBlankCapability(t *testing.T) {
+	store := newGRPCRegisterPolicyStore(t, []string{"*"}, nil)
+	client := startGRPCTestServer(t, &fakeControlEngine{}, NewMemoryRunnerDirectory(), WithGRPCAuthenticator(store)).WithToken("secret")
+
+	_, err := client.Register(context.Background(), protocol.RegisterRunnerRequest{
+		RunnerID:     "runner-1",
+		Concurrency:  1,
+		Capabilities: []protocol.Capability{{NodeType: " \t "}},
+	})
+	assertGRPCRegisterError(t, err, codes.InvalidArgument, ErrInvalidCapability.Error())
+}
+
+func newGRPCRegisterPolicyStore(t *testing.T, nodeTypes, namespaces []string) *FilePolicyStore {
+	t.Helper()
+	store, err := NewFilePolicyStoreFromConfig(PolicyConfig{
+		Version: 1,
+		Runners: []PolicyEntry{{
+			Name:              "functions",
+			IDPrefix:          "runner-",
+			Token:             "secret",
+			AllowedNodeTypes:  nodeTypes,
+			AllowedNamespaces: namespaces,
+		}},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
+
+func assertGRPCRegisterError(t *testing.T, err error, wantCode codes.Code, wantMessage string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected gRPC status %v", wantCode)
+	}
+	if got := status.Code(err); got != wantCode {
+		t.Fatalf("status code = %v, want %v", got, wantCode)
+	}
+	if got := status.Convert(err).Message(); got != wantMessage {
+		t.Fatalf("status message = %q, want fixed sentinel %q", got, wantMessage)
+	}
+}

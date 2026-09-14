@@ -474,12 +474,18 @@ func writeRunnerError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrRunnerIDRequired), errors.Is(err, ErrRunnerSessionRequired), errors.Is(err, ErrConcurrencyRequired), errors.Is(err, ErrInvalidNamespace), errors.Is(err, ErrLeaseRequired), errors.Is(err, ErrMissingWorkflowVersion):
 		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, ErrInvalidCapability):
+		writeError(w, http.StatusBadRequest, ErrInvalidCapability.Error())
 	case errors.Is(err, ErrRunnerSessionStale):
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, ErrRunnerNotFound):
 		writeError(w, http.StatusNotFound, "runner not found")
 	case errors.Is(err, ErrUnauthenticated):
 		writeError(w, http.StatusUnauthorized, err.Error())
+	case errors.Is(err, ErrAuthNamespaceDenied):
+		writeError(w, http.StatusForbidden, ErrAuthNamespaceDenied.Error())
+	case errors.Is(err, ErrAuthCapabilityDenied):
+		writeError(w, http.StatusForbidden, ErrAuthCapabilityDenied.Error())
 	case errors.Is(err, ErrMetricsProxyDisabled):
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 	case errors.Is(err, ErrMetricsPayloadTooLarge):

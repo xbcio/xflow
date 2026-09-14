@@ -138,12 +138,18 @@ type HeartbeatResponse struct {
 }
 
 type PollTaskRequest struct {
-	RunnerID     string            `json:"runner_id"`
-	SessionID    string            `json:"session_id"`
-	Capacity     int               `json:"capacity"`
-	Labels       map[string]string `json:"labels,omitempty"`
-	Capabilities []Capability      `json:"capabilities"`
-	AuthToken    string            `json:"auth_token,omitempty"`
+	RunnerID  string `json:"runner_id"`
+	SessionID string `json:"session_id"`
+	// Deprecated: retained for compatibility with older control planes. Current
+	// control planes use Register and Heartbeat as the capacity authority.
+	Capacity int `json:"capacity"`
+	// Deprecated: retained for compatibility with older control planes. Current
+	// control planes route with labels accepted at Register, never poll input.
+	Labels map[string]string `json:"labels,omitempty"`
+	// Deprecated: retained for compatibility with older control planes. Current
+	// control planes route with capabilities accepted at Register, never poll input.
+	Capabilities []Capability `json:"capabilities"`
+	AuthToken    string       `json:"auth_token,omitempty"`
 	// ActiveLeaseIDs lists the leases this runner's workers are executing at
 	// the moment of the poll. The control plane replays a finalized lease that
 	// never reached its runner (lost response, restarted process), and it

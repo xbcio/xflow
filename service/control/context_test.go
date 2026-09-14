@@ -111,10 +111,8 @@ func TestHTTPRunnerOperationsPropagateRequestContext(t *testing.T) {
 	enqueueContextPropagationAssignment(t, runners, lease)
 	var polled protocol.PollTaskResponse
 	postJSONWithContext(t, handler, httpContext("poll"), protocol.PollTaskPath, protocol.PollTaskRequest{
-		RunnerID:     registered.RunnerID,
-		SessionID:    registered.SessionID,
-		Capacity:     1,
-		Capabilities: contextPropagationCapabilities(),
+		RunnerID:  registered.RunnerID,
+		SessionID: registered.SessionID,
 	}, &polled)
 	if polled.Lease == nil {
 		t.Fatal("PollTask returned no lease")
@@ -151,10 +149,8 @@ func TestGRPCRunnerOperationsPropagateIncomingContext(t *testing.T) {
 
 	enqueueContextPropagationAssignment(t, runners, lease)
 	polled, err := client.Poll(grpcContext("poll"), protocol.PollTaskRequest{
-		RunnerID:     registered.RunnerID,
-		SessionID:    registered.SessionID,
-		Capacity:     1,
-		Capabilities: contextPropagationCapabilities(),
+		RunnerID:  registered.RunnerID,
+		SessionID: registered.SessionID,
 	})
 	if err != nil {
 		t.Fatalf("Poll() error = %v", err)

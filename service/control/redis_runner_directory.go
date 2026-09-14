@@ -258,28 +258,11 @@ func (d *RedisRunnerDirectory) ClaimForRunner(ctx context.Context, req ClaimRequ
 		return replay, true, nil
 	}
 
+	// Labels and capabilities are registration-time authority. Poll carries the
+	// fields only for wire compatibility with older servers; never let a poll
+	// change what this authenticated runner is eligible to claim.
 	capabilities := runner.capabilities
-	capabilitiesChanged := req.Capabilities != nil
-	if capabilitiesChanged {
-		capabilities = cloneCapabilities(req.Capabilities)
-	}
-	capabilitiesJSON, err := json.Marshal(capabilities)
-	if err != nil {
-		return Claim{}, false, fmt.Errorf("marshal runner capabilities: %w", err)
-	}
-
-	labelsChanged := req.Labels != nil
-	effectiveLabels := runner.labels
-	if labelsChanged {
-		effectiveLabels = cloneLabels(req.Labels)
-		labelsJSON, err := json.Marshal(effectiveLabels)
-		if err != nil {
-			return Claim{}, false, fmt.Errorf("marshal runner labels: %w", err)
-		}
-		if err := d.rdb.HSet(ctx, d.keys.runnerLabels, req.RunnerID, string(labelsJSON)).Err(); err != nil {
-			return Claim{}, false, fmt.Errorf("refresh runner labels: %w", err)
-		}
-	}
+	labels := runner.labels
 
 	assignmentIDs, err := d.rdb.LRange(ctx, d.keys.queue, 0, -1).Result()
 	if err != nil {
@@ -303,12 +286,12 @@ func (d *RedisRunnerDirectory) ClaimForRunner(ctx context.Context, req ClaimRequ
 		if !canServeNamespace(runner.namespaces, assignment.Namespace) {
 			continue
 		}
-		if rs := assignment.Routing.RunnerSelector; rs != nil && !MatchLabels(effectiveLabels, rs.MatchLabels) {
+		if rs := assignment.Routing.RunnerSelector; rs != nil && !MatchLabels(labels, rs.MatchLabels) {
 			continue
 		}
 
 		claimID := ClaimID(uuid.NewString())
-		status, err := d.claim(ctx, req, capabilitiesChanged, string(capabilitiesJSON), assignmentID, raw, claimID)
+		status, err := d.claim(ctx, req.RunnerID, req.SessionID, assignmentID, raw, claimID)
 		if err != nil {
 			return Claim{}, false, err
 		}
@@ -326,7 +309,7 @@ func (d *RedisRunnerDirectory) ClaimForRunner(ctx context.Context, req ClaimRequ
 		}
 	}
 
-	status, err := d.claim(ctx, req, capabilitiesChanged, string(capabilitiesJSON), "", "", "")
+	status, err := d.claim(ctx, req.RunnerID, req.SessionID, "", "", "")
 	if err != nil {
 		return Claim{}, false, err
 	}
@@ -415,11 +398,7 @@ func (d *RedisRunnerDirectory) replayLease(ctx context.Context, runnerID, sessio
 	return Claim{}, false, nil
 }
 
-func (d *RedisRunnerDirectory) claim(ctx context.Context, req ClaimRequest, capabilitiesChanged bool, capabilitiesJSON, assignmentID, expectedData string, claimID ClaimID) (string, error) {
-	changed := "0"
-	if capabilitiesChanged {
-		changed = "1"
-	}
+func (d *RedisRunnerDirectory) claim(ctx context.Context, runnerID, sessionID string, assignmentID, expectedData string, claimID ClaimID) (string, error) {
 	status, err := d.evalStatus(ctx, redisClaimAssignmentLua, []string{
 		d.keys.queue,
 		d.keys.assignmentData,
@@ -434,10 +413,8 @@ func (d *RedisRunnerDirectory) claim(ctx context.Context, req ClaimRequest, capa
 		d.keys.runnerLeaseCount,
 		d.keys.runnerSession,
 		d.keys.runnerCapacity,
-		d.keys.runnerInflight,
-		d.keys.runnerCapabilities,
 		d.keys.claimsExpiry,
-	}, req.RunnerID, req.SessionID, strconv.Itoa(req.Capacity), changed, capabilitiesJSON, assignmentID, expectedData, string(claimID), strconv.FormatInt(d.claimTTLMillis(), 10), strconv.FormatInt(time.Now().UTC().UnixMilli(), 10))
+	}, runnerID, sessionID, assignmentID, expectedData, string(claimID), strconv.FormatInt(d.claimTTLMillis(), 10), strconv.FormatInt(time.Now().UTC().UnixMilli(), 10))
 	if err != nil {
 		return "", fmt.Errorf("claim redis assignment: %w", err)
 	}
@@ -1196,44 +1173,37 @@ end
 if ARGV[2] == '' or current ~= ARGV[2] then
   return 'stale'
 end
-if ARGV[4] == '1' then
-  redis.call('HSET', KEYS[15], ARGV[1], ARGV[5])
-end
 -- Headroom is derived purely from server-side accounting: the authoritative
 -- total capacity (written only by register/heartbeat) minus the tasks this
--- runner already has in flight (active claims + finalized leases). The poll
--- request's ARGV[3] Capacity is deliberately NOT written to runnerCapacity and
--- NOT used here: doing so would let a client-supplied remainder both pollute
--- RunnerSnapshot.Capacity and double-count in-flight work already reflected by
--- claims+leases. runnerInflight is a heartbeat observation only and must not
--- gate the claim.
+-- runner already has in flight (active claims + finalized leases). Poll never
+-- supplies routing or capacity authority, so no poll field is written here.
 local capacity = tonumber(redis.call('HGET', KEYS[13], ARGV[1]) or '0')
 local claims = tonumber(redis.call('HGET', KEYS[10], ARGV[1]) or '0')
 local leases = tonumber(redis.call('HGET', KEYS[11], ARGV[1]) or '0')
 if capacity - claims - leases <= 0 then
   return 'none'
 end
-if ARGV[6] == '' then
+if ARGV[3] == '' then
   return 'none'
 end
-if redis.call('HGET', KEYS[3], ARGV[6]) ~= 'queued' then
+if redis.call('HGET', KEYS[3], ARGV[3]) ~= 'queued' then
   return 'retry'
 end
-if redis.call('HGET', KEYS[2], ARGV[6]) ~= ARGV[7] then
+if redis.call('HGET', KEYS[2], ARGV[3]) ~= ARGV[4] then
   return 'retry'
 end
-if redis.call('LREM', KEYS[1], 0, ARGV[6]) == 0 then
+if redis.call('LREM', KEYS[1], 0, ARGV[3]) == 0 then
   return 'retry'
 end
-redis.call('HSET', KEYS[3], ARGV[6], 'claimed')
-redis.call('HSET', KEYS[4], ARGV[6], ARGV[8])
-redis.call('HSET', KEYS[5], ARGV[6], ARGV[1])
-redis.call('HSET', KEYS[6], ARGV[6], ARGV[2])
-redis.call('HSET', KEYS[7], ARGV[8], ARGV[6])
-redis.call('HSET', KEYS[8], ARGV[8], ARGV[1])
-redis.call('HSET', KEYS[9], ARGV[8], ARGV[2])
+redis.call('HSET', KEYS[3], ARGV[3], 'claimed')
+redis.call('HSET', KEYS[4], ARGV[3], ARGV[5])
+redis.call('HSET', KEYS[5], ARGV[3], ARGV[1])
+redis.call('HSET', KEYS[6], ARGV[3], ARGV[2])
+redis.call('HSET', KEYS[7], ARGV[5], ARGV[3])
+redis.call('HSET', KEYS[8], ARGV[5], ARGV[1])
+redis.call('HSET', KEYS[9], ARGV[5], ARGV[2])
 redis.call('HINCRBY', KEYS[10], ARGV[1], 1)
-redis.call('ZADD', KEYS[16], tonumber(ARGV[10]) + tonumber(ARGV[9]), ARGV[8])
+redis.call('ZADD', KEYS[14], tonumber(ARGV[7]) + tonumber(ARGV[6]), ARGV[5])
 return 'claimed'
 `
 

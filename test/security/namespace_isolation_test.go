@@ -626,10 +626,8 @@ func TestNamespaceIsolationRunnerAssignmentDoesNotCrossNamespace(t *testing.T) {
 	}
 
 	_, ok, err := dir.ClaimForRunner(ctx, control.ClaimRequest{
-		RunnerID:     sessionA.RunnerID,
-		SessionID:    sessionA.SessionID,
-		Capacity:     1,
-		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+		RunnerID:  sessionA.RunnerID,
+		SessionID: sessionA.SessionID,
 	})
 	if err != nil {
 		t.Fatalf("runner-a claim: %v", err)
@@ -650,10 +648,8 @@ func TestNamespaceIsolationRunnerAssignmentDoesNotCrossNamespace(t *testing.T) {
 		t.Fatalf("register runner-b: %v", err)
 	}
 	claim, ok, err := dir.ClaimForRunner(ctx, control.ClaimRequest{
-		RunnerID:     sessionB.RunnerID,
-		SessionID:    sessionB.SessionID,
-		Capacity:     1,
-		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+		RunnerID:  sessionB.RunnerID,
+		SessionID: sessionB.SessionID,
 	})
 	if err != nil {
 		t.Fatalf("runner-b claim: %v", err)

@@ -193,12 +193,18 @@ func runnerStatus(err error) error {
 	switch {
 	case errors.Is(err, ErrRunnerIDRequired), errors.Is(err, ErrRunnerSessionRequired), errors.Is(err, ErrConcurrencyRequired), errors.Is(err, ErrInvalidNamespace), errors.Is(err, ErrLeaseRequired), errors.Is(err, ErrMissingWorkflowVersion):
 		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, ErrInvalidCapability):
+		return status.Error(codes.InvalidArgument, ErrInvalidCapability.Error())
 	case errors.Is(err, ErrRunnerSessionStale):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, ErrRunnerNotFound):
 		return status.Error(codes.NotFound, err.Error())
 	case errors.Is(err, ErrUnauthenticated):
 		return status.Error(codes.Unauthenticated, err.Error())
+	case errors.Is(err, ErrAuthNamespaceDenied):
+		return status.Error(codes.PermissionDenied, ErrAuthNamespaceDenied.Error())
+	case errors.Is(err, ErrAuthCapabilityDenied):
+		return status.Error(codes.PermissionDenied, ErrAuthCapabilityDenied.Error())
 	default:
 		return status.Error(codes.Internal, err.Error())
 	}

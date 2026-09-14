@@ -321,16 +321,14 @@ func nsbEnqueue(t *testing.T, ctx context.Context, dir *control.RedisRunnerDirec
 // counting primitive judgement 3 needs: "claimed only namespace A" must be an
 // exact set/count equality, never ">= 1" or "contains" (this repo's own
 // history: a leak that fires 10001 times still satisfies ">= 1").
-func nsbDrain(t *testing.T, ctx context.Context, dir *control.RedisRunnerDirectory, runnerID, sessionID, nodeType string, maxClaims int) map[namespace.Namespace]int {
+func nsbDrain(t *testing.T, ctx context.Context, dir *control.RedisRunnerDirectory, runnerID, sessionID string, maxClaims int) map[namespace.Namespace]int {
 	t.Helper()
 	got := map[namespace.Namespace]int{}
 	for i := 0; i < maxClaims; i++ {
 		claim, ok, err := dir.ClaimForRunner(ctx, control.ClaimRequest{
-			RunnerID:     runnerID,
-			SessionID:    sessionID,
-			Capacity:     maxClaims,
-			Capabilities: []protocol.Capability{{NodeType: nodeType}},
-			Now:          time.Now(),
+			RunnerID:  runnerID,
+			SessionID: sessionID,
+			Now:       time.Now(),
 		})
 		if err != nil {
 			t.Fatalf("ClaimForRunner(%s) iteration %d: %v", runnerID, i, err)
@@ -382,12 +380,14 @@ func TestRunnerNamespaceBoundaryRealRedisClaimForRunnerScopesByNamespace(t *test
 
 	regA, err := client.WithToken(tokenA).Register(ctx, protocol.RegisterRunnerRequest{
 		RunnerID: idA, Concurrency: 10, Namespaces: []string{string(nsA)},
+		Capabilities: []protocol.Capability{{NodeType: nodeType}},
 	})
 	if err != nil {
 		t.Fatalf("register runner A: %v", err)
 	}
 	regB, err := client.WithToken(tokenB).Register(ctx, protocol.RegisterRunnerRequest{
 		RunnerID: idB, Concurrency: 10, Namespaces: []string{string(nsB)},
+		Capabilities: []protocol.Capability{{NodeType: nodeType}},
 	})
 	if err != nil {
 		t.Fatalf("register runner B: %v", err)
@@ -405,7 +405,7 @@ func TestRunnerNamespaceBoundaryRealRedisClaimForRunnerScopesByNamespace(t *test
 	// sitting unclaimed in the (globally shared) queue: this is the case that
 	// actually exercises the filter, not merely "there happened to be nothing
 	// else to claim".
-	gotA := nsbDrain(t, ctx, dir, idA, regA.SessionID, nodeType, perNamespace*2)
+	gotA := nsbDrain(t, ctx, dir, idA, regA.SessionID, perNamespace*2)
 	wantA := map[namespace.Namespace]int{nsA: perNamespace}
 	if len(gotA) != len(wantA) || gotA[nsA] != wantA[nsA] {
 		t.Fatalf("runner A (namespace %q) claimed = %v, want exactly %v", nsA, gotA, wantA)
@@ -413,7 +413,7 @@ func TestRunnerNamespaceBoundaryRealRedisClaimForRunnerScopesByNamespace(t *test
 
 	// Runner B must still be able to claim its own three -- proving A's scan
 	// skipped them rather than silently discarding or consuming them.
-	gotB := nsbDrain(t, ctx, dir, idB, regB.SessionID, nodeType, perNamespace*2)
+	gotB := nsbDrain(t, ctx, dir, idB, regB.SessionID, perNamespace*2)
 	wantB := map[namespace.Namespace]int{nsB: perNamespace}
 	if len(gotB) != len(wantB) || gotB[nsB] != wantB[nsB] {
 		t.Fatalf("runner B (namespace %q) claimed = %v, want exactly %v", nsB, gotB, wantB)

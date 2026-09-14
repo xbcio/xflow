@@ -107,3 +107,56 @@ func TestHTTPBodyTokenAcceptedWhenNoHeader(t *testing.T) {
 		t.Fatalf("status = %d, want 200 (body token fallback)", resp.StatusCode)
 	}
 }
+
+func TestHTTPRegisterRejectsUnauthorizedCapability(t *testing.T) {
+	srv, dir := newAuthedServer(t)
+	resp := postAuthed(t, srv.URL+protocol.RegisterRunnerPath, "secret-token", protocol.RegisterRunnerRequest{
+		RunnerID:     "order-runner-1",
+		Concurrency:  1,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.script"}},
+	})
+	assertHTTPRegisterError(t, resp, http.StatusForbidden, ErrAuthCapabilityDenied.Error())
+
+	if _, ok := dir.Runner(context.Background(), "order-runner-1"); ok {
+		t.Fatal("unauthorized-capability runner was registered")
+	}
+}
+
+func TestHTTPRegisterRejectsUnauthorizedNamespaceWithForbidden(t *testing.T) {
+	srv, _ := newAuthedServer(t)
+	resp := postAuthed(t, srv.URL+protocol.RegisterRunnerPath, "secret-token", protocol.RegisterRunnerRequest{
+		RunnerID:     "order-runner-1",
+		Concurrency:  1,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+		Namespaces:   []string{"other-team"},
+	})
+	assertHTTPRegisterError(t, resp, http.StatusForbidden, ErrAuthNamespaceDenied.Error())
+}
+
+func TestHTTPRegisterRejectsBlankCapability(t *testing.T) {
+	srv, _ := newAuthedServer(t)
+	resp := postAuthed(t, srv.URL+protocol.RegisterRunnerPath, "secret-token", protocol.RegisterRunnerRequest{
+		RunnerID:     "order-runner-1",
+		Concurrency:  1,
+		Capabilities: []protocol.Capability{{NodeType: " \t "}},
+	})
+	assertHTTPRegisterError(t, resp, http.StatusBadRequest, ErrInvalidCapability.Error())
+}
+
+func assertHTTPRegisterError(t *testing.T, resp *http.Response, wantStatus int, wantMessage string) {
+	t.Helper()
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != wantStatus {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, wantStatus)
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if body.Error != wantMessage {
+		t.Fatalf("error message = %q, want fixed sentinel %q", body.Error, wantMessage)
+	}
+}
