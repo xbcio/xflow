@@ -9,11 +9,34 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/xbcio/xflow/namespace"
 )
+
+func TestNormalizeTriggerLockTTL(t *testing.T) {
+	tests := []struct {
+		name string
+		in   time.Duration
+		want time.Duration
+	}{
+		{name: "zero uses default", in: 0, want: defaultTriggerLockTTL},
+		{name: "negative uses default", in: -time.Second, want: defaultTriggerLockTTL},
+		{name: "sub-millisecond clamps", in: 100 * time.Microsecond, want: minRedisTriggerLockTTL},
+		{name: "one millisecond remains unchanged", in: time.Millisecond, want: time.Millisecond},
+		{name: "ordinary duration remains unchanged", in: 42 * time.Second, want: 42 * time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeTriggerLockTTL(tt.in); got != tt.want {
+				t.Fatalf("normalizeTriggerLockTTL(%s) = %s, want %s", tt.in, got, tt.want)
+			}
+		})
+	}
+}
 
 func TestTriggerDedupIsSharedAcrossPrimitiveInstances(t *testing.T) {
 	ctx := namespace.WithNamespace(context.Background(), namespace.Namespace("namespace-a"))
@@ -151,25 +174,35 @@ func TestTriggerLockRenewPreservesOwnership(t *testing.T) {
 }
 
 func TestTriggerLockRenewPositiveSubMillisecondTTLDoesNotExpireImmediately(t *testing.T) {
-	ctx := namespace.WithNamespace(context.Background(), namespace.Namespace("namespace-a"))
-	rdb := newTriggerRuntimeTestRedisClient(t)
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis.Run() error = %v", err)
+	}
+	t.Cleanup(mr.Close)
 
-	key := "test-trigger-lock-renew-sub-ms-" + uuid.NewString()
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+
+	ctx := namespace.WithNamespace(context.Background(), namespace.Namespace("namespace-a"))
+	key := "test-trigger-lock-renew-sub-ms"
 	lockKey := triggerLockKey(namespace.FromContext(ctx), key)
-	t.Cleanup(func() {
-		if err := rdb.Del(ctx, lockKey).Err(); err != nil {
-			t.Fatalf("Del(%q) error = %v", lockKey, err)
-		}
-	})
 
 	first := New(rdb)
 
-	lock, ok, err := first.TryLock(ctx, key, time.Minute)
+	lock, ok, err := first.TryLock(ctx, key, 500*time.Microsecond)
 	if err != nil {
 		t.Fatalf("TryLock(first) error = %v", err)
 	}
 	if !ok {
 		t.Fatal("first lock was not acquired")
+	}
+	if got := mr.TTL(lockKey); got != time.Millisecond {
+		t.Fatalf("initial lock TTL = %s, want %s", got, time.Millisecond)
+	}
+
+	mr.FastForward(500 * time.Microsecond)
+	if !mr.Exists(lockKey) {
+		t.Fatal("lock expired before its normalized TTL elapsed")
 	}
 
 	renewable, ok := lock.(interface {
@@ -187,12 +220,17 @@ func TestTriggerLockRenewPositiveSubMillisecondTTLDoesNotExpireImmediately(t *te
 		t.Fatal("Renew() = false, want true")
 	}
 
-	exists, err := rdb.Exists(ctx, lockKey).Result()
-	if err != nil {
-		t.Fatalf("Exists(%q) error = %v", lockKey, err)
+	if got := mr.TTL(lockKey); got != time.Millisecond {
+		t.Fatalf("renewed lock TTL = %s, want %s", got, time.Millisecond)
 	}
-	if exists == 0 {
-		t.Fatal("sub-millisecond renewal expired the lock immediately")
+
+	mr.FastForward(500 * time.Microsecond)
+	if !mr.Exists(lockKey) {
+		t.Fatal("renewed lock expired before its normalized TTL elapsed")
+	}
+	mr.FastForward(500 * time.Microsecond)
+	if mr.Exists(lockKey) {
+		t.Fatal("renewed lock remained after its normalized TTL elapsed")
 	}
 }
 

@@ -16,6 +16,11 @@ type Primitives struct {
 	rdb redis.UniversalClient
 }
 
+const (
+	defaultTriggerLockTTL  = time.Minute
+	minRedisTriggerLockTTL = time.Millisecond
+)
+
 func New(rdb redis.UniversalClient) *Primitives {
 	return &Primitives{rdb: rdb}
 }
@@ -60,9 +65,7 @@ func (p *Primitives) Dedup(ctx context.Context, key string, ttl time.Duration) (
 }
 
 func (p *Primitives) TryLock(ctx context.Context, key string, ttl time.Duration) (types.TriggerLock, bool, error) {
-	if ttl <= 0 {
-		ttl = time.Minute
-	}
+	ttl = normalizeTriggerLockTTL(ttl)
 	t := namespace.FromContext(ctx)
 	token := uuid.NewString()
 	lockKey := triggerLockKey(t, key)
@@ -71,6 +74,19 @@ func (p *Primitives) TryLock(ctx context.Context, key string, ttl time.Duration)
 		return nil, ok, err
 	}
 	return &triggerLock{rdb: p.rdb, key: lockKey, token: token}, true, nil
+}
+
+// normalizeTriggerLockTTL maps lock TTLs to Redis' positive millisecond
+// precision while preserving the public default for absent or invalid values.
+func normalizeTriggerLockTTL(ttl time.Duration) time.Duration {
+	switch {
+	case ttl <= 0:
+		return defaultTriggerLockTTL
+	case ttl < minRedisTriggerLockTTL:
+		return minRedisTriggerLockTTL
+	default:
+		return ttl
+	}
 }
 
 func (p *Primitives) State(ctx context.Context, scope string) types.TriggerState {
@@ -104,19 +120,13 @@ var releaseTriggerLockScript = redis.NewScript(releaseTriggerLockScriptSrc)
 var renewTriggerLockScript = redis.NewScript(renewTriggerLockScriptSrc)
 
 func (l *triggerLock) Renew(ctx context.Context, ttl time.Duration) (bool, error) {
-	if ttl <= 0 {
-		ttl = time.Minute
-	}
-	ttlMillis := ttl.Milliseconds()
-	if ttl > 0 && ttlMillis == 0 {
-		ttlMillis = 1
-	}
+	ttl = normalizeTriggerLockTTL(ttl)
 	renewed, err := renewTriggerLockScript.Run(
 		ctx,
 		l.rdb,
 		[]string{l.key},
 		l.token,
-		ttlMillis,
+		ttl.Milliseconds(),
 	).Int64()
 	if err != nil {
 		return false, err
