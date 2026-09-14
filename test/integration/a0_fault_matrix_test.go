@@ -439,7 +439,11 @@ func TestA0FaultMatrix(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		env := newA0FaultEnv(t, addr, true)
+		// This scenario explicitly drives the recovery flush below. Do not start
+		// Backend.Bind here: its process-wide outbox dispatcher scans the shared
+		// default namespace and can deliver a stale, unrelated execution into this
+		// scenario's recording fake queue.
+		env := newA0FaultEnv(t, addr, false)
 		g := a0TwoNodeGraph(t, "a0-commit-then-flush")
 		env.queue.setError(nil)
 
