@@ -20,7 +20,7 @@ Use Makefile targets as the canonical entry points so local runs match CI
 semantics.
 
 ```bash
-# All default tests: race-enabled, uncached, 5m package timeout
+# Default tests: race-enabled, uncached, 5m package timeout; excludes WASM
 make test
 
 # Verbose variant of the same default gate
@@ -44,17 +44,16 @@ make test-script-wasm
 ```
 
 This target runs the node-layer script seam and JavaScript engine serially,
-then discovers every runnable top-level WASM `Test`, `Fuzz`, and `Example` and
-round-robin partitions that complete list across eight serial race-enabled
-shards. Every shard retains the focused 5-minute package timeout; there is no
-maintained test allowlist, so newly added top-level tests are included
-automatically.
+then runs the complete WASM package once in an isolated race-enabled process
+with a 15-minute timeout. This lets `TestMain` compile its WASI guests once
+rather than once per shard; all package tests remain included automatically.
 
-`make test` first runs all other packages with the normal 120-second package
-timeout, then runs this same serialized and sharded focused gate. This keeps
-every package and every WASM test in the default gate without letting
-full-repository package fan-out starve real WASM compilation. Do not globally
-raise the ordinary package timeout to absorb that resource contention.
+`make test` runs ordinary packages plus the script and JavaScript packages with
+the normal 5-minute package timeout, but deliberately excludes the heavyweight
+WASM package. Run `make test-script-wasm` when changing script execution, Go,
+qjs, wazero, or wasip1 behavior. CI runs the full WASM suite once through its
+coverage gate; do not add it back to the default local feedback gate. Do not
+globally raise the ordinary package timeout to absorb that resource contention.
 
 ### Go coverage gate
 
@@ -65,14 +64,12 @@ artifact:
 make test-coverage
 ```
 
-The target runs every ordinary package with a 120-second package timeout, then
+The target runs every ordinary package with a 5-minute package timeout, then
 runs the script seam and JavaScript package serially with `-p=1` and a focused
-5-minute timeout. Atomic race coverage makes the full WASM test binary exceed
-that focused budget on some machines, so the target discovers every runnable
-top-level WASM test and partitions the complete list deterministically across
-eight serial shards. Each shard still uses `-p=1` and a 5-minute timeout; newly
-added tests are included automatically rather than relying on a maintained skip
-list.
+5-minute timeout. It runs the complete WASM package once with `-p=1` and a
+15-minute timeout, then merges that profile with the others. This is the single
+CI execution of the WASM suite; newly added package tests are included
+automatically rather than relying on a maintained skip list.
 
 Every coverage invocation uses `-race -count=1 -covermode=atomic`. The profiles
 are mode-checked and merged by source block, with duplicate counters summed and
@@ -227,8 +224,8 @@ gate and is not the focused G1 evidence entry.
 
 | Target | Directory | Notes |
 |---|---|---|
-| `make test-script-wasm` | `node/internal/code/script`, `node/internal/code/script/js`, `node/internal/code/script/wasm` | Serialized script/qjs gate plus eight auto-discovered WASM shards, each with a 5m timeout |
-| `make test-coverage` | all Go packages | Race-enabled atomic coverage; ordinary packages use 5m, script/WASM packages use serialized 5m gate |
+| `make test-script-wasm` | `node/internal/code/script`, `node/internal/code/script/js`, `node/internal/code/script/wasm` | Serialized script/qjs gate plus one isolated WASM package run (15m timeout) |
+| `make test-coverage` | all Go packages | Race-enabled atomic coverage; ordinary/script packages use 5m and WASM runs once in isolation (15m) |
 | `make test-perf` | `test/perf/` | Benchmarks, needs `make env-up` (Redis + Kafka) |
 | `make test-soak` | `test/soak/` | HA soak smoke, runs on in-process miniredis; no real Redis required |
 | `make test-concurrency` | `backend/providers/...` | Concurrency stress, gated by `concurrency` build tag |

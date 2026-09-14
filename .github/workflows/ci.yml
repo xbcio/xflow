@@ -61,7 +61,8 @@ jobs:
       - name: Stress tests
         run: make test-stress
 
-      - name: Coverage
+      # test-coverage is the single, isolated CI execution of the WASM suite.
+      - name: Coverage + single WASM regression
         run: make test-coverage
 
       - name: Upload coverage

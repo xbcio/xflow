@@ -11,11 +11,9 @@ GO_VERSION := 1.25.0
 SCRIPT_PACKAGE_ROOT := ./node/internal/code/script
 SCRIPT_JS_PACKAGES := $(SCRIPT_PACKAGE_ROOT) $(SCRIPT_PACKAGE_ROOT)/js
 WASM_PACKAGE := $(SCRIPT_PACKAGE_ROOT)/wasm
-SCRIPT_WASM_PACKAGES := $(SCRIPT_JS_PACKAGES) $(WASM_PACKAGE)
-# Eight shards keep heavyweight multi-MB compiles from consuming most of the
-# finite five-minute package watchdog under race-enabled host contention.
-WASM_TEST_SHARDS := 8
-WASM_COVERAGE_SHARDS := $(WASM_TEST_SHARDS)
+# WASM tests compile several real guests. Run the package once in an isolated
+# process so those guests are built once, with a dedicated watchdog for CI hosts.
+WASM_TEST_TIMEOUT ?= 15m
 INTEGRATION_PACKAGE := ./test/integration
 INTEGRATION_TEST_SHARDS := 4
 COVERAGE_PROFILE ?= coverage.out
@@ -65,34 +63,6 @@ build-runner: check-go
 	$(GO) build -o bin/runner ./cmd/runner
 
 # ── Test ───────────────────────────────────────────────────────────────────────
-
-# Discover top-level WASM tests at runtime so new tests are included without a
-# maintained allowlist. Round-robin shards keep every race-enabled invocation
-# within the focused 5-minute package budget on supported developer/CI hosts.
-define RUN_WASM_TEST_SHARDS
-set -eu; \
-case "$(WASM_TEST_SHARDS)" in ''|*[!0-9]*|0) echo "ERROR: WASM_TEST_SHARDS must be a positive integer" >&2; exit 1;; esac; \
-wasm_list="$$($(GO) test $(WASM_PACKAGE) -count=1 -list '^(Test|Fuzz|Example)')" || exit 1; \
-wasm_tests="$$(printf '%s\n' "$$wasm_list" | awk '/^(Test|Fuzz|Example)/')"; \
-if [ -z "$$wasm_tests" ]; then echo "ERROR: no runnable WASM tests discovered" >&2; exit 1; fi; \
-wasm_test_count="$$(printf '%s\n' "$$wasm_tests" | awk 'NF { count++ } END { print count + 0 }')"; \
-assigned=0; \
-shard=0; \
-while [ "$$shard" -lt "$(WASM_TEST_SHARDS)" ]; do \
-	shard_tests="$$(printf '%s\n' "$$wasm_tests" | awk -v shard="$$shard" -v shards="$(WASM_TEST_SHARDS)" \
-		'((NR - 1) % shards) == shard { printf "%s%s", separator, $$0; separator = "|" } END { print "" }')"; \
-	if [ -z "$$shard_tests" ]; then echo "ERROR: WASM test shard $$shard is empty" >&2; exit 1; fi; \
-	shard_count="$$(printf '%s\n' "$$shard_tests" | awk -F '|' '{ print NF }')"; \
-	assigned=$$((assigned + shard_count)); \
-	echo "==> WASM tests: shard $$((shard + 1))/$(WASM_TEST_SHARDS) ($$shard_count tests, serialized, 5m timeout)"; \
-	$(GO) test -p=1 $(WASM_PACKAGE) -run="^($$shard_tests)$$" -race -count=1 -timeout 5m $(1); \
-	shard=$$((shard + 1)); \
-done; \
-if [ "$$assigned" -ne "$$wasm_test_count" ]; then \
-	echo "ERROR: assigned $$assigned of $$wasm_test_count discovered WASM tests" >&2; \
-	exit 1; \
-fi
-endef
 
 # Discover every top-level integration test and run the root package in serial
 # shards so each race-enabled process keeps its own 10-minute timeout budget.
@@ -175,8 +145,8 @@ endef
 
 # The script seam and WASM packages compile several real wasip1 guests. Running
 # them in the same package fan-out as the rest of ./... can starve their bounded
-# execution contexts under -race. Run the ordinary packages first, then serialize
-# the focused script/WASM gate; every package remains covered by make test.
+# execution contexts under -race. The default test target runs ordinary packages
+# first and deliberately leaves the heavyweight WASM regression to its focused gate.
 define RUN_ORDINARY_TEST_PACKAGES
 all_packages="$$($(GO) list ./...)" || exit 1; \
 script_package="$$($(GO) list $(SCRIPT_PACKAGE_ROOT))" || exit 1; \
@@ -185,15 +155,14 @@ $(GO) test $$packages -race -count=1 -timeout 5m $(1) && \
 $(GO) test -p=1 $$redis_packages -race -count=1 -timeout 5m $(1)
 endef
 
+# Default feedback gate: WASM remains in test-script-wasm and the CI coverage gate.
 test: check-go
 	@$(call RUN_ORDINARY_TEST_PACKAGES,)
 	$(GO) test -p=1 $(SCRIPT_JS_PACKAGES) -race -count=1 -timeout 5m
-	@$(call RUN_WASM_TEST_SHARDS,)
 
 test-verbose: check-go
 	@$(call RUN_ORDINARY_TEST_PACKAGES,-v)
 	$(GO) test -p=1 $(SCRIPT_JS_PACKAGES) -race -count=1 -timeout 5m -v
-	@$(call RUN_WASM_TEST_SHARDS,-v)
 
 test-examples: check-go
 	$(GO) test ./sdk/examples/ -race -count=1 -v -timeout 30s
@@ -216,18 +185,15 @@ test-stress: check-go
 
 # Focused script-engine regression suite. Package execution is serialized so
 # the node-layer seam and wazero compilation do not compete for CPU under -race.
-# WASM tests are auto-discovered and sharded to retain the 5-minute package
-# timeout without omitting newly added top-level tests.
+# The WASM package runs once in its own process, so TestMain builds its guests once.
 test-script-wasm: check-go
 	$(GO) test -p=1 $(SCRIPT_JS_PACKAGES) -race -count=1 -timeout 5m
-	@$(call RUN_WASM_TEST_SHARDS,)
+	$(GO) test -p=1 $(WASM_PACKAGE) -race -count=1 -timeout $(WASM_TEST_TIMEOUT)
 
 # Generate one atomic coverage profile without reintroducing full-repository
-# package fan-out for the heavyweight script/WASM packages. Atomic coverage can
-# make the complete WASM test binary exceed its focused 5m package budget, so
-# enumerate every runnable top-level test and split it deterministically across
-# serial shards. Merge duplicate blocks by summing counters, validate the result,
-# then atomically replace the requested output profile.
+# package fan-out for the heavyweight script/WASM packages. The WASM package is
+# executed once in an isolated process and its profile is merged with the others.
+# The merged profile is validated before it atomically replaces the requested file.
 test-coverage: check-go
 	@set -eu; \
 	profile="$(COVERAGE_PROFILE)"; \
@@ -235,7 +201,6 @@ test-coverage: check-go
 	profile_dir="$$(dirname "$$profile")"; \
 	if [ ! -d "$$profile_dir" ]; then echo "ERROR: coverage output directory does not exist: $$profile_dir" >&2; exit 1; fi; \
 	rm -f "$$profile"; \
-	case "$(WASM_COVERAGE_SHARDS)" in ''|*[!0-9]*|0) echo "ERROR: WASM_COVERAGE_SHARDS must be a positive integer" >&2; exit 1;; esac; \
 	tmpdir="$$(mktemp -d "$${TMPDIR:-/tmp}/xflow-coverage.XXXXXX")"; \
 	merged=""; \
 	cleanup() { rm -rf "$$tmpdir"; if [ -n "$$merged" ]; then rm -f "$$merged"; fi; }; \
@@ -253,27 +218,10 @@ test-coverage: check-go
 	$(GO) test -p=1 $$redis_packages -race -count=1 -timeout 5m -covermode=atomic -coverprofile="$$redis_profile"; \
 	echo "==> coverage: script/JS packages (serialized, 5m timeout)"; \
 	$(GO) test -p=1 $(SCRIPT_JS_PACKAGES) -race -count=1 -timeout 5m -covermode=atomic -coverprofile="$$script_profile"; \
-	wasm_list="$$($(GO) test $(WASM_PACKAGE) -count=1 -list '^(Test|Fuzz|Example)')"; \
-	wasm_tests="$$(printf '%s\n' "$$wasm_list" | awk '/^(Test|Fuzz|Example)/')"; \
-	if [ -z "$$wasm_tests" ]; then echo "ERROR: no runnable WASM tests discovered" >&2; exit 1; fi; \
-	wasm_test_count="$$(printf '%s\n' "$$wasm_tests" | awk 'NF { count++ } END { print count + 0 }')"; \
-	assigned=0; \
-	shard=0; \
-	while [ "$$shard" -lt "$(WASM_COVERAGE_SHARDS)" ]; do \
-		shard_tests="$$(printf '%s\n' "$$wasm_tests" | awk -v shard="$$shard" -v shards="$(WASM_COVERAGE_SHARDS)" \
-			'((NR - 1) % shards) == shard { printf "%s%s", separator, $$0; separator = "|" } END { print "" }')"; \
-		if [ -z "$$shard_tests" ]; then echo "ERROR: WASM coverage shard $$shard is empty" >&2; exit 1; fi; \
-		shard_count="$$(printf '%s\n' "$$shard_tests" | awk -F '|' '{ print NF }')"; \
-		assigned=$$((assigned + shard_count)); \
-		echo "==> coverage: WASM shard $$((shard + 1))/$(WASM_COVERAGE_SHARDS) ($$shard_count tests, serialized, 5m timeout)"; \
-		$(GO) test -p=1 $(WASM_PACKAGE) -run="^($$shard_tests)$$" -race -count=1 -timeout 5m \
-			-covermode=atomic -coverprofile="$$tmpdir/wasm-$$shard.out"; \
-		shard=$$((shard + 1)); \
-	done; \
-	if [ "$$assigned" -ne "$$wasm_test_count" ]; then \
-		echo "ERROR: assigned $$assigned of $$wasm_test_count discovered WASM coverage tests" >&2; \
-		exit 1; \
-	fi; \
+	wasm_profile="$$tmpdir/wasm.out"; \
+	echo "==> coverage: WASM package (single isolated run, $(WASM_TEST_TIMEOUT) timeout)"; \
+	$(GO) test -p=1 $(WASM_PACKAGE) -race -count=1 -timeout $(WASM_TEST_TIMEOUT) \
+		-covermode=atomic -coverprofile="$$wasm_profile"; \
 	if ! awk ' \
 		function invalid() { failed = 1; exit 1 } \
 		FNR == 1 { if ($$0 != "mode: atomic") invalid(); next } \
@@ -291,7 +239,7 @@ test-coverage: check-go
 				location = order[i]; \
 				printf "%s %s %.0f\n", location, statement_count[location], coverage_count[location]; \
 			} \
-		}' "$$ordinary_profile" "$$redis_profile" "$$script_profile" "$$tmpdir"/wasm-*.out > "$$merged"; then \
+		}' "$$ordinary_profile" "$$redis_profile" "$$script_profile" "$$wasm_profile" > "$$merged"; then \
 		echo "ERROR: coverage profiles are malformed or have incompatible blocks" >&2; \
 		exit 1; \
 	fi; \
