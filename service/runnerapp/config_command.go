@@ -1,4 +1,4 @@
-package main
+package runnerapp
 
 import (
 	"fmt"
@@ -33,7 +33,7 @@ func newConfigCommand(opts commandOptions, cfg *runnerConfig) *cobra.Command {
 		Short: "Print a sample runner configuration",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			_, err := fmt.Fprint(opts.out, sampleRunnerConfigYAML())
+			_, err := fmt.Fprint(opts.out, sampleRunnerConfigYAML(cfg.profile))
 			return err
 		},
 	}

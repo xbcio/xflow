@@ -1,6 +1,7 @@
-package main
+package runnerapp
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -24,7 +25,41 @@ var legacyRunnerLongFlags = map[string]struct{}{
 	"server":             {},
 }
 
+// NewCommand creates a standalone runner command using profile. It exposes the
+// same YAML, environment, and CLI surface as xflow-runner; a profile can add
+// non-overridable deployment policy without introducing a second parser.
+func NewCommand(profile Profile) (*cobra.Command, error) {
+	return newRootCommandForProfile(commandOptions{}, profile)
+}
+
+// Execute runs the default xflow-runner command.
+func Execute(args ...string) error {
+	return ExecuteProfile(Profile{}, args...)
+}
+
+// ExecuteProfile runs a standalone runner command with profile.
+func ExecuteProfile(profile Profile, args ...string) error {
+	cmd, err := NewCommand(profile)
+	if err != nil {
+		return err
+	}
+	cmd.SetArgs(normalizeLegacyRunnerArgs(args))
+	return cmd.Execute()
+}
+
 func newRootCommand(opts commandOptions) *cobra.Command {
+	cmd, err := newRootCommandForProfile(opts, Profile{})
+	if err != nil {
+		panic(fmt.Sprintf("default runner profile: %v", err))
+	}
+	return cmd
+}
+
+func newRootCommandForProfile(opts commandOptions, profile Profile) (*cobra.Command, error) {
+	profile, err := normalizeProfile(profile)
+	if err != nil {
+		return nil, err
+	}
 	if opts.runFunc == nil {
 		opts.runFunc = runWithSignals
 	}
@@ -35,11 +70,11 @@ func newRootCommand(opts commandOptions) *cobra.Command {
 		opts.err = os.Stderr
 	}
 
-	cfg := defaultRunnerConfig()
+	cfg := defaultRunnerConfigForProfile(profile)
 	cfg.configPath = os.Getenv("XFLOW_RUNNER_CONFIG")
 	root := &cobra.Command{
-		Use:           "xflow-runner",
-		Short:         "XFlow task runner",
+		Use:           profile.CommandName,
+		Short:         profile.Short,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Args:          cobra.NoArgs,
@@ -61,15 +96,18 @@ func newRootCommand(opts commandOptions) *cobra.Command {
 	root.AddCommand(run)
 	root.AddCommand(newVerifyCommand(opts, &cfg))
 	root.AddCommand(newConfigCommand(opts, &cfg))
-	return root
-}
-
-func executeRoot(args ...string) error {
-	return executeRootWithOptions(commandOptions{}, args...)
+	return root, nil
 }
 
 func executeRootWithOptions(opts commandOptions, args ...string) error {
-	cmd := newRootCommand(opts)
+	return executeRootWithOptionsAndProfile(opts, Profile{}, args...)
+}
+
+func executeRootWithOptionsAndProfile(opts commandOptions, profile Profile, args ...string) error {
+	cmd, err := newRootCommandForProfile(opts, profile)
+	if err != nil {
+		return err
+	}
 	cmd.SetArgs(normalizeLegacyRunnerArgs(args))
 	return cmd.Execute()
 }

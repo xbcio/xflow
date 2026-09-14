@@ -41,7 +41,7 @@
 是一起修的。
 
 复核：`grep -nE 'Skipf\([^)]*dsn|Fatalf\([^)]*dsn'` 全仓库剩 4 处
-（`cmd/runner/config_test.go:551`、`sdk/xflow/runner_config_test.go:62`、
+（`service/runnerapp/config_test.go:551`、`sdk/xflow/runner_config_test.go:62`、
 `execution/runner_test.go:233,347`），都是配置解析测试里对**测试自造的假 DSN**
 的断言文本，不是真凭据。
 

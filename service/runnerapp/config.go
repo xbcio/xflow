@@ -1,4 +1,4 @@
-package main
+package runnerapp
 
 import (
 	"errors"
@@ -97,8 +97,12 @@ func defaultRunnerConfig() runnerConfig {
 }
 
 func loadRunnerConfig(path string) (runnerConfig, error) {
+	return loadRunnerConfigForProfile(path, Profile{})
+}
+
+func loadRunnerConfigForProfile(path string, profile Profile) (runnerConfig, error) {
 	if path == "" {
-		return defaultRunnerConfig(), nil
+		return defaultRunnerConfigForProfile(profile), nil
 	}
 
 	data, err := os.ReadFile(path)
@@ -106,7 +110,7 @@ func loadRunnerConfig(path string) (runnerConfig, error) {
 		return runnerConfig{}, err
 	}
 
-	cfg, err := loadRunnerConfigFromBytes(data)
+	cfg, err := loadRunnerConfigFromBytesForProfile(data, profile)
 	if err != nil {
 		return runnerConfig{}, err
 	}
@@ -115,7 +119,11 @@ func loadRunnerConfig(path string) (runnerConfig, error) {
 }
 
 func loadRunnerConfigFromBytes(data []byte) (runnerConfig, error) {
-	cfg := defaultRunnerConfig()
+	return loadRunnerConfigFromBytesForProfile(data, Profile{})
+}
+
+func loadRunnerConfigFromBytesForProfile(data []byte, profile Profile) (runnerConfig, error) {
+	cfg := defaultRunnerConfigForProfile(profile)
 
 	var file runnerConfigFile
 	if err := yaml.Unmarshal(data, &file); err != nil {
@@ -511,33 +519,48 @@ func validateRunnerConfig(cfg runnerConfig) error {
 
 	// A configured registration code means this run *may*, at enrollment time,
 	// send an HTTP request carrying that code regardless of --transport (see
-	// validateEnrollTransportSecurity) — but only if resolveRunnerIdentity
-	// (enroll.go) does not find a stored identity first: it checks store.Load()
-	// before the registration code, and returns immediately on a hit without
-	// ever reaching the enroll gate, so a runner that already enrolled and
-	// still has --registration-code sitting in its environment (a stale
-	// registration code is common: nothing forces it to be cleared on
-	// restart) never dials out and never needs this gate. Keying config
-	// validation on the registration code alone would misjudge exactly that
-	// case as an upcoming plaintext enrollment and refuse a deployment that
-	// `run` handles correctly. So this must mirror resolveRunnerIdentity's own
-	// two-part test, in the same order: read the store only when a
-	// registration code is configured (config validate stays host-state-free
-	// on the common path of no registration code — an identity file that is
-	// corrupt or too permissive with no registration code configured still
-	// only surfaces in `run`, not here; that gap predates this gate and is
-	// intentionally left alone), and skip the gate when the store already
-	// holds an identity.
-	if strings.TrimSpace(cfg.registrationCode) != "" {
-		_, ok, err := store.Load()
+	// validateEnrollTransportSecurity). A token-requiring profile also needs to
+	// inspect its identity store when no static token is present: a persisted
+	// identity is a valid credential source on restart. The check mirrors
+	// resolveRunnerIdentity's precedence (stored identity, then registration
+	// code, then static configuration) without doing enrollment/network I/O.
+	hasStaticToken := strings.TrimSpace(cfg.token) != ""
+	hasRegistrationCode := strings.TrimSpace(cfg.registrationCode) != ""
+	// A profile that constrains the runner ID must load the stored identity
+	// even when a static token is present: resolveRunnerIdentity always gives
+	// a stored identity precedence, so that is the ID that will actually reach
+	// the control plane. Without this lookup, `config validate` could bless a
+	// static ID while a non-conforming stored ID was about to be used instead.
+	needStoredIdentity := hasRegistrationCode || (cfg.profile.RequireToken && !hasStaticToken) ||
+		cfg.profile.RequiredRunnerIDPrefix != ""
+	storedIdentity := false
+	var stored identity
+	if needStoredIdentity {
+		stored, storedIdentity, err = store.Load()
 		if err != nil {
 			return err
 		}
-		if !ok {
-			if err := validateEnrollTransportSecurity(cfg); err != nil {
+	}
+	if cfg.profile.RequiredRunnerIDPrefix != "" {
+		switch {
+		case storedIdentity:
+			if err := validateProfileRunnerID(cfg.profile, stored.RunnerID); err != nil {
+				return err
+			}
+		case !hasRegistrationCode:
+			// With no stored identity or enrollment, cfg.runnerID is final.
+			if err := validateProfileRunnerID(cfg.profile, cfg.runnerID); err != nil {
 				return err
 			}
 		}
+	}
+	if hasRegistrationCode && !storedIdentity {
+		if err := validateEnrollTransportSecurity(cfg); err != nil {
+			return err
+		}
+	}
+	if cfg.profile.RequireToken && !hasStaticToken && !storedIdentity && !hasRegistrationCode {
+		return requireProfileToken(cfg)
 	}
 
 	return nil
@@ -600,7 +623,7 @@ func parsePositiveDuration(name, raw string) (time.Duration, error) {
 }
 
 func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
-	cfg, err := loadRunnerConfig(base.configPath)
+	cfg, err := loadRunnerConfigForProfile(base.configPath, base.profile)
 	if err != nil {
 		return runnerConfig{}, err
 	}
@@ -707,6 +730,10 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 		cfg.labels = mergeRunnerLabels(detectRunnerLabels(), cfg.labels)
 	}
 	cfg.namespaces = parseNamespaces(cfg.namespaceRaw)
+	cfg, err = applyProfile(cfg)
+	if err != nil {
+		return runnerConfig{}, err
+	}
 	if err := firstRunnerConfigIssue(cfg); err != nil {
 		return runnerConfig{}, err
 	}
@@ -748,7 +775,15 @@ func firstRunnerConfigIssue(cfg runnerConfig) error {
 	return nil
 }
 
-func sampleRunnerConfigYAML() string {
+func sampleRunnerConfigYAML(profile Profile) string {
+	if profile.Defaults != nil || profile.RunnerIDPrefix != "" || len(profile.RequiredLabels) != 0 ||
+		profile.FixedCapabilities != nil || profile.RequireToken {
+		return profileSampleRunnerConfigYAML(profile)
+	}
+	return genericSampleRunnerConfigYAML()
+}
+
+func genericSampleRunnerConfigYAML() string {
 	return `runner:
   id: "runner-1"
   concurrency: 2

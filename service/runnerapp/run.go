@@ -1,4 +1,4 @@
-package main
+package runnerapp
 
 import (
 	"context"
@@ -24,11 +24,17 @@ import (
 )
 
 const (
-	transportHTTP = "http"
-	transportGRPC = "grpc"
+	// TransportHTTP selects the HTTP Runner Protocol channel.
+	TransportHTTP = xflowsdk.RunnerTransportHTTP
+	// TransportGRPC selects the gRPC Runner Protocol channel.
+	TransportGRPC = xflowsdk.RunnerTransportGRPC
+
+	transportHTTP = TransportHTTP
+	transportGRPC = TransportGRPC
 )
 
 type runnerConfig struct {
+	profile           Profile
 	configPath        string
 	serverURL         string
 	transport         string
@@ -190,7 +196,7 @@ var newRunnerService = func(cfg xflowsdk.RunnerConfig, opts ...xflowsdk.RunnerOp
 // means group leases are never SENT rather than failing, an artifact resolver
 // that reaches only the dispatcher leaves nested scripts unable to fetch, an
 // HTTP client that skips the TLS material makes the readiness gate decline
-// forever — and a second hand-maintained copy of it in package main is how a
+// forever — and a second hand-maintained copy of it in another executable is how a
 // field added to one and not the other goes unnoticed. This function's whole
 // job is field translation plus the two process-level concerns the SDK
 // deliberately leaves to its host: the tracer provider's lifecycle and the
@@ -204,6 +210,9 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 	}
 	cfg, err = resolveRunnerIdentity(ctx, cfg, store)
 	if err != nil {
+		return err
+	}
+	if err := requireProfileToken(cfg); err != nil {
 		return err
 	}
 
@@ -252,7 +261,11 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 	if err != nil {
 		return err
 	}
-	defer runner.Close()
+	defer func() {
+		if closeErr := runner.Close(); closeErr != nil {
+			slog.Error("runner shutdown failed", "error", closeErr)
+		}
+	}()
 
 	// Which transports can actually report is the SDK's decision (only the HTTP
 	// protocol client implements MetricsReportClient), so this only says what
@@ -405,7 +418,7 @@ func runWithSignals(cfg runnerConfig) error {
 	return runRunner(ctx, cfg)
 }
 
-// renewClient is the seam the renewal loop is tested through. cmd/runner has
+// renewClient is the seam the renewal loop is tested through. The executable has
 // no business dialing a real server in a unit test.
 type renewClient interface {
 	RenewIdentity(context.Context, protocol.RenewIdentityRequest) (protocol.RenewIdentityResponse, error)
@@ -538,7 +551,7 @@ var startIdentityRenewal = runIdentityRenewal
 
 // runIdentityRenewal keeps this runner's issued identity alive.
 //
-// It lives here, in package main, and not in service/runner's heartbeat loop,
+// It lives in this process-layer package, not in service/runner's heartbeat loop,
 // for a structural reason: runRunner is the only place that holds the
 // identity store, the run context, and the server URL at the same time. The
 // heartbeat loop is a layer below and cannot reach any of them.

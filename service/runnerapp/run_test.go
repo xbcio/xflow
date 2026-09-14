@@ -1,4 +1,4 @@
-package main
+package runnerapp
 
 import (
 	"bytes"
@@ -11,8 +11,7 @@ import (
 	xflowsdk "github.com/xbcio/xflow/sdk/xflow"
 )
 
-// These tests assert the one thing cmd/runner still owns after the assembly
-// moved to sdk/xflow: that the resolved CLI/YAML config reaches the SDK intact.
+// These tests assert that the resolved CLI/YAML config reaches the SDK intact.
 // The assembly's own invariants — GroupRuntime, SubgraphRuntime, the group
 // capability's feature, the supply gate's TLS material — are asserted in
 // sdk/xflow, against the same code this command now calls.

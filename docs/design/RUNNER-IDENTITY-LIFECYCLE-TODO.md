@@ -38,7 +38,7 @@
 | `d246d584` | `test/integration/` 三个 e2e | 给三个真进程 harness 补 `--allow-plaintext` |
 | `870eac1` | `test/integration/runner_plaintext_gate_e2e_test.go` | **新增**一条真二进制的门禁 e2e |
 | `cb1da42` | `Makefile` | 让 `make run-runner` 过门禁 |
-| `c7d6bc3` | `cmd/runner/config.go`、`main_test.go` | 让配置样例过门禁 |
+| `c7d6bc3` | `service/runnerapp/config.go`、`main_test.go` | 让配置样例过门禁 |
 
 **这批不可与 T8 分离**：去掉它们而保留 T8，main 的 integration 套件会红。
 
@@ -287,10 +287,10 @@ wrap 一层，`ErrAuthUnknownToken` 仍是唯一 `errors.Is` 可匹配的身份�
 > 本条保留原文，因为它是 `startIdentityRenewal` seam 为什么存在的**唯一记录**：读不到这段的
 > 人，很容易把这个变量当成一层无意义的间接而内联掉，那等于把下面这条分支重新变回不可观测。
 
-`cmd/runner/renew_test.go` 只驱动这个纯函数本身、断言它返回的四个值，没有驱动 `runRunner`
+`service/runnerapp/renew_test.go` 只驱动这个纯函数本身、断言它返回的四个值，没有驱动 `runRunner`
 全程去观察续期 goroutine 是否真的按判定结果被启动或不被启动。
 
-判定与启动之间的实际距离（`cmd/runner/run.go:294-297`）：
+判定与启动之间的实际距离（`service/runnerapp/run.go:294-297`）：
 
 ```go
 if rc, start, warnMsg, warnErr := decideIdentityRenewal(cfg, store); warnErr != nil {
@@ -480,6 +480,6 @@ enroll 成功后不消费、不标记。这是既有设计，本次不改。与�
 | 忘记取消注释 `allow_plaintext` | 启动时硬停，**立刻可见** |
 | 把 url 挪离 loopback 后忘记重新注释掉 | 凭证静默泄漏，**永远不可见** |
 
-样例默认倒向前者。两条测试守卫锁住这个形状（`cmd/runner/main_test.go`）：一条断言样例能通过
+样例默认倒向前者。两条测试守卫锁住这个形状（`service/runnerapp/main_test.go`）：一条断言样例能通过
 `validateTransportSecurity`，另一条断言它**不是靠** `allow_plaintext` 通过的。两条守卫落在
 不同行、互不掩蔽——变异验证过。

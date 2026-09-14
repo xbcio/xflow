@@ -1,4 +1,4 @@
-package main
+package runnerapp
 
 import (
 	"context"
@@ -44,11 +44,17 @@ func resolveRunnerIdentity(ctx context.Context, cfg runnerConfig, store identity
 		return cfg, err
 	}
 	if ok {
+		if err := validateProfileRunnerID(cfg.profile, stored.RunnerID); err != nil {
+			return cfg, err
+		}
 		cfg.runnerID = stored.RunnerID
 		cfg.token = stored.Token
 		return cfg, nil
 	}
 	if strings.TrimSpace(cfg.registrationCode) == "" {
+		if err := validateProfileRunnerID(cfg.profile, cfg.runnerID); err != nil {
+			return cfg, err
+		}
 		return cfg, nil
 	}
 
@@ -93,6 +99,9 @@ func resolveRunnerIdentity(ctx context.Context, cfg runnerConfig, store identity
 	}
 
 	issued := identity{RunnerID: resp.RunnerID, Token: resp.Token}
+	if err := validateProfileRunnerID(cfg.profile, issued.RunnerID); err != nil {
+		return cfg, err
+	}
 	if err := store.Save(issued); err != nil {
 		// Saving is not optional: an unsaved identity means the next restart
 		// re-enrolls, and a one-time code will not be there to do it with.

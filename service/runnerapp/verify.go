@@ -1,4 +1,4 @@
-package main
+package runnerapp
 
 import (
 	"context"
@@ -42,6 +42,20 @@ func newVerifyCommand(opts commandOptions, cfg *runnerConfig) *cobra.Command {
 // translation below is the same toSDKRunnerConfig the run command uses, which
 // is what keeps the two commands answering about the same runner.
 func verifyRunner(ctx context.Context, cfg runnerConfig) (xflowsdk.VerifyResult, error) {
+	// Keep verification on the same identity path as run. In particular, a
+	// file-backed issued identity must survive a restart, and a first-run
+	// registration code must be exchanged before the VerifyRunner registration.
+	store, err := newIdentityStore(cfg)
+	if err != nil {
+		return xflowsdk.VerifyResult{}, err
+	}
+	cfg, err = resolveRunnerIdentity(ctx, cfg, store)
+	if err != nil {
+		return xflowsdk.VerifyResult{}, err
+	}
+	if err := requireProfileToken(cfg); err != nil {
+		return xflowsdk.VerifyResult{}, err
+	}
 	sdkCfg, err := toSDKRunnerConfig(cfg)
 	if err != nil {
 		return xflowsdk.VerifyResult{}, err

@@ -60,7 +60,7 @@ import (
 // SupplyGate + ActivationTracker + EntryActivationReconciler), so the four
 // "no message loss" assertions in the brief are exercised, adapted to the
 // self-heal mechanism verified above. What is NOT exercised: cmd/runner's own
-// process-level reconnect/backoff loop (runWithReconnect in cmd/runner/run.go)
+// process-level reconnect/backoff loop (runWithReconnect in service/runnerapp/run.go)
 // — this test drives Runner.Run/ActivationTracker/reconciler directly, same
 // as the existing i_remote_trigger_hosting_e2e_test.go, and constructs a
 // second Runner instance to stand in for a restarted process.
@@ -216,7 +216,7 @@ func newSupplyGatingControlPlane(t *testing.T, redisAddr string) (*httptest.Serv
 }
 
 // newSupplyGatingRunner builds an ActivationTracker using the PRODUCTION
-// construction path (cmd/runner/run.go): TriggerActivationHandler wrapped
+// construction path (service/runnerapp/run.go): TriggerActivationHandler wrapped
 // with WithSupplyGate, whose gate is a real HTTPSupplyFetcher hitting the
 // test server's /v1/supplies/{name} endpoint. reg is an ISOLATED
 // node/supply.Registry (never supply.Default) so this test cannot leak state

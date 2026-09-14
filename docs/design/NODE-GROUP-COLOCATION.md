@@ -137,7 +137,7 @@ Operations: `lease_acquired`, `lease_expired`, `committed`, `admission_accepted`
 > 存」。真正挡住这个特性的是两件一行代码都没有的事：
 >
 > 1. **挂起的成员会停住一个外层租约无法恢复的子执行**——与 map body 内禁止挂起
->    同源。生产因此刻意关闭组内挂起（`cmd/runner/run.go` 的
+>    同源。生产因此刻意关闭组内挂起（`service/runnerapp/run.go` 的
 >    `runnersvc.WithSuspendDisabled()`、`group_exec_trigger_runtime.go` 硬设
 >    `SuspendDisabled: true`），成员发出的 wait 在 `engine/commit.go` 就被判失败。
 >    这条**保留不变**，删除不影响它。
@@ -212,7 +212,7 @@ Group execution requires the `group.exec.v1` feature capability. Runners that do
 | Trigger admission via first-writer-wins | No lease lifecycle for trigger-groups; Kafka offset is the durability checkpoint |
 | Deterministic execution ID from admission key | All Redis keys share hash slot for single-script atomicity |
 | Backpressure via offset non-commit | Natural flow control; no distributed protocol needed |
-| Signal journal replay on resume — **已移除**（见 §6：组级持久化挂起已从代码库删除；`cmd/runner/run.go` 用 `runnersvc.WithSuspendDisabled()`，`group_exec_trigger_runtime.go` 硬设 `SuspendDisabled: true`） | Deterministic re-execution from entry input; no partial member state persisted |
+| Signal journal replay on resume — **已移除**（见 §6：组级持久化挂起已从代码库删除；`service/runnerapp/run.go` 用 `runnersvc.WithSuspendDisabled()`，`group_exec_trigger_runtime.go` 硬设 `SuspendDisabled: true`） | Deterministic re-execution from entry input; no partial member state persisted |
 | Activation directives piggybacked on heartbeat | No extra RPC; runner learns assignments on next heartbeat response |
 
 ## 12. Known Limitations & Future Work

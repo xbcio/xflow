@@ -1,4 +1,4 @@
-package main
+package runnerapp
 
 import (
 	"bytes"
@@ -153,7 +153,11 @@ func assertLifecycleProbes(t *testing.T, client *http.Client, addr string) {
 	if err != nil {
 		t.Fatalf("GET /readyz: %v", err)
 	}
-	defer readyResp.Body.Close()
+	defer func() {
+		if closeErr := readyResp.Body.Close(); closeErr != nil {
+			t.Errorf("close /readyz body: %v", closeErr)
+		}
+	}()
 	readyBody, err := io.ReadAll(readyResp.Body)
 	if err != nil {
 		t.Fatalf("read /readyz body: %v", err)
@@ -173,7 +177,11 @@ func assertLifecycleProbes(t *testing.T, client *http.Client, addr string) {
 	if err != nil {
 		t.Fatalf("GET /healthz: %v", err)
 	}
-	defer healthResp.Body.Close()
+	defer func() {
+		if closeErr := healthResp.Body.Close(); closeErr != nil {
+			t.Errorf("close /healthz body: %v", closeErr)
+		}
+	}()
 	if healthResp.StatusCode != http.StatusOK {
 		t.Fatalf("/healthz status = %d, want 200 (liveness is unconditional)", healthResp.StatusCode)
 	}

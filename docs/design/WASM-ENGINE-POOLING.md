@@ -2,7 +2,7 @@
 
 > Status: **P1 + P2 + P3 已实现**（reactor 引擎 + 实例池 + 两阶段初始化落地于 `node/internal/code/script/wasm/{pool.go,host.go,reactor.go}`；磁盘 CompilationCache + startup warmup 落地于 `cache.go` 与 `sdk/xflow/runner.go`（`Runner.Run`）；换池协议由 supply 驱动，见 §6.4 与 [SUPPLY-NODE.md](./SUPPLY-NODE.md)，单测全绿含 `-race`）
 > 关联：[NODE-GROUP-COLOCATION.md](./NODE-GROUP-COLOCATION.md)、[HIGH-THROUGHPUT-INGESTION.md](./HIGH-THROUGHPUT-INGESTION.md)、[SUPPLY-NODE.md](./SUPPLY-NODE.md)
-> 现状代码：`node/internal/code/script/wasm/{wasm.go,wazero.go,pool.go,host.go,reactor.go,cache.go,supply_consumer.go}`、`testdata/{reactor,reactorspin,reactormin}/`、`node/internal/code/script/{engine/warmup.go,warmup.go}`、`node/node.go`（`WarmupScriptEngines`/`PrewarmWasmModule`）、`cmd/runner/run.go`
+> 现状代码：`node/internal/code/script/wasm/{wasm.go,wazero.go,pool.go,host.go,reactor.go,cache.go,supply_consumer.go}`、`testdata/{reactor,reactorspin,reactormin}/`、`node/internal/code/script/{engine/warmup.go,warmup.go}`、`node/node.go`（`WarmupScriptEngines`/`PrewarmWasmModule`）、`service/runnerapp/run.go`
 
 ## 0. 背景与目标
 
@@ -232,7 +232,7 @@ type pooledInstance struct {
 2. `warmupPool` 编译模块 + 预建 poolSize 个实例 + 初次 configure。
 3. **在 runner 启动路径补上 `engine.Warmup(ctx)` 调用**（顺带修掉 qjs 的既有问题）。
 
-**实际落地位置**：`xnode.WarmupScriptEngines(ctx)` 在 `sdk/xflow/runner.go` 的 `Runner.Run()` 内（约第 336 行）调用；`cmd/runner/run.go` 通过 `runner.Run(ctx)` 间接触发，不直接持有 Warmup 调用。
+**实际落地位置**：`xnode.WarmupScriptEngines(ctx)` 在 `sdk/xflow/runner.go` 的 `Runner.Run()` 内（约第 336 行）调用；`service/runnerapp/run.go` 通过 `runner.Run(ctx)` 间接触发，不直接持有 Warmup 调用。
 
 ### 5.6 状态污染防护（约束 #7 的另一面）
 
