@@ -639,6 +639,9 @@ export G0_EVIDENCE_VALIDATE_PY
 
 test-g0-evidence-required: check-go
 	@set -eu; \
+	set -a; [ -f test/env/.env ] && . ./test/env/.env; set +a; \
+	: "$${XFLOW_TEST_REDIS_ADDR:=localhost:$${REDIS_PORT:-6379}}"; \
+	export XFLOW_TEST_REDIS_ADDR; \
 	test_bin="$${G0_TEST_BIN:-}"; \
 	raw_dir="$${G0_RAW_DIR:-}"; \
 	json_path="$${G0_JSON:-}"; \
