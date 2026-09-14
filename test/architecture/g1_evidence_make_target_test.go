@@ -68,7 +68,10 @@ type fakeG1Bundle struct {
 }
 
 func TestG1EvidenceTargetPublishesValidatedBoundArtifacts(t *testing.T) {
-	run := runFakeG1EvidenceTarget(t, map[string]string{"EVIDENCE_CANDIDATE_SHA": fakeEvidenceCandidateSHA})
+	run := runFakeG1EvidenceTarget(t, map[string]string{
+		"EVIDENCE_CANDIDATE_SHA": fakeEvidenceCandidateSHA,
+		"FAKE_G1_EVENT_MODE":     "toolchain-build-output",
+	})
 	if run.err != nil {
 		t.Fatalf("G1 evidence target failed: %v\n%s", run.err, run.output)
 	}
@@ -403,6 +406,26 @@ func TestG1EvidenceTargetRejectsUnpublishableRunsWithoutOverwritingFinals(t *tes
 		{
 			name:       "duplicate run marker",
 			env:        map[string]string{"FAKE_G1_EVENT_MODE": "duplicate-marker"},
+			wantOutput: "run ID marker must occur exactly once",
+		},
+		{
+			name:       "build failure event",
+			env:        map[string]string{"FAKE_G1_EVENT_MODE": "build-fail"},
+			wantOutput: "contains forbidden Action=build-fail",
+		},
+		{
+			name:       "build output without import path",
+			env:        map[string]string{"FAKE_G1_EVENT_MODE": "build-output-without-import-path"},
+			wantOutput: "build-output ImportPath must be non-empty",
+		},
+		{
+			name:       "build output with non-string output",
+			env:        map[string]string{"FAKE_G1_EVENT_MODE": "build-output-with-non-string-output"},
+			wantOutput: "build-output Output must be a string",
+		},
+		{
+			name:       "build output marker does not prove test",
+			env:        map[string]string{"FAKE_G1_EVENT_MODE": "build-output-marker-only"},
 			wantOutput: "run ID marker must occur exactly once",
 		},
 		{
@@ -888,19 +911,29 @@ func verifyG1EventStream(raw []byte, runID string) error {
 			continue
 		}
 		var event struct {
-			Action  string `json:"Action"`
-			Package string `json:"Package"`
-			Test    string `json:"Test"`
-			Output  string `json:"Output"`
+			Action     string `json:"Action"`
+			ImportPath string `json:"ImportPath"`
+			Package    string `json:"Package"`
+			Test       string `json:"Test"`
+			Output     string `json:"Output"`
 		}
 		if err := json.Unmarshal(line, &event); err != nil {
 			return fmt.Errorf("line %d is not a JSON object: %w", index+1, err)
 		}
-		if event.Package != fakeG1Package {
-			return fmt.Errorf("line %d package = %q, want %q", index+1, event.Package, fakeG1Package)
-		}
 		if event.Action == "" {
 			return fmt.Errorf("line %d action is empty", index+1)
+		}
+		if event.Action == "build-output" {
+			if event.ImportPath == "" {
+				return fmt.Errorf("line %d build-output import path is empty", index+1)
+			}
+			continue
+		}
+		if event.Action == "build-fail" {
+			return fmt.Errorf("line %d contains forbidden action %q", index+1, event.Action)
+		}
+		if event.Package != fakeG1Package {
+			return fmt.Errorf("line %d package = %q, want %q", index+1, event.Package, fakeG1Package)
 		}
 		if event.Action == "skip" || event.Action == "fail" {
 			return fmt.Errorf("line %d contains forbidden action %q", index+1, event.Action)
@@ -1144,8 +1177,41 @@ PY
     emit_package_pass() {
       printf '{"Elapsed":0.02,"Package":"%s","Action":"pass"}\n' "$package"
     }
+    emit_toolchain_build_output() {
+      printf '{"ImportPath":"%s.test","Action":"build-output","Output":"# %s.test\\n"}\n' "$package" "$package"
+    }
+    emit_build_fail() {
+      printf '{"ImportPath":"%s.test","Action":"build-fail","Output":"# %s.test\\n"}\n' "$package" "$package"
+    }
+    emit_build_output_without_import_path() {
+      printf '%s\n' '{"Action":"build-output","Output":"# missing import path\n"}'
+    }
+    emit_build_output_with_non_string_output() {
+      printf '{"ImportPath":"github.com/acme/dependency","Action":"build-output","Output":42}\n'
+    }
+    emit_build_output_marker() {
+      printf '{"ImportPath":"github.com/acme/dependency","Action":"build-output","Output":"xflow-g1-evidence-run-id=%s\\n"}\n' "$run_id"
+    }
+    event_mode="${FAKE_G1_EVENT_MODE:-pass}"
+    case "$event_mode" in
+      toolchain-build-output)
+        emit_toolchain_build_output
+        ;;
+      build-fail)
+        emit_build_fail
+        ;;
+      build-output-without-import-path)
+        emit_build_output_without_import_path
+        ;;
+      build-output-with-non-string-output)
+        emit_build_output_with_non_string_output
+        ;;
+      build-output-marker-only)
+        emit_build_output_marker
+        ;;
+    esac
     emit_run
-    case "${FAKE_G1_EVENT_MODE:-pass}" in
+    case "$event_mode" in
       skip)
         emit_marker
         printf '{"Package":"%s","Action":"skip","Test":"TestG1ProductionE2E"}\n' "$package"
@@ -1173,6 +1239,10 @@ PY
       duplicate-marker)
         emit_marker
         emit_marker
+        emit_test_pass
+        emit_package_pass
+        ;;
+      build-output-marker-only)
         emit_test_pass
         emit_package_pass
         ;;

@@ -1037,11 +1037,21 @@ for line_number, line in enumerate(lines, 1):
         fail("line " + str(line_number) + " is not JSON: " + str(exc))
     if not isinstance(event, dict):
         fail("line " + str(line_number) + " must be a JSON object")
-    if event.get("Package") != expected_package:
-        fail("line " + str(line_number) + " Package does not match " + expected_package)
     action = event.get("Action")
     if not isinstance(action, str) or not action:
         fail("line " + str(line_number) + " Action must be non-empty")
+    if action == "build-output":
+        import_path = event.get("ImportPath")
+        if not isinstance(import_path, str) or not import_path:
+            fail("line " + str(line_number) + " build-output ImportPath must be non-empty")
+        output = event.get("Output")
+        if not isinstance(output, str):
+            fail("line " + str(line_number) + " build-output Output must be a string")
+        continue
+    if action == "build-fail":
+        fail("line " + str(line_number) + " contains forbidden Action=build-fail")
+    if event.get("Package") != expected_package:
+        fail("line " + str(line_number) + " Package does not match " + expected_package)
     if action in {"skip", "fail"}:
         fail("line " + str(line_number) + " contains forbidden Action=" + action)
     test = event.get("Test")
