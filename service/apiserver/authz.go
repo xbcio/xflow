@@ -134,6 +134,11 @@ const (
 	// MUST also appear in scopeForOperation or the route is silently
 	// unreachable.
 	OpArtifactRead = "artifact.read"
+	// ScopeRunnerResource is granted to enrollment-issued runners for the small
+	// HTTP resource surface they need: supply fetch, artifact fetch, and entry
+	// seed admission. It intentionally does not grant the broader execution
+	// scope, which also permits operators to inspect, signal, and cancel work.
+	ScopeRunnerResource = "runner.resource"
 	// Registration-code operations mint, list, revoke, and audit the credentials
 	// runners enroll with. Each gets its own scope: minting a code is strictly
 	// more privileged than reading the list, and an ops dashboard that only
@@ -234,7 +239,7 @@ func (ScopeAuthorizer) Authorize(_ context.Context, req AuthorizationRequest) (D
 	if scope == "" {
 		return DecisionDeny, nil
 	}
-	if !req.Principal.HasScope(scope) {
+	if !principalAllowsOperation(req.Principal, req.Operation, scope) {
 		return DecisionDeny, nil
 	}
 	return DecisionAllow, nil
@@ -295,13 +300,28 @@ func (NamespaceAwareAuthorizer) Authorize(_ context.Context, req AuthorizationRe
 	if scope == "" {
 		return DecisionDeny, nil
 	}
-	if !req.Principal.HasScope(scope) {
+	if !principalAllowsOperation(req.Principal, req.Operation, scope) {
 		return DecisionDeny, nil
 	}
 	if req.ResourceNamespace != "" && req.ResourceNamespace != req.Principal.Namespace {
 		return DecisionDeny, nil
 	}
 	return DecisionAllow, nil
+}
+
+func principalAllowsOperation(principal Principal, operation, requiredScope string) bool {
+	if principal.HasScope(requiredScope) {
+		return true
+	}
+	if !principal.HasScope(ScopeRunnerResource) {
+		return false
+	}
+	switch operation {
+	case OpSupplyRead, OpArtifactRead, OpExecutionSeed:
+		return true
+	default:
+		return false
+	}
 }
 
 // PrincipalAuthenticator verifies a credential and returns a trusted Principal.

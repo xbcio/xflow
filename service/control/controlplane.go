@@ -125,6 +125,10 @@ type Config struct {
 	// enroll has no gRPC endpoint (grpc_server.go has no Enroll method), so
 	// there is nothing on that transport for a TTL to affect.
 	IdentityTTL time.Duration
+	// EnrollmentRunnerIDPrefix is prepended to every server-issued enrollment
+	// runner ID. Empty preserves the legacy "runner-" prefix. It is validated
+	// before the control plane is constructed and copied into RunnerPolicy.
+	EnrollmentRunnerIDPrefix string
 }
 
 // EnrollDeclared reports whether both enrollment stores are present. It is
@@ -273,6 +277,11 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	if cfg.Backend == nil {
 		return nil, errors.New("control: Config.Backend is required")
 	}
+	prefix, err := normalizeEnrollmentRunnerIDPrefix(cfg.EnrollmentRunnerIDPrefix)
+	if err != nil {
+		return nil, err
+	}
+	cfg.EnrollmentRunnerIDPrefix = prefix
 	// Enrollment-issued identities authenticate through the same Authenticator
 	// seam as runners.yaml. Composing here (rather than at each call site) is
 	// what makes ControlPlane.Authenticator() — the one the namespace-declaration
@@ -366,6 +375,7 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	if enrollConfigured(cfg) {
 		serverOpts = append(serverOpts, WithEnroll(cfg.RegistrationCodes, cfg.IssuedIdentities))
 	}
+	serverOpts = append(serverOpts, withEnrollmentRunnerIDPrefix(cfg.EnrollmentRunnerIDPrefix))
 	// WithIdentityTTL no-ops for cfg.IdentityTTL <= 0, so this is unconditional
 	// like the other options above that guard internally.
 	serverOpts = append(serverOpts, WithIdentityTTL(cfg.IdentityTTL))

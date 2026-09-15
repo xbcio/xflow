@@ -45,6 +45,13 @@ type HTTPEntrySeedRuntime struct {
 	Client *http.Client
 	// Token, when non-empty, is sent as "Authorization: Bearer <Token>".
 	Token string
+	// RunnerID, when non-empty, is sent to identify an enrollment-issued
+	// runner to the control plane's HTTP resource authentication middleware.
+	RunnerID string
+	// Namespace is the activation namespace represented by this seed request.
+	// It is a declaration only; the server verifies it against the issued
+	// runner policy before using it.
+	Namespace string
 	// Generation is the entry-activation generation this runtime serves. It is
 	// stamped onto every seed request so the control-plane fence admits exactly
 	// the current-generation seeds. The runtime is constructed PER ACTIVATION
@@ -133,6 +140,12 @@ func (h *HTTPEntrySeedRuntime) SeedExecutionFromEntry(ctx context.Context, req t
 	httpReq.Header.Set("Accept", "application/json")
 	if h.Token != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+h.Token)
+	}
+	if h.RunnerID != "" {
+		httpReq.Header.Set(RunnerIDHeader, h.RunnerID)
+	}
+	if h.Namespace != "" {
+		httpReq.Header.Set("X-Xflow-Namespace", h.Namespace)
 	}
 
 	client := h.Client

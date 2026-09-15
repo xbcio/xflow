@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -202,6 +203,15 @@ func (a *IssuedIdentityAuthenticator) authenticate(runnerID, token string) (Runn
 	}
 	if !id.ExpiresAt.IsZero() && !id.ExpiresAt.After(now) {
 		return RunnerPolicy{}, fmt.Errorf("%w: issued identity expired", ErrAuthUnknownToken)
+	}
+	// Enrollment writes the prefix into the issued policy as a durable
+	// entitlement. Exact runner-ID lookup already prevents an attacker from
+	// substituting another ID, but enforcing the stored invariant here also
+	// fails closed if a malformed identity row is ever written by a migration or
+	// a non-memory store implementation. Legacy identities with no prefix keep
+	// their pre-feature behavior.
+	if id.Scope.IDPrefix != "" && !strings.HasPrefix(runnerID, id.Scope.IDPrefix) {
+		return RunnerPolicy{}, fmt.Errorf("%w: issued identity runner ID prefix denied", ErrAuthUnknownToken)
 	}
 	return id.Scope, nil
 }

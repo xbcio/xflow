@@ -839,8 +839,10 @@ type registrationCodeCreateRequest struct {
 // appears. It is not recoverable afterwards — not from the list endpoint, not
 // from the database.
 type registrationCodeCreateResponse struct {
-	ID   string `json:"id"`
-	Code string `json:"code"`
+	ID        string `json:"id"`
+	Code      string `json:"code"`
+	ExpiresAt string `json:"expires_at,omitempty"`
+	MaxUses   int    `json:"max_uses"`
 }
 
 // registrationCodeView is the list projection. It deliberately carries neither
@@ -1008,7 +1010,18 @@ func (m *managementModule) handleCreateRegistrationCode(w http.ResponseWriter, r
 		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
-	writeData(w, r, http.StatusOK, registrationCodeCreateResponse{ID: id, Code: plaintext})
+	response := registrationCodeCreateResponse{
+		ID:      id,
+		Code:    plaintext,
+		MaxUses: code.MaxUses,
+	}
+	if !code.ExpiresAt.IsZero() {
+		response.ExpiresAt = code.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+	// The plaintext code is deliberately returned exactly once. Intermediaries
+	// must not retain it in a browser cache or shared response cache.
+	w.Header().Set("Cache-Control", "no-store")
+	writeData(w, r, http.StatusOK, response)
 }
 
 // maxRegistrationCodeTTLSeconds is where seconds stop fitting in a

@@ -92,6 +92,13 @@ func WithEnroll(codes RegistrationCodeStore, ids IssuedIdentityStore) ServerOpti
 	}
 }
 
+// withEnrollmentRunnerIDPrefix installs the already-normalized prefix supplied
+// by Config. It is intentionally private: control.NewControlPlane is the
+// construction boundary that can return an invalid-prefix error.
+func withEnrollmentRunnerIDPrefix(prefix string) ServerOption {
+	return func(s *Server) { s.core.enrollmentRunnerIDPrefix = prefix }
+}
+
 // WithIdentityTTL sets how long a newly enrolled identity authenticates
 // before it must renew. Zero (the default) means the identity never expires,
 // which is the pre-feature behavior: switching a running fleet onto a TTL

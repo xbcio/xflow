@@ -3,6 +3,7 @@ package apiserver
 import (
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -182,10 +183,12 @@ func bearerToken(r *http.Request) string {
 // httpTransportInfoFromRequest extracts TLS peer identity from the request,
 // mirroring service/control/server.go's unexported httpTransportInfo (not
 // exported from that package, so duplicated here at the same small size
-// rather than justifying a cross-package export for one helper). Returns an
-// empty struct on plaintext HTTP so an mTLS-bound policy correctly refuses.
+// rather than justifying a cross-package export for one helper). SourceIP is
+// the actual peer address with its port stripped; X-Forwarded-For remains
+// deliberately untrusted. Plaintext HTTP has empty TLS fields so an
+// mTLS-bound policy correctly refuses.
 func httpTransportInfoFromRequest(r *http.Request) control.TransportInfo {
-	info := control.TransportInfo{}
+	info := control.TransportInfo{SourceIP: sourceIPFromRequest(r)}
 	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 		return info
 	}
@@ -193,6 +196,17 @@ func httpTransportInfoFromRequest(r *http.Request) control.TransportInfo {
 	info.TLSPeerCN = cert.Subject.String()
 	info.TLSPeerSAN = append(info.TLSPeerSAN, cert.DNSNames...)
 	return info
+}
+
+func sourceIPFromRequest(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 // handleArtifact serves the bytes for a digest the caller's namespace

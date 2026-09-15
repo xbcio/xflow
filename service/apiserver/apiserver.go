@@ -58,6 +58,9 @@ type Config struct {
 	// it must renew. Zero (the default) means never expires. See
 	// control.Config.IdentityTTL, which this threads to verbatim.
 	IdentityTTL time.Duration
+	// EnrollmentRunnerIDPrefix is prepended to every enrollment-issued runner
+	// ID. Empty preserves the legacy "runner-" prefix.
+	EnrollmentRunnerIDPrefix string
 	// RegistrationCodeTTL caps how long a registration code minted through the
 	// management API may live. Zero (the default) means no cap. Unlike
 	// IdentityTTL this is a management-face concern only — it is consumed when
@@ -199,6 +202,20 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 		if cfg.AuditSink == nil {
 			return nil, errors.New("apiserver: PrincipalAuth requires an AuditSink (mutations must be audited before execution)")
 		}
+	}
+	// Resource routes may be served by a host-injected principal, an
+	// enrollment-issued runner identity, or the embedder's regular principal
+	// authenticator. The order is deliberate: a supplied runner ID selects the
+	// issued-identity path, and an invalid issued credential must not fall back
+	// to a static bearer token. Context principals are server-process values;
+	// no request header can activate that branch.
+	if cfg.PrincipalAuth != nil {
+		authenticators := []PrincipalAuthenticator{ContextPrincipalAuthenticator()}
+		if control.EnrollDeclared(cfg.RegistrationCodes, cfg.IssuedIdentities) {
+			authenticators = append(authenticators, NewIssuedIdentityPrincipalAuthenticator(cfg.IssuedIdentities))
+		}
+		authenticators = append(authenticators, cfg.PrincipalAuth)
+		cfg.PrincipalAuth = NewMultiPrincipalAuthenticator(authenticators...)
 	}
 
 	// Production posture (fail-closed). Runs before anything is constructed so
@@ -353,18 +370,19 @@ const entryActivationStoreTTL = 24 * time.Hour
 // caller's responsibility to construct.
 func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 	ccfg := control.Config{
-		Auth:                    cfg.Auth,
-		RegistrationCodes:       cfg.RegistrationCodes,
-		IssuedIdentities:        cfg.IssuedIdentities,
-		IdentityTTL:             cfg.IdentityTTL,
-		Logger:                  cfg.Logger,
-		Metrics:                 cfg.Metrics,
-		Tracer:                  cfg.Tracer,
-		Supplies:                cfg.Supplies,
-		EnableSupplyEncryption:  cfg.EnableSupplyEncryption,
-		SupplyKeyRotationPeriod: cfg.SupplyKeyRotationPeriod,
-		EnableMetricsProxy:      cfg.EnableRunnerMetricsProxy,
-		MetricsReportInterval:   cfg.RunnerMetricsInterval,
+		Auth:                     cfg.Auth,
+		RegistrationCodes:        cfg.RegistrationCodes,
+		IssuedIdentities:         cfg.IssuedIdentities,
+		IdentityTTL:              cfg.IdentityTTL,
+		EnrollmentRunnerIDPrefix: cfg.EnrollmentRunnerIDPrefix,
+		Logger:                   cfg.Logger,
+		Metrics:                  cfg.Metrics,
+		Tracer:                   cfg.Tracer,
+		Supplies:                 cfg.Supplies,
+		EnableSupplyEncryption:   cfg.EnableSupplyEncryption,
+		SupplyKeyRotationPeriod:  cfg.SupplyKeyRotationPeriod,
+		EnableMetricsProxy:       cfg.EnableRunnerMetricsProxy,
+		MetricsReportInterval:    cfg.RunnerMetricsInterval,
 	}
 
 	useRedis := cfg.RedisConfig != nil || cfg.RedisAddr != ""

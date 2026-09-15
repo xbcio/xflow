@@ -94,6 +94,9 @@ type serverConfig struct {
 	// it must renew. Zero means never expires. Set only by
 	// WithServerIdentityTTL.
 	identityTTL time.Duration
+	// enrollmentRunnerIDPrefix is prepended to IDs minted by enrollment. Empty
+	// preserves the legacy runner- prefix; validation happens in control.NewControlPlane.
+	enrollmentRunnerIDPrefix string
 	// registrationCodeTTL caps how long a registration code minted through the
 	// management API may live. Zero means no cap. Set only by
 	// WithServerRegistrationCodeTTL.
@@ -166,6 +169,14 @@ func WithServerEnroll(codes control.RegistrationCodeStore, ids control.IssuedIde
 		c.registrationCodes = codes
 		c.issuedIdentities = ids
 	}
+}
+
+// WithServerEnrollmentRunnerIDPrefix sets the prefix for server-issued
+// enrollment runner IDs. An empty value preserves the default "runner-".
+// Invalid non-empty values make NewServer return an error before it exposes a
+// handler.
+func WithServerEnrollmentRunnerIDPrefix(prefix string) ServerOption {
+	return func(c *serverConfig) { c.enrollmentRunnerIDPrefix = prefix }
 }
 
 // WithServerIdentityTTL sets how long a newly enrolled identity authenticates
@@ -577,21 +588,22 @@ func buildServerAPIConfig(cfg ServerConfig, sc *serverConfig) apiserver.Config {
 	}
 
 	return apiserver.Config{
-		RedisAddr:           cfg.RedisAddr,
-		RedisConfig:         cfg.RedisConfig,
-		Store:               cfg.Store,
-		Supplies:            supplies,
-		Artifacts:           sc.artifacts,
-		Auth:                sc.auth,
-		RegistrationCodes:   sc.registrationCodes,
-		IssuedIdentities:    sc.issuedIdentities,
-		IdentityTTL:         sc.identityTTL,
-		RegistrationCodeTTL: sc.registrationCodeTTL,
-		WorkflowAuth:        sc.workflowAuth,
-		RequireWorkflowAuth: sc.requireWorkflowAuth,
-		PrincipalAuth:       sc.principalAuth,
-		Authorizer:          sc.authorizer,
-		AuditSink:           sc.auditSink,
+		RedisAddr:                cfg.RedisAddr,
+		RedisConfig:              cfg.RedisConfig,
+		Store:                    cfg.Store,
+		Supplies:                 supplies,
+		Artifacts:                sc.artifacts,
+		Auth:                     sc.auth,
+		RegistrationCodes:        sc.registrationCodes,
+		IssuedIdentities:         sc.issuedIdentities,
+		IdentityTTL:              sc.identityTTL,
+		EnrollmentRunnerIDPrefix: sc.enrollmentRunnerIDPrefix,
+		RegistrationCodeTTL:      sc.registrationCodeTTL,
+		WorkflowAuth:             sc.workflowAuth,
+		RequireWorkflowAuth:      sc.requireWorkflowAuth,
+		PrincipalAuth:            sc.principalAuth,
+		Authorizer:               sc.authorizer,
+		AuditSink:                sc.auditSink,
 
 		// Production posture. Off unless WithServerProduction was passed, so
 		// embedders and tests that never declare it are untouched.

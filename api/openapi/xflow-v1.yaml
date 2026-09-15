@@ -867,6 +867,11 @@ paths:
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
+            Cache-Control:
+              description: Plaintext registration codes must not be stored by clients or intermediaries.
+              schema:
+                type: string
+                enum: [no-store]
           content:
             application/json:
               schema:
@@ -1582,7 +1587,7 @@ components:
         The ONLY place the plaintext code ever appears in this API. It is not
         recoverable afterwards — not from the list endpoint, not from the
         database (only its hash is persisted).
-      required: [id, code]
+      required: [id, code, max_uses]
       properties:
         id:
           type: string
@@ -1592,6 +1597,14 @@ components:
             Plaintext registration code. Returned only here, never again —
             but usable for as many enrollments as its lifetime and `max_uses`
             allow.
+        expires_at:
+          type: string
+          format: date-time
+          description: Absolute UTC expiry time. Omitted when the code does not expire.
+        max_uses:
+          type: integer
+          minimum: 0
+          description: Maximum enrollments permitted; 0 means unlimited.
 
 
     RegistrationCodeView:

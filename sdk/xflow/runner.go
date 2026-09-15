@@ -647,13 +647,15 @@ func wireRunnerTriggerHosting(svcCfg *runnersvc.Config, cfg RunnerConfig, o *run
 	// plane's HTTP API. The gate publishes into supply.Default, the same
 	// registry node handlers read through $supplies.
 	gate := runnersvc.NewSupplyGate(&runnersvc.HTTPSupplyFetcher{
-		BaseURL: seedBaseURL,
-		Token:   cfg.Token,
-		Client:  seedClient,
+		BaseURL:  seedBaseURL,
+		Token:    cfg.Token,
+		RunnerID: cfg.RunnerID,
+		Client:   seedClient,
 	}, supply.Default, o.logger)
 
 	handler := runnersvc.NewTriggerActivationHandler(seedBaseURL, cfg.Token, runnerTriggerLookup{},
 		runnersvc.WithSeedHTTPClient(seedClient),
+		runnersvc.WithSeedRunnerID(cfg.RunnerID),
 		runnersvc.WithSupplyGate(gate),
 		runnersvc.WithGroupRuntime(groupRuntime),
 		// The same resolver the executor uses, so activation can compile a wasm

@@ -93,7 +93,8 @@ func (c *Core) Enroll(ctx context.Context, req protocol.EnrollRequest, info Tran
 		c.auditEnroll(ctx, code.ID, false, "identity generation failed", "", info.SourceIP)
 		return protocol.EnrollResponse{}, ErrEnrollRejected
 	}
-	runnerID = "runner-" + runnerID
+	prefix := c.enrollmentRunnerIDPrefixOrDefault()
+	runnerID = prefix + runnerID
 
 	now := time.Now().UTC()
 	issued := IssuedIdentity{
@@ -102,7 +103,7 @@ func (c *Core) Enroll(ctx context.Context, req protocol.EnrollRequest, info Tran
 		// The issued scope is the code's scope, narrowed to what the runner
 		// actually asked for. A runner that asks for one namespace does not get
 		// the code's full ceiling.
-		Scope:  issuedScope(code, req, runnerID),
+		Scope:  issuedScopeWithPrefix(code, req, runnerID, prefix),
 		CodeID: code.ID,
 		// Snapshot the code's owner so revoking this identity later stays
 		// inside one tenant. Copied, not joined through CodeID: the identity
@@ -203,6 +204,15 @@ func issuedScope(code RegistrationCode, req protocol.EnrollRequest, runnerID str
 	if len(req.NodeTypes) > 0 {
 		scope.AllowedNodeTypes = append([]string(nil), req.NodeTypes...)
 	}
+	return scope
+}
+
+// issuedScopeWithPrefix adds the enrollment issuer's ID entitlement to the
+// narrowed scope. It is separate from issuedScope so the legacy narrowing
+// helper retains its established shape for callers that do not issue IDs.
+func issuedScopeWithPrefix(code RegistrationCode, req protocol.EnrollRequest, runnerID, prefix string) RunnerPolicy {
+	scope := issuedScope(code, req, runnerID)
+	scope.IDPrefix = prefix
 	return scope
 }
 

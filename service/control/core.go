@@ -135,6 +135,10 @@ type Core struct {
 	registrationCodes RegistrationCodeStore
 	issuedIdentities  IssuedIdentityStore
 	enrollLimiter     *enrollLimiter
+	// enrollmentRunnerIDPrefix is validated while Config is assembled. An empty
+	// value is retained only by directly-constructed legacy test Cores, where
+	// enrollmentRunnerIDPrefixOrDefault preserves runner-.
+	enrollmentRunnerIDPrefix string
 	// identityTTL is how long a newly issued identity authenticates for. Zero
 	// means "never expires", which is the pre-feature behavior and the
 	// default: switching a running fleet onto a TTL must be a deliberate act

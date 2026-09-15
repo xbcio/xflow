@@ -65,7 +65,7 @@ func (l fakeLookup) Trigger(nodeType string) (types.TriggerHandler, bool) {
 func TestTriggerActivationHandler_ActivateStampsSeedRuntimeAndParams(t *testing.T) {
 	fh := &fakeTriggerHandler{}
 	lookup := fakeLookup{handlers: map[string]types.TriggerHandler{"fake": fh}}
-	h := NewTriggerActivationHandler("https://control.internal", "secret-bearer", lookup)
+	h := NewTriggerActivationHandler("https://control.internal", "secret-bearer", lookup, WithSeedRunnerID("runner-issued"))
 
 	d := protocol.ActivateDirective{
 		Namespace:       "ns1",
@@ -128,6 +128,9 @@ func TestTriggerActivationHandler_ActivateStampsSeedRuntimeAndParams(t *testing.
 	}
 	if rt.Token != "secret-bearer" {
 		t.Errorf("Runtime.Token = %q, want %q", rt.Token, "secret-bearer")
+	}
+	if rt.RunnerID != "runner-issued" || rt.Namespace != "ns1" {
+		t.Errorf("Runtime identity = (%q, %q), want (runner-issued, ns1)", rt.RunnerID, rt.Namespace)
 	}
 
 	// Deactivate closes the stored subscription.

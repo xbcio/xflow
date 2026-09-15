@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/observability/tracing"
@@ -392,14 +393,25 @@ func artifactCacheMaxBytesFromEnv() int64 {
 }
 
 // capabilityNodeTypes flattens the parsed capabilities back to node type names,
-// which is all --cap can express: it has no syntax for a feature list, so the
-// Features field is always empty here. The SDK re-adds the group execution
-// feature, which is the only one that exists and the one an operator could not
-// spell even if they knew of it.
+// which is all --cap can express: it has no syntax for a feature list. It also
+// adds the synthetic group node type using the same stable, deduplicated set
+// the SDK runner later registers with its required group execution feature.
 func capabilityNodeTypes(caps []protocol.Capability) []string {
-	out := make([]string, 0, len(caps))
+	out := make([]string, 0, len(caps)+1)
+	seen := make(map[string]struct{}, len(caps)+1)
 	for _, c := range caps {
-		out = append(out, c.NodeType)
+		nodeType := strings.TrimSpace(c.NodeType)
+		if nodeType == "" {
+			continue
+		}
+		if _, ok := seen[nodeType]; ok {
+			continue
+		}
+		seen[nodeType] = struct{}{}
+		out = append(out, nodeType)
+	}
+	if _, ok := seen[engine.GroupNodeType]; !ok {
+		out = append(out, engine.GroupNodeType)
 	}
 	return out
 }

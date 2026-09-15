@@ -135,6 +135,18 @@ func ExampleRegistrationCodeCreateRequest(namespaces, nodeTypes []string, expire
 	}
 }
 
+// ExampleRegistrationCodeCreateResponse builds the one response shape that
+// carries plaintext registration code material. A non-zero expiration and
+// bounded use count exercise both fields a management UI needs without a
+// follow-up list call.
+func ExampleRegistrationCodeCreateResponse(id, code string, expiresAt time.Time, maxUses int) any {
+	response := registrationCodeCreateResponse{ID: id, Code: code, MaxUses: maxUses}
+	if !expiresAt.IsZero() {
+		response.ExpiresAt = expiresAt.UTC().Format(time.RFC3339)
+	}
+	return response
+}
+
 // ExampleRegistrationCodeView builds a registrationCodeView (GET
 // /v1/management/registration-codes). Carries neither the plaintext nor the
 // hash, which is the property the schema exists to pin down.

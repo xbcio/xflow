@@ -242,6 +242,13 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 			),
 		},
 		{
+			name:   "registration code create response",
+			schema: "RegistrationCodeCreateResponse",
+			value: apiserver.ExampleRegistrationCodeCreateResponse(
+				"rc-01H8XG", "plaintext-once", now.Add(24*time.Hour), 3,
+			),
+		},
+		{
 			// The absent-lifetime shape. expires_in_seconds is a pointer with
 			// omitempty precisely so "take the deployment default" and "never
 			// expires" (an explicit 0) stay distinguishable on the wire; a

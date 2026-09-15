@@ -10,7 +10,10 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/service/crypto/supplyenc"
+	"github.com/xbcio/xflow/service/protocol"
+	"github.com/xbcio/xflow/store/objectstore"
 )
 
 // ErrSupplyNotFound reports that the server has no content for a supply name.
@@ -34,7 +37,10 @@ const maxSupplyResponseBytes = 1 << 20
 type HTTPSupplyFetcher struct {
 	BaseURL string
 	Token   string
-	Client  *http.Client
+	// RunnerID identifies an enrollment-issued runner to the resource API.
+	// Empty preserves compatibility with static host principals.
+	RunnerID string
+	Client   *http.Client
 	// Keyring, when non-nil, enables encrypted supply fetching. The fetcher
 	// sends Accept: application/x-xflow-encrypted and decrypts the response.
 	Keyring *supplyenc.Keyring
@@ -59,6 +65,12 @@ func (f *HTTPSupplyFetcher) Fetch(ctx context.Context, name string) ([]byte, str
 	if f.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+f.Token)
 	}
+	if f.RunnerID != "" {
+		req.Header.Set(protocol.RunnerIDHeader, f.RunnerID)
+	}
+	// Supply content is namespace-scoped. The server accepts this declaration
+	// only after authenticating the runner and checking its issued policy.
+	req.Header.Set(objectstore.NamespaceHeader, string(namespace.FromContext(ctx)))
 	if f.Keyring.HasKeys() {
 		req.Header.Set("Accept", "application/x-xflow-encrypted")
 	}

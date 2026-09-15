@@ -6,6 +6,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/service/protocol"
+	"github.com/xbcio/xflow/store/objectstore"
 )
 
 func TestHTTPSupplyFetcher_OK(t *testing.T) {
@@ -38,6 +42,26 @@ func TestHTTPSupplyFetcher_OK(t *testing.T) {
 	}
 	if revision != 42 {
 		t.Errorf("revision = %d, want 42", revision)
+	}
+}
+
+func TestHTTPSupplyFetcherSendsEnrollmentIdentityHeaders(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get(protocol.RunnerIDHeader); got != "runner-issued" {
+			t.Errorf("%s = %q, want runner-issued", protocol.RunnerIDHeader, got)
+		}
+		if got := r.Header.Get(objectstore.NamespaceHeader); got != "team-a" {
+			t.Errorf("%s = %q, want team-a", objectstore.NamespaceHeader, got)
+		}
+		w.Header().Set("ETag", "h")
+		_, _ = w.Write([]byte("content"))
+	}))
+	defer srv.Close()
+
+	f := &HTTPSupplyFetcher{BaseURL: srv.URL, RunnerID: "runner-issued", Client: srv.Client()}
+	ctx := namespace.WithNamespace(context.Background(), "team-a")
+	if _, _, _, err := f.Fetch(ctx, "rules"); err != nil {
+		t.Fatalf("Fetch: %v", err)
 	}
 }
 

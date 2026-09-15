@@ -15,10 +15,12 @@ import (
 // and that the request is POSTed to /v1/executions with the bearer token and a
 // well-formed SeedExecutionRequest body.
 func TestHTTPEntrySeed_Accepted(t *testing.T) {
-	var gotAuth, gotMethod, gotPath string
+	var gotAuth, gotRunnerID, gotNamespace, gotMethod, gotPath string
 	var gotReq SeedExecutionRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
+		gotRunnerID = r.Header.Get(RunnerIDHeader)
+		gotNamespace = r.Header.Get("X-Xflow-Namespace")
 		gotMethod = r.Method
 		gotPath = r.URL.Path
 		_ = json.NewDecoder(r.Body).Decode(&gotReq)
@@ -31,7 +33,10 @@ func TestHTTPEntrySeed_Accepted(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	rt := &HTTPEntrySeedRuntime{BaseURL: srv.URL, Client: srv.Client(), Token: "secret-token"}
+	rt := &HTTPEntrySeedRuntime{
+		BaseURL: srv.URL, Client: srv.Client(), Token: "secret-token",
+		RunnerID: "runner-issued", Namespace: "team-a",
+	}
 	resp, err := rt.SeedExecutionFromEntry(context.Background(), types.EntrySeedRequest{
 		AdmissionKey:    "ak-1",
 		WorkflowID:      "wf1",
@@ -67,6 +72,12 @@ func TestHTTPEntrySeed_Accepted(t *testing.T) {
 	}
 	if gotAuth != "Bearer secret-token" {
 		t.Fatalf("Authorization = %q, want %q", gotAuth, "Bearer secret-token")
+	}
+	if gotRunnerID != "runner-issued" {
+		t.Fatalf("%s = %q, want runner-issued", RunnerIDHeader, gotRunnerID)
+	}
+	if gotNamespace != "team-a" {
+		t.Fatalf("X-Xflow-Namespace = %q, want team-a", gotNamespace)
 	}
 	if gotReq.AdmissionKey != "ak-1" || gotReq.WorkflowID != "wf1" || gotReq.EntryUnitID != "g1" || gotReq.Outcome != "success" {
 		t.Fatalf("request body not mapped correctly: %+v", gotReq)

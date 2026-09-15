@@ -8,6 +8,7 @@ import (
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/service/protocol"
@@ -37,6 +38,7 @@ type TriggerHandlerLookup interface {
 type TriggerActivationHandler struct {
 	seedBaseURL string
 	authToken   string
+	runnerID    string
 	triggers    TriggerHandlerLookup
 	seedClient  *http.Client // injected via WithSeedHTTPClient; nil uses http.DefaultClient
 
@@ -83,6 +85,13 @@ type TriggerActivationHandlerOption func(*TriggerActivationHandler)
 // Recommended: 30s.
 func WithSeedHTTPClient(c *http.Client) TriggerActivationHandlerOption {
 	return func(h *TriggerActivationHandler) { h.seedClient = c }
+}
+
+// WithSeedRunnerID declares the runner identity on HTTP entry-seed requests.
+// It is used by enrollment-issued identities; empty preserves static-principal
+// deployments.
+func WithSeedRunnerID(runnerID string) TriggerActivationHandlerOption {
+	return func(h *TriggerActivationHandler) { h.runnerID = runnerID }
 }
 
 // WithSupplyGate installs the activation-time supply readiness gate. Without it
@@ -134,6 +143,10 @@ func NewTriggerActivationHandler(seedBaseURL string, authToken string, triggers 
 // keyed by activation identity so Deactivate can close it. Returns an error
 // (fail closed) if the NodeType has no registered handler.
 func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.ActivateDirective) error {
+	// The activation carries the server-authoritative namespace. Thread it into
+	// supply/artifact fetches performed while installing the trigger so their
+	// HTTP declarations match the entry-seed request below.
+	ctx = namespace.WithNamespace(ctx, namespace.Namespace(d.Namespace))
 	// Computed once and threaded through: registerSupplyConsumers uses it as the
 	// owner identity for each legacy binding's digest-keyed registration (spec
 	// Z.4 / Z.8), and the deferred rollback below must release the SAME owner
@@ -212,6 +225,8 @@ func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.Acti
 			BaseURL:      h.seedBaseURL,
 			Client:       h.seedHTTPClient(),
 			Token:        h.authToken,
+			RunnerID:     h.runnerID,
+			Namespace:    d.Namespace,
 			Generation:   d.Generation,
 			ReplicaIndex: d.ReplicaIndex,
 		},
@@ -265,6 +280,8 @@ func (h *TriggerActivationHandler) activateGroup(ctx context.Context, d protocol
 				BaseURL:      h.seedBaseURL,
 				Client:       h.seedHTTPClient(),
 				Token:        h.authToken,
+				RunnerID:     h.runnerID,
+				Namespace:    d.Namespace,
 				Generation:   d.Generation,
 				ReplicaIndex: d.ReplicaIndex,
 			},

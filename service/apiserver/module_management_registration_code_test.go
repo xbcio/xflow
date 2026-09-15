@@ -695,3 +695,57 @@ func TestListRegistrationCodesGlobalScopeDisclosesForeignAllowedNamespaces(t *te
 			"re-read RUNNER-IDENTITY-LIFECYCLE-TODO.md §6 before changing either one", listBody)
 	}
 }
+
+func TestCreateRegistrationCodeResponseIsNoStoreAndIncludesLimits(t *testing.T) {
+	h := newRegistrationCodeTTLServer(t, time.Hour, false)
+	defer h.srv.Close()
+
+	req, err := http.NewRequest(http.MethodPost, h.srv.URL+PathManagementRegistrationCodes,
+		strings.NewReader(`{"allowed_namespaces":["namespaceA"],"expires_in_seconds":60,"max_uses":2}`))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := h.srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body = %q", resp.StatusCode, body)
+	}
+	if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+	var created struct {
+		Data struct {
+			ID        string `json:"id"`
+			Code      string `json:"code"`
+			ExpiresAt string `json:"expires_at"`
+			MaxUses   int    `json:"max_uses"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if created.Data.ID == "" || created.Data.Code == "" {
+		t.Fatalf("create response omitted id or plaintext code: %+v", created.Data)
+	}
+	if created.Data.MaxUses != 2 {
+		t.Fatalf("max_uses = %d, want 2", created.Data.MaxUses)
+	}
+	if _, err := time.Parse(time.RFC3339, created.Data.ExpiresAt); err != nil {
+		t.Fatalf("expires_at = %q, want RFC3339 time: %v", created.Data.ExpiresAt, err)
+	}
+
+	listBody := h.doJSON(t, http.MethodGet, PathManagementRegistrationCodes, "", http.StatusOK)
+	if strings.Contains(listBody, created.Data.Code) {
+		t.Fatalf("list response leaked plaintext registration code")
+	}
+	auditBody := h.doJSON(t, http.MethodGet,
+		"/v1/management/registration-codes/"+created.Data.ID+"/audit", "", http.StatusOK)
+	if strings.Contains(auditBody, created.Data.Code) {
+		t.Fatalf("audit response leaked plaintext registration code")
+	}
+}
