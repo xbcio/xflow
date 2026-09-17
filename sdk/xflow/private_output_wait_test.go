@@ -9,9 +9,10 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-// TestEngineWaitRedactsPrivateOutputWithLocalWaiter ensures the local backend's
-// fast completion notification cannot bypass the core public-output projection.
-func TestEngineWaitRedactsPrivateOutputWithLocalWaiter(t *testing.T) {
+// TestEngineWaitRedactsPrivateOutputAfterWaiterNotification ensures a waiter
+// only supplies completion notification; Wait must rebuild the public result
+// instead of returning a backend runtime view that contains private output.
+func TestEngineWaitRedactsPrivateOutputAfterWaiterNotification(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
@@ -39,10 +40,24 @@ func TestEngineWaitRedactsPrivateOutputWithLocalWaiter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Invoke() error = %v", err)
 	}
+	if _, err := eng.waiter.WaitDone(ctx, executionID); err != nil {
+		t.Fatalf("backend WaitDone() error = %v", err)
+	}
+	leakingWaiter := &privateOutputLeakingWaiter{result: types.Result{
+		ExecutionID: executionID,
+		Status:      types.ExecutionStatusSuccess,
+		Output: map[string]any{
+			"private": map[string]any{"secret": "do-not-project"},
+		},
+	}}
+	eng.waiter = leakingWaiter
 
 	result, err := eng.Wait(ctx, executionID)
 	if err != nil {
 		t.Fatalf("Wait() error = %v", err)
+	}
+	if !leakingWaiter.called {
+		t.Fatal("Wait() did not use completion waiter")
 	}
 	if result.Status != types.ExecutionStatusSuccess {
 		t.Fatalf("Wait() status = %q, want %q (error %q)", result.Status, types.ExecutionStatusSuccess, result.Error)
@@ -60,6 +75,16 @@ func TestEngineWaitRedactsPrivateOutputWithLocalWaiter(t *testing.T) {
 	if got := publicOutput["received_private"]; got != true {
 		t.Fatalf("public node received_private = %#v, want true", got)
 	}
+}
+
+type privateOutputLeakingWaiter struct {
+	result types.Result
+	called bool
+}
+
+func (w *privateOutputLeakingWaiter) WaitDone(_ context.Context, _ types.ExecutionID) (types.Result, error) {
+	w.called = true
+	return w.result, nil
 }
 
 type privateOutputWaitHandler struct{}

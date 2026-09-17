@@ -16,7 +16,18 @@ import (
 // outputs. In cyclic mode, repeated nodes expose only their latest output.
 func (e *Engine) Wait(ctx context.Context, id types.ExecutionID) (types.Result, error) {
 	if e.waiter != nil {
-		return e.waiter.WaitDone(ctx, id)
+		// WaitDone provides prompt terminal-state notification, but its result is
+		// a backend runtime view and can contain private node outputs. Always
+		// rebuild the public result through the core inspector after it wakes.
+		result, err := e.waiter.WaitDone(ctx, id)
+		if err != nil {
+			return result, err
+		}
+		detail, err := e.eng.Inspect(ctx, id)
+		if err != nil {
+			return types.Result{}, err
+		}
+		return resultFromDetail(detail), nil
 	}
 	// Fallback: poll StateStore. Check immediately once before entering the
 	// ticker loop so an already-terminal execution returns without waiting a
