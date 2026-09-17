@@ -539,57 +539,88 @@ func TestCompileMissTriggersSweep(t *testing.T) {
 // count it reports is correct" — as two independently failing assertions.
 func TestCompileMissTriggersSweepReportsEngineCount(t *testing.T) {
 	ctx := context.Background()
-	rec := &recordingObserver{}
-	// SetObserver panics on a second non-nil install, so nil first (same
-	// pattern as TestReclaimReportsCountAndCause above).
-	SetObserver(nil)
-	SetObserver(rec)
-	defer SetObserver(nil)
 
 	h := newTestReactorHost(t)
 	modA := decodeForTest(t, testReactorCode(t))
 
+	// A host with no engineCountObserver of its own must publish through the
+	// process-wide Observer exactly as before: the per-host point below is a
+	// test seam, and production's reporting path has to stay the default one.
+	// Asserted rather than assumed, because the rest of this test deliberately
+	// takes the other branch.
+	//
+	// The process-wide recorder is installed purely as a comparable value: obs()
+	// is a noopObserver by default, so "resolves to obs()" would also be
+	// satisfied by a mutation that resolved to any other noopObserver — the
+	// comparison would look right while the reporting path was gone. Nothing
+	// below reads this recorder.
+	globalRec := &recordingObserver{}
+	SetObserver(nil)
+	SetObserver(globalRec)
+	defer SetObserver(nil)
+	if got := h.engineCountObserverOrDefault(); got != Observer(globalRec) {
+		t.Fatalf("a host carrying no engineCountObserver of its own published to %T, want "+
+			"the process-wide Observer — the per-host point is a test seam and must not "+
+			"change the production reporting path", got)
+	}
+
+	// rec receives THIS host's reports and nothing else. It is not installed
+	// process-wide, and that is the point: Observer carries no host identity, so
+	// a process-wide recorder collects every host's sweep, and this test cannot
+	// tell its own host's report from another's.
+	//
+	// That is not hypothetical. This test used to install rec via SetObserver
+	// and read "the first OnEngineCount past my baseline" — a report whose
+	// producer is unknowable. Under `-race` in a full-package run it failed with
+	// "= 6, want exactly 1" (degraded machine) and "= 2, want exactly 1"
+	// (cleaner machine), and passed when run alone. The foreign reports are
+	// real and abundant: 22 test files in this package build hosts with
+	// newReactorHost() directly, which inherits the production default 15m
+	// engineIdleTTL (this file's newTestReactorHost is the one that zeroes it),
+	// so every such host's first compile miss arms sweepEnginesAsync's
+	// self-re-arming timer at ttl/4 = 3m45s and keeps republishing its resident
+	// count into the process-wide Observer for the rest of the run.
+	//
+	// The value that failed on its own proves attribution was the defect: this
+	// host holds at most the two modules compiled below, so 6 was never its
+	// report. No deadline, however generous, can repair that — reading a report
+	// that is not this host's and waiting longer for it are different mistakes.
+	rec := &recordingObserver{}
+	h.engineCountObserver = rec
+
 	// engineIdleTTL stays 0 (newTestReactorHost's default) through first's own
-	// compile-miss and its lastUsed rewind: sweepEnginesAsync's ttl<=0 guard
-	// keeps that compile from firing its own sweep. Only enabled afterward, so
-	// the ONE sweep this test drives is unambiguously the one triggered by
-	// second's compile miss, running against an already-rewound first. Setting
-	// it before first's own compile (as an earlier draft of this test, and
-	// TestCompileMissTriggersSweep above, both do — harmlessly there, since
-	// that test only polls for "eventually reclaimed" and does not care which
-	// pass does it) raced first's own compile-triggered sweep goroutine against
-	// the main goroutine's lastUsed rewind: observed failure was
-	// calls[0] == 0, i.e. the rewind landed before that first sweep pass ran,
-	// so even the "control" sample reclaimed first instead of reporting it
-	// still resident.
+	// compile-miss: sweepEnginesAsync's ttl<=0 guard keeps that compile from
+	// firing its own sweep. Only enabled afterward, so the ONE sweep this test
+	// drives is unambiguously the one triggered by second's compile miss,
+	// running against an already-rewound first. Setting it before first's own
+	// compile (as an earlier draft of this test, and TestCompileMissTriggersSweep
+	// above, both do — harmlessly there, since that test only polls for
+	// "eventually reclaimed" and does not care which pass does it) raced first's
+	// own compile-triggered sweep goroutine against the main goroutine's
+	// lastUsed rewind: observed failure was calls[0] == 0, i.e. the rewind
+	// landed before that first sweep pass ran, so even the "control" sample
+	// reclaimed first instead of reporting it still resident.
 	first, err := h.engineForBytes(ctx, modA)
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	first.lastUsed.Store(time.Now().Add(-time.Hour).UnixNano())
-	h.engineIdleTTL = 50 * time.Millisecond
+	// A minute of ttl, not the 50ms an earlier draft used. The assertion below
+	// is that second is still resident at the moment the sweep pass runs, and
+	// that pass runs on a goroutine sweepEnginesAsync spawns some unspecified
+	// time after second's compile miss returns — under `-race` on a loaded host
+	// easily tens of milliseconds later. Against a 50ms ttl that delay could age
+	// second past the cutoff and report 0 instead of 1. An hour of rewind
+	// against a minute of ttl keeps first unambiguously reclaimable whatever
+	// this value is, while giving second a minute of margin — the same pairing
+	// every manual-reclaim test in this file already uses
+	// (h.reclaimIdleEngines(ctx, time.Minute)).
+	h.engineIdleTTL = time.Minute
 
-	// Mark where THIS test's own reports begin. OnEngineCount (host.go) carries
-	// no host identity and SetObserver is package-level, so rec receives every
-	// host's reports, including ones from hosts whose test already finished:
-	// sweepEnginesAsync re-arms via time.AfterFunc (host.go: `if remaining > 0`)
-	// and DISCARDS the returned Timer, so a pending re-arm cannot be cancelled;
-	// closeForTest empties h.engines but leaves engineIdleTTL non-zero, so that
-	// re-arm still clears the ttl<=0 guard and fires one final
-	// OnEngineCount(0) roughly ttl/4 after the test that owned it returned.
-	//
-	// Reading calls[0] therefore did NOT mean "this test's first report" — it
-	// meant "whatever landed first", which under `-count=N` or a full-package
-	// run is the previous 50ms-ttl test's trailing 0 (TestCompileMissTriggersSweep
-	// at h.engineIdleTTL = 50ms above is the in-package predecessor). Measured:
-	// 10 separate `-count=1` processes passed 10/10, while one `-count=10`
-	// process passed 3/10 and failed 7/10 — always with calls[0] == 0, and
-	// always from the second iteration onward.
-	//
-	// base is taken AFTER first's (seconds-long) compile, so the trailing report
-	// from a predecessor — due ttl/4 = 12.5ms after that predecessor returned —
-	// has long since landed and is counted into base rather than mistaken for
-	// ours. The re-arm chain is finite: a pass reporting 0 does not re-arm.
+	// Where THIS test's own reports begin. This host has swept nothing yet
+	// (ttl was 0 through first's compile), so base is 0 in practice; it is kept
+	// as a position rather than assumed away so the assertion below reads the
+	// first pass this test caused even if that ever stops being true.
 	base := len(rec.engineCountCalls())
 
 	// 编译第二个模块 = 一次 miss = 一次扫（与 TestCompileMissTriggersSweep 相同的触发）。
@@ -597,14 +628,14 @@ func TestCompileMissTriggersSweepReportsEngineCount(t *testing.T) {
 		t.Fatalf("second: %v", err)
 	}
 
-	// Poll for the first OnEngineCount call PAST base, not a fixed sleep and not
-	// a single unconditional read: the sweep runs on a goroutine
+	// Poll for that host's first OnEngineCount call PAST base, not a fixed sleep
+	// and not a single unconditional read: the sweep runs on a goroutine
 	// sweepEnginesAsync spawns, and there is no other synchronization point to
-	// wait on. Grabbing that one call specifically — not "whatever is in the
+	// wait on. Reading the first report specifically — not "whatever is in the
 	// slice by the time we look" — matters because the timer keeps re-arming
-	// (host.go: "while any engine remains resident"): once the second engine
-	// also ages past the 50ms ttl, a LATER pass will report 0, and reading the
-	// slice too late would silently swap in that later value.
+	// (host.go: "while any engine remains resident"): once second also ages past
+	// the ttl, a LATER pass reports 0, and reading the slice too late would
+	// silently swap in that later value.
 	deadline := time.Now().Add(5 * time.Second)
 	var calls []int
 	for {
@@ -613,15 +644,16 @@ func TestCompileMissTriggersSweepReportsEngineCount(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("sweepEnginesAsync never reported OnEngineCount after a compile miss fired a sweep")
+			t.Fatal("sweepEnginesAsync never reported OnEngineCount for this host after a " +
+				"compile miss fired a sweep")
 		}
 		time.Sleep(time.Millisecond)
 	}
 
 	// Exactly 1, not >= 1: this number has one correct answer at the moment of
 	// the first pass. first was rewound an hour into the past and must already
-	// be gone; second was compiled a moment ago (well inside the 50ms ttl at
-	// the time this sweep pass ran) and must still be resident.
+	// be gone; second was compiled a moment ago (well inside the ttl at the time
+	// this sweep pass ran) and must still be resident.
 	if calls[base] != 1 {
 		t.Fatalf("first OnEngineCount report after this test's own compile miss = %d, "+
 			"want exactly 1 (the freshly compiled second module; the idle first one "+

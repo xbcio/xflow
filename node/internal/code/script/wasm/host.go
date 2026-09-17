@@ -142,6 +142,32 @@ type reactorHost struct {
 	// engineIdleTTLFromEnv; a test may override it directly since reactorHost is
 	// only ever built via newReactorHost in this package.
 	engineIdleTTL time.Duration
+
+	// engineCountObserver, when non-nil, receives THIS host's reclamation
+	// reports in place of the process-wide Observer. Production leaves it nil.
+	//
+	// It exists because Observer is process-wide and OnEngineCount carries no
+	// host identity, so a report is not attributable to the host that produced
+	// it. In a test process that is not a theoretical hazard: many reactorHosts
+	// live at once, each sweep pass reports into the same recorder, and nothing
+	// in the report says which host it came from. That is exactly how
+	// TestCompileMissTriggersSweepReportsEngineCount failed under `-race` in a
+	// full-package run — observed "= 6, want exactly 1" and "= 2, want exactly
+	// 1" on 2026-09-17 while passing when run alone. That test's host can only
+	// ever hold the two modules it compiles, so a report of 6 was never its
+	// own: it had read some other host's sweep. No amount of waiting fixes
+	// that; only attributing a report to a host does.
+	engineCountObserver Observer
+}
+
+// engineCountObserverOrDefault is the Observer a reclamation pass publishes its
+// resident-engine count to: this host's own when it carries one (tests), and
+// the process-wide Observer otherwise, which is what production always gets.
+func (h *reactorHost) engineCountObserverOrDefault() Observer {
+	if h.engineCountObserver != nil {
+		return h.engineCountObserver
+	}
+	return obs()
 }
 
 // prewarmEntry is one module queued for startup warm-up. It keeps the original
@@ -467,7 +493,10 @@ func (h *reactorHost) sweepEnginesAsync() {
 		h.mu.Lock()
 		remaining := len(h.engines)
 		h.mu.Unlock()
-		obs().OnEngineCount(ctx, remaining)
+		// Published through the host rather than obs() directly: the report
+		// names no host, so a per-host observation point is the only way to
+		// attribute a count to the host that swept. See engineCountObserver.
+		h.engineCountObserverOrDefault().OnEngineCount(ctx, remaining)
 		if remaining > 0 {
 			// A quarter of the ttl, so an engine is reclaimed within ttl*1.25 of
 			// going idle rather than up to ttl*2 with a period of ttl.
