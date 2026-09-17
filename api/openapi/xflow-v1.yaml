@@ -15,6 +15,15 @@ info:
     failure bodies are still JSON Envelopes — spec §3.4) and the /healthz and
     /readyz probes, which load balancers parse directly and must not be
     enveloped (§7).
+
+    Delivery semantics, stated once here instead of per endpoint: the handler
+    boundary and the Runner Protocol are at-least-once — lease replay, node
+    execution timeout and failover can each invoke the same handler twice — so
+    business side effects are the host's responsibility, with
+    `execution_id` + `node_name` as the recommended idempotency key. Those are
+    the faces this document deliberately omits (spec §0.1 / §10); see
+    docs/design/RELEASE-GATES.md §3 and §3.1. No endpoint below promises
+    exactly-once delivery.
   contact:
     name: xflow maintainers
     url: https://github.com/xbcio/xflow
@@ -370,6 +379,149 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/ExecuteWorkflowResponse"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/executions:
+    get:
+      operationId: listExecutions
+      summary: List executions
+      description: |
+        One offset-paginated page of the executions recorded in the caller's own
+        namespace (spec §3.3 page list). Namespace is resolved server-side from
+        the authenticated principal — there is no `namespace` parameter, and a
+        caller can never list another tenant's executions.
+
+        `list` holds summary rows, not execution snapshots; read one execution
+        with `GET /v1/executions/{id}`. Rows are ordered newest first
+        (`created_at` descending, then `id` descending), so the order is total
+        and stable across pages. `total` is the exact size of the collection in
+        the caller's namespace AFTER filtering — what a pagination control
+        needs, independent of the page requested.
+
+        Every row carries the namespace it belongs to, and only rows whose
+        namespace is exactly the caller's are returned. Rows whose namespace is
+        the unattributed sentinel `""` — written before the namespace column
+        existed, or by a writer that did not set it — are unreachable from every
+        scope and every filter. That is deliberate: it is better to under-report
+        an execution than to show one tenant another tenant's row.
+
+        Offset pagination is the page-list default by rule: the
+        cursor-paginated endpoints exist only for machine scans, and no endpoint
+        carries both.
+      tags: [Executions]
+      parameters:
+        - name: page
+          in: query
+          required: false
+          description: |
+            1-based page number (spec §3.3); `page=1` is the first page.
+            Malformed pagination input is never a business error: an absent,
+            empty, non-numeric, zero, or negative value falls back to 1. The
+            constraints below describe the domain the server honors, not a
+            request-validation gate.
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: page_size
+          in: query
+          required: false
+          description: |
+            Rows per page (spec §3.3). Defaults to 20. The server enforces a
+            hard ceiling of 200 and CLAMPS a larger request to 200 rather than
+            rejecting it — that ceiling is a security control (a sensitive-data
+            enumeration endpoint must not permit full-table traversal), not a
+            performance knob. An absent, empty, non-numeric, zero, or negative
+            value falls back to 20.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 20
+        - name: status
+          in: query
+          required: false
+          description: |
+            Narrows the page to one lifecycle status. Both the page and `total`
+            are narrowed by it, so `total` is the size of the filtered set.
+
+            An unrecognized value is a 400 `execution_status_invalid`, NOT an
+            empty page: a typo served as `list: []` is indistinguishable from
+            "no executions have that status".
+          schema:
+            $ref: "#/components/schemas/ExecutionStatus"
+        - name: created_after
+          in: query
+          required: false
+          description: |
+            Lower bound on `created_at`, RFC3339 (a fractional second is
+            accepted). The bound is EXCLUSIVE: an execution created exactly at
+            it is not returned. Absent means unbounded on that side.
+
+            A value that does not parse is a 400
+            `execution_list_time_invalid` rather than being ignored: an ignored
+            lower bound silently widens the result set, and widening a
+            tenant-scoped enumeration is the direction that costs data.
+          schema:
+            type: string
+            format: date-time
+        - name: created_before
+          in: query
+          required: false
+          description: |
+            Upper bound on `created_at`, RFC3339 (a fractional second is
+            accepted). The bound is EXCLUSIVE — an execution created exactly at
+            it is not returned — so a caller walking adjacent windows
+            (`[t0,t1)`, `[t1,t2)`) cannot double-count a row landing on `t1`.
+            Absent means unbounded on that side. A value that does not parse is
+            a 400 `execution_list_time_invalid`.
+          schema:
+            type: string
+            format: date-time
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: One page of executions.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ExecutionListResponse"
+        "400":
+          description: |
+            A filter value is unusable: an unrecognized `status`, or a
+            `created_after` / `created_before` that is not an RFC3339
+            date-time.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                unknownStatus:
+                  summary: The status filter is not a lifecycle status.
+                  value:
+                    success: false
+                    code: execution_status_invalid
+                    message: status must be one of pending, running, success, failed, canceling, canceled, timeout
+                    trace_id: 0123456789abcdef0123456789abcdef
+                unparsableBound:
+                  summary: A created_at bound is not an RFC3339 date-time.
+                  value:
+                    success: false
+                    code: execution_list_time_invalid
+                    message: created_after must be an RFC3339 date-time
+                    trace_id: 0123456789abcdef0123456789abcdef
         default:
           $ref: "#/components/responses/DefaultError"
 
@@ -1538,6 +1690,69 @@ components:
     ExecutionStatus:
       type: string
       enum: [pending, running, success, failed, canceling, canceled, timeout]
+
+    ExecutionListResponse:
+      type: object
+      description: |
+        The `data` payload of an execution collection response — the mandated
+        `{list, total}` shape (spec §3.3), never a bare array.
+      required: [list, total]
+      properties:
+        list:
+          type: array
+          description: The requested page. Empty pages are `[]`, never `null`.
+          items:
+            $ref: "#/components/schemas/ExecutionListItem"
+        total:
+          type: integer
+          description: |
+            The exact number of executions in the caller's own namespace that
+            match the request's filter — the size of the collection after
+            filtering, which is what spec §3.3 defines `total` as. It is
+            independent of the page requested, so `total` may exceed `list`'s
+            length; in particular it is not `offset + len(list)` and it does not
+            shrink as pages are consumed.
+          example: 3
+
+    ExecutionListItem:
+      type: object
+      description: |
+        One row of an execution list: a summary of a recorded execution, not its
+        snapshot. The stored definition, params, and runtime JSON are
+        deliberately absent — a page of them would be
+        O(page × workflow size) on the wire — and are read one execution at a
+        time via `GET /v1/executions/{id}`.
+
+        `workflow_name` is a display string, not a workflow identity: the
+        executions table stores no workflow id, key, or definition hash, so a
+        name is the only workflow field a row can honestly project.
+      required: [execution_id, namespace, workflow_name, status, error, created_at, updated_at]
+      properties:
+        execution_id:
+          type: string
+          description: The `{id}` of the inspect/signal/cancel/wait routes.
+        namespace:
+          type: string
+          description: |
+            The server-issued isolation scope this execution belongs to. It is
+            always the authenticated principal's namespace — a row is returned
+            only when the two are exactly equal.
+        workflow_name:
+          type: string
+          description: Name of the workflow this execution ran, as recorded at submit time.
+        status:
+          $ref: "#/components/schemas/ExecutionStatus"
+        error:
+          type: string
+          description: Failure message when the execution failed; `""` otherwise.
+        created_at:
+          type: string
+          format: date-time
+          description: When the execution was created. The listing's primary sort key, descending.
+        updated_at:
+          type: string
+          format: date-time
+          description: When the execution row was last updated.
 
     NodeStatus:
       type: string
