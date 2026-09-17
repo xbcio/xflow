@@ -845,7 +845,7 @@ func (a *partitionAggregator) run() {
 	// offset that is not yet durably parked, so the failure degrades to block's
 	// trade — a stall, which is recoverable — instead of discard's, which is not.
 	handleOverflow := func(msg Message) {
-		if true { // MUTATION-PROBE
+		if a.rt.cfg.OnOverflow != onOverflowDeadLetter {
 			reportOverflow(msg)
 			return
 		}
