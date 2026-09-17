@@ -249,8 +249,16 @@ func (e *Engine) commitLegacyNodeWithClassification(ctx context.Context, lease *
 	// reaches an intermediate waiting state. Once the fenced child generation
 	// completes, use the normal atomic commit/outbox path so downstream work is
 	// not left to the legacy direct scheduler.
+	//
+	// cls is forwarded, not dropped. This redirect used to call the
+	// empty-classification wrapper, so a graph that is acyclic but reaches the
+	// legacy entry point (a loop/split parent, or a pre-upgrade outbox entry)
+	// committed its failure with no classification and — once ErrorDetails
+	// started riding on cls — with no structured detail either. Same failure,
+	// different readback depending on which commit entry point the graph type
+	// happened to route through.
 	if !g.AllowCycles() {
-		return e.commitAcyclicNode(ctx, lease, privateOutput, status, output, port, errMsg, fatal)
+		return e.commitAcyclicNodeWithClassification(ctx, lease, privateOutput, status, output, port, errMsg, fatal, cls)
 	}
 
 	committer, ok := e.state.(LegacyNodeCommitter)
@@ -301,6 +309,9 @@ func (e *Engine) commitLegacyNodeWithClassification(ctx context.Context, lease *
 		PrivateOutput: privateOutput,
 		Port:          port,
 		Error:         errMsg,
+		// Same fenced transition as Error, for the same reason as the acyclic
+		// committer: nothing recomputes this after the commit.
+		ErrorDetails: cls.Details,
 		// The graph is cyclic by construction here — the !AllowCycles redirect
 		// near the top of this function sent every acyclic graph to
 		// commitAcyclicNode. Naming the redirect rather than its line number:

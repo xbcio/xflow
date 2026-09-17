@@ -132,10 +132,23 @@
 // obvious fix does not work. This section used to call the types.Error split
 // (payload in Details, which Error() does not render) "the convention", with
 // the caveat that no compile-time or runtime check enforces it. The situation
-// is worse than unenforced: outside tests, Details is written in exactly one
-// file and read in none. Moving a payload there does not relocate the
-// diagnostic, it discards it with extra steps — so any claim that a leak was
-// "moved to Details" should be read as a claim that it was deleted.
+// was worse than unenforced: outside tests, Details was written and read by
+// nothing. Moving a payload there did not relocate the diagnostic, it
+// discarded it with extra steps — so any claim that a leak was "moved to
+// Details" had to be read as a claim that it was deleted.
+//
+// That last sentence is no longer true and this note is the correction. U-9
+// plumbed ClassifiedError.Details through to the read API: the engine projects
+// it (engine.boundedErrorDetails — scalar-only, key- and size-capped), commits
+// it with the node's terminal state, both backends persist it, and
+// NodeDetail.ErrorDetails serves it from Inspect and GET /v1/executions/{id}.
+// So "moved to Details" is now a claim that can be checked, and the check is
+// whether the detail survives to the read surface — not whether the writer
+// stopped rendering it into Error(). Note the asymmetry that makes this
+// section still matter: the details are additionally withheld for a node whose
+// output policy is private (engine/inspect.go), while the error TEXT is not,
+// because that text is already the execution-level reason an operator reads.
+// Details are consequently the narrower channel of the two, not the wider one.
 //
 // What worked for the other two was neither keeping nor dropping the text but
 // splitting it: URL query keys kept and values replaced, duplicate-key index

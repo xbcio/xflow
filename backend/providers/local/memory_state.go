@@ -322,6 +322,10 @@ func cloneNodeSnapshot(ns *engine.NodeSnapshot) *engine.NodeSnapshot {
 	}
 	cp := *ns
 	cp.Output = cloneData(ns.Output)
+	// ErrorDetails is returned to read callers, so it must not alias the stored
+	// snapshot either — a caller that mutates the map it was handed would
+	// otherwise edit the node's persisted failure detail.
+	cp.ErrorDetails = cloneData(ns.ErrorDetails)
 	cp.LeasePayload = cloneLeasePayload(ns.LeasePayload)
 	return &cp
 }

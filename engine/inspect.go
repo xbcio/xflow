@@ -22,7 +22,16 @@ type NodeDetail struct {
 	Attempt int              `json:"attempt,omitempty"`
 	Port    string           `json:"port,omitempty"`
 	Error   string           `json:"error,omitempty"`
-	Output  map[string]any   `json:"output,omitempty"`
+	// ErrorDetails carries the structured failure detail (see
+	// engine.NodeSnapshot.ErrorDetails) to the consumer of this API — the SDK's
+	// Inspect, and GET /v1/executions/{id}, which serializes this struct
+	// directly. Without it a caller saw the rendered message and had to
+	// reverse-engineer the machine-readable part out of prose.
+	//
+	// Subject to the same fail-closed private-output policy as Output, and
+	// deliberately NOT covered by Output's own redaction: see inspectNode.
+	ErrorDetails map[string]any `json:"error_details,omitempty"`
+	Output       map[string]any `json:"output,omitempty"`
 }
 
 // Inspect returns execution status and, when requested or discoverable from the
@@ -105,6 +114,26 @@ func (e *Engine) inspectNode(
 	privateOutput := !graphPolicyResolved || graphPrivateOutput
 	if privateOutput {
 		return detail, nil
+	}
+
+	// ErrorDetails is projected here, AFTER the fail-closed return, and not in
+	// the block above that copies Error. Two different visibility judgments are
+	// in play and conflating them would be wrong in opposite directions:
+	//
+	//   - Error is a rendered string that the engine already publishes for
+	//     private nodes (it is the execution-level reason, it reaches the
+	//     audit row, and it is what an operator has to go on). Withholding it
+	//     would break every existing private-output diagnosis.
+	//   - ErrorDetails is an arbitrary runner-supplied map with no bound and no
+	//     producer-side contract, i.e. a channel the node can widen at will.
+	//     A node whose output the graph marked private is exactly the node
+	//     whose error detail could quote that output, so it is withheld —
+	//     failing closed, like every other decision on this path.
+	//
+	// The cost is bounded: the plain Error text survives, so the failure is
+	// still diagnosable, just not machine-readably.
+	if snap != nil {
+		detail.ErrorDetails = snap.ErrorDetails
 	}
 
 	output, err := e.state.GetOutput(ctx, id, name)

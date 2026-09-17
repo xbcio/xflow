@@ -365,6 +365,15 @@ func (s *Store) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID,
 // this layer cannot check. The isTransient guard below is the part that is
 // enforced.
 //
+// Details is no longer a write-only field, so the split above is not the escape
+// hatch this comment used to imply. Since U-9 the engine projects
+// ClassifiedError.Details onto the node snapshot and the inspect API serves it
+// as NodeDetail.ErrorDetails — see the "Projection error text" section of
+// doc.go. The difference that matters for THIS function is nil: errMsg remains
+// the execution-level reason and still reaches the audit store unchanged,
+// while the structured detail is withheld from any node whose output policy is
+// private.
+//
 // That guard is load-bearing only on the GROUP commit path: state_commit.go
 // already wraps its call in an outer !isTransient block, so a node-commit test
 // cannot tell this check from that one. TestPerWorkflowTransient_

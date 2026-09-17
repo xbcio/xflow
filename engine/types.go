@@ -324,6 +324,22 @@ type NodeSnapshot struct {
 	PrivateOutput bool
 	Port          string
 	Error         string
+	// ErrorDetails is the structured companion to Error: the producer's
+	// ClassifiedError.Details for this failure, already bounded by
+	// boundedErrorDetails at ingest. Error alone is a rendered string, so a
+	// consumer could read "denied by policy" without learning WHICH of the
+	// three sources denied the URL, or "timed out" without the phase; Details
+	// was written by three node constructors and read by nothing until this
+	// field and its read path existed.
+	//
+	// It is stored rather than recomputed because nothing downstream can
+	// recompute it — by the time the commit lands, the *ClassifiedError has
+	// been rendered to text and the original object is gone.
+	//
+	// It is NOT covered by PrivateOutput. The projection policy lives at the
+	// single read surface (engine/inspect.go), not here, so that a stored
+	// snapshot never has to be rewritten to change what is publicly visible.
+	ErrorDetails map[string]any
 }
 
 // ExpiredLease describes a node whose lease has passed its deadline and is

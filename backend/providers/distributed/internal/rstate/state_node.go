@@ -77,6 +77,17 @@ func (s *Store) UpsertNode(ctx context.Context, n *engine.NodeSnapshot) error {
 		}
 		leasePayloadJSON = string(encoded)
 	}
+	// Marshalled here rather than left to the meta block below: the block is
+	// entered only when some OTHER field is non-zero (see the guard), so a
+	// snapshot that carries nothing but a detail would otherwise drop it.
+	errorDetailsJSON := ""
+	if len(n.ErrorDetails) > 0 {
+		encoded, err := json.Marshal(n.ErrorDetails)
+		if err != nil {
+			return fmt.Errorf("marshal node error details %q/%q: %w", n.ExecutionID, n.Name, err)
+		}
+		errorDetailsJSON = string(encoded)
+	}
 
 	ttl := s.getExecTTL(ctx, n.ExecutionID)
 	privateOutput := 0
@@ -114,7 +125,7 @@ func (s *Store) UpsertNode(ctx context.Context, n *engine.NodeSnapshot) error {
 			keys = append(keys, outKey)
 		}
 		refreshMeta := n.PrivateOutput
-		if n.LeaseID != "" || n.LeaseToken != "" || n.Attempt != 0 || n.ActivationID != 0 || n.AutoDepth != 0 || !n.LeaseIssuedAt.IsZero() || n.Port != "" || n.Error != "" || n.CommittedLeaseToken != "" || n.CommittedAttempt != 0 {
+		if n.LeaseID != "" || n.LeaseToken != "" || n.Attempt != 0 || n.ActivationID != 0 || n.AutoDepth != 0 || !n.LeaseIssuedAt.IsZero() || n.Port != "" || n.Error != "" || errorDetailsJSON != "" || n.CommittedLeaseToken != "" || n.CommittedAttempt != 0 {
 			meta := map[string]any{
 				"lease_id":        string(n.LeaseID),
 				"lease_token":     string(n.LeaseToken),
@@ -139,6 +150,9 @@ func (s *Store) UpsertNode(ctx context.Context, n *engine.NodeSnapshot) error {
 			}
 			if n.Error != "" {
 				meta["error"] = n.Error
+			}
+			if errorDetailsJSON != "" {
+				meta["error_details"] = errorDetailsJSON
 			}
 			if n.CommittedLeaseToken != "" {
 				meta["committed_lease_token"] = string(n.CommittedLeaseToken)
@@ -306,6 +320,19 @@ func (s *Store) GetNode(ctx context.Context, id types.ExecutionID, name string) 
 	}
 	ns.Port = meta["port"]
 	ns.Error = meta["error"]
+	// Written by commitNodeLua's trailing error_details argument (see
+	// state_commit.go) and by UpsertNode below. An absent field and an empty
+	// string are the same "no detail" state, so decoding is attempted only for
+	// a non-empty value; a malformed one is a hard error rather than a silent
+	// nil, because a detail that quietly vanished is the failure mode this
+	// field exists to end.
+	if rawDetails := meta["error_details"]; rawDetails != "" {
+		var details map[string]any
+		if err := json.Unmarshal([]byte(rawDetails), &details); err != nil {
+			return nil, fmt.Errorf("decode node error details %q/%q: %w", id, name, err)
+		}
+		ns.ErrorDetails = details
+	}
 	ns.CommittedLeaseToken = engine.LeaseToken(meta["committed_lease_token"])
 	if committedAttempt := meta["committed_attempt"]; committedAttempt != "" {
 		var parsed int

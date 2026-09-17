@@ -215,8 +215,12 @@ func (e *Engine) commitAcyclicNodeWithClassification(ctx context.Context, lease 
 		PrivateOutput: privateOutput,
 		Port:          port,
 		Error:         errMsg,
-		Fatal:         fatal,
-		AdvanceTask:   advanceTask,
+		// Rides the same fenced transition as Error. Emitting it separately
+		// would leave a window in which the node is terminal with a message but
+		// no detail — permanently, since nothing recomputes it.
+		ErrorDetails: cls.Details,
+		Fatal:        fatal,
+		AdvanceTask:  advanceTask,
 	}
 	result, err := e.commitNode(ctx, req)
 	if err != nil {

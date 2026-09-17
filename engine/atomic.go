@@ -72,7 +72,15 @@ type CommitNodeRequest struct {
 	PrivateOutput bool
 	Port          string
 	Error         string
-	System        bool
+	// ErrorDetails is the structured companion to Error, taken from the
+	// EffectiveClassification bound to this commit and persisted alongside the
+	// node's terminal state so it survives a restart and a second replica. The
+	// backends store it verbatim: it is already bounded by
+	// engine.boundedErrorDetails, and applying a projection per backend would
+	// let the two disagree about what a failure said. Visibility policy for
+	// this field lives at the read surface (engine/inspect.go).
+	ErrorDetails map[string]any
+	System       bool
 	// Fatal short-circuits the ACYCLIC completion protocol: the backend finalizes
 	// the execution immediately instead of waiting for the remaining-unit counter
 	// to reach zero. It is meaningless on a cyclic graph, which has no such

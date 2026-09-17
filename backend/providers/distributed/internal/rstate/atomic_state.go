@@ -30,8 +30,14 @@ import (
 var commitNodeLua = redis.NewScript(`
 -- The privacy result is part of this linearized response. SQL projection must
 -- never infer it with a later Redis read, which could race metadata expiry.
+--
+-- Two arguments trail the fixed header and the variable-length cyclic outbox
+-- pairs, and both are addressed from the END so they cannot perturb the cyclic
+-- base index (ARGV[23] onward is the outbox suffix). The engine's side of that
+-- layout is the comment on the args slice in state_commit.go.
 local existingPrivate = redis.call('HGET', KEYS[6], 'private_output') == '1'
-local requestedPrivate = tonumber(ARGV[#ARGV] or '0') == 1
+local errorDetails = ARGV[#ARGV] or ''
+local requestedPrivate = tonumber(ARGV[#ARGV - 1] or '0') == 1
 local effectivePrivate = (existingPrivate or requestedPrivate) and 1 or 0
 local executionStatus = redis.call('GET', KEYS[1])
 if executionStatus == false then
@@ -97,6 +103,11 @@ redis.call('HSET', KEYS[6],
     'auto_depth', ARGV[6],
     'port', ARGV[9],
     'error', ARGV[10],
+    -- Always written, including as '' on a success commit: a node that failed
+    -- and was later retried to success must not keep serving the previous
+    -- attempt's detail, and HGET of an absent field and of '' both yield ''
+    -- here, so a reader can treat the empty string as "no detail".
+    'error_details', errorDetails,
     'committed_lease_token', ARGV[3],
     'committed_attempt', ARGV[4])
 redis.call('EXPIRE', KEYS[6], ttl)

@@ -88,6 +88,8 @@ func (s *memoryState) CommitNode(_ context.Context, req engine.CommitNodeRequest
 	}
 
 	privateOutput := s.preserveOutputPrivacyLocked(key, req.PrivateOutput)
+	// ErrorDetails is cloned like Output: the caller's map must not stay
+	// aliased into stored state, where a later mutation would rewrite history.
 	node := &engine.NodeSnapshot{
 		ExecutionID:         req.ExecutionID,
 		Name:                req.NodeName,
@@ -99,6 +101,7 @@ func (s *memoryState) CommitNode(_ context.Context, req engine.CommitNodeRequest
 		PrivateOutput:       privateOutput,
 		Port:                req.Port,
 		Error:               req.Error,
+		ErrorDetails:        cloneData(req.ErrorDetails),
 		CommittedLeaseToken: req.LeaseToken,
 		CommittedAttempt:    req.Attempt,
 	}

@@ -138,6 +138,17 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 	if req.StoreOutput {
 		storeOutput = 1
 	}
+	// Empty string rather than an omitted argument: the trailing layout above
+	// is positional, so the slot must always be sent. An empty detail is the
+	// encoder's "no detail" and decodes back to a nil map.
+	errorDetailsJSON := ""
+	if len(req.ErrorDetails) > 0 {
+		encoded, err := json.Marshal(req.ErrorDetails)
+		if err != nil {
+			return engine.CommitNodeResult{}, fmt.Errorf("marshal error details %q/%q: %w", req.ExecutionID, req.NodeName, err)
+		}
+		errorDetailsJSON = string(encoded)
+	}
 	privateOutput := 0
 	if req.PrivateOutput {
 		privateOutput = 1
@@ -178,9 +189,12 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 		cyclicComplete, cyclicFinalStatus, cyclicFinalError, len(req.CyclicOutbox),
 	}
 	args = append(args, cyclicArgs...)
-	// Keep the privacy bit last: commitNodeLua's cyclic outbox entries are a
-	// variable-length suffix, and the marker must not perturb their indexes.
-	args = append(args, privateOutput)
+	// Two trailing arguments live after the variable-length cyclic outbox
+	// suffix, and commitNodeLua reads both from the END of ARGV (#ARGV and
+	// #ARGV-1) precisely so neither can perturb the suffix's base index: first
+	// the privacy bit, then the node's structured error detail. Their order is
+	// the contract — swapping them silently inverts both readings.
+	args = append(args, privateOutput, errorDetailsJSON)
 	t := namespace.FromContext(ctx)
 	result, err := commitNodeLua.Run(ctx, s.rdb, []string{
 		execKey(t, req.ExecutionID, "status"),
