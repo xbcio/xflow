@@ -27,7 +27,6 @@ type redisRunnerDirectoryKeys struct {
 	assignmentSession                            string
 	assignmentLeaseID                            string
 	assignmentLeaseToken                         string
-	assignmentLeaseMeta                          string
 	claimsAssignment                             string
 	claimsRunner                                 string
 	claimsSession                                string
@@ -117,7 +116,6 @@ func newRedisRunnerDirectoryKeys(prefix string) redisRunnerDirectoryKeys {
 		assignmentSession:                     prefix + ":assignment:session",
 		assignmentLeaseID:                     prefix + ":assignment:lease-id",
 		assignmentLeaseToken:                  prefix + ":assignment:lease-token",
-		assignmentLeaseMeta:                   prefix + ":assignment:lease-meta",
 		claimsAssignment:                      prefix + ":claim:assignment",
 		claimsRunner:                          prefix + ":claim:runner",
 		claimsSession:                         prefix + ":claim:session",
@@ -181,6 +179,12 @@ func newRedisRunnerDirectoryKeys(prefix string) redisRunnerDirectoryKeys {
 		handoffRecoveryReady:                         prefix + ":runner:handoff:recovery-ready",
 		handoffRecoveryDeadline:                      prefix + ":runner:handoff:recovery-deadline",
 	}
+}
+
+// assignmentLeaseMetaKey returns the assignment-scoped lease metadata key. The
+// prefix supplies the shared Redis Cluster hash tag for every Lua key.
+func (keys redisRunnerDirectoryKeys) assignmentLeaseMetaKey(assignmentID string) string {
+	return keys.prefix + ":assignment:lease-meta:" + assignmentID
 }
 
 // redisActivationInventoryItem intentionally encodes generation as a string:

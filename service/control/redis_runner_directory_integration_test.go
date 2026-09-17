@@ -147,18 +147,26 @@ func newRealRedisRunnerDirectory(t *testing.T, rdb *redis.Client) *RedisRunnerDi
 		keys:     newRedisRunnerDirectoryKeys(prefix),
 	}
 	t.Cleanup(func() {
-		_ = rdb.Del(context.Background(), redisRunnerDirectoryAllKeys(directory.keys)...).Err()
+		ctx := context.Background()
+		if err := rdb.Del(ctx, redisRunnerDirectoryAllKeys(directory.keys)...).Err(); err != nil {
+			t.Errorf("cleanup fixed Redis runner-directory keys: %v", err)
+		}
+		if err := cleanupRedisRunnerDirectoryAssignmentLeaseMeta(ctx, rdb, directory.keys); err != nil {
+			t.Errorf("cleanup dynamic Redis runner-directory lease metadata: %v", err)
+		}
 		_ = rdb.Close()
 	})
 	return directory
 }
 
-// redisRunnerDirectoryAllKeys lists every key the directory writes, for the
-// real-Redis tests' teardown. None of these expire on their own — nothing in
-// redis_runner_directory.go calls EXPIRE — so a key missing from this list
-// stays in the operator's Redis after the test that made it has gone.
-// TestRedisRunnerDirectoryCleanupDeletesEveryKeyItCreates holds it to the key
-// struct, which is how runnerLabels and runnerNamespaces were found missing.
+// redisRunnerDirectoryAllKeys lists the directory's fixed keys for real-Redis
+// test teardown. Assignment-scoped lease metadata is stored as separate
+// TTL-backed keys and is removed by cleanupRedisRunnerDirectoryAssignmentLeaseMeta.
+// The fixed keys are not uniformly TTL-bound, so a key missing from this list
+// can still remain in Redis after the test that made it has gone.
+// TestRedisRunnerDirectoryCleanupDeletesEveryKeyItCreates holds this list to
+// the key struct, which is how runnerLabels and runnerNamespaces were found
+// missing.
 func redisRunnerDirectoryAllKeys(keys redisRunnerDirectoryKeys) []string {
 	return []string{
 		keys.queue,
@@ -170,7 +178,6 @@ func redisRunnerDirectoryAllKeys(keys redisRunnerDirectoryKeys) []string {
 		keys.assignmentSession,
 		keys.assignmentLeaseID,
 		keys.assignmentLeaseToken,
-		keys.assignmentLeaseMeta,
 		keys.claimsAssignment,
 		keys.claimsRunner,
 		keys.claimsSession,
@@ -233,5 +240,77 @@ func redisRunnerDirectoryAllKeys(keys redisRunnerDirectoryKeys) []string {
 		keys.handoffLeaseToken,
 		keys.handoffRecoveryReady,
 		keys.handoffRecoveryDeadline,
+	}
+}
+
+func TestCleanupRedisRunnerDirectoryAssignmentLeaseMeta(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	// The literal asterisk makes the SCAN pattern broader than the namespace;
+	// the helper must keep only keys that have the exact string prefix.
+	keys := newRedisRunnerDirectoryKeys("xflow:runner-directory:{lease-meta-cleanup}*")
+	dynamic := []string{
+		keys.assignmentLeaseMetaKey("assignment-a"),
+		keys.assignmentLeaseMetaKey("assignment-b"),
+	}
+	for _, key := range dynamic {
+		if err := rdb.Set(ctx, key, "lease", 0).Err(); err != nil {
+			t.Fatalf("seed dynamic lease metadata %q: %v", key, err)
+		}
+	}
+	outsidePrefix := "xflow:runner-directory:{lease-meta-cleanup}other:assignment:lease-meta:keep"
+	if err := rdb.Set(ctx, outsidePrefix, "keep", 0).Err(); err != nil {
+		t.Fatalf("seed broad-pattern non-member %q: %v", outsidePrefix, err)
+	}
+
+	if err := cleanupRedisRunnerDirectoryAssignmentLeaseMeta(ctx, rdb, keys); err != nil {
+		t.Fatalf("cleanupRedisRunnerDirectoryAssignmentLeaseMeta() error = %v", err)
+	}
+	for _, key := range dynamic {
+		exists, err := rdb.Exists(ctx, key).Result()
+		if err != nil {
+			t.Fatalf("exists dynamic lease metadata %q: %v", key, err)
+		}
+		if exists != 0 {
+			t.Errorf("dynamic lease metadata %q still exists after cleanup", key)
+		}
+	}
+	exists, err := rdb.Exists(ctx, outsidePrefix).Result()
+	if err != nil {
+		t.Fatalf("exists broad-pattern non-member %q: %v", outsidePrefix, err)
+	}
+	if exists != 1 {
+		t.Errorf("cleanup deleted non-member %q", outsidePrefix)
+	}
+}
+
+// cleanupRedisRunnerDirectoryAssignmentLeaseMeta removes the assignment-scoped
+// lease metadata keys that cannot appear in redisRunnerDirectoryAllKeys. SCAN
+// keeps cleanup incremental, and the literal-prefix check prevents a glob-like
+// prefix from broadening the deletion set.
+func cleanupRedisRunnerDirectoryAssignmentLeaseMeta(ctx context.Context, rdb *redis.Client, keys redisRunnerDirectoryKeys) error {
+	prefix := keys.prefix + ":assignment:lease-meta:"
+	pattern := prefix + "*"
+	var cursor uint64
+	for {
+		found, next, err := rdb.Scan(ctx, cursor, pattern, 100).Result()
+		if err != nil {
+			return fmt.Errorf("scan assignment lease metadata keys: %w", err)
+		}
+		deleteKeys := make([]string, 0, len(found))
+		for _, key := range found {
+			if len(key) >= len(prefix) && key[:len(prefix)] == prefix {
+				deleteKeys = append(deleteKeys, key)
+			}
+		}
+		if len(deleteKeys) > 0 {
+			if err := rdb.Del(ctx, deleteKeys...).Err(); err != nil {
+				return fmt.Errorf("delete assignment lease metadata keys: %w", err)
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			return nil
+		}
 	}
 }

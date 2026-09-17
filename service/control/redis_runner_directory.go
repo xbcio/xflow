@@ -385,7 +385,7 @@ func (d *RedisRunnerDirectory) EnqueueAssignment(ctx context.Context, assignment
 		d.keys.assignmentSession,
 		d.keys.assignmentLeaseID,
 		d.keys.assignmentLeaseToken,
-		d.keys.assignmentLeaseMeta,
+		d.keys.assignmentLeaseMetaKey(string(assignment.AssignmentID)),
 	}, string(assignment.AssignmentID), payload)
 	if err != nil {
 		return false, fmt.Errorf("enqueue redis assignment: %w", err)
@@ -581,6 +581,13 @@ func (d *RedisRunnerDirectory) SettleClaimHandoff(ctx context.Context, claimID C
 	if disposition != HandoffDispositionRequeue && disposition != HandoffDispositionDrop {
 		return fmt.Errorf("settle redis handoff %q: unsupported disposition %q", claimID, disposition)
 	}
+	assignmentID, ok, err := d.claimAssignmentID(ctx, claimID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
 	status, err := d.evalStatus(ctx, redisSettleHandoffLua, []string{
 		d.keys.queue,
 		d.keys.seen,
@@ -605,7 +612,8 @@ func (d *RedisRunnerDirectory) SettleClaimHandoff(ctx context.Context, claimID C
 		d.keys.handoffLeaseToken,
 		d.keys.handoffRecoveryReady,
 		d.keys.handoffRecoveryDeadline,
-	}, string(claimID), string(disposition))
+		d.keys.assignmentLeaseMetaKey(assignmentID),
+	}, string(claimID), string(disposition), assignmentID)
 	if err != nil {
 		return fmt.Errorf("settle redis handoff: %w", err)
 	}
@@ -771,7 +779,7 @@ func (d *RedisRunnerDirectory) replayLease(ctx context.Context, runnerID, sessio
 		if err != nil {
 			return Claim{}, false, err
 		}
-		rawLease, err := d.rdb.HGet(ctx, d.keys.assignmentLeaseMeta, assignmentID).Result()
+		rawLease, err := d.rdb.Get(ctx, d.keys.assignmentLeaseMetaKey(assignmentID)).Result()
 		if errors.Is(err, redis.Nil) {
 			// Same race, one field later: the release deleted the lease metadata
 			// while the payload was still readable.
@@ -837,6 +845,13 @@ func (d *RedisRunnerDirectory) FinalizeClaim(ctx context.Context, claimID ClaimI
 	if err := d.ReclaimExpiredClaims(ctx); err != nil {
 		return err
 	}
+	assignmentID, ok, err := d.claimAssignmentID(ctx, claimID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errClaimNotActive
+	}
 	meta, err := marshalRedisLeaseMeta(lease)
 	if err != nil {
 		return err
@@ -854,7 +869,7 @@ func (d *RedisRunnerDirectory) FinalizeClaim(ctx context.Context, claimID ClaimI
 		d.keys.assignmentSession,
 		d.keys.assignmentLeaseID,
 		d.keys.assignmentLeaseToken,
-		d.keys.assignmentLeaseMeta,
+		d.keys.assignmentLeaseMetaKey(assignmentID),
 		d.keys.claimsAssignment,
 		d.keys.claimsRunner,
 		d.keys.claimsSession,
@@ -874,7 +889,8 @@ func (d *RedisRunnerDirectory) FinalizeClaim(ctx context.Context, claimID ClaimI
 		d.keys.handoffLeaseToken,
 		d.keys.handoffRecoveryReady,
 		d.keys.handoffRecoveryDeadline,
-	}, string(claimID), leaseID, leaseToken, meta)
+	}, string(claimID), leaseID, leaseToken, meta, assignmentID,
+		strconv.FormatInt(d.assignmentLeaseMetaTTLMillis(lease), 10))
 	if err != nil {
 		return fmt.Errorf("finalize redis claim: %w", err)
 	}
@@ -897,6 +913,13 @@ func (d *RedisRunnerDirectory) ReleaseClaim(ctx context.Context, claimID ClaimID
 	if err := d.ReclaimExpiredClaims(ctx); err != nil {
 		return err
 	}
+	assignmentID, ok, err := d.claimAssignmentID(ctx, claimID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
 	status, err := d.evalStatus(ctx, redisReleaseClaimLua, []string{
 		d.keys.queue,
 		d.keys.seen,
@@ -907,7 +930,7 @@ func (d *RedisRunnerDirectory) ReleaseClaim(ctx context.Context, claimID ClaimID
 		d.keys.assignmentSession,
 		d.keys.assignmentLeaseID,
 		d.keys.assignmentLeaseToken,
-		d.keys.assignmentLeaseMeta,
+		d.keys.assignmentLeaseMetaKey(assignmentID),
 		d.keys.claimsAssignment,
 		d.keys.claimsRunner,
 		d.keys.claimsSession,
@@ -924,7 +947,7 @@ func (d *RedisRunnerDirectory) ReleaseClaim(ctx context.Context, claimID ClaimID
 		d.keys.handoffLeaseToken,
 		d.keys.handoffRecoveryReady,
 		d.keys.handoffRecoveryDeadline,
-	}, string(claimID), string(reason))
+	}, string(claimID), string(reason), assignmentID)
 	if err != nil {
 		return fmt.Errorf("release redis claim: %w", err)
 	}
@@ -942,6 +965,14 @@ func (d *RedisRunnerDirectory) ReleaseClaim(ctx context.Context, claimID ClaimID
 // still matches. It intentionally does not require the original session,
 // because report cleanup may race a legitimate runner re-registration.
 func (d *RedisRunnerDirectory) ReleaseLeased(ctx context.Context, req ReleaseLeasedRequest) error {
+	assignmentID, _, err := d.resolveLeaseAssignmentID(ctx, LeaseLookupKey{
+		AssignmentID: req.AssignmentID,
+		LeaseID:      req.LeaseID,
+		LeaseToken:   req.LeaseToken,
+	})
+	if err != nil {
+		return err
+	}
 	status, err := d.evalStatus(ctx, redisReleaseLeasedLua, []string{
 		d.keys.runnerSession,
 		d.keys.assignmentData,
@@ -950,7 +981,7 @@ func (d *RedisRunnerDirectory) ReleaseLeased(ctx context.Context, req ReleaseLea
 		d.keys.assignmentSession,
 		d.keys.assignmentLeaseID,
 		d.keys.assignmentLeaseToken,
-		d.keys.assignmentLeaseMeta,
+		d.keys.assignmentLeaseMetaKey(assignmentID),
 		d.keys.leaseByID,
 		d.keys.leaseByToken,
 		d.keys.runnerLeaseCount,
@@ -966,7 +997,8 @@ func (d *RedisRunnerDirectory) ReleaseLeased(ctx context.Context, req ReleaseLea
 		d.keys.handoffLeaseToken,
 		d.keys.handoffRecoveryReady,
 		d.keys.handoffRecoveryDeadline,
-	}, req.RunnerID, string(req.AssignmentID), string(req.LeaseID), string(req.LeaseToken), boolRedisArg(req.RemoveSeen))
+	}, req.RunnerID, string(req.AssignmentID), string(req.LeaseID), string(req.LeaseToken),
+		boolRedisArg(req.RemoveSeen), assignmentID)
 	if err != nil {
 		return fmt.Errorf("release redis lease: %w", err)
 	}
@@ -1026,7 +1058,10 @@ func (d *RedisRunnerDirectory) LookupLease(ctx context.Context, runnerID, sessio
 	if err != nil {
 		return nil, false, err
 	}
-	rawLease, err := d.rdb.HGet(ctx, d.keys.assignmentLeaseMeta, assignmentID).Result()
+	rawLease, err := d.rdb.Get(ctx, d.keys.assignmentLeaseMetaKey(assignmentID)).Result()
+	if errors.Is(err, redis.Nil) {
+		return nil, false, nil
+	}
 	if err != nil {
 		return nil, false, fmt.Errorf("read persisted lease %q: %w", assignmentID, err)
 	}
@@ -1065,6 +1100,17 @@ func (d *RedisRunnerDirectory) resolveLeaseAssignmentID(ctx context.Context, key
 	return "", false, nil
 }
 
+func (d *RedisRunnerDirectory) claimAssignmentID(ctx context.Context, claimID ClaimID) (string, bool, error) {
+	assignmentID, err := d.rdb.HGet(ctx, d.keys.claimsAssignment, string(claimID)).Result()
+	if errors.Is(err, redis.Nil) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("resolve claim assignment %q: %w", claimID, err)
+	}
+	return assignmentID, true, nil
+}
+
 // ReleaseExpiredLease removes a finalized lease from the directory only when
 // AssignmentID, LeaseID, and LeaseToken all match the stored record. It removes
 // capacity before engine reclaim but intentionally retains the finalized
@@ -1077,7 +1123,7 @@ func (d *RedisRunnerDirectory) ReleaseExpiredLease(ctx context.Context, req Expi
 		d.keys.assignmentSession,
 		d.keys.assignmentLeaseID,
 		d.keys.assignmentLeaseToken,
-		d.keys.assignmentLeaseMeta,
+		d.keys.assignmentLeaseMetaKey(string(req.AssignmentID)),
 		d.keys.leaseByID,
 		d.keys.leaseByToken,
 		d.keys.runnerLeaseCount,
@@ -1149,7 +1195,7 @@ func (d *RedisRunnerDirectory) ClearAssignment(ctx context.Context, assignmentID
 		d.keys.assignmentSession,
 		d.keys.assignmentLeaseID,
 		d.keys.assignmentLeaseToken,
-		d.keys.assignmentLeaseMeta,
+		d.keys.assignmentLeaseMetaKey(string(assignmentID)),
 		d.keys.claimsAssignment,
 		d.keys.claimsRunner,
 		d.keys.claimsSession,
@@ -1493,6 +1539,31 @@ func (d *RedisRunnerDirectory) claimTTLMillis() int64 {
 	return 1
 }
 
+// assignmentLeaseMetaTTLMillis retains the complete runner-facing lease for
+// the live lease interval plus one claim-recovery window. The metadata is
+// sensitive (it can include task input), so a zero-TTL lease or a directory
+// constructed directly by a test must still receive a finite positive expiry.
+func (d *RedisRunnerDirectory) assignmentLeaseMetaTTLMillis(lease *engine.TaskLease) int64 {
+	live := time.Duration(0)
+	if lease != nil {
+		live = lease.TTL
+	}
+	if live <= 0 {
+		live = d.claimTTL
+	}
+	if live <= 0 {
+		live = defaultRedisRunnerDirectoryClaimTTL
+	}
+	margin := d.claimTTL
+	if margin <= 0 {
+		margin = defaultRedisRunnerDirectoryClaimTTL
+	}
+	if millis := (live + margin).Milliseconds(); millis > 0 {
+		return millis
+	}
+	return 1
+}
+
 func (d *RedisRunnerDirectory) evalStatus(ctx context.Context, script string, keys []string, args ...interface{}) (string, error) {
 	value, err := d.rdb.Eval(ctx, script, keys, args...).Result()
 	if err != nil {
@@ -1686,7 +1757,7 @@ redis.call('HDEL', KEYS[6], ARGV[1])
 redis.call('HDEL', KEYS[7], ARGV[1])
 redis.call('HDEL', KEYS[8], ARGV[1])
 redis.call('HDEL', KEYS[9], ARGV[1])
-redis.call('HDEL', KEYS[10], ARGV[1])
+redis.call('DEL', KEYS[10])
 redis.call('LREM', KEYS[1], 0, ARGV[1])
 redis.call('RPUSH', KEYS[1], ARGV[1])
 return 'enqueued'
@@ -1805,6 +1876,7 @@ local assignmentID = redis.call('HGET', KEYS[8], claimID)
 local runnerID = redis.call('HGET', KEYS[9], claimID)
 local sessionID = redis.call('HGET', KEYS[10], claimID)
 if not assignmentID or not runnerID then return 'noop' end
+if assignmentID ~= ARGV[5] then return 'noop' end
 if redis.call('HGET', KEYS[16], runnerID) ~= sessionID then return 'stale' end
 if redis.call('HGET', KEYS[1], assignmentID) ~= 'claimed' or redis.call('HGET', KEYS[2], assignmentID) ~= claimID then return 'noop' end
 redis.call('HDEL', KEYS[8], claimID)
@@ -1818,7 +1890,7 @@ redis.call('HSET', KEYS[1], assignmentID, 'leased')
 redis.call('HDEL', KEYS[2], assignmentID)
 redis.call('HSET', KEYS[5], assignmentID, ARGV[2])
 redis.call('HSET', KEYS[6], assignmentID, ARGV[3])
-redis.call('HSET', KEYS[7], assignmentID, ARGV[4])
+redis.call('SET', KEYS[7], ARGV[4], 'PX', tonumber(ARGV[6]))
 if ARGV[2] ~= '' then redis.call('HSET', KEYS[13], ARGV[2], assignmentID) end
 if ARGV[3] ~= '' then redis.call('HSET', KEYS[14], ARGV[3], assignmentID) end
 redis.call('HSET', KEYS[17], claimID, 'finalized')
@@ -1893,6 +1965,7 @@ local assignmentID = redis.call('HGET', KEYS[8], claimID)
 local runnerID = redis.call('HGET', KEYS[9], claimID)
 local state = redis.call('HGET', KEYS[13], claimID)
 if not assignmentID or not state then return 'noop' end
+if assignmentID ~= ARGV[3] then return 'noop' end
 if state ~= 'lease_may_exist' and state ~= 'lease_created' then return 'unresolved' end
 if redis.call('HGET', KEYS[4], assignmentID) ~= 'claimed' or redis.call('HGET', KEYS[5], assignmentID) ~= claimID then return 'unresolved' end
 if ARGV[2] == 'requeue' then
@@ -1911,6 +1984,7 @@ elseif ARGV[2] == 'drop' then
   redis.call('HDEL', KEYS[6], assignmentID)
   redis.call('HDEL', KEYS[7], assignmentID)
 else return 'unresolved' end
+redis.call('DEL', KEYS[24])
 redis.call('HDEL', KEYS[8], claimID)
 redis.call('HDEL', KEYS[9], claimID)
 redis.call('HDEL', KEYS[10], claimID)
@@ -1938,6 +2012,7 @@ local claimID = ARGV[1]
 local assignmentID = redis.call('HGET', KEYS[11], claimID)
 local runnerID = redis.call('HGET', KEYS[12], claimID)
 if not assignmentID then return 'noop' end
+if assignmentID ~= ARGV[3] then return 'noop' end
 local handoffState = redis.call('HGET', KEYS[16], claimID)
 if not handoffState then
   -- Do not let a newly deployed error path erase a pre-ledger claim that may
@@ -1963,6 +2038,7 @@ if redis.call('HGET', KEYS[4], assignmentID) == 'claimed' and redis.call('HGET',
     redis.call('HDEL', KEYS[5], assignmentID)
     redis.call('HDEL', KEYS[6], assignmentID)
     redis.call('HDEL', KEYS[7], assignmentID)
+    redis.call('DEL', KEYS[10])
     redis.call('LREM', KEYS[1], 0, assignmentID)
     if redis.call('HEXISTS', KEYS[3], assignmentID) == 1 then redis.call('LPUSH', KEYS[1], assignmentID) end
   elseif ARGV[2] == 'drop' then
@@ -1975,7 +2051,7 @@ if redis.call('HGET', KEYS[4], assignmentID) == 'claimed' and redis.call('HGET',
     redis.call('HDEL', KEYS[7], assignmentID)
     redis.call('HDEL', KEYS[8], assignmentID)
     redis.call('HDEL', KEYS[9], assignmentID)
-    redis.call('HDEL', KEYS[10], assignmentID)
+    redis.call('DEL', KEYS[10])
   else
     return 'noop'
   end
@@ -2009,12 +2085,14 @@ if ARGV[4] ~= '' then assignmentID = redis.call('HGET', KEYS[10], ARGV[4]) end
 if not assignmentID and ARGV[3] ~= '' then assignmentID = redis.call('HGET', KEYS[9], ARGV[3]) end
 if not assignmentID or assignmentID == '' then assignmentID = ARGV[2] end
 if assignmentID == '' then return 'noop' end
+if assignmentID ~= ARGV[6] then return 'noop' end
 if redis.call('HGET', KEYS[3], assignmentID) ~= 'leased' then return 'noop' end
 if redis.call('HGET', KEYS[4], assignmentID) ~= ARGV[1] then return 'noop' end
 local currentLeaseID = redis.call('HGET', KEYS[6], assignmentID) or ''
 local currentLeaseToken = redis.call('HGET', KEYS[7], assignmentID) or ''
 if ARGV[4] ~= '' and currentLeaseToken ~= ARGV[4] then return 'noop' end
 if ARGV[4] == '' and ARGV[3] ~= '' and currentLeaseID ~= ARGV[3] then return 'noop' end
+redis.call('DEL', KEYS[8])
 if currentLeaseID ~= '' and redis.call('HGET', KEYS[9], currentLeaseID) == assignmentID then redis.call('HDEL', KEYS[9], currentLeaseID) end
 if currentLeaseToken ~= '' and redis.call('HGET', KEYS[10], currentLeaseToken) == assignmentID then redis.call('HDEL', KEYS[10], currentLeaseToken) end
 local leases = tonumber(redis.call('HGET', KEYS[11], ARGV[1]) or '0')
@@ -2027,14 +2105,12 @@ if ARGV[5] == '1' then
   redis.call('HDEL', KEYS[5], assignmentID)
   redis.call('HDEL', KEYS[6], assignmentID)
   redis.call('HDEL', KEYS[7], assignmentID)
-  redis.call('HDEL', KEYS[8], assignmentID)
 else
   redis.call('HSET', KEYS[3], assignmentID, 'released')
   redis.call('HDEL', KEYS[4], assignmentID)
   redis.call('HDEL', KEYS[5], assignmentID)
   redis.call('HDEL', KEYS[6], assignmentID)
   redis.call('HDEL', KEYS[7], assignmentID)
-  redis.call('HDEL', KEYS[8], assignmentID)
 end
 local claimID = redis.call('HGET', KEYS[17], assignmentID)
 if claimID and redis.call('HGET', KEYS[13], claimID) == 'finalized' and redis.call('HGET', KEYS[20], claimID) == currentLeaseID and redis.call('HGET', KEYS[21], claimID) == currentLeaseToken then
@@ -2109,7 +2185,7 @@ redis.call('HDEL', KEYS[6], assignmentID)
 redis.call('HDEL', KEYS[7], assignmentID)
 redis.call('HDEL', KEYS[8], assignmentID)
 redis.call('HDEL', KEYS[9], assignmentID)
-redis.call('HDEL', KEYS[10], assignmentID)
+redis.call('DEL', KEYS[10])
 local handoffID = redis.call('HGET', KEYS[23], assignmentID)
 if handoffID then
   redis.call('HDEL', KEYS[19], handoffID)
@@ -2142,7 +2218,7 @@ redis.call('HDEL', KEYS[3], assignmentID)
 redis.call('HDEL', KEYS[4], assignmentID)
 redis.call('HDEL', KEYS[5], assignmentID)
 redis.call('HDEL', KEYS[6], assignmentID)
-redis.call('HDEL', KEYS[7], assignmentID)
+redis.call('DEL', KEYS[7])
 if leaseID ~= '' and redis.call('HGET', KEYS[8], leaseID) == assignmentID then redis.call('HDEL', KEYS[8], leaseID) end
 if leaseToken ~= '' and redis.call('HGET', KEYS[9], leaseToken) == assignmentID then redis.call('HDEL', KEYS[9], leaseToken) end
 if runnerID then

@@ -45,7 +45,7 @@ func TestReplayLeaseSkipsAnAssignmentReleasedMidRead(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("FinalizeClaim() error = %v", err)
 	}
-	server.HDel(directory.keys.assignmentLeaseMeta, string(torn.AssignmentID))
+	server.Del(directory.keys.assignmentLeaseMetaKey(string(torn.AssignmentID)))
 	server.HDel(directory.keys.assignmentData, string(torn.AssignmentID))
 
 	// Real work is waiting behind it.
