@@ -488,8 +488,9 @@ group)" 此前没有实现：`seedKafkaEntryBatchMessages` 把原始 Kafka 消�
 整个文件不认识 group，控制面为 trigger-group 派发的 directive 带
 `NodeType: "xflow.group"`，该合成类型从无 handler 注册，必然 fail closed。
 
-按 [2026-08-07 SAS 流量打标 spec](../superpowers/specs/2026-08-07-sas-traffic-tagging-runner-group-design.md) §3
-与 [2026-08-09 trigger-group-local-execution 计划](../superpowers/plans/2026-08-09-trigger-group-local-execution.md)
+按内部的 2026-08-07「SAS 流量打标」设计（runner group，gitignored，不随仓库分发，
+故此处不给出路径）§3
+与内部的 2026-08-09「trigger-group-local-execution」计划（同样 gitignored）
 补齐了三处接线：
 
 | 缺口 | 位置 | 修法 |

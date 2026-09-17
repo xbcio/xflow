@@ -262,14 +262,21 @@ items listed below under §12.1. What remains open is in §12.2.
   reproducible across a redelivery — batch boundaries are decided by broker
   fetch timing, not by the aggregation logic, and no alignment scheme can
   change that. The delivery semantics are therefore **at-least-once**, matching
-  the rest of xflow rather than the per-message entry-seed path's
-  exactly-once: a batch that seeds successfully but whose offsets never commit
-  is reprocessed after the reader is rebuilt. Duplication is bounded at one
-  batch and is what the `admission_state` metric exists to measure. The
-  seed-then-commit rule and the ride-along of schema-discarded offsets are
-  shared verbatim with the legacy `Emit` branch. Consumers must be idempotent
-  on `(topic, partition, offset)` — not on `execution_id`, since the duplicate
-  is by construction a different execution.
+  the rest of xflow: a batch that seeds successfully but whose offsets never
+  commit is reprocessed after the reader is rebuilt. What differs on the
+  per-message entry-seed path is not the guarantee but the key: `seedEntryBatch`
+  admits on the record's stable source identity
+  (`…/topic/partition/offset-offset`), so a redelivered record is answered
+  `duplicate` and never seeds a second execution. That is idempotent admission
+  (dedup on a stable key), not exactly-once delivery — no path in xflow promises
+  that. A batch key carries the batch's actual offset range and
+  therefore recurs only when the same boundary recurs, which is why a redelivered
+  batch can re-execute while a redelivered record cannot. Duplication is bounded
+  at one batch and is what `xflow_trigger_batch_admissions_total` exists to
+  measure. The seed-then-commit rule and the ride-along of schema-discarded
+  offsets are shared verbatim with the legacy `Emit` branch. Consumers must be
+  idempotent on `(topic, partition, offset)` — not on `execution_id`, since the
+  duplicate is by construction a different execution.
 - **`default`-selector fallback grace period** (spec §11.7). A `default`-mode
   activation with no label-matching runner waits out `FallbackGrace`, then falls
   back to any live runner with headroom whose capabilities satisfy the entry
