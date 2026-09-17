@@ -81,8 +81,10 @@ const aggregateDedupMessage = "message"
 //	         republish the arriving message to a dead-letter topic, and only
 //	         then let the offset advance past it. This is audited loss, not
 //	         loss: the record is durably preserved elsewhere with its
-//	         provenance, and a later commit sweeping past its offset no longer
-//	         discards anything that cannot be replayed.
+//	         provenance, so a later commit sweeping past its offset no longer
+//	         discards anything irrecoverable. It does NOT make the record
+//	         replayable by itself — nothing in this repository reads the
+//	         overflow topic; re-driving those records is an operator's job.
 //
 // There is no setting that avoids all three costs, and the reason is the single
 // shared reader rather than an oversight. Partition-selective backpressure would
@@ -835,9 +837,11 @@ func (a *partitionAggregator) run() {
 	// caused the overflow stays intact and the record's memory is bounded to this
 	// one reference. Its offset is subsequently swept past by an ordinary commit
 	// of a higher offset, which is no longer loss: the record is durable in the
-	// DLQ with its topic/partition/offset provenance, and the DLQ is the replay
-	// path. That is "audited loss", and it is the only shape of this policy that
-	// both preserves the record and keeps the aggregator's memory bound.
+	// DLQ with its topic/partition/offset provenance, so it is recoverable by an
+	// operator re-drive. The DLQ is NOT a replay path this code drives — no
+	// component here reads it (see Node.DeadLetterOnOverflow). That is "audited
+	// loss", and it is the only shape of this policy that both preserves the
+	// record and keeps the aggregator's memory bound.
 	//
 	// A FAILED publish is not the same event: the record is held in
 	// pendingOverflow, this partition stops receiving (see blockedDeadLetter
