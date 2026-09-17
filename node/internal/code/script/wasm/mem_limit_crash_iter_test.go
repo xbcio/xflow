@@ -133,7 +133,17 @@ func TestMemLimitCrashIter(t *testing.T) {
 	inst.evalCount = maxEvalsPerInstance - 1
 	e.giveBack(ctx, pool, inst)
 
-	if _, err := facade.evalFromPool(ctx, e, input); err != nil {
+	// Bound this borrow as well, and for the same reason as the replacement
+	// borrow below. reactorEngine.borrow selects on ctx.Done(), so an unbounded
+	// context — whose Done() is a nil channel — blocks forever when the pool has
+	// no free instance instead of returning. That hangs the whole test binary
+	// until the go-test watchdog fires, and the dump it prints names whichever
+	// goroutine happened to be running rather than this pool wait, which is what
+	// made this test look like a wazero compile problem.
+	borrowCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	if _, err := facade.evalFromPool(borrowCtx, e, input); err != nil {
 		t.Fatalf("eval at recycle boundary: %v", err)
 	}
 	if !inst.mod.IsClosed() {
