@@ -111,6 +111,14 @@ var guardSamples = []guardSample{
 	{"PathWorkflowExecute", PathWorkflowExecute, http.MethodPost, "/v1/workflows/execute"},
 	{"PathWorkflowExecuteByID", PathWorkflowExecuteByID, http.MethodPost, "/v1/workflows/wf-1/execute"},
 
+	// PathExecutions is shared by two methods on the same path. The sample is
+	// the GET (the offset-paginated collection read, spec §3.3) rather than the
+	// POST entry-seed: both are registered on this fixture's production mux, so
+	// either would satisfy guard 1, but the GET is the user-face route and is
+	// what the sample is here to keep alive. The POST's own registration is
+	// covered by the entry-seed tests.
+	{"PathExecutions", PathExecutions, http.MethodGet, "/v1/executions"},
+
 	{"PathExecutionByID", PathExecutionByID, http.MethodGet, "/v1/executions/ex-1"},
 	{"PathExecutionCancel", PathExecutionCancel, http.MethodPost, "/v1/executions/ex-1/cancel"},
 	{"PathExecutionSignals", PathExecutionSignals, http.MethodPost, "/v1/executions/ex-1/signals"},

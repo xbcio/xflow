@@ -241,6 +241,16 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 
 	workflowAuth := cfg.WorkflowAuth
 	ctrlModule := newWorkflowControlModule(s.cp, workflowAuth, cfg.Logger, cfg.Tracer)
+	// GET /v1/executions reads the execution store, which is the one dependency
+	// of this module that does not come from the ControlPlane (the ControlPlane
+	// owns the *engine* state store, not the durable execution projection the
+	// list endpoint pages over). Post-construction field injection, the same
+	// shape as the management module's code/issued/principalAuth below: a
+	// constructor signature change would touch every test call site for no
+	// behavioral reason. cfg.Store is a store.Store, so it satisfies the narrow
+	// store.Executions field the module declares. Nil stays nil and the handler
+	// answers 500 rather than an empty page.
+	ctrlModule.executions = cfg.Store
 	if cfg.PrincipalAuth != nil {
 		ctrlModule.principalAuth = cfg.PrincipalAuth
 		ctrlModule.authorizer = cfg.Authorizer

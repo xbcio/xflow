@@ -40,6 +40,19 @@ type workflowControlModule struct {
 	// by the asynchronous dispatch span — closing the submit→dispatch trace
 	// causality gap. NoopTracer when tracing is disabled.
 	tracer tracing.Tracer
+	// executions is the execution store backing the collection read
+	// GET /v1/executions (spec §3.3). It is the one dependency of this module
+	// that does NOT come from the ControlPlane, so it is injected
+	// post-construction by APIServer.New (Config.Store) exactly the way the
+	// management module's registration-code stores are. Nil means no execution
+	// store is wired — the collection route is then registered but answers 500,
+	// never an empty page (an empty 200 would read as "this namespace has no
+	// executions", which is a different and false statement).
+	//
+	// It is deliberately a narrow store.Executions rather than a whole
+	// store.Store: this module reads executions and nothing else, and the
+	// narrower field is what makes that auditable.
+	executions store.Executions
 }
 
 func newWorkflowControlModule(cp *control.ControlPlane, auth WorkflowAuthenticator, log engine.Logger, tracer tracing.Tracer) *workflowControlModule {
@@ -104,6 +117,15 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 	// method-qualified patterns below. ServeMux treats exact and {id} patterns
 	// as distinct from the /v1/executions/{id}/ 404 catch.
 	mux.HandleFunc("POST "+PathExecutions, wrap("seed_execution", m.handleSeedExecution))
+	// GET /v1/executions is the offset-paginated execution collection read
+	// (spec §3.3). It is mounted in this legacy branch as well as in
+	// registerAuthzRoutes, for the same reason GET /v1/workflows is: without a
+	// PrincipalAuthenticator this branch has no verified principal, so the
+	// scope is namespace.FromContext's Default — the same namespace every other
+	// bare-mode handler in this branch already uses. The route is registered
+	// even when no execution store is wired; the handler then answers 500
+	// rather than serving a false empty page.
+	mux.HandleFunc("GET "+PathExecutions, wrap("execution.read", m.handleListExecutions))
 	mux.HandleFunc("GET "+PathExecutionByID, wrap("execution.read", m.handleInspectByID))
 	mux.HandleFunc("GET "+PathExecutionWait, wrap("execution.read", m.handleWaitByID))
 	mux.HandleFunc("POST "+PathExecutionSignals, wrap("execution.signal", m.handleSignalByID))
@@ -177,6 +199,17 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	// the principal's namespace into the request context; handleSeedExecution
 	// reads it via namespace.FromContext — never from the client body.
 	mux.HandleFunc("POST "+PathExecutions, authz(OpExecutionSeed, true, m.handleSeedExecution, newExecutionIDResolver()))
+	// GET /v1/executions (the collection read) reuses OpExecutionRead — the very
+	// operation GET /v1/executions/{id} carries, and deliberately NOT
+	// OpExecutionSeed, which is the mutation the POST route on this same exact
+	// path carries. The mux picks between them by method before the wrapper
+	// runs: the authz wrapper here is the static-op form, so `isMutation` is a
+	// compile-time literal (false) rather than something resolved from the
+	// request, and a GET can never be admitted as a mutation. No resource
+	// resolver is passed: a collection is not one resource, and the scope of
+	// the read is the principal's own namespace, resolved inside the handler
+	// via namespace.FromContext (never from a query parameter).
+	mux.HandleFunc("GET "+PathExecutions, authz(OpExecutionRead, false, m.handleListExecutions, nil))
 	mux.HandleFunc("GET "+PathExecutionByID, authz(OpExecutionRead, false, m.handleInspectByID, execIDResolver("")))
 	mux.HandleFunc("GET "+PathExecutionWait, authz(OpExecutionRead, false, m.handleWaitByID, execIDResolver("wait")))
 	mux.HandleFunc("POST "+PathExecutionSignals, authz(OpExecutionSignal, true, m.handleSignalByID, execIDResolver("signals")))
@@ -761,6 +794,278 @@ func (m *workflowControlModule) workflowListItems(ctx context.Context, registry 
 		})
 	}
 	return items, nil
+}
+
+// executionListItem is one row of a GET /v1/executions page. It is a summary
+// projection of store.ExecutionRecord, not the record itself.
+//
+// The heavy columns are deliberately absent. store.ExecutionRecord carries
+// workflow_def (the full definition), params, and runtime — three JSON blobs
+// whose size is proportional to the workflow, not to the row. A page of them is
+// O(page × workflow size) on the wire for a table that renders none of it; a
+// client that needs one execution's definition reads it through
+// GET /v1/executions/{id}. What a row actually needs is the identity
+// (execution_id), the tenant it belongs to (namespace), what it ran
+// (workflow_name), where it is (status), how it ended (error), and when it was
+// created / last touched.
+//
+// workflow_name and not a workflow id: the executions table stores no workflow
+// id / key / hash column, so a name is the only workflow identity a row can
+// honestly project. That is also why no workflow filter is offered — see
+// executionListFilterFrom.
+type executionListItem struct {
+	ExecutionID  string                `json:"execution_id"`
+	Namespace    string                `json:"namespace"`
+	WorkflowName string                `json:"workflow_name"`
+	Status       types.ExecutionStatus `json:"status"`
+	Error        string                `json:"error"`
+	CreatedAt    time.Time             `json:"created_at"`
+	UpdatedAt    time.Time             `json:"updated_at"`
+}
+
+// executionListFilterFrom parses and validates everything about a list request
+// that is a business input rather than a page number: the status filter and the
+// created_after / created_before bounds.
+//
+// Only these three filters exist, and that is a data-model fact, not a
+// conservative default. The store's doc on ListExecutions spells out the two
+// rejections at column level: the executions table has no workflow id / key /
+// hash column (only workflow_name, which is a display string, not an identity —
+// two namespaces can hold the same name and it is not immutable across a
+// re-registration), and runner_id is not a column of that table at all (it
+// lives in the enrollment/identity tables and in per-node lease columns, none of
+// which is a per-execution projection of "who ran this"). Advertising either
+// parameter would promise a narrowing the store cannot perform — an
+// unrecognized query parameter is silently ignored, so the caller would get the
+// whole namespace back and read it as a filtered page.
+//
+// Unlike page/page_size — whose malformed values degrade to defaults because
+// they come straight off a frontend table component and can only ever make the
+// page smaller (spec §3.3, pageParams) — a malformed FILTER is a 400. The
+// distinction is deliberate and load-bearing in both directions:
+//
+//   - an unknown status served as an empty page is indistinguishable from "no
+//     executions have that status", which is exactly what store.ExecutionFilter
+//     refuses to do (ExecutionFilter.Validate);
+//   - a created_after that failed to parse and silently became "unbounded"
+//     widens the result set, and widening a tenant-scoped enumeration is the
+//     direction that costs data, not convenience.
+//
+// ok=false means the handler has already written the failure response.
+//
+// The returned filter is passed straight to the store, which re-validates the
+// status itself: this function is the HTTP-layer mapping, not a replacement for
+// the store's own refusal.
+func executionListFilterFrom(w http.ResponseWriter, r *http.Request) (store.ExecutionFilter, bool) {
+	q := r.URL.Query()
+
+	var filter store.ExecutionFilter
+	if raw := q.Get("status"); raw != "" {
+		status := types.ExecutionStatus(raw)
+		if !knownExecutionListStatus(status) {
+			writeFail(w, r, http.StatusBadRequest, "execution_status_invalid",
+				"status must be one of pending, running, success, failed, canceling, canceled, timeout")
+			return store.ExecutionFilter{}, false
+		}
+		filter.Status = status
+	}
+
+	createdAfter, ok := parseExecutionListTime(w, r, q.Get("created_after"), "created_after")
+	if !ok {
+		return store.ExecutionFilter{}, false
+	}
+	filter.CreatedAfter = createdAfter
+
+	createdBefore, ok := parseExecutionListTime(w, r, q.Get("created_before"), "created_before")
+	if !ok {
+		return store.ExecutionFilter{}, false
+	}
+	filter.CreatedBefore = createdBefore
+
+	// The bounds are exclusive at both ends (ExecutionFilter), so an empty
+	// window is a legitimate request that honestly matches nothing. It is NOT a
+	// 400: both endpoints are the caller's own values and the answer leaks
+	// nothing. It is worth naming because the empty page it produces is
+	// indistinguishable from "no executions in this window", and that is the
+	// truth in both cases.
+	return filter, true
+}
+
+// knownExecutionListStatus reports whether s is one of the lifecycle statuses
+// an execution row can hold. It mirrors store's own known-status set (that
+// function is unexported) and exists so the refusal is a 400 mapped to a stable
+// snake_case code at the HTTP layer instead of a 500 reached through whatever
+// error text the store happens to return.
+func knownExecutionListStatus(s types.ExecutionStatus) bool {
+	switch s {
+	case types.ExecutionStatusPending,
+		types.ExecutionStatusRunning,
+		types.ExecutionStatusSuccess,
+		types.ExecutionStatusFailed,
+		types.ExecutionStatusCanceling,
+		types.ExecutionStatusCanceled,
+		types.ExecutionStatusTimeout:
+		return true
+	}
+	return false
+}
+
+// parseExecutionListTime parses one RFC3339 date-time bound. An absent or empty
+// parameter is the zero time, which ExecutionFilter documents as "unbounded on
+// that side"; anything else must parse, or the request is a 400. See
+// executionListFilterFrom for why a bad bound is refused rather than ignored.
+func parseExecutionListTime(w http.ResponseWriter, r *http.Request, raw, param string) (time.Time, bool) {
+	if raw == "" {
+		return time.Time{}, true
+	}
+	// RFC3339Nano accepts everything RFC3339 does, plus a fractional second —
+	// the form a client naturally produces from a Go time.Time. Accepting both
+	// is not a relaxation: the instants compared are identical either way.
+	t, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		writeFail(w, r, http.StatusBadRequest, "execution_list_time_invalid",
+			param+" must be an RFC3339 date-time")
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+// handleListExecutions serves GET /v1/executions (spec §3.3 page list). It is
+// the second of the two endpoints API-SPECIFICATION.md §9.6 recorded as
+// unwired, and the first one whose blocker was a missing COLUMN rather than a
+// missing index: the executions table now carries namespace, and the store's
+// ListExecutions/CountExecutions were landed for exactly this caller.
+//
+// Namespace: resolved server-side from the authenticated principal via
+// namespace.FromContext (injected by the authz wrapper), exactly as
+// handleListWorkflows and handleInspectByID do. There is deliberately no
+// `namespace` query parameter and no body — a caller can only ever list its own
+// namespace. That is the whole security property here: an unscoped version of
+// this route is a cross-tenant enumeration endpoint. Three independent layers
+// hold it, in this order:
+//
+//  1. the scope check refuses a bad scope with 403 execution_namespace_invalid
+//     (and the store would refuse it again);
+//  2. ns is passed to both store calls as a required explicit argument, and the
+//     store fails closed on an empty or malformed one rather than widening to
+//     every namespace;
+//  3. rows whose namespace is the unattributed sentinel "" match nothing — they
+//     are unreachable from every scope × filter combination, deliberately, so a
+//     pre-migration row is never shown to a tenant that merely might own it.
+//
+// Pagination: offset, 1-based, through the shared pageParams helper (default
+// 20, hard cap 200). The cap is a SECURITY control per org policy §2 — a
+// sensitive-data enumeration endpoint may not permit full-table traversal — so
+// an oversized page_size is CLAMPED to 200, not rejected. Cursor pagination is
+// reserved for machine scans (spec §3.3); this is a page list, so it must not
+// grow a second pagination dialect.
+//
+// Ordering is the store's, not this handler's: created_at DESC, id DESC. The id
+// tiebreak is what makes the order TOTAL, so offset paging cannot duplicate or
+// skip a row when several executions share a created_at tick.
+//
+// Envelope: writeList, i.e. the mandated {list,total} collection shape — never
+// a bare array. `total` comes from CountExecutions with the SAME namespace and
+// the SAME filter as the page, so the two cannot disagree about which rows are
+// in scope.
+func (m *workflowControlModule) handleListExecutions(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+	st := m.executions
+	if st == nil {
+		if m.log != nil {
+			m.log.Error("list_executions_no_store")
+		}
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	ns := namespace.FromContext(r.Context())
+	// Fail closed on a scope that cannot be enforced. FromContext returns the
+	// Default namespace for an absent one, so reaching here with an empty or
+	// malformed value means the caller's identity could not be resolved into a
+	// tenant at all — a 403, not a fallback to "all namespaces", and never a
+	// 200 with an empty list. The store would refuse the same value; doing it
+	// here keeps the refusal a stable business code instead of a 500.
+	if err := store.ValidateNamespaceScope(ns); err != nil {
+		if m.log != nil {
+			m.log.Error("list_executions_namespace_invalid", "err", err)
+		}
+		writeFail(w, r, http.StatusForbidden, "execution_namespace_invalid", "forbidden")
+		return
+	}
+	page, pageSize := pageParams(r)
+	filter, ok := executionListFilterFrom(w, r)
+	if !ok {
+		return
+	}
+
+	// fail is the single failure exit below. The store error is logged and
+	// never reaches the body: spec §3.5 requires a generic message on a 500.
+	fail := func(event string, err error) {
+		if m.log != nil {
+			m.log.Error(event, "err", err)
+		}
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+	}
+
+	// One page, sliced by the store itself (ListOptions is passed through and
+	// normalized there), so the handler never re-implements paging over an
+	// unbounded slice.
+	recs, err := st.ListExecutions(r.Context(), ns, filter, store.ListOptions{
+		Offset: pageOffset(page, pageSize),
+		Limit:  pageSize,
+	})
+	if err != nil {
+		fail("list_executions_failed", err)
+		return
+	}
+	total, err := st.CountExecutions(r.Context(), ns, filter)
+	if err != nil {
+		fail("count_executions_failed", err)
+		return
+	}
+	items := make([]executionListItem, 0, len(recs))
+	for _, rec := range recs {
+		// The store already scoped this page by exact namespace equality. The
+		// re-check is defense in depth against a store whose scope handling
+		// regresses: this endpoint is the one place where such a regression
+		// becomes a cross-tenant disclosure rather than a 404, so it is worth
+		// the redundant comparison. A foreign row is skipped, not fatal.
+		if rec.Namespace != string(ns) {
+			if m.log != nil {
+				m.log.Error("list_executions_row_namespace_mismatch",
+					"execution_id", string(rec.ExecutionID))
+			}
+			continue
+		}
+		items = append(items, executionListItem{
+			ExecutionID:  string(rec.ExecutionID),
+			Namespace:    rec.Namespace,
+			WorkflowName: rec.WorkflowName,
+			Status:       rec.Status,
+			Error:        rec.Error,
+			CreatedAt:    rec.CreatedAt,
+			UpdatedAt:    rec.UpdatedAt,
+		})
+	}
+	writeList(w, r, items, executionListTotal(total))
+}
+
+// executionListTotal narrows the store's int64 count to the envelope's int.
+// The envelope's `total` is an int (spec §3.3), so the conversion is required,
+// not optional. The upper guard is a no-op on every platform this repository
+// builds for (64-bit: int and int64 have the same width, so the condition is
+// never taken) and is kept so the line is self-evidently not a silent truncation
+// if a 32-bit target is ever added.
+func executionListTotal(total int64) int {
+	if maxInt := int64(^uint(0) >> 1); maxInt > 0 && total > maxInt {
+		return int(maxInt)
+	}
+	if total < 0 {
+		return 0
+	}
+	return int(total)
 }
 
 // handleGetWorkflow serves GET /v1/workflows/{id} (spec §7 + Addition 1): it

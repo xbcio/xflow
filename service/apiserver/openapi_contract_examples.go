@@ -98,6 +98,22 @@ func ExampleWaitTimeoutResponse(id types.ExecutionID, status types.ExecutionStat
 	return waitTimeoutResponse{ExecutionID: id, Status: status, TimedOut: true}
 }
 
+// ExampleExecutionListItem builds one row of a GET /v1/executions page (the
+// executionListItem the list handler serializes inside the {list,total}
+// envelope). Every field is non-zero so the contract test validates a populated
+// row rather than a row of omitted keys.
+func ExampleExecutionListItem(id types.ExecutionID, ns, workflowName string, status types.ExecutionStatus, errMsg string, createdAt, updatedAt time.Time) any {
+	return executionListItem{
+		ExecutionID:  string(id),
+		Namespace:    ns,
+		WorkflowName: workflowName,
+		Status:       status,
+		Error:        errMsg,
+		CreatedAt:    createdAt,
+		UpdatedAt:    updatedAt,
+	}
+}
+
 // ExampleRunnerControlRequest builds the private runnerControlBody used by
 // POST /v1/management/runners/{id}/drain and /resume. It keeps the OpenAPI
 // contract test bound to the actual handler DTO without exporting that DTO.

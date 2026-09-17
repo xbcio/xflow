@@ -19,8 +19,14 @@ const (
 	PathWorkflowExecute     = "/v1/workflows/execute"
 	PathWorkflowExecuteByID = "/v1/workflows/{id}/execute"
 
-	// PathExecutions is registered for POST only — the GET list route is not
-	// implemented, see API-SPECIFICATION.md §9.
+	// PathExecutions serves both POST (the entry-seed endpoint, runner protocol
+	// face, spec §0.1) and GET (the offset-paginated execution collection read,
+	// spec §3.3) — the two are disambiguated by method, not by a separate path
+	// constant, exactly like PathWorkflows and
+	// PathManagementRegistrationCodes. The two are not merely different verbs on
+	// one resource: POST is a runner admission mutation (OpExecutionSeed) and
+	// GET is a tenant-scoped read (OpExecutionRead), and the authz wrapper takes
+	// that distinction from the registered pattern rather than from the request.
 	PathExecutions          = "/v1/executions"
 	PathExecutionByID       = "/v1/executions/{id}"
 	PathExecutionCancel     = "/v1/executions/{id}/cancel"
@@ -70,12 +76,21 @@ const (
 // describes only the user face. POST /v1/executions (entry-seed) is a runner
 // protocol-face endpoint (§0.1) and is likewise absent — its bare 409 body
 // shape is a load-bearing offset-safety contract, not an OpenAPI schema.
+//
+// PathExecutions IS listed, and the asymmetry with the paragraph above is the
+// point: the constant is shared by two methods, and membership here is decided
+// per path. The POST on it stays out of the contract (runner protocol face, as
+// just described); the GET on it is the offset-paginated collection read, which
+// is as user-facing as GET /v1/workflows and MUST appear in the contract. The
+// contract's operations decide, not this list — this list only says the path is
+// part of the user face.
 var UserFacingPaths = []string{
 	PathWorkflows,
 	PathWorkflowByID,
 	PathWorkflowExecute,
 	PathWorkflowExecuteByID,
 
+	PathExecutions,
 	PathExecutionByID,
 	PathExecutionCancel,
 	PathExecutionSignals,
