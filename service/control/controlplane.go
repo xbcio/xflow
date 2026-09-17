@@ -635,6 +635,11 @@ func (cp *ControlPlane) RunnerHTTPHandler() protocol.RunnerHTTPHandler {
 // control.EngineFacade, so no adapter is required.
 func (cp *ControlPlane) Engine() EngineFacade { return cp.eng }
 
+// SchedulingCore returns the single scheduling engine owned by this control
+// plane for trusted in-process composition. It does not transfer lifecycle
+// ownership; callers must use the ControlPlane lifecycle methods.
+func (cp *ControlPlane) SchedulingCore() *engine.Engine { return cp.eng }
+
 // SeedExecutionFromEntry admits an entry-unit seed through the control Core so
 // the server-side namespace resolution AND generation fence (spec §11.6) always
 // apply — the apiserver seed module MUST route through this rather than calling

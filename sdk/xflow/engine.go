@@ -23,12 +23,16 @@ var bindDeprecationOnce sync.Once
 // from a backend.Provider via newFromConfig, and every field below is used by
 // both modes. Mode-specific setup lives in local.go / cluster.go.
 type Engine struct {
-	eng                 *engine.Engine
-	registry            engine.HandlerRegistry
-	workflowRegistry    backend.WorkflowRegistry
-	triggerRuntime      *triggerRuntime
-	waiter              backend.Waiter
-	stopFns             []func()
+	eng              *engine.Engine
+	registry         engine.HandlerRegistry
+	workflowRegistry backend.WorkflowRegistry
+	triggerRuntime   *triggerRuntime
+	waiter           backend.Waiter
+	stopFns          []func()
+	// nonOwning marks a facade over resources owned by Server. Its Stop method
+	// is deliberately a no-op so callers cannot stop the Server's dispatcher,
+	// consumers, registries, or other lifecycle-owned resources.
+	nonOwning           bool
 	allowDirectHandlers bool
 	executionMode       ExecutionMode
 	logger              engine.Logger
@@ -153,11 +157,34 @@ func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error
 	return e, nil
 }
 
+// newNonOwningEngineFacade exposes an already-assembled control-plane core to
+// trusted in-process callers without binding, starting, or owning anything.
+// The Server remains responsible for all provider and dispatcher lifecycle.
+func newNonOwningEngineFacade(core *engine.Engine, provider backend.Provider) *Engine {
+	e := &Engine{
+		eng:                core,
+		registry:           provider.Registry(),
+		workflowRegistry:   provider.WorkflowRegistry(),
+		nonOwning:          true,
+		directHandlerNames: make(map[string]string),
+		directHandlers:     make(map[string]types.ActionHandler),
+		globalHandlers:     make(map[string]types.ActionHandler),
+	}
+	if waiter, ok := provider.(backend.Waiter); ok {
+		e.waiter = waiter
+	}
+	return e
+}
+
 // Stop shuts down background services and releases resources.
 // Stop functions are called in LIFO order. Stop is idempotent: repeated calls
 // after the first are no-ops (the local queue panics on a double close, so the
-// stopFns must run exactly once).
+// stopFns must run exactly once). For a non-owning Server facade, Stop is a
+// no-op because Server owns the underlying lifecycle.
 func (e *Engine) Stop() {
+	if e == nil || e.nonOwning {
+		return
+	}
 	e.stopOnce.Do(func() {
 		for i := len(e.stopFns) - 1; i >= 0; i-- {
 			e.stopFns[i]()

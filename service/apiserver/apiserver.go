@@ -508,6 +508,10 @@ func (s *APIServer) IsLeader() bool { return s.cp.IsLeader() }
 // plane (an injected one); callers type-assert the capabilities they need.
 func (s *APIServer) Backend() backend.Provider { return s.cp.Backend() }
 
+// Engine returns the control plane's single scheduling core for trusted
+// in-process composition. It does not transfer lifecycle ownership.
+func (s *APIServer) Engine() *engine.Engine { return s.cp.SchedulingCore() }
+
 // SupplyObserved returns the sink of runner-reported applied supply hashes, or
 // nil when no store.Supplies was configured. Transparent passthrough to the
 // underlying ControlPlane.

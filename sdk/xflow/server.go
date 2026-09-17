@@ -405,6 +405,7 @@ func WithServerHTTPMiddleware(mw ...func(http.Handler) http.Handler) ServerOptio
 // when the host program is stopping.
 type Server struct {
 	api        *apiserver.APIServer
+	sdkEngine  *Engine
 	supplies   store.Supplies
 	artifacts  *store.ArtifactStore
 	reconciler *control.AuditReconcileWorker
@@ -499,6 +500,7 @@ func NewServer(cfg ServerConfig, opts ...ServerOption) (*Server, error) {
 	}
 	return &Server{
 		api:        api,
+		sdkEngine:  newNonOwningEngineFacade(api.Engine(), api.Backend()),
 		supplies:   apiCfg.Supplies,
 		artifacts:  sc.artifacts,
 		reconciler: newAuditReconciler(cfg.Store, api, sc),
@@ -630,6 +632,16 @@ func (s *Server) Reconciler() *control.AuditReconcileWorker { return s.reconcile
 
 // Handler returns the HTTP Runner Protocol + workflow submission/query API.
 func (s *Server) Handler() http.Handler { return s.api.Handler() }
+
+// Engine returns a non-owning SDK facade over this Server's already-assembled
+// core, backend runtime, handler registry, workflow registry, and state store.
+// It neither starts nor stops dispatchers, consumers, registries, or other
+// Server-owned resources; Server remains their lifecycle owner.
+//
+// Engine is for trusted in-process host code only. It bypasses the HTTP
+// authentication and authorization boundary and is not a replacement for
+// configuring HTTP authentication on Server.
+func (s *Server) Engine() *Engine { return s.sdkEngine }
 
 // Start begins dispatching queued tasks to runners and starts background
 // maintenance (lease sweeping, leader election, audit reconciliation). Does not
