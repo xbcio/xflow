@@ -305,6 +305,7 @@ func (c *Core) register(ctx context.Context, req protocol.RegisterRunnerRequest,
 		Capabilities: req.Capabilities,
 		Policy:       policy,
 		Namespaces:   effective,
+		Activations:  req.Activations,
 		Now:          time.Now(),
 	})
 	if err != nil {
@@ -316,11 +317,15 @@ func (c *Core) register(ctx context.Context, req protocol.RegisterRunnerRequest,
 	// not fail an otherwise-valid registration; the periodic reconcile loop is a
 	// backstop. Only runs when the node-generic reconciler is wired.
 	if c.entryReconciler != nil {
-		if err := c.entryReconciler.ReconcileRunnerInventory(ctx, req.RunnerID, req.Activations, time.Now()); err != nil && c.logger != nil {
+		if err := c.entryReconciler.ReconcileRunnerInventorySession(ctx, req.RunnerID, session.SessionID, req.Activations, time.Now()); err != nil && c.logger != nil {
 			c.logger.Warn("register inventory reconcile failed", "runner_id", req.RunnerID, "err", err)
 		}
 	}
-	resp := protocol.RegisterRunnerResponse{RunnerID: req.RunnerID, SessionID: session.SessionID}
+	resp := protocol.RegisterRunnerResponse{
+		RunnerID:  req.RunnerID,
+		SessionID: session.SessionID,
+		Control:   c.runnerControlDirective(ctx, req.RunnerID),
+	}
 	if req.SupportsEncryption && c.supplyEncryptor != nil {
 		resp.SupplyKey = c.supplyEncryptor.KeyForRunner()
 	}
@@ -340,11 +345,12 @@ func (c *Core) heartbeat(ctx context.Context, req protocol.HeartbeatRequest, inf
 		at = time.Now()
 	}
 	if err := c.runners.Heartbeat(ctx, HeartbeatRequest{
-		RunnerID:  req.RunnerID,
-		SessionID: req.SessionID,
-		Capacity:  req.Capacity,
-		InFlight:  req.InFlight,
-		Now:       at,
+		RunnerID:         req.RunnerID,
+		SessionID:        req.SessionID,
+		Capacity:         req.Capacity,
+		InFlight:         req.InFlight,
+		DrainObservation: req.DrainObservation,
+		Now:              at,
 	}); err != nil {
 		return protocol.HeartbeatResponse{}, normalizeRunnerError(err, c.logger, "heartbeat")
 	}
@@ -352,6 +358,18 @@ func (c *Core) heartbeat(ctx context.Context, req protocol.HeartbeatRequest, inf
 	// The node-generic entry reconciler supplies activation directives when wired.
 	if c.entryReconciler != nil {
 		resp.Activations = c.entryReconciler.DirectivesForRunner(req.RunnerID)
+	}
+	// Drain-triggered deactivations are a durable receipt workflow rather than a
+	// drain-once reconciler queue. Merge them after the legacy directives so
+	// normal activation migration remains backward compatible while a lost
+	// heartbeat response is retried until the matching receipt arrives.
+	if directives, err := c.deactivationDirectives(ctx, req.RunnerID, req.SessionID); err != nil {
+		return protocol.HeartbeatResponse{}, normalizeRunnerError(err, c.logger, "heartbeat_deactivation_directives")
+	} else if len(directives) > 0 {
+		if resp.Activations == nil {
+			resp.Activations = &protocol.HeartbeatActivations{}
+		}
+		resp.Activations.Deactivate = append(resp.Activations.Deactivate, directives...)
 	}
 	// Supply hints/observed reporting: both optional, wired only when
 	// Config.Supplies is provided (see ControlPlane assembly). Nil means this
@@ -372,6 +390,7 @@ func (c *Core) heartbeat(ctx context.Context, req protocol.HeartbeatRequest, inf
 	if secs := clampMetricsReportInterval(c.metricsReportInterval); secs != 0 {
 		resp.MetricsReportIntervalSeconds = secs
 	}
+	resp.Control = c.runnerControlDirective(ctx, req.RunnerID)
 	return resp, nil
 }
 
@@ -386,19 +405,54 @@ func (c *Core) activationAck(ctx context.Context, req protocol.ActivationAck, in
 	if c.entryReconciler == nil {
 		return nil
 	}
+	// A receipt must carry the complete durable activation key. This was already
+	// required for failed activation acknowledgements; enforce it for successful
+	// deactivation receipts too, rather than turning an absent version into an
+	// ambiguous cross-version lookup.
+	if (req.Status == protocol.ActivationStatusFailed || req.Status == protocol.ActivationStatusDeactivated) && req.WorkflowVersion == "" {
+		return ErrMissingWorkflowVersion
+	}
 	// Resolve the namespace server-side from the runner's registration record
 	// (never from the client body). A runner registers with one or more
 	// namespaces; we probe each with a precise Get to find the matching
-	// activation. This is O(runner namespace count) exact Gets, NOT a scan.
+	// activation/obligation. This is O(runner namespace count), NOT a scan.
 	namespaces := c.runnerNamespaces(ctx, req.RunnerID)
-	for _, ns := range namespaces {
-		nsCtx := namespace.WithNamespace(ctx, ns)
-		err := c.entryReconciler.MarkActivationFailed(nsCtx, req.RunnerID, req)
-		if err != nil {
-			return normalizeRunnerError(err, c.logger, "activation_ack")
+	switch req.Status {
+	case protocol.ActivationStatusDeactivated:
+		directory, ok := c.runners.(DeactivationObligationDirectory)
+		if !ok || directory == nil {
+			return nil
+		}
+		for _, ns := range namespaces {
+			nsCtx := namespace.WithNamespace(ctx, ns)
+			_, err := directory.AcknowledgeDeactivation(nsCtx, req)
+			if err != nil {
+				return normalizeRunnerError(err, c.logger, "activation_deactivation_receipt")
+			}
+		}
+		return nil
+	case protocol.ActivationStatusFailed:
+		for _, ns := range namespaces {
+			nsCtx := namespace.WithNamespace(ctx, ns)
+			err := c.entryReconciler.MarkActivationFailed(nsCtx, req.RunnerID, req)
+			if err != nil {
+				return normalizeRunnerError(err, c.logger, "activation_ack")
+			}
 		}
 	}
 	return nil
+}
+
+// deactivationDirectives derives retryable drain cleanup directives from the
+// directory's durable obligation ledger. It is intentionally separate from the
+// reconciler's old in-memory directive queue: failure to fetch it must surface
+// as a heartbeat error so the runner retries, never as a silent lost cleanup.
+func (c *Core) deactivationDirectives(ctx context.Context, runnerID, sessionID string) ([]protocol.DeactivateDirective, error) {
+	directory, ok := c.runners.(DeactivationObligationDirectory)
+	if !ok || directory == nil {
+		return nil, nil
+	}
+	return directory.DeactivationDirectives(ctx, runnerID, sessionID)
 }
 
 // reportMetrics retains one runner's Prometheus snapshot.
@@ -446,6 +500,125 @@ func (c *Core) runnerNamespaces(ctx context.Context, runnerID string) []namespac
 	return []namespace.Namespace{namespace.Default}
 }
 
+// handoffLedger returns the optional directory capability without widening
+// RunnerDirectory. Wrappers written before the ledger intentionally retain the
+// legacy ReleaseClaim behavior; they must opt in by forwarding this interface.
+func (c *Core) handoffLedger() (HandoffDebtDirectory, bool) {
+	directory, ok := c.runners.(HandoffDebtDirectory)
+	return directory, ok && directory != nil
+}
+
+// prepareClaimLease writes the handoff crash fence immediately before an
+// engine Build*Lease call. A directory without the optional ledger retains the
+// legacy behavior; MemoryRunnerDirectory and RedisRunnerDirectory implement it
+// so production control planes never reclaim this window as an ordinary claim.
+func (c *Core) prepareClaimLease(ctx context.Context, claim Claim) error {
+	directory, ok := c.handoffLedger()
+	if !ok || claim.ClaimID == "" {
+		return nil
+	}
+	return directory.MarkClaimLeaseMayExist(ctx, claim.ClaimID)
+}
+
+func (c *Core) recordClaimLeaseCreated(ctx context.Context, claim Claim, lease *engine.TaskLease) error {
+	directory, ok := c.handoffLedger()
+	if !ok || claim.ClaimID == "" {
+		return nil
+	}
+	return directory.RecordClaimLeaseCreated(ctx, claim.ClaimID, lease)
+}
+
+// makeClaimHandoffRecoverable returns true when the ledger retained the
+// uncertain handoff. Callers use the false result to preserve legacy
+// ReleaseClaim behavior for custom/wrapped directories that have not adopted
+// the optional capability.
+func (c *Core) makeClaimHandoffRecoverable(ctx context.Context, claim Claim) bool {
+	directory, ok := c.handoffLedger()
+	if !ok || claim.ClaimID == "" {
+		return false
+	}
+	_ = directory.MakeClaimHandoffRecoverable(ctx, claim.ClaimID)
+	return true
+}
+
+func (c *Core) requeueClaimAfterDispatchFailure(ctx context.Context, claim Claim) {
+	if c.makeClaimHandoffRecoverable(ctx, claim) {
+		return
+	}
+	_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
+}
+
+func (c *Core) settleClaimHandoff(ctx context.Context, claim Claim, disposition HandoffDisposition) error {
+	directory, ok := c.handoffLedger()
+	if !ok || claim.ClaimID == "" {
+		if disposition == HandoffDispositionRequeue {
+			return c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
+		}
+		return c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimDrop)
+	}
+	return directory.SettleClaimHandoff(ctx, claim.ClaimID, disposition)
+}
+
+func (c *Core) dropClaimAfterHandoffResolution(ctx context.Context, claim Claim) error {
+	return c.settleClaimHandoff(ctx, claim, HandoffDispositionDrop)
+}
+
+// resolveHandoffClaim asks the engine authority about an uncertain handoff.
+// It is called before any new Build*Lease call. A successful recovery is
+// finalized and returned; an inactive task is dropped, a non-recoverable
+// lease is safely requeued, and all other errors retain debt for retry.
+func (c *Core) resolveHandoffClaim(ctx context.Context, claim Claim) (protocol.PollTaskResponse, bool, error) {
+	if claim.Handoff == nil {
+		return protocol.PollTaskResponse{}, false, nil
+	}
+	if c.engine == nil {
+		c.makeClaimHandoffRecoverable(ctx, claim)
+		return protocol.PollTaskResponse{}, true, ErrEngineNotConfigured
+	}
+
+	var (
+		lease *engine.TaskLease
+		err   error
+	)
+	if isGroupTask(&claim.Assignment.Task) {
+		ge, ok := c.engine.(groupLeaseEngine)
+		if !ok {
+			c.requeueClaimAfterDispatchFailure(ctx, claim)
+			return protocol.PollTaskResponse{}, true, errors.New("engine does not support group leases")
+		}
+		lease, err = c.recoverGroupLease(ctx, ge, &claim.Assignment.Task)
+	} else {
+		lease, err = c.recoverTaskLease(ctx, &claim.Assignment.Task)
+	}
+	if err == nil {
+		lease.Namespace = claim.Assignment.Namespace
+		if finalizeErr := c.runners.FinalizeClaim(ctx, claim.ClaimID, lease); finalizeErr != nil {
+			c.makeClaimHandoffRecoverable(ctx, claim)
+			return protocol.PollTaskResponse{}, true, normalizeRunnerError(finalizeErr, c.logger, "poll")
+		}
+		return protocol.PollTaskResponse{Lease: lease}, true, nil
+	}
+	// A recorded lease is evidence, not authority. If the engine cannot recover
+	// it, the resolver follows the explicit terminal/requeue cases below rather
+	// than replaying a potentially expired or superseded credential.
+	if errors.Is(err, engine.ErrExecutionInactive) || errors.Is(err, engine.ErrGroupLeaseNotActive) {
+		if settleErr := c.dropClaimAfterHandoffResolution(ctx, claim); settleErr != nil {
+			c.makeClaimHandoffRecoverable(ctx, claim)
+			return protocol.PollTaskResponse{}, true, normalizeRunnerError(settleErr, c.logger, "poll")
+		}
+		return protocol.PollTaskResponse{}, true, nil
+	}
+	if errors.Is(err, engine.ErrLeaseNotRecoverable) {
+		if settleErr := c.settleClaimHandoff(ctx, claim, HandoffDispositionRequeue); settleErr != nil {
+			c.makeClaimHandoffRecoverable(ctx, claim)
+			return protocol.PollTaskResponse{}, true, normalizeRunnerError(settleErr, c.logger, "poll")
+		}
+		return protocol.PollTaskResponse{}, true, nil
+	}
+	c.makeClaimHandoffRecoverable(ctx, claim)
+	return protocol.PollTaskResponse{}, true, err
+}
+
 func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info TransportInfo) (protocol.PollTaskResponse, error) {
 	if req.RunnerID == "" || req.SessionID == "" {
 		return protocol.PollTaskResponse{}, ErrRunnerSessionRequired
@@ -454,18 +627,23 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 	if err := c.authDeny(ctx, req.RunnerID, req.AuthToken, "poll", info, authErr); err != nil {
 		return protocol.PollTaskResponse{}, err
 	}
+	withControl := func(resp protocol.PollTaskResponse) protocol.PollTaskResponse {
+		resp.Control = c.runnerControlDirective(ctx, req.RunnerID)
+		return resp
+	}
 	for {
 		claim, ok, err := c.runners.ClaimForRunner(ctx, ClaimRequest{
 			RunnerID:       req.RunnerID,
 			SessionID:      req.SessionID,
 			ActiveLeaseIDs: req.ActiveLeaseIDs,
+			RecoveryOnly:   req.RecoveryOnly,
 			Now:            time.Now(),
 		})
 		if err != nil {
 			return protocol.PollTaskResponse{}, normalizeRunnerError(err, c.logger, "poll")
 		}
 		if !ok {
-			return protocol.PollTaskResponse{Wait: c.pollWait}, nil
+			return withControl(protocol.PollTaskResponse{Wait: c.pollWait}), nil
 		}
 
 		// Inject the assignment's authoritative namespace so the downstream
@@ -481,6 +659,19 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 		// risk).
 		if tid := claim.Assignment.Namespace; tid != "" {
 			ctx = namespace.WithNamespace(ctx, tid)
+		}
+
+		if claim.Handoff != nil {
+			resp, handled, resolveErr := c.resolveHandoffClaim(ctx, claim)
+			if resolveErr != nil {
+				return protocol.PollTaskResponse{}, resolveErr
+			}
+			if handled && resp.Lease != nil {
+				return withControl(resp), nil
+			}
+			if handled {
+				continue
+			}
 		}
 
 		// A leased claim is a durable replay after a response-loss or process
@@ -515,11 +706,11 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 				}
 			}
 			lease.Namespace = claim.Assignment.Namespace
-			return protocol.PollTaskResponse{Lease: lease}, nil
+			return withControl(protocol.PollTaskResponse{Lease: lease}), nil
 		}
 
 		if c.engine == nil {
-			_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
+			c.makeClaimHandoffRecoverable(ctx, claim)
 			return protocol.PollTaskResponse{}, ErrEngineNotConfigured
 		}
 
@@ -531,7 +722,7 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 				return protocol.PollTaskResponse{}, err
 			}
 			if resp.Lease != nil {
-				return resp, nil
+				return withControl(resp), nil
 			}
 			// resp.Lease == nil with no error means the execution is inactive
 			// (dropped). Loop to try the next claim.
@@ -547,27 +738,36 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 				return protocol.PollTaskResponse{}, err
 			}
 			if resp.Lease != nil {
-				return resp, nil
+				return withControl(resp), nil
 			}
 			continue
 		}
 
 		// The span deliberately opens BEFORE BuildTaskLease and closes after
 		// FinalizeClaim, so a lease built but never finalized is visible as such.
+		if err := c.prepareClaimLease(ctx, claim); err != nil {
+			return protocol.PollTaskResponse{}, normalizeRunnerError(err, c.logger, "poll")
+		}
 		dispatchCtx, dispatchSpan := c.startDispatchSpan(ctx, &claim.Assignment.Task)
 		lease, err := c.engine.BuildTaskLease(dispatchCtx, &claim.Assignment.Task)
 		switch {
 		case err == nil:
 			lease.TraceCarrier = tracing.InjectCarrier(dispatchCtx)
 			lease.Namespace = claim.Assignment.Namespace
+			if recordErr := c.recordClaimLeaseCreated(dispatchCtx, claim, lease); recordErr != nil {
+				dispatchSpan.RecordError(recordErr)
+				dispatchSpan.End()
+				c.requeueClaimAfterDispatchFailure(ctx, claim)
+				return protocol.PollTaskResponse{}, normalizeRunnerError(recordErr, c.logger, "poll")
+			}
 			if err := c.runners.FinalizeClaim(dispatchCtx, claim.ClaimID, lease); err != nil {
 				dispatchSpan.RecordError(err)
 				dispatchSpan.End()
-				_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
+				c.requeueClaimAfterDispatchFailure(ctx, claim)
 				return protocol.PollTaskResponse{}, normalizeRunnerError(err, c.logger, "poll")
 			}
 			dispatchSpan.End()
-			return protocol.PollTaskResponse{Lease: lease}, nil
+			return withControl(protocol.PollTaskResponse{Lease: lease}), nil
 		case errors.Is(err, engine.ErrLeaseAlreadyActive):
 			dispatchSpan.End()
 			// BuildTaskLease may already have committed a running lease when a
@@ -576,25 +776,35 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 			recovered, recoverErr := c.recoverTaskLease(ctx, &claim.Assignment.Task)
 			if recoverErr == nil {
 				recovered.Namespace = claim.Assignment.Namespace
+				if recordErr := c.recordClaimLeaseCreated(ctx, claim, recovered); recordErr != nil {
+					c.requeueClaimAfterDispatchFailure(ctx, claim)
+					return protocol.PollTaskResponse{}, normalizeRunnerError(recordErr, c.logger, "poll")
+				}
 				if finalizeErr := c.runners.FinalizeClaim(ctx, claim.ClaimID, recovered); finalizeErr != nil {
-					_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
+					c.requeueClaimAfterDispatchFailure(ctx, claim)
 					return protocol.PollTaskResponse{}, normalizeRunnerError(finalizeErr, c.logger, "poll")
 				}
-				return protocol.PollTaskResponse{Lease: recovered}, nil
+				return withControl(protocol.PollTaskResponse{Lease: recovered}), nil
 			}
 			if errors.Is(recoverErr, engine.ErrExecutionInactive) {
-				_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimDrop)
+				if settleErr := c.dropClaimAfterHandoffResolution(ctx, claim); settleErr != nil {
+					c.makeClaimHandoffRecoverable(ctx, claim)
+					return protocol.PollTaskResponse{}, normalizeRunnerError(settleErr, c.logger, "poll")
+				}
 				continue
 			}
-			_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
+			c.requeueClaimAfterDispatchFailure(ctx, claim)
 			return protocol.PollTaskResponse{}, recoverErr
 		case errors.Is(err, engine.ErrExecutionInactive):
 			dispatchSpan.End()
-			_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimDrop)
+			if settleErr := c.dropClaimAfterHandoffResolution(ctx, claim); settleErr != nil {
+				c.requeueClaimAfterDispatchFailure(ctx, claim)
+				return protocol.PollTaskResponse{}, normalizeRunnerError(settleErr, c.logger, "poll")
+			}
 		default:
 			dispatchSpan.RecordError(err)
 			dispatchSpan.End()
-			_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
+			c.requeueClaimAfterDispatchFailure(ctx, claim)
 			return protocol.PollTaskResponse{}, err
 		}
 	}

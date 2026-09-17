@@ -42,6 +42,23 @@ message Capability {
   repeated string features = 3;
 }
 
+// RunnerControlDirective is the cooperative view of the control plane's
+// server-authoritative desired state. The server still gates new claims even
+// when an old or faulty runner ignores this directive.
+message RunnerControlDirective {
+  string desired_state = 1;
+  uint64 generation = 2;
+  bool recovery_only = 3;
+}
+
+// RunnerDrainObservation is emitted only after the runner applied a draining
+// directive. in_flight remains a top-level heartbeat field for compatibility.
+message RunnerDrainObservation {
+  uint64 generation = 1;
+  bool recovery_only = 2;
+  uint32 active_activations = 3;
+}
+
 message RegisterRequest {
   string runner_id = 1;
   int32 concurrency = 2;
@@ -65,6 +82,7 @@ message ActivationInventoryItem {
 message RegisterResponse {
   string runner_id = 1;
   string session_id = 2;
+  RunnerControlDirective control = 3;
 }
 
 message HeartbeatRequest {
@@ -78,6 +96,7 @@ message HeartbeatRequest {
   // encryption key this runner holds. The server returns supply_key_rotation
   // only when it differs from its own, making rotation delivery convergent.
   string supply_key_id = 7;
+  RunnerDrainObservation drain_observation = 8;
 }
 
 message HeartbeatResponse {
@@ -88,6 +107,7 @@ message HeartbeatResponse {
   // (activate/deactivate directives). Using JSON bytes avoids modeling
   // map[string]any params in proto — same pattern as lease_json.
   bytes activations_json = 4;
+  RunnerControlDirective control = 5;
 }
 
 message PollTaskRequest {
@@ -100,6 +120,9 @@ message PollTaskRequest {
   // replays only leases that never reached it rather than also handing a live
   // task to the same runner's idle workers.
   repeated string active_lease_ids = 6;
+  // A capable draining runner requests only replay of already-finalized work.
+  // The server independently enforces the same safety boundary.
+  bool recovery_only = 7;
 }
 
 message PollTaskResponse {
@@ -109,6 +132,7 @@ message PollTaskResponse {
   // wait_nanos is how long the runner should wait before polling again when no
   // lease is returned.
   int64 wait_nanos = 2;
+  RunnerControlDirective control = 3;
 }
 
 message ReportResultRequest {
@@ -137,6 +161,9 @@ message RunnerFrame {
     HelloFrame hello = 1;
     ResultFrame result = 2;
     ByeFrame bye = 3;
+    // Reports the runner's applied control state on an established Connect
+    // stream. recovery_only is the runner's request for pre-drain debt only.
+    ControlObservationFrame control_observation = 4;
   }
 }
 
@@ -156,6 +183,17 @@ message ResultFrame {
 
 message ByeFrame {}
 
+// ControlObservationFrame is the stream equivalent of a heartbeat drain
+// observation. It is scoped to the session established by the stream's HELLO.
+// recovery_only requests only pre-drain debt; the server remains authoritative
+// for admission and never treats this declaration as an authorization grant.
+message ControlObservationFrame {
+  uint64 generation = 1;
+  bool recovery_only = 2;
+  uint32 active_workers = 3;
+  uint32 active_activations = 4;
+}
+
 message ServerFrame {
   oneof frame {
     WelcomeFrame welcome = 1;
@@ -163,12 +201,21 @@ message ServerFrame {
     AckFrame ack = 3;
     BackoffFrame backoff = 4;
     KeepaliveFrame keepalive = 5;
+    // Carries a desired-state update after the initial WelcomeFrame.
+    ControlFrame control = 6;
   }
 }
 
 message WelcomeFrame {
   string runner_id = 1;
   int64 server_time = 2;
+  // Initial desired state for this stream. Older servers leave it unset.
+  RunnerControlDirective control = 3;
+}
+
+// ControlFrame delivers a later desired-state update on an established stream.
+message ControlFrame {
+  RunnerControlDirective directive = 1;
 }
 
 message TaskFrame {

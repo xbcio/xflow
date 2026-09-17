@@ -49,6 +49,34 @@
 //   - Wire types and path constants (service/protocol)
 //   - User-facing HTTP paths (service/apiserver)
 //
+// # Runner operation control
+//
+// When a RunnerDirectory also implements RunnerControlDirectory, its desired
+// state is authoritative: active admits compatible new claims, while draining
+// closes the new-claim gate and permits only recovery of already-finalized
+// leases owned by the runner's current session. Drain is a scheduling
+// convergence operation, not a process-shutdown operation.
+//
+// A draining runner projects quiescing, complete, or timed_out. Complete
+// requires both zero durable server-side drain debt and a fresh quiet
+// observation from the current session and control generation. The observation
+// must be recovery-only with no in-flight work or active activations; freshness
+// is measured using the server clock, not a runner timestamp. A real
+// active-to-draining transition creates a fixed deadline. Same-state requests,
+// idempotency receipt replays, and runner re-registration do not extend it;
+// resume clears it.
+//
+// At the deadline, unresolved work changes the projection to timed_out but
+// leaves the desired state draining and the new-claim gate closed. Timed out
+// never implicitly resumes, evicts, cancels, or reclaims work. Once durable
+// blockers settle, a later valid quiet observation can still change the
+// projection to complete.
+//
+// When Config.Metrics is set, a control plane whose directory supports runner
+// control wires fleet-level runner-control observations into the configured
+// metrics collector. Per-runner diagnosis remains the management snapshot's
+// responsibility; metrics intentionally do not label individual runners.
+//
 // # Key flow: a task from queue to runner
 //
 //	Queue publishes task

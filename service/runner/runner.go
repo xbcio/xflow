@@ -154,6 +154,7 @@ type Runner struct {
 	supplyRegistry    *supply.Registry
 	supplyGate        *SupplyGate
 	metricsReporter   *MetricsReporter
+	controlGate       *runnerControlGate
 	// acker sends ActivationAck for activations the tracker failed to take.
 	// nil when there is no ActivationTracker configured, or the configured
 	// client's transport does not support acks (e.g. the gRPC transport,
@@ -186,6 +187,7 @@ func New(client ProtocolClient, registry engine.HandlerRegistry, config Config) 
 		supplyRegistry:    config.SupplyRegistry,
 		supplyGate:        config.SupplyGate,
 		metricsReporter:   config.MetricsReporter,
+		controlGate:       newRunnerControlGate(),
 	}
 	if config.ActivationTracker != nil {
 		if ackClient, ok := client.(activationAckClient); ok {
@@ -222,6 +224,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		return runContextError(ctx, err)
 	}
 	sessionID := registerResp.SessionID
+	r.applyRunnerControl(registerResp.Control)
 
 	// Install the supply encryption keyring if the server provided a key.
 	if registerResp.SupplyKey != "" {
@@ -245,6 +248,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	if r.activationTracker != nil && r.acker != nil {
 		r.activationTracker.SetOnActivateFailed(func(d protocol.ActivateDirective, activateErr error) {
 			r.acker.ackFailed(sessionID, d, activateErr)
+		})
+		r.activationTracker.SetOnDeactivated(func(d protocol.DeactivateDirective) {
+			r.acker.ackDeactivated(sessionID, d)
 		})
 	}
 
@@ -352,6 +358,7 @@ func (r *Runner) pollLoop(ctx context.Context, sessionID string, leaseCh chan<- 
 			Capacity:     r.config.Concurrency,
 			Labels:       r.config.Labels,
 			Capabilities: r.config.Capabilities,
+			RecoveryOnly: r.controlGate != nil && r.controlGate.recoveryOnly(),
 			// Reported every poll rather than tracked server-side: the server
 			// has no way to distinguish a lease this runner is executing from
 			// one it never received, and replaying the former runs the node a
@@ -361,6 +368,7 @@ func (r *Runner) pollLoop(ctx context.Context, sessionID string, leaseCh chan<- 
 		if err != nil {
 			return runContextError(ctx, err)
 		}
+		r.applyRunnerControl(resp.Control)
 		if resp.Lease == nil {
 			wait := resp.Wait
 			if wait <= 0 {
@@ -543,6 +551,7 @@ func (r *Runner) heartbeatLoop(ctx context.Context, sessionID string, inFlight *
 		return
 	}
 	r.observeHeartbeat(ctx, true)
+	r.applyRunnerControl(resp.Control)
 	r.processActivations(ctx, resp)
 	r.processSupplyHints(ctx, resp)
 	r.processSupplyKeyRotation(resp)
@@ -562,6 +571,7 @@ func (r *Runner) heartbeatLoop(ctx context.Context, sessionID string, inFlight *
 				return
 			}
 			r.observeHeartbeat(ctx, true)
+			r.applyRunnerControl(resp.Control)
 			r.processActivations(ctx, resp)
 			r.processSupplyHints(ctx, resp)
 			r.processSupplyKeyRotation(resp)
@@ -599,7 +609,7 @@ func (r *Runner) processSupplyHints(ctx context.Context, resp protocol.Heartbeat
 }
 
 func (r *Runner) heartbeat(ctx context.Context, sessionID string, inFlight int) (protocol.HeartbeatResponse, error) {
-	return r.client.Heartbeat(ctx, protocol.HeartbeatRequest{
+	req := protocol.HeartbeatRequest{
 		RunnerID:       r.config.RunnerID,
 		SessionID:      sessionID,
 		Capacity:       r.config.Concurrency,
@@ -607,7 +617,15 @@ func (r *Runner) heartbeat(ctx context.Context, sessionID string, inFlight int) 
 		Timestamp:      time.Now().Unix(),
 		SupplyObserved: r.observedSupplies(),
 		SupplyKeyID:    r.supplyKeyID(),
-	})
+	}
+	if generation, draining := r.controlGate.drainingGeneration(); draining {
+		req.DrainObservation = &protocol.RunnerDrainObservation{
+			Generation:        generation,
+			RecoveryOnly:      true,
+			ActiveActivations: r.activationTracker.ActiveCount(),
+		}
+	}
+	return r.client.Heartbeat(ctx, req)
 }
 
 // supplyKeyID reports which supply encryption key this runner currently holds,

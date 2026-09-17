@@ -65,6 +65,21 @@
 //	Runner.Run returns (transport error or ctx.Err())
 //	      → caller reconnects (cmd/runner reconnect loop)
 //
+// # Runner operation control
+//
+// Registration and heartbeat responses can carry a runner-control directive.
+// When the directive is draining, the runner's local gate stops ordinary
+// polling and uses recovery-only polling only to settle pre-drain work. The
+// control-plane claim gate remains the authoritative safety boundary: a local
+// gate is only a prompt convergence aid and never authorizes a claim.
+//
+// A runner does not exit when a drain reaches complete or timed_out. Complete
+// is a convergence observation, while timed_out leaves the server-side
+// new-claim gate closed; process termination belongs to the host or its
+// orchestrator. Runner.Run still drives the unary ProtocolClient lifecycle and
+// does not consume the gRPC Connect control stream as a full lifecycle
+// replacement.
+//
 // # Pitfalls when modifying this package
 //
 //   - Transport fault vs. shutdown: runContextError tests ctx.Err() to

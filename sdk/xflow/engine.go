@@ -1,6 +1,3 @@
-// Package xflow provides the public SDK entry points for embedding the
-// workflow engine: mode factories (see local.go, cluster.go), the definition
-// builder (builder.go), and runtime control APIs (engine_control.go).
 package xflow
 
 import (

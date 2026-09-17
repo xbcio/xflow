@@ -38,9 +38,13 @@ const (
 	// match r.PathValue's argument byte-for-byte or PathValue silently returns
 	// "" with no compile error, no panic, and no log.
 	PathManagementRunnerRevokeIdentity = "/v1/management/runners/{id}/revoke-identity"
-	PathManagementExecByID             = "/v1/management/executions/{id}"
-	PathManagementDeadLetters          = "/v1/management/dead-letters/{execID}"
-	PathManagementDLReplay             = "/v1/management/dead-letters/{execID}/replay"
+	// Drain / resume are platform-operator controls. They deliberately do not
+	// imply remote process shutdown or force cancellation of leased tasks.
+	PathManagementRunnerDrain  = "/v1/management/runners/{id}/drain"
+	PathManagementRunnerResume = "/v1/management/runners/{id}/resume"
+	PathManagementExecByID     = "/v1/management/executions/{id}"
+	PathManagementDeadLetters  = "/v1/management/dead-letters/{execID}"
+	PathManagementDLReplay     = "/v1/management/dead-letters/{execID}/replay"
 
 	// PathManagementRegistrationCodes serves both POST (create) and GET (list) —
 	// the two are disambiguated by method, not by a separate path constant. See
@@ -82,6 +86,8 @@ var UserFacingPaths = []string{
 	PathManagementRunners,
 	PathManagementRunnerByID,
 	PathManagementRunnerRevokeIdentity,
+	PathManagementRunnerDrain,
+	PathManagementRunnerResume,
 	PathManagementExecByID,
 	PathManagementDeadLetters,
 	PathManagementDLReplay,

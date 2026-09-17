@@ -711,6 +711,110 @@ paths:
         default:
           $ref: "#/components/responses/DefaultError"
 
+  /v1/management/runners/{id}/drain:
+    post:
+      operationId: drainRunner
+      summary: Stop new work admission for a runner
+      description: |
+        Atomically changes the runner's desired scheduling state to `draining`.
+        Once accepted, the control plane refuses all newly queued task claims for
+        that runner; a finalized pre-drain lease may still be replayed to settle
+        existing work. This endpoint does not remotely terminate the process,
+        cancel a handler, or force-revoke a lease.
+
+        Requires both `management.runner.drain` and the platform-only
+        `management.runner.control_global` scope. `X-Request-Id` is a required
+        idempotency key: a retry with the same principal, action, runner, and
+        body returns its original receipt, while a changed body returns 409. A
+        200 means the server-side admission gate is active, not that the runner
+        has exited or every handoff has settled.
+      tags: [Management]
+      parameters:
+        - $ref: "#/components/parameters/RunnerId"
+        - $ref: "#/components/parameters/RunnerControlRequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunnerControlRequest"
+      responses:
+        "200":
+          description: Current drain control projection or the original idempotency receipt.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/RunnerControlSnapshot"
+        "400":
+          $ref: "#/components/responses/DefaultError"
+        "404":
+          $ref: "#/components/responses/DefaultError"
+        "409":
+          $ref: "#/components/responses/DefaultError"
+        "501":
+          $ref: "#/components/responses/DefaultError"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/management/runners/{id}/resume:
+    post:
+      operationId: resumeRunner
+      summary: Reopen new work admission for a runner
+      description: |
+        Atomically changes the runner's desired scheduling state to `active`,
+        allowing future compatible queue claims again. Existing drain receipts
+        are immutable: retrying an earlier drain request cannot reapply it after
+        this newer resume transition.
+
+        Requires both `management.runner.resume` and the platform-only
+        `management.runner.control_global` scope. `X-Request-Id` is required
+        and has the same idempotency behavior as drain. This endpoint does not
+        start a process or assign trigger activations synchronously; normal
+        reconciliation remains responsible for subsequent activation placement.
+      tags: [Management]
+      parameters:
+        - $ref: "#/components/parameters/RunnerId"
+        - $ref: "#/components/parameters/RunnerControlRequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunnerControlRequest"
+      responses:
+        "200":
+          description: Current active control projection or the original idempotency receipt.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/RunnerControlSnapshot"
+        "400":
+          $ref: "#/components/responses/DefaultError"
+        "404":
+          $ref: "#/components/responses/DefaultError"
+        "409":
+          $ref: "#/components/responses/DefaultError"
+        "501":
+          $ref: "#/components/responses/DefaultError"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
   /v1/management/executions/{id}:
     get:
       operationId: inspectExecutionManagement
@@ -1130,6 +1234,17 @@ components:
       schema:
         type: string
         pattern: '^[A-Za-z0-9._-]{1,128}$'
+    RunnerControlRequestId:
+      name: X-Request-Id
+      in: header
+      required: true
+      description: |
+        Required idempotency key for a runner drain or resume mutation. It must
+        match `[A-Za-z0-9._-]{1,128}`; absent or invalid values return 400
+        `request_id_required` rather than creating an untracked transition.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9._-]{1,128}$'
 
   headers:
     XRequestId:
@@ -1400,6 +1515,101 @@ components:
         last_heartbeat:
           type: string
           format: date-time
+        control:
+          $ref: "#/components/schemas/RunnerControlSnapshot"
+
+    RunnerControlRequest:
+      type: object
+      description: Operator rationale for a drain or resume mutation.
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          description: Required operator rationale after leading/trailing whitespace is removed; the server limits its UTF-8 encoding to 512 bytes.
+
+    RunnerControlSnapshot:
+      type: object
+      description: |
+        Durable desired state and current drain projection for one runner. A
+        drain response confirms the server-side new-claim gate only.
+        `phase=complete` is a conditional convergence observation, not a remote
+        shutdown, a command to terminate a worker, or authorization to discard
+        unknown or unsettled work. `phase=timed_out` means the drain deadline
+        elapsed while the server-side admission gate remains closed; it does not
+        resume, evict, cancel, or reclaim work.
+      required: [desired_state, generation]
+      properties:
+        desired_state:
+          type: string
+          enum: [active, draining]
+        generation:
+          type: integer
+          format: uint64
+          minimum: 0
+          description: Monotonically increasing desired-state transition generation.
+        requested_at:
+          type: string
+          format: date-time
+        reason:
+          type: string
+        drain:
+          $ref: "#/components/schemas/RunnerDrainSnapshot"
+
+    RunnerDrainSnapshot:
+      type: object
+      description: |
+        Durable server-side debt and runner-local observation projection while
+        the desired state is `draining`. `phase=complete` requires both the
+        server-side debt predicate and a fresh quiet observation from the current
+        live runner session for the current control generation. `phase=timed_out`
+        leaves the runner draining and can later become `complete` after the
+        blockers settle. A complete or timed_out phase never proves that the
+        runner process exited, forces a worker to stop, or authorizes discarding
+        unknown or unsettled work.
+      required: [phase, active_claims, leased_tasks, unsettled_drain_debt, handoff_debt, lease_may_exist_debt, replayable_debt, pending_activation_cleanup, server_quiescent, runner_quiescent]
+      properties:
+        phase:
+          type: string
+          enum: [quiescing, complete, timed_out]
+          description: Complete only when both `server_quiescent` and `runner_quiescent` are true. Timed out means the deadline elapsed with one or more blockers and leaves the admission gate closed.
+        deadline_at:
+          type: string
+          format: date-time
+          description: Fixed deadline created by the ACTIVE-to-DRAINING transition. Same-state requests, receipt replays, and runner re-registration do not extend it.
+        active_claims:
+          type: integer
+          minimum: 0
+        leased_tasks:
+          type: integer
+          minimum: 0
+        unsettled_drain_debt:
+          type: integer
+          minimum: 0
+          description: Authoritative count of non-terminal pre-drain handoffs owned by this runner.
+        handoff_debt:
+          type: integer
+          minimum: 0
+          description: Unfinalized handoffs that require an engine-aware resolver.
+        lease_may_exist_debt:
+          type: integer
+          minimum: 0
+          description: Crash-fenced handoffs for which an engine lease may exist but is not yet confirmed.
+        replayable_debt:
+          type: integer
+          minimum: 0
+          description: Finalized lease handoffs awaiting result commit or token-fenced reclaim.
+        pending_activation_cleanup:
+          type: integer
+          minimum: 0
+          description: Durable drain-triggered trigger deactivation obligations awaiting a matching session- and generation-fenced receipt.
+        server_quiescent:
+          type: boolean
+          description: True only when the built-in directory has zero active claims, leased tasks, unsettled handoff debt, and durable activation-cleanup obligations for this runner.
+        runner_quiescent:
+          type: boolean
+          description: True only after a heartbeat observation from the current live session, fenced to the current control generation, reports `recovery_only=true`, `in_flight=0`, and `active_activations=0`.
 
     Capability:
       type: object

@@ -98,6 +98,13 @@ func ExampleWaitTimeoutResponse(id types.ExecutionID, status types.ExecutionStat
 	return waitTimeoutResponse{ExecutionID: id, Status: status, TimedOut: true}
 }
 
+// ExampleRunnerControlRequest builds the private runnerControlBody used by
+// POST /v1/management/runners/{id}/drain and /resume. It keeps the OpenAPI
+// contract test bound to the actual handler DTO without exporting that DTO.
+func ExampleRunnerControlRequest(reason string) any {
+	return runnerControlBody{Reason: reason}
+}
+
 // ExampleDeadLetterListResponse builds a deadLetterListResponse (GET
 // /v1/management/dead-letters/{execID}).
 func ExampleDeadLetterListResponse(entries []engine.OutboxEntry, nextCursor string) any {

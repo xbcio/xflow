@@ -236,6 +236,9 @@ func NewEntryActivationReconciler(cfg EntryActivationReconcilerConfig) *EntryAct
 // Reconcile performs a single reconciliation pass over every desired activation
 // in the reconciler's namespaces, using now as the clock.
 func (r *EntryActivationReconciler) Reconcile(ctx context.Context, now time.Time) error {
+	if err := r.recoverPendingDeactivationObligations(ctx); err != nil {
+		return err
+	}
 	live := r.liveRunners(ctx, now)
 	seen := make(map[engine.EntryActivationKey]struct{})
 	var activations []engine.EntryActivation
@@ -416,12 +419,11 @@ func (r *EntryActivationReconciler) reconcileExisting(ctx context.Context, act *
 	if !act.Desired {
 		if act.RunnerID != "" {
 			prevRunner := act.RunnerID
+			prevSession := act.SessionID
 			prevGen := act.Generation
-			if err := r.cfg.Store.Fence(ctx, key, act.Generation); err != nil {
+			if _, err := r.fenceAndDeactivate(ctx, act, prevRunner, prevSession, prevGen); err != nil {
 				return err
 			}
-			r.enqueueDeactivate(prevRunner, deactivateDirectiveFor(act, prevGen))
-			r.recordGroupActivation(act, "deactivate")
 			act.RunnerID = ""
 		}
 		return nil
@@ -461,15 +463,15 @@ func (r *EntryActivationReconciler) reconcileExisting(ctx context.Context, act *
 			return nil
 		}
 		prevRunner := act.RunnerID
+		prevSession := act.SessionID
 		prevGen := act.Generation
-		if err := r.cfg.Store.Fence(ctx, key, act.Generation); err != nil {
+		fenced, err := r.fenceAndDeactivate(ctx, act, prevRunner, prevSession, prevGen)
+		if err != nil {
 			return err
 		}
-		// Tell the stale/dead/mismatched owner to stop (best-effort; a dead runner
-		// simply never receives it).
-		r.enqueueDeactivate(prevRunner, deactivateDirectiveFor(act, prevGen))
-		r.recordGroupActivation(act, "deactivate")
-		act.RunnerID = ""
+		if fenced {
+			act.RunnerID = ""
+		}
 	}
 	return nil
 }
@@ -516,7 +518,7 @@ func (r *EntryActivationReconciler) assignUnowned(ctx context.Context, act *engi
 
 	nextGen := act.Generation + 1
 	deadline := now.Add(r.cfg.LeaseTTL)
-	assigned, err := r.cfg.Store.Assign(ctx, key, chosen.RunnerID, "", nextGen, deadline)
+	assigned, err := r.cfg.Store.Assign(ctx, key, chosen.RunnerID, chosen.SessionID, nextGen, deadline)
 	if err != nil {
 		return err
 	}
@@ -655,6 +657,18 @@ func (r *EntryActivationReconciler) runnerIsLive(runnerID string, live []RunnerS
 	return false
 }
 
+func (r *EntryActivationReconciler) runnerIsDraining(ctx context.Context, runnerID string) bool {
+	if r.cfg.Lister == nil {
+		return false
+	}
+	for _, snapshot := range r.cfg.Lister.ListLiveRunners(ctx) {
+		if snapshot.RunnerID == runnerID && snapshot.Control != nil {
+			return snapshot.Control.DesiredState == RunnerDesiredStateDraining
+		}
+	}
+	return false
+}
+
 func (r *EntryActivationReconciler) liveRunners(ctx context.Context, now time.Time) []RunnerSnapshot {
 	if r.cfg.Lister == nil {
 		return nil
@@ -662,6 +676,13 @@ func (r *EntryActivationReconciler) liveRunners(ctx context.Context, now time.Ti
 	all := r.cfg.Lister.ListLiveRunners(ctx)
 	out := all[:0:0]
 	for _, snap := range all {
+		// Draining runners remain visible to management and the directory, but
+		// are never activation candidates. Existing owners are consequently
+		// fenced/deactivated by reconcileExisting and a healthy runner can take
+		// the next generation.
+		if snap.Control != nil && snap.Control.DesiredState == RunnerDesiredStateDraining {
+			continue
+		}
 		if r.selector.IsLive(snap, now) {
 			out = append(out, snap)
 		}
@@ -690,9 +711,37 @@ func (r *EntryActivationReconciler) liveRunners(ctx context.Context, now time.Ti
 // reassigned at the current desired state. Reported items for activations NOT
 // currently owned by this runner are ignored — the reconciler assigns owners; a
 // runner cannot claim an activation by reporting it.
+// ReconcileRunnerInventory is retained for callers that do not expose a
+// session ID (mostly legacy tests/custom integrations). Such callers can still
+// reconcile activation ownership, but cannot rebind a durable cleanup receipt
+// to a replacement session.
 func (r *EntryActivationReconciler) ReconcileRunnerInventory(ctx context.Context, runnerID string, reported []protocol.ActivationInventoryItem, now time.Time) error {
+	return r.reconcileRunnerInventory(ctx, runnerID, "", reported, now)
+}
+
+// ReconcileRunnerInventorySession is the runner-protocol path. The session is
+// used to atomically bind any reported old activation to its drain cleanup
+// obligation before normal inventory reconciliation evaluates ownership.
+func (r *EntryActivationReconciler) ReconcileRunnerInventorySession(ctx context.Context, runnerID, sessionID string, reported []protocol.ActivationInventoryItem, now time.Time) error {
+	return r.reconcileRunnerInventory(ctx, runnerID, sessionID, reported, now)
+}
+
+func (r *EntryActivationReconciler) reconcileRunnerInventory(ctx context.Context, runnerID, sessionID string, reported []protocol.ActivationInventoryItem, now time.Time) error {
 	if runnerID == "" {
 		return nil
+	}
+	if directory, ok := r.cfg.Lister.(DeactivationObligationDirectory); ok && directory != nil && sessionID != "" {
+		if err := directory.RebindDeactivationObligations(ctx, runnerID, sessionID, reported); err != nil {
+			return err
+		}
+	}
+	// A newly registered session may still be hosting an activation from before
+	// drain. Do not renew that lease from its inventory: a successful register
+	// is allowed for heartbeat/result/recovery, not a way to restore trigger
+	// ownership. Treat its report as empty so the existing fence/deactivate path
+	// releases it for a healthy non-draining candidate.
+	if r.runnerIsDraining(ctx, runnerID) {
+		reported = nil
 	}
 	// Index the reported inventory by
 	// (workflowID, workflowVersion, entryUnitID, replicaIndex) → generation
@@ -761,7 +810,7 @@ func (r *EntryActivationReconciler) ReconcileRunnerInventory(ctx context.Context
 			// generation) → the reconnected session dropped it. Fence + deactivate
 			// so a later reconcile reassigns it to a live runner.
 			prevGen := act.Generation
-			if err := r.cfg.Store.Fence(ctx, key, act.Generation); err != nil {
+			if _, err := r.fenceAndDeactivate(ctx, act, runnerID, act.SessionID, prevGen); err != nil {
 				if r.cfg.Logger != nil {
 					r.cfg.Logger.Warn("entry activation inventory revoke failed",
 						"workflow_id", act.WorkflowID,
@@ -770,11 +819,162 @@ func (r *EntryActivationReconciler) ReconcileRunnerInventory(ctx context.Context
 				}
 				continue
 			}
-			r.enqueueDeactivate(runnerID, deactivateDirectiveFor(act, prevGen))
-			r.recordGroupActivation(act, "deactivate")
 		}
 	}
 	return nil
+}
+
+// recoverPendingDeactivationObligations resolves the one cross-authority
+// window that cannot be made a single transaction: an obligation intent was
+// persisted, then the process crashed before or after EntryActivationStore.Fence.
+// The activation store remains the authority for the old owner; only an observed
+// fence makes the intent deliverable.
+func (r *EntryActivationReconciler) recoverPendingDeactivationObligations(ctx context.Context) error {
+	directory, ok := r.cfg.Lister.(DeactivationObligationDirectory)
+	if !ok || directory == nil {
+		return nil
+	}
+	obligations, err := directory.PendingDeactivationObligations(ctx)
+	if err != nil {
+		return err
+	}
+	sort.Slice(obligations, func(i, j int) bool {
+		return deactivationObligationID(obligations[i]) < deactivationObligationID(obligations[j])
+	})
+	for _, obligation := range obligations {
+		if obligation.State != DeactivationObligationPendingFence {
+			continue
+		}
+		nsCtx := namespace.WithNamespace(ctx, obligation.Namespace)
+		key := engine.EntryActivationKey{
+			Namespace:       obligation.Namespace,
+			WorkflowID:      obligation.WorkflowID,
+			WorkflowVersion: obligation.WorkflowVersion,
+			EntryUnitID:     obligation.EntryUnitID,
+			ReplicaIndex:    obligation.ReplicaIndex,
+		}
+		act, found, err := r.cfg.Store.Get(nsCtx, key)
+		if err != nil {
+			return err
+		}
+		if !found || deactivationFenceObserved(act, obligation) {
+			if err := directory.MarkDeactivationObligationReady(ctx, obligation); err != nil {
+				return err
+			}
+			continue
+		}
+		// The exact old owner is still authoritative. If the drain was resumed
+		// before any authority fence occurred, discard this pending intent rather
+		// than letting a crash turn a cancelled drain into a surprise stop.
+		if control, controlFound, err := runnerControlFor(ctx, r.cfg.Lister, obligation.RunnerID); err != nil {
+			return err
+		} else if controlFound && (control.DesiredState != RunnerDesiredStateDraining || control.Generation != obligation.DrainGeneration) {
+			if err := directory.CancelPendingDeactivationObligation(ctx, obligation); err != nil {
+				return err
+			}
+			continue
+		}
+		// Complete the fence, then make the already-persisted intent deliverable.
+		// A persisted intent from
+		// an older control generation is still safe to resolve — the old owner
+		// was selected while drain was authoritative, and once we fence it the
+		// cleanup must not be lost merely because an operator subsequently resumed.
+		if err := r.cfg.Store.Fence(nsCtx, key, obligation.Generation); err != nil {
+			return err
+		}
+		if err := directory.MarkDeactivationObligationReady(ctx, obligation); err != nil {
+			return err
+		}
+		r.recordGroupActivation(&act, "deactivate")
+	}
+	return nil
+}
+
+func deactivationFenceObserved(act engine.EntryActivation, obligation DeactivationObligation) bool {
+	if act.Generation != obligation.Generation {
+		return true
+	}
+	if act.RunnerID != obligation.RunnerID {
+		return true
+	}
+	return obligation.SessionID != "" && act.SessionID != "" && act.SessionID != obligation.SessionID
+}
+
+// fenceAndDeactivate fences an old owner and, only for an active drain
+// generation, records a durable cleanup intent before doing so. The pending
+// intent closes the crash window between "we decided to drain this owner" and
+// the activation authority write; ready is published only after Fence succeeds.
+// Non-drain deactivations preserve the existing best-effort behavior.
+func (r *EntryActivationReconciler) fenceAndDeactivate(ctx context.Context, act *engine.EntryActivation, runnerID, sessionID string, generation uint64) (bool, error) {
+	key := keyOf(act)
+	if directory, ok := r.cfg.Lister.(DeactivationObligationDirectory); ok && directory != nil {
+		if control, found, err := runnerControlFor(ctx, r.cfg.Lister, runnerID); err != nil {
+			return false, err
+		} else if found && control.DesiredState == RunnerDesiredStateDraining {
+			obligation := DeactivationObligation{
+				RunnerID:        runnerID,
+				SessionID:       sessionID,
+				Namespace:       act.Namespace,
+				WorkflowID:      act.WorkflowID,
+				WorkflowVersion: act.WorkflowVersion,
+				EntryUnitID:     act.EntryUnitID,
+				ReplicaIndex:    act.ReplicaIndex,
+				Generation:      generation,
+				DrainGeneration: control.Generation,
+			}
+			applicable, err := directory.EnsureDeactivationObligation(ctx, obligation)
+			if err != nil {
+				return false, err
+			}
+			if applicable {
+				// Re-read the control fence after creating the intent. It cannot make
+				// the cross-store fence wholly atomic, but it closes the common
+				// drain->resume race before we touch activation authority. If resume
+				// won, cancel only the still-pending intent and let a later reconcile
+				// evaluate the now-active owner from fresh liveness data.
+				current, currentFound, err := runnerControlFor(ctx, r.cfg.Lister, runnerID)
+				if err != nil {
+					return false, err
+				}
+				if !currentFound || current.DesiredState != RunnerDesiredStateDraining || current.Generation != obligation.DrainGeneration {
+					_ = directory.CancelPendingDeactivationObligation(ctx, obligation)
+					if act.Desired {
+						return false, nil
+					}
+				} else {
+					if err := r.cfg.Store.Fence(ctx, key, generation); err != nil {
+						// An authority error may mean the fence committed but its response
+						// was lost. Preserve pending_fence; the periodic resolver reads
+						// the activation authority before deciding whether to publish it.
+						return false, err
+					}
+					if err := directory.MarkDeactivationObligationReady(ctx, obligation); err != nil {
+						return false, err
+					}
+					r.recordGroupActivation(act, "deactivate")
+					return true, nil
+				}
+			} else if act.Desired {
+				// A resume/superseding control generation won before intent creation.
+				// Do not apply a stale drain's decision to an otherwise healthy owner.
+				return false, nil
+			}
+		}
+	}
+	if err := r.cfg.Store.Fence(ctx, key, generation); err != nil {
+		return false, err
+	}
+	r.enqueueDeactivate(runnerID, deactivateDirectiveFor(act, generation))
+	r.recordGroupActivation(act, "deactivate")
+	return true, nil
+}
+
+func runnerControlFor(ctx context.Context, lister ActivationRunnerLister, runnerID string) (RunnerControlSnapshot, bool, error) {
+	directory, ok := lister.(RunnerControlDirectory)
+	if !ok || directory == nil {
+		return RunnerControlSnapshot{}, false, nil
+	}
+	return directory.RunnerControl(ctx, runnerID)
 }
 
 // selectorMatches applies runner-selector label matching. A nil selector is a

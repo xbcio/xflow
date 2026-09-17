@@ -50,7 +50,12 @@ type RegisterRunnerRequest struct {
 	Capabilities []protocol.Capability
 	Policy       RunnerPolicy
 	Namespaces   []namespace.Namespace
-	Now          time.Time
+	// Activations is the runner's reconnect inventory. It is passed through the
+	// directory registration transition so a replacement session can atomically
+	// prove which old trigger generations it still hosts before inheriting their
+	// drain cleanup obligations.
+	Activations []protocol.ActivationInventoryItem
+	Now         time.Time
 }
 
 // RunnerSession identifies the current live session for a runner ID.
@@ -63,13 +68,22 @@ type RunnerSession struct {
 // a RunnerDirectory. JSON tags are snake_case so the GET /v1/management/runners/{id}
 // user-face response (spec §9.4) matches the rest of the wire contract.
 type RunnerSnapshot struct {
-	RunnerID      string                `json:"runner_id"`
+	RunnerID string `json:"runner_id"`
+	// SessionID is an internal protocol fence, deliberately omitted from the
+	// management JSON projection. Activation cleanup receipts bind to it so a
+	// replaced runner process cannot acknowledge an obligation owned by an old
+	// session.
+	SessionID     string                `json:"-"`
 	Capacity      int                   `json:"capacity"`
 	InFlight      int                   `json:"in_flight"`
 	Labels        map[string]string     `json:"labels,omitempty"`
 	Capabilities  []protocol.Capability `json:"capabilities,omitempty"`
 	Namespaces    []namespace.Namespace `json:"namespaces,omitempty"`
 	LastHeartbeat time.Time             `json:"last_heartbeat"`
+	// Control is present when the directory implements RunnerControlDirectory.
+	// A nil value preserves compatibility for external directories that have not
+	// adopted the optional control capability.
+	Control *RunnerControlSnapshot `json:"control,omitempty"`
 }
 
 func cloneCapabilities(capabilities []protocol.Capability) []protocol.Capability {
@@ -95,11 +109,12 @@ func cloneLabels(labels map[string]string) map[string]string {
 // HeartbeatRequest updates observed runner capacity and liveness for an
 // existing session.
 type HeartbeatRequest struct {
-	RunnerID  string
-	SessionID string
-	Capacity  int
-	InFlight  int
-	Now       time.Time
+	RunnerID         string
+	SessionID        string
+	Capacity         int
+	InFlight         int
+	DrainObservation *protocol.RunnerDrainObservation
+	Now              time.Time
 }
 
 // ClaimRequest asks the directory for the next compatible assignment for a
@@ -127,6 +142,11 @@ type ClaimRequest struct {
 	// else. Empty means "nothing in flight", which is what a freshly restarted
 	// process reports and is exactly when replay must fire.
 	ActiveLeaseIDs []string
+	// RecoveryOnly asks for an already-finalized lease replay only. It is a
+	// runner-side convergence aid: the directory still enforces DRAINING on its
+	// own atomic new-claim path, so a stale or malicious runner cannot bypass
+	// drain by omitting this flag.
+	RecoveryOnly bool
 }
 
 // Claim is either a temporary reservation for an assignment or a durable
@@ -136,6 +156,10 @@ type Claim struct {
 	ClaimID    ClaimID
 	Assignment Assignment
 	Lease      *engine.TaskLease
+	// Handoff is set only for an unfinalized lease_may_exist/lease_created
+	// recovery claim. The caller must resolve it against the engine and finalize
+	// or explicitly settle it; it must never issue a fresh Build*Lease blindly.
+	Handoff *HandoffDebt
 }
 
 // ReleaseClaimReason controls how an abandoned claim affects queue and seen

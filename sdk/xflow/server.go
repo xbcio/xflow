@@ -1,17 +1,3 @@
-// Package xflow server.go: the embeddable control-plane server entry point.
-//
-// NewServer mirrors NewLocal / NewCluster's factory-plus-Option shape but
-// returns a *Server rather than an *Engine, because a server does not
-// execute node handlers itself — it dispatches them to remote runners over
-// the Runner Protocol. See docs/design/DEPLOYMENT-TOPOLOGIES.md.
-//
-// As of stage 4 (SDK convergence) Server is a thin facade over
-// service/apiserver.APIServer, so an embedded SDK server exposes the same
-// module surface (Runner Protocol + workflow/control API) as the standalone
-// cmd/server binary. Callers that only need Handler/Start/Shutdown/IsLeader
-// keep their existing code; callers that want the apiserver to host its own
-// transports can use Run with the WithServerHTTPAddr / WithServerGRPCAddr /
-// WithServerTLS / WithServerMetricsAddr options.
 package xflow
 
 import (
@@ -383,9 +369,9 @@ func WithServerRunnerMetricsInterval(d time.Duration) ServerOption {
 	return func(c *serverConfig) { c.runnerMetricsInterval = d }
 }
 
-// WithServerManagement registers the read-only ops API (/v1/management/*:
-// leader identity, runner status, execution lookup). Opt-in, because it is an
-// operator surface rather than part of the workflow API.
+// WithServerManagement registers the privileged operator API
+// (/v1/management/*), including runner inspection and runner drain/resume.
+// It is opt-in because it is not part of the workflow API.
 func WithServerManagement() ServerOption {
 	return func(c *serverConfig) { c.enableManagement = true }
 }

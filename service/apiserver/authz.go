@@ -119,6 +119,11 @@ const (
 	// Like every operation here, it MUST also appear in scopeForOperation or
 	// the route is silently unreachable.
 	OpManagementRunnerRevokeIdentity = "management.runner.revoke_identity"
+	// Runner drain/resume are platform-wide scheduling controls. Each retains a
+	// narrow operation scope, and handlers additionally require the global scope
+	// below because a runner can serve multiple namespaces.
+	OpManagementRunnerDrain  = "management.runner.drain"
+	OpManagementRunnerResume = "management.runner.resume"
 	// There is no OpSupplyWrite: PUT /v1/supplies/{name} is sealed (Z.5). The
 	// write path is in-process only (sdk/xflow.Server.UpdateSupply). Re-adding
 	// the operation without re-adding the route would be harmless; re-adding
@@ -181,6 +186,11 @@ const (
 	// not "everyone's", so no tenant scope matches it. Without this scope those
 	// identities would be unrevokable.
 	ScopeManagementRunnerRevokeIdentityGlobal = "management.runner.revoke_identity_global"
+
+	// ScopeManagementRunnerControlGlobal is additive to each runner-control
+	// operation scope. A runner has no single tenant owner, so this prevents a
+	// namespace-scoped principal from draining another tenant's shared worker.
+	ScopeManagementRunnerControlGlobal = "management.runner.control_global"
 )
 
 // scopeForOperation maps an operation to the scope it requires. A principal
@@ -207,6 +217,10 @@ func scopeForOperation(op string) string {
 		return "management.runner.list"
 	case OpManagementRunnerRevokeIdentity:
 		return "management.runner.revoke_identity"
+	case OpManagementRunnerDrain:
+		return "management.runner.drain"
+	case OpManagementRunnerResume:
+		return "management.runner.resume"
 	case OpSupplyRead:
 		return "supply.read"
 	case OpArtifactRead:
@@ -310,17 +324,27 @@ func (NamespaceAwareAuthorizer) Authorize(_ context.Context, req AuthorizationRe
 }
 
 func principalAllowsOperation(principal Principal, operation, requiredScope string) bool {
-	if principal.HasScope(requiredScope) {
-		return true
+	if !principal.HasScope(requiredScope) {
+		if !principal.HasScope(ScopeRunnerResource) {
+			return false
+		}
+		switch operation {
+		case OpSupplyRead, OpArtifactRead, OpExecutionSeed:
+			return true
+		default:
+			return false
+		}
 	}
-	if !principal.HasScope(ScopeRunnerResource) {
-		return false
-	}
+	// Drain/resume act on a runner that may serve several tenants. Keep this
+	// additive scope in the shared authorization decision (rather than only in
+	// the handler) so deny auditing and the no-directory-lookup guarantee follow
+	// the same path as every other protected management operation. The handler
+	// repeats the check as defense in depth for custom Authorizer implementations.
 	switch operation {
-	case OpSupplyRead, OpArtifactRead, OpExecutionSeed:
-		return true
+	case OpManagementRunnerDrain, OpManagementRunnerResume:
+		return principal.HasScope(ScopeManagementRunnerControlGlobal)
 	default:
-		return false
+		return true
 	}
 }
 

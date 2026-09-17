@@ -1,8 +1,8 @@
 // Package apiserver is the user-facing HTTP layer of xflow. It aggregates a
 // service/control.ControlPlane, a workflow-control module, and optional
 // feature modules (supply, artifact, management) behind a single Handler()
-// and Start()/Shutdown() lifecycle, exposing the API described in
-// docs/design/API-SPECIFICATION.md.
+// and Start()/Shutdown() lifecycle, exposing the HTTP API described in
+// api/openapi/xflow-v1.yaml.
 //
 // # Position in the main line
 //
@@ -59,6 +59,22 @@
 //
 // Each module implements HTTPModule.RegisterHTTP(*http.ServeMux). Modules
 // never share a mux; routing is by path prefix with no overlap.
+//
+// # Runner operation control
+//
+// Runner management routes are opt-in: use WithManagement here, or
+// xflow.WithServerManagement for an embedded xflow.Server. Their exact HTTP
+// contract, including authentication, scopes, idempotency, and response
+// schemas, is in api/openapi/xflow-v1.yaml.
+//
+// A successful POST /v1/management/runners/{id}/drain confirms only that the
+// server-side new-claim gate is closed. It neither exits a runner nor proves
+// that all work has settled. The returned complete phase is a conditional
+// convergence observation, not process termination. timed_out leaves the
+// runner in draining state and keeps the gate closed; it does not implicitly
+// resume, evict, cancel, or reclaim work. Once outstanding blockers settle and
+// the control plane receives a fresh valid quiet observation, a timed-out drain
+// can still become complete.
 //
 // # Pitfalls when modifying this package
 //

@@ -28,6 +28,9 @@ func TestRunnerProtocolSessionIDRoundTripsJSON(t *testing.T) {
 	if heartbeat.SessionID != "session-1" {
 		t.Fatalf("heartbeat SessionID = %q, want session-1", heartbeat.SessionID)
 	}
+	if heartbeat.DrainObservation != nil {
+		t.Fatalf("old heartbeat DrainObservation = %#v, want nil", heartbeat.DrainObservation)
+	}
 
 	var poll PollTaskRequest
 	if err := json.Unmarshal([]byte(`{"runner_id":"runner-1","session_id":"session-1","capacity":2}`), &poll); err != nil {
@@ -198,6 +201,9 @@ func TestHeartbeatRequestOmitsSupplyObservedWhenNil(t *testing.T) {
 	}
 	if strings.Contains(string(data), "supply_observed") {
 		t.Fatalf("heartbeat request JSON = %s, must not contain supply_observed when nil", data)
+	}
+	if strings.Contains(string(data), "drain_observation") {
+		t.Fatalf("heartbeat request JSON = %s, must not contain drain_observation when nil", data)
 	}
 }
 

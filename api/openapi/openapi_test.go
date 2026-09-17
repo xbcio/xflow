@@ -133,6 +133,51 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 				Capabilities:  []protocol.Capability{{NodeType: "kafka.source", NodeVersion: 1, Runtimes: []string{"wasm"}}},
 				Namespaces:    []namespace.Namespace{"default"},
 				LastHeartbeat: now,
+				Control: &control.RunnerControlSnapshot{
+					DesiredState: control.RunnerDesiredStateDraining,
+					Generation:   7,
+					RequestedAt:  &now,
+					Reason:       "node maintenance",
+					Drain: &control.RunnerDrainSnapshot{
+						Phase:                    control.RunnerDrainPhaseQuiescing,
+						ActiveClaims:             1,
+						LeasedTasks:              2,
+						UnsettledDebt:            3,
+						HandoffDebt:              1,
+						LeaseMayExistDebt:        1,
+						ReplayableDebt:           2,
+						PendingActivationCleanup: 1,
+						ServerQuiescent:          false,
+						RunnerQuiescent:          false,
+					},
+				},
+			},
+		},
+		{
+			name:   "runner control request",
+			schema: "RunnerControlRequest",
+			value:  apiserver.ExampleRunnerControlRequest("node maintenance"),
+		},
+		{
+			name:   "runner control snapshot",
+			schema: "RunnerControlSnapshot",
+			value: control.RunnerControlSnapshot{
+				DesiredState: control.RunnerDesiredStateDraining,
+				Generation:   7,
+				RequestedAt:  &now,
+				Reason:       "node maintenance",
+				Drain: &control.RunnerDrainSnapshot{
+					Phase:                    control.RunnerDrainPhaseQuiescing,
+					ActiveClaims:             1,
+					LeasedTasks:              2,
+					UnsettledDebt:            3,
+					HandoffDebt:              1,
+					LeaseMayExistDebt:        1,
+					ReplayableDebt:           2,
+					PendingActivationCleanup: 1,
+					ServerQuiescent:          false,
+					RunnerQuiescent:          false,
+				},
 			},
 		},
 		{
@@ -414,6 +459,55 @@ func TestReplaceWorkflowContract(t *testing.T) {
 	}
 }
 
+func TestRunnerControlContract(t *testing.T) {
+	spec := loadSpec(t)
+	for path, wantOperation := range map[string]string{
+		"/v1/management/runners/{id}/drain":  "drainRunner",
+		"/v1/management/runners/{id}/resume": "resumeRunner",
+	} {
+		item := spec.Paths.Value(path)
+		if item == nil || item.Post == nil {
+			t.Errorf("POST %s is missing", path)
+			continue
+		}
+		op := item.Post
+		if op.OperationID != wantOperation {
+			t.Errorf("POST %s operationId = %q, want %q", path, op.OperationID, wantOperation)
+		}
+		requestIDRequired := false
+		for _, parameter := range op.Parameters {
+			if parameter == nil || parameter.Value == nil {
+				continue
+			}
+			if parameter.Value.In == "header" && parameter.Value.Name == "X-Request-Id" {
+				requestIDRequired = parameter.Value.Required
+			}
+		}
+		if !requestIDRequired {
+			t.Errorf("POST %s must require X-Request-Id as the idempotency key", path)
+		}
+		if op.RequestBody == nil || op.RequestBody.Value == nil {
+			t.Errorf("POST %s request body is missing", path)
+		} else if media := op.RequestBody.Value.Content.Get("application/json"); media == nil || media.Schema == nil || media.Schema.Ref != "#/components/schemas/RunnerControlRequest" {
+			t.Errorf("POST %s request schema = %#v, want RunnerControlRequest", path, media)
+		}
+		response := op.Responses.Value("200")
+		if response == nil || response.Value == nil {
+			t.Errorf("POST %s success response is missing", path)
+			continue
+		}
+		media := response.Value.Content.Get("application/json")
+		if media == nil || media.Schema == nil || media.Schema.Value == nil || len(media.Schema.Value.AllOf) < 2 {
+			t.Errorf("POST %s success envelope schema is missing", path)
+			continue
+		}
+		data := media.Schema.Value.AllOf[1].Value.Properties["data"]
+		if data == nil || data.Ref != "#/components/schemas/RunnerControlSnapshot" {
+			t.Errorf("POST %s success data schema = %#v, want RunnerControlSnapshot", path, data)
+		}
+	}
+}
+
 func TestReadyzContract(t *testing.T) {
 	spec := loadSpec(t)
 	path := spec.Paths.Value("/readyz")
@@ -486,3 +580,52 @@ func TestContractPathsAreAllRegistered(t *testing.T) {
 
 // ptrInt64 exists because a *int64 field cannot be given a literal inline.
 func ptrInt64(v int64) *int64 { return &v }
+
+func TestRunnerDrainSnapshotContract(t *testing.T) {
+	schemaRef := loadSpec(t).Components.Schemas["RunnerDrainSnapshot"]
+	if schemaRef == nil || schemaRef.Value == nil {
+		t.Fatal("RunnerDrainSnapshot schema is missing")
+	}
+	schema := schemaRef.Value
+	required := make(map[string]bool, len(schema.Required))
+	for _, name := range schema.Required {
+		required[name] = true
+	}
+	for _, name := range []string{"server_quiescent", "runner_quiescent"} {
+		if !required[name] {
+			t.Errorf("RunnerDrainSnapshot must require %q", name)
+		}
+	}
+
+	phase := schema.Properties["phase"]
+	if phase == nil || phase.Value == nil {
+		t.Fatal("RunnerDrainSnapshot phase schema is missing")
+	}
+	phaseValues := make(map[string]bool, len(phase.Value.Enum))
+	for _, value := range phase.Value.Enum {
+		if text, ok := value.(string); ok {
+			phaseValues[text] = true
+		}
+	}
+	for _, want := range []string{"quiescing", "complete", "timed_out"} {
+		if !phaseValues[want] {
+			t.Errorf("RunnerDrainSnapshot phase enum = %#v, missing %q", phase.Value.Enum, want)
+		}
+	}
+	deadline := schema.Properties["deadline_at"]
+	if deadline == nil || deadline.Value == nil || deadline.Value.Format != "date-time" {
+		t.Fatal("RunnerDrainSnapshot deadline_at must be a date-time field")
+	}
+
+	server := schema.Properties["server_quiescent"]
+	runner := schema.Properties["runner_quiescent"]
+	if server == nil || server.Value == nil || runner == nil || runner.Value == nil {
+		t.Fatal("RunnerDrainSnapshot quiescence field schemas are missing")
+	}
+	description := strings.Join([]string{schema.Description, phase.Value.Description, server.Value.Description, runner.Value.Description}, " ")
+	for _, semantic := range []string{"current live session", "current control generation", "timed_out", "never proves that", "runner process exited"} {
+		if !strings.Contains(description, semantic) {
+			t.Errorf("RunnerDrainSnapshot descriptions must state %q", semantic)
+		}
+	}
+}

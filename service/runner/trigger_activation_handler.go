@@ -610,20 +610,30 @@ func (h *TriggerActivationHandler) Deactivate(d protocol.DeactivateDirective) er
 	id := activationIDFromDeactivate(d)
 	h.mu.Lock()
 	st, ok := h.subs[id]
-	if ok {
-		delete(h.subs, id)
-	}
 	h.mu.Unlock()
 
 	if !ok {
 		// Unknown / already removed — idempotent no-op.
 		return nil
 	}
-	unregisterSupplyConsumers(id, st.bindings)
-	if st.sub == nil {
-		return nil
+	// Keep the subscription record until Close succeeds. ActivationTracker keeps
+	// its own active entry after a cleanup failure and retries this method when
+	// the durable deactivation directive is redelivered; deleting here first
+	// would make that retry falsely look like a successful no-op.
+	if st.sub != nil {
+		if err := st.sub.Close(context.Background()); err != nil {
+			return err
+		}
 	}
-	return st.sub.Close(context.Background())
+	unregisterSupplyConsumers(id, st.bindings)
+	h.mu.Lock()
+	// A direct concurrent Activate may have replaced this identity while Close
+	// ran. Never delete the replacement; its own generation owns the map entry.
+	if current, stillCurrent := h.subs[id]; stillCurrent && current.sub == st.sub {
+		delete(h.subs, id)
+	}
+	h.mu.Unlock()
+	return nil
 }
 
 // withEntrySeedParams returns a copy of d.Params merged with the entry-seed

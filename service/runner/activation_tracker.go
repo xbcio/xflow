@@ -23,6 +23,11 @@ type ActivationTracker struct {
 	// stops at a local log line and the server never learns the activation was
 	// not taken. Called WITHOUT t.mu held — the callback does network I/O.
 	onActivateFailed func(protocol.ActivateDirective, error)
+	// onDeactivated reports a successful, local trigger cleanup. It is invoked
+	// only after ActivationHandler.Deactivate returns nil (or the activation was
+	// already absent), so a durable server-side drain obligation is never settled
+	// merely because the tracker canceled a context. Called WITHOUT t.mu held.
+	onDeactivated func(protocol.DeactivateDirective)
 }
 
 type activationID struct {
@@ -102,6 +107,13 @@ func (t *ActivationTracker) SetOnActivateFailed(fn func(protocol.ActivateDirecti
 	t.onActivateFailed = fn
 }
 
+// SetOnDeactivated installs the successful cleanup callback. Like
+// SetOnActivateFailed, call it during runner wiring before ProcessDirectives
+// can run; callbacks themselves execute after the tracker mutex is released.
+func (t *ActivationTracker) SetOnDeactivated(fn func(protocol.DeactivateDirective)) {
+	t.onDeactivated = fn
+}
+
 // ProcessDirectives handles activate/deactivate directives from a heartbeat response.
 // Safe for concurrent use.
 func (t *ActivationTracker) ProcessDirectives(ctx context.Context, directives *protocol.HeartbeatActivations) error {
@@ -109,20 +121,26 @@ func (t *ActivationTracker) ProcessDirectives(ctx context.Context, directives *p
 		return nil
 	}
 
-	// failed is collected under the lock and reported after releasing it: the
-	// callback performs network I/O, and holding t.mu across it would block
+	// Callbacks are collected under the lock and reported after releasing it:
+	// both can perform network I/O, and holding t.mu across either would block
 	// every other directive batch for the duration of an HTTP round-trip.
 	type failedActivation struct {
 		directive protocol.ActivateDirective
 		err       error
 	}
 	var failed []failedActivation
+	var deactivated []protocol.DeactivateDirective
 
 	t.mu.Lock()
 
-	// Process deactivate directives first so we free resources before activating new ones.
+	// Process deactivate directives first so we free resources before activating
+	// new ones. A deactivation is acknowledged only after handler cleanup has
+	// succeeded; a failure keeps the activation in the tracker so the durable
+	// directive retry can attempt the cleanup again.
 	for _, d := range directives.Deactivate {
-		t.deactivateLocked(d)
+		if t.deactivateLocked(d) {
+			deactivated = append(deactivated, d)
+		}
 	}
 
 	for _, d := range directives.Activate {
@@ -142,6 +160,11 @@ func (t *ActivationTracker) ProcessDirectives(ctx context.Context, directives *p
 	if t.onActivateFailed != nil {
 		for _, f := range failed {
 			t.invokeOnActivateFailed(f.directive, f.err)
+		}
+	}
+	if t.onDeactivated != nil {
+		for _, d := range deactivated {
+			t.invokeOnDeactivated(d)
 		}
 	}
 
@@ -166,6 +189,23 @@ func (t *ActivationTracker) invokeOnActivateFailed(d protocol.ActivateDirective,
 		}
 	}()
 	t.onActivateFailed(d, activateErr)
+}
+
+// invokeOnDeactivated isolates the success callback just like the activate
+// failure callback: an acknowledgement client must never be able to panic the
+// heartbeat goroutine that drives directive processing.
+func (t *ActivationTracker) invokeOnDeactivated(d protocol.DeactivateDirective) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.logger.Error("onDeactivated callback panicked",
+				"workflow_id", d.WorkflowID,
+				"group_id", d.EntryUnitID,
+				"generation", d.Generation,
+				"panic", r,
+			)
+		}
+	}()
+	t.onDeactivated(d)
 }
 
 func (t *ActivationTracker) activateLocked(ctx context.Context, d protocol.ActivateDirective) error {
@@ -209,22 +249,28 @@ func (t *ActivationTracker) activateLocked(ctx context.Context, d protocol.Activ
 	return nil
 }
 
-func (t *ActivationTracker) deactivateLocked(d protocol.DeactivateDirective) {
+// deactivateLocked returns true only when the directive's cleanup is known to
+// be locally complete and can therefore receive a deactivated receipt. Keeping
+// an entry after cleanup failure is intentional: its context has already been
+// canceled, but retrying handler.Deactivate is the only way to prove external
+// resources (consumer, connection, supply bindings) were released.
+func (t *ActivationTracker) deactivateLocked(d protocol.DeactivateDirective) bool {
 	id := activationIDFromDeactivate(d)
 	existing, ok := t.active[id]
 	if !ok {
-		// Not active — skip.
-		return
+		// A restarted runner may no longer have a subscription that an earlier
+		// session hosted. It is already locally absent, so acknowledging this
+		// idempotent cleanup is correct and lets the server clear the durable
+		// obligation after its session fence has been checked.
+		return true
 	}
 	if existing.Generation > d.Generation {
-		// Runner has a newer generation than the deactivate directive — skip.
-		return
+		// A delayed old-generation stop must not claim cleanup of an activation
+		// that this tracker now hosts at a newer generation.
+		return false
 	}
 
 	existing.cancel()
-	delete(t.active, id)
-
-	// Best-effort cleanup via handler.
 	if err := t.handler.Deactivate(d); err != nil {
 		t.logger.Warn("deactivation cleanup error",
 			"workflow_id", d.WorkflowID,
@@ -232,7 +278,10 @@ func (t *ActivationTracker) deactivateLocked(d protocol.DeactivateDirective) {
 			"generation", d.Generation,
 			"error", err,
 		)
+		return false
 	}
+	delete(t.active, id)
+	return true
 }
 
 // Inventory returns the current activation inventory for reconnect reporting.
@@ -255,6 +304,18 @@ func (t *ActivationTracker) Inventory() []protocol.ActivationInventoryItem {
 		})
 	}
 	return items
+}
+
+// ActiveCount returns the locally managed activation/subscription count for a
+// drain heartbeat. Unlike Inventory it performs no per-heartbeat allocation.
+// A nil tracker means this runner owns no tracker-managed activations.
+func (t *ActivationTracker) ActiveCount() uint32 {
+	if t == nil {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return uint32(len(t.active))
 }
 
 // Shutdown stops all active subscriptions.

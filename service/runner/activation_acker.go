@@ -37,6 +37,15 @@ type activationAckKey struct {
 	ReplicaIndex    uint32
 }
 
+// deactivationAckKey includes the runner session. A durable cleanup obligation
+// can be explicitly rebound to a replacement session, and an acknowledgement
+// from the old fenced session must not suppress delivery from the new one.
+type deactivationAckKey struct {
+	activationAckKey
+	SessionID  string
+	Generation uint64
+}
+
 // activationAcker sends ActivationAck for failed activate directives to the
 // server. It is wired as ActivationTracker's onActivateFailed callback, which
 // runs synchronously in the ProcessDirectives call chain (after t.mu is
@@ -62,6 +71,11 @@ type activationAcker struct {
 
 	mu    sync.Mutex
 	acked map[activationAckKey]uint64
+	// Deactivation receipts are durable cleanup evidence, unlike failed
+	// activation acks. Do not mark one delivered until the HTTP call succeeds;
+	// a lost response must be retried when the server re-delivers its obligation.
+	deactivated          map[deactivationAckKey]bool
+	deactivationInFlight map[deactivationAckKey]bool
 }
 
 func newActivationAcker(client activationAckClient, runnerID string, logger *slog.Logger) *activationAcker {
@@ -69,10 +83,12 @@ func newActivationAcker(client activationAckClient, runnerID string, logger *slo
 		logger = slog.Default()
 	}
 	return &activationAcker{
-		client:   client,
-		runnerID: runnerID,
-		logger:   logger,
-		acked:    make(map[activationAckKey]uint64),
+		client:               client,
+		runnerID:             runnerID,
+		logger:               logger,
+		acked:                make(map[activationAckKey]uint64),
+		deactivated:          make(map[deactivationAckKey]bool),
+		deactivationInFlight: make(map[deactivationAckKey]bool),
 	}
 }
 
@@ -155,4 +171,79 @@ func (a *activationAcker) ackFailed(sessionID string, d protocol.ActivateDirecti
 			)
 		}
 	}()
+}
+
+// ackDeactivated reports a successful local cleanup for one durable
+// DeactivateDirective. It deliberately has stronger retry semantics than
+// ackFailed: the server's receipt ledger cannot clear until this exact request
+// arrives, so a transport error releases the local in-flight guard and lets the
+// next re-delivered directive retry it.
+func (a *activationAcker) ackDeactivated(sessionID string, d protocol.DeactivateDirective) {
+	key := deactivationAckKey{
+		activationAckKey: activationAckKey{
+			WorkflowID:      d.WorkflowID,
+			WorkflowVersion: d.WorkflowVersion,
+			EntryUnitID:     d.EntryUnitID,
+			ReplicaIndex:    d.ReplicaIndex,
+		},
+		SessionID:  sessionID,
+		Generation: d.Generation,
+	}
+	if !a.beginDeactivationAck(key) {
+		return
+	}
+	ack := protocol.ActivationAck{
+		RunnerID:        a.runnerID,
+		SessionID:       sessionID,
+		WorkflowID:      d.WorkflowID,
+		WorkflowVersion: d.WorkflowVersion,
+		GroupID:         d.EntryUnitID,
+		ReplicaIndex:    d.ReplicaIndex,
+		Generation:      d.Generation,
+		Status:          protocol.ActivationStatusDeactivated,
+	}
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				a.finishDeactivationAck(key, false)
+				a.logger.Error("deactivation receipt panicked",
+					"workflow_id", d.WorkflowID,
+					"group_id", d.EntryUnitID,
+					"generation", d.Generation,
+					"recover", rec,
+				)
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), activationAckTimeout)
+		defer cancel()
+		err := a.client.ActivationAck(ctx, ack)
+		a.finishDeactivationAck(key, err == nil)
+		if err != nil {
+			a.logger.Warn("deactivation receipt failed",
+				"workflow_id", d.WorkflowID,
+				"group_id", d.EntryUnitID,
+				"generation", d.Generation,
+				"error", err,
+			)
+		}
+	}()
+}
+
+func (a *activationAcker) beginDeactivationAck(key deactivationAckKey) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.deactivated[key] || a.deactivationInFlight[key] {
+		return false
+	}
+	a.deactivationInFlight[key] = true
+	return true
+}
+
+func (a *activationAcker) finishDeactivationAck(key deactivationAckKey, delivered bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.deactivationInFlight, key)
+	if delivered {
+		a.deactivated[key] = true
+	}
 }

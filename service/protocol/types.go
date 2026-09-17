@@ -62,9 +62,36 @@ type RegisterRunnerRequest struct {
 	SupportsEncryption bool `json:"supports_encryption,omitempty"`
 }
 
+// RunnerControlDirective is the server's current desired scheduling state for
+// a runner session. It is a cooperative convergence signal only: the control
+// plane always applies the authoritative DRAINING gate before creating a queue
+// claim, including for old runners that do not understand this DTO.
+type RunnerControlDirective struct {
+	DesiredState string `json:"desired_state"`
+	Generation   uint64 `json:"generation"`
+	// RecoveryOnly tells a capable runner to stop ordinary polling and request
+	// only already-finalized handoff replay. It is true while desired_state is
+	// draining and intentionally may be ignored by older peers.
+	RecoveryOnly bool `json:"recovery_only,omitempty"`
+}
+
+// RunnerDrainObservation is a runner-local observation made only after the
+// runner has applied a DRAINING control directive. InFlight remains on the
+// enclosing heartbeat so older peers retain their existing capacity payload.
+// The control plane fences this observation by the live session and control
+// generation before using it in a drain-completion projection.
+type RunnerDrainObservation struct {
+	Generation        uint64 `json:"generation"`
+	RecoveryOnly      bool   `json:"recovery_only"`
+	ActiveActivations uint32 `json:"active_activations"`
+}
+
 type RegisterRunnerResponse struct {
 	RunnerID  string `json:"runner_id"`
 	SessionID string `json:"session_id"`
+	// Control is included by servers whose runner directory supports graceful
+	// drain. Nil preserves compatibility with older servers/directories.
+	Control *RunnerControlDirective `json:"control,omitempty"`
 	// SupplyKey is a base64-encoded 32-byte AES-256 key for decrypting supply
 	// content. Included only when the runner declared supports_encryption=true
 	// and the server has encryption enabled. The runner stores it in its
@@ -79,6 +106,10 @@ type HeartbeatRequest struct {
 	InFlight  int    `json:"in_flight"`
 	Timestamp int64  `json:"timestamp"`
 	AuthToken string `json:"auth_token,omitempty"`
+	// DrainObservation is sent only while this runner has applied a draining
+	// directive. It is advisory evidence, never the server-side admission
+	// authority: the directory verifies session and generation atomically.
+	DrainObservation *RunnerDrainObservation `json:"drain_observation,omitempty"`
 	// SupplyObserved reports the content hash currently in effect for each supply
 	// this runner hosts a consumer for. Aggregated server-side it answers "are all
 	// runners on revision N yet" — the direct analogue of Kubernetes'
@@ -101,6 +132,9 @@ type HeartbeatRequest struct {
 type HeartbeatResponse struct {
 	ServerTime  int64                 `json:"server_time"`
 	Activations *HeartbeatActivations `json:"activations,omitempty"`
+	// Control lets a runner promptly converge its local poll gate after an
+	// operator changes desired state.
+	Control *RunnerControlDirective `json:"control,omitempty"`
 	// SupplyHints carries "supply node name → current content hash" for the
 	// supplies this runner hosts a consumer for. A differing hash tells the runner
 	// to fetch once; an equal hash costs nothing.
@@ -165,11 +199,16 @@ type PollTaskRequest struct {
 	// task input. An old runner omits the field, which reads as "nothing in
 	// flight" and restores the previous behaviour for it alone.
 	ActiveLeaseIDs []string `json:"active_lease_ids,omitempty"`
+	// RecoveryOnly is sent after a capable runner receives a DRAINING directive.
+	// It requests lease replay only and can never grant extra work; server-side
+	// desired-state gating remains authoritative.
+	RecoveryOnly bool `json:"recovery_only,omitempty"`
 }
 
 type PollTaskResponse struct {
-	Lease *engine.TaskLease `json:"lease,omitempty"`
-	Wait  time.Duration     `json:"wait"`
+	Lease   *engine.TaskLease       `json:"lease,omitempty"`
+	Wait    time.Duration           `json:"wait"`
+	Control *RunnerControlDirective `json:"control,omitempty"`
 }
 
 type ReportResultRequest struct {
@@ -314,9 +353,10 @@ func UnmarshalTaskResult(data []byte) (engine.TaskResult, error) {
 
 // RunnerFrame is the transport-agnostic runner→server frame (mirrors runnerpb.RunnerFrame.oneof).
 type RunnerFrame struct {
-	Hello  *HelloFrame
-	Result *ResultFrame
-	Bye    *ByeFrame
+	Hello              *HelloFrame
+	Result             *ResultFrame
+	ControlObservation *ControlObservationFrame
+	Bye                *ByeFrame
 }
 
 type HelloFrame struct {
@@ -333,11 +373,23 @@ type ResultFrame struct {
 	Result  engine.TaskResult
 }
 
+// ControlObservationFrame reports the runner's locally applied control state
+// on an established Connect stream. RecoveryOnly is the stream's recovery-only
+// request: it asks for pre-drain debt only and never authorizes new admission.
+// The server still decides every claim against its authoritative control state.
+type ControlObservationFrame struct {
+	Generation        uint64
+	RecoveryOnly      bool
+	ActiveWorkers     uint32
+	ActiveActivations uint32
+}
+
 type ByeFrame struct{}
 
 // ServerFrame is the transport-agnostic server→runner frame.
 type ServerFrame struct {
 	Welcome   *WelcomeFrame
+	Control   *ControlFrame
 	Task      *TaskFrame
 	Ack       *AckFrame
 	Backoff   *BackoffFrame
@@ -347,6 +399,15 @@ type ServerFrame struct {
 type WelcomeFrame struct {
 	RunnerID   string
 	ServerTime int64
+	// Control is the initial desired state for this stream. Nil means an older
+	// server did not project control; callers retain the active/generation-zero
+	// compatibility default in that case.
+	Control *RunnerControlDirective
+}
+
+// ControlFrame carries a desired-state update after WelcomeFrame.
+type ControlFrame struct {
+	Directive *RunnerControlDirective
 }
 
 type TaskFrame struct {

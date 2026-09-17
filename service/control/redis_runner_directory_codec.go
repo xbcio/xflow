@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/service/protocol"
 )
 
 // redisRunnerDirectoryKeys is the fixed set of Redis keys backing a
@@ -16,64 +18,245 @@ import (
 type redisRunnerDirectoryKeys struct {
 	prefix string
 
-	queue                string
-	seen                 string
-	assignmentData       string
-	assignmentState      string
-	assignmentClaim      string
-	assignmentRunner     string
-	assignmentSession    string
-	assignmentLeaseID    string
-	assignmentLeaseToken string
-	assignmentLeaseMeta  string
-	claimsAssignment     string
-	claimsRunner         string
-	claimsSession        string
-	claimsExpiry         string
-	runnerSession        string
-	runnerCapacity       string
-	runnerInflight       string
-	runnerCapabilities   string
-	runnerLabels         string
-	runnerPolicy         string
-	runnerNamespaces     string
-	runnerHeartbeat      string
-	runnerClaimCount     string
-	runnerLeaseCount     string
-	leaseByID            string
-	leaseByToken         string
+	queue                                        string
+	seen                                         string
+	assignmentData                               string
+	assignmentState                              string
+	assignmentClaim                              string
+	assignmentRunner                             string
+	assignmentSession                            string
+	assignmentLeaseID                            string
+	assignmentLeaseToken                         string
+	assignmentLeaseMeta                          string
+	claimsAssignment                             string
+	claimsRunner                                 string
+	claimsSession                                string
+	claimsExpiry                                 string
+	runnerSession                                string
+	runnerCapacity                               string
+	runnerInflight                               string
+	runnerCapabilities                           string
+	runnerLabels                                 string
+	runnerPolicy                                 string
+	runnerNamespaces                             string
+	runnerHeartbeat                              string
+	runnerClaimCount                             string
+	runnerLeaseCount                             string
+	leaseByID                                    string
+	leaseByToken                                 string
+	runnerControlDesired                         string
+	runnerControlGeneration                      string
+	runnerControlRequestedAt                     string
+	runnerControlActor                           string
+	runnerControlReason                          string
+	runnerControlDrainDeadline                   string
+	runnerControlReceiptHash                     string
+	runnerControlReceiptDesired                  string
+	runnerControlReceiptGeneration               string
+	runnerControlReceiptRequestedAt              string
+	runnerControlReceiptReason                   string
+	runnerControlReceiptClaims                   string
+	runnerControlReceiptLeases                   string
+	runnerControlReceiptUnsettledDebt            string
+	runnerControlReceiptHandoffDebt              string
+	runnerControlReceiptLeaseMayExistDebt        string
+	runnerControlReceiptReplayableDebt           string
+	runnerControlReceiptPendingActivationCleanup string
+	runnerControlReceiptDrainDeadline            string
+	runnerControlReceiptStoredAt                 string
+	runnerControlReceiptStatus                   string
+	runnerControlReceiptExpiry                   string
+	runnerControlAudit                           string
+
+	// Drain-triggered activation cleanup obligation keys are all keyed by an
+	// opaque obligation ID. They share the directory hash tag so Register,
+	// control transitions, and receipt acks can use single-slot Lua CAS.
+	deactivationObligationState           string
+	deactivationObligationRunner          string
+	deactivationObligationSession         string
+	deactivationObligationNamespace       string
+	deactivationObligationWorkflowID      string
+	deactivationObligationWorkflowVersion string
+	deactivationObligationEntryUnitID     string
+	deactivationObligationReplicaIndex    string
+	deactivationObligationGeneration      string
+	deactivationObligationDrainGeneration string
+	// runnerActivationInventory retains the registration's reported activation
+	// generations so an obligation created immediately after reconnect can bind
+	// delivery to that session only when it proved it still hosts the old work.
+	runnerActivationInventory string
+	// runnerDrainObservation stores the last session- and generation-fenced
+	// runner-local drain sample as one JSON value per runner. Lua never parses
+	// it; heartbeat validates the scalar generation before HSET.
+	runnerDrainObservation string
+
+	// Handoff keys are all claim-scoped except handoffAssignment, which gives
+	// token-fenced terminal cleanup an O(1) assignment -> current handoff path.
+	handoffState            string
+	handoffGeneration       string
+	handoffLeaseMeta        string
+	handoffClaim            string
+	handoffAssignment       string
+	handoffRunner           string
+	handoffSession          string
+	handoffLeaseID          string
+	handoffLeaseToken       string
+	handoffRecoveryReady    string
+	handoffRecoveryDeadline string
 }
 
 func newRedisRunnerDirectoryKeys(prefix string) redisRunnerDirectoryKeys {
 	return redisRunnerDirectoryKeys{
-		prefix:               prefix,
-		queue:                prefix + ":queue",
-		seen:                 prefix + ":seen",
-		assignmentData:       prefix + ":assignment:data",
-		assignmentState:      prefix + ":assignment:state",
-		assignmentClaim:      prefix + ":assignment:claim",
-		assignmentRunner:     prefix + ":assignment:runner",
-		assignmentSession:    prefix + ":assignment:session",
-		assignmentLeaseID:    prefix + ":assignment:lease-id",
-		assignmentLeaseToken: prefix + ":assignment:lease-token",
-		assignmentLeaseMeta:  prefix + ":assignment:lease-meta",
-		claimsAssignment:     prefix + ":claim:assignment",
-		claimsRunner:         prefix + ":claim:runner",
-		claimsSession:        prefix + ":claim:session",
-		claimsExpiry:         prefix + ":claim:expiry",
-		runnerSession:        prefix + ":runner:session",
-		runnerCapacity:       prefix + ":runner:capacity",
-		runnerInflight:       prefix + ":runner:inflight",
-		runnerCapabilities:   prefix + ":runner:capabilities",
-		runnerLabels:         prefix + ":runner:labels",
-		runnerPolicy:         prefix + ":runner:policy",
-		runnerNamespaces:     prefix + ":runner:namespaces",
-		runnerHeartbeat:      prefix + ":runner:heartbeat",
-		runnerClaimCount:     prefix + ":runner:claim-count",
-		runnerLeaseCount:     prefix + ":runner:lease-count",
-		leaseByID:            prefix + ":lease:by-id",
-		leaseByToken:         prefix + ":lease:by-token",
+		prefix:                                prefix,
+		queue:                                 prefix + ":queue",
+		seen:                                  prefix + ":seen",
+		assignmentData:                        prefix + ":assignment:data",
+		assignmentState:                       prefix + ":assignment:state",
+		assignmentClaim:                       prefix + ":assignment:claim",
+		assignmentRunner:                      prefix + ":assignment:runner",
+		assignmentSession:                     prefix + ":assignment:session",
+		assignmentLeaseID:                     prefix + ":assignment:lease-id",
+		assignmentLeaseToken:                  prefix + ":assignment:lease-token",
+		assignmentLeaseMeta:                   prefix + ":assignment:lease-meta",
+		claimsAssignment:                      prefix + ":claim:assignment",
+		claimsRunner:                          prefix + ":claim:runner",
+		claimsSession:                         prefix + ":claim:session",
+		claimsExpiry:                          prefix + ":claim:expiry",
+		runnerSession:                         prefix + ":runner:session",
+		runnerCapacity:                        prefix + ":runner:capacity",
+		runnerInflight:                        prefix + ":runner:inflight",
+		runnerCapabilities:                    prefix + ":runner:capabilities",
+		runnerLabels:                          prefix + ":runner:labels",
+		runnerPolicy:                          prefix + ":runner:policy",
+		runnerNamespaces:                      prefix + ":runner:namespaces",
+		runnerHeartbeat:                       prefix + ":runner:heartbeat",
+		runnerClaimCount:                      prefix + ":runner:claim-count",
+		runnerLeaseCount:                      prefix + ":runner:lease-count",
+		leaseByID:                             prefix + ":lease:by-id",
+		leaseByToken:                          prefix + ":lease:by-token",
+		runnerControlDesired:                  prefix + ":runner:control:desired",
+		runnerControlGeneration:               prefix + ":runner:control:generation",
+		runnerControlRequestedAt:              prefix + ":runner:control:requested-at",
+		runnerControlActor:                    prefix + ":runner:control:actor",
+		runnerControlReason:                   prefix + ":runner:control:reason",
+		runnerControlDrainDeadline:            prefix + ":runner:control:drain-deadline",
+		runnerControlReceiptHash:              prefix + ":runner:control:receipt:hash",
+		runnerControlReceiptDesired:           prefix + ":runner:control:receipt:desired",
+		runnerControlReceiptGeneration:        prefix + ":runner:control:receipt:generation",
+		runnerControlReceiptRequestedAt:       prefix + ":runner:control:receipt:requested-at",
+		runnerControlReceiptReason:            prefix + ":runner:control:receipt:reason",
+		runnerControlReceiptClaims:            prefix + ":runner:control:receipt:claims",
+		runnerControlReceiptLeases:            prefix + ":runner:control:receipt:leases",
+		runnerControlReceiptUnsettledDebt:     prefix + ":runner:control:receipt:unsettled-debt",
+		runnerControlReceiptHandoffDebt:       prefix + ":runner:control:receipt:handoff-debt",
+		runnerControlReceiptLeaseMayExistDebt: prefix + ":runner:control:receipt:lease-may-exist-debt",
+		runnerControlReceiptReplayableDebt:    prefix + ":runner:control:receipt:replayable-debt",
+		runnerControlReceiptPendingActivationCleanup: prefix + ":runner:control:receipt:pending-activation-cleanup",
+		runnerControlReceiptDrainDeadline:            prefix + ":runner:control:receipt:drain-deadline",
+		runnerControlReceiptStoredAt:                 prefix + ":runner:control:receipt:stored-at",
+		runnerControlReceiptStatus:                   prefix + ":runner:control:receipt:status",
+		runnerControlReceiptExpiry:                   prefix + ":runner:control:receipt:expiry",
+		runnerControlAudit:                           prefix + ":runner:control:audit",
+		deactivationObligationState:                  prefix + ":runner:deactivation:state",
+		deactivationObligationRunner:                 prefix + ":runner:deactivation:runner",
+		deactivationObligationSession:                prefix + ":runner:deactivation:session",
+		deactivationObligationNamespace:              prefix + ":runner:deactivation:namespace",
+		deactivationObligationWorkflowID:             prefix + ":runner:deactivation:workflow-id",
+		deactivationObligationWorkflowVersion:        prefix + ":runner:deactivation:workflow-version",
+		deactivationObligationEntryUnitID:            prefix + ":runner:deactivation:entry-unit-id",
+		deactivationObligationReplicaIndex:           prefix + ":runner:deactivation:replica-index",
+		deactivationObligationGeneration:             prefix + ":runner:deactivation:generation",
+		deactivationObligationDrainGeneration:        prefix + ":runner:deactivation:drain-generation",
+		runnerActivationInventory:                    prefix + ":runner:activation-inventory",
+		runnerDrainObservation:                       prefix + ":runner:control:drain-observation",
+		handoffState:                                 prefix + ":runner:handoff:state",
+		handoffGeneration:                            prefix + ":runner:handoff:generation",
+		handoffLeaseMeta:                             prefix + ":runner:handoff:lease-meta",
+		handoffClaim:                                 prefix + ":runner:handoff:claim",
+		handoffAssignment:                            prefix + ":runner:handoff:assignment",
+		handoffRunner:                                prefix + ":runner:handoff:runner",
+		handoffSession:                               prefix + ":runner:handoff:session",
+		handoffLeaseID:                               prefix + ":runner:handoff:lease-id",
+		handoffLeaseToken:                            prefix + ":runner:handoff:lease-token",
+		handoffRecoveryReady:                         prefix + ":runner:handoff:recovery-ready",
+		handoffRecoveryDeadline:                      prefix + ":runner:handoff:recovery-deadline",
 	}
+}
+
+// redisActivationInventoryItem intentionally encodes generation as a string:
+// JSON/Lua number conversion would otherwise lose exact uint64 fencing values
+// above 2^53 while a reconnect decides whether it may inherit cleanup work.
+type redisActivationInventoryItem struct {
+	WorkflowID      string `json:"workflow_id"`
+	WorkflowVersion string `json:"workflow_version"`
+	EntryUnitID     string `json:"entry_unit_id"`
+	ReplicaIndex    uint32 `json:"replica_index"`
+	Generation      string `json:"generation"`
+}
+
+type redisRunnerDrainObservation struct {
+	SessionID         string    `json:"session_id"`
+	Generation        uint64    `json:"generation"`
+	RecoveryOnly      bool      `json:"recovery_only"`
+	InFlight          int       `json:"in_flight"`
+	ActiveActivations uint32    `json:"active_activations"`
+	ObservedAt        time.Time `json:"observed_at"`
+}
+
+func marshalRedisRunnerDrainObservation(observation *runnerDrainObservation) (string, error) {
+	if observation == nil {
+		return "", nil
+	}
+	payload, err := json.Marshal(redisRunnerDrainObservation{
+		SessionID:         observation.sessionID,
+		Generation:        observation.generation,
+		RecoveryOnly:      observation.recoveryOnly,
+		InFlight:          observation.inFlight,
+		ActiveActivations: observation.activeActivations,
+		ObservedAt:        observation.observedAt,
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal runner drain observation: %w", err)
+	}
+	return string(payload), nil
+}
+
+// unmarshalRedisRunnerDrainObservation fails closed: an older or damaged
+// payload simply cannot contribute runner-local quiescence to the projection.
+func unmarshalRedisRunnerDrainObservation(payload string) *runnerDrainObservation {
+	if payload == "" {
+		return nil
+	}
+	var record redisRunnerDrainObservation
+	if err := json.Unmarshal([]byte(payload), &record); err != nil || record.SessionID == "" || record.InFlight < 0 {
+		return nil
+	}
+	return &runnerDrainObservation{
+		sessionID:         record.SessionID,
+		generation:        record.Generation,
+		recoveryOnly:      record.RecoveryOnly,
+		inFlight:          record.InFlight,
+		activeActivations: record.ActiveActivations,
+		observedAt:        record.ObservedAt,
+	}
+}
+
+func marshalRedisActivationInventory(items []protocol.ActivationInventoryItem) (string, error) {
+	encoded := make([]redisActivationInventoryItem, 0, len(items))
+	for _, item := range items {
+		encoded = append(encoded, redisActivationInventoryItem{
+			WorkflowID:      item.WorkflowID,
+			WorkflowVersion: item.WorkflowVersion,
+			EntryUnitID:     item.EntryUnitID,
+			ReplicaIndex:    item.ReplicaIndex,
+			Generation:      strconv.FormatUint(item.Generation, 10),
+		})
+	}
+	payload, err := json.Marshal(encoded)
+	if err != nil {
+		return "", fmt.Errorf("marshal runner activation inventory: %w", err)
+	}
+	return string(payload), nil
 }
 
 func boolRedisArg(value bool) string {

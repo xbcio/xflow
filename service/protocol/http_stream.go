@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"context"
+	"sync"
 	"time"
 )
 
@@ -16,12 +17,15 @@ type httpStream struct {
 	stop      context.CancelFunc
 	sessionID string
 	authToken string
+
+	controlMu    sync.RWMutex
+	recoveryOnly bool
 }
 
 // Connect returns an *httpStream that implements FrameStream using the HTTP
 // long-poll endpoints (Register / Poll / ReportResult) to simulate a bidi
-// stream. The caller must send a HELLO frame first, then can Recv WELCOME +
-// TASK frames and Send RESULT frames.
+// stream. The caller must send a HELLO frame first, then can Recv WELCOME,
+// CONTROL, and TASK frames and Send RESULT or CONTROL_OBSERVATION frames.
 func (c *Client) Connect(ctx context.Context) (FrameStream, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	s := &httpStream{
@@ -36,6 +40,7 @@ func (c *Client) Connect(ctx context.Context) (FrameStream, error) {
 }
 
 func (s *httpStream) run() {
+	defer s.stop()
 	defer close(s.recvCh)
 
 	// First frame from the runner must be HELLO.
@@ -43,7 +48,7 @@ func (s *httpStream) run() {
 	select {
 	case fr := <-s.sendCh:
 		if fr.Hello == nil {
-			s.recvCh <- ServerFrame{Ack: &AckFrame{Accepted: false, Error: "first frame must be HELLO"}}
+			s.emit(ServerFrame{Ack: &AckFrame{Accepted: false, Error: "first frame must be HELLO"}})
 			return
 		}
 		hello = fr.Hello
@@ -62,45 +67,28 @@ func (s *httpStream) run() {
 		AuthToken:    s.authToken,
 	})
 	if err != nil {
-		s.recvCh <- ServerFrame{Ack: &AckFrame{Accepted: false, Error: err.Error()}}
+		s.emit(ServerFrame{Ack: &AckFrame{Accepted: false, Error: err.Error()}})
 		return
 	}
 	s.sessionID = registerResp.SessionID
 
-	// Emit WELCOME.
-	s.recvCh <- ServerFrame{Welcome: &WelcomeFrame{RunnerID: hello.RunnerID, ServerTime: time.Now().Unix()}}
+	// Emit WELCOME with the initial control projection. A nil Control preserves
+	// compatibility with older HTTP control planes that do not send it.
+	if !s.emit(ServerFrame{Welcome: &WelcomeFrame{
+		RunnerID:   hello.RunnerID,
+		ServerTime: time.Now().Unix(),
+		Control:    registerResp.Control,
+	}}) {
+		return
+	}
 
-	// Goroutine: drain RESULT frames from the runner and send ACKs back.
+	// Goroutine: drain RESULT and CONTROL_OBSERVATION frames from the runner.
+	// Observation forwarding uses the existing heartbeat transport so the HTTP
+	// emulation preserves the same server-side control call chain as unary HTTP.
 	resultDone := make(chan struct{})
-	go func() {
-		defer close(resultDone)
-		for {
-			select {
-			case fr := <-s.sendCh:
-				if fr.Result != nil {
-					resp, err := s.client.ReportResult(s.ctx, ReportResultRequest{
-						RunnerID:  hello.RunnerID,
-						SessionID: s.sessionID,
-						Lease:     fr.Result.Lease,
-						Result:    fr.Result.Result,
-						AuthToken: s.authToken,
-					})
-					if err != nil {
-						s.recvCh <- ServerFrame{Ack: &AckFrame{LeaseID: fr.Result.LeaseID, Accepted: false, Error: err.Error()}}
-						continue
-					}
-					s.recvCh <- ServerFrame{Ack: &AckFrame{LeaseID: fr.Result.LeaseID, Accepted: resp.Accepted, Error: resp.Error}}
-				}
-				if fr.Bye != nil {
-					return
-				}
-			case <-s.ctx.Done():
-				return
-			}
-		}
-	}()
+	go s.consumeRunnerFrames(hello, resultDone)
 
-	// Polling loop: continuously poll for tasks and emit TASK frames.
+	// Polling loop: continuously poll for tasks and emit CONTROL/TASK frames.
 	pollWait := time.Second
 	for {
 		select {
@@ -117,15 +105,19 @@ func (s *httpStream) run() {
 			Capabilities: hello.Capabilities,
 			Labels:       hello.Labels,
 			AuthToken:    s.authToken,
+			RecoveryOnly: s.isRecoveryOnly(),
 		})
 		if err != nil {
+			s.stop()
+			<-resultDone
+			return
+		}
+		if !s.emitControl(resp.Control) {
 			<-resultDone
 			return
 		}
 		if resp.Lease != nil {
-			select {
-			case s.recvCh <- ServerFrame{Task: &TaskFrame{Lease: resp.Lease}}:
-			case <-s.ctx.Done():
+			if !s.emit(ServerFrame{Task: &TaskFrame{Lease: resp.Lease}}) {
 				<-resultDone
 				return
 			}
@@ -141,6 +133,88 @@ func (s *httpStream) run() {
 			return
 		}
 	}
+}
+
+func (s *httpStream) consumeRunnerFrames(hello *HelloFrame, done chan<- struct{}) {
+	defer close(done)
+	for {
+		select {
+		case fr := <-s.sendCh:
+			switch {
+			case fr.Result != nil:
+				resp, err := s.client.ReportResult(s.ctx, ReportResultRequest{
+					RunnerID:  hello.RunnerID,
+					SessionID: s.sessionID,
+					Lease:     fr.Result.Lease,
+					Result:    fr.Result.Result,
+					AuthToken: s.authToken,
+				})
+				if err != nil {
+					if !s.emit(ServerFrame{Ack: &AckFrame{LeaseID: fr.Result.LeaseID, Accepted: false, Error: err.Error()}}) {
+						return
+					}
+					continue
+				}
+				if !s.emit(ServerFrame{Ack: &AckFrame{LeaseID: fr.Result.LeaseID, Accepted: resp.Accepted, Error: resp.Error}}) {
+					return
+				}
+			case fr.ControlObservation != nil:
+				s.setRecoveryOnly(fr.ControlObservation.RecoveryOnly)
+				resp, err := s.client.Heartbeat(s.ctx, HeartbeatRequest{
+					RunnerID:  hello.RunnerID,
+					SessionID: s.sessionID,
+					Capacity:  hello.Concurrency,
+					InFlight:  int(fr.ControlObservation.ActiveWorkers),
+					DrainObservation: &RunnerDrainObservation{
+						Generation:        fr.ControlObservation.Generation,
+						RecoveryOnly:      fr.ControlObservation.RecoveryOnly,
+						ActiveActivations: fr.ControlObservation.ActiveActivations,
+					},
+				})
+				if err != nil {
+					if !s.emit(ServerFrame{Ack: &AckFrame{Accepted: false, Error: err.Error()}}) {
+						return
+					}
+					continue
+				}
+				if !s.emitControl(resp.Control) {
+					return
+				}
+			case fr.Bye != nil:
+				return
+			}
+		case <-s.ctx.Done():
+			return
+		}
+	}
+}
+
+func (s *httpStream) emit(frame ServerFrame) bool {
+	select {
+	case s.recvCh <- frame:
+		return true
+	case <-s.ctx.Done():
+		return false
+	}
+}
+
+func (s *httpStream) emitControl(directive *RunnerControlDirective) bool {
+	if directive == nil {
+		return true
+	}
+	return s.emit(ServerFrame{Control: &ControlFrame{Directive: directive}})
+}
+
+func (s *httpStream) setRecoveryOnly(recoveryOnly bool) {
+	s.controlMu.Lock()
+	s.recoveryOnly = recoveryOnly
+	s.controlMu.Unlock()
+}
+
+func (s *httpStream) isRecoveryOnly() bool {
+	s.controlMu.RLock()
+	defer s.controlMu.RUnlock()
+	return s.recoveryOnly
 }
 
 // Send enqueues a frame to the stream. Returns ctx.Err() if the stream is closed.

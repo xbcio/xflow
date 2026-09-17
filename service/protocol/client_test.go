@@ -120,3 +120,47 @@ func decodeClientTestJSON(t *testing.T, r *http.Request, dst any) {
 		t.Fatal(err)
 	}
 }
+
+func TestClientRunnerControlWireFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case RegisterRunnerPath:
+			_ = json.NewEncoder(w).Encode(RegisterRunnerResponse{Control: &RunnerControlDirective{DesiredState: "draining", Generation: 2, RecoveryOnly: true}})
+		case HeartbeatPath:
+			var request HeartbeatRequest
+			decodeClientTestJSON(t, r, &request)
+			if request.DrainObservation == nil || *request.DrainObservation != (RunnerDrainObservation{Generation: 2, RecoveryOnly: true, ActiveActivations: 3}) {
+				t.Fatalf("HTTP heartbeat drain observation = %#v", request.DrainObservation)
+			}
+			_ = json.NewEncoder(w).Encode(HeartbeatResponse{Control: &RunnerControlDirective{DesiredState: "draining", Generation: 2, RecoveryOnly: true}})
+		case PollTaskPath:
+			var request PollTaskRequest
+			decodeClientTestJSON(t, r, &request)
+			if !request.RecoveryOnly {
+				t.Fatal("HTTP poll request did not carry recovery_only")
+			}
+			_ = json.NewEncoder(w).Encode(PollTaskResponse{Control: &RunnerControlDirective{DesiredState: "draining", Generation: 2, RecoveryOnly: true}})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := NewClient(server.URL, server.Client())
+	ctx := context.Background()
+	registered, err := client.Register(ctx, RegisterRunnerRequest{RunnerID: "runner-a", Concurrency: 1})
+	if err != nil || registered.Control == nil || !registered.Control.RecoveryOnly {
+		t.Fatalf("Register control = %#v, err=%v", registered.Control, err)
+	}
+	heartbeat, err := client.Heartbeat(ctx, HeartbeatRequest{
+		RunnerID: "runner-a", Capacity: 1,
+		DrainObservation: &RunnerDrainObservation{Generation: 2, RecoveryOnly: true, ActiveActivations: 3},
+	})
+	if err != nil || heartbeat.Control == nil || !heartbeat.Control.RecoveryOnly {
+		t.Fatalf("Heartbeat control = %#v, err=%v", heartbeat.Control, err)
+	}
+	poll, err := client.Poll(ctx, PollTaskRequest{RunnerID: "runner-a", RecoveryOnly: true})
+	if err != nil || poll.Control == nil || !poll.Control.RecoveryOnly {
+		t.Fatalf("Poll control = %#v, err=%v", poll.Control, err)
+	}
+}

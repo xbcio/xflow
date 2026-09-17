@@ -445,3 +445,84 @@ func TestActivationTracker_ReplicaSiblingsAreIndependent(t *testing.T) {
 		t.Fatalf("handler deactivations = %#v, want only replica 1", deactivations)
 	}
 }
+
+func TestActivationTrackerDeactivatedCallbackOnlyAfterCleanupSucceeds(t *testing.T) {
+	handler := &cleanupRetryHandler{failOnce: true}
+	tracker := NewActivationTracker(handler, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	var acknowledgements []protocol.DeactivateDirective
+	tracker.SetOnDeactivated(func(d protocol.DeactivateDirective) {
+		acknowledgements = append(acknowledgements, d)
+	})
+	ctx := context.Background()
+	activate := protocol.ActivateDirective{WorkflowID: "wf", WorkflowVersion: "v1", EntryUnitID: "entry", Generation: 1}
+	deactivate := protocol.DeactivateDirective{WorkflowID: "wf", WorkflowVersion: "v1", EntryUnitID: "entry", Generation: 1}
+	if err := tracker.ProcessDirectives(ctx, &protocol.HeartbeatActivations{Activate: []protocol.ActivateDirective{activate}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tracker.ProcessDirectives(ctx, &protocol.HeartbeatActivations{Deactivate: []protocol.DeactivateDirective{deactivate}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(acknowledgements) != 0 {
+		t.Fatalf("acknowledgements after failed cleanup = %+v, want none", acknowledgements)
+	}
+	if inventory := tracker.Inventory(); len(inventory) != 1 {
+		t.Fatalf("inventory after failed cleanup = %+v, want retained activation for retry", inventory)
+	}
+	if err := tracker.ProcessDirectives(ctx, &protocol.HeartbeatActivations{Deactivate: []protocol.DeactivateDirective{deactivate}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(acknowledgements) != 1 || acknowledgements[0] != deactivate {
+		t.Fatalf("acknowledgements after retry = %+v, want %+v", acknowledgements, deactivate)
+	}
+	if inventory := tracker.Inventory(); len(inventory) != 0 {
+		t.Fatalf("inventory after successful retry = %+v, want empty", inventory)
+	}
+}
+
+type cleanupRetryHandler struct {
+	failOnce bool
+	calls    int
+}
+
+func (h *cleanupRetryHandler) Activate(context.Context, protocol.ActivateDirective) error { return nil }
+func (h *cleanupRetryHandler) Deactivate(protocol.DeactivateDirective) error {
+	h.calls++
+	if h.failOnce {
+		h.failOnce = false
+		return errors.New("close failed")
+	}
+	return nil
+}
+
+func TestActivationTrackerActiveCountTracksSubscriptions(t *testing.T) {
+	var nilTracker *ActivationTracker
+	if got := nilTracker.ActiveCount(); got != 0 {
+		t.Fatalf("nil tracker active count = %d, want 0", got)
+	}
+
+	tracker := NewActivationTracker(&mockActivationHandler{}, slog.Default())
+	first := protocol.ActivateDirective{WorkflowID: "workflow-a", WorkflowVersion: "v1", EntryUnitID: "entry-a", Generation: 1}
+	second := protocol.ActivateDirective{WorkflowID: "workflow-b", WorkflowVersion: "v1", EntryUnitID: "entry-b", Generation: 1}
+	if err := tracker.ProcessDirectives(context.Background(), &protocol.HeartbeatActivations{Activate: []protocol.ActivateDirective{first, second}}); err != nil {
+		t.Fatalf("activate subscriptions: %v", err)
+	}
+	if got := tracker.ActiveCount(); got != 2 {
+		t.Fatalf("active count after activation = %d, want 2", got)
+	}
+	if err := tracker.ProcessDirectives(context.Background(), &protocol.HeartbeatActivations{Deactivate: []protocol.DeactivateDirective{{
+		WorkflowID: first.WorkflowID, WorkflowVersion: first.WorkflowVersion, EntryUnitID: first.EntryUnitID, Generation: first.Generation,
+	}}}); err != nil {
+		t.Fatalf("deactivate first subscription: %v", err)
+	}
+	if got := tracker.ActiveCount(); got != 1 {
+		t.Fatalf("active count after one deactivation = %d, want 1", got)
+	}
+	if err := tracker.ProcessDirectives(context.Background(), &protocol.HeartbeatActivations{Deactivate: []protocol.DeactivateDirective{{
+		WorkflowID: second.WorkflowID, WorkflowVersion: second.WorkflowVersion, EntryUnitID: second.EntryUnitID, Generation: second.Generation,
+	}}}); err != nil {
+		t.Fatalf("deactivate second subscription: %v", err)
+	}
+	if got := tracker.ActiveCount(); got != 0 {
+		t.Fatalf("active count after all deactivations = %d, want 0", got)
+	}
+}

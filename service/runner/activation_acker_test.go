@@ -341,3 +341,49 @@ func TestActivationAckDedupIncludesReplicaIndex(t *testing.T) {
 		t.Fatalf("acks by replica = %v, want replica 0/gen5 and replica 1/gen1", generations)
 	}
 }
+
+func TestDeactivationReceiptRetriesAfterTransportFailure(t *testing.T) {
+	client := &flakyDeactivationAckClient{failFirst: true, attempted: make(chan struct{}, 2)}
+	acker := newActivationAcker(client, "runner-1", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	directive := protocol.DeactivateDirective{WorkflowID: "wf", WorkflowVersion: "v1", EntryUnitID: "entry", Generation: 3}
+	acker.ackDeactivated("session-1", directive)
+	select {
+	case <-client.attempted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for failed receipt attempt")
+	}
+	acker.ackDeactivated("session-1", directive)
+	select {
+	case <-client.attempted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for retry receipt attempt")
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.acks) != 2 {
+		t.Fatalf("receipt attempts = %d, want retry after failure", len(client.acks))
+	}
+	if client.acks[1].Status != protocol.ActivationStatusDeactivated || client.acks[1].SessionID != "session-1" {
+		t.Fatalf("retry receipt = %+v", client.acks[1])
+	}
+}
+
+type flakyDeactivationAckClient struct {
+	mu        sync.Mutex
+	failFirst bool
+	acks      []protocol.ActivationAck
+	attempted chan struct{}
+}
+
+func (c *flakyDeactivationAckClient) ActivationAck(_ context.Context, ack protocol.ActivationAck) error {
+	c.mu.Lock()
+	c.acks = append(c.acks, ack)
+	fail := c.failFirst
+	c.failFirst = false
+	c.mu.Unlock()
+	c.attempted <- struct{}{}
+	if fail {
+		return errors.New("temporary receipt failure")
+	}
+	return nil
+}

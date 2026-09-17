@@ -179,6 +179,66 @@ func TestTriggerActivationHandler_DeactivateUnknownIsNoop(t *testing.T) {
 	}
 }
 
+// retryCloseSubscription makes the production handler's Close-before-remove
+// contract observable. A durable drain directive is redelivered after a local
+// cleanup failure, so dropping this record on the first error would turn the
+// retry into a false successful no-op.
+type retryCloseSubscription struct {
+	closeCalls int
+}
+
+func (s *retryCloseSubscription) Close(context.Context) error {
+	s.closeCalls++
+	if s.closeCalls == 1 {
+		return errors.New("temporary close failure")
+	}
+	return nil
+}
+
+func TestTriggerActivationHandler_DeactivateRetriesCloseAfterFailure(t *testing.T) {
+	h := NewTriggerActivationHandler(
+		"https://control.internal",
+		"secret",
+		fakeLookup{handlers: map[string]types.TriggerHandler{}},
+	)
+	d := protocol.DeactivateDirective{
+		Namespace:       "ns",
+		WorkflowID:      "wf",
+		WorkflowVersion: "v1",
+		EntryUnitID:     "entry",
+		Generation:      7,
+	}
+	id := activationIDFromDeactivate(d)
+	sub := &retryCloseSubscription{}
+	h.subs[id] = activationState{sub: sub}
+
+	if err := h.Deactivate(d); err == nil {
+		t.Fatal("first Deactivate error = nil, want Close failure")
+	}
+	h.mu.Lock()
+	stored, stillPresent := h.subs[id]
+	h.mu.Unlock()
+	if !stillPresent || stored.sub != sub {
+		t.Fatal("subscription was removed after failed Close; durable retry would falsely succeed")
+	}
+	if sub.closeCalls != 1 {
+		t.Fatalf("Close calls after first deactivate = %d, want 1", sub.closeCalls)
+	}
+
+	if err := h.Deactivate(d); err != nil {
+		t.Fatalf("retry Deactivate error = %v, want nil", err)
+	}
+	h.mu.Lock()
+	_, stillPresent = h.subs[id]
+	h.mu.Unlock()
+	if stillPresent {
+		t.Fatal("subscription remains after successful retry")
+	}
+	if sub.closeCalls != 2 {
+		t.Fatalf("Close calls after retry = %d, want 2", sub.closeCalls)
+	}
+}
+
 func TestTriggerActivationHandler_StaleCloseOnGenerationUpgrade(t *testing.T) {
 	fh := &fakeTriggerHandler{}
 	lookup := fakeLookup{handlers: map[string]types.TriggerHandler{"fake": fh}}

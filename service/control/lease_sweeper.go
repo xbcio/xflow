@@ -271,6 +271,7 @@ func (s *LeaseSweeper) SweepOnce(ctx context.Context) int {
 		ok, err := s.engine.ReclaimLease(ctx, lease)
 		switch {
 		case ok && err == nil:
+			s.settleFinalizedHandoff(ctx, lease)
 			s.observeTiming(func(observer SweepTimingObserver) {
 				observer.OnSweepReclaimResult(leaseCtx, "reclaimed", time.Since(reclaimStarted))
 			})
@@ -280,6 +281,7 @@ func (s *LeaseSweeper) SweepOnce(ctx context.Context) int {
 				s.observer.OnSweepReclaim(leaseCtx, string(lease.ExecutionID), lease.NodeName, ageMs)
 			}
 		case ok && err != nil:
+			s.settleFinalizedHandoff(ctx, lease)
 			// Revoke/outbox applied, but immediate FlushOutbox failed. The
 			// lease is already revoked (it will not be re-listed), so count
 			// the reclaim as applied and let the durable OutboxDispatcher
@@ -317,6 +319,22 @@ func (s *LeaseSweeper) SweepOnce(ctx context.Context) int {
 		}
 	}
 	return reclaimed
+}
+
+// settleFinalizedHandoff records the final engine disposition after a
+// directory lease record was removed ahead of reclaim. It is deliberately
+// best-effort only after a conclusive reclaim: a failed settlement keeps the
+// durable debt visible rather than making drain look complete.
+func (s *LeaseSweeper) settleFinalizedHandoff(ctx context.Context, lease engine.ExpiredLease) {
+	settler, ok := s.directory.(FinalizedHandoffSettler)
+	if !ok || settler == nil {
+		return
+	}
+	if err := settler.SettleFinalizedHandoff(ctx,
+		BuildAssignmentID(taskFromExpiredLease(&lease)), lease.LeaseID, lease.LeaseToken); err != nil && s.log != nil {
+		s.log.Error("settle finalized runner handoff",
+			"exec", string(lease.ExecutionID), "node", lease.NodeName, "err", err)
+	}
 }
 
 // taskFromExpiredLease reconstructs the queued task identity used to derive

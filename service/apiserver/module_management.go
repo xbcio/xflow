@@ -2,8 +2,12 @@ package apiserver
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"net/http"
@@ -203,6 +207,16 @@ func (m *managementModule) RegisterHTTP(mux *http.ServeMux) {
 		// its handler answers not_implemented.
 		mux.HandleFunc("POST "+PathManagementRunnerRevokeIdentity, m.authzWrap(OpManagementRunnerRevokeIdentity, true, m.handleRevokeRunnerIdentity, func(r *http.Request) (string, string, string, string) {
 			return "management/runners/" + r.PathValue("id") + "/revoke-identity", "", "", ""
+		}))
+		// Drain/resume are intentionally mounted only behind PrincipalAuth, just
+		// like identity revocation. There is no unauthenticated dev fallback for
+		// a platform-wide scheduling mutation. The handler applies the additive
+		// control_global scope before it consults the directory.
+		mux.HandleFunc("POST "+PathManagementRunnerDrain, m.authzWrap(OpManagementRunnerDrain, true, m.handleDrainRunner, func(r *http.Request) (string, string, string, string) {
+			return "management/runners/" + r.PathValue("id") + "/drain", "", "", ""
+		}))
+		mux.HandleFunc("POST "+PathManagementRunnerResume, m.authzWrap(OpManagementRunnerResume, true, m.handleResumeRunner, func(r *http.Request) (string, string, string, string) {
+			return "management/runners/" + r.PathValue("id") + "/resume", "", "", ""
 		}))
 	} else {
 		mux.HandleFunc("GET "+PathManagementLeader, m.handleLeader)
@@ -452,6 +466,133 @@ func (m *managementModule) handleListRunners(w http.ResponseWriter, r *http.Requ
 		out = append(out, runnerListItem{RunnerID: id, Enrolled: enrolled[id]})
 	}
 	writeData(w, r, http.StatusOK, out)
+}
+
+// runnerControlBody is intentionally small: a reason is the complete mutation
+// body, so its canonical form can be hashed into the durable receipt. Do not add
+// caller-controlled operational fields here without extending that receipt
+// contract.
+type runnerControlBody struct {
+	Reason string `json:"reason"`
+}
+
+const maxRunnerControlReasonBytes = 512
+
+// decodeRunnerControlBody accepts exactly one JSON object with the one field
+// that participates in the idempotency hash. The generic decodeJSON helper is
+// intentionally permissive for older routes; using it here would let two
+// syntactically different bodies share a receipt while silently ignoring extra
+// fields, which makes later API evolution unsafe.
+func decodeRunnerControlBody(w http.ResponseWriter, r *http.Request, dst *runnerControlBody) bool {
+	defer func() { _ = r.Body.Close() }()
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		writeFail(w, r, http.StatusBadRequest, "bad_request", "invalid JSON")
+		return false
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		writeFail(w, r, http.StatusBadRequest, "bad_request", "invalid JSON")
+		return false
+	}
+	return true
+}
+
+func (m *managementModule) handleDrainRunner(w http.ResponseWriter, r *http.Request) {
+	m.handleRunnerControl(w, r, "drain", control.RunnerDesiredStateDraining)
+}
+
+func (m *managementModule) handleResumeRunner(w http.ResponseWriter, r *http.Request) {
+	m.handleRunnerControl(w, r, "resume", control.RunnerDesiredStateActive)
+}
+
+// handleRunnerControl applies one server-authoritative desired-state mutation.
+// The base operation scope is admitted by authzWrap; control_global is checked
+// here before a directory capability assertion or runner lookup so an otherwise
+// authorized tenant principal cannot turn this route into a runner-ID oracle.
+func (m *managementModule) handleRunnerControl(w http.ResponseWriter, r *http.Request, action string, desired control.RunnerDesiredState) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	principal, ok := principalFromRequest(r)
+	if !ok {
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	if !principal.HasScope(ScopeManagementRunnerControlGlobal) {
+		writeFail(w, r, http.StatusForbidden, "forbidden", "forbidden")
+		return
+	}
+
+	// X-Request-Id is a required idempotency key for this mutation, not merely
+	// a response-correlation header. sanitizeRequestID deliberately treats bad
+	// syntax as absent so it cannot enter receipts or audit rows.
+	requestID := sanitizeRequestID(r.Header.Get("X-Request-Id"))
+	if requestID == "" {
+		writeFail(w, r, http.StatusBadRequest, "request_id_required", "X-Request-Id is required")
+		return
+	}
+
+	var body runnerControlBody
+	if !decodeRunnerControlBody(w, r, &body) {
+		return
+	}
+	reason := strings.TrimSpace(body.Reason)
+	if reason == "" {
+		writeFail(w, r, http.StatusBadRequest, "bad_request", "reason is required")
+		return
+	}
+	if len([]byte(reason)) > maxRunnerControlReasonBytes {
+		writeFail(w, r, http.StatusBadRequest, "bad_request", "reason is too long")
+		return
+	}
+
+	// This is deliberately after the global-scope check. A directory that cannot
+	// atomically persist both receipt and new-claim gate is not a safe degraded
+	// implementation, so answer 501 rather than putting a cosmetic flag in the
+	// management surface.
+	directory, supported := m.cp.RunnerDirectory().(control.RunnerControlDirectory)
+	if !supported || isNilValue(directory) {
+		writeFail(w, r, http.StatusNotImplemented, "runner_control_unsupported", "runner control is not supported")
+		return
+	}
+	runnerID := r.PathValue("id")
+	if runnerID == "" {
+		writeFail(w, r, http.StatusNotFound, "runner_not_found", "runner not found")
+		return
+	}
+
+	hash := runnerControlRequestHash(action, reason)
+	snapshot, err := directory.SetRunnerControl(r.Context(), control.RunnerControlRequest{
+		RunnerID:     runnerID,
+		DesiredState: desired,
+		Actor:        principal.Subject,
+		Reason:       reason,
+		Action:       action,
+		RequestID:    requestID,
+		RequestHash:  hash,
+		Now:          time.Now().UTC(),
+	})
+	switch {
+	case err == nil:
+		writeData(w, r, http.StatusOK, snapshot)
+	case errors.Is(err, control.ErrRunnerControlRequestConflict):
+		writeFail(w, r, http.StatusConflict, "idempotency_key_reused", "X-Request-Id was reused with a different request")
+	case errors.Is(err, control.ErrRunnerNotFound):
+		writeFail(w, r, http.StatusNotFound, "runner_not_found", "runner not found")
+	case errors.Is(err, control.ErrRunnerControlRequestIDRequired), errors.Is(err, control.ErrRunnerControlInvalidState):
+		// Both should have been rejected above; retain a stable client error if a
+		// custom directory validates more eagerly than the built-ins.
+		writeFail(w, r, http.StatusBadRequest, "bad_request", "invalid runner control request")
+	default:
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+	}
+}
+
+func runnerControlRequestHash(action, reason string) string {
+	digest := sha256.Sum256([]byte(action + "\x00" + reason))
+	return hex.EncodeToString(digest[:])
 }
 
 // handleRevokeRunnerIdentity kills a runner's issued identity, so its next

@@ -67,6 +67,9 @@ func (c *Core) dispatchSubgraphLease(ctx context.Context, claim Claim) (protocol
 		_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
 		return protocol.PollTaskResponse{}, errors.New("engine does not support batch leases")
 	}
+	if err := c.prepareClaimLease(ctx, claim); err != nil {
+		return protocol.PollTaskResponse{}, normalizeRunnerError(err, c.logger, "poll")
+	}
 
 	// A batch's lease needs a dispatch span for the same reason a node's does:
 	// the runner starts xflow.task.execute from the carrier injected here, so
@@ -78,10 +81,16 @@ func (c *Core) dispatchSubgraphLease(ctx context.Context, claim Claim) (protocol
 		lease.SubgraphPayload = payload
 		lease.TraceCarrier = tracing.InjectCarrier(dispatchCtx)
 		lease.Namespace = claim.Assignment.Namespace
+		if recordErr := c.recordClaimLeaseCreated(dispatchCtx, claim, lease); recordErr != nil {
+			dispatchSpan.RecordError(recordErr)
+			dispatchSpan.End()
+			c.requeueClaimAfterDispatchFailure(ctx, claim)
+			return protocol.PollTaskResponse{}, normalizeRunnerError(recordErr, c.logger, "poll")
+		}
 		if err := c.runners.FinalizeClaim(dispatchCtx, claim.ClaimID, lease); err != nil {
 			dispatchSpan.RecordError(err)
 			dispatchSpan.End()
-			_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
+			c.requeueClaimAfterDispatchFailure(ctx, claim)
 			return protocol.PollTaskResponse{}, normalizeRunnerError(err, c.logger, "poll")
 		}
 		dispatchSpan.End()
@@ -89,13 +98,16 @@ func (c *Core) dispatchSubgraphLease(ctx context.Context, claim Claim) (protocol
 
 	case errors.Is(err, engine.ErrExecutionInactive):
 		dispatchSpan.End()
-		_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimDrop)
+		if settleErr := c.dropClaimAfterHandoffResolution(ctx, claim); settleErr != nil {
+			c.requeueClaimAfterDispatchFailure(ctx, claim)
+			return protocol.PollTaskResponse{}, normalizeRunnerError(settleErr, c.logger, "poll")
+		}
 		return protocol.PollTaskResponse{}, nil
 
 	default:
 		dispatchSpan.RecordError(err)
 		dispatchSpan.End()
-		_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
+		c.requeueClaimAfterDispatchFailure(ctx, claim)
 		return protocol.PollTaskResponse{}, err
 	}
 }
@@ -108,6 +120,9 @@ func (c *Core) dispatchGroupLease(ctx context.Context, claim Claim) (protocol.Po
 		_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
 		return protocol.PollTaskResponse{}, errors.New("engine does not support group leases")
 	}
+	if err := c.prepareClaimLease(ctx, claim); err != nil {
+		return protocol.PollTaskResponse{}, normalizeRunnerError(err, c.logger, "poll")
+	}
 
 	// See dispatchSubgraphLease: the carrier injected from this span's context is
 	// what parents the runner's whole group execution to the workflow trace.
@@ -118,10 +133,16 @@ func (c *Core) dispatchGroupLease(ctx context.Context, claim Claim) (protocol.Po
 		lease.GroupPayload = payload
 		lease.TraceCarrier = tracing.InjectCarrier(dispatchCtx)
 		lease.Namespace = claim.Assignment.Namespace
+		if recordErr := c.recordClaimLeaseCreated(dispatchCtx, claim, lease); recordErr != nil {
+			dispatchSpan.RecordError(recordErr)
+			dispatchSpan.End()
+			c.requeueClaimAfterDispatchFailure(ctx, claim)
+			return protocol.PollTaskResponse{}, normalizeRunnerError(recordErr, c.logger, "poll")
+		}
 		if err := c.runners.FinalizeClaim(dispatchCtx, claim.ClaimID, lease); err != nil {
 			dispatchSpan.RecordError(err)
 			dispatchSpan.End()
-			_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
+			c.requeueClaimAfterDispatchFailure(ctx, claim)
 			return protocol.PollTaskResponse{}, normalizeRunnerError(err, c.logger, "poll")
 		}
 		dispatchSpan.End()
@@ -135,32 +156,44 @@ func (c *Core) dispatchGroupLease(ctx context.Context, claim Claim) (protocol.Po
 			// receive it is starting a fresh execute span either way.
 			recovered.TraceCarrier = tracing.InjectCarrier(dispatchCtx)
 			recovered.Namespace = claim.Assignment.Namespace
+			if recordErr := c.recordClaimLeaseCreated(dispatchCtx, claim, recovered); recordErr != nil {
+				dispatchSpan.RecordError(recordErr)
+				dispatchSpan.End()
+				c.requeueClaimAfterDispatchFailure(ctx, claim)
+				return protocol.PollTaskResponse{}, normalizeRunnerError(recordErr, c.logger, "poll")
+			}
 			if finalizeErr := c.runners.FinalizeClaim(dispatchCtx, claim.ClaimID, recovered); finalizeErr != nil {
 				dispatchSpan.RecordError(finalizeErr)
 				dispatchSpan.End()
-				_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
+				c.requeueClaimAfterDispatchFailure(ctx, claim)
 				return protocol.PollTaskResponse{}, normalizeRunnerError(finalizeErr, c.logger, "poll")
 			}
 			dispatchSpan.End()
 			return protocol.PollTaskResponse{Lease: recovered}, nil
 		}
 		dispatchSpan.End()
-		if errors.Is(recoverErr, engine.ErrExecutionInactive) {
-			_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimDrop)
+		if errors.Is(recoverErr, engine.ErrExecutionInactive) || errors.Is(recoverErr, engine.ErrGroupLeaseNotActive) {
+			if settleErr := c.dropClaimAfterHandoffResolution(ctx, claim); settleErr != nil {
+				c.makeClaimHandoffRecoverable(ctx, claim)
+				return protocol.PollTaskResponse{}, normalizeRunnerError(settleErr, c.logger, "poll")
+			}
 			return protocol.PollTaskResponse{}, nil
 		}
-		_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
+		c.requeueClaimAfterDispatchFailure(ctx, claim)
 		return protocol.PollTaskResponse{}, recoverErr
 
 	case errors.Is(err, engine.ErrExecutionInactive):
 		dispatchSpan.End()
-		_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimDrop)
+		if settleErr := c.dropClaimAfterHandoffResolution(ctx, claim); settleErr != nil {
+			c.requeueClaimAfterDispatchFailure(ctx, claim)
+			return protocol.PollTaskResponse{}, normalizeRunnerError(settleErr, c.logger, "poll")
+		}
 		return protocol.PollTaskResponse{}, nil
 
 	default:
 		dispatchSpan.RecordError(err)
 		dispatchSpan.End()
-		_ = c.runners.ReleaseClaim(ctx, claim.ClaimID, ReleaseClaimRequeue)
+		c.requeueClaimAfterDispatchFailure(ctx, claim)
 		return protocol.PollTaskResponse{}, err
 	}
 }

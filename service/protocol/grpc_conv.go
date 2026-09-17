@@ -122,10 +122,55 @@ func ActivationInventoryFromProto(items []*runnerpb.ActivationInventoryItem) []A
 	return out
 }
 
+func RunnerControlDirectiveToProto(directive *RunnerControlDirective) *runnerpb.RunnerControlDirective {
+	if directive == nil {
+		return nil
+	}
+	return &runnerpb.RunnerControlDirective{
+		DesiredState: directive.DesiredState,
+		Generation:   directive.Generation,
+		RecoveryOnly: directive.RecoveryOnly,
+	}
+}
+
+func RunnerControlDirectiveFromProto(directive *runnerpb.RunnerControlDirective) *RunnerControlDirective {
+	if directive == nil {
+		return nil
+	}
+	return &RunnerControlDirective{
+		DesiredState: directive.GetDesiredState(),
+		Generation:   directive.GetGeneration(),
+		RecoveryOnly: directive.GetRecoveryOnly(),
+	}
+}
+
+func RunnerDrainObservationToProto(observation *RunnerDrainObservation) *runnerpb.RunnerDrainObservation {
+	if observation == nil {
+		return nil
+	}
+	return &runnerpb.RunnerDrainObservation{
+		Generation:        observation.Generation,
+		RecoveryOnly:      observation.RecoveryOnly,
+		ActiveActivations: observation.ActiveActivations,
+	}
+}
+
+func RunnerDrainObservationFromProto(observation *runnerpb.RunnerDrainObservation) *RunnerDrainObservation {
+	if observation == nil {
+		return nil
+	}
+	return &RunnerDrainObservation{
+		Generation:        observation.GetGeneration(),
+		RecoveryOnly:      observation.GetRecoveryOnly(),
+		ActiveActivations: observation.GetActiveActivations(),
+	}
+}
+
 func RegisterResponseToProto(resp RegisterRunnerResponse) *runnerpb.RegisterResponse {
 	return &runnerpb.RegisterResponse{
 		RunnerId:  resp.RunnerID,
 		SessionId: resp.SessionID,
+		Control:   RunnerControlDirectiveToProto(resp.Control),
 	}
 }
 
@@ -133,30 +178,33 @@ func RegisterResponseFromProto(resp *runnerpb.RegisterResponse) RegisterRunnerRe
 	return RegisterRunnerResponse{
 		RunnerID:  resp.GetRunnerId(),
 		SessionID: resp.GetSessionId(),
+		Control:   RunnerControlDirectiveFromProto(resp.GetControl()),
 	}
 }
 
 func HeartbeatRequestToProto(req HeartbeatRequest) *runnerpb.HeartbeatRequest {
 	return &runnerpb.HeartbeatRequest{
-		RunnerId:       req.RunnerID,
-		Capacity:       int32(req.Capacity),
-		InFlight:       int32(req.InFlight),
-		Timestamp:      req.Timestamp,
-		SessionId:      req.SessionID,
-		SupplyObserved: cloneLabels(req.SupplyObserved),
-		SupplyKeyId:    req.SupplyKeyID,
+		RunnerId:         req.RunnerID,
+		Capacity:         int32(req.Capacity),
+		InFlight:         int32(req.InFlight),
+		Timestamp:        req.Timestamp,
+		SessionId:        req.SessionID,
+		SupplyObserved:   cloneLabels(req.SupplyObserved),
+		SupplyKeyId:      req.SupplyKeyID,
+		DrainObservation: RunnerDrainObservationToProto(req.DrainObservation),
 	}
 }
 
 func HeartbeatRequestFromProto(req *runnerpb.HeartbeatRequest) HeartbeatRequest {
 	return HeartbeatRequest{
-		RunnerID:       req.GetRunnerId(),
-		SessionID:      req.GetSessionId(),
-		Capacity:       int(req.GetCapacity()),
-		InFlight:       int(req.GetInFlight()),
-		Timestamp:      req.GetTimestamp(),
-		SupplyObserved: cloneLabels(req.GetSupplyObserved()),
-		SupplyKeyID:    req.GetSupplyKeyId(),
+		RunnerID:         req.GetRunnerId(),
+		SessionID:        req.GetSessionId(),
+		Capacity:         int(req.GetCapacity()),
+		InFlight:         int(req.GetInFlight()),
+		Timestamp:        req.GetTimestamp(),
+		SupplyObserved:   cloneLabels(req.GetSupplyObserved()),
+		SupplyKeyID:      req.GetSupplyKeyId(),
+		DrainObservation: RunnerDrainObservationFromProto(req.GetDrainObservation()),
 	}
 }
 
@@ -168,6 +216,7 @@ func HeartbeatResponseToProto(resp HeartbeatResponse) (*runnerpb.HeartbeatRespon
 		ServerTime:        resp.ServerTime,
 		SupplyHints:       cloneLabels(resp.SupplyHints),
 		SupplyKeyRotation: resp.SupplyKeyRotation,
+		Control:           RunnerControlDirectiveToProto(resp.Control),
 	}
 	if resp.Activations != nil {
 		data, err := json.Marshal(resp.Activations)
@@ -185,6 +234,7 @@ func HeartbeatResponseFromProto(resp *runnerpb.HeartbeatResponse) (HeartbeatResp
 		ServerTime:        resp.GetServerTime(),
 		SupplyHints:       cloneLabels(resp.GetSupplyHints()),
 		SupplyKeyRotation: resp.GetSupplyKeyRotation(),
+		Control:           RunnerControlDirectiveFromProto(resp.GetControl()),
 	}
 	if data := resp.GetActivationsJson(); len(data) > 0 {
 		var acts HeartbeatActivations
@@ -204,6 +254,7 @@ func PollTaskRequestToProto(req PollTaskRequest) *runnerpb.PollTaskRequest {
 		Capabilities:   CapabilitiesToProto(req.Capabilities),
 		Labels:         cloneLabels(req.Labels),
 		ActiveLeaseIds: append([]string(nil), req.ActiveLeaseIDs...),
+		RecoveryOnly:   req.RecoveryOnly,
 	}
 }
 
@@ -215,6 +266,7 @@ func PollTaskRequestFromProto(req *runnerpb.PollTaskRequest) PollTaskRequest {
 		Capabilities:   CapabilitiesFromProto(req.GetCapabilities()),
 		Labels:         cloneLabels(req.GetLabels()),
 		ActiveLeaseIDs: append([]string(nil), req.GetActiveLeaseIds()...),
+		RecoveryOnly:   req.GetRecoveryOnly(),
 	}
 }
 
@@ -226,6 +278,7 @@ func PollTaskResponseToProto(resp PollTaskResponse) (*runnerpb.PollTaskResponse,
 	return &runnerpb.PollTaskResponse{
 		LeaseJson: leaseJSON,
 		WaitNanos: int64(resp.Wait),
+		Control:   RunnerControlDirectiveToProto(resp.Control),
 	}, nil
 }
 
@@ -235,8 +288,9 @@ func PollTaskResponseFromProto(resp *runnerpb.PollTaskResponse) (PollTaskRespons
 		return PollTaskResponse{}, err
 	}
 	return PollTaskResponse{
-		Lease: lease,
-		Wait:  time.Duration(resp.GetWaitNanos()),
+		Lease:   lease,
+		Wait:    time.Duration(resp.GetWaitNanos()),
+		Control: RunnerControlDirectiveFromProto(resp.GetControl()),
 	}, nil
 }
 
@@ -324,6 +378,15 @@ func RunnerFrameToProto(f RunnerFrame) (*runnerpb.RunnerFrame, error) {
 				ResultJson: resultJSON,
 			},
 		}}, nil
+	case f.ControlObservation != nil:
+		return &runnerpb.RunnerFrame{Frame: &runnerpb.RunnerFrame_ControlObservation{
+			ControlObservation: &runnerpb.ControlObservationFrame{
+				Generation:        f.ControlObservation.Generation,
+				RecoveryOnly:      f.ControlObservation.RecoveryOnly,
+				ActiveWorkers:     f.ControlObservation.ActiveWorkers,
+				ActiveActivations: f.ControlObservation.ActiveActivations,
+			},
+		}}, nil
 	case f.Bye != nil:
 		return &runnerpb.RunnerFrame{Frame: &runnerpb.RunnerFrame_Bye{Bye: &runnerpb.ByeFrame{}}}, nil
 	}
@@ -354,6 +417,13 @@ func RunnerFrameFromProto(pb *runnerpb.RunnerFrame) (RunnerFrame, error) {
 			Lease:   lease,
 			Result:  result,
 		}}, nil
+	case *runnerpb.RunnerFrame_ControlObservation:
+		return RunnerFrame{ControlObservation: &ControlObservationFrame{
+			Generation:        f.ControlObservation.GetGeneration(),
+			RecoveryOnly:      f.ControlObservation.GetRecoveryOnly(),
+			ActiveWorkers:     f.ControlObservation.GetActiveWorkers(),
+			ActiveActivations: f.ControlObservation.GetActiveActivations(),
+		}}, nil
 	case *runnerpb.RunnerFrame_Bye:
 		return RunnerFrame{Bye: &ByeFrame{}}, nil
 	}
@@ -364,7 +434,15 @@ func ServerFrameToProto(f ServerFrame) (*runnerpb.ServerFrame, error) {
 	switch {
 	case f.Welcome != nil:
 		return &runnerpb.ServerFrame{Frame: &runnerpb.ServerFrame_Welcome{
-			Welcome: &runnerpb.WelcomeFrame{RunnerId: f.Welcome.RunnerID, ServerTime: f.Welcome.ServerTime},
+			Welcome: &runnerpb.WelcomeFrame{
+				RunnerId:   f.Welcome.RunnerID,
+				ServerTime: f.Welcome.ServerTime,
+				Control:    RunnerControlDirectiveToProto(f.Welcome.Control),
+			},
+		}}, nil
+	case f.Control != nil:
+		return &runnerpb.ServerFrame{Frame: &runnerpb.ServerFrame_Control{
+			Control: &runnerpb.ControlFrame{Directive: RunnerControlDirectiveToProto(f.Control.Directive)},
 		}}, nil
 	case f.Task != nil:
 		leaseJSON, err := marshalLease(f.Task.Lease)
@@ -391,7 +469,15 @@ func ServerFrameToProto(f ServerFrame) (*runnerpb.ServerFrame, error) {
 func ServerFrameFromProto(pb *runnerpb.ServerFrame) (ServerFrame, error) {
 	switch f := pb.GetFrame().(type) {
 	case *runnerpb.ServerFrame_Welcome:
-		return ServerFrame{Welcome: &WelcomeFrame{RunnerID: f.Welcome.GetRunnerId(), ServerTime: f.Welcome.GetServerTime()}}, nil
+		return ServerFrame{Welcome: &WelcomeFrame{
+			RunnerID:   f.Welcome.GetRunnerId(),
+			ServerTime: f.Welcome.GetServerTime(),
+			Control:    RunnerControlDirectiveFromProto(f.Welcome.GetControl()),
+		}}, nil
+	case *runnerpb.ServerFrame_Control:
+		return ServerFrame{Control: &ControlFrame{
+			Directive: RunnerControlDirectiveFromProto(f.Control.GetDirective()),
+		}}, nil
 	case *runnerpb.ServerFrame_Task:
 		lease, err := unmarshalLease(f.Task.GetLeaseJson())
 		if err != nil {

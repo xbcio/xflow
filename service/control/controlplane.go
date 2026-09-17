@@ -196,15 +196,17 @@ func selectWorkflowRegistry(cfg Config) backend.WorkflowRegistry {
 // Shutdown() lifecycle methods, so it can be mounted into a host program's
 // own http.Server instead of only running as the cmd/server binary.
 type ControlPlane struct {
-	backend    backend.Provider
-	eng        *engine.Engine
-	runners    RunnerDirectory
-	dispatcher *Dispatcher
-	httpServer *Server
-	grpcServer *GRPCServer
-	sweeper    *LeaseSweeper
-	elector    backend.LeaderElector
-	logger     engine.Logger
+	backend              backend.Provider
+	eng                  *engine.Engine
+	runners              RunnerDirectory
+	managementRunners    RunnerDirectory
+	runnerControlMetrics *RunnerControlMetricsCollector
+	dispatcher           *Dispatcher
+	httpServer           *Server
+	grpcServer           *GRPCServer
+	sweeper              *LeaseSweeper
+	elector              backend.LeaderElector
+	logger               engine.Logger
 
 	// entryActivations is the optional durable EntryActivation store (node-generic
 	// activation controller). Non-nil only when Config.EntryActivationStore is
@@ -253,16 +255,17 @@ type ControlPlane struct {
 	// apiserver can merge it into the scrape endpoint.
 	metricsInbox *MetricsInbox
 
-	lifecycleMu              sync.Mutex
-	started                  bool
-	stopped                  bool
-	leaderCancel             context.CancelFunc
-	sweeperCancel            context.CancelFunc
-	claimRecoveryCancel      context.CancelFunc
-	entryReconcilerCancel    context.CancelFunc
-	workflowProjectionCancel context.CancelFunc
-	supplyKeyCancel          context.CancelFunc
-	unbind                   func()
+	lifecycleMu                sync.Mutex
+	started                    bool
+	stopped                    bool
+	leaderCancel               context.CancelFunc
+	sweeperCancel              context.CancelFunc
+	claimRecoveryCancel        context.CancelFunc
+	runnerControlMetricsCancel context.CancelFunc
+	entryReconcilerCancel      context.CancelFunc
+	workflowProjectionCancel   context.CancelFunc
+	supplyKeyCancel            context.CancelFunc
+	unbind                     func()
 	// wg tracks the background goroutines started by Start (leader campaign,
 	// sweeper, claim recovery, entry reconciliation, workflow projection, and
 	// supply-key rotation). Shutdown cancels their contexts and then waits for
@@ -361,6 +364,14 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		runnerClaimObserver = metrics.NewRunnerClaimMetrics(cfg.Metrics)
 	}
 	runners := selectRunnerDirectory(cfg, runnerClaimObserver)
+	managementRunners := runners
+	var runnerControlMetrics *RunnerControlMetricsCollector
+	if cfg.Metrics != nil {
+		managementRunners, runnerControlMetrics = newRunnerControlMetricsManagementDirectory(
+			runners,
+			metrics.NewRunnerControlMetrics(cfg.Metrics),
+		)
+	}
 
 	var dispatcherOpts []DispatcherOption
 	if cfg.Metrics != nil {
@@ -553,6 +564,8 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		backend:                  cfg.Backend,
 		eng:                      eng,
 		runners:                  runners,
+		managementRunners:        managementRunners,
+		runnerControlMetrics:     runnerControlMetrics,
 		dispatcher:               dispatcher,
 		httpServer:               httpServer,
 		grpcServer:               grpcServer,
@@ -668,8 +681,15 @@ func (cp *ControlPlane) WorkflowActivationProjectionWorker() *WorkflowActivation
 // RunnerDirectory exposes the runner directory for management/observability
 // modules. It is intended for read-only single-runner lookup (the directory
 // interface has no list API), so management endpoints can answer
-// /v1/management/runners/{id} without re-implementing directory access.
-func (cp *ControlPlane) RunnerDirectory() RunnerDirectory { return cp.runners }
+// /v1/management/runners/{id} without re-implementing directory access. When
+// metrics are configured, its optional runner-control mutation capability is
+// decorated without changing the raw directory used by process internals.
+func (cp *ControlPlane) RunnerDirectory() RunnerDirectory {
+	if cp.managementRunners != nil {
+		return cp.managementRunners
+	}
+	return cp.runners
+}
 
 // Backend exposes the backend provider for management modules that need a
 // capability of the StateStore beyond the engine facade — e.g. the
@@ -732,6 +752,16 @@ func (cp *ControlPlane) Start(ctx context.Context) error {
 		defer cp.wg.Done()
 		cp.sweeper.Run(sweepCtx)
 	}()
+
+	if cp.runnerControlMetrics != nil {
+		metricsCtx, metricsCancel := context.WithCancel(context.Background())
+		cp.runnerControlMetricsCancel = metricsCancel
+		cp.wg.Add(1)
+		go func() {
+			defer cp.wg.Done()
+			cp.runnerControlMetrics.run(metricsCtx, runnerControlMetricsCollectPeriod)
+		}()
+	}
 
 	if reclaimer, ok := cp.runners.(ClaimReclaimer); ok {
 		claimCtx, claimCancel := context.WithCancel(context.Background())
@@ -891,6 +921,9 @@ func (cp *ControlPlane) Shutdown(ctx context.Context) error {
 	if cp.claimRecoveryCancel != nil {
 		cp.claimRecoveryCancel()
 	}
+	if cp.runnerControlMetricsCancel != nil {
+		cp.runnerControlMetricsCancel()
+	}
 	if cp.entryReconcilerCancel != nil {
 		cp.entryReconcilerCancel()
 	}
@@ -905,8 +938,9 @@ func (cp *ControlPlane) Shutdown(ctx context.Context) error {
 	}
 	// Wait for the background goroutines to observe their cancelled contexts
 	// and return, but bound the wait by ctx so a stuck goroutine cannot hang
-	// shutdown. The sweeper, leader, claim-recovery, entry-reconciliation,
-	// workflow-projection, and supply-key loops all observe their contexts.
+	// shutdown. The sweeper, leader, claim-recovery, runner-control metrics,
+	// entry-reconciliation, workflow-projection, and supply-key loops all
+	// observe their contexts.
 	waitDone := make(chan struct{})
 	go func() { cp.wg.Wait(); close(waitDone) }()
 	select {

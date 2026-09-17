@@ -32,7 +32,8 @@
 //     HeartbeatRequest/Response, PollTaskRequest/Response,
 //     ReportResultRequest/Response, RenewLeaseRequest/Response,
 //     ActivateDirective, DeactivateDirective, ActivationAck,
-//     GroupLeaseWire/GroupResultWire, MetricsPayloadStamp/Unstamp
+//     GroupLeaseWire/GroupResultWire, MetricsPayloadStamp/Unstamp,
+//     RunnerFrame/ServerFrame and their Connect control frames
 //   - The concrete HTTP Client (register/heartbeat/poll/report/renew/ack/metrics)
 //   - The RunnerHTTPHandler interface consumed by service/control
 //   - The gRPC client (grpc_client.go) and protobuf mappings (runnerpb/)
@@ -53,11 +54,23 @@
 //	   ActAck     POST /v1/runners/activation/ack
 //	   Metrics    POST /v1/runners/metrics        (HTTP only)
 //
-//	Experimental transport: gRPC (grpc_client.go + runnerpb/)
-//	   Only Register/Heartbeat/Poll/Result mapped; RenewLease, ActivationAck
-//	   and Metrics are HTTP-only — gRPC is not the target deployment shape
-//	   (cross-cloud traffic goes through the Relay Gateway, which is not yet
-//	   implemented).
+//	Unary gRPC transport (grpc_client.go + runnerpb/)
+//	   Register, Heartbeat, Poll, and Result are mapped. RenewLease,
+//	   ActivationAck, and Metrics remain HTTP-only, so unary gRPC is not a
+//	   complete production lifecycle transport.
+//
+// gRPC also exposes Connect, a bidirectional control stream. Its first
+// runner-to-server frame must be Hello; the server answers with Welcome,
+// including the initial runner-control directive when one is available. The
+// server may then send Control directives. A runner can report a
+// ControlObservation and task Result frames, and every Result receives an Ack.
+//
+// Connect is a supplementary control-frame transport, not the default runner
+// lifecycle. service/runner.Run continues to use the unary ProtocolClient
+// lifecycle for registration, heartbeat, polling, and result reporting. Do not
+// treat Connect as a replacement for activation handling, supply delivery,
+// lease renewal, or metrics reporting; those capabilities still follow their
+// existing unary paths (and some are HTTP-only).
 //
 // # Pitfalls when modifying this package
 //
