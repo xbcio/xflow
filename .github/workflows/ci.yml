@@ -38,6 +38,30 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # setup-go's `cache: true` above covers GOCACHE only. wazero's
+      # guest-module compilation cache is a separate directory, so without
+      # this step every run recompiles every guest from scratch: under -race a
+      # fresh guest compile costs ~23 s against 0.64 s warm, and a
+      # compile-dominated subset of the package took 2m28s cold vs 28s warm
+      # (5.2x, measured 2026-09-17). That is what makes the WASM leg of
+      # `make test-coverage` the expensive one.
+      #
+      # Correctness does not rest on this cache: wazero namespaces the
+      # directory by its own version and GOOS/GOARCH, and keys every entry by
+      # module content, so a restored entry that is stale or from another
+      # platform is inert rather than wrong. That is also why the
+      # `restore-keys` fallback is safe — after a go.mod change the partial
+      # hit still reuses every entry that is still valid. The directory is
+      # bounded by the repo's own sweep (XFLOW_WASM_CACHE_MAX_BYTES, 1 GiB
+      # default); a full package run's cache measured 1.0 GiB locally.
+      - name: Restore WASM compilation cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/xflow-wasm-cache
+          key: wasm-cache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.mod') }}
+          restore-keys: |
+            wasm-cache-${{ runner.os }}-${{ runner.arch }}-
+
       - name: Check gofmt
         run: |
           files="$(gofmt -l .)"
@@ -85,6 +109,15 @@ jobs:
   integration:
     name: Integration
     runs-on: ubuntu-latest
+    # 4 shards x 600s package timeout = 40m, plus service readiness and the
+    # integration build.
+    timeout-minutes: 50
+    env:
+      # The same WASM compilation cache as the `test` job, under an identical
+      # key so the two jobs share one archive: this job compiles wasm guests
+      # too, via test/integration/wasm_supply_binding_e2e_test.go and
+      # sas_tagging_e2e_test.go.
+      XFLOW_WASM_CACHE_DIR: ${{ runner.temp }}/xflow-wasm-cache
     services:
       redis:
         image: redis:7.2
@@ -139,6 +172,16 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      # Shares one archive with the `test` job's step of the same key — see
+      # there for why this cache is needed and why a partial hit is safe.
+      - name: Restore WASM compilation cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/xflow-wasm-cache
+          key: wasm-cache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.mod') }}
+          restore-keys: |
+            wasm-cache-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Wait for services
         run: |
