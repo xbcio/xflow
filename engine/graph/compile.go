@@ -310,6 +310,7 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 			Kind:               nd.Kind,
 			Version:            nd.Version,
 			OnError:            nd.OnError,
+			Output:             cloneNodeOutputPolicy(nd.Output),
 			RunnerSelector:     runnerSelector,
 			MergeMode:          extractMergeMode(nd),
 			Parameters:         cloneStringAnyMap(nd.Parameters),

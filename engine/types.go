@@ -314,9 +314,16 @@ type NodeSnapshot struct {
 	// graph.
 	CommittedLeaseToken LeaseToken
 	CommittedAttempt    int
-	Output              map[string]any
-	Port                string
-	Error               string
+	// Output is the public node-snapshot projection. Private node output stays
+	// in the runtime output store for downstream execution but is never present
+	// here.
+	Output map[string]any
+	// PrivateOutput records that Output was intentionally redacted. It is also a
+	// fail-closed fallback for public inspection when the compiled graph cannot
+	// be loaded.
+	PrivateOutput bool
+	Port          string
+	Error         string
 }
 
 // ExpiredLease describes a node whose lease has passed its deadline and is

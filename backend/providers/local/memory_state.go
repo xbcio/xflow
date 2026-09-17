@@ -31,7 +31,11 @@ type memoryState struct {
 	// retried replay with a different RequestID returns already_replayed.
 	replayReceipts map[types.ExecutionID]map[string]*memoryReplayReceipt
 	replayEntryIdx map[types.ExecutionID]map[string]string
-	outputs        map[string]map[string]any     // key: execID+"/"+name
+	outputs        map[string]map[string]any // key: execID+"/"+name
+	// privateOutputs is an execution-local, monotonic privacy marker for runtime
+	// output keys. It is separate from nodes because group and entry exits have
+	// runtime outputs without necessarily materializing a NodeSnapshot.
+	privateOutputs map[string]bool
 	suspended      map[string]*types.SuspendSpec // key: execID+"/"+nodeName
 	signals        map[string]map[string]any     // pre-delivered: key: execID+"/"+signalName
 	signalSets     map[string]map[string]map[string]any
@@ -65,6 +69,7 @@ func newMemoryState() *memoryState {
 		replayReceipts: make(map[types.ExecutionID]map[string]*memoryReplayReceipt),
 		replayEntryIdx: make(map[types.ExecutionID]map[string]string),
 		outputs:        make(map[string]map[string]any),
+		privateOutputs: make(map[string]bool),
 		suspended:      make(map[string]*types.SuspendSpec),
 		signals:        make(map[string]map[string]any),
 		signalSets:     make(map[string]map[string]map[string]any),
@@ -202,7 +207,11 @@ func (s *memoryState) LoadGraph(_ context.Context, id types.ExecutionID) (*graph
 func (s *memoryState) UpsertNode(_ context.Context, n *engine.NodeSnapshot) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	key := string(n.ExecutionID) + "/" + n.Name
+	key := memoryNodeKey(n.ExecutionID, n.Name)
+	// Record a privacy decision before checking the write fence. A stale update
+	// that carries the marker must still fail closed; a later zero-value update
+	// is never authority to declassify this runtime output.
+	privateOutput := s.preserveOutputPrivacyLocked(key, n.PrivateOutput)
 	if existing, ok := s.nodes[key]; ok && isTerminalNode(existing.Status) && n.ActivationID <= existing.ActivationID {
 		return nil // CAS: don't overwrite terminal state
 	}
@@ -210,6 +219,10 @@ func (s *memoryState) UpsertNode(_ context.Context, n *engine.NodeSnapshot) erro
 		return nil
 	}
 	cp := *n
+	cp.PrivateOutput = privateOutput
+	if cp.PrivateOutput {
+		cp.Output = nil
+	}
 	s.nodes[key] = &cp
 	return nil
 }
@@ -217,8 +230,51 @@ func (s *memoryState) UpsertNode(_ context.Context, n *engine.NodeSnapshot) erro
 func (s *memoryState) GetNode(_ context.Context, id types.ExecutionID, name string) (*engine.NodeSnapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ns := s.nodes[string(id)+"/"+name]
-	return ns, nil
+	key := memoryNodeKey(id, name)
+	return s.publicNodeSnapshotLocked(key, s.nodes[key]), nil
+}
+
+// publicNodeSnapshotLocked returns an isolated, externally readable node
+// snapshot. A group or entry exit can set a marker without materializing a
+// node, so the key-level marker is authoritative for every public read.
+// Callers must hold s.mu.
+func (s *memoryState) publicNodeSnapshotLocked(key string, ns *engine.NodeSnapshot) *engine.NodeSnapshot {
+	cp := cloneNodeSnapshot(ns)
+	if cp != nil && s.outputIsPrivateLocked(key) {
+		cp.PrivateOutput = true
+		cp.Output = nil
+	}
+	return cp
+}
+
+// preserveOutputPrivacyLocked records an output privacy decision without ever
+// clearing an earlier one. Callers must hold s.mu. Output privacy is graph
+// policy, so a false value in an ordinary retry/resume update is not authority
+// to declassify a previously private output.
+func (s *memoryState) preserveOutputPrivacyLocked(key string, requested bool) bool {
+	privateOutput := requested || s.outputIsPrivateLocked(key)
+	if !privateOutput {
+		return false
+	}
+	s.privateOutputs[key] = true
+	if node := s.nodes[key]; node != nil && (!node.PrivateOutput || node.Output != nil) {
+		cp := *node
+		cp.PrivateOutput = true
+		cp.Output = nil
+		s.nodes[key] = &cp
+	}
+	return true
+}
+
+// outputIsPrivateLocked reports the monotonic marker for one runtime output
+// key. The snapshot fallback keeps states created before the marker map in
+// sync; new writes always populate the map through preserveOutputPrivacyLocked.
+func (s *memoryState) outputIsPrivateLocked(key string) bool {
+	if s.privateOutputs[key] {
+		return true
+	}
+	node := s.nodes[key]
+	return node != nil && node.PrivateOutput
 }
 
 // CancelSuspendedNode atomically flips a node from Suspended to Canceled under
@@ -248,6 +304,10 @@ func (s *memoryState) CancelSuspendedNode(_ context.Context, id types.ExecutionI
 	}
 	cp := *ns
 	cp.Status = types.NodeStatusCanceled
+	cp.PrivateOutput = s.preserveOutputPrivacyLocked(key, cp.PrivateOutput)
+	if cp.PrivateOutput {
+		cp.Output = nil
+	}
 	s.nodes[key] = &cp
 	delete(s.suspended, key)
 	// Multi-signal waiters accumulate partial arrivals under the same key; the
@@ -285,22 +345,22 @@ func (s *memoryState) AcquireTaskLease(_ context.Context, lease *engine.TaskLeas
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	key := string(lease.Task.ExecutionID) + "/" + lease.Task.NodeName
+	key := memoryNodeKey(lease.Task.ExecutionID, lease.Task.NodeName)
 	current := s.nodes[key]
 	if current != nil {
 		if lease.Task.ActivationID > 0 && current.ActivationID > lease.Task.ActivationID {
-			return cloneNodeSnapshot(current), false, nil
+			return s.publicNodeSnapshotLocked(key, current), false, nil
 		}
 		if isTerminalNode(current.Status) && (lease.Task.ActivationID <= 0 || current.ActivationID >= lease.Task.ActivationID) {
-			return cloneNodeSnapshot(current), false, nil
+			return s.publicNodeSnapshotLocked(key, current), false, nil
 		}
 		if current.Status == types.NodeStatusCommitting || current.Status == types.NodeStatusWaiting {
-			return cloneNodeSnapshot(current), false, nil
+			return s.publicNodeSnapshotLocked(key, current), false, nil
 		}
 		if current.Status == types.NodeStatusRunning && current.LeaseToken != "" {
 			deadline := current.LeaseIssuedAt.Add(current.LeaseTTL)
 			if current.LeaseIssuedAt.IsZero() || current.LeaseTTL <= 0 || lease.IssuedAt.Before(deadline) {
-				return cloneNodeSnapshot(current), false, nil
+				return s.publicNodeSnapshotLocked(key, current), false, nil
 			}
 		}
 	}
@@ -312,6 +372,7 @@ func (s *memoryState) AcquireTaskLease(_ context.Context, lease *engine.TaskLeas
 	if current != nil && current.ActivationID == lease.Task.ActivationID {
 		attempt = current.Attempt + 1
 	}
+	privateOutput := s.preserveOutputPrivacyLocked(key, false)
 	s.nodes[key] = &engine.NodeSnapshot{
 		ExecutionID:   lease.Task.ExecutionID,
 		Name:          lease.Task.NodeName,
@@ -327,8 +388,9 @@ func (s *memoryState) AcquireTaskLease(_ context.Context, lease *engine.TaskLeas
 		LeaseTTL:      lease.TTL,
 		LeaseTaskType: lease.Task.Type,
 		LeasePayload:  cloneLeasePayload(lease.Task.Payload),
+		PrivateOutput: privateOutput,
 	}
-	return cloneNodeSnapshot(current), true, nil
+	return s.publicNodeSnapshotLocked(key, current), true, nil
 }
 
 // ResetNodeForRetryWithOutbox atomically creates the retry delivery intent
@@ -363,6 +425,10 @@ func (s *memoryState) resetNodeForRetryLocked(id types.ExecutionID, name string,
 	cp.LeaseTTL = 0
 	cp.LeaseTaskType = engine.TaskTypeNodeExec
 	cp.LeasePayload = nil
+	cp.PrivateOutput = s.preserveOutputPrivacyLocked(key, cp.PrivateOutput)
+	if cp.PrivateOutput {
+		cp.Output = nil
+	}
 	s.nodes[key] = &cp
 	return true
 }
@@ -461,6 +527,10 @@ func (s *memoryState) revokeLeaseLocked(id types.ExecutionID, name string, token
 	cp.LeaseTTL = 0
 	cp.LeaseTaskType = engine.TaskTypeNodeExec
 	cp.LeasePayload = nil
+	cp.PrivateOutput = s.preserveOutputPrivacyLocked(key, cp.PrivateOutput)
+	if cp.PrivateOutput {
+		cp.Output = nil
+	}
 	s.nodes[key] = &cp
 	return true
 }
@@ -469,41 +539,45 @@ func (s *memoryState) ClaimTaskLease(_ context.Context, lease *engine.TaskLease)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	key := string(lease.Task.ExecutionID) + "/" + lease.Task.NodeName
+	key := memoryNodeKey(lease.Task.ExecutionID, lease.Task.NodeName)
 	ns := s.nodes[key]
 	if ns == nil {
 		return nil, false, nil
 	}
 	if isTerminalNode(ns.Status) {
 		if lease.Task.ActivationID > 0 && ns.ActivationID != lease.Task.ActivationID {
-			return ns, false, nil
+			return s.publicNodeSnapshotLocked(key, ns), false, nil
 		}
-		return ns, true, nil
+		return s.publicNodeSnapshotLocked(key, ns), true, nil
 	}
 	if lease.Task.ActivationID > 0 && ns.ActivationID != lease.Task.ActivationID {
-		return ns, false, nil
+		return s.publicNodeSnapshotLocked(key, ns), false, nil
 	}
 	if ns.Status != types.NodeStatusRunning || ns.LeaseToken == "" || ns.LeaseToken != lease.LeaseToken {
-		return ns, false, nil
+		return s.publicNodeSnapshotLocked(key, ns), false, nil
 	}
 	if lease.LeaseID != "" && ns.LeaseID != lease.LeaseID {
-		return ns, false, nil
+		return s.publicNodeSnapshotLocked(key, ns), false, nil
 	}
 	if lease.Attempt != 0 && ns.Attempt != lease.Attempt {
-		return ns, false, nil
+		return s.publicNodeSnapshotLocked(key, ns), false, nil
 	}
 
 	cp := *ns
 	cp.Status = types.NodeStatusCommitting
+	cp.PrivateOutput = s.preserveOutputPrivacyLocked(key, cp.PrivateOutput)
+	if cp.PrivateOutput {
+		cp.Output = nil
+	}
 	s.nodes[key] = &cp
-	return cloneNodeSnapshot(&cp), true, nil
+	return s.publicNodeSnapshotLocked(key, &cp), true, nil
 }
 
 // SuspendTaskLease atomically parks a claimed lease after verifying the same
 // lease that entered committing still owns the node. A sweeper that reset the
 // lease, or a newer runner, therefore cannot be overwritten by a stale
 // suspend result.
-func (s *memoryState) SuspendTaskLease(_ context.Context, lease *engine.TaskLease, output map[string]any, storeOutput bool, spec *types.SuspendSpec, oldSignalName string) (*types.SignalPayload, bool, error) {
+func (s *memoryState) SuspendTaskLease(_ context.Context, lease *engine.TaskLease, output map[string]any, storeOutput bool, privateOutput bool, spec *types.SuspendSpec, oldSignalName string) (*types.SignalPayload, bool, error) {
 	if lease == nil || spec == nil {
 		return nil, false, engine.ErrInvalidLeaseToken
 	}
@@ -515,6 +589,7 @@ func (s *memoryState) SuspendTaskLease(_ context.Context, lease *engine.TaskLeas
 	if node == nil || node.Status != types.NodeStatusCommitting || node.LeaseID != lease.LeaseID || node.LeaseToken != lease.LeaseToken || node.Attempt != lease.Attempt || node.ActivationID != lease.Task.ActivationID {
 		return nil, false, nil
 	}
+	privateOutput = s.preserveOutputPrivacyLocked(key, privateOutput)
 	if storeOutput {
 		s.outputs[key] = cloneData(output)
 	}
@@ -563,6 +638,10 @@ func (s *memoryState) SuspendTaskLease(_ context.Context, lease *engine.TaskLeas
 	cp.LeaseTTL = 0
 	cp.LeaseTaskType = engine.TaskTypeNodeExec
 	cp.LeasePayload = nil
+	cp.PrivateOutput = privateOutput
+	if privateOutput {
+		cp.Output = nil
+	}
 	s.nodes[key] = &cp
 	for _, entry := range engine.SuspendOutboxEntries(lease, spec, payload, time.Now().UTC()) {
 		s.putOutboxLocked(lease.Task.ExecutionID, entry.ID, entry.Task, entry.AvailableAt)
@@ -573,8 +652,8 @@ func (s *memoryState) SuspendTaskLease(_ context.Context, lease *engine.TaskLeas
 // SuspendTaskLeaseWithOutbox shares the fenced suspend transition above. The
 // transition writes continuation intents while the memory-state mutex is held,
 // so callers never observe a consumed pre-signal without a recoverable task.
-func (s *memoryState) SuspendTaskLeaseWithOutbox(ctx context.Context, lease *engine.TaskLease, output map[string]any, storeOutput bool, spec *types.SuspendSpec, oldSignalName string) (bool, error) {
-	_, committed, err := s.SuspendTaskLease(ctx, lease, output, storeOutput, spec, oldSignalName)
+func (s *memoryState) SuspendTaskLeaseWithOutbox(ctx context.Context, lease *engine.TaskLease, output map[string]any, storeOutput bool, privateOutput bool, spec *types.SuspendSpec, oldSignalName string) (bool, error) {
+	_, committed, err := s.SuspendTaskLease(ctx, lease, output, storeOutput, privateOutput, spec, oldSignalName)
 	return committed, err
 }
 
@@ -923,7 +1002,11 @@ func (s *memoryState) ListSuspendedNodes(_ context.Context, id types.ExecutionID
 func (s *memoryState) PutOutput(_ context.Context, id types.ExecutionID, name string, data map[string]any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.outputs[string(id)+"/"+name] = data
+	key := string(id) + "/" + name
+	// PutOutput has no privacy parameter, so it must never declassify a key
+	// marked private by a node, group, or entry transition.
+	s.preserveOutputPrivacyLocked(key, false)
+	s.outputs[key] = data
 	return nil
 }
 
@@ -944,7 +1027,7 @@ func (s *memoryState) GetAllOutputs(id types.ExecutionID) map[string]any {
 	prefix := string(id) + "/"
 	result := make(map[string]any)
 	for key, data := range s.outputs {
-		if strings.HasPrefix(key, prefix) {
+		if strings.HasPrefix(key, prefix) && !s.outputIsPrivateLocked(key) {
 			nodeName := strings.TrimPrefix(key, prefix)
 			result[nodeName] = data
 		}

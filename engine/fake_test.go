@@ -111,6 +111,9 @@ func (f *fakeState) UpsertNode(_ context.Context, n *NodeSnapshot) error {
 		return nil
 	}
 	cp := *n
+	if cp.PrivateOutput {
+		cp.Output = nil
+	}
 	f.nodes[key] = &cp
 	return nil
 }

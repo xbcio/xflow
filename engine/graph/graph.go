@@ -112,7 +112,7 @@ func (g *Graph) NodeCount() int { return len(g.nodes) }
 func (g *Graph) NodeName(i int) string { return g.nodes[i].Name }
 
 // NodeAt returns a defensive deep copy of the NodeMeta at position i. Every
-// mutable reference field (Parameters, PortOuts, RunnerSelector, Retry) is
+// mutable reference field (Parameters, PortOuts, RunnerSelector, Retry, Output) is
 // recursively cloned so the caller cannot mutate the Graph's internal state
 // through the returned value. Callers that only need the node name should use
 // NodeName to avoid the copy.
@@ -122,6 +122,7 @@ func (g *Graph) NodeAt(i int) NodeMeta {
 	n.PortOuts = cloneStringSlice(n.PortOuts)
 	n.RunnerSelector = cloneRunnerSelector(n.RunnerSelector)
 	n.Retry = cloneRetry(n.Retry)
+	n.Output = cloneNodeOutputPolicy(n.Output)
 	return n
 }
 
@@ -269,11 +270,14 @@ func (g *Graph) UnitDisplayName(unitIdx int) string { return g.units[unitIdx].Na
 
 // NodeMeta holds the static metadata for a single node extracted from NodeDef.
 type NodeMeta struct {
-	Name           string
-	Type           string
-	Kind           types.NodeKind
-	Version        int
-	OnError        string
+	Name    string
+	Type    string
+	Kind    types.NodeKind
+	Version int
+	OnError string
+	// Output controls runtime visibility of this node's output. It stays nil
+	// unless the definition explicitly declares an output policy.
+	Output         *types.NodeOutputPolicy `json:",omitempty"`
 	RunnerSelector *types.RunnerSelector
 	MergeMode      string // "wait_all" or "wait_any"; empty means normal node
 	Parameters     map[string]any

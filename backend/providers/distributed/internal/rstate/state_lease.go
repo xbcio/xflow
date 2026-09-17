@@ -15,6 +15,8 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
+var _ engine.LeaseSuspender = (*Store)(nil)
+
 func (s *Store) AcquireTaskLease(ctx context.Context, lease *engine.TaskLease) (previous *engine.NodeSnapshot, acquired bool, err error) {
 	started := time.Now()
 	defer func() {
@@ -462,7 +464,7 @@ func (s *Store) ClaimTaskLease(ctx context.Context, lease *engine.TaskLease) (*e
 // node while preserving the signal rendezvous semantics for ordinary and
 // multi-signal waits. A stale claimant returns committed=false and cannot
 // consume signals or overwrite a recovered lease.
-func (s *Store) SuspendTaskLease(ctx context.Context, lease *engine.TaskLease, output map[string]any, storeOutput bool, spec *types.SuspendSpec, oldSignalName string) (*types.SignalPayload, bool, error) {
+func (s *Store) SuspendTaskLease(ctx context.Context, lease *engine.TaskLease, output map[string]any, storeOutput bool, privateOutput bool, spec *types.SuspendSpec, oldSignalName string) (*types.SignalPayload, bool, error) {
 	if s.transient {
 		// See SuspendOrConsume: transient mode never parks a waiter.
 		return nil, false, engine.ErrSuspendUnsupported
@@ -520,6 +522,13 @@ func (s *Store) SuspendTaskLease(ctx context.Context, lease *engine.TaskLease, o
 	for _, signalName := range spec.Signals {
 		args = append(args, signalName)
 	}
+	private := 0
+	if privateOutput {
+		private = 1
+	}
+	// The trailing privacy bit keeps the variable-length signal name indexes
+	// stable inside suspendTaskLeaseLua.
+	args = append(args, private)
 	result, err := suspendTaskLeaseLua.Run(ctx, s.rdb, keys, args...).Slice()
 	if err != nil {
 		return nil, false, fmt.Errorf("suspend task lease %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)

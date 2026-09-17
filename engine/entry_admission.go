@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"time"
 
@@ -185,13 +186,23 @@ func (e *Engine) SeedExecutionFromEntry(ctx context.Context, req SeedExecutionFr
 		return SeedExecutionFromEntryResponse{}, ErrEntryAdmissionNotSupported
 	}
 
+	// An entry seed arrives from a runner, so an exit's privacy marker is not
+	// trusted. Copy its exits, including their mutable data trees, before
+	// deriving each marker from the control-plane graph. A backend may retain or
+	// mutate its request without changing the runner's retryable request.
+	admissionReq := req
+	admissionReq.Exits = cloneEntryAdmissionExits(req.Exits)
+	for i := range admissionReq.Exits {
+		admissionReq.Exits[i].PrivateOutput = entryAdmissionExitPrivateOutput(admissionReq.Graph, admissionReq.Exits[i].NodeName)
+	}
+
 	isGroupEntry := req.Graph != nil &&
 		req.EntryUnitIdx >= 0 &&
 		req.EntryUnitIdx < req.Graph.UnitCount() &&
 		req.Graph.UnitKindAt(req.EntryUnitIdx) == graph.UnitGroup
 
 	start := time.Now()
-	resp, err := store.SeedExecutionFromEntry(ctx, req)
+	resp, err := store.SeedExecutionFromEntry(ctx, admissionReq)
 	d := time.Since(start)
 
 	if isGroupEntry {
@@ -199,6 +210,165 @@ func (e *Engine) SeedExecutionFromEntry(ctx context.Context, req SeedExecutionFr
 	}
 
 	return resp, err
+}
+
+// cloneEntryAdmissionExits makes the store-owned copy of runner boundary
+// outputs. BoundaryExit.Data is runtime payload data, so copying only the
+// slice or struct would still let the backend mutate the caller through a map
+// or nested container alias.
+func cloneEntryAdmissionExits(exits []BoundaryExit) []BoundaryExit {
+	if exits == nil {
+		return nil
+	}
+
+	cloned := make([]BoundaryExit, len(exits))
+	for i := range exits {
+		cloned[i] = exits[i]
+		cloned[i].Data = cloneEntryAdmissionData(exits[i].Data)
+	}
+	return cloned
+}
+
+func cloneEntryAdmissionData(data map[string]any) map[string]any {
+	if data == nil {
+		return nil
+	}
+
+	cloned := make(map[string]any, len(data))
+	for key, value := range data {
+		cloned[key] = cloneEntryAdmissionValue(value)
+	}
+	return cloned
+}
+
+// cloneEntryAdmissionValue recursively copies ordinary runtime-data
+// containers while preserving their concrete Go types. Opaque scalar values
+// are immutable by value and can be reused. This deliberately mirrors the
+// graph package's defensive-copy behavior without importing an internal graph
+// helper into the runtime payload boundary.
+func cloneEntryAdmissionValue(value any) any {
+	if value == nil {
+		return nil
+	}
+
+	cloned := cloneEntryAdmissionReflectValue(reflect.ValueOf(value))
+	if !cloned.IsValid() || !cloned.CanInterface() {
+		return value
+	}
+	return cloned.Interface()
+}
+
+func cloneEntryAdmissionReflectValue(value reflect.Value) reflect.Value {
+	if !value.IsValid() {
+		return value
+	}
+
+	switch value.Kind() {
+	case reflect.Interface:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		return cloneEntryAdmissionReflectValue(value.Elem())
+	case reflect.Map:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		cloned := reflect.MakeMapWithSize(value.Type(), value.Len())
+		iter := value.MapRange()
+		for iter.Next() {
+			source := iter.Value()
+			copied := cloneEntryAdmissionReflectValue(source)
+			if !copied.IsValid() || !copied.Type().AssignableTo(value.Type().Elem()) {
+				copied = source
+			}
+			cloned.SetMapIndex(iter.Key(), copied)
+		}
+		return cloned
+	case reflect.Slice:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		cloned := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+		for i := 0; i < value.Len(); i++ {
+			source := value.Index(i)
+			copied := cloneEntryAdmissionReflectValue(source)
+			if !copied.IsValid() || !copied.Type().AssignableTo(value.Type().Elem()) {
+				copied = source
+			}
+			cloned.Index(i).Set(copied)
+		}
+		return cloned
+	case reflect.Array:
+		cloned := reflect.New(value.Type()).Elem()
+		for i := 0; i < value.Len(); i++ {
+			source := value.Index(i)
+			copied := cloneEntryAdmissionReflectValue(source)
+			if !copied.IsValid() || !copied.Type().AssignableTo(value.Type().Elem()) {
+				copied = source
+			}
+			cloned.Index(i).Set(copied)
+		}
+		return cloned
+	case reflect.Pointer:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		cloned := reflect.New(value.Type().Elem())
+		source := value.Elem()
+		copied := cloneEntryAdmissionReflectValue(source)
+		if !copied.IsValid() || !copied.Type().AssignableTo(value.Type().Elem()) {
+			copied = source
+		}
+		cloned.Elem().Set(copied)
+		return cloned
+	case reflect.Struct:
+		cloned := reflect.New(value.Type()).Elem()
+		for i := 0; i < value.NumField(); i++ {
+			source := value.Field(i)
+			target := cloned.Field(i)
+			// Do not risk corrupting opaque structs with unexported fields. Such
+			// values are retained by value; normal map/slice runtime payloads do
+			// not take this branch.
+			if !source.CanInterface() || !target.CanSet() {
+				return value
+			}
+			copied := cloneEntryAdmissionReflectValue(source)
+			if !copied.IsValid() || !copied.Type().AssignableTo(target.Type()) {
+				copied = source
+			}
+			target.Set(copied)
+		}
+		return cloned
+	default:
+		return value
+	}
+}
+
+// entryAdmissionExitPrivateOutput resolves one runner-supplied boundary exit
+// against the graph selected by the control plane. Missing or malformed graph
+// metadata must fail closed: exposing an output is irreversible, whereas a
+// false positive only withholds it from public projections.
+//
+// This deliberately has an admission-specific name rather than sharing the
+// task-commit helper: entry admission must handle a nil graph and a potentially
+// malformed node index before dereferencing NodeAt.
+func entryAdmissionExitPrivateOutput(g *graph.Graph, nodeName string) bool {
+	if g == nil {
+		return true
+	}
+
+	nodeIdx, ok := g.NodeIndex(nodeName)
+	if !ok || nodeIdx < 0 || nodeIdx >= g.NodeCount() {
+		return true
+	}
+
+	node := g.NodeAt(nodeIdx)
+	// Treat an inconsistent index as an unknown node rather than accepting a
+	// policy for a different node from a malformed graph snapshot.
+	if node.Name != nodeName {
+		return true
+	}
+	return node.Output != nil && node.Output.Private
 }
 
 // classifyAdmissionOutcome maps a SeedExecutionFromEntry result to the

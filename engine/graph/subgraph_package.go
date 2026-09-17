@@ -202,6 +202,7 @@ func ProjectGroupPackage(g *Graph, unitIdx int) (*SubgraphPackage, string, error
 			Kind:       n.Kind,
 			Version:    n.Version,
 			OnError:    n.OnError,
+			Output:     cloneNodeOutputPolicy(n.Output),
 			Parameters: params,
 			// Timeout crosses the projection boundary even though Retry and
 			// RunnerSelector deliberately do not (see the mini-def comment above).
@@ -596,6 +597,7 @@ func compileTrusted(def *types.WorkflowDef, visibleSupplies, visibleOuterNodes [
 			Kind:               nd.Kind,
 			Version:            nd.Version,
 			OnError:            nd.OnError,
+			Output:             cloneNodeOutputPolicy(nd.Output),
 			Parameters:         cloneStringAnyMap(nd.Parameters),
 			GroupIdx:           -1,
 			Timeout:            nd.Timeout,

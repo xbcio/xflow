@@ -80,7 +80,7 @@ return {1}
 // KEYS: 1=exec:status 2=exec:error 3=remaining 4=failed 5=group:status
 //
 //	6=group:meta 7=leases(zset) 8=outbox:ready 9=outbox:body
-//	10.. = per exit: output key (1 key each), followed by
+//	10.. = per exit: output key + node meta key (2 keys each), followed by
 //	       per downstream unit: inDegree, active, schedule (3 keys each)
 //
 // Redis Cluster: all keys share the same {id} hash tag (execution ID) so they
@@ -92,7 +92,7 @@ return {1}
 // ARGV: 1=lease_token 2=attempt 3=ttl_s 4=lease_member 5=outcome(success|failed)
 //
 //	6=fatal(0|1) 7=allowCycles(0|1) 8=error 9=exitCount 10=downstreamCount
-//	11.. = per exit: encoded output data (1 arg each), followed by
+//	11.. = per exit: encoded output data + private-output bit (2 args each), followed by
 //	       per unit: arrivalCount, activeCount, mergeMode,
 //	       executeID, executeBody, skipID, skipBody (7 args each)
 //
@@ -150,8 +150,15 @@ local ttl = tonumber(ARGV[3])
 local exitCount = tonumber(ARGV[9] or '0')
 local keypos = 10
 for i = 1, exitCount do
-    redis.call('SET', KEYS[keypos], ARGV[10 + i], 'EX', ttl)
-    keypos = keypos + 1
+    local dataPos = 11 + (i - 1) * 2
+    redis.call('SET', KEYS[keypos], ARGV[dataPos], 'EX', ttl)
+    if tonumber(ARGV[dataPos + 1]) == 1 then
+        redis.call('HSET', KEYS[keypos + 1], 'private_output', '1')
+    end
+    -- A false flag must not let an existing private marker expire before the
+    -- refreshed boundary output. EXPIRE is a no-op for public exits.
+    redis.call('EXPIRE', KEYS[keypos + 1], ttl)
+    keypos = keypos + 2
 end
 redis.call('SET', KEYS[5], 'done', 'EX', ttl)
 redis.call('HSET', KEYS[6], 'lease_id', '', 'lease_token', '', 'committed_lease_token', ARGV[1])
@@ -188,7 +195,7 @@ if tonumber(ARGV[7]) == 0 then
 end
 if done == 0 and tonumber(ARGV[6]) == 0 and redis.call('GET', KEYS[1]) ~= 'canceling' then
     local n = tonumber(ARGV[10] or '0')
-    local argpos = 10 + exitCount + 1
+    local argpos = 11 + 2 * exitCount
     for i = 1, n do
         local inDegreeKey = KEYS[keypos]
         local activeKey = KEYS[keypos + 1]
@@ -314,14 +321,21 @@ func (s *Store) CommitGroup(ctx context.Context, req engine.GroupCommitRequest) 
 	// separate, unchecked Set call before the script runs. Encoding errors are
 	// caught here (fail before any Redis command runs); Redis command errors
 	// are surfaced by the single Run() call below.
-	exitArgs := make([]any, 0, len(req.Exits))
+	exitArgs := make([]any, 0, len(req.Exits)*2)
 	for _, ex := range req.Exits {
 		encoded, err := json.Marshal(ex.Data)
 		if err != nil {
 			return engine.GroupCommitResult{}, fmt.Errorf("marshal group exit %q/%q: %w", req.ExecutionID, ex.NodeName, err)
 		}
-		keys = append(keys, outputKey(t, req.ExecutionID, ex.NodeName))
-		exitArgs = append(exitArgs, string(encoded))
+		keys = append(keys,
+			outputKey(t, req.ExecutionID, ex.NodeName),
+			nodeMetaKey(t, req.ExecutionID, ex.NodeName),
+		)
+		private := 0
+		if ex.PrivateOutput {
+			private = 1
+		}
+		exitArgs = append(exitArgs, string(encoded), private)
 	}
 	args = append(args, exitArgs...)
 	// Downstream unit arrivals: each arrival appends 3 counting keys + 7 args

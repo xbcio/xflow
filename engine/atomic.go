@@ -65,9 +65,14 @@ type CommitNodeRequest struct {
 	Status       types.NodeStatus
 	Output       map[string]any
 	StoreOutput  bool
-	Port         string
-	Error        string
-	System       bool
+	// PrivateOutput keeps the runtime output available to downstream execution
+	// while excluding it from public node snapshots and result projections. The
+	// engine derives it from the compiled graph; backends must never treat it as
+	// a runner-controlled visibility claim.
+	PrivateOutput bool
+	Port          string
+	Error         string
+	System        bool
 	// Fatal short-circuits the ACYCLIC completion protocol: the backend finalizes
 	// the execution immediately instead of waiting for the remaining-unit counter
 	// to reach zero. It is meaningless on a cyclic graph, which has no such
@@ -625,26 +630,29 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 			AutoDepth:    task.AutoDepth,
 			Port:         &skippedPort,
 		}
+		privateOutput := privateOutputForTask(g, task)
 		result, err := e.commitNode(ctx, CommitNodeRequest{
-			ExecutionID:  task.ExecutionID,
-			NodeName:     task.NodeName,
-			NodeIdx:      task.NodeIdx,
-			ActivationID: task.ActivationID,
-			AutoDepth:    task.AutoDepth,
-			Status:       types.NodeStatusSkipped,
-			System:       true,
-			AdvanceTask:  advance,
+			ExecutionID:   task.ExecutionID,
+			NodeName:      task.NodeName,
+			NodeIdx:       task.NodeIdx,
+			ActivationID:  task.ActivationID,
+			AutoDepth:     task.AutoDepth,
+			Status:        types.NodeStatusSkipped,
+			PrivateOutput: privateOutput,
+			System:        true,
+			AdvanceTask:   advance,
 		})
 		if err != nil {
 			return true, fmt.Errorf("commit skipped node %q/%q: %w", task.ExecutionID, task.NodeName, err)
 		}
 		return true, e.afterAtomicCommitWithFlush(ctx, CommitNodeRequest{
-			ExecutionID:  task.ExecutionID,
-			NodeName:     task.NodeName,
-			NodeIdx:      task.NodeIdx,
-			ActivationID: task.ActivationID,
-			AutoDepth:    task.AutoDepth,
-			Status:       types.NodeStatusSkipped,
+			ExecutionID:   task.ExecutionID,
+			NodeName:      task.NodeName,
+			NodeIdx:       task.NodeIdx,
+			ActivationID:  task.ActivationID,
+			AutoDepth:     task.AutoDepth,
+			Status:        types.NodeStatusSkipped,
+			PrivateOutput: privateOutput,
 		}, result, flush)
 	case TaskTypeGroupExec:
 		if e.groupExecutor == nil {

@@ -42,12 +42,13 @@ func (e *Engine) Inspect(ctx context.Context, id types.ExecutionID, nodeNames ..
 		Error:       snap.Error,
 	}
 
+	g, err := e.state.LoadGraph(ctx, id)
+	if err != nil {
+		return ExecutionDetail{}, fmt.Errorf("inspect graph %q: %w", id, err)
+	}
+
 	names := nodeNames
 	if len(names) == 0 {
-		g, err := e.state.LoadGraph(ctx, id)
-		if err != nil {
-			return ExecutionDetail{}, fmt.Errorf("inspect graph %q: %w", id, err)
-		}
 		if g == nil {
 			return detail, nil
 		}
@@ -59,7 +60,17 @@ func (e *Engine) Inspect(ctx context.Context, id types.ExecutionID, nodeNames ..
 
 	detail.Nodes = make([]NodeDetail, 0, len(names))
 	for _, name := range names {
-		node, err := e.inspectNode(ctx, id, name)
+		graphPolicyResolved := false
+		graphPrivateOutput := false
+		if g != nil {
+			if idx, ok := g.NodeIndex(name); ok && idx >= 0 && idx < g.NodeCount() {
+				graphPolicyResolved = true
+				output := g.NodeAt(idx).Output
+				graphPrivateOutput = output != nil && output.Private
+			}
+		}
+
+		node, err := e.inspectNode(ctx, id, name, graphPolicyResolved, graphPrivateOutput)
 		if err != nil {
 			return ExecutionDetail{}, err
 		}
@@ -68,7 +79,13 @@ func (e *Engine) Inspect(ctx context.Context, id types.ExecutionID, nodeNames ..
 	return detail, nil
 }
 
-func (e *Engine) inspectNode(ctx context.Context, id types.ExecutionID, name string) (NodeDetail, error) {
+func (e *Engine) inspectNode(
+	ctx context.Context,
+	id types.ExecutionID,
+	name string,
+	graphPolicyResolved bool,
+	graphPrivateOutput bool,
+) (NodeDetail, error) {
 	snap, err := e.state.GetNode(ctx, id, name)
 	if err != nil {
 		return NodeDetail{}, fmt.Errorf("inspect node %q/%q: %w", id, name, err)
@@ -80,6 +97,14 @@ func (e *Engine) inspectNode(ctx context.Context, id types.ExecutionID, name str
 		detail.Attempt = snap.Attempt
 		detail.Port = snap.Port
 		detail.Error = snap.Error
+	}
+
+	// A resolved graph is authoritative. If it is unavailable or does not know
+	// this node, fail closed: neither a missing snapshot nor a stale public
+	// marker may turn a potentially private runtime output into an audit value.
+	privateOutput := !graphPolicyResolved || graphPrivateOutput
+	if privateOutput {
+		return detail, nil
 	}
 
 	output, err := e.state.GetOutput(ctx, id, name)

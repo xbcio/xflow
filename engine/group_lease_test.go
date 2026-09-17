@@ -246,10 +246,140 @@ func TestCommitGroupResult_ValidExitAccepted(t *testing.T) {
 	}
 }
 
+func TestCommitGroupResult_DerivesExitPrivacyFromCurrentGraph(t *testing.T) {
+	tests := []struct {
+		name          string
+		graphPrivate  bool
+		runnerPrivate bool
+		wantPrivate   bool
+	}{
+		{
+			name:          "private graph exit overrides runner public marker",
+			graphPrivate:  true,
+			runnerPrivate: false,
+			wantPrivate:   true,
+		},
+		{
+			name:          "public graph exit overrides runner private marker",
+			graphPrivate:  false,
+			runnerPrivate: true,
+			wantPrivate:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			eng, g, execID := setupGroupLeaseTestWithExitPrivacy(t, tt.graphPrivate)
+			ctx := context.Background()
+			gm := g.Groups()[0]
+			task := &Task{
+				ExecutionID:  execID,
+				NodeName:     gm.Name,
+				NodeIdx:      gm.EntryIdx,
+				UnitIdx:      gm.UnitIdx,
+				Type:         TaskTypeGroupExec,
+				ActivationID: 0,
+			}
+
+			lease, _, err := eng.BuildGroupLease(ctx, task)
+			if err != nil {
+				t.Fatalf("BuildGroupLease: %v", err)
+			}
+
+			if len(gm.BoundaryOutputs) == 0 {
+				t.Fatalf("fixture regressed: group %q has no boundary outputs", gm.Name)
+			}
+			bo := gm.BoundaryOutputs[0]
+			src := g.NodeAt(bo.Src.NodeIdx)
+			if got := src.Output != nil && src.Output.Private; got != tt.graphPrivate {
+				t.Fatalf("fixture exit privacy = %v, want %v", got, tt.graphPrivate)
+			}
+
+			_, err = eng.CommitGroupResult(ctx, lease, GroupResult{
+				Outcome: GroupOutcomeSuccess,
+				Exits: []GroupExitResult{{
+					// NodeIdx and PrivateOutput originate on the remote runner and
+					// must not influence the stored group exit policy.
+					NodeIdx:       -1,
+					NodeName:      src.Name,
+					Port:          bo.Src.Port,
+					Data:          map[string]any{"result": "ok"},
+					PrivateOutput: tt.runnerPrivate,
+				}},
+			})
+			if err != nil {
+				t.Fatalf("CommitGroupResult: %v", err)
+			}
+
+			state := eng.state.(*fakeGroupLeaseState)
+			state.mu.Lock()
+			exits := append([]GroupExitResult(nil), state.lastCommit.Exits...)
+			state.mu.Unlock()
+			if len(exits) != 1 {
+				t.Fatalf("committed exits = %d, want 1", len(exits))
+			}
+			if got := exits[0].PrivateOutput; got != tt.wantPrivate {
+				t.Errorf("committed exit PrivateOutput = %v, want %v", got, tt.wantPrivate)
+			}
+		})
+	}
+}
+
+func TestCommitGroup_UnknownExitPrivacyFailsClosed(t *testing.T) {
+	eng, g, execID := setupGroupLeaseTest(t)
+	ctx := context.Background()
+	gm := g.Groups()[0]
+	task := &Task{
+		ExecutionID:  execID,
+		NodeName:     gm.Name,
+		NodeIdx:      gm.EntryIdx,
+		UnitIdx:      gm.UnitIdx,
+		Type:         TaskTypeGroupExec,
+		ActivationID: 0,
+	}
+
+	lease, _, err := eng.BuildGroupLease(ctx, task)
+	if err != nil {
+		t.Fatalf("BuildGroupLease: %v", err)
+	}
+	err = eng.commitGroup(ctx, g, &GroupLease{
+		ExecutionID:  execID,
+		GroupUnitIdx: gm.UnitIdx,
+		LeaseToken:   lease.LeaseToken,
+		Attempt:      lease.Attempt,
+	}, gm, []GroupExit{{
+		NodeName: "unknown-exit",
+		Port:     "main",
+		Data:     map[string]any{"result": "must not be public"},
+	}}, false, nil, false)
+	if err != nil {
+		t.Fatalf("commitGroup: %v", err)
+	}
+
+	state := eng.state.(*fakeGroupLeaseState)
+	state.mu.Lock()
+	exits := append([]GroupExitResult(nil), state.lastCommit.Exits...)
+	state.mu.Unlock()
+	if len(exits) != 1 {
+		t.Fatalf("committed exits = %d, want 1", len(exits))
+	}
+	if !exits[0].PrivateOutput {
+		t.Error("unknown exit PrivateOutput = false, want fail-closed true")
+	}
+}
+
 // setupGroupLeaseTest creates an engine with a local group-capable state
 // and a grouped workflow execution in running state.
 func setupGroupLeaseTest(t *testing.T) (*Engine, *graph.Graph, types.ExecutionID) {
+	return setupGroupLeaseTestWithExitPrivacy(t, false)
+}
+
+func setupGroupLeaseTestWithExitPrivacy(t *testing.T, privateExit bool) (*Engine, *graph.Graph, types.ExecutionID) {
 	t.Helper()
+	var exitOutput *types.NodeOutputPolicy
+	if privateExit {
+		exitOutput = &types.NodeOutputPolicy{Private: true}
+	}
 	def := &types.WorkflowDef{
 		Name:    "test-grouped",
 		Version: "1",
@@ -260,7 +390,7 @@ func setupGroupLeaseTest(t *testing.T) (*Engine, *graph.Graph, types.ExecutionID
 		Nodes: []types.NodeDef{
 			{Name: "A", Type: "http.request", Version: 1, Parameters: map[string]any{"url": "http://a"}},
 			{Name: "B", Type: "code.python", Version: 2, Parameters: map[string]any{"script": "pass"}},
-			{Name: "C", Type: "http.request", Version: 1, Parameters: map[string]any{"url": "http://c"}},
+			{Name: "C", Type: "http.request", Version: 1, Output: exitOutput, Parameters: map[string]any{"url": "http://c"}},
 			{Name: "D", Type: "db.query", Version: 1},
 		},
 		Groups: []types.GroupDef{
@@ -297,11 +427,12 @@ func setupGroupLeaseTest(t *testing.T) (*Engine, *graph.Graph, types.ExecutionID
 // tests. Tracks acquire/renew/commit.
 type fakeGroupLeaseState struct {
 	*fakeState
-	acquired  bool
-	committed bool
-	leaseID   LeaseID
-	token     LeaseToken
-	attempt   int
+	acquired   bool
+	committed  bool
+	leaseID    LeaseID
+	token      LeaseToken
+	attempt    int
+	lastCommit GroupCommitRequest
 }
 
 func (f *fakeGroupLeaseState) AcquireGroupLease(_ context.Context, lease *GroupLease) (bool, error) {
@@ -336,6 +467,7 @@ func (f *fakeGroupLeaseState) CommitGroup(_ context.Context, req GroupCommitRequ
 		return GroupCommitResult{Outcome: CommitOutcomeStaleToken}, nil
 	}
 	f.committed = true
+	f.lastCommit = req
 
 	exec := f.executions[req.ExecutionID]
 	if exec == nil {

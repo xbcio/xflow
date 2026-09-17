@@ -32,14 +32,14 @@ var _ engine.EntryAdmissionStore = (*Store)(nil)
 // KEYS: 1=admission 2=exec:status 3=exec:graph 4=remaining 5=failed
 //
 //	6=group:status 7=group:meta 8=outbox:ready 9=outbox:body
-//	10..10+exitCount-1 = output keys
-//	10+exitCount..end = per downstream: inDegree, active, schedule (3 each)
+//	10.. = per exit: output key + node meta key (2 keys each)
+//	10+2*exitCount..end = per downstream: inDegree, active, schedule (3 each)
 //
 // ARGV: 1=resultHash 2=ttl_s 3=graphJSON 4=outcome(success|failed)
 //
 //	5=exitCount 6=downstreamCount
-//	7..7+exitCount-1 = encoded exit data
-//	7+exitCount..end = per downstream: arrivalCount, activeCount, mergeMode,
+//	7.. = per exit: encoded exit data + private-output bit (2 args each)
+//	7+2*exitCount..end = per downstream: arrivalCount, activeCount, mergeMode,
 //	                   executeID, executeBody, skipID, skipBody (7 each)
 //
 // Returns {code, finalStatus}: code 1=accepted, 2=duplicate, 3=conflict
@@ -66,8 +66,15 @@ redis.call('EXPIRE', KEYS[7], ttl)
 local exitCount = tonumber(ARGV[5] or '0')
 local keypos = 10
 for i = 1, exitCount do
-    redis.call('SET', KEYS[keypos], ARGV[6 + i], 'EX', ttl)
-    keypos = keypos + 1
+    local dataPos = 7 + (i - 1) * 2
+    redis.call('SET', KEYS[keypos], ARGV[dataPos], 'EX', ttl)
+    if tonumber(ARGV[dataPos + 1]) == 1 then
+        redis.call('HSET', KEYS[keypos + 1], 'private_output', '1')
+    end
+    -- Never let a refreshed runtime output outlive a prior private marker.
+    -- EXPIRE is a no-op when this exit has never had metadata.
+    redis.call('EXPIRE', KEYS[keypos + 1], ttl)
+    keypos = keypos + 2
 end
 -- Step 6: Decrement remaining (group unit is done).
 local remaining = redis.call('DECR', KEYS[4])
@@ -86,7 +93,7 @@ end
 -- Step 7: Downstream fan-in (same logic as commitGroupLua).
 if remaining > 0 then
     local n = tonumber(ARGV[6] or '0')
-    local argpos = 6 + exitCount + 1
+    local argpos = 7 + 2 * exitCount
     for i = 1, n do
         local inDegreeKey = KEYS[keypos]
         local activeKey = KEYS[keypos + 1]
@@ -247,8 +254,15 @@ func (s *Store) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 		if err != nil {
 			return engine.SeedExecutionFromEntryResponse{}, fmt.Errorf("marshal exit %q: %w", ex.NodeName, err)
 		}
-		keys = append(keys, outputKey(t, execID, ex.NodeName))
-		args = append(args, string(encoded))
+		keys = append(keys,
+			outputKey(t, execID, ex.NodeName),
+			nodeMetaKey(t, execID, ex.NodeName),
+		)
+		private := 0
+		if ex.PrivateOutput {
+			private = 1
+		}
+		args = append(args, string(encoded), private)
 	}
 
 	// Downstream arrivals (keys + args).

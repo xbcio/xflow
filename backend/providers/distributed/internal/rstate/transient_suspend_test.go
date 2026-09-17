@@ -30,7 +30,7 @@ func TestTransientStateRejectsSuspend(t *testing.T) {
 	if _, err := state.SuspendOrConsume(ctx, id, "wait", spec); !errors.Is(err, engine.ErrSuspendUnsupported) {
 		t.Fatalf("SuspendOrConsume() error = %v, want ErrSuspendUnsupported", err)
 	}
-	if _, _, err := state.SuspendTaskLease(ctx, lease, nil, false, spec, ""); !errors.Is(err, engine.ErrSuspendUnsupported) {
+	if _, _, err := state.SuspendTaskLease(ctx, lease, nil, false, false, spec, ""); !errors.Is(err, engine.ErrSuspendUnsupported) {
 		t.Fatalf("SuspendTaskLease() error = %v, want ErrSuspendUnsupported", err)
 	}
 	if _, err := state.ResuspendAtomic(ctx, id, "wait", "", "approval", spec); !errors.Is(err, engine.ErrSuspendUnsupported) {

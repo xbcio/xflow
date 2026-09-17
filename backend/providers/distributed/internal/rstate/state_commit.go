@@ -138,6 +138,10 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 	if req.StoreOutput {
 		storeOutput = 1
 	}
+	privateOutput := 0
+	if req.PrivateOutput {
+		privateOutput = 1
+	}
 	system := 0
 	if req.System {
 		system = 1
@@ -174,6 +178,9 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 		cyclicComplete, cyclicFinalStatus, cyclicFinalError, len(req.CyclicOutbox),
 	}
 	args = append(args, cyclicArgs...)
+	// Keep the privacy bit last: commitNodeLua's cyclic outbox entries are a
+	// variable-length suffix, and the marker must not perturb their indexes.
+	args = append(args, privateOutput)
 	t := namespace.FromContext(ctx)
 	result, err := commitNodeLua.Run(ctx, s.rdb, []string{
 		execKey(t, req.ExecutionID, "status"),
@@ -191,8 +198,12 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 	if err != nil {
 		return engine.CommitNodeResult{}, fmt.Errorf("commit node %q/%q: %w", req.ExecutionID, req.NodeName, err)
 	}
-	if len(result) != 3 {
+	if len(result) != 4 {
 		return engine.CommitNodeResult{}, fmt.Errorf("commit node %q/%q: unexpected result %v", req.ExecutionID, req.NodeName, result)
+	}
+	effectivePrivate, err := redisResultBit(result[3])
+	if err != nil {
+		return engine.CommitNodeResult{}, fmt.Errorf("commit node %q/%q: invalid private-output result: %w", req.ExecutionID, req.NodeName, err)
 	}
 	code := redisResultInt(result[0])
 	out := engine.CommitNodeResult{}
@@ -226,7 +237,14 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 	// per-workflow transient execution must skip this even when the control
 	// plane's global transient mode is off. Same reason as UpsertNode.
 	if out.Applied && s.db != nil && !s.isTransient(ctx, req.ExecutionID) {
-		output, _ := json.Marshal(req.Output)
+		// The Lua response supplies the monotonic privacy decision at the same
+		// linearization point as the accepted Redis transition. Do not HGET the
+		// marker here: it could expire or otherwise change before this SQL
+		// projection, turning a private output public.
+		var output []byte
+		if !effectivePrivate {
+			output, _ = json.Marshal(req.Output)
+		}
 		rec := &store.NodeRecord{
 			ExecutionID: req.ExecutionID,
 			NodeName:    req.NodeName,

@@ -35,6 +35,7 @@ type memoryReplayReceipt struct {
 
 var _ engine.AtomicStateStore = (*memoryState)(nil)
 var _ engine.LegacyNodeCommitter = (*memoryState)(nil)
+var _ engine.LeaseSuspender = (*memoryState)(nil)
 var _ engine.DurableLeaseSuspender = (*memoryState)(nil)
 var _ engine.OutboxFailureRecorder = (*memoryState)(nil)
 var _ engine.OutboxLeaser = (*memoryState)(nil)
@@ -86,6 +87,7 @@ func (s *memoryState) CommitNode(_ context.Context, req engine.CommitNodeRequest
 		}
 	}
 
+	privateOutput := s.preserveOutputPrivacyLocked(key, req.PrivateOutput)
 	node := &engine.NodeSnapshot{
 		ExecutionID:         req.ExecutionID,
 		Name:                req.NodeName,
@@ -94,11 +96,14 @@ func (s *memoryState) CommitNode(_ context.Context, req engine.CommitNodeRequest
 		Attempt:             req.Attempt,
 		ActivationID:        req.ActivationID,
 		AutoDepth:           req.AutoDepth,
-		Output:              cloneData(req.Output),
+		PrivateOutput:       privateOutput,
 		Port:                req.Port,
 		Error:               req.Error,
 		CommittedLeaseToken: req.LeaseToken,
 		CommittedAttempt:    req.Attempt,
+	}
+	if !privateOutput {
+		node.Output = cloneData(req.Output)
 	}
 	if req.System && current != nil {
 		node.Attempt = current.Attempt

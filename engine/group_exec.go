@@ -113,7 +113,11 @@ func (e *Engine) commitGroup(ctx context.Context, g *graph.Graph, lease *GroupLe
 	reqExits := make([]GroupExitResult, 0, len(exits))
 	for _, ex := range exits {
 		reqExits = append(reqExits, GroupExitResult{
-			NodeIdx: nodeIdxOf(g, ex.NodeName), NodeName: ex.NodeName, Port: ex.Port, Data: ex.Data,
+			NodeIdx:       nodeIdxOf(g, ex.NodeName),
+			NodeName:      ex.NodeName,
+			Port:          ex.Port,
+			Data:          ex.Data,
+			PrivateOutput: groupExitOutputIsPrivate(g, ex.NodeName),
 		})
 	}
 
@@ -176,6 +180,25 @@ func (e *Engine) commitGroup(ctx context.Context, g *graph.Graph, lease *GroupLe
 func nodeIdxOf(g *graph.Graph, name string) int {
 	idx, _ := g.NodeIndex(name)
 	return idx
+}
+
+// groupExitOutputIsPrivate derives a group exit's public-output policy solely
+// from the current compiled graph. Group results can originate on a remote
+// runner, so their claimed policy is never authoritative. An absent or invalid
+// graph node is private by default: a bad exit must not turn into a disclosure.
+func groupExitOutputIsPrivate(g *graph.Graph, name string) bool {
+	if g == nil {
+		return true
+	}
+	idx, ok := g.NodeIndex(name)
+	if !ok || idx < 0 || idx >= g.NodeCount() {
+		return true
+	}
+	node := g.NodeAt(idx)
+	if node.Name != name {
+		return true
+	}
+	return node.Output != nil && node.Output.Private
 }
 
 // groupOnErrorFatal maps the group's OnError strategy to whether a group

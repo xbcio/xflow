@@ -33,6 +33,7 @@ type nodeEntry struct {
 	handler            types.ActionHandler // local-only direct handler
 	kind               types.NodeKind
 	onError            types.OnError
+	output             *types.NodeOutputPolicy
 	normalizedParams   map[string]any
 	runnerSelector     *types.RunnerSelector
 	timeout            time.Duration
@@ -225,6 +226,14 @@ func (n *NodeRef) NodePort() (string, string) { return n.name, "main" }
 // Body attaches a sub-workflow as the loop/split body.
 func (n *NodeRef) Body(body *WorkflowBuilder) *NodeRef {
 	n.body = body
+	return n
+}
+
+// PrivateOutput marks this node's runtime output as private and public-redacted.
+func (n *NodeRef) PrivateOutput() *NodeRef {
+	if n.entry != nil {
+		n.entry.output = &types.NodeOutputPolicy{Private: true}
+	}
 	return n
 }
 
@@ -512,6 +521,7 @@ func (w *WorkflowBuilder) assembleNodes(def *types.WorkflowDef) {
 			Version:            nodeVersion,
 			Parameters:         params,
 			OnError:            string(entry.onError),
+			Output:             cloneNodeOutputPolicy(entry.output),
 			RunnerSelector:     cloneRunnerSelector(entry.runnerSelector),
 			Timeout:            entry.timeout,
 			ActivationReplicas: entry.activationReplicas,
@@ -662,6 +672,14 @@ func cloneWorkflowOptions(opts *types.WorkflowOptions) *types.WorkflowOptions {
 		return nil
 	}
 	out := *opts
+	return &out
+}
+
+func cloneNodeOutputPolicy(policy *types.NodeOutputPolicy) *types.NodeOutputPolicy {
+	if policy == nil {
+		return nil
+	}
+	out := *policy
 	return &out
 }
 

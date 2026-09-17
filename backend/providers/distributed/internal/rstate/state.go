@@ -320,6 +320,7 @@ func transientExecutionKeys(t namespace.Namespace, id types.ExecutionID, g *grap
 				nodeStatusKey(t, id, node.Name),
 				nodeMetaKey(t, id, node.Name),
 				outputKey(t, id, node.Name),
+				subExecutionKey(t, id, node.Name),
 			)
 		}
 	}
@@ -371,6 +372,35 @@ func redisResultInt(value any) int64 {
 	default:
 		return 0
 	}
+}
+
+// redisResultBit strictly parses a Lua 0|1 result. Privacy is fail-closed:
+// accepting an unknown representation as public could leak a projected output.
+func redisResultBit(value any) (bool, error) {
+	switch typed := value.(type) {
+	case int64:
+		switch typed {
+		case 0:
+			return false, nil
+		case 1:
+			return true, nil
+		}
+	case string:
+		switch typed {
+		case "0":
+			return false, nil
+		case "1":
+			return true, nil
+		}
+	case []byte:
+		switch string(typed) {
+		case "0":
+			return false, nil
+		case "1":
+			return true, nil
+		}
+	}
+	return false, fmt.Errorf("want Redis bit 0 or 1, got %T(%v)", value, value)
 }
 
 // redisResultString coerces a Redis Lua result element into a string.

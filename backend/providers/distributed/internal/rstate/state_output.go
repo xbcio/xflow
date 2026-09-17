@@ -13,11 +13,23 @@ import (
 
 func (s *Store) PutOutput(ctx context.Context, id types.ExecutionID, name string, data map[string]any) error {
 	t := namespace.FromContext(ctx)
+	output := outputKey(t, id, name)
+	meta := nodeMetaKey(t, id, name)
+	ttl := s.getExecTTL(ctx, id)
 	b, _ := json.Marshal(data) // json.Marshal of map[string]any cannot fail
-	if err := s.rdb.Set(ctx, outputKey(t, id, name), string(b), s.getExecTTL(ctx, id)).Err(); err != nil {
+
+	// PutOutput is intentionally policy-agnostic for runtime consumers. If a
+	// previous fenced transition marked this output private, renew that marker
+	// in the same Redis transaction as the output so it cannot expire before a
+	// newly refreshed value. EXPIRE on an absent metadata hash is a no-op and
+	// never creates a public marker.
+	pipe := s.rdb.TxPipeline()
+	pipe.Set(ctx, output, string(b), ttl)
+	pipe.Expire(ctx, meta, ttl)
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
 		return err
 	}
-	return s.refreshTransientTTL(ctx, id, outputKey(t, id, name))
+	return s.refreshTransientTTL(ctx, id, output, meta)
 }
 
 func (s *Store) GetOutput(ctx context.Context, id types.ExecutionID, name string) (map[string]any, error) {

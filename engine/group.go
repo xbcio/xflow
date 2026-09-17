@@ -23,6 +23,9 @@ type GroupExitResult struct {
 	NodeName string
 	Port     string
 	Data     map[string]any
+	// PrivateOutput is engine-derived from the compiled graph before the exit
+	// reaches a backend. A runner-supplied GroupResult marker is not trusted.
+	PrivateOutput bool
 }
 
 // BoundaryExit is the seed-context name for a group/entry-unit boundary output.

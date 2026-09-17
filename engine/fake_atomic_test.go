@@ -19,7 +19,7 @@ func (f *fakeState) CommitLeasedNode(ctx context.Context, req CommitNodeRequest)
 
 var _ LeaseSuspender = (*fakeState)(nil)
 
-func (f *fakeState) SuspendTaskLease(_ context.Context, lease *TaskLease, output map[string]any, storeOutput bool, spec *types.SuspendSpec, oldSignalName string) (*types.SignalPayload, bool, error) {
+func (f *fakeState) SuspendTaskLease(_ context.Context, lease *TaskLease, output map[string]any, storeOutput bool, privateOutput bool, spec *types.SuspendSpec, oldSignalName string) (*types.SignalPayload, bool, error) {
 	if lease == nil || spec == nil {
 		return nil, false, ErrInvalidLeaseToken
 	}
@@ -34,6 +34,7 @@ func (f *fakeState) SuspendTaskLease(_ context.Context, lease *TaskLease, output
 	if storeOutput {
 		f.outputs[key] = cloneMap(output)
 	}
+	privateOutput = privateOutput || node.PrivateOutput
 	delete(f.resumed, key)
 	if oldSignalName != "" {
 		delete(f.suspended, key)
@@ -77,6 +78,10 @@ func (f *fakeState) SuspendTaskLease(_ context.Context, lease *TaskLease, output
 	copy.LeaseTTL = 0
 	copy.LeaseTaskType = TaskTypeNodeExec
 	copy.LeasePayload = nil
+	copy.PrivateOutput = privateOutput
+	if privateOutput {
+		copy.Output = nil
+	}
 	f.nodes[key] = &copy
 	for _, entry := range SuspendOutboxEntries(lease, spec, payload, time.Now().UTC()) {
 		f.putAtomicOutboxLocked(lease.Task.ExecutionID, entry.ID, entry.Task, entry.AvailableAt)
@@ -84,8 +89,8 @@ func (f *fakeState) SuspendTaskLease(_ context.Context, lease *TaskLease, output
 	return cloneFakeLeasePayload(payload), true, nil
 }
 
-func (f *fakeState) SuspendTaskLeaseWithOutbox(ctx context.Context, lease *TaskLease, output map[string]any, storeOutput bool, spec *types.SuspendSpec, oldSignalName string) (bool, error) {
-	_, committed, err := f.SuspendTaskLease(ctx, lease, output, storeOutput, spec, oldSignalName)
+func (f *fakeState) SuspendTaskLeaseWithOutbox(ctx context.Context, lease *TaskLease, output map[string]any, storeOutput bool, privateOutput bool, spec *types.SuspendSpec, oldSignalName string) (bool, error) {
+	_, committed, err := f.SuspendTaskLease(ctx, lease, output, storeOutput, privateOutput, spec, oldSignalName)
 	return committed, err
 }
 
@@ -181,6 +186,7 @@ func (f *fakeState) CommitNode(_ context.Context, req CommitNodeRequest) (Commit
 		return CommitNodeResult{Outcome: CommitOutcomeStaleToken}, nil
 	}
 
+	privateOutput := req.PrivateOutput || (current != nil && current.PrivateOutput)
 	node := &NodeSnapshot{
 		ExecutionID:         req.ExecutionID,
 		Name:                req.NodeName,
@@ -189,11 +195,14 @@ func (f *fakeState) CommitNode(_ context.Context, req CommitNodeRequest) (Commit
 		Attempt:             req.Attempt,
 		ActivationID:        req.ActivationID,
 		AutoDepth:           req.AutoDepth,
-		Output:              cloneMap(req.Output),
+		PrivateOutput:       privateOutput,
 		Port:                req.Port,
 		Error:               req.Error,
 		CommittedLeaseToken: req.LeaseToken,
 		CommittedAttempt:    req.Attempt,
+	}
+	if !privateOutput {
+		node.Output = cloneMap(req.Output)
 	}
 	if req.System && current != nil {
 		node.Attempt = current.Attempt

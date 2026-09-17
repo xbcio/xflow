@@ -296,27 +296,46 @@ return nil
 
 // upsertNodeLua atomically checks if the node is in a terminal state before writing.
 // KEYS[1] = node status key, KEYS[2] = output key (optional, may be empty string), KEYS[3] = node meta hash
-// ARGV[1] = new status, ARGV[2] = output JSON (or ""), ARGV[3] = ttl seconds, ARGV[4] = activation id
-// Returns 1 (written) or 0 (skipped, already terminal).
+// ARGV[1] = new status, ARGV[2] = output JSON (or ""), ARGV[3] = ttl seconds, ARGV[4] = activation id, ARGV[5] = private output (0|1)
+// Returns {written, effectivePrivate}. effectivePrivate is a strict 0|1
+// decision made at the same linearization point as the snapshot write.
 var upsertNodeLua = redis.NewScript(`
+local ttl = tonumber(ARGV[3])
+-- Calculate privacy before any stale/terminal fence. A stale private recovery
+-- snapshot still has to redact an older SQL projection. Once private, it is
+-- monotonic for this node output lifetime.
+local existingPrivate = redis.call('HGET', KEYS[3], 'private_output') == '1'
+local requestedPrivate = tonumber(ARGV[5] or '0') == 1
+local effectivePrivate = (existingPrivate or requestedPrivate) and 1 or 0
+if requestedPrivate then
+    redis.call('HSET', KEYS[3], 'private_output', '1')
+end
+-- A later public upsert must not let the existing private marker expire before
+-- the refreshed runtime output. This also covers a stale public snapshot.
+if effectivePrivate == 1 then
+    redis.call('EXPIRE', KEYS[3], ttl)
+end
 local existing = redis.call('GET', KEYS[1])
 if existing == 'success' or existing == 'failed' or existing == 'skipped' or existing == 'canceled' or existing == 'continued' then
     local oldActivation = tonumber(redis.call('HGET', KEYS[3], 'activation_id') or '0')
     local newActivation = tonumber(ARGV[4] or '0')
     if newActivation <= oldActivation then
-        return 0
+        return {0, effectivePrivate}
     end
 end
 if existing == 'committing' or existing == 'waiting' then
     if ARGV[1] == 'running' then
-        return 0
+        return {0, effectivePrivate}
     end
 end
-redis.call('SET', KEYS[1], ARGV[1], 'EX', tonumber(ARGV[3]))
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ttl)
 if ARGV[2] ~= '' then
-    redis.call('SET', KEYS[2], ARGV[2], 'EX', tonumber(ARGV[3]))
+    redis.call('SET', KEYS[2], ARGV[2], 'EX', ttl)
 end
-return 1
+-- Keep normal accepted-write metadata expiration behavior, even where no
+-- privacy marker exists (EXPIRE on a missing hash is harmless).
+redis.call('EXPIRE', KEYS[3], ttl)
+return {1, effectivePrivate}
 `)
 
 // claimTaskLeaseLua remains only for suspend and experimental expansion paths.
@@ -359,7 +378,8 @@ return {1, 'committing'}
 // KEYS: status, meta, output, lease index, suspended set, resume lock,
 // old waiter, waiter spec, signal batch, then signal/waiter key pairs.
 // ARGV: lease id, token, attempt, activation, ttl, lease member, store output,
-// output JSON, node name, multi flag, quorum, signal count, spec JSON, names.
+// output JSON, node name, multi flag, quorum, signal count, spec JSON, names,
+// trailing private-output bit.
 // Returns {committed, signal name, signal payload JSON, multi-payload JSON}.
 var suspendTaskLeaseLua = redis.NewScript(`
 local terminal = function(value)
@@ -378,6 +398,9 @@ end
 local ttl = tonumber(ARGV[5])
 if tonumber(ARGV[7]) == 1 then
     redis.call('SET', KEYS[3], ARGV[8], 'EX', ttl)
+end
+if tonumber(ARGV[#ARGV] or '0') == 1 then
+    redis.call('HSET', KEYS[2], 'private_output', '1')
 end
 redis.call('SET', KEYS[1], 'suspended', 'EX', ttl)
 redis.call('HSET', KEYS[2], 'lease_id', '', 'lease_token', '', 'lease_issued_at_ms', '0', 'lease_ttl_ms', '0', 'lease_deadline_ms', '0', 'lease_task_type', '0', 'lease_payload', '')

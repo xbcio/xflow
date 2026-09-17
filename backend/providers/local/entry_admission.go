@@ -65,9 +65,13 @@ func (s *memoryState) SeedExecutionFromEntry(_ context.Context, req engine.SeedE
 		committedToken: "seed-triggered",
 	}
 
-	// Step 5: Write boundary outputs.
+	// Step 5: Write boundary outputs. Private exits remain in runtime output
+	// storage for downstream execution, but their monotonic marker excludes
+	// them from public aggregation and WaitDone.
 	for _, ex := range req.Exits {
-		s.outputs[string(execID)+"/"+ex.NodeName] = cloneData(ex.Data)
+		key := memoryNodeKey(execID, ex.NodeName)
+		s.preserveOutputPrivacyLocked(key, ex.PrivateOutput)
+		s.outputs[key] = cloneData(ex.Data)
 	}
 
 	// Step 6: Completion counting + downstream outbox.

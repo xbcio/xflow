@@ -133,6 +133,7 @@ func ProjectNodeBodyPackage(mapNodeName string, params map[string]any, visibleSu
 			Kind:       nd.Kind,
 			Version:    nd.Version,
 			OnError:    nd.OnError,
+			Output:     cloneNodeOutputPolicy(nd.Output),
 			Parameters: cloneStringAnyMap(nd.Parameters),
 			// Timeout crosses the body projection boundary so a map body member
 			// keeps its own bound. A group's bound and a member's bound nest;

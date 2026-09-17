@@ -73,9 +73,9 @@ func (e *Engine) refuseAcyclicExpansion(_ context.Context, lease *TaskLease, _ *
 //     and the legacy fenced scheduler are different backends, so this varies
 //     rather than being a third copy of the function around it.
 type taskResultCommitStrategy struct {
-	commitError  func(ctx context.Context, lease *TaskLease, meta graph.NodeMeta, systemErr error, output *types.Output, businessErr *types.Error) (CommitOutcome, error)
+	commitError  func(ctx context.Context, lease *TaskLease, meta graph.NodeMeta, privateOutput bool, systemErr error, output *types.Output, businessErr *types.Error) (CommitOutcome, error)
 	commitExpand func(ctx context.Context, lease *TaskLease, g *graph.Graph, data map[string]any) (CommitOutcome, error)
-	commitNode   func(ctx context.Context, lease *TaskLease, status types.NodeStatus, output map[string]any, port, errMsg string, fatal bool) (CommitOutcome, error)
+	commitNode   func(ctx context.Context, lease *TaskLease, privateOutput bool, status types.NodeStatus, output map[string]any, port, errMsg string, fatal bool) (CommitOutcome, error)
 }
 
 // commitTaskResultWithStrategy is the task-result verdict sequence shared by
@@ -87,13 +87,14 @@ type taskResultCommitStrategy struct {
 func (e *Engine) commitTaskResultWithStrategy(ctx context.Context, lease *TaskLease, g *graph.Graph, result TaskResult, strategy taskResultCommitStrategy) (CommitOutcome, error) {
 	task := &lease.Task
 	meta := g.NodeAt(task.NodeIdx)
+	privateOutput := privateOutputForTask(g, task)
 
 	if result.Error != nil || (result.Output != nil && result.Output.Error != nil) {
 		var businessErr *types.Error
 		if result.Output != nil {
 			businessErr = result.Output.Error
 		}
-		return strategy.commitError(ctx, lease, meta, result.Error, result.Output, businessErr)
+		return strategy.commitError(ctx, lease, meta, privateOutput, result.Error, result.Output, businessErr)
 	}
 
 	if retryErr := outputPortRetryError(result.Output); retryErr != nil {
@@ -114,7 +115,7 @@ func (e *Engine) commitTaskResultWithStrategy(ctx context.Context, lease *TaskLe
 		// Retry budget exhausted: the explicit error-port output is a terminal
 		// failure. Apply the node's OnError strategy rather than committing it
 		// as a success on the error port.
-		return strategy.commitError(ctx, lease, meta, retryErr, result.Output, nil)
+		return strategy.commitError(ctx, lease, meta, privateOutput, retryErr, result.Output, nil)
 	}
 
 	data := make(map[string]any)
@@ -136,11 +137,11 @@ func (e *Engine) commitTaskResultWithStrategy(ctx context.Context, lease *TaskLe
 	if result.Output != nil && result.Output.Port != "" {
 		port = result.Output.Port
 	}
-	return strategy.commitNode(ctx, lease, types.NodeStatusSuccess, data, port, "", false)
+	return strategy.commitNode(ctx, lease, privateOutput, types.NodeStatusSuccess, data, port, "", false)
 }
 
-func (e *Engine) commitAcyclicNodeError(ctx context.Context, lease *TaskLease, meta graph.NodeMeta, systemErr error, output *types.Output, businessErr *types.Error) (CommitOutcome, error) {
-	return e.commitNodeErrorOutcome(ctx, lease, meta, systemErr, output, businessErr, e.commitAcyclicNodeWithClassification)
+func (e *Engine) commitAcyclicNodeError(ctx context.Context, lease *TaskLease, meta graph.NodeMeta, privateOutput bool, systemErr error, output *types.Output, businessErr *types.Error) (CommitOutcome, error) {
+	return e.commitNodeErrorOutcome(ctx, lease, meta, privateOutput, systemErr, output, businessErr, e.commitAcyclicNodeWithClassification)
 }
 
 // nodeErrorCommitFunc is the shape of the terminal-transition step that
@@ -149,7 +150,7 @@ func (e *Engine) commitAcyclicNodeError(ctx context.Context, lease *TaskLease, m
 // path. The two committers differ (atomic commit vs. the legacy fenced
 // scheduler), which is exactly why this is a parameter rather than a third
 // copy of the function it varies.
-type nodeErrorCommitFunc func(ctx context.Context, lease *TaskLease, status types.NodeStatus, output map[string]any, port, errMsg string, fatal bool, cls EffectiveClassification) (CommitOutcome, error)
+type nodeErrorCommitFunc func(ctx context.Context, lease *TaskLease, privateOutput bool, status types.NodeStatus, output map[string]any, port, errMsg string, fatal bool, cls EffectiveClassification) (CommitOutcome, error)
 
 // commitNodeErrorOutcome is the failure-handling pipeline shared by
 // commitAcyclicNodeError and commitLegacyNodeError: retry → publishRetryReceipt
@@ -164,7 +165,7 @@ type nodeErrorCommitFunc func(ctx context.Context, lease *TaskLease, status type
 // failure; this function decides WHAT happens to one. Neither decision has a
 // second copy, which is what keeps the convergence true rather than merely
 // currently observed.
-func (e *Engine) commitNodeErrorOutcome(ctx context.Context, lease *TaskLease, meta graph.NodeMeta, systemErr error, output *types.Output, businessErr *types.Error, commit nodeErrorCommitFunc) (CommitOutcome, error) {
+func (e *Engine) commitNodeErrorOutcome(ctx context.Context, lease *TaskLease, meta graph.NodeMeta, privateOutput bool, systemErr error, output *types.Output, businessErr *types.Error, commit nodeErrorCommitFunc) (CommitOutcome, error) {
 	if retried, err := e.tryRetryWithAttempt(ctx, &lease.Task, meta, systemErr, lease.Attempt, lease.LeaseToken); err != nil {
 		return CommitOutcomeTransientError, fmt.Errorf("retry node %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
 	} else if retried {
@@ -175,14 +176,14 @@ func (e *Engine) commitNodeErrorOutcome(ctx context.Context, lease *TaskLease, m
 	outcome := ApplyOnError(meta.OnError, systemErr, businessErr, output)
 	errorPort := outcome.RoutePort == "error" && businessErr == nil
 	cls := buildEffectiveClassification(systemErr, businessErr, errorPort)
-	return commit(ctx, lease, outcome.NodeStatus, outcome.Output, outcome.RoutePort, outcome.ErrorMessage, outcome.ExecFatal, cls)
+	return commit(ctx, lease, privateOutput, outcome.NodeStatus, outcome.Output, outcome.RoutePort, outcome.ErrorMessage, outcome.ExecFatal, cls)
 }
 
-func (e *Engine) commitAcyclicNode(ctx context.Context, lease *TaskLease, status types.NodeStatus, output map[string]any, port, errMsg string, fatal bool) (CommitOutcome, error) {
-	return e.commitAcyclicNodeWithClassification(ctx, lease, status, output, port, errMsg, fatal, EffectiveClassification{})
+func (e *Engine) commitAcyclicNode(ctx context.Context, lease *TaskLease, privateOutput bool, status types.NodeStatus, output map[string]any, port, errMsg string, fatal bool) (CommitOutcome, error) {
+	return e.commitAcyclicNodeWithClassification(ctx, lease, privateOutput, status, output, port, errMsg, fatal, EffectiveClassification{})
 }
 
-func (e *Engine) commitAcyclicNodeWithClassification(ctx context.Context, lease *TaskLease, status types.NodeStatus, output map[string]any, port, errMsg string, fatal bool, cls EffectiveClassification) (CommitOutcome, error) {
+func (e *Engine) commitAcyclicNodeWithClassification(ctx context.Context, lease *TaskLease, privateOutput bool, status types.NodeStatus, output map[string]any, port, errMsg string, fatal bool, cls EffectiveClassification) (CommitOutcome, error) {
 	task := &lease.Task
 	var advanceTask *Task
 	if !fatal {
@@ -200,21 +201,22 @@ func (e *Engine) commitAcyclicNodeWithClassification(ctx context.Context, lease 
 		}
 	}
 	req := CommitNodeRequest{
-		ExecutionID:  task.ExecutionID,
-		NodeName:     task.NodeName,
-		NodeIdx:      task.NodeIdx,
-		ActivationID: task.ActivationID,
-		AutoDepth:    task.AutoDepth,
-		LeaseID:      lease.LeaseID,
-		LeaseToken:   lease.LeaseToken,
-		Attempt:      lease.Attempt,
-		Status:       status,
-		Output:       output,
-		StoreOutput:  true,
-		Port:         port,
-		Error:        errMsg,
-		Fatal:        fatal,
-		AdvanceTask:  advanceTask,
+		ExecutionID:   task.ExecutionID,
+		NodeName:      task.NodeName,
+		NodeIdx:       task.NodeIdx,
+		ActivationID:  task.ActivationID,
+		AutoDepth:     task.AutoDepth,
+		LeaseID:       lease.LeaseID,
+		LeaseToken:    lease.LeaseToken,
+		Attempt:       lease.Attempt,
+		Status:        status,
+		Output:        output,
+		StoreOutput:   true,
+		PrivateOutput: privateOutput,
+		Port:          port,
+		Error:         errMsg,
+		Fatal:         fatal,
+		AdvanceTask:   advanceTask,
 	}
 	result, err := e.commitNode(ctx, req)
 	if err != nil {
@@ -273,24 +275,25 @@ func (e *Engine) publishCommitReceipt(ctx context.Context, req CommitNodeRequest
 	})
 }
 
-func (e *Engine) commitAcyclicFailure(ctx context.Context, lease *TaskLease, failure error) error {
+func (e *Engine) commitAcyclicFailure(ctx context.Context, lease *TaskLease, privateOutput bool, failure error) error {
 	if failure == nil {
 		failure = fmt.Errorf("task failed")
 	}
 	task := &lease.Task
 	req := CommitNodeRequest{
-		ExecutionID:  task.ExecutionID,
-		NodeName:     task.NodeName,
-		NodeIdx:      task.NodeIdx,
-		ActivationID: task.ActivationID,
-		AutoDepth:    task.AutoDepth,
-		LeaseID:      lease.LeaseID,
-		LeaseToken:   lease.LeaseToken,
-		Attempt:      lease.Attempt,
-		Status:       types.NodeStatusFailed,
-		StoreOutput:  true,
-		Error:        failure.Error(),
-		Fatal:        true,
+		ExecutionID:   task.ExecutionID,
+		NodeName:      task.NodeName,
+		NodeIdx:       task.NodeIdx,
+		ActivationID:  task.ActivationID,
+		AutoDepth:     task.AutoDepth,
+		LeaseID:       lease.LeaseID,
+		LeaseToken:    lease.LeaseToken,
+		Attempt:       lease.Attempt,
+		Status:        types.NodeStatusFailed,
+		StoreOutput:   true,
+		PrivateOutput: privateOutput,
+		Error:         failure.Error(),
+		Fatal:         true,
 	}
 	result, err := e.commitNode(ctx, req)
 	if err != nil {

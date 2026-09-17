@@ -28,18 +28,19 @@ const compilerVersion = "v3"
 // decode must accept either key and fail closed if both are present with
 // conflicting values, never silently prefer one.
 type wireNodeMeta struct {
-	Name           string                `json:"Name"`
-	Type           string                `json:"Type"`
-	Kind           types.NodeKind        `json:"Kind"`
-	Version        int                   `json:"Version"`
-	OnError        string                `json:"OnError"`
-	RunnerSelector *types.RunnerSelector `json:"RunnerSelector"`
-	MergeMode      string                `json:"MergeMode"`
-	Parameters     map[string]any        `json:"Parameters"`
-	PortOuts       []string              `json:"PortOuts"`
-	Retry          *types.RetrySettings  `json:"Retry"`
-	GroupIdx       *int                  `json:"group_idx,omitempty"`
-	GroupIdxAlt    *int                  `json:"GroupIdx,omitempty"`
+	Name           string                  `json:"Name"`
+	Type           string                  `json:"Type"`
+	Kind           types.NodeKind          `json:"Kind"`
+	Version        int                     `json:"Version"`
+	OnError        string                  `json:"OnError"`
+	Output         *types.NodeOutputPolicy `json:"output,omitempty"`
+	RunnerSelector *types.RunnerSelector   `json:"RunnerSelector"`
+	MergeMode      string                  `json:"MergeMode"`
+	Parameters     map[string]any          `json:"Parameters"`
+	PortOuts       []string                `json:"PortOuts"`
+	Retry          *types.RetrySettings    `json:"Retry"`
+	GroupIdx       *int                    `json:"group_idx,omitempty"`
+	GroupIdxAlt    *int                    `json:"GroupIdx,omitempty"`
 	// Timeout carries NodeMeta.Timeout across the wire. omitempty is
 	// load-bearing for the same reason Body's is: an unset timeout must not
 	// appear in the snapshot, and (because NodeMeta is also hashed directly by
@@ -63,6 +64,7 @@ func toWireNodeMeta(n NodeMeta) wireNodeMeta {
 		Kind:               n.Kind,
 		Version:            n.Version,
 		OnError:            n.OnError,
+		Output:             n.Output,
 		RunnerSelector:     n.RunnerSelector,
 		MergeMode:          n.MergeMode,
 		Parameters:         n.Parameters,
@@ -125,6 +127,7 @@ func decodeWireNodes(raw []wireNodeMeta) ([]NodeMeta, bool, error) {
 			Kind:               w.Kind,
 			Version:            w.Version,
 			OnError:            w.OnError,
+			Output:             cloneNodeOutputPolicy(w.Output),
 			RunnerSelector:     w.RunnerSelector,
 			MergeMode:          w.MergeMode,
 			Parameters:         w.Parameters,
@@ -191,6 +194,14 @@ func cloneRetry(r *types.RetrySettings) *types.RetrySettings {
 		return nil
 	}
 	cp := *r
+	return &cp
+}
+
+func cloneNodeOutputPolicy(policy *types.NodeOutputPolicy) *types.NodeOutputPolicy {
+	if policy == nil {
+		return nil
+	}
+	cp := *policy
 	return &cp
 }
 

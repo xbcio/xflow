@@ -83,7 +83,7 @@ func (e *Engine) CommitTaskResultWithOutcome(ctx context.Context, lease *TaskLea
 		return outcome, err
 	}
 	if result.Suspend != nil {
-		return e.commitSuspendedTaskResult(ctx, lease, result)
+		return e.commitSuspendedTaskResult(ctx, lease, g, result)
 	}
 	return e.commitLegacyTaskResult(ctx, lease, g, result)
 }
@@ -138,7 +138,7 @@ func (e *Engine) CommitTaskTimeout(ctx context.Context, lease *TaskLease, cause 
 		return e.CommitTaskFailure(ctx, lease, cause)
 	}
 	meta := g.NodeAt(t.NodeIdx)
-	outcome, err := e.commitAcyclicNodeError(ctx, lease, meta, cause, nil, nil)
+	outcome, err := e.commitAcyclicNodeError(ctx, lease, meta, privateOutputForTask(g, t), cause, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -166,10 +166,11 @@ func (e *Engine) CommitTaskFailure(ctx context.Context, lease *TaskLease, failur
 	if !active {
 		return nil
 	}
+	privateOutput := privateOutputForTask(g, t)
 	if !g.AllowCycles() {
-		return e.commitAcyclicFailure(ctx, lease, failure)
+		return e.commitAcyclicFailure(ctx, lease, privateOutput, failure)
 	}
-	outcome, err := e.commitLegacyNode(ctx, lease, types.NodeStatusFailed, nil, "", failure.Error(), true)
+	outcome, err := e.commitLegacyNode(ctx, lease, privateOutput, types.NodeStatusFailed, nil, "", failure.Error(), true)
 	if err != nil {
 		return err
 	}
@@ -218,12 +219,12 @@ func (e *Engine) expandLegacyTaskResult(ctx context.Context, lease *TaskLease, g
 	return CommitOutcomeAccepted, nil
 }
 
-func (e *Engine) commitLegacyNodeError(ctx context.Context, lease *TaskLease, meta graph.NodeMeta, systemErr error, output *types.Output, businessErr *types.Error) (CommitOutcome, error) {
-	return e.commitNodeErrorOutcome(ctx, lease, meta, systemErr, output, businessErr, e.commitLegacyNodeWithClassification)
+func (e *Engine) commitLegacyNodeError(ctx context.Context, lease *TaskLease, meta graph.NodeMeta, privateOutput bool, systemErr error, output *types.Output, businessErr *types.Error) (CommitOutcome, error) {
+	return e.commitNodeErrorOutcome(ctx, lease, meta, privateOutput, systemErr, output, businessErr, e.commitLegacyNodeWithClassification)
 }
 
-func (e *Engine) commitLegacyNode(ctx context.Context, lease *TaskLease, status types.NodeStatus, output map[string]any, port, errMsg string, fatal bool) (CommitOutcome, error) {
-	return e.commitLegacyNodeWithClassification(ctx, lease, status, output, port, errMsg, fatal, EffectiveClassification{})
+func (e *Engine) commitLegacyNode(ctx context.Context, lease *TaskLease, privateOutput bool, status types.NodeStatus, output map[string]any, port, errMsg string, fatal bool) (CommitOutcome, error) {
+	return e.commitLegacyNodeWithClassification(ctx, lease, privateOutput, status, output, port, errMsg, fatal, EffectiveClassification{})
 }
 
 // commitLegacyNodeWithClassification applies a fenced terminal transition for a
@@ -231,7 +232,7 @@ func (e *Engine) commitLegacyNode(ctx context.Context, lease *TaskLease, status 
 // intent in one backend transaction. cls is the EffectiveClassification bound
 // to this commit (empty for non-error commits); it is only carried on the
 // read-only commit receipt and never changes control flow.
-func (e *Engine) commitLegacyNodeWithClassification(ctx context.Context, lease *TaskLease, status types.NodeStatus, output map[string]any, port, errMsg string, fatal bool, cls EffectiveClassification) (CommitOutcome, error) {
+func (e *Engine) commitLegacyNodeWithClassification(ctx context.Context, lease *TaskLease, privateOutput bool, status types.NodeStatus, output map[string]any, port, errMsg string, fatal bool, cls EffectiveClassification) (CommitOutcome, error) {
 	task := &lease.Task
 	g, active, err := e.loadActiveGraph(ctx, task.ExecutionID)
 	if err != nil {
@@ -240,13 +241,16 @@ func (e *Engine) commitLegacyNodeWithClassification(ctx context.Context, lease *
 	if !active {
 		return CommitOutcomeExecutionInactive, nil
 	}
+	// The graph was reloaded from the authoritative execution state above. Do
+	// not let a caller or a runner-provided marker declassify its output.
+	privateOutput = privateOutputForTask(g, task)
 
 	// Experimental Loop/Split workflows may be acyclic even though their parent
 	// reaches an intermediate waiting state. Once the fenced child generation
 	// completes, use the normal atomic commit/outbox path so downstream work is
 	// not left to the legacy direct scheduler.
 	if !g.AllowCycles() {
-		return e.commitAcyclicNode(ctx, lease, status, output, port, errMsg, fatal)
+		return e.commitAcyclicNode(ctx, lease, privateOutput, status, output, port, errMsg, fatal)
 	}
 
 	committer, ok := e.state.(LegacyNodeCommitter)
@@ -283,19 +287,20 @@ func (e *Engine) commitLegacyNodeWithClassification(ctx context.Context, lease *
 	}
 
 	req := CommitNodeRequest{
-		ExecutionID:  task.ExecutionID,
-		NodeName:     task.NodeName,
-		NodeIdx:      task.NodeIdx,
-		ActivationID: task.ActivationID,
-		AutoDepth:    task.AutoDepth,
-		LeaseID:      lease.LeaseID,
-		LeaseToken:   lease.LeaseToken,
-		Attempt:      lease.Attempt,
-		Status:       status,
-		Output:       output,
-		StoreOutput:  true,
-		Port:         port,
-		Error:        errMsg,
+		ExecutionID:   task.ExecutionID,
+		NodeName:      task.NodeName,
+		NodeIdx:       task.NodeIdx,
+		ActivationID:  task.ActivationID,
+		AutoDepth:     task.AutoDepth,
+		LeaseID:       lease.LeaseID,
+		LeaseToken:    lease.LeaseToken,
+		Attempt:       lease.Attempt,
+		Status:        status,
+		Output:        output,
+		StoreOutput:   true,
+		PrivateOutput: privateOutput,
+		Port:          port,
+		Error:         errMsg,
 		// The graph is cyclic by construction here — the !AllowCycles redirect
 		// near the top of this function sent every acyclic graph to
 		// commitAcyclicNode. Naming the redirect rather than its line number:
@@ -372,7 +377,7 @@ func (e *Engine) commitLegacyNodeWithClassification(ctx context.Context, lease *
 
 // commitSuspendedTaskResult claims the active lease, then delegates the full
 // output/signal/status transition to a token-fenced state-store primitive.
-func (e *Engine) commitSuspendedTaskResult(ctx context.Context, lease *TaskLease, result TaskResult) (CommitOutcome, error) {
+func (e *Engine) commitSuspendedTaskResult(ctx context.Context, lease *TaskLease, g *graph.Graph, result TaskResult) (CommitOutcome, error) {
 	node, claimed, err := e.state.ClaimTaskLease(ctx, lease)
 	if err != nil {
 		return CommitOutcomeTransientError, err
@@ -402,7 +407,8 @@ func (e *Engine) commitSuspendedTaskResult(ctx context.Context, lease *TaskLease
 	if !ok {
 		return CommitOutcomeTransientError, ErrAtomicCommitUnsupported
 	}
-	committed, err := suspender.SuspendTaskLeaseWithOutbox(ctx, lease, output, storeOutput, result.Suspend, oldSignalName)
+	privateOutput := privateOutputForTask(g, &lease.Task)
+	committed, err := suspender.SuspendTaskLeaseWithOutbox(ctx, lease, output, storeOutput, privateOutput, result.Suspend, oldSignalName)
 	if err != nil {
 		return CommitOutcomeTransientError, err
 	}

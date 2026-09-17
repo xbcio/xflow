@@ -74,6 +74,7 @@ func (e *Engine) Cancel(ctx context.Context, id types.ExecutionID) error {
 			cancelSnap.ActivationID = current.ActivationID
 			cancelSnap.AutoDepth = current.AutoDepth
 			cancelSnap.Output = current.Output
+			cancelSnap.PrivateOutput = current.PrivateOutput
 			cancelSnap.Port = current.Port
 			cancelSnap.Error = current.Error
 		}

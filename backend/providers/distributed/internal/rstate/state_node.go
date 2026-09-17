@@ -79,82 +79,113 @@ func (s *Store) UpsertNode(ctx context.Context, n *engine.NodeSnapshot) error {
 	}
 
 	ttl := s.getExecTTL(ctx, n.ExecutionID)
-	_, err := upsertNodeLua.Run(ctx, s.rdb,
+	privateOutput := 0
+	if n.PrivateOutput {
+		privateOutput = 1
+	}
+	result, err := upsertNodeLua.Run(ctx, s.rdb,
 		[]string{key, outKey, metaKey},
-		string(n.Status), outputJSON, int(ttl.Seconds()), n.ActivationID,
-	).Int64()
-	if err != nil && err != redis.Nil {
+		string(n.Status), outputJSON, int(ttl.Seconds()), n.ActivationID, privateOutput,
+	).Slice()
+	if err != nil {
 		return fmt.Errorf("upsert node %q/%q: %w", n.ExecutionID, n.Name, err)
 	}
-	keys := []string{key}
-	if outputJSON != "" {
-		keys = append(keys, outKey)
+	if len(result) != 2 {
+		return fmt.Errorf("upsert node %q/%q: unexpected result %v", n.ExecutionID, n.Name, result)
 	}
-	if n.LeaseID != "" || n.LeaseToken != "" || n.Attempt != 0 || n.ActivationID != 0 || n.AutoDepth != 0 || !n.LeaseIssuedAt.IsZero() || n.Port != "" || n.Error != "" || n.CommittedLeaseToken != "" || n.CommittedAttempt != 0 {
-		meta := map[string]any{
-			"lease_id":        string(n.LeaseID),
-			"lease_token":     string(n.LeaseToken),
-			"attempt":         n.Attempt,
-			"activation_id":   n.ActivationID,
-			"auto_depth":      n.AutoDepth,
-			"node_idx":        n.NodeIdx,
-			"lease_task_type": int(n.LeaseTaskType),
-			"lease_payload":   leasePayloadJSON,
+	written, err := redisResultBit(result[0])
+	if err != nil {
+		return fmt.Errorf("upsert node %q/%q: invalid write result: %w", n.ExecutionID, n.Name, err)
+	}
+	effectivePrivate, err := redisResultBit(result[1])
+	if err != nil {
+		return fmt.Errorf("upsert node %q/%q: invalid private-output result: %w", n.ExecutionID, n.Name, err)
+	}
+	// A stale public snapshot has no state or projection work to do. A stale
+	// private snapshot is different: Lua may have just marked the node private
+	// before rejecting the stale status, so it must still redact a historical SQL
+	// output below.
+	if !written && !effectivePrivate {
+		return nil
+	}
+	if written {
+		keys := []string{key}
+		if outputJSON != "" {
+			keys = append(keys, outKey)
 		}
-		if !n.LeaseIssuedAt.IsZero() {
-			meta["lease_issued_at_ms"] = n.LeaseIssuedAt.UnixMilli()
-		}
-		if n.LeaseTTL > 0 {
-			meta["lease_ttl_ms"] = n.LeaseTTL.Milliseconds()
+		refreshMeta := n.PrivateOutput
+		if n.LeaseID != "" || n.LeaseToken != "" || n.Attempt != 0 || n.ActivationID != 0 || n.AutoDepth != 0 || !n.LeaseIssuedAt.IsZero() || n.Port != "" || n.Error != "" || n.CommittedLeaseToken != "" || n.CommittedAttempt != 0 {
+			meta := map[string]any{
+				"lease_id":        string(n.LeaseID),
+				"lease_token":     string(n.LeaseToken),
+				"attempt":         n.Attempt,
+				"activation_id":   n.ActivationID,
+				"auto_depth":      n.AutoDepth,
+				"node_idx":        n.NodeIdx,
+				"lease_task_type": int(n.LeaseTaskType),
+				"lease_payload":   leasePayloadJSON,
+			}
 			if !n.LeaseIssuedAt.IsZero() {
-				meta["lease_deadline_ms"] = n.LeaseIssuedAt.Add(n.LeaseTTL).UnixMilli()
+				meta["lease_issued_at_ms"] = n.LeaseIssuedAt.UnixMilli()
+			}
+			if n.LeaseTTL > 0 {
+				meta["lease_ttl_ms"] = n.LeaseTTL.Milliseconds()
+				if !n.LeaseIssuedAt.IsZero() {
+					meta["lease_deadline_ms"] = n.LeaseIssuedAt.Add(n.LeaseTTL).UnixMilli()
+				}
+			}
+			if n.Port != "" {
+				meta["port"] = n.Port
+			}
+			if n.Error != "" {
+				meta["error"] = n.Error
+			}
+			if n.CommittedLeaseToken != "" {
+				meta["committed_lease_token"] = string(n.CommittedLeaseToken)
+				meta["committed_attempt"] = n.CommittedAttempt
+			}
+			if err := s.rdb.HSet(ctx, metaKey, meta).Err(); err != nil {
+				return fmt.Errorf("upsert node lease %q/%q: %w", n.ExecutionID, n.Name, err)
+			}
+			if err := s.rdb.Expire(ctx, metaKey, ttl).Err(); err != nil {
+				return fmt.Errorf("expire node lease %q/%q: %w", n.ExecutionID, n.Name, err)
+			}
+			refreshMeta = true
+		}
+		if refreshMeta {
+			keys = append(keys, metaKey)
+		}
+		// Lease-expiry discovery is per execution so it shares the hash tag with
+		// the node status and metadata. AcquireTaskLease updates all three in one
+		// Lua command; this path keeps generic snapshot upserts recoverable too.
+		leaseIndexKey := leaseExpiryZSetKey(t, n.ExecutionID)
+		member := leaseExpiryMember(n.ExecutionID, n.Name)
+		keys = append(keys, leaseIndexKey)
+		if (n.Status == types.NodeStatusRunning || n.Status == types.NodeStatusCommitting || n.Status == types.NodeStatusWaiting) && n.LeaseToken != "" && !n.LeaseIssuedAt.IsZero() && n.LeaseTTL > 0 {
+			expiryMs := float64(n.LeaseIssuedAt.Add(n.LeaseTTL).UnixMilli())
+			if err := s.rdb.ZAdd(ctx, leaseIndexKey, redis.Z{Score: expiryMs, Member: member}).Err(); err != nil {
+				return fmt.Errorf("index lease expiry %q/%q: %w", n.ExecutionID, n.Name, err)
+			}
+		} else if n.Status != types.NodeStatusRunning && n.Status != types.NodeStatusCommitting && n.Status != types.NodeStatusWaiting {
+			// Terminal, suspended, and pending nodes have no recoverable lease.
+			if err := s.rdb.ZRem(ctx, leaseIndexKey, member).Err(); err != nil {
+				return fmt.Errorf("remove lease expiry %q/%q: %w", n.ExecutionID, n.Name, err)
 			}
 		}
-		if n.Port != "" {
-			meta["port"] = n.Port
+		if err := s.refreshTransientTTL(ctx, n.ExecutionID, keys...); err != nil {
+			return err
 		}
-		if n.Error != "" {
-			meta["error"] = n.Error
-		}
-		if n.CommittedLeaseToken != "" {
-			meta["committed_lease_token"] = string(n.CommittedLeaseToken)
-			meta["committed_attempt"] = n.CommittedAttempt
-		}
-		if err := s.rdb.HSet(ctx, metaKey, meta).Err(); err != nil {
-			return fmt.Errorf("upsert node lease %q/%q: %w", n.ExecutionID, n.Name, err)
-		}
-		if err := s.rdb.Expire(ctx, metaKey, ttl).Err(); err != nil {
-			return fmt.Errorf("expire node lease %q/%q: %w", n.ExecutionID, n.Name, err)
-		}
-		keys = append(keys, metaKey)
-	}
-	// Lease-expiry discovery is per execution so it shares the hash tag with
-	// the node status and metadata. AcquireTaskLease updates all three in one
-	// Lua command; this path keeps generic snapshot upserts recoverable too.
-	leaseIndexKey := leaseExpiryZSetKey(t, n.ExecutionID)
-	member := leaseExpiryMember(n.ExecutionID, n.Name)
-	keys = append(keys, leaseIndexKey)
-	if (n.Status == types.NodeStatusRunning || n.Status == types.NodeStatusCommitting || n.Status == types.NodeStatusWaiting) && n.LeaseToken != "" && !n.LeaseIssuedAt.IsZero() && n.LeaseTTL > 0 {
-		expiryMs := float64(n.LeaseIssuedAt.Add(n.LeaseTTL).UnixMilli())
-		if err := s.rdb.ZAdd(ctx, leaseIndexKey, redis.Z{Score: expiryMs, Member: member}).Err(); err != nil {
-			return fmt.Errorf("index lease expiry %q/%q: %w", n.ExecutionID, n.Name, err)
-		}
-	} else if n.Status != types.NodeStatusRunning && n.Status != types.NodeStatusCommitting && n.Status != types.NodeStatusWaiting {
-		// Terminal, suspended, and pending nodes have no recoverable lease.
-		if err := s.rdb.ZRem(ctx, leaseIndexKey, member).Err(); err != nil {
-			return fmt.Errorf("remove lease expiry %q/%q: %w", n.ExecutionID, n.Name, err)
-		}
-	}
-	if err := s.refreshTransientTTL(ctx, n.ExecutionID, keys...); err != nil {
-		return err
 	}
 
 	// isTransient, not s.transient: this row carries n.Output, the node's actual
 	// payload. A per-workflow transient execution running on a control plane
 	// whose global mode is off would otherwise persist it in full.
 	if s.db != nil && !s.isTransient(ctx, n.ExecutionID) {
+		// effectivePrivate was computed by the same Lua command that accepted (or
+		// privacy-marked and rejected) this snapshot. A post-Lua HGET could race
+		// metadata expiry and would not be fail-closed.
 		var outBytes []byte
-		if n.Output != nil {
+		if n.Output != nil && !effectivePrivate {
 			outBytes, _ = json.Marshal(n.Output) // json.Marshal of map[string]any cannot fail
 		}
 		rec := &store.NodeRecord{
@@ -203,18 +234,25 @@ func (s *Store) GetNode(ctx context.Context, id types.ExecutionID, name string) 
 	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
 		return nil, fmt.Errorf("get node %q/%q: %w", id, name, err)
 	}
+	// Read metadata before deciding a status miss is absent: group/entry
+	// boundary exits have runtime output and a privacy marker but no ordinary
+	// node status. Returning that marker lets public readers fail closed.
+	meta, err := metaCmd.Result()
+	if err != nil && err != redis.Nil {
+		return nil, fmt.Errorf("get node lease %q/%q: %w", id, name, err)
+	}
+	privateOutput := meta["private_output"] == "1"
 	val, err := statusCmd.Result()
 	if err == redis.Nil {
+		if privateOutput {
+			return &engine.NodeSnapshot{ExecutionID: id, Name: name, PrivateOutput: true}, nil
+		}
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get node %q/%q: %w", id, name, err)
 	}
-	ns := &engine.NodeSnapshot{ExecutionID: id, Name: name, Status: types.NodeStatus(val)}
-	meta, err := metaCmd.Result()
-	if err != nil {
-		return nil, fmt.Errorf("get node lease %q/%q: %w", id, name, err)
-	}
+	ns := &engine.NodeSnapshot{ExecutionID: id, Name: name, Status: types.NodeStatus(val), PrivateOutput: privateOutput}
 	ns.LeaseID = engine.LeaseID(meta["lease_id"])
 	ns.LeaseToken = engine.LeaseToken(meta["lease_token"])
 	if nodeIdx := meta["node_idx"]; nodeIdx != "" {

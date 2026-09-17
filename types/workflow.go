@@ -79,23 +79,31 @@ type WorkflowOptions struct {
 	TransientCompletionTTL time.Duration `json:"transient_completion_ttl,omitempty"`
 }
 
+// NodeOutputPolicy controls how a node's runtime output is exposed.
+// Private output remains available to runtime consumers but is redacted from
+// public representations.
+type NodeOutputPolicy struct {
+	Private bool `json:"private,omitempty"`
+}
+
 // NodeDef describes a single node in the workflow graph.
 type NodeDef struct {
-	ID             string          `json:"id,omitempty"`
-	Name           string          `json:"name,omitempty"`
-	Type           string          `json:"type,omitempty"`
-	Kind           NodeKind        `json:"kind,omitempty"`
-	Version        int             `json:"version,omitempty"`
-	Template       string          `json:"template,omitempty"`
-	Position       *Position       `json:"position,omitempty"`
-	Disabled       bool            `json:"disabled,omitempty"`
-	OnError        string          `json:"on_error,omitempty"`
-	RunnerSelector *RunnerSelector `json:"runner_selector,omitempty"`
-	Notes          string          `json:"notes,omitempty"`
-	Inputs         []PortDecl      `json:"inputs,omitempty"`
-	OutputSchema   map[string]any  `json:"output_schema,omitempty"`
-	Parameters     map[string]any  `json:"parameters,omitempty"`
-	UI             map[string]any  `json:"ui,omitempty"`
+	ID             string            `json:"id,omitempty"`
+	Name           string            `json:"name,omitempty"`
+	Type           string            `json:"type,omitempty"`
+	Kind           NodeKind          `json:"kind,omitempty"`
+	Version        int               `json:"version,omitempty"`
+	Template       string            `json:"template,omitempty"`
+	Position       *Position         `json:"position,omitempty"`
+	Disabled       bool              `json:"disabled,omitempty"`
+	OnError        string            `json:"on_error,omitempty"`
+	RunnerSelector *RunnerSelector   `json:"runner_selector,omitempty"`
+	Notes          string            `json:"notes,omitempty"`
+	Inputs         []PortDecl        `json:"inputs,omitempty"`
+	OutputSchema   map[string]any    `json:"output_schema,omitempty"`
+	Output         *NodeOutputPolicy `json:"output,omitempty"`
+	Parameters     map[string]any    `json:"parameters,omitempty"`
+	UI             map[string]any    `json:"ui,omitempty"`
 	// Retry overrides WorkflowSettings.Retry for this node. Nil means inherit
 	// the workflow default; the workflow default of nil means no retries.
 	Retry *RetrySettings `json:"retry,omitempty"`

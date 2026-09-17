@@ -2,10 +2,12 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/types"
 )
 
 // fakeEntryAdmissionState is an EntryAdmissionStore test double whose
@@ -14,11 +16,19 @@ import (
 // deterministically without a real backend.
 type fakeEntryAdmissionState struct {
 	*fakeState
-	resp SeedExecutionFromEntryResponse
-	err  error
+	resp    SeedExecutionFromEntryResponse
+	err     error
+	calls   int
+	lastReq SeedExecutionFromEntryRequest
+	mutate  func(SeedExecutionFromEntryRequest)
 }
 
-func (f *fakeEntryAdmissionState) SeedExecutionFromEntry(_ context.Context, _ SeedExecutionFromEntryRequest) (SeedExecutionFromEntryResponse, error) {
+func (f *fakeEntryAdmissionState) SeedExecutionFromEntry(_ context.Context, req SeedExecutionFromEntryRequest) (SeedExecutionFromEntryResponse, error) {
+	f.calls++
+	f.lastReq = req
+	if f.mutate != nil {
+		f.mutate(f.lastReq)
+	}
 	return f.resp, f.err
 }
 
@@ -45,6 +55,242 @@ func newEntryAdmissionEngine(t *testing.T, resp SeedExecutionFromEntryResponse, 
 	t.Helper()
 	state := &fakeEntryAdmissionState{fakeState: newFakeState(), resp: resp, err: err}
 	return New(state, &fakeQueue{}, opts...)
+}
+
+func buildEntryAdmissionOutputPolicyGraph(t *testing.T) *graph.Graph {
+	t.Helper()
+	g, err := graph.Compile(&types.WorkflowDef{
+		Name: "entry-admission-output-policy",
+		Nodes: []types.NodeDef{
+			{Name: "public", Type: "test.action", Kind: types.NodeKindAction},
+			{
+				Name:   "private",
+				Type:   "test.action",
+				Kind:   types.NodeKindAction,
+				Output: &types.NodeOutputPolicy{Private: true},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("compile output-policy graph: %v", err)
+	}
+	return g
+}
+
+// graphWithInvalidNodeIndex builds a graph snapshot whose index claims a node
+// exists at an out-of-bounds position. Graph.UnmarshalJSON intentionally
+// retains the persisted index, so this exercises the admission bounds guard
+// without reaching into graph's unexported fields.
+func graphWithInvalidNodeIndex(t *testing.T, source *graph.Graph, name string) *graph.Graph {
+	t.Helper()
+	data, err := json.Marshal(source)
+	if err != nil {
+		t.Fatalf("marshal source graph: %v", err)
+	}
+	var wire map[string]json.RawMessage
+	if err := json.Unmarshal(data, &wire); err != nil {
+		t.Fatalf("decode source graph wire form: %v", err)
+	}
+	var index map[string]int
+	if err := json.Unmarshal(wire["index"], &index); err != nil {
+		t.Fatalf("decode graph index: %v", err)
+	}
+	index[name] = source.NodeCount()
+	wire["index"], err = json.Marshal(index)
+	if err != nil {
+		t.Fatalf("encode corrupt graph index: %v", err)
+	}
+	data, err = json.Marshal(wire)
+	if err != nil {
+		t.Fatalf("encode corrupt graph: %v", err)
+	}
+	var corrupted graph.Graph
+	if err := json.Unmarshal(data, &corrupted); err != nil {
+		t.Fatalf("decode corrupt graph: %v", err)
+	}
+	return &corrupted
+}
+
+func TestSeedExecutionFromEntry_DerivesExitPrivacyFromTrustedGraph(t *testing.T) {
+	policyGraph := buildEntryAdmissionOutputPolicyGraph(t)
+	invalidIndexGraph := graphWithInvalidNodeIndex(t, policyGraph, "public")
+
+	cases := []struct {
+		name          string
+		graph         *graph.Graph
+		nodeName      string
+		inboundMarker bool
+		wantPrivate   bool
+	}{
+		{
+			name:          "public graph node overrides inbound private marker",
+			graph:         policyGraph,
+			nodeName:      "public",
+			inboundMarker: true,
+			wantPrivate:   false,
+		},
+		{
+			name:          "private graph node overrides inbound public marker",
+			graph:         policyGraph,
+			nodeName:      "private",
+			inboundMarker: false,
+			wantPrivate:   true,
+		},
+		{
+			name:          "nil graph fails closed",
+			graph:         nil,
+			nodeName:      "public",
+			inboundMarker: false,
+			wantPrivate:   true,
+		},
+		{
+			name:          "unknown node fails closed",
+			graph:         policyGraph,
+			nodeName:      "not-in-graph",
+			inboundMarker: false,
+			wantPrivate:   true,
+		},
+		{
+			name:          "invalid graph index fails closed",
+			graph:         invalidIndexGraph,
+			nodeName:      "public",
+			inboundMarker: false,
+			wantPrivate:   true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &fakeEntryAdmissionState{
+				fakeState: newFakeState(),
+				resp:      SeedExecutionFromEntryResponse{State: AdmissionStateAccepted},
+			}
+			eng := New(state, &fakeQueue{})
+			req := SeedExecutionFromEntryRequest{
+				Graph: tc.graph,
+				Exits: []BoundaryExit{{
+					NodeName:      tc.nodeName,
+					Port:          "main",
+					Data:          map[string]any{"secret": "value"},
+					PrivateOutput: tc.inboundMarker,
+				}},
+			}
+
+			if _, err := eng.SeedExecutionFromEntry(context.Background(), req); err != nil {
+				t.Fatalf("SeedExecutionFromEntry() error = %v", err)
+			}
+			if state.calls != 1 {
+				t.Fatalf("store calls = %d, want 1", state.calls)
+			}
+			if got := state.lastReq.Exits[0].PrivateOutput; got != tc.wantPrivate {
+				t.Fatalf("store exit PrivateOutput = %t, want %t", got, tc.wantPrivate)
+			}
+			if got := req.Exits[0].PrivateOutput; got != tc.inboundMarker {
+				t.Fatalf("caller exit PrivateOutput mutated to %t, want original %t", got, tc.inboundMarker)
+			}
+			if &state.lastReq.Exits[0] == &req.Exits[0] {
+				t.Fatal("store received caller's exit slice instead of an admission-owned clone")
+			}
+		})
+	}
+}
+
+func TestSeedExecutionFromEntry_DeepClonesExitData(t *testing.T) {
+	callerNested := map[string]any{"value": "original"}
+	callerListItem := map[string]any{"value": "original"}
+	callerList := []any{callerListItem}
+	callerStrings := []string{"original"}
+	callerTypedMap := map[string][]string{"values": {"original"}}
+	callerData := map[string]any{
+		"nested":    callerNested,
+		"list":      callerList,
+		"strings":   callerStrings,
+		"typed_map": callerTypedMap,
+	}
+
+	state := &fakeEntryAdmissionState{
+		fakeState: newFakeState(),
+		resp:      SeedExecutionFromEntryResponse{State: AdmissionStateAccepted},
+		mutate: func(admission SeedExecutionFromEntryRequest) {
+			data := admission.Exits[0].Data
+			data["store_only"] = "store mutation"
+			data["nested"].(map[string]any)["value"] = "store mutation"
+			data["list"].([]any)[0].(map[string]any)["value"] = "store mutation"
+			data["strings"].([]string)[0] = "store mutation"
+			data["typed_map"].(map[string][]string)["values"][0] = "store mutation"
+		},
+	}
+	eng := New(state, &fakeQueue{})
+	req := SeedExecutionFromEntryRequest{
+		Graph: buildEntryAdmissionOutputPolicyGraph(t),
+		Exits: []BoundaryExit{{
+			NodeName: "public",
+			Port:     "main",
+			Data:     callerData,
+		}},
+	}
+
+	if _, err := eng.SeedExecutionFromEntry(context.Background(), req); err != nil {
+		t.Fatalf("SeedExecutionFromEntry() error = %v", err)
+	}
+
+	if _, ok := callerData["store_only"]; ok {
+		t.Fatal("store mutation leaked into caller's top-level Data map")
+	}
+	if got := callerNested["value"]; got != "original" {
+		t.Fatalf("caller nested map = %q, want original", got)
+	}
+	if got := callerListItem["value"]; got != "original" {
+		t.Fatalf("caller nested list map = %q, want original", got)
+	}
+	if got := callerStrings[0]; got != "original" {
+		t.Fatalf("caller nested string slice = %q, want original", got)
+	}
+	if got := callerTypedMap["values"][0]; got != "original" {
+		t.Fatalf("caller typed nested container = %q, want original", got)
+	}
+
+	// The isolation is bidirectional: a caller retrying with a mutated request
+	// cannot retrospectively alter the backend's admitted input either.
+	callerData["caller_only"] = "caller mutation"
+	callerNested["value"] = "caller mutation"
+	callerListItem["value"] = "caller mutation"
+	callerStrings[0] = "caller mutation"
+	callerTypedMap["values"][0] = "caller mutation"
+
+	stored := state.lastReq.Exits[0].Data
+	if _, ok := stored["caller_only"]; ok {
+		t.Fatal("caller mutation leaked into store-owned top-level Data map")
+	}
+	if got := stored["nested"].(map[string]any)["value"]; got != "store mutation" {
+		t.Fatalf("store nested map = %q, want store mutation", got)
+	}
+	if got := stored["list"].([]any)[0].(map[string]any)["value"]; got != "store mutation" {
+		t.Fatalf("store nested list map = %q, want store mutation", got)
+	}
+	if got := stored["strings"].([]string)[0]; got != "store mutation" {
+		t.Fatalf("store nested string slice = %q, want store mutation", got)
+	}
+	if got := stored["typed_map"].(map[string][]string)["values"][0]; got != "store mutation" {
+		t.Fatalf("store typed nested container = %q, want store mutation", got)
+	}
+}
+
+func TestComputeResultHash_IgnoresPrivateOutputMarker(t *testing.T) {
+	exits := []BoundaryExit{{
+		NodeName:      "private",
+		Port:          "main",
+		Data:          map[string]any{"credential": "redacted-at-projection"},
+		PrivateOutput: false,
+	}}
+	withPrivateMarker := append([]BoundaryExit(nil), exits...)
+	withPrivateMarker[0].PrivateOutput = true
+
+	withoutMarkerHash := ComputeResultHash(GroupOutcomeSuccess, exits)
+	withMarkerHash := ComputeResultHash(GroupOutcomeSuccess, withPrivateMarker)
+	if withMarkerHash != withoutMarkerHash {
+		t.Fatalf("ComputeResultHash changed with PrivateOutput marker: %q != %q", withMarkerHash, withoutMarkerHash)
+	}
 }
 
 // TestSeedExecutionFromEntry_GroupAdmission_Accepted is the positive control:

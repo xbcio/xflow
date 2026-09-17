@@ -634,7 +634,7 @@ func (e *Engine) completeLoopSplit(ctx context.Context, lease *TaskLease, g *gra
 	if failures := failedBatchErrors(results); len(failures) > 0 {
 		return e.failLoopSplit(ctx, lease, g, output, failures, len(results))
 	}
-	outcome, err := e.commitLegacyNode(ctx, lease, types.NodeStatusSuccess, output, "main", "", false)
+	outcome, err := e.commitLegacyNode(ctx, lease, privateOutputForTask(g, &lease.Task), types.NodeStatusSuccess, output, "main", "", false)
 	if outcome == CommitOutcomeStaleToken || outcome == CommitOutcomeDuplicateTerminal || outcome == CommitOutcomeExecutionInactive {
 		return nil
 	}
@@ -663,7 +663,7 @@ func (e *Engine) failLoopSplit(ctx context.Context, lease *TaskLease, g *graph.G
 	// error in, so the results array survives: a downstream error branch can
 	// still see which batches did produce items.
 	decision := ApplyOnError(meta.OnError, cause, nil, &types.Output{Data: output})
-	outcome, err := e.commitLegacyNodeWithClassification(ctx, lease, decision.NodeStatus, decision.Output,
+	outcome, err := e.commitLegacyNodeWithClassification(ctx, lease, privateOutputForTask(g, &lease.Task), decision.NodeStatus, decision.Output,
 		decision.RoutePort, decision.ErrorMessage, decision.ExecFatal,
 		buildEffectiveClassification(cause, nil, false))
 	if outcome == CommitOutcomeStaleToken || outcome == CommitOutcomeDuplicateTerminal || outcome == CommitOutcomeExecutionInactive {

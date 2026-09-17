@@ -108,7 +108,7 @@ func TestRedisSuspendTaskLeaseIsFencedAndClearsRecoveryLease(t *testing.T) {
 		t.Fatalf("DeliverSignal(pre) error = %v", err)
 	}
 
-	payload, committed, err := state.SuspendTaskLease(ctx, lease, map[string]any{"request": "42"}, true, &types.SuspendSpec{
+	payload, committed, err := state.SuspendTaskLease(ctx, lease, map[string]any{"request": "42"}, true, false, &types.SuspendSpec{
 		Mode:    types.ModeSignal,
 		Signals: []string{"approval"},
 	}, "")
@@ -132,7 +132,7 @@ func TestRedisSuspendTaskLeaseIsFencedAndClearsRecoveryLease(t *testing.T) {
 	if expired, err := state.ListExpiredLeases(ctx, time.Now().Add(time.Hour)); err != nil || len(expired) != 0 {
 		t.Fatalf("expired after suspend = %+v err=%v, want none", expired, err)
 	}
-	if _, committed, err := state.SuspendTaskLease(ctx, lease, nil, false, &types.SuspendSpec{Mode: types.ModeSignal, Signals: []string{"approval"}}, ""); err != nil || committed {
+	if _, committed, err := state.SuspendTaskLease(ctx, lease, nil, false, false, &types.SuspendSpec{Mode: types.ModeSignal, Signals: []string{"approval"}}, ""); err != nil || committed {
 		t.Fatalf("stale SuspendTaskLease() committed=%v err=%v, want false/nil", committed, err)
 	}
 }
@@ -169,7 +169,7 @@ func TestRedisSuspendTaskLeaseMultiSignalPreservesPayloadSet(t *testing.T) {
 			t.Fatalf("DeliverSignal(%q) error = %v", signalName, err)
 		}
 	}
-	payload, committed, err := state.SuspendTaskLease(ctx, lease, nil, false, &types.SuspendSpec{
+	payload, committed, err := state.SuspendTaskLease(ctx, lease, nil, false, false, &types.SuspendSpec{
 		Mode:    types.ModeMultiSignal,
 		Signals: []string{"security", "approval"},
 		Quorum:  2,
@@ -297,7 +297,7 @@ func TestRedisSuspendWithOutboxPersistsPreDeliveredResume(t *testing.T) {
 	if _, _, err := state.DeliverSignal(ctx, id, "approval", map[string]any{"by": "lead"}); err != nil {
 		t.Fatalf("DeliverSignal() error = %v", err)
 	}
-	if committed, err := state.SuspendTaskLeaseWithOutbox(ctx, lease, map[string]any{"request": "42"}, true, &types.SuspendSpec{
+	if committed, err := state.SuspendTaskLeaseWithOutbox(ctx, lease, map[string]any{"request": "42"}, true, false, &types.SuspendSpec{
 		Mode:    types.ModeSignal,
 		Signals: []string{"approval"},
 	}, ""); err != nil || !committed {
@@ -350,7 +350,7 @@ func TestRedisDeliverSignalWithOutboxMultiSignalPreservesAll(t *testing.T) {
 	// Park the node in multi-signal mode with no signals yet delivered, so the
 	// resume flows through the post-suspension DeliverSignalWithOutbox path
 	// (not the suspend-time consume path).
-	if payload, _, err := state.SuspendTaskLease(ctx, lease, nil, false, &types.SuspendSpec{
+	if payload, _, err := state.SuspendTaskLease(ctx, lease, nil, false, false, &types.SuspendSpec{
 		Mode:    types.ModeMultiSignal,
 		Signals: []string{"security", "approval"},
 		Quorum:  2,
@@ -431,7 +431,7 @@ func TestRedisSuspendWithOutboxMultiSignalPreservesFidelity(t *testing.T) {
 			t.Fatalf("DeliverSignal(%q) error = %v", signalName, err)
 		}
 	}
-	if committed, err := state.SuspendTaskLeaseWithOutbox(ctx, lease, nil, false, &types.SuspendSpec{
+	if committed, err := state.SuspendTaskLeaseWithOutbox(ctx, lease, nil, false, false, &types.SuspendSpec{
 		Mode:    types.ModeMultiSignal,
 		Signals: []string{"security", "approval"},
 		Quorum:  2,
@@ -487,7 +487,7 @@ func TestRedisDeliverSignalWithOutboxStampsLiveActivation(t *testing.T) {
 		t.Fatalf("ClaimTaskLease() claimed=%v err=%v", claimed, err)
 	}
 	// Park the node waiting for signal "approval" with no pre-delivered signal.
-	if payload, _, err := state.SuspendTaskLease(ctx, lease, nil, false, &types.SuspendSpec{
+	if payload, _, err := state.SuspendTaskLease(ctx, lease, nil, false, false, &types.SuspendSpec{
 		Signals: []string{"approval"},
 	}, ""); err != nil || payload != nil {
 		t.Fatalf("SuspendTaskLease() payload=%+v err=%v, want parked (nil payload)", payload, err)

@@ -42,6 +42,9 @@ local ttl = tonumber(ARGV[5])
 if tonumber(ARGV[7]) == 1 then
     redis.call('SET', KEYS[3], ARGV[8], 'EX', ttl)
 end
+if tonumber(ARGV[#ARGV] or '0') == 1 then
+    redis.call('HSET', KEYS[2], 'private_output', '1')
+end
 redis.call('SET', KEYS[1], 'suspended', 'EX', ttl)
 redis.call('HSET', KEYS[2], 'lease_id', '', 'lease_token', '', 'lease_issued_at_ms', '0', 'lease_ttl_ms', '0', 'lease_deadline_ms', '0', 'lease_task_type', '0', 'lease_payload', '')
 redis.call('EXPIRE', KEYS[2], ttl)
@@ -163,7 +166,7 @@ return 1
 
 // SuspendTaskLeaseWithOutbox atomically parks one claimed lease and persists
 // the resume delivery required by an already-present signal, timer, or timeout.
-func (s *Store) SuspendTaskLeaseWithOutbox(ctx context.Context, lease *engine.TaskLease, output map[string]any, storeOutput bool, spec *types.SuspendSpec, oldSignalName string) (bool, error) {
+func (s *Store) SuspendTaskLeaseWithOutbox(ctx context.Context, lease *engine.TaskLease, output map[string]any, storeOutput bool, privateOutput bool, spec *types.SuspendSpec, oldSignalName string) (bool, error) {
 	if lease == nil || spec == nil {
 		return false, engine.ErrInvalidLeaseToken
 	}
@@ -239,6 +242,13 @@ func (s *Store) SuspendTaskLeaseWithOutbox(ctx context.Context, lease *engine.Ta
 	for _, signalName := range spec.Signals {
 		args = append(args, signalName)
 	}
+	private := 0
+	if privateOutput {
+		private = 1
+	}
+	// Keep this after the delayed entries and signal names: the Lua script uses
+	// their existing offsets to construct durable resume intents.
+	args = append(args, private)
 	result, err := suspendTaskLeaseWithOutboxLua.Run(ctx, s.rdb, keys, args...).Int64()
 	if err != nil && err != redis.Nil {
 		return false, fmt.Errorf("suspend task lease with outbox %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)

@@ -2,6 +2,7 @@ package xflow
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -104,6 +105,66 @@ func TestWorkflowBuilderEmitsRunnerSelectors(t *testing.T) {
 	}
 	if got := approveDef.RunnerSelector.MatchLabels["mode"]; got != "local" {
 		t.Fatalf("approve selector mode = %q, want local", got)
+	}
+}
+
+func TestNodeRefPrivateOutput(t *testing.T) {
+	wf := Workflow("node-output-policy")
+	wf.Node("worker", node.Function("return input")).PrivateOutput()
+
+	def, err := wf.build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(def.Nodes) != 1 {
+		t.Fatalf("node count = %d, want 1", len(def.Nodes))
+	}
+	got := def.Nodes[0]
+	if got.Output == nil || !got.Output.Private {
+		t.Fatalf("Output = %+v, want private output policy", got.Output)
+	}
+
+	// build must not leak its policy pointer: mutating one definition must not
+	// alter the builder's declaration or a later definition.
+	got.Output.Private = false
+	again, err := wf.build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Nodes[0].Output == nil || !again.Nodes[0].Output.Private {
+		t.Fatalf("second build Output = %+v, want independent private policy", again.Nodes[0].Output)
+	}
+}
+
+func TestWorkflowBuilderPrivateOutputSurvivesMapBodyJSON(t *testing.T) {
+	body := Workflow("body")
+	body.Node("inner", node.Function("return input")).PrivateOutput()
+
+	wf := Workflow("map-body")
+	wf.Node("m", node.Map("$input.rows", 1)).Body(body)
+	def, err := wf.build()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := json.Marshal(def.Nodes[0].Parameters["body"])
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+	var bodyShape struct {
+		Parameters struct {
+			Nodes []types.NodeDef `json:"nodes"`
+		} `json:"parameters"`
+	}
+	if err := json.Unmarshal(data, &bodyShape); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if len(bodyShape.Parameters.Nodes) != 1 {
+		t.Fatalf("body node count = %d, want 1", len(bodyShape.Parameters.Nodes))
+	}
+	output := bodyShape.Parameters.Nodes[0].Output
+	if output == nil || !output.Private {
+		t.Fatalf("body node Output = %+v, want private output policy", output)
 	}
 }
 

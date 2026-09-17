@@ -181,7 +181,7 @@ type ExecutionStatusReader interface {
 // discovery in one state transition. committed=false means recovery or a new
 // lease won the fence before the suspend was applied.
 type LeaseSuspender interface {
-	SuspendTaskLease(ctx context.Context, lease *TaskLease, output map[string]any, storeOutput bool, spec *types.SuspendSpec, oldSignalName string) (payload *types.SignalPayload, committed bool, err error)
+	SuspendTaskLease(ctx context.Context, lease *TaskLease, output map[string]any, storeOutput bool, privateOutput bool, spec *types.SuspendSpec, oldSignalName string) (payload *types.SignalPayload, committed bool, err error)
 }
 
 // DurableLeaseSuspender atomically converts a claimed lease to Suspended and
@@ -189,7 +189,7 @@ type LeaseSuspender interface {
 // backend transition. A successful result is therefore recoverable even if the
 // caller crashes before it can reach TaskQueue.
 type DurableLeaseSuspender interface {
-	SuspendTaskLeaseWithOutbox(ctx context.Context, lease *TaskLease, output map[string]any, storeOutput bool, spec *types.SuspendSpec, oldSignalName string) (committed bool, err error)
+	SuspendTaskLeaseWithOutbox(ctx context.Context, lease *TaskLease, output map[string]any, storeOutput bool, privateOutput bool, spec *types.SuspendSpec, oldSignalName string) (committed bool, err error)
 }
 
 // LeaseExpander coordinates the experimental Loop/Split parent state with its

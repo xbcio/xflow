@@ -28,9 +28,14 @@ import (
 // status key — in transient mode that is the documented
 // "transientTTL > max execution wall-clock" invariant, and nothing enforces it.
 var commitNodeLua = redis.NewScript(`
+-- The privacy result is part of this linearized response. SQL projection must
+-- never infer it with a later Redis read, which could race metadata expiry.
+local existingPrivate = redis.call('HGET', KEYS[6], 'private_output') == '1'
+local requestedPrivate = tonumber(ARGV[#ARGV] or '0') == 1
+local effectivePrivate = (existingPrivate or requestedPrivate) and 1 or 0
 local executionStatus = redis.call('GET', KEYS[1])
 if executionStatus == false then
-    return {3, 0, ''}
+    return {3, 0, '', effectivePrivate}
 end
 local terminal = function(value)
     return value == 'success' or value == 'failed' or value == 'skipped' or value == 'canceled' or value == 'continued'
@@ -42,38 +47,44 @@ if terminal(status) then
     local currentActivation = tonumber(redis.call('HGET', KEYS[6], 'activation_id') or '0')
     if currentActivation == expectedActivation then
         if isSystem == 1 and status == ARGV[1] then
-            return {2, 0, ''}
+            return {2, 0, '', effectivePrivate}
         end
         local committed = redis.call('HGET', KEYS[6], 'committed_lease_token') or ''
         if isSystem == 0 and committed ~= '' and committed == ARGV[3] then
-            return {2, 0, ''}
+            return {2, 0, '', effectivePrivate}
         end
     end
-    return {0, 0, ''}
+    return {0, 0, '', effectivePrivate}
 end
 if executionStatus == 'success' or executionStatus == 'failed' or executionStatus == 'canceled' or executionStatus == 'timeout' then
-    return {3, 0, executionStatus}
+    return {3, 0, executionStatus, effectivePrivate}
 end
 if isSystem == 1 then
     local action = redis.call('HGET', KEYS[11], 'action') or ''
     if action ~= 'skip' or (status and status ~= 'pending') then
-        return {0, 0, ''}
+        return {0, 0, '', effectivePrivate}
     end
 else
     if status ~= 'running' and status ~= 'committing' and status ~= 'waiting' then
-        return {0, 0, ''}
+        return {0, 0, '', effectivePrivate}
     end
     local leaseID = redis.call('HGET', KEYS[6], 'lease_id') or ''
     local leaseToken = redis.call('HGET', KEYS[6], 'lease_token') or ''
     local attempt = tonumber(redis.call('HGET', KEYS[6], 'attempt') or '0')
     local activation = tonumber(redis.call('HGET', KEYS[6], 'activation_id') or '0')
     if leaseID ~= ARGV[2] or leaseToken ~= ARGV[3] or attempt ~= tonumber(ARGV[4]) or activation ~= expectedActivation then
-        return {0, 0, ''}
+        return {0, 0, '', effectivePrivate}
     end
 end
 local ttl = tonumber(ARGV[13])
 if tonumber(ARGV[7]) == 1 then
     redis.call('SET', KEYS[7], ARGV[8], 'EX', ttl)
+end
+-- Privacy is monotonic: a later public result must never declassify output
+-- that an earlier accepted transition marked private. The trailing argument
+-- follows any variable-length cyclic outbox pairs.
+if requestedPrivate then
+    redis.call('HSET', KEYS[6], 'private_output', '1')
 end
 redis.call('SET', KEYS[5], ARGV[1], 'EX', ttl)
 redis.call('HSET', KEYS[6],
@@ -152,7 +163,7 @@ if tonumber(ARGV[16]) == 1 and done == 0 and tonumber(ARGV[12]) == 0 and redis.c
         end
     end
 end
-return {1, done, finalStatus}
+return {1, done, finalStatus, effectivePrivate}
 `)
 
 // advanceNodeLua converts all inbound arrivals from one completed source into

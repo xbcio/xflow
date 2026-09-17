@@ -164,7 +164,9 @@ func (s *memoryState) CommitGroup(_ context.Context, req engine.GroupCommitReque
 	}
 	// 1. Persist boundary outputs (same path as CommitNode: s.outputs keyed by execID+"/"+name).
 	for _, ex := range req.Exits {
-		s.outputs[string(req.ExecutionID)+"/"+ex.NodeName] = cloneData(ex.Data)
+		key := memoryNodeKey(req.ExecutionID, ex.NodeName)
+		s.preserveOutputPrivacyLocked(key, ex.PrivateOutput)
+		s.outputs[key] = cloneData(ex.Data)
 	}
 	// 2. Terminalize the group unit.
 	st.status = groupUnitDone
