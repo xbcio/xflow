@@ -20,6 +20,12 @@ const DefaultSweepPeriod = 10 * time.Second
 // acquire/revoke/commit paths already maintain the index atomically.
 const DefaultLeaseRepairPeriod = time.Minute
 
+// DefaultLegacyLeaseMetaReapPeriod bounds pre-U-7 lease-metadata reaping. The
+// backlog it drains is finite and only shrinks, so it is deliberately the
+// slowest cadence here: each pass is bounded work against a Redis the whole
+// control plane shares, and there is no correctness reason to hurry.
+const DefaultLegacyLeaseMetaReapPeriod = 5 * time.Minute
+
 // LeaseLister is the subset of engine.StateStore used by the sweeper to find
 // candidates for reclamation. The full StateStore interface satisfies this
 // shape implicitly.
@@ -56,6 +62,11 @@ type LeaseSweeper struct {
 	repairBatch  int
 	repairMu     sync.Mutex
 	lastRepair   time.Time
+
+	reapPeriod time.Duration
+	reapBatch  int
+	reapMu     sync.Mutex
+	lastReap   time.Time
 }
 
 // SweepObserver receives lease-sweep outcomes so observability layers can
@@ -100,6 +111,14 @@ type LeaseSweeperConfig struct {
 	LeaseRepairPeriod time.Duration
 	// LeaseRepairBatch bounds one reconciliation scan. Zero defaults to 256.
 	LeaseRepairBatch int
+	// LegacyLeaseMetaReapPeriod controls the optional pre-U-7 lease-metadata
+	// reaper rate. Zero defaults to DefaultLegacyLeaseMetaReapPeriod. It is
+	// slower than the repair cadence because it drains a finite backlog left by
+	// an upgrade, not a live index that keeps changing.
+	LegacyLeaseMetaReapPeriod time.Duration
+	// LegacyLeaseMetaReapBatch bounds one reaper call. Zero defaults to
+	// defaultLegacyLeaseMetaReapBatch.
+	LegacyLeaseMetaReapBatch int
 }
 
 // NewLeaseSweeper builds a sweeper bound to the given state store and engine.
@@ -115,6 +134,12 @@ func NewLeaseSweeper(state LeaseLister, eng execution.Engine, cfg LeaseSweeperCo
 	}
 	if cfg.LeaseRepairBatch <= 0 {
 		cfg.LeaseRepairBatch = 256
+	}
+	if cfg.LegacyLeaseMetaReapPeriod <= 0 {
+		cfg.LegacyLeaseMetaReapPeriod = DefaultLegacyLeaseMetaReapPeriod
+	}
+	if cfg.LegacyLeaseMetaReapBatch <= 0 {
+		cfg.LegacyLeaseMetaReapBatch = defaultLegacyLeaseMetaReapBatch
 	}
 	var timingObserver SweepTimingObserver
 	if observer, ok := cfg.Observer.(SweepTimingObserver); ok {
@@ -134,6 +159,8 @@ func NewLeaseSweeper(state LeaseLister, eng execution.Engine, cfg LeaseSweeperCo
 		sleepFunc:      sleepWithContext,
 		repairPeriod:   cfg.LeaseRepairPeriod,
 		repairBatch:    cfg.LeaseRepairBatch,
+		reapPeriod:     cfg.LegacyLeaseMetaReapPeriod,
+		reapBatch:      cfg.LegacyLeaseMetaReapBatch,
 	}
 }
 
@@ -143,12 +170,60 @@ func (s *LeaseSweeper) Run(ctx context.Context) {
 	// Reconcile once at startup so a clean control-plane restart does not wait
 	// a full repair interval before expired leases become discoverable.
 	s.RepairOnce(ctx)
+	s.ReapLegacyLeaseMetaOnce(ctx)
 	for {
 		if err := s.sleepFunc(ctx, s.period); err != nil {
 			return
 		}
 		s.SweepOnce(ctx)
+		s.ReapLegacyLeaseMetaOnce(ctx)
 	}
+}
+
+// ReapLegacyLeaseMetaOnce drains orphaned pre-U-7 assignment lease metadata at
+// its own bounded cadence. Like RepairOnce it is separately leader-gated,
+// because this is maintenance over shared state rather than part of any single
+// lease's execution, and like RepairOnce it is a no-op for directories that do
+// not implement the capability.
+//
+// Running it from the control plane rather than leaving the legacy hash to a
+// runbook step is what makes the U-7 fix complete: the hash has no TTL and no
+// reader, so nothing else will ever remove it, and an operator cannot be the
+// mechanism for data that may hold task input. The reaper is safe to run
+// against a live directory and alongside a previous-version instance — see
+// ReapOrphanedLegacyAssignmentLeaseMeta for the reachability argument — so
+// there is no window in which this must be disabled.
+func (s *LeaseSweeper) ReapLegacyLeaseMetaOnce(ctx context.Context) int {
+	if s.elector != nil && !s.elector.IsLeader() {
+		return 0
+	}
+	reaper, ok := s.directory.(LegacyLeaseMetaReaper)
+	if !ok {
+		return 0
+	}
+
+	now := s.clock()
+	s.reapMu.Lock()
+	if !s.lastReap.IsZero() && now.Sub(s.lastReap) < s.reapPeriod {
+		s.reapMu.Unlock()
+		return 0
+	}
+	s.lastReap = now
+	s.reapMu.Unlock()
+
+	reaped, err := reaper.ReapOrphanedLegacyAssignmentLeaseMeta(ctx, s.reapBatch)
+	if err != nil {
+		// A failure here never blocks lease execution, so it is logged and
+		// retried on the next cadence rather than surfaced as a sweep error.
+		if s.log != nil {
+			s.log.Error("reap orphaned legacy assignment lease metadata", "err", err)
+		}
+		return 0
+	}
+	if reaped > 0 && s.log != nil {
+		s.log.Info("reaped orphaned legacy assignment lease metadata", "reaped", reaped)
+	}
+	return reaped
 }
 
 // RepairOnce invokes an optional backend lease-index reconciler at its bounded

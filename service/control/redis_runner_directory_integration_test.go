@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -178,6 +179,14 @@ func redisRunnerDirectoryAllKeys(keys redisRunnerDirectoryKeys) []string {
 		keys.assignmentSession,
 		keys.assignmentLeaseID,
 		keys.assignmentLeaseToken,
+		// The pre-U-7 shared lease-metadata hash. It belongs in this list for
+		// the same reason every other fixed key does: it carries no TTL, so a
+		// real-Redis test that seeds it leaves it in whatever Redis the harness
+		// pointed at unless teardown names it. The field is back in the key
+		// struct purely so the clear transition, the orphan reaper, and this
+		// inventory share one literal for the legacy name — it is never read or
+		// written as live state.
+		keys.assignmentLeaseMetaLegacy,
 		keys.claimsAssignment,
 		keys.claimsRunner,
 		keys.claimsSession,
@@ -312,5 +321,79 @@ func cleanupRedisRunnerDirectoryAssignmentLeaseMeta(ctx context.Context, rdb *re
 		if cursor == 0 {
 			return nil
 		}
+	}
+}
+
+// TestRedisRunnerDirectoryRealRedisLegacyLeaseMetaReap exercises the orphan
+// reaper against real HSCAN semantics. miniredis answers HSCAN with the whole
+// hash and cursor 0, so it cannot show whether repeated calls converge when the
+// cursor is real, the hash is bigger than one page, and fields are deleted
+// underneath the cursor. That is the only part of the reaper whose behaviour
+// depends on the server rather than on this package.
+func TestRedisRunnerDirectoryRealRedisLegacyLeaseMetaReap(t *testing.T) {
+	addr := os.Getenv("XFLOW_TEST_REDIS_ADDR")
+	if addr == "" {
+		if os.Getenv("XFLOW_REQUIRE_REDIS_INTEGRATION") == "1" {
+			t.Fatal("XFLOW_REQUIRE_REDIS_INTEGRATION=1: XFLOW_TEST_REDIS_ADDR not set (use 127.0.0.1:6381)")
+		}
+		t.Skip("XFLOW_TEST_REDIS_ADDR not set; skipping the real-Redis runner-directory test")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	rdb := redis.NewClient(&redis.Options{Addr: addr})
+	if err := rdb.Ping(ctx).Err(); err != nil {
+		_ = rdb.Close()
+		t.Fatalf("ping real Redis at %s: %v", addr, err)
+	}
+	directory := newRealRedisRunnerDirectory(t, rdb)
+	legacyKey := directory.keys.assignmentLeaseMetaLegacy
+
+	// 300 fields is well past one HSCAN page, so the cursor is genuinely
+	// exercised rather than returning everything on the first call.
+	const residue = 300
+	dead := make([]string, 0, residue)
+	for i := 0; i < residue; i++ {
+		dead = append(dead, "residue-"+strconv.Itoa(i))
+	}
+	values := make([]interface{}, 0, 2*len(dead))
+	for _, field := range dead {
+		values = append(values, field, "previous-version-lease-payload")
+	}
+	if err := rdb.HSet(ctx, legacyKey, values...).Err(); err != nil {
+		t.Fatalf("seed legacy lease metadata: %v", err)
+	}
+	// One field stays reachable: the previous version reads it only after
+	// matching this same shared record, so the reaper must leave it alone.
+	if err := rdb.HSet(ctx, legacyKey, "reachable", "previous-version-lease-payload").Err(); err != nil {
+		t.Fatalf("seed reachable legacy lease metadata: %v", err)
+	}
+	if err := rdb.HSet(ctx, directory.keys.assignmentData, "reachable", "assignment-payload").Err(); err != nil {
+		t.Fatalf("seed reachable assignment record: %v", err)
+	}
+
+	reaped := 0
+	for attempt := 0; attempt < 100; attempt++ {
+		n, err := directory.ReapOrphanedLegacyAssignmentLeaseMeta(ctx, 64)
+		if err != nil {
+			t.Fatalf("ReapOrphanedLegacyAssignmentLeaseMeta() error = %v", err)
+		}
+		reaped += n
+		remaining, err := rdb.HLen(ctx, legacyKey).Result()
+		if err != nil {
+			t.Fatalf("HLEN legacy lease metadata: %v", err)
+		}
+		if remaining == 1 {
+			break
+		}
+	}
+	if reaped != residue {
+		t.Fatalf("reaped = %d, want %d", reaped, residue)
+	}
+	if got, err := rdb.HGet(ctx, legacyKey, "reachable").Result(); err != nil || got == "" {
+		t.Fatalf("reachable legacy field = %q, err = %v; want it untouched", got, err)
+	}
+	if got, err := rdb.HLen(ctx, legacyKey).Result(); err != nil || got != 1 {
+		t.Fatalf("HLEN legacy lease metadata = %d, err = %v; want only the reachable field", got, err)
 	}
 }

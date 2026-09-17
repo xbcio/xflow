@@ -6,8 +6,9 @@ assignment lease metadata 的存储格式变更，以及升级、清理和回滚
 assignment ID；所有连接参数和标识符都必须仅在受控运维环境中提供。
 
 > **关键结论：不要把此变更作为带有在飞 lease 的普通滚动发布。** 新旧版本
-> 不会双读或双写两种 metadata 格式。先排空和协调切换，旧 Hash 在确认无旧版
-> 依赖后才可由人工精确删除。
+> 不会双读或双写两种 metadata 格式。先排空和协调切换。旧 Hash 上**已经不可达**
+> 的 field 由 control-plane 自动清理（见 §6），但该 Hash 的整键删除仍然是需要
+> 人工批准的操作。
 
 ## 1. 受影响的键与生命周期
 
@@ -17,7 +18,7 @@ assignment ID；所有连接参数和标识符都必须仅在受控运维环境�
 
 | 版本 | 键 | Redis 类型 | 生命周期 |
 |---|---|---|---|
-| 旧版 | `xflow:runner-directory:{control}:assignment:lease-meta` | 一个 shared **Hash**；field 为 assignment ID | 没有由 U-7 添加的 TTL。U-7 **不会**迁移、读取或自动删除这个旧 Hash。它可能无限保留，直到旧版自己的正常 field 清理或一次经批准的人工删除。 |
+| 旧版 | `xflow:runner-directory:{control}:assignment:lease-meta` | 一个 shared **Hash**；field 为 assignment ID | 整键没有 TTL。当前版本**不读取也不写入**它；它只作为删除目标出现：终止路径（ClearAssignment）删除该 assignment 的精确 field，control-plane 的后台 reaper 删除**不再可达**的 field（见 §6）。因此 Hash 会自动收缩，但它**不会**自己在没有任何 field 时被主动删除——最后一个 field 被 HDEL 后键才消失，整键删除仍需人工批准（§4）。 |
 | U-7 新版 | `xflow:runner-directory:{control}:assignment:lease-meta:<assignment-id>` | 每个 assignment 一个 **String** | 正常写入时带有限期 TTL；期限覆盖 lease 的存活期再加一个 claim-recovery 窗口。正常 release/drop 会删除该精确键，TTL 是额外的有界兜底。 |
 
 新键的 `PTTL` 应为有限的非负毫秒数；它会随时间减少。`PTTL = -1` 表示没有
@@ -152,8 +153,10 @@ release/过期时可以出现；应在安静窗口复查，而非手工删除新
 4. **协调切换到新版。** 启动全部 U-7 版本，再恢复准入。先用一个受控的可幂等
    工作负载验证新键是 `string` 且有有限 `PTTL`，然后观察恢复、重试和 runner
    健康状态。
-5. **经过稳定观察期后再决定清理。** U-7 不会自动清理旧 Hash；保留它不会让
-   新版本回读它。只有在 §4 的批准条件全部满足后，才考虑删除这个唯一的旧键。
+5. **经过稳定观察期后再决定清理。** control-plane 会自动排空旧 Hash 中**不再
+   可达**的 field（§6），但不会删除整键。`HLEN` 因此应随时间单调下降并最终趋于
+   0；若它长时间不降，按 §6 的残留风险排查，而不是直接删键。只有在 §4 的批准
+   条件全部满足后，才考虑删除这个唯一的旧键。
 
 如果平台只能做逐实例滚动发布，必须先用 drain/维护窗口把版本重叠期间的活动
 claim/lease 降为零；否则不要在同一 runner-directory 状态上混合新旧版本。不要
@@ -245,3 +248,70 @@ String。旧 Hash 的存在不能使旧版理解新格式。旧 Hash 删除后�
 升级后应持续观察 runner reconnect、lease replay、任务失败/重试和队列积压；若
 出现 metadata 类型异常、无 TTL 的新 String 或无法解释的恢复行为，应暂停后续
 发布与清理，保留现有键，并按事件响应流程调查。
+
+## 6. 自动清理：可达性判据与残留风险
+
+本节描述 U-7 之后新增的实现行为，它改变了 §1 表格中旧 Hash 的生命周期，但**没有**
+改变 §3 的升级顺序，也没有改变 §5 的双读/双写结论：新旧版本仍然互不读取对方的
+metadata 键。
+
+### 6.1 两条自动删除路径
+
+1. **终止路径。** `ClearAssignment` 在删除该 assignment 的全部共享记录的同一条
+   Lua 脚本里，额外 `HDEL` 旧 Hash 中该 assignment 的 field。此时该 assignment 的
+   `assignment:data` / `state` / `claim` / `runner` / `session` / `lease-id` /
+   `lease-token` 已在同一步被删除，因此这个 field 对两个版本都已不可达——它不再
+   是一个「可读的记录」，只是残留。
+2. **后台 reaper。** control-plane 的 lease sweeper 以 leader-gated、自带节奏
+   （默认 5 分钟）、单次有界的批次调用
+   `ReapOrphanedLegacyAssignmentLeaseMeta`。它用 `HSCAN` 遍历**这一个键**
+   （单键、单 slot、游标推进），对每个 field 检查 §6.2 的判据，只删除不可达的
+   field。它不返回也不记录 field 名或值，只记录删除数量。
+
+### 6.2 判据：为什么可以「在线」删除
+
+U-7 只移动了 metadata 的键；两个版本读取的共享 per-assignment 记录
+（`assignment:data`、`assignment:state`、`assignment:claim`、`assignment:runner`、
+`assignment:session`、`assignment:lease-id`、`assignment:lease-token`）完全一致。
+旧版在**每一条**读取旧 Hash 的路径上，都是先读取并匹配上述记录之后才去
+`HGET` 旧 Hash。因此：
+
+> 一个旧 Hash field，如果它的 assignment 在上述记录中已经不存在，那么旧版二进制
+> 也读不到它——它是残留，而不是在用状态。
+
+这就是 reaper 唯一的删除判据。它不依赖任何版本标记（版本标记本身可能过期），也
+不依赖「旧实例是否已经停止」这一无法在进程内证明的事实，因此：
+
+- **可以在一台实例上在线运行**，与新版 control-plane 并存；
+- **可以在混合版本窗口内运行**，不需要先排空；
+- **不会破坏回滚**：被删除的 field 全部属于在飞之外的 assignment，回滚需要排空的
+  是**在飞**lease，而那些 field 的共享记录仍在，判据会保留它们。
+
+### 6.3 不会做的事
+
+- **不删除整键。** 即使最后一个 field 被删掉、键随之消失，reaper 也不会主动
+  `DEL`/`UNLINK` 旧 Hash——整键删除仍是 §4 的人工批准动作。这样做的原因是：判据
+  证明的是「没有 field 处于在用状态」，而整键删除会让「回滚时需要旧数据」这一
+  决策无法覆盖；把不可逆的那一步留在人手里。
+- **不做双读/双写。** 不读旧 Hash 作为 metadata 来源，也不向旧 Hash 写入新数据。
+  §5 的不兼容结论仍然成立：不要让新旧版本共享同一个 runner-directory 状态。
+- **不使用前缀 `SCAN`。** Redis Cluster 下 `SCAN` 按节点应答，会漏掉其它节点的
+  field；单键 `HSCAN` 是唯一在多节点下正确且有界的做法。
+
+### 6.4 残留风险（必须明确）
+
+1. **判据依赖旧版的读取顺序。** 6.2 的推理来自 v0.0.6 的实际代码：只有两个 Go
+   读取点，且都在匹配共享记录之后；六个 Lua 脚本均不读取旧 Hash。如果存在**第三个**
+   未在此仓库中验证的旧版消费者（例如某个直接连 Redis 的运维脚本、或更早的
+   预发布版本），判据对它不成立，它可能读到已被删除的 field。上生产前请确认没有
+   这类消费者。
+2. **`HLEN` 不下降不等于出错。** 阈值受 §6.1 的节奏影响，且只有「不在飞的
+   assignment」才会被删。若 `HLEN` 长期不降，应按活跃 assignment 数对照排查，
+   而不是直接把键删掉。
+3. **`DEL` 的阻塞风险。** 若旧 Hash 在 reaper 生效前已经积累到很大（例如数百万
+   field），§4 的 `DEL` 会在共享 Redis 上阻塞。先让它被 reaper 排空到很小的规模
+   再执行 §4；如果必须一次性删除一个大键，用 `UNLINK`（异步回收）替代 `DEL`，
+   并把 §4 的确认流程原样保留。
+4. **reaper 是可选的类型断言能力。** 内存目录和其它 `RunnerDirectory` 实现不
+   实现该能力，行为不变；但如果一个部署更换了目录实现，自动排空会静默消失，
+   旧 Hash 会重新变成永久残留。

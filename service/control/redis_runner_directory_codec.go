@@ -18,15 +18,26 @@ import (
 type redisRunnerDirectoryKeys struct {
 	prefix string
 
-	queue                                        string
-	seen                                         string
-	assignmentData                               string
-	assignmentState                              string
-	assignmentClaim                              string
-	assignmentRunner                             string
-	assignmentSession                            string
-	assignmentLeaseID                            string
-	assignmentLeaseToken                         string
+	queue                string
+	seen                 string
+	assignmentData       string
+	assignmentState      string
+	assignmentClaim      string
+	assignmentRunner     string
+	assignmentSession    string
+	assignmentLeaseID    string
+	assignmentLeaseToken string
+	// assignmentLeaseMetaLegacy is the pre-U-7 shared HASH — field =
+	// assignment ID, no TTL on the key, never deleted as a whole. It is named
+	// here for exactly one reason: three places need the same literal (the
+	// clear transition, the orphan reaper, and the real-Redis key inventory),
+	// and a second hard-coded copy of the string is how the format drifts.
+	//
+	// Nothing in this version reads or writes it as live state. Lease metadata
+	// is written to keys.assignmentLeaseMetaKey(assignmentID); this field only
+	// ever appears as a deletion target, and never as a key the correctness of
+	// a transition depends on.
+	assignmentLeaseMetaLegacy                    string
 	claimsAssignment                             string
 	claimsRunner                                 string
 	claimsSession                                string
@@ -116,6 +127,7 @@ func newRedisRunnerDirectoryKeys(prefix string) redisRunnerDirectoryKeys {
 		assignmentSession:                     prefix + ":assignment:session",
 		assignmentLeaseID:                     prefix + ":assignment:lease-id",
 		assignmentLeaseToken:                  prefix + ":assignment:lease-token",
+		assignmentLeaseMetaLegacy:             prefix + ":assignment:lease-meta",
 		claimsAssignment:                      prefix + ":claim:assignment",
 		claimsRunner:                          prefix + ":claim:runner",
 		claimsSession:                         prefix + ":claim:session",

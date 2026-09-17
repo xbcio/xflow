@@ -1215,6 +1215,7 @@ func (d *RedisRunnerDirectory) ClearAssignment(ctx context.Context, assignmentID
 		d.keys.handoffLeaseToken,
 		d.keys.handoffRecoveryReady,
 		d.keys.handoffRecoveryDeadline,
+		d.keys.assignmentLeaseMetaLegacy,
 	}, string(assignmentID))
 	if err != nil {
 		return fmt.Errorf("clear redis assignment: %w", err)
@@ -2186,6 +2187,13 @@ redis.call('HDEL', KEYS[7], assignmentID)
 redis.call('HDEL', KEYS[8], assignmentID)
 redis.call('HDEL', KEYS[9], assignmentID)
 redis.call('DEL', KEYS[10])
+-- KEYS[30] is the pre-U-7 shared lease-metadata hash. A clear is the one
+-- point where this version has decided the assignment is terminally done, so
+-- dropping its legacy field is exactly as safe as the HDELs above: the shared
+-- per-assignment hashes this version and the previous one both read are being
+-- erased in the same atomic step. Leaving the field behind would keep the
+-- legacy hash alive forever, which is the leak the per-assignment keys fixed.
+redis.call('HDEL', KEYS[30], assignmentID)
 local handoffID = redis.call('HGET', KEYS[23], assignmentID)
 if handoffID then
   redis.call('HDEL', KEYS[19], handoffID)
