@@ -1292,6 +1292,7 @@ XFlow 的 connections 仅描述拓扑关系（谁连到谁），条件逻辑由 
 | 节点类型 | 标识符 | 说明 | 输入端口 | 输出端口 | 动态端口 | output_schema |
 |---------|--------|------|---------|---------|---------|--------------|
 | HTTP请求 | xflow.http | HTTP/HTTPS 请求 | main | main, error | ❌ | 可选 |
+| 浏览器会话采集 | xflow.browser.cdp | 通过受限的远程 Chrome DevTools Protocol（CDP）采集认证态 | main | main, error | ❌ | 可选 |
 | 开始 | xflow.start | 显式工作流入口；有环图 v1 必须且只能有一个 | _(无)_ | main | ❌ | 不适用 |
 | 结束 | xflow.end | 显式工作流终点；执行到该节点后当前路径结束 | main | _(无)_ | ❌ | 不适用 |
 | 定时触发 | xflow.trigger.timer | 固定间隔触发执行 | _(无)_ | main | ❌ | 不适用 |
@@ -1606,6 +1607,126 @@ dependency_edges:
         enabled: bool
         max_attempts: int
 ```
+
+#### Browser CDP 节点
+
+`xflow.browser.cdp` 是一个**受限的会话材料采集节点**，不是通用浏览器自动化节点。它仅连接已经运行的远程 Chrome DevTools Protocol（CDP）端点，在隔离的浏览器上下文中预置可选 cookie、导航并采集限定范围内的 cookie/请求头。
+
+**调度前提**：承载此节点的 runner 必须在其能力列表中显式声明精确的节点类型 `xflow.browser.cdp`。描述符中的 `browser.cdp.v1` 是能力元数据，不会替代节点类型的 runner 路由声明；注册了节点但未声明该能力的 runner 不会领取此任务。
+
+**安全边界**：
+
+- **仅远程 CDP**：节点只能连接 `debugging_url` 指向的已存在远程端点；不会在 runner 上启动 Chrome，也不管理浏览器池。
+- **端点默认拒绝**：`debugging_url` 的 host 必须命中 runner 进程级 `endpoint_allowlist`；空 allowlist 拒绝全部端点。匹配为忽略大小写的精确 host 匹配，端口不参与匹配。此 allowlist 与 `HTTPHostPolicy` 是两套独立策略，不能用其中一套替代另一套。
+- **导航受 host policy 约束**：`HTTPHostPolicy` 应用于入口导航、固定回退导航及每一个重定向/浏览器请求；Browser CDP 未配置该策略时默认拒绝，而不会沿用 `xflow.http` 的兼容性放行行为。策略拒绝时不得借浏览器绕过 HTTP 节点的 SSRF 防护，并以 `browser.host_denied` 失败。
+- **不可编程**：不支持任意 JavaScript、点击、输入、选择器断言、截图、PDF、页面爬取或任意 URL 导航列表。`wait_selector` 仅用于等待页面就绪，不执行交互。允许的导航只有 `entry_url`、固定根路径回退和可选 reload。
+- **会话隔离**：每一次尝试（包括重试）都使用新的浏览器上下文；上下文绝不跨节点执行复用。取消、超时、失败和 panic 都必须释放该上下文及其连接资源。
+- **秘密不出诊断面**：输出中的认证材料是敏感数据；错误消息、错误详情、日志和 `diag` 不得包含 cookie/header 值、CDP 原始错误、panic 内容、完整 URL 或 `entry_url` query 值。
+
+所有参数都在执行边界递归处理模板表达式；求值后的值仍必须满足下面的类型与安全校验。错误形态、数值字符串、非有限数、带小数的毫秒数和负数都会被拒绝，而不是宽松转换。
+
+```yaml
+- name: harvest_session
+  type: xflow.browser.cdp
+  parameters:
+    debugging_url: string       # 必填；http(s) 或 ws(s) 的远程 CDP endpoint
+    entry_url: string           # 必填；http(s) 入口 URL
+    seed_cookies: []            # 可选；导航前预置 cookie
+    plan: {}                    # 可选；受限导航计划
+    harvest: {}                 # 可选；采集范围与过滤规则
+    ttl: {}                     # 可选；有效期计算规则
+    target_host: string         # 可选；省略时取 entry_url 的 hostname
+    timeout_ms: 30000           # 可选；单次导航等待上限
+    total_timeout_ms: 45000     # 可选；整个节点（含重试）预算
+```
+
+`debugging_url`、`entry_url`、固定回退 URL、cookie URL 和 seed cookie URL 均须为带 host 的合法 URL。`seed_cookies` 默认为 `[]`；每个元素必须是对象，且必须提供字符串 `name`、`value`、`url`，可选的 `path`（string）和 `secure`（bool）也必须类型正确。省略 `target_host` 时取 `entry_url` 的 hostname；该 host 同时限定默认 cookie 与请求头采集范围。
+
+**`plan`（受限导航计划）**
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---:|---|
+| `navigate.wait_selector` | string | `"body"` | 导航后只等待该选择器出现；不执行选择器交互。 |
+| `navigate.settle_ms` | number | `2000` | 页面就绪后的额外静默等待。 |
+| `fallback.navigate_to_root` | bool | `true` | 首次未采到材料时，只可导航至 `scheme://target_host/`。 |
+| `fallback.reload` | bool | `true` | 固定回退后是否 reload 一次。 |
+| `fallback.settle_ms` | number | `2000` | 固定回退路径的额外静默等待。 |
+| `retries` | number | `3` | 首次尝试后的额外重试次数；`0` 表示只尝试一次。整个过程仍受 `total_timeout_ms` 限制。 |
+| `retry_backoff_ms` | number | `2000` | 内部重试间隔。 |
+| `retry_on` | array of string | `["ERR_INSUFFICIENT_RESOURCES"]` | 可被视为浏览器资源瞬态失败的受限错误特征。 |
+
+**`harvest`（采集范围与过滤）**
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `cookie_urls` | array of string | `https://{target_host}`、`http://{target_host}` | 按 URL 限定 cookie 查询范围；每一项的 hostname 必须精确等于 `target_host`，不会读取整个浏览器上下文或其他 host 的 cookie。 |
+| `cookie_name_exclude_prefixes` | array of string | `[]` | 按名称前缀排除 cookie。 |
+| `header_exclude` | array of string | `[]` | 按名称排除请求头，大小写不敏感。 |
+| `request_scope.host` | string | `target_host` | 仅采集发往此精确 host 的请求头。 |
+| `request_scope.skip_suffixes` | array of string | `[]` | 跳过匹配的静态资源后缀。 |
+| `request_scope.api_path_patterns` | array of string | `[]` | 额外认定为 API 请求的路径特征。 |
+| `request_scope.whole_host_match` | bool | `true` | 仅比较 URL 的完整 host 组件，不进行子串匹配。 |
+
+捕获的请求 `Cookie` 头不会直接回传；节点仅从已过滤的 CDP cookie 构造输出 `Cookie` 头，避免把范围外材料带入结果。
+
+**`ttl`（认证材料有效期）**
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---:|---|
+| `early_expire_ratio` | number | `0.1` | 有效期提前量比例。 |
+| `early_expire_min_ms` | number | `300000` | 有效期提前量下限。 |
+| `credential_ttl_cap_ms` | number | `14400000` | 认证材料 TTL 的硬上限。 |
+
+节点从非 session cookie 的过期时间和可解析 Bearer JWT 的 `exp` 中选择最早的未来过期时间；没有候选值时使用 `credential_ttl_cap_ms`。候选 TTL 先被该上限截断，再减去 `max(TTL * early_expire_ratio, early_expire_min_ms)`；若提前量会耗尽 TTL，则退化为保留原 TTL 的一半。JWT 仅读取 payload 的 `exp`，不会验证或记录 token。
+
+**成功输出（`main`）**
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `headers` | `map[string][]string` | 敏感认证材料。`Cookie` 是一条由过滤后 cookie 拼接的字符串；其他允许的请求头按名称保留。调用方必须按凭据处理，不能记录或回显。 |
+| `expire_time` | integer | 节点计算出的 Unix 秒过期时间。 |
+| `diag` | object | 仅包含 `retries`、`cookie_count`、`header_count`、`fallback_used` 等计数或布尔值；绝不含认证材料或 URL 值。 |
+
+跳转完成但未收集到任何允许的 cookie 或 header 不算成功，必须返回 `browser.no_credentials`，而不是返回空 `headers`。
+
+**分类错误（`error`）**
+
+节点失败后适用工作流的 `on_error` 策略；要沿 `error` 端口继续执行，请设置节点或 `settings` 的 `on_error: error_output`。错误信息是稳定、通用且已脱敏的，不可依赖其中的远端错误细节。
+
+| 错误码 | 分类 | 条件 |
+|---|---|---|
+| `browser.invalid_params` | Permanent | 必填参数缺失、URL/cookie/数字/对象形态无效。 |
+| `browser.host_denied` | Permanent | endpoint allowlist 或导航的 `HTTPHostPolicy` 拒绝访问。 |
+| `browser.unavailable` | Permanent | 允许的 CDP endpoint 无法连接或握手。 |
+| `browser.no_credentials` | Permanent | 导航完成（包括允许的回退）后没有允许的认证材料。 |
+| `browser.timeout` | Transient | 排队、连接、导航或整体预算耗尽。 |
+| `browser.resource_exhausted` | Transient | CDP 返回与 `plan.retry_on` 匹配的资源不足类错误。 |
+
+**Runner 配置与两层并发**
+
+Browser CDP 是 runner **进程级**资源。嵌入式 runner 通过 `xflow.RunnerConfig.BrowserCDP` 配置；同一进程中的多个嵌入式 runner 必须使用一致的 Browser CDP 配置，不能依赖每个 runner 拥有不同的端点 allowlist 或 context 上限。
+
+独立 runner 的 YAML 配置如下；host 名是 allowlist 条目，不带 scheme 或端口：
+
+```yaml
+browser_cdp:
+  endpoint_allowlist:
+    - "chrome.example.test"
+  max_contexts: 2
+  queue_timeout: "5s"
+  connect_timeout: "5s"
+```
+
+默认值为：`endpoint_allowlist: []`（拒绝所有 endpoint）、`max_contexts: 1`、`queue_timeout: "5s"`、`connect_timeout: "5s"`。独立 runner 也支持以下环境变量和同名 CLI 配置：
+
+| YAML 字段 | 环境变量 | CLI flag |
+|---|---|---|
+| `browser_cdp.endpoint_allowlist` | `XFLOW_BROWSER_CDP_ENDPOINT_ALLOWLIST`（逗号分隔 host） | `--browser-cdp-endpoint-allowlist` |
+| `browser_cdp.max_contexts` | `XFLOW_BROWSER_CDP_MAX_CONTEXTS` | `--browser-cdp-max-contexts` |
+| `browser_cdp.queue_timeout` | `XFLOW_BROWSER_CDP_QUEUE_TIMEOUT` | `--browser-cdp-queue-timeout` |
+| `browser_cdp.connect_timeout` | `XFLOW_BROWSER_CDP_CONNECT_TIMEOUT` | `--browser-cdp-connect-timeout` |
+
+优先级为 YAML、环境变量、显式 CLI flag（后者覆盖前者）。`runner.concurrency` / `--concurrency` 限制该 runner 同时执行的**所有 lease**；`browser_cdp.max_contexts` 仅限制该进程内同时打开的浏览器上下文。两者互不替代：browser 任务在 context 上限满时最多等待 `queue_timeout`，而非无限制创建上下文；其他类型的 lease 仍会消耗 runner concurrency。应按 CDP endpoint 的实际容量分别设置这两个上限。
 
 #### gRPC 节点
 ```yaml

@@ -278,6 +278,7 @@ func profileSampleRunnerConfigYAML(profile Profile) string {
 		fmt.Fprintf(&sample, "    %s: %s\n", strconv.Quote(key), strconv.Quote(labels[key]))
 	}
 	sample.WriteString("  capabilities:\n")
+	sample.WriteString("    # Browser CDP work requires the \"xflow.browser.cdp\" capability.\n")
 	for _, capability := range capabilities {
 		fmt.Fprintf(&sample, "    - %s\n", strconv.Quote(capability))
 	}
@@ -290,6 +291,24 @@ func profileSampleRunnerConfigYAML(profile Profile) string {
 	fmt.Fprintf(&sample, "  grpc_target: %s\n\n", strconv.Quote(grpcTarget))
 
 	sample.WriteString("poll:\n  wait: \"1s\"\n\nheartbeat:\n  interval: \"5s\"\n")
+	sample.WriteString(`
+
+# Shared destination policy for xflow.http requests and Browser navigation.
+# Hosts only: schemes, ports, paths, and userinfo are rejected at validation.
+# http_host_policy:
+#   allow: ["app.example.internal"]
+#   deny: ["metadata.google.internal"]
+
+# Browser CDP uses an existing remote-debugging endpoint; it never starts a
+# browser. An empty endpoint_allowlist (the secure default) denies all endpoint
+# connections until the exact hosts are listed. Browser navigation also denies
+# all hosts unless http_host_policy is explicitly configured.
+browser_cdp:
+  endpoint_allowlist: []
+  max_contexts: 1
+  queue_timeout: "5s"
+  connect_timeout: "5s"
+`)
 	if profile.RequireToken {
 		sample.WriteString("\n# This profile requires a runner token. Use XFLOW_RUNNER_TOKEN (or --token),\n# a persisted identity, or a registration code; keep static tokens out of this file.\n")
 	}

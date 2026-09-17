@@ -1,39 +1,10 @@
-// Package xflow runner.go: the embeddable runner entry point.
-//
-// NewRunner is the execution-plane counterpart to NewServer. A host program
-// registers its own node types (node.Define + registry.Register, or a
-// types.ActionHandler implementation), calls NewRunner, and runs it; the
-// runner connects to a control plane over the Runner Protocol, claims leases
-// for the node types it advertises, and executes them in-process.
-//
-// The assembly this file performs is not a convenience wrapper. Several of its
-// steps fail silently when omitted, which is why it lives here rather than in
-// each host program:
-//
-//   - A missing GroupRuntime does not fail a group lease, it never receives
-//     one: a group unit's routing requires the group.exec.v1 feature, so a
-//     runner that does not advertise it is filtered out during assignment and
-//     the task waits in the queue with nothing logged on either side.
-//   - The GroupRuntime must exist before the TriggerActivationHandler is built,
-//     because a runner that both hosts triggers and executes groups needs the
-//     same instance in both places.
-//   - The artifact resolver must reach three consumers (dispatcher, group
-//     runtime, subgraph runtime), because the latter two build their own inner
-//     backends per attempt. A resolver installed only on the dispatcher leaves
-//     a script nested inside a group or a map body failing permanently with
-//     script.artifact_unavailable.
-//   - Every HTTP client pointed at the control plane must carry the runner's
-//     TLS material. One that silently used http.DefaultTransport would ignore
-//     a private CA, and a failing supply fetch makes the readiness gate decline
-//     forever, so the runner never hosts its triggers at all.
-//
-// cmd/runner is a CLI/YAML front end over this same assembly.
 package xflow
 
 import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -43,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -79,6 +51,11 @@ const (
 // distinct groups/map nodes this runner serves — not executions.
 const runnerPackageCacheEntries = 64
 
+const browserCDPNodeType = "xflow.browser.cdp"
+
+// newRunnerResourcePool is a test seam for constructor rollback coverage.
+var newRunnerResourcePool = resource.NewDefaultResourcePool
+
 // RunnerConfig configures an embedded xflow runner. ServerURL is the only
 // required field; everything else has a working default.
 type RunnerConfig struct {
@@ -99,6 +76,14 @@ type RunnerConfig struct {
 	// Concurrency is how many leases this runner executes at once, and the
 	// capacity it reports. Zero uses the runner service default.
 	Concurrency int
+
+	// BrowserCDP configures the process-global remote-browser CDP client used
+	// by xflow.browser.cdp nodes. Zero-valued scalar fields use node defaults.
+	// Concurrent Browser-capable embedded runners must resolve to the same
+	// configuration; NewRunner rejects a conflicting configuration instead of
+	// replacing one a live Browser-capable runner is using. Other runners do not
+	// acquire this process-global lease.
+	BrowserCDP xnode.BrowserCDPConfig
 
 	// MapBatchConcurrency caps the number of map batches actively executing in
 	// this runner. It is separate from Kafka's emit/reorder window: queued emits
@@ -257,11 +242,14 @@ func WithRunnerLifecycleObserver(o runnersvc.LifecycleObserver) RunnerOption {
 // control plane, claims leases for its advertised node types, executes them
 // with the handlers registered in this process, and reports results.
 type Runner struct {
-	svc              *runnersvc.Runner
-	cleanup          func()
-	releaseObservers func()
-	pool             types.ResourcePool
-	metrics          *metrics.Metrics
+	svc               *runnersvc.Runner
+	cleanup           func()
+	releaseObservers  func()
+	releaseBrowserCDP func()
+	pool              types.ResourcePool
+	metrics           *metrics.Metrics
+	closeOnce         sync.Once
+	closeErr          error
 }
 
 // NewRunner creates an embeddable runner. Register node handlers before
@@ -290,13 +278,24 @@ func NewRunner(cfg RunnerConfig, opts ...RunnerOption) (*Runner, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// From this point until ownership is transferred to Runner, every acquired
+	// resource is rolled back on both ordinary errors and panics. In particular,
+	// process-observer setters deliberately panic on a conflicting live install.
+	var cleanup, releaseObservers, releaseBrowserCDP func()
+	constructed := false
+	defer func() {
+		if !constructed {
+			_ = releaseRunnerResources(releaseBrowserCDP, releaseObservers, cleanup, svcCfg.ResourcePool)
+		}
+	}()
+
 	client, cleanup, err := newRunnerProtocolClient(cfg)
 	if err != nil {
 		return nil, err
 	}
 	reporter, err := newRunnerMetricsReporter(client, o.metrics, cfg)
 	if err != nil {
-		cleanup()
 		return nil, err
 	}
 	svcCfg.MetricsReporter = reporter
@@ -304,18 +303,32 @@ func NewRunner(cfg RunnerConfig, opts ...RunnerOption) (*Runner, error) {
 	if reg == nil {
 		reg = execution.NewRegistry()
 	}
-	// Last, after every fallible step: these write process-global slots that
-	// only Close releases, so installing them before a step that can still
-	// return an error would leak them on that error path and make the next
-	// NewRunner in this process panic.
-	releaseObservers := installProcessObservers(o)
-	return &Runner{
-		svc:              runnersvc.New(client, reg, svcCfg),
-		cleanup:          cleanup,
-		releaseObservers: releaseObservers,
-		pool:             svcCfg.ResourcePool,
-		metrics:          o.metrics,
-	}, nil
+
+	// Browser CDP is process-global, but only runners that can actually receive
+	// xflow.browser.cdp work participate in its lease. A non-Browser runner must
+	// neither validate nor reserve a Browser configuration it will never use.
+	if runnerCapabilitiesContain(svcCfg.Capabilities, browserCDPNodeType) {
+		releaseBrowserCDP, err = xnode.AcquireBrowserCDPConfig(resolveRunnerBrowserCDPConfig(cfg.BrowserCDP))
+		if err != nil {
+			return nil, fmt.Errorf("xflow: acquire BrowserCDP configuration: %w", err)
+		}
+	}
+
+	// Install process-global observers last. installProcessObservers rolls back
+	// any earlier slots if a later setter panics; the constructor-level defer
+	// above then releases the CDP lease, protocol client, and resource pool while
+	// preserving the public panic behavior of the observer setters.
+	releaseObservers = installProcessObservers(o)
+	r := &Runner{
+		svc:               runnersvc.New(client, reg, svcCfg),
+		cleanup:           cleanup,
+		releaseObservers:  releaseObservers,
+		releaseBrowserCDP: releaseBrowserCDP,
+		pool:              svcCfg.ResourcePool,
+		metrics:           o.metrics,
+	}
+	constructed = true
+	return r, nil
 }
 
 // newRunnerMetricsReporter assembles the server-side metrics reporter, or
@@ -448,29 +461,56 @@ func (r *Runner) MetricsHandler() http.Handler {
 }
 
 // Close releases transport-owned resources (the gRPC connection), the
-// process-scoped ResourcePool, and the process-wide observer slots this runner
-// installed. Idempotent; safe to defer immediately after NewRunner.
+// process-scoped ResourcePool, and the process-wide Browser CDP and observer
+// leases this runner installed. Idempotent; safe to defer immediately after
+// NewRunner.
 //
 // Releasing the observers is what makes the install-once guard on those slots
 // survivable: they panic on a second non-nil install, so a process that builds
 // more than one runner over its lifetime depends on this half of the pair.
 func (r *Runner) Close() error {
-	if r.releaseObservers != nil {
-		r.releaseObservers()
-		r.releaseObservers = nil
+	r.closeOnce.Do(func() {
+		r.closeErr = releaseRunnerResources(r.releaseBrowserCDP, r.releaseObservers, r.cleanup, r.pool)
+	})
+	return r.closeErr
+}
+
+func releaseRunnerResources(releaseBrowserCDP, releaseObservers, cleanup func(), pool types.ResourcePool) error {
+	if releaseBrowserCDP != nil {
+		releaseBrowserCDP()
 	}
-	if r.cleanup != nil {
-		r.cleanup()
-		r.cleanup = nil
+	if releaseObservers != nil {
+		releaseObservers()
 	}
-	if r.pool != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		err := r.pool.Close(ctx)
-		r.pool = nil
-		return err
+	if cleanup != nil {
+		cleanup()
 	}
-	return nil
+	if pool == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return pool.Close(ctx)
+}
+
+// resolveRunnerBrowserCDPConfig applies node-owned defaults before acquiring
+// the process-global lease. Negative values intentionally remain unchanged so
+// node.AcquireBrowserCDPConfig can return its authoritative validation error.
+// The allowlist is copied before handing it to process-global state so a caller
+// cannot mutate the acquired configuration through the original slice.
+func resolveRunnerBrowserCDPConfig(cfg xnode.BrowserCDPConfig) xnode.BrowserCDPConfig {
+	defaults := xnode.BrowserCDPConfigDefaults()
+	if cfg.MaxContexts == 0 {
+		cfg.MaxContexts = defaults.MaxContexts
+	}
+	if cfg.QueueTimeout == 0 {
+		cfg.QueueTimeout = defaults.QueueTimeout
+	}
+	if cfg.ConnectTimeout == 0 {
+		cfg.ConnectTimeout = defaults.ConnectTimeout
+	}
+	cfg.EndpointAllowlist = append([]string(nil), cfg.EndpointAllowlist...)
+	return cfg
 }
 
 func runnerOptionsFrom(opts []RunnerOption) *runnerOptions {
@@ -605,7 +645,7 @@ func buildRunnerServiceConfig(cfg RunnerConfig, opts ...RunnerOption) (runnersvc
 		if poolCfg == (types.ResourcePoolConfig{}) {
 			poolCfg = types.DefaultResourcePoolConfig()
 		}
-		svcCfg.ResourcePool = resource.NewDefaultResourcePool(poolCfg)
+		svcCfg.ResourcePool = newRunnerResourcePool(poolCfg)
 	}
 	if len(cfg.Credentials) > 0 {
 		// Captured in the closure; never logged or surfaced in errors.
@@ -616,7 +656,10 @@ func buildRunnerServiceConfig(cfg RunnerConfig, opts ...RunnerOption) (runnersvc
 	}
 
 	if err := wireRunnerTriggerHosting(&svcCfg, cfg, o, groupRuntime); err != nil {
-		return runnersvc.Config{}, err
+		return runnersvc.Config{}, errors.Join(
+			err,
+			releaseRunnerResources(nil, nil, nil, svcCfg.ResourcePool),
+		)
 	}
 	wireRunnerMetrics(&svcCfg, o)
 	wireSupplyGateObserver(&svcCfg, o)
@@ -769,24 +812,41 @@ func (f supplyGateFanout) OnSupplyServingUnavailable(ctx context.Context, name s
 //
 // Returns nil when there is nothing to release, so Close can call it
 // unconditionally.
-func installProcessObservers(o *runnerOptions) func() {
+func installProcessObservers(o *runnerOptions) (release func()) {
 	if o.metrics == nil {
 		return nil
 	}
+
+	// Each successful setter adds its inverse immediately. If a later setter
+	// panics because that slot already belongs to another live runner, unwind
+	// only the slots installed by this attempt and re-panic unchanged.
+	releases := make([]func(), 0, 4)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			releaseProcessObservers(releases)
+			panic(recovered)
+		}
+	}()
+
 	sm := metrics.NewSupplyMetrics(o.metrics)
 	supply.Default.SetObserver(sm)
+	releases = append(releases, func() { supply.Default.SetObserver(nil) })
 	xnode.SetWasmObserver(sm)
+	releases = append(releases, func() { xnode.SetWasmObserver(nil) })
 	xnode.SetScriptObserver(metrics.NewScriptMetrics(o.metrics))
+	releases = append(releases, func() { xnode.SetScriptObserver(nil) })
 	// The trigger observer covers the discards, dead letters and batch
 	// admissions on the Kafka ingest path. Without it a producer emitting
 	// malformed records looks exactly like an idle topic — offsets keep being
 	// committed, so consumer-group lag stays at zero.
 	kafkatrigger.SetObserver(metrics.NewTriggerMetrics(o.metrics))
-	return func() {
-		supply.Default.SetObserver(nil)
-		xnode.SetWasmObserver(nil)
-		xnode.SetScriptObserver(nil)
-		kafkatrigger.SetObserver(nil)
+	releases = append(releases, func() { kafkatrigger.SetObserver(nil) })
+	return func() { releaseProcessObservers(releases) }
+}
+
+func releaseProcessObservers(releases []func()) {
+	for i := len(releases) - 1; i >= 0; i-- {
+		releases[i]()
 	}
 }
 
@@ -841,6 +901,15 @@ func runnerCapabilities(declared []string) []protocol.Capability {
 			engine.FeatureWasmSupplyDeclarationV1,
 		},
 	})
+}
+
+func runnerCapabilitiesContain(capabilities []protocol.Capability, nodeType string) bool {
+	for _, capability := range capabilities {
+		if capability.NodeType == nodeType {
+			return true
+		}
+	}
+	return false
 }
 
 // runnerTriggerLookup adapts the global node registry to the runner's

@@ -1,0 +1,87 @@
+# ============================================================
+# 受限远程 CDP 会话采集 — 安全占位样例
+# ============================================================
+#
+# 该样例只展示 DSL 结构。example.test 是保留的示例域名，无法直接用于
+# 真实登录；所有值均为非秘密占位值。不要把真实 cookie、token 或带票据的
+# entry_url query 写入工作流文件、日志或错误处理节点。
+#
+# 运行前的 runner 前提：
+#   1. capabilities 必须显式包含 "xflow.browser.cdp"；仅注册节点不够。
+#   2. browser_cdp.endpoint_allowlist 必须包含 "chrome.example.test"。
+#   3. HTTPHostPolicy 必须允许 app.example.test 以及其合法重定向目标。
+#
+# 节点仅连接已有远程 CDP endpoint；它不会启动本地 Chrome，也不执行 JS、
+# 点击、输入、截图或任意导航列表。
+
+spec: "1.0"
+name: "browser-cdp-harvest-example"
+version: "1.0.0"
+description: "受限远程 CDP 会话采集的非秘密占位样例"
+
+settings:
+  on_error: error_output
+
+nodes:
+  - name: harvest_session
+    type: xflow.browser.cdp
+    parameters:
+      # 仅示例 host；runner 的 endpoint allowlist 按 host 精确匹配且忽略端口。
+      debugging_url: "http://chrome.example.test:9222"
+
+      # 不含 query token 的安全示例入口。真实的一次性 URL 应从受控运行时输入注入。
+      entry_url: "https://app.example.test/session/complete"
+      target_host: "app.example.test"
+
+      # 结构示例：该值不是 token、密码或真实会话 cookie。
+      seed_cookies:
+        - name: "example_seed"
+          value: "example-value-not-a-secret"
+          url: "https://app.example.test/"
+          path: "/"
+          secure: true
+
+      # 未列出的 plan 字段使用安全规范中的默认值；wait_selector 只等待，不交互。
+      plan:
+        navigate:
+          wait_selector: "body"
+          settle_ms: 2000
+        fallback:
+          navigate_to_root: true
+          reload: true
+
+      harvest:
+        # 只读取这个 target host 的 cookie；不会读取整个浏览器上下文。
+        cookie_urls:
+          - "https://app.example.test"
+          - "http://app.example.test"
+        cookie_name_exclude_prefixes: ["analytics_"]
+        # 过滤不需要传给下游的请求头名称，匹配不区分大小写。
+        header_exclude: ["X-Debug-Trace"]
+        request_scope:
+          host: "app.example.test"
+          skip_suffixes: [".css", ".js", ".png", ".svg"]
+          api_path_patterns: ["/api/"]
+          whole_host_match: true
+
+      ttl:
+        early_expire_ratio: 0.1
+        early_expire_min_ms: 300000
+        credential_ttl_cap_ms: 14400000
+
+      timeout_ms: 30000
+      total_timeout_ms: 45000
+
+  - name: harvest_succeeded
+    type: xflow.end
+
+  - name: harvest_failed
+    type: xflow.end
+
+connections:
+  harvest_session:
+    main:
+      - node: harvest_succeeded
+    error:
+      # error data is intentionally generic and must not be used to log headers/cookies.
+      - node: harvest_failed

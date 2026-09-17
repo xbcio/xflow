@@ -30,6 +30,7 @@ type HTTPMethod = core.HTTPMethod
 type HTTPNode = action.HTTPNode
 type DatabaseNode = action.DatabaseNode
 type GRPCNode = action.GRPCNode
+type BrowserCDPNode = action.CDPNode
 
 type FunctionNode = codepkg.FunctionNode
 type UserFunc = codepkg.UserFunc
@@ -91,6 +92,9 @@ func Database(operation, table, credential string) *DatabaseNode {
 	return action.Database(operation, table, credential)
 }
 func GRPC(service, method, host string) *GRPCNode { return action.GRPC(service, method, host) }
+func BrowserCDP(params map[string]any) *BrowserCDPNode {
+	return action.BrowserCDP(params)
+}
 
 func Function(name string) *FunctionNode { return codepkg.Function(name) }
 func Expr(code string) *FunctionNode     { return codepkg.Expr(code) }
@@ -151,9 +155,10 @@ func SetWasmObserver(o WasmObserver) {
 	wasm.SetObserver(o)
 }
 
-// HTTPHostPolicy decides whether an xflow.http node may dispatch to a given
-// host: a nil return permits the request, a non-nil error aborts it before any
-// bytes are sent. Re-exported from the internal action package's HostPolicy so
+// HTTPHostPolicy decides whether an xflow.http node or Browser CDP navigation
+// may dispatch to a given host: a nil return permits the request, a non-nil
+// error aborts it before any bytes are sent. Re-exported from the internal
+// action package's HostPolicy so
 // a host process can install one without importing an internal package — which
 // it cannot do, the internal rule being a compile error outside node/.
 type HTTPHostPolicy = action.HostPolicy
@@ -165,10 +170,10 @@ func NewHTTPHostPolicy(allow, deny []string) HTTPHostPolicy {
 	return action.NewHostPolicy(allow, deny)
 }
 
-// SetHTTPHostPolicy installs the SSRF allow/deny policy for xflow.http nodes.
-// It is consulted before the initial request and again on every redirect hop,
-// so a redirect cannot smuggle a request to a host the policy would reject.
-// Call once at startup; pass nil to remove it.
+// SetHTTPHostPolicy installs the SSRF allow/deny policy for xflow.http nodes
+// and Browser CDP navigation. It is consulted before the initial request and
+// again on every redirect hop, so a redirect cannot smuggle a request to a host
+// the policy would reject. Call once at startup; pass nil to remove it.
 //
 // Until this forwarder existed the policy was unreachable rather than merely
 // unset: the variable, its constructor and both consult sites all live in
@@ -177,10 +182,27 @@ func NewHTTPHostPolicy(allow, deny []string) HTTPHostPolicy {
 // embedder. The variable's own doc invited "embedded runtimes" to set it,
 // which was a promise the language would not let them keep.
 //
-// There is still no configuration or CLI surface for this. A deployment that
-// wants host filtering has to call this from its own startup code.
+// The standalone sdk/runner configures this policy through YAML, environment,
+// and CLI options. Embedded hosts call this function at startup and own the
+// process-global policy lifecycle.
 func SetHTTPHostPolicy(p HTTPHostPolicy) {
 	action.HTTPHostPolicy = p
+}
+
+// BrowserCDPConfig configures the restricted remote-CDP credential-harvesting
+// node. It is re-exported so runner hosts can configure it without importing
+// node/internal/action.
+type BrowserCDPConfig = action.BrowserCDPConfig
+
+// BrowserCDPConfigDefaults returns the safe process-wide Browser CDP defaults.
+func BrowserCDPConfigDefaults() BrowserCDPConfig {
+	return action.BrowserCDPConfigDefaults()
+}
+
+// AcquireBrowserCDPConfig installs cfg for this process and returns a release
+// function. Concurrent incompatible configurations are rejected.
+func AcquireBrowserCDPConfig(cfg BrowserCDPConfig) (release func(), err error) {
+	return action.AcquireBrowserCDPConfig(cfg)
 }
 
 // WarmupScriptEngines absorbs script-engine cold start before traffic arrives:

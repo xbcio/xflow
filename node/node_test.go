@@ -2,10 +2,11 @@ package node_test
 
 import (
 	"context"
-	"github.com/xbcio/xflow/types"
+	"reflect"
 	"testing"
 
 	"github.com/xbcio/xflow/node"
+	"github.com/xbcio/xflow/types"
 )
 
 func TestFacadeExposesBuiltInNodes(t *testing.T) {
@@ -20,6 +21,20 @@ func TestFacadeExposesBuiltInNodes(t *testing.T) {
 	}
 	if got := node.Filter("items", "item.enabled").NodeType(); got != "xflow.transform.filter" {
 		t.Fatalf("Filter().NodeType() = %q, want xflow.transform.filter", got)
+	}
+	params := map[string]any{
+		"debugging_url": "http://chrome.example.test:9222",
+		"entry_url":     "https://app.example.test/login",
+	}
+	browser := node.BrowserCDP(params)
+	if got := browser.NodeType(); got != "xflow.browser.cdp" {
+		t.Fatalf("BrowserCDP().NodeType() = %q, want xflow.browser.cdp", got)
+	}
+	if got := browser.RawParams(); !reflect.DeepEqual(got, params) {
+		t.Fatalf("BrowserCDP().RawParams() = %#v, want %#v", got, params)
+	}
+	if got := browser.OnError(types.OnErrorOutput); got != browser || browser.OnErrorStrategy() != types.OnErrorOutput {
+		t.Fatalf("BrowserCDP().OnError() did not preserve builder and strategy")
 	}
 }
 

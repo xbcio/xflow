@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
+	xnode "github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/observability/tracing"
 	xflowsdk "github.com/xbcio/xflow/sdk/xflow"
@@ -52,6 +53,17 @@ type runnerConfig struct {
 	namespaces        []namespace.Namespace
 	heartbeatInterval string
 	pollWait          string
+	// browserCDP* is kept in the raw CLI/YAML representation until precedence
+	// resolution and validation complete, then converted in toSDKRunnerConfig.
+	browserCDPEndpointAllowlist []string
+	browserCDPMaxContexts       int
+	browserCDPQueueTimeout      string
+	browserCDPConnectTimeout    string
+	// httpHostPolicy* configures the process-wide destination policy shared by
+	// xflow.http and Browser CDP navigation. nil means unspecified; a non-nil
+	// empty slice is an explicit empty list from YAML, env, or CLI.
+	httpHostPolicyAllow []string
+	httpHostPolicyDeny  []string
 	// autoLabels adds environment-derived xflow.io/* labels to the manual set.
 	autoLabels bool
 	// token is the runner's bearer token (matched against the server's
@@ -136,6 +148,12 @@ func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
 	cmd.Flags().BoolVar(&cfg.autoLabels, "auto-labels", cfg.autoLabels, "Add environment-derived xflow.io/* labels (os, arch, env, hostname)")
 	cmd.Flags().StringVar(&cfg.heartbeatInterval, "heartbeat-interval", cfg.heartbeatInterval, "Heartbeat interval")
 	cmd.Flags().StringVar(&cfg.pollWait, "poll-wait", cfg.pollWait, "Poll wait duration when no task is available")
+	cmd.Flags().StringArrayVar(&cfg.browserCDPEndpointAllowlist, "browser-cdp-endpoint-allowlist", cfg.browserCDPEndpointAllowlist, "Allowlisted remote Browser CDP endpoint host; repeatable")
+	cmd.Flags().IntVar(&cfg.browserCDPMaxContexts, "browser-cdp-max-contexts", cfg.browserCDPMaxContexts, "Maximum concurrent Browser CDP contexts")
+	cmd.Flags().StringVar(&cfg.browserCDPQueueTimeout, "browser-cdp-queue-timeout", cfg.browserCDPQueueTimeout, "Browser CDP context queue timeout")
+	cmd.Flags().StringVar(&cfg.browserCDPConnectTimeout, "browser-cdp-connect-timeout", cfg.browserCDPConnectTimeout, "Browser CDP endpoint connect timeout")
+	cmd.Flags().StringArrayVar(&cfg.httpHostPolicyAllow, "http-host-allow", cfg.httpHostPolicyAllow, "Allowlisted navigation and HTTP destination host; repeatable")
+	cmd.Flags().StringArrayVar(&cfg.httpHostPolicyDeny, "http-host-deny", cfg.httpHostPolicyDeny, "Denied navigation and HTTP destination host; repeatable")
 	cmd.Flags().StringVar(&cfg.token, "token", cfg.token, "Runner bearer token (prefer XFLOW_RUNNER_TOKEN env)")
 	cmd.Flags().StringVar(&cfg.tlsServerCA, "tls-server-ca", cfg.tlsServerCA, "Path to server CA bundle (enables TLS)")
 	cmd.Flags().StringVar(&cfg.tlsClientCert, "tls-client-cert", cfg.tlsClientCert, "Path to client TLS certificate (enables mTLS)")
@@ -203,6 +221,9 @@ var newRunnerService = func(cfg xflowsdk.RunnerConfig, opts ...xflowsdk.RunnerOp
 // deliberately leaves to its host: the tracer provider's lifecycle and the
 // local scrape listener.
 func runRunner(ctx context.Context, cfg runnerConfig) error {
+	restoreHTTPHostPolicy := installRunnerHTTPHostPolicy(cfg)
+	defer restoreHTTPHostPolicy()
+
 	// Identity is settled before anything else: it rewrites cfg.runnerID and
 	// cfg.token, and every client built below reads them.
 	store, err := newIdentityStore(cfg)
@@ -324,6 +345,49 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 	return err
 }
 
+const standaloneBrowserCDPCapability = "xflow.browser.cdp"
+
+// setRunnerHTTPHostPolicy is a seam for lifecycle tests. Production always
+// points at node.SetHTTPHostPolicy.
+var setRunnerHTTPHostPolicy = xnode.SetHTTPHostPolicy
+
+// installRunnerHTTPHostPolicy installs one process-wide policy for both stock
+// HTTP nodes and Browser CDP navigation. Browser-capable runners fail closed
+// when no lists are configured; ordinary runners retain the historical
+// no-policy behavior unless an operator explicitly configures a list.
+func installRunnerHTTPHostPolicy(cfg runnerConfig) func() {
+	configured := cfg.httpHostPolicyAllow != nil || cfg.httpHostPolicyDeny != nil
+	browserCapable := runnerConfigHasCapability(cfg, standaloneBrowserCDPCapability)
+	if !configured && !browserCapable {
+		return func() {}
+	}
+
+	policy := xnode.NewHTTPHostPolicy(
+		copyTrimmedHosts(cfg.httpHostPolicyAllow),
+		copyTrimmedHosts(cfg.httpHostPolicyDeny),
+	)
+	if policy == nil && browserCapable {
+		policy = func(host string) error {
+			return fmt.Errorf("host %q is denied: Browser CDP navigation has no HTTP host allowlist", host)
+		}
+	}
+	setRunnerHTTPHostPolicy(policy)
+	return func() { setRunnerHTTPHostPolicy(nil) }
+}
+
+func runnerConfigHasCapability(cfg runnerConfig, nodeType string) bool {
+	capabilities := cfg.capabilities
+	if len(capabilities) == 0 {
+		capabilities = parseCapabilities(cfg.capRaw)
+	}
+	for _, capability := range capabilities {
+		if capability.NodeType == nodeType {
+			return true
+		}
+	}
+	return false
+}
+
 // toSDKRunnerConfig converts the resolved CLI/YAML config into the SDK's shape.
 //
 // The durations are re-parsed here rather than carried as time.Duration through
@@ -342,6 +406,14 @@ func toSDKRunnerConfig(cfg runnerConfig) (xflowsdk.RunnerConfig, error) {
 	if err != nil {
 		return xflowsdk.RunnerConfig{}, err
 	}
+	browserCDPQueueTimeout, err := parsePositiveDuration("browser CDP queue timeout", cfg.browserCDPQueueTimeout)
+	if err != nil {
+		return xflowsdk.RunnerConfig{}, err
+	}
+	browserCDPConnectTimeout, err := parsePositiveDuration("browser CDP connect timeout", cfg.browserCDPConnectTimeout)
+	if err != nil {
+		return xflowsdk.RunnerConfig{}, err
+	}
 	reportInterval := time.Duration(0)
 	if cfg.reportMetrics && cfg.reportMetricsInterval != "" {
 		reportInterval, err = parsePositiveDuration("report metrics interval", cfg.reportMetricsInterval)
@@ -350,20 +422,26 @@ func toSDKRunnerConfig(cfg runnerConfig) (xflowsdk.RunnerConfig, error) {
 		}
 	}
 	return xflowsdk.RunnerConfig{
-		ServerURL:             cfg.serverURL,
-		Transport:             cfg.transport,
-		GRPCTarget:            cfg.grpcTarget,
-		RunnerID:              cfg.runnerID,
-		Concurrency:           cfg.concurrency,
-		Capabilities:          capabilityNodeTypes(cfg.capabilities),
-		Labels:                cloneStringMap(cfg.labels),
-		Namespaces:            cfg.namespaces,
-		Token:                 cfg.token,
-		TLSServerCA:           cfg.tlsServerCA,
-		TLSClientCert:         cfg.tlsClientCert,
-		TLSClientKey:          cfg.tlsClientKey,
-		HeartbeatInterval:     heartbeat,
-		PollWait:              pollWait,
+		ServerURL:         cfg.serverURL,
+		Transport:         cfg.transport,
+		GRPCTarget:        cfg.grpcTarget,
+		RunnerID:          cfg.runnerID,
+		Concurrency:       cfg.concurrency,
+		Capabilities:      capabilityNodeTypes(cfg.capabilities),
+		Labels:            cloneStringMap(cfg.labels),
+		Namespaces:        cfg.namespaces,
+		Token:             cfg.token,
+		TLSServerCA:       cfg.tlsServerCA,
+		TLSClientCert:     cfg.tlsClientCert,
+		TLSClientKey:      cfg.tlsClientKey,
+		HeartbeatInterval: heartbeat,
+		PollWait:          pollWait,
+		BrowserCDP: xnode.BrowserCDPConfig{
+			EndpointAllowlist: copyTrimmedHosts(cfg.browserCDPEndpointAllowlist),
+			MaxContexts:       cfg.browserCDPMaxContexts,
+			QueueTimeout:      browserCDPQueueTimeout,
+			ConnectTimeout:    browserCDPConnectTimeout,
+		},
 		Credentials:           cfg.credentials,
 		ResourcePoolConfig:    cfg.resourcePoolConfig,
 		ArtifactCacheDir:      os.Getenv("XFLOW_ARTIFACT_CACHE_DIR"),

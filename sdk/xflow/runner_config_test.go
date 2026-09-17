@@ -2,12 +2,33 @@ package xflow
 
 import (
 	"context"
+	"database/sql"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc"
 
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
+
+type runnerPoolCloseRecorder struct {
+	closeCalls int
+}
+
+func (*runnerPoolCloseRecorder) SQL(context.Context, string, string) (*sql.DB, error) {
+	return nil, nil
+}
+
+func (*runnerPoolCloseRecorder) GRPC(context.Context, string, bool, ...grpc.DialOption) (*grpc.ClientConn, error) {
+	return nil, nil
+}
+
+func (p *runnerPoolCloseRecorder) Close(context.Context) error {
+	p.closeCalls++
+	return nil
+}
 
 // The pool caches *sql.DB and *grpc.ClientConn process-wide, so constructing one
 // for a runner that will never open either is a live resource nobody closes.
@@ -101,8 +122,9 @@ func TestNewRunnerCarriesTheResourcePoolConfig(t *testing.T) {
 		t.Fatal("ResourcePool = nil")
 	}
 	// The value, not just the pointer. buildRunnerServiceConfig hands the config
-	// to resource.NewDefaultResourcePool, which returns a pool for any input, so
-	// non-nil is equally true of a version that replaced `poolCfg :=
+	// to newRunnerResourcePool (which defaults to resource.NewDefaultResourcePool),
+	// which returns a pool for any input, so non-nil is equally true of a version
+	// that replaced `poolCfg :=
 	// cfg.ResourcePoolConfig` with the defaults — which is exactly the silent
 	// all-fields-defaulted outcome this test's comment says it guards against.
 	if got := sqlPoolMaxOpenConns(t, svcCfg.ResourcePool); got != 77 {
@@ -113,6 +135,30 @@ func TestNewRunnerCarriesTheResourcePoolConfig(t *testing.T) {
 		defer cancel()
 		_ = svcCfg.ResourcePool.Close(ctx)
 	})
+}
+
+func TestBuildRunnerServiceConfigClosesPoolWhenTriggerWiringFails(t *testing.T) {
+	originalFactory := newRunnerResourcePool
+	pool := &runnerPoolCloseRecorder{}
+	newRunnerResourcePool = func(types.ResourcePoolConfig) types.ResourcePool { return pool }
+	t.Cleanup(func() { newRunnerResourcePool = originalFactory })
+
+	_, err := buildRunnerServiceConfig(
+		RunnerConfig{
+			ServerURL:    "http://server:8080",
+			Capabilities: []string{"xflow.database", "xflow.trigger.kafka"},
+			TLSServerCA:  filepath.Join(t.TempDir(), "missing-ca.pem"),
+		},
+		WithRunnerArtifactResolver(func(context.Context, string) ([]byte, error) {
+			return nil, nil
+		}),
+	)
+	if err == nil {
+		t.Fatal("buildRunnerServiceConfig succeeded, want trigger wiring failure")
+	}
+	if pool.closeCalls != 1 {
+		t.Fatalf("pool Close calls = %d, want 1", pool.closeCalls)
+	}
 }
 
 // Namespaces restrict which assignments this runner may claim. Dropping them

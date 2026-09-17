@@ -63,6 +63,7 @@ var evaluableParams = map[string]map[string]bool{
 	// a MISSING type yields an empty exemption set too, but by accident, and
 	// the registry-coverage test exists to keep the two apart.
 	"xflow.http":            {},
+	"xflow.browser.cdp":     {},
 	"xflow.start":           {},
 	"xflow.end":             {},
 	"xflow.merge":           {},
