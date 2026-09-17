@@ -60,6 +60,14 @@ type TriggerActivationHandler struct {
 
 	mu   sync.Mutex
 	subs map[activationID]activationState
+	// nextGen hands out activationState.gen, the per-entry identity Deactivate
+	// uses to distinguish "the map entry is still the one I loaded" from
+	// "someone replaced it while I was closing the old subscription" — see
+	// activationState.gen. It is per-handler, exactly like subs, so a
+	// generation is only ever compared against other entries of this same map.
+	// It is incremented under mu on every install and never reset, so a
+	// generation is never reused while this handler is alive.
+	nextGen uint64
 }
 
 // activationState is what the handler retains per live activation: the trigger
@@ -69,6 +77,26 @@ type TriggerActivationHandler struct {
 type activationState struct {
 	sub      types.TriggerSubscription
 	bindings []engine.SupplyConsumerBinding
+
+	// gen is this entry's identity: the generation handed out by nextGen when
+	// storeSubscription installed this state. Deactivate captures the gen of
+	// the entry it loaded and removes the map entry only if the gen is
+	// unchanged, i.e. only if the entry is still that exact install. A
+	// replacement installed while the old subscription was being closed
+	// carries a higher gen and is therefore never deleted — its own
+	// generation owns the map entry.
+	//
+	// The identity deliberately is NOT sub. types.TriggerSubscription is
+	// implemented by types.CloseFunc, a func type, and Go panics with
+	// "comparing uncomparable type types.CloseFunc" when two interface values
+	// with an identical non-comparable dynamic type are compared. Every
+	// production trigger (timer, cron, kafka, redis aggregate, webhook) returns
+	// a types.CloseFunc, so comparing sub crashed the deactivate path for every
+	// real trigger kind. A uint64 is always comparable, whatever sub holds.
+	//
+	// storeSubscription is the only install site and always assigns a fresh
+	// nonzero gen, which is what makes "equal gen" mean "same install".
+	gen uint64
 }
 
 // TriggerActivationHandlerOption configures a TriggerActivationHandler.
@@ -457,6 +485,11 @@ func (h *TriggerActivationHandler) registerSupplyConsumers(ctx context.Context, 
 // ActivationTracker.ProcessDirectives serializes calls to this handler's
 // Activate per activation identity).
 //
+// Every install also stamps a fresh activationState.gen from nextGen, under
+// h.mu. That generation is the entry's identity for Deactivate's
+// never-delete-the-replacement guard, and this is the only place a state is
+// installed — see activationState.gen for why the identity cannot be sub.
+//
 // It also reconciles the OLD activation's supply-consumer registrations —
 // but the rule differs by binding shape, because the two shapes are governed
 // by different registries with different semantics:
@@ -504,7 +537,8 @@ func (h *TriggerActivationHandler) registerSupplyConsumers(ctx context.Context, 
 func (h *TriggerActivationHandler) storeSubscription(ctx context.Context, id activationID, sub types.TriggerSubscription, bindings []engine.SupplyConsumerBinding) {
 	h.mu.Lock()
 	old, exists := h.subs[id]
-	h.subs[id] = activationState{sub: sub, bindings: bindings}
+	h.nextGen++
+	h.subs[id] = activationState{sub: sub, bindings: bindings, gen: h.nextGen}
 	h.mu.Unlock()
 
 	if exists {
@@ -629,7 +663,10 @@ func (h *TriggerActivationHandler) Deactivate(d protocol.DeactivateDirective) er
 	h.mu.Lock()
 	// A direct concurrent Activate may have replaced this identity while Close
 	// ran. Never delete the replacement; its own generation owns the map entry.
-	if current, stillCurrent := h.subs[id]; stillCurrent && current.sub == st.sub {
+	// The entry's identity is its generation, not its subscription: sub is
+	// routinely a types.CloseFunc (a func type), and comparing two interface
+	// values whose identical dynamic type is not comparable panics at runtime.
+	if current, stillCurrent := h.subs[id]; stillCurrent && current.gen == st.gen {
 		delete(h.subs, id)
 	}
 	h.mu.Unlock()

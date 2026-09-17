@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 
 	"github.com/xbcio/xflow/engine/graph"
@@ -487,5 +488,176 @@ func TestTriggerActivationHandler_ReplicaSubscriptionsAreIndependent(t *testing.
 	h.mu.Unlock()
 	if replica0Present || !replica1Present {
 		t.Fatalf("stored subscriptions after deactivate: replica0=%v replica1=%v", replica0Present, replica1Present)
+	}
+}
+
+// closeFuncTriggerHandler returns a types.CloseFunc-typed subscription.
+//
+// It must be a func type, not a struct/pointer: types.CloseFunc is the shape
+// EVERY production trigger returns (timer, cron, kafka per-message, kafka
+// aggregate, redis, and sdk/xflow webhook), and a func type is not comparable.
+// A struct- or pointer-typed fake subscription is comparable, so it silently
+// sidesteps the defect this handler exists to reproduce — the old
+// Deactivate guard compared two types.TriggerSubscription interface values and
+// panicked with "comparing uncomparable type types.CloseFunc".
+//
+// When entered/release are non-nil, the FIRST Close blocks between signaling
+// entered and waiting for release, letting a test drive a concurrent Activate
+// into the window between Deactivate loading its activationState and
+// re-checking the map under h.mu. The gate uses a compare-and-swap rather than
+// a sync.Once: a nested Close from the concurrent Activate's own stale-close
+// would block on Once.Do until the first one returns, deadlocking the test.
+type closeFuncTriggerHandler struct {
+	entered chan struct{}
+	release chan struct{}
+
+	gated     atomic.Int32
+	activates atomic.Int32
+	closed    atomic.Int32
+}
+
+func (f *closeFuncTriggerHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "close-func"}
+}
+
+func (f *closeFuncTriggerHandler) Activate(context.Context, *types.TriggerActivateInput) (types.TriggerSubscription, error) {
+	f.activates.Add(1)
+	return types.CloseFunc(func(context.Context) error {
+		if f.entered != nil && f.gated.CompareAndSwap(0, 1) {
+			close(f.entered)
+			<-f.release
+		}
+		f.closed.Add(1)
+		return nil
+	}), nil
+}
+
+// deactivateDirectiveFor renders the deactivate directive matching an activate
+// directive for the same activation identity.
+func deactivateDirectiveFor(d protocol.ActivateDirective) protocol.DeactivateDirective {
+	return protocol.DeactivateDirective{
+		Namespace:       d.Namespace,
+		WorkflowID:      d.WorkflowID,
+		WorkflowVersion: d.WorkflowVersion,
+		EntryUnitID:     d.EntryUnitID,
+		ReplicaIndex:    d.ReplicaIndex,
+		Generation:      d.Generation,
+	}
+}
+
+// TestTriggerActivationHandler_DeactivateWithCloseFuncSubscription is the
+// regression test for the "comparing uncomparable type types.CloseFunc" panic.
+// On the old guard (`current.sub == st.sub`) this test panics; on the
+// generation-based guard it must close the subscription and remove the entry.
+//
+// The subscription here is deliberately a types.CloseFunc, because that is what
+// every production trigger returns; the struct-typed fakes used elsewhere in
+// this file would not have caught the defect.
+func TestTriggerActivationHandler_DeactivateWithCloseFuncSubscription(t *testing.T) {
+	fh := &closeFuncTriggerHandler{}
+	h := NewTriggerActivationHandler(
+		"https://control.internal",
+		"token",
+		fakeLookup{handlers: map[string]types.TriggerHandler{"close-func": fh}},
+	)
+	d := protocol.ActivateDirective{
+		Namespace:       "ns",
+		WorkflowID:      "wf",
+		WorkflowVersion: "v1",
+		EntryUnitID:     "entry",
+		NodeType:        "close-func",
+		Generation:      1,
+	}
+	if err := h.Activate(context.Background(), d); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	id := activationIDFromActivate(d)
+
+	if err := h.Deactivate(deactivateDirectiveFor(d)); err != nil {
+		t.Fatalf("Deactivate: %v", err)
+	}
+	if got := fh.closed.Load(); got != 1 {
+		t.Fatalf("Close calls = %d, want 1", got)
+	}
+	h.mu.Lock()
+	_, present := h.subs[id]
+	h.mu.Unlock()
+	if present {
+		t.Fatal("entry remains after a Deactivate that closed its only subscription")
+	}
+}
+
+// TestTriggerActivationHandler_DeactivateKeepsEntryReplacedWhileClosing proves
+// the guard's load-bearing behaviour survives the fix: while one Deactivate is
+// in flight, a direct concurrent Activate installs a NEW state for the same
+// activation identity, and that replacement must survive the in-flight
+// Deactivate — the old subscription is still closed.
+//
+// This is the behaviour the original (panicking) comparison existed to protect.
+// Removing the comparison outright — deleting unconditionally — makes this test
+// fail because the replacement is deleted by Deactivate.
+func TestTriggerActivationHandler_DeactivateKeepsEntryReplacedWhileClosing(t *testing.T) {
+	fh := &closeFuncTriggerHandler{entered: make(chan struct{}), release: make(chan struct{})}
+	h := NewTriggerActivationHandler(
+		"https://control.internal",
+		"token",
+		fakeLookup{handlers: map[string]types.TriggerHandler{"close-func": fh}},
+	)
+	d := protocol.ActivateDirective{
+		Namespace:       "ns",
+		WorkflowID:      "wf",
+		WorkflowVersion: "v1",
+		EntryUnitID:     "entry",
+		NodeType:        "close-func",
+		Generation:      1,
+	}
+	if err := h.Activate(context.Background(), d); err != nil {
+		t.Fatalf("initial Activate: %v", err)
+	}
+	id := activationIDFromActivate(d)
+	if got := fh.activates.Load(); got != 1 {
+		t.Fatalf("Activate calls = %d, want 1", got)
+	}
+
+	deactivateDone := make(chan error, 1)
+	go func() { deactivateDone <- h.Deactivate(deactivateDirectiveFor(d)) }()
+
+	// Wait until the Deactivate goroutine is inside the stored subscription's
+	// Close, i.e. past the point where it read the activationState it intends
+	// to remove and before it re-checks the map under h.mu.
+	<-fh.entered
+
+	// The replacement: a direct concurrent Activate for the SAME identity.
+	replacement := d
+	replacement.Generation = 2
+	if err := h.Activate(context.Background(), replacement); err != nil {
+		t.Fatalf("concurrent Activate: %v", err)
+	}
+	h.mu.Lock()
+	replacedGen := h.subs[id].gen
+	h.mu.Unlock()
+
+	close(fh.release)
+	if err := <-deactivateDone; err != nil {
+		t.Fatalf("in-flight Deactivate: %v", err)
+	}
+
+	h.mu.Lock()
+	current, present := h.subs[id]
+	h.mu.Unlock()
+	if !present {
+		t.Fatal("in-flight Deactivate deleted the entry installed by a concurrent Activate")
+	}
+	if current.gen != replacedGen {
+		t.Fatalf("surviving entry gen = %d, want the replacement's %d", current.gen, replacedGen)
+	}
+	// The old subscription is still closed, by the in-flight Deactivate and/or
+	// by the concurrent Activate's own stale-close of the generation it
+	// replaced — so assert "closed", not an exact count.
+	if got := fh.closed.Load(); got < 1 {
+		t.Fatal("the replaced subscription was never closed")
+	}
+	if got := fh.activates.Load(); got != 2 {
+		t.Fatalf("Activate calls = %d, want 2", got)
 	}
 }
