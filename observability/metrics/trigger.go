@@ -47,7 +47,11 @@ func NewTriggerMetrics(m *Metrics) TriggerMetrics { return TriggerMetrics{Metric
 // schema/schema_fail describe a message that could not be used. buffer_overflow
 // describes a usable message the aggregator threw away under load, with the
 // commit frontier advancing past its offset — nothing redelivers it, so that
-// series is a running total of permanently lost records.
+// series is a running total of permanently lost records. It is the series the
+// DEFAULT policy produces: a topic configured with on_overflow=block reports
+// into xflow_trigger_consumption_blocked instead, and one configured with
+// on_overflow=dead_letter reports into xflow_trigger_messages_dead_lettered_total,
+// so this counter keeps meaning "gone" on every topic.
 func (t TriggerMetrics) OnMessageDiscarded(ctx context.Context, topic, reason string) {
 	t.Metrics.Inc(metricTriggerMessagesDiscarded, withNamespace(ctx, map[string]string{
 		"topic": topic, "reason": reason,
@@ -55,9 +59,16 @@ func (t TriggerMetrics) OnMessageDiscarded(ctx context.Context, topic, reason st
 }
 
 // OnMessageDeadLettered counts a dead-letter publish attempt. result is "ok" or
-// "error". An "error" rate means invalid messages are being redelivered rather
-// than parked, so the source partition is stalled — that is the more urgent of
-// the two.
+// "error". An "error" rate means records are being redelivered rather than
+// parked, so the source partition is stalled — that is the more urgent of the
+// two.
+//
+// Both axes report here. Which one it was is not a label: the axis is already
+// carried by the published record's xflow-dlq-reason header, and adding it to
+// the label set would double every series to say something the DLQ itself
+// records. On the overflow axis an "error" is a partition that has stopped
+// consuming and is retrying a dead-letter write, which is the same operator
+// response as the schema axis: go look at the dead-letter broker.
 func (t TriggerMetrics) OnMessageDeadLettered(ctx context.Context, topic, result string) {
 	t.Metrics.Inc(metricTriggerMessagesDeadLetterd, withNamespace(ctx, map[string]string{
 		"topic": topic, "result": result,
@@ -146,7 +157,8 @@ func (t TriggerMetrics) OnConsumerLag(ctx context.Context, topic string, partiti
 }
 
 // OnConsumptionBlocked records whether a partition has stopped consuming to
-// avoid dropping records, under on_overflow=block.
+// avoid dropping records, under on_overflow=block or while an
+// on_overflow=dead_letter publish is failing.
 //
 // A gauge rather than a counter because the question an operator asks is "is it
 // blocked right now", and because the transitions are already in the log. It is
