@@ -26,7 +26,7 @@ nodes:
   - name: harvest_session
     type: xflow.browser.cdp
     parameters:
-      # 仅示例 host；runner 的 endpoint allowlist 按 host 精确匹配且忽略端口。
+      # 仅示例 host；runner 的 endpoint allowlist 可用精确 host、.suffix 或 *.wildcard，且忽略端口。
       debugging_url: "http://chrome.example.test:9222"
 
       # 不含 query token 的安全示例入口。真实的一次性 URL 应从受控运行时输入注入。

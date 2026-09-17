@@ -959,14 +959,15 @@ heartbeat:
   interval: "5s"
 
 # Shared destination policy for xflow.http requests and Browser navigation.
-# Hosts only: schemes, ports, paths, and userinfo are rejected at validation.
+# Host patterns only: exact hosts, suffixes prefixed by ".", and wildcards
+# prefixed by "*." are accepted; schemes, ports, paths, and userinfo are rejected.
 # http_host_policy:
 #   allow: ["app.example.internal"]
 #   deny: ["metadata.google.internal"]
 
 # Browser CDP uses an existing remote-debugging endpoint; it never starts a
 # browser. An empty endpoint_allowlist (the secure default) denies all endpoint
-# connections until the exact hosts are listed. Browser navigation also denies
+# connections until an exact, suffix, or wildcard host pattern is listed. Browser navigation also denies
 # all hosts unless http_host_policy is explicitly configured.
 browser_cdp:
   endpoint_allowlist: []

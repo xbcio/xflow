@@ -71,28 +71,30 @@ var HTTPHostPolicy HostPolicy
 // allow is non-empty, only hosts present in it are permitted; deny always
 // rejects matching hosts and takes precedence over allow. Host matching is
 // case-insensitive and compares hostnames only (ports are ignored). It returns
-// nil when both lists are empty, preserving the no-filtering default.
+// nil when both lists are empty, preserving the no-filtering default. Entries
+// may be exact hosts, suffixes prefixed by '.', or wildcards prefixed by '*.';
+// malformed entries make the returned policy deny every host.
 func NewHostPolicy(allow, deny []string) HostPolicy {
-	allowSet := make(map[string]struct{}, len(allow))
-	for _, h := range allow {
-		allowSet[strings.ToLower(h)] = struct{}{}
+	allowPatterns, allowErr := compileHostPatterns(allow)
+	denyPatterns, denyErr := compileHostPatterns(deny)
+	if allowErr != nil || denyErr != nil {
+		return func(string) error {
+			return errors.New("host policy is invalid")
+		}
 	}
-	denySet := make(map[string]struct{}, len(deny))
-	for _, h := range deny {
-		denySet[strings.ToLower(h)] = struct{}{}
-	}
-	if len(allowSet) == 0 && len(denySet) == 0 {
+	if len(allowPatterns) == 0 && len(denyPatterns) == 0 {
 		return nil
 	}
 	return func(host string) error {
-		h := strings.ToLower(host)
-		if _, denied := denySet[h]; denied {
+		normalizedHost, err := normalizeHostOnly(host)
+		if err != nil {
+			return errors.New("host is invalid")
+		}
+		if hostPatternsMatch(denyPatterns, normalizedHost) {
 			return fmt.Errorf("host %q is denied", host)
 		}
-		if len(allowSet) > 0 {
-			if _, ok := allowSet[h]; !ok {
-				return fmt.Errorf("host %q is not in the allowlist", host)
-			}
+		if len(allowPatterns) > 0 && !hostPatternsMatch(allowPatterns, normalizedHost) {
+			return fmt.Errorf("host %q is not in the allowlist", host)
 		}
 		return nil
 	}

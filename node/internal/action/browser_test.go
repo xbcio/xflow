@@ -64,6 +64,35 @@ func TestBrowserCDPConfigDefaultsAndLeases(t *testing.T) {
 	}
 }
 
+func TestBrowserCDPEndpointAllowlistPatterns(t *testing.T) {
+	cfg := BrowserCDPConfigDefaults()
+	cfg.EndpointAllowlist = []string{"*.CHROME.TEST", ".apps.test", "*.chrome.test"}
+	normalized, err := normalizeBrowserCDPConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"*.chrome.test", ".apps.test"}; !reflect.DeepEqual(normalized.EndpointAllowlist, want) {
+		t.Fatalf("normalized endpoint allowlist = %v, want %v", normalized.EndpointAllowlist, want)
+	}
+
+	for _, tt := range []struct {
+		host string
+		want bool
+	}{
+		{host: "chrome.test", want: false},
+		{host: "remote.chrome.test", want: true},
+		{host: "apps.test", want: true},
+		{host: "login.apps.test", want: true},
+		{host: "other.test", want: false},
+	} {
+		t.Run(tt.host, func(t *testing.T) {
+			if got := browserEndpointAllowed(normalized.EndpointAllowlist, tt.host); got != tt.want {
+				t.Fatalf("browserEndpointAllowed(%q) = %t, want %t", tt.host, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBrowserCDPConfigRejectsEndpointURLs(t *testing.T) {
 	for _, host := range []string{"", "https://chrome.test", "chrome.test:9222", "chrome.test/path", " chrome.test"} {
 		cfg := BrowserCDPConfigDefaults()

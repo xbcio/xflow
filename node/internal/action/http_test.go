@@ -388,6 +388,32 @@ func TestHTTP_DenylistRejectsHost(t *testing.T) {
 	}
 }
 
+func TestHTTPHostPolicyPatterns(t *testing.T) {
+	policy := actionimpl.NewHostPolicy(
+		[]string{".allowed.test", "*.wildcard.test"},
+		[]string{".blocked.allowed.test"},
+	)
+	for _, tt := range []struct {
+		host string
+		want bool
+	}{
+		{host: "ALLOWED.TEST", want: true},
+		{host: "api.allowed.test", want: true},
+		{host: "blocked.allowed.test", want: false},
+		{host: "api.blocked.allowed.test", want: false},
+		{host: "wildcard.test", want: false},
+		{host: "api.wildcard.test", want: true},
+		{host: "other.test", want: false},
+	} {
+		t.Run(tt.host, func(t *testing.T) {
+			got := policy(tt.host) == nil
+			if got != tt.want {
+				t.Fatalf("policy(%q) permitted = %t, want %t", tt.host, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestHTTP_RedirectToDisallowedHostRejected verifies the policy is re-applied to
 // redirect targets, so a redirect cannot bypass the allowlist.
 func TestHTTP_RedirectToDisallowedHostRejected(t *testing.T) {

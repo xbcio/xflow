@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"net"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -115,8 +114,9 @@ func (n *CDPNode) OnError(strategy types.OnError) types.Builder {
 func (n *CDPNode) RawParams() any { return n.Params }
 
 // BrowserCDPConfig is process-wide admission configuration for CDP nodes.
-// EndpointAllowlist contains hostnames only; an empty list denies every CDP
-// endpoint. Each installed snapshot owns its own concurrency semaphore.
+// EndpointAllowlist contains hostname patterns only: exact hosts, suffixes
+// prefixed by '.', or wildcards prefixed by "*.". An empty list denies
+// every CDP endpoint. Each installed snapshot owns its own concurrency semaphore.
 type BrowserCDPConfig struct {
 	EndpointAllowlist []string
 	MaxContexts       int
@@ -194,19 +194,11 @@ func normalizeBrowserCDPConfig(cfg BrowserCDPConfig) (BrowserCDPConfig, error) {
 		return BrowserCDPConfig{}, fmt.Errorf("browser CDP connect timeout must be positive")
 	}
 
-	set := make(map[string]struct{}, len(cfg.EndpointAllowlist))
-	for _, raw := range cfg.EndpointAllowlist {
-		host, err := normalizeHostOnly(raw)
-		if err != nil {
-			return BrowserCDPConfig{}, fmt.Errorf("browser CDP endpoint allowlist contains an invalid host")
-		}
-		set[host] = struct{}{}
+	patterns, err := normalizedHostPatterns(cfg.EndpointAllowlist)
+	if err != nil {
+		return BrowserCDPConfig{}, fmt.Errorf("browser CDP endpoint allowlist contains an invalid host")
 	}
-	cfg.EndpointAllowlist = make([]string, 0, len(set))
-	for host := range set {
-		cfg.EndpointAllowlist = append(cfg.EndpointAllowlist, host)
-	}
-	sort.Strings(cfg.EndpointAllowlist)
+	cfg.EndpointAllowlist = patterns
 	return cfg, nil
 }
 
@@ -841,33 +833,6 @@ func parseBrowserURL(field, raw string, schemes ...string) (*url.URL, error) {
 	return u, nil
 }
 
-func normalizeHostOnly(raw string) (string, error) {
-	if raw == "" || raw != strings.TrimSpace(raw) || strings.ContainsAny(raw, "/\\?#@") || strings.ContainsAny(raw, " \t\r\n") {
-		return "", errors.New("invalid host")
-	}
-	host := strings.TrimSuffix(strings.TrimPrefix(raw, "["), "]")
-	if strings.Contains(host, "[") || strings.Contains(host, "]") {
-		return "", errors.New("invalid host")
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return strings.ToLower(ip.String()), nil
-	}
-	if strings.Contains(host, ":") || len(host) > 253 {
-		return "", errors.New("invalid host")
-	}
-	for _, label := range strings.Split(host, ".") {
-		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
-			return "", errors.New("invalid host")
-		}
-		for _, r := range label {
-			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_') {
-				return "", errors.New("invalid host")
-			}
-		}
-	}
-	return strings.ToLower(host), nil
-}
-
 func hostForBrowserURL(host string) string {
 	if strings.Contains(host, ":") {
 		return "[" + host + "]"
@@ -876,8 +841,8 @@ func hostForBrowserURL(host string) string {
 }
 
 func browserEndpointAllowed(allowlist []string, host string) bool {
-	index := sort.SearchStrings(allowlist, host)
-	return index < len(allowlist) && allowlist[index] == host
+	patterns, err := compileHostPatterns(allowlist)
+	return err == nil && hostPatternsMatch(patterns, host)
 }
 
 func applyBrowserHostPolicy(policy HostPolicy, host string) error {

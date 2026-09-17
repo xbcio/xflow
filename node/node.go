@@ -164,8 +164,9 @@ func SetWasmObserver(o WasmObserver) {
 type HTTPHostPolicy = action.HostPolicy
 
 // NewHTTPHostPolicy builds a host policy from optional allow and deny lists.
-// deny takes precedence over allow, matching is case-insensitive, and ports are
-// ignored. Both lists empty returns nil, which is the no-filtering default.
+// Entries may be exact hosts, suffixes prefixed by '.', or wildcards prefixed
+// by "*."; deny takes precedence over allow. Matching is case-insensitive and
+// ignores ports. Both lists empty returns nil, which is the no-filtering default.
 func NewHTTPHostPolicy(allow, deny []string) HTTPHostPolicy {
 	return action.NewHostPolicy(allow, deny)
 }
