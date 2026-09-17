@@ -66,12 +66,12 @@ func TestBrowserCDPConfigDefaultsAndLeases(t *testing.T) {
 
 func TestBrowserCDPEndpointAllowlistPatterns(t *testing.T) {
 	cfg := BrowserCDPConfigDefaults()
-	cfg.EndpointAllowlist = []string{"*.CHROME.TEST", ".apps.test", "*.chrome.test"}
+	cfg.EndpointAllowlist = []string{"EXACT.CHROME.TEST", "*.WILDCARD.CHROME.TEST", ".apps.test", "*.wildcard.chrome.test"}
 	normalized, err := normalizeBrowserCDPConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"*.chrome.test", ".apps.test"}; !reflect.DeepEqual(normalized.EndpointAllowlist, want) {
+	if want := []string{"*.wildcard.chrome.test", ".apps.test", "exact.chrome.test"}; !reflect.DeepEqual(normalized.EndpointAllowlist, want) {
 		t.Fatalf("normalized endpoint allowlist = %v, want %v", normalized.EndpointAllowlist, want)
 	}
 
@@ -79,10 +79,14 @@ func TestBrowserCDPEndpointAllowlistPatterns(t *testing.T) {
 		host string
 		want bool
 	}{
-		{host: "chrome.test", want: false},
-		{host: "remote.chrome.test", want: true},
+		{host: "exact.chrome.test", want: true},
+		{host: "remote.exact.chrome.test", want: false},
+		{host: "wildcard.chrome.test", want: false},
+		{host: "remote.wildcard.chrome.test", want: true},
+		{host: "evil-wildcard.chrome.test", want: false},
 		{host: "apps.test", want: true},
 		{host: "login.apps.test", want: true},
+		{host: "evil-apps.test", want: false},
 		{host: "other.test", want: false},
 	} {
 		t.Run(tt.host, func(t *testing.T) {
@@ -94,7 +98,18 @@ func TestBrowserCDPEndpointAllowlistPatterns(t *testing.T) {
 }
 
 func TestBrowserCDPConfigRejectsEndpointURLs(t *testing.T) {
-	for _, host := range []string{"", "https://chrome.test", "chrome.test:9222", "chrome.test/path", " chrome.test"} {
+	for _, host := range []string{
+		"",
+		"https://chrome.test",
+		"chrome.test:9222",
+		"chrome.test/path",
+		"user@chrome.test",
+		" chrome.test",
+		"*.chrome.test:9222",
+		"*.chrome.test/path",
+		"*.user@chrome.test",
+		".chrome.test:9222",
+	} {
 		cfg := BrowserCDPConfigDefaults()
 		cfg.EndpointAllowlist = []string{host}
 		if _, err := AcquireBrowserCDPConfig(cfg); err == nil {
@@ -488,6 +503,93 @@ func TestBrowserCDPExecuteDeniesNilHostPolicyBeforeExecutor(t *testing.T) {
 	}
 }
 
+func TestBrowserCDPHostDeniedDetails(t *testing.T) {
+	t.Run("endpoint_allowlist", func(t *testing.T) {
+		release := acquireTestBrowserConfig(t, "allowed-chrome.test", 1, time.Second)
+		defer release()
+		oldPolicy, oldExecutor := HTTPHostPolicy, executeBrowserCDPAttempt
+		defer func() { HTTPHostPolicy, executeBrowserCDPAttempt = oldPolicy, oldExecutor }()
+		HTTPHostPolicy = NewHostPolicy([]string{"app.test"}, nil)
+		var calls atomic.Int32
+		executeBrowserCDPAttempt = func(context.Context, *browserParams, *browserConfigSnapshot) (*browserAttemptResult, error) {
+			calls.Add(1)
+			return &browserAttemptResult{Headers: http.Header{"Authorization": []string{"opaque"}}}, nil
+		}
+
+		params := validBrowserParams()
+		params["debugging_url"] = "http://denied-chrome.test:9222"
+		_, err := (&CDPNode{}).Execute(context.Background(), &types.Input{Params: params})
+		assertBrowserErrorDetails(t, err, "browser.host_denied", true, map[string]any{
+			"source":       browserHostDeniedSourceEndpointAllowlist,
+			"rejected_url": "http://denied-chrome.test",
+		})
+		if calls.Load() != 0 {
+			t.Fatalf("executor called %d times", calls.Load())
+		}
+	})
+
+	t.Run("navigation_policy", func(t *testing.T) {
+		release := acquireTestBrowserConfig(t, "chrome.test", 1, time.Second)
+		defer release()
+		oldPolicy, oldExecutor := HTTPHostPolicy, executeBrowserCDPAttempt
+		defer func() { HTTPHostPolicy, executeBrowserCDPAttempt = oldPolicy, oldExecutor }()
+		HTTPHostPolicy = NewHostPolicy([]string{"allowed.test"}, nil)
+		var calls atomic.Int32
+		executeBrowserCDPAttempt = func(context.Context, *browserParams, *browserConfigSnapshot) (*browserAttemptResult, error) {
+			calls.Add(1)
+			return &browserAttemptResult{Headers: http.Header{"Authorization": []string{"opaque"}}}, nil
+		}
+
+		params := validBrowserParams()
+		params["entry_url"] = "https://denied.test/path?token=TOP_SECRET#fragment"
+		_, err := (&CDPNode{}).Execute(context.Background(), &types.Input{Params: params})
+		assertBrowserErrorDetails(t, err, "browser.host_denied", true, map[string]any{
+			"source":       browserHostDeniedSourceNavigationPolicy,
+			"rejected_url": "https://denied.test/path",
+		})
+		if calls.Load() != 0 {
+			t.Fatalf("executor called %d times", calls.Load())
+		}
+	})
+
+	t.Run("intercepted_request", func(t *testing.T) {
+		release := acquireTestBrowserConfig(t, "chrome.test", 1, time.Second)
+		defer release()
+		oldPolicy, oldExecutor := HTTPHostPolicy, executeBrowserCDPAttempt
+		defer func() { HTTPHostPolicy, executeBrowserCDPAttempt = oldPolicy, oldExecutor }()
+		HTTPHostPolicy = NewHostPolicy([]string{"app.test"}, nil)
+		executeBrowserCDPAttempt = func(_ context.Context, params *browserParams, _ *browserConfigSnapshot) (*browserAttemptResult, error) {
+			return nil, validateInterceptedBrowserURL(&network.Request{
+				URL: "https://user:password@denied.test:8443/path?token=TOP_SECRET#fragment",
+			}, params.Policy)
+		}
+
+		_, err := (&CDPNode{}).Execute(context.Background(), &types.Input{Params: validBrowserParams()})
+		assertBrowserErrorDetails(t, err, "browser.host_denied", true, map[string]any{
+			"source":       browserHostDeniedSourceInterceptedRequest,
+			"rejected_url": "https://denied.test/path",
+		})
+	})
+}
+
+func TestSanitizeBrowserRejectedURL(t *testing.T) {
+	got := sanitizeBrowserRejectedURL("HTTPS://user:password@Denied.test:8443/path?token=TOP_SECRET&scope=private#fragment")
+	const want = "https://denied.test/path"
+	if got != want {
+		t.Fatalf("sanitized URL = %q, want %q", got, want)
+	}
+	for _, secret := range []string{"user", "password", "TOP_SECRET", "scope", "fragment"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("sanitized URL leaked %q: %q", secret, got)
+		}
+	}
+	for _, raw := range []string{"", "https://", "data:text/plain,TOP_SECRET"} {
+		if got := sanitizeBrowserRejectedURL(raw); got != browserRejectedURLInvalid {
+			t.Fatalf("sanitizeBrowserRejectedURL(%q) = %q, want %q", raw, got, browserRejectedURLInvalid)
+		}
+	}
+}
+
 func TestBrowserCDPExecuteRetriesAndBuildsFilteredOutput(t *testing.T) {
 	release := acquireTestBrowserConfig(t, "chrome.test", 1, time.Second)
 	defer release()
@@ -623,11 +725,72 @@ func TestBrowserCDPSemaphoreQueueTimeout(t *testing.T) {
 	}()
 	<-entered
 	_, err := (&CDPNode{}).Execute(context.Background(), &types.Input{Params: validBrowserParams()})
-	assertBrowserError(t, err, "browser.timeout", false)
+	assertBrowserErrorDetails(t, err, "browser.timeout", false, map[string]any{"phase": browserTimeoutPhaseQueue})
 	close(unblock)
 	if err := <-firstDone; err != nil {
 		t.Fatalf("first execute: %v", err)
 	}
+}
+
+func TestBrowserCDPExecuteConnectTimeoutDetails(t *testing.T) {
+	entered := make(chan struct{})
+	unblock := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		close(entered)
+		<-unblock
+	}))
+	defer func() {
+		close(unblock)
+		server.Close()
+	}()
+
+	debuggingURL := mustParseBrowserTestURL(t, server.URL)
+	cfg := BrowserCDPConfigDefaults()
+	cfg.EndpointAllowlist = []string{debuggingURL.Hostname()}
+	cfg.MaxContexts = 1
+	cfg.QueueTimeout = time.Second
+	cfg.ConnectTimeout = 50 * time.Millisecond
+	release, err := AcquireBrowserCDPConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	oldPolicy := HTTPHostPolicy
+	defer func() { HTTPHostPolicy = oldPolicy }()
+	HTTPHostPolicy = NewHostPolicy([]string{"app.test"}, nil)
+	params := validBrowserParams()
+	params["debugging_url"] = server.URL
+	params["timeout_ms"] = 500
+	params["total_timeout_ms"] = 1000
+	params["plan"] = map[string]any{"retries": 0, "retry_backoff_ms": 0}
+
+	_, err = (&CDPNode{}).Execute(context.Background(), &types.Input{Params: params})
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("discovery request did not reach the server")
+	}
+	assertBrowserErrorDetails(t, err, "browser.timeout", false, map[string]any{"phase": browserTimeoutPhaseConnect})
+}
+
+func TestBrowserCDPExecuteRunTimeoutDetails(t *testing.T) {
+	release := acquireTestBrowserConfig(t, "chrome.test", 1, time.Second)
+	defer release()
+	oldPolicy, oldExecutor := HTTPHostPolicy, executeBrowserCDPAttempt
+	defer func() { HTTPHostPolicy, executeBrowserCDPAttempt = oldPolicy, oldExecutor }()
+	HTTPHostPolicy = NewHostPolicy([]string{"app.test"}, nil)
+	executeBrowserCDPAttempt = func(ctx context.Context, _ *browserParams, _ *browserConfigSnapshot) (*browserAttemptResult, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	params := validBrowserParams()
+	params["timeout_ms"] = 20
+	params["total_timeout_ms"] = 1000
+	params["plan"] = map[string]any{"retries": 0, "retry_backoff_ms": 0}
+
+	_, err := (&CDPNode{}).Execute(context.Background(), &types.Input{Params: params})
+	assertBrowserErrorDetails(t, err, "browser.timeout", false, map[string]any{"phase": browserTimeoutPhaseRun})
 }
 
 func TestCalculateBrowserCredentialExpireTime(t *testing.T) {
@@ -704,8 +867,17 @@ func assertBrowserError(t *testing.T, err error, code string, permanent bool) {
 	if !errors.As(err, &classified) {
 		t.Fatalf("error = %v (%T), want ClassifiedError", err, err)
 	}
-	if classified.Code != code || classified.Permanent != permanent || classified.Retryable == permanent || classified.Details != nil {
+	if classified.Code != code || classified.Permanent != permanent || classified.Retryable == permanent {
 		t.Fatalf("classified error = %+v", classified)
+	}
+}
+
+func assertBrowserErrorDetails(t *testing.T, err error, code string, permanent bool, want map[string]any) {
+	t.Helper()
+	assertBrowserError(t, err, code, permanent)
+	var classified *types.ClassifiedError
+	if !errors.As(err, &classified) || !reflect.DeepEqual(classified.Details, want) {
+		t.Fatalf("classified details = %#v, want %#v", classified.Details, want)
 	}
 }
 

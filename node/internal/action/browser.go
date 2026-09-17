@@ -49,6 +49,18 @@ const (
 	maxBrowserDiscoveryBytes  = 1 << 20
 )
 
+const (
+	browserHostDeniedSourceEndpointAllowlist  = "endpoint_allowlist"
+	browserHostDeniedSourceNavigationPolicy   = "navigation_policy"
+	browserHostDeniedSourceInterceptedRequest = "intercepted_request"
+
+	browserTimeoutPhaseQueue   = "queue"
+	browserTimeoutPhaseConnect = "connect"
+	browserTimeoutPhaseRun     = "run"
+
+	browserRejectedURLInvalid = "invalid"
+)
+
 // browserPausedRequestBufSize bounds the queue between the CDP event listener
 // and the single worker that continues each paused request.
 //
@@ -267,11 +279,16 @@ type browserParamError struct{ field string }
 
 func (e *browserParamError) Error() string { return "invalid browser parameter: " + e.field }
 
-type browserHostDeniedError struct{}
+type browserHostDeniedError struct {
+	source      string
+	rejectedURL string
+}
 
 func (*browserHostDeniedError) Error() string { return "browser destination denied" }
 
-type browserTimeoutError struct{}
+type browserTimeoutError struct {
+	phase string
+}
 
 func (*browserTimeoutError) Error() string { return "browser operation timed out" }
 
@@ -323,7 +340,7 @@ func parseBrowserCDPParams(raw map[string]any, snapshot *browserConfigSnapshot, 
 	}
 	debugHost, err := normalizeHostOnly(debugURL.Hostname())
 	if err != nil || !browserEndpointAllowed(snapshot.config.EndpointAllowlist, debugHost) {
-		return nil, &browserHostDeniedError{}
+		return nil, newBrowserHostDeniedError(browserHostDeniedSourceEndpointAllowlist, debugURL.String())
 	}
 
 	entryRaw, err := requiredBrowserString(raw, "entry_url", false)
@@ -403,26 +420,26 @@ func parseBrowserCDPParams(raw map[string]any, snapshot *browserConfigSnapshot, 
 	// All known destinations are checked before the semaphore is acquired and
 	// before any CDP connection can be attempted. Redirect and subresource URLs
 	// are checked again by Fetch interception in the real executor.
-	if err := applyBrowserHostPolicy(policy, entryURL.Hostname()); err != nil {
+	if err := applyBrowserHostPolicy(policy, entryURL.Hostname(), entryURL.String()); err != nil {
 		return nil, err
 	}
 	if p.Plan.FallbackRoot {
-		if err := applyBrowserHostPolicy(policy, p.FallbackURL.Hostname()); err != nil {
+		if err := applyBrowserHostPolicy(policy, p.FallbackURL.Hostname(), p.FallbackURL.String()); err != nil {
 			return nil, err
 		}
 	}
-	if err := applyBrowserHostPolicy(policy, p.Harvest.RequestHost); err != nil {
+	if err := applyBrowserHostPolicy(policy, p.Harvest.RequestHost, browserURLForHost(p.Harvest.RequestHost)); err != nil {
 		return nil, err
 	}
 	for _, cookieURL := range p.Harvest.CookieURLs {
 		u, _ := url.Parse(cookieURL)
-		if err := applyBrowserHostPolicy(policy, u.Hostname()); err != nil {
+		if err := applyBrowserHostPolicy(policy, u.Hostname(), cookieURL); err != nil {
 			return nil, err
 		}
 	}
 	for _, cookie := range p.SeedCookies {
 		u, _ := url.Parse(cookie.URL)
-		if err := applyBrowserHostPolicy(policy, u.Hostname()); err != nil {
+		if err := applyBrowserHostPolicy(policy, u.Hostname(), cookie.URL); err != nil {
 			return nil, err
 		}
 	}
@@ -845,13 +862,25 @@ func browserEndpointAllowed(allowlist []string, host string) bool {
 	return err == nil && hostPatternsMatch(patterns, host)
 }
 
-func applyBrowserHostPolicy(policy HostPolicy, host string) error {
+func browserURLForHost(host string) string {
+	normalized, err := normalizeHostOnly(host)
+	if err != nil {
+		return ""
+	}
+	return (&url.URL{Scheme: "https", Host: hostForBrowserURL(normalized), Path: "/"}).String()
+}
+
+func newBrowserHostDeniedError(source, rejectedURL string) *browserHostDeniedError {
+	return &browserHostDeniedError{source: source, rejectedURL: rejectedURL}
+}
+
+func applyBrowserHostPolicy(policy HostPolicy, host, rejectedURL string) error {
 	if policy == nil {
-		return &browserHostDeniedError{}
+		return newBrowserHostDeniedError(browserHostDeniedSourceNavigationPolicy, rejectedURL)
 	}
 	normalized, err := normalizeHostOnly(host)
 	if err != nil || policy(normalized) != nil {
-		return &browserHostDeniedError{}
+		return newBrowserHostDeniedError(browserHostDeniedSourceNavigationPolicy, rejectedURL)
 	}
 	return nil
 }
@@ -869,7 +898,7 @@ func resolveBrowserWebSocketEndpoint(ctx context.Context, debuggingURL *url.URL,
 		return nil, &browserParamError{field: "debugging_url"}
 	}
 	if !browserEndpointAllowed(snapshot.config.EndpointAllowlist, host) {
-		return nil, &browserHostDeniedError{}
+		return nil, newBrowserHostDeniedError(browserHostDeniedSourceEndpointAllowlist, debuggingURL.String())
 	}
 
 	switch strings.ToLower(debuggingURL.Scheme) {
@@ -903,7 +932,7 @@ func resolveBrowserWebSocketEndpoint(ctx context.Context, debuggingURL *url.URL,
 	resp, err := client.Do(req)
 	if err != nil {
 		if discoveryCtx.Err() != nil {
-			return nil, &browserTimeoutError{}
+			return nil, &browserTimeoutError{phase: browserTimeoutPhaseConnect}
 		}
 		return nil, &browserUnavailableError{cause: err}
 	}
@@ -914,7 +943,7 @@ func resolveBrowserWebSocketEndpoint(ctx context.Context, debuggingURL *url.URL,
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBrowserDiscoveryBytes+1))
 	if err != nil {
 		if discoveryCtx.Err() != nil {
-			return nil, &browserTimeoutError{}
+			return nil, &browserTimeoutError{phase: browserTimeoutPhaseConnect}
 		}
 		return nil, &browserUnavailableError{cause: err}
 	}
@@ -933,7 +962,7 @@ func resolveBrowserWebSocketEndpoint(ctx context.Context, debuggingURL *url.URL,
 	}
 	endpointHost, err := normalizeHostOnly(endpoint.Hostname())
 	if err != nil || !browserEndpointAllowed(snapshot.config.EndpointAllowlist, endpointHost) {
-		return nil, &browserHostDeniedError{}
+		return nil, newBrowserHostDeniedError(browserHostDeniedSourceEndpointAllowlist, endpoint.String())
 	}
 	return endpoint, nil
 }
@@ -1003,7 +1032,7 @@ func (n *CDPNode) Execute(ctx context.Context, input *types.Input) (out *types.O
 	if parseErr != nil {
 		var denied *browserHostDeniedError
 		if errors.As(parseErr, &denied) {
-			return nil, browserHostDeniedClassified()
+			return nil, browserHostDeniedClassified(denied)
 		}
 		return nil, browserInvalidParamsClassified()
 	}
@@ -1014,7 +1043,11 @@ func (n *CDPNode) Execute(ctx context.Context, input *types.Input) (out *types.O
 	totalCtx, totalCancel := context.WithTimeout(ctx, params.TotalTimeout)
 	defer totalCancel()
 	if err := acquireBrowserSlot(totalCtx, snapshot); err != nil {
-		return nil, browserTimeoutClassified()
+		var timeout *browserTimeoutError
+		if errors.As(err, &timeout) {
+			return nil, browserTimeoutClassified(timeout)
+		}
+		return nil, browserTimeoutClassified(&browserTimeoutError{phase: browserTimeoutPhaseQueue})
 	}
 	defer func() { <-snapshot.sem }()
 
@@ -1031,14 +1064,14 @@ func (n *CDPNode) Execute(ctx context.Context, input *types.Input) (out *types.O
 
 		var denied *browserHostDeniedError
 		if errors.As(attemptErr, &denied) {
-			return nil, browserHostDeniedClassified()
-		}
-		if totalCtx.Err() != nil || errors.Is(attemptErr, context.Canceled) || errors.Is(attemptErr, context.DeadlineExceeded) {
-			return nil, browserTimeoutClassified()
+			return nil, browserHostDeniedClassified(denied)
 		}
 		var timeout *browserTimeoutError
 		if errors.As(attemptErr, &timeout) {
-			return nil, browserTimeoutClassified()
+			return nil, browserTimeoutClassified(timeout)
+		}
+		if totalCtx.Err() != nil || errors.Is(attemptErr, context.Canceled) || errors.Is(attemptErr, context.DeadlineExceeded) {
+			return nil, browserTimeoutClassified(&browserTimeoutError{phase: browserTimeoutPhaseRun})
 		}
 
 		if matchesBrowserRetry(attemptErr, params.Plan.RetryOn) {
@@ -1046,7 +1079,11 @@ func (n *CDPNode) Execute(ctx context.Context, input *types.Input) (out *types.O
 				return nil, browserResourceClassified()
 			}
 			if err := waitBrowserBackoff(totalCtx, params.Plan.RetryBackoff); err != nil {
-				return nil, browserTimeoutClassified()
+				var timeout *browserTimeoutError
+				if errors.As(err, &timeout) {
+					return nil, browserTimeoutClassified(timeout)
+				}
+				return nil, browserTimeoutClassified(&browserTimeoutError{phase: browserTimeoutPhaseRun})
 			}
 			continue
 		}
@@ -1066,9 +1103,9 @@ func acquireBrowserSlot(ctx context.Context, snapshot *browserConfigSnapshot) er
 	case snapshot.sem <- struct{}{}:
 		return nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return &browserTimeoutError{phase: browserTimeoutPhaseQueue}
 	case <-timer.C:
-		return &browserTimeoutError{}
+		return &browserTimeoutError{phase: browserTimeoutPhaseQueue}
 	}
 }
 
@@ -1076,7 +1113,7 @@ func waitBrowserBackoff(ctx context.Context, delay time.Duration) error {
 	if delay == 0 {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return &browserTimeoutError{phase: browserTimeoutPhaseRun}
 		default:
 			return nil
 		}
@@ -1085,7 +1122,7 @@ func waitBrowserBackoff(ctx context.Context, delay time.Duration) error {
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return &browserTimeoutError{phase: browserTimeoutPhaseRun}
 	case <-timer.C:
 		return nil
 	}
@@ -1148,17 +1185,83 @@ func buildBrowserOutput(params *browserParams, result *browserAttemptResult, ret
 func browserInvalidParamsClassified() *types.ClassifiedError {
 	return types.NewPermanentError("browser.invalid_params", "browser parameters are invalid")
 }
-func browserHostDeniedClassified() *types.ClassifiedError {
-	return types.NewPermanentError("browser.host_denied", "browser destination is denied by policy")
+func browserHostDeniedClassified(denied *browserHostDeniedError) *types.ClassifiedError {
+	source := browserHostDeniedSourceNavigationPolicy
+	rejectedURL := ""
+	if denied != nil {
+		source = validatedBrowserHostDeniedSource(denied.source)
+		rejectedURL = denied.rejectedURL
+	}
+	err := types.NewPermanentError("browser.host_denied", "browser destination is denied by policy")
+	err.Details = map[string]any{
+		"source":       source,
+		"rejected_url": sanitizeBrowserRejectedURL(rejectedURL),
+	}
+	return err
 }
+
+func validatedBrowserHostDeniedSource(source string) string {
+	switch source {
+	case browserHostDeniedSourceEndpointAllowlist, browserHostDeniedSourceNavigationPolicy, browserHostDeniedSourceInterceptedRequest:
+		return source
+	default:
+		return browserHostDeniedSourceNavigationPolicy
+	}
+}
+
+func sanitizeBrowserRejectedURL(raw string) string {
+	if raw == "" || len(raw) > maxBrowserURLBytes {
+		return browserRejectedURLInvalid
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return browserRejectedURLInvalid
+	}
+	return sanitizeBrowserRejectedURLValue(parsed)
+}
+
+func sanitizeBrowserRejectedURLValue(value *url.URL) string {
+	if value == nil || value.Scheme == "" || value.Host == "" || value.Opaque != "" || value.Hostname() == "" {
+		return browserRejectedURLInvalid
+	}
+	host, err := normalizeHostOnly(value.Hostname())
+	if err != nil {
+		return browserRejectedURLInvalid
+	}
+	sanitized := *value
+	sanitized.Scheme = strings.ToLower(sanitized.Scheme)
+	sanitized.Host = hostForBrowserURL(host)
+	sanitized.User = nil
+	sanitized.RawQuery = ""
+	sanitized.ForceQuery = false
+	sanitized.Fragment = ""
+	sanitized.RawFragment = ""
+	return sanitized.String()
+}
+
 func browserUnavailableClassified() *types.ClassifiedError {
 	return types.NewPermanentError("browser.unavailable", "remote browser is unavailable")
 }
 func browserNoCredentialsClassified() *types.ClassifiedError {
 	return types.NewPermanentError("browser.no_credentials", "browser navigation produced no permitted credentials")
 }
-func browserTimeoutClassified() *types.ClassifiedError {
-	return types.NewTransientError("browser.timeout", "browser operation timed out")
+func browserTimeoutClassified(timeout *browserTimeoutError) *types.ClassifiedError {
+	phase := browserTimeoutPhaseRun
+	if timeout != nil {
+		phase = validatedBrowserTimeoutPhase(timeout.phase)
+	}
+	err := types.NewTransientError("browser.timeout", "browser operation timed out")
+	err.Details = map[string]any{"phase": phase}
+	return err
+}
+
+func validatedBrowserTimeoutPhase(phase string) string {
+	switch phase {
+	case browserTimeoutPhaseQueue, browserTimeoutPhaseConnect, browserTimeoutPhaseRun:
+		return phase
+	default:
+		return browserTimeoutPhaseRun
+	}
 }
 func browserResourceClassified() *types.ClassifiedError {
 	return types.NewTransientError("browser.resource_exhausted", "browser resources are exhausted")
@@ -1349,7 +1452,7 @@ func realBrowserCDPAttempt(ctx context.Context, params *browserParams, snapshot 
 		return nil, err
 	}
 	if err := chromedp.Run(runCtx, fetch.Enable()); err != nil {
-		return nil, classifyBrowserRunError(runCtx, fatal, err, true)
+		return nil, classifyBrowserRunError(runCtx, fatal, err, browserTimeoutPhaseConnect, true)
 	}
 
 	seedActions := make([]chromedp.Action, 0, len(params.SeedCookies))
@@ -1359,16 +1462,16 @@ func realBrowserCDPAttempt(ctx context.Context, params *browserParams, snapshot 
 	}
 	if len(seedActions) > 0 {
 		if err := chromedp.Run(runCtx, seedActions...); err != nil {
-			return nil, classifyBrowserRunError(runCtx, fatal, err, false)
+			return nil, classifyBrowserRunError(runCtx, fatal, err, browserTimeoutPhaseRun, false)
 		}
 	}
 
 	if err := runBrowserNavigation(runCtx, params.EntryURL.String(), false, params.Plan.WaitSelector, params.Plan.Settle); err != nil {
-		return nil, classifyBrowserRunError(runCtx, fatal, err, false)
+		return nil, classifyBrowserRunError(runCtx, fatal, err, browserTimeoutPhaseRun, false)
 	}
 	cookies, err := getScopedBrowserCookies(runCtx, params.Harvest.CookieURLs)
 	if err != nil {
-		return nil, classifyBrowserRunError(runCtx, fatal, err, false)
+		return nil, classifyBrowserRunError(runCtx, fatal, err, browserTimeoutPhaseRun, false)
 	}
 	filtered, _, err := filterBrowserCookies(cookies, params.Harvest.CookieExcludePrefixes)
 	if err != nil {
@@ -1379,11 +1482,11 @@ func realBrowserCDPAttempt(ctx context.Context, params *browserParams, snapshot 
 	if len(filtered) == 0 && len(headers) == 0 && params.Plan.FallbackRoot {
 		fallbackUsed = true
 		if err := runBrowserNavigation(runCtx, params.FallbackURL.String(), params.Plan.FallbackReload, params.Plan.WaitSelector, params.Plan.FallbackSettle); err != nil {
-			return nil, classifyBrowserRunError(runCtx, fatal, err, false)
+			return nil, classifyBrowserRunError(runCtx, fatal, err, browserTimeoutPhaseRun, false)
 		}
 		cookies, err = getScopedBrowserCookies(runCtx, params.Harvest.CookieURLs)
 		if err != nil {
-			return nil, classifyBrowserRunError(runCtx, fatal, err, false)
+			return nil, classifyBrowserRunError(runCtx, fatal, err, browserTimeoutPhaseRun, false)
 		}
 		headers = collector.snapshot()
 	}
@@ -1413,15 +1516,15 @@ func initializeRemoteBrowser(ctx context.Context, cancel context.CancelFunc, tim
 			return nil
 		}
 		if ctx.Err() != nil {
-			return &browserTimeoutError{}
+			return &browserTimeoutError{phase: browserTimeoutPhaseConnect}
 		}
 		return &browserUnavailableError{cause: err}
 	case <-ctx.Done():
 		cancel()
-		return &browserTimeoutError{}
+		return &browserTimeoutError{phase: browserTimeoutPhaseConnect}
 	case <-timer.C:
 		cancel()
-		return &browserTimeoutError{}
+		return &browserTimeoutError{phase: browserTimeoutPhaseConnect}
 	}
 }
 
@@ -1446,14 +1549,14 @@ func getScopedBrowserCookies(ctx context.Context, urls []string) ([]*network.Coo
 	return cookies, err
 }
 
-func classifyBrowserRunError(ctx context.Context, fatal <-chan error, err error, connecting bool) error {
+func classifyBrowserRunError(ctx context.Context, fatal <-chan error, err error, timeoutPhase string, connecting bool) error {
 	select {
 	case fatalErr := <-fatal:
 		return fatalErr
 	default:
 	}
 	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return &browserTimeoutError{}
+		return &browserTimeoutError{phase: validatedBrowserTimeoutPhase(timeoutPhase)}
 	}
 	if connecting {
 		return &browserUnavailableError{cause: err}
@@ -1463,28 +1566,34 @@ func classifyBrowserRunError(ctx context.Context, fatal <-chan error, err error,
 
 func validateInterceptedBrowserURL(request *network.Request, policy HostPolicy) error {
 	if request == nil || request.URL == "" || len(request.URL) > maxBrowserURLBytes {
-		return &browserHostDeniedError{}
+		return newBrowserHostDeniedError(browserHostDeniedSourceInterceptedRequest, "")
 	}
 	u, err := url.Parse(request.URL)
 	if err != nil {
-		return &browserHostDeniedError{}
+		return newBrowserHostDeniedError(browserHostDeniedSourceInterceptedRequest, request.URL)
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "http", "https", "ws", "wss":
 		if u.Hostname() == "" {
-			return &browserHostDeniedError{}
+			return newBrowserHostDeniedError(browserHostDeniedSourceInterceptedRequest, request.URL)
 		}
-		return applyBrowserHostPolicy(policy, u.Hostname())
+		if err := applyBrowserHostPolicy(policy, u.Hostname(), request.URL); err != nil {
+			return newBrowserHostDeniedError(browserHostDeniedSourceInterceptedRequest, request.URL)
+		}
+		return nil
 	case "about", "data":
 		return nil
 	case "blob":
-		inner, err := url.Parse(strings.TrimPrefix(request.URL, "blob:"))
+		inner, err := url.Parse(u.Opaque)
 		if err != nil || inner.Hostname() == "" {
-			return &browserHostDeniedError{}
+			return newBrowserHostDeniedError(browserHostDeniedSourceInterceptedRequest, request.URL)
 		}
-		return applyBrowserHostPolicy(policy, inner.Hostname())
+		if err := applyBrowserHostPolicy(policy, inner.Hostname(), inner.String()); err != nil {
+			return newBrowserHostDeniedError(browserHostDeniedSourceInterceptedRequest, inner.String())
+		}
+		return nil
 	default:
-		return &browserHostDeniedError{}
+		return newBrowserHostDeniedError(browserHostDeniedSourceInterceptedRequest, request.URL)
 	}
 }
 
