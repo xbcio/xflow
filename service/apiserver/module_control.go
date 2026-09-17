@@ -88,6 +88,12 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 	// (was compile-and-execute). The compile-and-execute semantics moved to
 	// POST /v1/workflows/execute, which merges the old submit + invoke shapes.
 	mux.HandleFunc("POST "+PathWorkflows, wrap("register_workflow", m.handleRegisterWorkflow))
+	// GET /v1/workflows is the offset-paginated collection read (spec §3.3). It
+	// is mounted in this legacy branch as well as in registerAuthzRoutes: here
+	// the namespace is namespace.FromContext's Default rather than a verified
+	// principal's, which is the same namespace every other bare-mode workflow
+	// handler in this branch already uses.
+	mux.HandleFunc("GET "+PathWorkflows, wrap("list_workflows", m.handleListWorkflows))
 	mux.HandleFunc("GET "+PathWorkflowByID, wrap("read_workflow", m.handleGetWorkflow))
 	mux.HandleFunc("PUT "+PathWorkflowByID, wrap("replace_workflow", m.handleReplaceWorkflow))
 	mux.HandleFunc("DELETE "+PathWorkflowByID, wrap("deregister_workflow", m.handleDeregisterWorkflow))
@@ -154,6 +160,14 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	// into the request context; handlers resolve it via namespace.FromContext —
 	// never from the client body (spec §6.2).
 	mux.HandleFunc("POST "+PathWorkflows, authz(OpWorkflowRegister, true, m.handleRegisterWorkflow, nil))
+	// GET /v1/workflows (the collection read) reuses OpWorkflowRead — the very
+	// operation GET /v1/workflows/{id} carries — so the two scopes cannot drift:
+	// a principal that may read one workflow may list them, and one that may not
+	// is refused by the same default-deny check before the handler runs. No
+	// resource resolver is passed: a collection is not one resource, and the
+	// scope of the read is the principal's own namespace, resolved inside the
+	// handler via namespace.FromContext (never from a query parameter).
+	mux.HandleFunc("GET "+PathWorkflows, authz(OpWorkflowRead, false, m.handleListWorkflows, nil))
 	mux.HandleFunc("GET "+PathWorkflowByID, authz(OpWorkflowRead, false, m.handleGetWorkflow, workflowIDResolver()))
 	mux.HandleFunc("PUT "+PathWorkflowByID, authz(OpWorkflowDefinitionUpdate, true, m.handleReplaceWorkflow, workflowIDResolver()))
 	mux.HandleFunc("DELETE "+PathWorkflowByID, authz(OpWorkflowRegister, true, m.handleDeregisterWorkflow, workflowIDResolver()))
@@ -598,6 +612,155 @@ func (m *workflowControlModule) handleDeregisterWorkflow(w http.ResponseWriter, 
 		return
 	}
 	writeData(w, r, http.StatusOK, map[string]bool{"removed": true})
+}
+
+// workflowListItem is one row of the GET /v1/workflows page. It is a summary
+// projection of backend.WorkflowRecord, not the record itself.
+//
+// The definition and the compiled graph are deliberately absent: a page of
+// full definitions is O(page × definition size) on the wire, and the UI reads
+// one workflow's definition at a time through GET /v1/workflows/{id}. What a
+// table row needs is the identity (id, name, version), a change detector
+// (definition_hash), and the compare-and-swap token PUT /v1/workflows/{id}
+// expects (registry_revision).
+type workflowListItem struct {
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	Version          string `json:"version"`
+	DefinitionHash   string `json:"definition_hash"`
+	RegistryRevision uint64 `json:"registry_revision"`
+}
+
+// handleListWorkflows serves GET /v1/workflows (spec §3.3 page list; it closes
+// the first of the two blockers §9.6 records for the list endpoints — the
+// registry's per-namespace index now exists).
+//
+// Namespace: resolved server-side from the authenticated principal via
+// namespace.FromContext (injected by the authz wrapper), exactly as
+// handleGetWorkflow does. There is deliberately no `namespace` query parameter
+// and no body — a caller can only ever list its own namespace — and the
+// registry takes ns as a required explicit argument that it validates, so even
+// a bad value here cannot widen the read beyond the caller's namespace.
+//
+// Pagination: offset, 1-based, through the shared pageParams helper (default
+// 20, hard cap 200). Cursor pagination is reserved for machine scans (spec
+// §3.3); this is a page list, so it must not grow a second pagination dialect.
+//
+// Envelope: writeList, i.e. the mandated {list,total} collection shape —
+// never a bare array. The two pre-existing list endpoints (listRunners,
+// listRegistrationCodes) still return bare arrays, which violates §3.3; that
+// is not copied here.
+func (m *workflowControlModule) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+	registry := m.registry()
+	if registry == nil {
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	ns := namespace.FromContext(r.Context())
+	page, pageSize := pageParams(r)
+
+	// fail is the single failure exit below. The registry error is logged (it
+	// may name internal storage detail) and never reaches the body: spec §3.5
+	// requires a generic message on a 500.
+	fail := func(event string, err error) {
+		if m.log != nil {
+			m.log.Error(event, "err", err)
+		}
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+	}
+
+	// One page of ids, sliced by the registry itself: the registry owns the
+	// namespace's enumeration order (newest registry revision first, then id
+	// ascending) and the offset/limit contract, so the handler never
+	// re-implements paging over an unbounded slice.
+	ids, err := registry.ListWorkflows(r.Context(), ns, backend.WorkflowListOptions{
+		Offset: pageOffset(page, pageSize),
+		Limit:  pageSize,
+	})
+	if err != nil {
+		fail("list_workflows_failed", err)
+		return
+	}
+	total, err := countWorkflows(r.Context(), registry, ns)
+	if err != nil {
+		fail("count_workflows_failed", err)
+		return
+	}
+	items, err := m.workflowListItems(r.Context(), registry, ns, ids)
+	if err != nil {
+		fail("list_workflows_rows_failed", err)
+		return
+	}
+	writeList(w, r, items, total)
+}
+
+// countWorkflows returns the number of workflows registered in ns — the
+// `total` of the collection envelope.
+//
+// backend.WorkflowRegistry exposes no count primitive, so the only exact source
+// reachable from this layer is a namespace-scoped id enumeration with Limit 0,
+// which the interface documents as "unbounded", not as "none". That makes
+// `total` EXACT: spec §3.3 defines it as the size of the collection after
+// filtering, and a truncated or "at least" value would silently understate the
+// collection a UI paginates over — a list that claims fewer pages than exist
+// is a wrong list, not a conservative one.
+//
+// The cost is worth naming rather than hiding: this is O(N) ids, where N is
+// the number of workflows in the caller's OWN namespace, and it runs on every
+// page request. It grants no extra data access (the caller can already page
+// through exactly that set, and the registry refuses any namespace but the one
+// passed), but it does turn one request into O(N) index work — the 200 cap
+// bounds the response, not this read. A count primitive on the registry (ZCARD
+// over the distributed index, a map length in the in-memory one) removes the
+// amplification entirely; that is a backend/ change and is deliberately left
+// as a follow-up rather than reached for from here.
+func countWorkflows(ctx context.Context, registry backend.WorkflowRegistry, ns namespace.Namespace) (int, error) {
+	ids, err := registry.ListWorkflows(ctx, ns, backend.WorkflowListOptions{})
+	if err != nil {
+		return 0, err
+	}
+	return len(ids), nil
+}
+
+// workflowListItems reads one summary row per id.
+//
+// An id that no longer resolves is skipped, not fatal: ListWorkflows confirms
+// liveness per page, but the two reads are not one transaction, so a record
+// removed between them is a legitimate race. A row the caller can no longer
+// read is worse than a page that is one row shorter (and total, read
+// separately, may then exceed offset+len(list) by exactly that race).
+//
+// A record whose namespace is not the caller's is also skipped. That is the
+// same defense handleGetWorkflow applies — a foreign record is reported as
+// absent, never projected — and it is load-bearing on the in-memory registry,
+// whose GetWorkflow ignores the context namespace; on the distributed registry
+// a foreign id cannot be resolved in the caller's slot at all, so both
+// backends answer "not yours" the same way.
+func (m *workflowControlModule) workflowListItems(ctx context.Context, registry backend.WorkflowRegistry, ns namespace.Namespace, ids []types.WorkflowID) ([]workflowListItem, error) {
+	items := make([]workflowListItem, 0, len(ids))
+	for _, id := range ids {
+		rec, err := registry.GetWorkflow(ctx, id)
+		if err != nil {
+			if errors.Is(err, backend.ErrWorkflowNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		if rec.Namespace != "" && ns != "" && rec.Namespace != string(ns) {
+			continue
+		}
+		items = append(items, workflowListItem{
+			ID:               string(rec.ID),
+			Name:             rec.Name,
+			Version:          rec.Version,
+			DefinitionHash:   rec.DefinitionHash,
+			RegistryRevision: rec.RegistryRevision,
+		})
+	}
+	return items, nil
 }
 
 // handleGetWorkflow serves GET /v1/workflows/{id} (spec §7 + Addition 1): it

@@ -9,8 +9,11 @@ package apiserver
 //
 // runner-face paths live in service/protocol, not here.
 const (
-	// PathWorkflows is registered for POST only — the GET list route is not
-	// implemented, see API-SPECIFICATION.md §9.
+	// PathWorkflows serves both POST (register a definition) and GET (the
+	// offset-paginated page list, spec §3.3) — the two are disambiguated by
+	// method, not by a separate path constant, exactly like
+	// PathManagementRegistrationCodes. Both hang off the principal's own
+	// namespace; neither reads a namespace from the request.
 	PathWorkflows           = "/v1/workflows"
 	PathWorkflowByID        = "/v1/workflows/{id}"
 	PathWorkflowExecute     = "/v1/workflows/execute"

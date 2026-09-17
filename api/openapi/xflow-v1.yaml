@@ -84,6 +84,73 @@ paths:
                         $ref: "#/components/schemas/RegisterWorkflowResponse"
         default:
           $ref: "#/components/responses/DefaultError"
+    get:
+      operationId: listWorkflows
+      summary: List registered workflows
+      description: |
+        One offset-paginated page of the workflows registered in the caller's
+        own namespace (spec §3.3 page list). Namespace is resolved server-side
+        from the authenticated principal — there is no `namespace` parameter,
+        and a caller can never list another tenant's workflows.
+
+        `list` holds summary rows, not definitions; read a definition with
+        `GET /v1/workflows/{id}`. Rows are ordered newest registry revision
+        first, then by id ascending, so the order is total and stable across
+        pages. `total` is the exact size of the collection in the caller's
+        namespace — what a pagination control needs, independent of the page
+        requested.
+
+        Offset pagination is the page-list default by rule: the
+        cursor-paginated endpoints exist only for machine scans, and no
+        endpoint carries both.
+      tags: [Workflows]
+      parameters:
+        - name: page
+          in: query
+          required: false
+          description: |
+            1-based page number (spec §3.3); `page=1` is the first page.
+            Malformed pagination input is never a business error: an absent,
+            empty, non-numeric, zero, or negative value falls back to 1. The
+            constraints below describe the domain the server honors, not a
+            request-validation gate.
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: page_size
+          in: query
+          required: false
+          description: |
+            Rows per page (spec §3.3). Defaults to 20. The server enforces a
+            hard ceiling of 200 and CLAMPS a larger request to 200 rather than
+            rejecting it — that ceiling is a security control (a sensitive-data
+            enumeration endpoint must not permit full-table traversal), not a
+            performance knob. An absent, empty, non-numeric, zero, or negative
+            value falls back to 20.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 20
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: One page of workflows.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/WorkflowListResponse"
+        default:
+          $ref: "#/components/responses/DefaultError"
 
   /v1/workflows/{id}:
     get:
@@ -1893,6 +1960,56 @@ components:
         at:
           type: string
           format: date-time
+
+    WorkflowListResponse:
+      type: object
+      description: |
+        The `data` payload of a workflow collection response — the mandated
+        `{list, total}` shape (spec §3.3), never a bare array.
+      required: [list, total]
+      properties:
+        list:
+          type: array
+          description: The requested page. Empty pages are `[]`, never `null`.
+          items:
+            $ref: "#/components/schemas/WorkflowListItem"
+        total:
+          type: integer
+          description: |
+            The exact number of workflows registered in the caller's own
+            namespace — the size of the collection after filtering, which is
+            what spec §3.3 defines `total` as. It is independent of the page
+            requested, so `total` may exceed `list`'s length; in particular it
+            is not `offset + len(list)` and it does not shrink as pages are
+            consumed.
+          example: 3
+
+    WorkflowListItem:
+      type: object
+      description: |
+        One row of a workflow list: a summary of a registered workflow, not its
+        definition. The definition and compiled graph are deliberately absent —
+        a page of definitions would be O(page × definition size) on the wire —
+        and are read one at a time via `GET /v1/workflows/{id}`.
+      required: [id, name, version, definition_hash, registry_revision]
+      properties:
+        id:
+          type: string
+          description: Server-assigned workflow id (the `{id}` of the read/replace/deregister routes).
+        name:
+          type: string
+        version:
+          type: string
+        definition_hash:
+          type: string
+          description: Hash of the stored definition; changes whenever the definition does.
+        registry_revision:
+          type: integer
+          format: uint64
+          description: |
+            The registry's monotonically increasing revision for this record.
+            Opaque except for ordering and equality; it is the compare-and-swap
+            token a replacement must present.
 
     WorkflowDef:
       type: object

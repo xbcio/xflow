@@ -88,3 +88,19 @@ func TestPageBeyondIntRangeFallsBack(t *testing.T) {
 		t.Errorf("overflow page_size → %d, want 20 (default fallback, not the 200 cap)", size)
 	}
 }
+
+// TestPageOffsetSaturatesAtMaxInt makes a valid but enormous page number a
+// harmless past-the-end request rather than an integer-overflow-induced 500.
+func TestPageOffsetSaturatesAtMaxInt(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+	wantMaxOffset := maxInt - (maxPageSize - 1)
+	if got := pageOffset(maxInt, maxPageSize); got != wantMaxOffset {
+		t.Fatalf("pageOffset(MaxInt, %d) = %d, want largest safe offset %d", maxPageSize, got, wantMaxOffset)
+	}
+	if got := pageOffset(maxInt, 1); got != maxInt-1 {
+		t.Fatalf("pageOffset(MaxInt, 1) = %d, want %d without saturation", got, maxInt-1)
+	}
+	if got := pageOffset(1, maxPageSize); got != 0 {
+		t.Fatalf("pageOffset(1, %d) = %d, want 0", maxPageSize, got)
+	}
+}

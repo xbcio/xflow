@@ -37,8 +37,11 @@ const (
 // test or probe that omits the params entirely gets deterministic behavior.
 //
 // This function only parses parameters; it makes no claims about whether the
-// list endpoint it serves is registered. As of this writing no list endpoint
-// is registered (see docs/design/API-SPECIFICATION.md §9.6).
+// list endpoint it serves is registered. Its first caller is GET /v1/workflows
+// (the workflow collection read). The cursor-paginated endpoints — the
+// dead-letter list — deliberately do NOT go through it: spec §3.3 keeps page
+// lists on offset and machine scans on cursor, and forbids mixing the two on
+// one endpoint.
 func pageParams(r *http.Request) (page, pageSize int) {
 	page = defaultPage
 	pageSize = defaultPageSize
@@ -64,4 +67,22 @@ func pageParams(r *http.Request) (page, pageSize int) {
 		pageSize = maxPageSize
 	}
 	return page, pageSize
+}
+
+// pageOffset translates the public 1-based page number to the registry's
+// zero-based offset without allowing an otherwise valid, very large page to
+// wrap negative. A wrapped offset would be rejected by the registry and turn a
+// harmless past-the-end request into a 500. The returned offset also leaves
+// room for Limit rows: the Redis implementation computes offset + limit - 1,
+// so returning MaxInt itself would merely move the overflow downstream.
+func pageOffset(page, pageSize int) int {
+	if page <= 1 || pageSize <= 0 {
+		return 0
+	}
+	maxInt := int(^uint(0) >> 1)
+	maxOffset := maxInt - (pageSize - 1)
+	if page-1 > maxOffset/pageSize {
+		return maxOffset
+	}
+	return (page - 1) * pageSize
 }
