@@ -151,6 +151,21 @@ func TestWithControlPlaneInjectsUnowned(t *testing.T) {
 	}
 }
 
+// TestAPIServerEngineReturnsControlPlaneSchedulingCore verifies that the
+// concrete engine exposed for trusted in-process composition is the exact core
+// owned by the injected control plane.
+func TestAPIServerEngineReturnsControlPlaneSchedulingCore(t *testing.T) {
+	cp := newMemoryControlPlane(t, 1)
+	srv, err := New(Config{}, WithControlPlane(cp))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if got, want := srv.Engine(), cp.SchedulingCore(); got != want {
+		t.Fatalf("APIServer.Engine() = %p, want control-plane scheduling core %p", got, want)
+	}
+}
+
 // TestBuildControlPlaneUsesRedisConfigPath verifies that when RedisConfig is
 // set, buildControlPlane attempts to construct a distributed backend using it.
 // An invalid mode fails before any network call, proving the option is wired.
