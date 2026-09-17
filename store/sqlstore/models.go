@@ -101,6 +101,7 @@ func fromDBSupply(d *dbSupply) *store.SupplyResource {
 type dbExecution struct {
 	ID           uint64                `gorm:"column:id;primaryKey;autoIncrement"`
 	ExecutionID  types.ExecutionID     `gorm:"column:execution_id;type:varchar(64);uniqueIndex:uk_execution_id"`
+	Namespace    string                `gorm:"column:namespace;type:varchar(64);not null;default:'';index:idx_namespace_created_at,priority:1"`
 	WorkflowName string                `gorm:"column:workflow_name;type:varchar(255)"`
 	WorkflowDef  []byte                `gorm:"column:workflow_def;type:json"`
 	Params       []byte                `gorm:"column:params;type:json"`
@@ -109,7 +110,7 @@ type dbExecution struct {
 	SpanID       string                `gorm:"column:span_id;type:varchar(32)"`
 	Status       types.ExecutionStatus `gorm:"column:status;type:varchar(20)"`
 	Error        string                `gorm:"column:error_msg;type:text"`
-	CreatedAt    time.Time             `gorm:"column:created_at;autoCreateTime:milli"`
+	CreatedAt    time.Time             `gorm:"column:created_at;autoCreateTime:milli;index:idx_namespace_created_at,priority:2"`
 	UpdatedAt    time.Time             `gorm:"column:updated_at;autoUpdateTime:milli"`
 }
 
@@ -119,6 +120,7 @@ func toDBExecution(r *store.ExecutionRecord) *dbExecution {
 	return &dbExecution{
 		ID:           r.ID,
 		ExecutionID:  r.ExecutionID,
+		Namespace:    r.Namespace,
 		WorkflowName: r.WorkflowName,
 		WorkflowDef:  r.WorkflowDef,
 		Params:       r.Params,
@@ -136,6 +138,7 @@ func fromDBExecution(d *dbExecution) *store.ExecutionRecord {
 	return &store.ExecutionRecord{
 		ID:           d.ID,
 		ExecutionID:  d.ExecutionID,
+		Namespace:    d.Namespace,
 		WorkflowName: d.WorkflowName,
 		WorkflowDef:  d.WorkflowDef,
 		Params:       d.Params,
@@ -147,6 +150,18 @@ func fromDBExecution(d *dbExecution) *store.ExecutionRecord {
 		CreatedAt:    d.CreatedAt,
 		UpdatedAt:    d.UpdatedAt,
 	}
+}
+
+// fromDBExecutions maps a listing page. It returns an EMPTY non-nil slice for
+// no rows, unlike the node/signal mappers beside it which return nil: this
+// slice is the payload of a list endpoint, and the API spec requires an empty
+// JSON array rather than null (a front end that calls .map on it would throw).
+func fromDBExecutions(ds []*dbExecution) []*store.ExecutionRecord {
+	recs := make([]*store.ExecutionRecord, 0, len(ds))
+	for _, d := range ds {
+		recs = append(recs, fromDBExecution(d))
+	}
+	return recs
 }
 
 // dbNode is the internal GORM persistence type for store.NodeRecord.

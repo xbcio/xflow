@@ -2,9 +2,11 @@ package memstore
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
 )
@@ -160,6 +162,87 @@ func (s *Store) GetExecution(_ context.Context, id types.ExecutionID) (*store.Ex
 	}
 	cp := *rec
 	return &cp, nil
+}
+
+// ListExecutions returns one page of ns's executions, newest first. It mirrors
+// store/sqlstore's query exactly, including the fail-closed scope check: the
+// two backends are contract-tested against each other by
+// store/storetest.ExecutionsContract, and "the memstore is the loose one" is
+// how a cross-tenant listing would first appear.
+func (s *Store) ListExecutions(_ context.Context, ns namespace.Namespace, filter store.ExecutionFilter, opts store.ListOptions) ([]*store.ExecutionRecord, error) {
+	scope, err := s.scopedExecutions(ns, filter)
+	if err != nil {
+		return nil, err
+	}
+	page := paginate(scope, opts)
+	// Non-nil even when empty: the API spec requires `list: []`, not null.
+	out := make([]*store.ExecutionRecord, 0, len(page))
+	for _, rec := range page {
+		cp := *rec
+		out = append(out, &cp)
+	}
+	return out, nil
+}
+
+// CountExecutions returns the size of the whole filtered set in ns — the same
+// set ListExecutions pages through, so a page and its total cannot disagree.
+func (s *Store) CountExecutions(_ context.Context, ns namespace.Namespace, filter store.ExecutionFilter) (int64, error) {
+	scope, err := s.scopedExecutions(ns, filter)
+	if err != nil {
+		return 0, err
+	}
+	return int64(len(scope)), nil
+}
+
+// scopedExecutions applies the scope and filter, in the same order and with the
+// same failures as the SQL backend. Scope validation comes first and is
+// unconditional: a malformed namespace must not reach the matcher, so that no
+// future filter can be the thing that accidentally makes an empty scope match.
+func (s *Store) scopedExecutions(ns namespace.Namespace, filter store.ExecutionFilter) ([]*store.ExecutionRecord, error) {
+	if err := store.ValidateNamespaceScope(ns); err != nil {
+		return nil, err
+	}
+	if err := filter.Validate(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var scope []*store.ExecutionRecord
+	for _, rec := range s.executions {
+		// Exact equality against a scope that is known non-empty, so a record
+		// with an empty namespace can never be selected.
+		if rec.Namespace != string(ns) {
+			continue
+		}
+		if filter.Status != "" && rec.Status != filter.Status {
+			continue
+		}
+		if !filter.CreatedAfter.IsZero() && !rec.CreatedAt.After(filter.CreatedAfter) {
+			continue
+		}
+		if !filter.CreatedBefore.IsZero() && !rec.CreatedAt.Before(filter.CreatedBefore) {
+			continue
+		}
+		scope = append(scope, rec)
+	}
+	sortExecutionsNewestFirst(scope)
+	return scope, nil
+}
+
+// sortExecutionsNewestFirst is store.ExecutionOrder in Go: created_at
+// descending, then id descending. The id tiebreak is load-bearing, not
+// decoration — see the comment on store.ExecutionOrder. Without it, records
+// created within the same clock tick come back in map iteration order, which
+// differs between calls, and a paginated walk would then repeat one row and
+// drop another.
+func sortExecutionsNewestFirst(recs []*store.ExecutionRecord) {
+	sort.Slice(recs, func(i, j int) bool {
+		a, b := recs[i], recs[j]
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			return a.CreatedAt.After(b.CreatedAt)
+		}
+		return a.ID > b.ID
+	})
 }
 
 // ---------------------------------------------------------------------------

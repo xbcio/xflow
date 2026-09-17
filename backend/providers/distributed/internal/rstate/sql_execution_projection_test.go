@@ -9,6 +9,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/store/memstore"
 	"github.com/xbcio/xflow/types"
@@ -40,7 +41,8 @@ func newStateWithAuditStore(t *testing.T) (*Store, store.Store) {
 
 func TestCommitLeasedNodeProjectsTerminalStatusToSQL(t *testing.T) {
 	state, db := newStateWithAuditStore(t)
-	ctx := context.Background()
+	tenant := namespace.Namespace("sql-projection-node")
+	ctx := namespace.WithNamespace(context.Background(), tenant)
 
 	g, err := graph.Compile(&types.WorkflowDef{
 		Name:  "sql-projection-node",
@@ -87,6 +89,16 @@ func TestCommitLeasedNodeProjectsTerminalStatusToSQL(t *testing.T) {
 	if rec.Status != types.ExecutionStatusSuccess {
 		t.Fatalf("SQL execution status = %q, want %q (Redis says %q)",
 			rec.Status, types.ExecutionStatusSuccess, res.ExecutionStatus)
+	}
+	if rec.Namespace != string(tenant) {
+		t.Fatalf("SQL execution namespace = %q, want %q", rec.Namespace, tenant)
+	}
+	listed, err := db.ListExecutions(ctx, tenant, store.ExecutionFilter{}, store.DefaultListOptions())
+	if err != nil {
+		t.Fatalf("ListExecutions: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ExecutionID != id {
+		t.Fatalf("ListExecutions(%q) = %+v, want only %q", tenant, listed, id)
 	}
 }
 
@@ -439,7 +451,8 @@ func TestCommitGroupProjectsTerminalStatusToSQL(t *testing.T) {
 // admitted from a Kafka entry unit is invisible to the audit trail.
 func TestSeedExecutionFromEntryProjectsExecutionToSQL(t *testing.T) {
 	state, db := newStateWithAuditStore(t)
-	ctx := context.Background()
+	tenant := namespace.Namespace("sql-projection-entry-seed")
+	ctx := namespace.WithNamespace(context.Background(), tenant)
 
 	g, err := graph.Compile(&types.WorkflowDef{
 		Name: "sql-projection-entry-seed",
@@ -480,6 +493,16 @@ func TestSeedExecutionFromEntryProjectsExecutionToSQL(t *testing.T) {
 	// finishes inside the seed itself.
 	if rec.Status != types.ExecutionStatusSuccess {
 		t.Fatalf("SQL execution status = %q, want success", rec.Status)
+	}
+	if rec.Namespace != string(tenant) {
+		t.Fatalf("SQL execution namespace = %q, want %q", rec.Namespace, tenant)
+	}
+	listed, err := db.ListExecutions(ctx, tenant, store.ExecutionFilter{}, store.DefaultListOptions())
+	if err != nil {
+		t.Fatalf("ListExecutions: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ExecutionID != resp.ExecutionID {
+		t.Fatalf("ListExecutions(%q) = %+v, want only %q", tenant, listed, resp.ExecutionID)
 	}
 }
 

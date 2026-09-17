@@ -264,6 +264,7 @@ func (s *Store) cleanupCreatedExecution(ctx context.Context, e *engine.Execution
 func buildExecutionRecord(ctx context.Context, e *engine.ExecutionSnapshot, now time.Time) (*store.ExecutionRecord, error) {
 	rec := &store.ExecutionRecord{
 		ExecutionID: e.ID,
+		Namespace:   string(namespace.FromContext(ctx)),
 		Status:      e.Status,
 		CreatedAt:   now,
 		UpdatedAt:   now,

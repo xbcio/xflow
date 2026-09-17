@@ -4,9 +4,21 @@
 -- 使用 WithMySQL(dsn) 或 WithStore(s) 前需先创建这些表。
 
 -- 工作流执行记录
+--
+-- namespace 是服务端签发的隔离域，也是列举接口的唯一必需作用域。它 NOT NULL
+-- DEFAULT '' 而不是 NULL：MySQL 没有 ADD COLUMN IF NOT EXISTS，这一列只能靠下方
+-- 的 INFORMATION_SCHEMA 守卫补齐，而该守卫只能加一个带缺省值的列；已存在的历史
+-- 行因此读回为空串。'' 表示"未归属"（unattributed）——本次迁移之前写入的所有
+-- 执行行都是这个状态，它们的 namespace 从未持久化过、无法从任何现存列推导出来
+-- （backend.WorkflowRegistry 是 Redis KV，与 SQL 执行行没有任何可 join 的关系，
+-- 而且 workflow 可以被删除）。store.ListExecutions 对空 namespace 直接 fail
+-- closed，所以未归属行对任何 tenant 都不可见：宁可少列，绝不错列。
+-- 归属只能由写入侧从请求上下文补齐（namespace.FromContext），或在离线对账窗口内
+-- 由运维显式迁移；两者都不在本文件范围内。详见 store/execution.go 的说明。
 CREATE TABLE IF NOT EXISTS xflow_executions (
     id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
     execution_id VARCHAR(64)  NOT NULL              COMMENT '执行唯一标识 (exec-<hex>)',
+    namespace    VARCHAR(64)  NOT NULL DEFAULT ''    COMMENT '服务端签发的隔离域；空串表示本列新增前写入的未归属行，对任何 namespace 查询均不可见（fail-closed）',
     workflow_name VARCHAR(255) NOT NULL DEFAULT ''   COMMENT '工作流名称，用于查询过滤',
     workflow_def JSON         NOT NULL              COMMENT '完整 WorkflowDef JSON',
     params       JSON                               COMMENT '提交时的输入参数 JSON',
@@ -18,6 +30,7 @@ CREATE TABLE IF NOT EXISTS xflow_executions (
     created_at   DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     updated_at   DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
     UNIQUE INDEX uk_execution_id (execution_id),
+    INDEX idx_namespace_created_at (namespace, created_at),
     INDEX idx_status (status),
     INDEX idx_workflow_name (workflow_name),
     INDEX idx_created_at (created_at),
@@ -888,3 +901,54 @@ END$$
 DELIMITER ;
 CALL xflow_add_registration_code_use_columns();
 DROP PROCEDURE IF EXISTS xflow_add_registration_code_use_columns;
+
+
+-- 执行记录的 namespace 列与列举索引。CREATE TABLE IF NOT EXISTS 对已存在的表是
+-- no-op，故用 INFORMATION_SCHEMA 守卫补列（MySQL 无 ADD COLUMN IF NOT EXISTS）。
+--
+-- 这一列是纯 ADD COLUMN：NOT NULL DEFAULT '' 是常量缺省，不是数据转换，MySQL 8
+-- 对它可以走 INSTANT DDL，历史行不需要重写。不要在这一步给历史行"猜"一个
+-- namespace —— 执行行里没有任何列能推导出它，猜错的代价是把 A 租户的执行列表
+-- 里塞进 B 租户的行。历史行保持 ''，即"未归属"，store.ListExecutions 对空
+-- namespace fail closed，因此它们对任何 tenant 都不可见（宁可少列，绝不错列）。
+DROP PROCEDURE IF EXISTS xflow_add_execution_namespace_column;
+DELIMITER $$
+CREATE PROCEDURE xflow_add_execution_namespace_column()
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_executions'
+          AND COLUMN_NAME = 'namespace'
+    ) THEN
+        ALTER TABLE xflow_executions
+            ADD COLUMN namespace VARCHAR(64) NOT NULL DEFAULT ''
+                COMMENT '服务端签发的隔离域；空串表示本列新增前写入的未归属行，对任何 namespace 查询均不可见（fail-closed）'
+                AFTER execution_id;
+    END IF;
+END$$
+DELIMITER ;
+CALL xflow_add_execution_namespace_column();
+DROP PROCEDURE IF EXISTS xflow_add_execution_namespace_column;
+
+
+-- 列举索引 (namespace, created_at)。列举按 namespace 等值过滤、created_at 倒序
+-- 取页，索引把过滤与排序都收进一次范围扫描；id 只是同一毫秒内的稳定 tiebreak，
+-- 不需要进索引（InnoDB 二级索引项尾部已经隐含主键）。
+DROP PROCEDURE IF EXISTS xflow_add_execution_namespace_index;
+DELIMITER $$
+CREATE PROCEDURE xflow_add_execution_namespace_index()
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_executions'
+          AND INDEX_NAME = 'idx_namespace_created_at'
+    ) THEN
+        ALTER TABLE xflow_executions
+            ADD INDEX idx_namespace_created_at (namespace, created_at);
+    END IF;
+END$$
+DELIMITER ;
+CALL xflow_add_execution_namespace_index();
+DROP PROCEDURE IF EXISTS xflow_add_execution_namespace_index;

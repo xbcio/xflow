@@ -4,14 +4,78 @@ import (
 	"context"
 	"time"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
 
 // Executions persists workflow execution lifecycle state.
+//
+// Adding ListExecutions and CountExecutions here makes them required of every
+// store.Store implementation, including test doubles. The repository's
+// failingStore and latencyStore deliberately provide stubs because neither test
+// double lists executions. The alternative shape — keep Executions as-is and
+// put the listing methods on a separate optional interface the way
+// AuditReconciler is separate from AuditAppender — would have been non-breaking,
+// but it would also let a backend claim store.Store while silently lacking
+// tenant-scoped enumeration, and the listing methods are what GET
+// /v1/executions needs from every backend.
 type Executions interface {
 	CreateExecution(ctx context.Context, rec *ExecutionRecord) error
 	UpdateExecutionStatus(ctx context.Context, id types.ExecutionID, status types.ExecutionStatus, errMsg string) error
 	GetExecution(ctx context.Context, id types.ExecutionID) (*ExecutionRecord, error)
+
+	// ListExecutions returns one page of the executions belonging to ns, newest
+	// first (see ExecutionOrder), narrowed by filter.
+	//
+	// ns is a REQUIRED SCOPE, not an optional filter: it is matched by exact
+	// equality, and an empty or malformed one is refused with
+	// ErrInvalidNamespace rather than widened to every namespace. That refusal
+	// is the whole security property of this method — an unscoped version is a
+	// cross-tenant enumeration endpoint.
+	//
+	// A namespace that is valid but holds nothing returns an empty slice and a
+	// nil error; it is not an error to ask about a namespace you do not own the
+	// naming of, and the answer to it leaks nothing.
+	//
+	// Rows whose namespace is empty (unattributed: written before the namespace
+	// column existed, or written by a caller that did not set it) match NO
+	// namespace query. They cannot be reached by any argument to this method,
+	// including one that happens to look like the empty scope, because that
+	// argument is refused. Recovering them is an offline operator decision; the
+	// store will not guess a namespace for a row, because a guess that puts one
+	// tenant's execution in another tenant's list is not recoverable by a later
+	// fix.
+	//
+	// Filtering is limited to what the row actually stores. Supported:
+	// ExecutionFilter.Status (the status column) and ExecutionFilter.CreatedAfter/
+	// CreatedBefore (created_at). NOT supported, with the column-level reason:
+	//
+	//   - by workflow: xflow_executions stores workflow_name only. There is no
+	//     workflow_id / workflow_key / definition-hash column, and that is not an
+	//     omission — types.WorkflowID belongs to the workflow registry, and a
+	//     name is not an identity: two namespaces can hold the same name, and the
+	//     name is not immutable across a re-registration under the same id. A
+	//     name filter would therefore be a filter on a display string that does
+	//     not resolve to a workflow.
+	//   - by runner: runner_id is not a column of xflow_executions at all. It
+	//     lives in the enrollment/identity tables (xflow_enroll_audit,
+	//     xflow_issued_identities) and in the node lease columns, neither of
+	//     which is a per-execution projection of "who ran this". Adding a runner
+	//     filter requires a reliable projection first.
+	//
+	// Pagination is offset-based, per docs/design/API-SPECIFICATION.md §3.3:
+	// opts.Offset/opts.Limit are passed through (Normalized first), and the
+	// page-size ceiling that bounds an enumeration endpoint belongs to the HTTP
+	// layer, which owns page/page_size parsing.
+	ListExecutions(ctx context.Context, ns namespace.Namespace, filter ExecutionFilter, opts ListOptions) ([]*ExecutionRecord, error)
+
+	// CountExecutions returns how many executions in ns match filter — the
+	// total, not the page size, so a page list can report a total without
+	// scanning it. It applies exactly the same scope and filter rules as
+	// ListExecutions, including the ErrInvalidNamespace refusal, so the two can
+	// never disagree about which rows are in scope. opts does not participate:
+	// the count is of the whole filtered set.
+	CountExecutions(ctx context.Context, ns namespace.Namespace, filter ExecutionFilter) (int64, error)
 }
 
 // Nodes persists per-node execution state.

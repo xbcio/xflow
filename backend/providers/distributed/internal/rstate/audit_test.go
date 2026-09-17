@@ -9,6 +9,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
 )
@@ -55,6 +56,18 @@ func (f *failingStore) GetNode(context.Context, types.ExecutionID, string) (*sto
 
 func (f *failingStore) ListNodes(context.Context, types.ExecutionID, store.ListOptions) ([]*store.NodeRecord, error) {
 	return nil, nil
+}
+
+// ListExecutions and CountExecutions are stubs. This double exists to make the
+// AUDIT write path fail, and no audit path lists executions. They must still be
+// declared: store.Store is a broad facade, and a double that omits a method
+// stops satisfying it.
+func (f *failingStore) ListExecutions(context.Context, namespace.Namespace, store.ExecutionFilter, store.ListOptions) ([]*store.ExecutionRecord, error) {
+	return nil, nil
+}
+
+func (f *failingStore) CountExecutions(context.Context, namespace.Namespace, store.ExecutionFilter) (int64, error) {
+	return 0, nil
 }
 
 func (f *failingStore) ListSuspendedBySignal(context.Context, types.ExecutionID, string) ([]*store.NodeRecord, error) {
@@ -125,6 +138,18 @@ func (c *countingStore) GetNode(context.Context, types.ExecutionID, string) (*st
 
 func (c *countingStore) ListNodes(context.Context, types.ExecutionID, store.ListOptions) ([]*store.NodeRecord, error) {
 	return nil, nil
+}
+
+// ListExecutions and CountExecutions are stubs: this double counts audit-path
+// calls and never lists executions. They must still be declared, because
+// store.Store is a broad facade and a double that omits a method stops
+// satisfying it.
+func (c *countingStore) ListExecutions(context.Context, namespace.Namespace, store.ExecutionFilter, store.ListOptions) ([]*store.ExecutionRecord, error) {
+	return nil, nil
+}
+
+func (c *countingStore) CountExecutions(context.Context, namespace.Namespace, store.ExecutionFilter) (int64, error) {
+	return 0, nil
 }
 
 func (c *countingStore) ListSuspendedBySignal(context.Context, types.ExecutionID, string) ([]*store.NodeRecord, error) {

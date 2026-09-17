@@ -14,6 +14,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
@@ -310,6 +311,18 @@ func (s *latencyStore) GetNode(context.Context, types.ExecutionID, string) (*sto
 
 func (s *latencyStore) ListNodes(context.Context, types.ExecutionID, store.ListOptions) ([]*store.NodeRecord, error) {
 	return nil, nil
+}
+
+// ListExecutions and CountExecutions are stubs: this double exists to inject
+// write latency, and the loadtest never lists executions. They must still be
+// declared, because store.Store is a broad facade and a double that omits a
+// method stops satisfying it.
+func (s *latencyStore) ListExecutions(context.Context, namespace.Namespace, store.ExecutionFilter, store.ListOptions) ([]*store.ExecutionRecord, error) {
+	return nil, nil
+}
+
+func (s *latencyStore) CountExecutions(context.Context, namespace.Namespace, store.ExecutionFilter) (int64, error) {
+	return 0, nil
 }
 
 func (s *latencyStore) ListSuspendedBySignal(context.Context, types.ExecutionID, string) ([]*store.NodeRecord, error) {

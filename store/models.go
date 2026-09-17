@@ -10,8 +10,22 @@ import (
 // domain record: ORM schema concerns (table name, GORM tags) live in
 // store/sqlstore's internal dbExecution type, not here.
 type ExecutionRecord struct {
-	ID           uint64
-	ExecutionID  types.ExecutionID
+	ID          uint64
+	ExecutionID types.ExecutionID
+	// Namespace is the server-issued isolation scope this execution belongs to.
+	// It comes from the request context (namespace.FromContext) at the moment
+	// the execution is created; it is never a client-supplied value and is only
+	// ever read back as a read-scope, never as an authorization token.
+	//
+	// The empty string means UNATTRIBUTED, and it is not equivalent to "the
+	// default namespace". Two things produce it: a writer that did not set the
+	// field, and every row written before the column existed (db/xflow_schema.sql
+	// adds it NOT NULL DEFAULT '' precisely so the migration is a pure ADD
+	// COLUMN). ListExecutions and CountExecutions reject an empty scope outright
+	// and never match an empty value, so an unattributed row is invisible to
+	// every namespace — deliberately: it is better to under-report an execution
+	// than to show one tenant another tenant's row.
+	Namespace    string
 	WorkflowName string
 	WorkflowDef  []byte
 	Params       []byte

@@ -369,6 +369,7 @@ func (s *Store) projectSeededExecution(ctx context.Context, execID types.Executi
 	now := time.Now()
 	rec := &store.ExecutionRecord{
 		ExecutionID: execID,
+		Namespace:   string(namespace.FromContext(ctx)),
 		Status:      status,
 		TraceID:     req.TraceID,
 		SpanID:      req.SpanID,
