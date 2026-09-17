@@ -20,18 +20,26 @@ type a3RowKey struct{ fixture, topology string }
 
 // ProvenanceProvider abstracts git/binary provenance so unit tests can inject
 // controlled values without touching the real repo or filesystem.
+//
+// Release is one call rather than one method per field on purpose: the verifier
+// must recompute the schema-v3 release block atomically, so no caller can end
+// up with a block that mixes recomputed values with recorded ones.
 type ProvenanceProvider interface {
 	CommitSHA() (string, error)
 	RelevantTreeClean(paths []string) (bool, string, error)
 	RelevantDiffDigest(paths []string) (string, error)
 	TestBinaryDigest(path string) (string, error)
 	GoVersion() string
+	Release(commitSHA string) (ReleaseProvenance, error)
 }
 
 // RealProvenance uses os/exec git, crypto/sha256, and runtime.Version().
 // TestBinaryPath is the path to the test binary whose digest is recomputed.
+// Release carries the release-harness inputs that cannot be recomputed from the
+// repository; see ReleaseInput.
 type RealProvenance struct {
 	TestBinaryPath string
+	ReleaseInput   ReleaseInput
 }
 
 // CommitSHA returns the full SHA of HEAD.
@@ -193,13 +201,11 @@ func (v *Verifier) Verify(env *Envelope, suiteEvents []GoTestEvent) Verification
 		errors = append(errors, fmt.Sprintf("source: go_version mismatch: envelope=%s recomputed=%s", env.Source.GoVersion, goVer))
 	}
 
-	sourceRecomputed := true
-	for _, e := range errors {
-		if strings.Contains(e, "cannot recompute") {
-			sourceRecomputed = false
-			break
-		}
-	}
+	// sourceRecomputed is computed AFTER the release block below: release
+	// provenance (tag, toolchain pins, platform, images) is source provenance,
+	// so a verifier that cannot establish it has not recomputed the source.
+	// Computing the flag here as well would let a missing release input publish
+	// an artifact that still claims source_recomputed==true.
 
 	// 2. Suite outcome: recompute from go test -json events. recomputeSuite
 	// also repopulates env.Suite.RequiredRows (from the manifest) and
@@ -277,6 +283,28 @@ func (v *Verifier) Verify(env *Envelope, suiteEvents []GoTestEvent) Verification
 	// disagree).
 	recomputeEnvironment(env)
 	errors = append(errors, checkEnvironmentIntegrity(env)...)
+
+	// 3e. release provenance (schema v3, spec §8.1): the tag that points at the
+	// candidate, the pinned toolchain, GOOS/GOARCH, the container images the
+	// gate ran against, the human attestation, the declared unverified scope
+	// and the gate identity. This block is a verifier output: it is recomputed
+	// here from git/the pinned toolchain files/the runtime plus the harness
+	// ReleaseInput, and it is never read from the envelope. A failure to
+	// recompute it fails verification rather than leaving an empty block that
+	// would read as "nothing to check".
+	errors = append(errors, v.populateRelease(env, commitSHA)...)
+	errors = append(errors, checkReleaseIntegrity(env)...)
+
+	// source_recomputed covers every provenance axis, release provenance
+	// included. It is evaluated here, after the last provenance check, so the
+	// flag cannot be true while a provenance input failed to recompute.
+	sourceRecomputed := true
+	for _, e := range errors {
+		if strings.Contains(e, "cannot recompute") {
+			sourceRecomputed = false
+			break
+		}
+	}
 
 	// 4b. Detect duplicate scenario/row markers from distinct executions.
 	dupA0, dupA3 := findDuplicateMarkers(env.Raw.ProtocolObservations)

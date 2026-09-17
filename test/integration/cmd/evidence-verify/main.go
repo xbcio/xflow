@@ -18,6 +18,19 @@ func main() {
 		manifestPath = flag.String("manifest", "", "path to manifest (optional, compiled manifest used by default)")
 		outDir       = flag.String("out", "test/integration/testdata/evidence", "output directory for final artifact")
 		binaryPath   = flag.String("binary", os.Args[0], "path to the test binary that produced the evidence")
+
+		// Release-harness inputs. Everything else in the schema-v3 `release`
+		// block is recomputed from git, the pinned toolchain files, and the Go
+		// runtime; these four things exist only in the harness that invoked the
+		// gate. They are flags rather than environment lookups so the recorded
+		// values are visible in the command the gate printed.
+		gateName        = flag.String("gate-name", "", "release gate name, e.g. g0 (required)")
+		gateCommand     = flag.String("gate-command", "", "exact command that ran this gate, e.g. \"make test-g0-evidence-required\" (required)")
+		gateStartedAt   = flag.String("gate-started-at", "", "RFC3339 UTC time the gate started (required)")
+		containerImages = flag.String("container-images", "", "dependency images as component=reference[@sha256:<digest>] separated by ';' (required)")
+		reviewer        = flag.String("reviewer", "", "human who reviewed this evidence; empty records an unsigned artifact")
+		reRunner        = flag.String("re-runner", "", "human who re-ran this gate on the candidate SHA; empty records an unsigned artifact")
+		unverifiedScope = flag.String("unverified-scope", "", "claims this artifact does NOT establish, separated by ';' (required)")
 	)
 	flag.Parse()
 
@@ -39,7 +52,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	prov := evidence.RealProvenance{TestBinaryPath: *binaryPath}
+	prov := evidence.RealProvenance{
+		TestBinaryPath: *binaryPath,
+		ReleaseInput: evidence.ReleaseInput{
+			GateName:        *gateName,
+			GateCommand:     *gateCommand,
+			GateStartedAt:   *gateStartedAt,
+			ContainerImages: *containerImages,
+			Reviewer:        *reviewer,
+			ReRunner:        *reRunner,
+			UnverifiedScope: *unverifiedScope,
+		},
+	}
 	v := evidence.NewVerifier(prov)
 	res := v.Verify(env, suiteEvents)
 

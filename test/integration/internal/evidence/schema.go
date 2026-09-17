@@ -9,10 +9,31 @@ import (
 )
 
 // SchemaVersion is the current envelope schema version.
-const SchemaVersion = 2
+//
+// Version history:
+//
+//	2 — git SHA + relevant-tree cleanliness + Go version + suite/raw ledgers.
+//	3 — adds the `release` block: tag, Node/pnpm pins, GOOS/GOARCH, container
+//	    image identity, human attestation, declared unverified scope, and the
+//	    harness gate identity. A v3 artifact is the only shape the verifier
+//	    publishes; v2 remains readable so historical artifacts stay parseable
+//	    (MergeRawEnvelopes takes the fragment's version, and the G0 artifact
+//	    validator accepts both versions — see VersionMinSupported).
+//
+// The bump is a bump, not a documentation change: at v3 the `release` block is
+// required by the verifier and by the G0 artifact validator, so a v3 artifact
+// that omits it fails loudly instead of passing as a v2 artifact would.
+const SchemaVersion = 3
+
+// VersionMinSupported is the oldest envelope schema version the current
+// verifier and validators still understand. It exists so the "accept older
+// artifacts" branch is named once instead of being spelled as a bare literal
+// in each validator.
+const VersionMinSupported = 2
 
 // Envelope is the versioned artifact envelope that bundles raw observations,
-// source provenance, environment metadata, and independent verification.
+// source provenance, environment metadata, release provenance, and independent
+// verification.
 //
 // It matches spec §8.1 and is produced by tests as a raw ledger and by the
 // verifier as a finalized artifact.
@@ -23,6 +44,7 @@ type Envelope struct {
 	FinishedAt          time.Time            `json:"finished_at"`
 	Source              SourceProvenance     `json:"source"`
 	Environment         Environment          `json:"environment"`
+	Release             ReleaseProvenance    `json:"release"`
 	Suite               SuiteSummary         `json:"suite"`
 	Raw                 RawLedger            `json:"raw"`
 	DerivedObservations []DerivedObservation `json:"derived_observations"`
@@ -44,6 +66,78 @@ type SourceProvenance struct {
 type Environment struct {
 	RedisVersion string `json:"redis_version"`
 	MySQLVersion string `json:"mysql_version"`
+}
+
+// ReleaseProvenance is the schema-v3 release block: the release identity of the
+// candidate that this artifact is evidence for.
+//
+// It is a VERIFIER OUTPUT. Nothing in it may be self-reported by the test
+// binary or the recorder: the verifier recomputes the whole block from
+// authoritative sources (git for the tag, the pinned toolchain files and the Go
+// runtime for the versions and platform) and from the release-harness inputs
+// (ReleaseInput) that no repository read can recover — the container images the
+// gate ran against, the human attestation, the declared unverified scope, and
+// the gate's own identity. MergeRawEnvelopes deliberately does not carry a
+// fragment's Release block, so a fragment that stamps one cannot influence the
+// finalized artifact.
+type ReleaseProvenance struct {
+	Gate            GateIdentity     `json:"gate"`
+	Tag             string           `json:"tag"`
+	TagKind         string           `json:"tag_kind"`
+	GoVersion       string           `json:"go_version"`
+	NodeVersion     string           `json:"node_version"`
+	PnpmVersion     string           `json:"pnpm_version"`
+	OS              string           `json:"os"`
+	Arch            string           `json:"arch"`
+	ContainerImages []ContainerImage `json:"container_images"`
+	Attestation     Attestation      `json:"attestation"`
+	UnverifiedScope []string         `json:"unverified_scope"`
+}
+
+// TagKind values for ReleaseProvenance.TagKind. The kind is recorded rather
+// than inferred so "no tag points at this candidate" is distinguishable from
+// "the tag was not recorded".
+const (
+	TagKindNone        = "none"
+	TagKindLightweight = "lightweight"
+	TagKindAnnotated   = "annotated"
+)
+
+// GateIdentity identifies the release-harness gate that produced this artifact.
+// Name, Command and StartedAt are supplied by the harness, because only the
+// harness knows which target was invoked and when it started. ExitCode is taken
+// from the independently recomputed suite (the verifier fails the artifact on
+// any mismatch, so a self-reported exit code cannot survive), and
+// FinishedAt/DurationSeconds are derived by the verifier when it finalizes the
+// artifact, so the recorded duration cannot be self-reported.
+type GateIdentity struct {
+	Name            string    `json:"name"`
+	Command         string    `json:"command"`
+	StartedAt       time.Time `json:"started_at"`
+	FinishedAt      time.Time `json:"finished_at"`
+	ExitCode        int       `json:"exit_code"`
+	DurationSeconds float64   `json:"duration_seconds"`
+}
+
+// ContainerImage is one dependency image the gate ran against. Digest is the
+// registry digest (sha256:...) when the harness could resolve it; Resolved
+// carries that fact explicitly so an unresolved digest can never be read as a
+// pinned one.
+type ContainerImage struct {
+	Component string `json:"component"`
+	Reference string `json:"reference"`
+	Digest    string `json:"digest"`
+	Resolved  bool   `json:"resolved"`
+}
+
+// Attestation records who vouches for this evidence. It is recorded, not
+// recomputed: no repository read can establish who reviewed an artifact.
+// SignedOff is required to equal "both names are present" so the boolean can
+// never claim a sign-off that the names do not support.
+type Attestation struct {
+	Reviewer  string `json:"reviewer"`
+	ReRunner  string `json:"re_runner"`
+	SignedOff bool   `json:"signed_off"`
 }
 
 // SuiteSummary records the test suite outcome as recomputed from go test -json.

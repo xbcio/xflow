@@ -23,6 +23,8 @@ type fakeProvenance struct {
 	relevantDiffSHA256 string
 	testBinarySHA256   string
 	goVersion          string
+	release            ReleaseProvenance
+	releaseErr         error
 }
 
 func (f fakeProvenance) CommitSHA() (string, error) { return f.commitSHA, nil }
@@ -35,13 +37,52 @@ func (f fakeProvenance) RelevantDiffDigest([]string) (string, error) {
 func (f fakeProvenance) TestBinaryDigest(string) (string, error) { return f.testBinarySHA256, nil }
 func (f fakeProvenance) GoVersion() string                       { return f.goVersion }
 
+// Release returns the injected block (schema v3). A provider that cannot
+// establish release provenance returns an error; the verifier must fail rather
+// than treat the block as "nothing to check".
+func (f fakeProvenance) Release(string) (ReleaseProvenance, error) {
+	if f.releaseErr != nil {
+		return ReleaseProvenance{}, f.releaseErr
+	}
+	return f.release, nil
+}
+
+// fakeReleaseProvenance returns a valid release block. Gate.ExitCode,
+// Gate.FinishedAt and Gate.DurationSeconds are deliberately left zero: the
+// verifier recomputes them, and a fake that pre-filled them would hide a
+// regression in that recomputation.
+func fakeReleaseProvenance(goVersion string) ReleaseProvenance {
+	return ReleaseProvenance{
+		Gate: GateIdentity{
+			Name:      "g0",
+			Command:   "make test-g0-evidence-required",
+			StartedAt: time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC),
+		},
+		Tag:         "v0.0.6",
+		TagKind:     TagKindAnnotated,
+		GoVersion:   goVersion,
+		NodeVersion: "22.15.0",
+		PnpmVersion: "10.10.0",
+		OS:          runtime.GOOS,
+		Arch:        runtime.GOARCH,
+		ContainerImages: []ContainerImage{
+			{Component: "mysql", Reference: "docker.io/library/mysql:8.0", Digest: "sha256:" + strings.Repeat("b", 64), Resolved: true},
+			{Component: "redis", Reference: "docker.io/library/redis:7.2", Digest: "sha256:" + strings.Repeat("a", 64), Resolved: true},
+		},
+		Attestation:     Attestation{Reviewer: "reviewer-a", ReRunner: "rerunner-b", SignedOff: true},
+		UnverifiedScope: []string{"G2 HA / multi-namespace is not exercised by a G0 artifact"},
+	}
+}
+
 func defaultFakeProvenance() fakeProvenance {
+	goVersion := runtime.Version()
 	return fakeProvenance{
 		commitSHA:          "abcdef1234567890abcdef1234567890abcdef12",
 		relevantTreeClean:  true,
 		relevantDiffSHA256: sha256String("clean"),
 		testBinarySHA256:   sha256String("binary"),
-		goVersion:          runtime.Version(),
+		goVersion:          goVersion,
+		release:            fakeReleaseProvenance(goVersion),
 	}
 }
 

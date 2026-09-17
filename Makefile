@@ -501,19 +501,193 @@ G0_RAW_DIR  := test/integration/testdata/evidence
 # to parse the go-test stream as an evidence fragment.
 G0_JSON     := test/integration/testdata/g0-evidence.json
 EVIDENCE_CANDIDATE_SHA ?=
-export G0_TEST_BIN G0_RAW_DIR G0_JSON EVIDENCE_CANDIDATE_SHA
+# Release-harness inputs for the schema-v3 `release` block. Everything else in
+# that block (tag, toolchain pins, GOOS/GOARCH, Go version) is recomputed by the
+# verifier from git, the pinned toolchain files and the runtime, so it cannot be
+# set here. These four can: only the harness knows the images the gate ran
+# against, when it started, and who vouches for the result.
+#
+# EVIDENCE_CONTAINER_IMAGES is empty by default and derived from
+# test/env/docker-compose.yml by scripts/evidence-images.sh, which also
+# best-effort resolves registry digests from a local docker/podman daemon and
+# marks them resolved=false when it cannot. Set it explicitly to record digests
+# observed elsewhere: component=reference[@sha256:<digest>] joined by ';'.
+EVIDENCE_CONTAINER_IMAGES ?=
+# The default is a real, named gap, not a placeholder: a G0 artifact is
+# scheduling-reliability evidence for a candidate and does not establish G2.
+# Override with EVIDENCE_UNVERIFIED_SCOPE="..." to declare more (or, on a
+# candidate that has closed these, to replace them).
+EVIDENCE_UNVERIFIED_SCOPE ?= G2 HA / multi-namespace acceptance is not established by this artifact; real CI artifact checkout and external release signoff remain outstanding
+EVIDENCE_GATE_NAME ?= g0
+EVIDENCE_GATE_COMMAND ?= make test-g0-evidence-required
+# Who vouches for this evidence. Both empty records an UNSIGNED artifact: the
+# gate still publishes (the evidence is mechanically valid), but the release
+# record derived from it refuses to exist without a signature — see
+# `make release-summary`.
+REVIEWER ?=
+RE_RUNNER ?=
+export G0_TEST_BIN G0_RAW_DIR G0_JSON EVIDENCE_CANDIDATE_SHA \
+       EVIDENCE_CONTAINER_IMAGES EVIDENCE_UNVERIFIED_SCOPE EVIDENCE_GATE_NAME EVIDENCE_GATE_COMMAND \
+       REVIEWER RE_RUNNER
 
 define G0_EVIDENCE_VALIDATE_PY
+import datetime
 import hashlib
 import json
 import pathlib
+import re
 import sys
 import uuid
+
+
+SCHEMA_VERSION = 3
+# v2 artifacts predate the `release` block. They stay readable so a historical
+# generation is not retroactively invalidated, but every artifact this target
+# publishes is v3 and must carry the block. The acceptance set is therefore a
+# version-dispatched contract, never a weakened one: a v2 artifact is checked by
+# exactly the checks it was always checked by, and a v3 artifact by strictly
+# more.
+LEGACY_SCHEMA_VERSIONS = (2,)
+REQUIRED_GO_VERSION = "go$(GO_VERSION)"
+TAG_KINDS = ("none", "lightweight", "annotated")
+SHA256_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+EXACT_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
+PLATFORM = re.compile(r"[a-z0-9_]+")
 
 
 def fail(message):
     print("ERROR: G0 artifact validation failed: " + message, file=sys.stderr)
     raise SystemExit(1)
+
+
+def exact_keys(value, expected, field):
+    if not isinstance(value, dict):
+        fail(field + " must be an object")
+    actual = set(value)
+    expected = set(expected)
+    if actual != expected:
+        fail(field + " fields mismatch: missing=" + repr(sorted(expected - actual)) + " extra=" + repr(sorted(actual - expected)))
+    return value
+
+
+def nonempty(value, field):
+    if not isinstance(value, str) or not value.strip():
+        fail(field + " must be a non-empty string")
+    return value
+
+
+def timestamp(value, field):
+    if not isinstance(value, str) or not value.endswith("Z"):
+        fail(field + " must be UTC RFC3339 with a trailing Z")
+    text = value[:-1]
+    if "." in text:
+        text = text.split(".", 1)[0]
+    try:
+        parsed = datetime.datetime.strptime(text, "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        fail(field + " must be RFC3339")
+    # The Go zero time (0001-01-01T00:00:00Z) is what an unset field marshals
+    # to; accepting it would let a missing harness timestamp read as a real one.
+    if parsed.year < 2000:
+        fail(field + " is not a real timestamp")
+    return parsed
+
+
+def validate_release(release, schema_version):
+    if not isinstance(release, dict):
+        fail("release must be an object at schema_version " + str(schema_version))
+    exact_keys(release, {
+        "gate", "tag", "tag_kind", "go_version", "node_version", "pnpm_version",
+        "os", "arch", "container_images", "attestation", "unverified_scope",
+    }, "release")
+
+    gate = exact_keys(release.get("gate"), {
+        "name", "command", "started_at", "finished_at", "exit_code", "duration_seconds",
+    }, "release.gate")
+    nonempty(gate.get("name"), "release.gate.name")
+    nonempty(gate.get("command"), "release.gate.command")
+    started_at = timestamp(gate.get("started_at"), "release.gate.started_at")
+    finished_at = timestamp(gate.get("finished_at"), "release.gate.finished_at")
+    if finished_at <= started_at:
+        fail("release.gate.finished_at must be after release.gate.started_at")
+    exit_code = gate.get("exit_code")
+    if type(exit_code) is not int or exit_code != 0:
+        fail("release.gate.exit_code must be integer zero")
+    if exit_code != document["suite"]["exit_code"]:
+        fail("release.gate.exit_code must equal suite.exit_code")
+    duration = gate.get("duration_seconds")
+    if type(duration) not in (int, float) or type(duration) is bool or duration <= 0:
+        fail("release.gate.duration_seconds must be a positive number")
+
+    tag_kind = release.get("tag_kind")
+    if tag_kind not in TAG_KINDS:
+        fail("release.tag_kind must be one of " + repr(list(TAG_KINDS)))
+    tag = release.get("tag")
+    if not isinstance(tag, str):
+        fail("release.tag must be a string")
+    if tag_kind == "none":
+        if tag != "":
+            fail("release.tag must be empty when release.tag_kind is none")
+    else:
+        if tag == "":
+            fail("release.tag must be non-empty when release.tag_kind is " + tag_kind)
+        if re.fullmatch(r"[^\s-][^\s]*", tag) is None:
+            fail("release.tag must be a plausible git tag name")
+
+    if release.get("go_version") != REQUIRED_GO_VERSION:
+        fail("release.go_version must equal " + REQUIRED_GO_VERSION)
+    for field in ("node_version", "pnpm_version"):
+        value = release.get(field)
+        if not isinstance(value, str) or EXACT_VERSION.fullmatch(value) is None:
+            fail("release." + field + " must be an exact x.y.z version")
+    for field in ("os", "arch"):
+        value = release.get(field)
+        if not isinstance(value, str) or PLATFORM.fullmatch(value) is None:
+            fail("release." + field + " must be a platform identifier")
+
+    images = release.get("container_images")
+    if not isinstance(images, list) or not images:
+        fail("release.container_images must be a non-empty array")
+    components = set()
+    for index, image in enumerate(images):
+        field = "release.container_images[" + str(index) + "]"
+        exact_keys(image, {"component", "reference", "digest", "resolved"}, field)
+        component = nonempty(image.get("component"), field + ".component")
+        if component in components:
+            fail(field + ".component " + component + " is declared more than once")
+        components.add(component)
+        nonempty(image.get("reference"), field + ".reference")
+        resolved = image.get("resolved")
+        if not isinstance(resolved, bool):
+            fail(field + ".resolved must be a boolean")
+        digest = image.get("digest")
+        if not isinstance(digest, str):
+            fail(field + ".digest must be a string")
+        if resolved and SHA256_DIGEST.fullmatch(digest) is None:
+            fail(field + ".digest must be sha256:<64 lowercase hex> when resolved is true")
+        if not resolved and digest != "":
+            fail(field + ".digest must be empty when resolved is false; an unresolved image is not a pinned one")
+
+    attestation = exact_keys(release.get("attestation"), {"reviewer", "re_runner", "signed_off"}, "release.attestation")
+    reviewer = attestation.get("reviewer")
+    re_runner = attestation.get("re_runner")
+    if not isinstance(reviewer, str) or not isinstance(re_runner, str):
+        fail("release.attestation.reviewer and re_runner must be strings")
+    if not isinstance(attestation.get("signed_off"), bool):
+        fail("release.attestation.signed_off must be a boolean")
+    if attestation["signed_off"] != (reviewer != "" and re_runner != ""):
+        fail("release.attestation.signed_off must be true exactly when reviewer and re_runner are both set")
+
+    scope = release.get("unverified_scope")
+    if not isinstance(scope, list) or not scope:
+        fail("release.unverified_scope must be a non-empty array: an artifact that declares nothing uncovered claims to cover everything")
+    seen = set()
+    for index, entry in enumerate(scope):
+        if not isinstance(entry, str) or not entry.strip():
+            fail("release.unverified_scope[" + str(index) + "] must be a non-empty string")
+        if entry in seen:
+            fail("release.unverified_scope declares " + repr(entry) + " more than once")
+        seen.add(entry)
 
 
 artifact_path = pathlib.Path(sys.argv[1])
@@ -526,8 +700,8 @@ except Exception as exc:
     fail("cannot parse final JSON: " + str(exc))
 if not isinstance(document, dict):
     fail("top-level JSON must be an object")
-if type(document.get("schema_version")) is not int or document["schema_version"] != 2:
-    fail("schema_version must be integer 2")
+if type(document.get("schema_version")) is not int or document["schema_version"] not in (SCHEMA_VERSION,) + LEGACY_SCHEMA_VERSIONS:
+    fail("schema_version must be integer 2 or 3")
 run_id = document.get("run_id")
 try:
     parsed_run_id = uuid.UUID(run_id)
@@ -619,6 +793,14 @@ for field in ("redis_version", "mysql_version"):
     value = environment.get(field)
     if not isinstance(value, str) or not value.strip():
         fail("environment." + field + " must be non-empty")
+# release (schema v3): required at v3, and validated whenever present so a v2
+# artifact that carries a partial block cannot smuggle one past the gate.
+# The Go verifier recomputes this block and enforces the identical contract
+# (test/integration/internal/evidence/release.go); validator_conformance_test.go
+# runs both against the same fixtures so the two cannot drift apart.
+release = document.get("release")
+if document["schema_version"] >= SCHEMA_VERSION or isinstance(release, dict):
+    validate_release(release, document["schema_version"])
 expected_digest = hashlib.sha256(artifact_bytes).hexdigest() + "\n"
 try:
     actual_digest = digest_path.read_text(encoding="ascii")
@@ -628,6 +810,14 @@ if actual_digest != expected_digest:
     fail("SHA-256 sidecar does not exactly match independently recomputed JSON digest")
 endef
 export G0_EVIDENCE_VALIDATE_PY
+
+# print-g0-evidence-validator prints the G0 artifact validator with this
+# Makefile's variables already expanded. It exists so the schema-conformance
+# test in test/integration/internal/evidence runs the SAME program the gate
+# runs, rather than a copy that drifts from it — the failure this prevents is a
+# validator that accepts a field the Go verifier rejects (or the reverse).
+print-g0-evidence-validator:
+	@printf '%s\n' "$$G0_EVIDENCE_VALIDATE_PY"
 
 test-g0-evidence-required: check-go
 	@set -eu; \
@@ -657,6 +847,25 @@ test-g0-evidence-required: check-go
 	fi; \
 	echo "==> G0 candidate SHA: $$candidate_sha (full worktree clean)"; \
 	set -a; if [ -f test/env/.env ]; then . ./test/env/.env; fi; set +a; \
+	: "Resolve the release-harness inputs BEFORE the 15-minute run so a broken"; \
+	: "harness surfaces now instead of as a verifier failure afterwards"; \
+	gate_started_at="$$(date -u +%Y-%m-%dT%H:%M:%SZ)" || { echo "ERROR: cannot read the gate start time" >&2; exit 1; }; \
+	python3 -c 'import datetime,sys; datetime.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ")' "$$gate_started_at" \
+		|| { echo "ERROR: gate start time $$gate_started_at is not UTC RFC3339" >&2; exit 1; }; \
+	if [ -z "$$EVIDENCE_CONTAINER_IMAGES" ]; then \
+		EVIDENCE_CONTAINER_IMAGES="$$(./scripts/evidence-images.sh)" \
+			|| { echo "ERROR: cannot derive the container image list from test/env/docker-compose.yml" >&2; exit 1; }; \
+	fi; \
+	if [ -z "$$EVIDENCE_CONTAINER_IMAGES" ]; then \
+		echo "ERROR: EVIDENCE_CONTAINER_IMAGES is empty; the G0 artifact must record the images the gate ran against" >&2; \
+		exit 1; \
+	fi; \
+	if [ -z "$$EVIDENCE_UNVERIFIED_SCOPE" ]; then \
+		echo "ERROR: EVIDENCE_UNVERIFIED_SCOPE is empty; an artifact that declares nothing uncovered claims to cover everything" >&2; \
+		exit 1; \
+	fi; \
+	echo "==> G0 gate identity: $$EVIDENCE_GATE_NAME ($$EVIDENCE_GATE_COMMAND) started $$gate_started_at"; \
+	echo "==> G0 container images: $$EVIDENCE_CONTAINER_IMAGES"; \
 	tmpdir="$$(mktemp -d "$${TMPDIR:-/tmp}/xflow-g0-evidence.XXXXXX")"; \
 	run_test_bin="$$tmpdir/xflow-g0.test"; \
 	run_raw_dir="$$tmpdir/raw"; \
@@ -687,7 +896,14 @@ test-g0-evidence-required: check-go
 	if [ $$rc -ne 0 ]; then echo "test suite failed (exit $$rc)"; cat "$$run_json"; exit 1; fi; \
 	echo "==> running independent verifier"; \
 	$(GO) run ./test/integration/cmd/evidence-verify \
-		-in "$$run_json" -raw "$$run_raw_dir" -binary "$$run_test_bin" -out "$$verify_out"; \
+		-in "$$run_json" -raw "$$run_raw_dir" -binary "$$run_test_bin" -out "$$verify_out" \
+		-gate-name "$$EVIDENCE_GATE_NAME" \
+		-gate-command "$$EVIDENCE_GATE_COMMAND" \
+		-gate-started-at "$$gate_started_at" \
+		-container-images "$$EVIDENCE_CONTAINER_IMAGES" \
+		-reviewer "$${REVIEWER:-}" \
+		-re-runner "$${RE_RUNNER:-}" \
+		-unverified-scope "$$EVIDENCE_UNVERIFIED_SCOPE"; \
 	artifact_list="$$(find "$$verify_out" -maxdepth 1 -type f -name 'evidence-*.json' ! -name '*.diagnostic.json' -print)"; \
 	artifact_count="$$(printf '%s\n' "$$artifact_list" | awk 'NF { count++ } END { print count + 0 }')"; \
 	if [ "$$artifact_count" -ne 1 ]; then \
