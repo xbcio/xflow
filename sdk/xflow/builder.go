@@ -229,6 +229,14 @@ func (n *NodeRef) Body(body *WorkflowBuilder) *NodeRef {
 	return n
 }
 
+// OnError overrides this node's error-handling strategy.
+func (n *NodeRef) OnError(strategy types.OnError) *NodeRef {
+	if n.entry != nil {
+		n.entry.onError = strategy
+	}
+	return n
+}
+
 // PrivateOutput marks this node's runtime output as private and public-redacted.
 func (n *NodeRef) PrivateOutput() *NodeRef {
 	if n.entry != nil {

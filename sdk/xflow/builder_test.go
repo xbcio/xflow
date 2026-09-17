@@ -108,6 +108,22 @@ func TestWorkflowBuilderEmitsRunnerSelectors(t *testing.T) {
 	}
 }
 
+func TestNodeRefOnError(t *testing.T) {
+	wf := Workflow("node-on-error")
+	wf.Node("worker", node.Function("return input")).OnError(types.OnErrorContinue)
+
+	def, err := wf.build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(def.Nodes) != 1 {
+		t.Fatalf("node count = %d, want 1", len(def.Nodes))
+	}
+	if got := def.Nodes[0].OnError; got != string(types.OnErrorContinue) {
+		t.Fatalf("OnError = %q, want %q", got, types.OnErrorContinue)
+	}
+}
+
 func TestNodeRefPrivateOutput(t *testing.T) {
 	wf := Workflow("node-output-policy")
 	wf.Node("worker", node.Function("return input")).PrivateOutput()
