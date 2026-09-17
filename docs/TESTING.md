@@ -45,7 +45,8 @@ make test-script-wasm
 
 This target runs the node-layer script seam and JavaScript engine serially,
 then runs the complete WASM package once in an isolated race-enabled process
-with a 15-minute timeout. This lets `TestMain` compile its WASI guests once
+with a 45-minute watchdog (raise-only; see the measured cost above). This lets
+`TestMain` compile its WASI guests once
 rather than once per shard; all package tests remain included automatically.
 
 `make test` runs ordinary packages plus the script and JavaScript packages with
@@ -54,6 +55,129 @@ WASM package. Run `make test-script-wasm` when changing script execution, Go,
 qjs, wazero, or wasip1 behavior. CI runs the full WASM suite once through its
 coverage gate; do not add it back to the default local feedback gate. Do not
 globally raise the ordinary package timeout to absorb that resource contention.
+
+#### Measured cost of the WASM package
+
+The WASM package is the most expensive gate in the repository, and its cost is
+spread across the whole suite rather than concentrated in one test. Clean
+measurement of 2026-09-17, 8-core host, cold WASM cache, workspace-local
+`GOCACHE`, started at 1-min load ≈ 9 (decaying after an unrelated full-repo test
+run finished — so treat the wall time as mildly load-inflated):
+
+| Invocation | Result | Wall time |
+|---|---|---|
+| `go test -p=1 ./node/internal/code/script/wasm -count=1 -v -timeout 15m` | pass (176 + 2 env-gated skips) | **114.5 s** |
+| `go test -p=1 ./node/internal/code/script/wasm -race -count=1 -v -timeout 60m` | 175 pass, **1 fail** (the isolation-sensitive sweep test — see below), 2 env-gated skips | **1424.7 s (~24 m)** |
+
+An earlier `-race` run the same day measured 2040.9 s with 13 failures; that
+number is **not comparable** — 12 of the failures were the externally deleted
+cache directory described below (they aborted early yet the run was inflated by
+CPU contention from concurrent test suites), and the fail count says nothing
+about those tests.
+
+The one `-race` failure is `TestCompileMissTriggersSweepReportsEngineCount`, and
+its cause is **cross-test mis-attribution**, not a lagging reclaim. An earlier
+revision of this section diagnosed it as "the TTL reclaim lags, so the idle
+engine is still alive" and prescribed waiting longer. That diagnosis was wrong
+and the numbers refute it: a lagging reclaim can only ever yield 2 (both modules
+resident), whereas the degraded run reported **6**, which a two-engine host
+cannot produce at all.
+
+The actual mechanism: the test reads `engineCountCalls()`, which comes from the
+**process-wide** observer whose `OnEngineCount` carries no host identity, and it
+treats "the first report past my baseline" as its own host's sweep. Other
+`reactorHost` instances in the process sweep continuously and publish into that
+same channel. An instrumented full-package `-race` run (per-host id added at the
+report site) shows the target host is 28 and the read was **host 16's report**:
+
+```text
+TEST   phase=base        host=28  base=4  all=[1 0 2 2]
+report                   host=16  count=2      <-- foreign, inside the window
+TEST   phase=second-done host=28  all=[1 0 2 2 2]
+report                   host=28  count=1      <-- its own, correct, 0.95 s later
+TEST   phase=read        host=28  read=2  -> FAIL "= 2, want exactly 1"
+```
+
+The reclaim contract held throughout. The window is wide because the test takes
+its baseline before compiling a trigger module, which under `-race` costs ~21 s,
+during which other hosts publish. Many of those hosts inherit the production 15 m
+TTL (37 hosts in one run, from the test files that call `newReactorHost()`
+directly rather than `newReactorHost(t)`), so each arms a self-re-arming sweep
+timer at ttl/4 ≈ 3 m 45 s and republishes its resident count for the rest of the
+~24 min run — `sharedReactorHost` alone reported 6 twelve times, which is exactly
+the "= 6" observed.
+
+So: a test-isolation defect, not a product defect. The same host-less
+process-wide-channel pattern appears in 12 test files; two of them assert on the
+host-less `OnInstanceRecycled` stream (`TestReclaimReportsCountAndCause` and
+`TestSupplyChangedOrphansNothingWhenReclaimWinsMidSwap`) and would inflate the
+same way if a foreign reclaim landed in their window. They have not been observed
+to flake, but they are the same defect shape and need an owner.
+
+Measured 2026-09-17 (8-core host, workspace-local `GOCACHE`): the same
+`-race` invocation on a compile-dominated subset costs **2m28s cold vs 28s
+warm — 5.2x** — because wazero's guest-module cache is a separate directory
+(`XFLOW_WASM_CACHE_DIR`, defaulting under `os.UserCacheDir()`) that
+`actions/setup-go`'s `cache: true` does **not** cover. So the ~24 m figure above
+is substantially a COLD-cache tax, and CI re-paid it on every run.
+
+CI now caches that directory — the `Restore WASM compilation cache` step in the
+`test` and `integration` jobs of `.github/workflows/ci.yml`, which share one
+archive. A warm **full-package** number has not been measured: the 5.2x comes
+from a subset deliberately chosen to be compile-dominated, so read it as the
+direction and rough size of the win, not as a predicted full-package time. A
+partial hit is safe by construction — wazero namespaces the directory by its own
+version and GOOS/GOARCH and keys each entry by module content, so an entry that
+is stale or from another platform is inert rather than wrong.
+Two consequences worth knowing before adjusting anything here:
+
+- **The pre-2026-09-17 15-minute watchdog sat ~1.6x below the measured `-race`
+  cost.** `WASM_TEST_TIMEOUT ?= 15m` fired on a gate whose real cost is ~24 m;
+  when it fires, the goroutine dump it prints names whichever test was running,
+  that goroutine is not a culprit, and reading it as one is what produced the
+  earlier misattributed "902 s" failure. `WASM_TEST_TIMEOUT` is now 45 m —
+  headroom for slower and noisier CI hosts, not a budget to fill.
+- **Under `-race`, a test that makes wazero compile a fresh guest module costs a
+  flat ~23 s**, so per-test runtime is a poor measure of how "heavy" a test is.
+  `TestABI_MinimalGuestWorks` is 0.64 s untagged and 23.6 s under `-race`, while
+  tests that reuse an already-compiled module stay under 1 s. A test resolving
+  several distinct modules costs a multiple of ~23 s regardless of what it
+  asserts. This is also why a "partition off the slowest tests" gate cannot
+  work: per-test time measures how many distinct modules a test resolves, which
+  correlates with contract breadth, not fixture-ness.
+
+Raise `WASM_TEST_TIMEOUT` only to a measured value recorded alongside the change.
+
+A bare `go test ./... -race` cannot carry this package: Go's per-package default
+timeout is 10 m, well under the ~24 m the run needs, so the package fails there
+with a timeout panic and the same misleading goroutine dump. Use the Makefile
+targets, which supply the watchdog. (`make test` deliberately excludes the WASM
+package from its 5 m fan-out for the same reason.)
+
+#### Known hazard: an externally deleted WASM cache directory
+
+wazero's `fileCache.Add` calls `os.CreateTemp(dirPath, ...)`, which returns
+ENOENT when the *parent directory* is gone, so a compile fails with a
+distinctive signature:
+
+```text
+compile module: open <cache dir>/wazero-<ver>-<arch>-<os>/<sha>.NNNN.tmp: no such file or directory
+```
+
+The cause observed on 2026-09-17 was **external**, not a defect in this
+package: the cache directory configured for the run (`XFLOW_WASM_CACHE_DIR`) was
+deleted by a concurrent disk-cleanup step while the package was still running.
+12 of the 13 `-race` failures in the run above carry that signature, they
+cluster at the tail of the run, and tests that did not need a fresh guest
+compile kept passing afterwards.
+
+So the actionable reading is: this signature means the cache directory vanished
+mid-run. Check for an external cleanup before investigating this package. The
+package's own sweep is not a candidate — `sweepCache` preserves empty version
+directories by design and skips `.tmp` files younger than `staleTempAge`.
+
+Because a run's cache directory can be a gigabyte or more, do not delete
+`.tmp/*` (or any `XFLOW_WASM_CACHE_DIR`) while a package run is in flight.
 
 ### Go coverage gate
 
@@ -67,7 +191,7 @@ make test-coverage
 The target runs every ordinary package with a 5-minute package timeout, then
 runs the script seam and JavaScript package serially with `-p=1` and a focused
 5-minute timeout. It runs the complete WASM package once with `-p=1` and a
-15-minute timeout, then merges that profile with the others. This is the single
+45-minute watchdog, then merges that profile with the others. This is the single
 CI execution of the WASM suite; newly added package tests are included
 automatically rather than relying on a maintained skip list.
 
@@ -224,8 +348,8 @@ gate and is not the focused G1 evidence entry.
 
 | Target | Directory | Notes |
 |---|---|---|
-| `make test-script-wasm` | `node/internal/code/script`, `node/internal/code/script/js`, `node/internal/code/script/wasm` | Serialized script/qjs gate plus one isolated WASM package run (15m timeout) |
-| `make test-coverage` | all Go packages | Race-enabled atomic coverage; ordinary/script packages use 5m and WASM runs once in isolation (15m) |
+| `make test-script-wasm` | `node/internal/code/script`, `node/internal/code/script/js`, `node/internal/code/script/wasm` | Serialized script/qjs gate plus one isolated WASM package run (45m watchdog) |
+| `make test-coverage` | all Go packages | Race-enabled atomic coverage; ordinary/script packages use 5m and WASM runs once in isolation (45m) |
 | `make test-perf` | `test/perf/` | Benchmarks, needs `make env-up` (Redis + Kafka) |
 | `make test-soak` | `test/soak/` | HA soak smoke, runs on in-process miniredis; no real Redis required |
 | `make test-concurrency` | `backend/providers/...` | Concurrency stress, gated by `concurrency` build tag |
