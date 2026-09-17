@@ -364,6 +364,16 @@ func (e *Executor) Execute(ctx context.Context, req Request) (Result, error) {
 		result.Outcome = OutcomeSuccess
 		result.Exits = collector.Exits()
 	case types.ExecutionStatusFailed:
+		// The member's lease is clamped to req.Deadline, so its timeout can
+		// commit the inner failure before the independently scheduled execCtx
+		// timer wakes WaitDone. The absolute group deadline is authoritative:
+		// once it has passed, this is a group timeout rather than a member
+		// failure. Check the instant directly instead of execCtx.Err() so the
+		// two timers cannot race result classification.
+		if timeout, expired := expiredDeadlineResult(req.Deadline); expired {
+			result = timeout
+			break
+		}
 		result.Outcome = OutcomeFailed
 		if f := observer.fatal(); f != nil {
 			result.Error = f.Err.Error()
