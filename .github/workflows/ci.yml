@@ -28,6 +28,19 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    # The slowest job: every Go gate runs here serially, and
+    # `make test-coverage` alone budgets 5m + 5m + 5m + 45m across its four
+    # package groups — the last is WASM_TEST_TIMEOUT, because a whole-package
+    # `-race` run of it measured 1424.7 s on 2026-09-17. 75m clears that
+    # ceiling plus lint/vet/vuln-scan overhead, and is finite so a hung job
+    # cannot reach the 6h default.
+    timeout-minutes: 75
+    env:
+      # Pin the WASM compilation cache to the path this job restores and saves
+      # below, instead of letting it follow os.UserCacheDir(), so the cache
+      # steps and the compiler cannot disagree about where it lives. Kept
+      # outside the workspace so it cannot affect worktree-cleanliness gates.
+      XFLOW_WASM_CACHE_DIR: ${{ runner.temp }}/xflow-wasm-cache
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -228,6 +241,9 @@ jobs:
   web:
     name: Web
     runs-on: ubuntu-latest
+    # install + lint/typecheck/test/boundaries/fixtures/build + two
+    # Playwright suites + coverage, on a cold pnpm store.
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
@@ -295,6 +311,8 @@ jobs:
   openapi:
     name: OpenAPI Contract
     runs-on: ubuntu-latest
+    # Two `npx` downloads (spectral, redocly) plus one Go test package.
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -321,6 +339,10 @@ jobs:
     # main the range would be empty or the whole history.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    # Up to MAX_COMMITS (30) sequential `go build ./...` runs, each from a
+    # fresh `git archive` extraction. They share GOCACHE/GOMODCACHE, so only
+    # the first is cold.
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
