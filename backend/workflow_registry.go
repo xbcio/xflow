@@ -229,6 +229,20 @@ type DurableWorkflowReplaceCapability interface {
 	WorkflowActivationProjectionOutbox
 }
 
+// WorkflowListOptions bounds one enumeration page. It mirrors
+// store.ListOptions (zero Limit means unbounded, non-positive Offset means
+// zero) so a backend registry can be listed with the same vocabulary as the
+// durable stores.
+type WorkflowListOptions struct {
+	// Limit is the maximum number of ids to return. Zero means unbounded —
+	// implementations must return every match rather than none, which is not
+	// the natural reading of a SQL LIMIT.
+	Limit int
+	// Offset is the number of leading ids to skip in the namespace's stable
+	// enumeration order.
+	Offset int
+}
+
 type WorkflowRegistry interface {
 	AddWorkflow(ctx context.Context, rec WorkflowRecord) (WorkflowRecord, error)
 	GetWorkflow(ctx context.Context, id types.WorkflowID) (WorkflowRecord, error)
@@ -244,4 +258,21 @@ type WorkflowRegistry interface {
 	// Engine.AddWorkflow to upgrade legacy-format hashes when semantics match.
 	UpdateDefinitionHash(ctx context.Context, id types.WorkflowID, expectedOldHash, newHash string) error
 	RemoveWorkflow(ctx context.Context, id types.WorkflowID) error
+
+	// ListWorkflows returns the ids of the workflows registered in ns, newest
+	// registry revision first, then by id ascending so the order is total and
+	// stable across pages.
+	//
+	// ns is a required scope, not an optional filter: it is matched exactly, so
+	// an empty or unknown namespace yields an empty result and never stands in
+	// for "every namespace". There is deliberately no variant that enumerates
+	// across namespaces — a registry-wide enumeration would be a cross-tenant
+	// listing endpoint, and the only registry-wide index that exists is the
+	// append-only projection-discovery set, which is not an authority for
+	// "which workflows exist".
+	//
+	// The result contains ids only. Callers that need definitions read them
+	// back with GetWorkflow, which keeps a page of ids O(page) rather than
+	// O(page × definition size) on the wire.
+	ListWorkflows(ctx context.Context, ns namespace.Namespace, opts WorkflowListOptions) ([]types.WorkflowID, error)
 }

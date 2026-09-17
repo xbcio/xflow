@@ -173,6 +173,66 @@ func (r *workflowRegistry) RemoveWorkflow(ctx context.Context, id types.Workflow
 	return nil
 }
 
+// ListWorkflows returns one page of the ids registered in ns, newest registry
+// revision first and then by id ascending, matching the distributed registry's
+// enumeration contract.
+//
+// The in-memory registry is single-process and namespace-agnostic everywhere
+// else (GetWorkflow and GetWorkflowByKey ignore the context namespace), so
+// enumeration is the one place where a scope is supplied explicitly and must be
+// honoured: ns is matched exactly and is validated first, so an empty or
+// malformed namespace is rejected rather than interpreted as "every namespace",
+// and an unknown namespace yields an empty result rather than an error.
+//
+// A record whose Namespace field is empty resolves to namespace.Default, the
+// same mapping workflowProjectionNamespace already applies to projection
+// namespaces for records written before the field was populated.
+func (r *workflowRegistry) ListWorkflows(ctx context.Context, ns namespace.Namespace, opts backend.WorkflowListOptions) ([]types.WorkflowID, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := namespace.Validate(ns); err != nil {
+		return nil, fmt.Errorf("list workflows: %w", err)
+	}
+	if opts.Limit < 0 || opts.Offset < 0 {
+		return nil, fmt.Errorf("list workflows: limit and offset must not be negative (limit=%d offset=%d)", opts.Limit, opts.Offset)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	records := make([]backend.WorkflowRecord, 0, len(r.byID))
+	for _, rec := range r.byID {
+		if workflowProjectionNamespace(rec.Namespace) != ns {
+			continue
+		}
+		records = append(records, rec)
+	}
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].RegistryRevision != records[j].RegistryRevision {
+			return records[i].RegistryRevision > records[j].RegistryRevision
+		}
+		return records[i].ID < records[j].ID
+	})
+
+	start := opts.Offset
+	if start > len(records) {
+		start = len(records)
+	}
+	records = records[start:]
+	if opts.Limit > 0 && opts.Limit < len(records) {
+		records = records[:opts.Limit]
+	}
+	ids := make([]types.WorkflowID, 0, len(records))
+	for _, rec := range records {
+		ids = append(ids, rec.ID)
+	}
+	return ids, nil
+}
+
 // CompareAndReplaceWorkflow atomically validates an expected revision and
 // replaces both registry indexes. A committed MutationID is retained so a
 // retry can recover the exact result without reapplying the mutation.

@@ -68,6 +68,7 @@ func New(rdb redis.UniversalClient) *Registry {
 //	xflow:wfreg:v2:{ns:<sha256(namespace)>}:projection:lease:<sha256(mutation-id)>
 //	xflow:wfreg:v2:{ns:<sha256(namespace)>}:legacy:bykey:<sha256(logical-key)>
 //	xflow:wfreg:v2:{ns:<sha256(namespace)>}:legacy:byid:<sha256(workflow-id)>
+//	xflow:wfreg:v2:{ns:<sha256(namespace)>}:index
 //
 // bykey and byid are Redis hashes containing the same payload and compact CAS
 // metadata. meta repeats only the compact metadata. Keeping a complete payload
@@ -128,6 +129,21 @@ func workflowProjectionPendingKey(t namespace.Namespace) string {
 
 func workflowProjectionLeaseKey(t namespace.Namespace, mutationID string) string {
 	return registryPrefix(t) + "projection:lease:" + digestKeyComponent(mutationID)
+}
+
+// workflowIndexKey is the per-namespace enumeration index: a ZSET of workflow
+// ids belonging to exactly one namespace. It lives in that namespace's digest
+// slot so every index mutation runs inside the same Lua script — and therefore
+// the same Redis Cluster slot — as the record mutation it mirrors.
+//
+// The score is the negation of the record's registry revision, so a plain
+// ascending ZRANGE lists the namespace's records newest-revision-first, and a
+// replace that allocates a fresh revision naturally re-scores the id to the
+// front. Revisions come from the namespace-global INCR counter, so two live ids
+// in one namespace cannot share a score and the ZSET's lexicographic tie-break
+// over equal scores is never load-bearing.
+func workflowIndexKey(t namespace.Namespace) string {
+	return registryPrefix(t) + "index"
 }
 
 // Migration markers are permanent v2 tombstones for a legacy identity. They
@@ -204,6 +220,7 @@ redis.call('HSET', KEYS[2],
 redis.call('HSET', KEYS[3],
 	'id', ARGV[1], 'key', ARGV[2], 'version', ARGV[3], 'hash', ARGV[4],
 	'revision', tostring(revision), 'fingerprint', ARGV[5])
+redis.call('ZADD', KEYS[6], -revision, ARGV[1])
 return {'created', payload}
 `)
 
@@ -254,6 +271,7 @@ redis.call('HSET', KEYS[3],
 	'revision', tostring(revision), 'fingerprint', ARGV[5])
 redis.call('SET', KEYS[5], ARGV[1])
 redis.call('SET', KEYS[6], ARGV[2])
+redis.call('ZADD', KEYS[7], -revision, ARGV[1])
 return {'imported', payload}
 `)
 
@@ -292,6 +310,7 @@ redis.call('HSET', KEYS[2],
 redis.call('HSET', KEYS[3],
 	'id', ARGV[1], 'key', ARGV[2], 'version', ARGV[8], 'hash', ARGV[5],
 	'revision', tostring(revision), 'fingerprint', ARGV[6])
+redis.call('ZADD', KEYS[5], -revision, ARGV[1])
 return {'ok', payload}
 `)
 
@@ -317,6 +336,7 @@ redis.call('DEL', KEYS[1], KEYS[2], KEYS[3])
 if not hasByID and not hasByKey then
 	return {'notfound'}
 end
+redis.call('ZREM', KEYS[4], ARGV[1])
 return {'ok'}
 `)
 
@@ -398,6 +418,12 @@ redis.call('HSET', KEYS[1],
 	'previous_hash', ARGV[5], 'previous_revision', ARGV[6],
 	'projection_namespace', ARGV[16], 'projection_state', 'pending')
 redis.call('SADD', KEYS[9], ARGV[1])
+-- A replacement usually retires the source id and installs a different
+-- destination id, so the index must lose the source membership as well as gain
+-- the destination one. When both ids are equal this is a re-score, and ZREM
+-- before ZADD leaves exactly one membership at the new revision.
+redis.call('ZREM', KEYS[10], ARGV[3])
+redis.call('ZADD', KEYS[10], -revision, ARGV[7])
 return {'replaced', payload, ARGV[3], ARGV[4], previousVersion, ARGV[5], ARGV[6]}
 `)
 
@@ -525,6 +551,163 @@ end
 return result
 `)
 
+// reconcileWorkflowIndexLua repairs the per-namespace workflow index against
+// the records that are actually live in the same namespace, and is the only
+// index operation that is not part of a record mutation.
+//
+// It is not a mutation of authority state, so it does not need to be atomic
+// with one: it never writes a bykey/byid/meta/revision key, only the index, and
+// every membership it inserts or drops is derived from keys observed inside the
+// same script run. A concurrent add/replace/remove either happens before the
+// SCAN (and is therefore observed) or after the script (and maintains the index
+// itself), so the repair can never invent or destroy a membership that the
+// authority write path would not.
+//
+// It exists for the upgrade case: records written before this index key
+// existed carry no membership. SCAN is safe here precisely because KEYS[2] is
+// the namespace-prefixed byid pattern, so the traversal is bounded to one
+// namespace and one Cluster slot rather than being a keyspace-wide walk.
+//
+// KEYS[1] is the byid prefix (also the id-stripping base), KEYS[2] is that
+// prefix with the trailing wildcard, and KEYS[3] is the index.
+const reconcileWorkflowIndexScript = `
+local function revisionOf(key)
+	return tonumber(redis.call('HGET', key, 'revision'))
+end
+
+local revisions = {}
+local cursor = '0'
+repeat
+	local batch = redis.call('SCAN', cursor, 'MATCH', KEYS[2], 'COUNT', 256)
+	cursor = batch[1]
+	for _, key in ipairs(batch[2]) do
+		local revision = revisionOf(key)
+		if revision then
+			revisions[key] = revision
+		end
+	end
+until cursor == '0'
+
+local existing = redis.call('ZRANGE', KEYS[3], 0, -1, 'WITHSCORES')
+local indexed = {}
+for i = 1, #existing, 2 do
+	indexed[existing[i]] = tonumber(existing[i + 1])
+end
+
+local added = 0
+for key, revision in pairs(revisions) do
+	local id = string.sub(key, string.len(KEYS[1]) + 1)
+	if indexed[id] ~= -revision then
+		redis.call('ZADD', KEYS[3], -revision, id)
+		added = added + 1
+	end
+end
+
+local removed = 0
+for id, _ in pairs(indexed) do
+	if revisions[KEYS[1] .. id] == nil then
+		redis.call('ZREM', KEYS[3], id)
+		removed = removed + 1
+	end
+end
+return {tostring(added), tostring(removed)}
+`
+
+var reconcileWorkflowIndexLua = redis.NewScript(reconcileWorkflowIndexScript)
+
+// ListWorkflows returns one page of the namespace's workflow ids, newest
+// registry revision first and then by id ascending.
+//
+// ns is a required scope that is validated and then used as the only source of
+// the keys this read touches, so an empty, malformed, or unknown namespace can
+// never widen the scope: cross-namespace enumeration is structurally
+// impossible rather than merely unimplemented. The context namespace is
+// deliberately not consulted, so a caller cannot get a different scope than the
+// one it named.
+//
+// Two properties matter for the caller's correctness:
+//
+//   - Only live ids are returned. Each candidate is confirmed against its byid
+//     record inside one pipeline, so a membership left behind by an out-of-band
+//     key deletion is skipped rather than handed to a caller that would then
+//     fail to resolve it. The read itself never writes.
+//   - The index is self-healing for data that predates it. When a page starts
+//     at offset zero and resolves to no live ids at all, the index is
+//     reconciled against the namespace's live byid records and the read is
+//     retried once. That is what makes records written before this key existed
+//     enumerable; a populated namespace pays a single ZRANGE plus one pipeline
+//     on the hot path and never scans.
+func (r *Registry) ListWorkflows(ctx context.Context, ns namespace.Namespace, opts backend.WorkflowListOptions) ([]types.WorkflowID, error) {
+	if err := namespace.Validate(ns); err != nil {
+		return nil, fmt.Errorf("list workflows: %w", err)
+	}
+	if opts.Limit < 0 || opts.Offset < 0 {
+		return nil, fmt.Errorf("list workflows: limit and offset must not be negative (limit=%d offset=%d)", opts.Limit, opts.Offset)
+	}
+	offset := int64(opts.Offset)
+	stop := int64(-1)
+	if opts.Limit > 0 {
+		stop = offset + int64(opts.Limit) - 1
+	}
+
+	ids, err := r.liveWorkflowIDs(ctx, ns, offset, stop)
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) > 0 || opts.Offset != 0 {
+		return ids, nil
+	}
+
+	if _, reconcileErr := reconcileWorkflowIndexLua.Run(
+		ctx,
+		r.rdb,
+		[]string{
+			workflowByIDKeyPrefix(ns, ""),
+			workflowByIDKeyPrefix(ns, "") + "*",
+			workflowIndexKey(ns),
+		},
+	).Result(); reconcileErr != nil {
+		return nil, fmt.Errorf("list workflows for namespace %q: reconcile index: %w", ns, reconcileErr)
+	}
+	return r.liveWorkflowIDs(ctx, ns, offset, stop)
+}
+
+// liveWorkflowIDs reads one index page and drops members whose byid record is
+// gone. The confirmation runs as a pipeline so a page costs one extra round
+// trip regardless of size, and it issues reads only: pruning is the reconcile
+// path's job, so a list can never surprise a concurrent writer.
+func (r *Registry) liveWorkflowIDs(ctx context.Context, ns namespace.Namespace, offset, stop int64) ([]types.WorkflowID, error) {
+	members, err := r.rdb.ZRange(ctx, workflowIndexKey(ns), offset, stop).Result()
+	if err != nil {
+		return nil, fmt.Errorf("list workflows for namespace %q: %w", ns, err)
+	}
+	if len(members) == 0 {
+		return nil, nil
+	}
+
+	pipe := r.rdb.Pipeline()
+	exists := make([]*redis.IntCmd, len(members))
+	for i, member := range members {
+		exists[i] = pipe.Exists(ctx, workflowByIDKey(ns, "", types.WorkflowID(member)))
+	}
+	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+		return nil, fmt.Errorf("list workflows for namespace %q: confirm index members: %w", ns, err)
+	}
+
+	ids := make([]types.WorkflowID, 0, len(members))
+	for i, member := range members {
+		live, cmdErr := exists[i].Result()
+		if cmdErr != nil {
+			return nil, fmt.Errorf("list workflows for namespace %q: confirm index member %q: %w", ns, member, cmdErr)
+		}
+		if live == 0 {
+			continue
+		}
+		ids = append(ids, types.WorkflowID(member))
+	}
+	return ids, nil
+}
+
 func (r *Registry) AddWorkflow(ctx context.Context, rec backend.WorkflowRecord) (backend.WorkflowRecord, error) {
 	t := namespace.FromContext(ctx)
 	if err := namespace.Validate(t); err != nil {
@@ -574,6 +757,7 @@ func (r *Registry) addWorkflowV2(ctx context.Context, t namespace.Namespace, sto
 			workflowIDMapKey(t, stored.ID),
 			workflowRevisionKey(t),
 			workflowProjectionPendingKey(t),
+			workflowIndexKey(t),
 		},
 		string(stored.ID),
 		stored.Key,
@@ -787,6 +971,7 @@ func (r *Registry) importLegacyWorkflow(ctx context.Context, t namespace.Namespa
 			workflowRevisionKey(t),
 			workflowLegacyByKeyMarker(t, stored.Key),
 			workflowLegacyByIDMarker(t, stored.ID),
+			workflowIndexKey(t),
 		},
 		string(stored.ID),
 		stored.Key,
@@ -861,6 +1046,7 @@ func (r *Registry) UpdateDefinitionHash(ctx context.Context, id types.WorkflowID
 			workflowByKeyKey(t, existing.Key),
 			workflowIDMapKey(t, id),
 			workflowRevisionKey(t),
+			workflowIndexKey(t),
 		},
 		string(id),
 		existing.Key,
@@ -919,6 +1105,7 @@ func (r *Registry) RemoveWorkflow(ctx context.Context, id types.WorkflowID) erro
 				workflowByIDKey(t, key, id),
 				workflowByKeyKey(t, key),
 				workflowIDMapKey(t, id),
+				workflowIndexKey(t),
 			},
 			string(id),
 			key,
@@ -1048,6 +1235,7 @@ func (r *Registry) CompareAndReplaceWorkflow(ctx context.Context, req backend.Wo
 			workflowIDMapKey(t, stored.ID),
 			workflowRevisionKey(t),
 			workflowProjectionPendingKey(t),
+			workflowIndexKey(t),
 		},
 		req.MutationID,
 		requestFingerprint,
