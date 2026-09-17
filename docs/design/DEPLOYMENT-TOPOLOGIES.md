@@ -428,8 +428,7 @@ HTTP 是首选传输，gRPC 是实验性的；跨网络域走 Relay Gateway 而�
 Prometheus 是拉模型：采集端必须能主动连到被采集端。runner 的目标形态是跨网络域
 部署（§5），这个方向的连通性不存在，于是 runner 进程里正确产出的指标无人可抓。
 
-现已实现上报通道（设计见
-[runner 指标代理通道 spec](../superpowers/specs/2026-08-09-runner-metrics-proxy-design.md)）：
+现已实现上报通道（断网域下 runner 指标的唯一出路）：
 
 ```
 runner: Gather() → 注入 runner_id → protobuf(delimited)+gzip
@@ -440,6 +439,11 @@ server: MetricsInbox → Redis xflow:runner:metrics:{control}:payload:<id> (TTL 
         ▼
         /metrics ──────────► Prometheus scrape
 ```
+
+（上报端点常量 `ReportMetricsPath = "/v1/runners/metrics"` 在
+`service/protocol/metrics.go`；存储前缀 `RedisMetricsKeyPrefix` 与保留期
+`DefaultMetricsRetention = 3 × DefaultRunnerLiveTTL` 在
+`service/control/redis_metrics_store.go`。）
 
 两个 flag 各控一条出口，**互不绑定**：
 
@@ -579,8 +583,28 @@ Relay Gateway 用于 runner 无法直连 server、不能互相直连或需要本
 | Relay Gateway | **规划** | 网络隔离中继拓扑已定义，尚无独立进程实现 |
 | 跨域 runner 指标采集 | **已实现** | runner `--report-metrics` → server `/v1/runners/metrics` → 并入 server `/metrics`（§4.7）；Redis 共享 inbox 支持多副本，`IsLive` 过期，`runner_id` 由 server 覆盖 |
 | 批次任务队列隔离 | **已实现** | 两个后端各自分离批次通道并加权调度（§4.3）；升级须 consumer 先于 producer |
+| 控制面 HA / 多 namespace 生产隔离 | **未验收** | leader election 只 gate maintenance（§4.5）；G2 仍需真实环境报告；对外声明见 [RELEASE-GATES.md](./RELEASE-GATES.md) §4.2 与 §6 |
 
 一句话：**local / cluster 已可用；server / runner 的 durable handoff MVP 已落地；remote SDK、Relay Gateway、Loop/Split 正式版与 streaming / credit-flow control 仍在规划或实验阶段。完整 control-plane HA 仍需独立验证与设计。**
+
+### 7.1 实验性功能与非承诺（对外声明口径）
+
+下表是**对外声明**必须逐项照抄的边界清单，证据来源是仓库里已有的标记，不是本文档的自述：
+
+| 能力 | 口径 | 仓库证据 |
+|---|---|---|
+| gRPC streaming / credit-flow control | **实验性传输优化**，非生产可靠性承诺；HTTP long-poll 是生产通道。gRPC 还缺 ActivationAck，gated activation 只能靠重启 runner 恢复 | §4.5/§4.6；`service/runner/doc.go:6`、`service/protocol/doc.go:12`、`service/control/doc.go:18`（"gRPC (experimental, incomplete)"）；`test/integration/server_runner_e2e_test.go:178,202-205`（credit-flow 明示为 experimental，不在 release-gate 断言内） |
+| Loop / Split | **实验性**扩展路径，未纳入静态 DAG completion 与 server/runner production-ready 保证 | §7 本表 Loop/Split 行；`engine/interfaces.go:195`、`engine/commit.go:108` |
+| Node Group co-location | **实验/受限**，经 `WorkflowOptions.experimental_node_group` 显式开启 | [NODE-GROUP-COLOCATION.md](./NODE-GROUP-COLOCATION.md) 头部 Status；`types/workflow.go:53-59`；`api/openapi/xflow-v1.yaml:2234` |
+| Kafka aggregate `on_overflow` | 默认 `discard` 是**永久丢弃**；三个取值 `discard` / `block` / `dead_letter`，未识别取值使 activation 失败而非回退 | `node/trigger/kafka/aggregate.go:116-122,1326-1335`；`observability/metrics/metrics.go:445-447,453`（`xflow_trigger_messages_discarded_total`、`xflow_trigger_messages_dead_lettered_total`、`xflow_trigger_consumption_blocked`） |
+| leader election | 只协调 leader-only maintenance，**不是** control-plane HA / failover SLO | §4.5；[RELEASE-GATES.md](./RELEASE-GATES.md) §4 反声明 |
+| Remote SDK / Relay Gateway / Raft | **规划或不建设**：remote 与 Relay Gateway 无实现，Raft 明确不引入 | §7 本表对应行；[CORE-COMPONENTS.md](./CORE-COMPONENTS.md):5 |
+
+> 本阶段的**非范围**：Remote SDK、Relay Gateway、Raft，以及通用低代码 / ETL / 浏览器自动化平台。
+> 面向使用者的合并版声明（含支持矩阵与待批准事项）见
+> [README「Supported Topologies and Guarantees」](../../README.md#supported-topologies-and-guarantees)；
+> 本文档与 [RELEASE-GATES.md §6](./RELEASE-GATES.md#6-open-approvals未批准事项支持矩阵--迁移停机窗口--runbook-owner)
+> 同属该声明在仓库内的权威来源（§4.2 为门槛文档侧的同一口径）。
 
 ---
 

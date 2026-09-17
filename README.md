@@ -52,6 +52,107 @@ scheduler/runtime, not as the business approval system of record:
 - Complex approval nodes should pass an approval event ID in the signal payload
   and read the authoritative approval event set from the host service database.
 
+## Delivery Semantics
+
+XFlow is **at-least-once**, not exactly-once. Both the handler boundary and the
+Runner Protocol may invoke the same work more than once: lease replay after a
+runner reconnect, a node execution timeout, and failover to another runner can
+each cause a duplicate handler invocation. The engine fences the DAG itself, so
+a duplicate result does not advance a node twice, but it cannot deduplicate a
+host-side side effect. **Business side effects are the host's responsibility**,
+and the recommended idempotency key is `execution_id` + `node_name` (or an
+equivalent business key, such as the source record's own ID).
+
+The same contract reaches the Kafka trigger's source records. In
+`aggregate` mode, `on_overflow` defaults to `discard`, which permanently drops
+records that arrive while a partition is at its retained bound — that is loss,
+not deferral. Any topic that cannot afford it must set `on_overflow`
+explicitly; the alternatives are `block` (loses nothing, but halts fetching for
+the whole assignment and is invisible to the lag gauges) and `dead_letter`
+(republishes to `dead_letter_topic` before the offset may pass). The per-value
+trade-offs are spelled out in
+[DSL-SPECIFICATION.md](docs/design/DSL-SPECIFICATION.md) and
+[kafka-batch-overflow.yaml](docs/dsl-samples/kafka-batch-overflow.yaml).
+
+## Supported Topologies and Guarantees
+
+Nothing outside the lists in this section is promised. When a capability below
+is marked **planned** or **unproven**, treat it as unavailable rather than as a
+configuration you can enable.
+
+**What XFlow supports today**
+
+- **Delivery is at-least-once** — handler invocation and Runner Protocol
+  responses may both repeat; the host owns side-effect idempotency under the
+  `execution_id` + `node_name` key. See [Delivery Semantics](#delivery-semantics)
+  above.
+- **local, cluster, and the server + runner split** are implemented. The
+  split's durable Redis handoff (assignment claim, reconnect lease replay,
+  fenced release) is exercised end-to-end against a real Redis/Asynq backend by
+  the required integration shard (`make test-integration-required`), alongside
+  the runner-reconnect replay coverage in
+  [DEPLOYMENT-TOPOLOGIES.md](docs/design/DEPLOYMENT-TOPOLOGIES.md) §4.2.
+- **HTTP long-poll is the production Runner Protocol channel**; gRPC is the
+  experimental one (see below).
+- **Runner-side enforcement** — bearer token / mTLS / runner policy allowlist,
+  network-scoped runner placement, and server-issued workflow namespaces — is
+  implemented. Capability matching is exact on `node_type` / `node_version`;
+  tags, env, region, and weighted scheduling are **planned**.
+
+**Topology support matrix**
+
+| Topology | Status | Notes |
+|---|---|---|
+| SDK `local` — in-process, in-memory | Supported | No persistence; direct inline `ActionHandler` only here |
+| SDK `cluster` — peer processes on Redis/Asynq | Supported | Every process submits and also executes; roles cannot be separated |
+| `server` + `runner` split via Runner Protocol | Supported | HTTP is the recommended production path (see the gRPC note below) |
+| Embedded `xflow.NewServer` / `xflow.NewRunner` | Supported | Same assembly as `cmd/server` / `cmd/runner` |
+| SDK `remote` thin client | **Planned** | No factory or client exists yet; use `cluster` or the server HTTP API |
+| Relay Gateway | **Planned** | No standalone process; runners must reach the server directly |
+| Leader election (Redis lease) | Implemented, **not** HA | Gates leader-only maintenance only; see below |
+
+The topology catalogue, its per-entry status labels, and the reasoning behind
+each are maintained in
+[DEPLOYMENT-TOPOLOGIES.md](docs/design/DEPLOYMENT-TOPOLOGIES.md) §1 and §7.
+
+**Not supported, and not to be claimed**
+
+- **No full control-plane HA.** Leader election (`RedisLeaderElector`) only
+  elects the process allowed to run leader-only maintenance. It is not
+  metadata replication, not cross-replica API ownership, and not a failover
+  SLO.
+- **No multi-namespace production isolation claim.** The namespace boundary is
+  implemented in code and contract-tested, but production isolation is not
+  accepted until a real multi-namespace environment is exercised.
+- **Out of scope**: the remote SDK, the Relay Gateway, Raft, and any general
+  low-code / ETL / browser-automation platform.
+
+**What would be required to claim HA**
+
+A real G2 control-plane HA soak: at least two servers, real Redis
+Sentinel/Cluster, ≥ 2 runners, and a persistent store,
+run through the existing fault matrix and written up in the existing HA soak
+report. `make test-soak` in this repository is **not** that evidence — it is an
+in-process run over a miniredis emulator, and its Redis-failover and
+network-partition injectors are expected to report themselves as env-gated
+because a single-node emulator cannot induce a real failover. The gate layering
+that defines this boundary is in
+[RELEASE-GATES.md](docs/design/RELEASE-GATES.md); the support matrix that this
+statement would need to match, and the decisions still awaiting an approver,
+are listed as open in
+[RELEASE-GATES.md §6](docs/design/RELEASE-GATES.md#6-open-approvals未批准事项支持矩阵--迁移停机窗口--runbook-owner).
+
+**Experimental capabilities**
+
+- **gRPC Runner Protocol streaming and credit-flow control** are experimental
+  transport optimizations. HTTP long-poll is the production channel. gRPC is
+  also missing the activation-ack path, so a gated activation under a
+  gRPC-only deployment can only be cleared by restarting the runner.
+- **Loop / Split** expansion paths are experimental and are excluded from
+  static-DAG completion guarantees.
+- **Node Group co-location** is implemented but experimental/limited, and is
+  opt-in through `WorkflowOptions.experimental_node_group`.
+
 ## DSL
 
 XFlow uses an n8n-inspired DSL. Key concepts:

@@ -209,6 +209,15 @@ namespace boundary 全链路代码与越权测试已完成（Phase 6-8，详见 
 - **leader 全局、不按 namespace 拆分**：control-plane leader 保持全局单 key `xflow:leader:control-plane`，避免 N 倍 election 开销；leader-only maintenance 通过 `ListNamespaces` 按 namespace 迭代（`xflow:namespaces` SET + 隐式 `default`）。
 - **代码完成 ≠ G2 验收完成**：namespace boundary 代码 + 越权测试完成只解除 G2 退出清单中“namespace boundary 全链路 + 越权测试”一项；历史 G1 已于 2026-07-24 闭合，但当前候选仍须完成 G1 clean-SHA 重签，G2 还依赖 Redis HA + 多副本 SLO（ENV-GATED）。
 
+## 4.2 支持声明（Support Statement）
+
+面向使用者的支持边界声明位于 [README「Supported Topologies and Guarantees」](../../README.md#supported-topologies-and-guarantees)：
+at-least-once 与宿主幂等键、支持拓扑矩阵、HA / 多 namespace 的「不承诺」清单、以及实验性功能清单。
+该节与本文档 §1–§4.1 的分层门槛和反声明是同一套边界；两者不一致时以本文档为准（门槛文档是判据来源）。
+
+一句话版本：**handler 与 Runner Protocol at-least-once；HTTP 是生产 runner 通道，gRPC streaming / credit-flow 与 Loop/Split / Node Group 为实验性；
+leader election 不等于 control-plane HA；G2 达成前不承诺 HA 或多 namespace 生产隔离。**
+
 ## 5. 配置要求清单
 
 G1 生产部署必须配置以下能力，详细示例见 [deployment-examples.md](../references/deployment-examples.md)：
@@ -225,3 +234,42 @@ G1 生产部署必须配置以下能力，详细示例见 [deployment-examples.m
 | structured logging | `--log-format json` | — |
 | 维护窗口 | SIGTERM graceful shutdown | [maintenance-window-runbook](../references/maintenance-window-runbook.md) |
 | Redis 备份/恢复演练 | 部署侧 | [maintenance-window-runbook](../references/maintenance-window-runbook.md) |
+
+## 6. OPEN APPROVALS（未批准事项：支持矩阵 / 迁移停机窗口 / runbook owner）
+
+> **本节全部为「未批准」。** 以下条目是**待办决策**，不是已签署的结论，也不是已授予的许可。
+> 在对应状态被改为 `APPROVED`（并由具名的**角色**记录批准来源）之前，任何文档、发布说明或
+> 对外材料都不得把支持矩阵、停机窗口或 runbook 覆盖情况表述为已批准。
+> 本节由文档维护者建立，**不代表任何批准已经发生**；决策必须由下表中的角色作出并回写状态。
+
+| # | 待决策事项 | 决策角色（非具名个人） | 该决策解锁 / 作为前置的证据 | 状态 |
+|---|---|---|---|---|
+| D1 | **批准支持矩阵**：明确支持的依赖版本与拓扑（Redis 单实例 / Sentinel / Cluster，MySQL 版本，Kafka 是否必需，runner 传输），以及被排除项（PostgreSQL 当前无 typed error classifier；gRPC-only 无 ActivationAck 自愈；Relay Gateway / remote SDK 不在范围内）。 | 产品负责人 + 运行时/后端负责人 | 使 README 的拓扑矩阵、[deployment-examples.md](../references/deployment-examples.md) 与 §5 配置清单成为**经批准**的支持边界；G2 环境必须与矩阵一致 | **OPEN — 未批准** |
+| D2 | **是否引入版本化 migration framework**：若引入，须同时批准离线迁移的停机窗口与回退方案；若不引入，须明确接受「无版本化迁移」这一现状。 | 运行时/后端负责人 + DBA / 存储负责人 | `db/xflow_schema.sql:262-265` 已声明该块为 BREAKING / OFFLINE MIGRATION 且 mixed-version operation 不受支持；D2 决定后续 schema 变更能否滚动升级 | **OPEN — 未批准** |
+| D3 | **批准停机窗口**：应用 `db/xflow_schema.sql` 的离线迁移、`make env-migrate` 演练以及备份/恢复演练所需的具体窗口（时长、通告方式）。 | 运维/on-call 负责人 + 产品负责人（业务影响） | D 阶段退出谓词中的「迁移在已批准的 offline 窗口中完成，并有恢复步骤」；窗口未批准前不得执行生产迁移 | **OPEN — 未批准** |
+| D4 | **是否投入真实 HA 环境**（≥ 2 server、真实 Redis Sentinel/Cluster、持久化 Store、Kafka、≥ 2 runner）。 | 产品负责人 + 基础设施/平台负责人（预算与采购） | G2 / B2 的 HA soak 报告；在报告填实前，README 的「不承诺 HA」保持不变 | **OPEN — 未批准** |
+| D5 | **是否投入真实多 namespace 环境**并规定其验收口径（多 principal 并发、跨 namespace 性能隔离基线）。 | 产品负责人 + 安全/权限负责人 | G2 的多 namespace 验收；在此之前不得宣称多 namespace 生产隔离 | **OPEN — 未批准** |
+| D6 | **runbook 覆盖缺口补齐**：为下表中的缺失 runbook 指定 owner（角色）与期限，或签署风险接受记录。 | 运维/on-call 负责人 | D 阶段退出谓词「缺失 runbook 列表清零或有明确 owner、期限和风险接受记录」 | **OPEN — 未批准** |
+| D7 | **Kafka aggregate overflow 策略**：`discard`（当前默认，永久丢弃）/ `block`（停整个 assignment 且 lag 不可见）/ `dead_letter`（需 `dead_letter_topic`）。三者语义见 [DSL-SPECIFICATION.md](./DSL-SPECIFICATION.md) §on_overflow 与 `node/trigger/kafka/aggregate.go`。 | 产品负责人 + 运行时/后端负责人 | 发布说明中的默认值与数据损失语义披露；选定后需同步 operator 文档与告警 | **OPEN — 未批准** |
+| D8 | **批准证据的验收判据**：HA soak 报告与安装/恢复演练的**验收标准**（而不是「是否执行」），即 §6 与 P0 Exit Gate 中 HA 行的签核口径。 | 运行时/后端负责人 + 运维/on-call 负责人 | G2 的签署结论与 P0 Exit Gate 的 HA 行；判据未批准前，任何 soak 报告都只能记为「已执行」而非「已通过」 | **OPEN — 未批准** |
+
+### 6.1 已存在与缺失的 runbook（D6 的输入）
+
+本表只描述**现状**，不构成对覆盖度的批准。已存在的 runbook 在 `docs/references/`：
+
+| 主题 | 现状 | 位置 / 缺口 |
+|---|---|---|
+| dead-letter 检视与回放 | 已存在 | [dead-letter-runbook.md](../references/dead-letter-runbook.md) |
+| 维护窗口（单副本 SLO、升级后验证） | 已存在 | [maintenance-window-runbook.md](../references/maintenance-window-runbook.md) |
+| Redis 备份 / 恢复演练 | 已存在（演练记录本身仍是部署时落实项） | [maintenance-window-runbook.md](../references/maintenance-window-runbook.md) §4 |
+| 部署配置示例与启动前核对清单 | 已存在 | [deployment-examples.md](../references/deployment-examples.md) |
+| HA soak 方案、报告模板、容量报告模板 | 已存在（真实环境填实仍 ENV-GATED） | [ha-soak-plan.md](../references/ha-soak-plan.md)、[ha-soak-report-template.md](../references/ha-soak-report-template.md)、[capacity-report-template.md](../references/capacity-report-template.md) |
+| Kafka lag 观测与处置（含 lag 盲区：`on_overflow=block` 下停止 fetch 的分区不再采样 lag） | **缺失** | 待 D6 指定 owner 与期限 |
+| runner 替换 / 排空（drain）标准流程 | **缺失** | 待 D6 指定 owner 与期限 |
+| 密钥轮换（runner token / mTLS / supply KEK） | **缺失** | 待 D6 指定 owner 与期限 |
+
+### 6.2 回写规则
+
+决策完成后，本节只做两件事：把对应 `状态` 改为 `APPROVED`（并在同格注明批准来源的角色与日期），
+以及把解锁证据的链接指向实际产物（支持矩阵文档、签名报告、runbook PR）。
+在此之前，`OPEN — 未批准` 是这些条目的唯一正确状态。
