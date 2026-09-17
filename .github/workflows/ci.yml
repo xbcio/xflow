@@ -89,6 +89,13 @@ jobs:
           version: latest
           args: ./...
 
+      # `make vet` is a strict superset of `go vet ./...`: it also builds
+      # five build-tag configurations (integration/perf/soak/stress/
+      # concurrency). A tagged suite rotted silently at 92bd8fb because no
+      # Makefile target and no workflow ever built it.
+      - name: Vet
+        run: make vet
+
       - name: Unit tests
         run: make test
 
