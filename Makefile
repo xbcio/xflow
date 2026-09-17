@@ -1592,6 +1592,142 @@ test-g1-evidence-required: check-go
 	echo "==> G1 manifest published: $$final_manifest"; \
 	echo "==> G1 evidence bundle committed for run $$run_id"
 
+# ── Release record ─────────────────────────────────────────────────────────────
+
+# Every evidence artifact this repository produces is gitignored, so a fresh
+# clone cannot tell current evidence from historical evidence and a release
+# claim rests on files the reader does not have. release-summary derives the ONE
+# tracked record from those artifacts: small, reviewable, non-sensitive, and
+# checkable against the artifact it came from (the G0 SHA-256 sidecar and the G1
+# canonical binding digest are both recomputed, both gates must name the same
+# candidate SHA, and an unsigned gate run is refused).
+#
+# The destination is release/evidence-summary.json: a release record, next to
+# nothing else, deliberately distinct from docs/design/RELEASE-GATES.md, which
+# is the policy the record is judged against. The format is a contract —
+# docs/references/release-summary-format.md.
+#
+# Run it after `make test-g0-evidence-required REVIEWER=<name> RE_RUNNER=<name>`
+# (and `make test-g1-evidence-required` when G1 evidence is in scope).
+RELEASE_SUMMARY ?= release/evidence-summary.json
+
+release-summary:
+	@./scripts/release-summary.sh \
+		--out "$(RELEASE_SUMMARY)" \
+		--g0-dir "$(G0_RAW_DIR)" \
+		--g1-manifest "$(G1_MANIFEST)"
+
+# evidence-image-digests prints a ready-to-paste EVIDENCE_CONTAINER_IMAGES value
+# with registry digests resolved from a local docker/podman daemon. The G0
+# target resolves them itself when the daemon is present; this target is for the
+# cases where it is not (CI, a remote host, a digest observed elsewhere).
+evidence-image-digests:
+	@./scripts/evidence-images.sh --format make
+
+# ── Supply chain (plan §9 F) ───────────────────────────────────────────────────
+#
+# pin-audit checks that every reference this repository reaches out to at
+# build/CI/release time is pinned to something immutable and machine-checkable:
+# Actions `uses:` at a 40-hex SHA, container images at an @sha256: digest, and
+# CI/Makefile tool installs at an explicit version.
+#
+# SCOPE, because a gate that overstates itself is worse than none: this is a
+# SOURCE-TEXT audit. It proves a human wrote an immutable reference into a
+# tracked file. It verifies no signature, does not confirm a SHA belongs to the
+# tag beside it, and does not confirm a digest names the image someone believes
+# it names. All three need network or keys. scripts/pin-audit.sh says so in its
+# header, and docs/references/supply-chain-pins.md carries the same list.
+#
+# A mutable reference is not automatically a failure: it must be DECLARED in
+# scripts/pins-allowlist.txt with a reason, an owner and an expiry. That split is
+# deliberate — pin-audit stays green so it can run in ordinary CI, and
+# pin-audit-strict is the release gate that fails on every declared gap. It
+# FAILS TODAY, on 10 declared references, and keeps failing until the image
+# digests are pinned or the dated justification is re-signed. An entry past its
+# `expires` is a hard failure in both modes.
+#
+# Neither target is on `test`, `vet`, or any aggregate: a release gate that is
+# expected to fail must not be able to break the default local loop.
+pin-audit:
+	@./scripts/pin-audit.sh
+
+pin-audit-strict:
+	@./scripts/pin-audit.sh --strict
+
+# pin-audit-selftest proves the auditor can actually fail. A check never observed
+# failing is indistinguishable from one that always passes; secret-scan.yml makes
+# the same argument for gitleaks (`.github/workflows/secret-scan.yml:45-49`,
+# where a sweep for internal addresses once "came back clean against a tree that
+# provably contained them"). It builds throwaway fixtures in $TMPDIR — never
+# under .tmp/, which sibling test runs own — and asserts each defect class is
+# reported, each correctly pinned reference is not, and an untrustworthy
+# inventory is refused rather than guessed at.
+pin-audit-selftest:
+	@./scripts/pin-audit-selftest.sh
+
+# sbom emits a CycloneDX 1.5 SBOM for the Go module dependency graph — the part
+# of the supply chain that is fully knowable offline (go list -m all, go mod
+# graph, go.sum, the module cache). CycloneDX over SPDX because its `dependencies`
+# array carries the graph directly and its `bom-ref`/`purl` pair is the join key
+# container scanners already consume; scripts/sbom.sh states the full rationale.
+#
+# WHAT IT IS NOT — a Go-module SBOM is NOT a container/OS-package SBOM. It sees
+# no base image, no dpkg/rpm/apk, no npm/pnpm tree, and no signatures. Those are
+# recorded in the document's own `xflow:not-covered` properties, in
+# docs/references/sbom.md, and in the printed summary.
+#
+# Output goes to release/, which is NOT gitignored, so `make sbom` makes
+# `git status --porcelain` non-empty. The G0/G1 evidence targets require an empty
+# worktree before AND after (Makefile:841/:921, :1502/:1546) — so like
+# release-summary, this is a POST-gate step. Run it after
+# `make test-g0-evidence-required` / `make test-g1-evidence-required`, never
+# before. SBOM_OUT overrides the path.
+SBOM_OUT ?= release/xflow-sbom.cdx.json
+# Set SBOM_FETCH_HASHES=1 to run `go mod download all` first so every component
+# gets a real SHA-256 of its module zip. Needs module-proxy access; without it,
+# components keep only the go.sum h1 dirhash and the document says so, because
+# the two are different objects and are never presented as the same thing.
+SBOM_FETCH_HASHES ?=
+
+sbom:
+	@args="--out $(SBOM_OUT)"; \
+	if [ -n "$(SBOM_FETCH_HASHES)" ]; then args="$$args --fetch-hashes"; fi; \
+	./scripts/sbom.sh $$args
+
+# sbom-validate parses the generated document back and checks the CycloneDX 1.5
+# requirements a consumer actually trips over: required/enumerated fields,
+# well-formed purls, unique bom-refs, every dependsOn target resolving, hash alg
+# and digest-length agreement, and DAG acyclicity. That last one has teeth —
+# Go's module graph is cyclic and CycloneDX forbids cycles, so it is a real check
+# on scripts/sbom.sh rather than a formality.
+#
+# It also runs the drift check (`--against-repo`): the document's module set must
+# equal `go list -m all` right now, because a stale SBOM is worse than none —
+# it is read as current.
+#
+# Honest limit, printed on every run: a STRUCTURAL pass is not a full
+# JSON-Schema pass. Full validation runs only when a validator is installed;
+# scripts/sbom-validate.sh names which one it looked for and what installing it
+# would enable rather than silently downgrading. Set SBOM_SCHEMA=<path> to pass
+# the schema, and SBOM_STRICT=1 to also fail when the document is stale.
+SBOM_STRICT ?=
+SBOM_SCHEMA ?=
+# SBOM_SELFTEST=1 proves the validator can FAIL. It mutates a copy of the
+# document, one defect at a time (16 of them: bad bomFormat, dangling bom-refs,
+# a duplicate bom-ref, a bad hash alg, a digest of the wrong length, an
+# introduced dependency cycle, ...), re-invokes the validator through its
+# ordinary CLI on each, and includes the unmutated copy as a negative control.
+# A validator that has never rejected anything is indistinguishable from one
+# that checks nothing.
+SBOM_SELFTEST ?=
+
+sbom-validate:
+	@args="--sbom $(SBOM_OUT)"; \
+	if [ -n "$(SBOM_STRICT)" ]; then args="$$args --against-repo"; fi; \
+	if [ -n "$(SBOM_SCHEMA)" ]; then args="$$args --schema $(SBOM_SCHEMA)"; fi; \
+	if [ -n "$(SBOM_SELFTEST)" ]; then args="$$args --selftest"; fi; \
+	./scripts/sbom-validate.sh $$args
+
 test-perf: check-go
 	@set -a; [ -f test/env/.env ] && . ./test/env/.env; set +a; \
 	: "$${XFLOW_TEST_REDIS_ADDR:=localhost:$${REDIS_PORT:-6379}}"; \

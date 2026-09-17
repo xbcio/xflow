@@ -1,0 +1,51 @@
+# Known-mutable supply-chain references — the machine-checkable pin inventory.
+#
+# scripts/pin-audit.sh reads this file. Anything it finds that is NOT pinned to
+# an immutable, machine-checkable reference is either a violation (default
+# failure) or must be declared here. `make pin-audit` reports what is declared
+# and exits 0; `make pin-audit-strict` fails on every declared entry, and is the
+# target a release gate should run.
+#
+# Format:
+#   [actions] | [images] | [tools]
+#   key = reason=<why this cannot be pinned yet> | owner=<who closes it> | expires=YYYY-MM-DD
+#
+# A lapsed `expires` is a hard failure in BOTH modes. That is the point: this
+# file is a dated debt register, not a permanent excuse. Re-justifying an entry
+# is a deliberate act someone has to sign.
+#
+# Key forms:
+#   actions: <owner>/<repo>@<ref-as-written>
+#   images:  <registry>/<repo>:<tag>   (normalised: implicit docker.io/library applied)
+#   tools:   <path>:go-install[:<pkg>@<version>] | <path>:npx:<pkg> | <path>:curl-download
+
+# ── Container images ─────────────────────────────────────────────────────────
+#
+# These are the real, unclosed gap F names: every CI service image and every
+# compose dependency floats on a tag. A tag is a moving pointer — `redis:7.2`
+# resolves to whatever bytes that tag holds when the job starts, so two runs of
+# the same commit can differ with no commit explaining it.
+#
+# Why not fixed here: resolving a digest requires a registry query (network),
+# and pinning is only meaningful once someone also owns the refresh path —
+# a digest that nobody re-resolves is a frozen image with silently unpatched
+# CVEs. That owner decision is a release-process decision, not a code change.
+
+[images]
+docker.io/library/redis:7.2 = reason=CI integration service + local composeRedis; tag floats, no @sha256 digest. Digest requires a registry query and a named owner for the refresh path | owner=release-process (UNASSIGNED) | expires=2026-10-31
+docker.io/library/mysql:8.0 = reason=CI integration service + local compose MySQL; tag floats, no @sha256 digest | owner=release-process (UNASSIGNED) | expires=2026-10-31
+docker.io/apache/kafka:3.7.2 = reason=CI integration service + local compose Kafka; tag floats, no @sha256 digest | owner=release-process (UNASSIGNED) | expires=2026-10-31
+docker.io/library/redis:7 = reason=.github/workflows/perf-sample.yml uses the bare minor tag `redis:7` while ci.yml and compose use `7.2`; the perf gate therefore runs a Redis minor that reading the other files would not predict | owner=release-process (UNASSIGNED) | expires=2026-10-31
+
+# ── Tools fetched at CI/Makefile run time ────────────────────────────────────
+#
+# Not a "no version" problem: each of these names a version. They are declared
+# because the pin audit can prove a version STRING, and in two of these cases
+# the string is not the whole story the reader assumes.
+#
+# `spectral-cli` is the genuine unpinned one: no @version at all.
+
+[tools]
+Makefile:npx:@stoplight/spectral-cli = reason=make validate-openapi runs `npx @stoplight/spectral-cli` with no @version; npm resolves latest at run time, so this gate's rules engine changes without a commit. The sibling redocly call IS pinned (@1.34.2), so the asymmetry is likely an oversight rather than a decision | owner=api-contract (UNASSIGNED) | expires=2026-10-31
+
+.github/workflows/secret-scan.yml:curl-download = reason=secret-scan.yml curls the gitleaks release tarball and untars it to /usr/local/bin with no checksum or signature verification. GITLEAKS_VERSION is pinned to 8.30.1, so the version is fixed, but the ARTIFACT is trusted purely on TLS. Declared, not fixed: a checksum needs a value recorded from a trusted source, which is a human step | owner=security (UNASSIGNED) | expires=2026-10-31
