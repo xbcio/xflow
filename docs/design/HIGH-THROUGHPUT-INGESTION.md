@@ -95,8 +95,8 @@ server 启动按 [deployment-examples.md](../references/deployment-examples.md)�
 |---|---|---|
 | `ExecutionModeTransient` | `sdk/xflow/execution_mode.go` (`ExecutionModeTransient`) | 常量，禁用 signal/suspend/inspect |
 | `NewCluster` 接受 mode | `sdk/xflow/cluster.go` (`NewCluster`) | transient 时传 `distributed.WithTransientMode(ttl, completionTTL)` |
-| `WithTransientTTL` | `sdk/xflow/execution_mode.go` (`WithTransientTTL`) | 活跃 runtime state TTL，默认 10min |
-| `WithTransientCompletionTTL` | `sdk/xflow/execution_mode.go` (`WithTransientCompletionTTL`) | 完成后结果 TTL，默认 30s |
+| `WithTransientTTL` | `sdk/xflow/execution_mode.go` (`WithTransientTTL`) | 活跃 runtime state TTL；自 execution 创建起计时、常规 mutation 不续期，默认 10min，必须大于最大端到端 wall-clock |
+| `WithTransientCompletionTTL` | `sdk/xflow/execution_mode.go` (`WithTransientCompletionTTL`) | execution 进入 terminal 后适用的 state/result TTL，默认 30s |
 | transient 禁用 | `sdk/xflow/engine_control.go`、`engine.go` | signal/revoke/inspect/suspend 全部拒绝 |
 | `NewLocal` 拒绝 transient | `sdk/xflow/local.go` (`NewLocal`) | transient 要求 cluster，返回 `ErrTransientRequiresCluster` |
 | backend transient | `backend/providers/distributed/backend.go` | transient 不启动 TimeoutMonitor，短 TTL 状态 |
@@ -109,8 +109,8 @@ server 启动按 [deployment-examples.md](../references/deployment-examples.md)�
 eng, err := xflow.NewCluster(
     xflow.ClusterConfig{RedisAddr: redisAddr},
     xflow.WithExecutionMode(xflow.ExecutionModeTransient),
-    xflow.WithTransientTTL(10*time.Minute),             // 活跃 state TTL
-    xflow.WithTransientCompletionTTL(30*time.Second),    // 完成后结果 TTL
+    xflow.WithTransientTTL(10*time.Minute),             // 自 execution 创建起计时；须大于最大 wall-clock
+    xflow.WithTransientCompletionTTL(30*time.Second),    // terminal 后适用的 state/result TTL
     xflow.WithNodes(/* 采集 handler 节点 */),
 )
 // 注册带 Kafka trigger 的工作流
@@ -118,6 +118,12 @@ eng.AddWorkflow(ctx, &types.WorkflowRecord{
     WorkflowDef: kafkaIngestWorkflow,  // 含 trigger.Kafka() 节点
 })
 ```
+
+活跃 TTL 从 execution 创建时开始计时，常规 state mutation 不会续期；它不是
+sliding 或 idle timeout，必须配置为大于该 execution 的最大端到端 wall-clock。
+execution 进入 terminal 后，completion TTL 适用于其 transient state/result。支持
+suspend 的其他 transient 执行路径可为等待状态显式延长相关 key，但这项特例不改变
+常规 mutation 不续期的约定；本路径 B 本身禁止 suspend。
 
 trigger.Kafka() 节点配置（aggregate 模式，高吞吐）：
 
@@ -133,7 +139,7 @@ trigger.Kafka().
 ### 4.4 限制
 
 - **禁止 signal/suspend/inspect**：调用返回 `ErrTransientSignalsUnsupported` / `ErrTransientSuspendUnsupported` / `ErrTransientInspectionUnavailable`。
-- 短 TTL runtime state：活跃 10min、完成后 30s，过期自动清理。
+- 短 TTL runtime state：活跃 TTL 自 execution 创建起计时且常规 mutation 不续期；terminal 后适用 completion TTL（示例为 30s），过期自动清理。
 - 受限可观测性：无长期 inspect 表面。
 - per-message 模式每分区串行；aggregate 模式按 MaxSize/FlushInterval 批量 emit。
 - 空闲分区 worker 5 分钟后退出（处理 rebalance 分区撤销）。

@@ -100,8 +100,11 @@ func (w *WorkflowBuilder) AllowCycles(maxAutoDepth int) *WorkflowBuilder {
 // into a disclosure. Redis state is TTL-bounded rather than retained for the
 // durable window.
 //
-// ttl slides while the execution is active; completionTTL replaces it once the
-// execution reaches a terminal state. Zero for either means "use the
+// ttl defines the active retention window from execution creation. Ordinary state
+// mutations do not renew it, so callers must set it above the maximum end-to-end
+// wall-clock duration. completionTTL applies once the execution is terminal.
+// Supported suspension handling may explicitly extend affected keys while waiting;
+// that exception is not general sliding retention. Zero for either means "use the
 // engine-wide transient TTL", per types.WorkflowOptions.
 //
 // Unlike the store-wide transient mode this does NOT disable suspend: the

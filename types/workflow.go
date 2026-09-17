@@ -65,12 +65,16 @@ type WorkflowOptions struct {
 	// engine instance.
 	Transient bool `json:"transient,omitempty"`
 
-	// TransientTTL is the sliding active TTL for transient execution keys.
-	// When zero, the engine-wide transient TTL (or the default exec TTL) is used.
+	// TransientTTL is the active retention TTL for transient execution keys. Its
+	// active window starts when the execution is created; ordinary state mutations
+	// do not renew it, so it must exceed the execution's maximum end-to-end
+	// wall-clock duration. Supported suspension handling may explicitly extend
+	// affected keys while waiting; that is not general sliding retention. When
+	// zero, the engine-wide transient TTL (or the default exec TTL) is used.
 	TransientTTL time.Duration `json:"transient_ttl,omitempty"`
 
-	// TransientCompletionTTL is the shortened TTL applied to all execution keys
-	// once the execution reaches a terminal state. When zero, the engine-wide
+	// TransientCompletionTTL is the retention TTL applied to transient execution
+	// keys after the execution reaches a terminal state. When zero, the engine-wide
 	// transient completion TTL is used.
 	TransientCompletionTTL time.Duration `json:"transient_completion_ttl,omitempty"`
 }

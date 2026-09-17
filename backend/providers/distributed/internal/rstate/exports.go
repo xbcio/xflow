@@ -27,8 +27,12 @@ func (s *Store) SetLeaseObserver(o LeaseObserver) {
 // SetLogger installs the logger used for best-effort audit-write failures.
 func (s *Store) SetLogger(l engine.Logger) { s.logger = l }
 
-// ConfigureTransient sets transient (fire-and-forget) retention: a sliding
-// active TTL and a shorter completion TTL. enabled=false keeps durable mode.
+// ConfigureTransient sets transient (fire-and-forget) retention. The active TTL
+// starts when an execution is created and ordinary state mutations do not renew
+// it, so callers must set activeTTL above the maximum execution wall-clock
+// duration. completionTTL applies after the execution becomes terminal. Supported
+// suspension handling may explicitly extend affected keys while waiting; that is
+// not general sliding retention. enabled=false keeps durable mode.
 func (s *Store) ConfigureTransient(enabled bool, activeTTL, completionTTL time.Duration) {
 	s.transient = enabled
 	s.transientTTL = activeTTL

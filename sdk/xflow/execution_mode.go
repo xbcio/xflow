@@ -47,13 +47,13 @@ func WithExecutionMode(mode ExecutionMode) Option {
 
 // WithTransientTTL sets the active transient runtime-state TTL.
 //
-// It must exceed the maximum end-to-end wall-clock duration of any single
-// execution. Transient mode slides only the execution-scoped structural Redis
-// keys on each mutation; per-node and in-degree keys rely on the EX TTL set at
-// write/creation and are not continuously re-slid, so an execution running
-// longer than this TTL can lose a key mid-run and stall. Size it as a safety
-// ceiling above the slowest expected run, not as a business timeout. Only valid
-// with ExecutionModeTransient (cluster mode).
+// The active retention window starts when an execution is created, and ordinary
+// state mutations do not renew it. Set ttl above the maximum end-to-end
+// wall-clock duration of any execution; it is a safety ceiling, not a business
+// timeout. Once an execution is terminal, WithTransientCompletionTTL applies.
+// Supported suspension handling may explicitly extend affected keys while waiting;
+// that exception is not general sliding retention. Only valid with
+// ExecutionModeTransient (cluster mode).
 func WithTransientTTL(ttl time.Duration) Option {
 	return func(c *engineConfig) {
 		c.transientTTL = ttl
