@@ -29,10 +29,24 @@ type Observer interface {
 	// The three are not equally recoverable, and the metric's help text says so:
 	// a schema drop is a decision about a message that could not be used,
 	// whereas buffer_overflow discards a usable message AND lets the commit
-	// frontier advance past its offset, so nothing ever redelivers it.
+	// frontier advance past its offset, so nothing ever redelivers it. That
+	// reading of buffer_overflow holds under the default on_overflow=discard
+	// only: under on_overflow=dead_letter the record leaves through
+	// OnMessageDeadLettered instead, precisely so this series keeps meaning
+	// "gone" and an alert on it is not diluted by records that were in fact
+	// preserved.
 	OnMessageDiscarded(ctx context.Context, topic, reason string)
 	// OnMessageDeadLettered reports a dead-letter publish attempt. result is
 	// "ok" or "error".
+	//
+	// Both dead-letter axes report here, because both do the same thing to the
+	// record and fail in the same way: message_schema's on_invalid=dead_letter
+	// republishes records that failed validation, and the aggregator's
+	// on_overflow=dead_letter republishes records the buffer was at its cap for.
+	// Which axis it was is in the published record's xflow-dlq-reason header and
+	// in the log line; the operational reading of result is identical either way
+	// — "error" means the record is being redelivered rather than parked, and the
+	// source partition is stalled on it.
 	OnMessageDeadLettered(ctx context.Context, topic, result string)
 	// OnConsumerLag reports how far this partition's fetch position sits behind
 	// the broker's high-water mark, sampled from a message that has just been
@@ -51,9 +65,15 @@ type Observer interface {
 	// is now-minus-fetchedAt, and a lag figure is only worth reading if that is
 	// small. Reporting lag alone would have been worse than reporting nothing.
 	OnConsumerLag(ctx context.Context, topic string, partition int, lag int64, fetchedAt time.Time)
-	// OnConsumptionBlocked reports a partition halting or resuming consumption
-	// under on_overflow=block. blocked is the new state, reported on transitions
-	// only.
+	// OnConsumptionBlocked reports a partition halting or resuming consumption.
+	// blocked is the new state, reported on transitions only.
+	//
+	// Two conditions set it, and both mean "this partition is fetching nothing so
+	// that no record is lost": on_overflow=block sitting at its retained bound,
+	// and on_overflow=dead_letter holding a record whose dead-letter publish has
+	// not succeeded. They share a series because an operator's question is the
+	// same one — has this partition stopped, and is that why my lag looks fine —
+	// and the log line at each transition names which of the two it is.
 	//
 	// Partition is a label here for the same reason it is on OnConsumerLag, and
 	// with more force: this is a per-partition state, and one blocked partition
@@ -260,14 +280,21 @@ const discardLogInterval = 30 * time.Second
 // That makes the inventory below load-bearing: it is the whole of the
 // no-collision argument. Re-derive it rather than trusting it — the criterion
 // is every non-test call site of discardLog.allow, and the discriminator is
-// the second \x00-separated segment each one builds. Today that is four sites
-// yielding seven discriminators:
+// the second \x00-separated segment each one builds. Today that is six call
+// sites across three files, yielding nine discriminators:
 //
 //	entryseed.go  "admission_" + state   admission_error,
 //	                                     admission_deterministic_error
-//	aggregate.go  "overflow"             (shed under on_overflow=drop)
+//	aggregate.go  "overflow"             (shed under on_overflow=discard)
 //	aggregate.go  "stuck_batch"
+//	aggregate.go  "overflow_dlq"         (parked under on_overflow=dead_letter)
+//	aggregate.go  "overflow_dlq_failed"  (the same, with the publish failing)
 //	schema.go     reason                 schema, schema_fail, dead_letter
+//
+// The two overflow_dlq keys are separate rather than one key with an outcome
+// field on purpose: a partition whose dead-letter writes are landing and one
+// whose dead-letter broker is unreachable are different incidents, and one
+// throttle window over both would hide whichever happened second.
 //
 // Note that entryseed.go's state is NOT OnBatchAdmission's five-value enum:
 // the log fires only on the failure paths, so accepted/duplicate/conflict
@@ -277,11 +304,11 @@ const discardLogInterval = 30 * time.Second
 // Only two segments are variables (entryseed.go's state, schema.go's reason)
 // and both are closed enums built in this package — every call site passes a
 // literal except entryseed.go:293-295, which picks between those same two
-// values. schema.go passes err.Error() as the log's action, not into the key,
-// so no free-text error ever reaches this map.
+// values. schema.go and the overflow dead-letter log pass err.Error() as the
+// log's action, not into the key, so no free-text error ever reaches this map.
 //
 // The same enumeration bounds the maps: every key component is bounded (topic
-// x seven discriminators x the partition assignment), so last/suppressed grow
+// x nine discriminators x the partition assignment), so last/suppressed grow
 // with the assignment and not with traffic. An earlier note in this tree
 // claimed they were unbounded insert-only maps; that was wrong, and the
 // enumeration above is why.

@@ -9,13 +9,38 @@ import (
 	kafkago "github.com/segmentio/kafka-go"
 )
 
+// Dead-letter reasons. They are stamped into the published record as
+// provenance, and they are a closed enum built here: a consumer of the DLQ
+// filters on them to tell "the payload could not be used" (schema) from "the
+// aggregator was at its buffer cap and parked a perfectly good record instead
+// of dropping it" (buffer_overflow). The two need different operator responses,
+// so a single value would make the header useless.
+const (
+	// deadLetterReasonSchema is the invalid-message axis
+	// (message_schema.on_invalid=dead_letter).
+	deadLetterReasonSchema = "schema"
+	// deadLetterReasonOverflow is the aggregate overflow axis
+	// (aggregate.on_overflow=dead_letter). It deliberately matches the reason
+	// the discard path reports to xflow_trigger_messages_discarded_total, so one
+	// word means one thing across the two axes: this record was read and would
+	// have been dropped for buffer pressure.
+	deadLetterReasonOverflow = "buffer_overflow"
+)
+
 // DeadLetterPublisher republishes messages the trigger could not process.
 // It is an interface so tests can assert dead-letter behaviour without a broker
 // and so a deployment can route dead letters somewhere other than Kafka.
 type DeadLetterPublisher interface {
-	// Publish writes msg to topic. It must return an error rather than dropping:
-	// the caller withholds the offset commit on error so Kafka redelivers.
-	Publish(ctx context.Context, topic string, msg Message) error
+	// Publish writes msg to topic, stamped with reason. It must return an error
+	// rather than dropping: the caller withholds the offset commit on error so
+	// Kafka redelivers.
+	//
+	// reason is required rather than derived from msg because it is the one
+	// thing about a parked record that the record itself cannot carry. Both
+	// axes that reach this interface (schema.go and the aggregate overflow path)
+	// publish through one shared publisher, so leaving the reason to the message
+	// would make every overflow record claim to be a schema failure.
+	Publish(ctx context.Context, topic string, msg Message, reason string) error
 	Close() error
 }
 
@@ -75,14 +100,14 @@ func newKafkaGoDeadLetterPublisher(cfg ConsumerConfig) (DeadLetterPublisher, err
 	}, nil
 }
 
-func (p *kafkaGoDeadLetterPublisher) Publish(ctx context.Context, topic string, msg Message) error {
+func (p *kafkaGoDeadLetterPublisher) Publish(ctx context.Context, topic string, msg Message, reason string) error {
 	ctx, cancel := context.WithTimeout(ctx, deadLetterWriteTimeout)
 	defer cancel()
 	return p.writer.WriteMessages(ctx, kafkago.Message{
 		Topic:   topic,
 		Key:     msg.Key,
 		Value:   msg.Value,
-		Headers: deadLetterHeaders(msg),
+		Headers: deadLetterHeaders(msg, reason),
 	})
 }
 
@@ -96,13 +121,13 @@ func (p *kafkaGoDeadLetterPublisher) Close() error {
 // tell where the record came from and why it is here. Provenance goes in
 // headers rather than wrapping the value so the payload stays byte-identical to
 // what the producer sent — a re-drive can replay it without unwrapping.
-func deadLetterHeaders(msg Message) []kafkago.Header {
+func deadLetterHeaders(msg Message, reason string) []kafkago.Header {
 	headers := make([]kafkago.Header, 0, len(msg.Headers)+4)
 	for k, v := range msg.Headers {
 		headers = append(headers, kafkago.Header{Key: k, Value: []byte(v)})
 	}
 	headers = append(headers,
-		kafkago.Header{Key: "xflow-dlq-reason", Value: []byte("schema")},
+		kafkago.Header{Key: "xflow-dlq-reason", Value: []byte(reason)},
 		kafkago.Header{Key: "xflow-dlq-source-topic", Value: []byte(msg.Topic)},
 		kafkago.Header{Key: "xflow-dlq-source-partition", Value: []byte(fmt.Sprint(msg.Partition))},
 		kafkago.Header{Key: "xflow-dlq-source-offset", Value: []byte(fmt.Sprint(msg.Offset))},

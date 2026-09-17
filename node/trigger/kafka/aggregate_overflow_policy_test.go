@@ -64,6 +64,20 @@ func (c *unboundedProducerConsumer) CommitMessages(_ context.Context, msgs ...Me
 	return nil
 }
 
+// committedOffsets returns the offsets this consumer was explicitly asked to
+// commit. Added for the on_overflow=dead_letter tests, which ask the one
+// question that matters about a record whose dead-letter publish failed: did any
+// commit pass its offset while it was not durably anywhere?
+func (c *unboundedProducerConsumer) committedOffsets() []int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]int64, 0, len(c.commits))
+	for _, msg := range c.commits {
+		out = append(out, msg.Offset)
+	}
+	return out
+}
+
 // blockedEmitTrigger builds an activated trigger whose downstream never returns
 // until release is closed, so the partition reaches its retained bound and stays
 // there. onOverflow selects the policy under test.

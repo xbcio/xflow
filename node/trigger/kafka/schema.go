@@ -108,7 +108,7 @@ func handleInvalidMessage(ctx context.Context, rt invalidMessageHandler, msg Mes
 			logInvalidMessage(msg, "dead_letter", "dead-letter publisher unavailable; withholding commit")
 			return false
 		}
-		if err := publisher.Publish(ctx, schema.DeadLetterTopic, msg); err != nil {
+		if err := publisher.Publish(ctx, schema.DeadLetterTopic, msg, deadLetterReasonSchema); err != nil {
 			obs().OnMessageDeadLettered(ctx, msg.Topic, "error")
 			logInvalidMessage(msg, "dead_letter", "dead-letter publish failed: "+err.Error())
 			return false

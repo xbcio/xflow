@@ -16,12 +16,17 @@
 #   block          一条不丢，但该 partition 的缓冲不再排空，submit 阻塞；
 #                  所有 partition 共用一个 reader，因此停的是**整个
 #                  assignment**，不只是溢出的那个 partition。
+#   dead_letter    先把溢出的记录原样发布到 dead_letter_topic，成功后才允许
+#                  offset 越过它；发布失败时保留记录、停止 fetch 并重试，
+#                  因此退化为 block，而不是静默丢弃。
 #
-# 关键运维陷阱：block 状态下 **lag 指标看不见它**。lag 只在 fetch 到消息时
-# 采样，停止 fetch 的 partition 会把 lag 冻结在最后一个健康值上，读起来是
-# 正常的。唯一信号是 xflow_trigger_consumption_blocked{topic,partition}。
+# dead_letter 必须同时配置 aggregate.dead_letter_topic；它与
+# message_schema.on_invalid 的 dead_letter 是两个独立轴，可以使用不同 topic。
 #
-# 溢出轴上没有 dead_letter：dead_letter 只属于 message_schema.on_invalid。
+# 关键运维陷阱：block 和 dead_letter 发布失败状态下 **lag 指标看不见它**。
+# lag 只在 fetch 到消息时采样，停止 fetch 的 partition 会把 lag 冻结在最后一个
+# 健康值上，读起来是正常的。唯一信号是
+# xflow_trigger_consumption_blocked{topic,partition}。
 #
 # 结论：**任何不能接受丢数据的 topic 都必须显式写 on_overflow**。
 # 本样例选择 block，因为它演示的是"不丢"，代价是可能停取整个 assignment。
@@ -51,8 +56,8 @@ nodes:
         dedup: message
 
         # 显式声明：不能接受丢数据的 topic 必须写这一行。
-        # 只接受 discard 与 block；写成 dead_letter 会让 activation 失败，
-        # 而不是静默降级为 discard。
+        # 可选 discard、block、dead_letter；dead_letter 必须同时配置
+        # dead_letter_topic，否则 activation 会失败而不会静默降级为 discard。
         on_overflow: block
 
   # 2. 逐条处理 batch 内的消息（data.messages / start_offset / end_offset / count）。

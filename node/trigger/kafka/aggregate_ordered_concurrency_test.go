@@ -292,7 +292,7 @@ type failOncePublisher struct {
 	attempts map[int64]int
 }
 
-func (p *failOncePublisher) Publish(_ context.Context, _ string, msg Message) error {
+func (p *failOncePublisher) Publish(_ context.Context, _ string, msg Message, _ string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.attempts == nil {

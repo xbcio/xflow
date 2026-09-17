@@ -152,6 +152,7 @@ type fakePublisher struct {
 	mu        sync.Mutex
 	published []Message
 	topics    []string
+	reasons   []string
 	err       error
 	closed    bool
 	notify    chan struct{}
@@ -161,7 +162,7 @@ func newFakePublisher() *fakePublisher {
 	return &fakePublisher{notify: make(chan struct{})}
 }
 
-func (p *fakePublisher) Publish(_ context.Context, topic string, msg Message) error {
+func (p *fakePublisher) Publish(_ context.Context, topic string, msg Message, reason string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.err != nil {
@@ -169,6 +170,7 @@ func (p *fakePublisher) Publish(_ context.Context, topic string, msg Message) er
 	}
 	p.published = append(p.published, msg)
 	p.topics = append(p.topics, topic)
+	p.reasons = append(p.reasons, reason)
 	close(p.notify)
 	p.notify = make(chan struct{})
 	return nil

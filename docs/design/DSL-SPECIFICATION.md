@@ -1408,7 +1408,7 @@ Kafka 聚合只保证同一 partition 内按消费顺序进入 batch 并按 batc
 
 ##### 聚合缓冲溢出处置（on_overflow）
 
-`aggregate.on_overflow` 只回答一个问题：某个 partition 的保留缓冲（上限由 `max_size` 派生）已满、下一条消息又到达时怎么办。取值只有两个，默认是 `discard`：
+`aggregate.on_overflow` 只回答一个问题：某个 partition 的保留缓冲（上限由 `max_size` 派生）已满、下一条消息又到达时怎么办。取值有三个，默认是 `discard`：
 
 ```yaml
     parameters:
@@ -1418,21 +1418,25 @@ Kafka 聚合只保证同一 partition 内按消费顺序进入 batch 并按 batc
         max_size: 100
         flush_interval: 100ms
         dedup: message
-        on_overflow: block        # discard(默认) | block
+        on_overflow: block             # discard(默认) | block | dead_letter
+        dead_letter_topic: events-dlq  # on_overflow: dead_letter 时必填
 ```
 
 | 取值 | 到达的那条消息 | 代价 |
 |---|---|---|
 | `discard`（默认） | **永久丢弃**：丢的是刚到达的那条；之后提交更高 offset 时会直接扫过它，Kafka 不会重投。这是丢失，不是延后。会计入 `xflow_trigger_messages_discarded_total{reason="buffer_overflow"}` 并限流打 WARN 日志 | 丢数据 |
 | `block` | 一条不丢：该 partition 的缓冲不再排空，`submit` 阻塞，消费整体暂停直到积压排空 | 停取。所有 partition 共用一个 reader，因此**停的是整个 assignment**，不只是溢出的那个 partition |
+| `dead_letter` | 一条不丢：先把这条消息原样重投到 `dead_letter_topic`（保留原 key 与 payload，附加 `xflow-dlq-reason=buffer_overflow` 与来源 topic/partition/offset 头），**写成功之后**才允许 offset 越过它。此后那次"扫过"不再是丢失：记录连同来源信息已持久保存在溢出 topic 里，回放路径就是这个 topic | 溢出 topic 健康的常态下不停取，但要占一条写入往返；溢出 topic 慢或不可用时，写操作会占住该 partition 的协调协程，`agg.ch` 填满、共享 reader 停取——与 `block` 同样的代价，只是由写入超时兜底而非等下游恢复 |
 
-`block` 的失败模式在指标上尤其反直觉：**lag 指标看不见它**。consumer lag 只在 fetch 到消息时采样，一个停止 fetch 的 partition 会把 lag 冻结在最后一个"健康"值上，于是它在 dashboard 上读起来是正常的。这是该策略下的稳态而非边角情况——恰恰是背压生效的那一刻，lag 停止更新。唯一信号是 `xflow_trigger_consumption_blocked{topic,partition}`（进入/退出阻塞时在 1/0 之间翻转并打日志）。用 lag 判断消费健康度，会把正在阻塞的 consumer 判成健康。
+`dead_letter` 的 offset 处置是这套语义的关键，必须说清：**发布成功**才等于"这条记录已不再只存在于本进程"，因此只有成功后才允许后续提交越过它的 offset；这一步之后 offset 被扫过属于**有审计的让位**，不是静默丢失（记录、原因、来源都可查、可回放）。**发布失败**则完全不同：记录被保留在内存中（每个 partition 至多一条，因此内存仍有界），该 partition **停止 fetch**，并按退避重试写操作，`xflow_trigger_messages_dead_lettered_total{result="error"}` 计数。也就是说 DLQ 故障时它会**退化成 `block` 的取舍**（停取，可恢复），而不是退化成 `discard` 的取舍（丢失，不可恢复）——这正是这个策略存在的理由。没有任何记录会在"尚未持久保存"的状态下被提交越过。
 
-溢出轴上**没有** `dead_letter`。`dead_letter` 只属于非法消息轴（`message_schema.on_invalid`）：overflow 需要的 offset 处置、持久化、回放与容量语义都还不存在，不能拿 invalid-message DLQ 顶替。
+`block` 与 `dead_letter` 写失败这两种"停取"在指标上尤其反直觉：**lag 指标看不见它们**。consumer lag 只在 fetch 到消息时采样，一个停止 fetch 的 partition 会把 lag 冻结在最后一个"健康"值上，于是它在 dashboard 上读起来是正常的。这是这些策略下的稳态而非边角情况——恰恰是背压生效的那一刻，lag 停止更新。唯一信号是 `xflow_trigger_consumption_blocked{topic,partition}`（进入/退出阻塞时在 1/0 之间翻转并打日志；日志行会指明是哪种原因）。用 lag 判断消费健康度，会把正在阻塞的 consumer 判成健康。
 
-除 `block` 之外没有"既不丢也不停"的第三档，这不是遗漏：按 partition 单独暂停需要 Reader 支持单 partition 暂停，kafka-go 的 group Reader 不提供该能力，于是有界内存只能在"丢记录"与"停掉所有 partition 共享的 reader"之间二选一。
+`dead_letter` 必须配置 `dead_letter_topic`：缺少（或为空）时 activation 失败，而不是回退到 `discard`——operator 既然显式选了"不许丢"，就不该被静默挪回会丢的那个策略。这与 `message_schema.on_invalid: dead_letter` 要求 `dead_letter_topic` 的处理一致。两个轴的 `dead_letter` 用不同的 topic 是允许的，且不会互相继承：溢出轴只读 `aggregate.dead_letter_topic`。
 
-默认取 `discard` 是既有行为的保持：现有部署升级后不会被挪到另一种取舍上，`on_overflow` 也不会被写入 `RawParams()`。由此得到一条必须明说的结论：**任何不能接受丢数据的 topic 都必须显式设置 `on_overflow`，因为默认值就是丢弃。** 未识别的取值（含 `dead_letter`）会让 activation 失败，而不是静默回退到 `discard`。
+仍然没有"既不丢、又完全不停"的档位：按 partition 单独暂停需要 Reader 支持单 partition 暂停，kafka-go 的 group Reader 不提供该能力。`dead_letter` 之所以最接近，是因为它把"停"压缩成一次写入的时间——写入成功即恢复消费；写入不成功就必须停，因为此时继续消费意味着可能提交越过一条尚未持久化的记录。
+
+默认取 `discard` 是既有行为的保持：现有部署升级后不会被挪到另一种取舍上，`on_overflow` 也不会被写入 `RawParams()`。由此得到一条必须明说的结论：**任何不能接受丢数据的 topic 都必须显式设置 `on_overflow`，因为默认值就是丢弃。** 未识别的取值会让 activation 失败，而不是静默回退到 `discard`。
 
 ##### 消息校验与非法消息处置
 
