@@ -177,6 +177,32 @@ func (n *Node) BlockOnOverflow() *Node {
 	return n
 }
 
+// DeadLetterOnOverflow switches the at-cap policy from dropping the arriving
+// record to republishing it to topic (a dead-letter/overflow topic) and only
+// then letting its offset advance. Requires aggregation to be enabled, and
+// topic must be non-empty: a node that selects this policy without one fails
+// activation rather than silently falling back to the drop it was leaving.
+//
+// It is the only one of the three policies that neither loses the record nor
+// deliberately stalls the assignment, and it is not free. The republish runs on
+// that partition's coordinator, so a slow dead-letter topic stalls the shared
+// reader exactly as BlockOnOverflow does — bounded by the publisher's write
+// timeout rather than by the downstream recovering. A FAILED republish is
+// treated as backpressure: the record is held, the partition stops consuming,
+// and the write is retried, because committing past a record that is not yet
+// durably parked is the loss this option exists to avoid.
+//
+// Choose it for a topic where a stalled assignment is unacceptable AND a lost
+// record is unacceptable, and give the overflow topic a consumer — the records
+// are durable but nothing replays them on its own. The published record keeps
+// its original key and payload byte-for-byte, with the source topic, partition,
+// offset and reason in xflow-dlq-* headers.
+func (n *Node) DeadLetterOnOverflow(topic string) *Node {
+	n.AggregateValue.OnOverflow = onOverflowDeadLetter
+	n.AggregateValue.DeadLetterTopic = topic
+	return n
+}
+
 // MessageSchema requires each message value to be a JSON object carrying all of
 // fields as top-level keys. Invalid messages are discarded (offset committed,
 // message dropped) but counted and logged — see DiscardInvalid/DeadLetterInvalid
@@ -218,7 +244,7 @@ func (n *Node) Descriptor() types.Descriptor {
 			{Name: "group", DisplayName: "Group", Type: types.ParamString, Required: true},
 			{Name: "start_offset", DisplayName: "Start Offset", Type: types.ParamString, Default: "latest"},
 			{Name: "max_inflight", DisplayName: "Max Inflight", Type: types.ParamNumber, Default: float64(defaultTriggerMaxInflight)},
-			{Name: "aggregate", DisplayName: "Aggregate", Type: types.ParamObject, Description: "Optional partition batch aggregation: enabled, by, max_size, flush_interval, dedup. Under entry-seed hosting the batch is admitted to the control plane instead of emitted locally, with an admission key covering the batch's actual offset range; delivery is at-least-once (a batch may be reprocessed once if its offsets fail to commit), so consumers must be idempotent on (topic, partition, offset). flush_interval defaults to 1s in entry-seed mode and 100ms on the legacy emit path."},
+			{Name: "aggregate", DisplayName: "Aggregate", Type: types.ParamObject, Description: "Optional partition batch aggregation: enabled, by, max_size, flush_interval, dedup, on_overflow, dead_letter_topic. Under entry-seed hosting the batch is admitted to the control plane instead of emitted locally, with an admission key covering the batch's actual offset range; delivery is at-least-once (a batch may be reprocessed once if its offsets fail to commit), so consumers must be idempotent on (topic, partition, offset). flush_interval defaults to 1s in entry-seed mode and 100ms on the legacy emit path. on_overflow decides what happens when a partition reaches its retained bound: \"discard\" (the default) drops the arriving record and a later commit sweeps past its offset, so it is never redelivered — the loss is counted in xflow_trigger_messages_discarded_total{reason=\"buffer_overflow\"} and logged; \"block\" loses nothing but halts fetching for the WHOLE assignment until that partition drains, and neither lag gauge can report it, so watch xflow_trigger_consumption_blocked instead; \"dead_letter\" republishes the record to dead_letter_topic (required with this value) before letting its offset advance, so nothing is lost and nothing stalls while the overflow topic is healthy — a failed republish is retried as backpressure (the partition stops consuming) rather than dropping, counted in xflow_trigger_messages_dead_lettered_total. Set on_overflow explicitly on any topic that cannot afford the default loss."},
 			{Name: "message_schema", DisplayName: "Message Schema", Type: types.ParamObject, Description: "Optional message validation: {required_fields: [\"f\"], on_invalid: \"discard|fail|dead_letter\", dead_letter_topic: \"t-dlq\"}. on_invalid defaults to discard (offset committed, message dropped, drop counted and logged)."},
 			{Name: "tuning", DisplayName: "Tuning", Type: types.ParamObject, Description: "Optional consumer tuning: fetch_min_bytes (1), fetch_max_bytes (10000000), max_wait (10s), dial_timeout (10s), session_timeout (30s), heartbeat_interval (3s), rebalance_timeout (30s). Durations are strings (\"45s\"). heartbeat_interval must stay below session_timeout or the group rebalances continuously. Offsets always commit synchronously after the side effect; that is not tunable."},
 		},
@@ -272,7 +298,16 @@ func (n *Node) RawParams() any {
 		// appear to take and then quietly not apply, which for this particular
 		// setting means losing the records it was chosen to protect.
 		if aggregate.OnOverflow != onOverflowDiscard {
-			params["aggregate"].(map[string]any)["on_overflow"] = aggregate.OnOverflow
+			agg := params["aggregate"].(map[string]any)
+			agg["on_overflow"] = aggregate.OnOverflow
+			// Written only for the policy that reads it, and only when it is set.
+			// A dead_letter node that reaches the runtime without its topic is
+			// rejected at activation, which is the fail-closed outcome: emitting
+			// the policy without the destination would otherwise look like a
+			// working definition that quietly drops records.
+			if aggregate.OnOverflow == onOverflowDeadLetter && aggregate.DeadLetterTopic != "" {
+				agg["dead_letter_topic"] = aggregate.DeadLetterTopic
+			}
 		}
 	}
 	if n.MessageSchemaValue != nil && len(n.MessageSchemaValue.RequiredFields) > 0 {
@@ -312,12 +347,19 @@ func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (ty
 	if err != nil {
 		return nil, err
 	}
-	// The dead-letter publisher is built only when the policy needs it, and
+	// The dead-letter publisher is built only when a policy needs it, and
 	// eagerly rather than on first invalid message: a broker-unreachable DLQ
 	// should fail activation (which self-heals via retry) instead of surfacing
 	// as an unbounded redelivery loop the first time a malformed record arrives.
+	//
+	// Two axes can need it now — invalid messages (message_schema.on_invalid)
+	// and buffer overflow (aggregate.on_overflow) — and one publisher serves
+	// both: it is one Kafka writer, and each Publish call carries its own topic
+	// and reason. Building one per axis would open a second producer connection
+	// per trigger for a deployment that has both, which is the cost
+	// TestKafkaActivateSkipsPublisherForDiscardPolicy exists to refuse.
 	var deadLetters DeadLetterPublisher
-	if cfg.MessageSchema != nil && cfg.MessageSchema.OnInvalid == onInvalidDeadLetter {
+	if needsDeadLetterPublisher(cfg) {
 		deadLetters, err = newDeadLetterPublisher(cfg)
 		if err != nil {
 			_ = consumer.Close()
@@ -328,6 +370,24 @@ func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (ty
 		return activateAggregate(ctx, in, cfg, consumer, deadLetters), nil
 	}
 	return activatePerMessage(ctx, in, cfg, consumer, deadLetters), nil
+}
+
+// needsDeadLetterPublisher reports whether any configured policy republishes
+// records, and therefore whether activation must open a dead-letter writer.
+//
+// Both checks are on the VALUE, not on the presence of the config block: a
+// message_schema with on_invalid=discard and an aggregate with
+// on_overflow=block must open no writer at all. The aggregate arm additionally
+// requires a non-empty topic, so a config that reached this function without one
+// (only possible by constructing ConsumerConfig directly, since the params path
+// rejects it) yields no publisher — and the runtime then fails closed by holding
+// the record and stalling rather than by dropping it.
+func needsDeadLetterPublisher(cfg ConsumerConfig) bool {
+	if cfg.MessageSchema != nil && cfg.MessageSchema.OnInvalid == onInvalidDeadLetter {
+		return true
+	}
+	return cfg.Aggregate.Enabled && cfg.Aggregate.OnOverflow == onOverflowDeadLetter &&
+		cfg.Aggregate.DeadLetterTopic != ""
 }
 
 func activatePerMessage(ctx context.Context, in *types.TriggerActivateInput, cfg ConsumerConfig, consumer Consumer, deadLetters DeadLetterPublisher) types.TriggerSubscription {

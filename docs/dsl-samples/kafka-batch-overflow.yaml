@@ -1,0 +1,73 @@
+# ============================================================
+# Kafka 批量聚合 — on_overflow 取舍样例
+# ============================================================
+#
+# 该样例只展示 DSL 结构。example.test / localhost 均为占位地址，
+# 不代表任何真实集群；所有值都是非秘密占位值。
+#
+# 背景：aggregate 模式下每个 partition 有一个保留缓冲（上限由 max_size
+# 派生）。缓冲满且又有消息到达时，由 on_overflow 决定怎么办，默认是
+# discard——**默认行为会永久丢数据**：
+#
+#   discard(默认)  丢弃刚到达的那条；之后提交更高 offset 会直接扫过它，
+#                  Kafka 不会重投。计入
+#                  xflow_trigger_messages_discarded_total{reason="buffer_overflow"}
+#                  并打 WARN 日志。
+#   block          一条不丢，但该 partition 的缓冲不再排空，submit 阻塞；
+#                  所有 partition 共用一个 reader，因此停的是**整个
+#                  assignment**，不只是溢出的那个 partition。
+#
+# 关键运维陷阱：block 状态下 **lag 指标看不见它**。lag 只在 fetch 到消息时
+# 采样，停止 fetch 的 partition 会把 lag 冻结在最后一个健康值上，读起来是
+# 正常的。唯一信号是 xflow_trigger_consumption_blocked{topic,partition}。
+#
+# 溢出轴上没有 dead_letter：dead_letter 只属于 message_schema.on_invalid。
+#
+# 结论：**任何不能接受丢数据的 topic 都必须显式写 on_overflow**。
+# 本样例选择 block，因为它演示的是"不丢"，代价是可能停取整个 assignment。
+#
+# 详见 docs/design/DSL-SPECIFICATION.md「聚合缓冲溢出处置（on_overflow）」。
+
+spec: "1.0"
+name: "kafka-batch-overflow"
+version: "1.0.0"
+description: "Kafka 聚合 on_overflow 取舍示例：block 换零丢失，代价可能是整个 assignment 停取"
+
+nodes:
+  # 1. Kafka 批量入口：一个 batch 触发一次 execution。
+  - name: order_events
+    type: xflow.trigger.kafka
+    kind: trigger
+    parameters:
+      brokers: ["localhost:9092"]
+      topic: order.created
+      group: order-created
+
+      aggregate:
+        enabled: true
+        by: partition
+        max_size: 100
+        flush_interval: 100ms
+        dedup: message
+
+        # 显式声明：不能接受丢数据的 topic 必须写这一行。
+        # 只接受 discard 与 block；写成 dead_letter 会让 activation 失败，
+        # 而不是静默降级为 discard。
+        on_overflow: block
+
+  # 2. 逐条处理 batch 内的消息（data.messages / start_offset / end_offset / count）。
+  #    消费方必须按 (topic, partition, offset) 幂等：batch 在 entry-seed
+  #    托管下是 at-least-once，重复的那一批会以另一个 execution 重跑。
+  - name: persist_orders
+    type: xflow.function
+
+  - name: done
+    type: xflow.end
+
+connections:
+  order_events:
+    main:
+      - node: persist_orders
+  persist_orders:
+    main:
+      - node: done

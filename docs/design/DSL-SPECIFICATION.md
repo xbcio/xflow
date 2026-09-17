@@ -1406,6 +1406,34 @@ Kafka trigger 默认仍是"一条消息触发一个 execution"。配置 `paramet
 
 Kafka 聚合只保证同一 partition 内按消费顺序进入 batch 并按 batch 顺序发起 emit；不保证跨 partition 顺序，也不保证后续 workflow execution 的完成顺序。需要端到端严格顺序时，应在调度层引入 partition 维度的串行执行能力，而不是只依赖 trigger 聚合。
 
+##### 聚合缓冲溢出处置（on_overflow）
+
+`aggregate.on_overflow` 只回答一个问题：某个 partition 的保留缓冲（上限由 `max_size` 派生）已满、下一条消息又到达时怎么办。取值只有两个，默认是 `discard`：
+
+```yaml
+    parameters:
+      aggregate:
+        enabled: true
+        by: partition
+        max_size: 100
+        flush_interval: 100ms
+        dedup: message
+        on_overflow: block        # discard(默认) | block
+```
+
+| 取值 | 到达的那条消息 | 代价 |
+|---|---|---|
+| `discard`（默认） | **永久丢弃**：丢的是刚到达的那条；之后提交更高 offset 时会直接扫过它，Kafka 不会重投。这是丢失，不是延后。会计入 `xflow_trigger_messages_discarded_total{reason="buffer_overflow"}` 并限流打 WARN 日志 | 丢数据 |
+| `block` | 一条不丢：该 partition 的缓冲不再排空，`submit` 阻塞，消费整体暂停直到积压排空 | 停取。所有 partition 共用一个 reader，因此**停的是整个 assignment**，不只是溢出的那个 partition |
+
+`block` 的失败模式在指标上尤其反直觉：**lag 指标看不见它**。consumer lag 只在 fetch 到消息时采样，一个停止 fetch 的 partition 会把 lag 冻结在最后一个"健康"值上，于是它在 dashboard 上读起来是正常的。这是该策略下的稳态而非边角情况——恰恰是背压生效的那一刻，lag 停止更新。唯一信号是 `xflow_trigger_consumption_blocked{topic,partition}`（进入/退出阻塞时在 1/0 之间翻转并打日志）。用 lag 判断消费健康度，会把正在阻塞的 consumer 判成健康。
+
+溢出轴上**没有** `dead_letter`。`dead_letter` 只属于非法消息轴（`message_schema.on_invalid`）：overflow 需要的 offset 处置、持久化、回放与容量语义都还不存在，不能拿 invalid-message DLQ 顶替。
+
+除 `block` 之外没有"既不丢也不停"的第三档，这不是遗漏：按 partition 单独暂停需要 Reader 支持单 partition 暂停，kafka-go 的 group Reader 不提供该能力，于是有界内存只能在"丢记录"与"停掉所有 partition 共享的 reader"之间二选一。
+
+默认取 `discard` 是既有行为的保持：现有部署升级后不会被挪到另一种取舍上，`on_overflow` 也不会被写入 `RawParams()`。由此得到一条必须明说的结论：**任何不能接受丢数据的 topic 都必须显式设置 `on_overflow`，因为默认值就是丢弃。** 未识别的取值（含 `dead_letter`）会让 activation 失败，而不是静默回退到 `discard`。
+
 ##### 消息校验与非法消息处置
 
 可选参数 `message_schema` 声明消息值必须是 JSON 对象且包含指定的顶层字段：

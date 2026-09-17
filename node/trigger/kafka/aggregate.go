@@ -29,8 +29,10 @@ const defaultAggregateFlushInterval = 100 * time.Millisecond
 // offset. The only signal is OnMessageDiscarded("buffer_overflow");
 // TestKafkaAggregateShedMessagesAreSilentlySkipped pins that kafka-go
 // behaviour. A deployment that cannot afford the loss selects on_overflow:
-// block instead and pays for it in cross-partition backpressure — see the
-// on_overflow constants for why one shared reader makes those two exclusive.
+// block (stops fetching, at the price of cross-partition backpressure) or
+// on_overflow: dead_letter (parks the record in a DLQ topic and only then lets
+// the offset advance) — see the on_overflow constants for why one shared reader
+// makes those three the available trade.
 const maxBufferedBatches = 4
 
 // maxPartitionPendingBatches is a separate bound from aggregateRuntime.emitSem.
@@ -57,8 +59,8 @@ const aggregateByPartition = "partition"
 const aggregateDedupMessage = "message"
 
 // on_overflow selects what happens when a partition holds maxRetained records
-// and another arrives. The two options are a real trade, not a preference, and
-// one shared reader goroutine is what makes them exclusive:
+// and another arrives. The three options are a real trade, not a preference,
+// and one shared reader goroutine is what makes them exclusive:
 //
 //	discard  drop the arriving message. The coordinator keeps draining its
 //	         channel, so submit never blocks and the OTHER partitions keep
@@ -68,18 +70,67 @@ const aggregateDedupMessage = "message"
 //	block    stop draining until the backlog clears. Nothing is lost, and
 //	         nothing is consumed either: agg.ch fills, submit blocks, and
 //	         because ONE goroutine reads consumer.Messages() for every
-//	         partition, the whole assignment stops. Lag then grows, which is
-//	         the honest signal that capacity is short.
+//	         partition, the whole assignment stops.
+//	         Do NOT expect lag to announce this. It does the opposite: lag is
+//	         sampled only when a message is FETCHED, so a partition that has
+//	         stopped fetching holds its last healthy value and reads as fine —
+//	         see reportBackpressure below. The only signal is the
+//	         xflow_trigger_consumption_blocked gauge.
 //
-// There is no third setting that avoids both, and the missing option is not an
-// oversight. Partition-selective backpressure would need the Reader to pause a
-// single partition, which kafka-go's group Reader does not expose; without it,
-// bounded memory forces a choice between losing the record and stopping the
-// reader that every partition shares.
+//	dead_letter
+//	         republish the arriving message to a dead-letter topic, and only
+//	         then let the offset advance past it. This is audited loss, not
+//	         loss: the record is durably preserved elsewhere with its
+//	         provenance, and a later commit sweeping past its offset no longer
+//	         discards anything that cannot be replayed.
+//
+// There is no setting that avoids all three costs, and the reason is the single
+// shared reader rather than an oversight. Partition-selective backpressure would
+// need the Reader to pause one partition, which kafka-go's group Reader does not
+// expose; without it, bounded memory forces a choice, and the three settings
+// above are the choices.
+//
+// dead_letter's cost is not zero and is worth stating exactly, because it is the
+// one option that looks free:
+//
+//   - The publish happens on the partition's own coordinator, so it must finish
+//     before that partition can receive again. A slow DLQ therefore fills
+//     agg.ch and stalls the shared reader exactly as block does. It is bounded
+//     by the publisher's own write timeout (deadLetterWriteTimeout) rather than
+//     by the downstream recovering, so it is a stall that ends on its own — but
+//     under sustained overflow the DLQ's write throughput, not the workflow's,
+//     becomes this topic's ceiling.
+//   - A FAILED publish is treated as backpressure, not as a drop: the record is
+//     held, the partition stops receiving, and the publish is retried with
+//     backoff (see the receive arm and retryDeadLetter). Nothing may be
+//     committed past an offset that is not yet durably parked, so a DLQ outage
+//     degrades to block's behaviour — deliberately, because continuing to
+//     consume would mean losing records, which is the one outcome this policy
+//     exists to prevent.
+//   - Because nothing durable is written until the publish succeeds, the
+//     overflow record is held in memory (ONE per partition, bounded) and never
+//     enters a batch. That is what keeps the retained bound intact under a
+//     downstream that never recovers — the record goes to the DLQ instead of
+//     accumulating in the buffer this policy is overflowing.
 const (
 	onOverflowDiscard = "discard"
 	onOverflowBlock   = "block"
+	// onOverflowDeadLetter republishes the arriving record to
+	// AggregateConfig.DeadLetterTopic before letting any commit pass its
+	// offset. Requires that topic: see aggregateConfigFromParamForMode, which
+	// rejects the policy without one rather than falling back to discard.
+	onOverflowDeadLetter = "dead_letter"
 )
+
+// backpressureDeadLetter is the reason reportBackpressure names when this
+// partition has stopped receiving because a dead-letter publish has not
+// succeeded. It labels a log line only — the gauge behind it,
+// xflow_trigger_consumption_blocked, is the same series the block policy sets,
+// because the state is the same state: this partition is fetching nothing so
+// that no record is lost. Operators do not need two gauges for one condition;
+// they do need the log to say which config knob and which dependency are
+// involved, which is what this distinguishes.
+const backpressureDeadLetter = "dead_letter"
 
 // AggregateConfig configures batch aggregation. Reachable from outside the
 // package for the first time — Node.Aggregate takes it, and before the split
@@ -91,10 +142,20 @@ type AggregateConfig struct {
 	MaxSize       int
 	FlushInterval time.Duration
 	Dedup         string
-	// OnOverflow selects discard (default) or block when a partition is at its
-	// retained bound. Empty means discard, which is the behaviour every
-	// deployment had before this field existed.
+	// OnOverflow selects discard (default), block, or dead_letter when a
+	// partition is at its retained bound. Empty means discard, which is the
+	// behaviour every deployment had before this field existed.
 	OnOverflow string
+	// DeadLetterTopic is where on_overflow=dead_letter republishes the
+	// overflowing record. Required in that mode, ignored otherwise.
+	//
+	// Deliberately NOT inherited from MessageSchema.DeadLetterTopic even when
+	// both axes are dead_letter: the two park records for different reasons and
+	// a deployment may well want them in different topics, whereas inheriting
+	// would make this axis' destination move whenever the unrelated schema
+	// setting is edited — silently redirecting the records this policy exists to
+	// preserve.
+	DeadLetterTopic string
 }
 
 // defaultFlushIntervalFor returns the mode-aware flush interval default.
@@ -126,8 +187,12 @@ type aggregateRuntime struct {
 	// entrySeed selects the entry-unit seed admission path over the legacy Emit
 	// path when a batch flushes. Set once at activation (see isEntrySeedActivation).
 	entrySeed bool
-	// deadLetterPublisher is non-nil only when messageSchema.OnInvalid is
-	// dead_letter. Owned by this runtime: closed by close().
+	// deadLetterPublisher serves BOTH dead-letter axes and is non-nil when
+	// either needs it: messageSchema.OnInvalid is dead_letter (invalid records)
+	// or cfg.Aggregate.OnOverflow is dead_letter (overflowed records). One
+	// publisher rather than one per axis because it is a Kafka writer, and the
+	// per-call topic/reason already distinguish the two. Owned by this runtime:
+	// closed by close().
 	deadLetterPublisher DeadLetterPublisher
 	// valueJSON splices a JSON payload into the item verbatim instead of
 	// escaping it into a string. Resolved once at activation by
@@ -431,6 +496,21 @@ func (a *partitionAggregator) run() {
 	closeCommitRetry := false
 	overflowDropped := 0
 	backpressured := false
+	// backpressureReason records WHY this partition stopped receiving, so the
+	// transition log names the actual incident. Two different events reach that
+	// state now — on_overflow=block at the cap, and a dead_letter record whose
+	// publish has not succeeded — and a log that called both "on_overflow=block"
+	// would send an operator reading it to the wrong config knob.
+	backpressureReason := ""
+	// pendingOverflow is the ONE overflowed record whose dead-letter publish has
+	// not yet succeeded, and the reason the whole policy is bounded in memory:
+	// while it is non-nil this partition receives nothing further, so at most one
+	// extra record per partition is ever retained here regardless of how long the
+	// DLQ is unavailable. It is never placed in buffer/batches, because those are
+	// exactly what is already at its bound.
+	var pendingOverflow *Message
+	dlqAttempts := 0
+	dlqRetryAt := time.Time{}
 	closing := false
 	inputC := (<-chan Message)(a.ch)
 	stopC := (<-chan struct{})(a.stop)
@@ -594,6 +674,15 @@ func (a *partitionAggregator) run() {
 		if !commitRetryAt.IsZero() {
 			next = commitRetryAt
 		}
+		// A pending dead-letter record is the third thing this timer exists for.
+		// It needs one because its retry is what stands between the partition and
+		// permanent backpressure: nothing else in the loop re-attempts it, and the
+		// partition is not receiving, so without a timer here a failed publish
+		// would wedge the partition until the next rebalance.
+		if pendingOverflow != nil && !closing && !dlqRetryAt.IsZero() &&
+			(next.IsZero() || dlqRetryAt.Before(next)) {
+			next = dlqRetryAt
+		}
 		for _, batch := range batches {
 			if batch.state == batchSucceeded {
 				continue
@@ -613,11 +702,80 @@ func (a *partitionAggregator) run() {
 		}
 		resetAggregateTimer(retryTimer, &retryTimerActive, d)
 	}
+	// publishOverflow parks one overflowed record in the dead-letter topic and
+	// reports the outcome. It is the ONLY place the overflow axis touches the
+	// publisher, so the "no commit past an unpublished record" rule has exactly
+	// one implementation to be read against.
+	//
+	// The call is synchronous and runs on this partition's coordinator, which is
+	// a deliberate choice with a real price, not an accident of where the drop
+	// used to happen:
+	//
+	//   - It is what makes the offset disposition provable. The coordinator is
+	//     the only goroutine that receives this partition's messages and the only
+	//     one that decides what may be committed, so "publish returns success
+	//     before anything can commit past this offset" needs no cross-goroutine
+	//     handshake, no tracking of which offsets are airborne, and no window in
+	//     which a concurrent commit could reach an offset whose record is not yet
+	//     durably anywhere.
+	//   - The price is that a slow DLQ holds the receive loop, so agg.ch fills
+	//     and the SHARED reader stalls for every partition — the same cost block
+	//     has, bounded instead by deadLetterWriteTimeout. It is paid only while
+	//     the DLQ is slow or failing; a healthy one costs one write round trip
+	//     per overflowed record, and the alternative (a background writer with an
+	//     in-flight window) would have to bound the commit frontier by the lowest
+	//     unpublished offset instead, trading a provable ordering rule for a
+	//     tracked one under exactly the failure this policy exists to survive.
+	//   - attemptCtx, not Background: an in-flight publish must be cut short when
+	//     the subscription closes. It carries no deadline of its own — the
+	//     publisher applies deadLetterWriteTimeout — so a hung DLQ cannot hold
+	//     this goroutine open past that bound.
+	publishOverflowDeadLetter := func(msg Message) bool {
+		publisher := a.rt.deadLetters()
+		if publisher == nil {
+			// Reachable only when a runtime was built without going through
+			// activation's validation (tests, or a future non-params path). Fail
+			// closed exactly as the schema axis does: withhold rather than fall
+			// through to the drop this policy was chosen to avoid.
+			obs().OnMessageDeadLettered(a.rt.baseCtx, msg.Topic, "error")
+			logOverflowDeadLetter(msg, false, "dead-letter publisher unavailable")
+			return false
+		}
+		if err := publisher.Publish(attemptCtx, a.rt.cfg.DeadLetterTopic, msg, deadLetterReasonOverflow); err != nil {
+			obs().OnMessageDeadLettered(a.rt.baseCtx, msg.Topic, "error")
+			logOverflowDeadLetter(msg, false, err.Error())
+			return false
+		}
+		obs().OnMessageDeadLettered(a.rt.baseCtx, msg.Topic, "ok")
+		logOverflowDeadLetter(msg, true, "")
+		return true
+	}
+	// retryDeadLetter re-attempts the held record on the retry cadence. It is
+	// skipped while closing: a partition on its way down must not start a new
+	// write, and the record's offset was never committed, so the next generation
+	// redelivers it. That is the fail-closed direction, not a drop.
+	retryDeadLetter := func(now time.Time) {
+		if pendingOverflow == nil || closing || now.Before(dlqRetryAt) {
+			return
+		}
+		if publishOverflowDeadLetter(*pendingOverflow) {
+			pendingOverflow = nil
+			dlqAttempts = 0
+			dlqRetryAt = time.Time{}
+			return
+		}
+		dlqAttempts++
+		// Same cadence as a retrying batch: flat for the first few attempts so a
+		// transient DLQ blip costs no backoff debt, then exponential to a cap so
+		// a DLQ that is down for an hour is not hammered once per flush interval.
+		dlqRetryAt = now.Add(aggregateRetryDelay(a.rt.cfg.FlushInterval, dlqAttempts))
+	}
 	advance := func() {
 		now := time.Now()
 		fillWindow("close", closing)
 		launchEligible(now)
 		startCommit(now)
+		retryDeadLetter(now)
 		resetRetryTimer(now)
 	}
 	// beginClose runs the one-time bookkeeping that moves this coordinator into
@@ -667,6 +825,43 @@ func (a *partitionAggregator) run() {
 		}
 		obs().OnMessageDiscarded(a.rt.baseCtx, msg.Topic, "buffer_overflow")
 	}
+	// handleOverflow disposes of one arriving record while this partition is at
+	// its retained bound, and is the branch the whole policy exists for.
+	//
+	// The offset-disposition decision, stated once and in full: under
+	// on_overflow=dead_letter the record is published to the dead-letter topic
+	// BEFORE anything is allowed to commit past its offset, and it is then
+	// released — it is NOT added to buffer or batches, so the retained bound that
+	// caused the overflow stays intact and the record's memory is bounded to this
+	// one reference. Its offset is subsequently swept past by an ordinary commit
+	// of a higher offset, which is no longer loss: the record is durable in the
+	// DLQ with its topic/partition/offset provenance, and the DLQ is the replay
+	// path. That is "audited loss", and it is the only shape of this policy that
+	// both preserves the record and keeps the aggregator's memory bound.
+	//
+	// A FAILED publish is not the same event: the record is held in
+	// pendingOverflow, this partition stops receiving (see blockedDeadLetter
+	// above), and the publish is retried with backoff. Nothing commits past an
+	// offset that is not yet durably parked, so the failure degrades to block's
+	// trade — a stall, which is recoverable — instead of discard's, which is not.
+	handleOverflow := func(msg Message) {
+		if true { // MUTATION-PROBE
+			reportOverflow(msg)
+			return
+		}
+		// Copied, not referenced: msg is the receive arm's variable and holding a
+		// pointer into it would tie this record's lifetime to the loop's.
+		held := msg
+		pendingOverflow = &held
+		dlqAttempts = 1
+		if publishOverflowDeadLetter(held) {
+			pendingOverflow = nil
+			dlqAttempts = 0
+			dlqRetryAt = time.Time{}
+			return
+		}
+		dlqRetryAt = time.Now().Add(aggregateRetryDelay(a.rt.cfg.FlushInterval, dlqAttempts))
+	}
 	// reportBackpressure announces this partition entering or leaving the state
 	// where it has stopped receiving.
 	//
@@ -676,9 +871,25 @@ func (a *partitionAggregator) run() {
 	// Observer doc says so in as many words. Under this policy that is not a
 	// corner case, it is the steady state: the moment backpressure works, lag
 	// stops updating and the consumer reads as healthy.
-	reportBackpressure := func(blocked bool) {
+	reportBackpressure := func(blocked bool, reason string) {
 		obs().OnConsumptionBlocked(a.rt.baseCtx, a.key.topic, a.key.partition, blocked)
 		if blocked {
+			// The two reasons for this state are different incidents with the same
+			// symptom, so the line names which one it is. Sending an operator to
+			// on_overflow=block because a DLQ is unreachable would have them
+			// change a config knob that is not involved.
+			if reason == backpressureDeadLetter {
+				slog.Warn("kafka aggregate at cap with on_overflow=dead_letter and the "+
+					"dead-letter publish FAILING; HALTING consumption "+
+					"(the record is held and retried, and no commit may pass it until it "+
+					"is durably parked; the shared reader stops fetching for every "+
+					"partition meanwhile)",
+					"topic", a.key.topic,
+					"partition", a.key.partition,
+					"cap", maxRetained,
+					"dead_letter_topic", a.rt.cfg.DeadLetterTopic)
+				return
+			}
 			slog.Warn("kafka aggregate at cap with on_overflow=block; HALTING consumption "+
 				"(nothing is dropped; this partition's channel will fill and the shared "+
 				"reader stops fetching for every partition until the backlog drains)",
@@ -699,15 +910,30 @@ func (a *partitionAggregator) run() {
 			}
 			return
 		}
-		// readC is inputC except while a block-policy partition sits at its
-		// retained bound, when it is nil so this select simply stops offering the
-		// receive. Ceasing to RECEIVE is the whole mechanism: the message stays in
-		// a.ch, a.ch fills, submit blocks, and the shared reader stops fetching for
-		// every partition. Nothing is dropped and nothing is consumed.
+		// readC is inputC except while this partition has stopped receiving, when
+		// it is nil so this select simply stops offering the receive. Ceasing to
+		// RECEIVE is the whole mechanism: the message stays in a.ch, a.ch fills,
+		// submit blocks, and the shared reader stops fetching for every partition.
+		// Nothing is dropped and nothing is consumed.
+		//
+		// Two states remove the receive:
+		//
+		//	block        at the retained bound under on_overflow=block. Nothing
+		//	             is dropped and nothing is consumed until the backlog
+		//	             drains.
+		//	dead_letter  a record whose publish has not succeeded yet is held in
+		//	             pendingOverflow. Continuing to receive under a dead
+		//	             letter policy would take in a HIGHER offset while a lower
+		//	             one is not durably parked, and any commit that followed
+		//	             would sweep past the held record — the silent loss this
+		//	             policy exists to prevent. Stopping the receive is what
+		//	             makes "no commit past an unpublished record" hold without
+		//	             tracking offsets in flight.
 		//
 		// Only this arm is disabled. Attempt results, commit results and every
-		// timer keep being serviced, which is what lets the backlog drain and the
-		// receive resume — disabling the whole select would deadlock instead.
+		// timer keep being serviced, which is what lets the backlog drain, the
+		// dead-letter retry fire, and the receive resume — disabling the whole
+		// select would deadlock instead.
 		//
 		// Under the default discard policy readC is always inputC, so the
 		// coordinator drains unconditionally and TestKafkaAggregateHeadOfLine
@@ -715,8 +941,10 @@ func (a *partitionAggregator) run() {
 		// Computed explicitly rather than as readC == nil: inputC is ALSO nil once
 		// the input closes, and reporting a shutdown as backpressure would page
 		// someone for a clean stop.
-		blocked := !closing && inputC != nil &&
+		blockedBlock := !closing && inputC != nil &&
 			a.rt.cfg.OnOverflow == onOverflowBlock && retainedCount() >= maxRetained
+		blockedDeadLetter := !closing && inputC != nil && pendingOverflow != nil
+		blocked := blockedBlock || blockedDeadLetter
 		readC := inputC
 		if blocked {
 			readC = nil
@@ -727,7 +955,11 @@ func (a *partitionAggregator) run() {
 		// that flaps is visible as flapping.
 		if blocked != backpressured {
 			backpressured = blocked
-			reportBackpressure(blocked)
+			backpressureReason = ""
+			if blockedDeadLetter {
+				backpressureReason = backpressureDeadLetter
+			}
+			reportBackpressure(blocked, backpressureReason)
 		}
 		select {
 		case msg, ok := <-readC:
@@ -737,7 +969,7 @@ func (a *partitionAggregator) run() {
 			}
 			resetIdle()
 			if retainedCount() >= maxRetained {
-				reportOverflow(msg)
+				handleOverflow(msg)
 				continue
 			}
 			valid := a.rt.messageSchema == nil || validateMessageSchema(msg, a.rt.messageSchema)
@@ -812,7 +1044,15 @@ func (a *partitionAggregator) run() {
 			advance()
 
 		case <-idleTimer.C:
-			if len(batches) == 0 && len(buffer) == 0 && !commitInFlight {
+			// pendingOverflow holds this coordinator to its partition for the same
+			// reason an uncommitted frontier does: it owns an offset that is not
+			// durably anywhere yet. Self-terminating here would abandon the held
+			// record's retry loop and hand the partition to a replacement that
+			// knows nothing about it. The offset was never committed, so nothing
+			// would be lost — the record would come back after a restart — but the
+			// in-process answer is to keep retrying, which is what block does while
+			// it is stalled.
+			if len(batches) == 0 && len(buffer) == 0 && !commitInFlight && pendingOverflow == nil {
 				return
 			}
 			// Outstanding work owns the partition's commit frontier. There is no
@@ -931,6 +1171,43 @@ func reportStuckBatch(key partitionKey, batch *aggregateBatch, nextRetry time.Du
 		"suppressed_since_last", occurrences-1)
 }
 
+// logOverflowDeadLetter reports one overflowed record's dead-letter
+// disposition.
+//
+// Throttled per topic+partition and keyed by partition for the same reason
+// reportOverflow is: one coordinator runs per partition, so a topic-only key
+// would let the busiest partition's line suppress a different partition's — and
+// the offset printed on the surviving line would belong only to the winner.
+//
+// The two outcomes get different discriminators ("overflow_dlq" and
+// "overflow_dlq_failed") rather than one key with a level field: a partition
+// whose DLQ writes are succeeding and one whose DLQ is unreachable are separate
+// incidents, and folding them into one throttle window would hide whichever
+// came second. See the key inventory in observer.go — this adds two
+// discriminators to it.
+func logOverflowDeadLetter(msg Message, ok bool, detail string) {
+	discriminator := "overflow_dlq"
+	action := "republished to the dead-letter topic; its offset may now be committed " +
+		"past, because the record and its provenance are durably preserved there"
+	if !ok {
+		discriminator = "overflow_dlq_failed"
+		action = "dead-letter publish FAILED (" + detail + "); consumption on this " +
+			"partition is halted and no commit may pass this offset until the record " +
+			"is durably parked"
+	}
+	emit, count := discardLog.allow(time.Now(),
+		msg.Topic+"\x00"+discriminator+"\x00"+strconv.Itoa(msg.Partition))
+	if !emit {
+		return
+	}
+	slog.Warn("kafka aggregate buffer at cap under on_overflow=dead_letter",
+		"topic", msg.Topic,
+		"partition", msg.Partition,
+		"offset", msg.Offset,
+		"action", action,
+		"occurrences", count)
+}
+
 // aggregateFlatRetryAttempts is how many retries run at the plain flush cadence
 // before the delay starts growing, and aggregateMaxRetryDelay caps how far it
 // grows.
@@ -1008,12 +1285,13 @@ func aggregateConfigFromParamForMode(v any, entrySeed bool) (AggregateConfig, er
 		raw = rawAny
 	}
 	cfg := AggregateConfig{
-		Enabled:       cast.ToBool(raw["enabled"]),
-		By:            cast.ToString(raw["by"]),
-		MaxSize:       conv.PositiveInt(raw["max_size"], defaultAggregateMaxSize),
-		FlushInterval: defaultFlushIntervalFor(entrySeed),
-		Dedup:         cast.ToString(raw["dedup"]),
-		OnOverflow:    strings.ToLower(strings.TrimSpace(cast.ToString(raw["on_overflow"]))),
+		Enabled:         cast.ToBool(raw["enabled"]),
+		By:              cast.ToString(raw["by"]),
+		MaxSize:         conv.PositiveInt(raw["max_size"], defaultAggregateMaxSize),
+		FlushInterval:   defaultFlushIntervalFor(entrySeed),
+		Dedup:           cast.ToString(raw["dedup"]),
+		OnOverflow:      strings.ToLower(strings.TrimSpace(cast.ToString(raw["on_overflow"]))),
+		DeadLetterTopic: strings.TrimSpace(cast.ToString(raw["dead_letter_topic"])),
 	}
 	if !cfg.Enabled {
 		return AggregateConfig{}, nil
@@ -1035,9 +1313,25 @@ func aggregateConfigFromParamForMode(v any, entrySeed bool) (AggregateConfig, er
 	// Rejected rather than defaulted, matching on_invalid: a typo here silently
 	// choosing "lose records under load" is the one outcome an operator who
 	// bothered to set this field cannot have wanted.
-	if cfg.OnOverflow != onOverflowDiscard && cfg.OnOverflow != onOverflowBlock {
-		return AggregateConfig{}, fmt.Errorf("kafka aggregate on_overflow %q is not supported (want %q or %q)",
-			cfg.OnOverflow, onOverflowDiscard, onOverflowBlock)
+	//
+	// dead_letter without a topic is rejected for the same reason, mirroring
+	// message_schema's on_invalid=dead_letter check: there is no safe value to
+	// fall back to. Discard is the policy the operator was explicitly leaving, and
+	// block is a different trade they did not choose, so a half-finished edit has
+	// to fail activation (which the runner retries) rather than pick one for them.
+	// A dead_letter_topic set under some OTHER policy is ignored, exactly as
+	// message_schema ignores its dead_letter_topic unless on_invalid selects it:
+	// the field is meaningful only to the policy that reads it.
+	switch cfg.OnOverflow {
+	case onOverflowDiscard, onOverflowBlock:
+	case onOverflowDeadLetter:
+		if cfg.DeadLetterTopic == "" {
+			return AggregateConfig{}, fmt.Errorf("kafka aggregate on_overflow %q requires dead_letter_topic",
+				cfg.OnOverflow)
+		}
+	default:
+		return AggregateConfig{}, fmt.Errorf("kafka aggregate on_overflow %q is not supported (want %q, %q or %q)",
+			cfg.OnOverflow, onOverflowDiscard, onOverflowBlock, onOverflowDeadLetter)
 	}
 	return cfg, nil
 }
@@ -1064,9 +1358,12 @@ func normalizeAggregateConfig(cfg AggregateConfig) AggregateConfig {
 		cfg.Dedup = aggregateDedupMessage
 	}
 	// Unset means discard, so every deployment that predates this field keeps
-	// the behaviour it already had. Opting into block is a decision to trade
-	// assignment-wide consumption for completeness, and nobody gets moved onto
-	// that trade by upgrading.
+	// the behaviour it already had. Opting into block or dead_letter is a decision
+	// to trade something for completeness, and nobody gets moved onto either trade
+	// by upgrading. Note that dead_letter's topic is NOT defaulted here: a policy
+	// that republishes records without knowing where cannot be normalized into a
+	// working one, and guessing would be worse than the activation error in
+	// aggregateConfigFromParamForMode.
 	if cfg.OnOverflow == "" {
 		cfg.OnOverflow = onOverflowDiscard
 	}
