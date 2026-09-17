@@ -3,8 +3,12 @@ package runner
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,6 +49,136 @@ func runCommand(t *testing.T, args ...string) {
 	}, args...)
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func captureRunnerStartupLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	previous := slog.Default()
+	var logs bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return &logs
+}
+
+func loggedRunnerCredentialNames(t *testing.T, logs []byte) []string {
+	t.Helper()
+	for _, line := range bytes.Split(bytes.TrimSpace(logs), []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		var record struct {
+			Message         string   `json:"msg"`
+			CredentialNames []string `json:"credential_names"`
+		}
+		if err := json.Unmarshal(line, &record); err != nil {
+			t.Fatalf("decode runner startup log %q: %v", line, err)
+		}
+		if record.Message == "runner starting" {
+			return record.CredentialNames
+		}
+	}
+	t.Fatalf("runner startup log missing from %q", logs)
+	return nil
+}
+
+func TestRunCommandLogsSortedCredentialNamesWithoutValues(t *testing.T) {
+	const (
+		secretField = "r8_secret_field_must_not_be_logged"
+		secretValue = "credential-value-that-must-not-be-logged"
+		configField = "r8_config_field_must_not_be_logged"
+		configValue = "credential-config-detail-that-must-not-be-logged"
+	)
+	path := filepath.Join(t.TempDir(), "runner.yaml")
+	data := []byte(`
+server:
+  transport: http
+  url: http://server:8080
+credentials:
+  zebra:
+    r8_secret_field_must_not_be_logged: "credential-value-that-must-not-be-logged"
+  api:
+    r8_config_field_must_not_be_logged: "credential-config-detail-that-must-not-be-logged"
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	restore := stubRunnerServiceFactory(func(xflowsdk.RunnerConfig) error { return nil })
+	defer restore()
+	logs := captureRunnerStartupLogs(t)
+
+	runCommand(t, "run", "--config", path, "--allow-plaintext")
+
+	if got, want := loggedRunnerCredentialNames(t, logs.Bytes()), []string{"api", "zebra"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("logged credential names = %q, want %q", got, want)
+	}
+	for _, forbidden := range []string{secretField, secretValue, configField, configValue} {
+		if strings.Contains(logs.String(), forbidden) {
+			t.Fatalf("credential value or configuration shape leaked into startup logs: %q", logs.String())
+		}
+	}
+}
+
+func TestRunCommandLogsAnEmptyCredentialList(t *testing.T) {
+	restore := stubRunnerServiceFactory(func(xflowsdk.RunnerConfig) error { return nil })
+	defer restore()
+	logs := captureRunnerStartupLogs(t)
+
+	runCommand(t, "run", "--server", "http://server:8080", "--allow-plaintext")
+
+	if got := loggedRunnerCredentialNames(t, logs.Bytes()); got == nil || len(got) != 0 {
+		t.Fatalf("logged credential names = %q, want an explicit empty list", got)
+	}
+	if !strings.Contains(logs.String(), `"credential_names":[]`) {
+		t.Fatalf("empty credential list was not encoded as []: %q", logs.String())
+	}
+}
+
+func TestRunCommandConfigLoadFailureDoesNotLogCredentials(t *testing.T) {
+	const (
+		secretField = "r8_secret_field_must_not_leak_on_load_error"
+		secretValue = "credential-value-that-must-not-leak-on-load-error"
+	)
+	path := filepath.Join(t.TempDir(), "runner.yaml")
+	data := []byte(`
+server:
+  transport: http
+  url: http://server:8080
+credentials:
+  api:
+    r8_secret_field_must_not_leak_on_load_error: "credential-value-that-must-not-leak-on-load-error"
+resource_pool:
+  sql:
+    conn_max_lifetime: "not-a-duration"
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	logs := captureRunnerStartupLogs(t)
+	ran := false
+	err := executeRootWithOptions(commandOptions{
+		runFunc: func(runnerConfig) error {
+			ran = true
+			return nil
+		},
+		out: &bytes.Buffer{},
+		err: &bytes.Buffer{},
+	}, "run", "--config", path, "--allow-plaintext")
+	if err == nil {
+		t.Fatal("run with an invalid config succeeded")
+	}
+	if ran {
+		t.Fatal("run function was called after config load failed")
+	}
+	for _, forbidden := range []string{secretField, secretValue} {
+		if strings.Contains(err.Error(), forbidden) || strings.Contains(logs.String(), forbidden) {
+			t.Fatalf("credential value or configuration shape leaked on config load failure: error=%q logs=%q", err, logs.String())
+		}
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("config load failure emitted startup logs: %q", logs.String())
 	}
 }
 

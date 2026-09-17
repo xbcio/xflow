@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -207,6 +208,18 @@ var newRunnerService = func(cfg xflowsdk.RunnerConfig, opts ...xflowsdk.RunnerOp
 	return xflowsdk.NewRunner(cfg, opts...)
 }
 
+// configuredCredentialNames returns a non-nil, stable credential-name list for
+// startup logging. It intentionally reads only map keys: credential values and
+// configuration shape must remain in process memory.
+func configuredCredentialNames(credentials map[string]map[string]any) []string {
+	names := make([]string, 0, len(credentials))
+	for name := range credentials {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // runRunner translates the resolved CLI/YAML config into the SDK's RunnerConfig
 // and runs the embedded runner.
 //
@@ -283,6 +296,12 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 	if err != nil {
 		return err
 	}
+
+	// Emit the credential inventory only after the SDK runner has assembled
+	// successfully. Configuration/load failures therefore produce no credential
+	// log, and this deliberately passes names rather than credential maps.
+	slog.Info("runner starting", "credential_names", configuredCredentialNames(cfg.credentials))
+
 	defer func() {
 		if closeErr := runner.Close(); closeErr != nil {
 			slog.Error("runner shutdown failed", "error", closeErr)
