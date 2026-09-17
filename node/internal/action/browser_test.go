@@ -523,6 +523,9 @@ func TestBrowserCDPHostDeniedDetails(t *testing.T) {
 			"source":       browserHostDeniedSourceEndpointAllowlist,
 			"rejected_url": "http://denied-chrome.test",
 		})
+		assertBrowserErrorMessage(t, err,
+			"browser.host_denied: browser destination is denied by policy (source=endpoint_allowlist rejected_url=http://denied-chrome.test)",
+		)
 		if calls.Load() != 0 {
 			t.Fatalf("executor called %d times", calls.Load())
 		}
@@ -547,6 +550,10 @@ func TestBrowserCDPHostDeniedDetails(t *testing.T) {
 			"source":       browserHostDeniedSourceNavigationPolicy,
 			"rejected_url": "https://denied.test/path",
 		})
+		assertBrowserErrorMessage(t, err,
+			"browser.host_denied: browser destination is denied by policy (source=navigation_policy rejected_url=https://denied.test/path)",
+			"?token=TOP_SECRET", "#fragment", "TOP_SECRET",
+		)
 		if calls.Load() != 0 {
 			t.Fatalf("executor called %d times", calls.Load())
 		}
@@ -569,6 +576,10 @@ func TestBrowserCDPHostDeniedDetails(t *testing.T) {
 			"source":       browserHostDeniedSourceInterceptedRequest,
 			"rejected_url": "https://denied.test/path",
 		})
+		assertBrowserErrorMessage(t, err,
+			"browser.host_denied: browser destination is denied by policy (source=intercepted_request rejected_url=https://denied.test/path)",
+			"user:password@", "?token=TOP_SECRET", "#fragment", "TOP_SECRET",
+		)
 	})
 }
 
@@ -726,6 +737,7 @@ func TestBrowserCDPSemaphoreQueueTimeout(t *testing.T) {
 	<-entered
 	_, err := (&CDPNode{}).Execute(context.Background(), &types.Input{Params: validBrowserParams()})
 	assertBrowserErrorDetails(t, err, "browser.timeout", false, map[string]any{"phase": browserTimeoutPhaseQueue})
+	assertBrowserErrorMessage(t, err, "browser.timeout: browser operation timed out (phase=queue)")
 	close(unblock)
 	if err := <-firstDone; err != nil {
 		t.Fatalf("first execute: %v", err)
@@ -772,6 +784,7 @@ func TestBrowserCDPExecuteConnectTimeoutDetails(t *testing.T) {
 		t.Fatal("discovery request did not reach the server")
 	}
 	assertBrowserErrorDetails(t, err, "browser.timeout", false, map[string]any{"phase": browserTimeoutPhaseConnect})
+	assertBrowserErrorMessage(t, err, "browser.timeout: browser operation timed out (phase=connect)")
 }
 
 func TestBrowserCDPExecuteRunTimeoutDetails(t *testing.T) {
@@ -791,6 +804,7 @@ func TestBrowserCDPExecuteRunTimeoutDetails(t *testing.T) {
 
 	_, err := (&CDPNode{}).Execute(context.Background(), &types.Input{Params: params})
 	assertBrowserErrorDetails(t, err, "browser.timeout", false, map[string]any{"phase": browserTimeoutPhaseRun})
+	assertBrowserErrorMessage(t, err, "browser.timeout: browser operation timed out (phase=run)")
 }
 
 func TestCalculateBrowserCredentialExpireTime(t *testing.T) {
@@ -878,6 +892,18 @@ func assertBrowserErrorDetails(t *testing.T, err error, code string, permanent b
 	var classified *types.ClassifiedError
 	if !errors.As(err, &classified) || !reflect.DeepEqual(classified.Details, want) {
 		t.Fatalf("classified details = %#v, want %#v", classified.Details, want)
+	}
+}
+
+func assertBrowserErrorMessage(t *testing.T, err error, want string, forbidden ...string) {
+	t.Helper()
+	if got := err.Error(); got != want {
+		t.Fatalf("error message = %q, want %q", got, want)
+	}
+	for _, value := range forbidden {
+		if strings.Contains(err.Error(), value) {
+			t.Fatalf("error message leaked %q: %q", value, err.Error())
+		}
 	}
 }
 

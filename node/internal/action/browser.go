@@ -1192,10 +1192,14 @@ func browserHostDeniedClassified(denied *browserHostDeniedError) *types.Classifi
 		source = validatedBrowserHostDeniedSource(denied.source)
 		rejectedURL = denied.rejectedURL
 	}
-	err := types.NewPermanentError("browser.host_denied", "browser destination is denied by policy")
+	rejectedURL = sanitizeBrowserRejectedURL(rejectedURL)
+	err := types.NewPermanentError(
+		"browser.host_denied",
+		fmt.Sprintf("browser destination is denied by policy (source=%s rejected_url=%s)", source, rejectedURL),
+	)
 	err.Details = map[string]any{
 		"source":       source,
-		"rejected_url": sanitizeBrowserRejectedURL(rejectedURL),
+		"rejected_url": rejectedURL,
 	}
 	return err
 }
@@ -1250,7 +1254,10 @@ func browserTimeoutClassified(timeout *browserTimeoutError) *types.ClassifiedErr
 	if timeout != nil {
 		phase = validatedBrowserTimeoutPhase(timeout.phase)
 	}
-	err := types.NewTransientError("browser.timeout", "browser operation timed out")
+	err := types.NewTransientError(
+		"browser.timeout",
+		fmt.Sprintf("browser operation timed out (phase=%s)", phase),
+	)
 	err.Details = map[string]any{"phase": phase}
 	return err
 }
