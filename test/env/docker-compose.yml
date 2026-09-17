@@ -2,7 +2,11 @@ name: xflow-test
 
 services:
   redis:
-    image: docker.io/library/redis:latest
+    # Pinned, not `latest`, and deliberately the same version the CI integration
+    # job uses (.github/workflows/ci.yml `redis:7.2`): a floating tag here meant
+    # the local env and CI could disagree about Redis with no commit to explain
+    # it, so the same SHA could not be claimed to produce the same gate result.
+    image: docker.io/library/redis:7.2
     container_name: xflow-test-redis
     command: ["redis-server", "--save", "60", "1"]
     ports:
