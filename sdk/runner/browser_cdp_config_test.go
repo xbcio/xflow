@@ -170,6 +170,19 @@ func TestRunCommandPropagatesBrowserCDPFlagsToSDK(t *testing.T) {
 		"--browser-cdp-connect-timeout", "8s")
 }
 
+func TestValidateRunnerConfigAcceptsBrowserCDPHostRuleForms(t *testing.T) {
+	cfg := defaultRunnerConfig()
+	cfg.allowPlaintext = true
+	cfg.browserCDPEndpointAllowlist = []string{
+		"chrome.example.test",
+		".browser.example.test",
+		"*.worker.example.test",
+	}
+	if err := validateRunnerConfig(cfg); err != nil {
+		t.Fatalf("validateRunnerConfig() = %v, want supported exact/suffix/wildcard rules accepted", err)
+	}
+}
+
 func TestValidateRunnerConfigRejectsInvalidBrowserCDPValues(t *testing.T) {
 	tests := []struct {
 		name string

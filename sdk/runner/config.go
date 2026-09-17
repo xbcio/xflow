@@ -3,6 +3,7 @@ package runner
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"runtime"
@@ -684,18 +685,63 @@ func validateTransportSecurity(cfg runnerConfig) error {
 			"or pass --allow-plaintext to accept the risk")
 }
 
+// validateHostOnlyList accepts the same host-rule grammar supplied to the
+// action layer without importing node/internal/action (which Go's internal
+// package boundary deliberately forbids from sdk/runner). Rules are exact
+// hosts, suffixes prefixed with '.', and wildcards prefixed with '*.'. The
+// latter two are patterns, not URL syntax: the action layer gives suffixes the
+// apex-plus-descendants meaning and wildcards the descendants-only meaning.
 func validateHostOnlyList(name string, hosts []string) error {
 	for _, raw := range hosts {
-		host := strings.TrimSpace(raw)
-		if host == "" {
-			return fmt.Errorf("%s must not contain a blank entry", name)
+		if err := validateHostRule(strings.TrimSpace(raw)); err != nil {
+			if strings.TrimSpace(raw) == "" {
+				return fmt.Errorf("%s must not contain a blank entry", name)
+			}
+			return fmt.Errorf("%s entries must be host-only exact hosts, .suffixes, or *.wildcards without scheme, port, path, query, fragment, or userinfo: %q", name, raw)
 		}
-		if strings.ContainsAny(host, "/?#@") || strings.Contains(host, ":") {
-			return fmt.Errorf("%s entries must be host-only without scheme, port, path, query, fragment, or userinfo: %q", name, raw)
+	}
+	return nil
+}
+
+func validateHostRule(rule string) error {
+	pattern := false
+	host := rule
+	switch {
+	case strings.HasPrefix(host, "*."):
+		pattern = true
+		host = host[2:]
+	case strings.HasPrefix(host, "."):
+		pattern = true
+		host = host[1:]
+	}
+	if host == "" || strings.ContainsAny(host, "/\\?#@") || strings.ContainsAny(host, " \t\r\n") {
+		return errors.New("invalid host rule")
+	}
+
+	// Bracketed IPv6 is accepted only as an exact host, matching action's
+	// normalizer. A suffix/wildcard IP rule has no DNS-label meaning and is
+	// rejected rather than silently treating text after a dot as a hostname.
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	if strings.Contains(host, "[") || strings.Contains(host, "]") {
+		return errors.New("invalid host rule")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if pattern {
+			return errors.New("IP host patterns are invalid")
 		}
-		u, err := url.Parse("http://" + host)
-		if err != nil || u.User != nil || u.Hostname() != host || u.Port() != "" || u.Path != "" {
-			return fmt.Errorf("%s entries must be host-only without scheme, port, path, query, fragment, or userinfo: %q", name, raw)
+		return nil
+	}
+	if strings.Contains(host, ":") || len(host) > 253 {
+		return errors.New("invalid host rule")
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return errors.New("invalid host rule")
+		}
+		for _, r := range label {
+			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_') {
+				return errors.New("invalid host rule")
+			}
 		}
 	}
 	return nil

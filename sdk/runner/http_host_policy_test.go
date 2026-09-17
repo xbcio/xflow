@@ -108,6 +108,29 @@ func TestValidateRunnerConfigRejectsMalformedHTTPHostPolicyHosts(t *testing.T) {
 	}
 }
 
+func TestValidateRunnerConfigRejectsMalformedHostRulePatterns(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		rule string
+	}{
+		{name: "star without dot", rule: "*example.test"},
+		{name: "wildcard ip", rule: "*.127.0.0.1"},
+		{name: "suffix ip", rule: ".127.0.0.1"},
+		{name: "double dot", rule: ".example..test"},
+		{name: "trailing dot", rule: "example.test."},
+		{name: "bracketed port", rule: "[::1]:9222"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := defaultRunnerConfig()
+			cfg.allowPlaintext = true
+			cfg.httpHostPolicyAllow = []string{tt.rule}
+			if err := validateRunnerConfig(cfg); err == nil || !strings.Contains(err.Error(), "HTTP host policy allowlist") {
+				t.Fatalf("validateRunnerConfig(%q) error = %v, want HTTP host policy allowlist error", tt.rule, err)
+			}
+		})
+	}
+}
+
 func TestInstallRunnerHTTPHostPolicyConfiguredForStockRunnerAndRestores(t *testing.T) {
 	originalSetter := setRunnerHTTPHostPolicy
 	defer func() { setRunnerHTTPHostPolicy = originalSetter }()
