@@ -1,6 +1,7 @@
-.PHONY: all build test test-verbose test-examples test-concurrency test-script-wasm test-coverage lint fmt vet tidy clean run-server run-runner install-hooks \
+.PHONY: all build test test-verbose test-examples test-concurrency test-script-wasm test-script-wasm-heavy test-coverage lint fmt vet tidy clean run-server run-runner install-hooks \
         check-go check-proto-tools proto proto-check proto-tools fetch-protoc \
-        env-up env-down env-reset env-logs env-migrate env-ready test-integration test-integration-required test-g0-evidence-required test-g1-evidence-required test-perf perf-sample test-soak \
+        env-up env-down env-reset env-logs env-migrate env-ready test-integration test-integration-required test-g0-evidence-required test-g1-evidence-required print-g0-evidence-validator release-summary evidence-image-digests test-perf perf-sample test-soak \
+        pin-audit pin-audit-strict pin-audit-selftest sbom sbom-validate \
         web-install web-lint web-typecheck web-test web-test-coverage web-check-boundaries web-check-production-fixtures web-build web-e2e web-e2e-preview web-ci web-all validate-openapi
 
 GO ?= go
@@ -13,7 +14,11 @@ SCRIPT_JS_PACKAGES := $(SCRIPT_PACKAGE_ROOT) $(SCRIPT_PACKAGE_ROOT)/js
 WASM_PACKAGE := $(SCRIPT_PACKAGE_ROOT)/wasm
 # WASM tests compile several real guests. Run the package once in an isolated
 # process so those guests are built once, with a dedicated watchdog for CI hosts.
-WASM_TEST_TIMEOUT ?= 15m
+# Measured 2026-09-17 on an 8-core host: the full -race package needs ~1425s
+# (~24m) even with the machine otherwise idle-ish, so 15m sat below the cost and
+# fired as a false watchdog. 45m is headroom for slower/noisier CI hosts, not a
+# budget to fill. docs/TESTING.md carries the measurement.
+WASM_TEST_TIMEOUT ?= 45m
 INTEGRATION_PACKAGE := ./test/integration
 INTEGRATION_TEST_SHARDS := 4
 COVERAGE_PROFILE ?= coverage.out
@@ -190,6 +195,44 @@ test-script-wasm: check-go
 	$(GO) test -p=1 $(SCRIPT_JS_PACKAGES) -race -count=1 -timeout 5m
 	$(GO) test -p=1 $(WASM_PACKAGE) -race -count=1 -timeout $(WASM_TEST_TIMEOUT)
 
+# wasm-heavy is a SEPARATE target for the heavy guest-integration set, deliberately
+# NOT part of test-script-wasm, test-coverage, or make test.
+#
+# Why separate: the default WASM package run has to stay fast and green — it is
+# a per-change feedback gate (and the CI coverage gate), so it cannot carry a
+# suite whose cost is dominated by building and driving several real wasip1
+# guests. The heavy guest-integration set needs its own budget rather than a
+# larger shared watchdog: one package-wide `-timeout` would have to grow for the
+# heavy set, which silently removes the watchdog from the ordinary tests that
+# share that binary. WS2 tags those files with `//go:build wasmheavy`; the tag
+# only ADDS files to this configuration, so the ordinary run below is unaffected.
+# The tag is also vetted in the `vet` target, because tagged files are invisible
+# to `go vet ./...` and `go build ./...`.
+#
+# The target REFUSES to run when nothing carries the tag. `go test -tags=X` with
+# no tagged files is not an error — it runs the ordinary package — so an empty
+# tagged set would leave this gate reporting success for heavy work it never
+# did, under a budget that hides the difference. That is the silent-rot failure
+# the `vet` target's comment records for test/stress, one layer up.
+# The heavy build COMPILES IN the ordinary package (the tag only adds files), so
+# when tagged tests land this budget must exceed WASM_TEST_TIMEOUT; size it from
+# a measured heavy run, not from this default.
+WASM_HEAVY_TEST_TIMEOUT ?= 60m
+
+test-script-wasm-heavy: check-go
+	@set -eu; \
+	tagged="$$(grep -rl -e 'go:build.*wasmheavy' -e '+build.*wasmheavy' --include='*.go' $(WASM_PACKAGE) 2>/dev/null | sort)"; \
+	if [ -z "$$tagged" ]; then \
+		echo "ERROR: no file in $(WASM_PACKAGE) carries the wasmheavy build tag." >&2; \
+		echo "       This gate runs the heavy guest-integration set; with nothing tagged it would" >&2; \
+		echo "       run the ORDINARY package under the heavy budget and report success for work" >&2; \
+		echo "       it never did. Failing here instead of passing over nothing." >&2; \
+		echo "       Fix: tag the heavy guest tests with '//go:build wasmheavy'." >&2; \
+		exit 1; \
+	fi; \
+	echo "==> wasm-heavy tagged files: $$(printf '%s\n' "$$tagged" | awk 'NF { count++ } END { print count + 0 }')"; \
+	$(GO) test -p=1 -tags=wasmheavy $(WASM_PACKAGE) -race -count=1 -timeout $(WASM_HEAVY_TEST_TIMEOUT)
+
 # Generate one atomic coverage profile without reintroducing full-repository
 # package fan-out for the heavyweight script/WASM packages. The WASM package is
 # executed once in an isolated process and its profile is merged with the others.
@@ -260,7 +303,7 @@ lint:
 fmt:
 	go fmt ./...
 
-vet:
+vet: check-go
 	go vet ./...
 	# Build-tagged files are excluded from the default build config, so
 	# `go vet ./...` above cannot see them and `go build ./...` cannot either.
@@ -274,6 +317,7 @@ vet:
 	go vet -tags=soak ./test/soak/...
 	go vet -tags=stress ./test/stress/...
 	go vet -tags=concurrency ./backend/providers/local/ ./backend/providers/distributed/...
+	go vet -tags=wasmheavy $(WASM_PACKAGE)
 
 tidy:
 	go mod tidy
