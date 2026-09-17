@@ -1426,9 +1426,11 @@ Kafka 聚合只保证同一 partition 内按消费顺序进入 batch 并按 batc
 |---|---|---|
 | `discard`（默认） | **永久丢弃**：丢的是刚到达的那条；之后提交更高 offset 时会直接扫过它，Kafka 不会重投。这是丢失，不是延后。会计入 `xflow_trigger_messages_discarded_total{reason="buffer_overflow"}` 并限流打 WARN 日志 | 丢数据 |
 | `block` | 一条不丢：该 partition 的缓冲不再排空，`submit` 阻塞，消费整体暂停直到积压排空 | 停取。所有 partition 共用一个 reader，因此**停的是整个 assignment**，不只是溢出的那个 partition |
-| `dead_letter` | 一条不丢：先把这条消息原样重投到 `dead_letter_topic`（保留原 key 与 payload，附加 `xflow-dlq-reason=buffer_overflow` 与来源 topic/partition/offset 头），**写成功之后**才允许 offset 越过它。此后那次"扫过"不再是丢失：记录连同来源信息已持久保存在溢出 topic 里，回放路径就是这个 topic | 溢出 topic 健康的常态下不停取，但要占一条写入往返；溢出 topic 慢或不可用时，写操作会占住该 partition 的协调协程，`agg.ch` 填满、共享 reader 停取——与 `block` 同样的代价，只是由写入超时兜底而非等下游恢复 |
+| `dead_letter` | 一条不丢：先把这条消息原样重投到 `dead_letter_topic`（保留原 key 与 payload，附加 `xflow-dlq-reason=buffer_overflow` 与来源 topic/partition/offset 头），**写成功之后**才允许 offset 越过它。此后那次"扫过"不再是丢失：记录连同来源信息已持久保存在溢出 topic 里，可据以人工重投 | 溢出 topic 健康的常态下不停取，但要占一条写入往返；溢出 topic 慢或不可用时，写操作会占住该 partition 的协调协程，`agg.ch` 填满、共享 reader 停取——与 `block` 同样的代价，只是由写入超时兜底而非等下游恢复 |
 
-`dead_letter` 的 offset 处置是这套语义的关键，必须说清：**发布成功**才等于"这条记录已不再只存在于本进程"，因此只有成功后才允许后续提交越过它的 offset；这一步之后 offset 被扫过属于**有审计的让位**，不是静默丢失（记录、原因、来源都可查、可回放）。**发布失败**则完全不同：记录被保留在内存中（每个 partition 至多一条，因此内存仍有界），该 partition **停止 fetch**，并按退避重试写操作，`xflow_trigger_messages_dead_lettered_total{result="error"}` 计数。也就是说 DLQ 故障时它会**退化成 `block` 的取舍**（停取，可恢复），而不是退化成 `discard` 的取舍（丢失，不可恢复）——这正是这个策略存在的理由。没有任何记录会在"尚未持久保存"的状态下被提交越过。
+> **`dead_letter` 提供的是持久化与来源可查，不是自动回放。** 溢出 topic 需要**自己配一个消费者**：本仓库没有任何组件会读取它，溢出记录也不会自行回到流程里。准确的说法不是"回放路径已经存在"，而是"记录已经变成可被重投的形态"，重投动作要由 operator 自行搭建。
+
+`dead_letter` 的 offset 处置是这套语义的关键，必须说清：**发布成功**才等于"这条记录已不再只存在于本进程"，因此只有成功后才允许后续提交越过它的 offset；这一步之后 offset 被扫过属于**有审计的让位**，不是静默丢失（记录、原因、来源都可查，可据以重投）。**发布失败**则完全不同：记录被保留在内存中（每个 partition 至多一条，因此内存仍有界），该 partition **停止 fetch**，并按退避重试写操作，`xflow_trigger_messages_dead_lettered_total{result="error"}` 计数。也就是说 DLQ 故障时它会**退化成 `block` 的取舍**（停取，可恢复），而不是退化成 `discard` 的取舍（丢失，不可恢复）——这正是这个策略存在的理由。没有任何记录会在"尚未持久保存"的状态下被提交越过。
 
 `block` 与 `dead_letter` 写失败这两种"停取"在指标上尤其反直觉：**lag 指标看不见它们**。consumer lag 只在 fetch 到消息时采样，一个停止 fetch 的 partition 会把 lag 冻结在最后一个"健康"值上，于是它在 dashboard 上读起来是正常的。这是这些策略下的稳态而非边角情况——恰恰是背压生效的那一刻，lag 停止更新。唯一信号是 `xflow_trigger_consumption_blocked{topic,partition}`（进入/退出阻塞时在 1/0 之间翻转并打日志；日志行会指明是哪种原因）。用 lag 判断消费健康度，会把正在阻塞的 consumer 判成健康。
 

@@ -5,6 +5,11 @@ Durable scheduling outbox entries that exceed the delivery attempt limit
 `xflow_outbox_dead_letters`) are moved to per-execution dead-letter storage for
 operator review. This runbook covers detection, inspection, and safe replay.
 
+> **This is the outbox axis only.** Kafka aggregate overflow
+> (`aggregate.on_overflow=dead_letter`) is a different axis — different metrics,
+> no replay tooling — and the procedures here do not apply to it. See
+> [kafka-overflow-runbook.md](kafka-overflow-runbook.md).
+
 ## Semantics
 
 - **At-least-once**: replay redelivers an entry; lease/commit fencing ensures a
