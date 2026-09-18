@@ -26,7 +26,7 @@ func TestP2_ColdStartBudget(t *testing.T) {
 
 	start := func() time.Duration {
 		t.Helper()
-		h := newReactorHost()
+		h := newTestReactorHost(t)
 		f := &reactorFacade{host: h}
 		h.addPrewarm(code, cfg)
 		t0 := time.Now()

@@ -59,15 +59,17 @@ const cacheVersionDirPrefix = "wazero-"
 // would only fail that process's cache write, but there is no reason to.
 const staleTempAge = time.Hour
 
-// compilationCache is the process-wide wazero CompilationCache shared by every
-// wasm runtime in this package (the legacy command engine and the reactor host).
+// Compilation caches have two ownership layers. cacheDir is process-wide
+// configuration for the durable on-disk cache, while compilationCacheFor creates
+// a fresh in-memory cache for each runtime owner (the legacy command engine or
+// one reactor host).
 //
-// Sharing is both safe and the point: a CompilationCache is explicitly reusable
-// across runtimes, and doing so cuts a second runtime's compile of the same
-// module from seconds to tens of milliseconds (design §1 constraint #5). Backing
-// it with a directory extends that across process restarts (constraint #6:
-// 3.18 s cold → 82 ms after restart), which is what makes a runner redeploy
-// cheap instead of paying a multi-second compile on the first request.
+// A wazero CompiledModule.Close removes compiled code from the cache engine that
+// owns it. Reactor hosts reclaim modules independently, so sharing an in-memory
+// cache would let reclaiming one host invalidate a still-live module in another.
+// Fresh cache objects isolate those close operations. Their common directory
+// still preserves restart and cross-owner cold-start performance without sharing
+// mutable compiled-module state.
 //
 // wazero namespaces the directory by its own version and GOOS/GOARCH, so a
 // wazero upgrade invalidates stale entries automatically rather than loading
@@ -83,9 +85,9 @@ const staleTempAge = time.Hour
 // practice and for the bound this package applies on top.
 var (
 	// cacheOnce is a pointer so tests can substitute a fresh Once (and restore
-	// the original) without copying a lock value.
+	// the original) without copying a lock value. It resolves only the shared
+	// disk-cache configuration; it never owns a wazero CompilationCache.
 	cacheOnce = new(sync.Once)
-	cacheVal  wazero.CompilationCache
 	cacheDir  string // resolved directory; empty when in-memory only
 	cacheErr  error  // why the disk cache was not used, for diagnostics
 
@@ -107,40 +109,58 @@ var (
 	sweepDir atomic.Pointer[string]
 )
 
-// compilationCacheFor returns the shared cache, creating it on first use. It
-// fails open: if the directory cannot be resolved or created, an in-memory
-// cache is returned instead so wasm execution still works (it just pays the
-// full compile again after a restart). The reason is retained in cacheErr and
-// surfaced by cacheStatus for logging.
+// compilationCacheFor creates a cache owned by exactly one runtime owner. It
+// shares only the already-validated on-disk directory with other owners.
+//
+// It fails open: if the directory cannot be resolved, created, or later opened,
+// a fresh in-memory cache is returned so wasm execution still works (it just
+// pays the full compile again after a restart). The initial failure is retained
+// in cacheErr and surfaced by cacheStatus for logging.
 func compilationCacheFor(ctx context.Context) wazero.CompilationCache {
-	cacheOnce.Do(func() {
-		dir, err := resolveCacheDir()
-		if err != nil {
-			cacheErr = err
-			cacheVal = wazero.NewCompilationCache()
-			return
-		}
-		if dir == "" {
-			// Explicitly disabled.
-			cacheVal = wazero.NewCompilationCache()
-			return
-		}
-		c, err := wazero.NewCompilationCacheWithDir(dir)
-		if err != nil {
-			cacheErr = fmt.Errorf("wasm: compilation cache dir %q unusable: %w", dir, err)
-			cacheVal = wazero.NewCompilationCache()
-			return
-		}
-		cacheVal, cacheDir = c, dir
-		sweepDir.Store(&dir)
-		// Sweep at startup as well as after each compile miss. A process that
-		// restarts often enough to never reach a miss still inherits whatever
-		// the previous ones left, and that inheritance is exactly how this
-		// directory reached 20 GB.
-		sweepCacheAsync()
-	})
+	cacheOnce.Do(initCompilationCacheConfig)
 	_ = ctx // reserved: wazero's cache constructor takes no context today
-	return cacheVal
+	if cacheDir == "" {
+		return wazero.NewCompilationCache()
+	}
+	c, err := wazero.NewCompilationCacheWithDir(cacheDir)
+	if err != nil {
+		// The initial validation succeeded, so this can only be a later filesystem
+		// change. Keep this owner isolated and usable rather than making a runner
+		// fail to start because persistence disappeared underneath it.
+		slog.Warn("wasm: compilation cache directory became unusable; using in-memory cache",
+			"dir", cacheDir, "error", err)
+		return wazero.NewCompilationCache()
+	}
+	return c
+}
+
+// initCompilationCacheConfig resolves and validates the one on-disk cache
+// directory every owner may use. The probe is deliberately not retained: each
+// runtime receives its own cache object so a compiled-module close cannot cross
+// a reactor-host boundary.
+func initCompilationCacheConfig() {
+	dir, err := resolveCacheDir()
+	if err != nil {
+		cacheErr = err
+		return
+	}
+	if dir == "" {
+		// Explicitly disabled.
+		return
+	}
+	probe, err := wazero.NewCompilationCacheWithDir(dir)
+	if err != nil {
+		cacheErr = fmt.Errorf("wasm: compilation cache dir %q unusable: %w", dir, err)
+		return
+	}
+	_ = probe.Close(context.Background())
+	cacheDir = dir
+	sweepDir.Store(&dir)
+	// Sweep at startup as well as after each compile miss. A process that
+	// restarts often enough to never reach a miss still inherits whatever the
+	// previous ones left, and that inheritance is exactly how this directory
+	// reached 20 GB.
+	sweepCacheAsync()
 }
 
 // cacheBudget reads the configured cap. A zero or negative value, and any

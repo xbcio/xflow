@@ -35,7 +35,7 @@ func TestInstanceGaugeCountsAllEngines(t *testing.T) {
 	// module sha256, and SAS resolves two modules (decode and clean). Two
 	// separate hosts would not reproduce it — the overwrite happens because
 	// both pools report into one process-wide series.
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 
 	cfg, err := json.Marshal(ruleConfig([2]string{"r0", `request.uri startsWith "/api/"`}))
 	if err != nil {

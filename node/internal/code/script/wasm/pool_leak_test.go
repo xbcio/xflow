@@ -23,7 +23,7 @@ import (
 // is hand-built and this test is its only drainer.
 func TestDrainPoolReturnsWhenInstancesWereInFlight(t *testing.T) {
 	ctx := context.Background()
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 	e, err := h.engineFor(ctx, reactorWasm)
 	if err != nil {
 		t.Fatalf("engineFor: %v", err)
@@ -79,7 +79,7 @@ func TestDoomReportsRebuildFailure(t *testing.T) {
 	defer SetObserver(nil)
 
 	ctx := context.Background()
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 	e, err := h.engineFor(ctx, reactorWasm)
 	if err != nil {
 		t.Fatalf("engineFor: %v", err)

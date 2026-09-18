@@ -17,14 +17,18 @@ import (
 
 // closeForTest tears down every engine a test host built. Production has no
 // shutdown path — the runner process outlives its modules — so this exists only
-// to keep a test's wazero runtimes and pooled instances from outliving the test.
+// to keep a test's wazero runtimes, owner caches, and pooled instances from
+// outliving the test.
 func (h *reactorHost) closeForTest(ctx context.Context) {
 	h.reclaimIdleEngines(ctx, time.Nanosecond)
 	h.mu.Lock()
-	rt := h.rt
+	rt, cache := h.rt, h.cache
 	h.mu.Unlock()
 	if rt != nil {
 		_ = rt.Close(ctx)
+	}
+	if cache != nil {
+		_ = cache.Close(ctx)
 	}
 }
 
@@ -48,6 +52,46 @@ func newTestReactorHost(t *testing.T) *reactorHost {
 	h.engineIdleTTL = 0
 	t.Cleanup(func() { h.closeForTest(context.Background()) })
 	return h
+}
+
+// TestReclaimInOneHostDoesNotInvalidateAnotherHost verifies the cache ownership
+// boundary directly. Both hosts compile the same module, host A reclaims and
+// closes its copy, then host B builds another pool from its still-live copy.
+//
+// With a shared wazero CompilationCache, A's CompiledModule.Close deletes the
+// shared engine entry and B fails to instantiate with "source module must be
+// compiled before instantiation". Each host must therefore own its in-memory
+// cache even when both use the same durable cache directory in production.
+func TestReclaimInOneHostDoesNotInvalidateAnotherHost(t *testing.T) {
+	t.Setenv(CacheDirEnv, cacheDisabled)
+	resetCacheForTest(t)
+
+	ctx := context.Background()
+	code := testReactorCode(t)
+	raw := decodeForTest(t, code)
+	hostA := newTestReactorHost(t)
+	hostB := newTestReactorHost(t)
+
+	engineA, err := hostA.engineForBytes(ctx, raw)
+	if err != nil {
+		t.Fatalf("compile host A: %v", err)
+	}
+	engineB, err := hostB.engineForBytes(ctx, raw)
+	if err != nil {
+		t.Fatalf("compile host B: %v", err)
+	}
+	if err := engineB.swapConfig(ctx, emptyContent(), 1, 1); err != nil {
+		t.Fatalf("configure host B before reclaim: %v", err)
+	}
+
+	engineA.lastUsed.Store(time.Now().Add(-time.Hour).UnixNano())
+	if got := hostA.reclaimIdleEngines(ctx, time.Minute); got != 1 {
+		t.Fatalf("host A reclaimed %d engines, want 1", got)
+	}
+
+	if err := engineB.swapConfig(ctx, emptyContent(), 1, 2); err != nil {
+		t.Fatalf("configure host B after host A reclaimed the same module: %v", err)
+	}
 }
 
 // warmTestEngine compiles a module unique to this call and gives it a live pool,

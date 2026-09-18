@@ -294,7 +294,7 @@ func TestCompileMiss_TriggersSweep(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 	if _, err := h.engineFor(ctx, reactorWasm); err != nil {
 		t.Fatalf("engineFor: %v", err)
 	}

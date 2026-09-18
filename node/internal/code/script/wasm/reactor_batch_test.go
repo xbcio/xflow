@@ -10,7 +10,7 @@ import (
 
 // 单条求值失败不该让整批失败 —— 一条烂记录不能污染其余。
 func TestExecuteBatch_SkipsFailingRecord(t *testing.T) {
-	f := &reactorFacade{host: newReactorHost()}
+	f := &reactorFacade{host: newTestReactorHost(t)}
 	code := b64(taggerWasm)
 
 	records := []any{
@@ -46,7 +46,7 @@ func TestExecuteBatch_SkipsFailingRecord(t *testing.T) {
 }
 
 func TestExecuteBatch_EmptyInput(t *testing.T) {
-	f := &reactorFacade{host: newReactorHost()}
+	f := &reactorFacade{host: newTestReactorHost(t)}
 	out, err := f.ExecuteBatch(context.Background(), engine.Code(b64(taggerWasm)), nil, map[string]any{})
 	if err != nil {
 		t.Fatalf("empty batch must not error: %v", err)
@@ -104,7 +104,7 @@ func TestIsBatchSkippable(t *testing.T) {
 // TestExecuteBatch_CancelledContextFails confirms a pre-cancelled context fails
 // the batch immediately rather than producing a silently empty result.
 func TestExecuteBatch_CancelledContextFails(t *testing.T) {
-	f := &reactorFacade{host: newReactorHost()}
+	f := &reactorFacade{host: newTestReactorHost(t)}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, err := f.ExecuteBatch(ctx, engine.Code(b64(taggerWasm)), []any{map[string]any{"x": 1}}, map[string]any{})

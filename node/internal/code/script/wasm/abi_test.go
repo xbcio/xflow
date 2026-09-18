@@ -38,7 +38,7 @@ func TestABI_MinimalGuestWorks(t *testing.T) {
 // tears down cleanly (teardown must skip the missing hook, not panic).
 func TestABI_OptionalExportsAreNil(t *testing.T) {
 	ctx := context.Background()
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 	eng, err := h.engineFor(ctx, reactorMinWasm)
 	if err != nil {
 		t.Fatalf("engineFor: %v", err)
@@ -61,7 +61,7 @@ func TestABI_OptionalExportsAreNil(t *testing.T) {
 // change that moved them off the per-call lookup path).
 func TestABI_FullGuestHasOptionalExports(t *testing.T) {
 	ctx := context.Background()
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 	eng, err := h.engineFor(ctx, reactorWasm)
 	if err != nil {
 		t.Fatalf("engineFor: %v", err)
@@ -83,7 +83,7 @@ func TestABI_FullGuestHasOptionalExports(t *testing.T) {
 // speaking a different ABI rather than calling into it and misreading memory.
 func TestABI_VersionMismatchRefused(t *testing.T) {
 	ctx := context.Background()
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 	eng, err := h.engineFor(ctx, reactorWasm)
 	if err != nil {
 		t.Fatalf("engineFor: %v", err)

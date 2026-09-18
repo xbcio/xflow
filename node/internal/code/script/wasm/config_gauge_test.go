@@ -32,7 +32,7 @@ func TestConfigGaugesAggregateAcrossEngines(t *testing.T) {
 	SetObserver(obs)
 	t.Cleanup(func() { SetObserver(nil) })
 
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 
 	cfgA, err := json.Marshal(ruleConfig(
 		[2]string{"a0", `request.uri startsWith "/api/"`},
@@ -120,7 +120,7 @@ func TestConfigRuleCountPoisonsOnUnrecognizedShape(t *testing.T) {
 	SetObserver(obs)
 	t.Cleanup(func() { SetObserver(nil) })
 
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 
 	good, err := json.Marshal(ruleConfig([2]string{"g0", `request.uri startsWith "/api/"`}))
 	if err != nil {

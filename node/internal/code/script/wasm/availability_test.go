@@ -7,7 +7,7 @@ import (
 
 func TestAvailabilityLadder(t *testing.T) {
 	ctx := context.Background()
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 	e, err := h.engineFor(ctx, reactorWasm)
 	if err != nil {
 		t.Fatalf("engineFor: %v", err)
@@ -43,7 +43,7 @@ func TestAvailabilityLadder(t *testing.T) {
 // fraud demo got this wrong; the regression is mandatory (spec §7-5).
 func TestEmptyRuleSetIsServed(t *testing.T) {
 	ctx := context.Background()
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 	e, err := h.engineFor(ctx, reactorWasm)
 	if err != nil {
 		t.Fatalf("engineFor: %v", err)

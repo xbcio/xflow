@@ -14,7 +14,7 @@ import (
 // not touch the currently active pool.
 func TestRejectedConfigLeavesActivePoolIntact(t *testing.T) {
 	ctx := context.Background()
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 	e, err := h.engineFor(ctx, reactorWasm)
 	if err != nil {
 		t.Fatalf("engineFor: %v", err)

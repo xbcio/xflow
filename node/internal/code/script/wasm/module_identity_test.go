@@ -160,7 +160,7 @@ func TestAlternateEncodingOfHandlesEveryLengthClass(t *testing.T) {
 func TestSourceDrivenIsKeyedByModuleNotEncoding(t *testing.T) {
 	code := b64(reactorMinWasm)
 	alt := alternateEncodingOf(t, code)
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 	h.seedSourceDrivenByKey(mustModuleKey(t, code))
 
 	if !h.isSourceDriven(alt) {
@@ -190,7 +190,7 @@ func TestSourceDrivenIsKeyedByModuleNotEncoding(t *testing.T) {
 func TestPrewarmIsKeyedByModuleNotEncoding(t *testing.T) {
 	code := b64(reactorMinWasm)
 	alt := alternateEncodingOf(t, code)
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 	h.addPrewarm(code, ruleConfig([2]string{"v1", "x > 1"}))
 	h.addPrewarm(alt, ruleConfig([2]string{"v2", "x > 2"}))
 
@@ -275,7 +275,7 @@ func (o *countingConsumerObserver) last() int {
 // this one already exists.
 func TestSourceDrivenFlipSurvivesCodeCacheEviction(t *testing.T) {
 	ctx := context.Background()
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 
 	code := testReactorCode(t)
 	e, err := h.engineForCode(ctx, code)

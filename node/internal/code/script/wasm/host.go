@@ -66,6 +66,7 @@ func engineIdleTTLFromEnv() time.Duration {
 type reactorHost struct {
 	rt     wazero.Runtime
 	rtOnce sync.Once
+	cache  wazero.CompilationCache // owned exclusively by this host runtime
 
 	mu      sync.Mutex
 	engines map[string]*reactorEngine // keyed by module sha256
@@ -267,13 +268,14 @@ func (h *reactorHost) prewarmModules() []prewarmEntry {
 
 func (h *reactorHost) runtime(ctx context.Context) wazero.Runtime {
 	h.rtOnce.Do(func() {
-		// WithCompilationCache shares compiled machine code with the legacy
-		// command runtime and, when a directory is available, across process
-		// restarts (design §1 constraints #5/#6).
+		// This host owns its in-memory cache. compilationCacheFor shares the
+		// durable directory with other runtimes, but not the mutable cache engine:
+		// reclaiming a module here must not invalidate another host's module.
+		h.cache = compilationCacheFor(ctx)
 		h.rt = wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().
 			WithCloseOnContextDone(true).
 			WithMemoryLimitPages(engine.DefaultWasmMemoryPages).
-			WithCompilationCache(compilationCacheFor(ctx)))
+			WithCompilationCache(h.cache))
 		wasi_snapshot_preview1.MustInstantiate(ctx, h.rt)
 	})
 	return h.rt

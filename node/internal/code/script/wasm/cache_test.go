@@ -13,17 +13,17 @@ import (
 )
 
 // resetCacheForTest forces the next compilationCacheFor call to re-resolve the
-// cache directory, so a test can point it at a temp dir despite the singleton
-// having been initialized by an earlier test. The previous cache is restored
-// (not closed) on cleanup — runtimes opened by other tests still hold it.
+// shared disk-cache configuration, so a test can point new owners at a temp dir
+// despite an earlier test having initialized it. Existing owner caches are not
+// closed or replaced here; their runtimes still hold them.
 func resetCacheForTest(t *testing.T) {
 	t.Helper()
-	prevOnce, prevVal, prevDir, prevErr := cacheOnce, cacheVal, cacheDir, cacheErr
+	prevOnce, prevDir, prevErr := cacheOnce, cacheDir, cacheErr
 	prevSweep := sweepDir.Load()
-	cacheOnce, cacheVal, cacheDir, cacheErr = new(sync.Once), nil, "", nil
+	cacheOnce, cacheDir, cacheErr = new(sync.Once), "", nil
 	sweepDir.Store(nil)
 	t.Cleanup(func() {
-		cacheOnce, cacheVal, cacheDir, cacheErr = prevOnce, prevVal, prevDir, prevErr
+		cacheOnce, cacheDir, cacheErr = prevOnce, prevDir, prevErr
 		sweepDir.Store(prevSweep)
 	})
 }
@@ -132,13 +132,19 @@ func TestDiskCache_SurvivesRuntimeRecreation(t *testing.T) {
 	}
 }
 
-// TestCompilationCacheFor_Shared asserts the process-wide cache is a singleton,
-// which is what lets the legacy command runtime and the reactor runtime share
-// compiled code (design §1 constraint #5).
-func TestCompilationCacheFor_Shared(t *testing.T) {
+// TestCompilationCacheFor_Isolated guards the ownership boundary: independently
+// reclaimable runtimes must not share one in-memory cache, because closing a
+// compiled module removes it from that cache's engine. The durable directory may
+// still be shared and is checked separately by TestDiskCache_SurvivesRuntimeRecreation.
+func TestCompilationCacheFor_Isolated(t *testing.T) {
 	ctx := context.Background()
-	if a, b := compilationCacheFor(ctx), compilationCacheFor(ctx); a != b {
-		t.Fatal("compilationCacheFor returned different instances; runtimes would not share compiled code")
+	a, b := compilationCacheFor(ctx), compilationCacheFor(ctx)
+	t.Cleanup(func() {
+		_ = b.Close(ctx)
+		_ = a.Close(ctx)
+	})
+	if a == b {
+		t.Fatal("compilationCacheFor returned one shared in-memory cache; module reclamation could cross runtime boundaries")
 	}
 	if dir, err := cacheStatus(); err != nil {
 		t.Logf("disk cache unavailable (in-memory fallback): %v", err)

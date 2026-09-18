@@ -14,7 +14,7 @@ func TestSwapConfigNotifiesObserverOnApply(t *testing.T) {
 	defer SetObserver(nil)
 
 	ctx := context.Background()
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 	e, err := h.engineFor(ctx, reactorWasm)
 	if err != nil {
 		t.Fatalf("engineFor: %v", err)
@@ -59,7 +59,7 @@ func TestSwapConfigNotifiesObserverOnReject(t *testing.T) {
 	defer SetObserver(nil)
 
 	ctx := context.Background()
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 	e, err := h.engineFor(ctx, reactorWasm)
 	if err != nil {
 		t.Fatalf("engineFor: %v", err)
@@ -86,7 +86,7 @@ func TestBorrowNotifiesObserverWithWaitDuration(t *testing.T) {
 	defer SetObserver(nil)
 
 	ctx := context.Background()
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 	e, err := h.engineFor(ctx, reactorWasm)
 	if err != nil {
 		t.Fatalf("engineFor: %v", err)
@@ -119,7 +119,7 @@ func TestDoomNotifiesObserverEvalError(t *testing.T) {
 	defer SetObserver(nil)
 
 	ctx := context.Background()
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 	e, err := h.engineFor(ctx, reactorWasm)
 	if err != nil {
 		t.Fatalf("engineFor: %v", err)
@@ -162,7 +162,7 @@ func TestDoomClassifiesExpiredContextAsTimeout(t *testing.T) {
 	defer SetObserver(nil)
 
 	ctx := context.Background()
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 	e, err := h.engineFor(ctx, reactorWasm)
 	if err != nil {
 		t.Fatalf("engineFor: %v", err)
@@ -203,7 +203,7 @@ func TestDrainPoolNotifiesObserverPoolSwapped(t *testing.T) {
 	defer SetObserver(nil)
 
 	ctx := context.Background()
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 	e, err := h.engineFor(ctx, reactorWasm)
 	if err != nil {
 		t.Fatalf("engineFor: %v", err)
@@ -250,7 +250,7 @@ func TestEngineForNotifiesObserverCompileHitMiss(t *testing.T) {
 	defer SetObserver(nil)
 
 	ctx := context.Background()
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 	if _, err := h.engineFor(ctx, reactorWasm); err != nil {
 		t.Fatalf("engineFor #1: %v", err)
 	}

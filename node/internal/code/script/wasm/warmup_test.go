@@ -12,7 +12,7 @@ import (
 // nothing pre-registered: it opens the wazero runtime (resolving the on-disk
 // compilation cache and instantiating WASI) so the first request does not.
 func TestWarmup_OpensRuntimeWithoutModules(t *testing.T) {
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 	f := &reactorFacade{host: h}
 	if err := f.warmup(context.Background()); err != nil {
 		t.Fatalf("warmup: %v", err)
@@ -25,7 +25,7 @@ func TestWarmup_OpensRuntimeWithoutModules(t *testing.T) {
 // warmup must tolerate a nil context — engine.Warmer callers are hosts, and the
 // contract in engine/warmup.go substitutes Background rather than panicking.
 func TestWarmup_NilContext(t *testing.T) {
-	f := &reactorFacade{host: newReactorHost()}
+	f := &reactorFacade{host: newTestReactorHost(t)}
 	var nilCtx context.Context
 	if err := f.warmup(nilCtx); err != nil {
 		t.Fatalf("warmup(nil): %v", err)
@@ -37,7 +37,7 @@ func TestWarmup_NilContext(t *testing.T) {
 // Execute borrows a ready instance instead of building the pool under the
 // request's deadline.
 func TestPrewarm_BuildsPoolBeforeFirstRequest(t *testing.T) {
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 	f := &reactorFacade{host: h}
 	code := b64(reactorWasm)
 	cfg := ruleConfig([2]string{"big", "x > 5"})
@@ -79,7 +79,7 @@ func TestPrewarm_BuildsPoolBeforeFirstRequest(t *testing.T) {
 // TestPrewarm_ReregisterReplacesConfig guards against the prewarm set growing an
 // entry per config revision, which would make warm-up build stale pools.
 func TestPrewarm_ReregisterReplacesConfig(t *testing.T) {
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 	code := b64(reactorWasm)
 	h.addPrewarm(code, ruleConfig([2]string{"v1", "x > 1"}))
 	h.addPrewarm(code, ruleConfig([2]string{"v2", "x > 2"}))
@@ -97,7 +97,7 @@ func TestPrewarm_ReregisterReplacesConfig(t *testing.T) {
 // TestPrewarm_BadModuleSurfacesError: warm-up must report a failure rather than
 // silently leaving a broken module to blow up on the first request.
 func TestPrewarm_BadModuleSurfacesError(t *testing.T) {
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 	f := &reactorFacade{host: h}
 	h.addPrewarm("!!!not base64!!!", nil)
 	if err := f.warmup(context.Background()); err == nil {

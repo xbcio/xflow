@@ -125,7 +125,7 @@ func TestEvalDetailDistinguishesGuestBranches(t *testing.T) {
 // the thing being looked for.
 func TestEvalDetailReachesTheLogFromARealGuest(t *testing.T) {
 	ctx := context.Background()
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 	eng, err := h.engineFor(ctx, reactorWasm)
 	if err != nil {
 		t.Fatalf("engineFor: %v", err)
@@ -197,7 +197,7 @@ func TestEvalDetailIgnoresStaleOutput(t *testing.T) {
 	resetEvalDetailLog(t)
 
 	ctx := context.Background()
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 	eng, err := h.engineFor(ctx, reactorStaleWasm)
 	if err != nil {
 		t.Fatalf("engineFor: %v", err)

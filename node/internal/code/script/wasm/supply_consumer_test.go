@@ -68,7 +68,7 @@ func TestRegistrationAndEngineCreationResolveInEitherOrder(t *testing.T) {
 	// Warmup order: engine first, registration after. This is the production
 	// ordering — activation registers consumers long after warmup compiled the
 	// module.
-	h := newReactorHost()
+	h := newTestReactorHost(t)
 	e, err := h.engineForCode(ctx, code)
 	if err != nil {
 		t.Fatalf("engineForCode: %v", err)
@@ -83,7 +83,7 @@ func TestRegistrationAndEngineCreationResolveInEitherOrder(t *testing.T) {
 
 	// Activation order: registration first, engine created after. The engine
 	// must resolve the flag at birth, from the seeded intent.
-	h2 := newReactorHost()
+	h2 := newTestReactorHost(t)
 	h2.seedSourceDrivenByKey(mustModuleKey(t, code))
 	e2, err := h2.engineForCode(ctx, code)
 	if err != nil {
@@ -114,7 +114,7 @@ func TestConcurrentRegisterAndEngineCreateIsRaceFree(t *testing.T) {
 	// the two goroutines interleaving, which is why it is not reduced to one.
 	const iterations = 3
 	for i := 0; i < iterations; i++ {
-		h := newReactorHost()
+		h := newTestReactorHost(t)
 		code := testReactorCode(t)
 		// Hashed before the goroutines start, both because t.Fatalf must not be
 		// called from a non-test goroutine and because hashing inside the racing

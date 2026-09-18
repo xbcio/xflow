@@ -49,6 +49,7 @@ var sharedWazero = &wazeroEngine{compiled: newWasmModuleCache(DefaultWasmModuleC
 type wazeroEngine struct {
 	rt       wazero.Runtime
 	rtOnce   sync.Once
+	cache    wazero.CompilationCache // owned exclusively by this command runtime
 	compiled *wasmModuleCache
 }
 
@@ -80,14 +81,15 @@ func (e *wazeroEngine) runtime(ctx context.Context) wazero.Runtime {
 		// configured budget (each page is 64 KiB). Guests that exceed this
 		// via memory.grow trap at the wazero boundary instead of consuming
 		// unbounded host memory.
-		// WithCompilationCache shares compiled machine code with the reactor
-		// runtime and, when a directory is available, across process restarts
-		// (design §1 constraints #5/#6) so a runner redeploy does not pay a
-		// multi-second compile on its first request.
+		// This command runtime owns its in-memory cache. It shares the durable
+		// cache directory with reactor hosts for warm restarts, but not their
+		// mutable cache engine: an LRU eviction here must not invalidate a reactor
+		// module that is still serving traffic.
+		e.cache = compilationCacheFor(ctx)
 		e.rt = wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().
 			WithCloseOnContextDone(true).
 			WithMemoryLimitPages(engine.DefaultWasmMemoryPages).
-			WithCompilationCache(compilationCacheFor(ctx)))
+			WithCompilationCache(e.cache))
 		wasi_snapshot_preview1.MustInstantiate(ctx, e.rt)
 	})
 	return e.rt
