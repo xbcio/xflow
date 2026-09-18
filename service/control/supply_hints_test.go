@@ -2,11 +2,14 @@ package control
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/service/crypto/supplyenc"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/store/memstore"
@@ -323,4 +326,178 @@ func TestHeartbeatWiresHinterAndObservedSink(t *testing.T) {
 	if snap["runner-a"]["rules"] != rec.ContentHash {
 		t.Fatalf("observed snapshot = %#v, want runner-a/rules = %s", snap, rec.ContentHash)
 	}
+}
+
+// --- Supply read failures must not be silently indistinguishable ---
+
+// failingSupplySource returns a fixed error for every read. It exists to drive
+// the hinter's error branch without a real store fault: the defect being tested
+// is about how the hinter CLASSIFIES an error, and a real MySQL is neither
+// available here nor needed for that.
+type failingSupplySource struct {
+	err   error
+	calls int
+}
+
+func (s *failingSupplySource) GetSupply(context.Context, string, string) (*store.SupplyResource, error) {
+	s.calls++
+	return nil, s.err
+}
+
+// supplyHintWarnRecorder captures Warn calls, msg and args both, so a test can
+// require the underlying error to be legible in the line an operator reads —
+// not merely that "a warning happened". Mirrors controlplane_test.go's
+// warnCapturingLogger, which deliberately records only a boolean because it
+// asserts presence; this one has to assert content.
+type supplyHintWarnRecorder struct {
+	msgs []string
+	args [][]any
+}
+
+func (l *supplyHintWarnRecorder) Debug(string, ...any)  {}
+func (l *supplyHintWarnRecorder) Debugf(string, ...any) {}
+func (l *supplyHintWarnRecorder) Info(string, ...any)   {}
+func (l *supplyHintWarnRecorder) Infof(string, ...any)  {}
+func (l *supplyHintWarnRecorder) Warn(msg string, args ...any) {
+	l.msgs = append(l.msgs, msg)
+	l.args = append(l.args, append([]any(nil), args...))
+}
+func (l *supplyHintWarnRecorder) Warnf(string, ...any)  {}
+func (l *supplyHintWarnRecorder) Error(string, ...any)  {}
+func (l *supplyHintWarnRecorder) Errorf(string, ...any) {}
+func (l *supplyHintWarnRecorder) Panic(string, ...any)  {}
+func (l *supplyHintWarnRecorder) Panicf(string, ...any) {}
+
+// errArgString renders the recorder's recorded args so a test can look for the
+// error text inside the line that was actually emitted.
+func (l *supplyHintWarnRecorder) errArgString(i int) string {
+	var b strings.Builder
+	for _, a := range l.args[i] {
+		fmt.Fprintf(&b, "%v ", a)
+	}
+	return b.String()
+}
+
+// A real read fault — the shape a KEK change produces ("no key matches kid"),
+// and equally a content-hash mismatch — must be REPORTED, and must remain
+// distinguishable from the expected "resource not written yet" case that the
+// single `err != nil || rec == nil` branch used to fold it into.
+//
+// That fold was the actual defect: an undecryptable supply produced no log line
+// and no metric on this path, on every heartbeat, while the runner kept serving
+// last-good content and /readyz stayed green — even though the HTTP GET path
+// answered 500 for that exact row. Two surfaces disagreed about whether
+// anything was wrong, and only one of them was observable.
+//
+// The hint must still NOT be emitted, and the heartbeat must still succeed: a
+// hint is an optimization, and failing the heartbeat would take the runner
+// offline over one (see HintsForRunner's contract).
+func TestHintsReportARealSupplyReadFailure(t *testing.T) {
+	ctx := context.Background()
+	store_ := NewMemoryEntryActivationStore()
+	if err := store_.Upsert(ctx, activationWithSupply(t, "unit-a", "runner-a", true, "rules", "shared-rules")); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	decryptErr := fmt.Errorf("get supply %q/%q: decrypt: %w: %s",
+		string(namespace.Default), "shared-rules", supplyenc.ErrUnknownKey, "0123abcd")
+	src := &failingSupplySource{err: decryptErr}
+	logger := &supplyHintWarnRecorder{}
+
+	h := NewSupplyHinter(store_, src, []namespace.Namespace{namespace.Default}, logger)
+	if got := h.HintsForRunner(ctx, "runner-a"); got != nil {
+		t.Fatalf("hints = %#v, want nil: an unreadable supply must not be hinted", got)
+	}
+	if len(logger.msgs) != 1 {
+		t.Fatalf("Warn calls = %d (%v), want exactly 1 for one failed read", len(logger.msgs), logger.msgs)
+	}
+	line := logger.msgs[0] + " " + logger.errArgString(0)
+	// The underlying cause has to survive into the log. A fixed string here
+	// would leave an operator unable to tell a KEK problem from a bad row.
+	if !strings.Contains(line, supplyenc.ErrUnknownKey.Error()) {
+		t.Errorf("log line %q does not name the read failure %q", line, decryptErr)
+	}
+	if !strings.Contains(line, "shared-rules") {
+		t.Errorf("log line %q does not name the resource that failed", line)
+	}
+}
+
+// The counterpart: a resource that simply has not been written yet is EXPECTED,
+// not a fault, and must stay silent. Without this test the previous fix could be
+// "satisfied" by logging everything — which would turn every not-yet-registered
+// supply into a warning and make the real signal worthless.
+func TestHintsStaySilentOnANotFoundSupply(t *testing.T) {
+	ctx := context.Background()
+	store_ := NewMemoryEntryActivationStore()
+	if err := store_.Upsert(ctx, activationWithSupply(t, "unit-a", "runner-a", true, "rules", "shared-rules")); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	// memstore returns exactly this sentinel for a missing row
+	// (store/memstore/supply.go), and sqlstore wraps the same sentinel with %w
+	// (store/sqlstore/errors.go), so errors.Is is the contract both honour.
+	src := &failingSupplySource{err: store.ErrNotFound}
+	logger := &supplyHintWarnRecorder{}
+
+	h := NewSupplyHinter(store_, src, []namespace.Namespace{namespace.Default}, logger)
+	if got := h.HintsForRunner(ctx, "runner-a"); got != nil {
+		t.Fatalf("hints = %#v, want nil for a supply with no content yet", got)
+	}
+	if len(logger.msgs) != 0 {
+		t.Fatalf("Warn calls = %v, want none: 'not written yet' is expected, not a fault", logger.msgs)
+	}
+}
+
+// One unreadable supply must not blind the runner to the others. The loop used
+// to `continue` for a read fault, which was right; the risk in fixing the
+// reporting is turning the fault into an abort, so this pins the pre-existing
+// best-effort behaviour in place.
+func TestOneUnreadableSupplyDoesNotSuppressTheOthers(t *testing.T) {
+	ctx := context.Background()
+	store_ := NewMemoryEntryActivationStore()
+	if err := store_.Upsert(ctx, activationWithSupply(t, "unit-a", "runner-a", true, "broken", "broken-resource")); err != nil {
+		t.Fatalf("Upsert broken: %v", err)
+	}
+	if err := store_.Upsert(ctx, activationWithSupply(t, "unit-b", "runner-a", true, "good", "good-resource")); err != nil {
+		t.Fatalf("Upsert good: %v", err)
+	}
+
+	good := memstore.New()
+	rec, err := good.PutSupply(ctx, &store.SupplyResource{
+		Namespace: string(namespace.Default), Name: "good-resource", Content: []byte(`{"ok":true}`),
+	}, nil)
+	if err != nil {
+		t.Fatalf("PutSupply: %v", err)
+	}
+
+	src := &partialFailSupplySource{good: good, badName: "broken-resource", err: supplyenc.ErrUnknownKey}
+	logger := &supplyHintWarnRecorder{}
+
+	h := NewSupplyHinter(store_, src, []namespace.Namespace{namespace.Default}, logger)
+	got := h.HintsForRunner(ctx, "runner-a")
+	if len(got) != 1 || got["good"] != rec.ContentHash {
+		t.Fatalf("hints = %#v, want {good: %s}: one bad row must not suppress the rest", got, rec.ContentHash)
+	}
+	if _, bad := got["broken"]; bad {
+		t.Errorf("hints = %#v, want no hint for the unreadable supply", got)
+	}
+	if len(logger.msgs) != 1 {
+		t.Fatalf("Warn calls = %v, want exactly 1 (for the unreadable supply only)", logger.msgs)
+	}
+}
+
+// partialFailSupplySource fails for one named resource and delegates everything
+// else to a real in-memory store, so a test can hold "one bad row beside good
+// ones" without stubbing the good path.
+type partialFailSupplySource struct {
+	good    store.Supplies
+	badName string
+	err     error
+}
+
+func (s *partialFailSupplySource) GetSupply(ctx context.Context, ns, name string) (*store.SupplyResource, error) {
+	if name == s.badName {
+		return nil, s.err
+	}
+	return s.good.GetSupply(ctx, ns, name)
 }

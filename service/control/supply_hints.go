@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"github.com/xbcio/xflow/engine"
@@ -82,9 +83,40 @@ func (h *SupplyHinter) HintsForRunner(ctx context.Context, runnerID string) map[
 					continue
 				}
 				rec, err := h.supplies.GetSupply(ctx, string(ns), req.Resource)
-				if err != nil || rec == nil {
-					// No content yet: nothing to hint. The gate already declined
-					// or is serving degraded; a hint cannot help either way.
+				if err != nil {
+					// ErrNotFound is the expected "no content yet" case: the
+					// resource was never written, so there is nothing to hint
+					// and nothing to report.
+					//
+					// Every OTHER error is a real fault — most importantly a
+					// decryption failure (decrypt: supplyenc: no key matches
+					// kid, after the KEK changed) or a content-hash mismatch —
+					// and it must stay distinguishable from that expected case.
+					// It used to be indistinguishable: both landed in one silent
+					// `continue`, so an unreadable supply produced no log and no
+					// metric on this path, on every heartbeat, while the runner
+					// kept serving last-good content and /readyz stayed green.
+					// The HTTP GET path answers 500 for that same row, so the
+					// two disagreed about whether anything was wrong at all.
+					//
+					// It stays best-effort — we do not fail the heartbeat over a
+					// hint (see the method comment) — but we stop pretending the
+					// fault did not happen. Per-occurrence Warn matches how the
+					// runner side already reports its own "supply hint: fetch
+					// failed" (service/runner/supply_gate.go), which is likewise
+					// unthrottled, so this needs no new machinery.
+					if !errors.Is(err, store.ErrNotFound) && h.logger != nil {
+						h.logger.Warn("supply hints: get supply failed",
+							"namespace", string(ns), "resource", req.Resource,
+							"node", req.Node, "error", err)
+					}
+					continue
+				}
+				if rec == nil {
+					// A nil record with a nil error breaks the store contract,
+					// and a hint is not worth failing a heartbeat over. There is
+					// no error value to log here, so this stays silent rather
+					// than inventing one.
 					continue
 				}
 				if out == nil {
