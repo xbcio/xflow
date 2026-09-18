@@ -33,6 +33,47 @@ import (
 
 const sasDualRunnerSinkType = "xflow.sas.sink"
 
+// The two functions below are the single source of truth for each runner's
+// node-type set. They exist because this test pins the set TWICE — once in the
+// policy fixture that the runners must satisfy, and once in the registration
+// assertion — and the two drifting apart is precisely how this test broke when
+// the standalone runner grew its ULP capabilities: a policy that lists fewer
+// types than the process declares answers 403, so the process never registers
+// and the failure surfaces far from the cause.
+//
+// They return fresh slices rather than exposing package-level vars because
+// callers hand them to stores and assertions that may append.
+//
+// sasDualRunnerLocalNodeTypes is the embedded local runner's set: the SAS sink
+// plus the engine's group node. The local runner advertises nothing else, which
+// is the invariant that lets a local-only deployment avoid carrying the
+// collection and ULP nodes.
+func sasDualRunnerLocalNodeTypes() []string {
+	return []string{sasDualRunnerSinkType, engine.GroupNodeType}
+}
+
+// sasDualRunnerStandaloneNodeTypes mirrors FixedCapabilities in the SAS
+// repository (asop/sas-runner/cmd/sas-runner/main.go), which carries a comment
+// pointing back at this contract. Keep the two in lockstep: the middleware
+// compares the node-type SET for exact equality and answers 403 on any
+// difference, so a missing entry here is a hard failure, not a tolerance.
+func sasDualRunnerStandaloneNodeTypes() []string {
+	return []string{
+		// Cross-environment traffic collection.
+		"xflow.trigger.kafka",
+		"xflow.map",
+		"xflow.script",
+		// ULP remote login.
+		"xflow.http",
+		"xflow.browser.cdp",
+		"xflow.if",
+		// Added by the runner assembly on top of the profile's
+		// FixedCapabilities, so the registered set is one larger than the
+		// profile declares.
+		engine.GroupNodeType,
+	}
+}
+
 // TestSASRunnerDualRunnerE2E proves the intended split between an embedded SAS
 // runner and the standalone sas-runner process. The test deliberately builds
 // the sibling process against this checkout through an ephemeral GOWORK: the
@@ -57,19 +98,14 @@ func TestSASRunnerDualRunnerE2E(t *testing.T) {
 				Name:              "sas-local",
 				IDPrefix:          "sas-local-e2e-",
 				Token:             localToken,
-				AllowedNodeTypes:  []string{sasDualRunnerSinkType, engine.GroupNodeType},
+				AllowedNodeTypes:  sasDualRunnerLocalNodeTypes(),
 				AllowedNamespaces: []string{string(namespace.Default)},
 			},
 			{
-				Name:     "sas-runner",
-				IDPrefix: "sas-runner-",
-				Token:    standaloneToken,
-				AllowedNodeTypes: []string{
-					"xflow.trigger.kafka",
-					"xflow.map",
-					"xflow.script",
-					engine.GroupNodeType,
-				},
+				Name:              "sas-runner",
+				IDPrefix:          "sas-runner-",
+				Token:             standaloneToken,
+				AllowedNodeTypes:  sasDualRunnerStandaloneNodeTypes(),
 				AllowedNamespaces: []string{string(namespace.Default)},
 			},
 		},
@@ -111,11 +147,11 @@ func TestSASRunnerDualRunnerE2E(t *testing.T) {
 	)
 	sasDualRunnerAssertRegistration(t, "local SAS runner", localRegistration,
 		map[string]string{"workload": "local"},
-		[]string{sasDualRunnerSinkType, engine.GroupNodeType},
+		sasDualRunnerLocalNodeTypes(),
 	)
 	sasDualRunnerAssertRegistration(t, "standalone sas-runner", standaloneRegistration,
 		map[string]string{"workload": "sas-runner"},
-		[]string{"xflow.trigger.kafka", "xflow.map", "xflow.script", engine.GroupNodeType},
+		sasDualRunnerStandaloneNodeTypes(),
 	)
 
 	// The local registry below contains only xflow.sas.sink. xflow's built-in
