@@ -36,10 +36,9 @@ const sasDualRunnerSinkType = "xflow.sas.sink"
 // The two functions below are the single source of truth for each runner's
 // node-type set. They exist because this test pins the set TWICE — once in the
 // policy fixture that the runners must satisfy, and once in the registration
-// assertion — and the two drifting apart is precisely how this test broke when
-// the standalone runner grew its ULP capabilities: a policy that lists fewer
-// types than the process declares answers 403, so the process never registers
-// and the failure surfaces far from the cause.
+// assertion — a policy that lists fewer types than the process declares answers
+// 403, so the process never registers and the failure surfaces far from the
+// cause.
 //
 // They return fresh slices rather than exposing package-level vars because
 // callers hand them to stores and assertions that may append.
@@ -63,10 +62,6 @@ func sasDualRunnerStandaloneNodeTypes() []string {
 		"xflow.trigger.kafka",
 		"xflow.map",
 		"xflow.script",
-		// ULP remote login.
-		"xflow.http",
-		"xflow.browser.cdp",
-		"xflow.if",
 		// Added by the runner assembly on top of the profile's
 		// FixedCapabilities, so the registered set is one larger than the
 		// profile declares.
