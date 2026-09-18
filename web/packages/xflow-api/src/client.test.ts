@@ -61,12 +61,13 @@ describe("createXFlowApiClient", () => {
     expect(error?.requestId).toBeUndefined();
   });
 
-  // Spec §3.3: a collection's data is object-wrapped as {list, total}. No list
-  // endpoint is registered server-side yet (§9.6), so this rides on getWorkflow
-  // — the transport is shared, and what is under test is that the envelope's
-  // `data` is returned whole rather than the envelope itself. Going through a
-  // client method keeps the transport un-exported: a test-only export would be
-  // public API that no production caller uses.
+  // Spec §3.3: a collection's data is object-wrapped as {list, total}. This
+  // client has no wired list call (§9.6: the server endpoint exists, the client
+  // method does not), so this rides on getWorkflow — the transport is shared,
+  // and what is under test is that the envelope's `data` is returned whole
+  // rather than the envelope itself. Going through a client method keeps the
+  // transport un-exported: a test-only export would be public API that no
+  // production caller uses.
   it("unwraps data.list for collections", async () => {
     const fetcher = vi.fn().mockResolvedValue(
       new Response(

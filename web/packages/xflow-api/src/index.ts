@@ -130,7 +130,8 @@ async function request<T>(fetcher: typeof fetch, url: string, init?: RequestInit
 }
 
 const LIST_NOT_IMPLEMENTED =
-  "listWorkflows is not implemented: the server has no registered list endpoint yet " +
+  "listWorkflows is not implemented in this client: the server endpoint " +
+  "GET /v1/workflows now exists, but this method has not been wired to it yet " +
   "(see docs/design/API-SPECIFICATION.md §9.6).";
 
 export function createXFlowApiClient(options: XFlowApiClientOptions): XFlowApiClient {
@@ -138,8 +139,10 @@ export function createXFlowApiClient(options: XFlowApiClientOptions): XFlowApiCl
 
   return {
     listWorkflows() {
-      // Server has no list capability yet (spec §9.6). Keep the method on the
-      // interface so the gap stays discoverable instead of silently failing.
+      // The server capability landed (GET /v1/workflows, spec §9.6), so this is
+      // now a CLIENT-side gap, not a missing endpoint. Keep the method on the
+      // interface so the gap stays discoverable instead of silently failing;
+      // wiring it up is a UI-gate task, not a transport one.
       return Promise.reject(new Error(LIST_NOT_IMPLEMENTED));
     },
     createWorkflow(workflow) {

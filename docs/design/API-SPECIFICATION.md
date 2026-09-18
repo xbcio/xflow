@@ -353,14 +353,14 @@ runner directory 认证只回答「这是不是一台已注册的 runner」。�
 
 ```
 POST   /v1/workflows                        注册定义 → workflow_id
-GET    /v1/workflows                        列表（分页）——未实现，见 §9.6
+GET    /v1/workflows                        列表（分页）——已实现，见 §9.6
 GET    /v1/workflows/{id}                   读取
 PUT    /v1/workflows/{id}                   全量更新
 DELETE /v1/workflows/{id}                   注销
 POST   /v1/workflows/{id}/execute           执行已注册的工作流
 POST   /v1/workflows/execute                内联定义直跑
 
-GET    /v1/executions                       列表（分页）——未实现，见 §9.6
+GET    /v1/executions                       列表（分页）——已实现，见 §9.6
 GET    /v1/executions/{id}                  查询
 POST   /v1/executions/{id}/cancel           取消
 POST   /v1/executions/{id}/signals          发信号
@@ -508,10 +508,10 @@ entry-seed 的 409 响应有**两种不同 body**，客户端据此决定是否�
 - 前端 `web/packages/xflow-api/src/index.ts` 读 `body.message`，服务端发
   `body.error`——**当前前端拿到的每一条服务端错误消息都被丢弃**，一律降级为
   `statusText`。信封落地后自然修复（workflows 族已修复）
-- 无任何列表端点实现分页（§3.3）。**参数层已落地**：`pageParams`
-  （`service/apiserver/pagination.go`，1-based、默认 20、服务端强制上限 200）
-  与 `writeList`（`service/apiserver/envelope.go`，`{list,total}` 载荷形状）
-  已实现并有单测，**但生产调用点为零**——阻塞在两处缺失的数据源，见 §9.6
+- 分页参数层已落地：`pageParams`（`service/apiserver/pagination.go`，1-based、
+  默认 20、服务端强制上限 200）与 `writeList`（`service/apiserver/envelope.go`，
+  `{list,total}` 载荷形状）已实现并有单测；**两个列表端点已成为其生产调用点**
+  （`GET /v1/workflows`、`GET /v1/executions`，见 §9.6）
 
 ### 9.4 字段命名
 
@@ -533,42 +533,61 @@ runtime hash 已通过 hash-local 镜像（`runtimeSelectorHashPayload`）与 wi
 | `OpWorkflowDefinition{Create,Read,Validate,Publish}`、`OpWorkflowExecutionInvoke`、`OpManagementWrite` | 已删除，零残留（`authz.go` 只保留 `OpWorkflowDefinitionUpdate`，由 PUT `/v1/workflows/{id}` 消费） |
 | `/v1/runners/lease/renew` 的生产调用链 | 已接线（`runner.go:415-420`，见 §8.3） |
 
-### 9.6 列表端点未接线（分页参数层已落地，数据源缺失）
+### 9.6 列表端点（已接线）
 
-`GET /v1/workflows` 与 `GET /v1/executions` 在 §7 路由表中标注为「未实现」。
-**不是分页没做，是列举能力本身不存在**。分页参数层已就位（见 §9.3 末段），
-但两个端点的数据源都不具备列举条件，注册一个返回空列表的 handler 只会复刻
-`/workflow-definitions` 的老毛病——契约描述一个不存在的端点。两条阻塞如下：
+`GET /v1/workflows` 与 `GET /v1/executions` **均已实现**，§7 路由表已同步。
+本节原先记录的两条阻塞（`workflowreg` 无 per-namespace 索引、`store.ExecutionRecord`
+无 namespace 字段）**都已消除**，下面是实现方式与必须知道的语义后果。
 
-**1. `GET /v1/workflows`：`workflowreg` 无 per-namespace 索引。**
+**1. `GET /v1/workflows` —— `workflowreg` 增加了 per-namespace 索引。**
 
-`backend.WorkflowRegistry` 接口只有 `AddWorkflow`/`GetWorkflow`/
-`GetWorkflowByKey`/`UpdateDefinitionHash`/`RemoveWorkflow`（`backend/
-workflow_registry.go:26-41`）。唯一实现 `workflowreg.Registry` 是纯 Redis KV，
-**零索引**（无 `SAdd`/`ZAdd`/`SCAN`），无法按 namespace 枚举。补这条端点需要：
+`backend.WorkflowRegistry` 增加 `ListWorkflows`（`backend/workflow_registry.go:277`），
+实现在 `backend/providers/distributed/internal/workflowreg/registry.go:640`。
+索引就是本节原先建议的那把键 `xflow:wfreg:v2:{ns:<sha256(namespace)>}:index`
+（`registry.go:71`、`:145`），写入是既有 Lua mutation 里的 `ZADD`
+（`registry.go:223/274/313/426/601`），因此**不是**非原子的旁路写入；
+读取走 `ZRange`（`registry.go:680`，**不** `SCAN`，故不违反 org policy §2 的「不得全表遍历」）。
+`ns` 是必需 scope 且只作为键来源，**context 里的 namespace 故意不被采纳**，
+使调用者无法拿到与它声明的不同的 scope；跨 namespace 枚举是**结构性不可能**，
+而不只是「未实现」。
 
-- 在 `workflowreg` 加一个 per-namespace 索引（例如
-  `xflow:wfreg:v2:{ns:<sha256(namespace)>}:index` ZSET），并处理与
-  `AddWorkflow`/`RemoveWorkflow` 的原子性
-- v2 authority 的 namespace-local key 已统一使用 `{ns:<sha256(namespace)>}`
-  hash tag，因此索引可以与记录位于同一 slot；实现仍须把索引更新纳入现有 Lua
-  mutation，并为升级前记录设计 backfill/repair，而不能另做非原子的旁路写入
+**该索引对早于它存在的数据是自愈的**：当某页从 offset 0 开始且解析不到任何 live id 时，
+索引会与该 namespace 的 live byid 记录对账并重试一次
+（`registry.go:657-661` 调用 `reconcileWorkflowIndexLua`，脚本定义在 `registry.go:573`）。
+**因此索引建立之前注册的 workflow 仍然可枚举**，且热路径不扫描。
 
-不先做索引直接 `SCAN xflow:wfreg:v2:*` 是全表遍历，违反 org policy §2
-「敏感数据枚举端点不得全表遍历」，也跨租户泄漏键名。
+**2. `GET /v1/executions` —— `store.ExecutionRecord` 增加了 namespace 列。**
 
-**2. `GET /v1/executions`：`store.ExecutionRecord` 无 namespace 字段。**
+`store.Executions` 增加 `ListExecutions`/`CountExecutions`（`store/interfaces.go`；
+实现 `store/sqlstore/execution.go:85`）。`xflow_executions` 经 `db/xflow_schema.sql`
+加上 namespace 列与列举索引（`db/xflow_schema.sql:906-948`：`INFORMATION_SCHEMA`
+守卫式补列，因 MySQL 无 `ADD COLUMN IF NOT EXISTS`；纯 `ADD COLUMN` + 常量缺省，
+可走 INSTANT DDL，历史行不重写）。排序恒定 `created_at DESC, id DESC`
+（`store/execution.go:136`）——`id` tiebreak 是分页正确性的承担者，故 offset 分页
+**不会重复或跳过**。scope 为空或非法时 `store.ErrInvalidNamespace` **fail closed**
+（`store/execution.go:37-45`），绝不回退成「全部 namespace」——那正是无 scope 的
+`GET /v1/executions` 会成为的跨租户枚举。
 
-`store.Executions` 接口只有 `CreateExecution`/`UpdateExecutionStatus`/
-`GetExecution`（`store/interfaces.go:11-15`）。全仓 `ListExecutions`/
-`CountExecutions` 零命中。更根本地，`store.ExecutionRecord` 与其 DB 投影
-`dbExecution` **没有 namespace 列**（只有 `dbSupply`/`dbArtifact` 带 namespace）。
-即便加了 `ListExecutions`，也**无法按 namespace 过滤**——那是一个跨租户
-列举端点，违反 org policy §1a 与 §2。补这条端点需要一次 schema 迁移：
-给 `xflow_executions` 加 namespace 列、回填历史行、再加索引与查询。
+**⚠ 必须写进发布说明的语义后果：历史 execution 不做回填。**
 
-两条都不在本次 rollout 范围内。完成本节列出的两件事后，从本节删除对应条目并
-解除 §7 路由表的「未实现」标注。
+本节原处方要求「回填历史行」，**实现刻意没有回填**：历史行保持 `''`（未归属），
+而 store 层对空 scope fail closed，因此**未归属行在任何 scope、任何过滤组合下都不可达**
+（设计取向：宁可少列，绝不借错列把 A 租户的行塞给 B 租户）。其后果是：
+
+> **本改动之前产生的 execution 不会出现在 `GET /v1/executions` 中，直到有人把它们
+> 人为归属；本次改动不做任何归属。** 未归属行仍可按精确 id 经 `GET /v1/executions/{id}`
+> 读取。真正的回填/归属是一次**离线 operator 决策**，不是本次交付的一部分。
+
+**注意两个端点在此处并不对称**：workflow 索引会自愈、历史记录可枚举；
+execution 不回填、历史记录不可枚举。不要假定两者行为一致。
+
+**过滤能力**：executions 只广告 `status`、`created_after`、`created_before`。
+按 workflow / runner 过滤**不被数据模型支持**（该表无 workflow id/key/hash 列，
+`runner_id` 也不是该表列），故不暴露——并有负向测试锁死其不被半途加入。
+分页按 §3.3 的 **offset** 语义（非 cursor），默认 20、硬上限 200 作为有文档的安全控制。
+
+契约侧：`api/openapi/xflow-v1.yaml` 已描述两条 `get`（`listWorkflows`、
+`listExecutions`），并含 `WorkflowListResponse` / `ExecutionListResponse` 与各自的 item schema。
 
 ---
 

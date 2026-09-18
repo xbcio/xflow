@@ -664,9 +664,9 @@ type workflowListItem struct {
 	RegistryRevision uint64 `json:"registry_revision"`
 }
 
-// handleListWorkflows serves GET /v1/workflows (spec §3.3 page list; it closes
-// the first of the two blockers §9.6 records for the list endpoints — the
-// registry's per-namespace index now exists).
+// handleListWorkflows serves GET /v1/workflows (spec §3.3 page list). It is the
+// endpoint whose absence §9.6 formerly recorded as a blocker — the registry's
+// per-namespace index now exists and this handler consumes it.
 //
 // Namespace: resolved server-side from the authenticated principal via
 // namespace.FromContext (injected by the authz wrapper), exactly as
