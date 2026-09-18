@@ -54,6 +54,8 @@ at-least-once 语义下，维护窗口是安全的：
 
 **业务侧要求**：handler 副作用必须幂等（宿主幂等键）。维护窗口期间被中断的 invocation 可能在重启后被重复执行一次。
 
+> 本节是**控制面进程**的优雅停机。**单个 runner 的排空与替换是另一套机制**（管理 API `POST /v1/management/runners/{id}/drain`，不发送信号、不退出进程），见 [runner-drain-runbook.md](runner-drain-runbook.md) §1。
+
 ## 3. 升级后验证
 
 升级完成后，启动新进程并验证：

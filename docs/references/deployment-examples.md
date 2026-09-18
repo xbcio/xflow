@@ -24,7 +24,8 @@ xflow-server \
   --metrics-addr :9090 \
   --metrics-path /metrics \
   --log-format json \
-  --management
+  --management \
+  --master-key-file /etc/xflow/master.key
 ```
 
 ### Flag 说明
@@ -53,6 +54,7 @@ xflow-server \
 | `--mysql-dsn` | `""` | **必设**（production） | MySQL DSN（`parseTime=true` 必须）；启用持久化执行状态 + 持久化 SQL 审计 sink。空=进程内存 store + 内存审计（仅 dev） |
 | `--mode` | `production` | `production` | 运行时姿态：`dev`\|`production`。`production`（默认，fail-closed）要求 `--auth-tokens-file` + `--mysql-dsn` + Reconciler；`dev` 允许内存审计 + 单 token，打印告警 |
 | `--auth-tokens-file` | `""` | **必设**（多租户） | JSON 数组 `[{token,subject,namespace,scopes}]`；多命名空间场景必用（`--api-auth-token` 单 token 不允许在 production 模式使用）。文件须 `0600`，不得记录日志 |
+| `--master-key-file` | `""` | **必设**（production） | 0600 文件，内含 base64 编码的 32 字节主密钥（`openssl rand -base64 32`）；`XFLOW_MASTER_KEY` 环境变量优先于它。启用 supply 内容静态加密（at-rest）。production 模式缺失即**启动失败**（`RequireSupplyEncryptionAtRest`）；dev 模式仅打印明文告警。**⚠ 此密钥不可轮换，必须纳入备份**——见 [credential-key-rotation-runbook.md](credential-key-rotation-runbook.md) §3 |
 
 ## 1.1. Redis HA 模式启动示例（sentinel / cluster）
 
@@ -86,7 +88,8 @@ xflow-server \
   --metrics-addr :9090 \
   --metrics-path /metrics \
   --log-format json \
-  --management
+  --management \
+  --master-key-file /etc/xflow/master.key
 ```
 
 ### Cluster 模式
@@ -113,7 +116,8 @@ xflow-server \
   --metrics-addr :9090 \
   --metrics-path /metrics \
   --log-format json \
-  --management
+  --management \
+  --master-key-file /etc/xflow/master.key
 ```
 
 ### HA flag 说明
@@ -233,6 +237,7 @@ groups:
 - [ ] `--auth-tokens-file` 配置（多租户/production 必设）；`--api-auth-token` 单 token 在 production 模式下被拒绝启动
 - [ ] `--auth-policy` 配置 runners.yaml，token 为高熵随机值，未硬编码
 - [ ] `--api-auth-token` 配置，`--require-api-auth` 启用（无 token 启动失败）
+- [ ] `--master-key-file`（0600）或 `XFLOW_MASTER_KEY` 配置：supply 内容静态加密所需；production 模式缺失会**启动失败**（`RequireSupplyEncryptionAtRest`）。**并把该密钥纳入备份**：它今天**不可轮换**，丢失或替换会让全部存量 supply 行无法解密，进而所有 runner 都无法承载任何 trigger（见 [credential-key-rotation-runbook.md](credential-key-rotation-runbook.md) §3）
 - [ ] `--tls-cert`/`--tls-key` 配置；runner 连接走 TLS，推荐 mTLS（`--tls-client-ca`）
 - [ ] `--trace otlp` 指向 collector；`--trace-insecure=false`
 - [ ] `--metrics-addr` 配置，Prometheus 抓取正常

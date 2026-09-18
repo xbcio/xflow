@@ -99,7 +99,9 @@
 //	LeaseSweeper.Run       — reclaims expired leases every ~10s (leader-gated)
 //	runEntryReconciler     — assigns/fences trigger activations every ~10s (leader-gated)
 //	runClaimRecovery       — recovers stale in-flight claims every ~1s (all replicas)
-//	runSupplyKeyRotation   — rotates supply transport AES key (leader-gated via Redis lease)
+//	runSupplyKeyRotation   — rotates supply transport AES key (SET NX slot per
+//	                         period, deliberately NOT leader-gated — see
+//	                         claimRotationSlot)
 //	runLeaderCampaign      — acquires/renews the Redis leadership lease
 //
 // # Pitfalls when modifying this package

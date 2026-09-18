@@ -249,7 +249,7 @@ G1 生产部署必须配置以下能力，详细示例见 [deployment-examples.m
 | D3 | **批准停机窗口**：应用 `db/xflow_schema.sql` 的离线迁移、`make env-migrate` 演练以及备份/恢复演练所需的具体窗口（时长、通告方式）。 | 运维/on-call 负责人 + 产品负责人（业务影响） | D 阶段退出谓词中的「迁移在已批准的 offline 窗口中完成，并有恢复步骤」；窗口未批准前不得执行生产迁移 | **OPEN — 未批准** |
 | D4 | **是否投入真实 HA 环境**（≥ 2 server、真实 Redis Sentinel/Cluster、持久化 Store、Kafka、≥ 2 runner）。 | 产品负责人 + 基础设施/平台负责人（预算与采购） | G2 / B2 的 HA soak 报告；在报告填实前，README 的「不承诺 HA」保持不变 | **OPEN — 未批准** |
 | D5 | **是否投入真实多 namespace 环境**并规定其验收口径（多 principal 并发、跨 namespace 性能隔离基线）。 | 产品负责人 + 安全/权限负责人 | G2 的多 namespace 验收；在此之前不得宣称多 namespace 生产隔离 | **OPEN — 未批准** |
-| D6 | **runbook 覆盖缺口补齐**：为下表中的缺失 runbook 指定 owner（角色）与期限，或签署风险接受记录。 | 运维/on-call 负责人 | D 阶段退出谓词「缺失 runbook 列表清零或有明确 owner、期限和风险接受记录」 | **OPEN — 未批准** |
+| D6 | **runbook 覆盖缺口补齐**：§6.1 的**缺失行已清零**（最后两条 runbook 内容已写出），故本决策现只剩「为这两份新 runbook 指定 owner（角色）与期限，并决定是否要求演练后才能视为批准」。注意密钥轮换那份的核心结论是**有一整条轴今天不可轮换**，属需要改代码的缺口而非文档缺口。 | 运维/on-call 负责人 | D 阶段退出谓词「缺失 runbook 列表清零或有明确 owner、期限和风险接受记录」——列表已清零，但**写出内容 ≠ 批准**；两份 runbook 各自声明从未做过端到端演练 | **OPEN — 未批准** |
 | D7 | **Kafka aggregate overflow 策略**：`discard`（当前默认，永久丢弃）/ `block`（停整个 assignment 且 lag 不可见）/ `dead_letter`（需 `dead_letter_topic`）。三者语义见 [DSL-SPECIFICATION.md](./DSL-SPECIFICATION.md) §on_overflow 与 `node/trigger/kafka/aggregate.go`。 | 产品负责人 + 运行时/后端负责人 | 发布说明中的默认值与数据损失语义披露；选定后需同步 operator 文档与告警 | **OPEN — 未批准** |
 | D8 | **批准证据的验收判据**：HA soak 报告与安装/恢复演练的**验收标准**（而不是「是否执行」），即 §6 与 P0 Exit Gate 中 HA 行的签核口径。 | 运行时/后端负责人 + 运维/on-call 负责人 | G2 的签署结论与 P0 Exit Gate 的 HA 行；判据未批准前，任何 soak 报告都只能记为「已执行」而非「已通过」 | **OPEN — 未批准** |
 
@@ -264,9 +264,9 @@ G1 生产部署必须配置以下能力，详细示例见 [deployment-examples.m
 | Redis 备份 / 恢复演练 | 已存在（演练记录本身仍是部署时落实项） | [maintenance-window-runbook.md](../references/maintenance-window-runbook.md) §4 |
 | 部署配置示例与启动前核对清单 | 已存在 | [deployment-examples.md](../references/deployment-examples.md) |
 | HA soak 方案、报告模板、容量报告模板 | 已存在（真实环境填实仍 ENV-GATED） | [ha-soak-plan.md](../references/ha-soak-plan.md)、[ha-soak-report-template.md](../references/ha-soak-report-template.md)、[capacity-report-template.md](../references/capacity-report-template.md) |
-| Kafka lag 观测与处置（含 lag 盲区：`on_overflow=block` 下停止 fetch 的分区不再采样 lag） | **缺失** | 待 D6 指定 owner 与期限 |
-| runner 替换 / 排空（drain）标准流程 | **缺失** | 待 D6 指定 owner 与期限 |
-| 密钥轮换（runner token / mTLS / supply KEK） | **缺失** | 待 D6 指定 owner 与期限 |
+| Kafka lag 观测与处置（含 lag 盲区：`on_overflow=block` 下停止 fetch 的分区不再采样 lag） | 已存在（内容已覆盖，**owner 与期限仍待 D6**） | [kafka-overflow-runbook.md](../references/kafka-overflow-runbook.md)、[kafka-overflow-topic-inventory.md](../references/kafka-overflow-topic-inventory.md)（含 `### Alerts` 告警表达式与停取诊断；topic 清单模板尚未对任何环境填实） |
+| runner 替换 / 排空（drain）标准流程 | 已存在（内容已覆盖，**owner 与期限仍待 D6**） | [runner-drain-runbook.md](../references/runner-drain-runbook.md)（平台级 `POST /v1/management/runners/{id}/drain`、完成判据、`quiescing` 期间安全边界、`timed_out` 升级路径；**从未做过端到端演练**） |
+| 密钥轮换（runner token / mTLS / supply KEK） | 已存在（内容已覆盖，**owner 与期限仍待 D6**） | [credential-key-rotation-runbook.md](../references/credential-key-rotation-runbook.md)。**该 runbook 的核心结论是「三条轴中有一条今天根本不能轮换」**：supply at-rest KEK 没有 previous-key 配置面、也没有重加密路径，`AtRest` 只装一把密钥，替换主密钥将使**全部存量 supply 行不可解密**——按 `RequireSupplyEncryptionAtRest` 的生产强制要求，这等于所有 runner 都无法承载任何 trigger。轮换它需要**改代码 + owner 决策**，不是运维步骤。另两条轴：transport key 自动轮换（24h）可用；runner 凭据只能**重启式**替换（无热重载、无 SIGHUP） |
 
 ### 6.2 回写规则
 
