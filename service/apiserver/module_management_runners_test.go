@@ -2,6 +2,7 @@ package apiserver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -89,12 +90,140 @@ func TestRunnersListMarksEnrolledRunners(t *testing.T) {
 	h := newRunnerListTestServer(t, lister)
 	defer h.srv.Close()
 	h.issued.ids = []string{"runner-a"}
-	body := h.doJSON(t, http.MethodGet, PathManagementRunners, "", http.StatusOK)
-	if !strings.Contains(body, `"runner_id":"runner-a","enrolled":true`) {
-		t.Fatalf("body %q: runner-a should be enrolled:true", body)
+	items := h.roster(t)
+	byID := runnerRosterByID(t, items)
+	if !byID["runner-a"].Enrolled {
+		t.Fatalf("runner-a = %+v, want enrolled:true", byID["runner-a"])
 	}
-	if !strings.Contains(body, `"runner_id":"runner-b","enrolled":false`) {
-		t.Fatalf("body %q: runner-b should be enrolled:false", body)
+	if byID["runner-b"].Enrolled {
+		t.Fatalf("runner-b = %+v, want enrolled:false", byID["runner-b"])
+	}
+}
+
+// TestRunnersListBuildsMergedRoster verifies the roster's two-source merge
+// and status projection. Liveness is intentionally a separate concern from
+// desired_state: a draining runner can still be online while it winds down.
+func TestRunnersListBuildsMergedRoster(t *testing.T) {
+	now := time.Now().UTC()
+	fresh := now.Add(-time.Second)
+	stale := now.Add(-2 * control.DefaultRunnerLiveTTL)
+	issuedAt := now.Add(-time.Hour)
+	revokedAt := now.Add(-30 * time.Minute)
+
+	lister := &stubRunnerLister{
+		ids: []string{
+			"runner-online", "runner-stale", "runner-zero", "runner-duplicate", "runner-duplicate",
+		},
+		snapshots: map[string]control.RunnerSnapshot{
+			"runner-online": {
+				RunnerID:      "runner-online",
+				LastHeartbeat: fresh,
+				Control: &control.RunnerControlSnapshot{
+					DesiredState: control.RunnerDesiredStateDraining,
+				},
+			},
+			"runner-stale": {
+				RunnerID:      "runner-stale",
+				LastHeartbeat: stale,
+			},
+			"runner-zero":      {RunnerID: "runner-zero"},
+			"runner-duplicate": {RunnerID: "runner-duplicate"},
+		},
+	}
+	h := newRunnerListTestServer(t, lister)
+	defer h.srv.Close()
+	h.issued.entries = []store.IssuedIdentity{
+		{RunnerID: "runner-online", IssuedAt: issuedAt, RevokedAt: revokedAt},
+		{RunnerID: "runner-duplicate", IssuedAt: issuedAt},
+		{RunnerID: "runner-never-connected", IssuedAt: issuedAt, RevokedAt: revokedAt},
+	}
+
+	body := h.doJSON(t, http.MethodGet, PathManagementRunners, "", http.StatusOK)
+	items := decodeRunnerRoster(t, body)
+	if len(items) != 5 {
+		t.Fatalf("roster length = %d, want 5: %+v", len(items), items)
+	}
+	byID := runnerRosterByID(t, items)
+
+	online := byID["runner-online"]
+	if online.State != runnerRosterStateOnline || !online.Enrolled || !online.LastHeartbeat.Equal(fresh) ||
+		!online.IssuedAt.Equal(issuedAt) || !online.RevokedAt.Equal(revokedAt) ||
+		online.DesiredState != string(control.RunnerDesiredStateDraining) {
+		t.Fatalf("online roster item = %+v, want a fresh enrolled draining runner", online)
+	}
+
+	staleItem := byID["runner-stale"]
+	if staleItem.State != runnerRosterStateOffline || !staleItem.LastHeartbeat.Equal(stale) {
+		t.Fatalf("stale roster item = %+v, want offline with its stale heartbeat", staleItem)
+	}
+
+	zero := byID["runner-zero"]
+	if zero.State != runnerRosterStateOffline || !zero.LastHeartbeat.IsZero() {
+		t.Fatalf("zero-heartbeat roster item = %+v, want offline without a heartbeat", zero)
+	}
+
+	neverConnected := byID["runner-never-connected"]
+	if neverConnected.State != runnerRosterStateNeverConnected || !neverConnected.Enrolled ||
+		!neverConnected.IssuedAt.Equal(issuedAt) || !neverConnected.RevokedAt.Equal(revokedAt) ||
+		!neverConnected.LastHeartbeat.IsZero() || neverConnected.DesiredState != "" {
+		t.Fatalf("issued-only roster item = %+v, want never_connected identity metadata only", neverConnected)
+	}
+
+	var raw struct {
+		Data []map[string]json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(body), &raw); err != nil {
+		t.Fatalf("unmarshal roster body: %v\nbody: %s", err, body)
+	}
+	rawByID := make(map[string]map[string]json.RawMessage, len(raw.Data))
+	for _, item := range raw.Data {
+		var id string
+		if err := json.Unmarshal(item["runner_id"], &id); err != nil {
+			t.Fatalf("unmarshal runner_id from %v: %v", item, err)
+		}
+		rawByID[id] = item
+	}
+	if _, ok := rawByID["runner-zero"]["last_heartbeat"]; ok {
+		t.Fatalf("zero-heartbeat item serializes last_heartbeat: %s", rawByID["runner-zero"]["last_heartbeat"])
+	}
+	if _, ok := rawByID["runner-never-connected"]["desired_state"]; ok {
+		t.Fatalf("issued-only item serializes desired_state: %s", rawByID["runner-never-connected"]["desired_state"])
+	}
+}
+
+func TestRunnersListReturnsEmptyArrayForEmptyRoster(t *testing.T) {
+	h := newRunnerListTestServer(t, &stubRunnerLister{ids: []string{}})
+	defer h.srv.Close()
+	body := h.doJSON(t, http.MethodGet, PathManagementRunners, "", http.StatusOK)
+	var raw struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(body), &raw); err != nil {
+		t.Fatalf("unmarshal roster body: %v\nbody: %s", err, body)
+	}
+	if string(raw.Data) != "[]" {
+		t.Fatalf("empty roster data = %s, want []", raw.Data)
+	}
+}
+
+func TestRunnersListRequiresDedicatedListScope(t *testing.T) {
+	m := newManagementModule(fakeControlPlaneForAuthz(t))
+	m.runners = &stubRunnerLister{ids: []string{"runner-a"}}
+	m.issued = &stubIssuedIdentityLister{}
+	m.principalAuth = staticPrincipalAuth{principal: Principal{
+		Subject:   "runner-reader",
+		Namespace: "namespaceA",
+		Scopes:    []string{scopeForOperation(OpManagementRunnerRead)},
+	}}
+	m.authorizer = ScopeAuthorizer{}
+	m.audit = NewInMemoryAuditSink()
+	mux := http.NewServeMux()
+	m.RegisterHTTP(mux)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, PathManagementRunners, nil))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body = %q", rec.Code, rec.Body.String())
 	}
 }
 
@@ -112,6 +241,9 @@ func TestRunnersListReturns500WhenIssuedListFails(t *testing.T) {
 	defer h.srv.Close()
 	h.issued.err = errStubIssuedListFailed
 	body := h.doJSON(t, http.MethodGet, PathManagementRunners, "", http.StatusInternalServerError)
+	if !strings.Contains(body, `"code":"internal_error"`) {
+		t.Fatalf("500 body missing stable internal_error code: %q", body)
+	}
 	// Same caveat as the 501 test's "data":[] check above: writeFail never
 	// writes a body containing `"enrolled":false` (that key only appears on
 	// the 200 success path's runnerListItem JSON), so this substring cannot
@@ -141,6 +273,9 @@ func TestRunnersListReturns500WhenListRunnersFails(t *testing.T) {
 	h := newRunnerListTestServer(t, lister)
 	defer h.srv.Close()
 	body := h.doJSON(t, http.MethodGet, PathManagementRunners, "", http.StatusInternalServerError)
+	if !strings.Contains(body, `"code":"internal_error"`) {
+		t.Fatalf("500 body missing stable internal_error code: %q", body)
+	}
 	// The teeth here: a 500 that echoed err.Error() would still be a 500, so
 	// the status-code assertion above alone would not catch a leak. This is
 	// the assertion doing the actual work, per org security policy §7
@@ -261,8 +396,9 @@ func TestNewManagementModuleRunnerProbeWiresListableDirectory(t *testing.T) {
 // file leaves err nil and gets ids back, matching the original brief stub's
 // shape).
 type stubRunnerLister struct {
-	ids []string
-	err error
+	ids       []string
+	err       error
+	snapshots map[string]control.RunnerSnapshot
 }
 
 func (s *stubRunnerLister) ListRunners(context.Context) ([]string, error) {
@@ -272,12 +408,18 @@ func (s *stubRunnerLister) ListRunners(context.Context) ([]string, error) {
 	return s.ids, nil
 }
 
+func (s *stubRunnerLister) Runner(_ context.Context, runnerID string) (control.RunnerSnapshot, bool) {
+	snapshot, ok := s.snapshots[runnerID]
+	return snapshot, ok
+}
+
 // stubIssuedIdentityLister is a minimal control.IssuedIdentityStore test
 // double. Only List is exercised by this file; Issue/Lookup/Revoke/Renew are
 // unused stubs.
 type stubIssuedIdentityLister struct {
-	ids []string
-	err error
+	ids     []string
+	entries []store.IssuedIdentity
+	err     error
 }
 
 func (s *stubIssuedIdentityLister) Issue(context.Context, store.IssuedIdentity) error {
@@ -291,6 +433,9 @@ func (s *stubIssuedIdentityLister) Lookup(context.Context, string) (store.Issued
 func (s *stubIssuedIdentityLister) List(context.Context) ([]store.IssuedIdentity, error) {
 	if s.err != nil {
 		return nil, s.err
+	}
+	if s.entries != nil {
+		return append([]store.IssuedIdentity(nil), s.entries...), nil
 	}
 	out := make([]store.IssuedIdentity, 0, len(s.ids))
 	for _, id := range s.ids {
@@ -320,6 +465,13 @@ func newRunnerListTestServer(t *testing.T, lister runnerLister) *runnerListTestS
 	t.Helper()
 	m := newManagementModule(fakeControlPlaneForAuthz(t))
 	m.runners = lister
+	// The fake control plane's default directory also has a snapshot capability;
+	// replace it with the test lister's optional projection so each roster test
+	// controls exactly the observations used by the handler.
+	m.snapshots = nil
+	if snapshots, ok := lister.(runnerSnapshotter); ok {
+		m.snapshots = snapshots
+	}
 	issued := &stubIssuedIdentityLister{}
 	m.issued = issued
 	m.principalAuth = staticPrincipalAuth{principal: Principal{
@@ -363,6 +515,34 @@ func (h *runnerListTestServer) doJSON(t *testing.T, method, path, body string, w
 		t.Fatalf("%s %s: status = %d, want %d; body = %q", method, path, resp.StatusCode, wantStatus, got)
 	}
 	return got
+}
+
+func (h *runnerListTestServer) roster(t *testing.T) []runnerListItem {
+	t.Helper()
+	return decodeRunnerRoster(t, h.doJSON(t, http.MethodGet, PathManagementRunners, "", http.StatusOK))
+}
+
+func decodeRunnerRoster(t *testing.T, body string) []runnerListItem {
+	t.Helper()
+	var response struct {
+		Data []runnerListItem `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(body), &response); err != nil {
+		t.Fatalf("unmarshal roster body: %v\nbody: %s", err, body)
+	}
+	return response.Data
+}
+
+func runnerRosterByID(t *testing.T, items []runnerListItem) map[string]runnerListItem {
+	t.Helper()
+	byID := make(map[string]runnerListItem, len(items))
+	for _, item := range items {
+		if _, exists := byID[item.RunnerID]; exists {
+			t.Fatalf("duplicate roster entry for runner %q: %+v", item.RunnerID, items)
+		}
+		byID[item.RunnerID] = item
+	}
+	return byID
 }
 
 func TestRunnerRevokeIdentityOpHasScope(t *testing.T) {

@@ -114,6 +114,22 @@ func ExampleExecutionListItem(id types.ExecutionID, ns, workflowName string, sta
 	}
 }
 
+// ExampleRunnerListItem builds the private runnerListItem used by GET
+// /v1/management/runners. Every optional field is populated so the OpenAPI
+// contract test validates the actual roster projection rather than a shadow DTO.
+func ExampleRunnerListItem() any {
+	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	return runnerListItem{
+		RunnerID:      "runner-1",
+		Enrolled:      true,
+		State:         runnerRosterStateOnline,
+		LastHeartbeat: now,
+		IssuedAt:      now.Add(-time.Hour),
+		RevokedAt:     now.Add(-30 * time.Minute),
+		DesiredState:  string(control.RunnerDesiredStateDraining),
+	}
+}
+
 // ExampleRunnerControlRequest builds the private runnerControlBody used by
 // POST /v1/management/runners/{id}/drain and /resume. It keeps the OpenAPI
 // contract test bound to the actual handler DTO without exporting that DTO.

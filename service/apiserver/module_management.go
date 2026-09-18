@@ -88,14 +88,24 @@ type managementModule struct {
 	// (see runnerLister below). Nil means the configured directory does not
 	// support enumeration, and the route answers 501 rather than an empty list.
 	runners runnerLister
+	// snapshots is the optional liveness/control projection for runner-list
+	// entries. A list-capable directory without this extension still serves the
+	// roster, with directory members reported offline because no fresh heartbeat
+	// can be confirmed.
+	snapshots runnerSnapshotter
 }
 
 // runnerLister is the structural probe for a runner directory that can
-// enumerate. The concrete directory does not implement it today; the interface
-// exists so the route can answer honestly either way, and so a directory that
-// grows the capability lights the route up without further plumbing.
+// enumerate. The interface lets a directory that grows this capability light
+// the route up without further plumbing.
 type runnerLister interface {
 	ListRunners(ctx context.Context) ([]string, error)
+}
+
+// runnerSnapshotter is an optional runnerLister extension that supplies the
+// liveness and control snapshot for one directory member.
+type runnerSnapshotter interface {
+	Runner(ctx context.Context, runnerID string) (control.RunnerSnapshot, bool)
 }
 
 func newManagementModule(cp *control.ControlPlane) *managementModule {
@@ -107,6 +117,9 @@ func newManagementModule(cp *control.ControlPlane) *managementModule {
 	if dir := cp.RunnerDirectory(); !isNilValue(dir) {
 		if l, ok := dir.(runnerLister); ok {
 			m.runners = l
+		}
+		if s, ok := dir.(runnerSnapshotter); ok {
+			m.snapshots = s
 		}
 	}
 	return m
@@ -383,10 +396,31 @@ type runnerListItem struct {
 	// endpoint rather than a static policy file. It is what tells an operator
 	// which half of the fleet a revoked registration code would affect.
 	Enrolled bool `json:"enrolled"`
+	// State is the server-authoritative roster state: online, offline, or
+	// never_connected. Consumers must not reimplement the liveness threshold.
+	State string `json:"state"`
+	// LastHeartbeat is omitted when no directory snapshot exists or its value is
+	// zero. A zero value alone does not distinguish offline from never_connected.
+	LastHeartbeat time.Time `json:"last_heartbeat,omitzero"`
+	// IssuedAt is the identity issuance time for enrollment-issued runners.
+	IssuedAt time.Time `json:"issued_at,omitzero"`
+	// RevokedAt is independent of liveness: a still-heartbeating runner can be
+	// revoked while its process remains online.
+	RevokedAt time.Time `json:"revoked_at,omitzero"`
+	// DesiredState is the runner control intent when the directory exposes it.
+	DesiredState string `json:"desired_state,omitzero"`
 }
 
-// handleListRunners enumerates the runner directory, when the configured
-// directory structurally supports it (m.runners != nil — see runnerLister).
+const (
+	runnerRosterStateOnline         = "online"
+	runnerRosterStateOffline        = "offline"
+	runnerRosterStateNeverConnected = "never_connected"
+)
+
+// handleListRunners returns the runner fleet roster when the configured
+// directory structurally supports enumeration (m.runners != nil — see
+// runnerLister). The roster also includes enrollment-issued identities that
+// have never entered the directory.
 //
 // Two distinct "this doesn't work" conditions live in this handler and they
 // are deliberately NOT unified (Task 9 addendum Ruling 6):
@@ -434,9 +468,11 @@ func (m *managementModule) handleListRunners(w http.ResponseWriter, r *http.Requ
 		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
-	enrolled := map[string]bool{}
+
+	issuedByID := map[string]control.IssuedIdentity{}
+	var issued []control.IssuedIdentity
 	if m.issued != nil {
-		list, err := m.issued.List(r.Context())
+		issued, err = m.issued.List(r.Context())
 		if err != nil {
 			// Not "nobody is enrolled" -- "we cannot tell who is enrolled".
 			// Reporting enrolled:false for the whole fleet here would misinform
@@ -451,19 +487,66 @@ func (m *managementModule) handleListRunners(w http.ResponseWriter, r *http.Requ
 			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}
-		for _, id := range list {
-			enrolled[id.RunnerID] = true
+		for _, identity := range issued {
+			issuedByID[identity.RunnerID] = identity
 		}
 	}
 	// m.issued == nil (this server has no issued-identity store configured at
-	// all) falls through with enrolled left empty -- every runner reports
-	// false. That is a true value, not a degraded one: without an
-	// issued-identity store there genuinely are no enroll-issued runners to
-	// report, unlike the List-error case above where the data exists but
-	// cannot be read.
-	out := make([]runnerListItem, 0, len(ids))
+	// all) falls through with issuedByID left empty -- every directory member
+	// reports enrolled:false. That is a true value, not a degraded one: without
+	// an issued-identity store there genuinely are no enroll-issued runners to
+	// report, unlike the List-error case above where the data exists but cannot
+	// be read.
+
+	now := time.Now()
+	// Keep roster liveness exactly aligned with the scheduler's production
+	// default rather than maintaining a second threshold here.
+	selector := control.DefaultRunnerSelector()
+	out := make([]runnerListItem, 0, len(ids)+len(issuedByID))
+	seen := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
-		out = append(out, runnerListItem{RunnerID: id, Enrolled: enrolled[id]})
+		// A directory is expected to return one ID per registered runner, but
+		// preserve the roster's one-row-per-runner invariant if an implementation
+		// returns a duplicate. Directory membership wins over an issued-only row.
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		item := runnerListItem{RunnerID: id, State: runnerRosterStateOffline}
+		if identity, ok := issuedByID[id]; ok {
+			item.Enrolled = true
+			item.IssuedAt = identity.IssuedAt
+			item.RevokedAt = identity.RevokedAt
+		}
+		if m.snapshots != nil {
+			if snapshot, ok := m.snapshots.Runner(r.Context(), id); ok {
+				item.LastHeartbeat = snapshot.LastHeartbeat
+				if !snapshot.LastHeartbeat.IsZero() && selector.IsLive(snapshot, now) {
+					item.State = runnerRosterStateOnline
+				}
+				if snapshot.Control != nil {
+					item.DesiredState = string(snapshot.Control.DesiredState)
+				}
+			}
+		}
+		out = append(out, item)
+	}
+
+	// Issued identities absent from the directory were never connected. Preserve
+	// the store's order after all directory entries, while suppressing a malformed
+	// duplicate identity row rather than emitting two roster entries for one id.
+	for _, identity := range issued {
+		if _, ok := seen[identity.RunnerID]; ok {
+			continue
+		}
+		seen[identity.RunnerID] = struct{}{}
+		out = append(out, runnerListItem{
+			RunnerID:  identity.RunnerID,
+			Enrolled:  true,
+			State:     runnerRosterStateNeverConnected,
+			IssuedAt:  identity.IssuedAt,
+			RevokedAt: identity.RevokedAt,
+		})
 	}
 	writeData(w, r, http.StatusOK, out)
 }

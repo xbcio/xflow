@@ -828,12 +828,23 @@ paths:
   /v1/management/runners:
     get:
       operationId: listRunners
-      summary: Enumerate the runner directory
+      summary: List the runner fleet roster
       description: |
-        Lists every runner id known to the directory, with whether each was
-        issued its credential through the enrollment endpoint (`enrolled:
-        true`) or a static policy file (`enrolled: false`). This is what tells
-        an operator which runners a revoked registration code would affect.
+        Lists every runner id known to the directory plus every enrollment-issued
+        identity currently absent from that directory. Directory members are
+        server-classified as `online` or `offline`; issued-only members are
+        `never_connected`. The server owns the liveness threshold: `online`
+        means a fresh heartbeat is confirmed, while `offline` means no fresh
+        heartbeat is confirmed (including when no directory snapshot is
+        available).
+
+        `state` is liveness, not task-placement readiness. For example, a
+        runner with `desired_state: draining` can remain `online` while it
+        stops accepting new work.
+
+        `enrolled: true` means the credential came from the enrollment endpoint,
+        rather than a static policy file. This tells an operator which runners a
+        revoked registration code would affect.
 
         Returns 501 `runner_listing_unsupported` when the configured runner
         directory does not structurally support enumeration, rather than an
@@ -859,6 +870,10 @@ paths:
                         type: array
                         items:
                           $ref: "#/components/schemas/RunnerListItem"
+        "500":
+          $ref: "#/components/responses/DefaultError"
+        "501":
+          $ref: "#/components/responses/DefaultError"
         default:
           $ref: "#/components/responses/DefaultError"
 
@@ -866,7 +881,7 @@ paths:
     get:
       operationId: getRunner
       summary: Inspect a single runner
-      description: Returns the registration and liveness snapshot for one runner id. No list API exists.
+      description: Returns the registration and liveness snapshot for one runner id. Use the fleet roster endpoint to list runners.
       tags: [Management]
       parameters:
         - $ref: "#/components/parameters/RunnerId"
@@ -1760,8 +1775,11 @@ components:
 
     RunnerListItem:
       type: object
-      description: One entry in the runner directory listing.
-      required: [runner_id, enrolled]
+      description: |
+        One entry in the fleet roster. Includes runners that enrolled and received
+        an identity but never registered (state: never_connected), which the runner
+        directory itself cannot enumerate.
+      required: [runner_id, enrolled, state]
       properties:
         runner_id:
           type: string
@@ -1769,7 +1787,35 @@ components:
           type: boolean
           description: |
             Whether this runner's credential came from the enrollment endpoint
-            rather than a static policy file.
+            rather than a static policy file. This is NOT "is it active".
+        state:
+          type: string
+          enum: [online, offline, never_connected]
+          description: |
+            Server-computed liveness. Do not recompute the threshold client-side:
+            `online` has a fresh heartbeat, `offline` has no fresh heartbeat
+            confirmed, and `never_connected` is an enrollment-issued identity
+            absent from the current directory. This is not task-placement
+            readiness; inspect desired_state as well.
+        last_heartbeat:
+          type: string
+          format: date-time
+          description: Most recent runner heartbeat when a directory snapshot is available.
+        issued_at:
+          type: string
+          format: date-time
+          description: Credential issuance time when recorded; may be present for enrolled runners, including never_connected ones.
+        revoked_at:
+          type: string
+          format: date-time
+          description: Credential revocation time, independent of the runner's liveness state.
+        desired_state:
+          type: string
+          enum: [active, draining]
+          description: |
+            Present when the runner has a control snapshot. `draining` means the
+            runner is winding down but may still be heartbeating and reporting
+            state: online.
 
     RunnerSnapshot:
       type: object

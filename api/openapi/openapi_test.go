@@ -123,6 +123,11 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 			value:  apiserver.ExampleWaitTimeoutResponse(execID, types.ExecutionStatusRunning),
 		},
 		{
+			name:   "runner list item",
+			schema: "RunnerListItem",
+			value:  apiserver.ExampleRunnerListItem(),
+		},
+		{
 			name:   "runner snapshot",
 			schema: "RunnerSnapshot",
 			value: control.RunnerSnapshot{
@@ -504,6 +509,72 @@ func TestRunnerControlContract(t *testing.T) {
 		data := media.Schema.Value.AllOf[1].Value.Properties["data"]
 		if data == nil || data.Ref != "#/components/schemas/RunnerControlSnapshot" {
 			t.Errorf("POST %s success data schema = %#v, want RunnerControlSnapshot", path, data)
+		}
+	}
+}
+
+func TestRunnerRosterContract(t *testing.T) {
+	spec := loadSpec(t)
+	path := spec.Paths.Value("/v1/management/runners")
+	if path == nil || path.Get == nil {
+		t.Fatal("GET /v1/management/runners is missing")
+	}
+	op := path.Get
+	if op.OperationID != "listRunners" {
+		t.Errorf("GET /v1/management/runners operationId = %q, want listRunners", op.OperationID)
+	}
+
+	for _, status := range []string{"200", "500", "501"} {
+		response := op.Responses.Map()[status]
+		if response == nil || response.Value == nil {
+			t.Errorf("GET /v1/management/runners response %s is missing", status)
+			continue
+		}
+		if status != "200" && response.Ref != "#/components/responses/DefaultError" {
+			t.Errorf("GET /v1/management/runners response %s ref = %q, want DefaultError", status, response.Ref)
+		}
+	}
+
+	success := op.Responses.Value("200")
+	if success == nil || success.Value == nil {
+		return
+	}
+	media := success.Value.Content.Get("application/json")
+	if media == nil || media.Schema == nil || media.Schema.Value == nil || len(media.Schema.Value.AllOf) < 2 {
+		t.Fatal("GET /v1/management/runners success envelope schema is missing")
+	}
+	data := media.Schema.Value.AllOf[1].Value.Properties["data"]
+	if data == nil || data.Value == nil || data.Value.Items == nil || data.Value.Items.Ref != "#/components/schemas/RunnerListItem" {
+		t.Errorf("GET /v1/management/runners data schema = %#v, want RunnerListItem array", data)
+	}
+
+	runnerListItem := spec.Components.Schemas["RunnerListItem"]
+	if runnerListItem == nil || runnerListItem.Value == nil {
+		t.Fatal("RunnerListItem schema is missing")
+	}
+	assertStringEnum(t, runnerListItem.Value.Properties["state"], "online", "offline", "never_connected")
+	assertStringEnum(t, runnerListItem.Value.Properties["desired_state"], "active", "draining")
+}
+
+func assertStringEnum(t *testing.T, schema *openapi3.SchemaRef, want ...string) {
+	t.Helper()
+	if schema == nil || schema.Value == nil {
+		t.Fatalf("enum schema is missing")
+	}
+	got := make(map[string]struct{}, len(schema.Value.Enum))
+	for _, value := range schema.Value.Enum {
+		text, ok := value.(string)
+		if !ok {
+			t.Fatalf("enum value %T(%v) is not a string", value, value)
+		}
+		got[text] = struct{}{}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("enum = %v, want exactly %v", schema.Value.Enum, want)
+	}
+	for _, value := range want {
+		if _, ok := got[value]; !ok {
+			t.Fatalf("enum = %v, missing %q", schema.Value.Enum, value)
 		}
 	}
 }
