@@ -53,6 +53,21 @@
 
 12. **大配置切换耗时可观。** configure：20 规则 17ms、100 规则 57ms、500 规则 484ms、1000 规则 1.18s。→ B 案下这笔 configure 成本落在**后台新池实例**上,老池全程正常服务,`active` 指针原子替换不阻塞任何 borrow（见 §6.3 不变量 3）。
 
+13. **【危险·已两次踩中】共享 engine 的编译产物是「内容寻址 + 全进程共享」的，`CompiledModule.Close()` 会删掉别人正在用的条目。** 约束 #5 记的是共享带来的 60× 提速，但共享有一个必须显式遵守的规则，否则会**永久**破坏该模块在本进程的可用性：
+
+    - wazero 的 `CompilationCache` 一旦配置，**engine 就跨该 cache 的所有 `Runtime` 共享**，且其生命周期不绑定任何单个 Runtime（`wazero/cache.go:57-62`）。本仓库刻意把 cache 做成**包级单例**（`node/internal/code/script/wasm/cache.go` 的 `cacheVal`/`cacheOnce`），因此**每个 `reactorHost` 的 runtime、以及 legacy command runtime，共用同一个 engine**——这正是 §6.1 生命周期表格里 Module 一行「每 code hash 一份，全进程共享」的含义。
+    - `Module.ID` 是**源 wasm 字节的 sha256**（`wazero/internal/wasm/module.go:168-170`），**由内容决定而非计数器**：同一份字节编译两次得到**同一个 ID**。
+    - `CompiledModule.Close()` 的实现就是 `compiledEngine.DeleteCompiledModule(c.module)`（`wazero/config.go:381-384`），而它执行的是 `delete(e.compiledModules, m.ID)`（`wazero/internal/engine/wazevo/engine.go:505-515`；interpreter 引擎同：`interpreter.go:55-61`）。此后 `NewModuleEngine` 查不到该 ID，返回 **`source module must be compiled before instantiation`**（`engine.go:567-575`、`interpreter.go:410`）。
+
+    **规则（新增任何 engine 生命周期路径都必须遵守）：绝不要在仍可能有其他句柄需要同一份字节的编译产物时调用 `CompiledModule.Close()`。** 删除是**永久的**——共享 engine 的条目一旦被删，该 host 对该模块就被彻底废掉，此后**每一次** `InstantiateModule` 都失败（`pool.go` 的 `build instance N/M` 会带上这个错误），因此**一个竞态触发会造成大量连带失败**，症状看起来像「一堆不相关的测试同时坏了」。缓存/磁盘**不是**这条路径的一部分：磁盘驱逐只会造成 cache miss → 重新编译 → 新的内存条目，不会产生这个错误。
+
+    已据此修复的两个调用点（同一规则）：
+    - `reactorHost.engineForKey`（`host.go`）：过去在锁外编译、重锁后发现别人已赢就 `cm.Close(ctx)` 自己的句柄——**却把赢方的引擎返回出去**，于是赢方句柄被输方删掉。现改为**每个模块只选举一个编译者**（`compiling map[string]chan struct{}`，查找与认领在**同一次 `h.mu` 持有内**完成，使「无引擎」+「无人在建」成为一个观察点），输方**根本不编译**，因此不存在需要释放的第二个句柄。
+    - `reactorHost` 的回收路径：过去在 `h.mu` 外「先从 map 删除、再去 drain 池、最后 `Close`」，而该窗口横跨 `drainPoolWithCause`（**会等待在飞实例**），足够宽；窗口内解析到该模块的调用者会重新编译出**同一内容 ID** 的新句柄，随后的迟到 `Close` 就把新引擎的条目删了。现由 `closeReclaimedModules` **在 `h.mu` 内**关闭，且只在该 key **既不居住(`h.engines`)也不在构建中(`h.compiling`)** 时才关；读取这两个条件与关闭动作在同一次持有内完成，才使判断在被执行的那一刻为真。
+
+    回归测试（`engine_reclaim_test.go`）：`TestConcurrentFirstUseOfOneModuleBuildsOneEngine`（8 goroutine 冷启动同一模块——**注意它断言的不只是「大家拿到同一个 engine」，还断言该 engine 仍可实例化**；只比指针相等的测试在坏代码上会通过）、`TestReclaimSparesAModuleThatCameBackDuringTeardown`、`TestReclaimDropsTheCompiledModuleWhenNothingCameBack`（后者防止「干脆不关」把回收退化成只记账）。前两个在旧代码上确定性失败并给出上述生产错误串。
+
+
 ## 2. 参考项目的设计（借鉴点）
 
 > 注：本节结论经四个调研 agent 于 2026-07-29-30 用一手源（proxy-wasm/spec 与 cpp-host 源码、wazero v1.9.0 tag 源码 + godoc、Extism kernel 源码、Bytecode Alliance/Fastly/Fermyon 官方文档）核实。仍有个别标「不确定」处已注明。

@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/tetratelabs/wazero"
 	"github.com/xbcio/xflow/node/internal/code/script/engine"
 	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/types"
@@ -854,5 +857,161 @@ func TestSupplyChangedOrphansNothingWhenReclaimWinsMidSwap(t *testing.T) {
 		t.Fatalf("engine_reclaimed recycles = %d, want %d (%d from the pool active at "+
 			"reclaim time, %d from the orphan pool OnSupplyChanged's own swapConfig built "+
 			"and then had to tear back down)", got, wantRecycled, oldPoolSize, int(defaultPoolSize()))
+	}
+}
+
+// TestConcurrentFirstUseOfOneModuleBuildsOneEngine pins the destructive half of
+// engineForKey's contract: two goroutines racing to compile ONE module must not
+// end up with two compiled handles for it.
+//
+// Two handles for one module are not a wasted allocation, they are a live
+// grenade. wazero keys its compiled-module cache by a content-derived id and one
+// engine backs every Runtime in this process (they share the compilation cache
+// the host installs), so CompiledModule.Close deletes the entry that EVERY
+// handle for those bytes depends on. The shape this replaces compiled outside
+// h.mu and disposed of its losing handle with cm.Close — which deleted the
+// winner's compiled module and left that module permanently uninstantiable in
+// this process. Observed in the wild as six reactor tests failing in a row under
+// `-race`, each at "build instance 1/8", from one lost race.
+//
+// The assertion with teeth is the swapConfig at the end, not the pointer
+// comparison: on the old shape the callers still agreed on one engine, but that
+// engine could no longer build an instance.
+func TestConcurrentFirstUseOfOneModuleBuildsOneEngine(t *testing.T) {
+	ctx := context.Background()
+	h := newTestReactorHost(t)
+	mod := decodeForTest(t, testReactorCode(t))
+	key := moduleKeyOf(mod)
+
+	const callers = 8
+	start := make(chan struct{})
+	engines := make([]*reactorEngine, callers)
+	errs := make([]error, callers)
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start // release every caller at once, so they collide on a cold key
+			engines[i], errs[i] = h.engineForBytes(ctx, mod)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("caller %d of %d: %v", i, callers, err)
+		}
+	}
+	for i := 1; i < callers; i++ {
+		if engines[i] != engines[0] {
+			t.Fatalf("caller %d resolved engine %p, caller 0 resolved %p — one module must "+
+				"have exactly one engine", i, engines[i], engines[0])
+		}
+	}
+	h.mu.Lock()
+	_, present := h.engines[key]
+	resident := len(h.engines)
+	h.mu.Unlock()
+	if !present || resident != 1 {
+		t.Fatalf("h.engines holds %d entries (this module's key present=%v), want exactly "+
+			"this module's entry and nothing else", resident, present)
+	}
+
+	if err := engines[0].swapConfig(ctx, emptyContent(), 2, 1); err != nil {
+		t.Fatalf("the engine every caller resolved can no longer be instantiated: %v — a "+
+			"concurrent first use of one module bricked it for the life of the process", err)
+	}
+}
+
+// TestReclaimSparesAModuleThatCameBackDuringTeardown pins the second half of the
+// same rule: never close a compiled module while anything else may still need
+// those compiled functions.
+//
+// reclaimIdleEngines unpublishes the engine under h.mu, but tears it down after
+// releasing the lock and after drainPoolWithCause has waited on in-flight
+// instances — long enough for a concurrent message to re-resolve the module,
+// find nothing, compile a fresh handle for the SAME content and publish it.
+// Closing the old handle then deletes the entry the fresh engine's pool runs on.
+//
+// The interleaving is forced here rather than raced for, the same way this file's
+// other reclaim tests force theirs: the two steps reclaim takes are performed
+// explicitly, with the re-resolve placed between them.
+func TestReclaimSparesAModuleThatCameBackDuringTeardown(t *testing.T) {
+	ctx := context.Background()
+	h := newTestReactorHost(t)
+	mod := decodeForTest(t, testReactorCode(t))
+	key := moduleKeyOf(mod)
+
+	old, err := h.engineForBytes(ctx, mod)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := old.swapConfig(ctx, emptyContent(), 2, 1); err != nil {
+		t.Fatalf("seed pool: %v", err)
+	}
+
+	// Step 1, what reclaimIdleEngines does while holding h.mu: unpublish it.
+	h.mu.Lock()
+	delete(h.engines, key)
+	h.republishEngineListLocked()
+	h.codeCache.Purge()
+	h.mu.Unlock()
+	old.reclaimed.Store(true)
+
+	// The window: the module comes back before the teardown loop reaches the old
+	// handle, so a fresh engine for the same content is published.
+	fresh, err := h.engineForBytes(ctx, mod)
+	if err != nil {
+		t.Fatalf("re-resolve: %v", err)
+	}
+	if fresh == old {
+		t.Fatal("test setup bug: re-resolve returned the reclaimed engine, so there is " +
+			"no live engine for the late close to break and this test proves nothing")
+	}
+	if err := fresh.swapConfig(ctx, emptyContent(), 2, 2); err != nil {
+		t.Fatalf("fresh pool: %v", err)
+	}
+
+	// Step 2, what the teardown loop does after the lock: release the old
+	// engine's compiled module.
+	h.closeReclaimedModules(ctx, []doomedEngine{{key: key, e: old}})
+
+	if err := fresh.swapConfig(ctx, []byte(`{"rules":[{"name":"r","expr":"true"}]}`), 2, 3); err != nil {
+		t.Fatalf("the module re-resolved in the teardown window can no longer be "+
+			"instantiated: %v — the reclaimed engine's late close deleted the compiled "+
+			"module the fresh engine depends on", err)
+	}
+}
+
+// TestReclaimDropsTheCompiledModuleWhenNothingCameBack keeps the guard above
+// honest. A guard that skipped the close unconditionally would satisfy every
+// assertion in TestReclaimSparesAModuleThatCameBackDuringTeardown while quietly
+// turning reclamation back into "unpublish the map entry and keep the compiled
+// code resident" — freeing the bookkeeping and none of the memory this feature
+// exists to bound.
+func TestReclaimDropsTheCompiledModuleWhenNothingCameBack(t *testing.T) {
+	ctx := context.Background()
+	h := newTestReactorHost(t)
+	e, err := h.engineForBytes(ctx, decodeForTest(t, testReactorCode(t)))
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	e.lastUsed.Store(time.Now().Add(-time.Hour).UnixNano())
+
+	if n := h.reclaimIdleEngines(ctx, time.Minute); n != 1 {
+		t.Fatalf("reclaimed %d engines, want exactly 1", n)
+	}
+
+	// Instantiating the reclaimed handle directly is the only way to see whether
+	// the compiled code was released: the engine is out of h.engines, so going
+	// through the resolver would simply compile a new one.
+	if _, err := h.runtime(ctx).InstantiateModule(ctx, e.cm, wazero.NewModuleConfig()); err == nil {
+		t.Fatal("the reclaimed engine's compiled module is still instantiable, so its " +
+			"compiled code was never released — reclamation freed the map entry and left " +
+			"the resident memory this feature exists to bound")
+	} else if !strings.Contains(err.Error(), "must be compiled before instantiation") {
+		t.Fatalf("the reclaimed compiled module is unusable for an unexpected reason: %v", err)
 	}
 }

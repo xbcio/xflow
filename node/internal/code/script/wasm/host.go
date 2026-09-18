@@ -158,6 +158,21 @@ type reactorHost struct {
 	// own: it had read some other host's sweep. No amount of waiting fixes
 	// that; only attributing a report to a host does.
 	engineCountObserver Observer
+
+	// compiling holds the module keys with a compile in flight: the entry is
+	// added and the engine published under ONE h.mu hold each, so a key present
+	// here means exactly one goroutine is building it. Closing the channel
+	// releases the waiters. See engineForKey for why a second concurrent
+	// compile of one module is not merely wasteful but destructive.
+	//
+	// Guarded by mu. Entries are deleted as soon as their build finishes, so
+	// this stays the size of the concurrent build fan-out, not of the module
+	// working set — a per-key mutex held forever would be the leak this whole
+	// change exists to prevent. That self-cleaning is also why this is
+	// hand-rolled rather than singleflight: golang.org/x/sync is not a direct
+	// dependency of this module, and promoting it to one for this is not worth
+	// a go.mod change.
+	compiling map[string]chan struct{}
 }
 
 // engineCountObserverOrDefault is the Observer a reclamation pass publishes its
@@ -226,6 +241,7 @@ func newReactorHost() *reactorHost {
 		prewarm:       map[string]prewarmEntry{},
 		sourceDriven:  map[string]struct{}{},
 		engineIdleTTL: engineIdleTTLFromEnv(),
+		compiling:     map[string]chan struct{}{},
 	}
 }
 
@@ -423,16 +439,86 @@ func (h *reactorHost) engineFor(ctx context.Context, wasmBytes []byte) (*reactor
 
 // engineForKey is engineFor for callers that already computed the module key,
 // so a multi-MB module is hashed once per call rather than twice.
+//
+// Exactly ONE goroutine compiles a given module, and the losers wait for it
+// instead of compiling the same bytes themselves. That is not a performance
+// concession; a second concurrent compile of one module is DESTRUCTIVE:
+//
+//   - wazero keys its compiled-module cache by a CONTENT-DERIVED id (sha256 of
+//     the source plus the configs that change the runtime representation), not
+//     by handle identity, and ONE engine backs every Runtime in the process
+//     because they share the compilation cache this host installs.
+//   - CompiledModule.Close is exactly "delete that id from that shared engine".
+//   - So two handles for the same bytes are two handles for one entry, and
+//     closing either one — even the one nobody installed — deletes the
+//     compiled functions the OTHER one's engine is running on.
+//
+// The old shape compiled outside h.mu and, on losing the race to publish,
+// disposed of its handle with cm.Close(ctx). On a cold concurrent first use of
+// one module (routine for a server starting up) both callers missed, both
+// compiled, and the loser's Close bricked the winner's engine permanently: every
+// later instantiation of that module failed with "source module must be compiled
+// before instantiation" until the process restarted. Reproduced deterministically
+// without any concurrency at all — compile a module twice, close the second
+// handle, and the first engine can no longer build an instance — and observed in
+// the wild as six reactor tests failing in a row in a `-race` package run, each
+// at "build instance 1/8": one lost race, then a host that could no longer
+// instantiate that module for the rest of the process.
 func (h *reactorHost) engineForKey(ctx context.Context, key string, wasmBytes []byte) (*reactorEngine, error) {
-	h.mu.Lock()
-	if e, ok := h.engines[key]; ok {
-		h.touchLocked(e)
+	for {
+		h.mu.Lock()
+		if e, ok := h.engines[key]; ok {
+			h.touchLocked(e)
+			h.mu.Unlock()
+			obs().OnModuleCompile(ctx, "hit")
+			return e, nil
+		}
+		if done, inflight := h.compiling[key]; inflight {
+			// Someone else is compiling this module. Wait for them rather than
+			// compiling the same bytes a second time (see the doc above), then
+			// look again: their build either published an engine or failed.
+			h.mu.Unlock()
+			<-done
+			continue
+		}
+		// Claim the build in the SAME hold as the lookup that found nothing, so
+		// "no engine" and "nobody is building one" are one observation and the
+		// claim cannot interleave with a rival's. This is what makes a second
+		// concurrent compile impossible by construction, rather than merely
+		// unlikely — the same argument publishEngine makes for its Dekker
+		// crossing, applied here.
+		done := make(chan struct{})
+		h.compiling[key] = done
 		h.mu.Unlock()
-		obs().OnModuleCompile(ctx, "hit")
-		return e, nil
-	}
-	h.mu.Unlock()
 
+		e, err := func() (*reactorEngine, error) {
+			// Released on EVERY path, a panic included: a claim left behind
+			// would block every future resolution of this module forever, which
+			// is a worse outcome than whatever went wrong inside the build.
+			// Delete before closing, so a waiter that wakes to find the build
+			// failed can claim the key itself rather than blocking on an
+			// already-closed channel.
+			defer func() {
+				h.mu.Lock()
+				delete(h.compiling, key)
+				h.mu.Unlock()
+				close(done)
+			}()
+			return h.buildEngineForKey(ctx, key, wasmBytes)
+		}()
+		return e, err
+	}
+}
+
+// buildEngineForKey compiles one module and publishes it, for the single caller
+// engineForKey elected to do it.
+//
+// It deliberately does NOT re-check h.engines after compiling, unlike the shape
+// it replaces: engineForKey elects one builder per key under h.mu, so no rival
+// can have published this key in the meantime, and a re-check would be
+// unreachable code guarding the very hazard the election removes. What it must
+// never do again is close a handle it did not install.
+func (h *reactorHost) buildEngineForKey(ctx context.Context, key string, wasmBytes []byte) (*reactorEngine, error) {
 	// Compile outside the lock (compilation is slow; §0.1 ~2s cold).
 	cm, err := h.runtime(ctx).CompileModule(ctx, wasmBytes)
 	if err != nil {
@@ -441,13 +527,6 @@ func (h *reactorHost) engineForKey(ctx context.Context, key string, wasmBytes []
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	// Another goroutine may have won the race; keep the first, drop ours.
-	if e, ok := h.engines[key]; ok {
-		_ = cm.Close(ctx)
-		h.touchLocked(e)
-		obs().OnModuleCompile(ctx, "hit")
-		return e, nil
-	}
 	e := &reactorEngine{host: h, cm: cm}
 	h.engines[key] = e
 	h.touchLocked(e)
@@ -746,7 +825,7 @@ func (h *reactorHost) reclaimIdleEngines(ctx context.Context, ttl time.Duration)
 	cutoff := time.Now().Add(-ttl).UnixNano()
 
 	h.mu.Lock()
-	var doomed []*reactorEngine
+	var doomed []doomedEngine
 	for key, e := range h.engines {
 		if e.lastUsed.Load() > cutoff {
 			continue
@@ -762,7 +841,7 @@ func (h *reactorHost) reclaimIdleEngines(ctx context.Context, ttl time.Duration)
 		}
 		delete(h.engines, key)
 		e.reclaimed.Store(true)
-		doomed = append(doomed, e)
+		doomed = append(doomed, doomedEngine{key: key, e: e})
 	}
 	if len(doomed) > 0 {
 		h.republishEngineListLocked()
@@ -776,22 +855,18 @@ func (h *reactorHost) reclaimIdleEngines(ctx context.Context, ttl time.Duration)
 	}
 	h.mu.Unlock()
 
-	// Teardown outside the lock: drainPoolWithCause waits (bounded) and cm.Close
-	// is slow, and neither may block a lookup. Safe to do unlocked precisely
-	// because the engines are already unreachable — out of engines, out of
-	// engineList, out of codeCache — so nothing can hand one to a new caller
-	// after this point.
-	for _, e := range doomed {
-		old := e.active.Swap(nil)
+	// Teardown outside the lock: drainPoolWithCause waits (bounded) and must not
+	// block a lookup. Safe to do unlocked precisely because the engines are
+	// already unreachable — out of engines, out of engineList, out of codeCache —
+	// so nothing can hand one to a new caller after this point.
+	for _, d := range doomed {
+		old := d.e.active.Swap(nil)
 		if old != nil {
 			// "engine_reclaimed", not "pool_swapped": nothing replaces these
 			// instances, because the whole module is going away, not getting a
 			// new config. See drainPoolWithCause's doc for why the cause is a
 			// parameter here at all.
-			e.drainPoolWithCause(ctx, old, "engine_reclaimed")
-		}
-		if e.cm != nil {
-			_ = e.cm.Close(ctx)
+			d.e.drainPoolWithCause(ctx, old, "engine_reclaimed")
 		}
 		// readyInstanceTotal, not the pool size just torn down: a report after
 		// each engine's teardown must reflect what is ACTUALLY still resident
@@ -800,5 +875,56 @@ func (h *reactorHost) reclaimIdleEngines(ctx context.Context, ttl time.Duration)
 		// the lock above was released, so there is no re-entrant hold.
 		obs().OnInstanceCount(ctx, "ready", h.readyInstanceTotal())
 	}
+	h.closeReclaimedModules(ctx, doomed)
 	return len(doomed)
+}
+
+// doomedEngine is one engine reclaimed out of h.engines, kept together with the
+// module key it was stored under. The key is what closeReclaimedModules needs to
+// ask whether that module has come back.
+type doomedEngine struct {
+	key string
+	e   *reactorEngine
+}
+
+// closeReclaimedModules closes the compiled modules of reclaimed engines, but
+// only where nothing can still be holding the same content.
+//
+// This is the second half of engineForKey's rule (see its doc for the first):
+// never close a compiled module while anything else may still need those
+// compiled functions. wazero's cache is keyed by a content-derived id shared by
+// every Runtime in the process, so Close on one handle deletes the entry every
+// other handle for the same bytes runs on.
+//
+// The window is real, not theoretical: the delete from h.engines above happens
+// under h.mu, but this close happens after the lock is released and after
+// drainPoolWithCause has waited on in-flight instances — plenty of time for a
+// concurrent message to re-resolve the module, find nothing, and compile a
+// fresh handle for the same content and publish it. Closing ours would then
+// brick that brand-new engine. Reproduced deterministically by deleting the
+// engine, re-resolving the module, and only then closing the old handle: the
+// fresh engine fails "source module must be compiled before instantiation".
+//
+// So the close happens under h.mu, together with both conditions it depends on:
+// nothing resident under this key, and no build in flight for it (a build would
+// publish an engine for the same content the moment it finished). Reading those
+// and deleting under one hold is what makes the answer true at the instant it
+// is acted on; checking outside the lock would leave the same race it closes.
+// The cost is acceptable — a compiled-module close is a map delete, not the slow
+// teardown drainPoolWithCause is kept out of the lock for.
+func (h *reactorHost) closeReclaimedModules(ctx context.Context, doomed []doomedEngine) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, d := range doomed {
+		if d.e.cm == nil {
+			continue
+		}
+		if _, resident := h.engines[d.key]; resident {
+			continue
+		}
+		if _, building := h.compiling[d.key]; building {
+			continue
+		}
+		_ = d.e.cm.Close(ctx)
+	}
 }
