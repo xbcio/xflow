@@ -368,6 +368,13 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 			// items are counted.
 			engine.WithItemFailureObserver(metrics.NewSubgraphMetrics(cfg.Metrics)),
 			engine.WithGroupObserver(metrics.NewGroupObserver(cfg.Metrics)),
+			// The skip counter is a separate option from the group observer
+			// because a skip is not a group event: all three flows that decide
+			// one — entry admission, node advance, group commit — reach it, and
+			// an engine with no group units still skips. This is the one engine
+			// every skip decision runs on, so wiring it here is what keeps
+			// xflow_node_skipped_total from being a permanently zero series.
+			engine.WithNodeSkipObserver(metrics.NewNodeSkipMetrics(cfg.Metrics)),
 		)
 	}
 	eng := engine.New(cfg.Backend.State(), cfg.Backend.Queue(), engOpts...)

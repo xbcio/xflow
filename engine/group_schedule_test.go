@@ -73,6 +73,11 @@ func (f *fakeGroupExecutor) ExecuteGroup(_ context.Context, _ *Task, _ graph.Gro
 
 type fakeGroupState struct {
 	acquired bool
+	// commitResult, when non-nil, replaces the canned accepted result. Tests
+	// that need to observe what the engine does with a specific backend
+	// outcome — the skipped-unit list a real store reports, in particular —
+	// set it rather than making this double reproduce the DAG arithmetic.
+	commitResult *GroupCommitResult
 }
 
 func (f *fakeGroupState) AcquireGroupLease(_ context.Context, _ *GroupLease) (bool, error) {
@@ -85,6 +90,9 @@ func (f *fakeGroupState) RenewGroupLease(_ context.Context, _ types.ExecutionID,
 }
 
 func (f *fakeGroupState) CommitGroup(_ context.Context, _ GroupCommitRequest) (GroupCommitResult, error) {
+	if f.commitResult != nil {
+		return *f.commitResult, nil
+	}
 	return GroupCommitResult{Outcome: CommitOutcomeAccepted, Applied: true}, nil
 }
 

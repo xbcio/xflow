@@ -159,6 +159,7 @@ type Engine struct {
 	nodeFailureObserver      NodeFailureObserver
 	itemFailureObserver      ItemFailureObserver
 	groupObserver            GroupObserver
+	nodeSkipObserver         NodeSkipObserver
 	outboxMaxDeliveryAttempt int
 	defaultLeaseTTL          time.Duration
 	defaultNodeTimeout       time.Duration

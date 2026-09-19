@@ -189,6 +189,24 @@ type AdvanceNodeRequest struct {
 	Arrivals     []DownstreamArrival
 }
 
+// SkippedUnit names one downstream unit a scheduling transition resolved as
+// skip rather than execute, and how many units that name covers.
+//
+// A skip is the graph deciding that a unit's inbound routes carried no active
+// port: the unit is recorded as scheduled, a skip intent is queued
+// (engine.TaskTypeNodeSkip), and it terminalizes without ever running — so the
+// branch the upstream data never reached is consumed instead of executed. That
+// is not a silent drop (the intent is durable), but it is invisible from the
+// outside: no error is raised, and the scheduling position does advance.
+//
+// It replaces an aggregate count because a single transition can skip several
+// different nodes at once, and an operator's question is "which node is being
+// skipped", which a total cannot answer.
+type SkippedUnit struct {
+	NodeName string
+	Count    int
+}
+
 // AdvanceNodeResult reports whether an internal advance task made a new
 // scheduling transition. A duplicate task returns Applied=false.
 //
@@ -208,6 +226,18 @@ type AdvanceNodeRequest struct {
 type AdvanceNodeResult struct {
 	Applied   bool
 	OutboxIDs []string
+	// Skipped reports the downstream units this transition resolved as skip.
+	//
+	// The backend reports it because only the backend knows which of the two
+	// candidate intents per arrival it actually wrote. OutboxIDs cannot
+	// substitute: deriving it from an ID prefix would make a naming convention
+	// load-bearing for an operator-visible series, and that field's other
+	// consumer (the evidence buffer) is defined over every intent, not just the
+	// skipped ones.
+	//
+	// Nil on an all-execute transition and on a duplicate delivery that applied
+	// nothing.
+	Skipped []SkippedUnit
 }
 
 // AtomicStateStore is the durable scheduling extension of StateStore. It is
@@ -591,6 +621,7 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 			e.explainUnappliedAdvance(ctx, task)
 		}
 		e.publishAdvanceReceipt(ctx, task, result)
+		e.notifySkip(ctx, flowAdvance, result.Skipped)
 		if !flush {
 			return true, nil
 		}

@@ -180,6 +180,35 @@ return {1, done, finalStatus, effectivePrivate}
 // advanceNodeLua converts all inbound arrivals from one completed source into
 // exactly one execute or skip intent per destination. The advance marker turns
 // response loss and repeated outbox delivery into no-ops.
+//
+// Returns {applied, skips}: applied is 1 when the transition ran and skips is a
+// flat name/count list of the downstream units this call resolved as skip
+// rather than execute ({name, count, name, count, ...}).
+//
+// The guards below still `return 0`, a bare scalar, and that is not a
+// divergence from the shape above: Redis renders a one-element Lua table as a
+// scalar, so the two shapes are indistinguishable on the wire for the cases
+// where they overlap. The Go wrapper (runAdvanceNodeLua) normalizes both, which
+// is what makes a fenced or duplicate advance — a normal outcome — decodable
+// rather than an error.
+//
+// The names come from an eighth per-arrival ARGV slot rather than from the Go
+// wrapper re-deriving them, because only the script knows which arrivals it
+// actually skipped. An advance intent is never replayed from a durable body
+// written by an older revision (see engine.LeaseNotRecoverable: advance and
+// skip tasks do not leave the engine), so widening the slot is a same-binary
+// change and not a wire-format one. A missing name would surface as an empty
+// label, never as a miscount.
+//
+// A skip is not a silent drop: it queues a durable TaskTypeNodeSkip intent and
+// the downstream unit is marked scheduled. The semantic boundary is still worth
+// stating plainly, because it is what makes the branch dangerous rather than
+// merely unfortunate: the transition COMMITS. The scheduling position advances
+// over that branch, and the downstream genuinely never sees that data — no
+// error is raised, nothing is retried, and the consumer-lag signal that would
+// normally expose a stalled consumer moves the wrong way, because the batch was
+// consumed and the position advanced past it. That is why the outcome is
+// reported back rather than left to be inferred from the outbox.
 var advanceNodeLua = redis.NewScript(`
 local terminal = function(value)
     return value == 'success' or value == 'failed' or value == 'skipped' or value == 'canceled' or value == 'continued'
@@ -218,6 +247,10 @@ end
 local count = tonumber(ARGV[3])
 local keypos = 7
 local argpos = 5
+-- Downstream units resolved as skip rather than execute, as a flat
+-- {name, count, name, count, ...} list reported back to the Go wrapper so the
+-- skip branch has an observable outcome at all; see this script's doc comment.
+local skips = {}
 for i = 1, count do
     local inDegreeKey = KEYS[keypos]
     local activeKey = KEYS[keypos + 1]
@@ -229,6 +262,7 @@ for i = 1, count do
     local executeBody = ARGV[argpos + 4]
     local skipID = ARGV[argpos + 5]
     local skipBody = ARGV[argpos + 6]
+    local arrivalName = ARGV[argpos + 7] or ''
     local activeBefore = tonumber(redis.call('GET', activeKey) or '0')
     local remaining = redis.call('DECRBY', inDegreeKey, arrivals)
     if activeArrivals > 0 then
@@ -257,6 +291,8 @@ for i = 1, count do
             if nextAction == 'skip' then
                 outboxID = skipID
                 outboxBody = skipBody
+                table.insert(skips, arrivalName)
+                table.insert(skips, 1)
             end
             if redis.call('HSETNX', KEYS[6], outboxID, outboxBody) == 1 then
                 redis.call('ZADD', KEYS[5], tonumber(ARGV[4]), outboxID)
@@ -266,9 +302,9 @@ for i = 1, count do
         end
     end
     keypos = keypos + 3
-    argpos = argpos + 7
+    argpos = argpos + 8
 end
-return 1
+return {1, skips}
 `)
 
 var ackOutboxLua = redis.NewScript(`

@@ -350,15 +350,78 @@ func (s *Store) AdvanceNode(ctx context.Context, req engine.AdvanceNodeRequest) 
 		if err != nil {
 			return engine.AdvanceNodeResult{}, err
 		}
-		args = append(args, arrival.ArrivalCount, arrival.ActiveCount, arrival.MergeMode, executeID, executeJSON, skipID, skipJSON)
+		// The destination node name rides along in an eighth per-arrival slot,
+		// read only by the skip branch: the script names the units it skipped so
+		// the caller does not have to re-derive them from a count. Nothing
+		// replays an advance intent out of a durable body written by an older
+		// revision — engine.LeaseNotRecoverable exists precisely because advance
+		// and skip tasks never leave the engine — so the slot cannot be absent
+		// for a body this binary produced.
+		args = append(args, arrival.ArrivalCount, arrival.ActiveCount, arrival.MergeMode, executeID, executeJSON, skipID, skipJSON, arrival.NodeName)
 		outboxIDs = append(outboxIDs, executeID, skipID)
 	}
-	applied, err := advanceNodeLua.Run(ctx, s.rdb, keys, args...).Int64()
+	applied, err := runAdvanceNodeLua(ctx, advanceNodeLua, s.rdb, keys, args)
 	if err != nil {
 		return engine.AdvanceNodeResult{}, fmt.Errorf("advance node %q/%q: %w", req.ExecutionID, req.NodeName, err)
 	}
-	if applied == 0 {
+	if len(applied) == 0 || redisResultInt(applied[0]) == 0 {
 		return engine.AdvanceNodeResult{}, nil
 	}
-	return engine.AdvanceNodeResult{Applied: true, OutboxIDs: outboxIDs}, nil
+	out := engine.AdvanceNodeResult{Applied: true, OutboxIDs: outboxIDs}
+	out.Skipped = skippedUnitsFromLua(applied[1])
+	return out, nil
+}
+
+// runAdvanceNodeLua runs advanceNodeLua and normalizes its two legal reply
+// shapes into one slice.
+//
+// The script returns {1, skips} on the applied path, but a Lua table with a
+// single trailing element that Redis renders as a scalar — and every early
+// `return 0` guard — makes the reply an integer instead. Both are part of the
+// same contract, so the caller must not assume a slice: doing so turns a fenced
+// or duplicate advance, which is a normal outcome, into an error that the
+// caller then reports as a delivery failure.
+//
+// A scalar reply is treated as {nil, applied}: the number of elements that
+// reaches redigo for `{1, {}}` is ambiguous (it decodes as the scalar 1), so the
+// payload cannot be distinguished from a missing one, and the applied flag is
+// the only thing that must survive.
+//
+// The script is a parameter so the normalizer can be exercised against a
+// literal reply shape rather than only through the production script.
+func runAdvanceNodeLua(ctx context.Context, script *redis.Script, rdb redis.UniversalClient, keys []string, args []any) ([]any, error) {
+	cmd := script.Run(ctx, rdb, keys, args...)
+	res, err := cmd.Slice()
+	if err == nil {
+		return res, nil
+	}
+	applied, intErr := cmd.Int64()
+	if intErr != nil {
+		return nil, err
+	}
+	return []any{applied}, nil
+}
+
+// skippedUnitsFromLua decodes the flat {name, count, name, count, ...} list the
+// scheduling scripts return for the units they resolved as skip. A malformed
+// trailing element is dropped rather than failing the caller: the transition it
+// describes has already been applied by Redis, and no observation is worth
+// turning that into an error.
+func skippedUnitsFromLua(value any) []engine.SkippedUnit {
+	items, ok := value.([]any)
+	if !ok || len(items) < 2 {
+		return nil
+	}
+	out := make([]engine.SkippedUnit, 0, len(items)/2)
+	for i := 0; i+1 < len(items); i += 2 {
+		count := int(redisResultInt(items[i+1]))
+		if count <= 0 {
+			continue
+		}
+		out = append(out, engine.SkippedUnit{
+			NodeName: redisResultString(items[i]),
+			Count:    count,
+		})
+	}
+	return out
 }

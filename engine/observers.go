@@ -244,6 +244,51 @@ type GroupObserver interface {
 	OnGroupAdmission(ctx context.Context, outcome string, d time.Duration)
 }
 
+// NodeSkipObserver receives the units a scheduling transition resolved as skip
+// rather than execute, partitioned by the flow that decided it.
+//
+// This is the only observation of the skip branch, and it is its own interface
+// rather than a method on GroupObserver for the reason ItemFailureObserver is:
+// a skip is not a group event. All three flows that produce one — entry
+// admission, a node advance, and a group commit — reach it, and an engine that
+// has no group units at all still skips. Folding it into GroupObserver would
+// mean an engine could not observe skips without also being handed an observer
+// whose other methods are about a subsystem it does not use.
+//
+// A skip is not a silent drop — it leaves a durable outbox intent
+// (engine.TaskTypeNodeSkip) and it does advance the scheduling position, which
+// is exactly why it needs a series: the downstream never sees that work, no
+// error is raised, and nothing else in the system distinguishes it from a
+// branch that legitimately had no data. A host that treats "no data loss" as a
+// hard requirement has to be able to alert on this counter being nonzero.
+//
+// Implementations must be non-blocking and must not affect scheduling.
+type NodeSkipObserver interface {
+	// OnNodeSkip reports the downstream units one transition resolved as skip.
+	//
+	// flow is a closed enum naming the decision point, not the workflow:
+	// "entry" (the SeedExecutionFromEntry fan-out), "advance" (AdvanceNode) and
+	// "group" (CommitGroup).
+	//
+	// node is the downstream unit's representative node name, and count is how
+	// many units of that name the one transition skipped — a single advance can
+	// skip several arrivals at once, which is why this carries a count rather
+	// than being a bare counter increment.
+	//
+	// It is called once per skipped node rather than once per transition, so an
+	// implementation sees the node attribution the aggregate cannot carry.
+	OnNodeSkip(ctx context.Context, flow string, node string, count int)
+}
+
+// WithNodeSkipObserver installs an observer for skipped downstream units.
+func WithNodeSkipObserver(o NodeSkipObserver) Option {
+	return func(e *Engine) {
+		if o != nil {
+			e.nodeSkipObserver = o
+		}
+	}
+}
+
 // WithGroupObserver installs an observer for group unit lease/commit lifecycle
 // events. A nil observer leaves group observation disabled.
 func WithGroupObserver(o GroupObserver) Option {
@@ -296,6 +341,52 @@ func (e *Engine) notifyGroupAdmission(ctx context.Context, outcome string, d tim
 	}
 	safeHook(ctx, e.logger, func(observerCtx context.Context) {
 		e.groupObserver.OnGroupAdmission(observerCtx, outcome, d)
+	})
+}
+
+// flowEntry is the OnNodeSkip flow label for the entry-admission fan-out, the
+// one skip site reached from Engine.SeedExecutionFromEntry.
+const flowEntry = "entry"
+
+// flowAdvance is the OnNodeSkip flow label for the ordinary downstream
+// advance (AtomicStateStore.AdvanceNode), which carries both the first
+// propagation of a completed node and the skip cascade that follows it.
+const flowAdvance = "advance"
+
+// flowGroup is the OnNodeSkip flow label for a group unit's commit
+// (GroupStateStore.CommitGroup), whose downstream fan-in is counted inside the
+// commit transition rather than by a subsequent advance.
+const flowGroup = "group"
+
+// notifySkip reports the downstream units one transition resolved as skip.
+//
+// An empty list is not reported: an execute-only transition is the common case,
+// and a call per advance would pay a hook invocation (panic recovery included)
+// on the engine's hottest scheduling path to publish nothing. The list is
+// therefore the gate, and a caller passes its result field straight through.
+//
+// No log. A skip is per entry unit per admission, and every one of them
+// already leaves a durable outbox record carrying the execution, the node and
+// the unit index — a log line here would duplicate, at proportional volume in
+// the hot path, data an operator can already read off the outbox and this
+// counter. The counter's flow/node labels are what make the aggregate
+// actionable, which is the thing the outbox records cannot do.
+//
+// One call per skipped node, not one per transition. A transition can skip
+// several downstream units at once, and collapsing them would mean either
+// dropping the node attribution or inventing a sentinel for "several", which
+// is not an operator's answer to "which node is being skipped".
+func (e *Engine) notifySkip(ctx context.Context, flow string, skipped []SkippedUnit) {
+	if len(skipped) == 0 || e.nodeSkipObserver == nil {
+		return
+	}
+	safeHook(ctx, e.logger, func(observerCtx context.Context) {
+		for _, unit := range skipped {
+			if unit.Count <= 0 {
+				continue
+			}
+			e.nodeSkipObserver.OnNodeSkip(observerCtx, flow, unit.NodeName, unit.Count)
+		}
 	})
 }
 

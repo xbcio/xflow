@@ -93,6 +93,12 @@ type GroupCommitResult struct {
 	ExecutionDone   bool
 	ExecutionStatus types.ExecutionStatus
 	OutboxIDs       []string
+	// Skipped reports the downstream units this commit resolved as skip (see
+	// SkippedUnit and AdvanceNodeResult.Skipped). It is the group-commit
+	// instance of the same transition: a group unit's downstream fan-in is
+	// counted here rather than by a separate AdvanceNode call, so without this
+	// field a skip decided on that path would be counted nowhere.
+	Skipped []SkippedUnit
 }
 
 // GroupStateStore 是 group 级原子状态转换能力（可选能力，仿 LegacyNodeCommitter/

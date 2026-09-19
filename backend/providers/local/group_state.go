@@ -194,16 +194,22 @@ func (s *memoryState) CommitGroup(_ context.Context, req engine.GroupCommitReque
 		result.ExecutionStatus = status
 	}
 	// 4. Downstream unit arrival counting (same unit-keyed counting as AdvanceNode).
-	result.OutboxIDs = append(result.OutboxIDs, s.applyGroupDownstreamLocked(req.ExecutionID, req.Downstream)...)
+	ids, skipped := s.applyGroupDownstreamLocked(req.ExecutionID, req.Downstream)
+	result.OutboxIDs = append(result.OutboxIDs, ids...)
+	result.Skipped = skipped
 	return result, nil
 }
 
 // applyGroupDownstreamLocked converts group commit downstream arrivals into
 // execute/skip outbox intents, using unit-keyed counting with the same semantics
 // as AdvanceNode (DECR in-degree, accumulate active, wait_any/wait_all threshold).
+// It returns the IDs actually written and, separately, the units resolved as
+// skip — the caller reports the latter as an observation, so it cannot be
+// re-derived from the ID list without depending on the ID format.
 // Caller must hold s.mu.
-func (s *memoryState) applyGroupDownstreamLocked(id types.ExecutionID, arrivals []engine.DownstreamArrival) []string {
+func (s *memoryState) applyGroupDownstreamLocked(id types.ExecutionID, arrivals []engine.DownstreamArrival) ([]string, []engine.SkippedUnit) {
 	var ids []string
+	var skipped []engine.SkippedUnit
 	for _, arrival := range arrivals {
 		if arrival.ArrivalCount <= 0 {
 			continue
@@ -236,7 +242,8 @@ func (s *memoryState) applyGroupDownstreamLocked(id types.ExecutionID, arrivals 
 			taskType = engine.TaskTypeNodeExec
 		}
 		outboxID := executeOutboxID(id, arrival.NodeName, 0)
-		if schedule == "skip" {
+		isSkip := schedule == "skip"
+		if isSkip {
 			taskType = engine.TaskTypeNodeSkip
 			outboxID = skipOutboxID(id, arrival.NodeName, 0)
 		}
@@ -248,7 +255,10 @@ func (s *memoryState) applyGroupDownstreamLocked(id types.ExecutionID, arrivals 
 			Type:        taskType,
 		}, time.Time{}) {
 			ids = append(ids, outboxID)
+			if isSkip {
+				skipped = append(skipped, engine.SkippedUnit{NodeName: arrival.NodeName, Count: 1})
+			}
 		}
 	}
-	return ids
+	return ids, skipped
 }

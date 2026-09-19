@@ -135,6 +135,12 @@ type SeedExecutionFromEntryResponse struct {
 	// Duplicate is true when the same key+hash was already accepted (idempotent
 	// retry); the same execution ID is returned.
 	Duplicate bool
+	// Skipped reports the downstream units this admission resolved as skip (see
+	// SkippedUnit). An admission is a scheduling transition like any other: it
+	// decrements the new execution's in-degree counters and picks execute or
+	// skip per downstream unit. Nil when the backend does not report it or when
+	// nothing was skipped.
+	Skipped []SkippedUnit
 }
 
 // --- EntryAdmissionStore ---
@@ -169,6 +175,12 @@ type EntryAdmissionStore interface {
 // store.SeedExecutionFromEntry backend round trip — not the topology
 // resolution or generation fence that service/control/core.go's caller
 // performs before/after this call.
+//
+// An accepted, non-duplicate admission additionally reports the downstream
+// units the backend resolved as skip through GroupObserver.OnNodeSkip with
+// flow "entry". That is reported for every entry unit, group or not: the skip
+// decision is made on the new execution's downstream fan-in, which has nothing
+// to do with what kind of unit the seed came from.
 //
 // The ErrEntryAdmissionNotSupported early return is NOT observed: a backend
 // lacking the capability is a static configuration fact, not an admission
@@ -207,6 +219,13 @@ func (e *Engine) SeedExecutionFromEntry(ctx context.Context, req SeedExecutionFr
 
 	if isGroupEntry {
 		e.notifyGroupAdmission(ctx, classifyAdmissionOutcome(resp, err), d)
+	}
+	// Only on a real admission. A duplicate retry applied no transition, so its
+	// response carries no skips; a conflict or a transport error applied
+	// nothing at all, and counting the skips of a transition that did not
+	// happen would inflate the one series an operator alerts on.
+	if err == nil && !resp.Duplicate && resp.State == AdmissionStateAccepted {
+		e.notifySkip(ctx, flowEntry, resp.Skipped)
 	}
 
 	return resp, err
