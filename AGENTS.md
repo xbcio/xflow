@@ -12,6 +12,25 @@ go fmt ./...             # Format
 golangci-lint run        # Lint
 ```
 
+### Test execution discipline
+
+Do not run the full suite or `-race` unless the task requires it. Both are the
+repository's slowest gates and are reserved for CI and pre-merge verification,
+not the inner development loop. Skipping them is not skipping verification.
+
+- Minimum for any change: `go build ./...`, `make vet` (it also vets the
+  build-tagged code the default config cannot see), and the tests for the
+  packages you touched: `go test ./path/to/pkg/... -count=1`.
+- Add `-race` only when the change touches concurrency or shared state; leave it
+  off for pure logic changes.
+- Full-gate targets are opt-in and should be named in advance when started:
+  `make test` (race-enabled, uncached, every ordinary package, 5m per package),
+  `make test-script-wasm` (WASM package once in isolation, 45m watchdog; ~24m
+  measured under `-race`), `make test-coverage`, `make test-integration*`.
+- A bare `go test ./... -race` cannot carry the WASM package — Go's 10m default
+  package timeout is far below its ~24m race cost, so it fails with a misleading
+  timeout panic. Use the Makefile targets, which supply the watchdog.
+
 ## Project Structure
 
 - **engine/** — Pure scheduling algorithm (zero business IO deps): Graph IR, Scheduler, ErrorPolicy, Suspend, lease/result semantics
