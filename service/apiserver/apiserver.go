@@ -268,6 +268,7 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 	// store.Executions field the module declares. Nil stays nil and the handler
 	// answers 500 rather than an empty page.
 	ctrlModule.executions = cfg.Store
+	ctrlModule.registrationMetrics = metrics.NewWorkflowRegistrationMetrics(cfg.Metrics)
 	if cfg.PrincipalAuth != nil {
 		ctrlModule.principalAuth = cfg.PrincipalAuth
 		ctrlModule.authorizer = cfg.Authorizer

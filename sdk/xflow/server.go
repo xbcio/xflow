@@ -773,6 +773,14 @@ func (s *Server) startReconciler(ctx context.Context) {
 // node to a remote runner and executes nothing itself, so accepting one would
 // register a workflow whose local nodes have no executor anywhere — it would
 // register cleanly and then stall at the first such node.
+//
+// Re-registering an unchanged workflow succeeds and changes nothing. A
+// definition that differs from the one already under the same name and version
+// is answered with backend.ErrWorkflowConflict, which no retry can clear — use
+// ReplaceWorkflow for a definition the host derives from its own configuration.
+// Use IsRetryableRegistrationError to tell a conflict apart from a backend
+// failure that is worth retrying; the two calls share the startup-registration
+// contract documented on ReplaceWorkflow.
 func (s *Server) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.WorkflowID, error) {
 	return s.addWorkflow(ctx, wf, false)
 }
@@ -793,22 +801,58 @@ func (s *Server) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.Wo
 // The replacement deactivates the old definition's entry units before removing
 // it, so its triggers stop. Do not use it where several independent publishers
 // share one workflow name: each would evict the others in turn.
+//
+// # Failing at startup is recoverable
+//
+// A registration that fails at startup is a recoverable condition, and retrying
+// the same call is the supported response — this is a contract, not a
+// suggestion, because the alternative a host reaches for by default is to give
+// up and keep running:
+//
+//   - The calls are idempotent, so retrying is safe at any point. Presenting an
+//     unchanged definition registers nothing, removes nothing, and re-derives
+//     the workflow's entry activations. That last part is what makes a retry
+//     finish a registration that failed halfway: a failure after the registry
+//     write and before the activation projection leaves the record registered
+//     with its entry activations unprojected, so its triggers are not yet
+//     assigned to a runner, and the retry takes the identical-definition path
+//     and projects them. Only a changed definition is removed and re-added.
+//   - The SDK does not retry for you, and holds no timer or background worker
+//     that would. Both calls are synchronous and return the backend's failure
+//     unchanged, so the decision and the pacing stay with the host, which is the
+//     only side that knows how long it can wait before serving traffic.
+//   - Retry what a retry can fix. IsRetryableRegistrationError separates a
+//     backend that was contended, unreachable or timed out (including the
+//     context deadline a startup timeout produces) from a definition the
+//     compiler rejected and a key another definition occupies; the latter two
+//     return the same answer however often they are asked.
+//   - A host that would rather not run half-started than retry may exit on the
+//     first failure instead. What it must not do is neither: a process that
+//     logs the failure and continues serves its own HTTP API with the xflow
+//     feature off, and the only symptom is wherever the host serves xflow from —
+//     in the case this contract was written for, its runner endpoint — answering
+//     503 until the process is restarted.
+//
+// Every attempt is counted in xflow_workflow_registration_total{operation,
+// outcome, namespace}, partitioned by that same taxonomy, so "the API is up but
+// xflow is not registered" is a series an alert can read rather than a log line
+// someone has to find.
 func (s *Server) ReplaceWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.WorkflowID, error) {
 	return s.addWorkflow(ctx, wf, true)
 }
 
 func (s *Server) addWorkflow(ctx context.Context, wf *WorkflowBuilder, replace bool) (types.WorkflowID, error) {
 	if wf == nil {
-		return "", errors.New("xflow: workflow must not be nil")
+		return "", definitionRefused{errors.New("xflow: workflow must not be nil")}
 	}
 	if len(wf.directHandlers()) > 0 {
-		return "", fmt.Errorf("xflow: workflow %q declares local node handlers, "+
+		return "", definitionRefused{fmt.Errorf("xflow: workflow %q declares local node handlers, "+
 			"which a control-plane Server cannot execute: register the node types on "+
-			"the runner instead", wf.name)
+			"the runner instead", wf.name)}
 	}
 	def, err := wf.build()
 	if err != nil {
-		return "", err
+		return "", definitionRefused{err}
 	}
 	if s.artifacts != nil {
 		if err := resolveArtifacts(ctx, def, s.artifacts); err != nil {

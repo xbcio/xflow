@@ -11,6 +11,14 @@
 // standalone server while letting a host own its HTTP and gRPC listeners through
 // Handler and RegisterGRPC, or let Server.Run own configured listeners.
 //
+// Registering the host's own workflow at startup is recoverable. AddWorkflow
+// and ReplaceWorkflow are idempotent and safe to call again, and neither retries
+// for you: a host whose registration fails should retry it — see
+// Server.ReplaceWorkflow for that contract and IsRetryableRegistrationError for
+// which failures a retry can clear — or decide to exit rather than keep serving
+// its API with the xflow feature off. Attempts are counted in
+// xflow_workflow_registration_total, by operation and outcome.
+//
 // NewRunner is the corresponding embedded execution-plane facade for a process
 // that registers node handlers and executes remote leases. Its assembly keeps
 // runtime dependencies consistent across task, group, subgraph, trigger, and

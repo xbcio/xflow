@@ -16,6 +16,7 @@ import (
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/protocol"
@@ -53,6 +54,15 @@ type workflowControlModule struct {
 	// store.Store: this module reads executions and nothing else, and the
 	// narrower field is what makes that auditable.
 	executions store.Executions
+	// registrationMetrics counts every registration attempt this module
+	// handles: the HTTP routes and APIServer.RegisterWorkflow /
+	// ReplaceWorkflow, which an embedded host reaches in-process. Both entry
+	// points funnel through registerWorkflow/replaceWorkflow below, so the
+	// counter has one emit point and the two cannot report different numbers.
+	// Injected post-construction by APIServer.New (Config.Metrics), the same
+	// shape the management module's metrics field uses; a nil Metrics counts
+	// nothing, which is the dev default.
+	registrationMetrics metrics.WorkflowRegistrationMetrics
 }
 
 func newWorkflowControlModule(cp *control.ControlPlane, auth WorkflowAuthenticator, log engine.Logger, tracer tracing.Tracer) *workflowControlModule {
@@ -538,7 +548,8 @@ var errWorkflowIDMismatch = errors.New("workflow id does not match path")
 // register a workflow the dispatcher then failed to resolve. ns is supplied by
 // the caller and written onto def; it is never read from def itself, so an
 // in-process caller cannot register into another namespace either.
-func (m *workflowControlModule) registerWorkflow(ctx context.Context, ns namespace.Namespace, def *types.WorkflowDef) (types.WorkflowID, []string, error) {
+func (m *workflowControlModule) registerWorkflow(ctx context.Context, ns namespace.Namespace, def *types.WorkflowDef) (id types.WorkflowID, warnings []string, err error) {
+	defer func() { m.observeRegistration(ctx, ns, "add", err) }()
 	registry := m.registry()
 	if registry == nil {
 		if m.log != nil {
@@ -551,6 +562,45 @@ func (m *workflowControlModule) registerWorkflow(ctx context.Context, ns namespa
 		return "", nil, err
 	}
 	return m.addWorkflowRecord(ctx, ns, registry, rec, warnings)
+}
+
+// registrationOutcome maps a registration failure to the closed outcome enum
+// xflow_workflow_registration_total is partitioned on, by asking what would
+// have to change for the call to succeed: nothing that a retry supplies
+// (invalid_definition, conflict), or the backend itself (error).
+//
+// It is deliberately the same split the HTTP handlers already make — a
+// *WorkflowCompileError is a 400 and everything else is a 500 — so an operator
+// reading status codes and an operator reading the counter see one taxonomy,
+// not two. Replace conflicts are split out of the bare conflict below because a
+// typed one names a racing writer (stale_revision and friends), which is a
+// different operator response from "your key is occupied".
+func registrationOutcome(err error) string {
+	var compileErr *WorkflowCompileError
+	if errors.As(err, &compileErr) {
+		return "invalid_definition"
+	}
+	var replaceConflict *backend.WorkflowReplaceConflictError
+	if errors.As(err, &replaceConflict) {
+		return "conflict"
+	}
+	if errors.Is(err, backend.ErrWorkflowConflict) {
+		return "conflict"
+	}
+	return "error"
+}
+
+// observeRegistration counts one registration attempt. The namespace is
+// asserted here rather than read from ctx because the in-process entry point
+// carries the target namespace as an argument, not in the context — reading
+// ctx would label the embedded host's registrations "default" regardless of the
+// namespace they actually registered into.
+func (m *workflowControlModule) observeRegistration(ctx context.Context, ns namespace.Namespace, operation string, err error) {
+	outcome := "registered"
+	if err != nil {
+		outcome = registrationOutcome(err)
+	}
+	m.registrationMetrics.ObserveRegistration(namespace.WithNamespace(ctx, ns), operation, outcome)
 }
 
 func (m *workflowControlModule) buildWorkflowRecord(ns namespace.Namespace, id types.WorkflowID, def *types.WorkflowDef) (backend.WorkflowRecord, []string, error) {
@@ -1313,7 +1363,8 @@ func sameWorkflowRevision(a, b backend.WorkflowRecord) bool {
 // its (namespace, name, version) key, atomically supersedes it. The embedded API
 // deliberately gives a changed definition a new ID; HTTP PUT, by contrast,
 // preserves its path ID in replaceWorkflowByID below.
-func (m *workflowControlModule) replaceWorkflow(ctx context.Context, ns namespace.Namespace, def *types.WorkflowDef) (types.WorkflowID, []string, error) {
+func (m *workflowControlModule) replaceWorkflow(ctx context.Context, ns namespace.Namespace, def *types.WorkflowDef) (id types.WorkflowID, warnings []string, err error) {
+	defer func() { m.observeRegistration(ctx, ns, "replace", err) }()
 	registry := m.registry()
 	if registry == nil {
 		return "", nil, errors.New("apiserver: no workflow registry configured")
@@ -1344,7 +1395,8 @@ func (m *workflowControlModule) replaceWorkflow(ctx context.Context, ns namespac
 // authoritative; name/version may rename the record only when the destination
 // key is free. All conflict checks and index changes occur in the registry's
 // single atomic compare-and-swap rather than a racy lookup/remove/add sequence.
-func (m *workflowControlModule) replaceWorkflowByID(ctx context.Context, ns namespace.Namespace, id types.WorkflowID, def *types.WorkflowDef, mutationID string) (types.WorkflowID, []string, error) {
+func (m *workflowControlModule) replaceWorkflowByID(ctx context.Context, ns namespace.Namespace, id types.WorkflowID, def *types.WorkflowDef, mutationID string) (newID types.WorkflowID, warnings []string, err error) {
+	defer func() { m.observeRegistration(ctx, ns, "replace_by_id", err) }()
 	if id == "" {
 		return "", nil, backend.ErrWorkflowNotFound
 	}
