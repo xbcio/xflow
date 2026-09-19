@@ -760,11 +760,11 @@ const DefaultOutboxMetricsInterval = 30 * time.Second
 // delivers everything a page yields, so this stays well under the point where
 // one tick's flush would dominate the interval.
 //
-// The page is also the discovery CEILING, which is what makes it a throughput
-// parameter rather than a tuning nicety. SCAN's COUNT counts keys EXAMINED, not
-// keys matched, so at a keyspace of N keys one drain reaches at most about
-// page/N of the ready backlog and a cursor needs N/page drains to come all the
-// way around.
+// The page is also the discovery CEILING of the keyspace SWEEP, which is what
+// makes it a throughput parameter rather than a tuning nicety. SCAN's COUNT
+// counts keys EXAMINED, not keys matched, so at a keyspace of N keys one sweep
+// reaches at most about page/N of the ready backlog and a cursor needs N/page
+// drains to come all the way around.
 //
 // That ceiling is the discovery half of the deficit this default was sized
 // against: a host deployed on a shared Redis Cluster with a five-figure key
@@ -776,12 +776,16 @@ const DefaultOutboxMetricsInterval = 30 * time.Second
 //
 // 2048 rather than 256: at a 20k-key keyspace it covers the cursor in ~10
 // drains instead of ~80, while the flush work a full page implies (~2048
-// executions) still fits an interval on the deployments this bounds. A keyspace
-// far larger than that needs the host to raise it further — see
-// WithOutboxDiscoveryPage — because no fixed default can track an unbounded
-// keyspace. The lasting fix is to discover ready work from an index instead of
-// from the keyspace; until the layout has one that survives Redis Cluster's
-// single-slot scripting rule, this knob is what bounds discovery.
+// executions) still fits an interval on the deployments this bounds.
+//
+// The keyspace dependency itself is now removed rather than merely bounded: a
+// store may keep a readiness index and answer discovery from it in time
+// proportional to the ready backlog, and this page then bounds only the
+// throttled SWEEP that backstops a registration the index missed. A backend
+// without one keeps discovering by sweep, so this stays the knob that bounds
+// that path — a keyspace far larger than the default anticipates needs the host
+// to raise it further, see WithOutboxDiscoveryPage, because no fixed default
+// can track an unbounded keyspace.
 const DefaultOutboxDiscoveryPage = 2048
 
 // OutboxDispatcherOption configures an OutboxDispatcher.
