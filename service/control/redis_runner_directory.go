@@ -1894,6 +1894,11 @@ func atoiDefault(raw string) int {
 // ReclaimExpiredClaims returns ordinary expired claims to the durable queue.
 // A lease_may_exist or lease_created record is never requeued here: expiry only
 // makes it resolver-eligible, preserving the engine-side crash fence.
+//
+// Its reach is exactly the claims still in the pre-claimation index — a claim
+// that reached 'leased' was removed from that index when it was finalized, so
+// this can never observe one. 'leased' assignments that stranded after their
+// lease metadata TTL'd out are the stranded-lease reaper's job, not this scan's.
 func (d *RedisRunnerDirectory) ReclaimExpiredClaims(ctx context.Context) error {
 	reclaimed, err := d.rdb.Eval(ctx, redisRecoverExpiredClaimsLua, []string{
 		d.keys.queue,
@@ -2210,6 +2215,14 @@ local function reclaim(claimID)
     return false
   end
   local recovered = false
+  -- 'claimed' is the only recoverable state on purpose; do not widen this to
+  -- 'leased'. It would be dead code: a claim that reaches 'leased' has already
+  -- had claim:assignment, claim:runner, claim:session and claim:expiry removed
+  -- by redisFinalizeClaimLua in the same atomic step that writes 'leased', and
+  -- this loop is driven by ZRANGEBYSCORE claim:expiry and HKEYS claim:assignment
+  -- (KEYS[11], KEYS[7]) — both empty for a leased assignment, so reclaim() is
+  -- never invoked for one. A stranded 'leased' assignment is reclaimed by the
+  -- control plane's stranded-lease reaper instead; see StrandedLeaseReaper.
   if assignmentID and redis.call('HGET', KEYS[3], assignmentID) == 'claimed' and redis.call('HGET', KEYS[4], assignmentID) == claimID then
     redis.call('HSET', KEYS[3], assignmentID, 'queued')
     redis.call('HDEL', KEYS[4], assignmentID)

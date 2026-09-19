@@ -26,6 +26,14 @@ const DefaultLeaseRepairPeriod = time.Minute
 // control plane shares, and there is no correctness reason to hurry.
 const DefaultLegacyLeaseMetaReapPeriod = 5 * time.Minute
 
+// DefaultStrandedLeaseReapPeriod bounds reclamation of 'leased' assignments
+// whose directory lease metadata expired. Like the legacy-metadata reaper it is
+// maintenance over shared state and runs on the slowest cadence, but unlike it
+// the backlog is not finite: a runner that is killed without a clean drain
+// leaves one stranded assignment per in-flight task, so this drains a steady
+// trickle rather than a one-time residue.
+const DefaultStrandedLeaseReapPeriod = 5 * time.Minute
+
 // LeaseLister is the subset of engine.StateStore used by the sweeper to find
 // candidates for reclamation. The full StateStore interface satisfies this
 // shape implicitly.
@@ -67,6 +75,11 @@ type LeaseSweeper struct {
 	reapBatch  int
 	reapMu     sync.Mutex
 	lastReap   time.Time
+
+	strandedPeriod time.Duration
+	strandedBatch  int
+	strandedMu     sync.Mutex
+	lastStranded   time.Time
 }
 
 // SweepObserver receives lease-sweep outcomes so observability layers can
@@ -119,6 +132,12 @@ type LeaseSweeperConfig struct {
 	// LegacyLeaseMetaReapBatch bounds one reaper call. Zero defaults to
 	// defaultLegacyLeaseMetaReapBatch.
 	LegacyLeaseMetaReapBatch int
+	// StrandedLeaseReapPeriod controls the optional stranded-lease reaper rate.
+	// Zero defaults to DefaultStrandedLeaseReapPeriod.
+	StrandedLeaseReapPeriod time.Duration
+	// StrandedLeaseReapBatch bounds one reaper call. Zero defaults to
+	// defaultStrandedLeaseReapBatch.
+	StrandedLeaseReapBatch int
 }
 
 // NewLeaseSweeper builds a sweeper bound to the given state store and engine.
@@ -141,6 +160,12 @@ func NewLeaseSweeper(state LeaseLister, eng execution.Engine, cfg LeaseSweeperCo
 	if cfg.LegacyLeaseMetaReapBatch <= 0 {
 		cfg.LegacyLeaseMetaReapBatch = defaultLegacyLeaseMetaReapBatch
 	}
+	if cfg.StrandedLeaseReapPeriod <= 0 {
+		cfg.StrandedLeaseReapPeriod = DefaultStrandedLeaseReapPeriod
+	}
+	if cfg.StrandedLeaseReapBatch <= 0 {
+		cfg.StrandedLeaseReapBatch = defaultStrandedLeaseReapBatch
+	}
 	var timingObserver SweepTimingObserver
 	if observer, ok := cfg.Observer.(SweepTimingObserver); ok {
 		timingObserver = observer
@@ -161,6 +186,8 @@ func NewLeaseSweeper(state LeaseLister, eng execution.Engine, cfg LeaseSweeperCo
 		repairBatch:    cfg.LeaseRepairBatch,
 		reapPeriod:     cfg.LegacyLeaseMetaReapPeriod,
 		reapBatch:      cfg.LegacyLeaseMetaReapBatch,
+		strandedPeriod: cfg.StrandedLeaseReapPeriod,
+		strandedBatch:  cfg.StrandedLeaseReapBatch,
 	}
 }
 
@@ -171,13 +198,62 @@ func (s *LeaseSweeper) Run(ctx context.Context) {
 	// a full repair interval before expired leases become discoverable.
 	s.RepairOnce(ctx)
 	s.ReapLegacyLeaseMetaOnce(ctx)
+	s.ReapStrandedLeasesOnce(ctx)
 	for {
 		if err := s.sleepFunc(ctx, s.period); err != nil {
 			return
 		}
 		s.SweepOnce(ctx)
 		s.ReapLegacyLeaseMetaOnce(ctx)
+		s.ReapStrandedLeasesOnce(ctx)
 	}
+}
+
+// ReapStrandedLeasesOnce reclaims assignments left 'leased' after their
+// directory lease metadata expired, at its own bounded cadence. It is
+// separately leader-gated for the same reason as the repair and legacy-metadata
+// passes: it is maintenance over shared state rather than part of any one
+// lease's execution, and it is a no-op for directories that do not implement
+// the capability.
+//
+// This closes the one shape the sweep itself cannot see. SweepOnce enumerates
+// the engine's lease index, whose TTL is the same transient metadata that has
+// already expired — so at the moment an assignment becomes unrecoverable it has
+// also dropped out of that enumeration, taking its runner capacity with it.
+// Nothing else reclaims it either: the claim-reclaim path only walks
+// pre-claimation state, and the owning runner's own poll-time recovery stopped
+// when the runner did. See StrandedLeaseReaper for the reachability argument.
+func (s *LeaseSweeper) ReapStrandedLeasesOnce(ctx context.Context) int {
+	if s.elector != nil && !s.elector.IsLeader() {
+		return 0
+	}
+	reaper, ok := s.directory.(StrandedLeaseReaper)
+	if !ok {
+		return 0
+	}
+
+	now := s.clock()
+	s.strandedMu.Lock()
+	if !s.lastStranded.IsZero() && now.Sub(s.lastStranded) < s.strandedPeriod {
+		s.strandedMu.Unlock()
+		return 0
+	}
+	s.lastStranded = now
+	s.strandedMu.Unlock()
+
+	released, err := reaper.ReapStrandedLeases(ctx, s.strandedBatch)
+	if err != nil {
+		// Never blocks lease execution, so it is logged and retried on the next
+		// cadence rather than surfaced as a sweep error.
+		if s.log != nil {
+			s.log.Error("reap stranded directory leases", "err", err)
+		}
+		return 0
+	}
+	if released > 0 && s.log != nil {
+		s.log.Info("reaped stranded directory leases", "released", released)
+	}
+	return released
 }
 
 // ReapLegacyLeaseMetaOnce drains orphaned pre-U-7 assignment lease metadata at
