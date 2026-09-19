@@ -141,9 +141,15 @@ func (s *Store) AcquireTaskLease(ctx context.Context, lease *engine.TaskLease) (
 	return prev, true, nil
 }
 
-// leaseIndexBatchLimit caps a single ListExpiredLeases scan. Small enough that
-// the sweeper stays quick under heavy backlog; the sweeper re-polls until the
-// list drains, so this is not a coverage cap, only a per-call bound.
+// leaseIndexBatchLimit caps a single ListExpiredLeases call. Small enough that
+// the sweeper stays quick under heavy backlog; the sweeper re-polls on its next
+// tick, so this is not a coverage cap, only a per-call bound.
+//
+// The bound is shared across namespaces by splitNamespaceScanBudget rather than
+// consumed in namespace order. Letting the first namespace fill it meant that
+// while one namespace had a batch worth of expired leases, every namespace
+// after it was never scanned at all — its leases went unreclaimed for as long
+// as that backlog lasted, which is a stuck task, not just a slow one.
 const leaseIndexBatchLimit = 256
 
 func (s *Store) ListExpiredLeases(ctx context.Context, before time.Time) (expired []engine.ExpiredLease, err error) {
@@ -162,11 +168,9 @@ func (s *Store) ListExpiredLeases(ctx context.Context, before time.Time) (expire
 	if err != nil {
 		return out, fmt.Errorf("list namespaces for lease scan: %w", err)
 	}
-	for _, t := range namespaces {
-		if len(out) >= leaseIndexBatchLimit {
-			break
-		}
-		if err := s.scanExpiredLeasesForNamespace(ctx, t, before, max, scanCount, seenIndexes, &out); err != nil {
+	budget := splitNamespaceScanBudget(leaseIndexBatchLimit, len(namespaces))
+	for i, t := range namespaces {
+		if err := s.scanExpiredLeasesForNamespace(ctx, t, before, max, scanCount, budget[i], seenIndexes, &out); err != nil {
 			return out, err
 		}
 	}
@@ -176,12 +180,19 @@ func (s *Store) ListExpiredLeases(ctx context.Context, before time.Time) (expire
 	return out, nil
 }
 
-func (s *Store) scanExpiredLeasesForNamespace(ctx context.Context, t namespace.Namespace, before time.Time, max string, scanCount int64, seenIndexes map[string]struct{}, out *[]engine.ExpiredLease) error {
+func (s *Store) scanExpiredLeasesForNamespace(ctx context.Context, t namespace.Namespace, before time.Time, max string, scanCount int64, budget int, seenIndexes map[string]struct{}, out *[]engine.ExpiredLease) error {
+	if budget <= 0 {
+		return nil
+	}
+	start := len(*out)
 	indexKeys, err := redisx.ScanAll(ctx, s.rdb, execScanPattern(t, "leases"), scanCount)
 	if err != nil {
 		return fmt.Errorf("scan lease indexes: %w", err)
 	}
 	for _, indexKey := range indexKeys {
+		if len(*out)-start >= budget {
+			break
+		}
 		if _, seen := seenIndexes[indexKey]; seen {
 			continue
 		}
@@ -191,7 +202,7 @@ func (s *Store) scanExpiredLeasesForNamespace(ctx context.Context, t namespace.N
 			continue
 		}
 
-		remaining := leaseIndexBatchLimit - len(*out)
+		remaining := budget - (len(*out) - start)
 		members, err := s.rdb.ZRangeArgs(ctx, redis.ZRangeArgs{
 			Key: indexKey, Start: "-inf", Stop: max, ByScore: true, Offset: 0, Count: int64(remaining),
 		}).Result()
@@ -219,7 +230,7 @@ func (s *Store) scanExpiredLeasesForNamespace(ctx context.Context, t namespace.N
 				if err := s.appendExpiredGroupLease(ctx, t, execID, unitIdx, indexKey, member, out); err != nil {
 					return err
 				}
-				if len(*out) == leaseIndexBatchLimit {
+				if len(*out)-start >= budget {
 					break
 				}
 				continue
@@ -300,11 +311,11 @@ func (s *Store) scanExpiredLeasesForNamespace(ctx context.Context, t namespace.N
 				lease.Payload = &payload
 			}
 			*out = append(*out, lease)
-			if len(*out) == leaseIndexBatchLimit {
+			if len(*out)-start >= budget {
 				break
 			}
 		}
-		if len(*out) == leaseIndexBatchLimit {
+		if len(*out)-start >= budget {
 			break
 		}
 	}
