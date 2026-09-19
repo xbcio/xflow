@@ -163,7 +163,20 @@ func selectRunnerDirectory(cfg Config, observer RunnerClaimObserver) RunnerDirec
 	}
 	if provider, ok := cfg.Backend.(redisClientProvider); ok {
 		if client := provider.RedisClient(); client != nil {
-			return NewRedisRunnerDirectory(client, WithRedisRunnerDirectoryObserver(observer))
+			opts := []RedisRunnerDirectoryOption{WithRedisRunnerDirectoryObserver(observer)}
+			// The queued-assignment reaper asks whether an assignment's
+			// execution can still be leased, and that answer belongs to the
+			// engine's state store rather than to the directory's key space.
+			// This is the only place that holds both halves, so the probe is
+			// injected here. A state store that does not expose the reader
+			// leaves the reaper a no-op rather than letting it guess from key
+			// names — a wrong "gone" answer removes real work.
+			if state := cfg.Backend.State(); state != nil {
+				if reader, ok := state.(engine.ExecutionStatusReader); ok {
+					opts = append(opts, WithRedisRunnerDirectoryExecutionStatus(reader))
+				}
+			}
+			return NewRedisRunnerDirectory(client, opts...)
 		}
 	}
 	return NewMemoryRunnerDirectory()

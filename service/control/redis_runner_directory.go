@@ -42,6 +42,7 @@ type redisRunnerDirectoryConfig struct {
 	drainDeadline             time.Duration
 	clock                     func() time.Time
 	observer                  RunnerClaimObserver
+	executions                engine.ExecutionStatusReader
 }
 
 // WithRedisRunnerDirectoryClaimTTL sets the maximum time a poll claim can
@@ -120,6 +121,22 @@ func WithRedisRunnerDirectoryObserver(observer RunnerClaimObserver) RedisRunnerD
 	}
 }
 
+// WithRedisRunnerDirectoryExecutionStatus installs the execution-liveness probe
+// the queued-assignment reaper asks whether an assignment can still be leased.
+// It is a StateStore capability rather than a key the directory knows, because
+// the execution's keys belong to the engine's namespace-scoped key space: a
+// directory reading that layout directly would silently stop matching the day
+// it changed, and "not found" is the answer that removes work. A directory built
+// without this option performs no queued reclamation at all; see
+// DeadQueuedAssignmentReaper.
+func WithRedisRunnerDirectoryExecutionStatus(reader engine.ExecutionStatusReader) RedisRunnerDirectoryOption {
+	return func(cfg *redisRunnerDirectoryConfig) {
+		if reader != nil {
+			cfg.executions = reader
+		}
+	}
+}
+
 // RedisRunnerDirectory persists runner registrations, pending assignments,
 // claims, and leased capacity in Redis. It has no process-local scheduling
 // state, so a replacement control-plane process can continue from the same
@@ -133,6 +150,7 @@ type RedisRunnerDirectory struct {
 	drainDeadline             time.Duration
 	clock                     func() time.Time
 	observer                  RunnerClaimObserver
+	executions                engine.ExecutionStatusReader
 	keys                      redisRunnerDirectoryKeys
 
 	// claimCursorMu guards claimCursors, the per-runner resume position into
@@ -141,6 +159,11 @@ type RedisRunnerDirectory struct {
 	// sweep from the head. See claimFromQueuePage.
 	claimCursorMu sync.Mutex
 	claimCursors  map[string]int
+
+	// queuedReap is the same kind of process-local state for the
+	// queued-assignment reaper's walk of assignment:state. See
+	// ReapDeadQueuedAssignments.
+	queuedReap queuedReapCursor
 }
 
 var _ RunnerDirectory = (*RedisRunnerDirectory)(nil)
@@ -175,6 +198,7 @@ func NewRedisRunnerDirectory(rdb redis.Cmdable, opts ...RedisRunnerDirectoryOpti
 		drainDeadline:             cfg.drainDeadline,
 		clock:                     cfg.clock,
 		observer:                  cfg.observer,
+		executions:                cfg.executions,
 		keys:                      newRedisRunnerDirectoryKeys(redisRunnerDirectoryKeyPrefix),
 		claimCursors:              make(map[string]int),
 	}
