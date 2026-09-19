@@ -7,9 +7,12 @@ This file provides guidance to AI coding agents working with code in this reposi
 ```bash
 go mod download          # Dependencies
 make build               # Build
-make test                # Test
-go fmt ./...             # Format
-golangci-lint run        # Lint
+make fmt                 # Format
+make lint                # Lint (adds --build-tags soak so test/soak/ is seen)
+
+# Verification — pick the smallest that covers your change (see below)
+make vet                 # Vet every build tag
+make test                # Full gate: race, uncached, all ordinary packages
 ```
 
 ### Test execution discipline
