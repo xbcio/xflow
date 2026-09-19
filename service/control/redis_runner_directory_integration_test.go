@@ -152,7 +152,7 @@ func newRealRedisRunnerDirectory(t *testing.T, rdb *redis.Client) *RedisRunnerDi
 		if err := rdb.Del(ctx, redisRunnerDirectoryAllKeys(directory.keys)...).Err(); err != nil {
 			t.Errorf("cleanup fixed Redis runner-directory keys: %v", err)
 		}
-		if err := cleanupRedisRunnerDirectoryAssignmentLeaseMeta(ctx, rdb, directory.keys); err != nil {
+		if err := cleanupRedisRunnerDirectoryDynamicKeys(ctx, rdb, directory.keys); err != nil {
 			t.Errorf("cleanup dynamic Redis runner-directory lease metadata: %v", err)
 		}
 		_ = rdb.Close()
@@ -162,7 +162,7 @@ func newRealRedisRunnerDirectory(t *testing.T, rdb *redis.Client) *RedisRunnerDi
 
 // redisRunnerDirectoryAllKeys lists the directory's fixed keys for real-Redis
 // test teardown. Assignment-scoped lease metadata is stored as separate
-// TTL-backed keys and is removed by cleanupRedisRunnerDirectoryAssignmentLeaseMeta.
+// TTL-backed keys and is removed by cleanupRedisRunnerDirectoryDynamicKeys.
 // The fixed keys are not uniformly TTL-bound, so a key missing from this list
 // can still remain in Redis after the test that made it has gone.
 // TestRedisRunnerDirectoryCleanupDeletesEveryKeyItCreates holds this list to
@@ -252,7 +252,7 @@ func redisRunnerDirectoryAllKeys(keys redisRunnerDirectoryKeys) []string {
 	}
 }
 
-func TestCleanupRedisRunnerDirectoryAssignmentLeaseMeta(t *testing.T) {
+func TestCleanupRedisRunnerDirectoryDynamicKeys(t *testing.T) {
 	ctx := context.Background()
 	_, rdb := newRedisRunnerDirectoryTestClient(t)
 	// The literal asterisk makes the SCAN pattern broader than the namespace;
@@ -272,8 +272,8 @@ func TestCleanupRedisRunnerDirectoryAssignmentLeaseMeta(t *testing.T) {
 		t.Fatalf("seed broad-pattern non-member %q: %v", outsidePrefix, err)
 	}
 
-	if err := cleanupRedisRunnerDirectoryAssignmentLeaseMeta(ctx, rdb, keys); err != nil {
-		t.Fatalf("cleanupRedisRunnerDirectoryAssignmentLeaseMeta() error = %v", err)
+	if err := cleanupRedisRunnerDirectoryDynamicKeys(ctx, rdb, keys); err != nil {
+		t.Fatalf("cleanupRedisRunnerDirectoryDynamicKeys() error = %v", err)
 	}
 	for _, key := range dynamic {
 		exists, err := rdb.Exists(ctx, key).Result()
@@ -293,18 +293,29 @@ func TestCleanupRedisRunnerDirectoryAssignmentLeaseMeta(t *testing.T) {
 	}
 }
 
-// cleanupRedisRunnerDirectoryAssignmentLeaseMeta removes the assignment-scoped
-// lease metadata keys that cannot appear in redisRunnerDirectoryAllKeys. SCAN
-// keeps cleanup incremental, and the literal-prefix check prevents a glob-like
-// prefix from broadening the deletion set.
-func cleanupRedisRunnerDirectoryAssignmentLeaseMeta(ctx context.Context, rdb *redis.Client, keys redisRunnerDirectoryKeys) error {
-	prefix := keys.prefix + ":assignment:lease-meta:"
+// cleanupRedisRunnerDirectoryDynamicKeys removes the directory keys whose names
+// embed an assignment or runner ID and so cannot appear in
+// redisRunnerDirectoryAllKeys. SCAN keeps cleanup incremental, and the literal
+// prefix check prevents a glob-like prefix from broadening the deletion set.
+func cleanupRedisRunnerDirectoryDynamicKeys(ctx context.Context, rdb *redis.Client, keys redisRunnerDirectoryKeys) error {
+	for _, prefix := range []string{
+		keys.prefix + ":assignment:lease-meta:",
+		keys.prefix + ":runner:leased-assignments:",
+	} {
+		if err := deleteRedisKeysWithPrefix(ctx, rdb, prefix); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func deleteRedisKeysWithPrefix(ctx context.Context, rdb *redis.Client, prefix string) error {
 	pattern := prefix + "*"
 	var cursor uint64
 	for {
 		found, next, err := rdb.Scan(ctx, cursor, pattern, 100).Result()
 		if err != nil {
-			return fmt.Errorf("scan assignment lease metadata keys: %w", err)
+			return fmt.Errorf("scan dynamic keys under %q: %w", prefix, err)
 		}
 		deleteKeys := make([]string, 0, len(found))
 		for _, key := range found {
@@ -314,7 +325,7 @@ func cleanupRedisRunnerDirectoryAssignmentLeaseMeta(ctx context.Context, rdb *re
 		}
 		if len(deleteKeys) > 0 {
 			if err := rdb.Del(ctx, deleteKeys...).Err(); err != nil {
-				return fmt.Errorf("delete assignment lease metadata keys: %w", err)
+				return fmt.Errorf("delete dynamic keys under %q: %w", prefix, err)
 			}
 		}
 		cursor = next

@@ -199,6 +199,16 @@ func (keys redisRunnerDirectoryKeys) assignmentLeaseMetaKey(assignmentID string)
 	return keys.prefix + ":assignment:lease-meta:" + assignmentID
 }
 
+// runnerLeasedAssignmentsKey returns the per-runner set of assignment IDs that
+// runner currently holds in 'leased' state. It is the index that keeps a poll's
+// lease replay proportional to the runner's own leases instead of to every
+// assignment in the directory. Like assignmentLeaseMetaKey it is derived from
+// the prefix, so it carries the same Cluster hash tag as the Lua transitions
+// that write it.
+func (keys redisRunnerDirectoryKeys) runnerLeasedAssignmentsKey(runnerID string) string {
+	return keys.prefix + ":runner:leased-assignments:" + runnerID
+}
+
 // redisActivationInventoryItem intentionally encodes generation as a string:
 // JSON/Lua number conversion would otherwise lose exact uint64 fencing values
 // above 2^53 while a reconnect decides whether it may inherit cleanup work.

@@ -837,9 +837,159 @@ func (d *RedisRunnerDirectory) replayLease(ctx context.Context, runnerID, sessio
 			active[id] = struct{}{}
 		}
 	}
+	// Pass 0 reads the per-runner index; pass 1, reached only when the index is
+	// known to be short, reads the whole assignment-state hash. A pass that
+	// replays a lease returns, so a shortfall is noticed by the poll that finds
+	// nothing left to replay rather than by every poll.
+	visited := make(map[string]struct{})
+	for pass := 0; ; pass++ {
+		assignmentIDs, err := d.leasedAssignmentCandidates(ctx, runnerID, pass > 0)
+		if err != nil {
+			return Claim{}, false, err
+		}
+		sort.Strings(assignmentIDs)
+		live := 0
+		for _, assignmentID := range assignmentIDs {
+			if _, done := visited[assignmentID]; done {
+				continue
+			}
+			visited[assignmentID] = struct{}{}
+			// The candidates are a superset of this runner's leases — the index
+			// can hold an entry whose lease has since been released, and the
+			// fallback pass holds every leased assignment in the directory — so
+			// each one is re-checked here rather than trusted.
+			state, err := d.rdb.HGet(ctx, d.keys.assignmentState, assignmentID).Result()
+			if err != nil && !errors.Is(err, redis.Nil) {
+				return Claim{}, false, fmt.Errorf("read lease state %q: %w", assignmentID, err)
+			}
+			if state != redisAssignmentLeased {
+				d.pruneLeasedAssignmentIndex(ctx, runnerID, assignmentID)
+				continue
+			}
+			owner, err := d.rdb.HGet(ctx, d.keys.assignmentRunner, assignmentID).Result()
+			if err != nil && !errors.Is(err, redis.Nil) {
+				return Claim{}, false, fmt.Errorf("read lease owner %q: %w", assignmentID, err)
+			}
+			if owner != runnerID {
+				d.pruneLeasedAssignmentIndex(ctx, runnerID, assignmentID)
+				continue
+			}
+			live++
+			if pass > 0 {
+				// This candidate came from the full scan, so the index did not know
+				// about it. Recording a lease that was just confirmed live and owned
+				// is the safe direction for the index to be wrong in: a later poll
+				// re-checks it, and an extra entry costs one bounded read where a
+				// missing one would cost the lease its replay.
+				d.indexLeasedAssignment(ctx, runnerID, assignmentID)
+			}
+			session, err := d.rdb.HGet(ctx, d.keys.assignmentSession, assignmentID).Result()
+			if err != nil && !errors.Is(err, redis.Nil) {
+				return Claim{}, false, fmt.Errorf("read lease session %q: %w", assignmentID, err)
+			}
+			if session != sessionID {
+				// Still leased and still this runner's, just not this session's. The
+				// index entry is accurate, so it is left in place for the session
+				// that does own it.
+				continue
+			}
+			rawAssignment, err := d.rdb.HGet(ctx, d.keys.assignmentData, assignmentID).Result()
+			if errors.Is(err, redis.Nil) {
+				// Released between the reads above — by the sweeper reclaiming a
+				// dead runner's lease, or by a report committing. The assignment is
+				// simply not this runner's to replay. Reporting it as an error would
+				// be fatal out of proportion: Runner.pollLoop returns on a poll
+				// error, so the runner stops claiming work altogether and a queue
+				// with waiting tasks goes unserved.
+				d.pruneLeasedAssignmentIndex(ctx, runnerID, assignmentID)
+				continue
+			}
+			if err != nil {
+				return Claim{}, false, fmt.Errorf("read leased assignment %q: %w", assignmentID, err)
+			}
+			assignment, err := unmarshalRedisAssignment(rawAssignment)
+			if err != nil {
+				return Claim{}, false, err
+			}
+			rawLease, err := d.rdb.Get(ctx, d.keys.assignmentLeaseMetaKey(assignmentID)).Result()
+			if errors.Is(err, redis.Nil) {
+				// The metadata is armed for the lease window plus one recovery margin
+				// and is now extended on every renewal, so its absence here means the
+				// lease has expired out of the directory: LookupLease can no longer
+				// find it, no renew and no report will ever succeed, and the
+				// assignment would hold this runner's capacity for the life of the
+				// process. Neither reclaim path sees that shape — the claim reclaimer
+				// only scans 'claimed', and the lease sweeper enumerates the
+				// execution's own lease index, which shares the metadata's transient
+				// TTL. Release the record here, token-fenced on the identity it still
+				// carries, and keep scanning.
+				//
+				// This is safe against a lost execution rather than a lost lease: an
+				// engine that still holds the lease reclaims it and re-enqueues the
+				// task through its outbox, and an execution that is gone has nothing
+				// left to re-enqueue.
+				d.releaseStrandedLease(ctx, assignmentID)
+				d.pruneLeasedAssignmentIndex(ctx, runnerID, assignmentID)
+				continue
+			}
+			if err != nil {
+				return Claim{}, false, fmt.Errorf("read persisted lease %q: %w", assignmentID, err)
+			}
+			lease, err := unmarshalRedisLeaseMeta(rawLease, assignment.Task)
+			if err != nil {
+				return Claim{}, false, fmt.Errorf("decode persisted lease %q: %w", assignmentID, err)
+			}
+			if _, executing := active[string(lease.LeaseID)]; executing {
+				// The runner is running this one. Handing it back would start a
+				// second execution of a node the first worker has not finished.
+				continue
+			}
+			d.observeLeaseReplay(ctx)
+			return Claim{Assignment: assignment, Lease: lease}, true, nil
+		}
+		if pass > 0 {
+			return Claim{}, false, nil
+		}
+		// The poll is about to report no work, and that answer is only as good as
+		// the index behind it: entries that no longer name a live lease were
+		// pruned above, so the entries counted live here are exactly the leases
+		// this runner's index can account for. Comparing them against the count
+		// every version maintains exposes the one way the index can be short —
+		// leases finalized by a control plane that predates it — and reading the
+		// whole hash once rebuilds it.
+		count, err := d.rdb.HGet(ctx, d.keys.runnerLeaseCount, runnerID).Int()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			return Claim{}, false, fmt.Errorf("read runner lease count %q: %w", runnerID, err)
+		}
+		if live >= count {
+			return Claim{}, false, nil
+		}
+	}
+}
+
+// leasedAssignmentCandidates returns the assignment IDs that may be leased by
+// runnerID. scan selects the full assignment-state hash over the per-runner
+// index.
+//
+// The index is what keeps a poll proportional to the runner's own leases rather
+// than to every assignment in the directory. It is not trusted on its own: the
+// caller counts the candidates it turns out to hold live leases for and compares
+// that against runnerLeaseCount, which every version maintains. FinalizeClaim is
+// the sole transition into 'leased' and writes the index in the same step, so an
+// index that names fewer live leases than the count cannot be complete — the
+// entries it is missing were finalized by a control plane that predates the
+// index — and the full hash is read once to rebuild it.
+func (d *RedisRunnerDirectory) leasedAssignmentCandidates(ctx context.Context, runnerID string, scan bool) ([]string, error) {
+	if !scan {
+		indexed, err := d.rdb.SMembers(ctx, d.keys.runnerLeasedAssignmentsKey(runnerID)).Result()
+		if err != nil {
+			return nil, fmt.Errorf("read runner leased assignment index: %w", err)
+		}
+		return indexed, nil
+	}
 	states, err := d.rdb.HGetAll(ctx, d.keys.assignmentState).Result()
 	if err != nil {
-		return Claim{}, false, fmt.Errorf("read leased assignment states: %w", err)
+		return nil, fmt.Errorf("read leased assignment states: %w", err)
 	}
 	assignmentIDs := make([]string, 0, len(states))
 	for assignmentID, state := range states {
@@ -847,63 +997,49 @@ func (d *RedisRunnerDirectory) replayLease(ctx context.Context, runnerID, sessio
 			assignmentIDs = append(assignmentIDs, assignmentID)
 		}
 	}
-	sort.Strings(assignmentIDs)
-	for _, assignmentID := range assignmentIDs {
-		owner, err := d.rdb.HGet(ctx, d.keys.assignmentRunner, assignmentID).Result()
-		if errors.Is(err, redis.Nil) || owner != runnerID {
-			continue
-		}
-		if err != nil {
-			return Claim{}, false, fmt.Errorf("read lease owner %q: %w", assignmentID, err)
-		}
-		session, err := d.rdb.HGet(ctx, d.keys.assignmentSession, assignmentID).Result()
-		if errors.Is(err, redis.Nil) || session != sessionID {
-			continue
-		}
-		if err != nil {
-			return Claim{}, false, fmt.Errorf("read lease session %q: %w", assignmentID, err)
-		}
-		rawAssignment, err := d.rdb.HGet(ctx, d.keys.assignmentData, assignmentID).Result()
-		if errors.Is(err, redis.Nil) {
-			// Released between the HGETALL above and this read — by the sweeper
-			// reclaiming a dead runner's lease, or by a report committing. The
-			// assignment is simply not this runner's to replay. Reporting it as
-			// an error would be fatal out of proportion: Runner.pollLoop returns
-			// on a poll error, so the runner stops claiming work altogether and
-			// a queue with waiting tasks goes unserved.
-			continue
-		}
-		if err != nil {
-			return Claim{}, false, fmt.Errorf("read leased assignment %q: %w", assignmentID, err)
-		}
-		assignment, err := unmarshalRedisAssignment(rawAssignment)
-		if err != nil {
-			return Claim{}, false, err
-		}
-		rawLease, err := d.rdb.Get(ctx, d.keys.assignmentLeaseMetaKey(assignmentID)).Result()
-		if errors.Is(err, redis.Nil) {
-			// Same race, one field later: the release deleted the lease metadata
-			// while the payload was still readable.
-			continue
-		}
-		if err != nil {
-			return Claim{}, false, fmt.Errorf("read persisted lease %q: %w", assignmentID, err)
-		}
-		lease, err := unmarshalRedisLeaseMeta(rawLease, assignment.Task)
-		if err != nil {
-			return Claim{}, false, fmt.Errorf("decode persisted lease %q: %w", assignmentID, err)
-		}
-		if _, executing := active[string(lease.LeaseID)]; executing {
-			// The runner is running this one. Handing it back would start a
-			// second execution of a node the first worker has not finished.
-			continue
-		}
-		d.observeLeaseReplay(ctx)
-		return Claim{Assignment: assignment, Lease: lease}, true, nil
-	}
-	return Claim{}, false, nil
+	return assignmentIDs, nil
 }
 
+// pruneLeasedAssignmentIndex drops an index entry that no longer names a live
+// lease for its runner. It is best effort on purpose: a stale entry costs one
+// bounded read on the next poll, and a poll that failed over index hygiene would
+// stop the runner from claiming work altogether.
+func (d *RedisRunnerDirectory) pruneLeasedAssignmentIndex(ctx context.Context, runnerID, assignmentID string) {
+	_, _ = d.rdb.SRem(ctx, d.keys.runnerLeasedAssignmentsKey(runnerID), assignmentID).Result()
+}
+
+// indexLeasedAssignment records a lease the full scan confirmed, so the poll
+// after this one can use the bounded index path again. Like the prune, it is
+// best effort: the next poll that finds the index short simply scans again.
+func (d *RedisRunnerDirectory) indexLeasedAssignment(ctx context.Context, runnerID, assignmentID string) {
+	_, _ = d.rdb.SAdd(ctx, d.keys.runnerLeasedAssignmentsKey(runnerID), assignmentID).Result()
+}
+
+// releaseStrandedLease clears a directory record whose lease metadata is gone.
+//
+// The release is token-fenced on the lease identity the assignment still
+// carries, so a newer lease generation is never disturbed, and it is
+// idempotent: a release that raced this one turns the Lua's state check into a
+// no-op. Failures are left to the next poll — the condition is durable, and
+// returning an error would be fatal out of proportion, since Runner.pollLoop
+// stops claiming work altogether on a poll error.
+func (d *RedisRunnerDirectory) releaseStrandedLease(ctx context.Context, assignmentID string) {
+	leaseID, err := d.rdb.HGet(ctx, d.keys.assignmentLeaseID, assignmentID).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return
+	}
+	leaseToken, err := d.rdb.HGet(ctx, d.keys.assignmentLeaseToken, assignmentID).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return
+	}
+	_, _ = d.ReleaseExpiredLease(ctx, ExpiredDirectoryLeaseRequest{
+		AssignmentID: AssignmentID(assignmentID),
+		LeaseID:      engine.LeaseID(leaseID),
+		LeaseToken:   engine.LeaseToken(leaseToken),
+	})
+}
+
+// claim materializes one queued assignment into a claim owned by this runner.
 func (d *RedisRunnerDirectory) claim(ctx context.Context, runnerID, sessionID, assignmentID, expectedData string, claimID ClaimID) (string, error) {
 	status, err := d.evalStatus(ctx, redisClaimAssignmentLua, []string{
 		d.keys.queue,
@@ -953,6 +1089,18 @@ func (d *RedisRunnerDirectory) FinalizeClaim(ctx context.Context, claimID ClaimI
 	if !ok {
 		return errClaimNotActive
 	}
+	// The per-runner lease index key has to be named in KEYS for Redis Cluster,
+	// which means resolving the claim's runner here rather than inside the
+	// script. The script re-checks the ID it resolved against this one, so a
+	// claim that changed hands in between is refused instead of indexed under
+	// the wrong runner.
+	runnerID, ok, err := d.claimRunnerID(ctx, claimID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errClaimNotActive
+	}
 	meta, err := marshalRedisLeaseMeta(lease)
 	if err != nil {
 		return err
@@ -990,8 +1138,9 @@ func (d *RedisRunnerDirectory) FinalizeClaim(ctx context.Context, claimID ClaimI
 		d.keys.handoffLeaseToken,
 		d.keys.handoffRecoveryReady,
 		d.keys.handoffRecoveryDeadline,
+		d.keys.runnerLeasedAssignmentsKey(runnerID),
 	}, string(claimID), leaseID, leaseToken, meta, assignmentID,
-		strconv.FormatInt(d.assignmentLeaseMetaTTLMillis(lease), 10))
+		strconv.FormatInt(d.assignmentLeaseMetaTTLMillis(lease), 10), runnerID)
 	if err != nil {
 		return fmt.Errorf("finalize redis claim: %w", err)
 	}
@@ -1250,6 +1399,23 @@ func (d *RedisRunnerDirectory) claimAssignmentID(ctx context.Context, claimID Cl
 		return "", false, fmt.Errorf("resolve claim assignment %q: %w", claimID, err)
 	}
 	return assignmentID, true, nil
+}
+
+// claimRunnerID resolves the runner a claim belongs to. FinalizeClaim needs it
+// to name the per-runner lease index key, which Redis Cluster requires to be
+// known before the script runs.
+func (d *RedisRunnerDirectory) claimRunnerID(ctx context.Context, claimID ClaimID) (string, bool, error) {
+	runnerID, err := d.rdb.HGet(ctx, d.keys.claimsRunner, string(claimID)).Result()
+	if errors.Is(err, redis.Nil) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("resolve claim runner %q: %w", claimID, err)
+	}
+	if runnerID == "" {
+		return "", false, nil
+	}
+	return runnerID, true, nil
 }
 
 // ReleaseExpiredLease removes a finalized lease from the directory only when
@@ -2054,6 +2220,13 @@ local runnerID = redis.call('HGET', KEYS[9], claimID)
 local sessionID = redis.call('HGET', KEYS[10], claimID)
 if not assignmentID or not runnerID then return 'noop' end
 if assignmentID ~= ARGV[5] then return 'noop' end
+-- KEYS[27] is the per-runner leased-assignment index, and its key literal is
+-- derived from the runner's ID by the caller. That derivation is the one part
+-- of this transition that is not read inside the script, so it is re-checked
+-- here: a claim rebound to another runner between the caller's read and this
+-- call would otherwise add the assignment to a set the owner never reads,
+-- leaving the owner's own replay blind to its own lease.
+if runnerID ~= ARGV[7] then return 'stale' end
 if redis.call('HGET', KEYS[16], runnerID) ~= sessionID then return 'stale' end
 if redis.call('HGET', KEYS[1], assignmentID) ~= 'claimed' or redis.call('HGET', KEYS[2], assignmentID) ~= claimID then return 'noop' end
 redis.call('HDEL', KEYS[8], claimID)
@@ -2064,6 +2237,10 @@ local claims = tonumber(redis.call('HGET', KEYS[11], runnerID) or '0')
 if claims > 0 then redis.call('HINCRBY', KEYS[11], runnerID, -1) end
 redis.call('HINCRBY', KEYS[12], runnerID, 1)
 redis.call('HSET', KEYS[1], assignmentID, 'leased')
+-- The index is written in the same step that makes the assignment leased, not
+-- by a follow-up call: a lost write would leave a live lease unindexed, and an
+-- unindexed lease is one this runner never replays after a reconnect.
+redis.call('SADD', KEYS[27], assignmentID)
 redis.call('HDEL', KEYS[2], assignmentID)
 redis.call('HSET', KEYS[5], assignmentID, ARGV[2])
 redis.call('HSET', KEYS[6], assignmentID, ARGV[3])

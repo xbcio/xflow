@@ -110,6 +110,58 @@ func TestRedisRunnerDirectoryRefreshLeaseMetaOnExpiredMetadataIsNotAnError(t *te
 	}
 }
 
+// TestRedisRunnerDirectoryClaimForRunnerReleasesStrandedLease pins the recovery
+// half: once the metadata has expired the lease can be neither renewed nor
+// reported, and none of the reclaim paths can see it, so the poll that notices
+// it has to give the capacity back. Without this the runner's capacity stays
+// consumed for the life of the process and its sink goes to zero throughput.
+func TestRedisRunnerDirectoryClaimForRunnerReleasesStrandedLease(t *testing.T) {
+	const claimTTL = 2 * time.Second
+	ctx, server, directory, session := newRedisRunnerDirectoryLeaseMetaTestDirectory(t, claimTTL, 1)
+	assignment := redisDirectoryTestAssignment("exec-lease-refresh/stranded/activation-1")
+	lease := redisRunnerDirectoryLeaseMetaTestLease(assignment, "lease-stranded", 3*time.Second)
+	finalizeRedisRunnerDirectoryLeaseMetaTestAssignment(t, ctx, directory, session, assignment, lease)
+
+	key := directory.keys.assignmentLeaseMetaKey(string(assignment.AssignmentID))
+	server.FastForward(lease.TTL + claimTTL)
+	if server.Exists(key) {
+		t.Fatalf("metadata key %q survived its TTL", key)
+	}
+	if got := server.HGet(directory.keys.runnerLeaseCount, session.RunnerID); got != "1" {
+		t.Fatalf("runner lease count before the poll = %q, want 1", got)
+	}
+
+	claim, ok, err := directory.ClaimForRunner(ctx, redisDirectoryClaimRequest(session, 1))
+	if err != nil {
+		t.Fatalf("ClaimForRunner() error = %v", err)
+	}
+	if ok {
+		t.Fatalf("ClaimForRunner() replayed %+v, want no replay from an expired lease", claim)
+	}
+
+	if got := server.HGet(directory.keys.runnerLeaseCount, session.RunnerID); got != "0" {
+		t.Fatalf("runner lease count after the poll = %q, want 0 -- a stranded lease must "+
+			"return its capacity, or the runner never claims again", got)
+	}
+	if got := server.HGet(directory.keys.assignmentState, string(assignment.AssignmentID)); got != "" {
+		t.Fatalf("assignment state after the poll = %q, want cleared", got)
+	}
+	if got := server.HGet(directory.keys.assignmentRunner, string(assignment.AssignmentID)); got != "" {
+		t.Fatalf("assignment owner after the poll = %q, want cleared", got)
+	}
+	member := false
+	if server.Exists(directory.keys.seen) {
+		var err error
+		member, err = server.SIsMember(directory.keys.seen, string(assignment.AssignmentID))
+		if err != nil {
+			t.Fatalf("read seen set: %v", err)
+		}
+	}
+	if member {
+		t.Fatal("assignment is still marked seen; a released task would be rejected as a duplicate")
+	}
+}
+
 // refreshRecordingDirectory records the lease-metadata refreshes the renewal
 // path issues. It embeds the concrete directory rather than the RunnerDirectory
 // interface so that the optional capabilities renewLease asserts for
