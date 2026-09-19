@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -133,6 +134,13 @@ type RedisRunnerDirectory struct {
 	clock                     func() time.Time
 	observer                  RunnerClaimObserver
 	keys                      redisRunnerDirectoryKeys
+
+	// claimCursorMu guards claimCursors, the per-runner resume position into
+	// the shared assignment queue. It is process-local scheduling state, not
+	// authority: losing it (restart, eviction) only means a runner restarts its
+	// sweep from the head. See claimFromQueuePage.
+	claimCursorMu sync.Mutex
+	claimCursors  map[string]int
 }
 
 var _ RunnerDirectory = (*RedisRunnerDirectory)(nil)
@@ -168,6 +176,7 @@ func NewRedisRunnerDirectory(rdb redis.Cmdable, opts ...RedisRunnerDirectoryOpti
 		clock:                     cfg.clock,
 		observer:                  cfg.observer,
 		keys:                      newRedisRunnerDirectoryKeys(redisRunnerDirectoryKeyPrefix),
+		claimCursors:              make(map[string]int),
 	}
 }
 
@@ -417,6 +426,9 @@ func (d *RedisRunnerDirectory) ClaimForRunner(ctx context.Context, req ClaimRequ
 		return Claim{}, false, err
 	}
 	if !found {
+		// The runner is gone, so its resume position is stale state that would
+		// otherwise linger in the process-local cursor map.
+		d.storeClaimCursor(req.RunnerID, 0)
 		return Claim{}, false, ErrRunnerNotFound
 	}
 	if req.SessionID == "" || runner.sessionID != req.SessionID {
@@ -446,48 +458,17 @@ func (d *RedisRunnerDirectory) ClaimForRunner(ctx context.Context, req ClaimRequ
 	capabilities := runner.capabilities
 	labels := runner.labels
 
-	assignmentIDs, err := d.rdb.LRange(ctx, d.keys.queue, 0, -1).Result()
-	if err != nil {
-		return Claim{}, false, fmt.Errorf("read redis assignment queue: %w", err)
-	}
-	for _, assignmentID := range assignmentIDs {
-		raw, err := d.rdb.HGet(ctx, d.keys.assignmentData, assignmentID).Result()
-		if errors.Is(err, redis.Nil) {
-			continue
-		}
-		if err != nil {
-			return Claim{}, false, fmt.Errorf("read redis assignment %q: %w", assignmentID, err)
-		}
-		assignment, err := unmarshalRedisAssignment(raw)
+	// A runner with no headroom cannot claim anything, so skip the queue scan
+	// entirely: reading it for a full runner was O(queue) work per poll that
+	// always ended in the same 'none'. The claim transition below re-checks
+	// headroom atomically, so this precheck only removes the read.
+	if runner.hasHeadroom {
+		claim, ok, resolved, err := d.claimFromQueuePage(ctx, req, runner, capabilities, labels)
 		if err != nil {
 			return Claim{}, false, err
 		}
-		if !MatchCapabilities(capabilities, assignment.Routing) || !runner.policy.Allows(assignment.Routing.NodeType) {
-			continue
-		}
-		if !canServeNamespace(runner.namespaces, assignment.Namespace) {
-			continue
-		}
-		if rs := assignment.Routing.RunnerSelector; rs != nil && !MatchLabels(labels, rs.MatchLabels) {
-			continue
-		}
-
-		claimID := ClaimID(uuid.NewString())
-		status, err := d.claim(ctx, req.RunnerID, req.SessionID, assignmentID, raw, claimID)
-		if err != nil {
-			return Claim{}, false, err
-		}
-		switch status {
-		case "claimed":
-			return Claim{ClaimID: claimID, Assignment: assignment}, true, nil
-		case "retry":
-			continue
-		case "none", "draining":
-			return Claim{}, false, nil
-		case "not_found", "stale":
-			return Claim{}, false, runnerSessionStatusError(status)
-		default:
-			return Claim{}, false, fmt.Errorf("claim redis assignment: unexpected result %q", status)
+		if resolved {
+			return claim, ok, nil
 		}
 	}
 
@@ -503,6 +484,126 @@ func (d *RedisRunnerDirectory) ClaimForRunner(ctx context.Context, req ClaimRequ
 	default:
 		return Claim{}, false, fmt.Errorf("claim redis assignment: unexpected result %q", status)
 	}
+}
+
+// redisClaimQueuePage bounds how much of the shared assignment queue one poll
+// examines. The queue is shared across every runner, namespace and workflow, so
+// a whole-list read made each poll O(queue) and the fleet O(runners x queue).
+const redisClaimQueuePage = 64
+
+// claimFromQueuePage reads one bounded page of the assignment queue starting at
+// this runner's persisted cursor and attempts to claim the first candidate it is
+// eligible for. It reports resolved=true when it reached a definite answer
+// (a claim, or "none"/"draining"); resolved=false means the page held nothing
+// this runner could claim and the caller should still run the empty transition
+// so draining and session fencing keep their meaning.
+//
+// The cursor is deliberately anchored rather than free-running. LREM (in the
+// claim and requeue transitions) deletes by value, so a removal ahead of a
+// positional cursor shifts the tail left and would skip an element. Resetting
+// the cursor to the head on a claim, on a short (end-of-queue) page, and once it
+// has walked past the length sampled at entry guarantees a skipped position is
+// revisited on the next sweep instead of being stranded. If a skipped element is
+// still 'queued' when the sweep wraps, it is re-examined then.
+func (d *RedisRunnerDirectory) claimFromQueuePage(
+	ctx context.Context,
+	req ClaimRequest,
+	runner redisClaimRunner,
+	capabilities []protocol.Capability,
+	labels map[string]string,
+) (Claim, bool, bool, error) {
+	total, err := d.rdb.LLen(ctx, d.keys.queue).Result()
+	if err != nil {
+		return Claim{}, false, false, fmt.Errorf("read redis assignment queue length: %w", err)
+	}
+	cursor := d.loadClaimCursor(req.RunnerID)
+	if total == 0 || cursor < 0 || cursor >= int(total) {
+		cursor = 0
+	}
+	assignmentIDs, err := d.rdb.LRange(ctx, d.keys.queue, int64(cursor), int64(cursor+redisClaimQueuePage-1)).Result()
+	if err != nil {
+		return Claim{}, false, false, fmt.Errorf("read redis assignment queue: %w", err)
+	}
+	if len(assignmentIDs) == 0 {
+		d.storeClaimCursor(req.RunnerID, 0)
+		return Claim{}, false, false, nil
+	}
+
+	raws, err := d.rdb.HMGet(ctx, d.keys.assignmentData, assignmentIDs...).Result()
+	if err != nil {
+		return Claim{}, false, false, fmt.Errorf("read redis assignments: %w", err)
+	}
+
+	for i, assignmentID := range assignmentIDs {
+		raw, _ := raws[i].(string)
+		if raw == "" {
+			// The payload expired between LRange and HMGet, or was never written;
+			// either way there is nothing claimable here.
+			continue
+		}
+		assignment, err := unmarshalRedisAssignment(raw)
+		if err != nil {
+			return Claim{}, false, false, err
+		}
+		if !MatchCapabilities(capabilities, assignment.Routing) || !runner.policy.Allows(assignment.Routing.NodeType) {
+			continue
+		}
+		if !canServeNamespace(runner.namespaces, assignment.Namespace) {
+			continue
+		}
+		if rs := assignment.Routing.RunnerSelector; rs != nil && !MatchLabels(labels, rs.MatchLabels) {
+			continue
+		}
+
+		claimID := ClaimID(uuid.NewString())
+		status, err := d.claim(ctx, req.RunnerID, req.SessionID, assignmentID, raw, claimID)
+		if err != nil {
+			return Claim{}, false, false, err
+		}
+		switch status {
+		case "claimed":
+			d.storeClaimCursor(req.RunnerID, 0)
+			return Claim{ClaimID: claimID, Assignment: assignment}, true, true, nil
+		case "retry":
+			continue
+		case "none", "draining":
+			d.storeClaimCursor(req.RunnerID, 0)
+			return Claim{}, false, true, nil
+		case "not_found", "stale":
+			return Claim{}, false, false, runnerSessionStatusError(status)
+		default:
+			return Claim{}, false, false, fmt.Errorf("claim redis assignment: unexpected result %q", status)
+		}
+	}
+
+	// Nothing on this page was claimable. Wrap to the head at end-of-queue or
+	// once the cursor has passed the length sampled at entry; otherwise resume
+	// from the next page on the following poll.
+	next := cursor + len(assignmentIDs)
+	if len(assignmentIDs) < redisClaimQueuePage || next >= int(total) {
+		next = 0
+	}
+	d.storeClaimCursor(req.RunnerID, next)
+	return Claim{}, false, false, nil
+}
+
+func (d *RedisRunnerDirectory) loadClaimCursor(runnerID string) int {
+	d.claimCursorMu.Lock()
+	defer d.claimCursorMu.Unlock()
+	return d.claimCursors[runnerID]
+}
+
+func (d *RedisRunnerDirectory) storeClaimCursor(runnerID string, cursor int) {
+	d.claimCursorMu.Lock()
+	defer d.claimCursorMu.Unlock()
+	if cursor <= 0 {
+		delete(d.claimCursors, runnerID)
+		return
+	}
+	if d.claimCursors == nil {
+		d.claimCursors = make(map[string]int)
+	}
+	d.claimCursors[runnerID] = cursor
 }
 
 // MarkClaimLeaseMayExist writes the durable pre-Build*Lease crash fence. The
@@ -1445,30 +1546,44 @@ type redisClaimRunner struct {
 	policy       RunnerPolicy
 	namespaces   []namespace.Namespace
 	labels       map[string]string
+	// hasHeadroom is capacity-claims-leases read in the same pipeline as the
+	// registration fields. It is a precheck only: the claim Lua re-evaluates it
+	// atomically, so a stale true costs one refused claim, never an over-claim.
+	hasHeadroom bool
 }
 
 func (d *RedisRunnerDirectory) runnerForClaim(ctx context.Context, runnerID string) (redisClaimRunner, bool, error) {
-	sessionID, err := d.rdb.HGet(ctx, d.keys.runnerSession, runnerID).Result()
-	if errors.Is(err, redis.Nil) {
+	// One pipelined round-trip replaces the previous five serial HGet calls, and
+	// folds in the capacity/claims/leases headroom so a poll for a full runner
+	// can skip the assignment-queue read entirely.
+	pipe := d.rdb.Pipeline()
+	sessionCmd := pipe.HGet(ctx, d.keys.runnerSession, runnerID)
+	capabilitiesCmd := pipe.HGet(ctx, d.keys.runnerCapabilities, runnerID)
+	policyCmd := pipe.HGet(ctx, d.keys.runnerPolicy, runnerID)
+	namespacesCmd := pipe.HGet(ctx, d.keys.runnerNamespaces, runnerID)
+	labelsCmd := pipe.HGet(ctx, d.keys.runnerLabels, runnerID)
+	capacityCmd := pipe.HGet(ctx, d.keys.runnerCapacity, runnerID)
+	claimCountCmd := pipe.HGet(ctx, d.keys.runnerClaimCount, runnerID)
+	leaseCountCmd := pipe.HGet(ctx, d.keys.runnerLeaseCount, runnerID)
+	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+		return redisClaimRunner{}, false, fmt.Errorf("read runner claim registration: %w", err)
+	}
+
+	sessionID := sessionCmd.Val()
+	if sessionID == "" {
 		return redisClaimRunner{}, false, nil
 	}
-	if err != nil {
-		return redisClaimRunner{}, false, fmt.Errorf("read runner session: %w", err)
+	capabilitiesRaw := capabilitiesCmd.Val()
+	if capabilitiesRaw == "" {
+		return redisClaimRunner{}, false, fmt.Errorf("read runner capabilities: %w", redis.Nil)
 	}
-	capabilitiesRaw, err := d.rdb.HGet(ctx, d.keys.runnerCapabilities, runnerID).Result()
-	if err != nil {
-		return redisClaimRunner{}, false, fmt.Errorf("read runner capabilities: %w", err)
+	policyRaw := policyCmd.Val()
+	if policyRaw == "" {
+		return redisClaimRunner{}, false, fmt.Errorf("read runner policy: %w", redis.Nil)
 	}
-	policyRaw, err := d.rdb.HGet(ctx, d.keys.runnerPolicy, runnerID).Result()
-	if err != nil {
-		return redisClaimRunner{}, false, fmt.Errorf("read runner policy: %w", err)
-	}
-	namespacesRaw, err := d.rdb.HGet(ctx, d.keys.runnerNamespaces, runnerID).Result()
-	if errors.Is(err, redis.Nil) {
-		namespacesRaw = ""
-	} else if err != nil {
-		return redisClaimRunner{}, false, fmt.Errorf("read runner namespaces: %w", err)
-	}
+	namespacesRaw := namespacesCmd.Val()
+	labelsRaw := labelsCmd.Val()
+
 	var capabilities []protocol.Capability
 	if err := json.Unmarshal([]byte(capabilitiesRaw), &capabilities); err != nil {
 		return redisClaimRunner{}, false, fmt.Errorf("decode runner capabilities: %w", err)
@@ -1483,19 +1598,32 @@ func (d *RedisRunnerDirectory) runnerForClaim(ctx context.Context, runnerID stri
 			return redisClaimRunner{}, false, fmt.Errorf("decode runner namespaces: %w", err)
 		}
 	}
-	labelsRaw, err := d.rdb.HGet(ctx, d.keys.runnerLabels, runnerID).Result()
-	if errors.Is(err, redis.Nil) {
-		labelsRaw = ""
-	} else if err != nil {
-		return redisClaimRunner{}, false, fmt.Errorf("read runner labels: %w", err)
-	}
 	var labels map[string]string
 	if labelsRaw != "" {
 		if err := json.Unmarshal([]byte(labelsRaw), &labels); err != nil {
 			return redisClaimRunner{}, false, fmt.Errorf("decode runner labels: %w", err)
 		}
 	}
-	return redisClaimRunner{sessionID: sessionID, capabilities: capabilities, policy: policy, namespaces: namespaces, labels: labels}, true, nil
+	headroom := atoiDefault(capacityCmd.Val()) - atoiDefault(claimCountCmd.Val()) - atoiDefault(leaseCountCmd.Val())
+	return redisClaimRunner{
+		sessionID:    sessionID,
+		capabilities: capabilities,
+		policy:       policy,
+		namespaces:   namespaces,
+		labels:       labels,
+		hasHeadroom:  headroom > 0,
+	}, true, nil
+}
+
+// atoiDefault parses a Redis integer field, treating a missing or malformed
+// value as zero. The claim Lua reads the same fields with the same default, so
+// the headroom precheck cannot disagree with the authoritative transition.
+func atoiDefault(raw string) int {
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0
+	}
+	return value
 }
 
 // ReclaimExpiredClaims returns ordinary expired claims to the durable queue.
