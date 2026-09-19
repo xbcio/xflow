@@ -524,7 +524,7 @@ being checked is theatre; confirm the posture first (`--mode=production` makes
 ### 4.4 Verification for axis 3
 
 - Metric: `xflow_runner_auth_decisions_total`, labelled `result` and `auth_mode`
-  (`observability/metrics/control.go:21`, `:63`; help text
+  (`observability/metrics/control.go:21`, `:103`; help text
   `observability/metrics/metrics.go:421`). A rotation in progress shows as
   `result="deny"` until the last runner has moved.
 - Log: `auth_denied` with `op`, `runner`, `token`, `cn`, `err`
@@ -549,25 +549,30 @@ problem**.
 
 ## 6. Observability: what actually exists
 
-There is **no metric for key rotation and no metric for a decryption failure.**
-Do not alert on one you invented. What exists and is relevant:
+There is **no metric for key rotation.** Do not alert on one you invented.
+There **is** now a metric for a decryption failure, but only on the control
+plane's hint path, and it is selected by a label rather than by its name — see
+the table below and the note after it. What exists and is relevant:
 
 | Metric | Type | What it tells you here |
 |---|---|---|
 | `xflow_supply_fetch_total{name,result}` | counter | A fetch attempt per supply, `result` = `ok` or `error` (`observability/metrics/supply.go:182-186`). A decrypt failure on either axis surfaces as `error`. |
 | `xflow_supply_not_ready{workflow,supply}` | gauge | An activation is currently being declined for a missing required supply (`observability/metrics/supply.go:196-204`). This is the fleet-impact signal for an axis-2 mistake. |
 | `xflow_supply_unavailable_serving{name}` | gauge | Traffic is being served with content that was never successfully fetched, for `require_ready:false` supplies (`observability/metrics/supply.go:214-220`). |
-| `xflow_runner_auth_decisions_total{result,auth_mode}` | counter | Runner authorization outcomes (`observability/metrics/control.go:21`, `:63`). Axis-3 verification signal. |
+| `xflow_supply_hint_read_errors_total{namespace,cause}` | counter | Supply reads that failed while the control plane computed heartbeat hints, `cause` = `decrypt` or `other` (the `SupplyHintMetrics` method in `observability/metrics/control.go`). The expected "not written yet" case is excluded. The only direct decryption-failure signal in the tree. |
+| `xflow_runner_auth_decisions_total{result,auth_mode}` | counter | Runner authorization outcomes (`observability/metrics/control.go:21`, `:103`). Axis-3 verification signal. |
 | `xflow_runner_up` | gauge | Runner liveness by heartbeat TTL (`observability/metrics/metrics.go:428`) — distinguishes "runner gone" from "runner healthy but hosting nothing". |
 
 Metric names are confirmed against the help-text map in
-`observability/metrics/metrics.go` (`:440-444` for the supply family, `:421` for
-runner auth). The **negative** was checked directly: the complete supply metric
-name list is five names plus the wasm ones
-(`observability/metrics/supply.go:12-16`), and a search for any
-rotation/decryption/key-management metric —
+`observability/metrics/metrics.go` (`:440-445` for the supply family, `:421` for
+runner auth). On the **negative** side: a search for any
+rotation/decryption/key-management metric *by name* still returns nothing —
 `grep -rniE "xflow_[a-z_]*(rotat|decrypt|kek|masterkey|key_rot)" --include=*.go .`
-— returns **no matches**.
+— but that grep is no longer sufficient evidence for the claim it used to
+support. A decryption failure is now reported, and its name
+(`xflow_supply_hint_read_errors_total`) matches none of those stems because the
+distinction lives in the `cause` **label**. Search labels too, or the negative
+will read as "nothing reports decryption failures" while something does.
 
 **Log signals (exact text to grep for):**
 
@@ -627,14 +632,30 @@ signature, and check the *most recent configuration change* first.
   means the process is running on content it never obtained.
 - **Runner authorization denials** —
   `rate(xflow_runner_auth_decisions_total{result="deny"}[5m]) > 0`, with
-  `auth_mode` on the series (`observability/metrics/control.go:63`). Expected in
+  `auth_mode` on the series (the `AuthMetrics` methods, `observability/metrics/control.go:103`). Expected in
   bursts during a token rotation (§4.1); sustained after a rotation is complete
   means a runner was missed.
-- **No rotation alert is possible.** Nothing emits a rotation or
-  decryption-failure metric, so an alert on "the key rotated" or "decryption
-  failed" cannot be written from what this repository exports. Axis-1 rotation is
-  observed in the server log (`supply transport key rotated`, `key_id`), and axis-2
-  damage is observed indirectly through the two supply metrics above.
+- **Decryption failures on the hint path** —
+  `rate(xflow_supply_hint_read_errors_total{cause="decrypt"}[5m]) > 0`.
+  This is the closest thing to a direct "the at-rest key is wrong on this
+  replica" alert, and the one to reach for after a rotation step. The series
+  carries `namespace`, so a single tenant failing points at data rather than at
+  a replica's keyring.
+  *Scope, stated precisely:* it covers reads the **control plane** makes while
+  computing heartbeat hints, not reads on the HTTP GET path — that path still
+  answers a generic 500 with no metric
+  (`service/apiserver/module_supply.go:104-107`). A zero rate is therefore not
+  proof that every row is readable, only that the hint path saw nothing wrong.
+  `cause="other"` covers corruption and database faults, which have no sentinel
+  to be told apart from each other.
+- **No rotation alert is possible.** Nothing emits a *rotation* metric — no
+  counter or gauge reports that a key changed — so "the key rotated" cannot be
+  alerted on from what this repository exports. Axis-1 rotation is observed in
+  the server log (`supply transport key rotated`, `key_id`).
+  *Updated:* decryption **failures** are no longer in this category. Since the
+  hint path stopped swallowing read errors, they can be alerted on directly (see
+  the bullet above); axis-2 damage on other paths is still visible only
+  indirectly, through the two supply metrics above.
 
 ## 7. What this runbook does not cover
 

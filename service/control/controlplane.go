@@ -501,6 +501,13 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	var supplyObserved SupplyObservedSink
 	if cfg.EntryActivationStore != nil && cfg.Supplies != nil {
 		hinter := NewSupplyHinter(cfg.EntryActivationStore, cfg.Supplies, entryNamespaces, cfg.Logger)
+		// Optional: without metrics the hinter still logs failed reads, so a
+		// deployment that never wires cfg.Metrics loses the count, not the
+		// signal. Installed once on the shared hinter — the same pointer is
+		// handed to both transports below, so one install covers both.
+		if cfg.Metrics != nil {
+			hinter.SetSupplyHintObserver(metrics.NewSupplyHintMetrics(cfg.Metrics))
+		}
 		observed := NewMemorySupplyObserved()
 		httpServer.core.supplyHinter = hinter
 		grpcServer.core.supplyHinter = hinter

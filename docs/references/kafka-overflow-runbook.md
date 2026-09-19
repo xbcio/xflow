@@ -79,7 +79,7 @@ once the partition advances", which under any live traffic is immediate.
 `consumer.go:253` disables kafka-go's own reporting). A partition that has stopped
 fetching therefore holds its last healthy value and reads as fine — under this
 policy that is the steady state, not a corner case (`aggregate.go:865-873`,
-`observability/metrics/metrics.go:451`). `xflow_trigger_consumption_blocked` is
+`observability/metrics/metrics.go:452`). `xflow_trigger_consumption_blocked` is
 the signal that does work. It is per **partition**, and only the blocked
 partition reports it: its healthy-looking siblings on the same shared reader read
 `0` while not being fetched at all.
@@ -111,7 +111,7 @@ are under `node/trigger/kafka/`.
 |---|---|---|
 | `xflow_trigger_messages_discarded_total{topic,reason}` | counter | Records consumed but never emitted. `reason` is a closed enum: `schema`, `schema_fail`, `buffer_overflow` (`node/trigger/kafka/observer.go:23-38`). **`buffer_overflow` is the overflow-axis loss**, and is produced only under `on_overflow=discard` |
 | `xflow_trigger_consumption_blocked{topic,partition}` | gauge | `1` while this partition has stopped consuming to avoid dropping records: `block` sitting at its retained bound, **or** `dead_letter` holding a record whose publish has not succeeded (`observer.go:68-88`, `aggregate.go:944-951`). Set on transitions, reported only by the affected partition |
-| `xflow_trigger_messages_dead_lettered_total{topic,result}` | counter | Dead-letter publish attempts, `result` = `ok` \| `error`. **Both dead-letter axes report here**; the axis is only in the published record's `xflow-dlq-reason` header (`metrics.go:446`, `node/trigger/kafka/dlq.go:124-134`) |
+| `xflow_trigger_messages_dead_lettered_total{topic,result}` | counter | Dead-letter publish attempts, `result` = `ok` \| `error`. **Both dead-letter axes report here**; the axis is only in the published record's `xflow-dlq-reason` header (`metrics.go:447`, `node/trigger/kafka/dlq.go:124-134`) |
 | `xflow_trigger_consumer_lag{topic,partition}` | gauge | Fetch position vs. high-water mark. Frozen by a stalled consumer — never read it without the next series |
 | `xflow_trigger_last_fetch_timestamp_seconds{topic,partition}` | gauge | Unix time of the most recent fetch on this partition. `time()` minus this is consumer staleness, and is the only way to tell a frozen lag reading from a live one (`observability/metrics/trigger.go:130-157`) |
 
@@ -156,7 +156,7 @@ are under `node/trigger/kafka/`.
   The record is being redelivered rather than parked and the source partition has
   stopped consuming on it. Fix the dead-letter broker, not the workflow.
   *Does not cover:* the schema axis, which reports into the same series
-  (`metrics.go:446`) — that axis parks records that failed validation, not
+  (`metrics.go:447`) — that axis parks records that failed validation, not
   records the buffer had no room for; the topic records are being parked *into*
   (no label); whether anyone ever reads that topic (nothing does — §"Semantics
   verification", replay); or a dead letter topic that is slow but succeeding
@@ -218,7 +218,7 @@ and *is the loss counter moving*.
    touches the cap at a peak and drains has neither. `xflow_trigger_batch_size`
    and the flush trigger mix (`xflow_trigger_batches_flushed_total{trigger}`)
    tell the two apart: a mix dominated by `timeout` means the batch is configured
-   larger than the traffic (`observability/metrics/metrics.go:449`).
+   larger than the traffic (`observability/metrics/metrics.go:450`).
 
 ## Remediation
 

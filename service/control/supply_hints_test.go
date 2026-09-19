@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -500,4 +501,150 @@ func (s *partialFailSupplySource) GetSupply(ctx context.Context, ns, name string
 		return nil, s.err
 	}
 	return s.good.GetSupply(ctx, ns, name)
+}
+
+// --- Observer wiring ---
+
+// hintObserverRecorder captures observer callbacks so a test can assert on what
+// the observer was actually told. service/control's tests assert here rather than
+// on a registry — the label mapping lives in observability/metrics and is tested
+// there (see supply_hint_test.go), which is the same split sweep_outcome_test.go
+// documents for the sweep counter.
+type hintObserverRecorder struct {
+	namespaces []string
+	causes     []string
+}
+
+func (o *hintObserverRecorder) OnSupplyHintReadError(_ context.Context, namespace, cause string) {
+	o.namespaces = append(o.namespaces, namespace)
+	o.causes = append(o.causes, cause)
+}
+
+// A failed read must reach BOTH reporting channels, and the log and the metric
+// must agree on what counts as a fault. A counter that fired while the log
+// stayed quiet (or the reverse) would leave an operator reading two surfaces
+// that disagree — which is exactly the defect this pair replaced, where the
+// hint path reported nothing at all while the HTTP GET for the same row
+// answered 500.
+func TestHintsReportReadErrorsToBothTheLogAndTheObserver(t *testing.T) {
+	ctx := context.Background()
+	store_ := NewMemoryEntryActivationStore()
+	if err := store_.Upsert(ctx, activationWithSupply(t, "unit-a", "runner-a", true, "rules", "shared-rules")); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	src := &failingSupplySource{err: fmt.Errorf("get supply %q/%q: decrypt: %w",
+		string(namespace.Default), "shared-rules", supplyenc.ErrUnknownKey)}
+	logger := &supplyHintWarnRecorder{}
+	obs := &hintObserverRecorder{}
+
+	h := NewSupplyHinter(store_, src, []namespace.Namespace{namespace.Default}, logger)
+	h.SetSupplyHintObserver(obs)
+
+	if got := h.HintsForRunner(ctx, "runner-a"); got != nil {
+		t.Fatalf("hints = %#v, want nil for an unreadable supply", got)
+	}
+
+	if len(logger.msgs) != 1 {
+		t.Errorf("Warn calls = %v, want exactly 1", logger.msgs)
+	}
+	if len(obs.causes) != 1 {
+		t.Fatalf("observer calls = %v, want exactly 1: the metric must fire with the log", obs.causes)
+	}
+	if obs.causes[0] != "decrypt" {
+		t.Errorf("cause = %q, want %q for a wrapped supplyenc sentinel", obs.causes[0], "decrypt")
+	}
+	// The namespace is the one the read was issued against (the hinter's own
+	// list), not anything off ctx.
+	if obs.namespaces[0] != string(namespace.Default) {
+		t.Errorf("namespace = %q, want %q", obs.namespaces[0], string(namespace.Default))
+	}
+}
+
+// "Not written yet" is expected, so it must reach NEITHER channel. Without this,
+// the fix could be satisfied by reporting every read, which would make the real
+// signal worthless on a cluster where most supplies are registered lazily.
+func TestHintsReportNothingAtAllForANotFoundSupply(t *testing.T) {
+	ctx := context.Background()
+	store_ := NewMemoryEntryActivationStore()
+	if err := store_.Upsert(ctx, activationWithSupply(t, "unit-a", "runner-a", true, "rules", "shared-rules")); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	src := &failingSupplySource{err: store.ErrNotFound}
+	logger := &supplyHintWarnRecorder{}
+	obs := &hintObserverRecorder{}
+
+	h := NewSupplyHinter(store_, src, []namespace.Namespace{namespace.Default}, logger)
+	h.SetSupplyHintObserver(obs)
+
+	h.HintsForRunner(ctx, "runner-a")
+
+	if len(logger.msgs) != 0 {
+		t.Errorf("Warn calls = %v, want none: 'not written yet' is not a fault", logger.msgs)
+	}
+	if len(obs.causes) != 0 {
+		t.Errorf("observer calls = %v, want none: 'not written yet' is not a fault", obs.causes)
+	}
+}
+
+// The cause label must be coarse by design: only the decrypt family gets its own
+// bucket, because only that family has sentinels to detect it with. A content
+// hash mismatch is a plain fmt.Errorf with no %w (store/sqlstore/supply.go), so
+// it is indistinguishable from a database error and must land in "other" rather
+// than be asserted into a split the code cannot make.
+func TestSupplyHintReadCauseBucketsOnlyWhatItCanDetect(t *testing.T) {
+	// Every sentinel the envelope path can produce, each wrapped the way
+	// sqlstore wraps it, must read as "decrypt".
+	for _, base := range []error{
+		supplyenc.ErrUnknownKey,
+		supplyenc.ErrDecryptFailed,
+		supplyenc.ErrUnsupportedVersion,
+		supplyenc.ErrNotEncrypted,
+	} {
+		wrapped := fmt.Errorf("get supply %q/%q: decrypt: %w", "default", "s", base)
+		if got := supplyHintReadCause(wrapped); got != "decrypt" {
+			t.Errorf("cause(%v) = %q, want %q", base, got, "decrypt")
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		// The exact shape store/sqlstore/supply.go returns: no %w, no sentinel.
+		{"hash mismatch",
+			fmt.Errorf("get supply %q/%q: content hash mismatch, stored content may be corrupted", "default", "s")},
+		{"database error", errors.New("get supply: dial tcp: connection refused")},
+		// A decrypt-looking message with NO sentinel under it must stay "other":
+		// matching on the text would be string-sniffing, which breaks the moment
+		// anyone rewords the error.
+		{"decrypt-shaped text without a sentinel", errors.New("get supply: decrypt: something went wrong")},
+	} {
+		if got := supplyHintReadCause(tc.err); got != "other" {
+			t.Errorf("cause(%s) = %q, want %q", tc.name, got, "other")
+		}
+	}
+}
+
+// An unwired observer must be a no-op, not a nil dereference: most deployments
+// and every test predating the observer leave it unset, and a read failure in
+// that configuration has to behave exactly as it did before.
+func TestHintsWithNoObserverStillReportByLogOnly(t *testing.T) {
+	ctx := context.Background()
+	store_ := NewMemoryEntryActivationStore()
+	if err := store_.Upsert(ctx, activationWithSupply(t, "unit-a", "runner-a", true, "rules", "shared-rules")); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	logger := &supplyHintWarnRecorder{}
+	h := NewSupplyHinter(store_, &failingSupplySource{err: supplyenc.ErrDecryptFailed},
+		[]namespace.Namespace{namespace.Default}, logger)
+
+	if got := h.HintsForRunner(ctx, "runner-a"); got != nil {
+		t.Fatalf("hints = %#v, want nil", got)
+	}
+	if len(logger.msgs) != 1 {
+		t.Errorf("Warn calls = %v, want 1: the log half must not depend on the observer", logger.msgs)
+	}
 }

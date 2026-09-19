@@ -7,6 +7,7 @@ import (
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/service/crypto/supplyenc"
 	"github.com/xbcio/xflow/store"
 )
 
@@ -15,6 +16,44 @@ import (
 // plane from depending on the write path.
 type SupplyHintSource interface {
 	GetSupply(ctx context.Context, ns string, name string) (*store.SupplyResource, error)
+}
+
+// SupplyHintObserver observes supply reads that fail while reporting hints.
+//
+// Every read error other than "not written yet" is a real fault, and this is the
+// seam that lets the control plane report one without importing the metrics
+// package (the same local-mirror-interface pattern observability/metrics uses to
+// avoid a cycle with this package).
+type SupplyHintObserver interface {
+	// OnSupplyHintReadError records one failed read. namespace is the namespace
+	// the read was actually issued against — NOT the one on ctx, which carries
+	// the heartbeat's scope and is typically empty here. cause is a bounded
+	// label, currently "decrypt" or "other".
+	OnSupplyHintReadError(ctx context.Context, namespace, cause string)
+}
+
+// supplyHintReadCause buckets a read error for the cause label.
+//
+// It is deliberately coarse. The decrypt family is worth splitting out because
+// it is the shape an at-rest KEK change produces, and it is the one an operator
+// can act on ("a key is missing from this replica's keyring"). Everything else
+// shares "other" because there is no sentinel to tell the cases apart: the
+// content-hash mismatch from store/sqlstore/supply.go is a plain fmt.Errorf
+// with no %w, so it is indistinguishable from a database error, and inventing a
+// distinct label would mean asserting a split the code cannot make.
+//
+// A high-cardinality cause (the error text itself) is not an option: it would
+// put every distinct error message into a label and blow up the series count.
+func supplyHintReadCause(err error) string {
+	switch {
+	case errors.Is(err, supplyenc.ErrUnknownKey),
+		errors.Is(err, supplyenc.ErrDecryptFailed),
+		errors.Is(err, supplyenc.ErrUnsupportedVersion),
+		errors.Is(err, supplyenc.ErrNotEncrypted):
+		return "decrypt"
+	default:
+		return "other"
+	}
 }
 
 // SupplyHinter computes per-runner supply hints from activation records.
@@ -29,6 +68,13 @@ type SupplyHinter struct {
 	supplies    SupplyHintSource
 	namespaces  []namespace.Namespace
 	logger      engine.Logger
+
+	// The observer is guarded rather than a plain field because HintsForRunner
+	// runs concurrently, once per heartbeat per runner: an install after the
+	// first heartbeat would otherwise be a data race on the field. Only the
+	// error path takes the lock.
+	observerMu sync.RWMutex
+	observer   SupplyHintObserver
 }
 
 // NewSupplyHinter constructs a SupplyHinter. ns mirrors the reconciler's own
@@ -41,6 +87,32 @@ func NewSupplyHinter(acts engine.EntryActivationStore, sup SupplyHintSource, ns 
 		ns = []namespace.Namespace{namespace.Default}
 	}
 	return &SupplyHinter{activations: acts, supplies: sup, namespaces: ns, logger: logger}
+}
+
+// SetSupplyHintObserver installs the observer; nil removes it. It is optional —
+// every test that predates it, and any deployment without metrics, leaves it
+// unset, and HintsForRunner must behave identically either way.
+func (h *SupplyHinter) SetSupplyHintObserver(o SupplyHintObserver) {
+	if h == nil {
+		return
+	}
+	h.observerMu.Lock()
+	defer h.observerMu.Unlock()
+	h.observer = o
+}
+
+// notifyReadError reports one failed supply read. It is nil-safe in both the
+// hinter and the observer, so an unwired control plane pays only a read lock.
+func (h *SupplyHinter) notifyReadError(ctx context.Context, ns, cause string) {
+	if h == nil {
+		return
+	}
+	h.observerMu.RLock()
+	o := h.observer
+	h.observerMu.RUnlock()
+	if o != nil {
+		o.OnSupplyHintReadError(ctx, ns, cause)
+	}
 }
 
 // HintsForRunner returns "supply node name → current content hash" for every
@@ -105,10 +177,18 @@ func (h *SupplyHinter) HintsForRunner(ctx context.Context, runnerID string) map[
 					// runner side already reports its own "supply hint: fetch
 					// failed" (service/runner/supply_gate.go), which is likewise
 					// unthrottled, so this needs no new machinery.
-					if !errors.Is(err, store.ErrNotFound) && h.logger != nil {
-						h.logger.Warn("supply hints: get supply failed",
-							"namespace", string(ns), "resource", req.Resource,
-							"node", req.Node, "error", err)
+					//
+					// The metric is the half that can page someone who is not
+					// watching logs, and it shares this exact condition — a log
+					// line and a counter that disagreed about what counts as a
+					// fault would be worse than either alone.
+					if !errors.Is(err, store.ErrNotFound) {
+						if h.logger != nil {
+							h.logger.Warn("supply hints: get supply failed",
+								"namespace", string(ns), "resource", req.Resource,
+								"node", req.Node, "error", err)
+						}
+						h.notifyReadError(ctx, string(ns), supplyHintReadCause(err))
 					}
 					continue
 				}

@@ -22,6 +22,7 @@ const (
 	metricRunnerClaimReclaimed       = "xflow_runner_claim_reclaimed_total"
 	metricRunnerLeaseReplayed        = "xflow_runner_lease_replayed_total"
 	metricDispatchTransient          = "xflow_dispatch_transient_total"
+	metricSupplyHintReadErrors       = "xflow_supply_hint_read_errors_total"
 )
 
 // Local mirror interfaces avoid an import cycle with service/control.
@@ -49,6 +50,46 @@ type runnerClaimObserver interface {
 type dispatcherObserver interface {
 	OnDispatchTransient(ctx context.Context, reason string)
 }
+
+type supplyHintObserver interface {
+	OnSupplyHintReadError(ctx context.Context, namespace, cause string)
+}
+
+// SupplyHintMetrics observes failures reading supply content while the control
+// plane computes heartbeat hints.
+//
+// This exists because that path used to be entirely silent: a decrypt failure
+// (the shape a changed at-rest KEK produces) and the expected "not written yet"
+// case were folded into one `continue`, so an unreadable supply produced no log
+// and no metric on every heartbeat, while the runner kept serving last-good
+// content and /readyz stayed green — even though the HTTP GET for that same row
+// answered 500. The log half is now in service/control; this is the half that
+// can page someone who is not watching logs.
+type SupplyHintMetrics struct {
+	Metrics *Metrics
+}
+
+func NewSupplyHintMetrics(metrics *Metrics) SupplyHintMetrics {
+	return SupplyHintMetrics{Metrics: metrics}
+}
+
+// OnSupplyHintReadError counts one failed supply read.
+//
+// namespace is the parameter, deliberately NOT withNamespace(ctx, ...) as every
+// other method in this file does. HintsForRunner iterates its own namespace
+// list, so the namespace that actually failed is not necessarily the one on
+// ctx — that ctx carries whatever the heartbeat request scoped to, typically
+// nothing. Reading it from ctx here would attribute every failure to that
+// namespace instead of the real one, which is worse than having no label at
+// all: an operator would chase the wrong tenant.
+func (s SupplyHintMetrics) OnSupplyHintReadError(_ context.Context, namespace, cause string) {
+	s.Metrics.Inc(metricSupplyHintReadErrors, map[string]string{
+		"namespace": namespace,
+		"cause":     cause,
+	})
+}
+
+var _ supplyHintObserver = SupplyHintMetrics{}
 
 // AuthMetrics observes runner-protocol auth decisions.
 type AuthMetrics struct {
