@@ -210,6 +210,11 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 		outboxReadyKey(t, req.ExecutionID),
 		outboxBodyKey(t, req.ExecutionID),
 		scheduleKey(t, req.ExecutionID, req.NodeIdx),
+		// KEYS[12]: re-EXPIREd by the script so the per-execution transient
+		// marker cannot lapse while the execution is still committing. See the
+		// note in commitNodeLua — a lapsed marker makes a transient execution
+		// read as durable, which projects its node output into SQL.
+		transientMarkKey(t, req.ExecutionID),
 	}, args...).Slice()
 	if err != nil {
 		return engine.CommitNodeResult{}, fmt.Errorf("commit node %q/%q: %w", req.ExecutionID, req.NodeName, err)
