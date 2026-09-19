@@ -238,6 +238,23 @@ type LeaseLookup interface {
 	LookupLease(ctx context.Context, runnerID, sessionID string, key LeaseLookupKey) (*engine.TaskLease, bool, error)
 }
 
+// LeaseMetaRefresher is an optional durable-directory capability that re-arms a
+// finalized lease's metadata expiry after the engine has extended the lease.
+//
+// A directory that stores lease metadata under its own expiry (as the Redis
+// directory does) arms it once, at finalization. Without a refresh hook that
+// expiry stops tracking the lease as soon as the first renewal extends it, and
+// a node that legitimately runs past the original window loses the metadata its
+// own renewals and reports are resolved through — leaving the assignment
+// leased to a runner that can neither renew nor report it.
+//
+// live is the window the engine just granted; implementations must expand the
+// expiry to cover it (plus whatever recovery margin they already apply), not
+// set it to the window alone.
+type LeaseMetaRefresher interface {
+	RefreshLeaseMeta(ctx context.Context, runnerID, sessionID string, key LeaseLookupKey, live time.Duration) error
+}
+
 // ExpiredDirectoryLeaseRequest identifies an expired lease to release from the
 // runner directory. All three fields must match the directory's finalized
 // lease record; any mismatch fails closed.

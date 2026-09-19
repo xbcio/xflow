@@ -337,6 +337,7 @@ func (c *Core) renewLease(ctx context.Context, req protocol.RenewLeaseRequest, i
 		resp := protocol.RenewLeaseResponse{Renewed: renewed}
 		if renewed {
 			resp.Deadline = time.Now().UTC().Add(extend)
+			c.refreshLeaseMeta(ctx, req, extend)
 		}
 		return resp, nil
 	}
@@ -357,6 +358,33 @@ func (c *Core) renewLease(ctx context.Context, req protocol.RenewLeaseRequest, i
 	resp := protocol.RenewLeaseResponse{Renewed: renewed}
 	if renewed {
 		resp.Deadline = time.Now().UTC().Add(extend)
+		c.refreshLeaseMeta(ctx, req, extend)
 	}
 	return resp, nil
+}
+
+// refreshLeaseMeta re-arms the directory's per-assignment lease-metadata expiry
+// after a successful renewal.
+//
+// The directory arms that expiry once, at FinalizeClaim, for the lease's TTL
+// plus a claim-recovery margin. Renewing extends the engine's lease but used to
+// leave the directory's copy behind, so a node running longer than that margin
+// lost the metadata its own next renewal is resolved through — the renew was
+// refused, the runner cancelled its handler, and the assignment was stranded in
+// 'leased'. Refreshing on each successful extension keeps the two in step.
+//
+// Best effort by design: the extension itself already succeeded, so a refresh
+// failure is logged rather than returned, and the next renewal retries it.
+func (c *Core) refreshLeaseMeta(ctx context.Context, req protocol.RenewLeaseRequest, live time.Duration) {
+	refresher, ok := c.runners.(LeaseMetaRefresher)
+	if !ok {
+		return
+	}
+	err := refresher.RefreshLeaseMeta(ctx, req.RunnerID, req.SessionID, LeaseLookupKey{
+		LeaseID:    engine.LeaseID(req.LeaseID),
+		LeaseToken: engine.LeaseToken(req.LeaseToken),
+	}, live)
+	if err != nil && c.logger != nil {
+		c.logger.Error("refresh lease metadata", "runner_id", req.RunnerID, "err", err)
+	}
 }

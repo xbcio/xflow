@@ -1173,6 +1173,46 @@ func (d *RedisRunnerDirectory) LookupLease(ctx context.Context, runnerID, sessio
 	return lease, true, nil
 }
 
+// RefreshLeaseMeta re-arms one finalized lease's metadata expiry.
+//
+// FinalizeClaim arms that expiry once, for the lease's own TTL plus one
+// claim-recovery margin — about 90s for a default 60s lease — and nothing used
+// to extend it. A node that legitimately outlives that window then loses the
+// metadata its own renewals and reports are resolved through: LookupLease
+// reads redis.Nil, renew is refused with "lease not found", the runner cancels
+// its handler, and the assignment is stranded in 'leased' where no reclaim path
+// can see it. The renewal path calls this after each successful engine-side
+// extension so the directory expiry tracks the lease the engine actually
+// granted.
+//
+// Absent metadata reports "expired" rather than an error: the lease is already
+// unrecoverable by then, and the renewal that led here has already succeeded,
+// so failing it would only widen the damage.
+func (d *RedisRunnerDirectory) RefreshLeaseMeta(ctx context.Context, runnerID, sessionID string, key LeaseLookupKey, live time.Duration) error {
+	assignmentID, ok, err := d.resolveLeaseAssignmentID(ctx, key)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	status, err := d.evalStatus(ctx, redisRefreshLeaseMetaLua, []string{
+		d.keys.assignmentState,
+		d.keys.assignmentRunner,
+		d.keys.assignmentSession,
+		d.keys.assignmentLeaseMetaKey(assignmentID),
+	}, assignmentID, runnerID, sessionID, strconv.FormatInt(d.assignmentLeaseMetaTTLMillisFor(live), 10))
+	if err != nil {
+		return fmt.Errorf("refresh redis lease metadata: %w", err)
+	}
+	switch status {
+	case "refreshed", "noop", "expired":
+		return nil
+	default:
+		return fmt.Errorf("refresh redis lease metadata: unexpected result %q", status)
+	}
+}
+
 // resolveLeaseAssignmentID resolves a finalized assignment ID from a lease
 // identity, mirroring ReleaseLeased's token > leaseID > assignmentID precedence
 // but read-only. ok=false means no index entry matches.
@@ -1673,10 +1713,18 @@ func (d *RedisRunnerDirectory) claimTTLMillis() int64 {
 // sensitive (it can include task input), so a zero-TTL lease or a directory
 // constructed directly by a test must still receive a finite positive expiry.
 func (d *RedisRunnerDirectory) assignmentLeaseMetaTTLMillis(lease *engine.TaskLease) int64 {
-	live := time.Duration(0)
+	var live time.Duration
 	if lease != nil {
 		live = lease.TTL
 	}
+	return d.assignmentLeaseMetaTTLMillisFor(live)
+}
+
+// assignmentLeaseMetaTTLMillisFor applies the live-plus-recovery-margin policy
+// to an explicit live window. The renewal path knows the window the engine just
+// granted but not the original lease value, so it needs the same arithmetic
+// without a lease.
+func (d *RedisRunnerDirectory) assignmentLeaseMetaTTLMillisFor(live time.Duration) int64 {
 	if live <= 0 {
 		live = d.claimTTL
 	}
@@ -2366,4 +2414,27 @@ redis.call('LREM', KEYS[12], 0, assignmentID)
 -- Keep the finalized handoff record until engine reclaim proves the same token
 -- is no longer live. Its assignment index survives this capacity cleanup.
 return 'released'
+`
+
+// redisRefreshLeaseMetaLua pushes a live lease's metadata expiry forward.
+//
+// KEYS: 1=assignment:state 2=assignment:runner 3=assignment:session
+//
+//	4=this assignment's lease-metadata key
+//
+// ARGV: 1=assignmentID 2=runnerID 3=sessionID 4=ttl_ms
+//
+// The runner/session and state checks make the refresh a no-op for a lease that
+// has already been released, taken over, or rebound to a newer session, so a
+// late renewal from a superseded runner cannot resurrect an expiry a release
+// chose to drop. 'expired' means the metadata is already gone: the lease is
+// unrecoverable and the caller must not treat the refresh as having armed it.
+const redisRefreshLeaseMetaLua = `
+local assignmentID = ARGV[1]
+if redis.call('HGET', KEYS[1], assignmentID) ~= 'leased' then return 'noop' end
+if redis.call('HGET', KEYS[2], assignmentID) ~= ARGV[2] then return 'noop' end
+if redis.call('HGET', KEYS[3], assignmentID) ~= ARGV[3] then return 'noop' end
+if redis.call('EXISTS', KEYS[4]) == 0 then return 'expired' end
+redis.call('PEXPIRE', KEYS[4], tonumber(ARGV[4]))
+return 'refreshed'
 `
