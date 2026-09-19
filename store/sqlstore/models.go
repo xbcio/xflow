@@ -58,6 +58,45 @@ func (b *b64Bytes) decode(s string) error {
 	return nil
 }
 
+// jsonBytes is a []byte persisted into a JSON column as text.
+//
+// A bare []byte cannot be used: database/sql passes every []byte argument as a
+// binary value, and MySQL refuses to build a JSON value from a binary-charset
+// string. The write fails with
+//
+//	Error 3144 (22032): Cannot create a JSON value from a string with
+//	CHARACTER SET 'binary'.
+//
+// which is what a deployment running these models against MySQL 8 saw on every
+// sink node commit — the one node whose output is always a populated object.
+// Returning a string instead makes the driver declare the connection charset
+// (utf8mb4), which MySQL accepts for a JSON column. The bytes are already valid
+// JSON produced by json.Marshal, so unlike b64Bytes no re-encoding happens.
+type jsonBytes []byte
+
+// Value returns nil for empty input, leaving the column NULL exactly as a nil
+// []byte did before this type existed.
+func (b jsonBytes) Value() (driver.Value, error) {
+	if len(b) == 0 {
+		return nil, nil
+	}
+	return string(b), nil
+}
+
+func (b *jsonBytes) Scan(src any) error {
+	switch v := src.(type) {
+	case nil:
+		*b = nil
+	case string:
+		*b = []byte(v)
+	case []byte:
+		*b = append((*b)[:0], v...)
+	default:
+		return fmt.Errorf("sqlstore: cannot scan %T into jsonBytes", src)
+	}
+	return nil
+}
+
 // dbSupply is the GORM persistence type for store.SupplyResource.
 type dbSupply struct {
 	ID          uint64     `gorm:"column:id;primaryKey;autoIncrement"`
@@ -103,9 +142,9 @@ type dbExecution struct {
 	ExecutionID  types.ExecutionID     `gorm:"column:execution_id;type:varchar(64);uniqueIndex:uk_execution_id"`
 	Namespace    string                `gorm:"column:namespace;type:varchar(64);not null;default:'';index:idx_namespace_created_at,priority:1"`
 	WorkflowName string                `gorm:"column:workflow_name;type:varchar(255)"`
-	WorkflowDef  []byte                `gorm:"column:workflow_def;type:json"`
-	Params       []byte                `gorm:"column:params;type:json"`
-	Runtime      []byte                `gorm:"column:runtime;type:json"`
+	WorkflowDef  jsonBytes             `gorm:"column:workflow_def;type:json"`
+	Params       jsonBytes             `gorm:"column:params;type:json"`
+	Runtime      jsonBytes             `gorm:"column:runtime;type:json"`
 	TraceID      string                `gorm:"column:trace_id;type:varchar(64)"`
 	SpanID       string                `gorm:"column:span_id;type:varchar(32)"`
 	Status       types.ExecutionStatus `gorm:"column:status;type:varchar(20)"`
@@ -122,9 +161,9 @@ func toDBExecution(r *store.ExecutionRecord) *dbExecution {
 		ExecutionID:  r.ExecutionID,
 		Namespace:    r.Namespace,
 		WorkflowName: r.WorkflowName,
-		WorkflowDef:  r.WorkflowDef,
-		Params:       r.Params,
-		Runtime:      r.Runtime,
+		WorkflowDef:  jsonBytes(r.WorkflowDef),
+		Params:       jsonBytes(r.Params),
+		Runtime:      jsonBytes(r.Runtime),
 		TraceID:      r.TraceID,
 		SpanID:       r.SpanID,
 		Status:       r.Status,
@@ -140,9 +179,9 @@ func fromDBExecution(d *dbExecution) *store.ExecutionRecord {
 		ExecutionID:  d.ExecutionID,
 		Namespace:    d.Namespace,
 		WorkflowName: d.WorkflowName,
-		WorkflowDef:  d.WorkflowDef,
-		Params:       d.Params,
-		Runtime:      d.Runtime,
+		WorkflowDef:  []byte(d.WorkflowDef),
+		Params:       []byte(d.Params),
+		Runtime:      []byte(d.Runtime),
 		TraceID:      d.TraceID,
 		SpanID:       d.SpanID,
 		Status:       d.Status,
@@ -174,10 +213,10 @@ type dbNode struct {
 	LeaseID      string            `gorm:"column:lease_id;type:varchar(96)"`
 	LeaseToken   string            `gorm:"column:lease_token;type:varchar(96)"`
 	Attempt      int               `gorm:"column:attempt"`
-	Output       []byte            `gorm:"column:output;type:json"`
+	Output       jsonBytes         `gorm:"column:output;type:json"`
 	Port         string            `gorm:"column:port;type:varchar(50)"`
 	SignalName   string            `gorm:"column:signal_name;type:varchar(255)"`
-	SignalConfig []byte            `gorm:"column:signal_config;type:json"`
+	SignalConfig jsonBytes         `gorm:"column:signal_config;type:json"`
 	Timeout      *time.Time        `gorm:"column:timeout_at"`
 	CreatedAt    time.Time         `gorm:"column:created_at;autoCreateTime:milli"`
 	UpdatedAt    time.Time         `gorm:"column:updated_at;autoUpdateTime:milli"`
@@ -195,10 +234,10 @@ func toDBNode(r *store.NodeRecord) *dbNode {
 		LeaseID:      r.LeaseID,
 		LeaseToken:   r.LeaseToken,
 		Attempt:      r.Attempt,
-		Output:       r.Output,
+		Output:       jsonBytes(r.Output),
 		Port:         r.Port,
 		SignalName:   r.SignalName,
-		SignalConfig: r.SignalConfig,
+		SignalConfig: jsonBytes(r.SignalConfig),
 		Timeout:      r.Timeout,
 		CreatedAt:    r.CreatedAt,
 		UpdatedAt:    r.UpdatedAt,
@@ -215,10 +254,10 @@ func fromDBNode(d *dbNode) *store.NodeRecord {
 		LeaseID:      d.LeaseID,
 		LeaseToken:   d.LeaseToken,
 		Attempt:      d.Attempt,
-		Output:       d.Output,
+		Output:       []byte(d.Output),
 		Port:         d.Port,
 		SignalName:   d.SignalName,
-		SignalConfig: d.SignalConfig,
+		SignalConfig: []byte(d.SignalConfig),
 		Timeout:      d.Timeout,
 		CreatedAt:    d.CreatedAt,
 		UpdatedAt:    d.UpdatedAt,
@@ -238,7 +277,7 @@ type dbSignal struct {
 	ID          uint64             `gorm:"column:id;primaryKey;autoIncrement"`
 	ExecutionID types.ExecutionID  `gorm:"column:execution_id;type:varchar(64);uniqueIndex:uk_exec_signal"`
 	SignalName  string             `gorm:"column:signal_name;type:varchar(255);uniqueIndex:uk_exec_signal"`
-	Payload     []byte             `gorm:"column:payload;type:json"`
+	Payload     jsonBytes          `gorm:"column:payload;type:json"`
 	Status      types.SignalStatus `gorm:"column:status;type:varchar(16)"`
 	CreatedAt   time.Time          `gorm:"column:created_at;autoCreateTime:milli"`
 	UpdatedAt   time.Time          `gorm:"column:updated_at;autoUpdateTime:milli"`
@@ -251,7 +290,7 @@ func toDBSignal(r *store.SignalRecord) *dbSignal {
 		ID:          r.ID,
 		ExecutionID: r.ExecutionID,
 		SignalName:  r.SignalName,
-		Payload:     r.Payload,
+		Payload:     jsonBytes(r.Payload),
 		Status:      r.Status,
 		CreatedAt:   r.CreatedAt,
 		UpdatedAt:   r.UpdatedAt,
@@ -263,7 +302,7 @@ func fromDBSignal(d *dbSignal) *store.SignalRecord {
 		ID:          d.ID,
 		ExecutionID: d.ExecutionID,
 		SignalName:  d.SignalName,
-		Payload:     d.Payload,
+		Payload:     []byte(d.Payload),
 		Status:      d.Status,
 		CreatedAt:   d.CreatedAt,
 		UpdatedAt:   d.UpdatedAt,
