@@ -33,7 +33,7 @@ func TestProductionScansUseClusterAwareHelpers(t *testing.T) {
 		"rstate/lease_repair.go":     {scanPage: 1},
 		"rstate/receipt_reader.go":   {scanAll: 1},
 		"rstate/state_lease.go":      {scanAll: 1},
-		"rstate/state_outbox.go":     {scanAll: 3},
+		"rstate/state_outbox.go":     {scanAll: 2, scanPage: 1},
 		"timeout/monitor.go":         {scanAll: 1},
 	}
 	actual := make(map[string]helperCallCounts)

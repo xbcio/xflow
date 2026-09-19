@@ -465,20 +465,36 @@ func (s *Store) scanOutboxMetricsForNamespace(ctx context.Context, t namespace.N
 
 // ListOutboxExecutions scans execution-scoped ready indexes. The index is
 // authoritative per execution; scanning is only a recovery discovery path.
+//
+// Discovery is paged, not exhaustive. The caller re-runs it every tick and the
+// ready entries are durable, so a bounded page only defers an execution's
+// discovery by a few ticks. Walking the whole keyspace per call was both
+// unbounded (it materialized every matching key across every master) and
+// unfair: the result was truncated to the lowest-sorted IDs, so executions
+// past the limit were re-scanned and re-rejected on every tick until the head
+// drained.
+//
+// The page is sharded across namespaces rather than handed to them in order. A
+// namespace that is never reached keeps its cursor frozen, so once one
+// namespace's backlog filled the page the loop stopped and every namespace
+// after it was never scanned at all — its ready entries were invisible for as
+// long as the earlier backlog lasted. Each namespace now advances by at least
+// one slot per call, which bounds a page at max(limit, number of namespaces)
+// ids instead of limit.
 func (s *Store) ListOutboxExecutions(ctx context.Context, limit int) ([]types.ExecutionID, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
-	ids := make(map[types.ExecutionID]struct{})
+	s.outboxDiscoveryMu.Lock()
+	defer s.outboxDiscoveryMu.Unlock()
 	namespaces, err := s.listNamespaces(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list namespaces for outbox discovery: %w", err)
 	}
-	for _, t := range namespaces {
-		if len(ids) >= limit {
-			break
-		}
-		if err := s.scanOutboxExecutionsForNamespace(ctx, t, limit, ids); err != nil {
+	budget := splitNamespaceScanBudget(limit, len(namespaces))
+	ids := make(map[types.ExecutionID]struct{})
+	for i, t := range namespaces {
+		if err := s.scanOutboxExecutionsForNamespace(ctx, t, budget[i], ids); err != nil {
 			return nil, err
 		}
 	}
@@ -490,17 +506,64 @@ func (s *Store) ListOutboxExecutions(ctx context.Context, limit int) ([]types.Ex
 	return out, nil
 }
 
+// splitNamespaceScanBudget divides a bounded scan across namespaces so that
+// none is left out. Every namespace gets at least one slot even when there are
+// more namespaces than the limit allows: a namespace whose slot is zero is
+// never scanned, and a scan that never runs discovers nothing. Remainder slots
+// go to the earliest namespaces, matching how a scan count is split across
+// Redis masters.
+func splitNamespaceScanBudget(limit, namespaces int) []int {
+	if namespaces <= 0 {
+		return nil
+	}
+	budget := make([]int, namespaces)
+	if limit <= namespaces {
+		for i := range budget {
+			budget[i] = 1
+		}
+		return budget
+	}
+	base, remainder := limit/namespaces, limit%namespaces
+	for i := range budget {
+		budget[i] = base
+		if i < remainder {
+			budget[i]++
+		}
+	}
+	return budget
+}
+
+// scanOutboxExecutionsForNamespace advances one page of this namespace's
+// ready-index scan. The cursor is kept per namespace and per Redis master so a
+// resumed scan neither re-reads the keyspace from zero nor reuses a node-local
+// cursor on another master.
+//
+// limit bounds this namespace alone, not the aggregate: sharing one counter
+// across namespaces is what let whichever namespace was scanned first consume
+// the whole page. The SCAN count is the same number, so a page and the budget
+// that consumes it stay in step; Redis treats COUNT as a hint, so an
+// over-delivering page is still truncated here.
 func (s *Store) scanOutboxExecutionsForNamespace(ctx context.Context, t namespace.Namespace, limit int, ids map[types.ExecutionID]struct{}) error {
-	keys, err := redisx.ScanAll(ctx, s.rdb, execScanPattern(t, "outbox:ready"), 128)
+	if limit <= 0 {
+		return nil
+	}
+	keys, next, err := redisx.ScanPage(ctx, s.rdb, s.outboxDiscoveryCursors[t], execScanPattern(t, "outbox:ready"), int64(limit))
 	if err != nil {
 		return fmt.Errorf("scan outbox indexes: %w", err)
 	}
+	s.outboxDiscoveryCursors[t] = next
+	added := 0
 	for _, key := range keys {
 		id, ok := executionIDFromKey(key)
-		if ok {
-			ids[id] = struct{}{}
+		if !ok {
+			continue
 		}
-		if len(ids) >= limit {
+		if _, seen := ids[id]; seen {
+			continue
+		}
+		ids[id] = struct{}{}
+		added++
+		if added >= limit {
 			break
 		}
 	}

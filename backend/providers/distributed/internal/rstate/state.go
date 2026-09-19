@@ -46,6 +46,14 @@ type Store struct {
 	leaseRepairMu      sync.Mutex
 	leaseRepairCursors map[namespace.Namespace]redisx.Cursors
 
+	// outboxDiscoveryCursors advance the bounded outbox discovery scan the same
+	// way leaseRepairCursors do: one node-local cursor per Redis master and
+	// namespace, so a resumed scan neither reuses a cursor across masters nor
+	// lets one namespace's backlog starve another's discovery. The mutex keeps
+	// two dispatchers sharing a Store from re-walking the same Redis pages.
+	outboxDiscoveryMu      sync.Mutex
+	outboxDiscoveryCursors map[namespace.Namespace]redisx.Cursors
+
 	// Audit-trail observability — Redis is system-of-record; the store/sqlstore
 	// audit trail is best-effort. auditWrite routes failures through these
 	// instead of silently dropping them.
@@ -68,16 +76,17 @@ type Store struct {
 
 func New(rdb redis.UniversalClient, db store.Store, execTTL time.Duration) *Store {
 	s := &Store{
-		rdb:                rdb,
-		db:                 db,
-		execTTL:            execTTL,
-		graphs:             make(map[types.ExecutionID]*graph.Graph),
-		execTTLs:           make(map[types.ExecutionID]time.Duration),
-		execTransient:      make(map[types.ExecutionID]transientMark),
-		leaseRepairCursors: make(map[namespace.Namespace]redisx.Cursors),
-		audit:              noopAuditObserver{},
-		auditCounters:      &auditCounters{},
-		cursorKey:          newCursorSigningKey(),
+		rdb:                    rdb,
+		db:                     db,
+		execTTL:                execTTL,
+		graphs:                 make(map[types.ExecutionID]*graph.Graph),
+		execTTLs:               make(map[types.ExecutionID]time.Duration),
+		execTransient:          make(map[types.ExecutionID]transientMark),
+		leaseRepairCursors:     make(map[namespace.Namespace]redisx.Cursors),
+		outboxDiscoveryCursors: make(map[namespace.Namespace]redisx.Cursors),
+		audit:                  noopAuditObserver{},
+		auditCounters:          &auditCounters{},
+		cursorKey:              newCursorSigningKey(),
 	}
 	// The default namespace is registered lazily on the first durable execution
 	// create, and listNamespaces also defensively includes the default namespace, so

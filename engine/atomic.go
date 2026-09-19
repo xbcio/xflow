@@ -713,11 +713,24 @@ func downstreamArrivals(g *graph.Graph, sourceIdx int, activePort string) []Down
 	return arrivals
 }
 
+// DefaultOutboxDiscoveryPage bounds one tick's outbox discovery page, sharded
+// across namespaces by the state store.
+//
+// The scan used to be exhaustive, so a larger page bought nothing but a larger
+// keyspace walk; it is now cursor-resumed, which makes the cost of raising this
+// linear in the page rather than quadratic in the backlog. A drain still
+// delivers everything a page yields, so this stays well under the point where
+// one tick's flush would dominate the interval.
+const DefaultOutboxDiscoveryPage = 256
+
 // OutboxDispatcher periodically retries durable delivery intents left behind
 // by queue outages, response loss, or process crashes.
 type OutboxDispatcher struct {
 	engine   *Engine
 	interval time.Duration
+	// discoveryPage is the per-drain discovery limit. drain runs on a single
+	// goroutine (Run), so no field needs a lock.
+	discoveryPage int
 }
 
 // NewOutboxDispatcher creates a retry loop for durable scheduling intents.
@@ -725,7 +738,11 @@ func NewOutboxDispatcher(eng *Engine, interval time.Duration) *OutboxDispatcher 
 	if interval <= 0 {
 		interval = time.Second
 	}
-	return &OutboxDispatcher{engine: eng, interval: interval}
+	return &OutboxDispatcher{
+		engine:        eng,
+		interval:      interval,
+		discoveryPage: DefaultOutboxDiscoveryPage,
+	}
 }
 
 // Run drains ready outboxes until ctx is canceled.
@@ -751,7 +768,11 @@ func (d *OutboxDispatcher) drain(ctx context.Context) {
 		d.engine.notifyOutboxError(ctx, "state", err)
 		return
 	}
-	ids, err := state.ListOutboxExecutions(ctx, 256)
+	page := d.discoveryPage
+	if page <= 0 {
+		page = DefaultOutboxDiscoveryPage
+	}
+	ids, err := state.ListOutboxExecutions(ctx, page)
 	if err != nil {
 		d.engine.notifyOutboxError(ctx, "list_executions", err)
 		if d.engine.logger != nil {
