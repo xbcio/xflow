@@ -98,7 +98,10 @@ func (s *memoryState) SeedExecutionFromEntry(_ context.Context, req engine.SeedE
 
 	// Step 6b: Write downstream outbox entries.
 	if req.Outcome == engine.GroupOutcomeSuccess || len(req.Downstream) > 0 {
-		s.applyGroupDownstreamLocked(execID, req.Downstream)
+		_, skipped := s.applyGroupDownstreamLocked(execID, req.Downstream)
+		// Reported only on this path: the duplicate and conflict returns above
+		// applied no transition, so they skipped nothing.
+		result.Skipped = skipped
 	}
 
 	// Step 7: Store admission entry.

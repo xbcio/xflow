@@ -219,7 +219,8 @@ func (s *memoryState) AdvanceNode(_ context.Context, req engine.AdvanceNodeReque
 			taskType = engine.TaskTypeNodeExec
 		}
 		outboxID := executeOutboxID(req.ExecutionID, arrival.NodeName, req.ActivationID)
-		if schedule == "skip" {
+		isSkip := schedule == "skip"
+		if isSkip {
 			taskType = engine.TaskTypeNodeSkip
 			outboxID = skipOutboxID(req.ExecutionID, arrival.NodeName, req.ActivationID)
 		}
@@ -233,6 +234,12 @@ func (s *memoryState) AdvanceNode(_ context.Context, req engine.AdvanceNodeReque
 			AutoDepth:    req.AutoDepth,
 		}, time.Time{}) {
 			result.OutboxIDs = append(result.OutboxIDs, outboxID)
+			// Only when the intent was actually written: a redelivered advance
+			// whose skip intent already exists applies nothing new, and
+			// reporting it would double-count one skip.
+			if isSkip {
+				result.Skipped = append(result.Skipped, engine.SkippedUnit{NodeName: arrival.NodeName, Count: 1})
+			}
 		}
 	}
 	return result, nil

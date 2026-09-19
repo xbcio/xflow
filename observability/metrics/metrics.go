@@ -394,6 +394,7 @@ var metricHelp = map[string]string{
 	"xflow_lease_sweep_repair_duration_seconds":      "Duration of lease sweep repair operations.",
 	"xflow_lease_sweep_repair_reconciled":            "Number of leases reconciled in the last sweep repair run.",
 	"xflow_node_started_total":                       "Nodes that started execution.",
+	"xflow_node_skipped_total":                       "Downstream units a scheduling transition resolved as skip rather than execute, partitioned by the flow that decided it (entry/advance/group) and the skipped node. A skip is not a silent drop — it leaves a durable TaskTypeNodeSkip outbox intent and the position advances past the branch — but nothing else makes it visible: no error is raised, and the consumer-lag signal points the WRONG way, because consuming the batch and advancing past it makes lag decrease while the data never arrives. Alert on any nonzero rate on a workload that must not lose data.",
 	"xflow_node_completed_total":                     "Nodes that completed execution.",
 	"xflow_node_duration_seconds":                    "Wall-clock duration of node execution.",
 	"xflow_node_suspended_total":                     "Nodes that suspended pending async completion.",

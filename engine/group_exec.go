@@ -135,6 +135,10 @@ func (e *Engine) commitGroup(ctx context.Context, g *graph.Graph, lease *GroupLe
 	if err != nil {
 		return fmt.Errorf("commit group %q: %w", meta.Name, err)
 	}
+	// A group commit is also where the group's downstream fan-in is counted, so
+	// this is the third and last place a skip is decided. A stale-token commit
+	// applied nothing and reports no skips.
+	e.notifySkip(ctx, flowGroup, res.Skipped)
 
 	// commitObserver's outcome label space is deliberately narrower than
 	// CommitOutcome. CommitGroupResult short-circuits to

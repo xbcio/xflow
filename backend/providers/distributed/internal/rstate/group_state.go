@@ -94,11 +94,23 @@ return {1}
 //	6=fatal(0|1) 7=allowCycles(0|1) 8=error 9=exitCount 10=downstreamCount
 //	11.. = per exit: encoded output data + private-output bit (2 args each), followed by
 //	       per unit: arrivalCount, activeCount, mergeMode,
-//	       executeID, executeBody, skipID, skipBody (7 args each)
+//	       executeID, executeBody, skipID, skipBody, nodeName (8 args each)
 //
-// Returns {code, done, finalStatus}: code 0=stale 1=accepted 2=duplicate_terminal
+// Returns {code, done, finalStatus, written, skips}: code 0=stale 1=accepted
 //
-//	3=execution_inactive
+//	2=duplicate_terminal 3=execution_inactive; written is the outbox IDs
+//	actually enqueued; skips is the flat {name, count, ...} list of the
+//	downstream units this commit resolved as skip rather than execute. The Go
+//	wrapper reads the first four and treats a four-element reply as "no skips",
+//	which is both a script revision predating this element and a commit that
+//	genuinely skipped nothing — the same shape, decoded the same way, so the
+//	wider reply cannot fail a commit Redis has already applied.
+//
+//	nodeName rides in a slot the skip branch alone reads: the script names the
+//	units it skipped rather than letting the caller re-derive them. A group
+//	commit request is assembled fresh by the caller and handed straight to the
+//	script — never decoded out of a durable body written by an older revision —
+//	so widening the per-unit slot cannot desynchronize a replay.
 //
 // A MISSING exec:status is execution_inactive, not a fall-through. Lua reads an
 // absent key as false, which equals none of the four terminal strings, so the
@@ -170,6 +182,14 @@ local finalStatus = ''
 -- wrapper does not have to guess: it knows both candidate IDs (execute and
 -- skip) per arrival but not which -- if either -- the script chose.
 local written = {}
+-- Downstream units resolved as skip rather than execute, as a flat
+-- {name, count, ...} list. Reported for the same reason 'written' is: the Go
+-- wrapper knows both candidate IDs and both candidate outcomes per arrival but
+-- not which one was taken. A skip queues a durable TaskTypeNodeSkip intent and
+-- the position advances past the branch, so the downstream unit never runs and
+-- no error is raised — the full statement of that semantic boundary is on
+-- advanceNodeLua's doc comment, and this list is what makes it visible.
+local skips = {}
 if tonumber(ARGV[7]) == 0 then
     local remaining = redis.call('DECR', KEYS[3])
     redis.call('EXPIRE', KEYS[3], ttl)
@@ -207,6 +227,7 @@ if done == 0 and tonumber(ARGV[6]) == 0 and redis.call('GET', KEYS[1]) ~= 'cance
         local executeBody = ARGV[argpos + 4]
         local skipID = ARGV[argpos + 5]
         local skipBody = ARGV[argpos + 6]
+        local arrivalName = ARGV[argpos + 7] or ''
         local activeBefore = tonumber(redis.call('GET', activeKey) or '0')
         local remaining = redis.call('DECRBY', inDegreeKey, arrivals)
         if activeArrivals > 0 then
@@ -235,6 +256,8 @@ if done == 0 and tonumber(ARGV[6]) == 0 and redis.call('GET', KEYS[1]) ~= 'cance
                 if nextAction == 'skip' then
                     outboxID = skipID
                     outboxBody = skipBody
+                    table.insert(skips, arrivalName)
+                    table.insert(skips, 1)
                 end
                 if redis.call('HSETNX', KEYS[9], outboxID, outboxBody) == 1 then
                     redis.call('ZADD', KEYS[8], tonumber(ARGV[2]), outboxID)
@@ -243,11 +266,11 @@ if done == 0 and tonumber(ARGV[6]) == 0 and redis.call('GET', KEYS[1]) ~= 'cance
             end
         end
         keypos = keypos + 3
-        argpos = argpos + 7
+        argpos = argpos + 8
     end
     redis.call('EXPIRE', KEYS[8], ttl); redis.call('EXPIRE', KEYS[9], ttl)
 end
-return {1, done, finalStatus, written}
+return {1, done, finalStatus, written, skips}
 `)
 
 // ---------------------------------------------------------------------------
@@ -373,13 +396,16 @@ func (s *Store) CommitGroup(ctx context.Context, req engine.GroupCommitRequest) 
 		if err != nil {
 			return engine.GroupCommitResult{}, err
 		}
-		args = append(args, arrival.ArrivalCount, arrival.ActiveCount, arrival.MergeMode, executeID, executeJSON, skipID, skipJSON)
+		args = append(args, arrival.ArrivalCount, arrival.ActiveCount, arrival.MergeMode, executeID, executeJSON, skipID, skipJSON, arrival.NodeName)
 	}
 	res, err := commitGroupLua.Run(ctx, s.rdb, keys, args...).Slice()
 	if err != nil {
 		return engine.GroupCommitResult{}, fmt.Errorf("commit group %q/#%d: %w", req.ExecutionID, req.GroupUnitIdx, err)
 	}
-	if len(res) != 4 {
+	// Four elements at minimum: a script revision predating the skip list still
+	// returns {code, done, finalStatus, written}, and rejecting it would fail a
+	// commit Redis has already applied.
+	if len(res) < 4 {
 		return engine.GroupCommitResult{}, fmt.Errorf("commit group %q/#%d: unexpected result %v", req.ExecutionID, req.GroupUnitIdx, res)
 	}
 	out := engine.GroupCommitResult{}
@@ -399,6 +425,12 @@ func (s *Store) CommitGroup(ctx context.Context, req engine.GroupCommitRequest) 
 		// nothing at all had been scheduled. The local backend reports what it
 		// actually wrote; the script now does too.
 		out.OutboxIDs = redisResultStrings(res[3])
+		// Element 5 is the skipped-unit list, absent from an older script
+		// revision — which then reports no skips rather than failing a commit
+		// that already applied.
+		if len(res) >= 5 {
+			out.Skipped = skippedUnitsFromLua(res[4])
+		}
 	case 2:
 		out.Outcome = engine.CommitOutcomeDuplicateTerminal
 	case 3:

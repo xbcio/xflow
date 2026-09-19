@@ -40,9 +40,20 @@ var _ engine.EntryAdmissionStore = (*Store)(nil)
 //	5=exitCount 6=downstreamCount
 //	7.. = per exit: encoded exit data + private-output bit (2 args each)
 //	7+2*exitCount..end = per downstream: arrivalCount, activeCount, mergeMode,
-//	                   executeID, executeBody, skipID, skipBody (7 each)
+//	                   executeID, executeBody, skipID, skipBody, nodeName (8 each)
 //
-// Returns {code, finalStatus}: code 1=accepted, 2=duplicate, 3=conflict
+// Returns {code, finalStatus, skips}: code 1=accepted, 2=duplicate, 3=conflict;
+// skips is the flat {name, count, ...} list of the downstream units this
+// admission resolved as skip rather than execute. The Go wrapper reads the
+// first two and treats a two-element reply as "no skips", which is both a
+// script revision predating this element and an admission that genuinely
+// skipped nothing — the same shape, decoded the same way, so the wider reply
+// cannot fail an admission Redis has already accepted.
+//
+// nodeName rides in a slot the skip branch alone reads: an admission request is
+// assembled fresh by the caller and handed straight to the script, never
+// decoded out of a durable body written by an older revision, so widening the
+// per-downstream slot cannot desynchronize a replay.
 var seedExecutionFromEntryLua = redis.NewScript(`
 local existing = redis.call('GET', KEYS[1])
 if existing and existing ~= '' then
@@ -91,6 +102,11 @@ if remaining <= 0 then
     redis.call('SET', KEYS[2], finalStatus, 'EX', ttl)
 end
 -- Step 7: Downstream fan-in (same logic as commitGroupLua).
+-- Downstream units resolved as skip rather than execute, as a flat
+-- {name, count, ...} list. Same semantics and same observation as the other two
+-- skip sites — see advanceNodeLua's doc comment for what a skip means (durable
+-- skip intent, position advances, downstream never sees the data, no error).
+local skips = {}
 if remaining > 0 then
     local n = tonumber(ARGV[6] or '0')
     local argpos = 7 + 2 * exitCount
@@ -105,6 +121,7 @@ if remaining > 0 then
         local executeBody = ARGV[argpos + 4]
         local skipID = ARGV[argpos + 5]
         local skipBody = ARGV[argpos + 6]
+        local arrivalName = ARGV[argpos + 7] or ''
         local activeBefore = tonumber(redis.call('GET', activeKey) or '0')
         local rem = redis.call('DECRBY', inDegreeKey, arrivals)
         if activeArrivals > 0 then
@@ -133,6 +150,8 @@ if remaining > 0 then
                 if nextAction == 'skip' then
                     outboxID = skipID
                     outboxBody = skipBody
+                    table.insert(skips, arrivalName)
+                    table.insert(skips, 1)
                 end
                 if redis.call('HSETNX', KEYS[9], outboxID, outboxBody) == 1 then
                     redis.call('ZADD', KEYS[8], 0, outboxID)
@@ -140,11 +159,11 @@ if remaining > 0 then
             end
         end
         keypos = keypos + 3
-        argpos = argpos + 7
+        argpos = argpos + 8
     end
     redis.call('EXPIRE', KEYS[8], ttl); redis.call('EXPIRE', KEYS[9], ttl)
 end
-return {1, finalStatus}
+return {1, finalStatus, skips}
 `)
 
 // SeedExecutionFromEntry implements engine.EntryAdmissionStore using a
@@ -298,7 +317,7 @@ func (s *Store) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 		if err != nil {
 			return engine.SeedExecutionFromEntryResponse{}, err
 		}
-		args = append(args, arrival.ArrivalCount, arrival.ActiveCount, arrival.MergeMode, executeID, executeJSON, skipID, skipJSON)
+		args = append(args, arrival.ArrivalCount, arrival.ActiveCount, arrival.MergeMode, executeID, executeJSON, skipID, skipJSON, arrival.NodeName)
 	}
 
 	// Run Lua.
@@ -320,6 +339,13 @@ func (s *Store) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 			finalStatus = types.ExecutionStatus(fs)
 		}
 	}
+	// Element 3 is the skipped-unit list, absent from an older script revision
+	// — which then reports no skips rather than failing an admission Redis has
+	// already accepted.
+	var skipped []engine.SkippedUnit
+	if len(res) >= 3 {
+		skipped = skippedUnitsFromLua(res[2])
+	}
 	switch code {
 	case 1: // accepted
 		// The execution is created INSIDE seedExecutionFromEntryLua — this path
@@ -331,6 +357,7 @@ func (s *Store) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 			State:       engine.AdmissionStateAccepted,
 			ExecutionID: execID,
 			Duplicate:   false,
+			Skipped:     skipped,
 		}, nil
 	case 2: // duplicate (same hash)
 		return engine.SeedExecutionFromEntryResponse{

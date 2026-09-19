@@ -350,6 +350,12 @@ func (f *fakeState) AdvanceNode(_ context.Context, req AdvanceNodeRequest) (Adva
 			AutoDepth:    req.AutoDepth,
 		}, time.Time{}) {
 			result.OutboxIDs = append(result.OutboxIDs, entryID)
+			// Reported only when the intent was written, exactly as both real
+			// backends do: a redelivered advance whose skip intent already
+			// exists applied nothing new and must not report a second skip.
+			if action == "skip" {
+				result.Skipped = append(result.Skipped, SkippedUnit{NodeName: arrival.NodeName, Count: 1})
+			}
 		}
 	}
 	return result, nil
