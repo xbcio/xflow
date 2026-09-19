@@ -235,3 +235,72 @@ func TestMarkerOutlivesACommitPathThatForgetsToRefreshIt(t *testing.T) {
 		t.Fatal("isTransient returned false although the execution is still live")
 	}
 }
+
+// TestCompletionShorteningDoesNotDropTheMarkerFirst pins the ordering that made
+// transient executions leak node rows into SQL.
+//
+// Completion shortening used to include the marker, on the theory that a marker
+// must not outlive its execution. But shortening is one-way: with the marker
+// gone, a late CommitNode for the terminal execution calls getExecTTL, gets the
+// DURABLE lifetime (the marker is no longer there to answer), re-EXPIREs the
+// node keys to it, and then projects -- because isTransient now says "durable".
+// The execution declared ephemeral ends up in SQL.
+//
+// This asserts the marker survives completion, which is what keeps every later
+// read of that execution honest. The marker expires on its own, after the keys.
+func TestCompletionShorteningDoesNotDropTheMarkerFirst(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer func() { _ = rdb.Close() }()
+
+	state := New(rdb, nil, time.Hour)
+	state.transient = false
+
+	ctx := context.Background()
+	id := types.ExecutionID("exec-completion-keeps-marker")
+	tg := testTransientGraph()
+	tctx := engine.WithExecutionTransient(ctx, engine.TransientHint{
+		TTL:           tg.TransientTTL(),
+		CompletionTTL: tg.TransientCompletionTTL(),
+	})
+	if err := state.CreateExecution(tctx, &engine.ExecutionSnapshot{
+		ID:     id,
+		Status: types.ExecutionStatusRunning,
+		Graph:  tg,
+	}); err != nil {
+		t.Fatalf("CreateExecution: %v", err)
+	}
+
+	ns := namespace.WithNamespace(context.Background(), namespace.FromContext(tctx))
+	marker := transientMarkKey(namespace.FromContext(tctx), id)
+	if !mr.Exists(marker) {
+		t.Fatalf("precondition failed: no marker at %s", marker)
+	}
+
+	// Terminal transition: this is what invokes completion shortening.
+	if err := state.UpdateExecutionStatus(ns, id, types.ExecutionStatusSuccess, ""); err != nil {
+		t.Fatalf("UpdateExecutionStatus(terminal): %v", err)
+	}
+
+	if !mr.Exists(marker) {
+		t.Fatal("completion shortening removed the transient marker; a late " +
+			"CommitNode now reads the durable TTL, extends the node keys past it, " +
+			"and projects output from an execution declared ephemeral")
+	}
+	if !state.isTransient(ns, id) {
+		t.Fatal("isTransient answered false for a completed transient execution; " +
+			"any later projection of it would be persisted")
+	}
+
+	// The marker must also outlive the completion TTL it was formerly cut to,
+	// because node keys can still be re-extended after completion.
+	mr.FastForward(tg.TransientCompletionTTL() + 5*time.Second)
+	if !mr.Exists(marker) {
+		t.Fatal("the marker died at the completion TTL, which is shorter than the " +
+			"lifetime a late commit can give the node keys")
+	}
+}

@@ -355,10 +355,30 @@ func transientExecutionKeys(t namespace.Namespace, id types.ExecutionID, g *grap
 		execKey(t, id, "trace_id"),
 		execKey(t, id, "span_id"),
 		execKey(t, id, "trace_carrier"),
-		// The transient marker expires with the execution it describes. It is
-		// listed here so completion-time shortening covers it too: a marker that
-		// outlived its execution would answer for a recycled ID.
-		transientMarkKey(t, id),
+		// NOTE: the transient marker is deliberately ABSENT from this list.
+		//
+		// It used to be included, so that completion shortened the marker along
+		// with the data -- the intent being that a marker must not outlive its
+		// execution and answer for a recycled ID. That intent is sound but the
+		// cost was the opposite failure, and the opposite failure is worse:
+		//
+		//   shortening is a one-way door. Once the marker is dropped to the
+		//   completion TTL it dies ahead of the node keys, because a late or
+		//   duplicate CommitNode for a terminal execution still re-EXPIREs its
+		//   node keys via getExecTTL -- and with the marker gone that call
+		//   returns the DURABLE ttl, so the keys are extended to the long
+		//   lifetime while isTransient now answers "durable". The projection
+		//   then runs and persists output from an execution declared ephemeral.
+		//   Measured on a real deployment: xflow_nodes rows with no matching
+		//   xflow_executions row, one per completed transient execution.
+		//
+		// The marker is a handful of bytes with no payload, and its own TTL is
+		// bounded by transientMarkerTTLFactor, so leaving it to expire on its
+		// own keeps it alive at least as long as every key above and costs
+		// nothing. The recycled-ID concern needs an ID to be reused within one
+		// TTL while the original keys are still alive, which is not a scenario
+		// this codebase's ID generation produces; the leak above is observed,
+		// not theoretical.
 		remainingNodesKey(t, id),
 		failedNodesKey(t, id),
 		leaseExpiryZSetKey(t, id),
