@@ -45,7 +45,16 @@ type Config struct {
 	// false for everything and the route would 404 unconditionally.
 	Artifacts   *store.ArtifactStore
 	Concurrency int
-	Auth        control.Authenticator
+	// LeaseTTL is how long a dispatched task lease stays valid before the
+	// LeaseSweeper treats the runner holding it as crashed and re-queues the
+	// task. Zero (the default) leaves engine.DefaultLeaseTTL in place.
+	//
+	// It bounds the time a crashed runner's work is unavailable, and equally
+	// the time a slow-but-live runner has to renew: a value below the slowest
+	// legitimate task lets the sweeper preempt live work and run it twice. See
+	// control.Config.LeaseTTL, which this threads to verbatim.
+	LeaseTTL time.Duration
+	Auth     control.Authenticator
 	// RegistrationCodes / IssuedIdentities turn on the runner enrollment
 	// endpoint (/v1/runners/enroll). Both must be non-nil for enrollment to be
 	// live — control.NewControlPlane treats this pair as a single decision
@@ -384,6 +393,7 @@ func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 		RegistrationCodes:        cfg.RegistrationCodes,
 		IssuedIdentities:         cfg.IssuedIdentities,
 		IdentityTTL:              cfg.IdentityTTL,
+		LeaseTTL:                 cfg.LeaseTTL,
 		EnrollmentRunnerIDPrefix: cfg.EnrollmentRunnerIDPrefix,
 		Logger:                   cfg.Logger,
 		Metrics:                  cfg.Metrics,

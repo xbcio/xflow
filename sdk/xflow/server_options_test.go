@@ -175,3 +175,29 @@ func TestManagementRouteAbsentByDefault(t *testing.T) {
 			resp.StatusCode)
 	}
 }
+
+// The lease TTL is the window a dispatched task has to finish before the
+// sweeper treats the runner as crashed and re-queues the work. control.Config
+// already honored it (engine.WithDefaultLeaseTTL), but nothing on the SDK
+// exposed it: apiserver.Config had no field to carry it and 22 WithServer*
+// options had none for it, so an embedded server was pinned to
+// engine.DefaultLeaseTTL with no way to move in either direction.
+func TestWithServerLeaseTTLReachesTheAPIConfig(t *testing.T) {
+	sc := &serverConfig{}
+	WithServerLeaseTTL(90 * time.Second)(sc)
+
+	cfg := buildServerAPIConfig(ServerConfig{}, sc)
+	if cfg.LeaseTTL != 90*time.Second {
+		t.Errorf("LeaseTTL = %v, want 90s", cfg.LeaseTTL)
+	}
+}
+
+// Unset stays unset: zero must reach control.Config as zero so it keeps
+// applying engine.DefaultLeaseTTL. A non-zero default smuggled in here would
+// silently change every embedder's recovery latency on upgrade.
+func TestServerLeaseTTLDefaultsToUnset(t *testing.T) {
+	cfg := buildServerAPIConfig(ServerConfig{}, &serverConfig{})
+	if cfg.LeaseTTL != 0 {
+		t.Errorf("LeaseTTL = %v without WithServerLeaseTTL, want 0 (engine default)", cfg.LeaseTTL)
+	}
+}

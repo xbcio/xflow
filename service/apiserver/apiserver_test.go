@@ -5,9 +5,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/backend/providers/distributed"
 	backendlocal "github.com/xbcio/xflow/backend/providers/local"
+	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/service/control"
 )
 
@@ -256,5 +258,36 @@ func TestNewAPIServerPropagatesEnableRunnerMetricsProxy(t *testing.T) {
 	}
 	if srv2.cp.MetricsInbox() != nil {
 		t.Fatal("MetricsInbox() != nil; inbox should stay nil when the proxy is disabled")
+	}
+}
+
+// TestNewAPIServerPropagatesLeaseTTL verifies the full chain for the lease
+// TTL: Config.LeaseTTL flows through buildControlPlane into
+// control.Config.LeaseTTL, which applies engine.WithDefaultLeaseTTL. Asserted
+// on the engine the control plane actually built, so a break anywhere along
+// the chain fails here rather than silently pinning every deployment to
+// engine.DefaultLeaseTTL.
+//
+// This is the shape of defect it catches: control.Config.LeaseTTL and its
+// wiring into engine options already existed and worked, but apiserver.Config
+// had no field for it, so no caller could reach it. Asserting the option
+// reaches Config would have passed the whole time.
+func TestNewAPIServerPropagatesLeaseTTL(t *testing.T) {
+	srv, err := New(Config{Concurrency: 1, LeaseTTL: 90 * time.Second})
+	if err != nil {
+		t.Fatalf("New(LeaseTTL=90s): %v", err)
+	}
+	if got := srv.cp.SchedulingCore().LeaseTTL(); got != 90*time.Second {
+		t.Fatalf("engine LeaseTTL = %v, want 90s", got)
+	}
+
+	// Unset keeps the engine default rather than becoming zero (a zero TTL
+	// would expire every lease immediately).
+	srvDefault, err := New(Config{Concurrency: 1})
+	if err != nil {
+		t.Fatalf("New(): %v", err)
+	}
+	if got := srvDefault.cp.SchedulingCore().LeaseTTL(); got != engine.DefaultLeaseTTL {
+		t.Fatalf("engine LeaseTTL = %v, want engine.DefaultLeaseTTL (%v)", got, engine.DefaultLeaseTTL)
 	}
 }

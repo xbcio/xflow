@@ -99,6 +99,7 @@ type serverConfig struct {
 
 	tracer                   tracing.Tracer
 	concurrency              int
+	leaseTTL                 time.Duration
 	enableRunnerMetricsProxy bool
 	runnerMetricsInterval    time.Duration
 	enableManagement         bool
@@ -339,6 +340,24 @@ func WithServerTracer(t tracing.Tracer) ServerOption {
 // Zero (the default) leaves the backend's own default in place.
 func WithServerConcurrency(n int) ServerOption {
 	return func(c *serverConfig) { c.concurrency = n }
+}
+
+// WithServerLeaseTTL sets how long a dispatched task lease stays valid before
+// the LeaseSweeper treats the runner holding it as crashed and re-queues the
+// task. Zero (the default) keeps engine.DefaultLeaseTTL (60s).
+//
+// The TTL is a two-sided bound and neither side has a universally right
+// answer, which is why it is configurable rather than fixed. It is the delay
+// before a crashed runner's work becomes available again, so a deployment that
+// wants fast recovery pushes it down. It is also the window a live runner has
+// to renew, so a deployment with tasks that stall — a slow HTTP call, a large
+// artifact upload — must push it up: below the slowest legitimate task the
+// sweeper preempts work that is still running and the node executes twice.
+//
+// The engine renews a lease well before its deadline, so the TTL bounds
+// recovery latency, not the runner's renewal interval.
+func WithServerLeaseTTL(d time.Duration) ServerOption {
+	return func(c *serverConfig) { c.leaseTTL = d }
 }
 
 // WithServerRunnerMetricsProxy accepts metrics pushed by runners and merges
@@ -607,6 +626,7 @@ func buildServerAPIConfig(cfg ServerConfig, sc *serverConfig) apiserver.Config {
 		TLS:         sc.tls,
 		Tracer:      sc.tracer,
 		Concurrency: sc.concurrency,
+		LeaseTTL:    sc.leaseTTL,
 
 		EnableRunnerMetricsProxy: sc.enableRunnerMetricsProxy,
 		RunnerMetricsInterval:    sc.runnerMetricsInterval,
