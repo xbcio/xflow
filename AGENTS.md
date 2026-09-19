@@ -81,50 +81,33 @@ not the inner development loop. Skipping them is not skipping verification.
 ## AI-Generated Documentation Placement
 
 Agent-produced design docs, specs, plans, and review reports go in exactly two
-places:
+places, both gitignored process artifacts:
 
 - `docs/specs/` — designs and specs, named `YYYY-MM-DD-<topic>-design.md`
-- `docs/plans/` — implementation plans and their working notes, named
+- `docs/plans/` — implementation plans and working notes, named
   `YYYY-MM-DD-<topic>-plan.md`
 
-Both are gitignored, so these documents never enter version control. They are
-process artifacts, not published material.
+Do not create a third location, and do not put these in `docs/design/` — that
+is reserved for tracked, human-maintained architecture docs, alongside
+`docs/dsl-samples/` and `docs/references/`. Two things deliberately stay where
+they are: ADRs are durable tracked records of decisions the code already
+embodies (live in `docs/design/`, named `ADR-<id>-<topic>.md`), and
+`.claude/superpowers/sdd/` is per-run execution scratch owned by the
+orchestration tooling.
 
-Do not create a third location. Six of them had accumulated before the
-2026-09-10 consolidation — `.claude/specs/`, `.claude/plans/`,
-`.claude/docs/specs/`, `.claude/decisions/`, `.claude/superpowers/{specs,plans}`
-(with a nested `superpowers/superpowers/` copy), and
-`docs/superpowers/{specs,plans,notes}`. Their ignore rules survive only to
-catch a tool that still writes an old path. Do not put these documents under
-`docs/design/`, which is reserved for human-maintained architecture docs that
-ARE tracked, alongside user-facing references (`docs/dsl-samples/`,
-`docs/references/`).
+Because `docs/specs/` and `docs/plans/` do not ship, a tracked file that cites a
+path under them hands the reader a dead link. Do not add such citations; promote
+whatever content is needed into the tracked file itself. The one deliberate
+exception is `docs/design/RUNNER-IDENTITY-LIFECYCLE-TODO.md`, which names its
+source spec only to say that path is gitignored and transcribes the rulings in
+full — copy that shape when provenance is needed.
 
-Two things are deliberately not swept into these directories. An ADR is a
-durable public record of a decision the code now embodies, not a process
-artifact: ADRs are tracked, live in `docs/design/`, and are named
-`ADR-<id>-<topic>.md`. And `.claude/superpowers/sdd/` is per-run execution
-scratch owned by the orchestration tooling (task briefs, review diffs, the
-progress ledger a run resumes from); it stays where the tooling expects it.
-
-One consequence worth stating: whoever clones this repository does not get
-`docs/specs/` or `docs/plans/`, so a tracked file citing a path under them
-gives that reader a dead link. Do not add new such citations; when tracked
-code or a tracked doc needs to lean on one of these documents, promote the
-content it needs into the tracked file itself.
-
-No tracked file cites a path under these two directories any more, with one
-deliberate exception: `docs/design/RUNNER-IDENTITY-LIFECYCLE-TODO.md` names
-the spec it came from, but only to say that path is gitignored and the
-rulings are therefore transcribed in full below it. That is the shape to
-copy if you ever need provenance — name the source, say it does not ship,
-and inline what the reader needs.
-
-A related habit survives and is worth knowing about before you follow one:
-several comments cite a bare `design §6.1`, `§4.2`, `§7.1`. These are not
-paths, so they are not dead links, but nothing says which design, and at
-least one (`service/apiserver/module_artifact.go`'s `§6.3`, added in
-`3546d45`) matches no section in any candidate document.
+Background only: six legacy locations were consolidated on 2026-09-10
+(`.claude/specs/`, `.claude/plans/`, `.claude/docs/specs/`, `.claude/decisions/`,
+`.claude/superpowers/{specs,plans}`, `docs/superpowers/{specs,plans,notes}`);
+their ignore rules remain only to catch tools still writing an old path. A
+related unfixed habit: some comments cite a bare `design §6.1` / `§4.2` / `§7.1`
+with no document named, and at least one matches no section anywhere.
 
 ## Git Commits
 
