@@ -42,10 +42,23 @@ type OutboxDeliveryFailure struct {
 // manager's, for instance — keeps compiling. The dispatcher type-asserts the
 // installed OutboxObserver, so an observer that does not implement this simply
 // receives no drain observations.
+//
+// Both numbers exist because neither alone answers "is dispatch keeping up".
+// A drain that discovers nothing while ready work is visible in
+// xflow_outbox_ready means discovery cannot see the backlog; a drain that
+// discovers work and runs far longer than the configured interval means
+// delivery is the bound. Operators previously had to count Redis keys by hand
+// to tell those apart.
 type OutboxDispatchObserver interface {
 	// OnOutboxDrain reports how many executions this drain discovered with
 	// ready outbox work, and how long the whole pass took.
 	OnOutboxDrain(ctx context.Context, discovered int, duration time.Duration)
+	// OnOutboxBacklog reports the dispatcher's throttled backlog scan. It
+	// carries the whole snapshot, including the due-now count OutboxObserver's
+	// OnOutboxPending has no field for; an observer that also implements
+	// OutboxObserver still receives that older callback and should keep
+	// reporting pending and dead-lettered from it rather than from here.
+	OnOutboxBacklog(ctx context.Context, snapshot OutboxMetricsSnapshot)
 }
 
 // OutboxMetricsSnapshot reports the aggregate durable outbox backlog. The
@@ -54,6 +67,19 @@ type OutboxMetricsSnapshot struct {
 	Pending         int
 	OldestPendingAt time.Time
 	DeadLettered    int
+	// Ready is how many of the pending entries are due for delivery right now.
+	//
+	// Pending counts every entry sitting in an execution's ready index, which
+	// includes entries a live deliverer currently holds a lease on and entries
+	// waiting out a retry backoff — both scored in the future and both
+	// undeliverable at this instant. Ready counts only the entries whose score
+	// has passed, which is the number a dispatcher could hand to the queue in
+	// this tick. A backlog that is large but entirely not-yet-ready is a
+	// different state from one that is large and due, and Pending alone cannot
+	// distinguish them.
+	//
+	// A store that cannot answer it reports zero.
+	Ready int
 }
 
 // OutboxFailureRecorder is an optional StateStore capability that durably
@@ -440,4 +466,20 @@ func (e *Engine) observeOutboxMetrics(ctx context.Context, state AtomicStateStor
 		}
 	}
 	e.notifyOutboxPending(ctx, snapshot.Pending, snapshot.DeadLettered, oldestAge)
+	e.notifyOutboxBacklog(ctx, snapshot)
+}
+
+// notifyOutboxBacklog hands the full snapshot to an observer that opted into
+// the dispatcher's own observations. It is separate from notifyOutboxPending,
+// which every OutboxObserver still receives: that callback predates the Ready
+// field and has no argument for it, and widening it would break every existing
+// implementation.
+func (e *Engine) notifyOutboxBacklog(ctx context.Context, snapshot OutboxMetricsSnapshot) {
+	observer, ok := e.outboxObserver.(OutboxDispatchObserver)
+	if !ok {
+		return
+	}
+	safeHook(ctx, e.logger, func(observerCtx context.Context) {
+		observer.OnOutboxBacklog(observerCtx, snapshot)
+	})
 }

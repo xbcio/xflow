@@ -22,6 +22,7 @@ func TestOutboxDispatchObserverMetricsIncrement(t *testing.T) {
 	outbox := NewOutboxMetrics(m)
 
 	outbox.OnOutboxDrain(ctx, 42, 1500*time.Millisecond)
+	outbox.OnOutboxBacklog(ctx, engine.OutboxMetricsSnapshot{Pending: 900, Ready: 120})
 
 	req := httptest.NewRequest("GET", "/metrics", nil)
 	rec := httptest.NewRecorder()
@@ -32,6 +33,7 @@ func TestOutboxDispatchObserverMetricsIncrement(t *testing.T) {
 		`xflow_outbox_drain_discovered{namespace="default"} 42`,
 		`xflow_outbox_drain_duration_seconds_count{namespace="default"} 1`,
 		`xflow_outbox_drain_duration_seconds_sum{namespace="default"} 1.5`,
+		`xflow_outbox_ready{namespace="default"} 120`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("metrics body missing %q:\n%s", want, body)
@@ -49,4 +51,22 @@ func TestOutboxDispatchObserverImplementsTheOptionalContract(t *testing.T) {
 		_ engine.OutboxObserver         = OutboxMetrics{}
 		_ engine.OutboxDispatchObserver = OutboxMetrics{}
 	)
+}
+
+// TestOutboxReadyGaugeTracksTheLastBacklogScan: ready is a gauge, so a second
+// scan that reports less must lower it rather than accumulate. A backlog
+// counter that only ever grew would read as a permanently stalled outbox.
+func TestOutboxReadyGaugeTracksTheLastBacklogScan(t *testing.T) {
+	m := New()
+	ctx := context.Background()
+	outbox := NewOutboxMetrics(m)
+
+	outbox.OnOutboxBacklog(ctx, engine.OutboxMetricsSnapshot{Pending: 900, Ready: 120})
+	outbox.OnOutboxBacklog(ctx, engine.OutboxMetricsSnapshot{Pending: 10, Ready: 0})
+
+	family := gatherMetricFamily(t, m, metricOutboxReady)
+	if got := family.GetMetric()[0].GetGauge().GetValue(); got != 0 {
+		t.Fatalf("xflow_outbox_ready = %v, want 0 -- a drained backlog must read as "+
+			"drained, not as the largest value ever seen", got)
+	}
 }

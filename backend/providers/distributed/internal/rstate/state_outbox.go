@@ -417,6 +417,9 @@ func (s *Store) oldestOutboxCreatedAt(ctx context.Context, bodyKey string, membe
 }
 
 func (s *Store) scanOutboxMetricsForNamespace(ctx context.Context, t namespace.Namespace, snapshot *engine.OutboxMetricsSnapshot) error {
+	// One cutoff for the whole scan: the due-now count is a point-in-time
+	// reading, and re-sampling per key would make the sum span a moving instant.
+	cutoff := strconv.FormatInt(time.Now().UTC().UnixMilli(), 10)
 	keys, err := redisx.ScanAll(ctx, s.rdb, execScanPattern(t, "outbox:ready"), 128)
 	if err != nil {
 		return fmt.Errorf("scan pending outbox indexes: %w", err)
@@ -430,6 +433,16 @@ func (s *Store) scanOutboxMetricsForNamespace(ctx context.Context, t namespace.N
 		if count == 0 {
 			continue
 		}
+		// The ready index is scored by availability, so a member scored in the
+		// future is either leased by a live deliverer or waiting out a retry
+		// backoff — neither is deliverable in this tick. ZCOUNT to the cutoff
+		// is what separates "backlog of future work" from "backlog dispatch is
+		// failing to clear", which ZCARD alone cannot.
+		due, err := s.rdb.ZCount(ctx, key, "-inf", cutoff).Result()
+		if err != nil {
+			return fmt.Errorf("count due outbox %q: %w", key, err)
+		}
+		snapshot.Ready += int(due)
 		head, err := s.rdb.ZRangeArgs(ctx, redis.ZRangeArgs{
 			Key: key, Start: "-inf", Stop: "+inf", ByScore: true,
 			Offset: 0, Count: outboxMetricsHeadCap,

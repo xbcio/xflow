@@ -14,6 +14,8 @@ import (
 // hand, which is exactly how a dispatch ceiling below the creation rate stayed
 // invisible for two releases.
 const (
+	// metricOutboxReady is the due-now share of the durable ready indexes.
+	metricOutboxReady = "xflow_outbox_ready"
 	// metricOutboxDrainDiscovered is how many executions one drain discovered.
 	metricOutboxDrainDiscovered = "xflow_outbox_drain_discovered"
 	// metricOutboxDrainDuration is how long one whole drain took.
@@ -42,4 +44,16 @@ var _ engine.OutboxDispatchObserver = OutboxMetrics{}
 func (o OutboxMetrics) OnOutboxDrain(ctx context.Context, discovered int, duration time.Duration) {
 	o.Metrics.Set(metricOutboxDrainDiscovered, withNamespace(ctx, nil), float64(discovered))
 	o.Metrics.Observe(metricOutboxDrainDuration, withNamespace(ctx, nil), duration)
+}
+
+// OnOutboxBacklog records the dispatcher's throttled backlog scan, which is the
+// only place the due-now share of the ready indexes is known.
+//
+// It reports xflow_outbox_ready alone and leaves pending / dead-lettered /
+// oldest-age to OutboxPending, which the engine still delivers to every
+// observer for compatibility. Splitting them this way is what let the existing
+// OnOutboxObserver contract stay untouched: it has no field for Ready, and
+// widening it would have broken every implementation of it.
+func (o OutboxMetrics) OnOutboxBacklog(ctx context.Context, snapshot engine.OutboxMetricsSnapshot) {
+	o.Metrics.Set(metricOutboxReady, withNamespace(ctx, nil), float64(snapshot.Ready))
 }

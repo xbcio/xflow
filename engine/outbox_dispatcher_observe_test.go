@@ -9,13 +9,28 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
+// OutboxMetrics reports the pending work as due. The fake keeps no
+// availability score and takes no delivery lease -- the two things that make a
+// pending entry undeliverable on the Redis path -- so every pending entry is
+// ready here, which is also what the in-memory StateStore reports.
+func (s *pageRecordingState) OutboxMetrics(ctx context.Context) (OutboxMetricsSnapshot, error) {
+	snapshot, err := s.outboxObserverState.OutboxMetrics(ctx)
+	if err != nil {
+		return snapshot, err
+	}
+	snapshot.Ready = snapshot.Pending
+	return snapshot, nil
+}
+
 // drainObserver records both dispatcher observations. It implements
 // OutboxObserver as well, because that is the option the dispatcher installs
 // it through: the drain observations ride the same observer, behind a type
 // assert.
 type drainObserver struct {
-	mu     sync.Mutex
-	drains []drainObservation
+	mu        sync.Mutex
+	drains    []drainObservation
+	backlogs  []OutboxMetricsSnapshot
+	pendingAt []OutboxMetricsSnapshot
 }
 
 type drainObservation struct {
@@ -28,11 +43,15 @@ func (o *drainObserver) OnOutboxDeadLetter(context.Context)                     
 func (o *drainObserver) OnOutboxReplayed(context.Context, DeadLetterReplayOutcome) {}
 func (o *drainObserver) OnOutboxError(context.Context, string, error)              {}
 
-// OnOutboxPending is the legacy backlog callback. This observer leaves it
-// empty: the same snapshot arrives through the dispatch observation, and the
-// point of the type assert the dispatcher does is that an observer only has to
-// implement what it reports.
-func (o *drainObserver) OnOutboxPending(context.Context, int, int, time.Duration) {}
+func (o *drainObserver) OnOutboxPending(_ context.Context, pending, deadLettered int, oldestAge time.Duration) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.pendingAt = append(o.pendingAt, OutboxMetricsSnapshot{
+		Pending:         pending,
+		DeadLettered:    deadLettered,
+		OldestPendingAt: time.Now().Add(-oldestAge),
+	})
+}
 
 func (o *drainObserver) OnOutboxDrain(_ context.Context, discovered int, duration time.Duration) {
 	o.mu.Lock()
@@ -40,10 +59,22 @@ func (o *drainObserver) OnOutboxDrain(_ context.Context, discovered int, duratio
 	o.drains = append(o.drains, drainObservation{discovered: discovered, duration: duration})
 }
 
+func (o *drainObserver) OnOutboxBacklog(_ context.Context, snapshot OutboxMetricsSnapshot) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.backlogs = append(o.backlogs, snapshot)
+}
+
 func (o *drainObserver) drainObservations() []drainObservation {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return append([]drainObservation(nil), o.drains...)
+}
+
+func (o *drainObserver) backlogObservations() []OutboxMetricsSnapshot {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]OutboxMetricsSnapshot(nil), o.backlogs...)
 }
 
 // TestOutboxDispatcherReportsDrainDurationAndDiscovery pins the two numbers an
@@ -79,6 +110,21 @@ func TestOutboxDispatcherReportsDrainDurationAndDiscovery(t *testing.T) {
 	}
 	if drains[0].duration <= 0 {
 		t.Fatalf("drain duration = %v, want positive", drains[0].duration)
+	}
+	// The backlog scan rides the same drain, and it is the only place the
+	// due-now count is known.
+	backlogs := observer.backlogObservations()
+	if len(backlogs) != 1 {
+		t.Fatalf("backlog observations = %d, want 1", len(backlogs))
+	}
+	if backlogs[0].Pending != 1 || backlogs[0].Ready != 1 {
+		t.Fatalf("backlog observation = %+v, want pending=1 ready=1 -- the undelivered entry "+
+			"is both still pending and due", backlogs[0])
+	}
+	if len(observer.pendingAt) != 1 {
+		t.Fatalf("legacy pending observations = %d, want 1 -- widening the backlog "+
+			"observation must not remove the callback every existing observer implements",
+			len(observer.pendingAt))
 	}
 }
 
