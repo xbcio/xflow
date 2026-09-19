@@ -3,6 +3,7 @@ package rstate
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -390,9 +391,47 @@ func (s *Store) projectExecutionStatus(ctx context.Context, id types.ExecutionID
 	if s.db == nil || s.isTransient(ctx, id) || status == "" {
 		return
 	}
-	s.auditWrite(ctx, "update_execution_status", func(ctx context.Context) error {
-		return s.db.UpdateExecutionStatus(ctx, id, status, errMsg)
-	})
+	err := s.db.UpdateExecutionStatus(ctx, id, status, errMsg)
+	if err != nil && errors.Is(err, store.ErrNotFound) && !s.executionExists(ctx, id) {
+		// The two ways to reach here are both benign and neither is a fault:
+		//
+		//   - a transient execution whose marker expired (transientTTL is an
+		//     upper bound on run time; a run that outlives it takes the marker
+		//     with it), so isTransient read "marker absent" as "durable" and the
+		//     MySQL row was never created in the first place;
+		//   - a late projection for an execution whose keys have already gone,
+		//     so there is no Redis state left to mirror.
+		//
+		// What must NOT happen is counting these as audit failures: the audit
+		// trail is best-effort by contract (Redis is authoritative), and at one
+		// error line per occurrence this reads as a broken store rather than as
+		// the write it correctly declined to make. The Redis existence check
+		// runs only on this path, so the happy path pays nothing.
+		s.audit.OnAuditOK(ctx, "update_execution_status")
+		if s.auditCounters != nil {
+			s.auditCounters.OnAuditOK(ctx, "update_execution_status")
+		}
+		if s.logger != nil {
+			s.logger.Debug("update_execution_status skipped; execution already gone",
+				"execution_id", string(id), "status", string(status))
+		}
+		return
+	}
+	s.auditWrite(ctx, "update_execution_status", func(context.Context) error { return err })
+}
+
+// executionExists reports whether Redis still holds any state for the execution.
+// It is the arbiter for the disappeared-execution case above because :status is
+// written at CreateExecution and re-EXPIREd by every committed mutation, so its
+// absence means the execution is gone rather than merely unprojected.
+func (s *Store) executionExists(ctx context.Context, id types.ExecutionID) bool {
+	exists, err := s.rdb.Exists(ctx, execKey(namespace.FromContext(ctx), id, "status")).Result()
+	if err != nil {
+		// Unreadable is not absent: keep the original failure so a real store
+		// fault is still counted.
+		return true
+	}
+	return exists > 0
 }
 
 // terminalExecutionError picks the reason to project for a terminal execution.
