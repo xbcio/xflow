@@ -728,7 +728,50 @@ const DefaultOutboxMetricsInterval = 30 * time.Second
 // linear in the page rather than quadratic in the backlog. A drain still
 // delivers everything a page yields, so this stays well under the point where
 // one tick's flush would dominate the interval.
-const DefaultOutboxDiscoveryPage = 256
+//
+// The page is also the discovery CEILING, which is what makes it a throughput
+// parameter rather than a tuning nicety. SCAN's COUNT counts keys EXAMINED, not
+// keys matched, so at a keyspace of N keys one drain reaches at most about
+// page/N of the ready backlog and a cursor needs N/page drains to come all the
+// way around.
+//
+// That ceiling is the discovery half of the deficit this default was sized
+// against: a host deployed on a shared Redis Cluster with a five-figure key
+// count reported 68 outbox dispatches per minute against 364 executions
+// created per minute, with the backlog stable instead of draining. At 256, a
+// cursor needs some eighty drains to see that keyspace once, so the ready
+// backlog is rediscovered far more slowly than it is produced no matter how
+// healthy delivery itself is.
+//
+// 2048 rather than 256: at a 20k-key keyspace it covers the cursor in ~10
+// drains instead of ~80, while the flush work a full page implies (~2048
+// executions) still fits an interval on the deployments this bounds. A keyspace
+// far larger than that needs the host to raise it further — see
+// WithOutboxDiscoveryPage — because no fixed default can track an unbounded
+// keyspace. The lasting fix is to discover ready work from an index instead of
+// from the keyspace; until the layout has one that survives Redis Cluster's
+// single-slot scripting rule, this knob is what bounds discovery.
+const DefaultOutboxDiscoveryPage = 2048
+
+// OutboxDispatcherOption configures an OutboxDispatcher.
+type OutboxDispatcherOption func(*OutboxDispatcher)
+
+// WithOutboxDiscoveryPage sizes one drain's discovery page. Zero or negative
+// leaves DefaultOutboxDiscoveryPage in place.
+//
+// The right value is a deployment property, not a library constant: it trades
+// keyspace scanned per tick against how long the cursor takes to come around,
+// and only the operator knows the keyspace size and how much scan load the
+// shared Redis will take. Raising it is the supported answer to "the outbox
+// backlog grows but xflow_outbox_drain_discovered stays flat" — see
+// DefaultOutboxDiscoveryPage for why the page bounds discovery at all.
+func WithOutboxDiscoveryPage(page int) OutboxDispatcherOption {
+	return func(d *OutboxDispatcher) {
+		if page > 0 {
+			d.discoveryPage = page
+		}
+	}
+}
 
 // OutboxDispatcher periodically retries durable delivery intents left behind
 // by queue outages, response loss, or process crashes.
@@ -744,16 +787,22 @@ type OutboxDispatcher struct {
 }
 
 // NewOutboxDispatcher creates a retry loop for durable scheduling intents.
-func NewOutboxDispatcher(eng *Engine, interval time.Duration) *OutboxDispatcher {
+func NewOutboxDispatcher(eng *Engine, interval time.Duration, opts ...OutboxDispatcherOption) *OutboxDispatcher {
 	if interval <= 0 {
 		interval = time.Second
 	}
-	return &OutboxDispatcher{
+	d := &OutboxDispatcher{
 		engine:          eng,
 		interval:        interval,
 		discoveryPage:   DefaultOutboxDiscoveryPage,
 		metricsInterval: DefaultOutboxMetricsInterval,
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(d)
+		}
+	}
+	return d
 }
 
 // Run drains ready outboxes until ctx is canceled.
