@@ -134,7 +134,7 @@ Read before implementing core features:
 - **[docs/design/DEPLOYMENT-TOPOLOGIES.md](docs/design/DEPLOYMENT-TOPOLOGIES.md)** — SDK modes (local/cluster/remote) + server/runner cluster architecture; current vs planned
 - **[docs/design/STORAGE-CONTRACT.md](docs/design/STORAGE-CONTRACT.md)** — Redis-as-system-of-record dual-write contract
 - **[docs/design/CORE-COMPONENTS.md](docs/design/CORE-COMPONENTS.md)** — Target design for server clustering (Raft HA, Relay Gateway) — not yet implemented
-- **[docs/TESTING.md](docs/TESTING.md)** — Test commands, strategies, conventions
+- **[docs/TESTING.md](docs/TESTING.md)** — Test commands, strategies, conventions; also the pinned protoc / protoc-gen-go / protoc-gen-go-grpc versions and the non-destructive `make proto-check` for `service/protocol/runnerpb/` drift
 - **[docs/NAMING-CONVENTIONS.md](docs/NAMING-CONVENTIONS.md)** — Stutter policy: which package/identifier names to fix vs. the four idiomatic patterns to leave alone
 - **[docs/CODING-STANDARDS.md](docs/CODING-STANDARDS.md)** — Naming, comments, error handling, concurrency
 - **[docs/design/DSL-SPECIFICATION.md](docs/design/DSL-SPECIFICATION.md)** — Complete DSL syntax specification
