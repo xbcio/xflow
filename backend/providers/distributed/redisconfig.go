@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"time"
 
 	asynqlib "github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
@@ -31,6 +32,21 @@ type RedisConfig struct {
 	SentinelPassword string
 	TLSConfig        *tls.Config
 	DB               int
+
+	// Timeouts. Zero keeps go-redis's own default (3s for Dial/Read/Write,
+	// PoolTimeout = ReadTimeout + 1s), which is tuned for a local Redis and is
+	// too tight for a remote one: operations on the deployment this was
+	// measured against took 13.5-16.3s, so every one of them failed with
+	// "i/o timeout" and the caller saw a connection error rather than the slow
+	// answer it was about to get.
+	//
+	// These are deployment properties, not policy: the value that works is a
+	// function of where Redis lives relative to the caller, so they have to be
+	// configurable rather than guessed here.
+	DialTimeout  time.Duration
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
+	PoolTimeout  time.Duration
 }
 
 // validate checks that the configuration is self-consistent. It is fail-closed:
@@ -91,11 +107,14 @@ func (c RedisConfig) AsAsynqConnOpt() (asynqlib.RedisConnOpt, error) {
 	switch c.Mode {
 	case RedisModeSingle:
 		return asynqlib.RedisClientOpt{
-			Addr:      c.firstAddr(),
-			Username:  c.Username,
-			Password:  c.Password,
-			TLSConfig: c.TLSConfig,
-			DB:        c.DB,
+			Addr:         c.firstAddr(),
+			Username:     c.Username,
+			Password:     c.Password,
+			TLSConfig:    c.TLSConfig,
+			DB:           c.DB,
+			DialTimeout:  c.DialTimeout,
+			ReadTimeout:  c.ReadTimeout,
+			WriteTimeout: c.WriteTimeout,
 		}, nil
 	case RedisModeSentinel:
 		return asynqlib.RedisFailoverClientOpt{
@@ -107,13 +126,19 @@ func (c RedisConfig) AsAsynqConnOpt() (asynqlib.RedisConnOpt, error) {
 			SentinelPassword: c.SentinelPassword,
 			TLSConfig:        c.TLSConfig,
 			DB:               c.DB,
+			DialTimeout:      c.DialTimeout,
+			ReadTimeout:      c.ReadTimeout,
+			WriteTimeout:     c.WriteTimeout,
 		}, nil
 	case RedisModeCluster:
 		return asynqlib.RedisClusterClientOpt{
-			Addrs:     c.Addrs,
-			Username:  c.Username,
-			Password:  c.Password,
-			TLSConfig: c.TLSConfig,
+			Addrs:        c.Addrs,
+			Username:     c.Username,
+			Password:     c.Password,
+			TLSConfig:    c.TLSConfig,
+			DialTimeout:  c.DialTimeout,
+			ReadTimeout:  c.ReadTimeout,
+			WriteTimeout: c.WriteTimeout,
 		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported redis mode %q", c.Mode)
@@ -131,11 +156,15 @@ func newRedisClient(cfg RedisConfig) (redis.UniversalClient, error) {
 	case RedisModeSingle:
 		addr := cfg.firstAddr()
 		return redis.NewClient(&redis.Options{
-			Addr:      addr,
-			Username:  cfg.Username,
-			Password:  cfg.Password,
-			TLSConfig: cfg.TLSConfig,
-			DB:        cfg.DB,
+			Addr:         addr,
+			Username:     cfg.Username,
+			Password:     cfg.Password,
+			TLSConfig:    cfg.TLSConfig,
+			DB:           cfg.DB,
+			DialTimeout:  cfg.DialTimeout,
+			ReadTimeout:  cfg.ReadTimeout,
+			WriteTimeout: cfg.WriteTimeout,
+			PoolTimeout:  cfg.PoolTimeout,
 		}), nil
 	case RedisModeSentinel, RedisModeCluster:
 		// redis.NewUniversalClient does not dispatch on any explicit mode: with
@@ -163,6 +192,10 @@ func newRedisClient(cfg RedisConfig) (redis.UniversalClient, error) {
 			SentinelPassword: cfg.SentinelPassword,
 			TLSConfig:        cfg.TLSConfig,
 			DB:               cfg.DB,
+			DialTimeout:      cfg.DialTimeout,
+			ReadTimeout:      cfg.ReadTimeout,
+			WriteTimeout:     cfg.WriteTimeout,
+			PoolTimeout:      cfg.PoolTimeout,
 		}), nil
 	default:
 		return nil, fmt.Errorf("unsupported redis mode %q", cfg.Mode)
