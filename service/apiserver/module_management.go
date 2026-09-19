@@ -385,6 +385,15 @@ func (m *managementModule) handleRunner(w http.ResponseWriter, r *http.Request) 
 		writeFail(w, r, http.StatusNotFound, "runner_not_found", "runner not found")
 		return
 	}
+	// The registration snapshot carries only the scalar control state. This
+	// endpoint is the management view, so it additionally resolves the
+	// debt-bearing drain projection -- the part that aggregates the fleet-wide
+	// handoff and deactivation ledgers, which recurring callers must not pay.
+	if control, ok := dir.(control.RunnerControlDirectory); ok && control != nil {
+		if full, found, err := control.RunnerControl(r.Context(), id); err == nil && found {
+			snap.Control = &full
+		}
+	}
 	writeData(w, r, http.StatusOK, snap)
 }
 

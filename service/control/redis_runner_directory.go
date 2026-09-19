@@ -1617,58 +1617,42 @@ func decodeRunnerSnapshot(runnerID string, raw runnerRawFields) (RunnerSnapshot,
 }
 
 // Runner returns the latest durable snapshot for runnerID.
+//
+// It reads the registration fields and the scalar control projection in one
+// pipeline. The debt-bearing drain projection is not attached here: it is a
+// management view with its own accessor, and folding it in made a single-runner
+// read cost one full pass over the fleet-wide handoff and deactivation ledgers.
 func (d *RedisRunnerDirectory) Runner(ctx context.Context, runnerID string) (RunnerSnapshot, bool) {
-	session, err := d.rdb.HGet(ctx, d.keys.runnerSession, runnerID).Result()
-	if err != nil || session == "" {
-		return RunnerSnapshot{}, false
-	}
-	capacityRaw, err := d.rdb.HGet(ctx, d.keys.runnerCapacity, runnerID).Result()
-	if err != nil {
-		return RunnerSnapshot{}, false
-	}
-	inFlightRaw, err := d.rdb.HGet(ctx, d.keys.runnerInflight, runnerID).Result()
-	if errors.Is(err, redis.Nil) {
-		inFlightRaw = "0"
-	} else if err != nil {
-		return RunnerSnapshot{}, false
-	}
-	capabilitiesRaw, err := d.rdb.HGet(ctx, d.keys.runnerCapabilities, runnerID).Result()
-	if err != nil {
-		return RunnerSnapshot{}, false
-	}
-	namespacesRaw, err := d.rdb.HGet(ctx, d.keys.runnerNamespaces, runnerID).Result()
-	if errors.Is(err, redis.Nil) {
-		namespacesRaw = ""
-	} else if err != nil {
-		return RunnerSnapshot{}, false
-	}
-	heartbeatRaw, err := d.rdb.HGet(ctx, d.keys.runnerHeartbeat, runnerID).Result()
-	if errors.Is(err, redis.Nil) {
-		heartbeatRaw = "0"
-	} else if err != nil {
-		return RunnerSnapshot{}, false
-	}
-	labelsRaw, err := d.rdb.HGet(ctx, d.keys.runnerLabels, runnerID).Result()
-	if errors.Is(err, redis.Nil) {
-		labelsRaw = ""
-	} else if err != nil {
+	pipe := d.rdb.Pipeline()
+	sessionCmd := pipe.HGet(ctx, d.keys.runnerSession, runnerID)
+	capacityCmd := pipe.HGet(ctx, d.keys.runnerCapacity, runnerID)
+	inFlightCmd := pipe.HGet(ctx, d.keys.runnerInflight, runnerID)
+	capabilitiesCmd := pipe.HGet(ctx, d.keys.runnerCapabilities, runnerID)
+	namespacesCmd := pipe.HGet(ctx, d.keys.runnerNamespaces, runnerID)
+	heartbeatCmd := pipe.HGet(ctx, d.keys.runnerHeartbeat, runnerID)
+	labelsCmd := pipe.HGet(ctx, d.keys.runnerLabels, runnerID)
+	desiredCmd := pipe.HGet(ctx, d.keys.runnerControlDesired, runnerID)
+	generationCmd := pipe.HGet(ctx, d.keys.runnerControlGeneration, runnerID)
+	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
 		return RunnerSnapshot{}, false
 	}
 
 	snapshot, ok := decodeRunnerSnapshot(runnerID, runnerRawFields{
-		session:      session,
-		capacity:     capacityRaw,
-		inflight:     inFlightRaw,
-		capabilities: capabilitiesRaw,
-		namespaces:   namespacesRaw,
-		heartbeat:    heartbeatRaw,
-		labels:       labelsRaw,
+		session:      sessionCmd.Val(),
+		capacity:     capacityCmd.Val(),
+		inflight:     inFlightCmd.Val(),
+		capabilities: capabilitiesCmd.Val(),
+		namespaces:   namespacesCmd.Val(),
+		heartbeat:    heartbeatCmd.Val(),
+		labels:       labelsCmd.Val(),
 	})
 	if !ok {
 		return RunnerSnapshot{}, false
 	}
-	if control, found, controlErr := d.RunnerControl(ctx, runnerID); controlErr == nil && found {
-		snapshot.Control = &control
+	// Best-effort, matching the previous behavior: a malformed control value
+	// leaves Control unset rather than failing the whole registration read.
+	if state, err := decodeRunnerControlState(desiredCmd.Val(), generationCmd.Val()); err == nil {
+		snapshot.Control = runnerControlStateSnapshot(state)
 	}
 	return snapshot, true
 }

@@ -77,3 +77,46 @@ func requireListMatchesPerRunnerProjection(t *testing.T, ctx context.Context, di
 		}
 	}
 }
+
+// TestRunnerSkipsLedgerAggregation pins the single-runner read. The
+// debt-bearing drain projection lives on RunnerControl; attaching it to Runner
+// made every registration read -- namespace resolution, liveness checks, and
+// each row of the management roster -- scan the fleet-wide handoff and
+// deactivation ledgers. The scalar control state must still be present, or the
+// roster loses the desired state it reports.
+func TestRunnerSkipsLedgerAggregation(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	directory := NewRedisRunnerDirectory(rdb)
+	hook := newLedgerHGetAllHook(ledgerKeys(directory)...)
+	rdb.AddHook(hook)
+
+	registerRedisDirectoryRunner(t, ctx, directory, "runner-a", 2)
+	if _, err := directory.SetRunnerControl(ctx, drainRunnerControlRequest("runner-a", "req-drain-a")); err != nil {
+		t.Fatalf("SetRunnerControl() error = %v", err)
+	}
+
+	hook.reset()
+	snap, ok := directory.Runner(ctx, "runner-a")
+	if !ok {
+		t.Fatal("Runner() not found for a registered runner")
+	}
+	if n := hook.count(); n != 0 {
+		t.Fatalf("ledger HGetAll reads for Runner() = %d, want 0", n)
+	}
+	if snap.Control == nil {
+		t.Fatal("Runner() control = nil; the scalar desired state must still be attached")
+	}
+	if snap.Control.DesiredState != RunnerDesiredStateDraining {
+		t.Fatalf("Runner() desired state = %q, want %q", snap.Control.DesiredState, RunnerDesiredStateDraining)
+	}
+
+	// Counter-check: RunnerControl still aggregates, so the zero above is the
+	// management view being separated out, not the ledgers going unread.
+	if _, found, err := directory.RunnerControl(ctx, "runner-a"); err != nil || !found {
+		t.Fatalf("RunnerControl() found=%v err=%v, want projection", found, err)
+	}
+	if n := hook.count(); n == 0 {
+		t.Fatal("ledger HGetAll reads for RunnerControl() = 0, want > 0 (hook is not observing)")
+	}
+}

@@ -727,7 +727,7 @@ func (d *MemoryRunnerDirectory) Runner(_ context.Context, runnerID string) (Runn
 	snapshot.Labels = cloneLabels(snapshot.Labels)
 	snapshot.Capabilities = cloneCapabilities(snapshot.Capabilities)
 	snapshot.Namespaces = normalizeRunnerNamespaces(snapshot.Namespaces)
-	snapshot.Control = d.controlSnapshotLocked(runnerID, state)
+	snapshot.Control = runnerControlStateSnapshot(d.runnerControlStateLocked(runnerID))
 	return snapshot, true
 }
 
@@ -900,12 +900,19 @@ func (d *MemoryRunnerDirectory) RunnerControlState(_ context.Context, runnerID s
 	if d.runners[runnerID] == nil {
 		return RunnerControlState{}, false, nil
 	}
+	return d.runnerControlStateLocked(runnerID), true, nil
+}
+
+// runnerControlStateLocked reads the scalar control state. It is what the
+// per-runner registration snapshot attaches; the debt-bearing drain projection
+// stays on RunnerControl, which is the management view.
+func (d *MemoryRunnerDirectory) runnerControlStateLocked(runnerID string) RunnerControlState {
 	control := d.controls[runnerID]
 	if control == nil {
 		initial := activeRunnerControl()
 		control = &initial
 	}
-	return RunnerControlState{DesiredState: control.desired, Generation: control.generation}, true, nil
+	return RunnerControlState{DesiredState: control.desired, Generation: control.generation}
 }
 
 func (d *MemoryRunnerDirectory) controlSnapshotLocked(runnerID string, state *memoryRunnerState) *RunnerControlSnapshot {

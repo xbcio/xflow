@@ -130,6 +130,16 @@ func decodeRunnerControlState(desiredRaw, generationRaw string) (RunnerControlSt
 	return RunnerControlState{DesiredState: desired, Generation: generation}, nil
 }
 
+// runnerControlStateSnapshot projects the scalar control state as a snapshot.
+//
+// The debt-bearing drain projection is deliberately absent: it aggregates the
+// fleet-wide handoff and deactivation ledgers, which is a management concern
+// served by its own accessor (RunnerControl). Attaching it to every
+// single-runner read made each one scan the whole fleet's debt.
+func runnerControlStateSnapshot(state RunnerControlState) *RunnerControlSnapshot {
+	return &RunnerControlSnapshot{DesiredState: state.DesiredState, Generation: state.Generation}
+}
+
 // redisControlLedger is the fleet-wide debt state every control projection
 // aggregates. Both hashes are keyed by claim or obligation rather than by
 // runner, so projecting a whole fleet reads them once and reuses the result
