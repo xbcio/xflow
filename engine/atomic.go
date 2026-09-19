@@ -847,7 +847,19 @@ func (d *OutboxDispatcher) Run(ctx context.Context) {
 	}
 }
 
+// drain runs one discovery-and-flush pass and reports what it cost.
+//
+// The duration covers the whole pass — discovery, the flush of every execution
+// the page yielded, and the throttled backlog scan — because that is the
+// interval the loop actually experiences. A drain longer than the configured
+// interval is the signal that dispatch is bounded by its own work rather than
+// by the tick; see xflow_outbox_drain_duration_seconds.
 func (d *OutboxDispatcher) drain(ctx context.Context) {
+	start := time.Now()
+	discovered := 0
+	defer func() {
+		d.engine.notifyOutboxDrain(ctx, discovered, time.Since(start))
+	}()
 	state, err := d.engine.atomicState()
 	if err != nil {
 		d.engine.notifyOutboxError(ctx, "state", err)
@@ -865,6 +877,7 @@ func (d *OutboxDispatcher) drain(ctx context.Context) {
 		}
 		return
 	}
+	discovered = len(ids)
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	for _, id := range ids {
 		if err := d.engine.FlushOutbox(ctx, id); err != nil && d.engine.logger != nil {

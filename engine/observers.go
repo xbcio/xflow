@@ -34,6 +34,20 @@ type OutboxDeliveryFailure struct {
 	DeadLettered bool
 }
 
+// OutboxDispatchObserver is an optional extension of OutboxObserver that
+// receives one observation per dispatcher drain.
+//
+// It is a separate interface rather than another method on OutboxObserver so
+// that an observer interested only in delivery outcomes — the dead-letter
+// manager's, for instance — keeps compiling. The dispatcher type-asserts the
+// installed OutboxObserver, so an observer that does not implement this simply
+// receives no drain observations.
+type OutboxDispatchObserver interface {
+	// OnOutboxDrain reports how many executions this drain discovered with
+	// ready outbox work, and how long the whole pass took.
+	OnOutboxDrain(ctx context.Context, discovered int, duration time.Duration)
+}
+
 // OutboxMetricsSnapshot reports the aggregate durable outbox backlog. The
 // oldest timestamp is zero when no pending delivery intent exists.
 type OutboxMetricsSnapshot struct {
@@ -341,6 +355,19 @@ func (e *Engine) notifyOutboxPending(ctx context.Context, pending int, deadLette
 	}
 	safeHook(ctx, e.logger, func(observerCtx context.Context) {
 		e.outboxObserver.OnOutboxPending(observerCtx, pending, deadLettered, oldestAge)
+	})
+}
+
+// notifyOutboxDrain reports one dispatcher drain to an observer that opted into
+// the drain observation by implementing OutboxDispatchObserver. An observer
+// that does not is simply not told, so the type assert is the whole wiring.
+func (e *Engine) notifyOutboxDrain(ctx context.Context, discovered int, duration time.Duration) {
+	observer, ok := e.outboxObserver.(OutboxDispatchObserver)
+	if !ok {
+		return
+	}
+	safeHook(ctx, e.logger, func(observerCtx context.Context) {
+		observer.OnOutboxDrain(observerCtx, discovered, duration)
 	})
 }
 

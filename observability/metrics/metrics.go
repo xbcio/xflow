@@ -416,6 +416,8 @@ var metricHelp = map[string]string{
 	"xflow_outbox_dead_letters":                      "Current count of outbox messages in the dead-letter queue.",
 	"xflow_outbox_dead_letters_replayed_total":       "Dead-letter messages replayed back to the ready set, partitioned by outcome.",
 	"xflow_outbox_pending":                           "Current count of outbox messages pending dispatch.",
+	"xflow_outbox_drain_discovered":                  "Executions the most recent outbox drain discovered with ready work. A gauge of the last pass, not a counter, so a drop after the backlog clears is the healthy reading. Persistently zero or flat while xflow_outbox_pending is non-zero means discovery is not finding the backlog: on a keyspace-scanned store, raise the discovery page (engine.WithOutboxDiscoveryPage). Without this series an operator had no way to see that at all.",
+	"xflow_outbox_drain_duration_seconds":            "Wall-clock duration of one whole outbox drain: discovery, the flush of every execution the page yielded, and the throttled backlog scan. A drain that routinely exceeds the dispatcher's tick interval means the loop is running back to back, so dispatch is bounded by its own work rather than by the tick.",
 	"xflow_outbox_oldest_pending_age_seconds":        "Age of the oldest pending outbox message.",
 	"xflow_outbox_errors_total":                      "Outbox dispatch errors, partitioned by operation.",
 	"xflow_runner_auth_decisions_total":              "Runner authorization decisions, partitioned by result and auth mode.",
