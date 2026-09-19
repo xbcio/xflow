@@ -56,6 +56,10 @@ type serverConfig struct {
 	redis       string
 	memory      bool
 	concurrency int
+	// outboxDiscoveryPage sizes the durable outbox dispatcher's per-drain
+	// discovery page (Redis keyspace keys examined per tick); 0 keeps the
+	// engine default. It is the CLI face of xflowsdk.WithServerOutboxDiscoveryPage.
+	outboxDiscoveryPage int
 	// redisMode selects the Redis deployment topology: single (default),
 	// sentinel, or cluster.
 	redisMode string
@@ -197,6 +201,8 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	fs.BoolVar(&cfg.redisTLS, "redis-tls", false, "Enable TLS for Redis connections")
 	fs.BoolVar(&cfg.memory, "memory", false, "Use in-memory backend")
 	fs.IntVar(&cfg.concurrency, "concurrency", cfg.concurrency, "Queue consumer concurrency")
+	fs.IntVar(&cfg.outboxDiscoveryPage, "outbox-discovery-page", 0,
+		"Outbox dispatcher discovery page: Redis keyspace keys examined per drain (0 = engine default)")
 	fs.StringVar(&cfg.authPolicy, "auth-policy", "", "Path to runners.yaml (empty = auth disabled)")
 	fs.BoolVar(&cfg.authDryRun, "auth-dry-run", false, "Log auth violations but let requests through (rollout aid)")
 	fs.BoolVar(&cfg.enroll, "enroll", false, "Enable the runner enrollment endpoint (/v1/runners/enroll)")
@@ -441,6 +447,7 @@ func buildServerOptions(cfg serverConfig, deps serverDeps) []xflowsdk.ServerOpti
 		xflowsdk.WithServerMetricsAddr(cfg.metricsAddr, cfg.metricsPath),
 		xflowsdk.WithServerTracer(deps.tracer),
 		xflowsdk.WithServerConcurrency(cfg.concurrency),
+		xflowsdk.WithServerOutboxDiscoveryPage(cfg.outboxDiscoveryPage),
 		xflowsdk.WithServerWorkflowAuth(deps.workflowAuth, cfg.requireAPIAuth),
 		xflowsdk.WithServerPrincipalAuth(deps.principalAuth, apiserver.NamespaceAwareAuthorizer{}, deps.audit),
 		xflowsdk.WithServerArtifacts(deps.artifactStore),

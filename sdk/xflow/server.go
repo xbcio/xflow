@@ -100,6 +100,7 @@ type serverConfig struct {
 	tracer                   tracing.Tracer
 	concurrency              int
 	leaseTTL                 time.Duration
+	outboxDiscoveryPage      int
 	enableRunnerMetricsProxy bool
 	runnerMetricsInterval    time.Duration
 	enableManagement         bool
@@ -358,6 +359,27 @@ func WithServerConcurrency(n int) ServerOption {
 // recovery latency, not the runner's renewal interval.
 func WithServerLeaseTTL(d time.Duration) ServerOption {
 	return func(c *serverConfig) { c.leaseTTL = d }
+}
+
+// WithServerOutboxDiscoveryPage sizes the durable outbox dispatcher's per-drain
+// discovery page. Zero (the default) keeps engine.DefaultOutboxDiscoveryPage.
+//
+// The page is the dispatcher's discovery ceiling, and that ceiling is what
+// decides whether the outbox keeps up with execution creation. Discovery walks
+// the Redis keyspace with SCAN, whose COUNT counts keys EXAMINED rather than
+// keys matched, so one drain reaches roughly page-over-total-keys of the ready
+// backlog and a full cursor round trip takes keys-over-page drains. A keyspace
+// that has outgrown the default therefore discovers ready work more slowly than
+// the ingress creates it, and the backlog grows monotonically even though
+// delivery itself is healthy — the symptom this option exists to fix.
+//
+// Raise it when xflow_outbox_ready stays high while
+// xflow_outbox_drain_discovered is flat. The cost is scan load per tick: the
+// page is keys examined per namespace per drain, and a drain flushes every
+// execution the page yields. Only the Redis-backed server uses it; the
+// in-memory backend discovers from a map and has no keyspace to page through.
+func WithServerOutboxDiscoveryPage(page int) ServerOption {
+	return func(c *serverConfig) { c.outboxDiscoveryPage = page }
 }
 
 // WithServerRunnerMetricsProxy accepts metrics pushed by runners and merges
@@ -627,6 +649,8 @@ func buildServerAPIConfig(cfg ServerConfig, sc *serverConfig) apiserver.Config {
 		Tracer:      sc.tracer,
 		Concurrency: sc.concurrency,
 		LeaseTTL:    sc.leaseTTL,
+
+		OutboxDiscoveryPage: sc.outboxDiscoveryPage,
 
 		EnableRunnerMetricsProxy: sc.enableRunnerMetricsProxy,
 		RunnerMetricsInterval:    sc.runnerMetricsInterval,
