@@ -54,6 +54,31 @@ func TestParseServerConfigSupportsObservabilityFlags(t *testing.T) {
 	}
 }
 
+// The outbox discovery page is the dispatcher's discovery ceiling on a
+// Redis-backed keyspace, and this flag is the only surface a standalone
+// deployment has for it: the defect it addresses (a backlog discovered more
+// slowly than it is created) is a property of the deployment's keyspace size,
+// which no default can track.
+func TestParseServerConfigSupportsOutboxDiscoveryPage(t *testing.T) {
+	cfg, err := parseServerConfig([]string{"-memory", "-outbox-discovery-page", "8192"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.outboxDiscoveryPage != 8192 {
+		t.Fatalf("outboxDiscoveryPage = %d, want 8192", cfg.outboxDiscoveryPage)
+	}
+
+	// Unset must stay 0 so the engine default applies, rather than pinning a
+	// smaller page for every deployment that does not pass the flag.
+	cfg, err = parseServerConfig([]string{"-memory"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.outboxDiscoveryPage != 0 {
+		t.Fatalf("outboxDiscoveryPage = %d, want 0 (engine default)", cfg.outboxDiscoveryPage)
+	}
+}
+
 func TestParseServerConfigRejectsUnsupportedTraceMode(t *testing.T) {
 	if _, err := parseServerConfig([]string{"-trace", "bogus"}); err == nil {
 		t.Fatal("parseServerConfig() error = nil, want error for unsupported trace mode")

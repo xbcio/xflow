@@ -45,6 +45,14 @@ type Config struct {
 	// false for everything and the route would 404 unconditionally.
 	Artifacts   *store.ArtifactStore
 	Concurrency int
+	// OutboxDiscoveryPage sizes the durable outbox dispatcher's per-drain
+	// discovery page (keyspace keys examined per tick). Zero leaves
+	// engine.DefaultOutboxDiscoveryPage in place. It is a deployment property:
+	// the page bounds how much of a Redis-backed ready backlog one drain can
+	// discover, so a keyspace that has outgrown the default needs it raised or
+	// dispatch falls behind execution creation. Ignored by the in-memory
+	// backend, whose discovery walks a map and has no page.
+	OutboxDiscoveryPage int
 	// LeaseTTL is how long a dispatched task lease stays valid before the
 	// LeaseSweeper treats the runner holding it as crashed and re-queues the
 	// task. Zero (the default) leaves engine.DefaultLeaseTTL in place.
@@ -423,6 +431,7 @@ func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 			distributed.WithConcurrency(cfg.Concurrency),
 			distributed.WithStateLogger(cfg.Logger),
 			distributed.WithConsumer(true),
+			distributed.WithOutboxDiscoveryPage(cfg.OutboxDiscoveryPage),
 		}
 		if cfg.Metrics != nil {
 			opts = append(opts,

@@ -408,16 +408,24 @@ func (s *memoryState) RecordOutboxFailure(_ context.Context, id types.ExecutionI
 	return result, nil
 }
 
-// OutboxMetrics returns aggregate pending and dead-letter counts for the
-// in-memory durable-outbox reference implementation.
+// OutboxMetrics returns aggregate pending, due-now, and dead-letter counts for
+// the in-memory durable-outbox reference implementation.
 func (s *memoryState) OutboxMetrics(_ context.Context) (engine.OutboxMetricsSnapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	now := time.Now()
 	var snapshot engine.OutboxMetricsSnapshot
 	for _, entries := range s.outbox {
 		for _, stored := range entries {
 			snapshot.Pending++
+			// The same split the Redis store makes with a ZCOUNT to now: an
+			// entry held behind a retry backoff is pending but not deliverable
+			// yet. The memory store takes no delivery lease, so availability is
+			// the only thing standing between pending and ready here.
+			if availableAt := stored.entry.AvailableAt; availableAt.IsZero() || !availableAt.After(now) {
+				snapshot.Ready++
+			}
 			createdAt := stored.entry.CreatedAt
 			if createdAt.IsZero() {
 				createdAt = stored.entry.AvailableAt

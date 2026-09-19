@@ -88,6 +88,7 @@ type config struct {
 	transport              queue.Transport
 	queueObserver          queue.Observer
 	redisConfig            *RedisConfig
+	outboxDiscoveryPage    int
 }
 
 // WithConcurrency sets the number of task consumer goroutines. Default is 10.
@@ -180,6 +181,23 @@ func WithStateLogger(l engine.Logger) Option {
 	}
 }
 
+// WithOutboxDiscoveryPage sizes the outbox dispatcher's per-drain discovery
+// page. Zero (the default) keeps engine.DefaultOutboxDiscoveryPage.
+//
+// It is exposed rather than fixed because the page is the dispatcher's
+// discovery ceiling on a Redis-backed keyspace: SCAN's COUNT counts keys
+// examined, so the share of a ready backlog one drain can reach is page over
+// total keys. A deployment whose keyspace has outgrown the default discovers
+// ready work more slowly than it creates it, and the outbox backlog then grows
+// even though delivery itself is healthy. See engine.WithOutboxDiscoveryPage.
+func WithOutboxDiscoveryPage(page int) Option {
+	return func(c *config) {
+		if page > 0 {
+			c.outboxDiscoveryPage = page
+		}
+	}
+}
+
 // WithShutdownObserver installs an observer that receives a ShutdownReport
 // after normal shutdown completes. When no observer is configured, shutdown
 // errors are still logged via the configured engine.Logger, or via the
@@ -246,6 +264,10 @@ type Backend struct {
 	shutdownObserver ShutdownObserver
 	logger           engine.Logger
 	testHooks        bindStartHooks
+
+	// outboxDiscoveryPage is the outbox dispatcher's per-drain discovery page;
+	// zero leaves engine.DefaultOutboxDiscoveryPage in place.
+	outboxDiscoveryPage int
 }
 
 // State returns the StateStore implementation.
@@ -382,6 +404,8 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 		leaderElector:    leaderElector,
 		shutdownObserver: cfg.shutdownObserver,
 		logger:           cfg.logger,
+
+		outboxDiscoveryPage: cfg.outboxDiscoveryPage,
 	}, nil
 }
 
@@ -703,7 +727,8 @@ func (b *Backend) bindHandler(eng *engine.Engine, handler func(context.Context, 
 
 	// 2. Start the durable outbox dispatcher. It exits when ctx is canceled.
 	outboxCtx, cancelOutbox := context.WithCancel(context.Background())
-	outboxDispatcher := engine.NewOutboxDispatcher(eng, time.Second)
+	outboxDispatcher := engine.NewOutboxDispatcher(eng, time.Second,
+		engine.WithOutboxDiscoveryPage(b.outboxDiscoveryPage))
 	outboxDone := make(chan struct{})
 	go func() {
 		defer close(outboxDone)
