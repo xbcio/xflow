@@ -435,10 +435,17 @@ func (d *RedisRunnerDirectory) ClaimForRunner(ctx context.Context, req ClaimRequ
 		return Claim{}, false, ErrRunnerSessionStale
 	}
 
-	if handoff, ok, err := d.recoverableHandoff(ctx, req.RunnerID, req.SessionID); err != nil {
-		return Claim{}, false, err
-	} else if ok {
-		return handoff, true, nil
+	// The ledger is normally empty, and proving that required reading all of it
+	// on every poll. The HLEN read in runnerForClaim's pipeline answers the same
+	// question in O(1): an empty ledger has no entry owned by this runner, so the
+	// scan below can only return not-found. The gate is a read optimization, not
+	// a cache -- an empty result here is the ledger's own current state.
+	if runner.hasHandoffDebt {
+		if handoff, ok, err := d.recoverableHandoff(ctx, req.RunnerID, req.SessionID); err != nil {
+			return Claim{}, false, err
+		} else if ok {
+			return handoff, true, nil
+		}
 	}
 	if replay, ok, err := d.replayLease(ctx, req.RunnerID, req.SessionID, req.ActiveLeaseIDs); err != nil {
 		return Claim{}, false, err
@@ -1790,6 +1797,11 @@ type redisClaimRunner struct {
 	// registration fields. It is a precheck only: the claim Lua re-evaluates it
 	// atomically, so a stale true costs one refused claim, never an over-claim.
 	hasHeadroom bool
+	// hasHandoffDebt reports whether the fleet-wide handoff ledger holds any
+	// entry at all, read in the same pipeline. It gates the per-poll recovery
+	// scan: with an empty ledger there is nothing to recover, and the scan would
+	// otherwise read the whole ledger on every poll to prove that.
+	hasHandoffDebt bool
 }
 
 func (d *RedisRunnerDirectory) runnerForClaim(ctx context.Context, runnerID string) (redisClaimRunner, bool, error) {
@@ -1805,6 +1817,7 @@ func (d *RedisRunnerDirectory) runnerForClaim(ctx context.Context, runnerID stri
 	capacityCmd := pipe.HGet(ctx, d.keys.runnerCapacity, runnerID)
 	claimCountCmd := pipe.HGet(ctx, d.keys.runnerClaimCount, runnerID)
 	leaseCountCmd := pipe.HGet(ctx, d.keys.runnerLeaseCount, runnerID)
+	handoffLenCmd := pipe.HLen(ctx, d.keys.handoffRunner)
 	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
 		return redisClaimRunner{}, false, fmt.Errorf("read runner claim registration: %w", err)
 	}
@@ -1846,12 +1859,13 @@ func (d *RedisRunnerDirectory) runnerForClaim(ctx context.Context, runnerID stri
 	}
 	headroom := atoiDefault(capacityCmd.Val()) - atoiDefault(claimCountCmd.Val()) - atoiDefault(leaseCountCmd.Val())
 	return redisClaimRunner{
-		sessionID:    sessionID,
-		capabilities: capabilities,
-		policy:       policy,
-		namespaces:   namespaces,
-		labels:       labels,
-		hasHeadroom:  headroom > 0,
+		sessionID:      sessionID,
+		capabilities:   capabilities,
+		policy:         policy,
+		namespaces:     namespaces,
+		labels:         labels,
+		hasHeadroom:    headroom > 0,
+		hasHandoffDebt: handoffLenCmd.Val() > 0,
 	}, true, nil
 }
 
