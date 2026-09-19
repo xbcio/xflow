@@ -18,6 +18,8 @@ const (
 	metricLeaseSweepRepair           = "xflow_lease_sweep_repair_total"
 	metricLeaseSweepRepairDuration   = "xflow_lease_sweep_repair_duration_seconds"
 	metricLeaseSweepRepairReconciled = "xflow_lease_sweep_repair_reconciled"
+	metricLeaseMaintenancePass       = "xflow_lease_maintenance_pass_total"
+	metricLeaseMaintenanceReleased   = "xflow_lease_maintenance_released_total"
 	metricRunnerAuthDecisions        = "xflow_runner_auth_decisions_total"
 	metricRunnerClaimReclaimed       = "xflow_runner_claim_reclaimed_total"
 	metricRunnerLeaseReplayed        = "xflow_runner_lease_replayed_total"
@@ -40,6 +42,10 @@ type sweepTimingObserver interface {
 	OnSweepListExpired(ctx context.Context, candidates int, elapsed time.Duration, err error)
 	OnSweepReclaimResult(ctx context.Context, result string, elapsed time.Duration)
 	OnSweepRepair(ctx context.Context, reconciled int, elapsed time.Duration, err error)
+}
+
+type sweepPassObserver interface {
+	OnSweepPass(ctx context.Context, pass, outcome string, released int)
 }
 
 type runnerClaimObserver interface {
@@ -165,9 +171,35 @@ func (s SweepMetrics) OnSweepRepair(ctx context.Context, reconciled int, elapsed
 	s.Metrics.Set(metricLeaseSweepRepairReconciled, labels, float64(reconciled))
 }
 
+// OnSweepPass records one background maintenance pass and how much it released.
+//
+// pass and outcome are compared and forwarded as literals rather than through
+// service/control's SweepPass* constants because this package must not import
+// service/control — the local mirror interfaces above exist for that reason.
+// service/control's tests assert the literals the sweeper sends, and
+// TestSweepPassMetricsSeparateRunsFromSkips pins the two the branch below
+// depends on.
+//
+// The released counter is incremented for a pass that ran, including one that
+// released nothing, so "ran and released 0" is a visible zero rather than a
+// missing series. A skipped pass reports no released sample at all: a zero
+// there would be indistinguishable from the zero above, which is the exact
+// confusion this family exists to remove.
+func (s SweepMetrics) OnSweepPass(ctx context.Context, pass, outcome string, released int) {
+	s.Metrics.Inc(metricLeaseMaintenancePass, withNamespace(ctx, map[string]string{
+		"pass":    pass,
+		"outcome": outcome,
+	}))
+	if outcome != "ran" && outcome != "error" {
+		return
+	}
+	s.Metrics.Add(metricLeaseMaintenanceReleased, withNamespace(ctx, map[string]string{"pass": pass}), float64(released))
+}
+
 var (
 	_ sweepObserver       = SweepMetrics{}
 	_ sweepTimingObserver = SweepMetrics{}
+	_ sweepPassObserver   = SweepMetrics{}
 )
 
 // RunnerClaimMetrics observes durable runner-directory claim recovery and
