@@ -197,6 +197,9 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 	if err := s.refreshTransientTTL(ctx, e.ID, keys...); err != nil {
 		return err
 	}
+	if len(entries) > 0 {
+		s.markOutboxReadyIndex(ctx, t, e.ID)
+	}
 
 	// Dual-write to store.
 	if rec != nil {
@@ -256,6 +259,10 @@ func (s *Store) cleanupCreatedExecution(ctx context.Context, e *engine.Execution
 		}
 	}
 	_, _ = pipe.Exec(ctx)
+	// The execution's ready set is gone, so its readiness-index member has to
+	// go with it. Leaving it would only cost a no-op drain that repairs it
+	// later; removing it here keeps "a member implies a ready set" true.
+	s.refreshOutboxReadyIndex(ctx, t, e.ID)
 	s.mu.Lock()
 	delete(s.graphs, e.ID)
 	s.mu.Unlock()

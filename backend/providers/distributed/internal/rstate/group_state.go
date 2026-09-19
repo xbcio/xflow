@@ -438,6 +438,11 @@ func (s *Store) CommitGroup(ctx context.Context, req engine.GroupCommitRequest) 
 	default:
 		return engine.GroupCommitResult{}, fmt.Errorf("commit group %q/#%d: unknown outcome %d", req.ExecutionID, req.GroupUnitIdx, code)
 	}
+	if out.Applied {
+		// The group commit is what schedules its downstream arrivals, so it is
+		// the transition that makes the execution ready again.
+		s.markOutboxReadyIndex(ctx, t, req.ExecutionID)
+	}
 	if out.ExecutionDone {
 		s.evictExecutionCaches(req.ExecutionID)
 		// commitGroupLua finalizes the execution itself, so this is the only
@@ -598,6 +603,7 @@ func (s *Store) RevokeGroupLeaseWithOutbox(ctx context.Context, id types.Executi
 	if result != 1 {
 		return false, nil
 	}
+	s.markOutboxReadyIndex(ctx, t, id)
 	if err := s.refreshTransientTTL(ctx, id,
 		groupUnitStatusKey(t, id, unitIdx),
 		groupUnitMetaKey(t, id, unitIdx),

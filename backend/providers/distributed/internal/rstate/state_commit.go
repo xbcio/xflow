@@ -52,6 +52,7 @@ func (s *Store) ResetNodeForRetryWithOutbox(ctx context.Context, id types.Execut
 	if result != 1 {
 		return false, nil
 	}
+	s.markOutboxReadyIndex(ctx, t, id)
 	if err := s.refreshTransientTTL(ctx, id,
 		nodeStatusKey(t, id, nodeName),
 		nodeMetaKey(t, id, nodeName),
@@ -96,6 +97,7 @@ func (s *Store) RevokeLeaseWithOutbox(ctx context.Context, id types.ExecutionID,
 	if result != 1 {
 		return false, nil
 	}
+	s.markOutboxReadyIndex(ctx, t, id)
 	if err := s.refreshTransientTTL(ctx, id,
 		nodeStatusKey(t, id, nodeName),
 		nodeMetaKey(t, id, nodeName),
@@ -244,6 +246,12 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 	default:
 		return engine.CommitNodeResult{}, fmt.Errorf("commit node %q/%q: unknown outcome %d", req.ExecutionID, req.NodeName, code)
 	}
+	if out.Applied {
+		// The commit is what appends the node's advance intent (and any cyclic
+		// intents), so it is the transition that makes the execution ready
+		// again. An unapplied commit writes no outbox entry and is not marked.
+		s.markOutboxReadyIndex(ctx, t, req.ExecutionID)
+	}
 	if out.ExecutionDone {
 		s.evictExecutionCaches(req.ExecutionID)
 	}
@@ -367,6 +375,9 @@ func (s *Store) AdvanceNode(ctx context.Context, req engine.AdvanceNodeRequest) 
 	if len(applied) == 0 || redisResultInt(applied[0]) == 0 {
 		return engine.AdvanceNodeResult{}, nil
 	}
+	// An applied advance is what schedules the next hop's execute/skip intents,
+	// so the execution is ready again the moment this transition lands.
+	s.markOutboxReadyIndex(ctx, t, req.ExecutionID)
 	out := engine.AdvanceNodeResult{Applied: true, OutboxIDs: outboxIDs}
 	out.Skipped = skippedUnitsFromLua(applied[1])
 	return out, nil

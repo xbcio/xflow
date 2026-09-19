@@ -188,6 +188,7 @@ func (s *Store) BeginTaskExpansionWithOutbox(ctx context.Context, lease *engine.
 	if result != 1 {
 		return false, nil
 	}
+	s.markOutboxReadyIndex(ctx, t, lease.Task.ExecutionID)
 	if err := s.refreshTransientTTL(ctx, lease.Task.ExecutionID,
 		nodeStatusKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
 		nodeMetaKey(t, lease.Task.ExecutionID, lease.Task.NodeName),

@@ -217,6 +217,17 @@ func (s *Store) LeaseOutbox(ctx context.Context, id types.ExecutionID, now time.
 		entry.LeaseDeadlineMs = deadline
 		out = append(out, entry)
 	}
+	if len(out) == 0 {
+		// A claim that finds nothing is the one moment this execution's
+		// readiness is fully determined after a drain: FlushOutbox loops until a
+		// claim comes back empty, so this call happens after every ack, release
+		// and dead-letter the flush performed, and after any advance or skip
+		// intent it appended. Re-arming the readiness index here is what keeps a
+		// drained execution from being rediscovered forever, and what records
+		// the instant its next entry becomes deliverable. See
+		// state_outbox_index.go.
+		s.refreshOutboxReadyIndex(ctx, namespace.FromContext(ctx), id)
+	}
 	return out, nil
 }
 
@@ -476,12 +487,19 @@ func (s *Store) scanOutboxMetricsForNamespace(ctx context.Context, t namespace.N
 	return nil
 }
 
-// ListOutboxExecutions scans execution-scoped ready indexes. The index is
-// authoritative per execution; scanning is only a recovery discovery path.
+// ListOutboxExecutions reports executions with ready outbox work. Discovery is
+// the readiness index; the keyspace scan is its fallback and its staleness
+// bound.
 //
-// Discovery is paged, not exhaustive. The caller re-runs it every tick and the
-// ready entries are durable, so a bounded page only defers an execution's
-// discovery by a few ticks. Walking the whole keyspace per call was both
+// DISCOVERY IS THE INDEX. One ZRANGEBYSCORE per namespace returns every
+// execution whose earliest ready entry is due, in time proportional to the
+// ready backlog rather than to the keyspace. The index is a best-effort
+// accelerator written outside the atomic transitions (see state_outbox_index.go
+// for why it cannot be written inside them and why that is acceptable), so it
+// can be missing entries — which is what the scan below is for.
+//
+// DISCOVERY IS STILL PAGED, and the scan is still cursor-resumed. The page
+// bounds one tick's work. Walking the whole keyspace per call was both
 // unbounded (it materialized every matching key across every master) and
 // unfair: the result was truncated to the lowest-sorted IDs, so executions
 // past the limit were re-scanned and re-rejected on every tick until the head
@@ -494,6 +512,22 @@ func (s *Store) scanOutboxMetricsForNamespace(ctx context.Context, t namespace.N
 // long as the earlier backlog lasted. Each namespace now advances by at least
 // one slot per call, which bounds a page at max(limit, number of namespaces)
 // ids instead of limit.
+//
+// A CALL IS ANSWERED BY ONE OF THE TWO, NOT BOTH. The page is a bound on one
+// tick's work, so a call that swept and also read the index would carry up to
+// twice the page. The single exception is a store that has not yet seen the
+// index carry work: there the index is read alongside the sweep, because a
+// store that never reads it can never prove it, and that overlap ends on the
+// first call the index answers.
+//
+// THE SWEEP IS THROTTLED ONLY ONCE THE INDEX HAS PROVEN ITSELF. While the index
+// has carried work at some point in this process, the scan runs once every
+// outboxIndexSweepEveryCalls calls; at all other times it runs on every call,
+// which is the pre-index behaviour. A store whose index is disabled, absent,
+// empty or failing therefore behaves exactly as it did before the index
+// existed rather than degrading to a tenth of the discovery it used to do. The
+// bound that throttling buys: a registration the index never received is found
+// within outboxIndexSweepEveryCalls drains plus one full cursor round.
 func (s *Store) ListOutboxExecutions(ctx context.Context, limit int) ([]types.ExecutionID, error) {
 	if limit <= 0 {
 		return nil, nil
@@ -506,9 +540,38 @@ func (s *Store) ListOutboxExecutions(ctx context.Context, limit int) ([]types.Ex
 	}
 	budget := splitNamespaceScanBudget(limit, len(namespaces))
 	ids := make(map[types.ExecutionID]struct{})
-	for i, t := range namespaces {
-		if err := s.scanOutboxExecutionsForNamespace(ctx, t, budget[i], ids); err != nil {
-			return nil, err
+	now := time.Now().UTC()
+	s.outboxDiscoveryCalls++
+	// Both decisions come from the state BEFORE this call, so a call that proves
+	// the index does not also skip the sweep that has not yet been earned.
+	// Uint64 wrap is not a concern: reaching it would take ~584 billion years at
+	// the drain cadence, and the comparison is only a cadence.
+	indexEnabled := s.outboxIndexEnabled()
+	indexProven := indexEnabled && s.outboxIndexProven.Load()
+	sweep := !indexProven || s.outboxDiscoveryCalls%outboxIndexSweepEveryCalls == 0
+	readIndex := indexEnabled && (!sweep || !indexProven)
+	indexed := 0
+	if readIndex {
+		for i, t := range namespaces {
+			added, err := s.readOutboxReadyIndex(ctx, t, now, budget[i], ids)
+			if err != nil {
+				// Abandon the index for this call and sweep instead: an index
+				// that cannot be read is an index this drain must not depend on.
+				s.noteOutboxIndexFailure(ctx, "discover", err)
+				sweep = true
+				break
+			}
+			indexed += added
+		}
+	}
+	if indexed > 0 {
+		s.outboxIndexProven.Store(true)
+	}
+	if sweep {
+		for i, t := range namespaces {
+			if err := s.scanOutboxExecutionsForNamespace(ctx, t, budget[i], ids); err != nil {
+				return nil, err
+			}
 		}
 	}
 	out := make([]types.ExecutionID, 0, len(ids))

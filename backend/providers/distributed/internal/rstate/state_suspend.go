@@ -412,8 +412,10 @@ func (s *Store) DeliverSignalWithOutbox(ctx context.Context, id types.ExecutionI
 	}
 	nodeName, _ := result.(string)
 	if nodeName == "" {
+		// No waiter consumed the signal, so no resume intent was written.
 		return "", nil, false, nil
 	}
+	s.markOutboxReadyIndex(ctx, t, id)
 	return nodeName, nil, true, nil
 }
 
@@ -609,6 +611,10 @@ func (s *Store) cleanupOnCancel(ctx context.Context, id types.ExecutionID) {
 		timeoutZSetKey(t, id),
 	)
 	_, _ = pipe.Exec(ctx)
+	// Cancellation removes the execution's ready set, so its readiness-index
+	// member has to go too: a member left behind would only cost a no-op drain
+	// that repairs it, but "a member implies a ready set" is worth keeping true.
+	s.refreshOutboxReadyIndex(ctx, t, id)
 }
 
 // suspendedWaiterKeys returns every waiter/signal-related key owned by a single

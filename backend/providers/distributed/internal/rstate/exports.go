@@ -39,6 +39,22 @@ func (s *Store) ConfigureTransient(enabled bool, activeTTL, completionTTL time.D
 	s.transientCompletionTTL = completionTTL
 }
 
+// ConfigureOutboxReadyIndex enables or disables the best-effort outbox
+// readiness index.
+//
+// It is an accelerator, not part of the state machine: with it the dispatcher
+// discovers ready work in time proportional to the ready backlog, without it
+// every discovery call sweeps the keyspace for `...:outbox:ready` exactly as it
+// did before the index existed. Disabling it therefore costs discovery
+// throughput and nothing else — every entry stays discoverable, because the
+// outbox body and its per-execution ready set are still written atomically and
+// the keyspace sweep is still the fallback. See state_outbox_index.go.
+//
+// Defaults to enabled.
+func (s *Store) ConfigureOutboxReadyIndex(enabled bool) {
+	s.outboxIndexOn.Store(enabled)
+}
+
 // AuditStats returns a point-in-time snapshot of audit-store dual-write
 // outcomes (ok and failed counts keyed by op).
 func (s *Store) AuditStats() AuditStats { return s.auditCounters.snapshot() }

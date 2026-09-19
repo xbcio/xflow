@@ -56,11 +56,17 @@ func newOutboxDiscoveryTestStore(t *testing.T, seeds map[namespace.Namespace][]t
 }
 
 // TestListOutboxExecutionsResumesDiscoveryFromStoredCursor pins the discovery
-// contract the dispatcher relies on. The scan used to materialize every
+// contract the dispatcher relies on when the readiness index is NOT carrying the
+// load: a store with the index disabled, a deployment whose registrations are
+// failing, or an index whose read errored. The scan used to materialize every
 // matching key and truncate the sorted result to the limit, so with more
 // executions than the limit the same lowest IDs came back on every tick and the
 // rest were never discovered. A page that resumes from the cursor saved by the
 // previous tick is what makes them reachable.
+//
+// The index is switched off deliberately: with it on, discovery is answered by
+// one ZRANGEBYSCORE and the cursor below never advances, because the sweep is
+// the path under test here. See state_outbox_index_test.go for the accelerator.
 //
 // miniredis cannot express this: its SCAN ignores COUNT and always returns every
 // matching key with cursor 0. The pagedScanHook supplies faithful SCAN paging
@@ -75,6 +81,7 @@ func TestListOutboxExecutionsResumesDiscoveryFromStoredCursor(t *testing.T) {
 	state, hook := newOutboxDiscoveryTestStore(t, map[namespace.Namespace][]types.ExecutionID{
 		namespace.Default: ids,
 	})
+	state.ConfigureOutboxReadyIndex(false)
 
 	ctx := namespace.WithNamespace(context.Background(), namespace.Default)
 	var seen []types.ExecutionID
@@ -108,6 +115,8 @@ func TestListOutboxExecutionsResumesDiscoveryFromStoredCursor(t *testing.T) {
 // namespace was never scanned, and because its cursor therefore never advanced
 // it could not be discovered on any later tick either. A namespace's entries
 // have to surface even while an earlier-sorting namespace is saturated.
+//
+// Like the cursor test, this is the sweep path with the readiness index off.
 func TestListOutboxExecutionsDoesNotStarveLaterNamespaces(t *testing.T) {
 	const limit = 4
 	acme := make([]types.ExecutionID, 12)
@@ -119,6 +128,7 @@ func TestListOutboxExecutionsDoesNotStarveLaterNamespaces(t *testing.T) {
 		"acme":            acme,
 		namespace.Default: {"exec-default-0"},
 	})
+	state.ConfigureOutboxReadyIndex(false)
 
 	ctx := namespace.WithNamespace(context.Background(), namespace.Default)
 	seenDefault := false

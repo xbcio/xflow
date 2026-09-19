@@ -352,6 +352,7 @@ func (s *Store) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 		// never calls CreateExecution, so without this projection a
 		// trigger-group-seeded execution has no SQL row at all and is invisible
 		// to the audit trail once its Redis keys expire.
+		s.markOutboxReadyIndex(ctx, t, execID)
 		s.projectSeededExecution(ctx, execID, finalStatus, req)
 		return engine.SeedExecutionFromEntryResponse{
 			State:       engine.AdmissionStateAccepted,
