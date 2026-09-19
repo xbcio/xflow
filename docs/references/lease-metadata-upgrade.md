@@ -315,3 +315,80 @@ U-7 只移动了 metadata 的键；两个版本读取的共享 per-assignment �
 4. **reaper 是可选的类型断言能力。** 内存目录和其它 `RunnerDirectory` 实现不
    实现该能力，行为不变；但如果一个部署更换了目录实现，自动排空会静默消失，
    旧 Hash 会重新变成永久残留。
+
+## 7. 自动回收：`leased` 状态的滞留 assignment
+
+§6 处理的是旧 Hash 的残留 field。本节处理另一种残留——目录里仍处于
+`assignment:state = 'leased'`、但其 lease metadata 键已经因为 TTL 到期而消失的
+assignment。这不需要旧版本参与，纯属当前控制面自身的覆盖缺口。
+
+### 7.1 为什么它是可达性缺口
+
+runner 目录里一个 assignment 的完整生命周期是 `queued → claimed → leased`。
+三条现有的回收路径都看不到「state 为 `leased`、metadata 已过期」这一形态：
+
+1. **claim 回收（`ReclaimExpiredClaims`）。** 它只枚举**尚未被 finalize** 的
+   claim 索引。一个 assignment 一旦进入 `leased`，`claim:assignment` /
+   `claim:runner` / `claim:session` / `claim:expiry` 已经在写入 `leased` 的**同一条
+   Lua 原子步骤**里被删除；该脚本枚举的正是这些键，所以 `leased` 的 assignment
+   根本不会进入它的视野。**因此把该脚本的状态判据从 `claimed` 放宽到同时接受
+   `leased` 不会产生任何效果——那是死代码**，不要把它当作修复。
+2. **lease sweeper 的过期扫描。** 它枚举的是 engine 侧 lease 索引，而该索引与这份
+   metadata 共享同一个瞬态 TTL；metadata 过期的同一时刻，它也从该索引里消失。
+3. **runner 自身的 poll 重放（`replayLease`）。** 它确实认识这一形态并会释放，
+   但只在**持有该 lease 的 runner 仍在轮询时**才会执行。runner 被 kill、被
+   drain、Pod 被驱逐之后，再没有谁运行这段检查，assignment 会一直占着该 runner
+   的容量，直到目录被清空。
+
+因此，**只要 runner 消失，这个 assignment 就同时失去了所有回收者**；它占用的
+`runner:lease-count` 不会回落，该 runner 的容量永久泄漏。
+
+> 与之相对的是 runner 仍然存活的情形：一次「状态已提交、但紧随其后的 outbox 投递
+> 失败」的提交，现在会回报它**实际取得**的分类（`accepted` / `duplicate_terminal`）
+> 而不是 `transient_error`，于是 control-plane 会照常释放该 runner 的 `leased`
+> 容量。该分类只表示「状态迁移已完成，只是投递失败」，与「迁移根本没发生」不同。
+> 本节描述的 reaper 覆盖的是另一半：连这条路径也不会再被触发的时候。
+
+### 7.2 自动 reaper 的行为
+
+control-plane 的 lease sweeper 以 leader-gated、自带节奏（默认 5 分钟）、单次
+有界（默认 256 条）的批次调用 `ReapStrandedLeases`。它只在同时满足下面两点时才
+释放一个 assignment：
+
+- `assignment:state` 仍为 `leased`；且
+- 该 assignment 的 lease metadata 键**不存在**（`assignment:lease-meta:<id>`
+  已过期或已被删除）。
+
+第二条是整个操作的安全前提：只要 metadata 仍在，无论它看起来多旧，都可能是某个
+存活 runner 正在执行的 lease，reaper **绝不触碰**。
+
+释放本身复用正常的、以 lease identity（lease ID + token）为栅栏的
+`ReleaseExpiredLease`：并发提交/续约如果已经推进到新一代 lease，reaper 会得到
+token 不匹配并安静放弃。释放后它按 runner 自己的重放路径同样地维护 per-runner
+租约索引，并结清释放路径**刻意保留**的 `finalized` handoff 记录
+（`SettleFinalizedHandoff`）。
+
+### 7.3 两趟枚举，各覆盖一半
+
+reaper 用两个独立来源找候选，因为任一趟单跑都会漏掉一类：
+
+1. **per-runner 租约索引。** 按已注册 runner 遍历
+   `runner:leased-assignments:<runner-id>`，逐条用 `assignment:state` 与
+   `assignment:runner` 复核状态和归属（索引只是提示，不是权威）。当索引中的存活
+   条目数**少于** `runner:lease-count` 时，说明该 runner 存在索引写入之前由旧
+   控制面 finalize 的 lease，于是对该 runner 做一次全哈希扫描补齐——这与 runner
+   自身重放的做法一致。
+2. **handoff 账本。** 遍历 `handoff:state` 中仍为 `finalized` 的记录，从中取出
+   assignment。这一趟专门覆盖**per-runner 索引已不可用**的情形（例如 runner 已从
+   注册表移除、索引条目丢失），此时第一趟根本不会枚举到它。
+
+### 7.4 边界与不做的事
+
+- **不释放 metadata 仍在的 lease**，因此可以对着在线目录跑。
+- **不改变双读/双写结论**：它只操作当前版本的键，与 §5 无关。
+- **不会掩盖 §6 的旧 Hash 残留**：两者对象不同，各自独立排空。
+- **是可选的能力（类型断言）**：内存目录和其它 `RunnerDirectory` 实现不实现它，
+  行为不变；但更换目录实现会让这个回收静默消失，届时应由运维侧监控
+  `runner:lease-count` 是否长期不回落。
+- **不使用前缀 `SCAN`**：与 §6 同样的原因，Redis Cluster 下按节点应答会漏键。
+
