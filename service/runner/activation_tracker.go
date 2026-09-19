@@ -101,6 +101,16 @@ func NewActivationTracker(handler ActivationHandler, logger *slog.Logger) *Activ
 	}
 }
 
+// Handler returns the activation handler this tracker drives.
+//
+// It exists so that wiring assertions can be made on the handler the process
+// actually built, rather than on the config value that was supposed to reach it.
+// The two are not the same claim: a host that sets a knob, has it validated, and
+// then never threads it into the handler passes a config-level test while every
+// activation keeps using the built-in default. The caller (sdk/xflow) is a
+// different package, so that assertion needs an exported reader.
+func (t *ActivationTracker) Handler() ActivationHandler { return t.handler }
+
 // SetOnActivateFailed installs the failure callback. Not safe to call
 // concurrently with ProcessDirectives; call it once during wiring.
 func (t *ActivationTracker) SetOnActivateFailed(fn func(protocol.ActivateDirective, error)) {

@@ -244,8 +244,18 @@ items listed below under §12.1. What remains open is in §12.2.
   field-defaulting rules cannot drift apart.
 - **The seed HTTP client is injectable.** `NewTriggerActivationHandler` takes
   `WithSeedHTTPClient`; the runner entrypoint passes a client whose timeout sits
-  above `entrySeedRequestTimeout` so the per-request context deadline stays the
+  above the per-request context deadline so the context deadline stays the
   effective bound.
+- **The seed admission deadline is configurable.** The per-request context
+  timeout is `protocol.DefaultEntrySeedRequestTimeout` (15s) unless the runner
+  sets `RunnerConfig.SeedRequestTimeout` (or the standalone
+  `seed.request_timeout`). The integrator's batch size sets how long an
+  admission takes, so the integrator is who has to be able to move this bound:
+  at 15s a large batch fails with `context.DeadlineExceeded`, the offset is left
+  uncommitted, and the whole batch is redelivered. The seed HTTP client timeout
+  is derived from the deadline (twice it), so raising the deadline does not leave
+  the client cutting the request off first and reporting a transport error where
+  the deadline would have reported a timeout.
 - **The generation-upgrade stale-close branch is tested.** Two cases cover it:
   a second `Activate` at a higher generation closes the superseded subscription
   exactly once, and a failing `Activate` leaves the old subscription open and

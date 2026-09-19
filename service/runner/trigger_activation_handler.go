@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
@@ -41,6 +42,15 @@ type TriggerActivationHandler struct {
 	runnerID    string
 	triggers    TriggerHandlerLookup
 	seedClient  *http.Client // injected via WithSeedHTTPClient; nil uses http.DefaultClient
+	// seedRequestTimeout bounds one seed admission round trip on every runtime
+	// this handler installs. Zero (the default) leaves
+	// protocol.DefaultEntrySeedRequestTimeout in place. Set via
+	// WithSeedRequestTimeout.
+	seedRequestTimeout time.Duration
+	// seedObserver, when non-nil, receives one observation per seed admission
+	// attempt from every runtime this handler installs. nil (the default) means
+	// no admission metrics. Set via WithSeedObserver.
+	seedObserver types.EntrySeedObserver
 
 	// gate, when set, is the activation-time supply readiness gate. nil means no
 	// gating (a runner with no supply-consuming workflows, or an older wiring).
@@ -107,12 +117,49 @@ type TriggerActivationHandlerOption func(*TriggerActivationHandler)
 // the fallback in protocol.HTTPEntrySeedRuntime.
 //
 // The client's Timeout should be set larger than the per-request context
-// timeout (entrySeedRequestTimeout = 15s in entry_seed_runtime.go) so that
-// the context deadline governs normal cancellation while the client Timeout
-// acts as an absolute safety net covering connection setup and body reads.
-// Recommended: 30s.
+// timeout (protocol.DefaultEntrySeedRequestTimeout, or WithSeedRequestTimeout
+// when raised) so that the context deadline governs normal cancellation while
+// the client Timeout acts as an absolute safety net covering connection setup
+// and body reads.
 func WithSeedHTTPClient(c *http.Client) TriggerActivationHandlerOption {
 	return func(h *TriggerActivationHandler) { h.seedClient = c }
+}
+
+// WithSeedRequestTimeout sets the deadline applied to each entry-seed admission
+// round trip. Zero or negative leaves
+// protocol.DefaultEntrySeedRequestTimeout (15s) in place.
+//
+// The deadline is what a slow admission is judged against, and the admission
+// carries one whole trigger batch: its latency grows with the batch size the
+// integrator chose. Below that batch's real latency the deadline converts a
+// successful-but-slow admission into a transient failure, the Kafka offset is
+// left uncommitted, and the batch is redelivered and re-executed. Raise it to
+// the batch the deployment actually runs; see
+// protocol.DefaultEntrySeedRequestTimeout for the measurements.
+//
+// Raising it is not free: the flush that issued the admission waits for the
+// whole window, so a value beyond what the workload can tolerate converts
+// prompt redelivery into a stalled partition. Keep the WithSeedHTTPClient
+// client Timeout above this value so the context deadline is what governs.
+func WithSeedRequestTimeout(d time.Duration) TriggerActivationHandlerOption {
+	return func(h *TriggerActivationHandler) {
+		if d > 0 {
+			h.seedRequestTimeout = d
+		}
+	}
+}
+
+// WithSeedObserver installs the observer that receives one observation per
+// entry-seed admission attempt (outcome + duration) from every seed runtime
+// this handler installs. nil (the default) leaves admission unobserved.
+//
+// It is a plain injection rather than a process-global slot because a runtime
+// is constructed per activation and carries the observer itself: two runners in
+// one process each observe their own admissions, with no install-once guard to
+// arbitrate. That is also why the seed path's metrics need no counterpart to
+// installProcessObservers.
+func WithSeedObserver(o types.EntrySeedObserver) TriggerActivationHandlerOption {
+	return func(h *TriggerActivationHandler) { h.seedObserver = o }
 }
 
 // WithSeedRunnerID declares the runner identity on HTTP entry-seed requests.
@@ -257,6 +304,10 @@ func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.Acti
 			Namespace:    d.Namespace,
 			Generation:   d.Generation,
 			ReplicaIndex: d.ReplicaIndex,
+			// Resolved here, not left to the runtime's own fallback, so the
+			// value this handler reports is the value that is applied.
+			RequestTimeout: h.seedRequestTimeoutOrDefault(),
+			Observer:       h.seedObserver,
 		},
 		Supplies: resolveSuppliesForTrigger(d.Supplies),
 	}
@@ -312,6 +363,11 @@ func (h *TriggerActivationHandler) activateGroup(ctx context.Context, d protocol
 				Namespace:    d.Namespace,
 				Generation:   d.Generation,
 				ReplicaIndex: d.ReplicaIndex,
+				// Same resolution as the single-node path above: a group batch
+				// is the larger of the two, so it is the one that most needs
+				// the configured deadline.
+				RequestTimeout: h.seedRequestTimeoutOrDefault(),
+				Observer:       h.seedObserver,
 			},
 			runtime:     h.groupRuntime,
 			pkg:         pkg,
@@ -634,6 +690,29 @@ func (h *TriggerActivationHandler) seedHTTPClient() *http.Client {
 		return h.seedClient
 	}
 	return http.DefaultClient
+}
+
+// seedRequestTimeoutOrDefault is the deadline every runtime this handler
+// installs is given: the configured value when it is positive, otherwise
+// protocol.DefaultEntrySeedRequestTimeout.
+func (h *TriggerActivationHandler) seedRequestTimeoutOrDefault() time.Duration {
+	if h.seedRequestTimeout > 0 {
+		return h.seedRequestTimeout
+	}
+	return protocol.DefaultEntrySeedRequestTimeout
+}
+
+// SeedRequestTimeout reports the deadline this handler applies to entry-seed
+// admissions — the resolved value, not the raw option, so an unset or
+// non-positive option reports protocol.DefaultEntrySeedRequestTimeout rather
+// than 0.
+//
+// Exported so a test outside this package can assert the value on the
+// component that will APPLY it. The defect this exists to catch is a config
+// field that is set, validated, and then never reaches the admission call,
+// which a test that stops at "the option struct holds 60s" passes silently.
+func (h *TriggerActivationHandler) SeedRequestTimeout() time.Duration {
+	return h.seedRequestTimeoutOrDefault()
 }
 
 // Deactivate closes and removes the stored subscription for the directive's

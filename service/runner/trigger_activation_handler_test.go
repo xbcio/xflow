@@ -3,8 +3,10 @@ package runner
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/execution"
@@ -659,5 +661,170 @@ func TestTriggerActivationHandler_DeactivateKeepsEntryReplacedWhileClosing(t *te
 	}
 	if got := fh.activates.Load(); got != 2 {
 		t.Fatalf("Activate calls = %d, want 2", got)
+	}
+}
+
+// TestTriggerActivationHandler_SeedRequestTimeoutReachesTheInstalledRuntime
+// asserts the configured admission deadline on the RUNTIME THAT APPLIES IT, for
+// both runtimes this handler installs.
+//
+// The double duty is not incidental. Through the group path the seed runtime is
+// wrapped inside groupExecTriggerRuntime and is reachable only by unwrapping the
+// embedded pointer, so "the handler holds the value" and "the value reached both
+// activation shapes" are separate claims — and the group path, which carries the
+// larger batch, is the one where a missing deadline would hurt most.
+//
+// The defect shape this catches, in the handler's own terms: WithSeedRequestTimeout
+// stores a duration that nothing reads, and every activation keeps applying the
+// 15s default while the wiring appears complete.
+func TestTriggerActivationHandler_SeedRequestTimeoutReachesTheInstalledRuntime(t *testing.T) {
+	fh := &fakeTriggerHandler{}
+	lookup := fakeLookup{handlers: map[string]types.TriggerHandler{"fake": fh}}
+	h := NewTriggerActivationHandler("https://control.internal", "tok", lookup,
+		WithSeedRequestTimeout(90*time.Second))
+
+	if err := h.Activate(context.Background(), protocol.ActivateDirective{
+		Namespace: "ns1", WorkflowID: "wf1", EntryUnitID: "t1", NodeType: "fake", Generation: 1,
+	}); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	rt, ok := fh.gotInput.Runtime.(*protocol.HTTPEntrySeedRuntime)
+	if !ok {
+		t.Fatalf("Runtime type = %T, want *protocol.HTTPEntrySeedRuntime", fh.gotInput.Runtime)
+	}
+	if rt.RequestTimeout != 90*time.Second {
+		t.Fatalf("installed RequestTimeout = %v, want 90s: the configured admission "+
+			"deadline did not reach the runtime that applies it", rt.RequestTimeout)
+	}
+	if rt.Observer != nil {
+		t.Fatalf("Observer = %v, want nil when none was configured", rt.Observer)
+	}
+}
+
+// TestTriggerActivationHandler_SeedRequestTimeoutUnsetKeeps15s is the
+// no-behaviour-change half: a host that passes no option keeps exactly the
+// window the runner applied before the deadline was configurable. Asserted on
+// the installed runtime, so a resolved default of 0 — which reaches
+// context.WithTimeout as an already-expired deadline and withholds every offset
+// forever — fails here rather than in production.
+func TestTriggerActivationHandler_SeedRequestTimeoutUnsetKeeps15s(t *testing.T) {
+	fh := &fakeTriggerHandler{}
+	lookup := fakeLookup{handlers: map[string]types.TriggerHandler{"fake": fh}}
+	h := NewTriggerActivationHandler("https://control.internal", "tok", lookup)
+
+	if got := h.SeedRequestTimeout(); got != protocol.DefaultEntrySeedRequestTimeout {
+		t.Errorf("SeedRequestTimeout() = %v with no option, want the %v default",
+			got, protocol.DefaultEntrySeedRequestTimeout)
+	}
+
+	if err := h.Activate(context.Background(), protocol.ActivateDirective{
+		Namespace: "ns1", WorkflowID: "wf1", EntryUnitID: "t1", NodeType: "fake", Generation: 1,
+	}); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	rt, ok := fh.gotInput.Runtime.(*protocol.HTTPEntrySeedRuntime)
+	if !ok {
+		t.Fatalf("Runtime type = %T", fh.gotInput.Runtime)
+	}
+	if rt.RequestTimeout != protocol.DefaultEntrySeedRequestTimeout {
+		t.Fatalf("installed RequestTimeout = %v, want %v", rt.RequestTimeout,
+			protocol.DefaultEntrySeedRequestTimeout)
+	}
+}
+
+// TestTriggerActivationHandler_SeedObserverReachesTheInstalledRuntime checks the
+// metric contract's other half: the observer the host installs is the one the
+// runtime calls. Without this the counter series exists but nothing ever
+// increments it, which is indistinguishable from a healthy deployment on a
+// scrape.
+func TestTriggerActivationHandler_SeedObserverReachesTheInstalledRuntime(t *testing.T) {
+	obs := &recordingSeedObserver{}
+	fh := &fakeTriggerHandler{}
+	lookup := fakeLookup{handlers: map[string]types.TriggerHandler{"fake": fh}}
+	h := NewTriggerActivationHandler("https://control.internal", "tok", lookup,
+		WithSeedObserver(obs))
+
+	if err := h.Activate(context.Background(), protocol.ActivateDirective{
+		Namespace: "ns1", WorkflowID: "wf1", EntryUnitID: "t1", NodeType: "fake", Generation: 1,
+	}); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	rt, ok := fh.gotInput.Runtime.(*protocol.HTTPEntrySeedRuntime)
+	if !ok {
+		t.Fatalf("Runtime type = %T", fh.gotInput.Runtime)
+	}
+	if rt.Observer != types.EntrySeedObserver(obs) {
+		t.Fatalf("installed Observer = %v, want the observer passed to WithSeedObserver", rt.Observer)
+	}
+}
+
+// recordingSeedObserver is the minimal types.EntrySeedObserver, shared by the
+// wiring tests above. The behaviour it records is exercised in
+// service/protocol's own tests; here it only has to be the same value on both
+// sides of the handoff.
+type recordingSeedObserver struct {
+	mu       sync.Mutex
+	outcomes []string
+}
+
+func (r *recordingSeedObserver) OnEntrySeedAdmission(_ context.Context, outcome string, _ time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.outcomes = append(r.outcomes, outcome)
+}
+
+// TestTriggerActivationHandler_GroupSeedTimeoutReachesTheEmbeddedRuntime is the
+// group-path half of the assertion above: the group runtime embeds
+// HTTPEntrySeedRuntime, and a deadline threaded into only the single-node
+// constructor would leave every group batch on the 15s default — the shape with
+// the largest batch and therefore the one most likely to breach it.
+func TestTriggerActivationHandler_GroupSeedTimeoutReachesTheEmbeddedRuntime(t *testing.T) {
+	fh := &groupExecFakeTriggerHandler{}
+	lookup := fakeLookup{handlers: map[string]types.TriggerHandler{"test.grouplocal.trigger": fh}}
+
+	reg := execution.NewRegistry()
+	reg.RegisterGlobal("test.echo", echoHandler{})
+	groupRT := NewGroupRuntime(reg, NewPackageCache(PackageCacheConfig{MaxEntries: 10}), WithSuspendDisabled())
+
+	pkg := &graph.SubgraphPackage{
+		Version:   1,
+		GroupName: "g",
+		EntryNode: "trig",
+		Def: &types.WorkflowDef{
+			Name: "g",
+			Nodes: []types.NodeDef{
+				{Name: "trig", Type: "test.grouplocal.trigger", Version: 1},
+				{Name: "__collector_trig_main", Type: graph.NodeTypeGroupExit, Version: 1},
+			},
+			Connections: types.Connections{
+				"trig": {"main": types.PortConnections{Targets: []types.Connection{{Node: "__collector_trig_main"}}}},
+			},
+		},
+		Exits: []graph.SubgraphPackageExit{{CollectorNode: "__collector_trig_main", SrcNode: "trig", Port: "main"}},
+	}
+
+	h := NewTriggerActivationHandler("http://control-plane", "tok", lookup,
+		WithGroupRuntime(groupRT), WithSeedRequestTimeout(90*time.Second))
+
+	if err := h.Activate(context.Background(), protocol.ActivateDirective{
+		WorkflowID: "wf-1", WorkflowVersion: "v1", EntryUnitID: "g",
+		NodeType: "xflow.group", Generation: 3, PackageHash: "pkg-sha256:v1:x", Package: pkg,
+	}); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	if fh.gotInput == nil {
+		t.Fatal("group entry's trigger handler Activate was never called")
+	}
+	// groupExecTriggerRuntime is package-private, so unwrap it directly.
+	gr, ok := fh.gotInput.Runtime.(*groupExecTriggerRuntime)
+	if !ok {
+		t.Fatalf("Runtime type = %T, want *groupExecTriggerRuntime", fh.gotInput.Runtime)
+	}
+	if gr.HTTPEntrySeedRuntime == nil {
+		t.Fatal("groupExecTriggerRuntime.HTTPEntrySeedRuntime is nil; the group path has no admission runtime at all")
+	}
+	if got := gr.HTTPEntrySeedRuntime.RequestTimeout; got != 90*time.Second {
+		t.Fatalf("embedded RequestTimeout = %v, want 90s: the group activation path "+
+			"kept the default deadline, and it is the path carrying the largest batch", got)
 	}
 }

@@ -130,6 +130,25 @@ type RunnerConfig struct {
 	HeartbeatInterval time.Duration
 	PollWait          time.Duration
 
+	// SeedRequestTimeout bounds one entry-seed admission round trip — the POST
+	// to /v1/executions that admits a whole trigger batch's results. Zero (the
+	// default) keeps protocol.DefaultEntrySeedRequestTimeout, 15s.
+	//
+	// The window a deployment needs is a function of the batch size IT chose:
+	// the request carries the batch's exits, so its latency grows with the
+	// batch. At the 15s default a large batch fails with
+	// context.DeadlineExceeded, which is treated as a transient failure — the
+	// Kafka offset is left uncommitted and the whole batch is redelivered and
+	// re-executed, so the failure amplifies load instead of shedding it. Raise
+	// this to cover the batch the runner is configured to flush.
+	//
+	// It is a two-sided bound like LeaseTTL, with a milder cost for
+	// overshooting: too low redelivers batches and burns downstream capacity on
+	// work already done; too high makes a partition's flush wait longer before
+	// it retries. This runner's seed HTTP client timeout is derived from it, so
+	// the context deadline is what governs a normal admission.
+	SeedRequestTimeout time.Duration
+
 	// ReportMetrics ships this runner's whole Prometheus registry to the server,
 	// which merges it into its own /metrics. Requires WithRunnerMetrics, and is
 	// deliberately independent of whether the host exposes a scrape endpoint: a
@@ -542,6 +561,10 @@ func buildRunnerServiceConfig(cfg RunnerConfig, opts ...RunnerOption) (runnersvc
 		return runnersvc.Config{}, fmt.Errorf("xflow: RunnerConfig.MapItemConcurrency must be positive, got %d",
 			cfg.MapItemConcurrency)
 	}
+	if cfg.SeedRequestTimeout < 0 {
+		return runnersvc.Config{}, fmt.Errorf("xflow: RunnerConfig.SeedRequestTimeout must be positive, got %s",
+			cfg.SeedRequestTimeout)
+	}
 
 	artifactCode := o.artifactResolver
 	if artifactCode == nil {
@@ -682,7 +705,10 @@ func wireRunnerTriggerHosting(svcCfg *runnersvc.Config, cfg RunnerConfig, o *run
 	// The seed client timeout is deliberately larger than the per-request
 	// context timeout: the context deadline governs normal cancellation, this
 	// is an absolute safety net covering connection setup and full body read.
-	seedClient, err := newRunnerHTTPClient(cfg, 30*time.Second)
+	// It tracks SeedRequestTimeout, so raising the admission window does not
+	// leave the client cutting the request off first and reporting a transport
+	// error where the deadline would have reported a timeout.
+	seedClient, err := newRunnerHTTPClient(cfg, seedClientTimeout(cfg))
 	if err != nil {
 		return err
 	}
@@ -699,12 +725,18 @@ func wireRunnerTriggerHosting(svcCfg *runnersvc.Config, cfg RunnerConfig, o *run
 	handler := runnersvc.NewTriggerActivationHandler(seedBaseURL, cfg.Token, runnerTriggerLookup{},
 		runnersvc.WithSeedHTTPClient(seedClient),
 		runnersvc.WithSeedRunnerID(cfg.RunnerID),
+		runnersvc.WithSeedRequestTimeout(cfg.SeedRequestTimeout),
 		runnersvc.WithSupplyGate(gate),
 		runnersvc.WithGroupRuntime(groupRuntime),
 		// The same resolver the executor uses, so activation can compile a wasm
 		// module before registering its supply consumer without a second client
 		// or cache.
-		runnersvc.WithArtifactCodeResolver(svcCfg.ArtifactCodeResolver))
+		runnersvc.WithArtifactCodeResolver(svcCfg.ArtifactCodeResolver),
+		// Seed admission observation rides the runtime the handler installs, not
+		// a process-global slot, so a host with no metrics registry gets nil and
+		// an observed one gets its own registry — no install-once guard and no
+		// cross-runner arbitration.
+		runnersvc.WithSeedObserver(runnerSeedObserver(o.metrics)))
 
 	svcCfg.ActivationTracker = runnersvc.NewActivationTracker(handler, o.logger)
 	// The same gate/registry pair feeds the heartbeat's two supply channels:
@@ -713,6 +745,34 @@ func wireRunnerTriggerHosting(svcCfg *runnersvc.Config, cfg RunnerConfig, o *run
 	svcCfg.SupplyRegistry = supply.Default
 	svcCfg.SupplyGate = gate
 	return nil
+}
+
+// seedClientTimeout is the absolute http.Client timeout for the seed client:
+// twice the admission deadline, which is the ratio the 30s/15s pair always
+// used. Seeding a positive SeedRequestTimeout therefore keeps the client above
+// the deadline rather than pinning it at 30s — a 60s admission window under a
+// 30s client timeout would fail as a transport error before the context
+// deadline could classify it as the timeout it is.
+func seedClientTimeout(cfg RunnerConfig) time.Duration {
+	if cfg.SeedRequestTimeout > 0 {
+		return 2 * cfg.SeedRequestTimeout
+	}
+	return 2 * protocol.DefaultEntrySeedRequestTimeout
+}
+
+// runnerSeedObserver returns the seed admission observer for this runner, or
+// nil when no metrics registry was configured.
+//
+// The nil case is returned as an untyped nil rather than as a non-nil interface
+// holding a nil *Metrics: the runtime installs whatever it is given into
+// HTTPEntrySeedRuntime.Observer and calls it behind a `!= nil` test, and a
+// typed-nil interface would pass that test and then panic on the first
+// admission — on the hot path, inside the runner's trigger flush.
+func runnerSeedObserver(m *metrics.Metrics) types.EntrySeedObserver {
+	if m == nil {
+		return nil
+	}
+	return metrics.NewEntrySeedMetrics(m)
 }
 
 // wireRunnerMetrics installs the observers that belong to THIS assembly — the

@@ -54,6 +54,12 @@ type runnerConfig struct {
 	namespaces        []namespace.Namespace
 	heartbeatInterval string
 	pollWait          string
+	// seedRequestTimeout bounds one entry-seed admission round trip (one trigger
+	// batch), which is the POST that admits a whole batch's results. Empty means
+	// "unset": the SDK keeps protocol.DefaultEntrySeedRequestTimeout (15s). Kept
+	// as a string until precedence resolution completes, like every other
+	// duration here.
+	seedRequestTimeout string
 	// browserCDP* is kept in the raw CLI/YAML representation until precedence
 	// resolution and validation complete, then converted in toSDKRunnerConfig.
 	browserCDPEndpointAllowlist []string
@@ -149,6 +155,8 @@ func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
 	cmd.Flags().BoolVar(&cfg.autoLabels, "auto-labels", cfg.autoLabels, "Add environment-derived xflow.io/* labels (os, arch, env, hostname)")
 	cmd.Flags().StringVar(&cfg.heartbeatInterval, "heartbeat-interval", cfg.heartbeatInterval, "Heartbeat interval")
 	cmd.Flags().StringVar(&cfg.pollWait, "poll-wait", cfg.pollWait, "Poll wait duration when no task is available")
+	cmd.Flags().StringVar(&cfg.seedRequestTimeout, "seed-request-timeout", cfg.seedRequestTimeout,
+		"Deadline for one entry-seed admission (one Kafka batch); raise it when a large batch exceeds the 15s default")
 	cmd.Flags().StringArrayVar(&cfg.browserCDPEndpointAllowlist, "browser-cdp-endpoint-allowlist", cfg.browserCDPEndpointAllowlist, "Allowlisted Browser CDP host rule: exact host, .suffix (apex + descendants), or *.wildcard (descendants only); repeatable")
 	cmd.Flags().IntVar(&cfg.browserCDPMaxContexts, "browser-cdp-max-contexts", cfg.browserCDPMaxContexts, "Maximum concurrent Browser CDP contexts")
 	cmd.Flags().StringVar(&cfg.browserCDPQueueTimeout, "browser-cdp-queue-timeout", cfg.browserCDPQueueTimeout, "Browser CDP context queue timeout")
@@ -440,21 +448,32 @@ func toSDKRunnerConfig(cfg runnerConfig) (xflowsdk.RunnerConfig, error) {
 			return xflowsdk.RunnerConfig{}, err
 		}
 	}
+	// Empty stays empty: an unset admission deadline must reach the SDK as zero
+	// so it keeps protocol.DefaultEntrySeedRequestTimeout, rather than as a
+	// resolved 15s that would silently freeze the default in this layer.
+	seedRequestTimeout := time.Duration(0)
+	if cfg.seedRequestTimeout != "" {
+		seedRequestTimeout, err = parsePositiveDuration("seed request timeout", cfg.seedRequestTimeout)
+		if err != nil {
+			return xflowsdk.RunnerConfig{}, err
+		}
+	}
 	return xflowsdk.RunnerConfig{
-		ServerURL:         cfg.serverURL,
-		Transport:         cfg.transport,
-		GRPCTarget:        cfg.grpcTarget,
-		RunnerID:          cfg.runnerID,
-		Concurrency:       cfg.concurrency,
-		Capabilities:      capabilityNodeTypes(cfg.capabilities),
-		Labels:            cloneStringMap(cfg.labels),
-		Namespaces:        cfg.namespaces,
-		Token:             cfg.token,
-		TLSServerCA:       cfg.tlsServerCA,
-		TLSClientCert:     cfg.tlsClientCert,
-		TLSClientKey:      cfg.tlsClientKey,
-		HeartbeatInterval: heartbeat,
-		PollWait:          pollWait,
+		ServerURL:          cfg.serverURL,
+		Transport:          cfg.transport,
+		GRPCTarget:         cfg.grpcTarget,
+		RunnerID:           cfg.runnerID,
+		Concurrency:        cfg.concurrency,
+		Capabilities:       capabilityNodeTypes(cfg.capabilities),
+		Labels:             cloneStringMap(cfg.labels),
+		Namespaces:         cfg.namespaces,
+		Token:              cfg.token,
+		TLSServerCA:        cfg.tlsServerCA,
+		TLSClientCert:      cfg.tlsClientCert,
+		TLSClientKey:       cfg.tlsClientKey,
+		HeartbeatInterval:  heartbeat,
+		PollWait:           pollWait,
+		SeedRequestTimeout: seedRequestTimeout,
 		BrowserCDP: xnode.BrowserCDPConfig{
 			EndpointAllowlist: copyTrimmedHosts(cfg.browserCDPEndpointAllowlist),
 			MaxContexts:       cfg.browserCDPMaxContexts,

@@ -37,6 +37,11 @@ type runnerConfigFile struct {
 	Heartbeat struct {
 		Interval *string `yaml:"interval"`
 	} `yaml:"heartbeat"`
+	// Seed tunes entry-seed admission: the POST that admits one trigger batch's
+	// results to the control plane, which is what a Kafka flush blocks on.
+	Seed struct {
+		RequestTimeout *string `yaml:"request_timeout"`
+	} `yaml:"seed"`
 	Metrics struct {
 		Addr           *string `yaml:"addr"`            // Prometheus scrape listen address
 		Report         *bool   `yaml:"report"`          // ship metrics to the server
@@ -181,6 +186,9 @@ func loadRunnerConfigFromBytesForProfile(data []byte, profile Profile) (runnerCo
 	if file.Heartbeat.Interval != nil {
 		cfg.heartbeatInterval = *file.Heartbeat.Interval
 	}
+	if file.Seed.RequestTimeout != nil {
+		cfg.seedRequestTimeout = *file.Seed.RequestTimeout
+	}
 	if file.Metrics.Addr != nil {
 		cfg.metricsAddr = *file.Metrics.Addr
 	}
@@ -287,6 +295,7 @@ var runnerConfigIssueOrder = []string{
 	"namespace",
 	"heartbeat-interval",
 	"poll-wait",
+	"seed-request-timeout",
 	"allow-plaintext",
 	"require-supply-encryption",
 	"auto-labels",
@@ -360,6 +369,13 @@ func applyLookupEnvOverrides(cfg runnerConfig, lookupEnv func(string) (string, b
 	}
 	if v, ok := lookupEnv("XFLOW_RUNNER_POLL_WAIT"); ok {
 		cfg.pollWait = v
+	}
+	// No default, unlike heartbeat/poll: an unset value must stay unset so the
+	// SDK applies protocol.DefaultEntrySeedRequestTimeout. Materializing 15s
+	// here would make the default a property of this CLI layer, where raising it
+	// in the SDK would no longer reach a runner configured through YAML.
+	if v, ok := lookupEnv("XFLOW_RUNNER_SEED_REQUEST_TIMEOUT"); ok {
+		cfg.seedRequestTimeout = v
 	}
 	if v, ok := lookupEnv("XFLOW_RUNNER_TOKEN"); ok {
 		cfg.token = v
@@ -580,6 +596,15 @@ func validateRunnerConfig(cfg runnerConfig) error {
 	}
 	if err := validatePositiveDuration("poll wait", cfg.pollWait); err != nil {
 		return err
+	}
+	// Optional, so it is validated only when set. A malformed value still fails
+	// closed here rather than being dropped: a batch-sized admission whose
+	// deadline silently stayed at 15s is the failure mode this knob exists to
+	// fix, and accepting "60" (no unit) as unset would reproduce it exactly.
+	if cfg.seedRequestTimeout != "" {
+		if err := validatePositiveDuration("seed request timeout", cfg.seedRequestTimeout); err != nil {
+			return err
+		}
 	}
 
 	if err := validateTransportSecurity(cfg); err != nil {
@@ -864,6 +889,10 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 		clearRunnerConfigIssue(&cfg, "poll-wait")
 		cfg.pollWait = base.pollWait
 	}
+	if base.changed["seed-request-timeout"] {
+		clearRunnerConfigIssue(&cfg, "seed-request-timeout")
+		cfg.seedRequestTimeout = base.seedRequestTimeout
+	}
 	// The credential-bearing flags. They were missing from this list, so they
 	// bound, parsed and validated and were then dropped here — only
 	// XFLOW_RUNNER_TOKEN and XFLOW_RUNNER_TLS_* ever took effect. Both halves
@@ -1003,6 +1032,17 @@ poll:
 
 heartbeat:
   interval: "5s"
+
+# Entry-seed admission: the POST that admits one trigger batch's results to the
+# control plane, which a Kafka flush blocks on. Omitted keeps the 15s default.
+# Raise it when the configured batch is large enough that its admission cannot
+# finish inside 15s: the deadline converts a slow-but-successful admission into
+# a transient failure, so the offset is not committed and the whole batch is
+# redelivered and re-executed. Roughly, a 100-record batch admits in ~2s and a
+# 150-record batch can exceed 15s, so a large batch_size wants a value with
+# headroom above its worst case, not merely above its mean.
+# seed:
+#   request_timeout: "60s"
 
 # Shared destination policy for xflow.http requests and Browser navigation.
 # Host patterns only: exact hosts, suffixes prefixed by ".", and wildcards
