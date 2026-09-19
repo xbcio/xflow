@@ -12,34 +12,41 @@ import (
 	"github.com/xbcio/xflow/service/protocol"
 )
 
-// ledgerHGetAllHook counts whole-hash reads of the fleet-wide handoff and
-// deactivation ledgers. Those hashes are keyed by claim/obligation across every
-// runner, so reading one on a per-poll path costs O(fleet debt) for fields the
-// poll caller does not use.
-type ledgerHGetAllHook struct {
-	mu   sync.Mutex
-	keys map[string]struct{}
-	n    int
+// keyCommandHook counts a chosen Redis command against a fixed set of keys. It
+// is how a test pins which command reaches a key rather than only how many reads
+// happen, which matters for the fleet-wide handoff and deactivation ledgers:
+// those hashes are keyed by claim/obligation across every runner, so reading one
+// on a per-poll path costs O(fleet debt) for fields the poll caller does not use.
+type keyCommandHook struct {
+	mu      sync.Mutex
+	command string
+	keys    map[string]struct{}
+	n       int
 }
 
-func newLedgerHGetAllHook(keys ...string) *ledgerHGetAllHook {
+func newLedgerHGetAllHook(keys ...string) *keyCommandHook {
+	return newKeyCommandHook("hgetall", keys...)
+}
+
+// newKeyCommandHook counts one named command against the given keys.
+func newKeyCommandHook(command string, keys ...string) *keyCommandHook {
 	set := make(map[string]struct{}, len(keys))
 	for _, key := range keys {
 		set[key] = struct{}{}
 	}
-	return &ledgerHGetAllHook{keys: set}
+	return &keyCommandHook{command: command, keys: set}
 }
 
-func (h *ledgerHGetAllHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+func (h *keyCommandHook) DialHook(next redis.DialHook) redis.DialHook { return next }
 
-func (h *ledgerHGetAllHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+func (h *keyCommandHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 	return func(ctx context.Context, cmd redis.Cmder) error {
 		h.observe(cmd)
 		return next(ctx, cmd)
 	}
 }
 
-func (h *ledgerHGetAllHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+func (h *keyCommandHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
 	return func(ctx context.Context, cmds []redis.Cmder) error {
 		for _, cmd := range cmds {
 			h.observe(cmd)
@@ -48,8 +55,8 @@ func (h *ledgerHGetAllHook) ProcessPipelineHook(next redis.ProcessPipelineHook) 
 	}
 }
 
-func (h *ledgerHGetAllHook) observe(cmd redis.Cmder) {
-	if strings.ToLower(cmd.Name()) != "hgetall" {
+func (h *keyCommandHook) observe(cmd redis.Cmder) {
+	if strings.ToLower(cmd.Name()) != h.command {
 		return
 	}
 	args := cmd.Args()
@@ -68,13 +75,13 @@ func (h *ledgerHGetAllHook) observe(cmd redis.Cmder) {
 	h.mu.Unlock()
 }
 
-func (h *ledgerHGetAllHook) count() int {
+func (h *keyCommandHook) count() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.n
 }
 
-func (h *ledgerHGetAllHook) reset() {
+func (h *keyCommandHook) reset() {
 	h.mu.Lock()
 	h.n = 0
 	h.mu.Unlock()

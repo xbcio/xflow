@@ -209,6 +209,30 @@ func (keys redisRunnerDirectoryKeys) runnerLeasedAssignmentsKey(runnerID string)
 	return keys.prefix + ":runner:leased-assignments:" + runnerID
 }
 
+// redisHandoffClaimIndexSuffix names the per-runner handoff index. It is a bare
+// suffix rather than a full key because the two Lua transitions that promote an
+// unledgered claim into handoff debt only learn the owning runner inside the
+// script; they build the key from handoffClaimIndexPrefix instead.
+const redisHandoffClaimIndexSuffix = ":runner:handoff-index:"
+
+// handoffClaimIndexKey returns the per-runner set of claim IDs that
+// handoffRunner currently maps to runnerID. It is the index that keeps a poll's
+// handoff recovery proportional to the runner's own debt instead of to every
+// handoff claim in the fleet. Like assignmentLeaseMetaKey it is derived from the
+// prefix, so it carries the same Cluster hash tag as the Lua transitions that
+// write it.
+func (keys redisRunnerDirectoryKeys) handoffClaimIndexKey(runnerID string) string {
+	return keys.prefix + redisHandoffClaimIndexSuffix + runnerID
+}
+
+// handoffClaimIndexPrefix is the ARGV form handed to Lua scripts whose owner is
+// only known at runtime. Concatenating a runner ID onto it is safe on Redis
+// Cluster because the prefix still carries the shared hash tag, so every key a
+// script can name lands in the same slot as the keys it declares.
+func (keys redisRunnerDirectoryKeys) handoffClaimIndexPrefix() string {
+	return keys.prefix + redisHandoffClaimIndexSuffix
+}
+
 // redisActivationInventoryItem intentionally encodes generation as a string:
 // JSON/Lua number conversion would otherwise lose exact uint64 fencing values
 // above 2^53 while a reconnect decides whether it may inherit cleanup work.

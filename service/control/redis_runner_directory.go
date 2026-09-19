@@ -309,6 +309,7 @@ func (d *RedisRunnerDirectory) Register(ctx context.Context, req RegisterRunnerR
 		d.keys.deactivationObligationState,
 		d.keys.runnerActivationInventory,
 		d.keys.runnerDrainObservation,
+		d.keys.handoffClaimIndexKey(req.RunnerID),
 	}, req.RunnerID, session.SessionID, strconv.Itoa(req.Capacity), string(capabilities), string(policy), string(namespaces), strconv.FormatInt(now.UnixMilli(), 10), string(labels), activations)
 	if err != nil {
 		return RunnerSession{}, fmt.Errorf("register redis runner: %w", err)
@@ -435,17 +436,14 @@ func (d *RedisRunnerDirectory) ClaimForRunner(ctx context.Context, req ClaimRequ
 		return Claim{}, false, ErrRunnerSessionStale
 	}
 
-	// The ledger is normally empty, and proving that required reading all of it
-	// on every poll. The HLEN read in runnerForClaim's pipeline answers the same
-	// question in O(1): an empty ledger has no entry owned by this runner, so the
-	// scan below can only return not-found. The gate is a read optimization, not
-	// a cache -- an empty result here is the ledger's own current state.
-	if runner.hasHandoffDebt {
-		if handoff, ok, err := d.recoverableHandoff(ctx, req.RunnerID, req.SessionID); err != nil {
-			return Claim{}, false, err
-		} else if ok {
-			return handoff, true, nil
-		}
+	// The ledger is keyed by claim across the whole fleet, so filtering it in
+	// Redis would cost O(fleet handoff debt) on every poll. The per-runner index
+	// makes the scan proportional to this runner's own debt instead; the runner
+	// ID is known here, so no fleet-wide read is needed to find it.
+	if handoff, ok, err := d.recoverableHandoff(ctx, req.RunnerID, req.SessionID, runner.handoffClaimIDs); err != nil {
+		return Claim{}, false, err
+	} else if ok {
+		return handoff, true, nil
 	}
 	if replay, ok, err := d.replayLease(ctx, req.RunnerID, req.SessionID, req.ActiveLeaseIDs); err != nil {
 		return Claim{}, false, err
@@ -735,19 +733,34 @@ func (d *RedisRunnerDirectory) SettleClaimHandoff(ctx context.Context, claimID C
 	}
 }
 
-func (d *RedisRunnerDirectory) recoverableHandoff(ctx context.Context, runnerID, sessionID string) (Claim, bool, error) {
-	claims, err := d.rdb.HGetAll(ctx, d.keys.handoffRunner).Result()
-	if err != nil {
-		return Claim{}, false, fmt.Errorf("read redis handoff runners: %w", err)
-	}
-	claimIDs := make([]string, 0, len(claims))
-	for claimID, owner := range claims {
-		if owner == runnerID {
-			claimIDs = append(claimIDs, claimID)
-		}
-	}
+// recoverableHandoff replays at most one handoff owned by this runner's session
+// that a resolver may take.
+//
+// It is handed the candidate claim IDs from the per-runner handoff index that
+// the caller already read in its registration pipeline, rather than reading the
+// fleet-wide handoff ledger. That ledger is keyed by claim across every runner,
+// so scanning it made every poll cost O(fleet handoff debt) to find the handful
+// of entries this runner owns. The index is written by the same Lua transitions
+// that create a handoff record, so it is a complete superset of this runner's
+// debt; it is nevertheless not trusted on its own, and each candidate is
+// re-checked against the authoritative owner below.
+func (d *RedisRunnerDirectory) recoverableHandoff(ctx context.Context, runnerID, sessionID string, candidateClaimIDs []string) (Claim, bool, error) {
+	claimIDs := append([]string(nil), candidateClaimIDs...)
 	sort.Strings(claimIDs)
 	for _, rawClaimID := range claimIDs {
+		// The index entry outlives the handoff record it names until the
+		// transition that clears that record runs, so ownership is re-read here.
+		// An entry whose record is gone, or whose record now names another
+		// runner, is dropped: that is the only cleanup the index needs, and it is
+		// what keeps it bounded to live debt.
+		owner, err := d.rdb.HGet(ctx, d.keys.handoffRunner, rawClaimID).Result()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			return Claim{}, false, fmt.Errorf("read redis handoff owner %q: %w", rawClaimID, err)
+		}
+		if owner != runnerID {
+			d.pruneHandoffClaimIndex(ctx, runnerID, rawClaimID)
+			continue
+		}
 		session, err := d.rdb.HGet(ctx, d.keys.handoffSession, rawClaimID).Result()
 		if errors.Is(err, redis.Nil) || session != sessionID {
 			continue
@@ -764,6 +777,10 @@ func (d *RedisRunnerDirectory) recoverableHandoff(ctx context.Context, runnerID,
 		}
 		state := HandoffDebtState(stateRaw)
 		if state != HandoffDebtLeaseMayExist && state != HandoffDebtLeaseCreated {
+			// Still this runner's record, still correctly indexed; only its state
+			// is not yet (or no longer) resolver-eligible. Keep the entry -- a
+			// 'reserved' claim becomes recoverable when its lease fence is
+			// written, and the transition that clears the record prunes it.
 			continue
 		}
 		status, err := d.evalStatus(ctx, redisTakeHandoffRecoveryLua, []string{
@@ -828,6 +845,14 @@ func (d *RedisRunnerDirectory) recoverableHandoff(ctx context.Context, runnerID,
 		return Claim{ClaimID: ClaimID(rawClaimID), Assignment: assignment, Handoff: debt}, true, nil
 	}
 	return Claim{}, false, nil
+}
+
+// pruneHandoffClaimIndex drops an index entry whose handoff record no longer
+// names its runner. Like the lease index prune it is best effort on purpose: a
+// stale entry costs one bounded read on the next poll, and a poll that failed
+// over index hygiene would stop the runner from recovering work altogether.
+func (d *RedisRunnerDirectory) pruneHandoffClaimIndex(ctx context.Context, runnerID, claimID string) {
+	_, _ = d.rdb.SRem(ctx, d.keys.handoffClaimIndexKey(runnerID), claimID).Result()
 }
 
 func (d *RedisRunnerDirectory) restoreHandoffRecovery(ctx context.Context, claimID ClaimID) {
@@ -1075,6 +1100,7 @@ func (d *RedisRunnerDirectory) claim(ctx context.Context, runnerID, sessionID, a
 		d.keys.handoffLeaseID,
 		d.keys.handoffLeaseToken,
 		d.keys.handoffRecoveryReady,
+		d.keys.handoffClaimIndexKey(runnerID),
 	}, runnerID, sessionID, assignmentID, expectedData, string(claimID), strconv.FormatInt(d.claimTTLMillis(), 10), strconv.FormatInt(time.Now().UTC().UnixMilli(), 10))
 	if err != nil {
 		return "", fmt.Errorf("claim redis assignment: %w", err)
@@ -1146,6 +1172,7 @@ func (d *RedisRunnerDirectory) FinalizeClaim(ctx context.Context, claimID ClaimI
 		d.keys.handoffRecoveryReady,
 		d.keys.handoffRecoveryDeadline,
 		d.keys.runnerLeasedAssignmentsKey(runnerID),
+		d.keys.handoffClaimIndexKey(runnerID),
 	}, string(claimID), leaseID, leaseToken, meta, assignmentID,
 		strconv.FormatInt(d.assignmentLeaseMetaTTLMillis(lease), 10), runnerID)
 	if err != nil {
@@ -1204,7 +1231,7 @@ func (d *RedisRunnerDirectory) ReleaseClaim(ctx context.Context, claimID ClaimID
 		d.keys.handoffLeaseToken,
 		d.keys.handoffRecoveryReady,
 		d.keys.handoffRecoveryDeadline,
-	}, string(claimID), string(reason), assignmentID)
+	}, string(claimID), string(reason), assignmentID, d.keys.handoffClaimIndexPrefix())
 	if err != nil {
 		return fmt.Errorf("release redis claim: %w", err)
 	}
@@ -1781,11 +1808,11 @@ type redisClaimRunner struct {
 	// registration fields. It is a precheck only: the claim Lua re-evaluates it
 	// atomically, so a stale true costs one refused claim, never an over-claim.
 	hasHeadroom bool
-	// hasHandoffDebt reports whether the fleet-wide handoff ledger holds any
-	// entry at all, read in the same pipeline. It gates the per-poll recovery
-	// scan: with an empty ledger there is nothing to recover, and the scan would
-	// otherwise read the whole ledger on every poll to prove that.
-	hasHandoffDebt bool
+	// handoffClaimIDs is this runner's slice of the per-runner handoff index,
+	// read in the same pipeline and bounded by this runner's own debt. The fleet
+	// ledger it used to be filtered out of is keyed by claim across every runner,
+	// so reading that was O(fleet debt) on a path that only ever wants these few.
+	handoffClaimIDs []string
 }
 
 func (d *RedisRunnerDirectory) runnerForClaim(ctx context.Context, runnerID string) (redisClaimRunner, bool, error) {
@@ -1801,7 +1828,7 @@ func (d *RedisRunnerDirectory) runnerForClaim(ctx context.Context, runnerID stri
 	capacityCmd := pipe.HGet(ctx, d.keys.runnerCapacity, runnerID)
 	claimCountCmd := pipe.HGet(ctx, d.keys.runnerClaimCount, runnerID)
 	leaseCountCmd := pipe.HGet(ctx, d.keys.runnerLeaseCount, runnerID)
-	handoffLenCmd := pipe.HLen(ctx, d.keys.handoffRunner)
+	handoffIndexCmd := pipe.SMembers(ctx, d.keys.handoffClaimIndexKey(runnerID))
 	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
 		return redisClaimRunner{}, false, fmt.Errorf("read runner claim registration: %w", err)
 	}
@@ -1843,13 +1870,13 @@ func (d *RedisRunnerDirectory) runnerForClaim(ctx context.Context, runnerID stri
 	}
 	headroom := atoiDefault(capacityCmd.Val()) - atoiDefault(claimCountCmd.Val()) - atoiDefault(leaseCountCmd.Val())
 	return redisClaimRunner{
-		sessionID:      sessionID,
-		capabilities:   capabilities,
-		policy:         policy,
-		namespaces:     namespaces,
-		labels:         labels,
-		hasHeadroom:    headroom > 0,
-		hasHandoffDebt: handoffLenCmd.Val() > 0,
+		sessionID:       sessionID,
+		capabilities:    capabilities,
+		policy:          policy,
+		namespaces:      namespaces,
+		labels:          labels,
+		hasHeadroom:     headroom > 0,
+		handoffClaimIDs: handoffIndexCmd.Val(),
 	}, true, nil
 }
 
@@ -1891,7 +1918,7 @@ func (d *RedisRunnerDirectory) ReclaimExpiredClaims(ctx context.Context) error {
 		d.keys.handoffLeaseToken,
 		d.keys.handoffRecoveryReady,
 		d.keys.handoffRecoveryDeadline,
-	}, strconv.FormatInt(time.Now().UTC().UnixMilli(), 10)).Int64()
+	}, strconv.FormatInt(time.Now().UTC().UnixMilli(), 10), d.keys.handoffClaimIndexPrefix()).Int64()
 	if err != nil {
 		return fmt.Errorf("recover expired redis claims: %w", err)
 	}
@@ -1997,6 +2024,7 @@ for _, claimID in ipairs(redis.call('HKEYS', KEYS[8])) do
       redis.call('HSET', KEYS[26], claimID, assignmentID)
       redis.call('HSET', KEYS[27], assignmentID, claimID)
       redis.call('HSET', KEYS[28], claimID, oldRunner)
+      redis.call('SADD', KEYS[46], claimID)
       redis.call('HDEL', KEYS[30], claimID)
       redis.call('HDEL', KEYS[31], claimID)
       redis.call('HSET', KEYS[32], claimID, '1')
@@ -2165,6 +2193,7 @@ local function reclaim(claimID)
     redis.call('HSET', KEYS[15], claimID, assignmentID)
     redis.call('HSET', KEYS[16], assignmentID, claimID)
     redis.call('HSET', KEYS[17], claimID, runnerID)
+    if runnerID then redis.call('SADD', ARGV[2] .. runnerID, claimID) end
     redis.call('HSET', KEYS[18], claimID, redis.call('HGET', KEYS[9], claimID) or '')
     redis.call('HDEL', KEYS[19], claimID)
     redis.call('HDEL', KEYS[20], claimID)
@@ -2238,6 +2267,10 @@ redis.call('HDEL', KEYS[19], ARGV[5])
 redis.call('HSET', KEYS[20], ARGV[5], ARGV[3])
 redis.call('HSET', KEYS[21], ARGV[3], ARGV[5])
 redis.call('HSET', KEYS[22], ARGV[5], ARGV[1])
+-- The reservation and the per-runner index that finds it again are written in
+-- the same step. Recovery reads that index rather than scanning the fleet, so a
+-- lost index write here would leave debt its owner never sees.
+redis.call('SADD', KEYS[27], ARGV[5])
 redis.call('HSET', KEYS[23], ARGV[5], ARGV[2])
 redis.call('HDEL', KEYS[24], ARGV[5])
 redis.call('HDEL', KEYS[25], ARGV[5])
@@ -2284,6 +2317,7 @@ redis.call('HSET', KEYS[18], claimID, ARGV[4])
 redis.call('HSET', KEYS[19], claimID, assignmentID)
 redis.call('HSET', KEYS[20], assignmentID, claimID)
 redis.call('HSET', KEYS[21], claimID, runnerID)
+redis.call('SADD', KEYS[28], claimID)
 redis.call('HSET', KEYS[22], claimID, sessionID)
 redis.call('HSET', KEYS[23], claimID, ARGV[2])
 redis.call('HSET', KEYS[24], claimID, ARGV[3])
@@ -2410,6 +2444,10 @@ if not handoffState then
   redis.call('HSET', KEYS[19], claimID, assignmentID)
   redis.call('HSET', KEYS[20], assignmentID, claimID)
   redis.call('HSET', KEYS[21], claimID, runnerID)
+  -- runnerID is read from claimsRunner, so the index key cannot be declared by
+  -- the caller: build it from the shared prefix, which keeps the shared Cluster
+  -- hash tag and therefore the same slot.
+  if runnerID then redis.call('SADD', ARGV[4] .. runnerID, claimID) end
   redis.call('HSET', KEYS[22], claimID, redis.call('HGET', KEYS[13], claimID) or '')
   redis.call('HDEL', KEYS[23], claimID)
   redis.call('HDEL', KEYS[24], claimID)
