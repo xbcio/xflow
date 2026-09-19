@@ -806,6 +806,14 @@ func NewOutboxDispatcher(eng *Engine, interval time.Duration, opts ...OutboxDisp
 }
 
 // Run drains ready outboxes until ctx is canceled.
+//
+// The loop never idles while there is work to find: a drain that outran the
+// interval has already spent the wait the ticker would have imposed, so it goes
+// straight back to draining instead of blocking on a tick it has effectively
+// paid for. That matters because drain time is bounded by discovery and flush,
+// not by the interval — on a large keyspace one drain routinely takes longer
+// than the tick, and a loop that waited anyway would run one drain per (drain +
+// interval) instead of one per drain.
 func (d *OutboxDispatcher) Run(ctx context.Context) {
 	if d == nil || d.engine == nil {
 		return
@@ -813,7 +821,24 @@ func (d *OutboxDispatcher) Run(ctx context.Context) {
 	ticker := time.NewTicker(d.interval)
 	defer ticker.Stop()
 	for {
+		start := time.Now()
 		d.drain(ctx)
+		if time.Since(start) >= d.interval {
+			// Drop the tick that elapsed while this drain ran. It is already
+			// spent, and letting it stand would make the NEXT iteration return
+			// immediately for no reason — an extra drain on a backlog that this
+			// one may have just emptied.
+			select {
+			case <-ticker.C:
+			default:
+			}
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			continue
+		}
 		select {
 		case <-ctx.Done():
 			return
