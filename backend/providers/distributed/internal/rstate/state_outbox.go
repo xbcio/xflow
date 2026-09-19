@@ -454,8 +454,10 @@ func (s *Store) scanOutboxMetricsForNamespace(ctx context.Context, t namespace.N
 			return fmt.Errorf("count due outbox %q: %w", key, err)
 		}
 		snapshot.Ready += int(due)
-		head, err := s.rdb.ZRangeArgs(ctx, redis.ZRangeArgs{
-			Key: key, Start: "-inf", Stop: "+inf", ByScore: true,
+		// ZRangeByScore rather than ZRangeArgs for the Redis 5.0 reason spelled
+		// out on the lease sweep in state_lease.go.
+		head, err := s.rdb.ZRangeByScore(ctx, key, &redis.ZRangeBy{
+			Min: "-inf", Max: "+inf",
 			Offset: 0, Count: outboxMetricsHeadCap,
 		}).Result()
 		if err != nil {

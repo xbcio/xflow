@@ -95,8 +95,10 @@ func (s *Store) ListDeadLetters(ctx context.Context, id types.ExecutionID, page 
 
 func (s *Store) listDeadLetterIndexEntries(ctx context.Context, key string, cursorScore float64, cursorMember string, hasCursor bool, limit int) ([]deadLetterIndexEntry, error) {
 	if !hasCursor {
-		zs, err := s.rdb.ZRangeArgsWithScores(ctx, redis.ZRangeArgs{
-			Key: key, Start: "-inf", Stop: "+inf", ByScore: true, Offset: 0, Count: int64(limit),
+		// Redis 5.0 compatibility: see the note on the lease sweep in
+		// state_lease.go. ZRangeArgs would emit the 6.2-only ZRANGE/BYSCORE form.
+		zs, err := s.rdb.ZRangeByScoreWithScores(ctx, key, &redis.ZRangeBy{
+			Min: "-inf", Max: "+inf", Offset: 0, Count: int64(limit),
 		}).Result()
 		if err != nil {
 			return nil, err
@@ -109,8 +111,8 @@ func (s *Store) listDeadLetterIndexEntries(ctx context.Context, key string, curs
 	score := formatScore(cursorScore)
 	var offset int64
 	for len(entries) < limit {
-		zs, err := s.rdb.ZRangeArgsWithScores(ctx, redis.ZRangeArgs{
-			Key: key, Start: score, Stop: score, ByScore: true, Offset: offset, Count: scanBatch,
+		zs, err := s.rdb.ZRangeByScoreWithScores(ctx, key, &redis.ZRangeBy{
+			Min: score, Max: score, Offset: offset, Count: scanBatch,
 		}).Result()
 		if err != nil {
 			return nil, err
@@ -139,8 +141,8 @@ func (s *Store) listDeadLetterIndexEntries(ctx context.Context, key string, curs
 		return entries, nil
 	}
 
-	higher, err := s.rdb.ZRangeArgsWithScores(ctx, redis.ZRangeArgs{
-		Key: key, Start: "(" + score, Stop: "+inf", ByScore: true, Offset: 0, Count: int64(limit - len(entries)),
+	higher, err := s.rdb.ZRangeByScoreWithScores(ctx, key, &redis.ZRangeBy{
+		Min: "(" + score, Max: "+inf", Offset: 0, Count: int64(limit - len(entries)),
 	}).Result()
 	if err != nil {
 		return nil, err

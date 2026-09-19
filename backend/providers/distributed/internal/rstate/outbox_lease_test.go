@@ -58,8 +58,11 @@ func TestRedisReleaseOutboxDoesNotResurrectAnAckedEntry(t *testing.T) {
 	}
 
 	ready := outboxReadyKey(namespace.FromContext(ctx), id)
-	members, err := rdb.ZRangeArgs(ctx, redis.ZRangeArgs{
-		Key: ready, Start: "-inf", Stop: "+inf", ByScore: true,
+	// ZRangeByScore, mirroring production: ZRangeArgs emits the ZRANGE/BYSCORE
+	// form that Redis only understands from 6.2, and miniredis accepts both, so
+	// a test using the other form would keep passing while production failed.
+	members, err := rdb.ZRangeByScore(ctx, ready, &redis.ZRangeBy{
+		Min: "-inf", Max: "+inf",
 	}).Result()
 	if err != nil {
 		t.Fatalf("ZRANGEBYSCORE(%s) error = %v", ready, err)

@@ -203,8 +203,15 @@ func (s *Store) scanExpiredLeasesForNamespace(ctx context.Context, t namespace.N
 		}
 
 		remaining := budget - (len(*out) - start)
-		members, err := s.rdb.ZRangeArgs(ctx, redis.ZRangeArgs{
-			Key: indexKey, Start: "-inf", Stop: max, ByScore: true, Offset: 0, Count: int64(remaining),
+		// ZRangeByScore, never ZRangeArgs: ZRangeArgs always issues the ZRANGE
+		// command carrying a BYSCORE modifier, which Redis only accepts from
+		// 6.2, whereas ZRANGEBYSCORE has existed since 1.2 and behaves
+		// identically here. Against a Redis 5.0 server ZRangeArgs fails with
+		// "ERR value is not an integer or out of range", which took this sweep
+		// — the only reclaimer of expired leases — down on every pass while
+		// looking like an empty scan.
+		members, err := s.rdb.ZRangeByScore(ctx, indexKey, &redis.ZRangeBy{
+			Min: "-inf", Max: max, Offset: 0, Count: int64(remaining),
 		}).Result()
 		if err != nil {
 			return fmt.Errorf("list expired leases for %q: %w", indexExecID, err)
