@@ -332,3 +332,9 @@ func TestPerWorkflowTransient_GraphJSONRoundTrip(t *testing.T) {
 		t.Fatalf("TransientCompletionTTL() = %v after round-trip, want 30s", g2.TransientCompletionTTL())
 	}
 }
+
+// GetExecution reports an existing row; the transient executions in these tests
+// carry Redis markers and never reach the durability confirmation.
+func (f *fakeAuditStore) GetExecution(context.Context, types.ExecutionID) (*store.ExecutionRecord, error) {
+	return nil, nil
+}

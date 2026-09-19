@@ -2,6 +2,7 @@ package rstate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -189,6 +190,10 @@ type transientMark struct {
 	transient     bool
 	ttl           time.Duration
 	completionTTL time.Duration
+	// durableConfirmed records that SQL holds an execution row for this ID, so
+	// the "durable" verdict rests on a fact that cannot expire. See
+	// lookupTransient.
+	durableConfirmed bool
 }
 
 // lookupTransient resolves an execution's transient mode, consulting the
@@ -216,7 +221,11 @@ func (s *Store) lookupTransient(ctx context.Context, id types.ExecutionID) trans
 	s.transientMu.RLock()
 	mark, ok := s.execTransient[id]
 	s.transientMu.RUnlock()
-	if ok {
+	// A negative entry is only as trustworthy as the evidence behind it: the
+	// absence of a Redis marker is exactly what a lapsed transient marker looks
+	// like, so a bare "no marker" verdict is re-confirmed (below) rather than
+	// cached as final.
+	if ok && (mark.transient || mark.durableConfirmed) {
 		return mark
 	}
 	if s.transient {
@@ -241,10 +250,52 @@ func (s *Store) lookupTransient(ctx context.Context, id types.ExecutionID) trans
 		resolved.ttl = parseDurationMillis(fields["ttl_ms"])
 		resolved.completionTTL = parseDurationMillis(fields["completion_ttl_ms"])
 	}
+	// No marker is not proof of durability, and treating it as proof is how this
+	// went wrong. transientTTL bounds run time and nothing enforces it, so an
+	// execution that outlives its marker reads as durable and has its node
+	// output projected into SQL -- while the execution row it should have
+	// matched was never created, which is the observed shape (xflow_nodes > 0
+	// with xflow_executions = 0). The margin on the marker's TTL narrows that
+	// window; it cannot close it, because a long enough execution beats any TTL.
+	//
+	// The row's existence is the durable answer: admission writes the row for
+	// exactly the executions that are not transient. So when Redis has no
+	// marker, ask SQL once and cache a verdict that cannot expire.
+	if !resolved.transient && s.db != nil {
+		switch _, err := s.db.GetExecution(ctx, id); {
+		case err == nil:
+			resolved.durableConfirmed = true
+		case errors.Is(err, store.ErrNotFound):
+			resolved.transient = true
+			resolved.ttl = s.transientTTL
+			resolved.completionTTL = s.transientCompletionTTL
+		default:
+			// The store is unreadable, which is not evidence either way. Keep the
+			// durable verdict and proceed: the projection this unlocks writes to
+			// the same store, so an unreadable store cannot silently persist a
+			// payload -- it fails that write and the failure is counted. Marking
+			// transient here would instead stop projecting every durable
+			// execution for the duration of the outage, silently, which is the
+			// worse failure. Do not cache, so recovery is immediate.
+			if s.logger != nil {
+				s.logger.Error("transient_row_check_failed", "execution_id", string(id), "err", err)
+			}
+			return resolved
+		}
+	}
 	s.transientMu.Lock()
 	s.execTransient[id] = resolved
 	s.transientMu.Unlock()
 	return resolved
+}
+
+// rememberTransient records a verdict this replica established itself, so later
+// reads do not have to re-derive it. Only callers that know the answer
+// authoritatively (execution creation) should use it.
+func (s *Store) rememberTransient(id types.ExecutionID, mark transientMark) {
+	s.transientMu.Lock()
+	s.execTransient[id] = mark
+	s.transientMu.Unlock()
 }
 
 func parseDurationMillis(raw string) time.Duration {

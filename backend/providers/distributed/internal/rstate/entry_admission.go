@@ -220,6 +220,18 @@ func (s *Store) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 		}
 	}
 
+	// Prime the verdict when the graph is NOT transient: admission is
+	// authoritative for this execution (it is the code that decided), and the
+	// projection below would otherwise ask isTransient, find no marker -- none
+	// is written for a durable execution -- and fall through to the SQL
+	// confirmation against a row that admission has not created yet, misreading
+	// every seeded execution as transient.
+	// Store-wide transient mode writes no per-execution marker, so it must not
+	// be primed as durable either.
+	if !s.transient && (req.Graph == nil || !req.Graph.Transient()) {
+		s.rememberTransient(execID, transientMark{durableConfirmed: true})
+	}
+
 	// Phase 1: Pre-seed structural keys (idempotent SET NX patterns won't
 	// overwrite). This uses a pipeline for the keys the Lua script reads but
 	// does not create itself (remaining, failed, in-degree).

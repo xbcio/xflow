@@ -22,6 +22,13 @@ type goneExecutionStore struct {
 	calls int
 }
 
+// GetExecution reports no row, which is the durable evidence that this
+// execution was admitted as transient: lookupTransient consults it because
+// Redis cannot distinguish "no marker" from "marker that lapsed".
+func (g *goneExecutionStore) GetExecution(_ context.Context, _ types.ExecutionID) (*store.ExecutionRecord, error) {
+	return nil, store.ErrNotFound
+}
+
 func (g *goneExecutionStore) CreateExecution(_ context.Context, _ *store.ExecutionRecord) error {
 	return nil
 }
@@ -67,17 +74,19 @@ func TestProjectionForGoneExecutionIsNotAnAuditFailure(t *testing.T) {
 	// absent, exactly as they are once the transient TTL has lapsed.
 	state.projectExecutionStatus(ctx, id, types.ExecutionStatusSuccess, "")
 
-	if fakeDB.calls != 1 {
-		t.Fatalf("UpdateExecutionStatus called %d times, want 1: the projection "+
-			"must still attempt the write, and only its classification is under test",
+	// Not attempted at all: with no execution row, lookupTransient resolves this
+	// execution as transient up front -- the row's absence is the evidence a
+	// lapsed marker cannot supply -- and projectExecutionStatus returns before
+	// writing. This supersedes attempt-then-classify, and the assertion that
+	// matters is unchanged: nothing here is an audit failure.
+	if fakeDB.calls != 0 {
+		t.Fatalf("UpdateExecutionStatus called %d times, want 0: an execution with "+
+			"no row is resolved as transient before the projection is attempted",
 			fakeDB.calls)
 	}
 	if n := observer.failed["update_execution_status"]; n != 0 {
-		t.Fatalf("audit failures = %d, want 0: a projection for an execution Redis "+
-			"no longer holds is a declined write, not a store fault", n)
-	}
-	if n := observer.ok["update_execution_status"]; n != 1 {
-		t.Fatalf("audit successes = %d, want 1", n)
+		t.Fatalf("audit failures = %d, want 0: a projection for an execution with no "+
+			"row is not a store fault", n)
 	}
 }
 
@@ -113,6 +122,12 @@ func TestProjectionReportsRealStoreFailures(t *testing.T) {
 type failingExecutionStore struct {
 	store.Store
 	err error
+}
+
+// GetExecution reports an existing row so that this double isolates a failing
+// UpdateExecutionStatus rather than the durability lookup.
+func (f *failingExecutionStore) GetExecution(_ context.Context, _ types.ExecutionID) (*store.ExecutionRecord, error) {
+	return nil, nil
 }
 
 func (f *failingExecutionStore) CreateExecution(_ context.Context, _ *store.ExecutionRecord) error {

@@ -478,3 +478,10 @@ func TestPerWorkflowTransient_SkipsGroupCommitStatusProjection(t *testing.T) {
 			"error rendered to", transientUpdates)
 	}
 }
+
+// GetExecution reports an existing row, so these durable executions are
+// confirmed durable once Redis carries no transient marker. Returning an error
+// would be read as "the store is unreadable" and logged.
+func (f *fakeNodeStore) GetExecution(context.Context, types.ExecutionID) (*store.ExecutionRecord, error) {
+	return nil, nil
+}

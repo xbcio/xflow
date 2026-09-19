@@ -69,6 +69,25 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 		}
 	}
 
+	// Prime the transient verdict from the decision just made above.
+	//
+	// createExecution is authoritative for this execution: it knows whether the
+	// graph asked to be transient. Without priming, the projection guard below
+	// would ask isTransient, find no marker (none is written yet), and fall
+	// through to the SQL confirmation -- which would report "no row" because
+	// this very call has not created it yet, so every execution would be
+	// misread as transient and silently stop being projected.
+	//
+	// Store-wide transient mode is folded in here: it writes no per-execution
+	// marker at all, so priming "durable" for it would override the mode.
+	effTransient := perExecTransient || s.transient
+	s.rememberTransient(e.ID, transientMark{
+		transient:        effTransient,
+		ttl:              hint.TTL,
+		completionTTL:    hint.CompletionTTL,
+		durableConfirmed: !effTransient,
+	})
+
 	// Check for per-execution TTL override from context.
 	if override, ok := engine.ExecutionTTLFromContext(ctx); ok {
 		ttl = override
