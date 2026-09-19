@@ -83,6 +83,12 @@ type Core struct {
 	auth         Authenticator
 	logger       engine.Logger
 	authObserver AuthObserver
+	// reportRejectionObserver, when set, records WHY a result report was
+	// rejected. All four reasons leave this path as the same bare 409, and three
+	// of them require the directory lookup to fail while the fourth requires it
+	// to succeed — so without this the 409 rate cannot be attributed. nil is a
+	// no-op (see report_rejection_observer.go).
+	reportRejectionObserver ReportRejectionObserver
 	// timeoutObserver, when set, records node execution timeout events emitted
 	// from the server side. The only server-side origin is the renewLease
 	// backstop that commits a terminal timeout when a lease's ExecutionDeadline
@@ -908,6 +914,7 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 			c.logger.Error("report directory does not implement LeaseLookup; rejecting (fail closed)",
 				"op", "report_result", "runner_id", req.RunnerID)
 		}
+		c.observeReportRejected(ctx, ReportRejectedDirectoryUnavailable)
 		return protocol.ReportResultResponse{Accepted: false, Error: engine.ErrInvalidLeaseToken.Error()}, engine.ErrInvalidLeaseToken
 	}
 	resolved, found, lerr := lookup.LookupLease(ctx, req.RunnerID, req.SessionID, LeaseLookupKey{
@@ -927,6 +934,7 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 			c.logger.Warn("report rejected: authoritative lease not found for runner+session (fail closed)",
 				"op", "report_result", "runner_id", req.RunnerID)
 		}
+		c.observeReportRejected(ctx, ReportRejectedDirectoryLeaseNotFound)
 		return protocol.ReportResultResponse{Accepted: false, Error: engine.ErrInvalidLeaseToken.Error()}, engine.ErrInvalidLeaseToken
 	}
 	// Immutable fields must match what the runner echoed. A mismatch on
@@ -936,6 +944,7 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 	// an old runner may echo a stale/missing Namespace, so namespace is always taken
 	// from the authoritative lease (logged if it disagrees, but not rejected).
 	if leaseImmutableMismatch(resolved, req.Lease) {
+		c.observeReportRejected(ctx, ReportRejectedDirectoryImmutableMismatch)
 		return protocol.ReportResultResponse{Accepted: false, Error: engine.ErrInvalidLeaseToken.Error()}, engine.ErrInvalidLeaseToken
 	}
 	if req.Lease.Namespace != resolved.Namespace && c.logger != nil {
@@ -959,6 +968,13 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 	)
 	defer span.End()
 
+	// Captured BEFORE the capacity release below, which is the only point at
+	// which the directory still holds the lease this commit was fenced against.
+	// After ReleaseLeased the record is gone, so a probe there would answer
+	// "not found" for every engine-rejected commit and report zero divergence
+	// unconditionally. See report_rejection_observer.go.
+	directoryStillResolved := false
+
 	var outcome engine.CommitOutcome
 	var err error
 	if req.GroupResult != nil && isGroupTask(&authoritativeLease.Task) {
@@ -968,6 +984,9 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 	}
 	if err != nil {
 		span.RecordError(err)
+		if errors.Is(err, engine.ErrInvalidLeaseToken) {
+			directoryStillResolved = c.reportLeaseStillResolvable(ctx, req.RunnerID, req.SessionID, authoritativeLease)
+		}
 	}
 	if outcome.ReleasesLeasedCapacity() {
 		removeSeen := outcome == engine.CommitOutcomeAccepted || outcome == engine.CommitOutcomeDuplicateTerminal || outcome == engine.CommitOutcomeExecutionInactive
@@ -984,6 +1003,10 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 	}
 	if err != nil {
 		if errors.Is(err, engine.ErrInvalidLeaseToken) {
+			c.observeReportRejected(ctx, ReportRejectedEngineStaleToken)
+			if directoryStillResolved {
+				c.observeReportDivergence(ctx)
+			}
 			return protocol.ReportResultResponse{Accepted: false, Error: err.Error()}, err
 		}
 		return protocol.ReportResultResponse{}, normalizeRunnerError(err, c.logger, "report_result")

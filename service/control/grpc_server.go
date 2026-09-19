@@ -44,6 +44,18 @@ func WithGRPCLogger(l engine.Logger) GRPCServerOption {
 	return func(s *GRPCServer) { s.core.logger = l }
 }
 
+// WithGRPCReportRejectionObserver installs the report-rejection observer on the
+// gRPC server.
+//
+// gRPC gets its own Core (see NewGRPCServer), so the HTTP Server's option does
+// not reach here and a 409 on this transport would otherwise stay unattributable.
+// The gRPC handler answers an invalid lease token in-band rather than with an
+// HTTP status, but it is the same four fences underneath and the same need to
+// tell them apart. nil or unset is a no-op.
+func WithGRPCReportRejectionObserver(observer ReportRejectionObserver) GRPCServerOption {
+	return func(s *GRPCServer) { s.core.reportRejectionObserver = observer }
+}
+
 // WithGRPCAuthObserver installs a non-blocking observer for runner auth decisions.
 func WithGRPCAuthObserver(observer AuthObserver) GRPCServerOption {
 	return func(s *GRPCServer) { s.core.authObserver = observer }

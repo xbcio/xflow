@@ -123,6 +123,14 @@ func WithAuthObserver(observer AuthObserver) ServerOption {
 	return func(s *Server) { s.core.authObserver = observer }
 }
 
+// WithReportRejectionObserver installs a non-blocking observer for rejected
+// result reports, so the reason a 409 was returned is attributable from metrics
+// rather than only from a log post-mortem. nil or unset leaves the report path
+// byte-identical to before (see reportRejectionObserver).
+func WithReportRejectionObserver(observer ReportRejectionObserver) ServerOption {
+	return func(s *Server) { s.core.reportRejectionObserver = observer }
+}
+
 // WithNodeTimeoutObserver installs the observer for node execution timeout
 // events emitted from the server side (the renewLease backstop). nil or unset
 // leaves the Core with a nil observer, which renewLease nil-guards so legacy
