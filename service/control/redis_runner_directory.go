@@ -1667,8 +1667,14 @@ func (d *RedisRunnerDirectory) Runner(ctx context.Context, runnerID string) (Run
 }
 
 // ListLiveRunners returns a snapshot of every registered runner using a
-// pipelined bulk fetch (HKeys + 7 HMGet calls in one round-trip) to avoid
-// O(n) serial Redis calls.
+// pipelined bulk fetch (HKeys plus one pipeline of scalar and ledger reads) to
+// avoid O(n) serial Redis calls.
+//
+// The control projection is built from that same pipeline. Reading it per
+// runner instead made each entry a private pipeline of its own, so the list
+// cost one round-trip and one full pass over the fleet-wide debt ledgers per
+// runner -- O(runners) round-trips and O(runners x fleet debt) bytes for data
+// the ledgers already hold once.
 func (d *RedisRunnerDirectory) ListLiveRunners(ctx context.Context) []RunnerSnapshot {
 	runnerIDs, err := d.rdb.HKeys(ctx, d.keys.runnerSession).Result()
 	if err != nil {
@@ -1686,6 +1692,15 @@ func (d *RedisRunnerDirectory) ListLiveRunners(ctx context.Context) []RunnerSnap
 	namespacesCmd := pipe.HMGet(ctx, d.keys.runnerNamespaces, runnerIDs...)
 	heartbeatCmd := pipe.HMGet(ctx, d.keys.runnerHeartbeat, runnerIDs...)
 	labelsCmd := pipe.HMGet(ctx, d.keys.runnerLabels, runnerIDs...)
+	desiredCmd := pipe.HMGet(ctx, d.keys.runnerControlDesired, runnerIDs...)
+	generationCmd := pipe.HMGet(ctx, d.keys.runnerControlGeneration, runnerIDs...)
+	requestedAtCmd := pipe.HMGet(ctx, d.keys.runnerControlRequestedAt, runnerIDs...)
+	reasonCmd := pipe.HMGet(ctx, d.keys.runnerControlReason, runnerIDs...)
+	drainDeadlineCmd := pipe.HMGet(ctx, d.keys.runnerControlDrainDeadline, runnerIDs...)
+	claimsCmd := pipe.HMGet(ctx, d.keys.runnerClaimCount, runnerIDs...)
+	leasesCmd := pipe.HMGet(ctx, d.keys.runnerLeaseCount, runnerIDs...)
+	drainObservationCmd := pipe.HMGet(ctx, d.keys.runnerDrainObservation, runnerIDs...)
+	ledgerCommands := d.queueRedisControlLedger(ctx, pipe)
 	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
 		return nil
 	}
@@ -1698,6 +1713,15 @@ func (d *RedisRunnerDirectory) ListLiveRunners(ctx context.Context) []RunnerSnap
 	namespacesList := namespacesCmd.Val()
 	heartbeats := heartbeatCmd.Val()
 	labelsList := labelsCmd.Val()
+	desireds := desiredCmd.Val()
+	generations := generationCmd.Val()
+	requestedAts := requestedAtCmd.Val()
+	reasons := reasonCmd.Val()
+	drainDeadlines := drainDeadlineCmd.Val()
+	claimsList := claimsCmd.Val()
+	leasesList := leasesCmd.Val()
+	drainObservations := drainObservationCmd.Val()
+	ledger := ledgerCommands.ledger()
 
 	out := make([]RunnerSnapshot, 0, n)
 	for i := 0; i < n; i++ {
@@ -1710,12 +1734,22 @@ func (d *RedisRunnerDirectory) ListLiveRunners(ctx context.Context) []RunnerSnap
 			heartbeat:    hmgetString(heartbeats, i),
 			labels:       hmgetString(labelsList, i),
 		}
-		if snap, ok := decodeRunnerSnapshot(runnerIDs[i], raw); ok {
-			if control, found, controlErr := d.RunnerControl(ctx, snap.RunnerID); controlErr == nil && found {
-				snap.Control = &control
-			}
-			out = append(out, snap)
+		snap, ok := decodeRunnerSnapshot(runnerIDs[i], raw)
+		if !ok {
+			continue
 		}
+		control, _, controlErr := decodeRunnerControlProjection(
+			hmgetString(desireds, i), hmgetString(generations, i), hmgetString(requestedAts, i),
+			hmgetString(drainDeadlines, i), hmgetString(reasons, i), raw.session,
+			unmarshalRedisRunnerDrainObservation(hmgetString(drainObservations, i)),
+			ledger.handoffDebtStats(snap.RunnerID, parseRedisInt(hmgetString(claimsList, i)), parseRedisInt(hmgetString(leasesList, i))),
+			ledger.pendingActivationCleanup(snap.RunnerID),
+			d.clockNow(), d.runnerDrainObservationFreshness(),
+		)
+		if controlErr == nil {
+			snap.Control = &control
+		}
+		out = append(out, snap)
 	}
 	return out
 }

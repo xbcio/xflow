@@ -130,9 +130,73 @@ func decodeRunnerControlState(desiredRaw, generationRaw string) (RunnerControlSt
 	return RunnerControlState{DesiredState: desired, Generation: generation}, nil
 }
 
+// redisControlLedger is the fleet-wide debt state every control projection
+// aggregates. Both hashes are keyed by claim or obligation rather than by
+// runner, so projecting a whole fleet reads them once and reuses the result
+// instead of re-reading them for every runner in the list.
+type redisControlLedger struct {
+	handoffRunners      map[string]string
+	handoffStates       map[string]string
+	deactivationRunners map[string]string
+	deactivationStates  map[string]string
+}
+
+// redisControlLedgerCommands are the four queued ledger reads. Keeping the
+// commands (not just their values) lets a caller share one pipeline with the
+// per-runner scalars it is already reading.
+type redisControlLedgerCommands struct {
+	handoffRunners      *redis.MapStringStringCmd
+	handoffStates       *redis.MapStringStringCmd
+	deactivationRunners *redis.MapStringStringCmd
+	deactivationStates  *redis.MapStringStringCmd
+}
+
+func (d *RedisRunnerDirectory) queueRedisControlLedger(ctx context.Context, pipe redis.Pipeliner) redisControlLedgerCommands {
+	return redisControlLedgerCommands{
+		handoffRunners:      pipe.HGetAll(ctx, d.keys.handoffRunner),
+		handoffStates:       pipe.HGetAll(ctx, d.keys.handoffState),
+		deactivationRunners: pipe.HGetAll(ctx, d.keys.deactivationObligationRunner),
+		deactivationStates:  pipe.HGetAll(ctx, d.keys.deactivationObligationState),
+	}
+}
+
+func (c redisControlLedgerCommands) ledger() redisControlLedger {
+	return redisControlLedger{
+		handoffRunners:      c.handoffRunners.Val(),
+		handoffStates:       c.handoffStates.Val(),
+		deactivationRunners: c.deactivationRunners.Val(),
+		deactivationStates:  c.deactivationStates.Val(),
+	}
+}
+
+// handoffDebtStats counts runnerID's slice of the shared ledger.
+func (l redisControlLedger) handoffDebtStats(runnerID string, claims, leases int) handoffDebtStats {
+	stats := handoffDebtStats{activeClaims: claims, leasedTasks: leases}
+	for claimID, owner := range l.handoffRunners {
+		if owner != runnerID {
+			continue
+		}
+		stats.unsettledDebt++
+		switch HandoffDebtState(l.handoffStates[claimID]) {
+		case HandoffDebtLeaseMayExist:
+			stats.handoffDebt++
+			stats.leaseMayExistDebt++
+		case HandoffDebtLeaseCreated:
+			stats.handoffDebt++
+		case HandoffDebtFinalized:
+			stats.replayableDebt++
+		}
+	}
+	return stats
+}
+
+func (l redisControlLedger) pendingActivationCleanup(runnerID string) int {
+	return countRedisDeactivationObligations(runnerID, l.deactivationRunners, l.deactivationStates)
+}
+
 func (d *RedisRunnerDirectory) redisCurrentControl(ctx context.Context, runnerID string) (RunnerControlSnapshot, bool, error) {
-	// A single pipeline, but NOT a cheap one: the four HGetAll calls below read
-	// the fleet-wide handoff and deactivation ledgers in full. That aggregation is
+	// A single pipeline, but NOT a cheap one: the ledger reads below return the
+	// fleet-wide handoff and deactivation debt in full. That aggregation is
 	// correct for a management snapshot and is why the recurring poll/register
 	// paths must use RunnerControlState instead of this method.
 	pipe := d.rdb.Pipeline()
@@ -144,10 +208,7 @@ func (d *RedisRunnerDirectory) redisCurrentControl(ctx context.Context, runnerID
 	drainDeadline := pipe.HGet(ctx, d.keys.runnerControlDrainDeadline, runnerID)
 	claims := pipe.HGet(ctx, d.keys.runnerClaimCount, runnerID)
 	leases := pipe.HGet(ctx, d.keys.runnerLeaseCount, runnerID)
-	handoffRunners := pipe.HGetAll(ctx, d.keys.handoffRunner)
-	handoffStates := pipe.HGetAll(ctx, d.keys.handoffState)
-	deactivationRunners := pipe.HGetAll(ctx, d.keys.deactivationObligationRunner)
-	deactivationStates := pipe.HGetAll(ctx, d.keys.deactivationObligationState)
+	ledger := d.queueRedisControlLedger(ctx, pipe)
 	drainObservation := pipe.HGet(ctx, d.keys.runnerDrainObservation, runnerID)
 	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
 		return RunnerControlSnapshot{}, false, fmt.Errorf("read runner control projection: %w", err)
@@ -155,29 +216,12 @@ func (d *RedisRunnerDirectory) redisCurrentControl(ctx context.Context, runnerID
 	if session.Val() == "" {
 		return RunnerControlSnapshot{}, false, nil
 	}
-	stats := handoffDebtStats{
-		activeClaims: parseRedisInt(claims.Val()),
-		leasedTasks:  parseRedisInt(leases.Val()),
-	}
-	for claimID, owner := range handoffRunners.Val() {
-		if owner != runnerID {
-			continue
-		}
-		stats.unsettledDebt++
-		switch HandoffDebtState(handoffStates.Val()[claimID]) {
-		case HandoffDebtLeaseMayExist:
-			stats.handoffDebt++
-			stats.leaseMayExistDebt++
-		case HandoffDebtLeaseCreated:
-			stats.handoffDebt++
-		case HandoffDebtFinalized:
-			stats.replayableDebt++
-		}
-	}
-	pendingActivationCleanup := countRedisDeactivationObligations(runnerID, deactivationRunners.Val(), deactivationStates.Val())
+	shared := ledger.ledger()
 	return decodeRunnerControlProjection(
 		desired.Val(), generation.Val(), requestedAt.Val(), drainDeadline.Val(), reason.Val(), session.Val(),
-		unmarshalRedisRunnerDrainObservation(drainObservation.Val()), stats, pendingActivationCleanup,
+		unmarshalRedisRunnerDrainObservation(drainObservation.Val()),
+		shared.handoffDebtStats(runnerID, parseRedisInt(claims.Val()), parseRedisInt(leases.Val())),
+		shared.pendingActivationCleanup(runnerID),
 		d.clockNow(), d.runnerDrainObservationFreshness(),
 	)
 }
