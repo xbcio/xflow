@@ -2,6 +2,7 @@ package rstate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -80,10 +81,51 @@ func TestProjectionForGoneExecutionIsNotAnAuditFailure(t *testing.T) {
 	}
 }
 
-// TestProjectionStillFailsWhenTheExecutionOutlivedTheWrite is the guard against
-// over-applying the skip: with the execution still present in Redis, a
-// not-found write is a real divergence and must keep being reported.
-func TestProjectionStillFailsWhenTheExecutionOutlivedTheWrite(t *testing.T) {
+// TestProjectionReportsRealStoreFailures is the guard against over-applying the
+// tolerance: only store.ErrNotFound is a "nothing to mirror". Any other error
+// is a genuine store fault and must keep being counted.
+func TestProjectionReportsRealStoreFailures(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer func() { _ = rdb.Close() }()
+
+	fakeDB := &failingExecutionStore{err: errors.New("mysql: connection refused")}
+	state := New(rdb, fakeDB, time.Hour)
+	state.transient = false
+
+	observer := newRecordingObserver()
+	state.SetAuditObserver(observer)
+
+	ctx := namespace.WithNamespace(context.Background(), "default")
+	state.projectExecutionStatus(ctx, types.ExecutionID("exec-store-down"), types.ExecutionStatusSuccess, "")
+
+	if n := observer.failed["update_execution_status"]; n != 1 {
+		t.Fatalf("audit failures = %d, want 1: a non-NotFound store error is a real "+
+			"audit outage and must stay visible", n)
+	}
+}
+
+// failingExecutionStore returns a caller-supplied error from every projection.
+type failingExecutionStore struct {
+	store.Store
+	err error
+}
+
+func (f *failingExecutionStore) CreateExecution(_ context.Context, _ *store.ExecutionRecord) error {
+	return nil
+}
+
+func (f *failingExecutionStore) UpsertNode(_ context.Context, _ *store.NodeRecord) error { return nil }
+
+func (f *failingExecutionStore) UpdateExecutionStatus(_ context.Context, _ types.ExecutionID, _ types.ExecutionStatus, _ string) error {
+	return f.err
+}
+
+func TestUpdateExecutionStatusPathIsEquallyTolerant(t *testing.T) {
 	mr, err := miniredis.Run()
 	if err != nil {
 		t.Fatal(err)
@@ -100,17 +142,27 @@ func TestProjectionStillFailsWhenTheExecutionOutlivedTheWrite(t *testing.T) {
 	state.SetAuditObserver(observer)
 
 	ctx := namespace.WithNamespace(context.Background(), "default")
-	id := types.ExecutionID("exec-present")
-	// :status present is what "this execution still exists" means; it is
-	// written at CreateExecution and re-EXPIREd by every committed mutation.
+	id := types.ExecutionID("exec-gone-direct")
 	if err := rdb.Set(ctx, execKey("default", id, "status"), "running", time.Hour).Err(); err != nil {
 		t.Fatalf("seed status key: %v", err)
 	}
 
-	state.projectExecutionStatus(ctx, id, types.ExecutionStatusSuccess, "")
+	// Drive the exported status writer, then let the execution disappear and
+	// drive it again: the second call is the benign divergence.
+	if err := state.UpdateExecutionStatus(ctx, id, types.ExecutionStatusRunning, ""); err != nil {
+		t.Fatalf("UpdateExecutionStatus (present): %v", err)
+	}
+	if err := rdb.Del(ctx, execKey("default", id, "status")).Err(); err != nil {
+		t.Fatalf("drop status key: %v", err)
+	}
+	before := observer.failed["update_execution_status"]
+	if err := state.UpdateExecutionStatus(ctx, id, types.ExecutionStatusSuccess, ""); err != nil {
+		t.Fatalf("UpdateExecutionStatus (gone): %v", err)
+	}
 
-	if n := observer.failed["update_execution_status"]; n != 1 {
-		t.Fatalf("audit failures = %d, want 1: the execution is still in Redis, so a "+
-			"missing audit row is a genuine divergence and must stay visible", n)
+	if after := observer.failed["update_execution_status"]; after != before {
+		t.Fatalf("audit failures rose from %d to %d when projecting an execution "+
+			"Redis no longer holds; the second writer must classify it the same "+
+			"way the first one does", before, after)
 	}
 }

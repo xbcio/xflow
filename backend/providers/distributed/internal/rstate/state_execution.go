@@ -343,9 +343,7 @@ func (s *Store) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID,
 		}
 	}
 	if applied == 1 && s.db != nil && !s.isTransient(ctx, id) {
-		s.auditWrite(ctx, "update_execution_status", func(ctx context.Context) error {
-			return s.db.UpdateExecutionStatus(ctx, id, status, errMsg)
-		})
+		s.writeExecutionStatusProjection(ctx, id, status, errMsg)
 	}
 	_ = s.PublishExecutionEvent(ctx, engine.ExecutionEvent{ExecutionID: id, Status: status, Error: errMsg})
 	return nil
@@ -391,47 +389,59 @@ func (s *Store) projectExecutionStatus(ctx context.Context, id types.ExecutionID
 	if s.db == nil || s.isTransient(ctx, id) || status == "" {
 		return
 	}
+	s.writeExecutionStatusProjection(ctx, id, status, errMsg)
+}
+
+// writeExecutionStatusProjection mirrors an execution status onto the SQL audit
+// trail, tolerating the one way that write is expected to fail.
+//
+// Both projection call sites route through here, and that is the point: the
+// tolerance was first added to just one of them, and the other kept reporting
+// the same divergence — 69 further "store: not found" lines in a run whose
+// sibling site had already gone quiet. A shared helper is what keeps a rule
+// about a write from having to be rediscovered per writer.
+//
+// store.ErrNotFound means there is no execution row to update, and for this
+// projection that is never a store fault:
+//
+//   - a transient execution never gets a row at all — CreateExecution skips the
+//     audit mirror for it — while a lapsed transient marker makes isTransient
+//     answer "durable". This is the common case: transientTTL bounds run time,
+//     and a run that outlives it loses its marker first. Measured on a real
+//     deployment: 135 and 69 such lines in two runs.
+//   - a late projection for an execution whose keys have already gone has
+//     nothing left to mirror.
+//
+// Counting either as an audit failure is worse than useless: the audit trail is
+// best-effort by contract (Redis is authoritative), and one error line per
+// occurrence makes a healthy pipeline look like a broken store — which is how a
+// genuine audit outage would be missed.
+//
+// Residual, stated rather than hidden: a durable execution whose row was
+// genuinely deleted is indistinguishable here and is not reported. Nothing at
+// this layer can tell it from the lapsed-marker case, because the marker is
+// exactly the evidence that lapsed. Catching that is the job of the audit
+// reconcile pass (§4), not of a per-write counter that cannot see the
+// difference.
+func (s *Store) writeExecutionStatusProjection(ctx context.Context, id types.ExecutionID, status types.ExecutionStatus, errMsg string) {
 	err := s.db.UpdateExecutionStatus(ctx, id, status, errMsg)
-	if err != nil && errors.Is(err, store.ErrNotFound) && !s.executionExists(ctx, id) {
-		// The two ways to reach here are both benign and neither is a fault:
-		//
-		//   - a transient execution whose marker expired (transientTTL is an
-		//     upper bound on run time; a run that outlives it takes the marker
-		//     with it), so isTransient read "marker absent" as "durable" and the
-		//     MySQL row was never created in the first place;
-		//   - a late projection for an execution whose keys have already gone,
-		//     so there is no Redis state left to mirror.
-		//
-		// What must NOT happen is counting these as audit failures: the audit
-		// trail is best-effort by contract (Redis is authoritative), and at one
-		// error line per occurrence this reads as a broken store rather than as
-		// the write it correctly declined to make. The Redis existence check
-		// runs only on this path, so the happy path pays nothing.
+	if errors.Is(err, store.ErrNotFound) {
+		// Reported as OK rather than as neither outcome: the observer's question
+		// is "did the audit trail diverge from Redis?", and here it did not —
+		// there was simply nothing to mirror. Leaving it uncounted would make
+		// ok+failed stop equalling the projections attempted, so a skip could
+		// not be told from a write that never happened.
 		s.audit.OnAuditOK(ctx, "update_execution_status")
 		if s.auditCounters != nil {
 			s.auditCounters.OnAuditOK(ctx, "update_execution_status")
 		}
 		if s.logger != nil {
-			s.logger.Debug("update_execution_status skipped; execution already gone",
+			s.logger.Debug("update_execution_status skipped; no execution row to mirror",
 				"execution_id", string(id), "status", string(status))
 		}
 		return
 	}
 	s.auditWrite(ctx, "update_execution_status", func(context.Context) error { return err })
-}
-
-// executionExists reports whether Redis still holds any state for the execution.
-// It is the arbiter for the disappeared-execution case above because :status is
-// written at CreateExecution and re-EXPIREd by every committed mutation, so its
-// absence means the execution is gone rather than merely unprojected.
-func (s *Store) executionExists(ctx context.Context, id types.ExecutionID) bool {
-	exists, err := s.rdb.Exists(ctx, execKey(namespace.FromContext(ctx), id, "status")).Result()
-	if err != nil {
-		// Unreadable is not absent: keep the original failure so a real store
-		// fault is still counted.
-		return true
-	}
-	return exists > 0
 }
 
 // terminalExecutionError picks the reason to project for a terminal execution.
