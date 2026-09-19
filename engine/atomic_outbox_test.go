@@ -436,6 +436,7 @@ func TestEngineLoopSplitJSONBatchesUseDurableSystemTasks(t *testing.T) {
 type outboxObserverState struct {
 	*fakeState
 	deadLettered int
+	metricsCalls int
 }
 
 func newOutboxObserverState() *outboxObserverState {
@@ -473,6 +474,7 @@ func (s *outboxObserverState) OutboxMetrics(_ context.Context) (OutboxMetricsSna
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.metricsCalls++
 	pending := 0
 	for _, entries := range s.atomicOutbox {
 		pending += len(entries)
@@ -557,5 +559,51 @@ func TestEngineFlushOutboxNotifiesRetryDeadLetterAndBacklogObservers(t *testing.
 	got := observer.pending[0]
 	if got.Pending != 0 || got.DeadLettered != 1 {
 		t.Fatalf("backlog observation = %+v, want pending=0 dead_lettered=1", got)
+	}
+}
+
+// TestOutboxDispatcherThrottlesBacklogScan pins the cost bound on the backlog
+// gauge: the scan walks the whole keyspace, so it must not run on every
+// delivery tick. Only the metric's freshness is affected — the flush itself
+// still runs every tick.
+func TestOutboxDispatcherThrottlesBacklogScan(t *testing.T) {
+	ctx := context.Background()
+	state := newOutboxObserverState()
+	observer := &outboxObserverRecorder{}
+	eng := New(state, &toggleOutboxQueue{}, WithOutboxObserver(observer))
+	dispatcher := NewOutboxDispatcher(eng, time.Hour)
+
+	dispatcher.drain(ctx)
+	if state.metricsCalls != 1 {
+		t.Fatalf("OutboxMetrics() calls after first drain = %d, want 1 -- the first drain "+
+			"has no previous scan to throttle against", state.metricsCalls)
+	}
+
+	dispatcher.drain(ctx)
+	if state.metricsCalls != 1 {
+		t.Fatalf("OutboxMetrics() calls after a second drain inside the interval = %d, want 1",
+			state.metricsCalls)
+	}
+
+	// Age the last scan past the interval; the next drain collects again.
+	dispatcher.lastMetrics = time.Now().Add(-2 * dispatcher.metricsInterval)
+	dispatcher.drain(ctx)
+	if state.metricsCalls != 2 {
+		t.Fatalf("OutboxMetrics() calls after the interval elapsed = %d, want 2",
+			state.metricsCalls)
+	}
+}
+
+// TestOutboxDispatcherSkipsBacklogScanWithoutObserver: with no observer the
+// result is discarded, so the expensive scan must not run at all.
+func TestOutboxDispatcherSkipsBacklogScanWithoutObserver(t *testing.T) {
+	ctx := context.Background()
+	state := newOutboxObserverState()
+	eng := New(state, &toggleOutboxQueue{})
+
+	NewOutboxDispatcher(eng, time.Hour).drain(ctx)
+	if state.metricsCalls != 0 {
+		t.Fatalf("OutboxMetrics() calls without an observer = %d, want 0 -- the result "+
+			"has nowhere to go, so the scan is pure cost", state.metricsCalls)
 	}
 }

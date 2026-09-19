@@ -390,6 +390,12 @@ func (e *Engine) releaseOutboxLease(ctx context.Context, state AtomicStateStore,
 }
 
 func (e *Engine) observeOutboxMetrics(ctx context.Context, state AtomicStateStore) {
+	// Gate on the observer before the reader: notifyOutboxPending drops the
+	// result when no observer is installed, so without this check the expensive
+	// keyspace-wide OutboxMetrics scan runs only to be discarded.
+	if e.outboxObserver == nil {
+		return
+	}
 	reader, ok := state.(OutboxMetricsReader)
 	if !ok {
 		return

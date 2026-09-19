@@ -713,6 +713,13 @@ func downstreamArrivals(g *graph.Graph, sourceIdx int, activePort string) []Down
 	return arrivals
 }
 
+// DefaultOutboxMetricsInterval bounds how often the dispatcher runs the
+// outbox backlog scan. The scan walks every execution-scoped ready and
+// dead-letter index in the keyspace, so it is orders of magnitude more
+// expensive than one drain; it reports a gauge, so it does not need the
+// dispatcher's delivery cadence.
+const DefaultOutboxMetricsInterval = 30 * time.Second
+
 // DefaultOutboxDiscoveryPage bounds one tick's outbox discovery page, sharded
 // across namespaces by the state store.
 //
@@ -728,9 +735,12 @@ const DefaultOutboxDiscoveryPage = 256
 type OutboxDispatcher struct {
 	engine   *Engine
 	interval time.Duration
-	// discoveryPage is the per-drain discovery limit. drain runs on a single
-	// goroutine (Run), so no field needs a lock.
-	discoveryPage int
+	// discoveryPage is the per-drain discovery limit; metricsInterval is how
+	// often drain may run the backlog scan, and lastMetrics is when it last
+	// did. drain runs on a single goroutine (Run), so no field needs a lock.
+	discoveryPage   int
+	metricsInterval time.Duration
+	lastMetrics     time.Time
 }
 
 // NewOutboxDispatcher creates a retry loop for durable scheduling intents.
@@ -739,9 +749,10 @@ func NewOutboxDispatcher(eng *Engine, interval time.Duration) *OutboxDispatcher 
 		interval = time.Second
 	}
 	return &OutboxDispatcher{
-		engine:        eng,
-		interval:      interval,
-		discoveryPage: DefaultOutboxDiscoveryPage,
+		engine:          eng,
+		interval:        interval,
+		discoveryPage:   DefaultOutboxDiscoveryPage,
+		metricsInterval: DefaultOutboxMetricsInterval,
 	}
 }
 
@@ -786,6 +797,19 @@ func (d *OutboxDispatcher) drain(ctx context.Context) {
 			d.engine.logger.Error("flush durable outbox failed", "execution_id", string(id), "err", err)
 		}
 	}
+	d.observeMetrics(ctx, state)
+}
+
+// observeMetrics runs the outbox backlog scan at most once per metricsInterval.
+// The scan walks the whole keyspace, so running it on the delivery tick costs
+// far more than the gauge it reports, and the gauge does not need second-level
+// freshness. A zero lastMetrics means the first drain is always observed.
+func (d *OutboxDispatcher) observeMetrics(ctx context.Context, state AtomicStateStore) {
+	now := time.Now()
+	if !d.lastMetrics.IsZero() && now.Sub(d.lastMetrics) < d.metricsInterval {
+		return
+	}
+	d.lastMetrics = now
 	d.engine.observeOutboxMetrics(ctx, state)
 }
 
