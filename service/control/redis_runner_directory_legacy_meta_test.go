@@ -63,12 +63,20 @@ func TestRedisRunnerDirectoryReapsOnlyUnreachableLegacyLeaseMetaFields(t *testin
 			seedLegacyLeaseMetaField(t, server, directory, "residue", "lease-payload")
 			server.HSet(live.stream(directory.keys), "reachable", "x")
 
-			reaped, err := directory.ReapOrphanedLegacyAssignmentLeaseMeta(ctx, 16)
+			reap, err := directory.ReapOrphanedLegacyAssignmentLeaseMeta(ctx, 16)
 			if err != nil {
 				t.Fatalf("ReapOrphanedLegacyAssignmentLeaseMeta() error = %v", err)
 			}
-			if reaped != 1 {
-				t.Fatalf("reaped = %d, want 1 (only the field with no %s record)", reaped, live.name)
+			if reap.Released != 1 {
+				t.Fatalf("reaped = %d, want 1 (only the field with no %s record)", reap.Released, live.name)
+			}
+			// Both fields are candidates of this pass — the whole hash is that
+			// shape — and exactly one of them is unreachable. This is the
+			// divergence the inspected count exists to expose: the pass releases
+			// half of what it inspects, and the other half is held back by a
+			// record a previous-version instance would still read.
+			if reap.Inspected != 2 {
+				t.Fatalf("inspected = %d, want 2: the pass read both legacy fields", reap.Inspected)
 			}
 			assertLegacyLeaseMetaFieldPresent(t, server, directory, "reachable")
 			assertLegacyLeaseMetaFieldAbsent(t, server, directory, "residue")
@@ -90,15 +98,15 @@ func TestRedisRunnerDirectoryLegacyLeaseMetaReapTreatsPayloadAsOpaque(t *testing
 	directory := NewRedisRunnerDirectory(rdb)
 	seedLegacyLeaseMetaField(t, server, directory, "opaque", secret)
 
-	reaped, err := directory.ReapOrphanedLegacyAssignmentLeaseMeta(ctx, 16)
+	reap, err := directory.ReapOrphanedLegacyAssignmentLeaseMeta(ctx, 16)
 	if err != nil {
 		if strings.Contains(err.Error(), secret) {
 			t.Fatalf("reap error leaked the legacy payload: %v", err)
 		}
 		t.Fatalf("ReapOrphanedLegacyAssignmentLeaseMeta() error = %v", err)
 	}
-	if reaped != 1 {
-		t.Fatalf("reaped = %d, want 1: the reaper must not need a decodable payload", reaped)
+	if reap.Released != 1 {
+		t.Fatalf("reaped = %d, want 1: the reaper must not need a decodable payload", reap.Released)
 	}
 	assertLegacyLeaseMetaFieldAbsent(t, server, directory, "opaque")
 }
@@ -113,21 +121,21 @@ func TestRedisRunnerDirectoryLegacyLeaseMetaReapIsBounded(t *testing.T) {
 		seedLegacyLeaseMetaField(t, server, directory, id, "lease-payload")
 	}
 
-	reaped, err := directory.ReapOrphanedLegacyAssignmentLeaseMeta(ctx, 2)
+	reap, err := directory.ReapOrphanedLegacyAssignmentLeaseMeta(ctx, 2)
 	if err != nil {
 		t.Fatalf("ReapOrphanedLegacyAssignmentLeaseMeta() error = %v", err)
 	}
-	if reaped != 2 {
-		t.Fatalf("reaped = %d, want exactly the limit of 2", reaped)
+	if reap.Released != 2 {
+		t.Fatalf("reaped = %d, want exactly the limit of 2", reap.Released)
 	}
 
 	// A second call makes progress on what the first deliberately left behind.
-	reaped, err = directory.ReapOrphanedLegacyAssignmentLeaseMeta(ctx, 16)
+	reap, err = directory.ReapOrphanedLegacyAssignmentLeaseMeta(ctx, 16)
 	if err != nil {
 		t.Fatalf("second ReapOrphanedLegacyAssignmentLeaseMeta() error = %v", err)
 	}
-	if reaped != 3 {
-		t.Fatalf("second reaped = %d, want the remaining 3", reaped)
+	if reap.Released != 3 {
+		t.Fatalf("second reaped = %d, want the remaining 3", reap.Released)
 	}
 	if server.Exists(directory.keys.assignmentLeaseMetaLegacy) {
 		t.Fatal("legacy lease metadata hash still exists after every field was reaped")
@@ -139,12 +147,12 @@ func TestRedisRunnerDirectoryLegacyLeaseMetaReapWithoutLegacyKey(t *testing.T) {
 	_, rdb := newRedisRunnerDirectoryTestClient(t)
 	directory := NewRedisRunnerDirectory(rdb)
 
-	reaped, err := directory.ReapOrphanedLegacyAssignmentLeaseMeta(ctx, 16)
+	reap, err := directory.ReapOrphanedLegacyAssignmentLeaseMeta(ctx, 16)
 	if err != nil {
 		t.Fatalf("ReapOrphanedLegacyAssignmentLeaseMeta() error = %v", err)
 	}
-	if reaped != 0 {
-		t.Fatalf("reaped = %d, want 0 when the legacy key was never written", reaped)
+	if reap.Released != 0 {
+		t.Fatalf("reaped = %d, want 0 when the legacy key was never written", reap.Released)
 	}
 }
 

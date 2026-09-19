@@ -30,11 +30,22 @@ const defaultDeadQueuedAssignmentReapBatch = 512
 // and any other RunnerDirectory implementation are unaffected.
 type DeadQueuedAssignmentReaper interface {
 	// ReapDeadQueuedAssignments removes up to limit assignments that can never
-	// be claimed again, and returns how many it removed. It is idempotent, safe
-	// to call concurrently from several replicas, and safe to run against a
-	// live directory: it never touches an assignment that is claimable or
-	// currently leased.
-	ReapDeadQueuedAssignments(ctx context.Context, limit int) (reclaimed int, err error)
+	// be claimed again, and reports how many candidates it inspected and how
+	// many of them it removed. It is idempotent, safe to call concurrently from
+	// several replicas, and safe to run against a live directory: it never
+	// touches an assignment that is claimable or currently leased.
+	//
+	// Inspected counts the assignment-state entries this pass read whose
+	// recorded state is 'queued'. That is the whole shape it drains, and it is
+	// deliberately narrower than the hash it scans: an entry in any other state
+	// is not a candidate of this shape, and counting it would make the ratio
+	// against the removed count a measure of how full the directory is rather
+	// than of how much of its candidate set the pass releases. Most inspected
+	// entries are expected NOT to be removed on a healthy fleet — the pass walks
+	// the head of a live queue and correctly leaves claimable work alone — so a
+	// high inspected/released ratio is only a defect signal when the queue is
+	// not converging.
+	ReapDeadQueuedAssignments(ctx context.Context, limit int) (ReapResult, error)
 }
 
 var _ DeadQueuedAssignmentReaper = (*RedisRunnerDirectory)(nil)
@@ -123,12 +134,12 @@ func (c *queuedReapCursor) store(cursor uint64) {
 // positional fragility. One page's payloads are read with a single HMGet, and
 // each candidate that survives the filter costs one status read plus one
 // bounded transition.
-func (d *RedisRunnerDirectory) ReapDeadQueuedAssignments(ctx context.Context, limit int) (int, error) {
+func (d *RedisRunnerDirectory) ReapDeadQueuedAssignments(ctx context.Context, limit int) (ReapResult, error) {
 	if limit <= 0 || d.executions == nil {
 		// Without a status reader the directory cannot tell a live assignment
 		// from a dead one, so it reclaims nothing rather than guessing from key
 		// names or from age.
-		return 0, nil
+		return ReapResult{}, nil
 	}
 	batch := defaultDeadQueuedAssignmentReapBatch
 	if limit < batch {
@@ -139,55 +150,57 @@ func (d *RedisRunnerDirectory) ReapDeadQueuedAssignments(ctx context.Context, li
 	// producing removals — so one call also bounds itself and resumes on the
 	// next cadence. The page budget is the second half of that bound: a scan
 	// cursor that kept returning empty pages would otherwise keep this pass
-	// turning without ever adding to the inspected count.
+	// turning without ever adding to the scanned count.
 	inspectCap := 4 * limit
 	maxPages := inspectCap/batch + 1
 
 	cursor := d.queuedReap.load()
-	inspected := 0
-	reclaimed := 0
+	scanned := 0
+	var result ReapResult
 	for pages := 0; ; pages++ {
 		pairs, next, err := d.rdb.HScan(ctx, d.keys.assignmentState, cursor, "", int64(batch)).Result()
 		if err != nil {
 			d.queuedReap.store(cursor)
-			return reclaimed, fmt.Errorf("reap dead queued assignments: scan assignment states: %w", err)
+			return result, fmt.Errorf("reap dead queued assignments: scan assignment states: %w", err)
 		}
-		pageReclaimed, err := d.reapDeadQueuedAssignmentPage(ctx, pairs, limit-reclaimed)
-		reclaimed += pageReclaimed
-		inspected += len(pairs) / 2
+		pageReclaimed, pageInspected, err := d.reapDeadQueuedAssignmentPage(ctx, pairs, limit-result.Released)
+		result.Released += pageReclaimed
+		result.Inspected += pageInspected
+		scanned += len(pairs) / 2
 		if err != nil {
 			// Resume at this page: re-inspecting it is harmless because every
 			// step of the pass is idempotent, and it is the only way a page that
 			// failed part-way still gets fully covered.
 			d.queuedReap.store(cursor)
-			return reclaimed, err
+			return result, err
 		}
-		if reclaimed >= limit {
+		if result.Released >= limit {
 			// Stopped part-way through the page by the removal limit. Hold the
 			// page head so the candidates this call did not reach are
 			// re-inspected rather than skipped. Each call still removes up to
 			// limit entries, so a page cannot pin the cursor forever.
 			d.queuedReap.store(cursor)
-			return reclaimed, nil
+			return result, nil
 		}
 		cursor = next
-		if cursor == 0 || inspected >= inspectCap || pages+1 >= maxPages {
+		if cursor == 0 || scanned >= inspectCap || pages+1 >= maxPages {
 			// A completed lap restarts at the head. The hash has no meaningful
 			// order to preserve the way the queue list does, so a lap boundary
 			// is simply where coverage is known to have wrapped.
 			d.queuedReap.store(cursor)
-			return reclaimed, nil
+			return result, nil
 		}
 	}
 }
 
 // reapDeadQueuedAssignmentPage removes the dead queued assignments of one scan
-// page. It is the whole per-candidate pipeline: filter by recorded state, read
-// the payloads in one call, ask the engine whether each execution is still
-// leaseable, and remove only the ones it is not.
-func (d *RedisRunnerDirectory) reapDeadQueuedAssignmentPage(ctx context.Context, pairs []string, limit int) (int, error) {
+// page and reports how many candidates of the shape that page carried. It is the
+// whole per-candidate pipeline: filter by recorded state, read the payloads in
+// one call, ask the engine whether each execution is still leaseable, and remove
+// only the ones it is not.
+func (d *RedisRunnerDirectory) reapDeadQueuedAssignmentPage(ctx context.Context, pairs []string, limit int) (reclaimed, inspected int, err error) {
 	if limit <= 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
 	candidates := make([]string, 0, len(pairs)/2)
 	for i := 0; i+1 < len(pairs); i += 2 {
@@ -196,8 +209,14 @@ func (d *RedisRunnerDirectory) reapDeadQueuedAssignmentPage(ctx context.Context,
 		}
 	}
 	if len(candidates) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
+	// Counted on discovery, before the payload read and before the activeness
+	// probe: these entries are the shape this pass drains, and the ones it then
+	// decides not to remove — because their execution is still leaseable, or
+	// because their payload is missing — are exactly the candidates the ratio
+	// against the removal count is there to show.
+	inspected = len(candidates)
 	// Sorted for the same reason the stranded reaper sorts its candidates: a
 	// bounded pass should pick the same entries every call rather than depend on
 	// hash iteration order, so a backlog drains deterministically instead of
@@ -206,9 +225,9 @@ func (d *RedisRunnerDirectory) reapDeadQueuedAssignmentPage(ctx context.Context,
 
 	raws, err := d.rdb.HMGet(ctx, d.keys.assignmentData, candidates...).Result()
 	if err != nil {
-		return 0, fmt.Errorf("reap dead queued assignments: read assignment payloads: %w", err)
+		return 0, inspected, fmt.Errorf("reap dead queued assignments: read assignment payloads: %w", err)
 	}
-	reclaimed := 0
+	reclaimed = 0
 	for i, assignmentID := range candidates {
 		if reclaimed >= limit {
 			break
@@ -230,20 +249,20 @@ func (d *RedisRunnerDirectory) reapDeadQueuedAssignmentPage(ctx context.Context,
 		}
 		active, err := d.queuedAssignmentExecutionActive(ctx, assignment)
 		if err != nil {
-			return reclaimed, err
+			return reclaimed, inspected, err
 		}
 		if active {
 			continue
 		}
 		didReap, err := d.reapQueuedAssignment(ctx, AssignmentID(assignmentID))
 		if err != nil {
-			return reclaimed, err
+			return reclaimed, inspected, err
 		}
 		if didReap {
 			reclaimed++
 		}
 	}
-	return reclaimed, nil
+	return reclaimed, inspected, nil
 }
 
 // queuedAssignmentExecutionActive reports whether the assignment's execution can

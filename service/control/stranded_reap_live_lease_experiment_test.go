@@ -142,14 +142,14 @@ func TestStrandedReapLeavesARenewingLiveLeaseAlone(t *testing.T) {
 			}
 		}
 
-		released, err := directory.ReapStrandedLeases(ctx, 16)
+		reap, err := directory.ReapStrandedLeases(ctx, 16)
 		if err != nil {
 			t.Fatalf("ReapStrandedLeases() at renewal %d error = %v", renewals, err)
 		}
-		if released != 0 {
+		if reap.Released != 0 {
 			t.Fatalf("renewal %d: released = %d, want 0: the holder is still renewing "+
 				"(engine deadline %s), so the assignment is not stranded",
-				renewals, released, engineLease.deadline)
+				renewals, reap.Released, engineLease.deadline)
 		}
 		if got := server.HGet(directory.keys.assignmentState, string(assignment.AssignmentID)); got != redisAssignmentLeased {
 			t.Fatalf("renewal %d: assignment state = %q, want %q", renewals, got, redisAssignmentLeased)
@@ -197,8 +197,8 @@ func TestStrandedReapAndEngineLeaseLapseShareAnInstant(t *testing.T) {
 	// One tick before the engine's window ends the reaper must do nothing, and
 	// the lease must still fence.
 	server.FastForward(leaseTTL - time.Second)
-	if released, err := directory.ReapStrandedLeases(ctx, 16); err != nil || released != 0 {
-		t.Fatalf("released = %d (err=%v) while the engine lease is still live, want 0", released, err)
+	if reap, err := directory.ReapStrandedLeases(ctx, 16); err != nil || reap.Released != 0 {
+		t.Fatalf("released = %d (err=%v) while the engine lease is still live, want 0", reap, err)
 	}
 	if !engineLease.live(time.Unix(100, 0).UTC().Add(leaseTTL - time.Second)) {
 		t.Fatal("model error: the engine lease should still be live one tick before its deadline")
@@ -216,12 +216,12 @@ func TestStrandedReapAndEngineLeaseLapseShareAnInstant(t *testing.T) {
 	if engineLease.live(time.Unix(100, 0).UTC().Add(leaseTTL + claimTTL + 2*time.Second)) {
 		t.Fatal("model error: the engine lease outlived the directory metadata window")
 	}
-	released, err := directory.ReapStrandedLeases(ctx, 16)
+	reap, err := directory.ReapStrandedLeases(ctx, 16)
 	if err != nil {
 		t.Fatalf("ReapStrandedLeases() error = %v", err)
 	}
-	if released != 1 {
-		t.Fatalf("released = %d after both windows lapsed, want 1", released)
+	if reap.Released != 1 {
+		t.Fatalf("released = %d after both windows lapsed, want 1", reap.Released)
 	}
 	if got := server.HGet(directory.keys.assignmentState, assignmentID); got != "" {
 		t.Fatalf("assignment state = %q, want released", got)
@@ -254,12 +254,12 @@ func TestStrandedReapRefreshedMetadataRestoresTheMargin(t *testing.T) {
 	if server.Exists(directory.keys.assignmentLeaseMetaKey(assignmentID)) {
 		t.Fatal("metadata should have lapsed")
 	}
-	released, err := directory.ReapStrandedLeases(ctx, 16)
+	reap, err := directory.ReapStrandedLeases(ctx, 16)
 	if err != nil {
 		t.Fatalf("ReapStrandedLeases() error = %v", err)
 	}
-	if released != 1 {
-		t.Fatalf("released = %d, want 1", released)
+	if reap.Released != 1 {
+		t.Fatalf("released = %d, want 1", reap.Released)
 	}
 	_, found, err := directory.LookupLease(ctx, runnerID, session.SessionID, LeaseLookupKey{
 		LeaseID:    lease.LeaseID,
@@ -315,12 +315,12 @@ func TestStrandedReapNeedsTheMetadataToBeGoneNotTheHolderToBeDead(t *testing.T) 
 			"the directory is already unable to resolve this lease", found, err)
 	}
 
-	released, err := directory.ReapStrandedLeases(ctx, 16)
+	reap, err := directory.ReapStrandedLeases(ctx, 16)
 	if err != nil {
 		t.Fatalf("ReapStrandedLeases() error = %v", err)
 	}
-	if released != 1 {
-		t.Fatalf("released = %d, want 1: the reaper's gate is metadata presence, not holder liveness", released)
+	if reap.Released != 1 {
+		t.Fatalf("released = %d, want 1: the reaper's gate is metadata presence, not holder liveness", reap.Released)
 	}
 	if got := server.HGet(directory.keys.assignmentState, assignmentID); got != "" {
 		t.Fatalf("assignment state = %q, want released", got)
@@ -359,8 +359,8 @@ func TestStrandedReapIsNotThe409PathWhileItsGateIsHonest(t *testing.T) {
 	}); err != nil || found {
 		t.Fatalf("LookupLease() with the metadata removed = (found=%v, err=%v), want a miss", found, err)
 	}
-	if released, err := directory.ReapStrandedLeases(ctx, 16); err != nil || released != 1 {
-		t.Fatalf("released = %d (err=%v) with the metadata removed, want 1", released, err)
+	if reap, err := directory.ReapStrandedLeases(ctx, 16); err != nil || reap.Released != 1 {
+		t.Fatalf("released = %d (err=%v) with the metadata removed, want 1", reap, err)
 	}
 
 	// Rebuild the same assignment in state two: metadata present. This is the
@@ -370,8 +370,8 @@ func TestStrandedReapIsNotThe409PathWhileItsGateIsHonest(t *testing.T) {
 	second := redisDirectoryTestAssignment("exec-gate/node/activation-2")
 	secondLease := redisRunnerDirectoryLeaseMetaTestLease(second, "lease-gate-2", time.Minute)
 	finalizeRedisRunnerDirectoryLeaseMetaTestAssignment(t, ctx, directory, session, second, secondLease)
-	if released, err := directory.ReapStrandedLeases(ctx, 16); err != nil || released != 0 {
-		t.Fatalf("released = %d (err=%v) with the metadata present, want 0", released, err)
+	if reap, err := directory.ReapStrandedLeases(ctx, 16); err != nil || reap.Released != 0 {
+		t.Fatalf("released = %d (err=%v) with the metadata present, want 0", reap, err)
 	}
 	if _, found, err := directory.LookupLease(ctx, runnerID, session.SessionID, LeaseLookupKey{
 		LeaseID:    secondLease.LeaseID,

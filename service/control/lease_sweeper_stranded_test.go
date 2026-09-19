@@ -12,23 +12,24 @@ import (
 // discovers by type assertion, so it can stand in for a RedisRunnerDirectory
 // without a Redis.
 type fakeStrandedReaperDirectory struct {
-	mu       sync.Mutex
-	calls    int
-	limits   []int
-	released int
-	err      error
+	mu        sync.Mutex
+	calls     int
+	limits    []int
+	released  int
+	inspected int
+	err       error
 }
 
 func (f *fakeStrandedReaperDirectory) ReleaseExpiredLease(context.Context, ExpiredDirectoryLeaseRequest) (ExpiredDirectoryLeaseOutcome, error) {
 	return ExpiredDirectoryLeaseAlreadyReleased, nil
 }
 
-func (f *fakeStrandedReaperDirectory) ReapStrandedLeases(_ context.Context, limit int) (int, error) {
+func (f *fakeStrandedReaperDirectory) ReapStrandedLeases(_ context.Context, limit int) (ReapResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
 	f.limits = append(f.limits, limit)
-	return f.released, f.err
+	return ReapResult{Inspected: f.inspected, Released: f.released}, f.err
 }
 
 func (f *fakeStrandedReaperDirectory) snapshot() (int, []int) {

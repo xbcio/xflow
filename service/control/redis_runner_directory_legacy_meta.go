@@ -17,10 +17,17 @@ const defaultLegacyLeaseMetaReapBatch = 128
 type LegacyLeaseMetaReaper interface {
 	// ReapOrphanedLegacyAssignmentLeaseMeta removes up to limit legacy-hash
 	// fields whose assignment can no longer be read by any version of this
-	// system, and returns how many it removed. It is idempotent, safe to call
-	// concurrently from several replicas, and safe to run against a live
-	// directory: it never touches a field that is still reachable.
-	ReapOrphanedLegacyAssignmentLeaseMeta(ctx context.Context, limit int) (int, error)
+	// system, and reports how many candidates it inspected and how many of them
+	// it removed. It is idempotent, safe to call concurrently from several
+	// replicas, and safe to run against a live directory: it never touches a
+	// field that is still reachable.
+	//
+	// Inspected counts every field the pass's HSCAN read from the legacy hash.
+	// The whole hash is that shape — U-7 left it unreferenced, so no field in it
+	// belongs to this version — which makes inspected the field count of the
+	// hash as measured by this pass, and the difference between it and the
+	// removed count the fields still reachable by a previous binary.
+	ReapOrphanedLegacyAssignmentLeaseMeta(ctx context.Context, limit int) (ReapResult, error)
 }
 
 var _ LegacyLeaseMetaReaper = (*RedisRunnerDirectory)(nil)
@@ -72,9 +79,9 @@ var _ LegacyLeaseMetaReaper = (*RedisRunnerDirectory)(nil)
 // so this function receives them and drops them immediately: they are never
 // retained, returned, or logged, and the Lua script deletes by field name
 // alone.
-func (d *RedisRunnerDirectory) ReapOrphanedLegacyAssignmentLeaseMeta(ctx context.Context, limit int) (int, error) {
+func (d *RedisRunnerDirectory) ReapOrphanedLegacyAssignmentLeaseMeta(ctx context.Context, limit int) (ReapResult, error) {
 	if limit <= 0 {
-		return 0, nil
+		return ReapResult{}, nil
 	}
 	batch := defaultLegacyLeaseMetaReapBatch
 	if limit < batch {
@@ -82,8 +89,7 @@ func (d *RedisRunnerDirectory) ReapOrphanedLegacyAssignmentLeaseMeta(ctx context
 	}
 
 	cursor := uint64(0)
-	inspected := 0
-	reaped := 0
+	var result ReapResult
 	// inspectCap keeps one call bounded when the hash is mostly live fields. The
 	// limit alone bounds deletions but says nothing about how many fields a
 	// caller must look at to find that many dead ones, and the directory runs
@@ -92,7 +98,7 @@ func (d *RedisRunnerDirectory) ReapOrphanedLegacyAssignmentLeaseMeta(ctx context
 	for {
 		pairs, next, err := d.rdb.HScan(ctx, d.keys.assignmentLeaseMetaLegacy, cursor, "", int64(batch)).Result()
 		if err != nil {
-			return reaped, fmt.Errorf("scan legacy assignment lease metadata: %w", err)
+			return result, fmt.Errorf("scan legacy assignment lease metadata: %w", err)
 		}
 		// HSCAN returns field, value, field, value… The value is the lease
 		// payload; only the field name is carried forward.
@@ -104,20 +110,20 @@ func (d *RedisRunnerDirectory) ReapOrphanedLegacyAssignmentLeaseMeta(ctx context
 		// remaining budget. Truncating stops a single call from deleting past
 		// its limit; the cursor has already moved past the rest, and the next
 		// call re-scans from the start and reaches them once these are gone.
-		if remaining := limit - reaped; len(candidates) > remaining {
+		if remaining := limit - result.Released; len(candidates) > remaining {
 			candidates = candidates[:remaining]
 		}
 		if len(candidates) > 0 {
 			removed, err := d.reapLegacyAssignmentLeaseMetaFields(ctx, candidates)
 			if err != nil {
-				return reaped, err
+				return result, err
 			}
-			reaped += removed
+			result.Released += removed
 		}
-		inspected += len(pairs) / 2
+		result.Inspected += len(pairs) / 2
 		cursor = next
-		if cursor == 0 || reaped >= limit || inspected >= inspectCap {
-			return reaped, nil
+		if cursor == 0 || result.Released >= limit || result.Inspected >= inspectCap {
+			return result, nil
 		}
 	}
 }

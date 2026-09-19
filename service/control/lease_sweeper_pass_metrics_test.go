@@ -25,10 +25,13 @@ var _ SweepPassObserver = metrics.SweepMetrics{}
 type passMetricsDirectory struct {
 	mu                  sync.Mutex
 	strandedReleased    int
+	strandedInspected   int
 	strandedErr         error
 	legacyReaped        int
+	legacyInspected     int
 	legacyErr           error
 	deadQueuedReclaimed int
+	deadQueuedInspected int
 	deadQueuedErr       error
 }
 
@@ -36,22 +39,22 @@ func (d *passMetricsDirectory) ReleaseExpiredLease(context.Context, ExpiredDirec
 	return ExpiredDirectoryLeaseAlreadyReleased, nil
 }
 
-func (d *passMetricsDirectory) ReapStrandedLeases(context.Context, int) (int, error) {
+func (d *passMetricsDirectory) ReapStrandedLeases(context.Context, int) (ReapResult, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.strandedReleased, d.strandedErr
+	return ReapResult{Inspected: d.strandedInspected, Released: d.strandedReleased}, d.strandedErr
 }
 
-func (d *passMetricsDirectory) ReapOrphanedLegacyAssignmentLeaseMeta(context.Context, int) (int, error) {
+func (d *passMetricsDirectory) ReapOrphanedLegacyAssignmentLeaseMeta(context.Context, int) (ReapResult, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.legacyReaped, d.legacyErr
+	return ReapResult{Inspected: d.legacyInspected, Released: d.legacyReaped}, d.legacyErr
 }
 
-func (d *passMetricsDirectory) ReapDeadQueuedAssignments(context.Context, int) (int, error) {
+func (d *passMetricsDirectory) ReapDeadQueuedAssignments(context.Context, int) (ReapResult, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.deadQueuedReclaimed, d.deadQueuedErr
+	return ReapResult{Inspected: d.deadQueuedInspected, Released: d.deadQueuedReclaimed}, d.deadQueuedErr
 }
 
 // passMetricsState is a LeaseLister that also reconciles a lease index, which

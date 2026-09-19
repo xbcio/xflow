@@ -16,6 +16,7 @@ type fakeDeadQueuedReaperDirectory struct {
 	calls     int
 	limits    []int
 	reclaimed int
+	inspected int
 	err       error
 }
 
@@ -23,12 +24,12 @@ func (f *fakeDeadQueuedReaperDirectory) ReleaseExpiredLease(context.Context, Exp
 	return ExpiredDirectoryLeaseAlreadyReleased, nil
 }
 
-func (f *fakeDeadQueuedReaperDirectory) ReapDeadQueuedAssignments(_ context.Context, limit int) (int, error) {
+func (f *fakeDeadQueuedReaperDirectory) ReapDeadQueuedAssignments(_ context.Context, limit int) (ReapResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
 	f.limits = append(f.limits, limit)
-	return f.reclaimed, f.err
+	return ReapResult{Inspected: f.inspected, Released: f.reclaimed}, f.err
 }
 
 func (f *fakeDeadQueuedReaperDirectory) snapshot() (int, []int) {

@@ -147,12 +147,20 @@ func TestRedisRunnerDirectoryReapsQueuedAssignmentWithGoneExecution(t *testing.T
 		t.Fatalf("seed lease metadata: %v", err)
 	}
 
-	reclaimed, err := directory.ReapDeadQueuedAssignments(ctx, 16)
+	reap, err := directory.ReapDeadQueuedAssignments(ctx, 16)
 	if err != nil {
 		t.Fatalf("ReapDeadQueuedAssignments() error = %v", err)
 	}
-	if reclaimed != 1 {
-		t.Fatalf("reclaimed = %d, want 1", reclaimed)
+	if reap.Released != 1 {
+		t.Fatalf("reclaimed = %d, want 1", reap.Released)
+	}
+	// The candidate count is the entries of the shape this pass drains, not the
+	// entries of the hash it scans: both assignments are 'queued' and were
+	// examined, and the live one is examined and correctly left alone. That gap
+	// between inspected and released is the pass reporting that it is not a
+	// reaper of everything it looks at.
+	if reap.Inspected != 2 {
+		t.Fatalf("inspected = %d, want 2 (both queued assignments examined)", reap.Inspected)
 	}
 
 	assertQueuedReapRemovedAssignment(t, ctx, server, rdb, directory, dead.AssignmentID)
@@ -185,12 +193,18 @@ func TestRedisRunnerDirectoryQueuedReapKeepsLiveExecution(t *testing.T) {
 	reader.set("exec-running", types.ExecutionStatusRunning)
 	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
 
-	reclaimed, err := directory.ReapDeadQueuedAssignments(ctx, 16)
+	reap, err := directory.ReapDeadQueuedAssignments(ctx, 16)
 	if err != nil {
 		t.Fatalf("ReapDeadQueuedAssignments() error = %v", err)
 	}
-	if reclaimed != 0 {
-		t.Fatalf("reclaimed = %d, want 0: the execution is still running", reclaimed)
+	if reap.Released != 0 {
+		t.Fatalf("reclaimed = %d, want 0: the execution is still running", reap.Released)
+	}
+	// Inspected 1 with released 0 is the divergence case for this pass: it found
+	// a candidate of its shape and released nothing, which is a different reading
+	// from a pass that inspected nothing at all (see the leased case below).
+	if reap.Inspected != 1 {
+		t.Fatalf("inspected = %d, want 1: the queued assignment is a candidate of this pass", reap.Inspected)
 	}
 	if got := server.HGet(directory.keys.assignmentState, string(assignment.AssignmentID)); got != redisAssignmentQueued {
 		t.Fatalf("assignment state = %q, want %q", got, redisAssignmentQueued)
@@ -227,12 +241,12 @@ func TestRedisRunnerDirectoryQueuedReapReclaimsTerminalExecution(t *testing.T) {
 			assignment := queuedReapTestAssignment(AssignmentID(string(executionID)+"/node/activation-1"), executionID)
 			mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
 
-			reclaimed, err := directory.ReapDeadQueuedAssignments(ctx, 16)
+			reap, err := directory.ReapDeadQueuedAssignments(ctx, 16)
 			if err != nil {
 				t.Fatalf("ReapDeadQueuedAssignments() error = %v", err)
 			}
-			if reclaimed != 1 {
-				t.Fatalf("reclaimed for a %q execution = %d, want 1", status, reclaimed)
+			if reap.Released != 1 {
+				t.Fatalf("reclaimed for a %q execution = %d, want 1", status, reap.Released)
 			}
 			if got := server.HGet(directory.keys.assignmentState, string(assignment.AssignmentID)); got != "" {
 				t.Fatalf("assignment state = %q, want the record removed", got)
@@ -259,12 +273,20 @@ func TestRedisRunnerDirectoryQueuedReapLeavesLeasedAssignmentAlone(t *testing.T)
 
 	// The execution was never registered, so only the state fence keeps this
 	// assignment out of the reaper's reach.
-	reclaimed, err := directory.ReapDeadQueuedAssignments(ctx, 16)
+	reap, err := directory.ReapDeadQueuedAssignments(ctx, 16)
 	if err != nil {
 		t.Fatalf("ReapDeadQueuedAssignments() error = %v", err)
 	}
-	if reclaimed != 0 {
-		t.Fatalf("reclaimed = %d, want 0: a leased assignment is not this reaper's to remove", reclaimed)
+	if reap.Released != 0 {
+		t.Fatalf("reclaimed = %d, want 0: a leased assignment is not this reaper's to remove", reap.Released)
+	}
+	// Inspected 0 because a 'leased' entry is not a candidate of this pass's
+	// shape. Counting every entry of the state hash would make inspected a
+	// measure of how many assignments the directory holds, and the ratio against
+	// released a measure of how few of them are dead — neither of which is what
+	// an operator needs to read from a scope counter.
+	if reap.Inspected != 0 {
+		t.Fatalf("inspected = %d, want 0: a leased assignment is not a queued candidate", reap.Inspected)
 	}
 	if got := server.HGet(directory.keys.assignmentState, assignmentID); got != redisAssignmentLeased {
 		t.Fatalf("assignment state = %q, want %q untouched", got, redisAssignmentLeased)
@@ -296,12 +318,12 @@ func TestRedisRunnerDirectoryQueuedReapLeavesClaimedAssignmentAlone(t *testing.T
 	claim := claimRedisDirectoryAssignment(t, ctx, directory, session, 1)
 	assignmentID := string(assignment.AssignmentID)
 
-	reclaimed, err := directory.ReapDeadQueuedAssignments(ctx, 16)
+	reap, err := directory.ReapDeadQueuedAssignments(ctx, 16)
 	if err != nil {
 		t.Fatalf("ReapDeadQueuedAssignments() error = %v", err)
 	}
-	if reclaimed != 0 {
-		t.Fatalf("reclaimed = %d, want 0: a claimed assignment is not this reaper's to remove", reclaimed)
+	if reap.Released != 0 {
+		t.Fatalf("reclaimed = %d, want 0: a claimed assignment is not this reaper's to remove", reap.Released)
 	}
 	if got := server.HGet(directory.keys.assignmentState, assignmentID); got != redisAssignmentClaimed {
 		t.Fatalf("assignment state = %q, want %q untouched", got, redisAssignmentClaimed)
@@ -353,12 +375,12 @@ func TestRedisRunnerDirectoryQueuedReapWithoutProbeIsNoOp(t *testing.T) {
 	assignment := queuedReapTestAssignment("exec-noprobe/node/activation-1", "exec-noprobe")
 	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
 
-	reclaimed, err := directory.ReapDeadQueuedAssignments(ctx, 16)
+	reap, err := directory.ReapDeadQueuedAssignments(ctx, 16)
 	if err != nil {
 		t.Fatalf("ReapDeadQueuedAssignments() error = %v", err)
 	}
-	if reclaimed != 0 {
-		t.Fatalf("reclaimed = %d, want 0 without a liveness probe", reclaimed)
+	if reap.Released != 0 {
+		t.Fatalf("reclaimed = %d, want 0 without a liveness probe", reap.Released)
 	}
 	if got := server.HGet(directory.keys.assignmentState, string(assignment.AssignmentID)); got != redisAssignmentQueued {
 		t.Fatalf("assignment state = %q, want %q untouched", got, redisAssignmentQueued)
@@ -386,12 +408,12 @@ func TestRedisRunnerDirectoryQueuedReapSkipsUnclassifiableRecord(t *testing.T) {
 		t.Fatalf("seed undecodable payload: %v", err)
 	}
 
-	reclaimed, err := directory.ReapDeadQueuedAssignments(ctx, 16)
+	reap, err := directory.ReapDeadQueuedAssignments(ctx, 16)
 	if err != nil {
 		t.Fatalf("ReapDeadQueuedAssignments() error = %v", err)
 	}
-	if reclaimed != 0 {
-		t.Fatalf("reclaimed = %d, want 0 for records this reaper cannot classify", reclaimed)
+	if reap.Released != 0 {
+		t.Fatalf("reclaimed = %d, want 0 for records this reaper cannot classify", reap.Released)
 	}
 	for _, id := range []string{payloadless, undecodable} {
 		if got := server.HGet(directory.keys.assignmentState, id); got != redisAssignmentQueued {
@@ -413,12 +435,12 @@ func TestRedisRunnerDirectoryQueuedReapFailurePropagates(t *testing.T) {
 	assignment := queuedReapTestAssignment("exec-err/node/activation-1", "exec-err")
 	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
 
-	reclaimed, err := directory.ReapDeadQueuedAssignments(ctx, 16)
+	reap, err := directory.ReapDeadQueuedAssignments(ctx, 16)
 	if err == nil {
 		t.Fatal("ReapDeadQueuedAssignments() error = nil, want the probe failure")
 	}
-	if reclaimed != 0 {
-		t.Fatalf("reclaimed = %d, want 0", reclaimed)
+	if reap.Released != 0 {
+		t.Fatalf("reclaimed = %d, want 0", reap.Released)
 	}
 	if got := server.HGet(directory.keys.assignmentState, string(assignment.AssignmentID)); got != redisAssignmentQueued {
 		t.Fatalf("assignment state = %q, want %q untouched", got, redisAssignmentQueued)
@@ -445,12 +467,12 @@ func TestRedisRunnerDirectoryQueuedReapIsBoundedAndIdempotent(t *testing.T) {
 		mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
 	}
 
-	reclaimed, err := directory.ReapDeadQueuedAssignments(ctx, 2)
+	reap, err := directory.ReapDeadQueuedAssignments(ctx, 2)
 	if err != nil {
 		t.Fatalf("first ReapDeadQueuedAssignments() error = %v", err)
 	}
-	if reclaimed != 2 {
-		t.Fatalf("first reclaimed = %d, want exactly the limit of 2", reclaimed)
+	if reap.Released != 2 {
+		t.Fatalf("first reclaimed = %d, want exactly the limit of 2", reap.Released)
 	}
 	if length, err := rdb.LLen(ctx, directory.keys.queue).Result(); err != nil {
 		t.Fatalf("read queue length: %v", err)
@@ -458,20 +480,20 @@ func TestRedisRunnerDirectoryQueuedReapIsBoundedAndIdempotent(t *testing.T) {
 		t.Fatalf("queue length after a bounded pass = %d, want %d", length, backlog-2)
 	}
 
-	reclaimed, err = directory.ReapDeadQueuedAssignments(ctx, 16)
+	reap, err = directory.ReapDeadQueuedAssignments(ctx, 16)
 	if err != nil {
 		t.Fatalf("second ReapDeadQueuedAssignments() error = %v", err)
 	}
-	if reclaimed != backlog-2 {
-		t.Fatalf("second reclaimed = %d, want the remaining %d", reclaimed, backlog-2)
+	if reap.Released != backlog-2 {
+		t.Fatalf("second reclaimed = %d, want the remaining %d", reap.Released, backlog-2)
 	}
 
-	reclaimed, err = directory.ReapDeadQueuedAssignments(ctx, 16)
+	reap, err = directory.ReapDeadQueuedAssignments(ctx, 16)
 	if err != nil {
 		t.Fatalf("third ReapDeadQueuedAssignments() error = %v", err)
 	}
-	if reclaimed != 0 {
-		t.Fatalf("third reclaimed = %d, want 0 on a drained directory", reclaimed)
+	if reap.Released != 0 {
+		t.Fatalf("third reclaimed = %d, want 0 on a drained directory", reap.Released)
 	}
 
 	if length, err := rdb.LLen(ctx, directory.keys.queue).Result(); err != nil {
@@ -540,12 +562,12 @@ func TestRedisRunnerDirectoryQueuedReapAgainstRealStateStore(t *testing.T) {
 		t.Fatalf("seed execution status: %v", err)
 	}
 
-	reclaimed, err := directory.ReapDeadQueuedAssignments(ctx, 16)
+	reap, err := directory.ReapDeadQueuedAssignments(ctx, 16)
 	if err != nil {
 		t.Fatalf("ReapDeadQueuedAssignments() error = %v", err)
 	}
-	if reclaimed != 0 {
-		t.Fatalf("reclaimed = %d, want 0 while the execution's status key exists", reclaimed)
+	if reap.Released != 0 {
+		t.Fatalf("reclaimed = %d, want 0 while the execution's status key exists", reap.Released)
 	}
 
 	// The execution's transient keys expiring is what leaves the queue entry
@@ -554,12 +576,12 @@ func TestRedisRunnerDirectoryQueuedReapAgainstRealStateStore(t *testing.T) {
 		t.Fatalf("expire execution status: %v", err)
 	}
 
-	reclaimed, err = directory.ReapDeadQueuedAssignments(ctx, 16)
+	reap, err = directory.ReapDeadQueuedAssignments(ctx, 16)
 	if err != nil {
 		t.Fatalf("ReapDeadQueuedAssignments() after expiry error = %v", err)
 	}
-	if reclaimed != 1 {
-		t.Fatalf("reclaimed = %d, want 1 once the execution is gone", reclaimed)
+	if reap.Released != 1 {
+		t.Fatalf("reclaimed = %d, want 1 once the execution is gone", reap.Released)
 	}
 	if got := server.HGet(directory.keys.assignmentState, string(assignment.AssignmentID)); got != "" {
 		t.Fatalf("assignment state = %q, want the record removed", got)
@@ -592,12 +614,12 @@ func TestRedisRunnerDirectoryQueuedReapIsSafeAcrossReplicas(t *testing.T) {
 		go func(i int, replica *RedisRunnerDirectory) {
 			defer wg.Done()
 			for round := 0; round < 8; round++ {
-				reclaimed, err := replica.ReapDeadQueuedAssignments(ctx, 8)
+				reap, err := replica.ReapDeadQueuedAssignments(ctx, 8)
 				if err != nil {
 					t.Errorf("replica %d: ReapDeadQueuedAssignments() error = %v", i, err)
 					return
 				}
-				totals[i] += reclaimed
+				totals[i] += reap.Released
 			}
 		}(i, replica)
 	}
@@ -651,12 +673,12 @@ func TestRedisRunnerDirectoryQueuedReapRestoresTheClaimableHead(t *testing.T) {
 		t.Fatalf("queue head = %v, want a dead assignment ahead of %q", head, live.AssignmentID)
 	}
 
-	reclaimed, err := directory.ReapDeadQueuedAssignments(ctx, 64)
+	reap, err := directory.ReapDeadQueuedAssignments(ctx, 64)
 	if err != nil {
 		t.Fatalf("ReapDeadQueuedAssignments() error = %v", err)
 	}
-	if reclaimed != deadCount {
-		t.Fatalf("reclaimed = %d, want all %d dead assignments", reclaimed, deadCount)
+	if reap.Released != deadCount {
+		t.Fatalf("reclaimed = %d, want all %d dead assignments", reap.Released, deadCount)
 	}
 	if queue, err := rdb.LRange(ctx, directory.keys.queue, 0, -1).Result(); err != nil {
 		t.Fatalf("read queue: %v", err)

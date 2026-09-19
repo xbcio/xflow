@@ -23,11 +23,18 @@ const defaultStrandedLeaseReapBatch = 256
 // directory and any other RunnerDirectory implementation are unaffected.
 type StrandedLeaseReaper interface {
 	// ReapStrandedLeases releases up to limit assignments whose directory lease
-	// record is unrecoverable, and returns how many it released. It is
-	// idempotent, safe to call concurrently from several replicas, and safe to
-	// run against a live directory: it never touches an assignment whose lease
-	// metadata is still present.
-	ReapStrandedLeases(ctx context.Context, limit int) (released int, err error)
+	// record is unrecoverable, and reports how many candidates it inspected and
+	// how many of them it released. It is idempotent, safe to call concurrently
+	// from several replicas, and safe to run against a live directory: it never
+	// touches an assignment whose lease metadata is still present.
+	//
+	// Inspected counts the candidates the pass found in the shape it drains: the
+	// 'leased' assignments its per-runner walks yielded, plus the records the
+	// handoff ledger still marks finalized. A candidate it then did not release —
+	// a racing renew re-armed its metadata, a racing report released it first —
+	// is counted as inspected and not as released, which is what lets the pair
+	// report a pass whose scope is wider than the work it finds.
+	ReapStrandedLeases(ctx context.Context, limit int) (ReapResult, error)
 }
 
 var _ StrandedLeaseReaper = (*RedisRunnerDirectory)(nil)
@@ -62,61 +69,68 @@ var _ StrandedLeaseReaper = (*RedisRunnerDirectory)(nil)
 // rather than with one runner's — acceptable here, on a slow maintenance cadence
 // with a hard limit, and it is the only enumeration that reaches an assignment
 // whose per-runner index entry is gone.
-func (d *RedisRunnerDirectory) ReapStrandedLeases(ctx context.Context, limit int) (int, error) {
+func (d *RedisRunnerDirectory) ReapStrandedLeases(ctx context.Context, limit int) (ReapResult, error) {
 	if limit <= 0 {
-		return 0, nil
+		return ReapResult{}, nil
 	}
-	released, err := d.reapStrandedIndexedLeases(ctx, limit)
+	result, err := d.reapStrandedIndexedLeases(ctx, limit)
 	if err != nil {
-		return released, err
+		return result, err
 	}
-	if released >= limit {
-		return released, nil
+	if result.Released >= limit {
+		return result, nil
 	}
-	ledgerReleased, err := d.reapStrandedLedgerHandoffs(ctx, limit-released)
-	released += ledgerReleased
+	ledger, err := d.reapStrandedLedgerHandoffs(ctx, limit-result.Released)
+	result.Inspected += ledger.Inspected
+	result.Released += ledger.Released
 	if err != nil {
-		return released, err
+		return result, err
 	}
-	return released, nil
+	return result, nil
 }
 
 // reapStrandedIndexedLeases is pass A: every leased assignment the per-runner
 // index accounts for, and, for a runner whose index is short, every leased
 // assignment in the directory that belongs to it.
-func (d *RedisRunnerDirectory) reapStrandedIndexedLeases(ctx context.Context, limit int) (int, error) {
+func (d *RedisRunnerDirectory) reapStrandedIndexedLeases(ctx context.Context, limit int) (ReapResult, error) {
 	runnerIDs, err := d.ListRunners(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("reap stranded leases: list runners: %w", err)
+		return ReapResult{}, fmt.Errorf("reap stranded leases: list runners: %w", err)
 	}
 	// Sorted for the same reason replayLease sorts: a bounded pass should pick
 	// the same candidates every call rather than depending on hash iteration
 	// order, so a backlog drains deterministically instead of starving whoever
 	// keeps losing the race to the limit.
 	sort.Strings(runnerIDs)
-	released := 0
+	var result ReapResult
 	for _, runnerID := range runnerIDs {
-		if released >= limit {
+		if result.Released >= limit {
 			break
 		}
 		candidates, err := d.strandedLeaseCandidates(ctx, runnerID)
 		if err != nil {
-			return released, err
+			return result, err
 		}
+		// Counted on discovery rather than on release, and before the batch can
+		// stop the loop: a candidate this call never reached because the limit
+		// was already met is still a record in this shape, and leaving it out
+		// would make a backlog larger than the batch read as a pass that
+		// inspected exactly its batch.
+		result.Inspected += len(candidates)
 		for _, assignmentID := range candidates {
-			if released >= limit {
+			if result.Released >= limit {
 				break
 			}
 			didRelease, err := d.reapStrandedAssignment(ctx, runnerID, assignmentID)
 			if err != nil {
-				return released, err
+				return result, err
 			}
 			if didRelease {
-				released++
+				result.Released++
 			}
 		}
 	}
-	return released, nil
+	return result, nil
 }
 
 // reapStrandedLedgerHandoffs is pass B: assignments the handoff ledger still
@@ -130,9 +144,9 @@ func (d *RedisRunnerDirectory) reapStrandedIndexedLeases(ctx context.Context, li
 // inspect cap is what bounds it when the ledger is mostly records that settle
 // concurrently, since the release limit alone says nothing about how many
 // entries a caller must look at to find that many stranded ones.
-func (d *RedisRunnerDirectory) reapStrandedLedgerHandoffs(ctx context.Context, limit int) (int, error) {
+func (d *RedisRunnerDirectory) reapStrandedLedgerHandoffs(ctx context.Context, limit int) (ReapResult, error) {
 	if limit <= 0 {
-		return 0, nil
+		return ReapResult{}, nil
 	}
 	batch := defaultStrandedLeaseReapBatch
 	if limit < batch {
@@ -140,13 +154,13 @@ func (d *RedisRunnerDirectory) reapStrandedLedgerHandoffs(ctx context.Context, l
 	}
 
 	cursor := uint64(0)
-	inspected := 0
-	released := 0
+	scanned := 0
+	var result ReapResult
 	inspectCap := 4 * limit
 	for {
 		pairs, next, err := d.rdb.HScan(ctx, d.keys.handoffState, cursor, "", int64(batch)).Result()
 		if err != nil {
-			return released, fmt.Errorf("reap stranded leases: scan handoff ledger: %w", err)
+			return result, fmt.Errorf("reap stranded leases: scan handoff ledger: %w", err)
 		}
 		claimIDs := make([]string, 0, len(pairs)/2)
 		for i := 0; i+1 < len(pairs); i += 2 {
@@ -155,22 +169,28 @@ func (d *RedisRunnerDirectory) reapStrandedLedgerHandoffs(ctx context.Context, l
 			}
 		}
 		sort.Strings(claimIDs)
+		// Every finalized record this page yielded is a candidate in the shape,
+		// counted even if the release limit stops the loop before all of them
+		// are resolved. The scan cap below counts differently on purpose: it
+		// bounds how much of the ledger one call reads, not how much of the
+		// shape it found.
+		result.Inspected += len(claimIDs)
 		for _, claimID := range claimIDs {
-			if released >= limit {
-				return released, nil
+			if result.Released >= limit {
+				return result, nil
 			}
 			didRelease, err := d.reapStrandedHandoff(ctx, claimID)
 			if err != nil {
-				return released, err
+				return result, err
 			}
 			if didRelease {
-				released++
+				result.Released++
 			}
 		}
-		inspected += len(pairs) / 2
+		scanned += len(pairs) / 2
 		cursor = next
-		if cursor == 0 || released >= limit || inspected >= inspectCap {
-			return released, nil
+		if cursor == 0 || result.Released >= limit || scanned >= inspectCap {
+			return result, nil
 		}
 	}
 }

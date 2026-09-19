@@ -12,32 +12,34 @@ import (
 // sweeper discovers by type assertion, so it can stand in for a
 // RedisRunnerDirectory without a Redis.
 type fakeLegacyReaperDirectory struct {
-	mu       sync.Mutex
-	calls    int
-	limits   []int
-	reaped   int
-	err      error
-	reapFunc func() int
+	mu        sync.Mutex
+	calls     int
+	limits    []int
+	reaped    int
+	inspected int
+	err       error
+	reapFunc  func() int
 }
 
 func (f *fakeLegacyReaperDirectory) ReleaseExpiredLease(context.Context, ExpiredDirectoryLeaseRequest) (ExpiredDirectoryLeaseOutcome, error) {
 	return ExpiredDirectoryLeaseAlreadyReleased, nil
 }
 
-func (f *fakeLegacyReaperDirectory) ReapOrphanedLegacyAssignmentLeaseMeta(_ context.Context, limit int) (int, error) {
+func (f *fakeLegacyReaperDirectory) ReapOrphanedLegacyAssignmentLeaseMeta(_ context.Context, limit int) (ReapResult, error) {
 	f.mu.Lock()
 	f.calls++
 	f.limits = append(f.limits, limit)
 	reaped, err := f.reaped, f.err
+	inspected := f.inspected
 	fn := f.reapFunc
 	f.mu.Unlock()
 	if err != nil {
-		return 0, err
+		return ReapResult{}, err
 	}
 	if fn != nil {
-		return fn(), nil
+		return ReapResult{Inspected: inspected, Released: fn()}, nil
 	}
-	return reaped, nil
+	return ReapResult{Inspected: inspected, Released: reaped}, nil
 }
 
 func (f *fakeLegacyReaperDirectory) snapshot() (int, []int) {

@@ -385,11 +385,11 @@ func TestRedisRunnerDirectoryRealRedisLegacyLeaseMetaReap(t *testing.T) {
 
 	reaped := 0
 	for attempt := 0; attempt < 100; attempt++ {
-		n, err := directory.ReapOrphanedLegacyAssignmentLeaseMeta(ctx, 64)
+		reap, err := directory.ReapOrphanedLegacyAssignmentLeaseMeta(ctx, 64)
 		if err != nil {
 			t.Fatalf("ReapOrphanedLegacyAssignmentLeaseMeta() error = %v", err)
 		}
-		reaped += n
+		reaped += reap.Released
 		remaining, err := rdb.HLen(ctx, legacyKey).Result()
 		if err != nil {
 			t.Fatalf("HLEN legacy lease metadata: %v", err)

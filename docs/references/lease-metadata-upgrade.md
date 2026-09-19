@@ -266,7 +266,8 @@ metadata 键。
    （默认 5 分钟）、单次有界的批次调用
    `ReapOrphanedLegacyAssignmentLeaseMeta`。它用 `HSCAN` 遍历**这一个键**
    （单键、单 slot、游标推进），对每个 field 检查 §6.2 的判据，只删除不可达的
-   field。它不返回也不记录 field 名或值，只记录删除数量。
+   field。它不返回也不记录 field 名或值，只以 `ReapResult` 报告扫描的候选数与
+   删除数量。
 
 ### 6.2 判据：为什么可以「在线」删除
 

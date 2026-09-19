@@ -63,12 +63,19 @@ func TestRedisRunnerDirectoryReapsStrandedLeasedAssignment(t *testing.T) {
 	assignmentID := string(assignment.AssignmentID)
 	claimID := server.HGet(directory.keys.handoffAssignment, assignmentID)
 
-	released, err := directory.ReapStrandedLeases(ctx, 16)
+	reap, err := directory.ReapStrandedLeases(ctx, 16)
 	if err != nil {
 		t.Fatalf("ReapStrandedLeases() error = %v", err)
 	}
-	if released != 1 {
-		t.Fatalf("released = %d, want 1", released)
+	if reap.Released != 1 {
+		t.Fatalf("released = %d, want 1", reap.Released)
+	}
+	// inspected == released: the pass found one candidate of its shape and
+	// released it. The pair is what makes that readable — the released count
+	// alone cannot say whether this pass found one record or walked a hundred to
+	// release the same one.
+	if reap.Inspected != 1 {
+		t.Fatalf("inspected = %d, want 1: the one stranded assignment is one candidate", reap.Inspected)
 	}
 	if got := server.HGet(directory.keys.assignmentState, assignmentID); got != "" {
 		t.Fatalf("assignment state = %q, want released", got)
@@ -102,12 +109,22 @@ func TestRedisRunnerDirectoryStrandedReapLeavesLiveLeaseAlone(t *testing.T) {
 	finalizeRedisRunnerDirectoryLeaseMetaTestAssignment(t, ctx, directory, session, assignment, lease)
 	assignmentID := string(assignment.AssignmentID)
 
-	released, err := directory.ReapStrandedLeases(ctx, 16)
+	reap, err := directory.ReapStrandedLeases(ctx, 16)
 	if err != nil {
 		t.Fatalf("ReapStrandedLeases() error = %v", err)
 	}
-	if released != 0 {
-		t.Fatalf("released = %d, want 0: the lease metadata is still present", released)
+	if reap.Released != 0 {
+		t.Fatalf("released = %d, want 0: the lease metadata is still present", reap.Released)
+	}
+	// Inspected 2 with released 0 is the divergence case, and it is also the
+	// honest reading of what this pass examines: the walk yielded the assignment
+	// as a candidate and the handoff ledger still marks its debt finalized, so
+	// two records were examined and neither was released. An assignment both
+	// enumerations reach is counted once per enumeration — the counter measures
+	// candidates examined, not distinct assignments — which is why the released
+	// count is the only side of the pair with a one-to-one meaning.
+	if reap.Inspected != 2 {
+		t.Fatalf("inspected = %d, want 2: the walked assignment and its finalized ledger record", reap.Inspected)
 	}
 	if got := server.HGet(directory.keys.assignmentState, assignmentID); got != redisAssignmentLeased {
 		t.Fatalf("assignment state = %q, want untouched %q", got, redisAssignmentLeased)
@@ -140,12 +157,12 @@ func TestRedisRunnerDirectoryStrandedReapReachesLedgerWithoutRunner(t *testing.T
 		t.Fatalf("deregister runner: %v", err)
 	}
 
-	released, err := directory.ReapStrandedLeases(ctx, 16)
+	reap, err := directory.ReapStrandedLeases(ctx, 16)
 	if err != nil {
 		t.Fatalf("ReapStrandedLeases() error = %v", err)
 	}
-	if released != 1 {
-		t.Fatalf("released = %d, want 1 via the ledger enumeration", released)
+	if reap.Released != 1 {
+		t.Fatalf("released = %d, want 1 via the ledger enumeration", reap.Released)
 	}
 	if got := server.HGet(directory.keys.assignmentState, assignmentID); got != "" {
 		t.Fatalf("assignment state = %q, want released", got)
@@ -193,12 +210,12 @@ func TestRedisRunnerDirectoryStrandedReapPrunesBogusIndexEntry(t *testing.T) {
 	}
 
 	// The true owner's pass still releases exactly once.
-	released, err := directory.ReapStrandedLeases(ctx, 16)
+	reap, err := directory.ReapStrandedLeases(ctx, 16)
 	if err != nil {
 		t.Fatalf("ReapStrandedLeases() error = %v", err)
 	}
-	if released != 1 {
-		t.Fatalf("released = %d, want 1 (only the true owner's lease)", released)
+	if reap.Released != 1 {
+		t.Fatalf("released = %d, want 1 (only the true owner's lease)", reap.Released)
 	}
 }
 
@@ -233,12 +250,12 @@ func TestRedisRunnerDirectoryStrandedReapFallsBackToFullScanWhenIndexShort(t *te
 		t.Fatalf("strandedLeaseCandidates() = %v, want [%s] via the count-shortfall scan", candidates, assignmentID)
 	}
 
-	released, err := directory.ReapStrandedLeases(ctx, 16)
+	reap, err := directory.ReapStrandedLeases(ctx, 16)
 	if err != nil {
 		t.Fatalf("ReapStrandedLeases() error = %v", err)
 	}
-	if released != 1 {
-		t.Fatalf("released = %d, want 1", released)
+	if reap.Released != 1 {
+		t.Fatalf("released = %d, want 1", reap.Released)
 	}
 	if got := server.HGet(directory.keys.assignmentState, assignmentID); got != "" {
 		t.Fatalf("assignment state = %q, want released", got)
@@ -265,28 +282,28 @@ func TestRedisRunnerDirectoryStrandedReapIsBoundedAndIdempotent(t *testing.T) {
 		seedStrandedLeasedAssignment(t, ctx, rdb, directory, session, assignment, lease)
 	}
 
-	released, err := directory.ReapStrandedLeases(ctx, 2)
+	reap, err := directory.ReapStrandedLeases(ctx, 2)
 	if err != nil {
 		t.Fatalf("ReapStrandedLeases() error = %v", err)
 	}
-	if released != 2 {
-		t.Fatalf("released = %d, want exactly the limit of 2", released)
+	if reap.Released != 2 {
+		t.Fatalf("released = %d, want exactly the limit of 2", reap.Released)
 	}
 
-	released, err = directory.ReapStrandedLeases(ctx, 16)
+	reap, err = directory.ReapStrandedLeases(ctx, 16)
 	if err != nil {
 		t.Fatalf("second ReapStrandedLeases() error = %v", err)
 	}
-	if released != 1 {
-		t.Fatalf("second released = %d, want the remaining 1", released)
+	if reap.Released != 1 {
+		t.Fatalf("second released = %d, want the remaining 1", reap.Released)
 	}
 
-	released, err = directory.ReapStrandedLeases(ctx, 16)
+	reap, err = directory.ReapStrandedLeases(ctx, 16)
 	if err != nil {
 		t.Fatalf("third ReapStrandedLeases() error = %v", err)
 	}
-	if released != 0 {
-		t.Fatalf("third released = %d, want 0 on a drained directory", released)
+	if reap.Released != 0 {
+		t.Fatalf("third released = %d, want 0 on a drained directory", reap.Released)
 	}
 	for i := 0; i < runnerCount; i++ {
 		assertStrandedReapLeftLeaseCount(t, server, directory, "runner-bounded-"+strconv.Itoa(i), "0")
