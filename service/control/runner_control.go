@@ -102,6 +102,22 @@ type RunnerControlDirectory interface {
 	RunnerControl(ctx context.Context, runnerID string) (RunnerControlSnapshot, bool, error)
 }
 
+// RunnerControlState is the minimal control projection consumed by recurring
+// protocol paths. It is exactly the fields a runner acts on, without the
+// fleet-wide debt aggregate that a management snapshot carries.
+type RunnerControlState struct {
+	DesiredState RunnerDesiredState
+	Generation   uint64
+}
+
+// RunnerControlStateDirectory is the optional lightweight read for the control
+// projection. A directory that implements it lets the poll and register paths
+// avoid aggregating handoff and deactivation debt they never consume; callers
+// that need debt or drain detail must still use RunnerControlDirectory.
+type RunnerControlStateDirectory interface {
+	RunnerControlState(ctx context.Context, runnerID string) (RunnerControlState, bool, error)
+}
+
 type runnerControlReceipt struct {
 	RequestHash string
 	Snapshot    RunnerControlSnapshot

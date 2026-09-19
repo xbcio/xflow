@@ -219,6 +219,20 @@ func (d *runnerControlMetricsDirectory) RunnerControl(ctx context.Context, runne
 	return d.control.RunnerControl(ctx, runnerID)
 }
 
+// RunnerControlState forwards the lightweight projection so wrapping a directory
+// does not silently push recurring callers back onto the debt-aggregating read.
+func (d *runnerControlMetricsDirectory) RunnerControlState(ctx context.Context, runnerID string) (RunnerControlState, bool, error) {
+	states, ok := d.control.(RunnerControlStateDirectory)
+	if !ok || states == nil {
+		snapshot, found, err := d.control.RunnerControl(ctx, runnerID)
+		if err != nil || !found {
+			return RunnerControlState{}, found, err
+		}
+		return RunnerControlState{DesiredState: snapshot.DesiredState, Generation: snapshot.Generation}, true, nil
+	}
+	return states.RunnerControlState(ctx, runnerID)
+}
+
 func runnerControlMetricAction(req RunnerControlRequest) string {
 	switch req.DesiredState {
 	case RunnerDesiredStateDraining:

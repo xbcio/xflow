@@ -90,10 +90,51 @@ func (d *RedisRunnerDirectory) RunnerControl(ctx context.Context, runnerID strin
 	return d.redisCurrentControl(ctx, runnerID)
 }
 
+// RunnerControlState reads only the scalar control projection. Unlike
+// RunnerControl it does not aggregate the handoff and deactivation ledgers,
+// which are keyed by claim/obligation across the whole fleet and are not
+// consumed by the poll or register paths that call this.
+func (d *RedisRunnerDirectory) RunnerControlState(ctx context.Context, runnerID string) (RunnerControlState, bool, error) {
+	pipe := d.rdb.Pipeline()
+	session := pipe.HGet(ctx, d.keys.runnerSession, runnerID)
+	desired := pipe.HGet(ctx, d.keys.runnerControlDesired, runnerID)
+	generation := pipe.HGet(ctx, d.keys.runnerControlGeneration, runnerID)
+	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+		return RunnerControlState{}, false, fmt.Errorf("read runner control state: %w", err)
+	}
+	if session.Val() == "" {
+		return RunnerControlState{}, false, nil
+	}
+	state, err := decodeRunnerControlState(desired.Val(), generation.Val())
+	if err != nil {
+		return RunnerControlState{}, false, err
+	}
+	return state, true, nil
+}
+
+func decodeRunnerControlState(desiredRaw, generationRaw string) (RunnerControlState, error) {
+	desired := RunnerDesiredState(desiredRaw)
+	if desired == "" {
+		desired = RunnerDesiredStateActive
+	}
+	if desired != RunnerDesiredStateActive && desired != RunnerDesiredStateDraining {
+		return RunnerControlState{}, fmt.Errorf("decode runner control desired state %q", desired)
+	}
+	if generationRaw == "" {
+		generationRaw = "0"
+	}
+	generation, err := strconv.ParseUint(generationRaw, 10, 64)
+	if err != nil {
+		return RunnerControlState{}, fmt.Errorf("decode runner control generation: %w", err)
+	}
+	return RunnerControlState{DesiredState: desired, Generation: generation}, nil
+}
+
 func (d *RedisRunnerDirectory) redisCurrentControl(ctx context.Context, runnerID string) (RunnerControlSnapshot, bool, error) {
-	// A single pipeline is a diagnostic projection, not a transition. The
-	// handoff ledger itself is written atomically by the claim/finalize Lua
-	// scripts; aggregating it here keeps management reads off the hot path.
+	// A single pipeline, but NOT a cheap one: the four HGetAll calls below read
+	// the fleet-wide handoff and deactivation ledgers in full. That aggregation is
+	// correct for a management snapshot and is why the recurring poll/register
+	// paths must use RunnerControlState instead of this method.
 	pipe := d.rdb.Pipeline()
 	session := pipe.HGet(ctx, d.keys.runnerSession, runnerID)
 	desired := pipe.HGet(ctx, d.keys.runnerControlDesired, runnerID)

@@ -892,6 +892,22 @@ func (d *MemoryRunnerDirectory) RunnerControl(_ context.Context, runnerID string
 	return *d.controlSnapshotLocked(runnerID, state), true, nil
 }
 
+// RunnerControlState is the lightweight sibling of RunnerControl: it reports the
+// scalar desired state without building the debt-bearing snapshot.
+func (d *MemoryRunnerDirectory) RunnerControlState(_ context.Context, runnerID string) (RunnerControlState, bool, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.runners[runnerID] == nil {
+		return RunnerControlState{}, false, nil
+	}
+	control := d.controls[runnerID]
+	if control == nil {
+		initial := activeRunnerControl()
+		control = &initial
+	}
+	return RunnerControlState{DesiredState: control.desired, Generation: control.generation}, true, nil
+}
+
 func (d *MemoryRunnerDirectory) controlSnapshotLocked(runnerID string, state *memoryRunnerState) *RunnerControlSnapshot {
 	control := d.controls[runnerID]
 	if control == nil {
