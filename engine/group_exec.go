@@ -170,7 +170,9 @@ func (e *Engine) commitGroup(ctx context.Context, g *graph.Graph, lease *GroupLe
 		return nil
 	}
 	if flush {
-		return e.FlushOutbox(ctx, lease.ExecutionID)
+		if err := e.FlushOutbox(ctx, lease.ExecutionID); err != nil {
+			return fmt.Errorf("%w: %w", errGroupCommitFlushPending, err)
+		}
 	}
 	return nil
 }

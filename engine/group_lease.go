@@ -41,6 +41,14 @@ var ErrGroupLeaseAlreadyActive = errors.New("group lease already active")
 // drop it" rather than propagating it as a server error.
 var ErrGroupLeaseNotActive = errors.New("group lease not active")
 
+// errGroupCommitFlushPending marks a group commit whose state transition was
+// applied but whose downstream outbox could not be delivered. It exists so
+// CommitGroupResult can report the commit's true classification (Accepted)
+// alongside the delivery failure: the caller in service/control releases the
+// runner's leased capacity on that classification, and an unclassified error
+// leaked the capacity instead.
+var errGroupCommitFlushPending = errors.New("group commit applied but outbox flush pending")
+
 // BuildGroupLease assembles a group lease for a queued group task. Unlike
 // BuildTaskLease, the lease payload carries the full SubgraphPackage and entry
 // input, and TaskLease.Input is nil (the group payload is authoritative).
@@ -323,6 +331,13 @@ func (e *Engine) CommitGroupResult(ctx context.Context, lease *TaskLease, res Gr
 
 	err = e.commitGroup(ctx, g, groupLease, gm, exits, fatal, groupResultError(res), true)
 	if err != nil {
+		// The group's state transition already applied; only the downstream
+		// delivery failed. Keep the classification so the caller releases the
+		// runner's leased capacity — reporting an empty outcome released
+		// nothing and the assignment held capacity indefinitely.
+		if errors.Is(err, errGroupCommitFlushPending) {
+			return CommitOutcomeAccepted, err
+		}
 		return "", err
 	}
 	return CommitOutcomeAccepted, nil

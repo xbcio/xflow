@@ -317,8 +317,19 @@ func (e *Engine) commitAcyclicFailure(ctx context.Context, lease *TaskLease, pri
 func (e *Engine) finishAtomicCommit(ctx context.Context, req CommitNodeRequest, result CommitNodeResult) (CommitOutcome, error) {
 	switch result.Outcome {
 	case CommitOutcomeAccepted, CommitOutcomeDuplicateTerminal:
+		// A delivery failure here is reported alongside the outcome the commit
+		// itself earned, not as CommitOutcomeTransientError. The state
+		// transition already applied — that is what makes the outcome one of
+		// these two — and TransientError means "storage or scheduling failed
+		// before classification completed" (types.go). Downgrading conflated
+		// "the commit did not happen" with "the commit happened and its
+		// delivery did not", and the caller that releases the runner's leased
+		// capacity (service/control) keys off exactly that distinction: a
+		// transient_error never releases, so an applied commit whose outbox
+		// flush failed held its capacity until the runner's own retry
+		// succeeded, or forever once its lease index expired.
 		if err := e.afterAtomicCommit(ctx, req, result); err != nil {
-			return CommitOutcomeTransientError, fmt.Errorf("deliver atomic commit outbox for %q/%q: %w", req.ExecutionID, req.NodeName, err)
+			return result.Outcome, fmt.Errorf("deliver atomic commit outbox for %q/%q: %w", req.ExecutionID, req.NodeName, err)
 		}
 		return result.Outcome, nil
 	case CommitOutcomeStaleToken:

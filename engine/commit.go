@@ -363,9 +363,13 @@ func (e *Engine) commitLegacyNodeWithClassification(ctx context.Context, lease *
 			return CommitOutcomeAccepted, nil
 		}
 		// Downstream intents are durably persisted; deliver them now. A crash
-		// before this flush is recovered by the outbox dispatcher.
+		// before this flush is recovered by the outbox dispatcher. A failed
+		// flush keeps the commit's own classification: the terminal write
+		// applied, so the caller must still release the runner's capacity for
+		// it. Returning CommitOutcomeTransientError here told the caller the
+		// commit had not happened, and the capacity was never released.
 		if err := e.FlushOutbox(ctx, task.ExecutionID); err != nil {
-			return CommitOutcomeTransientError, err
+			return CommitOutcomeAccepted, err
 		}
 		return CommitOutcomeAccepted, nil
 	case CommitOutcomeDuplicateTerminal:
@@ -373,8 +377,11 @@ func (e *Engine) commitLegacyNodeWithClassification(ctx context.Context, lease *
 		// have crashed before delivering its downstream intents. Replay the
 		// outbox so those intents are not stranded (fixes the retry-does-not-
 		// re-enqueue gap in #7). FlushOutbox is a no-op when nothing is pending.
+		// As above, a failed replay does not un-terminate the node, so the
+		// duplicate classification — and the capacity release it earns —
+		// survives the error.
 		if err := e.FlushOutbox(ctx, task.ExecutionID); err != nil {
-			return CommitOutcomeTransientError, err
+			return CommitOutcomeDuplicateTerminal, err
 		}
 		return CommitOutcomeDuplicateTerminal, nil
 	case CommitOutcomeStaleToken:
@@ -426,10 +433,14 @@ func (e *Engine) commitSuspendedTaskResult(ctx context.Context, lease *TaskLease
 	if !committed {
 		return CommitOutcomeStaleToken, ErrInvalidLeaseToken
 	}
-	if err := e.FlushOutbox(ctx, lease.Task.ExecutionID); err != nil {
-		return CommitOutcomeTransientError, fmt.Errorf("deliver suspend continuation for %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
-	}
+	// The suspend is durable at this point, so the notification is emitted
+	// before delivery, matching the atomic path's ordering (hooks, then flush).
+	// A failed flush below therefore still reports an accepted suspend rather
+	// than withholding both the notification and the classification.
 	e.notifyNodeSuspended(ctx, &lease.Task)
+	if err := e.FlushOutbox(ctx, lease.Task.ExecutionID); err != nil {
+		return CommitOutcomeAccepted, fmt.Errorf("deliver suspend continuation for %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
+	}
 	return CommitOutcomeAccepted, nil
 }
 
