@@ -256,6 +256,7 @@ func (s *Store) SuspendTaskLeaseWithOutbox(ctx context.Context, lease *engine.Ta
 	if result != 1 {
 		return false, nil
 	}
+	s.markOutboxReadyIndex(ctx, t, lease.Task.ExecutionID)
 	if err := s.refreshTransientTTL(ctx, lease.Task.ExecutionID, keys...); err != nil {
 		return false, err
 	}

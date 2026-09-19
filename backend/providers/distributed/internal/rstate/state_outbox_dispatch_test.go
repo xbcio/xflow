@@ -96,8 +96,8 @@ func TestOutboxMetricsReportsDueWorkSeparatelyFromPending(t *testing.T) {
 }
 
 // TestOutboxDiscoveryCostTracksTheKeyspaceNotTheBacklog is the honest guard on
-// this store's discovery path, and it pins a KNOWN LIMITATION rather than a
-// property anyone should be pleased with.
+// this store's FALLBACK discovery path, and it pins a KNOWN LIMITATION rather
+// than a property anyone should be pleased with.
 //
 // Discovery walks the keyspace with SCAN and filters by pattern, so the keys it
 // examines per call is the page, not the matches. A backlog of B ready
@@ -107,19 +107,25 @@ func TestOutboxMetricsReportsDueWorkSeparatelyFromPending(t *testing.T) {
 // measured dispatch ceiling — the integration reached only a fifth of the work
 // it created, and the outbox backlog grew even though delivery was healthy.
 //
+// This path is now the fallback rather than the only mechanism: the readiness
+// index answers discovery in one ZRANGEBYSCORE, and the sweep exists to bound
+// how long a registration the index missed can stay invisible. The index is
+// therefore switched OFF here, which is both how the fallback is exercised
+// deliberately and a faithful model of the deployments that have no index at
+// all — see TestOutboxReadyIndexDiscoveryDoesNotTrackTheKeyspace for the same
+// measurement with the accelerator in place.
+//
 // What the test asserts is therefore two things. First, the defect is real and
 // measurable here: adding noise keys multiplies the discovery calls needed at a
 // fixed page. Second, the page is an effective lever: sized to the keyspace,
 // the same backlog is discovered in ONE call with no noise sensitivity at all,
 // which is why the dispatcher's page is host-configurable.
 //
-// The lasting fix is to discover ready executions from an index instead of from
-// the keyspace. The key layout cannot carry one: every outbox mutation is a Lua
-// script over keys that share the execution's {id} hash tag, and Redis Cluster
-// refuses a script that touches a key outside that slot, so a namespace-global
-// ready index cannot be written in the same atomic transition as the entry it
-// indexes. If a correct index does land, this test is where the keyspace
-// dependency it removes is pinned.
+// A correct index cannot be written atomically with the entry it indexes: every
+// outbox mutation is a Lua script over keys that share the execution's {id}
+// hash tag, and Redis Cluster refuses a script that touches a key outside that
+// slot. The index is therefore a best-effort accelerator, and this sweep is
+// what bounds its staleness.
 func TestOutboxDiscoveryCostTracksTheKeyspaceNotTheBacklog(t *testing.T) {
 	const backlog = 24
 	const noise = 4000
@@ -130,6 +136,7 @@ func TestOutboxDiscoveryCostTracksTheKeyspaceNotTheBacklog(t *testing.T) {
 		available[types.ExecutionID(fmt.Sprintf("exec-discovery-%03d", i))] = time.Time{}
 	}
 	state, rdb := newOutboxMetricsTestStore(t, available)
+	state.ConfigureOutboxReadyIndex(false)
 	ctx := namespace.WithNamespace(context.Background(), namespace.Default)
 
 	hook := &keyspaceScanHook{}
@@ -163,6 +170,7 @@ func TestOutboxDiscoveryCostTracksTheKeyspaceNotTheBacklog(t *testing.T) {
 		t.Fatal(err)
 	}
 	state, rdb = newOutboxMetricsTestStore(t, available)
+	state.ConfigureOutboxReadyIndex(false)
 	rdb.AddHook(hook)
 	for i := 0; i < noise; i++ {
 		if err := rdb.Set(ctx, fmt.Sprintf("%s%05d", noiseKeyPrefix, i), "x", time.Hour).Err(); err != nil {
@@ -277,6 +285,15 @@ func (h *keyspaceScanHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook
 
 func (h *keyspaceScanHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
 	return next
+}
+
+// scanCount reports how many SCAN commands have been issued through this hook,
+// which is how a test asserts that a discovery path ran NO keyspace scan at all
+// rather than a cheaper one.
+func (h *keyspaceScanHook) scanCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.scan
 }
 
 // allKeys lists the store's whole keyspace, sorted, which is the order SCAN

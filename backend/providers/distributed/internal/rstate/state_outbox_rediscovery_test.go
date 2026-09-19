@@ -67,6 +67,10 @@ func TestOutboxDiscoveryWrapRediscoveryIsIdempotent(t *testing.T) {
 	state, hook := newOutboxDiscoveryTestStore(t, map[namespace.Namespace][]types.ExecutionID{
 		namespace.Default: ids,
 	})
+	// The wrap this test is about is the sweep's cursor. With the readiness
+	// index on, discovery is answered by one ZRANGEBYSCORE and there is no
+	// cursor to wrap, so the index is switched off to exercise the fallback.
+	state.ConfigureOutboxReadyIndex(false)
 	ctx := namespace.WithNamespace(context.Background(), namespace.Default)
 
 	// One id per page: with two keys the scan reaches the end of the keyspace,

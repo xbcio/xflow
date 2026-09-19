@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -50,9 +51,27 @@ type Store struct {
 	// way leaseRepairCursors do: one node-local cursor per Redis master and
 	// namespace, so a resumed scan neither reuses a cursor across masters nor
 	// lets one namespace's backlog starve another's discovery. The mutex keeps
-	// two dispatchers sharing a Store from re-walking the same Redis pages.
+	// two dispatchers sharing a Store from re-walking the same Redis pages; it
+	// also guards outboxDiscoveryCalls below.
 	outboxDiscoveryMu      sync.Mutex
 	outboxDiscoveryCursors map[namespace.Namespace]redisx.Cursors
+	// outboxDiscoveryCalls counts discovery calls, which is how the keyspace
+	// sweep is throttled once the readiness index has proven it carries work.
+	outboxDiscoveryCalls uint64
+
+	// outboxIndexOn switches the best-effort readiness index off entirely.
+	// outboxIndexProven records that the index has been observed carrying work
+	// in this process, which is the only state in which the sweep may be
+	// throttled. Both are written from producer goroutines, hence atomics. See
+	// state_outbox_index.go for the contract they belong to.
+	outboxIndexOn     atomic.Bool
+	outboxIndexProven atomic.Bool
+	// outboxIndexLogMu guards outboxIndexLastLog, which rate-limits the
+	// best-effort index-failure log. The refresh runs on the outbox hot path, so
+	// a Redis outage would otherwise turn one failure per transition into a log
+	// storm on top of the outage.
+	outboxIndexLogMu   sync.Mutex
+	outboxIndexLastLog time.Time
 
 	// Audit-trail observability — Redis is system-of-record; the store/sqlstore
 	// audit trail is best-effort. auditWrite routes failures through these
@@ -88,6 +107,11 @@ func New(rdb redis.UniversalClient, db store.Store, execTTL time.Duration) *Stor
 		auditCounters:          &auditCounters{},
 		cursorKey:              newCursorSigningKey(),
 	}
+	// The readiness index is on by default because it is a pure accelerator:
+	// with it the drain discovers ready work in time proportional to the
+	// backlog, without it every discovery call sweeps the keyspace exactly as
+	// it did before. See state_outbox_index.go.
+	s.outboxIndexOn.Store(true)
 	// The default namespace is registered lazily on the first durable execution
 	// create, and listNamespaces also defensively includes the default namespace, so
 	// single-namespace deployments work without any eager SADD. Transient

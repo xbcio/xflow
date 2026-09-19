@@ -204,6 +204,11 @@ func (s *Store) ReplayDeadLetter(ctx context.Context, req engine.ReplayDeadLette
 		return engine.ReplayDeadLetterResult{}, fmt.Errorf("replay dead letter %q/%q: unexpected result %v", req.ExecutionID, req.EntryID, result)
 	}
 	outcome := replayOutcomeFromInt(redisResultInt(result[0]))
+	if outcome == engine.ReplayReplayed {
+		// A replay moves an entry out of the dead-letter index and back into the
+		// ready set, so it is the transition that makes this execution ready.
+		s.markOutboxReadyIndex(ctx, t, req.ExecutionID)
+	}
 	return engine.ReplayDeadLetterResult{
 		Outcome:      outcome,
 		AuditID:      redisResultString(result[1]),

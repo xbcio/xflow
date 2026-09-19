@@ -89,6 +89,7 @@ type config struct {
 	queueObserver          queue.Observer
 	redisConfig            *RedisConfig
 	outboxDiscoveryPage    int
+	outboxReadyIndex       bool
 }
 
 // WithConcurrency sets the number of task consumer goroutines. Default is 10.
@@ -190,11 +191,32 @@ func WithStateLogger(l engine.Logger) Option {
 // total keys. A deployment whose keyspace has outgrown the default discovers
 // ready work more slowly than it creates it, and the outbox backlog then grows
 // even though delivery itself is healthy. See engine.WithOutboxDiscoveryPage.
+//
+// Since the store can answer discovery from its readiness index, this page now
+// bounds the throttled SWEEP that backstops a missed registration rather than
+// the whole discovery path — see WithOutboxReadyIndex. It is still the ceiling
+// for a backend that has no index, and still the bound on how long a
+// registration the index missed can stay invisible.
 func WithOutboxDiscoveryPage(page int) Option {
 	return func(c *config) {
 		if page > 0 {
 			c.outboxDiscoveryPage = page
 		}
+	}
+}
+
+// WithOutboxReadyIndex enables or disables the store's best-effort outbox
+// readiness index. It is enabled by default.
+//
+// The index is an accelerator, not part of the state machine: discovery reads
+// it in time proportional to the ready backlog instead of walking the keyspace,
+// and a registration it misses is still found by the keyspace sweep. Disabling
+// it restores scanning-based discovery exactly — it costs throughput, never
+// delivery. See rstate's state_outbox_index.go for the whole contract, and
+// WithOutboxDiscoveryPage for the page that bounds the sweep either way.
+func WithOutboxReadyIndex(enabled bool) Option {
+	return func(c *config) {
+		c.outboxReadyIndex = enabled
 	}
 }
 
@@ -330,7 +352,7 @@ var _ backend.StartBinder = (*Backend)(nil)
 // db may be nil for pure-Redis mode (no MySQL persistence).
 // Call Bind(eng) after creating the engine to start queue consumers.
 func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
-	cfg := &config{concurrency: 10, execTTL: rstate.DefaultExecTTL, consumer: true}
+	cfg := &config{concurrency: 10, execTTL: rstate.DefaultExecTTL, consumer: true, outboxReadyIndex: true}
 	for _, o := range opts {
 		o(cfg)
 	}
@@ -359,6 +381,7 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 	state.SetLeaseObserver(cfg.leaseObserver)
 	state.SetLogger(cfg.logger)
 	state.ConfigureTransient(cfg.transient, cfg.transientTTL, cfg.transientCompletionTTL)
+	state.ConfigureOutboxReadyIndex(cfg.outboxReadyIndex)
 
 	// Default to the Asynq transport; WithTransport can inject an alternative.
 	// If a RedisConfig was injected, map it to the corresponding asynq HA
