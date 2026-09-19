@@ -304,3 +304,52 @@ func TestCompletionShorteningDoesNotDropTheMarkerFirst(t *testing.T) {
 			"lifetime a late commit can give the node keys")
 	}
 }
+
+// TestTransientGraphGetsAMarkerWithoutAContextHint pins the asymmetry that
+// produced node rows with no matching execution row.
+//
+// Entry admission decides transience from the GRAPH (its comment: "The graph is
+// the source of truth here, not a context hint", because a trigger group's
+// admission passes through neither Submit nor Invoke and so has no hint on its
+// context). createExecution, given the same transient graph, looked only for a
+// context hint and therefore wrote no marker at all.
+//
+// The two paths then disagreed about the same execution: admission skipped the
+// execution row because it knew the graph was transient, while every later node
+// commit asked isTransient, found no marker, answered "durable", and projected
+// the node -- which is exactly the observed shape (xflow_nodes > 0 with
+// xflow_executions = 0), and the reason transient traffic could reach SQL.
+func TestTransientGraphGetsAMarkerWithoutAContextHint(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer func() { _ = rdb.Close() }()
+
+	state := New(rdb, nil, time.Hour)
+	state.transient = false
+
+	// Deliberately NO engine.WithExecutionTransient: this is the trigger-group
+	// shape, where only the graph carries the decision.
+	ctx := context.Background()
+	id := types.ExecutionID("exec-graph-only-transient")
+	tg := testTransientGraph()
+	if err := state.CreateExecution(ctx, &engine.ExecutionSnapshot{
+		ID:     id,
+		Status: types.ExecutionStatusRunning,
+		Graph:  tg,
+	}); err != nil {
+		t.Fatalf("CreateExecution: %v", err)
+	}
+
+	if !state.isTransient(ctx, id) {
+		t.Fatal("a graph declaring itself transient produced no transient marker " +
+			"when created without a context hint; every later node commit will " +
+			"read \"durable\" and project this execution's output into SQL")
+	}
+	if !mr.Exists(transientMarkKey(namespace.FromContext(ctx), id)) {
+		t.Fatal("no transient marker in Redis for a transient graph")
+	}
+}

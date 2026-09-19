@@ -41,6 +41,26 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 	// This must be checked before the global transient fallback so a per-workflow
 	// transient execution gets the correct TTL even when the global mode is off.
 	hint, perExecTransient := engine.ExecutionTransientFromContext(ctx)
+	if !perExecTransient && e.Graph != nil && e.Graph.Transient() {
+		// The graph is the source of truth for transience, exactly as it is on
+		// the entry-admission path -- that path's own comment makes the argument
+		// ("The graph is the source of truth here, not a context hint"), because
+		// a Kafka trigger group's admission goes through neither Submit nor
+		// Invoke and therefore carries no hint on its context.
+		//
+		// Relying on the hint alone left the two paths disagreeing about the
+		// same execution: admission skipped the execution row because it read
+		// the graph, while createExecution wrote no marker, so every later node
+		// commit asked isTransient, found nothing, answered "durable" and
+		// projected. That is the observed shape -- xflow_nodes rows with no
+		// matching xflow_executions row -- and how transient traffic reached
+		// SQL (xflow_nodes.output carries it by construction).
+		perExecTransient = true
+		hint = engine.TransientHint{
+			TTL:           e.Graph.TransientTTL(),
+			CompletionTTL: e.Graph.TransientCompletionTTL(),
+		}
+	}
 	if perExecTransient {
 		if hint.TTL > 0 {
 			ttl = hint.TTL
