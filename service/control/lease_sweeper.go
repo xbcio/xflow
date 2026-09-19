@@ -69,6 +69,7 @@ type LeaseSweeper struct {
 	log            engine.Logger
 	observer       SweepObserver
 	timingObserver SweepTimingObserver
+	passObserver   SweepPassObserver
 	elector        backend.LeaderElector
 	clock          func() time.Time
 	sleepFunc      func(context.Context, time.Duration) error
@@ -110,6 +111,45 @@ type SweepTimingObserver interface {
 	OnSweepListExpired(ctx context.Context, candidates int, elapsed time.Duration, err error)
 	OnSweepReclaimResult(ctx context.Context, result string, elapsed time.Duration)
 	OnSweepRepair(ctx context.Context, reconciled int, elapsed time.Duration, err error)
+}
+
+// Maintenance passes reported to a SweepPassObserver. The values are metric
+// label values, so they are part of the observable surface.
+const (
+	SweepPassRepair               = "repair"
+	SweepPassLegacyLeaseMeta      = "legacy_lease_meta"
+	SweepPassStrandedLease        = "stranded_lease"
+	SweepPassDeadQueuedAssignment = "dead_queued_assignment"
+)
+
+// Outcomes a maintenance pass reports.
+//
+// Exactly one outcome means the pass did the work: SweepPassOutcomeRan. It is
+// emitted whether or not anything was released, so "ran and released 0" is a
+// positive observation rather than an absence. Every other outcome names WHY
+// the pass did not run — the gate that stopped it — which is what separates it
+// from a pass whose loop never reached the call at all (no series, no event).
+const (
+	SweepPassOutcomeRan              = "ran"
+	SweepPassOutcomeError            = "error"
+	SweepPassOutcomeSkippedNotLeader = "skipped_not_leader"
+	SweepPassOutcomeSkippedCadence   = "skipped_cadence"
+	SweepPassOutcomeUnsupported      = "unsupported"
+)
+
+// SweepPassObserver is an optional extension implemented by observability
+// adapters that need every state-mutating maintenance pass accounted for.
+// LeaseSweeper discovers it from LeaseSweeperConfig.Observer the same way it
+// discovers SweepTimingObserver, so the backwards-compatible SweepObserver
+// contract is unchanged.
+//
+// It exists because these passes have no other signal: each reports through an
+// optional logger, so a host that injects none sees nothing at all, and the
+// passes are gated twice (leadership and cadence), so a silent pass could mean
+// "released nothing", "not the leader", "not due yet" or "never reached". A
+// real investigation of clustered 409s could not tell those apart.
+type SweepPassObserver interface {
+	OnSweepPass(ctx context.Context, pass, outcome string, released int)
 }
 
 // LeaseSweeperConfig configures a sweeper.
@@ -194,6 +234,10 @@ func NewLeaseSweeper(state LeaseLister, eng execution.Engine, cfg LeaseSweeperCo
 	if observer, ok := cfg.Observer.(SweepTimingObserver); ok {
 		timingObserver = observer
 	}
+	var passObserver SweepPassObserver
+	if observer, ok := cfg.Observer.(SweepPassObserver); ok {
+		passObserver = observer
+	}
 	return &LeaseSweeper{
 		state:            state,
 		engine:           eng,
@@ -203,6 +247,7 @@ func NewLeaseSweeper(state LeaseLister, eng execution.Engine, cfg LeaseSweeperCo
 		log:              cfg.Logger,
 		observer:         cfg.Observer,
 		timingObserver:   timingObserver,
+		passObserver:     passObserver,
 		elector:          cfg.Elector,
 		clock:            func() time.Time { return time.Now().UTC() },
 		sleepFunc:        sleepWithContext,
@@ -253,10 +298,12 @@ func (s *LeaseSweeper) Run(ctx context.Context) {
 // when the runner did. See StrandedLeaseReaper for the reachability argument.
 func (s *LeaseSweeper) ReapStrandedLeasesOnce(ctx context.Context) int {
 	if s.elector != nil && !s.elector.IsLeader() {
+		s.observePass(ctx, SweepPassStrandedLease, SweepPassOutcomeSkippedNotLeader, 0)
 		return 0
 	}
 	reaper, ok := s.directory.(StrandedLeaseReaper)
 	if !ok {
+		s.observePass(ctx, SweepPassStrandedLease, SweepPassOutcomeUnsupported, 0)
 		return 0
 	}
 
@@ -264,6 +311,7 @@ func (s *LeaseSweeper) ReapStrandedLeasesOnce(ctx context.Context) int {
 	s.strandedMu.Lock()
 	if !s.lastStranded.IsZero() && now.Sub(s.lastStranded) < s.strandedPeriod {
 		s.strandedMu.Unlock()
+		s.observePass(ctx, SweepPassStrandedLease, SweepPassOutcomeSkippedCadence, 0)
 		return 0
 	}
 	s.lastStranded = now
@@ -276,11 +324,13 @@ func (s *LeaseSweeper) ReapStrandedLeasesOnce(ctx context.Context) int {
 		if s.log != nil {
 			s.log.Error("reap stranded directory leases", "err", err)
 		}
+		s.observePass(ctx, SweepPassStrandedLease, SweepPassOutcomeError, released)
 		return 0
 	}
 	if released > 0 && s.log != nil {
 		s.log.Info("reaped stranded directory leases", "released", released)
 	}
+	s.observePass(ctx, SweepPassStrandedLease, SweepPassOutcomeRan, released)
 	return released
 }
 
@@ -300,10 +350,12 @@ func (s *LeaseSweeper) ReapStrandedLeasesOnce(ctx context.Context) int {
 // argument.
 func (s *LeaseSweeper) ReapDeadQueuedAssignmentsOnce(ctx context.Context) int {
 	if s.elector != nil && !s.elector.IsLeader() {
+		s.observePass(ctx, SweepPassDeadQueuedAssignment, SweepPassOutcomeSkippedNotLeader, 0)
 		return 0
 	}
 	reaper, ok := s.directory.(DeadQueuedAssignmentReaper)
 	if !ok {
+		s.observePass(ctx, SweepPassDeadQueuedAssignment, SweepPassOutcomeUnsupported, 0)
 		return 0
 	}
 
@@ -311,6 +363,7 @@ func (s *LeaseSweeper) ReapDeadQueuedAssignmentsOnce(ctx context.Context) int {
 	s.deadQueuedMu.Lock()
 	if !s.lastDeadQueued.IsZero() && now.Sub(s.lastDeadQueued) < s.deadQueuedPeriod {
 		s.deadQueuedMu.Unlock()
+		s.observePass(ctx, SweepPassDeadQueuedAssignment, SweepPassOutcomeSkippedCadence, 0)
 		return 0
 	}
 	s.lastDeadQueued = now
@@ -323,11 +376,13 @@ func (s *LeaseSweeper) ReapDeadQueuedAssignmentsOnce(ctx context.Context) int {
 		if s.log != nil {
 			s.log.Error("reap dead queued assignments", "err", err)
 		}
+		s.observePass(ctx, SweepPassDeadQueuedAssignment, SweepPassOutcomeError, reclaimed)
 		return 0
 	}
 	if reclaimed > 0 && s.log != nil {
 		s.log.Info("reaped dead queued assignments", "reclaimed", reclaimed)
 	}
+	s.observePass(ctx, SweepPassDeadQueuedAssignment, SweepPassOutcomeRan, reclaimed)
 	return reclaimed
 }
 
@@ -346,10 +401,12 @@ func (s *LeaseSweeper) ReapDeadQueuedAssignmentsOnce(ctx context.Context) int {
 // there is no window in which this must be disabled.
 func (s *LeaseSweeper) ReapLegacyLeaseMetaOnce(ctx context.Context) int {
 	if s.elector != nil && !s.elector.IsLeader() {
+		s.observePass(ctx, SweepPassLegacyLeaseMeta, SweepPassOutcomeSkippedNotLeader, 0)
 		return 0
 	}
 	reaper, ok := s.directory.(LegacyLeaseMetaReaper)
 	if !ok {
+		s.observePass(ctx, SweepPassLegacyLeaseMeta, SweepPassOutcomeUnsupported, 0)
 		return 0
 	}
 
@@ -357,6 +414,7 @@ func (s *LeaseSweeper) ReapLegacyLeaseMetaOnce(ctx context.Context) int {
 	s.reapMu.Lock()
 	if !s.lastReap.IsZero() && now.Sub(s.lastReap) < s.reapPeriod {
 		s.reapMu.Unlock()
+		s.observePass(ctx, SweepPassLegacyLeaseMeta, SweepPassOutcomeSkippedCadence, 0)
 		return 0
 	}
 	s.lastReap = now
@@ -369,11 +427,13 @@ func (s *LeaseSweeper) ReapLegacyLeaseMetaOnce(ctx context.Context) int {
 		if s.log != nil {
 			s.log.Error("reap orphaned legacy assignment lease metadata", "err", err)
 		}
+		s.observePass(ctx, SweepPassLegacyLeaseMeta, SweepPassOutcomeError, reaped)
 		return 0
 	}
 	if reaped > 0 && s.log != nil {
 		s.log.Info("reaped orphaned legacy assignment lease metadata", "reaped", reaped)
 	}
+	s.observePass(ctx, SweepPassLegacyLeaseMeta, SweepPassOutcomeRan, reaped)
 	return reaped
 }
 
@@ -382,10 +442,12 @@ func (s *LeaseSweeper) ReapLegacyLeaseMetaOnce(ctx context.Context) int {
 // maintenance work rather than part of normal per-lease execution.
 func (s *LeaseSweeper) RepairOnce(ctx context.Context) int {
 	if s.elector != nil && !s.elector.IsLeader() {
+		s.observePass(ctx, SweepPassRepair, SweepPassOutcomeSkippedNotLeader, 0)
 		return 0
 	}
 	repairer, ok := s.state.(LeaseIndexRepairer)
 	if !ok {
+		s.observePass(ctx, SweepPassRepair, SweepPassOutcomeUnsupported, 0)
 		return 0
 	}
 
@@ -393,6 +455,7 @@ func (s *LeaseSweeper) RepairOnce(ctx context.Context) int {
 	s.repairMu.Lock()
 	if !s.lastRepair.IsZero() && now.Sub(s.lastRepair) < s.repairPeriod {
 		s.repairMu.Unlock()
+		s.observePass(ctx, SweepPassRepair, SweepPassOutcomeSkippedCadence, 0)
 		return 0
 	}
 	s.lastRepair = now
@@ -407,8 +470,10 @@ func (s *LeaseSweeper) RepairOnce(ctx context.Context) int {
 		s.log.Error("repair lease expiry index", "err", err)
 	}
 	if err != nil {
+		s.observePass(ctx, SweepPassRepair, SweepPassOutcomeError, reconciled)
 		return 0
 	}
+	s.observePass(ctx, SweepPassRepair, SweepPassOutcomeRan, reconciled)
 	return reconciled
 }
 
@@ -611,6 +676,17 @@ func (s *LeaseSweeper) observeTiming(fn func(SweepTimingObserver)) {
 	}
 	defer func() { _ = recover() }()
 	fn(s.timingObserver)
+}
+
+// observePass reports one maintenance pass call. released is whatever the pass
+// measured before returning — including a partial count on an error, which is
+// still work that happened.
+func (s *LeaseSweeper) observePass(ctx context.Context, pass, outcome string, released int) {
+	if s.passObserver == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	s.passObserver.OnSweepPass(ctx, pass, outcome, released)
 }
 
 // sleepWithContext sleeps for d or returns when ctx is canceled. The error
