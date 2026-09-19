@@ -138,6 +138,35 @@ type EntrySeedResponse struct {
 	ExecutionID ExecutionID
 }
 
+// EntrySeedObserver receives one observation per entry-seed admission attempt:
+// its outcome and how long the control-plane round trip took. Implementations
+// must be non-blocking and must not affect admission.
+//
+// It exists so an admission that FAILS is visible to the integrator, not only
+// to the runner's logger. The deadline on this path is a window the runner
+// applies, and the batch each admission carries is the integrator's choice, so
+// an admission that starts timing out is the signal that the batch size is out
+// of bounds — a signal that otherwise reaches only a throttled log line on one
+// runner.
+//
+// One method, not a counter call plus a duration call: one attempt must always
+// produce exactly one of each, so the count and the duration distribution can
+// never disagree about how many attempts happened. That is the same shape
+// engine.GroupObserver.OnGroupAdmission uses for the group admission path.
+//
+// The contract lives here rather than in service/protocol because the package
+// that consumes it (observability/metrics) must not import service/ — see
+// AGENTS.md's lower-layer prohibition. types is the dependency-free contract
+// package both sides already share, and this sits beside EntrySeedRuntime,
+// whose calls it observes.
+type EntrySeedObserver interface {
+	// OnEntrySeedAdmission reports one admission attempt. outcome is a closed
+	// enum produced by the runtime, never free text: "accepted", "duplicate",
+	// "conflict", "timeout", "error". d is how long the round trip took,
+	// including any queueing inside the HTTP client.
+	OnEntrySeedAdmission(ctx context.Context, outcome string, d time.Duration)
+}
+
 // GroupExecRuntime is an optional capability of TriggerRuntime that lets a
 // trigger route one batch through LOCAL group execution — running the
 // group's real member nodes on this runner via the embedded engine — instead

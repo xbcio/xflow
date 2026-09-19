@@ -6,8 +6,11 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/execution"
 	kafkatrigger "github.com/xbcio/xflow/node/trigger/kafka"
 	"github.com/xbcio/xflow/observability/metrics"
+	"github.com/xbcio/xflow/service/protocol"
+	runnersvc "github.com/xbcio/xflow/service/runner"
 )
 
 // An operator who has heard of group execution declares it by hand. A bare
@@ -312,5 +315,107 @@ func TestRunnerMapItemConcurrencyRejectsNegativeValues(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("negative MapItemConcurrency was accepted")
+	}
+}
+
+// TestRunnerSeedRequestTimeoutRejectsNegativeValues pins that a malformed
+// admission window fails at construction rather than being silently ignored.
+// Ignoring it is the dangerous outcome: the operator believes the window was
+// raised, the runner keeps applying 15s, and large batches keep being
+// redelivered with no sign that the setting did nothing.
+func TestRunnerSeedRequestTimeoutRejectsNegativeValues(t *testing.T) {
+	_, err := buildRunnerServiceConfig(RunnerConfig{
+		ServerURL:          "http://server:8080",
+		SeedRequestTimeout: -time.Second,
+	})
+	if err == nil {
+		t.Fatal("negative SeedRequestTimeout was accepted")
+	}
+}
+
+// TestRunnerSeedRequestTimeoutZeroIsAccepted pins the default case: zero means
+// "not configured" and must NOT be an error, because every existing embedder
+// passes zero and option C's whole requirement is that an embedder that does
+// nothing sees no behaviour change.
+func TestRunnerSeedRequestTimeoutZeroIsAccepted(t *testing.T) {
+	if _, err := buildRunnerServiceConfig(RunnerConfig{ServerURL: "http://server:8080"}); err != nil {
+		t.Fatalf("buildRunnerServiceConfig with no SeedRequestTimeout: %v", err)
+	}
+}
+
+// TestRunnerSeedClientTimeoutTracksTheAdmissionDeadline pins the derived client
+// timeout against the admission deadline it has to sit above.
+//
+// The pairing is load-bearing and was previously a hardcoded 30s against a
+// hardcoded 15s. With the deadline configurable, a client timeout left at 30s
+// would cut off a 60s admission FIRST and report a transport error, so the
+// attempt would be counted as "error" rather than "timeout" — the exact
+// signal the metric was added to expose, silently missing for the deployment
+// that needed it most.
+func TestRunnerSeedClientTimeoutTracksTheAdmissionDeadline(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  RunnerConfig
+		want time.Duration
+	}{
+		{"unset keeps the 30s safety net", RunnerConfig{}, 30 * time.Second},
+		{"raised deadline raises the client", RunnerConfig{SeedRequestTimeout: 60 * time.Second}, 120 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := seedClientTimeout(tc.cfg); got != tc.want {
+				t.Errorf("seedClientTimeout = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRunnerSeedObserverIsNilWithoutMetrics pins the nil-interface discipline:
+// with no registry the SDK must hand the handler a genuine nil, not a typed-nil
+// *Metrics wrapped in the interface. The runtime stores what it is given and
+// calls it behind a != nil test, so a typed nil would pass that test and panic
+// on the first admission — inside the runner's trigger flush, on the hot path.
+func TestRunnerSeedObserverIsNilWithoutMetrics(t *testing.T) {
+	if obs := runnerSeedObserver(nil); obs != nil {
+		t.Fatalf("runnerSeedObserver(nil) = %v, want an untyped nil", obs)
+	}
+	if obs := runnerSeedObserver(metrics.New()); obs == nil {
+		t.Fatal("runnerSeedObserver with a registry returned nil; seed admissions would go unobserved")
+	}
+}
+
+// TestWireRunnerTriggerHostingCarriesTheSeedTimeoutAndObserver asserts on the
+// handler the runner's own wiring produced, which is the last point before the
+// value is handed to per-activation runtimes (asserted in service/runner's own
+// tests).
+//
+// Asserting here rather than only on RunnerConfig matters because the failure
+// mode is a config field that is plumbed as far as buildRunnerServiceConfig and
+// then dropped: the host sets 60s, no error is returned, the field looks
+// applied, and every admission still times out at 15s.
+func TestWireRunnerTriggerHostingCarriesTheSeedTimeoutAndObserver(t *testing.T) {
+	reg := execution.NewRegistry()
+	svcCfg := runnersvc.Config{Capabilities: []protocol.Capability{{NodeType: "xflow.trigger.kafka"}}}
+	o := &runnerOptions{metrics: metrics.New(), nodeRegistry: reg}
+
+	cfg := RunnerConfig{
+		ServerURL:          "http://server:8080",
+		Capabilities:       []string{"xflow.trigger.kafka"},
+		SeedRequestTimeout: 45 * time.Second,
+	}
+	if err := wireRunnerTriggerHosting(&svcCfg, cfg, o, nil); err != nil {
+		t.Fatalf("wireRunnerTriggerHosting: %v", err)
+	}
+	if svcCfg.ActivationTracker == nil {
+		t.Fatal("no ActivationTracker was installed; the runner hosts triggers with nothing to activate them")
+	}
+	h, ok := svcCfg.ActivationTracker.Handler().(*runnersvc.TriggerActivationHandler)
+	if !ok {
+		t.Fatalf("tracker handler = %T, want *runnersvc.TriggerActivationHandler",
+			svcCfg.ActivationTracker.Handler())
+	}
+	if got := h.SeedRequestTimeout(); got != 45*time.Second {
+		t.Fatalf("handler applies %v, want 45s: RunnerConfig.SeedRequestTimeout was "+
+			"carried into the config struct and then dropped before the admission call", got)
 	}
 }
