@@ -34,6 +34,13 @@ const DefaultLegacyLeaseMetaReapPeriod = 5 * time.Minute
 // trickle rather than a one-time residue.
 const DefaultStrandedLeaseReapPeriod = 5 * time.Minute
 
+// DefaultDeadQueuedAssignmentReapPeriod bounds reclamation of 'queued'
+// assignments whose execution is gone. It matches the stranded-lease cadence:
+// both are maintenance over a directory the whole control plane shares, and both
+// are bounded per pass, so there is no reason to read more often than the
+// existing reaper does.
+const DefaultDeadQueuedAssignmentReapPeriod = 5 * time.Minute
+
 // LeaseLister is the subset of engine.StateStore used by the sweeper to find
 // candidates for reclamation. The full StateStore interface satisfies this
 // shape implicitly.
@@ -80,6 +87,11 @@ type LeaseSweeper struct {
 	strandedBatch  int
 	strandedMu     sync.Mutex
 	lastStranded   time.Time
+
+	deadQueuedPeriod time.Duration
+	deadQueuedBatch  int
+	deadQueuedMu     sync.Mutex
+	lastDeadQueued   time.Time
 }
 
 // SweepObserver receives lease-sweep outcomes so observability layers can
@@ -138,6 +150,12 @@ type LeaseSweeperConfig struct {
 	// StrandedLeaseReapBatch bounds one reaper call. Zero defaults to
 	// defaultStrandedLeaseReapBatch.
 	StrandedLeaseReapBatch int
+	// DeadQueuedAssignmentReapPeriod controls the optional dead-queued-assignment
+	// reaper rate. Zero defaults to DefaultDeadQueuedAssignmentReapPeriod.
+	DeadQueuedAssignmentReapPeriod time.Duration
+	// DeadQueuedAssignmentReapBatch bounds one reaper call. Zero defaults to
+	// defaultDeadQueuedAssignmentReapBatch.
+	DeadQueuedAssignmentReapBatch int
 }
 
 // NewLeaseSweeper builds a sweeper bound to the given state store and engine.
@@ -166,28 +184,36 @@ func NewLeaseSweeper(state LeaseLister, eng execution.Engine, cfg LeaseSweeperCo
 	if cfg.StrandedLeaseReapBatch <= 0 {
 		cfg.StrandedLeaseReapBatch = defaultStrandedLeaseReapBatch
 	}
+	if cfg.DeadQueuedAssignmentReapPeriod <= 0 {
+		cfg.DeadQueuedAssignmentReapPeriod = DefaultDeadQueuedAssignmentReapPeriod
+	}
+	if cfg.DeadQueuedAssignmentReapBatch <= 0 {
+		cfg.DeadQueuedAssignmentReapBatch = defaultDeadQueuedAssignmentReapBatch
+	}
 	var timingObserver SweepTimingObserver
 	if observer, ok := cfg.Observer.(SweepTimingObserver); ok {
 		timingObserver = observer
 	}
 	return &LeaseSweeper{
-		state:          state,
-		engine:         eng,
-		directory:      cfg.RunnerDirectory,
-		period:         cfg.Period,
-		grace:          cfg.Grace,
-		log:            cfg.Logger,
-		observer:       cfg.Observer,
-		timingObserver: timingObserver,
-		elector:        cfg.Elector,
-		clock:          func() time.Time { return time.Now().UTC() },
-		sleepFunc:      sleepWithContext,
-		repairPeriod:   cfg.LeaseRepairPeriod,
-		repairBatch:    cfg.LeaseRepairBatch,
-		reapPeriod:     cfg.LegacyLeaseMetaReapPeriod,
-		reapBatch:      cfg.LegacyLeaseMetaReapBatch,
-		strandedPeriod: cfg.StrandedLeaseReapPeriod,
-		strandedBatch:  cfg.StrandedLeaseReapBatch,
+		state:            state,
+		engine:           eng,
+		directory:        cfg.RunnerDirectory,
+		period:           cfg.Period,
+		grace:            cfg.Grace,
+		log:              cfg.Logger,
+		observer:         cfg.Observer,
+		timingObserver:   timingObserver,
+		elector:          cfg.Elector,
+		clock:            func() time.Time { return time.Now().UTC() },
+		sleepFunc:        sleepWithContext,
+		repairPeriod:     cfg.LeaseRepairPeriod,
+		repairBatch:      cfg.LeaseRepairBatch,
+		reapPeriod:       cfg.LegacyLeaseMetaReapPeriod,
+		reapBatch:        cfg.LegacyLeaseMetaReapBatch,
+		strandedPeriod:   cfg.StrandedLeaseReapPeriod,
+		strandedBatch:    cfg.StrandedLeaseReapBatch,
+		deadQueuedPeriod: cfg.DeadQueuedAssignmentReapPeriod,
+		deadQueuedBatch:  cfg.DeadQueuedAssignmentReapBatch,
 	}
 }
 
@@ -199,6 +225,7 @@ func (s *LeaseSweeper) Run(ctx context.Context) {
 	s.RepairOnce(ctx)
 	s.ReapLegacyLeaseMetaOnce(ctx)
 	s.ReapStrandedLeasesOnce(ctx)
+	s.ReapDeadQueuedAssignmentsOnce(ctx)
 	for {
 		if err := s.sleepFunc(ctx, s.period); err != nil {
 			return
@@ -206,6 +233,7 @@ func (s *LeaseSweeper) Run(ctx context.Context) {
 		s.SweepOnce(ctx)
 		s.ReapLegacyLeaseMetaOnce(ctx)
 		s.ReapStrandedLeasesOnce(ctx)
+		s.ReapDeadQueuedAssignmentsOnce(ctx)
 	}
 }
 
@@ -254,6 +282,53 @@ func (s *LeaseSweeper) ReapStrandedLeasesOnce(ctx context.Context) int {
 		s.log.Info("reaped stranded directory leases", "released", released)
 	}
 	return released
+}
+
+// ReapDeadQueuedAssignmentsOnce reclaims queued assignments whose execution is
+// gone, at its own bounded cadence. It is separately leader-gated for the same
+// reason as the repair, legacy-metadata and stranded-lease passes: it is
+// maintenance over shared state rather than part of any one task's execution,
+// and it is a no-op for directories that do not implement the capability.
+//
+// This is the pass that makes the queue converge on its own. SweepOnce only
+// enumerates leases, ReapStrandedLeasesOnce only releases 'leased' assignments,
+// and ReapLegacyLeaseMetaOnce only drains a pre-upgrade hash. Nothing else
+// removes a 'queued' assignment whose execution has expired out of state, so
+// without this the only consumer of those entries is a live runner walking past
+// them on a poll — which is precisely what stops happening when the queue is
+// mostly dead. See DeadQueuedAssignmentReaper for the reachability and safety
+// argument.
+func (s *LeaseSweeper) ReapDeadQueuedAssignmentsOnce(ctx context.Context) int {
+	if s.elector != nil && !s.elector.IsLeader() {
+		return 0
+	}
+	reaper, ok := s.directory.(DeadQueuedAssignmentReaper)
+	if !ok {
+		return 0
+	}
+
+	now := s.clock()
+	s.deadQueuedMu.Lock()
+	if !s.lastDeadQueued.IsZero() && now.Sub(s.lastDeadQueued) < s.deadQueuedPeriod {
+		s.deadQueuedMu.Unlock()
+		return 0
+	}
+	s.lastDeadQueued = now
+	s.deadQueuedMu.Unlock()
+
+	reclaimed, err := reaper.ReapDeadQueuedAssignments(ctx, s.deadQueuedBatch)
+	if err != nil {
+		// Never blocks lease execution, so it is logged and retried on the next
+		// cadence rather than surfaced as a sweep error.
+		if s.log != nil {
+			s.log.Error("reap dead queued assignments", "err", err)
+		}
+		return 0
+	}
+	if reclaimed > 0 && s.log != nil {
+		s.log.Info("reaped dead queued assignments", "reclaimed", reclaimed)
+	}
+	return reclaimed
 }
 
 // ReapLegacyLeaseMetaOnce drains orphaned pre-U-7 assignment lease metadata at
