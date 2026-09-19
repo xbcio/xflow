@@ -20,6 +20,7 @@ const (
 	metricLeaseSweepRepairReconciled = "xflow_lease_sweep_repair_reconciled"
 	metricLeaseMaintenancePass       = "xflow_lease_maintenance_pass_total"
 	metricLeaseMaintenanceReleased   = "xflow_lease_maintenance_released_total"
+	metricLeaseMaintenanceCandidates = "xflow_lease_maintenance_candidates_total"
 	metricRunnerAuthDecisions        = "xflow_runner_auth_decisions_total"
 	metricRunnerClaimReclaimed       = "xflow_runner_claim_reclaimed_total"
 	metricRunnerLeaseReplayed        = "xflow_runner_lease_replayed_total"
@@ -46,6 +47,14 @@ type sweepTimingObserver interface {
 
 type sweepPassObserver interface {
 	OnSweepPass(ctx context.Context, pass, outcome string, released int)
+}
+
+// sweepPassCandidateObserver mirrors service/control's SweepPassCandidateObserver,
+// including its embedding of the pass observer: the candidate count is only
+// emitted by an adapter that also emits the pass and released counts.
+type sweepPassCandidateObserver interface {
+	sweepPassObserver
+	OnSweepPassCandidates(ctx context.Context, pass, outcome string, inspected int)
 }
 
 type runnerClaimObserver interface {
@@ -196,10 +205,28 @@ func (s SweepMetrics) OnSweepPass(ctx context.Context, pass, outcome string, rel
 	s.Metrics.Add(metricLeaseMaintenanceReleased, withNamespace(ctx, map[string]string{"pass": pass}), float64(released))
 }
 
+// OnSweepPassCandidates records how many candidates a pass inspected, beside how
+// many of them it released.
+//
+// Gated exactly like the released count: a pass that ran reports its candidate
+// count even when it is zero, and a skipped pass reports none, so a zero never
+// has to be read as either "inspected nothing" or "did not run".
+//
+// It exists because the released count alone cannot tell a pass that found
+// nothing to do from one whose scope is far wider than the shape it drains: the
+// ratio of the two is what answers whether a pass releases what it inspects.
+func (s SweepMetrics) OnSweepPassCandidates(ctx context.Context, pass, outcome string, inspected int) {
+	if outcome != "ran" && outcome != "error" {
+		return
+	}
+	s.Metrics.Add(metricLeaseMaintenanceCandidates, withNamespace(ctx, map[string]string{"pass": pass}), float64(inspected))
+}
+
 var (
-	_ sweepObserver       = SweepMetrics{}
-	_ sweepTimingObserver = SweepMetrics{}
-	_ sweepPassObserver   = SweepMetrics{}
+	_ sweepObserver              = SweepMetrics{}
+	_ sweepTimingObserver        = SweepMetrics{}
+	_ sweepPassObserver          = SweepMetrics{}
+	_ sweepPassCandidateObserver = SweepMetrics{}
 )
 
 // RunnerClaimMetrics observes durable runner-directory claim recovery and
