@@ -410,6 +410,10 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		serverOpts = append(serverOpts,
 			WithAuthObserver(metrics.NewAuthMetrics(cfg.Metrics)),
 			WithNodeTimeoutObserver(metrics.NewNodeTimeoutMetrics(cfg.Metrics)),
+			// The report path answers four structurally different fences with one
+			// bare 409. Without this the difference between them is only
+			// recoverable from logs, which is what stalled the R6 attribution.
+			WithReportRejectionObserver(metrics.NewReportRejectionMetrics(cfg.Metrics)),
 		)
 	}
 	if cfg.Tracer != nil {
@@ -435,7 +439,13 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		grpcOpts = append(grpcOpts, WithGRPCLogger(cfg.Logger))
 	}
 	if cfg.Metrics != nil {
-		grpcOpts = append(grpcOpts, WithGRPCAuthObserver(metrics.NewAuthMetrics(cfg.Metrics)))
+		grpcOpts = append(grpcOpts,
+			WithGRPCAuthObserver(metrics.NewAuthMetrics(cfg.Metrics)),
+			// The gRPC server owns a separate Core, so the HTTP option above does
+			// not reach it. Without this pair a gRPC-transport 409 stays
+			// unattributable, which is the whole reason these counters exist.
+			WithGRPCReportRejectionObserver(metrics.NewReportRejectionMetrics(cfg.Metrics)),
+		)
 	}
 	if cfg.Tracer != nil {
 		grpcOpts = append(grpcOpts, WithGRPCTracer(cfg.Tracer))
