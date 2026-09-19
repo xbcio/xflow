@@ -123,8 +123,11 @@ redis.call('EXPIRE', KEYS[6], ttl)
 -- xflow_executions, i.e. raw traffic from transient executions persisted.
 --
 -- EXISTS-guarded so a durable execution, which has no marker, is untouched.
+-- The factor 2 mirrors transientMarkerTTLFactor in state.go: the marker must
+-- outlive the node keys it qualifies, so a path that extends node keys without
+-- refreshing the marker still cannot make it lapse first.
 if redis.call('EXISTS', KEYS[12]) == 1 then
-    redis.call('EXPIRE', KEYS[12], ttl)
+    redis.call('EXPIRE', KEYS[12], ttl * 2)
 end
 redis.call('ZREM', KEYS[8], ARGV[14])
 local done = 0

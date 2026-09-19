@@ -164,3 +164,74 @@ func commitStartNode(ctx context.Context, state *Store, id types.ExecutionID) er
 	})
 	return err
 }
+
+// TestMarkerOutlivesACommitPathThatForgetsToRefreshIt pins the margin, not the
+// refresh.
+//
+// Refreshing the marker on the commit path is necessary but not sufficient: it
+// only holds for the paths that remember. This test drives a path that extends
+// the node keys and does NOT touch the marker (UpsertNode), then steps the
+// clock past the deadline the marker would have had WITHOUT the margin. If the
+// margin is removed the marker lapses while node keys are still alive -- which
+// is precisely the state that leaked 187 node rows into SQL on a real
+// deployment, because isTransient answers "durable" and the projection runs.
+func TestMarkerOutlivesACommitPathThatForgetsToRefreshIt(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer func() { _ = rdb.Close() }()
+
+	state := New(rdb, nil, time.Hour)
+	state.transient = false
+
+	ctx := context.Background()
+	id := types.ExecutionID("exec-marker-margin")
+	tg := testTransientGraph()
+	ttl := tg.TransientTTL()
+	tctx := engine.WithExecutionTransient(ctx, engine.TransientHint{
+		TTL:           ttl,
+		CompletionTTL: tg.TransientCompletionTTL(),
+	})
+	if err := state.CreateExecution(tctx, &engine.ExecutionSnapshot{
+		ID:     id,
+		Status: types.ExecutionStatusRunning,
+		Graph:  tg,
+	}); err != nil {
+		t.Fatalf("CreateExecution: %v", err)
+	}
+
+	marker := transientMarkKey(namespace.FromContext(tctx), id)
+	nodeStatus := nodeStatusKey(namespace.FromContext(tctx), id, "start")
+
+	// Just before the marker's original deadline, write through a path that
+	// extends the node keys and leaves the marker alone.
+	mr.FastForward(ttl - 30*time.Second)
+	if err := state.UpsertNode(ctx, &engine.NodeSnapshot{
+		ExecutionID: id,
+		Name:        "start",
+		Status:      types.NodeStatusRunning,
+	}); err != nil {
+		t.Fatalf("UpsertNode: %v", err)
+	}
+
+	// Step past the original deadline. Without the margin the marker is gone
+	// here while the execution is still live.
+	mr.FastForward(60 * time.Second)
+
+	if !mr.Exists(nodeStatus) {
+		t.Fatalf("precondition failed: the execution's node key %s is already "+
+			"gone, so this test cannot show that the marker outlived it", nodeStatus)
+	}
+	if !mr.Exists(marker) {
+		t.Fatalf("the transient marker lapsed while the execution's own node key " +
+			"was still alive: isTransient now answers \"durable\" and this " +
+			"execution's node output would be projected into SQL")
+	}
+	ns := namespace.WithNamespace(context.Background(), namespace.FromContext(tctx))
+	if !state.isTransient(ns, id) {
+		t.Fatal("isTransient returned false although the execution is still live")
+	}
+}

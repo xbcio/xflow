@@ -264,6 +264,38 @@ func parseDurationMillis(raw string) time.Duration {
 // transaction as the execution's structural keys, or a replica could observe an
 // execution that exists but is not yet known to be transient and project its
 // first node output.
+// transientMarkerTTLFactor is how much longer the transient marker lives than
+// the keyTTL it qualifies.
+//
+// The invariant that makes absence of the marker mean "not transient" is that
+// the marker outlives EVERY execution-scoped key it speaks for. Reaching that
+// invariant by refreshing the marker on each write is necessary but not
+// sufficient on its own: it holds only for the paths that remember to refresh,
+// and a single forgotten path re-EXPIREs the node keys past the marker. That is
+// not hypothetical -- it is exactly how transient executions leaked node rows
+// into SQL (xflow_nodes=187 with xflow_executions=0 on a real deployment): a
+// path extended the node keys while the marker kept its original deadline, so
+// isTransient read the lapsed marker as "durable" and the projection ran.
+//
+// The factor turns that class of mistake from "leaks a payload" into "defers
+// cleanup": with a margin of one full keyTTL, a forgotten refresh still leaves
+// the marker alive as long as some execution-scoped key is alive, because any
+// key can only ever be extended to now+keyTTL. The marker's absence therefore
+// keeps meaning what callers assume it means.
+//
+// Kept in sync with commitNodeLua's `EXPIRE KEYS[12]`, which applies the same
+// factor inside the commit transaction.
+const transientMarkerTTLFactor = 2
+
+// markerTTL is the lifetime to give a transient marker qualifying keys that
+// live for keyTTL. See transientMarkerTTLFactor for why it is longer.
+func markerTTL(keyTTL time.Duration) time.Duration {
+	if keyTTL <= 0 {
+		return 0
+	}
+	return keyTTL * transientMarkerTTLFactor
+}
+
 func (s *Store) markExecutionTransient(ctx context.Context, pipe redis.Pipeliner, id types.ExecutionID, ttl, completionTTL, keyTTL time.Duration) {
 	fields := map[string]any{}
 	if ttl > 0 {
@@ -279,7 +311,7 @@ func (s *Store) markExecutionTransient(ctx context.Context, pipe redis.Pipeliner
 
 	key := transientMarkKey(namespace.FromContext(ctx), id)
 	pipe.HSet(ctx, key, fields)
-	pipe.Expire(ctx, key, keyTTL)
+	pipe.Expire(ctx, key, markerTTL(keyTTL))
 
 	s.transientMu.Lock()
 	s.execTransient[id] = transientMark{transient: true, ttl: ttl, completionTTL: completionTTL}
