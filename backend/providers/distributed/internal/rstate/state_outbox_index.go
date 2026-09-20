@@ -55,9 +55,12 @@ import (
 //   - A missed registration is not data loss. The keyspace sweep (the same
 //     mechanism that used to be the only path) still runs and still finds it.
 //     An index write failure degrades throughput, never correctness.
-//   - A stale entry is not a false execution. Draining it costs one no-op
-//     claim that repairs the entry, so it is self-limiting rather than
-//     self-perpetuating.
+//   - A stale entry is not a false execution, but it is not work either, and it
+//     must never be counted as work. A member whose execution still has a ready
+//     set costs one no-op claim that re-arms it; a member whose execution has no
+//     outbox left is an ORPHAN, and it is removed by the read that found it,
+//     because leaving it to a drain does not repair it when the drain is what
+//     the orphan is starving. See readOutboxReadyIndex.
 //   - An absent, empty, mistyped or disabled index changes nothing. The
 //     dispatcher falls back to sweeping, which is what it did before.
 //
@@ -93,11 +96,14 @@ import (
 // because it is only ever accessed with ordinary commands (ZADD, ZREM,
 // ZRANGEBYSCORE), never inside a multi-key script.
 //
-// The key has no expiry of its own. A member is removed by the drain path, and
-// an orphaned member — one whose execution's ready set expired with the
-// execution's own TTL before anything refreshed it — is still returned by
-// discovery, so the very next drain of that execution removes it. The index
-// therefore cleans up after itself without a sweeping reaper of its own.
+// The key has no expiry of its own. That is what makes an orphan possible: a
+// member outlives the ready set it points at when the execution's own TTL takes
+// the outbox first, or when a removal is lost — the flush's terminating claim,
+// which is where removal used to live, reads before it removes and so removes
+// nothing when that read fails (a canceled context is enough), and nothing else
+// reaps the index. Discovery must therefore treat a member whose ready set is
+// gone as not-work and repair it; the index does not clean up after itself by
+// being returned.
 //
 // ---------------------------------------------------------------------------
 // The two transitions that maintain it
@@ -366,36 +372,187 @@ func (s *Store) earliestReadyScore(ctx context.Context, t namespace.Namespace, i
 // out a retry backoff, and neither is deliverable in this tick — exactly the
 // distinction OutboxMetrics draws between Pending and Ready.
 //
-// The read is pure. Popping the members would be cheaper to reason about but
-// would lose them if the process died between the pop and the flush; leaving
-// them means a stale member is returned once more, flushed to a no-op, and
-// repaired by that flush's terminating claim.
+// THE SCORE IS NOT THE WHOLE PREDICATE: a member is work only if the execution
+// it names still has a ready set at all. The index key outlives the keys it
+// points at — it has no TTL of its own (see the file note) while the ready set
+// expires with the execution — so a member whose ready set is gone survives as
+// an orphan and is, by its score, indistinguishable from work that is ready. An
+// orphan is not work, and returning one as if it were is why this read must not
+// stop at the member list:
+//
+//   - It spends the page budget the index exists to spend on work, so a head of
+//     orphans HIDES the live backlog behind it. Discovery returns nothing but
+//     dead ids for as long as the head is dead.
+//   - `added` is what proves the index to ListOutboxExecutions, so a page of
+//     orphans latched the index as carrying work and throttled away the keyspace
+//     sweep — the one mechanism that would have found the work they hid. That
+//     latch is per-process and the orphans are in Redis, which is why a restart
+//     restored service while the orphans stayed to block again.
+//
+// So a member whose outbox is gone is skipped, counted as nothing, and repaired
+// here — this read is the cheapest place to notice it, because discovery has
+// already paid for the member list. See repairStaleOutboxIndexMembers.
+//
+// The members are read in batches and the loop continues past a batch that was
+// all orphans, so one call reaches the work behind a dead head instead of
+// returning it a page at a time. It terminates because every batch either adds
+// at least one live id, removes at least one stale member, or ends the read.
 func (s *Store) readOutboxReadyIndex(ctx context.Context, t namespace.Namespace, now time.Time, limit int, ids map[types.ExecutionID]struct{}) (int, error) {
 	if limit <= 0 {
 		return 0, nil
 	}
-	members, err := s.rdb.ZRangeByScore(ctx, outboxReadyIndexKey(t), &redis.ZRangeBy{
-		Min:    "-inf",
-		Max:    strconv.FormatInt(now.UTC().UnixMilli(), 10),
-		Offset: 0,
-		Count:  int64(limit),
-	}).Result()
-	if err != nil {
-		return 0, fmt.Errorf("read outbox readiness index for namespace %q: %w", t, err)
-	}
+	indexKey := outboxReadyIndexKey(t)
+	cutoff := strconv.FormatInt(now.UTC().UnixMilli(), 10)
 	added := 0
-	for _, member := range members {
-		id := types.ExecutionID(member)
-		if _, seen := ids[id]; seen {
+	for {
+		members, err := s.rdb.ZRangeByScore(ctx, indexKey, &redis.ZRangeBy{
+			Min:    "-inf",
+			Max:    cutoff,
+			Offset: 0,
+			Count:  int64(limit),
+		}).Result()
+		if err != nil {
+			return added, fmt.Errorf("read outbox readiness index for namespace %q: %w", t, err)
+		}
+		if len(members) == 0 {
+			return added, nil
+		}
+		live, err := s.outboxMembersLive(ctx, t, members)
+		if err != nil {
+			return added, err
+		}
+		var stale []string
+		for _, member := range members {
+			if !live[member] {
+				stale = append(stale, member)
+				continue
+			}
+			id := types.ExecutionID(member)
+			if _, seen := ids[id]; seen {
+				continue
+			}
+			ids[id] = struct{}{}
+			added++
+			if added >= limit {
+				break
+			}
+		}
+		if len(stale) > 0 {
+			if err := s.repairStaleOutboxIndexMembers(ctx, indexKey, t, now, stale); err != nil {
+				return added, err
+			}
+		}
+		if added >= limit {
+			return added, nil
+		}
+		if len(stale) == 0 {
+			// Every due member at the head is live and already collected. A live
+			// member is deliberately not removed, so re-reading would return the
+			// same head forever; whatever is behind it is not this call's budget.
+			return added, nil
+		}
+		// The head advanced by the removals. Read again to reach the work behind
+		// the orphans rather than reporting an empty page over a live backlog.
+	}
+}
+
+// outboxMembersLive reports, per index member, whether the execution it names
+// still has a ready ZSET to lease from — which is the index's own membership
+// contract, "a member exists exactly when there is work behind it", the same
+// predicate refreshOutboxReadyIndex and cleanupCreatedExecution decide removal
+// by. Redis drops an empty ZSET, so the key being present means the execution
+// has ready entries.
+//
+// The BODY hash is deliberately not consulted. A member whose ready set survives
+// without its body is not an orphan: its first claim pops the ready member,
+// finds no body, and the terminating empty claim removes the index member with
+// it — the documented one-no-op-claim path, which is already tested. Judging it
+// stale here instead would remove a member the ready set still justifies, which
+// is the lost-registration direction this file is careful to avoid.
+//
+// The whole page is probed in ONE pipeline rather than one round trip per
+// member, which is the package's idiom for a bounded batch of per-execution
+// reads.
+func (s *Store) outboxMembersLive(ctx context.Context, t namespace.Namespace, members []string) (map[string]bool, error) {
+	pipe := s.rdb.Pipeline()
+	exists := make([]*redis.IntCmd, len(members))
+	for i, member := range members {
+		exists[i] = pipe.Exists(ctx, outboxReadyKey(t, types.ExecutionID(member)))
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		// Report rather than answer: a probe that failed is not evidence that a
+		// member is stale, and the caller's fallback (sweep) is strictly safer
+		// than removing a member on an error.
+		return nil, fmt.Errorf("probe ready sets for %d index members in namespace %q: %w", len(members), t, err)
+	}
+	live := make(map[string]bool, len(members))
+	for i, cmd := range exists {
+		live[members[i]] = cmd.Val() > 0
+	}
+	return live, nil
+}
+
+// repairStaleOutboxIndexMembers removes index members whose execution has no
+// outbox left, and puts back any that reappears while it does.
+//
+// The removal cannot be atomic with the keys it judges: the index is
+// namespace-global and those keys are execution-scoped, so a Redis Cluster
+// script cannot touch both (see the file note) — the same slot boundary that
+// keeps the index out of the atomic transitions. A check-then-remove is
+// therefore the strongest form available, and it leaves one interleaving: an
+// execution that drained to nothing appends its next entry and re-registers
+// between this removal's probe and its ZREM. That is not exotic — Redis drops an
+// empty ZSET and an empty HASH, so a fully drained execution has no outbox keys
+// at all while it is still alive and about to append.
+//
+// It is closed the way refreshOutboxReadyIndex closes its own prune: probe,
+// remove, then probe AGAIN and re-register what is there. The second probe is
+// sent only after the ZREM's reply has been read, which is what orders it after
+// the removal on any topology — including a real cluster, where the two
+// commands reach different nodes — because any append it must observe was
+// executed before the removal it is ordered after.
+//
+// Recovery does not depend on that: a re-registration this still misses is
+// found by the keyspace sweep within the bound the file note states, exactly as
+// any other missed registration always was. The removal is cheap where the
+// removal this replaces was not: it no longer needs a flush to run, to find
+// work, or to have a live context.
+func (s *Store) repairStaleOutboxIndexMembers(ctx context.Context, indexKey string, t namespace.Namespace, now time.Time, stale []string) error {
+	zrem := make([]any, len(stale))
+	for i, member := range stale {
+		zrem[i] = member
+	}
+	pipe := s.rdb.Pipeline()
+	pipe.ZRem(ctx, indexKey, zrem...)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("remove %d stale outbox readiness index members for namespace %q: %w", len(stale), t, err)
+	}
+	live, err := s.outboxMembersLive(ctx, t, stale)
+	if err != nil {
+		return err
+	}
+	pipe = s.rdb.Pipeline()
+	repaired := 0
+	for _, member := range stale {
+		if !live[member] {
 			continue
 		}
-		ids[id] = struct{}{}
-		added++
-		if added >= limit {
-			break
-		}
+		// Scored at the read's own cutoff, the lower bound markOutboxReadyIndex
+		// writes, so a member removed a moment before it reappeared is due on the
+		// next call instead of waiting out a sweep interval.
+		pipe.ZAdd(ctx, indexKey, redis.Z{
+			Score:  float64(now.UTC().UnixMilli()),
+			Member: member,
+		})
+		repaired++
 	}
-	return added, nil
+	if repaired == 0 {
+		return nil
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("re-register %d outbox readiness index members for namespace %q: %w", repaired, t, err)
+	}
+	return nil
 }
 
 // noteOutboxIndexFailure records a best-effort index failure. It is deliberately

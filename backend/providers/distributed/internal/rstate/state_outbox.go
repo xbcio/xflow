@@ -522,6 +522,12 @@ func (s *Store) scanOutboxMetricsForNamespace(ctx context.Context, t namespace.N
 // store that never reads it can never prove it, and that overlap ends on the
 // first call the index answers.
 //
+// THE INDEX ONLY ANSWERS WITH WORK. A member whose execution has no outbox left
+// is not counted and not returned, and is removed from the index by the read
+// that found it; an index whose due head is all orphans therefore reports
+// nothing here, which is what keeps it from hiding the live backlog behind the
+// orphans. See readOutboxReadyIndex.
+//
 // THE SWEEP IS THROTTLED ONLY ONCE THE INDEX HAS PROVEN ITSELF. While the index
 // has carried work at some point in this process, the scan runs once every
 // outboxIndexSweepEveryCalls calls; at all other times it runs on every call,
@@ -566,6 +572,10 @@ func (s *Store) ListOutboxExecutions(ctx context.Context, limit int) ([]types.Ex
 			indexed += added
 		}
 	}
+	// Only LIVE members are counted by the read, so this cannot be earned by a
+	// page of orphans: an index that returns nothing but members whose execution
+	// has no outbox has delivered no work, and must not throttle away the sweep
+	// that is the only thing left to find it. See readOutboxReadyIndex.
 	if indexed > 0 {
 		s.outboxIndexProven.Store(true)
 	}

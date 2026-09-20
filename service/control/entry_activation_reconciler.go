@@ -37,6 +37,16 @@ const (
 	// down for hours therefore costs one redispatch per 5 minutes, and recovery
 	// is noticed within that window.
 	DefaultActivationRetryBackoffMax = 5 * time.Minute
+	// ActivationFailureEscalationStart is the consecutive-failure count at which
+	// an activation's repeated failures are first escalated to a WARN, and the
+	// base of the escalation ladder: 3, 6, 12, 24, 48, ...
+	//
+	// Deliberately more than one: a single fence or decline is ordinary (a
+	// workflow re-registering, a runner reconnecting) and must not page anyone.
+	// The ladder, not the raw count, is what bounds the output — one record per
+	// rung means an activation that keeps failing for a week costs ~15 records
+	// instead of one per reconcile tick (8,640/day at the 10s period).
+	ActivationFailureEscalationStart = 3
 )
 
 // ActivationRunnerLister provides runner enumeration for the activation
@@ -197,7 +207,96 @@ type activationRetryState struct {
 	// doubles on the next failure. Jitter is applied on top of it to produce
 	// nextAttempt, so it is not itself the interval reported by
 	// retryDelayFor.
+	//
+	// delay == 0 with consecutiveFailures > 0 is the deliberate shape of a
+	// retained-but-not-scheduled entry: clearRetryBackoff zeroes the scheduling
+	// half while keeping the diagnostics below, so a later failure restarts the
+	// ladder at RetryBackoffMin rather than at zero.
 	delay time.Duration
+
+	// reason is the last failure reason retained for this activation: the
+	// runner's ack.Error on a decline, or the fence reason when the reconciler
+	// itself revoked the assignment. It is what makes a failure explicable
+	// in-process after the fact — before this it existed only inside one log
+	// record, and every failure reason was unrecoverable once that record was
+	// gone.
+	reason string
+	// consecutiveFailures counts the failures recorded for this activation
+	// since its entry last had none. It is deliberately NOT reset by a healthy
+	// reconcile tick: clearRetryBackoff keeps it, because a single pass with a
+	// live owner is not evidence that an activation stopped being fenced. The
+	// observed production loop is fence -> ~90s apparently healthy -> fence
+	// again, which reset on every pass and so could never escalate. The whole
+	// entry, diagnostics included, is dropped by pruneRetryBackoff once the
+	// activation leaves the store, so this map stays bounded by the number of
+	// live activations.
+	consecutiveFailures int
+	// firstFailureAt is the wall time of the first failure in the current run,
+	// so an escalation can report how long the activation has been failing.
+	firstFailureAt time.Time
+	// runnerID and generation identify the assignment the last failure refers
+	// to, and are what an escalation report names.
+	runnerID   string
+	generation uint64
+}
+
+// activationFailureInfo is the diagnostic half of one recorded failure: what
+// went wrong, and which assignment it happened to. The retry-scheduling half
+// needs none of it, which is why it is a separate argument rather than more
+// parameters.
+type activationFailureInfo struct {
+	// reason is the operator-facing explanation (ack.Error, or a fence reason).
+	reason string
+	// runnerID is the runner that declined or was fenced.
+	runnerID string
+	// generation is the activation generation the failure refers to.
+	generation uint64
+}
+
+// Fence reasons recorded on the retained failure state. Each names the decision
+// that revoked an assignment. Together they are what distinguishes "the runner
+// died" from "the workflow was re-registered" from "the selector moved" when
+// reading a fence/reassign loop after the fact — the reconciler's fence path
+// previously recorded nothing at all, on either the fence or the receipt side.
+const (
+	fenceReasonNotDesired         = "activation_no_longer_desired"
+	fenceReasonLeaseExpired       = "lease_expired"
+	fenceReasonOwnerNotLive       = "owner_not_live"
+	fenceReasonOwnerNoLongerMatch = "owner_no_longer_matches_desired"
+	fenceReasonSiblingOwner       = "sibling_owner_holds_logical_activation"
+	fenceReasonOwnerInvalid       = "owner_invalid"
+	fenceReasonInventoryMissing   = "reconnect_inventory_missing"
+	fenceReasonInventoryStaleGen  = "reconnect_inventory_stale_generation"
+	fenceReasonDrainPendingFence  = "drain_pending_fence"
+)
+
+// activationFailureRecord is the outcome of recording one failure, assembled
+// under r.mu so the escalation can be reported after the lock is released (a
+// logger must never be called while holding it).
+type activationFailureRecord struct {
+	reason              string
+	runnerID            string
+	generation          uint64
+	consecutiveFailures int
+	firstFailureAt      time.Time
+	// escalate reports that this failure landed exactly on the escalation
+	// ladder rung for its count (see activationFailureEscalates).
+	escalate bool
+}
+
+// activationFailureEscalates reports whether a run of n consecutive failures is
+// on the escalation ladder (ActivationFailureEscalationStart * 2^k: 3, 6, 12,
+// 24, 48, ...). Exactly one rung per doubling is reported, so the number of
+// records produced by a permanently failing activation grows logarithmically
+// with its failure count instead of linearly with the reconcile period.
+func activationFailureEscalates(n int) bool {
+	if n < ActivationFailureEscalationStart {
+		return false
+	}
+	for n > ActivationFailureEscalationStart && n%2 == 0 {
+		n /= 2
+	}
+	return n == ActivationFailureEscalationStart
 }
 
 // NewEntryActivationReconciler constructs a reconciler with defaults applied.
@@ -421,7 +520,7 @@ func (r *EntryActivationReconciler) reconcileExisting(ctx context.Context, act *
 			prevRunner := act.RunnerID
 			prevSession := act.SessionID
 			prevGen := act.Generation
-			if _, err := r.fenceAndDeactivate(ctx, act, prevRunner, prevSession, prevGen); err != nil {
+			if _, err := r.fenceAndDeactivate(ctx, act, prevRunner, prevSession, prevGen, fenceReasonNotDesired); err != nil {
 				return err
 			}
 			act.RunnerID = ""
@@ -465,7 +564,7 @@ func (r *EntryActivationReconciler) reconcileExisting(ctx context.Context, act *
 		prevRunner := act.RunnerID
 		prevSession := act.SessionID
 		prevGen := act.Generation
-		fenced, err := r.fenceAndDeactivate(ctx, act, prevRunner, prevSession, prevGen)
+		fenced, err := r.fenceAndDeactivate(ctx, act, prevRunner, prevSession, prevGen, ownerInvalidFenceReason(expired, ownerLive, ownerMatches, siblingAlreadyOwns))
 		if err != nil {
 			return err
 		}
@@ -474,6 +573,28 @@ func (r *EntryActivationReconciler) reconcileExisting(ctx context.Context, act *
 		}
 	}
 	return nil
+}
+
+// ownerInvalidFenceReason names which of the invalid-owner conditions fenced an
+// assignment. Precedence follows reconcileExisting's own evaluation order, so
+// the reason reported is the first condition that made the owner invalid rather
+// than an arbitrary one when several hold at once (an expired lease usually also
+// means a stale heartbeat).
+func ownerInvalidFenceReason(expired, ownerLive, ownerMatches, siblingAlreadyOwns bool) string {
+	switch {
+	case expired:
+		return fenceReasonLeaseExpired
+	case !ownerLive:
+		return fenceReasonOwnerNotLive
+	case !ownerMatches:
+		return fenceReasonOwnerNoLongerMatch
+	case siblingAlreadyOwns:
+		return fenceReasonSiblingOwner
+	default:
+		// Unreachable: the healthy case returned before the fence. Kept so a
+		// future edit to that condition cannot silently record no reason.
+		return fenceReasonOwnerInvalid
+	}
 }
 
 func (r *EntryActivationReconciler) assignUnowned(ctx context.Context, act *engine.EntryActivation, live []RunnerSnapshot, owners map[logicalActivationKey]map[string]struct{}, now time.Time) error {
@@ -809,8 +930,12 @@ func (r *EntryActivationReconciler) reconcileRunnerInventory(ctx context.Context
 			// Assigned to this runner but NOT reported (or reported at a stale
 			// generation) → the reconnected session dropped it. Fence + deactivate
 			// so a later reconcile reassigns it to a live runner.
+			revokeReason := fenceReasonInventoryMissing
+			if ok {
+				revokeReason = fenceReasonInventoryStaleGen
+			}
 			prevGen := act.Generation
-			if _, err := r.fenceAndDeactivate(ctx, act, runnerID, act.SessionID, prevGen); err != nil {
+			if _, err := r.fenceAndDeactivate(ctx, act, runnerID, act.SessionID, prevGen, revokeReason); err != nil {
 				if r.cfg.Logger != nil {
 					r.cfg.Logger.Warn("entry activation inventory revoke failed",
 						"workflow_id", act.WorkflowID,
@@ -886,6 +1011,7 @@ func (r *EntryActivationReconciler) recoverPendingDeactivationObligations(ctx co
 			return err
 		}
 		r.recordGroupActivation(&act, "deactivate")
+		r.recordAssignmentFenced(&act, obligation.RunnerID, obligation.Generation, fenceReasonDrainPendingFence, time.Now())
 	}
 	return nil
 }
@@ -905,7 +1031,14 @@ func deactivationFenceObserved(act engine.EntryActivation, obligation Deactivati
 // intent closes the crash window between "we decided to drain this owner" and
 // the activation authority write; ready is published only after Fence succeeds.
 // Non-drain deactivations preserve the existing best-effort behavior.
-func (r *EntryActivationReconciler) fenceAndDeactivate(ctx context.Context, act *engine.EntryActivation, runnerID, sessionID string, generation uint64) (bool, error) {
+//
+// reason names the decision that got here (one of the fenceReason* constants).
+// It is retained on the activation's failure state and reported on the
+// escalation ladder, because this path — not the runner-decline path — is the
+// one a fence/reassign loop actually executes, and it previously recorded
+// nothing anywhere: the only trace of a fence was the Deactivate directive,
+// whose receipt is ack'ed as "deactivated" and (core.go) discarded.
+func (r *EntryActivationReconciler) fenceAndDeactivate(ctx context.Context, act *engine.EntryActivation, runnerID, sessionID string, generation uint64, reason string) (bool, error) {
 	key := keyOf(act)
 	if directory, ok := r.cfg.Lister.(DeactivationObligationDirectory); ok && directory != nil {
 		if control, found, err := runnerControlFor(ctx, r.cfg.Lister, runnerID); err != nil {
@@ -952,6 +1085,7 @@ func (r *EntryActivationReconciler) fenceAndDeactivate(ctx context.Context, act 
 						return false, err
 					}
 					r.recordGroupActivation(act, "deactivate")
+					r.recordAssignmentFenced(act, runnerID, generation, reason, time.Now())
 					return true, nil
 				}
 			} else if act.Desired {
@@ -966,6 +1100,7 @@ func (r *EntryActivationReconciler) fenceAndDeactivate(ctx context.Context, act 
 	}
 	r.enqueueDeactivate(runnerID, deactivateDirectiveFor(act, generation))
 	r.recordGroupActivation(act, "deactivate")
+	r.recordAssignmentFenced(act, runnerID, generation, reason, time.Now())
 	return true, nil
 }
 
@@ -1066,32 +1201,132 @@ func (r *EntryActivationReconciler) clearNoMatch(key engine.EntryActivationKey) 
 // delay, capped at RetryBackoffMax. The actual next-attempt time additionally
 // applies +/-20% jitter to the delay, so that many keys failing at the same
 // instant (a shared supply going down) do not all retry in lockstep.
+//
+// This is the reason-less form, kept for callers with no diagnostic to attach.
+// Callers that have one — every production caller does — use
+// recordActivationFailure, which is this plus the retained reason and the
+// consecutive-failure count. Both share noteFailureLocked, so there is exactly
+// one implementation of the backoff.
 func (r *EntryActivationReconciler) noteActivationFailure(key engine.EntryActivationKey, now time.Time) {
+	r.recordActivationFailure(key, activationFailureInfo{}, now)
+}
+
+// recordActivationFailure is noteActivationFailure plus the diagnostics: it
+// retains info (reason, runner, generation) and the consecutive-failure count
+// on the key's entry, and emits the escalating WARN when the count reaches a
+// rung of the ladder. The reason is retained rather than only logged, because a
+// log record can be discarded (nil logger, level filter, log rotation) while
+// the next reader of this state — an operator, or a future status endpoint —
+// still needs to know why the activation keeps failing.
+func (r *EntryActivationReconciler) recordActivationFailure(key engine.EntryActivationKey, info activationFailureInfo, now time.Time) {
+	rec := r.noteFailureLocked(key, info, now, true)
+	if rec.escalate {
+		r.logActivationFailureEscalation(key, rec, now)
+	}
+}
+
+// recordAssignmentFenced records that the reconciler itself revoked a hosted
+// assignment (reason is one of the fenceReason* constants). It updates the SAME
+// retained failure state as a runner decline — so the count and the reason
+// describe "how this activation keeps failing to stay hosted", whatever the
+// cause — but deliberately does NOT schedule a backoff: a fence is followed by
+// a reassignment on the next pass, and withholding that redispatch would turn
+// the observability fix into a behaviour change.
+//
+// This is the path that is actually executed when the reconciler fences and
+// reassigns repeatedly; it used to produce no record of any kind anywhere,
+// which is why such a loop was unexplainable from the logs.
+func (r *EntryActivationReconciler) recordAssignmentFenced(act *engine.EntryActivation, runnerID string, generation uint64, reason string, now time.Time) {
+	key := keyOf(act)
+	rec := r.noteFailureLocked(key, activationFailureInfo{
+		reason:     reason,
+		runnerID:   runnerID,
+		generation: generation,
+	}, now, false)
+	if rec.escalate {
+		r.logActivationFailureEscalation(key, rec, now)
+	}
+}
+
+// noteFailureLocked applies one failure to key's retained state and returns the
+// values the escalation report needs. The scheduling half (recordedAt,
+// nextAttempt, delay) is updated only when withBackoff is set: a fence that
+// will be reassigned on the next pass must not be delayed, while a runner
+// decline is exactly what the backoff exists for.
+func (r *EntryActivationReconciler) noteFailureLocked(key engine.EntryActivationKey, info activationFailureInfo, now time.Time, withBackoff bool) activationFailureRecord {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	min := r.cfg.RetryBackoffMin
-	if min <= 0 {
-		min = DefaultActivationRetryBackoffMin
+	state := r.retryBackoff[key]
+	state.consecutiveFailures++
+	if state.firstFailureAt.IsZero() {
+		state.firstFailureAt = now
 	}
-	max := r.cfg.RetryBackoffMax
-	if max <= 0 {
-		max = DefaultActivationRetryBackoffMax
-	}
-
-	state, ok := r.retryBackoff[key]
-	delay := min
-	if ok {
-		delay = state.delay * 2
-		if delay > max {
-			delay = max
+	state.reason = info.reason
+	state.runnerID = info.runnerID
+	state.generation = info.generation
+	if withBackoff {
+		min := r.cfg.RetryBackoffMin
+		if min <= 0 {
+			min = DefaultActivationRetryBackoffMin
 		}
+		max := r.cfg.RetryBackoffMax
+		if max <= 0 {
+			max = DefaultActivationRetryBackoffMax
+		}
+		delay := min
+		// A non-positive delay means either no recorded failure at all or one
+		// whose scheduling half was cleared by clearRetryBackoff after the
+		// activation looked healthy again. Both restart the ladder at the
+		// minimum: doubling zero would schedule the retry immediately and
+		// silently disable the backoff.
+		if state.delay > 0 {
+			delay = state.delay * 2
+			if delay > max {
+				delay = max
+			}
+		}
+		state.recordedAt = now
+		state.delay = delay
+		state.nextAttempt = now.Add(jitter(delay))
 	}
-	r.retryBackoff[key] = activationRetryState{
-		recordedAt:  now,
-		nextAttempt: now.Add(jitter(delay)),
-		delay:       delay,
+	r.retryBackoff[key] = state
+
+	return activationFailureRecord{
+		reason:              state.reason,
+		runnerID:            state.runnerID,
+		generation:          state.generation,
+		consecutiveFailures: state.consecutiveFailures,
+		firstFailureAt:      state.firstFailureAt,
+		escalate:            activationFailureEscalates(state.consecutiveFailures),
 	}
+}
+
+// logActivationFailureEscalation emits the lazily-repeated report for an
+// activation whose assignments keep failing. It is called only on a ladder
+// rung, never per reconcile tick, and carries everything needed to triage
+// without a second lookup: which activation, which runner held it, at which
+// generation, how many failures in a row, how long it has been failing, and the
+// reason the last one gave.
+func (r *EntryActivationReconciler) logActivationFailureEscalation(key engine.EntryActivationKey, rec activationFailureRecord, now time.Time) {
+	if r.cfg.Logger == nil {
+		return
+	}
+	failingFor := time.Duration(0)
+	if !rec.firstFailureAt.IsZero() {
+		failingFor = now.Sub(rec.firstFailureAt).Round(time.Second)
+	}
+	r.cfg.Logger.Warn("entry activation repeatedly failing",
+		"workflow_id", key.WorkflowID,
+		"workflow_version", key.WorkflowVersion,
+		"namespace", key.Namespace,
+		"entry_unit_id", key.EntryUnitID,
+		"replica_index", key.ReplicaIndex,
+		"runner_id", rec.runnerID,
+		"generation", rec.generation,
+		"consecutive_failures", rec.consecutiveFailures,
+		"failing_for", failingFor,
+		"error", rec.reason)
 }
 
 // jitter applies +/-20% jitter to d using the package-level math/rand source
@@ -1138,13 +1373,30 @@ func (r *EntryActivationReconciler) retryBlocked(key engine.EntryActivationKey, 
 	return now.Before(state.nextAttempt)
 }
 
-// clearRetryBackoff removes the retry-backoff state for key. Called once an
-// activation is successfully accepted by a runner, so a supply's recovery is
-// not masked by a lingering long backoff.
+// clearRetryBackoff clears the SCHEDULING half of the retry state for key:
+// called once an activation is accepted by a live, selector-matching runner, so
+// a supply's recovery is not masked by a lingering long backoff.
+//
+// It deliberately keeps the entry's diagnostics (reason, consecutive-failure
+// count, first-failure time). A healthy reconcile tick means this activation is
+// dispatchable again right now — it is NOT evidence that it has stopped being
+// fenced. The pattern this exists for is exactly fence -> ~90s of apparently
+// healthy passes -> fence again: resetting the count on each of those passes
+// would make the escalation ladder unreachable, which is the same reason the
+// backoff itself never accumulated there. The retained entry carries delay ==
+// 0, so retryBlocked() is false and the next redispatch is immediate;
+// pruneRetryBackoff still drops it once the activation leaves the store.
 func (r *EntryActivationReconciler) clearRetryBackoff(key engine.EntryActivationKey) {
 	r.mu.Lock()
-	delete(r.retryBackoff, key)
-	r.mu.Unlock()
+	defer r.mu.Unlock()
+	state, ok := r.retryBackoff[key]
+	if !ok {
+		return
+	}
+	state.recordedAt = time.Time{}
+	state.nextAttempt = time.Time{}
+	state.delay = 0
+	r.retryBackoff[key] = state
 }
 
 // MarkActivationFailed records that a runner could not take an activation and
@@ -1220,7 +1472,17 @@ func (r *EntryActivationReconciler) MarkActivationFailed(ctx context.Context, ru
 	if err := r.cfg.Store.Fence(ctx, key, act.Generation); err != nil {
 		return err
 	}
-	r.noteActivationFailure(key, time.Now())
+	// The reason travels with the failure: this is the one place a runner tells
+	// the control plane WHY it could not take an activation, and it used to be
+	// consumed by a single Info record that a nil logger or a level filter could
+	// discard, leaving nothing behind. It is now retained on the key's state
+	// (consecutive count, first-failure time, reason) and republished on the
+	// escalation ladder by recordActivationFailure.
+	r.recordActivationFailure(key, activationFailureInfo{
+		reason:     ack.Error,
+		runnerID:   runnerID,
+		generation: ack.Generation,
+	}, time.Now())
 
 	if r.cfg.Logger != nil {
 		r.cfg.Logger.Info("activation fenced after runner decline",
