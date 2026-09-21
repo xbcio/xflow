@@ -426,29 +426,43 @@ func (s *Store) projectSeededExecution(ctx context.Context, execID types.Executi
 	if req.Graph != nil {
 		rec.WorkflowName = req.Graph.Name()
 	}
+	// An unencodable field drops only that field, never the row: this
+	// projection is the execution's last surviving record once its Redis keys
+	// expire, so losing it over a params value that cannot be marshalled is a
+	// worse trade than a row without the field. Both JSON columns are nullable.
 	if req.Params != nil {
 		paramsJSON, err := json.Marshal(req.Params)
 		if err != nil {
-			s.auditWrite(ctx, "create_seeded_execution", func(context.Context) error {
-				return fmt.Errorf("marshal execution params for %q: %w", execID, err)
-			})
-			return
+			s.logProjectionEncodeFailure(execID, "params", err)
+		} else {
+			rec.Params = paramsJSON
 		}
-		rec.Params = paramsJSON
 	}
 	if req.Runtime != nil {
 		runtimeJSON, err := json.Marshal(req.Runtime)
 		if err != nil {
-			s.auditWrite(ctx, "create_seeded_execution", func(context.Context) error {
-				return fmt.Errorf("marshal execution runtime for %q: %w", execID, err)
-			})
-			return
+			s.logProjectionEncodeFailure(execID, "runtime", err)
+		} else {
+			rec.Runtime = runtimeJSON
 		}
-		rec.Runtime = runtimeJSON
 	}
 	s.auditWrite(ctx, "create_seeded_execution", func(ctx context.Context) error {
 		return s.db.CreateExecution(ctx, rec)
 	})
+}
+
+// logProjectionEncodeFailure reports a request field that could not be encoded
+// for the SQL projection. It is deliberately NOT routed through auditWrite: the
+// audit observer and its ok/failed counters answer "did the SQL projection
+// diverge from Redis?", and an encode failure is not that — counting it as one
+// reports a phantom audit-store outage to whoever is watching the counters. The
+// row is still projected, without the field.
+func (s *Store) logProjectionEncodeFailure(id types.ExecutionID, field string, err error) {
+	if s.logger == nil {
+		return
+	}
+	s.logger.Error("seed_projection_encode_failed",
+		"execution_id", string(id), "field", field, "err", err)
 }
 
 // admissionKey stores the result hash for a given deterministic execution ID.
