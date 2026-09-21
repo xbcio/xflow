@@ -96,10 +96,12 @@ func TestEntryActivationReconciler_AssignsMatchingRunner(t *testing.T) {
 		t.Fatalf("idempotent reconcile changed assignment: %+v", got)
 	}
 
-	// Expire the lease → reconcile fences the old generation and reassigns with a
-	// strictly higher generation. Refresh runner heartbeats so they remain live
-	// at the later clock.
-	later := got.LeaseDeadline.Add(time.Second)
+	// Lapse the lease past the revive grace → reconcile fences the old
+	// generation and reassigns with a strictly higher generation. (Inside the
+	// grace the same tick renews instead — see
+	// TestEntryActivationReconciler_LeaseLapsedByStalledPassIsRevivedNotFenced.)
+	// Refresh runner heartbeats so they remain live at the later clock.
+	later := got.LeaseDeadline.Add(DefaultEntryActivationLeaseGrace + time.Second)
 	matching.LastHeartbeat = later
 	nonMatching.LastHeartbeat = later
 	lister.runners = []RunnerSnapshot{nonMatching, matching}
@@ -1403,8 +1405,9 @@ func TestMarkActivationFailedIgnoresStaleGeneration(t *testing.T) {
 		t.Fatalf("expected gen=1 runner=runner-a, got gen=%d runner=%q", got.Generation, got.RunnerID)
 	}
 
-	// Expire and reassign at generation 2 (simulating a normal lease cycle).
-	later := got.LeaseDeadline.Add(time.Second)
+	// Lapse the lease past the revive grace and reassign at generation 2
+	// (simulating a normal lease cycle).
+	later := got.LeaseDeadline.Add(DefaultEntryActivationLeaseGrace + time.Second)
 	runner.LastHeartbeat = later
 	lister.runners = []RunnerSnapshot{runner}
 	if err := r.Reconcile(ctx, later); err != nil {

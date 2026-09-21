@@ -308,8 +308,10 @@ func TestEntryActivationReconciler_EscalatesRepeatedActivationFailures(t *testin
 			}
 			generations = append(generations, act.Generation)
 
-			// The runner stays live; only its lease lapses.
-			now = now.Add(r.cfg.LeaseTTL + time.Second)
+			// The runner stays live; only its lease lapses — past the revive
+			// grace, so the pass still fences (inside the grace a live owner is
+			// renewed instead, which is not the path this test is about).
+			now = now.Add(r.cfg.LeaseTTL + r.leaseGrace() + time.Second)
 			runner.LastHeartbeat = now
 			lister.runners = []RunnerSnapshot{runner}
 			if err := r.Reconcile(ctx, now); err != nil {

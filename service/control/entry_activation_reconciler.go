@@ -29,6 +29,20 @@ const (
 	// DefaultEntryActivationRenewThreshold is the remaining-lease window under
 	// which a live owner's lease is proactively renewed.
 	DefaultEntryActivationRenewThreshold = 20 * time.Second
+	// DefaultEntryActivationLeaseGrace is how long past its deadline a live,
+	// still-matching owner's assignment may still be renewed instead of fenced.
+	//
+	// A renewal is only attempted by a pass that lands inside the
+	// RenewThreshold window, and the loop's ticker coalesces the ticks a slow
+	// pass misses, so the effective pass interval can exceed that window: the
+	// window is then jumped over and the lease is never renewed, with no fault
+	// on the owner's side. One full TTL of grace covers that slip (and the
+	// deadline skew a slow pass writes into the lease it renews); beyond it the
+	// owner has gone a whole TTL without a renewal while passes were running,
+	// which is the signal that it is live but no longer hosting — the assignment
+	// is then fenced and re-assigned, redelivering the Activate directive that
+	// only a re-assignment can deliver again.
+	DefaultEntryActivationLeaseGrace = DefaultEntryActivationLeaseTTL
 	// DefaultActivationRetryBackoffMin is the first retry delay after a runner
 	// declines an activation. It matches the reconcile period: retrying sooner
 	// cannot help, since a retry only takes effect on a reconcile pass.
@@ -125,6 +139,10 @@ type EntryActivationReconcilerConfig struct {
 	// lease is proactively renewed. Defaults to
 	// DefaultEntryActivationRenewThreshold.
 	RenewThreshold time.Duration
+	// LeaseGrace is how long past its deadline a live, still-matching owner may
+	// still be renewed instead of fenced. Defaults to
+	// DefaultEntryActivationLeaseGrace.
+	LeaseGrace time.Duration
 	// RetryBackoffMin is the first retry delay applied after a runner declines
 	// an activation. Defaults to DefaultActivationRetryBackoffMin.
 	RetryBackoffMin time.Duration
@@ -149,9 +167,9 @@ type entryRunnerDirectives struct {
 // EntryActivationReconciler drives desired EntryActivation records toward a
 // live runner assignment. For each desired-but-unassigned activation it assigns
 // a capable, selector-matching live runner a fresh generation; activations
-// whose lease has expired (or whose owner is no longer live) are fenced and
-// reassigned. It is fail-closed: a runner that does not satisfy a required
-// selector is never assigned.
+// whose lease has lapsed beyond the revive grace, or whose owner is no longer
+// live, are fenced and reassigned. It is fail-closed: a runner that does not
+// satisfy a required selector is never assigned.
 //
 // For "default" selector mode (spec §11.7): when no label-matching runner is
 // available (or all matching runners are at capacity) for longer than
@@ -310,6 +328,9 @@ func NewEntryActivationReconciler(cfg EntryActivationReconcilerConfig) *EntryAct
 	if cfg.RenewThreshold <= 0 {
 		cfg.RenewThreshold = DefaultEntryActivationRenewThreshold
 	}
+	if cfg.LeaseGrace <= 0 {
+		cfg.LeaseGrace = DefaultEntryActivationLeaseGrace
+	}
 	if cfg.RetryBackoffMin <= 0 {
 		cfg.RetryBackoffMin = DefaultActivationRetryBackoffMin
 	}
@@ -330,6 +351,18 @@ func NewEntryActivationReconciler(cfg EntryActivationReconcilerConfig) *EntryAct
 		noMatchSince: make(map[engine.EntryActivationKey]time.Time),
 		retryBackoff: make(map[engine.EntryActivationKey]activationRetryState),
 	}
+}
+
+// leaseGrace is the configured revive grace with its default applied, read
+// through an accessor for the same reason noteFailureLocked re-derives its
+// backoff bounds: a reconciler assembled without the constructor must not end
+// up with no grace at all, which would silently restore the terminal fence this
+// grace exists to remove.
+func (r *EntryActivationReconciler) leaseGrace() time.Duration {
+	if r.cfg.LeaseGrace > 0 {
+		return r.cfg.LeaseGrace
+	}
+	return DefaultEntryActivationLeaseGrace
 }
 
 // Reconcile performs a single reconciliation pass over every desired activation
@@ -528,12 +561,13 @@ func (r *EntryActivationReconciler) reconcileExisting(ctx context.Context, act *
 		return nil
 	}
 
-	// Already assigned: keep it unless the lease expired, the owner is no longer
-	// live, or the owner no longer satisfies the (possibly updated) desired
-	// selector/capability. Otherwise fence the old generation and deactivate the
-	// old owner before reassigning, so the stale runner can never keep driving the
-	// entry unit and a material change (selector/capability) moves it to a runner
-	// that matches the new desired state.
+	// Already assigned: keep it unless the lease lapsed beyond the revive grace,
+	// the owner is no longer live, or the owner no longer satisfies the
+	// (possibly updated) desired selector/capability. Otherwise fence the old
+	// generation and deactivate the old owner before reassigning, so the stale
+	// runner can never keep driving the entry unit and a material change
+	// (selector/capability) moves it to a runner that matches the new desired
+	// state.
 	if act.RunnerID != "" {
 		expired := !act.LeaseDeadline.IsZero() && act.LeaseDeadline.Before(now)
 		ownerLive := r.runnerIsLive(act.RunnerID, live, now)
@@ -543,7 +577,28 @@ func (r *EntryActivationReconciler) reconcileExisting(ctx context.Context, act *
 			owners[logical] = make(map[string]struct{})
 		}
 		_, siblingAlreadyOwns := owners[logical][act.RunnerID]
-		if !expired && ownerMatches && !siblingAlreadyOwns {
+		// A live owner that still matches desired state keeps its assignment even
+		// when the deadline has already passed: a lapsed deadline means the
+		// renewal was MISSED — renewal is only attempted by a pass landing inside
+		// the RenewThreshold window, and the loop's ticker coalesces the ticks a
+		// slow pass misses, so that window can be jumped over entirely — not that
+		// the owner stopped hosting. Fencing on a miss is terminal for a healthy
+		// owner (the next pass reassigns at a new generation, deactivating and
+		// re-activating the runner) and is decided by nothing but the reconciler's
+		// own cadence.
+		//
+		// LeaseGrace bounds that revival, so a missed renewal cannot be forgiven
+		// forever. Note what the bound does and does not cover: it can only be
+		// reached BY a miss, because a live owner that matches desired state is
+		// renewed on every pass (the deadline falls inside the renew window on some
+		// cadence) and so never lapses while passes are running. It is deliberately
+		// NOT a detector for "live but no longer hosting": a runner that kept its
+		// heartbeat and selector but lost the Activate directive still matches, so
+		// it is renewed indefinitely rather than fenced. Redelivering that directive
+		// is a separate problem — RunnerSnapshot carries no hosted-activation set to
+		// detect it with.
+		revivable := !expired || now.Sub(act.LeaseDeadline) <= r.leaseGrace()
+		if ownerMatches && !siblingAlreadyOwns && revivable {
 			owners[logical][act.RunnerID] = struct{}{}
 			// Owner still valid: the activation is being hosted successfully, so any
 			// backoff from a prior failure on this key no longer applies. (Task 5
@@ -555,8 +610,23 @@ func (r *EntryActivationReconciler) reconcileExisting(ctx context.Context, act *
 			// disrupted.
 			if !act.LeaseDeadline.IsZero() && act.LeaseDeadline.Sub(now) < r.cfg.RenewThreshold {
 				newDeadline := now.Add(r.cfg.LeaseTTL)
-				if _, err := r.cfg.Store.Renew(ctx, key, act.Generation, newDeadline); err != nil {
+				renewed, err := r.cfg.Store.Renew(ctx, key, act.Generation, newDeadline)
+				if err != nil {
 					return err
+				}
+				// A revival is the event this grace exists for, and it is invisible
+				// otherwise: the pass that would have missed the window looks exactly
+				// like a healthy one.
+				if renewed && expired && r.cfg.Logger != nil {
+					r.cfg.Logger.Warn("entry activation lease renewed past its deadline",
+						"workflow_id", act.WorkflowID,
+						"workflow_version", act.WorkflowVersion,
+						"namespace", act.Namespace,
+						"entry_unit_id", act.EntryUnitID,
+						"replica_index", act.ReplicaIndex,
+						"runner_id", act.RunnerID,
+						"generation", act.Generation,
+						"lapsed_for", now.Sub(act.LeaseDeadline).Round(time.Second))
 				}
 			}
 			return nil
