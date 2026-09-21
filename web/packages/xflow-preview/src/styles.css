@@ -1,17 +1,196 @@
 .xflow-preview {
-  --xflow-bg: #171717;
-  --xflow-panel: #202020;
-  --xflow-panel-2: #262626;
-  --xflow-line: #343434;
-  --xflow-text: #f2f2f2;
-  --xflow-muted: #9b9b9b;
-  --xflow-blue: #2878ff;
-  --xflow-green: #35c98b;
-  --xflow-red: #ff5f57;
-  --xflow-amber: #f7b955;
-  background: var(--xflow-bg);
-  border: 1px solid var(--xflow-line);
-  color: var(--xflow-text);
+  /*
+   * Theme contract: an embedding XFlow surface may provide the public
+   * --xflow-* semantic tokens. Keep those tokens outside this scope so the
+   * preview can inherit them; these private aliases retain its dark standalone
+   * appearance when it is rendered without an editor shell.
+   */
+
+  /* Surfaces / canvas */
+  --xflow-preview-surface-app: var(--xflow-surface-app, #171717);
+  --xflow-preview-surface-toolbar: var(--xflow-surface-toolbar, #1f1f1f);
+  --xflow-preview-surface-panel: var(--xflow-surface-panel, #202020);
+  --xflow-preview-surface-panel-raised: var(--xflow-surface-panel-raised, #262626);
+  --xflow-preview-surface-field: var(--xflow-surface-field, #1f2125);
+  --xflow-preview-surface-canvas: var(--xflow-surface-canvas, #222);
+  --xflow-preview-surface-control: var(
+    --xflow-surface-control,
+    var(--xflow-surface-field, #252525)
+  );
+  --xflow-preview-surface-hover: var(--xflow-surface-hover, #303030);
+  --xflow-preview-canvas-grid: var(--xflow-canvas-grid-minor, #3b3b3b);
+  --xflow-preview-canvas-grid-major: var(
+    --xflow-canvas-grid-major,
+    var(--xflow-canvas-grid-minor, #3b3b3b)
+  );
+  --xflow-preview-minimap-mask: var(--xflow-canvas-minimap-mask, rgba(16, 18, 20, .58));
+
+  /* Text / borders / focus */
+  --xflow-preview-text: var(--xflow-text, #f2f2f2);
+  --xflow-preview-text-secondary: var(--xflow-text-secondary, #c7c7c7);
+  --xflow-preview-text-muted: var(--xflow-text-tertiary, #9b9b9b);
+  --xflow-preview-text-meta: var(--xflow-text-secondary, #cfd4dc);
+  --xflow-preview-text-pill: var(--xflow-text-secondary, #cfcfcf);
+  --xflow-preview-border: var(--xflow-border, #343434);
+  --xflow-preview-border-strong: var(--xflow-border-strong, #454951);
+  --xflow-preview-focus-base: var(--xflow-focus, #2878ff);
+  --xflow-preview-focus: var(--xflow-focus, #8db5ff);
+  --xflow-preview-focus-subtle: var(
+    --xflow-focus-subtle,
+    color-mix(in srgb, var(--xflow-preview-focus-base) 9%, transparent)
+  );
+  --xflow-preview-focus-border-strong: var(
+    --xflow-focus-border-strong,
+    color-mix(in srgb, var(--xflow-preview-focus-base) 42%, transparent)
+  );
+  --xflow-preview-focus-ring: var(
+    --xflow-focus-ring,
+    color-mix(in srgb, var(--xflow-preview-focus-base) 58%, transparent)
+  );
+
+  /* Runtime status */
+  --xflow-preview-status-running: var(--xflow-status-running, var(--xflow-focus, #2878ff));
+  --xflow-preview-status-running-text: var(
+    --xflow-status-running-text,
+    var(--xflow-status-running, var(--xflow-focus, #8db5ff))
+  );
+  --xflow-preview-status-running-border: var(
+    --xflow-status-running-border,
+    color-mix(in srgb, var(--xflow-preview-status-running) 58%, transparent)
+  );
+  --xflow-preview-status-success: var(--xflow-status-success, #35c98b);
+  --xflow-preview-status-success-text: var(
+    --xflow-status-success-text,
+    var(--xflow-preview-status-success)
+  );
+  --xflow-preview-status-success-border: var(
+    --xflow-status-success-border,
+    color-mix(in srgb, var(--xflow-preview-status-success) 56%, transparent)
+  );
+  --xflow-preview-status-warning: var(--xflow-status-warning, #f7b955);
+  --xflow-preview-status-error: var(--xflow-status-error, #ff5f57);
+  --xflow-preview-status-error-text: var(
+    --xflow-status-error-text,
+    var(--xflow-preview-status-error)
+  );
+  --xflow-preview-status-error-border: var(
+    --xflow-status-error-border,
+    color-mix(in srgb, var(--xflow-preview-status-error) 58%, transparent)
+  );
+  --xflow-preview-status-disabled: var(--xflow-status-disabled, #747b86);
+
+  /* Nodes / ports / edges */
+  --xflow-preview-node-bg: var(--xflow-node-bg, #292b2f);
+  --xflow-preview-node-border: var(
+    --xflow-node-border,
+    var(--xflow-preview-border-strong)
+  );
+  --xflow-preview-node-shadow: var(--xflow-node-shadow, 0 12px 28px rgba(0, 0, 0, .24));
+  --xflow-preview-node-meta-bg: var(
+    --xflow-node-meta-bg,
+    var(--xflow-preview-surface-field)
+  );
+  --xflow-preview-port: var(--xflow-port-bg, var(--xflow-preview-focus));
+  --xflow-preview-port-border: var(--xflow-port-border, var(--xflow-surface-canvas, #202226));
+  --xflow-preview-port-disabled: var(
+    --xflow-port-disabled,
+    var(--xflow-preview-status-disabled)
+  );
+  --xflow-preview-port-chip-bg: var(
+    --xflow-port-chip-bg,
+    color-mix(in srgb, var(--xflow-preview-focus-base) 18%, transparent)
+  );
+  --xflow-preview-port-chip-border: var(
+    --xflow-port-chip-border,
+    var(--xflow-preview-focus-border-strong)
+  );
+  --xflow-preview-port-chip-text: var(--xflow-port-text, var(--xflow-preview-focus));
+  --xflow-preview-edge: var(--xflow-edge, #5b5b5b);
+  --xflow-preview-edge-error: var(
+    --xflow-edge-error,
+    var(--xflow-preview-status-error)
+  );
+  --xflow-preview-edge-selected: var(
+    --xflow-edge-selected,
+    var(--xflow-preview-focus)
+  );
+  --xflow-preview-edge-running: var(
+    --xflow-edge-running,
+    var(--xflow-status-running, var(--xflow-focus, #2878ff))
+  );
+  --xflow-preview-edge-label: var(--xflow-edge-label, var(--xflow-status-warning, #f7b955));
+  --xflow-preview-edge-label-bg: var(
+    --xflow-edge-label-bg,
+    var(--xflow-surface-canvas, #202020)
+  );
+
+  /* Node type tones */
+  --xflow-preview-tone-blue-base: var(--xflow-node-tone-blue, var(--xflow-focus, #2878ff));
+  --xflow-preview-tone-blue: var(
+    --xflow-node-tone-blue-text,
+    var(--xflow-node-tone-blue, var(--xflow-focus, #8db5ff))
+  );
+  --xflow-preview-tone-blue-bg: var(
+    --xflow-node-tone-blue-bg,
+    color-mix(in srgb, var(--xflow-preview-tone-blue-base) 9%, transparent)
+  );
+  --xflow-preview-tone-blue-border: var(
+    --xflow-node-tone-blue-border,
+    color-mix(in srgb, var(--xflow-preview-tone-blue-base) 20%, transparent)
+  );
+  --xflow-preview-tone-cyan-base: var(--xflow-node-tone-cyan, #19c2d6);
+  --xflow-preview-tone-cyan: var(--xflow-node-tone-cyan-text, var(--xflow-node-tone-cyan, #55d7e6));
+  --xflow-preview-tone-cyan-bg: var(
+    --xflow-node-tone-cyan-bg,
+    color-mix(in srgb, var(--xflow-preview-tone-cyan-base) 8%, transparent)
+  );
+  --xflow-preview-tone-cyan-border: var(
+    --xflow-node-tone-cyan-border,
+    color-mix(in srgb, var(--xflow-preview-tone-cyan-base) 18%, transparent)
+  );
+  --xflow-preview-tone-green-base: var(--xflow-node-tone-green, #35c98b);
+  --xflow-preview-tone-green: var(
+    --xflow-node-tone-green-text,
+    var(--xflow-node-tone-green, #67d9a7)
+  );
+  --xflow-preview-tone-green-bg: var(
+    --xflow-node-tone-green-bg,
+    color-mix(in srgb, var(--xflow-preview-tone-green-base) 8%, transparent)
+  );
+  --xflow-preview-tone-green-border: var(
+    --xflow-node-tone-green-border,
+    color-mix(in srgb, var(--xflow-preview-tone-green-base) 18%, transparent)
+  );
+  --xflow-preview-tone-amber-base: var(--xflow-node-tone-amber, #f7b955);
+  --xflow-preview-tone-amber: var(
+    --xflow-node-tone-amber-text,
+    var(--xflow-node-tone-amber, #f7b955)
+  );
+  --xflow-preview-tone-amber-bg: var(
+    --xflow-node-tone-amber-bg,
+    color-mix(in srgb, var(--xflow-preview-tone-amber-base) 8%, transparent)
+  );
+  --xflow-preview-tone-amber-border: var(
+    --xflow-node-tone-amber-border,
+    color-mix(in srgb, var(--xflow-preview-tone-amber-base) 20%, transparent)
+  );
+  --xflow-preview-tone-violet-base: var(--xflow-node-tone-violet, #8b6dff);
+  --xflow-preview-tone-violet: var(
+    --xflow-node-tone-violet-text,
+    var(--xflow-node-tone-violet, #a99bff)
+  );
+  --xflow-preview-tone-violet-bg: var(
+    --xflow-node-tone-violet-bg,
+    color-mix(in srgb, var(--xflow-preview-tone-violet-base) 9%, transparent)
+  );
+  --xflow-preview-tone-violet-border: var(
+    --xflow-node-tone-violet-border,
+    color-mix(in srgb, var(--xflow-preview-tone-violet-base) 20%, transparent)
+  );
+
+  background: var(--xflow-preview-surface-app);
+  border: 1px solid var(--xflow-preview-border);
+  color: var(--xflow-preview-text);
   display: flex;
   flex-direction: column;
   font-family:
@@ -25,8 +204,8 @@
 
 .xflow-preview-toolbar {
   align-items: center;
-  background: #1f1f1f;
-  border-bottom: 1px solid var(--xflow-line);
+  background: var(--xflow-preview-surface-toolbar);
+  border-bottom: 1px solid var(--xflow-preview-border);
   display: flex;
   justify-content: space-between;
   min-height: 48px;
@@ -39,7 +218,7 @@
 }
 
 .xflow-preview-toolbar p {
-  color: var(--xflow-muted);
+  color: var(--xflow-preview-text-muted);
   font-size: 11px;
 }
 
@@ -49,26 +228,26 @@
 }
 
 .xflow-preview-status {
-  border: 1px solid var(--xflow-line);
+  border: 1px solid var(--xflow-preview-border);
   border-radius: 4px;
-  color: var(--xflow-muted);
+  color: var(--xflow-preview-text-muted);
   font-size: 12px;
   padding: 4px 8px;
 }
 
 .xflow-preview-status[data-status="running"] {
-  border-color: var(--xflow-blue);
-  color: #8db5ff;
+  border-color: var(--xflow-preview-status-running);
+  color: var(--xflow-preview-status-running-text);
 }
 
 .xflow-preview-status[data-status="success"] {
-  border-color: var(--xflow-green);
-  color: var(--xflow-green);
+  border-color: var(--xflow-preview-status-success);
+  color: var(--xflow-preview-status-success-text);
 }
 
 .xflow-preview-status[data-status="failed"] {
-  border-color: var(--xflow-red);
-  color: var(--xflow-red);
+  border-color: var(--xflow-preview-status-error);
+  color: var(--xflow-preview-status-error-text);
 }
 
 .xflow-preview-shell {
@@ -80,65 +259,87 @@
 
 .xflow-preview-sidebar,
 .xflow-preview-panel {
-  background: var(--xflow-panel);
-  border-color: var(--xflow-line);
-  color: var(--xflow-muted);
+  background: var(--xflow-preview-surface-panel);
+  border-color: var(--xflow-preview-border);
+  color: var(--xflow-preview-text-muted);
   font-size: 12px;
   padding: 14px;
 }
 
 .xflow-preview-sidebar {
-  border-right: 1px solid var(--xflow-line);
+  border-right: 1px solid var(--xflow-preview-border);
 }
 
 .xflow-preview-sidebar strong {
-  color: var(--xflow-text);
+  color: var(--xflow-preview-text);
   display: block;
   font-size: 24px;
   margin-top: 8px;
 }
 
 .xflow-preview-panel {
-  border-left: 1px solid var(--xflow-line);
+  border-left: 1px solid var(--xflow-preview-border);
 }
 
 .xflow-preview-panel > span {
-  color: var(--xflow-text);
+  color: var(--xflow-preview-text);
   display: block;
   font-weight: 650;
   margin-bottom: 10px;
 }
 
 .xflow-preview-canvas {
-  background: #222;
+  background: var(--xflow-preview-surface-canvas);
   min-height: 360px;
   min-width: 0;
   position: relative;
 }
 
 .xflow-preview-canvas .react-flow {
-  background: #222;
+  --xy-background-color: var(--xflow-preview-surface-canvas);
+  --xy-background-pattern-color: var(--xflow-preview-canvas-grid);
+  --xy-edge-stroke: var(--xflow-preview-edge);
+  --xy-edge-stroke-selected: var(--xflow-preview-edge-selected);
+  --xy-connectionline-stroke: var(--xflow-preview-edge-running);
+  --xy-selection-background-color: var(--xflow-preview-focus-subtle);
+  --xy-selection-border: 1px dotted var(--xflow-preview-focus-ring);
+  --xy-handle-background-color: var(--xflow-preview-port);
+  --xy-handle-border-color: var(--xflow-preview-port-border);
+  --xy-controls-button-background-color: var(--xflow-preview-surface-control);
+  --xy-controls-button-background-color-hover: var(--xflow-preview-surface-hover);
+  --xy-controls-button-color: var(--xflow-preview-text);
+  --xy-controls-button-color-hover: var(--xflow-preview-text);
+  --xy-controls-button-border-color: var(--xflow-preview-border);
+  --xy-edge-label-background-color: var(--xflow-preview-edge-label-bg);
+  --xy-edge-label-color: var(--xflow-preview-edge-label);
+  background: var(--xflow-preview-surface-canvas);
+}
+
+.xflow-preview-canvas .react-flow__background {
+  /* Override the Background color prop so an embedding theme controls the grid. */
+  --xy-background-pattern-color-props: var(--xflow-preview-canvas-grid-major) !important;
 }
 
 .xflow-preview-canvas .react-flow__controls {
-  background: #252525;
-  border: 1px solid var(--xflow-line);
+  background: var(--xflow-preview-surface-control);
+  border: 1px solid var(--xflow-preview-border);
   box-shadow: none;
 }
 
 .xflow-preview-canvas .react-flow__controls button {
-  background: #252525;
-  border-bottom: 1px solid var(--xflow-line);
-  color: var(--xflow-text);
+  background: var(--xflow-preview-surface-control);
+  border-bottom: 1px solid var(--xflow-preview-border);
+  color: var(--xflow-preview-text);
 }
 
 .xflow-preview-canvas .react-flow__controls button:hover {
-  background: #303030;
+  background: var(--xflow-preview-surface-hover);
 }
 
 .xflow-preview-canvas .react-flow__minimap {
-  background: #202020;
-  border: 1px solid var(--xflow-line);
+  --xy-minimap-mask-background-color-props: var(--xflow-preview-minimap-mask) !important;
+  background: var(--xflow-preview-surface-panel);
+  border: 1px solid var(--xflow-preview-border);
   border-radius: 4px;
 }
 
@@ -146,41 +347,72 @@
   stroke-linecap: round;
 }
 
+.xflow-preview-canvas .react-flow__edge:focus-visible .react-flow__edge-path,
+.xflow-preview-canvas .react-flow__edge.selected .react-flow__edge-path {
+  stroke: var(--xflow-preview-edge-selected) !important;
+  stroke-width: 2.4;
+}
+
 .xflow-preview-canvas .react-flow__edge-textbg {
-  fill: #202020;
+  fill: var(--xflow-preview-edge-label-bg);
 }
 
 .xflow-preview-canvas .react-flow__edge-text {
-  fill: var(--xflow-amber);
+  fill: var(--xflow-preview-edge-label);
   font-size: 11px;
 }
 
 .xflow-preview-node {
-  background: #292b2f;
-  border: 1px solid #454951;
+  background: var(--xflow-preview-node-bg);
+  border: 1px solid var(--xflow-preview-node-border);
   border-radius: 6px;
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
+  box-shadow: var(--xflow-preview-node-shadow);
   min-width: 198px;
   padding: 10px;
   position: relative;
 }
 
-.xflow-preview-node:focus-visible,
+.xflow-preview-node__select:focus-visible,
 .xflow-preview-node[data-selected="true"] {
-  outline: 2px solid rgba(40, 120, 255, 0.58);
+  outline: 2px solid var(--xflow-preview-focus-ring);
   outline-offset: 2px;
 }
 
+.xflow-preview-node__select {
+  border-radius: inherit;
+  cursor: pointer;
+  outline: none;
+}
+
+.xflow-preview-canvas .xflow-preview-node__handle {
+  background: var(--xflow-preview-port);
+  border: 2px solid var(--xflow-preview-port-border);
+  height: 10px;
+  width: 10px;
+  z-index: 2;
+}
+
+.xflow-preview-canvas .xflow-preview-node__handle[aria-disabled="true"] {
+  background: var(--xflow-preview-port-disabled);
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.xflow-preview-canvas .xflow-preview-node__handle:focus-visible {
+  box-shadow: 0 0 0 3px var(--xflow-preview-focus-ring);
+  outline: none;
+}
+
 .xflow-preview-node[data-status="running"] {
-  border-color: var(--xflow-blue);
+  border-color: var(--xflow-preview-status-running);
 }
 
 .xflow-preview-node[data-status="success"] {
-  border-color: var(--xflow-green);
+  border-color: var(--xflow-preview-status-success);
 }
 
 .xflow-preview-node[data-status="failed"] {
-  border-color: var(--xflow-red);
+  border-color: var(--xflow-preview-status-error);
 }
 
 .xflow-preview-node__header {
@@ -210,22 +442,22 @@
 .xflow-preview-node__header > div > span,
 .xflow-preview-node__status,
 .xflow-preview-node__ports span {
-  color: var(--xflow-muted);
+  color: var(--xflow-preview-text-muted);
   font-size: 11px;
 }
 
 .xflow-preview-node__status {
-  border: 1px solid var(--xflow-line);
+  border: 1px solid var(--xflow-preview-border);
   border-radius: 4px;
   padding: 2px 5px;
 }
 
 .xflow-preview-node__icon {
   align-items: center;
-  background: rgba(40, 120, 255, .09);
-  border: 1px solid rgba(40, 120, 255, .2);
+  background: var(--xflow-preview-tone-blue-bg);
+  border: 1px solid var(--xflow-preview-tone-blue-border);
   border-radius: 5px;
-  color: #8db5ff;
+  color: var(--xflow-preview-tone-blue);
   display: inline-flex;
   flex: 0 0 28px;
   height: 28px;
@@ -238,46 +470,46 @@
 }
 
 .xflow-preview-node__icon[data-tone="green"] {
-  background: rgba(53, 201, 139, .08);
-  border-color: rgba(53, 201, 139, .18);
-  color: #67d9a7;
+  background: var(--xflow-preview-tone-green-bg);
+  border-color: var(--xflow-preview-tone-green-border);
+  color: var(--xflow-preview-tone-green);
 }
 
 .xflow-preview-node__icon[data-tone="cyan"] {
-  background: rgba(25, 194, 214, .08);
-  border-color: rgba(25, 194, 214, .18);
-  color: #55d7e6;
+  background: var(--xflow-preview-tone-cyan-bg);
+  border-color: var(--xflow-preview-tone-cyan-border);
+  color: var(--xflow-preview-tone-cyan);
 }
 
 .xflow-preview-node__icon[data-tone="amber"] {
-  background: rgba(247, 185, 85, .08);
-  border-color: rgba(247, 185, 85, .2);
-  color: #f7b955;
+  background: var(--xflow-preview-tone-amber-bg);
+  border-color: var(--xflow-preview-tone-amber-border);
+  color: var(--xflow-preview-tone-amber);
 }
 
 .xflow-preview-node__icon[data-tone="violet"] {
-  background: rgba(139, 109, 255, .09);
-  border-color: rgba(139, 109, 255, .2);
-  color: #a99bff;
+  background: var(--xflow-preview-tone-violet-bg);
+  border-color: var(--xflow-preview-tone-violet-border);
+  color: var(--xflow-preview-tone-violet);
 }
 
 .xflow-preview-node[data-status="running"] .xflow-preview-node__status {
-  border-color: rgba(40, 120, 255, .58);
-  color: #8db5ff;
+  border-color: var(--xflow-preview-status-running-border);
+  color: var(--xflow-preview-status-running-text);
 }
 
 .xflow-preview-node[data-status="success"] .xflow-preview-node__status {
-  border-color: rgba(53, 201, 139, .56);
-  color: var(--xflow-green);
+  border-color: var(--xflow-preview-status-success-border);
+  color: var(--xflow-preview-status-success-text);
 }
 
 .xflow-preview-node[data-status="failed"] .xflow-preview-node__status {
-  border-color: rgba(255, 95, 87, .58);
-  color: var(--xflow-red);
+  border-color: var(--xflow-preview-status-error-border);
+  color: var(--xflow-preview-status-error-text);
 }
 
 .xflow-preview-node__body {
-  border-top: 1px solid var(--xflow-line);
+  border-top: 1px solid var(--xflow-preview-border);
   display: grid;
   gap: 7px;
   margin-top: 10px;
@@ -294,10 +526,10 @@
 }
 
 .xflow-preview-node__meta span {
-  background: #1f2125;
-  border: 1px solid var(--xflow-line);
+  background: var(--xflow-preview-node-meta-bg);
+  border: 1px solid var(--xflow-preview-border);
   border-radius: 4px;
-  color: #cfd4dc;
+  color: var(--xflow-preview-text-meta);
   font-size: 11px;
   padding: 2px 5px;
 }
@@ -309,10 +541,10 @@
 }
 
 .xflow-preview-node__port-chips span {
-  background: rgba(40, 120, 255, .18);
-  border: 1px solid rgba(40, 120, 255, .42);
+  background: var(--xflow-preview-port-chip-bg);
+  border: 1px solid var(--xflow-preview-port-chip-border);
   border-radius: 4px;
-  color: #8db5ff;
+  color: var(--xflow-preview-port-chip-text);
   font-family: "SFMono-Regular", Consolas, monospace;
   font-size: 10px;
   line-height: 18px;
@@ -328,27 +560,27 @@
 }
 
 .xflow-preview-node__body code {
-  color: #c7c7c7;
+  color: var(--xflow-preview-text-secondary);
   font-family: "SFMono-Regular", Consolas, monospace;
   font-size: 11px;
 }
 
 .xflow-preview-node__error {
-  color: var(--xflow-red);
+  color: var(--xflow-preview-status-error-text);
   font-size: 12px;
   margin: 10px 0 0;
 }
 
 .xflow-preview-summary,
 .xflow-preview-details {
-  border-bottom: 1px solid var(--xflow-line);
+  border-bottom: 1px solid var(--xflow-preview-border);
   margin-bottom: 12px;
   padding-bottom: 12px;
 }
 
 .xflow-preview-summary > span,
 .xflow-preview-details > span {
-  color: var(--xflow-text);
+  color: var(--xflow-preview-text);
   display: block;
   font-weight: 650;
   margin-bottom: 10px;
@@ -361,10 +593,10 @@
 }
 
 .xflow-preview-summary__pill {
-  background: var(--xflow-panel-2);
-  border: 1px solid var(--xflow-line);
+  background: var(--xflow-preview-surface-panel-raised);
+  border: 1px solid var(--xflow-preview-border);
   border-radius: 4px;
-  color: #cfcfcf;
+  color: var(--xflow-preview-text-pill);
   font-size: 11px;
   padding: 4px 7px;
 }
@@ -377,18 +609,18 @@
 }
 
 .xflow-preview-details strong {
-  color: var(--xflow-text);
+  color: var(--xflow-preview-text);
   font-size: 13px;
 }
 
 .xflow-preview-details code {
-  color: #c7c7c7;
+  color: var(--xflow-preview-text-secondary);
   font-family: "SFMono-Regular", Consolas, monospace;
   font-size: 11px;
 }
 
 .xflow-preview-details p {
-  color: var(--xflow-muted);
+  color: var(--xflow-preview-text-muted);
   font-size: 12px;
 }
 
@@ -401,8 +633,8 @@
 }
 
 .xflow-preview-edges li {
-  background: var(--xflow-panel-2);
-  border: 1px solid var(--xflow-line);
+  background: var(--xflow-preview-surface-panel-raised);
+  border: 1px solid var(--xflow-preview-border);
   border-radius: 4px;
   display: grid;
   gap: 5px;
@@ -419,11 +651,11 @@
 
 .xflow-preview-edges span:nth-child(2),
 .xflow-preview-edges span:nth-child(5) {
-  color: var(--xflow-amber);
+  color: var(--xflow-preview-status-warning);
 }
 
 .xflow-preview-empty {
-  color: var(--xflow-muted);
+  color: var(--xflow-preview-text-muted);
   font-size: 13px;
   margin: 0;
 }
@@ -436,6 +668,6 @@
   .xflow-preview-sidebar,
   .xflow-preview-panel {
     border: 0;
-    border-top: 1px solid var(--xflow-line);
+    border-top: 1px solid var(--xflow-preview-border);
   }
 }

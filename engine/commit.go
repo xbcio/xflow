@@ -138,7 +138,7 @@ func (e *Engine) CommitTaskTimeout(ctx context.Context, lease *TaskLease, cause 
 		return e.CommitTaskFailure(ctx, lease, cause)
 	}
 	meta := g.NodeAt(t.NodeIdx)
-	outcome, err := e.commitAcyclicNodeError(ctx, lease, meta, privateOutputForTask(g, t), cause, nil, nil)
+	outcome, err := e.commitAcyclicNodeError(ctx, lease, g, meta, privateOutputForTask(g, t), cause, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -168,7 +168,7 @@ func (e *Engine) CommitTaskFailure(ctx context.Context, lease *TaskLease, failur
 	}
 	privateOutput := privateOutputForTask(g, t)
 	if !g.AllowCycles() {
-		return e.commitAcyclicFailure(ctx, lease, privateOutput, failure)
+		return e.commitAcyclicFailure(ctx, lease, g, privateOutput, failure)
 	}
 	outcome, err := e.commitLegacyNode(ctx, lease, privateOutput, types.NodeStatusFailed, nil, "", failure.Error(), true)
 	if err != nil {
@@ -258,7 +258,7 @@ func (e *Engine) commitLegacyNodeWithClassification(ctx context.Context, lease *
 	// different readback depending on which commit entry point the graph type
 	// happened to route through.
 	if !g.AllowCycles() {
-		return e.commitAcyclicNodeWithClassification(ctx, lease, privateOutput, status, output, port, errMsg, fatal, cls)
+		return e.commitAcyclicNodeWithClassification(ctx, lease, g, privateOutput, status, output, port, errMsg, fatal, cls)
 	}
 
 	committer, ok := e.state.(LegacyNodeCommitter)

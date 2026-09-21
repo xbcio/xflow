@@ -191,14 +191,18 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 		cyclicComplete, cyclicFinalStatus, cyclicFinalError, len(req.CyclicOutbox),
 	}
 	args = append(args, cyclicArgs...)
-	// Two trailing arguments live after the variable-length cyclic outbox
-	// suffix, and commitNodeLua reads both from the END of ARGV (#ARGV and
-	// #ARGV-1) precisely so neither can perturb the suffix's base index: first
-	// the privacy bit, then the node's structured error detail. Their order is
-	// the contract — swapping them silently inverts both readings.
-	args = append(args, privateOutput, errorDetailsJSON)
 	t := namespace.FromContext(ctx)
-	result, err := commitNodeLua.Run(ctx, s.rdb, []string{
+	reclaimKeys := make([]string, 0, len(req.ReclaimOutputNames))
+	for _, name := range req.ReclaimOutputNames {
+		reclaimKeys = append(reclaimKeys, outputKey(t, req.ExecutionID, name))
+	}
+	// Three trailing arguments live after the variable-length cyclic outbox
+	// suffix, and commitNodeLua reads them from the END of ARGV so neither the
+	// reclaim count nor the privacy/error-detail fields can perturb the suffix's
+	// fixed base index. Their order is the contract: reclaim count, privacy bit,
+	// then the node's structured error detail.
+	args = append(args, len(reclaimKeys), privateOutput, errorDetailsJSON)
+	keys := []string{
 		execKey(t, req.ExecutionID, "status"),
 		execKey(t, req.ExecutionID, "error"),
 		remainingNodesKey(t, req.ExecutionID),
@@ -215,7 +219,12 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 		// note in commitNodeLua — a lapsed marker makes a transient execution
 		// read as durable, which projects its node output into SQL.
 		transientMarkKey(t, req.ExecutionID),
-	}, args...).Slice()
+	}
+	// KEYS[13...] are source outputs that the engine proved have no remaining
+	// consumers. They are deleted by commitNodeLua only after the commit fence
+	// accepts this terminal transition.
+	keys = append(keys, reclaimKeys...)
+	result, err := commitNodeLua.Run(ctx, s.rdb, keys, args...).Slice()
 	if err != nil {
 		return engine.CommitNodeResult{}, fmt.Errorf("commit node %q/%q: %w", req.ExecutionID, req.NodeName, err)
 	}

@@ -232,8 +232,15 @@ func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.Acti
 	// per-message path. Once a Kafka subscription is live it commits offsets, and
 	// a message whose supply is missing then has nowhere safe to go. Declining
 	// here leaves the traffic in Kafka with consumer-group lag as the signal.
+	//
+	// d.SupplyConsumers travels with the requirements because this call runs
+	// BEFORE registerSupplyConsumers below, so the declarations' consumers are
+	// not registered yet and isReadyLocked — a conjunction over the consumer set
+	// — would report a pointer supply ready on zero consumers. The declarations
+	// are what let the gate resolve the pointer's digests itself and decline an
+	// activation whose artifact set is incomplete. See AdmitWithDeclarations.
 	if h.gate != nil {
-		if err := h.gate.Admit(ctx, d.WorkflowID, d.Supplies); err != nil {
+		if err := h.gate.AdmitWithDeclarations(ctx, d.WorkflowID, d.Supplies, d.SupplyConsumers); err != nil {
 			return err
 		}
 	}

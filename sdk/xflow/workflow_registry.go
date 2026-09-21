@@ -51,6 +51,12 @@ func (e *Engine) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.Wo
 	if err != nil {
 		return "", err
 	}
+	// resolveArtifacts persists ScriptFile content, including content nested in a
+	// body that graph.Compile would later reject for FAF. Reject artifact-backed
+	// FAF definitions first so no durable artifact bytes or references are made.
+	if err := rejectFAFArtifactBackedScripts(def); err != nil {
+		return "", err
+	}
 
 	// Pre-check and compile before mutating global state so failures here
 	// leave no side effects.
@@ -96,6 +102,16 @@ func (e *Engine) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.Wo
 		rollbackGlobal()
 		e.mu.Unlock()
 		return "", err
+	}
+	var fafHandler types.ActionHandler
+	if g.FAF() {
+		fafHandler, err = e.resolveFAFWorkflowHandlerLocked(wf, def)
+		if err != nil {
+			rollbackDirect()
+			rollbackGlobal()
+			e.mu.Unlock()
+			return "", err
+		}
 	}
 	e.mu.Unlock()
 
@@ -186,7 +202,128 @@ func (e *Engine) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.Wo
 			return "", err
 		}
 	}
+	if g.FAF() && rec.Graph != nil {
+		// An idempotent registration returns the existing record. Its graph is
+		// authoritative even when this call compiled a different graph because a
+		// field outside runtime identity (such as node timeout) changed.
+		bindingGraph := rec.Graph
+		node := bindingGraph.NodeAt(0)
+		e.mu.Lock()
+		if e.fafHandlers == nil {
+			e.fafHandlers = make(map[types.WorkflowID]fafHandlerBinding)
+		}
+		e.fafHandlers[rec.ID] = fafHandlerBinding{
+			handler:     fafHandler,
+			graphHash:   bindingGraph.Hash(),
+			nodeName:    node.Name,
+			nodeType:    node.Type,
+			nodeVersion: node.Version,
+		}
+		e.mu.Unlock()
+	}
 	return rec.ID, nil
+}
+
+// ErrFAFArtifactUnsupported is returned before registration when a FAF
+// workflow would use durable script artifact bytes or references.
+var ErrFAFArtifactUnsupported = errors.New("xflow: FAF workflows cannot use artifact-backed script code")
+
+// rejectFAFArtifactBackedScripts runs before resolveArtifacts. The latter walks
+// bodies and writes ScriptFile content before graph.Compile can reject a FAF
+// body, so this preflight mirrors that traversal and fails before any store I/O.
+func rejectFAFArtifactBackedScripts(def *types.WorkflowDef) error {
+	if def == nil || def.Options == nil || !def.Options.FAF {
+		return nil
+	}
+	for i := range def.Nodes {
+		nd := &def.Nodes[i]
+		if err := rejectFAFNodeArtifacts(nd.Name, nd.Type, nd.Parameters); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rejectFAFNodeArtifacts(name, nodeType string, params map[string]any) error {
+	if params == nil {
+		return nil
+	}
+	if nodeType == "xflow.script" {
+		if _, hasFile := params["__artifact_file_path"]; hasFile {
+			return fmt.Errorf("%w: node %q uses ScriptFile", ErrFAFArtifactUnsupported, name)
+		}
+		if _, hasDigest := params["artifact_digest"]; hasDigest {
+			return fmt.Errorf("%w: node %q uses artifact_digest", ErrFAFArtifactUnsupported, name)
+		}
+	}
+
+	body, _ := params["body"].(map[string]any)
+	bodyParams, _ := body["parameters"].(map[string]any)
+	members, _ := bodyParams["nodes"].([]any)
+	for _, raw := range members {
+		member, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		memberName, _ := member["name"].(string)
+		memberType, _ := member["type"].(string)
+		memberParams, _ := member["parameters"].(map[string]any)
+		if err := rejectFAFNodeArtifacts(name+"/"+memberName, memberType, memberParams); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// resolveFAFWorkflowHandlerLocked captures the handler owned by this workflow
+// at registration time. It intentionally never calls HandlerRegistry.Get:
+// name-scoped LocalNode handlers are process-global and another workflow can
+// shadow the requested node name there. Caller must hold e.mu.
+func (e *Engine) resolveFAFWorkflowHandlerLocked(wf *WorkflowBuilder, def *types.WorkflowDef) (types.ActionHandler, error) {
+	if wf == nil || def == nil || len(def.Nodes) != 1 {
+		return nil, fmt.Errorf("%w: invalid workflow definition", ErrFAFHandlerBindingRequired)
+	}
+
+	node := def.Nodes[0]
+	for _, entry := range wf.nodes {
+		if entry == nil || entry.name != node.Name {
+			continue
+		}
+		if entry.handler != nil {
+			return entry.handler, nil
+		}
+		if entry.builder != nil {
+			if provider, ok := entry.builder.(types.HandlerProvider); ok {
+				if handler := provider.Handler(); handler != nil {
+					return handler, nil
+				}
+			}
+			if handler, ok := entry.builder.(types.ActionHandler); ok && handler != nil {
+				return handler, nil
+			}
+		}
+		break
+	}
+
+	// A version-pinned node must use an exact registry match. Type-keyed
+	// mirrors do not retain version information, so falling through to one on a
+	// miss could silently invoke a newer handler for an older workflow.
+	if node.Version > 0 {
+		if handler, ok := registry.LookupVersion(node.Type, node.Version); ok && handler != nil {
+			return handler, nil
+		}
+		return nil, fmt.Errorf("%w: workflow %q node %q (%s@v%d) has no exact local action handler", ErrFAFHandlerBindingRequired, def.Name, node.Name, node.Type, node.Version)
+	}
+	if handler := wf.workflowHandlers()[node.Type]; handler != nil {
+		return handler, nil
+	}
+	if handler := e.globalHandlers[node.Type]; handler != nil {
+		return handler, nil
+	}
+	if handler, ok := registry.Lookup(node.Type); ok && handler != nil {
+		return handler, nil
+	}
+	return nil, fmt.Errorf("%w: workflow %q node %q (%s) has no local action handler", ErrFAFHandlerBindingRequired, def.Name, node.Name, node.Type)
 }
 
 // preCheckHandlerVersions verifies every NodeDef's (type, version) is
@@ -252,5 +389,11 @@ func (e *Engine) RemoveWorkflow(ctx context.Context, workflowID types.WorkflowID
 			return err
 		}
 	}
-	return e.workflowRegistry.RemoveWorkflow(ctx, workflowID)
+	if err := e.workflowRegistry.RemoveWorkflow(ctx, workflowID); err != nil {
+		return err
+	}
+	e.mu.Lock()
+	delete(e.fafHandlers, workflowID)
+	e.mu.Unlock()
+	return nil
 }

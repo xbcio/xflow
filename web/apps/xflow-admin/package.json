@@ -9,6 +9,9 @@
     "typecheck": "max setup && tsc --noEmit"
   },
   "dependencies": {
+    "@xflow/api": "workspace:*",
+    "@xflow/core": "workspace:*",
+    "@xflow/editor": "workspace:*",
     "@ant-design/icons": "6.3.2",
     "@umijs/max": "4.6.82",
     "antd": "6.5.2",

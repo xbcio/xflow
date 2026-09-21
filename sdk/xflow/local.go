@@ -35,6 +35,10 @@ func NewLocal(opts ...Option) (*Engine, error) {
 		cfg.concurrency = 4
 	}
 	pool := resolveResourcePool(cfg)
+	// Keep the exact pool installed in the local provider on the owning SDK
+	// Engine as well. Direct FAF dispatch uses the same process-local pool as
+	// ordinary embedded execution; it creates no execution state of its own.
+	cfg.resourcePool = pool
 	memOpts := []backendlocal.Option{backendlocal.WithConcurrency(cfg.concurrency)}
 	if pool != nil {
 		memOpts = append(memOpts, backendlocal.WithResourcePool(pool))

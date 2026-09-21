@@ -641,6 +641,68 @@ func TestCompile_DependencyEdgeStaysOutOfTopology(t *testing.T) {
 	}
 }
 
+// TestCompile_PortConnectionTypeValidation keeps the accepted data forms and
+// rejects undeclared channel classes before they can silently enter dataflow.
+func TestCompile_PortConnectionTypeValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		typ  types.ConnectionType
+	}{
+		{name: "unset", typ: ""},
+		{name: "data", typ: types.ConnectionTypeData},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			def := &types.WorkflowDef{
+				Name: "wf",
+				Nodes: []types.NodeDef{
+					{Name: "a", Type: "xflow.noop"},
+					{Name: "b", Type: "xflow.noop"},
+				},
+				Connections: types.Connections{
+					"a": {"main": {
+						Type:    tc.typ,
+						Targets: []types.Connection{{Node: "b", Input: "main"}},
+					}},
+				},
+			}
+
+			g, err := Compile(def)
+			if err != nil {
+				t.Fatalf("Compile() error = %v", err)
+			}
+			if got := len(g.outEdges[g.index["a"]]); got != 1 {
+				t.Fatalf("data out-edges from a = %d, want 1", got)
+			}
+			if got := g.inDegree[g.index["b"]]; got != 1 {
+				t.Fatalf("in-degree of b = %d, want 1", got)
+			}
+		})
+	}
+
+	def := &types.WorkflowDef{
+		Name: "wf",
+		Nodes: []types.NodeDef{
+			{Name: "a", Type: "xflow.noop"},
+			{Name: "b", Type: "xflow.noop"},
+		},
+		Connections: types.Connections{
+			"a": {"main": {
+				Type:    types.ConnectionType("control"),
+				Targets: []types.Connection{{Node: "b", Input: "main"}},
+			}},
+		},
+	}
+
+	_, err := Compile(def)
+	if err == nil {
+		t.Fatal("Compile() error = nil, want unsupported connection type rejection")
+	}
+	const want = `node "a" port "main" declares unsupported connection type "control"; supported types are "data" and "dependency" (or omit type for data)`
+	if got := err.Error(); got != want {
+		t.Fatalf("Compile() error = %q, want %q", got, want)
+	}
+}
+
 // TestCompile_ConnectionTypeMustMatchSourceKind checks both directions of the
 // type/Kind cross-validation.
 func TestCompile_ConnectionTypeMustMatchSourceKind(t *testing.T) {

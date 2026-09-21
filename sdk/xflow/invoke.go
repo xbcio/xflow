@@ -26,6 +26,12 @@ func (e *Engine) Invoke(ctx context.Context, workflowID types.WorkflowID, entry 
 	if err != nil {
 		return "", err
 	}
+	// FAF workflows have no durable execution state. Refuse before calling the
+	// core engine so Invoke cannot allocate an execution, queue task, or outbox
+	// entry; callers must use FireAndForget instead.
+	if rec.Graph != nil && rec.Graph.FAF() {
+		return "", enginecore.ErrFAFRequiresDirectDispatch
+	}
 	cfg := &invokeConfig{}
 	for _, o := range opts {
 		o(cfg)

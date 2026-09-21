@@ -65,6 +65,16 @@ type CommitNodeRequest struct {
 	Status       types.NodeStatus
 	Output       map[string]any
 	StoreOutput  bool
+	// ReclaimOutputNames names transient runtime outputs that the engine proved
+	// are no longer reachable once this fenced successful terminal transition is
+	// accepted.
+	// Backends must apply the deletion in the same atomic commit as this node; a
+	// stale, duplicate, or inactive request must leave every named output intact.
+	//
+	// The field is engine-derived, never runner-controlled. It is intentionally
+	// conservative: it is populated only for the supported transient
+	// group-boundary-to-single-normal-consumer topology.
+	ReclaimOutputNames []string
 	// PrivateOutput keeps the runtime output available to downstream execution
 	// while excluding it from public node snapshots and result projections. The
 	// engine derives it from the compiled graph; backends must never treat it as
@@ -133,6 +143,9 @@ type CommitNodeRequest struct {
 // below belongs to exactly one protocol, so a mismatch is a programming error
 // and is worth failing the commit over rather than guessing which half is right.
 func (r CommitNodeRequest) Validate() error {
+	if len(r.ReclaimOutputNames) > 0 && (r.AllowCycles || r.Fatal || r.System || r.Status != types.NodeStatusSuccess) {
+		return fmt.Errorf("commit %s/%s: ReclaimOutputNames is only valid for a non-system, non-fatal successful acyclic commit", r.ExecutionID, r.NodeName)
+	}
 	if r.AllowCycles {
 		if r.Fatal {
 			return fmt.Errorf("commit %s/%s: Fatal is the acyclic finalization signal and is "+

@@ -774,6 +774,9 @@ func (s *Server) startReconciler(ctx context.Context) {
 // register a workflow whose local nodes have no executor anywhere — it would
 // register cleanly and then stall at the first such node.
 //
+// FAF workflows are also rejected. Their zero-persistence execution model is
+// incompatible with this Server's durable registration and activation path.
+//
 // Re-registering an unchanged workflow succeeds and changes nothing. A
 // definition that differs from the one already under the same name and version
 // is answered with backend.ErrWorkflowConflict, which no retry can clear — use
@@ -853,6 +856,12 @@ func (s *Server) addWorkflow(ctx context.Context, wf *WorkflowBuilder, replace b
 	def, err := wf.build()
 	if err != nil {
 		return "", definitionRefused{err}
+	}
+	// FAF has no durable execution state, so it cannot pass through a
+	// control-plane Server. Keep this ahead of artifact resolution and registry
+	// admission so the refusal has no persistence or audit-facing effects.
+	if def.Options != nil && def.Options.FAF {
+		return "", definitionRefused{fmt.Errorf("xflow: workflow %q enables options.faf, which a control-plane Server cannot register", def.Name)}
 	}
 	if s.artifacts != nil {
 		if err := resolveArtifacts(ctx, def, s.artifacts); err != nil {

@@ -31,13 +31,14 @@ var commitNodeLua = redis.NewScript(`
 -- The privacy result is part of this linearized response. SQL projection must
 -- never infer it with a later Redis read, which could race metadata expiry.
 --
--- Two arguments trail the fixed header and the variable-length cyclic outbox
--- pairs, and both are addressed from the END so they cannot perturb the cyclic
+-- Three arguments trail the fixed header and the variable-length cyclic outbox
+-- pairs, and all are addressed from the END so they cannot perturb the cyclic
 -- base index (ARGV[23] onward is the outbox suffix). The engine's side of that
 -- layout is the comment on the args slice in state_commit.go.
 local existingPrivate = redis.call('HGET', KEYS[6], 'private_output') == '1'
 local errorDetails = ARGV[#ARGV] or ''
 local requestedPrivate = tonumber(ARGV[#ARGV - 1] or '0') == 1
+local reclaimCount = tonumber(ARGV[#ARGV - 2] or '0')
 local effectivePrivate = (existingPrivate or requestedPrivate) and 1 or 0
 local executionStatus = redis.call('GET', KEYS[1])
 if executionStatus == false then
@@ -191,6 +192,13 @@ if tonumber(ARGV[16]) == 1 and done == 0 and tonumber(ARGV[12]) == 0 and redis.c
             done = 1
         end
     end
+end
+-- KEYS[13...] are source outputs selected by the engine after it proved they
+-- have no remaining consumers. This is deliberately after every terminal
+-- fence and accepted-transition side effect above: stale, duplicate, and
+-- inactive calls returned before reaching this point and cannot reclaim data.
+for i = 1, reclaimCount do
+    redis.call('DEL', KEYS[12 + i])
 end
 return {1, done, finalStatus, effectivePrivate}
 `)

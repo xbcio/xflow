@@ -28,6 +28,13 @@ var ErrExecutionNotFound = errors.New("execution not found")
 // exist in the compiled workflow.
 var ErrEntryNotFound = errors.New("entry not found")
 
+// ErrFAFRequiresDirectDispatch is returned when a zero-persistence FAF graph
+// is sent through the durable engine submission path. Callers must use the
+// local SDK's direct FireAndForget entry point instead; Submit and Invoke must
+// never create an execution snapshot, outbox entry, lease, or result state for
+// a FAF graph.
+var ErrFAFRequiresDirectDispatch = errors.New("faf workflow requires direct non-persistent dispatch")
+
 // ErrInvalidLeaseToken is returned when a runner commits with a stale or
 // unknown lease token.
 var ErrInvalidLeaseToken = errors.New("invalid lease token")
@@ -233,6 +240,9 @@ func preallocOrNewExecutionID(ctx context.Context) types.ExecutionID {
 // root nodes (in-degree == 0) through a durable outbox when the StateStore
 // implements AtomicStateStore.
 func (e *Engine) Submit(ctx context.Context, g *graph.Graph, params map[string]any, runtime ...*types.Runtime) (types.ExecutionID, error) {
+	if g != nil && g.FAF() {
+		return "", ErrFAFRequiresDirectDispatch
+	}
 	id := preallocOrNewExecutionID(ctx)
 	snap := &ExecutionSnapshot{
 		ID:     id,
@@ -250,6 +260,9 @@ func (e *Engine) Submit(ctx context.Context, g *graph.Graph, params map[string]a
 
 // Invoke starts a new execution from one explicit entry node.
 func (e *Engine) Invoke(ctx context.Context, g *graph.Graph, entryName string, params map[string]any, runtime ...*types.Runtime) (types.ExecutionID, error) {
+	if g != nil && g.FAF() {
+		return "", ErrFAFRequiresDirectDispatch
+	}
 	entryIdx, ok := g.EntryIndex(entryName)
 	if !ok {
 		return "", fmt.Errorf("entry node %q: %w", entryName, ErrEntryNotFound)

@@ -2,6 +2,7 @@ package xflow
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/service/apiserver"
@@ -233,6 +235,48 @@ func TestServerAddWorkflowRejectsLocalHandlers(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "local node handlers") {
 		t.Fatalf("error = %q, want it to name the local handlers as the reason", err)
+	}
+}
+
+func TestServerRejectsFAFWorkflowsBeforeAdmission(t *testing.T) {
+	srv, idx, _ := newTestServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	for _, tt := range []struct {
+		name     string
+		register func(context.Context, *WorkflowBuilder) (types.WorkflowID, error)
+	}{
+		{name: "add", register: srv.AddWorkflow},
+		{name: "replace", register: srv.ReplaceWorkflow},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			name := "faf-" + tt.name
+			path := filepath.Join(t.TempDir(), "must-not-be-stored.js")
+			if err := os.WriteFile(path, []byte(`({ok: true})`), 0o600); err != nil {
+				t.Fatalf("write script: %v", err)
+			}
+			wf := Workflow(name).FAF()
+			// A guard below artifact resolution would persist this valid script.
+			wf.Node("script", node.ScriptFile(path).Language("js").Runtime("goja"))
+
+			_, err := tt.register(ctx, wf)
+			if err == nil {
+				t.Fatalf("%s accepted a workflow with options.faf", tt.name)
+			}
+			if !strings.Contains(err.Error(), "options.faf") {
+				t.Fatalf("error = %q, want a clear options.faf rejection", err)
+			}
+			if IsRetryableRegistrationError(err) {
+				t.Fatalf("options.faf rejection was retryable: %v", err)
+			}
+			if len(idx.refs) != 0 {
+				t.Fatalf("artifact references = %#v, want none after rejection", idx.refs)
+			}
+			if _, err := srv.api.Backend().WorkflowRegistry().GetWorkflowByKey(ctx, "default/"+name+"@v1"); !errors.Is(err, backend.ErrWorkflowNotFound) {
+				t.Fatalf("workflow registry lookup error = %v, want backend.ErrWorkflowNotFound", err)
+			}
+		})
 	}
 }
 

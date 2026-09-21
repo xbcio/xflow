@@ -156,6 +156,9 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	if n == 0 {
 		return nil, errors.New("workflow has no nodes")
 	}
+	if err := validateFAF(def); err != nil {
+		return nil, err
+	}
 	if err := validateWorkflowRunnerSelector(def.RunnerSelector); err != nil {
 		return nil, err
 	}
@@ -175,6 +178,7 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	if def.Options != nil {
 		g.allowCycles = def.Options.AllowCycles
 		g.maxAutoDepth = def.Options.MaxAutoDepth
+		g.faf = def.Options.FAF
 		g.transient = def.Options.Transient
 		g.transientTTL = def.Options.TransientTTL
 		g.transientCompletionTTL = def.Options.TransientCompletionTTL
@@ -288,6 +292,85 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	}
 
 	return g, nil
+}
+
+// validateFAF rejects definition features that need persisted execution state
+// or durable coordination. FAF is intentionally limited to one independent
+// action node; ordinary parameters, context, and node timeout
+// remain valid because they are available before dispatch.
+func validateFAF(def *types.WorkflowDef) error {
+	if def.Options == nil || !def.Options.FAF {
+		return nil
+	}
+	opts := def.Options
+	if opts.Transient || opts.TransientTTL != 0 || opts.TransientCompletionTTL != 0 {
+		return errors.New("faf workflow cannot enable transient mode or transient TTLs")
+	}
+	if opts.AllowCycles {
+		return errors.New("faf workflow cannot allow cycles")
+	}
+	if len(def.Groups) != 0 {
+		return errors.New("faf workflow cannot define groups")
+	}
+	if def.RunnerSelector != nil {
+		return errors.New("faf workflow cannot define a workflow runner selector")
+	}
+	if len(def.Connections) != 0 {
+		return errors.New("faf workflow cannot define connections or dataflow")
+	}
+	if len(def.DependencyEdges) != 0 {
+		return errors.New("faf workflow cannot define dependency edges")
+	}
+	if len(def.Outputs) != 0 {
+		return errors.New("faf workflow cannot define workflow outputs")
+	}
+	if def.Settings != nil && def.Settings.Retry != nil {
+		return errors.New("faf workflow cannot define workflow retries")
+	}
+	if len(def.Nodes) != 1 {
+		return fmt.Errorf("faf workflow must contain exactly one node, got %d", len(def.Nodes))
+	}
+
+	node := def.Nodes[0]
+	// Direct FAF dispatch runs exactly one ActionHandler. Trigger and supply
+	// nodes need lifecycle/state protocols even when they are the sole node, so
+	// accepting them would violate FAF's zero-persistence contract. The empty
+	// kind retains the compiler's legacy action normalization.
+	switch node.Kind {
+	case "", types.NodeKindAction:
+	default:
+		return fmt.Errorf("faf workflow node %q must be an action, got kind %q", node.Name, node.Kind)
+	}
+	if node.OnError != "" {
+		return fmt.Errorf("faf workflow node %q cannot define on_error", node.Name)
+	}
+	if node.RunnerSelector != nil {
+		return fmt.Errorf("faf workflow node %q cannot define a runner selector", node.Name)
+	}
+	if node.ActivationReplicas != 0 {
+		return fmt.Errorf("faf workflow node %q cannot define activation replicas", node.Name)
+	}
+	if node.Retry != nil {
+		return fmt.Errorf("faf workflow node %q cannot define retries", node.Name)
+	}
+	if node.Type == "xflow.script" {
+		if _, hasFile := node.Parameters["__artifact_file_path"]; hasFile {
+			return fmt.Errorf("faf workflow node %q cannot use artifact-backed script code", node.Name)
+		}
+		if _, hasDigest := node.Parameters["artifact_digest"]; hasDigest {
+			return fmt.Errorf("faf workflow node %q cannot use artifact-backed script code", node.Name)
+		}
+	}
+	if declaresSubgraphBody(node.Parameters) {
+		return fmt.Errorf("faf workflow node %q cannot define a subgraph body", node.Name)
+	}
+	if refs := deriveNodesRefs(node.Parameters); len(refs) != 0 {
+		return fmt.Errorf("faf workflow node %q cannot reference $nodes statically: %s", node.Name, strings.Join(refs, ", "))
+	}
+	if hasDynamicNodesRef(node.Parameters) {
+		return fmt.Errorf("faf workflow node %q cannot reference $nodes dynamically", node.Name)
+	}
+	return nil
 }
 
 // registerNodes performs the first compile pass: it populates g.index/g.nodes,
@@ -513,6 +596,13 @@ func buildEdges(def *types.WorkflowDef, g *Graph) ([]dependencyPort, error) {
 		portOuts := make([]string, 0, len(portNames))
 		for _, port := range portNames {
 			pc := ports[port]
+
+			if pc.Type != "" &&
+				pc.Type != types.ConnectionTypeData &&
+				pc.Type != types.ConnectionTypeDependency {
+				return nil, fmt.Errorf("node %q port %q declares unsupported connection type %q; supported types are %q and %q (or omit type for data)",
+					srcName, port, pc.Type, types.ConnectionTypeData, types.ConnectionTypeDependency)
+			}
 
 			if pc.Type == types.ConnectionTypeDependency {
 				// Declared type and node Kind cross-validate each other:

@@ -70,6 +70,16 @@ func auditedPerRequest(op string) bool {
 // read is scoped to the principal's namespace — the authoritative IDOR defense.
 // The client request body is never consulted for namespace.
 func (h *authzHolder) authzWrap(op string, isMutation bool, fn http.HandlerFunc, resourceResolver func(*http.Request) (resource, workflowID, executionID, resourceNamespace string)) http.HandlerFunc {
+	return h.authzWrapWithPreAdmission(op, isMutation, fn, resourceResolver, nil)
+}
+
+// authzWrapWithPreAdmission is authzWrap with an optional route-specific
+// validation hook. The hook runs only after authentication and authorization
+// succeed, and after the verified namespace is attached to the request, but
+// before a mutation's fail-closed admission audit is written. It is for
+// definitions that the control plane must refuse without admitting them into
+// the audit or persistence path.
+func (h *authzHolder) authzWrapWithPreAdmission(op string, isMutation bool, fn http.HandlerFunc, resourceResolver func(*http.Request) (resource, workflowID, executionID, resourceNamespace string), preAdmission func(http.ResponseWriter, *http.Request) bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		principal, err := h.principalAuth.Authenticate(r)
 		if err != nil {
@@ -102,6 +112,10 @@ func (h *authzHolder) authzWrap(op string, isMutation bool, fn http.HandlerFunc,
 		// downstream read and the audit sink draw namespace from the same source:
 		// namespace.FromContext(ctx).
 		r = r.WithContext(namespace.WithNamespace(context.WithValue(r.Context(), authzContextKey{}, principal), namespace.Namespace(principal.Namespace)))
+
+		if preAdmission != nil && !preAdmission(w, r) {
+			return
+		}
 
 		// R3.1: when the resolver carried an execution id (pre-allocated for
 		// workflow create/invoke, or the path param for execution-scoped

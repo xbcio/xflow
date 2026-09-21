@@ -120,6 +120,16 @@ func (w *WorkflowBuilder) Transient(ttl, completionTTL time.Duration) *WorkflowB
 	return w
 }
 
+// FAF sets options.faf for this workflow definition.
+//
+// FAF is distinct from Transient: it is true zero-persistence execution rather
+// than TTL-bounded transient state. The graph compiler accepts it only for the
+// restricted single-node definition shape that needs no durable coordination.
+func (w *WorkflowBuilder) FAF() *WorkflowBuilder {
+	w.ensureOptions().FAF = true
+	return w
+}
+
 // ensureOptions returns the workflow's option block, allocating it on first
 // use. Every option setter must go through here: assigning w.options wholesale
 // makes the last setter win and silently discards the earlier ones -- which for

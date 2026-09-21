@@ -93,6 +93,112 @@ describe("toGraphModel", () => {
     });
   });
 
+  it("normalizes object-form data connections without an explicit type", () => {
+    const workflow: WorkflowDef = {
+      nodes: [
+        { name: "start", type: "xflow.start" },
+        { name: "charge", type: "xflow.http" }
+      ],
+      connections: {
+        start: {
+          main: {
+            targets: [{ node: "charge", input: "main" }]
+          }
+        }
+      }
+    };
+
+    expect(toGraphModel(workflow).edges).toEqual([
+      {
+        id: "start:main->charge:main",
+        source: "start",
+        sourceName: "start",
+        sourcePort: "main",
+        target: "charge",
+        targetName: "charge",
+        targetPort: "main"
+      }
+    ]);
+  });
+
+  it("does not turn unknown typed connections into graph edges", () => {
+    const workflow = {
+      nodes: [
+        { name: "start", type: "xflow.start" },
+        { name: "charge", type: "xflow.http" }
+      ],
+      connections: {
+        start: {
+          main: {
+            type: "unknown",
+            targets: [{ node: "charge", input: "main" }]
+          }
+        }
+      }
+    } as unknown as WorkflowDef;
+
+    expect(toGraphModel(workflow).edges).toEqual([]);
+  });
+
+  it("keeps supply dependencies out of the dataflow topology", () => {
+    const workflow: WorkflowDef = {
+      options: {
+        allow_cycles: true,
+        max_auto_depth: 4,
+        experimental_node_group: true,
+        transient: true,
+        transient_ttl: 60_000_000_000,
+        transient_completion_ttl: 10_000_000_000
+      },
+      groups: [
+        {
+          name: "worker-group",
+          members: ["worker"],
+          on_error: "continue",
+          timeout: 30_000_000_000,
+          mode: "transient",
+          activation_replicas: 2
+        }
+      ],
+      nodes: [
+        {
+          name: "rules",
+          type: "xflow.supply",
+          kind: "supply",
+          output: { private: true },
+          timeout: 5_000_000_000,
+          activation_replicas: 2
+        },
+        { name: "worker", type: "xflow.function" }
+      ],
+      connections: {
+        rules: {
+          supply: {
+            type: "dependency",
+            targets: [{ node: "worker" }]
+          }
+        }
+      },
+      dependency_edges: [{ node: "worker", supply: "rules" }]
+    };
+
+    const graph = toGraphModel(workflow);
+
+    expect(graph.edges).toEqual([]);
+    expect(graph.nodes).toEqual([
+      expect.objectContaining({
+        name: "rules",
+        kind: "supply",
+        position: { x: 0, y: 0 }
+      }),
+      expect.objectContaining({
+        name: "worker",
+        kind: "action",
+        position: { x: 0, y: 120 }
+      })
+    ]);
+  });
+
   it("places nodes in stable columns when positions are not provided", () => {
     const workflow: WorkflowDef = {
       nodes: [

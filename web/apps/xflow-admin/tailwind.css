@@ -17,4 +17,11 @@
 @layer antd-reset, theme, base, components, utilities;
 
 @import 'antd/dist/reset.css' layer(antd-reset);
+
 @import 'tailwindcss';
+
+/* Tailwind v4 scans the Admin app by default. The editor and preview live in
+ * workspace packages, so declare them explicitly to keep their utility classes
+ * in the production bundle rather than relying on runtime CSS fallbacks. */
+@source '../../packages/xflow-editor/src';
+@source '../../packages/xflow-preview/src';

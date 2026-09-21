@@ -379,6 +379,7 @@ func assignGraphHash(g *Graph) error {
 		AllowCycles:            g.allowCycles,
 		StartIdx:               g.startIdx,
 		MaxAutoDepth:           g.maxAutoDepth,
+		FAF:                    g.faf,
 		Transient:              g.transient,
 		TransientTTL:           g.transientTTL,
 		TransientCompletionTTL: g.transientCompletionTTL,
@@ -413,8 +414,9 @@ type graphHashPayload struct {
 	AllowCycles     bool
 	StartIdx        int
 	MaxAutoDepth    int
-	// Transient fields use omitempty so pre-existing graphs that never set them
-	// hash identically to before.
+	// FAF and transient fields use omitempty so pre-existing graphs that never
+	// set them hash identically to before.
+	FAF                    bool          `json:",omitempty"`
 	Transient              bool          `json:",omitempty"`
 	TransientTTL           time.Duration `json:",omitempty"`
 	TransientCompletionTTL time.Duration `json:",omitempty"`
@@ -478,8 +480,9 @@ type graphSerializedForm struct {
 	AllowCycles     bool           `json:"allow_cycles"`
 	StartIdx        int            `json:"start_idx"`
 	MaxAutoDepth    int            `json:"max_auto_depth"`
-	// Transient fields are omitempty so legacy snapshots without them decode
-	// with zero values (= not transient), preserving backward compatibility.
+	// FAF and transient fields are omitempty so legacy snapshots without them
+	// decode with zero values, preserving backward compatibility.
+	FAF                    bool          `json:"faf,omitempty"`
 	Transient              bool          `json:"transient,omitempty"`
 	TransientTTL           time.Duration `json:"transient_ttl,omitempty"`
 	TransientCompletionTTL time.Duration `json:"transient_completion_ttl,omitempty"`
@@ -522,6 +525,7 @@ func (g *Graph) MarshalJSON() ([]byte, error) {
 		AllowCycles:            g.allowCycles,
 		StartIdx:               g.startIdx,
 		MaxAutoDepth:           g.maxAutoDepth,
+		FAF:                    g.faf,
 		Transient:              g.transient,
 		TransientTTL:           g.transientTTL,
 		TransientCompletionTTL: g.transientCompletionTTL,
@@ -643,6 +647,7 @@ func (g *Graph) UnmarshalJSON(data []byte) error {
 	g.allowCycles = sf.AllowCycles
 	g.startIdx = sf.StartIdx
 	g.maxAutoDepth = sf.MaxAutoDepth
+	g.faf = sf.FAF
 	g.transient = sf.Transient
 	g.transientTTL = sf.TransientTTL
 	g.transientCompletionTTL = sf.TransientCompletionTTL

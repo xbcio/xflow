@@ -1,15 +1,416 @@
+/*
+ * Shared XFlow semantic theme contract.
+ *
+ * The editor owns the workspace shell and provides these variables to embedded
+ * XFlow surfaces (including @xflow/preview). Generic Ant Design controls are
+ * intentionally not restyled here: ConfigProvider component tokens own them.
+ * The no-data-attribute fallback remains Graphite dark for existing hosts.
+ */
+.xflow-editor,
+.xflow-editor[data-theme-variant="graphite"][data-theme="dark"] {
+  /* surface */
+  --xflow-surface-app: #151617;
+  --xflow-surface-toolbar: #1e1f21;
+  --xflow-surface-panel: #24262a;
+  --xflow-surface-panel-raised: #2b2e33;
+  --xflow-surface-field: #1e2023;
+  --xflow-surface-canvas: #202225;
+  --xflow-surface-control: #18191b;
+  --xflow-surface-hover: #30343a;
+  --xflow-surface-overlay: rgba(23, 25, 28, .92);
+  --xflow-surface-overlay-subtle: rgba(24, 26, 29, .82);
+  --xflow-surface-highlight: rgba(255, 255, 255, .035);
+  --xflow-surface-hover-subtle: rgba(255, 255, 255, .03);
+  --xflow-surface-inset-shadow: rgba(0, 0, 0, .18);
+  --xflow-canvas-grid-minor: rgba(255, 255, 255, .04);
+  --xflow-canvas-grid-major: rgba(255, 255, 255, .14);
+  --xflow-canvas-grid-dot: rgba(255, 255, 255, .10);
+  --xflow-canvas-minimap-mask: rgba(20, 22, 25, .88);
+
+  /* content, borders, and focus */
+  --xflow-text: #f2f4f7;
+  --xflow-text-secondary: #c8cdd5;
+  --xflow-text-tertiary: #a4abb6;
+  --xflow-border: #3a3d43;
+  --xflow-border-strong: #4b5058;
+  --xflow-focus: #4c8dff;
+  --xflow-focus-text: #9bbcff;
+  --xflow-focus-subtle: rgba(76, 141, 255, .12);
+  --xflow-focus-border: rgba(76, 141, 255, .42);
+  --xflow-focus-border-strong: rgba(76, 141, 255, .72);
+  --xflow-focus-ring: rgba(76, 141, 255, .25);
+
+  /* workflow status */
+  --xflow-status-running: #4c8dff;
+  --xflow-status-success: #35c98b;
+  --xflow-status-warning: #f7b955;
+  --xflow-status-error: #ff5f57;
+  --xflow-status-disabled: #747b86;
+  --xflow-status-running-text: #9bbcff;
+  --xflow-status-success-text: #62d7a0;
+  --xflow-status-warning-text: #e7c174;
+  --xflow-status-error-text: #ff948e;
+  --xflow-status-running-border: rgba(76, 141, 255, .42);
+  --xflow-status-success-border: rgba(53, 201, 139, .40);
+  --xflow-status-warning-border: rgba(247, 185, 85, .38);
+  --xflow-status-error-border: rgba(255, 95, 87, .45);
+  --xflow-status-running-subtle: rgba(76, 141, 255, .12);
+  --xflow-status-success-subtle: rgba(53, 201, 139, .12);
+  --xflow-status-warning-subtle: rgba(247, 185, 85, .08);
+  --xflow-status-error-subtle: rgba(255, 95, 87, .12);
+
+  /* workflow nodes, ports, and edges */
+  --xflow-node-bg: #282b30;
+  --xflow-node-border: #3d424b;
+  --xflow-node-shadow: rgba(0, 0, 0, .18);
+  --xflow-node-meta-bg: #22262c;
+  --xflow-port-bg: #202329;
+  --xflow-port-border: #3d444f;
+  --xflow-port-disabled: #747b86;
+  --xflow-port-chip-bg: rgba(76, 141, 255, .12);
+  --xflow-port-chip-border: rgba(76, 141, 255, .32);
+  --xflow-port-text: #8993a1;
+  --xflow-edge: #69707a;
+  --xflow-edge-selected: #4c8dff;
+  --xflow-edge-running: #4c8dff;
+  --xflow-edge-error: #ff5f57;
+  --xflow-edge-label: #c8cdd5;
+  --xflow-edge-label-bg: #202226;
+
+  /* node category tones */
+  --xflow-node-tone-blue: #4c8dff;
+  --xflow-node-tone-cyan: #39c6e8;
+  --xflow-node-tone-green: #35c98b;
+  --xflow-node-tone-amber: #f7b955;
+  --xflow-node-tone-violet: #aa8cff;
+  --xflow-node-tone-blue-text: #9bbcff;
+  --xflow-node-tone-cyan-text: #82ddf2;
+  --xflow-node-tone-green-text: #62d7a0;
+  --xflow-node-tone-amber-text: #e7c174;
+  --xflow-node-tone-violet-text: #c2b0ff;
+  --xflow-node-tone-blue-bg: rgba(76, 141, 255, .12);
+  --xflow-node-tone-cyan-bg: rgba(57, 198, 232, .12);
+  --xflow-node-tone-green-bg: rgba(53, 201, 139, .12);
+  --xflow-node-tone-amber-bg: rgba(247, 185, 85, .08);
+  --xflow-node-tone-violet-bg: rgba(170, 140, 255, .12);
+  --xflow-node-tone-blue-border: rgba(76, 141, 255, .42);
+  --xflow-node-tone-cyan-border: rgba(57, 198, 232, .40);
+  --xflow-node-tone-green-border: rgba(53, 201, 139, .40);
+  --xflow-node-tone-amber-border: rgba(247, 185, 85, .38);
+  --xflow-node-tone-violet-border: rgba(170, 140, 255, .40);
+}
+
+.xflow-editor[data-theme-variant="graphite"][data-theme="light"] {
+  /* surface */
+  --xflow-surface-app: #f5f6f8;
+  --xflow-surface-toolbar: #ffffff;
+  --xflow-surface-panel: #ffffff;
+  --xflow-surface-panel-raised: #f7f8fa;
+  --xflow-surface-field: #ffffff;
+  --xflow-surface-canvas: #f0f2f5;
+  --xflow-surface-control: #f7f8fa;
+  --xflow-surface-hover: #edf3ff;
+  --xflow-surface-overlay: rgba(255, 255, 255, .92);
+  --xflow-surface-overlay-subtle: rgba(255, 255, 255, .84);
+  --xflow-surface-highlight: rgba(255, 255, 255, .78);
+  --xflow-surface-hover-subtle: rgba(47, 124, 255, .06);
+  --xflow-surface-inset-shadow: rgba(31, 35, 41, .08);
+  --xflow-canvas-grid-minor: rgba(31, 35, 41, .05);
+  --xflow-canvas-grid-major: rgba(31, 35, 41, .13);
+  --xflow-canvas-grid-dot: rgba(31, 35, 41, .12);
+  --xflow-canvas-minimap-mask: rgba(245, 247, 250, .88);
+
+  /* content, borders, and focus */
+  --xflow-text: #1f2329;
+  --xflow-text-secondary: #4e5969;
+  --xflow-text-tertiary: #86909c;
+  --xflow-border: #d9dee7;
+  --xflow-border-strong: #bcc5d0;
+  --xflow-focus: #2f7cff;
+  --xflow-focus-text: #1f6fe5;
+  --xflow-focus-subtle: rgba(47, 124, 255, .10);
+  --xflow-focus-border: rgba(47, 124, 255, .42);
+  --xflow-focus-border-strong: rgba(47, 124, 255, .68);
+  --xflow-focus-ring: rgba(47, 124, 255, .20);
+
+  /* workflow status */
+  --xflow-status-running: #2f7cff;
+  --xflow-status-success: #1a9b67;
+  --xflow-status-warning: #c98600;
+  --xflow-status-error: #d9363e;
+  --xflow-status-disabled: #a6afb9;
+  --xflow-status-running-text: #1f6fe5;
+  --xflow-status-success-text: #16875a;
+  --xflow-status-warning-text: #946200;
+  --xflow-status-error-text: #b4232b;
+  --xflow-status-running-border: rgba(47, 124, 255, .42);
+  --xflow-status-success-border: rgba(26, 155, 103, .38);
+  --xflow-status-warning-border: rgba(201, 134, 0, .38);
+  --xflow-status-error-border: rgba(217, 54, 62, .42);
+  --xflow-status-running-subtle: rgba(47, 124, 255, .10);
+  --xflow-status-success-subtle: rgba(26, 155, 103, .10);
+  --xflow-status-warning-subtle: rgba(201, 134, 0, .10);
+  --xflow-status-error-subtle: rgba(217, 54, 62, .10);
+
+  /* workflow nodes, ports, and edges */
+  --xflow-node-bg: #ffffff;
+  --xflow-node-border: #d7dee8;
+  --xflow-node-shadow: rgba(31, 35, 41, .10);
+  --xflow-node-meta-bg: #f5f7fa;
+  --xflow-port-bg: #ffffff;
+  --xflow-port-border: #c9d3df;
+  --xflow-port-disabled: #a6afb9;
+  --xflow-port-chip-bg: rgba(47, 124, 255, .10);
+  --xflow-port-chip-border: rgba(47, 124, 255, .30);
+  --xflow-port-text: #687586;
+  --xflow-edge: #8c9aaa;
+  --xflow-edge-selected: #2f7cff;
+  --xflow-edge-running: #2f7cff;
+  --xflow-edge-error: #d9363e;
+  --xflow-edge-label: #4e5969;
+  --xflow-edge-label-bg: #ffffff;
+
+  /* node category tones */
+  --xflow-node-tone-blue: #2f7cff;
+  --xflow-node-tone-cyan: #0899b8;
+  --xflow-node-tone-green: #1a9b67;
+  --xflow-node-tone-amber: #c98600;
+  --xflow-node-tone-violet: #7656d6;
+  --xflow-node-tone-blue-text: #1f6fe5;
+  --xflow-node-tone-cyan-text: #087e98;
+  --xflow-node-tone-green-text: #16875a;
+  --xflow-node-tone-amber-text: #946200;
+  --xflow-node-tone-violet-text: #6543bd;
+  --xflow-node-tone-blue-bg: rgba(47, 124, 255, .10);
+  --xflow-node-tone-cyan-bg: rgba(8, 153, 184, .10);
+  --xflow-node-tone-green-bg: rgba(26, 155, 103, .10);
+  --xflow-node-tone-amber-bg: rgba(201, 134, 0, .10);
+  --xflow-node-tone-violet-bg: rgba(118, 86, 214, .10);
+  --xflow-node-tone-blue-border: rgba(47, 124, 255, .42);
+  --xflow-node-tone-cyan-border: rgba(8, 153, 184, .38);
+  --xflow-node-tone-green-border: rgba(26, 155, 103, .38);
+  --xflow-node-tone-amber-border: rgba(201, 134, 0, .38);
+  --xflow-node-tone-violet-border: rgba(118, 86, 214, .38);
+}
+
+.xflow-editor[data-theme-variant="blueprint"][data-theme="dark"] {
+  /* surface */
+  --xflow-surface-app: #111827;
+  --xflow-surface-toolbar: #141e2d;
+  --xflow-surface-panel: #17202d;
+  --xflow-surface-panel-raised: #1e2a3a;
+  --xflow-surface-field: #121b28;
+  --xflow-surface-canvas: #17202d;
+  --xflow-surface-control: #111a28;
+  --xflow-surface-hover: #24344a;
+  --xflow-surface-overlay: rgba(15, 23, 42, .94);
+  --xflow-surface-overlay-subtle: rgba(18, 27, 40, .84);
+  --xflow-surface-highlight: rgba(203, 224, 255, .045);
+  --xflow-surface-hover-subtle: rgba(112, 161, 255, .08);
+  --xflow-surface-inset-shadow: rgba(4, 10, 20, .28);
+  --xflow-canvas-grid-minor: rgba(143, 169, 205, .08);
+  --xflow-canvas-grid-major: rgba(143, 169, 205, .18);
+  --xflow-canvas-grid-dot: rgba(143, 169, 205, .16);
+  --xflow-canvas-minimap-mask: rgba(10, 18, 31, .82);
+
+  /* content, borders, and focus */
+  --xflow-text: #e6edf7;
+  --xflow-text-secondary: #c0cddc;
+  --xflow-text-tertiary: #8fa0b5;
+  --xflow-border: #314158;
+  --xflow-border-strong: #465b76;
+  --xflow-focus: #5b8cff;
+  --xflow-focus-text: #9fbaff;
+  --xflow-focus-subtle: rgba(91, 140, 255, .14);
+  --xflow-focus-border: rgba(112, 161, 255, .45);
+  --xflow-focus-border-strong: rgba(112, 161, 255, .72);
+  --xflow-focus-ring: rgba(112, 161, 255, .28);
+
+  /* workflow status */
+  --xflow-status-running: #5b8cff;
+  --xflow-status-success: #48c78e;
+  --xflow-status-warning: #eab85b;
+  --xflow-status-error: #ff6b6b;
+  --xflow-status-disabled: #71829a;
+  --xflow-status-running-text: #9fbaff;
+  --xflow-status-success-text: #7fdcaf;
+  --xflow-status-warning-text: #f0ce8b;
+  --xflow-status-error-text: #ffaaa4;
+  --xflow-status-running-border: rgba(112, 161, 255, .45);
+  --xflow-status-success-border: rgba(72, 199, 142, .42);
+  --xflow-status-warning-border: rgba(234, 184, 91, .40);
+  --xflow-status-error-border: rgba(255, 107, 107, .45);
+  --xflow-status-running-subtle: rgba(91, 140, 255, .14);
+  --xflow-status-success-subtle: rgba(72, 199, 142, .12);
+  --xflow-status-warning-subtle: rgba(234, 184, 91, .10);
+  --xflow-status-error-subtle: rgba(255, 107, 107, .12);
+
+  /* workflow nodes, ports, and edges */
+  --xflow-node-bg: #1d2938;
+  --xflow-node-border: #3b4c63;
+  --xflow-node-shadow: rgba(3, 9, 18, .28);
+  --xflow-node-meta-bg: #162131;
+  --xflow-port-bg: #152132;
+  --xflow-port-border: #40536c;
+  --xflow-port-disabled: #71829a;
+  --xflow-port-chip-bg: rgba(91, 140, 255, .14);
+  --xflow-port-chip-border: rgba(112, 161, 255, .36);
+  --xflow-port-text: #a1b0c3;
+  --xflow-edge: #68798f;
+  --xflow-edge-selected: #70a1ff;
+  --xflow-edge-running: #5b8cff;
+  --xflow-edge-error: #ff6b6b;
+  --xflow-edge-label: #c0cddc;
+  --xflow-edge-label-bg: #17202d;
+
+  /* node category tones */
+  --xflow-node-tone-blue: #5b8cff;
+  --xflow-node-tone-cyan: #46c5e8;
+  --xflow-node-tone-green: #48c78e;
+  --xflow-node-tone-amber: #eab85b;
+  --xflow-node-tone-violet: #ae92ff;
+  --xflow-node-tone-blue-text: #9fbaff;
+  --xflow-node-tone-cyan-text: #86dbef;
+  --xflow-node-tone-green-text: #7fdcaf;
+  --xflow-node-tone-amber-text: #f0ce8b;
+  --xflow-node-tone-violet-text: #c5b5ff;
+  --xflow-node-tone-blue-bg: rgba(91, 140, 255, .14);
+  --xflow-node-tone-cyan-bg: rgba(70, 197, 232, .12);
+  --xflow-node-tone-green-bg: rgba(72, 199, 142, .12);
+  --xflow-node-tone-amber-bg: rgba(234, 184, 91, .10);
+  --xflow-node-tone-violet-bg: rgba(174, 146, 255, .12);
+  --xflow-node-tone-blue-border: rgba(112, 161, 255, .45);
+  --xflow-node-tone-cyan-border: rgba(70, 197, 232, .40);
+  --xflow-node-tone-green-border: rgba(72, 199, 142, .42);
+  --xflow-node-tone-amber-border: rgba(234, 184, 91, .40);
+  --xflow-node-tone-violet-border: rgba(174, 146, 255, .40);
+}
+
+.xflow-editor[data-theme-variant="blueprint"][data-theme="light"] {
+  /* surface */
+  --xflow-surface-app: #f6f8fc;
+  --xflow-surface-toolbar: #ffffff;
+  --xflow-surface-panel: #ffffff;
+  --xflow-surface-panel-raised: #f1f5fb;
+  --xflow-surface-field: #ffffff;
+  --xflow-surface-canvas: #f8fafd;
+  --xflow-surface-control: #f4f7fb;
+  --xflow-surface-hover: #ecf3ff;
+  --xflow-surface-overlay: rgba(255, 255, 255, .94);
+  --xflow-surface-overlay-subtle: rgba(248, 250, 253, .88);
+  --xflow-surface-highlight: rgba(255, 255, 255, .82);
+  --xflow-surface-hover-subtle: rgba(49, 109, 255, .06);
+  --xflow-surface-inset-shadow: rgba(27, 43, 63, .08);
+  --xflow-canvas-grid-minor: rgba(61, 87, 119, .06);
+  --xflow-canvas-grid-major: rgba(61, 87, 119, .14);
+  --xflow-canvas-grid-dot: rgba(61, 87, 119, .12);
+  --xflow-canvas-minimap-mask: rgba(246, 249, 253, .88);
+
+  /* content, borders, and focus */
+  --xflow-text: #1b2b3f;
+  --xflow-text-secondary: #50647d;
+  --xflow-text-tertiary: #8191a5;
+  --xflow-border: #d5dfeb;
+  --xflow-border-strong: #b7c7d9;
+  --xflow-focus: #316dff;
+  --xflow-focus-text: #2258d6;
+  --xflow-focus-subtle: rgba(49, 109, 255, .10);
+  --xflow-focus-border: rgba(49, 109, 255, .40);
+  --xflow-focus-border-strong: rgba(49, 109, 255, .66);
+  --xflow-focus-ring: rgba(49, 109, 255, .20);
+
+  /* workflow status */
+  --xflow-status-running: #316dff;
+  --xflow-status-success: #168b63;
+  --xflow-status-warning: #b87700;
+  --xflow-status-error: #cf3c45;
+  --xflow-status-disabled: #a0afc0;
+  --xflow-status-running-text: #2258d6;
+  --xflow-status-success-text: #137652;
+  --xflow-status-warning-text: #8b5900;
+  --xflow-status-error-text: #ae2932;
+  --xflow-status-running-border: rgba(49, 109, 255, .40);
+  --xflow-status-success-border: rgba(22, 139, 99, .38);
+  --xflow-status-warning-border: rgba(184, 119, 0, .38);
+  --xflow-status-error-border: rgba(207, 60, 69, .42);
+  --xflow-status-running-subtle: rgba(49, 109, 255, .10);
+  --xflow-status-success-subtle: rgba(22, 139, 99, .10);
+  --xflow-status-warning-subtle: rgba(184, 119, 0, .10);
+  --xflow-status-error-subtle: rgba(207, 60, 69, .10);
+
+  /* workflow nodes, ports, and edges */
+  --xflow-node-bg: #ffffff;
+  --xflow-node-border: #cbd8e8;
+  --xflow-node-shadow: rgba(27, 43, 63, .10);
+  --xflow-node-meta-bg: #f3f7fc;
+  --xflow-port-bg: #ffffff;
+  --xflow-port-border: #bfd0e3;
+  --xflow-port-disabled: #a0afc0;
+  --xflow-port-chip-bg: rgba(49, 109, 255, .10);
+  --xflow-port-chip-border: rgba(49, 109, 255, .30);
+  --xflow-port-text: #60758d;
+  --xflow-edge: #93a4bb;
+  --xflow-edge-selected: #316dff;
+  --xflow-edge-running: #316dff;
+  --xflow-edge-error: #cf3c45;
+  --xflow-edge-label: #50647d;
+  --xflow-edge-label-bg: #ffffff;
+
+  /* node category tones */
+  --xflow-node-tone-blue: #316dff;
+  --xflow-node-tone-cyan: #078eae;
+  --xflow-node-tone-green: #168b63;
+  --xflow-node-tone-amber: #b87700;
+  --xflow-node-tone-violet: #7154ce;
+  --xflow-node-tone-blue-text: #2258d6;
+  --xflow-node-tone-cyan-text: #08758f;
+  --xflow-node-tone-green-text: #137652;
+  --xflow-node-tone-amber-text: #8b5900;
+  --xflow-node-tone-violet-text: #5f42b8;
+  --xflow-node-tone-blue-bg: rgba(49, 109, 255, .10);
+  --xflow-node-tone-cyan-bg: rgba(7, 142, 174, .10);
+  --xflow-node-tone-green-bg: rgba(22, 139, 99, .10);
+  --xflow-node-tone-amber-bg: rgba(184, 119, 0, .10);
+  --xflow-node-tone-violet-bg: rgba(113, 84, 206, .10);
+  --xflow-node-tone-blue-border: rgba(49, 109, 255, .40);
+  --xflow-node-tone-cyan-border: rgba(7, 142, 174, .38);
+  --xflow-node-tone-green-border: rgba(22, 139, 99, .38);
+  --xflow-node-tone-amber-border: rgba(184, 119, 0, .38);
+  --xflow-node-tone-violet-border: rgba(113, 84, 206, .38);
+}
+
 .xflow-editor {
-  --xflow-editor-app: #151617;
-  --xflow-editor-top: #1e1f21;
-  --xflow-editor-panel: #24262a;
-  --xflow-editor-panel-2: #2b2e33;
-  --xflow-editor-field: #1e2023;
-  --xflow-editor-canvas: #202225;
-  --xflow-editor-line: #3a3d43;
-  --xflow-editor-line-2: #4b5058;
-  --xflow-editor-text: #f2f4f7;
-  --xflow-editor-muted: #a4abb6;
-  --xflow-editor-blue: #2f7cff;
+  /* Legacy editor aliases retained while consumers move to the shared contract. */
+  --xflow-editor-app: var(--xflow-surface-app);
+  --xflow-editor-top: var(--xflow-surface-toolbar);
+  --xflow-editor-panel: var(--xflow-surface-panel);
+  --xflow-editor-panel-2: var(--xflow-surface-panel-raised);
+  --xflow-editor-field: var(--xflow-surface-field);
+  --xflow-editor-canvas: var(--xflow-surface-canvas);
+  --xflow-editor-line: var(--xflow-border);
+  --xflow-editor-line-2: var(--xflow-border-strong);
+  --xflow-editor-text: var(--xflow-text);
+  --xflow-editor-muted: var(--xflow-text-tertiary);
+  --xflow-editor-blue: var(--xflow-focus);
+  --xflow-toolbar-height: 48px;
+  --xflow-panel-rail-width: 52px;
+  --xflow-panel-left-width: 300px;
+  --xflow-panel-right-width: 324px;
+  --xflow-panel-collapsed-width: 44px;
+  --xflow-ruler-x-height: 24px;
+  --xflow-ruler-y-width: 24px;
+  --xflow-ruler-major-step: 100px;
+  --xflow-ruler-mid-step: 50px;
+  --xflow-ruler-minor-step: 10px;
+  --xflow-ruler-tick-major: color-mix(in srgb, var(--xflow-text) 46%, transparent);
+  --xflow-ruler-tick-mid: color-mix(in srgb, var(--xflow-text) 27%, transparent);
+  --xflow-ruler-tick-minor: color-mix(in srgb, var(--xflow-text) 15%, transparent);
+  --xflow-ruler-origin: var(--xflow-status-warning);
+  --xflow-control-height: 28px;
+  --xflow-field-height: 24px;
+  --xflow-control-radius: 6px;
+  --xflow-control-radius-sm: 4px;
+  --xflow-popup-shadow: 0 12px 30px var(--xflow-node-shadow);
   background: var(--xflow-editor-app);
   color: var(--xflow-editor-text);
   display: flex;
@@ -18,61 +419,24 @@
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   height: 100vh;
   min-height: 720px;
+  min-width: 0;
   overflow: hidden;
+  width: 100%;
+}
+
+/* The workflow detail host applies this modifier inside its own 100dvh layout.
+ * It deliberately wins over the standalone editor fallback above without a
+ * brittle Tailwind ! utility or a dependency on the surrounding Admin shell. */
+.xflow-editor.xflow-editor--fullscreen {
+  flex: 1 1 auto;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  width: 100%;
 }
 
 .xflow-editor * {
   box-sizing: border-box;
-}
-
-.xflow-editor .ant-btn-default,
-.xflow-editor .ant-btn-text,
-.xflow-editor .ant-input,
-.xflow-editor .ant-input-search .ant-input-group-addon,
-.xflow-editor .ant-input-search .ant-input-search-button,
-.xflow-editor .ant-segmented,
-.xflow-editor .ant-switch {
-  background: var(--xflow-editor-field) !important;
-  border-color: var(--xflow-editor-line) !important;
-  color: var(--xflow-editor-text) !important;
-}
-
-.xflow-editor .ant-input::placeholder {
-  color: #747b86 !important;
-}
-
-.xflow-editor .ant-input:hover,
-.xflow-editor .ant-input:focus,
-.xflow-editor .ant-btn-default:hover,
-.xflow-editor .ant-btn-text:hover,
-.xflow-editor .ant-input-search .ant-input-search-button:hover {
-  background: var(--xflow-editor-panel-2) !important;
-  border-color: var(--xflow-editor-line-2) !important;
-  color: var(--xflow-editor-text) !important;
-}
-
-.xflow-editor .ant-segmented-item-selected {
-  background: var(--xflow-editor-panel-2) !important;
-}
-
-.xflow-editor .ant-segmented {
-  padding: 2px !important;
-}
-
-.xflow-editor .ant-segmented-item-label {
-  align-items: center;
-  display: inline-flex !important;
-  gap: 5px;
-  min-height: 22px !important;
-  padding: 0 8px !important;
-}
-
-.xflow-editor .ant-tabs .ant-tabs-tab-btn {
-  color: var(--xflow-editor-muted) !important;
-}
-
-.xflow-editor .ant-tabs .ant-tabs-tab-active .ant-tabs-tab-btn {
-  color: var(--xflow-editor-blue) !important;
 }
 
 .xflow-editor-toolbar {
@@ -80,7 +444,7 @@
   background: var(--xflow-editor-top);
   border-bottom: 1px solid var(--xflow-editor-line);
   display: flex;
-  flex: 0 0 48px;
+  flex: 0 0 var(--xflow-toolbar-height);
   gap: 12px;
   justify-content: space-between;
   min-width: 0;
@@ -102,7 +466,7 @@
 
 .xflow-editor-tool-group {
   align-items: center;
-  background: #18191b;
+  background: var(--xflow-surface-control);
   border: 1px solid var(--xflow-editor-line);
   border-radius: 6px;
   display: flex;
@@ -115,7 +479,7 @@
   background: transparent;
   border: 1px solid transparent;
   border-radius: 5px;
-  color: #c8cdd5;
+  color: var(--xflow-text-secondary);
   cursor: pointer;
   display: inline-flex;
   font-size: 13px;
@@ -130,14 +494,26 @@
 }
 
 .xflow-editor-tool-strip button:hover,
-.xflow-editor-tool-strip button.active {
-  background: var(--xflow-editor-panel-2);
-  border-color: #444951;
-  color: #fff;
+.xflow-editor-tool-strip button.active,
+.xflow-editor-tool-strip button[aria-pressed="true"] {
+  background: var(--xflow-focus-subtle);
+  border-color: var(--xflow-focus-border);
+  color: var(--xflow-focus-text);
+}
+
+.xflow-editor-tool-strip button:disabled {
+  cursor: not-allowed;
+  opacity: .38;
+}
+
+.xflow-editor-tool-strip button:disabled:hover {
+  background: transparent;
+  border-color: transparent;
+  color: var(--xflow-text-secondary);
 }
 
 .xflow-editor-tool-divider {
-  background: #454a53;
+  background: var(--xflow-border-strong);
   display: block;
   height: 18px;
   opacity: .8;
@@ -155,13 +531,13 @@
 }
 
 .xflow-editor-toolbar-actions .ant-space {
-  gap: 6px !important;
+  gap: 6px;
 }
 
 .xflow-editor-operation-status {
-  border: 1px solid #383e49;
+  border: 1px solid var(--xflow-border);
   border-radius: 4px;
-  color: #8e98a7;
+  color: var(--xflow-text-tertiary);
   font-size: 10.5px;
   line-height: 20px;
   padding: 0 7px;
@@ -175,6 +551,71 @@
   gap: 4px;
   height: 28px;
   padding-inline: 9px;
+}
+
+/* Theme controls are editor-specific; Segmented visuals remain ConfigProvider-owned. */
+.xflow-editor-theme-trigger {
+  align-items: center;
+  border-color: var(--xflow-border);
+  color: var(--xflow-text-secondary);
+  display: inline-flex;
+  gap: 4px;
+}
+
+.xflow-editor-theme-trigger:hover,
+.xflow-editor-theme-trigger:focus-visible {
+  border-color: var(--xflow-focus-border-strong);
+  color: var(--xflow-focus);
+}
+
+.xflow-editor-theme-trigger:focus-visible {
+  outline: 2px solid var(--xflow-focus-ring);
+  outline-offset: 1px;
+}
+
+.xflow-editor-theme-popover .ant-popover-inner {
+  background: var(--xflow-surface-panel);
+  border: 1px solid var(--xflow-border);
+  box-shadow: 0 12px 30px var(--xflow-node-shadow);
+  color: var(--xflow-text);
+}
+
+.xflow-editor-theme-popover .ant-popover-title {
+  border-bottom-color: var(--xflow-border);
+  color: var(--xflow-text);
+}
+
+.xflow-editor-theme-settings {
+  display: grid;
+  gap: 14px;
+  min-width: 248px;
+}
+
+.xflow-editor-theme-settings__row {
+  display: grid;
+  gap: 7px;
+}
+
+.xflow-editor-theme-settings__row > div {
+  display: grid;
+  gap: 2px;
+}
+
+.xflow-editor-theme-settings__label,
+.xflow-editor-theme-settings__hint {
+  display: block;
+}
+
+.xflow-editor-theme-settings__label {
+  color: var(--xflow-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.xflow-editor-theme-settings__hint {
+  color: var(--xflow-text-tertiary);
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .xflow-editor-title {
@@ -218,7 +659,7 @@
 }
 
 .xflow-editor-title__heading em {
-  background: #17191c;
+  background: var(--xflow-surface-control);
   border: 1px solid var(--xflow-editor-line);
   border-radius: 4px;
   color: var(--xflow-editor-muted);
@@ -230,15 +671,15 @@
 }
 
 .xflow-editor-title__heading em.blue {
-  background: rgba(47, 124, 255, .14);
-  border-color: rgba(47, 124, 255, .42);
-  color: #8db5ff;
+  background: var(--xflow-focus-subtle);
+  border-color: var(--xflow-focus-border);
+  color: var(--xflow-focus-text);
 }
 
 .xflow-editor-title__heading em.amber {
-  background: rgba(247, 185, 85, .12);
-  border-color: rgba(247, 185, 85, .38);
-  color: #f7b955;
+  background: var(--xflow-status-warning-subtle);
+  border-color: var(--xflow-status-warning-border);
+  color: var(--xflow-status-warning);
 }
 
 .xflow-editor-title p {
@@ -249,20 +690,22 @@
 .xflow-editor-main {
   display: grid;
   flex: 1 1 auto;
-  grid-template-columns: 300px minmax(480px, 1fr) 324px;
+  grid-template-columns: var(--xflow-panel-left-width) minmax(480px, 1fr) var(--xflow-panel-right-width);
   min-height: 0;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .xflow-editor-main[data-left-collapsed="true"] {
-  grid-template-columns: 52px minmax(480px, 1fr) 324px;
+  grid-template-columns: var(--xflow-panel-rail-width) minmax(480px, 1fr) var(--xflow-panel-right-width);
 }
 
 .xflow-editor-main[data-right-collapsed="true"] {
-  grid-template-columns: 300px minmax(480px, 1fr) 44px;
+  grid-template-columns: var(--xflow-panel-left-width) minmax(480px, 1fr) var(--xflow-panel-collapsed-width);
 }
 
 .xflow-editor-main[data-left-collapsed="true"][data-right-collapsed="true"] {
-  grid-template-columns: 52px minmax(480px, 1fr) 44px;
+  grid-template-columns: var(--xflow-panel-rail-width) minmax(480px, 1fr) var(--xflow-panel-collapsed-width);
 }
 
 .xflow-editor-left,
@@ -285,23 +728,23 @@
 
 .xflow-editor-panel-handle {
   align-items: center;
-  background: #1b1d21 !important;
-  border-color: #3f444c !important;
-  color: #8f98a6 !important;
+  background: var(--xflow-surface-control);
+  border-color: var(--xflow-border-strong);
+  color: var(--xflow-text-tertiary);
   display: inline-flex;
-  height: 24px !important;
+  height: var(--xflow-field-height);
   justify-content: center;
-  min-width: 20px !important;
-  padding: 0 !important;
+  min-width: 20px;
+  padding: 0;
   position: absolute;
   top: 50%;
   z-index: 4;
 }
 
 .xflow-editor-panel-handle:hover {
-  background: #252932 !important;
-  border-color: #596171 !important;
-  color: #f1f4f8 !important;
+  background: var(--xflow-surface-hover);
+  border-color: var(--xflow-border-strong);
+  color: var(--xflow-text);
 }
 
 .xflow-editor-panel-handle .anticon {
@@ -320,7 +763,7 @@
 
 .xflow-editor-rail {
   align-items: center;
-  background: #191a1c;
+  background: var(--xflow-surface-toolbar);
   border-right: 1px solid var(--xflow-editor-line);
   display: flex;
   flex: 0 0 52px;
@@ -357,15 +800,17 @@
 
 .xflow-editor-left__content {
   display: grid;
-  flex: 1;
-  grid-template-rows: minmax(350px, 1.18fr) minmax(220px, .82fr);
+  flex: 1 1 auto;
+  grid-template-rows: minmax(0, 1.06fr) minmax(0, .94fr);
+  min-height: 0;
   min-width: 0;
+  overflow: hidden;
 }
 
 .xflow-editor .xflow-editor-panel-card.ant-card {
-  background: #23262a !important;
-  border: 0 !important;
-  border-radius: 0 !important;
+  background: var(--xflow-surface-panel);
+  border: 0;
+  border-radius: 0;
   color: var(--xflow-editor-text);
   display: flex;
   flex-direction: column;
@@ -377,7 +822,7 @@
 .xflow-editor .xflow-editor-panel-card > .ant-card-head,
 .xflow-editor .xflow-editor-panel-card > .ant-card-body,
 .xflow-editor .xflow-editor-panel-card > .ant-card-head > .ant-card-head-wrapper {
-  border-radius: 0 !important;
+  border-radius: 0;
 }
 
 .xflow-editor-left__content > .xflow-editor-panel-card.ant-card {
@@ -385,12 +830,12 @@
 }
 
 .xflow-editor .xflow-editor-panel-card > .ant-card-head {
-  background: #282b30;
-  border-bottom: 1px solid #363a42;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .035);
+  background: var(--xflow-surface-panel-raised);
+  border-bottom: 1px solid var(--xflow-border);
+  box-shadow: inset 0 1px 0 var(--xflow-surface-highlight);
   flex: 0 0 auto;
   min-height: 42px;
-  padding: 0 10px !important;
+  padding: 0 10px;
 }
 
 .xflow-editor .xflow-editor-panel-card > .ant-card-head > .ant-card-head-wrapper {
@@ -399,21 +844,21 @@
 
 .xflow-editor .xflow-editor-panel-card > .ant-card-head .ant-card-head-title {
   min-width: 0;
-  padding: 0 !important;
+  padding: 0;
 }
 
 .xflow-editor .xflow-editor-panel-card > .ant-card-head .ant-card-extra {
   margin-inline-start: 8px;
-  padding: 0 !important;
+  padding: 0;
 }
 
 .xflow-editor .xflow-editor-panel-card__body {
-  background: #202226;
-  box-shadow: inset 0 1px 0 rgba(0, 0, 0, .18);
+  background: var(--xflow-surface-panel);
+  box-shadow: inset 0 1px 0 var(--xflow-surface-inset-shadow);
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
-  padding: 8px 10px 10px !important;
+  padding: 8px 10px 10px;
 }
 
 .xflow-editor-panel-title {
@@ -425,10 +870,10 @@
 
 .xflow-editor-panel-title__icon {
   align-items: center;
-  background: #202329;
-  border: 1px solid #3d444f;
+  background: var(--xflow-surface-field);
+  border: 1px solid var(--xflow-port-border);
   border-radius: 4px;
-  color: #9aa7b8;
+  color: var(--xflow-text-secondary);
   display: inline-flex;
   flex: 0 0 22px;
   height: 22px;
@@ -456,21 +901,21 @@
 }
 
 .xflow-editor-panel-title__text > strong {
-  color: #eff2f6;
+  color: var(--xflow-text);
   font-size: 12px;
   font-weight: 650;
   line-height: 16px;
 }
 
 .xflow-editor-panel-title__text > span {
-  color: #747d89;
+  color: var(--xflow-text-tertiary);
   font-size: 10px;
   font-weight: 500;
   line-height: 13px;
 }
 
 .xflow-editor-library.ant-card {
-  border-bottom: 1px solid #343840 !important;
+  border-bottom: 1px solid var(--xflow-border) !important;
 }
 
 .xflow-editor-outline.ant-card > .ant-card-head {
@@ -521,7 +966,7 @@
 }
 
 .xflow-editor .xflow-editor-block-title .anticon {
-  color: #7d8490;
+  color: var(--xflow-text-tertiary);
   display: inline-flex !important;
   flex: 0 0 auto;
   font-size: 12px;
@@ -541,10 +986,10 @@
 .xflow-editor-library-title__icon,
 .xflow-editor-pane-title__icon {
   align-items: center;
-  background: rgba(47, 124, 255, .14);
-  border: 1px solid rgba(47, 124, 255, .36);
+  background: var(--xflow-focus-subtle);
+  border: 1px solid var(--xflow-focus-border);
   border-radius: 5px;
-  color: #8db5ff;
+  color: var(--xflow-focus-text);
   display: inline-flex !important;
   flex: 0 0 24px;
   height: 24px;
@@ -559,9 +1004,9 @@
 }
 
 .xflow-editor-library-search-toggle[data-active="true"] {
-  background: var(--xflow-editor-panel-2) !important;
-  border-color: var(--xflow-editor-line-2) !important;
-  color: var(--xflow-editor-blue) !important;
+  background: var(--xflow-editor-panel-2);
+  border-color: var(--xflow-editor-line-2);
+  color: var(--xflow-editor-blue);
 }
 
 .xflow-editor-library-search {
@@ -574,84 +1019,184 @@
 
 .xflow-editor-node-group__title {
   align-items: center;
-  color: var(--xflow-editor-muted);
+  background: transparent;
+  border: 0;
+  color: var(--xflow-text-secondary);
+  cursor: pointer;
   display: flex;
+  font: inherit;
   font-size: 11px;
   justify-content: space-between;
   margin-bottom: 8px;
+  min-width: 0;
+  padding: 0;
+  text-align: left;
+  width: 100%;
 }
 
-.xflow-editor-node-grid {
+.xflow-editor-node-group__title:hover {
+  color: var(--xflow-text);
+}
+
+.xflow-editor-node-group__title[aria-expanded="false"] {
+  margin-bottom: 0;
+}
+
+.xflow-editor-node-group__title:focus-visible {
+  border-radius: 3px;
+  outline: 2px solid var(--xflow-focus-ring);
+  outline-offset: 2px;
+}
+
+.xflow-editor-node-group__heading {
+  align-items: center;
+  display: inline-flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.xflow-editor-node-group__heading .xflow-editor-block-title {
+  color: var(--xflow-text-secondary);
+  font-weight: 650;
+}
+
+.xflow-editor-node-group__heading .xflow-editor-block-title .anticon {
+  color: var(--xflow-focus-text);
+}
+
+.xflow-editor-node-group__title:hover .xflow-editor-block-title {
+  color: var(--xflow-text);
+}
+
+.xflow-editor-node-group__count {
+  color: var(--xflow-text-tertiary);
+  font-family: SFMono-Regular, Consolas, monospace;
+  font-size: 9px;
+  font-weight: 500;
+}
+
+.xflow-editor-node-group__chevron {
+  color: var(--xflow-text-tertiary);
+  flex: 0 0 auto;
+  font-size: 10px;
+  transition: transform .16s ease;
+}
+
+.xflow-editor-node-group__chevron.is-collapsed {
+  transform: rotate(-90deg);
+}
+
+.xflow-editor-node-grid,
+.xflow-editor-node-list {
   display: grid;
-  gap: 7px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .xflow-editor-node-tile {
   align-items: center;
-  background: #1f2125;
-  border: 1px solid var(--xflow-editor-line);
-  border-radius: 6px;
-  color: var(--xflow-editor-text);
+  background: var(--xflow-surface-field);
+  border: 1px solid var(--xflow-border);
+  border-radius: 5px;
+  color: var(--xflow-text);
   cursor: pointer;
-  display: flex;
-  gap: 7px;
-  height: 34px;
-  min-width: 0;
-  padding: 6px;
+  display: grid;
+  grid-template-columns: 25px minmax(0, 1fr) 18px;
+  min-height: 39px;
+  padding: 4px 6px;
+  text-align: left;
+  width: 100%;
 }
 
 .xflow-editor-node-tile:hover {
-  border-color: rgba(47, 124, 255, .72);
-  background: #252932;
+  background: var(--xflow-surface-hover);
+  border-color: var(--xflow-border-strong);
+  color: var(--xflow-text);
 }
 
-.xflow-editor-node-tile span {
+.xflow-editor-node-tile:focus-visible {
+  border-color: var(--xflow-focus-border-strong);
+  box-shadow: 0 0 0 2px var(--xflow-focus-ring);
+  outline: none;
+}
+
+.xflow-editor-node-tile__icon {
   align-items: center;
-  background: transparent;
-  border: 1px solid transparent;
+  background: var(--xflow-node-tone-blue-bg);
+  border: 1px solid var(--xflow-node-tone-blue-border);
   border-radius: 4px;
-  color: #8a94a3;
+  color: var(--xflow-node-tone-blue-text);
   display: inline-flex;
-  flex: 0 0 22px;
-  font-size: 11px;
-  height: 22px;
+  height: 23px;
   justify-content: center;
+  width: 23px;
 }
 
-.xflow-editor-node-tile[data-tone="green"] span {
-  background: transparent;
-  border-color: transparent;
-  color: #8a94a3;
+.xflow-editor-node-tile[data-tone="green"] .xflow-editor-node-tile__icon {
+  background: var(--xflow-node-tone-green-bg);
+  border-color: var(--xflow-node-tone-green-border);
+  color: var(--xflow-node-tone-green-text);
 }
 
-.xflow-editor-node-tile[data-tone="cyan"] span {
-  background: transparent;
-  border-color: transparent;
-  color: #8a94a3;
+.xflow-editor-node-tile[data-tone="cyan"] .xflow-editor-node-tile__icon {
+  background: var(--xflow-node-tone-cyan-bg);
+  border-color: var(--xflow-node-tone-cyan-border);
+  color: var(--xflow-node-tone-cyan-text);
 }
 
-.xflow-editor-node-tile[data-tone="amber"] span {
-  background: transparent;
-  border-color: transparent;
-  color: #8a94a3;
+.xflow-editor-node-tile[data-tone="amber"] .xflow-editor-node-tile__icon {
+  background: var(--xflow-node-tone-amber-bg);
+  border-color: var(--xflow-node-tone-amber-border);
+  color: var(--xflow-node-tone-amber-text);
 }
 
-.xflow-editor-node-tile[data-tone="violet"] span {
-  background: transparent;
-  border-color: transparent;
-  color: #8a94a3;
+.xflow-editor-node-tile[data-tone="violet"] .xflow-editor-node-tile__icon {
+  background: var(--xflow-node-tone-violet-bg);
+  border-color: var(--xflow-node-tone-violet-border);
+  color: var(--xflow-node-tone-violet-text);
 }
 
-.xflow-editor-node-tile .anticon {
-  font-size: 14px;
+.xflow-editor-node-tile__icon .anticon {
+  color: inherit;
+  font-size: 13px;
 }
 
-.xflow-editor-node-tile strong {
-  font-size: 12px;
+.xflow-editor-node-tile__content {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+  padding: 0 7px;
+}
+
+.xflow-editor-node-tile__content strong,
+.xflow-editor-node-tile__content small {
+  display: block;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.xflow-editor-node-tile__content strong {
+  color: var(--xflow-text);
+  font-size: 10.5px;
+  font-weight: 650;
+  line-height: 13px;
+}
+
+.xflow-editor-node-tile__content small {
+  color: var(--xflow-text-tertiary);
+  font-family: SFMono-Regular, Consolas, monospace;
+  font-size: 8.5px;
+  line-height: 11px;
+}
+
+.xflow-editor-node-tile__add {
+  color: var(--xflow-text-tertiary);
+  font-size: 17px;
+  font-weight: 300;
+  line-height: 1;
+  text-align: right;
 }
 
 .xflow-editor-outline-list {
@@ -665,7 +1210,7 @@
   background: transparent;
   border: 1px solid transparent;
   border-radius: 6px;
-  color: var(--xflow-editor-muted);
+  color: var(--xflow-text-tertiary);
   cursor: pointer;
   display: grid;
   font-size: 11px;
@@ -676,10 +1221,29 @@
   text-align: left;
 }
 
+.xflow-editor-outline-row:hover {
+  background: var(--xflow-surface-hover);
+  border-color: var(--xflow-border-strong);
+  color: var(--xflow-text);
+}
+
+.xflow-editor-outline-row:focus-visible {
+  background: var(--xflow-focus-subtle);
+  border-color: var(--xflow-focus-border-strong);
+  box-shadow: 0 0 0 2px var(--xflow-focus-ring);
+  color: var(--xflow-text);
+  outline: none;
+}
+
 .xflow-editor-outline-row[data-selected="true"] {
-  background: rgba(47, 124, 255, .12);
-  border-color: rgba(47, 124, 255, .62);
-  color: var(--xflow-editor-text);
+  background: var(--xflow-focus-subtle);
+  border-color: var(--xflow-focus-border-strong);
+  color: var(--xflow-text);
+}
+
+.xflow-editor-outline-row[data-selected="true"]:focus-visible {
+  box-shadow: 0 0 0 2px var(--xflow-focus-ring);
+  outline: none;
 }
 
 .xflow-editor-outline-row > span:nth-child(2) {
@@ -687,6 +1251,14 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.xflow-editor-outline-status {
+  color: var(--xflow-text-tertiary);
+}
+
+.xflow-editor-outline-row[data-selected="true"] .xflow-editor-outline-status {
+  color: var(--xflow-text-secondary);
 }
 
 .xflow-editor-outline-row .ant-tag {
@@ -697,14 +1269,14 @@
 }
 
 .xflow-editor-status-dot {
-  background: #747b86;
+  background: var(--xflow-status-disabled);
   border-radius: 999px;
   height: 6px;
   width: 6px;
 }
 
 .xflow-editor-status-dot[data-status="success"] {
-  background: #33c481;
+  background: var(--xflow-status-success);
 }
 
 .xflow-editor-status-dot[data-status="running"],
@@ -714,11 +1286,11 @@
 
 .xflow-editor-status-dot[data-status="failed"],
 .xflow-editor-status-dot[data-status="canceled"] {
-  background: #ff5f57;
+  background: var(--xflow-status-error);
 }
 
 .xflow-editor-canvas {
-  background: #1b1d20;
+  background: var(--xflow-surface-canvas);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -727,60 +1299,131 @@
   z-index: 1;
 }
 
-.xflow-editor-canvas__ruler {
-  background-color: #18191b;
-  border-color: var(--xflow-editor-line);
-  color: #69707a;
-  font-family: SFMono-Regular, Consolas, monospace;
-  font-size: 10px;
-  position: relative;
-}
-
-.xflow-editor-canvas__ruler--x {
-  background-image:
-    linear-gradient(90deg, rgba(255, 255, 255, .14) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, .055) 1px, transparent 1px);
-  background-size: 96px 100%, 16px 100%;
-  border-bottom: 1px solid var(--xflow-editor-line);
-  flex: 0 0 28px;
-}
-
-.xflow-editor-canvas__ruler--x span {
-  position: absolute;
-  top: 7px;
-}
-
-.xflow-editor-canvas__body {
-  display: flex;
-  flex: 1;
+/* The canvas is a real four-cell ruler grid, not decorative overlays. Keeping
+ * the ruler and React Flow surface in the same grid gives both a stable height
+ * in the full-screen host and matching 96px major rhythm. */
+/* The canvas ruler follows the fused preview: 10 / 50 / 100 unit tick
+ * hierarchy, a visible origin marker, and a shared 100-unit canvas rhythm. */
+.xflow-editor-canvas__frame {
+  display: grid;
+  flex: 1 1 auto;
+  grid-template-columns: var(--xflow-ruler-y-width) minmax(0, 1fr);
+  grid-template-rows: var(--xflow-ruler-x-height) minmax(0, 1fr);
+  height: 100%;
   min-height: 0;
   min-width: 0;
 }
 
+.xflow-editor-canvas__ruler-corner {
+  background: var(--xflow-surface-control);
+  border-bottom: 1px solid var(--xflow-border);
+  border-right: 1px solid var(--xflow-border);
+  grid-column: 1;
+  grid-row: 1;
+  position: relative;
+}
+
+.xflow-editor-canvas__ruler-corner::before {
+  border-bottom: 1px solid var(--xflow-ruler-origin);
+  border-right: 1px solid var(--xflow-ruler-origin);
+  bottom: -1px;
+  content: "";
+  height: 7px;
+  opacity: .86;
+  position: absolute;
+  right: -1px;
+  width: 7px;
+}
+
+.xflow-editor-canvas__ruler {
+  background-color: var(--xflow-surface-control);
+  color: var(--xflow-text-tertiary);
+  font-family: SFMono-Regular, Consolas, monospace;
+  font-size: 8px;
+  line-height: 1;
+  overflow: hidden;
+  position: relative;
+  text-rendering: geometricPrecision;
+  user-select: none;
+}
+
+.xflow-editor-canvas__ruler--x {
+  background-image:
+    linear-gradient(90deg, var(--xflow-ruler-tick-major) 0 1px, transparent 1px),
+    linear-gradient(90deg, var(--xflow-ruler-tick-mid) 0 1px, transparent 1px),
+    linear-gradient(90deg, var(--xflow-ruler-tick-minor) 0 1px, transparent 1px);
+  background-position: 0 bottom;
+  background-repeat: repeat-x;
+  background-size:
+    var(--xflow-ruler-major-step) 15px,
+    var(--xflow-ruler-mid-step) 10px,
+    var(--xflow-ruler-minor-step) 6px;
+  border-bottom: 1px solid var(--xflow-border);
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.xflow-editor-canvas__ruler--x::after {
+  background: var(--xflow-ruler-origin);
+  bottom: 0;
+  content: "";
+  height: 18px;
+  left: 0;
+  opacity: .78;
+  position: absolute;
+  width: 1px;
+}
+
+.xflow-editor-canvas__ruler--x span {
+  left: 5px;
+  position: absolute;
+  top: 4px;
+}
+
 .xflow-editor-canvas__ruler--y {
   background-image:
-    linear-gradient(rgba(255, 255, 255, .14) 1px, transparent 1px),
-    linear-gradient(rgba(255, 255, 255, .055) 1px, transparent 1px);
-  background-size: 100% 96px, 100% 16px;
-  border-right: 1px solid var(--xflow-editor-line);
-  flex: 0 0 36px;
+    linear-gradient(var(--xflow-ruler-tick-major) 0 1px, transparent 1px),
+    linear-gradient(var(--xflow-ruler-tick-mid) 0 1px, transparent 1px),
+    linear-gradient(var(--xflow-ruler-tick-minor) 0 1px, transparent 1px);
+  background-position: right 0;
+  background-repeat: repeat-y;
+  background-size:
+    15px var(--xflow-ruler-major-step),
+    10px var(--xflow-ruler-mid-step),
+    6px var(--xflow-ruler-minor-step);
+  border-right: 1px solid var(--xflow-border);
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.xflow-editor-canvas__ruler--y::after {
+  background: var(--xflow-ruler-origin);
+  content: "";
+  height: 1px;
+  opacity: .78;
+  position: absolute;
+  right: 0;
+  top: 0;
+  width: 18px;
 }
 
 .xflow-editor-canvas__ruler--y span {
-  left: 7px;
+  left: 5px;
   position: absolute;
-  transform: rotate(-90deg);
-  transform-origin: left center;
+  top: 6px;
+  writing-mode: vertical-rl;
 }
 
 .xflow-editor-preview-frame {
   background-color: var(--xflow-editor-canvas);
   background-image:
-    linear-gradient(rgba(255, 255, 255, .04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, .04) 1px, transparent 1px),
-    radial-gradient(circle at 1px 1px, rgba(255, 255, 255, .10) 1px, transparent 0);
-  background-size: 96px 96px, 96px 96px, 12px 12px;
-  flex: 1;
+    linear-gradient(var(--xflow-canvas-grid-minor) 1px, transparent 1px),
+    linear-gradient(90deg, var(--xflow-canvas-grid-minor) 1px, transparent 1px),
+    radial-gradient(circle at 1px 1px, var(--xflow-canvas-grid-dot) 1px, transparent 0);
+  background-size: var(--xflow-ruler-major-step) var(--xflow-ruler-major-step), var(--xflow-ruler-major-step) var(--xflow-ruler-major-step), var(--xflow-ruler-minor-step) var(--xflow-ruler-minor-step);
+  display: flex;
+  grid-column: 2;
+  grid-row: 2;
   min-height: 0;
   min-width: 0;
   overflow: hidden;
@@ -791,13 +1434,16 @@
 .xflow-editor-preview {
   background: transparent;
   border: 0;
+  flex: 1 1 auto;
   height: 100%;
   min-height: 0;
+  min-width: 0;
+  width: 100%;
 }
 
 .xflow-editor-canvas-status {
   align-items: center;
-  background: rgba(23, 25, 28, .92);
+  background: var(--xflow-surface-overlay);
   border: 1px solid var(--xflow-editor-line);
   border-radius: 6px;
   color: var(--xflow-editor-muted);
@@ -811,7 +1457,7 @@
 }
 
 .xflow-editor-canvas-zone {
-  background: rgba(24, 26, 29, .82);
+  background: var(--xflow-surface-overlay-subtle);
   border: 1px solid var(--xflow-editor-line);
   border-radius: 5px;
   color: var(--xflow-editor-muted);
@@ -832,8 +1478,8 @@
 .xflow-editor-canvas-zone.zone-l1,
 .xflow-editor-canvas-zone.zone-l2,
 .xflow-editor-canvas-zone.zone-l3 {
-  border-color: rgba(47, 124, 255, .45);
-  color: #8db5ff;
+  border-color: var(--xflow-focus-border);
+  color: var(--xflow-focus-text);
   left: auto;
   right: 132px;
 }
@@ -851,8 +1497,8 @@
 }
 
 .xflow-editor-canvas-zone.zone-error {
-  border-color: rgba(255, 95, 87, .45);
-  color: #ff8b84;
+  border-color: var(--xflow-status-error-border);
+  color: var(--xflow-status-error-text);
   left: auto;
   right: 330px;
   top: 402px;
@@ -894,15 +1540,102 @@
   min-height: 0;
 }
 
+.xflow-editor-preview .xflow-preview-empty {
+  display: none;
+}
+
+.xflow-editor-canvas-context {
+  color: var(--xflow-text-secondary);
+  font-size: 10px;
+}
+
+.xflow-editor-canvas-context i {
+  background: var(--xflow-status-warning);
+  border-radius: 999px;
+  box-shadow: 0 0 0 3px var(--xflow-status-warning-subtle);
+  height: 5px;
+  width: 5px;
+}
+
+.xflow-editor-canvas-context strong {
+  color: var(--xflow-text);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.xflow-editor-canvas-context span {
+  color: var(--xflow-text-tertiary);
+}
+
+.xflow-editor-empty-canvas {
+  color: var(--xflow-text-secondary);
+  max-width: 340px;
+}
+
+.xflow-editor-empty-canvas__icon {
+  align-items: center;
+  background: var(--xflow-focus-subtle);
+  border: 1px solid var(--xflow-focus-border);
+  border-radius: 999px;
+  box-shadow: 0 0 0 12px color-mix(in srgb, var(--xflow-focus) 3%, transparent), 0 18px 44px var(--xflow-node-shadow);
+  color: var(--xflow-focus-text);
+  display: inline-flex;
+  height: 72px;
+  justify-content: center;
+  margin-bottom: 15px;
+  width: 72px;
+}
+
+.xflow-editor-empty-canvas__icon .anticon {
+  font-size: 23px;
+}
+
+.xflow-editor-empty-canvas h1 {
+  color: var(--xflow-text);
+  font-size: 15px;
+  font-weight: 650;
+  margin: 0;
+}
+
+.xflow-editor-empty-canvas p {
+  color: var(--xflow-text-tertiary);
+  font-size: 11px;
+  line-height: 1.65;
+  margin: 8px 0 14px;
+}
+
+.xflow-editor-empty-canvas button {
+  background: var(--xflow-surface-panel-raised);
+  border: 1px solid var(--xflow-border-strong);
+  border-radius: 5px;
+  color: var(--xflow-text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 6px 10px;
+}
+
+.xflow-editor-empty-canvas button:hover {
+  background: var(--xflow-surface-hover);
+  border-color: var(--xflow-focus-border);
+  color: var(--xflow-focus-text);
+}
+
+.xflow-editor-empty-canvas button:focus-visible {
+  outline: 2px solid var(--xflow-focus-ring);
+  outline-offset: 2px;
+}
+
 .xflow-editor-preview .react-flow {
   background: transparent;
 }
 
 .xflow-editor-preview .xflow-preview-node {
-  background: #282b30;
-  border-color: #3d424b;
+  background: var(--xflow-node-bg);
+  border-color: var(--xflow-node-border);
   border-radius: 6px;
-  box-shadow: 0 10px 24px rgba(0, 0, 0, .18);
+  box-shadow: 0 10px 24px var(--xflow-node-shadow);
   min-width: 164px;
   padding: 8px;
   position: relative;
@@ -910,7 +1643,7 @@
 }
 
 .xflow-editor-preview .xflow-preview-node::before {
-  background: #6f7784;
+  background: var(--xflow-status-disabled);
   border-radius: 6px 6px 0 0;
   content: "";
   height: 2px;
@@ -924,20 +1657,20 @@
 .xflow-editor-preview .xflow-preview-node[data-status="running"],
 .xflow-editor-preview .xflow-preview-node[data-status="waiting"],
 .xflow-editor-preview .xflow-preview-node[data-status="failed"] {
-  border-color: #3d424b;
+  border-color: var(--xflow-node-border);
 }
 
 .xflow-editor-preview .xflow-preview-node[data-status="success"]::before {
-  background: #35c98b;
+  background: var(--xflow-status-success);
 }
 
 .xflow-editor-preview .xflow-preview-node[data-status="running"]::before,
 .xflow-editor-preview .xflow-preview-node[data-status="waiting"]::before {
-  background: #2f7cff;
+  background: var(--xflow-status-running);
 }
 
 .xflow-editor-preview .xflow-preview-node[data-status="failed"]::before {
-  background: #ff5f57;
+  background: var(--xflow-status-error);
 }
 
 .xflow-editor-preview .xflow-preview-node__header strong {
@@ -954,7 +1687,7 @@
 .xflow-editor-preview .xflow-preview-node__icon {
   background: transparent;
   border-color: transparent;
-  color: #8993a1;
+  color: var(--xflow-port-text);
   flex-basis: 20px;
   height: 20px;
   width: 20px;
@@ -967,32 +1700,32 @@
 .xflow-editor-preview .xflow-preview-node__icon[data-tone] {
   background: transparent;
   border-color: transparent;
-  color: #8993a1;
+  color: var(--xflow-port-text);
 }
 
 .xflow-editor-preview .xflow-preview-node__status {
-  background: #22262c;
+  background: var(--xflow-node-meta-bg);
   border: 0;
   border-radius: 3px;
-  color: #8e98a7;
+  color: var(--xflow-text-tertiary);
   padding: 1px 4px;
 }
 
 .xflow-editor-preview .xflow-preview-node[data-status="running"] .xflow-preview-node__status,
 .xflow-editor-preview .xflow-preview-node[data-status="waiting"] .xflow-preview-node__status {
-  color: #9bbcff;
+  color: var(--xflow-status-running-text);
 }
 
 .xflow-editor-preview .xflow-preview-node[data-status="success"] .xflow-preview-node__status {
-  color: #62d7a0;
+  color: var(--xflow-status-success-text);
 }
 
 .xflow-editor-preview .xflow-preview-node[data-status="failed"] .xflow-preview-node__status {
-  color: #ff948e;
+  color: var(--xflow-status-error-text);
 }
 
 .xflow-editor-preview .xflow-preview-node__body {
-  border-top-color: #3a3f48;
+  border-top-color: var(--xflow-node-border);
   gap: 5px;
   margin-top: 7px;
   padding-top: 7px;
@@ -1003,8 +1736,8 @@
 }
 
 .xflow-editor-preview .xflow-preview-node__port-chips span {
-  background: rgba(47, 124, 255, .12);
-  border-color: rgba(47, 124, 255, .32);
+  background: var(--xflow-port-chip-bg);
+  border-color: var(--xflow-port-chip-border);
   font-size: 9px;
   line-height: 16px;
   padding: 0 4px;
@@ -1016,8 +1749,8 @@
 }
 
 .xflow-editor-preview .react-flow__minimap {
-  background: rgba(20, 22, 25, .88) !important;
-  border: 1px solid rgba(74, 80, 91, .78) !important;
+  background: var(--xflow-canvas-minimap-mask) !important;
+  border: 1px solid var(--xflow-border-strong) !important;
   border-radius: 6px !important;
   bottom: 16px !important;
   height: 104px !important;
@@ -1031,7 +1764,7 @@
 }
 
 .xflow-editor-preview .react-flow__controls {
-  background: rgba(23, 25, 28, .94);
+  background: var(--xflow-surface-overlay);
   border: 1px solid var(--xflow-editor-line);
   border-radius: 6px;
   box-shadow: none;
@@ -1047,165 +1780,142 @@
   display: none;
 }
 
+/* The inspector has its own header contract: one compact identity row,
+ * then three equal-width views. It must not inherit the generic two-line panel
+ * title because selected-node metadata belongs in the header's trailing slot. */
 .xflow-editor-inspector {
   height: 100%;
-  overflow: auto;
-  padding: 10px 12px 12px;
-}
-
-.xflow-editor .xflow-editor-inspector.ant-card {
-  background: #23262a !important;
-  border-radius: 0 !important;
-  height: 100%;
+  min-height: 0;
   overflow: hidden;
   padding: 0;
 }
 
-.xflow-editor .xflow-editor-inspector.ant-card > .ant-card-head {
-  background: #292c31;
-  border-radius: 0 !important;
-  min-height: 58px;
-  padding: 0 12px !important;
+.xflow-editor .xflow-editor-inspector.xflow-editor-panel-card {
+  background: var(--xflow-surface-panel);
+  border-radius: 0;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
 }
 
-.xflow-editor .xflow-editor-inspector.ant-card > .ant-card-head > .ant-card-head-wrapper {
-  min-height: 58px;
+.xflow-editor .xflow-editor-inspector > .xflow-editor-panel-card__header {
+  background: var(--xflow-surface-panel-raised);
+  border-radius: 0;
+  flex: 0 0 49px;
+  min-height: 49px;
+  padding: 0 12px;
 }
 
+.xflow-editor .xflow-editor-inspector > .xflow-editor-panel-card__header .ant-card-head-wrapper {
+  min-height: 49px;
+}
+
+.xflow-editor .xflow-editor-inspector > .xflow-editor-panel-card__body,
 .xflow-editor .xflow-editor-inspector__body {
-  background: #202226;
-  padding: 0 10px 12px !important;
+  background: var(--xflow-surface-panel);
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
+}
+
+.xflow-editor .xflow-editor-inspector .xflow-editor-panel-card__extra {
+  margin-inline-start: 10px;
+}
+
+.xflow-editor-inspector-header-actions {
+  align-items: center;
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+}
+
+.xflow-editor-inspector-header-meta {
+  color: var(--xflow-text-tertiary);
+  display: block;
+  font-family: SFMono-Regular, Consolas, monospace;
+  font-size: 9px;
+  max-width: 158px;
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .xflow-editor-inspector-tabs {
-  align-items: center;
-  border-bottom: 1px solid var(--xflow-editor-line);
-  display: flex;
-  gap: 6px;
-  height: 28px;
-  margin: 0 -2px 10px;
-}
-
-.xflow-editor .xflow-editor-inspector__body > .xflow-editor-inspector-tabs {
-  background: #22252a;
-  border-bottom-color: #343840;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .025);
-  margin: 0 -10px 10px;
-  padding: 0 10px;
+  background: var(--xflow-surface-panel-raised);
+  border-bottom: 1px solid var(--xflow-border);
+  display: grid;
+  flex: 0 0 36px;
+  gap: 2px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+  padding: 5px 9px;
 }
 
 .xflow-editor-inspector-tabs button {
-  align-self: stretch;
+  align-items: center;
   background: transparent;
   border: 0;
-  border-bottom: 2px solid transparent;
-  border-radius: 4px 4px 0 0;
-  color: var(--xflow-editor-muted);
+  border-radius: 4px;
+  color: var(--xflow-text-tertiary);
   cursor: pointer;
-  font-size: 12px;
-  line-height: 26px;
-  min-width: 42px;
-  padding: 0 6px;
+  display: inline-flex;
+  font-size: 11px;
+  justify-content: center;
+  min-width: 0;
+  padding: 0;
+  width: 100%;
 }
 
 .xflow-editor-inspector-tabs button.active {
-  border-bottom-color: var(--xflow-editor-blue);
-  color: var(--xflow-editor-blue);
+  background: var(--xflow-surface-hover);
+  color: var(--xflow-text);
   font-weight: 650;
 }
 
 .xflow-editor-inspector-tab-label {
   align-items: center;
   display: inline-flex;
-  gap: 5px;
-}
-
-.xflow-editor-inspector-tab-label .anticon {
-  font-size: 11px;
-}
-
-.xflow-editor-inspector-tabs button:hover {
-  background: rgba(255, 255, 255, .03);
-  color: var(--xflow-editor-text);
-}
-
-.xflow-editor-inspector-panel {
-  min-width: 0;
-}
-
-.xflow-editor .xflow-editor-inspector-panel {
-  padding-top: 0;
-}
-
-.xflow-editor-inspector__header {
-  align-items: flex-start;
-  border-bottom: 1px solid var(--xflow-editor-line);
-  display: flex;
-  gap: 10px;
-  justify-content: space-between;
-  margin: -10px -12px 10px;
-  min-height: 64px;
-  padding: 9px 12px 8px;
-}
-
-.xflow-editor-inspector-title {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-  width: 100%;
-}
-
-.xflow-editor .xflow-editor-panel-title__text > .xflow-editor-inspector-title {
-  display: grid;
-  gap: 1px;
-  line-height: normal;
-  width: auto;
-}
-
-.xflow-editor-inspector-title span,
-.xflow-editor-inspector-title strong,
-.xflow-editor-inspector-title em {
-  display: block;
+  justify-content: center;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.xflow-editor-inspector-title span {
-  color: var(--xflow-editor-muted);
-  font-size: 11px;
-  line-height: 16px;
+.xflow-editor-inspector-tabs button:hover {
+  background: var(--xflow-surface-hover-subtle);
+  color: var(--xflow-text);
 }
 
-.xflow-editor-inspector-title .xflow-editor-block-title {
-  display: inline-flex;
+.xflow-editor-inspector-tabs button:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--xflow-focus-border-strong), 0 0 0 2px var(--xflow-focus-ring);
+  color: var(--xflow-text);
+  outline: none;
 }
 
-.xflow-editor-inspector-title strong {
-  color: var(--xflow-editor-text);
-  font-size: 14px;
-  font-weight: 700;
-  line-height: 19px;
+.xflow-editor-inspector-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+  padding: 14px 12px 16px;
 }
 
-.xflow-editor-inspector-node-name {
-  letter-spacing: 0;
+.xflow-editor-inspector-panel:has(.xflow-editor-inspector-empty) {
+  align-items: center;
+  display: flex;
+  justify-content: center;
 }
 
-.xflow-editor-inspector-title em {
-  background: transparent;
-  border: 0;
-  border-radius: 4px;
-  color: #858c98;
-  display: inline-block;
-  font-family: SFMono-Regular, Consolas, monospace;
-  font-size: 10px;
-  font-style: normal;
-  line-height: 14px;
-  padding: 0;
-  width: fit-content;
-  max-width: 100%;
+.xflow-editor-inspector-empty {
+  color: var(--xflow-text-tertiary);
+  max-width: 220px;
+  text-align: center;
 }
 
 .xflow-editor-form {
@@ -1221,7 +1931,7 @@
 
 .xflow-editor-form-section__title {
   align-items: center;
-  color: var(--xflow-editor-muted);
+  color: var(--xflow-text-tertiary);
   display: flex;
   font-size: 12px;
   font-weight: 650;
@@ -1230,7 +1940,7 @@
 }
 
 .xflow-editor-form-section__title .anticon {
-  color: #7d8490;
+  color: var(--xflow-text-tertiary);
   font-size: 12px;
 }
 
@@ -1239,7 +1949,7 @@
   background: transparent;
   border: 0;
   border-radius: 4px;
-  color: #7d8490;
+  color: var(--xflow-text-tertiary);
   cursor: pointer;
   display: inline-flex;
   height: 20px;
@@ -1249,8 +1959,15 @@
 }
 
 .xflow-editor-section-action:hover {
-  background: var(--xflow-editor-panel-2);
-  color: var(--xflow-editor-text);
+  background: var(--xflow-surface-hover);
+  color: var(--xflow-text);
+}
+
+.xflow-editor-section-action:focus-visible {
+  background: var(--xflow-focus-subtle);
+  box-shadow: 0 0 0 2px var(--xflow-focus-ring);
+  color: var(--xflow-focus-text);
+  outline: none;
 }
 
 .xflow-editor-form label {
@@ -1261,7 +1978,7 @@
 }
 
 .xflow-editor-form label span {
-  color: var(--xflow-editor-muted);
+  color: var(--xflow-text-tertiary);
   font-size: 12px;
 }
 
@@ -1272,14 +1989,14 @@
 }
 
 .xflow-editor-json-field textarea.ant-input {
-  background: #1b1e23 !important;
+  background: var(--xflow-surface-field);
   line-height: 1.45;
   resize: vertical;
 }
 
 .xflow-editor-json-field > span {
-  color: #ff8b84 !important;
-  font-size: 10px !important;
+  color: var(--xflow-status-error-text);
+  font-size: 10px;
   line-height: 14px;
 }
 
@@ -1291,7 +2008,7 @@
 
 .xflow-editor-rule-row {
   align-items: flex-start;
-  background: rgba(31, 33, 37, .78);
+  background: var(--xflow-surface-overlay-subtle);
   border: 1px solid var(--xflow-editor-line);
   border-radius: 6px;
   display: flex;
@@ -1302,8 +2019,8 @@
 }
 
 .xflow-editor-rule-row[data-active="true"] {
-  background: rgba(31, 33, 37, .86);
-  border-color: rgba(47, 124, 255, .38);
+  background: var(--xflow-surface-overlay);
+  border-color: var(--xflow-focus-border);
 }
 
 .xflow-editor-rule-row[data-active="true"]::before {
@@ -1323,7 +2040,7 @@
 }
 
 .xflow-editor-rule-row strong {
-  color: #8db5ff;
+  color: var(--xflow-focus-text);
   font-family: SFMono-Regular, Consolas, monospace;
   font-size: 11px;
   margin-bottom: 4px;
@@ -1354,7 +2071,7 @@
 }
 
 .xflow-editor-error {
-  color: #ff5f57;
+  color: var(--xflow-status-error);
 }
 
 .xflow-editor-connection-list,
@@ -1365,8 +2082,8 @@
 }
 
 .xflow-editor-connection-actions {
-  background: #1f2227;
-  border: 1px solid #343944;
+  background: var(--xflow-surface-field);
+  border: 1px solid var(--xflow-border);
   border-radius: 4px;
   display: grid;
   gap: 6px;
@@ -1374,7 +2091,7 @@
 }
 
 .xflow-editor-connection-actions > span {
-  color: #8c95a3;
+  color: var(--xflow-text-tertiary);
   font-size: 10.5px;
 }
 
@@ -1385,10 +2102,10 @@
 }
 
 .xflow-editor-connection-actions button {
-  background: #242832;
-  border: 1px solid #3a4150;
+  background: var(--xflow-surface-panel-raised);
+  border: 1px solid var(--xflow-border);
   border-radius: 4px;
-  color: #c9d1dc;
+  color: var(--xflow-text-secondary);
   cursor: pointer;
   font-family: SFMono-Regular, Consolas, monospace;
   font-size: 10px;
@@ -1397,15 +2114,15 @@
 }
 
 .xflow-editor-connection-actions button:hover {
-  background: #2a3344;
-  border-color: #4a5a73;
-  color: #eef4ff;
+  background: var(--xflow-surface-hover);
+  border-color: var(--xflow-border-strong);
+  color: var(--xflow-text);
 }
 
 .xflow-editor-connection-row {
   align-items: center;
-  background: #202329;
-  border: 1px solid #343944;
+  background: var(--xflow-surface-field);
+  border: 1px solid var(--xflow-border);
   border-radius: 4px;
   display: grid;
   font-size: 10.5px;
@@ -1415,7 +2132,7 @@
 }
 
 .xflow-editor-connection-row code {
-  color: #c7ced8;
+  color: var(--xflow-text-secondary);
   font-family: SFMono-Regular, Consolas, monospace;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1427,7 +2144,7 @@
   background: transparent;
   border: 0;
   border-radius: 4px;
-  color: #7f8896;
+  color: var(--xflow-text-tertiary);
   cursor: pointer;
   display: inline-flex;
   height: 20px;
@@ -1437,28 +2154,28 @@
 }
 
 .xflow-editor-connection-delete:hover {
-  background: rgba(255, 95, 87, .12);
-  color: #ff8b84;
+  background: var(--xflow-status-error-subtle);
+  color: var(--xflow-status-error-text);
 }
 
 .xflow-editor-inspector-delete.ant-btn {
   align-items: center;
-  color: #a6afbd !important;
+  color: var(--xflow-text-secondary) !important;
   display: inline-flex;
   height: 22px;
   justify-content: center;
   min-width: 22px;
-  padding: 0 !important;
+  padding: 0;
 }
 
 .xflow-editor-inspector-delete.ant-btn:hover {
-  background: rgba(255, 95, 87, .12) !important;
-  color: #ff8b84 !important;
+  background: var(--xflow-status-error-subtle);
+  color: var(--xflow-status-error-text);
 }
 
 .xflow-editor-run-list > div {
   align-items: center;
-  border-bottom: 1px solid #343944;
+  border-bottom: 1px solid var(--xflow-border);
   display: flex;
   justify-content: space-between;
   padding: 5px 0;
@@ -1470,7 +2187,7 @@
 }
 
 .xflow-editor-run-list strong {
-  color: #dce2ea;
+  color: var(--xflow-text);
   font-family: SFMono-Regular, Consolas, monospace;
   font-size: 11px;
   font-weight: 600;
@@ -1487,8 +2204,8 @@
 }
 
 .xflow-editor-diagnostics {
-  background: #202226;
-  border-top: 1px solid var(--xflow-editor-line);
+  background: var(--xflow-surface-panel);
+  border-top: 1px solid var(--xflow-border);
   flex: 0 0 168px;
   min-height: 0;
 }
@@ -1499,9 +2216,9 @@
 
 .xflow-editor-diagnostics__bar {
   align-items: center;
-  background: #26292e;
-  border-bottom: 1px solid #363a42;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .035);
+  background: var(--xflow-surface-panel-raised);
+  border-bottom: 1px solid var(--xflow-border);
+  box-shadow: inset 0 1px 0 var(--xflow-surface-highlight);
   display: flex;
   height: 36px;
   justify-content: space-between;
@@ -1520,6 +2237,7 @@
 }
 
 .xflow-editor-diagnostics__tabs strong {
+  color: var(--xflow-text);
   font-size: 12px;
   margin-right: 8px;
 }
@@ -1529,7 +2247,7 @@
   background: transparent;
   border: 0;
   border-radius: 4px;
-  color: var(--xflow-editor-muted);
+  color: var(--xflow-text-tertiary);
   cursor: pointer;
   display: inline-flex;
   font-size: 12px;
@@ -1538,16 +2256,28 @@
   padding: 0 8px;
 }
 
-.xflow-editor-diagnostics__tabs button.active,
-.xflow-editor-diagnostics__tabs button:hover {
-  background: var(--xflow-editor-panel-2);
-  color: var(--xflow-editor-text);
+.xflow-editor-diagnostics__tabs .active,
+.xflow-editor-diagnostics__tabs button:hover:not(:disabled) {
+  background: var(--xflow-surface-hover);
+  color: var(--xflow-text);
+}
+
+.xflow-editor-diagnostics__tabs button:disabled {
+  background: transparent;
+  color: var(--xflow-text-tertiary);
+  cursor: not-allowed;
+}
+
+.xflow-editor-diagnostics__tabs button:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--xflow-focus-border-strong), 0 0 0 2px var(--xflow-focus-ring);
+  color: var(--xflow-text);
+  outline: none;
 }
 
 .xflow-editor-diagnostics__status {
-  color: var(--xflow-editor-muted);
-  gap: 10px;
+  color: var(--xflow-text-tertiary);
   font-size: 11px;
+  gap: 10px;
 }
 
 .xflow-editor-diagnostics__status > span {
@@ -1559,31 +2289,46 @@
 
 .xflow-editor-diagnostics__status .ok,
 .xflow-editor-diagnostics-log .ok {
-  color: #35c98b;
+  color: var(--xflow-status-success-text);
 }
 
+.xflow-editor-diagnostics__status .warn,
 .xflow-editor-diagnostics-log .warn {
-  color: #f7b955;
+  color: var(--xflow-status-warning-text);
+}
+
+.xflow-editor-diagnostics__status .error,
+.xflow-editor-diagnostics-log .error {
+  color: var(--xflow-status-error-text);
 }
 
 .xflow-editor-diagnostics-toggle {
   align-items: center;
-  background: #17191c;
-  border: 1px solid var(--xflow-editor-line);
+  background: var(--xflow-surface-control);
+  border: 1px solid var(--xflow-border);
   border-radius: 4px;
-  color: var(--xflow-editor-muted);
+  color: var(--xflow-text-tertiary);
   cursor: pointer;
   display: inline-flex;
+  flex: 0 0 24px;
   height: 24px;
   justify-content: center;
+  line-height: 1;
   padding: 0;
   width: 24px;
 }
 
 .xflow-editor-diagnostics-toggle:hover {
-  background: var(--xflow-editor-panel-2);
-  border-color: var(--xflow-editor-line-2);
-  color: var(--xflow-editor-text);
+  background: var(--xflow-surface-hover);
+  border-color: var(--xflow-border-strong);
+  color: var(--xflow-text);
+}
+
+.xflow-editor-diagnostics-toggle:focus-visible {
+  border-color: var(--xflow-focus-border-strong);
+  box-shadow: 0 0 0 2px var(--xflow-focus-ring);
+  color: var(--xflow-text);
+  outline: none;
 }
 
 .xflow-editor-diagnostics-toggle .anticon {
@@ -1591,7 +2336,7 @@
 }
 
 .xflow-editor-diagnostics__body {
-  background: #1d2024;
+  background: var(--xflow-surface-app);
   display: grid;
   gap: 0;
   grid-template-columns: minmax(0, 1fr) 310px 300px;
@@ -1601,8 +2346,8 @@
 }
 
 .xflow-editor-diagnostics__body section {
-  background: #202226;
-  border-left: 1px solid #343840;
+  background: var(--xflow-surface-panel);
+  border-left: 1px solid var(--xflow-border);
   overflow: auto;
   padding: 12px;
 }
@@ -1619,11 +2364,15 @@
 
 .xflow-editor-diagnostics-log p,
 .xflow-editor-diagnostics-run p {
-  color: var(--xflow-editor-muted);
+  color: var(--xflow-text-secondary);
   font-family: SFMono-Regular, Consolas, monospace;
   font-size: 11px;
   line-height: 1.45;
   margin: 0;
+}
+
+.xflow-editor-diagnostics-log p {
+  border-bottom: 1px solid var(--xflow-border);
 }
 
 .xflow-editor-diagnostics-log p > span {
@@ -1631,9 +2380,13 @@
   min-width: 78px;
 }
 
+.xflow-editor-diagnostics-log p > span:nth-child(2) {
+  color: var(--xflow-text-tertiary);
+}
+
 .xflow-editor-diagnostics-section-title {
   align-items: center;
-  color: var(--xflow-editor-muted);
+  color: var(--xflow-text-tertiary);
   display: flex;
   font-size: 11px;
   justify-content: space-between;
@@ -1641,9 +2394,9 @@
 }
 
 .xflow-editor-diagnostics__body .xflow-editor-diagnostics-section-title {
-  background: #24272c;
-  border-color: #343840 !important;
-  color: #cdd3dc;
+  background: var(--xflow-surface-panel-raised);
+  border-bottom-color: var(--xflow-border);
+  color: var(--xflow-text-secondary);
 }
 
 .xflow-editor-diagnostics-meter {
@@ -1666,7 +2419,7 @@
 }
 
 .xflow-editor-diagnostics-meter::after {
-  background: #17191c;
+  background: var(--xflow-surface-control);
   border-radius: 999px;
   content: "";
   display: block;
@@ -1683,13 +2436,13 @@
 }
 
 .xflow-editor-diagnostics-meter i.green {
-  background: #35c98b;
+  background: var(--xflow-status-success);
 }
 
 .xflow-editor-diagnostics-kv {
   align-items: center;
-  border-top: 1px solid var(--xflow-editor-line);
-  color: var(--xflow-editor-muted);
+  border-top: 1px solid var(--xflow-border);
+  color: var(--xflow-text-tertiary);
   display: flex;
   font-size: 11px;
   justify-content: space-between;
@@ -1703,10 +2456,10 @@
 }
 
 .xflow-editor-diagnostics-dsl {
-  background: #191c20;
-  border: 1px solid #303640;
+  background: var(--xflow-surface-field);
+  border: 1px solid var(--xflow-border);
   border-radius: 4px;
-  color: #9fa8b7;
+  color: var(--xflow-text-secondary);
   font-family: SFMono-Regular, Consolas, monospace;
   font-size: 10px;
   line-height: 1.45;
@@ -1719,10 +2472,10 @@
 
 .xflow-editor-diagnostics-issue {
   align-items: center;
-  background: rgba(247, 185, 85, .08);
-  border: 1px solid rgba(247, 185, 85, .24);
+  background: var(--xflow-status-warning-subtle);
+  border: 1px solid var(--xflow-status-warning-border);
   border-radius: 5px;
-  color: #e7c174;
+  color: var(--xflow-status-warning-text);
   display: flex;
   font-size: 11px;
   gap: 7px;
@@ -1755,22 +2508,851 @@
 }
 
 .xflow-editor-diagnostics-run strong[data-status="running"] {
-  color: #8db5ff;
+  color: var(--xflow-focus-text);
 }
 
 .xflow-editor-diagnostics-run strong[data-status="success"] {
-  color: #35c98b;
+  color: var(--xflow-status-success);
 }
 
 .xflow-editor-diagnostics-run strong[data-status="failed"] {
-  color: #ff5f57;
+  color: var(--xflow-status-error);
 }
 
 .xflow-editor-diagnostics-run p {
   align-items: center;
-  border-top: 1px solid var(--xflow-editor-line);
+  border-top: 1px solid var(--xflow-border);
   display: flex;
   gap: 6px;
   margin-top: 2px;
   padding-top: 9px;
+}
+
+/* Keep the desktop workspace dense, but let the editor become a vertical document
+ * before the three fixed desktop columns can force the viewport wider. */
+@media (max-width: 1120px) {
+  .xflow-editor {
+    height: auto;
+    max-width: 100%;
+    min-height: 100dvh;
+    overflow-x: clip;
+    overflow-y: visible;
+  }
+
+  .xflow-editor-toolbar {
+    align-items: flex-start;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    gap: 8px;
+    min-height: 48px;
+    padding: 8px 10px;
+  }
+
+  .xflow-editor-title {
+    flex: 1 1 280px;
+  }
+
+  .xflow-editor-title > div,
+  .xflow-editor-toolbar > *,
+  .xflow-editor-main > * {
+    min-width: 0;
+  }
+
+  .xflow-editor-tool-strip {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    justify-content: center;
+    left: auto;
+    max-width: 100%;
+    order: 3;
+    position: static;
+    transform: none;
+  }
+
+  .xflow-editor-toolbar-actions {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    margin-left: 0;
+    max-width: 100%;
+  }
+
+  .xflow-editor-toolbar-actions .ant-space {
+    display: flex !important;
+    flex: 1 1 auto;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+
+  .xflow-editor-integration-notice {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .xflow-editor-main,
+  .xflow-editor-main[data-left-collapsed="true"],
+  .xflow-editor-main[data-right-collapsed="true"],
+  .xflow-editor-main[data-left-collapsed="true"][data-right-collapsed="true"] {
+    flex: 0 0 auto;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(360px, 60vh) auto;
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .xflow-editor-left,
+  .xflow-editor-right {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .xflow-editor-left {
+    border-bottom: 1px solid var(--xflow-editor-line);
+    border-right: 0;
+  }
+
+  .xflow-editor-right {
+    border-left: 0;
+    border-top: 1px solid var(--xflow-editor-line);
+  }
+
+  .xflow-editor-left__content {
+    grid-template-rows: auto auto;
+    min-width: 0;
+  }
+
+  .xflow-editor-main[data-left-collapsed="true"] .xflow-editor-left,
+  .xflow-editor-main[data-right-collapsed="true"] .xflow-editor-right {
+    min-height: 44px;
+  }
+
+  .xflow-editor-panel-handle {
+    top: 10px;
+    transform: none;
+  }
+
+  .xflow-editor-panel-handle--left,
+  .xflow-editor-panel-handle--right {
+    left: auto;
+    right: 8px;
+  }
+
+  .xflow-editor-right__strip {
+    height: 44px;
+    writing-mode: horizontal-tb;
+  }
+
+  .xflow-editor-canvas {
+    height: clamp(360px, 60vh, 520px);
+    min-height: 360px;
+    width: 100%;
+  }
+
+  .xflow-editor-preview-frame,
+  .xflow-editor-preview {
+    max-width: 100%;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .xflow-editor-canvas-mode {
+    background: var(--xflow-surface-overlay);
+    border: 1px solid var(--xflow-editor-line);
+    border-radius: 5px;
+    display: flex;
+    flex-direction: column;
+    font-size: 10px;
+    gap: 2px;
+    left: 10px;
+    max-width: calc(100% - 20px);
+    min-width: 0;
+    padding: 5px 7px;
+    position: absolute;
+    top: 10px;
+    z-index: 3;
+  }
+
+  .xflow-editor-canvas-mode span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .xflow-editor-preview-inspector {
+    max-width: 100%;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    padding: 16px;
+  }
+
+  /* The legacy document layout may grow its diagnostics area. Compact mode is
+   * a viewport workbench instead, so its dedicated rules below retain a fixed,
+   * internally scrollable diagnostics surface. */
+  .xflow-editor:not([data-layout="c"]) .xflow-editor-diagnostics {
+    flex-basis: auto;
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .xflow-editor:not([data-layout="c"]) .xflow-editor-diagnostics[data-collapsed="true"] {
+    flex-basis: auto;
+  }
+
+  .xflow-editor:not([data-layout="c"]) .xflow-editor-diagnostics__bar {
+    flex-wrap: wrap;
+    gap: 6px;
+    height: auto;
+    min-height: 32px;
+    padding: 4px 10px;
+  }
+
+  .xflow-editor:not([data-layout="c"]) .xflow-editor-diagnostics__tabs,
+  .xflow-editor:not([data-layout="c"]) .xflow-editor-diagnostics__status {
+    flex-wrap: wrap;
+  }
+
+  .xflow-editor:not([data-layout="c"]) .xflow-editor-diagnostics__body {
+    grid-template-columns: minmax(0, 1fr);
+    height: auto;
+    max-width: 100%;
+    overflow: visible;
+  }
+
+  .xflow-editor:not([data-layout="c"]) .xflow-editor-diagnostics__body section {
+    border-left: 0;
+    border-top: 1px solid var(--xflow-border);
+    min-width: 0;
+  }
+
+  .xflow-editor:not([data-layout="c"]) .xflow-editor-diagnostics__body section:first-child {
+    border-top: 0;
+  }
+}
+
+@media (max-width: 560px) {
+  .xflow-editor-title {
+    flex-basis: 100%;
+  }
+
+  .xflow-editor-title__heading {
+    flex-wrap: wrap;
+  }
+
+  .xflow-editor-title__heading strong {
+    flex: 1 1 100%;
+  }
+
+  .xflow-editor-title p {
+    max-height: 2.8em;
+    white-space: normal;
+  }
+
+  .xflow-editor-tool-strip {
+    justify-content: flex-start;
+    gap: 4px;
+  }
+
+  .xflow-editor-tool-group {
+    gap: 2px;
+    padding: 2px;
+  }
+
+  .xflow-editor-tool-divider {
+    display: none;
+  }
+
+  .xflow-editor-tool-strip button {
+    min-width: 26px;
+    padding: 0 6px;
+  }
+
+  .xflow-editor-toolbar-actions {
+    gap: 6px;
+  }
+
+  .xflow-editor-toolbar-actions .ant-space {
+    flex-basis: 100%;
+  }
+
+  .xflow-editor-toolbar-actions .ant-btn {
+    font-size: 11px;
+    padding-inline: 7px;
+  }
+
+  .xflow-editor-integration-notice {
+    flex: 1 1 100%;
+    max-width: 100%;
+  }
+
+  .xflow-editor-main,
+  .xflow-editor-main[data-left-collapsed="true"],
+  .xflow-editor-main[data-right-collapsed="true"],
+  .xflow-editor-main[data-left-collapsed="true"][data-right-collapsed="true"] {
+    grid-template-rows: auto minmax(320px, 56vh) auto;
+  }
+
+  .xflow-editor-canvas {
+    height: clamp(320px, 56vh, 440px);
+    min-height: 320px;
+  }
+
+  .xflow-editor-preview .react-flow__minimap {
+    bottom: 8px !important;
+    height: 72px !important;
+    right: 8px !important;
+    width: 112px !important;
+  }
+
+  .xflow-editor-connection-selectors {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .xflow-editor-connection-selectors > * {
+    flex: 1 1 92px;
+    min-width: 0;
+  }
+
+  .xflow-editor-connection-row {
+    gap: 4px;
+    grid-template-columns: minmax(0, 1fr) auto auto auto minmax(0, 1fr) 20px;
+    padding: 5px;
+  }
+
+  .xflow-editor-form label {
+    grid-template-columns: 48px minmax(0, 1fr);
+  }
+
+  .xflow-editor-diagnostics__tabs,
+  .xflow-editor-diagnostics__status {
+    flex-basis: 100%;
+  }
+
+  .xflow-editor-diagnostics__tabs strong {
+    margin-right: 2px;
+  }
+
+  .xflow-editor-diagnostics__status {
+    gap: 6px;
+  }
+
+  .xflow-editor-diagnostics__status > span {
+    white-space: normal;
+  }
+
+  .xflow-editor-diagnostics-dsl {
+    max-width: 100%;
+  }
+}
+
+/* Responsive compact workbench. These overrides deliberately follow the legacy
+ * narrow-document rules above: compact mode always keeps its canvas in the
+ * middle rail rather than stacking the editor into a vertical document. */
+.xflow-editor {
+  position: relative;
+}
+
+.xflow-editor[data-layout="c"] {
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* A full-screen detail host owns the available height. Do not impose a fixed
+ * compact minimum here: it would push the diagnostics bar outside short viewports. */
+.xflow-editor.xflow-editor--fullscreen[data-layout="c"] {
+  height: 100%;
+  min-height: 0;
+}
+
+.xflow-editor[data-layout="c"] .xflow-editor-toolbar {
+  align-items: center;
+  flex: 0 0 var(--xflow-toolbar-height);
+  flex-wrap: nowrap;
+  gap: 12px;
+  min-height: 48px;
+  padding: 0 12px;
+}
+
+.xflow-editor[data-layout="c"] .xflow-editor-title {
+  flex: 0 1 280px;
+  max-width: calc(50% - 84px);
+}
+
+.xflow-editor[data-layout="c"] .xflow-editor-toolbar-actions {
+  flex: 0 1 auto;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+  margin-left: auto;
+  max-width: calc(50% - 84px);
+}
+
+.xflow-editor[data-layout="c"] .xflow-editor-toolbar-actions .ant-space {
+  flex: 0 1 auto;
+  flex-wrap: nowrap;
+}
+
+/* Compact mode keeps canvas controls usable while the less frequent workflow
+ * actions remain available on wider desktop workspaces. */
+.xflow-editor[data-layout="c"] .xflow-editor-operation-status,
+.xflow-editor[data-layout="c"] .xflow-editor-layout-toggle,
+.xflow-editor[data-layout="c"] .xflow-editor-new-button,
+.xflow-editor[data-layout="c"] .xflow-editor-validate-button,
+.xflow-editor[data-layout="c"] .xflow-editor-publish-button {
+  display: none !important;
+}
+
+.xflow-editor[data-layout="c"] .xflow-editor-main,
+.xflow-editor[data-layout="c"] .xflow-editor-main[data-left-collapsed="true"],
+.xflow-editor[data-layout="c"] .xflow-editor-main[data-right-collapsed="true"],
+.xflow-editor[data-layout="c"] .xflow-editor-main[data-left-collapsed="true"][data-right-collapsed="true"] {
+  display: grid;
+  flex: 1 1 auto;
+  grid-template-columns: 52px minmax(0, 1fr) 52px;
+  grid-template-rows: minmax(0, 1fr);
+  max-width: none;
+  min-height: 0;
+  min-width: 0;
+}
+
+.xflow-editor[data-layout="c"] .xflow-editor-compact-rail {
+  background: var(--xflow-surface-toolbar);
+  border: 0;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+  width: 52px;
+}
+
+.xflow-editor[data-layout="c"] .xflow-editor-compact-rail--left {
+  border-right: 1px solid var(--xflow-editor-line);
+}
+
+.xflow-editor[data-layout="c"] .xflow-editor-compact-rail--right {
+  border-left: 1px solid var(--xflow-editor-line);
+  border-right: 0;
+}
+
+.xflow-editor[data-layout="c"] .xflow-editor-compact-rail--right button {
+  border-left: 0;
+  border-right: 2px solid transparent;
+}
+
+.xflow-editor[data-layout="c"] .xflow-editor-compact-rail--right button.active {
+  border-left: 0;
+  border-right-color: var(--xflow-editor-blue);
+}
+
+.xflow-editor[data-layout="c"] .xflow-editor-canvas {
+  height: auto;
+  min-height: 0;
+  min-width: 0;
+  width: auto;
+}
+
+.xflow-editor[data-layout="c"] .xflow-editor-preview-frame,
+.xflow-editor[data-layout="c"] .xflow-editor-preview {
+  height: 100%;
+  max-width: none;
+  min-height: 0;
+  min-width: 0;
+  width: 100%;
+}
+
+.xflow-editor[data-layout="c"] .xflow-editor-preview .xflow-preview-shell,
+.xflow-editor[data-layout="c"] .xflow-editor-preview .xflow-preview-canvas,
+.xflow-editor[data-layout="c"] .xflow-editor-preview .react-flow {
+  min-height: 0;
+}
+
+.xflow-editor[data-layout="c"] .xflow-editor-diagnostics {
+  /* Keep the bottom tool strip inside even a short viewport. The canvas owns the
+   * remaining space; expanded diagnostics scroll internally rather than growing
+   * the workbench beyond the host. */
+  flex: 0 0 min(160px, calc(100dvh - var(--xflow-toolbar-height) - 120px));
+  max-width: none;
+  min-height: 32px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.xflow-editor[data-layout="c"] .xflow-editor-diagnostics[data-collapsed="true"] {
+  flex: 0 0 32px;
+}
+
+@media (max-width: 1120px) {
+  .xflow-editor[data-layout="c"] .xflow-editor-diagnostics__body {
+    grid-template-columns: minmax(0, 1fr);
+    height: calc(100% - 36px);
+    max-width: 100%;
+    overflow: hidden;
+  }
+
+  .xflow-editor[data-layout="c"] .xflow-editor-diagnostics__body section {
+    border-left: 0;
+    border-top: 1px solid var(--xflow-border);
+    min-width: 0;
+    overflow: auto;
+  }
+
+  .xflow-editor[data-layout="c"] .xflow-editor-diagnostics__body section:first-child {
+    border-top: 0;
+  }
+}
+
+.xflow-editor-compact-drawer {
+  z-index: 12;
+}
+
+.xflow-editor-compact-drawer .ant-drawer-content-wrapper {
+  box-shadow: 0 10px 36px rgba(0, 0, 0, .28);
+}
+
+.xflow-editor-compact-drawer .ant-drawer-content {
+  background: var(--xflow-surface-panel);
+}
+
+.xflow-editor-compact-drawer .ant-drawer-header {
+  background: var(--xflow-surface-panel-raised);
+  border-bottom-color: var(--xflow-border);
+}
+
+.xflow-editor-compact-drawer .ant-drawer-title,
+.xflow-editor-compact-drawer .ant-drawer-close {
+  color: var(--xflow-text);
+}
+
+.xflow-editor-compact-drawer .ant-drawer-body {
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
+}
+
+.xflow-editor-compact-drawer .xflow-editor-panel-card.ant-card,
+.xflow-editor-compact-drawer .xflow-editor-outline,
+.xflow-editor-compact-drawer .xflow-editor-library,
+.xflow-editor-compact-drawer .xflow-editor-inspector {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.xflow-editor-compact-drawer .xflow-editor-inspector.ant-card {
+  border: 0;
+}
+
+.xflow-editor-outline-node {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.xflow-editor-outline-node > strong {
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xflow-editor-outline-meta {
+  color: var(--xflow-text-tertiary);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 9px;
+  gap: 2px 7px;
+  text-align: left;
+}
+
+.xflow-editor-outline-meta span {
+  white-space: nowrap;
+}
+
+.xflow-editor-diagnostics-locate {
+  background: transparent;
+  border: 0;
+  color: var(--xflow-focus-text);
+  cursor: pointer;
+  display: inline;
+  font: inherit;
+  margin-inline-start: 8px;
+  padding: 0;
+  text-decoration: underline;
+}
+
+.xflow-editor-save-button:not(.ant-btn-primary) {
+  border-color: var(--xflow-border-strong);
+}
+
+.xflow-editor-tool-group .xflow-editor-disabled-control:has(button[aria-label="运行工作流"]:not(:disabled)) button {
+  background: var(--xflow-focus-subtle);
+  border-color: var(--xflow-focus-border);
+  color: var(--xflow-focus-text);
+}
+
+
+/* The compact shell retains the same centered icon-only toolbar. The host action
+ * cluster degrades first, preserving the two immediate canvas tools on phones. */
+.xflow-editor[data-layout="c"] .xflow-editor-tool-strip {
+  flex: 0 0 auto;
+  left: 50%;
+  position: absolute;
+  transform: translateX(-50%);
+}
+
+
+/* --------------------------------------------------------------------------
+ * Ant Design integration contract
+ *
+ * The nested ConfigProvider provides theme tokens; these stable semantic hooks
+ * own only the design-reference deviations. Each value comes from the editor
+ * CSS-variable palette so dark/light and graphite/blueprint never drift.
+ * -------------------------------------------------------------------------- */
+.xflow-editor .xflow-editor-theme-segmented,
+.xflow-editor .xflow-editor-mode-segmented {
+  border: 1px solid var(--xflow-border);
+  border-radius: var(--xflow-control-radius-sm);
+  box-shadow: inset 0 1px 0 var(--xflow-surface-highlight);
+}
+
+.xflow-editor .xflow-editor-theme-segmented__item,
+.xflow-editor .xflow-editor-mode-segmented__item {
+  border-radius: calc(var(--xflow-control-radius-sm) - 1px);
+}
+
+.xflow-editor .xflow-editor-theme-segmented__label,
+.xflow-editor .xflow-editor-mode-segmented__label {
+  align-items: center;
+  display: inline-flex;
+  font-size: 11px;
+  gap: 4px;
+}
+
+.xflow-editor .xflow-editor-mode-segmented {
+  min-height: var(--xflow-control-height);
+}
+
+.xflow-editor .xflow-editor-theme-trigger.ant-btn,
+.xflow-editor .xflow-editor-toolbar-icon-action.ant-btn,
+.xflow-editor .xflow-editor-panel-handle.ant-btn,
+.xflow-editor .xflow-editor-library-search-toggle.ant-btn,
+.xflow-editor .xflow-editor-inspector-delete.ant-btn {
+  align-items: center;
+  border-radius: var(--xflow-control-radius-sm);
+  display: inline-flex;
+  justify-content: center;
+}
+
+.xflow-editor .xflow-editor-theme-trigger.ant-btn,
+.xflow-editor .xflow-editor-toolbar-icon-action.ant-btn {
+  height: var(--xflow-control-height);
+  min-width: var(--xflow-control-height);
+  padding-inline: 0;
+}
+
+.xflow-editor .xflow-editor-toolbar-actions .ant-btn {
+  height: var(--xflow-control-height);
+}
+
+.xflow-editor .xflow-editor-field.ant-input,
+.xflow-editor .xflow-editor-library-search.ant-input,
+.xflow-editor .xflow-editor-textarea.ant-input,
+.xflow-editor .xflow-editor-select__root .ant-select-selector {
+  background: var(--xflow-surface-field);
+  border-color: var(--xflow-border);
+  border-radius: var(--xflow-control-radius-sm);
+  color: var(--xflow-text);
+}
+
+.xflow-editor .xflow-editor-field.ant-input,
+.xflow-editor .xflow-editor-library-search.ant-input {
+  font-size: 11px;
+  height: var(--xflow-field-height);
+  line-height: calc(var(--xflow-field-height) - 2px);
+  padding-inline: 7px;
+}
+
+.xflow-editor .xflow-editor-library-search.ant-input {
+  margin-bottom: 6px;
+}
+
+.xflow-editor .xflow-editor-field.ant-input::placeholder,
+.xflow-editor .xflow-editor-library-search.ant-input::placeholder,
+.xflow-editor .xflow-editor-textarea.ant-input::placeholder {
+  color: var(--xflow-text-tertiary);
+}
+
+.xflow-editor .xflow-editor-field.ant-input:hover,
+.xflow-editor .xflow-editor-library-search.ant-input:hover,
+.xflow-editor .xflow-editor-textarea.ant-input:hover,
+.xflow-editor .xflow-editor-select__root:hover .ant-select-selector {
+  border-color: var(--xflow-focus-border-strong);
+}
+
+.xflow-editor .xflow-editor-field.ant-input:focus,
+.xflow-editor .xflow-editor-library-search.ant-input:focus,
+.xflow-editor .xflow-editor-textarea.ant-input:focus,
+.xflow-editor .xflow-editor-select__root.ant-select-focused .ant-select-selector {
+  border-color: var(--xflow-focus);
+  box-shadow: 0 0 0 2px var(--xflow-focus-ring);
+}
+
+.xflow-editor .xflow-editor-textarea.ant-input {
+  font-size: 11px;
+  line-height: 1.45;
+  min-height: 48px;
+  padding: 5px 7px;
+  resize: vertical;
+}
+
+.xflow-editor .xflow-editor-textarea--code.ant-input {
+  font-family: SFMono-Regular, Consolas, monospace;
+  font-size: 10.5px;
+}
+
+.xflow-editor .xflow-editor-connection-select.ant-select {
+  min-width: 92px;
+}
+
+.xflow-editor .xflow-editor-select__root .ant-select-selector {
+  box-shadow: none;
+}
+
+.xflow-editor .xflow-editor-select__root.ant-select-focused .ant-select-selector {
+  box-shadow: 0 0 0 2px var(--xflow-focus-ring);
+}
+
+.xflow-editor .xflow-editor-select__content,
+.xflow-editor .xflow-editor-select__popup-item {
+  font-size: 11px;
+}
+
+.xflow-editor .xflow-editor-select__popup {
+  background: var(--xflow-surface-panel-raised);
+  border: 1px solid var(--xflow-border);
+  border-radius: var(--xflow-control-radius);
+  box-shadow: var(--xflow-popup-shadow);
+}
+
+.xflow-editor .xflow-editor-select__popup-list {
+  padding: 4px;
+}
+
+.xflow-editor .xflow-editor-switch.ant-switch {
+  background: var(--xflow-border-strong);
+}
+
+.xflow-editor .xflow-editor-switch.ant-switch.ant-switch-checked {
+  background: var(--xflow-focus);
+}
+
+.xflow-editor .xflow-editor-runtime-tag.ant-tag {
+  border-radius: var(--xflow-control-radius-sm);
+  font-size: 10px;
+  line-height: 16px;
+  margin-inline-end: 0;
+  padding-inline: 5px;
+}
+
+.xflow-editor .xflow-editor-tooltip__container {
+  background: var(--xflow-surface-overlay);
+  border: 1px solid var(--xflow-border-strong);
+  border-radius: var(--xflow-control-radius-sm);
+  box-shadow: var(--xflow-popup-shadow);
+  color: var(--xflow-text);
+  font-size: 11px;
+  padding: 5px 8px;
+}
+
+.xflow-editor .xflow-editor-theme-popover .ant-popover-inner {
+  box-shadow: var(--xflow-popup-shadow);
+}
+
+.xflow-editor .xflow-editor-compact-drawer__wrapper {
+  box-shadow: 0 10px 36px var(--xflow-node-shadow);
+}
+
+.xflow-editor .xflow-editor-compact-drawer__section {
+  background: var(--xflow-surface-panel);
+}
+
+.xflow-editor .xflow-editor-compact-drawer__header {
+  background: var(--xflow-surface-panel-raised);
+  border-bottom-color: var(--xflow-border);
+}
+
+.xflow-editor .xflow-editor-compact-drawer__title,
+.xflow-editor .xflow-editor-compact-drawer__close {
+  color: var(--xflow-text);
+}
+
+.xflow-editor .xflow-editor-compact-drawer__body {
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
+}
+
+/* Structural composition belongs to CSS/Tailwind rather than antd overrides. */
+.xflow-editor-form-row {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+}
+
+.xflow-editor-form-row--workflow {
+  grid-template-columns: 64px minmax(0, 1fr);
+}
+
+.xflow-editor-form-row--node {
+  grid-template-columns: 52px minmax(0, 1fr);
+}
+
+.xflow-editor-form-section__title--spaced {
+  margin-top: 4px;
+}
+
+.xflow-editor-canvas-context {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+  left: 14px;
+  pointer-events: none;
+  position: absolute;
+  top: 12px;
+  z-index: 3;
+}
+
+.xflow-editor-empty-canvas {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  left: 50%;
+  position: absolute;
+  text-align: center;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(340px, calc(100% - 72px));
+  z-index: 2;
+}
+
+@media (max-width: 801px) {
+  .xflow-editor .xflow-editor-title,
+  .xflow-editor .xflow-editor-toolbar-actions {
+    display: none;
+  }
+
+  .xflow-editor .xflow-editor-tool-divider--history,
+  .xflow-editor .xflow-editor-tool-button--history {
+    display: none;
+  }
+}
+
+/* The compact breakpoint must not turn a detail route back into a scrollable
+ * document. Its rails/drawers provide the responsive alternative. */
+@media (max-width: 1120px) {
+  .xflow-editor.xflow-editor--fullscreen {
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+  }
 }

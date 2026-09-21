@@ -19,9 +19,13 @@ import (
 // the atomic path differs.
 func (e *Engine) commitAcyclicTaskResult(ctx context.Context, lease *TaskLease, g *graph.Graph, result TaskResult) (CommitOutcome, error) {
 	return e.commitTaskResultWithStrategy(ctx, lease, g, result, taskResultCommitStrategy{
-		commitError:  e.commitAcyclicNodeError,
+		commitError: func(ctx context.Context, lease *TaskLease, meta graph.NodeMeta, privateOutput bool, systemErr error, output *types.Output, businessErr *types.Error) (CommitOutcome, error) {
+			return e.commitAcyclicNodeError(ctx, lease, g, meta, privateOutput, systemErr, output, businessErr)
+		},
 		commitExpand: e.refuseAcyclicExpansion,
-		commitNode:   e.commitAcyclicNode,
+		commitNode: func(ctx context.Context, lease *TaskLease, privateOutput bool, status types.NodeStatus, output map[string]any, port, errMsg string, fatal bool) (CommitOutcome, error) {
+			return e.commitAcyclicNode(ctx, lease, g, privateOutput, status, output, port, errMsg, fatal)
+		},
 	})
 }
 
@@ -140,8 +144,10 @@ func (e *Engine) commitTaskResultWithStrategy(ctx context.Context, lease *TaskLe
 	return strategy.commitNode(ctx, lease, privateOutput, types.NodeStatusSuccess, data, port, "", false)
 }
 
-func (e *Engine) commitAcyclicNodeError(ctx context.Context, lease *TaskLease, meta graph.NodeMeta, privateOutput bool, systemErr error, output *types.Output, businessErr *types.Error) (CommitOutcome, error) {
-	return e.commitNodeErrorOutcome(ctx, lease, meta, privateOutput, systemErr, output, businessErr, e.commitAcyclicNodeWithClassification)
+func (e *Engine) commitAcyclicNodeError(ctx context.Context, lease *TaskLease, g *graph.Graph, meta graph.NodeMeta, privateOutput bool, systemErr error, output *types.Output, businessErr *types.Error) (CommitOutcome, error) {
+	return e.commitNodeErrorOutcome(ctx, lease, meta, privateOutput, systemErr, output, businessErr, func(ctx context.Context, lease *TaskLease, privateOutput bool, status types.NodeStatus, output map[string]any, port, errMsg string, fatal bool, cls EffectiveClassification) (CommitOutcome, error) {
+		return e.commitAcyclicNodeWithClassification(ctx, lease, g, privateOutput, status, output, port, errMsg, fatal, cls)
+	})
 }
 
 // nodeErrorCommitFunc is the shape of the terminal-transition step that
@@ -179,11 +185,26 @@ func (e *Engine) commitNodeErrorOutcome(ctx context.Context, lease *TaskLease, m
 	return commit(ctx, lease, privateOutput, outcome.NodeStatus, outcome.Output, outcome.RoutePort, outcome.ErrorMessage, outcome.ExecFatal, cls)
 }
 
-func (e *Engine) commitAcyclicNode(ctx context.Context, lease *TaskLease, privateOutput bool, status types.NodeStatus, output map[string]any, port, errMsg string, fatal bool) (CommitOutcome, error) {
-	return e.commitAcyclicNodeWithClassification(ctx, lease, privateOutput, status, output, port, errMsg, fatal, EffectiveClassification{})
+// commitAcyclicNode is reached only from commitTaskResultWithStrategy's
+// non-error result branch. That branch is the sole authority that a handler
+// completed normally, which is stricter than NodeStatusSuccess: on_error output
+// policies intentionally encode failed handlers as successful node statuses.
+func (e *Engine) commitAcyclicNode(ctx context.Context, lease *TaskLease, g *graph.Graph, privateOutput bool, status types.NodeStatus, output map[string]any, port, errMsg string, fatal bool) (CommitOutcome, error) {
+	return e.commitAcyclicNodeWithReclaimEligibility(ctx, lease, g, privateOutput, status, output, port, errMsg, fatal, EffectiveClassification{}, true)
 }
 
-func (e *Engine) commitAcyclicNodeWithClassification(ctx context.Context, lease *TaskLease, privateOutput bool, status types.NodeStatus, output map[string]any, port, errMsg string, fatal bool, cls EffectiveClassification) (CommitOutcome, error) {
+// commitAcyclicNodeWithClassification is the classified-error and legacy
+// redirect path. It deliberately never authorizes transient-output reclaim:
+// its NodeStatusSuccess may represent an error routed by on_error.
+func (e *Engine) commitAcyclicNodeWithClassification(ctx context.Context, lease *TaskLease, g *graph.Graph, privateOutput bool, status types.NodeStatus, output map[string]any, port, errMsg string, fatal bool, cls EffectiveClassification) (CommitOutcome, error) {
+	return e.commitAcyclicNodeWithReclaimEligibility(ctx, lease, g, privateOutput, status, output, port, errMsg, fatal, cls, false)
+}
+
+// commitAcyclicNodeWithReclaimEligibility constructs the fenced request after
+// the caller has classified the result path. normalHandlerSuccess must be true
+// only for a direct, non-error handler result; terminal status alone is not
+// sufficient because error_output and main_output intentionally use success.
+func (e *Engine) commitAcyclicNodeWithReclaimEligibility(ctx context.Context, lease *TaskLease, g *graph.Graph, privateOutput bool, status types.NodeStatus, output map[string]any, port, errMsg string, fatal bool, cls EffectiveClassification, normalHandlerSuccess bool) (CommitOutcome, error) {
 	task := &lease.Task
 	var advanceTask *Task
 	if !fatal {
@@ -200,21 +221,32 @@ func (e *Engine) commitAcyclicNodeWithClassification(ctx context.Context, lease 
 			Port: &port,
 		}
 	}
+	// A source output may be released only after the supported sink's handler
+	// completed normally. A failed, retried, continued, timed-out, or error-routed
+	// terminal path can still need the handoff output for diagnostics or recovery,
+	// so it retains normal transient-TTL ownership. In particular, on_error
+	// error_output/main_output map failures to NodeStatusSuccess, hence both
+	// provenance and status are required here.
+	var reclaimOutputNames []string
+	if normalHandlerSuccess && status == types.NodeStatusSuccess {
+		reclaimOutputNames = transientOutputReclaimsForCommit(g, task.NodeIdx)
+	}
 	req := CommitNodeRequest{
-		ExecutionID:   task.ExecutionID,
-		NodeName:      task.NodeName,
-		NodeIdx:       task.NodeIdx,
-		ActivationID:  task.ActivationID,
-		AutoDepth:     task.AutoDepth,
-		LeaseID:       lease.LeaseID,
-		LeaseToken:    lease.LeaseToken,
-		Attempt:       lease.Attempt,
-		Status:        status,
-		Output:        output,
-		StoreOutput:   true,
-		PrivateOutput: privateOutput,
-		Port:          port,
-		Error:         errMsg,
+		ExecutionID:        task.ExecutionID,
+		NodeName:           task.NodeName,
+		NodeIdx:            task.NodeIdx,
+		ActivationID:       task.ActivationID,
+		AutoDepth:          task.AutoDepth,
+		LeaseID:            lease.LeaseID,
+		LeaseToken:         lease.LeaseToken,
+		Attempt:            lease.Attempt,
+		Status:             status,
+		Output:             output,
+		StoreOutput:        true,
+		ReclaimOutputNames: reclaimOutputNames,
+		PrivateOutput:      privateOutput,
+		Port:               port,
+		Error:              errMsg,
 		// Rides the same fenced transition as Error. Emitting it separately
 		// would leave a window in which the node is terminal with a message but
 		// no detail — permanently, since nothing recomputes it.
@@ -279,7 +311,7 @@ func (e *Engine) publishCommitReceipt(ctx context.Context, req CommitNodeRequest
 	})
 }
 
-func (e *Engine) commitAcyclicFailure(ctx context.Context, lease *TaskLease, privateOutput bool, failure error) error {
+func (e *Engine) commitAcyclicFailure(ctx context.Context, lease *TaskLease, g *graph.Graph, privateOutput bool, failure error) error {
 	if failure == nil {
 		failure = fmt.Errorf("task failed")
 	}

@@ -583,6 +583,9 @@ func (s *APIServer) RegisterWorkflow(ctx context.Context, ns namespace.Namespace
 	if def == nil {
 		return "", nil, errors.New("apiserver: workflow definition must not be nil")
 	}
+	if err := validateWorkflowRegistrationDefinition(def); err != nil {
+		return "", nil, err
+	}
 	if ns == "" {
 		ns = namespace.Default
 	}
@@ -611,6 +614,9 @@ func (s *APIServer) ReplaceWorkflow(ctx context.Context, ns namespace.Namespace,
 	}
 	if def == nil {
 		return "", nil, errors.New("apiserver: workflow definition must not be nil")
+	}
+	if err := validateWorkflowRegistrationDefinition(def); err != nil {
+		return "", nil, err
 	}
 	if ns == "" {
 		ns = namespace.Default

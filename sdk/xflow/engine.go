@@ -40,9 +40,8 @@ type Engine struct {
 	// shutdown closes a channel that panics on a second close, so Stop must be
 	// idempotent for callers that defer Stop and also stop explicitly.
 	stopOnce sync.Once
-	// mu serializes AddWorkflow calls to protect directHandlerNames and the
-	// register→compile→persist sequence from concurrent map access panics and
-	// partial-registration pollution.
+	// mu serializes workflow registration and protects the handler mirrors plus
+	// per-workflow FAF handler bindings from concurrent mutation.
 	mu sync.Mutex
 	// directHandlerNames tracks LocalNode handler names this Engine has already
 	// registered, keyed by node name with the registering workflow's name as the
@@ -58,10 +57,19 @@ type Engine struct {
 	// when a later step of the same call fails (rollback). Guarded by e.mu.
 	directHandlers map[string]types.ActionHandler
 	globalHandlers map[string]types.ActionHandler
+	// fafHandlers pins a locally registered FAF workflow ID to its exact action
+	// handler. It must not resolve through directHandlers at dispatch time:
+	// direct handler names are process-global and can be shadowed by a later
+	// workflow registration.
+	fafHandlers map[types.WorkflowID]fafHandlerBinding
 
 	// artifactStore for ScriptFile resolution (AddWorkflow) and embedded-runner
 	// artifact_digest resolution (Execute). nil = disabled.
 	artifactStore *store.ArtifactStore
+	// resourcePool is the process-owned pool supplied to embedded execution.
+	// FAF reuses it so resource-aware actions retain local execution parity
+	// without introducing any execution persistence.
+	resourcePool types.ResourcePool
 }
 
 // newFromConfig assembles an Engine from a resolved engineConfig and a backend provider.
@@ -127,7 +135,9 @@ func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error
 		directHandlerNames:  make(map[string]string),
 		directHandlers:      make(map[string]types.ActionHandler),
 		globalHandlers:      make(map[string]types.ActionHandler),
+		fafHandlers:         make(map[types.WorkflowID]fafHandlerBinding),
 		artifactStore:       cfg.artifactStore,
+		resourcePool:        cfg.resourcePool,
 	}
 	e.triggerRuntime = newTriggerRuntime(e, provider.TriggerPrimitives())
 
@@ -169,6 +179,7 @@ func newNonOwningEngineFacade(core *engine.Engine, provider backend.Provider) *E
 		directHandlerNames: make(map[string]string),
 		directHandlers:     make(map[string]types.ActionHandler),
 		globalHandlers:     make(map[string]types.ActionHandler),
+		fafHandlers:        make(map[types.WorkflowID]fafHandlerBinding),
 	}
 	if waiter, ok := provider.(backend.Waiter); ok {
 		e.waiter = waiter

@@ -118,6 +118,9 @@ func (s *memoryState) CommitNode(_ context.Context, req engine.CommitNodeRequest
 	}
 
 	result := engine.CommitNodeResult{Outcome: engine.CommitOutcomeAccepted, Applied: true}
+	for _, sourceName := range req.ReclaimOutputNames {
+		delete(s.outputs, memoryNodeKey(req.ExecutionID, sourceName))
+	}
 	if !req.AllowCycles {
 		s.remaining[req.ExecutionID]--
 		if req.Status == types.NodeStatusFailed {

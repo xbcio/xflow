@@ -77,6 +77,12 @@ type WorkflowOptions struct {
 	// keys after the execution reaches a terminal state. When zero, the engine-wide
 	// transient completion TTL is used.
 	TransientCompletionTTL time.Duration `json:"transient_completion_ttl,omitempty"`
+
+	// FAF is best-effort, non-persistent fire-and-forget: it creates no Redis/MySQL
+	// execution, node, output, lease, outbox, retry, audit, or result state; it provides
+	// no durable delivery, retry/recovery, cross-process dataflow, status inspection/wait/cancel,
+	// or workflow result.
+	FAF bool `json:"faf,omitempty"`
 }
 
 // NodeOutputPolicy controls how a node's runtime output is exposed.

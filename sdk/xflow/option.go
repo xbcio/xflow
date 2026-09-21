@@ -171,10 +171,11 @@ func WithArtifactStore(s *store.ArtifactStore) Option {
 type InvokeOption func(*invokeConfig)
 
 type invokeConfig struct {
-	execTTL time.Duration
-	runtime *types.Runtime
-	traceID string
-	spanID  string
+	execTTL    time.Duration
+	runtime    *types.Runtime
+	fafRuntime *types.Runtime
+	traceID    string
+	spanID     string
 }
 
 // WithExecutionTTL overrides the backend execution TTL for this invocation.
@@ -197,6 +198,9 @@ func WithExecutionTTL(d time.Duration) InvokeOption {
 func WithRuntime(runtime *types.Runtime) InvokeOption {
 	return func(c *invokeConfig) {
 		c.runtime = cloneRuntime(runtime)
+		// FAF snapshots this original payload immediately before it launches its
+		// asynchronous runner. Ordinary Invoke continues to use runtime above.
+		c.fafRuntime = runtime
 	}
 }
 

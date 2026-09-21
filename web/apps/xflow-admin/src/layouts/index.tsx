@@ -1,5 +1,5 @@
 import { App, ConfigProvider, Layout, theme } from 'antd';
-import { Outlet } from '@umijs/max';
+import { Outlet, useLocation } from '@umijs/max';
 
 /**
  * 应用布局。
@@ -19,14 +19,22 @@ import { Outlet } from '@umijs/max';
  * 改用 style / antd token；tailwind 用于 antd 未声明的属性和自有元素则完全正常。
  */
 export default function BasicLayout() {
+  const { pathname } = useLocation();
+  const isWorkflowEditorRoute = /^\/workflows\/[^/]+\/?$/.test(pathname);
+
   return (
     <ConfigProvider theme={{ algorithm: theme.defaultAlgorithm }}>
       <App>
-        <Layout style={{ minHeight: '100vh' }}>
-          <Layout.Header className="flex items-center">
-            <span className="text-white text-base font-semibold">XFlow</span>
-          </Layout.Header>
-          <Layout.Content className="p-6">
+        <Layout style={isWorkflowEditorRoute ? { height: '100dvh', minHeight: '100dvh' } : { minHeight: '100vh' }}>
+          {isWorkflowEditorRoute ? null : (
+            <Layout.Header className="flex items-center">
+              <span className="text-white text-base font-semibold">XFlow</span>
+            </Layout.Header>
+          )}
+          <Layout.Content
+            className={isWorkflowEditorRoute ? 'min-h-0' : 'p-6'}
+            style={isWorkflowEditorRoute ? { display: 'flex', minHeight: 0, overflow: 'hidden', padding: 0 } : undefined}
+          >
             <Outlet />
           </Layout.Content>
         </Layout>

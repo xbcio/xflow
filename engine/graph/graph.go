@@ -39,6 +39,9 @@ type Graph struct {
 	// maxAutoDepth limits one uninterrupted automatic scheduling chain.
 	maxAutoDepth int
 
+	// faf opts a workflow into true zero-persistence fire-and-forget execution.
+	faf bool
+
 	// transient opts a single workflow into fire-and-forget execution mode.
 	// When true, executions of this workflow skip SQL audit and use TTL-bounded
 	// Redis state, regardless of the engine-wide transient setting.
@@ -182,6 +185,9 @@ func (g *Graph) StartIndex() int { return g.startIdx }
 
 // MaxAutoDepth returns the maximum uninterrupted automatic scheduling depth.
 func (g *Graph) MaxAutoDepth() int { return g.maxAutoDepth }
+
+// FAF reports whether this graph opts into zero-persistence fire-and-forget mode.
+func (g *Graph) FAF() bool { return g.faf }
 
 // Transient reports whether this graph opts into per-workflow transient mode.
 func (g *Graph) Transient() bool { return g.transient }
@@ -355,6 +361,58 @@ func (g *Graph) NodesRefsFor(nodeIdx int) []string {
 	out := make([]string, len(names))
 	copy(out, names)
 	return out
+}
+
+// HasDynamicNodesRefFor reports whether the node at nodeIdx uses a computed
+// $nodes subscript in its own parameters. Such a reference has no statically
+// derivable name and therefore is deliberately absent from NodesRefsFor.
+//
+// Subgraph-body parameters are excluded for the same reason as NodesRefsFor:
+// they belong to the body's separately compiled graph, not to this node's
+// outer-graph input. Invalid indexes report false so conservative callers can
+// safely use this as an optional additional guard.
+func (g *Graph) HasDynamicNodesRefFor(nodeIdx int) bool {
+	if nodeIdx < 0 || nodeIdx >= len(g.nodes) {
+		return false
+	}
+	return hasDynamicNodesRef(g.nodes[nodeIdx].Parameters)
+}
+
+// BodyMayReadNode reports whether a subgraph body declared by nodeIdx can read
+// the named outer-graph node through a static $nodes reference. It is separate
+// from NodesRefsFor because body references are snapshotted into a later
+// sub-execution rather than prefetched for the enclosing node itself.
+func (g *Graph) BodyMayReadNode(nodeIdx int, name string) bool {
+	if nodeIdx < 0 || nodeIdx >= len(g.nodes) || name == "" {
+		return false
+	}
+	for _, ref := range g.BodyOuterRefsFor(nodeIdx) {
+		if ref.Node == name {
+			return true
+		}
+	}
+	return false
+}
+
+// BodyHasDynamicNodesRefFor reports whether a subgraph body declared by
+// nodeIdx contains a computed $nodes subscript. The body package is separately
+// compiled, so this cannot be inferred from HasDynamicNodesRefFor, which
+// intentionally excludes body parameters from the enclosing node's input
+// references.
+func (g *Graph) BodyHasDynamicNodesRefFor(nodeIdx int) bool {
+	if nodeIdx < 0 || nodeIdx >= len(g.nodes) {
+		return false
+	}
+	body := g.nodes[nodeIdx].Body
+	if body == nil || body.Package == nil || body.Package.Def == nil {
+		return false
+	}
+	for _, node := range body.Package.Def.Nodes {
+		if hasDynamicNodesRef(node.Parameters) {
+			return true
+		}
+	}
+	return false
 }
 
 // BodyOuterRefsFor returns the OUTER-graph $nodes references the body declared

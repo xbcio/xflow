@@ -1,7 +1,8 @@
-export type NodeKind = "action" | "trigger";
+export type NodeKind = "action" | "trigger" | "supply";
 export type ErrorPolicy = "stop" | "error_output" | "main_output" | "continue";
 export type RetryStrategy = "fixed" | "exponential";
 export type RunnerSelectorMode = "default" | "required";
+export type ConnectionType = "data" | "dependency";
 
 export interface Position {
   x?: number;
@@ -18,7 +19,20 @@ export interface Connection {
   input?: string;
 }
 
-export type Connections = Record<string, Record<string, Connection[]>>;
+/**
+ * Connections from one output port. Data ports may use the compact array form;
+ * dependency ports use the object form and are intentionally outside dataflow
+ * topology. An omitted type in the object form retains the backend's data-port
+ * default.
+ */
+export interface PortConnections {
+  type?: ConnectionType;
+  targets: Connection[];
+}
+
+export type ConnectionTargets = Connection[] | PortConnections;
+
+export type Connections = Record<string, Record<string, ConnectionTargets>>;
 
 export interface RetryPolicy {
   enabled?: boolean;
@@ -41,6 +55,17 @@ export interface WorkflowSettings {
 export interface WorkflowOptions {
   allow_cycles?: boolean;
   max_auto_depth?: number;
+  experimental_node_group?: boolean;
+  transient?: boolean;
+  transient_ttl?: number;
+  transient_completion_ttl?: number;
+  /**
+   * FAF is best-effort, non-persistent fire-and-forget: it creates no Redis/MySQL
+   * execution, node, output, lease, outbox, retry, audit, or result state; it provides
+   * no durable delivery, retry/recovery, cross-process dataflow, status inspection/wait/cancel,
+   * or workflow result.
+   */
+  faf?: boolean;
 }
 
 export interface RunnerSelector {
@@ -71,6 +96,28 @@ export interface WorkflowOutput {
   display_name?: string;
 }
 
+export interface NodeOutputPolicy {
+  private?: boolean;
+}
+
+export interface GroupDef {
+  name?: string;
+  members?: string[];
+  runner_selector?: RunnerSelector;
+  on_error?: "stop" | "continue";
+  retry?: RetryPolicy;
+  timeout?: number;
+  mode?: "transient";
+  activation_replicas?: number;
+}
+
+export type WorkflowGroup = GroupDef;
+
+export interface DependencyEdge {
+  node: string;
+  supply: string;
+}
+
 export interface WorkflowNode {
   id?: string;
   name?: string;
@@ -85,7 +132,10 @@ export interface WorkflowNode {
   notes?: string;
   inputs?: PortDecl[];
   output_schema?: Record<string, unknown>;
+  output?: NodeOutputPolicy;
   retry?: RetryPolicy;
+  timeout?: number;
+  activation_replicas?: number;
   parameters?: Record<string, unknown>;
   ui?: Record<string, unknown>;
 }
@@ -108,9 +158,11 @@ export interface WorkflowDef {
   params?: Record<string, WorkflowParam>;
   node_templates?: Record<string, NodeTemplate>;
   nodes?: WorkflowNode[];
+  groups?: GroupDef[];
   connections?: Connections;
   outputs?: Record<string, WorkflowOutput>;
   pin_data?: Record<string, unknown>;
+  dependency_edges?: DependencyEdge[];
 }
 
 export type WorkflowStatus =
@@ -197,6 +249,16 @@ function normalizeInputs(inputs: PortDecl[] | undefined): Required<PortDecl>[] {
   }));
 }
 
+function dataConnectionTargets(value: ConnectionTargets | undefined): Connection[] {
+  if (Array.isArray(value)) {
+    return value;
+  }
+  if (!value || !Array.isArray(value.targets)) {
+    return [];
+  }
+  return value.type === undefined || value.type === "data" ? value.targets : [];
+}
+
 function buildDepths(workflow: WorkflowDef, names: string[]): Map<string, number> {
   const known = new Set(names);
   const depths = new Map(names.map((name) => [name, 0]));
@@ -204,8 +266,8 @@ function buildDepths(workflow: WorkflowDef, names: string[]): Map<string, number
 
   for (const [source, ports] of Object.entries(workflow.connections ?? {})) {
     if (!known.has(source)) continue;
-    for (const targets of Object.values(ports)) {
-      for (const target of targets) {
+    for (const portConnections of Object.values(ports)) {
+      for (const target of dataConnectionTargets(portConnections)) {
         if (target.node && known.has(target.node)) {
           edges.push({ source, target: target.node });
         }
@@ -290,8 +352,8 @@ export function toGraphModel(workflow: WorkflowDef): GraphModel {
 
   for (const [sourceName, ports] of Object.entries(workflow.connections ?? {})) {
     const source = byName.get(sourceName);
-    for (const [sourcePort, targets] of Object.entries(ports)) {
-      for (const targetRef of targets) {
+    for (const [sourcePort, portConnections] of Object.entries(ports)) {
+      for (const targetRef of dataConnectionTargets(portConnections)) {
         const targetName = targetRef.node ?? "unknown";
         const target = byName.get(targetName);
         const targetPort = targetRef.input ?? "main";

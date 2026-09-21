@@ -1,12 +1,14 @@
 package apiserver
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -191,7 +193,7 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	// itself (spec §1.3). The authz wrapper injects the principal's namespace
 	// into the request context; handlers resolve it via namespace.FromContext —
 	// never from the client body (spec §6.2).
-	mux.HandleFunc("POST "+PathWorkflows, authz(OpWorkflowRegister, true, m.handleRegisterWorkflow, nil))
+	mux.HandleFunc("POST "+PathWorkflows, m.authzWrapWithPreAdmission(OpWorkflowRegister, true, m.handleRegisterWorkflow, nil, rejectFAFWorkflowRegistrationBeforeAdmission))
 	// GET /v1/workflows (the collection read) reuses OpWorkflowRead — the very
 	// operation GET /v1/workflows/{id} carries — so the two scopes cannot drift:
 	// a principal that may read one workflow may list them, and one that may not
@@ -201,7 +203,7 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	// handler via namespace.FromContext (never from a query parameter).
 	mux.HandleFunc("GET "+PathWorkflows, authz(OpWorkflowRead, false, m.handleListWorkflows, nil))
 	mux.HandleFunc("GET "+PathWorkflowByID, authz(OpWorkflowRead, false, m.handleGetWorkflow, workflowIDResolver()))
-	mux.HandleFunc("PUT "+PathWorkflowByID, authz(OpWorkflowDefinitionUpdate, true, m.handleReplaceWorkflow, workflowIDResolver()))
+	mux.HandleFunc("PUT "+PathWorkflowByID, m.authzWrapWithPreAdmission(OpWorkflowDefinitionUpdate, true, m.handleReplaceWorkflow, workflowIDResolver(), rejectFAFWorkflowRegistrationBeforeAdmission))
 	mux.HandleFunc("DELETE "+PathWorkflowByID, authz(OpWorkflowRegister, true, m.handleDeregisterWorkflow, workflowIDResolver()))
 	mux.HandleFunc("POST "+PathWorkflowExecute, authz(OpWorkflowCreate, true, m.handleExecuteWorkflow, newExecutionIDResolver()))
 	mux.HandleFunc("POST "+PathWorkflowExecuteByID, authz(OpWorkflowInvoke, true, m.handleExecuteWorkflowByID, workflowIDResolver()))
@@ -454,6 +456,10 @@ func (m *workflowControlModule) handleExecuteWorkflow(w http.ResponseWriter, r *
 		// An unknown entry node is a client error (400): the missing resource is
 		// the entry in the submitted graph, not an execution in the store.
 		if err != nil {
+			if errors.Is(err, engine.ErrFAFRequiresDirectDispatch) {
+				writeFail(w, r, http.StatusBadRequest, "workflow_faf_unsupported", "FAF workflows require direct dispatch")
+				return
+			}
 			if errors.Is(err, engine.ErrEntryNotFound) {
 				writeFail(w, r, http.StatusBadRequest, "workflow_entry_not_found", err.Error())
 				return
@@ -464,6 +470,10 @@ func (m *workflowControlModule) handleExecuteWorkflow(w http.ResponseWriter, r *
 	} else {
 		id, err = m.eng.Submit(ctx, g, req.Params)
 		if err != nil {
+			if errors.Is(err, engine.ErrFAFRequiresDirectDispatch) {
+				writeFail(w, r, http.StatusBadRequest, "workflow_faf_unsupported", "FAF workflows require direct dispatch")
+				return
+			}
 			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}
@@ -538,6 +548,49 @@ func (e *WorkflowCompileError) Unwrap() error { return e.err }
 
 var errWorkflowIDMismatch = errors.New("workflow id does not match path")
 
+var errFAFWorkflowRegistration = errors.New("workflow registration does not support options.faf")
+
+// validateWorkflowRegistrationDefinition rejects execution modes that cannot
+// be represented by the durable workflow registry. It returns a
+// WorkflowCompileError so callers preserve the existing invalid-definition
+// contract: HTTP reports 400 workflow_compile_failed and the in-process API
+// reports a caller-fixable registration error.
+func validateWorkflowRegistrationDefinition(def *types.WorkflowDef) error {
+	if def != nil && def.Options != nil && def.Options.FAF {
+		return &WorkflowCompileError{err: errFAFWorkflowRegistration}
+	}
+	return nil
+}
+
+// rejectFAFWorkflowRegistrationBeforeAdmission preserves the request bytes for
+// handleRegisterWorkflow/handleReplaceWorkflow while inspecting the first JSON
+// value with the same decoder behavior as decodeJSON. Invalid bodies are left
+// for the handler so their established validation and audit behavior is
+// unchanged; a valid FAF definition is refused before authzWrap writes an
+// admission audit row.
+func rejectFAFWorkflowRegistrationBeforeAdmission(w http.ResponseWriter, r *http.Request) bool {
+	if r.Body == nil {
+		return true
+	}
+	body := r.Body
+	raw, err := io.ReadAll(body)
+	_ = body.Close()
+	r.Body = io.NopCloser(bytes.NewReader(raw))
+	if err != nil {
+		return true
+	}
+
+	var def types.WorkflowDef
+	if err := json.NewDecoder(bytes.NewReader(raw)).Decode(&def); err != nil {
+		return true
+	}
+	if err := validateWorkflowRegistrationDefinition(&def); err != nil {
+		writeFail(w, r, http.StatusBadRequest, "workflow_compile_failed", err.Error())
+		return false
+	}
+	return true
+}
+
 // registerWorkflow is the definition -> persisted graph path both entry points
 // share: the HTTP handler above and APIServer.RegisterWorkflow, which an
 // embedded server calls in-process.
@@ -604,6 +657,9 @@ func (m *workflowControlModule) observeRegistration(ctx context.Context, ns name
 }
 
 func (m *workflowControlModule) buildWorkflowRecord(ns namespace.Namespace, id types.WorkflowID, def *types.WorkflowDef) (backend.WorkflowRecord, []string, error) {
+	if err := validateWorkflowRegistrationDefinition(def); err != nil {
+		return backend.WorkflowRecord{}, nil, err
+	}
 	if def != nil {
 		// Namespace is server-authoritative and must be fixed before compilation
 		// and hashing so every derived representation uses the authenticated
@@ -1253,6 +1309,10 @@ func (m *workflowControlModule) handleExecuteWorkflowByID(w http.ResponseWriter,
 	if req.Entry != "" {
 		execID, err = m.eng.Invoke(ctx, rec.Graph, req.Entry, req.Input)
 		if err != nil {
+			if errors.Is(err, engine.ErrFAFRequiresDirectDispatch) {
+				writeFail(w, r, http.StatusBadRequest, "workflow_faf_unsupported", "FAF workflows require direct dispatch")
+				return
+			}
 			if errors.Is(err, engine.ErrEntryNotFound) {
 				writeFail(w, r, http.StatusBadRequest, "workflow_entry_not_found", err.Error())
 				return
@@ -1263,6 +1323,10 @@ func (m *workflowControlModule) handleExecuteWorkflowByID(w http.ResponseWriter,
 	} else {
 		execID, err = m.eng.Submit(ctx, rec.Graph, req.Params)
 		if err != nil {
+			if errors.Is(err, engine.ErrFAFRequiresDirectDispatch) {
+				writeFail(w, r, http.StatusBadRequest, "workflow_faf_unsupported", "FAF workflows require direct dispatch")
+				return
+			}
 			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}

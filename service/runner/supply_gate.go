@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/exprx"
 	"github.com/xbcio/xflow/node/supply"
+	"github.com/xbcio/xflow/store"
 )
 
 // SupplyFetcher retrieves one supply's current content. The runner uses it at
@@ -153,6 +155,36 @@ func (g *SupplyGate) resourceFor(name string) string {
 // workflowID identifies the activation for the xflow_supply_not_ready label —
 // it is a workflow ID, not an execution ID, so it stays low-cardinality.
 func (g *SupplyGate) Admit(ctx context.Context, workflowID string, reqs []engine.SupplyRequirement) error {
+	return g.AdmitWithDeclarations(ctx, workflowID, reqs, nil)
+}
+
+// AdmitWithDeclarations is Admit plus the activation's wasm supply declarations.
+//
+// It exists because Admit alone cannot answer the question for a pointer supply
+// on the FIRST activation. Activate calls Admit BEFORE it calls
+// registerSupplyConsumers (see trigger_activation_handler.go: the order is
+// load-bearing — registering before Admit delivers nothing, because
+// RegisterConsumer notifies only against content already cached). At that moment
+// the declaration's consumers do not exist yet, and isReadyLocked is a
+// conjunction over the consumer set, so ZERO consumers means ready for whatever
+// content is cached. A pointer supply publishing a digest for one wasm node and
+// nothing usable for another therefore passes the gate on the first evaluation,
+// the subscription starts, and Kafka offsets advance — for a workflow that
+// cannot run. The declared half of the work is fixed only per message, which is
+// too late: once a subscription is live, a message whose artifact is missing has
+// nowhere safe to go.
+//
+// Passing the declarations in lets the gate resolve each declared node's
+// artifact_digest against the content it just fetched, so readiness is decided
+// the same way on the first Admit as on every later one, independent of when
+// consumers register.
+//
+// The check is deliberately narrow, mirroring wasmWarmupConsumer: an expression
+// that cannot be rendered against $supplies alone is skipped rather than
+// rejected, and a digest that renders to a well-formed sha256 the artifact store
+// cannot serve is NOT detected here — that costs a fetch, so it stays with the
+// consumer verdict and the execution-time guard.
+func (g *SupplyGate) AdmitWithDeclarations(ctx context.Context, workflowID string, reqs []engine.SupplyRequirement, decls []engine.SupplyConsumerBinding) error {
 	if len(reqs) == 0 {
 		return nil
 	}
@@ -163,7 +195,11 @@ func (g *SupplyGate) Admit(ctx context.Context, workflowID string, reqs []engine
 		// the resource name is known. Recording it even when a fetch fails or a
 		// consumer rejects keeps ApplyHints able to retry with the right name.
 		g.resources.Store(req.Node, req.Resource)
-		if g.registry.IsReady(req.Node) {
+		declared := declaresFor(decls, req.Node)
+		// The ready fast path is only sound when nothing declares a node on this
+		// supply. With a declaration present the cached content must still be
+		// resolved below, because "cached" is not "complete".
+		if len(declared) == 0 && g.registry.IsReady(req.Node) {
 			g.notifyNotReady(ctx, workflowID, req.Node, false)
 			continue
 		}
@@ -208,6 +244,22 @@ func (g *SupplyGate) Admit(ctx context.Context, workflowID string, reqs []engine
 			}
 			continue
 		}
+		// Resolve every declared node against the content just cached. This runs
+		// after Apply, not before: the render reads the registry's decoded view,
+		// and before Apply that view still holds the PREVIOUS content (or nothing
+		// at all on a first activation), so an expression would be validated
+		// against the wrong pointer — reporting a complete set as incomplete for
+		// one heartbeat, or accepting an incomplete one.
+		if nodeName, ok := g.unresolvableDeclaration(declared); ok {
+			g.logDeclaredNodeUnusable(ctx, req, nodeName, hash)
+			if req.RequireReady {
+				missing = append(missing, req.Node)
+				g.notifyNotReady(ctx, workflowID, req.Node, true)
+			} else {
+				g.notifyNotReady(ctx, workflowID, req.Node, false)
+			}
+			continue
+		}
 		// Apply returned nil, but that can mean either "consumers accepted" or
 		// "content unchanged, no notification happened". Re-check IsReady to catch
 		// the case where the content is cached-but-rejected from a prior Apply
@@ -231,6 +283,80 @@ func (g *SupplyGate) Admit(ctx context.Context, workflowID string, reqs []engine
 	}
 	sort.Strings(missing)
 	return &NotReadyError{Missing: missing}
+}
+
+// declaresFor returns the DECLARATION-shaped bindings naming supply, in order.
+//
+// Legacy bindings (ModuleDigest set, names empty) are excluded deliberately: a
+// legacy binding names a concrete module, so its readiness is already decided by
+// compiling and registering it, and registerSupplyConsumers propagates that
+// failure out of Activate. Only a declaration defers resolution to a digest
+// expression, and only a deferred resolution can be unresolved at gate time.
+func declaresFor(decls []engine.SupplyConsumerBinding, supply string) []engine.SupplyConsumerBinding {
+	var out []engine.SupplyConsumerBinding
+	for _, b := range decls {
+		if b.IsDeclaration() && b.SupplyNode == supply {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// unresolvableDeclaration reports the first declared node on this supply whose
+// artifact_digest does not resolve to a usable digest, and whether there was one.
+//
+// "Usable" is store.ValidateDigest: a sha256:<64 hex> string. An empty or
+// malformed value is what an unpublished or half-published pointer looks like,
+// and it is exactly the state that must not admit an activation — the node has
+// no module, so there is nothing to run.
+//
+// An expression that fails to RENDER is skipped, not rejected, for the reason
+// wasmWarmupConsumer documents: DigestExpr may legitimately reference $input,
+// $env or $credentials, none of which exist in this environment, and rejecting
+// those would leave a correctly-configured node permanently not-ready. The
+// cost is that such a node keeps its consumer verdict as its only gate, which
+// is what it had before this check existed.
+func (g *SupplyGate) unresolvableDeclaration(decls []engine.SupplyConsumerBinding) (string, bool) {
+	if len(decls) == 0 {
+		return "", false
+	}
+	env := exprx.SuppliesEnv(g.registry)
+	for _, b := range decls {
+		rendered, err := exprx.RenderTemplate(b.DigestExpr, env)
+		if err != nil {
+			continue
+		}
+		digest, _ := rendered.(string)
+		if store.ValidateDigest(digest) != nil {
+			return b.NodeName, true
+		}
+	}
+	return "", false
+}
+
+// logDeclaredNodeUnusable records that a supply publishes no usable artifact for
+// one of the nodes declared on it.
+//
+// The node name appears; the digest expression and the rendered value do not.
+// The rendered value is supply CONTENT, and supply content is not log material
+// (same rule as Admit's log, which keeps a hash prefix and nothing else). The
+// expression is operator-authored node configuration that may interpolate
+// credentials, which is why wasmWarmupConsumer refuses to log it either.
+func (g *SupplyGate) logDeclaredNodeUnusable(_ context.Context, req engine.SupplyRequirement, nodeName, hash string) {
+	if g.logger == nil {
+		return
+	}
+	attrs := []any{
+		"supply_node", req.Node,
+		"resource", req.Resource,
+		"require_ready", req.RequireReady,
+		"declared_node", nodeName,
+	}
+	if hash != "" {
+		attrs = append(attrs, "hash", hashPrefix(hash))
+	}
+	g.logger.Log(context.Background(), slog.LevelWarn,
+		"supply publishes no usable artifact digest for a declared node", attrs...)
 }
 
 // notifyFetch, notifyNotReady, notifyServingUnavailable are all nil-safe: most

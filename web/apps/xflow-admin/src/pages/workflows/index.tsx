@@ -1,4 +1,4 @@
-import { useIntl } from '@umijs/max';
+import { history, useIntl } from '@umijs/max';
 import { App, Button, Card, Typography } from 'antd';
 
 /**
@@ -23,14 +23,17 @@ export default function WorkflowsPage() {
       <div className="mt-4 rounded bg-green-600 px-4 py-2 text-white" data-testid="style-probe-block">
         tailwind utilities active
       </div>
-      <Button
-        className="mt-4"
-        type="primary"
-        data-testid="message-probe"
-        onClick={() => message.success('ok')}
-      >
-        {intl.formatMessage({ id: 'page.workflows.title' })}
-      </Button>
+      <div className="mt-4 flex flex-wrap gap-2">
+        <Button type="primary" onClick={() => history.push('/workflows/new')}>
+          新建工作流
+        </Button>
+        <Button
+          data-testid="message-probe"
+          onClick={() => message.success('ok')}
+        >
+          {intl.formatMessage({ id: 'page.workflows.title' })}
+        </Button>
+      </div>
     </Card>
   );
 }
