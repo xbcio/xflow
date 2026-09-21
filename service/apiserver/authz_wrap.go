@@ -22,6 +22,44 @@ type authzHolder struct {
 	audit         AuditSink
 }
 
+// auditedPerRequest reports whether one operation's admission and outcome are
+// recorded in the audit ledger.
+//
+// It is false for OpExecutionSeed, and that is a throughput decision with a
+// measured basis rather than a preference. The seed operation is the collection
+// pipeline's own data plane: the runner creates one execution per Kafka batch,
+// machine to machine, under an identity this wrapper has ALREADY authenticated
+// and authorized before this predicate is consulted — nothing here weakens
+// either. What it removes is two synchronous, fail-closed ledger INSERTs per
+// batch, and that cost is what made the pipeline unusable:
+//
+//   - Measured on the SAS deployment: `execution.seed` accounted for 8,393 of
+//     the audit rows written in 20 minutes (vs 28 for every other operation),
+//     68% of ALL statements the process issued, and 76% of its total statement
+//     time. The ledger held 734,462 rows in 26 hours.
+//   - Because the admission row is written BEFORE the handler and its failure
+//     denies the request (see authzWrap's mutation branch), MySQL latency sat
+//     directly in front of every batch. Measured seed latency between the
+//     admission and outcome rows: avg 2,790 ms, max 14,170 ms, with 75% over 1s.
+//   - The runner's request timed out at that latency ("context canceled" on
+//     POST /v1/executions), the batch was never committed, and its aggregate
+//     stayed at cap — so consumption halted. Worse, a FAILED seed also wrote its
+//     rows, so degradation raised the load that caused it.
+//
+// The volume is the disqualifying property: this ledger's job is "which
+// principal acted on which resource", and an operation whose row count scales
+// with traffic cannot live in a per-request synchronous ledger without the
+// ledger becoming the bottleneck it sits in front of. Operator-initiated
+// execution mutations (signal / revoke / cancel) remain audited and remain
+// fail-closed — they are bounded by human action, which is the shape this
+// ledger was designed for.
+//
+// The seed path stays observable through xflow_group_admission_duration_seconds,
+// which times the same round trip this ledger used to bracket.
+func auditedPerRequest(op string) bool {
+	return op != OpExecutionSeed
+}
+
 // authzWrap returns a handler that enforces authenticate → authorize → audit
 // admission → handler → audit reconcile outcome. Extracted so any module that
 // embeds authzHolder can wrap its routes, and tests can exercise the wrapper
@@ -74,6 +112,16 @@ func (h *authzHolder) authzWrap(op string, isMutation bool, fn http.HandlerFunc,
 		// do not call Submit/Invoke, so injecting their path-param id is inert.
 		if execID != "" {
 			r = r.WithContext(engine.WithExecutionID(r.Context(), types.ExecutionID(execID)))
+		}
+
+		// An operation outside the per-request ledger runs authenticated and
+		// authorized but records nothing; see auditedPerRequest for why, and for
+		// the measurement that made it necessary. Checked after the authorize
+		// block above, so a denial is still recorded — the exemption covers the
+		// admitted path, never the evidence that something was refused.
+		if !auditedPerRequest(op) {
+			fn(w, r)
+			return
 		}
 
 		// Mutation fail-closed: persist the admission audit BEFORE the
