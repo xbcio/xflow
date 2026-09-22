@@ -497,6 +497,24 @@ func (s *Store) shortenTransientCompletionTTL(ctx context.Context, id types.Exec
 	return nil
 }
 
+// shortenTransientCompletionTTLBestEffort runs completion-time TTL shortening
+// from a post-commit hook, where the authoritative Redis transition has already
+// been accepted inside a Lua script.
+//
+// It cannot return an error. The commit is already durable, so failing the call
+// would make the caller retry a transition that succeeded; the other post-commit
+// work here (auditWrite, projectExecutionStatus) is best-effort for the same
+// reason. It does not stay silent either: shortening that keeps failing leaves
+// finished executions' output holding its full active TTL, which is precisely
+// the keyspace growth this hook exists to bound, and a silent failure of it is
+// indistinguishable from a healthy store.
+func (s *Store) shortenTransientCompletionTTLBestEffort(ctx context.Context, id types.ExecutionID, newKeys ...string) {
+	err := s.shortenTransientCompletionTTL(ctx, id, newKeys...)
+	if err != nil && s.logger != nil {
+		s.logger.Error("transient_completion_ttl_shorten_failed", "execution_id", string(id), "err", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // ExecutionStore
 // ---------------------------------------------------------------------------
