@@ -2,7 +2,6 @@ package rstate
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -16,7 +15,10 @@ func (s *Store) PutOutput(ctx context.Context, id types.ExecutionID, name string
 	output := outputKey(t, id, name)
 	meta := nodeMetaKey(t, id, name)
 	ttl := s.getExecTTL(ctx, id)
-	b, _ := json.Marshal(data) // json.Marshal of map[string]any cannot fail
+	payload, err := s.encodeOutputValue(data)
+	if err != nil {
+		return fmt.Errorf("marshal output %q/%q: %w", id, name, err)
+	}
 
 	// PutOutput is intentionally policy-agnostic for runtime consumers. If a
 	// previous fenced transition marked this output private, renew that marker
@@ -24,7 +26,7 @@ func (s *Store) PutOutput(ctx context.Context, id types.ExecutionID, name string
 	// newly refreshed value. EXPIRE on an absent metadata hash is a no-op and
 	// never creates a public marker.
 	pipe := s.rdb.TxPipeline()
-	pipe.Set(ctx, output, string(b), ttl)
+	pipe.Set(ctx, output, payload, ttl)
 	pipe.Expire(ctx, meta, ttl)
 	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
 		return err
@@ -41,8 +43,8 @@ func (s *Store) GetOutput(ctx context.Context, id types.ExecutionID, name string
 	if err != nil {
 		return nil, err
 	}
-	var out map[string]any
-	if err := json.Unmarshal(raw, &out); err != nil {
+	out, err := s.decodeOutputValue(raw)
+	if err != nil {
 		return nil, fmt.Errorf("unmarshal output %q/%q: %w", id, name, err)
 	}
 	return out, nil

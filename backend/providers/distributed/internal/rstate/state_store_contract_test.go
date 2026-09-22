@@ -26,6 +26,33 @@ func TestMiniredisStateStoreContract(t *testing.T) {
 	statestoretest.RunStateStoreContract(t, state)
 }
 
+// TestMiniredisStateStoreContractWithOutputCompression reruns the whole contract
+// suite with output compression switched on.
+//
+// Compression changes the bytes of every stored output, on the write side of the
+// one code path every node commit goes through. Running the full contract again
+// under it — rather than only asserting an output round trip — is what shows the
+// feature is confined to the store: terminal protection, lease fencing, signal
+// consumption and the rest must be indistinguishable with it on.
+//
+// Note that this suite does not by itself prove that compression engaged: its
+// output is a few bytes, below the floor where compressing is worthwhile, so it
+// stays plain JSON by design. The assertions that the frame is real, that it
+// shrinks a large value, and that both forms are mutually readable live in
+// output_codec_test.go; this test covers the rest of the contract under the flag.
+func TestMiniredisStateStoreContractWithOutputCompression(t *testing.T) {
+	srv, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis.Run() error = %v", err)
+	}
+	t.Cleanup(srv.Close)
+	rdb := redis.NewClient(&redis.Options{Addr: srv.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	state := New(rdb, nil, time.Minute)
+	state.ConfigureOutputCompression(true)
+	statestoretest.RunStateStoreContract(t, state)
+}
+
 // TestRedisStateStoreContract runs the same suite against a real Redis when
 // XFLOW_TEST_REDIS_ADDR is set, matching the group/entry-admission contracts
 // which each have both a miniredis and a real-Redis runner.

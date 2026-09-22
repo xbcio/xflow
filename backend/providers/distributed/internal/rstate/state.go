@@ -74,6 +74,12 @@ type Store struct {
 	outboxIndexLogMu   sync.Mutex
 	outboxIndexLastLog time.Time
 
+	// outputCompression switches storing node outputs compressed. Written once at
+	// construction and read from every node commit, hence an atomic. The READ
+	// path deliberately does not consult it — see output_codec.go for why the two
+	// halves are asymmetric.
+	outputCompression atomic.Bool
+
 	// Audit-trail observability — Redis is system-of-record; the store/sqlstore
 	// audit trail is best-effort. auditWrite routes failures through these
 	// instead of silently dropping them.

@@ -28,6 +28,17 @@ type ClusterConfig struct {
 	// API-only pods; worker pods should leave it false and register executable
 	// node definitions with WithNodes.
 	DisableConsumer bool
+
+	// OutputCompression stores node outputs zstd-compressed in Redis. Off by
+	// default. Node outputs are the largest values a workflow keeps there, so
+	// this is the knob that bounds the keyspace a busy workflow needs.
+	//
+	// Enable it only once every process reading this Redis can decode a frame.
+	// Reads do not depend on the setting in either direction — the store
+	// recognises a compressed value by its header — so the safe sequence is to
+	// ship the code everywhere first and enable this afterwards, and disabling it
+	// again needs no migration. See rstate/output_codec.go.
+	OutputCompression bool
 }
 
 // NewCluster creates a distributed engine backed by Redis/Asynq and an optional
@@ -66,6 +77,7 @@ func NewCluster(clusterCfg ClusterConfig, opts ...Option) (*Engine, error) {
 	asynqOpts := []distributed.Option{
 		distributed.WithConcurrency(cfg.concurrency),
 		distributed.WithConsumer(!clusterCfg.DisableConsumer),
+		distributed.WithOutputCompression(clusterCfg.OutputCompression),
 	}
 	if cfg.executionMode == ExecutionModeTransient {
 		asynqOpts = append(asynqOpts, distributed.WithTransientMode(cfg.transientTTL, cfg.transientCompletionTTL))

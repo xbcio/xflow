@@ -120,11 +120,11 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 	ttl := s.getExecTTL(ctx, req.ExecutionID)
 	outputJSON := ""
 	if req.StoreOutput {
-		encoded, err := json.Marshal(req.Output)
+		encoded, err := s.encodeOutputValue(req.Output)
 		if err != nil {
 			return engine.CommitNodeResult{}, fmt.Errorf("marshal output %q/%q: %w", req.ExecutionID, req.NodeName, err)
 		}
-		outputJSON = string(encoded)
+		outputJSON = encoded
 	}
 	advanceID := ""
 	advanceJSON := ""

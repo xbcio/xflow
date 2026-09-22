@@ -492,11 +492,11 @@ func (s *Store) SuspendTaskLease(ctx context.Context, lease *engine.TaskLease, o
 	}
 	outputJSON := ""
 	if storeOutput {
-		encoded, err := json.Marshal(output)
+		encoded, err := s.encodeOutputValue(output)
 		if err != nil {
 			return nil, false, fmt.Errorf("marshal suspend output %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
 		}
-		outputJSON = string(encoded)
+		outputJSON = encoded
 	}
 	specJSON, err := json.Marshal(spec)
 	if err != nil {

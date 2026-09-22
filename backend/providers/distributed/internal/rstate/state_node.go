@@ -66,8 +66,11 @@ func (s *Store) UpsertNode(ctx context.Context, n *engine.NodeSnapshot) error {
 
 	var outputJSON string
 	if n.Output != nil {
-		b, _ := json.Marshal(n.Output) // json.Marshal of map[string]any cannot fail
-		outputJSON = string(b)
+		encoded, err := s.encodeOutputValue(n.Output)
+		if err != nil {
+			return fmt.Errorf("marshal node output %q/%q: %w", n.ExecutionID, n.Name, err)
+		}
+		outputJSON = encoded
 	}
 	var leasePayloadJSON string
 	if n.LeasePayload != nil {

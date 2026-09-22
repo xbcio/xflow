@@ -53,6 +53,18 @@ type Config struct {
 	// dispatch falls behind execution creation. Ignored by the in-memory
 	// backend, whose discovery walks a map and has no page.
 	OutboxDiscoveryPage int
+	// OutputCompression stores node outputs — one per node, and the largest
+	// values this backend keeps in Redis — zstd-compressed. Off by default.
+	//
+	// It is a deployment property rather than a per-workflow one because the
+	// backend is shared, and the switch bounds what a mixed-version fleet may
+	// write: a process running an older build cannot decode a frame. Reads are
+	// unaffected by the setting either way, since the store recognises a frame by
+	// its header — so the safe sequence is to ship the code everywhere first and
+	// enable this afterwards, and disabling it again needs no migration. See
+	// rstate/output_codec.go for the measurements and the decoder's size bound.
+	// Ignored by the in-memory backend, which does not compress.
+	OutputCompression bool
 	// LeaseTTL is how long a dispatched task lease stays valid before the
 	// LeaseSweeper treats the runner holding it as crashed and re-queues the
 	// task. Zero (the default) leaves engine.DefaultLeaseTTL in place.
@@ -433,6 +445,7 @@ func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 			distributed.WithStateLogger(cfg.Logger),
 			distributed.WithConsumer(true),
 			distributed.WithOutboxDiscoveryPage(cfg.OutboxDiscoveryPage),
+			distributed.WithOutputCompression(cfg.OutputCompression),
 		}
 		if cfg.Metrics != nil {
 			opts = append(opts,

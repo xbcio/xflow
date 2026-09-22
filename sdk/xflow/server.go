@@ -101,6 +101,7 @@ type serverConfig struct {
 	concurrency              int
 	leaseTTL                 time.Duration
 	outboxDiscoveryPage      int
+	outputCompression        bool
 	enableRunnerMetricsProxy bool
 	runnerMetricsInterval    time.Duration
 	enableManagement         bool
@@ -382,6 +383,25 @@ func WithServerOutboxDiscoveryPage(page int) ServerOption {
 	return func(c *serverConfig) { c.outboxDiscoveryPage = page }
 }
 
+// WithServerOutputCompression stores node outputs zstd-compressed in Redis. It
+// is off by default.
+//
+// Node outputs are the largest values a workflow keeps in Redis — one per node —
+// and in a pipeline that emits batches of records they are also highly
+// redundant, so compressing them shrinks the keyspace several-fold for
+// negligible CPU. The compressed form never leaves the store: node handlers and
+// every other reader are handed the plain output map.
+//
+// Reads do not depend on this setting in either direction, because the store
+// recognises a compressed value by its frame header. That is what makes the
+// rollout safe — ship the code everywhere, then turn this on — and what makes
+// turning it back off a no-op rather than a migration. Turn it on only once
+// every process that reads this Redis can decode a frame. See
+// rstate/output_codec.go.
+func WithServerOutputCompression(enabled bool) ServerOption {
+	return func(c *serverConfig) { c.outputCompression = enabled }
+}
+
 // WithServerRunnerMetricsProxy accepts metrics pushed by runners and merges
 // them into this server's /metrics.
 //
@@ -651,6 +671,8 @@ func buildServerAPIConfig(cfg ServerConfig, sc *serverConfig) apiserver.Config {
 		LeaseTTL:    sc.leaseTTL,
 
 		OutboxDiscoveryPage: sc.outboxDiscoveryPage,
+
+		OutputCompression: sc.outputCompression,
 
 		EnableRunnerMetricsProxy: sc.enableRunnerMetricsProxy,
 		RunnerMetricsInterval:    sc.runnerMetricsInterval,

@@ -55,6 +55,19 @@ func (s *Store) ConfigureOutboxReadyIndex(enabled bool) {
 	s.outboxIndexOn.Store(enabled)
 }
 
+// ConfigureOutputCompression enables storing node outputs compressed, and is the
+// write-side half of the feature described in output_codec.go.
+//
+// It is a switch rather than always-on for one reason: a process running an older
+// build cannot decode a zstd frame, so a mixed-version fleet that starts writing
+// compressed values would hand those processes unreadable node outputs. Ship the
+// code first — its read path already serves both forms — then enable this once
+// every process can decode. Turning it back off is always safe, and no data
+// migration is needed in either direction.
+func (s *Store) ConfigureOutputCompression(enabled bool) {
+	s.outputCompression.Store(enabled)
+}
+
 // AuditStats returns a point-in-time snapshot of audit-store dual-write
 // outcomes (ok and failed counts keyed by op).
 func (s *Store) AuditStats() AuditStats { return s.auditCounters.snapshot() }

@@ -90,6 +90,7 @@ type config struct {
 	redisConfig            *RedisConfig
 	outboxDiscoveryPage    int
 	outboxReadyIndex       bool
+	outputCompression      bool
 }
 
 // WithConcurrency sets the number of task consumer goroutines. Default is 10.
@@ -217,6 +218,26 @@ func WithOutboxDiscoveryPage(page int) Option {
 func WithOutboxReadyIndex(enabled bool) Option {
 	return func(c *config) {
 		c.outboxReadyIndex = enabled
+	}
+}
+
+// WithOutputCompression stores node outputs — the largest values this backend
+// keeps in Redis, one per node — zstd-compressed instead of as plain JSON. It
+// is off by default.
+//
+// Reads are unaffected by the setting in either direction: the store recognises
+// a compressed value by its frame header, so a process with this enabled and one
+// without both read everything ever written. That is what makes the rollout
+// order safe — ship the code everywhere first, then enable it — and what makes
+// turning it back off a no-op rather than a migration.
+//
+// It is worth enabling where node outputs are large, which in practice means a
+// workflow whose node emits a batch of records: the values are highly redundant,
+// so the keyspace shrink is several-fold for negligible CPU. See
+// rstate/output_codec.go for the measurements and the decoder's size bound.
+func WithOutputCompression(enabled bool) Option {
+	return func(c *config) {
+		c.outputCompression = enabled
 	}
 }
 
@@ -382,6 +403,7 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 	state.SetLogger(cfg.logger)
 	state.ConfigureTransient(cfg.transient, cfg.transientTTL, cfg.transientCompletionTTL)
 	state.ConfigureOutboxReadyIndex(cfg.outboxReadyIndex)
+	state.ConfigureOutputCompression(cfg.outputCompression)
 
 	// Default to the Asynq transport; WithTransport can inject an alternative.
 	// If a RedisConfig was injected, map it to the corresponding asynq HA
