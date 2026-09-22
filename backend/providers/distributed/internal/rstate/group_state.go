@@ -2,7 +2,6 @@ package rstate
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -346,7 +345,13 @@ func (s *Store) CommitGroup(ctx context.Context, req engine.GroupCommitRequest) 
 	// are surfaced by the single Run() call below.
 	exitArgs := make([]any, 0, len(req.Exits)*2)
 	for _, ex := range req.Exits {
-		encoded, err := json.Marshal(ex.Data)
+		// encodeOutputValue, not json.Marshal: a boundary exit is a node output
+		// and lands in the same output:<name> key CommitNode writes, so it has to
+		// go through the same codec. In the collection pipeline this is THE hot
+		// one — the map node's `collect` exit is the ~800 KB batch of decoded
+		// messages — so leaving it out makes the compression switch a no-op for
+		// the exact key class it exists to shrink.
+		encoded, err := s.encodeOutputValue(ex.Data)
 		if err != nil {
 			return engine.GroupCommitResult{}, fmt.Errorf("marshal group exit %q/%q: %w", req.ExecutionID, ex.NodeName, err)
 		}

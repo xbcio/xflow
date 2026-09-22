@@ -281,7 +281,10 @@ func (s *Store) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 
 	// Exit outputs (keys + args).
 	for _, ex := range req.Exits {
-		encoded, err := json.Marshal(ex.Data)
+		// Same codec as CommitNode and CommitGroup: this writes the same
+		// output:<name> key, so a value stored here has to be readable by the
+		// same decodeOutputValue that serves every other path.
+		encoded, err := s.encodeOutputValue(ex.Data)
 		if err != nil {
 			return engine.SeedExecutionFromEntryResponse{}, fmt.Errorf("marshal exit %q: %w", ex.NodeName, err)
 		}
