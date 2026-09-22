@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync/atomic"
 	"time"
 
 	"github.com/xbcio/xflow/engine/graph"
@@ -828,10 +829,12 @@ type OutboxDispatcher struct {
 	interval time.Duration
 	// discoveryPage is the per-drain discovery limit; metricsInterval is how
 	// often drain may run the backlog scan, and lastMetrics is when it last
-	// did. drain runs on a single goroutine (Run), so no field needs a lock.
+	// did. drain runs on a single goroutine (Run), so neither needs a lock;
+	// metricsRunning is the one field the metrics goroutine shares with it.
 	discoveryPage   int
 	metricsInterval time.Duration
 	lastMetrics     time.Time
+	metricsRunning  atomic.Bool
 }
 
 // NewOutboxDispatcher creates a retry loop for durable scheduling intents.
@@ -939,13 +942,30 @@ func (d *OutboxDispatcher) drain(ctx context.Context) {
 // The scan walks the whole keyspace, so running it on the delivery tick costs
 // far more than the gauge it reports, and the gauge does not need second-level
 // freshness. A zero lastMetrics means the first drain is always observed.
+//
+// It runs OFF the delivery goroutine, and that is not an optimisation. The scan
+// is unbounded and its cost grows with the backlog it measures, so inline it
+// made delivery wait on the measurement of its own backlog: while one scan ran,
+// no outbox intent was delivered at all, which is precisely the state that keeps
+// the backlog large. Observed on a keyspace of a few thousand pending
+// executions, at 1s ticks, as every sink dispatch stalling for minutes — the
+// backlog then never draining, and the executions behind it never completing.
+//
+// At most one scan is in flight. A tick that finds one running is dropped rather
+// than queued: a stale gauge is harmless, a queue of expensive scans is not.
 func (d *OutboxDispatcher) observeMetrics(ctx context.Context, state AtomicStateStore) {
 	now := time.Now()
 	if !d.lastMetrics.IsZero() && now.Sub(d.lastMetrics) < d.metricsInterval {
 		return
 	}
+	if !d.metricsRunning.CompareAndSwap(false, true) {
+		return
+	}
 	d.lastMetrics = now
-	d.engine.observeOutboxMetrics(ctx, state)
+	go func() {
+		defer d.metricsRunning.Store(false)
+		d.engine.observeOutboxMetrics(ctx, state)
+	}()
 }
 
 // requeueGroupOutboxID is the group-unit analogue of requeueOutboxID. It keys
