@@ -24,8 +24,9 @@ func (t *Transport) StartConsumer(cfg queue.ConsumerConfig, handler queue.TaskHa
 		t.connOpt,
 		asynqlib.Config{
 			Concurrency: cfg.Concurrency,
-			// Without Queues, asynq polls only "default" and every batch task
-			// enqueued to the batch queue sits unprocessed forever.
+			// Without Queues, asynq falls back to its own config, which polls
+			// only asynq's bare "default" queue — so a task enqueued to any
+			// queue this transport actually uses sits unprocessed forever.
 			Queues: queueWeights(),
 		},
 	)

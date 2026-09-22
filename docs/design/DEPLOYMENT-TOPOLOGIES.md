@@ -360,16 +360,43 @@ repair、runner claim expiry recovery，以及 outbox replay 都是独立的恢�
 
 | 后端 | 队列 | 权重 |
 |---|---|---|
-| distributed（asynq） | `default` / `xflow:batch` | 8 : 1 |
+| distributed（asynq） | `xflow:default` / `xflow:batch` | 8 : 1 |
 | local（内存） | 交互 lane / 批次 lane | 每 8 个交互任务让出 1 次 |
 
 **加权而非严格优先级**：严格优先级实测同样把队头等待压到 10ms，但会让持续
 的普通任务流把进行中的 map 无限期饿死，且 asynq 与本地队列都不会为此报告
 任何信号。
 
+**队列名必须带 `xflow:` 前缀**：asynq 以 `asynq:{<queue>}:*` 寻址队列，全局
+记账 key（`asynq:servers`、`asynq:workers`、`asynq:schedulers`、`asynq:queues`、
+`asynq:cancel`）不带前缀，且没有按应用的 key 前缀选项——队列名是本应用仅有的
+应用级隔离轴。
+沿用 asynq 自带的裸名 `default`（即主队列的旧名）等于和同一个 Redis 库里的
+**每一个** asynq 应用共用队列。
+
+**最典型的撞车形态是嵌入**：宿主应用自己已经在用 asynq，又在同进程里挂一个
+xflow server，两者共用同一 Redis —— 同一个进程里两个 asynq server 抢同一条
+队列。后果是**竞态而非必然丢失**：抢错的一方没有该 task type 的 handler，报的
+是可重试的 "handler not found"，任务退回 `asynq:{default}:retry` 带退避等下
+一轮；正确的一方通常下一轮就能抢到并处理成功。所以常见症状是**重试风暴、延迟
+尖刺、任务在 retry 里打转**，只有连续 25 次都抢错才进 `archived` 变真丢，而
+**两个应用的 owner 都收不到任何报错**。影响面也不止抢 pending：asynq server 的
+recoverer（lease 过期恢复、聚合组回收）与 janitor（completed 清理）同样按
+`Config.Queues` 逐队列执行，修复前会连宿主的这些数据一起动。
+
+队列名是**常量而非配置**：可配置的名字就能被设回共享的裸 `default`，静默复活
+上述问题。要分隔两个 xflow 应用必须用独立 Redis 实例——**Redis Cluster 只有
+DB 0**，`--redis-db` 在 cluster 拓扑下不生效。
+
 > **滚动升级顺序：consumer 必须先于 producer 上线。** 未配置 `Queues` 的
-> asynq server 只轮询 `default`；旧版 consumer 面对新版 producer 投到
-> `xflow:batch` 的任务是一个**静默黑洞**——入队成功、永不投递、无任何报错。
+> asynq server 只轮询 asynq 自带的 `default`；旧版 consumer 面对新版 producer
+> 投到 `xflow:batch` 的任务是一个**静默黑洞**——入队成功、永不投递、无任何报错。
+>
+> 这条只适用于**新增**队列，不适用于改名：改名不存在「老 consumer 仍会服务的
+> 队列」，两代之间队列集合交集为空，先发 producer 或先发 consumer 都会让另一
+> 代的任务永久搁置（入队但从未被 lease，lease sweep 与 outbox 都找不到它，见
+> `engine/lease.go`）。因此改名若发生在已发布版本之间，需要「consumer 先同时
+> 轮询新旧两个名字 → 再发 producer → 排空后去掉旧名」的过渡期。
 
 ### 4.4 重试与责任分层
 

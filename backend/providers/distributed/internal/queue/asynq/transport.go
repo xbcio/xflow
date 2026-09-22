@@ -16,31 +16,77 @@ import (
 // taskType is the Asynq task type used for all xflow node tasks.
 const taskType = "xflow:node"
 
-// Asynq queue names and their relative weights. Batch continuations (an
-// expanded map's items) ride their own queue so a wide map cannot occupy every
-// slot ahead of an unrelated execution's first node — the same head-of-line
-// block measured on the local backend, where a small execution submitted into a
-// queue saturated by a 200-batch map waited 854ms for its first node.
+// Asynq queue names and their relative weights.
+//
+// Every queue name carries the "xflow:" prefix, and that prefix is the whole of
+// the isolation this application gets from another asynq application sharing the
+// Redis database. asynq has no per-application key prefix: it addresses a queue
+// as asynq:{<queue>}:* and keeps its bookkeeping under unprefixed asynq:* keys
+// (internal/base/base.go), so the queue name *is* the namespace. A bare name
+// like "default" is therefore not this application's private queue — it is every
+// asynq application's queue in that database.
+//
+// The collision this prefix prevents is not hypothetical, and the case that
+// motivated it is embedding: a host application already using asynq for its own
+// work mounts an xflow server in the same process, sharing one Redis. Two asynq
+// servers then poll the same "default" queue, so which one takes a given task is
+// a race. The one that takes a task it has no handler for returns asynq's
+// "handler not found" error, which is RETRYABLE rather than skipped, so the task
+// goes back to asynq:{default}:retry with a backoff. The usual outcome is
+// therefore not loss but churn: retry storms, latency spikes and tasks cycling
+// through retry until the rightful consumer happens to win the race. Only a task
+// that loses the race the default of 25 times ends up archived, which is where
+// it is genuinely lost. Either way neither consumer's owner sees an error. Only
+// a payload that fails to unmarshal is skipped without retry; see consumer.go.
+//
+// The whole server is scoped by this list, not just the pending take. asynq's
+// recoverer (ListLeaseExpired, ReclaimStaleAggregationSets) and janitor
+// (DeleteExpiredCompletedTasks) each loop over Config.Queues, so before the
+// prefix an embedded xflow server would also recover a host's lease-expired
+// tasks and reap its completed sets. UniqueTask and group keys are per-queue
+// too (asynq:{<queue>}:unique:*, asynq:{<queue>}:g:*).
+//
+// What stays shared is asynq's five hardcoded global keys — asynq:servers,
+// asynq:workers, asynq:schedulers, asynq:queues, asynq:cancel (base.go:36-40).
+// They cannot be prefixed and are not configurable. That costs tooling
+// visibility only (asynqmon lists both applications' servers and queues);
+// asynq:cancel is a shared pubsub channel addressed by task UUID, so a
+// cross-application hit is not credible. Execution correctness does not depend
+// on them.
+//
+// defaultQueueName deliberately does not reuse taskType ("xflow:node"): asynq
+// prints queue names and task types side by side in the same diagnostics, and
+// making them identical there costs more than the symmetry is worth.
+//
+// Batch continuations (an expanded map's items) ride their own queue so a wide
+// map cannot occupy every slot ahead of an unrelated execution's first node —
+// the same head-of-line block measured on the local backend, where a small
+// execution submitted into a queue saturated by a 200-batch map waited 854ms
+// for its first node.
 //
 // Weighted, not strict: asynq drains a strict-priority high queue completely
 // before touching the low one, which would let a steady stream of ordinary
 // tasks park an in-flight map indefinitely with nothing reporting the stall.
 // At 8:1 the batch queue keeps roughly 1/9 of consumer throughput.
-//
-// defaultQueueName must stay "default" — it is asynq's own default, so a task
-// enqueued without an explicit Queue option lands there, and a consumer built
-// before this split processed only that queue.
 const (
-	defaultQueueName = "default"
+	defaultQueueName = "xflow:default"
 	batchQueueName   = "xflow:batch"
 
 	defaultQueueWeight = 8
 	batchQueueWeight   = 1
 )
 
-// queueWeights is the consumer's queue configuration. Consumers must be rolled
-// out before producers: a consumer that predates this split does not poll
-// batchQueueName at all, so batch tasks enqueued to it would sit unprocessed.
+// queueWeights is the consumer's queue configuration, and the complete set of
+// queues this application reads.
+//
+// These names are constants rather than configuration on purpose. An operator-
+// supplied queue name is a name that can be set back to asynq's shared "default"
+// — silently reintroducing exactly the collision the prefix exists to prevent,
+// with no compile error and nothing in the logs to notice. Isolation that
+// depends on every deployment's config staying right is not isolation. A
+// deployment that needs to separate two xflow applications must do it at a
+// level that actually separates all of them: separate Redis instances, since a
+// Redis Cluster has a single database and no DB index to move one of them to.
 func queueWeights() map[string]int {
 	return map[string]int{
 		defaultQueueName: defaultQueueWeight,

@@ -43,6 +43,7 @@
 | namespace registry | `xflow:namespaces` | `ListNamespaces` 在返回结果中隐式保证 `default`，不要求 Redis SET 实际存有该成员 |
 | leader | `xflow:leader:control-plane` | 全局 leader，只门控 maintenance，不作为 namespace 安全边界 |
 | runner directory | `xflow:runner-directory:{control}` | 目录全局；namespace 约束位于注册、assignment 与 claim 路由层 |
+| Asynq task queue | `asynq:{xflow:default}:*`、`asynq:{xflow:batch}:*`；`asynq:servers`、`asynq:workers`、`asynq:schedulers`、`asynq:queues`、`asynq:cancel` 无前缀 | Asynq 无按应用的 key 前缀选项，队列名是唯一的应用级隔离轴（防的是同库其它 asynq 应用，尤其宿主应用嵌入 server 的同进程形态），因此队列名取常量、不做配置；队列名不含 namespace，单个 consumer 多路复用全部 namespace，namespace 经 payload `_namespace` 在消费侧恢复 |
 
 ### 1.3 已有安全证据
 
