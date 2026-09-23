@@ -1,6 +1,7 @@
 .PHONY: all build test test-verbose test-examples test-concurrency test-script-wasm test-script-wasm-heavy test-coverage lint fmt vet tidy clean run-server run-runner install-hooks \
         check-go check-proto-tools proto proto-check proto-tools fetch-protoc \
         env-up env-down env-reset env-logs env-migrate env-ready test-integration test-integration-required test-g0-evidence-required test-g1-evidence-required print-g0-evidence-validator release-summary evidence-image-digests test-perf perf-sample test-soak \
+        test-workflows test-workflows-required test-workflows-stress \
         pin-audit pin-audit-strict pin-audit-selftest sbom sbom-validate \
         web-install web-lint web-typecheck web-test web-test-coverage web-check-boundaries web-check-production-fixtures web-build web-e2e web-e2e-preview web-ci web-all validate-openapi
 
@@ -1734,6 +1735,65 @@ test-perf: check-go
 	: "$${XFLOW_TEST_KAFKA_BROKERS:=localhost:$${KAFKA_PORT:-9092}}"; \
 	export XFLOW_TEST_REDIS_ADDR XFLOW_TEST_KAFKA_BROKERS; \
 	$(GO) test -tags=perf -bench=. -benchtime=2s -timeout 30m ./test/perf/...
+
+# ── Workflow QA suite (test/workflows, three complexity tiers) ───────────────
+# Every test these two targets select begins with TestWorkflow, so the pattern
+# is exact rather than an enumeration that drifts when a tier gains a test.
+WORKFLOW_TEST_PATTERN := '^TestWorkflow'
+
+# test-workflows runs the functional-completeness suite: node and trigger
+# coverage assertions, the three tier journeys through the production
+# server+runner topology, and the five trigger firing suites. Requires
+# `make env-up` — Redis for every tier, MySQL for the high tier, Kafka for the
+# Kafka trigger.
+#
+# It is not folded into test-integration's shard set because it is a distinct
+# surface (the QA definitions under test/workflows) rather than an engine
+# contract test, and because it wants one process with all three dependencies
+# present instead of a shard budget.
+#
+# XFLOW_REQUIRE_* is deliberately unset: a missing dependency skips its tier
+# (a local dev convenience). CI should use the -required variant.
+test-workflows: check-go
+	@set -a; [ -f test/env/.env ] && . ./test/env/.env; set +a; \
+	: "$${XFLOW_TEST_REDIS_ADDR:=localhost:$${REDIS_PORT:-6379}}"; \
+	: "$${XFLOW_TEST_KAFKA_BROKERS:=localhost:$${KAFKA_PORT:-9092}}"; \
+	export XFLOW_TEST_REDIS_ADDR XFLOW_TEST_KAFKA_BROKERS; \
+	$(GO) test -tags=integration -race -count=1 -timeout 20m ./test/integration/ \
+		-run=$(WORKFLOW_TEST_PATTERN) -v
+
+# test-workflows-required is test-workflows in CI gating mode: a missing Redis,
+# MySQL, or Kafka fails the target instead of silently skipping the tier that
+# needed it, so a green run cannot be confused with a run that tested nothing.
+test-workflows-required: check-go
+	@set -a; [ -f test/env/.env ] && . ./test/env/.env; set +a; \
+	: "$${XFLOW_TEST_REDIS_ADDR:=localhost:$${REDIS_PORT:-6379}}"; \
+	: "$${XFLOW_TEST_KAFKA_BROKERS:=localhost:$${KAFKA_PORT:-9092}}"; \
+	export XFLOW_TEST_REDIS_ADDR XFLOW_TEST_KAFKA_BROKERS; \
+	export XFLOW_REQUIRE_REDIS_INTEGRATION=1 XFLOW_REQUIRE_MYSQL_INTEGRATION=1 XFLOW_REQUIRE_KAFKA_INTEGRATION=1; \
+	$(GO) test -tags=integration -race -count=1 -timeout 20m ./test/integration/ \
+		-run=$(WORKFLOW_TEST_PATTERN) -v
+
+# test-workflows-stress runs the concurrent load suite over the three tiers and
+# prints one perf.metric line per tier. It is separate from test-perf because
+# that target runs -bench=. only, which never executes these Test* functions.
+#
+# It is the one test target here that does NOT pass -race, on purpose: the
+# suite reports latency percentiles, and race instrumentation changes the
+# measurement it exists to produce. Concurrency correctness is covered by the
+# race-enabled test-workflows run and the engine's own race suites.
+#
+# Redis and MySQL are REQUIRED rather than optional: the point of the target is
+# the report, and a skip would produce no metric line at all while still
+# exiting 0. MySQL is reached through XFLOW_TEST_MYSQL_DSN, or through
+# MYSQL_ROOT_PASSWORD from test/env/.env when the DSN is unset.
+test-workflows-stress: check-go
+	@set -a; [ -f test/env/.env ] && . ./test/env/.env; set +a; \
+	: "$${XFLOW_TEST_REDIS_ADDR:=localhost:$${REDIS_PORT:-6379}}"; \
+	export XFLOW_TEST_REDIS_ADDR; \
+	export XFLOW_REQUIRE_REDIS_INTEGRATION=1 XFLOW_REQUIRE_MYSQL_INTEGRATION=1; \
+	$(GO) test -tags=perf -count=1 -timeout 20m ./test/perf/ \
+		-run='^TestWorkflowTierStress$$' -v
 
 # test-soak runs the HA soak harness smoke over in-process miniredis (no real
 # Redis / multi-host topology required). The smoke only verifies multi-replica
