@@ -138,3 +138,102 @@ func TestSkipCascadeResolvesTheScheduleMarkerByUnit(t *testing.T) {
 			"must be consumed by the cascade, not left unrun", got)
 	}
 }
+
+// blockingHandler parks its node in Running until the test releases it, so the
+// skip task below is applied to a live execution rather than one that already
+// reached a terminal status and evicted its graph.
+type blockingHandler struct{ release chan struct{} }
+
+func (blockingHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.blocking"}
+}
+
+func (h blockingHandler) Execute(ctx context.Context, _ *types.Input) (*types.Output, error) {
+	select {
+	case <-h.release:
+		return &types.Output{Data: map[string]any{"ok": true}}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// TestNodeSkipRejectsAnUnknownUnitIndex pins that a skip task with no unit
+// identity fails loudly instead of being silently dropped.
+//
+// The commit that consumes a skip resolves its scheduling marker by UnitIdx.
+// engine.UnitIdxUnknown (-1) is what a lease or queue payload that lost the
+// field defaults to, and it names a key nothing ever wrote: the guard reads no
+// marker, refuses the commit, and the refusal is reported as handled — so the
+// intent is acked, the branch never terminalizes, and the remaining-unit
+// counter never reaches zero. That is the same silent stall the unit-index fix
+// addressed, reached from a different direction, and it is exactly what the
+// NodeIdx check a few lines above already prevents for its own index. This test
+// is the UnitIdx half of that guard.
+func TestNodeSkipRejectsAnUnknownUnitIndex(t *testing.T) {
+	release := make(chan struct{})
+
+	reg := execution.NewRegistry()
+	reg.RegisterGlobal("xflow.start", blockingHandler{release: release})
+	reg.RegisterGlobal("test.pass_through", passThroughHandler{})
+
+	def := &types.WorkflowDef{
+		Name: "unknown-unit-index",
+		Nodes: []types.NodeDef{
+			{Name: "rules", Type: "xflow.supply.external", Kind: types.NodeKindSupply},
+			{Name: "start", Type: "xflow.start"},
+			{Name: "middle", Type: "test.pass_through"},
+			{Name: "sink", Type: "test.pass_through"},
+		},
+		Connections: types.Connections{
+			"start":  {"main": {Targets: []types.Connection{{Node: "middle", Input: "main"}}}},
+			"middle": {"main": {Targets: []types.Connection{{Node: "sink", Input: "main"}}}},
+		},
+		DependencyEdges: []types.DependencyEdge{{Node: "sink", Supply: "rules"}},
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	middleIdx, ok := g.NodeIndex("middle")
+	if !ok {
+		t.Fatal("middle not registered")
+	}
+	if unit := g.UnitIndexForNode(middleIdx); unit == middleIdx {
+		t.Fatalf("middle has unit index %d equal to its node index: the fixture no longer "+
+			"declares its supply node first, so the two indexes never diverge here", unit)
+	}
+
+	b := New(WithConcurrency(2), WithRegistry(reg))
+	eng := engine.New(b.State(), b.Queue())
+	stop := b.Bind(eng)
+	// Release the parked worker before stopping the backend, or stop waits on a
+	// worker the handler is still holding.
+	defer func() {
+		close(release)
+		stop()
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	id, err := eng.Submit(ctx, g, map[string]any{})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	handled, err := eng.HandleSystemTask(ctx, &engine.Task{
+		ExecutionID: id,
+		NodeName:    "middle",
+		NodeIdx:     middleIdx,
+		UnitIdx:     engine.UnitIdxUnknown,
+		Type:        engine.TaskTypeNodeSkip,
+	})
+	if !handled {
+		t.Fatal("HandleSystemTask reported the skip unhandled; the engine owns system tasks")
+	}
+	if err == nil {
+		t.Fatalf("HandleSystemTask accepted a node-skip with UnitIdx = %d: its scheduling "+
+			"marker resolves to a key nothing wrote, so the guard would refuse the commit and "+
+			"report the refusal as handled, acking the intent and dropping the branch",
+			engine.UnitIdxUnknown)
+	}
+}
