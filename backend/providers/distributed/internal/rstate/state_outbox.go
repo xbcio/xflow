@@ -59,6 +59,16 @@ type redisOutboxEntry struct {
 // ARGV: 1=cutoff_ms (availability cutoff, also the lease clock) 2=limit
 //
 //	3=visibility_ms
+//
+// It returns {claimed, earliest}. claimed is the id/body/previous-score triples
+// the caller consumes. earliest is the ready set's smallest remaining score, or
+// "" when nothing is left.
+//
+// earliest exists so the caller can re-arm the readiness index in this same
+// round trip. The claim is the moment the execution's readiness is fully
+// determined, and the script is the only place that sees the ready set with the
+// lease already applied, so reporting it here is both cheaper and more accurate
+// than the ZRANGE the caller would otherwise issue. See applyOutboxReadyIndex.
 var leaseOutboxLua = redis.NewScript(`
 local cutoff = tonumber(ARGV[1])
 local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', cutoff, 'LIMIT', 0, tonumber(ARGV[2]))
@@ -77,7 +87,12 @@ for i = 1, #ids do
         redis.call('HDEL', KEYS[2], entryID)
     end
 end
-return out
+local head = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
+local earliest = ''
+if head[2] then
+    earliest = head[2]
+end
+return {out, earliest}
 `)
 
 // renewOutboxLua extends the leases a live deliverer still holds.
@@ -198,13 +213,14 @@ func (s *Store) LeaseOutbox(ctx context.Context, id types.ExecutionID, now time.
 	}
 	t := namespace.FromContext(ctx)
 	deadline := now.UnixMilli() + engine.OutboxDeliveryLeaseTTL.Milliseconds()
-	raw, err := leaseOutboxLua.Run(ctx, s.rdb,
+	res, err := leaseOutboxLua.Run(ctx, s.rdb,
 		[]string{outboxReadyKey(t, id), outboxBodyKey(t, id)},
 		now.UnixMilli(), limit, engine.OutboxDeliveryLeaseTTL.Milliseconds(),
 	).Slice()
 	if err != nil {
 		return nil, fmt.Errorf("lease outbox %q: %w", id, err)
 	}
+	raw, earliest := splitLeaseOutboxReply(res)
 	out := make([]engine.OutboxEntry, 0, len(raw)/3)
 	for i := 0; i+2 < len(raw); i += 3 {
 		entryID, _ := raw[i].(string)
@@ -226,9 +242,38 @@ func (s *Store) LeaseOutbox(ctx context.Context, id types.ExecutionID, now time.
 		// drained execution from being rediscovered forever, and what records
 		// the instant its next entry becomes deliverable. See
 		// state_outbox_index.go.
-		s.refreshOutboxReadyIndex(ctx, namespace.FromContext(ctx), id)
+		//
+		// The score comes from the claim script rather than a fresh read, so
+		// this costs no extra round trip.
+		score, ready := parseReadyScore(earliest)
+		s.applyOutboxReadyIndex(ctx, t, id, score, ready)
 	}
 	return out, nil
+}
+
+// splitLeaseOutboxReply unpacks leaseOutboxLua's {claimed, earliest} reply.
+func splitLeaseOutboxReply(res []any) (claimed []any, earliest string) {
+	if len(res) > 0 {
+		claimed, _ = res[0].([]any)
+	}
+	if len(res) > 1 {
+		earliest, _ = res[1].(string)
+	}
+	return claimed, earliest
+}
+
+// parseReadyScore reads the claim script's earliest-remaining-score field. An
+// empty string is the script's "the ready set is gone" sentinel, which is the
+// prune case rather than a zero score.
+func parseReadyScore(earliest string) (float64, bool) {
+	if earliest == "" {
+		return 0, false
+	}
+	score, err := strconv.ParseFloat(earliest, 64)
+	if err != nil {
+		return 0, false
+	}
+	return score, true
 }
 
 // RenewOutbox extends the leases this deliverer still holds, proving it is

@@ -314,14 +314,36 @@ func (s *Store) refreshOutboxReadyIndex(ctx context.Context, t namespace.Namespa
 	if !s.outboxIndexEnabled() {
 		return
 	}
-	indexKey := outboxReadyIndexKey(t)
 	score, ready, err := s.earliestReadyScore(ctx, t, id)
 	if err != nil {
 		s.noteOutboxIndexFailure(ctx, "read", err)
 		return
 	}
+	s.applyOutboxReadyIndex(ctx, t, id, score, ready)
+}
+
+// applyOutboxReadyIndex is refreshOutboxReadyIndex given the ready set's state
+// instead of reading it.
+//
+// A caller that has just read that state atomically, on the same key and in the
+// same command as the transition it is reporting on, has a strictly better
+// answer than a fresh ZRANGE: the claim script sees the ready set with the lease
+// already applied, so no append can slip between its read and the lease. Passing
+// it in is what lets a claim-finds-nothing flush re-arm the index without paying
+// a second round trip for a read it has already done — the difference between
+// three round trips per execution and two, which on a link whose round trip is
+// ~80ms is the difference between a dispatcher that keeps up and one that does
+// not.
+//
+// readScore is only meaningful when ready; a caller that knows the ready set is
+// gone passes ready=false.
+func (s *Store) applyOutboxReadyIndex(ctx context.Context, t namespace.Namespace, id types.ExecutionID, readScore float64, ready bool) {
+	if !s.outboxIndexEnabled() {
+		return
+	}
+	indexKey := outboxReadyIndexKey(t)
 	if ready {
-		if err := s.rdb.ZAdd(ctx, indexKey, redis.Z{Score: score, Member: string(id)}).Err(); err != nil {
+		if err := s.rdb.ZAdd(ctx, indexKey, redis.Z{Score: readScore, Member: string(id)}).Err(); err != nil {
 			s.noteOutboxIndexFailure(ctx, "add", err)
 		}
 		return
@@ -333,7 +355,7 @@ func (s *Store) refreshOutboxReadyIndex(ctx context.Context, t namespace.Namespa
 	// Prune, then verify, then repair — see the file note for why the verify
 	// read is what makes this prune incapable of dropping a registration a
 	// concurrent producer just wrote.
-	score, ready, err = s.earliestReadyScore(ctx, t, id)
+	score, ready, err := s.earliestReadyScore(ctx, t, id)
 	if err != nil {
 		s.noteOutboxIndexFailure(ctx, "verify", err)
 		return
