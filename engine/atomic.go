@@ -678,6 +678,16 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 		if task.NodeIdx < 0 || task.NodeIdx >= g.NodeCount() {
 			return true, fmt.Errorf("skip node index %d is out of range", task.NodeIdx)
 		}
+		// The commit below resolves its scheduling marker by UnitIdx, so an
+		// unset one is not merely unvalidated: it addresses a key nothing ever
+		// wrote, the guard sees no "skip", and the refusal is reported as
+		// handled — the intent is acked and the branch silently drops instead of
+		// cascading. UnitIdxUnknown (-1) is exactly that value, and a lease or
+		// queue payload that lost the field defaults to it. Reject it here,
+		// where the failure is still loud.
+		if task.UnitIdx < 0 || task.UnitIdx >= g.UnitCount() {
+			return true, fmt.Errorf("skip node unit index %d is out of range [0,%d)", task.UnitIdx, g.UnitCount())
+		}
 		// A skipped node commits with no active port (the CommitNodeRequest
 		// below sets none), and that empty port is what makes downstreamArrivals
 		// give every out-edge ActiveCount 0 and propagate the skip. Carry it
