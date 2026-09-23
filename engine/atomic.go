@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xbcio/xflow/engine/graph"
@@ -834,6 +836,57 @@ func WithOutboxDiscoveryPage(page int) OutboxDispatcherOption {
 	}
 }
 
+// WithOutboxDrainBudget caps how long one drain may run before it yields to the
+// next tick. Zero or negative removes the cap, which is the pre-existing
+// behaviour: one drain walks the whole discovery page however long that takes.
+//
+// The cap is a latency bound, not a throughput one. Work already flushed leaves
+// the due page, so a drain that stops early is resumed by the next one rather
+// than repeated; what changes is how long outbox metrics and shutdown can be
+// held up by a slow store.
+func WithOutboxDrainBudget(budget time.Duration) OutboxDispatcherOption {
+	return func(d *OutboxDispatcher) {
+		d.budget = budget
+	}
+}
+
+// DefaultOutboxDrainBudget bounds one drain well below the ~10 minutes a page
+// costs on a store whose round trip is ~80ms, while staying far above the cost
+// of a page on a co-located one (a 2048-entry page at ~0.5ms per round trip is
+// single-digit seconds). It is deliberately generous: the budget exists to stop
+// a pathological pass, not to shape the steady state.
+const DefaultOutboxDrainBudget = 30 * time.Second
+
+// WithOutboxFlushConcurrency sets how many executions one drain flushes at the
+// same time. Values below one take the default.
+//
+// This is the dispatcher's throughput knob, and it is the only one that changes
+// throughput at all: one flush costs a fixed number of round trips to the store,
+// so a serial loop delivers 1/(that cost) executions per second no matter how
+// the page or the budget are sized. Measured against a store ~80ms away, a flush
+// costs ~310ms, which caps a serial drain at ~3 executions/second — below the
+// rate a collection pipeline produces them, so the backlog grows without bound
+// and the sink deliveries it holds fall behind the output TTL they depend on.
+//
+// Concurrency is safe here because the loop's unit is one execution and distinct
+// executions own distinct keys. FlushOutbox is already called concurrently for
+// distinct executions by every runner commit, lease and group path, so a
+// concurrent drain adds no concurrency class the engine does not already run.
+func WithOutboxFlushConcurrency(n int) OutboxDispatcherOption {
+	return func(d *OutboxDispatcher) {
+		if n > 0 {
+			d.flushConcurrency = n
+		}
+	}
+}
+
+// DefaultOutboxFlushConcurrency covers a store whose round trip is tens of
+// milliseconds while staying far below the point where one dispatcher's parallel
+// flushes would contend with the runners for the shared store. Against a
+// co-located store (sub-millisecond round trip) a serial drain already keeps up;
+// this only makes it keep up with margin.
+const DefaultOutboxFlushConcurrency = 8
+
 // OutboxDispatcher periodically retries durable delivery intents left behind
 // by queue outages, response loss, or process crashes.
 type OutboxDispatcher struct {
@@ -841,10 +894,18 @@ type OutboxDispatcher struct {
 	interval time.Duration
 	// discoveryPage is the per-drain discovery limit; metricsInterval is how
 	// often drain may run the backlog scan, and lastMetrics is when it last
-	// did. drain runs on a single goroutine (Run), so no field needs a lock.
+	// did. drain runs on a single goroutine (Run), so neither needs a lock;
+	// metricsRunning is the one field the metrics goroutine shares with it.
 	discoveryPage   int
 	metricsInterval time.Duration
 	lastMetrics     time.Time
+	metricsRunning  atomic.Bool
+	// budget caps one drain's wall clock so a slow store cannot make a single
+	// pass outlive its own tick by minutes. Zero disables the cap.
+	budget time.Duration
+	// flushConcurrency is how many executions one drain flushes at once. It is
+	// the throughput knob; see WithOutboxFlushConcurrency.
+	flushConcurrency int
 }
 
 // NewOutboxDispatcher creates a retry loop for durable scheduling intents.
@@ -857,6 +918,8 @@ func NewOutboxDispatcher(eng *Engine, interval time.Duration, opts ...OutboxDisp
 		interval:        interval,
 		discoveryPage:   DefaultOutboxDiscoveryPage,
 		metricsInterval: DefaultOutboxMetricsInterval,
+		budget:          DefaultOutboxDrainBudget,
+		flushConcurrency: DefaultOutboxFlushConcurrency,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -940,25 +1003,114 @@ func (d *OutboxDispatcher) drain(ctx context.Context) {
 	}
 	discovered = len(ids)
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-	for _, id := range ids {
-		if err := d.engine.FlushOutbox(ctx, id); err != nil && d.engine.logger != nil {
-			d.engine.logger.Error("flush durable outbox failed", "execution_id", string(id), "err", err)
-		}
-	}
+	d.flushPage(ctx, ids, start)
 	d.observeMetrics(ctx, state)
+}
+
+// flushPage flushes one discovery page, at most flushConcurrency executions at a
+// time, and stops submitting once the drain's budget is spent.
+//
+// A serial loop is what this replaces, and the reason it had to go is that a
+// serial loop's throughput is fixed by the cost of one flush rather than by
+// anything the loop controls: page size and budget both change how the work is
+// shaped, never how fast it completes. One flush is a handful of round trips to
+// the store, so a store 80ms away caps a serial drain at ~3 executions/second
+// while the collection pipeline produces ~16 — the backlog then grows without
+// bound, and because a sink delivery is what reclaims the collection output, the
+// outputs it cannot reach in time sit out their whole TTL. Concurrency is the
+// only knob that moves that number.
+//
+// A page entry this pass does not reach is not skipped work: FlushOutbox drives
+// each execution to a fixed point (it loops until a claim comes back empty), so
+// a flushed execution has either leased all its ready work or been pruned from
+// the due page. Whatever is left is picked up by the next drain.
+func (d *OutboxDispatcher) flushPage(ctx context.Context, ids []types.ExecutionID, start time.Time) {
+	workers := d.flushConcurrency
+	if workers <= 0 {
+		workers = DefaultOutboxFlushConcurrency
+	}
+	if workers > len(ids) {
+		workers = len(ids)
+	}
+	if workers <= 1 {
+		for i, id := range ids {
+			if i > 0 && d.budgetSpent(start) {
+				return
+			}
+			d.flushOne(ctx, id)
+		}
+		return
+	}
+
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+	submit := func(id types.ExecutionID) {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			d.flushOne(ctx, id)
+		}()
+	}
+	for i, id := range ids {
+		// One flush is allowed to finish past the budget — it is in flight by the
+		// time the budget is checked again — so the bound is the budget plus at
+		// most one flush.
+		if i > 0 && d.budgetSpent(start) {
+			break
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		submit(id)
+	}
+	wg.Wait()
+}
+
+// budgetSpent reports whether this drain has used up its wall-clock budget. A
+// zero budget means unbounded, which is the pre-existing behaviour.
+func (d *OutboxDispatcher) budgetSpent(start time.Time) bool {
+	return d.budget > 0 && time.Since(start) >= d.budget
+}
+
+// flushOne flushes a single execution's outbox, reporting a delivery failure
+// without aborting the rest of the page: one execution's store error is not
+// evidence about any other execution's.
+func (d *OutboxDispatcher) flushOne(ctx context.Context, id types.ExecutionID) {
+	if err := d.engine.FlushOutbox(ctx, id); err != nil && d.engine.logger != nil {
+		d.engine.logger.Error("flush durable outbox failed", "execution_id", string(id), "err", err)
+	}
 }
 
 // observeMetrics runs the outbox backlog scan at most once per metricsInterval.
 // The scan walks the whole keyspace, so running it on the delivery tick costs
 // far more than the gauge it reports, and the gauge does not need second-level
 // freshness. A zero lastMetrics means the first drain is always observed.
+//
+// It runs OFF the delivery goroutine, and that is not an optimisation. The scan
+// is unbounded and its cost grows with the backlog it measures, so inline it
+// made delivery wait on the measurement of its own backlog: while one scan ran,
+// no outbox intent was delivered at all, which is precisely the state that keeps
+// the backlog large. Observed on a keyspace of a few thousand pending
+// executions, at 1s ticks, as every sink dispatch stalling for minutes — the
+// backlog then never draining, and the executions behind it never completing.
+//
+// At most one scan is in flight. A tick that finds one running is dropped rather
+// than queued: a stale gauge is harmless, a queue of expensive scans is not.
 func (d *OutboxDispatcher) observeMetrics(ctx context.Context, state AtomicStateStore) {
 	now := time.Now()
 	if !d.lastMetrics.IsZero() && now.Sub(d.lastMetrics) < d.metricsInterval {
 		return
 	}
+	if !d.metricsRunning.CompareAndSwap(false, true) {
+		return
+	}
 	d.lastMetrics = now
-	d.engine.observeOutboxMetrics(ctx, state)
+	go func() {
+		defer d.metricsRunning.Store(false)
+		d.engine.observeOutboxMetrics(ctx, state)
+	}()
 }
 
 // requeueGroupOutboxID is the group-unit analogue of requeueOutboxID. It keys

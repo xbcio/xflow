@@ -274,6 +274,14 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 		s.markOutboxReadyIndex(ctx, t, req.ExecutionID)
 	}
 	if out.ExecutionDone {
+		// Apply the completion TTL HERE, not only in UpdateExecutionStatus:
+		// commitNodeLua finalizes the execution inside the script, so a terminal
+		// CommitNode never passes through that method. Omitting it leaves every
+		// finished execution's output at its full active TTL.
+		//
+		// Order matters — before evictExecutionCaches, which drops the cached
+		// transient decision this needs.
+		s.shortenTransientCompletionTTLBestEffort(ctx, req.ExecutionID)
 		s.evictExecutionCaches(req.ExecutionID)
 	}
 	// isTransient, not s.transient: req.Output is the node's payload, so a

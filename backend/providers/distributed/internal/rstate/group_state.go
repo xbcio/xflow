@@ -449,6 +449,16 @@ func (s *Store) CommitGroup(ctx context.Context, req engine.GroupCommitRequest) 
 		s.markOutboxReadyIndex(ctx, t, req.ExecutionID)
 	}
 	if out.ExecutionDone {
+		// The same reason that brings the status projection here applies to the
+		// completion TTL: commitGroupLua finalizes the execution inside the
+		// script, so this hook is the only place completion-time work can run for
+		// a group-finalized execution. This is the path every collection pipeline
+		// execution takes, and its boundary outputs are the largest values the
+		// store holds — without the shortening they keep the full active TTL.
+		//
+		// Order matters — before evictExecutionCaches, which drops the cached
+		// transient decision this needs.
+		s.shortenTransientCompletionTTLBestEffort(ctx, req.ExecutionID)
 		s.evictExecutionCaches(req.ExecutionID)
 		// commitGroupLua finalizes the execution itself, so this is the only
 		// place the terminal state can reach the SQL audit trail.

@@ -71,6 +71,12 @@ func (o *drainObserver) drainObservations() []drainObservation {
 	return append([]drainObservation(nil), o.drains...)
 }
 
+func (o *drainObserver) pendingObservations() []OutboxMetricsSnapshot {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]OutboxMetricsSnapshot(nil), o.pendingAt...)
+}
+
 func (o *drainObserver) backlogObservations() []OutboxMetricsSnapshot {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -99,7 +105,9 @@ func TestOutboxDispatcherReportsDrainDurationAndDiscovery(t *testing.T) {
 		t.Fatalf("CreateExecutionWithOutbox() error = %v", err)
 	}
 
-	NewOutboxDispatcher(eng, time.Hour).drain(ctx)
+	dispatcher := NewOutboxDispatcher(eng, time.Hour)
+	dispatcher.drain(ctx)
+	waitForBacklogScan(t, dispatcher, state.metricsCallCount, 1)
 
 	drains := observer.drainObservations()
 	if len(drains) != 1 {
@@ -121,10 +129,10 @@ func TestOutboxDispatcherReportsDrainDurationAndDiscovery(t *testing.T) {
 		t.Fatalf("backlog observation = %+v, want pending=1 ready=1 -- the undelivered entry "+
 			"is both still pending and due", backlogs[0])
 	}
-	if len(observer.pendingAt) != 1 {
+	if pending := observer.pendingObservations(); len(pending) != 1 {
 		t.Fatalf("legacy pending observations = %d, want 1 -- widening the backlog "+
 			"observation must not remove the callback every existing observer implements",
-			len(observer.pendingAt))
+			len(pending))
 	}
 }
 

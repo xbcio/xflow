@@ -3,6 +3,8 @@ package engine
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -436,8 +438,13 @@ func TestEngineLoopSplitJSONBatchesUseDurableSystemTasks(t *testing.T) {
 type outboxObserverState struct {
 	*fakeState
 	deadLettered int
-	metricsCalls int
+	// metricsCalls is atomic because the backlog scan now runs off the delivery
+	// goroutine, so this counter is written on one goroutine and read on another.
+	metricsCalls atomic.Int64
 }
+
+// metricsCallCount is how many times the backlog scan has read this store.
+func (s *outboxObserverState) metricsCallCount() int { return int(s.metricsCalls.Load()) }
 
 func newOutboxObserverState() *outboxObserverState {
 	return &outboxObserverState{fakeState: newFakeState()}
@@ -474,7 +481,7 @@ func (s *outboxObserverState) OutboxMetrics(_ context.Context) (OutboxMetricsSna
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.metricsCalls++
+	s.metricsCalls.Add(1)
 	pending := 0
 	for _, entries := range s.atomicOutbox {
 		pending += len(entries)
@@ -483,6 +490,7 @@ func (s *outboxObserverState) OutboxMetrics(_ context.Context) (OutboxMetricsSna
 }
 
 type outboxObserverRecorder struct {
+	mu          sync.Mutex
 	retries     []int
 	deadLetters int
 	replayed    []DeadLetterReplayOutcome
@@ -490,19 +498,53 @@ type outboxObserverRecorder struct {
 	operations  []string
 }
 
+// The backlog callbacks fire off the delivery goroutine, so every field a test
+// reads is taken under the lock rather than read directly.
+func (r *outboxObserverRecorder) retryObservations() []int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]int(nil), r.retries...)
+}
+
+func (r *outboxObserverRecorder) deadLetterCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.deadLetters
+}
+
+func (r *outboxObserverRecorder) operationObservations() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.operations...)
+}
+
+func (r *outboxObserverRecorder) pendingObservations() []OutboxMetricsSnapshot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]OutboxMetricsSnapshot(nil), r.pending...)
+}
+
 func (r *outboxObserverRecorder) OnOutboxRetry(_ context.Context, attempt int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.retries = append(r.retries, attempt)
 }
 
 func (r *outboxObserverRecorder) OnOutboxDeadLetter(context.Context) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.deadLetters++
 }
 
 func (r *outboxObserverRecorder) OnOutboxReplayed(_ context.Context, outcome DeadLetterReplayOutcome) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.replayed = append(r.replayed, outcome)
 }
 
 func (r *outboxObserverRecorder) OnOutboxPending(_ context.Context, pending, deadLettered int, oldestAge time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.pending = append(r.pending, OutboxMetricsSnapshot{
 		Pending:         pending,
 		DeadLettered:    deadLettered,
@@ -511,6 +553,8 @@ func (r *outboxObserverRecorder) OnOutboxPending(_ context.Context, pending, dea
 }
 
 func (r *outboxObserverRecorder) OnOutboxError(_ context.Context, operation string, _ error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.operations = append(r.operations, operation)
 }
 
@@ -535,28 +579,31 @@ func TestEngineFlushOutboxNotifiesRetryDeadLetterAndBacklogObservers(t *testing.
 	if err := eng.FlushOutbox(ctx, id); !errors.Is(err, errOutboxQueueUnavailable) {
 		t.Fatalf("first FlushOutbox() error = %v, want queue outage", err)
 	}
-	if got := observer.retries; len(got) != 1 || got[0] != 1 {
+	if got := observer.retryObservations(); len(got) != 1 || got[0] != 1 {
 		t.Fatalf("retry observations = %v, want [1]", got)
 	}
-	if observer.deadLetters != 0 {
-		t.Fatalf("dead-letter observations after first failure = %d, want 0", observer.deadLetters)
+	if observer.deadLetterCount() != 0 {
+		t.Fatalf("dead-letter observations after first failure = %d, want 0", observer.deadLetterCount())
 	}
 
 	if err := eng.FlushOutbox(ctx, id); !errors.Is(err, errOutboxQueueUnavailable) {
 		t.Fatalf("second FlushOutbox() error = %v, want queue outage", err)
 	}
-	if observer.deadLetters != 1 {
-		t.Fatalf("dead-letter observations = %d, want 1", observer.deadLetters)
+	if observer.deadLetterCount() != 1 {
+		t.Fatalf("dead-letter observations = %d, want 1", observer.deadLetterCount())
 	}
-	if len(observer.operations) != 2 {
-		t.Fatalf("outbox error observations = %v, want two delivery errors", observer.operations)
+	if len(observer.operationObservations()) != 2 {
+		t.Fatalf("outbox error observations = %v, want two delivery errors", observer.operationObservations())
 	}
 
-	NewOutboxDispatcher(eng, time.Hour).drain(ctx)
-	if len(observer.pending) != 1 {
-		t.Fatalf("backlog observations = %d, want 1", len(observer.pending))
+	dispatcher := NewOutboxDispatcher(eng, time.Hour)
+	dispatcher.drain(ctx)
+	waitForBacklogScan(t, dispatcher, state.metricsCallCount, 1)
+	pending := observer.pendingObservations()
+	if len(pending) != 1 {
+		t.Fatalf("backlog observations = %d, want 1", len(pending))
 	}
-	got := observer.pending[0]
+	got := pending[0]
 	if got.Pending != 0 || got.DeadLettered != 1 {
 		t.Fatalf("backlog observation = %+v, want pending=0 dead_lettered=1", got)
 	}
@@ -574,23 +621,25 @@ func TestOutboxDispatcherThrottlesBacklogScan(t *testing.T) {
 	dispatcher := NewOutboxDispatcher(eng, time.Hour)
 
 	dispatcher.drain(ctx)
-	if state.metricsCalls != 1 {
+	waitForBacklogScan(t, dispatcher, state.metricsCallCount, 1)
+	if state.metricsCallCount() != 1 {
 		t.Fatalf("OutboxMetrics() calls after first drain = %d, want 1 -- the first drain "+
-			"has no previous scan to throttle against", state.metricsCalls)
+			"has no previous scan to throttle against", state.metricsCallCount())
 	}
 
 	dispatcher.drain(ctx)
-	if state.metricsCalls != 1 {
+	if state.metricsCallCount() != 1 {
 		t.Fatalf("OutboxMetrics() calls after a second drain inside the interval = %d, want 1",
-			state.metricsCalls)
+			state.metricsCallCount())
 	}
 
 	// Age the last scan past the interval; the next drain collects again.
 	dispatcher.lastMetrics = time.Now().Add(-2 * dispatcher.metricsInterval)
 	dispatcher.drain(ctx)
-	if state.metricsCalls != 2 {
+	waitForBacklogScan(t, dispatcher, state.metricsCallCount, 2)
+	if state.metricsCallCount() != 2 {
 		t.Fatalf("OutboxMetrics() calls after the interval elapsed = %d, want 2",
-			state.metricsCalls)
+			state.metricsCallCount())
 	}
 }
 
@@ -602,8 +651,8 @@ func TestOutboxDispatcherSkipsBacklogScanWithoutObserver(t *testing.T) {
 	eng := New(state, &toggleOutboxQueue{})
 
 	NewOutboxDispatcher(eng, time.Hour).drain(ctx)
-	if state.metricsCalls != 0 {
+	if state.metricsCallCount() != 0 {
 		t.Fatalf("OutboxMetrics() calls without an observer = %d, want 0 -- the result "+
-			"has nowhere to go, so the scan is pure cost", state.metricsCalls)
+			"has nowhere to go, so the scan is pure cost", state.metricsCallCount())
 	}
 }
