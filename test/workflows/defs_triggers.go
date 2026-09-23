@@ -5,6 +5,7 @@ import (
 
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/node/trigger"
+	triggerredis "github.com/xbcio/xflow/node/trigger/redis"
 	"github.com/xbcio/xflow/sdk/xflow"
 	"github.com/xbcio/xflow/types"
 )
@@ -71,6 +72,15 @@ func CronTriggerWorkflow(expression string) *xflow.WorkflowBuilder {
 // shared names would resume from wherever a previous run left off, and would
 // then be asserting against that run's offsets instead of its own messages.
 //
+// StartID "0" is load-bearing, not a preference. The trigger's default is "$",
+// which creates the group to see only entries added after it exists — but the
+// group is created by the consumer goroutine, after AddWorkflow has already
+// returned. A producer that publishes immediately therefore races the group,
+// and when it wins the messages are outside the group's window and are never
+// delivered at all. Reading from the stream's beginning removes the race
+// instead of narrowing it, the same way the kafka tier sets StartOffset
+// "earliest" rather than trusting the group to be ready.
+//
 // Node types: xflow.trigger.redis, xflow.function, xflow.end.
 func RedisTriggerWorkflow(addr, stream, group string) *xflow.WorkflowBuilder {
 	return triggerWorkflow("trigger-redis",
@@ -78,7 +88,8 @@ func RedisTriggerWorkflow(addr, stream, group string) *xflow.WorkflowBuilder {
 			Addr(addr).
 			Mode("stream").
 			Stream(stream).
-			Group(group),
+			Group(group).
+			Tuning(triggerredis.Tuning{StartID: "0"}),
 		`{"kind": "redis", "event": $input.trigger}`)
 }
 
