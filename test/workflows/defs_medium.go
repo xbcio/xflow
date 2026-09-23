@@ -75,7 +75,7 @@ func MediumWorkflow() *xflow.WorkflowBuilder {
 		`({script_ok: true, n: $input.orders.length, amount: $input.amount, orders: $input.orders})`).
 		Language("js").Runtime("goja"))
 	route := wf.Node("route", Switch([]node.SwitchRule{
-		{Condition: `$input.amount >= 100`, Output: "bulk"},
+		{Condition: BranchCondition(), Output: "bulk"},
 	}, "single", "bulk", "single"))
 
 	fan := wf.Node("fan", node.Map("orders", 2))
@@ -112,12 +112,6 @@ func MediumWorkflow() *xflow.WorkflowBuilder {
 		Connect(notify.Output("main"), done)
 	return wf
 }
-
-// MediumBulkInput takes the map arm of MediumWorkflow's switch.
-func MediumBulkInput() map[string]any { return map[string]any{"amount": 500.0} }
-
-// MediumSingleInput takes the single-node arm of MediumWorkflow's switch.
-func MediumSingleInput() map[string]any { return map[string]any{"amount": 10.0} }
 
 // MediumVars returns the runtime variables MediumWorkflow requires.
 func MediumVars(httpURL, recipient string) map[string]any {

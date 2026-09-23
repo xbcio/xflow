@@ -324,9 +324,9 @@ func lowStressJobs(t *testing.T, n int) []stressJob {
 		}
 		// Alternate arms so both branch nodes are loaded; the coverage and
 		// integration suites assert which arm each input selects.
-		input := workflows.LowSingleInput()
+		input := workflows.BelowThresholdInput()
 		if i%2 == 0 {
-			input = workflows.LowBulkInput()
+			input = workflows.AboveThresholdInput()
 		}
 		jobs[i] = stressJob{def: def, input: input}
 	}
@@ -342,9 +342,9 @@ func mediumStressJobs(t *testing.T, n int, httpURL string) []stressJob {
 			t.Fatalf("MediumWorkflow().Definition(): %v", err)
 		}
 		workflows.WithVars(def, workflows.MediumVars(httpURL, "qa-stress@example.test"))
-		input := workflows.MediumSingleInput()
+		input := workflows.BelowThresholdInput()
 		if i%2 == 0 {
-			input = workflows.MediumBulkInput()
+			input = workflows.AboveThresholdInput()
 		}
 		jobs[i] = stressJob{def: def, input: input}
 	}

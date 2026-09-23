@@ -20,14 +20,15 @@ import (
 // Node types: xflow.start, xflow.function, xflow.transform.set, xflow.if,
 // xflow.transform.pick, xflow.merge, xflow.end.
 //
-// Input: `amount` (number) decides the branch. Runtime vars: none.
+// Input: `amount` (number) decides the branch — AboveThresholdInput takes the
+// true arm, BelowThresholdInput the false one. Runtime vars: none.
 func LowWorkflow() *xflow.WorkflowBuilder {
 	wf := xflow.Workflow("low-tier")
 	start := wf.Node("start", node.Start())
 	seed := wf.Node("seed", node.Expr(`{"amount": $input.amount, "rows": [10, 20, 30]}`))
 	tag := wf.Node("tag", node.Set(map[string]any{"tier": "low"}).
 		SetExpr(map[string]string{"double_amount": "$input.amount * 2"}))
-	branch := wf.Node("branch", node.IF(`$input.amount >= 100`))
+	branch := wf.Node("branch", node.IF(BranchCondition()))
 	big := wf.Node("big", node.Pick("amount", "tier", "double_amount"))
 	small := wf.Node("small", node.Pick("amount", "tier"))
 	join := wf.Node("join", node.Merge(node.MergeWaitAny))
@@ -43,10 +44,3 @@ func LowWorkflow() *xflow.WorkflowBuilder {
 		Connect(join.Output("main"), done)
 	return wf
 }
-
-// LowBulkInput returns an invocation input that takes the true arm of
-// LowWorkflow's branch.
-func LowBulkInput() map[string]any { return map[string]any{"amount": 500.0} }
-
-// LowSingleInput returns an invocation input that takes the false arm.
-func LowSingleInput() map[string]any { return map[string]any{"amount": 10.0} }

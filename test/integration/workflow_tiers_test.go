@@ -42,8 +42,8 @@ func TestWorkflowTierLowDistributed(t *testing.T) {
 		input  map[string]any
 		ranNot string
 	}{
-		{name: "bulk_arm", input: workflows.LowBulkInput(), ranNot: "small"},
-		{name: "single_arm", input: workflows.LowSingleInput(), ranNot: "big"},
+		{name: "bulk_arm", input: workflows.AboveThresholdInput(), ranNot: "small"},
+		{name: "single_arm", input: workflows.BelowThresholdInput(), ranNot: "big"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			def, err := workflows.LowWorkflow().Definition()
@@ -94,8 +94,8 @@ func TestWorkflowTierMediumDistributed(t *testing.T) {
 		name  string
 		input map[string]any
 	}{
-		{name: "bulk_arm", input: workflows.MediumBulkInput()},
-		{name: "single_arm", input: workflows.MediumSingleInput()},
+		{name: "bulk_arm", input: workflows.AboveThresholdInput()},
+		{name: "single_arm", input: workflows.BelowThresholdInput()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			def, err := workflows.MediumWorkflow().Definition()

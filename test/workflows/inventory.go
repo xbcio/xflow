@@ -55,6 +55,24 @@ var DeclarationOnlyNodeTypes = []string{
 	"xflow.supply.static",
 }
 
+// ArmThreshold is the amount the low and medium tiers branch on. The branch
+// conditions and the two inputs that select an arm all derive from it, because
+// restating it as literals let the threshold move without the inputs moving
+// with it: a threshold raised past 500 would leave the "bulk" input taking the
+// single arm, and the arm tests would still pass while exercising the other
+// branch.
+const ArmThreshold = 100.0
+
+// BranchCondition is the expression both tiers branch on, so the threshold is
+// written once and read by the compiler rather than restated per tier.
+func BranchCondition() string { return fmt.Sprintf("$input.amount >= %v", ArmThreshold) }
+
+// AboveThresholdInput selects the branch BranchCondition routes to when true.
+func AboveThresholdInput() map[string]any { return map[string]any{"amount": ArmThreshold * 5} }
+
+// BelowThresholdInput selects the other branch.
+func BelowThresholdInput() map[string]any { return map[string]any{"amount": ArmThreshold / 10} }
+
 // switchWithPorts wraps xflow.switch to supply the one parameter the node cannot
 // infer: the list of output ports its rules route to.
 //
