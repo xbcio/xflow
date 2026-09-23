@@ -1631,16 +1631,57 @@ dependency_edges:
   parameters:
     method: POST|GET|PUT|DELETE
     url: string
+    mode: json|raw               # 默认 json；见下方「raw 模式」
     authentication: apiKey|oauth2|basic
     headers: object
     query: object
-    body: object
+    body: object                 # 仅 mode=json：值被 json.Marshal 后发送
+    body_b64: string             # 仅 mode=raw：请求体原始字节的 base64
     options:
-      timeout: int
+      timeout: string              # duration，如 "30s"；缺省 30s
+      max_response_bytes: int
+      disable_redirect: bool
+      insecure_skip_verify: bool
       retry:
         enabled: bool
         max_attempts: int
 ```
+
+**raw 模式**
+
+`mode: raw` 把请求体与响应体都当作不透明字节处理，用于 json 模式表达不了的请求。两种模式只在这两处不同，传输层（host policy、超时、重定向）完全共用。
+
+| 维度 | `mode: json`（默认） | `mode: raw` |
+|---|---|---|
+| 请求体 | `body` 经 `json.Marshal`，并强制 `Content-Type: application/json` | `body_b64` 解码后的字节原样发送，**不附加任何 Content-Type**（调用方通过 `headers` 自行设置） |
+| 响应体 | 能解析成 JSON 则输出对象，否则输出 string | 始终输出 `body_b64`（原始字节的 base64）；即使响应是合法 JSON 也不解析，避免重序列化丢失键序与数字格式 |
+| 4xx / 5xx | 4xx 永久错误、5xx 与 408/429 可重试错误 | 全部是 main 端口的正常结果，带 `status` / `status_text` / `headers` |
+| 连接失败 | 可重试错误 | main 端口结果，`status: 0`，原因在 `error` 字段 |
+| 超过 `max_response_bytes` | 永久错误 | 截断并置 `body_truncated: true`，保留已返回的 status 与 headers |
+| 逐请求计时 | 无 | `started_at` / `finished_at` / `duration_ms` |
+
+这三点差异都是为了同一个目的：一个节点承载一批请求时，**一批 N 个请求必须产出 N 个按序结果**，所以单条请求的传输失败、被拒绝的状态码、过大的响应体都不能变成节点级错误去替换整批输出。唯一的例外是 host policy 拒绝——它是安全决策，仍以 `http.host_not_allowed` 永久错误上报，否则被拦截的 SSRF 尝试会与「目标不可达」无法区分。
+
+```yaml
+- name: send_form
+  type: xflow.http
+  parameters:
+    mode: raw
+    method: POST
+    url: "{{ $item.url }}"
+    headers:
+      Content-Type: application/x-www-form-urlencoded
+    body_b64: "{{ $item.body_b64 }}"
+    options:
+      timeout: 30s
+      disable_redirect: true       # 凭据请求必须置 true，见下
+```
+
+**安全约束**：
+
+- `disable_redirect: true` 必须用于任何携带凭证的请求。跟随重定向会把同一个请求连同 Authorization / Cookie 重发到新 host，这是凭证外泄路径，不是便利性开关。默认 `false`（沿用既有行为）。
+- `insecure_skip_verify: true` 关闭 TLS 证书校验，仅用于扫描自签名/过期证书的目标——该状态必须在结果里被报告为发现项而非连接失败。**携带凭证的请求绝不能设置它**：校验被关闭后凭证可被中间人重放。该选项按请求生效，不会影响同进程的其他请求。
+- 这两个开关都在 `options` 下，且默认 `false`，因此既有工作流的行为完全不变。
 
 #### Browser CDP 节点
 

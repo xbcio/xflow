@@ -27,6 +27,8 @@ type HTTPNode struct {
 	URL            string
 	Headers        map[string]any
 	Body           any
+	BodyB64        string
+	Mode           string
 	Query          map[string]any
 	Authentication string
 	Options        map[string]any
@@ -119,6 +121,37 @@ func (n *HTTPNode) Timeout(d string) *HTTPNode {
 	return n
 }
 
+// SetMode selects the request/response encoding: "json" (the default) or
+// "raw". See httpMode for what the two do differently.
+//
+//	node.HTTP("POST", url).SetMode("raw").SetBodyB64(encoded)
+func (n *HTTPNode) SetMode(mode string) *HTTPNode { n.Mode = mode; return n }
+
+// SetBodyB64 sets the request body as pre-encoded bytes, base64. It is only
+// read when Mode is "raw"; SetBody is only read otherwise.
+//
+//	node.HTTP("POST", url).SetMode("raw").SetBodyB64(base64.StdEncoding.EncodeToString(b))
+func (n *HTTPNode) SetBodyB64(bodyB64 string) *HTTPNode { n.BodyB64 = bodyB64; return n }
+
+// DisableRedirect makes the node return the first 3xx response instead of
+// following it, so the caller can observe the status and the Location header.
+//
+//	node.HTTP("GET", url).DisableRedirect()
+func (n *HTTPNode) DisableRedirect() *HTTPNode { return n.setOption("disable_redirect", true) }
+
+// InsecureSkipVerify disables TLS certificate verification for this request.
+// Opt-in and per-request only: see relaxedTLSRoundTripper for why it exists and
+// why a credential-bearing request must never set it.
+func (n *HTTPNode) InsecureSkipVerify() *HTTPNode { return n.setOption("insecure_skip_verify", true) }
+
+func (n *HTTPNode) setOption(key string, value any) *HTTPNode {
+	if n.Options == nil {
+		n.Options = map[string]any{}
+	}
+	n.Options[key] = value
+	return n
+}
+
 func (n *HTTPNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.http",
@@ -127,11 +160,13 @@ func (n *HTTPNode) Descriptor() types.Descriptor {
 		Params: []types.ParamSpec{
 			{Name: "method", DisplayName: "Method", Type: types.ParamString, Required: true, Default: "GET", Description: "HTTP method: GET/POST/PUT/DELETE/PATCH"},
 			{Name: "url", DisplayName: "URL", Type: types.ParamString, Required: true, Description: "Target URL"},
+			{Name: "mode", DisplayName: "Mode", Type: types.ParamString, Required: false, Description: "Payload encoding: \"json\" (default, body is marshalled and the response parsed) or \"raw\" (body in/out as opaque base64 bytes, every status is a result)"},
 			{Name: "authentication", DisplayName: "Authentication", Type: types.ParamString, Required: false, Description: "Credential reference name"},
-			{Name: "body", DisplayName: "Body", Type: types.ParamObject, Required: false, Description: "Request body"},
+			{Name: "body", DisplayName: "Body", Type: types.ParamObject, Required: false, Description: "Request body, marshalled to JSON. Ignored when mode=raw"},
+			{Name: "body_b64", DisplayName: "Raw Body (base64)", Type: types.ParamString, Required: false, Description: "Request body as base64-encoded bytes, sent verbatim with no Content-Type added. Only read when mode=raw"},
 			{Name: "headers", DisplayName: "Headers", Type: types.ParamObject, Required: false, Description: "Request headers"},
 			{Name: "query", DisplayName: "Query Params", Type: types.ParamObject, Required: false, Description: "URL query parameters"},
-			{Name: "options", DisplayName: "Options", Type: types.ParamObject, Required: false, Description: "Additional options (timeout, retry, etc.)"},
+			{Name: "options", DisplayName: "Options", Type: types.ParamObject, Required: false, Description: "Additional options (timeout, max_response_bytes, disable_redirect, insecure_skip_verify)"},
 		},
 		Inputs:  []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}, {Name: "error", DisplayName: "Error"}},
@@ -146,11 +181,17 @@ func (n *HTTPNode) OnError(s types.OnError) types.Builder {
 
 func (n *HTTPNode) RawParams() any {
 	params := map[string]any{"method": n.Method, "url": n.URL}
+	if n.Mode != "" {
+		params[httpModeParam] = n.Mode
+	}
 	if n.Headers != nil {
 		params["headers"] = n.Headers
 	}
 	if n.Body != nil {
 		params["body"] = n.Body
+	}
+	if n.BodyB64 != "" {
+		params[httpRawBodyParam] = n.BodyB64
 	}
 	if n.Query != nil {
 		params["query"] = n.Query
@@ -216,6 +257,11 @@ func safeMethodOp(ue *url.Error) string {
 }
 
 func (n *HTTPNode) Execute(ctx context.Context, input *types.Input) (*types.Output, error) {
+	mode, err := parseHTTPMode(input.Params)
+	if err != nil {
+		return nil, err
+	}
+
 	method := cast.ToString(input.Params["method"])
 	if method == "" {
 		method = "GET"
@@ -250,13 +296,29 @@ func (n *HTTPNode) Execute(ctx context.Context, input *types.Input) (*types.Outp
 		parsedURL.RawQuery = q.Encode()
 	}
 
+	opts := parseHTTPOptions(input)
+
+	// The two modes differ in exactly two places: how the body is produced, and
+	// how the response is interpreted. Everything between them is shared, so a
+	// transport-level fix (host policy, timeout, redirect handling) cannot land
+	// in one mode and be missed in the other.
 	var bodyReader io.Reader
-	if body := input.Params["body"]; body != nil {
+	contentType := ""
+	if mode == modeRaw {
+		bodyBytes, err := rawRequestBody(input.Params)
+		if err != nil {
+			return nil, err
+		}
+		if bodyBytes != nil {
+			bodyReader = bytes.NewReader(bodyBytes)
+		}
+	} else if body := input.Params["body"]; body != nil {
 		bodyBytes, err := json.Marshal(body)
 		if err != nil {
 			return nil, types.NewPermanentError("http.marshal_body", err.Error())
 		}
 		bodyReader = bytes.NewReader(bodyBytes)
+		contentType = "application/json"
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, parsedURL.String(), bodyReader)
@@ -264,8 +326,8 @@ func (n *HTTPNode) Execute(ctx context.Context, input *types.Input) (*types.Outp
 		return nil, types.NewPermanentError("http.create_request", err.Error())
 	}
 
-	if bodyReader != nil {
-		req.Header.Set("Content-Type", "application/json")
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
 	}
 
 	if headers, ok := input.Params["headers"].(map[string]any); ok {
@@ -279,26 +341,15 @@ func (n *HTTPNode) Execute(ctx context.Context, input *types.Input) (*types.Outp
 		applyHTTPAuth(req, cred)
 	}
 
-	timeout := 30 * time.Second
-	maxResponseBytes := defaultMaxResponseBytes
-	if options, ok := input.Params["options"].(map[string]any); ok {
-		if t := cast.ToString(options["timeout"]); t != "" {
-			if d, err := time.ParseDuration(t); err == nil {
-				timeout = d
-			}
-		}
-		if _, ok := options["max_response_bytes"]; ok {
-			if n := cast.ToInt64(options["max_response_bytes"]); n > 0 {
-				maxResponseBytes = n
-			}
-		}
-	}
-	if input.Timeout > 0 {
-		timeout = input.Timeout
-	}
-
 	client := *DefaultHTTPClient
-	client.Timeout = timeout
+	client.Timeout = opts.timeout
+	if opts.insecureSkipVerify {
+		transport, err := relaxedTLSRoundTripper(client.Transport)
+		if err != nil {
+			return nil, err
+		}
+		client.Transport = transport
+	}
 
 	// Enforce the host policy (SSRF allow/deny) after the final URL is resolved
 	// but before any request is dispatched. When no policy is configured the
@@ -307,21 +358,12 @@ func (n *HTTPNode) Execute(ctx context.Context, input *types.Input) (*types.Outp
 		if err := policy(parsedURL.Hostname()); err != nil {
 			return nil, types.NewPermanentError("http.host_not_allowed", err.Error())
 		}
-		// The default client follows redirects, so re-check every redirect hop
-		// with the same policy; otherwise a redirect could smuggle a request to
-		// a disallowed host and bypass the allowlist.
-		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-			if err := policy(req.URL.Hostname()); err != nil {
-				return types.NewPermanentError("http.host_not_allowed", err.Error())
-			}
-			if len(via) >= 10 {
-				return fmt.Errorf("stopped after 10 redirects")
-			}
-			return nil
-		}
 	}
+	configureRedirects(&client, opts, HTTPHostPolicy)
 
+	startedAt := time.Now()
 	resp, err := client.Do(req)
+	finishedAt := time.Now()
 	if err != nil {
 		// A redirect rejected by the host policy surfaces here wrapped in a
 		// *url.Error; preserve its permanent classification instead of masking
@@ -330,19 +372,40 @@ func (n *HTTPNode) Execute(ctx context.Context, input *types.Input) (*types.Outp
 		if errors.As(err, &ce) && ce.Permanent {
 			return nil, ce
 		}
-		return nil, types.NewTransientError("http.connection", transportErrorMessage(parsedURL, err))
+		message := transportErrorMessage(parsedURL, err)
+		if mode == modeRaw {
+			// A refused connection, a DNS failure and a TLS handshake failure are
+			// results a scanner reports on, not node failures. Returning them here
+			// keeps one request's transport outcome from replacing the output of
+			// the batch it belongs to.
+			return &types.Output{Data: rawFailureData(message, startedAt, finishedAt), Port: "main"}, nil
+		}
+		return nil, types.NewTransientError("http.connection", message)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	// Cap the buffered response body so an oversized response cannot exhaust
 	// memory. Read one extra byte to detect an overflow past the limit.
-	limited := io.LimitReader(resp.Body, maxResponseBytes+1)
+	limited := io.LimitReader(resp.Body, opts.maxResponseBytes+1)
 	respBody, err := io.ReadAll(limited)
 	if err != nil {
 		return nil, types.NewTransientError("http.read_response", fmt.Sprintf("read response: %v", err))
 	}
-	if int64(len(respBody)) > maxResponseBytes {
-		return nil, types.NewPermanentError("http.response_too_large", fmt.Sprintf("response body exceeds %d bytes", maxResponseBytes))
+	truncated := int64(len(respBody)) > opts.maxResponseBytes
+	if truncated {
+		// raw mode reports the overflow on main with a truncated body rather than
+		// failing the node: a scanner needs "the response was larger than the cap"
+		// as an observation, and discarding the request's whole result over it
+		// would lose the status and headers that came back. json mode keeps the
+		// hard error it has always had -- its contract is a fully parsed body.
+		if mode != modeRaw {
+			return nil, types.NewPermanentError("http.response_too_large", fmt.Sprintf("response body exceeds %d bytes", opts.maxResponseBytes))
+		}
+		respBody = respBody[:opts.maxResponseBytes]
+	}
+
+	if mode == modeRaw {
+		return &types.Output{Data: rawResponseData(resp, respBody, truncated, startedAt, finishedAt), Port: "main"}, nil
 	}
 
 	data := map[string]any{
