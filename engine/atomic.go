@@ -914,11 +914,11 @@ func NewOutboxDispatcher(eng *Engine, interval time.Duration, opts ...OutboxDisp
 		interval = time.Second
 	}
 	d := &OutboxDispatcher{
-		engine:          eng,
-		interval:        interval,
-		discoveryPage:   DefaultOutboxDiscoveryPage,
-		metricsInterval: DefaultOutboxMetricsInterval,
-		budget:          DefaultOutboxDrainBudget,
+		engine:           eng,
+		interval:         interval,
+		discoveryPage:    DefaultOutboxDiscoveryPage,
+		metricsInterval:  DefaultOutboxMetricsInterval,
+		budget:           DefaultOutboxDrainBudget,
 		flushConcurrency: DefaultOutboxFlushConcurrency,
 	}
 	for _, opt := range opts {
