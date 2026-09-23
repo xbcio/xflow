@@ -453,6 +453,12 @@ func transientExecutionKeys(t namespace.Namespace, id types.ExecutionID, g *grap
 		timeoutZSetKey(t, id),
 	}
 	if g != nil {
+		// The counter triplet is keyed by UNIT index, but the loop walks node
+		// indices. That is safe because UnitCount <= NodeCount — a supply node
+		// takes a node index and no unit, and a group collapses many nodes into
+		// one unit — so 0..NodeCount-1 is a superset of every unit key and the
+		// surplus iterations are no-ops. It would under-delete only if a unit
+		// index could exceed every node index, which the unit builder forbids.
 		for i := 0; i < g.NodeCount(); i++ {
 			node := g.NodeAt(i)
 			keys = append(keys,

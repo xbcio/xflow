@@ -286,6 +286,9 @@ func (s *Store) cleanupCreatedExecution(ctx context.Context, e *engine.Execution
 		timeoutZSetKey(t, e.ID),
 	)
 	if e.Graph != nil {
+		// Same superset argument as the TTL-shortening walk in state.go: the
+		// counter keys are unit-indexed while this loop walks node indices, and
+		// UnitCount <= NodeCount makes the node range cover every unit key.
 		for i := 0; i < e.Graph.NodeCount(); i++ {
 			node := e.Graph.NodeAt(i)
 			pipe.Del(ctx,

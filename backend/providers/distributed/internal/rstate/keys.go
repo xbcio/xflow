@@ -60,8 +60,8 @@ func failedNodesKey(t namespace.Namespace, id types.ExecutionID) string {
 func advanceMarkerKey(t namespace.Namespace, id types.ExecutionID, name string, activationID int) string {
 	return execKey(t, id, fmt.Sprintf("node:%s:advance:%d", name, activationID))
 }
-func scheduleKey(t namespace.Namespace, id types.ExecutionID, nodeIdx int) string {
-	return execKey(t, id, fmt.Sprintf("schedule:%d", nodeIdx))
+func scheduleKey(t namespace.Namespace, id types.ExecutionID, unitIdx int) string {
+	return execKey(t, id, fmt.Sprintf("schedule:%d", unitIdx))
 }
 func outboxReadyKey(t namespace.Namespace, id types.ExecutionID) string {
 	return execKey(t, id, "outbox:ready")
@@ -131,12 +131,12 @@ func signalBatchKey(t namespace.Namespace, id types.ExecutionID, nodeName string
 	return fmt.Sprintf("xflow:ns:%s:exec:{%s}:node:%s:signals", t, id, nodeName)
 }
 
-func inDegreeKey(t namespace.Namespace, id types.ExecutionID, nodeIdx int) string {
-	return fmt.Sprintf("xflow:ns:%s:exec:{%s}:indegree:%d", t, id, nodeIdx)
+func inDegreeKey(t namespace.Namespace, id types.ExecutionID, unitIdx int) string {
+	return fmt.Sprintf("xflow:ns:%s:exec:{%s}:indegree:%d", t, id, unitIdx)
 }
 
-func activeInputsKey(t namespace.Namespace, id types.ExecutionID, nodeIdx int) string {
-	return fmt.Sprintf("xflow:ns:%s:exec:{%s}:active_inputs:%d", t, id, nodeIdx)
+func activeInputsKey(t namespace.Namespace, id types.ExecutionID, unitIdx int) string {
+	return fmt.Sprintf("xflow:ns:%s:exec:{%s}:active_inputs:%d", t, id, unitIdx)
 }
 
 func resumeLockKey(t namespace.Namespace, id types.ExecutionID, name string) string {
