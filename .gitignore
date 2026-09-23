@@ -114,3 +114,17 @@ data/
 # 文件路径、按接口算的丢失率。这是公开仓库，这类记录的归宿是内部，不是这里。
 # 路径带斜杠，所以只匹配仓库根下的这一个文件，不会像裸词那样吞掉同名目录。
 docs/xflow-verification-findings.md
+
+# 编排工具的运行时状态。这些目录在每次工具调用后都会被改写（session id、
+# tool-error 状态、限流计数、goal 账本），不是源码；它们此前没有被忽略，
+# 所以一次 git add -A 会把它们连同新目录一起卷进来。深度不限，因为 web/
+# 与各 package 下同样会出现 .omc。
+**/.omc/*
+.omx/
+.swork/
+# Umi 的构建缓存，理由同上面的 pnpm store。
+.umi/
+
+# 唯一的例外：项目级 skill 是刻意入库的（见 CLAUDE.md 的 worktree_paths）。
+!/.omc/skills/
+!/.omc/skills/**
