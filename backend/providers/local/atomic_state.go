@@ -668,8 +668,13 @@ func memoryNodeKey(id types.ExecutionID, name string) string {
 	return string(id) + "/" + name
 }
 
-func memoryCounterKey(id types.ExecutionID, nodeIdx int) string {
-	return fmt.Sprintf("%s/%d", id, nodeIdx)
+// memoryCounterKey names the in-degree / active-input / schedule counter triplet
+// for one durable unit. It is keyed by the UNIT index, not the node index: a
+// supply node occupies a node index but no unit, so the two diverge for every
+// node after one. Naming the parameter nodeIdx here is how the skip-cascade
+// guard came to read the wrong key.
+func memoryCounterKey(id types.ExecutionID, unitIdx int) string {
+	return fmt.Sprintf("%s/%d", id, unitIdx)
 }
 
 func memoryAdvanceKey(id types.ExecutionID, name string, activationID int) string {
