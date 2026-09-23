@@ -284,8 +284,8 @@ func (s *nonAtomicState) ListExpiredLeases(ctx context.Context, before time.Time
 func (s *nonAtomicState) RevokeLease(ctx context.Context, id types.ExecutionID, name string, token LeaseToken) (bool, error) {
 	return s.fakeState.RevokeLease(ctx, id, name, token)
 }
-func (s *nonAtomicState) DecrementInDegree(ctx context.Context, id types.ExecutionID, nodeIdx int, portActive bool) (int, int, error) {
-	return s.fakeState.DecrementInDegree(ctx, id, nodeIdx, portActive)
+func (s *nonAtomicState) DecrementInDegree(ctx context.Context, id types.ExecutionID, unitIdx int, portActive bool) (int, int, error) {
+	return s.fakeState.DecrementInDegree(ctx, id, unitIdx, portActive)
 }
 func (s *nonAtomicState) CheckCompletion(ctx context.Context, id types.ExecutionID, totalNodes int) (bool, bool, error) {
 	return s.fakeState.CheckCompletion(ctx, id, totalNodes)

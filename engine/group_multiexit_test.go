@@ -185,10 +185,10 @@ func (s *drivingState) ClaimTaskLease(_ context.Context, lease *TaskLease) (*Nod
 	return &cp, true, nil
 }
 
-func (s *drivingState) DecrementInDegree(_ context.Context, id types.ExecutionID, nodeIdx int, portActive bool) (int, int, error) {
+func (s *drivingState) DecrementInDegree(_ context.Context, id types.ExecutionID, unitIdx int, portActive bool) (int, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	key := drivingKey(id, nodeIdx)
+	key := drivingKey(id, unitIdx)
 	s.inDegrees[key]--
 	if portActive {
 		s.activeIns[key]++

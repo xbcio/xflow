@@ -19,8 +19,8 @@ type fakeState struct {
 	mu             sync.Mutex
 	executions     map[types.ExecutionID]*ExecutionSnapshot
 	nodes          map[string]*NodeSnapshot // key: execID+"/"+name
-	inDegrees      map[string]int           // key: execID+"/"+nodeIdx
-	activeIns      map[string]int           // key: execID+"/"+nodeIdx (count of active arrivals)
+	inDegrees      map[string]int           // key: execID+"/"+unitIdx
+	activeIns      map[string]int           // key: execID+"/"+unitIdx (count of active arrivals)
 	outputs        map[string]map[string]any
 	suspended      map[string]*types.SuspendSpec // key: execID+"/"+nodeName
 	signals        map[string]map[string]any     // pre-delivered signals: key: execID+"/"+signalName
@@ -286,10 +286,10 @@ func (f *fakeState) ClaimTaskLease(_ context.Context, lease *TaskLease) (*NodeSn
 	return cloneNodeSnapshot(&cp), true, nil
 }
 
-func (f *fakeState) DecrementInDegree(_ context.Context, id types.ExecutionID, nodeIdx int, portActive bool) (int, int, error) {
+func (f *fakeState) DecrementInDegree(_ context.Context, id types.ExecutionID, unitIdx int, portActive bool) (int, int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	key := fmt.Sprintf("%s/%d", id, nodeIdx)
+	key := fmt.Sprintf("%s/%d", id, unitIdx)
 	f.inDegrees[key]--
 	if portActive {
 		f.activeIns[key]++

@@ -55,7 +55,7 @@ type Nodes interface {
 
 // Scheduling stores DAG scheduling counters and completion state.
 type Scheduling interface {
-	DecrementInDegree(ctx context.Context, id types.ExecutionID, nodeIdx int, portActive bool) (remainingInDeg, arrivedActiveIn int, err error)
+	DecrementInDegree(ctx context.Context, id types.ExecutionID, unitIdx int, portActive bool) (remainingInDeg, arrivedActiveIn int, err error)
 	CheckCompletion(ctx context.Context, id types.ExecutionID, totalNodes int) (allDone bool, hasFailed bool, err error)
 }
 

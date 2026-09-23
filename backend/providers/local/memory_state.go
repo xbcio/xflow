@@ -18,8 +18,8 @@ type memoryState struct {
 	mu         sync.Mutex
 	executions map[types.ExecutionID]*execEntry
 	nodes      map[string]*engine.NodeSnapshot // key: execID+"/"+name
-	inDegrees  map[string]int                  // key: execID+"/"+nodeIdx
-	activeIns  map[string]int                  // key: execID+"/"+nodeIdx
+	inDegrees  map[string]int                  // key: execID+"/"+unitIdx
+	activeIns  map[string]int                  // key: execID+"/"+unitIdx
 	remaining  map[types.ExecutionID]int
 	failed     map[types.ExecutionID]int
 	advanced   map[string]bool
@@ -681,10 +681,10 @@ func (s *memoryState) SuspendTaskLeaseWithOutbox(ctx context.Context, lease *eng
 // Scheduling counters
 // ---------------------------------------------------------------------------
 
-func (s *memoryState) DecrementInDegree(_ context.Context, id types.ExecutionID, nodeIdx int, portActive bool) (int, int, error) {
+func (s *memoryState) DecrementInDegree(_ context.Context, id types.ExecutionID, unitIdx int, portActive bool) (int, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	key := fmt.Sprintf("%s/%d", id, nodeIdx)
+	key := fmt.Sprintf("%s/%d", id, unitIdx)
 	s.inDegrees[key]--
 	if portActive {
 		s.activeIns[key]++

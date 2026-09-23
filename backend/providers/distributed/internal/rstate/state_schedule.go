@@ -8,7 +8,7 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-func (s *Store) DecrementInDegree(ctx context.Context, id types.ExecutionID, nodeIdx int, portActive bool) (int, int, error) {
+func (s *Store) DecrementInDegree(ctx context.Context, id types.ExecutionID, unitIdx int, portActive bool) (int, int, error) {
 	activeFlag := 0
 	if portActive {
 		activeFlag = 1
@@ -16,13 +16,13 @@ func (s *Store) DecrementInDegree(ctx context.Context, id types.ExecutionID, nod
 	ttl := int(s.getExecTTL(ctx, id).Seconds())
 	t := namespace.FromContext(ctx)
 	vals, err := propagateLua.Run(ctx, s.rdb,
-		[]string{inDegreeKey(t, id, nodeIdx), activeInputsKey(t, id, nodeIdx)},
+		[]string{inDegreeKey(t, id, unitIdx), activeInputsKey(t, id, unitIdx)},
 		activeFlag, ttl,
 	).Int64Slice()
 	if err != nil {
 		return 0, 0, fmt.Errorf("propagate lua: %w", err)
 	}
-	if err := s.refreshTransientTTL(ctx, id, inDegreeKey(t, id, nodeIdx), activeInputsKey(t, id, nodeIdx)); err != nil {
+	if err := s.refreshTransientTTL(ctx, id, inDegreeKey(t, id, unitIdx), activeInputsKey(t, id, unitIdx)); err != nil {
 		return 0, 0, err
 	}
 	return int(vals[0]), int(vals[1]), nil
