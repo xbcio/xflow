@@ -54,9 +54,21 @@ type OutboxEntry struct {
 // request must match the active lease; system requests are used only by the
 // internal skip cascade after its scheduling marker was persisted.
 type CommitNodeRequest struct {
-	ExecutionID  types.ExecutionID
-	NodeName     string
-	NodeIdx      int
+	ExecutionID types.ExecutionID
+	NodeName    string
+	NodeIdx     int
+	// UnitIdx is the durable scheduling unit this node belongs to, and the key
+	// the backend stores its scheduling marker, in-degree and active-input
+	// counters under. It is not NodeIdx: a unit collapses every node of a group
+	// body, and a declaration-only node (supply) takes a node index while having
+	// no unit at all, so the two diverge for any definition that declares one.
+	//
+	// A system commit must resolve the marker by this field. Reading it by
+	// NodeIdx resolves a neighbouring unit instead — and because the marker
+	// resolves to "execute" rather than "skip", the backend refuses the commit,
+	// the skip cascade drops it, and the branch's units never terminalize, so the
+	// execution stays running with every node it did run reporting success.
+	UnitIdx      int
 	ActivationID int
 	AutoDepth    int
 	LeaseID      LeaseID
@@ -687,6 +699,7 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 			ExecutionID:   task.ExecutionID,
 			NodeName:      task.NodeName,
 			NodeIdx:       task.NodeIdx,
+			UnitIdx:       task.UnitIdx,
 			ActivationID:  task.ActivationID,
 			AutoDepth:     task.AutoDepth,
 			Status:        types.NodeStatusSkipped,

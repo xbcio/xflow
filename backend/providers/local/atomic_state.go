@@ -75,7 +75,13 @@ func (s *memoryState) CommitNode(_ context.Context, req engine.CommitNodeRequest
 	}
 
 	if req.System {
-		if s.scheduled[memoryCounterKey(req.ExecutionID, req.NodeIdx)] != "skip" {
+		// UnitIdx, not NodeIdx: the scheduling marker lives in the unit-indexed
+		// counter space, which is what AdvanceNode writes and what a supply node
+		// shifts NodeIdx away from. The two coincided for every definition without
+		// a declaration-only node, so reading NodeIdx here silently refused the
+		// cascade — and a refused system commit is reported as handled, so the
+		// intent was acked and dropped instead of the branch being consumed.
+		if s.scheduled[memoryCounterKey(req.ExecutionID, req.UnitIdx)] != "skip" {
 			return engine.CommitNodeResult{Outcome: engine.CommitOutcomeStaleToken}, nil
 		}
 		if current != nil && current.Status != types.NodeStatusPending {

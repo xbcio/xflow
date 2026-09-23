@@ -213,7 +213,14 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 		leaseExpiryZSetKey(t, req.ExecutionID),
 		outboxReadyKey(t, req.ExecutionID),
 		outboxBodyKey(t, req.ExecutionID),
-		scheduleKey(t, req.ExecutionID, req.NodeIdx),
+		// KEYS[11]: the scheduling marker the system/skip guard resolves. It is
+		// unit-indexed, matching what AdvanceNode wrote (in-degree, active-input
+		// and schedule are all one counter space). NodeIdx is not a substitute --
+		// it is shifted by every declaration-only node the definition declares,
+		// so reading it here resolved a neighbouring unit's marker, refused the
+		// skip, and left the execution running with every executed node reporting
+		// success.
+		scheduleKey(t, req.ExecutionID, req.UnitIdx),
 		// KEYS[12]: re-EXPIREd by the script so the per-execution transient
 		// marker cannot lapse while the execution is still committing. See the
 		// note in commitNodeLua — a lapsed marker makes a transient execution

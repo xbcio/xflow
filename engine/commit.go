@@ -298,6 +298,7 @@ func (e *Engine) commitLegacyNodeWithClassification(ctx context.Context, lease *
 		ExecutionID:   task.ExecutionID,
 		NodeName:      task.NodeName,
 		NodeIdx:       task.NodeIdx,
+		UnitIdx:       task.UnitIdx,
 		ActivationID:  task.ActivationID,
 		AutoDepth:     task.AutoDepth,
 		LeaseID:       lease.LeaseID,
