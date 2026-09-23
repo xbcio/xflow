@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"sync"
 
 	"github.com/xbcio/xflow/backend"
@@ -201,6 +202,22 @@ func (e *Engine) Stop() {
 			e.stopFns[i]()
 		}
 	})
+}
+
+// WebhookHandler returns the http.Handler that serves the routes this engine's
+// xflow.trigger.webhook nodes registered, or nil when the engine owns no
+// trigger runtime (a non-owning Server facade does not).
+//
+// A host embedding the engine must mount the result on its own listener.
+// Nothing else mounts it: the control-plane API has no webhook route, and a
+// remote-hosted runner's trigger runtime fails closed on webhooks, so without
+// this call a webhook workflow activates successfully and then never receives a
+// request — the trigger's route exists but is unreachable.
+func (e *Engine) WebhookHandler() http.Handler {
+	if e == nil || e.triggerRuntime == nil || e.triggerRuntime.webhooks == nil {
+		return nil
+	}
+	return e.triggerRuntime.webhooks
 }
 
 func cfgAllowsDirectHandlers(e *Engine) bool {
