@@ -160,6 +160,7 @@ nodes:
   - name: route_by_amount
     type: xflow.switch
     parameters:
+      mode: rules
       outputs: [level_1, level_2, level_3]
       rules:
         - condition: "$params.amount < $vars.approval_levels.level_1_max"
@@ -277,6 +278,7 @@ nodes:
   - name: l3_final_check
     type: xflow.switch
     parameters:
+      mode: rules
       outputs: [approved, rejected]
       rules:
         - condition: "$nodes['l3_parallel_merge'].vp.action == 'approved' && $nodes['l3_parallel_merge'].finance.action == 'approved'"
