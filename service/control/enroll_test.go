@@ -348,9 +348,10 @@ func TestHTTPTransportInfoCarriesSourceIP(t *testing.T) {
 }
 
 func TestEnrollRejectsEmptySourceIP(t *testing.T) {
-	// Not a hypothetical: TransportInfo has three construction sites and only
-	// the HTTP runner face populates SourceIP. If enroll is ever wired onto
-	// another one, this must fail loudly instead of silently sharing a bucket.
+	// Not a hypothetical: TransportInfo has four construction sites (HTTP, gRPC,
+	// the apiserver's HTTP mirror, and the in-process client) and only the HTTP
+	// faces populate SourceIP. If enroll is ever wired onto another one, this must
+	// fail loudly instead of silently sharing a bucket.
 	core, _, _, plaintext := enrollFixture(t, []string{"sas"}, []string{"*"})
 	_, err := core.Enroll(context.Background(), protocol.EnrollRequest{
 		RegistrationCode: plaintext,

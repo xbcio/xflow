@@ -188,7 +188,7 @@ func bearerToken(r *http.Request) string {
 // deliberately untrusted. Plaintext HTTP has empty TLS fields so an
 // mTLS-bound policy correctly refuses.
 func httpTransportInfoFromRequest(r *http.Request) control.TransportInfo {
-	info := control.TransportInfo{SourceIP: sourceIPFromRequest(r)}
+	info := control.TransportInfo{Kind: control.TransportKindHTTP, SourceIP: sourceIPFromRequest(r)}
 	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 		return info
 	}

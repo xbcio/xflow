@@ -30,14 +30,15 @@
 // four required methods (Register, Heartbeat, Poll, ReportResult) and several
 // optional capabilities detected via type assertion at startup:
 //
-//   - leaseRenewClient (RenewLease) — HTTP client only; gRPC client does not
-//     implement it, so gRPC-transport runners never renew leases and rely on the
-//     server-side sweeper for reclaim after a crash.
-//   - MetricsReportClient (ReportMetrics) — HTTP client only; allows the runner
-//     to proxy its Prometheus registry through the server when cross-domain
-//     scraping is not possible.
-//   - activationAckClient (ActivationAck) — HTTP client only; sends a negative
-//     ack when an ActivateDirective could not be applied.
+//   - leaseRenewClient (RenewLease) — the HTTP and in-process clients implement
+//     it; the gRPC client does not, so gRPC-transport runners never renew leases
+//     and rely on the server-side sweeper for reclaim after a crash.
+//   - MetricsReportClient (ReportMetrics) — the HTTP and in-process clients
+//     implement it; allows the runner to proxy its Prometheus registry through
+//     the server when cross-domain scraping is not possible.
+//   - activationAckClient (ActivationAck) — the HTTP and in-process clients
+//     implement it; sends a negative ack when an ActivateDirective could not be
+//     applied.
 //
 // The runner does NOT import redis, asynq, or any storage driver. Any
 // connectivity it needs is satisfied by a custom *http.Client passed at

@@ -32,6 +32,7 @@ import (
 	kafkatrigger "github.com/xbcio/xflow/node/trigger/kafka"
 	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/observability/tracing"
+	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/protocol"
 	runnersvc "github.com/xbcio/xflow/service/runner"
 	"github.com/xbcio/xflow/store"
@@ -43,6 +44,11 @@ import (
 const (
 	RunnerTransportHTTP = "http"
 	RunnerTransportGRPC = "grpc"
+	// RunnerTransportInProc dispatches the runner protocol straight into an
+	// embedded control plane in this process, with no HTTP or gRPC hop. It
+	// requires WithRunnerControlPlane; omitting that fails NewRunner rather than
+	// silently falling back to HTTP.
+	RunnerTransportInProc = "inproc"
 )
 
 // Cache bounds, shared by the group-package and map-body caches. A package
@@ -59,13 +65,19 @@ var newRunnerResourcePool = resource.NewDefaultResourcePool
 // RunnerConfig configures an embedded xflow runner. ServerURL is the only
 // required field; everything else has a working default.
 type RunnerConfig struct {
-	// ServerURL is the control plane's HTTP origin. Required even under the
-	// gRPC transport: entry seeding and artifact fetch are always HTTP
-	// round-trips to this origin.
+	// ServerURL is the control plane's HTTP origin. Required under the HTTP and
+	// gRPC transports: entry seeding and artifact fetch are always HTTP
+	// round-trips to this origin. Under RunnerTransportInProc it may be empty —
+	// the runner protocol no longer needs an origin — but any capability that
+	// does reach the control plane over HTTP (hosted triggers seeding entries,
+	// script/map artifact fetch) still requires it, so leaving it unset is only
+	// valid for a runner that declares neither. See RunnerConfig.Transport.
 	ServerURL string
 
-	// Transport selects the Runner Protocol channel, RunnerTransportHTTP
-	// (default) or RunnerTransportGRPC. GRPCTarget is required for the latter.
+	// Transport selects the Runner Protocol channel: RunnerTransportHTTP
+	// (default), RunnerTransportGRPC, or RunnerTransportInProc. GRPCTarget is
+	// required for the gRPC transport; WithRunnerControlPlane is required for
+	// the in-process one.
 	Transport  string
 	GRPCTarget string
 
@@ -202,6 +214,9 @@ type runnerOptions struct {
 	artifactResolver  func(ctx context.Context, digest string) ([]byte, error)
 	nodeRegistry      *execution.Registry
 	lifecycleObserver runnersvc.LifecycleObserver
+	// controlPlane is the embedded control plane an in-process runner
+	// dispatches into. Nil unless WithRunnerControlPlane was supplied.
+	controlPlane *control.Server
 }
 
 // RunnerOption configures a Runner.
@@ -257,6 +272,20 @@ func WithRunnerLifecycleObserver(o runnersvc.LifecycleObserver) RunnerOption {
 	return func(opts *runnerOptions) { opts.lifecycleObserver = o }
 }
 
+// WithRunnerControlPlane supplies the embedded control plane an in-process
+// runner dispatches into. It is required when RunnerConfig.Transport is
+// RunnerTransportInProc and unused by the HTTP and gRPC transports.
+//
+// srv is the runner-protocol server of an embedded control plane — for a host
+// that built one with xflow.NewServer, that is Server.ControlServer(). An
+// embedded host holds the control plane as a Go value and needs no client
+// pointed at itself; without this the only way to reach its own protocol is a
+// loopback HTTP call, which is a failure surface (see the loopback i/o timeout
+// this transport exists to remove).
+func WithRunnerControlPlane(srv *control.Server) RunnerOption {
+	return func(opts *runnerOptions) { opts.controlPlane = srv }
+}
+
 // Runner is an embeddable xflow execution-plane runner. It connects to a
 // control plane, claims leases for its advertised node types, executes them
 // with the handlers registered in this process, and reports results.
@@ -287,7 +316,17 @@ type Runner struct {
 //	defer r.Close()
 //	return r.Run(ctx)
 func NewRunner(cfg RunnerConfig, opts ...RunnerOption) (*Runner, error) {
-	if strings.TrimSpace(cfg.ServerURL) == "" {
+	// ServerURL is the origin for every HTTP round-trip the runner makes to the
+	// control plane (entry seeding, artifact fetch). The in-process transport
+	// removes the runner-protocol round-trip but not those, so an empty
+	// ServerURL is only permitted under it, and only for a runner that declares
+	// no capability needing them — see the guarded warning in
+	// wireRunnerTriggerHosting and the artifact resolver, which still build an
+	// empty-origin HTTP client that fails at first use. Leaving ServerURL unset
+	// with a hosted trigger or a script/map capability is therefore a
+	// configuration error the runner reports at use time, not one this gate can
+	// see without duplicating the capability analysis.
+	if strings.TrimSpace(cfg.ServerURL) == "" && cfg.Transport != RunnerTransportInProc {
 		return nil, fmt.Errorf("xflow: RunnerConfig.ServerURL is required: it is the " +
 			"control plane server origin for leases, entry seeding, and artifact fetch")
 	}
@@ -309,7 +348,7 @@ func NewRunner(cfg RunnerConfig, opts ...RunnerOption) (*Runner, error) {
 		}
 	}()
 
-	client, cleanup, err := newRunnerProtocolClient(cfg)
+	client, cleanup, err := newRunnerProtocolClient(cfg, o)
 	if err != nil {
 		return nil, err
 	}
@@ -700,6 +739,16 @@ func wireRunnerTriggerHosting(svcCfg *runnersvc.Config, cfg RunnerConfig, o *run
 	}
 	seedBaseURL := runnerSeedBaseURL(cfg)
 	if seedBaseURL == "" {
+		// This runner advertises a trigger but has no control-plane origin to
+		// seed entries through. Only RunnerTransportInProc permits an empty
+		// ServerURL (NewRunner rejects it elsewhere), so this is an in-process
+		// runner that declared a trigger capability without a seed origin.
+		// Trigger hosting is skipped, and a skipped trigger is indistinguishable
+		// from a quiet one from the outside — so say so rather than degrade in
+		// silence. Entry seeding is still an HTTP round-trip; closing it in
+		// process (the way the runner protocol was) is a separate change.
+		o.logger.Warn("runner declares a trigger capability but has no control-plane origin to seed entries through; trigger hosting is disabled",
+			"capabilities", cfg.Capabilities)
 		return nil
 	}
 	// The seed client timeout is deliberately larger than the per-request
@@ -1015,7 +1064,20 @@ func runnerSeedBaseURL(cfg RunnerConfig) string {
 	return strings.TrimRight(cfg.ServerURL, "/")
 }
 
-func newRunnerProtocolClient(cfg RunnerConfig) (runnersvc.ProtocolClient, func(), error) {
+func newRunnerProtocolClient(cfg RunnerConfig, o *runnerOptions) (runnersvc.ProtocolClient, func(), error) {
+	if cfg.Transport == RunnerTransportInProc {
+		if o.controlPlane == nil {
+			return nil, nil, fmt.Errorf("xflow: RunnerConfig.Transport is %q but no control plane was supplied: "+
+				"pass WithRunnerControlPlane (a host built on xflow.NewServer uses Server.ControlServer()); "+
+				"falling back to HTTP would silently reintroduce the loopback the in-process transport removes",
+				RunnerTransportInProc)
+		}
+		// No TLS material is consulted: there is no connection to secure, and a
+		// runner-proc TLS config here would be a misconfiguration, not a
+		// transport option. The token is the only credential, carried the way the
+		// wire transports carry it (see control.InProcessRunnerClient).
+		return o.controlPlane.InProcessRunnerClient(cfg.Token), func() {}, nil
+	}
 	tlsCfg, err := buildRunnerTLSConfig(cfg)
 	if err != nil {
 		return nil, nil, err
@@ -1118,6 +1180,15 @@ func NewRunnerHTTPClient(cfg RunnerConfig, timeout time.Duration) (*http.Client,
 // newRunnerArtifactResolver builds the digest -> script bytes resolver every
 // script execution path shares: a read-through cache serving from local disk
 // and falling back to GET /v1/artifacts/{digest} on the control plane.
+//
+// The fallback is an HTTP round-trip, so under RunnerTransportInProc with an
+// empty ServerURL the origin below is empty and the fallback fails at first
+// use. Only a runner that declares no script/map capability avoids it —
+// those are the only nodes that resolve artifacts. Closing this in process
+// (serving guest bytes straight from the embedded artifact store, the way the
+// seed fetch must also be closed) is a separate change; until then an in-process
+// runner that does reach a script node needs ServerURL set, and picking the
+// transport does not by itself make it self-contained.
 //
 // One instance, three consumers — the dispatcher, the group runtime, and the
 // subgraph runtime. The latter two build their own inner backends per attempt,

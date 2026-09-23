@@ -709,6 +709,17 @@ func (s *Server) Handler() http.Handler { return s.api.Handler() }
 // configuring HTTP authentication on Server.
 func (s *Server) Engine() *Engine { return s.sdkEngine }
 
+// ControlServer returns this embedded server's runner-protocol server. Pair it
+// with WithRunnerControlPlane to run an embedded runner over the in-process
+// transport instead of loopback HTTP:
+//
+//	srv, err := xflow.NewServer(...)
+//	r, err := xflow.NewRunner(xflow.RunnerConfig{Transport: xflow.RunnerTransportInProc},
+//		xflow.WithRunnerControlPlane(srv.ControlServer()))
+//
+// It does not transfer lifecycle ownership; Server remains the lifecycle owner.
+func (s *Server) ControlServer() *control.Server { return s.api.ControlServer() }
+
 // Start begins dispatching queued tasks to runners and starts background
 // maintenance (lease sweeping, leader election, audit reconciliation). Does not
 // block.

@@ -57,7 +57,7 @@ func TestNewRunnerCompletesAHandDeclaredGroupCapability(t *testing.T) {
 // way its metrics are ever seen. An embedded runner has exactly that shape more
 // often than the CLI one does.
 func TestNewRunnerBuildsTheMetricsReporterWhenAsked(t *testing.T) {
-	client, cleanup, err := newRunnerProtocolClient(RunnerConfig{ServerURL: "http://server:8080"})
+	client, cleanup, err := newRunnerProtocolClient(RunnerConfig{ServerURL: "http://server:8080"}, runnerOptionsFrom(nil))
 	if err != nil {
 		t.Fatalf("newRunnerProtocolClient: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestNewRunnerBuildsTheMetricsReporterWhenAsked(t *testing.T) {
 // report must not refuse to start: that turns a merely ineffective config into
 // an outage. Only the HTTP client implements MetricsReportClient.
 func TestNewRunnerSkipsTheMetricsReporterWhenItCannotReport(t *testing.T) {
-	httpClient, cleanupHTTP, err := newRunnerProtocolClient(RunnerConfig{ServerURL: "http://server:8080"})
+	httpClient, cleanupHTTP, err := newRunnerProtocolClient(RunnerConfig{ServerURL: "http://server:8080"}, runnerOptionsFrom(nil))
 	if err != nil {
 		t.Fatalf("newRunnerProtocolClient: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestNewRunnerSkipsTheMetricsReporterWhenItCannotReport(t *testing.T) {
 		Transport:  RunnerTransportGRPC,
 		GRPCTarget: "server:9090",
 	}
-	grpcClient, cleanupGRPC, err := newRunnerProtocolClient(grpcCfg)
+	grpcClient, cleanupGRPC, err := newRunnerProtocolClient(grpcCfg, runnerOptionsFrom(nil))
 	if err != nil {
 		t.Fatalf("newRunnerProtocolClient(grpc): %v", err)
 	}
@@ -121,7 +121,7 @@ func TestNewRunnerSkipsTheMetricsReporterWhenItCannotReport(t *testing.T) {
 // that reports on a different cadence than configured is worse than one that
 // refuses the config outright.
 func TestNewRunnerRejectsABadMetricsReportInterval(t *testing.T) {
-	client, cleanup, err := newRunnerProtocolClient(RunnerConfig{ServerURL: "http://server:8080"})
+	client, cleanup, err := newRunnerProtocolClient(RunnerConfig{ServerURL: "http://server:8080"}, runnerOptionsFrom(nil))
 	if err != nil {
 		t.Fatalf("newRunnerProtocolClient: %v", err)
 	}

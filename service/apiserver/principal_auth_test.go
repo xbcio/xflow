@@ -65,7 +65,11 @@ func TestContextPrincipalAuthenticatorUsesOnlyTrustedContext(t *testing.T) {
 func TestHTTPTransportInfoFromRequestUsesPeerAddress(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "127.0.0.9:43120"
-	if got := httpTransportInfoFromRequest(req).SourceIP; got != "127.0.0.9" {
+	info := httpTransportInfoFromRequest(req)
+	if info.Kind != control.TransportKindHTTP {
+		t.Fatalf("Kind = %q, want %q", info.Kind, control.TransportKindHTTP)
+	}
+	if got := info.SourceIP; got != "127.0.0.9" {
 		t.Fatalf("SourceIP = %q, want 127.0.0.9", got)
 	}
 	req.Header.Set("X-Forwarded-For", "198.51.100.7")

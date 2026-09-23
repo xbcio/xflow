@@ -667,6 +667,12 @@ func (cp *ControlPlane) RunnerHTTPHandler() protocol.RunnerHTTPHandler {
 	return cp.httpServer
 }
 
+// RunnerServer returns the runner-protocol HTTP server. It exists so an
+// embedded host can build an in-process runner transport from the same control
+// plane it serves over HTTP — see Server.InProcessRunnerClient — rather than
+// having to reach its own protocol over a loopback socket.
+func (cp *ControlPlane) RunnerServer() *Server { return cp.httpServer }
+
 // Engine returns the engine facade for control API modules (submit/invoke/
 // inspect/signal/revoke-signal/cancel). The *engine.Engine satisfies
 // control.EngineFacade, so no adapter is required.

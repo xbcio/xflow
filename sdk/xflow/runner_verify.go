@@ -50,7 +50,11 @@ type VerifyResult struct {
 // translation helpers buildRunnerServiceConfig uses. Fields added to the
 // registration reach both paths or neither.
 func VerifyRunner(ctx context.Context, cfg RunnerConfig) (VerifyResult, error) {
-	client, cleanup, err := newRunnerProtocolClient(cfg)
+	// No options: VerifyRunner is the external-runner preflight (cmd/runner), so
+	// there is no control-plane handle to pass and RunnerTransportInProc is not
+	// a meaningful transport here — newRunnerProtocolClient rejects it with a
+	// clear error rather than probing a loopback the caller never configured.
+	client, cleanup, err := newRunnerProtocolClient(cfg, runnerOptionsFrom(nil))
 	if err != nil {
 		return VerifyResult{}, err
 	}

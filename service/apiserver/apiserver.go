@@ -555,6 +555,13 @@ func (s *APIServer) Backend() backend.Provider { return s.cp.Backend() }
 // in-process composition. It does not transfer lifecycle ownership.
 func (s *APIServer) Engine() *engine.Engine { return s.cp.SchedulingCore() }
 
+// ControlServer returns the runner-protocol HTTP server of the underlying
+// control plane. An embedded host uses it to build an in-process runner
+// transport bound to the same control plane it serves — see
+// control.Server.InProcessRunnerClient and xflow.WithRunnerControlPlane. It
+// does not transfer lifecycle ownership.
+func (s *APIServer) ControlServer() *control.Server { return s.cp.RunnerServer() }
+
 // SupplyObserved returns the sink of runner-reported applied supply hashes, or
 // nil when no store.Supplies was configured. Transparent passthrough to the
 // underlying ControlPlane.

@@ -175,9 +175,14 @@ func overrideTokenFromMetadata(ctx context.Context, dst *string) {
 }
 
 // grpcTransportInfo extracts TLS peer identity for authenticators that want to
-// enforce mTLS. Returns an empty struct on plaintext connections.
+// enforce mTLS. It deliberately does not populate SourceIP, so a gRPC caller is
+// not distinguishable from a peerless HTTP one by address; authenticators that
+// must tell a local gRPC peer apart need Kind (currently the second half of the
+// gRPC story is unimplemented — a loopback-gated policy denies all gRPC runners
+// rather than admitting the local one). Returns an empty TLS identity on
+// plaintext connections.
 func grpcTransportInfo(ctx context.Context) TransportInfo {
-	info := TransportInfo{}
+	info := TransportInfo{Kind: TransportKindGRPC}
 	pr, ok := peer.FromContext(ctx)
 	if !ok || pr == nil || pr.AuthInfo == nil {
 		return info

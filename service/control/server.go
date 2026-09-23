@@ -434,7 +434,7 @@ func overrideTokenFromHeader(r *http.Request, dst *string) {
 // (empty TLS fields on plaintext HTTP so the authenticator's mTLS branch will
 // reject).
 func httpTransportInfo(r *http.Request) TransportInfo {
-	info := TransportInfo{SourceIP: sourceIPOf(r)}
+	info := TransportInfo{Kind: TransportKindHTTP, SourceIP: sourceIPOf(r)}
 	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 		return info
 	}

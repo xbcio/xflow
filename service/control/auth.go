@@ -36,10 +36,40 @@ var (
 	ErrAuthCapabilityDenied = errors.New("runner not authorized for declared capability")
 )
 
+// TransportKind names which runner-facing transport produced a request. It is
+// stamped by the server-side handler that invoked Core, never parsed from
+// request data, so an authenticator may trust it as a discriminator the same
+// way it trusts SourceIP.
+//
+// It exists because SourceIP alone cannot separate "an in-process embedded
+// runner" from "a plaintext HTTP caller whose peer address is unavailable": the
+// in-process client legitimately carries no peer address, while an HTTP caller
+// with a missing RemoteAddr is untrustworthy. An authenticator that admits a
+// local peer must key on the kind, not on an empty SourceIP.
+type TransportKind string
+
+const (
+	// TransportKindUnknown is the zero value: a caller that constructed a
+	// TransportInfo without naming its transport. Authenticators must treat it
+	// as unclassified and fail closed, not as any particular transport.
+	TransportKindUnknown TransportKind = ""
+	// TransportKindHTTP is the HTTP runner face (server.go).
+	TransportKindHTTP TransportKind = "http"
+	// TransportKindGRPC is the gRPC runner face (grpc_server.go).
+	TransportKindGRPC TransportKind = "grpc"
+	// TransportKindInProcess is the embedded runner's in-process transport:
+	// same process, no socket, no peer address, no client certificate. Its
+	// SourceIP is always empty. Note gRPC also never populates SourceIP, so an
+	// empty SourceIP alone does not identify this transport — read Kind.
+	TransportKindInProcess TransportKind = "inproc"
+)
+
 // TransportInfo carries transport-layer identity extracted by the HTTP or
 // gRPC middleware. TLSPeerCN / TLSPeerSAN are empty when TLS is not in play;
 // mTLS policies reject in that case.
 type TransportInfo struct {
+	// Kind names the transport that produced this request. See TransportKind.
+	Kind       TransportKind
 	TLSPeerCN  string
 	TLSPeerSAN []string
 	// SourceIP is the peer host with the port stripped. It is what the enroll
@@ -50,6 +80,12 @@ type TransportInfo struct {
 	// is configured to preserve the client address. Trusting a caller-supplied
 	// X-Forwarded-For here would let anyone reset their own lockout by editing
 	// a header, so it is deliberately not read.
+	//
+	// It is empty on the in-process transport (TransportKindInProcess) and on
+	// gRPC (grpcTransportInfo never sets it). It can also be empty on HTTP for
+	// a malformed or absent RemoteAddr. Because more than one transport can
+	// leave it empty, "empty SourceIP" alone must not be read as "local peer" —
+	// read Kind for that.
 	SourceIP string
 }
 
