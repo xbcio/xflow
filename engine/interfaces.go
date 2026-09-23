@@ -175,6 +175,25 @@ type ExecutionStatusReader interface {
 	GetExecutionStatus(ctx context.Context, id types.ExecutionID) (status types.ExecutionStatus, found bool, err error)
 }
 
+// ExecutionStatusBatchReader is the optional batch form of ExecutionStatusReader:
+// it answers the same activeness question for many executions in one round trip.
+//
+// It exists because both of its callers ask that question about a whole PAGE of
+// assignments and need only a yes/no per execution — the runner's claim path and
+// the dead-queued-assignment reaper — and because a page of candidates is expected
+// to be mostly dead. Asked one id at a time, a 64-entry claim page cost 64
+// sequential round trips and a 512-candidate reaper pass cost 512, so nearly the
+// entire cost of both operations was spent learning "this one is gone".
+//
+// The result is positionally aligned with ids and an empty status means "no such
+// execution" — the same absence GetExecutionStatus reports as found=false. A reader
+// that does not implement this interface is probed one id at a time by the caller,
+// so the two MUST agree per id, for the same reason GetExecutionStatus and
+// GetExecution must.
+type ExecutionStatusBatchReader interface {
+	GetExecutionStatuses(ctx context.Context, ids []types.ExecutionID) ([]types.ExecutionStatus, error)
+}
+
 // LeaseSuspender atomically converts a previously claimed lease into a
 // suspended node. It validates the original lease token, persists optional
 // resume-base output, consumes or registers signals, and clears lease expiry

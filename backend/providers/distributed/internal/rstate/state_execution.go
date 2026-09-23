@@ -510,6 +510,47 @@ func (s *Store) GetExecutionStatus(ctx context.Context, id types.ExecutionID) (t
 	return types.ExecutionStatus(val), true, nil
 }
 
+// GetExecutionStatuses answers the activeness question for a whole page of
+// executions in one round trip.
+//
+// The status key is a single GET, so this is a pipeline of GETs rather than N
+// sequential ones — the same saving GetExecution made for its eight keys, applied
+// to the one key its callers here actually need. Both of them ask it about a page
+// of assignments they have already loaded, where all but a few are expected to be
+// dead, so answering per-execution charged the caller a full round trip each time
+// to be told "gone".
+//
+// Positionally aligned with ids; an empty status means the execution has no status
+// key, which is the absence GetExecutionStatus reports as found=false.
+func (s *Store) GetExecutionStatuses(ctx context.Context, ids []types.ExecutionID) ([]types.ExecutionStatus, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	t := namespace.FromContext(ctx)
+	pipe := s.rdb.Pipeline()
+	cmds := make([]*redis.StringCmd, len(ids))
+	for i, id := range ids {
+		cmds[i] = pipe.Get(ctx, execKey(t, id, "status"))
+	}
+	// A missing key is the expected answer for a dead execution, not a failure:
+	// redis.Nil is per-command and is read off each cmd below.
+	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+		return nil, fmt.Errorf("get execution statuses: %w", err)
+	}
+	out := make([]types.ExecutionStatus, len(ids))
+	for i, cmd := range cmds {
+		val, err := cmd.Result()
+		if errors.Is(err, redis.Nil) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("get execution status %q: %w", ids[i], err)
+		}
+		out[i] = types.ExecutionStatus(val)
+	}
+	return out, nil
+}
+
 // GetExecution assembles a full snapshot from the eight per-field keys the
 // execution is stored across. They are read in one pipeline: they are
 // independent GETs of the same execution, so issuing them back to back — as

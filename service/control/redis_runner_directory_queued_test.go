@@ -267,12 +267,15 @@ func TestRedisRunnerDirectoryQueuedReapLeavesLeasedAssignmentAlone(t *testing.T)
 	const runnerID = "runner-leased-queued-reap"
 	session := registerRedisDirectoryRunner(t, ctx, directory, runnerID, 1)
 	assignment := queuedReapTestAssignment("exec-leased/node/activation-1", "exec-leased")
+	// Registered because the setup has to reach the leased state through a real
+	// claim, and ClaimForRunner refuses an assignment whose execution it cannot
+	// find: leasing that would hand a runner work with nothing left to run. What
+	// this test pins is the pass after it — the state fence, not liveness, is what
+	// keeps a 'leased' assignment out of the reaper's reach.
+	reader.set("exec-leased", types.ExecutionStatusRunning)
 	lease := redisRunnerDirectoryLeaseMetaTestLease(assignment, "lease-leased", time.Minute)
 	finalizeRedisRunnerDirectoryLeaseMetaTestAssignment(t, ctx, directory, session, assignment, lease)
 	assignmentID := string(assignment.AssignmentID)
-
-	// The execution was never registered, so only the state fence keeps this
-	// assignment out of the reaper's reach.
 	reap, err := directory.ReapDeadQueuedAssignments(ctx, 16)
 	if err != nil {
 		t.Fatalf("ReapDeadQueuedAssignments() error = %v", err)
@@ -314,6 +317,9 @@ func TestRedisRunnerDirectoryQueuedReapLeavesClaimedAssignmentAlone(t *testing.T
 	const runnerID = "runner-claimed-queued-reap"
 	session := registerRedisDirectoryRunner(t, ctx, directory, runnerID, 1)
 	assignment := queuedReapTestAssignment("exec-claimed/node/activation-1", "exec-claimed")
+	// Registered for the same reason as the leased case: the setup claims, and a
+	// claim now requires the execution to still exist.
+	reader.set("exec-claimed", types.ExecutionStatusRunning)
 	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
 	claim := claimRedisDirectoryAssignment(t, ctx, directory, session, 1)
 	assignmentID := string(assignment.AssignmentID)

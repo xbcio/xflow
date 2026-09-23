@@ -190,6 +190,22 @@ func (s *memoryState) GetExecutionStatus(_ context.Context, id types.ExecutionID
 	return entry.snap.Status, true, nil
 }
 
+// GetExecutionStatuses is the batch form of GetExecutionStatus. It exists for the
+// same reason the interface does: the callers ask about a whole page at once, and
+// a backend that answered the batch differently from the single read would make
+// activeness depend on which one the caller happened to use.
+func (s *memoryState) GetExecutionStatuses(_ context.Context, ids []types.ExecutionID) ([]types.ExecutionStatus, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]types.ExecutionStatus, len(ids))
+	for i, id := range ids {
+		if entry, ok := s.executions[id]; ok {
+			out[i] = entry.snap.Status
+		}
+	}
+	return out, nil
+}
+
 func (s *memoryState) LoadGraph(_ context.Context, id types.ExecutionID) (*graph.Graph, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

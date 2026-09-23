@@ -563,6 +563,17 @@ func (d *RedisRunnerDirectory) claimFromQueuePage(
 		return Claim{}, false, false, fmt.Errorf("read redis assignments: %w", err)
 	}
 
+	// Resolve the whole page before claiming anything. The eligibility filters used
+	// to run inside the claim loop, which made their cost invisible; hoisting them
+	// out is what lets the liveness question below be asked once for the page
+	// instead of once per attempt.
+	type claimCandidate struct {
+		assignmentID string
+		raw          string
+		assignment   Assignment
+	}
+	candidates := make([]claimCandidate, 0, len(assignmentIDs))
+	assignments := make([]Assignment, 0, len(assignmentIDs))
 	for i, assignmentID := range assignmentIDs {
 		raw, _ := raws[i].(string)
 		if raw == "" {
@@ -583,16 +594,51 @@ func (d *RedisRunnerDirectory) claimFromQueuePage(
 		if rs := assignment.Routing.RunnerSelector; rs != nil && !MatchLabels(labels, rs.MatchLabels) {
 			continue
 		}
+		candidates = append(candidates, claimCandidate{assignmentID: assignmentID, raw: raw, assignment: assignment})
+		assignments = append(assignments, assignment)
+	}
+	if len(candidates) == 0 {
+		d.storeClaimCursor(req.RunnerID, nextClaimCursor(cursor, len(assignmentIDs), int(total)))
+		return Claim{}, false, false, nil
+	}
 
+	// Drop the assignments whose execution is already gone before claiming any of
+	// them. Claiming one is not a no-op: it runs an entire Lua transition, allocates
+	// a claim slot, and is then walked back by finalize/release when the dispatch
+	// finds nothing to run. On a queue whose head has outlived its executions that
+	// is nearly all of the page, so the claim path spent its whole budget
+	// materializing leases for work that no longer existed — which is both wasted
+	// work and, because a claim resets the resume cursor, the reason a live entry
+	// further down the queue was never reached at all.
+	//
+	// Removal stays with the dead-queued reaper: it owns the atomic transitions
+	// (queue, seen set, claim maps) and a wrong removal here would lose work.
+	leaseable, err := d.leaseableExecutions(ctx, assignments)
+	if err != nil {
+		return Claim{}, false, false, err
+	}
+
+	for _, c := range candidates {
+		if !leaseable[c.assignment.Task.ExecutionID] {
+			continue
+		}
 		claimID := ClaimID(uuid.NewString())
-		status, err := d.claim(ctx, req.RunnerID, req.SessionID, assignmentID, raw, claimID)
+		status, err := d.claim(ctx, req.RunnerID, req.SessionID, c.assignmentID, c.raw, claimID)
 		if err != nil {
 			return Claim{}, false, false, err
 		}
 		switch status {
 		case "claimed":
-			d.storeClaimCursor(req.RunnerID, 0)
-			return Claim{ClaimID: claimID, Assignment: assignment}, true, true, nil
+			// The cursor is deliberately NOT reset to the head here. It used to be,
+			// so that an element shifted left by a concurrent LREM could not be
+			// stranded — but a claim removes the entry the cursor points at, so
+			// leaving it where it is already names the next entry, and the
+			// wrap-to-head on an exhausted page still revisits anything skipped by a
+			// shift. Resetting instead sent every poll back over the same prefix:
+			// with a page of dead assignments in front of the live ones, each poll
+			// re-walked that whole prefix before it could claim anything, and an
+			// unadvanced cursor cannot step over a prefix the way a skipped page can.
+			return Claim{ClaimID: claimID, Assignment: c.assignment}, true, true, nil
 		case "retry":
 			continue
 		case "none", "draining":
@@ -608,12 +654,20 @@ func (d *RedisRunnerDirectory) claimFromQueuePage(
 	// Nothing on this page was claimable. Wrap to the head at end-of-queue or
 	// once the cursor has passed the length sampled at entry; otherwise resume
 	// from the next page on the following poll.
-	next := cursor + len(assignmentIDs)
-	if len(assignmentIDs) < redisClaimQueuePage || next >= int(total) {
+	d.storeClaimCursor(req.RunnerID, nextClaimCursor(cursor, len(assignmentIDs), int(total)))
+	return Claim{}, false, false, nil
+}
+
+// nextClaimCursor is where the following poll resumes. A short (end-of-queue) page
+// or a cursor that has passed the length sampled at entry wraps to the head, so a
+// position skipped by a concurrent removal is revisited on the next sweep rather
+// than stranded.
+func nextClaimCursor(cursor, pageLen, total int) int {
+	next := cursor + pageLen
+	if pageLen < redisClaimQueuePage || next >= total {
 		next = 0
 	}
-	d.storeClaimCursor(req.RunnerID, next)
-	return Claim{}, false, false, nil
+	return next
 }
 
 func (d *RedisRunnerDirectory) loadClaimCursor(runnerID string) int {

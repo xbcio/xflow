@@ -6,6 +6,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
@@ -14,14 +15,25 @@ import (
 // many assignments are removed and, through the scan and inspect caps below,
 // how much of the shared Redis one call reads.
 //
-// Twice the stranded-lease reaper's batch on purpose: that one drains a finite
-// residue left by crashed runners, while this one drains a continuous arrival —
-// every execution that reaches its transient TTL with one of its tasks still
-// queued leaves another entry behind. 512 per pass at the sweeper's cadence is
-// ~102/min, which has to exceed that arrival rate for the queue to converge
-// rather than keep growing: the deployment this exists for measured a queue
-// growing by ~42 assignments per minute.
-const defaultDeadQueuedAssignmentReapBatch = 512
+// Much larger than the stranded-lease reaper's batch on purpose: that one drains a
+// finite residue left by crashed runners, while this one drains a continuous
+// arrival — every execution that reaches its transient TTL with one of its tasks
+// still queued leaves another entry behind. The pass has to exceed that arrival
+// rate for the queue to converge rather than keep growing.
+//
+// The size is set from the measured arrival, not from the older estimate: one
+// deployment this exists for measured ~42/min and 512 per pass was enough, while
+// the deployment that forced this value grows its queue by hundreds per minute —
+// the runner's own claim path could not keep up, so the queue reached 12k entries
+// with a live tail a runner never reached. 4096 per pass at the sweeper's
+// five-minute cadence is ~819/min, which clears that arrival with headroom.
+//
+// A batch this size is only affordable because the liveness probe below answers it
+// in one round trip. Asked per candidate, 4096 candidates were 4096 sequential
+// reads on a link whose round trip is tens of milliseconds — the pass would have
+// spent minutes learning that the entries were already dead, which is the same
+// cost that capped the older value.
+const defaultDeadQueuedAssignmentReapBatch = 4096
 
 // DeadQueuedAssignmentReaper is the durable-directory capability that reclaims
 // assignments left in 'queued' state after the execution they belong to has
@@ -227,11 +239,18 @@ func (d *RedisRunnerDirectory) reapDeadQueuedAssignmentPage(ctx context.Context,
 	if err != nil {
 		return 0, inspected, fmt.Errorf("reap dead queued assignments: read assignment payloads: %w", err)
 	}
-	reclaimed = 0
+	// Decode the page and answer the liveness question once for all of it. The
+	// per-candidate probe this replaces issued one state-store read per candidate,
+	// so a 512-candidate pass cost 512 round trips — which, on a link whose round
+	// trip is tens of milliseconds, is the whole cost of the pass and is spent
+	// almost entirely on entries that are dead.
+	type reaperCandidate struct {
+		assignmentID string
+		assignment   Assignment
+	}
+	parsed := make([]reaperCandidate, 0, len(candidates))
+	page := make([]Assignment, 0, len(candidates))
 	for i, assignmentID := range candidates {
-		if reclaimed >= limit {
-			break
-		}
 		raw, _ := raws[i].(string)
 		if raw == "" {
 			// A queued record with no payload cannot be claimed either, but it
@@ -247,14 +266,23 @@ func (d *RedisRunnerDirectory) reapDeadQueuedAssignmentPage(ctx context.Context,
 			// candidates, and it must not become a removal.
 			continue
 		}
-		active, err := d.queuedAssignmentExecutionActive(ctx, assignment)
-		if err != nil {
-			return reclaimed, inspected, err
+		parsed = append(parsed, reaperCandidate{assignmentID: assignmentID, assignment: assignment})
+		page = append(page, assignment)
+	}
+	leaseable, err := d.leaseableExecutions(ctx, page)
+	if err != nil {
+		return reclaimed, inspected, err
+	}
+
+	reclaimed = 0
+	for _, c := range parsed {
+		if reclaimed >= limit {
+			break
 		}
-		if active {
+		if leaseable[c.assignment.Task.ExecutionID] {
 			continue
 		}
-		didReap, err := d.reapQueuedAssignment(ctx, AssignmentID(assignmentID))
+		didReap, err := d.reapQueuedAssignment(ctx, AssignmentID(c.assignmentID))
 		if err != nil {
 			return reclaimed, inspected, err
 		}
@@ -265,18 +293,65 @@ func (d *RedisRunnerDirectory) reapDeadQueuedAssignmentPage(ctx context.Context,
 	return reclaimed, inspected, nil
 }
 
-// queuedAssignmentExecutionActive reports whether the assignment's execution can
-// still be leased. It is the engine's own activeness predicate: present and
-// non-terminal. Namespace comes from the assignment, the same value the poll
-// path resolves the lease through, so both paths read the same execution key.
-func (d *RedisRunnerDirectory) queuedAssignmentExecutionActive(ctx context.Context, assignment Assignment) (bool, error) {
-	status, found, err := d.executions.GetExecutionStatus(
-		namespace.WithNamespace(ctx, assignment.Namespace), assignment.Task.ExecutionID)
-	if err != nil {
-		return false, fmt.Errorf("reap dead queued assignments: read execution status %q: %w",
-			assignment.Task.ExecutionID, err)
+// leaseableExecutions answers, for a whole page of assignments, which of their
+// executions can still be run.
+//
+// The predicate is the engine's own activeness one — present and non-terminal — and
+// the namespace comes from each assignment, the same value the poll path resolves
+// the lease through, so both paths read the same execution key.
+//
+// It answers the question for the page at once because both callers need it that
+// way: the claim path and the dead-queued reaper each hold a page of candidates of
+// which all but a few are expected to be dead. Asked one at a time, a 64-entry page cost 64 sequential
+// round trips and a 512-candidate reaper pass cost 512, which is the whole cost of
+// either operation and is spent almost entirely on entries that are already gone.
+//
+// Grouped by namespace because the status key is namespaced, and the batch
+// capability is optional: a reader that does not implement it is probed one
+// execution at a time, which is what every caller did before this existed.
+func (d *RedisRunnerDirectory) leaseableExecutions(ctx context.Context, assignments []Assignment) (map[types.ExecutionID]bool, error) {
+	live := make(map[types.ExecutionID]bool, len(assignments))
+	if d.executions == nil {
+		// Without a status reader there is nothing to prove an assignment dead
+		// with, so every one of them stays a candidate. Reporting them all live is
+		// the safe direction on both paths: the claim path simply behaves as it did
+		// before this probe existed, and the reaper — which is the only caller that
+		// removes anything — already declines to run at all in this configuration.
+		for _, a := range assignments {
+			live[a.Task.ExecutionID] = true
+		}
+		return live, nil
 	}
-	return found && !types.IsTerminalExecutionStatus(status), nil
+	byNamespace := make(map[namespace.Namespace][]types.ExecutionID, 1)
+	for _, a := range assignments {
+		byNamespace[a.Namespace] = append(byNamespace[a.Namespace], a.Task.ExecutionID)
+	}
+	batch, batched := d.executions.(engine.ExecutionStatusBatchReader)
+	for ns, ids := range byNamespace {
+		nsCtx := namespace.WithNamespace(ctx, ns)
+		if batched {
+			statuses, err := batch.GetExecutionStatuses(nsCtx, ids)
+			if err != nil {
+				return nil, fmt.Errorf("read execution statuses: %w", err)
+			}
+			for i, id := range ids {
+				if i >= len(statuses) {
+					live[id] = false
+					continue
+				}
+				live[id] = statuses[i] != "" && !types.IsTerminalExecutionStatus(statuses[i])
+			}
+			continue
+		}
+		for _, id := range ids {
+			status, found, err := d.executions.GetExecutionStatus(nsCtx, id)
+			if err != nil {
+				return nil, fmt.Errorf("read execution status %q: %w", id, err)
+			}
+			live[id] = found && !types.IsTerminalExecutionStatus(status)
+		}
+	}
+	return live, nil
 }
 
 // reapQueuedAssignment performs the atomic removal. ok is false when the
