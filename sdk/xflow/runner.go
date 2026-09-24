@@ -677,7 +677,7 @@ func buildRunnerServiceConfig(cfg RunnerConfig, opts ...RunnerOption) (runnersvc
 	svcCfg := runnersvc.Config{
 		RunnerID:     cfg.RunnerID,
 		Concurrency:  cfg.Concurrency,
-		Labels:       cloneStringMap(cfg.Labels),
+		Labels:       runnerRegistrationLabels(cfg.Labels, protocol.LinkedXflowVersion()),
 		Capabilities: runnerCapabilities(cfg.Capabilities),
 		PollWait:     cfg.PollWait,
 		Tracer:       o.tracer,
@@ -1019,6 +1019,42 @@ func runnerCapabilitiesContain(capabilities []protocol.Capability, nodeType stri
 		}
 	}
 	return false
+}
+
+// runnerRegistrationLabels copies the caller's labels and stamps in the
+// reserved version label reporting the xflow revision this binary links.
+//
+// The stamp is applied in the SDK, at the two places it turns a RunnerConfig
+// into a registration payload, because every transport reads the labels off the
+// resulting config: HTTP and gRPC both send r.config.Labels on register and
+// again on hello, and the in-process transport passes the same struct straight
+// through. A stamp applied per transport would have to be applied four more
+// times and would drift.
+//
+// version is passed in rather than read here so the stamping rule is testable:
+// a test binary built from this repository has this repository as its main
+// module, so LinkedXflowVersion reports "" inside every test in this module and
+// the interesting branch would otherwise be unreachable.
+//
+// It deliberately does not delegate to cloneStringMap, which returns nil for
+// empty input — the version label must be present even when the caller declared
+// no labels of its own.
+func runnerRegistrationLabels(labels map[string]string, version string) map[string]string {
+	out := make(map[string]string, len(labels)+1)
+	for key, value := range labels {
+		out[key] = value
+	}
+	// Overwrites a caller-supplied value rather than deferring to it: a runner
+	// asserting a version other than the one it links would make a control
+	// plane agree with it on a false premise, which is strictly worse than the
+	// mismatch this label exists to expose. An unknown version stamps nothing —
+	// absent is a distinguishable answer, and a placeholder like "unknown" is
+	// one a control plane would have to special-case to avoid comparing it as a
+	// version.
+	if version = strings.TrimSpace(version); version != "" {
+		out[protocol.RunnerXflowVersionLabel] = version
+	}
+	return out
 }
 
 // runnerTriggerLookup adapts the global node registry to the runner's
