@@ -77,6 +77,18 @@ func normalizeProfile(profile Profile) (Profile, error) {
 			if value == "" {
 				return Profile{}, fmt.Errorf("runner profile %q requires label %q with an empty value", profile.CommandName, key)
 			}
+			// A required label that is always overwritten cannot be required.
+			// The SDK stamps the linked xflow version over any value a caller
+			// supplies, so a profile declaring this key would either pass
+			// because it happened to guess right or fail with a message naming
+			// the profile rather than the version — in both cases hiding the
+			// fact that the declaration never had any effect.
+			if key == protocol.RunnerXflowVersionLabel {
+				return Profile{}, fmt.Errorf(
+					"runner profile %q requires reserved label %q; the SDK reports the linked xflow version there and overrides any value set for it",
+					profile.CommandName, key,
+				)
+			}
 		}
 	}
 	if profile.FixedCapabilities != nil {

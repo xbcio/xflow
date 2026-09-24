@@ -593,3 +593,24 @@ func TestProfileRejectsConflictingDefaultAndFixedCapabilities(t *testing.T) {
 		t.Fatalf("error = %v, want conflicting profile capabilities", err)
 	}
 }
+
+// The SDK stamps the linked xflow version over any value a caller supplies for
+// the reserved label, so a profile that *requires* that key can never be
+// honoured: it would pass only by coinciding with the linked version, and
+// otherwise fail with a message blaming the profile rather than the version.
+// Rejecting the declaration is what keeps the reserved key meaning one thing.
+func TestProfileRejectsTheReservedVersionLabel(t *testing.T) {
+	_, err := NewCommand(Profile{
+		RequiredLabels: map[string]string{protocol.RunnerXflowVersionLabel: "v0.0.31"},
+	})
+	if err == nil {
+		t.Fatal("a profile requiring the reserved version label was accepted; " +
+			"the SDK overrides that key, so the requirement could never be honoured")
+	}
+	if !strings.Contains(err.Error(), protocol.RunnerXflowVersionLabel) {
+		t.Fatalf("error = %v, want it to name the reserved label %q", err, protocol.RunnerXflowVersionLabel)
+	}
+	if !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("error = %v, want it to say the label is reserved", err)
+	}
+}
