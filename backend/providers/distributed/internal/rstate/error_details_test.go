@@ -67,7 +67,7 @@ func TestRedisCommitNodePersistsErrorDetails(t *testing.T) {
 	lease.Attempt = 1
 
 	details := map[string]any{
-		"source":       "endpoint_allowlist",
+		"source":       "endpoints",
 		"rejected_url": "https://denied.test/path",
 	}
 	if _, err := state.CommitNode(ctx, engine.CommitNodeRequest{
@@ -95,7 +95,7 @@ func TestRedisCommitNodePersistsErrorDetails(t *testing.T) {
 	if snap == nil {
 		t.Fatal("GetNode() = nil, want the committed node snapshot")
 	}
-	if got, want := snap.ErrorDetails["source"], "endpoint_allowlist"; got != want {
+	if got, want := snap.ErrorDetails["source"], "endpoints"; got != want {
 		t.Fatalf("GetNode() ErrorDetails[source] = %#v, want %#v (full details %#v); "+
 			"the meta hash round trip dropped the field", got, want, snap.ErrorDetails)
 	}
@@ -114,7 +114,7 @@ func TestRedisCommitNodePersistsErrorDetails(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
 		t.Fatalf("stored error_details is not JSON (%q): %v", raw, err)
 	}
-	if got, want := decoded["source"], "endpoint_allowlist"; got != want {
+	if got, want := decoded["source"], "endpoints"; got != want {
 		t.Fatalf("stored error_details[source] = %#v, want %#v (raw %s)", got, want, raw)
 	}
 }

@@ -567,7 +567,7 @@ func resolveRunnerBrowserCDPConfig(cfg xnode.BrowserCDPConfig) xnode.BrowserCDPC
 	if cfg.ConnectTimeout == 0 {
 		cfg.ConnectTimeout = defaults.ConnectTimeout
 	}
-	cfg.EndpointAllowlist = append([]string(nil), cfg.EndpointAllowlist...)
+	cfg.Endpoints = append([]string(nil), cfg.Endpoints...)
 	return cfg
 }
 

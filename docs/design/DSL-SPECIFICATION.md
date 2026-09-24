@@ -1692,7 +1692,7 @@ dependency_edges:
 **安全边界**：
 
 - **仅远程 CDP**：节点只能连接 `debugging_url` 指向的已存在远程端点；不会在 runner 上启动 Chrome，也不管理浏览器池。
-- **端点默认拒绝**：`debugging_url` 的 host 必须命中 runner 进程级 `endpoint_allowlist`；空 allowlist 拒绝全部端点。条目可为忽略大小写的精确 host、以 `.` 开头且包含 apex 的后缀，或以 `*.` 开头且要求至少一个额外 label 的通配符；端口不参与匹配。此 allowlist 与 `HTTPHostPolicy` 是两套独立策略，不能用其中一套替代另一套。
+- **端点默认拒绝**：`debugging_url` 的 host 必须命中 runner 进程级 `endpoints`；空 allowlist 拒绝全部端点。条目可为忽略大小写的精确 host、以 `.` 开头且包含 apex 的后缀，或以 `*.` 开头且要求至少一个额外 label 的通配符；端口不参与匹配。此 allowlist 与 `HTTPHostPolicy` 是两套独立策略，不能用其中一套替代另一套。
 - **导航受 host policy 约束**：`HTTPHostPolicy` 应用于入口导航、固定回退导航及每一个重定向/浏览器请求；Browser CDP 未配置该策略时默认拒绝，而不会沿用 `xflow.http` 的兼容性放行行为。策略拒绝时不得借浏览器绕过 HTTP 节点的 SSRF 防护，并以 `browser.host_denied` 失败。
 - **不可编程**：不支持任意 JavaScript、点击、输入、选择器断言、截图、PDF、页面爬取或任意 URL 导航列表。`wait_selector` 仅用于等待页面就绪，不执行交互。允许的导航只有 `entry_url`、固定根路径回退和可选 reload。
 - **会话隔离**：每一次尝试（包括重试）都使用新的浏览器上下文；上下文绝不跨节点执行复用。取消、超时、失败和 panic 都必须释放该上下文及其连接资源。
@@ -1785,18 +1785,18 @@ Browser CDP 是 runner **进程级**资源。嵌入式 runner 通过 `xflow.Runn
 
 ```yaml
 browser_cdp:
-  endpoint_allowlist:
+  endpoints:
     - "chrome.example.test"
   max_contexts: 2
   queue_timeout: "5s"
   connect_timeout: "5s"
 ```
 
-默认值为：`endpoint_allowlist: []`（拒绝所有 endpoint）、`max_contexts: 1`、`queue_timeout: "5s"`、`connect_timeout: "5s"`。独立 runner 也支持以下环境变量和同名 CLI 配置：
+默认值为：`endpoints: []`（拒绝所有 endpoint）、`max_contexts: 1`、`queue_timeout: "5s"`、`connect_timeout: "5s"`。独立 runner 也支持以下环境变量和同名 CLI 配置：
 
 | YAML 字段 | 环境变量 | CLI flag |
 |---|---|---|
-| `browser_cdp.endpoint_allowlist` | `XFLOW_BROWSER_CDP_ENDPOINT_ALLOWLIST`（逗号分隔 host） | `--browser-cdp-endpoint-allowlist` |
+| `browser_cdp.endpoints` | `XFLOW_BROWSER_CDP_ENDPOINTS`（逗号分隔 host） | `--browser-cdp-endpoints` |
 | `browser_cdp.max_contexts` | `XFLOW_BROWSER_CDP_MAX_CONTEXTS` | `--browser-cdp-max-contexts` |
 | `browser_cdp.queue_timeout` | `XFLOW_BROWSER_CDP_QUEUE_TIMEOUT` | `--browser-cdp-queue-timeout` |
 | `browser_cdp.connect_timeout` | `XFLOW_BROWSER_CDP_CONNECT_TIMEOUT` | `--browser-cdp-connect-timeout` |

@@ -77,7 +77,7 @@ func TestApplyLookupEnvOverridesHTTPHostPolicy(t *testing.T) {
 func TestValidateRunnerConfigAllowsHostPatterns(t *testing.T) {
 	cfg := defaultRunnerConfig()
 	cfg.allowPlaintext = true
-	cfg.browserCDPEndpointAllowlist = []string{"*.chrome.test", ".browser.test"}
+	cfg.browserCDPEndpoints = []string{"*.chrome.test", ".browser.test"}
 	cfg.httpHostPolicyAllow = []string{"*.apps.test", ".allowed.test"}
 	cfg.httpHostPolicyDeny = []string{".blocked.allowed.test"}
 	if err := validateRunnerConfig(cfg); err != nil {

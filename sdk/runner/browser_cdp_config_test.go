@@ -15,7 +15,7 @@ import (
 func TestLoadRunnerConfigFromYAMLBrowserCDP(t *testing.T) {
 	cfg, err := loadRunnerConfigFromBytes([]byte(`
 browser_cdp:
-  endpoint_allowlist:
+  endpoints:
     - chrome-a.test.internal
     - chrome-b.test.internal
   max_contexts: 3
@@ -25,8 +25,8 @@ browser_cdp:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := cfg.browserCDPEndpointAllowlist, []string{"chrome-a.test.internal", "chrome-b.test.internal"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("browser CDP endpoint allowlist = %v, want %v", got, want)
+	if got, want := cfg.browserCDPEndpoints, []string{"chrome-a.test.internal", "chrome-b.test.internal"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("browser CDP endpoints = %v, want %v", got, want)
 	}
 	if cfg.browserCDPMaxContexts != 3 || cfg.browserCDPQueueTimeout != "7s" || cfg.browserCDPConnectTimeout != "8s" {
 		t.Fatalf("browser CDP config = %+v, want max_contexts=3 queue_timeout=7s connect_timeout=8s", cfg)
@@ -37,16 +37,16 @@ func TestApplyLookupEnvOverridesBrowserCDP(t *testing.T) {
 	cfg := defaultRunnerConfig()
 	got := applyLookupEnvOverrides(cfg, func(key string) (string, bool) {
 		env := map[string]string{
-			"XFLOW_BROWSER_CDP_ENDPOINT_ALLOWLIST": "chrome-env-a.test.internal, chrome-env-b.test.internal",
-			"XFLOW_BROWSER_CDP_MAX_CONTEXTS":       "4",
-			"XFLOW_BROWSER_CDP_QUEUE_TIMEOUT":      "9s",
-			"XFLOW_BROWSER_CDP_CONNECT_TIMEOUT":    "10s",
+			"XFLOW_BROWSER_CDP_ENDPOINTS":       "chrome-env-a.test.internal, chrome-env-b.test.internal",
+			"XFLOW_BROWSER_CDP_MAX_CONTEXTS":    "4",
+			"XFLOW_BROWSER_CDP_QUEUE_TIMEOUT":   "9s",
+			"XFLOW_BROWSER_CDP_CONNECT_TIMEOUT": "10s",
 		}
 		value, ok := env[key]
 		return value, ok
 	})
-	if got, want := got.browserCDPEndpointAllowlist, []string{"chrome-env-a.test.internal", "chrome-env-b.test.internal"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("browser CDP endpoint allowlist = %v, want %v", got, want)
+	if got, want := got.browserCDPEndpoints, []string{"chrome-env-a.test.internal", "chrome-env-b.test.internal"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("browser CDP endpoints = %v, want %v", got, want)
 	}
 	if got.browserCDPMaxContexts != 4 || got.browserCDPQueueTimeout != "9s" || got.browserCDPConnectTimeout != "10s" {
 		t.Fatalf("browser CDP config = %+v, want max_contexts=4 queue_timeout=9s connect_timeout=10s", got)
@@ -59,14 +59,14 @@ func TestResolveRunnerConfigBrowserCDPFlagPrecedence(t *testing.T) {
 server:
   url: http://file-server:8080
 browser_cdp:
-  endpoint_allowlist: [chrome-file.test.internal]
+  endpoints: [chrome-file.test.internal]
   max_contexts: 2
   queue_timeout: "2s"
   connect_timeout: "3s"
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("XFLOW_BROWSER_CDP_ENDPOINT_ALLOWLIST", "chrome-env.test.internal")
+	t.Setenv("XFLOW_BROWSER_CDP_ENDPOINTS", "chrome-env.test.internal")
 	t.Setenv("XFLOW_BROWSER_CDP_MAX_CONTEXTS", "4")
 	t.Setenv("XFLOW_BROWSER_CDP_QUEUE_TIMEOUT", "4s")
 	t.Setenv("XFLOW_BROWSER_CDP_CONNECT_TIMEOUT", "5s")
@@ -74,24 +74,24 @@ browser_cdp:
 	base := defaultRunnerConfig()
 	base.configPath = path
 	base.allowPlaintext = true
-	base.browserCDPEndpointAllowlist = []string{"chrome-flag-a.test.internal", "chrome-flag-b.test.internal"}
+	base.browserCDPEndpoints = []string{"chrome-flag-a.test.internal", "chrome-flag-b.test.internal"}
 	base.browserCDPMaxContexts = 6
 	base.browserCDPQueueTimeout = "6s"
 	base.browserCDPConnectTimeout = "7s"
 	base.changed = map[string]bool{
-		"allow-plaintext":                true,
-		"browser-cdp-endpoint-allowlist": true,
-		"browser-cdp-max-contexts":       true,
-		"browser-cdp-queue-timeout":      true,
-		"browser-cdp-connect-timeout":    true,
+		"allow-plaintext":             true,
+		"browser-cdp-endpoints":       true,
+		"browser-cdp-max-contexts":    true,
+		"browser-cdp-queue-timeout":   true,
+		"browser-cdp-connect-timeout": true,
 	}
 
 	got, err := resolveRunnerConfig(base)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"chrome-flag-a.test.internal", "chrome-flag-b.test.internal"}; !reflect.DeepEqual(got.browserCDPEndpointAllowlist, want) {
-		t.Fatalf("endpoint allowlist = %v, want changed flag value %v", got.browserCDPEndpointAllowlist, want)
+	if want := []string{"chrome-flag-a.test.internal", "chrome-flag-b.test.internal"}; !reflect.DeepEqual(got.browserCDPEndpoints, want) {
+		t.Fatalf("endpoint allowlist = %v, want changed flag value %v", got.browserCDPEndpoints, want)
 	}
 	if got.browserCDPMaxContexts != 6 || got.browserCDPQueueTimeout != "6s" || got.browserCDPConnectTimeout != "7s" {
 		t.Fatalf("browser CDP config = %+v, want changed flag values", got)
@@ -102,36 +102,36 @@ func TestResolveRunnerConfigExplicitEmptyBrowserCDPFlagDeniesAll(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "runner.yaml")
 	if err := os.WriteFile(path, []byte(`
 browser_cdp:
-  endpoint_allowlist: [chrome-file.test.internal]
+  endpoints: [chrome-file.test.internal]
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("XFLOW_BROWSER_CDP_ENDPOINT_ALLOWLIST", "chrome-env.test.internal")
+	t.Setenv("XFLOW_BROWSER_CDP_ENDPOINTS", "chrome-env.test.internal")
 
 	base := defaultRunnerConfig()
 	base.configPath = path
 	base.allowPlaintext = true
 	base.changed = map[string]bool{
-		"allow-plaintext":                true,
-		"browser-cdp-endpoint-allowlist": true,
+		"allow-plaintext":       true,
+		"browser-cdp-endpoints": true,
 	}
-	// pflag.StringArray represents --browser-cdp-endpoint-allowlist= as one
+	// pflag.StringArray represents --browser-cdp-endpoints= as one
 	// empty value. Resolution normalizes that explicit value to a non-nil empty
 	// slice rather than letting the env or YAML allowlist survive.
-	base.browserCDPEndpointAllowlist = []string{""}
+	base.browserCDPEndpoints = []string{""}
 	got, err := resolveRunnerConfig(base)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.browserCDPEndpointAllowlist == nil || len(got.browserCDPEndpointAllowlist) != 0 {
-		t.Fatalf("endpoint allowlist = %#v, want explicit deny-all empty slice", got.browserCDPEndpointAllowlist)
+	if got.browserCDPEndpoints == nil || len(got.browserCDPEndpoints) != 0 {
+		t.Fatalf("endpoint allowlist = %#v, want explicit deny-all empty slice", got.browserCDPEndpoints)
 	}
 }
 
-func TestBrowserCDPEndpointAllowlistTrimsHostOnlyValues(t *testing.T) {
+func TestBrowserCDPEndpointsTrimsHostOnlyValues(t *testing.T) {
 	cfg := defaultRunnerConfig()
 	cfg.allowPlaintext = true
-	cfg.browserCDPEndpointAllowlist = []string{"  ChRoMe.Test.Internal  "}
+	cfg.browserCDPEndpoints = []string{"  ChRoMe.Test.Internal  "}
 	if err := validateRunnerConfig(cfg); err != nil {
 		t.Fatalf("validateRunnerConfig: %v", err)
 	}
@@ -139,15 +139,15 @@ func TestBrowserCDPEndpointAllowlistTrimsHostOnlyValues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("toSDKRunnerConfig: %v", err)
 	}
-	if want := []string{"ChRoMe.Test.Internal"}; !reflect.DeepEqual(sdkCfg.BrowserCDP.EndpointAllowlist, want) {
-		t.Fatalf("endpoint allowlist = %v, want %v", sdkCfg.BrowserCDP.EndpointAllowlist, want)
+	if want := []string{"ChRoMe.Test.Internal"}; !reflect.DeepEqual(sdkCfg.BrowserCDP.Endpoints, want) {
+		t.Fatalf("endpoint allowlist = %v, want %v", sdkCfg.BrowserCDP.Endpoints, want)
 	}
 }
 
 func TestRunCommandPropagatesBrowserCDPFlagsToSDK(t *testing.T) {
 	restore := stubRunnerServiceFactory(func(cfg xflowsdk.RunnerConfig) error {
-		if want := []string{"chrome-a.test.internal", "chrome-b.test.internal"}; !reflect.DeepEqual(cfg.BrowserCDP.EndpointAllowlist, want) {
-			t.Errorf("BrowserCDP.EndpointAllowlist = %v, want %v", cfg.BrowserCDP.EndpointAllowlist, want)
+		if want := []string{"chrome-a.test.internal", "chrome-b.test.internal"}; !reflect.DeepEqual(cfg.BrowserCDP.Endpoints, want) {
+			t.Errorf("BrowserCDP.Endpoints = %v, want %v", cfg.BrowserCDP.Endpoints, want)
 		}
 		if cfg.BrowserCDP.MaxContexts != 3 {
 			t.Errorf("BrowserCDP.MaxContexts = %d, want 3", cfg.BrowserCDP.MaxContexts)
@@ -163,8 +163,8 @@ func TestRunCommandPropagatesBrowserCDPFlagsToSDK(t *testing.T) {
 	defer restore()
 
 	runCommand(t, "run", "--server", "http://server:8080", "--allow-plaintext",
-		"--browser-cdp-endpoint-allowlist", "chrome-a.test.internal",
-		"--browser-cdp-endpoint-allowlist", "chrome-b.test.internal",
+		"--browser-cdp-endpoints", "chrome-a.test.internal",
+		"--browser-cdp-endpoints", "chrome-b.test.internal",
 		"--browser-cdp-max-contexts", "3",
 		"--browser-cdp-queue-timeout", "7s",
 		"--browser-cdp-connect-timeout", "8s")
@@ -173,7 +173,7 @@ func TestRunCommandPropagatesBrowserCDPFlagsToSDK(t *testing.T) {
 func TestValidateRunnerConfigAcceptsBrowserCDPHostRuleForms(t *testing.T) {
 	cfg := defaultRunnerConfig()
 	cfg.allowPlaintext = true
-	cfg.browserCDPEndpointAllowlist = []string{
+	cfg.browserCDPEndpoints = []string{
 		"chrome.example.test",
 		".browser.example.test",
 		"*.worker.example.test",
@@ -195,28 +195,28 @@ func TestValidateRunnerConfigRejectsInvalidBrowserCDPValues(t *testing.T) {
 			want: "browser CDP max contexts",
 		},
 		{
-			name: "blank endpoint allowlist entry",
-			edit: func(cfg *runnerConfig) { cfg.browserCDPEndpointAllowlist = []string{" "} },
-			want: "endpoint allowlist",
+			name: "blank browser CDP endpoints entry",
+			edit: func(cfg *runnerConfig) { cfg.browserCDPEndpoints = []string{" "} },
+			want: "browser CDP endpoints",
 		},
 		{
 			name: "endpoint scheme",
-			edit: func(cfg *runnerConfig) { cfg.browserCDPEndpointAllowlist = []string{"ws://chrome.test.internal"} },
+			edit: func(cfg *runnerConfig) { cfg.browserCDPEndpoints = []string{"ws://chrome.test.internal"} },
 			want: "host-only",
 		},
 		{
 			name: "endpoint port",
-			edit: func(cfg *runnerConfig) { cfg.browserCDPEndpointAllowlist = []string{"chrome.test.internal:9222"} },
+			edit: func(cfg *runnerConfig) { cfg.browserCDPEndpoints = []string{"chrome.test.internal:9222"} },
 			want: "host-only",
 		},
 		{
 			name: "endpoint path",
-			edit: func(cfg *runnerConfig) { cfg.browserCDPEndpointAllowlist = []string{"chrome.test.internal/devtools"} },
+			edit: func(cfg *runnerConfig) { cfg.browserCDPEndpoints = []string{"chrome.test.internal/devtools"} },
 			want: "host-only",
 		},
 		{
 			name: "endpoint userinfo",
-			edit: func(cfg *runnerConfig) { cfg.browserCDPEndpointAllowlist = []string{"user@chrome.test.internal"} },
+			edit: func(cfg *runnerConfig) { cfg.browserCDPEndpoints = []string{"user@chrome.test.internal"} },
 			want: "host-only",
 		},
 		{
@@ -271,7 +271,7 @@ func TestRunnerConfigSamplesIncludeBrowserCDP(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			for _, fragment := range []string{
 				"browser_cdp:",
-				"endpoint_allowlist:",
+				"endpoints:",
 				"max_contexts:",
 				"queue_timeout:",
 				"connect_timeout:",
@@ -292,7 +292,7 @@ func TestBrowserCDPFlagsAreAcceptedByConfigValidate(t *testing.T) {
 		out: &out,
 		err: &bytes.Buffer{},
 	}, "config", "validate", "--allow-plaintext",
-		"--browser-cdp-endpoint-allowlist", "chrome.test.internal",
+		"--browser-cdp-endpoints", "chrome.test.internal",
 		"--browser-cdp-max-contexts", "2",
 		"--browser-cdp-queue-timeout", "2s",
 		"--browser-cdp-connect-timeout", "3s")

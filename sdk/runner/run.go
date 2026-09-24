@@ -62,10 +62,10 @@ type runnerConfig struct {
 	seedRequestTimeout string
 	// browserCDP* is kept in the raw CLI/YAML representation until precedence
 	// resolution and validation complete, then converted in toSDKRunnerConfig.
-	browserCDPEndpointAllowlist []string
-	browserCDPMaxContexts       int
-	browserCDPQueueTimeout      string
-	browserCDPConnectTimeout    string
+	browserCDPEndpoints      []string
+	browserCDPMaxContexts    int
+	browserCDPQueueTimeout   string
+	browserCDPConnectTimeout string
 	// httpHostPolicy* configures the process-wide destination policy shared by
 	// xflow.http and Browser CDP navigation. nil means unspecified; a non-nil
 	// empty slice is an explicit empty list from YAML, env, or CLI.
@@ -157,7 +157,7 @@ func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
 	cmd.Flags().StringVar(&cfg.pollWait, "poll-wait", cfg.pollWait, "Poll wait duration when no task is available")
 	cmd.Flags().StringVar(&cfg.seedRequestTimeout, "seed-request-timeout", cfg.seedRequestTimeout,
 		"Deadline for one entry-seed admission (one Kafka batch); raise it when a large batch exceeds the 15s default")
-	cmd.Flags().StringArrayVar(&cfg.browserCDPEndpointAllowlist, "browser-cdp-endpoint-allowlist", cfg.browserCDPEndpointAllowlist, "Allowlisted Browser CDP host rule: exact host, .suffix (apex + descendants), or *.wildcard (descendants only); repeatable")
+	cmd.Flags().StringArrayVar(&cfg.browserCDPEndpoints, "browser-cdp-endpoints", cfg.browserCDPEndpoints, "Allowlisted Browser CDP host rule: exact host, .suffix (apex + descendants), or *.wildcard (descendants only); repeatable")
 	cmd.Flags().IntVar(&cfg.browserCDPMaxContexts, "browser-cdp-max-contexts", cfg.browserCDPMaxContexts, "Maximum concurrent Browser CDP contexts")
 	cmd.Flags().StringVar(&cfg.browserCDPQueueTimeout, "browser-cdp-queue-timeout", cfg.browserCDPQueueTimeout, "Browser CDP context queue timeout")
 	cmd.Flags().StringVar(&cfg.browserCDPConnectTimeout, "browser-cdp-connect-timeout", cfg.browserCDPConnectTimeout, "Browser CDP endpoint connect timeout")
@@ -475,10 +475,10 @@ func toSDKRunnerConfig(cfg runnerConfig) (xflowsdk.RunnerConfig, error) {
 		PollWait:           pollWait,
 		SeedRequestTimeout: seedRequestTimeout,
 		BrowserCDP: xnode.BrowserCDPConfig{
-			EndpointAllowlist: copyTrimmedHosts(cfg.browserCDPEndpointAllowlist),
-			MaxContexts:       cfg.browserCDPMaxContexts,
-			QueueTimeout:      browserCDPQueueTimeout,
-			ConnectTimeout:    browserCDPConnectTimeout,
+			Endpoints:      copyTrimmedHosts(cfg.browserCDPEndpoints),
+			MaxContexts:    cfg.browserCDPMaxContexts,
+			QueueTimeout:   browserCDPQueueTimeout,
+			ConnectTimeout: browserCDPConnectTimeout,
 		},
 		Credentials:           cfg.credentials,
 		ResourcePoolConfig:    cfg.resourcePoolConfig,

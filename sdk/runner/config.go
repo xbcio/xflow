@@ -56,10 +56,10 @@ type runnerConfigFile struct {
 		RequireSupplyEncryption *bool `yaml:"require_supply_encryption"`
 	} `yaml:"security"`
 	BrowserCDP struct {
-		EndpointAllowlist *[]string `yaml:"endpoint_allowlist"`
-		MaxContexts       *int      `yaml:"max_contexts"`
-		QueueTimeout      *string   `yaml:"queue_timeout"`
-		ConnectTimeout    *string   `yaml:"connect_timeout"`
+		Endpoints      *[]string `yaml:"endpoints"`
+		MaxContexts    *int      `yaml:"max_contexts"`
+		QueueTimeout   *string   `yaml:"queue_timeout"`
+		ConnectTimeout *string   `yaml:"connect_timeout"`
 	} `yaml:"browser_cdp"`
 	HTTPHostPolicy struct {
 		Allow *[]string `yaml:"allow"`
@@ -99,22 +99,22 @@ type grpcPoolFile struct {
 func defaultRunnerConfig() runnerConfig {
 	browserCDPDefaults := xnode.BrowserCDPConfigDefaults()
 	return runnerConfig{
-		serverURL:                   "http://localhost:8080",
-		transport:                   transportGRPC,
-		grpcTarget:                  "localhost:9090",
-		runnerID:                    fmt.Sprintf("runner-%d", os.Getpid()),
-		concurrency:                 1,
-		capRaw:                      "xflow.function",
-		capabilities:                parseCapabilities("xflow.function"),
-		heartbeatInterval:           "5s",
-		pollWait:                    "1s",
-		browserCDPEndpointAllowlist: append([]string(nil), browserCDPDefaults.EndpointAllowlist...),
-		browserCDPMaxContexts:       browserCDPDefaults.MaxContexts,
-		browserCDPQueueTimeout:      browserCDPDefaults.QueueTimeout.String(),
-		browserCDPConnectTimeout:    browserCDPDefaults.ConnectTimeout.String(),
-		reportMetricsInterval:       "15s",
-		identityStoreKind:           identityStoreEphemeral,
-		autoLabels:                  true,
+		serverURL:                "http://localhost:8080",
+		transport:                transportGRPC,
+		grpcTarget:               "localhost:9090",
+		runnerID:                 fmt.Sprintf("runner-%d", os.Getpid()),
+		concurrency:              1,
+		capRaw:                   "xflow.function",
+		capabilities:             parseCapabilities("xflow.function"),
+		heartbeatInterval:        "5s",
+		pollWait:                 "1s",
+		browserCDPEndpoints:      append([]string(nil), browserCDPDefaults.Endpoints...),
+		browserCDPMaxContexts:    browserCDPDefaults.MaxContexts,
+		browserCDPQueueTimeout:   browserCDPDefaults.QueueTimeout.String(),
+		browserCDPConnectTimeout: browserCDPDefaults.ConnectTimeout.String(),
+		reportMetricsInterval:    "15s",
+		identityStoreKind:        identityStoreEphemeral,
+		autoLabels:               true,
 	}
 }
 
@@ -210,8 +210,8 @@ func loadRunnerConfigFromBytesForProfile(data []byte, profile Profile) (runnerCo
 	if file.Security.RequireSupplyEncryption != nil {
 		cfg.requireSupplyEncryption = *file.Security.RequireSupplyEncryption
 	}
-	if file.BrowserCDP.EndpointAllowlist != nil {
-		cfg.browserCDPEndpointAllowlist = append([]string(nil), (*file.BrowserCDP.EndpointAllowlist)...)
+	if file.BrowserCDP.Endpoints != nil {
+		cfg.browserCDPEndpoints = append([]string(nil), (*file.BrowserCDP.Endpoints)...)
 	}
 	if file.BrowserCDP.MaxContexts != nil {
 		cfg.browserCDPMaxContexts = *file.BrowserCDP.MaxContexts
@@ -330,8 +330,8 @@ func applyLookupEnvOverrides(cfg runnerConfig, lookupEnv func(string) (string, b
 			cfg.concurrency = n
 		}
 	}
-	if v, ok := lookupEnv("XFLOW_BROWSER_CDP_ENDPOINT_ALLOWLIST"); ok {
-		cfg.browserCDPEndpointAllowlist = splitCSV(v)
+	if v, ok := lookupEnv("XFLOW_BROWSER_CDP_ENDPOINTS"); ok {
+		cfg.browserCDPEndpoints = splitCSV(v)
 	}
 	if v, ok := lookupEnv("XFLOW_BROWSER_CDP_MAX_CONTEXTS"); ok {
 		n, err := strconv.Atoi(v)
@@ -557,7 +557,7 @@ func validateRunnerConfig(cfg runnerConfig) error {
 	if cfg.browserCDPMaxContexts <= 0 {
 		return fmt.Errorf("browser CDP max contexts must be greater than zero: %d", cfg.browserCDPMaxContexts)
 	}
-	if err := validateHostOnlyList("browser CDP endpoint allowlist", cfg.browserCDPEndpointAllowlist); err != nil {
+	if err := validateHostOnlyList("browser CDP endpoints", cfg.browserCDPEndpoints); err != nil {
 		return err
 	}
 	if err := validateHostOnlyList("HTTP host policy allowlist", cfg.httpHostPolicyAllow); err != nil {
@@ -850,8 +850,8 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 		clearRunnerConfigIssue(&cfg, "concurrency")
 		cfg.concurrency = base.concurrency
 	}
-	if base.changed["browser-cdp-endpoint-allowlist"] {
-		cfg.browserCDPEndpointAllowlist = normalizeExplicitEmptyStringArray(base.browserCDPEndpointAllowlist)
+	if base.changed["browser-cdp-endpoints"] {
+		cfg.browserCDPEndpoints = normalizeExplicitEmptyStringArray(base.browserCDPEndpoints)
 	}
 	if base.changed["browser-cdp-max-contexts"] {
 		clearRunnerConfigIssue(&cfg, "browser-cdp-max-contexts")
@@ -1052,11 +1052,11 @@ heartbeat:
 #   deny: ["metadata.google.internal"]
 
 # Browser CDP uses an existing remote-debugging endpoint; it never starts a
-# browser. An empty endpoint_allowlist (the secure default) denies all endpoint
+# browser. An empty endpoints list (the secure default) denies all endpoint
 # connections until an exact, suffix, or wildcard host pattern is listed. Browser navigation also denies
 # all hosts unless http_host_policy is explicitly configured.
 browser_cdp:
-  endpoint_allowlist: []
+  endpoints: []
   max_contexts: 1
   queue_timeout: "5s"
   connect_timeout: "5s"

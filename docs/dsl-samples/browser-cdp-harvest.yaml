@@ -8,7 +8,7 @@
 #
 # 运行前的 runner 前提：
 #   1. capabilities 必须显式包含 "xflow.browser.cdp"；仅注册节点不够。
-#   2. browser_cdp.endpoint_allowlist 必须包含 "chrome.example.test"。
+#   2. browser_cdp.endpoints 必须包含 "chrome.example.test"。
 #   3. HTTPHostPolicy 必须允许 app.example.test 以及其合法重定向目标。
 #
 # 节点仅连接已有远程 CDP endpoint；它不会启动本地 Chrome，也不执行 JS、

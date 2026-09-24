@@ -38,19 +38,19 @@ func TestBrowserCDPDescriptorAndRegistration(t *testing.T) {
 
 func TestBrowserCDPConfigDefaultsAndLeases(t *testing.T) {
 	defaults := BrowserCDPConfigDefaults()
-	if len(defaults.EndpointAllowlist) != 0 || defaults.MaxContexts != 1 || defaults.QueueTimeout != 5*time.Second || defaults.ConnectTimeout != 5*time.Second {
+	if len(defaults.Endpoints) != 0 || defaults.MaxContexts != 1 || defaults.QueueTimeout != 5*time.Second || defaults.ConnectTimeout != 5*time.Second {
 		t.Fatalf("defaults = %+v", defaults)
 	}
 	cfg := defaults
-	cfg.EndpointAllowlist = []string{"CHROME-B.TEST", "chrome-a.test", "chrome-b.test"}
+	cfg.Endpoints = []string{"CHROME-B.TEST", "chrome-a.test", "chrome-b.test"}
 	release1, err := AcquireBrowserCDPConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer release1()
 	snapshot := currentBrowserConfigSnapshot()
-	if want := []string{"chrome-a.test", "chrome-b.test"}; !reflect.DeepEqual(snapshot.config.EndpointAllowlist, want) {
-		t.Fatalf("allowlist = %v, want %v", snapshot.config.EndpointAllowlist, want)
+	if want := []string{"chrome-a.test", "chrome-b.test"}; !reflect.DeepEqual(snapshot.config.Endpoints, want) {
+		t.Fatalf("allowlist = %v, want %v", snapshot.config.Endpoints, want)
 	}
 	release2, err := AcquireBrowserCDPConfig(cfg)
 	if err != nil {
@@ -64,15 +64,15 @@ func TestBrowserCDPConfigDefaultsAndLeases(t *testing.T) {
 	}
 }
 
-func TestBrowserCDPEndpointAllowlistPatterns(t *testing.T) {
+func TestBrowserCDPEndpointsPatterns(t *testing.T) {
 	cfg := BrowserCDPConfigDefaults()
-	cfg.EndpointAllowlist = []string{"EXACT.CHROME.TEST", "*.WILDCARD.CHROME.TEST", ".apps.test", "*.wildcard.chrome.test"}
+	cfg.Endpoints = []string{"EXACT.CHROME.TEST", "*.WILDCARD.CHROME.TEST", ".apps.test", "*.wildcard.chrome.test"}
 	normalized, err := normalizeBrowserCDPConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"*.wildcard.chrome.test", ".apps.test", "exact.chrome.test"}; !reflect.DeepEqual(normalized.EndpointAllowlist, want) {
-		t.Fatalf("normalized endpoint allowlist = %v, want %v", normalized.EndpointAllowlist, want)
+	if want := []string{"*.wildcard.chrome.test", ".apps.test", "exact.chrome.test"}; !reflect.DeepEqual(normalized.Endpoints, want) {
+		t.Fatalf("normalized endpoint allowlist = %v, want %v", normalized.Endpoints, want)
 	}
 
 	for _, tt := range []struct {
@@ -90,7 +90,7 @@ func TestBrowserCDPEndpointAllowlistPatterns(t *testing.T) {
 		{host: "other.test", want: false},
 	} {
 		t.Run(tt.host, func(t *testing.T) {
-			if got := browserEndpointAllowed(normalized.EndpointAllowlist, tt.host); got != tt.want {
+			if got := browserEndpointAllowed(normalized.Endpoints, tt.host); got != tt.want {
 				t.Fatalf("browserEndpointAllowed(%q) = %t, want %t", tt.host, got, tt.want)
 			}
 		})
@@ -111,7 +111,7 @@ func TestBrowserCDPConfigRejectsEndpointURLs(t *testing.T) {
 		".chrome.test:9222",
 	} {
 		cfg := BrowserCDPConfigDefaults()
-		cfg.EndpointAllowlist = []string{host}
+		cfg.Endpoints = []string{host}
 		if _, err := AcquireBrowserCDPConfig(cfg); err == nil {
 			t.Fatalf("allowlist host %q accepted", host)
 		}
@@ -504,7 +504,7 @@ func TestBrowserCDPExecuteDeniesNilHostPolicyBeforeExecutor(t *testing.T) {
 }
 
 func TestBrowserCDPHostDeniedDetails(t *testing.T) {
-	t.Run("endpoint_allowlist", func(t *testing.T) {
+	t.Run("endpoints", func(t *testing.T) {
 		release := acquireTestBrowserConfig(t, "allowed-chrome.test", 1, time.Second)
 		defer release()
 		oldPolicy, oldExecutor := HTTPHostPolicy, executeBrowserCDPAttempt
@@ -520,11 +520,11 @@ func TestBrowserCDPHostDeniedDetails(t *testing.T) {
 		params["debugging_url"] = "http://denied-chrome.test:9222"
 		_, err := (&CDPNode{}).Execute(context.Background(), &types.Input{Params: params})
 		assertBrowserErrorDetails(t, err, "browser.host_denied", true, map[string]any{
-			"source":       browserHostDeniedSourceEndpointAllowlist,
+			"source":       browserHostDeniedSourceEndpoints,
 			"rejected_url": "http://denied-chrome.test",
 		})
 		assertBrowserErrorMessage(t, err,
-			"browser.host_denied: browser destination is denied by policy (source=endpoint_allowlist rejected_url=http://denied-chrome.test)",
+			"browser.host_denied: browser destination is denied by policy (source=endpoints rejected_url=http://denied-chrome.test)",
 		)
 		if calls.Load() != 0 {
 			t.Fatalf("executor called %d times", calls.Load())
@@ -758,7 +758,7 @@ func TestBrowserCDPExecuteConnectTimeoutDetails(t *testing.T) {
 
 	debuggingURL := mustParseBrowserTestURL(t, server.URL)
 	cfg := BrowserCDPConfigDefaults()
-	cfg.EndpointAllowlist = []string{debuggingURL.Hostname()}
+	cfg.Endpoints = []string{debuggingURL.Hostname()}
 	cfg.MaxContexts = 1
 	cfg.QueueTimeout = time.Second
 	cfg.ConnectTimeout = 50 * time.Millisecond
@@ -854,7 +854,7 @@ func validBrowserParams() map[string]any {
 
 func testBrowserSnapshot(host string) *browserConfigSnapshot {
 	cfg := BrowserCDPConfigDefaults()
-	cfg.EndpointAllowlist = []string{host}
+	cfg.Endpoints = []string{host}
 	normalized, err := normalizeBrowserCDPConfig(cfg)
 	if err != nil {
 		panic(err)
@@ -865,7 +865,7 @@ func testBrowserSnapshot(host string) *browserConfigSnapshot {
 func acquireTestBrowserConfig(t *testing.T, host string, max int, queue time.Duration) func() {
 	t.Helper()
 	cfg := BrowserCDPConfigDefaults()
-	cfg.EndpointAllowlist = []string{host}
+	cfg.Endpoints = []string{host}
 	cfg.MaxContexts = max
 	cfg.QueueTimeout = queue
 	release, err := AcquireBrowserCDPConfig(cfg)

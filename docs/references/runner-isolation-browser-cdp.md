@@ -50,7 +50,7 @@ changes, requires, or checks that configuration.
 ### 2.1 Endpoint allowlist — fail-closed, and the gate before any bytes move
 
 The CDP endpoint is gated by a hostname allowlist in
-`BrowserCDPConfig.EndpointAllowlist` (`browser.go:133`). The default is `nil`,
+`BrowserCDPConfig.Endpoints` (`browser.go:133`). The default is `nil`,
 and the doc comment is explicit that **an empty list denies every CDP
 endpoint** (`browser.go:130-131`); `BrowserCDPConfigDefaults` returns `nil`
 (`browser.go:139-147`).
@@ -58,7 +58,7 @@ endpoint** (`browser.go:130-131`); `BrowserCDPConfigDefaults` returns `nil`
 Enforcement happens in `resolveBrowserWebSocketEndpoint`, before the discovery
 request is sent and before chromedp's transport exists: `browser.go:900-902`
 rejects a non-allowlisted host with
-`browserHostDeniedError{source: endpoint_allowlist}`.
+`browserHostDeniedError{source: endpoints}`.
 
 The doc comment on that function explains why the check sits there: the
 discovery request *"happens before chromedp's CDP transport can enforce any of
@@ -137,10 +137,10 @@ The closure is installed at `run.go:237` and removed on shutdown
 
 Configuration surface (`sdk/runner/config.go`):
 
-- `browser_cdp.endpoint_allowlist` / `max_contexts` / `queue_timeout` /
+- `browser_cdp.endpoints` / `max_contexts` / `queue_timeout` /
   `connect_timeout` (`config.go:53-58`);
 - `http_host_policy.allow` / `.deny` (`config.go:59-62`);
-- env equivalents `XFLOW_BROWSER_CDP_ENDPOINT_ALLOWLIST` (`config.go:324`) and
+- env equivalents `XFLOW_BROWSER_CDP_ENDPOINTS` (`config.go:324`) and
   `XFLOW_HTTP_HOST_POLICY_ALLOW` / `_DENY` (`config.go:343-347`);
 - an invalid pattern list fails config load (`config.go:544-551`), so a
   malformed policy is a startup failure rather than a silently permissive one.

@@ -313,11 +313,11 @@ func profileSampleRunnerConfigYAML(profile Profile) string {
 #   deny: ["metadata.google.internal"]
 
 # Browser CDP uses an existing remote-debugging endpoint; it never starts a
-# browser. An empty endpoint_allowlist (the secure default) denies all endpoint
+# browser. An empty endpoints list (the secure default) denies all endpoint
 # connections until an exact, suffix, or wildcard host pattern is listed. Browser navigation also denies
 # all hosts unless http_host_policy is explicitly configured.
 browser_cdp:
-  endpoint_allowlist: []
+  endpoints: []
   max_contexts: 1
   queue_timeout: "5s"
   connect_timeout: "5s"

@@ -18,7 +18,7 @@ import (
 
 func TestBoundedErrorDetailsKeepsScalarsAndDropsStructuredPayload(t *testing.T) {
 	got := boundedErrorDetails(map[string]any{
-		"source":       "endpoint_allowlist",
+		"source":       "endpoints",
 		"phase":        "connect",
 		"attempt":      3,
 		"retryable":    false,
@@ -39,7 +39,7 @@ func TestBoundedErrorDetailsKeepsScalarsAndDropsStructuredPayload(t *testing.T) 
 		}
 	}
 	for key, want := range map[string]any{
-		"source":    "endpoint_allowlist",
+		"source":    "endpoints",
 		"phase":     "connect",
 		"attempt":   3,
 		"retryable": false,

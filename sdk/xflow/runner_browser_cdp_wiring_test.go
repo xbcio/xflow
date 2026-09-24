@@ -12,7 +12,7 @@ import (
 
 func TestResolveRunnerBrowserCDPConfigUsesDefaultsAndCopiesAllowlist(t *testing.T) {
 	defaults := xnode.BrowserCDPConfigDefaults()
-	input := xnode.BrowserCDPConfig{EndpointAllowlist: []string{"chrome.test.internal"}}
+	input := xnode.BrowserCDPConfig{Endpoints: []string{"chrome.test.internal"}}
 
 	got := resolveRunnerBrowserCDPConfig(input)
 	if got.MaxContexts != defaults.MaxContexts {
@@ -24,15 +24,15 @@ func TestResolveRunnerBrowserCDPConfigUsesDefaultsAndCopiesAllowlist(t *testing.
 	if got.ConnectTimeout != defaults.ConnectTimeout {
 		t.Fatalf("ConnectTimeout = %s, want node default %s", got.ConnectTimeout, defaults.ConnectTimeout)
 	}
-	input.EndpointAllowlist[0] = "mutated.test.internal"
-	if got.EndpointAllowlist[0] != "chrome.test.internal" {
-		t.Fatalf("EndpointAllowlist = %v, want an independent copy", got.EndpointAllowlist)
+	input.Endpoints[0] = "mutated.test.internal"
+	if got.Endpoints[0] != "chrome.test.internal" {
+		t.Fatalf("Endpoints = %v, want an independent copy", got.Endpoints)
 	}
 }
 
 func TestNewRunnerOrdinaryAndBrowserCDPRunnersCoexist(t *testing.T) {
 	browserConfig := xnode.BrowserCDPConfigDefaults()
-	browserConfig.EndpointAllowlist = []string{"chrome-a.test.internal"}
+	browserConfig.Endpoints = []string{"chrome-a.test.internal"}
 	browser := newBrowserCDPTestRunner(t, browserConfig)
 	t.Cleanup(func() {
 		if err := browser.Close(); err != nil {
@@ -44,7 +44,7 @@ func TestNewRunnerOrdinaryAndBrowserCDPRunnersCoexist(t *testing.T) {
 	// does not advertise the exact Browser node type must neither validate nor
 	// acquire this process-global configuration.
 	ordinaryConfig := browserConfig
-	ordinaryConfig.EndpointAllowlist = []string{"chrome-b.test.internal"}
+	ordinaryConfig.Endpoints = []string{"chrome-b.test.internal"}
 	ordinaryConfig.MaxContexts++
 	ordinary, err := NewRunner(RunnerConfig{
 		ServerURL:    "http://127.0.0.1:1",
@@ -62,7 +62,7 @@ func TestNewRunnerOrdinaryAndBrowserCDPRunnersCoexist(t *testing.T) {
 
 func TestNewRunnerBrowserCDPConfigLeaseLifecycle(t *testing.T) {
 	firstConfig := xnode.BrowserCDPConfigDefaults()
-	firstConfig.EndpointAllowlist = []string{"chrome-a.test.internal"}
+	firstConfig.Endpoints = []string{"chrome-a.test.internal"}
 	firstConfig.MaxContexts = 2
 	firstConfig.QueueTimeout = 3 * time.Second
 	firstConfig.ConnectTimeout = 4 * time.Second
@@ -79,7 +79,7 @@ func TestNewRunnerBrowserCDPConfigLeaseLifecycle(t *testing.T) {
 	})
 
 	conflictingConfig := firstConfig
-	conflictingConfig.EndpointAllowlist = append([]string(nil), firstConfig.EndpointAllowlist...)
+	conflictingConfig.Endpoints = append([]string(nil), firstConfig.Endpoints...)
 	conflictingConfig.MaxContexts = firstConfig.MaxContexts + 1
 	if _, err := NewRunner(browserCDPTestRunnerConfig(conflictingConfig)); err == nil {
 		t.Fatal("NewRunner accepted a Browser CDP configuration conflicting with live runners")
@@ -111,7 +111,7 @@ func TestNewRunnerObserverPanicRollsBackBrowserCDPLeaseAndObservers(t *testing.T
 	defer kafkatrigger.SetObserver(nil)
 
 	firstConfig := xnode.BrowserCDPConfigDefaults()
-	firstConfig.EndpointAllowlist = []string{"chrome-a.test.internal"}
+	firstConfig.Endpoints = []string{"chrome-a.test.internal"}
 	func() {
 		defer func() {
 			if recovered := recover(); recovered == nil {
@@ -126,7 +126,7 @@ func TestNewRunnerObserverPanicRollsBackBrowserCDPLeaseAndObservers(t *testing.T
 	// and the Browser CDP lease to be acquired with a different configuration.
 	kafkatrigger.SetObserver(nil)
 	secondConfig := firstConfig
-	secondConfig.EndpointAllowlist = []string{"chrome-b.test.internal"}
+	secondConfig.Endpoints = []string{"chrome-b.test.internal"}
 	secondConfig.MaxContexts++
 	runner, err := NewRunner(browserCDPTestRunnerConfig(secondConfig), WithRunnerMetrics(metrics.New()))
 	if err != nil {
@@ -145,7 +145,7 @@ func TestNewRunnerBrowserCDPConfigErrorDoesNotAcquireALease(t *testing.T) {
 	}
 
 	validConfig := xnode.BrowserCDPConfigDefaults()
-	validConfig.EndpointAllowlist = []string{"chrome.test.internal"}
+	validConfig.Endpoints = []string{"chrome.test.internal"}
 	runner := newBrowserCDPTestRunner(t, validConfig)
 	t.Cleanup(func() {
 		if err := runner.Close(); err != nil {

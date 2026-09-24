@@ -55,7 +55,7 @@ var errorDetailsNodeHandler = node.Define(
 			Message:   "browser destination is denied by policy",
 			Permanent: true,
 			Details: map[string]any{
-				"source":       "endpoint_allowlist",
+				"source":       "endpoints",
 				"rejected_url": "https://denied.test/path",
 			},
 		}
@@ -93,7 +93,7 @@ func TestExecutionErrorDetailsReachConsumerSurfaces(t *testing.T) {
 			t.Fatalf("Inspect() node %q ErrorDetails = nil, want the node's structured detail; "+
 				"the failure message alone is %q", "work", nodeDetail.Error)
 		}
-		if got, want := nodeDetail.ErrorDetails["source"], "endpoint_allowlist"; got != want {
+		if got, want := nodeDetail.ErrorDetails["source"], "endpoints"; got != want {
 			t.Errorf("ErrorDetails[source] = %#v, want %#v", got, want)
 		}
 		if got, want := nodeDetail.ErrorDetails["rejected_url"], "https://denied.test/path"; got != want {
@@ -105,7 +105,7 @@ func TestExecutionErrorDetailsReachConsumerSurfaces(t *testing.T) {
 		body := getInspectBody(t, httpSrv, detailsID)
 		t.Logf("GET /v1/executions/%s body = %s", detailsID, body)
 
-		for _, want := range []string{`"error_details"`, `"source":"endpoint_allowlist"`, `"rejected_url":"https://denied.test/path"`} {
+		for _, want := range []string{`"error_details"`, `"source":"endpoints"`, `"rejected_url":"https://denied.test/path"`} {
 			if !strings.Contains(body, want) {
 				t.Errorf("inspect body is missing %s; body = %s", want, body)
 			}
@@ -224,7 +224,7 @@ func TestPrivateOutputWithholdsErrorDetails(t *testing.T) {
 	// must still expose Details, proving the redaction above is specific to the
 	// private policy rather than a dead field.
 	publicDetail := findNodeDetail(t, detail, "public")
-	if got, want := publicDetail.ErrorDetails["source"], "endpoint_allowlist"; got != want {
+	if got, want := publicDetail.ErrorDetails["source"], "endpoints"; got != want {
 		t.Fatalf("public node ErrorDetails[source] = %#v, want %#v — the control case must "+
 			"surface details, or the private-node assertion above proves nothing",
 			got, want)

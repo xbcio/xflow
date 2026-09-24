@@ -50,7 +50,7 @@ const (
 )
 
 const (
-	browserHostDeniedSourceEndpointAllowlist  = "endpoint_allowlist"
+	browserHostDeniedSourceEndpoints          = "endpoints"
 	browserHostDeniedSourceNavigationPolicy   = "navigation_policy"
 	browserHostDeniedSourceInterceptedRequest = "intercepted_request"
 
@@ -126,23 +126,23 @@ func (n *CDPNode) OnError(strategy types.OnError) types.Builder {
 func (n *CDPNode) RawParams() any { return n.Params }
 
 // BrowserCDPConfig is process-wide admission configuration for CDP nodes.
-// EndpointAllowlist contains hostname patterns only: exact hosts, suffixes
+// Endpoints contains hostname patterns only: exact hosts, suffixes
 // prefixed by '.', or wildcards prefixed by "*.". An empty list denies
 // every CDP endpoint. Each installed snapshot owns its own concurrency semaphore.
 type BrowserCDPConfig struct {
-	EndpointAllowlist []string
-	MaxContexts       int
-	QueueTimeout      time.Duration
-	ConnectTimeout    time.Duration
+	Endpoints      []string
+	MaxContexts    int
+	QueueTimeout   time.Duration
+	ConnectTimeout time.Duration
 }
 
 // BrowserCDPConfigDefaults returns fail-closed defaults.
 func BrowserCDPConfigDefaults() BrowserCDPConfig {
 	return BrowserCDPConfig{
-		EndpointAllowlist: nil,
-		MaxContexts:       defaultBrowserMaxContexts,
-		QueueTimeout:      defaultBrowserQueueTimeout,
-		ConnectTimeout:    defaultBrowserConnectTimeout,
+		Endpoints:      nil,
+		MaxContexts:    defaultBrowserMaxContexts,
+		QueueTimeout:   defaultBrowserQueueTimeout,
+		ConnectTimeout: defaultBrowserConnectTimeout,
 	}
 }
 
@@ -158,7 +158,7 @@ var browserConfigState = struct {
 }{snapshot: newBrowserConfigSnapshot(BrowserCDPConfigDefaults())}
 
 func newBrowserConfigSnapshot(cfg BrowserCDPConfig) *browserConfigSnapshot {
-	cfg.EndpointAllowlist = append([]string(nil), cfg.EndpointAllowlist...)
+	cfg.Endpoints = append([]string(nil), cfg.Endpoints...)
 	return &browserConfigSnapshot{config: cfg, sem: make(chan struct{}, cfg.MaxContexts)}
 }
 
@@ -206,11 +206,11 @@ func normalizeBrowserCDPConfig(cfg BrowserCDPConfig) (BrowserCDPConfig, error) {
 		return BrowserCDPConfig{}, fmt.Errorf("browser CDP connect timeout must be positive")
 	}
 
-	patterns, err := normalizedHostPatterns(cfg.EndpointAllowlist)
+	patterns, err := normalizedHostPatterns(cfg.Endpoints)
 	if err != nil {
-		return BrowserCDPConfig{}, fmt.Errorf("browser CDP endpoint allowlist contains an invalid host")
+		return BrowserCDPConfig{}, fmt.Errorf("browser CDP endpoints contains an invalid host")
 	}
-	cfg.EndpointAllowlist = patterns
+	cfg.Endpoints = patterns
 	return cfg, nil
 }
 
@@ -218,7 +218,7 @@ func sameBrowserCDPConfig(a, b BrowserCDPConfig) bool {
 	if a.MaxContexts != b.MaxContexts || a.QueueTimeout != b.QueueTimeout || a.ConnectTimeout != b.ConnectTimeout {
 		return false
 	}
-	return reflect.DeepEqual(a.EndpointAllowlist, b.EndpointAllowlist)
+	return reflect.DeepEqual(a.Endpoints, b.Endpoints)
 }
 
 func currentBrowserConfigSnapshot() *browserConfigSnapshot {
@@ -339,8 +339,8 @@ func parseBrowserCDPParams(raw map[string]any, snapshot *browserConfigSnapshot, 
 		return nil, &browserParamError{field: "debugging_url"}
 	}
 	debugHost, err := normalizeHostOnly(debugURL.Hostname())
-	if err != nil || !browserEndpointAllowed(snapshot.config.EndpointAllowlist, debugHost) {
-		return nil, newBrowserHostDeniedError(browserHostDeniedSourceEndpointAllowlist, debugURL.String())
+	if err != nil || !browserEndpointAllowed(snapshot.config.Endpoints, debugHost) {
+		return nil, newBrowserHostDeniedError(browserHostDeniedSourceEndpoints, debugURL.String())
 	}
 
 	entryRaw, err := requiredBrowserString(raw, "entry_url", false)
@@ -897,8 +897,8 @@ func resolveBrowserWebSocketEndpoint(ctx context.Context, debuggingURL *url.URL,
 	if err != nil {
 		return nil, &browserParamError{field: "debugging_url"}
 	}
-	if !browserEndpointAllowed(snapshot.config.EndpointAllowlist, host) {
-		return nil, newBrowserHostDeniedError(browserHostDeniedSourceEndpointAllowlist, debuggingURL.String())
+	if !browserEndpointAllowed(snapshot.config.Endpoints, host) {
+		return nil, newBrowserHostDeniedError(browserHostDeniedSourceEndpoints, debuggingURL.String())
 	}
 
 	switch strings.ToLower(debuggingURL.Scheme) {
@@ -961,8 +961,8 @@ func resolveBrowserWebSocketEndpoint(ctx context.Context, debuggingURL *url.URL,
 		return nil, &browserUnavailableError{}
 	}
 	endpointHost, err := normalizeHostOnly(endpoint.Hostname())
-	if err != nil || !browserEndpointAllowed(snapshot.config.EndpointAllowlist, endpointHost) {
-		return nil, newBrowserHostDeniedError(browserHostDeniedSourceEndpointAllowlist, endpoint.String())
+	if err != nil || !browserEndpointAllowed(snapshot.config.Endpoints, endpointHost) {
+		return nil, newBrowserHostDeniedError(browserHostDeniedSourceEndpoints, endpoint.String())
 	}
 	return endpoint, nil
 }
@@ -1206,7 +1206,7 @@ func browserHostDeniedClassified(denied *browserHostDeniedError) *types.Classifi
 
 func validatedBrowserHostDeniedSource(source string) string {
 	switch source {
-	case browserHostDeniedSourceEndpointAllowlist, browserHostDeniedSourceNavigationPolicy, browserHostDeniedSourceInterceptedRequest:
+	case browserHostDeniedSourceEndpoints, browserHostDeniedSourceNavigationPolicy, browserHostDeniedSourceInterceptedRequest:
 		return source
 	default:
 		return browserHostDeniedSourceNavigationPolicy
