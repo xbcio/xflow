@@ -3,6 +3,8 @@ package protocol
 import (
 	"encoding/json"
 	"errors"
+	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/xbcio/xflow/engine"
@@ -60,6 +62,79 @@ type RegisterRunnerRequest struct {
 	// supply envelopes. When true the server includes a SupplyKey in the
 	// registration response and encrypts supply GET responses for this runner.
 	SupportsEncryption bool `json:"supports_encryption,omitempty"`
+}
+
+// RunnerXflowVersionLabel is the registration label a runner uses to report the
+// xflow revision its binary links.
+//
+// It exists because the capability guard cannot see a version. A control plane
+// admits a runner by comparing node TYPES, and the capabilities an SDK declares
+// are identical across releases in which a node's parameters gained a mode: the
+// capability says "xflow.http", never "xflow.http with mode=raw". Two deployments
+// one release apart therefore register successfully and then disagree about what
+// a parameter means — the older one ignoring it — with no signal on either side.
+//
+// A LABEL carries it because that is the part of the registration a control plane
+// already compares against exact expected values, and because labels are the only
+// free-form map on the registration wire that every transport (HTTP, gRPC,
+// in-process, stream) already carries. A new protocol field would be the more
+// honest home and costs a protobuf regeneration plus a matching change on every
+// side that constructs the DTO; this costs one map entry.
+//
+// It is a RESERVED key: a runner's own labels must not use it, and the SDK
+// overrides any value a caller sets for it.
+const RunnerXflowVersionLabel = "xflow_version"
+
+// xflowModule names the module whose version is reported. It is spelled out
+// rather than read from BuildInfo().Main.Path because a RUNNER is its own module
+// and links xflow as a dependency — the main module's path is the runner's.
+const xflowModule = "github.com/xbcio/xflow"
+
+// LinkedXflowVersion reports the version of this module the running binary was
+// built against, or "" when that cannot be established.
+//
+// Empty is a distinct answer from a version, and callers must treat it as "not
+// reported" rather than as agreement: a build that cannot name its own version
+// cannot be compared against anything.
+func LinkedXflowVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return ""
+	}
+	// Built FROM this module — cmd/runner, cmd/server, or a test binary in this
+	// repo. There is then no dependency entry to read, and the main module's
+	// version describes a working tree rather than a release, so it is reported
+	// as unknown instead of as a version two deployments might match on.
+	if info.Main.Path == xflowModule {
+		return ""
+	}
+	for _, dep := range info.Deps {
+		if dep == nil || dep.Path != xflowModule {
+			continue
+		}
+		// The replacement is what is actually linked. A module replacement
+		// answers honestly; a filesystem replacement has no comparable version
+		// and is rejected below rather than allowed to claim the version it
+		// replaced — which would let a side running unreleased code assert a
+		// released version.
+		if dep.Replace != nil {
+			return comparableModuleVersion(dep.Replace.Version)
+		}
+		return comparableModuleVersion(dep.Version)
+	}
+	return ""
+}
+
+// comparableModuleVersion reports a version only when it is one two deployments
+// can meaningfully compare: a release tag or a pseudo-version, both of which
+// start with "v". "(devel)" is a working tree and "" is a filesystem
+// replacement; neither names a release, so both become "unknown".
+func comparableModuleVersion(version string) string {
+	version = strings.TrimSpace(version)
+	if !strings.HasPrefix(version, "v") {
+		return ""
+	}
+	return version
 }
 
 // RunnerControlDirective is the server's current desired scheduling state for
