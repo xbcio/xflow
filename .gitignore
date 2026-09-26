@@ -95,6 +95,11 @@ data/
 # pnpm store (web monorepo)
 .pnpm-store/
 
+# pnpm keeps task-run state in a node_modules at whatever directory the task was
+# run from, so running one from the repo root deposits a node_modules here. The
+# web workspace ignores its own; this one is the same thing one level up.
+node_modules/
+
 # Agent workspace artifacts
 .agents/
 
