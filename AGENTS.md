@@ -147,3 +147,34 @@ Use the shared Ant Design skill at `.claude/skills/antd/SKILL.md` before working
 The skill teaches agents when and how to call `@ant-design/cli` commands such as `antd info`, `antd doc`, `antd demo`, `antd token`, `antd semantic`, and `antd changelog`.
 
 <!-- antd-cli setup end -->
+
+## XFlow Editor UI Constraints
+
+These rules apply to the XFlow workbench in `web/packages/xflow-editor/`, its
+preview surface, and the admin workflow-detail host. The HTML design references
+under `.claude/mockups/` are the visual source of truth; Ant Design supplies
+accessible behavior and primitives, not its unmodified visual language.
+
+1. **Full-viewport workbench.** A workflow detail route is an immersive editor:
+   it must occupy the complete viewport and must not inherit the Admin header,
+   page padding, max-width, or scrolling container. Preserve `min-width: 0`,
+   `min-height: 0`, and overflow boundaries through every flex/grid ancestor.
+2. **Stable styling hooks.** Every editor-owned Ant Design component that needs
+   visual customization must expose a semantic, editor-scoped `className`,
+   `rootClassName`, or `classNames` hook. Scope CSS below `.xflow-editor`; do
+   not rely on unscoped generated `.ant-*` selectors or CSS-in-JS hash classes.
+3. **Token-first theming.** Define reusable visual values as `--xflow-*` CSS
+   variables on the editor root. Derive local rules from those variables rather
+   than hard-coding colors, radii, shadows, spacing, or state colors throughout
+   the stylesheet. Keep the nested editor `ConfigProvider` token values aligned
+   with the same semantic palette.
+4. **Tailwind + AntD division of responsibility.** Use Tailwind for structural
+   layout and one-off composition (flex/grid, sizing, spacing, responsive
+   placement). Use the local `ConfigProvider` for AntD component tokens, then
+   editor-scoped semantic classes only for design-specific overrides. Do not use
+   `!important` as the normal integration mechanism; reserve it for a documented
+   third-party specificity conflict.
+5. **Visual acceptance.** Validate both light and dark appearances with the real
+   browser after editor styling changes. Verify viewport dimensions, canvas and
+   React Flow heights, contrast, popup/drawer containment, and the design
+   reference before declaring the work complete.
