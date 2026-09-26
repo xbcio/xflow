@@ -340,6 +340,27 @@ describe("XFlowPreview", () => {
     expect(fitBounds).toHaveBeenCalledTimes(2);
   });
 
+  it("gives a branch node its declared output handles before anything is wired", () => {
+    const { container } = render(
+      <XFlowPreview
+        workflow={{ name: "Branch", nodes: [{ name: "gate", type: "xflow.if" }, { name: "done", type: "xflow.end" }] }}
+        editable
+        onConnect={vi.fn()}
+      />
+    );
+
+    const handles = [...container.querySelectorAll("[data-handle-id]")].map((handle) => ({
+      id: handle.getAttribute("data-handle-id"),
+      type: handle.getAttribute("data-handle-type")
+    }));
+
+    // The branch node's named outputs and nothing else: the end node declares no
+    // output at all, so it must not fall back to a main handle.
+    expect(handles.filter((handle) => handle.type === "source").map((handle) => handle.id)).toEqual(["true", "false"]);
+    // Both nodes take a main input, so two target handles are expected.
+    expect(handles.filter((handle) => handle.type === "target").map((handle) => handle.id)).toEqual(["main", "main"]);
+  });
+
   it("fits measured nodes when the fit-view control is used", () => {
     reactFlowMock.fitBounds.mockResolvedValue(true);
     render(<XFlowPreview workflow={portWorkflow} />);

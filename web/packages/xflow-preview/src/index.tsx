@@ -251,6 +251,22 @@ function portsWithMain(...portGroups: string[][]): string[] {
   return ports;
 }
 
+/**
+ * Declared ports lead so a branch or error handle exists before anything is
+ * wired to it. Edge ports follow: React Flow needs a handle for every edge it
+ * has to draw, including one the node type does not declare (a hand-written
+ * definition, or an edge kept from an older version of the node).
+ */
+function mergeDeclaredPorts(declaredPorts: string[], edgePorts: string[]): string[] {
+  const ports: string[] = [];
+  for (const port of [...declaredPorts, ...edgePorts]) {
+    if (port && !ports.includes(port)) {
+      ports.push(port);
+    }
+  }
+  return ports;
+}
+
 function isSupplyNode(node: GraphNode | undefined): boolean {
   return node?.kind === "supply" || node?.type.startsWith("xflow.supply.") === true;
 }
@@ -289,7 +305,7 @@ function toFlowNodes(
         runtime: nodeRuntime,
         // Read-only data edges still need their handles for React Flow to locate them.
         // Supply nodes intentionally have neither source nor target data handles.
-        sourcePorts: isSupply ? [] : portsWithMain(sourcePortsByNode.get(node.id) ?? []),
+        sourcePorts: isSupply ? [] : mergeDeclaredPorts(node.outputs, sourcePortsByNode.get(node.id) ?? []),
         targetPorts: isSupply
           ? []
           : portsWithMain(
