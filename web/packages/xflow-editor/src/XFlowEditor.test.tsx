@@ -152,6 +152,20 @@ describe("XFlowEditor", () => {
     expect(triggers.getAttribute("aria-expanded")).toBe("true");
   });
 
+  it("starts a library drag with the node type the canvas reads back on drop", () => {
+    render(<XFlowEditor value={workflow} />);
+
+    const tile = within(screen.getByRole("region", { name: "节点" })).getByRole("button", { name: "HTTP" });
+    expect(tile.getAttribute("draggable")).toBe("true");
+
+    const setData = vi.fn();
+    fireEvent.dragStart(tile, { dataTransfer: { setData, effectAllowed: "" } });
+
+    // Literal, not the shared constant: this string is the cross-package
+    // contract with the preview's drop reader, so a rename must fail here.
+    expect(setData).toHaveBeenCalledWith("application/xflow-node-type", "xflow.http");
+  });
+
   it("renders the editable workbench around the preview canvas", () => {
     render(
       <XFlowEditor

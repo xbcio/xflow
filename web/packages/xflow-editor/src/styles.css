@@ -3327,12 +3327,19 @@
   display: flex;
   flex-direction: column;
   left: 50%;
+  /* The canvas below stays a drop target for the node library, so only the
+     button — which is the one interactive child — takes the pointer back. */
+  pointer-events: none;
   position: absolute;
   text-align: center;
   top: 50%;
   transform: translate(-50%, -50%);
   width: min(340px, calc(100% - 72px));
   z-index: 2;
+}
+
+.xflow-editor-empty-canvas button {
+  pointer-events: auto;
 }
 
 @media (max-width: 801px) {

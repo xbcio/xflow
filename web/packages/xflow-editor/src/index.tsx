@@ -72,7 +72,7 @@ import type {
   WorkflowNode
 } from "@xflow/core";
 import { declaredOutputPorts } from "@xflow/core";
-import { XFlowPreview, type PreviewConnection } from "@xflow/preview";
+import { XFlowPreview, XFLOW_NODE_DRAG_MIME, type PreviewConnection } from "@xflow/preview";
 import "./styles.css";
 
 export type XFlowEditorAppearance = "light" | "dark" | "system";
@@ -1280,13 +1280,17 @@ function kindForDescriptor(descriptor: NodeDescriptor): WorkflowNode["kind"] {
   return descriptor.kind ?? (descriptor.group === "触发器" ? "trigger" : "action");
 }
 
-function createNodeFromDescriptor(workflow: WorkflowDef, descriptor: NodeDescriptor): WorkflowNode {
+function createNodeFromDescriptor(
+  workflow: WorkflowDef,
+  descriptor: NodeDescriptor,
+  position?: { x: number; y: number }
+): WorkflowNode {
   const nextIndex = (workflow.nodes ?? []).length + 1;
   return {
     name: uniqueNodeName(workflow, descriptor),
     type: descriptor.type,
     kind: kindForDescriptor(descriptor),
-    position: { x: nextIndex * 155, y: 220 },
+    position: position ?? { x: nextIndex * 155, y: 220 },
     ui: { label: descriptor.label }
   };
 }
@@ -1415,8 +1419,15 @@ function NodeLibrary({
                       aria-label={descriptor.label}
                       className="xflow-editor-node-tile"
                       data-tone={descriptor.tone}
+                      draggable
                       type="button"
                       onClick={() => onAddNode(descriptor)}
+                      onDragStart={(event) => {
+                        // The canvas reads this payload back on drop. Click stays
+                        // wired so the tile remains usable without a drag.
+                        event.dataTransfer.setData(XFLOW_NODE_DRAG_MIME, descriptor.type);
+                        event.dataTransfer.effectAllowed = "copy";
+                      }}
                     >
                       <span className="xflow-editor-node-tile__icon">{descriptor.icon}</span>
                       <span className="xflow-editor-node-tile__content">
@@ -2568,8 +2579,8 @@ export function XFlowEditor({
   }, [draftWorkflow, localRuntime, operationError]);
 
   const addNode = React.useCallback(
-    (descriptor: NodeDescriptor) => {
-      const nextNode = createNodeFromDescriptor(draftWorkflow, descriptor);
+    (descriptor: NodeDescriptor, position?: { x: number; y: number }) => {
+      const nextNode = createNodeFromDescriptor(draftWorkflow, descriptor, position);
       const withNode: WorkflowDef = {
         ...draftWorkflow,
         nodes: [...(draftWorkflow.nodes ?? []), nextNode]
@@ -2579,6 +2590,17 @@ export function XFlowEditor({
       setSelectedKey(nodeKey(nextNode, (connectedWorkflow.nodes ?? []).length - 1));
     },
     [commitWorkflow, draftWorkflow, selectedNode]
+  );
+
+  const dropNode = React.useCallback(
+    (type: string, position: { x: number; y: number }) => {
+      // The payload crosses a drag boundary, so an unknown type is a real input
+      // case rather than a programming error.
+      const descriptor = nodeDescriptors.find((candidate) => candidate.type === type);
+      if (!descriptor) return;
+      addNode(descriptor, position);
+    },
+    [addNode]
   );
 
   const updateNodePosition = React.useCallback(
@@ -3057,6 +3079,7 @@ export function XFlowEditor({
                 onNodePositionChange={updateNodePosition}
                 onConnect={addCanvasConnection}
                 onDeleteConnection={removeCanvasConnection}
+                onDropNode={dropNode}
               />
             </div>
           </div>

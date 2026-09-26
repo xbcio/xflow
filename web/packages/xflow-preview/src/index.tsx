@@ -36,11 +36,19 @@ import {
   type GraphEdge,
   type GraphNode,
   type NodeStatus,
+  type Position as NodePosition,
   type RuntimeNodeSnapshot,
   type RuntimeSnapshot,
   type WorkflowDef
 } from "@xflow/core";
 import "./styles.css";
+
+/**
+ * Payload key the node library writes when a node tile starts a drag. It lives
+ * here, not in the editor, because the preview owns the drop target and the
+ * editor already depends on this package — the reverse import is not allowed.
+ */
+export const XFLOW_NODE_DRAG_MIME = "application/xflow-node-type";
 
 /** A data-flow connection expressed with workflow node names and port names. */
 export interface PreviewConnection {
@@ -69,6 +77,12 @@ export interface XFlowPreviewProps {
   onConnect?: (connection: PreviewConnection) => void;
   /** Requests that the owner remove one data-flow connection. The preview never mutates the workflow. */
   onDeleteConnection?: (connection: PreviewConnection) => void;
+  /**
+   * Requests that the owner add a node of `type` at a canvas position. A drop on
+   * an empty workflow is admitted like any other, so the very first node can be
+   * dragged in rather than clicked. The preview never mutates the workflow.
+   */
+  onDropNode?: (type: string, position: Required<NodePosition>) => void;
 }
 
 const statusLabel: Record<string, string> = {
@@ -608,7 +622,8 @@ export function XFlowPreview({
   onSelectNode,
   onNodePositionChange,
   onConnect,
-  onDeleteConnection
+  onDeleteConnection,
+  onDropNode
 }: XFlowPreviewProps): React.ReactElement {
   const graph = React.useMemo(() => toGraphModel(workflow), [workflow]);
   const [internalSelectedNodeId, setInternalSelectedNodeId] = React.useState<string | undefined>();
@@ -618,6 +633,7 @@ export function XFlowPreview({
     flow: ReactFlowInstance<PreviewFlowNode, Edge> | null;
     selectedNodeId: string | undefined;
   }>({ flow: null, selectedNodeId: undefined });
+  const canvasRef = React.useRef<HTMLDivElement | null>(null);
   const selectedNodeId = selectedNodeIdProp ?? internalSelectedNodeId;
   // Preserve the original standalone API when no mode is supplied. The editor
   // opts into a mode explicitly so selecting nodes never accidentally starts a
@@ -625,6 +641,7 @@ export function XFlowPreview({
   const canDragNodes = editable && (interactionMode === undefined || interactionMode === "select");
   const canConnect = editable && (interactionMode === undefined || interactionMode === "connect") && Boolean(onConnect);
   const canDeleteConnections = editable && Boolean(onDeleteConnection);
+  const canDropNode = editable && Boolean(onDropNode);
   const graphNodesById = React.useMemo(
     () => new Map(graph.nodes.map((node) => [node.id, node])),
     [graph.nodes]
@@ -648,6 +665,24 @@ export function XFlowPreview({
   const handleFlowInit = React.useCallback((instance: ReactFlowInstance<PreviewFlowNode, Edge>) => {
     setFlowInstance(instance);
   }, []);
+  const handleDragOver = React.useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (!canDropNode) return;
+    // Without preventDefault the browser refuses the drop outright, which would
+    // make the node library's drag look broken instead of rejected.
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  }, [canDropNode]);
+  const handleDrop = React.useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (!canDropNode) return;
+    const type = event.dataTransfer.getData(XFLOW_NODE_DRAG_MIME);
+    if (!type) return;
+    event.preventDefault();
+    // screenToFlowPosition is the only correct conversion: it folds in the
+    // canvas pan and zoom, which a raw client-offset reading would ignore.
+    const position = flowInstance?.screenToFlowPosition({ x: event.clientX, y: event.clientY });
+    if (!position) return;
+    onDropNode?.(type, position);
+  }, [canDropNode, flowInstance, onDropNode]);
   React.useEffect(() => {
     const previous = selectionViewportRef.current;
     if (!flowInstance) {
@@ -775,48 +810,55 @@ export function XFlowPreview({
           <strong>{graph.nodes.length}</strong>
         </aside>
 
-        <div className="xflow-preview-canvas">
+        <div
+          className="xflow-preview-canvas"
+          ref={canvasRef}
+          onDragOver={canDropNode ? handleDragOver : undefined}
+          onDrop={canDropNode ? handleDrop : undefined}
+        >
+          {/* React Flow mounts even with zero nodes so an empty canvas can still
+              accept a dropped node; the note sits above it without intercepting
+              the pointer, and the editor's own empty state covers it visually. */}
           {graph.nodes.length === 0 ? (
             <p className="xflow-preview-empty">No nodes to preview</p>
-          ) : (
-            <ReactFlow
-              nodes={flowNodes}
-              edges={flowEdges}
-              nodeTypes={nodeTypes}
-              onInit={handleFlowInit}
-              minZoom={0.4}
-              maxZoom={1.6}
-              nodesDraggable={canDragNodes}
-              nodesConnectable={canConnect}
-              edgesFocusable={canDeleteConnections}
-              nodesFocusable={false}
-              elementsSelectable={canDeleteConnections}
-              connectOnClick={canConnect}
-              deleteKeyCode={canDeleteConnections ? ["Backspace", "Delete"] : null}
-              onConnect={canConnect ? handleConnect : undefined}
-              onEdgesChange={canDeleteConnections ? handleEdgesChange : undefined}
-              onEdgesDelete={canDeleteConnections ? handleEdgesDelete : undefined}
-              onBeforeDelete={canDeleteConnections ? handleBeforeDelete : undefined}
-              isValidConnection={canConnect ? isValidConnection : undefined}
-              aria-label={`${title} canvas`}
-              onNodeDragStop={canDragNodes ? (_, node) => {
-                onNodePositionChange?.(node.id, node.position);
-              } : undefined}
-              attributionPosition="bottom-left"
-            >
-              <InitialViewFitter flow={flowInstance} />
-              <Background color="var(--xflow-preview-canvas-grid)" gap={20} size={1} />
-              <PreviewControls />
-              <MiniMap
-                pannable
-                zoomable
-                maskColor="var(--xflow-preview-minimap-mask)"
-                nodeColor={miniMapNodeColor}
-                nodeStrokeColor="var(--xflow-preview-node-border)"
-                nodeStrokeWidth={2}
-              />
-            </ReactFlow>
-          )}
+          ) : null}
+          <ReactFlow
+            nodes={flowNodes}
+            edges={flowEdges}
+            nodeTypes={nodeTypes}
+            onInit={handleFlowInit}
+            minZoom={0.4}
+            maxZoom={1.6}
+            nodesDraggable={canDragNodes}
+            nodesConnectable={canConnect}
+            edgesFocusable={canDeleteConnections}
+            nodesFocusable={false}
+            elementsSelectable={canDeleteConnections}
+            connectOnClick={canConnect}
+            deleteKeyCode={canDeleteConnections ? ["Backspace", "Delete"] : null}
+            onConnect={canConnect ? handleConnect : undefined}
+            onEdgesChange={canDeleteConnections ? handleEdgesChange : undefined}
+            onEdgesDelete={canDeleteConnections ? handleEdgesDelete : undefined}
+            onBeforeDelete={canDeleteConnections ? handleBeforeDelete : undefined}
+            isValidConnection={canConnect ? isValidConnection : undefined}
+            aria-label={`${title} canvas`}
+            onNodeDragStop={canDragNodes ? (_, node) => {
+              onNodePositionChange?.(node.id, node.position);
+            } : undefined}
+            attributionPosition="bottom-left"
+          >
+            <InitialViewFitter flow={flowInstance} />
+            <Background color="var(--xflow-preview-canvas-grid)" gap={20} size={1} />
+            <PreviewControls />
+            <MiniMap
+              pannable
+              zoomable
+              maskColor="var(--xflow-preview-minimap-mask)"
+              nodeColor={miniMapNodeColor}
+              nodeStrokeColor="var(--xflow-preview-node-border)"
+              nodeStrokeWidth={2}
+            />
+          </ReactFlow>
         </div>
 
         <aside className="xflow-preview-panel" aria-label="Workflow status">

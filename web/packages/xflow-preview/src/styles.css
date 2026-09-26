@@ -658,6 +658,15 @@
   color: var(--xflow-preview-text-muted);
   font-size: 13px;
   margin: 0;
+  /* The empty canvas stays a drop target, so the note may not swallow the
+     pointer; it only needs to be readable above the mounted React Flow. */
+  left: 50%;
+  pointer-events: none;
+  position: absolute;
+  text-align: center;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 1;
 }
 
 @media (max-width: 860px) {

@@ -94,10 +94,19 @@ interface MockFlowEdge extends Record<string, unknown> {
   selected?: boolean;
 }
 
+interface MockFlowNode {
+  id: string;
+  position?: { x: number; y: number };
+  measured?: { width?: number; height?: number };
+  width?: number;
+  height?: number;
+}
+
 interface MockFlowInstance {
   fitBounds: (bounds: unknown, options?: { padding?: number }) => Promise<boolean>;
-  getNodes: () => Array<{ id: string }>;
+  getNodes: () => MockFlowNode[];
   getNodesBounds: (nodes: Array<{ id: string }>) => unknown;
+  screenToFlowPosition?: (clientPosition: { x: number; y: number }) => { x: number; y: number };
 }
 
 interface MockFlowProps extends Record<string, unknown> {
@@ -133,6 +142,33 @@ interface MockFlowProps extends Record<string, unknown> {
 function latestFlowProps(): MockFlowProps {
   expect(reactFlowMock.latestProps).toBeTruthy();
   return reactFlowMock.latestProps as MockFlowProps;
+}
+
+interface DragTransferStub {
+  getData: ReturnType<typeof vi.fn>;
+  setData: ReturnType<typeof vi.fn>;
+  dropEffect: string;
+  effectAllowed: string;
+}
+
+function dragTransferStub(type: string): DragTransferStub {
+  return { getData: vi.fn(() => type), setData: vi.fn(), dropEffect: "", effectAllowed: "" };
+}
+
+// jsdom implements neither DragEvent nor DataTransfer, so a plain Event has to
+// carry the drag payload and the pointer position by hand. `fireEvent.drop`
+// cannot: it builds a `new Event(name, init)`, and Event ignores clientX/Y.
+function fireCanvasDrop(
+  canvas: Element,
+  dataTransfer: DragTransferStub,
+  clientX: number,
+  clientY: number
+): void {
+  const event = new Event("drop", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "dataTransfer", { value: dataTransfer });
+  Object.defineProperty(event, "clientX", { value: clientX });
+  Object.defineProperty(event, "clientY", { value: clientY });
+  fireEvent(canvas, event);
 }
 
 const portWorkflow = {
@@ -378,6 +414,88 @@ describe("XFlowPreview", () => {
     render(<XFlowPreview workflow={{ name: "Empty flow", nodes: [] }} />);
 
     expect(screen.getByText("No nodes to preview")).toBeTruthy();
+  });
+
+  it("reports a dropped node type at the canvas position for an empty workflow", () => {
+    const onDropNode = vi.fn();
+    const screenToFlowPosition = vi.fn((clientPosition: { x: number; y: number }) => ({
+      x: clientPosition.x - 40,
+      y: clientPosition.y - 60
+    }));
+    const { container } = render(
+      <XFlowPreview
+        workflow={{ name: "Empty flow", nodes: [] }}
+        editable
+        onDropNode={onDropNode}
+      />
+    );
+
+    act(() => {
+      latestFlowProps().onInit?.({
+        fitBounds: reactFlowMock.fitBounds,
+        getNodes: () => [],
+        getNodesBounds: reactFlowMock.getNodesBounds,
+        screenToFlowPosition
+      });
+    });
+
+    const canvas = container.querySelector(".xflow-preview-canvas");
+    expect(canvas).toBeTruthy();
+    fireCanvasDrop(canvas!, dragTransferStub("xflow.function"), 300, 400);
+
+    expect(screenToFlowPosition).toHaveBeenCalledWith({ x: 300, y: 400 });
+    expect(onDropNode).toHaveBeenCalledWith("xflow.function", { x: 260, y: 340 });
+  });
+
+  it("ignores a drop that carries no node type or no canvas instance", () => {
+    const onDropNode = vi.fn();
+    const { container } = render(
+      <XFlowPreview
+        workflow={{ name: "Empty flow", nodes: [] }}
+        editable
+        onDropNode={onDropNode}
+      />
+    );
+
+    const canvas = container.querySelector(".xflow-preview-canvas");
+    fireCanvasDrop(canvas!, dragTransferStub(""), 10, 20);
+    expect(onDropNode).not.toHaveBeenCalled();
+
+    fireCanvasDrop(canvas!, dragTransferStub("xflow.function"), 10, 20);
+    expect(onDropNode).not.toHaveBeenCalled();
+  });
+
+  it("does not admit drops on a read-only canvas", () => {
+    const onDropNode = vi.fn();
+    const { container } = render(
+      <XFlowPreview
+        workflow={{ name: "Empty flow", nodes: [] }}
+        onDropNode={onDropNode}
+      />
+    );
+
+    const canvas = container.querySelector(".xflow-preview-canvas");
+    fireCanvasDrop(canvas!, dragTransferStub("xflow.function"), 10, 20);
+
+    expect(onDropNode).not.toHaveBeenCalled();
+  });
+
+  it("accepts a drag over the canvas only while a drop is admitted", () => {
+    const { container } = render(
+      <XFlowPreview
+        workflow={{ name: "Empty flow", nodes: [] }}
+        editable
+        onDropNode={vi.fn()}
+      />
+    );
+
+    const canvas = container.querySelector(".xflow-preview-canvas");
+    const event = new Event("dragover", { bubbles: true, cancelable: true });
+    const preventDefault = vi.spyOn(event, "preventDefault");
+    Object.defineProperty(event, "dataTransfer", { value: dragTransferStub("") });
+    fireEvent(canvas!, event);
+
+    expect(preventDefault).toHaveBeenCalled();
   });
 
   it("notifies the owner when a canvas node is selected with mouse or keyboard", () => {
