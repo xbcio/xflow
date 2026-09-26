@@ -207,6 +207,8 @@ export interface GraphNode {
   disabled: boolean;
   notes?: string;
   inputs: Required<PortDecl>[];
+  /** Output ports the node declares on its own, before any connection is drawn. */
+  outputs: string[];
 }
 
 export interface GraphEdge {
@@ -247,6 +249,44 @@ function normalizeInputs(inputs: PortDecl[] | undefined): Required<PortDecl>[] {
     name: input.name ?? "main",
     required: input.required ?? false
   }));
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
+}
+
+/**
+ * Output ports a node declares on its own, independent of what is connected.
+ * `hasMain` is false for types that replace the single default output with a set
+ * of named branches, so callers can tell "no main" apart from "no ports yet".
+ * Ports named by the node's own `outputs` parameter come first, then the ones
+ * its type implies.
+ */
+export function declaredOutputPorts(node: {
+  type?: string;
+  parameters?: Record<string, unknown>;
+}): { ports: string[]; hasMain: boolean } {
+  const type = node.type ?? "";
+  const dynamicPorts = stringArray(node.parameters?.outputs);
+  switch (type) {
+    case "xflow.if":
+      return { ports: [...dynamicPorts, "true", "false"], hasMain: false };
+    case "xflow.approval":
+      return { ports: [...dynamicPorts, "approved", "rejected", "timeout"], hasMain: false };
+    case "xflow.wait":
+      return { ports: [...dynamicPorts, "timeout", "error"], hasMain: true };
+    case "xflow.http":
+    case "xflow.grpc":
+    case "xflow.database":
+    case "xflow.function":
+    case "xflow.script":
+    case "xflow.notification":
+      return { ports: [...dynamicPorts, "error"], hasMain: true };
+    case "xflow.end":
+      return { ports: [], hasMain: false };
+    default:
+      return { ports: dynamicPorts, hasMain: true };
+  }
 }
 
 function dataConnectionTargets(value: ConnectionTargets | undefined): Connection[] {
@@ -334,6 +374,7 @@ export function toGraphModel(workflow: WorkflowDef): GraphModel {
   const autoPositions = buildAutoPositions(workflow);
   const nodes = (workflow.nodes ?? []).map<GraphNode>((node) => {
     const name = nodeName(node);
+    const declared = declaredOutputPorts(node);
     return {
       id: nodeKey(node),
       name,
@@ -343,7 +384,8 @@ export function toGraphModel(workflow: WorkflowDef): GraphModel {
       position: nodePosition(node, autoPositions.get(name) ?? { x: 0, y: 0 }),
       disabled: node.disabled ?? false,
       notes: node.notes,
-      inputs: normalizeInputs(node.inputs)
+      inputs: normalizeInputs(node.inputs),
+      outputs: [...(declared.hasMain ? ["main"] : []), ...declared.ports]
     };
   });
 

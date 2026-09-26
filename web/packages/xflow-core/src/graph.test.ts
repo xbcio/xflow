@@ -1,7 +1,59 @@
 import { describe, expect, it } from "vitest";
-import { toGraphModel, type WorkflowDef } from "./index";
+import { declaredOutputPorts, toGraphModel, type WorkflowDef } from "./index";
+
+describe("declaredOutputPorts", () => {
+  it("replaces the single default output with the branches a type declares", () => {
+    expect(declaredOutputPorts({ type: "xflow.if" })).toEqual({
+      ports: ["true", "false"],
+      hasMain: false
+    });
+    expect(declaredOutputPorts({ type: "xflow.approval" })).toEqual({
+      ports: ["approved", "rejected", "timeout"],
+      hasMain: false
+    });
+  });
+
+  it("keeps main alongside the extra ports a type adds", () => {
+    expect(declaredOutputPorts({ type: "xflow.http" })).toEqual({
+      ports: ["error"],
+      hasMain: true
+    });
+    expect(declaredOutputPorts({ type: "xflow.wait" })).toEqual({
+      ports: ["timeout", "error"],
+      hasMain: true
+    });
+    expect(declaredOutputPorts({ type: "xflow.start" })).toEqual({ ports: [], hasMain: true });
+  });
+
+  it("treats an end node as having no output at all", () => {
+    expect(declaredOutputPorts({ type: "xflow.end" })).toEqual({ ports: [], hasMain: false });
+  });
+
+  it("puts ports named by the node's own outputs parameter ahead of the type's", () => {
+    expect(declaredOutputPorts({ type: "xflow.switch", parameters: { outputs: ["paid", "unpaid", ""] } })).toEqual({
+      ports: ["paid", "unpaid"],
+      hasMain: true
+    });
+  });
+});
 
 describe("toGraphModel", () => {
+  it("exposes the ports each node declares so handles exist before any wiring", () => {
+    const graph = toGraphModel({
+      nodes: [
+        { name: "branch", type: "xflow.if" },
+        { name: "call", type: "xflow.http" },
+        { name: "done", type: "xflow.end" }
+      ]
+    });
+
+    expect(graph.nodes.map((node) => [node.name, node.outputs])).toEqual([
+      ["branch", ["true", "false"]],
+      ["call", ["main", "error"]],
+      ["done", []]
+    ]);
+  });
+
   it("normalizes workflow nodes and connections into a stable graph model", () => {
     const workflow: WorkflowDef = {
       id: "wf-order",
@@ -36,7 +88,8 @@ describe("toGraphModel", () => {
         disabled: false,
         kind: "action",
         notes: undefined,
-        inputs: []
+        inputs: [],
+        outputs: ["main"]
       },
       {
         id: "charge",
@@ -47,7 +100,8 @@ describe("toGraphModel", () => {
         disabled: false,
         kind: "action",
         notes: "Calls payment gateway",
-        inputs: [{ name: "main", required: true }]
+        inputs: [{ name: "main", required: true }],
+        outputs: ["main", "error"]
       }
     ]);
     expect(graph.edges).toEqual([
