@@ -71,6 +71,7 @@ import type {
   WorkflowDef,
   WorkflowNode
 } from "@xflow/core";
+import { declaredOutputPorts } from "@xflow/core";
 import { XFlowPreview, type PreviewConnection } from "@xflow/preview";
 import "./styles.css";
 
@@ -908,10 +909,6 @@ function selectedPorts(workflow: WorkflowDef, selectedNode?: WorkflowNode): stri
     .map(([port]) => port);
 }
 
-function arrayParameter(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
-}
-
 function supportedOutputPorts(node?: WorkflowNode, workflow?: WorkflowDef): string[] {
   if (!node || isSupplyNode(node)) return [];
   const type = node.type ?? "";
@@ -921,31 +918,15 @@ function supportedOutputPorts(node?: WorkflowNode, workflow?: WorkflowDef): stri
         .filter(([, portConnections]) => connectionTypeFor(portConnections) === "data")
         .map(([port]) => port)
     : [];
-  const dynamicPorts = arrayParameter(node.parameters?.outputs);
-  const ports = new Set<string>(["main", ...existingPorts, ...dynamicPorts]);
-
-  if (type === "xflow.if") {
-    ports.add("true");
-    ports.add("false");
-    ports.delete("main");
-  }
-  if (type === "xflow.http" || type === "xflow.grpc" || type === "xflow.database" || type === "xflow.function" || type === "xflow.script" || type === "xflow.notification") {
-    ports.add("error");
-  }
-  if (type === "xflow.wait") {
-    ports.add("timeout");
-    ports.add("error");
-  }
-  if (type === "xflow.approval") {
-    ports.add("approved");
-    ports.add("rejected");
-    ports.add("timeout");
-    ports.delete("main");
-  }
   if (type === "xflow.end") {
     return existingPorts;
   }
 
+  const declared = declaredOutputPorts(node);
+  const ports = new Set<string>(declared.hasMain ? ["main"] : []);
+  for (const port of [...existingPorts, ...declared.ports]) {
+    ports.add(port);
+  }
   return Array.from(ports);
 }
 
