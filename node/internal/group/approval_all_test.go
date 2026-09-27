@@ -89,7 +89,7 @@ func TestApprovalAll_KeepsWaitingAfterASignalItCannotCount(t *testing.T) {
 		&types.SignalPayload{
 			Triggered: types.SignalReceived,
 			Name:      "approval_1/approval/alice",
-			Data:      map[string]any{"approver": "alice"},
+			Data:      map[string]any{types.VerifiedActorKey: "alice"},
 		})
 	if err != nil {
 		t.Fatalf("OnResume() error = %v", err)

@@ -195,21 +195,28 @@ func (n *ApprovalNode) OnResume(_ context.Context, input *types.Input, signal *t
 	// deliberately does not fail the execution: failing here would hand any
 	// caller a way to kill an in-flight approval with one misattributed or
 	// malformed signal.
+	//
+	// Identity is established before anything in the payload is interpreted: an
+	// unauthenticated signal is not read at all, so a caller cannot get the node
+	// to act on a field it supplied before we know who is speaking.
+	actor, ok := resolveActor(signal.Data)
+	if !ok {
+		return ignoreApprovalSignal(input, signal, "unverified-actor")
+	}
+	if !isRegisteredApprover(params, actor) {
+		return ignoreApprovalSignal(input, signal, "unauthorized-approver")
+	}
 	action, ok := signalAction(signal.Data)
 	if !ok {
 		return ignoreApprovalSignal(input, signal, "malformed-action")
 	}
-	approver, err := validateApprovalApprover(params, signal.Data)
-	if err != nil {
-		return ignoreApprovalSignal(input, signal, "unauthorized-approver")
-	}
-	if signal.Name != expectedApproverSignal(input.NodeName, params.Mode, approver) {
+	if signal.Name != expectedApproverSignal(input.NodeName, params.Mode, actor) {
 		return ignoreApprovalSignal(input, signal, "signal-name-mismatch")
 	}
-	if params.Mode == ApprovalSequential && approver != currentSequentialApprover(params, input.Data) {
+	if params.Mode == ApprovalSequential && actor != currentSequentialApprover(params, input.Data) {
 		return ignoreApprovalSignal(input, signal, "not-current-approver")
 	}
-	if hasApproverDecision(getDecisions(input.Data), approver) {
+	if hasApproverDecision(getDecisions(input.Data), actor) {
 		// Idempotent: a decision already on the ledger is not counted twice, and
 		// a retried delivery is not an error. Critical operations must tolerate
 		// a repeat without acting twice.
@@ -218,9 +225,9 @@ func (n *ApprovalNode) OnResume(_ context.Context, input *types.Input, signal *t
 
 	switch action {
 	case actionApprove:
-		return n.handleApprove(params, input, signal, approver)
+		return n.handleApprove(params, input, signal, actor)
 	case actionReject:
-		return n.handleReject(input, signal, approver)
+		return n.handleReject(input, signal, actor)
 	case actionReturn:
 		return &types.Output{Resuspend: true}, nil
 	}
@@ -384,24 +391,32 @@ func approvalOutput(base map[string]any, overlays ...map[string]any) map[string]
 	return out
 }
 
-func validateApprovalApprover(params *ApprovalParams, data map[string]any) (string, error) {
+// resolveActor reads the identity the control plane established for the caller.
+//
+// The "approver" field is whatever the caller wrote in the payload, so it is a
+// claim about who someone is, not evidence of it: an approval gate that acted on
+// it would let anyone able to deliver a signal decide any approval by claiming
+// to be a named approver. The subject the API layer verified from the caller's
+// credentials is the only accepted identity, and its absence means the request
+// cannot be attributed to anybody.
+func resolveActor(data map[string]any) (string, bool) {
 	if data == nil {
-		return "", fmt.Errorf("approval signal missing \"approver\" field")
+		return "", false
 	}
-	approverRaw, ok := data["approver"]
-	if !ok {
-		return "", fmt.Errorf("approval signal missing \"approver\" field")
+	actor, ok := data[types.VerifiedActorKey].(string)
+	if !ok || actor == "" {
+		return "", false
 	}
-	approver, ok := approverRaw.(string)
-	if !ok {
-		return "", fmt.Errorf("approval signal \"approver\" field is not a string")
-	}
+	return actor, true
+}
+
+func isRegisteredApprover(params *ApprovalParams, actor string) bool {
 	for _, allowed := range params.Approvers {
-		if approver == allowed {
-			return approver, nil
+		if actor == allowed {
+			return true
 		}
 	}
-	return "", fmt.Errorf("approval signal approver %q is not authorized", approver)
+	return false
 }
 
 func appendDecision(decisions []map[string]any, approver string, action string, comment any) []map[string]any {

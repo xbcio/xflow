@@ -177,8 +177,10 @@ func TestWorkflowTierHighDistributed(t *testing.T) {
 	// HTTP route an operator would use.
 	waitNodeSuspended(t, h, execID, "gate")
 	postSignal(t, h, execID, workflows.HighApprovalSignal, map[string]any{
-		"approver": workflows.HighApprover,
-		"action":   "approve",
+		// The actor is the in-process equivalent of the subject the API layer
+		// verifies for an HTTP caller; the node counts the decision under it.
+		types.VerifiedActorKey: workflows.HighApprover,
+		"action":               "approve",
 	})
 
 	// The wait node parks a second time; releasing it exercises the signal-wait

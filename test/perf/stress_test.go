@@ -384,8 +384,10 @@ func driveHighStress(h *stressHarness, id types.ExecutionID) error {
 		return err
 	}
 	if err := postSignalStress(h, id, workflows.HighApprovalSignal, map[string]any{
-		"approver": workflows.HighApprover,
-		"action":   "approve",
+		// The subject comes from the bearer token, not from the payload: the
+		// server sets the actor key from the credentials it verified and refuses
+		// a body that tries to supply it.
+		"action": "approve",
 	}); err != nil {
 		return err
 	}
@@ -405,7 +407,12 @@ type stressHarness struct {
 	httpSrv *httptest.Server
 	state   engine.StateStore
 	runners control.RunnerDirectory
-	stop    func()
+	// authToken is the bearer credential this run's principals authenticate
+	// with. The server verifies it and derives the caller's subject from it, so
+	// an approval decision is attributed to the authenticated identity rather
+	// than to anything the request body claims.
+	authToken string
+	stop      func()
 }
 
 // newStressHarness brings up the control plane and nRunners runners advertising
@@ -432,7 +439,16 @@ func newStressHarness(t *testing.T, addr string, defs []*types.WorkflowDef, runn
 	if err != nil {
 		t.Fatalf("NewControlPlane: %v", err)
 	}
-	srv, err := apiserver.New(apiserver.Config{}, apiserver.WithControlPlane(cp))
+	// The server authenticates callers the way a deployment does: the harness
+	// holds a per-run token whose subject is the approver the high tier's gate
+	// names, so the approval is decided by the identity the server verified.
+	authToken := stressToken(t)
+	srv, err := apiserver.New(apiserver.Config{
+		PrincipalAuth:       apiserver.NewBearerPrincipalAuth(authToken, workflows.HighApprover, []string{"workflow", "execution"}),
+		Authorizer:          apiserver.ScopeAuthorizer{},
+		AuditSink:           apiserver.NewInMemoryAuditSink(),
+		RequireWorkflowAuth: true,
+	}, apiserver.WithControlPlane(cp))
 	if err != nil {
 		t.Fatalf("apiserver.New: %v", err)
 	}
@@ -469,7 +485,7 @@ func newStressHarness(t *testing.T, addr string, defs []*types.WorkflowDef, runn
 		go func() { _ = r.Run(ctx) }()
 	}
 
-	h := &stressHarness{httpSrv: httpSrv, state: b.State(), runners: cp.RunnerDirectory()}
+	h := &stressHarness{httpSrv: httpSrv, state: b.State(), runners: cp.RunnerDirectory(), authToken: authToken}
 	h.stop = func() {
 		cancel()
 		shutdownCtx, sc := context.WithTimeout(context.Background(), 5*time.Second)
@@ -505,6 +521,31 @@ func stressCaps(defs []*types.WorkflowDef) []protocol.Capability {
 
 // --- HTTP helpers (goroutine-safe: they return errors, never call t.Fatal) ---
 
+// stressToken mints a per-run bearer token. Generating it rather than fixing it
+// keeps a credential whose only validity is this process out of the tree, and
+// matches how the harness's other identifiers are made.
+func stressToken(t *testing.T) string {
+	t.Helper()
+	var b [24]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	return "qa_stress_tier_" + hex.EncodeToString(b[:])
+}
+
+// postAuthorized posts an authenticated JSON body to a route on the harness's
+// server. Every control-plane call goes through here so no request is sent
+// without the credential the server now requires.
+func postAuthorized(h *stressHarness, url string, body []byte) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+h.authToken)
+	return h.httpSrv.Client().Do(req)
+}
+
 func submitStress(h *stressHarness, def *types.WorkflowDef, params map[string]any) (types.ExecutionID, error) {
 	body := struct {
 		Workflow *types.WorkflowDef `json:"workflow"`
@@ -515,7 +556,7 @@ func submitStress(h *stressHarness, def *types.WorkflowDef, params map[string]an
 	if err := json.NewEncoder(&buf).Encode(body); err != nil {
 		return "", fmt.Errorf("encode submit: %w", err)
 	}
-	resp, err := h.httpSrv.Client().Post(h.httpSrv.URL+control.SubmitWorkflowPath, "application/json", &buf)
+	resp, err := postAuthorized(h, h.httpSrv.URL+control.SubmitWorkflowPath, buf.Bytes())
 	if err != nil {
 		return "", fmt.Errorf("post submit: %w", err)
 	}
@@ -557,7 +598,7 @@ func postSignalStress(h *stressHarness, id types.ExecutionID, name string, data 
 	}
 	// Built from the route constant so the path is not restated here.
 	url := h.httpSrv.URL + strings.Replace(apiserver.PathExecutionSignals, "{id}", string(id), 1)
-	resp, err := h.httpSrv.Client().Post(url, "application/json", bytes.NewReader(body))
+	resp, err := postAuthorized(h, url, body)
 	if err != nil {
 		return fmt.Errorf("post signal %s: %w", name, err)
 	}

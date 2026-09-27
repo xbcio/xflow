@@ -15,6 +15,7 @@ import (
 // external test package, and renaming a code should break these tests loudly
 // instead of passing against a stale expectation.
 const (
+	reasonUnverifiedActor      = "unverified-actor"
 	reasonUnauthorizedApprover = "unauthorized-approver"
 	reasonSignalNameMismatch   = "signal-name-mismatch"
 	reasonNotCurrentApprover   = "not-current-approver"
@@ -22,7 +23,7 @@ const (
 	reasonUnknownAction        = "unknown-action"
 )
 
-func TestApproval_IgnoresAnUnauthorizedApprover(t *testing.T) {
+func TestApproval_IgnoresAnApproverOutsideTheApproverList(t *testing.T) {
 	sh := approvalHandler(t)
 	out, err := sh.OnResume(context.Background(),
 		approvalInput(node.ApprovalAny, nil),
@@ -41,40 +42,64 @@ func TestApproval_IgnoresAnUnauthorizedApprover(t *testing.T) {
 	assertIgnored(t, out.Data, 0, reasonUnauthorizedApprover)
 }
 
-func TestApproval_IgnoresASignalWithNoApproverField(t *testing.T) {
+func TestApproval_IgnoresASignalWithNoActor(t *testing.T) {
+	// No verified subject means the request cannot be attributed to anybody,
+	// whatever the payload says about who is asking.
 	sh := approvalHandler(t)
 	out, err := sh.OnResume(context.Background(),
 		approvalInput(node.ApprovalAny, nil),
 		&types.SignalPayload{
 			Triggered: types.SignalReceived,
 			Name:      "approval_1/approval",
-			Data:      map[string]any{"action": "approve"},
+			Data:      map[string]any{"approver": "alice", "action": "approve"},
 		})
 	if err != nil {
 		t.Fatalf("OnResume() error = %v", err)
 	}
 	if !out.Resuspend {
-		t.Fatalf("a signal naming no approver resolved the gate (port %q)", out.Port)
+		t.Fatalf("a signal naming no verified actor resolved the gate (port %q)", out.Port)
 	}
-	assertIgnored(t, out.Data, 0, reasonUnauthorizedApprover)
+	assertIgnored(t, out.Data, 0, reasonUnverifiedActor)
 }
 
-func TestApproval_IgnoresANonStringApproverField(t *testing.T) {
+func TestApproval_IgnoresANonStringActor(t *testing.T) {
 	sh := approvalHandler(t)
 	out, err := sh.OnResume(context.Background(),
 		approvalInput(node.ApprovalAny, nil),
 		&types.SignalPayload{
 			Triggered: types.SignalReceived,
 			Name:      "approval_1/approval",
-			Data:      map[string]any{"action": "approve", "approver": 42},
+			Data:      map[string]any{"action": "approve", types.VerifiedActorKey: 42},
 		})
 	if err != nil {
 		t.Fatalf("OnResume() error = %v", err)
 	}
 	if !out.Resuspend {
-		t.Fatalf("a signal whose approver is not a string resolved the gate (port %q)", out.Port)
+		t.Fatalf("a signal whose actor is not a string resolved the gate (port %q)", out.Port)
 	}
-	assertIgnored(t, out.Data, 0, reasonUnauthorizedApprover)
+	assertIgnored(t, out.Data, 0, reasonUnverifiedActor)
+}
+
+// TestApproval_DecidesOnTheVerifiedActorNotTheClaimedApprover is the
+// impersonation case the actor key exists to close: the payload claims to be
+// bob, the verified subject is alice, and alice is who gets counted.
+func TestApproval_DecidesOnTheVerifiedActorNotTheClaimedApprover(t *testing.T) {
+	sh := approvalHandler(t)
+	signal := sharedApprovalSignal("alice", "approve", "claiming to be bob")
+	signal.Data["approver"] = "bob"
+
+	out, err := sh.OnResume(context.Background(), approvalInput(node.ApprovalAny, nil), signal)
+	if err != nil {
+		t.Fatalf("OnResume() error = %v", err)
+	}
+	if out.Port != "approved" {
+		t.Fatalf("Port = %q, want approved: the verified actor is a registered "+
+			"approver, so the decision counts", out.Port)
+	}
+	if got := out.Data["approver"]; got != "alice" {
+		t.Fatalf("approver = %v, want alice; the payload's claim to be bob was "+
+			"recorded as fact", got)
+	}
 }
 
 func TestApproval_IgnoresAnUnknownAction(t *testing.T) {
@@ -99,7 +124,7 @@ func TestApproval_IgnoresASignalWithNoAction(t *testing.T) {
 		&types.SignalPayload{
 			Triggered: types.SignalReceived,
 			Name:      "approval_1/approval",
-			Data:      map[string]any{"approver": "alice"},
+			Data:      map[string]any{types.VerifiedActorKey: "alice"},
 		})
 	if err != nil {
 		t.Fatalf("OnResume() error = %v", err)
@@ -117,7 +142,7 @@ func TestApproval_IgnoresANonStringAction(t *testing.T) {
 		&types.SignalPayload{
 			Triggered: types.SignalReceived,
 			Name:      "approval_1/approval",
-			Data:      map[string]any{"approver": "alice", "action": 7},
+			Data:      map[string]any{types.VerifiedActorKey: "alice", "action": 7},
 		})
 	if err != nil {
 		t.Fatalf("OnResume() error = %v", err)
@@ -175,13 +200,15 @@ func TestApproval_IgnoresAnApproverContradictingTheirDecision(t *testing.T) {
 
 func TestApproval_IgnoresASignalDeliveredOnAnotherApproversName(t *testing.T) {
 	sh := approvalHandler(t)
-	// The payload says bob, but it arrived on alice's signal name. The name is
-	// what the backend matched, so the two disagreeing is a mismatch rather than
-	// a vote for either.
+	// The verified actor is bob, but the signal arrived on alice's name. The name
+	// is the slot the backend matched, so delivering on someone else's slot is a
+	// mismatch rather than a vote for either: without this, a verified alice
+	// could answer on bob's behalf, which is the same impersonation reached
+	// through the signal name instead of the payload.
 	signal := &types.SignalPayload{
 		Triggered: types.SignalReceived,
 		Name:      "approval_1/approval/alice",
-		Data:      map[string]any{"approver": "bob", "action": "approve"},
+		Data:      map[string]any{types.VerifiedActorKey: "bob", "action": "approve"},
 	}
 	out, err := sh.OnResume(context.Background(), approvalInput(node.ApprovalAll, nil), signal)
 	if err != nil {
@@ -475,15 +502,16 @@ func approvalInput(mode node.ApprovalMode, data map[string]any) *types.Input {
 }
 
 // approvalSignal builds the signal for one approver in "all"/"sequential" mode,
-// where each approver has a name of their own.
+// where each approver has a name of their own. The actor is the server-set key:
+// identity travels there, never in a caller-supplied field.
 func approvalSignal(approver string, action string, comment string) *types.SignalPayload {
 	return &types.SignalPayload{
 		Triggered: types.SignalReceived,
 		Name:      "approval_1/approval/" + approver,
 		Data: map[string]any{
-			"approver": approver,
-			"action":   action,
-			"comment":  comment,
+			types.VerifiedActorKey: approver,
+			"action":               action,
+			"comment":              comment,
 		},
 	}
 }

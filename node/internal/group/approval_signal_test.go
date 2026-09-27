@@ -28,7 +28,7 @@ func TestApproval_IgnoredTrailIsBoundedAndCounted(t *testing.T) {
 			signal = &types.SignalPayload{
 				Triggered: types.SignalReceived,
 				Name:      "approval_1/approval/alice",
-				Data:      map[string]any{"approver": "alice"},
+				Data:      map[string]any{types.VerifiedActorKey: "alice"},
 			}
 		}
 		out, err := sh.OnResume(ctx, input, signal)
@@ -70,7 +70,7 @@ func TestApproval_TruncatesAnOverlongSignalNameInTheTrail(t *testing.T) {
 		&types.SignalPayload{
 			Triggered: types.SignalReceived,
 			Name:      longName,
-			Data:      map[string]any{"approver": "alice", "action": "approve"},
+			Data:      map[string]any{types.VerifiedActorKey: "alice", "action": "approve"},
 		})
 	if err != nil {
 		t.Fatalf("OnResume() error = %v", err)

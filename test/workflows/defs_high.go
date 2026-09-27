@@ -21,7 +21,9 @@ const (
 
 // HighApprover is the approver identity HighWorkflow requires. The caller must
 // send the approval signal as this identity, with signal name
-// HighApprovalSignal.
+// HighApprovalSignal. In-process callers pass it as the actor key; a caller
+// using the HTTP API has it taken from their verified credentials instead and
+// must be authenticated as this subject.
 const HighApprover = "qa-approver@example.test"
 
 // HighApprovalSignal is the signal name HighWorkflow's approval node listens on.
