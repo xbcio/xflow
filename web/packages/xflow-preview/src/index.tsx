@@ -180,6 +180,28 @@ function fitMeasuredNodes(flow: ReactFlowInstance<PreviewFlowNode, Edge>): boole
   return true;
 }
 
+/**
+ * Whether a node is on screen at all, judged by its own anchor point. Nodes are
+ * top-level, so their position is already absolute and no parent offset applies.
+ * The box is deliberately not consulted: a freshly added node has no measured
+ * size yet, and a node the user dropped near an edge is still where they put it,
+ * so re-centering on anything short of "off screen" would move the graph out
+ * from under them.
+ */
+function isNodeAnchorOnScreen(
+  flow: ReactFlowInstance<PreviewFlowNode, Edge>,
+  node: PreviewFlowNode,
+  canvas: DOMRect
+): boolean {
+  const position = node.position as { x: number; y: number } | undefined;
+  if (!position) return false;
+
+  const { x, y, zoom } = flow.getViewport();
+  const left = canvas.left + x + position.x * zoom;
+  const top = canvas.top + y + position.y * zoom;
+  return left >= canvas.left && left <= canvas.right && top >= canvas.top && top <= canvas.bottom;
+}
+
 function useFitMeasuredNodes(): () => void {
   const flow = useReactFlow<PreviewFlowNode, Edge>();
 
@@ -704,6 +726,13 @@ export function XFlowPreview({
 
     const selectedNode = flowInstance.getNodes().find((node) => node.id === selectedNodeId);
     if (!selectedNode) return;
+    // The fit exists to reveal a node that is off screen — one appended at a
+    // default slot while the canvas is panned elsewhere, one picked from the
+    // outline. A node that is already on screen is the one the user just placed,
+    // and re-centering it would pull the graph out from under the pointer that
+    // dropped it.
+    const canvas = canvasRef.current?.getBoundingClientRect();
+    if (!canvas || isNodeAnchorOnScreen(flowInstance, selectedNode, canvas)) return;
     const bounds = flowInstance.getNodesBounds([selectedNode]);
     void flowInstance.fitBounds(bounds, { padding: 0.28 });
   }, [flowInstance, selectedNodeId]);

@@ -106,6 +106,7 @@ interface MockFlowInstance {
   fitBounds: (bounds: unknown, options?: { padding?: number }) => Promise<boolean>;
   getNodes: () => MockFlowNode[];
   getNodesBounds: (nodes: Array<{ id: string }>) => unknown;
+  getViewport?: () => { x: number; y: number; zoom: number };
   screenToFlowPosition?: (clientPosition: { x: number; y: number }) => { x: number; y: number };
 }
 
@@ -344,7 +345,8 @@ describe("XFlowPreview", () => {
     const flowInstance: MockFlowInstance = {
       fitBounds,
       getNodes: vi.fn(() => [sourceNode, targetNode]),
-      getNodesBounds
+      getNodesBounds,
+      getViewport: () => ({ x: 0, y: 0, zoom: 1 })
     };
     const { rerender } = render(
       <XFlowPreview workflow={portWorkflow} selectedNodeId={sourceNode.id} />
@@ -374,6 +376,46 @@ describe("XFlowPreview", () => {
     expect(getNodesBounds).toHaveBeenLastCalledWith([sourceNode]);
     expect(fitBounds).toHaveBeenLastCalledWith(sourceBounds, { padding: 0.28 });
     expect(fitBounds).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves a selected node alone when it is already on screen", () => {
+    vi.stubGlobal("requestAnimationFrame", vi.fn(() => 1));
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    // jsdom reports a zero-sized box for every element, which would make every
+    // node look off screen, so the canvas needs a real box for this to mean anything.
+    const rect = {
+      x: 0, y: 0, left: 0, top: 0, right: 1000, bottom: 800, width: 1000, height: 800
+    } as DOMRect;
+    const rectSpy = vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue(rect);
+
+    try {
+      const onScreen = { id: "on-screen", position: { x: 120, y: 90 } };
+      const offScreen = { id: "off-screen", position: { x: 2400, y: 1800 } };
+      const fitBounds = vi
+        .fn<(bounds: unknown, options?: { padding?: number }) => Promise<boolean>>()
+        .mockResolvedValue(true);
+      const flowInstance: MockFlowInstance = {
+        fitBounds,
+        getNodes: vi.fn(() => [onScreen, offScreen]),
+        getNodesBounds: vi.fn(() => ({ x: 0, y: 0, width: 200, height: 100 })),
+        getViewport: () => ({ x: 0, y: 0, zoom: 1 })
+      };
+      const { rerender } = render(<XFlowPreview workflow={portWorkflow} />);
+
+      act(() => {
+        latestFlowProps().onInit?.(flowInstance);
+      });
+
+      rerender(<XFlowPreview workflow={portWorkflow} selectedNodeId={onScreen.id} />);
+
+      expect(fitBounds).not.toHaveBeenCalled();
+
+      rerender(<XFlowPreview workflow={portWorkflow} selectedNodeId={offScreen.id} />);
+
+      expect(fitBounds).toHaveBeenCalledTimes(1);
+    } finally {
+      rectSpy.mockRestore();
+    }
   });
 
   it("gives a branch node its declared output handles before anything is wired", () => {
