@@ -24,8 +24,8 @@ import (
 // otherwise, which makes the audit trail actively misleading rather than absent.
 //
 // The same hole covers the timeout arm (default action "route" vs "reject"), the
-// ApprovalAny approve path, the "return" action, and all mode's rule that a
-// single signature must NOT complete the node.
+// ApprovalAny approve path, and all mode's rule that a single signature must NOT
+// complete the node.
 
 func TestApproval_OnResumeRejectDoesNotRouteToApproved(t *testing.T) {
 	sh := approvalHandler(t)
@@ -203,10 +203,13 @@ func TestApproval_OnResumeTimeoutRoutesByConfiguredAction(t *testing.T) {
 	}
 }
 
-func TestApproval_OnResumeReturnResuspendsWithoutDeciding(t *testing.T) {
-	// "return" means the approver handed the request back for revision. It is
-	// neither an approval nor a rejection, and emitting on either port would end
-	// the wait — the node must keep waiting instead.
+func TestApproval_OnResumeReturnRoutesToTheReturnedPort(t *testing.T) {
+	// "return" means the approver handed the request back for revision. That is
+	// a decision about the request — it must leave the gate — and it is neither
+	// an approval nor a rejection, so it needs a port of its own. The alternative
+	// the node previously took, silently resuspending, left the request parked
+	// waiting for a decision that had already been made: the approver saw their
+	// return accepted and nothing happened.
 	sh := approvalHandler(t)
 	out, err := sh.OnResume(context.Background(),
 		approvalInput(node.ApprovalAny, nil),
@@ -215,14 +218,57 @@ func TestApproval_OnResumeReturnResuspendsWithoutDeciding(t *testing.T) {
 		t.Fatalf("OnResume() error = %v", err)
 	}
 
-	if !out.Resuspend {
-		t.Fatal("a returned request stopped waiting; the approval is resolved " +
-			"without anybody having approved or rejected it")
+	if out.Port != "returned" {
+		t.Fatalf("a returned request emitted on port %q, want returned", out.Port)
 	}
-	if out.Port != "" {
-		t.Fatalf("a returned request emitted on port %q", out.Port)
+	if out.Resuspend {
+		t.Fatal("a returned request kept waiting; the gate is still holding a " +
+			"decision that was already handed back")
 	}
-	if _, ok := out.Data["approved"]; ok {
-		t.Fatalf("approved = %v was recorded for a request that was handed back", out.Data["approved"])
+	if returned, ok := out.Data["returned"].(bool); !ok || !returned {
+		t.Fatalf("returned = %v (%T), want true", out.Data["returned"], out.Data["returned"])
+	}
+	if approved, ok := out.Data["approved"].(bool); !ok || approved {
+		t.Fatalf("approved = %v (%T) on a returned request, want false", out.Data["approved"], out.Data["approved"])
+	}
+	if got := out.Data["approver"]; got != "alice" {
+		t.Fatalf("approver = %v, want alice", got)
+	}
+	if got := out.Data["comment"]; got != "needs more detail" {
+		t.Fatalf("comment = %v, want the reason the approver gave", got)
+	}
+	assertDecision(t, out.Data, "decisions", 0, "alice", "return", "needs more detail")
+}
+
+func TestApprovalAll_OnResumeReturnIsFinalWithoutTheRemainingApprovers(t *testing.T) {
+	// The same short-circuit as a reject, for the same reason: once the request
+	// is on its way back for revision, a vote from an approver who has not
+	// answered yet cannot change where it went.
+	sh := node.Approval([]string{"alice", "bob", "carol"}, node.ApprovalAll)
+	input := &types.Input{
+		NodeName: "approval_1",
+		Params: map[string]any{
+			"approvers": []any{"alice", "bob", "carol"},
+			"mode":      "all",
+		},
+		Data: map[string]any{
+			"_decisions": []map[string]any{{"approver": "alice", "action": "approve"}},
+		},
+	}
+	out, err := sh.OnResume(context.Background(), input, approvalSignal("bob", "return", "resubmit the docs"))
+	if err != nil {
+		t.Fatalf("OnResume() error = %v", err)
+	}
+	if out.Port != "returned" {
+		t.Fatalf("Port = %q, want returned: carol had not answered yet, so the gate "+
+			"must close now rather than wait on a vote that can no longer change "+
+			"where the request is going", out.Port)
+	}
+	decisions := decisionsOf(t, out.Data, "decisions")
+	if len(decisions) != 2 {
+		t.Fatalf("len(decisions) = %d, want 2 (alice's approval and bob's return)", len(decisions))
+	}
+	if decisions[1]["approver"] != "bob" || decisions[1]["action"] != "return" {
+		t.Fatalf("decisions[1] = %#v, want bob's return", decisions[1])
 	}
 }

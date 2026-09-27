@@ -100,7 +100,7 @@ func (n *ApprovalNode) Descriptor() types.Descriptor {
 			{Name: "timeout_action", DisplayName: "Timeout Action", Type: types.ParamString, Required: false, Default: "route", Description: "Action on timeout: \"reject\" or \"route\""},
 		},
 		Inputs:  []types.PortSpec{{Name: "main", DisplayName: "Main"}},
-		Outputs: []types.PortSpec{{Name: "approved", DisplayName: "Approved"}, {Name: "rejected", DisplayName: "Rejected"}, {Name: "timeout", DisplayName: "Timeout"}},
+		Outputs: []types.PortSpec{{Name: "approved", DisplayName: "Approved"}, {Name: "rejected", DisplayName: "Rejected"}, {Name: "returned", DisplayName: "Returned"}, {Name: "timeout", DisplayName: "Timeout"}},
 	}
 }
 
@@ -229,7 +229,7 @@ func (n *ApprovalNode) OnResume(_ context.Context, input *types.Input, signal *t
 	case actionReject:
 		return n.handleReject(input, signal, actor)
 	case actionReturn:
-		return &types.Output{Resuspend: true}, nil
+		return handleReturn(input, signal, actor)
 	}
 
 	return ignoreApprovalSignal(input, signal, "unknown-action")
@@ -273,6 +273,26 @@ func (n *ApprovalNode) handleReject(input *types.Input, signal *types.SignalPayl
 				"comment":  signal.Data["comment"],
 			}),
 		Port: "rejected",
+	}, nil
+}
+
+// handleReturn sends the work back to the caller on the "returned" port, which
+// is what it means when an approver hands a request back for rework rather than
+// declining it outright. It short-circuits the same way a reject does: the
+// request has left the gate, so waiting for the remaining approvers could only
+// delay a decision they no longer have anything to decide.
+func handleReturn(input *types.Input, signal *types.SignalPayload, approver string) (*types.Output, error) {
+	decisions := appendDecision(getDecisions(input.Data), approver, actionReturn, signal.Data["comment"])
+	return &types.Output{
+		Data: approvalOutput(input.Data,
+			decisionLedger(decisions),
+			map[string]any{
+				"approved": false,
+				"returned": true,
+				"approver": approver,
+				"comment":  signal.Data["comment"],
+			}),
+		Port: "returned",
 	}, nil
 }
 
