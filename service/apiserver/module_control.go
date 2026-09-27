@@ -1744,6 +1744,12 @@ func inspectExecution(w http.ResponseWriter, r *http.Request, eng control.Engine
 // enveloped via writeData. The signal payload is delivered to the engine, but
 // never appears in message/data — message carries only the stable code's text
 // (spec §3.5).
+//
+// The delivered payload records the authenticated caller's subject under
+// types.VerifiedActorKey so a handler that acts on a person's behalf — an
+// approval deciding who voted — can read a server-verified identity instead of
+// one the caller supplied. A request that supplies the reserved key itself is
+// 400 signal_invalid.
 func (m *workflowControlModule) handleSignal(w http.ResponseWriter, r *http.Request, id types.ExecutionID) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
@@ -1756,11 +1762,38 @@ func (m *workflowControlModule) handleSignal(w http.ResponseWriter, r *http.Requ
 		writeFail(w, r, http.StatusBadRequest, "signal_invalid", "signal name is required")
 		return
 	}
-	if err := m.eng.DeliverSignal(r.Context(), id, req.Name, req.Data); err != nil {
+	// A signal that carries a reserved key is claiming a fact only this server
+	// can establish. Refuse it instead of overwriting: a regression that drops
+	// the injection below must fail loudly rather than fall back to trusting the
+	// caller's claim about who they are.
+	if _, reserved := req.Data[types.VerifiedActorKey]; reserved {
+		writeFail(w, r, http.StatusBadRequest, "signal_invalid", "signal payload is invalid")
+		return
+	}
+	data := req.Data
+	if p, ok := principalFromRequest(r); ok && p.Subject != "" {
+		data = withVerifiedActor(data, p.Subject)
+	}
+	if err := m.eng.DeliverSignal(r.Context(), id, req.Name, data); err != nil {
 		writeExecEngineFail(w, r, err)
 		return
 	}
 	writeData(w, r, http.StatusOK, map[string]bool{"accepted": true})
+}
+
+// withVerifiedActor returns data carrying the verified actor under the reserved
+// key. The map is copied so the decoded request body is not mutated.
+//
+// A signal delivered without a verified principal is passed through unchanged:
+// no actor can be established, and handlers must treat that as unattributable
+// rather than as an absence of identity to be filled in from the payload.
+func withVerifiedActor(data map[string]any, actor string) map[string]any {
+	out := make(map[string]any, len(data)+1)
+	for k, v := range data {
+		out[k] = v
+	}
+	out[types.VerifiedActorKey] = actor
+	return out
 }
 
 // handleCancel serves POST /v1/executions/{id}/cancel (spec §7). A not-found
