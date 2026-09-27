@@ -2,94 +2,116 @@ package group_test
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/types"
 )
 
-// handleAllSignals (approval.go) is the ApprovalAll multi-signal path.
-// approval_test.go and approval_decision_test.go both drive it, but only ever
-// with a fully-formed, correctly-keyed signal.All map where every payload's
-// own "approver" field matches the signal name it arrived under and every
-// action is "approve" or "reject". The three malformed-input branches below
-// are never reached by any existing test.
+// Countersign ("all") mode is decided one signal at a time now, so what matters
+// is how successive rounds compose: the ledger a round writes is the ledger the
+// next round reads, and the gate opens exactly when the last outstanding
+// approver decides — not before, and not later.
 
-func TestApprovalAll_OnResumeRejectsMissingApproverPayload(t *testing.T) {
-	sh := node.Approval([]string{"alice", "bob"}, node.ApprovalAll)
-	_, err := sh.OnResume(context.Background(), &types.Input{
-		NodeName: "SecurityApproval",
-		Params: map[string]any{
-			"approvers": []any{"alice", "bob"},
-			"mode":      "all",
-		},
-	}, &types.SignalPayload{
-		Triggered: types.SignalReceived,
-		Name:      "SecurityApproval/approval/alice",
-		Data:      map[string]any{"approver": "alice", "action": "approve"},
-		All: map[string]map[string]any{
-			"SecurityApproval/approval/alice": {"approver": "alice", "action": "approve"},
-			// bob's payload is missing entirely even though bob is a
-			// required approver.
-		},
-	})
-	if err == nil {
-		t.Fatal("expected error when a required approver's payload is absent from signal.All")
+func TestApprovalAll_CompletesOnlyAfterEveryApproverHasDecided(t *testing.T) {
+	sh := approvalHandler(t)
+	ctx := context.Background()
+
+	first, err := sh.OnResume(ctx,
+		approvalInput(node.ApprovalAll, nil),
+		approvalSignal("alice", "approve", "one of two"))
+	if err != nil {
+		t.Fatalf("first OnResume() error = %v", err)
 	}
-	if !strings.Contains(err.Error(), "missing payload") {
-		t.Fatalf("error = %q, want substring %q", err.Error(), "missing payload")
+	if !first.Resuspend {
+		t.Fatalf("one of two approvers completed the gate (port %q); the second "+
+			"approver is never asked", first.Port)
 	}
+
+	second, err := sh.OnResume(ctx,
+		approvalInput(node.ApprovalAll, first.Data),
+		approvalSignal("bob", "approve", "two of two"))
+	if err != nil {
+		t.Fatalf("second OnResume() error = %v", err)
+	}
+	if second.Resuspend {
+		t.Fatalf("the last outstanding approver signed and the node resuspended "+
+			"anyway, so the approval can never complete (data %v)", second.Data)
+	}
+	if second.Port != "approved" {
+		t.Fatalf("port = %q, want approved: every approver signed off", second.Port)
+	}
+	// Both signatures must survive into the completing round: a completion
+	// carrying only the last one is indistinguishable from a single approver
+	// having decided for everyone.
+	assertDecision(t, second.Data, "decisions", 0, "alice", "approve", "one of two")
+	assertDecision(t, second.Data, "decisions", 1, "bob", "approve", "two of two")
 }
 
-func TestApprovalAll_OnResumeRejectsMismatchedApproverIdentity(t *testing.T) {
-	sh := node.Approval([]string{"alice", "bob"}, node.ApprovalAll)
-	_, err := sh.OnResume(context.Background(), &types.Input{
-		NodeName: "SecurityApproval",
-		Params: map[string]any{
-			"approvers": []any{"alice", "bob"},
-			"mode":      "all",
-		},
-	}, &types.SignalPayload{
-		Triggered: types.SignalReceived,
-		Name:      "SecurityApproval/approval/alice",
-		Data:      map[string]any{"approver": "alice", "action": "approve"},
-		All: map[string]map[string]any{
-			// The payloads are keyed by the right signal names, but each
-			// payload's own "approver" field names the other person.
-			"SecurityApproval/approval/alice": {"approver": "bob", "action": "approve"},
-			"SecurityApproval/approval/bob":   {"approver": "alice", "action": "approve"},
-		},
-	})
-	if err == nil {
-		t.Fatal("expected error when a payload's own approver identity does not match the signal slot it was found under")
+func TestApprovalAll_RejectOnTheLastSignatureStillRejects(t *testing.T) {
+	sh := approvalHandler(t)
+	ctx := context.Background()
+
+	first, err := sh.OnResume(ctx,
+		approvalInput(node.ApprovalAll, nil),
+		approvalSignal("alice", "approve", "one of two"))
+	if err != nil {
+		t.Fatalf("first OnResume() error = %v", err)
 	}
-	if !strings.Contains(err.Error(), "expected approver") {
-		t.Fatalf("error = %q, want substring %q", err.Error(), "expected approver")
+
+	second, err := sh.OnResume(ctx,
+		approvalInput(node.ApprovalAll, first.Data),
+		approvalSignal("bob", "reject", "not this time"))
+	if err != nil {
+		t.Fatalf("second OnResume() error = %v", err)
 	}
+	// The count of decisions now equals the number of approvers, so completion
+	// and rejection are decided by the same round. A completion check that runs
+	// before the rejection check would open the gate on a declined request.
+	if second.Port != "rejected" {
+		t.Fatalf("port = %q, want rejected: the last signature was a rejection and "+
+			"the ledger is what an auditor reads", second.Port)
+	}
+	if second.Data["approved"] != false {
+		t.Fatalf("approved = %v, want false", second.Data["approved"])
+	}
+	assertDecision(t, second.Data, "decisions", 1, "bob", "reject", "not this time")
 }
 
-func TestApprovalAll_OnResumeRejectsUnknownActionInMultiSignalPath(t *testing.T) {
-	sh := node.Approval([]string{"alice", "bob"}, node.ApprovalAll)
-	_, err := sh.OnResume(context.Background(), &types.Input{
-		NodeName: "SecurityApproval",
-		Params: map[string]any{
-			"approvers": []any{"alice", "bob"},
-			"mode":      "all",
-		},
-	}, &types.SignalPayload{
-		Triggered: types.SignalReceived,
-		Name:      "SecurityApproval/approval/alice",
-		Data:      map[string]any{"approver": "alice", "action": "approve"},
-		All: map[string]map[string]any{
-			"SecurityApproval/approval/alice": {"approver": "alice", "action": "cancel"},
-			"SecurityApproval/approval/bob":   {"approver": "bob", "action": "approve"},
-		},
-	})
-	if err == nil {
-		t.Fatal("expected error for an unrecognized action inside the multi-signal payload")
+func TestApprovalAll_KeepsWaitingAfterASignalItCannotCount(t *testing.T) {
+	sh := approvalHandler(t)
+	ctx := context.Background()
+
+	// A blocker and a stranger deliver first. Neither may move the gate, and
+	// neither may stop it: the approvers who are entitled to decide still can.
+	afterBlocker, err := sh.OnResume(ctx,
+		approvalInput(node.ApprovalAll, nil),
+		&types.SignalPayload{
+			Triggered: types.SignalReceived,
+			Name:      "approval_1/approval/alice",
+			Data:      map[string]any{"approver": "alice"},
+		})
+	if err != nil {
+		t.Fatalf("OnResume() error = %v", err)
 	}
-	if !strings.Contains(err.Error(), "unknown approval action") {
-		t.Fatalf("error = %q, want substring %q", err.Error(), "unknown approval action")
+	afterStranger, err := sh.OnResume(ctx,
+		approvalInput(node.ApprovalAll, afterBlocker.Data),
+		approvalSignal("mallory", "approve", "let me in"))
+	if err != nil {
+		t.Fatalf("OnResume() error = %v", err)
 	}
+	if !afterStranger.Resuspend {
+		t.Fatalf("a stranger's approval moved the gate (port %q)", afterStranger.Port)
+	}
+	assertIgnored(t, afterStranger.Data, 0, reasonMalformedAction)
+	assertIgnored(t, afterStranger.Data, 1, reasonUnauthorizedApprover)
+
+	// Retrying alice's decision, properly formed this time, is still accepted.
+	final, err := sh.OnResume(ctx,
+		approvalInput(node.ApprovalAll, afterStranger.Data),
+		approvalSignal("alice", "approve", "ok"))
+	if err != nil {
+		t.Fatalf("OnResume() error = %v", err)
+	}
+	assertDecision(t, final.Data, "decisions", 0, "alice", "approve", "ok")
 }

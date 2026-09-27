@@ -9,29 +9,28 @@ import (
 )
 
 // approval_test.go is thorough about which approver is ALLOWED to decide — it
-// pins unauthorized approvers, duplicate approvers, and the non-current approver
-// in sequential mode. What it never asserts is what the node then DOES with a
-// decision it accepted, on any single-signal path. Every one of those tests ends
-// at `err == nil`.
+// pins unauthorized approvers, repeated decisions, and the out-of-turn
+// approver in sequential mode. What it never asserts is what the node then DOES
+// with a decision it accepted. Every one of those tests ends at `err == nil`.
 //
 // That leaves the single most consequential output in this node unpinned: the
 // port and the approved flag on a reject. Swapping `Port: "rejected"` for
-// `Port: "approved"` and `"approved": false` for true in OnResume's reject arm
-// leaves the whole node package green, so an authorized approver who explicitly
+// `Port: "approved"` and `"approved": false` for true in the reject arm leaves
+// the whole node package green, so an authorized approver who explicitly
 // declined would route the workflow down the approved branch. There is no error
 // and no log line on that path — the decision is simply inverted, and the
 // decisions list still faithfully records "reject" while the routing says
 // otherwise, which makes the audit trail actively misleading rather than absent.
 //
 // The same hole covers the timeout arm (default action "route" vs "reject"), the
-// ApprovalAny approve path, the "return" action, and ApprovalAll's rule that a
+// ApprovalAny approve path, the "return" action, and all mode's rule that a
 // single signature must NOT complete the node.
 
 func TestApproval_OnResumeRejectDoesNotRouteToApproved(t *testing.T) {
 	sh := approvalHandler(t)
 	out, err := sh.OnResume(context.Background(),
 		approvalInput(node.ApprovalAny, nil),
-		approvalSignal("alice", "reject", "budget not available"))
+		sharedApprovalSignal("alice", "reject", "budget not available"))
 	if err != nil {
 		t.Fatalf("OnResume() error = %v", err)
 	}
@@ -65,7 +64,7 @@ func TestApprovalAny_OnResumeApproveRoutesToApprovedPort(t *testing.T) {
 	sh := approvalHandler(t)
 	out, err := sh.OnResume(context.Background(),
 		approvalInput(node.ApprovalAny, map[string]any{"order_id": "ord-1"}),
-		approvalSignal("bob", "approve", "looks good"))
+		sharedApprovalSignal("bob", "approve", "looks good"))
 	if err != nil {
 		t.Fatalf("OnResume() error = %v", err)
 	}
@@ -88,11 +87,10 @@ func TestApprovalAny_OnResumeApproveRoutesToApprovedPort(t *testing.T) {
 }
 
 func TestApprovalAll_OnResumeOneSignatureDoesNotCompleteTheNode(t *testing.T) {
-	// ApprovalAll's entire contract is "everybody signs". approval_test.go pins
-	// that rule on the multi-signal path (handleAllSignals) but not on this one,
-	// which is the path taken whenever the signals arrive one at a time. Dropping
-	// the len(decisions) < len(approvers) branch lets the first approver's
-	// signature complete the node on behalf of everyone.
+	// The rule that makes countersign countersign: the gate opens only once
+	// every approver has decided. Dropping the len(decisions) < len(approvers)
+	// branch lets the first approver's signature complete it on behalf of
+	// everyone.
 	sh := approvalHandler(t)
 	out, err := sh.OnResume(context.Background(),
 		approvalInput(node.ApprovalAll, nil),
@@ -112,9 +110,10 @@ func TestApprovalAll_OnResumeOneSignatureDoesNotCompleteTheNode(t *testing.T) {
 	if _, ok := out.Data["approved"]; ok {
 		t.Fatalf("approved = %v is already set with one signature outstanding", out.Data["approved"])
 	}
-	// _decisions is the key PrepareSuspend reads to decide it must fall back to a
-	// shared signal on the next round; decisions is the one an auditor reads.
-	// Both are written here and the two are not interchangeable.
+	// _decisions is this node's own ledger and the only key its state is read
+	// from; decisions is the public copy downstream reads. They are written
+	// together but are not interchangeable — reading the public one back would
+	// let an upstream node's output pass for votes.
 	assertDecision(t, out.Data, "_decisions", 0, "alice", "approve", "one of two")
 	assertDecision(t, out.Data, "decisions", 0, "alice", "approve", "one of two")
 }
@@ -141,7 +140,7 @@ func TestApproval_OnResumeTimeoutRoutesByConfiguredAction(t *testing.T) {
 			if tc.action != "" {
 				input.Params["timeout_action"] = tc.action
 			}
-			signal := approvalSignal("", "", "")
+			signal := sharedApprovalSignal("", "", "")
 			signal.Triggered = types.TimeoutFired
 
 			out, err := sh.OnResume(context.Background(), input, signal)
@@ -178,7 +177,7 @@ func TestApproval_OnResumeReturnResuspendsWithoutDeciding(t *testing.T) {
 	sh := approvalHandler(t)
 	out, err := sh.OnResume(context.Background(),
 		approvalInput(node.ApprovalAny, nil),
-		approvalSignal("alice", "return", "needs more detail"))
+		sharedApprovalSignal("alice", "return", "needs more detail"))
 	if err != nil {
 		t.Fatalf("OnResume() error = %v", err)
 	}

@@ -86,8 +86,10 @@ func resultFromDetail(detail engine.ExecutionDetail) types.Result {
 
 // Signal delivers a named signal to a suspended node within the execution.
 //
-// Signal names are defined by suspending nodes. For built-in approval nodes the
-// per-approver form is "NodeName/approval/approver". If a signal arrives before
+// Signal names are defined by suspending nodes. A built-in approval node in
+// "any" mode listens on the shared name "NodeName/approval"; in "all" and
+// "sequential" mode each approver answers on "NodeName/approval/approver", so
+// one approver's delivery cannot displace another's. If a signal arrives before
 // the node suspends, the backend stores it and consumes it when the node reaches
 // the matching wait point.
 func (e *Engine) Signal(ctx context.Context, id types.ExecutionID, name string, data map[string]any) error {

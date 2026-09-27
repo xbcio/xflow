@@ -8,67 +8,40 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-// TestApprovalAll_OnResumeLastSignatureCompletesTheNode is the other half of
-// TestApprovalAll_OnResumeOneSignatureDoesNotCompleteTheNode.
-//
-// That test drives the first of two approvers through handleApprove's
-// ApprovalAll arm and pins that the node resuspends. It only exercises the
-// `len(decisions) < len(params.Approvers)` side of that branch, so widening the
-// comparison to `<=` — which sends the completing round back to resuspend
-// instead — leaves it green. Verified: with `<` changed to `<=`, all 14
-// packages that import node/internal/group pass.
-//
-// The branch is not reachable through the multi-signal path the rest of the
-// ApprovalAll tests use. handleAllSignals consumes a types.ModeMultiSignal
-// payload and has its own completion logic; this branch belongs to the shared
-// single-signal fallback PrepareSuspend switches to once a partial decision
-// exists (the behavior TestApprovalAll_PrepareSuspendKeepsLegacySharedSignalAfterPartialDecision
-// pins the suspend spec of, but never resumes). Signatures arriving one at a
-// time is the ordinary case for that fallback, so the failure mode is not
-// exotic: the final approver signs, the node resuspends anyway, and the
-// approval waits forever on a signal every approver has already sent.
-//
-// The second round is fed the first round's own output rather than a
-// hand-built decision list, so the two rounds are pinned as composing — the
-// keys production writes are the keys production then reads back.
-func TestApprovalAll_OnResumeLastSignatureCompletesTheNode(t *testing.T) {
+// "any" mode addresses every approver on one signal name, so the name an
+// approver is entitled to answer on differs by mode. A node that accepted the
+// per-approver name in "any" mode would resolve the gate on a signal delivered
+// under a name the specification for that mode never declares, and the reverse
+// mistake — requiring the per-approver name in "any" mode — makes the gate
+// unanswerable, since it arms only the shared name.
+
+func TestApprovalAny_IgnoresAPerApproverSignalName(t *testing.T) {
 	sh := approvalHandler(t)
-	ctx := context.Background()
-
-	first, err := sh.OnResume(ctx,
-		approvalInput(node.ApprovalAll, nil),
-		approvalSignal("alice", "approve", "one of two"))
+	// approvalSignal builds the per-approver form, which is not the name armed
+	// in "any" mode; sharedApprovalSignal is.
+	out, err := sh.OnResume(context.Background(),
+		approvalInput(node.ApprovalAny, nil),
+		approvalSignal("alice", "approve", "ok"))
 	if err != nil {
-		t.Fatalf("first OnResume() error = %v", err)
+		t.Fatalf("OnResume() error = %v", err)
 	}
-	if !first.Resuspend {
-		t.Fatalf("setup: the first of two approvers already completed the node")
+	if !out.Resuspend {
+		t.Fatalf("a signal on an undeclared name resolved an any-mode gate (port %q)", out.Port)
 	}
+	assertIgnored(t, out.Data, 0, reasonSignalNameMismatch)
+}
 
-	second, err := sh.OnResume(ctx,
-		approvalInput(node.ApprovalAll, first.Data),
-		approvalSignal("bob", "approve", "two of two"))
+func TestApprovalAny_AcceptsTheArmedSharedSignalName(t *testing.T) {
+	sh := approvalHandler(t)
+	out, err := sh.OnResume(context.Background(),
+		approvalInput(node.ApprovalAny, nil),
+		sharedApprovalSignal("bob", "approve", "ok"))
 	if err != nil {
-		t.Fatalf("second OnResume() error = %v", err)
+		t.Fatalf("OnResume() error = %v", err)
 	}
-
-	if second.Resuspend {
-		t.Fatalf("the last outstanding approver signed and the node resuspended anyway; "+
-			"it now waits on a signal that every approver has already sent, so the "+
-			"approval never completes (data %v)", second.Data)
+	if out.Port != "approved" {
+		t.Fatalf("port = %q, want approved: any one approver decides in any mode", out.Port)
 	}
-	if second.Port != "approved" {
-		t.Fatalf("port = %q, want approved: every approver signed off", second.Port)
-	}
-	if second.Data["approved"] != true {
-		t.Fatalf("approved = %v, want true", second.Data["approved"])
-	}
-	// Both signatures must survive into the completing round's payload: the
-	// decision list is what an auditor reads to see who actually signed, and a
-	// completion carrying only the last signature is indistinguishable from a
-	// single approver having decided for everyone.
-	assertDecision(t, second.Data, "decisions", 0, "alice", "approve", "one of two")
-	assertDecision(t, second.Data, "decisions", 1, "bob", "approve", "two of two")
 }
 
 // TestApproval_PrepareSuspendRejectsUnknownMode pins the fall-through error at
@@ -77,7 +50,7 @@ func TestApprovalAll_OnResumeLastSignatureCompletesTheNode(t *testing.T) {
 // ApprovalMode is an exported string type, so node.Approval(approvers,
 // node.ApprovalMode("aproved")) compiles and passes review as readily as the
 // correct spelling. No test supplies anything but "any"/"all"/"sequential", so
-// replacing the error with `return nil, nil` leaves all 14 importing packages
+// replacing the error with `return nil, nil` leaves every importing package
 // green.
 //
 // What that costs is not a nil dereference. Measured end to end on a local

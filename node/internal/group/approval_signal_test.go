@@ -9,59 +9,83 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-// validateApprovalApprover (approval.go) is reached on every OnResume call
-// through approvalSignal(), but that helper always supplies a well-formed
-// string "approver" field. The two branches below — the field missing
-// entirely, and the field present but not a string — are otherwise never
-// exercised on the single-signal OnResume path.
+// A signal the node declines leaves a trail entry. Two properties matter for a
+// trail a caller can influence: it must not grow without bound, and it must not
+// be the only thing distinguishing a handful of refusals from a flood.
 
-func TestApproval_OnResumeRejectsSignalMissingApproverField(t *testing.T) {
+func TestApproval_IgnoredTrailIsBoundedAndCounted(t *testing.T) {
 	sh := approvalHandler(t)
-	input := approvalInput(node.ApprovalAny, nil)
-	signal := &types.SignalPayload{
-		Triggered: types.SignalReceived,
-		Name:      "approval_1/approval",
-		Data:      map[string]any{"action": "approve"},
+	ctx := context.Background()
+	input := approvalInput(node.ApprovalAll, nil)
+
+	const deliveries = 25
+	for i := 0; i < deliveries; i++ {
+		var signal *types.SignalPayload
+		switch i % 2 {
+		case 0:
+			signal = approvalSignal("alice", "cancel", "")
+		default:
+			signal = &types.SignalPayload{
+				Triggered: types.SignalReceived,
+				Name:      "approval_1/approval/alice",
+				Data:      map[string]any{"approver": "alice"},
+			}
+		}
+		out, err := sh.OnResume(ctx, input, signal)
+		if err != nil {
+			t.Fatalf("delivery %d: OnResume() error = %v", i, err)
+		}
+		input = approvalInput(node.ApprovalAll, out.Data)
 	}
-	_, err := sh.OnResume(context.Background(), input, signal)
-	if err == nil {
-		t.Fatal("expected error when the signal payload has no \"approver\" field")
+
+	if got := input.Data["_ignored_count"]; got != deliveries {
+		t.Fatalf("_ignored_count = %v (%T), want %d: the count is the only place a "+
+			"refusal beyond the trail limit is visible", got, got, deliveries)
 	}
-	if !strings.Contains(err.Error(), "missing \"approver\" field") {
-		t.Fatalf("error = %q, want substring about a missing approver field", err.Error())
+	trail, ok := input.Data["_ignored"].([]map[string]any)
+	if !ok {
+		t.Fatalf("no ignored trail in %v", input.Data)
+	}
+	if len(trail) != 20 {
+		t.Fatalf("len(trail) = %d, want 20 (bounded): an unbounded trail lets a "+
+			"caller grow a suspended node's stored output", len(trail))
+	}
+	// The trail keeps the most recent entries, so its first entry is the 6th
+	// delivery (index 5), an odd one and therefore malformed-action.
+	if trail[0]["reason"] != reasonMalformedAction {
+		t.Fatalf("trail[0] = %v, want the most recent 20 entries (oldest kept "+
+			"should be delivery 5, %s)", trail[0], reasonMalformedAction)
+	}
+	if trail[len(trail)-1]["reason"] != reasonUnknownAction {
+		t.Fatalf("trail[last] = %v, want the newest delivery", trail[len(trail)-1])
 	}
 }
 
-func TestApproval_OnResumeRejectsNonStringApproverField(t *testing.T) {
+func TestApproval_TruncatesAnOverlongSignalNameInTheTrail(t *testing.T) {
 	sh := approvalHandler(t)
-	input := approvalInput(node.ApprovalAny, nil)
-	signal := &types.SignalPayload{
-		Triggered: types.SignalReceived,
-		Name:      "approval_1/approval",
-		Data:      map[string]any{"action": "approve", "approver": 42},
-	}
-	_, err := sh.OnResume(context.Background(), input, signal)
-	if err == nil {
-		t.Fatal("expected error when the approver field is not a string")
-	}
-	if !strings.Contains(err.Error(), "not a string") {
-		t.Fatalf("error = %q, want substring about the approver field not being a string", err.Error())
-	}
-}
+	longName := strings.Repeat("x", 4096)
 
-// Every existing OnResume test drives one of "approve", "reject", "return",
-// or a timeout signal. Nothing pins the terminal `default` error for an
-// action the node does not recognize on the single-signal path (as opposed
-// to the ApprovalAll multi-signal path, which validates it separately).
-func TestApproval_OnResumeRejectsUnknownAction(t *testing.T) {
-	sh := approvalHandler(t)
 	out, err := sh.OnResume(context.Background(),
-		approvalInput(node.ApprovalAny, nil),
-		approvalSignal("alice", "cancel", ""))
-	if err == nil {
-		t.Fatalf("expected error for unrecognized action %q, got output %#v", "cancel", out)
+		approvalInput(node.ApprovalAll, nil),
+		&types.SignalPayload{
+			Triggered: types.SignalReceived,
+			Name:      longName,
+			Data:      map[string]any{"approver": "alice", "action": "approve"},
+		})
+	if err != nil {
+		t.Fatalf("OnResume() error = %v", err)
 	}
-	if !strings.Contains(err.Error(), "unknown approval action") {
-		t.Fatalf("error = %q, want substring %q", err.Error(), "unknown approval action")
+	trail, ok := out.Data["_ignored"].([]map[string]any)
+	if !ok || len(trail) != 1 {
+		t.Fatalf("ignored trail = %v, want one entry", out.Data["_ignored"])
+	}
+	// The signal name is whatever the caller sent, so recording it verbatim
+	// puts caller-controlled bytes into the node's persisted output.
+	recorded, ok := trail[0]["signal"].(string)
+	if !ok {
+		t.Fatalf("recorded signal = %T, want a string", trail[0]["signal"])
+	}
+	if len(recorded) != 128 {
+		t.Fatalf("len(recorded signal) = %d, want 128 (truncated from %d)", len(recorded), len(longName))
 	}
 }

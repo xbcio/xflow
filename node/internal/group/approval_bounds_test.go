@@ -5,52 +5,87 @@ import (
 	"testing"
 
 	"github.com/xbcio/xflow/node"
-	"github.com/xbcio/xflow/types"
 )
 
-// Both PrepareSuspend and validateCurrentSequentialApprover guard sequential
-// mode with `idx >= len(params.Approvers)` before indexing
-// params.Approvers[idx]. Every existing sequential test only ever supplies an
-// index strictly inside range (0 or 1, for a 2-approver list), so the exact
-// boundary where idx == len(Approvers) is never exercised. If either `>=` is
-// weakened to `>`, idx == len(Approvers) slips past the guard and the very
-// next line indexes one past the end of the slice: a real, reachable
-// out-of-range panic, not merely a missing error.
+// Sequential mode's current approver is derived from the ledger rather than
+// from a stored cursor, so the two cannot drift apart. The boundary that needs
+// pinning is the end of the chain, where there is no current approver left:
+// the derivation returns the empty string there, and nothing may treat that
+// sentinel as a person — an approver named "" is not in the list, so a signal
+// claiming it must not be counted.
 
-func TestApprovalSequential_PrepareSuspendRejectsApproverIndexAtApproversLength(t *testing.T) {
-	sh := node.Approval([]string{"alice", "bob"}, node.ApprovalSequential)
-	_, err := sh.PrepareSuspend(context.Background(), &types.Input{
-		NodeName: "SecurityApproval",
-		Params: map[string]any{
-			"approvers": []any{"alice", "bob"},
-			"mode":      "sequential",
-		},
-		// _approver_idx == len(approvers): every approver has already signed
-		// off, so there is no next approver to address a signal to.
-		Data: map[string]any{"_approver_idx": 2},
-	})
-	if err == nil {
-		t.Fatal("expected error for approver index == len(approvers); if the " +
-			"guard is weakened from >= to >, this index is used to read " +
-			"params.Approvers[idx] one element past the end of the slice and " +
-			"panics instead of returning a clean error")
+func TestApprovalSequential_CurrentApproverFollowsTheLedger(t *testing.T) {
+	sh := approvalHandler(t)
+	ctx := context.Background()
+
+	afterAlice, err := sh.OnResume(ctx,
+		approvalInput(node.ApprovalSequential, nil),
+		approvalSignal("alice", "approve", "ok"))
+	if err != nil {
+		t.Fatalf("alice's OnResume() error = %v", err)
+	}
+
+	// alice's turn has passed. Repeating her decision is not a second vote.
+	repeat, err := sh.OnResume(ctx,
+		approvalInput(node.ApprovalSequential, afterAlice.Data),
+		approvalSignal("alice", "approve", "ok again"))
+	if err != nil {
+		t.Fatalf("repeat OnResume() error = %v", err)
+	}
+	if !repeat.Resuspend {
+		t.Fatalf("alice's repeated approval completed the gate (port %q)", repeat.Port)
+	}
+	if decisions := decisionsOf(t, repeat.Data, "_decisions"); len(decisions) != 1 {
+		t.Fatalf("len(decisions) = %d, want 1: alice was counted twice", len(decisions))
+	}
+
+	// bob is now the current approver, and his decision completes the chain.
+	final, err := sh.OnResume(ctx,
+		approvalInput(node.ApprovalSequential, repeat.Data),
+		approvalSignal("bob", "approve", "ship it"))
+	if err != nil {
+		t.Fatalf("bob's OnResume() error = %v", err)
+	}
+	if final.Port != "approved" {
+		t.Fatalf("port = %q, want approved after the last approver in the chain "+
+			"decided", final.Port)
 	}
 }
 
-func TestApprovalSequential_OnResumeRejectsApproverIndexAtApproversLength(t *testing.T) {
+func TestApprovalSequential_IgnoresASignalWhenTheWholeChainHasDecided(t *testing.T) {
 	sh := approvalHandler(t)
-	input := approvalInput(node.ApprovalSequential, map[string]any{"_approver_idx": 2})
-	// approvalInput() configures exactly two approvers (alice, bob), so index
-	// 2 is one past the end — the same boundary as above, but reached through
-	// OnResume's validateCurrentSequentialApprover instead of PrepareSuspend.
-	signal := approvalSignal("alice", "approve", "")
+	input := approvalInput(node.ApprovalSequential, map[string]any{
+		"_decisions": []map[string]any{
+			{"approver": "alice", "action": "approve"},
+			{"approver": "bob", "action": "approve"},
+		},
+	})
 
-	_, err := sh.OnResume(context.Background(), input, signal)
-	if err == nil {
-		t.Fatal("expected error for approver index == len(approvers) in " +
-			"validateCurrentSequentialApprover; weakening >= to > lets " +
-			"currentIdx == len(params.Approvers) through to " +
-			"params.Approvers[currentIdx], which panics instead of returning a " +
-			"clean error")
+	// Every approver in the chain has decided, so there is no current approver
+	// to match. The node must decline the signal rather than index the empty
+	// sentinel or panic on a chain that has run out.
+	out, err := sh.OnResume(context.Background(), input, approvalSignal("carol", "approve", "me too"))
+	if err != nil {
+		t.Fatalf("OnResume() error = %v", err)
 	}
+	if !out.Resuspend {
+		t.Fatalf("a signal from outside the finished chain resolved the gate (port %q)", out.Port)
+	}
+	if got := out.Data["approved"]; got != nil {
+		t.Fatalf("approved = %v was set by an approver who is not in the chain", got)
+	}
+}
+
+func TestApprovalSequential_IgnoresAnUnknownApproverBeforeAnyoneDecides(t *testing.T) {
+	sh := approvalHandler(t)
+	out, err := sh.OnResume(context.Background(),
+		approvalInput(node.ApprovalSequential, nil),
+		approvalSignal("mallory", "approve", "first"))
+	if err != nil {
+		t.Fatalf("OnResume() error = %v", err)
+	}
+	if !out.Resuspend {
+		t.Fatalf("an unknown approver resolved the gate (port %q)", out.Port)
+	}
+	assertIgnored(t, out.Data, 0, reasonUnauthorizedApprover)
 }

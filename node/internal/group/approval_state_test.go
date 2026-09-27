@@ -2,53 +2,26 @@ package group_test
 
 import (
 	"context"
-	"reflect"
 	"testing"
 
 	"github.com/xbcio/xflow/node"
-	"github.com/xbcio/xflow/types"
 )
 
-// getApproverIndex and parseDecisionList (approval.go) both accept two
-// input shapes: the native Go type produced in-process (int, []map[string]any)
-// and the shape a JSON round trip through persisted state produces (float64,
-// []any of map[string]any). Every existing sequential test only ever
-// constructs Data with the native Go shape by hand, so the JSON-shaped
-// branches are unexercised.
-
-func TestApprovalSequential_PrepareSuspendHandlesFloat64ApproverIndex(t *testing.T) {
-	sh := node.Approval([]string{"alice", "bob"}, node.ApprovalSequential)
-	spec, err := sh.PrepareSuspend(context.Background(), &types.Input{
-		NodeName: "SecurityApproval",
-		Params: map[string]any{
-			"approvers": []any{"alice", "bob"},
-			"mode":      "sequential",
-		},
-		// A previous round trip through persisted state decodes the saved
-		// index as float64, not int.
-		Data: map[string]any{"_approver_idx": float64(1)},
-	})
-	if err != nil {
-		t.Fatalf("PrepareSuspend() error = %v", err)
-	}
-	wantSignals := []string{"SecurityApproval/approval/bob"}
-	if !reflect.DeepEqual(spec.Signals, wantSignals) {
-		t.Fatalf("Signals = %#v, want %#v: a float64 _approver_idx of 1 must resolve "+
-			"to the second approver, not silently fall back to the first", spec.Signals, wantSignals)
-	}
-}
+// State that has been through persisted storage comes back in the shapes a JSON
+// round trip produces, not the native Go shapes an in-process call builds: a
+// ledger is []any of map[string]any, and a count is float64. Every other test
+// constructs these by hand in their native form, so the decoding branches would
+// otherwise be unexercised — and a node that silently drops a stored ledger
+// starts the approval over with nobody having voted.
 
 func TestApprovalSequential_OnResumeCarriesJSONShapedDecisionHistory(t *testing.T) {
 	sh := approvalHandler(t)
-	// Decision history as it would come back from a JSON-encoded store:
-	// []any of map[string]any, not the native []map[string]any that
-	// appendDecision produces in-process.
 	input := approvalInput(node.ApprovalSequential, map[string]any{
-		"_approver_idx": 1,
-		"decisions": []any{
+		"_decisions": []any{
 			map[string]any{"approver": "alice", "action": "approve", "comment": "ok"},
 		},
 	})
+
 	out, err := sh.OnResume(context.Background(), input, approvalSignal("bob", "approve", "ship"))
 	if err != nil {
 		t.Fatalf("OnResume() error = %v", err)
@@ -56,15 +29,52 @@ func TestApprovalSequential_OnResumeCarriesJSONShapedDecisionHistory(t *testing.
 	if out.Port != "approved" {
 		t.Fatalf("Port = %q, want approved", out.Port)
 	}
-	decisions, ok := out.Data["decisions"].([]map[string]any)
-	if !ok {
-		t.Fatalf("decisions type = %T, want []map[string]any", out.Data["decisions"])
-	}
+	decisions := decisionsOf(t, out.Data, "decisions")
 	if len(decisions) != 2 {
-		t.Fatalf("len(decisions) = %d, want 2: alice's earlier decision, stored in "+
-			"the []any shape a JSON round trip produces, must not be dropped", len(decisions))
+		t.Fatalf("len(decisions) = %d, want 2: alice's decision, stored in the "+
+			"[]any shape a JSON round trip produces, was dropped", len(decisions))
 	}
 	if decisions[0]["approver"] != "alice" || decisions[1]["approver"] != "bob" {
 		t.Fatalf("decisions = %#v, want approver order alice,bob", decisions)
+	}
+}
+
+func TestApprovalSequential_OrderCheckReadsAJSONShapedLedger(t *testing.T) {
+	// The same stored shape, but for the decision the order check depends on:
+	// if alice's stored approval is not recognized, bob becomes the current
+	// approver and a chain that should wait on alice advances past her.
+	sh := approvalHandler(t)
+	input := approvalInput(node.ApprovalSequential, map[string]any{
+		"_decisions": []any{
+			map[string]any{"approver": "alice", "action": "approve"},
+		},
+	})
+
+	out, err := sh.OnResume(context.Background(), input, approvalSignal("alice", "approve", "again"))
+	if err != nil {
+		t.Fatalf("OnResume() error = %v", err)
+	}
+	if !out.Resuspend {
+		t.Fatalf("alice was accepted a second time (port %q): her stored approval "+
+			"was not read, so the ledger no longer showed her as having decided", out.Port)
+	}
+}
+
+func TestApproval_IgnoredCountSurvivesAJSONRoundTrip(t *testing.T) {
+	sh := approvalHandler(t)
+	// A count that came back from storage is a float64, as JSON decoding
+	// produces. Read as an int it would look like zero, and every further
+	// refusal would overwrite the running total with 1.
+	input := approvalInput(node.ApprovalAny, map[string]any{
+		"_ignored_count": float64(3),
+	})
+
+	out, err := sh.OnResume(context.Background(),
+		input, sharedApprovalSignal("mallory", "approve", ""))
+	if err != nil {
+		t.Fatalf("OnResume() error = %v", err)
+	}
+	if got := out.Data["_ignored_count"]; got != 4 {
+		t.Fatalf("_ignored_count = %v (%T), want 4", got, got)
 	}
 }
