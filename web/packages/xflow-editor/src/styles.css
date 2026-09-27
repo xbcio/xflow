@@ -798,6 +798,73 @@
   color: var(--xflow-editor-text);
 }
 
+/* Pinned to the bottom of the rail so it reads as a workbench utility rather
+ * than a third navigation section alongside 节点 / 大纲. */
+.xflow-editor-rail .xflow-editor-rail-help {
+  border-top: 1px solid var(--xflow-editor-line);
+  height: 44px;
+  margin-top: auto;
+}
+
+.xflow-editor-shortcuts__group + .xflow-editor-shortcuts__group {
+  border-top: 1px solid var(--xflow-editor-line);
+  margin-top: 12px;
+  padding-top: 12px;
+}
+
+/* The whole reference is 11px, where the tertiary token drops to ~3:1 on the
+ * light modal surface. Secondary keeps the key chips and the note readable
+ * without promoting them to full body weight. */
+.xflow-editor-shortcuts__group-title {
+  color: var(--xflow-text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  margin: 0 0 6px;
+  text-transform: uppercase;
+}
+
+.xflow-editor-shortcuts__list {
+  margin: 0;
+}
+
+.xflow-editor-shortcuts__row {
+  align-items: center;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  padding: 3px 0;
+}
+
+.xflow-editor-shortcuts__label {
+  color: var(--xflow-editor-text);
+  font-size: 12px;
+}
+
+.xflow-editor-shortcuts__keys {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.xflow-editor-shortcuts__keys kbd {
+  background: var(--xflow-surface-field);
+  border: 1px solid var(--xflow-editor-line);
+  border-radius: var(--xflow-control-radius-sm);
+  color: var(--xflow-text-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  padding: 2px 6px;
+  white-space: nowrap;
+}
+
+.xflow-editor-shortcuts__note {
+  border-top: 1px solid var(--xflow-editor-line);
+  color: var(--xflow-text-secondary);
+  font-size: 11px;
+  margin: 12px 0 0;
+  padding-top: 12px;
+}
+
 .xflow-editor-left__content {
   display: grid;
   flex: 1 1 auto;

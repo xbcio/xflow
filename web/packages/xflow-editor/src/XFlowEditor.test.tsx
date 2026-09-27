@@ -1342,6 +1342,27 @@ describe("XFlowEditor", () => {
     expect(screen.getByText("runner offline")).toBeTruthy();
   });
 
+  it("drives history from the keyboard, not only from the toolbar", () => {
+    const handleChange = vi.fn();
+    render(<XFlowEditor value={workflow} onChange={handleChange} />);
+
+    fireEvent.click(within(screen.getByRole("region", { name: "节点" })).getByRole("button", { name: "HTTP" }));
+    const addedCount = handleChange.mock.calls.at(-1)?.[0]?.nodes.length;
+    expect(addedCount).toBe(4);
+
+    fireEvent.keyDown(window, { key: "z", metaKey: true });
+    expect(handleChange.mock.calls.at(-1)?.[0]).toEqual(workflow);
+
+    fireEvent.keyDown(window, { key: "y", ctrlKey: true });
+    expect(handleChange.mock.calls.at(-1)?.[0]?.nodes).toHaveLength(4);
+
+    fireEvent.keyDown(window, { key: "z", metaKey: true });
+    expect(handleChange.mock.calls.at(-1)?.[0]).toEqual(workflow);
+
+    fireEvent.keyDown(window, { key: "z", metaKey: true, shiftKey: true });
+    expect(handleChange.mock.calls.at(-1)?.[0]?.nodes).toHaveLength(4);
+  });
+
   it("deletes the selected node from the keyboard and takes its connections with it", () => {
     const handleChange = vi.fn();
     render(<XFlowEditor value={workflow} onChange={handleChange} />);
@@ -1364,5 +1385,94 @@ describe("XFlowEditor", () => {
     fireEvent.keyDown(window, { key: "Backspace" });
 
     expect(handleChange).not.toHaveBeenCalled();
+  });
+
+  it("duplicates the selected node under a fresh name at an offset", () => {
+    const handleChange = vi.fn();
+    const positioned = {
+      ...workflow,
+      nodes: [
+        { name: "start", type: "xflow.start", position: { x: 100, y: 200 } },
+        { name: "route_by_amount", type: "xflow.switch", position: { x: 300, y: 240 } },
+        { name: "route_by_amount_1", type: "xflow.switch" }
+      ]
+    };
+    render(<XFlowEditor value={positioned} onChange={handleChange} />);
+
+    fireEvent.keyDown(window, { key: "d", metaKey: true });
+
+    const next = handleChange.mock.calls.at(-1)?.[0];
+    const duplicated = next.nodes.at(-1);
+    expect(next.nodes).toHaveLength(4);
+    // `route_by_amount_1` is taken, so the suffix skips past it.
+    expect(duplicated.name).toBe("route_by_amount_2");
+    expect(duplicated.type).toBe("xflow.switch");
+    expect(duplicated.position).toEqual({ x: 336, y: 276 });
+    // A duplicate is added beside the original, never spliced into its slot.
+    expect(next.connections).toEqual(positioned.connections);
+  });
+
+  it("saves with the primary modifier and runs with the primary modifier plus Enter", async () => {
+    const handleSave = vi.fn(async (nextWorkflow: typeof workflow) => nextWorkflow);
+    const handleRun = vi.fn(async () => ({
+      status: "success" as const,
+      nodes: { start: { status: "success" as const, durationMs: 12 } }
+    }));
+    render(<XFlowEditor value={workflow} onSave={handleSave} onRun={handleRun} />);
+
+    fireEvent.keyDown(window, { key: "s", metaKey: true });
+    await waitFor(() => {
+      expect(handleSave).toHaveBeenCalledWith(workflow);
+    });
+
+    fireEvent.keyDown(window, { key: "Enter", ctrlKey: true });
+    await waitFor(() => {
+      expect(handleRun).toHaveBeenCalledWith(workflow);
+    });
+  });
+
+  it("keeps global shortcuts alive in a text field while canvas ones defer to it", async () => {
+    const handleChange = vi.fn();
+    const handleSave = vi.fn(async (nextWorkflow: typeof workflow) => nextWorkflow);
+    render(<XFlowEditor value={workflow} onChange={handleChange} onSave={handleSave} />);
+
+    fireEvent.click(within(screen.getByRole("region", { name: "节点" })).getByRole("button", { name: "HTTP" }));
+    const changeCountBefore = handleChange.mock.calls.length;
+
+    const nameField = within(screen.getByRole("region", { name: "属性" })).getByLabelText("工作流名称");
+    fireEvent.keyDown(nameField, { key: "z", metaKey: true });
+    expect(handleChange.mock.calls).toHaveLength(changeCountBefore);
+
+    // Saving is app-level: the browser's own ⌘S is no use to the user here.
+    fireEvent.keyDown(nameField, { key: "s", metaKey: true });
+    await waitFor(() => {
+      expect(handleSave).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("collapses and restores the left panel from the keyboard", () => {
+    render(<XFlowEditor value={workflow} />);
+
+    fireEvent.keyDown(window, { key: "b", metaKey: true });
+    expect(screen.getByRole("button", { name: "展开左侧面板" })).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: "b", ctrlKey: true });
+    expect(screen.getByRole("button", { name: "收起左侧面板" })).toBeTruthy();
+  });
+
+  it("opens the keyboard reference from ? and from the rail help button", () => {
+    const { unmount } = render(<XFlowEditor value={workflow} />);
+    expect(screen.queryByRole("dialog", { name: /快捷键/ })).toBeNull();
+
+    fireEvent.keyDown(window, { key: "?" });
+
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText("复制选中节点")).toBeTruthy();
+    expect(within(dialog).getByText("⌘ / Ctrl + S")).toBeTruthy();
+    unmount();
+
+    render(<XFlowEditor value={workflow} />);
+    fireEvent.click(screen.getByRole("button", { name: "快捷键帮助" }));
+    expect(screen.getByRole("dialog")).toBeTruthy();
   });
 });

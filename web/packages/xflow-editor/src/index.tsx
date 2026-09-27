@@ -30,6 +30,7 @@ import {
   MoonOutlined,
   PlayCircleOutlined,
   PlaySquareOutlined,
+  QuestionCircleOutlined,
   RedoOutlined,
   RightOutlined,
   SaveOutlined,
@@ -49,6 +50,7 @@ import {
   ConfigProvider,
   Drawer,
   Input,
+  Modal,
   Popover,
   Select,
   Segmented,
@@ -90,6 +92,121 @@ interface WorkflowHistory {
 const compactViewportQuery = "(max-width: 1399px)";
 const historyLimit = 80;
 const rulerMarks = [0, 100, 200, 300, 400, 500, 600, 700];
+
+/**
+ * Which keystrokes survive focus landing in a text field. Canvas bindings defer
+ * to the field — ⌘Z there means undo typing and V means the letter V — while
+ * global ones still fire, because the browser's own ⌘S and ⌘Enter are no use to
+ * anyone editing a workflow.
+ */
+type ShortcutScope = "global" | "canvas";
+
+interface EditorShortcut {
+  id: string;
+  label: string;
+  /** Rendered in the tooltip and the shortcut reference, hence a display string. */
+  keys: string;
+  scope: ShortcutScope;
+  /** Escape leaves the key's default alone so it can still cancel a live drag. */
+  preventDefault?: boolean;
+  match: (event: KeyboardEvent) => boolean;
+}
+
+const isPrimaryModifier = (event: KeyboardEvent): boolean => event.metaKey || event.ctrlKey;
+const isBareKey = (event: KeyboardEvent): boolean =>
+  !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey;
+const isModifiedKey = (event: KeyboardEvent, key: string): boolean =>
+  isPrimaryModifier(event) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === key;
+
+/**
+ * The single declaration of every binding: the window handler dispatches from
+ * this list and the shortcut reference renders from it, so the advertised keys
+ * and the live behavior cannot drift apart.
+ */
+const editorShortcuts: EditorShortcut[] = [
+  {
+    id: "undo",
+    label: "撤销",
+    keys: "⌘ / Ctrl + Z",
+    scope: "canvas",
+    match: (event) => isModifiedKey(event, "z")
+  },
+  {
+    id: "redo",
+    label: "重做",
+    keys: "⌘ / Ctrl + ⇧ + Z 或 ⌘ / Ctrl + Y",
+    scope: "canvas",
+    match: (event) => isPrimaryModifier(event) && !event.altKey
+      && (event.shiftKey ? event.key.toLowerCase() === "z" : event.key.toLowerCase() === "y")
+  },
+  {
+    id: "save",
+    label: "保存工作流",
+    keys: "⌘ / Ctrl + S",
+    scope: "global",
+    match: (event) => isModifiedKey(event, "s")
+  },
+  {
+    id: "run",
+    label: "运行工作流",
+    keys: "⌘ / Ctrl + Enter",
+    scope: "global",
+    match: (event) => isPrimaryModifier(event) && !event.altKey && event.key === "Enter"
+  },
+  {
+    id: "duplicate",
+    label: "复制选中节点",
+    keys: "⌘ / Ctrl + D",
+    scope: "canvas",
+    match: (event) => isModifiedKey(event, "d")
+  },
+  {
+    id: "toggleLeftPanel",
+    label: "收起 / 展开左侧面板",
+    keys: "⌘ / Ctrl + B",
+    scope: "canvas",
+    match: (event) => isModifiedKey(event, "b")
+  },
+  {
+    id: "selectTool",
+    label: "选择工具",
+    keys: "V",
+    scope: "canvas",
+    match: (event) => isBareKey(event) && event.key.toLowerCase() === "v"
+  },
+  {
+    id: "connectTool",
+    label: "连线工具",
+    keys: "L",
+    scope: "canvas",
+    match: (event) => isBareKey(event) && event.key.toLowerCase() === "l"
+  },
+  {
+    id: "escape",
+    label: "关闭抽屉 / 退出连线工具",
+    keys: "Esc",
+    scope: "canvas",
+    preventDefault: false,
+    match: (event) => event.key === "Escape"
+  },
+  {
+    id: "shortcutsHelp",
+    label: "快捷键速查",
+    keys: "?",
+    scope: "global",
+    match: (event) => event.key === "?"
+  }
+];
+
+/**
+ * Whether a key event belongs to a text field that owns the keystroke. React
+ * Flow skips its own Delete handling in exactly this case, so matching it keeps
+ * a backspace while renaming a node from acting on the canvas behind it.
+ */
+function isTextEntryTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement
+    && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
+}
 const rulerStepPx = 100;
 
 export interface XFlowEditorProps {
@@ -1280,6 +1397,41 @@ function kindForDescriptor(descriptor: NodeDescriptor): WorkflowNode["kind"] {
   return descriptor.kind ?? (descriptor.group === "触发器" ? "trigger" : "action");
 }
 
+/**
+ * Clones a node under the first free `<base>_<n>` name derived from its own
+ * name, so a duplicate of `http_2` becomes `http_3` rather than `http_1`. The
+ * `id` is dropped because the name is the key connections and selection use; a
+ * carried-over id would give two nodes the same identity.
+ *
+ * The clone is deliberately left unconnected: wiring it into the original's slot
+ * would silently re-route the graph, which is not what "duplicate" promises.
+ */
+function duplicateNodeInWorkflow(workflow: WorkflowDef, source: WorkflowNode, sourceIndex: number): { workflow: WorkflowDef; node: WorkflowNode } {
+  const sourceName = nodeName(source, sourceIndex);
+  const baseName = sourceName.replace(/_\d+$/, "") || sourceName;
+  const usedNames = new Set((workflow.nodes ?? []).map((node, index) => nodeName(node, index)));
+  let suffix = 1;
+  while (usedNames.has(`${baseName}_${suffix}`)) {
+    suffix += 1;
+  }
+
+  const offset = 36;
+  const position = source.position
+    ? { x: (source.position.x ?? 0) + offset, y: (source.position.y ?? 0) + offset }
+    : undefined;
+  const { id: _droppedId, ...rest } = source;
+  const node: WorkflowNode = {
+    ...rest,
+    name: `${baseName}_${suffix}`,
+    ...(position ? { position } : {})
+  };
+
+  return {
+    node,
+    workflow: { ...workflow, nodes: [...(workflow.nodes ?? []), node] }
+  };
+}
+
 function createNodeFromDescriptor(
   workflow: WorkflowDef,
   descriptor: NodeDescriptor,
@@ -2411,6 +2563,50 @@ function Diagnostics({
   );
 }
 
+/**
+ * Renders the same `editorShortcuts` list the window handler dispatches from,
+ * so this reference cannot advertise a key the editor does not honor.
+ */
+function ShortcutsHelp({ open, onClose }: { open: boolean; onClose: () => void }): React.ReactElement {
+  const groups: { title: string; scope: ShortcutScope }[] = [
+    { title: "画布", scope: "canvas" },
+    { title: "全局", scope: "global" }
+  ];
+
+  return (
+    <Modal
+      className="xflow-editor-shortcuts-modal"
+      classNames={{
+        body: "xflow-editor-shortcuts",
+        container: "xflow-editor-shortcuts__content",
+        header: "xflow-editor-shortcuts__header"
+      }}
+      footer={null}
+      getContainer={false}
+      open={open}
+      title="快捷键"
+      onCancel={onClose}
+    >
+      {groups.map((group) => (
+        <section className="xflow-editor-shortcuts__group" key={group.scope} aria-label={group.title}>
+          <h3 className="xflow-editor-shortcuts__group-title">{group.title}</h3>
+          <dl className="xflow-editor-shortcuts__list">
+            {editorShortcuts.filter((shortcut) => shortcut.scope === group.scope).map((shortcut) => (
+              <div className="xflow-editor-shortcuts__row" key={shortcut.id}>
+                <dt className="xflow-editor-shortcuts__label">{shortcut.label}</dt>
+                <dd className="xflow-editor-shortcuts__keys"><kbd>{shortcut.keys}</kbd></dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+      ))}
+      <p className="xflow-editor-shortcuts__note">
+        删除与退格键删除当前选中项：选中连线时删除连线，否则删除选中节点。
+      </p>
+    </Modal>
+  );
+}
+
 export function XFlowEditor({
   value,
   className,
@@ -2471,6 +2667,7 @@ export function XFlowEditor({
   const [viewMode, setViewMode] = React.useState<"edit" | "preview">("edit");
   const [leftCollapsed, setLeftCollapsed] = React.useState(false);
   const [rightCollapsed, setRightCollapsed] = React.useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = React.useState(false);
   // Keep the workbench canvas-first. Validation, execution, and failures expand
   // this surface on demand so operational feedback is never hidden.
   const [bottomCollapsed, setBottomCollapsed] = React.useState(true);
@@ -2624,6 +2821,38 @@ export function XFlowEditor({
     setSelectedKey(defaultSelectedKey(nextWorkflow.nodes ?? []));
   }, [commitWorkflow, draftWorkflow, selectedNode]);
 
+  const duplicateSelectedNode = React.useCallback(() => {
+    if (!editMode || !selectedNode) return;
+    const { workflow: nextWorkflow, node } = duplicateNodeInWorkflow(draftWorkflow, selectedNode, selectedIndex);
+    commitWorkflow(nextWorkflow);
+    setSelectedKey(nodeKey(node, (nextWorkflow.nodes ?? []).length - 1));
+  }, [commitWorkflow, draftWorkflow, editMode, selectedIndex, selectedNode]);
+
+  // Compact layout has no collapsed rail, so the same intent opens or closes the
+  // drawer instead of collapsing a panel that is not there.
+  const toggleLeftPanel = React.useCallback(() => {
+    if (layout === "a") {
+      setLeftCollapsed((current) => !current);
+      return;
+    }
+    setCompactDrawer((current) => (current === "left" ? undefined : "left"));
+  }, [layout]);
+
+  // Escape never clears the selection: the effect below falls back to a default
+  // node whenever the selected key is missing, so clearing would be undone on the
+  // next render. Leaving a transient mode is the behavior that sticks.
+  const leaveTransientMode = React.useCallback(() => {
+    if (shortcutsOpen) {
+      setShortcutsOpen(false);
+      return;
+    }
+    if (compactDrawer) {
+      setCompactDrawer(undefined);
+      return;
+    }
+    setCanvasTool((current) => (current === "connect" ? "select" : current));
+  }, [compactDrawer, shortcutsOpen]);
+
   const addCanvasConnection = React.useCallback(
     (connection: PreviewConnection) => {
       if (!editMode) return;
@@ -2760,28 +2989,67 @@ export function XFlowEditor({
   }, [layout, openCompactDrawer]);
 
   React.useEffect(() => {
+    const runShortcut = (id: string) => {
+      switch (id) {
+        case "undo":
+          undoWorkflow();
+          return;
+        case "redo":
+          redoWorkflow();
+          return;
+        case "save":
+          if (onSave) void saveWorkflow();
+          return;
+        case "run":
+          if (onRun && !running) void runWorkflow();
+          return;
+        case "duplicate":
+          duplicateSelectedNode();
+          return;
+        case "toggleLeftPanel":
+          toggleLeftPanel();
+          return;
+        case "selectTool":
+          setCanvasTool("select");
+          return;
+        case "connectTool":
+          setCanvasTool("connect");
+          return;
+        case "escape":
+          leaveTransientMode();
+          return;
+        case "shortcutsHelp":
+          setShortcutsOpen(true);
+          return;
+        default:
+          return;
+      }
+    };
+
     const handleCanvasShortcut = (event: KeyboardEvent) => {
-      const target = event.target;
-      if (
-        event.metaKey || event.ctrlKey || event.altKey ||
-        (target instanceof HTMLElement && (
-          target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)
-        ))
-      ) {
+      const inTextEntry = isTextEntryTarget(event.target);
+      for (const shortcut of editorShortcuts) {
+        if (inTextEntry && shortcut.scope === "canvas") continue;
+        if (!shortcut.match(event)) continue;
+        if (shortcut.preventDefault !== false) event.preventDefault();
+        runShortcut(shortcut.id);
         return;
-      }
-      if (event.key.toLowerCase() === "v") {
-        event.preventDefault();
-        setCanvasTool("select");
-      }
-      if (event.key.toLowerCase() === "l") {
-        event.preventDefault();
-        setCanvasTool("connect");
       }
     };
     window.addEventListener("keydown", handleCanvasShortcut);
     return () => window.removeEventListener("keydown", handleCanvasShortcut);
-  }, []);
+  }, [
+    duplicateSelectedNode,
+    leaveTransientMode,
+    onRun,
+    onSave,
+    redoWorkflow,
+    running,
+    runWorkflow,
+    saveWorkflow,
+    toggleLeftPanel,
+    undoWorkflow
+  ]);
 
   return (
     <ConfigProvider
@@ -2921,7 +3189,7 @@ export function XFlowEditor({
               </span>
             </Tooltip>
             <Button aria-label="校验" className="xflow-editor-validate-button" icon={<CheckCircleOutlined />} onClick={validateCurrentWorkflow}>校验</Button>
-            <Tooltip classNames={editorTooltipClassNames} title={onSave ? "保存工作流" : "保存不可用：宿主未提供 onSave 处理器"}>
+            <Tooltip classNames={editorTooltipClassNames} title={onSave ? "保存工作流（⌘ / Ctrl + S）" : "保存不可用：宿主未提供 onSave 处理器"}>
               <span>
                 <Button
                   aria-label="保存"
@@ -2937,7 +3205,7 @@ export function XFlowEditor({
                 </Button>
               </span>
             </Tooltip>
-            <Tooltip classNames={editorTooltipClassNames} title={onRun ? "运行工作流" : "运行不可用：宿主未提供 onRun 处理器"}>
+            <Tooltip classNames={editorTooltipClassNames} title={onRun ? "运行工作流（⌘ / Ctrl + Enter）" : "运行不可用：宿主未提供 onRun 处理器"}>
               <span>
                 <Button
                   aria-label="运行工作流"
@@ -2969,6 +3237,7 @@ export function XFlowEditor({
               aria-label={leftCollapsed ? "展开左侧面板" : "收起左侧面板"}
               className="xflow-editor-panel-handle xflow-editor-panel-handle--left"
               size="small"
+              title="收起 / 展开左侧面板（⌘ / Ctrl + B）"
               onClick={() => setLeftCollapsed((current) => !current)}
             >
               {leftCollapsed ? <RightOutlined /> : <LeftOutlined />}
@@ -2996,6 +3265,16 @@ export function XFlowEditor({
                   >
                     <BarsOutlined />
                     <span>大纲</span>
+                  </button>
+                  <button
+                    aria-label="快捷键帮助"
+                    className="xflow-editor-rail-help"
+                    title="快捷键（?）"
+                    type="button"
+                    onClick={() => setShortcutsOpen(true)}
+                  >
+                    <QuestionCircleOutlined />
+                    <span>帮助</span>
                   </button>
                 </nav>
                 <div className={`xflow-editor-left__content ${editMode ? "" : "xflow-editor-left__content--preview"}`}>
@@ -3030,6 +3309,16 @@ export function XFlowEditor({
             >
               <BarsOutlined />
               <span>大纲</span>
+            </button>
+            <button
+              aria-label="快捷键帮助"
+              className="xflow-editor-rail-help"
+              title="快捷键（?）"
+              type="button"
+              onClick={() => setShortcutsOpen(true)}
+            >
+              <QuestionCircleOutlined />
+              <span>帮助</span>
             </button>
           </aside>
         )}
@@ -3204,6 +3493,7 @@ export function XFlowEditor({
         onToggle={() => setBottomCollapsed((current) => !current)}
         onSelectNode={selectNodeByName}
       />
+      <ShortcutsHelp open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
       </section>
     </ConfigProvider>
   );
