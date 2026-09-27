@@ -78,6 +78,13 @@ export interface XFlowPreviewProps {
   /** Requests that the owner remove one data-flow connection. The preview never mutates the workflow. */
   onDeleteConnection?: (connection: PreviewConnection) => void;
   /**
+   * Requests that the owner remove a node. Supplying it enables Delete and
+   * Backspace on the canvas. The preview never mutates the workflow, and it
+   * stands down when a connection is selected so one press cannot both remove a
+   * connection and the node behind it.
+   */
+  onDeleteNode?: (nodeId: string) => void;
+  /**
    * Requests that the owner add a node of `type` at a canvas position. A drop on
    * an empty workflow is admitted like any other, so the very first node can be
    * dragged in rather than clicked. The preview never mutates the workflow.
@@ -285,6 +292,16 @@ function portsWithMain(...portGroups: string[][]): string[] {
     }
   }
   return ports;
+}
+
+/**
+ * Whether a key event belongs to a text field that owns the keystroke. React
+ * Flow skips its own Delete handling in exactly this case, so matching it keeps
+ * "backspace while renaming a node" from deleting the node as well.
+ */
+function isTextEntryTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement
+    && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
 }
 
 /**
@@ -645,6 +662,7 @@ export function XFlowPreview({
   onNodePositionChange,
   onConnect,
   onDeleteConnection,
+  onDeleteNode,
   onDropNode
 }: XFlowPreviewProps): React.ReactElement {
   const graph = React.useMemo(() => toGraphModel(workflow), [workflow]);
@@ -663,6 +681,7 @@ export function XFlowPreview({
   const canDragNodes = editable && (interactionMode === undefined || interactionMode === "select");
   const canConnect = editable && (interactionMode === undefined || interactionMode === "connect") && Boolean(onConnect);
   const canDeleteConnections = editable && Boolean(onDeleteConnection);
+  const canDeleteNodes = editable && Boolean(onDeleteNode);
   const canDropNode = editable && Boolean(onDropNode);
   const graphNodesById = React.useMemo(
     () => new Map(graph.nodes.map((node) => [node.id, node])),
@@ -801,6 +820,24 @@ export function XFlowPreview({
       return next.size === current.size ? current : next;
     });
   }, [canDeleteConnections, graphEdgesById]);
+  // Node deletion rides its own listener rather than React Flow's delete key:
+  // onBeforeDelete returns `nodes: []`, so the library only ever removes edges.
+  // Standing down while an edge is selected keeps that press meaning "remove the
+  // connection" — the library's handler runs for the same keystroke, and letting
+  // both act would take the node behind the connection with it.
+  React.useEffect(() => {
+    if (!canDeleteNodes) return undefined;
+    const handleDeleteKey = (event: KeyboardEvent) => {
+      if (event.key !== "Delete" && event.key !== "Backspace") return;
+      if (isTextEntryTarget(event.target)) return;
+      if (selectedEdgeIds.size > 0) return;
+      if (!selectedNodeId) return;
+      event.preventDefault();
+      onDeleteNode?.(selectedNodeId);
+    };
+    window.addEventListener("keydown", handleDeleteKey);
+    return () => window.removeEventListener("keydown", handleDeleteKey);
+  }, [canDeleteNodes, onDeleteNode, selectedEdgeIds, selectedNodeId]);
   const flowNodes = React.useMemo(
     () => toFlowNodes(graph.nodes, canvasGraphEdges, runtime, selectedNodeId, canDragNodes, canConnect, handleSelectNode),
     [graph.nodes, canvasGraphEdges, runtime, selectedNodeId, canDragNodes, canConnect, handleSelectNode]

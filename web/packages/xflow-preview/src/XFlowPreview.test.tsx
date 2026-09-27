@@ -660,6 +660,87 @@ describe("XFlowPreview", () => {
     expect(permitted.edges.map((item) => item.id)).toEqual(["source:success->target:payload"]);
   });
 
+  it("requests node deletion on Delete and Backspace for a selected node", () => {
+    const onDeleteNode = vi.fn();
+    render(
+      <XFlowPreview
+        workflow={portWorkflow}
+        editable
+        selectedNodeId="source-id"
+        onDeleteNode={onDeleteNode}
+      />
+    );
+
+    fireEvent.keyDown(window, { key: "Delete" });
+    expect(onDeleteNode).toHaveBeenCalledWith("source-id");
+
+    fireEvent.keyDown(window, { key: "Backspace" });
+    expect(onDeleteNode).toHaveBeenCalledTimes(2);
+  });
+
+  it("stands down for node deletion while a connection is selected", () => {
+    const onDeleteNode = vi.fn();
+    const onDeleteConnection = vi.fn();
+    render(
+      <XFlowPreview
+        workflow={portWorkflow}
+        editable
+        selectedNodeId="source-id"
+        onDeleteConnection={onDeleteConnection}
+        onDeleteNode={onDeleteNode}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Connection from source success/ }));
+    fireEvent.keyDown(screen.getByRole("button", { name: /Connection from source success/ }), { key: "Delete" });
+
+    // One press removes the connection the user selected, not the node behind it.
+    expect(onDeleteConnection).toHaveBeenCalledTimes(1);
+    expect(onDeleteNode).not.toHaveBeenCalled();
+  });
+
+  it("leaves Delete to a focused text field", () => {
+    const onDeleteNode = vi.fn();
+    const input = document.createElement("input");
+    document.body.appendChild(input);
+    try {
+      render(
+        <XFlowPreview
+          workflow={portWorkflow}
+          editable
+          selectedNodeId="source-id"
+          onDeleteNode={onDeleteNode}
+        />
+      );
+
+      fireEvent.keyDown(input, { key: "Backspace" });
+
+      expect(onDeleteNode).not.toHaveBeenCalled();
+    } finally {
+      input.remove();
+    }
+  });
+
+  it("withholds node deletion without a handler, in read-only mode, or with nothing selected", () => {
+    const onDeleteNode = vi.fn();
+    const { rerender } = render(<XFlowPreview workflow={portWorkflow} selectedNodeId="source-id" />);
+    fireEvent.keyDown(window, { key: "Delete" });
+
+    rerender(<XFlowPreview workflow={portWorkflow} editable selectedNodeId="source-id" onDeleteNode={onDeleteNode} />);
+    fireEvent.keyDown(window, { key: "Delete" });
+    expect(onDeleteNode).toHaveBeenCalledTimes(1);
+
+    // Read-only: the same handler and selection, but the canvas is not editable.
+    rerender(<XFlowPreview workflow={portWorkflow} selectedNodeId="source-id" onDeleteNode={onDeleteNode} />);
+    fireEvent.keyDown(window, { key: "Delete" });
+    expect(onDeleteNode).toHaveBeenCalledTimes(1);
+
+    // Editable again, but this time nothing is selected.
+    rerender(<XFlowPreview workflow={portWorkflow} editable onDeleteNode={onDeleteNode} />);
+    fireEvent.keyDown(window, { key: "Delete" });
+    expect(onDeleteNode).toHaveBeenCalledTimes(1);
+  });
+
   it("switches explicit editor canvas modes between selecting and connecting", () => {
     const onConnect = vi.fn();
     const { rerender } = render(

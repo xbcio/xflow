@@ -1341,4 +1341,28 @@ describe("XFlowEditor", () => {
     });
     expect(screen.getByText("runner offline")).toBeTruthy();
   });
+
+  it("deletes the selected node from the keyboard and takes its connections with it", () => {
+    const handleChange = vi.fn();
+    render(<XFlowEditor value={workflow} onChange={handleChange} />);
+
+    // The fixture's switch node is the default selection, and starting a node is
+    // wired into it, so this also covers the dangling-connection cleanup.
+    fireEvent.keyDown(window, { key: "Delete" });
+
+    const next = handleChange.mock.calls.at(-1)?.[0];
+    expect(next.nodes.map((node: { name: string }) => node.name)).toEqual(["start", "l1_manager"]);
+    expect(JSON.stringify(next.connections)).not.toContain("route_by_amount");
+  });
+
+  it("leaves node deletion alone while previewing", () => {
+    const handleChange = vi.fn();
+    render(<XFlowEditor value={workflow} onChange={handleChange} />);
+
+    fireEvent.click(screen.getByRole("radio", { name: /预览/ }));
+    fireEvent.keyDown(window, { key: "Delete" });
+    fireEvent.keyDown(window, { key: "Backspace" });
+
+    expect(handleChange).not.toHaveBeenCalled();
+  });
 });

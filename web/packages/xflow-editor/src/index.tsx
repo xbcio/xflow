@@ -2169,7 +2169,7 @@ function Inspector({
         <div className="xflow-editor-inspector-header-actions">
           <span className="xflow-editor-inspector-header-meta" title={inspectorHeaderMeta}>{inspectorHeaderMeta}</span>
           {selectedNode ? (
-            <Tooltip classNames={editorTooltipClassNames} title="删除节点">
+            <Tooltip classNames={editorTooltipClassNames} title="删除节点（Delete）">
               <Button
                 aria-label="删除节点"
                 className="xflow-editor-inspector-delete"
@@ -3079,6 +3079,7 @@ export function XFlowEditor({
                 onNodePositionChange={updateNodePosition}
                 onConnect={addCanvasConnection}
                 onDeleteConnection={removeCanvasConnection}
+                onDeleteNode={deleteSelectedNode}
                 onDropNode={dropNode}
               />
             </div>
