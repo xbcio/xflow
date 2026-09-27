@@ -64,3 +64,22 @@ type SignalPayload struct {
 	Data      map[string]any            // payload of the triggering signal
 	All       map[string]map[string]any `json:"All,omitempty"` // all collected signal payloads (multi-signal mode)
 }
+
+// VerifiedActorKey is the reserved key in SignalPayload.Data under which the
+// control plane records the authenticated caller's subject.
+//
+// A handler that acts on behalf of a person must read the actor from here and
+// never from a field the caller fills in: the API layer overwrites this key
+// from the server-verified principal and refuses a request that supplies it, so
+// a caller cannot claim to be someone else. The key is reserved, not merely
+// conventional — anything a client sends under it is a protocol error.
+//
+// An in-process caller that delivers a signal directly through the engine (the
+// SDK facade) is itself the server side of this boundary and sets the key
+// itself; only network callers are untrusted.
+//
+// The key is absent when no verified principal exists for the request, which is
+// the case only when principal authentication is not configured at all. The
+// production posture requires it, so absence means the deployment is running
+// in the unauthenticated dev posture and no actor can be established.
+const VerifiedActorKey = "_actor"
