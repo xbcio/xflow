@@ -424,6 +424,7 @@ func appendDecision(decisions []map[string]any, approver string, action string, 
 		"approver": approver,
 		"action":   action,
 		"comment":  comment,
+		"at":       time.Now().UTC().Format(time.RFC3339),
 	})
 }
 

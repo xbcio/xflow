@@ -3,6 +3,7 @@ package group_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/types"
@@ -83,6 +84,38 @@ func TestApprovalAny_OnResumeApproveRoutesToApprovedPort(t *testing.T) {
 	if got := out.Data["order_id"]; got != "ord-1" {
 		t.Fatalf("order_id = %v, want ord-1: the payload under approval was dropped "+
 			"and every downstream node now sees an empty envelope", got)
+	}
+}
+
+func TestApproval_DecisionRecordsWhenItWasMade(t *testing.T) {
+	// An approval is a business decision somebody is accountable for, and the
+	// ledger is the record of it. A record that says who decided but not when
+	// cannot establish the order decisions were made in, or whether one landed
+	// before a deadline — so the moment is part of the decision, not decoration.
+	sh := approvalHandler(t)
+	// Truncated to the second the ledger records in: RFC3339 carries no
+	// sub-second precision, so a finer bound would read as the stamp being
+	// early by less than a second.
+	before := time.Now().UTC().Truncate(time.Second)
+
+	out, err := sh.OnResume(context.Background(),
+		approvalInput(node.ApprovalAll, nil),
+		approvalSignal("alice", "approve", "ok"))
+	if err != nil {
+		t.Fatalf("OnResume() error = %v", err)
+	}
+
+	decisions := decisionsOf(t, out.Data, "decisions")
+	raw, ok := decisions[0]["at"].(string)
+	if !ok {
+		t.Fatalf("at = %v (%T), want an RFC3339 timestamp", decisions[0]["at"], decisions[0]["at"])
+	}
+	at, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		t.Fatalf("at = %q, want a parseable RFC3339 timestamp: %v", raw, err)
+	}
+	if at.Before(before) || at.After(time.Now().UTC().Add(time.Second)) {
+		t.Fatalf("at = %v, want the moment the decision was made (between %v and now)", at, before)
 	}
 }
 
