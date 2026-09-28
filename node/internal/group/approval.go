@@ -22,6 +22,7 @@ const (
 	actionReturn    = "return"
 	actionDelegate  = "delegate"
 	actionAddSigner = "add_signer"
+	actionForce     = "force"
 )
 
 // Positions an added signer can take relative to the approver who added them.
@@ -78,16 +79,27 @@ type ApprovalParams struct {
 	Mode          ApprovalMode  `json:"mode"`
 	Timeout       time.Duration `json:"timeout"`
 	TimeoutAction string        `json:"timeout_action"`
+	// ForceApprovers names the subjects who may close the gate without the
+	// outstanding approvers, by declaring that the decision is made above them.
+	// Empty -- the default -- means nobody can, and the force signal is not even
+	// armed; see handleForce for what a force approval is and is not allowed to
+	// skip.
+	//
+	// This param is evaluated like every other one, so a definition may template
+	// it; a definition that resolves it from execution data is choosing to let
+	// whoever supplies that data name the force approvers.
+	ForceApprovers []string `json:"force_approvers"`
 }
 
 // ApprovalNode implements xflow.approval — suspends execution until
 // approvers deliver their decisions via signals.
 type ApprovalNode struct {
 	nodeinternal.BaseNode
-	Approvers     []string
-	Mode          ApprovalMode
-	TimeoutStr    string
-	TimeoutAction string
+	Approvers      []string
+	Mode           ApprovalMode
+	TimeoutStr     string
+	TimeoutAction  string
+	ForceApprovers []string
 }
 
 // Approval creates an approval gate node.
@@ -95,6 +107,15 @@ type ApprovalNode struct {
 //	node.Approval([]string{"manager@example.com"}, node.ApprovalAny)
 func Approval(approvers []string, mode ApprovalMode) *ApprovalNode {
 	return &ApprovalNode{Approvers: approvers, Mode: mode}
+}
+
+// WithForceApprovers names the subjects allowed to force this gate open. It is
+// meant for a chain that reports to a decision maker who may not be made to wait
+// for every slot, so the list is part of the workflow definition and changes by
+// editing the definition, not by the people it names.
+func (n *ApprovalNode) WithForceApprovers(forceApprovers []string) *ApprovalNode {
+	n.ForceApprovers = forceApprovers
+	return n
 }
 
 // WithTimeout configures how long the approval node waits before routing to
@@ -114,6 +135,7 @@ func (n *ApprovalNode) Descriptor() types.Descriptor {
 			{Name: "mode", DisplayName: "Mode", Type: types.ParamString, Required: false, Default: "any", Description: "Approval mode: \"any\", \"all\", or \"sequential\""},
 			{Name: "timeout", DisplayName: "Timeout", Type: types.ParamString, Required: false, Description: "Maximum wait duration before timeout routing (e.g. \"48h\")"},
 			{Name: "timeout_action", DisplayName: "Timeout Action", Type: types.ParamString, Required: false, Default: "route", Description: "Action on timeout: \"reject\" or \"route\""},
+			{Name: "force_approvers", DisplayName: "Force Approvers", Type: types.ParamArray, Required: false, Description: "Identifiers allowed to pass the gate without the outstanding approvers; unset means nobody can"},
 		},
 		Inputs:  []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 		Outputs: []types.PortSpec{{Name: "approved", DisplayName: "Approved"}, {Name: "rejected", DisplayName: "Rejected"}, {Name: "returned", DisplayName: "Returned"}, {Name: "timeout", DisplayName: "Timeout"}},
@@ -136,6 +158,9 @@ func (n *ApprovalNode) RawParams() any {
 	}
 	if n.TimeoutAction != "" {
 		params["timeout_action"] = n.TimeoutAction
+	}
+	if len(n.ForceApprovers) > 0 {
+		params["force_approvers"] = n.ForceApprovers
 	}
 	return params
 }
@@ -165,18 +190,25 @@ func (n *ApprovalNode) PrepareSuspend(_ context.Context, input *types.Input) (*t
 	// choose who the gate waits on.
 	chain := approvedChain(params, getDecisions(input.State))
 
+	// A force approval can close the gate from any mode, so its signal is armed
+	// beside the approvers'. With no force_approvers the name is not armed at
+	// all: a wait that does not listen for it cannot be resumed by it, which
+	// makes an unconfigured gate unreachable by force rather than merely
+	// unpersuaded by it.
+	force := forceSignals(input.NodeName, params.ForceApprovers)
+
 	switch params.Mode {
 	case ApprovalAny:
 		return &types.SuspendSpec{
 			Mode:    types.ModeSignal,
-			Signals: []string{approvalSignal(input.NodeName)},
+			Signals: append([]string{approvalSignal(input.NodeName)}, force...),
 			Timeout: params.Timeout,
 		}, nil
 
 	case ApprovalAll:
 		return &types.SuspendSpec{
 			Mode:    types.ModeMultiSignal,
-			Signals: approverSignals(input.NodeName, chain),
+			Signals: append(approverSignals(input.NodeName, chain), force...),
 			Quorum:  1,
 			Timeout: params.Timeout,
 		}, nil
@@ -190,7 +222,7 @@ func (n *ApprovalNode) PrepareSuspend(_ context.Context, input *types.Input) (*t
 		// approver could see the earlier decisions.
 		return &types.SuspendSpec{
 			Mode:    types.ModeMultiSignal,
-			Signals: approverSignals(input.NodeName, chain),
+			Signals: append(approverSignals(input.NodeName, chain), force...),
 			Quorum:  1,
 			Timeout: params.Timeout,
 		}, nil
@@ -215,27 +247,47 @@ func (n *ApprovalNode) OnResume(_ context.Context, input *types.Input, signal *t
 	}
 
 	// Everything below this point decides whether the signal may change the
-	// outcome. A signal that cannot be attributed to an authorized approver, or
-	// cannot be read as a decision, is recorded and the node keeps waiting. It
-	// deliberately does not fail the execution: failing here would hand any
-	// caller a way to kill an in-flight approval with one misattributed or
-	// malformed signal.
+	// outcome. A signal that cannot be attributed to somebody authorized for what
+	// it asks, or cannot be read as a decision, is recorded and the node keeps
+	// waiting. It deliberately does not fail the execution: failing here would
+	// hand any caller a way to kill an in-flight approval with one misattributed
+	// or malformed signal.
 	//
 	// Identity is established before anything in the payload is interpreted: an
 	// unauthenticated signal is not read at all, so a caller cannot get the node
-	// to act on a field it supplied before we know who is speaking.
+	// to act on a field it supplied before we know who is speaking. The action is
+	// then read only to choose which authorization rule applies -- there are two,
+	// the approver chain and the force list -- and that rule is applied before any
+	// of the payload's other fields are looked at.
 	actor, ok := resolveActor(signal.Data)
 	if !ok {
 		return ignoreApprovalSignal(input, signal, "unverified-actor")
 	}
 	record := recordOf(input)
 	chain := approvedChain(params, record.decisions)
-	if !containsApprover(chain, actor) {
-		return ignoreApprovalSignal(input, signal, "unauthorized-approver")
-	}
 	action, ok := signalAction(signal.Data)
 	if !ok {
 		return ignoreApprovalSignal(input, signal, "malformed-action")
+	}
+
+	// A force approval is the one action authorized by the node's own force list
+	// rather than by a slot in the chain: it is a statement that the decision is
+	// made above the outstanding approvers, so the person making it need not be
+	// one of them. It is also the one action that outranks the rollout of the
+	// gate, so it is answered before the turn and repeat checks below, which
+	// exist to sequence and to deduplicate slot decisions.
+	if action == actionForce {
+		if !containsApprover(params.ForceApprovers, actor) {
+			return ignoreApprovalSignal(input, signal, "unauthorized-force-approver")
+		}
+		if signal.Name != forceSignal(input.NodeName) {
+			return ignoreApprovalSignal(input, signal, "signal-name-mismatch")
+		}
+		return handleForce(input, record, signal, actor, chain)
+	}
+
+	if !containsApprover(chain, actor) {
+		return ignoreApprovalSignal(input, signal, "unauthorized-approver")
 	}
 	if signal.Name != expectedApproverSignal(input.NodeName, params.Mode, actor) {
 		return ignoreApprovalSignal(input, signal, "signal-name-mismatch")
@@ -291,6 +343,42 @@ func (n *ApprovalNode) handleApprove(params *ApprovalParams, chain []string, inp
 		return resuspendWithRecord(input, record), nil
 	}
 	return decide(input, record, "approved", map[string]any{"approved": true}), nil
+}
+
+// handleForce closes the gate on the authority of a configured force approver,
+// whatever the chain still has outstanding. The slots it passes over are
+// recorded as bypassed rather than quietly left out: the point of the action is
+// that the decision was taken above them, and a record that did not say whose
+// decisions were skipped would read exactly like a gate that had collected them
+// all.
+//
+// What it does not do is skip the identity check or the ledger: the caller is a
+// subject the workflow itself named, verified by the control plane, and the
+// decision is appended to the same record as every other one. Nor does it
+// rewrite the chain -- the outstanding slots stay outstanding, because they were
+// never decided; the gate simply does not wait for them.
+func handleForce(input *types.Input, record approvalRecord, signal *types.SignalPayload, actor string, chain []string) (*types.Output, error) {
+	bypassed := undecidedApprovers(chain, record.decisions)
+	record.decisions = appendDecision(record.decisions, actor, actionForce, signal.Data["comment"])
+	return decide(input, record, "approved", map[string]any{
+		"approved": true,
+		"approver": actor,
+		"forced":   true,
+		"bypassed": bypassed,
+	}), nil
+}
+
+// undecidedApprovers lists the chain slots a force approval passes over, in
+// chain order, so the record of a forced approval names them in the order the
+// gate would have asked them.
+func undecidedApprovers(chain []string, decisions []map[string]any) []string {
+	var pending []string
+	for _, approver := range chain {
+		if !hasApproverDecision(decisions, approver) {
+			pending = append(pending, approver)
+		}
+	}
+	return pending
 }
 
 // handleDelegate moves the delegating approver's own slot in the chain to
@@ -714,30 +802,50 @@ func approverSignal(nodeName, approver string) string {
 	return nodeName + "/approval/" + approver
 }
 
+// forceSignal is the name a force approval travels under. It is a fixed name
+// rather than one derived from the caller, because the force list is a property
+// of the workflow and not a slot in the chain: nothing about the wait depends on
+// which of the configured approvers sends it.
+//
+// An approver literally named "force" therefore shares this name with the force
+// action. That is not a conflict: the action in the payload decides which rule
+// applies, and each rule checks its own list, so such an approver can still
+// decide their own slot with an ordinary action, and can force only if the
+// workflow also names them a force approver.
+func forceSignal(nodeName string) string {
+	return nodeName + "/approval/force"
+}
+
+// forceSignals names the force signal, or nothing when the gate has no
+// configured force approvers.
+func forceSignals(nodeName string, forceApprovers []string) []string {
+	if len(forceApprovers) == 0 {
+		return nil
+	}
+	return []string{forceSignal(nodeName)}
+}
+
 func parseApprovalParams(params map[string]any) (*ApprovalParams, error) {
 	p := &ApprovalParams{
 		Mode:          ApprovalAny,
 		TimeoutAction: "route",
 	}
 
-	if approvers, ok := params["approvers"]; ok {
-		switch v := approvers.(type) {
-		case []string:
-			p.Approvers = v
-		case []any:
-			for _, a := range v {
-				s, ok := a.(string)
-				if !ok {
-					return nil, fmt.Errorf("approvers must be a list of strings")
-				}
-				p.Approvers = append(p.Approvers, s)
-			}
-		default:
-			return nil, fmt.Errorf("approvers must be a list of strings")
-		}
+	if approvers, err := parseStringList(params["approvers"]); err != nil {
+		return nil, fmt.Errorf("approvers must be a list of strings")
+	} else {
+		p.Approvers = approvers
 	}
 	if len(p.Approvers) == 0 {
 		return nil, fmt.Errorf("approvers list must not be empty")
+	}
+
+	// A gate with no force approvers is the default, not an error: it is a gate
+	// nobody may force.
+	if forceApprovers, err := parseStringList(params["force_approvers"]); err != nil {
+		return nil, fmt.Errorf("force_approvers must be a list of strings")
+	} else {
+		p.ForceApprovers = forceApprovers
 	}
 
 	if mode, ok := params["mode"]; ok {
@@ -768,6 +876,30 @@ func parseApprovalParams(params map[string]any) (*ApprovalParams, error) {
 	}
 
 	return p, nil
+}
+
+// parseStringList reads a param that may be absent, a []string as a Go caller
+// writes it, or a []any of strings as a decoded YAML or JSON document gives it.
+// An absent param is an empty list, not an error: the caller decides whether
+// empty is allowed, which for approvers it is not and for force_approvers it is.
+func parseStringList(v any) ([]string, error) {
+	switch list := v.(type) {
+	case nil:
+		return nil, nil
+	case []string:
+		return list, nil
+	case []any:
+		out := make([]string, 0, len(list))
+		for _, item := range list {
+			s, ok := item.(string)
+			if !ok {
+				return nil, fmt.Errorf("element is %T, want a string", item)
+			}
+			out = append(out, s)
+		}
+		return out, nil
+	}
+	return nil, fmt.Errorf("value is %T, want a list of strings", v)
 }
 
 // getDecisions reads the ledger out of the node's private state. A nil state --
