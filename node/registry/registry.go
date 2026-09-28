@@ -15,85 +15,95 @@ type registry struct {
 	triggerVer map[string]map[int]types.TriggerHandler
 }
 
-var globalRegistry = &registry{
-	handlers:   make(map[string]types.ActionHandler),
-	versioned:  make(map[string]map[int]types.ActionHandler),
-	triggers:   make(map[string]types.TriggerHandler),
-	triggerVer: make(map[string]map[int]types.TriggerHandler),
+var globalRegistry = newRegistry()
+
+func newRegistry() *registry {
+	return &registry{
+		handlers:   make(map[string]types.ActionHandler),
+		versioned:  make(map[string]map[int]types.ActionHandler),
+		triggers:   make(map[string]types.TriggerHandler),
+		triggerVer: make(map[string]map[int]types.TriggerHandler),
+	}
 }
 
 // Register registers a handler in the global registry.
 // If h embeds BaseNode, its version is used; otherwise defaults to v1.
 // The latest registered version becomes the default for Lookup.
-func Register(h types.ActionHandler) {
+func Register(h types.ActionHandler) { globalRegistry.register(h) }
+
+func RegisterTrigger(h types.TriggerHandler) { globalRegistry.registerTrigger(h) }
+
+func (r *registry) register(h types.ActionHandler) {
 	t := h.Descriptor().Type
 	if t == "" {
 		panic(fmt.Sprintf("node.Register: handler %T has empty Descriptor().Type", h))
 	}
 
-	version := 1
-	if v, ok := h.(interface{ NodeVersion() int }); ok {
-		version = v.NodeVersion()
-	}
+	version := handlerVersion(h)
 
-	globalRegistry.mu.Lock()
-	defer globalRegistry.mu.Unlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-	registerActionLocked(t, version, h)
+	r.registerActionLocked(t, version, h)
 	if th, ok := h.(types.TriggerHandler); ok {
-		registerTriggerLocked(t, version, th)
+		r.registerTriggerLocked(t, version, th)
 	}
 }
 
-func RegisterTrigger(h types.TriggerHandler) {
+func (r *registry) registerTrigger(h types.TriggerHandler) {
 	t := h.Descriptor().Type
 	if t == "" {
 		panic(fmt.Sprintf("node.RegisterTrigger: handler %T has empty Descriptor().Type", h))
 	}
-	version := 1
-	if v, ok := h.(interface{ NodeVersion() int }); ok {
-		version = v.NodeVersion()
-	}
-	globalRegistry.mu.Lock()
-	defer globalRegistry.mu.Unlock()
-	registerTriggerLocked(t, version, h)
+	version := handlerVersion(h)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.registerTriggerLocked(t, version, h)
 	if ah, ok := h.(types.ActionHandler); ok {
-		registerActionLocked(t, version, ah)
+		r.registerActionLocked(t, version, ah)
 	}
 }
 
-func registerActionLocked(nodeType string, version int, h types.ActionHandler) {
-	if globalRegistry.versioned[nodeType] == nil {
-		globalRegistry.versioned[nodeType] = make(map[int]types.ActionHandler)
+// handlerVersion is the optional NodeVersion(), defaulting to v1.
+func handlerVersion(h any) int {
+	if v, ok := h.(interface{ NodeVersion() int }); ok {
+		return v.NodeVersion()
 	}
-	globalRegistry.versioned[nodeType][version] = h
+	return 1
+}
+
+func (r *registry) registerActionLocked(nodeType string, version int, h types.ActionHandler) {
+	if r.versioned[nodeType] == nil {
+		r.versioned[nodeType] = make(map[int]types.ActionHandler)
+	}
+	r.versioned[nodeType][version] = h
 
 	// latest version wins as default
-	if cur, exists := globalRegistry.handlers[nodeType]; exists {
+	if cur, exists := r.handlers[nodeType]; exists {
 		if cv, ok := cur.(interface{ NodeVersion() int }); ok {
 			if version >= cv.NodeVersion() {
-				globalRegistry.handlers[nodeType] = h
+				r.handlers[nodeType] = h
 			}
 			return
 		}
 	}
-	globalRegistry.handlers[nodeType] = h
+	r.handlers[nodeType] = h
 }
 
-func registerTriggerLocked(nodeType string, version int, h types.TriggerHandler) {
-	if globalRegistry.triggerVer[nodeType] == nil {
-		globalRegistry.triggerVer[nodeType] = make(map[int]types.TriggerHandler)
+func (r *registry) registerTriggerLocked(nodeType string, version int, h types.TriggerHandler) {
+	if r.triggerVer[nodeType] == nil {
+		r.triggerVer[nodeType] = make(map[int]types.TriggerHandler)
 	}
-	globalRegistry.triggerVer[nodeType][version] = h
-	if cur, exists := globalRegistry.triggers[nodeType]; exists {
+	r.triggerVer[nodeType][version] = h
+	if cur, exists := r.triggers[nodeType]; exists {
 		if cv, ok := cur.(interface{ NodeVersion() int }); ok {
 			if version >= cv.NodeVersion() {
-				globalRegistry.triggers[nodeType] = h
+				r.triggers[nodeType] = h
 			}
 			return
 		}
 	}
-	globalRegistry.triggers[nodeType] = h
+	r.triggers[nodeType] = h
 }
 
 // Lookup finds the latest version of a handler by node type.
