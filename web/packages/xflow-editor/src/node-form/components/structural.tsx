@@ -56,6 +56,8 @@ function NodeNameField({
   const text = active ? active.text : current;
   const locked = readOnly || onRename === undefined;
   const commit = () => {
+    // A read-only form (e.g. while the parameters JSON is broken) never renames.
+    if (locked) return;
     if (!active || active.text === current) {
       if (active) setDraft(null);
       return;
@@ -82,7 +84,9 @@ function NodeNameField({
           autoComplete="off"
           aria-describedby={ids.describedBy}
           aria-invalid={ids.invalid || undefined}
-          onChange={(event) => setDraft({ text: event.target.value, base: current })}
+          onChange={(event) => {
+            if (!locked) setDraft({ text: event.target.value, base: current });
+          }}
           onBlur={commit}
           onKeyDown={(event) => {
             if (event.key === "Enter") {

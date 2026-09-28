@@ -486,6 +486,9 @@ for (const kernel of kernels) {
           const m = mountComposer({ kernel, registry: reg, spec: nameSpec, value: { name: "n1" }, readOnly });
           await m.flush();
           expect(input(fieldOf(m.container, "n")).readOnly).toBe(true);
+          // Even a programmatic change + blur (read-only inputs still fire them) never renames.
+          fireEvent.change(input(fieldOf(m.container, "n")), { target: { value: "n2" } });
+          fireEvent.blur(input(fieldOf(m.container, "n")));
           m.unmount();
         }
         expect(onRename).not.toHaveBeenCalled();
