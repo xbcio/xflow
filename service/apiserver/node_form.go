@@ -54,11 +54,18 @@ type nodeFormPort struct {
 	DisplayName string `json:"display_name,omitempty"`
 }
 
-// nodeFormPorts has no dynamic_outputs member: types.Descriptor has no
-// declarative source for it, and an absent key is the wire's "not dynamic".
+// nodeFormPorts.DynamicOutputs projects Descriptor.DynamicOutputsFrom; an
+// absent key is the wire's "not dynamic".
 type nodeFormPorts struct {
-	Inputs  []nodeFormPort `json:"inputs,omitempty"`
-	Outputs []nodeFormPort `json:"outputs,omitempty"`
+	Inputs         []nodeFormPort          `json:"inputs,omitempty"`
+	Outputs        []nodeFormPort          `json:"outputs,omitempty"`
+	DynamicOutputs *nodeFormDynamicOutputs `json:"dynamic_outputs,omitempty"`
+}
+
+// nodeFormDynamicOutputs.From is a JSON Pointer into the node
+// ("/parameters/outputs").
+type nodeFormDynamicOutputs struct {
+	From string `json:"from"`
 }
 
 type nodeFormGroup struct {
@@ -195,8 +202,11 @@ func projectNodeForm(rd registry.RegisteredDescriptor, fallbacks nodeFormFallbac
 		Credentials:  d.Credentials,
 		Fields:       make([]nodeFormField, 0, len(d.Params)),
 	}
-	if len(d.Inputs) > 0 || len(d.Outputs) > 0 {
+	if len(d.Inputs) > 0 || len(d.Outputs) > 0 || d.DynamicOutputsFrom != "" {
 		s.Ports = &nodeFormPorts{Inputs: projectPorts(d.Inputs), Outputs: projectPorts(d.Outputs)}
+		if d.DynamicOutputsFrom != "" {
+			s.Ports.DynamicOutputs = &nodeFormDynamicOutputs{From: "/parameters/" + escapeNodeFormPointer(d.DynamicOutputsFrom)}
+		}
 	}
 	for _, g := range d.Groups {
 		s.Groups = append(s.Groups, nodeFormGroup{Key: g.Key, DisplayName: g.DisplayName, Description: g.Description, Collapsed: g.Collapsed})

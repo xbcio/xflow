@@ -274,6 +274,8 @@ func ExampleNodeFormSchema() any {
 		Outputs:      []types.PortSpec{{Name: "main"}, {Name: "error"}},
 		Groups:       []types.GroupSpec{{Key: "advanced", DisplayName: "Advanced", Description: "Tuning", Collapsed: true}},
 		OneOf:        []types.OneOfGroup{{Params: []string{"mode", "count"}, Mode: types.OneOfAtMost}},
+		// "list" is the ParamArray below.
+		DynamicOutputsFrom: "list",
 		Params: []types.ParamSpec{
 			{Name: "mode", DisplayName: "Mode", Type: types.ParamString, Default: "a", Description: "Mode",
 				Enum:     []types.EnumOption{{Value: "a", DisplayName: "A", Description: "first"}, {Value: "b"}},

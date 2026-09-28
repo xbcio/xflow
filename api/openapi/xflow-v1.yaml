@@ -3032,7 +3032,7 @@ components:
 
     NodeFormPorts:
       type: object
-      description: Declared ports. `dynamic_outputs` is reserved; no Descriptor declares one yet, so the server never writes it.
+      description: Declared ports. `dynamic_outputs` is present only for node types whose output ports also come from a parameter (e.g. xflow.switch).
       additionalProperties: false
       properties:
         inputs:
@@ -3047,8 +3047,9 @@ components:
             $ref: "#/components/schemas/NodeFormPort"
         dynamic_outputs:
           type: object
-          description: Reserved; output ports derived from a parameter.
+          description: Extra output ports listed by a parameter's value (strings, or objects with a `name`), on top of `outputs`.
           required: [from]
+          additionalProperties: false
           properties:
             from:
               type: string
