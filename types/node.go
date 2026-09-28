@@ -66,6 +66,26 @@ type Input struct {
 	Vars    map[string]any // workflow-level variables ($vars)
 	Config  map[string]any // workflow-level config ($config)
 	Runtime *Runtime       // per-execution runtime context ($runtime)
+	// State is this node's own private state, restored from its own stored
+	// output. It is the one input channel no other node and no caller can write:
+	// the engine fills it only from what this node itself committed, and never
+	// from upstream data, submission params, or an execution scope.
+	//
+	// A suspending node keeps its bookkeeping here rather than in Data. Data is
+	// the merged output of every upstream node, so a key a node stores there can
+	// be written by a node upstream of it, and a node that reads such a key back
+	// as its own memory is trusting data it did not produce. State has no such
+	// path: a node that needs to remember something across a resumption writes it
+	// to Output.State and reads it back from here.
+	//
+	// Nil means the node has no stored state — a first activation, or a node that
+	// never suspends. Values must be encodable by the state backend's output
+	// codec (JSON-shaped), because State is persisted inside the node's output.
+	//
+	// This is not the same thing as a private OUTPUT (Graph.NodeOutputPrivate):
+	// that flag decides whether an operator may inspect a node's output, while
+	// State is a channel between a node and its own next activation.
+	State map[string]any
 	// Nodes holds the outputs of nodes referenced via $nodes['name'] in the
 	// node's parameters. Populated at input assembly from the compile-time
 	// reference set (Graph.NodesRefsFor).
@@ -184,6 +204,17 @@ type Output struct {
 	Error     *Error // non-nil routes to the error output port (business error, routable)
 	Port      string // output port name; defaults to "main" if empty
 	Resuspend bool   // if true, node re-enters suspended state after producing output
+	// State is this node's private state, persisted with its output and handed
+	// back as Input.State on that node's own next resumption. It travels through
+	// the same commit as Data but down a separate channel: unlike Data it is
+	// never merged into a downstream node's input, and unlike Data it cannot be
+	// seeded by an upstream node or a caller. See Input.State.
+	//
+	// Setting State on a result that is not a resuspend stores it just the same,
+	// and a result that carries only State — nil Data — still counts as an output
+	// worth storing, which is what lets a node update its state without
+	// republishing data.
+	State map[string]any
 }
 
 // Error is a business-level error that can be routed to the error output port.
