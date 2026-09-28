@@ -1,0 +1,218 @@
+{
+  "spec": "node-form/v1",
+  "node_type": "xflow.script",
+  "node_version": 1,
+  "kind": "action",
+  "display_name": "Script",
+  "ports": {
+    "inputs": [
+      {
+        "name": "main",
+        "display_name": "Main"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "main",
+        "display_name": "Main"
+      },
+      {
+        "name": "error",
+        "display_name": "Error"
+      }
+    ]
+  },
+  "groups": [
+    {
+      "key": "source",
+      "display_name": "Source"
+    },
+    {
+      "key": "environment",
+      "display_name": "Environment"
+    }
+  ],
+  "one_of": [
+    {
+      "params": [
+        "code",
+        "artifact_digest",
+        "__artifact_file_path"
+      ],
+      "mode": "exactly"
+    }
+  ],
+  "fields": [
+    {
+      "name": "language",
+      "path": "/parameters/language",
+      "label": "Language",
+      "type": "string",
+      "required": true,
+      "help": "Language family: js | wasm (no default — choose explicitly)",
+      "group": "source",
+      "expression": {
+        "mode": "template"
+      },
+      "options": [
+        {
+          "value": "js",
+          "label": "JavaScript"
+        },
+        {
+          "value": "wasm",
+          "label": "WebAssembly",
+          "description": "Base64 wasip1 module"
+        }
+      ]
+    },
+    {
+      "name": "runtime",
+      "path": "/parameters/runtime",
+      "label": "Runtime",
+      "type": "string",
+      "required": true,
+      "help": "Engine: js-\u003egoja|qjs, wasm-\u003ewazero|wazero-reactor (no default — choose explicitly)",
+      "group": "source",
+      "expression": {
+        "mode": "template"
+      },
+      "options": [
+        {
+          "value": "goja",
+          "label": "goja",
+          "description": "Fastest cold start; cannot interrupt tight loops"
+        },
+        {
+          "value": "qjs",
+          "label": "QuickJS",
+          "description": "Slower first load; genuine mid-execution termination"
+        },
+        {
+          "value": "wazero",
+          "label": "wazero"
+        },
+        {
+          "value": "wazero-reactor",
+          "label": "wazero (reactor)",
+          "description": "Pooled reactor-mode guest instances"
+        }
+      ],
+      "options_when": [
+        {
+          "when": {
+            "param": "language",
+            "eq": "js"
+          },
+          "options": [
+            {
+              "value": "goja",
+              "label": "goja",
+              "description": "Fastest cold start; cannot interrupt tight loops"
+            },
+            {
+              "value": "qjs",
+              "label": "QuickJS",
+              "description": "Slower first load; genuine mid-execution termination"
+            }
+          ]
+        },
+        {
+          "when": {
+            "param": "language",
+            "eq": "wasm"
+          },
+          "options": [
+            {
+              "value": "wazero",
+              "label": "wazero"
+            },
+            {
+              "value": "wazero-reactor",
+              "label": "wazero (reactor)",
+              "description": "Pooled reactor-mode guest instances"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "code",
+      "path": "/parameters/code",
+      "label": "Code",
+      "type": "string",
+      "widget": "code",
+      "help": "JS source (js) or base64 wasm module (wasm); omit when artifact_digest is set",
+      "group": "source",
+      "expression": {
+        "mode": "literal"
+      }
+    },
+    {
+      "name": "artifact_digest",
+      "path": "/parameters/artifact_digest",
+      "label": "Artifact Digest",
+      "type": "string",
+      "help": "Content-addressable digest (sha256:\u003chex\u003e) of the script in the artifact store",
+      "group": "source",
+      "expression": {
+        "mode": "template"
+      },
+      "rules": [
+        {
+          "type": "format",
+          "format": "sha256-digest"
+        }
+      ]
+    },
+    {
+      "name": "__artifact_file_path",
+      "path": "/parameters/__artifact_file_path",
+      "label": "Artifact File Path",
+      "type": "string",
+      "help": "SDK build-time placeholder for Script.File(); rewritten to artifact_digest before the workflow runs and never reaches Execute",
+      "group": "source",
+      "expression": {
+        "mode": "template"
+      },
+      "visible_when": {
+        "not": {}
+      }
+    },
+    {
+      "name": "credentials",
+      "path": "/parameters/credentials",
+      "label": "Credentials",
+      "type": "array",
+      "widget": "credential-select",
+      "help": "Declared credential names injected as $credentials",
+      "group": "environment",
+      "expression": {
+        "mode": "template"
+      },
+      "item": {
+        "type": "string",
+        "expression": {
+          "mode": "template"
+        }
+      }
+    },
+    {
+      "name": "roots",
+      "path": "/parameters/roots",
+      "label": "Roots",
+      "type": "array",
+      "help": "Expression roots the script reads; omit to send the whole environment",
+      "group": "environment",
+      "expression": {
+        "mode": "template"
+      },
+      "item": {
+        "type": "string",
+        "expression": {
+          "mode": "template"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,114 @@
+{
+  "spec": "node-form/v1",
+  "node_type": "xflow.map",
+  "node_version": 1,
+  "kind": "action",
+  "display_name": "Map",
+  "ports": {
+    "inputs": [
+      {
+        "name": "main",
+        "display_name": "Main"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "main",
+        "display_name": "Main"
+      },
+      {
+        "name": "error",
+        "display_name": "Error"
+      }
+    ]
+  },
+  "one_of": [
+    {
+      "params": [
+        "body",
+        "expression"
+      ],
+      "mode": "exactly"
+    }
+  ],
+  "fields": [
+    {
+      "name": "items",
+      "path": "/parameters/items",
+      "label": "Items",
+      "type": "string",
+      "widget": "expression",
+      "required": true,
+      "help": "Expression that evaluates to the array to iterate",
+      "expression": {
+        "mode": "pure"
+      },
+      "rules": [
+        {
+          "type": "format",
+          "format": "expression"
+        }
+      ]
+    },
+    {
+      "name": "batch_size",
+      "path": "/parameters/batch_size",
+      "label": "Batch Size",
+      "type": "number",
+      "default": 1,
+      "help": "Number of items processed per batch",
+      "expression": {
+        "mode": "template"
+      }
+    },
+    {
+      "name": "continue_on_error",
+      "path": "/parameters/continue_on_error",
+      "label": "Continue On Error",
+      "type": "boolean",
+      "default": false,
+      "help": "Continue iteration when an item fails",
+      "expression": {
+        "mode": "template"
+      }
+    },
+    {
+      "name": "body_concurrency",
+      "path": "/parameters/body_concurrency",
+      "label": "Body Concurrency",
+      "type": "number",
+      "default": 1,
+      "help": "Maximum items of one batch running at the same time; 1 (the default) runs them serially",
+      "expression": {
+        "mode": "template"
+      }
+    },
+    {
+      "name": "body",
+      "path": "/parameters/body",
+      "label": "Body",
+      "type": "object",
+      "help": "Sub-graph executed once per item; mutually exclusive with expression, and exactly one of the two is required",
+      "expression": {
+        "mode": "none"
+      }
+    },
+    {
+      "name": "expression",
+      "path": "/parameters/expression",
+      "label": "Expression",
+      "type": "string",
+      "widget": "expression",
+      "help": "Expression evaluated once per item over $item/$index/$items; mutually exclusive with body, and exactly one of the two is required",
+      "expression": {
+        "mode": "pure"
+      },
+      "rules": [
+        {
+          "type": "format",
+          "format": "expression"
+        }
+      ]
+    }
+  ]
+}

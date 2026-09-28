@@ -1,0 +1,471 @@
+{
+  "spec": "node-form/v1",
+  "node_type": "xflow.trigger.kafka",
+  "node_version": 1,
+  "kind": "trigger",
+  "display_name": "Kafka Trigger",
+  "ports": {
+    "outputs": [
+      {
+        "name": "main",
+        "display_name": "Main"
+      }
+    ]
+  },
+  "groups": [
+    {
+      "key": "connection",
+      "display_name": "Connection"
+    },
+    {
+      "key": "processing",
+      "display_name": "Processing"
+    },
+    {
+      "key": "advanced",
+      "display_name": "Advanced",
+      "collapsed": true
+    }
+  ],
+  "fields": [
+    {
+      "name": "brokers",
+      "path": "/parameters/brokers",
+      "label": "Brokers",
+      "type": "array",
+      "required": true,
+      "group": "connection",
+      "expression": {
+        "mode": "template"
+      },
+      "item": {
+        "type": "string",
+        "expression": {
+          "mode": "template"
+        }
+      }
+    },
+    {
+      "name": "topic",
+      "path": "/parameters/topic",
+      "label": "Topic",
+      "type": "string",
+      "required": true,
+      "group": "connection",
+      "expression": {
+        "mode": "template"
+      }
+    },
+    {
+      "name": "group",
+      "path": "/parameters/group",
+      "label": "Group",
+      "type": "string",
+      "required": true,
+      "group": "connection",
+      "expression": {
+        "mode": "template"
+      }
+    },
+    {
+      "name": "start_offset",
+      "path": "/parameters/start_offset",
+      "label": "Start Offset",
+      "type": "string",
+      "default": "latest",
+      "group": "connection",
+      "expression": {
+        "mode": "template"
+      },
+      "options": [
+        {
+          "value": "latest",
+          "label": "Latest",
+          "description": "Only records produced after the group first joins"
+        },
+        {
+          "value": "earliest",
+          "label": "Earliest",
+          "description": "From the oldest retained record"
+        },
+        {
+          "value": "last",
+          "label": "Last",
+          "description": "Alias of latest"
+        },
+        {
+          "value": "newest",
+          "label": "Newest",
+          "description": "Alias of latest"
+        },
+        {
+          "value": "first",
+          "label": "First",
+          "description": "Alias of earliest"
+        },
+        {
+          "value": "oldest",
+          "label": "Oldest",
+          "description": "Alias of earliest"
+        },
+        {
+          "value": "beginning",
+          "label": "Beginning",
+          "description": "Alias of earliest"
+        }
+      ]
+    },
+    {
+      "name": "max_inflight",
+      "path": "/parameters/max_inflight",
+      "label": "Max Inflight",
+      "type": "number",
+      "default": 64,
+      "group": "processing",
+      "expression": {
+        "mode": "template"
+      }
+    },
+    {
+      "name": "aggregate",
+      "path": "/parameters/aggregate",
+      "label": "Aggregate",
+      "type": "object",
+      "help": "Optional partition batch aggregation: enabled, by, max_size, flush_interval, dedup, on_overflow, dead_letter_topic. Under entry-seed hosting the batch is admitted to the control plane instead of emitted locally, with an admission key covering the batch's actual offset range; delivery is at-least-once (a batch may be reprocessed once if its offsets fail to commit), so consumers must be idempotent on (topic, partition, offset). flush_interval defaults to 1s in entry-seed mode and 100ms on the legacy emit path. on_overflow decides what happens when a partition reaches its retained bound: \"discard\" (the default) drops the arriving record and a later commit sweeps past its offset, so it is never redelivered — the loss is counted in xflow_trigger_messages_discarded_total{reason=\"buffer_overflow\"} and logged; \"block\" loses nothing but halts fetching for the WHOLE assignment until that partition drains, and neither lag gauge can report it, so watch xflow_trigger_consumption_blocked instead; \"dead_letter\" republishes the record to dead_letter_topic (required with this value) before letting its offset advance, so nothing is lost and nothing stalls while the overflow topic is healthy — a failed republish is retried as backpressure (the partition stops consuming) rather than dropping, counted in xflow_trigger_messages_dead_lettered_total. Set on_overflow explicitly on any topic that cannot afford the default loss.",
+      "group": "processing",
+      "expression": {
+        "mode": "template"
+      },
+      "fields": [
+        {
+          "name": "enabled",
+          "path": "/parameters/aggregate/enabled",
+          "label": "Enabled",
+          "type": "boolean",
+          "help": "Aggregation is off unless this is true; every other field is ignored while it is off",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "by",
+          "path": "/parameters/aggregate/by",
+          "label": "By",
+          "type": "string",
+          "fallback": "partition",
+          "help": "Batch key; only \"partition\" is supported (the default)",
+          "expression": {
+            "mode": "template"
+          },
+          "options": [
+            {
+              "value": "partition"
+            }
+          ]
+        },
+        {
+          "name": "max_size",
+          "path": "/parameters/aggregate/max_size",
+          "label": "Max Size",
+          "type": "number",
+          "fallback": 100,
+          "help": "Records per batch; unset or non-positive means 100",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "flush_interval",
+          "path": "/parameters/aggregate/flush_interval",
+          "label": "Flush Interval",
+          "type": "string",
+          "widget": "duration",
+          "help": "Positive duration; defaults to 1s in entry-seed mode and 100ms otherwise",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "duration"
+            }
+          ]
+        },
+        {
+          "name": "dedup",
+          "path": "/parameters/aggregate/dedup",
+          "label": "Dedup",
+          "type": "string",
+          "fallback": "message",
+          "help": "Deduplication unit; only \"message\" is supported (the default)",
+          "expression": {
+            "mode": "template"
+          },
+          "options": [
+            {
+              "value": "message"
+            }
+          ]
+        },
+        {
+          "name": "on_overflow",
+          "path": "/parameters/aggregate/on_overflow",
+          "label": "On Overflow",
+          "type": "string",
+          "fallback": "discard",
+          "help": "Policy when a partition reaches its retained bound; unset means discard",
+          "expression": {
+            "mode": "template"
+          },
+          "options": [
+            {
+              "value": "discard",
+              "label": "Discard",
+              "description": "Drop the arriving record (counted and logged)"
+            },
+            {
+              "value": "block",
+              "label": "Block",
+              "description": "Halt fetching for the whole assignment until the partition drains"
+            },
+            {
+              "value": "dead_letter",
+              "label": "Dead Letter",
+              "description": "Republish to dead_letter_topic before advancing the offset"
+            }
+          ]
+        },
+        {
+          "name": "dead_letter_topic",
+          "path": "/parameters/aggregate/dead_letter_topic",
+          "label": "Dead Letter Topic",
+          "type": "string",
+          "required_when": {
+            "param": "on_overflow",
+            "eq": "dead_letter"
+          },
+          "help": "Overflow topic; read only when on_overflow is dead_letter",
+          "expression": {
+            "mode": "template"
+          },
+          "visible_when": {
+            "param": "on_overflow",
+            "eq": "dead_letter"
+          }
+        }
+      ]
+    },
+    {
+      "name": "message_schema",
+      "path": "/parameters/message_schema",
+      "label": "Message Schema",
+      "type": "object",
+      "help": "Optional message validation: {required_fields: [\"f\"], on_invalid: \"discard|fail|dead_letter\", dead_letter_topic: \"t-dlq\"}. on_invalid defaults to discard (offset committed, message dropped, drop counted and logged).",
+      "group": "processing",
+      "expression": {
+        "mode": "template"
+      },
+      "fields": [
+        {
+          "name": "required_fields",
+          "path": "/parameters/message_schema/required_fields",
+          "label": "Required Fields",
+          "type": "array",
+          "help": "Top-level keys every message value must carry; an empty list disables validation",
+          "expression": {
+            "mode": "template"
+          },
+          "item": {
+            "type": "string",
+            "expression": {
+              "mode": "template"
+            }
+          }
+        },
+        {
+          "name": "on_invalid",
+          "path": "/parameters/message_schema/on_invalid",
+          "label": "On Invalid",
+          "type": "string",
+          "fallback": "discard",
+          "help": "Policy for an invalid message; unset means discard",
+          "expression": {
+            "mode": "template"
+          },
+          "options": [
+            {
+              "value": "discard",
+              "label": "Discard",
+              "description": "Commit the offset and drop the message (counted and logged)"
+            },
+            {
+              "value": "fail",
+              "label": "Fail",
+              "description": "Withhold the commit so Kafka redelivers; blocks the partition"
+            },
+            {
+              "value": "dead_letter",
+              "label": "Dead Letter",
+              "description": "Republish to dead_letter_topic, then commit"
+            }
+          ]
+        },
+        {
+          "name": "dead_letter_topic",
+          "path": "/parameters/message_schema/dead_letter_topic",
+          "label": "Dead Letter Topic",
+          "type": "string",
+          "required_when": {
+            "param": "on_invalid",
+            "eq": "dead_letter"
+          },
+          "help": "Read only when on_invalid is dead_letter",
+          "expression": {
+            "mode": "template"
+          },
+          "visible_when": {
+            "param": "on_invalid",
+            "eq": "dead_letter"
+          }
+        }
+      ]
+    },
+    {
+      "name": "tuning",
+      "path": "/parameters/tuning",
+      "label": "Tuning",
+      "type": "object",
+      "help": "Optional consumer tuning: fetch_min_bytes (1), fetch_max_bytes (10000000), max_wait (10s), dial_timeout (10s), session_timeout (30s), heartbeat_interval (3s), rebalance_timeout (30s). Durations are strings (\"45s\"). heartbeat_interval must stay below session_timeout or the group rebalances continuously. Offsets always commit synchronously after the side effect; that is not tunable.",
+      "group": "advanced",
+      "expression": {
+        "mode": "template"
+      },
+      "fields": [
+        {
+          "name": "fetch_min_bytes",
+          "path": "/parameters/tuning/fetch_min_bytes",
+          "label": "Fetch Min Bytes",
+          "type": "number",
+          "fallback": 1,
+          "help": "Default 1; must not exceed fetch_max_bytes",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "min",
+              "value": 1
+            }
+          ]
+        },
+        {
+          "name": "fetch_max_bytes",
+          "path": "/parameters/tuning/fetch_max_bytes",
+          "label": "Fetch Max Bytes",
+          "type": "number",
+          "fallback": 10000000,
+          "help": "Default 10000000",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "min",
+              "value": 1
+            }
+          ]
+        },
+        {
+          "name": "max_wait",
+          "path": "/parameters/tuning/max_wait",
+          "label": "Max Wait",
+          "type": "string",
+          "widget": "duration",
+          "fallback": "10s",
+          "help": "Default 10s",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "duration"
+            }
+          ]
+        },
+        {
+          "name": "dial_timeout",
+          "path": "/parameters/tuning/dial_timeout",
+          "label": "Dial Timeout",
+          "type": "string",
+          "widget": "duration",
+          "fallback": "10s",
+          "help": "Default 10s",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "duration"
+            }
+          ]
+        },
+        {
+          "name": "session_timeout",
+          "path": "/parameters/tuning/session_timeout",
+          "label": "Session Timeout",
+          "type": "string",
+          "widget": "duration",
+          "fallback": "30s",
+          "help": "Default 30s",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "duration"
+            }
+          ]
+        },
+        {
+          "name": "heartbeat_interval",
+          "path": "/parameters/tuning/heartbeat_interval",
+          "label": "Heartbeat Interval",
+          "type": "string",
+          "widget": "duration",
+          "fallback": "3s",
+          "help": "Default 3s; must stay below session_timeout",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "duration"
+            }
+          ]
+        },
+        {
+          "name": "rebalance_timeout",
+          "path": "/parameters/tuning/rebalance_timeout",
+          "label": "Rebalance Timeout",
+          "type": "string",
+          "widget": "duration",
+          "fallback": "30s",
+          "help": "Default 30s",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "duration"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

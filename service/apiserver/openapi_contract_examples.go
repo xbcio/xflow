@@ -5,6 +5,7 @@ import (
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/types"
 )
@@ -241,4 +242,58 @@ func ExampleRegistrationCodeView(id string, createdAt, expiresAt time.Time, name
 		CreatedAt:         createdAt,
 		ExpiresAt:         expiresAt,
 	})
+}
+
+// ExampleNodeTypesResponse builds the real GET /v1/node-types data payload for
+// every node type in this process's registry, so the contract test validates
+// the projection of every builtin descriptor, not a hand-picked sample.
+func ExampleNodeTypesResponse() any {
+	return nodeTypesResponse{
+		ParamValidationMode: types.DefaultParamValidationMode,
+		NodeTypes:           projectNodeTypes(registry.Descriptors(), builtinNodeFormFallbacks()),
+	}
+}
+
+// ExampleNodeFormSchema builds a GET /v1/node-types/{type} payload from a
+// synthetic descriptor that sets every projected member at least once
+// (conditions with eq/in/truthy/all_of/any_of/not, every rule kind, item,
+// sub-fields, options_when, groups, one_of), so an omitempty or tag mistake on
+// a member no builtin uses still surfaces.
+func ExampleNodeFormSchema() any {
+	yes := true
+	lo, hi := 0.0, 10.0
+	two := 2
+	return projectNodeForm(registry.RegisteredDescriptor{Type: "example.node", Version: 2, Descriptor: types.Descriptor{
+		Type:         "example.node",
+		Kind:         types.NodeKindAction,
+		DisplayName:  "Example",
+		Credentials:  []string{"api"},
+		Capabilities: []string{"experimental"},
+		Docs:         "Example node.",
+		Inputs:       []types.PortSpec{{Name: "main", DisplayName: "Main"}},
+		Outputs:      []types.PortSpec{{Name: "main"}, {Name: "error"}},
+		Groups:       []types.GroupSpec{{Key: "advanced", DisplayName: "Advanced", Description: "Tuning", Collapsed: true}},
+		OneOf:        []types.OneOfGroup{{Params: []string{"mode", "count"}, Mode: types.OneOfAtMost}},
+		Params: []types.ParamSpec{
+			{Name: "mode", DisplayName: "Mode", Type: types.ParamString, Default: "a", Description: "Mode",
+				Enum:     []types.EnumOption{{Value: "a", DisplayName: "A", Description: "first"}, {Value: "b"}},
+				EnumWhen: []types.ConditionalEnum{{When: types.Condition{Param: "flag", Truthy: &yes}, Enum: []types.EnumOption{{Value: "a"}}}}},
+			{Name: "flag", Type: types.ParamBool, Secret: true, Deprecated: "use mode"},
+			{Name: "count", Type: types.ParamNumber, Group: "advanced", Order: 1,
+				Constraints:  &types.Constraints{Min: &lo, Max: &hi},
+				VisibleWhen:  &types.Condition{AnyOf: []types.Condition{{Param: "mode", Eq: "b"}, {Not: &types.Condition{Param: "mode", In: []any{"a", nil}}}}},
+				RequiredWhen: &types.Condition{AllOf: []types.Condition{{Param: "mode", Eq: "b"}}}},
+			{Name: "name", Type: types.ParamString, Required: true, Widget: "text",
+				Constraints: &types.Constraints{MinLength: &two, MaxLength: &two, Pattern: "^[a-z]+$", Format: "url"}},
+			{Name: "list", Type: types.ParamArray,
+				Constraints: &types.Constraints{MinItems: &two, MaxItems: &two, UniqueItems: true},
+				Item: &types.ParamSpec{Type: types.ParamObject, Fields: []types.ParamSpec{
+					{Name: "key", Type: types.ParamString, Required: true},
+				}}},
+			{Name: "cfg", Type: types.ParamObject, Fields: []types.ParamSpec{
+				{Name: "timeout", Type: types.ParamString, Widget: "duration", Constraints: &types.Constraints{Format: "duration"}},
+			}},
+			{Name: "hidden", Type: types.ParamString, VisibleWhen: &types.Condition{Not: &types.Condition{}}},
+		},
+	}}, nil)
 }

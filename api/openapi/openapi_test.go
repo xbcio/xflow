@@ -113,6 +113,18 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 			value:  apiserver.ExampleParamInvalidErrorEnvelope(),
 		},
 		{
+			// Every node type registered in this test process (the builtins
+			// the server links), through the real projector.
+			name:   "node types response",
+			schema: "NodeTypesResponse",
+			value:  apiserver.ExampleNodeTypesResponse(),
+		},
+		{
+			name:   "node form schema (every member)",
+			schema: "NodeFormSchema",
+			value:  apiserver.ExampleNodeFormSchema(),
+		},
+		{
 			name:   "signal request",
 			schema: "SignalRequest",
 			value:  apiserver.ExampleSignalRequest("approve", map[string]any{"ok": true}),

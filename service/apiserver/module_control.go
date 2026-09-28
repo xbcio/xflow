@@ -75,6 +75,9 @@ type workflowControlModule struct {
 	// descriptorLookup resolves node Descriptors for ParamSpec validation;
 	// nil means execution.RegistryDescriptorLookup.
 	descriptorLookup execution.DescriptorLookup
+	// nodeDescriptors feeds GET /v1/node-types; nil means
+	// registry.Descriptors (see module_node_types.go).
+	nodeDescriptors nodeDescriptorSource
 }
 
 func newWorkflowControlModule(cp *control.ControlPlane, auth WorkflowAuthenticator, log engine.Logger, tracer tracing.Tracer) *workflowControlModule {
@@ -132,6 +135,11 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+PathWorkflowByID, wrap("read_workflow", m.handleGetWorkflow))
 	mux.HandleFunc("PUT "+PathWorkflowByID, wrap("replace_workflow", m.handleReplaceWorkflow))
 	mux.HandleFunc("DELETE "+PathWorkflowByID, wrap("deregister_workflow", m.handleDeregisterWorkflow))
+	// Node-type schemas (editor forms) are mounted in both branches, like
+	// GET /v1/workflows; the registry they project is process-global, not
+	// namespaced.
+	mux.HandleFunc("GET "+PathNodeTypes, wrap("read_node_types", m.handleListNodeTypes))
+	mux.HandleFunc("GET "+PathNodeTypeByType, wrap("read_node_types", m.handleGetNodeType))
 	mux.HandleFunc("POST "+PathWorkflowExecute, wrap("execute_workflow", m.handleExecuteWorkflow))
 	mux.HandleFunc("POST "+PathWorkflowExecuteByID, wrap("execute_workflow_by_id", m.handleExecuteWorkflowByID))
 	// POST /v1/executions is the entry-seed endpoint (runner protocol face,
@@ -215,6 +223,12 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+PathWorkflowByID, authz(OpWorkflowRead, false, m.handleGetWorkflow, workflowIDResolver()))
 	mux.HandleFunc("PUT "+PathWorkflowByID, m.authzWrapWithPreAdmission(OpWorkflowDefinitionUpdate, true, m.handleReplaceWorkflow, workflowIDResolver(), rejectFAFWorkflowRegistrationBeforeAdmission))
 	mux.HandleFunc("DELETE "+PathWorkflowByID, authz(OpWorkflowRegister, true, m.handleDeregisterWorkflow, workflowIDResolver()))
+	// GET /v1/node-types[/{type}] reuses OpWorkflowRead: a principal that may
+	// read workflow definitions may read the node schemas they are written
+	// against. No resource resolver: the registry is not a per-namespace
+	// resource.
+	mux.HandleFunc("GET "+PathNodeTypes, authz(OpWorkflowRead, false, m.handleListNodeTypes, nil))
+	mux.HandleFunc("GET "+PathNodeTypeByType, authz(OpWorkflowRead, false, m.handleGetNodeType, nil))
 	mux.HandleFunc("POST "+PathWorkflowExecute, authz(OpWorkflowCreate, true, m.handleExecuteWorkflow, newExecutionIDResolver()))
 	mux.HandleFunc("POST "+PathWorkflowExecuteByID, authz(OpWorkflowInvoke, true, m.handleExecuteWorkflowByID, workflowIDResolver()))
 	// Entry-seed endpoint (exact path, POST only). The authz wrapper injects

@@ -1,0 +1,147 @@
+{
+  "spec": "node-form/v1",
+  "node_type": "xflow.switch",
+  "node_version": 1,
+  "kind": "action",
+  "display_name": "Switch",
+  "ports": {
+    "inputs": [
+      {
+        "name": "main",
+        "display_name": "Main"
+      }
+    ]
+  },
+  "fields": [
+    {
+      "name": "mode",
+      "path": "/parameters/mode",
+      "label": "Mode",
+      "type": "string",
+      "required": true,
+      "fallback": "rules",
+      "help": "Routing mode: \"rules\" or \"expression\"",
+      "expression": {
+        "mode": "template"
+      },
+      "options": [
+        {
+          "value": "rules",
+          "label": "Rules",
+          "description": "First rule whose condition holds picks the output"
+        },
+        {
+          "value": "expression",
+          "label": "Expression",
+          "description": "Expression result is the output port name"
+        }
+      ]
+    },
+    {
+      "name": "outputs",
+      "path": "/parameters/outputs",
+      "label": "Outputs",
+      "type": "array",
+      "help": "List of output port names (dynamic)",
+      "expression": {
+        "mode": "template"
+      },
+      "item": {
+        "type": "string",
+        "expression": {
+          "mode": "template"
+        }
+      }
+    },
+    {
+      "name": "rules",
+      "path": "/parameters/rules",
+      "label": "Rules",
+      "type": "array",
+      "help": "Rule list for rules mode",
+      "expression": {
+        "mode": "template"
+      },
+      "visible_when": {
+        "param": "mode",
+        "in": [
+          "rules",
+          null
+        ]
+      },
+      "item": {
+        "type": "object",
+        "expression": {
+          "mode": "template"
+        },
+        "fields": [
+          {
+            "name": "condition",
+            "path": "condition",
+            "label": "Condition",
+            "type": "string",
+            "widget": "expression",
+            "help": "Boolean expression; a rule with an empty condition is skipped",
+            "expression": {
+              "mode": "pure"
+            },
+            "rules": [
+              {
+                "type": "format",
+                "format": "expression"
+              }
+            ]
+          },
+          {
+            "name": "output",
+            "path": "output",
+            "label": "Output",
+            "type": "string",
+            "widget": "port-select",
+            "help": "Output port taken when condition holds; a rule with an empty output is skipped",
+            "expression": {
+              "mode": "template"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "expression",
+      "path": "/parameters/expression",
+      "label": "Expression",
+      "type": "string",
+      "widget": "expression",
+      "required_when": {
+        "param": "mode",
+        "eq": "expression"
+      },
+      "help": "Expression for expression mode",
+      "expression": {
+        "mode": "pure"
+      },
+      "rules": [
+        {
+          "type": "format",
+          "format": "expression"
+        }
+      ],
+      "visible_when": {
+        "param": "mode",
+        "eq": "expression"
+      }
+    },
+    {
+      "name": "default_output",
+      "path": "/parameters/default_output",
+      "label": "Default Output",
+      "type": "string",
+      "widget": "port-select",
+      "fallback": "default",
+      "help": "Port name used when no rule matches",
+      "expression": {
+        "mode": "template"
+      }
+    }
+  ]
+}

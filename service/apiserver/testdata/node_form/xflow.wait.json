@@ -1,0 +1,196 @@
+{
+  "spec": "node-form/v1",
+  "node_type": "xflow.wait",
+  "node_version": 1,
+  "kind": "action",
+  "display_name": "Wait",
+  "ports": {
+    "inputs": [
+      {
+        "name": "main",
+        "display_name": "Main"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "main",
+        "display_name": "Main"
+      },
+      {
+        "name": "timeout",
+        "display_name": "Timeout"
+      },
+      {
+        "name": "error",
+        "display_name": "Error"
+      }
+    ]
+  },
+  "fields": [
+    {
+      "name": "mode",
+      "path": "/parameters/mode",
+      "label": "Mode",
+      "type": "string",
+      "default": "signal",
+      "help": "Trigger mode: \"signal\" (default) or \"timer\"",
+      "expression": {
+        "mode": "template"
+      },
+      "options": [
+        {
+          "value": "signal",
+          "label": "Signal",
+          "description": "Wait for one or more external signals"
+        },
+        {
+          "value": "timer",
+          "label": "Timer",
+          "description": "Wait for a fixed duration or until an absolute time"
+        }
+      ]
+    },
+    {
+      "name": "signal_name",
+      "path": "/parameters/signal_name",
+      "label": "Signal Name",
+      "type": "string",
+      "help": "Name of the external signal to wait for (signal mode)",
+      "expression": {
+        "mode": "template"
+      },
+      "visible_when": {
+        "param": "mode",
+        "in": [
+          "signal",
+          null
+        ]
+      }
+    },
+    {
+      "name": "signals",
+      "path": "/parameters/signals",
+      "label": "Signal Names",
+      "type": "array",
+      "help": "List of signal names to wait for (multi-signal mode)",
+      "expression": {
+        "mode": "template"
+      },
+      "visible_when": {
+        "param": "mode",
+        "in": [
+          "signal",
+          null
+        ]
+      },
+      "item": {
+        "type": "string",
+        "expression": {
+          "mode": "template"
+        }
+      }
+    },
+    {
+      "name": "quorum",
+      "path": "/parameters/quorum",
+      "label": "Quorum",
+      "type": "number",
+      "help": "Number of signals required to proceed; 0 or unset means all (multi-signal mode)",
+      "expression": {
+        "mode": "template"
+      },
+      "visible_when": {
+        "all_of": [
+          {
+            "param": "mode",
+            "in": [
+              "signal",
+              null
+            ]
+          },
+          {
+            "param": "signals",
+            "truthy": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "timeout",
+      "path": "/parameters/timeout",
+      "label": "Timeout",
+      "type": "string",
+      "widget": "duration",
+      "help": "Maximum wait duration before routing to timeout port (e.g. \"48h\")",
+      "expression": {
+        "mode": "template"
+      },
+      "rules": [
+        {
+          "type": "format",
+          "format": "duration"
+        }
+      ]
+    },
+    {
+      "name": "duration",
+      "path": "/parameters/duration",
+      "label": "Duration",
+      "type": "string",
+      "widget": "duration",
+      "required_when": {
+        "all_of": [
+          {
+            "param": "mode",
+            "eq": "timer"
+          },
+          {
+            "param": "until",
+            "truthy": false
+          }
+        ]
+      },
+      "help": "Fixed wait duration (timer mode, e.g. \"5m\")",
+      "expression": {
+        "mode": "template"
+      },
+      "rules": [
+        {
+          "type": "format",
+          "format": "duration"
+        }
+      ],
+      "visible_when": {
+        "param": "mode",
+        "eq": "timer"
+      }
+    },
+    {
+      "name": "until",
+      "path": "/parameters/until",
+      "label": "Until",
+      "type": "string",
+      "widget": "datetime",
+      "required_when": {
+        "all_of": [
+          {
+            "param": "mode",
+            "eq": "timer"
+          },
+          {
+            "param": "duration",
+            "truthy": false
+          }
+        ]
+      },
+      "help": "Absolute time expression to wait until (timer mode)",
+      "expression": {
+        "mode": "template"
+      },
+      "visible_when": {
+        "param": "mode",
+        "eq": "timer"
+      }
+    }
+  ]
+}

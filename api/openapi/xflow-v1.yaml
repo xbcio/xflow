@@ -40,6 +40,8 @@ tags:
     description: Register, read, replace, deregister, and execute workflow definitions.
   - name: Executions
     description: Inspect, signal, cancel, and wait for executions.
+  - name: NodeTypes
+    description: Editor form schemas (NodeFormSchema) of the node types registered in the server process.
   - name: Supplies
     description: Push and read supply content (raw-byte stream on success).
   - name: Artifacts
@@ -771,6 +773,109 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/WaitTimeoutResponse"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/node-types:
+    get:
+      operationId: listNodeTypes
+      summary: List node-type form schemas
+      description: |
+        Returns the NodeFormSchema v1 projection of every (type, version)
+        registered in the SERVER PROCESS's node registry, sorted by type then
+        version, plus the server's `param_validation_mode` so an editor's
+        blocking semantics follow the backend (off | warn | enforce).
+
+        Scope: only types registered in the server process. Custom node types
+        registered only on runners are absent — runners do not report
+        Descriptors at enroll — and an editor treats such a node as having no
+        schema (parameters edited as JSON).
+
+        The projection is recomputed per request. `ETag` is a strong
+        validator over the `data` payload bytes (not the envelope, whose
+        `trace_id` differs per request); a matching `If-None-Match` answers 304
+        with no body. Authorization is `workflow.read`, the operation of
+        GET /v1/workflows.
+      tags: [NodeTypes]
+      parameters:
+        - $ref: "#/components/parameters/IfNoneMatch"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: Every registered node type.
+          headers:
+            ETag:
+              $ref: "#/components/headers/NodeTypesETag"
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/NodeTypesResponse"
+        "304":
+          description: If-None-Match matched the current ETag; no body.
+          headers:
+            ETag:
+              $ref: "#/components/headers/NodeTypesETag"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/node-types/{type}:
+    get:
+      operationId: getNodeType
+      summary: Read one node-type form schema
+      description: |
+        Returns the NodeFormSchema of one node type registered in the server
+        process (the same scope as GET /v1/node-types). `version` selects a
+        registered version; omitted or 0 selects the latest, matching registry
+        Lookup. An unknown type or version fails with 404
+        (`node_type_not_found`); a malformed version with 400
+        (`node_type_version_invalid`). ETag / If-None-Match behave as on
+        GET /v1/node-types.
+      tags: [NodeTypes]
+      parameters:
+        - name: type
+          in: path
+          required: true
+          description: Node type, e.g. xflow.trigger.kafka.
+          schema:
+            type: string
+        - name: version
+          in: query
+          required: false
+          description: Registered node version; omitted or 0 means the latest.
+          schema:
+            type: integer
+            minimum: 0
+        - $ref: "#/components/parameters/IfNoneMatch"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: The node type's form schema.
+          headers:
+            ETag:
+              $ref: "#/components/headers/NodeTypesETag"
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/NodeFormSchema"
+        "304":
+          description: If-None-Match matched the current ETag; no body.
+          headers:
+            ETag:
+              $ref: "#/components/headers/NodeTypesETag"
         default:
           $ref: "#/components/responses/DefaultError"
 
@@ -1540,6 +1645,13 @@ components:
       description: Registration code id.
       schema:
         type: string
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      required: false
+      description: An ETag from a previous response; when it (or `*`) matches, the server answers 304.
+      schema:
+        type: string
     XRequestId:
       name: X-Request-Id
       in: header
@@ -1568,6 +1680,11 @@ components:
       description: Echoed X-Request-Id (only when the inbound value was valid).
       schema:
         type: string
+    NodeTypesETag:
+      description: Strong ETag, "sha256:<hex>" of the data payload bytes, recomputed per request.
+      schema:
+        type: string
+        example: '"sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"'
 
   responses:
     DefaultError:
@@ -2835,3 +2952,349 @@ components:
         value: {}
         display_name:
           type: string
+
+    NodeTypesResponse:
+      type: object
+      description: GET /v1/node-types payload.
+      additionalProperties: false
+      required: [param_validation_mode, node_types]
+      properties:
+        param_validation_mode:
+          type: string
+          enum: ["off", warn, enforce]
+          description: The server's ParamSpec validation mode for registration and inline execution.
+        node_types:
+          type: array
+          description: One schema per registered (type, version), sorted by type then version.
+          items:
+            $ref: "#/components/schemas/NodeFormSchema"
+
+    NodeFormSchema:
+      type: object
+      description: |
+        NodeFormSchema v1: a projection of one registered node type's Go
+        Descriptor for editor forms (a domain schema, not a layout). Optional
+        keys are omitted rather than written as null.
+      additionalProperties: false
+      required: [spec, node_type, node_version, kind, fields]
+      properties:
+        spec:
+          type: string
+          enum: [node-form/v1]
+          description: Schema format version.
+        node_type:
+          type: string
+          description: Node type, e.g. xflow.wait.
+        node_version:
+          type: integer
+          minimum: 1
+          description: Registered version this schema describes.
+        kind:
+          type: string
+          enum: [action, trigger, supply]
+          description: Node kind; a Descriptor without one projects as action.
+        display_name:
+          type: string
+          description: Descriptor display name.
+        description:
+          type: string
+          description: Reserved; Descriptor has no description today, so the server never writes it.
+        docs:
+          type: string
+          description: Long-form documentation (Markdown).
+        capabilities:
+          type: array
+          description: Open-set capability tags.
+          items:
+            type: string
+        credentials:
+          type: array
+          description: Credential names the node declares it needs (display only in v1).
+          items:
+            type: string
+        ports:
+          $ref: "#/components/schemas/NodeFormPorts"
+        groups:
+          type: array
+          description: Editor sections fields join via `group`, in display order.
+          items:
+            $ref: "#/components/schemas/NodeFormGroup"
+        one_of:
+          type: array
+          description: Cross-parameter cardinality rules over top-level params.
+          items:
+            $ref: "#/components/schemas/NodeFormOneOf"
+        fields:
+          type: array
+          description: Top-level parameters in declaration order.
+          items:
+            $ref: "#/components/schemas/NodeFormField"
+
+    NodeFormPorts:
+      type: object
+      description: Declared ports. `dynamic_outputs` is reserved; no Descriptor declares one yet, so the server never writes it.
+      additionalProperties: false
+      properties:
+        inputs:
+          type: array
+          description: Input ports.
+          items:
+            $ref: "#/components/schemas/NodeFormPort"
+        outputs:
+          type: array
+          description: Output ports.
+          items:
+            $ref: "#/components/schemas/NodeFormPort"
+        dynamic_outputs:
+          type: object
+          description: Reserved; output ports derived from a parameter.
+          required: [from]
+          properties:
+            from:
+              type: string
+              description: JSON Pointer of the parameter listing the port names.
+
+    NodeFormPort:
+      type: object
+      description: One port.
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: Port name.
+        display_name:
+          type: string
+          description: Port display name.
+
+    NodeFormGroup:
+      type: object
+      description: One editor section.
+      additionalProperties: false
+      required: [key]
+      properties:
+        key:
+          type: string
+          description: Key fields name in `group`.
+        display_name:
+          type: string
+          description: Section title.
+        description:
+          type: string
+          description: Section description.
+        collapsed:
+          type: boolean
+          description: Initially collapsed.
+
+    NodeFormOneOf:
+      type: object
+      description: How many of `params` may be set.
+      additionalProperties: false
+      required: [params]
+      properties:
+        params:
+          type: array
+          description: Top-level param names.
+          items:
+            type: string
+        mode:
+          type: string
+          enum: [exactly, at_most, at_least]
+          description: Omitted means exactly.
+
+    NodeFormField:
+      description: One parameter. A NodeFormItem plus its identity (`name`, `path`).
+      allOf:
+        - $ref: "#/components/schemas/NodeFormItem"
+        - type: object
+          required: [name, path]
+
+    NodeFormItem:
+      type: object
+      description: |
+        A field's schema without required identity; used as-is for array
+        element schemas (`item`). All values are display metadata or
+        ParamSpec rules; `default` and `fallback` are hints and are never
+        written into a definition.
+      additionalProperties: false
+      required: [type]
+      properties:
+        name:
+          type: string
+          description: Parameter name; absent on an array element schema.
+        path:
+          type: string
+          description: |
+            JSON Pointer from the WorkflowNode root ("/parameters/a/b") for
+            top-level params and object sub-fields; relative to the element
+            ("condition", "cfg/x") inside an array element schema.
+        label:
+          type: string
+          description: Display name, falling back to the parameter name.
+        type:
+          type: string
+          enum: [string, number, boolean, array, object]
+          description: Value type (Go ParamBool is spelled boolean).
+        widget:
+          type: string
+          description: Editor widget name; open set, unknown names degrade by type.
+        required:
+          type: boolean
+          description: Always required.
+        required_when:
+          $ref: "#/components/schemas/NodeFormCondition"
+        default:
+          $ref: "#/components/schemas/NodeFormValue"
+        fallback:
+          $ref: "#/components/schemas/NodeFormValue"
+        help:
+          type: string
+          description: Parameter description.
+        group:
+          type: string
+          description: Key of a schema `groups` entry.
+        order:
+          type: integer
+          description: Sort key within the group (ascending; ties keep declaration order).
+        secret:
+          type: boolean
+          description: Mask the value.
+        deprecated:
+          type: string
+          description: Deprecation note; present only when deprecated.
+        expression:
+          type: object
+          description: The backend's expression classification of this parameter path.
+          additionalProperties: false
+          required: [mode]
+          properties:
+            mode:
+              type: string
+              enum: [none, pure, template, literal]
+              description: none = never evaluated; pure = whole value is an expression; template = literal with embedded templates; literal = host source code.
+        rules:
+          type: array
+          description: Projected Constraints.
+          items:
+            $ref: "#/components/schemas/NodeFormRule"
+        visible_when:
+          $ref: "#/components/schemas/NodeFormCondition"
+        options:
+          type: array
+          description: Allowed values (Enum).
+          items:
+            $ref: "#/components/schemas/NodeFormEnumOption"
+        options_when:
+          type: array
+          description: Conditional Enum overrides; the first entry whose `when` holds wins.
+          items:
+            $ref: "#/components/schemas/NodeFormConditionalOptions"
+        item:
+          $ref: "#/components/schemas/NodeFormItem"
+        fields:
+          type: array
+          description: Known sub-fields of an object; absent means a free map.
+          items:
+            $ref: "#/components/schemas/NodeFormField"
+
+    NodeFormRule:
+      type: object
+      description: One projected Constraints entry. `advisory` rules are not enforced by the backend.
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [required, min, max, min_length, max_length, pattern, format, min_items, max_items, unique_items, json_parsable]
+          description: Rule kind.
+        value:
+          type: number
+          description: Bound for min/max/min_length/max_length/min_items/max_items.
+        pattern:
+          type: string
+          description: RE2 pattern.
+        format:
+          type: string
+          description: Format name (duration, cron, expression, sha256-digest, json enforced; url, host-port, code advisory).
+        advisory:
+          type: boolean
+          description: The backend does not enforce this rule.
+        message:
+          type: string
+          description: Reserved override message; the server does not write it today.
+
+    NodeFormEnumOption:
+      type: object
+      description: One allowed value.
+      additionalProperties: false
+      required: [value]
+      properties:
+        value:
+          $ref: "#/components/schemas/NodeFormValue"
+        label:
+          type: string
+          description: Display name.
+        description:
+          type: string
+          description: Option description.
+
+    NodeFormConditionalOptions:
+      type: object
+      description: An Enum that applies while `when` holds.
+      additionalProperties: false
+      required: [when, options]
+      properties:
+        when:
+          $ref: "#/components/schemas/NodeFormCondition"
+        options:
+          type: array
+          description: Allowed values while `when` holds.
+          items:
+            $ref: "#/components/schemas/NodeFormEnumOption"
+
+    NodeFormValue:
+      description: |
+        Any JSON value, null included: a Descriptor Default, a handler
+        fallback, an enum value, or a condition operand. `default` and
+        `fallback` are display-only hints; condition `eq` compares
+        numerically.
+      type: [string, number, boolean, object, array, "null"]
+      items:
+        $ref: "#/components/schemas/NodeFormValue"
+
+    NodeFormCondition:
+      type: object
+      description: |
+        A predicate over sibling params (Go types.Condition). All present
+        clauses must hold; no clauses holds. A missing param compares as null.
+        `eq` is present only when the Go Eq is set — `eq: null` would be a
+        real "param is unset" clause, so it is never written for "no Eq".
+        `in` and `any_of` are present whenever the Go slice is non-nil, even
+        when empty (an empty `in` / `any_of` never holds).
+      additionalProperties: false
+      properties:
+        param:
+          type: string
+          description: Sibling param the eq/in/truthy clauses test.
+        eq:
+          $ref: "#/components/schemas/NodeFormValue"
+        in:
+          type: array
+          description: Is one of (numbers compare numerically); null entries match an unset param.
+          items:
+            $ref: "#/components/schemas/NodeFormValue"
+        truthy:
+          type: boolean
+          description: JavaScript truthiness must equal this.
+        all_of:
+          type: array
+          description: Every sub-condition holds.
+          items:
+            $ref: "#/components/schemas/NodeFormCondition"
+        any_of:
+          type: array
+          description: Some sub-condition holds.
+          items:
+            $ref: "#/components/schemas/NodeFormCondition"
+        not:
+          $ref: "#/components/schemas/NodeFormCondition"

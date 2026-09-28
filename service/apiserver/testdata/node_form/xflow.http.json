@@ -1,0 +1,194 @@
+{
+  "spec": "node-form/v1",
+  "node_type": "xflow.http",
+  "node_version": 1,
+  "kind": "action",
+  "display_name": "HTTP Request",
+  "credentials": [
+    "http_auth"
+  ],
+  "ports": {
+    "inputs": [
+      {
+        "name": "main",
+        "display_name": "Main"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "main",
+        "display_name": "Main"
+      },
+      {
+        "name": "error",
+        "display_name": "Error"
+      }
+    ]
+  },
+  "groups": [
+    {
+      "key": "request",
+      "display_name": "Request"
+    },
+    {
+      "key": "advanced",
+      "display_name": "Advanced",
+      "collapsed": true
+    }
+  ],
+  "fields": [
+    {
+      "name": "method",
+      "path": "/parameters/method",
+      "label": "Method",
+      "type": "string",
+      "default": "GET",
+      "help": "HTTP method: GET/POST/PUT/DELETE/PATCH",
+      "group": "request",
+      "expression": {
+        "mode": "template"
+      },
+      "options": [
+        {
+          "value": "GET"
+        },
+        {
+          "value": "POST"
+        },
+        {
+          "value": "PUT"
+        },
+        {
+          "value": "DELETE"
+        },
+        {
+          "value": "PATCH"
+        }
+      ]
+    },
+    {
+      "name": "url",
+      "path": "/parameters/url",
+      "label": "URL",
+      "type": "string",
+      "required": true,
+      "help": "Target URL",
+      "group": "request",
+      "expression": {
+        "mode": "template"
+      },
+      "rules": [
+        {
+          "type": "format",
+          "format": "url",
+          "advisory": true
+        }
+      ]
+    },
+    {
+      "name": "mode",
+      "path": "/parameters/mode",
+      "label": "Mode",
+      "type": "string",
+      "fallback": "json",
+      "help": "Payload encoding: \"json\" (default, body is marshalled and the response parsed) or \"raw\" (body in/out as opaque base64 bytes, every status is a result)",
+      "group": "request",
+      "expression": {
+        "mode": "template"
+      },
+      "options": [
+        {
+          "value": "json",
+          "label": "JSON",
+          "description": "Body marshalled to JSON; response parsed; 4xx is a node error"
+        },
+        {
+          "value": "raw",
+          "label": "Raw",
+          "description": "Body in and out as base64 bytes; every status is a result"
+        }
+      ]
+    },
+    {
+      "name": "authentication",
+      "path": "/parameters/authentication",
+      "label": "Authentication",
+      "type": "string",
+      "widget": "credential-select",
+      "help": "Credential reference name",
+      "group": "request",
+      "expression": {
+        "mode": "template"
+      }
+    },
+    {
+      "name": "body",
+      "path": "/parameters/body",
+      "label": "Body",
+      "type": "object",
+      "help": "Request body, marshalled to JSON. Ignored when mode=raw",
+      "group": "request",
+      "expression": {
+        "mode": "template"
+      },
+      "visible_when": {
+        "param": "mode",
+        "in": [
+          "json",
+          null
+        ]
+      }
+    },
+    {
+      "name": "body_b64",
+      "path": "/parameters/body_b64",
+      "label": "Raw Body (base64)",
+      "type": "string",
+      "widget": "base64",
+      "help": "Request body as base64-encoded bytes, sent verbatim with no Content-Type added. Only read when mode=raw",
+      "group": "request",
+      "expression": {
+        "mode": "template"
+      },
+      "visible_when": {
+        "param": "mode",
+        "eq": "raw"
+      }
+    },
+    {
+      "name": "headers",
+      "path": "/parameters/headers",
+      "label": "Headers",
+      "type": "object",
+      "widget": "key-value",
+      "help": "Request headers",
+      "group": "request",
+      "expression": {
+        "mode": "template"
+      }
+    },
+    {
+      "name": "query",
+      "path": "/parameters/query",
+      "label": "Query Params",
+      "type": "object",
+      "widget": "key-value",
+      "help": "URL query parameters",
+      "group": "request",
+      "expression": {
+        "mode": "template"
+      }
+    },
+    {
+      "name": "options",
+      "path": "/parameters/options",
+      "label": "Options",
+      "type": "object",
+      "help": "Additional options (timeout, max_response_bytes, disable_redirect, insecure_skip_verify)",
+      "group": "advanced",
+      "expression": {
+        "mode": "template"
+      }
+    }
+  ]
+}

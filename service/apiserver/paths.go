@@ -34,6 +34,12 @@ const (
 	PathExecutionSignalByID = "/v1/executions/{id}/signals/{name}"
 	PathExecutionWait       = "/v1/executions/{id}/wait"
 
+	// PathNodeTypes lists the NodeFormSchema of every node type registered in
+	// the server process; PathNodeTypeByType serves one (?version= selects a
+	// version, latest when omitted).
+	PathNodeTypes      = "/v1/node-types"
+	PathNodeTypeByType = "/v1/node-types/{type}"
+
 	PathSupplyByName     = "/v1/supplies/{name}"
 	PathArtifactByDigest = "/v1/artifacts/{digest}"
 
@@ -96,6 +102,9 @@ var UserFacingPaths = []string{
 	PathExecutionSignals,
 	PathExecutionSignalByID,
 	PathExecutionWait,
+
+	PathNodeTypes,
+	PathNodeTypeByType,
 
 	PathSupplyByName,
 	PathArtifactByDigest,

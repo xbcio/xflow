@@ -125,6 +125,9 @@ var guardSamples = []guardSample{
 	{"PathExecutionSignalByID", PathExecutionSignalByID, http.MethodDelete, "/v1/executions/ex-1/signals/s1"},
 	{"PathExecutionWait", PathExecutionWait, http.MethodGet, "/v1/executions/ex-1/wait"},
 
+	{"PathNodeTypes", PathNodeTypes, http.MethodGet, "/v1/node-types"},
+	{"PathNodeTypeByType", PathNodeTypeByType, http.MethodGet, "/v1/node-types/xflow.wait"},
+
 	{"PathSupplyByName", PathSupplyByName, http.MethodGet, "/v1/supplies/rules"},
 	// The sample digest MUST be format-valid (sha256:<64 hex>): the artifact
 	// route validates the digest in the route resolver BEFORE authz, and an
