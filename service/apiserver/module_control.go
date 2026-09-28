@@ -1553,6 +1553,12 @@ func (m *workflowControlModule) replaceWorkflowByID(ctx context.Context, ns name
 	if err != nil {
 		return "", registrationDiagnostics{}, err
 	}
+	if unchangedExceptStampedID(existing, replacement, id) {
+		// A record registered by POST stores its definition without an id,
+		// while PUT stamps the path id onto def above. Content is identical,
+		// so this is the no-op replace, not a new revision (Doc C §5.1 #2).
+		return existing.ID, diag, nil
+	}
 	if mutationID == "" {
 		mutationID = "http:" + uuid.NewString()
 	}
@@ -1658,6 +1664,18 @@ func (m *workflowControlModule) entryActivationManager() *control.EntryActivatio
 // namespace/name@version identity so a definition registered twice is idempotent.
 func workflowRegistryKey(ns, name, version string) string {
 	return fmt.Sprintf("%s/%s@%s", ns, name, version)
+}
+
+// unchangedExceptStampedID reports whether replacement differs from existing
+// only by the path id PUT stamps onto the definition: same registry key, and
+// the stored definition, once given that id, hashes identically.
+func unchangedExceptStampedID(existing, replacement backend.WorkflowRecord, id types.WorkflowID) bool {
+	if existing.Key != replacement.Key || existing.Definition == nil || existing.Definition.ID != "" {
+		return false
+	}
+	stamped := *existing.Definition
+	stamped.ID = string(id)
+	return definitionHash(&stamped) == replacement.DefinitionHash
 }
 
 // definitionHash returns a stable SHA-256 fingerprint over the JSON-encoded

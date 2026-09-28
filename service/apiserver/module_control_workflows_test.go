@@ -405,6 +405,43 @@ func TestGetWorkflowByIDNotFoundReturnsStableCode(t *testing.T) {
 	}
 }
 
+// TestPutWorkflowByIDUnchangedAfterPostIsNoOp pins that the first PUT of an
+// untouched definition after its POST is a no-op: the server-assigned id the
+// PUT body now carries is not definition content (Doc C §5.1 #2).
+func TestPutWorkflowByIDUnchangedAfterPostIsNoOp(t *testing.T) {
+	srv, cp := newRegisterTestServer(t)
+
+	def := validWorkflow()
+	def.Name = "unchanged"
+	resp := postWorkflows(t, srv.URL, "tok-full", def)
+	defer func() { _ = resp.Body.Close() }()
+	var out registerWorkflowResponse
+	decodeEnvelope(t, resp, &out)
+	before, err := cp.WorkflowRegistry().GetWorkflow(context.Background(), out.WorkflowID)
+	if err != nil {
+		t.Fatalf("GetWorkflow after POST: %v", err)
+	}
+
+	// The editor GETs the record and PUTs it back untouched; the body now
+	// carries the server-assigned id, which the POST body did not.
+	same := validWorkflow()
+	same.Name = "unchanged"
+	same.ID = string(out.WorkflowID)
+	putResp := putWorkflow(t, srv.URL, "tok-full", string(out.WorkflowID), same)
+	defer func() { _ = putResp.Body.Close() }()
+	if putResp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", putResp.StatusCode)
+	}
+	after, err := cp.WorkflowRegistry().GetWorkflow(context.Background(), out.WorkflowID)
+	if err != nil {
+		t.Fatalf("GetWorkflow after PUT: %v", err)
+	}
+	if after.DefinitionHash != before.DefinitionHash || after.RegistryRevision != before.RegistryRevision {
+		t.Fatalf("first unchanged PUT after POST changed the record: before hash=%s rev=%d, after hash=%s rev=%d",
+			before.DefinitionHash, before.RegistryRevision, after.DefinitionHash, after.RegistryRevision)
+	}
+}
+
 // TestPutWorkflowByIDReplaces pins PUT /v1/workflows/{id}: the path id is the
 // authoritative resource identity, while the body is the replacement
 // definition. A changed definition under the same key is stored under the same
