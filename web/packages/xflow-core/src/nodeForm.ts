@@ -201,3 +201,21 @@ export interface NodeTypesResponse {
   param_validation_mode: ParamValidationMode;
   node_types: NodeFormSchema[];
 }
+
+
+/**
+ * One ParamSpec validation finding (Go engine/graph.ParamIssue), returned as
+ * `param_issues` by POST/PUT /v1/workflows (warn mode, in `data`) and by the
+ * 400 `workflow_param_invalid` failure envelope (enforce mode, in `data`).
+ */
+export interface ParamIssue {
+  /** Node name; inside a sub-graph body it is "parent/child". */
+  node: string;
+  /** JSON Pointer relative to the node, same format as NodeFormField.path. */
+  path: string;
+  /** required | enum | one_of | constraint.<name> | format.<name>. */
+  code: string;
+  /** Names the parameter and the rule, never the value. */
+  message: string;
+  severity: "error" | "warning";
+}
