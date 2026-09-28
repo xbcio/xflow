@@ -238,9 +238,23 @@ type Descriptor struct {
 	// Capabilities is an open-set list of capability tags. The compiler may use
 	// these to gate experimental or implementation-incomplete features.
 	Capabilities []string
+	// Groups declares the editor sections ParamSpec.Group refers to, in
+	// display order.
+	Groups []GroupSpec
+	// Docs is long-form documentation for the node type (Markdown).
+	Docs string
+	// OneOf declares cross-parameter "set" cardinality rules over top-level
+	// params. Hidden params (VisibleWhen false) still count, because a handler
+	// reads any value that is present.
+	OneOf []OneOfGroup
 }
 
 // ParamSpec defines the schema for a single node parameter.
+//
+// A param is "set" when its key is present and its value is neither nil nor
+// "". A param whose VisibleWhen evaluates false is hidden: it is exempt from
+// Required, RequiredWhen, Enum, EnumWhen, and Constraints validation, but it
+// still counts toward Descriptor.OneOf.
 type ParamSpec struct {
 	Name        string
 	DisplayName string
@@ -248,6 +262,103 @@ type ParamSpec struct {
 	Required    bool
 	Default     any
 	Description string
+
+	// Enum lists the allowed values. Empty means unrestricted.
+	Enum []EnumOption
+	// EnumWhen overrides Enum depending on other params: the first entry whose
+	// When holds wins; when none holds, Enum applies.
+	EnumWhen []ConditionalEnum
+	// Item is the element schema when Type is ParamArray.
+	Item *ParamSpec
+	// Fields lists the known sub-fields when Type is ParamObject. Empty means
+	// a free-form map.
+	Fields []ParamSpec
+	// Secret marks a value that must be masked in editors and logs.
+	Secret bool
+	// Constraints bounds the value; nil means no constraints.
+	Constraints *Constraints
+	// VisibleWhen hides the param when it evaluates false; nil means always
+	// visible.
+	VisibleWhen *Condition
+	// RequiredWhen makes the param required while it evaluates true. It is
+	// ignored when Required is true.
+	RequiredWhen *Condition
+	// Group is the Key of a Descriptor.Groups entry; empty means ungrouped.
+	Group string
+	// Order sorts params within a group (ascending, ties keep declaration order).
+	Order int
+	// Widget names an editor widget for types the editor cannot infer; empty
+	// means infer from Type.
+	Widget string
+	// Deprecated, when non-empty, marks the param deprecated and explains the
+	// replacement.
+	Deprecated string
+}
+
+// EnumOption is one allowed value of a ParamSpec.
+type EnumOption struct {
+	Value       any
+	DisplayName string
+	Description string
+}
+
+// ConditionalEnum is an Enum that applies while When holds.
+type ConditionalEnum struct {
+	When Condition
+	Enum []EnumOption
+}
+
+// Constraints bounds a param value. Nil pointers mean unbounded.
+type Constraints struct {
+	Min, Max             *float64 // numeric bounds, inclusive
+	MinLength, MaxLength *int     // string length bounds, inclusive
+	Pattern              string   // RE2 regular expression the string must match
+	// Format names a value format. The backend enforces duration, cron,
+	// expression, sha256-digest, and json; url, host-port, and code are
+	// advisory editor hints only.
+	Format             string
+	MinItems, MaxItems *int // array length bounds, inclusive
+	UniqueItems        bool
+}
+
+// Condition is a predicate over sibling params: top-level params of the same
+// Descriptor, or fields of the same ParamSpec.Fields. All non-zero clauses
+// must hold (implicit AND); a Condition with no clauses holds.
+//
+// A missing param compares as null. Eq and In compare numbers numerically,
+// so a JSON float64 equals an int literal of the same value. Truthy follows
+// JavaScript truthiness: "", 0, false, and null are false; [], {}, and "0"
+// are true.
+type Condition struct {
+	Param  string // the sibling param the Eq, In, and Truthy clauses test
+	Eq     any
+	In     []any
+	Truthy *bool // non-nil: the param's truthiness must equal *Truthy
+	AllOf  []Condition
+	AnyOf  []Condition
+	Not    *Condition
+}
+
+// OneOfGroup constrains how many of Params may be set; see ParamSpec for the
+// definition of "set".
+type OneOfGroup struct {
+	Params []string
+	Mode   string // OneOfExactly when empty
+}
+
+// OneOfGroup modes.
+const (
+	OneOfExactly = "exactly"  // exactly one param set (the default)
+	OneOfAtMost  = "at_most"  // zero or one param set
+	OneOfAtLeast = "at_least" // one or more params set
+)
+
+// GroupSpec declares an editor section that params join via ParamSpec.Group.
+type GroupSpec struct {
+	Key         string
+	DisplayName string
+	Description string
+	Collapsed   bool // initially collapsed in the editor
 }
 
 // ParamType enumerates the supported parameter types.
