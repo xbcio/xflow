@@ -98,6 +98,21 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 			value:  apiserver.ExampleExecuteWorkflowResponse(execID),
 		},
 		{
+			name:   "register workflow response with param issues",
+			schema: "RegisterWorkflowResponse",
+			value:  apiserver.ExampleRegisterWorkflowResponseWithParamIssues("wf-01H8XG"),
+		},
+		{
+			name:   "execute workflow response with param issues",
+			schema: "ExecuteWorkflowResponse",
+			value:  apiserver.ExampleExecuteWorkflowResponseWithParamIssues(execID),
+		},
+		{
+			name:   "param invalid error envelope",
+			schema: "ParamInvalidErrorEnvelope",
+			value:  apiserver.ExampleParamInvalidErrorEnvelope(),
+		},
+		{
 			name:   "signal request",
 			schema: "SignalRequest",
 			value:  apiserver.ExampleSignalRequest("approve", map[string]any{"ok": true}),

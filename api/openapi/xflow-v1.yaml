@@ -91,6 +91,37 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/RegisterWorkflowResponse"
+        "400":
+          description: |
+            The definition is invalid. `workflow_compile_failed` (ErrorEnvelope)
+            when the compiler rejects it; `workflow_param_invalid`
+            (ParamInvalidErrorEnvelope, carrying `data.param_issues`) when the
+            server runs ParamSpec validation in enforce mode and a node
+            parameter violates its node type's Descriptor.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ErrorEnvelope"
+                  - $ref: "#/components/schemas/ParamInvalidErrorEnvelope"
+              examples:
+                workflowParamInvalid:
+                  summary: Enforce-mode ParamSpec validation rejected a node parameter.
+                  value:
+                    success: false
+                    code: workflow_param_invalid
+                    message: 'workflow "orders": 1 invalid parameter(s): node "pause": duration is required'
+                    data:
+                      param_issues:
+                        - node: pause
+                          path: /parameters/duration
+                          code: required
+                          message: duration is required
+                          severity: error
+                    trace_id: 0123456789abcdef0123456789abcdef
         default:
           $ref: "#/components/responses/DefaultError"
     get:
@@ -236,15 +267,36 @@ paths:
                       data:
                         $ref: "#/components/schemas/RegisterWorkflowResponse"
         "400":
-          description: The body id differs from the path id, or the replacement definition is invalid.
+          description: |
+            The body id differs from the path id (`workflow_id_mismatch`), the
+            compiler rejects the replacement (`workflow_compile_failed`), or
+            enforce-mode ParamSpec validation rejects a node parameter
+            (`workflow_param_invalid`, a ParamInvalidErrorEnvelope carrying
+            `data.param_issues`).
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
+                oneOf:
+                  - $ref: "#/components/schemas/ErrorEnvelope"
+                  - $ref: "#/components/schemas/ParamInvalidErrorEnvelope"
               examples:
+                workflowParamInvalid:
+                  summary: Enforce-mode ParamSpec validation rejected a node parameter.
+                  value:
+                    success: false
+                    code: workflow_param_invalid
+                    message: 'workflow "orders": 1 invalid parameter(s): node "pause": duration is required'
+                    data:
+                      param_issues:
+                        - node: pause
+                          path: /parameters/duration
+                          code: required
+                          message: duration is required
+                          severity: error
+                    trace_id: 0123456789abcdef0123456789abcdef
                 workflowIdMismatch:
                   summary: The optional body id does not match the authoritative path id.
                   value:
@@ -346,6 +398,37 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/ExecuteWorkflowResponse"
+        "400":
+          description: |
+            The definition is invalid. `workflow_compile_failed` (ErrorEnvelope)
+            when the compiler rejects it; `workflow_param_invalid`
+            (ParamInvalidErrorEnvelope, carrying `data.param_issues`) when the
+            server runs ParamSpec validation in enforce mode and a node
+            parameter violates its node type's Descriptor.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ErrorEnvelope"
+                  - $ref: "#/components/schemas/ParamInvalidErrorEnvelope"
+              examples:
+                workflowParamInvalid:
+                  summary: Enforce-mode ParamSpec validation rejected a node parameter.
+                  value:
+                    success: false
+                    code: workflow_param_invalid
+                    message: 'workflow "orders": 1 invalid parameter(s): node "pause": duration is required'
+                    data:
+                      param_issues:
+                        - node: pause
+                          path: /parameters/duration
+                          code: required
+                          message: duration is required
+                          severity: error
+                    trace_id: 0123456789abcdef0123456789abcdef
         default:
           $ref: "#/components/responses/DefaultError"
 
@@ -1503,8 +1586,9 @@ components:
       description: |
         The user-face response envelope (spec §3). On success success=true,
         code="200" (string), and data carries the payload. On failure
-        success=false, data is omitted (not null), and code carries a stable
-        snake_case business identifier. trace_id is server-authoritative
+        success=false, data is omitted (not null) — except for
+        workflow_param_invalid, which carries data.param_issues — and code
+        carries a stable snake_case business identifier. trace_id is server-authoritative
         (W3C 32-hex).
       required: [success, code, message, trace_id]
       properties:
@@ -1518,7 +1602,7 @@ components:
           type: string
           description: Human-readable text. "" on success. Never carries credentials, node output, SQL, or stack traces (§3.5).
         data:
-          description: Payload on success. Omitted on failure (writeFail never writes data).
+          description: Payload on success. Omitted on failure, except workflow_param_invalid (see ParamInvalidErrorEnvelope).
         trace_id:
           type: string
           description: Server-authoritative W3C trace id (32 hex).
@@ -1559,6 +1643,81 @@ components:
           items:
             type: string
           description: Non-fatal compile diagnostics (node/referenced-node names only — never output or parameter values, §3.5).
+        param_issues:
+          type: array
+          items:
+            $ref: "#/components/schemas/ParamIssue"
+          description: |
+            ParamSpec validation findings, separate from the compile warnings.
+            In warn mode (the default) every issue is reported and none
+            rejects; in enforce mode an error-severity issue rejects the
+            request (400 workflow_param_invalid), so only warnings appear here.
+            Omitted when there are none or validation is off.
+
+    ParamIssue:
+      type: object
+      description: |
+        One ParamSpec validation finding. Node types not registered in the
+        server process are skipped (counted in
+        xflow_param_validation_skipped_total), never reported. The message
+        names the parameter and the rule, never the value (§3.5).
+      required: [node, path, code, message, severity]
+      properties:
+        node:
+          type: string
+          description: Node name; inside a sub-graph body, "parent/child".
+          example: pause
+        path:
+          type: string
+          description: JSON Pointer relative to the node, e.g. /parameters/method, /parameters/aggregate/dead_letter_topic, /parameters/rules/0/condition.
+          example: /parameters/duration
+        code:
+          type: string
+          description: required | enum | one_of | constraint.<name> (min, max, min_length, max_length, pattern, min_items, max_items, unique_items) | format.<name> (duration, cron, expression, sha256-digest, json).
+          example: required
+        message:
+          type: string
+          description: Human-readable; may change. Clients branch on code.
+          example: duration is required
+        severity:
+          type: string
+          enum: [error, warning]
+          description: Only error rejects, and only in enforce mode.
+
+    ParamInvalidErrorEnvelope:
+      type: object
+      description: |
+        The failure Envelope of `workflow_param_invalid` — the one failure that
+        carries data, so a client can place every issue on its field.
+      additionalProperties: false
+      required: [success, code, message, data, trace_id]
+      properties:
+        success:
+          type: boolean
+          description: Always false on this shape.
+          example: false
+        code:
+          type: string
+          description: Always workflow_param_invalid on this shape.
+          enum: [workflow_param_invalid]
+        message:
+          type: string
+          description: Human-readable summary. May change; clients must branch on code.
+        data:
+          type: object
+          description: The rejected definition's findings.
+          additionalProperties: false
+          required: [param_issues]
+          properties:
+            param_issues:
+              type: array
+              description: Every finding, warnings included.
+              items:
+                $ref: "#/components/schemas/ParamIssue"
+        trace_id:
+          type: string
+          description: Server-authoritative W3C trace id (32 hex).
+          pattern: '^[0-9a-f]{32}$'
 
     ExecuteWorkflowRequest:
       type: object
@@ -1595,6 +1754,15 @@ components:
       properties:
         execution_id:
           type: string
+        param_issues:
+          type: array
+          items:
+            $ref: "#/components/schemas/ParamIssue"
+          description: |
+            ParamSpec validation findings for an inline definition
+            (POST /v1/workflows/execute only; a registered workflow was
+            validated at registration). Same semantics as
+            RegisterWorkflowResponse.param_issues.
 
     SignalRequest:
       type: object

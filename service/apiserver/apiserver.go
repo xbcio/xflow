@@ -3,6 +3,7 @@ package apiserver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/xbcio/xflow/backend/providers/distributed"
 	backendlocal "github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/observability/tracing"
@@ -97,6 +99,15 @@ type Config struct {
 	RegistrationCodeTTL time.Duration
 	Logger              engine.Logger
 	Metrics             *metrics.Metrics
+	// ParamValidation selects what workflow registration (POST/PUT
+	// /v1/workflows and RegisterWorkflow/ReplaceWorkflow) and inline execution
+	// (POST /v1/workflows/execute) do with ParamSpec issues. Empty means
+	// types.ParamValidationWarn: issues are logged and returned as
+	// param_issues, nothing is rejected. types.ParamValidationEnforce rejects
+	// a definition with any error-severity issue (400 workflow_param_invalid).
+	// Node types not registered in this process are skipped and counted in
+	// xflow_param_validation_skipped_total.
+	ParamValidation types.ParamValidationMode
 	// Tracer, when non-nil, enables OTel HTTP middleware and wires distributed
 	// tracing through the runner dispatch/commit path. Nil means no tracing.
 	Tracer tracing.Tracer
@@ -220,6 +231,9 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 	if cfg.RequireWorkflowAuth && cfg.WorkflowAuth == nil && cfg.PrincipalAuth == nil {
 		return nil, errors.New("apiserver: WorkflowAuth (or PrincipalAuth) must be configured when RequireWorkflowAuth is set")
 	}
+	if cfg.ParamValidation != "" && !cfg.ParamValidation.Valid() {
+		return nil, fmt.Errorf("apiserver: invalid ParamValidation %q: want off, warn, or enforce", cfg.ParamValidation)
+	}
 	// B3 production fail-closed: when PrincipalAuth is configured for the
 	// resource/operation authz path, an Authorizer and a durable AuditSink are
 	// also required. A missing authorizer would default-deny everything; a
@@ -281,6 +295,9 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 	// answers 500 rather than an empty page.
 	ctrlModule.executions = cfg.Store
 	ctrlModule.registrationMetrics = metrics.NewWorkflowRegistrationMetrics(cfg.Metrics)
+	ctrlModule.paramValidation = cfg.ParamValidation.OrDefault()
+	ctrlModule.paramValidationMetrics = metrics.NewParamValidationMetrics(cfg.Metrics)
+	ctrlModule.descriptorLookup = execution.RegistryDescriptorLookup
 	if cfg.PrincipalAuth != nil {
 		ctrlModule.principalAuth = cfg.PrincipalAuth
 		ctrlModule.authorizer = cfg.Authorizer
@@ -609,7 +626,8 @@ func (s *APIServer) RegisterWorkflow(ctx context.Context, ns namespace.Namespace
 	if ns == "" {
 		ns = namespace.Default
 	}
-	return s.ctrl.registerWorkflow(ctx, ns, def)
+	id, diag, err := s.ctrl.registerWorkflow(ctx, ns, def)
+	return id, diag.Warnings, err
 }
 
 // ReplaceWorkflow is RegisterWorkflow, except that a DIFFERENT definition
@@ -641,7 +659,8 @@ func (s *APIServer) ReplaceWorkflow(ctx context.Context, ns namespace.Namespace,
 	if ns == "" {
 		ns = namespace.Default
 	}
-	return s.ctrl.replaceWorkflow(ctx, ns, def)
+	id, diag, err := s.ctrl.replaceWorkflow(ctx, ns, def)
+	return id, diag.Warnings, err
 }
 
 // hasHTTPModule reports whether any registered module implements HTTPModule.

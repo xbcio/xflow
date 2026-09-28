@@ -17,6 +17,7 @@ import (
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/observability/tracing"
@@ -65,6 +66,15 @@ type workflowControlModule struct {
 	// shape the management module's metrics field uses; a nil Metrics counts
 	// nothing, which is the dev default.
 	registrationMetrics metrics.WorkflowRegistrationMetrics
+	// paramValidation is Config.ParamValidation (defaulted to warn): what
+	// registration and inline execution do with ParamSpec issues. A module
+	// built without APIServer.New (unit tests) has "" and behaves as warn.
+	paramValidation types.ParamValidationMode
+	// paramValidationMetrics counts nodes skipped for an unknown type.
+	paramValidationMetrics metrics.ParamValidationMetrics
+	// descriptorLookup resolves node Descriptors for ParamSpec validation;
+	// nil means execution.RegistryDescriptorLookup.
+	descriptorLookup execution.DescriptorLookup
 }
 
 func newWorkflowControlModule(cp *control.ControlPlane, auth WorkflowAuthenticator, log engine.Logger, tracer tracing.Tracer) *workflowControlModule {
@@ -373,6 +383,9 @@ type executeWorkflowRequest struct {
 
 type executeWorkflowResponse struct {
 	ExecutionID types.ExecutionID `json:"execution_id"`
+	// ParamIssues is set only by the inline POST /v1/workflows/execute: a
+	// registered workflow was validated when it was registered.
+	ParamIssues []graph.ParamIssue `json:"param_issues,omitempty"`
 }
 
 // executeRegisteredRequest is the body for POST /v1/workflows/{id}/execute
@@ -429,6 +442,15 @@ func (m *workflowControlModule) handleExecuteWorkflow(w http.ResponseWriter, r *
 		writeFail(w, r, http.StatusBadRequest, "workflow_compile_failed", err.Error())
 		return
 	}
+	// The inline definition gets the same ParamSpec check a registered one
+	// does; it is the other path a node definition enters the server by.
+	paramIssues, err := m.checkWorkflowParams(r.Context(), req.Workflow)
+	if err != nil {
+		if !writeParamInvalid(w, r, err) {
+			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		}
+		return
+	}
 	// xflow.workflow.execute starts the inbound trace for a workflow execution.
 	// Its SpanContext is persisted on the execution snapshot (via
 	// engine.WithTraceCarrier) so the later, asynchronous dispatch span can
@@ -478,7 +500,7 @@ func (m *workflowControlModule) handleExecuteWorkflow(w http.ResponseWriter, r *
 			return
 		}
 	}
-	writeData(w, r, http.StatusOK, executeWorkflowResponse{ExecutionID: id})
+	writeData(w, r, http.StatusOK, executeWorkflowResponse{ExecutionID: id, ParamIssues: paramIssues})
 }
 
 // registerWorkflowResponse echoes the persisted workflow ID (server-assigned
@@ -489,9 +511,16 @@ func (m *workflowControlModule) handleExecuteWorkflow(w http.ResponseWriter, r *
 // design-time step: the author is holding the definition and can still change
 // it. A warning names only nodes and referenced node names -- never a node's
 // output or a parameter value, which routinely carry credentials.
+//
+// ParamIssues carries the ParamSpec validator's findings (warn mode: every
+// issue; enforce mode: warnings only, since an error rejects the request). It
+// is deliberately separate from the compiler's Warnings: the two have
+// different shapes and different consumers (the editor maps each ParamIssue
+// onto the field its Path names).
 type registerWorkflowResponse struct {
-	WorkflowID types.WorkflowID `json:"workflow_id"`
-	Warnings   []string         `json:"warnings,omitempty"`
+	WorkflowID  types.WorkflowID   `json:"workflow_id"`
+	Warnings    []string           `json:"warnings,omitempty"`
+	ParamIssues []graph.ParamIssue `json:"param_issues,omitempty"`
 }
 
 // handleRegisterWorkflow serves POST /v1/workflows (spec §7). After the §9.1
@@ -519,8 +548,11 @@ func (m *workflowControlModule) handleRegisterWorkflow(w http.ResponseWriter, r 
 	// Namespace is authoritative from the context, never the body.
 	ns := namespace.FromContext(r.Context())
 
-	id, warnings, err := m.registerWorkflow(r.Context(), ns, &def)
+	id, diag, err := m.registerWorkflow(r.Context(), ns, &def)
 	if err != nil {
+		if writeParamInvalid(w, r, err) {
+			return
+		}
 		var compileErr *WorkflowCompileError
 		if errors.As(err, &compileErr) {
 			writeFail(w, r, http.StatusBadRequest, "workflow_compile_failed", compileErr.Unwrap().Error())
@@ -534,7 +566,7 @@ func (m *workflowControlModule) handleRegisterWorkflow(w http.ResponseWriter, r 
 		return
 	}
 	w.Header().Set("Location", "/v1/workflows/"+string(id))
-	writeData(w, r, http.StatusCreated, registerWorkflowResponse{WorkflowID: id, Warnings: warnings})
+	writeData(w, r, http.StatusCreated, registerWorkflowResponse{WorkflowID: id, Warnings: diag.Warnings, ParamIssues: diag.ParamIssues})
 }
 
 // WorkflowCompileError marks a registration failure that the caller can fix by
@@ -601,20 +633,20 @@ func rejectFAFWorkflowRegistrationBeforeAdmission(w http.ResponseWriter, r *http
 // register a workflow the dispatcher then failed to resolve. ns is supplied by
 // the caller and written onto def; it is never read from def itself, so an
 // in-process caller cannot register into another namespace either.
-func (m *workflowControlModule) registerWorkflow(ctx context.Context, ns namespace.Namespace, def *types.WorkflowDef) (id types.WorkflowID, warnings []string, err error) {
+func (m *workflowControlModule) registerWorkflow(ctx context.Context, ns namespace.Namespace, def *types.WorkflowDef) (id types.WorkflowID, diag registrationDiagnostics, err error) {
 	defer func() { m.observeRegistration(ctx, ns, "add", err) }()
 	registry := m.registry()
 	if registry == nil {
 		if m.log != nil {
 			m.log.Error("register_workflow_no_registry")
 		}
-		return "", nil, errors.New("apiserver: no workflow registry configured")
+		return "", registrationDiagnostics{}, errors.New("apiserver: no workflow registry configured")
 	}
-	rec, warnings, err := m.buildWorkflowRecord(ns, "", def)
+	rec, diag, err := m.buildWorkflowRecord(ctx, ns, "", def)
 	if err != nil {
-		return "", nil, err
+		return "", registrationDiagnostics{}, err
 	}
-	return m.addWorkflowRecord(ctx, ns, registry, rec, warnings)
+	return m.addWorkflowRecord(ctx, ns, registry, rec, diag)
 }
 
 // registrationOutcome maps a registration failure to the closed outcome enum
@@ -631,6 +663,10 @@ func (m *workflowControlModule) registerWorkflow(ctx context.Context, ns namespa
 func registrationOutcome(err error) string {
 	var compileErr *WorkflowCompileError
 	if errors.As(err, &compileErr) {
+		return "invalid_definition"
+	}
+	var paramErr *execution.ParamIssuesError
+	if errors.As(err, &paramErr) {
 		return "invalid_definition"
 	}
 	var replaceConflict *backend.WorkflowReplaceConflictError
@@ -656,9 +692,9 @@ func (m *workflowControlModule) observeRegistration(ctx context.Context, ns name
 	m.registrationMetrics.ObserveRegistration(namespace.WithNamespace(ctx, ns), operation, outcome)
 }
 
-func (m *workflowControlModule) buildWorkflowRecord(ns namespace.Namespace, id types.WorkflowID, def *types.WorkflowDef) (backend.WorkflowRecord, []string, error) {
+func (m *workflowControlModule) buildWorkflowRecord(ctx context.Context, ns namespace.Namespace, id types.WorkflowID, def *types.WorkflowDef) (backend.WorkflowRecord, registrationDiagnostics, error) {
 	if err := validateWorkflowRegistrationDefinition(def); err != nil {
-		return backend.WorkflowRecord{}, nil, err
+		return backend.WorkflowRecord{}, registrationDiagnostics{}, err
 	}
 	if def != nil {
 		// Namespace is server-authoritative and must be fixed before compilation
@@ -668,7 +704,15 @@ func (m *workflowControlModule) buildWorkflowRecord(ns namespace.Namespace, id t
 	}
 	g, err := graph.Compile(def)
 	if err != nil {
-		return backend.WorkflowRecord{}, nil, &WorkflowCompileError{err: err}
+		return backend.WorkflowRecord{}, registrationDiagnostics{}, &WorkflowCompileError{err: err}
+	}
+	// ParamSpec validation runs after the compiler accepted the definition, so
+	// a structural error keeps its workflow_compile_failed answer. It never
+	// modifies def: the HTTP path writes no defaults, so definitionHash is
+	// unchanged by this step.
+	paramIssues, err := m.checkWorkflowParams(ctx, def)
+	if err != nil {
+		return backend.WorkflowRecord{}, registrationDiagnostics{}, err
 	}
 
 	rec := backend.WorkflowRecord{
@@ -681,30 +725,30 @@ func (m *workflowControlModule) buildWorkflowRecord(ns namespace.Namespace, id t
 		Definition:     def,
 		Graph:          g,
 	}
-	return rec, g.Warnings(), nil
+	return rec, registrationDiagnostics{Warnings: g.Warnings(), ParamIssues: paramIssues}, nil
 }
 
-func (m *workflowControlModule) addWorkflowRecord(ctx context.Context, ns namespace.Namespace, registry backend.WorkflowRegistry, rec backend.WorkflowRecord, warnings []string) (types.WorkflowID, []string, error) {
+func (m *workflowControlModule) addWorkflowRecord(ctx context.Context, ns namespace.Namespace, registry backend.WorkflowRegistry, rec backend.WorkflowRecord, diag registrationDiagnostics) (types.WorkflowID, registrationDiagnostics, error) {
 	if registry == nil {
 		if m.log != nil {
 			m.log.Error("register_workflow_no_registry")
 		}
-		return "", nil, errors.New("apiserver: no workflow registry configured")
+		return "", registrationDiagnostics{}, errors.New("apiserver: no workflow registry configured")
 	}
 	stored, err := registry.AddWorkflow(ctx, rec)
 	if err != nil {
 		if m.log != nil {
 			m.log.Error("register_workflow_failed", "err", err)
 		}
-		return "", nil, err
+		return "", registrationDiagnostics{}, err
 	}
 	if err := m.deriveWorkflowActivations(ctx, ns, stored); err != nil {
 		if m.log != nil {
 			m.log.Error("register_workflow_derive_activations_failed", "err", err)
 		}
-		return "", nil, err
+		return "", registrationDiagnostics{}, err
 	}
-	return stored.ID, warnings, nil
+	return stored.ID, diag, nil
 }
 
 func (m *workflowControlModule) deriveWorkflowActivations(ctx context.Context, ns namespace.Namespace, rec backend.WorkflowRecord) error {
@@ -1238,8 +1282,11 @@ func (m *workflowControlModule) handleReplaceWorkflow(w http.ResponseWriter, r *
 	if mutationID != "" {
 		mutationID = "http:" + mutationID
 	}
-	replacedID, warnings, err := m.replaceWorkflowByID(r.Context(), ns, id, &def, mutationID)
+	replacedID, diag, err := m.replaceWorkflowByID(r.Context(), ns, id, &def, mutationID)
 	if err != nil {
+		if writeParamInvalid(w, r, err) {
+			return
+		}
 		var compileErr *WorkflowCompileError
 		if errors.As(err, &compileErr) {
 			writeFail(w, r, http.StatusBadRequest, "workflow_compile_failed", compileErr.Unwrap().Error())
@@ -1260,7 +1307,7 @@ func (m *workflowControlModule) handleReplaceWorkflow(w http.ResponseWriter, r *
 		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
-	writeData(w, r, http.StatusOK, registerWorkflowResponse{WorkflowID: replacedID, Warnings: warnings})
+	writeData(w, r, http.StatusOK, registerWorkflowResponse{WorkflowID: replacedID, Warnings: diag.Warnings, ParamIssues: diag.ParamIssues})
 }
 
 // handleExecuteWorkflowByID serves POST /v1/workflows/{id}/execute (spec §7):
@@ -1427,49 +1474,49 @@ func sameWorkflowRevision(a, b backend.WorkflowRecord) bool {
 // its (namespace, name, version) key, atomically supersedes it. The embedded API
 // deliberately gives a changed definition a new ID; HTTP PUT, by contrast,
 // preserves its path ID in replaceWorkflowByID below.
-func (m *workflowControlModule) replaceWorkflow(ctx context.Context, ns namespace.Namespace, def *types.WorkflowDef) (id types.WorkflowID, warnings []string, err error) {
+func (m *workflowControlModule) replaceWorkflow(ctx context.Context, ns namespace.Namespace, def *types.WorkflowDef) (id types.WorkflowID, diag registrationDiagnostics, err error) {
 	defer func() { m.observeRegistration(ctx, ns, "replace", err) }()
 	registry := m.registry()
 	if registry == nil {
-		return "", nil, errors.New("apiserver: no workflow registry configured")
+		return "", registrationDiagnostics{}, errors.New("apiserver: no workflow registry configured")
 	}
-	replacement, warnings, err := m.buildWorkflowRecord(ns, "", def)
+	replacement, diag, err := m.buildWorkflowRecord(ctx, ns, "", def)
 	if err != nil {
-		return "", nil, err
+		return "", registrationDiagnostics{}, err
 	}
 	ctx = namespace.WithNamespace(ctx, ns)
 	existing, err := registry.GetWorkflowByKey(ctx, replacement.Key)
 	if errors.Is(err, backend.ErrWorkflowNotFound) {
-		return m.addWorkflowRecord(ctx, ns, registry, replacement, warnings)
+		return m.addWorkflowRecord(ctx, ns, registry, replacement, diag)
 	}
 	if err != nil {
-		return "", nil, err
+		return "", registrationDiagnostics{}, err
 	}
 	if existing.DefinitionHash == replacement.DefinitionHash {
-		return m.addWorkflowRecord(ctx, ns, registry, replacement, warnings)
+		return m.addWorkflowRecord(ctx, ns, registry, replacement, diag)
 	}
 
 	// A replacement ID must be fixed before the CAS so response-loss retries use
 	// the same semantic request fingerprint instead of allocating a second ID.
 	replacement.ID = types.WorkflowID(uuid.NewString())
-	return m.compareAndReplaceWorkflow(ctx, ns, registry, existing, replacement, "embedded:"+uuid.NewString(), warnings)
+	return m.compareAndReplaceWorkflow(ctx, ns, registry, existing, replacement, "embedded:"+uuid.NewString(), diag)
 }
 
 // replaceWorkflowByID implements HTTP PUT /v1/workflows/{id}. The path ID is
 // authoritative; name/version may rename the record only when the destination
 // key is free. All conflict checks and index changes occur in the registry's
 // single atomic compare-and-swap rather than a racy lookup/remove/add sequence.
-func (m *workflowControlModule) replaceWorkflowByID(ctx context.Context, ns namespace.Namespace, id types.WorkflowID, def *types.WorkflowDef, mutationID string) (newID types.WorkflowID, warnings []string, err error) {
+func (m *workflowControlModule) replaceWorkflowByID(ctx context.Context, ns namespace.Namespace, id types.WorkflowID, def *types.WorkflowDef, mutationID string) (newID types.WorkflowID, diag registrationDiagnostics, err error) {
 	defer func() { m.observeRegistration(ctx, ns, "replace_by_id", err) }()
 	if id == "" {
-		return "", nil, backend.ErrWorkflowNotFound
+		return "", registrationDiagnostics{}, backend.ErrWorkflowNotFound
 	}
 	registry := m.registry()
 	if registry == nil {
 		if m.log != nil {
 			m.log.Error("replace_workflow_no_registry")
 		}
-		return "", nil, errors.New("apiserver: no workflow registry configured")
+		return "", registrationDiagnostics{}, errors.New("apiserver: no workflow registry configured")
 	}
 
 	ctx = namespace.WithNamespace(ctx, ns)
@@ -1478,24 +1525,24 @@ func (m *workflowControlModule) replaceWorkflowByID(ctx context.Context, ns name
 		if !errors.Is(err, backend.ErrWorkflowNotFound) && m.log != nil {
 			m.log.Error("replace_workflow_lookup_failed", "workflow_id", string(id), "err", err)
 		}
-		return "", nil, err
+		return "", registrationDiagnostics{}, err
 	}
 	if existing.Namespace != "" && ns != "" && existing.Namespace != string(ns) {
-		return "", nil, backend.ErrWorkflowNotFound
+		return "", registrationDiagnostics{}, backend.ErrWorkflowNotFound
 	}
 	if def.ID != "" && def.ID != string(id) {
-		return "", nil, errWorkflowIDMismatch
+		return "", registrationDiagnostics{}, errWorkflowIDMismatch
 	}
 	def.ID = string(id)
 	def.Namespace = string(ns)
-	replacement, warnings, err := m.buildWorkflowRecord(ns, id, def)
+	replacement, diag, err := m.buildWorkflowRecord(ctx, ns, id, def)
 	if err != nil {
-		return "", nil, err
+		return "", registrationDiagnostics{}, err
 	}
 	if mutationID == "" {
 		mutationID = "http:" + uuid.NewString()
 	}
-	return m.compareAndReplaceWorkflow(ctx, ns, registry, existing, replacement, mutationID, warnings)
+	return m.compareAndReplaceWorkflow(ctx, ns, registry, existing, replacement, mutationID, diag)
 }
 
 func (m *workflowControlModule) compareAndReplaceWorkflow(
@@ -1505,14 +1552,14 @@ func (m *workflowControlModule) compareAndReplaceWorkflow(
 	existing backend.WorkflowRecord,
 	replacement backend.WorkflowRecord,
 	mutationID string,
-	warnings []string,
-) (types.WorkflowID, []string, error) {
+	diag registrationDiagnostics,
+) (types.WorkflowID, registrationDiagnostics, error) {
 	durableRegistry, ok := registry.(backend.DurableWorkflowReplaceCapability)
 	if !ok || m.workflowActivationProjectionWorker() == nil {
 		if m.log != nil {
 			m.log.Error("replace_workflow_durable_projection_capability_missing")
 		}
-		return "", nil, backend.ErrWorkflowReplaceUnsupported
+		return "", registrationDiagnostics{}, backend.ErrWorkflowReplaceUnsupported
 	}
 	request := backend.WorkflowReplaceRequest{
 		MutationID:  mutationID,
@@ -1520,7 +1567,7 @@ func (m *workflowControlModule) compareAndReplaceWorkflow(
 		Replacement: replacement,
 	}
 	if err := ctx.Err(); err != nil {
-		return "", nil, err
+		return "", registrationDiagnostics{}, err
 	}
 	result, err := durableRegistry.CompareAndReplaceWorkflow(ctx, request)
 	if errors.Is(err, backend.ErrWorkflowMutationIndeterminate) {
@@ -1540,7 +1587,7 @@ func (m *workflowControlModule) compareAndReplaceWorkflow(
 		if m.log != nil && !errors.Is(err, backend.ErrWorkflowConflict) {
 			m.log.Error("replace_workflow_atomic_failed", "workflow_id", string(existing.ID), "err", err)
 		}
-		return "", nil, err
+		return "", registrationDiagnostics{}, err
 	}
 
 	// The registry commit, operation ledger, and projection intent are now one
@@ -1557,9 +1604,9 @@ func (m *workflowControlModule) compareAndReplaceWorkflow(
 		if m.log != nil {
 			m.log.Error("replace_workflow_project_activations_failed", "workflow_id", string(result.Current.ID), "registry_revision", result.Current.RegistryRevision, "err", err)
 		}
-		return "", nil, err
+		return "", registrationDiagnostics{}, err
 	}
-	return result.Current.ID, warnings, nil
+	return result.Current.ID, diag, nil
 }
 
 const workflowProjectionTimeout = 10 * time.Second

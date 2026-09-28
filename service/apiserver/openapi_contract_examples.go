@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/types"
 )
@@ -52,6 +53,41 @@ func ExampleErrorEnvelope() any {
 // /v1/workflows, /v1/workflows/{id}).
 func ExampleRegisterWorkflowResponse(id string, warnings []string) any {
 	return registerWorkflowResponse{WorkflowID: types.WorkflowID(id), Warnings: warnings}
+}
+
+// exampleParamIssues is a non-zero ParamIssue list for the contract examples.
+func exampleParamIssues() []graph.ParamIssue {
+	return []graph.ParamIssue{{
+		Node:     "pause",
+		Path:     "/parameters/duration",
+		Code:     graph.ParamIssueCodeRequired,
+		Message:  "duration is required",
+		Severity: graph.ParamIssueError,
+	}}
+}
+
+// ExampleRegisterWorkflowResponseWithParamIssues builds a
+// registerWorkflowResponse carrying warn-mode param_issues.
+func ExampleRegisterWorkflowResponseWithParamIssues(id string) any {
+	return registerWorkflowResponse{WorkflowID: types.WorkflowID(id), ParamIssues: exampleParamIssues()}
+}
+
+// ExampleExecuteWorkflowResponseWithParamIssues builds an inline-execute
+// executeWorkflowResponse carrying warn-mode param_issues.
+func ExampleExecuteWorkflowResponseWithParamIssues(id types.ExecutionID) any {
+	return executeWorkflowResponse{ExecutionID: id, ParamIssues: exampleParamIssues()}
+}
+
+// ExampleParamInvalidErrorEnvelope builds the real workflow_param_invalid
+// failure envelope writeParamInvalid serializes.
+func ExampleParamInvalidErrorEnvelope() any {
+	return envelope{
+		Success: false,
+		Code:    workflowParamInvalidCode,
+		Message: `workflow "orders": 1 invalid parameter(s): node "pause": duration is required`,
+		Data:    paramInvalidData{ParamIssues: exampleParamIssues()},
+		TraceID: "4bf92f3577b34da6a3ce929d0e0e4736",
+	}
 }
 
 // ExampleExecuteWorkflowResponse builds an executeWorkflowResponse (POST
