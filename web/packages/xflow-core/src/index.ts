@@ -419,3 +419,5 @@ export function toGraphModel(workflow: WorkflowDef): GraphModel {
     edges
   };
 }
+
+export * from "./nodeForm";
