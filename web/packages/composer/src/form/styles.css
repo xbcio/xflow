@@ -230,15 +230,16 @@
 /* -------------------------------------------------------------- code/json */
 
 .xflow-composer-code-frame {
-  position: relative;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
 }
 
+/* A header chip above the text, not an overlay: an overlay covers the end of
+   the first code line. */
 .xflow-composer-code-language {
-  position: absolute;
-  top: 4px;
-  right: 6px;
-  z-index: 1;
+  align-self: flex-end;
+  margin-bottom: 2px;
   padding: 0 6px;
   border-radius: var(--xflow-control-radius-sm, 4px);
   background: var(--xflow-surface-control, #f7f8fa);
