@@ -152,9 +152,10 @@ func (d *Definition) DisplayName(name string) *Definition {
 	return d
 }
 
-// Param appends a parameter schema entry.
+// Param appends a deep copy of spec, so containers the caller keeps (Default
+// maps, Enum values, Fields) never alias the definition.
 func (d *Definition) Param(spec types.ParamSpec) *Definition {
-	d.descriptor.Params = append(d.descriptor.Params, spec)
+	d.descriptor.Params = append(d.descriptor.Params, spec.Clone())
 	return d
 }
 

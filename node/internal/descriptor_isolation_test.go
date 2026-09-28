@@ -59,3 +59,35 @@ func TestTriggerDefinitionDescriptorIsolation(t *testing.T) {
 		t.Fatalf("caller write reached the trigger definition: Outputs[0].Name = %q, want main", name)
 	}
 }
+
+// TestDefinitionParamCopiesSpec pins that Param stores a deep copy: containers
+// the caller still holds after passing a spec in cannot reach the definition.
+func TestDefinitionParamCopiesSpec(t *testing.T) {
+	def := map[string]any{"k": "v"}
+	enumValue := []any{"a"}
+	fields := []types.ParamSpec{{Name: "f"}}
+	d := Define("xflow.test.param_copies_spec", func(context.Context, *types.Input) (*types.Output, error) {
+		return &types.Output{}, nil
+	}).Param(types.ParamSpec{
+		Name:    "p",
+		Type:    types.ParamObject,
+		Default: def,
+		Enum:    []types.EnumOption{{Value: enumValue}},
+		Fields:  fields,
+	})
+
+	def["k"] = "mutated"
+	enumValue[0] = "mutated"
+	fields[0].Name = "mutated"
+
+	got := d.Descriptor().Params[0]
+	if got.Default.(map[string]any)["k"] != "v" {
+		t.Fatalf("caller's Default map aliases the definition: %#v", got.Default)
+	}
+	if got.Enum[0].Value.([]any)[0] != "a" {
+		t.Fatalf("caller's Enum value aliases the definition: %#v", got.Enum)
+	}
+	if got.Fields[0].Name != "f" {
+		t.Fatalf("caller's Fields slice aliases the definition: %#v", got.Fields)
+	}
+}
