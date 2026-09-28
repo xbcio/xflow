@@ -17,9 +17,10 @@ const ApprovalNodeType = "xflow.approval"
 // Approval actions. These are wire values: the action travels in the signal
 // payload under the "action" field.
 const (
-	actionApprove = "approve"
-	actionReject  = "reject"
-	actionReturn  = "return"
+	actionApprove  = "approve"
+	actionReject   = "reject"
+	actionReturn   = "return"
+	actionDelegate = "delegate"
 )
 
 // Keys the node keeps in its own output data across resumptions.
@@ -139,6 +140,11 @@ func (n *ApprovalNode) PrepareSuspend(_ context.Context, input *types.Input) (*t
 	if err != nil {
 		return nil, err
 	}
+	// The chain is derived from the ledger, so a delegation made in an earlier
+	// resumption is still waited on here: the wait is re-armed on every
+	// resumption, and a chain that reverted to the configured approvers would
+	// silently drop the people the gate now depends on.
+	chain := approvedChain(params, getDecisions(input.Data))
 
 	switch params.Mode {
 	case ApprovalAny:
@@ -151,7 +157,7 @@ func (n *ApprovalNode) PrepareSuspend(_ context.Context, input *types.Input) (*t
 	case ApprovalAll:
 		return &types.SuspendSpec{
 			Mode:    types.ModeMultiSignal,
-			Signals: approverSignals(input.NodeName, params.Approvers),
+			Signals: approverSignals(input.NodeName, chain),
 			Quorum:  1,
 			Timeout: params.Timeout,
 		}, nil
@@ -165,7 +171,7 @@ func (n *ApprovalNode) PrepareSuspend(_ context.Context, input *types.Input) (*t
 		// approver could see the earlier decisions.
 		return &types.SuspendSpec{
 			Mode:    types.ModeMultiSignal,
-			Signals: approverSignals(input.NodeName, params.Approvers),
+			Signals: approverSignals(input.NodeName, chain),
 			Quorum:  1,
 			Timeout: params.Timeout,
 		}, nil
@@ -203,7 +209,8 @@ func (n *ApprovalNode) OnResume(_ context.Context, input *types.Input, signal *t
 	if !ok {
 		return ignoreApprovalSignal(input, signal, "unverified-actor")
 	}
-	if !isRegisteredApprover(params, actor) {
+	chain := approvedChain(params, getDecisions(input.Data))
+	if !containsApprover(chain, actor) {
 		return ignoreApprovalSignal(input, signal, "unauthorized-approver")
 	}
 	action, ok := signalAction(signal.Data)
@@ -213,32 +220,38 @@ func (n *ApprovalNode) OnResume(_ context.Context, input *types.Input, signal *t
 	if signal.Name != expectedApproverSignal(input.NodeName, params.Mode, actor) {
 		return ignoreApprovalSignal(input, signal, "signal-name-mismatch")
 	}
-	if params.Mode == ApprovalSequential && actor != currentSequentialApprover(params, input.Data) {
+	if params.Mode == ApprovalSequential && actor != currentSequentialApprover(chain, input.Data) {
 		return ignoreApprovalSignal(input, signal, "not-current-approver")
 	}
 	if hasApproverDecision(getDecisions(input.Data), actor) {
 		// Idempotent: a decision already on the ledger is not counted twice, and
 		// a retried delivery is not an error. Critical operations must tolerate
-		// a repeat without acting twice.
+		// a repeat without acting twice. It also fences the amend-the-chain
+		// action below: whoever has already decided cannot re-delegate a
+		// decision that is on the record.
 		return &types.Output{Resuspend: true}, nil
 	}
 
 	switch action {
 	case actionApprove:
-		return n.handleApprove(params, input, signal, actor)
+		return n.handleApprove(params, chain, input, signal, actor)
 	case actionReject:
-		return n.handleReject(input, signal, actor)
+		return handleReject(input, signal, actor)
 	case actionReturn:
 		return handleReturn(input, signal, actor)
+	case actionDelegate:
+		return handleDelegate(input, signal, actor, chain)
 	}
 
 	return ignoreApprovalSignal(input, signal, "unknown-action")
 }
 
 // handleApprove records one approval. In "any" mode a single approval decides;
-// in "all" and "sequential" the gate opens once every approver has decided,
-// which the ledger alone determines.
-func (n *ApprovalNode) handleApprove(params *ApprovalParams, input *types.Input, signal *types.SignalPayload, approver string) (*types.Output, error) {
+// in "all" and "sequential" the gate opens once every member of the chain has
+// decided. Completion is judged against the chain rather than against the length
+// of the ledger: a delegated slot changes who is being waited on, and the ledger
+// also holds entries for the delegate decisions themselves.
+func (n *ApprovalNode) handleApprove(params *ApprovalParams, chain []string, input *types.Input, signal *types.SignalPayload, approver string) (*types.Output, error) {
 	if params.Mode == ApprovalAny {
 		return &types.Output{
 			Data: approvalOutput(input.Data, map[string]any{"approved": true, "approver": approver, "comment": signal.Data["comment"]}),
@@ -247,7 +260,7 @@ func (n *ApprovalNode) handleApprove(params *ApprovalParams, input *types.Input,
 	}
 
 	decisions := appendDecision(getDecisions(input.Data), approver, actionApprove, signal.Data["comment"])
-	if len(decisions) < len(params.Approvers) {
+	if !allChainMembersDecided(chain, decisions) {
 		return &types.Output{
 			Resuspend: true,
 			Data:      approvalOutput(input.Data, decisionLedger(decisions)),
@@ -259,10 +272,37 @@ func (n *ApprovalNode) handleApprove(params *ApprovalParams, input *types.Input,
 	}, nil
 }
 
+// handleDelegate moves the delegating approver's own slot in the chain to
+// somebody else, so the person who now holds the decision is the person the gate
+// waits on. The delegator's slot is replaced rather than duplicated: leaving them
+// in the chain would keep a decision outstanding for someone who has already
+// passed theirs on, and the gate would wait for a signature that is no longer
+// theirs to give. The assignee may be anyone — a chain is not a role list, and
+// the delegatee's identity is verified the same way as anyone else's when they
+// sign.
+func handleDelegate(input *types.Input, signal *types.SignalPayload, actor string, chain []string) (*types.Output, error) {
+	assignee, ok := signalAssignee(signal.Data)
+	if !ok || containsApprover(withoutApprover(chain, actor), assignee) {
+		// The second condition covers both a payload that names nobody and one
+		// that names somebody the chain already holds a slot for: either way the
+		// chain would end up with a repeated approver, whose single decision
+		// would stand for two outstanding ones.
+		return ignoreApprovalSignal(input, signal, "malformed-assignee")
+	}
+	decisions := appendDecision(getDecisions(input.Data), actor, actionDelegate, signal.Data["comment"],
+		map[string]any{"assignee": assignee})
+	// The chain is not written out here: it is read back off the ledger on the
+	// next resumption, so this decision is the only thing that has to be stored.
+	return &types.Output{
+		Resuspend: true,
+		Data:      approvalOutput(input.Data, decisionLedger(decisions)),
+	}, nil
+}
+
 // handleReject rejects the gate on the first rejection, whatever the mode. The
 // ledger keeps the decisions recorded so far, so the trail shows who had
 // answered before the gate closed.
-func (n *ApprovalNode) handleReject(input *types.Input, signal *types.SignalPayload, approver string) (*types.Output, error) {
+func handleReject(input *types.Input, signal *types.SignalPayload, approver string) (*types.Output, error) {
 	decisions := appendDecision(getDecisions(input.Data), approver, actionReject, signal.Data["comment"])
 	return &types.Output{
 		Data: approvalOutput(input.Data,
@@ -368,12 +408,12 @@ func signalAction(data map[string]any) (string, bool) {
 	return action, ok
 }
 
-// currentSequentialApprover is the first approver who has not decided yet. The
-// ledger is the source of truth rather than a stored cursor, so the two cannot
-// disagree.
-func currentSequentialApprover(params *ApprovalParams, data map[string]any) string {
+// currentSequentialApprover is the first member of the chain who has not decided
+// yet. The chain and the ledger are both read from the node's own state rather
+// than from a stored cursor, so the two cannot disagree.
+func currentSequentialApprover(chain []string, data map[string]any) string {
 	decisions := getDecisions(data)
-	for _, approver := range params.Approvers {
+	for _, approver := range chain {
 		if !hasApproverDecision(decisions, approver) {
 			return approver
 		}
@@ -430,29 +470,119 @@ func resolveActor(data map[string]any) (string, bool) {
 	return actor, true
 }
 
-func isRegisteredApprover(params *ApprovalParams, actor string) bool {
-	for _, allowed := range params.Approvers {
-		if actor == allowed {
+// signalAssignee reads the subject an amend-the-chain action hands the decision
+// to. It is an identity, so it is checked the same way as any approver's: it
+// travels in the payload only as a name, and the person it names still has to
+// authenticate as themselves before their decision counts.
+func signalAssignee(data map[string]any) (string, bool) {
+	raw, ok := data["assignee"]
+	if !ok {
+		return "", false
+	}
+	assignee, ok := raw.(string)
+	if !ok || assignee == "" {
+		return "", false
+	}
+	return assignee, true
+}
+
+// approvedChain is the chain the gate is actually waiting on: the configured
+// approvers, as amended by the delegations on the ledger.
+//
+// It is recomputed from the ledger rather than stored beside it, so the chain
+// and the record of who decided it cannot drift apart. Storing the amended chain
+// as its own field would also mean a second piece of state a resumption has to
+// carry, and the two would have to be kept in step by hand.
+func approvedChain(params *ApprovalParams, decisions []map[string]any) []string {
+	chain := append([]string(nil), params.Approvers...)
+	for _, decision := range decisions {
+		if decision["action"] != actionDelegate {
+			continue
+		}
+		from, fromOK := decision["approver"].(string)
+		to, toOK := decision["assignee"].(string)
+		if !fromOK || !toOK {
+			continue
+		}
+		chain = replaceApprover(chain, from, to)
+	}
+	return chain
+}
+
+// allChainMembersDecided reports whether every slot in the chain has a decision
+// on the ledger.
+func allChainMembersDecided(chain []string, decisions []map[string]any) bool {
+	for _, approver := range chain {
+		if !hasApproverDecision(decisions, approver) {
+			return false
+		}
+	}
+	return true
+}
+
+func containsApprover(chain []string, approver string) bool {
+	for _, candidate := range chain {
+		if candidate == approver {
 			return true
 		}
 	}
 	return false
 }
 
-func appendDecision(decisions []map[string]any, approver string, action string, comment any) []map[string]any {
-	return append(decisions, map[string]any{
+// replaceApprover hands the first slot held by from over to to, keeping its
+// position. Precondition: from holds a slot in chain.
+func replaceApprover(chain []string, from string, to string) []string {
+	out := append([]string(nil), chain...)
+	for i, candidate := range out {
+		if candidate == from {
+			out[i] = to
+			break
+		}
+	}
+	return out
+}
+
+// withoutApprover drops the first slot held by approver.
+func withoutApprover(chain []string, approver string) []string {
+	out := make([]string, 0, len(chain))
+	dropped := false
+	for _, candidate := range chain {
+		if candidate == approver && !dropped {
+			dropped = true
+			continue
+		}
+		out = append(out, candidate)
+	}
+	return out
+}
+
+// appendDecision adds one entry to the ledger. extra carries the fields an
+// amend-the-chain decision needs beyond the common shape (the assignee).
+func appendDecision(decisions []map[string]any, approver string, action string, comment any, extra ...map[string]any) []map[string]any {
+	return append(decisions, approvalOutput(map[string]any{
 		"approver": approver,
 		"action":   action,
 		"comment":  comment,
 		"at":       time.Now().UTC().Format(time.RFC3339),
-	})
+	}, extra...))
 }
 
+// hasApproverDecision reports whether this approver's own slot has been
+// resolved. The ledger is an event log rather than a list of votes, so not every
+// entry in it closes a slot, which is what closesSlot decides.
 func hasApproverDecision(decisions []map[string]any, approver string) bool {
 	for _, decision := range decisions {
-		if decision["approver"] == approver {
+		if decision["approver"] == approver && closesSlot(decision["action"]) {
 			return true
 		}
+	}
+	return false
+}
+
+func closesSlot(action any) bool {
+	switch action {
+	case actionApprove, actionReject, actionReturn, actionDelegate:
+		return true
 	}
 	return false
 }
