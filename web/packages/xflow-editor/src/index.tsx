@@ -664,6 +664,34 @@ interface RenameFeedback {
   message: string;
 }
 
+/**
+ * An uncommitted, unparseable parameters-JSON draft. It is held by the editor
+ * (keyed by node) rather than the Inspector, so it survives the Inspector
+ * unmounting (drawers and tabs use destroyOnHidden) and can block save/run.
+ */
+interface ParameterDraft {
+  text: string;
+  error: string;
+}
+
+/**
+ * Computes the next workflow from the latest committed draft. Writers pass an
+ * updater instead of a whole workflow so two writes in the same tick compose
+ * instead of the second silently discarding the first.
+ */
+type WorkflowUpdater = (latest: WorkflowDef) => WorkflowDef;
+
+function updateNodeByKey(
+  workflow: WorkflowDef,
+  key: string,
+  update: (node: WorkflowNode) => WorkflowNode
+): WorkflowDef {
+  const nodes = workflow.nodes ?? [];
+  const index = nodes.findIndex((node, nodeIndex) => nodeKey(node, nodeIndex) === key);
+  if (index < 0) return workflow;
+  return { ...workflow, nodes: nodes.map((node, nodeIndex) => (nodeIndex === index ? update(node) : node)) };
+}
+
 interface ConnectionReference {
   sourceName: string;
   sourcePort: string;
@@ -1861,17 +1889,21 @@ function Inspector({
   selectedNode,
   selectedIndex,
   runtime,
-  onChange,
+  onChangeWith,
   onDeleteNode,
-  onNodeRenamed
+  onNodeRenamed,
+  parameterDrafts,
+  onParameterDraft
 }: {
   workflow: WorkflowDef;
   selectedNode?: WorkflowNode;
   selectedIndex: number;
   runtime?: RuntimeSnapshot;
-  onChange?: (workflow: WorkflowDef) => void;
+  onChangeWith?: (update: WorkflowUpdater) => void;
   onDeleteNode?: () => void;
   onNodeRenamed?: (previousKey: string, nextKey: string) => void;
+  parameterDrafts?: Record<string, ParameterDraft>;
+  onParameterDraft?: (key: string, draft?: ParameterDraft) => void;
 }): React.ReactElement {
   const [activeTab, setActiveTab] = React.useState<"config" | "connections" | "run">("config");
   const [nodeNameText, setNodeNameText] = React.useState("");
@@ -1885,14 +1917,22 @@ function Inspector({
   const selectedNodeIdentity = selectedNode ? nodeKey(selectedNode, selectedIndex) : undefined;
   const activeRenameFeedback =
     renameFeedback && renameFeedback.nodeKey === selectedNodeIdentity ? renameFeedback : undefined;
+  // Read through a ref so a draft edit does not re-run the resync effect below
+  // (which also resets the rename field) on every keystroke.
+  const parameterDraftsRef = React.useRef(parameterDrafts);
+  parameterDraftsRef.current = parameterDrafts;
 
   React.useEffect(() => {
     setNodeNameText(selectedNode ? nodeName(selectedNode, selectedIndex) : "");
     setRenameFeedback((current) =>
       current?.nodeKey === selectedNodeIdentity ? current : undefined
     );
-    setParametersText(serializeJson(selectedNode?.parameters ?? {}));
-    setParametersError(undefined);
+    // An unparseable draft is never overwritten by a re-serialization of the
+    // committed parameters -- not by an undo, not by another writer, and not
+    // by the Inspector remounting.
+    const draft = selectedNodeIdentity ? parameterDraftsRef.current?.[selectedNodeIdentity] : undefined;
+    setParametersText(draft ? draft.text : serializeJson(selectedNode?.parameters ?? {}));
+    setParametersError(draft?.error);
     setNodeRunnerSelectorText(serializeJson(selectedNode?.runner_selector ?? {}));
     setNodeRunnerSelectorError(undefined);
   }, [selectedIndex, selectedNodeIdentity, selectedNode?.name, selectedNode?.id, selectedNode?.parameters, selectedNode?.runner_selector]);
@@ -1911,9 +1951,9 @@ function Inspector({
 
   const updateWorkflowMeta = React.useCallback(
     (patch: Partial<WorkflowDef>) => {
-      onChange?.({ ...workflow, ...patch });
+      onChangeWith?.((latest) => ({ ...latest, ...patch }));
     },
-    [onChange, workflow]
+    [onChangeWith]
   );
   const updateWorkflowJson = React.useCallback(
     (
@@ -1937,27 +1977,35 @@ function Inspector({
   );
   const updateSelectedNode = React.useCallback(
     (patch: Partial<WorkflowNode>) => {
-      if (!selectedNode || selectedIndex < 0) return;
-      onChange?.({
-        ...workflow,
-        nodes: (workflow.nodes ?? []).map((node, index) =>
-          index === selectedIndex ? { ...node, ...patch } : node
-        )
-      });
+      if (!selectedNodeIdentity) return;
+      const key = selectedNodeIdentity;
+      onChangeWith?.((latest) => updateNodeByKey(latest, key, (node) => ({ ...node, ...patch })));
     },
-    [onChange, selectedIndex, selectedNode, workflow]
+    [onChangeWith, selectedNodeIdentity]
   );
-  const commitNodeRename = React.useCallback(() => {
-    if (!selectedNode || selectedIndex < 0) return;
-    const previousKey = nodeKey(selectedNode, selectedIndex);
-    const result = renameNodeInWorkflow(workflow, selectedIndex, nodeNameText);
+  const commitNodeRename = React.useCallback((requestedName: string) => {
+    if (!selectedNodeIdentity) return;
+    const previousKey = selectedNodeIdentity;
+    // Held in an object: TypeScript does not see assignments made inside the
+    // updater callback, so a plain `let` would narrow to `undefined` here.
+    const outcome: { result?: RenameResult; nextKey: string } = { nextKey: previousKey };
+    onChangeWith?.((latest) => {
+      const index = (latest.nodes ?? []).findIndex((node, nodeIndex) => nodeKey(node, nodeIndex) === previousKey);
+      if (index < 0) return latest;
+      const result = renameNodeInWorkflow(latest, index, requestedName);
+      outcome.result = result;
+      if (result.error || !result.workflow) return latest;
+      const renamedNode = result.workflow.nodes?.[index];
+      outcome.nextKey = renamedNode ? nodeKey(renamedNode, index) : previousKey;
+      return result.workflow;
+    });
+    const { result, nextKey } = outcome;
+    if (!result) return;
     if (result.error) {
       setRenameFeedback({ nodeKey: previousKey, kind: "error", message: result.error });
       return;
     }
     if (!result.workflow) return;
-    const renamedNode = result.workflow.nodes?.[selectedIndex];
-    const nextKey = renamedNode ? nodeKey(renamedNode, selectedIndex) : previousKey;
     setRenameFeedback(
       result.hasPotentialFreeFormReference
         ? {
@@ -1967,37 +2015,50 @@ function Inspector({
           }
         : undefined
     );
-    onChange?.(result.workflow);
+    // Selection is keyed by id ?? name, so an id-less node must be re-selected
+    // under its new name or the Inspector loses it.
     onNodeRenamed?.(previousKey, nextKey);
-  }, [nodeNameText, onChange, onNodeRenamed, selectedIndex, selectedNode, workflow]);
+  }, [onChangeWith, onNodeRenamed, selectedNodeIdentity]);
   const addSelectedConnection = React.useCallback(
     (targetName: string, sourcePort: string, targetInput: string) => {
-      onChange?.(addConnection(workflow, selectedNode, targetName, sourcePort, targetInput));
+      const key = selectedNodeIdentity;
+      onChangeWith?.((latest) => {
+        const node = key
+          ? (latest.nodes ?? []).find((candidate, index) => nodeKey(candidate, index) === key)
+          : undefined;
+        return addConnection(latest, node, targetName, sourcePort, targetInput);
+      });
     },
-    [onChange, selectedNode, workflow]
+    [onChangeWith, selectedNodeIdentity]
   );
   const removeSelectedConnection = React.useCallback(
     (connection: ConnectionReference) => {
-      onChange?.(removeConnectionFromWorkflow(workflow, connection));
+      onChangeWith?.((latest) => removeConnectionFromWorkflow(latest, connection));
     },
-    [onChange, workflow]
+    [onChangeWith]
   );
   const updateParameters = React.useCallback(
     (nextText: string) => {
       setParametersText(nextText);
+      const key = selectedNodeIdentity;
+      const reject = (error: string) => {
+        setParametersError(error);
+        if (key) onParameterDraft?.(key, { text: nextText, error });
+      };
       try {
         const nextParameters = nextText.trim() ? (JSON.parse(nextText) as unknown) : {};
         if (!nextParameters || typeof nextParameters !== "object" || Array.isArray(nextParameters)) {
-          setParametersError("参数 JSON 必须是对象");
+          reject("参数 JSON 必须是对象");
           return;
         }
         setParametersError(undefined);
+        if (key) onParameterDraft?.(key, undefined);
         updateSelectedNode({ parameters: nextParameters as Record<string, unknown> });
       } catch {
-        setParametersError("参数 JSON 格式错误");
+        reject("参数 JSON 格式错误");
       }
     },
-    [updateSelectedNode]
+    [onParameterDraft, selectedNodeIdentity, updateSelectedNode]
   );
   const updateNodeRunnerSelector = React.useCallback(
     (nextText: string) => {
@@ -2162,7 +2223,7 @@ function Inspector({
             classNames={editorInputClassNames}
             status={activeRenameFeedback?.kind === "error" ? "error" : undefined}
             value={nodeNameText}
-            onBlur={commitNodeRename}
+            onBlur={() => commitNodeRename(nodeNameText)}
             onChange={(event) => {
               setNodeNameText(event.target.value);
               setRenameFeedback(undefined);
@@ -2702,6 +2763,8 @@ export function XFlowEditor({
     setDraftWorkflow(value);
     historyRef.current = { undo: [], redo: [] };
     setHistory(historyRef.current);
+    // Drafts belong to the replaced definition; they must not block the new one.
+    setParameterDrafts({});
     setIsDirty(!value.id);
     setOperationError(undefined);
     setOperationStatus(value.id ? "已保存" : "未保存");
@@ -2732,6 +2795,66 @@ export function XFlowEditor({
     [onChange]
   );
 
+  // Every Inspector writer goes through this: the updater runs against the
+  // latest committed draft, so writes in the same tick compose.
+  const commitWorkflowWith = React.useCallback(
+    (update: WorkflowUpdater) => {
+      commitWorkflow(update(latestDraftRef.current));
+    },
+    [commitWorkflow]
+  );
+
+  const [parameterDrafts, setParameterDrafts] = React.useState<Record<string, ParameterDraft>>({});
+  const parameterDraftsRef = React.useRef(parameterDrafts);
+  parameterDraftsRef.current = parameterDrafts;
+  const updateParameterDraft = React.useCallback((key: string, draft?: ParameterDraft) => {
+    setParameterDrafts((current) => {
+      if (!draft) {
+        if (!(key in current)) return current;
+        const { [key]: _removed, ...rest } = current;
+        return rest;
+      }
+      const existing = current[key];
+      if (existing && existing.text === draft.text && existing.error === draft.error) return current;
+      return { ...current, [key]: draft };
+    });
+  }, []);
+  const handleNodeRenamed = React.useCallback((previousKey: string, nextKey: string) => {
+    setSelectedKey(nextKey);
+    if (previousKey === nextKey) return;
+    setParameterDrafts((current) => {
+      if (!(previousKey in current)) return current;
+      const { [previousKey]: draft, ...rest } = current;
+      return { ...rest, [nextKey]: draft };
+    });
+  }, []);
+  // Drop drafts whose node no longer exists (deleted, or an undo/redo moved it
+  // back to another key). Run as an effect, not inside commitWorkflow, so a
+  // rename's commit and its draft rekey land in the same batch before pruning;
+  // otherwise a later node reusing the key would inherit a stranger's draft.
+  React.useEffect(() => {
+    const liveKeys = new Set((draftWorkflow.nodes ?? []).map((node, index) => nodeKey(node, index)));
+    setParameterDrafts((current) => {
+      const orphaned = Object.keys(current).filter((key) => !liveKeys.has(key));
+      if (orphaned.length === 0) return current;
+      const next = { ...current };
+      for (const key of orphaned) delete next[key];
+      return next;
+    });
+  }, [draftWorkflow]);
+  /** Blocks save/run while any live node holds an unparseable parameters draft. */
+  const blockedByParameterDraft = React.useCallback((action: "保存" | "运行"): boolean => {
+    const nodesNow = latestDraftRef.current.nodes ?? [];
+    const blocked = nodesNow
+      .map((node, index) => ({ key: nodeKey(node, index), name: nodeName(node, index) }))
+      .filter(({ key }) => key in parameterDraftsRef.current)
+      .map(({ name }) => name);
+    if (blocked.length === 0) return false;
+    setOperationError(`节点 ${blocked.join("、")} 的参数 JSON 未通过解析，请修正后再${action}`);
+    setOperationStatus(`${action}已阻止`);
+    setBottomCollapsed(false);
+    return true;
+  }, []);
   const restoreHistory = React.useCallback((nextWorkflow: WorkflowDef, nextHistory: WorkflowHistory) => {
     historyRef.current = nextHistory;
     setHistory(nextHistory);
@@ -2895,7 +3018,10 @@ export function XFlowEditor({
       setBottomCollapsed(false);
       return;
     }
-    const workflowToSave = draftWorkflow;
+    if (blockedByParameterDraft("保存")) return;
+    // The ref, not render state: it already includes writes committed earlier
+    // in this tick (the shortcut can fire from inside a text field).
+    const workflowToSave = latestDraftRef.current;
     const revisionAtSave = draftRevisionRef.current;
     setSaving(true);
     setOperationError(undefined);
@@ -2919,7 +3045,7 @@ export function XFlowEditor({
     } finally {
       setSaving(false);
     }
-  }, [draftWorkflow, onSave]);
+  }, [blockedByParameterDraft, onSave]);
 
   const runWorkflow = React.useCallback(async () => {
     if (!onRun) {
@@ -2928,10 +3054,11 @@ export function XFlowEditor({
       setBottomCollapsed(false);
       return;
     }
+    if (blockedByParameterDraft("运行")) return;
     setRunning(true);
     setOperationError(undefined);
     try {
-      const nextRuntime = await onRun(draftWorkflow);
+      const nextRuntime = await onRun(latestDraftRef.current);
       if (!nextRuntime) throw new Error("运行处理器未返回运行状态快照");
       setLocalRuntime(nextRuntime);
       setOperationStatus("运行完成");
@@ -2944,7 +3071,7 @@ export function XFlowEditor({
     } finally {
       setRunning(false);
     }
-  }, [draftWorkflow, onRun]);
+  }, [blockedByParameterDraft, onRun]);
 
   React.useEffect(() => {
     if (nodes.length === 0) {
@@ -3399,9 +3526,11 @@ export function XFlowEditor({
                 selectedNode={selectedNode}
                 selectedIndex={selectedIndex}
                 runtime={localRuntime}
-                onChange={commitWorkflow}
+                onChangeWith={commitWorkflowWith}
                 onDeleteNode={deleteSelectedNode}
-                onNodeRenamed={(_previousKey, nextKey) => setSelectedKey(nextKey)}
+                onNodeRenamed={handleNodeRenamed}
+                parameterDrafts={parameterDrafts}
+                onParameterDraft={updateParameterDraft}
               />
             )}
           </aside>
@@ -3471,9 +3600,11 @@ export function XFlowEditor({
               selectedNode={selectedNode}
               selectedIndex={selectedIndex}
               runtime={localRuntime}
-              onChange={commitWorkflow}
+              onChangeWith={commitWorkflowWith}
               onDeleteNode={deleteSelectedNode}
-              onNodeRenamed={(_previousKey, nextKey) => setSelectedKey(nextKey)}
+              onNodeRenamed={handleNodeRenamed}
+              parameterDrafts={parameterDrafts}
+              onParameterDraft={updateParameterDraft}
             />
           ) : (
             <section className="xflow-editor-preview-inspector" aria-label="预览模式说明">
