@@ -127,17 +127,25 @@ describe("dynamic ports (Doc C §4.3)", () => {
 });
 
 describe("externalIssuesByNode (Doc C §1 rule 3)", () => {
-  it("groups param_issues by node and JSON Pointer and skips sub-graph body nodes", () => {
+  it("groups param_issues by node and JSON Pointer and rolls body members up onto the parent's body", () => {
     const grouped = externalIssuesByNode([
       { node: "api", path: "/parameters/url", code: "required", message: "url is required", severity: "error" },
       { node: "api", path: "/parameters/url", code: "format.url", message: "not a url", severity: "warning" },
-      { node: "loop/inner", path: "/parameters/x", code: "required", message: "x", severity: "error" }
+      { node: "loop/inner", path: "/parameters/x", code: "required", message: "x is required", severity: "error" },
+      { node: "loop/nested/deep", path: "/parameters/y", code: "enum", message: "y is invalid", severity: "warning" },
+      { node: "loop/", path: "/parameters/z", code: "required", message: "z", severity: "error" }
     ]);
-    expect([...grouped.keys()]).toEqual(["api"]);
+    expect([...grouped.keys()]).toEqual(["api", "loop"]);
     expect(grouped.get("api")).toEqual({
       "/parameters/url": [
         { path: "/parameters/url", message: "url is required", severity: "error" },
         { path: "/parameters/url", message: "not a url", severity: "warning" }
+      ]
+    });
+    expect(grouped.get("loop")).toEqual({
+      "/parameters/body": [
+        { path: "/parameters/body", message: "inner: x is required", severity: "error" },
+        { path: "/parameters/body", message: "nested/deep: y is invalid", severity: "warning" }
       ]
     });
   });

@@ -347,17 +347,27 @@ export function nodeHasTemplate(workflow: WorkflowDef, node: WorkflowNode | unde
 
 /**
  * Backend param_issues (Doc C §1 rule 3) grouped by node name, then by JSON
- * Pointer, in composer's `externalIssues` shape. Issues of sub-graph body
- * nodes (`parent/child`) are not placed in v1: a body node has no Inspector.
+ * Pointer, in composer's `externalIssues` shape. A body node has no Inspector
+ * of its own, so an issue of a sub-graph body member (`parent/child`, at any
+ * depth) is rolled up onto the top-level parent's `/parameters/body` field,
+ * its message prefixed with the member's name relative to that parent.
  */
 export function externalIssuesByNode(issues: readonly ParamIssue[] | undefined): Map<string, Record<string, Issue[]>> {
   const out = new Map<string, Record<string, Issue[]>>();
   for (const issue of issues ?? []) {
-    if (!issue.node || issue.node.includes("/")) continue;
-    const byPath = out.get(issue.node) ?? {};
-    const path = issue.path || "/parameters";
-    (byPath[path] ??= []).push({ path, message: issue.message, severity: issue.severity === "warning" ? "warning" : "error" });
-    out.set(issue.node, byPath);
+    if (!issue.node) continue;
+    const slash = issue.node.indexOf("/");
+    const node = slash < 0 ? issue.node : issue.node.slice(0, slash);
+    const member = slash < 0 ? "" : issue.node.slice(slash + 1);
+    if (!node || (slash >= 0 && !member)) continue;
+    const path = member ? SUBGRAPH_BODY_POINTER : issue.path || "/parameters";
+    const message = member ? `${member}: ${issue.message}` : issue.message;
+    const byPath = out.get(node) ?? {};
+    (byPath[path] ??= []).push({ path, message, severity: issue.severity === "warning" ? "warning" : "error" });
+    out.set(node, byPath);
   }
   return out;
 }
+
+/** Where a sub-graph body lives (engine/graph subgraphBodyKey). */
+const SUBGRAPH_BODY_POINTER = "/parameters/body";

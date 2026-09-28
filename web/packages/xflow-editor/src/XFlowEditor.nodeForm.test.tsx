@@ -285,6 +285,32 @@ describe("node form: backend param_issues land on their field", () => {
 
     await waitFor(() => expect(within(fieldOf(container, "f.parameters.url")).getAllByText("server rejects this url").length).toBeGreaterThan(0));
   });
+
+  it("rolls a sub-graph body member's issue up onto the parent's body field", async () => {
+    const mapWorkflow: WorkflowDef = {
+      id: "wf-body-issues",
+      name: "body-issues",
+      nodes: [
+        {
+          name: "loop",
+          type: "xflow.map",
+          parameters: {
+            items: "{{ $input.items }}",
+            body: { type: "xflow.subgraph", parameters: { nodes: [{ name: "inner", type: "xflow.http", parameters: {} }] } }
+          }
+        }
+      ],
+      connections: {}
+    };
+    const bodyIssue: ParamIssue = { node: "loop/inner", path: "/parameters/url", code: "required", message: "url is required", severity: "error" };
+    const handleSave = vi.fn(async (next: WorkflowDef): Promise<XFlowEditorSaveResult> => ({ workflow: next, paramIssues: [bodyIssue] }));
+    const { container } = render(<XFlowEditor value={mapWorkflow} nodeTypes={nodeTypes} onSave={handleSave} />);
+    selectNode("loop");
+    fireEvent.click(screen.getByRole("button", { name: /保存/ }));
+    await waitFor(() => expect(handleSave).toHaveBeenCalledTimes(1));
+
+    await waitFor(() => expect(within(fieldOf(container, "f.parameters.body:control")).getAllByText("inner: url is required").length).toBeGreaterThan(0));
+  });
 });
 
 // ------------------------------------------------------ (h) no schema
