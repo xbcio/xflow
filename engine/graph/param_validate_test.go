@@ -357,6 +357,24 @@ func TestValidateParamsAdvisoryAllowlist(t *testing.T) {
 	}), "/parameters/aggregate/on_overflow enum warning", "/parameters/message_schema/on_invalid enum warning")
 }
 
+func TestValidateParamsAdvisoryOneOfExcess(t *testing.T) {
+	scriptDesc := types.Descriptor{Type: "xflow.script", Params: []types.ParamSpec{
+		{Name: "code", Type: types.ParamString},
+		{Name: "artifact_digest", Type: types.ParamString},
+	}, OneOf: []types.OneOfGroup{{Params: []string{"code", "artifact_digest"}, Mode: types.OneOfExactly}}}
+
+	// More than one set: the handler runs code, so it is only a warning...
+	assertIssues(t, ValidateParams(scriptDesc, map[string]any{"code": "c", "artifact_digest": "d"}), "/parameters/code one_of warning")
+	// ...but none set still cannot run.
+	assertIssues(t, ValidateParams(scriptDesc, map[string]any{}), "/parameters/code one_of error")
+	assertIssues(t, ValidateOneOf(scriptDesc, map[string]any{"code": "c", "artifact_digest": "d"}), "/parameters/code one_of warning")
+
+	// Keyed by node type: the same group elsewhere is an error.
+	other := scriptDesc
+	other.Type = "custom.script"
+	assertIssues(t, ValidateParams(other, map[string]any{"code": "c", "artifact_digest": "d"}), "/parameters/code one_of error")
+}
+
 func TestValidateParamsSDKShapedValues(t *testing.T) {
 	// SDK params are not JSON-normalized: typed slices/maps and typed nils.
 	type rule struct {

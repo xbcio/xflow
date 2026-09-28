@@ -380,10 +380,30 @@ func oneOfIssues(desc types.Descriptor, params map[string]any) []ParamIssue {
 			Path:     "/parameters/" + escapePointerToken(g.Params[0]),
 			Code:     ParamIssueCodeOneOf,
 			Message:  fmt.Sprintf("%s of %s must be set, %d are", want, strings.Join(g.Params, ", "), n),
-			Severity: ParamIssueError,
+			Severity: oneOfSeverity(desc.Type, g.Params[0], n),
 		})
 	}
 	return out
+}
+
+// advisoryOneOfExcess lists (node type, first param of the group) OneOf
+// groups whose "more than one is set" finding is a warning, not an error: the
+// handler accepts several and picks one, so rejecting them under enforce would
+// refuse definitions that run correctly today. "None is set" stays an error.
+// Same contract as advisoryParamRules: remove the entry once the handler and
+// the Descriptor agree.
+//
+//   - xflow.script {code, artifact_digest, __artifact_file_path}: the handler
+//     runs code when it is non-empty and only then falls back to the digest.
+var advisoryOneOfExcess = map[string]map[string]bool{
+	"xflow.script": {"code": true},
+}
+
+func oneOfSeverity(nodeType, first string, n int) string {
+	if n > 1 && advisoryOneOfExcess[nodeType][first] {
+		return ParamIssueWarning
+	}
+	return ParamIssueError
 }
 
 // evalCondition evaluates a ParamSpec condition against sibling values. The
