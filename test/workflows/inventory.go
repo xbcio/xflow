@@ -76,12 +76,10 @@ func BelowThresholdInput() map[string]any { return map[string]any{"amount": ArmT
 // switchWithPorts wraps xflow.switch to supply the one parameter the node cannot
 // infer: the list of output ports its rules route to.
 //
-// The descriptor marks both `mode` and `outputs` required, and RawParams emits
-// `mode` but not `outputs`, so a switch built with node.Switch fails the
-// builder's own required-parameter check before the graph is ever compiled. The
-// node does not need the list to route — it needs it so the compiler can bind an
-// edge to each port name the rules mention, which is why the caller must state
-// them here.
+// The node does not need the list to route, and node.Switch's RawParams does
+// not emit it; the Descriptor no longer marks it Required for that reason. The
+// wrapper keeps stating the ports so the definition documents every output its
+// rules reference.
 type switchWithPorts struct {
 	*node.SwitchNode
 	ports []string
