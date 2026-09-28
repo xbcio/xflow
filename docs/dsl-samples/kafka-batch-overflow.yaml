@@ -65,6 +65,9 @@ nodes:
   #    托管下是 at-least-once，重复的那一批会以另一个 execution 重跑。
   - name: persist_orders
     type: xflow.function
+    parameters:
+      # 宿主注册的 Go 函数（示意名）；function_name 与 code 至少写一个。
+      function_name: persistOrders
 
   - name: done
     type: xflow.end

@@ -97,15 +97,7 @@ func stringKeys(v any) any {
 // the exact error issues they produce. They are real defects in the sample,
 // not validator over-reach: each is asserted to fail exactly this way, so
 // fixing the sample turns this test red until the entry is removed.
-var knownInvalidSamples = map[string][]string{
-	// persist_orders is an xflow.function with no parameters at all. Its
-	// handler answers that with the permanent error function.config_required
-	// ("either function_name or code is required") on every execution, so
-	// the sample as written cannot run.
-	"kafka-batch-overflow.yaml": {
-		"persist_orders /parameters/function_name one_of: at least one of function_name, code must be set, 0 are",
-	},
-}
+var knownInvalidSamples = map[string][]string{}
 
 // registerUnderEnforce validates def directly (to report every issue, not just
 // the first failure) and then registers it through the real enforce-mode
