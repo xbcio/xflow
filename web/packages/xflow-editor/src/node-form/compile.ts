@@ -227,9 +227,9 @@ function isOptionValue(value: unknown): value is OptionItem["value"] {
 }
 
 /**
- * composer/form options take primitive values and no description (B4
- * `optionSchema` is strict), so option descriptions are dropped and
- * non-primitive enum values are skipped with a warning.
+ * composer/form options take primitive values, so non-primitive enum values
+ * are skipped with a warning. Descriptions are carried through (a second line
+ * in a Select popup, a Radio tooltip).
  */
 function toOptions(options: readonly EnumOption[], warn: (message: string) => void): OptionItem[] {
   const out: OptionItem[] = [];
@@ -238,7 +238,11 @@ function toOptions(options: readonly EnumOption[], warn: (message: string) => vo
       warn(`enum value ${JSON.stringify(option.value)} is not a primitive; option skipped`);
       continue;
     }
-    out.push({ value: option.value, label: option.label ?? String(option.value) });
+    out.push({
+      value: option.value,
+      label: option.label ?? String(option.value),
+      ...(option.description ? { description: option.description } : {})
+    });
   }
   return out;
 }

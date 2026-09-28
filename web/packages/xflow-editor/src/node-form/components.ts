@@ -29,6 +29,7 @@ export type Bound<T> = T | Expr;
 export interface OptionItem {
   value: string | number | boolean;
   label: string;
+  description?: string;
 }
 
 /** Port list item; also the shape of `context.ports` (Doc C §4.3). */

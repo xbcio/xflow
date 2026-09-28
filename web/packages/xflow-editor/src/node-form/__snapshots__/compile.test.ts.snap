@@ -87,18 +87,22 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > commonSchema 
           "label": "错误处理",
           "options": [
             {
+              "description": "节点失败时终止执行",
               "label": "停止",
               "value": "stop",
             },
             {
+              "description": "把错误路由到 error 输出端口",
               "label": "错误端口",
               "value": "error_output",
             },
             {
+              "description": "把错误作为结果从 main 端口输出",
               "label": "主端口",
               "value": "main_output",
             },
             {
+              "description": "忽略错误继续执行",
               "label": "继续",
               "value": "continue",
             },
@@ -1085,10 +1089,12 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
           "label": "Mode",
           "options": [
             {
+              "description": "Body marshalled to JSON; response parsed; 4xx is a node error",
               "label": "JSON",
               "value": "json",
             },
             {
+              "description": "Body in and out as base64 bytes; every status is a result",
               "label": "Raw",
               "value": "raw",
             },
@@ -1661,6 +1667,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
               "value": "js",
             },
             {
+              "description": "Base64 wasip1 module",
               "label": "WebAssembly",
               "value": "wasm",
             },
@@ -1744,10 +1751,12 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
               },
               "else": [
                 {
+                  "description": "Fastest cold start; cannot interrupt tight loops",
                   "label": "goja",
                   "value": "goja",
                 },
                 {
+                  "description": "Slower first load; genuine mid-execution termination",
                   "label": "QuickJS",
                   "value": "qjs",
                 },
@@ -1756,6 +1765,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
                   "value": "wazero",
                 },
                 {
+                  "description": "Pooled reactor-mode guest instances",
                   "label": "wazero (reactor)",
                   "value": "wazero-reactor",
                 },
@@ -1766,6 +1776,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
                   "value": "wazero",
                 },
                 {
+                  "description": "Pooled reactor-mode guest instances",
                   "label": "wazero (reactor)",
                   "value": "wazero-reactor",
                 },
@@ -1773,10 +1784,12 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
             },
             "then": [
               {
+                "description": "Fastest cold start; cannot interrupt tight loops",
                 "label": "goja",
                 "value": "goja",
               },
               {
+                "description": "Slower first load; genuine mid-execution termination",
                 "label": "QuickJS",
                 "value": "qjs",
               },
@@ -1962,10 +1975,12 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.switch 
           "label": "Mode",
           "options": [
             {
+              "description": "First rule whose condition holds picks the output",
               "label": "Rules",
               "value": "rules",
             },
             {
+              "description": "Expression result is the output port name",
               "label": "Expression",
               "value": "expression",
             },
@@ -2661,14 +2676,17 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
           "label": "On Overflow",
           "options": [
             {
+              "description": "Drop the arriving record (counted and logged)",
               "label": "Discard",
               "value": "discard",
             },
             {
+              "description": "Halt fetching for the whole assignment until the partition drains",
               "label": "Block",
               "value": "block",
             },
             {
+              "description": "Republish to dead_letter_topic before advancing the offset",
               "label": "Dead Letter",
               "value": "dead_letter",
             },
@@ -2902,14 +2920,17 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
           "label": "On Invalid",
           "options": [
             {
+              "description": "Commit the offset and drop the message (counted and logged)",
               "label": "Discard",
               "value": "discard",
             },
             {
+              "description": "Withhold the commit so Kafka redelivers; blocks the partition",
               "label": "Fail",
               "value": "fail",
             },
             {
+              "description": "Republish to dead_letter_topic, then commit",
               "label": "Dead Letter",
               "value": "dead_letter",
             },
@@ -2988,30 +3009,37 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
           "label": "Start Offset",
           "options": [
             {
+              "description": "Only records produced after the group first joins",
               "label": "Latest",
               "value": "latest",
             },
             {
+              "description": "From the oldest retained record",
               "label": "Earliest",
               "value": "earliest",
             },
             {
+              "description": "Alias of latest",
               "label": "Last",
               "value": "last",
             },
             {
+              "description": "Alias of latest",
               "label": "Newest",
               "value": "newest",
             },
             {
+              "description": "Alias of earliest",
               "label": "First",
               "value": "first",
             },
             {
+              "description": "Alias of earliest",
               "label": "Oldest",
               "value": "oldest",
             },
             {
+              "description": "Alias of earliest",
               "label": "Beginning",
               "value": "beginning",
             },
@@ -3682,10 +3710,12 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
           "label": "Mode",
           "options": [
             {
+              "description": "Consume a Redis Stream through a consumer group",
               "label": "Stream",
               "value": "stream",
             },
             {
+              "description": "Subscribe to a Pub/Sub channel (one active replica)",
               "label": "Pub/Sub",
               "value": "pubsub",
             },
@@ -4165,10 +4195,12 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.wait sn
           "label": "Mode",
           "options": [
             {
+              "description": "Wait for one or more external signals",
               "label": "Signal",
               "value": "signal",
             },
             {
+              "description": "Wait for a fixed duration or until an absolute time",
               "label": "Timer",
               "value": "timer",
             },

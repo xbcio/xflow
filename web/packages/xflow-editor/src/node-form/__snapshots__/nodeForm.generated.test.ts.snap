@@ -1626,10 +1626,12 @@ exports[`A6-generated node-types fixture > xflow.http@1 snapshot 1`] = `
           "label": "Mode",
           "options": [
             {
+              "description": "Body marshalled to JSON; response parsed; 4xx is a node error",
               "label": "JSON",
               "value": "json",
             },
             {
+              "description": "Body in and out as base64 bytes; every status is a result",
               "label": "Raw",
               "value": "raw",
             },
@@ -2127,10 +2129,12 @@ exports[`A6-generated node-types fixture > xflow.merge@1 snapshot 1`] = `
           "label": "Mode",
           "options": [
             {
+              "description": "Wait for every upstream branch",
               "label": "Wait All",
               "value": "wait_all",
             },
             {
+              "description": "Take the first branch to arrive",
               "label": "Wait Any",
               "value": "wait_any",
             },
@@ -2172,10 +2176,12 @@ exports[`A6-generated node-types fixture > xflow.merge@1 snapshot 1`] = `
           "label": "On Others",
           "options": [
             {
+              "description": "Best-effort cancel of the remaining branches",
               "label": "Cancel",
               "value": "cancel",
             },
             {
+              "description": "Let the remaining branches run and ignore their output",
               "label": "Detach",
               "value": "detach",
             },
@@ -2585,6 +2591,7 @@ exports[`A6-generated node-types fixture > xflow.script@1 snapshot 1`] = `
               "value": "js",
             },
             {
+              "description": "Base64 wasip1 module",
               "label": "WebAssembly",
               "value": "wasm",
             },
@@ -2668,10 +2675,12 @@ exports[`A6-generated node-types fixture > xflow.script@1 snapshot 1`] = `
               },
               "else": [
                 {
+                  "description": "Fastest cold start; cannot interrupt tight loops",
                   "label": "goja",
                   "value": "goja",
                 },
                 {
+                  "description": "Slower first load; genuine mid-execution termination",
                   "label": "QuickJS",
                   "value": "qjs",
                 },
@@ -2680,6 +2689,7 @@ exports[`A6-generated node-types fixture > xflow.script@1 snapshot 1`] = `
                   "value": "wazero",
                 },
                 {
+                  "description": "Pooled reactor-mode guest instances",
                   "label": "wazero (reactor)",
                   "value": "wazero-reactor",
                 },
@@ -2690,6 +2700,7 @@ exports[`A6-generated node-types fixture > xflow.script@1 snapshot 1`] = `
                   "value": "wazero",
                 },
                 {
+                  "description": "Pooled reactor-mode guest instances",
                   "label": "wazero (reactor)",
                   "value": "wazero-reactor",
                 },
@@ -2697,10 +2708,12 @@ exports[`A6-generated node-types fixture > xflow.script@1 snapshot 1`] = `
             },
             "then": [
               {
+                "description": "Fastest cold start; cannot interrupt tight loops",
                 "label": "goja",
                 "value": "goja",
               },
               {
+                "description": "Slower first load; genuine mid-execution termination",
                 "label": "QuickJS",
                 "value": "qjs",
               },
@@ -3029,10 +3042,12 @@ exports[`A6-generated node-types fixture > xflow.switch@1 snapshot 1`] = `
           "label": "Mode",
           "options": [
             {
+              "description": "First rule whose condition holds picks the output",
               "label": "Rules",
               "value": "rules",
             },
             {
+              "description": "Expression result is the output port name",
               "label": "Expression",
               "value": "expression",
             },
@@ -4544,14 +4559,17 @@ exports[`A6-generated node-types fixture > xflow.trigger.kafka@1 snapshot 1`] = 
           "label": "On Overflow",
           "options": [
             {
+              "description": "Drop the arriving record (counted and logged)",
               "label": "Discard",
               "value": "discard",
             },
             {
+              "description": "Halt fetching for the whole assignment until the partition drains",
               "label": "Block",
               "value": "block",
             },
             {
+              "description": "Republish to dead_letter_topic before advancing the offset",
               "label": "Dead Letter",
               "value": "dead_letter",
             },
@@ -4786,14 +4804,17 @@ exports[`A6-generated node-types fixture > xflow.trigger.kafka@1 snapshot 1`] = 
           "label": "On Invalid",
           "options": [
             {
+              "description": "Commit the offset and drop the message (counted and logged)",
               "label": "Discard",
               "value": "discard",
             },
             {
+              "description": "Withhold the commit so Kafka redelivers; blocks the partition",
               "label": "Fail",
               "value": "fail",
             },
             {
+              "description": "Republish to dead_letter_topic, then commit",
               "label": "Dead Letter",
               "value": "dead_letter",
             },
@@ -4872,30 +4893,37 @@ exports[`A6-generated node-types fixture > xflow.trigger.kafka@1 snapshot 1`] = 
           "label": "Start Offset",
           "options": [
             {
+              "description": "Only records produced after the group first joins",
               "label": "Latest",
               "value": "latest",
             },
             {
+              "description": "From the oldest retained record",
               "label": "Earliest",
               "value": "earliest",
             },
             {
+              "description": "Alias of latest",
               "label": "Last",
               "value": "last",
             },
             {
+              "description": "Alias of latest",
               "label": "Newest",
               "value": "newest",
             },
             {
+              "description": "Alias of earliest",
               "label": "First",
               "value": "first",
             },
             {
+              "description": "Alias of earliest",
               "label": "Oldest",
               "value": "oldest",
             },
             {
+              "description": "Alias of earliest",
               "label": "Beginning",
               "value": "beginning",
             },
@@ -5578,10 +5606,12 @@ exports[`A6-generated node-types fixture > xflow.trigger.redis@1 snapshot 1`] = 
           "label": "Mode",
           "options": [
             {
+              "description": "Consume a Redis Stream through a consumer group",
               "label": "Stream",
               "value": "stream",
             },
             {
+              "description": "Subscribe to a Pub/Sub channel (one active replica)",
               "label": "Pub/Sub",
               "value": "pubsub",
             },
@@ -6307,10 +6337,12 @@ exports[`A6-generated node-types fixture > xflow.wait@1 snapshot 1`] = `
           "label": "Mode",
           "options": [
             {
+              "description": "Wait for one or more external signals",
               "label": "Signal",
               "value": "signal",
             },
             {
+              "description": "Wait for a fixed duration or until an absolute time",
               "label": "Timer",
               "value": "timer",
             },
