@@ -2,6 +2,7 @@ import {
   AimOutlined,
   ApartmentOutlined,
   AppstoreAddOutlined,
+  AppstoreOutlined,
   AuditOutlined,
   BarsOutlined,
   BgColorsOutlined,
@@ -21,6 +22,7 @@ import {
   EyeOutlined,
   FileAddOutlined,
   FileSearchOutlined,
+  ForkOutlined,
   InfoCircleOutlined,
   GlobalOutlined,
   ImportOutlined,
@@ -28,6 +30,7 @@ import {
   LinkOutlined,
   MergeCellsOutlined,
   MoonOutlined,
+  NotificationOutlined,
   PlayCircleOutlined,
   PlaySquareOutlined,
   QuestionCircleOutlined,
@@ -55,7 +58,7 @@ import {
   Select,
   Segmented,
   Space,
-  Switch,
+  Tabs,
   Tag,
   Tooltip,
   theme,
@@ -68,13 +71,32 @@ import type {
   ConnectionType,
   Connections,
   GroupDef,
+  NodeTypesResponse,
+  ParamIssue,
   RuntimeNodeSnapshot,
   RuntimeSnapshot,
   WorkflowDef,
   WorkflowNode
 } from "@xflow/core";
 import { declaredOutputPorts } from "@xflow/core";
+import type { Issue, Patch } from "@xflow/composer/core";
+import { Composer, type Registry } from "@xflow/composer/react";
 import { XFlowPreview, XFLOW_NODE_DRAG_MIME, type PreviewConnection } from "@xflow/preview";
+import {
+  createNodeFormRegistry,
+  danglingPorts,
+  externalIssuesByNode,
+  NodeFormCompiler,
+  nodeHasTemplate,
+  portsForNode,
+  reduceNodePatches,
+  schemaForNode,
+  withDynamicPortsFallback,
+  type DanglingEdge
+} from "./node-form";
+import type { NodeFormKind, NodeFormPort, NodeFormPorts, NodeFormSchema } from "./node-form/schema";
+// Composer form styles first so the editor's scoped overrides win on equal specificity.
+import "@xflow/composer/form/styles.css";
 import "./styles.css";
 
 export type XFlowEditorAppearance = "light" | "dark" | "system";
@@ -209,14 +231,50 @@ function isTextEntryTarget(target: EventTarget | null): boolean {
 }
 const rulerStepPx = 100;
 
+/**
+ * What `onSave` may resolve to besides the saved definition itself: the
+ * definition plus the server's ParamSpec findings for it (`param_issues` of
+ * POST/PUT /v1/workflows in warn mode). The editor shows each issue on its
+ * field (Doc C §1 rule 3) until the next save or a new `value`.
+ */
+export interface XFlowEditorSaveResult {
+  workflow: WorkflowDef;
+  paramIssues?: ParamIssue[];
+}
+
+/**
+ * A rejected `onSave` may carry the server's findings the same way: any
+ * thrown value with a `paramIssues: ParamIssue[]` property (e.g. the
+ * `XFlowApiError` of a 400 `workflow_param_invalid` in enforce mode) has
+ * them placed on their fields. The editor does not depend on @xflow/api, so
+ * this is duck-typed.
+ */
+export interface XFlowEditorSaveError {
+  message?: string;
+  paramIssues?: ParamIssue[];
+}
+
 export interface XFlowEditorProps {
   value: WorkflowDef;
   /** Optional host layout class; useful when the workbench lives below an app header. */
   className?: string;
   runtime?: RuntimeSnapshot;
   onChange?: (value: WorkflowDef) => void;
-  onSave?: (value: WorkflowDef) => Promise<WorkflowDef> | WorkflowDef;
+  /**
+   * Persists the draft. Resolve to the saved definition, or to
+   * `{ workflow, paramIssues }` (XFlowEditorSaveResult) to also report the
+   * server's param issues. Rejections may carry `paramIssues` too
+   * (XFlowEditorSaveError).
+   */
+  onSave?: (value: WorkflowDef) => Promise<WorkflowDef | XFlowEditorSaveResult> | WorkflowDef | XFlowEditorSaveResult;
   onRun?: (value: WorkflowDef) => Promise<RuntimeSnapshot> | RuntimeSnapshot;
+  /**
+   * GET /v1/node-types. Drives the Inspector's parameter form (Doc C) and the
+   * save/run blocking mode (`param_validation_mode`). Omit (or pass while it
+   * loads / after it fails) and every node gets the "no schema" form: common
+   * fields only, parameters edited on the JSON tab.
+   */
+  nodeTypes?: NodeTypesResponse;
   /** Preferred color mode. Omit to use the editor's local setting. */
   appearance?: XFlowEditorAppearance;
   /** Preferred workbench visual language. Omit to use the editor's local setting. */
@@ -542,11 +600,6 @@ const editorSelectClassNames = {
   root: "xflow-editor-select__root"
 };
 
-const editorSwitchClassNames = {
-  content: "xflow-editor-switch__content",
-  indicator: "xflow-editor-switch__indicator",
-  root: "xflow-editor-switch__root"
-};
 
 const editorTagClassNames = {
   content: "xflow-editor-runtime-tag__content",
@@ -631,13 +684,21 @@ function ThemeSettings({
   );
 }
 
+/** Node-library groups in display order; "其他" collects types with no presentation entry. */
+const nodeLibraryGroups = ["触发器", "流程控制", "动作与人工", "数据转换", "供应", "其他"] as const;
+type NodeLibraryGroup = (typeof nodeLibraryGroups)[number];
+type NodeTone = "blue" | "cyan" | "green" | "amber" | "violet";
+
+/** One node-library tile: what the type is (from the schema) plus how it looks. */
 interface NodeDescriptor {
   label: string;
   type: string;
-  group: "触发器" | "流程控制" | "动作与人工" | "数据转换" | "供应";
-  tone: "blue" | "cyan" | "green" | "amber" | "violet";
+  group: NodeLibraryGroup;
+  tone: NodeTone;
   icon: React.ReactNode;
   kind?: NonNullable<WorkflowNode["kind"]>;
+  description?: string;
+  ports?: NodeFormPorts;
 }
 
 interface EditorPanelProps {
@@ -665,13 +726,60 @@ interface RenameFeedback {
 }
 
 /**
- * An uncommitted, unparseable parameters-JSON draft. It is held by the editor
- * (keyed by node) rather than the Inspector, so it survives the Inspector
- * unmounting (drawers and tabs use destroyOnHidden) and can block save/run.
+ * An uncommitted parameters-JSON draft, held by the editor (keyed by node)
+ * rather than the Inspector, so it survives the Inspector unmounting (drawers
+ * and tabs use destroyOnHidden) and can block save/run.
+ * - `error` set: the text does not parse; never committed, blocks save/run
+ *   and makes the node form read-only.
+ * - `error` unset: parseable text waiting for the 300ms debounce or a blur
+ *   (Doc C §6.2); save, run, undo and form edits flush it first.
  */
 interface ParameterDraft {
   text: string;
-  error: string;
+  error?: string;
+}
+
+/** Debounce of a parseable parameters-JSON edit before it commits (Doc C §6.2). */
+const parameterDraftDebounceMs = 300;
+
+function parseParametersText(text: string): { value?: Record<string, unknown>; error?: string } {
+  try {
+    const parsed = text.trim() ? (JSON.parse(text) as unknown) : {};
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { error: "参数 JSON 必须是对象" };
+    return { value: parsed as Record<string, unknown> };
+  } catch {
+    return { error: "参数 JSON 格式错误" };
+  }
+}
+
+function isSaveResult(value: unknown): value is XFlowEditorSaveResult {
+  return Boolean(value) && typeof value === "object" && "workflow" in (value as object)
+    && typeof (value as { workflow?: unknown }).workflow === "object" && (value as { workflow?: unknown }).workflow !== null;
+}
+
+function paramIssuesOf(error: unknown): ParamIssue[] | undefined {
+  const issues = error && typeof error === "object" ? (error as XFlowEditorSaveError).paramIssues : undefined;
+  return Array.isArray(issues) ? issues : undefined;
+}
+
+type ParameterTab = "form" | "json";
+
+/** The node's schema for the form, with the dynamic-ports fallback applied. */
+function formSchemaForNode(nodeTypes: NodeTypesResponse | undefined, node: WorkflowNode | undefined): NodeFormSchema | null {
+  const schema = schemaForNode(nodeTypes, node);
+  return schema ? withDynamicPortsFallback(schema) : null;
+}
+
+/** Ports the canvas adds to a node on its own; they stay valid next to the schema's ports. */
+function canvasOutputPorts(node: WorkflowNode): string[] {
+  const declared = declaredOutputPorts(node);
+  return [...(declared.hasMain ? ["main"] : []), ...declared.ports];
+}
+
+/** Per-node issue counts of the node forms, for the save button and enforce blocking. */
+interface FormIssueSummary {
+  errors: number;
+  nodes: string[];
 }
 
 /**
@@ -701,7 +809,18 @@ interface ConnectionReference {
   legacyDependency?: boolean;
 }
 
-const nodeDescriptors: NodeDescriptor[] = [
+/**
+ * Offline node library, used only when the host passes no `nodeTypes` (it did
+ * not fetch GET /v1/node-types, or the fetch failed). With `nodeTypes` the
+ * library is derived from the server's schemas instead (Doc C §6.3), so a new
+ * builtin shows up without a frontend change. This list is kept, not deleted,
+ * because the editor must stay usable offline and in hosts that never call the
+ * API; it is also the presentation source (group, tone, icon) for these types.
+ * Custom types registered only on runners are in neither list until runners
+ * report their descriptors (Doc C §8 item 3); such nodes still load and edit as
+ * no-schema nodes (Doc C §2.1).
+ */
+const fallbackNodeDescriptors: NodeDescriptor[] = [
   { label: "Webhook", type: "xflow.trigger.webhook", group: "触发器", tone: "blue", icon: <LinkOutlined /> },
   { label: "Kafka", type: "xflow.trigger.kafka", group: "触发器", tone: "cyan", icon: <CloudServerOutlined /> },
   { label: "Cron", type: "xflow.trigger.cron", group: "触发器", tone: "amber", icon: <ClockCircleOutlined /> },
@@ -724,7 +843,95 @@ const nodeDescriptors: NodeDescriptor[] = [
   { label: "External Supply", type: "xflow.supply.external", group: "供应", tone: "cyan", icon: <DatabaseOutlined />, kind: "supply" },
   { label: "Static Supply", type: "xflow.supply.static", group: "供应", tone: "violet", icon: <DatabaseOutlined />, kind: "supply" }
 ];
-const supportedNodeTypes = new Set(nodeDescriptors.map((descriptor) => descriptor.type));
+
+type NodePresentation = Pick<NodeDescriptor, "group" | "tone" | "icon">;
+
+/**
+ * Look only (group, tone, icon), keyed by node type. Builtins that predate the
+ * schema-driven library but were missing from the offline list get an entry
+ * here so they land in their natural group. Anything else falls back to
+ * {@link fallbackPresentation}: presentation is cosmetic, never a gate.
+ */
+const nodePresentation: ReadonlyMap<string, NodePresentation> = new Map<string, NodePresentation>([
+  ...fallbackNodeDescriptors.map(({ type, group, tone, icon }): [string, NodePresentation] => [type, { group, tone, icon }]),
+  ["xflow.trigger.redis", { group: "触发器", tone: "green", icon: <DatabaseOutlined /> }],
+  ["xflow.map", { group: "流程控制", tone: "violet", icon: <ApartmentOutlined /> }],
+  ["xflow.split", { group: "流程控制", tone: "cyan", icon: <ForkOutlined /> }],
+  ["xflow.notification", { group: "动作与人工", tone: "amber", icon: <NotificationOutlined /> }],
+  ["xflow.browser.cdp", { group: "动作与人工", tone: "cyan", icon: <DesktopOutlined /> }],
+  ["xflow.transform.rename", { group: "数据转换", tone: "violet", icon: <CodeOutlined /> }],
+  ["xflow.transform.sort", { group: "数据转换", tone: "green", icon: <CodeOutlined /> }],
+  ["xflow.transform.limit", { group: "数据转换", tone: "amber", icon: <CodeOutlined /> }],
+  ["xflow.transform.aggregate", { group: "数据转换", tone: "blue", icon: <CodeOutlined /> }],
+  ["xflow.transform.remove_duplicates", { group: "数据转换", tone: "cyan", icon: <CodeOutlined /> }]
+]);
+/** Tile order inside a group: presentation-map order, then unknown types by label. */
+const nodePresentationOrder = new Map([...nodePresentation.keys()].map((type, index) => [type, index]));
+
+/** Presentation for a type with no entry: the group follows the schema's kind. */
+function fallbackPresentation(kind: NodeFormKind): NodePresentation {
+  if (kind === "trigger") return { group: "触发器", tone: "blue", icon: <AppstoreOutlined /> };
+  if (kind === "supply") return { group: "供应", tone: "violet", icon: <AppstoreOutlined /> };
+  return { group: "其他", tone: "blue", icon: <AppstoreOutlined /> };
+}
+
+/**
+ * Supply declarations are resolved by the engine's supply subsystem, not the
+ * handler registry, so GET /v1/node-types never lists them. They stay in the
+ * library next to the schema-derived types.
+ */
+const engineDeclaredNodeDescriptors = fallbackNodeDescriptors.filter((descriptor) => descriptor.kind === "supply");
+
+const derivedNodeDescriptors = new WeakMap<NodeTypesResponse, NodeDescriptor[]>();
+
+/**
+ * The node library for a `/v1/node-types` response (Doc C §6.3): one tile per
+ * type (its latest version, which is what a node without `version` resolves
+ * to), labelled by `display_name`, with look from {@link nodePresentation}.
+ * Without a response it is the offline {@link fallbackNodeDescriptors}.
+ */
+function nodeLibraryDescriptors(nodeTypes: NodeTypesResponse | undefined): NodeDescriptor[] {
+  if (!nodeTypes || !Array.isArray(nodeTypes.node_types)) return fallbackNodeDescriptors;
+  const cached = derivedNodeDescriptors.get(nodeTypes);
+  if (cached) return cached;
+
+  const latest = new Map<string, NodeFormSchema>();
+  for (const schema of nodeTypes.node_types) {
+    if (!schema || typeof schema.node_type !== "string" || !schema.node_type) continue;
+    const current = latest.get(schema.node_type);
+    if (!current || (schema.node_version ?? 0) > (current.node_version ?? 0)) latest.set(schema.node_type, schema);
+  }
+  const derived: NodeDescriptor[] = [...latest.values()].map((schema) => {
+    const kind: NodeFormKind = schema.kind === "trigger" || schema.kind === "supply" ? schema.kind : "action";
+    const presentation = nodePresentation.get(schema.node_type) ?? fallbackPresentation(kind);
+    return {
+      ...presentation,
+      label: schema.display_name?.trim() || schema.node_type,
+      type: schema.node_type,
+      kind,
+      ...(schema.description ? { description: schema.description } : {}),
+      ...(schema.ports ? { ports: schema.ports } : {})
+    };
+  });
+  const descriptors = [...derived, ...engineDeclaredNodeDescriptors.filter((descriptor) => !latest.has(descriptor.type))].sort(
+    (left, right) =>
+      (nodePresentationOrder.get(left.type) ?? Number.MAX_SAFE_INTEGER) - (nodePresentationOrder.get(right.type) ?? Number.MAX_SAFE_INTEGER)
+      || left.label.localeCompare(right.label)
+  );
+  derivedNodeDescriptors.set(nodeTypes, descriptors);
+  return descriptors;
+}
+
+/** One-line port summary for a library tile's tooltip, from the schema's ports. */
+function describePorts(ports: NodeFormPorts | undefined): string | undefined {
+  if (!ports) return undefined;
+  const names = (list: NodeFormPort[] | undefined) => (list ?? []).map((port) => port.name).join(", ");
+  const parts = [
+    ports.inputs?.length ? `输入 ${names(ports.inputs)}` : "",
+    ports.dynamic_outputs ? "输出 动态" : ports.outputs?.length ? `输出 ${names(ports.outputs)}` : ""
+  ].filter(Boolean);
+  return parts.length ? parts.join(" · ") : undefined;
+}
 
 function nodeKey(node: WorkflowNode, index: number): string {
   return node.id ?? node.name ?? `node-${index}`;
@@ -977,15 +1184,12 @@ function renameNodeInWorkflow(workflow: WorkflowDef, selectedIndex: number, requ
   };
 }
 
-function groupDescriptors(group: NodeDescriptor["group"]): NodeDescriptor[] {
-  return nodeDescriptors.filter((descriptor) => descriptor.group === group);
-}
-
 function groupIcon(group: NodeDescriptor["group"]): React.ReactNode {
   if (group === "触发器") return <ThunderboltOutlined />;
   if (group === "流程控制") return <BranchesOutlined />;
   if (group === "数据转换") return <CodeOutlined />;
   if (group === "供应") return <DatabaseOutlined />;
+  if (group === "其他") return <AppstoreOutlined />;
   return <AuditOutlined />;
 }
 
@@ -1095,8 +1299,12 @@ interface WorkflowDiagnostic {
 function validateWorkflow(
   workflow: WorkflowDef,
   runtime?: RuntimeSnapshot,
-  operationError?: string
+  operationError?: string,
+  nodeTypes?: NodeTypesResponse
 ): WorkflowDiagnostic[] {
+  // Doc C §4.3: edges left behind by a removed dynamic port are reported, never deleted.
+  const dangling = new Set(danglingPorts(workflow, nodeTypes, canvasOutputPorts).map((edge: DanglingEdge) => `${edge.source}\u0000${edge.port}`));
+  const registeredTypes = new Set((nodeTypes?.node_types ?? []).map((schema) => schema.node_type));
   const nodes = workflow.nodes ?? [];
   const names = nodes.map((node, index) => nodeName(node, index));
   const knownNames = new Set(names);
@@ -1121,14 +1329,19 @@ function validateWorkflow(
       message: `节点名称重复: ${Array.from(new Set(duplicateNames)).join(", ")}`
     });
   }
+  // A type outside the library may still be real (registered only on a
+  // runner, Doc C §2.1): the node stays editable as a no-schema node, so this
+  // is a warning, not an error.
+  const libraryTypes = new Set(nodeLibraryDescriptors(nodeTypes).map((descriptor) => descriptor.type));
   const unsupportedTypes = nodes
-    .filter((node) => node.type && !supportedNodeTypes.has(node.type))
-    .map((node, index) => `${nodeName(node, index)}:${node.type}`);
+    .map((node, index) => ({ node, index }))
+    .filter(({ node }) => node.type && !libraryTypes.has(node.type) && !registeredTypes.has(node.type))
+    .map(({ node, index }) => `${nodeName(node, index)}:${node.type}`);
   if (unsupportedTypes.length > 0) {
     diagnostics.push({
-      status: "error",
+      status: "warn",
       area: "nodes",
-      message: `节点类型不在 DSL 节点库中: ${unsupportedTypes.join(", ")}`
+      message: `${nodeTypes ? "节点类型未在 server 注册" : "节点类型不在离线节点库中"}，参数按 JSON 编辑: ${unsupportedTypes.join(", ")}`
     });
   }
   if (workflow.runner_selector?.mode === "required" && Object.keys(workflow.runner_selector.match_labels ?? {}).length === 0) {
@@ -1192,6 +1405,10 @@ function validateWorkflow(
       }
 
       dataEdgeCount += targets.length;
+      if (dangling.has(`${sourceName}\u0000${portName}`)) {
+        diagnostics.push({ status: "error", area: "edges", message: `${sourceName}.${portName} 端口已不存在，连线悬空；请删除或改接连线` });
+        continue;
+      }
       if (sourceNode && isSupplyNode(sourceNode)) {
         diagnostics.push({ status: "error", area: "edges", message: `supply 节点不能参与数据连接: ${sourceName}.${portName}` });
       } else if (sourceNode && !supportedOutputPorts(sourceNode, workflow).includes(portName)) {
@@ -1460,6 +1677,14 @@ function duplicateNodeInWorkflow(workflow: WorkflowDef, source: WorkflowNode, so
   };
 }
 
+/**
+ * A new node carries identity and placement only: name, type, kind, position
+ * and the tile label. It deliberately has no `parameters` (not even `{}`) and
+ * no `version`: Doc C §5.2 keeps schema defaults as display hints, never
+ * written values, so an untouched node is exactly what the handler's own
+ * fallbacks run against, required parameters without a default stay absent
+ * (the form reports them), and an omitted version resolves to the latest.
+ */
 function createNodeFromDescriptor(
   workflow: WorkflowDef,
   descriptor: NodeDescriptor,
@@ -1501,11 +1726,25 @@ function serializeJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
+function nodeTileTooltip(descriptor: NodeDescriptor): React.ReactNode {
+  const ports = describePorts(descriptor.ports);
+  if (!ports && !descriptor.description) return descriptor.type;
+  return (
+    <span className="xflow-editor-node-tile__tooltip">
+      <span>{descriptor.type}</span>
+      {ports ? <span>{ports}</span> : null}
+      {descriptor.description ? <span>{descriptor.description}</span> : null}
+    </span>
+  );
+}
+
 function NodeLibrary({
+  descriptors: libraryDescriptors,
   onAddNode,
   autoFocusSearch = false,
   searchInputRef
 }: {
+  descriptors: NodeDescriptor[];
   onAddNode: (descriptor: NodeDescriptor) => void;
   autoFocusSearch?: boolean;
   searchInputRef?: React.Ref<InputRef>;
@@ -1524,15 +1763,17 @@ function NodeLibrary({
       return next;
     });
   }, []);
+  const matchesQuery = React.useCallback(
+    (descriptor: NodeDescriptor) =>
+      !normalizedQuery ||
+      descriptor.label.toLowerCase().includes(normalizedQuery) ||
+      descriptor.type.toLowerCase().includes(normalizedQuery),
+    [normalizedQuery]
+  );
   const descriptorsForGroup = React.useCallback(
     (group: NodeDescriptor["group"]) =>
-      groupDescriptors(group).filter(
-        (descriptor) =>
-          !normalizedQuery ||
-          descriptor.label.toLowerCase().includes(normalizedQuery) ||
-          descriptor.type.toLowerCase().includes(normalizedQuery)
-      ),
-    [normalizedQuery]
+      libraryDescriptors.filter((descriptor) => descriptor.group === group && matchesQuery(descriptor)),
+    [libraryDescriptors, matchesQuery]
   );
 
   return (
@@ -1569,10 +1810,12 @@ function NodeLibrary({
           onChange={(event) => setQuery(event.target.value)}
         />
       ) : null}
-      {(["触发器", "流程控制", "动作与人工", "数据转换", "供应"] as const).map((group) => {
+      {nodeLibraryGroups.map((group) => {
         const descriptors = descriptorsForGroup(group);
         const collapsed = !normalizedQuery && collapsedGroups.has(group);
-        if (normalizedQuery && descriptors.length === 0) return null;
+        // An empty group is hidden: always while searching, and for "其他",
+        // which only exists to catch types without a presentation entry.
+        if (descriptors.length === 0 && (normalizedQuery || group === "其他")) return null;
 
         return (
           <div className="xflow-editor-node-group" key={group}>
@@ -1594,10 +1837,11 @@ function NodeLibrary({
             {collapsed ? null : (
               <div className="xflow-editor-node-list">
                 {descriptors.map((descriptor) => (
-                  <Tooltip classNames={editorTooltipClassNames} key={descriptor.type} title={descriptor.type}>
+                  <Tooltip classNames={editorTooltipClassNames} key={descriptor.type} title={nodeTileTooltip(descriptor)}>
                     <button
                       aria-label={descriptor.label}
                       className="xflow-editor-node-tile"
+                      data-node-type={descriptor.type}
                       data-tone={descriptor.tone}
                       draggable
                       type="button"
@@ -1623,7 +1867,7 @@ function NodeLibrary({
           </div>
         );
       })}
-      {normalizedQuery && nodeDescriptors.every((descriptor) => !descriptor.label.toLowerCase().includes(normalizedQuery) && !descriptor.type.toLowerCase().includes(normalizedQuery)) ? (
+      {normalizedQuery && !libraryDescriptors.some(matchesQuery) ? (
         <p className="xflow-editor-empty">没有匹配节点。</p>
       ) : null}
     </EditorPanel>
@@ -1884,58 +2128,164 @@ function RunPanel({
   );
 }
 
+/** Shared, stable node-form machinery the editor creates once and hands to the Inspector. */
+interface NodeFormHost {
+  registry: Registry;
+  compiler: NodeFormCompiler;
+  /** Written by the mounted Inspector; read by the registry's NodeNameInput. */
+  renameRef: React.MutableRefObject<((requestedName: string) => void) | undefined>;
+}
+
+function NodeParametersForm({
+  workflow,
+  node,
+  nodeKeyValue,
+  nodeTypes,
+  host,
+  externalIssues,
+  readOnly,
+  invalidDraft,
+  onApplyPatches
+}: {
+  workflow: WorkflowDef;
+  node: WorkflowNode;
+  nodeKeyValue: string;
+  nodeTypes?: NodeTypesResponse;
+  host: NodeFormHost;
+  externalIssues?: Record<string, Issue[]>;
+  readOnly: boolean;
+  invalidDraft: boolean;
+  onApplyPatches?: (key: string, patches: Patch[]) => void;
+}): React.ReactElement {
+  const schema = formSchemaForNode(nodeTypes, node);
+  const hasTemplate = nodeHasTemplate(workflow, node);
+  // Memoised per schema + flags inside the compiler: typing never recompiles.
+  const spec = host.compiler.spec(schema, { hasTemplate, parameters: node.parameters, schemasLoaded: Boolean(nodeTypes) });
+  const ports = portsForNode(schema, node);
+  const portsKey = JSON.stringify(ports);
+  const credentialsKey = Object.keys(workflow.credentials ?? {}).join("\u0000");
+  const context = React.useMemo(
+    () => ({
+      ports: JSON.parse(portsKey) as unknown,
+      credentials: credentialsKey ? credentialsKey.split("\u0000") : []
+    }),
+    [credentialsKey, portsKey]
+  );
+  const handleChange = React.useCallback(
+    (patches: Patch[]) => onApplyPatches?.(nodeKeyValue, patches),
+    [nodeKeyValue, onApplyPatches]
+  );
+
+  return (
+    <div className="xflow-editor-node-form" data-node-form-schema={schema ? `${schema.node_type}@${schema.node_version}` : "none"}>
+      {!nodeTypes ? (
+        <p className="xflow-editor-node-form__notice" role="status">
+          <InfoCircleOutlined />
+          节点类型 schema 未加载：参数请在 JSON 页签编辑，通用字段仍可在此修改。
+        </p>
+      ) : null}
+      {invalidDraft ? (
+        <p className="xflow-editor-node-form__notice xflow-editor-node-form__notice--error" role="status">
+          <WarningOutlined />
+          参数 JSON 未通过解析，表单暂为只读；请在 JSON 页签修正。
+        </p>
+      ) : null}
+      <Composer
+        // A node switch remounts the form, so local drafts never cross nodes.
+        key={nodeKeyValue}
+        context={context}
+        externalIssues={externalIssues}
+        readOnly={readOnly}
+        registry={host.registry}
+        spec={spec}
+        value={node}
+        onChange={handleChange}
+      />
+    </div>
+  );
+}
+
 function Inspector({
   workflow,
   selectedNode,
   selectedIndex,
   runtime,
+  editable = true,
+  nodeTypes,
+  formHost,
+  externalIssues,
+  parameterTab,
+  revealNonce,
   onChangeWith,
+  onApplyNodePatches,
   onDeleteNode,
   onNodeRenamed,
   parameterDrafts,
-  onParameterDraft
+  onParameterText,
+  onParameterCommit,
+  onParameterTabChange
 }: {
   workflow: WorkflowDef;
   selectedNode?: WorkflowNode;
   selectedIndex: number;
   runtime?: RuntimeSnapshot;
+  editable?: boolean;
+  nodeTypes?: NodeTypesResponse;
+  formHost: NodeFormHost;
+  externalIssues?: Record<string, Issue[]>;
+  parameterTab: ParameterTab;
+  /** Bumped by the editor to bring the configuration view to the front. */
+  revealNonce?: number;
   onChangeWith?: (update: WorkflowUpdater) => void;
+  onApplyNodePatches?: (key: string, patches: Patch[]) => void;
   onDeleteNode?: () => void;
   onNodeRenamed?: (previousKey: string, nextKey: string) => void;
   parameterDrafts?: Record<string, ParameterDraft>;
-  onParameterDraft?: (key: string, draft?: ParameterDraft) => void;
+  /** Every keystroke of the parameters JSON; the editor parses, drafts and debounces. */
+  onParameterText?: (key: string, text: string) => void;
+  /** Blur / leaving the JSON tab: commit a parseable draft now. */
+  onParameterCommit?: (key: string) => void;
+  onParameterTabChange?: (tab: ParameterTab) => void;
 }): React.ReactElement {
   const [activeTab, setActiveTab] = React.useState<"config" | "connections" | "run">("config");
-  const [nodeNameText, setNodeNameText] = React.useState("");
   const [renameFeedback, setRenameFeedback] = React.useState<RenameFeedback>();
   const [parametersText, setParametersText] = React.useState("{}");
-  const [parametersError, setParametersError] = React.useState<string>();
-  const [nodeRunnerSelectorText, setNodeRunnerSelectorText] = React.useState("{}");
-  const [nodeRunnerSelectorError, setNodeRunnerSelectorError] = React.useState<string>();
   const [workflowJsonText, setWorkflowJsonText] = React.useState<Record<string, string>>({});
   const [workflowJsonErrors, setWorkflowJsonErrors] = React.useState<Record<string, string | undefined>>({});
   const selectedNodeIdentity = selectedNode ? nodeKey(selectedNode, selectedIndex) : undefined;
   const activeRenameFeedback =
     renameFeedback && renameFeedback.nodeKey === selectedNodeIdentity ? renameFeedback : undefined;
-  // Read through a ref so a draft edit does not re-run the resync effect below
-  // (which also resets the rename field) on every keystroke.
+  const selectedDraft = selectedNodeIdentity ? parameterDrafts?.[selectedNodeIdentity] : undefined;
+  const invalidDraft = Boolean(selectedDraft?.error);
+  // Read through refs so a draft edit does not re-run the resync effect below
+  // on every keystroke.
   const parameterDraftsRef = React.useRef(parameterDrafts);
   parameterDraftsRef.current = parameterDrafts;
+  const parametersTextRef = React.useRef(parametersText);
+  parametersTextRef.current = parametersText;
 
   React.useEffect(() => {
-    setNodeNameText(selectedNode ? nodeName(selectedNode, selectedIndex) : "");
+    if (revealNonce) setActiveTab("config");
+  }, [revealNonce]);
+
+  React.useEffect(() => {
     setRenameFeedback((current) =>
       current?.nodeKey === selectedNodeIdentity ? current : undefined
     );
-    // An unparseable draft is never overwritten by a re-serialization of the
-    // committed parameters -- not by an undo, not by another writer, and not
-    // by the Inspector remounting.
+    // A draft (unparseable, or parseable but not yet committed) is never
+    // overwritten by a re-serialization of the committed parameters -- not by
+    // an undo, not by another writer, and not by the Inspector remounting.
     const draft = selectedNodeIdentity ? parameterDraftsRef.current?.[selectedNodeIdentity] : undefined;
-    setParametersText(draft ? draft.text : serializeJson(selectedNode?.parameters ?? {}));
-    setParametersError(draft?.error);
-    setNodeRunnerSelectorText(serializeJson(selectedNode?.runner_selector ?? {}));
-    setNodeRunnerSelectorError(undefined);
-  }, [selectedIndex, selectedNodeIdentity, selectedNode?.name, selectedNode?.id, selectedNode?.parameters, selectedNode?.runner_selector]);
+    if (draft) {
+      setParametersText(draft.text);
+      return;
+    }
+    // The user's own text that just committed stays as typed (no reformat,
+    // no caret jump) as long as it still means the committed parameters.
+    const committed = serializeJson(selectedNode?.parameters ?? {});
+    const current = parseParametersText(parametersTextRef.current);
+    setParametersText(current.value && serializeJson(current.value) === committed ? parametersTextRef.current : committed);
+  }, [selectedIndex, selectedNodeIdentity, selectedNode?.name, selectedNode?.id, selectedNode?.parameters]);
 
   React.useEffect(() => {
     setWorkflowJsonText({
@@ -1983,11 +2333,13 @@ function Inspector({
     },
     [onChangeWith, selectedNodeIdentity]
   );
+  // Called by the form's NodeNameInput (Doc C §4.2): `/name` is never a patch.
   const commitNodeRename = React.useCallback((requestedName: string) => {
     if (!selectedNodeIdentity) return;
     const previousKey = selectedNodeIdentity;
     // Held in an object: TypeScript does not see assignments made inside the
     // updater callback, so a plain `let` would narrow to `undefined` here.
+    // Relies on commitWorkflowWith running the updater synchronously (Doc C §6.1).
     const outcome: { result?: RenameResult; nextKey: string } = { nextKey: previousKey };
     onChangeWith?.((latest) => {
       const index = (latest.nodes ?? []).findIndex((node, nodeIndex) => nodeKey(node, nodeIndex) === previousKey);
@@ -2019,6 +2371,15 @@ function Inspector({
     // under its new name or the Inspector loses it.
     onNodeRenamed?.(previousKey, nextKey);
   }, [onChangeWith, onNodeRenamed, selectedNodeIdentity]);
+  // The registry is created once per editor; its NodeNameInput calls through
+  // this ref, so it always reaches the mounted Inspector's current node.
+  const renameRef = formHost.renameRef;
+  React.useLayoutEffect(() => {
+    renameRef.current = commitNodeRename;
+    return () => {
+      if (renameRef.current === commitNodeRename) renameRef.current = undefined;
+    };
+  }, [commitNodeRename, renameRef]);
   const addSelectedConnection = React.useCallback(
     (targetName: string, sourcePort: string, targetInput: string) => {
       const key = selectedNodeIdentity;
@@ -2040,46 +2401,139 @@ function Inspector({
   const updateParameters = React.useCallback(
     (nextText: string) => {
       setParametersText(nextText);
-      const key = selectedNodeIdentity;
-      const reject = (error: string) => {
-        setParametersError(error);
-        if (key) onParameterDraft?.(key, { text: nextText, error });
-      };
-      try {
-        const nextParameters = nextText.trim() ? (JSON.parse(nextText) as unknown) : {};
-        if (!nextParameters || typeof nextParameters !== "object" || Array.isArray(nextParameters)) {
-          reject("参数 JSON 必须是对象");
-          return;
-        }
-        setParametersError(undefined);
-        if (key) onParameterDraft?.(key, undefined);
-        updateSelectedNode({ parameters: nextParameters as Record<string, unknown> });
-      } catch {
-        reject("参数 JSON 格式错误");
-      }
+      if (selectedNodeIdentity) onParameterText?.(selectedNodeIdentity, nextText);
     },
-    [onParameterDraft, selectedNodeIdentity, updateSelectedNode]
+    [onParameterText, selectedNodeIdentity]
   );
-  const updateNodeRunnerSelector = React.useCallback(
-    (nextText: string) => {
-      setNodeRunnerSelectorText(nextText);
-      try {
-        const nextRunnerSelector = nextText.trim() ? (JSON.parse(nextText) as unknown) : {};
-        if (!nextRunnerSelector || typeof nextRunnerSelector !== "object" || Array.isArray(nextRunnerSelector)) {
-          setNodeRunnerSelectorError("Runner JSON 必须是对象");
-          return;
-        }
-        setNodeRunnerSelectorError(undefined);
-        updateSelectedNode({ runner_selector: nextRunnerSelector as WorkflowNode["runner_selector"] });
-      } catch {
-        setNodeRunnerSelectorError("Runner JSON 格式错误");
-      }
+  const commitParameters = React.useCallback(() => {
+    if (selectedNodeIdentity) onParameterCommit?.(selectedNodeIdentity);
+  }, [onParameterCommit, selectedNodeIdentity]);
+  const changeParameterTab = React.useCallback(
+    (tab: string) => {
+      // Leaving the JSON tab unmounts the textarea without a blur: commit first
+      // so a pending debounced draft never lands on top of form edits.
+      commitParameters();
+      onParameterTabChange?.(tab === "json" ? "json" : "form");
     },
-    [updateSelectedNode]
+    [commitParameters, onParameterTabChange]
   );
-
   const configPanel = selectedNode ? (
+    <div className="xflow-editor-config">
     <div className="xflow-editor-form">
+      <div className="xflow-editor-form-section">
+        <div className="xflow-editor-form-section__title xflow-editor-form-section__title--spaced">
+          <span className="xflow-editor-block-title">
+            <InfoCircleOutlined />
+            基础信息
+          </span>
+        </div>
+        {/* Doc C §4.2: /type stays on the editor's own control; name, notes,
+            disabled, on_error, timeout, retry and runner_selector are owned by
+            the node form below (one writer per path). */}
+        <label className="xflow-editor-form-row xflow-editor-form-row--node">
+          <span>类型</span>
+          <Input
+            aria-label="类型"
+            className="xflow-editor-field"
+            classNames={editorInputClassNames}
+            value={selectedNode.type ?? ""}
+            onChange={(event) => updateSelectedNode({ type: event.target.value })}
+          />
+        </label>
+        <label className="xflow-editor-form-row xflow-editor-form-row--node">
+          <span>模板</span>
+          <Input aria-label="模板" className="xflow-editor-field"
+            classNames={editorInputClassNames} readOnly value={selectedNode.template ?? "无"} />
+        </label>
+      </div>
+      {selectedNode.type?.includes("switch") ? (
+        <div className="xflow-editor-form-section">
+          <div className="xflow-editor-form-section__title xflow-editor-form-section__title--spaced">
+            <span className="xflow-editor-block-title">
+              <BranchesOutlined />
+              路由配置
+            </span>
+          </div>
+          <label className="xflow-editor-form-row xflow-editor-form-row--node">
+            <span>输出端口</span>
+            <Input
+              aria-label="输出端口"
+              className="xflow-editor-field"
+            classNames={editorInputClassNames}
+              readOnly
+              value={selectedPorts(workflow, selectedNode).join(", ") || "未配置"}
+            />
+          </label>
+          <p className="xflow-editor-empty">路由条件在下方节点配置中编辑；这里仅展示当前数据输出端口。</p>
+        </div>
+      ) : null}
+      </div>
+      <section className="xflow-editor-node-params" aria-label="节点配置">
+        <div className="xflow-editor-form-section__title xflow-editor-form-section__title--spaced">
+          <span className="xflow-editor-block-title">
+            <SettingOutlined />
+            节点配置
+          </span>
+        </div>
+        {activeRenameFeedback ? (
+          <span className={activeRenameFeedback.kind === "error" ? "xflow-editor-error" : "xflow-editor-warning"} role="status">
+            {activeRenameFeedback.message}
+          </span>
+        ) : null}
+        <Tabs
+          activeKey={parameterTab}
+          classNames={{
+            header: "xflow-editor-param-tabs__header",
+            item: "xflow-editor-param-tabs__item",
+            content: "xflow-editor-param-tabs__content"
+          }}
+          destroyOnHidden
+          items={[
+            {
+              key: "form",
+              label: "表单",
+              children: (
+                <NodeParametersForm
+                  externalIssues={externalIssues}
+                  host={formHost}
+                  invalidDraft={invalidDraft}
+                  node={selectedNode}
+                  nodeKeyValue={selectedNodeIdentity ?? ""}
+                  nodeTypes={nodeTypes}
+                  readOnly={!editable || invalidDraft}
+                  workflow={workflow}
+                  onApplyPatches={onApplyNodePatches}
+                />
+              )
+            },
+            {
+              key: "json",
+              label: "JSON",
+              children: (
+                <div className="xflow-editor-json-field">
+                  <Input.TextArea
+                    aria-label="参数 JSON"
+                    autoSize={{ minRows: 4, maxRows: 16 }}
+                    className="xflow-editor-textarea xflow-editor-textarea--code"
+                    classNames={editorTextAreaClassNames}
+                    readOnly={!editable}
+                    status={selectedDraft?.error ? "error" : undefined}
+                    value={parametersText}
+                    onBlur={commitParameters}
+                    onChange={(event) => updateParameters(event.target.value)}
+                  />
+                  {selectedDraft?.error ? <span>{selectedDraft.error}</span> : null}
+                </div>
+              )
+            }
+          ]}
+          rootClassName="xflow-editor-param-tabs"
+          size="small"
+          onChange={changeParameterTab}
+        />
+      </section>
+      {/* Workflow-level fields after the selected node: the node is what the user just picked. */}
+      <div className="xflow-editor-form">
       <div className="xflow-editor-form-section">
         <div className="xflow-editor-form-section__title">
           <span className="xflow-editor-block-title">
@@ -2208,122 +2662,7 @@ function Inspector({
           </div>
         </label>
       </div>
-      <div className="xflow-editor-form-section">
-        <div className="xflow-editor-form-section__title xflow-editor-form-section__title--spaced">
-          <span className="xflow-editor-block-title">
-            <InfoCircleOutlined />
-            基础信息
-          </span>
-        </div>
-        <label className="xflow-editor-form-row xflow-editor-form-row--node">
-          <span>名称</span>
-          <Input
-            aria-label="节点名称"
-            className="xflow-editor-field"
-            classNames={editorInputClassNames}
-            status={activeRenameFeedback?.kind === "error" ? "error" : undefined}
-            value={nodeNameText}
-            onBlur={() => commitNodeRename(nodeNameText)}
-            onChange={(event) => {
-              setNodeNameText(event.target.value);
-              setRenameFeedback(undefined);
-            }}
-            onPressEnter={(event) => event.currentTarget.blur()}
-          />
-          {activeRenameFeedback ? (
-            <span className={activeRenameFeedback.kind === "error" ? "xflow-editor-error" : "xflow-editor-warning"} role="status">
-              {activeRenameFeedback.message}
-            </span>
-          ) : null}
-        </label>
-        <label className="xflow-editor-form-row xflow-editor-form-row--node">
-          <span>类型</span>
-          <Input
-            aria-label="类型"
-            className="xflow-editor-field"
-            classNames={editorInputClassNames}
-            value={selectedNode.type ?? ""}
-            onChange={(event) => updateSelectedNode({ type: event.target.value })}
-          />
-        </label>
-        <label className="xflow-editor-form-row xflow-editor-form-row--node">
-          <span>模板</span>
-          <Input aria-label="模板" className="xflow-editor-field"
-            classNames={editorInputClassNames} readOnly value={selectedNode.template ?? "无"} />
-        </label>
-        <label className="xflow-editor-form-row xflow-editor-form-row--node">
-          <span>Runner</span>
-          <div className="xflow-editor-json-field">
-            <Input.TextArea
-              aria-label="节点 Runner 选择 JSON"
-              autoSize={{ minRows: 2, maxRows: 5 }}
-              className="xflow-editor-textarea xflow-editor-textarea--code"
-              classNames={editorTextAreaClassNames}
-              status={nodeRunnerSelectorError ? "error" : undefined}
-              value={nodeRunnerSelectorText}
-              onChange={(event) => updateNodeRunnerSelector(event.target.value)}
-            />
-            {nodeRunnerSelectorError ? <span>{nodeRunnerSelectorError}</span> : null}
-          </div>
-        </label>
-        <label className="xflow-editor-form-row xflow-editor-form-row--node">
-          <span>禁用</span>
-          <Switch
-            aria-label="禁用"
-            className="xflow-editor-switch"
-            classNames={editorSwitchClassNames}
-            checked={selectedNode.disabled ?? false}
-            onChange={(checked) => updateSelectedNode({ disabled: checked })}
-          />
-        </label>
-        <label className="xflow-editor-form-row xflow-editor-form-row--node">
-          <span>备注</span>
-          <Input.TextArea
-            aria-label="备注"
-            autoSize={{ minRows: 3, maxRows: 5 }}
-            className="xflow-editor-textarea"
-            classNames={editorTextAreaClassNames}
-            value={selectedNode.notes ?? ""}
-            onChange={(event) => updateSelectedNode({ notes: event.target.value })}
-          />
-        </label>
-        <label className="xflow-editor-form-row xflow-editor-form-row--node">
-          <span>参数</span>
-          <div className="xflow-editor-json-field">
-            <Input.TextArea
-              aria-label="参数 JSON"
-              autoSize={{ minRows: 3, maxRows: 6 }}
-              className="xflow-editor-textarea xflow-editor-textarea--code"
-              classNames={editorTextAreaClassNames}
-              status={parametersError ? "error" : undefined}
-              value={parametersText}
-              onChange={(event) => updateParameters(event.target.value)}
-            />
-            {parametersError ? <span>{parametersError}</span> : null}
-          </div>
-        </label>
       </div>
-      {selectedNode.type?.includes("switch") ? (
-        <div className="xflow-editor-form-section">
-          <div className="xflow-editor-form-section__title xflow-editor-form-section__title--spaced">
-            <span className="xflow-editor-block-title">
-              <BranchesOutlined />
-              路由配置
-            </span>
-          </div>
-          <label className="xflow-editor-form-row xflow-editor-form-row--node">
-            <span>输出端口</span>
-            <Input
-              aria-label="输出端口"
-              className="xflow-editor-field"
-            classNames={editorInputClassNames}
-              readOnly
-              value={selectedPorts(workflow, selectedNode).join(", ") || "未配置"}
-            />
-          </label>
-          <p className="xflow-editor-empty">路由条件由参数 JSON 配置；这里仅展示当前数据输出端口。</p>
-        </div>
-      ) : null}
     </div>
   ) : (
     <p className="xflow-editor-empty xflow-editor-inspector-empty">选择节点后编辑配置。</p>
@@ -2454,17 +2793,24 @@ function UnavailableControl({
 function Diagnostics({
   workflow,
   runtime,
+  nodeTypes,
   operationError,
+  blockedDraftNodes,
   collapsed,
   onToggle,
-  onSelectNode
+  onSelectNode,
+  onRevealJson
 }: {
   workflow: WorkflowDef;
   runtime?: RuntimeSnapshot;
+  nodeTypes?: NodeTypesResponse;
   operationError?: string;
+  /** Nodes whose unparseable parameters JSON blocked the last save/run. */
+  blockedDraftNodes?: string[];
   collapsed: boolean;
   onToggle: () => void;
   onSelectNode?: (nodeName: string) => void;
+  onRevealJson?: (nodeName: string) => void;
 }): React.ReactElement {
   const nodes = workflow.nodes ?? [];
   const connectionsCount = Object.values(workflow.connections ?? {}).reduce(
@@ -2475,7 +2821,10 @@ function Diagnostics({
   const runningNode = runtimeNodes.find(([, snapshot]) => snapshot.status === "running")?.[0];
   const failedCount = runtimeNodes.filter(([, snapshot]) => snapshot.status === "failed").length;
   const isWaitingForDefinition = nodes.length === 0 && !operationError;
-  const diagnostics = isWaitingForDefinition ? [] : validateWorkflow(workflow, runtime, operationError);
+  const diagnostics = React.useMemo(
+    () => (isWaitingForDefinition ? [] : validateWorkflow(workflow, runtime, operationError, nodeTypes)),
+    [isWaitingForDefinition, nodeTypes, operationError, runtime, workflow]
+  );
   const errorCount = diagnostics.filter((item) => item.status === "error").length;
   const warningCount = diagnostics.filter((item) => item.status === "warn").length;
   const workflowValid = !isWaitingForDefinition && errorCount === 0;
@@ -2566,7 +2915,18 @@ function Diagnostics({
                     <span className="!min-w-0">{item.area}</span>
                     <span>
                       {item.message}
-                      {item.nodeName && nodes.some((node, index) => nodeName(node, index) === item.nodeName) ? (
+                      {item.area === "operation" && blockedDraftNodes?.length ? (
+                        blockedDraftNodes.map((blockedName) => (
+                          <button
+                            className="xflow-editor-diagnostics-locate"
+                            key={blockedName}
+                            type="button"
+                            onClick={() => onRevealJson?.(blockedName)}
+                          >
+                            修正 {blockedName} 的参数 JSON
+                          </button>
+                        ))
+                      ) : item.nodeName && nodes.some((node, index) => nodeName(node, index) === item.nodeName) ? (
                         <button
                           className="xflow-editor-diagnostics-locate"
                           type="button"
@@ -2675,6 +3035,7 @@ export function XFlowEditor({
   onChange,
   onSave,
   onRun,
+  nodeTypes,
   appearance: controlledAppearance,
   themeVariant: controlledThemeVariant,
   onAppearanceChange,
@@ -2763,8 +3124,10 @@ export function XFlowEditor({
     setDraftWorkflow(value);
     historyRef.current = { undo: [], redo: [] };
     setHistory(historyRef.current);
-    // Drafts belong to the replaced definition; they must not block the new one.
-    setParameterDrafts({});
+    // Drafts and server findings belong to the replaced definition.
+    clearDraftTimer();
+    replaceParameterDrafts({});
+    setParamIssues(undefined);
     setIsDirty(!value.id);
     setOperationError(undefined);
     setOperationStatus(value.id ? "已保存" : "未保存");
@@ -2804,57 +3167,179 @@ export function XFlowEditor({
     [commitWorkflow]
   );
 
-  const [parameterDrafts, setParameterDrafts] = React.useState<Record<string, ParameterDraft>>({});
+  // Parameters-JSON drafts. The ref is the source of truth (a blur or a save
+  // in the same tick must see the keystroke before React re-renders); the
+  // state mirrors it for rendering.
+  const [parameterDrafts, setParameterDraftsState] = React.useState<Record<string, ParameterDraft>>({});
   const parameterDraftsRef = React.useRef(parameterDrafts);
-  parameterDraftsRef.current = parameterDrafts;
-  const updateParameterDraft = React.useCallback((key: string, draft?: ParameterDraft) => {
-    setParameterDrafts((current) => {
-      if (!draft) {
-        if (!(key in current)) return current;
-        const { [key]: _removed, ...rest } = current;
-        return rest;
-      }
-      const existing = current[key];
-      if (existing && existing.text === draft.text && existing.error === draft.error) return current;
-      return { ...current, [key]: draft };
-    });
+  const replaceParameterDrafts = React.useCallback((next: Record<string, ParameterDraft>) => {
+    if (next === parameterDraftsRef.current) return;
+    parameterDraftsRef.current = next;
+    setParameterDraftsState(next);
   }, []);
+  const draftTimerRef = React.useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const clearDraftTimer = React.useCallback(() => {
+    if (draftTimerRef.current !== undefined) clearTimeout(draftTimerRef.current);
+    draftTimerRef.current = undefined;
+  }, []);
+  React.useEffect(() => clearDraftTimer, [clearDraftTimer]);
+  const nodeTypesRef = React.useRef(nodeTypes);
+  nodeTypesRef.current = nodeTypes;
+
+  /** Commits one node's parseable draft now (blur, tab switch, debounce, save). */
+  const commitParameterDraft = React.useCallback((key: string) => {
+    const draft = parameterDraftsRef.current[key];
+    if (!draft || draft.error) return;
+    const parsed = parseParametersText(draft.text);
+    const { [key]: _committed, ...rest } = parameterDraftsRef.current;
+    replaceParameterDrafts(rest);
+    if (!parsed.value) return;
+    const parameters = parsed.value;
+    commitWorkflowWith((latest) => updateNodeByKey(latest, key, (node) =>
+      serializeJson(node.parameters ?? {}) === serializeJson(parameters) ? node : { ...node, parameters }
+    ));
+  }, [commitWorkflowWith, replaceParameterDrafts]);
+  const flushParameterDrafts = React.useCallback(() => {
+    clearDraftTimer();
+    for (const [key, draft] of Object.entries(parameterDraftsRef.current)) {
+      if (!draft.error) commitParameterDraft(key);
+    }
+  }, [clearDraftTimer, commitParameterDraft]);
+  /**
+   * Every keystroke of the parameters JSON (Doc C §6.2): unparseable text
+   * stays a blocking draft; parseable text is drafted and committed after
+   * 300ms of quiet, or earlier on blur / tab switch / save / run.
+   */
+  const updateParameterText = React.useCallback((key: string, text: string) => {
+    const parsed = parseParametersText(text);
+    const current = parameterDraftsRef.current;
+    const existing = current[key];
+    if (!existing || existing.text !== text || existing.error !== parsed.error) {
+      replaceParameterDrafts({ ...current, [key]: parsed.error ? { text, error: parsed.error } : { text } });
+    }
+    clearDraftTimer();
+    if (!parsed.error) draftTimerRef.current = setTimeout(flushParameterDrafts, parameterDraftDebounceMs);
+  }, [clearDraftTimer, flushParameterDrafts, replaceParameterDrafts]);
   const handleNodeRenamed = React.useCallback((previousKey: string, nextKey: string) => {
     setSelectedKey(nextKey);
     if (previousKey === nextKey) return;
-    setParameterDrafts((current) => {
-      if (!(previousKey in current)) return current;
-      const { [previousKey]: draft, ...rest } = current;
-      return { ...rest, [nextKey]: draft };
-    });
-  }, []);
+    const current = parameterDraftsRef.current;
+    if (!(previousKey in current)) return;
+    const { [previousKey]: draft, ...rest } = current;
+    replaceParameterDrafts({ ...rest, [nextKey]: draft });
+  }, [replaceParameterDrafts]);
   // Drop drafts whose node no longer exists (deleted, or an undo/redo moved it
   // back to another key). Run as an effect, not inside commitWorkflow, so a
   // rename's commit and its draft rekey land in the same batch before pruning;
   // otherwise a later node reusing the key would inherit a stranger's draft.
   React.useEffect(() => {
     const liveKeys = new Set((draftWorkflow.nodes ?? []).map((node, index) => nodeKey(node, index)));
-    setParameterDrafts((current) => {
-      const orphaned = Object.keys(current).filter((key) => !liveKeys.has(key));
-      if (orphaned.length === 0) return current;
-      const next = { ...current };
-      for (const key of orphaned) delete next[key];
-      return next;
+    const current = parameterDraftsRef.current;
+    const orphaned = Object.keys(current).filter((key) => !liveKeys.has(key));
+    if (orphaned.length === 0) return;
+    const next = { ...current };
+    for (const key of orphaned) delete next[key];
+    replaceParameterDrafts(next);
+  }, [draftWorkflow, replaceParameterDrafts]);
+
+  /**
+   * The C3 reducer (Doc C §6.1): one composer onChange batch for one node is
+   * whitelisted, applied with core applyPatches (row identity kept), extended
+   * with enum-invalidation unsets (§4.4) and committed in ONE synchronous
+   * commitWorkflowWith call -- one undo entry. Dynamic ports (§4.3) are
+   * derived from the committed value on the next render.
+   */
+  const applyNodePatches = React.useCallback((key: string, patches: Patch[]) => {
+    // A debounced JSON draft of this node must not land on top of the form edit.
+    commitParameterDraft(key);
+    if (parameterDraftsRef.current[key]?.error) return; // read-only while the JSON is broken
+    commitWorkflowWith((latest) => {
+      const nodesNow = latest.nodes ?? [];
+      const index = nodesNow.findIndex((node, nodeIndex) => nodeKey(node, nodeIndex) === key);
+      if (index < 0) return latest;
+      const node = nodesNow[index];
+      const { node: next, applied } = reduceNodePatches(node, patches, formSchemaForNode(nodeTypesRef.current, node));
+      if (applied.length === 0 || next === node) return latest;
+      return { ...latest, nodes: nodesNow.map((candidate, candidateIndex) => (candidateIndex === index ? next : candidate)) };
     });
-  }, [draftWorkflow]);
-  /** Blocks save/run while any live node holds an unparseable parameters draft. */
+  }, [commitParameterDraft, commitWorkflowWith]);
+
+  const [paramIssues, setParamIssues] = React.useState<ParamIssue[]>();
+  const externalIssuesMap = React.useMemo(() => externalIssuesByNode(paramIssues), [paramIssues]);
+  const [parameterTab, setParameterTab] = React.useState<ParameterTab>("form");
+  const [inspectorRevealNonce, setInspectorRevealNonce] = React.useState(0);
+  const renameRef = React.useRef<((requestedName: string) => void) | undefined>(undefined);
+  const formHost = React.useMemo<NodeFormHost>(() => {
+    const registry = createNodeFormRegistry({ onRename: (name) => renameRef.current?.(name) });
+    return { registry, compiler: new NodeFormCompiler(registry), renameRef };
+  }, []);
+  const validationMode = nodeTypes?.param_validation_mode ?? "warn";
+  // Frontend node-form errors over the whole workflow (Doc C §1 rule 3): shown
+  // on the save button in every mode, blocking only in enforce mode.
+  const formIssueSummary = React.useMemo<FormIssueSummary>(() => {
+    const summary: FormIssueSummary = { errors: 0, nodes: [] };
+    if (!nodeTypes) return summary;
+    const credentials = Object.keys(draftWorkflow.credentials ?? {});
+    (draftWorkflow.nodes ?? []).forEach((node, index) => {
+      const schema = formSchemaForNode(nodeTypes, node);
+      if (!schema) return;
+      const issues = formHost.compiler.issues(
+        schema,
+        node,
+        { hasTemplate: nodeHasTemplate(draftWorkflow, node), parameters: node.parameters, schemasLoaded: true },
+        { ports: portsForNode(schema, node), credentials }
+      );
+      const errors = issues.filter((issue) => issue.severity === "error").length;
+      if (errors === 0) return;
+      summary.errors += errors;
+      summary.nodes.push(nodeName(node, index));
+    });
+    return summary;
+  }, [draftWorkflow, formHost, nodeTypes]);
+  const formIssueSummaryRef = React.useRef(formIssueSummary);
+  formIssueSummaryRef.current = formIssueSummary;
+  const [blockedDraftNodes, setBlockedDraftNodes] = React.useState<string[]>([]);
+  const invalidDraftCount = Object.values(parameterDrafts).filter((draft) => draft.error).length;
+  const saveBlocked = invalidDraftCount > 0 || (validationMode === "enforce" && formIssueSummary.errors > 0);
+  const saveTooltip = !onSave
+    ? "保存不可用：宿主未提供 onSave 处理器"
+    : invalidDraftCount > 0
+      ? `${invalidDraftCount} 个节点的参数 JSON 未通过解析，修正后才能保存`
+      : formIssueSummary.errors > 0
+        ? validationMode === "enforce"
+          ? `${formIssueSummary.errors} 个参数错误（server 为 enforce 模式），修正后才能保存`
+          : `${formIssueSummary.errors} 个参数问题（server 为 ${validationMode} 模式，不阻止保存）`
+        : "保存工作流（⌘ / Ctrl + S）";
+
+  /**
+   * Save/run gate. Flushes parseable JSON drafts first, then blocks while any
+   * live node holds an unparseable one (every mode: a local parse failure,
+   * Doc C §6.2) or, in enforce mode, while node forms report errors (§1 rule 3).
+   */
   const blockedByParameterDraft = React.useCallback((action: "保存" | "运行"): boolean => {
+    flushParameterDrafts();
     const nodesNow = latestDraftRef.current.nodes ?? [];
     const blocked = nodesNow
       .map((node, index) => ({ key: nodeKey(node, index), name: nodeName(node, index) }))
-      .filter(({ key }) => key in parameterDraftsRef.current)
+      .filter(({ key }) => parameterDraftsRef.current[key]?.error)
       .map(({ name }) => name);
-    if (blocked.length === 0) return false;
-    setOperationError(`节点 ${blocked.join("、")} 的参数 JSON 未通过解析，请修正后再${action}`);
-    setOperationStatus(`${action}已阻止`);
-    setBottomCollapsed(false);
-    return true;
-  }, []);
+    if (blocked.length > 0) {
+      setBlockedDraftNodes(blocked);
+      setOperationError(`节点 ${blocked.join("、")} 的参数 JSON 未通过解析，请修正后再${action}`);
+      setOperationStatus(`${action}已阻止`);
+      setBottomCollapsed(false);
+      return true;
+    }
+    setBlockedDraftNodes([]);
+    const summary = formIssueSummaryRef.current;
+    if (nodeTypesRef.current?.param_validation_mode === "enforce" && summary.errors > 0) {
+      setOperationError(`节点 ${summary.nodes.join("、")} 的参数未通过校验（${summary.errors} 个错误），请修正后再${action}`);
+      setOperationStatus(`${action}已阻止`);
+      setBottomCollapsed(false);
+      return true;
+    }
+    return false;
+  }, [flushParameterDrafts]);
   const restoreHistory = React.useCallback((nextWorkflow: WorkflowDef, nextHistory: WorkflowHistory) => {
     historyRef.current = nextHistory;
     setHistory(nextHistory);
@@ -2868,22 +3353,24 @@ export function XFlowEditor({
   }, [onChange]);
 
   const undoWorkflow = React.useCallback(() => {
+    flushParameterDrafts();
     const previousWorkflow = historyRef.current.undo.at(-1);
     if (!previousWorkflow) return;
     restoreHistory(previousWorkflow, {
       undo: historyRef.current.undo.slice(0, -1),
       redo: [...historyRef.current.redo, latestDraftRef.current].slice(-historyLimit)
     });
-  }, [restoreHistory]);
+  }, [flushParameterDrafts, restoreHistory]);
 
   const redoWorkflow = React.useCallback(() => {
+    flushParameterDrafts();
     const nextWorkflow = historyRef.current.redo.at(-1);
     if (!nextWorkflow) return;
     restoreHistory(nextWorkflow, {
       undo: [...historyRef.current.undo, latestDraftRef.current].slice(-historyLimit),
       redo: historyRef.current.redo.slice(0, -1)
     });
-  }, [restoreHistory]);
+  }, [flushParameterDrafts, restoreHistory]);
 
   const createWorkflow = React.useCallback(() => {
     const nextWorkflow = createDraftWorkflow();
@@ -2892,11 +3379,13 @@ export function XFlowEditor({
   }, [commitWorkflow]);
 
   const validateCurrentWorkflow = React.useCallback(() => {
-    const diagnostics = validateWorkflow(draftWorkflow, localRuntime, operationError);
+    const diagnostics = validateWorkflow(draftWorkflow, localRuntime, operationError, nodeTypes);
     const hasErrors = diagnostics.some((item) => item.status === "error");
     setOperationStatus(hasErrors ? "校验失败" : "校验通过");
     setBottomCollapsed(false);
-  }, [draftWorkflow, localRuntime, operationError]);
+  }, [draftWorkflow, localRuntime, nodeTypes, operationError]);
+
+  const libraryDescriptors = React.useMemo(() => nodeLibraryDescriptors(nodeTypes), [nodeTypes]);
 
   const addNode = React.useCallback(
     (descriptor: NodeDescriptor, position?: { x: number; y: number }) => {
@@ -2916,11 +3405,11 @@ export function XFlowEditor({
     (type: string, position: { x: number; y: number }) => {
       // The payload crosses a drag boundary, so an unknown type is a real input
       // case rather than a programming error.
-      const descriptor = nodeDescriptors.find((candidate) => candidate.type === type);
+      const descriptor = libraryDescriptors.find((candidate) => candidate.type === type);
       if (!descriptor) return;
       addNode(descriptor, position);
     },
-    [addNode]
+    [addNode, libraryDescriptors]
   );
 
   const updateNodePosition = React.useCallback(
@@ -3026,8 +3515,12 @@ export function XFlowEditor({
     setSaving(true);
     setOperationError(undefined);
     try {
-      const savedWorkflow = await onSave(workflowToSave);
+      const saved = await onSave(workflowToSave);
+      const savedWorkflow = isSaveResult(saved) ? saved.workflow : saved;
       if (!savedWorkflow) throw new Error("保存处理器未返回工作流定义");
+      // Server findings describe the snapshot just saved; show them even if
+      // the user kept editing meanwhile (they are replaced on the next save).
+      setParamIssues(isSaveResult(saved) && saved.paramIssues?.length ? saved.paramIssues : undefined);
       // A response for an older snapshot must never overwrite edits made while
       // the save was in flight. Those edits remain dirty and can be saved next.
       if (draftRevisionRef.current !== revisionAtSave) return;
@@ -3036,6 +3529,8 @@ export function XFlowEditor({
       setIsDirty(false);
       setOperationStatus("已保存");
     } catch (error) {
+      const rejectedIssues = paramIssuesOf(error);
+      if (rejectedIssues) setParamIssues(rejectedIssues.length > 0 ? rejectedIssues : undefined);
       if (draftRevisionRef.current === revisionAtSave) {
         setOperationError(errorMessage(error, "保存失败"));
         setOperationStatus("保存失败");
@@ -3105,6 +3600,16 @@ export function XFlowEditor({
   const openCompactDrawer = React.useCallback((drawer: "left" | "right") => {
     setCompactDrawer(drawer);
   }, []);
+
+  /** Doc C §6.2: from a blocked save/run, jump to the node's parameters JSON. */
+  const revealParameterJson = React.useCallback((name: string) => {
+    selectNodeByName(name);
+    setViewMode("edit");
+    setParameterTab("json");
+    setInspectorRevealNonce((nonce) => nonce + 1);
+    if (layout === "a") setRightCollapsed(false);
+    else openCompactDrawer("right");
+  }, [layout, openCompactDrawer, selectNodeByName]);
 
   const openNodeLibrary = React.useCallback(() => {
     setViewMode("edit");
@@ -3182,8 +3687,10 @@ export function XFlowEditor({
     <ConfigProvider
       componentSize="small"
       getPopupContainer={(trigger) => {
-        const editor = trigger?.closest(".xflow-editor");
-        return editor instanceof HTMLElement ? editor : document.body;
+        // Inside a compact drawer, popups must live in the drawer: its focus
+        // trap pulls focus back from anything outside and closes the popup.
+        const container = trigger?.closest(".xflow-editor-compact-drawer__section") ?? trigger?.closest(".xflow-editor");
+        return container instanceof HTMLElement ? container : document.body;
       }}
       theme={editorThemeConfig}
     >
@@ -3316,19 +3823,25 @@ export function XFlowEditor({
               </span>
             </Tooltip>
             <Button aria-label="校验" className="xflow-editor-validate-button" icon={<CheckCircleOutlined />} onClick={validateCurrentWorkflow}>校验</Button>
-            <Tooltip classNames={editorTooltipClassNames} title={onSave ? "保存工作流（⌘ / Ctrl + S）" : "保存不可用：宿主未提供 onSave 处理器"}>
+            <Tooltip classNames={editorTooltipClassNames} title={saveTooltip}>
               <span>
                 <Button
                   aria-label="保存"
                   className="xflow-editor-save-button"
-                  color={isDirty ? "primary" : "default"}
+                  color={saveBlocked ? "danger" : isDirty ? "primary" : "default"}
+                  data-blocked={saveBlocked || undefined}
                   disabled={!onSave}
-                  icon={<SaveOutlined />}
+                  icon={saveBlocked ? <WarningOutlined /> : <SaveOutlined />}
                   loading={saving}
-                  variant={isDirty ? "solid" : "outlined"}
+                  variant={isDirty || saveBlocked ? "solid" : "outlined"}
                   onClick={() => void saveWorkflow()}
                 >
                   保存
+                  {formIssueSummary.errors > 0 ? (
+                    <span className="xflow-editor-save-issues" data-testid="save-issue-count">
+                      {formIssueSummary.errors}
+                    </span>
+                  ) : null}
                 </Button>
               </span>
             </Tooltip>
@@ -3405,7 +3918,7 @@ export function XFlowEditor({
                   </button>
                 </nav>
                 <div className={`xflow-editor-left__content ${editMode ? "" : "xflow-editor-left__content--preview"}`}>
-                  {editMode ? <NodeLibrary onAddNode={addNode} /> : null}
+                  {editMode ? <NodeLibrary descriptors={libraryDescriptors} onAddNode={addNode} /> : null}
                   <Outline workflow={draftWorkflow} selectedKey={selectedKey} runtime={localRuntime} onSelect={setSelectedKey} />
                 </div>
               </>
@@ -3527,10 +4040,18 @@ export function XFlowEditor({
                 selectedIndex={selectedIndex}
                 runtime={localRuntime}
                 onChangeWith={commitWorkflowWith}
+                onApplyNodePatches={applyNodePatches}
                 onDeleteNode={deleteSelectedNode}
                 onNodeRenamed={handleNodeRenamed}
                 parameterDrafts={parameterDrafts}
-                onParameterDraft={updateParameterDraft}
+                parameterTab={parameterTab}
+                revealNonce={inspectorRevealNonce}
+                nodeTypes={nodeTypes}
+                formHost={formHost}
+                externalIssues={selectedNode ? externalIssuesMap.get(nodeName(selectedNode, selectedIndex)) : undefined}
+                onParameterText={updateParameterText}
+                onParameterCommit={commitParameterDraft}
+                onParameterTabChange={setParameterTab}
               />
             )}
           </aside>
@@ -3571,7 +4092,7 @@ export function XFlowEditor({
           onClose={() => setCompactDrawer(undefined)}
         >
           {leftDrawerTab === "library" ? (
-            editMode ? <NodeLibrary autoFocusSearch onAddNode={addNode} searchInputRef={nodeLibrarySearchRef} /> : <p className="xflow-editor-empty">预览模式为只读。</p>
+            editMode ? <NodeLibrary autoFocusSearch descriptors={libraryDescriptors} onAddNode={addNode} searchInputRef={nodeLibrarySearchRef} /> : <p className="xflow-editor-empty">预览模式为只读。</p>
           ) : (
             <Outline workflow={draftWorkflow} selectedKey={selectedKey} runtime={localRuntime} onSelect={(key) => setSelectedKey(key)} />
           )}
@@ -3601,10 +4122,18 @@ export function XFlowEditor({
               selectedIndex={selectedIndex}
               runtime={localRuntime}
               onChangeWith={commitWorkflowWith}
+              onApplyNodePatches={applyNodePatches}
               onDeleteNode={deleteSelectedNode}
               onNodeRenamed={handleNodeRenamed}
               parameterDrafts={parameterDrafts}
-              onParameterDraft={updateParameterDraft}
+              parameterTab={parameterTab}
+              revealNonce={inspectorRevealNonce}
+              nodeTypes={nodeTypes}
+              formHost={formHost}
+              externalIssues={selectedNode ? externalIssuesMap.get(nodeName(selectedNode, selectedIndex)) : undefined}
+              onParameterText={updateParameterText}
+              onParameterCommit={commitParameterDraft}
+              onParameterTabChange={setParameterTab}
             />
           ) : (
             <section className="xflow-editor-preview-inspector" aria-label="预览模式说明">
@@ -3619,6 +4148,9 @@ export function XFlowEditor({
       <Diagnostics
         workflow={draftWorkflow}
         runtime={localRuntime}
+        nodeTypes={nodeTypes}
+        blockedDraftNodes={operationError ? blockedDraftNodes : undefined}
+        onRevealJson={revealParameterJson}
         operationError={operationError}
         collapsed={bottomCollapsed}
         onToggle={() => setBottomCollapsed((current) => !current)}

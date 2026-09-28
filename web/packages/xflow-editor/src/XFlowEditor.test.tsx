@@ -497,13 +497,13 @@ describe("XFlowEditor", () => {
     const connections = within(inspector).getByRole("tab", { name: "连接" });
     const run = within(inspector).getByRole("tab", { name: "运行" });
     expect(config.getAttribute("aria-controls")).toBe("xflow-editor-inspector-panel-config");
-    expect(within(inspector).getByRole("tabpanel").getAttribute("aria-labelledby")).toBe(config.id);
+    expect(within(inspector).getAllByRole("tabpanel")[0].getAttribute("aria-labelledby")).toBe(config.id);
 
     config.focus();
     fireEvent.keyDown(config, { key: "ArrowRight" });
     expect(document.activeElement).toBe(connections);
     expect(connections.getAttribute("aria-selected")).toBe("true");
-    expect(within(inspector).getByRole("tabpanel").getAttribute("aria-labelledby")).toBe(connections.id);
+    expect(within(inspector).getAllByRole("tabpanel")[0].getAttribute("aria-labelledby")).toBe(connections.id);
 
     fireEvent.keyDown(connections, { key: "End" });
     expect(document.activeElement).toBe(run);
@@ -797,50 +797,50 @@ describe("XFlowEditor", () => {
     });
   });
 
-  it("edits node-level runner selector overrides", () => {
+  it("edits node-level runner selector overrides through the node form", async () => {
     const handleChange = vi.fn();
 
     render(<XFlowEditor value={workflow} onChange={handleChange} />);
 
     fireEvent.click(screen.getByRole("button", { name: "选择节点 l1_manager" }));
     const inspector = screen.getByRole("region", { name: "属性" });
-    fireEvent.change(within(inspector).getByLabelText("节点 Runner 选择 JSON"), {
-      target: {
-        value: '{ "mode": "default", "match_labels": { "mode": "local", "env": "prod" } }'
-      }
+    // The form owns /runner_selector (Doc C §4.2); node-level `mode` is a
+    // compile error, so only match_labels is offered. The legacy JSON box is gone.
+    expect(within(inspector).queryByLabelText("节点 Runner 选择 JSON")).toBeNull();
+    fireEvent.click(within(inspector).getByRole("button", { name: "执行策略" }));
+    const labels = within(inspector).getByRole("group", { name: "匹配标签" });
+    fireEvent.click(within(labels).getByRole("button", { name: /添加/ }));
+    fireEvent.change(within(labels).getByLabelText("键"), { target: { value: "env" } });
+    await act(async () => {
+      fireEvent.change(within(labels).getByLabelText("env 的值"), { target: { value: "prod" } });
     });
 
-    expect(handleChange).toHaveBeenCalledWith({
+    expect(handleChange).toHaveBeenLastCalledWith({
       ...workflow,
       nodes: [
         workflow.nodes[0],
         workflow.nodes[1],
-        {
-          ...workflow.nodes[2],
-          runner_selector: {
-            mode: "default",
-            match_labels: {
-              mode: "local",
-              env: "prod"
-            }
-          }
-        }
+        { ...workflow.nodes[2], runner_selector: { match_labels: { env: "prod" } } }
       ]
     });
   });
 
-  it("edits node parameters as JSON and reports invalid JSON", () => {
+  it("edits node parameters as JSON on the JSON tab and reports invalid JSON", async () => {
     const handleChange = vi.fn();
 
     render(<XFlowEditor value={workflow} onChange={handleChange} />);
 
     fireEvent.click(screen.getByRole("button", { name: "选择节点 route_by_amount" }));
     const inspector = screen.getByRole("region", { name: "属性" });
+    fireEvent.click(within(inspector).getByRole("tab", { name: "JSON" }));
     const parameters = within(inspector).getByLabelText("参数 JSON");
 
     fireEvent.change(parameters, {
       target: { value: '{ "threshold": 5000 }' }
     });
+    // Parseable input is debounced (Doc C §6.2): nothing commits per keystroke.
+    expect(handleChange).not.toHaveBeenCalled();
+    fireEvent.blur(parameters);
 
     expect(handleChange).toHaveBeenCalledWith({
       ...workflow,

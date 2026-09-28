@@ -33,7 +33,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > commonSchema 
       "f.name": {
         "props": {
           "description": "失焦时改名，并同步更新连线、pin_data、分组与依赖边中的引用",
-          "label": "名称",
+          "label": "节点名称",
           "value": {
             "$state": "/name",
           },

@@ -8,3 +8,4 @@ export { compileNodeForm, JSON_EDITOR_PARAMS, ROOT_ID, type CompileNodeFormOptio
 export { nodeFormChecks, looksLikeSecret } from "./checks";
 export { deriveExpressionMode, deriveExpressionModeForPointer } from "./expressionMode";
 export * from "./components/index";
+export * from "./host";

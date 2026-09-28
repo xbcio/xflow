@@ -38,7 +38,8 @@ export const commonSchema: NodeFormSchema = {
     {
       name: "name",
       path: "/name",
-      label: "名称",
+      // "节点名称" keeps the accessible name distinct from the Inspector's 工作流名称.
+      label: "节点名称",
       type: "string",
       widget: COMMON_WIDGET_NODE_NAME,
       help: "失焦时改名，并同步更新连线、pin_data、分组与依赖边中的引用",

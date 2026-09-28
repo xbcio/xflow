@@ -3331,7 +3331,16 @@
   padding: 5px 8px;
 }
 
-.xflow-editor .xflow-editor-theme-popover .ant-popover-inner {
+.xflow-editor .xflow-editor-node-tile__tooltip {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 260px;
+}
+
+.xflow-editor .xflow-editor-node-tile__tooltip > span:not(:first-child) {
+  color: var(--xflow-text-secondary);
+}
   box-shadow: var(--xflow-popup-shadow);
 }
 
@@ -3341,6 +3350,8 @@
 
 .xflow-editor .xflow-editor-compact-drawer__section {
   background: var(--xflow-surface-panel);
+  /* Popup container inside the drawer (see getPopupContainer). */
+  position: relative;
 }
 
 .xflow-editor .xflow-editor-compact-drawer__header {
@@ -3612,4 +3623,99 @@
 .xflow-editor .xflow-editor-nodeform-notice-alert {
   border-radius: var(--xflow-control-radius);
   font-size: 12px;
+}
+
+
+/* --------------------------------------------------------------------------
+ * C3 Inspector: node configuration (表单 / JSON tabs), notices and the
+ * save-button issue badge. The composer form sits OUTSIDE .xflow-editor-form
+ * so the legacy two-column `label` grid never reaches composer fields.
+ * ------------------------------------------------------------------------ */
+.xflow-editor .xflow-editor-config {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  min-width: 0;
+}
+
+.xflow-editor .xflow-editor-node-params {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.xflow-editor .xflow-editor-param-tabs {
+  min-width: 0;
+}
+
+.xflow-editor .xflow-editor-param-tabs__header {
+  margin: 0 0 10px;
+}
+
+.xflow-editor .xflow-editor-param-tabs__item {
+  font-size: 12px;
+  padding-block: 5px;
+}
+
+.xflow-editor .xflow-editor-param-tabs__content {
+  min-width: 0;
+}
+
+.xflow-editor .xflow-editor-node-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.xflow-editor .xflow-editor-node-form__notice {
+  align-items: flex-start;
+  background: var(--xflow-status-running-subtle);
+  border: 1px solid var(--xflow-status-running-border);
+  border-radius: 6px;
+  color: var(--xflow-status-running-text);
+  display: flex;
+  font-size: 11px;
+  gap: 6px;
+  line-height: 16px;
+  margin: 0;
+  padding: 6px 8px;
+}
+
+.xflow-editor .xflow-editor-node-form__notice--error {
+  background: var(--xflow-status-error-subtle);
+  border-color: var(--xflow-status-error-border);
+  color: var(--xflow-status-error-text);
+}
+
+.xflow-editor .xflow-editor-node-form__notice .anticon {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.xflow-editor .xflow-editor-node-params .xflow-editor-json-field textarea.ant-input {
+  font-family: var(--xflow-font-mono);
+  font-size: 11px;
+}
+
+.xflow-editor .xflow-editor-save-issues {
+  background: var(--xflow-status-warning-subtle);
+  border: 1px solid var(--xflow-status-warning-border);
+  border-radius: 8px;
+  color: var(--xflow-status-warning-text);
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 14px;
+  margin-inline-start: 4px;
+  min-width: 16px;
+  padding: 0 4px;
+  text-align: center;
+}
+
+.xflow-editor .xflow-editor-save-button[data-blocked] .xflow-editor-save-issues {
+  background: var(--xflow-status-error-subtle);
+  border-color: var(--xflow-status-error-border);
+  color: var(--xflow-status-error-text);
 }
