@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xflow.dev/schemas/composer/v1/spec.schema.json",
+  "title": "Composer Spec v1",
+  "description": "Structural schema of composer/v1 (Doc B §3). Graph rules (dangling ids, cycles, multi-parent, orphans), registry membership and the minor-version degradation rule are enforced by validateSpec, not by this schema.",
+  "type": "object",
+  "required": ["spec", "root", "elements"],
+  "additionalProperties": false,
+  "properties": {
+    "spec": { "const": "composer/v1" },
+    "minor": { "type": "integer", "minimum": 0, "default": 0 },
+    "root": { "type": "string", "minLength": 1 },
+    "elements": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/element" }
+    }
+  },
+  "$defs": {
+    "pointer": {
+      "type": "string",
+      "pattern": "^(/([^~/]|~[01])*)*$"
+    },
+    "element": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "type": "string", "minLength": 1 },
+        "props": { "type": "object" },
+        "children": { "type": "array", "items": { "type": "string" } },
+        "slots": {
+          "type": "object",
+          "additionalProperties": { "type": "array", "items": { "type": "string" } }
+        },
+        "visible": { "$ref": "#/$defs/cond" },
+        "repeat": { "$ref": "#/$defs/repeat" },
+        "checks": { "type": "array", "items": { "$ref": "#/$defs/check" } }
+      }
+    },
+    "repeat": {
+      "type": "object",
+      "required": ["statePath"],
+      "additionalProperties": false,
+      "properties": {
+        "statePath": {
+          "oneOf": [
+            { "$ref": "#/$defs/pointer" },
+            {
+              "type": "object",
+              "required": ["$item"],
+              "additionalProperties": false,
+              "properties": { "$item": { "type": "string" } }
+            }
+          ]
+        },
+        "key": { "type": "string", "minLength": 1 }
+      }
+    },
+    "check": {
+      "type": "object",
+      "required": ["type", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "type": "string", "minLength": 1 },
+        "args": { "type": "object" },
+        "message": { "description": "String or value expression." },
+        "severity": { "enum": ["error", "warning"], "default": "error" },
+        "when": { "$ref": "#/$defs/cond" },
+        "targets": { "type": "array", "items": { "$ref": "#/$defs/pointer" } }
+      }
+    },
+    "cond": {
+      "oneOf": [
+        { "type": "boolean" },
+        { "type": "array", "items": { "$ref": "#/$defs/cond" } },
+        {
+          "type": "object",
+          "required": ["$and"],
+          "additionalProperties": false,
+          "properties": { "$and": { "type": "array", "items": { "$ref": "#/$defs/cond" } } }
+        },
+        {
+          "type": "object",
+          "required": ["$or"],
+          "additionalProperties": false,
+          "properties": { "$or": { "type": "array", "items": { "$ref": "#/$defs/cond" } } }
+        },
+        {
+          "type": "object",
+          "required": ["$not"],
+          "additionalProperties": false,
+          "properties": { "$not": { "$ref": "#/$defs/cond" } }
+        },
+        { "$ref": "#/$defs/condLeaf" }
+      ]
+    },
+    "condLeaf": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 2,
+      "maxProperties": 2,
+      "oneOf": [{ "required": ["$state"] }, { "required": ["$item"] }],
+      "properties": {
+        "$state": { "$ref": "#/$defs/pointer" },
+        "$item": { "type": "string" },
+        "eq": {},
+        "neq": {},
+        "gt": { "type": "number" },
+        "gte": { "type": "number" },
+        "lt": { "type": "number" },
+        "lte": { "type": "number" },
+        "in": { "type": "array" },
+        "truthy": { "type": "boolean" }
+      }
+    }
+  }
+}

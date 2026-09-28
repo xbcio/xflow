@@ -13,6 +13,7 @@ const dependencyFields = [
 
 const publicPackagePolicy = new Map([
   ["@xflow/core", new Set(["@xflow/typescript-config"])],
+  ["@xflow/composer", new Set(["@xflow/typescript-config"])],
   ["@xflow/api", new Set(["@xflow/core", "@xflow/typescript-config"])],
   ["@xflow/preview", new Set(["@xflow/core", "@xflow/typescript-config"])],
   [

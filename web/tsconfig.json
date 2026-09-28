@@ -3,6 +3,7 @@
   "files": [],
   "references": [
     { "path": "./packages/xflow-core" },
+    { "path": "./packages/composer" },
     { "path": "./packages/xflow-api" },
     { "path": "./packages/xflow-preview" },
     { "path": "./packages/xflow-editor" },

@@ -8,6 +8,7 @@ export default defineConfig({
   resolve: {
     alias: {
       "@xflow/core": path.resolve(root, "packages/xflow-core/src/index.ts"),
+      "@xflow/composer/core": path.resolve(root, "packages/composer/src/core/index.ts"),
       "@xflow/api": path.resolve(root, "packages/xflow-api/src/index.ts"),
       "@xflow/preview": path.resolve(root, "packages/xflow-preview/src/index.tsx"),
       "@xflow/editor": path.resolve(root, "packages/xflow-editor/src/index.tsx")

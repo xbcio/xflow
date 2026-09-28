@@ -30,6 +30,20 @@ const coreRestrictedImports = {
   ]
 };
 
+const composerCoreRestrictedImports = {
+  paths: ["react", "react-dom", "antd", "@xyflow/react"].map((name) => ({
+    name,
+    message: "@xflow/composer/core must stay free of React and renderers (Doc B §2)."
+  })),
+  patterns: [
+    ...packageBoundaryPatterns,
+    {
+      group: ["react/*", "react-dom/*", "antd/*", "@xyflow/react/*", "@json-render/*"],
+      message: "@xflow/composer/core must stay free of React and renderers (Doc B §2)."
+    }
+  ]
+};
+
 export default [
   {
     ignores: [
@@ -95,6 +109,12 @@ export default [
     files: ["packages/xflow-core/**/*.{js,mjs,cjs,ts,tsx}"],
     rules: {
       "no-restricted-imports": ["error", coreRestrictedImports]
+    }
+  },
+  {
+    files: ["packages/composer/src/core/**/*.{js,mjs,cjs,ts,tsx}"],
+    rules: {
+      "no-restricted-imports": ["error", composerCoreRestrictedImports]
     }
   }
 ];
