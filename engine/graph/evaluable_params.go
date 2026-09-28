@@ -20,11 +20,11 @@ package graph
 // It is a literal table, not a lookup into node/registry, for the same reason
 // transformNodeTypes and bannedBodyMemberTypes are literal: this package must
 // not depend on which handlers happen to be linked into the current binary.
-// That dependency is real and measured -- the server process sees a POPULATED
-// registry today, but only incidentally, because service/control imports
-// package node to install an observer. Read from engine/graph itself the same
-// registry is empty. A compile-time rule whose verdict changes with the
-// binary's import graph is worse than no rule.
+// That dependency is real: which types are registered is decided by the
+// binary's import graph (the server process links the builtins through an
+// explicit blank import of package node in cmd/server and sdk/xflow; read from
+// engine/graph itself the registry is empty). A compile-time rule whose verdict
+// changes with the binary's import graph is worse than no rule.
 //
 // The key is (nodeType, paramName), never paramName alone: xflow.trigger.cron
 // has a parameter called "expression" that holds a cron spec ("0 */5 * * *"),
@@ -119,25 +119,61 @@ var evaluableSubFields = map[string]map[string][]string{
 	"xflow.switch": {"rules": {"condition"}},
 }
 
+// IsEvaluableParam reports whether nodeType's handler evaluates the whole
+// parameter param itself (an expression, or program text), so no outer layer
+// may evaluate it again. It is the predicate form of the evaluableParams table
+// and the one lookup every consumer should use; see ExpressionMode for the
+// editor-facing classification that combines it with the other tables.
+func IsEvaluableParam(nodeType, param string) bool {
+	return evaluableParams[nodeType][param]
+}
+
+// HasEvaluableSubFields reports whether param of nodeType has at least one
+// handler-evaluated sub-field (see IsEvaluableSubField). A parameter with
+// sub-field exemptions is NOT itself evaluable: the boundary still evaluates
+// its other fields, so it needs the element-wise traversal rather than a skip.
+func HasEvaluableSubFields(nodeType, param string) bool {
+	return len(evaluableSubFields[nodeType][param]) > 0
+}
+
+// IsEvaluableSubField reports whether subField -- a key inside each element of
+// the array-of-objects parameter param -- is evaluated by nodeType's handler
+// itself (xflow.switch's rules[].condition). The element index is not part of
+// the question: an entry applies to every element.
+func IsEvaluableSubField(nodeType, param, subField string) bool {
+	for _, f := range evaluableSubFields[nodeType][param] {
+		if f == subField {
+			return true
+		}
+	}
+	return false
+}
+
+// IsHostSourceParam reports whether param of nodeType holds source code in a
+// language other than expr (xflow.script's code). Such a parameter is exempt
+// from the template form rule and is never rendered by any layer. Every host
+// source parameter is also an evaluable parameter (see hostSourceParams).
+func IsHostSourceParam(nodeType, param string) bool {
+	return hostSourceParams[nodeType][param]
+}
+
 // EvaluableParams reports, per node type, which parameters that type's
 // handler evaluates. The returned map must be treated as read-only.
 //
-// Exported for two consumers that must never keep a second copy of this
-// data: the boundary evaluation layer, which derives its exemption set by
-// negating this table, and the registry-coverage test, which asserts every
-// registered node type has an entry here.
+// The map is returned directly (no deep copy), so mutating it is a
+// programming error that corrupts every consumer.
 //
-// The map is returned directly (no deep copy) because both consumers are
-// read-only by contract and this is called on hot paths (graph compilation).
-// Mutating the returned map is a programming error.
+// Deprecated: handing out the package-level table lets callers mutate it and
+// invites a second composition of the rules. Use IsEvaluableParam for a
+// lookup, or ExpressionMode for the editor-facing classification. The only
+// remaining legitimate reader is a test that enumerates the table itself.
 func EvaluableParams() map[string]map[string]bool { return evaluableParams }
 
 // EvaluableSubFields reports, per node type and parameter, which sub-field
-// paths inside that parameter the handler evaluates itself. The boundary
-// evaluation layer must preserve these sub-fields verbatim (not evaluate them)
-// while still evaluating sibling fields in the same parameter.
+// paths inside that parameter the handler evaluates itself. The returned map
+// is read-only by contract.
 //
-// Exported for the same reason as EvaluableParams: the boundary layer derives
-// its sub-field exemption set from this table. There must be no second copy.
-// The returned map is read-only by contract.
+// Deprecated: use IsEvaluableSubField / HasEvaluableSubFields for lookups, or
+// ExpressionMode for the editor-facing classification. The only remaining
+// legitimate reader is a test that enumerates the table itself.
 func EvaluableSubFields() map[string]map[string][]string { return evaluableSubFields }

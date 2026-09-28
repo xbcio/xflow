@@ -34,17 +34,17 @@ var perItemExemptParams = map[string]map[string]bool{
 
 // evaluateParams renders all ${{ }} and {{ }} templates in lease.Input.Params
 // for parameters that are NOT exempt. Exempt parameters are those that:
-//  1. appear in graph.EvaluableParams() for this nodeType (the handler
+//  1. are graph.IsEvaluableParam for this nodeType (the handler
 //     evaluates them itself — code, condition, expression, items, etc.)
 //  2. appear in perItemExemptParams (per-item env roots don't exist here)
-//  3. appear as sub-field paths in graph.EvaluableSubFields() — the boundary
+//  3. are graph.IsEvaluableSubField sub-fields of a parameter — the boundary
 //     evaluates the parameter's OTHER fields but preserves these sub-fields
 //     verbatim for the handler (e.g. xflow.switch rules[].condition)
 //  4. hold a sub-graph body — the inner execution's source text, which must
 //     reach the inner compile verbatim (see skipSubgraphBody)
 //
-// The exemption set is derived from graph.EvaluableParams() and
-// graph.EvaluableSubFields() — the same data the compiler uses. There is
+// The exemptions are read through engine/graph's predicates over its
+// evaluableParams / evaluableSubFields tables — the same data the compiler uses. There is
 // deliberately NO second copy of either table here; two tables would inevitably
 // drift, and drift is silent: a parameter missing from both is neither
 // compile-rejected nor runtime-evaluated, so the template ships verbatim with
@@ -67,17 +67,15 @@ func evaluateParams(input *types.Input, nodeType string) error {
 		return nil
 	}
 
-	// Build the exemption set for this node type by merging:
-	// (a) evaluableParams from the compiler table (handler evaluates these)
+	// Exemptions for this node type (see isBoundaryExempt):
+	// (a) parameters the handler evaluates itself (graph.IsEvaluableParam)
 	// (b) perItemExemptParams (boundary cannot evaluate these)
-	exempt := buildExemptSet(nodeType)
-
+	//
 	// (c) Sub-field exemptions: parameters where only SOME sub-fields are
-	// handler-evaluated. These parameters are NOT in the exempt set (the
-	// boundary must still evaluate their non-exempt sub-fields), but need
-	// special traversal that skips the named paths.
-	subFieldExempt := graph.EvaluableSubFields()[nodeType]
-
+	// handler-evaluated (graph.HasEvaluableSubFields). These parameters are
+	// NOT exempt as a whole (the boundary must still evaluate their non-exempt
+	// sub-fields), but need special traversal that skips the named sub-fields.
+	//
 	// (d) A sub-graph body is the INNER execution's source text. It must reach
 	// the inner compile verbatim, so the whole sub-tree is exempt. See
 	// skipSubgraphBody for why this is keyed on the value's shape rather than on
@@ -88,7 +86,7 @@ func evaluateParams(input *types.Input, nodeType string) error {
 	env := exprx.BuildExprEnv(input, nil)
 
 	for param, value := range input.Params {
-		if exempt[param] {
+		if isBoundaryExempt(nodeType, param) {
 			continue
 		}
 		if skipBody && param == subgraphBodyParam {
@@ -98,10 +96,11 @@ func evaluateParams(input *types.Input, nodeType string) error {
 			evaluated any
 			err       error
 		)
-		if exemptKeys, hasSubFields := subFieldExempt[param]; hasSubFields {
+		if graph.HasEvaluableSubFields(nodeType, param) {
 			// This parameter has sub-field exemptions: traverse the array
-			// elements, skipping the named keys in each element map.
-			evaluated, err = evaluateParamWithSubFieldExemptions(value, env, exemptKeys)
+			// elements, skipping the handler-evaluated keys in each element map.
+			isExemptKey := func(key string) bool { return graph.IsEvaluableSubField(nodeType, param, key) }
+			evaluated, err = evaluateParamWithSubFieldExemptions(value, env, isExemptKey)
 		} else {
 			evaluated, err = evaluateParamValue(value, env)
 		}
@@ -155,30 +154,14 @@ func skipSubgraphBody(params map[string]any) bool {
 	return graph.DeclaresSubgraphBody(params)
 }
 
-// buildExemptSet returns the set of parameter names that should NOT be
-// evaluated at the boundary for the given node type.
+// isBoundaryExempt reports whether param of nodeType must NOT be evaluated at
+// the boundary: either the handler evaluates it itself (graph.IsEvaluableParam)
+// or it uses per-item roots that do not exist yet (perItemExemptParams).
 //
 // Note this is keyed on node type alone, so it cannot express the sub-graph
 // body exemption, which depends on the parameter VALUE -- see skipSubgraphBody.
-func buildExemptSet(nodeType string) map[string]bool {
-	evaluable := graph.EvaluableParams()
-	result := make(map[string]bool)
-
-	// (a) All parameters the handler evaluates itself.
-	if handlerEvals, ok := evaluable[nodeType]; ok {
-		for param := range handlerEvals {
-			result[param] = true
-		}
-	}
-
-	// (b) Per-item parameters whose env roots don't exist at boundary time.
-	if perItem, ok := perItemExemptParams[nodeType]; ok {
-		for param := range perItem {
-			result[param] = true
-		}
-	}
-
-	return result
+func isBoundaryExempt(nodeType, param string) bool {
+	return graph.IsEvaluableParam(nodeType, param) || perItemExemptParams[nodeType][param]
 }
 
 // evaluateParamWithSubFieldExemptions handles parameters where only specific
@@ -187,7 +170,7 @@ func buildExemptSet(nodeType string) map[string]bool {
 // handler, but rules[].output is a literal port name). The parameter is
 // expected to be []any of map[string]any; exempt keys within each element map
 // are preserved verbatim while other keys are recursively evaluated.
-func evaluateParamWithSubFieldExemptions(value any, env map[string]any, exemptKeys []string) (any, error) {
+func evaluateParamWithSubFieldExemptions(value any, env map[string]any, isExemptKey func(string) bool) (any, error) {
 	elems, ok := value.([]any)
 	if !ok {
 		// Not the expected array shape. Nothing rejects this earlier -- measured:
@@ -208,11 +191,6 @@ func evaluateParamWithSubFieldExemptions(value any, env map[string]any, exemptKe
 		return evaluateParamValue(value, env)
 	}
 
-	exempt := make(map[string]bool, len(exemptKeys))
-	for _, k := range exemptKeys {
-		exempt[k] = true
-	}
-
 	result := make([]any, len(elems))
 	for i, elem := range elems {
 		m, ok := elem.(map[string]any)
@@ -227,7 +205,7 @@ func evaluateParamWithSubFieldExemptions(value any, env map[string]any, exemptKe
 		}
 		newMap := make(map[string]any, len(m))
 		for k, child := range m {
-			if exempt[k] {
+			if isExemptKey(k) {
 				// Preserve verbatim — the handler evaluates this sub-field.
 				newMap[k] = child
 			} else {

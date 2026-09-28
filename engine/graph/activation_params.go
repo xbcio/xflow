@@ -71,10 +71,9 @@ func EvaluateActivationParams(g *Graph, nodeName, nodeType string, params map[st
 		env = map[string]any{"$config": map[string]any(nil), "$vars": map[string]any(nil)}
 	}
 
-	exempt := evaluableParams[nodeType]
 	out := make(map[string]any, len(params))
 	for name, value := range params {
-		if exempt[name] {
+		if IsEvaluableParam(nodeType, name) {
 			out[name] = value
 			continue
 		}

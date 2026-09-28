@@ -23,11 +23,10 @@ import (
 func validateTemplateForm(g *Graph) error {
 	for i := range g.nodes {
 		n := g.nodes[i]
-		hostSource := hostSourceParams[n.Type]
 		for param, value := range n.Parameters {
 			// A parameter holding host-language source is not a template, so the
 			// form rule does not apply -- see hostSourceParams.
-			if hostSource[param] {
+			if IsHostSourceParam(n.Type, param) {
 				continue
 			}
 			if err := rejectMalformedTemplate(n, param, value); err != nil {

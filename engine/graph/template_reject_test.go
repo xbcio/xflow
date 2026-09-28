@@ -30,11 +30,11 @@ func TestCompileAcceptsATemplateInAnEvaluatedParam(t *testing.T) {
 // it would be reclassified as handler-evaluated, and the boundary would then
 // skip it -- see execution/params.go's exemption derivation.
 func TestCronExpressionIsNotAnEvaluableParam(t *testing.T) {
-	if EvaluableParams()["xflow.trigger.cron"]["expression"] {
+	if IsEvaluableParam("xflow.trigger.cron", "expression") {
 		t.Error("xflow.trigger.cron's \"expression\" is a cron spec, not an expr; " +
 			"marking it handler-evaluated makes the boundary skip it")
 	}
-	if !EvaluableParams()["xflow.map"]["expression"] {
+	if !IsEvaluableParam("xflow.map", "expression") {
 		t.Error("xflow.map's \"expression\" IS handler-evaluated (per-item env); " +
 			"positive control for the assertion above")
 	}
@@ -139,7 +139,7 @@ func TestMalformedTemplateGateStillAppliesToFunctionCode(t *testing.T) {
 // the exact failure the compile-time gate exists to prevent.
 func TestHostSourceParamsAreExemptAtTheBoundary(t *testing.T) {
 	for nodeType, params := range hostSourceParams {
-		evaluable, known := EvaluableParams()[nodeType]
+		evaluable, known := evaluableParams[nodeType]
 		if !known {
 			t.Errorf("hostSourceParams[%q] has no EvaluableParams entry: the boundary "+
 				"would evaluate its parameters and RenderTemplate would see a value "+

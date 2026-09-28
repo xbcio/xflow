@@ -25,7 +25,9 @@ import (
 // vacuously green -- a classic false-test shape. The reverse probe confirms
 // this: removing the import must make the test fail.
 func TestEvaluableParamsCoversAllRegisteredTypes(t *testing.T) {
-	ep := graph.EvaluableParams()
+	// Enumerating the table itself is the point of this test, so it keeps the
+	// deprecated accessor rather than a per-(type, param) predicate.
+	ep := graph.EvaluableParams() //nolint:staticcheck // SA1019: coverage test enumerates the table
 
 	// Collect all registered types: action types from Types() and trigger-only
 	// types from TriggerTypes(). Some types appear in both (dual-registered),

@@ -421,8 +421,10 @@ func TestEvaluateParams_SwitchRulesConditionPreservedVerbatim(t *testing.T) {
 // entry to evaluableSubFields without wiring it here, this test fails —
 // preventing silent double evaluation for the new entry.
 func TestEvaluateParams_SubFieldExemptionCoverage(t *testing.T) {
-	subFields := graph.EvaluableSubFields()
-	evaluable := graph.EvaluableParams()
+	// Enumerating the tables is the point of this guard, so it keeps the
+	// deprecated accessors rather than per-(type, param) predicates.
+	subFields := graph.EvaluableSubFields() //nolint:staticcheck // SA1019: coverage guard enumerates the table
+	evaluable := graph.EvaluableParams()    //nolint:staticcheck // SA1019: coverage guard enumerates the table
 
 	for nodeType, params := range subFields {
 		for param := range params {
