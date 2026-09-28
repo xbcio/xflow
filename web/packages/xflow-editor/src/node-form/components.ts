@@ -1,19 +1,22 @@
 // Component contract targeted by compileNodeForm (C1).
 //
 // Component TYPE NAMES follow Doc B §5 (engine components from composer/form)
-// and Doc C §3 (host components registered by xflow-editor). The PROP SHAPES
-// below are C1's proposal, written before composer/form (B4) and the host
-// components (C2) exist. C3 reconciles them with the real components: either
-// the components accept these props, or compile.ts is adjusted to theirs.
-// `NODE_FORM_COMPONENT_PROPS` is the runtime mirror of these interfaces; the
-// C1 tests use it to prove every emitted prop is declared here.
+// and Doc C §3 (host components registered by xflow-editor, ./components/).
+// The PROP SHAPES below are the props compileNodeForm emits, reconciled with
+// the real components: composer/form (B4) for the engine types, the C2 host
+// components for the rest. Every props schema is strict (an unknown prop is
+// an ElementError), so the compile tests resolve every fixture against the
+// real registry (`createNodeFormRegistry`) instead of a stub.
 //
 // Conventions shared by every field component:
-// - `value` carries the primary binding (`{$bindState: ptr}` / `{$bindItem: f}`).
-// - `label` / `help` / `required` / `defaultHint` are the field chrome. A
-//   control placed in an ExpressionInput `literal` slot gets NO chrome: the
-//   ExpressionInput renders label, help and issues for both states.
-// - `required` is display-only (asterisk); enforcement is the `required` check.
+// - `value` carries the primary binding (`{$bindState: ptr}` / `{$bindItem: f}`);
+//   core strips bindings and `defaultHint` before the props schema sees them.
+// - `label` / `description` / `required` / `defaultHint` are the field chrome.
+//   A control placed in an ExpressionInput `literal` slot gets only `label`
+//   (+ `required`), kept for its accessible name and hidden visually: the
+//   ExpressionInput renders label, description and issues for both states.
+//   ObjectGroup in the literal slot gets no chrome (its title would repeat).
+// - `required` is display-only (marker); enforcement is the `required` check.
 // - `defaultHint` is display-only (Doc B §5, Doc C §5.2); never written.
 
 import type { ExpressionModeName, FieldType } from "./schema";
@@ -22,10 +25,10 @@ import type { ExpressionModeName, FieldType } from "./schema";
 export type Expr = Record<string, unknown>;
 export type Bound<T> = T | Expr;
 
+/** composer/form option (B4 `optionSchema`): primitive values only. */
 export interface OptionItem {
-  value: unknown;
+  value: string | number | boolean;
   label: string;
-  description?: string;
 }
 
 /** Port list item; also the shape of `context.ports` (Doc C §4.3). */
@@ -36,7 +39,7 @@ export interface PortItem {
 
 /**
  * Runtime shape guard metadata (Doc C §3.2). Honoured by `ShapeGuard` and by
- * template-mode `ExpressionInput`. Given the current value `v`:
+ * `ExpressionInput`. Given the current value `v`:
  * - `v === undefined`: render the control normally (unset is always fine).
  * - `v` is a string containing `${{ }}` / `{{ }}` and `type !== "string"`:
  *   template mode → ExpressionInput shows the fx state with the raw text;
@@ -56,10 +59,12 @@ export interface ShapeExpectation {
   values?: FieldType;
 }
 
+/** Field chrome accepted by every composer/form field and every host field. */
 interface FieldChrome {
   label?: string;
-  help?: string;
+  description?: string;
   required?: Bound<boolean>;
+  disabled?: boolean;
   defaultHint?: unknown;
 }
 
@@ -69,11 +74,11 @@ interface ValueProps {
 
 export interface NodeFormComponentProps {
   // ------------------------------------------------ engine (composer/form, B4)
-  Form: { layout: "vertical" | "horizontal" };
-  FieldGroup: { title: string; description?: string; collapsed?: boolean; groupKey: string };
+  Form: { layout?: "vertical" | "horizontal"; labelWidth?: number; title?: string };
+  FieldGroup: { title?: string; description?: string; collapsible?: boolean; defaultCollapsed?: boolean };
   Input: FieldChrome & ValueProps & { placeholder?: string };
-  /** `encoding: "base64"` = read-only summary + replace (Doc C §3 `base64`). */
-  TextArea: FieldChrome & ValueProps & { encoding?: "base64" };
+  /** Also the `base64` widget (B4 has no base64 summary mode; see compile.ts). */
+  TextArea: FieldChrome & ValueProps & { rows?: number };
   Password: FieldChrome & ValueProps;
   InputNumber: FieldChrome & ValueProps;
   Switch: FieldChrome & ValueProps;
@@ -81,13 +86,17 @@ export interface NodeFormComponentProps {
   Radio: FieldChrome & ValueProps & { options: Bound<OptionItem[]> };
   MultiSelect: FieldChrome & ValueProps & { options: Bound<OptionItem[]> };
   Tags: FieldChrome & ValueProps;
-  /** `valueType` names a registered component used as the value editor (a type ref, Doc B §5). */
-  KeyValue: FieldChrome & ValueProps & { valueType?: string };
-  ObjectGroup: FieldChrome & ValueProps;
+  /**
+   * `valueType` names a registered component used as the value editor (a
+   * type ref, Doc B §5); `valueProps` are that component's props.
+   */
+  KeyValue: FieldChrome & ValueProps & { valueType?: string; valueProps?: Record<string, unknown> };
+  /** No `required` / `disabled` in B4; title comes from `label`. */
+  ObjectGroup: { label?: string; description?: string; value: Expr; defaultHint?: unknown };
   ArrayTable: FieldChrome & ValueProps & { addText?: string };
   JsonEditor: FieldChrome & ValueProps;
-  /** `highlightTemplates: false` for host source (Doc C §4.1 `literal`). */
-  CodeEditor: FieldChrome & ValueProps & { language?: string; highlightTemplates?: boolean };
+  /** B4 has no highlighting, so `literal` mode needs no `highlightTemplates` flag. */
+  CodeEditor: FieldChrome & ValueProps & { language?: string };
 
   // ------------------------------------------------------ host (xflow-editor, C2)
   /**
@@ -99,22 +108,22 @@ export interface NodeFormComponentProps {
    * `mode: "pure"`: always an expression editor, no toggle, no slot.
    */
   ExpressionInput: FieldChrome &
-    ValueProps & { mode: "template" | "pure"; fxToggle: boolean; expect?: ShapeExpectation };
+    ValueProps & { mode: "template" | "pure"; fxToggle?: boolean; expect?: ShapeExpectation; placeholder?: string };
   /** `unit`: "string" = Go duration text; "ns"/"ms" = integer of that unit on the wire. */
   DurationInput: FieldChrome & ValueProps & { unit: "string" | "ns" | "ms" };
   /** RFC 3339 text. */
   DateTimeInput: FieldChrome & ValueProps;
   CronInput: FieldChrome & ValueProps;
   /** `credentials` reads `context.credentials: string[]` (workflow credential names). */
-  CredentialSelect: FieldChrome & ValueProps & { multiple: boolean; credentials: Bound<string[]> };
+  CredentialSelect: FieldChrome & ValueProps & { multiple: boolean; credentials?: Bound<string[]> };
   /** `ports` is static for fixed-port nodes, `{$state: "/$ctx/ports"}` for dynamic ones. */
-  PortSelect: FieldChrome & ValueProps & { ports: Bound<PortItem[]> };
+  PortSelect: FieldChrome & ValueProps & { ports?: Bound<PortItem[]> };
   /**
    * Rename control for `/name` (Doc C §4.2). `value` is a READ (`$state`),
    * not a binding: the component emits no patch and calls the editor's
    * rename callback, closed over at registration, on blur.
    */
-  NodeNameInput: { label?: string; help?: string; value: Expr };
+  NodeNameInput: { label?: string; description?: string; value: Expr };
   /** Wraps one non-template field; `observed` is a read of the guarded value. See ShapeExpectation. */
   ShapeGuard: { label?: string; observed: Expr; expect: ShapeExpectation; mode: ExpressionModeName };
   /** Static banner at the top of the form. */
@@ -160,58 +169,6 @@ export const NODE_FORM_COMPONENT_TYPES: readonly NodeFormComponentType[] = [
   ...ENGINE_COMPONENT_TYPES,
   ...HOST_COMPONENT_TYPES
 ];
-
-const CHROME = ["label", "help", "required", "defaultHint"] as const;
-const FIELD = [...CHROME, "value"] as const;
-
-/** Runtime mirror of NodeFormComponentProps: the prop keys each type may receive. */
-export const NODE_FORM_COMPONENT_PROPS: Readonly<Record<NodeFormComponentType, readonly string[]>> = {
-  Form: ["layout"],
-  FieldGroup: ["title", "description", "collapsed", "groupKey"],
-  Input: [...FIELD, "placeholder"],
-  TextArea: [...FIELD, "encoding"],
-  Password: FIELD,
-  InputNumber: FIELD,
-  Switch: FIELD,
-  Select: [...FIELD, "options"],
-  Radio: [...FIELD, "options"],
-  MultiSelect: [...FIELD, "options"],
-  Tags: FIELD,
-  KeyValue: [...FIELD, "valueType"],
-  ObjectGroup: FIELD,
-  ArrayTable: [...FIELD, "addText"],
-  JsonEditor: FIELD,
-  CodeEditor: [...FIELD, "language", "highlightTemplates"],
-  ExpressionInput: [...FIELD, "mode", "fxToggle", "expect"],
-  DurationInput: [...FIELD, "unit"],
-  DateTimeInput: FIELD,
-  CronInput: FIELD,
-  CredentialSelect: [...FIELD, "multiple", "credentials"],
-  PortSelect: [...FIELD, "ports"],
-  NodeNameInput: ["label", "help", "value"],
-  ShapeGuard: ["label", "observed", "expect", "mode"],
-  FormNotice: ["tone", "code", "message", "count"]
-};
-
-/** Props that name another component type (validateSpec `typeRefProps`, Doc B §5). */
-export const NODE_FORM_TYPE_REF_PROPS: Readonly<Partial<Record<NodeFormComponentType, readonly string[]>>> = {
-  KeyValue: ["valueType"]
-};
-
-/**
- * Recommended `bindings` value kinds (Doc B §5) for the `value` prop, which
- * drive "clear means unset" and the empty-container collapse (Doc B §6 rules
- * 1–2). Undeclared types are "scalar". JsonEditor and CredentialSelect stay
- * scalar because their value's kind depends on the field; they must emit
- * `undefined` (not `{}` / `[]`) when cleared.
- */
-export const NODE_FORM_BINDING_KINDS: Readonly<Partial<Record<NodeFormComponentType, Record<string, "scalar" | "array" | "object">>>> = {
-  MultiSelect: { value: "array" },
-  Tags: { value: "array" },
-  KeyValue: { value: "object" },
-  ObjectGroup: { value: "object" },
-  ArrayTable: { value: "array" }
-};
 
 /** Named slot of ExpressionInput holding the plain control (template mode). */
 export const EXPRESSION_LITERAL_SLOT = "literal";

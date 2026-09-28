@@ -32,7 +32,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > commonSchema 
       },
       "f.name": {
         "props": {
-          "help": "失焦时改名，并同步更新连线、pin_data、分组与依赖边中的引用",
+          "description": "失焦时改名，并同步更新连线、pin_data、分组与依赖边中的引用",
           "label": "名称",
           "value": {
             "$state": "/name",
@@ -83,26 +83,22 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > commonSchema 
       },
       "f.on_error:control": {
         "props": {
-          "help": "未设置时沿用工作流 settings.on_error",
+          "description": "未设置时沿用工作流 settings.on_error",
           "label": "错误处理",
           "options": [
             {
-              "description": "节点失败时终止执行",
               "label": "停止",
               "value": "stop",
             },
             {
-              "description": "把错误路由到 error 输出端口",
               "label": "错误端口",
               "value": "error_output",
             },
             {
-              "description": "把错误作为结果从 main 端口输出",
               "label": "主端口",
               "value": "main_output",
             },
             {
-              "description": "忽略错误继续执行",
               "label": "继续",
               "value": "continue",
             },
@@ -147,7 +143,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > commonSchema 
       },
       "f.retry.enabled:control": {
         "props": {
-          "help": "引擎目前不读取此字段，是否重试由最大尝试次数决定",
+          "description": "引擎目前不读取此字段，是否重试由最大尝试次数决定",
           "label": "启用",
           "value": {
             "$bindState": "/retry/enabled",
@@ -174,7 +170,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > commonSchema 
       "f.retry.initial_interval:control": {
         "props": {
           "defaultHint": 1000,
-          "help": "毫秒整数",
+          "description": "毫秒整数",
           "label": "初始间隔",
           "unit": "ms",
           "value": {
@@ -201,7 +197,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > commonSchema 
       },
       "f.retry.max_attempts:control": {
         "props": {
-          "help": "大于 0 时启用节点级重试；否则沿用工作流级重试",
+          "description": "大于 0 时启用节点级重试；否则沿用工作流级重试",
           "label": "最大尝试次数",
           "value": {
             "$bindState": "/retry/max_attempts",
@@ -228,7 +224,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > commonSchema 
       "f.retry.max_interval:control": {
         "props": {
           "defaultHint": 300000,
-          "help": "毫秒整数；单次等待另有 5 分钟上限",
+          "description": "毫秒整数；单次等待另有 5 分钟上限",
           "label": "最大间隔",
           "unit": "ms",
           "value": {
@@ -308,7 +304,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > commonSchema 
           "f.retry.multiplier",
         ],
         "props": {
-          "help": "覆盖工作流 settings.retry；未设置时继承",
+          "description": "覆盖工作流 settings.retry；未设置时继承",
           "label": "重试",
           "value": {
             "$bindState": "/retry",
@@ -370,7 +366,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > commonSchema 
           "f.runner_selector.match_labels",
         ],
         "props": {
-          "help": "节点级只支持 match_labels；mode 只能写在工作流级",
+          "description": "节点级只支持 match_labels；mode 只能写在工作流级",
           "label": "Runner 选择",
           "value": {
             "$bindState": "/runner_selector",
@@ -396,7 +392,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > commonSchema 
       },
       "f.timeout:control": {
         "props": {
-          "help": "单次执行的超时（线上为纳秒整数）；未设置继承引擎默认值，负值表示不限",
+          "description": "单次执行的超时（线上为纳秒整数）；未设置继承引擎默认值，负值表示不限",
           "label": "超时",
           "unit": "ns",
           "value": {
@@ -424,8 +420,8 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > commonSchema 
           "f.runner_selector",
         ],
         "props": {
-          "collapsed": true,
-          "groupKey": "execution",
+          "collapsible": true,
+          "defaultCollapsed": true,
           "title": "执行策略",
         },
         "type": "FieldGroup",
@@ -437,7 +433,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > commonSchema 
           "f.notes",
         ],
         "props": {
-          "groupKey": "general",
+          "collapsible": true,
           "title": "通用",
         },
         "type": "FieldGroup",
@@ -465,12 +461,12 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.databas
     "elements": {
       "f.parameters.columns": {
         "props": {
+          "description": "Columns to select (default: all)",
           "expect": {
             "item": "string",
             "type": "array",
           },
           "fxToggle": true,
-          "help": "Columns to select (default: all)",
           "label": "Columns",
           "mode": "template",
           "value": {
@@ -490,6 +486,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.databas
       },
       "f.parameters.columns:control": {
         "props": {
+          "label": "Columns",
           "value": {
             "$bindState": "/parameters/columns",
           },
@@ -504,11 +501,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.databas
           },
         ],
         "props": {
+          "description": "Credential reference name for the DB connection",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Credential reference name for the DB connection",
           "label": "Credential",
           "mode": "template",
           "required": true,
@@ -528,7 +525,9 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.databas
           "credentials": {
             "$state": "/$ctx/credentials",
           },
+          "label": "Credential",
           "multiple": false,
+          "required": true,
           "value": {
             "$bindState": "/parameters/credential",
           },
@@ -551,11 +550,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.databas
           },
         ],
         "props": {
+          "description": "Row data for insert/update operations; an array of row objects for insert_many",
           "expect": {
             "type": "object",
           },
           "fxToggle": true,
-          "help": "Row data for insert/update operations; an array of row objects for insert_many",
           "label": "Data",
           "mode": "template",
           "required": {
@@ -591,6 +590,19 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.databas
       },
       "f.parameters.data:control": {
         "props": {
+          "label": "Data",
+          "required": {
+            "$cond": {
+              "$state": "/parameters/operation",
+              "in": [
+                "insert",
+                "insert_many",
+                "update",
+              ],
+            },
+            "else": false,
+            "then": true,
+          },
           "value": {
             "$bindState": "/parameters/data",
           },
@@ -599,11 +611,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.databas
       },
       "f.parameters.limit": {
         "props": {
+          "description": "Max rows to return for select",
           "expect": {
             "type": "number",
           },
           "fxToggle": true,
-          "help": "Max rows to return for select",
           "label": "Limit",
           "mode": "template",
           "value": {
@@ -623,6 +635,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.databas
       },
       "f.parameters.limit:control": {
         "props": {
+          "label": "Limit",
           "value": {
             "$bindState": "/parameters/limit",
           },
@@ -637,11 +650,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.databas
           },
         ],
         "props": {
+          "description": "DB operation: "select"/"insert"/"update"/"delete"/"insert_many"",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "DB operation: "select"/"insert"/"update"/"delete"/"insert_many"",
           "label": "Operation",
           "mode": "template",
           "required": true,
@@ -658,6 +671,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.databas
       },
       "f.parameters.operation:control": {
         "props": {
+          "label": "Operation",
           "options": [
             {
               "label": "select",
@@ -680,6 +694,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.databas
               "value": "insert_many",
             },
           ],
+          "required": true,
           "value": {
             "$bindState": "/parameters/operation",
           },
@@ -715,11 +730,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.databas
           },
         ],
         "props": {
+          "description": "Target table name",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Target table name",
           "label": "Table",
           "mode": "template",
           "required": true,
@@ -736,6 +751,8 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.databas
       },
       "f.parameters.table:control": {
         "props": {
+          "label": "Table",
+          "required": true,
           "value": {
             "$bindState": "/parameters/table",
           },
@@ -757,11 +774,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.databas
           },
         ],
         "props": {
+          "description": "Filter conditions (key-value pairs)",
           "expect": {
             "type": "object",
           },
           "fxToggle": true,
-          "help": "Filter conditions (key-value pairs)",
           "label": "Where",
           "mode": "template",
           "required": {
@@ -796,6 +813,18 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.databas
       },
       "f.parameters.where:control": {
         "props": {
+          "label": "Where",
+          "required": {
+            "$cond": {
+              "$state": "/parameters/operation",
+              "in": [
+                "update",
+                "delete",
+              ],
+            },
+            "else": false,
+            "then": true,
+          },
           "value": {
             "$bindState": "/parameters/where",
           },
@@ -822,7 +851,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.databas
           "f.parameters.limit",
         ],
         "props": {
-          "groupKey": "",
+          "collapsible": true,
           "title": "参数",
         },
         "type": "FieldGroup",
@@ -842,11 +871,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
     "elements": {
       "f.parameters.authentication": {
         "props": {
+          "description": "Credential reference name",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Credential reference name",
           "label": "Authentication",
           "mode": "template",
           "value": {
@@ -865,6 +894,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
           "credentials": {
             "$state": "/$ctx/credentials",
           },
+          "label": "Authentication",
           "multiple": false,
           "value": {
             "$bindState": "/parameters/authentication",
@@ -874,11 +904,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
       },
       "f.parameters.body": {
         "props": {
+          "description": "Request body, marshalled to JSON. Ignored when mode=raw",
           "expect": {
             "type": "object",
           },
           "fxToggle": true,
-          "help": "Request body, marshalled to JSON. Ignored when mode=raw",
           "label": "Body",
           "mode": "template",
           "value": {
@@ -901,6 +931,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
       },
       "f.parameters.body:control": {
         "props": {
+          "label": "Body",
           "value": {
             "$bindState": "/parameters/body",
           },
@@ -909,11 +940,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
       },
       "f.parameters.body_b64": {
         "props": {
+          "description": "Request body as base64-encoded bytes, sent verbatim with no Content-Type added. Only read when mode=raw",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Request body as base64-encoded bytes, sent verbatim with no Content-Type added. Only read when mode=raw",
           "label": "Raw Body (base64)",
           "mode": "template",
           "value": {
@@ -933,7 +964,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
       },
       "f.parameters.body_b64:control": {
         "props": {
-          "encoding": "base64",
+          "label": "Raw Body (base64)",
           "value": {
             "$bindState": "/parameters/body_b64",
           },
@@ -949,12 +980,12 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
           },
         ],
         "props": {
+          "description": "Request headers",
           "expect": {
             "type": "object",
             "values": "string",
           },
           "fxToggle": true,
-          "help": "Request headers",
           "label": "Headers",
           "mode": "template",
           "value": {
@@ -970,6 +1001,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
       },
       "f.parameters.headers:control": {
         "props": {
+          "label": "Headers",
           "value": {
             "$bindState": "/parameters/headers",
           },
@@ -978,11 +1010,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
       },
       "f.parameters.method": {
         "props": {
+          "description": "HTTP method: GET/POST/PUT/DELETE/PATCH",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "HTTP method: GET/POST/PUT/DELETE/PATCH",
           "label": "Method",
           "mode": "template",
           "value": {
@@ -999,6 +1031,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
       "f.parameters.method:control": {
         "props": {
           "defaultHint": "GET",
+          "label": "Method",
           "options": [
             {
               "label": "GET",
@@ -1029,11 +1062,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
       },
       "f.parameters.mode": {
         "props": {
+          "description": "Payload encoding: "json" (default, body is marshalled and the response parsed) or "raw" (body in/out as opaque base64 bytes, every status is a result)",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Payload encoding: "json" (default, body is marshalled and the response parsed) or "raw" (body in/out as opaque base64 bytes, every status is a result)",
           "label": "Mode",
           "mode": "template",
           "value": {
@@ -1049,14 +1082,13 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
       },
       "f.parameters.mode:control": {
         "props": {
+          "label": "Mode",
           "options": [
             {
-              "description": "Body marshalled to JSON; response parsed; 4xx is a node error",
               "label": "JSON",
               "value": "json",
             },
             {
-              "description": "Body in and out as base64 bytes; every status is a result",
               "label": "Raw",
               "value": "raw",
             },
@@ -1069,11 +1101,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
       },
       "f.parameters.options": {
         "props": {
+          "description": "Additional options (timeout, max_response_bytes, disable_redirect, insecure_skip_verify)",
           "expect": {
             "type": "object",
           },
           "fxToggle": true,
-          "help": "Additional options (timeout, max_response_bytes, disable_redirect, insecure_skip_verify)",
           "label": "Options",
           "mode": "template",
           "value": {
@@ -1089,6 +1121,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
       },
       "f.parameters.options:control": {
         "props": {
+          "label": "Options",
           "value": {
             "$bindState": "/parameters/options",
           },
@@ -1104,12 +1137,12 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
           },
         ],
         "props": {
+          "description": "URL query parameters",
           "expect": {
             "type": "object",
             "values": "string",
           },
           "fxToggle": true,
-          "help": "URL query parameters",
           "label": "Query Params",
           "mode": "template",
           "value": {
@@ -1125,6 +1158,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
       },
       "f.parameters.query:control": {
         "props": {
+          "label": "Query Params",
           "value": {
             "$bindState": "/parameters/query",
           },
@@ -1148,11 +1182,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
           },
         ],
         "props": {
+          "description": "Target URL",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Target URL",
           "label": "URL",
           "mode": "template",
           "required": true,
@@ -1169,6 +1203,8 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
       },
       "f.parameters.url:control": {
         "props": {
+          "label": "URL",
+          "required": true,
           "value": {
             "$bindState": "/parameters/url",
           },
@@ -1190,8 +1226,8 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
           "f.parameters.options",
         ],
         "props": {
-          "collapsed": true,
-          "groupKey": "advanced",
+          "collapsible": true,
+          "defaultCollapsed": true,
           "title": "Advanced",
         },
         "type": "FieldGroup",
@@ -1208,7 +1244,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
           "f.parameters.query",
         ],
         "props": {
-          "groupKey": "request",
+          "collapsible": true,
           "title": "Request",
         },
         "type": "FieldGroup",
@@ -1228,11 +1264,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.map sna
     "elements": {
       "f.parameters.batch_size": {
         "props": {
+          "description": "Number of items processed per batch",
           "expect": {
             "type": "number",
           },
           "fxToggle": true,
-          "help": "Number of items processed per batch",
           "label": "Batch Size",
           "mode": "template",
           "value": {
@@ -1249,6 +1285,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.map sna
       "f.parameters.batch_size:control": {
         "props": {
           "defaultHint": 1,
+          "label": "Batch Size",
           "value": {
             "$bindState": "/parameters/batch_size",
           },
@@ -1280,7 +1317,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.map sna
           },
         ],
         "props": {
-          "help": "Sub-graph executed once per item; mutually exclusive with expression, and exactly one of the two is required",
+          "description": "Sub-graph executed once per item; mutually exclusive with expression, and exactly one of the two is required",
           "label": "Body",
           "value": {
             "$bindState": "/parameters/body",
@@ -1290,11 +1327,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.map sna
       },
       "f.parameters.body_concurrency": {
         "props": {
+          "description": "Maximum items of one batch running at the same time; 1 (the default) runs them serially",
           "expect": {
             "type": "number",
           },
           "fxToggle": true,
-          "help": "Maximum items of one batch running at the same time; 1 (the default) runs them serially",
           "label": "Body Concurrency",
           "mode": "template",
           "value": {
@@ -1311,6 +1348,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.map sna
       "f.parameters.body_concurrency:control": {
         "props": {
           "defaultHint": 1,
+          "label": "Body Concurrency",
           "value": {
             "$bindState": "/parameters/body_concurrency",
           },
@@ -1319,11 +1357,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.map sna
       },
       "f.parameters.continue_on_error": {
         "props": {
+          "description": "Continue iteration when an item fails",
           "expect": {
             "type": "boolean",
           },
           "fxToggle": true,
-          "help": "Continue iteration when an item fails",
           "label": "Continue On Error",
           "mode": "template",
           "value": {
@@ -1340,6 +1378,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.map sna
       "f.parameters.continue_on_error:control": {
         "props": {
           "defaultHint": false,
+          "label": "Continue On Error",
           "value": {
             "$bindState": "/parameters/continue_on_error",
           },
@@ -1357,11 +1396,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.map sna
           },
         ],
         "props": {
+          "description": "Expression evaluated once per item over $item/$index/$items; mutually exclusive with body, and exactly one of the two is required",
           "expect": {
             "type": "string",
           },
           "fxToggle": false,
-          "help": "Expression evaluated once per item over $item/$index/$items; mutually exclusive with body, and exactly one of the two is required",
           "label": "Expression",
           "mode": "pure",
           "value": {
@@ -1385,11 +1424,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.map sna
           },
         ],
         "props": {
+          "description": "Expression that evaluates to the array to iterate",
           "expect": {
             "type": "string",
           },
           "fxToggle": false,
-          "help": "Expression that evaluates to the array to iterate",
           "label": "Items",
           "mode": "pure",
           "required": true,
@@ -1435,7 +1474,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.map sna
           "f.parameters.expression",
         ],
         "props": {
-          "groupKey": "",
+          "collapsible": true,
           "title": "参数",
         },
         "type": "FieldGroup",
@@ -1465,11 +1504,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
           },
         ],
         "props": {
+          "description": "Content-addressable digest (sha256:<hex>) of the script in the artifact store",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Content-addressable digest (sha256:<hex>) of the script in the artifact store",
           "label": "Artifact Digest",
           "mode": "template",
           "value": {
@@ -1485,6 +1524,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
       },
       "f.parameters.artifact_digest:control": {
         "props": {
+          "label": "Artifact Digest",
           "value": {
             "$bindState": "/parameters/artifact_digest",
           },
@@ -1517,8 +1557,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
           },
         ],
         "props": {
-          "encoding": "base64",
-          "help": "JS source (js) or base64 wasm module (wasm); omit when artifact_digest is set",
+          "description": "JS source (js) or base64 wasm module (wasm); omit when artifact_digest is set",
           "label": "Code",
           "value": {
             "$bindState": "/parameters/code",
@@ -1539,8 +1578,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
           },
         ],
         "props": {
-          "help": "JS source (js) or base64 wasm module (wasm); omit when artifact_digest is set",
-          "highlightTemplates": false,
+          "description": "JS source (js) or base64 wasm module (wasm); omit when artifact_digest is set",
           "label": "Code",
           "language": "javascript",
           "value": {
@@ -1555,12 +1593,12 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
       },
       "f.parameters.credentials": {
         "props": {
+          "description": "Declared credential names injected as $credentials",
           "expect": {
             "item": "string",
             "type": "array",
           },
           "fxToggle": true,
-          "help": "Declared credential names injected as $credentials",
           "label": "Credentials",
           "mode": "template",
           "value": {
@@ -1579,6 +1617,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
           "credentials": {
             "$state": "/$ctx/credentials",
           },
+          "label": "Credentials",
           "multiple": true,
           "value": {
             "$bindState": "/parameters/credentials",
@@ -1594,11 +1633,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
           },
         ],
         "props": {
+          "description": "Language family: js | wasm (no default — choose explicitly)",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Language family: js | wasm (no default — choose explicitly)",
           "label": "Language",
           "mode": "template",
           "required": true,
@@ -1615,17 +1654,18 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
       },
       "f.parameters.language:control": {
         "props": {
+          "label": "Language",
           "options": [
             {
               "label": "JavaScript",
               "value": "js",
             },
             {
-              "description": "Base64 wasip1 module",
               "label": "WebAssembly",
               "value": "wasm",
             },
           ],
+          "required": true,
           "value": {
             "$bindState": "/parameters/language",
           },
@@ -1634,12 +1674,12 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
       },
       "f.parameters.roots": {
         "props": {
+          "description": "Expression roots the script reads; omit to send the whole environment",
           "expect": {
             "item": "string",
             "type": "array",
           },
           "fxToggle": true,
-          "help": "Expression roots the script reads; omit to send the whole environment",
           "label": "Roots",
           "mode": "template",
           "value": {
@@ -1655,6 +1695,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
       },
       "f.parameters.roots:control": {
         "props": {
+          "label": "Roots",
           "value": {
             "$bindState": "/parameters/roots",
           },
@@ -1669,11 +1710,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
           },
         ],
         "props": {
+          "description": "Engine: js->goja|qjs, wasm->wazero|wazero-reactor (no default — choose explicitly)",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Engine: js->goja|qjs, wasm->wazero|wazero-reactor (no default — choose explicitly)",
           "label": "Runtime",
           "mode": "template",
           "required": true,
@@ -1690,6 +1731,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
       },
       "f.parameters.runtime:control": {
         "props": {
+          "label": "Runtime",
           "options": {
             "$cond": {
               "$state": "/parameters/language",
@@ -1702,12 +1744,10 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
               },
               "else": [
                 {
-                  "description": "Fastest cold start; cannot interrupt tight loops",
                   "label": "goja",
                   "value": "goja",
                 },
                 {
-                  "description": "Slower first load; genuine mid-execution termination",
                   "label": "QuickJS",
                   "value": "qjs",
                 },
@@ -1716,7 +1756,6 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
                   "value": "wazero",
                 },
                 {
-                  "description": "Pooled reactor-mode guest instances",
                   "label": "wazero (reactor)",
                   "value": "wazero-reactor",
                 },
@@ -1727,7 +1766,6 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
                   "value": "wazero",
                 },
                 {
-                  "description": "Pooled reactor-mode guest instances",
                   "label": "wazero (reactor)",
                   "value": "wazero-reactor",
                 },
@@ -1735,17 +1773,16 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
             },
             "then": [
               {
-                "description": "Fastest cold start; cannot interrupt tight loops",
                 "label": "goja",
                 "value": "goja",
               },
               {
-                "description": "Slower first load; genuine mid-execution termination",
                 "label": "QuickJS",
                 "value": "qjs",
               },
             ],
           },
+          "required": true,
           "value": {
             "$bindState": "/parameters/runtime",
           },
@@ -1786,7 +1823,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
           "f.parameters.roots",
         ],
         "props": {
-          "groupKey": "environment",
+          "collapsible": true,
           "title": "Environment",
         },
         "type": "FieldGroup",
@@ -1799,7 +1836,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
           "f.parameters.artifact_digest",
         ],
         "props": {
-          "groupKey": "source",
+          "collapsible": true,
           "title": "Source",
         },
         "type": "FieldGroup",
@@ -1819,11 +1856,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.switch 
     "elements": {
       "f.parameters.default_output": {
         "props": {
+          "description": "Port name used when no rule matches",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Port name used when no rule matches",
           "label": "Default Output",
           "mode": "template",
           "value": {
@@ -1839,6 +1876,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.switch 
       },
       "f.parameters.default_output:control": {
         "props": {
+          "label": "Default Output",
           "ports": {
             "$state": "/$ctx/ports",
           },
@@ -1867,11 +1905,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.switch 
           },
         ],
         "props": {
+          "description": "Expression for expression mode",
           "expect": {
             "type": "string",
           },
           "fxToggle": false,
-          "help": "Expression for expression mode",
           "label": "Expression",
           "mode": "pure",
           "required": {
@@ -1900,11 +1938,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.switch 
           },
         ],
         "props": {
+          "description": "Routing mode: "rules" or "expression"",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Routing mode: "rules" or "expression"",
           "label": "Mode",
           "mode": "template",
           "required": true,
@@ -1921,18 +1959,18 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.switch 
       },
       "f.parameters.mode:control": {
         "props": {
+          "label": "Mode",
           "options": [
             {
-              "description": "First rule whose condition holds picks the output",
               "label": "Rules",
               "value": "rules",
             },
             {
-              "description": "Expression result is the output port name",
               "label": "Expression",
               "value": "expression",
             },
           ],
+          "required": true,
           "value": {
             "$bindState": "/parameters/mode",
           },
@@ -1947,12 +1985,12 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.switch 
           },
         ],
         "props": {
+          "description": "List of output port names (dynamic)",
           "expect": {
             "item": "string",
             "type": "array",
           },
           "fxToggle": true,
-          "help": "List of output port names (dynamic)",
           "label": "Outputs",
           "mode": "template",
           "required": true,
@@ -1969,6 +2007,8 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.switch 
       },
       "f.parameters.outputs:control": {
         "props": {
+          "label": "Outputs",
+          "required": true,
           "value": {
             "$bindState": "/parameters/outputs",
           },
@@ -1977,12 +2017,12 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.switch 
       },
       "f.parameters.rules": {
         "props": {
+          "description": "Rule list for rules mode",
           "expect": {
             "item": "object",
             "type": "array",
           },
           "fxToggle": true,
-          "help": "Rule list for rules mode",
           "label": "Rules",
           "mode": "template",
           "value": {
@@ -2010,6 +2050,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.switch 
         ],
         "props": {
           "addText": "添加",
+          "label": "Rules",
           "value": {
             "$bindState": "/parameters/rules",
           },
@@ -2030,11 +2071,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.switch 
           },
         ],
         "props": {
+          "description": "Boolean expression; a rule with an empty condition is skipped",
           "expect": {
             "type": "string",
           },
           "fxToggle": false,
-          "help": "Boolean expression; a rule with an empty condition is skipped",
           "label": "Condition",
           "mode": "pure",
           "value": {
@@ -2045,11 +2086,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.switch 
       },
       "f.parameters.rules[].output": {
         "props": {
+          "description": "Output port taken when condition holds; a rule with an empty output is skipped",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Output port taken when condition holds; a rule with an empty output is skipped",
           "label": "Output",
           "mode": "template",
           "value": {
@@ -2065,6 +2106,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.switch 
       },
       "f.parameters.rules[].output:control": {
         "props": {
+          "label": "Output",
           "ports": {
             "$state": "/$ctx/ports",
           },
@@ -2092,7 +2134,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.switch 
           "f.parameters.default_output",
         ],
         "props": {
-          "groupKey": "",
+          "collapsible": true,
           "title": "参数",
         },
         "type": "FieldGroup",
@@ -2125,11 +2167,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.transfo
           },
         ],
         "props": {
+          "description": "Expression that evaluates to the array to aggregate",
           "expect": {
             "type": "string",
           },
           "fxToggle": false,
-          "help": "Expression that evaluates to the array to aggregate",
           "label": "Items",
           "mode": "pure",
           "required": true,
@@ -2147,12 +2189,12 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.transfo
           },
         ],
         "props": {
+          "description": "Aggregate operations",
           "expect": {
             "item": "object",
             "type": "array",
           },
           "fxToggle": true,
-          "help": "Aggregate operations",
           "label": "Operations",
           "mode": "template",
           "required": true,
@@ -2175,6 +2217,8 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.transfo
         ],
         "props": {
           "addText": "添加",
+          "label": "Operations",
+          "required": true,
           "value": {
             "$bindState": "/parameters/operations",
           },
@@ -2192,11 +2236,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.transfo
           },
         ],
         "props": {
+          "description": "Output field name",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Output field name",
           "label": "As",
           "mode": "template",
           "required": true,
@@ -2213,6 +2257,8 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.transfo
       },
       "f.parameters.operations[].as:control": {
         "props": {
+          "label": "As",
+          "required": true,
           "value": {
             "$bindItem": "as",
           },
@@ -2221,11 +2267,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.transfo
       },
       "f.parameters.operations[].field": {
         "props": {
+          "description": "Item field to sum or average",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Item field to sum or average",
           "label": "Field",
           "mode": "template",
           "value": {
@@ -2249,6 +2295,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.transfo
       },
       "f.parameters.operations[].field:control": {
         "props": {
+          "label": "Field",
           "value": {
             "$bindItem": "field",
           },
@@ -2283,6 +2330,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.transfo
       },
       "f.parameters.operations[].kind:control": {
         "props": {
+          "label": "Kind",
           "options": [
             {
               "label": "Count",
@@ -2301,6 +2349,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.transfo
               "value": "average",
             },
           ],
+          "required": true,
           "value": {
             "$bindItem": "kind",
           },
@@ -2322,7 +2371,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.transfo
           "f.parameters.operations",
         ],
         "props": {
-          "groupKey": "",
+          "collapsible": true,
           "title": "参数",
         },
         "type": "FieldGroup",
@@ -2342,11 +2391,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
     "elements": {
       "f.parameters.aggregate": {
         "props": {
+          "description": "Optional partition batch aggregation (abridged; see kafka.go)",
           "expect": {
             "type": "object",
           },
           "fxToggle": true,
-          "help": "Optional partition batch aggregation (abridged; see kafka.go)",
           "label": "Aggregate",
           "mode": "template",
           "value": {
@@ -2362,11 +2411,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.aggregate.by": {
         "props": {
+          "description": "Batch key; only "partition" is supported (the default)",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Batch key; only "partition" is supported (the default)",
           "label": "By",
           "mode": "template",
           "value": {
@@ -2382,6 +2431,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.aggregate.by:control": {
         "props": {
+          "label": "By",
           "options": [
             {
               "label": "partition",
@@ -2406,11 +2456,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
           },
         ],
         "props": {
+          "description": "Overflow topic; read only when on_overflow is dead_letter",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Overflow topic; read only when on_overflow is dead_letter",
           "label": "Dead Letter Topic",
           "mode": "template",
           "required": {
@@ -2438,6 +2488,15 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.aggregate.dead_letter_topic:control": {
         "props": {
+          "label": "Dead Letter Topic",
+          "required": {
+            "$cond": {
+              "$state": "/parameters/aggregate/on_overflow",
+              "eq": "dead_letter",
+            },
+            "else": false,
+            "then": true,
+          },
           "value": {
             "$bindState": "/parameters/aggregate/dead_letter_topic",
           },
@@ -2446,11 +2505,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.aggregate.dedup": {
         "props": {
+          "description": "Deduplication unit; only "message" is supported (the default)",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Deduplication unit; only "message" is supported (the default)",
           "label": "Dedup",
           "mode": "template",
           "value": {
@@ -2466,6 +2525,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.aggregate.dedup:control": {
         "props": {
+          "label": "Dedup",
           "options": [
             {
               "label": "message",
@@ -2480,11 +2540,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.aggregate.enabled": {
         "props": {
+          "description": "Aggregation is off unless this is true; every other field is ignored while it is off",
           "expect": {
             "type": "boolean",
           },
           "fxToggle": true,
-          "help": "Aggregation is off unless this is true; every other field is ignored while it is off",
           "label": "Enabled",
           "mode": "template",
           "value": {
@@ -2500,6 +2560,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.aggregate.enabled:control": {
         "props": {
+          "label": "Enabled",
           "value": {
             "$bindState": "/parameters/aggregate/enabled",
           },
@@ -2518,11 +2579,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
           },
         ],
         "props": {
+          "description": "Positive duration; defaults to 1s in entry-seed mode and 100ms otherwise",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Positive duration; defaults to 1s in entry-seed mode and 100ms otherwise",
           "label": "Flush Interval",
           "mode": "template",
           "value": {
@@ -2538,6 +2599,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.aggregate.flush_interval:control": {
         "props": {
+          "label": "Flush Interval",
           "unit": "string",
           "value": {
             "$bindState": "/parameters/aggregate/flush_interval",
@@ -2547,11 +2609,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.aggregate.max_size": {
         "props": {
+          "description": "Records per batch; unset or non-positive means 100",
           "expect": {
             "type": "number",
           },
           "fxToggle": true,
-          "help": "Records per batch; unset or non-positive means 100",
           "label": "Max Size",
           "mode": "template",
           "value": {
@@ -2567,6 +2629,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.aggregate.max_size:control": {
         "props": {
+          "label": "Max Size",
           "value": {
             "$bindState": "/parameters/aggregate/max_size",
           },
@@ -2575,11 +2638,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.aggregate.on_overflow": {
         "props": {
+          "description": "Policy when a partition reaches its retained bound; unset means discard",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Policy when a partition reaches its retained bound; unset means discard",
           "label": "On Overflow",
           "mode": "template",
           "value": {
@@ -2595,19 +2658,17 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.aggregate.on_overflow:control": {
         "props": {
+          "label": "On Overflow",
           "options": [
             {
-              "description": "Drop the arriving record (counted and logged)",
               "label": "Discard",
               "value": "discard",
             },
             {
-              "description": "Halt fetching for the whole assignment until the partition drains",
               "label": "Block",
               "value": "block",
             },
             {
-              "description": "Republish to dead_letter_topic before advancing the offset",
               "label": "Dead Letter",
               "value": "dead_letter",
             },
@@ -2664,6 +2725,8 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.brokers:control": {
         "props": {
+          "label": "Brokers",
+          "required": true,
           "value": {
             "$bindState": "/parameters/brokers",
           },
@@ -2698,6 +2761,8 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.group:control": {
         "props": {
+          "label": "Group",
+          "required": true,
           "value": {
             "$bindState": "/parameters/group",
           },
@@ -2726,6 +2791,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       "f.parameters.max_inflight:control": {
         "props": {
           "defaultHint": 64,
+          "label": "Max Inflight",
           "value": {
             "$bindState": "/parameters/max_inflight",
           },
@@ -2734,11 +2800,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.message_schema": {
         "props": {
+          "description": "Optional message validation (abridged; see kafka.go)",
           "expect": {
             "type": "object",
           },
           "fxToggle": true,
-          "help": "Optional message validation (abridged; see kafka.go)",
           "label": "Message Schema",
           "mode": "template",
           "value": {
@@ -2764,11 +2830,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
           },
         ],
         "props": {
+          "description": "Read only when on_invalid is dead_letter",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Read only when on_invalid is dead_letter",
           "label": "Dead Letter Topic",
           "mode": "template",
           "required": {
@@ -2796,6 +2862,15 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.message_schema.dead_letter_topic:control": {
         "props": {
+          "label": "Dead Letter Topic",
+          "required": {
+            "$cond": {
+              "$state": "/parameters/message_schema/on_invalid",
+              "eq": "dead_letter",
+            },
+            "else": false,
+            "then": true,
+          },
           "value": {
             "$bindState": "/parameters/message_schema/dead_letter_topic",
           },
@@ -2804,11 +2879,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.message_schema.on_invalid": {
         "props": {
+          "description": "Policy for an invalid message; unset means discard",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Policy for an invalid message; unset means discard",
           "label": "On Invalid",
           "mode": "template",
           "value": {
@@ -2824,19 +2899,17 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.message_schema.on_invalid:control": {
         "props": {
+          "label": "On Invalid",
           "options": [
             {
-              "description": "Commit the offset and drop the message (counted and logged)",
               "label": "Discard",
               "value": "discard",
             },
             {
-              "description": "Withhold the commit so Kafka redelivers; blocks the partition",
               "label": "Fail",
               "value": "fail",
             },
             {
-              "description": "Republish to dead_letter_topic, then commit",
               "label": "Dead Letter",
               "value": "dead_letter",
             },
@@ -2849,12 +2922,12 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.message_schema.required_fields": {
         "props": {
+          "description": "Top-level keys every message value must carry; an empty list disables validation",
           "expect": {
             "item": "string",
             "type": "array",
           },
           "fxToggle": true,
-          "help": "Top-level keys every message value must carry; an empty list disables validation",
           "label": "Required Fields",
           "mode": "template",
           "value": {
@@ -2870,6 +2943,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.message_schema.required_fields:control": {
         "props": {
+          "label": "Required Fields",
           "value": {
             "$bindState": "/parameters/message_schema/required_fields",
           },
@@ -2911,39 +2985,33 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       "f.parameters.start_offset:control": {
         "props": {
           "defaultHint": "latest",
+          "label": "Start Offset",
           "options": [
             {
-              "description": "Only records produced after the group first joins",
               "label": "Latest",
               "value": "latest",
             },
             {
-              "description": "From the oldest retained record",
               "label": "Earliest",
               "value": "earliest",
             },
             {
-              "description": "Alias of latest",
               "label": "Last",
               "value": "last",
             },
             {
-              "description": "Alias of latest",
               "label": "Newest",
               "value": "newest",
             },
             {
-              "description": "Alias of earliest",
               "label": "First",
               "value": "first",
             },
             {
-              "description": "Alias of earliest",
               "label": "Oldest",
               "value": "oldest",
             },
             {
-              "description": "Alias of earliest",
               "label": "Beginning",
               "value": "beginning",
             },
@@ -2982,6 +3050,8 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.topic:control": {
         "props": {
+          "label": "Topic",
+          "required": true,
           "value": {
             "$bindState": "/parameters/topic",
           },
@@ -2990,11 +3060,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.tuning": {
         "props": {
+          "description": "Optional consumer tuning (abridged; see kafka.go)",
           "expect": {
             "type": "object",
           },
           "fxToggle": true,
-          "help": "Optional consumer tuning (abridged; see kafka.go)",
           "label": "Tuning",
           "mode": "template",
           "value": {
@@ -3039,6 +3109,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.tuning.dial_timeout:control": {
         "props": {
+          "label": "Dial Timeout",
           "unit": "string",
           "value": {
             "$bindState": "/parameters/tuning/dial_timeout",
@@ -3071,11 +3142,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
           },
         ],
         "props": {
+          "description": "Default 10000000",
           "expect": {
             "type": "number",
           },
           "fxToggle": true,
-          "help": "Default 10000000",
           "label": "Fetch Max Bytes",
           "mode": "template",
           "value": {
@@ -3091,6 +3162,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.tuning.fetch_max_bytes:control": {
         "props": {
+          "label": "Fetch Max Bytes",
           "value": {
             "$bindState": "/parameters/tuning/fetch_max_bytes",
           },
@@ -3122,11 +3194,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
           },
         ],
         "props": {
+          "description": "Default 1; must not exceed fetch_max_bytes",
           "expect": {
             "type": "number",
           },
           "fxToggle": true,
-          "help": "Default 1; must not exceed fetch_max_bytes",
           "label": "Fetch Min Bytes",
           "mode": "template",
           "value": {
@@ -3142,6 +3214,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.tuning.fetch_min_bytes:control": {
         "props": {
+          "label": "Fetch Min Bytes",
           "value": {
             "$bindState": "/parameters/tuning/fetch_min_bytes",
           },
@@ -3179,6 +3252,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.tuning.heartbeat_interval:control": {
         "props": {
+          "label": "Heartbeat Interval",
           "unit": "string",
           "value": {
             "$bindState": "/parameters/tuning/heartbeat_interval",
@@ -3217,6 +3291,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.tuning.max_wait:control": {
         "props": {
+          "label": "Max Wait",
           "unit": "string",
           "value": {
             "$bindState": "/parameters/tuning/max_wait",
@@ -3255,6 +3330,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.tuning.rebalance_timeout:control": {
         "props": {
+          "label": "Rebalance Timeout",
           "unit": "string",
           "value": {
             "$bindState": "/parameters/tuning/rebalance_timeout",
@@ -3293,6 +3369,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.tuning.session_timeout:control": {
         "props": {
+          "label": "Session Timeout",
           "unit": "string",
           "value": {
             "$bindState": "/parameters/tuning/session_timeout",
@@ -3333,8 +3410,8 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
           "f.parameters.tuning",
         ],
         "props": {
-          "collapsed": true,
-          "groupKey": "advanced",
+          "collapsible": true,
+          "defaultCollapsed": true,
           "title": "Advanced",
         },
         "type": "FieldGroup",
@@ -3347,7 +3424,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
           "f.parameters.start_offset",
         ],
         "props": {
-          "groupKey": "connection",
+          "collapsible": true,
           "title": "Connection",
         },
         "type": "FieldGroup",
@@ -3359,7 +3436,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
           "f.parameters.message_schema",
         ],
         "props": {
-          "groupKey": "processing",
+          "collapsible": true,
           "title": "Processing",
         },
         "type": "FieldGroup",
@@ -3394,11 +3471,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
           },
         ],
         "props": {
+          "description": "Redis server address, host:port. Credentials are not params: attach a supply with username/password to the node.",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Redis server address, host:port. Credentials are not params: attach a supply with username/password to the node.",
           "label": "Address",
           "mode": "template",
           "required": true,
@@ -3415,6 +3492,8 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.addr:control": {
         "props": {
+          "label": "Address",
+          "required": true,
           "value": {
             "$bindState": "/parameters/addr",
           },
@@ -3464,6 +3543,15 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.channel:control": {
         "props": {
+          "label": "Channel",
+          "required": {
+            "$cond": {
+              "$state": "/parameters/mode",
+              "eq": "pubsub",
+            },
+            "else": false,
+            "then": true,
+          },
           "value": {
             "$bindState": "/parameters/channel",
           },
@@ -3522,6 +3610,18 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.group:control": {
         "props": {
+          "label": "Group",
+          "required": {
+            "$cond": {
+              "$state": "/parameters/mode",
+              "in": [
+                "stream",
+                null,
+              ],
+            },
+            "else": false,
+            "then": true,
+          },
           "value": {
             "$bindState": "/parameters/group",
           },
@@ -3550,6 +3650,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       "f.parameters.max_inflight:control": {
         "props": {
           "defaultHint": 64,
+          "label": "Max Inflight",
           "value": {
             "$bindState": "/parameters/max_inflight",
           },
@@ -3578,14 +3679,13 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       "f.parameters.mode:control": {
         "props": {
           "defaultHint": "stream",
+          "label": "Mode",
           "options": [
             {
-              "description": "Consume a Redis Stream through a consumer group",
               "label": "Stream",
               "value": "stream",
             },
             {
-              "description": "Subscribe to a Pub/Sub channel (one active replica)",
               "label": "Pub/Sub",
               "value": "pubsub",
             },
@@ -3648,6 +3748,18 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.stream:control": {
         "props": {
+          "label": "Stream",
+          "required": {
+            "$cond": {
+              "$state": "/parameters/mode",
+              "in": [
+                "stream",
+                null,
+              ],
+            },
+            "else": false,
+            "then": true,
+          },
           "value": {
             "$bindState": "/parameters/stream",
           },
@@ -3656,11 +3768,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.tuning": {
         "props": {
+          "description": "Stream-mode knobs (abridged; see redis.go)",
           "expect": {
             "type": "object",
           },
           "fxToggle": true,
-          "help": "Stream-mode knobs (abridged; see redis.go)",
           "label": "Tuning",
           "mode": "template",
           "value": {
@@ -3686,11 +3798,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
           },
         ],
         "props": {
+          "description": "Positive duration (stream mode); default 1m",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Positive duration (stream mode); default 1m",
           "label": "Claim Min Idle",
           "mode": "template",
           "value": {
@@ -3706,6 +3818,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.tuning.claim_min_idle:control": {
         "props": {
+          "label": "Claim Min Idle",
           "unit": "string",
           "value": {
             "$bindState": "/parameters/tuning/claim_min_idle",
@@ -3715,11 +3828,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.tuning.consumer": {
         "props": {
+          "description": "Consumer name inside the group (stream mode); defaults to the node name",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Consumer name inside the group (stream mode); defaults to the node name",
           "label": "Consumer",
           "mode": "template",
           "value": {
@@ -3735,6 +3848,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.tuning.consumer:control": {
         "props": {
+          "label": "Consumer",
           "value": {
             "$bindState": "/parameters/tuning/consumer",
           },
@@ -3743,11 +3857,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.tuning.db": {
         "props": {
+          "description": "Database index; default 0",
           "expect": {
             "type": "number",
           },
           "fxToggle": true,
-          "help": "Database index; default 0",
           "label": "DB",
           "mode": "template",
           "value": {
@@ -3763,6 +3877,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.tuning.db:control": {
         "props": {
+          "label": "DB",
           "value": {
             "$bindState": "/parameters/tuning/db",
           },
@@ -3781,11 +3896,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
           },
         ],
         "props": {
+          "description": "Positive duration; default 10s",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Positive duration; default 10s",
           "label": "Dial Timeout",
           "mode": "template",
           "value": {
@@ -3801,6 +3916,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.tuning.dial_timeout:control": {
         "props": {
+          "label": "Dial Timeout",
           "unit": "string",
           "value": {
             "$bindState": "/parameters/tuning/dial_timeout",
@@ -3810,11 +3926,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.tuning.payload_field": {
         "props": {
+          "description": "Entry field used as the payload (stream mode); unset JSON-encodes the whole entry",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Entry field used as the payload (stream mode); unset JSON-encodes the whole entry",
           "label": "Payload Field",
           "mode": "template",
           "value": {
@@ -3830,6 +3946,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.tuning.payload_field:control": {
         "props": {
+          "label": "Payload Field",
           "value": {
             "$bindState": "/parameters/tuning/payload_field",
           },
@@ -3838,11 +3955,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.tuning.start_id": {
         "props": {
+          "description": "Group start ID (stream mode); default "$"",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Group start ID (stream mode); default "$"",
           "label": "Start ID",
           "mode": "template",
           "value": {
@@ -3858,6 +3975,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
       },
       "f.parameters.tuning.start_id:control": {
         "props": {
+          "label": "Start ID",
           "value": {
             "$bindState": "/parameters/tuning/start_id",
           },
@@ -3896,8 +4014,8 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
           "f.parameters.tuning",
         ],
         "props": {
-          "collapsed": true,
-          "groupKey": "advanced",
+          "collapsible": true,
+          "defaultCollapsed": true,
           "title": "Advanced",
         },
         "type": "FieldGroup",
@@ -3911,7 +4029,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
           "f.parameters.channel",
         ],
         "props": {
-          "groupKey": "connection",
+          "collapsible": true,
           "title": "Connection",
         },
         "type": "FieldGroup",
@@ -3957,11 +4075,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.wait sn
           },
         ],
         "props": {
+          "description": "Fixed wait duration (timer mode, e.g. "5m")",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Fixed wait duration (timer mode, e.g. "5m")",
           "label": "Duration",
           "mode": "template",
           "required": {
@@ -3997,6 +4115,23 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.wait sn
       },
       "f.parameters.duration:control": {
         "props": {
+          "label": "Duration",
+          "required": {
+            "$cond": {
+              "$and": [
+                {
+                  "$state": "/parameters/mode",
+                  "eq": "timer",
+                },
+                {
+                  "$state": "/parameters/until",
+                  "truthy": false,
+                },
+              ],
+            },
+            "else": false,
+            "then": true,
+          },
           "unit": "string",
           "value": {
             "$bindState": "/parameters/duration",
@@ -4006,11 +4141,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.wait sn
       },
       "f.parameters.mode": {
         "props": {
+          "description": "Trigger mode: "signal" (default) or "timer"",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Trigger mode: "signal" (default) or "timer"",
           "label": "Mode",
           "mode": "template",
           "value": {
@@ -4027,14 +4162,13 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.wait sn
       "f.parameters.mode:control": {
         "props": {
           "defaultHint": "signal",
+          "label": "Mode",
           "options": [
             {
-              "description": "Wait for one or more external signals",
               "label": "Signal",
               "value": "signal",
             },
             {
-              "description": "Wait for a fixed duration or until an absolute time",
               "label": "Timer",
               "value": "timer",
             },
@@ -4047,11 +4181,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.wait sn
       },
       "f.parameters.quorum": {
         "props": {
+          "description": "Number of signals required to proceed; 0 or unset means all (multi-signal mode)",
           "expect": {
             "type": "number",
           },
           "fxToggle": true,
-          "help": "Number of signals required to proceed; 0 or unset means all (multi-signal mode)",
           "label": "Quorum",
           "mode": "template",
           "value": {
@@ -4082,6 +4216,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.wait sn
       },
       "f.parameters.quorum:control": {
         "props": {
+          "label": "Quorum",
           "value": {
             "$bindState": "/parameters/quorum",
           },
@@ -4090,11 +4225,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.wait sn
       },
       "f.parameters.signal_name": {
         "props": {
+          "description": "Name of the external signal to wait for (signal mode)",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Name of the external signal to wait for (signal mode)",
           "label": "Signal Name",
           "mode": "template",
           "value": {
@@ -4117,6 +4252,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.wait sn
       },
       "f.parameters.signal_name:control": {
         "props": {
+          "label": "Signal Name",
           "value": {
             "$bindState": "/parameters/signal_name",
           },
@@ -4125,12 +4261,12 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.wait sn
       },
       "f.parameters.signals": {
         "props": {
+          "description": "List of signal names to wait for (multi-signal mode)",
           "expect": {
             "item": "string",
             "type": "array",
           },
           "fxToggle": true,
-          "help": "List of signal names to wait for (multi-signal mode)",
           "label": "Signal Names",
           "mode": "template",
           "value": {
@@ -4153,6 +4289,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.wait sn
       },
       "f.parameters.signals:control": {
         "props": {
+          "label": "Signal Names",
           "value": {
             "$bindState": "/parameters/signals",
           },
@@ -4171,11 +4308,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.wait sn
           },
         ],
         "props": {
+          "description": "Maximum wait duration before routing to timeout port (e.g. "48h")",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Maximum wait duration before routing to timeout port (e.g. "48h")",
           "label": "Timeout",
           "mode": "template",
           "value": {
@@ -4191,6 +4328,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.wait sn
       },
       "f.parameters.timeout:control": {
         "props": {
+          "label": "Timeout",
           "unit": "string",
           "value": {
             "$bindState": "/parameters/timeout",
@@ -4218,11 +4356,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.wait sn
           },
         ],
         "props": {
+          "description": "Absolute time expression to wait until (timer mode)",
           "expect": {
             "type": "string",
           },
           "fxToggle": true,
-          "help": "Absolute time expression to wait until (timer mode)",
           "label": "Until",
           "mode": "template",
           "required": {
@@ -4258,6 +4396,23 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.wait sn
       },
       "f.parameters.until:control": {
         "props": {
+          "label": "Until",
+          "required": {
+            "$cond": {
+              "$and": [
+                {
+                  "$state": "/parameters/mode",
+                  "eq": "timer",
+                },
+                {
+                  "$state": "/parameters/duration",
+                  "truthy": false,
+                },
+              ],
+            },
+            "else": false,
+            "then": true,
+          },
           "value": {
             "$bindState": "/parameters/until",
           },
@@ -4284,7 +4439,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.wait sn
           "f.parameters.until",
         ],
         "props": {
-          "groupKey": "",
+          "collapsible": true,
           "title": "参数",
         },
         "type": "FieldGroup",

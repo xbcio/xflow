@@ -1,24 +1,12 @@
-import {
-  createCheckRegistry,
-  createExpressionRegistry,
-  resolve,
-  validateSpec,
-  type ComposerSpec,
-  type ElementDef,
-  type PropsSchema,
-  type ResolvedNode
-} from "@xflow/composer/core";
+import { resolve, validateSpec, type ComposerSpec, type ElementDef, type ResolvedNode } from "@xflow/composer/core";
+import { formComponents } from "@xflow/composer/form";
+import { createRegistry, type Registry } from "@xflow/composer/react";
 import { describe, expect, it } from "vitest";
 import { nodeFormChecks } from "./checks";
 import { commonSchema } from "./commonSchema";
 import { compileNodeForm, JSON_EDITOR_PARAMS, ROOT_ID } from "./compile";
-import {
-  NODE_FORM_BINDING_KINDS,
-  NODE_FORM_COMPONENT_PROPS,
-  NODE_FORM_COMPONENT_TYPES,
-  NODE_FORM_TYPE_REF_PROPS,
-  type NodeFormComponentType
-} from "./components";
+import { NODE_FORM_COMPONENT_TYPES } from "./components";
+import { createNodeFormComponents, createNodeFormRegistry } from "./components/index";
 import type { NodeFormSchema } from "./schema";
 import {
   aggregateSchema,
@@ -35,23 +23,19 @@ import {
 
 // ------------------------------------------------------------------ harness
 
-/** Registry stub: every targeted type, accepting exactly the props components.ts declares. */
-function propsStub(type: NodeFormComponentType): PropsSchema<unknown> {
-  const allowed = new Set(NODE_FORM_COMPONENT_PROPS[type]);
-  return {
-    typeRefProps: NODE_FORM_TYPE_REF_PROPS[type],
-    parse(input) {
-      const extra = Object.keys(input as object).filter((key) => !allowed.has(key));
-      return extra.length === 0
-        ? { ok: true, value: input }
-        : { ok: false, issues: extra.map((key) => ({ path: `/${key}`, message: `undeclared prop ${key}` })) };
-    }
-  };
-}
+/** The real registry: composer/form built-ins + C2 host components + nodeFormChecks (strict props). */
+const registry = createNodeFormRegistry({ onRename: () => {} });
+const { schemas, checks, expressions } = registry;
 
-const schemas = Object.fromEntries(NODE_FORM_COMPONENT_TYPES.map((type) => [type, propsStub(type)]));
-const checks = createCheckRegistry(nodeFormChecks);
-const expressions = createExpressionRegistry();
+/** A registry holding only some node-form component types (compile-time degrade tests). */
+function subsetRegistry(types: readonly string[]): Registry {
+  const wanted = new Set(types);
+  const all = [...formComponents, ...createNodeFormComponents()];
+  return createRegistry(
+    all.filter((component) => wanted.has(component.type)),
+    { checks: nodeFormChecks }
+  );
+}
 
 function compile(schema: NodeFormSchema | null, options: Parameters<typeof compileNodeForm>[1] = {}) {
   return compileNodeForm(schema, { common: null, ...options });
@@ -97,7 +81,7 @@ function resolveWith(spec: ComposerSpec, value: object) {
     value,
     context: { ports: [{ name: "a" }, { name: "b" }], credentials: ["db"] },
     schemas,
-    bindingKinds: NODE_FORM_BINDING_KINDS,
+    bindingKinds: registry.bindingKinds,
     checks,
     expressions
   });
@@ -118,13 +102,13 @@ function issuesAt(spec: ComposerSpec, value: object, pointer: string) {
 describe("compileNodeForm: every fixture compiles to a valid Spec", () => {
   const cases: [string, NodeFormSchema | null][] = [...fixtureSchemas.map((s): [string, NodeFormSchema] => [s.node_type, s]), ["<no schema>", null]];
 
-  it.each(cases)("%s passes validateSpec with the component stub registry", (_name, schema) => {
+  it.each(cases)("%s passes validateSpec with the real node-form registry", (_name, schema) => {
     const { spec, warnings } = compileNodeForm(schema, { parameters: { extra: 1 }, hasTemplate: true });
     expect(warnings).toEqual([]);
     expect(validateSpec(spec, { schemas, checks, expressions })).toEqual([]);
   });
 
-  it.each(cases)("%s resolves without element errors (props match components.ts)", (_name, schema) => {
+  it.each(cases)("%s resolves without element errors (props accepted by the strict real schemas)", (_name, schema) => {
     const { spec } = compileNodeForm(schema);
     const tree = resolveWith(spec, { name: "n1", parameters: {} });
     expect(tree.specErrors).toEqual([]);
@@ -143,7 +127,11 @@ describe("compileNodeForm: every fixture compiles to a valid Spec", () => {
 
   it.todo("every builtin node type snapshot — waits for A6-generated /v1/node-types fixtures");
 
-  it("the stub registry rejects props components.ts does not declare (harness self-test)", () => {
+  it("registers every component type compileNodeForm targets", () => {
+    expect(NODE_FORM_COMPONENT_TYPES.filter((type) => !registry.types.includes(type))).toEqual([]);
+  });
+
+  it("the real registry rejects an undeclared prop (strict schemas; harness self-test)", () => {
     const { spec } = compile(waitSchema);
     const id = "f.parameters.mode:control";
     const tampered: ComposerSpec = {
@@ -193,7 +181,8 @@ describe("widget → component mapping (Doc C §3)", () => {
     expect(types(http, "/parameters/headers")).toEqual(["ExpressionInput", "KeyValue"]);
     expect(types(http, "/parameters/authentication")).toEqual(["CredentialSelect", "ExpressionInput"]);
     expect(types(http, "/parameters/body_b64")).toEqual(["ExpressionInput", "TextArea"]);
-    expect(bound(http, "/parameters/body_b64").find(([, e]) => e.type === "TextArea")?.[1].props?.encoding).toBe("base64");
+    // B4 TextArea has no base64 summary mode: the base64 widget is a plain TextArea (strict props).
+    expect(Object.keys(bound(http, "/parameters/body_b64").find(([, e]) => e.type === "TextArea")?.[1].props ?? {})).toEqual(["value", "label"]);
 
     const script = compile(scriptSchema).spec;
     const credentials = bound(script, "/parameters/credentials").find(([, e]) => e.type === "CredentialSelect")?.[1];
@@ -256,7 +245,7 @@ describe("widget → component mapping (Doc C §3)", () => {
   it("groups follow schema.groups order and fields follow `order`", () => {
     const { spec } = compile(kafkaSchema);
     expect(spec.elements[ROOT_ID].children).toEqual(["g.type.connection", "g.type.processing", "g.type.advanced"]);
-    expect(spec.elements["g.type.advanced"].props).toMatchObject({ title: "Advanced", collapsed: true });
+    expect(spec.elements["g.type.advanced"].props).toMatchObject({ title: "Advanced", collapsible: true, defaultCollapsed: true });
     const schema: NodeFormSchema = {
       ...waitSchema,
       fields: [
@@ -299,8 +288,8 @@ describe("degrade rules (Doc C §3.2)", () => {
     expect(warnings.some((warning) => warning.includes("ObjectGroup is not registered"))).toBe(true);
     const wait = compile(waitSchema, { registeredTypes }).spec;
     expect(types(wait, "/parameters/timeout")).toEqual(["ExpressionInput", "Input"]);
-    const stub = Object.fromEntries(registeredTypes.map((type) => [type, schemas[type]]));
-    expect(validateSpec(spec, { schemas: stub, checks, expressions })).toEqual([]);
+    const subset = subsetRegistry(registeredTypes);
+    expect(validateSpec(spec, { schemas: subset.schemas, checks: subset.checks, expressions: subset.expressions })).toEqual([]);
   });
 
   it("widgets that need structure the field lacks degrade", () => {
@@ -344,7 +333,8 @@ describe("expression modes (Doc C §4.1)", () => {
     expect(table.props).toMatchObject({ mode: "template", fxToggle: true, label: "Table", required: true });
     const [literal] = table.slots?.literal ?? [];
     expect(spec.elements[literal]).toMatchObject({ type: "Input", props: { value: { $bindState: "/parameters/table" } } });
-    expect(spec.elements[literal].props?.label).toBeUndefined();
+    // The literal control keeps only its accessible name; description/issues live on the ExpressionInput.
+    expect(spec.elements[literal].props).toEqual({ value: { $bindState: "/parameters/table" }, label: "Table", required: true });
   });
 
   it("template: required stays; other rules split into literalOnly (error) and expressionOnly (warning)", () => {
@@ -414,8 +404,8 @@ describe("expression modes (Doc C §4.1)", () => {
     expect(elements.map(([, e]) => e.type).sort()).toEqual(["CodeEditor", "TextArea"]);
     const code = elements.find(([, e]) => e.type === "CodeEditor")?.[1];
     const b64 = elements.find(([, e]) => e.type === "TextArea")?.[1];
-    expect(code?.props).toMatchObject({ language: "javascript", highlightTemplates: false });
-    expect(b64?.props?.encoding).toBe("base64");
+    expect(code?.props).toMatchObject({ language: "javascript" });
+    expect(b64?.props).not.toHaveProperty("language");
     expect(code?.visible).toEqual({ $state: "/parameters/language", neq: "wasm" });
     expect(b64?.visible).toEqual({ $state: "/parameters/language", eq: "wasm" });
     for (const element of [code, b64]) {

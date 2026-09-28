@@ -3430,3 +3430,186 @@
     overflow: hidden;
   }
 }
+
+
+/* --------------------------------------------------------------------------
+ * Node form (Doc C): composer/form variables and the C2 host components.
+ * Every rule is scoped below .xflow-editor and targets editor-owned
+ * `xflow-editor-nodeform-*` hooks (or composer's semantic `xflow-composer-*`
+ * classes); colours come from the --xflow-* contract above. AntD component
+ * states stay with the nested ConfigProvider.
+ * ------------------------------------------------------------------------ */
+.xflow-editor {
+  --xflow-font-mono: SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  --xflow-composer-font-size: 12px;
+  --xflow-composer-field-gap: 10px;
+  --xflow-composer-section-gap: 14px;
+  --xflow-composer-title-size: 12px;
+  --xflow-nodeform-fx-size: var(--xflow-field-height);
+}
+
+/* Small AntD inputs render 20px high with the editor tokens while small
+ * selects are 24px; align every node-form text control to the field height
+ * (as the editor's own .xflow-editor-field inputs do). */
+.xflow-editor .xflow-composer-form .xflow-composer-control,
+.xflow-editor .xflow-composer-form .xflow-editor-nodeform-node-name-control,
+.xflow-editor .xflow-composer-form .xflow-editor-nodeform-duration-text,
+.xflow-editor .xflow-composer-form .xflow-editor-nodeform-text-control,
+.xflow-editor .xflow-composer-form .xflow-editor-nodeform-expression-editor {
+  min-height: var(--xflow-field-height);
+}
+
+/* ExpressionInput: control + fx toggle on one row. */
+.xflow-editor .xflow-editor-nodeform-expression-row {
+  align-items: flex-start;
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+
+.xflow-editor .xflow-editor-nodeform-expression-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.xflow-editor .xflow-editor-nodeform-expression-editor,
+.xflow-editor .xflow-editor-nodeform-expression-editor textarea {
+  font-family: var(--xflow-font-mono);
+}
+
+.xflow-editor .xflow-editor-nodeform-expression.is-expression .xflow-editor-nodeform-expression-editor {
+  background: var(--xflow-surface-control);
+}
+
+.xflow-editor .xflow-editor-nodeform-fx {
+  flex: 0 0 auto;
+  height: var(--xflow-nodeform-fx-size);
+  width: var(--xflow-nodeform-fx-size);
+}
+
+.xflow-editor .xflow-editor-nodeform-fx:not(.is-active) {
+  color: var(--xflow-text-tertiary);
+}
+
+/* The literal control keeps its label as its accessible name only; the
+ * ExpressionInput frame shows the visible label, description and issues. */
+.xflow-editor .xflow-editor-nodeform-expression-literal > .xflow-composer-field > .xflow-composer-field-label {
+  border: 0;
+  clip: rect(0 0 0 0);
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  padding: 0;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
+}
+
+.xflow-editor .xflow-editor-nodeform-expression-literal > .xflow-composer-field,
+.xflow-editor .xflow-editor-nodeform-expression-literal > .xflow-composer-section {
+  min-width: 0;
+}
+
+/* Issues of the field's path reach every element bound to it; the
+ * ExpressionInput frame lists them once, the literal control only keeps its
+ * error state (border, aria-invalid). */
+.xflow-editor .xflow-editor-nodeform-expression-literal > .xflow-composer-field > .xflow-composer-field-body > .xflow-composer-field-issues,
+.xflow-editor .xflow-editor-nodeform-expression-literal > .xflow-composer-section > .xflow-composer-field-issues {
+  display: none;
+}
+
+/* Raw read-only view (shape guard): the value stays untouched. */
+.xflow-editor .xflow-editor-nodeform-raw {
+  background: var(--xflow-status-warning-subtle);
+  border: 1px solid var(--xflow-status-warning-border);
+  border-radius: var(--xflow-control-radius);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px 10px;
+}
+
+.xflow-editor .xflow-editor-nodeform-raw-notice {
+  color: var(--xflow-status-warning-text);
+  font-size: 12px;
+  margin: 0;
+}
+
+.xflow-editor .xflow-editor-nodeform-raw-value {
+  background: var(--xflow-surface-control);
+  border: 1px solid var(--xflow-border);
+  border-radius: var(--xflow-control-radius-sm);
+  color: var(--xflow-text-secondary);
+  font-family: var(--xflow-font-mono);
+  font-size: 11px;
+  margin: 0;
+  max-height: 160px;
+  overflow: auto;
+  padding: 6px 8px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.xflow-editor .xflow-editor-nodeform-raw-value:focus-visible {
+  outline: 2px solid var(--xflow-focus-ring);
+  outline-offset: 1px;
+}
+
+/* DurationInput / DateTimeInput / CronInput rows. */
+.xflow-editor .xflow-editor-nodeform-duration-row,
+.xflow-editor .xflow-editor-nodeform-text-row {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+
+.xflow-editor .xflow-editor-nodeform-duration-number,
+.xflow-editor .xflow-editor-nodeform-text-control {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.xflow-editor .xflow-editor-nodeform-duration-number {
+  width: auto;
+}
+
+.xflow-editor .xflow-editor-nodeform-duration-unit {
+  flex: 0 0 76px;
+  width: 76px;
+}
+
+.xflow-editor .xflow-editor-nodeform-duration-text,
+.xflow-editor .xflow-editor-nodeform-cron .xflow-editor-nodeform-text-control,
+.xflow-editor .xflow-editor-nodeform-datetime .xflow-editor-nodeform-text-control {
+  font-family: var(--xflow-font-mono);
+}
+
+.xflow-editor .xflow-editor-nodeform-now {
+  flex: 0 0 auto;
+}
+
+.xflow-editor .xflow-editor-nodeform-note.is-ok {
+  color: var(--xflow-text-tertiary);
+}
+
+.xflow-editor .xflow-editor-nodeform-note.is-warning {
+  color: var(--xflow-status-warning-text);
+}
+
+/* CredentialSelect / PortSelect. */
+.xflow-editor .xflow-editor-nodeform-select {
+  min-width: 0;
+  width: 100%;
+}
+
+.xflow-editor .xflow-editor-nodeform-clear-icon {
+  color: var(--xflow-text-tertiary);
+}
+
+/* FormNotice. */
+.xflow-editor .xflow-editor-nodeform-notice-alert {
+  border-radius: var(--xflow-control-radius);
+  font-size: 12px;
+}

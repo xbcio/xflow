@@ -219,12 +219,25 @@ function humanize(name: string): string {
   return name.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
 }
 
-function toOptions(options: readonly EnumOption[]): OptionItem[] {
-  return options.map((option) => {
-    const item: OptionItem = { value: option.value, label: option.label ?? String(option.value) };
-    if (option.description) item.description = option.description;
-    return item;
-  });
+function isOptionValue(value: unknown): value is OptionItem["value"] {
+  return typeof value === "string" || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value));
+}
+
+/**
+ * composer/form options take primitive values and no description (B4
+ * `optionSchema` is strict), so option descriptions are dropped and
+ * non-primitive enum values are skipped with a warning.
+ */
+function toOptions(options: readonly EnumOption[], warn: (message: string) => void): OptionItem[] {
+  const out: OptionItem[] = [];
+  for (const option of options) {
+    if (!isOptionValue(option.value)) {
+      warn(`enum value ${JSON.stringify(option.value)} is not a primitive; option skipped`);
+      continue;
+    }
+    out.push({ value: option.value, label: option.label ?? String(option.value) });
+  }
+  return out;
 }
 
 function sortFields<T extends { order?: number }>(fields: readonly T[]): T[] {
@@ -304,8 +317,8 @@ class Compiler {
     if (control.type === "KeyValue") controlChecks.push({ type: "secretLike", severity: "warning", message: MSG.secretLike });
 
     if (control.type === "NodeNameInput") {
-      const { label, help } = chrome;
-      control.props = { ...control.props, ...(label !== undefined && { label }), ...(help !== undefined && { help }) };
+      const { label, description } = chrome;
+      control.props = { ...control.props, ...(label !== undefined && { label }), ...(description !== undefined && { description }) };
       return [this.add(idBase, withVisible(control, visible))];
     }
 
@@ -313,7 +326,7 @@ class Compiler {
     if (mode === "pure") {
       const freeMap = type === "object" && control.type === "KeyValue";
       if (freeMap) {
-        if (this.has("ExpressionInput")) control.props = { ...control.props, valueType: "ExpressionInput" };
+        if (this.has("ExpressionInput")) control.props = { ...control.props, ...expressionValueEditor() };
         else warn("ExpressionInput is not registered; key-expression values edited as plain text");
       } else if (this.has("ExpressionInput")) {
         control = { type: "ExpressionInput", props: { value: bindExpr(field, scope), mode: "pure", fxToggle: false, expect } };
@@ -321,9 +334,9 @@ class Compiler {
         warn("ExpressionInput is not registered; pure expression edited as plain text");
       }
     } else if (mode === "literal") {
-      const isCode = control.type === "CodeEditor" || (control.type === "TextArea" && control.props?.encoding === "base64");
+      // B4 CodeEditor never highlights `${{ }}`, so no highlight flag is needed.
+      const isCode = control.type === "CodeEditor" || (control.type === "TextArea" && field.widget === "base64");
       if (!isCode) control = this.degradable({ type: "CodeEditor", props: { value: bindExpr(field, scope) } }, type, field, scope, warn);
-      if (control.type === "CodeEditor") control.props = { ...control.props, highlightTemplates: false };
       controlChecks.push({ type: "noTemplateInCode", severity: "warning", message: MSG.noTemplateInCode });
     } else if (mode === "none") {
       if (control.type === "ExpressionInput") {
@@ -343,8 +356,11 @@ class Compiler {
 
     if (mode === "template" && this.has("ExpressionInput")) {
       // The plain control sits in ExpressionInput's literal slot, bound to the
-      // same path; ExpressionInput owns chrome, checks and the fx toggle.
-      control.props = { ...control.props, ...(hint !== undefined && { defaultHint: hint }) };
+      // same path; ExpressionInput owns chrome, checks and the fx toggle. The
+      // control keeps its label (+ required) as its accessible name only; the
+      // ExpressionInput hides it visually. ObjectGroup would repeat the title.
+      const a11y = control.type === "ObjectGroup" ? {} : pick(chrome, ["label", "required"]);
+      control.props = { ...control.props, ...a11y, ...(hint !== undefined && { defaultHint: hint }) };
       const literalId = this.add(`${idBase}:control`, control);
       const outer: ElementDef = {
         type: "ExpressionInput",
@@ -355,7 +371,9 @@ class Compiler {
     }
     if (mode === "template") warn("ExpressionInput is not registered; template field has no fx toggle");
 
-    control.props = { ...control.props, ...chrome, ...(hint !== undefined && { defaultHint: hint }) };
+    // B4 ObjectGroup takes neither `required` nor `disabled`.
+    const own = control.type === "ObjectGroup" ? pick(chrome, ["label", "description"]) : chrome;
+    control.props = { ...control.props, ...own, ...(hint !== undefined && { defaultHint: hint }) };
     return [this.guard(field, scope, idBase, withChecks(control, controlChecks), { expect, mode, visible, label: chrome.label })];
   }
 
@@ -379,13 +397,13 @@ class Compiler {
     const common = { ...c.chrome, ...(c.hint !== undefined && { defaultHint: c.hint }), value: bindExpr(field, scope) };
     const code: ElementDef = {
       type: "CodeEditor",
-      props: { ...common, language: "javascript", highlightTemplates: false },
+      props: { ...common, language: "javascript" },
       visible: { $state: language, neq: "wasm" },
       ...(checks.length > 0 && { checks })
     };
     const base64: ElementDef = {
       type: "TextArea",
-      props: { ...common, encoding: "base64" },
+      props: common,
       visible: { $state: language, eq: "wasm" },
       ...(checks.length > 0 && { checks: checks.map((check) => ({ ...check })) })
     };
@@ -427,7 +445,7 @@ class Compiler {
   private chrome(field: NodeFormField, scope: Scope, warn: (message: string) => void): Record<string, unknown> {
     const out: Record<string, unknown> = { label: field.label || humanize(field.name) };
     const help = [field.deprecated ? `已弃用：${field.deprecated}` : undefined, field.help || undefined].filter(Boolean).join("\n");
-    if (help) out.help = help;
+    if (help) out.description = help;
     if (field.required) out.required = true;
     else if (field.required_when) {
       out.required = { $cond: compileCondition(field.required_when, scope, warn), then: true, else: false };
@@ -512,10 +530,11 @@ class Compiler {
         break;
       }
       case "base64":
-        props.encoding = "base64";
+        // Doc C §3 asks for a read-only summary + replace; B4 TextArea has no
+        // such mode, so v1 edits the base64 text directly.
         break;
       case "key-expression":
-        if (this.has("ExpressionInput")) props.valueType = "ExpressionInput";
+        if (this.has("ExpressionInput")) Object.assign(props, expressionValueEditor());
         break;
       case "duration":
         props.unit = "string";
@@ -603,9 +622,9 @@ class Compiler {
     const when = field.options_when ?? [];
     if (!base && when.length === 0) return undefined;
     // EnumWhen: the first matching entry wins; none matching falls back to Enum.
-    let out: OptionItem[] | Expr = toOptions(base ?? []);
+    let out: OptionItem[] | Expr = toOptions(base ?? [], warn);
     for (const entry of [...when].reverse()) {
-      out = { $cond: compileCondition(entry.when, scope, warn), then: toOptions(entry.options), else: out };
+      out = { $cond: compileCondition(entry.when, scope, warn), then: toOptions(entry.options, warn), else: out };
     }
     return out;
   }
@@ -636,9 +655,9 @@ class Compiler {
         children.push(...out);
       }
       if (children.length === 0) return;
-      const props: Record<string, unknown> = { title, groupKey: key };
+      const props: Record<string, unknown> = { title, collapsible: true };
       if (extra.description) props.description = extra.description;
-      if (extra.collapsed) props.collapsed = true;
+      if (extra.collapsed) props.defaultCollapsed = true;
       ids.push(this.add(`g.${prefix}.${key || "default"}`, { type: "FieldGroup", props, children }));
     };
     emit("", implicitTitle, buckets.get("") ?? [], {});
@@ -654,6 +673,17 @@ class Compiler {
   notice(code: NoticeCode, tone: "info" | "warning", message: string, count?: number): string {
     return this.add(`n.${code}`, { type: "FormNotice", props: { tone, code, message, ...(count !== undefined && { count }) } });
   }
+}
+
+/** KeyValue value editor for `key-expression` maps (Doc C §3): a pure ExpressionInput. */
+function expressionValueEditor(): Record<string, unknown> {
+  return { valueType: "ExpressionInput", valueProps: { mode: "pure" } };
+}
+
+function pick(source: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of keys) if (source[key] !== undefined) out[key] = source[key];
+  return out;
 }
 
 function withVisible(element: ElementDef, visible: Cond | undefined): ElementDef {

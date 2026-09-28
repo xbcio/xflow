@@ -21,7 +21,8 @@
     "@xflow/composer": "workspace:*",
     "@xflow/core": "workspace:*",
     "@xflow/preview": "workspace:*",
-    "antd": "6.5.2"
+    "antd": "6.5.2",
+    "zod": "4.6.5"
   },
   "devDependencies": {
     "@types/react": "19.2.18",
