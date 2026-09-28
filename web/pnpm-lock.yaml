@@ -105,13 +105,34 @@ importers:
 
   packages/composer:
     dependencies:
+      '@json-render/core':
+        specifier: 0.21.0
+        version: 0.21.0(zod@4.6.5)
+      '@json-render/react':
+        specifier: 0.21.0
+        version: 0.21.0(react@19.2.8)(zod@4.6.5)
       zod:
         specifier: 4.6.5
         version: 4.6.5
     devDependencies:
+      '@testing-library/react':
+        specifier: 16.1.0
+        version: 16.1.0(@testing-library/dom@10.4.1)(@types/react-dom@19.2.7(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      '@types/react':
+        specifier: 19.2.18
+        version: 19.2.18
       '@xflow/typescript-config':
         specifier: workspace:*
         version: link:../../tooling/typescript-config
+      react:
+        specifier: 19.2.8
+        version: 19.2.8
+      react-dom:
+        specifier: 19.2.8
+        version: 19.2.8(react@19.2.8)
+      vitest:
+        specifier: 3.2.0
+        version: 3.2.0(@types/node@22.15.0)(jiti@2.7.0)(jsdom@26.0.0)(less@4.8.1)(lightningcss@1.32.0)(sass@1.54.0)(terser@5.49.0)
 
   packages/xflow-api:
     dependencies:
@@ -1330,6 +1351,16 @@ packages:
 
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
+
+  '@json-render/core@0.21.0':
+    resolution: {integrity: sha512-vysEbTjO1y8mEgAsp0tztRyaWCkNsBrG8MhAqbndGK3qmMXjMRdCNtk21+AQRNKdRelFGVAwBgtUNW8tfjQlsw==}
+    peerDependencies:
+      zod: ^4.0.0
+
+  '@json-render/react@0.21.0':
+    resolution: {integrity: sha512-z/fZg0L8fJe2dnnQjWkmMw409iBclSWcOqdjoBy8eLHeBr/7F7VipzkY1CfgA2Fa5uW+zxZ54OvWMtdDcsp/yg==}
+    peerDependencies:
+      react: ^19.2.3
 
   '@loadable/component@5.15.2':
     resolution: {integrity: sha512-ryFAZOX5P2vFkUdzaAtTG88IGnr9qxSdvLRvJySXcUA4B4xVWurUNADu3AnKPksxOZajljqTrDEDcYjeL4lvLw==}
@@ -8885,6 +8916,17 @@ snapshots:
     dependencies:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
+
+  '@json-render/core@0.21.0(zod@4.6.5)':
+    dependencies:
+      zod: 4.6.5
+
+  '@json-render/react@0.21.0(react@19.2.8)(zod@4.6.5)':
+    dependencies:
+      '@json-render/core': 0.21.0(zod@4.6.5)
+      react: 19.2.8
+    transitivePeerDependencies:
+      - zod
 
   '@loadable/component@5.15.2(react@18.3.1)':
     dependencies:

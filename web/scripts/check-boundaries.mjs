@@ -38,6 +38,33 @@ const coreForbiddenPatterns = [
   { pattern: /^@xyflow\/react(?:\/|$)/, reason: "@xflow/core must remain framework-free" }
 ];
 
+// Doc B §7.2 / §9: composer pins @json-render/* exactly (they are its only
+// kernel dependency) and takes react / react-dom as peers, never as
+// runtime dependencies.
+const composerExactPins = /^@json-render\//;
+const composerPeerOnly = new Set(["react", "react-dom"]);
+
+function validateComposer(manifest) {
+  const violations = [];
+  for (const [name, range] of Object.entries(manifest.dependencies ?? {})) {
+    if (composerPeerOnly.has(name)) {
+      violations.push(`dependencies ${name}: composer must take ${name} as a peer dependency`);
+    }
+    if (composerExactPins.test(name) && !/^\d+\.\d+\.\d+$/.test(range)) {
+      violations.push(`dependencies ${name}@${range}: @json-render/* must be pinned to an exact version`);
+    }
+  }
+  for (const name of Object.keys(manifest.devDependencies ?? {})) {
+    if (composerExactPins.test(name)) {
+      violations.push(`devDependencies ${name}: @json-render/* must be a runtime dependency of composer`);
+    }
+  }
+  if (!manifest.peerDependencies?.react) {
+    violations.push("peerDependencies react: composer must declare react as a peer dependency");
+  }
+  return violations;
+}
+
 async function readProjects(directory, layer) {
   const absoluteDirectory = path.join(webRoot, directory);
   const entries = await readdir(absoluteDirectory, { withFileTypes: true });
@@ -110,12 +137,15 @@ function validateProject(project, workspaceLayers) {
     }
   }
 
+  if (manifest.name === "@xflow/composer") violations.push(...validateComposer(manifest));
+
   return violations;
 }
 
 function runNegativeSelfTest() {
   const workspaceLayers = new Map([
     ["@xflow/core", "package"],
+    ["@xflow/composer", "package"],
     ["@xflow/api", "package"],
     ["@xflow/editor", "package"],
     ["@xflow/admin", "app"],
@@ -148,6 +178,28 @@ function runNegativeSelfTest() {
       project: {
         layer: "package",
         manifest: { name: "@xflow/api", devDependencies: { "@xflow/admin": "workspace:*" } }
+      }
+    },
+    {
+      description: "react as a composer runtime dependency",
+      project: {
+        layer: "package",
+        manifest: {
+          name: "@xflow/composer",
+          dependencies: { react: "19.2.8" },
+          peerDependencies: { react: "^19.2.3" }
+        }
+      }
+    },
+    {
+      description: "unpinned @json-render dependency in composer",
+      project: {
+        layer: "package",
+        manifest: {
+          name: "@xflow/composer",
+          dependencies: { "@json-render/react": "^0.21.0" },
+          peerDependencies: { react: "^19.2.3" }
+        }
       }
     }
   ];

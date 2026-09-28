@@ -44,6 +44,26 @@ const composerCoreRestrictedImports = {
   ]
 };
 
+const jsonRenderPattern = {
+  group: ["@json-render/*"],
+  message: "Only composer/kernel-json-render and composer/react/defaultKernel may import @json-render/* (Doc B §7.2)."
+};
+
+const composerRestrictedImports = {
+  patterns: [...packageBoundaryPatterns, jsonRenderPattern]
+};
+
+const composerReactRestrictedImports = {
+  patterns: [
+    ...packageBoundaryPatterns,
+    jsonRenderPattern,
+    {
+      group: ["../kernel-*", "../kernel-*/**", "@xflow/composer/kernel-*"],
+      message: "composer/react reaches a kernel only through react/defaultKernel (Doc B §7.2)."
+    }
+  ]
+};
+
 export default [
   {
     ignores: [
@@ -109,6 +129,28 @@ export default [
     files: ["packages/xflow-core/**/*.{js,mjs,cjs,ts,tsx}"],
     rules: {
       "no-restricted-imports": ["error", coreRestrictedImports]
+    }
+  },
+  {
+    files: ["packages/composer/src/**/*.{js,mjs,cjs,ts,tsx}"],
+    rules: {
+      "no-restricted-imports": ["error", composerRestrictedImports]
+    }
+  },
+  {
+    files: ["packages/composer/src/react/**/*.{js,mjs,cjs,ts,tsx}"],
+    ignores: ["packages/composer/src/react/**/*.test.{ts,tsx}"],
+    rules: {
+      "no-restricted-imports": ["error", composerReactRestrictedImports]
+    }
+  },
+  {
+    files: [
+      "packages/composer/src/kernel-json-render/**/*.{js,mjs,cjs,ts,tsx}",
+      "packages/composer/src/react/defaultKernel.ts"
+    ],
+    rules: {
+      "no-restricted-imports": ["error", { patterns: packageBoundaryPatterns }]
     }
   },
   {
