@@ -136,8 +136,10 @@ func (d *Definition) New(params any) types.Builder {
 	return newBuilder(d, params)
 }
 
-// Descriptor returns this node definition's metadata.
-func (d *Definition) Descriptor() types.Descriptor { return d.descriptor }
+// Descriptor returns a deep copy of this node definition's metadata, so a
+// caller cannot mutate the definition through it and later builder calls
+// cannot write into slices the caller already holds.
+func (d *Definition) Descriptor() types.Descriptor { return d.descriptor.Clone() }
 
 // Execute runs this node definition's action.
 func (d *Definition) Execute(ctx context.Context, input *types.Input) (*types.Output, error) {
@@ -214,7 +216,9 @@ func DefineTrigger(nodeType string, activate TriggerActivateFunc) *TriggerDefini
 }
 
 func (d *TriggerDefinition) New(params any) types.Builder { return newTriggerBuilder(d, params) }
-func (d *TriggerDefinition) Descriptor() types.Descriptor { return d.descriptor }
+
+// Descriptor returns a deep copy; see Definition.Descriptor.
+func (d *TriggerDefinition) Descriptor() types.Descriptor { return d.descriptor.Clone() }
 func (d *TriggerDefinition) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
 	return ExecuteTriggerEntry(input)
 }
