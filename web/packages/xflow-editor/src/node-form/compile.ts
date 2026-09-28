@@ -83,7 +83,7 @@ const WIDGET_COMPONENTS: Readonly<Record<string, NodeFormComponentType>> = {
   "array-table": "ArrayTable",
   json: "JsonEditor",
   code: "CodeEditor",
-  base64: "TextArea",
+  base64: "Base64Input",
   duration: "DurationInput",
   datetime: "DateTimeInput",
   cron: "CronInput",
@@ -342,7 +342,7 @@ class Compiler {
       }
     } else if (mode === "literal") {
       // B4 CodeEditor never highlights `${{ }}`, so no highlight flag is needed.
-      const isCode = control.type === "CodeEditor" || (control.type === "TextArea" && field.widget === "base64");
+      const isCode = control.type === "CodeEditor" || field.widget === "base64";
       if (!isCode) control = this.degradable({ type: "CodeEditor", props: { value: bindExpr(field, scope) } }, type, field, scope, warn);
       controlChecks.push({ type: "noTemplateInCode", severity: "warning", message: MSG.noTemplateInCode });
     } else if (mode === "none") {
@@ -409,7 +409,7 @@ class Compiler {
       ...(checks.length > 0 && { checks })
     };
     const base64: ElementDef = {
-      type: "TextArea",
+      type: this.has("Base64Input") ? "Base64Input" : "TextArea",
       props: common,
       visible: { $state: language, eq: "wasm" },
       ...(checks.length > 0 && { checks: checks.map((check) => ({ ...check })) })
@@ -537,8 +537,9 @@ class Compiler {
         break;
       }
       case "base64":
-        // Doc C §3 asks for a read-only summary + replace; B4 TextArea has no
-        // such mode, so v1 edits the base64 text directly.
+        // Doc C §3: read-only summary + replace. Without the host component
+        // the text is edited directly in a TextArea.
+        if (!this.has("Base64Input")) element.type = "TextArea";
         break;
       case "key-expression":
         if (this.has("ExpressionInput")) Object.assign(props, expressionValueEditor());

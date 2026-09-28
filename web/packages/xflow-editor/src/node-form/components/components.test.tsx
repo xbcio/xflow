@@ -412,6 +412,64 @@ for (const kernel of kernels) {
       });
     });
 
+    describe("Base64Input", () => {
+      // "\0asm\x01\0\0\0" = 8 bytes.
+      const wasm = "AGFzbQEAAAA=";
+
+      it("summarizes without rendering the text in a control, and writes nothing on mount", async () => {
+        const m = mountComposer({
+          kernel,
+          registry,
+          spec: formSpec({
+            b: { type: "Base64Input", props: { label: "Code", value: { $bindState: "/b" } } },
+            bad: { type: "Base64Input", props: { label: "Bad", value: { $bindState: "/bad" } } },
+            none: { type: "Base64Input", props: { label: "None", value: { $bindState: "/none" } } },
+            wrong: { type: "Base64Input", props: { label: "Wrong", value: { $bindState: "/wrong" } } }
+          }),
+          value: { b: wasm, bad: "not base64!", wrong: 42 }
+        });
+        await m.flush();
+        const b = fieldOf(m.container, "b");
+        expect(b.querySelector("textarea, input:not([type=file])")).toBeNull();
+        expect(b.textContent).toContain("WebAssembly 模块 v1");
+        expect(b.textContent).toContain("8 B");
+        expect(fieldOf(m.container, "bad").textContent).toContain("不是合法的 base64");
+        expect(fieldOf(m.container, "none").textContent).toContain("未设置");
+        expect(fieldOf(m.container, "wrong").querySelector(COMPOSER_RAW)).not.toBeNull();
+        expect(m.log).toEqual([]);
+      });
+
+      it("replaces from a file and clears to unset", async () => {
+        const m = mountComposer({
+          kernel,
+          registry,
+          spec: formSpec({ b: { type: "Base64Input", props: { label: "Code", value: { $bindState: "/b" } } } }),
+          value: { b: wasm }
+        });
+        await m.flush();
+        const field = fieldOf(m.container, "b");
+        const file = new File([new Uint8Array([0, 0x61, 0x73, 0x6d, 2, 0, 0, 0])], "m.wasm");
+        fireEvent.change(one<HTMLInputElement>(field, "input[type=file]"), { target: { files: [file] } });
+        await vi.waitFor(() => expect(allPatches(m.log)).toEqual([{ op: "set", path: "/b", value: "AGFzbQIAAAA=" }]));
+
+        clickButton(fieldOf(m.container, "b"), "清除");
+        await m.flush();
+        expect(allPatches(m.log).at(-1)).toEqual({ op: "unset", path: "/b" });
+      });
+
+      it("offers no actions when read-only", async () => {
+        const m = mountComposer({
+          kernel,
+          registry,
+          readOnly: true,
+          spec: formSpec({ b: { type: "Base64Input", props: { label: "Code", value: { $bindState: "/b" } } } }),
+          value: { b: wasm }
+        });
+        await m.flush();
+        expect(fieldOf(m.container, "b").querySelector("button, input[type=file]")).toBeNull();
+      });
+    });
+
     describe("CredentialSelect / PortSelect lists", () => {
       it("reads credentials from /$ctx and notes a value missing from the list", async () => {
         const m = mountComposer({

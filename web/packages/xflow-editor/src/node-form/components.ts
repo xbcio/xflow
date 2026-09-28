@@ -78,7 +78,7 @@ export interface NodeFormComponentProps {
   Form: { layout?: "vertical" | "horizontal"; labelWidth?: number; title?: string };
   FieldGroup: { title?: string; description?: string; collapsible?: boolean; defaultCollapsed?: boolean };
   Input: FieldChrome & ValueProps & { placeholder?: string };
-  /** Also the `base64` widget (B4 has no base64 summary mode; see compile.ts). */
+  /** Also the `base64` widget when Base64Input is not registered (see compile.ts). */
   TextArea: FieldChrome & ValueProps & { rows?: number };
   Password: FieldChrome & ValueProps;
   InputNumber: FieldChrome & ValueProps;
@@ -115,6 +115,8 @@ export interface NodeFormComponentProps {
   /** RFC 3339 text. */
   DateTimeInput: FieldChrome & ValueProps;
   CronInput: FieldChrome & ValueProps;
+  /** `base64` widget: read-only summary + replace from file + clear (Doc C §3). */
+  Base64Input: FieldChrome & ValueProps;
   /** `credentials` reads `context.credentials: string[]` (workflow credential names). */
   CredentialSelect: FieldChrome & ValueProps & { multiple: boolean; credentials?: Bound<string[]> };
   /** `ports` is static for fixed-port nodes, `{$state: "/$ctx/ports"}` for dynamic ones. */
@@ -159,6 +161,7 @@ export const HOST_COMPONENT_TYPES = [
   "DurationInput",
   "DateTimeInput",
   "CronInput",
+  "Base64Input",
   "CredentialSelect",
   "PortSelect",
   "NodeNameInput",

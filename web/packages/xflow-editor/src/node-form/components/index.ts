@@ -4,12 +4,14 @@
 import { createFormRegistry } from "@xflow/composer/form";
 import type { ComposerComponent, Registry } from "@xflow/composer/react";
 import { nodeFormChecks } from "../checks";
+import { Base64Input } from "./Base64Input";
 import { DurationInput } from "./DurationInput";
 import { ExpressionInput } from "./ExpressionInput";
 import { CredentialSelect, PortSelect } from "./Selects";
 import { createNodeNameInput, FormNotice, ShapeGuard, type RenameCallback } from "./structural";
 import { CronInput, DateTimeInput } from "./TextFormatInputs";
 
+export { Base64Input, bytesToBase64, formatBytes, summarizeBase64, type Base64Summary } from "./Base64Input";
 export { DurationInput, type DurationInputProps } from "./DurationInput";
 export { ExpressionInput, type ExpressionInputProps } from "./ExpressionInput";
 export { CredentialSelect, PortSelect, type CredentialSelectProps, type PortSelectProps } from "./Selects";
@@ -47,6 +49,7 @@ export function createNodeFormComponents(options: NodeFormRegistryOptions = {}):
     DurationInput,
     DateTimeInput,
     CronInput,
+    Base64Input,
     CredentialSelect,
     PortSelect,
     createNodeNameInput(options.onRename),

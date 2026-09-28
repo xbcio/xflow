@@ -1509,7 +1509,7 @@ exports[`A6-generated node-types fixture > xflow.http@1 snapshot 1`] = `
             "$bindState": "/parameters/body_b64",
           },
         },
-        "type": "TextArea",
+        "type": "Base64Input",
       },
       "f.parameters.headers": {
         "checks": [
@@ -2493,7 +2493,7 @@ exports[`A6-generated node-types fixture > xflow.script@1 snapshot 1`] = `
             "$bindState": "/parameters/code",
           },
         },
-        "type": "TextArea",
+        "type": "Base64Input",
         "visible": {
           "$state": "/parameters/language",
           "eq": "wasm",

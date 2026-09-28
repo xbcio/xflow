@@ -3609,6 +3609,58 @@
   color: var(--xflow-status-warning-text);
 }
 
+/* Base64Input: summary card + actions. */
+.xflow-editor .xflow-editor-nodeform-base64-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.xflow-editor .xflow-editor-nodeform-base64-summary {
+  align-items: center;
+  background: var(--xflow-surface-control);
+  border: 1px solid var(--xflow-border);
+  border-radius: var(--xflow-control-radius-sm);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  min-width: 0;
+  padding: 6px 8px;
+}
+
+.xflow-editor .xflow-editor-nodeform-base64-kind {
+  color: var(--xflow-text);
+  font-weight: 600;
+}
+
+.xflow-editor .xflow-editor-nodeform-base64-size,
+.xflow-editor .xflow-editor-nodeform-base64-empty {
+  color: var(--xflow-text-secondary);
+}
+
+.xflow-editor .xflow-editor-nodeform-base64-preview {
+  color: var(--xflow-text-secondary);
+  font-family: var(--xflow-font-mono);
+  font-size: 11px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xflow-editor .xflow-editor-nodeform-base64-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.xflow-editor .xflow-editor-nodeform-base64-help {
+  color: var(--xflow-text-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  margin: 0;
+}
+
 /* CredentialSelect / PortSelect. */
 .xflow-editor .xflow-editor-nodeform-select {
   min-width: 0;

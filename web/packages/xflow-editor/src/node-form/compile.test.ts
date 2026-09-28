@@ -181,9 +181,8 @@ describe("widget → component mapping (Doc C §3)", () => {
     const http = compile(httpSchema).spec;
     expect(types(http, "/parameters/headers")).toEqual(["ExpressionInput", "KeyValue"]);
     expect(types(http, "/parameters/authentication")).toEqual(["CredentialSelect", "ExpressionInput"]);
-    expect(types(http, "/parameters/body_b64")).toEqual(["ExpressionInput", "TextArea"]);
-    // B4 TextArea has no base64 summary mode: the base64 widget is a plain TextArea (strict props).
-    expect(Object.keys(bound(http, "/parameters/body_b64").find(([, e]) => e.type === "TextArea")?.[1].props ?? {})).toEqual(["value", "label"]);
+    expect(types(http, "/parameters/body_b64")).toEqual(["Base64Input", "ExpressionInput"]);
+    expect(Object.keys(bound(http, "/parameters/body_b64").find(([, e]) => e.type === "Base64Input")?.[1].props ?? {})).toEqual(["value", "label"]);
 
     const script = compile(scriptSchema).spec;
     const credentials = bound(script, "/parameters/credentials").find(([, e]) => e.type === "CredentialSelect")?.[1];
@@ -399,12 +398,12 @@ describe("expression modes (Doc C §4.1)", () => {
     expect(bound(spec, "/parameters/body")[0][1].checks?.map((c) => c.type)).toContain("notEvaluated");
   });
 
-  it("literal: script.code is CodeEditor (js) / base64 TextArea (wasm) with noTemplateInCode", () => {
+  it("literal: script.code is CodeEditor (js) / Base64Input (wasm) with noTemplateInCode", () => {
     const { spec } = compile(scriptSchema);
     const elements = bound(spec, "/parameters/code");
-    expect(elements.map(([, e]) => e.type).sort()).toEqual(["CodeEditor", "TextArea"]);
+    expect(elements.map(([, e]) => e.type).sort()).toEqual(["Base64Input", "CodeEditor"]);
     const code = elements.find(([, e]) => e.type === "CodeEditor")?.[1];
-    const b64 = elements.find(([, e]) => e.type === "TextArea")?.[1];
+    const b64 = elements.find(([, e]) => e.type === "Base64Input")?.[1];
     expect(code?.props).toMatchObject({ language: "javascript" });
     expect(b64?.props).not.toHaveProperty("language");
     expect(code?.visible).toEqual({ $state: "/parameters/language", neq: "wasm" });
@@ -417,9 +416,13 @@ describe("expression modes (Doc C §4.1)", () => {
     const js = visibleIds(spec, { parameters: { language: "js" } });
     const wasm = visibleIds(spec, { parameters: { language: "wasm" } });
     const [codeId] = elements.find(([, e]) => e.type === "CodeEditor") ?? [];
-    const [b64Id] = elements.find(([, e]) => e.type === "TextArea") ?? [];
+    const [b64Id] = elements.find(([, e]) => e.type === "Base64Input") ?? [];
     expect([js.has(codeId!), js.has(b64Id!)]).toEqual([true, false]);
     expect([wasm.has(codeId!), wasm.has(b64Id!)]).toEqual([false, true]);
+
+    // Without the host component the wasm variant is a plain TextArea.
+    const registeredTypes = NODE_FORM_COMPONENT_TYPES.filter((type) => type !== "Base64Input");
+    expect(bound(compile(scriptSchema, { registeredTypes }).spec, "/parameters/code").map(([, e]) => e.type).sort()).toEqual(["CodeEditor", "TextArea"]);
   });
 
   it("an explicit expression.mode from the schema wins over the stub", () => {

@@ -973,7 +973,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
             "$bindState": "/parameters/body_b64",
           },
         },
-        "type": "TextArea",
+        "type": "Base64Input",
       },
       "f.parameters.headers": {
         "checks": [
@@ -1569,7 +1569,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
             "$bindState": "/parameters/code",
           },
         },
-        "type": "TextArea",
+        "type": "Base64Input",
         "visible": {
           "$state": "/parameters/language",
           "eq": "wasm",
