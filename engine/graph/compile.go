@@ -145,6 +145,27 @@ func DeclaresSubgraphBody(params map[string]any) bool {
 	return declaresSubgraphBody(params)
 }
 
+// SubgraphBodyMembers returns the member node definitions of a node's
+// sub-graph body. ok is false when the params carry no sub-graph body -- the
+// DeclaresSubgraphBody criterion, so a request-payload "body" is never
+// mistaken for one. A declared body whose members do not decode yields
+// (nil, true); Compile rejects that definition on its own.
+func SubgraphBodyMembers(params map[string]any) (members []types.NodeDef, ok bool) {
+	raw, present := params[subgraphBodyKey]
+	if !present {
+		return nil, false
+	}
+	bodyDef, err := decodeSubgraphBody(raw)
+	if err != nil || bodyDef.Type != subgraphNodeType {
+		return nil, false
+	}
+	nodes, _, err := decodeSubgraphMembers(bodyDef.Parameters)
+	if err != nil {
+		return nil, true
+	}
+	return nodes, true
+}
+
 // Compile validates a WorkflowDef and builds an immutable Graph IR.
 // It returns an error if the definition is nil, has no nodes, contains
 // duplicate node names, references unknown nodes, or contains a cycle.
