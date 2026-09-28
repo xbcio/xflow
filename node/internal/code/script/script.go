@@ -755,12 +755,29 @@ func ensureWasmSupplyConsumers(ctx context.Context, digest, code string, supplie
 				digest, supplyNode, err)
 		}
 	}
-	if !wasm.SupplyConfiguredByDigest(digest) {
-		return fmt.Errorf("wasm module %s is declared source-driven for %v but holds no "+
-			"supply-borne configuration; refusing to evaluate against an empty rule set",
-			digest, supplies)
+	if wasm.SupplyConfiguredByDigest(digest) {
+		return nil
 	}
-	return nil
+	// Registration succeeding is not configuration, and the two can diverge for
+	// reasons this call site cannot see: the module's content may have reached
+	// the registry before any engine existed, or the module may consume more than
+	// one supply. Resolve the config explicitly rather than re-deriving the
+	// verdict, so a module whose content IS available is configured here instead
+	// of failing closed on every message with no self-heal path.
+	if installed, reason := wasm.InstallModuleConfigFromRegistry(ctx, digest); installed {
+		return nil
+	} else if reason != "" {
+		// The reason names the supply nodes and the shape of the problem ("more
+		// than one registered supply carries a pool config"), which an operator
+		// needs in order to fix the declaration. It never carries module code or
+		// the node's params.
+		return fmt.Errorf("wasm module %s is declared source-driven for %v but holds no "+
+			"supply-borne configuration (%s); refusing to evaluate against an empty rule set",
+			digest, supplies, reason)
+	}
+	return fmt.Errorf("wasm module %s is declared source-driven for %v but holds no "+
+		"supply-borne configuration; refusing to evaluate against an empty rule set",
+		digest, supplies)
 }
 
 func init() { registry.Register(&ScriptNode{}) }
