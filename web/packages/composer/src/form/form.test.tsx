@@ -408,6 +408,46 @@ for (const kernel of kernels) {
   });
 }
 
+describe("option descriptions", () => {
+  const described = [
+    { value: "a", label: "A", description: "first choice" },
+    { value: "b", label: "B" }
+  ];
+  const mount = (type: string, kernel: (typeof kernels)[number]) =>
+    mountComposer({
+      kernel,
+      registry,
+      spec: formSpec({ f: { type, props: { label: "L", options: described, value: { $bindState: "/v" } } } }, ["f"]),
+      value: { v: "a" }
+    });
+
+  for (const kernel of kernels) {
+    it(`Select shows a described option as label plus a second line (${kernel.name})`, async () => {
+      const m = mount("Select", kernel);
+      await m.flush();
+      const field = fieldOf(m.container, "f");
+      // The selected value shows the label alone.
+      expect(field.querySelector(".xflow-composer-option-description")).toBeNull();
+      fireEvent.mouseDown(one(field, '[role="combobox"]'));
+      const popup = [...document.querySelectorAll(".xflow-composer-select-popup")].at(-1);
+      expect(popup?.querySelector(".xflow-composer-option-description")?.textContent).toBe("first choice");
+      expect(popup?.querySelectorAll(".xflow-composer-option-description")).toHaveLength(1);
+      pickOption(field, "B");
+      await m.flush();
+      expect(allPatches(m.log)).toEqual(set("b"));
+      expect(consoleError).not.toHaveBeenCalled();
+    });
+
+    it(`Radio carries the description as the option tooltip (${kernel.name})`, async () => {
+      const m = mount("Radio", kernel);
+      await m.flush();
+      const labels = [...fieldOf(m.container, "f").querySelectorAll("label.ant-radio-wrapper")];
+      expect(labels.map((label) => label.getAttribute("title"))).toEqual(["first choice", null]);
+      expect(consoleError).not.toHaveBeenCalled();
+    });
+  }
+});
+
 describe("registry", () => {
   it("formComponents covers every built-in type", () => {
     expect(formComponents.map((c) => c.type).sort()).toEqual(

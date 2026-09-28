@@ -6,7 +6,13 @@
 // is not among the options is shown as-is instead of being coerced.
 
 import { CloseCircleFilled } from "@ant-design/icons";
-import { InputNumber as AntInputNumber, Radio as AntRadio, Select as AntSelect, Switch as AntSwitch } from "antd";
+import {
+  InputNumber as AntInputNumber,
+  Radio as AntRadio,
+  Select as AntSelect,
+  Switch as AntSwitch,
+  type SelectProps as AntSelectProps
+} from "antd";
 import { z } from "zod";
 import { deepEqual, zodProps } from "../core";
 import type { ComposerComponent, ComposerComponentProps } from "../react";
@@ -175,9 +181,36 @@ function antOptions(options: readonly Option[]) {
   return options.map((option) => ({
     value: optionKey(option.value),
     label: option.label ?? displayValue(option.value),
-    disabled: option.disabled
+    disabled: option.disabled,
+    ...(option.description !== undefined && { description: option.description })
   }));
 }
+
+/** Radio options: the description becomes the option's tooltip. */
+function radioOptions(options: readonly Option[]) {
+  return options.map((option) => ({
+    value: optionKey(option.value),
+    label: option.label ?? displayValue(option.value),
+    disabled: option.disabled,
+    ...(option.description !== undefined && { title: option.description })
+  }));
+}
+
+/**
+ * Select popup row: the label, plus the option's description as a second
+ * line. The selected value keeps showing the label alone (optionRender only
+ * affects the popup).
+ */
+const renderOption: NonNullable<AntSelectProps["optionRender"]> = (option) => {
+  const description = (option.data as { description?: unknown }).description;
+  if (typeof description !== "string") return option.label;
+  return (
+    <span className="xflow-composer-option">
+      <span className="xflow-composer-option-label">{option.label}</span>
+      <span className="xflow-composer-option-description">{description}</span>
+    </span>
+  );
+};
 
 function fromKey(options: readonly Option[], key: string): unknown {
   const hit = options.find((option) => optionKey(option.value) === key);
@@ -223,6 +256,7 @@ function SelectField({ node, props, value, onChange, defaultHint, issues, readOn
             classNames={{ root: "xflow-composer-control", popup: { root: "xflow-composer-select-popup" } }}
             value={unset ? undefined : optionKey(value)}
             options={antOptions(props.options)}
+            optionRender={renderOption}
             placeholder={placeholder}
             showSearch={props.showSearch ? { filterOption: selectFilter } : false}
             allowClear={readOnly || props.disabled ? false : { clearIcon }}
@@ -300,6 +334,7 @@ function MultiField({
             classNames={{ root: "xflow-composer-control", popup: { root: "xflow-composer-select-popup" } }}
             value={tags ? (list as string[]) : list.map(optionKey)}
             options={tags ? options.map((o) => ({ value: String(o.value), label: o.label ?? String(o.value) })) : antOptions(options)}
+            optionRender={tags ? undefined : renderOption}
             placeholder={placeholder}
             tokenSeparators={tags ? (props.separators ?? [","]) : undefined}
             allowClear={readOnly || props.disabled ? false : { clearIcon }}
@@ -390,7 +425,7 @@ function RadioField({ node, props, value, onChange, defaultHint, issues, readOnl
               optionType={props.optionType ?? "default"}
               value={unset ? undefined : optionKey(value)}
               disabled={readOnly || props.disabled}
-              options={antOptions(props.options)}
+              options={radioOptions(props.options)}
               onChange={(event) => onChange?.(fromKey(props.options, String(event.target.value)))}
             />
             {!unset && !readOnly && !props.disabled ? (

@@ -54,6 +54,8 @@ export interface FieldProps {
 export const optionSchema = z.object({
   value: z.union([z.string(), z.number(), z.boolean()]),
   label: z.string().optional(),
+  /** Secondary text: a second line in a Select popup, the tooltip of a Radio. */
+  description: z.string().optional(),
   disabled: z.boolean().optional()
 });
 

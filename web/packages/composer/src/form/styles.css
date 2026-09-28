@@ -147,6 +147,25 @@
   min-width: 0;
 }
 
+/* Select popup row with a description (choice.tsx renderOption). */
+.xflow-composer-option {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.xflow-composer-option-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.xflow-composer-option-description {
+  color: var(--xflow-text-secondary, #4e5969);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: normal;
+}
+
 .xflow-composer-field-hint,
 .xflow-composer-field-description {
   color: var(--xflow-text-secondary, #4e5969);
