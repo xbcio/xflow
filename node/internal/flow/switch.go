@@ -76,8 +76,9 @@ func (n *SwitchNode) Descriptor() types.Descriptor {
 			{Name: "default_output", DisplayName: "Default Output", Type: types.ParamString, Required: false, Description: "Port name used when no rule matches",
 				Widget: nodeinternal.WidgetPortSelect},
 		},
-		Inputs:  []types.PortSpec{{Name: "main", DisplayName: "Main"}},
-		Outputs: []types.PortSpec{},
+		Inputs:             []types.PortSpec{{Name: "main", DisplayName: "Main"}},
+		Outputs:            []types.PortSpec{},
+		DynamicOutputsFrom: "outputs",
 	}
 }
 

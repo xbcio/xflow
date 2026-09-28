@@ -1439,7 +1439,10 @@
             "name": "main",
             "display_name": "Main"
           }
-        ]
+        ],
+        "dynamic_outputs": {
+          "from": "/parameters/outputs"
+        }
       },
       "fields": [
         {

@@ -49,13 +49,13 @@ export function schemaForNode(nodeTypes: NodeTypesResponse | undefined, node: Wo
 const fallbackCache = new WeakMap<NodeFormSchema, NodeFormSchema>();
 
 /**
- * Doc C §2.1 says switch-like nodes declare `ports.dynamic_outputs =
- * {from: "/parameters/outputs"}`. The server projection does not emit it yet
- * (xflow.switch has neither outputs nor dynamic_outputs), while the canvas
- * (xflow-core `declaredOutputPorts`) already treats `parameters.outputs` as
- * dynamic ports for every type. Until the backend declares it, a schema with
- * no declared outputs and a top-level array param named `outputs` is given
- * that `dynamic_outputs`, so PortSelect and the dangling-edge check work.
+ * Doc C §2.1: switch-like nodes declare `ports.dynamic_outputs =
+ * {from: "/parameters/outputs"}`; the server projects it from
+ * Descriptor.DynamicOutputsFrom (xflow.switch declares it). A schema that does
+ * not declare it but has no declared outputs and a top-level array param named
+ * `outputs` (a custom type, or an older server) is given the same
+ * `dynamic_outputs`, matching the canvas (xflow-core `declaredOutputPorts`),
+ * which treats `parameters.outputs` as dynamic ports for every type.
  * The result is cached per schema object, so compile memoisation holds.
  */
 export function withDynamicPortsFallback(schema: NodeFormSchema): NodeFormSchema {

@@ -2958,7 +2958,9 @@ exports[`A6-generated node-types fixture > xflow.switch@1 snapshot 1`] = `
         "props": {
           "defaultHint": "default",
           "label": "Default Output",
-          "ports": [],
+          "ports": {
+            "$state": "/$ctx/ports",
+          },
           "value": {
             "$bindState": "/parameters/default_output",
           },
@@ -3181,7 +3183,9 @@ exports[`A6-generated node-types fixture > xflow.switch@1 snapshot 1`] = `
       "f.parameters.rules[].output:control": {
         "props": {
           "label": "Output",
-          "ports": [],
+          "ports": {
+            "$state": "/$ctx/ports",
+          },
           "value": {
             "$bindItem": "output",
           },

@@ -406,6 +406,17 @@ func TestBuiltinDescriptorMetadataConsistent(t *testing.T) {
 				}
 			}
 		}
+		if from := d.DynamicOutputsFrom; from != "" {
+			isArray := false
+			for _, p := range d.Params {
+				if p.Name == from && p.Type == types.ParamArray {
+					isArray = true
+				}
+			}
+			if !isArray {
+				t.Errorf("%s: DynamicOutputsFrom %q is not a declared top-level array param", d.Type, from)
+			}
+		}
 
 		walkParams(d.Params, "", func(path string, p types.ParamSpec, siblings []types.ParamSpec) {
 			where := d.Type + "." + path
