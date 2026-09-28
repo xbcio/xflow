@@ -22,6 +22,8 @@ const (
 	reasonMalformedAction      = "malformed-action"
 	reasonUnknownAction        = "unknown-action"
 	reasonMalformedAssignee    = "malformed-assignee"
+	reasonMalformedPosition    = "malformed-position"
+	reasonChainLimitReached    = "chain-limit-reached"
 )
 
 func TestApproval_IgnoresAnApproverOutsideTheApproverList(t *testing.T) {

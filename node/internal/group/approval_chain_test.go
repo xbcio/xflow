@@ -2,6 +2,7 @@ package group_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/xbcio/xflow/node"
@@ -9,19 +10,36 @@ import (
 )
 
 // The gate's approver chain is not fixed: an approver may hand their own slot to
-// somebody else (delegate). That is an amendment to who the gate is waiting on,
-// so what these tests pin is that the amended chain is what the node actually
-// waits for — a delegation that the wait spec ignored would let the gate open on
-// the delegator's slot while the person they handed it to was still unreached.
+// somebody else (delegate) or call in an extra signer (add_signer). Both are
+// amendments to who the gate is waiting on, so what these tests pin is that the
+// amended chain is what the node actually waits for — a delegation that the wait
+// spec ignored would let the gate open on the delegator's slot while the person
+// they handed it to was still unreached.
 //
 // The amended chain is asserted through what the gate does — who it accepts, who
 // it refuses, and when it opens — rather than by reading a stored copy of it,
 // because the chain is derived from the ledger rather than carried beside it.
 
+// maxChainInTest restates the node's chain limit. It is spelled out rather than
+// shared so that changing the limit breaks this test loudly instead of the
+// expectation silently following the implementation.
+const maxChainInTest = 32
+
 func delegateSignal(actor, assignee, comment string) *types.SignalPayload {
 	signal := approvalSignal(actor, "delegate", comment)
 	if assignee != "" {
 		signal.Data["assignee"] = assignee
+	}
+	return signal
+}
+
+func addSignerSignal(actor, assignee, position, comment string) *types.SignalPayload {
+	signal := approvalSignal(actor, "add_signer", comment)
+	if assignee != "" {
+		signal.Data["assignee"] = assignee
+	}
+	if position != "" {
+		signal.Data["position"] = position
 	}
 	return signal
 }
@@ -196,4 +214,162 @@ func TestApprovalDelegate_IsRefusedOutOfTurnInASequence(t *testing.T) {
 			"turn must not be on the record", got)
 	}
 	assertIgnored(t, out.Data, 0, reasonNotCurrentApprover)
+}
+
+func TestApprovalAddSigner_AddsASlotTheGateThenWaitsFor(t *testing.T) {
+	sh := approvalHandler(t)
+	added, err := sh.OnResume(context.Background(),
+		approvalInput(node.ApprovalAll, nil),
+		addSignerSignal("alice", "erin", "after", "needs a second pair of eyes"))
+	if err != nil {
+		t.Fatalf("OnResume() error = %v", err)
+	}
+	if !added.Resuspend {
+		t.Fatalf("adding a signer resolved the gate (port %q)", added.Port)
+	}
+	assertDecision(t, added.Data, "decisions", 0, "alice", "add_signer", "needs a second pair of eyes")
+
+	// Both original approvers decide; the gate stays open, because the signer
+	// who was added is part of what it is waiting on now.
+	state := added.Data
+	for _, approver := range []string{"alice", "bob"} {
+		out, err := sh.OnResume(context.Background(),
+			approvalInput(node.ApprovalAll, state),
+			approvalSignal(approver, "approve", "ok"))
+		if err != nil {
+			t.Fatalf("OnResume(%s) error = %v", approver, err)
+		}
+		if !out.Resuspend {
+			t.Fatalf("the gate approved (port %q) after %s, with the added signer "+
+				"still unreached: adding a signer changed nothing", out.Port, approver)
+		}
+		state = out.Data
+	}
+
+	done, err := sh.OnResume(context.Background(),
+		approvalInput(node.ApprovalAll, state),
+		approvalSignal("erin", "approve", "reviewed"))
+	if err != nil {
+		t.Fatalf("OnResume() error = %v", err)
+	}
+	if done.Port != "approved" {
+		t.Fatalf("Port = %q, want approved once the added signer had decided too", done.Port)
+	}
+}
+
+func TestApprovalAddSigner_IgnoresAnUnusablePosition(t *testing.T) {
+	sh := approvalHandler(t)
+	out, err := sh.OnResume(context.Background(),
+		approvalInput(node.ApprovalAll, nil),
+		addSignerSignal("alice", "erin", "sideways", "put her somewhere"))
+	if err != nil {
+		t.Fatalf("OnResume() error = %v", err)
+	}
+	if !out.Resuspend {
+		t.Fatalf("an unusable position resolved the gate (port %q)", out.Port)
+	}
+	if got := ledgerOf(t, out.Data); len(got) != 0 {
+		t.Fatalf("ledger = %v, want none: a position the node does not recognize "+
+			"must not be guessed at", got)
+	}
+	assertIgnored(t, out.Data, 0, reasonMalformedPosition)
+}
+
+func TestApprovalAddSigner_DefaultsToSigningAfterTheRequester(t *testing.T) {
+	// A payload with no position puts the signer after the requester, which is
+	// only observable in a sequence: the requester keeps their turn. A default
+	// of "before" would quietly hand the turn to the signer instead.
+	sh := approvalHandler(t)
+	added, err := sh.OnResume(context.Background(),
+		approvalInput(node.ApprovalSequential, nil),
+		addSignerSignal("alice", "erin", "", "no position given"))
+	if err != nil {
+		t.Fatalf("OnResume() error = %v", err)
+	}
+	if got := decisionsOf(t, added.Data, "decisions"); got[0]["position"] != "after" {
+		t.Fatalf("position = %v, want after: the default is recorded, so the trail "+
+			"says where the signer actually went", got[0]["position"])
+	}
+
+	byAlice, err := sh.OnResume(context.Background(),
+		approvalInput(node.ApprovalSequential, added.Data),
+		approvalSignal("alice", "approve", "signing"))
+	if err != nil {
+		t.Fatalf("OnResume() error = %v", err)
+	}
+	if !byAlice.Resuspend {
+		t.Fatalf("the gate resolved on alice's approval (port %q); she still holds "+
+			"the first turn", byAlice.Port)
+	}
+	assertDecision(t, byAlice.Data, "decisions", 1, "alice", "approve", "signing")
+}
+
+func TestApprovalSequential_AddSignerBeforeYieldsTheTurn(t *testing.T) {
+	// In a sequence the chain is an order, so this is where "before" means
+	// something: alice asks erin to sign first, and alice's own turn moves behind
+	// hers. Without that, alice would hold a turn she has just given away.
+	sh := approvalHandler(t)
+	added, err := sh.OnResume(context.Background(),
+		approvalInput(node.ApprovalSequential, nil),
+		addSignerSignal("alice", "erin", "before", "she signs first"))
+	if err != nil {
+		t.Fatalf("OnResume() error = %v", err)
+	}
+
+	aliceTooSoon, err := sh.OnResume(context.Background(),
+		approvalInput(node.ApprovalSequential, added.Data),
+		approvalSignal("alice", "approve", "signing anyway"))
+	if err != nil {
+		t.Fatalf("OnResume() error = %v", err)
+	}
+	if !aliceTooSoon.Resuspend {
+		t.Fatalf("alice's approval resolved the gate (port %q) while erin, whose turn "+
+			"had been moved ahead of her, had not decided", aliceTooSoon.Port)
+	}
+	assertIgnored(t, aliceTooSoon.Data, 0, reasonNotCurrentApprover)
+
+	byErin, err := sh.OnResume(context.Background(),
+		approvalInput(node.ApprovalSequential, aliceTooSoon.Data),
+		approvalSignal("erin", "approve", "reviewed first"))
+	if err != nil {
+		t.Fatalf("OnResume() error = %v", err)
+	}
+	if !byErin.Resuspend {
+		t.Fatalf("erin's approval resolved the gate (port %q) with alice and bob "+
+			"still to decide", byErin.Port)
+	}
+}
+
+func TestApprovalAddSigner_RefusesToGrowTheChainPastItsLimit(t *testing.T) {
+	// Every added signer is a slot to wait for and an entry in the node's stored
+	// output, and a newly added signer can ask for one of their own, so the chain
+	// would otherwise grow for as long as somebody kept asking.
+	sh := approvalHandler(t)
+
+	// The chain is built out of the ledger, so a chain at its limit is seeded the
+	// way a real one would be: one add_signer decision per extra slot.
+	seeded := make([]map[string]any, 0, maxChainInTest-1)
+	for i := 0; len(seeded) < maxChainInTest-1; i++ {
+		seeded = append(seeded, map[string]any{
+			"approver": "alice",
+			"action":   "add_signer",
+			"assignee": fmt.Sprintf("signer-%d", i),
+			"position": "after",
+		})
+	}
+	input := approvalInput(node.ApprovalAll, map[string]any{"_decisions": seeded})
+
+	out, err := sh.OnResume(context.Background(), input,
+		addSignerSignal("alice", "newcomer", "after", "one more"))
+	if err != nil {
+		t.Fatalf("OnResume() error = %v", err)
+	}
+	if !out.Resuspend {
+		t.Fatalf("a signer was added to a chain already at its limit (port %q)", out.Port)
+	}
+	if got := ledgerOf(t, out.Data); len(got) != len(seeded) {
+		t.Fatalf("ledger grew to %d entries, want it unchanged at %d: the signer was "+
+			"added despite the limit", len(got), len(seeded))
+	}
+	assertIgnored(t, out.Data, 0, reasonChainLimitReached)
 }

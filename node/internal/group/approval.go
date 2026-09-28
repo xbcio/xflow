@@ -17,10 +17,19 @@ const ApprovalNodeType = "xflow.approval"
 // Approval actions. These are wire values: the action travels in the signal
 // payload under the "action" field.
 const (
-	actionApprove  = "approve"
-	actionReject   = "reject"
-	actionReturn   = "return"
-	actionDelegate = "delegate"
+	actionApprove   = "approve"
+	actionReject    = "reject"
+	actionReturn    = "return"
+	actionDelegate  = "delegate"
+	actionAddSigner = "add_signer"
+)
+
+// Positions an added signer can take relative to the approver who added them.
+// The distinction only changes the outcome in "sequential" mode, where the chain
+// is an order; in the other modes it only affects how the chain reads.
+const (
+	positionBefore = "before"
+	positionAfter  = "after"
 )
 
 // Keys the node keeps in its own output data across resumptions.
@@ -46,6 +55,12 @@ const (
 	ignoredTrailLimit = 20
 	// ignoredNameLimit bounds a recorded signal name, which a caller controls.
 	ignoredNameLimit = 128
+	// maxApproverChain bounds how long the chain may become. Each added signer is
+	// a slot the gate must wait for and an entry in the node's stored output, and
+	// the approvers who may add one are themselves chain members, so without a
+	// bound the chain would grow for as long as somebody kept asking for help.
+	// The limit is far past any chain a group could actually operate.
+	maxApproverChain = 32
 )
 
 // ApprovalMode represents the approval strategy.
@@ -241,6 +256,8 @@ func (n *ApprovalNode) OnResume(_ context.Context, input *types.Input, signal *t
 		return handleReturn(input, signal, actor)
 	case actionDelegate:
 		return handleDelegate(input, signal, actor, chain)
+	case actionAddSigner:
+		return handleAddSigner(input, signal, actor, chain)
 	}
 
 	return ignoreApprovalSignal(input, signal, "unknown-action")
@@ -249,8 +266,9 @@ func (n *ApprovalNode) OnResume(_ context.Context, input *types.Input, signal *t
 // handleApprove records one approval. In "any" mode a single approval decides;
 // in "all" and "sequential" the gate opens once every member of the chain has
 // decided. Completion is judged against the chain rather than against the length
-// of the ledger: a delegated slot changes who is being waited on, and the ledger
-// also holds entries for the delegate decisions themselves.
+// of the ledger: a delegated slot or an added signer changes who is being waited
+// on, and the ledger also holds entries for the delegate and add_signer
+// decisions themselves.
 func (n *ApprovalNode) handleApprove(params *ApprovalParams, chain []string, input *types.Input, signal *types.SignalPayload, approver string) (*types.Output, error) {
 	if params.Mode == ApprovalAny {
 		return &types.Output{
@@ -293,6 +311,31 @@ func handleDelegate(input *types.Input, signal *types.SignalPayload, actor strin
 		map[string]any{"assignee": assignee})
 	// The chain is not written out here: it is read back off the ledger on the
 	// next resumption, so this decision is the only thing that has to be stored.
+	return &types.Output{
+		Resuspend: true,
+		Data:      approvalOutput(input.Data, decisionLedger(decisions)),
+	}, nil
+}
+
+// handleAddSigner inserts another slot into the chain next to the approver who
+// asked for it. The signer then becomes a slot like any other, so the gate waits
+// for their decision before it opens.
+func handleAddSigner(input *types.Input, signal *types.SignalPayload, actor string, chain []string) (*types.Output, error) {
+	assignee, ok := signalAssignee(signal.Data)
+	if !ok || containsApprover(chain, assignee) {
+		// A chain holds each name once: a repeated approver's single decision
+		// would otherwise stand for two outstanding slots.
+		return ignoreApprovalSignal(input, signal, "malformed-assignee")
+	}
+	position, ok := signalPosition(signal.Data)
+	if !ok {
+		return ignoreApprovalSignal(input, signal, "malformed-position")
+	}
+	if len(chain) >= maxApproverChain {
+		return ignoreApprovalSignal(input, signal, "chain-limit-reached")
+	}
+	decisions := appendDecision(getDecisions(input.Data), actor, actionAddSigner, signal.Data["comment"],
+		map[string]any{"assignee": assignee, "position": position})
 	return &types.Output{
 		Resuspend: true,
 		Data:      approvalOutput(input.Data, decisionLedger(decisions)),
@@ -486,8 +529,24 @@ func signalAssignee(data map[string]any) (string, bool) {
 	return assignee, true
 }
 
+// signalPosition reads where an added signer goes relative to the approver who
+// added them. It reports false for anything but the two known positions rather
+// than defaulting: a misspelled position that silently meant "after" would put
+// the signer somewhere the request did not ask for.
+func signalPosition(data map[string]any) (string, bool) {
+	raw, ok := data["position"]
+	if !ok {
+		return positionAfter, true
+	}
+	position, ok := raw.(string)
+	if !ok || (position != positionBefore && position != positionAfter) {
+		return "", false
+	}
+	return position, true
+}
+
 // approvedChain is the chain the gate is actually waiting on: the configured
-// approvers, as amended by the delegations on the ledger.
+// approvers, as amended by the delegations and added signers on the ledger.
 //
 // It is recomputed from the ledger rather than stored beside it, so the chain
 // and the record of who decided it cannot drift apart. Storing the amended chain
@@ -496,15 +555,18 @@ func signalAssignee(data map[string]any) (string, bool) {
 func approvedChain(params *ApprovalParams, decisions []map[string]any) []string {
 	chain := append([]string(nil), params.Approvers...)
 	for _, decision := range decisions {
-		if decision["action"] != actionDelegate {
+		actor, actorOK := decision["approver"].(string)
+		assignee, assigneeOK := decision["assignee"].(string)
+		if !actorOK || !assigneeOK {
 			continue
 		}
-		from, fromOK := decision["approver"].(string)
-		to, toOK := decision["assignee"].(string)
-		if !fromOK || !toOK {
-			continue
+		switch decision["action"] {
+		case actionDelegate:
+			chain = replaceApprover(chain, actor, assignee)
+		case actionAddSigner:
+			position, _ := decision["position"].(string)
+			chain = insertApprover(chain, actor, assignee, position)
 		}
-		chain = replaceApprover(chain, from, to)
 	}
 	return chain
 }
@@ -537,6 +599,23 @@ func replaceApprover(chain []string, from string, to string) []string {
 		if candidate == from {
 			out[i] = to
 			break
+		}
+	}
+	return out
+}
+
+// insertApprover puts assignee next to actor's slot. Precondition: actor holds a
+// slot in chain, which is what the caller established when it accepted the
+// signal as this actor's own.
+func insertApprover(chain []string, actor string, assignee string, position string) []string {
+	out := make([]string, 0, len(chain)+1)
+	for _, candidate := range chain {
+		if candidate == actor && position == positionBefore {
+			out = append(out, assignee)
+		}
+		out = append(out, candidate)
+		if candidate == actor && position != positionBefore {
+			out = append(out, assignee)
 		}
 	}
 	return out
