@@ -623,6 +623,31 @@ describe("XFlowPreview", () => {
     });
   });
 
+  it("draws edges of reported dangling ports dashed, labeled and never deleted", () => {
+    const onDeleteConnection = vi.fn();
+    render(
+      <XFlowPreview
+        workflow={portWorkflow}
+        editable
+        onDeleteConnection={onDeleteConnection}
+        danglingPorts={[{ source: "source", sourcePort: "success" }, { source: "target", sourcePort: "main" }]}
+      />
+    );
+
+    const [edge] = latestFlowProps().edges;
+    expect(edge.className).toBe("xflow-preview-edge--dangling");
+    expect(edge.label).toBe("success · missing");
+    expect(edge.style).toMatchObject({ stroke: "var(--xflow-preview-edge-dangling)", strokeDasharray: "2 4" });
+    expect(edge.ariaLabel).toContain("(port no longer exists)");
+    expect(onDeleteConnection).not.toHaveBeenCalled();
+
+    // Without the prop the same edge is ordinary.
+    render(<XFlowPreview workflow={portWorkflow} editable onDeleteConnection={onDeleteConnection} />);
+    const [plain] = latestFlowProps().edges;
+    expect(plain.className).toBeUndefined();
+    expect(plain.label).toBe("success");
+  });
+
   it("requests deletion for selected data edges and never passes node or dependency deletion through", async () => {
     const onDeleteConnection = vi.fn();
     render(<XFlowPreview workflow={portWorkflow} editable onDeleteConnection={onDeleteConnection} />);

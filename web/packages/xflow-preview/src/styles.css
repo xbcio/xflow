@@ -119,6 +119,15 @@
     var(--xflow-status-running, var(--xflow-focus, #2878ff))
   );
   --xflow-preview-edge-label: var(--xflow-edge-label, var(--xflow-status-warning, #f7b955));
+  /* An edge whose source port no longer exists (danglingPorts prop). */
+  --xflow-preview-edge-dangling: var(
+    --xflow-edge-dangling,
+    var(--xflow-preview-status-warning)
+  );
+  --xflow-preview-edge-dangling-label: var(
+    --xflow-edge-dangling-label,
+    var(--xflow-status-warning-text, var(--xflow-preview-status-warning))
+  );
   --xflow-preview-edge-label-bg: var(
     --xflow-edge-label-bg,
     var(--xflow-surface-canvas, #202020)

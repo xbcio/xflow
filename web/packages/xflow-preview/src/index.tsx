@@ -90,7 +90,21 @@ export interface XFlowPreviewProps {
    * dragged in rather than clicked. The preview never mutates the workflow.
    */
   onDropNode?: (type: string, position: Required<NodePosition>) => void;
+  /**
+   * Output ports, by source node name, whose edges no longer lead anywhere
+   * valid (e.g. a removed dynamic branch). Their edges are drawn dashed in the
+   * warning color and labeled; the preview never removes them.
+   */
+  danglingPorts?: readonly DanglingPort[];
 }
+
+/** One output port of a node that the owner reports as no longer existing. */
+export interface DanglingPort {
+  source: string;
+  sourcePort: string;
+}
+
+const danglingKey = (source: string, port: string) => `${source}\u0000${port}`;
 
 const statusLabel: Record<string, string> = {
   pending: "pending",
@@ -405,14 +419,18 @@ function toFlowEdges(
   graphEdges: GraphEdge[],
   runtime: RuntimeSnapshot | undefined,
   canDeleteConnections: boolean,
-  selectedEdgeIds: ReadonlySet<string>
+  selectedEdgeIds: ReadonlySet<string>,
+  dangling: ReadonlySet<string>
 ): Edge[] {
   return graphEdges.map((edge) => {
     const targetRuntime = runtime?.nodes?.[edge.targetName] ?? runtime?.nodes?.[edge.target];
     const isActive = targetRuntime?.status === "running" || targetRuntime?.status === "waiting";
-    const isError = edge.sourcePort === "error";
-    const showLabel = edge.sourcePort !== "main";
-    const connectionLabel = `Connection from ${edge.sourceName} ${edge.sourcePort} to ${edge.targetName} ${edge.targetPort}`;
+    const isDangling = dangling.has(danglingKey(edge.sourceName, edge.sourcePort));
+    const isError = !isDangling && edge.sourcePort === "error";
+    const showLabel = isDangling || edge.sourcePort !== "main";
+    const connectionLabel = `Connection from ${edge.sourceName} ${edge.sourcePort} to ${edge.targetName} ${edge.targetPort}${
+      isDangling ? " (port no longer exists)" : ""
+    }`;
 
     return {
       id: edge.id,
@@ -421,8 +439,9 @@ function toFlowEdges(
       sourceHandle: edge.sourcePort,
       targetHandle: edge.targetPort,
       type: "smoothstep",
-      animated: isActive,
-      label: showLabel ? edge.sourcePort : undefined,
+      className: isDangling ? "xflow-preview-edge--dangling" : undefined,
+      animated: isActive && !isDangling,
+      label: showLabel ? (isDangling ? `${edge.sourcePort} · missing` : edge.sourcePort) : undefined,
       selectable: canDeleteConnections,
       focusable: canDeleteConnections,
       deletable: canDeleteConnections,
@@ -432,17 +451,23 @@ function toFlowEdges(
         : connectionLabel,
       interactionWidth: 16,
       style: {
-        stroke: isError
-          ? "var(--xflow-preview-edge-error)"
-          : isActive
-            ? "var(--xflow-preview-edge-running)"
-            : "var(--xflow-preview-edge)",
-        strokeDasharray: isError ? "5 4" : undefined,
+        stroke: isDangling
+          ? "var(--xflow-preview-edge-dangling)"
+          : isError
+            ? "var(--xflow-preview-edge-error)"
+            : isActive
+              ? "var(--xflow-preview-edge-running)"
+              : "var(--xflow-preview-edge)",
+        strokeDasharray: isDangling ? "2 4" : isError ? "5 4" : undefined,
         opacity: isError ? 0.78 : 1,
-        strokeWidth: isActive || isError ? 1.8 : 1.2
+        strokeWidth: isActive || isError || isDangling ? 1.8 : 1.2
       },
       labelStyle: {
-        fill: isError ? "var(--xflow-preview-status-error)" : "var(--xflow-preview-edge-label)",
+        fill: isDangling
+          ? "var(--xflow-preview-edge-dangling-label)"
+          : isError
+            ? "var(--xflow-preview-status-error)"
+            : "var(--xflow-preview-edge-label)",
         fontWeight: 700
       },
       labelBgStyle: {
@@ -663,7 +688,8 @@ export function XFlowPreview({
   onConnect,
   onDeleteConnection,
   onDeleteNode,
-  onDropNode
+  onDropNode,
+  danglingPorts
 }: XFlowPreviewProps): React.ReactElement {
   const graph = React.useMemo(() => toGraphModel(workflow), [workflow]);
   const [internalSelectedNodeId, setInternalSelectedNodeId] = React.useState<string | undefined>();
@@ -842,9 +868,13 @@ export function XFlowPreview({
     () => toFlowNodes(graph.nodes, canvasGraphEdges, runtime, selectedNodeId, canDragNodes, canConnect, handleSelectNode),
     [graph.nodes, canvasGraphEdges, runtime, selectedNodeId, canDragNodes, canConnect, handleSelectNode]
   );
+  const danglingSet = React.useMemo(
+    () => new Set((danglingPorts ?? []).map((port) => danglingKey(port.source, port.sourcePort))),
+    [danglingPorts]
+  );
   const flowEdges = React.useMemo(
-    () => toFlowEdges(canvasGraphEdges, runtime, canDeleteConnections, selectedEdgeIds),
-    [canvasGraphEdges, runtime, canDeleteConnections, selectedEdgeIds]
+    () => toFlowEdges(canvasGraphEdges, runtime, canDeleteConnections, selectedEdgeIds, danglingSet),
+    [canvasGraphEdges, runtime, canDeleteConnections, selectedEdgeIds, danglingSet]
   );
   const summary = React.useMemo(() => summarizeRuntime(graph.nodes, runtime), [graph.nodes, runtime]);
   const selectedNode = React.useMemo(
