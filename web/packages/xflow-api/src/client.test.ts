@@ -266,6 +266,58 @@ describe("createXFlowApiClient", () => {
     expect(result).toEqual({ workflowId: "wf-1" } satisfies RegisterWorkflowResult);
   });
 
+  const issue = {
+    node: "pause",
+    path: "/parameters/duration",
+    code: "required",
+    message: "duration is required",
+    severity: "error"
+  } as const;
+
+  it("returns warn-mode param_issues from a save", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/api",
+      fetcher: async () => success({ workflow_id: "wf-1", param_issues: [issue] })
+    });
+
+    const result = await client.saveWorkflow({ id: "wf-1", name: "Saved flow", nodes: [] });
+
+    expect(result).toEqual({ workflowId: "wf-1", paramIssues: [issue] } satisfies RegisterWorkflowResult);
+  });
+
+  it("rejects a register response whose param_issues is malformed", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/api",
+      fetcher: async () => success({ workflow_id: "wf-1", param_issues: [{ node: "pause" }] })
+    });
+
+    await expect(client.createWorkflow({ name: "x", nodes: [] })).rejects.toMatchObject({ message: "invalid API response" });
+  });
+
+  it("carries enforce-mode param_issues on the workflow_param_invalid rejection", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/api",
+      fetcher: async () =>
+        new Response(
+          JSON.stringify({
+            success: false,
+            code: "workflow_param_invalid",
+            message: 'workflow "orders": 1 invalid parameter(s)',
+            data: { param_issues: [issue] }
+          }),
+          { status: 400, headers: { "content-type": "application/json" } }
+        )
+    });
+
+    const error = await client.saveWorkflow({ id: "wf-1", name: "orders", nodes: [] }).then(
+      () => undefined,
+      (err: unknown) => err
+    );
+
+    expect(error).toBeInstanceOf(XFlowApiError);
+    expect(error).toMatchObject({ status: 400, code: "workflow_param_invalid", paramIssues: [issue] });
+  });
+
   it("rejects a save without an id without inventing an HTTP status", async () => {
     const fetcher = vi.fn();
     const client = createXFlowApiClient({ baseUrl: "/api", fetcher });

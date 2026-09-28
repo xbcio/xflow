@@ -2,6 +2,7 @@ import type {
   NodeFormSchema,
   NodeStatus as RuntimeNodeStatus,
   NodeTypesResponse,
+  ParamIssue,
   ParamValidationMode,
   RuntimeNodeSnapshot,
   RuntimeSnapshot,
@@ -105,6 +106,11 @@ export type WaitExecutionResult = ExecutionDetail | WaitExecutionTimeout;
 export interface RegisterWorkflowResult {
   workflowId: string;
   warnings?: string[];
+  /**
+   * ParamSpec findings (`param_issues`) the server reported without rejecting
+   * the definition (warn mode). Absent when there are none.
+   */
+  paramIssues?: ParamIssue[];
 }
 
 /**
@@ -163,6 +169,10 @@ export interface XFlowApiClient {
  * - `requestId`: the `X-Request-Id` response header, echoed only when the
  *   client sent a legal value (`envelope.go:99`). Never sourced from the body.
  *
+ * - `paramIssues`: `data.param_issues` of a failure envelope — carried by the
+ *   400 `workflow_param_invalid` rejection in enforce mode, so a caller can
+ *   place every issue on its field. Absent for every other failure.
+ *
  * The `message` is an envelope `message` when a valid failure envelope is
  * available; otherwise it is a fixed transport message and never raw body text.
  */
@@ -174,7 +184,8 @@ export class XFlowApiError extends Error {
     message: string,
     readonly code?: string,
     readonly traceId?: string,
-    readonly requestId?: string
+    readonly requestId?: string,
+    readonly paramIssues?: ParamIssue[]
   ) {
     super(message);
   }
@@ -257,6 +268,7 @@ interface ApiResponse<T> {
 interface RegisterWorkflowWire {
   workflow_id: string;
   warnings?: string[];
+  param_issues?: ParamIssue[];
 }
 
 interface ExecuteWorkflowWire {
@@ -436,7 +448,8 @@ async function request<T>(fetcher: typeof fetch, url: string, init?: RequestInit
       failure?.message ?? REQUEST_FAILED_MESSAGE,
       failure?.code,
       failure?.trace_id,
-      requestId
+      requestId,
+      failureParamIssues(failure)
     );
   }
 
@@ -452,12 +465,49 @@ async function request<T>(fetcher: typeof fetch, url: string, init?: RequestInit
   };
 }
 
+const paramIssueSeverities = new Set<string>(["error", "warning"]);
+
+/** Parses one wire ParamIssue; undefined when it does not have the Go shape. */
+function parseParamIssue(value: unknown): ParamIssue | undefined {
+  if (!isRecord(value)) return undefined;
+  const { node, path, code, message, severity } = value;
+  if (
+    typeof node !== "string" ||
+    typeof path !== "string" ||
+    typeof code !== "string" ||
+    typeof message !== "string" ||
+    typeof severity !== "string" ||
+    !paramIssueSeverities.has(severity)
+  ) {
+    return undefined;
+  }
+  return { node, path, code, message, severity: severity as ParamIssue["severity"] };
+}
+
+/**
+ * `data.param_issues` of a failure envelope. Best effort: the error is being
+ * thrown anyway, so a malformed list is dropped rather than masking the
+ * server's message with "invalid API response".
+ */
+function failureParamIssues(failure: Envelope<unknown> | undefined): ParamIssue[] | undefined {
+  const list = isRecord(failure?.data) ? failure.data.param_issues : undefined;
+  if (!Array.isArray(list)) return undefined;
+  const issues = list.map(parseParamIssue);
+  return issues.every((issue): issue is ParamIssue => issue !== undefined) ? issues : undefined;
+}
+
 function mapRegisterWorkflow(response: ApiResponse<unknown>): RegisterWorkflowResult {
   const data = requireRecord(response.data, response);
   const result: RegisterWorkflowResult = { workflowId: requireString(data, "workflow_id", response) };
   const warnings = optionalStringArray(data, "warnings", response);
   if (warnings !== undefined) {
     result.warnings = warnings;
+  }
+  const rawIssues = data.param_issues;
+  if (rawIssues !== undefined) {
+    if (!Array.isArray(rawIssues)) invalidResponse(response);
+    const issues = rawIssues.map((issue) => parseParamIssue(issue) ?? invalidResponse(response));
+    if (issues.length > 0) result.paramIssues = issues;
   }
   return result;
 }
