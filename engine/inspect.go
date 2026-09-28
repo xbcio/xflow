@@ -141,7 +141,11 @@ func (e *Engine) inspectNode(
 		return NodeDetail{}, fmt.Errorf("inspect output %q/%q: %w", id, name, err)
 	}
 	if output != nil {
-		detail.Output = output
+		// The engine's node-state slot is stripped so the inspected output is the
+		// same map a downstream node and a $nodes reference see. Leaving it in
+		// would make the public result surface the one place the slot appears,
+		// and it would disagree with $nodes['name'] about the same node.
+		detail.Output = nodeVisibleData(output)
 	}
 	return detail, nil
 }

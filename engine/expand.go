@@ -745,7 +745,7 @@ func (e *Engine) bodyOuterNodesSnapshot(ctx context.Context, id types.ExecutionI
 			return nil, fmt.Errorf("get body $nodes output %q/%q referenced by body of %q: %w",
 				id, ref.Node, g.NodeName(nodeIdx), err)
 		}
-		nodes[ref.Node] = data
+		nodes[ref.Node] = nodeVisibleData(data)
 	}
 	return nodes, nil
 }

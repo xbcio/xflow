@@ -126,6 +126,13 @@ func (e *Engine) commitTaskResultWithStrategy(ctx context.Context, lease *TaskLe
 	if result.Output != nil && result.Output.Data != nil {
 		data = result.Output.Data
 	}
+	// A node's private state is persisted inside its own output, so it is folded
+	// in here -- the single point where a handler result becomes the map this
+	// commit stores. Every read that feeds another node goes through
+	// nodeVisibleData, so downstream never sees the slot.
+	if result.Output != nil {
+		data = withNodeState(data, result.Output.State)
+	}
 	// Deliberately expandsIntoSubExecutions and not taskResultExpands: by this
 	// line the error and error-port branches have already returned, so the two
 	// predicates differ only in how they treat result.Output == nil. Swapping

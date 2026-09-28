@@ -82,10 +82,20 @@ func executeSuspendingTask(t *testing.T, sh types.SuspendingHandler, lease *Task
 			return TaskResult{Output: output, Error: err}
 		}
 		if output != nil && output.Resuspend {
+			// Mirrors execution/runner.go's executeSuspending: PrepareSuspend is
+			// re-entered with the data AND the state this decision produced. The
+			// duplication is structural (execution/ imports engine/, so this
+			// package cannot call the runner's helper), which is why the runner's
+			// own copy is covered by execution/runner_test.go as well.
 			input := lease.Input
 			if output.Data != nil {
 				cp := *lease.Input
 				cp.Data = output.Data
+				input = &cp
+			}
+			if output.State != nil {
+				cp := *input
+				cp.State = output.State
 				input = &cp
 			}
 			spec, err := sh.PrepareSuspend(ctx, input)

@@ -88,7 +88,11 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 		if err != nil {
 			return nil, fmt.Errorf("get resumed node output %q/%q: %w", t.ExecutionID, t.NodeName, err)
 		}
-		input.Data = cloneMap(data)
+		// This is the one read that recovers the node's own private state. It
+		// comes from the node's own stored output, which only this node's commits
+		// write, so it is the one input channel no upstream node and no caller can
+		// seed -- see types.Input.State.
+		input.State, input.Data = splitNodeState(data)
 		applyExecutionScope(input, snap.Scope)
 		// A resumed node's parameters may also contain $nodes references that
 		// need resolving — the resume re-enters handler Execute with the same
@@ -96,6 +100,7 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 		if err := prefetchNodesRefs(ctx, e, t, g, input); err != nil {
 			return nil, err
 		}
+		stripNodeState(input)
 		return input, nil
 	}
 
@@ -112,25 +117,26 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 	// for ?? to catch, so the guard the spec recommends for an unexecuted node
 	// could not fire and the whole node failed to evaluate its parameters.
 	if g.AllowCycles() && t.NodeIdx == g.StartIndex() && t.ActivationID == 1 {
-		input.Data = cloneMap(snap.Params)
+		input.Data = nodeVisibleData(cloneMap(snap.Params))
 		applyExecutionScope(input, snap.Scope)
 		if err := prefetchNodesRefs(ctx, e, t, g, input); err != nil {
 			return nil, err
 		}
+		stripNodeState(input)
 		return input, nil
 	}
 	switch len(inEdges) {
 	case 0:
 		// Root node — inject workflow-level submission params as input.Data so
 		// source handlers can read them (mirrors ClusterRunner behaviour).
-		input.Data = cloneMap(snap.Params)
+		input.Data = nodeVisibleData(cloneMap(snap.Params))
 	case 1:
 		name := g.NodeName(inEdges[0].SrcIdx)
 		data, err := e.state.GetOutput(ctx, t.ExecutionID, name)
 		if err != nil {
 			return nil, fmt.Errorf("get upstream output %q/%q: %w", t.ExecutionID, name, err)
 		}
-		input.Data = cloneMap(data)
+		input.Data = nodeVisibleData(cloneMap(data))
 	default:
 		// Fan-in: expose all upstream outputs keyed by node name.
 		inputs := make(map[string]any, len(inEdges))
@@ -140,7 +146,7 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 			if err != nil {
 				return nil, fmt.Errorf("get upstream output %q/%q: %w", t.ExecutionID, name, err)
 			}
-			inputs[name] = cloneMap(data)
+			inputs[name] = nodeVisibleData(cloneMap(data))
 		}
 		input.Inputs = inputs
 	}
@@ -148,6 +154,7 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 	if err := prefetchNodesRefs(ctx, e, t, g, input); err != nil {
 		return nil, err
 	}
+	stripNodeState(input)
 	return input, nil
 }
 
@@ -165,10 +172,16 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 // and lands in Nodes -- see that constant's doc for why Data cannot work for it.
 //
 // The scope wins over a same-named upstream key. The roots are "$"-prefixed and
-// the "$" prefix is reserved (a node output cannot introduce one through the
-// DSL), so the collision this resolves is not reachable today; the rule is
-// stated because the alternative -- letting an upstream output shadow a promised
-// loop root -- would be silent and item-dependent.
+// the "$" prefix belongs to the engine, so the collision this resolves is not
+// reachable through a workflow definition; the rule is stated because the
+// alternative -- letting an upstream output shadow a promised loop root -- would
+// be silent and item-dependent.
+//
+// The "$" prefix is a naming convention, not an enforced boundary: an output map
+// is untyped, so a node can publish a "$"-prefixed key and a caller can put one
+// in submission params. Nothing here relies on its absence. buildInput strips
+// the engine's own NodeStateKey from Data after this runs, which is why the
+// convention's limits cost nothing.
 func applyExecutionScope(input *types.Input, scope map[string]any) {
 	if len(scope) == 0 {
 		return
@@ -222,7 +235,7 @@ func prefetchNodesRefs(ctx context.Context, e *Engine, t *Task, g *graph.Graph, 
 		// return nil, nil — the static type is map[string]any so this assignment
 		// produces a typed nil map, which is the required form (see Input.Nodes
 		// field comment for why).
-		input.Nodes[name] = data
+		input.Nodes[name] = nodeVisibleData(data)
 	}
 	return nil
 }

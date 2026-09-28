@@ -412,13 +412,21 @@ func (e *Engine) commitSuspendedTaskResult(ctx context.Context, lease *TaskLease
 	var output map[string]any
 	oldSignalName := ""
 	if result.Output != nil && result.Output.Resuspend {
-		storeOutput = result.Output.Data != nil
-		output = result.Output.Data
+		// A resuspend that carries only private state -- nil Data -- still has
+		// something to store: the state itself. Treating Data as the sole
+		// signal would drop the update and leave the node resuming against the
+		// state it had before it decided anything.
+		storeOutput = result.Output.Data != nil || result.Output.State != nil
+		output = withNodeState(result.Output.Data, result.Output.State)
 		if lease.Task.Payload == nil {
 			return CommitOutcomeTransientError, fmt.Errorf("resuspend result for %s without resume payload", lease.Task.NodeName)
 		}
 		oldSignalName = lease.Task.Payload.Name
 	} else if lease.Input != nil {
+		// A first suspension stores the input as the node's output, so the
+		// resumption re-enters with the same data. No state is folded in: state
+		// is written by a resumption (Output.State), and this is the commit that
+		// creates the wait a resumption resumes from.
 		output = cloneMap(lease.Input.Data)
 	}
 
