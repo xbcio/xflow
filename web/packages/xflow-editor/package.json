@@ -21,11 +21,11 @@
     "@xflow/core": "workspace:*",
     "@xflow/preview": "workspace:*",
     "antd": "6.5.2",
-    "react": "19.1.0"
+    "react": "19.2.8"
   },
   "devDependencies": {
     "@xflow/typescript-config": "workspace:*",
-    "@types/react": "19.1.17"
+    "@types/react": "19.2.18"
   },
   "peerDependencies": {
     "react": ">=18"
