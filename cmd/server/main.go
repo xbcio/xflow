@@ -111,6 +111,11 @@ type serverConfig struct {
 	// holder is clamped exactly like a tenant. Raising it is therefore an
 	// auditable act on this host, not a scope someone can be granted.
 	registrationCodeTTL time.Duration
+	// paramValidation is what workflow registration and inline execution do
+	// with ParamSpec issues: off, warn, or enforce. Empty (the default) means
+	// warn, so an upgrade of this binary never starts rejecting definitions
+	// it accepted before; enforce is a deliberate operator act.
+	paramValidation xflowsdk.ParamValidationMode
 	// apiAuthToken, when non-empty, enables BearerTokenAuth on the workflow/
 	// control API (/v1/workflows, /v1/executions/*). The same token must be
 	// supplied by callers in the Authorization: Bearer <token> header. When set
@@ -215,6 +220,9 @@ func parseServerConfig(args []string) (serverConfig, error) {
 		"How long an enrolled runner identity authenticates before it must renew (0 disables expiry)")
 	fs.DurationVar(&cfg.registrationCodeTTL, "registration-code-ttl", 0,
 		"Ceiling on the lifetime of a registration code minted via the management API; also its default (0 disables expiry)")
+	var paramValidation string
+	fs.StringVar(&paramValidation, "param-validation", "",
+		"What workflow registration does with node param issues: off|warn|enforce (default warn; enforce rejects with 400 workflow_param_invalid)")
 	fs.StringVar(&cfg.apiAuthToken, "api-auth-token", "", "Static bearer token for workflow API authentication (sets Authorization: Bearer guard on /v1/workflows and /v1/executions/*); single-namespace → default namespace. For multi-namespace use --auth-tokens-file.")
 	fs.StringVar(&cfg.authTokensFile, "auth-tokens-file", "", "JSON file of [{token,subject,namespace,scopes}] mappings; each token binds to its own namespace (multi-namespace). Takes precedence over --api-auth-token. File must be 0600.")
 	fs.BoolVar(&cfg.requireAPIAuth, "require-api-auth", false, "Fail to start if no workflow API authenticator is configured (production fail-closed)")
@@ -269,6 +277,10 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	}
 	if cfg.registrationCodeTTL < 0 {
 		return serverConfig{}, fmt.Errorf("--registration-code-ttl must not be negative")
+	}
+	cfg.paramValidation = xflowsdk.ParamValidationMode(paramValidation)
+	if cfg.paramValidation != "" && !cfg.paramValidation.Valid() {
+		return serverConfig{}, fmt.Errorf("--param-validation must be one of: off|warn|enforce")
 	}
 	// Backwards compatibility: when no Redis address and no HA topology flags
 	// are provided, default to the in-memory backend.
@@ -493,6 +505,8 @@ func buildServerOptions(cfg serverConfig, deps serverDeps) []xflowsdk.ServerOpti
 	// Unconditional for the same reason: zero is a no-op ceiling, and the flag
 	// is validated to be no less than zero.
 	serverOpts = append(serverOpts, xflowsdk.WithServerRegistrationCodeTTL(cfg.registrationCodeTTL))
+	// Unconditional: an empty mode is the SDK default (warn).
+	serverOpts = append(serverOpts, xflowsdk.WithServerParamValidation(cfg.paramValidation))
 	// Production posture (Task 8 blocker 3), enforced by apiserver.New — the
 	// one layer both this binary and every SDK embedder pass through. The
 	// declaration carries the three facts that layer cannot see for itself:
