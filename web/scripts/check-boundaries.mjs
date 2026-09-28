@@ -18,7 +18,7 @@ const publicPackagePolicy = new Map([
   ["@xflow/preview", new Set(["@xflow/core", "@xflow/typescript-config"])],
   [
     "@xflow/editor",
-    new Set(["@xflow/core", "@xflow/preview", "@xflow/typescript-config"])
+    new Set(["@xflow/composer", "@xflow/core", "@xflow/preview", "@xflow/typescript-config"])
   ]
 ]);
 

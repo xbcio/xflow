@@ -161,6 +161,9 @@ importers:
       '@ant-design/icons':
         specifier: 6.3.2
         version: 6.3.2(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      '@xflow/composer':
+        specifier: workspace:*
+        version: link:../composer
       '@xflow/core':
         specifier: workspace:*
         version: link:../xflow-core

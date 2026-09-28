@@ -6,6 +6,6 @@
     "tsBuildInfoFile": "dist/tsconfig.tsbuildinfo"
   },
   "include": ["src"],
-  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"],
-  "references": [{ "path": "../xflow-core" }, { "path": "../xflow-preview" }]
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/**/testdata/**"],
+  "references": [{ "path": "../composer" }, { "path": "../xflow-core" }, { "path": "../xflow-preview" }]
 }
