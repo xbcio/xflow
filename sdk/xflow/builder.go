@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
 )
@@ -28,13 +29,17 @@ type WorkflowBuilder struct {
 }
 
 type nodeEntry struct {
-	name               string
-	builder            types.Builder       // nil when using the direct ActionHandler path
-	handler            types.ActionHandler // local-only direct handler
-	kind               types.NodeKind
-	onError            types.OnError
-	output             *types.NodeOutputPolicy
-	normalizedParams   map[string]any
+	name             string
+	builder          types.Builder       // nil when using the direct ActionHandler path
+	handler          types.ActionHandler // local-only direct handler
+	kind             types.NodeKind
+	onError          types.OnError
+	output           *types.NodeOutputPolicy
+	normalizedParams map[string]any
+	// paramIssues is what graph.ValidateParams reported for normalizedParams
+	// when they were computed; nil for body-bearing and direct-handler nodes,
+	// which the SDK does not validate. See paramIssues.
+	paramIssues        []graph.ParamIssue
 	runnerSelector     *types.RunnerSelector
 	timeout            time.Duration
 	activationReplicas uint32
@@ -505,9 +510,36 @@ func (w *WorkflowBuilder) validateAndNormalizeParams() error {
 		if err := validateParams(entry.name, desc.Params, params); err != nil {
 			return err
 		}
+		// The ParamSpec validator runs on the final params (defaults written)
+		// and only reports; whether an issue fails registration is decided by
+		// the registering Engine's ParamValidationMode (applyParamValidation).
+		// The Required check above is unaffected by that mode.
+		entry.paramIssues = graph.ValidateParams(desc, params)
 		entry.normalizedParams = params
 	}
 	return nil
+}
+
+// paramIssues collects the ParamSpec issues of the most recent successful
+// build, in node order, descending into attached bodies with member names
+// qualified as "parent/child". Call it only after build succeeded: build is
+// what rejects cyclic bodies.
+func (w *WorkflowBuilder) paramIssues() []graph.ParamIssue {
+	return w.collectParamIssues("")
+}
+
+func (w *WorkflowBuilder) collectParamIssues(prefix string) []graph.ParamIssue {
+	var out []graph.ParamIssue
+	for i, entry := range w.nodes {
+		for _, is := range entry.paramIssues {
+			is.Node = prefix + entry.name
+			out = append(out, is)
+		}
+		if i < len(w.refs) && w.refs[i].body != nil {
+			out = append(out, w.refs[i].body.collectParamIssues(prefix+entry.name+"/")...)
+		}
+	}
+	return out
 }
 
 // assembleNodes fills def.Nodes from w.nodes, finalizing type/kind/version/params

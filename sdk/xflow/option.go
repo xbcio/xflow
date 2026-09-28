@@ -54,6 +54,10 @@ type engineConfig struct {
 	transientCompletionTTL    time.Duration
 	transientCompletionTTLSet bool
 
+	// paramValidation is how AddWorkflow treats ParamSpec issues; empty means
+	// types.DefaultParamValidationMode. See WithParamValidation.
+	paramValidation types.ParamValidationMode
+
 	// local-only: NewCluster always leaves this false; direct handlers are
 	// rejected regardless (see node_registration.go registerDirectHandlers).
 	allowDirectHandlers bool

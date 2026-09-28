@@ -29,6 +29,7 @@ import (
 //   - NOT retryable, because only the definition or the call can change the
 //     answer: a *apiserver.WorkflowCompileError; the key conflict AddWorkflow
 //     answers a different definition with (backend.ErrWorkflowConflict); a
+//     *ParamIssuesError (ParamSpec validation under enforce); a
 //     registry that does not support atomic replacement
 //     (backend.ErrWorkflowReplaceUnsupported); and the definition problems
 //     AddWorkflow and ReplaceWorkflow refuse themselves — a nil workflow, a
@@ -56,6 +57,10 @@ func IsRetryableRegistrationError(err error) bool {
 	}
 	var refused definitionRefused
 	if errors.As(err, &refused) {
+		return false
+	}
+	var paramErr *ParamIssuesError
+	if errors.As(err, &paramErr) {
 		return false
 	}
 	var replaceConflict *backend.WorkflowReplaceConflictError

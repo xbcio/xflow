@@ -51,6 +51,14 @@ func (e *Engine) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.Wo
 	if err != nil {
 		return "", err
 	}
+	// ParamSpec validation reports on the built definition before anything is
+	// persisted, so an enforce-mode rejection leaves no side effects. Under
+	// warn it only logs. Script.File()'s __artifact_file_path counts as set
+	// here; OneOf is re-judged on artifact_digest after resolveArtifacts.
+	paramIssues := wf.paramIssues()
+	if err := applyParamValidation(e.paramValidation, e.logger, def.Name, paramIssues); err != nil {
+		return "", err
+	}
 	// resolveArtifacts persists ScriptFile content, including content nested in a
 	// body that graph.Compile would later reject for FAF. Reject artifact-backed
 	// FAF definitions first so no durable artifact bytes or references are made.
@@ -69,6 +77,11 @@ func (e *Engine) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.Wo
 	if e.artifactStore != nil {
 		if err := resolveArtifacts(ctx, def, e.artifactStore); err != nil {
 			return "", err
+		}
+		if e.paramValidation != types.ParamValidationOff {
+			if err := applyParamValidation(e.paramValidation, e.logger, def.Name, finalOneOfIssues(def, paramIssues)); err != nil {
+				return "", err
+			}
 		}
 	}
 	g, err := graph.Compile(def)

@@ -37,6 +37,8 @@ type Engine struct {
 	allowDirectHandlers bool
 	executionMode       ExecutionMode
 	logger              engine.Logger
+	// paramValidation is the WithParamValidation mode AddWorkflow applies.
+	paramValidation types.ParamValidationMode
 	// stopOnce guarantees the stopFns run at most once. The local queue's
 	// shutdown closes a channel that panics on a second close, so Stop must be
 	// idempotent for callers that defer Stop and also stop explicitly.
@@ -133,6 +135,7 @@ func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error
 		allowDirectHandlers: cfg.allowDirectHandlers,
 		executionMode:       cfg.executionMode,
 		logger:              cfg.logger,
+		paramValidation:     cfg.paramValidation.OrDefault(),
 		directHandlerNames:  make(map[string]string),
 		directHandlers:      make(map[string]types.ActionHandler),
 		globalHandlers:      make(map[string]types.ActionHandler),

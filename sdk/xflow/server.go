@@ -107,6 +107,9 @@ type serverConfig struct {
 	enableManagement         bool
 	supplyKeyRotation        time.Duration
 	middleware               []func(http.Handler) http.Handler
+	// paramValidation is WithServerParamValidation's mode; empty means
+	// types.DefaultParamValidationMode.
+	paramValidation types.ParamValidationMode
 }
 
 // ServerOption configures a Server.
@@ -466,6 +469,7 @@ func WithServerHTTPMiddleware(mw ...func(http.Handler) http.Handler) ServerOptio
 // when the host program is stopping.
 type Server struct {
 	api        *apiserver.APIServer
+	logger     engine.Logger
 	sdkEngine  *Engine
 	supplies   store.Supplies
 	artifacts  *store.ArtifactStore
@@ -561,6 +565,7 @@ func NewServer(cfg ServerConfig, opts ...ServerOption) (*Server, error) {
 	}
 	return &Server{
 		api:        api,
+		logger:     sc.logger,
 		sdkEngine:  newNonOwningEngineFacade(api.Engine(), api.Backend()),
 		supplies:   apiCfg.Supplies,
 		artifacts:  sc.artifacts,
@@ -659,16 +664,17 @@ func buildServerAPIConfig(cfg ServerConfig, sc *serverConfig) apiserver.Config {
 		Production:            sc.production,
 		ProductionDeclaration: sc.productionDecl,
 
-		Logger:      sc.logger,
-		Metrics:     sc.metrics,
-		HTTPAddr:    sc.httpAddr,
-		GRPCAddr:    sc.grpcAddr,
-		MetricsAddr: sc.metricsAddr,
-		MetricsPath: sc.metricsPath,
-		TLS:         sc.tls,
-		Tracer:      sc.tracer,
-		Concurrency: sc.concurrency,
-		LeaseTTL:    sc.leaseTTL,
+		Logger:          sc.logger,
+		Metrics:         sc.metrics,
+		ParamValidation: sc.paramValidation,
+		HTTPAddr:        sc.httpAddr,
+		GRPCAddr:        sc.grpcAddr,
+		MetricsAddr:     sc.metricsAddr,
+		MetricsPath:     sc.metricsPath,
+		TLS:             sc.tls,
+		Tracer:          sc.tracer,
+		Concurrency:     sc.concurrency,
+		LeaseTTL:        sc.leaseTTL,
 
 		OutboxDiscoveryPage: sc.outboxDiscoveryPage,
 
@@ -818,7 +824,8 @@ func (s *Server) startReconciler(ctx context.Context) {
 // failure that is worth retrying; the two calls share the startup-registration
 // contract documented on ReplaceWorkflow.
 func (s *Server) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.WorkflowID, error) {
-	return s.addWorkflow(ctx, wf, false)
+	res, err := s.addWorkflow(ctx, wf, false)
+	return res.ID, err
 }
 
 // ReplaceWorkflow is AddWorkflow, except that a DIFFERENT definition already
@@ -874,42 +881,98 @@ func (s *Server) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.Wo
 // xflow is not registered" is a series an alert can read rather than a log line
 // someone has to find.
 func (s *Server) ReplaceWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.WorkflowID, error) {
+	res, err := s.addWorkflow(ctx, wf, true)
+	return res.ID, err
+}
+
+// WorkflowRegistration is what AddWorkflowWithReport and
+// ReplaceWorkflowWithReport return: the workflow ID plus the non-fatal
+// diagnostics AddWorkflow and ReplaceWorkflow only log.
+type WorkflowRegistration struct {
+	ID types.WorkflowID
+	// Warnings are the compiler's non-fatal diagnostics.
+	Warnings []string
+	// ParamIssues are the ParamSpec validator's findings. Under
+	// WithServerParamValidation(types.ParamValidationEnforce) a definition
+	// with an error-severity issue is rejected with a *ParamIssuesError
+	// instead, so only warnings reach here.
+	ParamIssues []ParamIssue
+}
+
+// AddWorkflowWithReport is AddWorkflow, also returning the compile warnings
+// and ParamSpec issues the registration produced.
+func (s *Server) AddWorkflowWithReport(ctx context.Context, wf *WorkflowBuilder) (WorkflowRegistration, error) {
+	return s.addWorkflow(ctx, wf, false)
+}
+
+// ReplaceWorkflowWithReport is ReplaceWorkflow, also returning the compile
+// warnings and ParamSpec issues the registration produced.
+func (s *Server) ReplaceWorkflowWithReport(ctx context.Context, wf *WorkflowBuilder) (WorkflowRegistration, error) {
 	return s.addWorkflow(ctx, wf, true)
 }
 
-func (s *Server) addWorkflow(ctx context.Context, wf *WorkflowBuilder, replace bool) (types.WorkflowID, error) {
+func (s *Server) addWorkflow(ctx context.Context, wf *WorkflowBuilder, replace bool) (WorkflowRegistration, error) {
 	if wf == nil {
-		return "", definitionRefused{errors.New("xflow: workflow must not be nil")}
+		return WorkflowRegistration{}, definitionRefused{errors.New("xflow: workflow must not be nil")}
 	}
 	if len(wf.directHandlers()) > 0 {
-		return "", definitionRefused{fmt.Errorf("xflow: workflow %q declares local node handlers, "+
+		return WorkflowRegistration{}, definitionRefused{fmt.Errorf("xflow: workflow %q declares local node handlers, "+
 			"which a control-plane Server cannot execute: register the node types on "+
 			"the runner instead", wf.name)}
 	}
+	// The builder's Required check still applies here. The ParamSpec
+	// validator runs once, inside the apiserver registration path below, in
+	// WithServerParamValidation's mode -- so the builder's own issue list is
+	// not applied again. A Script.File() node that reaches it unresolved (no
+	// artifact store) carries the declared __artifact_file_path, which counts
+	// as set for OneOf.
 	def, err := wf.build()
 	if err != nil {
-		return "", definitionRefused{err}
+		return WorkflowRegistration{}, definitionRefused{err}
 	}
 	// FAF has no durable execution state, so it cannot pass through a
 	// control-plane Server. Keep this ahead of artifact resolution and registry
 	// admission so the refusal has no persistence or audit-facing effects.
 	if def.Options != nil && def.Options.FAF {
-		return "", definitionRefused{fmt.Errorf("xflow: workflow %q enables options.faf, which a control-plane Server cannot register", def.Name)}
+		return WorkflowRegistration{}, definitionRefused{fmt.Errorf("xflow: workflow %q enables options.faf, which a control-plane Server cannot register", def.Name)}
 	}
 	if s.artifacts != nil {
 		if err := resolveArtifacts(ctx, def, s.artifacts); err != nil {
-			return "", err
+			return WorkflowRegistration{}, err
 		}
 	}
-	register := s.api.RegisterWorkflow
+	register := s.api.RegisterWorkflowReport
 	if replace {
-		register = s.api.ReplaceWorkflow
+		register = s.api.ReplaceWorkflowReport
 	}
-	id, _, err := register(ctx, namespace.Namespace(def.Namespace), def)
+	res, err := register(ctx, namespace.Namespace(def.Namespace), def)
 	if err != nil {
-		return "", err
+		return WorkflowRegistration{}, err
 	}
-	return id, nil
+	// ParamIssues are already logged by the apiserver registration path;
+	// the compile warnings used to be discarded here.
+	if s.logger != nil {
+		for _, w := range res.Warnings {
+			s.logger.Warn("workflow_compile_warning", "workflow", def.Name, "warning", w)
+		}
+	}
+	return WorkflowRegistration{ID: res.ID, Warnings: res.Warnings, ParamIssues: res.ParamIssues}, nil
+}
+
+// WithServerParamValidation sets how the server treats ParamSpec validation
+// issues on every registration path it serves -- POST/PUT /v1/workflows,
+// POST /v1/workflows/execute, and AddWorkflow/ReplaceWorkflow. The default
+// is types.ParamValidationWarn: issues are logged and returned (HTTP
+// param_issues, AddWorkflowWithReport), nothing is rejected.
+// types.ParamValidationEnforce rejects a definition with an error-severity
+// issue: HTTP 400 workflow_param_invalid, or a *ParamIssuesError in process.
+// An invalid mode is ignored and the default kept.
+func WithServerParamValidation(mode types.ParamValidationMode) ServerOption {
+	return func(c *serverConfig) {
+		if mode.Valid() {
+			c.paramValidation = mode
+		}
+	}
 }
 
 // ErrSupplyContentTooLarge is returned by UpdateSupply and UpdateSupplyIfMatch
