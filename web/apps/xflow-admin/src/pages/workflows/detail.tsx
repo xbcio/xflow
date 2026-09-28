@@ -1,8 +1,8 @@
 import { history, useIntl, useParams } from '@umijs/max';
-import { Button, Result, Spin } from 'antd';
+import { App, Button, Result, Spin } from 'antd';
 import { createXFlowApiClient, executionDetailToRuntimeSnapshot } from '@xflow/api';
-import { XFlowEditor } from '@xflow/editor';
-import type { RuntimeSnapshot, WorkflowDef } from '@xflow/core';
+import { XFlowEditor, type XFlowEditorSaveResult } from '@xflow/editor';
+import type { NodeTypesResponse, RuntimeSnapshot, WorkflowDef } from '@xflow/core';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 const NEW_WORKFLOW_ROUTE = 'new';
@@ -36,6 +36,26 @@ export default function WorkflowDetailPage() {
   ));
   const [loading, setLoading] = useState(!isNewWorkflow);
   const [loadError, setLoadError] = useState<string>();
+  const [nodeTypes, setNodeTypes] = useState<NodeTypesResponse>();
+  const { message } = App.useApp();
+
+  // Node form schemas (GET /v1/node-types), fetched once per page. A failure
+  // is not fatal: the editor falls back to the "no schema" form (common
+  // fields + JSON tab) and says so in the Inspector; the toast explains why.
+  useEffect(() => {
+    let cancelled = false;
+    api.listNodeTypes().then(
+      (response) => {
+        if (!cancelled) setNodeTypes(response);
+      },
+      (error: unknown) => {
+        if (!cancelled) void message.warning(`节点类型加载失败，参数仅可按 JSON 编辑：${messageFor(error)}`);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [api, message]);
 
   const loadWorkflow = useCallback(async () => {
     if (isNewWorkflow) {
@@ -65,18 +85,21 @@ export default function WorkflowDetailPage() {
     void loadWorkflow();
   }, [loadWorkflow]);
 
-  const saveWorkflow = useCallback(async (nextWorkflow: WorkflowDef): Promise<WorkflowDef> => {
+  // Resolves to { workflow, paramIssues } so the editor places the server's
+  // warn-mode param_issues on their fields; an enforce-mode 400 rejects with
+  // an XFlowApiError whose `paramIssues` the editor reads the same way.
+  const saveWorkflow = useCallback(async (nextWorkflow: WorkflowDef): Promise<XFlowEditorSaveResult> => {
     if (!nextWorkflow.id) {
       const result = await api.createWorkflow(nextWorkflow);
       const createdWorkflow = { ...nextWorkflow, id: result.workflowId };
       setWorkflow(createdWorkflow);
       history.replace(`/workflows/${result.workflowId}`);
-      return createdWorkflow;
+      return { workflow: createdWorkflow, paramIssues: result.paramIssues };
     }
 
-    await api.saveWorkflow(nextWorkflow);
+    const result = await api.saveWorkflow(nextWorkflow);
     setWorkflow(nextWorkflow);
-    return nextWorkflow;
+    return { workflow: nextWorkflow, paramIssues: result.paramIssues };
   }, [api]);
 
   const runWorkflow = useCallback(async (nextWorkflow: WorkflowDef): Promise<RuntimeSnapshot> => {
@@ -120,6 +143,7 @@ export default function WorkflowDetailPage() {
       <XFlowEditor
         className="xflow-editor--fullscreen"
         value={workflow}
+        nodeTypes={nodeTypes}
         onChange={setWorkflow}
         onSave={saveWorkflow}
         onRun={runWorkflow}
