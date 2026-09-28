@@ -178,7 +178,10 @@ function compileCondition(cond: Condition, scope: Scope, warn: (message: string)
     warn("condition has eq/in/truthy but no param; clause ignored");
   }
   if (cond.all_of && cond.all_of.length > 0) parts.push({ $and: cond.all_of.map((c) => compileCondition(c, scope, warn)) });
-  if (cond.any_of && cond.any_of.length > 0) parts.push({ $or: cond.any_of.map((c) => compileCondition(c, scope, warn)) });
+  // Go (engine/graph evalCondition): a present-but-empty any_of holds for
+  // nothing (JS [].some), while an empty all_of always holds. The wire keeps
+  // empty any_of on purpose, so it must compile to false, not be dropped.
+  if (cond.any_of) parts.push(cond.any_of.length > 0 ? { $or: cond.any_of.map((c) => compileCondition(c, scope, warn)) } : false);
   if (cond.not) parts.push({ $not: compileCondition(cond.not, scope, warn) });
   if (parts.length === 0) return true; // Go: a Condition with no clauses holds.
   return parts.length === 1 ? parts[0] : { $and: parts };

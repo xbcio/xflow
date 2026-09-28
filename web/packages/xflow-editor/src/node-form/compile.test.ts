@@ -438,6 +438,19 @@ describe("expression modes (Doc C §4.1)", () => {
 // ---------------------------------------------------- linkage (Doc C §4.4)
 
 describe("conditional linkage matches the Go descriptors (Doc C §4.4)", () => {
+  it("empty any_of never holds and empty all_of always holds, as in Go evalCondition", () => {
+    const schema: NodeFormSchema = {
+      ...waitSchema,
+      fields: [
+        { name: "never", path: "/parameters/never", type: "string", visible_when: { any_of: [] } },
+        { name: "always", path: "/parameters/always", type: "string", visible_when: { all_of: [] } }
+      ]
+    };
+    const { spec } = compile(schema);
+    expect(bound(spec, "/parameters/never")).toEqual([]);
+    expect(outer(spec, "/parameters/always").visible).toBeUndefined();
+  });
+
   it("wait: mode drives signal_name/signals/duration/until; quorum needs signals; timeout always shown", () => {
     const { spec } = compile(waitSchema);
     const signalMode = { $state: "/parameters/mode", in: ["signal", null] };
