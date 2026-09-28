@@ -64,6 +64,17 @@ const composerReactRestrictedImports = {
   ]
 };
 
+const composerFormRestrictedImports = {
+  patterns: [
+    ...packageBoundaryPatterns,
+    jsonRenderPattern,
+    {
+      group: ["../kernel-*", "../kernel-*/**", "@xflow/composer/kernel-*"],
+      message: "composer/form depends only on the component contract, never on a kernel (Doc B §5)."
+    }
+  ]
+};
+
 export default [
   {
     ignores: [
@@ -142,6 +153,13 @@ export default [
     ignores: ["packages/composer/src/react/**/*.test.{ts,tsx}"],
     rules: {
       "no-restricted-imports": ["error", composerReactRestrictedImports]
+    }
+  },
+  {
+    files: ["packages/composer/src/form/**/*.{js,mjs,cjs,ts,tsx}"],
+    ignores: ["packages/composer/src/form/**/*.test.{ts,tsx}", "packages/composer/src/form/**/*.testkit.tsx"],
+    rules: {
+      "no-restricted-imports": ["error", composerFormRestrictedImports]
     }
   },
   {

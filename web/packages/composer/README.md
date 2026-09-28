@@ -9,6 +9,7 @@ semantics (visibility, repeat, expressions, checks, write rules) live in
 |---|---|
 | `@xflow/composer/core` | Spec types + JSON Schema, `validateSpec`, `resolve`, `write`, `applyPatches`, checks/expressions, `zodProps` (no React) |
 | `@xflow/composer/react` | `<Composer>`, `createRegistry`, component/kernel contracts, `defaultKernel` |
+| `@xflow/composer/form` | built-in AntD form components, `formComponents`, `createFormRegistry(extra?)`; styles in `@xflow/composer/form/styles.css` |
 | `@xflow/composer/kernel-json-render` | default kernel (on `@json-render/*` 0.21.0) |
 | `@xflow/composer/kernel-native` | reference / fallback kernel |
 | `@xflow/composer/testing` | `kernelConformance(kernel)` and test helpers (needs `vitest`, `@testing-library/react`) |
@@ -153,6 +154,35 @@ dropped, never applied to a neighbour.
 - Use `xflow-composer-` class names and `--xflow-*` CSS variables for styling.
 - Need a host capability that produces no patch (e.g. rename)? Close over the
   callback when registering the component (v1); `emit` + actions come in v2.
+
+## Built-in form components (`@xflow/composer/form`)
+
+`Form`, `FieldGroup`, `Input`, `TextArea`, `Password`, `InputNumber`, `Switch`,
+`Select`, `Radio`, `MultiSelect`, `Tags`, `KeyValue`, `ObjectGroup`,
+`ArrayTable`, `JsonEditor`, `CodeEditor`, `Unsupported`, `ElementError`.
+`antd` / `@ant-design/icons` are (optional) peers needed by this subpath only.
+
+```ts
+import { createFormRegistry } from "@xflow/composer/form";
+import "@xflow/composer/form/styles.css";
+const registry = createFormRegistry([ExpressionInput]); // extra host components; same type overrides a built-in
+```
+
+- Props are strict: an unknown prop is a props error (ElementError placeholder).
+  Common field props: `label`, `description`, `required` (marker only — add a
+  `required` check for validation), `disabled`.
+- A value whose shape does not match the control (including `null`, except
+  in `JsonEditor` / `ArrayTable`) is shown read-only as raw JSON with a
+  notice; it is never coerced. "清除此值" unsets it on request.
+- Unset + `defaultHint`: text controls use the placeholder (`默认：X`), Switch
+  shows `开（默认）` / `关（默认）`, the others show a hint line.
+- `KeyValue.valueType` names a registered component used to edit values
+  (looked up through `useComposerRegistry()`); incomplete / duplicate rows
+  stay local drafts.
+- `ArrayTable` needs `repeat`; it adds / removes / reorders by writing the
+  whole array. `JsonEditor` never writes text that does not parse.
+- Styling: `xflow-composer-*` classes, colours from `--xflow-*` variables
+  (with fallbacks); AntD itself follows the host `ConfigProvider`.
 
 ## Registry
 

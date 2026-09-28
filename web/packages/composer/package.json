@@ -13,6 +13,11 @@
       "types": "./dist/react/index.d.ts",
       "default": "./dist/react/index.js"
     },
+    "./form": {
+      "types": "./dist/form/index.d.ts",
+      "default": "./dist/form/index.js"
+    },
+    "./form/styles.css": "./src/form/styles.css",
     "./kernel-native": {
       "types": "./dist/kernel-native/index.d.ts",
       "default": "./dist/kernel-native/index.js"
@@ -36,21 +41,31 @@
     "zod": "4.6.5"
   },
   "devDependencies": {
+    "@ant-design/icons": "6.3.2",
     "@testing-library/react": "16.1.0",
     "@types/react": "19.2.18",
     "@xflow/typescript-config": "workspace:*",
+    "antd": "6.5.2",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "vitest": "3.2.0"
   },
   "peerDependencies": {
+    "@ant-design/icons": "^6.3.2",
     "@testing-library/react": "^16.1.0",
+    "antd": "^6.5.2",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "vitest": "^3.2.0"
   },
   "peerDependenciesMeta": {
+    "@ant-design/icons": {
+      "optional": true
+    },
     "@testing-library/react": {
+      "optional": true
+    },
+    "antd": {
       "optional": true
     },
     "react-dom": {

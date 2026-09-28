@@ -10,6 +10,7 @@ export default defineConfig({
       "@xflow/core": path.resolve(root, "packages/xflow-core/src/index.ts"),
       "@xflow/composer/core": path.resolve(root, "packages/composer/src/core/index.ts"),
       "@xflow/composer/react": path.resolve(root, "packages/composer/src/react/index.ts"),
+      "@xflow/composer/form": path.resolve(root, "packages/composer/src/form/index.ts"),
       "@xflow/composer/kernel-native": path.resolve(root, "packages/composer/src/kernel-native/index.tsx"),
       "@xflow/composer/kernel-json-render": path.resolve(root, "packages/composer/src/kernel-json-render/index.tsx"),
       "@xflow/composer/testing": path.resolve(root, "packages/composer/src/testing/index.ts"),

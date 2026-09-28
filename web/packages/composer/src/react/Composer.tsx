@@ -6,6 +6,7 @@ import { deepEqual, resolve, type ResolvedTree, type Warning } from "../core";
 import type { ComposerProps, ValidationResult } from "./contract";
 import { defaultKernel } from "./defaultKernel";
 import { OverlayController, type OverlayHost } from "./overlay";
+import { RegistryContext } from "./registryContext";
 import { createNodeRenderer } from "./renderNode";
 
 const defaultWarn = (warning: Warning) => console.warn(`[composer] ${warning.code}: ${warning.message}`);
@@ -74,7 +75,7 @@ export function Composer(props: ComposerProps) {
 
   useValidationReport(tree, onValidate);
 
-  return <>{kernel.render(tree, env)}</>;
+  return <RegistryContext.Provider value={registry}>{kernel.render(tree, env)}</RegistryContext.Provider>;
 }
 
 function useValidationReport(tree: ResolvedTree, onValidate: ComposerProps["onValidate"]): void {

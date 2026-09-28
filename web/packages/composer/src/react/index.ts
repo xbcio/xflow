@@ -17,4 +17,5 @@ export type {
 export { defaultKernel } from "./defaultKernel";
 export { OVERLAY_TIMEOUT_MS } from "./overlay";
 export { createRegistry, type CreateRegistryOptions } from "./registry";
+export { useComposerRegistry } from "./registryContext";
 export { createNodeRenderer, ROW_TYPE, type NodeRendererOptions, type PlaceholderProps } from "./renderNode";

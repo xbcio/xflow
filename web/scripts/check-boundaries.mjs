@@ -39,10 +39,10 @@ const coreForbiddenPatterns = [
 ];
 
 // Doc B §7.2 / §9: composer pins @json-render/* exactly (they are its only
-// kernel dependency) and takes react / react-dom as peers, never as
-// runtime dependencies.
+// kernel dependency) and takes react / react-dom / antd (composer/form) as
+// peers, never as runtime dependencies.
 const composerExactPins = /^@json-render\//;
-const composerPeerOnly = new Set(["react", "react-dom"]);
+const composerPeerOnly = new Set(["react", "react-dom", "antd", "@ant-design/icons"]);
 
 function validateComposer(manifest) {
   const violations = [];
@@ -187,6 +187,17 @@ function runNegativeSelfTest() {
         manifest: {
           name: "@xflow/composer",
           dependencies: { react: "19.2.8" },
+          peerDependencies: { react: "^19.2.3" }
+        }
+      }
+    },
+    {
+      description: "antd as a composer runtime dependency",
+      project: {
+        layer: "package",
+        manifest: {
+          name: "@xflow/composer",
+          dependencies: { antd: "6.5.2" },
           peerDependencies: { react: "^19.2.3" }
         }
       }
