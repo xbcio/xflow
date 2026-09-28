@@ -100,7 +100,7 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 		if err := prefetchNodesRefs(ctx, e, t, g, input); err != nil {
 			return nil, err
 		}
-		stripNodeState(input)
+		stripNodeStateFromInput(input)
 		return input, nil
 	}
 
@@ -117,26 +117,26 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 	// for ?? to catch, so the guard the spec recommends for an unexecuted node
 	// could not fire and the whole node failed to evaluate its parameters.
 	if g.AllowCycles() && t.NodeIdx == g.StartIndex() && t.ActivationID == 1 {
-		input.Data = nodeVisibleData(cloneMap(snap.Params))
+		input.Data = StripNodeState(cloneMap(snap.Params))
 		applyExecutionScope(input, snap.Scope)
 		if err := prefetchNodesRefs(ctx, e, t, g, input); err != nil {
 			return nil, err
 		}
-		stripNodeState(input)
+		stripNodeStateFromInput(input)
 		return input, nil
 	}
 	switch len(inEdges) {
 	case 0:
 		// Root node — inject workflow-level submission params as input.Data so
 		// source handlers can read them (mirrors ClusterRunner behaviour).
-		input.Data = nodeVisibleData(cloneMap(snap.Params))
+		input.Data = StripNodeState(cloneMap(snap.Params))
 	case 1:
 		name := g.NodeName(inEdges[0].SrcIdx)
 		data, err := e.state.GetOutput(ctx, t.ExecutionID, name)
 		if err != nil {
 			return nil, fmt.Errorf("get upstream output %q/%q: %w", t.ExecutionID, name, err)
 		}
-		input.Data = nodeVisibleData(cloneMap(data))
+		input.Data = StripNodeState(cloneMap(data))
 	default:
 		// Fan-in: expose all upstream outputs keyed by node name.
 		inputs := make(map[string]any, len(inEdges))
@@ -146,7 +146,7 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 			if err != nil {
 				return nil, fmt.Errorf("get upstream output %q/%q: %w", t.ExecutionID, name, err)
 			}
-			inputs[name] = nodeVisibleData(cloneMap(data))
+			inputs[name] = StripNodeState(cloneMap(data))
 		}
 		input.Inputs = inputs
 	}
@@ -154,7 +154,7 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 	if err := prefetchNodesRefs(ctx, e, t, g, input); err != nil {
 		return nil, err
 	}
-	stripNodeState(input)
+	stripNodeStateFromInput(input)
 	return input, nil
 }
 
@@ -235,7 +235,7 @@ func prefetchNodesRefs(ctx context.Context, e *Engine, t *Task, g *graph.Graph, 
 		// return nil, nil — the static type is map[string]any so this assignment
 		// produces a typed nil map, which is the required form (see Input.Nodes
 		// field comment for why).
-		input.Nodes[name] = nodeVisibleData(data)
+		input.Nodes[name] = StripNodeState(data)
 	}
 	return nil
 }

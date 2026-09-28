@@ -129,7 +129,7 @@ func (e *Engine) commitTaskResultWithStrategy(ctx context.Context, lease *TaskLe
 	// A node's private state is persisted inside its own output, so it is folded
 	// in here -- the single point where a handler result becomes the map this
 	// commit stores. Every read that feeds another node goes through
-	// nodeVisibleData, so downstream never sees the slot.
+	// StripNodeState, so downstream never sees the slot.
 	if result.Output != nil {
 		data = withNodeState(data, result.Output.State)
 	}

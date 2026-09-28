@@ -11,7 +11,7 @@ import "github.com/xbcio/xflow/types"
 // halfway, a second TTL to renew, and a second thing for every backend to
 // implement. The fold is invisible from outside: every read that hands an output
 // to anybody -- a downstream node's Data, a $nodes reference, a body's snapshot
-// of the outer graph, the inspection surface -- goes through nodeVisibleData,
+// of the outer graph, the inspection surface -- goes through StripNodeState,
 // which removes this key. A node sees its own state only through Input.State,
 // which is read from this slot and nowhere else.
 //
@@ -45,7 +45,7 @@ func withNodeState(data, state map[string]any) map[string]any {
 //
 // This is the only reader that KEEPS the state slot, and it is reachable only
 // from a resumption of the node that owns the output. Callers that are not the
-// owning node use nodeVisibleData.
+// owning node use StripNodeState.
 func splitNodeState(raw map[string]any) (state map[string]any, data map[string]any) {
 	if raw == nil {
 		return nil, nil
@@ -70,13 +70,20 @@ func splitNodeState(raw map[string]any) (state map[string]any, data map[string]a
 	return state, data
 }
 
-// nodeVisibleData returns m without the engine's node-state slot.
+// StripNodeState returns m without the engine's node-state slot.
+//
+// Every projection of a stored output goes through it -- the engine's own reads
+// and, for the local backend's wait result, callers outside the engine -- so that
+// there is exactly one definition of what a reader of a node output may see. It
+// is exported for that second set of callers; a node's handler must never need
+// it, because the input it receives has already been stripped.
 //
 // When the slot is absent -- every node that uses no state, which is nearly all
 // of them -- m is returned as-is so no copy is paid. When it is present the
 // result is a fresh map, which is why callers that need an isolated map must
 // still clone first; this function removes the slot, it does not take ownership.
-func nodeVisibleData(m map[string]any) map[string]any {
+// Crucially it never removes it IN PLACE: m may be the map the store holds.
+func StripNodeState(m map[string]any) map[string]any {
 	if _, ok := m[NodeStateKey]; !ok {
 		return m
 	}
@@ -90,7 +97,7 @@ func nodeVisibleData(m map[string]any) map[string]any {
 	return out
 }
 
-// stripNodeState removes the engine's node-state slot from every channel
+// stripNodeStateFromInput removes the engine's node-state slot from every channel
 // buildInput assembled: the main data, each multi-port input, and each $nodes
 // entry.
 //
@@ -100,16 +107,16 @@ func nodeVisibleData(m map[string]any) map[string]any {
 // params become one. Stripping at the exit makes "Input.Data never contains the
 // node-state key" hold regardless of which source filled it, which is what lets
 // Input.State be the only way a node reads its own state back.
-func stripNodeState(input *types.Input) {
-	input.Data = nodeVisibleData(input.Data)
+func stripNodeStateFromInput(input *types.Input) {
+	input.Data = StripNodeState(input.Data)
 	for name, raw := range input.Inputs {
 		if m, ok := raw.(map[string]any); ok {
-			input.Inputs[name] = nodeVisibleData(m)
+			input.Inputs[name] = StripNodeState(m)
 		}
 	}
 	for name, raw := range input.Nodes {
 		if m, ok := raw.(map[string]any); ok {
-			input.Nodes[name] = nodeVisibleData(m)
+			input.Nodes[name] = StripNodeState(m)
 		}
 	}
 }
