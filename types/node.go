@@ -247,6 +247,12 @@ type Descriptor struct {
 	// params. Hidden params (VisibleWhen false) still count, because a handler
 	// reads any value that is present.
 	OneOf []OneOfGroup
+	// DynamicOutputsFrom names a top-level ParamArray param whose value lists
+	// extra output ports (each item a port name string, or an object with a
+	// "name"), on top of Outputs. Empty means the outputs are fixed. It is
+	// editor metadata: the engine routes by whatever port a handler returns
+	// and does not read it.
+	DynamicOutputsFrom string
 }
 
 // ParamSpec defines the schema for a single node parameter.

@@ -86,7 +86,7 @@ func TestDescriptorClonePreservesNilSlices(t *testing.T) {
 // extending the matching clone (and routing any any-typed field through
 // cloneParamValue).
 var cloneFieldCounts = map[reflect.Type]int{
-	reflect.TypeOf(Descriptor{}):      11,
+	reflect.TypeOf(Descriptor{}):      12,
 	reflect.TypeOf(ParamSpec{}):       18,
 	reflect.TypeOf(PortSpec{}):        2,
 	reflect.TypeOf(EnumOption{}):      3,
