@@ -337,6 +337,13 @@ func (r *Runner) executeSuspending(ctx context.Context, lease *engine.TaskLease,
 			if output.Data != nil {
 				input = cloneInputWithData(lease.Input, output.Data)
 			}
+			// The wait is armed from the state this decision just produced, not
+			// from the state the resumption started with: a decision that adds a
+			// signer or delegates a slot changes who the gate waits on, and
+			// re-arming from the older state would wait on the old chain.
+			if output.State != nil {
+				input = cloneInputWithState(input, output.State)
+			}
 			spec, prepErr := r.callPrepareSuspend(ctx, sh, input, lease.NodeType, budget, deadline)
 			if prepErr != nil {
 				return engine.TaskResult{Output: output, Error: prepErr}, nil
@@ -472,6 +479,23 @@ func cloneInputWithData(input *types.Input, data map[string]any) *types.Input {
 	}
 	cp := *input
 	cp.Data = data
+	return &cp
+}
+
+// cloneInputWithState returns a copy of input carrying state as its private
+// state.
+//
+// The state is replaced, not merged: a handler returns the state it wants kept,
+// so a field it dropped stays dropped instead of being silently carried forward
+// by the runner. Compose with cloneInputWithData by calling that one first --
+// this copies the struct it is handed, so it preserves whatever Data clone was
+// already set.
+func cloneInputWithState(input *types.Input, state map[string]any) *types.Input {
+	if input == nil {
+		return &types.Input{State: state}
+	}
+	cp := *input
+	cp.State = state
 	return &cp
 }
 
