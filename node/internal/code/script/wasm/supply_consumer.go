@@ -99,6 +99,10 @@ func RegisterSupplyConsumer(code string, supplyNode string, reg *supply.Registry
 	// pool. If the flag were set after, a message arriving in between would take
 	// the globals path and eval against no rules.
 	sharedReactorHost.seedSourceDrivenByKey(key)
+	// Record the slot for the creation-time resolver, for the same reason the
+	// digest path does: an engine created after the notification missed it holds
+	// no pool and would otherwise never be handed this content.
+	sharedReactorHost.noteSupplyRef(key, moduleSupplyRef{reg: reg, name: supplyNode})
 	reg.RegisterConsumer(supplyNode, consumerKeyFor(key, supplyNode), c)
 	return nil
 }
@@ -114,6 +118,7 @@ func UnregisterSupplyConsumer(code string, supplyNode string, reg *supply.Regist
 		reg = supply.Default
 	}
 	reg.UnregisterConsumer(supplyNode, consumerKeyFor(key, supplyNode))
+	sharedReactorHost.forgetSupplyRef(key, moduleSupplyRef{reg: reg, name: supplyNode})
 }
 
 // consumerKeyFor builds the registration key from a module identity. Register and
@@ -154,12 +159,22 @@ func (c *supplyConsumerByDigest) OnSupplyChanged(ctx context.Context, snap suppl
 	}
 	c.host.mu.Unlock()
 	if !ok {
-		// Engine not yet compiled — the first Execute (or resolveArtifacts
-		// prewarm) will create it. Return nil: the supply registry marks this
-		// content as accepted so IsReady passes, and RegisterConsumer's
-		// immediate re-notify (which fires on every activation) will deliver the
-		// content once the engine exists. Returning an error would block the
-		// readiness gate and prevent traffic entirely.
+		// Engine not yet compiled. Return nil rather than an error: an error would
+		// block the readiness gate and prevent traffic entirely, and "the module
+		// has not been compiled here yet" is an expected ordering (a supply
+		// usually reaches the registry before any message has compiled the
+		// module).
+		//
+		// Returning nil does NOT mean the content is lost. It used to: the
+		// registry records this content as accepted, so it never notifies again
+		// for the same hash, and re-registration from the same owner is a no-op —
+		// so an engine created afterwards was never handed anything and the
+		// module failed closed until the process restarted. The delivery path is
+		// therefore the CREATION side: engineForKey resolves a new engine's
+		// config from the supplies the module is registered against
+		// (installModuleConfigFromRegistry). This branch only has to make sure the
+		// slot is recorded; see RegisterSupplyConsumerByDigest, which does so
+		// before its owner short-circuit.
 		return nil
 	}
 	if p := e.active.Load(); p != nil && configHash(p.cfg) == configHash(snap.Content) {
@@ -248,6 +263,15 @@ type consumerOwnerKey struct {
 // underlying registry registration is installed at most once per key
 // regardless of how many times the same owner calls this.
 func RegisterSupplyConsumerByDigest(digest string, supplyNode string, owner string, reg *supply.Registry) error {
+	return registerSupplyConsumerByDigestOn(sharedReactorHost, digest, supplyNode, owner, reg)
+}
+
+// registerSupplyConsumerByDigestOn is RegisterSupplyConsumerByDigest against a
+// caller-chosen host. It exists so a test can exercise the creation-time
+// resolution against a private reactorHost without touching the process-wide
+// one; production always passes sharedReactorHost. See
+// RegisterSupplyConsumerByDigest for the contract.
+func registerSupplyConsumerByDigestOn(h *reactorHost, digest string, supplyNode string, owner string, reg *supply.Registry) error {
 	if digest == "" || supplyNode == "" {
 		return fmt.Errorf("wasm: RegisterSupplyConsumerByDigest requires both digest and supply node name")
 	}
@@ -263,6 +287,14 @@ func RegisterSupplyConsumerByDigest(digest string, supplyNode string, owner stri
 	}
 	ownerKey := consumerOwnerKey{reg: reg, key: consumerKeyFor(key, supplyNode)}
 
+	// Record the SLOT before the owner short-circuit below, and unconditionally:
+	// this is the fact engine creation resolves config from, and it must be
+	// remembered even when this owner is already present and the registration
+	// therefore does nothing further. Ordering against the creation path does not
+	// matter — an engine created before this line is handed the content by the
+	// registry's own immediate notify, and one created after reads the index.
+	h.noteSupplyRef(key, moduleSupplyRef{reg: reg, name: supplyNode})
+
 	consumerOwnersMu.Lock()
 	set, exists := consumerOwners[ownerKey]
 	if !exists {
@@ -274,16 +306,23 @@ func RegisterSupplyConsumerByDigest(digest string, supplyNode string, owner stri
 	consumerOwnersMu.Unlock()
 
 	if alreadyOwner {
-		// This owner already holds the slot registered — the underlying
-		// registry entry is already installed (by this owner or, if it were
-		// added earlier by another owner, by that one; either way the entry
-		// exists). Re-registering here would be harmless but pointless: it
-		// would only re-run RegisterConsumer's immediate notify against
-		// content this consumer has typically already accepted.
+		// This owner already holds the slot registered and the underlying
+		// registry entry is already installed. Re-registering would be harmless
+		// but pointless: it would only re-run RegisterConsumer's immediate notify
+		// against content this consumer has typically already accepted.
+		//
+		// It is NOT a no-op for a module whose engine was reclaimed or has not
+		// been compiled yet — neither of those is repaired by the owner set. That
+		// repair belongs to the creation path and to the execution-time guard's
+		// explicit resolution (installModuleConfigFromRegistry), and must NOT be
+		// attempted by delivering content from here: a module may be registered
+		// against several supplies, and a supply notification REPLACES the whole
+		// pool, so delivering each slot in turn would install whichever supply
+		// happened to be registered last as the guest's rule set.
 		return nil
 	}
-	c := &supplyConsumerByDigest{moduleKey: key, host: sharedReactorHost}
-	sharedReactorHost.seedSourceDrivenByKey(key)
+	c := &supplyConsumerByDigest{moduleKey: key, host: h}
+	h.seedSourceDrivenByKey(key)
 	reg.RegisterConsumer(supplyNode, ownerKey.key, c)
 	return nil
 }
@@ -295,6 +334,13 @@ func RegisterSupplyConsumerByDigest(digest string, supplyNode string, owner stri
 // LAST owner releases — see consumerOwners for why this must be set
 // membership rather than a count.
 func UnregisterSupplyConsumerByDigest(digest string, supplyNode string, owner string, reg *supply.Registry) {
+	unregisterSupplyConsumerByDigestOn(sharedReactorHost, digest, supplyNode, owner, reg)
+}
+
+// unregisterSupplyConsumerByDigestOn is UnregisterSupplyConsumerByDigest against
+// a caller-chosen host, mirroring registerSupplyConsumerByDigestOn so a test's
+// private-host registration is released from the same host it was recorded on.
+func unregisterSupplyConsumerByDigestOn(h *reactorHost, digest string, supplyNode string, owner string, reg *supply.Registry) {
 	if owner == "" {
 		// No identity to release — cannot be anyone's registration under the
 		// owner-set contract, so there is nothing safe to do but no-op. See
@@ -330,6 +376,10 @@ func UnregisterSupplyConsumerByDigest(digest string, supplyNode string, owner st
 		return
 	}
 	reg.UnregisterConsumer(supplyNode, ownerKey.key)
+	// The last owner is gone, so this module must stop resolving its config from
+	// this supply: a later engine creation would otherwise install content for a
+	// dependency nothing hosts here any more.
+	h.forgetSupplyRef(key, moduleSupplyRef{reg: reg, name: supplyNode})
 }
 
 // SupplyConfiguredByDigest reports whether the module named by digest is both

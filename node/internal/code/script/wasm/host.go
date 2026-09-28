@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"os"
 	"runtime"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,6 +18,7 @@ import (
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 	"github.com/xbcio/xflow/node/internal/code/script/engine"
+	"github.com/xbcio/xflow/node/supply"
 )
 
 // EngineIdleTTLEnv overrides how long a compiled wasm module may sit unused
@@ -160,6 +163,31 @@ type reactorHost struct {
 	// that; only attributing a report to a host does.
 	engineCountObserver Observer
 
+	// supplyRefs records, per module key, the supply slots this module is
+	// registered as a consumer of — the fact engine creation needs in order to
+	// resolve the module's config from the registry.
+	//
+	// It exists because delivery by NOTIFICATION is not sufficient. The registry
+	// only notifies a consumer when a snapshot lands (Apply) or when a consumer
+	// registers against already-cached content (RegisterConsumer), and both of
+	// those miss the case that wedged a production runner for hours: content
+	// reaches the registry before anything has compiled the module, the module
+	// then created has no pool, and no later notification ever arrives because
+	// the content's hash did not change and re-registration from the same owner
+	// is a no-op. Creation is the one moment every such ordering has in common,
+	// so creation is where the config is resolved.
+	//
+	// Names, never content: the snapshot is read live from the registry at
+	// resolution time, so this index cannot go stale against the registry's own
+	// copy and its size does not grow with content.
+	//
+	// Guarded by supplyRefsMu, deliberately NOT by mu: registrars write here
+	// without holding mu, and the resolver takes it around the index alone and
+	// releases it before any swap. It must never be nested with mu or an
+	// engine's own mutex — see installModuleConfigFromRegistry.
+	supplyRefsMu sync.Mutex
+	supplyRefs   map[string][]moduleSupplyRef
+
 	// compiling holds the module keys with a compile in flight: the entry is
 	// added and the engine published under ONE h.mu hold each, so a key present
 	// here means exactly one goroutine is building it. Closing the channel
@@ -243,6 +271,7 @@ func newReactorHost() *reactorHost {
 		sourceDriven:  map[string]struct{}{},
 		engineIdleTTL: engineIdleTTLFromEnv(),
 		compiling:     map[string]chan struct{}{},
+		supplyRefs:    map[string][]moduleSupplyRef{},
 	}
 }
 
@@ -508,6 +537,20 @@ func (h *reactorHost) engineForKey(ctx context.Context, key string, wasmBytes []
 			}()
 			return h.buildEngineForKey(ctx, key, wasmBytes)
 		}()
+		if err != nil {
+			return nil, err
+		}
+		// A newly created engine has no pool. Resolve one from the supplies this
+		// module is registered as a consumer of, if any: notification alone is not
+		// sufficient, because content that arrived BEFORE the engine existed is
+		// never re-delivered (its hash does not change, and re-registration from
+		// the same owner is a no-op). Without this the module fails closed
+		// forever. Best-effort: an unresolvable config is installed as nothing
+		// here, and the caller's own guard is what refuses the message.
+		//
+		// Deliberately outside the elected-build block and with no host lock
+		// held — swapConfig takes e.mu and then reaches h.mu.
+		h.installModuleConfigFromRegistry(ctx, e, key)
 		return e, err
 	}
 }
@@ -929,4 +972,175 @@ func (h *reactorHost) closeReclaimedModules(ctx context.Context, doomed []doomed
 		}
 		_ = d.e.cm.Close(ctx)
 	}
+}
+
+// moduleSupplyRef names one supply slot a module is registered as a consumer of:
+// the registry holding it (tests use registries other than supply.Default) and
+// the supply name. It carries no content — see reactorHost.supplyRefs.
+type moduleSupplyRef struct {
+	reg  *supply.Registry
+	name string
+}
+
+// noteSupplyRef records that moduleKey is a registered consumer of (reg, name).
+// Idempotent: the entry is a SET of slots, not a count, so re-registering the
+// same slot (a re-activation, a per-message guard, a legacy binding's retry)
+// leaves one entry. Called on the registration path, so it must not block on a
+// long operation.
+func (h *reactorHost) noteSupplyRef(moduleKey string, r moduleSupplyRef) {
+	if h == nil || moduleKey == "" || r.reg == nil || r.name == "" {
+		return
+	}
+	h.supplyRefsMu.Lock()
+	defer h.supplyRefsMu.Unlock()
+	for _, existing := range h.supplyRefs[moduleKey] {
+		if existing == r {
+			return
+		}
+	}
+	h.supplyRefs[moduleKey] = append(h.supplyRefs[moduleKey], r)
+}
+
+// forgetSupplyRef drops one slot from a module's set. It is called when the
+// LAST owner of that (supply, digest) registration releases, so a module that is
+// no longer hosted here does not have its config resurrected from a supply
+// nobody consumes any more. A slot that was never recorded is a no-op.
+func (h *reactorHost) forgetSupplyRef(moduleKey string, r moduleSupplyRef) {
+	if h == nil || moduleKey == "" {
+		return
+	}
+	h.supplyRefsMu.Lock()
+	defer h.supplyRefsMu.Unlock()
+	refs := h.supplyRefs[moduleKey]
+	for i, existing := range refs {
+		if existing != r {
+			continue
+		}
+		refs = append(refs[:i], refs[i+1:]...)
+		if len(refs) == 0 {
+			delete(h.supplyRefs, moduleKey)
+		} else {
+			h.supplyRefs[moduleKey] = refs
+		}
+		return
+	}
+}
+
+// supplyRefsFor returns a copy of moduleKey's registered slots.
+func (h *reactorHost) supplyRefsFor(moduleKey string) []moduleSupplyRef {
+	h.supplyRefsMu.Lock()
+	defer h.supplyRefsMu.Unlock()
+	refs := h.supplyRefs[moduleKey]
+	if len(refs) == 0 {
+		return nil
+	}
+	return append([]moduleSupplyRef(nil), refs...)
+}
+
+// installModuleConfigFromRegistry resolves the module's pool config from the
+// supplies it is registered as a consumer of, and installs it if one is found.
+//
+// This is the self-heal path the notification route cannot provide. A supply
+// notification only fires when content CHANGES or when a consumer registers
+// against already-cached content; an engine created after both of those has
+// already happened is never handed anything, and it then fails closed forever
+// because SupplyConfiguredByDigest requires active.revision != 0. Resolving
+// from the registry at creation time is immune to both races, to the owner-set
+// short-circuit in RegisterSupplyConsumerByDigest, and to engine reclamation
+// (which keeps the registration but drops the compiled pool).
+//
+// Selection policy when a module consumes several supplies:
+//
+//   - only slots whose content is a recognized pool config are candidates, using
+//     ruleCount's own shape test (>= 0). This is what keeps an artifact-POINTER
+//     supply — a module legitimately consumes one, because that is how its
+//     module gets pre-compiled when the pointer flips — from being installed as
+//     the guest's rule set. Its content is a digest map, which is not a rule
+//     config, so it is not a candidate.
+//   - exactly one candidate installs. A config whose keys a guest does not
+//     recognize decodes into an EMPTY rule set that configures successfully and
+//     then discards nothing, so installing a non-candidate would be a silent
+//     pass-through — the exact outcome the fail-closed guard exists to prevent.
+//   - zero candidates installs NOTHING (fail closed: the config has not arrived).
+//   - more than one installs NOTHING and reports the ambiguity: swapConfig
+//     replaces the whole pool, so picking one would silently serve the wrong
+//     rule set and the caller must say which supply drives the guest.
+//
+// It returns whether a supply-borne config is now active, and a human-readable
+// reason when it deliberately installed nothing.
+//
+// Lock order: supplyRefsMu is taken and released around the index read only. The
+// swapConfig call runs with NO host lock held, because swapConfig takes e.mu and
+// then reaches h.mu (reportReadyInstances); taking h.mu here first would invert
+// that documented order and deadlock.
+func (h *reactorHost) installModuleConfigFromRegistry(ctx context.Context, e *reactorEngine, moduleKey string) (bool, string) {
+	refs := h.supplyRefsFor(moduleKey)
+	type candidate struct {
+		name string
+		snap supply.Snapshot
+	}
+	var cached int
+	var configish []candidate
+	for _, r := range refs {
+		snap, ok := r.reg.Get(r.name)
+		if !ok {
+			continue
+		}
+		cached++
+		if ruleCount(snap.Content) >= 0 {
+			configish = append(configish, candidate{name: r.name, snap: snap})
+		}
+	}
+
+	var chosen supply.Snapshot
+	switch {
+	case cached == 0:
+		return false, "no registered supply has content cached yet"
+	case len(configish) == 0:
+		return false, fmt.Sprintf(
+			"none of the %d registered supplies with cached content carries a pool config; "+
+				"refusing to install one as the guest configuration", cached)
+	case len(configish) == 1:
+		chosen = configish[0].snap
+	default:
+		names := make([]string, 0, len(configish))
+		for _, c := range configish {
+			names = append(names, c.name)
+		}
+		sort.Strings(names)
+		return false, fmt.Sprintf(
+			"more than one registered supply carries a pool config (%s); a supply notification "+
+				"replaces the whole pool, so installing either would silently serve the wrong rule "+
+				"set; declare exactly one config supply for this module", strings.Join(names, ", "))
+	}
+
+	if p := e.active.Load(); p != nil && configHash(p.cfg) == configHash(chosen.Content) {
+		// Same bytes: a swap would rebuild every instance to carry a number, and
+		// would restamp lastSwapAt (see swapConfig). The revision travels only
+		// when the content actually changes.
+		return p.revision != 0, ""
+	}
+	if err := e.swapConfig(ctx, chosen.Content, defaultPoolSize(), chosen.Revision); err != nil {
+		return false, fmt.Sprintf("install supply-borne config: %v", err)
+	}
+	return true, ""
+}
+
+// InstallModuleConfigFromRegistry is installModuleConfigFromRegistry for the
+// process-wide host, for callers outside this package that need to force a
+// resolution (the execution-time guard, after it has compiled and registered).
+// It is a no-op when the module has no engine or no registered supply slot.
+func InstallModuleConfigFromRegistry(ctx context.Context, digest string) (bool, string) {
+	key, ok := moduleKeyFromDigest(digest)
+	if !ok {
+		return false, "malformed digest"
+	}
+	h := sharedReactorHost
+	h.mu.Lock()
+	e, exists := h.engines[key]
+	h.mu.Unlock()
+	if !exists {
+		return false, "module has no compiled engine"
+	}
+	return h.installModuleConfigFromRegistry(ctx, e, key)
 }
