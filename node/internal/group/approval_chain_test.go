@@ -44,19 +44,21 @@ func addSignerSignal(actor, assignee, position, comment string) *types.SignalPay
 	return signal
 }
 
-// ledgerOf reads the node's own decision record, treating an absent one as
-// empty: a signal the node refuses stores no ledger at all, so a reader that
-// insisted on the key would report "nothing was recorded" as a test failure
-// rather than as the result being asserted.
-func ledgerOf(t *testing.T, data map[string]any) []map[string]any {
+// ledgerOf reads a decision record out of whichever map is handed to it --
+// Output.State for the node's own record, Output.Data for the copy published
+// downstream. Callers assert on the state unless the published copy is what is
+// under test. An absent record reads as empty rather than failing: a signal the
+// node refuses still stores a record, but an assertion about a record that was
+// never written is more useful as "empty" than as a reader error.
+func ledgerOf(t *testing.T, m map[string]any) []map[string]any {
 	t.Helper()
-	switch raw := data["_decisions"].(type) {
+	switch raw := m["decisions"].(type) {
 	case nil:
 		return nil
 	case []map[string]any:
 		return raw
 	default:
-		t.Fatalf("_decisions = %#v (%T), want a decision list", raw, raw)
+		t.Fatalf("decisions = %#v (%T), want a decision list", raw, raw)
 		return nil
 	}
 }
@@ -82,7 +84,7 @@ func TestApprovalDelegate_HandsTheSlotToSomebodyOutsideTheApproverList(t *testin
 
 	// dave signs on his own slot name.
 	byDave, err := sh.OnResume(context.Background(),
-		approvalInput(node.ApprovalAll, delegated.Data),
+		approvalInput(node.ApprovalAll, delegated.State),
 		approvalSignal("dave", "approve", "taking this one"))
 	if err != nil {
 		t.Fatalf("OnResume() error = %v", err)
@@ -95,7 +97,7 @@ func TestApprovalDelegate_HandsTheSlotToSomebodyOutsideTheApproverList(t *testin
 
 	// alice is no longer a slot holder, so her own token no longer decides it.
 	byAlice, err := sh.OnResume(context.Background(),
-		approvalInput(node.ApprovalAll, byDave.Data),
+		approvalInput(node.ApprovalAll, byDave.State),
 		approvalSignal("alice", "approve", "changed my mind"))
 	if err != nil {
 		t.Fatalf("OnResume() error = %v", err)
@@ -104,10 +106,10 @@ func TestApprovalDelegate_HandsTheSlotToSomebodyOutsideTheApproverList(t *testin
 		t.Fatalf("the delegator's approval still counted (port %q); the slot was "+
 			"handed away and only the person who received it may decide it", byAlice.Port)
 	}
-	assertIgnored(t, byAlice.Data, 0, reasonUnauthorizedApprover)
+	assertIgnored(t, byAlice.State, 0, reasonUnauthorizedApprover)
 
 	done, err := sh.OnResume(context.Background(),
-		approvalInput(node.ApprovalAll, byAlice.Data),
+		approvalInput(node.ApprovalAll, byAlice.State),
 		approvalSignal("bob", "approve", "fine by me"))
 	if err != nil {
 		t.Fatalf("OnResume() error = %v", err)
@@ -123,7 +125,7 @@ func TestApprovalDelegate_RequiresAnUndecidedSlot(t *testing.T) {
 	// that a decision on the record already refers to.
 	sh := approvalHandler(t)
 	input := approvalInput(node.ApprovalAll, map[string]any{
-		"_decisions": []map[string]any{{"approver": "alice", "action": "approve"}},
+		"decisions": []map[string]any{{"approver": "alice", "action": "approve"}},
 	})
 
 	out, err := sh.OnResume(context.Background(), input, delegateSignal("alice", "dave", "changed my mind"))
@@ -155,11 +157,11 @@ func TestApprovalDelegate_IgnoresAnUnusableAssignee(t *testing.T) {
 			if !out.Resuspend {
 				t.Fatalf("an unusable delegation resolved the gate (port %q)", out.Port)
 			}
-			if got := ledgerOf(t, out.Data); len(got) != 0 {
+			if got := ledgerOf(t, out.State); len(got) != 0 {
 				t.Fatalf("ledger = %v, want none: the delegation was not applied, so "+
 					"it must not be on the record either", got)
 			}
-			assertIgnored(t, out.Data, 0, reasonMalformedAssignee)
+			assertIgnored(t, out.State, 0, reasonMalformedAssignee)
 		})
 	}
 }
@@ -179,7 +181,7 @@ func TestApprovalDelegate_ReplacesRatherThanGrowsTheChain(t *testing.T) {
 
 	for _, approver := range []string{"newcomer", "bob"} {
 		next, err := sh.OnResume(context.Background(),
-			approvalInput(node.ApprovalAll, out.Data),
+			approvalInput(node.ApprovalAll, out.State),
 			approvalSignal(approver, "approve", "ok"))
 		if err != nil {
 			t.Fatalf("OnResume(%s) error = %v", approver, err)
@@ -209,11 +211,11 @@ func TestApprovalDelegate_IsRefusedOutOfTurnInASequence(t *testing.T) {
 	if !out.Resuspend {
 		t.Fatalf("an out-of-turn delegation resolved the gate (port %q)", out.Port)
 	}
-	if got := ledgerOf(t, out.Data); len(got) != 0 {
+	if got := ledgerOf(t, out.State); len(got) != 0 {
 		t.Fatalf("ledger = %v, want none: a delegation refused for being out of "+
 			"turn must not be on the record", got)
 	}
-	assertIgnored(t, out.Data, 0, reasonNotCurrentApprover)
+	assertIgnored(t, out.State, 0, reasonNotCurrentApprover)
 }
 
 func TestApprovalAddSigner_AddsASlotTheGateThenWaitsFor(t *testing.T) {
@@ -231,7 +233,7 @@ func TestApprovalAddSigner_AddsASlotTheGateThenWaitsFor(t *testing.T) {
 
 	// Both original approvers decide; the gate stays open, because the signer
 	// who was added is part of what it is waiting on now.
-	state := added.Data
+	state := added.State
 	for _, approver := range []string{"alice", "bob"} {
 		out, err := sh.OnResume(context.Background(),
 			approvalInput(node.ApprovalAll, state),
@@ -243,7 +245,7 @@ func TestApprovalAddSigner_AddsASlotTheGateThenWaitsFor(t *testing.T) {
 			t.Fatalf("the gate approved (port %q) after %s, with the added signer "+
 				"still unreached: adding a signer changed nothing", out.Port, approver)
 		}
-		state = out.Data
+		state = out.State
 	}
 
 	done, err := sh.OnResume(context.Background(),
@@ -268,11 +270,11 @@ func TestApprovalAddSigner_IgnoresAnUnusablePosition(t *testing.T) {
 	if !out.Resuspend {
 		t.Fatalf("an unusable position resolved the gate (port %q)", out.Port)
 	}
-	if got := ledgerOf(t, out.Data); len(got) != 0 {
+	if got := ledgerOf(t, out.State); len(got) != 0 {
 		t.Fatalf("ledger = %v, want none: a position the node does not recognize "+
 			"must not be guessed at", got)
 	}
-	assertIgnored(t, out.Data, 0, reasonMalformedPosition)
+	assertIgnored(t, out.State, 0, reasonMalformedPosition)
 }
 
 func TestApprovalAddSigner_DefaultsToSigningAfterTheRequester(t *testing.T) {
@@ -292,7 +294,7 @@ func TestApprovalAddSigner_DefaultsToSigningAfterTheRequester(t *testing.T) {
 	}
 
 	byAlice, err := sh.OnResume(context.Background(),
-		approvalInput(node.ApprovalSequential, added.Data),
+		approvalInput(node.ApprovalSequential, added.State),
 		approvalSignal("alice", "approve", "signing"))
 	if err != nil {
 		t.Fatalf("OnResume() error = %v", err)
@@ -317,7 +319,7 @@ func TestApprovalSequential_AddSignerBeforeYieldsTheTurn(t *testing.T) {
 	}
 
 	aliceTooSoon, err := sh.OnResume(context.Background(),
-		approvalInput(node.ApprovalSequential, added.Data),
+		approvalInput(node.ApprovalSequential, added.State),
 		approvalSignal("alice", "approve", "signing anyway"))
 	if err != nil {
 		t.Fatalf("OnResume() error = %v", err)
@@ -326,10 +328,10 @@ func TestApprovalSequential_AddSignerBeforeYieldsTheTurn(t *testing.T) {
 		t.Fatalf("alice's approval resolved the gate (port %q) while erin, whose turn "+
 			"had been moved ahead of her, had not decided", aliceTooSoon.Port)
 	}
-	assertIgnored(t, aliceTooSoon.Data, 0, reasonNotCurrentApprover)
+	assertIgnored(t, aliceTooSoon.State, 0, reasonNotCurrentApprover)
 
 	byErin, err := sh.OnResume(context.Background(),
-		approvalInput(node.ApprovalSequential, aliceTooSoon.Data),
+		approvalInput(node.ApprovalSequential, aliceTooSoon.State),
 		approvalSignal("erin", "approve", "reviewed first"))
 	if err != nil {
 		t.Fatalf("OnResume() error = %v", err)
@@ -357,7 +359,7 @@ func TestApprovalAddSigner_RefusesToGrowTheChainPastItsLimit(t *testing.T) {
 			"position": "after",
 		})
 	}
-	input := approvalInput(node.ApprovalAll, map[string]any{"_decisions": seeded})
+	input := approvalInput(node.ApprovalAll, map[string]any{"decisions": seeded})
 
 	out, err := sh.OnResume(context.Background(), input,
 		addSignerSignal("alice", "newcomer", "after", "one more"))
@@ -367,9 +369,9 @@ func TestApprovalAddSigner_RefusesToGrowTheChainPastItsLimit(t *testing.T) {
 	if !out.Resuspend {
 		t.Fatalf("a signer was added to a chain already at its limit (port %q)", out.Port)
 	}
-	if got := ledgerOf(t, out.Data); len(got) != len(seeded) {
+	if got := ledgerOf(t, out.State); len(got) != len(seeded) {
 		t.Fatalf("ledger grew to %d entries, want it unchanged at %d: the signer was "+
 			"added despite the limit", len(got), len(seeded))
 	}
-	assertIgnored(t, out.Data, 0, reasonChainLimitReached)
+	assertIgnored(t, out.State, 0, reasonChainLimitReached)
 }

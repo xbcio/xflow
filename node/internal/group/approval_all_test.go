@@ -29,7 +29,7 @@ func TestApprovalAll_CompletesOnlyAfterEveryApproverHasDecided(t *testing.T) {
 	}
 
 	second, err := sh.OnResume(ctx,
-		approvalInput(node.ApprovalAll, first.Data),
+		approvalInput(node.ApprovalAll, first.State),
 		approvalSignal("bob", "approve", "two of two"))
 	if err != nil {
 		t.Fatalf("second OnResume() error = %v", err)
@@ -60,7 +60,7 @@ func TestApprovalAll_RejectOnTheLastSignatureStillRejects(t *testing.T) {
 	}
 
 	second, err := sh.OnResume(ctx,
-		approvalInput(node.ApprovalAll, first.Data),
+		approvalInput(node.ApprovalAll, first.State),
 		approvalSignal("bob", "reject", "not this time"))
 	if err != nil {
 		t.Fatalf("second OnResume() error = %v", err)
@@ -95,7 +95,7 @@ func TestApprovalAll_KeepsWaitingAfterASignalItCannotCount(t *testing.T) {
 		t.Fatalf("OnResume() error = %v", err)
 	}
 	afterStranger, err := sh.OnResume(ctx,
-		approvalInput(node.ApprovalAll, afterBlocker.Data),
+		approvalInput(node.ApprovalAll, afterBlocker.State),
 		approvalSignal("mallory", "approve", "let me in"))
 	if err != nil {
 		t.Fatalf("OnResume() error = %v", err)
@@ -103,12 +103,12 @@ func TestApprovalAll_KeepsWaitingAfterASignalItCannotCount(t *testing.T) {
 	if !afterStranger.Resuspend {
 		t.Fatalf("a stranger's approval moved the gate (port %q)", afterStranger.Port)
 	}
-	assertIgnored(t, afterStranger.Data, 0, reasonMalformedAction)
-	assertIgnored(t, afterStranger.Data, 1, reasonUnauthorizedApprover)
+	assertIgnored(t, afterStranger.State, 0, reasonMalformedAction)
+	assertIgnored(t, afterStranger.State, 1, reasonUnauthorizedApprover)
 
 	// Retrying alice's decision, properly formed this time, is still accepted.
 	final, err := sh.OnResume(ctx,
-		approvalInput(node.ApprovalAll, afterStranger.Data),
+		approvalInput(node.ApprovalAll, afterStranger.State),
 		approvalSignal("alice", "approve", "ok"))
 	if err != nil {
 		t.Fatalf("OnResume() error = %v", err)

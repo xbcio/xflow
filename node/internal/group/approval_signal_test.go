@@ -35,16 +35,16 @@ func TestApproval_IgnoredTrailIsBoundedAndCounted(t *testing.T) {
 		if err != nil {
 			t.Fatalf("delivery %d: OnResume() error = %v", i, err)
 		}
-		input = approvalInput(node.ApprovalAll, out.Data)
+		input = approvalInput(node.ApprovalAll, out.State)
 	}
 
-	if got := input.Data["_ignored_count"]; got != deliveries {
-		t.Fatalf("_ignored_count = %v (%T), want %d: the count is the only place a "+
+	if got := input.State["ignored_count"]; got != deliveries {
+		t.Fatalf("ignored_count = %v (%T), want %d: the count is the only place a "+
 			"refusal beyond the trail limit is visible", got, got, deliveries)
 	}
-	trail, ok := input.Data["_ignored"].([]map[string]any)
+	trail, ok := input.State["ignored"].([]map[string]any)
 	if !ok {
-		t.Fatalf("no ignored trail in %v", input.Data)
+		t.Fatalf("no ignored trail in %v", input.State)
 	}
 	if len(trail) != 20 {
 		t.Fatalf("len(trail) = %d, want 20 (bounded): an unbounded trail lets a "+
@@ -75,9 +75,9 @@ func TestApproval_TruncatesAnOverlongSignalNameInTheTrail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OnResume() error = %v", err)
 	}
-	trail, ok := out.Data["_ignored"].([]map[string]any)
+	trail, ok := out.State["ignored"].([]map[string]any)
 	if !ok || len(trail) != 1 {
-		t.Fatalf("ignored trail = %v, want one entry", out.Data["_ignored"])
+		t.Fatalf("ignored trail = %v, want one entry", out.State["ignored"])
 	}
 	// The signal name is whatever the caller sent, so recording it verbatim
 	// puts caller-controlled bytes into the node's persisted output.

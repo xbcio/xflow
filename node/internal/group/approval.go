@@ -32,24 +32,24 @@ const (
 	positionAfter  = "after"
 )
 
-// Keys the node keeps in its own output data across resumptions.
+// Keys the node keeps in its own private state (Input.State / Output.State).
+//
+// They are read back only from this node's own record. The data channel
+// (Input.Data) is the merged output of every upstream node, so a key kept there
+// can also be written by a node upstream of this one -- a caller could open the
+// gate by publishing a plausible ledger. State has no such writer, which is what
+// makes these keys safe to trust as the gate's own memory.
 const (
-	// ledgerKey holds this node's own record of who decided what. It is
-	// underscore-prefixed because input.Data carries the merged output of every
-	// upstream node: a node that happens to publish a "decisions" field of its
-	// own would otherwise be read as approvers who had already voted. The
-	// public "decisions" copy below is for downstream readers, never for this
-	// node's state.
-	ledgerKey = "_decisions"
-	// decisionsKey is the public copy of the ledger, read by whatever follows
-	// the approval node.
+	// decisionsKey holds the ledger: who decided what, in order. The same name is
+	// published in the node's output data, rebuilt from the state, so whoever
+	// follows the gate can read the record without being able to write it.
 	decisionsKey = "decisions"
 	// ignoredKey holds the bounded trail of signals that were delivered but not
 	// counted, and ignoredCountKey the total number seen. Together they make a
 	// refusal observable without letting a caller grow the stored output: the
 	// trail is what a person reads, the count is what it cannot silently hide.
-	ignoredKey      = "_ignored"
-	ignoredCountKey = "_ignored_count"
+	ignoredKey      = "ignored"
+	ignoredCountKey = "ignored_count"
 	// ignoredTrailLimit bounds the recorded trail. Anything beyond it is
 	// reflected only in ignoredCountKey.
 	ignoredTrailLimit = 20
@@ -159,7 +159,11 @@ func (n *ApprovalNode) PrepareSuspend(_ context.Context, input *types.Input) (*t
 	// resumption is still waited on here: the wait is re-armed on every
 	// resumption, and a chain that reverted to the configured approvers would
 	// silently drop the people the gate now depends on.
-	chain := approvedChain(params, getDecisions(input.Data))
+	//
+	// The ledger comes from the node's private state, never from input.Data: a
+	// chain read out of the merged upstream data would let whoever published it
+	// choose who the gate waits on.
+	chain := approvedChain(params, getDecisions(input.State))
 
 	switch params.Mode {
 	case ApprovalAny:
@@ -224,7 +228,8 @@ func (n *ApprovalNode) OnResume(_ context.Context, input *types.Input, signal *t
 	if !ok {
 		return ignoreApprovalSignal(input, signal, "unverified-actor")
 	}
-	chain := approvedChain(params, getDecisions(input.Data))
+	record := recordOf(input)
+	chain := approvedChain(params, record.decisions)
 	if !containsApprover(chain, actor) {
 		return ignoreApprovalSignal(input, signal, "unauthorized-approver")
 	}
@@ -235,29 +240,33 @@ func (n *ApprovalNode) OnResume(_ context.Context, input *types.Input, signal *t
 	if signal.Name != expectedApproverSignal(input.NodeName, params.Mode, actor) {
 		return ignoreApprovalSignal(input, signal, "signal-name-mismatch")
 	}
-	if params.Mode == ApprovalSequential && actor != currentSequentialApprover(chain, input.Data) {
+	if params.Mode == ApprovalSequential && actor != currentSequentialApprover(chain, record) {
 		return ignoreApprovalSignal(input, signal, "not-current-approver")
 	}
-	if hasApproverDecision(getDecisions(input.Data), actor) {
+	if hasApproverDecision(record.decisions, actor) {
 		// Idempotent: a decision already on the ledger is not counted twice, and
 		// a retried delivery is not an error. Critical operations must tolerate
 		// a repeat without acting twice. It also fences the amend-the-chain
 		// action below: whoever has already decided cannot re-delegate a
 		// decision that is on the record.
+		//
+		// Neither data nor state is returned, which is how the engine is told to
+		// leave the stored output alone: a repeat has nothing new to say, and
+		// rewriting the same record would be a store write per redelivery.
 		return &types.Output{Resuspend: true}, nil
 	}
 
 	switch action {
 	case actionApprove:
-		return n.handleApprove(params, chain, input, signal, actor)
+		return n.handleApprove(params, chain, input, signal, actor, record)
 	case actionReject:
-		return handleReject(input, signal, actor)
+		return handleReject(input, record, signal, actor)
 	case actionReturn:
-		return handleReturn(input, signal, actor)
+		return handleReturn(input, record, signal, actor)
 	case actionDelegate:
-		return handleDelegate(input, signal, actor, chain)
+		return handleDelegate(input, record, signal, actor, chain)
 	case actionAddSigner:
-		return handleAddSigner(input, signal, actor, chain)
+		return handleAddSigner(input, record, signal, actor, chain)
 	}
 
 	return ignoreApprovalSignal(input, signal, "unknown-action")
@@ -269,7 +278,7 @@ func (n *ApprovalNode) OnResume(_ context.Context, input *types.Input, signal *t
 // of the ledger: a delegated slot or an added signer changes who is being waited
 // on, and the ledger also holds entries for the delegate and add_signer
 // decisions themselves.
-func (n *ApprovalNode) handleApprove(params *ApprovalParams, chain []string, input *types.Input, signal *types.SignalPayload, approver string) (*types.Output, error) {
+func (n *ApprovalNode) handleApprove(params *ApprovalParams, chain []string, input *types.Input, signal *types.SignalPayload, approver string, record approvalRecord) (*types.Output, error) {
 	if params.Mode == ApprovalAny {
 		return &types.Output{
 			Data: approvalOutput(input.Data, map[string]any{"approved": true, "approver": approver, "comment": signal.Data["comment"]}),
@@ -277,17 +286,11 @@ func (n *ApprovalNode) handleApprove(params *ApprovalParams, chain []string, inp
 		}, nil
 	}
 
-	decisions := appendDecision(getDecisions(input.Data), approver, actionApprove, signal.Data["comment"])
-	if !allChainMembersDecided(chain, decisions) {
-		return &types.Output{
-			Resuspend: true,
-			Data:      approvalOutput(input.Data, decisionLedger(decisions)),
-		}, nil
+	record.decisions = appendDecision(record.decisions, approver, actionApprove, signal.Data["comment"])
+	if !allChainMembersDecided(chain, record.decisions) {
+		return resuspendWithRecord(input, record), nil
 	}
-	return &types.Output{
-		Data: approvalOutput(input.Data, decisionLedger(decisions), map[string]any{"approved": true}),
-		Port: "approved",
-	}, nil
+	return decide(input, record, "approved", map[string]any{"approved": true}), nil
 }
 
 // handleDelegate moves the delegating approver's own slot in the chain to
@@ -298,7 +301,7 @@ func (n *ApprovalNode) handleApprove(params *ApprovalParams, chain []string, inp
 // theirs to give. The assignee may be anyone — a chain is not a role list, and
 // the delegatee's identity is verified the same way as anyone else's when they
 // sign.
-func handleDelegate(input *types.Input, signal *types.SignalPayload, actor string, chain []string) (*types.Output, error) {
+func handleDelegate(input *types.Input, record approvalRecord, signal *types.SignalPayload, actor string, chain []string) (*types.Output, error) {
 	assignee, ok := signalAssignee(signal.Data)
 	if !ok || containsApprover(withoutApprover(chain, actor), assignee) {
 		// The second condition covers both a payload that names nobody and one
@@ -307,20 +310,18 @@ func handleDelegate(input *types.Input, signal *types.SignalPayload, actor strin
 		// would stand for two outstanding ones.
 		return ignoreApprovalSignal(input, signal, "malformed-assignee")
 	}
-	decisions := appendDecision(getDecisions(input.Data), actor, actionDelegate, signal.Data["comment"],
+	// The amended chain is not written out here: it is read back off the ledger
+	// on the next resumption, so this decision is the only thing that has to be
+	// stored.
+	record.decisions = appendDecision(record.decisions, actor, actionDelegate, signal.Data["comment"],
 		map[string]any{"assignee": assignee})
-	// The chain is not written out here: it is read back off the ledger on the
-	// next resumption, so this decision is the only thing that has to be stored.
-	return &types.Output{
-		Resuspend: true,
-		Data:      approvalOutput(input.Data, decisionLedger(decisions)),
-	}, nil
+	return resuspendWithRecord(input, record), nil
 }
 
 // handleAddSigner inserts another slot into the chain next to the approver who
 // asked for it. The signer then becomes a slot like any other, so the gate waits
 // for their decision before it opens.
-func handleAddSigner(input *types.Input, signal *types.SignalPayload, actor string, chain []string) (*types.Output, error) {
+func handleAddSigner(input *types.Input, record approvalRecord, signal *types.SignalPayload, actor string, chain []string) (*types.Output, error) {
 	assignee, ok := signalAssignee(signal.Data)
 	if !ok || containsApprover(chain, assignee) {
 		// A chain holds each name once: a repeated approver's single decision
@@ -334,29 +335,21 @@ func handleAddSigner(input *types.Input, signal *types.SignalPayload, actor stri
 	if len(chain) >= maxApproverChain {
 		return ignoreApprovalSignal(input, signal, "chain-limit-reached")
 	}
-	decisions := appendDecision(getDecisions(input.Data), actor, actionAddSigner, signal.Data["comment"],
+	record.decisions = appendDecision(record.decisions, actor, actionAddSigner, signal.Data["comment"],
 		map[string]any{"assignee": assignee, "position": position})
-	return &types.Output{
-		Resuspend: true,
-		Data:      approvalOutput(input.Data, decisionLedger(decisions)),
-	}, nil
+	return resuspendWithRecord(input, record), nil
 }
 
 // handleReject rejects the gate on the first rejection, whatever the mode. The
 // ledger keeps the decisions recorded so far, so the trail shows who had
 // answered before the gate closed.
-func handleReject(input *types.Input, signal *types.SignalPayload, approver string) (*types.Output, error) {
-	decisions := appendDecision(getDecisions(input.Data), approver, actionReject, signal.Data["comment"])
-	return &types.Output{
-		Data: approvalOutput(input.Data,
-			decisionLedger(decisions),
-			map[string]any{
-				"approved": false,
-				"approver": approver,
-				"comment":  signal.Data["comment"],
-			}),
-		Port: "rejected",
-	}, nil
+func handleReject(input *types.Input, record approvalRecord, signal *types.SignalPayload, approver string) (*types.Output, error) {
+	record.decisions = appendDecision(record.decisions, approver, actionReject, signal.Data["comment"])
+	return decide(input, record, "rejected", map[string]any{
+		"approved": false,
+		"approver": approver,
+		"comment":  signal.Data["comment"],
+	}), nil
 }
 
 // handleReturn sends the work back to the caller on the "returned" port, which
@@ -364,42 +357,82 @@ func handleReject(input *types.Input, signal *types.SignalPayload, approver stri
 // declining it outright. It short-circuits the same way a reject does: the
 // request has left the gate, so waiting for the remaining approvers could only
 // delay a decision they no longer have anything to decide.
-func handleReturn(input *types.Input, signal *types.SignalPayload, approver string) (*types.Output, error) {
-	decisions := appendDecision(getDecisions(input.Data), approver, actionReturn, signal.Data["comment"])
-	return &types.Output{
-		Data: approvalOutput(input.Data,
-			decisionLedger(decisions),
-			map[string]any{
-				"approved": false,
-				"returned": true,
-				"approver": approver,
-				"comment":  signal.Data["comment"],
-			}),
-		Port: "returned",
-	}, nil
+func handleReturn(input *types.Input, record approvalRecord, signal *types.SignalPayload, approver string) (*types.Output, error) {
+	record.decisions = appendDecision(record.decisions, approver, actionReturn, signal.Data["comment"])
+	return decide(input, record, "returned", map[string]any{
+		"approved": false,
+		"returned": true,
+		"approver": approver,
+		"comment":  signal.Data["comment"],
+	}), nil
 }
 
-// decisionLedger is the overlay that records the ledger in both its private and
-// public form.
-func decisionLedger(decisions []map[string]any) map[string]any {
-	return map[string]any{ledgerKey: decisions, decisionsKey: decisions}
+// approvalRecord is the node's own memory: what the gate has decided, and which
+// signals it refused. It is read from Input.State and written to Output.State,
+// and those are the only two places it travels -- see the key constants.
+type approvalRecord struct {
+	decisions []map[string]any
+	ignored   []map[string]any
+	ignoredN  int
 }
 
-// ignoreApprovalSignal re-suspends the node with its state unchanged, recording
-// why the signal was not counted. Data is returned so the trail is persisted;
-// the wait specification is recomputed from the same ledger either way.
-func ignoreApprovalSignal(input *types.Input, signal *types.SignalPayload, reason string) (*types.Output, error) {
+func recordOf(input *types.Input) approvalRecord {
+	return approvalRecord{
+		decisions: getDecisions(input.State),
+		ignored:   getIgnored(input.State),
+		ignoredN:  getIgnoredCount(input.State),
+	}
+}
+
+// state is the private half: what the engine persists and hands back to this
+// node alone on its next resumption.
+func (r approvalRecord) state() map[string]any {
+	return map[string]any{
+		decisionsKey:    r.decisions,
+		ignoredKey:      r.ignored,
+		ignoredCountKey: r.ignoredN,
+	}
+}
+
+// resuspendWithRecord parks the gate again with an unchanged outcome and the
+// record as it now stands.
+func resuspendWithRecord(input *types.Input, record approvalRecord) *types.Output {
 	return &types.Output{
 		Resuspend: true,
-		Data: approvalOutput(input.Data, map[string]any{
-			ignoredKey:      appendIgnored(input.Data, signal.Name, reason),
-			ignoredCountKey: getIgnoredCount(input.Data) + 1,
-		}),
-	}, nil
+		State:     record.state(),
+		Data:      publicApprovalData(input, record, nil),
+	}
 }
 
-func appendIgnored(data map[string]any, signalName, reason string) []map[string]any {
-	trail := getIgnored(data)
+// decide closes the gate on one of its decision ports.
+func decide(input *types.Input, record approvalRecord, port string, extra map[string]any) *types.Output {
+	return &types.Output{
+		State: record.state(),
+		Data:  publicApprovalData(input, record, extra),
+		Port:  port,
+	}
+}
+
+// publicApprovalData is what downstream sees: the data that arrived at the gate,
+// with the record republished. The record is rebuilt from the node's own state
+// on every write, so a value an upstream node published under one of these names
+// is replaced rather than passed on.
+func publicApprovalData(input *types.Input, record approvalRecord, extra map[string]any) map[string]any {
+	return approvalOutput(input.Data, record.state(), extra)
+}
+
+// ignoreApprovalSignal re-suspends the node with its outcome unchanged,
+// recording why the signal was not counted. The record is returned so the trail
+// is persisted; the wait specification is recomputed from the same ledger either
+// way.
+func ignoreApprovalSignal(input *types.Input, signal *types.SignalPayload, reason string) (*types.Output, error) {
+	record := recordOf(input)
+	record.ignored = appendIgnored(record.ignored, signal.Name, reason)
+	record.ignoredN++
+	return resuspendWithRecord(input, record), nil
+}
+
+func appendIgnored(trail []map[string]any, signalName, reason string) []map[string]any {
 	trail = append(trail, map[string]any{
 		"signal": truncateForLedger(signalName, ignoredNameLimit),
 		"reason": reason,
@@ -410,18 +443,18 @@ func appendIgnored(data map[string]any, signalName, reason string) []map[string]
 	return trail
 }
 
-func getIgnored(data map[string]any) []map[string]any {
-	if data == nil {
+func getIgnored(state map[string]any) []map[string]any {
+	if state == nil {
 		return nil
 	}
-	return parseDecisionList(data[ignoredKey])
+	return parseDecisionList(state[ignoredKey])
 }
 
-func getIgnoredCount(data map[string]any) int {
-	if data == nil {
+func getIgnoredCount(state map[string]any) int {
+	if state == nil {
 		return 0
 	}
-	switch n := data[ignoredCountKey].(type) {
+	switch n := state[ignoredCountKey].(type) {
 	case int:
 		return n
 	case float64:
@@ -454,10 +487,9 @@ func signalAction(data map[string]any) (string, bool) {
 // currentSequentialApprover is the first member of the chain who has not decided
 // yet. The chain and the ledger are both read from the node's own state rather
 // than from a stored cursor, so the two cannot disagree.
-func currentSequentialApprover(chain []string, data map[string]any) string {
-	decisions := getDecisions(data)
+func currentSequentialApprover(chain []string, record approvalRecord) string {
 	for _, approver := range chain {
-		if !hasApproverDecision(decisions, approver) {
+		if !hasApproverDecision(record.decisions, approver) {
 			return approver
 		}
 	}
@@ -738,11 +770,13 @@ func parseApprovalParams(params map[string]any) (*ApprovalParams, error) {
 	return p, nil
 }
 
-func getDecisions(data map[string]any) []map[string]any {
-	if data == nil {
+// getDecisions reads the ledger out of the node's private state. A nil state --
+// a first resumption -- reads as an empty ledger.
+func getDecisions(state map[string]any) []map[string]any {
+	if state == nil {
 		return nil
 	}
-	return parseDecisionList(data[ledgerKey])
+	return parseDecisionList(state[decisionsKey])
 }
 
 func parseDecisionList(v any) []map[string]any {

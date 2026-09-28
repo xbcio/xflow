@@ -27,7 +27,7 @@ func TestApprovalSequential_CurrentApproverFollowsTheLedger(t *testing.T) {
 
 	// alice's turn has passed. Repeating her decision is not a second vote.
 	repeat, err := sh.OnResume(ctx,
-		approvalInput(node.ApprovalSequential, afterAlice.Data),
+		approvalInput(node.ApprovalSequential, afterAlice.State),
 		approvalSignal("alice", "approve", "ok again"))
 	if err != nil {
 		t.Fatalf("repeat OnResume() error = %v", err)
@@ -35,13 +35,13 @@ func TestApprovalSequential_CurrentApproverFollowsTheLedger(t *testing.T) {
 	if !repeat.Resuspend {
 		t.Fatalf("alice's repeated approval completed the gate (port %q)", repeat.Port)
 	}
-	if decisions := decisionsOf(t, repeat.Data, "_decisions"); len(decisions) != 1 {
+	if decisions := decisionsOf(t, repeat.Data, "decisions"); len(decisions) != 1 {
 		t.Fatalf("len(decisions) = %d, want 1: alice was counted twice", len(decisions))
 	}
 
 	// bob is now the current approver, and his decision completes the chain.
 	final, err := sh.OnResume(ctx,
-		approvalInput(node.ApprovalSequential, repeat.Data),
+		approvalInput(node.ApprovalSequential, repeat.State),
 		approvalSignal("bob", "approve", "ship it"))
 	if err != nil {
 		t.Fatalf("bob's OnResume() error = %v", err)
@@ -55,7 +55,7 @@ func TestApprovalSequential_CurrentApproverFollowsTheLedger(t *testing.T) {
 func TestApprovalSequential_IgnoresASignalWhenTheWholeChainHasDecided(t *testing.T) {
 	sh := approvalHandler(t)
 	input := approvalInput(node.ApprovalSequential, map[string]any{
-		"_decisions": []map[string]any{
+		"decisions": []map[string]any{
 			{"approver": "alice", "action": "approve"},
 			{"approver": "bob", "action": "approve"},
 		},
@@ -87,5 +87,5 @@ func TestApprovalSequential_IgnoresAnUnknownApproverBeforeAnyoneDecides(t *testi
 	if !out.Resuspend {
 		t.Fatalf("an unknown approver resolved the gate (port %q)", out.Port)
 	}
-	assertIgnored(t, out.Data, 0, reasonUnauthorizedApprover)
+	assertIgnored(t, out.State, 0, reasonUnauthorizedApprover)
 }

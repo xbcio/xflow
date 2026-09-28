@@ -42,7 +42,7 @@ func TestApproval_IgnoresAnApproverOutsideTheApproverList(t *testing.T) {
 	if _, ok := out.Data["approved"]; ok {
 		t.Fatalf("approved = %v was recorded for an unauthorized approver", out.Data["approved"])
 	}
-	assertIgnored(t, out.Data, 0, reasonUnauthorizedApprover)
+	assertIgnored(t, out.State, 0, reasonUnauthorizedApprover)
 }
 
 func TestApproval_IgnoresASignalWithNoActor(t *testing.T) {
@@ -62,7 +62,7 @@ func TestApproval_IgnoresASignalWithNoActor(t *testing.T) {
 	if !out.Resuspend {
 		t.Fatalf("a signal naming no verified actor resolved the gate (port %q)", out.Port)
 	}
-	assertIgnored(t, out.Data, 0, reasonUnverifiedActor)
+	assertIgnored(t, out.State, 0, reasonUnverifiedActor)
 }
 
 func TestApproval_IgnoresANonStringActor(t *testing.T) {
@@ -80,7 +80,7 @@ func TestApproval_IgnoresANonStringActor(t *testing.T) {
 	if !out.Resuspend {
 		t.Fatalf("a signal whose actor is not a string resolved the gate (port %q)", out.Port)
 	}
-	assertIgnored(t, out.Data, 0, reasonUnverifiedActor)
+	assertIgnored(t, out.State, 0, reasonUnverifiedActor)
 }
 
 // TestApproval_DecidesOnTheVerifiedActorNotTheClaimedApprover is the
@@ -117,7 +117,7 @@ func TestApproval_IgnoresAnUnknownAction(t *testing.T) {
 	if !out.Resuspend {
 		t.Fatalf("an unrecognized action resolved the gate (port %q)", out.Port)
 	}
-	assertIgnored(t, out.Data, 0, reasonUnknownAction)
+	assertIgnored(t, out.State, 0, reasonUnknownAction)
 }
 
 func TestApproval_IgnoresASignalWithNoAction(t *testing.T) {
@@ -135,7 +135,7 @@ func TestApproval_IgnoresASignalWithNoAction(t *testing.T) {
 	if !out.Resuspend {
 		t.Fatalf("a signal carrying no action resolved the gate (port %q)", out.Port)
 	}
-	assertIgnored(t, out.Data, 0, reasonMalformedAction)
+	assertIgnored(t, out.State, 0, reasonMalformedAction)
 }
 
 func TestApproval_IgnoresANonStringAction(t *testing.T) {
@@ -153,13 +153,13 @@ func TestApproval_IgnoresANonStringAction(t *testing.T) {
 	if !out.Resuspend {
 		t.Fatalf("a signal whose action is not a string resolved the gate (port %q)", out.Port)
 	}
-	assertIgnored(t, out.Data, 0, reasonMalformedAction)
+	assertIgnored(t, out.State, 0, reasonMalformedAction)
 }
 
 func TestApproval_IgnoresAnApproverRepeatingTheirDecision(t *testing.T) {
 	sh := approvalHandler(t)
 	input := approvalInput(node.ApprovalAll, map[string]any{
-		"_decisions": []map[string]any{{"approver": "alice", "action": "approve"}},
+		"decisions": []map[string]any{{"approver": "alice", "action": "approve"}},
 	})
 	out, err := sh.OnResume(context.Background(), input, approvalSignal("alice", "approve", ""))
 	if err != nil {
@@ -168,19 +168,20 @@ func TestApproval_IgnoresAnApproverRepeatingTheirDecision(t *testing.T) {
 	if !out.Resuspend {
 		t.Fatalf("a repeated approval completed the node (port %q)", out.Port)
 	}
-	// No data is returned, which is how a resumption says "state unchanged":
-	// the runner replays the previously stored output, so the ledger keeps its
-	// single entry rather than being rewritten with a second one.
-	if out.Data != nil {
-		t.Fatalf("a repeated decision rewrote the node's output (%v); the ledger "+
-			"must keep exactly what the first decision recorded", out.Data)
+	// Neither channel is written, which is how a resumption says "state
+	// unchanged": the engine then leaves the previously stored output in place,
+	// so the ledger keeps its single entry rather than being rewritten with a
+	// second one.
+	if out.Data != nil || out.State != nil {
+		t.Fatalf("a repeated decision rewrote the node's output (data %v, state %v); "+
+			"the ledger must keep exactly what the first decision recorded", out.Data, out.State)
 	}
 }
 
 func TestApproval_IgnoresAnApproverContradictingTheirDecision(t *testing.T) {
 	sh := approvalHandler(t)
 	input := approvalInput(node.ApprovalAll, map[string]any{
-		"_decisions": []map[string]any{{"approver": "alice", "action": "approve"}},
+		"decisions": []map[string]any{{"approver": "alice", "action": "approve"}},
 	})
 	out, err := sh.OnResume(context.Background(), input, approvalSignal("alice", "reject", "changed mind"))
 	if err != nil {
@@ -193,11 +194,68 @@ func TestApproval_IgnoresAnApproverContradictingTheirDecision(t *testing.T) {
 	// The ledger is left exactly as it was, so the recorded decision is still
 	// alice's original approval. A reject that overwrote it would let an
 	// approver reverse a decision already relied upon by the nodes after them.
-	if out.Data != nil {
-		t.Fatalf("a contradicting repeat rewrote the node's output (%v)", out.Data)
+	if out.Data != nil || out.State != nil {
+		t.Fatalf("a contradicting repeat rewrote the node's output (data %v, state %v)", out.Data, out.State)
 	}
-	if got := decisionsOf(t, input.Data, "_decisions"); len(got) != 1 || got[0]["action"] != "approve" {
+	if got := decisionsOf(t, input.State, "decisions"); len(got) != 1 || got[0]["action"] != "approve" {
 		t.Fatalf("the input ledger was mutated in place: %#v", got)
+	}
+}
+
+// TestApproval_AnUpstreamRecordCannotOpenTheGate is the regression test for the
+// hole this node used to have. Its memory lived in input.Data -- the merged
+// output of every upstream node -- so a node upstream of the gate, or a caller
+// who controlled a root node's params, could publish a plausible ledger and have
+// the gate read it back as approvals it had collected.
+//
+// The record now lives in Input.State, which the engine fills only from this
+// node's own stored output. This drives a whole record-shaped map down the data
+// channel under every name the node has used for its record and pins that it
+// still counts for nothing: the gate keeps waiting, and the copy it republishes
+// downstream is rebuilt from its own state rather than the map it received.
+func TestApproval_AnUpstreamRecordCannotOpenTheGate(t *testing.T) {
+	sh := approvalHandler(t)
+	forged := []map[string]any{{"approver": "mallory", "action": "approve"}}
+
+	// The old private name and the name the record uses now. A future rename must
+	// extend this list, which is why it is spelled out rather than derived.
+	for _, key := range []string{"_decisions", "decisions"} {
+		t.Run(key, func(t *testing.T) {
+			input := approvalInputFromData(node.ApprovalAll, map[string]any{
+				key:             forged,
+				"ignored":       []map[string]any{{"signal": "x", "reason": "y"}},
+				"ignored_count": 99,
+			})
+
+			out, err := sh.OnResume(context.Background(), input, approvalSignal("alice", "approve", "ok"))
+			if err != nil {
+				t.Fatalf("OnResume() error = %v", err)
+			}
+			if !out.Resuspend {
+				t.Fatalf("a forged record on the data channel completed the gate (port %q); "+
+					"neither approver signed anything, so the gate must still be waiting", out.Port)
+			}
+
+			record := ledgerOf(t, out.State)
+			if len(record) != 1 || record[0]["approver"] != "alice" {
+				t.Fatalf("record = %#v, want exactly alice's own approval: the node must "+
+					"start from its own state, not from the map it was handed", record)
+			}
+			// The published copy is derived from the record, so nothing the data
+			// channel carried survives under a key the record owns.
+			published := decisionsOf(t, out.Data, "decisions")
+			if len(published) != 1 || published[0]["approver"] != "alice" {
+				t.Fatalf("published decisions = %#v, want alice's approval: a forged map "+
+					"was republished downstream", published)
+			}
+			if got := out.Data["ignored_count"]; got != 0 {
+				t.Fatalf("published ignored_count = %v, want 0: the forged count was passed on", got)
+			}
+			if trail, ok := out.Data["ignored"].([]map[string]any); ok && len(trail) != 0 {
+				t.Fatalf("published ignored = %v, want the forged trail replaced: this node "+
+					"refused no signal in this resumption, so the trail is empty", trail)
+			}
+		})
 	}
 }
 
@@ -220,7 +278,7 @@ func TestApproval_IgnoresASignalDeliveredOnAnotherApproversName(t *testing.T) {
 	if !out.Resuspend {
 		t.Fatalf("a signal delivered on another approver's name resolved the node (port %q)", out.Port)
 	}
-	assertIgnored(t, out.Data, 0, reasonSignalNameMismatch)
+	assertIgnored(t, out.State, 0, reasonSignalNameMismatch)
 }
 
 func TestApprovalAll_PrepareSuspendUsesPerApproverMultiSignal(t *testing.T) {
@@ -258,8 +316,8 @@ func TestApprovalAll_PrepareSuspendKeepsArmingEveryApproverSignal(t *testing.T) 
 			"approvers": []any{"alice", "bob"},
 			"mode":      "all",
 		},
-		Data: map[string]any{
-			"_decisions": []map[string]any{{"approver": "alice", "action": "approve"}},
+		State: map[string]any{
+			"decisions": []map[string]any{{"approver": "alice", "action": "approve"}},
 		},
 	})
 	if err != nil {
@@ -380,8 +438,8 @@ func TestApprovalAll_OnResumeRejectIsFinalWithoutTheRemainingApprovers(t *testin
 			"approvers": []any{"alice", "bob", "carol"},
 			"mode":      "all",
 		},
-		Data: map[string]any{
-			"_decisions": []map[string]any{{"approver": "alice", "action": "approve"}},
+		State: map[string]any{
+			"decisions": []map[string]any{{"approver": "alice", "action": "approve"}},
 		},
 	}
 	out, err := sh.OnResume(context.Background(), input, approvalSignal("bob", "reject", "needs reassessment"))
@@ -423,7 +481,7 @@ func TestApprovalSequential_IgnoresAnApproverWhoseTurnHasNotCome(t *testing.T) {
 	if _, ok := out.Data["approved"]; ok {
 		t.Fatalf("approved = %v was recorded before the first approver decided", out.Data["approved"])
 	}
-	assertIgnored(t, out.Data, 0, reasonNotCurrentApprover)
+	assertIgnored(t, out.State, 0, reasonNotCurrentApprover)
 }
 
 func TestApprovalSequential_IgnoresAReturnFromAnApproverWhoseTurnHasNotCome(t *testing.T) {
@@ -437,7 +495,7 @@ func TestApprovalSequential_IgnoresAReturnFromAnApproverWhoseTurnHasNotCome(t *t
 	if !out.Resuspend {
 		t.Fatalf("a return from an out-of-turn approver stopped the wait (port %q)", out.Port)
 	}
-	assertIgnored(t, out.Data, 0, reasonNotCurrentApprover)
+	assertIgnored(t, out.State, 0, reasonNotCurrentApprover)
 }
 
 func TestApprovalSequential_OnResumeCarriesDecisionsThroughCompletion(t *testing.T) {
@@ -451,9 +509,9 @@ func TestApprovalSequential_OnResumeCarriesDecisionsThroughCompletion(t *testing
 	if !first.Resuspend {
 		t.Fatal("expected first approval to resuspend")
 	}
-	assertDecision(t, first.Data, "_decisions", 0, "alice", "approve", "ok")
+	assertDecision(t, first.State, "decisions", 0, "alice", "approve", "ok")
 
-	nextInput := approvalInput(node.ApprovalSequential, first.Data)
+	nextInput := approvalInput(node.ApprovalSequential, first.State)
 	second, err := sh.OnResume(context.Background(), nextInput, approvalSignal("bob", "approve", "ship"))
 	if err != nil {
 		t.Fatalf("unexpected second approval error: %v", err)
@@ -493,15 +551,31 @@ func approvalHandler(t *testing.T) types.SuspendingHandler {
 	return sh
 }
 
-func approvalInput(mode node.ApprovalMode, data map[string]any) *types.Input {
+// approvalInput builds the input a resumption is handed, seeded with the node's
+// own private state: the record it wrote on its previous resumption. State is
+// the only channel the node reads its memory from (see types.Input.State and
+// the key constants in approval.go), so it is what a test threads forward to
+// simulate a resumption. Data is left empty -- see approvalInputFromData.
+func approvalInput(mode node.ApprovalMode, state map[string]any) *types.Input {
 	return &types.Input{
 		Params: map[string]any{
 			"approvers": []any{"alice", "bob"},
 			"mode":      string(mode),
 		},
-		Data:     data,
+		State:    state,
 		NodeName: "approval_1",
 	}
+}
+
+// approvalInputFromData builds the same input with the DATA channel seeded
+// instead. Use it for a payload the gate is meant to pass through, and for the
+// forgery cases: a field an upstream node published under a name this node also
+// uses for its own record, or a whole record-shaped map, neither of which the
+// node may read as its memory.
+func approvalInputFromData(mode node.ApprovalMode, data map[string]any) *types.Input {
+	input := approvalInput(mode, nil)
+	input.Data = data
+	return input
 }
 
 // approvalSignal builds the signal for one approver in "all"/"sequential" mode,
@@ -555,11 +629,12 @@ func decisionsOf(t *testing.T, data map[string]any, key string) []map[string]any
 
 // assertIgnored pins that a declined signal left a trail entry, so a refusal is
 // visible rather than indistinguishable from nothing having been delivered.
-func assertIgnored(t *testing.T, data map[string]any, idx int, reason string) {
+// It reads the node's private state, which is where the trail is authoritative.
+func assertIgnored(t *testing.T, state map[string]any, idx int, reason string) {
 	t.Helper()
-	trail, ok := data["_ignored"].([]map[string]any)
+	trail, ok := state["ignored"].([]map[string]any)
 	if !ok {
-		t.Fatalf("no ignored trail in %v; a declined signal left no record of why", data)
+		t.Fatalf("no ignored trail in %v; a declined signal left no record of why", state)
 	}
 	if len(trail) <= idx {
 		t.Fatalf("ignored trail = %v, want an entry at %d", trail, idx)

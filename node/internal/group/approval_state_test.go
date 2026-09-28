@@ -17,7 +17,7 @@ import (
 func TestApprovalSequential_OnResumeCarriesJSONShapedDecisionHistory(t *testing.T) {
 	sh := approvalHandler(t)
 	input := approvalInput(node.ApprovalSequential, map[string]any{
-		"_decisions": []any{
+		"decisions": []any{
 			map[string]any{"approver": "alice", "action": "approve", "comment": "ok"},
 		},
 	})
@@ -45,7 +45,7 @@ func TestApprovalSequential_OrderCheckReadsAJSONShapedLedger(t *testing.T) {
 	// approver and a chain that should wait on alice advances past her.
 	sh := approvalHandler(t)
 	input := approvalInput(node.ApprovalSequential, map[string]any{
-		"_decisions": []any{
+		"decisions": []any{
 			map[string]any{"approver": "alice", "action": "approve"},
 		},
 	})
@@ -66,7 +66,7 @@ func TestApproval_IgnoredCountSurvivesAJSONRoundTrip(t *testing.T) {
 	// produces. Read as an int it would look like zero, and every further
 	// refusal would overwrite the running total with 1.
 	input := approvalInput(node.ApprovalAny, map[string]any{
-		"_ignored_count": float64(3),
+		"ignored_count": float64(3),
 	})
 
 	out, err := sh.OnResume(context.Background(),
@@ -74,7 +74,7 @@ func TestApproval_IgnoredCountSurvivesAJSONRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OnResume() error = %v", err)
 	}
-	if got := out.Data["_ignored_count"]; got != 4 {
-		t.Fatalf("_ignored_count = %v (%T), want 4", got, got)
+	if got := out.State["ignored_count"]; got != 4 {
+		t.Fatalf("ignored_count = %v (%T), want 4", got, got)
 	}
 }

@@ -28,7 +28,7 @@ func TestApprovalAny_IgnoresAPerApproverSignalName(t *testing.T) {
 	if !out.Resuspend {
 		t.Fatalf("a signal on an undeclared name resolved an any-mode gate (port %q)", out.Port)
 	}
-	assertIgnored(t, out.Data, 0, reasonSignalNameMismatch)
+	assertIgnored(t, out.State, 0, reasonSignalNameMismatch)
 }
 
 func TestApprovalAny_AcceptsTheArmedSharedSignalName(t *testing.T) {

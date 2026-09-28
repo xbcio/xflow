@@ -64,7 +64,7 @@ func TestApprovalAny_OnResumeApproveRoutesToApprovedPort(t *testing.T) {
 	// arms and only one of the two tests would notice.
 	sh := approvalHandler(t)
 	out, err := sh.OnResume(context.Background(),
-		approvalInput(node.ApprovalAny, map[string]any{"order_id": "ord-1"}),
+		approvalInputFromData(node.ApprovalAny, map[string]any{"order_id": "ord-1"}),
 		sharedApprovalSignal("bob", "approve", "looks good"))
 	if err != nil {
 		t.Fatalf("OnResume() error = %v", err)
@@ -143,11 +143,13 @@ func TestApprovalAll_OnResumeOneSignatureDoesNotCompleteTheNode(t *testing.T) {
 	if _, ok := out.Data["approved"]; ok {
 		t.Fatalf("approved = %v is already set with one signature outstanding", out.Data["approved"])
 	}
-	// _decisions is this node's own ledger and the only key its state is read
-	// from; decisions is the public copy downstream reads. They are written
-	// together but are not interchangeable — reading the public one back would
-	// let an upstream node's output pass for votes.
-	assertDecision(t, out.Data, "_decisions", 0, "alice", "approve", "one of two")
+	// Output.State is this node's own record and the only map its memory is read
+	// from; Output.Data carries the copy downstream reads, rebuilt from that
+	// record on every write. They travel in separate maps, and that is what makes
+	// them not interchangeable: the data channel is the merged output of every
+	// upstream node, so reading the published copy back would let an upstream
+	// node's output pass for votes.
+	assertDecision(t, out.State, "decisions", 0, "alice", "approve", "one of two")
 	assertDecision(t, out.Data, "decisions", 0, "alice", "approve", "one of two")
 }
 
@@ -251,8 +253,8 @@ func TestApprovalAll_OnResumeReturnIsFinalWithoutTheRemainingApprovers(t *testin
 			"approvers": []any{"alice", "bob", "carol"},
 			"mode":      "all",
 		},
-		Data: map[string]any{
-			"_decisions": []map[string]any{{"approver": "alice", "action": "approve"}},
+		State: map[string]any{
+			"decisions": []map[string]any{{"approver": "alice", "action": "approve"}},
 		},
 	}
 	out, err := sh.OnResume(context.Background(), input, approvalSignal("bob", "return", "resubmit the docs"))
