@@ -3386,6 +3386,11 @@ export function XFlowEditor({
   }, [draftWorkflow, localRuntime, nodeTypes, operationError]);
 
   const libraryDescriptors = React.useMemo(() => nodeLibraryDescriptors(nodeTypes), [nodeTypes]);
+  // Doc C §4.3: the canvas marks edges of removed dynamic ports; they are never deleted.
+  const canvasDanglingPorts = React.useMemo(
+    () => danglingPorts(draftWorkflow, nodeTypes, canvasOutputPorts).map((edge) => ({ source: edge.source, sourcePort: edge.port })),
+    [draftWorkflow, nodeTypes]
+  );
 
   const addNode = React.useCallback(
     (descriptor: NodeDescriptor, position?: { x: number; y: number }) => {
@@ -4010,6 +4015,7 @@ export function XFlowEditor({
                 onDeleteConnection={removeCanvasConnection}
                 onDeleteNode={deleteSelectedNode}
                 onDropNode={dropNode}
+                danglingPorts={canvasDanglingPorts}
               />
             </div>
           </div>
