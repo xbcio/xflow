@@ -133,9 +133,6 @@ importers:
       antd:
         specifier: 6.5.2
         version: 6.5.2(date-fns@2.30.0)(moment@2.30.1)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
-      react:
-        specifier: 19.2.8
-        version: 19.2.8
     devDependencies:
       '@types/react':
         specifier: 19.2.18
@@ -143,6 +140,9 @@ importers:
       '@xflow/typescript-config':
         specifier: workspace:*
         version: link:../../tooling/typescript-config
+      react:
+        specifier: 19.2.8
+        version: 19.2.8
 
   packages/xflow-preview:
     dependencies:
@@ -155,9 +155,6 @@ importers:
       '@xyflow/react':
         specifier: 12.5.0
         version: 12.5.0(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
-      react:
-        specifier: 19.2.8
-        version: 19.2.8
     devDependencies:
       '@types/react':
         specifier: 19.2.18
@@ -165,6 +162,9 @@ importers:
       '@xflow/typescript-config':
         specifier: workspace:*
         version: link:../../tooling/typescript-config
+      react:
+        specifier: 19.2.8
+        version: 19.2.8
 
   tooling/typescript-config: {}
 

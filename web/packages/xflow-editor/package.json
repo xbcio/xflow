@@ -20,12 +20,12 @@
     "@ant-design/icons": "6.3.2",
     "@xflow/core": "workspace:*",
     "@xflow/preview": "workspace:*",
-    "antd": "6.5.2",
-    "react": "19.2.8"
+    "antd": "6.5.2"
   },
   "devDependencies": {
+    "@types/react": "19.2.18",
     "@xflow/typescript-config": "workspace:*",
-    "@types/react": "19.2.18"
+    "react": "19.2.8"
   },
   "peerDependencies": {
     "react": ">=18"
