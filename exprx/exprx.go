@@ -79,6 +79,23 @@ func CompileExpr(code string, env map[string]any, asBool bool) (*vm.Program, err
 	return program, nil
 }
 
+// CheckExprSyntax reports whether code compiles as an expression, without an
+// environment: every identifier is allowed (the roots $input, item, ... only
+// exist at evaluation time), so only syntax and the registered functions'
+// arity are checked. It is for design-time validation of authored
+// expressions (engine/graph.ValidateParams, Format "expression").
+//
+// It deliberately bypasses the program cache. CompileExpr caches by (code,
+// asBool) regardless of env, so caching a program compiled here -- without an
+// env -- would hand the runtime a program its own env never type-checked.
+func CheckExprSyntax(code string) error {
+	opts := make([]expr.Option, 0, len(exprFunctions)+1)
+	opts = append(opts, expr.AllowUndefinedVariables())
+	opts = append(opts, exprFunctions...)
+	_, err := expr.Compile(code, opts...)
+	return err
+}
+
 // EvalExpr compiles (with caching) and runs code against env, returning the
 // result. Set asBool to require the expression to evaluate to a boolean
 // (used by conditional nodes like xflow.if and rules-mode xflow.switch).
