@@ -27,8 +27,10 @@ func (n *FilterNode) Descriptor() types.Descriptor {
 		Type:        "xflow.transform.filter",
 		DisplayName: "Filter",
 		Params: []types.ParamSpec{
-			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to filter"},
-			{Name: "condition", DisplayName: "Condition", Type: types.ParamString, Required: true, Description: "Boolean expression evaluated per item"},
+			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to filter",
+				Widget: nodeinternal.WidgetExpression, Constraints: nodeinternal.Format(nodeinternal.FormatExpression)},
+			{Name: "condition", DisplayName: "Condition", Type: types.ParamString, Required: true, Description: "Boolean expression evaluated per item; item, index, and the item's own fields are in scope",
+				Widget: nodeinternal.WidgetExpression, Constraints: nodeinternal.Format(nodeinternal.FormatExpression)},
 		},
 		Inputs:  []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}},

@@ -24,7 +24,8 @@ func (n *RenameNode) Descriptor() types.Descriptor {
 		Type:        "xflow.transform.rename",
 		DisplayName: "Rename",
 		Params: []types.ParamSpec{
-			{Name: "mapping", DisplayName: "Mapping", Type: types.ParamObject, Required: true, Description: "Old field name to new field name mapping"},
+			{Name: "mapping", DisplayName: "Mapping", Type: types.ParamObject, Required: true, Description: "Old field name to new field name mapping",
+				Widget: nodeinternal.WidgetKeyValue},
 		},
 		Inputs:  []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}},

@@ -43,7 +43,8 @@ func (n *SplitNode) Descriptor() types.Descriptor {
 		Type:        "xflow.split",
 		DisplayName: "Split",
 		Params: []types.ParamSpec{
-			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to split"},
+			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to split",
+				Widget: nodeinternal.WidgetExpression, Constraints: nodeinternal.Format(nodeinternal.FormatExpression)},
 			{Name: "batch_size", DisplayName: "Batch Size", Type: types.ParamNumber, Required: false, Description: "Items per batch (omit for one-item-per-execution)"},
 			{Name: "continue_on_error", DisplayName: "Continue On Error", Type: types.ParamBool, Required: false, Default: false, Description: "Continue splitting when a downstream branch fails"},
 		},

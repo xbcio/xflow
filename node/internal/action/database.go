@@ -46,13 +46,26 @@ func (n *DatabaseNode) Descriptor() types.Descriptor {
 		DisplayName: "Database",
 		Credentials: []string{"db_conn"},
 		Params: []types.ParamSpec{
-			{Name: "operation", DisplayName: "Operation", Type: types.ParamString, Required: true, Description: "DB operation: \"select\"/\"insert\"/\"update\"/\"delete\"/\"insert_many\""},
-			{Name: "table", DisplayName: "Table", Type: types.ParamString, Required: true, Description: "Target table name"},
-			{Name: "credential", DisplayName: "Credential", Type: types.ParamString, Required: true, Description: "Credential reference name for the DB connection"},
-			{Name: "where", DisplayName: "Where", Type: types.ParamObject, Required: false, Description: "Filter conditions (key-value pairs)"},
-			{Name: "data", DisplayName: "Data", Type: types.ParamObject, Required: false, Description: "Row data for insert/update operations"},
-			{Name: "columns", DisplayName: "Columns", Type: types.ParamArray, Required: false, Description: "Columns to select (default: all)"},
-			{Name: "limit", DisplayName: "Limit", Type: types.ParamNumber, Required: false, Description: "Max rows to return for select"},
+			{Name: "operation", DisplayName: "Operation", Type: types.ParamString, Required: true, Description: "DB operation: \"select\"/\"insert\"/\"update\"/\"delete\"/\"insert_many\"",
+				Enum: nodeinternal.Options("select", "insert", "update", "delete", "insert_many")},
+			// isValidIdentifier: letters, digits, and underscores, not
+			// starting with a digit.
+			{Name: "table", DisplayName: "Table", Type: types.ParamString, Required: true, Description: "Target table name",
+				Constraints: &types.Constraints{Pattern: `^[A-Za-z_][A-Za-z0-9_]*$`}},
+			{Name: "credential", DisplayName: "Credential", Type: types.ParamString, Required: true, Description: "Credential reference name for the DB connection",
+				Widget: nodeinternal.WidgetCredentialSelect},
+			// update and delete refuse to run without where (safety).
+			{Name: "where", DisplayName: "Where", Type: types.ParamObject, Required: false, Description: "Filter conditions (key-value pairs)",
+				VisibleWhen:  nodeinternal.CondIn("operation", "select", "update", "delete"),
+				RequiredWhen: nodeinternal.CondIn("operation", "update", "delete")},
+			// insert_many reads data as an array of row objects, not an object.
+			{Name: "data", DisplayName: "Data", Type: types.ParamObject, Required: false, Description: "Row data for insert/update operations; an array of row objects for insert_many",
+				VisibleWhen:  nodeinternal.CondIn("operation", "insert", "insert_many", "update"),
+				RequiredWhen: nodeinternal.CondIn("operation", "insert", "insert_many", "update")},
+			{Name: "columns", DisplayName: "Columns", Type: types.ParamArray, Required: false, Description: "Columns to select (default: all)",
+				Item: nodeinternal.StringItem(), VisibleWhen: nodeinternal.CondEq("operation", "select")},
+			{Name: "limit", DisplayName: "Limit", Type: types.ParamNumber, Required: false, Description: "Max rows to return for select",
+				VisibleWhen: nodeinternal.CondEq("operation", "select")},
 		},
 		Inputs:  []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}, {Name: "error", DisplayName: "Error"}},

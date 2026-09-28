@@ -115,15 +115,65 @@ func (n *ScriptNode) Descriptor() types.Descriptor {
 		Type:        "xflow.script",
 		DisplayName: "Script",
 		Params: []types.ParamSpec{
-			{Name: "language", DisplayName: "Language", Type: types.ParamString, Required: true, Description: "Language family: js | wasm (no default — choose explicitly)"},
-			{Name: "runtime", DisplayName: "Runtime", Type: types.ParamString, Required: true, Description: "Engine: js->goja|qjs, wasm->wazero (no default — choose explicitly)"},
-			{Name: "code", DisplayName: "Code", Type: types.ParamString, Required: false, Description: "JS source (js) or base64 wasm module (wasm); omit when artifact_digest is set"},
-			{Name: "artifact_digest", DisplayName: "Artifact Digest", Type: types.ParamString, Required: false, Description: "Content-addressable digest (sha256:<hex>) of the script in the artifact store"},
-			{Name: "credentials", DisplayName: "Credentials", Type: types.ParamArray, Required: false, Description: "Declared credential names injected as $credentials"},
-			{Name: "roots", DisplayName: "Roots", Type: types.ParamArray, Required: false, Description: "Expression roots the script reads; omit to send the whole environment"},
+			{Name: "language", DisplayName: "Language", Type: types.ParamString, Required: true, Description: "Language family: js | wasm (no default — choose explicitly)",
+				Group: "source",
+				Enum: []types.EnumOption{
+					{Value: "js", DisplayName: "JavaScript"},
+					{Value: wasmScriptLanguage, DisplayName: "WebAssembly", Description: "Base64 wasip1 module"},
+				}},
+			// The (language, runtime) pairs registered with engine.Register by
+			// js/goja.go, js/qjs.go, wasm/wazero.go, and wasm/reactor.go.
+			{Name: "runtime", DisplayName: "Runtime", Type: types.ParamString, Required: true, Description: "Engine: js->goja|qjs, wasm->wazero|wazero-reactor (no default — choose explicitly)",
+				Group: "source",
+				Enum:  append(append([]types.EnumOption{}, jsRuntimeOptions()...), wasmRuntimeOptions()...),
+				EnumWhen: []types.ConditionalEnum{
+					{When: *nodeinternal.CondEq("language", "js"), Enum: jsRuntimeOptions()},
+					{When: *nodeinternal.CondEq("language", wasmScriptLanguage), Enum: wasmRuntimeOptions()},
+				}},
+			// The widget is "code" for js; for wasm the value is a base64
+			// module and editors should render it as base64. ParamSpec has no
+			// per-condition widget, so that switch is left to the editor.
+			{Name: "code", DisplayName: "Code", Type: types.ParamString, Required: false, Description: "JS source (js) or base64 wasm module (wasm); omit when artifact_digest is set",
+				Group: "source", Widget: nodeinternal.WidgetCode},
+			{Name: "artifact_digest", DisplayName: "Artifact Digest", Type: types.ParamString, Required: false, Description: "Content-addressable digest (sha256:<hex>) of the script in the artifact store",
+				Group: "source", Constraints: nodeinternal.Format(nodeinternal.FormatSHA256Digest)},
+			// Declared so Descriptor.OneOf names only real params, and hidden
+			// so no editor ever shows it: it is the SDK's build-time
+			// placeholder written by Script.File() and rewritten to
+			// artifact_digest by resolveArtifacts before the workflow runs.
+			// A hidden param still counts toward OneOf, which is exactly the
+			// build-time semantics wanted.
+			{Name: artifactFilePathParam, DisplayName: "Artifact File Path", Type: types.ParamString, Required: false, Description: "SDK build-time placeholder for Script.File(); rewritten to artifact_digest before the workflow runs and never reaches Execute",
+				Group: "source", VisibleWhen: nodeinternal.CondNever()},
+			{Name: "credentials", DisplayName: "Credentials", Type: types.ParamArray, Required: false, Description: "Declared credential names injected as $credentials",
+				Group: "environment", Item: nodeinternal.StringItem(), Widget: nodeinternal.WidgetCredentialSelect},
+			{Name: "roots", DisplayName: "Roots", Type: types.ParamArray, Required: false, Description: "Expression roots the script reads; omit to send the whole environment",
+				Group: "environment", Item: nodeinternal.StringItem()},
 		},
+		Groups: []types.GroupSpec{
+			{Key: "source", DisplayName: "Source"},
+			{Key: "environment", DisplayName: "Environment"},
+		},
+		OneOf:   []types.OneOfGroup{{Params: []string{"code", "artifact_digest", artifactFilePathParam}, Mode: types.OneOfExactly}},
 		Inputs:  []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}, {Name: "error", DisplayName: "Error"}},
+	}
+}
+
+// artifactFilePathParam is the param Script.File() emits; see its ParamSpec.
+const artifactFilePathParam = "__artifact_file_path"
+
+func jsRuntimeOptions() []types.EnumOption {
+	return []types.EnumOption{
+		{Value: "goja", DisplayName: "goja", Description: "Fastest cold start; cannot interrupt tight loops"},
+		{Value: "qjs", DisplayName: "QuickJS", Description: "Slower first load; genuine mid-execution termination"},
+	}
+}
+
+func wasmRuntimeOptions() []types.EnumOption {
+	return []types.EnumOption{
+		{Value: "wazero", DisplayName: "wazero"},
+		{Value: "wazero-reactor", DisplayName: "wazero (reactor)", Description: "Pooled reactor-mode guest instances"},
 	}
 }
 
@@ -145,7 +195,7 @@ func (n *ScriptNode) RawParams() any {
 	case n.FilePath != "":
 		// Marker for resolveArtifacts: AddWorkflow reads the file, Puts to
 		// ArtifactStore, and rewrites to artifact_digest before graph.Compile.
-		params["__artifact_file_path"] = n.FilePath
+		params[artifactFilePathParam] = n.FilePath
 	case n.ArtifactDigest != "":
 		params["artifact_digest"] = n.ArtifactDigest
 	default:

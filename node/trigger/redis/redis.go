@@ -46,9 +46,8 @@ type Message struct {
 //
 // Username and Password are filled from the node's supplies, never from Params.
 // That is the same arrangement the kafka trigger uses for SASL credentials, and
-// it is the only one available: types.ParamSpec has no "secret" flag, so a
-// credential is kept out of the param surface by not being declared there at
-// all.
+// it keeps a credential out of the stored, hashed definition entirely, which
+// ParamSpec.Secret (an editor masking hint) cannot do.
 type ConsumerConfig struct {
 	Addr        string
 	DB          int
@@ -175,13 +174,49 @@ func (n *Node) Descriptor() types.Descriptor {
 		Kind:        types.NodeKindTrigger,
 		DisplayName: "Redis Trigger",
 		Params: []types.ParamSpec{
-			{Name: "addr", DisplayName: "Address", Type: types.ParamString, Required: true, Description: "Redis server address, host:port. Credentials are not params: attach a supply with username/password to the node."},
-			{Name: "mode", DisplayName: "Mode", Type: types.ParamString, Required: true, Default: "stream"},
-			{Name: "stream", DisplayName: "Stream", Type: types.ParamString},
-			{Name: "group", DisplayName: "Group", Type: types.ParamString},
-			{Name: "channel", DisplayName: "Channel", Type: types.ParamString},
-			{Name: "max_inflight", DisplayName: "Max Inflight", Type: types.ParamNumber, Default: float64(defaultTriggerMaxInflight)},
-			{Name: "tuning", DisplayName: "Tuning", Type: types.ParamObject, Description: "Stream-mode knobs: db (0), consumer (defaults to the node name), start_id (\"$\", i.e. only entries added after the group is created), payload_field (unset means the whole entry is JSON-encoded into the event payload), claim_min_idle (\"1m\"), dial_timeout (\"10s\"). Durations are strings. claim_min_idle is how long an unacknowledged entry must sit before another consumer takes it over, so it must exceed the slowest workflow this stream drives or entries will be delivered twice."},
+			{Name: "addr", DisplayName: "Address", Type: types.ParamString, Required: true, Description: "Redis server address, host:port. Credentials are not params: attach a supply with username/password to the node.",
+				Group: "connection", Constraints: nodeinternal.Format(nodeinternal.FormatHostPort)},
+			// Not Required: configFromParams treats an unset mode as stream,
+			// and the SDK writes the Default when the param is absent. The
+			// nil in the conditions below is that same fallback.
+			{Name: "mode", DisplayName: "Mode", Type: types.ParamString, Required: false, Default: "stream",
+				Group: "connection",
+				Enum: []types.EnumOption{
+					{Value: "stream", DisplayName: "Stream", Description: "Consume a Redis Stream through a consumer group"},
+					{Value: "pubsub", DisplayName: "Pub/Sub", Description: "Subscribe to a Pub/Sub channel (one active replica)"},
+				}},
+			{Name: "stream", DisplayName: "Stream", Type: types.ParamString,
+				Group:        "connection",
+				VisibleWhen:  nodeinternal.CondIn("mode", "stream", nil),
+				RequiredWhen: nodeinternal.CondIn("mode", "stream", nil)},
+			{Name: "group", DisplayName: "Group", Type: types.ParamString,
+				Group:        "connection",
+				VisibleWhen:  nodeinternal.CondIn("mode", "stream", nil),
+				RequiredWhen: nodeinternal.CondIn("mode", "stream", nil)},
+			{Name: "channel", DisplayName: "Channel", Type: types.ParamString,
+				Group:        "connection",
+				VisibleWhen:  nodeinternal.CondEq("mode", "pubsub"),
+				RequiredWhen: nodeinternal.CondEq("mode", "pubsub")},
+			{Name: "max_inflight", DisplayName: "Max Inflight", Type: types.ParamNumber, Default: float64(defaultTriggerMaxInflight), Group: "advanced"},
+			{Name: "tuning", DisplayName: "Tuning", Type: types.ParamObject, Description: "Stream-mode knobs: db (0), consumer (defaults to the node name), start_id (\"$\", i.e. only entries added after the group is created), payload_field (unset means the whole entry is JSON-encoded into the event payload), claim_min_idle (\"1m\"), dial_timeout (\"10s\"). Durations are strings. claim_min_idle is how long an unacknowledged entry must sit before another consumer takes it over, so it must exceed the slowest workflow this stream drives or entries will be delivered twice.",
+				// Not hidden in pubsub mode: db and dial_timeout configure the
+				// client both modes share (newRedisConsumer). The other four
+				// are read only by the stream loop.
+				Group: "advanced",
+				Fields: []types.ParamSpec{
+					{Name: "db", DisplayName: "DB", Type: types.ParamNumber, Description: "Database index; default 0"},
+					{Name: "consumer", DisplayName: "Consumer", Type: types.ParamString, Description: "Consumer name inside the group (stream mode); defaults to the node name"},
+					{Name: "start_id", DisplayName: "Start ID", Type: types.ParamString, Description: "Group start ID (stream mode); default \"$\""},
+					{Name: "payload_field", DisplayName: "Payload Field", Type: types.ParamString, Description: "Entry field used as the payload (stream mode); unset JSON-encodes the whole entry"},
+					{Name: "claim_min_idle", DisplayName: "Claim Min Idle", Type: types.ParamString, Description: "Positive duration (stream mode); default 1m",
+						Widget: nodeinternal.WidgetDuration, Constraints: nodeinternal.Format(nodeinternal.FormatDuration)},
+					{Name: "dial_timeout", DisplayName: "Dial Timeout", Type: types.ParamString, Description: "Positive duration; default 10s",
+						Widget: nodeinternal.WidgetDuration, Constraints: nodeinternal.Format(nodeinternal.FormatDuration)},
+				}},
+		},
+		Groups: []types.GroupSpec{
+			{Key: "connection", DisplayName: "Connection"},
+			{Key: "advanced", DisplayName: "Advanced", Collapsed: true},
 		},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 	}

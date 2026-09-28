@@ -34,7 +34,8 @@ func (n *Node) Descriptor() types.Descriptor {
 		Kind:        types.NodeKindTrigger,
 		DisplayName: "Timer Trigger",
 		Params: []types.ParamSpec{
-			{Name: "interval", DisplayName: "Interval", Type: types.ParamString, Required: true},
+			{Name: "interval", DisplayName: "Interval", Type: types.ParamString, Required: true, Description: "Positive tick interval (e.g. \"1m\")",
+				Widget: nodeinternal.WidgetDuration, Constraints: nodeinternal.Format(nodeinternal.FormatDuration)},
 		},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 	}

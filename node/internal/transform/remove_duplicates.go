@@ -27,8 +27,10 @@ func (n *RemoveDuplicatesNode) Descriptor() types.Descriptor {
 		Type:        "xflow.transform.remove_duplicates",
 		DisplayName: "Remove Duplicates",
 		Params: []types.ParamSpec{
-			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to deduplicate"},
-			{Name: "fields", DisplayName: "Fields", Type: types.ParamArray, Required: false, Description: "Fields used as the unique key; whole item when omitted"},
+			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to deduplicate",
+				Widget: nodeinternal.WidgetExpression, Constraints: nodeinternal.Format(nodeinternal.FormatExpression)},
+			{Name: "fields", DisplayName: "Fields", Type: types.ParamArray, Required: false, Description: "Fields used as the unique key; whole item when omitted",
+				Item: nodeinternal.StringItem()},
 		},
 		Inputs:  []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}},

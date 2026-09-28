@@ -31,7 +31,8 @@ func (n *IfNode) Descriptor() types.Descriptor {
 		Type:        "xflow.if",
 		DisplayName: "IF Condition",
 		Params: []types.ParamSpec{
-			{Name: "condition", DisplayName: "Condition", Type: types.ParamString, Required: true, Description: "Boolean expression to evaluate"},
+			{Name: "condition", DisplayName: "Condition", Type: types.ParamString, Required: true, Description: "Boolean expression to evaluate",
+				Widget: nodeinternal.WidgetExpression, Constraints: nodeinternal.Format(nodeinternal.FormatExpression)},
 		},
 		Inputs:  []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 		Outputs: []types.PortSpec{{Name: "true", DisplayName: "True"}, {Name: "false", DisplayName: "False"}},

@@ -62,13 +62,31 @@ func (n *WaitNode) Descriptor() types.Descriptor {
 		Type:        WaitNodeType,
 		DisplayName: "Wait",
 		Params: []types.ParamSpec{
-			{Name: "mode", DisplayName: "Mode", Type: types.ParamString, Required: false, Default: "signal", Description: "Trigger mode: \"signal\" (default) or \"timer\""},
-			{Name: "signal_name", DisplayName: "Signal Name", Type: types.ParamString, Required: false, Description: "Name of the external signal to wait for (signal mode)"},
-			{Name: "signals", DisplayName: "Signal Names", Type: types.ParamArray, Required: false, Description: "List of signal names to wait for (multi-signal mode)"},
-			{Name: "quorum", DisplayName: "Quorum", Type: types.ParamNumber, Required: false, Description: "Number of signals required to proceed; 0 or unset means all (multi-signal mode)"},
-			{Name: "timeout", DisplayName: "Timeout", Type: types.ParamString, Required: false, Description: "Maximum wait duration before routing to timeout port (e.g. \"48h\")"},
-			{Name: "duration", DisplayName: "Duration", Type: types.ParamString, Required: false, Description: "Fixed wait duration (timer mode, e.g. \"5m\")"},
-			{Name: "until", DisplayName: "Until", Type: types.ParamString, Required: false, Description: "Absolute time expression to wait until (timer mode)"},
+			{Name: "mode", DisplayName: "Mode", Type: types.ParamString, Required: false, Default: "signal", Description: "Trigger mode: \"signal\" (default) or \"timer\"",
+				Enum: []types.EnumOption{
+					{Value: string(WaitModeSignal), DisplayName: "Signal", Description: "Wait for one or more external signals"},
+					{Value: string(WaitModeTimer), DisplayName: "Timer", Description: "Wait for a fixed duration or until an absolute time"},
+				}},
+			// Unset mode behaves as signal (PrepareSuspend), hence the nil.
+			{Name: "signal_name", DisplayName: "Signal Name", Type: types.ParamString, Required: false, Description: "Name of the external signal to wait for (signal mode)",
+				VisibleWhen: nodeinternal.CondIn("mode", string(WaitModeSignal), nil)},
+			{Name: "signals", DisplayName: "Signal Names", Type: types.ParamArray, Required: false, Description: "List of signal names to wait for (multi-signal mode)",
+				Item: nodeinternal.StringItem(), VisibleWhen: nodeinternal.CondIn("mode", string(WaitModeSignal), nil)},
+			{Name: "quorum", DisplayName: "Quorum", Type: types.ParamNumber, Required: false, Description: "Number of signals required to proceed; 0 or unset means all (multi-signal mode)",
+				VisibleWhen: nodeinternal.CondAll(nodeinternal.CondIn("mode", string(WaitModeSignal), nil), nodeinternal.CondTruthy("signals"))},
+			// timeout applies to both modes, so it is always visible.
+			{Name: "timeout", DisplayName: "Timeout", Type: types.ParamString, Required: false, Description: "Maximum wait duration before routing to timeout port (e.g. \"48h\")",
+				Widget: nodeinternal.WidgetDuration, Constraints: nodeinternal.Format(nodeinternal.FormatDuration)},
+			// Timer mode needs duration or until (prepareTimer); each is
+			// required while the other is unset.
+			{Name: "duration", DisplayName: "Duration", Type: types.ParamString, Required: false, Description: "Fixed wait duration (timer mode, e.g. \"5m\")",
+				Widget: nodeinternal.WidgetDuration, Constraints: nodeinternal.Format(nodeinternal.FormatDuration),
+				VisibleWhen:  nodeinternal.CondEq("mode", string(WaitModeTimer)),
+				RequiredWhen: nodeinternal.CondAll(nodeinternal.CondEq("mode", string(WaitModeTimer)), nodeinternal.CondFalsy("until"))},
+			{Name: "until", DisplayName: "Until", Type: types.ParamString, Required: false, Description: "Absolute time expression to wait until (timer mode)",
+				Widget:       nodeinternal.WidgetDateTime,
+				VisibleWhen:  nodeinternal.CondEq("mode", string(WaitModeTimer)),
+				RequiredWhen: nodeinternal.CondAll(nodeinternal.CondEq("mode", string(WaitModeTimer)), nodeinternal.CondFalsy("duration"))},
 		},
 		Inputs:  []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}, {Name: "timeout", DisplayName: "Timeout"}, {Name: "error", DisplayName: "Error"}},

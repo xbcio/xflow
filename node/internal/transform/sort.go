@@ -35,8 +35,13 @@ func (n *SortNode) Descriptor() types.Descriptor {
 		Type:        "xflow.transform.sort",
 		DisplayName: "Sort",
 		Params: []types.ParamSpec{
-			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to sort"},
-			{Name: "fields", DisplayName: "Fields", Type: types.ParamArray, Required: true, Description: "Sort fields in priority order"},
+			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to sort",
+				Widget: nodeinternal.WidgetExpression, Constraints: nodeinternal.Format(nodeinternal.FormatExpression)},
+			{Name: "fields", DisplayName: "Fields", Type: types.ParamArray, Required: true, Description: "Sort fields in priority order",
+				Item: &types.ParamSpec{Type: types.ParamObject, Fields: []types.ParamSpec{
+					{Name: "field", DisplayName: "Field", Type: types.ParamString, Description: "Item field to compare"},
+					{Name: "desc", DisplayName: "Descending", Type: types.ParamBool, Description: "Sort in descending order"},
+				}}},
 		},
 		Inputs:  []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}},

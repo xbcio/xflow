@@ -46,8 +46,21 @@ func (n *AggregateNode) Descriptor() types.Descriptor {
 		Type:        "xflow.transform.aggregate",
 		DisplayName: "Aggregate",
 		Params: []types.ParamSpec{
-			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to aggregate"},
-			{Name: "operations", DisplayName: "Operations", Type: types.ParamArray, Required: true, Description: "Aggregate operations"},
+			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to aggregate",
+				Widget: nodeinternal.WidgetExpression, Constraints: nodeinternal.Format(nodeinternal.FormatExpression)},
+			{Name: "operations", DisplayName: "Operations", Type: types.ParamArray, Required: true, Description: "Aggregate operations",
+				Item: &types.ParamSpec{Type: types.ParamObject, Fields: []types.ParamSpec{
+					{Name: "kind", DisplayName: "Kind", Type: types.ParamString, Required: true,
+						Enum: []types.EnumOption{
+							{Value: "count", DisplayName: "Count"},
+							{Value: "sum", DisplayName: "Sum"},
+							{Value: "avg", DisplayName: "Average"},
+							{Value: "average", DisplayName: "Average (alias of avg)"},
+						}},
+					{Name: "field", DisplayName: "Field", Type: types.ParamString, Description: "Item field to sum or average",
+						VisibleWhen: nodeinternal.CondIn("kind", "sum", "avg", "average")},
+					{Name: "as", DisplayName: "As", Type: types.ParamString, Required: true, Description: "Output field name"},
+				}}},
 		},
 		Inputs:  []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}},

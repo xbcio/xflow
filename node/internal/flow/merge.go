@@ -29,8 +29,19 @@ func (n *MergeNode) Descriptor() types.Descriptor {
 		Type:        "xflow.merge",
 		DisplayName: "Merge",
 		Params: []types.ParamSpec{
-			{Name: "mode", DisplayName: "Mode", Type: types.ParamString, Required: true, Description: "Merge strategy: \"wait_all\" or \"wait_any\""},
-			{Name: "on_others", DisplayName: "On Others", Type: types.ParamString, Required: false, Default: "cancel", Description: "Action for remaining branches in wait_any mode (default: cancel)"},
+			{Name: "mode", DisplayName: "Mode", Type: types.ParamString, Required: true, Description: "Merge strategy: \"wait_all\" or \"wait_any\"",
+				Enum: []types.EnumOption{
+					{Value: string(nodeinternal.MergeWaitAll), DisplayName: "Wait All", Description: "Wait for every upstream branch"},
+					{Value: string(nodeinternal.MergeWaitAny), DisplayName: "Wait Any", Description: "Take the first branch to arrive"},
+				}},
+			// The handler forwards on_others verbatim as _on_others; the two
+			// values are the ones DSL-SPECIFICATION.md defines.
+			{Name: "on_others", DisplayName: "On Others", Type: types.ParamString, Required: false, Default: "cancel", Description: "Action for remaining branches in wait_any mode (default: cancel)",
+				Enum: []types.EnumOption{
+					{Value: "cancel", DisplayName: "Cancel", Description: "Best-effort cancel of the remaining branches"},
+					{Value: "detach", DisplayName: "Detach", Description: "Let the remaining branches run and ignore their output"},
+				},
+				VisibleWhen: nodeinternal.CondEq("mode", string(nodeinternal.MergeWaitAny))},
 		},
 		Inputs:  []types.PortSpec{},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}},

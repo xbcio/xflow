@@ -33,7 +33,8 @@ func (n *SetNode) Descriptor() types.Descriptor {
 		DisplayName: "Set",
 		Params: []types.ParamSpec{
 			{Name: "fields", DisplayName: "Fields", Type: types.ParamObject, Required: false, Description: "Literal fields to assign"},
-			{Name: "expressions", DisplayName: "Expressions", Type: types.ParamObject, Required: false, Description: "Fields computed from expressions"},
+			{Name: "expressions", DisplayName: "Expressions", Type: types.ParamObject, Required: false, Description: "Fields computed from expressions",
+				Widget: nodeinternal.WidgetKeyExpression},
 		},
 		Inputs:  []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}},

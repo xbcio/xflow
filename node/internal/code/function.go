@@ -42,9 +42,13 @@ func (n *FunctionNode) Descriptor() types.Descriptor {
 		DisplayName: "Function",
 		Params: []types.ParamSpec{
 			{Name: "function_name", DisplayName: "Function Name", Type: types.ParamString, Required: false, Description: "Name of a pre-registered Go function to call"},
-			{Name: "code", DisplayName: "Code", Type: types.ParamString, Required: false, Description: "Inline Expr expression to evaluate"},
+			{Name: "code", DisplayName: "Code", Type: types.ParamString, Required: false, Description: "Inline Expr expression to evaluate; ignored when function_name is set",
+				Widget: nodeinternal.WidgetExpression, Constraints: nodeinternal.Format(nodeinternal.FormatExpression)},
 			{Name: "params", DisplayName: "Params", Type: types.ParamObject, Required: false, Description: "Extra parameters passed to the function or expression"},
 		},
+		// at_least, not exactly: Execute accepts both and prefers
+		// function_name, so exactly would reject a configuration that runs.
+		OneOf:   []types.OneOfGroup{{Params: []string{"function_name", "code"}, Mode: types.OneOfAtLeast}},
 		Inputs:  []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}, {Name: "error", DisplayName: "Error"}},
 	}

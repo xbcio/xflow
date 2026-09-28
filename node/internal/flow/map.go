@@ -85,13 +85,17 @@ func (n *MapNode) Descriptor() types.Descriptor {
 		Type:        "xflow.map",
 		DisplayName: "Map",
 		Params: []types.ParamSpec{
-			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to iterate"},
+			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to iterate",
+				Widget: nodeinternal.WidgetExpression, Constraints: nodeinternal.Format(nodeinternal.FormatExpression)},
 			{Name: "batch_size", DisplayName: "Batch Size", Type: types.ParamNumber, Required: false, Default: 1, Description: "Number of items processed per batch"},
 			{Name: "continue_on_error", DisplayName: "Continue On Error", Type: types.ParamBool, Required: false, Default: false, Description: "Continue iteration when an item fails"},
 			{Name: "body_concurrency", DisplayName: "Body Concurrency", Type: types.ParamNumber, Required: false, Default: 1, Description: "Maximum items of one batch running at the same time; 1 (the default) runs them serially"},
 			{Name: "body", DisplayName: "Body", Type: types.ParamObject, Required: false, Description: "Sub-graph executed once per item; mutually exclusive with expression, and exactly one of the two is required"},
-			{Name: "expression", DisplayName: "Expression", Type: types.ParamString, Required: false, Description: "Expression evaluated once per item over $item/$index/$items; mutually exclusive with body, and exactly one of the two is required"},
+			{Name: "expression", DisplayName: "Expression", Type: types.ParamString, Required: false, Description: "Expression evaluated once per item over $item/$index/$items; mutually exclusive with body, and exactly one of the two is required",
+				Widget: nodeinternal.WidgetExpression, Constraints: nodeinternal.Format(nodeinternal.FormatExpression)},
 		},
+		// types.ParseTransformSpec rejects both and neither.
+		OneOf:   []types.OneOfGroup{{Params: []string{"body", "expression"}, Mode: types.OneOfExactly}},
 		Inputs:  []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}, {Name: "error", DisplayName: "Error"}},
 	}

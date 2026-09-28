@@ -27,7 +27,8 @@ func (n *PickNode) Descriptor() types.Descriptor {
 		DisplayName: "Pick",
 		Params: []types.ParamSpec{
 			{Name: "fields", DisplayName: "Fields", Type: types.ParamArray, Required: true,
-				Description: "Field names to keep; all others are removed"},
+				Description: "Field names to keep; all others are removed",
+				Item:        nodeinternal.StringItem()},
 		},
 		Inputs:  []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}},

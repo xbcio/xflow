@@ -41,8 +41,11 @@ func (n *Node) Descriptor() types.Descriptor {
 		Kind:        types.NodeKindTrigger,
 		DisplayName: "Cron Trigger",
 		Params: []types.ParamSpec{
-			{Name: "expression", DisplayName: "Expression", Type: types.ParamString, Required: true},
-			{Name: "timezone", DisplayName: "Timezone", Type: types.ParamString, Required: false, Default: "UTC"},
+			// Parsed by robfig/cron's standard parser: five fields plus the
+			// @every / @hourly descriptors.
+			{Name: "expression", DisplayName: "Expression", Type: types.ParamString, Required: true, Description: "Cron schedule, five fields (e.g. \"*/5 * * * *\") or a descriptor such as \"@every 1m\"",
+				Widget: nodeinternal.WidgetCron, Constraints: nodeinternal.Format(nodeinternal.FormatCron)},
+			{Name: "timezone", DisplayName: "Timezone", Type: types.ParamString, Required: false, Default: "UTC", Description: "IANA time zone name the schedule is evaluated in"},
 		},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 	}
