@@ -251,6 +251,17 @@ func (b *Backend) WaitDone(ctx context.Context, id types.ExecutionID) (types.Res
 	result := types.Result{ExecutionID: id, Status: snap.Status, Error: snap.Error}
 	if snap.Status == types.ExecutionStatusSuccess {
 		result.Output = b.state.GetAllOutputs(id)
+		// A stored output also carries the node's private state, because that is
+		// the map a resumption reads it back from -- so the store keeps it raw
+		// and every reader strips it. This fast path builds the result without
+		// Inspect, which means the engine never gets to strip for us, and a wait
+		// that returned the slot would answer differently here than in cluster
+		// mode for the same workflow.
+		for name, out := range result.Output {
+			if m, ok := out.(map[string]any); ok {
+				result.Output[name] = engine.StripNodeState(m)
+			}
+		}
 	}
 	return result, nil
 }
