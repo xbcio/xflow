@@ -35,6 +35,11 @@ import (
 	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
+	// Blank import: the server compiles, validates and (A6) describes workflows
+	// against the builtin node types, so it links them explicitly rather than
+	// relying on some other package importing node as a side effect.
+	// builtin_types_test.go fails if this set ever shrinks.
+	_ "github.com/xbcio/xflow/node"
 	obslogger "github.com/xbcio/xflow/observability/logger"
 	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/observability/tracing"
