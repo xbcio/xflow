@@ -1,0 +1,3110 @@
+{
+  "param_validation_mode": "warn",
+  "node_types": [
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.approval",
+      "node_version": 1,
+      "kind": "action",
+      "display_name": "Approval",
+      "ports": {
+        "inputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "approved",
+            "display_name": "Approved"
+          },
+          {
+            "name": "rejected",
+            "display_name": "Rejected"
+          },
+          {
+            "name": "returned",
+            "display_name": "Returned"
+          },
+          {
+            "name": "timeout",
+            "display_name": "Timeout"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "name": "approvers",
+          "path": "/parameters/approvers",
+          "label": "Approvers",
+          "type": "array",
+          "required": true,
+          "help": "List of approver identifiers",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "mode",
+          "path": "/parameters/mode",
+          "label": "Mode",
+          "type": "string",
+          "default": "any",
+          "help": "Approval mode: \"any\", \"all\", or \"sequential\"",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "timeout",
+          "path": "/parameters/timeout",
+          "label": "Timeout",
+          "type": "string",
+          "help": "Maximum wait duration before timeout routing (e.g. \"48h\")",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "timeout_action",
+          "path": "/parameters/timeout_action",
+          "label": "Timeout Action",
+          "type": "string",
+          "default": "route",
+          "help": "Action on timeout: \"reject\" or \"route\"",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "force_approvers",
+          "path": "/parameters/force_approvers",
+          "label": "Force Approvers",
+          "type": "array",
+          "help": "Identifiers allowed to pass the gate without the outstanding approvers; unset means nobody can",
+          "expression": {
+            "mode": "template"
+          }
+        }
+      ]
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.browser.cdp",
+      "node_version": 1,
+      "kind": "action",
+      "display_name": "Browser Harvest (CDP)",
+      "capabilities": [
+        "browser.cdp.v1"
+      ],
+      "ports": {
+        "inputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          },
+          {
+            "name": "error",
+            "display_name": "Error"
+          }
+        ]
+      },
+      "groups": [
+        {
+          "key": "target",
+          "display_name": "Target"
+        },
+        {
+          "key": "harvest",
+          "display_name": "Harvest"
+        },
+        {
+          "key": "limits",
+          "display_name": "Limits",
+          "collapsed": true
+        }
+      ],
+      "fields": [
+        {
+          "name": "debugging_url",
+          "path": "/parameters/debugging_url",
+          "label": "CDP Endpoint",
+          "type": "string",
+          "required": true,
+          "help": "Remote Chrome DevTools endpoint",
+          "group": "target",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "url",
+              "advisory": true
+            }
+          ]
+        },
+        {
+          "name": "entry_url",
+          "path": "/parameters/entry_url",
+          "label": "Entry URL",
+          "type": "string",
+          "required": true,
+          "group": "target",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "url",
+              "advisory": true
+            }
+          ]
+        },
+        {
+          "name": "seed_cookies",
+          "path": "/parameters/seed_cookies",
+          "label": "Seed Cookies",
+          "type": "array",
+          "group": "harvest",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "plan",
+          "path": "/parameters/plan",
+          "label": "Navigation Plan",
+          "type": "object",
+          "group": "harvest",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "harvest",
+          "path": "/parameters/harvest",
+          "label": "Harvest Rules",
+          "type": "object",
+          "group": "harvest",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "ttl",
+          "path": "/parameters/ttl",
+          "label": "TTL Rules",
+          "type": "object",
+          "group": "harvest",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "target_host",
+          "path": "/parameters/target_host",
+          "label": "Target Host",
+          "type": "string",
+          "group": "target",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "timeout_ms",
+          "path": "/parameters/timeout_ms",
+          "label": "Navigate Timeout (ms)",
+          "type": "number",
+          "default": 30000,
+          "group": "limits",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "min",
+              "value": 1
+            }
+          ]
+        },
+        {
+          "name": "total_timeout_ms",
+          "path": "/parameters/total_timeout_ms",
+          "label": "Total Timeout (ms)",
+          "type": "number",
+          "default": 45000,
+          "group": "limits",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "min",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.database",
+      "node_version": 1,
+      "kind": "action",
+      "display_name": "Database",
+      "credentials": [
+        "db_conn"
+      ],
+      "ports": {
+        "inputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          },
+          {
+            "name": "error",
+            "display_name": "Error"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "name": "operation",
+          "path": "/parameters/operation",
+          "label": "Operation",
+          "type": "string",
+          "required": true,
+          "help": "DB operation: \"select\"/\"insert\"/\"update\"/\"delete\"/\"insert_many\"",
+          "expression": {
+            "mode": "template"
+          },
+          "options": [
+            {
+              "value": "select"
+            },
+            {
+              "value": "insert"
+            },
+            {
+              "value": "update"
+            },
+            {
+              "value": "delete"
+            },
+            {
+              "value": "insert_many"
+            }
+          ]
+        },
+        {
+          "name": "table",
+          "path": "/parameters/table",
+          "label": "Table",
+          "type": "string",
+          "required": true,
+          "help": "Target table name",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "pattern",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+            }
+          ]
+        },
+        {
+          "name": "credential",
+          "path": "/parameters/credential",
+          "label": "Credential",
+          "type": "string",
+          "widget": "credential-select",
+          "required": true,
+          "help": "Credential reference name for the DB connection",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "where",
+          "path": "/parameters/where",
+          "label": "Where",
+          "type": "object",
+          "required_when": {
+            "param": "operation",
+            "in": [
+              "update",
+              "delete"
+            ]
+          },
+          "help": "Filter conditions (key-value pairs)",
+          "expression": {
+            "mode": "template"
+          },
+          "visible_when": {
+            "param": "operation",
+            "in": [
+              "select",
+              "update",
+              "delete"
+            ]
+          }
+        },
+        {
+          "name": "data",
+          "path": "/parameters/data",
+          "label": "Data",
+          "type": "object",
+          "required_when": {
+            "param": "operation",
+            "in": [
+              "insert",
+              "insert_many",
+              "update"
+            ]
+          },
+          "help": "Row data for insert/update operations; an array of row objects for insert_many",
+          "expression": {
+            "mode": "template"
+          },
+          "visible_when": {
+            "param": "operation",
+            "in": [
+              "insert",
+              "insert_many",
+              "update"
+            ]
+          }
+        },
+        {
+          "name": "columns",
+          "path": "/parameters/columns",
+          "label": "Columns",
+          "type": "array",
+          "help": "Columns to select (default: all)",
+          "expression": {
+            "mode": "template"
+          },
+          "visible_when": {
+            "param": "operation",
+            "eq": "select"
+          },
+          "item": {
+            "type": "string",
+            "expression": {
+              "mode": "template"
+            }
+          }
+        },
+        {
+          "name": "limit",
+          "path": "/parameters/limit",
+          "label": "Limit",
+          "type": "number",
+          "help": "Max rows to return for select",
+          "expression": {
+            "mode": "template"
+          },
+          "visible_when": {
+            "param": "operation",
+            "eq": "select"
+          }
+        }
+      ]
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.end",
+      "node_version": 1,
+      "kind": "action",
+      "display_name": "End",
+      "ports": {
+        "inputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ]
+      },
+      "fields": []
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.function",
+      "node_version": 1,
+      "kind": "action",
+      "display_name": "Function",
+      "ports": {
+        "inputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          },
+          {
+            "name": "error",
+            "display_name": "Error"
+          }
+        ]
+      },
+      "one_of": [
+        {
+          "params": [
+            "function_name",
+            "code"
+          ],
+          "mode": "at_least"
+        }
+      ],
+      "fields": [
+        {
+          "name": "function_name",
+          "path": "/parameters/function_name",
+          "label": "Function Name",
+          "type": "string",
+          "help": "Name of a pre-registered Go function to call",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "code",
+          "path": "/parameters/code",
+          "label": "Code",
+          "type": "string",
+          "widget": "expression",
+          "help": "Inline Expr expression to evaluate; ignored when function_name is set",
+          "expression": {
+            "mode": "pure"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "expression"
+            }
+          ]
+        },
+        {
+          "name": "params",
+          "path": "/parameters/params",
+          "label": "Params",
+          "type": "object",
+          "help": "Extra parameters passed to the function or expression",
+          "expression": {
+            "mode": "template"
+          }
+        }
+      ]
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.grpc",
+      "node_version": 1,
+      "kind": "action",
+      "display_name": "gRPC Call",
+      "ports": {
+        "inputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          },
+          {
+            "name": "error",
+            "display_name": "Error"
+          }
+        ]
+      },
+      "groups": [
+        {
+          "key": "request",
+          "display_name": "Request"
+        },
+        {
+          "key": "advanced",
+          "display_name": "Advanced",
+          "collapsed": true
+        }
+      ],
+      "fields": [
+        {
+          "name": "service",
+          "path": "/parameters/service",
+          "label": "Service",
+          "type": "string",
+          "required": true,
+          "help": "Fully-qualified service name (e.g. inventory.InventoryService)",
+          "group": "request",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "method",
+          "path": "/parameters/method",
+          "label": "Method",
+          "type": "string",
+          "required": true,
+          "help": "RPC method name",
+          "group": "request",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "host",
+          "path": "/parameters/host",
+          "label": "Host",
+          "type": "string",
+          "required": true,
+          "help": "gRPC server host:port",
+          "group": "request",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "host-port",
+              "advisory": true
+            }
+          ]
+        },
+        {
+          "name": "request",
+          "path": "/parameters/request",
+          "label": "Request",
+          "type": "object",
+          "help": "Request message payload",
+          "group": "request",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "metadata",
+          "path": "/parameters/metadata",
+          "label": "Metadata",
+          "type": "object",
+          "help": "gRPC metadata (headers)",
+          "group": "request",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "options",
+          "path": "/parameters/options",
+          "label": "Options",
+          "type": "object",
+          "help": "Dial/call options (timeout, tls, etc.)",
+          "group": "advanced",
+          "expression": {
+            "mode": "template"
+          }
+        }
+      ]
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.http",
+      "node_version": 1,
+      "kind": "action",
+      "display_name": "HTTP Request",
+      "credentials": [
+        "http_auth"
+      ],
+      "ports": {
+        "inputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          },
+          {
+            "name": "error",
+            "display_name": "Error"
+          }
+        ]
+      },
+      "groups": [
+        {
+          "key": "request",
+          "display_name": "Request"
+        },
+        {
+          "key": "advanced",
+          "display_name": "Advanced",
+          "collapsed": true
+        }
+      ],
+      "fields": [
+        {
+          "name": "method",
+          "path": "/parameters/method",
+          "label": "Method",
+          "type": "string",
+          "default": "GET",
+          "help": "HTTP method: GET/POST/PUT/DELETE/PATCH",
+          "group": "request",
+          "expression": {
+            "mode": "template"
+          },
+          "options": [
+            {
+              "value": "GET"
+            },
+            {
+              "value": "POST"
+            },
+            {
+              "value": "PUT"
+            },
+            {
+              "value": "DELETE"
+            },
+            {
+              "value": "PATCH"
+            }
+          ]
+        },
+        {
+          "name": "url",
+          "path": "/parameters/url",
+          "label": "URL",
+          "type": "string",
+          "required": true,
+          "help": "Target URL",
+          "group": "request",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "url",
+              "advisory": true
+            }
+          ]
+        },
+        {
+          "name": "mode",
+          "path": "/parameters/mode",
+          "label": "Mode",
+          "type": "string",
+          "fallback": "json",
+          "help": "Payload encoding: \"json\" (default, body is marshalled and the response parsed) or \"raw\" (body in/out as opaque base64 bytes, every status is a result)",
+          "group": "request",
+          "expression": {
+            "mode": "template"
+          },
+          "options": [
+            {
+              "value": "json",
+              "label": "JSON",
+              "description": "Body marshalled to JSON; response parsed; 4xx is a node error"
+            },
+            {
+              "value": "raw",
+              "label": "Raw",
+              "description": "Body in and out as base64 bytes; every status is a result"
+            }
+          ]
+        },
+        {
+          "name": "authentication",
+          "path": "/parameters/authentication",
+          "label": "Authentication",
+          "type": "string",
+          "widget": "credential-select",
+          "help": "Credential reference name",
+          "group": "request",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "body",
+          "path": "/parameters/body",
+          "label": "Body",
+          "type": "object",
+          "help": "Request body, marshalled to JSON. Ignored when mode=raw",
+          "group": "request",
+          "expression": {
+            "mode": "template"
+          },
+          "visible_when": {
+            "param": "mode",
+            "in": [
+              "json",
+              null
+            ]
+          }
+        },
+        {
+          "name": "body_b64",
+          "path": "/parameters/body_b64",
+          "label": "Raw Body (base64)",
+          "type": "string",
+          "widget": "base64",
+          "help": "Request body as base64-encoded bytes, sent verbatim with no Content-Type added. Only read when mode=raw",
+          "group": "request",
+          "expression": {
+            "mode": "template"
+          },
+          "visible_when": {
+            "param": "mode",
+            "eq": "raw"
+          }
+        },
+        {
+          "name": "headers",
+          "path": "/parameters/headers",
+          "label": "Headers",
+          "type": "object",
+          "widget": "key-value",
+          "help": "Request headers",
+          "group": "request",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "query",
+          "path": "/parameters/query",
+          "label": "Query Params",
+          "type": "object",
+          "widget": "key-value",
+          "help": "URL query parameters",
+          "group": "request",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "options",
+          "path": "/parameters/options",
+          "label": "Options",
+          "type": "object",
+          "help": "Additional options (timeout, max_response_bytes, disable_redirect, insecure_skip_verify)",
+          "group": "advanced",
+          "expression": {
+            "mode": "template"
+          }
+        }
+      ]
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.if",
+      "node_version": 1,
+      "kind": "action",
+      "display_name": "IF Condition",
+      "ports": {
+        "inputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "true",
+            "display_name": "True"
+          },
+          {
+            "name": "false",
+            "display_name": "False"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "name": "condition",
+          "path": "/parameters/condition",
+          "label": "Condition",
+          "type": "string",
+          "widget": "expression",
+          "required": true,
+          "help": "Boolean expression to evaluate",
+          "expression": {
+            "mode": "pure"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "expression"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.map",
+      "node_version": 1,
+      "kind": "action",
+      "display_name": "Map",
+      "ports": {
+        "inputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          },
+          {
+            "name": "error",
+            "display_name": "Error"
+          }
+        ]
+      },
+      "one_of": [
+        {
+          "params": [
+            "body",
+            "expression"
+          ],
+          "mode": "exactly"
+        }
+      ],
+      "fields": [
+        {
+          "name": "items",
+          "path": "/parameters/items",
+          "label": "Items",
+          "type": "string",
+          "widget": "expression",
+          "required": true,
+          "help": "Expression that evaluates to the array to iterate",
+          "expression": {
+            "mode": "pure"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "expression"
+            }
+          ]
+        },
+        {
+          "name": "batch_size",
+          "path": "/parameters/batch_size",
+          "label": "Batch Size",
+          "type": "number",
+          "default": 1,
+          "help": "Number of items processed per batch",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "continue_on_error",
+          "path": "/parameters/continue_on_error",
+          "label": "Continue On Error",
+          "type": "boolean",
+          "default": false,
+          "help": "Continue iteration when an item fails",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "body_concurrency",
+          "path": "/parameters/body_concurrency",
+          "label": "Body Concurrency",
+          "type": "number",
+          "default": 1,
+          "help": "Maximum items of one batch running at the same time; 1 (the default) runs them serially",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "body",
+          "path": "/parameters/body",
+          "label": "Body",
+          "type": "object",
+          "help": "Sub-graph executed once per item; mutually exclusive with expression, and exactly one of the two is required",
+          "expression": {
+            "mode": "none"
+          }
+        },
+        {
+          "name": "expression",
+          "path": "/parameters/expression",
+          "label": "Expression",
+          "type": "string",
+          "widget": "expression",
+          "help": "Expression evaluated once per item over $item/$index/$items; mutually exclusive with body, and exactly one of the two is required",
+          "expression": {
+            "mode": "pure"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "expression"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.merge",
+      "node_version": 1,
+      "kind": "action",
+      "display_name": "Merge",
+      "ports": {
+        "outputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "name": "mode",
+          "path": "/parameters/mode",
+          "label": "Mode",
+          "type": "string",
+          "required": true,
+          "fallback": "wait_all",
+          "help": "Merge strategy: \"wait_all\" or \"wait_any\"",
+          "expression": {
+            "mode": "template"
+          },
+          "options": [
+            {
+              "value": "wait_all",
+              "label": "Wait All",
+              "description": "Wait for every upstream branch"
+            },
+            {
+              "value": "wait_any",
+              "label": "Wait Any",
+              "description": "Take the first branch to arrive"
+            }
+          ]
+        },
+        {
+          "name": "on_others",
+          "path": "/parameters/on_others",
+          "label": "On Others",
+          "type": "string",
+          "default": "cancel",
+          "help": "Action for remaining branches in wait_any mode (default: cancel)",
+          "expression": {
+            "mode": "template"
+          },
+          "visible_when": {
+            "param": "mode",
+            "eq": "wait_any"
+          },
+          "options": [
+            {
+              "value": "cancel",
+              "label": "Cancel",
+              "description": "Best-effort cancel of the remaining branches"
+            },
+            {
+              "value": "detach",
+              "label": "Detach",
+              "description": "Let the remaining branches run and ignore their output"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.notification",
+      "node_version": 1,
+      "kind": "action",
+      "display_name": "Notification",
+      "ports": {
+        "inputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          },
+          {
+            "name": "error",
+            "display_name": "Error"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "name": "channel",
+          "path": "/parameters/channel",
+          "label": "Channel",
+          "type": "string",
+          "required": true,
+          "help": "Notification channel such as email, sms, slack, webhook",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "to",
+          "path": "/parameters/to",
+          "label": "To",
+          "type": "string",
+          "required": true,
+          "help": "Recipient address or identifier",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "subject",
+          "path": "/parameters/subject",
+          "label": "Subject",
+          "type": "string",
+          "help": "Notification subject or title",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "message",
+          "path": "/parameters/message",
+          "label": "Message",
+          "type": "string",
+          "help": "Notification body",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "data",
+          "path": "/parameters/data",
+          "label": "Data",
+          "type": "object",
+          "help": "Additional structured notification data",
+          "expression": {
+            "mode": "template"
+          }
+        }
+      ]
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.script",
+      "node_version": 1,
+      "kind": "action",
+      "display_name": "Script",
+      "ports": {
+        "inputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          },
+          {
+            "name": "error",
+            "display_name": "Error"
+          }
+        ]
+      },
+      "groups": [
+        {
+          "key": "source",
+          "display_name": "Source"
+        },
+        {
+          "key": "environment",
+          "display_name": "Environment"
+        }
+      ],
+      "one_of": [
+        {
+          "params": [
+            "code",
+            "artifact_digest",
+            "__artifact_file_path"
+          ],
+          "mode": "exactly"
+        }
+      ],
+      "fields": [
+        {
+          "name": "language",
+          "path": "/parameters/language",
+          "label": "Language",
+          "type": "string",
+          "required": true,
+          "help": "Language family: js | wasm (no default — choose explicitly)",
+          "group": "source",
+          "expression": {
+            "mode": "template"
+          },
+          "options": [
+            {
+              "value": "js",
+              "label": "JavaScript"
+            },
+            {
+              "value": "wasm",
+              "label": "WebAssembly",
+              "description": "Base64 wasip1 module"
+            }
+          ]
+        },
+        {
+          "name": "runtime",
+          "path": "/parameters/runtime",
+          "label": "Runtime",
+          "type": "string",
+          "required": true,
+          "help": "Engine: js-\u003egoja|qjs, wasm-\u003ewazero|wazero-reactor (no default — choose explicitly)",
+          "group": "source",
+          "expression": {
+            "mode": "template"
+          },
+          "options": [
+            {
+              "value": "goja",
+              "label": "goja",
+              "description": "Fastest cold start; cannot interrupt tight loops"
+            },
+            {
+              "value": "qjs",
+              "label": "QuickJS",
+              "description": "Slower first load; genuine mid-execution termination"
+            },
+            {
+              "value": "wazero",
+              "label": "wazero"
+            },
+            {
+              "value": "wazero-reactor",
+              "label": "wazero (reactor)",
+              "description": "Pooled reactor-mode guest instances"
+            }
+          ],
+          "options_when": [
+            {
+              "when": {
+                "param": "language",
+                "eq": "js"
+              },
+              "options": [
+                {
+                  "value": "goja",
+                  "label": "goja",
+                  "description": "Fastest cold start; cannot interrupt tight loops"
+                },
+                {
+                  "value": "qjs",
+                  "label": "QuickJS",
+                  "description": "Slower first load; genuine mid-execution termination"
+                }
+              ]
+            },
+            {
+              "when": {
+                "param": "language",
+                "eq": "wasm"
+              },
+              "options": [
+                {
+                  "value": "wazero",
+                  "label": "wazero"
+                },
+                {
+                  "value": "wazero-reactor",
+                  "label": "wazero (reactor)",
+                  "description": "Pooled reactor-mode guest instances"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "code",
+          "path": "/parameters/code",
+          "label": "Code",
+          "type": "string",
+          "widget": "code",
+          "help": "JS source (js) or base64 wasm module (wasm); omit when artifact_digest is set",
+          "group": "source",
+          "expression": {
+            "mode": "literal"
+          }
+        },
+        {
+          "name": "artifact_digest",
+          "path": "/parameters/artifact_digest",
+          "label": "Artifact Digest",
+          "type": "string",
+          "help": "Content-addressable digest (sha256:\u003chex\u003e) of the script in the artifact store",
+          "group": "source",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "sha256-digest"
+            }
+          ]
+        },
+        {
+          "name": "__artifact_file_path",
+          "path": "/parameters/__artifact_file_path",
+          "label": "Artifact File Path",
+          "type": "string",
+          "help": "SDK build-time placeholder for Script.File(); rewritten to artifact_digest before the workflow runs and never reaches Execute",
+          "group": "source",
+          "expression": {
+            "mode": "template"
+          },
+          "visible_when": {
+            "not": {}
+          }
+        },
+        {
+          "name": "credentials",
+          "path": "/parameters/credentials",
+          "label": "Credentials",
+          "type": "array",
+          "widget": "credential-select",
+          "help": "Declared credential names injected as $credentials",
+          "group": "environment",
+          "expression": {
+            "mode": "template"
+          },
+          "item": {
+            "type": "string",
+            "expression": {
+              "mode": "template"
+            }
+          }
+        },
+        {
+          "name": "roots",
+          "path": "/parameters/roots",
+          "label": "Roots",
+          "type": "array",
+          "help": "Expression roots the script reads; omit to send the whole environment",
+          "group": "environment",
+          "expression": {
+            "mode": "template"
+          },
+          "item": {
+            "type": "string",
+            "expression": {
+              "mode": "template"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.split",
+      "node_version": 1,
+      "kind": "action",
+      "display_name": "Split",
+      "ports": {
+        "inputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "name": "items",
+          "path": "/parameters/items",
+          "label": "Items",
+          "type": "string",
+          "widget": "expression",
+          "required": true,
+          "help": "Expression that evaluates to the array to split",
+          "expression": {
+            "mode": "pure"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "expression"
+            }
+          ]
+        },
+        {
+          "name": "batch_size",
+          "path": "/parameters/batch_size",
+          "label": "Batch Size",
+          "type": "number",
+          "fallback": 1,
+          "help": "Items per batch (omit for one-item-per-execution)",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "continue_on_error",
+          "path": "/parameters/continue_on_error",
+          "label": "Continue On Error",
+          "type": "boolean",
+          "default": false,
+          "help": "Continue splitting when a downstream branch fails",
+          "expression": {
+            "mode": "template"
+          }
+        }
+      ]
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.start",
+      "node_version": 1,
+      "kind": "action",
+      "display_name": "Start",
+      "ports": {
+        "outputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ]
+      },
+      "fields": []
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.switch",
+      "node_version": 1,
+      "kind": "action",
+      "display_name": "Switch",
+      "ports": {
+        "inputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "name": "mode",
+          "path": "/parameters/mode",
+          "label": "Mode",
+          "type": "string",
+          "required": true,
+          "fallback": "rules",
+          "help": "Routing mode: \"rules\" or \"expression\"",
+          "expression": {
+            "mode": "template"
+          },
+          "options": [
+            {
+              "value": "rules",
+              "label": "Rules",
+              "description": "First rule whose condition holds picks the output"
+            },
+            {
+              "value": "expression",
+              "label": "Expression",
+              "description": "Expression result is the output port name"
+            }
+          ]
+        },
+        {
+          "name": "outputs",
+          "path": "/parameters/outputs",
+          "label": "Outputs",
+          "type": "array",
+          "help": "List of output port names (dynamic)",
+          "expression": {
+            "mode": "template"
+          },
+          "item": {
+            "type": "string",
+            "expression": {
+              "mode": "template"
+            }
+          }
+        },
+        {
+          "name": "rules",
+          "path": "/parameters/rules",
+          "label": "Rules",
+          "type": "array",
+          "help": "Rule list for rules mode",
+          "expression": {
+            "mode": "template"
+          },
+          "visible_when": {
+            "param": "mode",
+            "in": [
+              "rules",
+              null
+            ]
+          },
+          "item": {
+            "type": "object",
+            "expression": {
+              "mode": "template"
+            },
+            "fields": [
+              {
+                "name": "condition",
+                "path": "condition",
+                "label": "Condition",
+                "type": "string",
+                "widget": "expression",
+                "help": "Boolean expression; a rule with an empty condition is skipped",
+                "expression": {
+                  "mode": "pure"
+                },
+                "rules": [
+                  {
+                    "type": "format",
+                    "format": "expression"
+                  }
+                ]
+              },
+              {
+                "name": "output",
+                "path": "output",
+                "label": "Output",
+                "type": "string",
+                "widget": "port-select",
+                "help": "Output port taken when condition holds; a rule with an empty output is skipped",
+                "expression": {
+                  "mode": "template"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "expression",
+          "path": "/parameters/expression",
+          "label": "Expression",
+          "type": "string",
+          "widget": "expression",
+          "required_when": {
+            "param": "mode",
+            "eq": "expression"
+          },
+          "help": "Expression for expression mode",
+          "expression": {
+            "mode": "pure"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "expression"
+            }
+          ],
+          "visible_when": {
+            "param": "mode",
+            "eq": "expression"
+          }
+        },
+        {
+          "name": "default_output",
+          "path": "/parameters/default_output",
+          "label": "Default Output",
+          "type": "string",
+          "widget": "port-select",
+          "fallback": "default",
+          "help": "Port name used when no rule matches",
+          "expression": {
+            "mode": "template"
+          }
+        }
+      ]
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.transform.aggregate",
+      "node_version": 1,
+      "kind": "action",
+      "display_name": "Aggregate",
+      "ports": {
+        "inputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "name": "items",
+          "path": "/parameters/items",
+          "label": "Items",
+          "type": "string",
+          "widget": "expression",
+          "required": true,
+          "help": "Expression that evaluates to the array to aggregate",
+          "expression": {
+            "mode": "pure"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "expression"
+            }
+          ]
+        },
+        {
+          "name": "operations",
+          "path": "/parameters/operations",
+          "label": "Operations",
+          "type": "array",
+          "required": true,
+          "help": "Aggregate operations",
+          "expression": {
+            "mode": "template"
+          },
+          "item": {
+            "type": "object",
+            "expression": {
+              "mode": "template"
+            },
+            "fields": [
+              {
+                "name": "kind",
+                "path": "kind",
+                "label": "Kind",
+                "type": "string",
+                "required": true,
+                "expression": {
+                  "mode": "template"
+                },
+                "options": [
+                  {
+                    "value": "count",
+                    "label": "Count"
+                  },
+                  {
+                    "value": "sum",
+                    "label": "Sum"
+                  },
+                  {
+                    "value": "avg",
+                    "label": "Average"
+                  },
+                  {
+                    "value": "average",
+                    "label": "Average (alias of avg)"
+                  }
+                ]
+              },
+              {
+                "name": "field",
+                "path": "field",
+                "label": "Field",
+                "type": "string",
+                "help": "Item field to sum or average",
+                "expression": {
+                  "mode": "template"
+                },
+                "visible_when": {
+                  "param": "kind",
+                  "in": [
+                    "sum",
+                    "avg",
+                    "average"
+                  ]
+                }
+              },
+              {
+                "name": "as",
+                "path": "as",
+                "label": "As",
+                "type": "string",
+                "required": true,
+                "help": "Output field name",
+                "expression": {
+                  "mode": "template"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.transform.filter",
+      "node_version": 1,
+      "kind": "action",
+      "display_name": "Filter",
+      "ports": {
+        "inputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "name": "items",
+          "path": "/parameters/items",
+          "label": "Items",
+          "type": "string",
+          "widget": "expression",
+          "required": true,
+          "help": "Expression that evaluates to the array to filter",
+          "expression": {
+            "mode": "pure"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "expression"
+            }
+          ]
+        },
+        {
+          "name": "condition",
+          "path": "/parameters/condition",
+          "label": "Condition",
+          "type": "string",
+          "widget": "expression",
+          "required": true,
+          "help": "Boolean expression evaluated per item; item, index, and the item's own fields are in scope",
+          "expression": {
+            "mode": "pure"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "expression"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.transform.limit",
+      "node_version": 1,
+      "kind": "action",
+      "display_name": "Limit",
+      "ports": {
+        "inputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "name": "items",
+          "path": "/parameters/items",
+          "label": "Items",
+          "type": "string",
+          "widget": "expression",
+          "required": true,
+          "help": "Expression that evaluates to the array to limit",
+          "expression": {
+            "mode": "pure"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "expression"
+            }
+          ]
+        },
+        {
+          "name": "max",
+          "path": "/parameters/max",
+          "label": "Max",
+          "type": "number",
+          "required": true,
+          "help": "Maximum number of items to keep",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "min",
+              "value": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.transform.pick",
+      "node_version": 1,
+      "kind": "action",
+      "display_name": "Pick",
+      "ports": {
+        "inputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "name": "fields",
+          "path": "/parameters/fields",
+          "label": "Fields",
+          "type": "array",
+          "required": true,
+          "help": "Field names to keep; all others are removed",
+          "expression": {
+            "mode": "template"
+          },
+          "item": {
+            "type": "string",
+            "expression": {
+              "mode": "template"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.transform.remove_duplicates",
+      "node_version": 1,
+      "kind": "action",
+      "display_name": "Remove Duplicates",
+      "ports": {
+        "inputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "name": "items",
+          "path": "/parameters/items",
+          "label": "Items",
+          "type": "string",
+          "widget": "expression",
+          "required": true,
+          "help": "Expression that evaluates to the array to deduplicate",
+          "expression": {
+            "mode": "pure"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "expression"
+            }
+          ]
+        },
+        {
+          "name": "fields",
+          "path": "/parameters/fields",
+          "label": "Fields",
+          "type": "array",
+          "help": "Fields used as the unique key; whole item when omitted",
+          "expression": {
+            "mode": "template"
+          },
+          "item": {
+            "type": "string",
+            "expression": {
+              "mode": "template"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.transform.rename",
+      "node_version": 1,
+      "kind": "action",
+      "display_name": "Rename",
+      "ports": {
+        "inputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "name": "mapping",
+          "path": "/parameters/mapping",
+          "label": "Mapping",
+          "type": "object",
+          "widget": "key-value",
+          "required": true,
+          "help": "Old field name to new field name mapping",
+          "expression": {
+            "mode": "template"
+          }
+        }
+      ]
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.transform.set",
+      "node_version": 1,
+      "kind": "action",
+      "display_name": "Set",
+      "ports": {
+        "inputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "name": "fields",
+          "path": "/parameters/fields",
+          "label": "Fields",
+          "type": "object",
+          "help": "Literal fields to assign",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "expressions",
+          "path": "/parameters/expressions",
+          "label": "Expressions",
+          "type": "object",
+          "widget": "key-expression",
+          "help": "Fields computed from expressions",
+          "expression": {
+            "mode": "pure"
+          }
+        }
+      ]
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.transform.sort",
+      "node_version": 1,
+      "kind": "action",
+      "display_name": "Sort",
+      "ports": {
+        "inputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "name": "items",
+          "path": "/parameters/items",
+          "label": "Items",
+          "type": "string",
+          "widget": "expression",
+          "required": true,
+          "help": "Expression that evaluates to the array to sort",
+          "expression": {
+            "mode": "pure"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "expression"
+            }
+          ]
+        },
+        {
+          "name": "fields",
+          "path": "/parameters/fields",
+          "label": "Fields",
+          "type": "array",
+          "required": true,
+          "help": "Sort fields in priority order",
+          "expression": {
+            "mode": "template"
+          },
+          "item": {
+            "type": "object",
+            "expression": {
+              "mode": "template"
+            },
+            "fields": [
+              {
+                "name": "field",
+                "path": "field",
+                "label": "Field",
+                "type": "string",
+                "help": "Item field to compare",
+                "expression": {
+                  "mode": "template"
+                }
+              },
+              {
+                "name": "desc",
+                "path": "desc",
+                "label": "Descending",
+                "type": "boolean",
+                "help": "Sort in descending order",
+                "expression": {
+                  "mode": "template"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.trigger.cron",
+      "node_version": 1,
+      "kind": "trigger",
+      "display_name": "Cron Trigger",
+      "ports": {
+        "outputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "name": "expression",
+          "path": "/parameters/expression",
+          "label": "Expression",
+          "type": "string",
+          "widget": "cron",
+          "required": true,
+          "help": "Cron schedule, five fields (e.g. \"*/5 * * * *\") or a descriptor such as \"@every 1m\"",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "cron"
+            }
+          ]
+        },
+        {
+          "name": "timezone",
+          "path": "/parameters/timezone",
+          "label": "Timezone",
+          "type": "string",
+          "default": "UTC",
+          "help": "IANA time zone name the schedule is evaluated in",
+          "expression": {
+            "mode": "template"
+          }
+        }
+      ]
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.trigger.kafka",
+      "node_version": 1,
+      "kind": "trigger",
+      "display_name": "Kafka Trigger",
+      "ports": {
+        "outputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ]
+      },
+      "groups": [
+        {
+          "key": "connection",
+          "display_name": "Connection"
+        },
+        {
+          "key": "processing",
+          "display_name": "Processing"
+        },
+        {
+          "key": "advanced",
+          "display_name": "Advanced",
+          "collapsed": true
+        }
+      ],
+      "fields": [
+        {
+          "name": "brokers",
+          "path": "/parameters/brokers",
+          "label": "Brokers",
+          "type": "array",
+          "required": true,
+          "group": "connection",
+          "expression": {
+            "mode": "template"
+          },
+          "item": {
+            "type": "string",
+            "expression": {
+              "mode": "template"
+            }
+          }
+        },
+        {
+          "name": "topic",
+          "path": "/parameters/topic",
+          "label": "Topic",
+          "type": "string",
+          "required": true,
+          "group": "connection",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "group",
+          "path": "/parameters/group",
+          "label": "Group",
+          "type": "string",
+          "required": true,
+          "group": "connection",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "start_offset",
+          "path": "/parameters/start_offset",
+          "label": "Start Offset",
+          "type": "string",
+          "default": "latest",
+          "group": "connection",
+          "expression": {
+            "mode": "template"
+          },
+          "options": [
+            {
+              "value": "latest",
+              "label": "Latest",
+              "description": "Only records produced after the group first joins"
+            },
+            {
+              "value": "earliest",
+              "label": "Earliest",
+              "description": "From the oldest retained record"
+            },
+            {
+              "value": "last",
+              "label": "Last",
+              "description": "Alias of latest"
+            },
+            {
+              "value": "newest",
+              "label": "Newest",
+              "description": "Alias of latest"
+            },
+            {
+              "value": "first",
+              "label": "First",
+              "description": "Alias of earliest"
+            },
+            {
+              "value": "oldest",
+              "label": "Oldest",
+              "description": "Alias of earliest"
+            },
+            {
+              "value": "beginning",
+              "label": "Beginning",
+              "description": "Alias of earliest"
+            }
+          ]
+        },
+        {
+          "name": "max_inflight",
+          "path": "/parameters/max_inflight",
+          "label": "Max Inflight",
+          "type": "number",
+          "default": 64,
+          "group": "processing",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "aggregate",
+          "path": "/parameters/aggregate",
+          "label": "Aggregate",
+          "type": "object",
+          "help": "Optional partition batch aggregation: enabled, by, max_size, flush_interval, dedup, on_overflow, dead_letter_topic. Under entry-seed hosting the batch is admitted to the control plane instead of emitted locally, with an admission key covering the batch's actual offset range; delivery is at-least-once (a batch may be reprocessed once if its offsets fail to commit), so consumers must be idempotent on (topic, partition, offset). flush_interval defaults to 1s in entry-seed mode and 100ms on the legacy emit path. on_overflow decides what happens when a partition reaches its retained bound: \"discard\" (the default) drops the arriving record and a later commit sweeps past its offset, so it is never redelivered — the loss is counted in xflow_trigger_messages_discarded_total{reason=\"buffer_overflow\"} and logged; \"block\" loses nothing but halts fetching for the WHOLE assignment until that partition drains, and neither lag gauge can report it, so watch xflow_trigger_consumption_blocked instead; \"dead_letter\" republishes the record to dead_letter_topic (required with this value) before letting its offset advance, so nothing is lost and nothing stalls while the overflow topic is healthy — a failed republish is retried as backpressure (the partition stops consuming) rather than dropping, counted in xflow_trigger_messages_dead_lettered_total. Set on_overflow explicitly on any topic that cannot afford the default loss.",
+          "group": "processing",
+          "expression": {
+            "mode": "template"
+          },
+          "fields": [
+            {
+              "name": "enabled",
+              "path": "/parameters/aggregate/enabled",
+              "label": "Enabled",
+              "type": "boolean",
+              "help": "Aggregation is off unless this is true; every other field is ignored while it is off",
+              "expression": {
+                "mode": "template"
+              }
+            },
+            {
+              "name": "by",
+              "path": "/parameters/aggregate/by",
+              "label": "By",
+              "type": "string",
+              "fallback": "partition",
+              "help": "Batch key; only \"partition\" is supported (the default)",
+              "expression": {
+                "mode": "template"
+              },
+              "options": [
+                {
+                  "value": "partition"
+                }
+              ]
+            },
+            {
+              "name": "max_size",
+              "path": "/parameters/aggregate/max_size",
+              "label": "Max Size",
+              "type": "number",
+              "fallback": 100,
+              "help": "Records per batch; unset or non-positive means 100",
+              "expression": {
+                "mode": "template"
+              }
+            },
+            {
+              "name": "flush_interval",
+              "path": "/parameters/aggregate/flush_interval",
+              "label": "Flush Interval",
+              "type": "string",
+              "widget": "duration",
+              "help": "Positive duration; defaults to 1s in entry-seed mode and 100ms otherwise",
+              "expression": {
+                "mode": "template"
+              },
+              "rules": [
+                {
+                  "type": "format",
+                  "format": "duration"
+                }
+              ]
+            },
+            {
+              "name": "dedup",
+              "path": "/parameters/aggregate/dedup",
+              "label": "Dedup",
+              "type": "string",
+              "fallback": "message",
+              "help": "Deduplication unit; only \"message\" is supported (the default)",
+              "expression": {
+                "mode": "template"
+              },
+              "options": [
+                {
+                  "value": "message"
+                }
+              ]
+            },
+            {
+              "name": "on_overflow",
+              "path": "/parameters/aggregate/on_overflow",
+              "label": "On Overflow",
+              "type": "string",
+              "fallback": "discard",
+              "help": "Policy when a partition reaches its retained bound; unset means discard",
+              "expression": {
+                "mode": "template"
+              },
+              "options": [
+                {
+                  "value": "discard",
+                  "label": "Discard",
+                  "description": "Drop the arriving record (counted and logged)"
+                },
+                {
+                  "value": "block",
+                  "label": "Block",
+                  "description": "Halt fetching for the whole assignment until the partition drains"
+                },
+                {
+                  "value": "dead_letter",
+                  "label": "Dead Letter",
+                  "description": "Republish to dead_letter_topic before advancing the offset"
+                }
+              ]
+            },
+            {
+              "name": "dead_letter_topic",
+              "path": "/parameters/aggregate/dead_letter_topic",
+              "label": "Dead Letter Topic",
+              "type": "string",
+              "required_when": {
+                "param": "on_overflow",
+                "eq": "dead_letter"
+              },
+              "help": "Overflow topic; read only when on_overflow is dead_letter",
+              "expression": {
+                "mode": "template"
+              },
+              "visible_when": {
+                "param": "on_overflow",
+                "eq": "dead_letter"
+              }
+            }
+          ]
+        },
+        {
+          "name": "message_schema",
+          "path": "/parameters/message_schema",
+          "label": "Message Schema",
+          "type": "object",
+          "help": "Optional message validation: {required_fields: [\"f\"], on_invalid: \"discard|fail|dead_letter\", dead_letter_topic: \"t-dlq\"}. on_invalid defaults to discard (offset committed, message dropped, drop counted and logged).",
+          "group": "processing",
+          "expression": {
+            "mode": "template"
+          },
+          "fields": [
+            {
+              "name": "required_fields",
+              "path": "/parameters/message_schema/required_fields",
+              "label": "Required Fields",
+              "type": "array",
+              "help": "Top-level keys every message value must carry; an empty list disables validation",
+              "expression": {
+                "mode": "template"
+              },
+              "item": {
+                "type": "string",
+                "expression": {
+                  "mode": "template"
+                }
+              }
+            },
+            {
+              "name": "on_invalid",
+              "path": "/parameters/message_schema/on_invalid",
+              "label": "On Invalid",
+              "type": "string",
+              "fallback": "discard",
+              "help": "Policy for an invalid message; unset means discard",
+              "expression": {
+                "mode": "template"
+              },
+              "options": [
+                {
+                  "value": "discard",
+                  "label": "Discard",
+                  "description": "Commit the offset and drop the message (counted and logged)"
+                },
+                {
+                  "value": "fail",
+                  "label": "Fail",
+                  "description": "Withhold the commit so Kafka redelivers; blocks the partition"
+                },
+                {
+                  "value": "dead_letter",
+                  "label": "Dead Letter",
+                  "description": "Republish to dead_letter_topic, then commit"
+                }
+              ]
+            },
+            {
+              "name": "dead_letter_topic",
+              "path": "/parameters/message_schema/dead_letter_topic",
+              "label": "Dead Letter Topic",
+              "type": "string",
+              "required_when": {
+                "param": "on_invalid",
+                "eq": "dead_letter"
+              },
+              "help": "Read only when on_invalid is dead_letter",
+              "expression": {
+                "mode": "template"
+              },
+              "visible_when": {
+                "param": "on_invalid",
+                "eq": "dead_letter"
+              }
+            }
+          ]
+        },
+        {
+          "name": "tuning",
+          "path": "/parameters/tuning",
+          "label": "Tuning",
+          "type": "object",
+          "help": "Optional consumer tuning: fetch_min_bytes (1), fetch_max_bytes (10000000), max_wait (10s), dial_timeout (10s), session_timeout (30s), heartbeat_interval (3s), rebalance_timeout (30s). Durations are strings (\"45s\"). heartbeat_interval must stay below session_timeout or the group rebalances continuously. Offsets always commit synchronously after the side effect; that is not tunable.",
+          "group": "advanced",
+          "expression": {
+            "mode": "template"
+          },
+          "fields": [
+            {
+              "name": "fetch_min_bytes",
+              "path": "/parameters/tuning/fetch_min_bytes",
+              "label": "Fetch Min Bytes",
+              "type": "number",
+              "fallback": 1,
+              "help": "Default 1; must not exceed fetch_max_bytes",
+              "expression": {
+                "mode": "template"
+              },
+              "rules": [
+                {
+                  "type": "min",
+                  "value": 1
+                }
+              ]
+            },
+            {
+              "name": "fetch_max_bytes",
+              "path": "/parameters/tuning/fetch_max_bytes",
+              "label": "Fetch Max Bytes",
+              "type": "number",
+              "fallback": 10000000,
+              "help": "Default 10000000",
+              "expression": {
+                "mode": "template"
+              },
+              "rules": [
+                {
+                  "type": "min",
+                  "value": 1
+                }
+              ]
+            },
+            {
+              "name": "max_wait",
+              "path": "/parameters/tuning/max_wait",
+              "label": "Max Wait",
+              "type": "string",
+              "widget": "duration",
+              "fallback": "10s",
+              "help": "Default 10s",
+              "expression": {
+                "mode": "template"
+              },
+              "rules": [
+                {
+                  "type": "format",
+                  "format": "duration"
+                }
+              ]
+            },
+            {
+              "name": "dial_timeout",
+              "path": "/parameters/tuning/dial_timeout",
+              "label": "Dial Timeout",
+              "type": "string",
+              "widget": "duration",
+              "fallback": "10s",
+              "help": "Default 10s",
+              "expression": {
+                "mode": "template"
+              },
+              "rules": [
+                {
+                  "type": "format",
+                  "format": "duration"
+                }
+              ]
+            },
+            {
+              "name": "session_timeout",
+              "path": "/parameters/tuning/session_timeout",
+              "label": "Session Timeout",
+              "type": "string",
+              "widget": "duration",
+              "fallback": "30s",
+              "help": "Default 30s",
+              "expression": {
+                "mode": "template"
+              },
+              "rules": [
+                {
+                  "type": "format",
+                  "format": "duration"
+                }
+              ]
+            },
+            {
+              "name": "heartbeat_interval",
+              "path": "/parameters/tuning/heartbeat_interval",
+              "label": "Heartbeat Interval",
+              "type": "string",
+              "widget": "duration",
+              "fallback": "3s",
+              "help": "Default 3s; must stay below session_timeout",
+              "expression": {
+                "mode": "template"
+              },
+              "rules": [
+                {
+                  "type": "format",
+                  "format": "duration"
+                }
+              ]
+            },
+            {
+              "name": "rebalance_timeout",
+              "path": "/parameters/tuning/rebalance_timeout",
+              "label": "Rebalance Timeout",
+              "type": "string",
+              "widget": "duration",
+              "fallback": "30s",
+              "help": "Default 30s",
+              "expression": {
+                "mode": "template"
+              },
+              "rules": [
+                {
+                  "type": "format",
+                  "format": "duration"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.trigger.redis",
+      "node_version": 1,
+      "kind": "trigger",
+      "display_name": "Redis Trigger",
+      "ports": {
+        "outputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ]
+      },
+      "groups": [
+        {
+          "key": "connection",
+          "display_name": "Connection"
+        },
+        {
+          "key": "advanced",
+          "display_name": "Advanced",
+          "collapsed": true
+        }
+      ],
+      "fields": [
+        {
+          "name": "addr",
+          "path": "/parameters/addr",
+          "label": "Address",
+          "type": "string",
+          "required": true,
+          "help": "Redis server address, host:port. Credentials are not params: attach a supply with username/password to the node.",
+          "group": "connection",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "host-port",
+              "advisory": true
+            }
+          ]
+        },
+        {
+          "name": "mode",
+          "path": "/parameters/mode",
+          "label": "Mode",
+          "type": "string",
+          "default": "stream",
+          "group": "connection",
+          "expression": {
+            "mode": "template"
+          },
+          "options": [
+            {
+              "value": "stream",
+              "label": "Stream",
+              "description": "Consume a Redis Stream through a consumer group"
+            },
+            {
+              "value": "pubsub",
+              "label": "Pub/Sub",
+              "description": "Subscribe to a Pub/Sub channel (one active replica)"
+            }
+          ]
+        },
+        {
+          "name": "stream",
+          "path": "/parameters/stream",
+          "label": "Stream",
+          "type": "string",
+          "required_when": {
+            "param": "mode",
+            "in": [
+              "stream",
+              null
+            ]
+          },
+          "group": "connection",
+          "expression": {
+            "mode": "template"
+          },
+          "visible_when": {
+            "param": "mode",
+            "in": [
+              "stream",
+              null
+            ]
+          }
+        },
+        {
+          "name": "group",
+          "path": "/parameters/group",
+          "label": "Group",
+          "type": "string",
+          "required_when": {
+            "param": "mode",
+            "in": [
+              "stream",
+              null
+            ]
+          },
+          "group": "connection",
+          "expression": {
+            "mode": "template"
+          },
+          "visible_when": {
+            "param": "mode",
+            "in": [
+              "stream",
+              null
+            ]
+          }
+        },
+        {
+          "name": "channel",
+          "path": "/parameters/channel",
+          "label": "Channel",
+          "type": "string",
+          "required_when": {
+            "param": "mode",
+            "eq": "pubsub"
+          },
+          "group": "connection",
+          "expression": {
+            "mode": "template"
+          },
+          "visible_when": {
+            "param": "mode",
+            "eq": "pubsub"
+          }
+        },
+        {
+          "name": "max_inflight",
+          "path": "/parameters/max_inflight",
+          "label": "Max Inflight",
+          "type": "number",
+          "default": 64,
+          "group": "advanced",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "tuning",
+          "path": "/parameters/tuning",
+          "label": "Tuning",
+          "type": "object",
+          "help": "Stream-mode knobs: db (0), consumer (defaults to the node name), start_id (\"$\", i.e. only entries added after the group is created), payload_field (unset means the whole entry is JSON-encoded into the event payload), claim_min_idle (\"1m\"), dial_timeout (\"10s\"). Durations are strings. claim_min_idle is how long an unacknowledged entry must sit before another consumer takes it over, so it must exceed the slowest workflow this stream drives or entries will be delivered twice.",
+          "group": "advanced",
+          "expression": {
+            "mode": "template"
+          },
+          "fields": [
+            {
+              "name": "db",
+              "path": "/parameters/tuning/db",
+              "label": "DB",
+              "type": "number",
+              "fallback": 0,
+              "help": "Database index; default 0",
+              "expression": {
+                "mode": "template"
+              }
+            },
+            {
+              "name": "consumer",
+              "path": "/parameters/tuning/consumer",
+              "label": "Consumer",
+              "type": "string",
+              "help": "Consumer name inside the group (stream mode); defaults to the node name",
+              "expression": {
+                "mode": "template"
+              }
+            },
+            {
+              "name": "start_id",
+              "path": "/parameters/tuning/start_id",
+              "label": "Start ID",
+              "type": "string",
+              "fallback": "$",
+              "help": "Group start ID (stream mode); default \"$\"",
+              "expression": {
+                "mode": "template"
+              }
+            },
+            {
+              "name": "payload_field",
+              "path": "/parameters/tuning/payload_field",
+              "label": "Payload Field",
+              "type": "string",
+              "help": "Entry field used as the payload (stream mode); unset JSON-encodes the whole entry",
+              "expression": {
+                "mode": "template"
+              }
+            },
+            {
+              "name": "claim_min_idle",
+              "path": "/parameters/tuning/claim_min_idle",
+              "label": "Claim Min Idle",
+              "type": "string",
+              "widget": "duration",
+              "fallback": "1m",
+              "help": "Positive duration (stream mode); default 1m",
+              "expression": {
+                "mode": "template"
+              },
+              "rules": [
+                {
+                  "type": "format",
+                  "format": "duration"
+                }
+              ]
+            },
+            {
+              "name": "dial_timeout",
+              "path": "/parameters/tuning/dial_timeout",
+              "label": "Dial Timeout",
+              "type": "string",
+              "widget": "duration",
+              "fallback": "10s",
+              "help": "Positive duration; default 10s",
+              "expression": {
+                "mode": "template"
+              },
+              "rules": [
+                {
+                  "type": "format",
+                  "format": "duration"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.trigger.timer",
+      "node_version": 1,
+      "kind": "trigger",
+      "display_name": "Timer Trigger",
+      "ports": {
+        "outputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "name": "interval",
+          "path": "/parameters/interval",
+          "label": "Interval",
+          "type": "string",
+          "widget": "duration",
+          "required": true,
+          "help": "Positive tick interval (e.g. \"1m\")",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "duration"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.trigger.webhook",
+      "node_version": 1,
+      "kind": "trigger",
+      "display_name": "Webhook Trigger",
+      "ports": {
+        "outputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "name": "method",
+          "path": "/parameters/method",
+          "label": "Method",
+          "type": "string",
+          "required": true,
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "path",
+          "path": "/parameters/path",
+          "label": "Path",
+          "type": "string",
+          "required": true,
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "event_id_header",
+          "path": "/parameters/event_id_header",
+          "label": "Event ID Header",
+          "type": "string",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "max_body_bytes",
+          "path": "/parameters/max_body_bytes",
+          "label": "Max Body Bytes",
+          "type": "number",
+          "default": 1048576,
+          "expression": {
+            "mode": "template"
+          }
+        }
+      ]
+    },
+    {
+      "spec": "node-form/v1",
+      "node_type": "xflow.wait",
+      "node_version": 1,
+      "kind": "action",
+      "display_name": "Wait",
+      "ports": {
+        "inputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          },
+          {
+            "name": "timeout",
+            "display_name": "Timeout"
+          },
+          {
+            "name": "error",
+            "display_name": "Error"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "name": "mode",
+          "path": "/parameters/mode",
+          "label": "Mode",
+          "type": "string",
+          "default": "signal",
+          "help": "Trigger mode: \"signal\" (default) or \"timer\"",
+          "expression": {
+            "mode": "template"
+          },
+          "options": [
+            {
+              "value": "signal",
+              "label": "Signal",
+              "description": "Wait for one or more external signals"
+            },
+            {
+              "value": "timer",
+              "label": "Timer",
+              "description": "Wait for a fixed duration or until an absolute time"
+            }
+          ]
+        },
+        {
+          "name": "signal_name",
+          "path": "/parameters/signal_name",
+          "label": "Signal Name",
+          "type": "string",
+          "help": "Name of the external signal to wait for (signal mode)",
+          "expression": {
+            "mode": "template"
+          },
+          "visible_when": {
+            "param": "mode",
+            "in": [
+              "signal",
+              null
+            ]
+          }
+        },
+        {
+          "name": "signals",
+          "path": "/parameters/signals",
+          "label": "Signal Names",
+          "type": "array",
+          "help": "List of signal names to wait for (multi-signal mode)",
+          "expression": {
+            "mode": "template"
+          },
+          "visible_when": {
+            "param": "mode",
+            "in": [
+              "signal",
+              null
+            ]
+          },
+          "item": {
+            "type": "string",
+            "expression": {
+              "mode": "template"
+            }
+          }
+        },
+        {
+          "name": "quorum",
+          "path": "/parameters/quorum",
+          "label": "Quorum",
+          "type": "number",
+          "help": "Number of signals required to proceed; 0 or unset means all (multi-signal mode)",
+          "expression": {
+            "mode": "template"
+          },
+          "visible_when": {
+            "all_of": [
+              {
+                "param": "mode",
+                "in": [
+                  "signal",
+                  null
+                ]
+              },
+              {
+                "param": "signals",
+                "truthy": true
+              }
+            ]
+          }
+        },
+        {
+          "name": "timeout",
+          "path": "/parameters/timeout",
+          "label": "Timeout",
+          "type": "string",
+          "widget": "duration",
+          "help": "Maximum wait duration before routing to timeout port (e.g. \"48h\")",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "duration"
+            }
+          ]
+        },
+        {
+          "name": "duration",
+          "path": "/parameters/duration",
+          "label": "Duration",
+          "type": "string",
+          "widget": "duration",
+          "required_when": {
+            "all_of": [
+              {
+                "param": "mode",
+                "eq": "timer"
+              },
+              {
+                "param": "until",
+                "truthy": false
+              }
+            ]
+          },
+          "help": "Fixed wait duration (timer mode, e.g. \"5m\")",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "duration"
+            }
+          ],
+          "visible_when": {
+            "param": "mode",
+            "eq": "timer"
+          }
+        },
+        {
+          "name": "until",
+          "path": "/parameters/until",
+          "label": "Until",
+          "type": "string",
+          "widget": "datetime",
+          "required_when": {
+            "all_of": [
+              {
+                "param": "mode",
+                "eq": "timer"
+              },
+              {
+                "param": "duration",
+                "truthy": false
+              }
+            ]
+          },
+          "help": "Absolute time expression to wait until (timer mode)",
+          "expression": {
+            "mode": "template"
+          },
+          "visible_when": {
+            "param": "mode",
+            "eq": "timer"
+          }
+        }
+      ]
+    }
+  ]
+}

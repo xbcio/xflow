@@ -125,7 +125,8 @@ describe("compileNodeForm: every fixture compiles to a valid Spec", () => {
     expect(compileNodeForm(null, { common: commonSchema })).toMatchSnapshot();
   });
 
-  it.todo("every builtin node type snapshot — waits for A6-generated /v1/node-types fixtures");
+  // Every builtin type: nodeForm.generated.test.ts compiles and snapshots the
+  // A6-generated testdata/node-types.generated.json.
 
   it("registers every component type compileNodeForm targets", () => {
     expect(NODE_FORM_COMPONENT_TYPES.filter((type) => !registry.types.includes(type))).toEqual([]);

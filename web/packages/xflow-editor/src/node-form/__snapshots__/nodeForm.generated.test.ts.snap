@@ -1,0 +1,6596 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`A6-generated node-types fixture > xflow.approval@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.approvers": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+        ],
+        "props": {
+          "description": "List of approver identifiers",
+          "expect": {
+            "type": "array",
+          },
+          "fxToggle": true,
+          "label": "Approvers",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/approvers",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.approvers:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.approvers:control": {
+        "props": {
+          "label": "Approvers",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/approvers",
+          },
+        },
+        "type": "JsonEditor",
+      },
+      "f.parameters.force_approvers": {
+        "props": {
+          "description": "Identifiers allowed to pass the gate without the outstanding approvers; unset means nobody can",
+          "expect": {
+            "type": "array",
+          },
+          "fxToggle": true,
+          "label": "Force Approvers",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/force_approvers",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.force_approvers:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.force_approvers:control": {
+        "props": {
+          "label": "Force Approvers",
+          "value": {
+            "$bindState": "/parameters/force_approvers",
+          },
+        },
+        "type": "JsonEditor",
+      },
+      "f.parameters.mode": {
+        "props": {
+          "description": "Approval mode: "any", "all", or "sequential"",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Mode",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/mode",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.mode:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.mode:control": {
+        "props": {
+          "defaultHint": "any",
+          "label": "Mode",
+          "value": {
+            "$bindState": "/parameters/mode",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.timeout": {
+        "props": {
+          "description": "Maximum wait duration before timeout routing (e.g. "48h")",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Timeout",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/timeout",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.timeout:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.timeout:control": {
+        "props": {
+          "label": "Timeout",
+          "value": {
+            "$bindState": "/parameters/timeout",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.timeout_action": {
+        "props": {
+          "description": "Action on timeout: "reject" or "route"",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Timeout Action",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/timeout_action",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.timeout_action:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.timeout_action:control": {
+        "props": {
+          "defaultHint": "route",
+          "label": "Timeout Action",
+          "value": {
+            "$bindState": "/parameters/timeout_action",
+          },
+        },
+        "type": "Input",
+      },
+      "form": {
+        "children": [
+          "g.type.default",
+        ],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.default": {
+        "children": [
+          "f.parameters.approvers",
+          "f.parameters.mode",
+          "f.parameters.timeout",
+          "f.parameters.timeout_action",
+          "f.parameters.force_approvers",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "参数",
+        },
+        "type": "FieldGroup",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.browser.cdp@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.debugging_url": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+          {
+            "args": {
+              "allowExpression": true,
+              "format": "url",
+            },
+            "message": "需要完整的 URL",
+            "severity": "warning",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Remote Chrome DevTools endpoint",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "CDP Endpoint",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/debugging_url",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.debugging_url:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.debugging_url:control": {
+        "props": {
+          "label": "CDP Endpoint",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/debugging_url",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.entry_url": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+          {
+            "args": {
+              "allowExpression": true,
+              "format": "url",
+            },
+            "message": "需要完整的 URL",
+            "severity": "warning",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Entry URL",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/entry_url",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.entry_url:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.entry_url:control": {
+        "props": {
+          "label": "Entry URL",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/entry_url",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.harvest": {
+        "props": {
+          "expect": {
+            "type": "object",
+          },
+          "fxToggle": true,
+          "label": "Harvest Rules",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/harvest",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.harvest:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.harvest:control": {
+        "props": {
+          "label": "Harvest Rules",
+          "value": {
+            "$bindState": "/parameters/harvest",
+          },
+        },
+        "type": "JsonEditor",
+      },
+      "f.parameters.plan": {
+        "props": {
+          "expect": {
+            "type": "object",
+          },
+          "fxToggle": true,
+          "label": "Navigation Plan",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/plan",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.plan:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.plan:control": {
+        "props": {
+          "label": "Navigation Plan",
+          "value": {
+            "$bindState": "/parameters/plan",
+          },
+        },
+        "type": "JsonEditor",
+      },
+      "f.parameters.seed_cookies": {
+        "props": {
+          "expect": {
+            "type": "array",
+          },
+          "fxToggle": true,
+          "label": "Seed Cookies",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/seed_cookies",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.seed_cookies:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.seed_cookies:control": {
+        "props": {
+          "label": "Seed Cookies",
+          "value": {
+            "$bindState": "/parameters/seed_cookies",
+          },
+        },
+        "type": "JsonEditor",
+      },
+      "f.parameters.target_host": {
+        "props": {
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Target Host",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/target_host",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.target_host:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.target_host:control": {
+        "props": {
+          "label": "Target Host",
+          "value": {
+            "$bindState": "/parameters/target_host",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.timeout_ms": {
+        "checks": [
+          {
+            "args": {
+              "args": {
+                "value": 1,
+              },
+              "check": "min",
+            },
+            "message": "不能小于 1",
+            "type": "literalOnly",
+          },
+          {
+            "args": {
+              "args": {
+                "value": 1,
+              },
+              "check": "min",
+            },
+            "message": "不能小于 1",
+            "severity": "warning",
+            "type": "expressionOnly",
+          },
+        ],
+        "props": {
+          "expect": {
+            "type": "number",
+          },
+          "fxToggle": true,
+          "label": "Navigate Timeout (ms)",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/timeout_ms",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.timeout_ms:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.timeout_ms:control": {
+        "props": {
+          "defaultHint": 30000,
+          "label": "Navigate Timeout (ms)",
+          "value": {
+            "$bindState": "/parameters/timeout_ms",
+          },
+        },
+        "type": "InputNumber",
+      },
+      "f.parameters.total_timeout_ms": {
+        "checks": [
+          {
+            "args": {
+              "args": {
+                "value": 1,
+              },
+              "check": "min",
+            },
+            "message": "不能小于 1",
+            "type": "literalOnly",
+          },
+          {
+            "args": {
+              "args": {
+                "value": 1,
+              },
+              "check": "min",
+            },
+            "message": "不能小于 1",
+            "severity": "warning",
+            "type": "expressionOnly",
+          },
+        ],
+        "props": {
+          "expect": {
+            "type": "number",
+          },
+          "fxToggle": true,
+          "label": "Total Timeout (ms)",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/total_timeout_ms",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.total_timeout_ms:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.total_timeout_ms:control": {
+        "props": {
+          "defaultHint": 45000,
+          "label": "Total Timeout (ms)",
+          "value": {
+            "$bindState": "/parameters/total_timeout_ms",
+          },
+        },
+        "type": "InputNumber",
+      },
+      "f.parameters.ttl": {
+        "props": {
+          "expect": {
+            "type": "object",
+          },
+          "fxToggle": true,
+          "label": "TTL Rules",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/ttl",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.ttl:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.ttl:control": {
+        "props": {
+          "label": "TTL Rules",
+          "value": {
+            "$bindState": "/parameters/ttl",
+          },
+        },
+        "type": "JsonEditor",
+      },
+      "form": {
+        "children": [
+          "g.type.target",
+          "g.type.harvest",
+          "g.type.limits",
+        ],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.harvest": {
+        "children": [
+          "f.parameters.seed_cookies",
+          "f.parameters.plan",
+          "f.parameters.harvest",
+          "f.parameters.ttl",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "Harvest",
+        },
+        "type": "FieldGroup",
+      },
+      "g.type.limits": {
+        "children": [
+          "f.parameters.timeout_ms",
+          "f.parameters.total_timeout_ms",
+        ],
+        "props": {
+          "collapsible": true,
+          "defaultCollapsed": true,
+          "title": "Limits",
+        },
+        "type": "FieldGroup",
+      },
+      "g.type.target": {
+        "children": [
+          "f.parameters.debugging_url",
+          "f.parameters.entry_url",
+          "f.parameters.target_host",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "Target",
+        },
+        "type": "FieldGroup",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.database@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.columns": {
+        "props": {
+          "description": "Columns to select (default: all)",
+          "expect": {
+            "item": "string",
+            "type": "array",
+          },
+          "fxToggle": true,
+          "label": "Columns",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/columns",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.columns:control",
+          ],
+        },
+        "type": "ExpressionInput",
+        "visible": {
+          "$state": "/parameters/operation",
+          "eq": "select",
+        },
+      },
+      "f.parameters.columns:control": {
+        "props": {
+          "label": "Columns",
+          "value": {
+            "$bindState": "/parameters/columns",
+          },
+        },
+        "type": "Tags",
+      },
+      "f.parameters.credential": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+        ],
+        "props": {
+          "description": "Credential reference name for the DB connection",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Credential",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/credential",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.credential:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.credential:control": {
+        "props": {
+          "credentials": {
+            "$state": "/$ctx/credentials",
+          },
+          "label": "Credential",
+          "multiple": false,
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/credential",
+          },
+        },
+        "type": "CredentialSelect",
+      },
+      "f.parameters.data": {
+        "checks": [
+          {
+            "message": "当前配置下必填",
+            "type": "required",
+            "when": {
+              "$state": "/parameters/operation",
+              "in": [
+                "insert",
+                "insert_many",
+                "update",
+              ],
+            },
+          },
+        ],
+        "props": {
+          "description": "Row data for insert/update operations; an array of row objects for insert_many",
+          "expect": {
+            "type": "object",
+          },
+          "fxToggle": true,
+          "label": "Data",
+          "mode": "template",
+          "required": {
+            "$cond": {
+              "$state": "/parameters/operation",
+              "in": [
+                "insert",
+                "insert_many",
+                "update",
+              ],
+            },
+            "else": false,
+            "then": true,
+          },
+          "value": {
+            "$bindState": "/parameters/data",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.data:control",
+          ],
+        },
+        "type": "ExpressionInput",
+        "visible": {
+          "$state": "/parameters/operation",
+          "in": [
+            "insert",
+            "insert_many",
+            "update",
+          ],
+        },
+      },
+      "f.parameters.data:control": {
+        "props": {
+          "label": "Data",
+          "required": {
+            "$cond": {
+              "$state": "/parameters/operation",
+              "in": [
+                "insert",
+                "insert_many",
+                "update",
+              ],
+            },
+            "else": false,
+            "then": true,
+          },
+          "value": {
+            "$bindState": "/parameters/data",
+          },
+        },
+        "type": "JsonEditor",
+      },
+      "f.parameters.limit": {
+        "props": {
+          "description": "Max rows to return for select",
+          "expect": {
+            "type": "number",
+          },
+          "fxToggle": true,
+          "label": "Limit",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/limit",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.limit:control",
+          ],
+        },
+        "type": "ExpressionInput",
+        "visible": {
+          "$state": "/parameters/operation",
+          "eq": "select",
+        },
+      },
+      "f.parameters.limit:control": {
+        "props": {
+          "label": "Limit",
+          "value": {
+            "$bindState": "/parameters/limit",
+          },
+        },
+        "type": "InputNumber",
+      },
+      "f.parameters.operation": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+        ],
+        "props": {
+          "description": "DB operation: "select"/"insert"/"update"/"delete"/"insert_many"",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Operation",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/operation",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.operation:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.operation:control": {
+        "props": {
+          "label": "Operation",
+          "options": [
+            {
+              "label": "select",
+              "value": "select",
+            },
+            {
+              "label": "insert",
+              "value": "insert",
+            },
+            {
+              "label": "update",
+              "value": "update",
+            },
+            {
+              "label": "delete",
+              "value": "delete",
+            },
+            {
+              "label": "insert_many",
+              "value": "insert_many",
+            },
+          ],
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/operation",
+          },
+        },
+        "type": "Select",
+      },
+      "f.parameters.table": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+          {
+            "args": {
+              "args": {
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+              },
+              "check": "pattern",
+            },
+            "message": "需要匹配 ^[A-Za-z_][A-Za-z0-9_]*$",
+            "type": "literalOnly",
+          },
+          {
+            "args": {
+              "args": {
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+              },
+              "check": "pattern",
+            },
+            "message": "需要匹配 ^[A-Za-z_][A-Za-z0-9_]*$",
+            "severity": "warning",
+            "type": "expressionOnly",
+          },
+        ],
+        "props": {
+          "description": "Target table name",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Table",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/table",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.table:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.table:control": {
+        "props": {
+          "label": "Table",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/table",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.where": {
+        "checks": [
+          {
+            "message": "当前配置下必填",
+            "type": "required",
+            "when": {
+              "$state": "/parameters/operation",
+              "in": [
+                "update",
+                "delete",
+              ],
+            },
+          },
+        ],
+        "props": {
+          "description": "Filter conditions (key-value pairs)",
+          "expect": {
+            "type": "object",
+          },
+          "fxToggle": true,
+          "label": "Where",
+          "mode": "template",
+          "required": {
+            "$cond": {
+              "$state": "/parameters/operation",
+              "in": [
+                "update",
+                "delete",
+              ],
+            },
+            "else": false,
+            "then": true,
+          },
+          "value": {
+            "$bindState": "/parameters/where",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.where:control",
+          ],
+        },
+        "type": "ExpressionInput",
+        "visible": {
+          "$state": "/parameters/operation",
+          "in": [
+            "select",
+            "update",
+            "delete",
+          ],
+        },
+      },
+      "f.parameters.where:control": {
+        "props": {
+          "label": "Where",
+          "required": {
+            "$cond": {
+              "$state": "/parameters/operation",
+              "in": [
+                "update",
+                "delete",
+              ],
+            },
+            "else": false,
+            "then": true,
+          },
+          "value": {
+            "$bindState": "/parameters/where",
+          },
+        },
+        "type": "JsonEditor",
+      },
+      "form": {
+        "children": [
+          "g.type.default",
+        ],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.default": {
+        "children": [
+          "f.parameters.operation",
+          "f.parameters.table",
+          "f.parameters.credential",
+          "f.parameters.where",
+          "f.parameters.data",
+          "f.parameters.columns",
+          "f.parameters.limit",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "参数",
+        },
+        "type": "FieldGroup",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.end@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "form": {
+        "children": [],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.function@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.code": {
+        "checks": [
+          {
+            "args": {
+              "format": "expression",
+            },
+            "message": "需要表达式，例如 \${{ $input.x }}",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Inline Expr expression to evaluate; ignored when function_name is set",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": false,
+          "label": "Code",
+          "mode": "pure",
+          "value": {
+            "$bindState": "/parameters/code",
+          },
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.function_name": {
+        "props": {
+          "description": "Name of a pre-registered Go function to call",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Function Name",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/function_name",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.function_name:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.function_name:control": {
+        "props": {
+          "label": "Function Name",
+          "value": {
+            "$bindState": "/parameters/function_name",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.params": {
+        "props": {
+          "description": "Extra parameters passed to the function or expression",
+          "expect": {
+            "type": "object",
+          },
+          "fxToggle": true,
+          "label": "Params",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/params",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.params:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.params:control": {
+        "props": {
+          "label": "Params",
+          "value": {
+            "$bindState": "/parameters/params",
+          },
+        },
+        "type": "JsonEditor",
+      },
+      "form": {
+        "checks": [
+          {
+            "args": {
+              "mode": "at_least",
+              "paths": [
+                "/parameters/function_name",
+                "/parameters/code",
+              ],
+            },
+            "message": "Function Name、Code 至少需要设置一个",
+            "targets": [
+              "/parameters/function_name",
+              "/parameters/code",
+            ],
+            "type": "oneOf",
+          },
+        ],
+        "children": [
+          "g.type.default",
+        ],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.default": {
+        "children": [
+          "f.parameters.function_name",
+          "f.parameters.code",
+          "f.parameters.params",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "参数",
+        },
+        "type": "FieldGroup",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.grpc@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.host": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+          {
+            "args": {
+              "allowExpression": true,
+              "format": "host-port",
+            },
+            "message": "需要 host:port",
+            "severity": "warning",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "gRPC server host:port",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Host",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/host",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.host:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.host:control": {
+        "props": {
+          "label": "Host",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/host",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.metadata": {
+        "props": {
+          "description": "gRPC metadata (headers)",
+          "expect": {
+            "type": "object",
+          },
+          "fxToggle": true,
+          "label": "Metadata",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/metadata",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.metadata:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.metadata:control": {
+        "props": {
+          "label": "Metadata",
+          "value": {
+            "$bindState": "/parameters/metadata",
+          },
+        },
+        "type": "JsonEditor",
+      },
+      "f.parameters.method": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+        ],
+        "props": {
+          "description": "RPC method name",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Method",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/method",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.method:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.method:control": {
+        "props": {
+          "label": "Method",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/method",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.options": {
+        "props": {
+          "description": "Dial/call options (timeout, tls, etc.)",
+          "expect": {
+            "type": "object",
+          },
+          "fxToggle": true,
+          "label": "Options",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/options",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.options:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.options:control": {
+        "props": {
+          "label": "Options",
+          "value": {
+            "$bindState": "/parameters/options",
+          },
+        },
+        "type": "JsonEditor",
+      },
+      "f.parameters.request": {
+        "props": {
+          "description": "Request message payload",
+          "expect": {
+            "type": "object",
+          },
+          "fxToggle": true,
+          "label": "Request",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/request",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.request:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.request:control": {
+        "props": {
+          "label": "Request",
+          "value": {
+            "$bindState": "/parameters/request",
+          },
+        },
+        "type": "JsonEditor",
+      },
+      "f.parameters.service": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+        ],
+        "props": {
+          "description": "Fully-qualified service name (e.g. inventory.InventoryService)",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Service",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/service",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.service:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.service:control": {
+        "props": {
+          "label": "Service",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/service",
+          },
+        },
+        "type": "Input",
+      },
+      "form": {
+        "children": [
+          "g.type.request",
+          "g.type.advanced",
+        ],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.advanced": {
+        "children": [
+          "f.parameters.options",
+        ],
+        "props": {
+          "collapsible": true,
+          "defaultCollapsed": true,
+          "title": "Advanced",
+        },
+        "type": "FieldGroup",
+      },
+      "g.type.request": {
+        "children": [
+          "f.parameters.service",
+          "f.parameters.method",
+          "f.parameters.host",
+          "f.parameters.request",
+          "f.parameters.metadata",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "Request",
+        },
+        "type": "FieldGroup",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.http@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.authentication": {
+        "props": {
+          "description": "Credential reference name",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Authentication",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/authentication",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.authentication:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.authentication:control": {
+        "props": {
+          "credentials": {
+            "$state": "/$ctx/credentials",
+          },
+          "label": "Authentication",
+          "multiple": false,
+          "value": {
+            "$bindState": "/parameters/authentication",
+          },
+        },
+        "type": "CredentialSelect",
+      },
+      "f.parameters.body": {
+        "props": {
+          "description": "Request body, marshalled to JSON. Ignored when mode=raw",
+          "expect": {
+            "type": "object",
+          },
+          "fxToggle": true,
+          "label": "Body",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/body",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.body:control",
+          ],
+        },
+        "type": "ExpressionInput",
+        "visible": {
+          "$state": "/parameters/mode",
+          "in": [
+            "json",
+            null,
+          ],
+        },
+      },
+      "f.parameters.body:control": {
+        "props": {
+          "label": "Body",
+          "value": {
+            "$bindState": "/parameters/body",
+          },
+        },
+        "type": "JsonEditor",
+      },
+      "f.parameters.body_b64": {
+        "props": {
+          "description": "Request body as base64-encoded bytes, sent verbatim with no Content-Type added. Only read when mode=raw",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Raw Body (base64)",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/body_b64",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.body_b64:control",
+          ],
+        },
+        "type": "ExpressionInput",
+        "visible": {
+          "$state": "/parameters/mode",
+          "eq": "raw",
+        },
+      },
+      "f.parameters.body_b64:control": {
+        "props": {
+          "label": "Raw Body (base64)",
+          "value": {
+            "$bindState": "/parameters/body_b64",
+          },
+        },
+        "type": "TextArea",
+      },
+      "f.parameters.headers": {
+        "checks": [
+          {
+            "message": "值看起来像凭据，请改用凭据引用",
+            "severity": "warning",
+            "type": "secretLike",
+          },
+        ],
+        "props": {
+          "description": "Request headers",
+          "expect": {
+            "type": "object",
+            "values": "string",
+          },
+          "fxToggle": true,
+          "label": "Headers",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/headers",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.headers:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.headers:control": {
+        "props": {
+          "label": "Headers",
+          "value": {
+            "$bindState": "/parameters/headers",
+          },
+        },
+        "type": "KeyValue",
+      },
+      "f.parameters.method": {
+        "props": {
+          "description": "HTTP method: GET/POST/PUT/DELETE/PATCH",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Method",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/method",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.method:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.method:control": {
+        "props": {
+          "defaultHint": "GET",
+          "label": "Method",
+          "options": [
+            {
+              "label": "GET",
+              "value": "GET",
+            },
+            {
+              "label": "POST",
+              "value": "POST",
+            },
+            {
+              "label": "PUT",
+              "value": "PUT",
+            },
+            {
+              "label": "DELETE",
+              "value": "DELETE",
+            },
+            {
+              "label": "PATCH",
+              "value": "PATCH",
+            },
+          ],
+          "value": {
+            "$bindState": "/parameters/method",
+          },
+        },
+        "type": "Select",
+      },
+      "f.parameters.mode": {
+        "props": {
+          "description": "Payload encoding: "json" (default, body is marshalled and the response parsed) or "raw" (body in/out as opaque base64 bytes, every status is a result)",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Mode",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/mode",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.mode:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.mode:control": {
+        "props": {
+          "defaultHint": "json",
+          "label": "Mode",
+          "options": [
+            {
+              "label": "JSON",
+              "value": "json",
+            },
+            {
+              "label": "Raw",
+              "value": "raw",
+            },
+          ],
+          "value": {
+            "$bindState": "/parameters/mode",
+          },
+        },
+        "type": "Select",
+      },
+      "f.parameters.options": {
+        "props": {
+          "description": "Additional options (timeout, max_response_bytes, disable_redirect, insecure_skip_verify)",
+          "expect": {
+            "type": "object",
+          },
+          "fxToggle": true,
+          "label": "Options",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/options",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.options:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.options:control": {
+        "props": {
+          "label": "Options",
+          "value": {
+            "$bindState": "/parameters/options",
+          },
+        },
+        "type": "JsonEditor",
+      },
+      "f.parameters.query": {
+        "checks": [
+          {
+            "message": "值看起来像凭据，请改用凭据引用",
+            "severity": "warning",
+            "type": "secretLike",
+          },
+        ],
+        "props": {
+          "description": "URL query parameters",
+          "expect": {
+            "type": "object",
+            "values": "string",
+          },
+          "fxToggle": true,
+          "label": "Query Params",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/query",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.query:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.query:control": {
+        "props": {
+          "label": "Query Params",
+          "value": {
+            "$bindState": "/parameters/query",
+          },
+        },
+        "type": "KeyValue",
+      },
+      "f.parameters.url": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+          {
+            "args": {
+              "allowExpression": true,
+              "format": "url",
+            },
+            "message": "需要完整的 URL",
+            "severity": "warning",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Target URL",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "URL",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/url",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.url:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.url:control": {
+        "props": {
+          "label": "URL",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/url",
+          },
+        },
+        "type": "Input",
+      },
+      "form": {
+        "children": [
+          "g.type.request",
+          "g.type.advanced",
+        ],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.advanced": {
+        "children": [
+          "f.parameters.options",
+        ],
+        "props": {
+          "collapsible": true,
+          "defaultCollapsed": true,
+          "title": "Advanced",
+        },
+        "type": "FieldGroup",
+      },
+      "g.type.request": {
+        "children": [
+          "f.parameters.method",
+          "f.parameters.url",
+          "f.parameters.mode",
+          "f.parameters.authentication",
+          "f.parameters.body",
+          "f.parameters.body_b64",
+          "f.parameters.headers",
+          "f.parameters.query",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "Request",
+        },
+        "type": "FieldGroup",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.if@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.condition": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+          {
+            "args": {
+              "format": "expression",
+            },
+            "message": "需要表达式，例如 \${{ $input.x }}",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Boolean expression to evaluate",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": false,
+          "label": "Condition",
+          "mode": "pure",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/condition",
+          },
+        },
+        "type": "ExpressionInput",
+      },
+      "form": {
+        "children": [
+          "g.type.default",
+        ],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.default": {
+        "children": [
+          "f.parameters.condition",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "参数",
+        },
+        "type": "FieldGroup",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.map@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.batch_size": {
+        "props": {
+          "description": "Number of items processed per batch",
+          "expect": {
+            "type": "number",
+          },
+          "fxToggle": true,
+          "label": "Batch Size",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/batch_size",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.batch_size:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.batch_size:control": {
+        "props": {
+          "defaultHint": 1,
+          "label": "Batch Size",
+          "value": {
+            "$bindState": "/parameters/batch_size",
+          },
+        },
+        "type": "InputNumber",
+      },
+      "f.parameters.body": {
+        "children": [
+          "f.parameters.body:control",
+        ],
+        "props": {
+          "expect": {
+            "type": "object",
+          },
+          "label": "Body",
+          "mode": "none",
+          "observed": {
+            "$state": "/parameters/body",
+          },
+        },
+        "type": "ShapeGuard",
+      },
+      "f.parameters.body:control": {
+        "checks": [
+          {
+            "message": "此参数不会被求值，其中的 \${{ }} 会按原文使用",
+            "severity": "warning",
+            "type": "notEvaluated",
+          },
+        ],
+        "props": {
+          "description": "Sub-graph executed once per item; mutually exclusive with expression, and exactly one of the two is required",
+          "label": "Body",
+          "value": {
+            "$bindState": "/parameters/body",
+          },
+        },
+        "type": "JsonEditor",
+      },
+      "f.parameters.body_concurrency": {
+        "props": {
+          "description": "Maximum items of one batch running at the same time; 1 (the default) runs them serially",
+          "expect": {
+            "type": "number",
+          },
+          "fxToggle": true,
+          "label": "Body Concurrency",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/body_concurrency",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.body_concurrency:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.body_concurrency:control": {
+        "props": {
+          "defaultHint": 1,
+          "label": "Body Concurrency",
+          "value": {
+            "$bindState": "/parameters/body_concurrency",
+          },
+        },
+        "type": "InputNumber",
+      },
+      "f.parameters.continue_on_error": {
+        "props": {
+          "description": "Continue iteration when an item fails",
+          "expect": {
+            "type": "boolean",
+          },
+          "fxToggle": true,
+          "label": "Continue On Error",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/continue_on_error",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.continue_on_error:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.continue_on_error:control": {
+        "props": {
+          "defaultHint": false,
+          "label": "Continue On Error",
+          "value": {
+            "$bindState": "/parameters/continue_on_error",
+          },
+        },
+        "type": "Switch",
+      },
+      "f.parameters.expression": {
+        "checks": [
+          {
+            "args": {
+              "format": "expression",
+            },
+            "message": "需要表达式，例如 \${{ $input.x }}",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Expression evaluated once per item over $item/$index/$items; mutually exclusive with body, and exactly one of the two is required",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": false,
+          "label": "Expression",
+          "mode": "pure",
+          "value": {
+            "$bindState": "/parameters/expression",
+          },
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.items": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+          {
+            "args": {
+              "format": "expression",
+            },
+            "message": "需要表达式，例如 \${{ $input.x }}",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Expression that evaluates to the array to iterate",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": false,
+          "label": "Items",
+          "mode": "pure",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/items",
+          },
+        },
+        "type": "ExpressionInput",
+      },
+      "form": {
+        "checks": [
+          {
+            "args": {
+              "mode": "exactly",
+              "paths": [
+                "/parameters/body",
+                "/parameters/expression",
+              ],
+            },
+            "message": "Body、Expression 必须且只能设置一个",
+            "targets": [
+              "/parameters/body",
+              "/parameters/expression",
+            ],
+            "type": "oneOf",
+          },
+        ],
+        "children": [
+          "g.type.default",
+        ],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.default": {
+        "children": [
+          "f.parameters.items",
+          "f.parameters.batch_size",
+          "f.parameters.continue_on_error",
+          "f.parameters.body_concurrency",
+          "f.parameters.body",
+          "f.parameters.expression",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "参数",
+        },
+        "type": "FieldGroup",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.merge@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.mode": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+        ],
+        "props": {
+          "description": "Merge strategy: "wait_all" or "wait_any"",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Mode",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/mode",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.mode:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.mode:control": {
+        "props": {
+          "defaultHint": "wait_all",
+          "label": "Mode",
+          "options": [
+            {
+              "label": "Wait All",
+              "value": "wait_all",
+            },
+            {
+              "label": "Wait Any",
+              "value": "wait_any",
+            },
+          ],
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/mode",
+          },
+        },
+        "type": "Select",
+      },
+      "f.parameters.on_others": {
+        "props": {
+          "description": "Action for remaining branches in wait_any mode (default: cancel)",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "On Others",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/on_others",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.on_others:control",
+          ],
+        },
+        "type": "ExpressionInput",
+        "visible": {
+          "$state": "/parameters/mode",
+          "eq": "wait_any",
+        },
+      },
+      "f.parameters.on_others:control": {
+        "props": {
+          "defaultHint": "cancel",
+          "label": "On Others",
+          "options": [
+            {
+              "label": "Cancel",
+              "value": "cancel",
+            },
+            {
+              "label": "Detach",
+              "value": "detach",
+            },
+          ],
+          "value": {
+            "$bindState": "/parameters/on_others",
+          },
+        },
+        "type": "Select",
+      },
+      "form": {
+        "children": [
+          "g.type.default",
+        ],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.default": {
+        "children": [
+          "f.parameters.mode",
+          "f.parameters.on_others",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "参数",
+        },
+        "type": "FieldGroup",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.notification@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.channel": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+        ],
+        "props": {
+          "description": "Notification channel such as email, sms, slack, webhook",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Channel",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/channel",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.channel:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.channel:control": {
+        "props": {
+          "label": "Channel",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/channel",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.data": {
+        "props": {
+          "description": "Additional structured notification data",
+          "expect": {
+            "type": "object",
+          },
+          "fxToggle": true,
+          "label": "Data",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/data",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.data:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.data:control": {
+        "props": {
+          "label": "Data",
+          "value": {
+            "$bindState": "/parameters/data",
+          },
+        },
+        "type": "JsonEditor",
+      },
+      "f.parameters.message": {
+        "props": {
+          "description": "Notification body",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Message",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/message",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.message:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.message:control": {
+        "props": {
+          "label": "Message",
+          "value": {
+            "$bindState": "/parameters/message",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.subject": {
+        "props": {
+          "description": "Notification subject or title",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Subject",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/subject",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.subject:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.subject:control": {
+        "props": {
+          "label": "Subject",
+          "value": {
+            "$bindState": "/parameters/subject",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.to": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+        ],
+        "props": {
+          "description": "Recipient address or identifier",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "To",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/to",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.to:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.to:control": {
+        "props": {
+          "label": "To",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/to",
+          },
+        },
+        "type": "Input",
+      },
+      "form": {
+        "children": [
+          "g.type.default",
+        ],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.default": {
+        "children": [
+          "f.parameters.channel",
+          "f.parameters.to",
+          "f.parameters.subject",
+          "f.parameters.message",
+          "f.parameters.data",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "参数",
+        },
+        "type": "FieldGroup",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.script@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.artifact_digest": {
+        "checks": [
+          {
+            "args": {
+              "allowExpression": true,
+              "format": "sha256-digest",
+            },
+            "message": "需要 sha256:<64 位十六进制>",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Content-addressable digest (sha256:<hex>) of the script in the artifact store",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Artifact Digest",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/artifact_digest",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.artifact_digest:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.artifact_digest:control": {
+        "props": {
+          "label": "Artifact Digest",
+          "value": {
+            "$bindState": "/parameters/artifact_digest",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.code": {
+        "children": [
+          "f.parameters.code:code",
+          "f.parameters.code:base64",
+        ],
+        "props": {
+          "expect": {
+            "type": "string",
+          },
+          "label": "Code",
+          "mode": "literal",
+          "observed": {
+            "$state": "/parameters/code",
+          },
+        },
+        "type": "ShapeGuard",
+      },
+      "f.parameters.code:base64": {
+        "checks": [
+          {
+            "message": "代码中的 \${{ }} 不会被渲染",
+            "severity": "warning",
+            "type": "noTemplateInCode",
+          },
+        ],
+        "props": {
+          "description": "JS source (js) or base64 wasm module (wasm); omit when artifact_digest is set",
+          "label": "Code",
+          "value": {
+            "$bindState": "/parameters/code",
+          },
+        },
+        "type": "TextArea",
+        "visible": {
+          "$state": "/parameters/language",
+          "eq": "wasm",
+        },
+      },
+      "f.parameters.code:code": {
+        "checks": [
+          {
+            "message": "代码中的 \${{ }} 不会被渲染",
+            "severity": "warning",
+            "type": "noTemplateInCode",
+          },
+        ],
+        "props": {
+          "description": "JS source (js) or base64 wasm module (wasm); omit when artifact_digest is set",
+          "label": "Code",
+          "language": "javascript",
+          "value": {
+            "$bindState": "/parameters/code",
+          },
+        },
+        "type": "CodeEditor",
+        "visible": {
+          "$state": "/parameters/language",
+          "neq": "wasm",
+        },
+      },
+      "f.parameters.credentials": {
+        "props": {
+          "description": "Declared credential names injected as $credentials",
+          "expect": {
+            "item": "string",
+            "type": "array",
+          },
+          "fxToggle": true,
+          "label": "Credentials",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/credentials",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.credentials:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.credentials:control": {
+        "props": {
+          "credentials": {
+            "$state": "/$ctx/credentials",
+          },
+          "label": "Credentials",
+          "multiple": true,
+          "value": {
+            "$bindState": "/parameters/credentials",
+          },
+        },
+        "type": "CredentialSelect",
+      },
+      "f.parameters.language": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+        ],
+        "props": {
+          "description": "Language family: js | wasm (no default — choose explicitly)",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Language",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/language",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.language:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.language:control": {
+        "props": {
+          "label": "Language",
+          "options": [
+            {
+              "label": "JavaScript",
+              "value": "js",
+            },
+            {
+              "label": "WebAssembly",
+              "value": "wasm",
+            },
+          ],
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/language",
+          },
+        },
+        "type": "Select",
+      },
+      "f.parameters.roots": {
+        "props": {
+          "description": "Expression roots the script reads; omit to send the whole environment",
+          "expect": {
+            "item": "string",
+            "type": "array",
+          },
+          "fxToggle": true,
+          "label": "Roots",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/roots",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.roots:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.roots:control": {
+        "props": {
+          "label": "Roots",
+          "value": {
+            "$bindState": "/parameters/roots",
+          },
+        },
+        "type": "Tags",
+      },
+      "f.parameters.runtime": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+        ],
+        "props": {
+          "description": "Engine: js->goja|qjs, wasm->wazero|wazero-reactor (no default — choose explicitly)",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Runtime",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/runtime",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.runtime:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.runtime:control": {
+        "props": {
+          "label": "Runtime",
+          "options": {
+            "$cond": {
+              "$state": "/parameters/language",
+              "eq": "js",
+            },
+            "else": {
+              "$cond": {
+                "$state": "/parameters/language",
+                "eq": "wasm",
+              },
+              "else": [
+                {
+                  "label": "goja",
+                  "value": "goja",
+                },
+                {
+                  "label": "QuickJS",
+                  "value": "qjs",
+                },
+                {
+                  "label": "wazero",
+                  "value": "wazero",
+                },
+                {
+                  "label": "wazero (reactor)",
+                  "value": "wazero-reactor",
+                },
+              ],
+              "then": [
+                {
+                  "label": "wazero",
+                  "value": "wazero",
+                },
+                {
+                  "label": "wazero (reactor)",
+                  "value": "wazero-reactor",
+                },
+              ],
+            },
+            "then": [
+              {
+                "label": "goja",
+                "value": "goja",
+              },
+              {
+                "label": "QuickJS",
+                "value": "qjs",
+              },
+            ],
+          },
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/runtime",
+          },
+        },
+        "type": "Select",
+      },
+      "form": {
+        "checks": [
+          {
+            "args": {
+              "mode": "exactly",
+              "paths": [
+                "/parameters/code",
+                "/parameters/artifact_digest",
+                "/parameters/__artifact_file_path",
+              ],
+            },
+            "message": "Code、Artifact Digest 必须且只能设置一个",
+            "targets": [
+              "/parameters/code",
+              "/parameters/artifact_digest",
+            ],
+            "type": "oneOf",
+          },
+        ],
+        "children": [
+          "g.type.source",
+          "g.type.environment",
+        ],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.environment": {
+        "children": [
+          "f.parameters.credentials",
+          "f.parameters.roots",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "Environment",
+        },
+        "type": "FieldGroup",
+      },
+      "g.type.source": {
+        "children": [
+          "f.parameters.language",
+          "f.parameters.runtime",
+          "f.parameters.code",
+          "f.parameters.artifact_digest",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "Source",
+        },
+        "type": "FieldGroup",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.split@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.batch_size": {
+        "props": {
+          "description": "Items per batch (omit for one-item-per-execution)",
+          "expect": {
+            "type": "number",
+          },
+          "fxToggle": true,
+          "label": "Batch Size",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/batch_size",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.batch_size:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.batch_size:control": {
+        "props": {
+          "defaultHint": 1,
+          "label": "Batch Size",
+          "value": {
+            "$bindState": "/parameters/batch_size",
+          },
+        },
+        "type": "InputNumber",
+      },
+      "f.parameters.continue_on_error": {
+        "props": {
+          "description": "Continue splitting when a downstream branch fails",
+          "expect": {
+            "type": "boolean",
+          },
+          "fxToggle": true,
+          "label": "Continue On Error",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/continue_on_error",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.continue_on_error:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.continue_on_error:control": {
+        "props": {
+          "defaultHint": false,
+          "label": "Continue On Error",
+          "value": {
+            "$bindState": "/parameters/continue_on_error",
+          },
+        },
+        "type": "Switch",
+      },
+      "f.parameters.items": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+          {
+            "args": {
+              "format": "expression",
+            },
+            "message": "需要表达式，例如 \${{ $input.x }}",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Expression that evaluates to the array to split",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": false,
+          "label": "Items",
+          "mode": "pure",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/items",
+          },
+        },
+        "type": "ExpressionInput",
+      },
+      "form": {
+        "children": [
+          "g.type.default",
+        ],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.default": {
+        "children": [
+          "f.parameters.items",
+          "f.parameters.batch_size",
+          "f.parameters.continue_on_error",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "参数",
+        },
+        "type": "FieldGroup",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.start@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "form": {
+        "children": [],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.switch@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.default_output": {
+        "props": {
+          "description": "Port name used when no rule matches",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Default Output",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/default_output",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.default_output:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.default_output:control": {
+        "props": {
+          "defaultHint": "default",
+          "label": "Default Output",
+          "ports": [],
+          "value": {
+            "$bindState": "/parameters/default_output",
+          },
+        },
+        "type": "PortSelect",
+      },
+      "f.parameters.expression": {
+        "checks": [
+          {
+            "message": "当前配置下必填",
+            "type": "required",
+            "when": {
+              "$state": "/parameters/mode",
+              "eq": "expression",
+            },
+          },
+          {
+            "args": {
+              "format": "expression",
+            },
+            "message": "需要表达式，例如 \${{ $input.x }}",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Expression for expression mode",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": false,
+          "label": "Expression",
+          "mode": "pure",
+          "required": {
+            "$cond": {
+              "$state": "/parameters/mode",
+              "eq": "expression",
+            },
+            "else": false,
+            "then": true,
+          },
+          "value": {
+            "$bindState": "/parameters/expression",
+          },
+        },
+        "type": "ExpressionInput",
+        "visible": {
+          "$state": "/parameters/mode",
+          "eq": "expression",
+        },
+      },
+      "f.parameters.mode": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+        ],
+        "props": {
+          "description": "Routing mode: "rules" or "expression"",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Mode",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/mode",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.mode:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.mode:control": {
+        "props": {
+          "defaultHint": "rules",
+          "label": "Mode",
+          "options": [
+            {
+              "label": "Rules",
+              "value": "rules",
+            },
+            {
+              "label": "Expression",
+              "value": "expression",
+            },
+          ],
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/mode",
+          },
+        },
+        "type": "Select",
+      },
+      "f.parameters.outputs": {
+        "props": {
+          "description": "List of output port names (dynamic)",
+          "expect": {
+            "item": "string",
+            "type": "array",
+          },
+          "fxToggle": true,
+          "label": "Outputs",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/outputs",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.outputs:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.outputs:control": {
+        "props": {
+          "label": "Outputs",
+          "value": {
+            "$bindState": "/parameters/outputs",
+          },
+        },
+        "type": "Tags",
+      },
+      "f.parameters.rules": {
+        "props": {
+          "description": "Rule list for rules mode",
+          "expect": {
+            "item": "object",
+            "type": "array",
+          },
+          "fxToggle": true,
+          "label": "Rules",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/rules",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.rules:control",
+          ],
+        },
+        "type": "ExpressionInput",
+        "visible": {
+          "$state": "/parameters/mode",
+          "in": [
+            "rules",
+            null,
+          ],
+        },
+      },
+      "f.parameters.rules:control": {
+        "children": [
+          "f.parameters.rules[].condition",
+          "f.parameters.rules[].output",
+        ],
+        "props": {
+          "addText": "添加",
+          "label": "Rules",
+          "value": {
+            "$bindState": "/parameters/rules",
+          },
+        },
+        "repeat": {
+          "statePath": "/parameters/rules",
+        },
+        "type": "ArrayTable",
+      },
+      "f.parameters.rules[].condition": {
+        "checks": [
+          {
+            "args": {
+              "format": "expression",
+            },
+            "message": "需要表达式，例如 \${{ $input.x }}",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Boolean expression; a rule with an empty condition is skipped",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": false,
+          "label": "Condition",
+          "mode": "pure",
+          "value": {
+            "$bindItem": "condition",
+          },
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.rules[].output": {
+        "props": {
+          "description": "Output port taken when condition holds; a rule with an empty output is skipped",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Output",
+          "mode": "template",
+          "value": {
+            "$bindItem": "output",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.rules[].output:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.rules[].output:control": {
+        "props": {
+          "label": "Output",
+          "ports": [],
+          "value": {
+            "$bindItem": "output",
+          },
+        },
+        "type": "PortSelect",
+      },
+      "form": {
+        "children": [
+          "g.type.default",
+        ],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.default": {
+        "children": [
+          "f.parameters.mode",
+          "f.parameters.outputs",
+          "f.parameters.rules",
+          "f.parameters.expression",
+          "f.parameters.default_output",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "参数",
+        },
+        "type": "FieldGroup",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.transform.aggregate@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.items": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+          {
+            "args": {
+              "format": "expression",
+            },
+            "message": "需要表达式，例如 \${{ $input.x }}",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Expression that evaluates to the array to aggregate",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": false,
+          "label": "Items",
+          "mode": "pure",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/items",
+          },
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.operations": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+        ],
+        "props": {
+          "description": "Aggregate operations",
+          "expect": {
+            "item": "object",
+            "type": "array",
+          },
+          "fxToggle": true,
+          "label": "Operations",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/operations",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.operations:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.operations:control": {
+        "children": [
+          "f.parameters.operations[].kind",
+          "f.parameters.operations[].field",
+          "f.parameters.operations[].as",
+        ],
+        "props": {
+          "addText": "添加",
+          "label": "Operations",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/operations",
+          },
+        },
+        "repeat": {
+          "statePath": "/parameters/operations",
+        },
+        "type": "ArrayTable",
+      },
+      "f.parameters.operations[].as": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+        ],
+        "props": {
+          "description": "Output field name",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "As",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindItem": "as",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.operations[].as:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.operations[].as:control": {
+        "props": {
+          "label": "As",
+          "required": true,
+          "value": {
+            "$bindItem": "as",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.operations[].field": {
+        "props": {
+          "description": "Item field to sum or average",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Field",
+          "mode": "template",
+          "value": {
+            "$bindItem": "field",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.operations[].field:control",
+          ],
+        },
+        "type": "ExpressionInput",
+        "visible": {
+          "$item": "kind",
+          "in": [
+            "sum",
+            "avg",
+            "average",
+          ],
+        },
+      },
+      "f.parameters.operations[].field:control": {
+        "props": {
+          "label": "Field",
+          "value": {
+            "$bindItem": "field",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.operations[].kind": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+        ],
+        "props": {
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Kind",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindItem": "kind",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.operations[].kind:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.operations[].kind:control": {
+        "props": {
+          "label": "Kind",
+          "options": [
+            {
+              "label": "Count",
+              "value": "count",
+            },
+            {
+              "label": "Sum",
+              "value": "sum",
+            },
+            {
+              "label": "Average",
+              "value": "avg",
+            },
+            {
+              "label": "Average (alias of avg)",
+              "value": "average",
+            },
+          ],
+          "required": true,
+          "value": {
+            "$bindItem": "kind",
+          },
+        },
+        "type": "Select",
+      },
+      "form": {
+        "children": [
+          "g.type.default",
+        ],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.default": {
+        "children": [
+          "f.parameters.items",
+          "f.parameters.operations",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "参数",
+        },
+        "type": "FieldGroup",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.transform.filter@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.condition": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+          {
+            "args": {
+              "format": "expression",
+            },
+            "message": "需要表达式，例如 \${{ $input.x }}",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Boolean expression evaluated per item; item, index, and the item's own fields are in scope",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": false,
+          "label": "Condition",
+          "mode": "pure",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/condition",
+          },
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.items": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+          {
+            "args": {
+              "format": "expression",
+            },
+            "message": "需要表达式，例如 \${{ $input.x }}",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Expression that evaluates to the array to filter",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": false,
+          "label": "Items",
+          "mode": "pure",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/items",
+          },
+        },
+        "type": "ExpressionInput",
+      },
+      "form": {
+        "children": [
+          "g.type.default",
+        ],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.default": {
+        "children": [
+          "f.parameters.items",
+          "f.parameters.condition",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "参数",
+        },
+        "type": "FieldGroup",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.transform.limit@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.items": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+          {
+            "args": {
+              "format": "expression",
+            },
+            "message": "需要表达式，例如 \${{ $input.x }}",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Expression that evaluates to the array to limit",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": false,
+          "label": "Items",
+          "mode": "pure",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/items",
+          },
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.max": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+          {
+            "args": {
+              "args": {
+                "value": 0,
+              },
+              "check": "min",
+            },
+            "message": "不能小于 0",
+            "type": "literalOnly",
+          },
+          {
+            "args": {
+              "args": {
+                "value": 0,
+              },
+              "check": "min",
+            },
+            "message": "不能小于 0",
+            "severity": "warning",
+            "type": "expressionOnly",
+          },
+        ],
+        "props": {
+          "description": "Maximum number of items to keep",
+          "expect": {
+            "type": "number",
+          },
+          "fxToggle": true,
+          "label": "Max",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/max",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.max:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.max:control": {
+        "props": {
+          "label": "Max",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/max",
+          },
+        },
+        "type": "InputNumber",
+      },
+      "form": {
+        "children": [
+          "g.type.default",
+        ],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.default": {
+        "children": [
+          "f.parameters.items",
+          "f.parameters.max",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "参数",
+        },
+        "type": "FieldGroup",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.transform.pick@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.fields": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+        ],
+        "props": {
+          "description": "Field names to keep; all others are removed",
+          "expect": {
+            "item": "string",
+            "type": "array",
+          },
+          "fxToggle": true,
+          "label": "Fields",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/fields",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.fields:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.fields:control": {
+        "props": {
+          "label": "Fields",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/fields",
+          },
+        },
+        "type": "Tags",
+      },
+      "form": {
+        "children": [
+          "g.type.default",
+        ],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.default": {
+        "children": [
+          "f.parameters.fields",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "参数",
+        },
+        "type": "FieldGroup",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.transform.remove_duplicates@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.fields": {
+        "props": {
+          "description": "Fields used as the unique key; whole item when omitted",
+          "expect": {
+            "item": "string",
+            "type": "array",
+          },
+          "fxToggle": true,
+          "label": "Fields",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/fields",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.fields:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.fields:control": {
+        "props": {
+          "label": "Fields",
+          "value": {
+            "$bindState": "/parameters/fields",
+          },
+        },
+        "type": "Tags",
+      },
+      "f.parameters.items": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+          {
+            "args": {
+              "format": "expression",
+            },
+            "message": "需要表达式，例如 \${{ $input.x }}",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Expression that evaluates to the array to deduplicate",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": false,
+          "label": "Items",
+          "mode": "pure",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/items",
+          },
+        },
+        "type": "ExpressionInput",
+      },
+      "form": {
+        "children": [
+          "g.type.default",
+        ],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.default": {
+        "children": [
+          "f.parameters.items",
+          "f.parameters.fields",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "参数",
+        },
+        "type": "FieldGroup",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.transform.rename@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.mapping": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+          {
+            "message": "值看起来像凭据，请改用凭据引用",
+            "severity": "warning",
+            "type": "secretLike",
+          },
+        ],
+        "props": {
+          "description": "Old field name to new field name mapping",
+          "expect": {
+            "type": "object",
+            "values": "string",
+          },
+          "fxToggle": true,
+          "label": "Mapping",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/mapping",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.mapping:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.mapping:control": {
+        "props": {
+          "label": "Mapping",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/mapping",
+          },
+        },
+        "type": "KeyValue",
+      },
+      "form": {
+        "children": [
+          "g.type.default",
+        ],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.default": {
+        "children": [
+          "f.parameters.mapping",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "参数",
+        },
+        "type": "FieldGroup",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.transform.set@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.expressions": {
+        "children": [
+          "f.parameters.expressions:control",
+        ],
+        "props": {
+          "expect": {
+            "type": "object",
+            "values": "string",
+          },
+          "label": "Expressions",
+          "mode": "pure",
+          "observed": {
+            "$state": "/parameters/expressions",
+          },
+        },
+        "type": "ShapeGuard",
+      },
+      "f.parameters.expressions:control": {
+        "checks": [
+          {
+            "message": "值看起来像凭据，请改用凭据引用",
+            "severity": "warning",
+            "type": "secretLike",
+          },
+        ],
+        "props": {
+          "description": "Fields computed from expressions",
+          "label": "Expressions",
+          "value": {
+            "$bindState": "/parameters/expressions",
+          },
+          "valueProps": {
+            "mode": "pure",
+          },
+          "valueType": "ExpressionInput",
+        },
+        "type": "KeyValue",
+      },
+      "f.parameters.fields": {
+        "props": {
+          "description": "Literal fields to assign",
+          "expect": {
+            "type": "object",
+          },
+          "fxToggle": true,
+          "label": "Fields",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/fields",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.fields:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.fields:control": {
+        "props": {
+          "label": "Fields",
+          "value": {
+            "$bindState": "/parameters/fields",
+          },
+        },
+        "type": "JsonEditor",
+      },
+      "form": {
+        "children": [
+          "g.type.default",
+        ],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.default": {
+        "children": [
+          "f.parameters.fields",
+          "f.parameters.expressions",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "参数",
+        },
+        "type": "FieldGroup",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.transform.sort@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.fields": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+        ],
+        "props": {
+          "description": "Sort fields in priority order",
+          "expect": {
+            "item": "object",
+            "type": "array",
+          },
+          "fxToggle": true,
+          "label": "Fields",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/fields",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.fields:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.fields:control": {
+        "children": [
+          "f.parameters.fields[].field",
+          "f.parameters.fields[].desc",
+        ],
+        "props": {
+          "addText": "添加",
+          "label": "Fields",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/fields",
+          },
+        },
+        "repeat": {
+          "statePath": "/parameters/fields",
+        },
+        "type": "ArrayTable",
+      },
+      "f.parameters.fields[].desc": {
+        "props": {
+          "description": "Sort in descending order",
+          "expect": {
+            "type": "boolean",
+          },
+          "fxToggle": true,
+          "label": "Descending",
+          "mode": "template",
+          "value": {
+            "$bindItem": "desc",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.fields[].desc:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.fields[].desc:control": {
+        "props": {
+          "label": "Descending",
+          "value": {
+            "$bindItem": "desc",
+          },
+        },
+        "type": "Switch",
+      },
+      "f.parameters.fields[].field": {
+        "props": {
+          "description": "Item field to compare",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Field",
+          "mode": "template",
+          "value": {
+            "$bindItem": "field",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.fields[].field:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.fields[].field:control": {
+        "props": {
+          "label": "Field",
+          "value": {
+            "$bindItem": "field",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.items": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+          {
+            "args": {
+              "format": "expression",
+            },
+            "message": "需要表达式，例如 \${{ $input.x }}",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Expression that evaluates to the array to sort",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": false,
+          "label": "Items",
+          "mode": "pure",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/items",
+          },
+        },
+        "type": "ExpressionInput",
+      },
+      "form": {
+        "children": [
+          "g.type.default",
+        ],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.default": {
+        "children": [
+          "f.parameters.items",
+          "f.parameters.fields",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "参数",
+        },
+        "type": "FieldGroup",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.trigger.cron@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.expression": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+          {
+            "args": {
+              "allowExpression": true,
+              "format": "cron",
+            },
+            "message": "需要合法的 cron 表达式",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Cron schedule, five fields (e.g. "*/5 * * * *") or a descriptor such as "@every 1m"",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Expression",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/expression",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.expression:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.expression:control": {
+        "props": {
+          "label": "Expression",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/expression",
+          },
+        },
+        "type": "CronInput",
+      },
+      "f.parameters.timezone": {
+        "props": {
+          "description": "IANA time zone name the schedule is evaluated in",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Timezone",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/timezone",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.timezone:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.timezone:control": {
+        "props": {
+          "defaultHint": "UTC",
+          "label": "Timezone",
+          "value": {
+            "$bindState": "/parameters/timezone",
+          },
+        },
+        "type": "Input",
+      },
+      "form": {
+        "children": [
+          "g.type.default",
+        ],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.default": {
+        "children": [
+          "f.parameters.expression",
+          "f.parameters.timezone",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "参数",
+        },
+        "type": "FieldGroup",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.trigger.kafka@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.aggregate": {
+        "props": {
+          "description": "Optional partition batch aggregation: enabled, by, max_size, flush_interval, dedup, on_overflow, dead_letter_topic. Under entry-seed hosting the batch is admitted to the control plane instead of emitted locally, with an admission key covering the batch's actual offset range; delivery is at-least-once (a batch may be reprocessed once if its offsets fail to commit), so consumers must be idempotent on (topic, partition, offset). flush_interval defaults to 1s in entry-seed mode and 100ms on the legacy emit path. on_overflow decides what happens when a partition reaches its retained bound: "discard" (the default) drops the arriving record and a later commit sweeps past its offset, so it is never redelivered — the loss is counted in xflow_trigger_messages_discarded_total{reason="buffer_overflow"} and logged; "block" loses nothing but halts fetching for the WHOLE assignment until that partition drains, and neither lag gauge can report it, so watch xflow_trigger_consumption_blocked instead; "dead_letter" republishes the record to dead_letter_topic (required with this value) before letting its offset advance, so nothing is lost and nothing stalls while the overflow topic is healthy — a failed republish is retried as backpressure (the partition stops consuming) rather than dropping, counted in xflow_trigger_messages_dead_lettered_total. Set on_overflow explicitly on any topic that cannot afford the default loss.",
+          "expect": {
+            "type": "object",
+          },
+          "fxToggle": true,
+          "label": "Aggregate",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/aggregate",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.aggregate:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.aggregate.by": {
+        "props": {
+          "description": "Batch key; only "partition" is supported (the default)",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "By",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/aggregate/by",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.aggregate.by:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.aggregate.by:control": {
+        "props": {
+          "defaultHint": "partition",
+          "label": "By",
+          "options": [
+            {
+              "label": "partition",
+              "value": "partition",
+            },
+          ],
+          "value": {
+            "$bindState": "/parameters/aggregate/by",
+          },
+        },
+        "type": "Select",
+      },
+      "f.parameters.aggregate.dead_letter_topic": {
+        "checks": [
+          {
+            "message": "当前配置下必填",
+            "type": "required",
+            "when": {
+              "$state": "/parameters/aggregate/on_overflow",
+              "eq": "dead_letter",
+            },
+          },
+        ],
+        "props": {
+          "description": "Overflow topic; read only when on_overflow is dead_letter",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Dead Letter Topic",
+          "mode": "template",
+          "required": {
+            "$cond": {
+              "$state": "/parameters/aggregate/on_overflow",
+              "eq": "dead_letter",
+            },
+            "else": false,
+            "then": true,
+          },
+          "value": {
+            "$bindState": "/parameters/aggregate/dead_letter_topic",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.aggregate.dead_letter_topic:control",
+          ],
+        },
+        "type": "ExpressionInput",
+        "visible": {
+          "$state": "/parameters/aggregate/on_overflow",
+          "eq": "dead_letter",
+        },
+      },
+      "f.parameters.aggregate.dead_letter_topic:control": {
+        "props": {
+          "label": "Dead Letter Topic",
+          "required": {
+            "$cond": {
+              "$state": "/parameters/aggregate/on_overflow",
+              "eq": "dead_letter",
+            },
+            "else": false,
+            "then": true,
+          },
+          "value": {
+            "$bindState": "/parameters/aggregate/dead_letter_topic",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.aggregate.dedup": {
+        "props": {
+          "description": "Deduplication unit; only "message" is supported (the default)",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Dedup",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/aggregate/dedup",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.aggregate.dedup:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.aggregate.dedup:control": {
+        "props": {
+          "defaultHint": "message",
+          "label": "Dedup",
+          "options": [
+            {
+              "label": "message",
+              "value": "message",
+            },
+          ],
+          "value": {
+            "$bindState": "/parameters/aggregate/dedup",
+          },
+        },
+        "type": "Select",
+      },
+      "f.parameters.aggregate.enabled": {
+        "props": {
+          "description": "Aggregation is off unless this is true; every other field is ignored while it is off",
+          "expect": {
+            "type": "boolean",
+          },
+          "fxToggle": true,
+          "label": "Enabled",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/aggregate/enabled",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.aggregate.enabled:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.aggregate.enabled:control": {
+        "props": {
+          "label": "Enabled",
+          "value": {
+            "$bindState": "/parameters/aggregate/enabled",
+          },
+        },
+        "type": "Switch",
+      },
+      "f.parameters.aggregate.flush_interval": {
+        "checks": [
+          {
+            "args": {
+              "allowExpression": true,
+              "format": "duration",
+            },
+            "message": "需要 Go duration，例如 30s、5m",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Positive duration; defaults to 1s in entry-seed mode and 100ms otherwise",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Flush Interval",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/aggregate/flush_interval",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.aggregate.flush_interval:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.aggregate.flush_interval:control": {
+        "props": {
+          "label": "Flush Interval",
+          "unit": "string",
+          "value": {
+            "$bindState": "/parameters/aggregate/flush_interval",
+          },
+        },
+        "type": "DurationInput",
+      },
+      "f.parameters.aggregate.max_size": {
+        "props": {
+          "description": "Records per batch; unset or non-positive means 100",
+          "expect": {
+            "type": "number",
+          },
+          "fxToggle": true,
+          "label": "Max Size",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/aggregate/max_size",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.aggregate.max_size:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.aggregate.max_size:control": {
+        "props": {
+          "defaultHint": 100,
+          "label": "Max Size",
+          "value": {
+            "$bindState": "/parameters/aggregate/max_size",
+          },
+        },
+        "type": "InputNumber",
+      },
+      "f.parameters.aggregate.on_overflow": {
+        "props": {
+          "description": "Policy when a partition reaches its retained bound; unset means discard",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "On Overflow",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/aggregate/on_overflow",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.aggregate.on_overflow:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.aggregate.on_overflow:control": {
+        "props": {
+          "defaultHint": "discard",
+          "label": "On Overflow",
+          "options": [
+            {
+              "label": "Discard",
+              "value": "discard",
+            },
+            {
+              "label": "Block",
+              "value": "block",
+            },
+            {
+              "label": "Dead Letter",
+              "value": "dead_letter",
+            },
+          ],
+          "value": {
+            "$bindState": "/parameters/aggregate/on_overflow",
+          },
+        },
+        "type": "Select",
+      },
+      "f.parameters.aggregate:control": {
+        "children": [
+          "f.parameters.aggregate.enabled",
+          "f.parameters.aggregate.by",
+          "f.parameters.aggregate.max_size",
+          "f.parameters.aggregate.flush_interval",
+          "f.parameters.aggregate.dedup",
+          "f.parameters.aggregate.on_overflow",
+          "f.parameters.aggregate.dead_letter_topic",
+        ],
+        "props": {
+          "value": {
+            "$bindState": "/parameters/aggregate",
+          },
+        },
+        "type": "ObjectGroup",
+      },
+      "f.parameters.brokers": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+        ],
+        "props": {
+          "expect": {
+            "item": "string",
+            "type": "array",
+          },
+          "fxToggle": true,
+          "label": "Brokers",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/brokers",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.brokers:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.brokers:control": {
+        "props": {
+          "label": "Brokers",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/brokers",
+          },
+        },
+        "type": "Tags",
+      },
+      "f.parameters.group": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+        ],
+        "props": {
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Group",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/group",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.group:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.group:control": {
+        "props": {
+          "label": "Group",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/group",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.max_inflight": {
+        "props": {
+          "expect": {
+            "type": "number",
+          },
+          "fxToggle": true,
+          "label": "Max Inflight",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/max_inflight",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.max_inflight:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.max_inflight:control": {
+        "props": {
+          "defaultHint": 64,
+          "label": "Max Inflight",
+          "value": {
+            "$bindState": "/parameters/max_inflight",
+          },
+        },
+        "type": "InputNumber",
+      },
+      "f.parameters.message_schema": {
+        "props": {
+          "description": "Optional message validation: {required_fields: ["f"], on_invalid: "discard|fail|dead_letter", dead_letter_topic: "t-dlq"}. on_invalid defaults to discard (offset committed, message dropped, drop counted and logged).",
+          "expect": {
+            "type": "object",
+          },
+          "fxToggle": true,
+          "label": "Message Schema",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/message_schema",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.message_schema:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.message_schema.dead_letter_topic": {
+        "checks": [
+          {
+            "message": "当前配置下必填",
+            "type": "required",
+            "when": {
+              "$state": "/parameters/message_schema/on_invalid",
+              "eq": "dead_letter",
+            },
+          },
+        ],
+        "props": {
+          "description": "Read only when on_invalid is dead_letter",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Dead Letter Topic",
+          "mode": "template",
+          "required": {
+            "$cond": {
+              "$state": "/parameters/message_schema/on_invalid",
+              "eq": "dead_letter",
+            },
+            "else": false,
+            "then": true,
+          },
+          "value": {
+            "$bindState": "/parameters/message_schema/dead_letter_topic",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.message_schema.dead_letter_topic:control",
+          ],
+        },
+        "type": "ExpressionInput",
+        "visible": {
+          "$state": "/parameters/message_schema/on_invalid",
+          "eq": "dead_letter",
+        },
+      },
+      "f.parameters.message_schema.dead_letter_topic:control": {
+        "props": {
+          "label": "Dead Letter Topic",
+          "required": {
+            "$cond": {
+              "$state": "/parameters/message_schema/on_invalid",
+              "eq": "dead_letter",
+            },
+            "else": false,
+            "then": true,
+          },
+          "value": {
+            "$bindState": "/parameters/message_schema/dead_letter_topic",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.message_schema.on_invalid": {
+        "props": {
+          "description": "Policy for an invalid message; unset means discard",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "On Invalid",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/message_schema/on_invalid",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.message_schema.on_invalid:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.message_schema.on_invalid:control": {
+        "props": {
+          "defaultHint": "discard",
+          "label": "On Invalid",
+          "options": [
+            {
+              "label": "Discard",
+              "value": "discard",
+            },
+            {
+              "label": "Fail",
+              "value": "fail",
+            },
+            {
+              "label": "Dead Letter",
+              "value": "dead_letter",
+            },
+          ],
+          "value": {
+            "$bindState": "/parameters/message_schema/on_invalid",
+          },
+        },
+        "type": "Select",
+      },
+      "f.parameters.message_schema.required_fields": {
+        "props": {
+          "description": "Top-level keys every message value must carry; an empty list disables validation",
+          "expect": {
+            "item": "string",
+            "type": "array",
+          },
+          "fxToggle": true,
+          "label": "Required Fields",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/message_schema/required_fields",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.message_schema.required_fields:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.message_schema.required_fields:control": {
+        "props": {
+          "label": "Required Fields",
+          "value": {
+            "$bindState": "/parameters/message_schema/required_fields",
+          },
+        },
+        "type": "Tags",
+      },
+      "f.parameters.message_schema:control": {
+        "children": [
+          "f.parameters.message_schema.required_fields",
+          "f.parameters.message_schema.on_invalid",
+          "f.parameters.message_schema.dead_letter_topic",
+        ],
+        "props": {
+          "value": {
+            "$bindState": "/parameters/message_schema",
+          },
+        },
+        "type": "ObjectGroup",
+      },
+      "f.parameters.start_offset": {
+        "props": {
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Start Offset",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/start_offset",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.start_offset:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.start_offset:control": {
+        "props": {
+          "defaultHint": "latest",
+          "label": "Start Offset",
+          "options": [
+            {
+              "label": "Latest",
+              "value": "latest",
+            },
+            {
+              "label": "Earliest",
+              "value": "earliest",
+            },
+            {
+              "label": "Last",
+              "value": "last",
+            },
+            {
+              "label": "Newest",
+              "value": "newest",
+            },
+            {
+              "label": "First",
+              "value": "first",
+            },
+            {
+              "label": "Oldest",
+              "value": "oldest",
+            },
+            {
+              "label": "Beginning",
+              "value": "beginning",
+            },
+          ],
+          "value": {
+            "$bindState": "/parameters/start_offset",
+          },
+        },
+        "type": "Select",
+      },
+      "f.parameters.topic": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+        ],
+        "props": {
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Topic",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/topic",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.topic:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.topic:control": {
+        "props": {
+          "label": "Topic",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/topic",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.tuning": {
+        "props": {
+          "description": "Optional consumer tuning: fetch_min_bytes (1), fetch_max_bytes (10000000), max_wait (10s), dial_timeout (10s), session_timeout (30s), heartbeat_interval (3s), rebalance_timeout (30s). Durations are strings ("45s"). heartbeat_interval must stay below session_timeout or the group rebalances continuously. Offsets always commit synchronously after the side effect; that is not tunable.",
+          "expect": {
+            "type": "object",
+          },
+          "fxToggle": true,
+          "label": "Tuning",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/tuning",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.tuning:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.tuning.dial_timeout": {
+        "checks": [
+          {
+            "args": {
+              "allowExpression": true,
+              "format": "duration",
+            },
+            "message": "需要 Go duration，例如 30s、5m",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Default 10s",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Dial Timeout",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/tuning/dial_timeout",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.tuning.dial_timeout:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.tuning.dial_timeout:control": {
+        "props": {
+          "defaultHint": "10s",
+          "label": "Dial Timeout",
+          "unit": "string",
+          "value": {
+            "$bindState": "/parameters/tuning/dial_timeout",
+          },
+        },
+        "type": "DurationInput",
+      },
+      "f.parameters.tuning.fetch_max_bytes": {
+        "checks": [
+          {
+            "args": {
+              "args": {
+                "value": 1,
+              },
+              "check": "min",
+            },
+            "message": "不能小于 1",
+            "type": "literalOnly",
+          },
+          {
+            "args": {
+              "args": {
+                "value": 1,
+              },
+              "check": "min",
+            },
+            "message": "不能小于 1",
+            "severity": "warning",
+            "type": "expressionOnly",
+          },
+        ],
+        "props": {
+          "description": "Default 10000000",
+          "expect": {
+            "type": "number",
+          },
+          "fxToggle": true,
+          "label": "Fetch Max Bytes",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/tuning/fetch_max_bytes",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.tuning.fetch_max_bytes:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.tuning.fetch_max_bytes:control": {
+        "props": {
+          "defaultHint": 10000000,
+          "label": "Fetch Max Bytes",
+          "value": {
+            "$bindState": "/parameters/tuning/fetch_max_bytes",
+          },
+        },
+        "type": "InputNumber",
+      },
+      "f.parameters.tuning.fetch_min_bytes": {
+        "checks": [
+          {
+            "args": {
+              "args": {
+                "value": 1,
+              },
+              "check": "min",
+            },
+            "message": "不能小于 1",
+            "type": "literalOnly",
+          },
+          {
+            "args": {
+              "args": {
+                "value": 1,
+              },
+              "check": "min",
+            },
+            "message": "不能小于 1",
+            "severity": "warning",
+            "type": "expressionOnly",
+          },
+        ],
+        "props": {
+          "description": "Default 1; must not exceed fetch_max_bytes",
+          "expect": {
+            "type": "number",
+          },
+          "fxToggle": true,
+          "label": "Fetch Min Bytes",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/tuning/fetch_min_bytes",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.tuning.fetch_min_bytes:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.tuning.fetch_min_bytes:control": {
+        "props": {
+          "defaultHint": 1,
+          "label": "Fetch Min Bytes",
+          "value": {
+            "$bindState": "/parameters/tuning/fetch_min_bytes",
+          },
+        },
+        "type": "InputNumber",
+      },
+      "f.parameters.tuning.heartbeat_interval": {
+        "checks": [
+          {
+            "args": {
+              "allowExpression": true,
+              "format": "duration",
+            },
+            "message": "需要 Go duration，例如 30s、5m",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Default 3s; must stay below session_timeout",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Heartbeat Interval",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/tuning/heartbeat_interval",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.tuning.heartbeat_interval:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.tuning.heartbeat_interval:control": {
+        "props": {
+          "defaultHint": "3s",
+          "label": "Heartbeat Interval",
+          "unit": "string",
+          "value": {
+            "$bindState": "/parameters/tuning/heartbeat_interval",
+          },
+        },
+        "type": "DurationInput",
+      },
+      "f.parameters.tuning.max_wait": {
+        "checks": [
+          {
+            "args": {
+              "allowExpression": true,
+              "format": "duration",
+            },
+            "message": "需要 Go duration，例如 30s、5m",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Default 10s",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Max Wait",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/tuning/max_wait",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.tuning.max_wait:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.tuning.max_wait:control": {
+        "props": {
+          "defaultHint": "10s",
+          "label": "Max Wait",
+          "unit": "string",
+          "value": {
+            "$bindState": "/parameters/tuning/max_wait",
+          },
+        },
+        "type": "DurationInput",
+      },
+      "f.parameters.tuning.rebalance_timeout": {
+        "checks": [
+          {
+            "args": {
+              "allowExpression": true,
+              "format": "duration",
+            },
+            "message": "需要 Go duration，例如 30s、5m",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Default 30s",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Rebalance Timeout",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/tuning/rebalance_timeout",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.tuning.rebalance_timeout:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.tuning.rebalance_timeout:control": {
+        "props": {
+          "defaultHint": "30s",
+          "label": "Rebalance Timeout",
+          "unit": "string",
+          "value": {
+            "$bindState": "/parameters/tuning/rebalance_timeout",
+          },
+        },
+        "type": "DurationInput",
+      },
+      "f.parameters.tuning.session_timeout": {
+        "checks": [
+          {
+            "args": {
+              "allowExpression": true,
+              "format": "duration",
+            },
+            "message": "需要 Go duration，例如 30s、5m",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Default 30s",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Session Timeout",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/tuning/session_timeout",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.tuning.session_timeout:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.tuning.session_timeout:control": {
+        "props": {
+          "defaultHint": "30s",
+          "label": "Session Timeout",
+          "unit": "string",
+          "value": {
+            "$bindState": "/parameters/tuning/session_timeout",
+          },
+        },
+        "type": "DurationInput",
+      },
+      "f.parameters.tuning:control": {
+        "children": [
+          "f.parameters.tuning.fetch_min_bytes",
+          "f.parameters.tuning.fetch_max_bytes",
+          "f.parameters.tuning.max_wait",
+          "f.parameters.tuning.dial_timeout",
+          "f.parameters.tuning.session_timeout",
+          "f.parameters.tuning.heartbeat_interval",
+          "f.parameters.tuning.rebalance_timeout",
+        ],
+        "props": {
+          "value": {
+            "$bindState": "/parameters/tuning",
+          },
+        },
+        "type": "ObjectGroup",
+      },
+      "form": {
+        "children": [
+          "g.type.connection",
+          "g.type.processing",
+          "g.type.advanced",
+        ],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.advanced": {
+        "children": [
+          "f.parameters.tuning",
+        ],
+        "props": {
+          "collapsible": true,
+          "defaultCollapsed": true,
+          "title": "Advanced",
+        },
+        "type": "FieldGroup",
+      },
+      "g.type.connection": {
+        "children": [
+          "f.parameters.brokers",
+          "f.parameters.topic",
+          "f.parameters.group",
+          "f.parameters.start_offset",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "Connection",
+        },
+        "type": "FieldGroup",
+      },
+      "g.type.processing": {
+        "children": [
+          "f.parameters.max_inflight",
+          "f.parameters.aggregate",
+          "f.parameters.message_schema",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "Processing",
+        },
+        "type": "FieldGroup",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.trigger.redis@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.addr": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+          {
+            "args": {
+              "allowExpression": true,
+              "format": "host-port",
+            },
+            "message": "需要 host:port",
+            "severity": "warning",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Redis server address, host:port. Credentials are not params: attach a supply with username/password to the node.",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Address",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/addr",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.addr:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.addr:control": {
+        "props": {
+          "label": "Address",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/addr",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.channel": {
+        "checks": [
+          {
+            "message": "当前配置下必填",
+            "type": "required",
+            "when": {
+              "$state": "/parameters/mode",
+              "eq": "pubsub",
+            },
+          },
+        ],
+        "props": {
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Channel",
+          "mode": "template",
+          "required": {
+            "$cond": {
+              "$state": "/parameters/mode",
+              "eq": "pubsub",
+            },
+            "else": false,
+            "then": true,
+          },
+          "value": {
+            "$bindState": "/parameters/channel",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.channel:control",
+          ],
+        },
+        "type": "ExpressionInput",
+        "visible": {
+          "$state": "/parameters/mode",
+          "eq": "pubsub",
+        },
+      },
+      "f.parameters.channel:control": {
+        "props": {
+          "label": "Channel",
+          "required": {
+            "$cond": {
+              "$state": "/parameters/mode",
+              "eq": "pubsub",
+            },
+            "else": false,
+            "then": true,
+          },
+          "value": {
+            "$bindState": "/parameters/channel",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.group": {
+        "checks": [
+          {
+            "message": "当前配置下必填",
+            "type": "required",
+            "when": {
+              "$state": "/parameters/mode",
+              "in": [
+                "stream",
+                null,
+              ],
+            },
+          },
+        ],
+        "props": {
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Group",
+          "mode": "template",
+          "required": {
+            "$cond": {
+              "$state": "/parameters/mode",
+              "in": [
+                "stream",
+                null,
+              ],
+            },
+            "else": false,
+            "then": true,
+          },
+          "value": {
+            "$bindState": "/parameters/group",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.group:control",
+          ],
+        },
+        "type": "ExpressionInput",
+        "visible": {
+          "$state": "/parameters/mode",
+          "in": [
+            "stream",
+            null,
+          ],
+        },
+      },
+      "f.parameters.group:control": {
+        "props": {
+          "label": "Group",
+          "required": {
+            "$cond": {
+              "$state": "/parameters/mode",
+              "in": [
+                "stream",
+                null,
+              ],
+            },
+            "else": false,
+            "then": true,
+          },
+          "value": {
+            "$bindState": "/parameters/group",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.max_inflight": {
+        "props": {
+          "expect": {
+            "type": "number",
+          },
+          "fxToggle": true,
+          "label": "Max Inflight",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/max_inflight",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.max_inflight:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.max_inflight:control": {
+        "props": {
+          "defaultHint": 64,
+          "label": "Max Inflight",
+          "value": {
+            "$bindState": "/parameters/max_inflight",
+          },
+        },
+        "type": "InputNumber",
+      },
+      "f.parameters.mode": {
+        "props": {
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Mode",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/mode",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.mode:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.mode:control": {
+        "props": {
+          "defaultHint": "stream",
+          "label": "Mode",
+          "options": [
+            {
+              "label": "Stream",
+              "value": "stream",
+            },
+            {
+              "label": "Pub/Sub",
+              "value": "pubsub",
+            },
+          ],
+          "value": {
+            "$bindState": "/parameters/mode",
+          },
+        },
+        "type": "Select",
+      },
+      "f.parameters.stream": {
+        "checks": [
+          {
+            "message": "当前配置下必填",
+            "type": "required",
+            "when": {
+              "$state": "/parameters/mode",
+              "in": [
+                "stream",
+                null,
+              ],
+            },
+          },
+        ],
+        "props": {
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Stream",
+          "mode": "template",
+          "required": {
+            "$cond": {
+              "$state": "/parameters/mode",
+              "in": [
+                "stream",
+                null,
+              ],
+            },
+            "else": false,
+            "then": true,
+          },
+          "value": {
+            "$bindState": "/parameters/stream",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.stream:control",
+          ],
+        },
+        "type": "ExpressionInput",
+        "visible": {
+          "$state": "/parameters/mode",
+          "in": [
+            "stream",
+            null,
+          ],
+        },
+      },
+      "f.parameters.stream:control": {
+        "props": {
+          "label": "Stream",
+          "required": {
+            "$cond": {
+              "$state": "/parameters/mode",
+              "in": [
+                "stream",
+                null,
+              ],
+            },
+            "else": false,
+            "then": true,
+          },
+          "value": {
+            "$bindState": "/parameters/stream",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.tuning": {
+        "props": {
+          "description": "Stream-mode knobs: db (0), consumer (defaults to the node name), start_id ("$", i.e. only entries added after the group is created), payload_field (unset means the whole entry is JSON-encoded into the event payload), claim_min_idle ("1m"), dial_timeout ("10s"). Durations are strings. claim_min_idle is how long an unacknowledged entry must sit before another consumer takes it over, so it must exceed the slowest workflow this stream drives or entries will be delivered twice.",
+          "expect": {
+            "type": "object",
+          },
+          "fxToggle": true,
+          "label": "Tuning",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/tuning",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.tuning:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.tuning.claim_min_idle": {
+        "checks": [
+          {
+            "args": {
+              "allowExpression": true,
+              "format": "duration",
+            },
+            "message": "需要 Go duration，例如 30s、5m",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Positive duration (stream mode); default 1m",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Claim Min Idle",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/tuning/claim_min_idle",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.tuning.claim_min_idle:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.tuning.claim_min_idle:control": {
+        "props": {
+          "defaultHint": "1m",
+          "label": "Claim Min Idle",
+          "unit": "string",
+          "value": {
+            "$bindState": "/parameters/tuning/claim_min_idle",
+          },
+        },
+        "type": "DurationInput",
+      },
+      "f.parameters.tuning.consumer": {
+        "props": {
+          "description": "Consumer name inside the group (stream mode); defaults to the node name",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Consumer",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/tuning/consumer",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.tuning.consumer:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.tuning.consumer:control": {
+        "props": {
+          "label": "Consumer",
+          "value": {
+            "$bindState": "/parameters/tuning/consumer",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.tuning.db": {
+        "props": {
+          "description": "Database index; default 0",
+          "expect": {
+            "type": "number",
+          },
+          "fxToggle": true,
+          "label": "DB",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/tuning/db",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.tuning.db:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.tuning.db:control": {
+        "props": {
+          "defaultHint": 0,
+          "label": "DB",
+          "value": {
+            "$bindState": "/parameters/tuning/db",
+          },
+        },
+        "type": "InputNumber",
+      },
+      "f.parameters.tuning.dial_timeout": {
+        "checks": [
+          {
+            "args": {
+              "allowExpression": true,
+              "format": "duration",
+            },
+            "message": "需要 Go duration，例如 30s、5m",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Positive duration; default 10s",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Dial Timeout",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/tuning/dial_timeout",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.tuning.dial_timeout:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.tuning.dial_timeout:control": {
+        "props": {
+          "defaultHint": "10s",
+          "label": "Dial Timeout",
+          "unit": "string",
+          "value": {
+            "$bindState": "/parameters/tuning/dial_timeout",
+          },
+        },
+        "type": "DurationInput",
+      },
+      "f.parameters.tuning.payload_field": {
+        "props": {
+          "description": "Entry field used as the payload (stream mode); unset JSON-encodes the whole entry",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Payload Field",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/tuning/payload_field",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.tuning.payload_field:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.tuning.payload_field:control": {
+        "props": {
+          "label": "Payload Field",
+          "value": {
+            "$bindState": "/parameters/tuning/payload_field",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.tuning.start_id": {
+        "props": {
+          "description": "Group start ID (stream mode); default "$"",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Start ID",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/tuning/start_id",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.tuning.start_id:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.tuning.start_id:control": {
+        "props": {
+          "defaultHint": "$",
+          "label": "Start ID",
+          "value": {
+            "$bindState": "/parameters/tuning/start_id",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.tuning:control": {
+        "children": [
+          "f.parameters.tuning.db",
+          "f.parameters.tuning.consumer",
+          "f.parameters.tuning.start_id",
+          "f.parameters.tuning.payload_field",
+          "f.parameters.tuning.claim_min_idle",
+          "f.parameters.tuning.dial_timeout",
+        ],
+        "props": {
+          "value": {
+            "$bindState": "/parameters/tuning",
+          },
+        },
+        "type": "ObjectGroup",
+      },
+      "form": {
+        "children": [
+          "g.type.connection",
+          "g.type.advanced",
+        ],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.advanced": {
+        "children": [
+          "f.parameters.max_inflight",
+          "f.parameters.tuning",
+        ],
+        "props": {
+          "collapsible": true,
+          "defaultCollapsed": true,
+          "title": "Advanced",
+        },
+        "type": "FieldGroup",
+      },
+      "g.type.connection": {
+        "children": [
+          "f.parameters.addr",
+          "f.parameters.mode",
+          "f.parameters.stream",
+          "f.parameters.group",
+          "f.parameters.channel",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "Connection",
+        },
+        "type": "FieldGroup",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.trigger.timer@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.interval": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+          {
+            "args": {
+              "allowExpression": true,
+              "format": "duration",
+            },
+            "message": "需要 Go duration，例如 30s、5m",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Positive tick interval (e.g. "1m")",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Interval",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/interval",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.interval:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.interval:control": {
+        "props": {
+          "label": "Interval",
+          "required": true,
+          "unit": "string",
+          "value": {
+            "$bindState": "/parameters/interval",
+          },
+        },
+        "type": "DurationInput",
+      },
+      "form": {
+        "children": [
+          "g.type.default",
+        ],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.default": {
+        "children": [
+          "f.parameters.interval",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "参数",
+        },
+        "type": "FieldGroup",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.trigger.webhook@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.event_id_header": {
+        "props": {
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Event ID Header",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/event_id_header",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.event_id_header:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.event_id_header:control": {
+        "props": {
+          "label": "Event ID Header",
+          "value": {
+            "$bindState": "/parameters/event_id_header",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.max_body_bytes": {
+        "props": {
+          "expect": {
+            "type": "number",
+          },
+          "fxToggle": true,
+          "label": "Max Body Bytes",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/max_body_bytes",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.max_body_bytes:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.max_body_bytes:control": {
+        "props": {
+          "defaultHint": 1048576,
+          "label": "Max Body Bytes",
+          "value": {
+            "$bindState": "/parameters/max_body_bytes",
+          },
+        },
+        "type": "InputNumber",
+      },
+      "f.parameters.method": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+        ],
+        "props": {
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Method",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/method",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.method:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.method:control": {
+        "props": {
+          "label": "Method",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/method",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.path": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+        ],
+        "props": {
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Path",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/path",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.path:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.path:control": {
+        "props": {
+          "label": "Path",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/path",
+          },
+        },
+        "type": "Input",
+      },
+      "form": {
+        "children": [
+          "g.type.default",
+        ],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.default": {
+        "children": [
+          "f.parameters.method",
+          "f.parameters.path",
+          "f.parameters.event_id_header",
+          "f.parameters.max_body_bytes",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "参数",
+        },
+        "type": "FieldGroup",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.wait@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.duration": {
+        "checks": [
+          {
+            "message": "当前配置下必填",
+            "type": "required",
+            "when": {
+              "$and": [
+                {
+                  "$state": "/parameters/mode",
+                  "eq": "timer",
+                },
+                {
+                  "$state": "/parameters/until",
+                  "truthy": false,
+                },
+              ],
+            },
+          },
+          {
+            "args": {
+              "allowExpression": true,
+              "format": "duration",
+            },
+            "message": "需要 Go duration，例如 30s、5m",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Fixed wait duration (timer mode, e.g. "5m")",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Duration",
+          "mode": "template",
+          "required": {
+            "$cond": {
+              "$and": [
+                {
+                  "$state": "/parameters/mode",
+                  "eq": "timer",
+                },
+                {
+                  "$state": "/parameters/until",
+                  "truthy": false,
+                },
+              ],
+            },
+            "else": false,
+            "then": true,
+          },
+          "value": {
+            "$bindState": "/parameters/duration",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.duration:control",
+          ],
+        },
+        "type": "ExpressionInput",
+        "visible": {
+          "$state": "/parameters/mode",
+          "eq": "timer",
+        },
+      },
+      "f.parameters.duration:control": {
+        "props": {
+          "label": "Duration",
+          "required": {
+            "$cond": {
+              "$and": [
+                {
+                  "$state": "/parameters/mode",
+                  "eq": "timer",
+                },
+                {
+                  "$state": "/parameters/until",
+                  "truthy": false,
+                },
+              ],
+            },
+            "else": false,
+            "then": true,
+          },
+          "unit": "string",
+          "value": {
+            "$bindState": "/parameters/duration",
+          },
+        },
+        "type": "DurationInput",
+      },
+      "f.parameters.mode": {
+        "props": {
+          "description": "Trigger mode: "signal" (default) or "timer"",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Mode",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/mode",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.mode:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.mode:control": {
+        "props": {
+          "defaultHint": "signal",
+          "label": "Mode",
+          "options": [
+            {
+              "label": "Signal",
+              "value": "signal",
+            },
+            {
+              "label": "Timer",
+              "value": "timer",
+            },
+          ],
+          "value": {
+            "$bindState": "/parameters/mode",
+          },
+        },
+        "type": "Select",
+      },
+      "f.parameters.quorum": {
+        "props": {
+          "description": "Number of signals required to proceed; 0 or unset means all (multi-signal mode)",
+          "expect": {
+            "type": "number",
+          },
+          "fxToggle": true,
+          "label": "Quorum",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/quorum",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.quorum:control",
+          ],
+        },
+        "type": "ExpressionInput",
+        "visible": {
+          "$and": [
+            {
+              "$state": "/parameters/mode",
+              "in": [
+                "signal",
+                null,
+              ],
+            },
+            {
+              "$state": "/parameters/signals",
+              "truthy": true,
+            },
+          ],
+        },
+      },
+      "f.parameters.quorum:control": {
+        "props": {
+          "label": "Quorum",
+          "value": {
+            "$bindState": "/parameters/quorum",
+          },
+        },
+        "type": "InputNumber",
+      },
+      "f.parameters.signal_name": {
+        "props": {
+          "description": "Name of the external signal to wait for (signal mode)",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Signal Name",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/signal_name",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.signal_name:control",
+          ],
+        },
+        "type": "ExpressionInput",
+        "visible": {
+          "$state": "/parameters/mode",
+          "in": [
+            "signal",
+            null,
+          ],
+        },
+      },
+      "f.parameters.signal_name:control": {
+        "props": {
+          "label": "Signal Name",
+          "value": {
+            "$bindState": "/parameters/signal_name",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.signals": {
+        "props": {
+          "description": "List of signal names to wait for (multi-signal mode)",
+          "expect": {
+            "item": "string",
+            "type": "array",
+          },
+          "fxToggle": true,
+          "label": "Signal Names",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/signals",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.signals:control",
+          ],
+        },
+        "type": "ExpressionInput",
+        "visible": {
+          "$state": "/parameters/mode",
+          "in": [
+            "signal",
+            null,
+          ],
+        },
+      },
+      "f.parameters.signals:control": {
+        "props": {
+          "label": "Signal Names",
+          "value": {
+            "$bindState": "/parameters/signals",
+          },
+        },
+        "type": "Tags",
+      },
+      "f.parameters.timeout": {
+        "checks": [
+          {
+            "args": {
+              "allowExpression": true,
+              "format": "duration",
+            },
+            "message": "需要 Go duration，例如 30s、5m",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Maximum wait duration before routing to timeout port (e.g. "48h")",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Timeout",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/timeout",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.timeout:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.timeout:control": {
+        "props": {
+          "label": "Timeout",
+          "unit": "string",
+          "value": {
+            "$bindState": "/parameters/timeout",
+          },
+        },
+        "type": "DurationInput",
+      },
+      "f.parameters.until": {
+        "checks": [
+          {
+            "message": "当前配置下必填",
+            "type": "required",
+            "when": {
+              "$and": [
+                {
+                  "$state": "/parameters/mode",
+                  "eq": "timer",
+                },
+                {
+                  "$state": "/parameters/duration",
+                  "truthy": false,
+                },
+              ],
+            },
+          },
+        ],
+        "props": {
+          "description": "Absolute time expression to wait until (timer mode)",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Until",
+          "mode": "template",
+          "required": {
+            "$cond": {
+              "$and": [
+                {
+                  "$state": "/parameters/mode",
+                  "eq": "timer",
+                },
+                {
+                  "$state": "/parameters/duration",
+                  "truthy": false,
+                },
+              ],
+            },
+            "else": false,
+            "then": true,
+          },
+          "value": {
+            "$bindState": "/parameters/until",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.until:control",
+          ],
+        },
+        "type": "ExpressionInput",
+        "visible": {
+          "$state": "/parameters/mode",
+          "eq": "timer",
+        },
+      },
+      "f.parameters.until:control": {
+        "props": {
+          "label": "Until",
+          "required": {
+            "$cond": {
+              "$and": [
+                {
+                  "$state": "/parameters/mode",
+                  "eq": "timer",
+                },
+                {
+                  "$state": "/parameters/duration",
+                  "truthy": false,
+                },
+              ],
+            },
+            "else": false,
+            "then": true,
+          },
+          "value": {
+            "$bindState": "/parameters/until",
+          },
+        },
+        "type": "DateTimeInput",
+      },
+      "form": {
+        "children": [
+          "g.type.default",
+        ],
+        "props": {
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.default": {
+        "children": [
+          "f.parameters.mode",
+          "f.parameters.signal_name",
+          "f.parameters.signals",
+          "f.parameters.quorum",
+          "f.parameters.timeout",
+          "f.parameters.duration",
+          "f.parameters.until",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "参数",
+        },
+        "type": "FieldGroup",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;

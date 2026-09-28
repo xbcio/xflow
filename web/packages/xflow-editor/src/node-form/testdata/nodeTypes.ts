@@ -23,8 +23,9 @@
 // - switch `ports.dynamic_outputs` has no Go metadata yet; it is the
 //   hand-written expectation of Doc C §2.1 ("switch 类节点写成 …").
 //
-// TODO(A6): replace with fixtures generated from GET /v1/node-types covering
-// every builtin type (see the it.todo in compile.test.ts).
+// Generated coverage of every builtin type now lives in
+// testdata/node-types.generated.json (A6), exercised by
+// nodeForm.generated.test.ts; these hand fixtures stay as focused cases.
 
 import type { Condition, NodeFormField, NodeFormSchema } from "../schema";
 
