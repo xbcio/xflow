@@ -53,7 +53,13 @@ func (n *SwitchNode) Descriptor() types.Descriptor {
 					{Value: "rules", DisplayName: "Rules", Description: "First rule whose condition holds picks the output"},
 					{Value: "expression", DisplayName: "Expression", Description: "Expression result is the output port name"},
 				}},
-			{Name: "outputs", DisplayName: "Outputs", Type: types.ParamArray, Required: true, Description: "List of output port names (dynamic)",
+			// Not Required: node.Switch never emits outputs and neither the
+			// handler nor the compiler reads it (a pre-existing gap), so a
+			// Required flag would make the param validator reject every
+			// switch built by the SDK's own factory under enforce. Required is
+			// not part of any workflow hash, and no Default is involved, so
+			// relaxing it changes no registered workflow.
+			{Name: "outputs", DisplayName: "Outputs", Type: types.ParamArray, Required: false, Description: "List of output port names (dynamic)",
 				Item: nodeinternal.StringItem()},
 			// Execute treats an empty mode as rules, hence the nil.
 			{Name: "rules", DisplayName: "Rules", Type: types.ParamArray, Required: false, Description: "Rule list for rules mode",
