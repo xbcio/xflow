@@ -1,5 +1,8 @@
 import type {
+  NodeFormSchema,
   NodeStatus as RuntimeNodeStatus,
+  NodeTypesResponse,
+  ParamValidationMode,
   RuntimeNodeSnapshot,
   RuntimeSnapshot,
   WorkflowDef,
@@ -133,6 +136,18 @@ export interface XFlowApiClient {
   runWorkflow(workflowId: string): Promise<ExecuteWorkflowResult>;
   getExecution(id: string): Promise<ExecutionDetail>;
   waitExecution(id: string, options?: WaitExecutionOptions): Promise<WaitExecutionResult>;
+  /**
+   * GET /v1/node-types: the NodeFormSchema of every node type registered in
+   * the server process (runner-only custom types are absent), plus the
+   * server's param validation mode. Responses carry an ETag and
+   * `Cache-Control: no-cache`, so the browser HTTP cache revalidates them.
+   */
+  listNodeTypes(): Promise<NodeTypesResponse>;
+  /**
+   * GET /v1/node-types/{type}?version=: one schema. An omitted (or 0) version
+   * selects the latest; an unknown type or version rejects with status 404.
+   */
+  getNodeType(type: string, version?: number): Promise<NodeFormSchema>;
 }
 
 /**
@@ -212,6 +227,10 @@ function withQuery(path: string, values: Record<string, string | undefined>): st
 
 function workflowPath(id: string): string {
   return `/workflows/${pathSegment(id)}`;
+}
+
+function nodeTypePath(type: string): string {
+  return `/node-types/${pathSegment(type)}`;
 }
 
 function executionPath(id: string): string {
@@ -470,6 +489,40 @@ function mapWorkflowList(response: ApiResponse<unknown>): WorkflowListPage {
   };
 }
 
+const paramValidationModes = new Set<string>(["off", "warn", "enforce"]);
+
+/**
+ * Checks the NodeFormSchema envelope fields the editor keys on (identity and
+ * the field list). Field contents are not re-validated here: the compiler
+ * degrades unknown widgets, types and rules with warnings (Doc C §3.2).
+ */
+function mapNodeFormSchema(value: unknown, response: ApiResponse<unknown>): NodeFormSchema {
+  const data = requireRecord(value, response);
+  requireString(data, "spec", response);
+  requireString(data, "node_type", response);
+  requireInteger(data, "node_version", response);
+  requireString(data, "kind", response);
+  if (!Array.isArray(data.fields) || data.fields.some((field) => !isRecord(field))) {
+    invalidResponse(response);
+  }
+  return data as unknown as NodeFormSchema;
+}
+
+function mapNodeTypes(response: ApiResponse<unknown>): NodeTypesResponse {
+  const data = requireRecord(response.data, response);
+  const mode = data.param_validation_mode;
+  if (typeof mode !== "string" || !paramValidationModes.has(mode)) {
+    invalidResponse(response);
+  }
+  if (!Array.isArray(data.node_types)) {
+    invalidResponse(response);
+  }
+  return {
+    param_validation_mode: mode as ParamValidationMode,
+    node_types: data.node_types.map((schema) => mapNodeFormSchema(schema, response))
+  };
+}
+
 function mapExecutionNode(value: unknown, response: ApiResponse<unknown>): ExecutionNodeDetail {
   const data = requireRecord(value, response);
   const node: ExecutionNodeDetail = {
@@ -692,6 +745,17 @@ export function createXFlowApiClient(options: XFlowApiClientOptions): XFlowApiCl
           }
           invalidResponse(response);
         }
+      );
+    },
+    listNodeTypes() {
+      return request<NodeTypesResponse>(fetcher, joinUrl(options.baseUrl, "/node-types")).then(mapNodeTypes);
+    },
+    getNodeType(type, version) {
+      const path = withQuery(nodeTypePath(type), {
+        version: version === undefined ? undefined : String(version)
+      });
+      return request<NodeFormSchema>(fetcher, joinUrl(options.baseUrl, path)).then((response) =>
+        mapNodeFormSchema(response.data, response)
       );
     }
   };

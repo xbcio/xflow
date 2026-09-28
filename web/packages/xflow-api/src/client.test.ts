@@ -405,3 +405,54 @@ describe("executionDetailToRuntimeSnapshot", () => {
     });
   });
 });
+
+describe("node types", () => {
+  const schema = {
+    spec: "node-form/v1",
+    node_type: "xflow.wait",
+    node_version: 1,
+    kind: "action",
+    fields: [{ name: "mode", path: "/parameters/mode", type: "string", expression: { mode: "template" } }]
+  };
+
+  it("lists node types with the server's param validation mode", async () => {
+    const fetcher = vi.fn().mockResolvedValue(success({ param_validation_mode: "enforce", node_types: [schema] }));
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    await expect(client.listNodeTypes()).resolves.toEqual({ param_validation_mode: "enforce", node_types: [schema] });
+    expect(fetcher).toHaveBeenCalledWith("/v1/node-types", undefined);
+  });
+
+  it("gets one node type, passing the version only when given", async () => {
+    const fetcher = vi.fn().mockImplementation(async () => success(schema));
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    await expect(client.getNodeType("xflow.wait")).resolves.toEqual(schema);
+    await client.getNodeType("xflow.wait", 2);
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual(["/v1/node-types/xflow.wait", "/v1/node-types/xflow.wait?version=2"]);
+  });
+
+  it("surfaces 404 for an unknown node type", async () => {
+    const fetcher = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ success: false, code: "node_type_not_found", message: "node type not found", trace_id: "t" }), {
+        status: 404
+      })
+    );
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    await expect(client.getNodeType("custom.x")).rejects.toMatchObject({ status: 404, code: "node_type_not_found" });
+  });
+
+  it("rejects malformed node-type payloads", async () => {
+    const bad = [
+      { param_validation_mode: "strict", node_types: [] },
+      { param_validation_mode: "warn" },
+      { param_validation_mode: "warn", node_types: [{ ...schema, fields: undefined }] },
+      { param_validation_mode: "warn", node_types: [{ ...schema, node_version: "1" }] }
+    ];
+    for (const data of bad) {
+      const client = createXFlowApiClient({ baseUrl: "/v1", fetcher: async () => success(data) });
+      await expect(client.listNodeTypes()).rejects.toBeInstanceOf(XFlowApiError);
+    }
+  });
+});
