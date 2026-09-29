@@ -150,11 +150,32 @@ func (e *Engine) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.Wo
 		Definition:       def,
 		Graph:            g,
 	})
+	if err == nil && strings.HasPrefix(rec.DefinitionHash, runtimeHashPrefix) && rec.Definition != nil {
+		// The registry matched on hash equality alone. A stored v1 hash may
+		// predate node Timeout/Output joining the runtime hash, in which case
+		// it also matches a definition that differs from the stored one only
+		// in those fields (for example, a timeout removed). Recompute from the
+		// stored definition to tell the two apart; a record this call just
+		// created recomputes to the same hash.
+		stored, hashErr := runtimeHash(rec.Definition)
+		if hashErr != nil {
+			rollbackHandlers()
+			return "", hashErr
+		}
+		if stored != hash {
+			// Correct the stale hash so the stored definition itself
+			// re-registers idempotently. Best effort: a lost CAS means
+			// another registrar already rewrote the record.
+			_ = e.workflowRegistry.UpdateDefinitionHash(ctx, rec.ID, rec.DefinitionHash, stored)
+			rollbackHandlers()
+			return "", backend.ErrWorkflowConflict
+		}
+	}
 	if err != nil {
 		// Legacy-hash compatibility: when a workflow was first registered
 		// before commit 3ef36d9 (or before F0-A3 tightened the runtime hash),
 		// the stored DefinitionHash is in a format that will never equal the
-		// freshly-computed runtime-sha256:v1: hash, so the registry rejects
+		// freshly-computed runtime hash, so the registry rejects
 		// the re-registration as a conflict. Recompute the runtime hash from
 		// the stored Definition and, if it matches, atomically upgrade the
 		// record's DefinitionHash so future registrations are idempotent.
@@ -218,7 +239,7 @@ func (e *Engine) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.Wo
 	if g.FAF() && rec.Graph != nil {
 		// An idempotent registration returns the existing record. Its graph is
 		// authoritative even when this call compiled a different graph because a
-		// field outside runtime identity (such as node timeout) changed.
+		// field outside runtime identity (editor metadata, for example) changed.
 		bindingGraph := rec.Graph
 		node := bindingGraph.NodeAt(0)
 		e.mu.Lock()

@@ -6,11 +6,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
 )
 
-func TestFAFBindingUsesStoredGraphAfterTimeoutOnlyReregistration(t *testing.T) {
+// A timeout-only change is a runtime-semantic change: re-registering the same
+// name@version conflicts, and the stored graph -- the one FAF binds to --
+// keeps the first registration's timeout.
+func TestFAFBindingKeepsStoredGraphWhenTimeoutOnlyReregistrationConflicts(t *testing.T) {
 	ctx := context.Background()
 	eng, err := NewLocal()
 	if err != nil {
@@ -31,12 +35,8 @@ func TestFAFBindingUsesStoredGraphAfterTimeoutOnlyReregistration(t *testing.T) {
 
 	second := Workflow("faf-binding-timeout-idempotent").FAF()
 	second.LocalNode("only", handler).Timeout(secondTimeout)
-	secondID, err := eng.AddWorkflow(ctx, second)
-	if err != nil {
-		t.Fatalf("AddWorkflow(second) error = %v", err)
-	}
-	if secondID != workflowID {
-		t.Fatalf("idempotent AddWorkflow() id = %q, want %q", secondID, workflowID)
+	if _, err := eng.AddWorkflow(ctx, second); !errors.Is(err, backend.ErrWorkflowConflict) {
+		t.Fatalf("AddWorkflow(second) error = %v, want ErrWorkflowConflict", err)
 	}
 
 	stored, err := eng.workflowRegistry.GetWorkflow(ctx, workflowID)

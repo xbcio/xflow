@@ -24,8 +24,18 @@ func workflowKey(def *types.WorkflowDef) string {
 // records without a separate migration pass.
 const (
 	// runtimeHashPrefix marks the canonical runtime-semantic hash produced by
-	// runtimeHash. Always current for new registrations.
+	// runtimeHash for a definition that sets no node Timeout or private Output.
+	// Such a definition hashes to the same bytes under both algorithms, so it
+	// keeps the v1 prefix and its historical hash.
+	//
+	// A stored v1 hash is not trusted as current: v1 hashes were also written
+	// for definitions whose node Timeout/Output the v1 algorithm ignored, so
+	// reconcileDefinitionHash recomputes them from the stored definition.
 	runtimeHashPrefix = "runtime-sha256:v1:"
+	// runtimeHashPrefixV2 marks a runtime hash over a definition that sets a
+	// node Timeout or private Output -- fields the v1 algorithm left out. A v2
+	// hash is always current.
+	runtimeHashPrefixV2 = "runtime-sha256:v2:"
 	// auditHashPrefix marks the audit fingerprint produced by
 	// legacyDefinitionHash (full-definition, includes editor metadata). It is
 	// stored in WorkflowRecord.AuditFingerprint and must NOT be used as the
@@ -57,7 +67,9 @@ const (
 //     over the compiled graph IR (nodes/edges/order); orthogonal to the JSON
 //     definition form.
 //
-// The returned string has the form "runtime-sha256:v1:<hex>".
+// Node Timeout and Output are included (v2). A definition that sets neither
+// on any node keeps the "runtime-sha256:v1:<hex>" form, byte-identical to the
+// pre-v2 hash; otherwise the form is "runtime-sha256:v2:<hex>".
 func runtimeHash(def *types.WorkflowDef) (string, error) {
 	payload := runtimeHashPayload{
 		Namespace:       def.Namespace,
@@ -78,7 +90,12 @@ func runtimeHash(def *types.WorkflowDef) (string, error) {
 		Groups:          canonicalizeGroups(def.Groups),
 		DependencyEdges: canonicalizeDependencyEdges(def.DependencyEdges),
 	}
+	prefix := runtimeHashPrefix
 	for i, n := range def.Nodes {
+		output := toHashOutputPolicy(n.Output)
+		if n.Timeout != 0 || output != nil {
+			prefix = runtimeHashPrefixV2
+		}
 		payload.Nodes[i] = runtimeNodeHashPayload{
 			Name:               n.Name,
 			Type:               n.Type,
@@ -93,6 +110,8 @@ func runtimeHash(def *types.WorkflowDef) (string, error) {
 			Parameters:         n.Parameters,
 			Retry:              n.Retry,
 			ActivationReplicas: n.ActivationReplicas,
+			Timeout:            n.Timeout,
+			Output:             output,
 		}
 	}
 
@@ -101,7 +120,7 @@ func runtimeHash(def *types.WorkflowDef) (string, error) {
 		return "", fmt.Errorf("marshal runtime hash payload: %w", err)
 	}
 	sum := sha256.Sum256(data)
-	return runtimeHashPrefix + hex.EncodeToString(sum[:]), nil
+	return prefix + hex.EncodeToString(sum[:]), nil
 }
 
 // runtimeHashPayload is the normalized, struct-based runtime identity used by
@@ -163,6 +182,27 @@ type runtimeNodeHashPayload struct {
 	// Appended with omitempty so zero-valued definitions retain their historical
 	// runtime hash bytes.
 	ActivationReplicas uint32 `json:"activation_replicas,omitempty"`
+	// Timeout and Output are the v2 additions, appended with omitempty so a
+	// node that sets neither keeps its v1 bytes. Output is the hash-local
+	// mirror below, nil unless it changes behaviour.
+	Timeout time.Duration             `json:"timeout,omitempty"`
+	Output  *runtimeOutputHashPayload `json:"output,omitempty"`
+}
+
+// runtimeOutputHashPayload is the hash-local mirror of types.NodeOutputPolicy,
+// kept separate for the same reason as runtimeSelectorHashPayload: a wire
+// change to NodeOutputPolicy must not move the hash.
+type runtimeOutputHashPayload struct {
+	Private bool `json:"private,omitempty"`
+}
+
+// toHashOutputPolicy returns nil for a nil or zero policy, so that an explicit
+// empty `output: {}` hashes like an absent one -- both run the same way.
+func toHashOutputPolicy(p *types.NodeOutputPolicy) *runtimeOutputHashPayload {
+	if p == nil || !p.Private {
+		return nil
+	}
+	return &runtimeOutputHashPayload{Private: true}
 }
 
 // runtimeSelectorHashPayload is the hash-local mirror of types.RunnerSelector.
@@ -272,21 +312,34 @@ func legacyDefinitionHash(def *types.WorkflowDef) (string, error) {
 // against a new registration, given the currently stored DefinitionHash and
 // the stored Definition.
 //
-// If storedHash is already in runtime-sha256:v1: format it is returned as-is
-// with needsUpgrade=false — the record is current and no rewrite is required.
+// A runtime-sha256:v2: hash is current: it is returned as-is with
+// needsUpgrade=false.
 //
-// Otherwise (storedHash is in any legacy format — bare "sha256:", or
-// "sha256:audit:v1:", or any unrecognized prefix), the runtime hash is
-// recomputed from storedDef and returned with needsUpgrade=true. Callers
-// should then persist the recomputed hash via the registry's
+// A runtime-sha256:v1: hash may be stale -- the v1 algorithm ignored node
+// Timeout and Output -- so it is recomputed from storedDef, with needsUpgrade
+// reporting whether the recomputed hash differs from the stored one. A v1 hash
+// with a nil storedDef cannot be recomputed and is returned as-is.
+//
+// Any other format (bare "sha256:", "sha256:audit:v1:", or an unrecognized
+// prefix) is recomputed from storedDef and returned with needsUpgrade=true.
+// Callers should then persist the recomputed hash via the registry's
 // UpdateDefinitionHash to atomically upgrade the record.
 //
-// storedDef may be nil only if storedHash is already in runtime format; if a
-// recompute is required and storedDef is nil, an error is returned. This
-// guards against registries that store the hash without the definition.
+// For a legacy (non-runtime) hash with a nil storedDef an error is returned.
+// This guards against registries that store the hash without the definition.
 func reconcileDefinitionHash(storedHash string, storedDef *types.WorkflowDef) (effectiveHash string, needsUpgrade bool, err error) {
-	if strings.HasPrefix(storedHash, runtimeHashPrefix) {
+	if strings.HasPrefix(storedHash, runtimeHashPrefixV2) {
 		return storedHash, false, nil
+	}
+	if strings.HasPrefix(storedHash, runtimeHashPrefix) {
+		if storedDef == nil {
+			return storedHash, false, nil
+		}
+		recomputed, err := runtimeHash(storedDef)
+		if err != nil {
+			return "", false, fmt.Errorf("reconcile definition hash: %w", err)
+		}
+		return recomputed, recomputed != storedHash, nil
 	}
 	if storedDef == nil {
 		return "", false, fmt.Errorf("reconcile definition hash: stored definition is nil for legacy hash %q", storedHash)
