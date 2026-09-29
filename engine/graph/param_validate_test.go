@@ -355,6 +355,13 @@ func TestValidateParamsAdvisoryAllowlist(t *testing.T) {
 		"aggregate":      map[string]any{"on_overflow": "BLOCK"},
 		"message_schema": map[string]any{"on_invalid": "FAIL"},
 	}), "/parameters/aggregate/on_overflow enum warning", "/parameters/message_schema/on_invalid enum warning")
+
+	approvalDesc := types.Descriptor{Type: "xflow.approval", Params: []types.ParamSpec{
+		{Name: "mode", Type: types.ParamString, Enum: []types.EnumOption{{Value: "any"}}},
+		{Name: "timeout_action", Type: types.ParamString, Enum: []types.EnumOption{{Value: "route"}, {Value: "reject"}}},
+	}}
+	assertIssues(t, ValidateParams(approvalDesc, map[string]any{"mode": "most", "timeout_action": "escalate"}),
+		"/parameters/mode enum error", "/parameters/timeout_action enum warning")
 }
 
 func TestValidateParamsAdvisoryOneOfExcess(t *testing.T) {

@@ -99,11 +99,16 @@ func HasParamErrors(issues []ParamIssue) bool {
 //     the handler matches case-insensitively; the Enum is lower-case.
 //   - xflow.wait timeout: the handler ignores a value that does not parse as
 //     a duration (cast.ToDurationE error discarded) instead of failing.
+//   - xflow.approval timeout_action: the handler routes on every value other
+//     than "reject"; the Enum lists only reject/route.
 //
 // A severity downgrade was chosen over a case-insensitive Enum flag because it
-// covers all three gaps with one mechanism (http.method accepts values no Enum
+// covers every gap with one mechanism (http.method accepts values no Enum
 // can list) and leaves the Descriptor -- which the editor renders -- unchanged.
 var advisoryParamRules = map[string]map[string]map[string]bool{
+	"xflow.approval": {
+		"/parameters/timeout_action": {ParamIssueCodeEnum: true},
+	},
 	"xflow.http": {
 		"/parameters/method": {ParamIssueCodeEnum: true},
 	},
