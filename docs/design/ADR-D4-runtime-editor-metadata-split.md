@@ -89,9 +89,9 @@ The TypeScript implementation provides two inverses:
 
 The canonical runtime hash is computed over the runtime-semantic subset only:
 
-- Prefix: `runtime-sha256:v1:`.
+- Prefix: `runtime-sha256:v1:` for a definition that sets no node `Timeout` and no private node `Output`; `runtime-sha256:v2:` otherwise. v2 added those two node fields to the hash; a definition that sets neither hashes to the same bytes under both, so it keeps its v1 hash.
 - Excludes: `WorkflowDef.ID`, `WorkflowDef.Description`, `NodeDef.ID`, `NodeDef.Position`, `NodeDef.UI`, `NodeDef.Notes`.
-- Includes: everything else, including `WorkflowDef.PinData` and the runtime subset of each node.
+- Includes: everything else, including `WorkflowDef.PinData` and the runtime subset of each node (with `NodeDef.Timeout` and `NodeDef.Output` since v2). Re-registering the same `name@version` with only a node timeout or output policy changed is therefore a conflict.
 
 A separate audit fingerprint (`sha256:audit:v1:`) is computed over the full `WorkflowDef` JSON (including editor metadata) for export/audit traceability. It must NOT be used for conflict detection.
 

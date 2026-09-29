@@ -79,7 +79,7 @@ The system maintains three distinct hashes to avoid conflating runtime identity,
 
 | Hash | Prefix | Scope | Purpose |
 |------|--------|-------|---------|
-| Runtime hash | `runtime-sha256:v1:` | Runtime-semantic subset of `WorkflowDef` / `NodeDef` | Registry conflict detection and canonical workflow identity. |
+| Runtime hash | `runtime-sha256:v1:` / `runtime-sha256:v2:` | Runtime-semantic subset of `WorkflowDef` / `NodeDef` (v2 when a node sets `Timeout` or a private `Output`) | Registry conflict detection and canonical workflow identity. |
 | Audit fingerprint | `sha256:audit:v1:` | Full `WorkflowDef` JSON including editor metadata and instance identifiers | Export/audit traceability; must never be used for conflict detection. |
 | Engine graph hash | (engine/graph) | Compiled graph IR (nodes, edges, order) | Structural compile identity; orthogonal to the JSON definition form. |
 
@@ -87,7 +87,8 @@ The system maintains three distinct hashes to avoid conflating runtime identity,
 
 Records written before the runtime/audit split may carry a bare `sha256:` prefix in `WorkflowRecord.DefinitionHash`. The registry reconciles such legacy records on read:
 
-- If the stored hash already starts with `runtime-sha256:v1:`, it is current and no rewrite is needed.
+- If the stored hash starts with `runtime-sha256:v2:`, it is current and no rewrite is needed.
+- If the stored hash starts with `runtime-sha256:v1:`, it may predate node `Timeout`/`Output` joining the hash, so it is recomputed from the stored definition (kept as-is when no definition is stored) and upgraded only if the result differs. After a hash-equal registry match on a v1 record, the SDK also recomputes from the stored definition, so a change the v1 hash could not see (such as a removed timeout) surfaces as a conflict.
 - If the stored hash has any other prefix (`sha256:`, `sha256:audit:v1:`, or an unrecognized prefix), the runtime hash is recomputed from the stored definition and returned with `needsUpgrade=true`.
 - The caller must then persist the recomputed hash atomically via `UpdateDefinitionHash` so the record is upgraded without changing its runtime semantics.
 
