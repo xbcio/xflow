@@ -74,16 +74,7 @@ describe("A6-generated node-types fixture", () => {
     }
   );
 
-  // JsonEditor outside the Doc C §3.1 list, known and justified: the
-  // approval descriptor (node/internal/group) has not had its A2b metadata
-  // backfill (Doc A §4: "A2b 已完成（group/ 除外）"), so its string arrays
-  // declare no Item and degrade to JsonEditor. Remove the entry once group/
-  // declares `Item: {Type: string}`; the test fails if it goes stale.
-  const PENDING_A2B_JSON_EDITOR: Readonly<Record<string, readonly string[]>> = {
-    "xflow.approval": ["approvers", "force_approvers"]
-  };
-
-  it("renders JsonEditor exactly for the Doc C §3.1 list (plus the pending-A2b allowlist)", () => {
+  it("renders JsonEditor exactly for the Doc C §3.1 list", () => {
     const got: Record<string, string[]> = {};
     for (const schema of schemas) {
       const { spec } = compileNodeForm(schema, { common: null });
@@ -97,7 +88,7 @@ describe("A6-generated node-types fixture", () => {
       if (params.length > 0) got[schema.node_type] = params;
     }
     const want = Object.fromEntries(
-      Object.entries({ ...JSON_EDITOR_PARAMS, ...PENDING_A2B_JSON_EDITOR })
+      Object.entries(JSON_EDITOR_PARAMS)
         .filter(([type]) => schemas.some((schema) => schema.node_type === type))
         .map(([type, params]) => [type, [...params].sort()])
     );

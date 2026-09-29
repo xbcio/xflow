@@ -10,10 +10,32 @@ exports[`A6-generated node-types fixture > xflow.approval@1 snapshot 1`] = `
             "message": "必填",
             "type": "required",
           },
+          {
+            "args": {
+              "args": {
+                "value": 1,
+              },
+              "check": "minItems",
+            },
+            "message": "至少 1 项",
+            "type": "literalOnly",
+          },
+          {
+            "args": {
+              "args": {
+                "value": 1,
+              },
+              "check": "minItems",
+            },
+            "message": "至少 1 项",
+            "severity": "warning",
+            "type": "expressionOnly",
+          },
         ],
         "props": {
           "description": "List of approver identifiers",
           "expect": {
+            "item": "string",
             "type": "array",
           },
           "fxToggle": true,
@@ -39,12 +61,13 @@ exports[`A6-generated node-types fixture > xflow.approval@1 snapshot 1`] = `
             "$bindState": "/parameters/approvers",
           },
         },
-        "type": "JsonEditor",
+        "type": "Tags",
       },
       "f.parameters.force_approvers": {
         "props": {
           "description": "Identifiers allowed to pass the gate without the outstanding approvers; unset means nobody can",
           "expect": {
+            "item": "string",
             "type": "array",
           },
           "fxToggle": true,
@@ -68,7 +91,7 @@ exports[`A6-generated node-types fixture > xflow.approval@1 snapshot 1`] = `
             "$bindState": "/parameters/force_approvers",
           },
         },
-        "type": "JsonEditor",
+        "type": "Tags",
       },
       "f.parameters.mode": {
         "props": {
@@ -94,13 +117,40 @@ exports[`A6-generated node-types fixture > xflow.approval@1 snapshot 1`] = `
         "props": {
           "defaultHint": "any",
           "label": "Mode",
+          "options": [
+            {
+              "description": "The first approver's decision closes the gate",
+              "label": "Any",
+              "value": "any",
+            },
+            {
+              "description": "Every approver must approve",
+              "label": "All",
+              "value": "all",
+            },
+            {
+              "description": "Approvers decide one after another, in list order",
+              "label": "Sequential",
+              "value": "sequential",
+            },
+          ],
           "value": {
             "$bindState": "/parameters/mode",
           },
         },
-        "type": "Input",
+        "type": "Select",
       },
       "f.parameters.timeout": {
+        "checks": [
+          {
+            "args": {
+              "allowExpression": true,
+              "format": "duration",
+            },
+            "message": "需要 Go duration，例如 30s、5m",
+            "type": "format",
+          },
+        ],
         "props": {
           "description": "Maximum wait duration before timeout routing (e.g. "48h")",
           "expect": {
@@ -123,11 +173,12 @@ exports[`A6-generated node-types fixture > xflow.approval@1 snapshot 1`] = `
       "f.parameters.timeout:control": {
         "props": {
           "label": "Timeout",
+          "unit": "string",
           "value": {
             "$bindState": "/parameters/timeout",
           },
         },
-        "type": "Input",
+        "type": "DurationInput",
       },
       "f.parameters.timeout_action": {
         "props": {
@@ -148,16 +199,32 @@ exports[`A6-generated node-types fixture > xflow.approval@1 snapshot 1`] = `
           ],
         },
         "type": "ExpressionInput",
+        "visible": {
+          "$state": "/parameters/timeout",
+          "truthy": true,
+        },
       },
       "f.parameters.timeout_action:control": {
         "props": {
           "defaultHint": "route",
           "label": "Timeout Action",
+          "options": [
+            {
+              "description": "Leave through the timeout port",
+              "label": "Route",
+              "value": "route",
+            },
+            {
+              "description": "Leave through the rejected port",
+              "label": "Reject",
+              "value": "reject",
+            },
+          ],
           "value": {
             "$bindState": "/parameters/timeout_action",
           },
         },
-        "type": "Input",
+        "type": "Select",
       },
       "form": {
         "children": [

@@ -127,15 +127,30 @@ func (n *ApprovalNode) WithTimeout(duration string, action string) *ApprovalNode
 }
 
 func (n *ApprovalNode) Descriptor() types.Descriptor {
+	// minApprovers mirrors parseApprovalParams, which refuses an empty list.
+	minApprovers := 1
 	return types.Descriptor{
 		Type:        ApprovalNodeType,
 		DisplayName: "Approval",
 		Params: []types.ParamSpec{
-			{Name: "approvers", DisplayName: "Approvers", Type: types.ParamArray, Required: true, Description: "List of approver identifiers"},
-			{Name: "mode", DisplayName: "Mode", Type: types.ParamString, Required: false, Default: "any", Description: "Approval mode: \"any\", \"all\", or \"sequential\""},
-			{Name: "timeout", DisplayName: "Timeout", Type: types.ParamString, Required: false, Description: "Maximum wait duration before timeout routing (e.g. \"48h\")"},
-			{Name: "timeout_action", DisplayName: "Timeout Action", Type: types.ParamString, Required: false, Default: "route", Description: "Action on timeout: \"reject\" or \"route\""},
-			{Name: "force_approvers", DisplayName: "Force Approvers", Type: types.ParamArray, Required: false, Description: "Identifiers allowed to pass the gate without the outstanding approvers; unset means nobody can"},
+			{Name: "approvers", DisplayName: "Approvers", Type: types.ParamArray, Required: true, Description: "List of approver identifiers",
+				Item: nodeinternal.StringItem(), Constraints: &types.Constraints{MinItems: &minApprovers}},
+			{Name: "mode", DisplayName: "Mode", Type: types.ParamString, Required: false, Default: "any", Description: "Approval mode: \"any\", \"all\", or \"sequential\"",
+				Enum: []types.EnumOption{
+					{Value: string(ApprovalAny), DisplayName: "Any", Description: "The first approver's decision closes the gate"},
+					{Value: string(ApprovalAll), DisplayName: "All", Description: "Every approver must approve"},
+					{Value: string(ApprovalSequential), DisplayName: "Sequential", Description: "Approvers decide one after another, in list order"},
+				}},
+			{Name: "timeout", DisplayName: "Timeout", Type: types.ParamString, Required: false, Description: "Maximum wait duration before timeout routing (e.g. \"48h\")",
+				Widget: nodeinternal.WidgetDuration, Constraints: nodeinternal.Format(nodeinternal.FormatDuration)},
+			{Name: "timeout_action", DisplayName: "Timeout Action", Type: types.ParamString, Required: false, Default: "route", Description: "Action on timeout: \"reject\" or \"route\"",
+				VisibleWhen: nodeinternal.CondTruthy("timeout"),
+				Enum: []types.EnumOption{
+					{Value: "route", DisplayName: "Route", Description: "Leave through the timeout port"},
+					{Value: actionReject, DisplayName: "Reject", Description: "Leave through the rejected port"},
+				}},
+			{Name: "force_approvers", DisplayName: "Force Approvers", Type: types.ParamArray, Required: false, Description: "Identifiers allowed to pass the gate without the outstanding approvers; unset means nobody can",
+				Item: nodeinternal.StringItem()},
 		},
 		Inputs:  []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 		Outputs: []types.PortSpec{{Name: "approved", DisplayName: "Approved"}, {Name: "rejected", DisplayName: "Rejected"}, {Name: "returned", DisplayName: "Returned"}, {Name: "timeout", DisplayName: "Timeout"}},

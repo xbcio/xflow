@@ -43,6 +43,18 @@
           "help": "List of approver identifiers",
           "expression": {
             "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "min_items",
+              "value": 1
+            }
+          ],
+          "item": {
+            "type": "string",
+            "expression": {
+              "mode": "template"
+            }
           }
         },
         {
@@ -54,17 +66,41 @@
           "help": "Approval mode: \"any\", \"all\", or \"sequential\"",
           "expression": {
             "mode": "template"
-          }
+          },
+          "options": [
+            {
+              "value": "any",
+              "label": "Any",
+              "description": "The first approver's decision closes the gate"
+            },
+            {
+              "value": "all",
+              "label": "All",
+              "description": "Every approver must approve"
+            },
+            {
+              "value": "sequential",
+              "label": "Sequential",
+              "description": "Approvers decide one after another, in list order"
+            }
+          ]
         },
         {
           "name": "timeout",
           "path": "/parameters/timeout",
           "label": "Timeout",
           "type": "string",
+          "widget": "duration",
           "help": "Maximum wait duration before timeout routing (e.g. \"48h\")",
           "expression": {
             "mode": "template"
-          }
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "duration"
+            }
+          ]
         },
         {
           "name": "timeout_action",
@@ -75,7 +111,23 @@
           "help": "Action on timeout: \"reject\" or \"route\"",
           "expression": {
             "mode": "template"
-          }
+          },
+          "visible_when": {
+            "param": "timeout",
+            "truthy": true
+          },
+          "options": [
+            {
+              "value": "route",
+              "label": "Route",
+              "description": "Leave through the timeout port"
+            },
+            {
+              "value": "reject",
+              "label": "Reject",
+              "description": "Leave through the rejected port"
+            }
+          ]
         },
         {
           "name": "force_approvers",
@@ -85,6 +137,12 @@
           "help": "Identifiers allowed to pass the gate without the outstanding approvers; unset means nobody can",
           "expression": {
             "mode": "template"
+          },
+          "item": {
+            "type": "string",
+            "expression": {
+              "mode": "template"
+            }
           }
         }
       ]

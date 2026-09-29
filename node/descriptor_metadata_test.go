@@ -20,15 +20,6 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-// groupNodeTypes are the builtins implemented under node/internal/group. Their
-// metadata backfill is deferred (that package is being edited separately), so
-// the linkage and degrade tests leave them out. The Default golden and the
-// consistency test still cover them: both hold for any descriptor.
-var groupNodeTypes = map[string]bool{
-	"xflow.approval":     true,
-	"xflow.notification": true,
-}
-
 type versionedDescriptor struct {
 	version int
 	desc    types.Descriptor
@@ -180,7 +171,7 @@ func condEq(param string, v any) *types.Condition {
 }
 
 // TestBuiltinLinkagesDeclared is the coverage table for the node-form design
-// §4.4 linkages (approval excluded; see groupNodeTypes). Where the handler
+// §4.4 linkages. Where the handler
 // disagrees with the table, the row encodes the handler and says why.
 func TestBuiltinLinkagesDeclared(t *testing.T) {
 	truthy := true
@@ -224,6 +215,8 @@ func TestBuiltinLinkagesDeclared(t *testing.T) {
 		// trigger.kafka: dead_letter_topic follows its sibling policy field.
 		{"xflow.trigger.kafka", "aggregate.dead_letter_topic", condEq("on_overflow", "dead_letter")},
 		{"xflow.trigger.kafka", "message_schema.dead_letter_topic", condEq("on_invalid", "dead_letter")},
+		// approval: timeout_action only matters once a timeout can fire.
+		{"xflow.approval", "timeout_action", &types.Condition{Param: "timeout", Truthy: &truthy}},
 	}
 	type required struct {
 		typ, path string
@@ -620,9 +613,7 @@ func jsonFallbackParams(typ string, params []types.ParamSpec, prefix string) []s
 }
 
 // TestBuiltinJSONFallbackMatchesDesign pins the node-form design §3.1 "v1
-// degrade list": exactly these params fall back to the JSON editor. Group
-// nodes are excluded (see groupNodeTypes); notification.data, which the
-// design also lists, lives there.
+// degrade list": exactly these params fall back to the JSON editor.
 func TestBuiltinJSONFallbackMatchesDesign(t *testing.T) {
 	want := []string{
 		"xflow.browser.cdp.harvest",
@@ -638,13 +629,11 @@ func TestBuiltinJSONFallbackMatchesDesign(t *testing.T) {
 		"xflow.http.body",
 		"xflow.http.options",
 		"xflow.map.body",
+		"xflow.notification.data",
 		"xflow.transform.set.fields",
 	}
 	var got []string
 	for _, vd := range builtinDescriptors(t) {
-		if groupNodeTypes[vd.desc.Type] {
-			continue
-		}
 		got = append(got, jsonFallbackParams(vd.desc.Type, vd.desc.Params, "")...)
 	}
 	sort.Strings(got)
