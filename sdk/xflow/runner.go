@@ -686,10 +686,14 @@ func buildRunnerServiceConfig(cfg RunnerConfig, opts ...RunnerOption) (runnersvc
 		Concurrency:  cfg.Concurrency,
 		Labels:       runnerRegistrationLabels(cfg.Labels, protocol.LinkedXflowVersion()),
 		Capabilities: runnerCapabilities(cfg.Capabilities),
-		PollWait:     cfg.PollWait,
-		Tracer:       o.tracer,
-		Namespaces:   cfg.Namespaces,
-		GroupRuntime: groupRuntime,
+		// Read once: the global registry is populated by init-time
+		// registration, and a changed set is reported by re-registering,
+		// which is what a restart already does.
+		DescriptorsJSON: runnerDescriptorsJSON(cfg.Capabilities, registry.Descriptors(), o.logger),
+		PollWait:        cfg.PollWait,
+		Tracer:          o.tracer,
+		Namespaces:      cfg.Namespaces,
+		GroupRuntime:    groupRuntime,
 		// A batch lease names a synthetic node ("m/_batch/0") that carries no
 		// Input and has no registered handler, so the ordinary node path has
 		// nothing to execute; the runtime resolves the body's member handlers
