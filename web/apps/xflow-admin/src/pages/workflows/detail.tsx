@@ -1,4 +1,4 @@
-import { history, useIntl, useParams } from '@umijs/max';
+import { history, useIntl, useModel, useParams } from '@umijs/max';
 import { App, Button, Result, Spin } from 'antd';
 import { createXFlowApiClient, executionDetailToRuntimeSnapshot } from '@xflow/api';
 import { XFlowEditor, type XFlowEditorSaveResult } from '@xflow/editor';
@@ -37,14 +37,23 @@ export default function WorkflowDetailPage() {
   const [loading, setLoading] = useState(!isNewWorkflow);
   const [loadError, setLoadError] = useState<string>();
   const [nodeTypes, setNodeTypes] = useState<NodeTypesResponse>();
+  const { initialState } = useModel('@@initialState');
   const { message } = App.useApp();
 
-  // Node form schemas (GET /v1/node-types), fetched once per page. A failure
-  // is not fatal: the editor falls back to the "no schema" form (common
-  // fields + JSON tab) and says so in the Inspector; the toast explains why.
+  // The namespace node types are scoped to: the loaded workflow's own
+  // (server-authoritative) namespace, or, for a draft the server has not
+  // stamped yet, the caller's namespace, which is the one a create lands in.
+  // Neither known yet means the server registry only.
+  const nodeTypesNamespace = workflow?.namespace || initialState?.currentUser?.namespace || undefined;
+
+  // Node form schemas (GET /v1/node-types?namespace=), fetched once per
+  // namespace so the library carries the runner types that namespace can use.
+  // A failure is not fatal: the editor falls back to the "no schema" form
+  // (common fields + JSON tab) and says so in the Inspector; the toast
+  // explains why.
   useEffect(() => {
     let cancelled = false;
-    api.listNodeTypes().then(
+    api.listNodeTypes({ namespace: nodeTypesNamespace }).then(
       (response) => {
         if (!cancelled) setNodeTypes(response);
       },
@@ -55,7 +64,7 @@ export default function WorkflowDetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [api, message]);
+  }, [api, message, nodeTypesNamespace]);
 
   const loadWorkflow = useCallback(async () => {
     if (isNewWorkflow) {
