@@ -133,6 +133,7 @@ func Definitions() []Definition {
 			return KafkaTriggerWorkflow(KafkaQABrokers(), KafkaQATopic, KafkaQAGroup)
 		}},
 		{Name: "trigger-webhook", Build: WebhookTriggerWorkflow},
+		{Name: "full", Build: func() *xflow.WorkflowBuilder { return FullWorkflow(DefaultFullTriggerConfig()) }},
 	}
 }
 
