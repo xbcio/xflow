@@ -86,11 +86,14 @@ import {
   createNodeFormRegistry,
   danglingPorts,
   externalIssuesByNode,
+  localizeNodeTypes,
   NodeFormCompiler,
+  nodeFormCatalogs,
   nodeHasTemplate,
   portsForNode,
   reduceNodePatches,
   schemaForNode,
+  translateNodeFormText,
   withDynamicPortsFallback,
   type DanglingEdge
 } from "./node-form";
@@ -98,6 +101,13 @@ import type { NodeFormKind, NodeFormPort, NodeFormPorts, NodeFormSchema } from "
 // Composer form styles first so the editor's scoped overrides win on equal specificity.
 import "@xflow/composer/form/styles.css";
 import "./styles.css";
+
+/**
+ * Node Descriptor text arrives in English (GET /v1/node-types); the editor UI
+ * is Chinese, so the response is localized once where it enters the editor
+ * (Doc C §8 item 1). Custom types without catalog entries stay English.
+ */
+const nodeFormCatalog = nodeFormCatalogs["zh-CN"];
 
 export type XFlowEditorAppearance = "light" | "dark" | "system";
 export type XFlowEditorThemeVariant = "graphite" | "blueprint";
@@ -820,7 +830,7 @@ interface ConnectionReference {
  * report their descriptors (Doc C §8 item 3); such nodes still load and edit as
  * no-schema nodes (Doc C §2.1).
  */
-const fallbackNodeDescriptors: NodeDescriptor[] = [
+const fallbackNodeDescriptors: NodeDescriptor[] = ([
   { label: "Webhook", type: "xflow.trigger.webhook", group: "触发器", tone: "blue", icon: <LinkOutlined /> },
   { label: "Kafka", type: "xflow.trigger.kafka", group: "触发器", tone: "cyan", icon: <CloudServerOutlined /> },
   { label: "Cron", type: "xflow.trigger.cron", group: "触发器", tone: "amber", icon: <ClockCircleOutlined /> },
@@ -842,7 +852,7 @@ const fallbackNodeDescriptors: NodeDescriptor[] = [
   { label: "Filter", type: "xflow.transform.filter", group: "数据转换", tone: "amber", icon: <CodeOutlined /> },
   { label: "External Supply", type: "xflow.supply.external", group: "供应", tone: "cyan", icon: <DatabaseOutlined />, kind: "supply" },
   { label: "Static Supply", type: "xflow.supply.static", group: "供应", tone: "violet", icon: <DatabaseOutlined />, kind: "supply" }
-];
+] satisfies NodeDescriptor[]).map((descriptor) => ({ ...descriptor, label: translateNodeFormText(nodeFormCatalog, descriptor.label, descriptor.type) }));
 
 type NodePresentation = Pick<NodeDescriptor, "group" | "tone" | "icon">;
 
@@ -3035,12 +3045,15 @@ export function XFlowEditor({
   onChange,
   onSave,
   onRun,
-  nodeTypes,
+  nodeTypes: sourceNodeTypes,
   appearance: controlledAppearance,
   themeVariant: controlledThemeVariant,
   onAppearanceChange,
   onThemeVariantChange
 }: XFlowEditorProps): React.ReactElement {
+  // Memoised per response inside localizeNodeTypes, so identity-keyed caches
+  // downstream (node library, form compiler) keep hitting.
+  const nodeTypes = localizeNodeTypes(sourceNodeTypes, nodeFormCatalog);
   const [uncontrolledAppearance, setUncontrolledAppearance] =
     React.useState<XFlowEditorAppearance>("dark");
   const [uncontrolledThemeVariant, setUncontrolledThemeVariant] =

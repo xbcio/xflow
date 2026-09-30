@@ -8,6 +8,8 @@ import { describe, expect, it, vi } from "vitest";
 import type { NodeTypesResponse, WorkflowDef, WorkflowNode } from "@xflow/core";
 import type { XFlowPreview as RealXFlowPreview } from "@xflow/preview";
 import { XFlowEditor } from "./index";
+import { translateNodeFormText } from "./node-form/i18n";
+import { zhCN } from "./node-form/locales/zh-CN";
 import type { NodeFormSchema } from "./node-form/schema";
 import generated from "./node-form/testdata/node-types.generated.json";
 
@@ -26,6 +28,8 @@ vi.mock("@xflow/preview", async (importOriginal) => {
 const nodeTypes = generated as unknown as NodeTypesResponse;
 const builtinTypes = [...new Set(nodeTypes.node_types.map((schema) => schema.node_type))];
 const supplyTypes = ["xflow.supply.external", "xflow.supply.static"];
+/** The library shows display names through the editor's zh-CN catalog. */
+const shownLabel = (item: NodeFormSchema) => translateNodeFormText(zhCN, item.display_name ?? item.node_type, item.node_type);
 
 const workflow: WorkflowDef = {
   name: "library",
@@ -56,8 +60,9 @@ describe("node library from /v1/node-types (Doc C §6.3)", () => {
 
     expect(tiles().map((element) => element.dataset.nodeType).sort()).toEqual([...builtinTypes, ...supplyTypes].sort());
     for (const item of nodeTypes.node_types) {
-      expect(tile(item.node_type).getAttribute("aria-label")).toBe(item.display_name);
+      expect(tile(item.node_type).getAttribute("aria-label")).toBe(shownLabel(item));
     }
+    expect(tile("xflow.approval").getAttribute("aria-label")).toBe("审批");
     // Existing presentation is kept for known types...
     expect(groupOf(tile("xflow.http"))).toBe("动作与人工");
     expect(iconOf(tile("xflow.http"))).toBe("global");
@@ -119,7 +124,7 @@ describe("node library from /v1/node-types (Doc C §6.3)", () => {
       expect(node.type).toBe(type);
       const described = nodeTypes.node_types.find((item) => item.node_type === type);
       expect(node.kind).toBe(described?.kind ?? "supply");
-      if (described) expect(node.ui).toEqual({ label: described.display_name });
+      if (described) expect(node.ui).toEqual({ label: shownLabel(described) });
     }
   }, 60_000);
 
@@ -138,7 +143,7 @@ describe("node library from /v1/node-types (Doc C §6.3)", () => {
       type: "xflow.map",
       kind: "action",
       position: { x: 320, y: 180 },
-      ui: { label: "Map" }
+      ui: { label: "遍历" }
     });
 
     const calls = handleChange.mock.calls.length;

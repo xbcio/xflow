@@ -9,3 +9,5 @@ export { nodeFormChecks, looksLikeSecret } from "./checks";
 export { deriveExpressionMode, deriveExpressionModeForPointer } from "./expressionMode";
 export * from "./components/index";
 export * from "./host";
+export { localizeNodeFormSchema, localizeNodeTypes, translateNodeFormText, type NodeFormCatalog } from "./i18n";
+export { nodeFormCatalogs } from "./locales";
