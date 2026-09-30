@@ -26,7 +26,14 @@ type StrandedLeaseReaper interface {
 	// record is unrecoverable, and reports how many candidates it inspected and
 	// how many of them it released. It is idempotent, safe to call concurrently
 	// from several replicas, and safe to run against a live directory: it never
-	// touches an assignment whose lease metadata is still present.
+	// touches an assignment whose lease metadata is still present, nor a
+	// finalized record whose assignment the directory still holds.
+	//
+	// Released also counts a finalized record whose assignment record is already
+	// gone — the state a release leaves behind when it does not reach its settle.
+	// Settling that record is all the work left on it, and no capacity is left to
+	// return, so counting it is what keeps the pass from reporting itself idle
+	// while it drains the shape.
 	//
 	// Inspected counts the candidates the pass found in the shape it drains: the
 	// 'leased' assignments its per-runner walks yielded, plus the records the
@@ -59,6 +66,16 @@ var _ StrandedLeaseReaper = (*RedisRunnerDirectory)(nil)
 //
 // That last point is what this reaper adds: the same release the poll performs,
 // driven by the control plane so it does not depend on the runner that died.
+//
+// # The second shape, which the first one leaves behind
+//
+// The release is not atomic with the settle that has to follow it, here or in
+// the sweeper: both take the assignment's record first and confirm the engine
+// outcome second. A crash in between leaves a finalized record whose assignment
+// record is gone, and both reclaim paths are blind to that too — the walks key
+// off the assignment's own record, and the ledger entry alone carries no lease
+// state to inspect. Pass B settles those as well, under a fence that keeps it
+// off any record whose assignment still exists.
 //
 // # Cost
 //
@@ -199,7 +216,9 @@ func (d *RedisRunnerDirectory) reapStrandedLedgerHandoffs(ctx context.Context, l
 // and runner and hands it to the shared release. The owning runner is only
 // needed to prune the per-runner index, and is legitimately absent for a record
 // written before that index existed or by a registry that removed the runner;
-// the release itself is fenced on the lease identity, not on the runner.
+// the release itself is fenced on the lease identity, not on the runner. A
+// record the release has nothing to act on is handed to the abandoned-record
+// settle instead, since the ledger is the only place such a record appears.
 func (d *RedisRunnerDirectory) reapStrandedHandoff(ctx context.Context, claimID string) (bool, error) {
 	assignmentID, err := d.rdb.HGet(ctx, d.keys.handoffClaim, claimID).Result()
 	if errors.Is(err, redis.Nil) || assignmentID == "" {
@@ -212,7 +231,68 @@ func (d *RedisRunnerDirectory) reapStrandedHandoff(ctx context.Context, claimID 
 	if err != nil && !errors.Is(err, redis.Nil) {
 		return false, fmt.Errorf("reap stranded leases: read handoff runner %q: %w", claimID, err)
 	}
-	return d.reapStrandedAssignment(ctx, runnerID, assignmentID)
+	released, err := d.reapStrandedAssignment(ctx, runnerID, assignmentID)
+	if released || err != nil {
+		return released, err
+	}
+	return d.settleReleasedLeaseHandoff(ctx, claimID, assignmentID)
+}
+
+// settleReleasedLeaseHandoff clears a finalized record whose assignment the
+// directory no longer holds at all.
+//
+// A release takes the assignment's own record and keeps this one until the
+// engine confirms the lease token is dead, and every caller performs that
+// confirmation in a later step: the sweeper reclaims through the engine between
+// the two, and this reaper's own release is followed by its settle. A crash in
+// either window leaves a record neither reclaim path can enumerate again — the
+// assignment's record is gone, so the lease walks no longer yield it, and only
+// the ledger still names it. Settling it here is what makes that window cost the
+// lease one cadence instead of pinning the debt for the life of the directory.
+//
+// The fence is the stranded release's own justification read from the other
+// side. assignment:state gone means LookupLease cannot resolve the lease and the
+// renewal Lua's state check no-ops, so no renew or report can ever succeed for
+// it; assignment:data gone means no assignment record is left for another
+// transition to be mid-flight on. The atomic release that has to have run for
+// this record to be here with its state gone deletes both, so the pair cannot
+// describe a live lease — and it is deliberately both, not the state alone,
+// because a record whose assignment survives is one the sweeper still has to
+// close against a real engine outcome.
+//
+// The lease identity comes from the record rather than the assignment for the
+// same reason: the assignment's copy is what the release deleted. That also
+// makes these reads advisory. The settle re-derives the claim from the
+// assignment and re-checks the record's state and lease identity, so a stale or
+// missing read can only cost a skipped settle, never a wrong one, and an
+// assignment re-enqueued between the fence and the write is rejected by that
+// same check.
+func (d *RedisRunnerDirectory) settleReleasedLeaseHandoff(ctx context.Context, claimID, assignmentID string) (bool, error) {
+	for _, key := range []string{d.keys.assignmentState, d.keys.assignmentData} {
+		held, err := d.rdb.HExists(ctx, key, assignmentID).Result()
+		if err != nil {
+			return false, fmt.Errorf("reap stranded leases: read assignment record %q: %w", assignmentID, err)
+		}
+		if held {
+			return false, nil
+		}
+	}
+	leaseID, err := d.rdb.HGet(ctx, d.keys.handoffLeaseID, claimID).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return false, fmt.Errorf("reap stranded leases: read handoff lease id %q: %w", claimID, err)
+	}
+	leaseToken, err := d.rdb.HGet(ctx, d.keys.handoffLeaseToken, claimID).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return false, fmt.Errorf("reap stranded leases: read handoff lease token %q: %w", claimID, err)
+	}
+	// Counted as released on the fence rather than on the settle's verdict: the
+	// settle reports settled, noop and mismatch alike, and all three mean this
+	// record holds no debt any more. A record another replica drained between
+	// the read above and this write is drained, not missed.
+	if err := d.SettleFinalizedHandoff(ctx, AssignmentID(assignmentID), engine.LeaseID(leaseID), engine.LeaseToken(leaseToken)); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // strandedLeaseCandidates returns every assignment runnerID holds in 'leased'

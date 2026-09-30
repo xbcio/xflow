@@ -724,6 +724,135 @@ func (c *Core) resolveHandoffClaim(ctx context.Context, claim Claim) (protocol.P
 	return protocol.PollTaskResponse{}, true, err
 }
 
+// ReapOrphanedHandoffs settles handoff debt whose owning runner can no longer
+// resolve it. It is the control-plane counterpart of resolveHandoffClaim: the
+// same engine questions, answered with the same dispositions, but driven by the
+// maintenance sweep instead of by the owning runner's own poll.
+//
+// It has to exist because resolveHandoffClaim is reachable only from that poll.
+// A runner that never comes back — a crash, a drain, an evicted pod — leaves its
+// handoff debt, and the assignment behind it, unresolved by every other path:
+// ReclaimExpiredClaims only marks this debt recoverable, the other maintenance
+// passes drain different shapes, and Register only rebinds a runner that
+// returns. See OrphanedHandoffReaper for the full reachability argument.
+//
+// The caller is a leader-gated maintenance pass, so it is safe for several
+// replicas to hold this method: ListOrphanedHandoffs takes the ledger's resolver
+// token before returning anything, and a second pass over the same claim gets
+// nothing to act on.
+func (c *Core) ReapOrphanedHandoffs(ctx context.Context, limit int) (ReapResult, error) {
+	if limit <= 0 {
+		return ReapResult{}, nil
+	}
+	directory, ok := c.runners.(OrphanedHandoffReaper)
+	if !ok || directory == nil {
+		return ReapResult{}, nil
+	}
+	claims, err := directory.ListOrphanedHandoffs(ctx, limit)
+	if err != nil {
+		// Whatever was listed before the failure is still real debt that was
+		// handed over, so the count travels with the error.
+		return ReapResult{Inspected: len(claims)}, err
+	}
+	result := ReapResult{Inspected: len(claims)}
+	// One bad record must not stop the batch: this is bounded maintenance, and
+	// the records behind it in the same pass are unrelated debt. The first error
+	// is still reported so the pass reads as failed rather than as one that
+	// settled everything it found.
+	var firstErr error
+	for _, claim := range claims {
+		settled, err := c.reapOrphanedHandoff(ctx, claim)
+		if err != nil {
+			if c.logger != nil {
+				c.logger.Error("reap orphaned runner handoff", "claim", string(claim.ClaimID), "err", err)
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if settled {
+			result.Released++
+		}
+	}
+	return result, firstErr
+}
+
+// reapOrphanedHandoff resolves one handoff whose resolver token this pass holds.
+// It returns true only when the debt was settled, in which case the token is
+// consumed with the ledger record; every other outcome returns the token so the
+// debt stays visible to the next pass and to an owner that comes back.
+func (c *Core) reapOrphanedHandoff(ctx context.Context, claim Claim) (bool, error) {
+	if claim.Handoff == nil {
+		return false, nil
+	}
+	if c.engine == nil {
+		c.makeClaimHandoffRecoverable(ctx, claim)
+		return false, ErrEngineNotConfigured
+	}
+	// Same injection as the poll path: the engine reads are namespaced, and the
+	// assignment's submit-time namespace is the authority for which one.
+	if ns := claim.Assignment.Namespace; ns != "" {
+		ctx = namespace.WithNamespace(ctx, ns)
+	}
+
+	var (
+		lease *engine.TaskLease
+		err   error
+	)
+	if isGroupTask(&claim.Assignment.Task) {
+		ge, ok := c.engine.(groupLeaseEngine)
+		if !ok {
+			c.makeClaimHandoffRecoverable(ctx, claim)
+			return false, errors.New("engine does not support group leases")
+		}
+		lease, err = c.recoverGroupLease(ctx, ge, &claim.Assignment.Task)
+	} else {
+		lease, err = c.recoverTaskLease(ctx, &claim.Assignment.Task)
+	}
+	if err == nil {
+		// A recoverable lease is evidence that work is still owned somewhere, and
+		// the one disposition this pass must never take is settling the debt
+		// underneath it: requeueing or dropping the assignment while the engine
+		// still holds a lease for it is exactly the duplicate execution the
+		// handoff ledger exists to prevent. The poll path can finalize the lease
+		// because it has a runner to hand it to; there is no runner here.
+		//
+		// Leaving the debt is also not a dead end. A live lease owned by a gone
+		// runner is ListExpiredLeases -> ReclaimLease's job, and once the lease
+		// sweeper has reclaimed it this resolve call returns
+		// ErrLeaseNotRecoverable and the next pass requeues the assignment
+		// cleanly.
+		c.makeClaimHandoffRecoverable(ctx, claim)
+		if c.logger != nil && lease != nil {
+			c.logger.Info("orphaned runner handoff still holds a recoverable lease",
+				"claim", string(claim.ClaimID), "lease", string(lease.LeaseID))
+		}
+		return false, nil
+	}
+
+	// The dispositions below are the poll path's, and they carry the same
+	// meaning: the engine authority is conclusive and says the assignment is
+	// either finished (drop) or never started (requeue).
+	var disposition HandoffDisposition
+	switch {
+	case errors.Is(err, engine.ErrExecutionInactive), errors.Is(err, engine.ErrGroupLeaseNotActive):
+		disposition = HandoffDispositionDrop
+	case errors.Is(err, engine.ErrLeaseNotRecoverable):
+		disposition = HandoffDispositionRequeue
+	default:
+		// Inconclusive. Retain the debt — a later pass, or the owner itself,
+		// resolves it once the engine can answer.
+		c.makeClaimHandoffRecoverable(ctx, claim)
+		return false, err
+	}
+	if settleErr := c.settleClaimHandoff(ctx, claim, disposition); settleErr != nil {
+		c.makeClaimHandoffRecoverable(ctx, claim)
+		return false, settleErr
+	}
+	return true, nil
+}
+
 func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info TransportInfo) (protocol.PollTaskResponse, error) {
 	if req.RunnerID == "" || req.SessionID == "" {
 		return protocol.PollTaskResponse{}, ErrRunnerSessionRequired

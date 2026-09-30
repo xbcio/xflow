@@ -41,6 +41,13 @@ const DefaultStrandedLeaseReapPeriod = 5 * time.Minute
 // existing reaper does.
 const DefaultDeadQueuedAssignmentReapPeriod = 5 * time.Minute
 
+// DefaultOrphanedHandoffReapPeriod bounds reclamation of handoff debt whose
+// owning runner is gone. It matches the other ledger-walking reapers: this one
+// scans the fleet-wide handoff ledger because there is no per-runner index to
+// walk once the owner has disappeared, so it is the most expensive of them and
+// the least urgent — the debt it settles has already waited out a claim expiry.
+const DefaultOrphanedHandoffReapPeriod = 5 * time.Minute
+
 // LeaseLister is the subset of engine.StateStore used by the sweeper to find
 // candidates for reclamation. The full StateStore interface satisfies this
 // shape implicitly.
@@ -94,6 +101,12 @@ type LeaseSweeper struct {
 	deadQueuedBatch  int
 	deadQueuedMu     sync.Mutex
 	lastDeadQueued   time.Time
+
+	orphanedHandoff       OrphanedHandoffReclaimer
+	orphanedHandoffPeriod time.Duration
+	orphanedHandoffBatch  int
+	orphanedHandoffMu     sync.Mutex
+	lastOrphanedHandoff   time.Time
 }
 
 // SweepObserver receives lease-sweep outcomes so observability layers can
@@ -121,6 +134,7 @@ const (
 	SweepPassLegacyLeaseMeta      = "legacy_lease_meta"
 	SweepPassStrandedLease        = "stranded_lease"
 	SweepPassDeadQueuedAssignment = "dead_queued_assignment"
+	SweepPassOrphanedHandoff      = "orphaned_handoff"
 )
 
 // Outcomes a maintenance pass reports.
@@ -219,6 +233,33 @@ type LeaseSweeperConfig struct {
 	// DeadQueuedAssignmentReapBatch bounds one reaper call. Zero defaults to
 	// defaultDeadQueuedAssignmentReapBatch.
 	DeadQueuedAssignmentReapBatch int
+	// OrphanedHandoffReaper resolves handoff debt whose owning runner is gone.
+	// Optional; nil skips the pass.
+	//
+	// Unlike the other optional reapers this is not a RunnerDirectory
+	// capability. Settling the debt is an engine question, not a directory
+	// question, and the component that holds both is Core — which is why the
+	// wiring is a field the control plane fills rather than an assertion on
+	// RunnerDirectory.
+	OrphanedHandoffReaper OrphanedHandoffReclaimer
+	// OrphanedHandoffReapPeriod controls the optional orphaned-handoff reaper
+	// rate. Zero defaults to DefaultOrphanedHandoffReapPeriod.
+	OrphanedHandoffReapPeriod time.Duration
+	// OrphanedHandoffReapBatch bounds one reaper call. Zero defaults to
+	// defaultOrphanedHandoffReapBatch.
+	OrphanedHandoffReapBatch int
+}
+
+// OrphanedHandoffReclaimer is the control-plane capability the sweeper drives to
+// settle handoff debt whose owning runner is gone. Core implements it; a host
+// that supplies no reaper simply skips the pass, and the ledger keeps the debt
+// visible.
+type OrphanedHandoffReclaimer interface {
+	// ReapOrphanedHandoffs settles up to limit orphaned handoffs and reports how
+	// many candidates it inspected and how many it settled. Implementation
+	// requirements — token fencing, engine consultation, when debt is retained —
+	// live on Core.ReapOrphanedHandoffs.
+	ReapOrphanedHandoffs(ctx context.Context, limit int) (ReapResult, error)
 }
 
 // NewLeaseSweeper builds a sweeper bound to the given state store and engine.
@@ -252,6 +293,12 @@ func NewLeaseSweeper(state LeaseLister, eng execution.Engine, cfg LeaseSweeperCo
 	}
 	if cfg.DeadQueuedAssignmentReapBatch <= 0 {
 		cfg.DeadQueuedAssignmentReapBatch = defaultDeadQueuedAssignmentReapBatch
+	}
+	if cfg.OrphanedHandoffReapPeriod <= 0 {
+		cfg.OrphanedHandoffReapPeriod = DefaultOrphanedHandoffReapPeriod
+	}
+	if cfg.OrphanedHandoffReapBatch <= 0 {
+		cfg.OrphanedHandoffReapBatch = defaultOrphanedHandoffReapBatch
 	}
 	var timingObserver SweepTimingObserver
 	if observer, ok := cfg.Observer.(SweepTimingObserver); ok {
@@ -287,6 +334,10 @@ func NewLeaseSweeper(state LeaseLister, eng execution.Engine, cfg LeaseSweeperCo
 		strandedBatch:    cfg.StrandedLeaseReapBatch,
 		deadQueuedPeriod: cfg.DeadQueuedAssignmentReapPeriod,
 		deadQueuedBatch:  cfg.DeadQueuedAssignmentReapBatch,
+
+		orphanedHandoff:       cfg.OrphanedHandoffReaper,
+		orphanedHandoffPeriod: cfg.OrphanedHandoffReapPeriod,
+		orphanedHandoffBatch:  cfg.OrphanedHandoffReapBatch,
 	}
 }
 
@@ -299,6 +350,7 @@ func (s *LeaseSweeper) Run(ctx context.Context) {
 	s.ReapLegacyLeaseMetaOnce(ctx)
 	s.ReapStrandedLeasesOnce(ctx)
 	s.ReapDeadQueuedAssignmentsOnce(ctx)
+	s.ReapOrphanedHandoffsOnce(ctx)
 	for {
 		if err := s.sleepFunc(ctx, s.period); err != nil {
 			return
@@ -307,6 +359,7 @@ func (s *LeaseSweeper) Run(ctx context.Context) {
 		s.ReapLegacyLeaseMetaOnce(ctx)
 		s.ReapStrandedLeasesOnce(ctx)
 		s.ReapDeadQueuedAssignmentsOnce(ctx)
+		s.ReapOrphanedHandoffsOnce(ctx)
 	}
 }
 
@@ -411,6 +464,65 @@ func (s *LeaseSweeper) ReapDeadQueuedAssignmentsOnce(ctx context.Context) int {
 		s.log.Info("reaped dead queued assignments", "reclaimed", result.Released)
 	}
 	s.observePass(ctx, SweepPassDeadQueuedAssignment, SweepPassOutcomeRan, result)
+	return result.Released
+}
+
+// ReapOrphanedHandoffsOnce settles handoff debt whose owning runner is gone, at
+// its own bounded cadence. It is separately leader-gated for the same reason as
+// the other maintenance passes: it is maintenance over shared state rather than
+// part of any one task's execution.
+//
+// This is the pass that reaches the one shape every other one is blind to. A
+// claim fenced as lease_may_exist or lease_created has exactly one resolver —
+// the owning runner's own poll, which asks the engine whether a lease exists
+// and settles the claim on the answer. ReclaimExpiredClaims deliberately only
+// marks such a claim recoverable, and never requeues it, because an engine lease
+// may exist and the directory cannot say. So when the owner dies, the debt and
+// the assignment behind it are unresolved by every control-plane path there is:
+// the other passes drain different shapes entirely, and Register only helps a
+// runner that comes back. See OrphanedHandoffReaper for the reachability
+// argument.
+//
+// Unlike the other three reapers this one goes through Core rather than the
+// directory, because settling the debt means asking the engine. That is a field
+// on the config rather than a directory assertion, so a host that wires no Core
+// skips the pass and the ledger keeps the debt visible.
+func (s *LeaseSweeper) ReapOrphanedHandoffsOnce(ctx context.Context) int {
+	if s.elector != nil && !s.elector.IsLeader() {
+		s.observePass(ctx, SweepPassOrphanedHandoff, SweepPassOutcomeSkippedNotLeader, ReapResult{})
+		return 0
+	}
+	if s.orphanedHandoff == nil {
+		s.observePass(ctx, SweepPassOrphanedHandoff, SweepPassOutcomeUnsupported, ReapResult{})
+		return 0
+	}
+
+	now := s.clock()
+	s.orphanedHandoffMu.Lock()
+	if !s.lastOrphanedHandoff.IsZero() && now.Sub(s.lastOrphanedHandoff) < s.orphanedHandoffPeriod {
+		s.orphanedHandoffMu.Unlock()
+		s.observePass(ctx, SweepPassOrphanedHandoff, SweepPassOutcomeSkippedCadence, ReapResult{})
+		return 0
+	}
+	s.lastOrphanedHandoff = now
+	s.orphanedHandoffMu.Unlock()
+
+	result, err := s.orphanedHandoff.ReapOrphanedHandoffs(ctx, s.orphanedHandoffBatch)
+	if err != nil {
+		// Never blocks lease execution, so it is logged and retried on the next
+		// cadence rather than surfaced as a sweep error. The result travels with
+		// it: a pass that settled some claims before failing has to report that,
+		// or a backlog larger than one batch looks like a pass that did nothing.
+		if s.log != nil {
+			s.log.Error("reap orphaned runner handoffs", "err", err)
+		}
+		s.observePass(ctx, SweepPassOrphanedHandoff, SweepPassOutcomeError, result)
+		return 0
+	}
+	if result.Released > 0 && s.log != nil {
+		s.log.Info("reaped orphaned runner handoffs", "settled", result.Released)
+	}
+	s.observePass(ctx, SweepPassOrphanedHandoff, SweepPassOutcomeRan, result)
 	return result.Released
 }
 

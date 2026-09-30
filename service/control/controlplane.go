@@ -492,7 +492,18 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	if !ok {
 		elector = backend.AlwaysLeader{}
 	}
-	sweeperCfg := LeaseSweeperConfig{Elector: elector, Logger: cfg.Logger, RunnerDirectory: runners}
+	sweeperCfg := LeaseSweeperConfig{
+		Elector:         elector,
+		Logger:          cfg.Logger,
+		RunnerDirectory: runners,
+		// The orphaned-handoff pass is the one reaper that cannot be a directory
+		// capability: settling that debt means asking the engine whether a lease
+		// still exists, and the component holding both the engine and the
+		// directory is Core. httpServer.core already has both bound by NewServer
+		// above, and it is the HTTP Core rather than the gRPC one because either
+		// is equivalent here — the pass never touches a transport.
+		OrphanedHandoffReaper: httpServer.core,
+	}
 	if cfg.Metrics != nil {
 		sweeperCfg.Observer = metrics.NewSweepMetrics(cfg.Metrics)
 	}

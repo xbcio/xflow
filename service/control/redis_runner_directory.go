@@ -867,68 +867,100 @@ func (d *RedisRunnerDirectory) recoverableHandoff(ctx context.Context, runnerID,
 			// written, and the transition that clears the record prunes it.
 			continue
 		}
-		status, err := d.evalStatus(ctx, redisTakeHandoffRecoveryLua, []string{
-			d.keys.handoffState,
-			d.keys.handoffClaim,
-			d.keys.handoffRecoveryReady,
-			d.keys.handoffRecoveryDeadline,
-		}, rawClaimID, strconv.FormatInt(time.Now().UTC().UnixMilli(), 10), strconv.FormatInt(d.claimTTLMillis(), 10))
+		status, err := d.takeHandoffRecovery(ctx, rawClaimID)
 		if err != nil {
 			return Claim{}, false, fmt.Errorf("take redis handoff recovery %q: %w", rawClaimID, err)
 		}
 		if status != "taken" {
 			continue
 		}
-		assignmentID, err := d.rdb.HGet(ctx, d.keys.handoffClaim, rawClaimID).Result()
+		claim, ok, err := d.buildHandoffClaim(ctx, rawClaimID, state)
 		if err != nil {
-			d.restoreHandoffRecovery(ctx, ClaimID(rawClaimID))
-			if errors.Is(err, redis.Nil) {
-				continue
-			}
-			return Claim{}, false, fmt.Errorf("read redis handoff assignment %q: %w", rawClaimID, err)
-		}
-		rawAssignment, err := d.rdb.HGet(ctx, d.keys.assignmentData, assignmentID).Result()
-		if err != nil {
-			d.restoreHandoffRecovery(ctx, ClaimID(rawClaimID))
-			if errors.Is(err, redis.Nil) {
-				continue
-			}
-			return Claim{}, false, fmt.Errorf("read redis handoff assignment payload %q: %w", assignmentID, err)
-		}
-		assignment, err := unmarshalRedisAssignment(rawAssignment)
-		if err != nil {
-			d.restoreHandoffRecovery(ctx, ClaimID(rawClaimID))
 			return Claim{}, false, err
 		}
-		generationRaw, err := d.rdb.HGet(ctx, d.keys.handoffGeneration, rawClaimID).Result()
-		if errors.Is(err, redis.Nil) {
-			generationRaw = "0"
-		} else if err != nil {
-			d.restoreHandoffRecovery(ctx, ClaimID(rawClaimID))
-			return Claim{}, false, fmt.Errorf("read redis handoff generation %q: %w", rawClaimID, err)
+		if !ok {
+			continue
 		}
-		generation, err := strconv.ParseUint(generationRaw, 10, 64)
-		if err != nil {
-			d.restoreHandoffRecovery(ctx, ClaimID(rawClaimID))
-			return Claim{}, false, fmt.Errorf("decode redis handoff generation %q: %w", rawClaimID, err)
-		}
-		debt := &HandoffDebt{State: state, AdmissionGeneration: generation}
-		if state == HandoffDebtLeaseCreated {
-			rawLease, err := d.rdb.HGet(ctx, d.keys.handoffLeaseMeta, rawClaimID).Result()
-			if err != nil {
-				d.restoreHandoffRecovery(ctx, ClaimID(rawClaimID))
-				return Claim{}, false, fmt.Errorf("read redis handoff lease %q: %w", rawClaimID, err)
-			}
-			lease, err := unmarshalRedisLeaseMeta(rawLease, assignment.Task)
-			if err != nil {
-				d.restoreHandoffRecovery(ctx, ClaimID(rawClaimID))
-				return Claim{}, false, fmt.Errorf("decode redis handoff lease %q: %w", rawClaimID, err)
-			}
-			debt.Lease = lease
-		}
-		return Claim{ClaimID: ClaimID(rawClaimID), Assignment: assignment, Handoff: debt}, true, nil
+		return claim, true, nil
 	}
 	return Claim{}, false, nil
+}
+
+// takeHandoffRecovery attempts to take the single resolver token a recoverable
+// handoff carries, returning the Lua's status: "taken" for this caller, and
+// "noop" or "busy" for anyone else.
+//
+// It is a helper rather than an inlined call because two callers now race for
+// the same token on purpose — the owning runner's poll, which resolves debt for
+// a runner that is alive, and the control plane's orphaned-handoff reaper, which
+// resolves debt for one that is not. Both must go through the same fence: a
+// second take before the first token's deadline is a "busy", which is what keeps
+// two resolvers from settling the same claim against the engine twice.
+func (d *RedisRunnerDirectory) takeHandoffRecovery(ctx context.Context, claimID string) (string, error) {
+	return d.evalStatus(ctx, redisTakeHandoffRecoveryLua, []string{
+		d.keys.handoffState,
+		d.keys.handoffClaim,
+		d.keys.handoffRecoveryReady,
+		d.keys.handoffRecoveryDeadline,
+	}, claimID, strconv.FormatInt(time.Now().UTC().UnixMilli(), 10), strconv.FormatInt(d.claimTTLMillis(), 10))
+}
+
+// buildHandoffClaim reads the ledger record behind a taken resolver token and
+// assembles the Claim a resolver needs. It is called only after the token is
+// held, and it returns the token on every failure so the debt is never left
+// behind a deadline its own owner cannot shorten.
+//
+// ok is false when the record is gone, which is not an error: a transition that
+// settled the claim between the take and this read has already done the work.
+func (d *RedisRunnerDirectory) buildHandoffClaim(ctx context.Context, claimID string, state HandoffDebtState) (Claim, bool, error) {
+	assignmentID, err := d.rdb.HGet(ctx, d.keys.handoffClaim, claimID).Result()
+	if err != nil {
+		d.restoreHandoffRecovery(ctx, ClaimID(claimID))
+		if errors.Is(err, redis.Nil) {
+			return Claim{}, false, nil
+		}
+		return Claim{}, false, fmt.Errorf("read redis handoff assignment %q: %w", claimID, err)
+	}
+	rawAssignment, err := d.rdb.HGet(ctx, d.keys.assignmentData, assignmentID).Result()
+	if err != nil {
+		d.restoreHandoffRecovery(ctx, ClaimID(claimID))
+		if errors.Is(err, redis.Nil) {
+			return Claim{}, false, nil
+		}
+		return Claim{}, false, fmt.Errorf("read redis handoff assignment payload %q: %w", assignmentID, err)
+	}
+	assignment, err := unmarshalRedisAssignment(rawAssignment)
+	if err != nil {
+		d.restoreHandoffRecovery(ctx, ClaimID(claimID))
+		return Claim{}, false, err
+	}
+	generationRaw, err := d.rdb.HGet(ctx, d.keys.handoffGeneration, claimID).Result()
+	if errors.Is(err, redis.Nil) {
+		generationRaw = "0"
+	} else if err != nil {
+		d.restoreHandoffRecovery(ctx, ClaimID(claimID))
+		return Claim{}, false, fmt.Errorf("read redis handoff generation %q: %w", claimID, err)
+	}
+	generation, err := strconv.ParseUint(generationRaw, 10, 64)
+	if err != nil {
+		d.restoreHandoffRecovery(ctx, ClaimID(claimID))
+		return Claim{}, false, fmt.Errorf("decode redis handoff generation %q: %w", claimID, err)
+	}
+	debt := &HandoffDebt{State: state, AdmissionGeneration: generation}
+	if state == HandoffDebtLeaseCreated {
+		rawLease, err := d.rdb.HGet(ctx, d.keys.handoffLeaseMeta, claimID).Result()
+		if err != nil {
+			d.restoreHandoffRecovery(ctx, ClaimID(claimID))
+			return Claim{}, false, fmt.Errorf("read redis handoff lease %q: %w", claimID, err)
+		}
+		lease, err := unmarshalRedisLeaseMeta(rawLease, assignment.Task)
+		if err != nil {
+			d.restoreHandoffRecovery(ctx, ClaimID(claimID))
+			return Claim{}, false, fmt.Errorf("decode redis handoff lease %q: %w", claimID, err)
+		}
+		debt.Lease = lease
+	}
+	return Claim{ClaimID: ClaimID(claimID), Assignment: assignment, Handoff: debt}, true, nil
 }
 
 // pruneHandoffClaimIndex drops an index entry whose handoff record no longer
@@ -2500,7 +2532,20 @@ local state = redis.call('HGET', KEYS[13], claimID)
 if not assignmentID or not state then return 'noop' end
 if assignmentID ~= ARGV[3] then return 'noop' end
 if state ~= 'lease_may_exist' and state ~= 'lease_created' then return 'unresolved' end
-if redis.call('HGET', KEYS[4], assignmentID) ~= 'claimed' or redis.call('HGET', KEYS[5], assignmentID) ~= claimID then return 'unresolved' end
+local assignmentState = redis.call('HGET', KEYS[4], assignmentID)
+-- Ownership is proven by either direction of the claim index. assignmentClaim is
+-- the reverse index and is written and cleared in the same steps as
+-- assignmentState, so a record that lost one lost the other: a claim that
+-- predates handoff-ledger recovery, or whose writer died mid-transition, shows
+-- up as a missing state with claimsAssignment still naming the assignment.
+-- claimsAssignment is fenced against assignmentID by the caller's own read
+-- above, so it is an independent witness, not a restatement of the same read.
+-- A state that is present must still be 'claimed': 'leased' is written through
+-- this field, so a live lease would be visible here and must keep blocking.
+local owned = redis.call('HGET', KEYS[5], assignmentID) == claimID
+if not owned then owned = redis.call('HGET', KEYS[8], claimID) == assignmentID end
+if not owned then return 'unresolved' end
+if assignmentState and assignmentState ~= 'claimed' then return 'unresolved' end
 if ARGV[2] == 'requeue' then
   redis.call('HSET', KEYS[4], assignmentID, 'queued')
   redis.call('HDEL', KEYS[5], assignmentID)
