@@ -444,6 +444,7 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 			// bare 409. Without this the difference between them is only
 			// recoverable from logs, which is what stalled the R6 attribution.
 			WithReportRejectionObserver(metrics.NewReportRejectionMetrics(cfg.Metrics)),
+			WithRunnerDescriptorObserver(metrics.NewRunnerDescriptorMetrics(cfg.Metrics)),
 		)
 	}
 	if cfg.Tracer != nil {
@@ -475,6 +476,7 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 			// not reach it. Without this pair a gRPC-transport 409 stays
 			// unattributable, which is the whole reason these counters exist.
 			WithGRPCReportRejectionObserver(metrics.NewReportRejectionMetrics(cfg.Metrics)),
+			WithGRPCRunnerDescriptorObserver(metrics.NewRunnerDescriptorMetrics(cfg.Metrics)),
 		)
 	}
 	if cfg.Tracer != nil {

@@ -94,6 +94,9 @@ type Core struct {
 	// to succeed — so without this the 409 rate cannot be attributed. nil is a
 	// no-op (see report_rejection_observer.go).
 	reportRejectionObserver ReportRejectionObserver
+	// runnerDescriptorObserver, when set, counts runner-reported descriptors
+	// dropped at registration by reason. nil is a no-op.
+	runnerDescriptorObserver RunnerDescriptorObserver
 	// timeoutObserver, when set, records node execution timeout events emitted
 	// from the server side. The only server-side origin is the renewLease
 	// backstop that commits a terminal timeout when a lease's ExecutionDeadline
@@ -319,11 +322,15 @@ func (c *Core) register(ctx context.Context, req protocol.RegisterRunnerRequest,
 			return protocol.RegisterRunnerResponse{}, fmt.Errorf("%w: policy %q does not grant node type %q", ErrAuthCapabilityDenied, policy.Name, capability.NodeType)
 		}
 	}
+	// Descriptors are editor metadata: a bad or over-limit payload drops
+	// entries (logged and counted) but never fails the registration.
+	descriptors := c.acceptRunnerDescriptors(ctx, req, policy)
 	session, err := c.runners.Register(ctx, RegisterRunnerRequest{
 		RunnerID:     req.RunnerID,
 		Capacity:     req.Concurrency,
 		Labels:       labels,
 		Capabilities: req.Capabilities,
+		Descriptors:  descriptors,
 		Policy:       policy,
 		Namespaces:   effective,
 		Activations:  req.Activations,

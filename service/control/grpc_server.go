@@ -56,6 +56,12 @@ func WithGRPCReportRejectionObserver(observer ReportRejectionObserver) GRPCServe
 	return func(s *GRPCServer) { s.core.reportRejectionObserver = observer }
 }
 
+// WithGRPCRunnerDescriptorObserver installs the runner-descriptor rejection
+// observer on the gRPC server's own Core. nil or unset is a no-op.
+func WithGRPCRunnerDescriptorObserver(observer RunnerDescriptorObserver) GRPCServerOption {
+	return func(s *GRPCServer) { s.core.runnerDescriptorObserver = observer }
+}
+
 // WithGRPCAuthObserver installs a non-blocking observer for runner auth decisions.
 func WithGRPCAuthObserver(observer AuthObserver) GRPCServerOption {
 	return func(s *GRPCServer) { s.core.authObserver = observer }

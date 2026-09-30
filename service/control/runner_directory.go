@@ -57,8 +57,13 @@ type RegisterRunnerRequest struct {
 	Capacity     int
 	Labels       map[string]string
 	Capabilities []protocol.Capability
-	Policy       RunnerPolicy
-	Namespaces   []namespace.Namespace
+	// Descriptors are the runner-reported node descriptors Core accepted,
+	// sorted by type then version. A registration replaces the session's
+	// previous set; nil clears it. Directories that implement
+	// RunnerDescriptorDirectory store them; others ignore them.
+	Descriptors []RunnerNodeDescriptor
+	Policy      RunnerPolicy
+	Namespaces  []namespace.Namespace
 	// Activations is the runner's reconnect inventory. It is passed through the
 	// directory registration transition so a replacement session can atomically
 	// prove which old trigger generations it still hosts before inheriting their

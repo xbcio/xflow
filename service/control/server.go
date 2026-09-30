@@ -162,6 +162,12 @@ func WithReportRejectionObserver(observer ReportRejectionObserver) ServerOption 
 	return func(s *Server) { s.core.reportRejectionObserver = observer }
 }
 
+// WithRunnerDescriptorObserver installs a non-blocking observer for
+// runner-reported descriptors dropped at registration. nil or unset is a no-op.
+func WithRunnerDescriptorObserver(observer RunnerDescriptorObserver) ServerOption {
+	return func(s *Server) { s.core.runnerDescriptorObserver = observer }
+}
+
 // WithNodeTimeoutObserver installs the observer for node execution timeout
 // events emitted from the server side (the renewLease backstop). nil or unset
 // leaves the Core with a nil observer, which renewLease nil-guards so legacy
