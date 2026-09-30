@@ -346,14 +346,23 @@ func (n *ApprovalNode) OnResume(_ context.Context, input *types.Input, signal *t
 // on, and the ledger also holds entries for the delegate and add_signer
 // decisions themselves.
 func (n *ApprovalNode) handleApprove(params *ApprovalParams, chain []string, input *types.Input, signal *types.SignalPayload, approver string, record approvalRecord) (*types.Output, error) {
+	record.decisions = appendDecision(record.decisions, approver, actionApprove, signal.Data["comment"])
 	if params.Mode == ApprovalAny {
-		return &types.Output{
-			Data: approvalOutput(input.Data, map[string]any{"approved": true, "approver": approver, "comment": signal.Data["comment"]}),
-			Port: "approved",
-		}, nil
+		// "any" closes on the first approval, and names that approver beside
+		// "approved" so a consumer need not read the ledger to know who decided.
+		// The decision goes on the ledger all the same: it is the entry an
+		// auditor looks for, and a gate whose record omitted the approval that
+		// closed it would read like a gate nobody decided. Publishing through
+		// decide() also keeps the rule the "all" path is pinned on -- the copy
+		// downstream is rebuilt from this node's state, so an upstream map
+		// under "decisions" cannot ride out as this node's record.
+		return decide(input, record, "approved", map[string]any{
+			"approved": true,
+			"approver": approver,
+			"comment":  signal.Data["comment"],
+		}), nil
 	}
 
-	record.decisions = appendDecision(record.decisions, approver, actionApprove, signal.Data["comment"])
 	if !allChainMembersDecided(chain, record.decisions) {
 		return resuspendWithRecord(input, record), nil
 	}

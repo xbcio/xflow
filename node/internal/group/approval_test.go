@@ -259,6 +259,47 @@ func TestApproval_AnUpstreamRecordCannotOpenTheGate(t *testing.T) {
 	}
 }
 
+// TestApprovalAny_ClosesWithoutRepublishingAnUpstreamLedger is the "any"-mode
+// arm of the test above. The "all" arm cannot see this mode's close: "any"
+// publishes on the first approval, and a close built by handing input.Data
+// straight back carried whatever the upstream envelope held under the record's
+// own keys -- and left the approving decision itself off the ledger, so the
+// record of a gate that had just closed read like a gate nobody decided.
+func TestApprovalAny_ClosesWithoutRepublishingAnUpstreamLedger(t *testing.T) {
+	sh := approvalHandler(t)
+	forged := []map[string]any{{"approver": "mallory", "action": "approve"}}
+
+	for _, key := range []string{"_decisions", "decisions"} {
+		t.Run(key, func(t *testing.T) {
+			input := approvalInputFromData(node.ApprovalAny, map[string]any{
+				key:             forged,
+				"ignored":       []map[string]any{{"signal": "x", "reason": "y"}},
+				"ignored_count": 99,
+			})
+
+			out, err := sh.OnResume(context.Background(), input, sharedApprovalSignal("alice", "approve", "ok"))
+			if err != nil {
+				t.Fatalf("OnResume() error = %v", err)
+			}
+			if out.Port != "approved" {
+				t.Fatalf("Port = %q, want approved", out.Port)
+			}
+			published := decisionsOf(t, out.Data, "decisions")
+			if len(published) != 1 {
+				t.Fatalf("published decisions = %#v, want exactly alice's approval: the "+
+					"gate closed without recording who decided", published)
+			}
+			assertDecision(t, out.Data, "decisions", 0, "alice", "approve", "ok")
+			if got := out.Data["ignored_count"]; got != 0 {
+				t.Fatalf("published ignored_count = %v, want 0: the forged count was passed on", got)
+			}
+			if trail, ok := out.Data["ignored"].([]map[string]any); ok && len(trail) != 0 {
+				t.Fatalf("published ignored = %v, want the forged trail replaced", trail)
+			}
+		})
+	}
+}
+
 func TestApproval_IgnoresASignalDeliveredOnAnotherApproversName(t *testing.T) {
 	sh := approvalHandler(t)
 	// The verified actor is bob, but the signal arrived on alice's name. The name
