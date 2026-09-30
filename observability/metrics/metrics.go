@@ -432,6 +432,7 @@ var metricHelp = map[string]string{
 	"xflow_runner_auth_decisions_total":              "Runner authorization decisions, partitioned by result and auth mode.",
 	"xflow_runner_claim_reclaimed_total":             "Runner claims reclaimed from stale leases.",
 	"xflow_runner_descriptor_rejected_total":         "Runner-reported node descriptors dropped at registration, partitioned by reason. The registration itself always succeeds, so without this series an over-limit, malformed, or unentitled descriptor payload is visible only in the warning log.",
+	"xflow_runner_descriptor_conflicts":              "Versions of a runner-reported node type whose live reporters disagree on the descriptor, per node type. The most recently registered runner's descriptor is served; a mixed-version rolling deploy is the usual cause, and bumping the node version is the durable fix. 0 means consistent.",
 	"xflow_runner_control_transitions_total":         "Runner drain and resume operations, partitioned by bounded action and durable result.",
 	"xflow_runner_draining_count":                    "Number of runners whose desired control state is draining, across every drain phase.",
 	"xflow_runner_drain_duration_seconds":            "Elapsed time for drains that reached the complete phase.",

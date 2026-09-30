@@ -29,3 +29,21 @@ func TestRunnerDescriptorMetricsCountByReason(t *testing.T) {
 		t.Fatalf("rejections = %v, want undeclared_type=2 envelope_too_large=1", counts)
 	}
 }
+
+func TestRunnerDescriptorMetricsConflictGaugePerType(t *testing.T) {
+	m := New()
+	observer := NewRunnerDescriptorMetrics(m)
+	ctx := context.Background()
+
+	observer.OnRunnerDescriptorConflicts(ctx, "acme.a", 2)
+	observer.OnRunnerDescriptorConflicts(ctx, "acme.b", 0)
+	observer.OnRunnerDescriptorConflicts(ctx, "acme.a", 1)
+
+	got := map[string]float64{}
+	for _, metric := range gatherMetricFamily(t, m, metricRunnerDescriptorConflicts).GetMetric() {
+		got[labelValue(metric, "node_type")] = metric.GetGauge().GetValue()
+	}
+	if got["acme.a"] != 1 || got["acme.b"] != 0 || len(got) != 2 {
+		t.Fatalf("conflict gauges = %v, want acme.a=1 acme.b=0", got)
+	}
+}
