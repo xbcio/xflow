@@ -219,9 +219,14 @@ type RegisterRequest struct {
 	Activations  []*ActivationInventoryItem `protobuf:"bytes,6,rep,name=activations,proto3" json:"activations,omitempty"`
 	// instance_uid identifies the registering process instance; see
 	// protocol.RegisterRunnerRequest.InstanceUID.
-	InstanceUid   string `protobuf:"bytes,7,opt,name=instance_uid,json=instanceUid,proto3" json:"instance_uid,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	InstanceUid string `protobuf:"bytes,7,opt,name=instance_uid,json=instanceUid,proto3" json:"instance_uid,omitempty"`
+	// descriptors_json is the versioned runner descriptor envelope
+	// (protocol.RunnerDescriptorSchema) encoded as JSON. Empty means the runner
+	// reports no node descriptors. Control decodes and validates it; see
+	// protocol.RegisterRunnerRequest.DescriptorsJSON.
+	DescriptorsJson []byte `protobuf:"bytes,8,opt,name=descriptors_json,json=descriptorsJson,proto3" json:"descriptors_json,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *RegisterRequest) Reset() {
@@ -301,6 +306,13 @@ func (x *RegisterRequest) GetInstanceUid() string {
 		return x.InstanceUid
 	}
 	return ""
+}
+
+func (x *RegisterRequest) GetDescriptorsJson() []byte {
+	if x != nil {
+		return x.DescriptorsJson
+	}
+	return nil
 }
 
 // ActivationInventoryItem reports a single trigger activation the runner is
@@ -1045,9 +1057,11 @@ type HelloFrame struct {
 	Labels       map[string]string      `protobuf:"bytes,4,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	Namespaces   []string               `protobuf:"bytes,5,rep,name=namespaces,proto3" json:"namespaces,omitempty"`
 	// instance_uid: see RegisterRequest.instance_uid.
-	InstanceUid   string `protobuf:"bytes,6,opt,name=instance_uid,json=instanceUid,proto3" json:"instance_uid,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	InstanceUid string `protobuf:"bytes,6,opt,name=instance_uid,json=instanceUid,proto3" json:"instance_uid,omitempty"`
+	// descriptors_json: see RegisterRequest.descriptors_json.
+	DescriptorsJson []byte `protobuf:"bytes,7,opt,name=descriptors_json,json=descriptorsJson,proto3" json:"descriptors_json,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *HelloFrame) Reset() {
@@ -1120,6 +1134,13 @@ func (x *HelloFrame) GetInstanceUid() string {
 		return x.InstanceUid
 	}
 	return ""
+}
+
+func (x *HelloFrame) GetDescriptorsJson() []byte {
+	if x != nil {
+		return x.DescriptorsJson
+	}
+	return nil
 }
 
 type ResultFrame struct {
@@ -1748,7 +1769,7 @@ const file_service_protocol_runnerpb_runner_proto_rawDesc = "" +
 	"generation\x18\x01 \x01(\x04R\n" +
 	"generation\x12#\n" +
 	"\rrecovery_only\x18\x02 \x01(\bR\frecoveryOnly\x12-\n" +
-	"\x12active_activations\x18\x03 \x01(\rR\x11activeActivations\"\xa1\x03\n" +
+	"\x12active_activations\x18\x03 \x01(\rR\x11activeActivations\"\xcc\x03\n" +
 	"\x0fRegisterRequest\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12 \n" +
 	"\vconcurrency\x18\x02 \x01(\x05R\vconcurrency\x12?\n" +
@@ -1758,7 +1779,8 @@ const file_service_protocol_runnerpb_runner_proto_rawDesc = "" +
 	"namespaces\x18\x05 \x03(\tR\n" +
 	"namespaces\x12J\n" +
 	"\vactivations\x18\x06 \x03(\v2(.xflow.runner.v1.ActivationInventoryItemR\vactivations\x12!\n" +
-	"\finstance_uid\x18\a \x01(\tR\vinstanceUid\x1a9\n" +
+	"\finstance_uid\x18\a \x01(\tR\vinstanceUid\x12)\n" +
+	"\x10descriptors_json\x18\b \x01(\fR\x0fdescriptorsJson\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xce\x01\n" +
@@ -1837,7 +1859,7 @@ const file_service_protocol_runnerpb_runner_proto_rawDesc = "" +
 	"\x06result\x18\x02 \x01(\v2\x1c.xflow.runner.v1.ResultFrameH\x00R\x06result\x12-\n" +
 	"\x03bye\x18\x03 \x01(\v2\x19.xflow.runner.v1.ByeFrameH\x00R\x03bye\x12[\n" +
 	"\x13control_observation\x18\x04 \x01(\v2(.xflow.runner.v1.ControlObservationFrameH\x00R\x12controlObservationB\a\n" +
-	"\x05frame\"\xcb\x02\n" +
+	"\x05frame\"\xf6\x02\n" +
 	"\n" +
 	"HelloFrame\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12 \n" +
@@ -1847,7 +1869,8 @@ const file_service_protocol_runnerpb_runner_proto_rawDesc = "" +
 	"\n" +
 	"namespaces\x18\x05 \x03(\tR\n" +
 	"namespaces\x12!\n" +
-	"\finstance_uid\x18\x06 \x01(\tR\vinstanceUid\x1a9\n" +
+	"\finstance_uid\x18\x06 \x01(\tR\vinstanceUid\x12)\n" +
+	"\x10descriptors_json\x18\a \x01(\fR\x0fdescriptorsJson\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"h\n" +

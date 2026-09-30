@@ -69,6 +69,11 @@ message RegisterRequest {
   // instance_uid identifies the registering process instance; see
   // protocol.RegisterRunnerRequest.InstanceUID.
   string instance_uid = 7;
+  // descriptors_json is the versioned runner descriptor envelope
+  // (protocol.RunnerDescriptorSchema) encoded as JSON. Empty means the runner
+  // reports no node descriptors. Control decodes and validates it; see
+  // protocol.RegisterRunnerRequest.DescriptorsJSON.
+  bytes descriptors_json = 8;
 }
 
 // ActivationInventoryItem reports a single trigger activation the runner is
@@ -178,6 +183,8 @@ message HelloFrame {
   repeated string namespaces = 5;
   // instance_uid: see RegisterRequest.instance_uid.
   string instance_uid = 6;
+  // descriptors_json: see RegisterRequest.descriptors_json.
+  bytes descriptors_json = 7;
 }
 
 message ResultFrame {
