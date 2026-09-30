@@ -99,6 +99,12 @@ func (s *memoryState) CreateExecutionWithOutbox(_ context.Context, e *engine.Exe
 	defer s.mu.Unlock()
 	s.createExecutionLocked(e)
 	for _, entry := range entries {
+		// A root skip intent is fenced on its unit's "skip" scheduling marker,
+		// which must exist before the intent can be delivered (see
+		// engine.UnselectedRootSkips).
+		if entry.Task.Type == engine.TaskTypeNodeSkip {
+			s.scheduled[memoryCounterKey(e.ID, entry.Task.UnitIdx)] = "skip"
+		}
 		s.putOutboxEntryLocked(e.ID, entry)
 	}
 	return nil

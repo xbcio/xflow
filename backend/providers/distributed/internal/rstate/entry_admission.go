@@ -39,8 +39,13 @@ var _ engine.EntryAdmissionStore = (*Store)(nil)
 //
 //	5=exitCount 6=downstreamCount
 //	7.. = per exit: encoded exit data + private-output bit (2 args each)
-//	7+2*exitCount..end = per downstream: arrivalCount, activeCount, mergeMode,
+//	7+2*exitCount.. = per downstream: arrivalCount, activeCount, mergeMode,
 //	                   executeID, executeBody, skipID, skipBody, nodeName (8 each)
+//	then rootSkipCount, then per unselected root: skipID, skipBody (2 each)
+//
+// The unselected-root tail (engine.UnselectedRootSkips) follows the downstream
+// keys: one schedule key per root. Appending it at the end leaves every earlier
+// slot where it was. A missing count reads as zero.
 //
 // Returns {code, finalStatus, skips}: code 1=accepted, 2=duplicate, 3=conflict;
 // skips is the flat {name, count, ...} list of the downstream units this
@@ -162,6 +167,29 @@ if remaining > 0 then
         argpos = argpos + 8
     end
     redis.call('EXPIRE', KEYS[8], ttl); redis.call('EXPIRE', KEYS[9], ttl)
+end
+-- Step 8: Resolve the roots this admission did not seed as skipped, so they
+-- neither hold remaining open nor block a fan-in shared with the seeded entry.
+-- They are not reported in skips: that list is the downstream fan-in decision.
+if remaining > 0 then
+    local downstreamCount = tonumber(ARGV[6] or '0')
+    local rootArg = 7 + 2 * exitCount + 8 * downstreamCount
+    local rootKey = 10 + 2 * exitCount + 3 * downstreamCount
+    local rootCount = tonumber(ARGV[rootArg] or '0')
+    for i = 1, rootCount do
+        local scheduleKey = KEYS[rootKey + i - 1]
+        local skipID = ARGV[rootArg + 1 + (i - 1) * 2]
+        local skipBody = ARGV[rootArg + 2 + (i - 1) * 2]
+        if redis.call('HSETNX', scheduleKey, 'action', 'skip') == 1 then
+            redis.call('EXPIRE', scheduleKey, ttl)
+            if redis.call('HSETNX', KEYS[9], skipID, skipBody) == 1 then
+                redis.call('ZADD', KEYS[8], 0, skipID)
+            end
+        end
+    end
+    if rootCount > 0 then
+        redis.call('EXPIRE', KEYS[8], ttl); redis.call('EXPIRE', KEYS[9], ttl)
+    end
 end
 return {1, finalStatus, skips}
 `)
@@ -333,6 +361,19 @@ func (s *Store) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 			return engine.SeedExecutionFromEntryResponse{}, err
 		}
 		args = append(args, arrival.ArrivalCount, arrival.ActiveCount, arrival.MergeMode, executeID, executeJSON, skipID, skipJSON, arrival.NodeName)
+	}
+
+	// Unselected roots (keys + args), after every downstream slot.
+	rootSkips := engine.UnselectedRootSkips(execID, req.Graph, req.EntryUnitIdx)
+	args = append(args, len(rootSkips))
+	for _, skip := range rootSkips {
+		skipID := redisSkipOutboxID(execID, skip.NodeName, 0)
+		skipJSON, err := marshalRedisOutboxEntry(skipID, skip, time.Time{})
+		if err != nil {
+			return engine.SeedExecutionFromEntryResponse{}, err
+		}
+		keys = append(keys, scheduleKey(t, execID, skip.UnitIdx))
+		args = append(args, skipID, skipJSON)
 	}
 
 	// Run Lua.

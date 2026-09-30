@@ -62,6 +62,31 @@ func triggerGroupWithDownstreamGraph(t *testing.T) *graph.Graph {
 	return g
 }
 
+// triggerGroupWithSiblingRootGraph: trigger group "tg" [entry, body] plus a
+// second, ungrouped trigger root "hook" -> "hook_end". UnitCount=3. Seeding tg
+// must resolve hook as skipped.
+func triggerGroupWithSiblingRootGraph(t *testing.T) *graph.Graph {
+	t.Helper()
+	g, err := graph.Compile(&types.WorkflowDef{
+		Name: "tg-sibling-root",
+		Nodes: []types.NodeDef{
+			{Name: "entry", Kind: types.NodeKindTrigger},
+			{Name: "body", Kind: types.NodeKindAction},
+			{Name: "hook", Kind: types.NodeKindTrigger},
+			{Name: "hook_end", Kind: types.NodeKindAction},
+		},
+		Connections: types.Connections{
+			"entry": {"main": {Targets: []types.Connection{{Node: "body", Input: "main"}}}},
+			"hook":  {"main": {Targets: []types.Connection{{Node: "hook_end", Input: "main"}}}},
+		},
+		Groups: []types.GroupDef{{Name: "tg", Members: []string{"entry", "body"}}},
+	})
+	if err != nil {
+		t.Fatalf("compile triggerGroupWithSiblingRootGraph: %v", err)
+	}
+	return g
+}
+
 func buildAdmissionRequest(t *testing.T, g *graph.Graph, key engine.AdmissionKey, outcome engine.GroupOutcome, exits []engine.BoundaryExit, downstream []engine.DownstreamArrival) engine.SeedExecutionFromEntryRequest {
 	t.Helper()
 	groups := g.Groups()
@@ -305,6 +330,76 @@ func RunEntryAdmissionContract(t *testing.T, newStore func(*testing.T) EntryAdmi
 		}
 		if !found {
 			t.Fatalf("outbox entries %+v do not contain a task for 'store'", entries)
+		}
+	})
+
+	// A workflow may declare several entries; an admission seeds exactly one.
+	// Every other root must be resolved as skipped in the same transition, or
+	// it holds the completion counter open forever (see
+	// engine.UnselectedRootSkips). The skip intent is only useful with its
+	// scheduling marker, so the proof is that the system skip commit the
+	// intent drives is accepted rather than refused as stale.
+	t.Run("UnselectedRootIsResolvedAsSkip", func(t *testing.T) {
+		s := newStore(t)
+		g := triggerGroupWithSiblingRootGraph(t)
+		gm := g.Groups()[0]
+		exits := []engine.BoundaryExit{{NodeName: "body", Port: "main", Data: map[string]any{"r": 1}}}
+		req := engine.SeedExecutionFromEntryRequest{
+			AdmissionKey:    "k-sibling",
+			Namespace:       namespace.Default,
+			WorkflowID:      "wf-test",
+			WorkflowVersion: "v1",
+			EntryUnitID:     gm.Name,
+			EntryUnitIdx:    gm.UnitIdx,
+			Graph:           g,
+			Outcome:         engine.GroupOutcomeSuccess,
+			Exits:           exits,
+			ResultHash:      engine.ComputeResultHash(engine.GroupOutcomeSuccess, exits),
+		}
+		resp, err := s.SeedExecutionFromEntry(ctx, req)
+		if err != nil {
+			t.Fatalf("admission: %v", err)
+		}
+		if resp.State != engine.AdmissionStateAccepted {
+			t.Fatalf("state = %q, want accepted", resp.State)
+		}
+
+		entries, err := s.(engine.AtomicStateStore).ListOutbox(ctx, resp.ExecutionID, time.Now().Add(time.Hour), 10)
+		if err != nil {
+			t.Fatalf("ListOutbox: %v", err)
+		}
+		var skip *engine.Task
+		for i := range entries {
+			if entries[i].Task.NodeName == "hook" {
+				skip = &entries[i].Task
+			}
+		}
+		if skip == nil || skip.Type != engine.TaskTypeNodeSkip {
+			t.Fatalf("outbox %+v carries no skip intent for the unselected root \"hook\"", entries)
+		}
+		hookIdx, _ := g.NodeIndex("hook")
+		if skip.NodeIdx != hookIdx || skip.UnitIdx != g.UnitIndexForNode(hookIdx) {
+			t.Fatalf("skip intent = %+v, want node %d unit %d", *skip, hookIdx, g.UnitIndexForNode(hookIdx))
+		}
+
+		res, err := s.(engine.AtomicStateStore).CommitNode(ctx, engine.CommitNodeRequest{
+			ExecutionID: resp.ExecutionID,
+			NodeName:    skip.NodeName,
+			NodeIdx:     skip.NodeIdx,
+			UnitIdx:     skip.UnitIdx,
+			Status:      types.NodeStatusSkipped,
+			System:      true,
+		})
+		if err != nil {
+			t.Fatalf("CommitNode(skip hook): %v", err)
+		}
+		if res.Outcome != engine.CommitOutcomeAccepted {
+			t.Fatalf("skip commit outcome = %q, want accepted (no skip marker was written)", res.Outcome)
+		}
+
+		// A duplicate retry applied nothing, so it must not add a second intent.
+		if _, err := s.SeedExecutionFromEntry(ctx, req); err != nil {
+			t.Fatalf("duplicate admission: %v", err)
 		}
 	})
 

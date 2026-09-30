@@ -94,6 +94,11 @@ func (e *Engine) startExecution(ctx context.Context, snap *ExecutionSnapshot, ta
 	e.cacheExecutionGraph(snap.ID, snap.Graph)
 	for _, initial := range tasks {
 		task := initial.task
+		// A skip intent is resolved by the atomic commit protocol this legacy
+		// store does not provide; enqueueing it would only fail on dequeue.
+		if task.Type == TaskTypeNodeSkip {
+			continue
+		}
 		if err := e.queue.Enqueue(ctx, &task); err != nil {
 			return "", e.failInitialExecution(ctx, snap.ID, initial.operation, err)
 		}

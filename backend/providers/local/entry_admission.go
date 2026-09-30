@@ -104,6 +104,19 @@ func (s *memoryState) SeedExecutionFromEntry(_ context.Context, req engine.SeedE
 		result.Skipped = skipped
 	}
 
+	// Step 6c: Resolve the roots this admission did not seed, so they neither
+	// hold remaining open nor block a fan-in shared with the seeded entry.
+	if entry := s.executions[execID]; entry != nil && !types.IsTerminalExecutionStatus(entry.snap.Status) {
+		for _, skip := range engine.UnselectedRootSkips(execID, req.Graph, req.EntryUnitIdx) {
+			counterKey := memoryCounterKey(execID, skip.UnitIdx)
+			if s.scheduled[counterKey] != "" {
+				continue
+			}
+			s.scheduled[counterKey] = "skip"
+			s.putOutboxLocked(execID, skipOutboxID(execID, skip.NodeName, 0), skip, time.Time{})
+		}
+	}
+
 	// Step 7: Store admission entry.
 	s.admissions[req.AdmissionKey] = &admissionEntry{
 		executionID: execID,

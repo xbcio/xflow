@@ -226,6 +226,15 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 			}
 			pipe.HSet(ctx, bodyKey, entry.ID, encoded)
 			pipe.ZAdd(ctx, readyKey, redis.Z{Score: float64(availableAt), Member: entry.ID})
+			// A root skip intent is fenced on its unit's "skip" scheduling
+			// marker; it joins the same transaction so the intent is never
+			// deliverable without it (see engine.UnselectedRootSkips).
+			if entry.Task.Type == engine.TaskTypeNodeSkip {
+				sk := scheduleKey(t, e.ID, entry.Task.UnitIdx)
+				pipe.HSet(ctx, sk, "action", "skip")
+				pipe.Expire(ctx, sk, ttl)
+				keys = append(keys, sk)
+			}
 		}
 		pipe.Expire(ctx, readyKey, ttl)
 		pipe.Expire(ctx, bodyKey, ttl)

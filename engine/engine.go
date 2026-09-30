@@ -281,7 +281,7 @@ func (e *Engine) Invoke(ctx context.Context, g *graph.Graph, entryName string, p
 	}
 	ctx = attachTransientHint(ctx, g)
 	entry := g.NodeAt(entryIdx)
-	return e.startExecution(ctx, snap, []initialTask{{
+	tasks := []initialTask{{
 		task: Task{
 			ExecutionID:  id,
 			NodeName:     entry.Name,
@@ -290,7 +290,16 @@ func (e *Engine) Invoke(ctx context.Context, g *graph.Graph, entryName string, p
 			ActivationID: 1,
 		},
 		operation: fmt.Sprintf("enqueue entry node %q", entry.Name),
-	}})
+	}}
+	// The other roots are resolved as skipped so they neither hold the
+	// completion counter open nor block a fan-in they share with this entry.
+	for _, skip := range UnselectedRootSkips(id, g, g.UnitIndexForNode(entryIdx)) {
+		tasks = append(tasks, initialTask{
+			task:      skip,
+			operation: fmt.Sprintf("skip unselected root %q", skip.NodeName),
+		})
+	}
+	return e.startExecution(ctx, snap, tasks)
 }
 
 // failInitialExecution marks an execution failed after its initial task could
