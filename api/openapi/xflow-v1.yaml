@@ -42,6 +42,8 @@ tags:
     description: Inspect, signal, cancel, and wait for executions.
   - name: NodeTypes
     description: Editor form schemas (NodeFormSchema) of the node types registered in the server process.
+  - name: CurrentUser
+    description: The caller's own verified identity (subject, namespace, scopes).
   - name: Supplies
     description: Push and read supply content (raw-byte stream on success).
   - name: Artifacts
@@ -876,6 +878,53 @@ paths:
           headers:
             ETag:
               $ref: "#/components/headers/NodeTypesETag"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/current-user:
+    get:
+      operationId: getCurrentUser
+      summary: Read the caller's own verified identity
+      description: |
+        Returns who the presented credential is, as the SERVER resolved it: the
+        subject the authenticator verified, the namespace that credential is
+        bound to, and the scopes it was issued. Nothing is read from the request
+        — there is no parameter that names a principal — so this endpoint cannot
+        disclose another one, and it grants a caller nothing it could not learn
+        by attempting the operations its own scopes name.
+
+        This is the call a console makes before it can render anything: the
+        alternative is probing routes and inferring capability from which ones
+        refuse, which guesses wrong on routes that 404 and spends an audited
+        round trip per guess on the ones that do not.
+
+        Authorization is `workflow.read` — the console's baseline read scope,
+        deliberately NOT a scope of this endpoint's own. The response is the
+        caller's own credential, so a dedicated scope could only ever subtract
+        callers while taking the route away from every token already issued.
+
+        Served only when the server was configured with a principal
+        authenticator (`--auth-tokens-file`, or an embedder's
+        `Config.PrincipalAuth`). A server without one has no verified identity to
+        report and answers 404 — it never invents one.
+      tags: [CurrentUser]
+      parameters:
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: The caller's own verified identity.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/CurrentUserResponse"
         default:
           $ref: "#/components/responses/DefaultError"
 
@@ -3135,6 +3184,40 @@ components:
         value: {}
         display_name:
           type: string
+
+    CurrentUserResponse:
+      type: object
+      description: |
+        GET /v1/current-user payload: the caller's own verified identity. Every
+        field is server-issued from the authenticated credential; none is read
+        from the request. The names are the server's vocabulary rather than any
+        one client's — a surface that wants different names maps them on its
+        side, so the contract does not have to be renamed when a surface is.
+      additionalProperties: false
+      required: [subject, namespace, scopes]
+      properties:
+        subject:
+          type: string
+          description: The subject the authenticator verified for the presented credential.
+          example: dev-operator
+        namespace:
+          type: string
+          description: |
+            The namespace that credential is bound to — server-issued and
+            authoritative. It is the same value every other scoped read on this
+            API draws from, never a client-supplied one.
+          example: default
+        scopes:
+          type: array
+          description: |
+            The scopes the credential was issued, in issue order. Empty — never
+            null — when it carries none, so a client can iterate without a null
+            guard. These are the values an authorizer checks, so a client that
+            keys UI capability off them must expect the same granularity: the
+            scope vocabulary is per-operation, not per-resource-per-verb.
+          items:
+            type: string
+          example: ["workflow", "execution"]
 
     NodeTypesResponse:
       type: object

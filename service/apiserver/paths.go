@@ -37,6 +37,12 @@ const (
 	PathNodeTypes      = "/v1/node-types"
 	PathNodeTypeByType = "/v1/node-types/{type}"
 
+	// PathCurrentUser reports the caller's own verified identity (subject,
+	// namespace, scopes). It is registered only on the principal-auth path: the
+	// response is a verified subject, and a server without a
+	// PrincipalAuthenticator has none to report.
+	PathCurrentUser = "/v1/current-user"
+
 	PathSupplyByName     = "/v1/supplies/{name}"
 	PathArtifactByDigest = "/v1/artifacts/{digest}"
 
@@ -102,6 +108,8 @@ var UserFacingPaths = []string{
 
 	PathNodeTypes,
 	PathNodeTypeByType,
+
+	PathCurrentUser,
 
 	PathSupplyByName,
 	PathArtifactByDigest,

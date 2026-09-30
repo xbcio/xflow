@@ -229,6 +229,13 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	// resource.
 	mux.HandleFunc("GET "+PathNodeTypes, authz(OpWorkflowRead, false, m.handleListNodeTypes, nil))
 	mux.HandleFunc("GET "+PathNodeTypeByType, authz(OpWorkflowRead, false, m.handleGetNodeType, nil))
+	// GET /v1/current-user reports the verified principal itself. No resource
+	// resolver: the resource IS the caller, so there is no id to resolve and no
+	// namespace to compare — the wrapper already bound the response to the
+	// principal it verified. It is mounted ONLY on this branch (the legacy
+	// branch below serves no identity at all), which is why it has no
+	// counterpart registration there.
+	mux.HandleFunc("GET "+PathCurrentUser, authz(OpCurrentUserRead, false, m.handleCurrentUser, nil))
 	mux.HandleFunc("POST "+PathWorkflowExecute, authz(OpWorkflowCreate, true, m.handleExecuteWorkflow, newExecutionIDResolver()))
 	mux.HandleFunc("POST "+PathWorkflowExecuteByID, authz(OpWorkflowInvoke, true, m.handleExecuteWorkflowByID, invokeByIDResolver()))
 	// Entry-seed endpoint (exact path, POST only). The authz wrapper injects

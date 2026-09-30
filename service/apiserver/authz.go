@@ -94,6 +94,16 @@ const (
 	OpExecutionSeed    = "execution.seed"
 	OpDeadLetterList   = "deadletter.list"
 	OpDeadLetterReplay = "deadletter.replay"
+	// OpCurrentUserRead serves GET /v1/current-user: the caller's OWN verified
+	// identity. It reports what the presented credential already carries — the
+	// subject the server authenticated, the namespace it is bound to, and the
+	// scopes it was issued — so it grants a caller nothing it could not learn by
+	// attempting the operations those scopes name. See scopeForOperation for why
+	// it deliberately rides an existing scope instead of getting one of its own.
+	//
+	// Like every operation here, it MUST also appear in scopeForOperation or the
+	// route is silently unreachable.
+	OpCurrentUserRead = "current-user.read"
 	// OpManagementRead is the stable operation for management execution inspect
 	// (single-resource lookup; the management surface exposes no list API). It
 	// maps to the "management.read" scope.
@@ -176,6 +186,16 @@ func scopeForOperation(op string) string {
 		return "workflow"
 	case OpExecutionRead, OpExecutionSignal, OpExecutionRevoke, OpExecutionCancel, OpExecutionSeed:
 		return "execution"
+	case OpCurrentUserRead:
+		// Deliberately the console's baseline read scope rather than a scope of
+		// its own. The response is the caller's own credential, so a scope here
+		// can never protect anything — it can only refuse a caller the ability to
+		// read what they are already holding. A dedicated scope would additionally
+		// take the endpoint away from every token already issued, which is a
+		// silent UI degradation for a route that guards nothing. Give it its own
+		// scope only if a future requirement makes a principal's own identity
+		// sensitive to that principal.
+		return "workflow"
 	case OpDeadLetterList:
 		return "deadletter.list"
 	case OpDeadLetterReplay:
