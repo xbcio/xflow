@@ -788,18 +788,26 @@ paths:
         version, plus the server's `param_validation_mode` so an editor's
         blocking semantics follow the backend (off | warn | enforce).
 
-        Scope: only types registered in the server process. Custom node types
-        registered only on runners are absent — runners do not report
-        Descriptors at enroll — and an editor treats such a node as having no
-        schema (parameters edited as JSON).
+        Scope: without `namespace`, only types registered in the server
+        process. With `namespace`, the response also carries the types live
+        runners serving that namespace reported at registration, marked
+        `source: runner` with their `runner_pools`. A runner type never
+        shadows a server type: when the server registry has the type (any
+        version), or the type is `xflow.*`, the runner entry is dropped. A
+        runner type disappears once its last runner's session is no longer
+        live. A type no live runner reports is absent, and an editor treats
+        such a node as having no schema (parameters edited as JSON).
 
         The projection is recomputed per request. `ETag` is a strong
         validator over the `data` payload bytes (not the envelope, whose
-        `trace_id` differs per request); a matching `If-None-Match` answers 304
-        with no body. Authorization is `workflow.read`, the operation of
-        GET /v1/workflows.
+        `trace_id` differs per request), so it changes when runner types
+        appear or disappear; a matching `If-None-Match` answers 304 with no
+        body. Authorization is `workflow.read`, the operation of
+        GET /v1/workflows; with `namespace` it is decided against that
+        namespace, and a namespace the caller may not read fails with 403.
       tags: [NodeTypes]
       parameters:
+        - $ref: "#/components/parameters/NodeTypesNamespace"
         - $ref: "#/components/parameters/IfNoneMatch"
         - $ref: "#/components/parameters/XRequestId"
       responses:
@@ -832,10 +840,10 @@ paths:
       operationId: getNodeType
       summary: Read one node-type form schema
       description: |
-        Returns the NodeFormSchema of one node type registered in the server
-        process (the same scope as GET /v1/node-types). `version` selects a
-        registered version; omitted or 0 selects the latest, matching registry
-        Lookup. An unknown type or version fails with 404
+        Returns the NodeFormSchema of one node type, with the same scope,
+        `namespace` handling and authorization as GET /v1/node-types.
+        `version` selects a version; omitted or 0 selects the latest, matching
+        registry Lookup. An unknown type or version fails with 404
         (`node_type_not_found`); a malformed version with 400
         (`node_type_version_invalid`). ETag / If-None-Match behave as on
         GET /v1/node-types.
@@ -854,6 +862,7 @@ paths:
           schema:
             type: integer
             minimum: 0
+        - $ref: "#/components/parameters/NodeTypesNamespace"
         - $ref: "#/components/parameters/IfNoneMatch"
         - $ref: "#/components/parameters/XRequestId"
       responses:
@@ -1806,6 +1815,17 @@ components:
       in: path
       required: true
       description: Pool-bound registration token id.
+      schema:
+        type: string
+    NodeTypesNamespace:
+      name: namespace
+      in: query
+      required: false
+      description: |
+        Namespace whose live runner-reported node types are merged in. Absent
+        means the server registry only. The caller must be allowed
+        `workflow.read` in this namespace (403 otherwise); a malformed value
+        fails with 400 (`namespace_invalid`).
       schema:
         type: string
     IfNoneMatch:
@@ -3295,6 +3315,19 @@ components:
           description: Top-level parameters in declaration order.
           items:
             $ref: "#/components/schemas/NodeFormField"
+        source:
+          type: string
+          enum: [runner]
+          description: |
+            Where the schema came from. `runner` means live runners reported
+            it; absent means the server's own registry.
+        runner_pools:
+          type: array
+          description: |
+            Sorted names of the runner pools that report this type. Absent for
+            server types and for runners registered without a pool.
+          items:
+            type: string
 
     NodeFormPorts:
       type: object
