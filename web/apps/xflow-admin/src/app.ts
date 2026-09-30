@@ -2,22 +2,22 @@ import type { RequestConfig, RequestOptions } from '@umijs/max';
 import { history } from '@umijs/max';
 
 import { clearToken, getToken } from '@/services/token';
-import type { CurrentUser } from '@/services/user';
+import type { CurrentIdentity } from '@/services/user';
 import { fetchCurrentUser } from '@/services/user';
 
 const LOGIN_PATH = '/login';
 
 export interface InitialState {
-  currentUser?: CurrentUser;
+  currentUser?: CurrentIdentity;
   /** 重新拉取当前用户，登录成功后调用以刷新权限 */
-  fetchUserInfo: () => Promise<CurrentUser | undefined>;
+  fetchUserInfo: () => Promise<CurrentIdentity | undefined>;
 }
 
 /**
  * initialState 插件契约：返回值即全局态，access.ts 与 useModel('@@initialState') 消费它。
  */
 export async function getInitialState(): Promise<InitialState> {
-  const fetchUserInfo = async (): Promise<CurrentUser | undefined> => {
+  const fetchUserInfo = async (): Promise<CurrentIdentity | undefined> => {
     if (!getToken()) {
       return undefined;
     }
