@@ -1,0 +1,262 @@
+{
+  "schema": "xflow.runner-descriptors/v1",
+  "descriptors": [
+    {
+      "type": "acme.analyse",
+      "version": 1,
+      "descriptor": {
+        "Type": "acme.analyse",
+        "Kind": "action",
+        "DisplayName": "",
+        "Credentials": null,
+        "Params": null,
+        "Inputs": null,
+        "Outputs": null,
+        "Capabilities": null,
+        "Groups": null,
+        "Docs": "",
+        "OneOf": null,
+        "DynamicOutputsFrom": ""
+      }
+    },
+    {
+      "type": "acme.analyse",
+      "version": 2,
+      "descriptor": {
+        "Type": "acme.analyse",
+        "Kind": "action",
+        "DisplayName": "Analyse",
+        "Credentials": [
+          "acme-api"
+        ],
+        "Params": [
+          {
+            "Name": "limit",
+            "DisplayName": "Limit",
+            "Type": "number",
+            "Required": true,
+            "Default": 1152921504606846977,
+            "Description": "Row limit",
+            "Enum": [
+              {
+                "Value": 10,
+                "DisplayName": "Ten",
+                "Description": "small"
+              },
+              {
+                "Value": "all",
+                "DisplayName": "All",
+                "Description": "everything"
+              }
+            ],
+            "EnumWhen": [
+              {
+                "When": {
+                  "Param": "mode",
+                  "Eq": "fast",
+                  "In": null,
+                  "Truthy": null,
+                  "AllOf": null,
+                  "AnyOf": null,
+                  "Not": null
+                },
+                "Enum": [
+                  {
+                    "Value": 1,
+                    "DisplayName": "One",
+                    "Description": "fast only"
+                  }
+                ]
+              }
+            ],
+            "Item": null,
+            "Fields": null,
+            "Secret": true,
+            "Constraints": {
+              "Min": 0,
+              "Max": 1000000,
+              "MinLength": 1,
+              "MaxLength": 8,
+              "Pattern": "^[0-9]+$",
+              "Format": "json",
+              "MinItems": 0,
+              "MaxItems": 3,
+              "UniqueItems": true
+            },
+            "VisibleWhen": {
+              "Param": "mode",
+              "Eq": null,
+              "In": [],
+              "Truthy": true,
+              "AllOf": [
+                {
+                  "Param": "a",
+                  "Eq": null,
+                  "In": null,
+                  "Truthy": null,
+                  "AllOf": null,
+                  "AnyOf": null,
+                  "Not": null
+                }
+              ],
+              "AnyOf": [
+                {
+                  "Param": "b",
+                  "Eq": true,
+                  "In": null,
+                  "Truthy": null,
+                  "AllOf": null,
+                  "AnyOf": null,
+                  "Not": null
+                }
+              ],
+              "Not": {
+                "Param": "c",
+                "Eq": null,
+                "In": null,
+                "Truthy": false,
+                "AllOf": null,
+                "AnyOf": null,
+                "Not": null
+              }
+            },
+            "RequiredWhen": {
+              "Param": "mode",
+              "Eq": null,
+              "In": [
+                "x",
+                2
+              ],
+              "Truthy": null,
+              "AllOf": null,
+              "AnyOf": null,
+              "Not": null
+            },
+            "Group": "advanced",
+            "Order": 3,
+            "Widget": "slider",
+            "Deprecated": "use rows"
+          },
+          {
+            "Name": "routes",
+            "DisplayName": "",
+            "Type": "array",
+            "Required": false,
+            "Default": null,
+            "Description": "",
+            "Enum": null,
+            "EnumWhen": null,
+            "Item": {
+              "Name": "route",
+              "DisplayName": "",
+              "Type": "string",
+              "Required": false,
+              "Default": null,
+              "Description": "",
+              "Enum": null,
+              "EnumWhen": null,
+              "Item": null,
+              "Fields": null,
+              "Secret": false,
+              "Constraints": null,
+              "VisibleWhen": null,
+              "RequiredWhen": null,
+              "Group": "",
+              "Order": 0,
+              "Widget": "",
+              "Deprecated": ""
+            },
+            "Fields": null,
+            "Secret": false,
+            "Constraints": null,
+            "VisibleWhen": null,
+            "RequiredWhen": null,
+            "Group": "",
+            "Order": 0,
+            "Widget": "",
+            "Deprecated": ""
+          },
+          {
+            "Name": "options",
+            "DisplayName": "",
+            "Type": "object",
+            "Required": false,
+            "Default": null,
+            "Description": "",
+            "Enum": null,
+            "EnumWhen": null,
+            "Item": null,
+            "Fields": [
+              {
+                "Name": "verbose",
+                "DisplayName": "",
+                "Type": "bool",
+                "Required": false,
+                "Default": false,
+                "Description": "",
+                "Enum": null,
+                "EnumWhen": null,
+                "Item": null,
+                "Fields": null,
+                "Secret": false,
+                "Constraints": null,
+                "VisibleWhen": null,
+                "RequiredWhen": null,
+                "Group": "",
+                "Order": 0,
+                "Widget": "",
+                "Deprecated": ""
+              }
+            ],
+            "Secret": false,
+            "Constraints": null,
+            "VisibleWhen": null,
+            "RequiredWhen": null,
+            "Group": "",
+            "Order": 0,
+            "Widget": "",
+            "Deprecated": ""
+          }
+        ],
+        "Inputs": [
+          {
+            "Name": "main",
+            "DisplayName": "Input"
+          }
+        ],
+        "Outputs": [
+          {
+            "Name": "main",
+            "DisplayName": "Output"
+          },
+          {
+            "Name": "error",
+            "DisplayName": "Error"
+          }
+        ],
+        "Capabilities": [
+          "acme.experimental"
+        ],
+        "Groups": [
+          {
+            "Key": "advanced",
+            "DisplayName": "Advanced",
+            "Description": "Tuning",
+            "Collapsed": true
+          }
+        ],
+        "Docs": "# Analyse\nRuns the analysis.",
+        "OneOf": [
+          {
+            "Params": [
+              "query",
+              "script"
+            ],
+            "Mode": "at_most"
+          }
+        ],
+        "DynamicOutputsFrom": "routes"
+      }
+    }
+  ]
+}
