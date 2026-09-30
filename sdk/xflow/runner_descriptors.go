@@ -9,6 +9,12 @@ import (
 	"github.com/xbcio/xflow/service/protocol"
 )
 
+// registeredNodeDescriptors is the node/registry view NewRunner reports
+// descriptors from. It is a variable only so an in-process test can give a
+// runner a type the co-hosted server's registry (the same process-global
+// node/registry) does not see.
+var registeredNodeDescriptors = registry.Descriptors
+
 // declaredRunnerDescriptors keeps the registered descriptors whose type this
 // runner declares as a capability, every registered version of each, so the
 // control plane can offer the editor a schema for what this runner executes.

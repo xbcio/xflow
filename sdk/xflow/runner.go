@@ -689,7 +689,7 @@ func buildRunnerServiceConfig(cfg RunnerConfig, opts ...RunnerOption) (runnersvc
 		// Read once: the global registry is populated by init-time
 		// registration, and a changed set is reported by re-registering,
 		// which is what a restart already does.
-		DescriptorsJSON: runnerDescriptorsJSON(cfg.Capabilities, registry.Descriptors(), o.logger),
+		DescriptorsJSON: runnerDescriptorsJSON(cfg.Capabilities, registeredNodeDescriptors(), o.logger),
 		PollWait:        cfg.PollWait,
 		Tracer:          o.tracer,
 		Namespaces:      cfg.Namespaces,
