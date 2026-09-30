@@ -168,7 +168,7 @@ func TestWorkflowTierHighDistributed(t *testing.T) {
 	}
 	workflows.WithVars(def, workflows.HighVars(grpcHost, table, rowID))
 
-	h := newServerRunnerHarness(t, addr, 1)
+	h := newServerRunnerHarnessAs(t, addr, workflows.HighApprover)
 	startWorkflowRunner(t, h, "runner-high", def, pool, resolver)
 
 	execID := submitWorkflowHTTP(t, h.httpSrv.URL, h.httpSrv.Client(), def, map[string]any{})
@@ -176,11 +176,10 @@ func TestWorkflowTierHighDistributed(t *testing.T) {
 	// The approval node parks the execution; the decision arrives over the same
 	// HTTP route an operator would use.
 	waitNodeSuspended(t, h, execID, "gate")
+	// The API server stamps the authenticated caller (HighApprover) as the
+	// actor; the node counts the decision under it.
 	postSignal(t, h, execID, workflows.HighApprovalSignal, map[string]any{
-		// The actor is the in-process equivalent of the subject the API layer
-		// verifies for an HTTP caller; the node counts the decision under it.
-		types.VerifiedActorKey: workflows.HighApprover,
-		"action":               "approve",
+		"action": "approve",
 	})
 
 	// The wait node parks a second time; releasing it exercises the signal-wait

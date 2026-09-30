@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/apiserver"
@@ -143,6 +145,36 @@ func (h *serverRunnerHarness) Sweeper() *control.LeaseSweeper { return h.cp.Swee
 // control plane, and registers cleanup.
 func newServerRunnerHarness(t *testing.T, addr string, concurrency int) *serverRunnerHarness {
 	t.Helper()
+	return newServerRunnerHarnessWithConfig(t, addr, concurrency, apiserver.Config{})
+}
+
+// fixedPrincipalAuth authenticates every request as one subject. It stands in
+// for the host's real authenticator so the API server — not the caller — puts
+// the actor identity on a signal. The signal route refuses a payload that
+// claims types.VerifiedActorKey itself, so an approval test needs this.
+type fixedPrincipalAuth struct{ subject string }
+
+func (a fixedPrincipalAuth) Authenticate(*http.Request) (apiserver.Principal, error) {
+	return apiserver.Principal{
+		Subject:   a.subject,
+		Namespace: string(namespace.Default),
+		Scopes:    []string{"workflow", "execution"},
+	}, nil
+}
+
+// newServerRunnerHarnessAs is newServerRunnerHarness (concurrency 1) with
+// principal authz enabled and every API caller authenticated as subject.
+func newServerRunnerHarnessAs(t *testing.T, addr, subject string) *serverRunnerHarness {
+	t.Helper()
+	return newServerRunnerHarnessWithConfig(t, addr, 1, apiserver.Config{
+		PrincipalAuth: fixedPrincipalAuth{subject: subject},
+		Authorizer:    apiserver.ScopeAuthorizer{},
+		AuditSink:     apiserver.NewInMemoryAuditSink(),
+	})
+}
+
+func newServerRunnerHarnessWithConfig(t *testing.T, addr string, concurrency int, cfg apiserver.Config) *serverRunnerHarness {
+	t.Helper()
 	b, err := distributed.New(addr, nil, distributed.WithConcurrency(concurrency), distributed.WithConsumer(true))
 	if err != nil {
 		t.Fatalf("distributed.New: %v", err)
@@ -156,7 +188,7 @@ func newServerRunnerHarness(t *testing.T, addr string, concurrency int) *serverR
 	if err != nil {
 		t.Fatalf("NewControlPlane: %v", err)
 	}
-	srv, err := apiserver.New(apiserver.Config{}, apiserver.WithControlPlane(cp))
+	srv, err := apiserver.New(cfg, apiserver.WithControlPlane(cp))
 	if err != nil {
 		t.Fatalf("apiserver.New: %v", err)
 	}
