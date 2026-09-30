@@ -643,3 +643,70 @@ func TestBuildSubgraphLeaseClonesTheSubmissionRuntime(t *testing.T) {
 		t.Errorf("mutating the payload changed the stored snapshot: tenant = %v, want \"acme\"", got)
 	}
 }
+
+// A map node reached from an Invoke'd entry runs at activation 1, because Invoke
+// queues its entry at activation 1 and the activation propagates downstream.
+// The batch task used to be built without it, so the runner-facing batch lease
+// carried activation 0, CompleteExpandedSubExecution refused every report as
+// belonging to another generation, and the map node stayed Waiting forever. The
+// defect is invisible to Submit, whose roots run at activation 0.
+func TestCommitSubgraphResultAcceptsBatchesOfAnInvokedExecution(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name: "batch-lease-invoked",
+		Nodes: []types.NodeDef{
+			{Name: "hook", Type: "xflow.trigger.webhook", Kind: types.NodeKindTrigger},
+			{Name: "loop", Type: "xflow.map", Parameters: mapBodyParamsForTest()},
+			{Name: "done", Type: "test.echo"},
+		},
+		Connections: types.Connections{
+			"hook": {"main": {Targets: []types.Connection{{Node: "loop", Input: "main"}}}},
+			"loop": {"main": {Targets: []types.Connection{{Node: "done", Input: "main"}}}},
+		},
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	queue := &fakeQueue{}
+	eng := newTestEngine(t, newFakeState(), queue, &fakeRegistry{handlers: map[string]types.ActionHandler{
+		"xflow.trigger.webhook": &echoHandler{},
+		"xflow.map":             &loopHandler{},
+		"test.echo":             &echoHandler{},
+	}})
+	ctx := context.Background()
+	if _, err := eng.Invoke(ctx, g, "hook", nil); err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	entry := queue.Drain()
+	if len(entry) != 1 || entry[0].ActivationID != 1 {
+		t.Fatalf("entry tasks = %+v, want one at activation 1 (test premise)", entry)
+	}
+	executeTask(t, eng, entry[0])
+	batches := drainBatchTasks(t, eng, queue)
+
+	fired := false
+	for i, bt := range batches {
+		lease, _, err := eng.BuildSubgraphLease(ctx, bt)
+		if err != nil {
+			t.Fatalf("BuildSubgraphLease(batch %d): %v", i, err)
+		}
+		if lease.Task.ActivationID != 1 {
+			t.Fatalf("batch %d lease activation = %d, want the parent's 1", i, lease.Task.ActivationID)
+		}
+		outcome, err := eng.CommitSubgraphResult(ctx, lease, TaskResult{Output: &types.Output{Data: map[string]any{"count": 1}}})
+		if err != nil {
+			t.Fatalf("CommitSubgraphResult(batch %d): %v", i, err)
+		}
+		if outcome == CommitOutcomeStaleToken {
+			t.Fatalf("batch %d report refused as stale: the lease lost the parent's activation", i)
+		}
+		for _, tk := range queue.Drain() {
+			if tk.NodeName == "done" {
+				fired = true
+			}
+		}
+	}
+	if !fired {
+		t.Fatal("\"done\" never fired after every batch reported")
+	}
+}

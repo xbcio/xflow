@@ -170,7 +170,15 @@ func expansionBatchTask(lease *TaskLease, childID types.ExecutionID, batchIndex 
 		NodeName:    fmt.Sprintf("%s/_batch/%d", lease.Task.NodeName, batchIndex),
 		NodeIdx:     lease.Task.NodeIdx,
 		Type:        TaskTypeNodeBatch,
-		Payload:     &types.SignalPayload{Data: payload},
+		// The parent's activation and depth ride on the task itself, not only in
+		// the payload: BuildSubgraphLease hands a runner this task verbatim, and
+		// CommitSubgraphResult fences the batch report on lease.Task's
+		// activation. Left zero, every report from a parent at activation 1 —
+		// any execution started by Invoke — is refused and the map node waits
+		// forever.
+		ActivationID: lease.Task.ActivationID,
+		AutoDepth:    lease.Task.AutoDepth,
+		Payload:      &types.SignalPayload{Data: payload},
 	}
 }
 
