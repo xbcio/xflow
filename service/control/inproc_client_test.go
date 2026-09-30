@@ -96,6 +96,9 @@ func TestInProcessClientMatchesHTTPTransport(t *testing.T) {
 		RunnerID:           "runner-contract",
 		Concurrency:        2,
 		SupportsEncryption: true,
+		// A descriptor envelope must not change the register outcome on
+		// either transport.
+		DescriptorsJSON: json.RawMessage(`{"schema":"xflow.runner-descriptors/v1","descriptors":[]}`),
 	}
 	httpReg, err := httpClient.Register(ctx, registerReq)
 	if err != nil {

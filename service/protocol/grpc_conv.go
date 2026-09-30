@@ -75,18 +75,21 @@ func RegisterRequestToProto(req RegisterRunnerRequest) *runnerpb.RegisterRequest
 		Namespaces:   cloneStrings(req.Namespaces),
 		Activations:  ActivationInventoryToProto(req.Activations),
 		InstanceUid:  req.InstanceUID,
+		// Verbatim: control, not the transport, decodes the envelope.
+		DescriptorsJson: cloneBytes(req.DescriptorsJSON),
 	}
 }
 
 func RegisterRequestFromProto(req *runnerpb.RegisterRequest) RegisterRunnerRequest {
 	return RegisterRunnerRequest{
-		RunnerID:     req.GetRunnerId(),
-		Concurrency:  int(req.GetConcurrency()),
-		Capabilities: CapabilitiesFromProto(req.GetCapabilities()),
-		Labels:       cloneLabels(req.GetLabels()),
-		Namespaces:   req.GetNamespaces(),
-		Activations:  ActivationInventoryFromProto(req.GetActivations()),
-		InstanceUID:  req.GetInstanceUid(),
+		RunnerID:        req.GetRunnerId(),
+		Concurrency:     int(req.GetConcurrency()),
+		Capabilities:    CapabilitiesFromProto(req.GetCapabilities()),
+		Labels:          cloneLabels(req.GetLabels()),
+		Namespaces:      req.GetNamespaces(),
+		Activations:     ActivationInventoryFromProto(req.GetActivations()),
+		InstanceUID:     req.GetInstanceUid(),
+		DescriptorsJSON: cloneBytes(req.GetDescriptorsJson()),
 	}
 }
 
@@ -352,17 +355,27 @@ func cloneStrings(src []string) []string {
 	return out
 }
 
+// cloneBytes copies src so a converted DTO does not alias the source message's
+// buffer. Empty input stays empty (nil) in both directions.
+func cloneBytes(src []byte) []byte {
+	if len(src) == 0 {
+		return nil
+	}
+	return append([]byte(nil), src...)
+}
+
 func RunnerFrameToProto(f RunnerFrame) (*runnerpb.RunnerFrame, error) {
 	switch {
 	case f.Hello != nil:
 		return &runnerpb.RunnerFrame{Frame: &runnerpb.RunnerFrame_Hello{
 			Hello: &runnerpb.HelloFrame{
-				RunnerId:     f.Hello.RunnerID,
-				Concurrency:  int32(f.Hello.Concurrency),
-				Capabilities: CapabilitiesToProto(f.Hello.Capabilities),
-				Labels:       cloneLabels(f.Hello.Labels),
-				Namespaces:   cloneStrings(f.Hello.Namespaces),
-				InstanceUid:  f.Hello.InstanceUID,
+				RunnerId:        f.Hello.RunnerID,
+				Concurrency:     int32(f.Hello.Concurrency),
+				Capabilities:    CapabilitiesToProto(f.Hello.Capabilities),
+				Labels:          cloneLabels(f.Hello.Labels),
+				Namespaces:      cloneStrings(f.Hello.Namespaces),
+				InstanceUid:     f.Hello.InstanceUID,
+				DescriptorsJson: cloneBytes(f.Hello.DescriptorsJSON),
 			},
 		}}, nil
 	case f.Result != nil:
@@ -400,12 +413,13 @@ func RunnerFrameFromProto(pb *runnerpb.RunnerFrame) (RunnerFrame, error) {
 	switch f := pb.GetFrame().(type) {
 	case *runnerpb.RunnerFrame_Hello:
 		return RunnerFrame{Hello: &HelloFrame{
-			RunnerID:     f.Hello.GetRunnerId(),
-			Concurrency:  int(f.Hello.GetConcurrency()),
-			Capabilities: CapabilitiesFromProto(f.Hello.GetCapabilities()),
-			Labels:       cloneLabels(f.Hello.GetLabels()),
-			Namespaces:   f.Hello.GetNamespaces(),
-			InstanceUID:  f.Hello.GetInstanceUid(),
+			RunnerID:        f.Hello.GetRunnerId(),
+			Concurrency:     int(f.Hello.GetConcurrency()),
+			Capabilities:    CapabilitiesFromProto(f.Hello.GetCapabilities()),
+			Labels:          cloneLabels(f.Hello.GetLabels()),
+			Namespaces:      f.Hello.GetNamespaces(),
+			InstanceUID:     f.Hello.GetInstanceUid(),
+			DescriptorsJSON: cloneBytes(f.Hello.GetDescriptorsJson()),
 		}}, nil
 	case *runnerpb.RunnerFrame_Result:
 		lease, err := unmarshalLease(f.Result.GetLeaseJson())

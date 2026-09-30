@@ -290,3 +290,38 @@ func TestHeartbeatResponseRoundTripsSupplyHints(t *testing.T) {
 		t.Fatalf("SupplyHints = %#v, want {rules: sha256:def}", got.SupplyHints)
 	}
 }
+
+func TestRegisterRunnerRequestDescriptorsJSON(t *testing.T) {
+	t.Run("OmittedWhenEmpty", func(t *testing.T) {
+		raw, err := json.Marshal(RegisterRunnerRequest{RunnerID: "r1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), "descriptors_json") {
+			t.Fatalf("register JSON = %s, want no descriptors_json key", raw)
+		}
+	})
+	t.Run("OldRunnerDecodesAsNone", func(t *testing.T) {
+		var req RegisterRunnerRequest
+		if err := json.Unmarshal([]byte(`{"runner_id":"r1","concurrency":1,"capabilities":[]}`), &req); err != nil {
+			t.Fatal(err)
+		}
+		if req.DescriptorsJSON != nil {
+			t.Fatalf("DescriptorsJSON = %s, want nil", req.DescriptorsJSON)
+		}
+	})
+	t.Run("RoundTripsVerbatim", func(t *testing.T) {
+		envelope := `{"schema":"xflow.runner-descriptors/v1","descriptors":[{"type":"acme.x","version":1,"descriptor":{"Type":"acme.x"}}]}`
+		raw, err := json.Marshal(RegisterRunnerRequest{RunnerID: "r1", DescriptorsJSON: json.RawMessage(envelope)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got RegisterRunnerRequest
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatal(err)
+		}
+		if string(got.DescriptorsJSON) != envelope {
+			t.Fatalf("DescriptorsJSON = %s, want %s", got.DescriptorsJSON, envelope)
+		}
+	})
+}

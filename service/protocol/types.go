@@ -67,6 +67,12 @@ type RegisterRunnerRequest struct {
 	// supply envelopes. When true the server includes a SupplyKey in the
 	// registration response and encrypts supply GET responses for this runner.
 	SupportsEncryption bool `json:"supports_encryption,omitempty"`
+	// DescriptorsJSON is the runner's node descriptor envelope
+	// (RunnerDescriptorSchema; see EncodeRunnerDescriptors). It stays raw on
+	// every transport so the HTTP, gRPC, and in-process paths move the same
+	// bytes and only control decodes it. Empty means the runner reports no
+	// descriptors, which replaces anything an earlier session reported.
+	DescriptorsJSON json.RawMessage `json:"descriptors_json,omitempty"`
 }
 
 // RunnerXflowVersionLabel is the registration label a runner uses to report the
@@ -447,6 +453,8 @@ type HelloFrame struct {
 	Namespaces   []string
 	// InstanceUID: see RegisterRunnerRequest.InstanceUID.
 	InstanceUID string
+	// DescriptorsJSON: see RegisterRunnerRequest.DescriptorsJSON.
+	DescriptorsJSON json.RawMessage
 }
 
 type ResultFrame struct {

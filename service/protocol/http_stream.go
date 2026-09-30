@@ -59,13 +59,14 @@ func (s *httpStream) run() {
 	// Register with the control plane.
 	s.authToken = s.client.token
 	registerResp, err := s.client.Register(s.ctx, RegisterRunnerRequest{
-		RunnerID:     hello.RunnerID,
-		Concurrency:  hello.Concurrency,
-		Capabilities: hello.Capabilities,
-		Labels:       hello.Labels,
-		Namespaces:   hello.Namespaces,
-		InstanceUID:  hello.InstanceUID,
-		AuthToken:    s.authToken,
+		RunnerID:        hello.RunnerID,
+		Concurrency:     hello.Concurrency,
+		Capabilities:    hello.Capabilities,
+		Labels:          hello.Labels,
+		Namespaces:      hello.Namespaces,
+		InstanceUID:     hello.InstanceUID,
+		DescriptorsJSON: hello.DescriptorsJSON,
+		AuthToken:       s.authToken,
 	})
 	if err != nil {
 		s.emit(ServerFrame{Ack: &AckFrame{Accepted: false, Error: err.Error()}})

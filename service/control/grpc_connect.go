@@ -51,13 +51,14 @@ func (s *GRPCServer) connect(stream protocol.RunnerConnectStream) error {
 		return runnerStatus(ErrInstanceUIDRequired)
 	}
 	registered, err := s.core.register(ctx, protocol.RegisterRunnerRequest{
-		RunnerID:     hello.RunnerID,
-		Concurrency:  hello.Concurrency,
-		Capabilities: hello.Capabilities,
-		Labels:       hello.Labels,
-		Namespaces:   hello.Namespaces,
-		InstanceUID:  hello.InstanceUID,
-		AuthToken:    authToken,
+		RunnerID:        hello.RunnerID,
+		Concurrency:     hello.Concurrency,
+		Capabilities:    hello.Capabilities,
+		Labels:          hello.Labels,
+		Namespaces:      hello.Namespaces,
+		InstanceUID:     hello.InstanceUID,
+		DescriptorsJSON: hello.DescriptorsJSON,
+		AuthToken:       authToken,
 	}, transport)
 	if err != nil {
 		return runnerStatus(err)

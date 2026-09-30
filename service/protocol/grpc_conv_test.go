@@ -365,3 +365,61 @@ func TestRegisterRequestProtoRoundTripEmptyActivations(t *testing.T) {
 		t.Fatalf("expected empty activations, got %v", got.Activations)
 	}
 }
+
+func TestRegisterDescriptorsJSONProtoRoundTrip(t *testing.T) {
+	envelope := json.RawMessage(`{"schema":"xflow.runner-descriptors/v1","descriptors":[{"type":"acme.x","version":1,"descriptor":{"Type":"acme.x"}}]}`)
+
+	t.Run("RegisterCarriesBytes", func(t *testing.T) {
+		src := RegisterRunnerRequest{RunnerID: "r1", InstanceUID: "i1", DescriptorsJSON: append(json.RawMessage(nil), envelope...)}
+		pb := RegisterRequestToProto(src)
+		if string(pb.GetDescriptorsJson()) != string(envelope) {
+			t.Fatalf("proto descriptors_json = %s, want %s", pb.GetDescriptorsJson(), envelope)
+		}
+		src.DescriptorsJSON[0] = 'X' // the proto must not alias the DTO buffer
+		if string(pb.GetDescriptorsJson()) != string(envelope) {
+			t.Fatalf("proto descriptors_json aliases the DTO buffer: %s", pb.GetDescriptorsJson())
+		}
+		got := RegisterRequestFromProto(pb)
+		if string(got.DescriptorsJSON) != string(envelope) {
+			t.Fatalf("DTO DescriptorsJSON = %s, want %s", got.DescriptorsJSON, envelope)
+		}
+	})
+	t.Run("RegisterEmptyStaysEmpty", func(t *testing.T) {
+		pb := RegisterRequestToProto(RegisterRunnerRequest{RunnerID: "r1"})
+		if pb.GetDescriptorsJson() != nil {
+			t.Fatalf("proto descriptors_json = %q, want nil", pb.GetDescriptorsJson())
+		}
+		if got := RegisterRequestFromProto(pb).DescriptorsJSON; got != nil {
+			t.Fatalf("DTO DescriptorsJSON = %q, want nil", got)
+		}
+	})
+	t.Run("HelloCarriesBytes", func(t *testing.T) {
+		pb, err := RunnerFrameToProto(RunnerFrame{Hello: &HelloFrame{RunnerID: "r1", DescriptorsJSON: envelope}})
+		if err != nil {
+			t.Fatalf("to proto: %v", err)
+		}
+		if string(pb.GetHello().GetDescriptorsJson()) != string(envelope) {
+			t.Fatalf("proto hello descriptors_json = %s, want %s", pb.GetHello().GetDescriptorsJson(), envelope)
+		}
+		got, err := RunnerFrameFromProto(pb)
+		if err != nil {
+			t.Fatalf("from proto: %v", err)
+		}
+		if string(got.Hello.DescriptorsJSON) != string(envelope) {
+			t.Fatalf("hello DescriptorsJSON = %s, want %s", got.Hello.DescriptorsJSON, envelope)
+		}
+	})
+	t.Run("HelloEmptyStaysEmpty", func(t *testing.T) {
+		pb, err := RunnerFrameToProto(RunnerFrame{Hello: &HelloFrame{RunnerID: "r1"}})
+		if err != nil {
+			t.Fatalf("to proto: %v", err)
+		}
+		got, err := RunnerFrameFromProto(pb)
+		if err != nil {
+			t.Fatalf("from proto: %v", err)
+		}
+		if pb.GetHello().GetDescriptorsJson() != nil || got.Hello.DescriptorsJSON != nil {
+			t.Fatalf("empty hello descriptors: proto=%q DTO=%q, want nil", pb.GetHello().GetDescriptorsJson(), got.Hello.DescriptorsJSON)
+		}
+	})
+}
