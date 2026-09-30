@@ -8,7 +8,9 @@ import (
 	"errors"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/service/protocol"
 )
 
@@ -48,6 +50,42 @@ type RunnerNodeDescriptor struct {
 	Version int
 	Hash    string
 	JSON    json.RawMessage
+}
+
+// RunnerDescriptorRecord is one live runner session's accepted descriptors
+// and the attribution the aggregator needs. Namespaces is the session's
+// effective namespace set; PoolID and PoolName are empty for a runner without
+// a pool.
+type RunnerDescriptorRecord struct {
+	RunnerID     string
+	PoolID       string
+	PoolName     string
+	Namespaces   []namespace.Namespace
+	RegisteredAt time.Time
+	Descriptors  []RunnerNodeDescriptor
+}
+
+// RunnerDescriptorDirectory is an optional directory capability, following
+// the RunnerControlDirectory pattern so external directories keep compiling.
+// LiveRunnerDescriptors returns every session that reported at least one
+// descriptor and is live at now under DefaultRunnerLiveTTL — the same rule
+// ListLiveRunners' consumers apply. A registration replaces the session's
+// set (nil clears it) and RemoveRunner deletes it. Descriptors are never part
+// of RunnerSnapshot, so the management JSON stays small.
+type RunnerDescriptorDirectory interface {
+	LiveRunnerDescriptors(ctx context.Context, now time.Time) ([]RunnerDescriptorRecord, error)
+}
+
+// runnerDescriptorsLive is the liveness rule shared by every directory's
+// LiveRunnerDescriptors.
+func runnerDescriptorsLive(lastHeartbeat, now time.Time) bool {
+	return DefaultRunnerSelector().IsLive(RunnerSnapshot{LastHeartbeat: lastHeartbeat}, now)
+}
+
+// sortRunnerDescriptorRecords orders records by runner ID so every directory
+// returns the same deterministic sequence.
+func sortRunnerDescriptorRecords(records []RunnerDescriptorRecord) {
+	sort.Slice(records, func(i, j int) bool { return records[i].RunnerID < records[j].RunnerID })
 }
 
 // runnerDescriptorRejection is one dropped envelope (Type empty) or entry.

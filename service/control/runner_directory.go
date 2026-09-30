@@ -62,8 +62,13 @@ type RegisterRunnerRequest struct {
 	// previous set; nil clears it. Directories that implement
 	// RunnerDescriptorDirectory store them; others ignore them.
 	Descriptors []RunnerNodeDescriptor
-	Policy      RunnerPolicy
-	Namespaces  []namespace.Namespace
+	// PoolID and PoolName attribute the session to the runner pool its issued
+	// identity is bound to. Both are empty for a runner without a pool (for
+	// example a static-token registration).
+	PoolID     string
+	PoolName   string
+	Policy     RunnerPolicy
+	Namespaces []namespace.Namespace
 	// Activations is the runner's reconnect inventory. It is passed through the
 	// directory registration transition so a replacement session can atomically
 	// prove which old trigger generations it still hosts before inheriting their

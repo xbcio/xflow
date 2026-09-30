@@ -259,7 +259,7 @@ func (c *Core) register(ctx context.Context, req protocol.RegisterRunnerRequest,
 	if err := c.authDeny(ctx, req.RunnerID, req.AuthToken, "register", info, authErr); err != nil {
 		return protocol.RegisterRunnerResponse{}, err
 	}
-	labels, err := c.registerLabels(ctx, issuedAuth, req)
+	labels, pool, err := c.registerLabels(ctx, issuedAuth, req)
 	if err != nil {
 		return protocol.RegisterRunnerResponse{}, normalizeRunnerError(err, c.logger, "register")
 	}
@@ -331,6 +331,8 @@ func (c *Core) register(ctx context.Context, req protocol.RegisterRunnerRequest,
 		Labels:       labels,
 		Capabilities: req.Capabilities,
 		Descriptors:  descriptors,
+		PoolID:       pool.ID,
+		PoolName:     pool.Name,
 		Policy:       policy,
 		Namespaces:   effective,
 		Activations:  req.Activations,
@@ -370,27 +372,29 @@ func (c *Core) register(ctx context.Context, req protocol.RegisterRunnerRequest,
 // registerLabels adds server-owned labels only when the authenticator that
 // actually accepted this registration was an issued-identity authenticator.
 // Static and custom authenticators return the request unchanged and never
-// touch the identity or pool stores.
-func (c *Core) registerLabels(ctx context.Context, issuedAuth *IssuedIdentityAuthenticator, req protocol.RegisterRunnerRequest) (map[string]string, error) {
+// touch the identity or pool stores. It also returns the pool the issued
+// identity is bound to, which attributes the runner's reported descriptors;
+// the zero value means the runner has no pool.
+func (c *Core) registerLabels(ctx context.Context, issuedAuth *IssuedIdentityAuthenticator, req protocol.RegisterRunnerRequest) (map[string]string, RunnerPool, error) {
 	if issuedAuth == nil || issuedAuth.store == nil {
-		return req.Labels, nil
+		return req.Labels, RunnerPool{}, nil
 	}
 	identity, found, err := issuedAuth.store.Lookup(ctx, req.RunnerID)
 	if err != nil {
-		return nil, fmt.Errorf("lookup issued identity labels: %w", err)
+		return nil, RunnerPool{}, fmt.Errorf("lookup issued identity labels: %w", err)
 	}
 	if !found || identity.PoolID == "" {
-		return req.Labels, nil
+		return req.Labels, RunnerPool{}, nil
 	}
 	if c.pools == nil {
-		return nil, errors.New("runner pool store is not configured")
+		return nil, RunnerPool{}, errors.New("runner pool store is not configured")
 	}
 	pool, err := c.pools.GetPool(ctx, identity.PoolID, OwnerScope{All: true})
 	if err != nil {
-		return nil, fmt.Errorf("lookup runner pool labels: %w", err)
+		return nil, RunnerPool{}, fmt.Errorf("lookup runner pool labels: %w", err)
 	}
 	if len(pool.Labels) == 0 {
-		return req.Labels, nil
+		return req.Labels, pool, nil
 	}
 	merged := make(map[string]string, len(req.Labels)+len(pool.Labels))
 	for key, value := range req.Labels {
@@ -400,11 +404,11 @@ func (c *Core) registerLabels(ctx context.Context, issuedAuth *IssuedIdentityAut
 		// A newly enrolled runner echoes the server labels it received. The same
 		// value is idempotent; a different runner-reported value is the conflict.
 		if reported, exists := merged[key]; exists && reported != value {
-			return nil, fmt.Errorf("%w: %q", ErrLabelConflict, key)
+			return nil, RunnerPool{}, fmt.Errorf("%w: %q", ErrLabelConflict, key)
 		}
 		merged[key] = value
 	}
-	return merged, nil
+	return merged, pool, nil
 }
 
 // authenticateRegisterSource preserves MultiAuthenticator's ordered dispatch

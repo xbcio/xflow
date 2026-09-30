@@ -101,6 +101,13 @@ type memoryRunnerState struct {
 	leaseByID         map[engine.LeaseID]AssignmentID
 	leaseByToken      map[engine.LeaseToken]AssignmentID
 	leasedAssignments map[AssignmentID]Assignment
+	// descriptors, poolID, poolName and registeredAt back
+	// LiveRunnerDescriptors. They are replaced wholesale on every Register and
+	// go with the state on RemoveRunner.
+	descriptors  []RunnerNodeDescriptor
+	poolID       string
+	poolName     string
+	registeredAt time.Time
 }
 
 type memoryClaim struct {
@@ -124,6 +131,7 @@ var _ RunnerRemover = (*MemoryRunnerDirectory)(nil)
 var _ HandoffDebtDirectory = (*MemoryRunnerDirectory)(nil)
 var _ FinalizedHandoffSettler = (*MemoryRunnerDirectory)(nil)
 var _ DeactivationObligationDirectory = (*MemoryRunnerDirectory)(nil)
+var _ RunnerDescriptorDirectory = (*MemoryRunnerDirectory)(nil)
 
 // NewMemoryRunnerDirectory constructs an empty in-memory runner directory.
 func NewMemoryRunnerDirectory(opts ...MemoryRunnerDirectoryOption) *MemoryRunnerDirectory {
@@ -245,6 +253,10 @@ func (d *MemoryRunnerDirectory) Register(_ context.Context, req RegisterRunnerRe
 		leaseByID:         indexLeaseIDs(finalizedLease),
 		leaseByToken:      indexLeaseTokens(finalizedLease),
 		leasedAssignments: leasedAssignments,
+		descriptors:       cloneRunnerNodeDescriptors(req.Descriptors),
+		poolID:            req.PoolID,
+		poolName:          req.PoolName,
+		registeredAt:      now,
 	}
 	d.runners[req.RunnerID] = state
 	// Registration carries the reconnect inventory into the same mutex
@@ -760,6 +772,29 @@ func (d *MemoryRunnerDirectory) ListLiveRunners(_ context.Context) []RunnerSnaps
 		out = append(out, snapshot)
 	}
 	return out
+}
+
+// LiveRunnerDescriptors implements RunnerDescriptorDirectory.
+func (d *MemoryRunnerDirectory) LiveRunnerDescriptors(_ context.Context, now time.Time) ([]RunnerDescriptorRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var out []RunnerDescriptorRecord
+	for runnerID, state := range d.runners {
+		if state == nil || len(state.descriptors) == 0 || !runnerDescriptorsLive(state.snapshot.LastHeartbeat, now) {
+			continue
+		}
+		out = append(out, RunnerDescriptorRecord{
+			RunnerID:     runnerID,
+			PoolID:       state.poolID,
+			PoolName:     state.poolName,
+			Namespaces:   normalizeRunnerNamespaces(state.snapshot.Namespaces),
+			RegisteredAt: state.registeredAt,
+			Descriptors:  cloneRunnerNodeDescriptors(state.descriptors),
+		})
+	}
+	sortRunnerDescriptorRecords(out)
+	return out, nil
 }
 
 // ListRunners returns the IDs of every registered runner. It implements the
