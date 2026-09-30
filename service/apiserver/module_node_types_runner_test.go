@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/namespace"
@@ -327,7 +328,8 @@ func TestNodeTypesAuthzBranchNamespace(t *testing.T) {
 
 // The production constructor wires the control plane's live runner node
 // types, so a runner registered on the control plane's directory reaches a
-// namespace-scoped list without any host-side hook.
+// namespace-scoped list without any host-side hook, and leaves it once its
+// session is past the live TTL.
 func TestNewWorkflowControlModuleServesControlPlaneRunnerNodeTypes(t *testing.T) {
 	dir := control.NewMemoryRunnerDirectory()
 	cp, err := control.NewControlPlane(control.Config{Backend: local.New(), RunnerDirectory: dir})
@@ -350,12 +352,21 @@ func TestNewWorkflowControlModuleServesControlPlaneRunnerNodeTypes(t *testing.T)
 		t.Fatalf("Register: %v", err)
 	}
 
-	mux := nodeTypesMux(newWorkflowControlModule(cp, nil, nil, nil))
+	m := newWorkflowControlModule(cp, nil, nil, nil)
+	now := time.Now()
+	m.runnerNodeTypesNow = func() time.Time { return now }
+	mux := nodeTypesMux(m)
 	s, ok := findNodeTypeSchema(listNodeTypeSchemas(t, mux, "/v1/node-types?namespace=default"), "acme.wired", 1)
 	if !ok || s.Source != nodeFormSourceRunner {
 		t.Fatalf("acme.wired@1 = %+v (found %v), want a runner-sourced entry", s, ok)
 	}
 	if _, ok := findNodeTypeSchema(listNodeTypeSchemas(t, mux, "/v1/node-types"), "acme.wired", 1); ok {
 		t.Fatal("unscoped list served a runner type")
+	}
+
+	// No heartbeat arrives: once the live TTL passes the type leaves the list.
+	now = now.Add(control.DefaultRunnerLiveTTL + time.Second)
+	if _, ok := findNodeTypeSchema(listNodeTypeSchemas(t, mux, "/v1/node-types?namespace=default"), "acme.wired", 1); ok {
+		t.Fatal("runner type still listed after the live TTL")
 	}
 }

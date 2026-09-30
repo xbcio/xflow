@@ -83,18 +83,24 @@ type workflowControlModule struct {
 	// newWorkflowControlModule sets it to the control plane's live runner
 	// node types, so every APIServer (embedded or cmd/server) serves them.
 	runnerNodeTypes runnerNodeTypeSource
+	// runnerNodeTypesNow is the liveness clock of the constructor-wired
+	// runnerNodeTypes; nil means time.Now. A test seam only.
+	runnerNodeTypesNow func() time.Time
 }
 
 func newWorkflowControlModule(cp *control.ControlPlane, auth WorkflowAuthenticator, log engine.Logger, tracer tracing.Tracer) *workflowControlModule {
 	if tracer == nil {
 		tracer = tracing.NoopTracer{}
 	}
-	return &workflowControlModule{
-		cp: cp, eng: cp.Engine(), auth: auth, log: log, tracer: tracer,
-		runnerNodeTypes: func(ctx context.Context, ns namespace.Namespace) ([]control.AggregatedDescriptor, error) {
-			return cp.LiveRunnerNodeTypes(ctx, ns, time.Now())
-		},
+	m := &workflowControlModule{cp: cp, eng: cp.Engine(), auth: auth, log: log, tracer: tracer}
+	m.runnerNodeTypes = func(ctx context.Context, ns namespace.Namespace) ([]control.AggregatedDescriptor, error) {
+		now := time.Now
+		if m.runnerNodeTypesNow != nil {
+			now = m.runnerNodeTypesNow
+		}
+		return cp.LiveRunnerNodeTypes(ctx, ns, now())
 	}
+	return m
 }
 
 func (m *workflowControlModule) Name() string { return "workflow-control" }
