@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -42,10 +43,16 @@ type ProtocolClient interface {
 type Config struct {
 	RunnerID string
 	// InstanceUID is sent on Register; see protocol.RegisterRunnerRequest.
-	InstanceUID       string
-	Concurrency       int
-	Labels            map[string]string
-	Capabilities      []protocol.Capability
+	InstanceUID  string
+	Concurrency  int
+	Labels       map[string]string
+	Capabilities []protocol.Capability
+	// DescriptorsJSON is the node descriptor envelope for the declared
+	// Capabilities (protocol.RunnerDescriptorSchema; build it with
+	// protocol.EncodeRunnerDescriptors). It is forwarded verbatim on every
+	// Register; control validates and bounds it. nil reports no descriptors,
+	// which clears anything an earlier session of this runner reported.
+	DescriptorsJSON   json.RawMessage
 	HeartbeatInterval time.Duration
 	PollWait          time.Duration
 	// Tracer, when set, enables the server→runner→server trace graph: the
@@ -226,6 +233,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		Activations:        inventory,
 		SupportsEncryption: r.config.SupportsEncryption,
 		InstanceUID:        r.config.InstanceUID,
+		DescriptorsJSON:    r.config.DescriptorsJSON,
 	})
 	if err != nil {
 		return runContextError(ctx, err)
