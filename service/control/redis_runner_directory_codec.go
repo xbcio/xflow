@@ -46,6 +46,7 @@ type redisRunnerDirectoryKeys struct {
 	runnerCapacity                               string
 	runnerInflight                               string
 	runnerCapabilities                           string
+	runnerDescriptors                            string
 	runnerLabels                                 string
 	runnerPolicy                                 string
 	runnerNamespaces                             string
@@ -139,6 +140,7 @@ func newRedisRunnerDirectoryKeys(prefix string) redisRunnerDirectoryKeys {
 		runnerCapacity:                        prefix + ":runner:capacity",
 		runnerInflight:                        prefix + ":runner:inflight",
 		runnerCapabilities:                    prefix + ":runner:capabilities",
+		runnerDescriptors:                     prefix + ":runner:descriptors",
 		runnerLabels:                          prefix + ":runner:labels",
 		runnerPolicy:                          prefix + ":runner:policy",
 		runnerNamespaces:                      prefix + ":runner:namespaces",

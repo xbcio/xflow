@@ -287,6 +287,10 @@ func (d *RedisRunnerDirectory) Register(ctx context.Context, req RegisterRunnerR
 	if now.IsZero() {
 		now = d.clockNow()
 	}
+	descriptors, err := marshalRedisRunnerDescriptors(req, now)
+	if err != nil {
+		return RunnerSession{}, err
+	}
 	session := RunnerSession{RunnerID: req.RunnerID, SessionID: uuid.NewString()}
 	status, err := d.evalStatus(ctx, redisRegisterRunnerLua, []string{
 		d.keys.queue,
@@ -336,8 +340,9 @@ func (d *RedisRunnerDirectory) Register(ctx context.Context, req RegisterRunnerR
 		d.keys.runnerDrainObservation,
 		d.keys.handoffClaimIndexKey(req.RunnerID),
 		d.keys.runnerInstanceUID,
+		d.keys.runnerDescriptors,
 	}, req.RunnerID, session.SessionID, strconv.Itoa(req.Capacity), string(capabilities), string(policy), string(namespaces), strconv.FormatInt(now.UnixMilli(), 10), string(labels), activations,
-		req.InstanceUID, strconv.FormatInt(DefaultRunnerLiveTTL.Milliseconds(), 10))
+		req.InstanceUID, strconv.FormatInt(DefaultRunnerLiveTTL.Milliseconds(), 10), descriptors)
 	if err != nil {
 		return RunnerSession{}, fmt.Errorf("register redis runner: %w", err)
 	}
@@ -2242,6 +2247,15 @@ if newUID ~= '' then
 else
   redis.call('HDEL', KEYS[47], oldRunner)
 end
+-- KEYS[48] is runnerDescriptors. Replaced in the same transition as the
+-- session so a replaced session can never keep serving its old descriptors;
+-- an empty ARGV[12] (an old runner, or nothing accepted) clears them.
+local descriptors = ARGV[12] or ''
+if descriptors ~= '' then
+  redis.call('HSET', KEYS[48], oldRunner, descriptors)
+else
+  redis.call('HDEL', KEYS[48], oldRunner)
+end
 return 'registered'
 `
 
@@ -2908,6 +2922,7 @@ func (d *RedisRunnerDirectory) RemoveRunner(ctx context.Context, runnerID string
 		d.keys.deactivationObligationState,
 		d.keys.runnerLeasedAssignmentsKey(runnerID),
 		d.keys.handoffClaimIndexKey(runnerID),
+		d.keys.runnerDescriptors,
 	}, runnerID)
 	if err != nil {
 		return fmt.Errorf("remove redis runner: %w", err)
@@ -2926,6 +2941,8 @@ func (d *RedisRunnerDirectory) RemoveRunner(ctx context.Context, runnerID string
 // KEYS 1..19 are all hashes whose field is runnerID. KEYS 20..25 are
 // authoritative debt ledgers; counts alone are not trusted because a damaged
 // or pre-index record must fail closed. KEYS 26..27 are runner-derived sets.
+// KEYS 28 is runnerDescriptors, another runnerID-field hash, appended rather
+// than folded into 1..19 so the indexes above stay stable.
 const redisRemoveRunnerLua = `
 local runnerID = ARGV[1]
 if tonumber(redis.call('HGET', KEYS[9], runnerID) or '0') ~= 0 then return 'outstanding' end
@@ -2957,6 +2974,7 @@ for index = 1, #activationOwners, 2 do
 end
 
 for index = 1, 19 do redis.call('HDEL', KEYS[index], runnerID) end
+redis.call('HDEL', KEYS[28], runnerID)
 redis.call('DEL', KEYS[26])
 redis.call('DEL', KEYS[27])
 return 'removed'
