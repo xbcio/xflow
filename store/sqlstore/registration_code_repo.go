@@ -10,6 +10,7 @@ import (
 
 	"github.com/xbcio/xflow/store"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type registrationCodeRepo struct {
@@ -38,8 +39,8 @@ func (r *registrationCodeRepo) clock() time.Time {
 }
 
 func encodeList(list []string) string {
-	if len(list) == 0 {
-		return "[]"
+	if list == nil {
+		return ""
 	}
 	b, err := json.Marshal(list)
 	if err != nil {
@@ -92,6 +93,7 @@ func (r *registrationCodeRepo) Create(ctx context.Context, code store.Registrati
 		ExpiresAt:         expires,
 		MaxUses:           code.MaxUses,
 		UseCount:          code.UseCount,
+		PoolID:            code.PoolID,
 	}).Error
 }
 
@@ -203,6 +205,7 @@ func rowToRegistrationCode(row dbRegistrationCode) (store.RegistrationCode, erro
 		CreatedAt:         row.CreatedAt,
 		MaxUses:           row.MaxUses,
 		UseCount:          row.UseCount,
+		PoolID:            row.PoolID,
 	}
 	copy(code.CodeHash[:], row.CodeHash)
 	if row.ExpiresAt != nil {
@@ -324,18 +327,39 @@ func (r *issuedIdentityRepo) Issue(ctx context.Context, id store.IssuedIdentity)
 		t := id.RevokedAt.UTC()
 		revoked = &t
 	}
-	return r.db.WithContext(ctx).Save(&dbIssuedIdentity{
-		RunnerID:        id.RunnerID,
-		TokenHash:       id.TokenHash[:],
-		IDPrefix:        id.Scope.IDPrefix,
-		ScopeNamespaces: encodeList(id.Scope.AllowedNamespaces),
-		ScopeNodeTypes:  encodeList(id.Scope.AllowedNodeTypes),
-		CodeID:          id.CodeID,
-		OwnerNamespace:  id.OwnerNamespace,
-		IssuedAt:        issuedAt,
-		ExpiresAt:       expires,
-		RevokedAt:       revoked,
-	}).Error
+	scopeName := id.Scope.Name
+	var previousValidUntil *time.Time
+	if !id.PreviousTokenValidUntil.IsZero() {
+		t := id.PreviousTokenValidUntil.UTC()
+		previousValidUntil = &t
+	}
+	// Insert-only, not Save: Save is an upsert and would let a colliding
+	// Issue replace another runner's token and scope. OnConflict DoNothing
+	// with RowsAffected == 0 is the same dedup shape artifact.go uses.
+	result := r.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&dbIssuedIdentity{
+		RunnerID:                id.RunnerID,
+		TokenHash:               id.TokenHash[:],
+		IDPrefix:                id.Scope.IDPrefix,
+		ScopeName:               &scopeName,
+		ScopeNamespaces:         encodeList(id.Scope.AllowedNamespaces),
+		ScopeNodeTypes:          encodeList(id.Scope.AllowedNodeTypes),
+		CodeID:                  id.CodeID,
+		OwnerNamespace:          id.OwnerNamespace,
+		PoolID:                  id.PoolID,
+		IssuedAt:                issuedAt,
+		ExpiresAt:               expires,
+		RevokedAt:               revoked,
+		CredentialGeneration:    id.CredentialGeneration,
+		PreviousTokenHash:       id.PreviousTokenHash[:],
+		PreviousTokenValidUntil: previousValidUntil,
+	})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return store.ErrIssuedIdentityExists
+	}
+	return nil
 }
 
 func (r *issuedIdentityRepo) Lookup(ctx context.Context, runnerID string) (store.IssuedIdentity, bool, error) {
@@ -367,17 +391,26 @@ func rowToIssuedIdentity(row dbIssuedIdentity) (store.IssuedIdentity, error) {
 	if err != nil {
 		return store.IssuedIdentity{}, fmt.Errorf("issued identity %s: scope_node_types: %w", row.RunnerID, err)
 	}
+	scopeName := row.RunnerID
+	if row.ScopeName != nil {
+		scopeName = *row.ScopeName
+	}
 	id := store.IssuedIdentity{
 		RunnerID: row.RunnerID,
 		Scope: store.RunnerPolicy{
-			Name:              row.RunnerID,
+			Name:              scopeName,
 			IDPrefix:          row.IDPrefix,
 			AllowedNamespaces: namespaces,
 			AllowedNodeTypes:  nodeTypes,
 		},
-		CodeID:         row.CodeID,
-		OwnerNamespace: row.OwnerNamespace,
-		IssuedAt:       issuedAt,
+		CodeID:               row.CodeID,
+		OwnerNamespace:       row.OwnerNamespace,
+		PoolID:               row.PoolID,
+		IssuedAt:             issuedAt,
+		CredentialGeneration: row.CredentialGeneration,
+	}
+	if id.CredentialGeneration == 0 {
+		id.CredentialGeneration = 1
 	}
 	if row.ExpiresAt != nil {
 		id.ExpiresAt = row.ExpiresAt.UTC()
@@ -385,7 +418,11 @@ func rowToIssuedIdentity(row dbIssuedIdentity) (store.IssuedIdentity, error) {
 	if row.RevokedAt != nil {
 		id.RevokedAt = row.RevokedAt.UTC()
 	}
+	if row.PreviousTokenValidUntil != nil {
+		id.PreviousTokenValidUntil = row.PreviousTokenValidUntil.UTC()
+	}
 	copy(id.TokenHash[:], row.TokenHash)
+	copy(id.PreviousTokenHash[:], row.PreviousTokenHash)
 	return id, nil
 }
 
@@ -473,4 +510,52 @@ func (r *issuedIdentityRepo) Renew(ctx context.Context, runnerID string, expires
 		return store.ErrIssuedIdentityNotFound
 	}
 	return nil
+}
+
+// RotateCredential moves a live identity to the next token generation in one
+// conditional UPDATE. Treating stored generation zero as one keeps identities
+// written before the generation column was introduced rotatable.
+func (r *issuedIdentityRepo) RotateCredential(ctx context.Context, runnerID string, expectGeneration int64, newHash [32]byte, previousValidUntil time.Time) (int64, error) {
+	now := time.Now().UTC()
+	var previousUntil *time.Time
+	if !previousValidUntil.IsZero() {
+		t := previousValidUntil.UTC()
+		previousUntil = &t
+	}
+	nextGeneration := expectGeneration + 1
+	res := r.db.WithContext(ctx).Model(&dbIssuedIdentity{}).
+		Where("runner_id = ?", runnerID).
+		Where("CASE WHEN credential_generation = 0 THEN 1 ELSE credential_generation END = ?", expectGeneration).
+		Where("revoked_at IS NULL").
+		Where("expires_at IS NULL OR expires_at > ?", now).
+		Updates(map[string]any{
+			"previous_token_hash":        gorm.Expr("token_hash"),
+			"previous_token_valid_until": previousUntil,
+			"token_hash":                 newHash[:],
+			"credential_generation":      nextGeneration,
+		})
+	if res.Error != nil {
+		return 0, res.Error
+	}
+	if res.RowsAffected != 0 {
+		return nextGeneration, nil
+	}
+
+	// The CAS already refused the write. This read only classifies that refusal
+	// for the caller; absent and non-live identities are deliberately identical.
+	var row dbIssuedIdentity
+	err := r.db.WithContext(ctx).
+		Select("runner_id", "expires_at", "revoked_at").
+		Where("runner_id = ?", runnerID).
+		Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return 0, store.ErrIssuedIdentityNotFound
+	}
+	if err != nil {
+		return 0, err
+	}
+	if row.RevokedAt != nil || (row.ExpiresAt != nil && !row.ExpiresAt.After(now)) {
+		return 0, store.ErrIssuedIdentityNotFound
+	}
+	return 0, store.ErrCredentialGenerationConflict
 }

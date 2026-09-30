@@ -37,12 +37,17 @@ const (
 )
 
 type runnerConfig struct {
-	profile           Profile
-	configPath        string
-	serverURL         string
-	transport         string
-	grpcTarget        string
-	runnerID          string
+	profile    Profile
+	configPath string
+	serverURL  string
+	transport  string
+	grpcTarget string
+	runnerID   string
+	systemID   string
+	// runnerIDExplicit records that an operator set the ID (file, env, or
+	// flag) rather than inheriting defaultRunnerID. Enrollment overrides the ID
+	// with the server-issued one, and an explicit value is worth a warning.
+	runnerIDExplicit  bool
 	concurrency       int
 	changed           map[string]bool
 	resolutionIssues  map[string]error
@@ -88,9 +93,9 @@ type runnerConfig struct {
 	// nothing is written to disk unless asked.
 	identityStoreKind string
 	identityFile      string
-	// registrationCode bootstraps enrollment when no identity is stored yet.
+	// registrationToken bootstraps enrollment when no identity is stored yet.
 	// Never logged.
-	registrationCode string
+	registrationToken string
 	// allowPlaintext opts out of the transport-security gate. Without it a
 	// runner whose control-plane connection carries no TLS material at all
 	// refuses to start, because its bearer token would cross the wire in the
@@ -148,6 +153,7 @@ func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
 	cmd.Flags().StringVar(&cfg.transport, "transport", cfg.transport, "Runner Protocol transport: http or grpc")
 	cmd.Flags().StringVar(&cfg.grpcTarget, "grpc-target", cfg.grpcTarget, "xflow-server gRPC target host:port (grpc transport)")
 	cmd.Flags().StringVar(&cfg.runnerID, "id", cfg.runnerID, "Runner ID")
+	cmd.Flags().StringVar(&cfg.systemID, "system-id", cfg.systemID, "Stable runner-pool instance key (default: XFLOW_RUNNER_SYSTEM_ID, POD_NAME, then hostname)")
 	cmd.Flags().IntVar(&cfg.concurrency, "concurrency", cfg.concurrency, "Runner concurrency")
 	cmd.Flags().StringVar(&cfg.capRaw, "cap", cfg.capRaw, "Comma-separated node type capabilities")
 	cmd.Flags().StringArrayVar(&cfg.labelRaw, "label", cfg.labelRaw, "Runner label as key=value; repeatable")
@@ -169,7 +175,7 @@ func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
 	cmd.Flags().StringVar(&cfg.tlsClientKey, "tls-client-key", cfg.tlsClientKey, "Path to client TLS private key")
 	cmd.Flags().StringVar(&cfg.identityStoreKind, "identity-store", cfg.identityStoreKind, "Where to keep the enrolled identity: ephemeral or file")
 	cmd.Flags().StringVar(&cfg.identityFile, "identity-file", cfg.identityFile, "Path to the identity file (--identity-store=file)")
-	cmd.Flags().StringVar(&cfg.registrationCode, "registration-code", cfg.registrationCode, "One-time code used to enroll when no identity is stored; enrollment dials --server over HTTP regardless of --transport (prefer XFLOW_RUNNER_REGISTRATION_CODE)")
+	cmd.Flags().StringVar(&cfg.registrationToken, "registration-token", cfg.registrationToken, "Registration token used to enroll when no identity is stored (reusable unless the server capped its max_uses); enrollment dials --server over HTTP regardless of --transport (prefer XFLOW_RUNNER_REGISTRATION_TOKEN)")
 	cmd.Flags().BoolVar(&cfg.allowPlaintext, "allow-plaintext", cfg.allowPlaintext, "Permit an unencrypted control-plane connection (no TLS material configured)")
 	cmd.Flags().BoolVar(&cfg.requireSupplyEncryption, "require-supply-encryption", cfg.requireSupplyEncryption, "Exit if the control plane issues no supply encryption key at registration")
 	cmd.Flags().StringVar(&cfg.traceMode, "trace", "disabled", "Tracing mode: disabled|stdout|otlp")
@@ -541,7 +547,7 @@ func runWithSignals(cfg runnerConfig) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if cfg.runnerID == "" {
-		cfg.runnerID = fmt.Sprintf("runner-%d", os.Getpid())
+		cfg.runnerID = defaultRunnerID()
 	}
 	return runRunner(ctx, cfg)
 }
@@ -649,7 +655,7 @@ func decideIdentityRenewal(cfg runnerConfig, store identityStore) (rc renewClien
 	}
 	if verr := validateEnrollTransportSecurity(cfg); verr != nil {
 		// Reusing enrollment's gate: it judges only the URL scheme against
-		// --allow-plaintext, never the registration code. Its message is
+		// --allow-plaintext, never the registration token. Its message is
 		// written for enrollment though, so do not surface it as the
 		// headline here.
 		return nil, false, "runner identity renewal disabled: renewing over a plaintext --server would send the runner token in the clear; use https or --allow-plaintext", verr

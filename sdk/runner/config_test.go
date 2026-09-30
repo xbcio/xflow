@@ -947,12 +947,12 @@ func TestValidateRunnerConfigRejectsPlaintextGRPCWithoutOptIn(t *testing.T) {
 // material configured satisfies validateTransportSecurity on its own — that
 // gate never looks at --server's scheme under grpc — but enrollment always
 // dials --server over plain HTTP regardless of --transport, so a plaintext
-// --server paired with a configured --registration-code must still be
+// --server paired with a configured --registration-token must still be
 // refused here, before `run` would crash-loop on the same combination.
 
 // TestConfigValidateRejectsPlaintextEnrollUnderGRPCTransport is the core
 // regression case: --transport=grpc with TLS material configured used to
-// sail through validateTransportSecurity even though --registration-code
+// sail through validateTransportSecurity even though --registration-token
 // means this run will enroll over plaintext HTTP.
 func TestConfigValidateRejectsPlaintextEnrollUnderGRPCTransport(t *testing.T) {
 	err := executeRootWithOptions(commandOptions{
@@ -963,10 +963,10 @@ func TestConfigValidateRejectsPlaintextEnrollUnderGRPCTransport(t *testing.T) {
 		"--grpc-target", "host:9090",
 		"--tls-server-ca", "/path/ca.pem",
 		"--server", "http://internal-controlplane:8080",
-		"--registration-code", "XXXX",
+		"--registration-token", "XXXX",
 	)
 	if err == nil {
-		t.Fatal("config validate accepted a plaintext --server with a configured --registration-code under --transport=grpc")
+		t.Fatal("config validate accepted a plaintext --server with a configured --registration-token under --transport=grpc")
 	}
 	if !strings.Contains(err.Error(), "refusing to enroll") {
 		t.Fatalf("error = %q, want it to name the enroll gate (\"refusing to enroll\")", err.Error())
@@ -984,10 +984,10 @@ func TestConfigValidateAcceptsHTTPSEnrollUnderGRPCTransport(t *testing.T) {
 		"--grpc-target", "host:9090",
 		"--tls-server-ca", "/path/ca.pem",
 		"--server", "https://internal-controlplane:8080",
-		"--registration-code", "XXXX",
+		"--registration-token", "XXXX",
 	)
 	if err != nil {
-		t.Fatalf("config validate rejected an https:// --server with a configured --registration-code: %v", err)
+		t.Fatalf("config validate rejected an https:// --server with a configured --registration-token: %v", err)
 	}
 }
 
@@ -1003,7 +1003,7 @@ func TestConfigValidateAcceptsPlaintextEnrollWithAllowPlaintext(t *testing.T) {
 		"--grpc-target", "host:9090",
 		"--tls-server-ca", "/path/ca.pem",
 		"--server", "http://internal-controlplane:8080",
-		"--registration-code", "XXXX",
+		"--registration-token", "XXXX",
 		"--allow-plaintext",
 	)
 	if err != nil {
@@ -1014,7 +1014,7 @@ func TestConfigValidateAcceptsPlaintextEnrollWithAllowPlaintext(t *testing.T) {
 // TestConfigValidateIgnoresEnrollGateWithoutRegistrationCode is the core
 // contrast with TestConfigValidateRejectsPlaintextEnrollUnderGRPCTransport:
 // the same plaintext --server under --transport=grpc must pass when no
-// --registration-code is configured, pinning that the gate is conditional on
+// --registration-token is configured, pinning that the gate is conditional on
 // an enrollment actually being about to happen, not unconditional.
 func TestConfigValidateIgnoresEnrollGateWithoutRegistrationCode(t *testing.T) {
 	err := executeRootWithOptions(commandOptions{
@@ -1027,19 +1027,19 @@ func TestConfigValidateIgnoresEnrollGateWithoutRegistrationCode(t *testing.T) {
 		"--server", "http://internal-controlplane:8080",
 	)
 	if err != nil {
-		t.Fatalf("config validate rejected a config with no --registration-code: %v", err)
+		t.Fatalf("config validate rejected a config with no --registration-token: %v", err)
 	}
 }
 
 // TestConfigValidateIgnoresEnrollGateWhenIdentityAlreadyStored pins the
 // regression round 1 introduced: resolveRunnerIdentity (enroll.go) checks
-// store.Load() before it ever looks at cfg.registrationCode, and returns
+// store.Load() before it ever looks at cfg.registrationToken, and returns
 // immediately on a stored identity without reaching the enroll gate at all.
 // A runner that already enrolled, with --identity-store=file pointing at a
-// valid identity file, and a stale --registration-code still sitting in its
+// valid identity file, and a stale --registration-token still sitting in its
 // environment (nothing forces it to be cleared on restart) never dials out
 // to enroll and must not be rejected by config validation either — even
-// though its --server is plaintext and its --registration-code is set, the
+// though its --server is plaintext and its --registration-token is set, the
 // conjunction with "no stored identity" is false, so the gate must not fire.
 func TestConfigValidateIgnoresEnrollGateWhenIdentityAlreadyStored(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "identity.json")
@@ -1055,7 +1055,7 @@ func TestConfigValidateIgnoresEnrollGateWhenIdentityAlreadyStored(t *testing.T) 
 		"--grpc-target", "host:9090",
 		"--tls-server-ca", "/path/ca.pem",
 		"--server", "http://internal-controlplane:8080",
-		"--registration-code", "XXXX",
+		"--registration-token", "XXXX",
 		"--identity-store", "file",
 		"--identity-file", path,
 	)
@@ -1333,5 +1333,48 @@ runner:
 	}
 	if _, ok := got.labels["xflow.io/os"]; !ok {
 		t.Fatal("labels missing xflow.io/os: the explicit --auto-labels=true flag must beat the YAML file's auto_labels: false")
+	}
+}
+
+func TestRegistrationTokenConfigSurface(t *testing.T) {
+	cfg, err := loadRunnerConfigFromBytes([]byte("registration_token: yaml-token\n"))
+	if err != nil {
+		t.Fatalf("loadRunnerConfigFromBytes: %v", err)
+	}
+	if cfg.registrationToken != "yaml-token" {
+		t.Fatalf("registration token = %q, want yaml-token", cfg.registrationToken)
+	}
+
+	cfg = applyLookupEnvOverrides(defaultRunnerConfig(), func(key string) (string, bool) {
+		if key == "XFLOW_RUNNER_REGISTRATION_TOKEN" {
+			return "current-token", true
+		}
+		return "", false
+	})
+	if cfg.registrationToken != "current-token" {
+		t.Fatalf("registration token from env = %q, want current-token", cfg.registrationToken)
+	}
+
+	cmd, err := NewCommand(Profile{})
+	if err != nil {
+		t.Fatalf("NewCommand: %v", err)
+	}
+	run, _, err := cmd.Find([]string{"run"})
+	if err != nil {
+		t.Fatalf("find run command: %v", err)
+	}
+	if flag := run.Flags().Lookup("registration-token"); flag == nil {
+		t.Fatal("registration-token flag is missing")
+	}
+}
+
+func TestEnrollModeRejectsExplicitRunnerID(t *testing.T) {
+	cfg := defaultRunnerConfig()
+	cfg.registrationToken = "registration-token"
+	cfg.runnerID = "configured-runner"
+	cfg.runnerIDExplicit = true
+	cfg.allowPlaintext = true
+	if err := validateRunnerConfig(cfg); err == nil || !strings.Contains(err.Error(), "must not be configured") {
+		t.Fatalf("validateRunnerConfig error = %v, want explicit runner ID rejection", err)
 	}
 }

@@ -208,11 +208,11 @@ func grpcTransportInfo(ctx context.Context) TransportInfo {
 // definition is needed when gRPC-only runners exist. (Task 6 scope: HTTP only.)
 func runnerStatus(err error) error {
 	switch {
-	case errors.Is(err, ErrRunnerIDRequired), errors.Is(err, ErrRunnerSessionRequired), errors.Is(err, ErrConcurrencyRequired), errors.Is(err, ErrInvalidNamespace), errors.Is(err, ErrLeaseRequired), errors.Is(err, ErrMissingWorkflowVersion):
+	case errors.Is(err, ErrRunnerIDRequired), errors.Is(err, ErrRunnerSessionRequired), errors.Is(err, ErrConcurrencyRequired), errors.Is(err, ErrInstanceUIDRequired), errors.Is(err, ErrInvalidNamespace), errors.Is(err, ErrLabelConflict), errors.Is(err, ErrLeaseRequired), errors.Is(err, ErrMissingWorkflowVersion):
 		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, ErrInvalidCapability):
 		return status.Error(codes.InvalidArgument, ErrInvalidCapability.Error())
-	case errors.Is(err, ErrRunnerSessionStale):
+	case errors.Is(err, ErrRunnerSessionStale), errors.Is(err, ErrRunnerIDConflict):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, ErrRunnerNotFound):
 		return status.Error(codes.NotFound, err.Error())

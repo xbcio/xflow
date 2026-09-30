@@ -63,7 +63,8 @@ func heartbeatOnce(t *testing.T, srv *Server) protocol.HeartbeatResponse {
 	t.Helper()
 	ctx := context.Background()
 	reg, err := srv.core.register(ctx, protocol.RegisterRunnerRequest{
-		RunnerID: "runner-a", Concurrency: 1,
+		InstanceUID: "test-instance",
+		RunnerID:    "runner-a", Concurrency: 1,
 	}, TransportInfo{})
 	if err != nil {
 		t.Fatalf("register: %v", err)

@@ -284,6 +284,8 @@ func profileSampleRunnerConfigYAML(profile Profile) string {
 	} else {
 		fmt.Fprintf(&sample, "  # id is omitted to use the %s<hostname>-<pid> profile default.\n", profile.RunnerIDPrefix)
 	}
+	sample.WriteString("  # Stable pool instance key; defaults to POD_NAME, then hostname.\n")
+	sample.WriteString("  # system_id: \"runner-pod-1\"\n")
 	sample.WriteString("  concurrency: 2\n")
 	sample.WriteString("  labels:\n")
 	for _, key := range labelKeys {
@@ -323,7 +325,19 @@ browser_cdp:
   connect_timeout: "5s"
 `)
 	if profile.RequireToken {
-		sample.WriteString("\n# This profile requires a runner token. Use XFLOW_RUNNER_TOKEN (or --token),\n# a persisted identity, or a registration code; keep static tokens out of this file.\n")
+		sample.WriteString("\n# This profile requires a runner token. Use XFLOW_RUNNER_TOKEN (or --token),\n# a persisted identity, or a registration token; keep static tokens out of this file.\n")
 	}
 	return sample.String()
+}
+
+// defaultRunnerID is the ID a runner registers under when nothing sets one:
+// runner-<hostname>-<pid>, the same shape profiledRunnerID derives.
+//
+// The PID alone is not enough. In a container the runner is usually PID 1, so
+// every replica of a Deployment would otherwise register as runner-1 and the
+// server would hand each replica's session to the next one in turn. The
+// hostname is the pod name there, which is unique per replica; on a shared
+// host the PID keeps two runners apart.
+func defaultRunnerID() string {
+	return profiledRunnerID("runner-")
 }

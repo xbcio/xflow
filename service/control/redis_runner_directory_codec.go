@@ -99,6 +99,9 @@ type redisRunnerDirectoryKeys struct {
 	// runner-local drain sample as one JSON value per runner. Lua never parses
 	// it; heartbeat validates the scalar generation before HSET.
 	runnerDrainObservation string
+	// runnerInstanceUID maps runner ID to the process instance UID that holds
+	// its current session (RegisterRunnerRequest.InstanceUID).
+	runnerInstanceUID string
 
 	// Handoff keys are all claim-scoped except handoffAssignment, which gives
 	// token-fenced terminal cleanup an O(1) assignment -> current handoff path.
@@ -179,6 +182,7 @@ func newRedisRunnerDirectoryKeys(prefix string) redisRunnerDirectoryKeys {
 		deactivationObligationDrainGeneration:        prefix + ":runner:deactivation:drain-generation",
 		runnerActivationInventory:                    prefix + ":runner:activation-inventory",
 		runnerDrainObservation:                       prefix + ":runner:control:drain-observation",
+		runnerInstanceUID:                            prefix + ":runner:instance-uid",
 		handoffState:                                 prefix + ":runner:handoff:state",
 		handoffGeneration:                            prefix + ":runner:handoff:generation",
 		handoffLeaseMeta:                             prefix + ":runner:handoff:lease-meta",

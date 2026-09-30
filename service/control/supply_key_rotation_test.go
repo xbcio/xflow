@@ -78,7 +78,8 @@ func TestRotationReachesEveryRunner(t *testing.T) {
 	sessions := map[string]string{}
 	for _, id := range []string{"runner-a", "runner-b"} {
 		reg, regErr := srv.core.register(ctx, protocol.RegisterRunnerRequest{
-			RunnerID: id, Concurrency: 1, SupportsEncryption: true,
+			InstanceUID: "test-instance",
+			RunnerID:    id, Concurrency: 1, SupportsEncryption: true,
 		}, TransportInfo{})
 		if regErr != nil {
 			t.Fatalf("register %s: %v", id, regErr)
@@ -140,7 +141,8 @@ func TestRotationReachesARunnerThatMissedIt(t *testing.T) {
 
 	// Registers only after the rotation has already happened.
 	reg, err := srv.core.register(ctx, protocol.RegisterRunnerRequest{
-		RunnerID: "latecomer", Concurrency: 1, SupportsEncryption: true,
+		InstanceUID: "test-instance",
+		RunnerID:    "latecomer", Concurrency: 1, SupportsEncryption: true,
 	}, TransportInfo{})
 	if err != nil {
 		t.Fatalf("register: %v", err)

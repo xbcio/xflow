@@ -18,7 +18,7 @@ import (
 func issuedIdentityForPrincipalAuth(t *testing.T, namespaces []string) *control.MemoryIssuedIdentityStore {
 	t.Helper()
 	store := control.NewMemoryIssuedIdentityStore()
-	if err := store.Issue(context.Background(), control.IssuedIdentity{
+	if err := store.Issue(context.Background(), control.IssuedIdentity{PoolID: "test-pool",
 		RunnerID:  "runner-issued",
 		TokenHash: control.HashSecret("issued-token"),
 		Scope: control.RunnerPolicy{
@@ -95,7 +95,7 @@ func TestIssuedIdentityPrincipalAuthenticatorChecksIdentityLifecycleAndScope(t *
 	}
 
 	expired := control.NewMemoryIssuedIdentityStore()
-	if err := expired.Issue(context.Background(), control.IssuedIdentity{
+	if err := expired.Issue(context.Background(), control.IssuedIdentity{PoolID: "test-pool",
 		RunnerID: "runner-expired", TokenHash: control.HashSecret("expired-token"),
 		Scope:     control.RunnerPolicy{IDPrefix: "runner-", AllowedNamespaces: []string{"team-a"}},
 		ExpiresAt: time.Now().UTC().Add(-time.Minute),

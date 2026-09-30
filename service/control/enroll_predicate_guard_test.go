@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/service/protocol"
+	"github.com/xbcio/xflow/store"
 )
 
 // This file guards against enroll.go's "is enrollment configured" gate
@@ -180,6 +181,13 @@ func TestCoreEnrollAgreesWithEnrollDeclaredAcrossStoreCombos(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			codes, ids := newStores(c.withCodes, c.withIDs)
 			want := EnrollDeclared(codes, ids)
+			pools := NewMemoryRunnerPoolStore()
+			if err := pools.CreatePool(context.Background(), RunnerPool{
+				ID: "predicate-pool", Name: "predicate", OwnerKind: store.PoolOwnerTenant, OwnerNamespace: "default",
+				AllowedNamespaces: []string{"*"}, AllowedNodeTypes: []string{"*"}, CreatedAt: time.Unix(1700000000, 0).UTC(),
+			}); err != nil {
+				t.Fatalf("CreatePool: %v", err)
+			}
 
 			// The request code has to differ by combo, or the "declared" half
 			// of this test asserts nothing. Every rejection Enroll can produce
@@ -196,7 +204,7 @@ func TestCoreEnrollAgreesWithEnrollDeclaredAcrossStoreCombos(t *testing.T) {
 					t.Fatalf("GenerateRegistrationCode: %v", err)
 				}
 				if err := codes.Create(context.Background(), RegistrationCode{
-					ID: id, CodeHash: HashSecret(plaintext),
+					ID: id, CodeHash: HashSecret(plaintext), PoolID: "predicate-pool",
 					AllowedNamespaces: []string{"*"}, AllowedNodeTypes: []string{"*"},
 					CreatedAt: time.Unix(1700000000, 0).UTC(),
 				}); err != nil {
@@ -209,9 +217,10 @@ func TestCoreEnrollAgreesWithEnrollDeclaredAcrossStoreCombos(t *testing.T) {
 				registrationCodes: codes,
 				issuedIdentities:  ids,
 				enrollLimiter:     newEnrollLimiter(defaultEnrollFailureLimit, defaultEnrollLockout),
+				pools:             pools,
 			}
-			_, err := core.Enroll(context.Background(), protocol.EnrollRequest{
-				RegistrationCode: reqCode,
+			_, err := core.Enroll(context.Background(), protocol.EnrollRequest{SystemID: "test-system", InstanceUID: "test-instance",
+				RegistrationCode: reqCode, Namespaces: []string{"default"}, NodeTypes: []string{"xflow.function"},
 			}, TransportInfo{SourceIP: "10.0.0.1"})
 
 			// "not declared" must reject; this is the half that also protects

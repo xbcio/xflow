@@ -13,7 +13,21 @@ import (
 
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/protocol"
+	"github.com/xbcio/xflow/store"
 )
+
+func newSDKEnrollmentTestPool(t *testing.T, namespaces, nodeTypes []string) (*control.MemoryRunnerPoolStore, string) {
+	t.Helper()
+	const poolID = "sdk-enrollment-test-pool"
+	pools := control.NewMemoryRunnerPoolStore()
+	if err := pools.CreatePool(context.Background(), store.RunnerPool{
+		ID: poolID, Name: "sdk enrollment", OwnerKind: store.PoolOwnerTenant, OwnerNamespace: "default",
+		AllowedNamespaces: namespaces, AllowedNodeTypes: nodeTypes, CreatedAt: time.Unix(1700000000, 0).UTC(),
+	}); err != nil {
+		t.Fatalf("CreatePool: %v", err)
+	}
+	return pools, poolID
+}
 
 // TestNewServerReachesEnrollEndToEnd is the reachability proof for the full
 // wiring chain: cmd/server -> xflowsdk.WithServerEnroll -> buildServerAPIConfig
@@ -43,19 +57,20 @@ import (
 func TestNewServerReachesEnrollEndToEnd(t *testing.T) {
 	codes := control.NewMemoryRegistrationCodeStore()
 	ids := control.NewMemoryIssuedIdentityStore()
+	pools, poolID := newSDKEnrollmentTestPool(t, []string{"*"}, []string{"*"})
 	id, plaintext, err := control.GenerateRegistrationCode()
 	if err != nil {
 		t.Fatalf("GenerateRegistrationCode: %v", err)
 	}
 	if err := codes.Create(context.Background(), control.RegistrationCode{
-		ID: id, CodeHash: control.HashSecret(plaintext),
+		ID: id, CodeHash: control.HashSecret(plaintext), PoolID: poolID,
 		AllowedNamespaces: []string{"*"}, AllowedNodeTypes: []string{"*"},
 		CreatedAt: time.Unix(1700000000, 0).UTC(),
 	}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	srv, err := NewServer(ServerConfig{}, WithServerEnroll(codes, ids))
+	srv, err := NewServer(ServerConfig{}, WithServerEnroll(codes, ids), WithServerRunnerPools(pools))
 	if err != nil {
 		t.Fatalf("NewServer(WithServerEnroll only) error = %v, want success — "+
 			"enrollment alone must count as a declared runner-auth posture", err)
@@ -65,7 +80,7 @@ func TestNewServerReachesEnrollEndToEnd(t *testing.T) {
 	defer ts.Close()
 
 	resp, err := ts.Client().Post(ts.URL+protocol.EnrollPath, "application/json",
-		strings.NewReader(`{"registration_code":"`+plaintext+`","namespaces":["sas"]}`))
+		strings.NewReader(`{"registration_code":"`+plaintext+`","system_id":"test-system","instance_uid":"test-instance","namespaces":["sas"]}`))
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
@@ -111,12 +126,13 @@ func TestNewServerRejectsEnrollWithMismatchedStores(t *testing.T) {
 func TestNewServerReachesIdentityTTLEndToEnd(t *testing.T) {
 	codes := control.NewMemoryRegistrationCodeStore()
 	ids := control.NewMemoryIssuedIdentityStore()
+	pools, poolID := newSDKEnrollmentTestPool(t, []string{"*"}, []string{"*"})
 	id, plaintext, err := control.GenerateRegistrationCode()
 	if err != nil {
 		t.Fatalf("GenerateRegistrationCode: %v", err)
 	}
 	if err := codes.Create(context.Background(), control.RegistrationCode{
-		ID: id, CodeHash: control.HashSecret(plaintext),
+		ID: id, CodeHash: control.HashSecret(plaintext), PoolID: poolID,
 		AllowedNamespaces: []string{"*"}, AllowedNodeTypes: []string{"*"},
 		CreatedAt: time.Unix(1700000000, 0).UTC(),
 	}); err != nil {
@@ -124,7 +140,7 @@ func TestNewServerReachesIdentityTTLEndToEnd(t *testing.T) {
 	}
 
 	const ttl = 24 * time.Hour
-	srv, err := NewServer(ServerConfig{}, WithServerEnroll(codes, ids), WithServerIdentityTTL(ttl))
+	srv, err := NewServer(ServerConfig{}, WithServerEnroll(codes, ids), WithServerRunnerPools(pools), WithServerIdentityTTL(ttl))
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -134,7 +150,7 @@ func TestNewServerReachesIdentityTTLEndToEnd(t *testing.T) {
 
 	before := time.Now().UTC()
 	resp, err := ts.Client().Post(ts.URL+protocol.EnrollPath, "application/json",
-		strings.NewReader(`{"registration_code":"`+plaintext+`","namespaces":["sas"]}`))
+		strings.NewReader(`{"registration_code":"`+plaintext+`","system_id":"test-system","instance_uid":"test-instance","namespaces":["sas"]}`))
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}

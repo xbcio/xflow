@@ -66,6 +66,7 @@ func TestAnUnmappedRunnerErrorBecomesA500ThatLeaksNothing(t *testing.T) {
 
 	var reg protocol.RegisterRunnerResponse
 	status, body := postForStatus(t, srv.URL+protocol.RegisterRunnerPath, protocol.RegisterRunnerRequest{
+		InstanceUID:  "test-instance",
 		RunnerID:     "runner-1",
 		Concurrency:  1,
 		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},

@@ -58,6 +58,11 @@ type RegisterRunnerRequest struct {
 	// on a fresh runner or one that hosts no triggers. Carries no secret values
 	// (only workflow/entry-unit identity + generation).
 	Activations []ActivationInventoryItem `json:"activations,omitempty"`
+	// InstanceUID identifies the process instance behind this registration
+	// (the pod UID under Kubernetes). The server refuses to let a registration
+	// with a different UID replace a still-live session for the same runner
+	// ID. The control plane rejects an empty value before registration.
+	InstanceUID string `json:"instance_uid,omitempty"`
 	// SupportsEncryption indicates the runner can receive and decrypt $enc
 	// supply envelopes. When true the server includes a SupplyKey in the
 	// registration response and encrypts supply GET responses for this runner.
@@ -440,6 +445,8 @@ type HelloFrame struct {
 	Capabilities []Capability
 	Labels       map[string]string
 	Namespaces   []string
+	// InstanceUID: see RegisterRunnerRequest.InstanceUID.
+	InstanceUID string
 }
 
 type ResultFrame struct {

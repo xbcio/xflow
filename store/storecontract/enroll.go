@@ -486,16 +486,13 @@ func RunIssuedIdentityStoreContract(t *testing.T, factory func(t *testing.T) sto
 			TokenHash: store.HashSecret("tok"),
 			Scope: store.RunnerPolicy{
 				Name: "runner-1",
-				// IDPrefix is deliberately non-zero here (task-7-addendum.md
-				// correction 3): enroll's own issuedScope never sets it today,
-				// so a contract that left it zero would not notice a SQL
-				// implementation that silently drops the column — a store
-				// that always writes/reads back "" would still pass. The
-				// point of this field is a future ceiling copied from
-				// RegistrationCode.Policy() onto Scope; if that day comes and
-				// the SQL side has no id_prefix column, the drop is a silent
-				// privilege escalation (dev honors the ceiling, prod does
-				// not), so this test must be able to see it now.
+				// IDPrefix is deliberately non-zero here: leaving it zero
+				// would not notice a SQL implementation that silently drops the
+				// column — a store that always writes/reads back "" would still
+				// pass. The field is a durable enrollment scope ceiling; if the
+				// SQL side loses id_prefix, dev honors the ceiling while prod does
+				// not, which is a silent privilege escalation this contract must
+				// detect.
 				IDPrefix:          "runner-",
 				AllowedNodeTypes:  []string{"kafka.trigger"},
 				AllowedNamespaces: []string{"sas"},
@@ -550,6 +547,25 @@ func RunIssuedIdentityStoreContract(t *testing.T, factory func(t *testing.T) sto
 		}
 		if !got.RevokedAt.Equal(want.RevokedAt) {
 			t.Fatalf("RevokedAt = %v, want %v", got.RevokedAt, want.RevokedAt)
+		}
+	})
+
+	t.Run("issue refuses an existing runner id", func(t *testing.T) {
+		st := factory(t)
+		first := store.IssuedIdentity{RunnerID: "runner-dup", TokenHash: store.HashSecret("first"), OwnerNamespace: "team-a"}
+		if err := st.Issue(ctx, first); err != nil {
+			t.Fatalf("first issue: %v", err)
+		}
+		second := store.IssuedIdentity{RunnerID: "runner-dup", TokenHash: store.HashSecret("second"), OwnerNamespace: "team-b"}
+		if err := st.Issue(ctx, second); !errors.Is(err, store.ErrIssuedIdentityExists) {
+			t.Fatalf("second issue = %v, want ErrIssuedIdentityExists", err)
+		}
+		got, ok, err := st.Lookup(ctx, "runner-dup")
+		if err != nil || !ok {
+			t.Fatalf("lookup = (%v, %v), want found", ok, err)
+		}
+		if got.TokenHash != first.TokenHash || got.OwnerNamespace != "team-a" {
+			t.Fatalf("stored identity was overwritten: owner=%q", got.OwnerNamespace)
 		}
 	})
 
@@ -767,5 +783,123 @@ func RunIssuedIdentityStoreContract(t *testing.T, factory func(t *testing.T) sto
 				t.Fatalf("global revoke of %s did not stamp RevokedAt", id)
 			}
 		}
+	})
+
+	t.Run("rotate credential uses generation CAS", func(t *testing.T) {
+		t.Run("success advances generation and retains previous token", func(t *testing.T) {
+			st := factory(t)
+			oldHash := store.HashSecret("old-token")
+			newHash := store.HashSecret("new-token")
+			validUntil := time.Now().UTC().Add(time.Minute).Truncate(time.Millisecond)
+			identity := store.IssuedIdentity{
+				RunnerID: "runner-rotate", TokenHash: oldHash,
+				Scope:  store.RunnerPolicy{Name: "scope", AllowedNamespaces: []string{"team-a"}},
+				CodeID: "code-1", OwnerNamespace: "team-a", PoolID: "pool-1",
+				IssuedAt:             time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond),
+				ExpiresAt:            time.Now().UTC().Add(time.Hour).Truncate(time.Millisecond),
+				CredentialGeneration: 4,
+			}
+			if err := st.Issue(ctx, identity); err != nil {
+				t.Fatalf("Issue: %v", err)
+			}
+			generation, err := st.RotateCredential(ctx, identity.RunnerID, 4, newHash, validUntil)
+			if err != nil || generation != 5 {
+				t.Fatalf("RotateCredential = (%d, %v), want (5, nil)", generation, err)
+			}
+			got, ok, err := st.Lookup(ctx, identity.RunnerID)
+			if err != nil || !ok {
+				t.Fatalf("Lookup after rotate = (ok=%v, err=%v)", ok, err)
+			}
+			if got.TokenHash != newHash || got.PreviousTokenHash != oldHash || !got.PreviousTokenValidUntil.Equal(validUntil) || got.CredentialGeneration != 5 {
+				t.Fatalf("rotated credential fields = %+v", got)
+			}
+			if got.RunnerID != identity.RunnerID || got.CodeID != identity.CodeID || got.OwnerNamespace != identity.OwnerNamespace || got.PoolID != identity.PoolID || !reflect.DeepEqual(got.Scope, identity.Scope) || !got.IssuedAt.Equal(identity.IssuedAt) || !got.ExpiresAt.Equal(identity.ExpiresAt) || !got.RevokedAt.Equal(identity.RevokedAt) {
+				t.Fatalf("RotateCredential changed immutable identity fields:\n got  = %+v\n want = %+v", got, identity)
+			}
+		})
+
+		t.Run("conflict changes nothing", func(t *testing.T) {
+			st := factory(t)
+			identity := store.IssuedIdentity{
+				RunnerID: "runner-conflict", TokenHash: store.HashSecret("old"),
+				CredentialGeneration: 3, IssuedAt: time.Now().UTC().Truncate(time.Millisecond),
+			}
+			if err := st.Issue(ctx, identity); err != nil {
+				t.Fatalf("Issue: %v", err)
+			}
+			before, _, err := st.Lookup(ctx, identity.RunnerID)
+			if err != nil {
+				t.Fatalf("Lookup before conflict: %v", err)
+			}
+			if generation, err := st.RotateCredential(ctx, identity.RunnerID, 2, store.HashSecret("new"), time.Now().UTC().Add(time.Minute)); generation != 0 || !errors.Is(err, store.ErrCredentialGenerationConflict) {
+				t.Fatalf("RotateCredential conflict = (%d, %v), want (0, ErrCredentialGenerationConflict)", generation, err)
+			}
+			after, _, err := st.Lookup(ctx, identity.RunnerID)
+			if err != nil {
+				t.Fatalf("Lookup after conflict: %v", err)
+			}
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("conflicting rotation mutated identity:\n before = %+v\n after  = %+v", before, after)
+			}
+		})
+
+		t.Run("zero stored generation is read as one", func(t *testing.T) {
+			st := factory(t)
+			oldHash := store.HashSecret("legacy")
+			if err := st.Issue(ctx, store.IssuedIdentity{RunnerID: "runner-legacy-generation", TokenHash: oldHash}); err != nil {
+				t.Fatalf("Issue: %v", err)
+			}
+			generation, err := st.RotateCredential(ctx, "runner-legacy-generation", 1, store.HashSecret("new"), time.Now().UTC().Add(time.Minute))
+			if err != nil || generation != 2 {
+				t.Fatalf("RotateCredential legacy generation = (%d, %v), want (2, nil)", generation, err)
+			}
+			got, _, _ := st.Lookup(ctx, "runner-legacy-generation")
+			if got.CredentialGeneration != 2 || got.PreviousTokenHash != oldHash {
+				t.Fatalf("legacy rotation = generation %d previous %x, want 2/%x", got.CredentialGeneration, got.PreviousTokenHash, oldHash)
+			}
+		})
+
+		t.Run("absent revoked and expired identities are hidden", func(t *testing.T) {
+			st := factory(t)
+			rotate := func(runnerID string) error {
+				t.Helper()
+				_, err := st.RotateCredential(ctx, runnerID, 1, store.HashSecret("new"), time.Now().UTC().Add(time.Minute))
+				return err
+			}
+			if err := rotate("absent"); !errors.Is(err, store.ErrIssuedIdentityNotFound) {
+				t.Fatalf("RotateCredential(absent) = %v, want ErrIssuedIdentityNotFound", err)
+			}
+			revoked := store.IssuedIdentity{RunnerID: "revoked", TokenHash: store.HashSecret("old"), OwnerNamespace: "team-a", CredentialGeneration: 1}
+			if err := st.Issue(ctx, revoked); err != nil {
+				t.Fatalf("Issue revoked candidate: %v", err)
+			}
+			if err := st.Revoke(ctx, revoked.RunnerID, store.OwnerScope{Namespace: "team-a"}); err != nil {
+				t.Fatalf("Revoke: %v", err)
+			}
+			beforeRevoked, _, _ := st.Lookup(ctx, revoked.RunnerID)
+			if err := rotate(revoked.RunnerID); !errors.Is(err, store.ErrIssuedIdentityNotFound) {
+				t.Fatalf("RotateCredential(revoked) = %v, want ErrIssuedIdentityNotFound", err)
+			}
+			afterRevoked, _, _ := st.Lookup(ctx, revoked.RunnerID)
+			if !reflect.DeepEqual(afterRevoked, beforeRevoked) {
+				t.Fatal("rejected revoked rotation mutated identity")
+			}
+
+			expired := store.IssuedIdentity{
+				RunnerID: "expired", TokenHash: store.HashSecret("old"), CredentialGeneration: 1,
+				ExpiresAt: time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond),
+			}
+			if err := st.Issue(ctx, expired); err != nil {
+				t.Fatalf("Issue expired identity: %v", err)
+			}
+			beforeExpired, _, _ := st.Lookup(ctx, expired.RunnerID)
+			if err := rotate(expired.RunnerID); !errors.Is(err, store.ErrIssuedIdentityNotFound) {
+				t.Fatalf("RotateCredential(expired) = %v, want ErrIssuedIdentityNotFound", err)
+			}
+			afterExpired, _, _ := st.Lookup(ctx, expired.RunnerID)
+			if !reflect.DeepEqual(afterExpired, beforeExpired) {
+				t.Fatal("rejected expired rotation mutated identity")
+			}
+		})
 	})
 }

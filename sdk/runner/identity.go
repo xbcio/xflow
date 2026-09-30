@@ -28,7 +28,7 @@ type identity struct {
 // bool reports presence: (identity{}, false, nil) means "nothing stored yet",
 // which is the enrollment trigger, and is distinct from an error — a corrupt
 // or world-readable store must NOT read as "not enrolled yet" and silently
-// re-enroll, burning a registration code every restart.
+// re-enroll, burning a registration token every restart.
 type identityStore interface {
 	Load() (identity, bool, error)
 	Save(identity) error

@@ -20,6 +20,15 @@ type EnrollRequest struct {
 	// intersects them against the code's ceiling and rejects anything outside.
 	Namespaces []string `json:"namespaces,omitempty"`
 	NodeTypes  []string `json:"node_types,omitempty"`
+	// SystemID is the instance's idempotency key within a pool (pod name,
+	// hostname, or a persisted random value). A pool-bound code maps
+	// (pool, SystemID) to one stable runner ID; re-enrolling rotates the token
+	// and returns the same ID. Empty takes the legacy path: a new runner ID on
+	// every enroll.
+	SystemID string `json:"system_id,omitempty"`
+	// InstanceUID identifies the process instance (pod UID); see
+	// RegisterRunnerRequest.InstanceUID.
+	InstanceUID string `json:"instance_uid,omitempty"`
 }
 
 // EnrollResponse is the issued identity. Token is returned exactly once; the
@@ -32,6 +41,15 @@ type EnrollResponse struct {
 	// response and simply ignores it, which is what makes rolling the server
 	// ahead of the fleet safe.
 	ExpiresAt string `json:"expires_at,omitempty"`
+	// Namespaces is the namespace set the runner must register for. A runner
+	// that declared none uses it verbatim; empty (an older server) keeps the
+	// runner's own default.
+	Namespaces []string `json:"namespaces,omitempty"`
+	// CredentialGeneration is the token's generation (1 on first issue). Its
+	// presence also tells a runner the server supports idempotent re-enroll.
+	CredentialGeneration int64 `json:"credential_generation,omitempty"`
+	// Labels are the pool's server-owned labels, merged into registration.
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // Enroll exchanges a registration code for a runner identity. It deliberately

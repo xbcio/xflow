@@ -88,6 +88,9 @@ type MemoryRunnerDirectory struct {
 }
 
 type memoryRunnerState struct {
+	// instanceUID is the registering process instance; see
+	// RegisterRunnerRequest.InstanceUID.
+	instanceUID       string
 	snapshot          RunnerSnapshot
 	policy            RunnerPolicy
 	sessionID         string
@@ -117,6 +120,7 @@ type memoryHandoff struct {
 }
 
 var _ ActivationRunnerLister = (*MemoryRunnerDirectory)(nil)
+var _ RunnerRemover = (*MemoryRunnerDirectory)(nil)
 var _ HandoffDebtDirectory = (*MemoryRunnerDirectory)(nil)
 var _ FinalizedHandoffSettler = (*MemoryRunnerDirectory)(nil)
 var _ DeactivationObligationDirectory = (*MemoryRunnerDirectory)(nil)
@@ -200,10 +204,13 @@ func (d *MemoryRunnerDirectory) Register(_ context.Context, req RegisterRunnerRe
 		SessionID: uuid.NewString(),
 	}
 
+	previous := d.runners[req.RunnerID]
+	if previous != nil && instanceConflict(previous.instanceUID, req.InstanceUID, previous.snapshot.LastHeartbeat, now) {
+		return RunnerSession{}, ErrRunnerIDConflict
+	}
 	finalizedLease := make(map[AssignmentID]engine.TaskLease)
 	leasedAssignments := make(map[AssignmentID]Assignment)
 	inFlight := 0
-	previous := d.runners[req.RunnerID]
 	if previous != nil {
 		finalizedLease = cloneFinalizedLeases(previous.finalizedLease)
 		leasedAssignments = cloneLeasedAssignments(previous.leasedAssignments)
@@ -231,6 +238,7 @@ func (d *MemoryRunnerDirectory) Register(_ context.Context, req RegisterRunnerRe
 		},
 		policy:            req.Policy,
 		sessionID:         session.SessionID,
+		instanceUID:       req.InstanceUID,
 		namespaces:        namespaceSet(req.Namespaces),
 		activeClaims:      make(map[ClaimID]AssignmentID),
 		finalizedLease:    finalizedLease,
@@ -1438,4 +1446,64 @@ func (s *memoryRunnerState) canServeNamespace(t namespace.Namespace) bool {
 	}
 	_, ok := s.namespaces[t]
 	return ok
+}
+
+// instanceConflict is the one definition of "this registration would evict a
+// different live instance", shared by the memory directory and mirrored
+// verbatim by redisRegisterRunnerLua's guard. Liveness is DefaultRunnerLiveTTL
+// on the server clock, the same window the selector uses to route work.
+func instanceConflict(currentUID, newUID string, lastHeartbeat, now time.Time) bool {
+	if currentUID == "" || newUID == "" || currentUID == newUID {
+		return false
+	}
+	return now.Sub(lastHeartbeat) < DefaultRunnerLiveTTL
+}
+
+// Deregister implements RunnerDeregisterer.
+func (d *MemoryRunnerDirectory) Deregister(_ context.Context, runnerID, sessionID string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	state, err := d.runnerForSessionLocked(runnerID, sessionID)
+	if err != nil {
+		return err
+	}
+	// The Unix epoch, not the zero time: the Redis directory stores
+	// milliseconds and records 0, and the two must read the same afterwards.
+	state.snapshot.LastHeartbeat = time.Unix(0, 0).UTC()
+	state.instanceUID = ""
+	return nil
+}
+
+// RemoveRunner implements RunnerRemover. The blocker predicate is the same
+// server-side predicate used by drain completion: claims, finalized leases,
+// every handoff ledger entry, and pending activation cleanup must all be gone.
+func (d *MemoryRunnerDirectory) RemoveRunner(_ context.Context, runnerID string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	state := d.runners[runnerID]
+	if state != nil && (len(state.activeClaims) != 0 || len(state.finalizedLease) != 0) {
+		return ErrRunnerHasOutstandingWork
+	}
+	for _, claim := range d.claims {
+		if claim.runnerID == runnerID {
+			return ErrRunnerHasOutstandingWork
+		}
+	}
+	for _, handoff := range d.handoffs {
+		if handoff.runnerID == runnerID {
+			return ErrRunnerHasOutstandingWork
+		}
+	}
+	for _, obligation := range d.deactivationObligations {
+		if obligation.RunnerID == runnerID &&
+			(obligation.State == DeactivationObligationPendingFence || obligation.State == DeactivationObligationReady) {
+			return ErrRunnerHasOutstandingWork
+		}
+	}
+
+	delete(d.runners, runnerID)
+	delete(d.controls, runnerID)
+	delete(d.activationInventory, runnerID)
+	return nil
 }

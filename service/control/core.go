@@ -34,7 +34,9 @@ var (
 	ErrRunnerIDRequired      = errors.New("runner_id is required")
 	ErrRunnerSessionRequired = errors.New("runner_id and session_id are required")
 	ErrConcurrencyRequired   = errors.New("runner_id and concurrency are required")
+	ErrInstanceUIDRequired   = errors.New("instance_uid is required")
 	ErrInvalidNamespace      = errors.New("invalid namespace")
+	ErrLabelConflict         = errors.New("runner label conflicts with pool label")
 	ErrInvalidCapability     = errors.New("invalid runner capability")
 	ErrRunnerNotFound        = errors.New("runner not found")
 	ErrLeaseRequired         = errors.New("runner_id, session_id and lease are required")
@@ -141,6 +143,8 @@ type Core struct {
 	registrationCodes RegistrationCodeStore
 	issuedIdentities  IssuedIdentityStore
 	enrollLimiter     *enrollLimiter
+	pools             RunnerPoolStore
+	rotationGrace     time.Duration
 	// enrollmentRunnerIDPrefix is validated while Config is assembled. An empty
 	// value is retained only by directly-constructed legacy test Cores, where
 	// enrollmentRunnerIDPrefixOrDefault preserves runner-.
@@ -241,9 +245,17 @@ func (c *Core) register(ctx context.Context, req protocol.RegisterRunnerRequest,
 	if req.RunnerID == "" || req.Concurrency <= 0 {
 		return protocol.RegisterRunnerResponse{}, ErrConcurrencyRequired
 	}
-	policy, authErr := c.authn().AuthenticateRegister(req.RunnerID, req.AuthToken, info)
+	if strings.TrimSpace(req.InstanceUID) == "" {
+		return protocol.RegisterRunnerResponse{}, ErrInstanceUIDRequired
+	}
+	auth := c.authn()
+	policy, authErr, issuedAuth := authenticateRegisterSource(auth, req.RunnerID, req.AuthToken, info)
 	if err := c.authDeny(ctx, req.RunnerID, req.AuthToken, "register", info, authErr); err != nil {
 		return protocol.RegisterRunnerResponse{}, err
+	}
+	labels, err := c.registerLabels(ctx, issuedAuth, req)
+	if err != nil {
+		return protocol.RegisterRunnerResponse{}, normalizeRunnerError(err, c.logger, "register")
 	}
 	// Shape first, then entitlement. A runner's namespace membership is decided
 	// by the server's policy, never by what the runner declares: the declared
@@ -307,13 +319,20 @@ func (c *Core) register(ctx context.Context, req protocol.RegisterRunnerRequest,
 	session, err := c.runners.Register(ctx, RegisterRunnerRequest{
 		RunnerID:     req.RunnerID,
 		Capacity:     req.Concurrency,
-		Labels:       req.Labels,
+		Labels:       labels,
 		Capabilities: req.Capabilities,
 		Policy:       policy,
 		Namespaces:   effective,
 		Activations:  req.Activations,
+		InstanceUID:  req.InstanceUID,
 		Now:          time.Now(),
 	})
+	if errors.Is(err, ErrRunnerIDConflict) {
+		c.observeAuth(ctx, "register", "runner_id_conflict")
+		if c.logger != nil {
+			c.logger.Error("runner_id_conflict", "runner", req.RunnerID, "instance_uid", req.InstanceUID)
+		}
+	}
 	if err != nil {
 		return protocol.RegisterRunnerResponse{}, normalizeRunnerError(err, c.logger, "register")
 	}
@@ -338,6 +357,85 @@ func (c *Core) register(ctx context.Context, req protocol.RegisterRunnerRequest,
 	return resp, nil
 }
 
+// registerLabels adds server-owned labels only when the authenticator that
+// actually accepted this registration was an issued-identity authenticator.
+// Static and custom authenticators return the request unchanged and never
+// touch the identity or pool stores.
+func (c *Core) registerLabels(ctx context.Context, issuedAuth *IssuedIdentityAuthenticator, req protocol.RegisterRunnerRequest) (map[string]string, error) {
+	if issuedAuth == nil || issuedAuth.store == nil {
+		return req.Labels, nil
+	}
+	identity, found, err := issuedAuth.store.Lookup(ctx, req.RunnerID)
+	if err != nil {
+		return nil, fmt.Errorf("lookup issued identity labels: %w", err)
+	}
+	if !found || identity.PoolID == "" {
+		return req.Labels, nil
+	}
+	if c.pools == nil {
+		return nil, errors.New("runner pool store is not configured")
+	}
+	pool, err := c.pools.GetPool(ctx, identity.PoolID, OwnerScope{All: true})
+	if err != nil {
+		return nil, fmt.Errorf("lookup runner pool labels: %w", err)
+	}
+	if len(pool.Labels) == 0 {
+		return req.Labels, nil
+	}
+	merged := make(map[string]string, len(req.Labels)+len(pool.Labels))
+	for key, value := range req.Labels {
+		merged[key] = value
+	}
+	for key, value := range pool.Labels {
+		// A newly enrolled runner echoes the server labels it received. The same
+		// value is idempotent; a different runner-reported value is the conflict.
+		if reported, exists := merged[key]; exists && reported != value {
+			return nil, fmt.Errorf("%w: %q", ErrLabelConflict, key)
+		}
+		merged[key] = value
+	}
+	return merged, nil
+}
+
+// authenticateRegisterSource preserves MultiAuthenticator's ordered dispatch
+// and dry-run rules while returning the issued authenticator that actually
+// accepted the token. Doing this in the same pass avoids both a second static
+// authenticator call and a token-rotation race between authentication and pool
+// label resolution.
+func authenticateRegisterSource(auth Authenticator, runnerID, token string, info TransportInfo) (RunnerPolicy, error, *IssuedIdentityAuthenticator) {
+	multi, ok := auth.(*MultiAuthenticator)
+	if !ok {
+		policy, err := auth.AuthenticateRegister(runnerID, token, info)
+		if err != nil {
+			return policy, err, nil
+		}
+		issued, _ := auth.(*IssuedIdentityAuthenticator)
+		return policy, nil, issued
+	}
+	if multi == nil || len(multi.auths) == 0 {
+		return RunnerPolicy{}, ErrAuthUnknownToken, nil
+	}
+	var (
+		lastErr      = ErrAuthUnknownToken
+		dryRunPolicy RunnerPolicy
+		dryRunErr    error
+	)
+	for _, member := range multi.auths {
+		policy, err, issued := authenticateRegisterSource(member, runnerID, token, info)
+		if err == nil {
+			return policy, nil, issued
+		}
+		if dryRunErr == nil && IsDryRunDenial(err) {
+			dryRunPolicy, dryRunErr = policy, err
+		}
+		lastErr = err
+	}
+	if dryRunErr != nil {
+		return dryRunPolicy, dryRunErr, nil
+	}
+	return RunnerPolicy{}, lastErr, nil
+}
+
 func (c *Core) heartbeat(ctx context.Context, req protocol.HeartbeatRequest, info TransportInfo) (protocol.HeartbeatResponse, error) {
 	if req.RunnerID == "" || req.SessionID == "" {
 		return protocol.HeartbeatResponse{}, ErrRunnerSessionRequired
@@ -346,10 +444,11 @@ func (c *Core) heartbeat(ctx context.Context, req protocol.HeartbeatRequest, inf
 	if err := c.authDeny(ctx, req.RunnerID, req.AuthToken, "heartbeat", info, authErr); err != nil {
 		return protocol.HeartbeatResponse{}, err
 	}
-	at := time.Unix(req.Timestamp, 0)
-	if req.Timestamp == 0 {
-		at = time.Now()
-	}
+	// Liveness is judged on the server's clock, never the runner's. A runner
+	// whose clock runs ahead would otherwise stretch its own live window, and
+	// the live window is what decides whether another instance may take over
+	// this runner ID. req.Timestamp is kept on the wire for diagnostics only.
+	at := time.Now()
 	if err := c.runners.Heartbeat(ctx, HeartbeatRequest{
 		RunnerID:         req.RunnerID,
 		SessionID:        req.SessionID,
@@ -1205,7 +1304,9 @@ func normalizeRunnerError(err error, logger engine.Logger, op string) error {
 	case errors.Is(err, ErrRunnerIDRequired),
 		errors.Is(err, ErrRunnerSessionRequired),
 		errors.Is(err, ErrConcurrencyRequired),
+		errors.Is(err, ErrInstanceUIDRequired),
 		errors.Is(err, ErrInvalidNamespace),
+		errors.Is(err, ErrLabelConflict),
 		errors.Is(err, ErrInvalidCapability),
 		errors.Is(err, ErrRunnerNotFound),
 		errors.Is(err, ErrLeaseRequired),
@@ -1214,6 +1315,7 @@ func normalizeRunnerError(err error, logger engine.Logger, op string) error {
 		errors.Is(err, ErrAuthNamespaceDenied),
 		errors.Is(err, ErrAuthCapabilityDenied),
 		errors.Is(err, ErrRunnerSessionStale),
+		errors.Is(err, ErrRunnerIDConflict),
 		errors.Is(err, ErrMissingWorkflowVersion),
 		errors.Is(err, engine.ErrInvalidLeaseToken):
 		return err
@@ -1262,4 +1364,24 @@ func namespaceIDs(strs []string) []namespace.Namespace {
 		out = append(out, t)
 	}
 	return out
+}
+
+// deregister ends the caller's live session. Authentication is the same
+// AuthenticateOngoing every other ongoing endpoint runs behind, and the
+// directory fences on SessionID, so a runner can only end its own current
+// session. A directory without the capability makes this a no-op: the
+// session ages out of the live window instead.
+func (c *Core) deregister(ctx context.Context, req protocol.DeregisterRequest, info TransportInfo) error {
+	if req.RunnerID == "" || req.SessionID == "" {
+		return ErrRunnerSessionRequired
+	}
+	_, authErr := c.authn().AuthenticateOngoing(req.RunnerID, req.AuthToken, info)
+	if err := c.authDeny(ctx, req.RunnerID, req.AuthToken, "deregister", info, authErr); err != nil {
+		return err
+	}
+	d, ok := c.runners.(RunnerDeregisterer)
+	if !ok {
+		return nil
+	}
+	return normalizeRunnerError(d.Deregister(ctx, req.RunnerID, req.SessionID), c.logger, "deregister")
 }

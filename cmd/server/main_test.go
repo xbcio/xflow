@@ -79,6 +79,27 @@ func TestParseServerConfigSupportsOutboxDiscoveryPage(t *testing.T) {
 	}
 }
 
+func TestParseServerConfigSupportsRunnerInstancePruning(t *testing.T) {
+	cfg, err := parseServerConfig([]string{
+		"-memory", "-runner-instance-idle-ttl", "2h", "-runner-instance-prune-interval", "3m",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.runnerInstanceIdleTTL != 2*time.Hour || cfg.runnerInstancePruneInterval != 3*time.Minute {
+		t.Fatalf("runner instance pruning = ttl %v interval %v, want 2h and 3m",
+			cfg.runnerInstanceIdleTTL, cfg.runnerInstancePruneInterval)
+	}
+	for _, args := range [][]string{
+		{"-memory", "-runner-instance-idle-ttl", "-1s"},
+		{"-memory", "-runner-instance-prune-interval", "-1s"},
+	} {
+		if _, err := parseServerConfig(args); err == nil {
+			t.Fatalf("parseServerConfig(%v) error = nil, want negative duration rejection", args)
+		}
+	}
+}
+
 func TestParseServerConfigRejectsUnsupportedTraceMode(t *testing.T) {
 	if _, err := parseServerConfig([]string{"-trace", "bogus"}); err == nil {
 		t.Fatal("parseServerConfig() error = nil, want error for unsupported trace mode")

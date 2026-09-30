@@ -182,6 +182,7 @@ func contextPropagationLease() *engine.TaskLease {
 
 func contextPropagationRegisterRequest() protocol.RegisterRunnerRequest {
 	return protocol.RegisterRunnerRequest{
+		InstanceUID:  "test-instance",
 		RunnerID:     "context-runner",
 		Concurrency:  1,
 		Capabilities: contextPropagationCapabilities(),

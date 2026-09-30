@@ -74,6 +74,7 @@ func RegisterRequestToProto(req RegisterRunnerRequest) *runnerpb.RegisterRequest
 		Labels:       cloneLabels(req.Labels),
 		Namespaces:   cloneStrings(req.Namespaces),
 		Activations:  ActivationInventoryToProto(req.Activations),
+		InstanceUid:  req.InstanceUID,
 	}
 }
 
@@ -85,6 +86,7 @@ func RegisterRequestFromProto(req *runnerpb.RegisterRequest) RegisterRunnerReque
 		Labels:       cloneLabels(req.GetLabels()),
 		Namespaces:   req.GetNamespaces(),
 		Activations:  ActivationInventoryFromProto(req.GetActivations()),
+		InstanceUID:  req.GetInstanceUid(),
 	}
 }
 
@@ -360,6 +362,7 @@ func RunnerFrameToProto(f RunnerFrame) (*runnerpb.RunnerFrame, error) {
 				Capabilities: CapabilitiesToProto(f.Hello.Capabilities),
 				Labels:       cloneLabels(f.Hello.Labels),
 				Namespaces:   cloneStrings(f.Hello.Namespaces),
+				InstanceUid:  f.Hello.InstanceUID,
 			},
 		}}, nil
 	case f.Result != nil:
@@ -402,6 +405,7 @@ func RunnerFrameFromProto(pb *runnerpb.RunnerFrame) (RunnerFrame, error) {
 			Capabilities: CapabilitiesFromProto(f.Hello.GetCapabilities()),
 			Labels:       cloneLabels(f.Hello.GetLabels()),
 			Namespaces:   f.Hello.GetNamespaces(),
+			InstanceUID:  f.Hello.GetInstanceUid(),
 		}}, nil
 	case *runnerpb.RunnerFrame_Result:
 		lease, err := unmarshalLease(f.Result.GetLeaseJson())

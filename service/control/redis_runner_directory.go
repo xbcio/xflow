@@ -167,6 +167,7 @@ type RedisRunnerDirectory struct {
 }
 
 var _ RunnerDirectory = (*RedisRunnerDirectory)(nil)
+var _ RunnerRemover = (*RedisRunnerDirectory)(nil)
 var _ ClaimReclaimer = (*RedisRunnerDirectory)(nil)
 var _ ActivationRunnerLister = (*RedisRunnerDirectory)(nil)
 var _ ExpiredLeaseReleaser = (*RedisRunnerDirectory)(nil)
@@ -334,9 +335,14 @@ func (d *RedisRunnerDirectory) Register(ctx context.Context, req RegisterRunnerR
 		d.keys.runnerActivationInventory,
 		d.keys.runnerDrainObservation,
 		d.keys.handoffClaimIndexKey(req.RunnerID),
-	}, req.RunnerID, session.SessionID, strconv.Itoa(req.Capacity), string(capabilities), string(policy), string(namespaces), strconv.FormatInt(now.UnixMilli(), 10), string(labels), activations)
+		d.keys.runnerInstanceUID,
+	}, req.RunnerID, session.SessionID, strconv.Itoa(req.Capacity), string(capabilities), string(policy), string(namespaces), strconv.FormatInt(now.UnixMilli(), 10), string(labels), activations,
+		req.InstanceUID, strconv.FormatInt(DefaultRunnerLiveTTL.Milliseconds(), 10))
 	if err != nil {
 		return RunnerSession{}, fmt.Errorf("register redis runner: %w", err)
+	}
+	if status == "runner_id_conflict" {
+		return RunnerSession{}, ErrRunnerIDConflict
 	}
 	if status != "registered" {
 		return RunnerSession{}, fmt.Errorf("register redis runner: unexpected result %q", status)
@@ -2092,6 +2098,17 @@ func canServeNamespace(namespaces []namespace.Namespace, t namespace.Namespace) 
 const redisRegisterRunnerLua = `
 local oldRunner = ARGV[1]
 local newSession = ARGV[2]
+-- Instance guard: mirrors instanceConflict in memory_runner_directory.go and
+-- must run before any mutation below. KEYS[47] is runnerInstanceUID.
+local newUID = ARGV[10] or ''
+local liveMillis = tonumber(ARGV[11] or '0') or 0
+if newUID ~= '' and liveMillis > 0 then
+  local currentUID = redis.call('HGET', KEYS[47], oldRunner)
+  local lastBeat = tonumber(redis.call('HGET', KEYS[17], oldRunner) or '')
+  if currentUID and currentUID ~= '' and currentUID ~= newUID and lastBeat and (tonumber(ARGV[7]) - lastBeat) < liveMillis then
+    return 'runner_id_conflict'
+  end
+end
 local preservedClaims = 0
 for _, claimID in ipairs(redis.call('HKEYS', KEYS[8])) do
   if redis.call('HGET', KEYS[8], claimID) == oldRunner then
@@ -2188,6 +2205,11 @@ redis.call('HSETNX', KEYS[22], oldRunner, '0')
 redis.call('HSET', KEYS[10], oldRunner, tostring(preservedClaims))
 redis.call('HSET', KEYS[44], oldRunner, ARGV[9])
 redis.call('HDEL', KEYS[45], oldRunner)
+if newUID ~= '' then
+  redis.call('HSET', KEYS[47], oldRunner, newUID)
+else
+  redis.call('HDEL', KEYS[47], oldRunner)
+end
 return 'registered'
 `
 
@@ -2775,4 +2797,122 @@ if redis.call('HGET', KEYS[3], assignmentID) ~= ARGV[3] then return 'noop' end
 if redis.call('EXISTS', KEYS[4]) == 0 then return 'expired' end
 redis.call('PEXPIRE', KEYS[4], tonumber(ARGV[4]))
 return 'refreshed'
+`
+
+// Deregister implements RunnerDeregisterer.
+func (d *RedisRunnerDirectory) Deregister(ctx context.Context, runnerID, sessionID string) error {
+	if runnerID == "" {
+		return ErrRunnerIDRequired
+	}
+	status, err := d.evalStatus(ctx, redisDeregisterRunnerLua, []string{
+		d.keys.runnerSession,
+		d.keys.runnerHeartbeat,
+		d.keys.runnerInstanceUID,
+	}, runnerID, sessionID)
+	if err != nil {
+		return fmt.Errorf("deregister redis runner: %w", err)
+	}
+	return runnerSessionStatusError(status)
+}
+
+const redisDeregisterRunnerLua = `
+local current = redis.call('HGET', KEYS[1], ARGV[1])
+if not current then
+  return 'not_found'
+end
+if ARGV[2] == '' or current ~= ARGV[2] then
+  return 'stale'
+end
+redis.call('HSET', KEYS[2], ARGV[1], '0')
+redis.call('HDEL', KEYS[3], ARGV[1])
+return 'ok'
+`
+
+// RemoveRunner implements RunnerRemover. One Lua transition checks the same
+// server-side debt that gates drain completion, then deletes every scalar
+// runner field and both runner-derived indexes atomically.
+func (d *RedisRunnerDirectory) RemoveRunner(ctx context.Context, runnerID string) error {
+	if runnerID == "" {
+		return ErrRunnerIDRequired
+	}
+	status, err := d.evalStatus(ctx, redisRemoveRunnerLua, []string{
+		d.keys.runnerSession,
+		d.keys.runnerCapacity,
+		d.keys.runnerInflight,
+		d.keys.runnerCapabilities,
+		d.keys.runnerLabels,
+		d.keys.runnerPolicy,
+		d.keys.runnerNamespaces,
+		d.keys.runnerHeartbeat,
+		d.keys.runnerClaimCount,
+		d.keys.runnerLeaseCount,
+		d.keys.runnerControlDesired,
+		d.keys.runnerControlGeneration,
+		d.keys.runnerControlRequestedAt,
+		d.keys.runnerControlActor,
+		d.keys.runnerControlReason,
+		d.keys.runnerControlDrainDeadline,
+		d.keys.runnerActivationInventory,
+		d.keys.runnerDrainObservation,
+		d.keys.runnerInstanceUID,
+		d.keys.claimsRunner,
+		d.keys.assignmentState,
+		d.keys.assignmentRunner,
+		d.keys.handoffRunner,
+		d.keys.deactivationObligationRunner,
+		d.keys.deactivationObligationState,
+		d.keys.runnerLeasedAssignmentsKey(runnerID),
+		d.keys.handoffClaimIndexKey(runnerID),
+	}, runnerID)
+	if err != nil {
+		return fmt.Errorf("remove redis runner: %w", err)
+	}
+	switch status {
+	case "removed":
+		d.storeClaimCursor(runnerID, 0)
+		return nil
+	case "outstanding":
+		return ErrRunnerHasOutstandingWork
+	default:
+		return fmt.Errorf("remove redis runner: unexpected result %q", status)
+	}
+}
+
+// KEYS 1..19 are all hashes whose field is runnerID. KEYS 20..25 are
+// authoritative debt ledgers; counts alone are not trusted because a damaged
+// or pre-index record must fail closed. KEYS 26..27 are runner-derived sets.
+const redisRemoveRunnerLua = `
+local runnerID = ARGV[1]
+if tonumber(redis.call('HGET', KEYS[9], runnerID) or '0') ~= 0 then return 'outstanding' end
+if tonumber(redis.call('HGET', KEYS[10], runnerID) or '0') ~= 0 then return 'outstanding' end
+
+local claimOwners = redis.call('HGETALL', KEYS[20])
+for index = 2, #claimOwners, 2 do
+  if claimOwners[index] == runnerID then return 'outstanding' end
+end
+
+local assignmentOwners = redis.call('HGETALL', KEYS[22])
+for index = 1, #assignmentOwners, 2 do
+  if assignmentOwners[index + 1] == runnerID and redis.call('HGET', KEYS[21], assignmentOwners[index]) == 'leased' then
+    return 'outstanding'
+  end
+end
+
+local handoffOwners = redis.call('HGETALL', KEYS[23])
+for index = 2, #handoffOwners, 2 do
+  if handoffOwners[index] == runnerID then return 'outstanding' end
+end
+
+local activationOwners = redis.call('HGETALL', KEYS[24])
+for index = 1, #activationOwners, 2 do
+  if activationOwners[index + 1] == runnerID then
+    local state = redis.call('HGET', KEYS[25], activationOwners[index])
+    if state == 'pending_fence' or state == 'ready' then return 'outstanding' end
+  end
+end
+
+for index = 1, 19 do redis.call('HDEL', KEYS[index], runnerID) end
+redis.call('DEL', KEYS[26])
+redis.call('DEL', KEYS[27])
+return 'removed'
 `

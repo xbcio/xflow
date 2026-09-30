@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -57,7 +58,8 @@ type EngineFacade interface {
 }
 
 type Server struct {
-	core *Core
+	core           *Core
+	trustedProxies []netip.Prefix
 }
 
 type errorResponse struct {
@@ -89,6 +91,35 @@ func WithEnroll(codes RegistrationCodeStore, ids IssuedIdentityStore) ServerOpti
 		s.core.registrationCodes = codes
 		s.core.issuedIdentities = ids
 		s.core.enrollLimiter = newEnrollLimiter(defaultEnrollFailureLimit, defaultEnrollLockout)
+	}
+}
+
+// WithRunnerPools installs the pool store used by pool-bound enrollment and
+// issued-identity registration labels. Nil leaves pool enrollment disabled.
+func WithRunnerPools(pools RunnerPoolStore) ServerOption {
+	return func(s *Server) {
+		if pools != nil {
+			s.core.pools = pools
+		}
+	}
+}
+
+// WithEnrollRotationGrace sets how long the immediately previous issued token
+// remains valid after an idempotent re-enroll. Negative durations are ignored.
+func WithEnrollRotationGrace(d time.Duration) ServerOption {
+	return func(s *Server) {
+		if d >= 0 {
+			s.core.rotationGrace = d
+		}
+	}
+}
+
+// WithTrustedProxies enables X-Forwarded-For processing for requests whose
+// direct peer is in one of the supplied CIDRs. With no prefixes, forwarding
+// headers remain ignored exactly as before.
+func WithTrustedProxies(prefixes []netip.Prefix) ServerOption {
+	return func(s *Server) {
+		s.trustedProxies = append([]netip.Prefix(nil), prefixes...)
 	}
 }
 
@@ -198,10 +229,11 @@ func NewServer(engine EngineFacade, runners RunnerDirectory, opts ...ServerOptio
 	}
 	srv := &Server{
 		core: &Core{
-			engine:   engine,
-			runners:  runners,
-			pollWait: time.Second,
-			tracer:   tracing.NoopTracer{},
+			engine:        engine,
+			runners:       runners,
+			pollWait:      time.Second,
+			tracer:        tracing.NoopTracer{},
+			rotationGrace: 60 * time.Second,
 		},
 	}
 	for _, o := range opts {
@@ -225,7 +257,7 @@ func (s *Server) HandleRegisterRunner(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	overrideTokenFromHeader(r, &req.AuthToken)
-	resp, err := s.core.register(r.Context(), req, httpTransportInfo(r))
+	resp, err := s.core.register(r.Context(), req, s.httpTransportInfo(r))
 	if err != nil {
 		writeRunnerError(w, err)
 		return
@@ -242,7 +274,7 @@ func (s *Server) HandleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	overrideTokenFromHeader(r, &req.AuthToken)
-	resp, err := s.core.heartbeat(r.Context(), req, httpTransportInfo(r))
+	resp, err := s.core.heartbeat(r.Context(), req, s.httpTransportInfo(r))
 	if err != nil {
 		writeRunnerError(w, err)
 		return
@@ -259,7 +291,7 @@ func (s *Server) HandlePollTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	overrideTokenFromHeader(r, &req.AuthToken)
-	resp, err := s.core.pollTask(r.Context(), req, httpTransportInfo(r))
+	resp, err := s.core.pollTask(r.Context(), req, s.httpTransportInfo(r))
 	if err != nil {
 		writeRunnerError(w, err)
 		return
@@ -276,7 +308,7 @@ func (s *Server) HandleReportResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	overrideTokenFromHeader(r, &req.AuthToken)
-	resp, err := s.core.reportResult(r.Context(), req, httpTransportInfo(r))
+	resp, err := s.core.reportResult(r.Context(), req, s.httpTransportInfo(r))
 	if err != nil {
 		if errors.Is(err, engine.ErrInvalidLeaseToken) {
 			writeJSON(w, http.StatusConflict, resp)
@@ -297,7 +329,7 @@ func (s *Server) HandleRenewLease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	overrideTokenFromHeader(r, &req.AuthToken)
-	resp, err := s.core.renewLease(r.Context(), req, httpTransportInfo(r))
+	resp, err := s.core.renewLease(r.Context(), req, s.httpTransportInfo(r))
 	if err != nil {
 		writeRunnerError(w, err)
 		return
@@ -314,7 +346,7 @@ func (s *Server) HandleActivationAck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	overrideTokenFromHeader(r, &req.AuthToken)
-	if err := s.core.activationAck(r.Context(), req, httpTransportInfo(r)); err != nil {
+	if err := s.core.activationAck(r.Context(), req, s.httpTransportInfo(r)); err != nil {
 		writeRunnerError(w, err)
 		return
 	}
@@ -357,7 +389,7 @@ func (s *Server) HandleReportMetrics(w http.ResponseWriter, r *http.Request) {
 	if err := s.core.reportMetrics(r.Context(),
 		r.Header.Get(protocol.RunnerIDHeader),
 		r.Header.Get(protocol.SessionIDHeader),
-		token, body, httpTransportInfo(r)); err != nil {
+		token, body, s.httpTransportInfo(r)); err != nil {
 		writeRunnerError(w, err)
 		return
 	}
@@ -389,7 +421,7 @@ func (s *Server) HandleEnroll(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "enrollment rejected")
 		return
 	}
-	resp, err := s.core.Enroll(r.Context(), req, httpTransportInfo(r))
+	resp, err := s.core.Enroll(r.Context(), req, s.httpTransportInfo(r))
 	if err != nil {
 		writeError(w, http.StatusForbidden, "enrollment rejected")
 		return
@@ -413,12 +445,31 @@ func (s *Server) HandleRenewIdentity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	overrideTokenFromHeader(r, &req.AuthToken)
-	resp, err := s.core.renewIdentity(r.Context(), req, httpTransportInfo(r))
+	resp, err := s.core.renewIdentity(r.Context(), req, s.httpTransportInfo(r))
 	if err != nil {
 		writeRunnerError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// HandleDeregister serves the runner-facing graceful-shutdown endpoint. Like
+// HandleRenewIdentity it adds no authorization of its own; Core.deregister
+// authenticates and the directory fences on the session.
+func (s *Server) HandleDeregister(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	var req protocol.DeregisterRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	overrideTokenFromHeader(r, &req.AuthToken)
+	if err := s.core.deregister(r.Context(), req, s.httpTransportInfo(r)); err != nil {
+		writeRunnerError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // overrideTokenFromHeader gives Authorization: Bearer priority over the body
@@ -434,7 +485,15 @@ func overrideTokenFromHeader(r *http.Request, dst *string) {
 // (empty TLS fields on plaintext HTTP so the authenticator's mTLS branch will
 // reject).
 func httpTransportInfo(r *http.Request) TransportInfo {
-	info := TransportInfo{Kind: TransportKindHTTP, SourceIP: sourceIPOf(r)}
+	return httpTransportInfoWithTrustedProxies(r, nil)
+}
+
+func (s *Server) httpTransportInfo(r *http.Request) TransportInfo {
+	return httpTransportInfoWithTrustedProxies(r, s.trustedProxies)
+}
+
+func httpTransportInfoWithTrustedProxies(r *http.Request, trustedProxies []netip.Prefix) TransportInfo {
+	info := TransportInfo{Kind: TransportKindHTTP, SourceIP: sourceIPOf(r, trustedProxies)}
 	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 		return info
 	}
@@ -444,9 +503,10 @@ func httpTransportInfo(r *http.Request) TransportInfo {
 	return info
 }
 
-// sourceIPOf strips the port from RemoteAddr. X-Forwarded-For is deliberately
-// ignored: it is caller-controlled, so honoring it would let anyone reset
-// their own enroll lockout by rotating a header value.
+// sourceIPOf strips the port from RemoteAddr. Without trustedProxies,
+// X-Forwarded-For stays ignored exactly as before. With trusted proxies, the
+// header is considered only when the direct peer is trusted; walking from the
+// right then finds the first address outside the trusted proxy chain.
 //
 // It can return "": r == nil; RemoteAddr == "" (net.SplitHostPort errors, and
 // the empty string is returned as-is); RemoteAddr with an empty host, e.g.
@@ -454,15 +514,60 @@ func httpTransportInfo(r *http.Request) TransportInfo {
 // socket listeners, which commonly report RemoteAddr as "" or "@". Callers
 // that bucket by SourceIP (the enroll rate limiter) must treat "" as "no
 // source to bucket by" and refuse rather than share one bucket.
-func sourceIPOf(r *http.Request) string {
+func sourceIPOf(r *http.Request, trustedProxies []netip.Prefix) string {
 	if r == nil {
 		return ""
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr
 	}
-	return host
+	if len(trustedProxies) == 0 {
+		return host
+	}
+
+	peer, err := netip.ParseAddr(host)
+	if err != nil || !addressInPrefixes(peer, trustedProxies) {
+		return host
+	}
+
+	parts := strings.Split(strings.Join(r.Header.Values("X-Forwarded-For"), ","), ",")
+	forwarded := make([]netip.Addr, 0, len(parts))
+	parseFailed := false
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			parseFailed = true
+			continue
+		}
+		addr, parseErr := netip.ParseAddr(part)
+		if parseErr != nil {
+			parseFailed = true
+			continue
+		}
+		forwarded = append(forwarded, addr)
+	}
+	if len(forwarded) == 0 {
+		return host
+	}
+	if parseFailed {
+		return forwarded[0].String()
+	}
+	for i := len(forwarded) - 1; i >= 0; i-- {
+		if !addressInPrefixes(forwarded[i], trustedProxies) {
+			return forwarded[i].String()
+		}
+	}
+	return forwarded[0].String()
+}
+
+func addressInPrefixes(addr netip.Addr, prefixes []netip.Prefix) bool {
+	for _, prefix := range prefixes {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
@@ -487,11 +592,11 @@ func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
 // returns a generic 500 so internal error details are not leaked.
 func writeRunnerError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, ErrRunnerIDRequired), errors.Is(err, ErrRunnerSessionRequired), errors.Is(err, ErrConcurrencyRequired), errors.Is(err, ErrInvalidNamespace), errors.Is(err, ErrLeaseRequired), errors.Is(err, ErrMissingWorkflowVersion):
+	case errors.Is(err, ErrRunnerIDRequired), errors.Is(err, ErrRunnerSessionRequired), errors.Is(err, ErrConcurrencyRequired), errors.Is(err, ErrInstanceUIDRequired), errors.Is(err, ErrInvalidNamespace), errors.Is(err, ErrLabelConflict), errors.Is(err, ErrLeaseRequired), errors.Is(err, ErrMissingWorkflowVersion):
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrInvalidCapability):
 		writeError(w, http.StatusBadRequest, ErrInvalidCapability.Error())
-	case errors.Is(err, ErrRunnerSessionStale):
+	case errors.Is(err, ErrRunnerSessionStale), errors.Is(err, ErrRunnerIDConflict):
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, ErrRunnerNotFound):
 		writeError(w, http.StatusNotFound, "runner not found")

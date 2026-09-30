@@ -51,6 +51,7 @@ func TestGRPCRegisterPollAndResultRoundTrip(t *testing.T) {
 	ctx := context.Background()
 
 	registerResp, err := client.Register(ctx, protocol.RegisterRunnerRequest{
+		InstanceUID:  "test-instance",
 		RunnerID:     "runner-1",
 		Concurrency:  2,
 		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
@@ -160,6 +161,7 @@ func TestGRPCReportResultRejectsStaleLeaseToken(t *testing.T) {
 	runners := NewMemoryRunnerDirectory()
 	client := startGRPCTestServer(t, eng, runners)
 	registerResp, err := client.Register(context.Background(), protocol.RegisterRunnerRequest{
+		InstanceUID:  "test-instance",
 		RunnerID:     "runner-1",
 		Concurrency:  1,
 		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
@@ -197,6 +199,7 @@ func TestGRPCReportResultRejectsStaleSession(t *testing.T) {
 	ctx := context.Background()
 
 	register := protocol.RegisterRunnerRequest{
+		InstanceUID:  "test-instance",
 		RunnerID:     "runner-1",
 		Concurrency:  1,
 		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
@@ -237,6 +240,7 @@ func TestGRPCRunnerSessionRequired(t *testing.T) {
 	ctx := context.Background()
 
 	session, err := client.Register(ctx, protocol.RegisterRunnerRequest{
+		InstanceUID:  "test-instance",
 		RunnerID:     "runner-1",
 		Concurrency:  1,
 		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
@@ -321,7 +325,7 @@ func TestGRPCRegisterRejectsMissingFields(t *testing.T) {
 	eng := &fakeControlEngine{}
 	client := startGRPCTestServer(t, eng, NewMemoryRunnerDirectory())
 
-	_, err := client.Register(context.Background(), protocol.RegisterRunnerRequest{Concurrency: 0})
+	_, err := client.Register(context.Background(), protocol.RegisterRunnerRequest{InstanceUID: "test-instance", Concurrency: 0})
 	if err == nil {
 		t.Fatal("expected error for missing fields")
 	}
@@ -346,6 +350,7 @@ func TestGRPCRegisterRejectedWithoutTokenReturnsUnauthenticated(t *testing.T) {
 	client := startGRPCTestServer(t, &fakeControlEngine{}, NewMemoryRunnerDirectory(), WithGRPCAuthenticator(store))
 
 	_, err = client.Register(context.Background(), protocol.RegisterRunnerRequest{
+		InstanceUID:  "test-instance",
 		RunnerID:     "runner-1",
 		Concurrency:  1,
 		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
@@ -364,6 +369,7 @@ func TestGRPCRegisterRejectsUnauthorizedCapability(t *testing.T) {
 	client := startGRPCTestServer(t, &fakeControlEngine{}, dir, WithGRPCAuthenticator(store)).WithToken("secret")
 
 	_, err := client.Register(context.Background(), protocol.RegisterRunnerRequest{
+		InstanceUID:  "test-instance",
 		RunnerID:     "runner-1",
 		Concurrency:  1,
 		Capabilities: []protocol.Capability{{NodeType: "xflow.script"}},
@@ -380,6 +386,7 @@ func TestGRPCRegisterRejectsUnauthorizedNamespaceWithPermissionDenied(t *testing
 	client := startGRPCTestServer(t, &fakeControlEngine{}, NewMemoryRunnerDirectory(), WithGRPCAuthenticator(store)).WithToken("secret")
 
 	_, err := client.Register(context.Background(), protocol.RegisterRunnerRequest{
+		InstanceUID:  "test-instance",
 		RunnerID:     "runner-1",
 		Concurrency:  1,
 		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
@@ -393,6 +400,7 @@ func TestGRPCRegisterRejectsBlankCapability(t *testing.T) {
 	client := startGRPCTestServer(t, &fakeControlEngine{}, NewMemoryRunnerDirectory(), WithGRPCAuthenticator(store)).WithToken("secret")
 
 	_, err := client.Register(context.Background(), protocol.RegisterRunnerRequest{
+		InstanceUID:  "test-instance",
 		RunnerID:     "runner-1",
 		Concurrency:  1,
 		Capabilities: []protocol.Capability{{NodeType: " \t "}},

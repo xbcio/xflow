@@ -19,6 +19,9 @@ type (
 	IssuedIdentityStore   = store.IssuedIdentityStore
 	RunnerPolicy          = store.RunnerPolicy
 	OwnerScope            = store.OwnerScope
+	RunnerPool            = store.RunnerPool
+	RunnerInstance        = store.RunnerInstance
+	RunnerPoolStore       = store.RunnerPoolStore
 )
 
 var (
@@ -44,6 +47,17 @@ var (
 	// management path; it must never be surfaced on the runner-facing
 	// authentication path, where every failure looks like ErrAuthUnknownToken.
 	ErrIssuedIdentityNotFound = store.ErrIssuedIdentityNotFound
+
+	// ErrIssuedIdentityExists is returned by Issue for a runner ID that already
+	// has an identity; Issue never overwrites.
+	ErrIssuedIdentityExists = store.ErrIssuedIdentityExists
+
+	ErrCredentialGenerationConflict = store.ErrCredentialGenerationConflict
+	ErrRunnerPoolNotFound           = store.ErrRunnerPoolNotFound
+	ErrRunnerPoolInstanceLimit      = store.ErrRunnerPoolInstanceLimit
+	ErrRunnerInstanceNotActive      = store.ErrRunnerInstanceNotActive
+	ErrRunnerInstanceStateConflict  = store.ErrRunnerInstanceStateConflict
+	ErrRunnerInstanceNotFound       = store.ErrRunnerInstanceNotFound
 
 	// HashSecret is the one-way transform applied to every credential this
 	// package's stores persist — registration codes and issued runner tokens

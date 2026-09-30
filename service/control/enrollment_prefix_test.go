@@ -41,7 +41,7 @@ func TestEnrollUsesConfiguredRunnerIDPrefixAndPolicy(t *testing.T) {
 	core, _, ids, code := enrollFixture(t, []string{"team-a"}, []string{"xflow.function"})
 	core.enrollmentRunnerIDPrefix = "workload-"
 
-	resp, err := core.Enroll(context.Background(), protocol.EnrollRequest{
+	resp, err := core.Enroll(context.Background(), protocol.EnrollRequest{SystemID: "test-system", InstanceUID: "test-instance",
 		RegistrationCode: code,
 		Namespaces:       []string{"team-a"},
 		NodeTypes:        []string{"xflow.function"},
@@ -63,7 +63,7 @@ func TestEnrollUsesConfiguredRunnerIDPrefixAndPolicy(t *testing.T) {
 
 func TestEnrollDefaultRunnerIDPrefixPreservesLegacyRunnerPrefix(t *testing.T) {
 	core, _, ids, code := enrollFixture(t, []string{"team-a"}, []string{"xflow.function"})
-	resp, err := core.Enroll(context.Background(), protocol.EnrollRequest{
+	resp, err := core.Enroll(context.Background(), protocol.EnrollRequest{SystemID: "test-system", InstanceUID: "test-instance",
 		RegistrationCode: code,
 		Namespaces:       []string{"team-a"},
 		NodeTypes:        []string{"xflow.function"},

@@ -64,6 +64,7 @@ func (s *httpStream) run() {
 		Capabilities: hello.Capabilities,
 		Labels:       hello.Labels,
 		Namespaces:   hello.Namespaces,
+		InstanceUID:  hello.InstanceUID,
 		AuthToken:    s.authToken,
 	})
 	if err != nil {

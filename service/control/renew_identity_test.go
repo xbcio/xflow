@@ -24,7 +24,7 @@ func renewIdentityFixture(t *testing.T, ttl time.Duration, runnerID string) (*Co
 	// authentication in this file would fail as "expired" rather than for the
 	// reason each test actually means to exercise.
 	now := time.Now().UTC()
-	issued := IssuedIdentity{
+	issued := IssuedIdentity{PoolID: "test-pool",
 		RunnerID:  runnerID,
 		TokenHash: HashSecret(token),
 		IssuedAt:  now,
@@ -136,7 +136,7 @@ func TestRenewIdentityCannotRenewAnotherRunner(t *testing.T) {
 	// to pin. Real, live times keep the two failure modes distinguishable.
 	bNow := time.Now().UTC()
 	bExpiresAt := bNow.Add(time.Hour)
-	if err := ids.Issue(context.Background(), IssuedIdentity{
+	if err := ids.Issue(context.Background(), IssuedIdentity{PoolID: "test-pool",
 		RunnerID:  "runner-b",
 		TokenHash: HashSecret("runner-b-own-token"),
 		IssuedAt:  bNow,

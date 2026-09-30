@@ -38,6 +38,7 @@ func newRenewLeaseAuthTestCore(t *testing.T, auth Authenticator) *Core {
 	}
 
 	resp, err := c.register(context.Background(), protocol.RegisterRunnerRequest{
+		InstanceUID: "test-instance",
 		RunnerID:    renewLeaseAuthTestRunnerID,
 		Concurrency: 1,
 		AuthToken:   "good-token",

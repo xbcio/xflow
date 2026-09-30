@@ -73,7 +73,7 @@ func skipOrFailEnrollMySQL(t *testing.T, format string, args ...any) {
 }
 
 // newEnrollTestDB opens a real local MySQL connection, runs AutoMigrate, then
-// truncates the three enroll tables so each contract subtest's factory(t) call
+// truncates the enroll tables so each contract subtest's factory(t) call
 // gets a fresh, empty store. It skips with an explicit reason if MySQL is
 // unreachable — never silently, and never echoing the DSN.
 func newEnrollTestDB(t *testing.T) *gorm.DB {
@@ -94,7 +94,7 @@ func newEnrollTestDB(t *testing.T) *gorm.DB {
 	if err := AutoMigrate(db); err != nil {
 		t.Fatalf("AutoMigrate: %v", err)
 	}
-	for _, table := range []string{"xflow_registration_codes", "xflow_enroll_audit", "xflow_issued_identities"} {
+	for _, table := range []string{"xflow_runner_instances", "xflow_runner_pools", "xflow_registration_codes", "xflow_enroll_audit", "xflow_issued_identities"} {
 		if err := db.Exec("DELETE FROM " + table).Error; err != nil {
 			t.Fatalf("truncate %s: %v", table, err)
 		}
@@ -114,6 +114,55 @@ func TestSQLIssuedIdentityStoreSatisfiesContract(t *testing.T) {
 		db := newEnrollTestDB(t)
 		return NewIssuedIdentityStore(db)
 	})
+}
+
+func TestSQLRunnerPoolStoreSatisfiesContract(t *testing.T) {
+	storecontract.RunRunnerPoolStoreContract(t, func(t *testing.T) store.RunnerPoolStore {
+		db := newEnrollTestDB(t)
+		return NewRunnerPoolStore(db)
+	})
+}
+
+// SetRunnerInstanceStateForContract is a test-only lifecycle fixture. Stage
+// 3.5 production code only creates active instances; stage 3.6 owns transitions.
+func (r *runnerPoolRepo) SetRunnerInstanceStateForContract(ctx context.Context, poolID, systemID string, state store.InstanceState) error {
+	res := r.db.WithContext(ctx).Model(&dbRunnerInstance{}).
+		Where("pool_id = ? AND system_id = ?", poolID, systemID).
+		Update("state", state)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("sqlstore: runner instance %q/%q not found", poolID, systemID)
+	}
+	return nil
+}
+
+func TestSQLRegistrationCodePoolIDRoundTrip(t *testing.T) {
+	db := newEnrollTestDB(t)
+	st := NewRegistrationCodeStore(db)
+	ctx := context.Background()
+	code := store.RegistrationCode{
+		ID: "pool-code", CodeHash: store.HashSecret("pool-code-plaintext"),
+		PoolID: "pool-1", CreatedAt: time.Now().UTC().Truncate(time.Millisecond),
+	}
+	if err := st.Create(ctx, code); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	resolved, err := st.ResolveByPlaintext(ctx, "pool-code-plaintext")
+	if err != nil {
+		t.Fatalf("ResolveByPlaintext: %v", err)
+	}
+	if resolved.PoolID != code.PoolID {
+		t.Fatalf("resolved PoolID = %q, want %q", resolved.PoolID, code.PoolID)
+	}
+	listed, err := st.List(ctx, store.OwnerScope{All: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(listed) != 1 || listed[0].PoolID != code.PoolID {
+		t.Fatalf("listed codes = %+v, want one code with PoolID %q", listed, code.PoolID)
+	}
 }
 
 // TestResolveByPlaintextRejectsCorruptedScope pins Ruling U: a registration

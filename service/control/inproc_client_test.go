@@ -92,6 +92,7 @@ func TestInProcessClientMatchesHTTPTransport(t *testing.T) {
 	inproc := srv.InProcessRunnerClient(token)
 
 	registerReq := protocol.RegisterRunnerRequest{
+		InstanceUID:        "test-instance",
 		RunnerID:           "runner-contract",
 		Concurrency:        2,
 		SupportsEncryption: true,
@@ -165,10 +166,10 @@ func TestInProcessClientErrorParity(t *testing.T) {
 			name:  "wrong token",
 			path:  protocol.RegisterRunnerPath,
 			token: "not-the-token",
-			body:  protocol.RegisterRunnerRequest{RunnerID: "runner-contract", Concurrency: 1},
+			body:  protocol.RegisterRunnerRequest{InstanceUID: "test-instance", RunnerID: "runner-contract", Concurrency: 1},
 			call: func() error {
 				_, err := srv.InProcessRunnerClient("not-the-token").Register(ctx,
-					protocol.RegisterRunnerRequest{RunnerID: "runner-contract", Concurrency: 1})
+					protocol.RegisterRunnerRequest{InstanceUID: "test-instance", RunnerID: "runner-contract", Concurrency: 1})
 				return err
 			},
 		},
@@ -186,9 +187,9 @@ func TestInProcessClientErrorParity(t *testing.T) {
 			name:  "missing concurrency",
 			path:  protocol.RegisterRunnerPath,
 			token: "valid-token",
-			body:  protocol.RegisterRunnerRequest{RunnerID: "runner-contract"},
+			body:  protocol.RegisterRunnerRequest{InstanceUID: "test-instance", RunnerID: "runner-contract"},
 			call: func() error {
-				_, err := valid.Register(ctx, protocol.RegisterRunnerRequest{RunnerID: "runner-contract"})
+				_, err := valid.Register(ctx, protocol.RegisterRunnerRequest{InstanceUID: "test-instance", RunnerID: "runner-contract"})
 				return err
 			},
 		},
@@ -232,7 +233,7 @@ func TestInProcessClientNeedsNoListener(t *testing.T) {
 	srv := newInProcAuthServer(t)
 	c := srv.InProcessRunnerClient("valid-token")
 	ctx := context.Background()
-	reg, err := c.Register(ctx, protocol.RegisterRunnerRequest{RunnerID: "runner-contract", Concurrency: 1})
+	reg, err := c.Register(ctx, protocol.RegisterRunnerRequest{InstanceUID: "test-instance", RunnerID: "runner-contract", Concurrency: 1})
 	if err != nil {
 		t.Fatalf("register with no listener: %v", err)
 	}
@@ -274,7 +275,7 @@ func TestInProcessClientOpensNoTCPConnections(t *testing.T) {
 
 	c := srv.InProcessRunnerClient("valid-token")
 	ctx := context.Background()
-	reg, err := c.Register(ctx, protocol.RegisterRunnerRequest{RunnerID: "runner-contract", Concurrency: 1})
+	reg, err := c.Register(ctx, protocol.RegisterRunnerRequest{InstanceUID: "test-instance", RunnerID: "runner-contract", Concurrency: 1})
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -327,7 +328,7 @@ func TestInProcessClientMatchesHTTPWithoutATransportIdentity(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	const token = "tok"
-	body := protocol.RegisterRunnerRequest{RunnerID: "runner-prod", Concurrency: 1}
+	body := protocol.RegisterRunnerRequest{InstanceUID: "test-instance", RunnerID: "runner-prod", Concurrency: 1}
 	httpStatus := httpStatusFor(t, ts.URL+protocol.RegisterRunnerPath, token, body)
 	if httpStatus == http.StatusOK {
 		t.Fatal("the HTTP control registered against a subject-bound policy without a " +
@@ -336,7 +337,7 @@ func TestInProcessClientMatchesHTTPWithoutATransportIdentity(t *testing.T) {
 
 	inprocStatus := statusForErr(func() error {
 		_, err := srv.InProcessRunnerClient(token).Register(context.Background(),
-			protocol.RegisterRunnerRequest{RunnerID: "runner-prod", Concurrency: 1})
+			protocol.RegisterRunnerRequest{InstanceUID: "test-instance", RunnerID: "runner-prod", Concurrency: 1})
 		return err
 	}())
 	if inprocStatus == http.StatusOK {

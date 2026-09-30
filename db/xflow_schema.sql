@@ -136,8 +136,10 @@ CREATE TABLE IF NOT EXISTS xflow_registration_codes (
     expires_at         DATETIME(3)  NULL                   COMMENT '注册码失效时间，NULL 表示永不过期。与 revoked 相互独立：吊销是运维动作，过期是铸造时定下的期限',
     max_uses           INT          NOT NULL DEFAULT 0     COMMENT '该码最多可注册多少个 runner；0 表示不限。与 expires_at 各自约束一枚泄漏码爆炸半径的一个维度（能用多久 / 能造多少），设一个不约束另一个',
     use_count          INT          NOT NULL DEFAULT 0     COMMENT '已注册的 runner 数。只由 enroll 前的条件 UPDATE 推进，查询路径绝不写它',
+    pool_id            VARCHAR(64)  NOT NULL DEFAULT ''    COMMENT '绑定的 runner pool；空串表示 legacy pool-less code',
     PRIMARY KEY (id),
-    UNIQUE INDEX uk_code_hash (code_hash)
+    UNIQUE INDEX uk_code_hash (code_hash),
+    INDEX idx_registration_code_pool (pool_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 每一次 enroll 尝试，成功与失败都记。reason 是服务端理由，故意不回给调用方，
@@ -161,15 +163,54 @@ CREATE TABLE IF NOT EXISTS xflow_issued_identities (
     runner_id        VARCHAR(128) NOT NULL              COMMENT 'enroll 生成的 runner ID',
     token_hash       BINARY(32)   NOT NULL              COMMENT 'sha256(token)，原始 32 字节，非 hex',
     id_prefix        VARCHAR(64)  NOT NULL DEFAULT ''  COMMENT 'RunnerPolicy.IDPrefix；enroll 今天恒为空',
+    scope_name       VARCHAR(255) NULL                    COMMENT 'RunnerPolicy.Name；历史 NULL 行读取时从 runner_id 派生',
     scope_namespaces TEXT                                COMMENT '签发时确定的 namespace 范围 JSON 数组',
     scope_node_types TEXT                                COMMENT '签发时确定的节点类型范围 JSON 数组',
     code_id          VARCHAR(64)  NOT NULL DEFAULT ''  COMMENT '签发所用的注册码 ID',
     owner_namespace  VARCHAR(64)  NOT NULL DEFAULT ''  COMMENT '签发时快照的归属 namespace；空串表示该字段存在之前写入的历史行，仅 *_global 可见',
+    pool_id          VARCHAR(64)  NOT NULL DEFAULT ''  COMMENT '所属 runner pool；空串表示 legacy identity',
     issued_at        DATETIME(3)  NULL                  COMMENT '签发时间；契约测试允许零值，故列可空，语义同 last_fetch_at',
     expires_at       DATETIME(3)  NULL                  COMMENT '身份失效时间，NULL 表示永不过期',
     revoked_at       DATETIME(3)  NULL                  COMMENT '身份被吊销的时间，NULL 表示未吊销',
+    credential_generation BIGINT NOT NULL DEFAULT 0      COMMENT 'token 代次；0 是历史行，读取时按 1',
+    previous_token_hash BINARY(32) NULL                  COMMENT '上一代 token 的 sha256；NULL 表示无上一代',
+    previous_token_valid_until DATETIME(3) NULL          COMMENT '上一代 token 宽限截止时间；NULL 表示不接受',
     PRIMARY KEY (runner_id),
-    INDEX idx_issued_identity_code (code_id)
+    INDEX idx_issued_identity_code (code_id),
+    INDEX idx_issued_identity_pool (pool_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Runner pool 定义，以及按 (pool_id, system_id) 幂等映射到稳定 runner ID 的实例。
+CREATE TABLE IF NOT EXISTS xflow_runner_pools (
+    id                   VARCHAR(64)  NOT NULL,
+    name                 VARCHAR(255) NOT NULL,
+    owner_kind           VARCHAR(16)  NOT NULL,
+    owner_namespace      VARCHAR(64)  NOT NULL DEFAULT '',
+    allowed_namespaces   TEXT         NULL,
+    allowed_node_types   TEXT         NULL,
+    labels               TEXT         NULL,
+    max_instances        INT          NOT NULL DEFAULT 0,
+    inherit_namespaces   TINYINT(1)   NOT NULL DEFAULT 0,
+    paused               TINYINT(1)   NOT NULL DEFAULT 0,
+    created_at           DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    deleted_at           DATETIME(3)  NULL,
+    PRIMARY KEY (id),
+    INDEX idx_runner_pool_owner (owner_kind, owner_namespace),
+    INDEX idx_runner_pool_deleted (deleted_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS xflow_runner_instances (
+    pool_id          VARCHAR(64)  NOT NULL,
+    system_id        VARCHAR(255) NOT NULL,
+    runner_id        VARCHAR(128) NOT NULL,
+    instance_uid     VARCHAR(255) NOT NULL DEFAULT '',
+    state            VARCHAR(16)  NOT NULL,
+    created_at       DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    last_enrolled_at DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    state_changed_at DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    UNIQUE INDEX uk_runner_instance_pool_system (pool_id, system_id),
+    UNIQUE INDEX uk_runner_instance_runner (runner_id),
+    INDEX idx_runner_instance_pool_state (pool_id, state)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 授权 / 变更审计事件（append-only，不可变）
@@ -952,3 +993,134 @@ END$$
 DELIMITER ;
 CALL xflow_add_execution_namespace_index();
 DROP PROCEDURE IF EXISTS xflow_add_execution_namespace_index;
+
+-- Runner pool 绑定与 credential rotation 列。CREATE TABLE IF NOT EXISTS 对老表是
+-- no-op，故每列和索引独立用 INFORMATION_SCHEMA 守卫，任意中间态都能幂等收敛。
+DROP PROCEDURE IF EXISTS xflow_add_registration_code_pool_column;
+DELIMITER $$
+CREATE PROCEDURE xflow_add_registration_code_pool_column()
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_registration_codes'
+          AND COLUMN_NAME = 'pool_id'
+    ) THEN
+        ALTER TABLE xflow_registration_codes
+            ADD COLUMN pool_id VARCHAR(64) NOT NULL DEFAULT ''
+                COMMENT '绑定的 runner pool；空串表示 legacy pool-less code' AFTER use_count;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_registration_codes'
+          AND INDEX_NAME = 'idx_registration_code_pool'
+    ) THEN
+        ALTER TABLE xflow_registration_codes
+            ADD INDEX idx_registration_code_pool (pool_id);
+    END IF;
+END$$
+DELIMITER ;
+CALL xflow_add_registration_code_pool_column();
+DROP PROCEDURE IF EXISTS xflow_add_registration_code_pool_column;
+
+DROP PROCEDURE IF EXISTS xflow_add_issued_identity_rotation_columns;
+DELIMITER $$
+CREATE PROCEDURE xflow_add_issued_identity_rotation_columns()
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_issued_identities'
+          AND COLUMN_NAME = 'scope_name'
+    ) THEN
+        ALTER TABLE xflow_issued_identities
+            ADD COLUMN scope_name VARCHAR(255) NULL
+                COMMENT 'RunnerPolicy.Name；历史 NULL 行读取时从 runner_id 派生' AFTER id_prefix;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_issued_identities'
+          AND COLUMN_NAME = 'pool_id'
+    ) THEN
+        ALTER TABLE xflow_issued_identities
+            ADD COLUMN pool_id VARCHAR(64) NOT NULL DEFAULT ''
+                COMMENT '所属 runner pool；空串表示 legacy identity' AFTER owner_namespace;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_issued_identities'
+          AND COLUMN_NAME = 'credential_generation'
+    ) THEN
+        ALTER TABLE xflow_issued_identities
+            ADD COLUMN credential_generation BIGINT NOT NULL DEFAULT 0
+                COMMENT 'token 代次；0 是历史行，读取时按 1' AFTER revoked_at;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_issued_identities'
+          AND COLUMN_NAME = 'previous_token_hash'
+    ) THEN
+        ALTER TABLE xflow_issued_identities
+            ADD COLUMN previous_token_hash BINARY(32) NULL
+                COMMENT '上一代 token 的 sha256；NULL 表示无上一代' AFTER credential_generation;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_issued_identities'
+          AND COLUMN_NAME = 'previous_token_valid_until'
+    ) THEN
+        ALTER TABLE xflow_issued_identities
+            ADD COLUMN previous_token_valid_until DATETIME(3) NULL
+                COMMENT '上一代 token 宽限截止时间；NULL 表示不接受' AFTER previous_token_hash;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_issued_identities'
+          AND INDEX_NAME = 'idx_issued_identity_pool'
+    ) THEN
+        ALTER TABLE xflow_issued_identities
+            ADD INDEX idx_issued_identity_pool (pool_id);
+    END IF;
+END$$
+DELIMITER ;
+CALL xflow_add_issued_identity_rotation_columns();
+DROP PROCEDURE IF EXISTS xflow_add_issued_identity_rotation_columns;
+
+
+-- Runner instance lifecycle columns. Existing rows were active before pruning
+-- existed, so their state-change baseline is their creation time.
+-- xflow_runner_pools.require_system_id is dropped: since stage 3.7 system_id is
+-- mandatory on every enrollment, so the switch has no meaning left.
+DROP PROCEDURE IF EXISTS xflow_migrate_runner_instance_lifecycle;
+DELIMITER $$
+CREATE PROCEDURE xflow_migrate_runner_instance_lifecycle()
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_runner_instances'
+          AND COLUMN_NAME = 'state_changed_at'
+    ) THEN
+        ALTER TABLE xflow_runner_instances
+            ADD COLUMN state_changed_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+                AFTER last_enrolled_at;
+        UPDATE xflow_runner_instances SET state_changed_at = created_at;
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_runner_pools'
+          AND COLUMN_NAME = 'require_system_id'
+    ) THEN
+        ALTER TABLE xflow_runner_pools DROP COLUMN require_system_id;
+    END IF;
+END$$
+DELIMITER ;
+CALL xflow_migrate_runner_instance_lifecycle();
+DROP PROCEDURE IF EXISTS xflow_migrate_runner_instance_lifecycle;

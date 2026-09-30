@@ -27,6 +27,9 @@ func (s *MemoryIssuedIdentityStore) Issue(_ context.Context, id IssuedIdentity) 
 	// Clone on the way in too: otherwise the caller retains a reference to the
 	// same backing arrays now held by the store and could mutate stored state
 	// without the lock.
+	if _, exists := s.byID[id.RunnerID]; exists {
+		return ErrIssuedIdentityExists
+	}
 	s.byID[id.RunnerID] = id.Clone()
 	return nil
 }
@@ -168,10 +171,20 @@ func (a *IssuedIdentityAuthenticator) authenticate(runnerID, token string) (Runn
 		return RunnerPolicy{}, ErrAuthUnknownToken
 	}
 	want := HashSecret(token)
-	if subtle.ConstantTimeCompare(want[:], id.TokenHash[:]) != 1 {
+	currentMatch := subtle.ConstantTimeCompare(want[:], id.TokenHash[:])
+	previousMatch := subtle.ConstantTimeCompare(want[:], id.PreviousTokenHash[:])
+	now := a.clock()
+	previousLive := !id.PreviousTokenValidUntil.IsZero() && now.Before(id.PreviousTokenValidUntil)
+	if currentMatch != 1 && !(previousMatch == 1 && previousLive) {
 		return RunnerPolicy{}, ErrAuthUnknownToken
 	}
-	// Lifecycle checks run AFTER the constant-time compare, never before: a
+	// Pool membership is checked only after both constant-time comparisons. A
+	// pool-less row is invalid and must not authenticate, but
+	// an invalid token must not become an identity-existence timing oracle.
+	if id.PoolID == "" {
+		return RunnerPolicy{}, fmt.Errorf("%w: identity has no pool", ErrAuthUnknownToken)
+	}
+	// Lifecycle checks run AFTER both constant-time comparisons, never before: a
 	// pre-compare check would answer "does this runner id exist and is it
 	// live?" to a caller holding no valid token at all.
 	//
@@ -197,7 +210,6 @@ func (a *IssuedIdentityAuthenticator) authenticate(runnerID, token string) (Runn
 	// Neither reason introduces a second errors.Is-matchable sentinel: %w is
 	// used only for ErrAuthUnknownToken, which stays the single matchable
 	// identity for MultiAuthenticator.dispatch and every caller.
-	now := a.clock()
 	if !id.RevokedAt.IsZero() {
 		return RunnerPolicy{}, fmt.Errorf("%w: issued identity was revoked", ErrAuthUnknownToken)
 	}
@@ -207,9 +219,7 @@ func (a *IssuedIdentityAuthenticator) authenticate(runnerID, token string) (Runn
 	// Enrollment writes the prefix into the issued policy as a durable
 	// entitlement. Exact runner-ID lookup already prevents an attacker from
 	// substituting another ID, but enforcing the stored invariant here also
-	// fails closed if a malformed identity row is ever written by a migration or
-	// a non-memory store implementation. Legacy identities with no prefix keep
-	// their pre-feature behavior.
+	// fails closed if a malformed identity row carries an incorrect prefix.
 	if id.Scope.IDPrefix != "" && !strings.HasPrefix(runnerID, id.Scope.IDPrefix) {
 		return RunnerPolicy{}, fmt.Errorf("%w: issued identity runner ID prefix denied", ErrAuthUnknownToken)
 	}
@@ -297,4 +307,27 @@ func (m *MultiAuthenticator) dispatch(call func(Authenticator) (RunnerPolicy, er
 	}
 	_ = lastPolicy
 	return RunnerPolicy{}, lastErr
+}
+
+// RotateCredential atomically advances a live identity's token generation.
+func (s *MemoryIssuedIdentityStore) RotateCredential(_ context.Context, runnerID string, expectGeneration int64, newHash [32]byte, previousValidUntil time.Time) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id, ok := s.byID[runnerID]
+	if !ok || !id.RevokedAt.IsZero() || (!id.ExpiresAt.IsZero() && !id.ExpiresAt.After(time.Now().UTC())) {
+		return 0, ErrIssuedIdentityNotFound
+	}
+	generation := id.CredentialGeneration
+	if generation == 0 {
+		generation = 1
+	}
+	if generation != expectGeneration {
+		return 0, ErrCredentialGenerationConflict
+	}
+	id.PreviousTokenHash = id.TokenHash
+	id.PreviousTokenValidUntil = previousValidUntil
+	id.TokenHash = newHash
+	id.CredentialGeneration = generation + 1
+	s.byID[runnerID] = id
+	return id.CredentialGeneration, nil
 }

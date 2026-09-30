@@ -201,3 +201,14 @@ func TestServerLeaseTTLDefaultsToUnset(t *testing.T) {
 		t.Errorf("LeaseTTL = %v without WithServerLeaseTTL, want 0 (engine default)", cfg.LeaseTTL)
 	}
 }
+
+func TestWithServerRunnerInstancePruningReachesTheAPIConfig(t *testing.T) {
+	sc := &serverConfig{}
+	WithServerRunnerInstancePruning(2*time.Hour, 3*time.Minute)(sc)
+
+	cfg := buildServerAPIConfig(ServerConfig{}, sc)
+	if cfg.RunnerInstanceIdleTTL != 2*time.Hour || cfg.RunnerInstancePruneInterval != 3*time.Minute {
+		t.Fatalf("runner instance pruning = ttl %v interval %v, want 2h and 3m",
+			cfg.RunnerInstanceIdleTTL, cfg.RunnerInstancePruneInterval)
+	}
+}

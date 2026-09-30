@@ -1345,39 +1345,11 @@ paths:
         default:
           $ref: "#/components/responses/DefaultError"
 
-  /v1/management/registration-codes:
+  /v1/management/runner-pools:
     post:
-      operationId: createRegistrationCode
-      summary: Mint a runner registration code
-      description: |
-        Mints a registration code a runner presents to the enroll endpoint to
-        obtain a signed identity. The plaintext code is returned exactly once,
-        in this response; it is never recoverable afterwards, including from
-        the list endpoint below.
-
-        The code is REUSABLE by default: a successful enroll does not consume
-        it, so one code can enroll a whole fleet. Bound its blast radius on
-        both axes — `expires_in_seconds` caps how long it works,
-        `max_uses` caps how many runners it can make — and revoke it once the
-        fleet is up.
-
-        Requires the `management.registration_code.create` scope.
-
-        The code's `allowed_namespaces` may never exceed the caller's own
-        namespace grant: a request naming `*`, or naming any namespace other
-        than the caller's, is rejected with 403 `namespace_forbidden`.
-        Omitting `allowed_namespaces` stores the caller's own namespace
-        explicitly — it is not left empty, because an empty set means "the
-        default namespace" to the enrollment path.
-
-        A principal that additionally holds
-        `management.registration_code.create_global` is a platform operator
-        and is exempt from the ceiling; it may mint `*`. The omission rule
-        above does NOT extend to it: a global creator that omits
-        `allowed_namespaces` is rejected with 400 `bad_request`, because it
-        has no namespace-of-its-own reading to fall back to and defaulting
-        the omission to `*` would be the implicit maximal grant this ceiling
-        exists to eliminate.
+      operationId: createRunnerPool
+      summary: Create a runner pool
+      description: Creates a tenant pool, or a platform pool when the caller also holds `management.runner_pool.write_global`.
       tags: [Management]
       parameters:
         - $ref: "#/components/parameters/XRequestId"
@@ -1386,18 +1358,13 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/RegistrationCodeCreateRequest"
+              $ref: "#/components/schemas/RunnerPoolCreateRequest"
       responses:
-        "200":
-          description: The newly minted code. The plaintext is returned only here.
+        "201":
+          description: Runner pool created.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
-            Cache-Control:
-              description: Plaintext registration codes must not be stored by clients or intermediaries.
-              schema:
-                type: string
-                enum: [no-store]
           content:
             application/json:
               schema:
@@ -1406,29 +1373,19 @@ paths:
                   - type: object
                     properties:
                       data:
-                        $ref: "#/components/schemas/RegistrationCodeCreateResponse"
+                        $ref: "#/components/schemas/RunnerPoolView"
         default:
           $ref: "#/components/responses/DefaultError"
     get:
-      operationId: listRegistrationCodes
-      summary: List registration codes
-      description: |
-        Lists minted registration codes. Neither the plaintext code nor its
-        hash is ever included — only the id, scope, revocation status, and
-        creation time.
-
-        Requires the `management.registration_code.list` scope. By default
-        the caller sees only registration codes owned by its own namespace.
-        A principal that additionally holds
-        `management.registration_code.list_global` is a platform operator
-        and sees every registration code across every namespace, including
-        codes minted before per-namespace ownership existed.
+      operationId: listRunnerPools
+      summary: List visible runner pools
+      description: Requires `management.runner_pool.read`; `read_global` adds platform and cross-tenant visibility.
       tags: [Management]
       parameters:
         - $ref: "#/components/parameters/XRequestId"
       responses:
         "200":
-          description: Registration code list.
+          description: Visible runner pools.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
@@ -1442,31 +1399,167 @@ paths:
                       data:
                         type: array
                         items:
-                          $ref: "#/components/schemas/RegistrationCodeView"
+                          $ref: "#/components/schemas/RunnerPoolView"
         default:
           $ref: "#/components/responses/DefaultError"
 
-  /v1/management/registration-codes/{id}:
-    delete:
-      operationId: revokeRegistrationCode
-      summary: Revoke a registration code
-      description: |
-        Revokes a registration code so it can no longer be redeemed by the
-        enroll endpoint. Already-issued runner identities are unaffected;
-        revoking a code does not revoke identities minted from it. Revoking
-        an unknown id is a 404, not a silent success.
-
-        Requires the `management.registration_code.revoke` scope. By default
-        the caller may only revoke a code owned by its own namespace;
-        revoking an id owned by another namespace is a 404, indistinguishable
-        from an unknown id. A principal that additionally holds
-        `management.registration_code.revoke_global` is a platform operator
-        and may revoke any registration code id regardless of which
-        namespace(s) it grants, including codes minted before per-namespace
-        ownership existed.
+  /v1/management/runner-pools/{id}:
+    get:
+      operationId: getRunnerPool
+      summary: Get a runner pool
+      description: Returns the pool when it is visible to the caller; hidden and unknown pools are both 404.
       tags: [Management]
       parameters:
-        - $ref: "#/components/parameters/RegistrationCodeId"
+        - $ref: "#/components/parameters/RunnerPoolId"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: Runner pool.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/RunnerPoolView"
+        default:
+          $ref: "#/components/responses/DefaultError"
+    patch:
+      operationId: updateRunnerPool
+      summary: Update a runner pool
+      description: Mutable settings may change, but allowed namespaces and node types may only be narrowed.
+      tags: [Management]
+      parameters:
+        - $ref: "#/components/parameters/RunnerPoolId"
+        - $ref: "#/components/parameters/XRequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunnerPoolUpdateRequest"
+      responses:
+        "200":
+          description: Updated runner pool.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/RunnerPoolView"
+        default:
+          $ref: "#/components/responses/DefaultError"
+    delete:
+      operationId: deleteRunnerPool
+      summary: Soft-delete a runner pool
+      description: Soft-deletes a visible pool; subsequent reads and enrollments treat it as not found.
+      tags: [Management]
+      parameters:
+        - $ref: "#/components/parameters/RunnerPoolId"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: Deletion acknowledged.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/RunnerPoolMutationResponse"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/management/runner-pools/{id}/tokens:
+    post:
+      operationId: createRunnerPoolToken
+      summary: Mint a pool-bound registration token
+      description: The plaintext registration token is returned exactly once and the response is `no-store`.
+      tags: [Management]
+      parameters:
+        - $ref: "#/components/parameters/RunnerPoolId"
+        - $ref: "#/components/parameters/XRequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunnerPoolTokenCreateRequest"
+      responses:
+        "200":
+          description: Newly minted pool token.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+            Cache-Control:
+              description: Plaintext registration tokens must not be stored.
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/RunnerPoolTokenCreateResponse"
+        default:
+          $ref: "#/components/responses/DefaultError"
+    get:
+      operationId: listRunnerPoolTokens
+      summary: List a runner pool's registration tokens
+      description: Returns metadata only; plaintext and hashes are never included.
+      tags: [Management]
+      parameters:
+        - $ref: "#/components/parameters/RunnerPoolId"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: Pool token metadata.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/RunnerPoolTokenView"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/management/runner-pools/{id}/tokens/{token_id}:
+    delete:
+      operationId: revokeRunnerPoolToken
+      summary: Revoke one pool-bound registration token
+      description: Revokes only the named token; other live tokens and already-issued identities are unaffected.
+      tags: [Management]
+      parameters:
+        - $ref: "#/components/parameters/RunnerPoolId"
+        - $ref: "#/components/parameters/RunnerPoolTokenId"
         - $ref: "#/components/parameters/XRequestId"
       responses:
         "200":
@@ -1482,34 +1575,19 @@ paths:
                   - type: object
                     properties:
                       data:
-                        type: object
-                        properties:
-                          id:
-                            type: string
-                          status:
-                            type: string
+                        $ref: "#/components/schemas/RunnerPoolMutationResponse"
         default:
           $ref: "#/components/responses/DefaultError"
 
-  /v1/management/registration-codes/{id}/audit:
+  /v1/management/runner-pools/{id}/tokens/{token_id}/audit:
     get:
-      operationId: getRegistrationCodeAudit
-      summary: Read the enroll audit trail for a registration code
-      description: |
-        Returns every enroll attempt (successful or failed) recorded against
-        this registration code id, oldest first.
-
-        Requires the `management.registration_code.audit` scope. By default
-        the caller may only read the audit trail for a code owned by its own
-        namespace; requesting the audit for an id owned by another namespace
-        is a 404, indistinguishable from an unknown id. A principal that
-        additionally holds `management.registration_code.audit_global` is a
-        platform operator and may read the audit trail for any registration
-        code id, including codes minted before per-namespace ownership
-        existed.
+      operationId: getRunnerPoolTokenAudit
+      summary: Read the enroll audit trail for a pool token
+      description: Returns enroll attempts for the selected token after verifying the caller can read its runner pool.
       tags: [Management]
       parameters:
-        - $ref: "#/components/parameters/RegistrationCodeId"
+        - $ref: "#/components/parameters/RunnerPoolId"
+        - $ref: "#/components/parameters/RunnerPoolTokenId"
         - $ref: "#/components/parameters/XRequestId"
       responses:
         "200":
@@ -1528,6 +1606,35 @@ paths:
                         type: array
                         items:
                           $ref: "#/components/schemas/EnrollAuditView"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/management/runner-pools/{id}/runners:
+    get:
+      operationId: listRunnerPoolInstances
+      summary: List enrolled runner instances in a pool
+      description: Lists the stable system-id to runner-id mappings visible in the selected pool.
+      tags: [Management]
+      parameters:
+        - $ref: "#/components/parameters/RunnerPoolId"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: Runner instances.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/RunnerPoolInstanceView"
         default:
           $ref: "#/components/responses/DefaultError"
 
@@ -1638,11 +1745,18 @@ components:
       description: Execution id whose dead-letters to list/replay.
       schema:
         type: string
-    RegistrationCodeId:
+    RunnerPoolId:
       name: id
       in: path
       required: true
-      description: Registration code id.
+      description: Runner pool id.
+      schema:
+        type: string
+    RunnerPoolTokenId:
+      name: token_id
+      in: path
+      required: true
+      description: Pool-bound registration token id.
       schema:
         type: string
     IfNoneMatch:
@@ -2344,74 +2458,143 @@ components:
         activation_id:
           type: string
 
-    RegistrationCodeCreateRequest:
+    RunnerPoolCreateRequest:
       type: object
-      description: |
-        The scope granted to runners that enroll with the minted code
-        (store.RunnerPolicy), plus the code's own lifetime.
+      required: [name]
       properties:
+        name:
+          type: string
+          minLength: 1
+        owner_kind:
+          type: string
+          enum: [tenant, platform]
+          default: tenant
         allowed_namespaces:
           type: array
           items:
             type: string
-          description: |
-            Namespaces runners enrolled with this code may join. It is capped
-            by the caller's own namespace grant: naming one outside it is 403.
-
-            Omitting it is NOT "no restriction". A caller holding only
-            `registration_code.create` gets its own namespace filled in; a
-            `registration_code.create_global` holder gets 400, because that
-            principal has no namespace-of-its-own to fall back on and
-            expanding an omission to `*` would be an implicit maximal grant.
         allowed_node_types:
           type: array
           items:
             type: string
-          description: |
-            Node types runners enrolled with this code may execute. `["*"]`
-            means all of them.
+          description: Non-global callers must list concrete node types and cannot use `*`.
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+        max_instances:
+          type: integer
+          minimum: 0
+          description: Zero means unlimited.
+        inherit_namespaces:
+          type: boolean
+        paused:
+          type: boolean
 
-            Omitting it is NOT "no restriction" either — it is the opposite.
-            The list is persisted as sent, and `RunnerPolicy.Allows` reports
-            false for every node type when it is empty, so a code minted
-            without this field enrolls runners that can execute nothing.
+    RunnerPoolUpdateRequest:
+      type: object
+      description: Every field is optional. Scope fields may only narrow their current values.
+      properties:
+        name:
+          type: string
+          minLength: 1
+        allowed_namespaces:
+          type: array
+          items:
+            type: string
+        allowed_node_types:
+          type: array
+          items:
+            type: string
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+        max_instances:
+          type: integer
+          minimum: 0
+        inherit_namespaces:
+          type: boolean
+        paused:
+          type: boolean
+
+    RunnerPoolView:
+      type: object
+      required: [id, name, owner_kind, owner_namespace, allowed_namespaces, allowed_node_types, labels, max_instances, inherit_namespaces, paused, created_at]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        owner_kind:
+          type: string
+          enum: [tenant, platform]
+        owner_namespace:
+          type: string
+          description: Empty for platform-owned pools.
+        allowed_namespaces:
+          type: array
+          items:
+            type: string
+        allowed_node_types:
+          type: array
+          items:
+            type: string
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+        max_instances:
+          type: integer
+          minimum: 0
+        inherit_namespaces:
+          type: boolean
+        paused:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    RunnerPoolTokenCreateRequest:
+      type: object
+      properties:
         expires_in_seconds:
           type: integer
           format: int64
           minimum: 0
-          description: |
-            How long the minted code stays usable. Omit it to take the
-            deployment default (`--registration-code-ttl`); pass 0 to ask for
-            a code that never expires.
+          description: Omit for the deployment default; zero requests no expiry.
 
-            The deployment value is a CEILING, not just a default: a request
-            longer than it — including 0, which asks for no expiry at all —
-            is rejected with 400 rather than silently clamped, so a caller
-            never walks away believing it got a lifetime it did not get. The
-            ceiling binds `registration_code.create_global` holders exactly
-            as it binds tenants; widening it is a deployment action, not an
-            authorization one.
-        max_uses:
-          type: integer
-          minimum: 0
-          default: 0
-          description: |
-            How many runners this code may enroll in total. 0 (the default,
-            and what omitting it means) is unlimited, because enrolling a
-            whole fleet from one code is this credential's published
-            behaviour — turning that off by default would break every
-            existing deployment.
+    RunnerPoolInstanceView:
+      type: object
+      required: [system_id, runner_id, state, created_at, last_enrolled_at]
+      properties:
+        system_id:
+          type: string
+        runner_id:
+          type: string
+        instance_uid:
+          type: string
+        state:
+          type: string
+          enum: [active, draining, pruned]
+        created_at:
+          type: string
+          format: date-time
+        last_enrolled_at:
+          type: string
+          format: date-time
 
-            Unlike `expires_in_seconds` there is no deployment ceiling on
-            this axis, so absent and an explicit 0 are the same request. A
-            negative value is rejected with 400 rather than clamped to 0:
-            clamping would turn an obviously malformed request into the
-            widest possible outcome, silently.
+    RunnerPoolMutationResponse:
+      type: object
+      required: [id, status]
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          enum: [deleted, revoked]
 
-            The two limits are independent. Setting one does not bound the
-            other, and neither replaces revocation.
-
-    RegistrationCodeCreateResponse:
+    RunnerPoolTokenCreateResponse:
       type: object
       description: |
         The ONLY place the plaintext code ever appears in this API. It is not
@@ -2437,7 +2620,7 @@ components:
           description: Maximum enrollments permitted; 0 means unlimited.
 
 
-    RegistrationCodeView:
+    RunnerPoolTokenView:
       type: object
       description: |
         The list projection of a registration code. Deliberately carries

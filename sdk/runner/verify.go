@@ -44,7 +44,7 @@ func newVerifyCommand(opts commandOptions, cfg *runnerConfig) *cobra.Command {
 func verifyRunner(ctx context.Context, cfg runnerConfig) (xflowsdk.VerifyResult, error) {
 	// Keep verification on the same identity path as run. In particular, a
 	// file-backed issued identity must survive a restart, and a first-run
-	// registration code must be exchanged before the VerifyRunner registration.
+	// registration token must be exchanged before the VerifyRunner registration.
 	store, err := newIdentityStore(cfg)
 	if err != nil {
 		return xflowsdk.VerifyResult{}, err

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -119,6 +120,19 @@ type Config struct {
 	// enrolled runner authenticate through the same Core.
 	RegistrationCodes RegistrationCodeStore
 	IssuedIdentities  IssuedIdentityStore
+	// RunnerPools enables pool-bound enrollment and server-owned label merging
+	// for enrolled runners. Nil rejects pool-bound tokens without changing the
+	// static-authenticator path.
+	RunnerPools RunnerPoolStore
+	// RunnerInstanceIdleTTL is the heartbeat/enrollment idle window before an
+	// active pool instance enters the prune saga. Zero uses 24 hours.
+	RunnerInstanceIdleTTL time.Duration
+	// RunnerInstancePruneInterval is the leader-only sweep cadence. Zero uses
+	// one minute.
+	RunnerInstancePruneInterval time.Duration
+	// TrustedProxies contains the direct-peer CIDRs allowed to supply
+	// X-Forwarded-For. Empty preserves the legacy RemoteAddr-only behavior.
+	TrustedProxies []netip.Prefix
 	// IdentityTTL is how long a newly enrolled identity authenticates before
 	// it must renew (see WithIdentityTTL). Zero (the default) means never
 	// expires — the pre-feature behavior. Only the HTTP Core receives this:
@@ -209,17 +223,19 @@ func selectWorkflowRegistry(cfg Config) backend.WorkflowRegistry {
 // Shutdown() lifecycle methods, so it can be mounted into a host program's
 // own http.Server instead of only running as the cmd/server binary.
 type ControlPlane struct {
-	backend              backend.Provider
-	eng                  *engine.Engine
-	runners              RunnerDirectory
-	managementRunners    RunnerDirectory
-	runnerControlMetrics *RunnerControlMetricsCollector
-	dispatcher           *Dispatcher
-	httpServer           *Server
-	grpcServer           *GRPCServer
-	sweeper              *LeaseSweeper
-	elector              backend.LeaderElector
-	logger               engine.Logger
+	backend               backend.Provider
+	eng                   *engine.Engine
+	runners               RunnerDirectory
+	managementRunners     RunnerDirectory
+	runnerControlMetrics  *RunnerControlMetricsCollector
+	dispatcher            *Dispatcher
+	httpServer            *Server
+	grpcServer            *GRPCServer
+	sweeper               *LeaseSweeper
+	instancePruner        *RunnerInstancePruner
+	instancePruneInterval time.Duration
+	elector               backend.LeaderElector
+	logger                engine.Logger
 
 	// entryActivations is the optional durable EntryActivation store (node-generic
 	// activation controller). Non-nil only when Config.EntryActivationStore is
@@ -273,6 +289,7 @@ type ControlPlane struct {
 	stopped                    bool
 	leaderCancel               context.CancelFunc
 	sweeperCancel              context.CancelFunc
+	instancePrunerCancel       context.CancelFunc
 	claimRecoveryCancel        context.CancelFunc
 	runnerControlMetricsCancel context.CancelFunc
 	entryReconcilerCancel      context.CancelFunc
@@ -406,6 +423,12 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	if enrollConfigured(cfg) {
 		serverOpts = append(serverOpts, WithEnroll(cfg.RegistrationCodes, cfg.IssuedIdentities))
 	}
+	if cfg.RunnerPools != nil {
+		serverOpts = append(serverOpts, WithRunnerPools(cfg.RunnerPools))
+	}
+	if len(cfg.TrustedProxies) > 0 {
+		serverOpts = append(serverOpts, WithTrustedProxies(cfg.TrustedProxies))
+	}
 	serverOpts = append(serverOpts, withEnrollmentRunnerIDPrefix(cfg.EnrollmentRunnerIDPrefix))
 	// WithIdentityTTL no-ops for cfg.IdentityTTL <= 0, so this is unconditional
 	// like the other options above that guard internally.
@@ -461,6 +484,9 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		grpcOpts = append(grpcOpts, WithGRPCPollWait(cfg.PollWait))
 	}
 	grpcServer := NewGRPCServer(eng, runners, grpcOpts...)
+	// gRPC has its own Core. It has no enroll RPC, but registration still needs
+	// the same pool labels as HTTP when an issued identity authenticates.
+	grpcServer.core.pools = cfg.RunnerPools
 
 	elector, ok := cfg.Backend.(backend.LeaderElector)
 	if !ok {
@@ -471,6 +497,19 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		sweeperCfg.Observer = metrics.NewSweepMetrics(cfg.Metrics)
 	}
 	sweeper := NewLeaseSweeper(cfg.Backend.State(), eng, sweeperCfg)
+
+	var instancePruner *RunnerInstancePruner
+	instancePruneInterval := cfg.RunnerInstancePruneInterval
+	if instancePruneInterval <= 0 {
+		instancePruneInterval = DefaultRunnerInstancePruneInterval
+	}
+	if cfg.RunnerPools != nil && cfg.IssuedIdentities != nil {
+		instancePruner = NewRunnerInstancePruner(RunnerInstancePrunerConfig{
+			Pools: cfg.RunnerPools, IssuedIdentities: cfg.IssuedIdentities,
+			Directory: runners, Leader: elector, Logger: cfg.Logger,
+			IdleTTL: cfg.RunnerInstanceIdleTTL,
+		})
+	}
 
 	// Node-generic entry-activation controller: optional, created only when an
 	// EntryActivationStore is provided. The manager writes desired-state on
@@ -607,6 +646,8 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		httpServer:               httpServer,
 		grpcServer:               grpcServer,
 		sweeper:                  sweeper,
+		instancePruner:           instancePruner,
+		instancePruneInterval:    instancePruneInterval,
 		elector:                  elector,
 		logger:                   cfg.Logger,
 		entryActivations:         cfg.EntryActivationStore,
@@ -801,6 +842,16 @@ func (cp *ControlPlane) Start(ctx context.Context) error {
 		cp.sweeper.Run(sweepCtx)
 	}()
 
+	if cp.instancePruner != nil {
+		pruneCtx, pruneCancel := context.WithCancel(context.Background())
+		cp.instancePrunerCancel = pruneCancel
+		cp.wg.Add(1)
+		go func() {
+			defer cp.wg.Done()
+			cp.runRunnerInstancePruner(pruneCtx)
+		}()
+	}
+
 	if cp.runnerControlMetrics != nil {
 		metricsCtx, metricsCancel := context.WithCancel(context.Background())
 		cp.runnerControlMetricsCancel = metricsCancel
@@ -866,6 +917,29 @@ func (cp *ControlPlane) Start(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (cp *ControlPlane) runRunnerInstancePruner(ctx context.Context) {
+	interval := cp.instancePruneInterval
+	if interval <= 0 {
+		interval = DefaultRunnerInstancePruneInterval
+	}
+	sweep := func() {
+		if err := cp.instancePruner.Sweep(ctx); err != nil && ctx.Err() == nil && cp.logger != nil {
+			cp.logger.Error("runner instance prune failed", "err", err)
+		}
+	}
+	sweep()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sweep()
+		}
+	}
 }
 
 // runEntryReconciler drives the node-generic entry-activation reconcile loop
@@ -965,6 +1039,9 @@ func (cp *ControlPlane) Shutdown(ctx context.Context) error {
 
 	if cp.sweeperCancel != nil {
 		cp.sweeperCancel()
+	}
+	if cp.instancePrunerCancel != nil {
+		cp.instancePrunerCancel()
 	}
 	if cp.claimRecoveryCancel != nil {
 		cp.claimRecoveryCancel()

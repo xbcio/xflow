@@ -56,6 +56,7 @@ func postAuthed(t *testing.T, url, token string, body any) *http.Response {
 func TestHTTPRegisterRejectedWithoutToken(t *testing.T) {
 	srv, _ := newAuthedServer(t)
 	resp := postAuthed(t, srv.URL+protocol.RegisterRunnerPath, "", protocol.RegisterRunnerRequest{
+		InstanceUID: "test-instance",
 		RunnerID:    "order-runner-1",
 		Concurrency: 1,
 	})
@@ -68,6 +69,7 @@ func TestHTTPRegisterRejectedWithoutToken(t *testing.T) {
 func TestHTTPRegisterAcceptedWithValidBearerToken(t *testing.T) {
 	srv, pool := newAuthedServer(t)
 	resp := postAuthed(t, srv.URL+protocol.RegisterRunnerPath, "secret-token", protocol.RegisterRunnerRequest{
+		InstanceUID:  "test-instance",
 		RunnerID:     "order-runner-1",
 		Concurrency:  1,
 		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
@@ -86,6 +88,7 @@ func TestHTTPRegisterAcceptedWithValidBearerToken(t *testing.T) {
 func TestHTTPRegisterRejectsForgedRunnerID(t *testing.T) {
 	srv, _ := newAuthedServer(t)
 	resp := postAuthed(t, srv.URL+protocol.RegisterRunnerPath, "secret-token", protocol.RegisterRunnerRequest{
+		InstanceUID: "test-instance",
 		RunnerID:    "hacker-runner",
 		Concurrency: 1,
 	})
@@ -98,6 +101,7 @@ func TestHTTPRegisterRejectsForgedRunnerID(t *testing.T) {
 func TestHTTPBodyTokenAcceptedWhenNoHeader(t *testing.T) {
 	srv, _ := newAuthedServer(t)
 	resp := postAuthed(t, srv.URL+protocol.RegisterRunnerPath, "", protocol.RegisterRunnerRequest{
+		InstanceUID: "test-instance",
 		RunnerID:    "order-runner-1",
 		Concurrency: 1,
 		AuthToken:   "secret-token",
@@ -111,6 +115,7 @@ func TestHTTPBodyTokenAcceptedWhenNoHeader(t *testing.T) {
 func TestHTTPRegisterRejectsUnauthorizedCapability(t *testing.T) {
 	srv, dir := newAuthedServer(t)
 	resp := postAuthed(t, srv.URL+protocol.RegisterRunnerPath, "secret-token", protocol.RegisterRunnerRequest{
+		InstanceUID:  "test-instance",
 		RunnerID:     "order-runner-1",
 		Concurrency:  1,
 		Capabilities: []protocol.Capability{{NodeType: "xflow.script"}},
@@ -125,6 +130,7 @@ func TestHTTPRegisterRejectsUnauthorizedCapability(t *testing.T) {
 func TestHTTPRegisterRejectsUnauthorizedNamespaceWithForbidden(t *testing.T) {
 	srv, _ := newAuthedServer(t)
 	resp := postAuthed(t, srv.URL+protocol.RegisterRunnerPath, "secret-token", protocol.RegisterRunnerRequest{
+		InstanceUID:  "test-instance",
 		RunnerID:     "order-runner-1",
 		Concurrency:  1,
 		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
@@ -136,6 +142,7 @@ func TestHTTPRegisterRejectsUnauthorizedNamespaceWithForbidden(t *testing.T) {
 func TestHTTPRegisterRejectsBlankCapability(t *testing.T) {
 	srv, _ := newAuthedServer(t)
 	resp := postAuthed(t, srv.URL+protocol.RegisterRunnerPath, "secret-token", protocol.RegisterRunnerRequest{
+		InstanceUID:  "test-instance",
 		RunnerID:     "order-runner-1",
 		Concurrency:  1,
 		Capabilities: []protocol.Capability{{NodeType: " \t "}},

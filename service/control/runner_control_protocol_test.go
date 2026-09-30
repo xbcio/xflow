@@ -12,7 +12,7 @@ func TestCoreProjectsRunnerControlOnRegisterHeartbeatAndPoll(t *testing.T) {
 	directory := NewMemoryRunnerDirectory()
 	core := &Core{runners: directory, auth: DisabledAuthenticator{}}
 
-	registered, err := core.register(ctx, protocol.RegisterRunnerRequest{RunnerID: "runner-a", Concurrency: 1}, TransportInfo{})
+	registered, err := core.register(ctx, protocol.RegisterRunnerRequest{InstanceUID: "test-instance", RunnerID: "runner-a", Concurrency: 1}, TransportInfo{})
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}

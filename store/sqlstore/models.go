@@ -370,8 +370,9 @@ type dbRegistrationCode struct {
 	// means unlimited, so the NOT NULL DEFAULT 0 is also the migration story:
 	// rows written before these columns existed read back as unbounded, exactly
 	// as they behaved.
-	MaxUses  int `gorm:"column:max_uses;not null;default:0"`
-	UseCount int `gorm:"column:use_count;not null;default:0"`
+	MaxUses  int    `gorm:"column:max_uses;not null;default:0"`
+	UseCount int    `gorm:"column:use_count;not null;default:0"`
+	PoolID   string `gorm:"column:pool_id;size:64;not null;default:'';index:idx_registration_code_pool"`
 }
 
 func (dbRegistrationCode) TableName() string { return "xflow_registration_codes" }
@@ -391,9 +392,9 @@ type dbEnrollAudit struct {
 
 func (dbEnrollAudit) TableName() string { return "xflow_enroll_audit" }
 
-// dbIssuedIdentity is a runner credential minted by enroll. scope_* mirror
-// RunnerPolicy's list fields; id_prefix mirrors its remaining scalar field.
-// The policy Name is derived from RunnerID on read, so it is not stored.
+// dbIssuedIdentity is a runner credential minted by enroll. scope_* and
+// id_prefix mirror RunnerPolicy. ScopeName is nullable so historical rows can
+// retain the old fallback that derived policy Name from RunnerID.
 //
 // id_prefix exists because RunnerPolicy has FOUR fields (Name, IDPrefix,
 // AllowedNodeTypes, AllowedNamespaces), not two — dropping it here would be a
@@ -414,16 +415,55 @@ type dbIssuedIdentity struct {
 	RunnerID        string     `gorm:"column:runner_id;primaryKey;size:128"`
 	TokenHash       []byte     `gorm:"column:token_hash;type:binary(32);not null"`
 	IDPrefix        string     `gorm:"column:id_prefix;type:varchar(64);not null"`
+	ScopeName       *string    `gorm:"column:scope_name;size:255"`
 	ScopeNamespaces string     `gorm:"column:scope_namespaces;type:text"`
 	ScopeNodeTypes  string     `gorm:"column:scope_node_types;type:text"`
 	CodeID          string     `gorm:"column:code_id;size:64;not null;index:idx_issued_identity_code"`
 	OwnerNamespace  string     `gorm:"column:owner_namespace;size:64;not null;default:''"`
+	PoolID          string     `gorm:"column:pool_id;size:64;not null;default:'';index:idx_issued_identity_pool"`
 	IssuedAt        *time.Time `gorm:"column:issued_at"`
 	// ExpiresAt / RevokedAt are pointers for the same reason IssuedAt above is:
 	// MySQL 8 strict mode (NO_ZERO_DATE) rejects '0000-00-00', so "no expiry"
 	// and "not revoked" must be NULL rather than a zero timestamp.
-	ExpiresAt *time.Time `gorm:"column:expires_at"`
-	RevokedAt *time.Time `gorm:"column:revoked_at"`
+	ExpiresAt               *time.Time `gorm:"column:expires_at"`
+	RevokedAt               *time.Time `gorm:"column:revoked_at"`
+	CredentialGeneration    int64      `gorm:"column:credential_generation;not null;default:0"`
+	PreviousTokenHash       []byte     `gorm:"column:previous_token_hash;type:binary(32)"`
+	PreviousTokenValidUntil *time.Time `gorm:"column:previous_token_valid_until"`
 }
 
 func (dbIssuedIdentity) TableName() string { return "xflow_issued_identities" }
+
+// dbRunnerPool persists a runner fleet's scope ceiling and enrollment policy.
+// Slice and map fields use JSON text, matching the existing enrollment models.
+type dbRunnerPool struct {
+	ID                string              `gorm:"column:id;primaryKey;size:64"`
+	Name              string              `gorm:"column:name;size:255;not null"`
+	OwnerKind         store.PoolOwnerKind `gorm:"column:owner_kind;size:16;not null;index:idx_runner_pool_owner,priority:1"`
+	OwnerNamespace    string              `gorm:"column:owner_namespace;size:64;not null;default:'';index:idx_runner_pool_owner,priority:2"`
+	AllowedNamespaces string              `gorm:"column:allowed_namespaces;type:text"`
+	AllowedNodeTypes  string              `gorm:"column:allowed_node_types;type:text"`
+	Labels            string              `gorm:"column:labels;type:text"`
+	MaxInstances      int                 `gorm:"column:max_instances;not null;default:0"`
+	InheritNamespaces bool                `gorm:"column:inherit_namespaces;not null;default:false"`
+	Paused            bool                `gorm:"column:paused;not null;default:false"`
+	CreatedAt         time.Time           `gorm:"column:created_at;not null"`
+	DeletedAt         *time.Time          `gorm:"column:deleted_at;index:idx_runner_pool_deleted"`
+}
+
+func (dbRunnerPool) TableName() string { return "xflow_runner_pools" }
+
+// dbRunnerInstance has two independent identities: the pool-local idempotency
+// key (pool_id, system_id), and the globally unique server-generated runner ID.
+type dbRunnerInstance struct {
+	PoolID         string              `gorm:"column:pool_id;size:64;not null;uniqueIndex:uk_runner_instance_pool_system,priority:1;index:idx_runner_instance_pool_state,priority:1"`
+	SystemID       string              `gorm:"column:system_id;size:255;not null;uniqueIndex:uk_runner_instance_pool_system,priority:2"`
+	RunnerID       string              `gorm:"column:runner_id;size:128;not null;uniqueIndex:uk_runner_instance_runner"`
+	InstanceUID    string              `gorm:"column:instance_uid;size:255;not null;default:''"`
+	State          store.InstanceState `gorm:"column:state;size:16;not null;index:idx_runner_instance_pool_state,priority:2"`
+	CreatedAt      time.Time           `gorm:"column:created_at;not null"`
+	LastEnrolledAt time.Time           `gorm:"column:last_enrolled_at;not null"`
+	StateChangedAt time.Time           `gorm:"column:state_changed_at;not null"`
+}
+
+func (dbRunnerInstance) TableName() string { return "xflow_runner_instances" }

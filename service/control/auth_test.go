@@ -262,6 +262,7 @@ func TestCoreAuthObserverRecordsAllowAndDeny(t *testing.T) {
 
 	ctx := context.Background()
 	regResp, err := core.register(ctx, protocol.RegisterRunnerRequest{
+		InstanceUID: "test-instance",
 		RunnerID:    "runner-1",
 		Concurrency: 1,
 		AuthToken:   "secret",

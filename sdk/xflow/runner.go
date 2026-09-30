@@ -85,6 +85,12 @@ type RunnerConfig struct {
 	// runner service generate one.
 	RunnerID string
 
+	// InstanceUID identifies this process instance to the control plane, so a
+	// second instance registering under the same RunnerID is refused while this
+	// one is live instead of silently evicting it. Empty uses
+	// DefaultRunnerInstanceUID.
+	InstanceUID string
+
 	// Concurrency is how many leases this runner executes at once, and the
 	// capacity it reports. Zero uses the runner service default.
 	Concurrency int
@@ -676,6 +682,7 @@ func buildRunnerServiceConfig(cfg RunnerConfig, opts ...RunnerOption) (runnersvc
 
 	svcCfg := runnersvc.Config{
 		RunnerID:     cfg.RunnerID,
+		InstanceUID:  runnerInstanceUIDOrDefault(cfg.InstanceUID),
 		Concurrency:  cfg.Concurrency,
 		Labels:       runnerRegistrationLabels(cfg.Labels, protocol.LinkedXflowVersion()),
 		Capabilities: runnerCapabilities(cfg.Capabilities),

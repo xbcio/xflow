@@ -66,6 +66,9 @@ message RegisterRequest {
   map<string, string> labels = 4;
   repeated string namespaces = 5;
   repeated ActivationInventoryItem activations = 6;
+  // instance_uid identifies the registering process instance; see
+  // protocol.RegisterRunnerRequest.InstanceUID.
+  string instance_uid = 7;
 }
 
 // ActivationInventoryItem reports a single trigger activation the runner is
@@ -173,6 +176,8 @@ message HelloFrame {
   repeated Capability capabilities = 3;
   map<string, string> labels = 4;
   repeated string namespaces = 5;
+  // instance_uid: see RegisterRequest.instance_uid.
+  string instance_uid = 6;
 }
 
 message ResultFrame {

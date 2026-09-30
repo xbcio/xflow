@@ -26,10 +26,9 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-// managementModule mounts the ops management HTTP API: leader status,
-// single-runner lookup and (when supported) runner listing,
-// single-execution inspect, dead-letter list/replay, registration-code
-// create/list/revoke/audit, and the process liveness/readiness probes. It is
+// managementModule mounts the ops management HTTP API: leader and runner
+// inspection/control, execution inspection, dead-letter operations, runner
+// pools and their registration tokens, and process liveness/readiness probes. It is
 // opt-in (registered only via WithManagement) because it exposes runner
 // directory, execution state, and dead-letter operations that must sit
 // behind authz.
@@ -53,27 +52,11 @@ type managementModule struct {
 	dlMgr     *control.DeadLetterManager
 	dlMgrOnce sync.Once
 	ready     ReadinessChecker
-	// codes / issued back the registration-code management API (create / list /
-	// revoke / audit). Whether these four routes are MOUNTED depends only on
-	// m.principalAuth (see RegisterHTTP) — never on codes/issued being non-nil.
-	//
-	// That is deliberate, not an oversight (Task 8 addendum Ruling W): the
-	// production dead-constant guard (paths_test.go newFullGuardMux) builds a
-	// PrincipalAuth-only server with no registration-code store configured at
-	// all, and TestUserFacingPathsHaveMuxRegistration requires every
-	// UserFacingPaths entry to resolve to an actually-registered route on THAT
-	// mux. Gating registration on codes/issued would make the three new routes
-	// vanish there, and the only "fix" for that red — dropping the paths back
-	// out of UserFacingPaths — would silently reopen the exact dead-constant
-	// hole the guard exists to catch (and nothing would ever catch THAT,
-	// addendum Ruling 4: there is no guard in the reverse direction).
-	//
-	// So instead: nil codes means the routes exist and are reachable by an
-	// authorized caller, but every handler answers 404 route_not_found itself.
-	// Same externally observed behavior as "the feature does not exist on this
-	// server", reached without touching the mount condition.
+	// codes stores pool-bound registration tokens; issued backs runner identity
+	// management; pools owns visibility and lifecycle for both surfaces.
 	codes  control.RegistrationCodeStore
 	issued control.IssuedIdentityStore
+	pools  control.RunnerPoolStore
 	// registrationCodeTTL is the deployment ceiling on how long a newly minted
 	// registration code may live. Zero means no ceiling, which is what a server
 	// upgraded without the flag carries — see resolveRegistrationCodeExpiry on
@@ -168,45 +151,35 @@ func (m *managementModule) RegisterHTTP(mux *http.ServeMux) {
 			id := r.PathValue("id")
 			return "management/execution/" + id, "", id, ""
 		}))
-		// Registration-code CRUD + audit (Task 8). Unlike leader/runner/exec
-		// above, these four have NO bare fallback in the else branch below, and
-		// unlike dead-letters they do not self-wrap unconditionally either: per
-		// the Task 8 addendum (Ruling Y, security-critical), a server with no
-		// PrincipalAuthenticator configured must not expose an endpoint that
-		// mints runner credentials at all — not even a bare (unauthenticated)
-		// version of it. So the mount is gated on principalAuth alone (never on
-		// m.codes/m.issued — see the struct field comment above for why), and
-		// principalAuth==nil leaves these routes genuinely unregistered → 404.
-		//
-		// Namespace boundary (Task 8 fix1 Important-3, superseded by Task 2's H1
-		// fix): all four leave ResourceNamespace empty in their authzWrap
-		// resolver funcs below, and — unlike handleExecution's
-		// cross-namespace-read-404 pattern — there is no namespace-scoped
-		// store read backing that emptiness via ResourceNamespace equality.
-		// The boundary instead runs through the store's own owner scoping
-		// (store.OwnerScope / RegistrationCode.OwnerNamespace, landed by Task
-		// 1): each handler below projects the requesting principal onto an
-		// OwnerScope via ownerScopeFor, so a tenant principal sees, revokes,
-		// and audits only the codes it minted, and create stamps
-		// OwnerNamespace with the principal's own namespace. A principal
-		// additionally holding the matching *_global scope
-		// (ScopeRegistrationCodeCreateGlobal/ListGlobal/RevokeGlobal/
-		// AuditGlobal) gets OwnerScope{All: true} instead — the platform-wide,
-		// list-ALL-codes behavior spec §2.3.4 describes. Do not remove
-		// ownerScopeFor's per-handler call or the ceiling check in
-		// resolveRequestedNamespaces to "simplify back" to a bare scope check;
-		// that is the H1 privilege-escalation path this fix closes.
-		mux.HandleFunc("POST "+PathManagementRegistrationCodes, m.authzWrap(OpRegistrationCodeCreate, true, m.handleCreateRegistrationCode, func(*http.Request) (string, string, string, string) {
-			return "management/registration-codes", "", "", ""
+		mux.HandleFunc("POST "+PathManagementRunnerPools, m.authzWrap(OpManagementRunnerPoolWrite, true, m.handleCreateRunnerPool, func(*http.Request) (string, string, string, string) {
+			return "management/runner-pools", "", "", ""
 		}))
-		mux.HandleFunc("GET "+PathManagementRegistrationCodes, m.authzWrap(OpRegistrationCodeList, false, m.handleListRegistrationCodes, func(*http.Request) (string, string, string, string) {
-			return "management/registration-codes", "", "", ""
+		mux.HandleFunc("GET "+PathManagementRunnerPools, m.authzWrap(OpManagementRunnerPoolRead, false, m.handleListRunnerPools, func(*http.Request) (string, string, string, string) {
+			return "management/runner-pools", "", "", ""
 		}))
-		mux.HandleFunc("DELETE "+PathManagementRegistrationCodeByID, m.authzWrap(OpRegistrationCodeRevoke, true, m.handleRevokeRegistrationCode, func(r *http.Request) (string, string, string, string) {
-			return "management/registration-codes/" + r.PathValue("id"), "", "", ""
+		mux.HandleFunc("GET "+PathManagementRunnerPoolByID, m.authzWrap(OpManagementRunnerPoolRead, false, m.handleGetRunnerPool, func(r *http.Request) (string, string, string, string) {
+			return "management/runner-pools/" + r.PathValue("id"), "", "", ""
 		}))
-		mux.HandleFunc("GET "+PathManagementRegistrationCodeAudit, m.authzWrap(OpRegistrationCodeAudit, false, m.handleRegistrationCodeAudit, func(r *http.Request) (string, string, string, string) {
-			return "management/registration-codes/" + r.PathValue("id") + "/audit", "", "", ""
+		mux.HandleFunc("PATCH "+PathManagementRunnerPoolByID, m.authzWrap(OpManagementRunnerPoolWrite, true, m.handleUpdateRunnerPool, func(r *http.Request) (string, string, string, string) {
+			return "management/runner-pools/" + r.PathValue("id"), "", "", ""
+		}))
+		mux.HandleFunc("DELETE "+PathManagementRunnerPoolByID, m.authzWrap(OpManagementRunnerPoolWrite, true, m.handleDeleteRunnerPool, func(r *http.Request) (string, string, string, string) {
+			return "management/runner-pools/" + r.PathValue("id"), "", "", ""
+		}))
+		mux.HandleFunc("POST "+PathManagementRunnerPoolTokens, m.authzWrap(OpManagementRunnerPoolWrite, true, m.handleCreateRunnerPoolToken, func(r *http.Request) (string, string, string, string) {
+			return "management/runner-pools/" + r.PathValue("id") + "/tokens", "", "", ""
+		}))
+		mux.HandleFunc("GET "+PathManagementRunnerPoolTokens, m.authzWrap(OpManagementRunnerPoolRead, false, m.handleListRunnerPoolTokens, func(r *http.Request) (string, string, string, string) {
+			return "management/runner-pools/" + r.PathValue("id") + "/tokens", "", "", ""
+		}))
+		mux.HandleFunc("DELETE "+PathManagementRunnerPoolTokenByID, m.authzWrap(OpManagementRunnerPoolWrite, true, m.handleRevokeRunnerPoolToken, func(r *http.Request) (string, string, string, string) {
+			return "management/runner-pools/" + r.PathValue("id") + "/tokens/" + r.PathValue("token_id"), "", "", ""
+		}))
+		mux.HandleFunc("GET "+PathManagementRunnerPoolTokenAudit, m.authzWrap(OpManagementRunnerPoolRead, false, m.handleRunnerPoolTokenAudit, func(r *http.Request) (string, string, string, string) {
+			return "management/runner-pools/" + r.PathValue("id") + "/tokens/" + r.PathValue("token_id") + "/audit", "", "", ""
+		}))
+		mux.HandleFunc("GET "+PathManagementRunnerPoolRunners, m.authzWrap(OpManagementRunnerPoolRead, false, m.handleListRunnerPoolInstances, func(r *http.Request) (string, string, string, string) {
+			return "management/runner-pools/" + r.PathValue("id") + "/runners", "", "", ""
 		}))
 		// Runner identity revocation (Task 6): kills one runner's issued
 		// identity so its next authenticated call is rejected by T5's gate in
@@ -443,11 +416,7 @@ const (
 //     ("who among them enrolled") that this backend also cannot answer, for a
 //     different reason (a corrupted issued-identity row, not a missing
 //     capability). It gets its own 500, not folded into the 501 above.
-//
-// This is unlike registrationCodeUnavailable's 404 (m.codes == nil): that 404
-// means the registration-code feature is not configured on this server at
-// all. The 501 here means the feature IS configured but the directory
-// implementation cannot enumerate. Different conditions, kept separate.
+
 func (m *managementModule) handleListRunners(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodGet) {
 		return
@@ -1035,56 +1004,22 @@ func (m *managementModule) deadLetterAuditSink(observer engine.OutboxObserver) e
 	})
 }
 
-// registrationCodeUnavailable answers 404 route_not_found when this server was
-// built without a registration-code store. The route IS mounted (see
-// RegisterHTTP's field comment on codes/issued for why), so an authorized
-// caller reaches this function rather than a genuinely-missing pattern; the
-// response is the same 404 either way, which is the honest answer for a
-// feature that does not exist on this server.
-func registrationCodeUnavailable(w http.ResponseWriter, r *http.Request) {
-	writeFail(w, r, http.StatusNotFound, "route_not_found", "route not found")
-}
-
-type registrationCodeCreateRequest struct {
-	AllowedNamespaces []string `json:"allowed_namespaces"`
-	AllowedNodeTypes  []string `json:"allowed_node_types"`
-	// ExpiresInSeconds is the requested lifetime. A pointer because absent and
-	// 0 are different requests: absent means "use the deployment default",
-	// while 0 explicitly asks for a code that never expires — and under a
-	// deployment ceiling that is a request the server must refuse rather than
-	// silently reinterpret. Seconds rather than a duration string ("24h")
-	// because the OpenAPI contract has no unambiguous duration type and a
-	// third-party client should not have to reimplement Go's parser.
-	ExpiresInSeconds *int64 `json:"expires_in_seconds,omitempty"`
-	// MaxUses caps how many runners this code may enroll. 0 (and absent) means
-	// unlimited, which is the default because enrolling a whole fleet from one
-	// code is this credential's published behaviour.
-	//
-	// A plain int rather than ExpiresInSeconds' pointer: there is no deployment
-	// ceiling on this axis, so absent and an explicit 0 are the same request and
-	// nothing needs to tell them apart. If a ceiling is ever added, this must
-	// become a pointer at the same time — under a ceiling, "use the default" and
-	// "I want unlimited" stop being the same thing.
-	MaxUses int `json:"max_uses,omitempty"`
-}
-
-// registrationCodeCreateResponse is the ONLY place the plaintext code ever
-// appears. It is not recoverable afterwards — not from the list endpoint, not
-// from the database.
-type registrationCodeCreateResponse struct {
+// runnerPoolTokenCreateResponse is returned when a pool token is minted; the
+// plaintext token appears only in this response.
+type runnerPoolTokenCreateResponse struct {
 	ID        string `json:"id"`
 	Code      string `json:"code"`
 	ExpiresAt string `json:"expires_at,omitempty"`
 	MaxUses   int    `json:"max_uses"`
 }
 
-// registrationCodeView is the list projection. It deliberately carries neither
+// runnerPoolTokenView is the list projection. It deliberately carries neither
 // the plaintext nor the hash: publishing sha256(code) would make every code
 // offline-crackable by anyone who can read the list.
 //
-// Build it with newRegistrationCodeView, never by literal: the two slice
+// Build it with newRunnerPoolTokenView, never by literal: the two slice
 // fields need normalizing and a literal is exactly how that gets skipped.
-type registrationCodeView struct {
+type runnerPoolTokenView struct {
 	ID                string   `json:"id"`
 	AllowedNamespaces []string `json:"allowed_namespaces"`
 	AllowedNodeTypes  []string `json:"allowed_node_types"`
@@ -1103,7 +1038,7 @@ type registrationCodeView struct {
 	UseCount int `json:"use_count"`
 }
 
-// newRegistrationCodeView projects a stored code onto its wire shape.
+// newRunnerPoolTokenView projects a stored code onto its wire shape.
 //
 // It exists for the two slice fields. A nil []string marshals to JSON `null`,
 // not `[]`, and the OpenAPI schema declares both as arrays — so a code whose
@@ -1120,8 +1055,8 @@ type registrationCodeView struct {
 // handle a state the server never means. `[]` is the honest encoding of "this
 // code allows nothing" — which, for AllowedNodeTypes, is exactly what
 // RunnerPolicy.Allows reports for an empty set.
-func newRegistrationCodeView(c control.RegistrationCode) registrationCodeView {
-	view := registrationCodeView{
+func newRunnerPoolTokenView(c control.RegistrationCode) runnerPoolTokenView {
+	view := runnerPoolTokenView{
 		ID:                c.ID,
 		AllowedNamespaces: emptyIfNil(c.AllowedNamespaces),
 		AllowedNodeTypes:  emptyIfNil(c.AllowedNodeTypes),
@@ -1155,6 +1090,17 @@ type enrollAuditView struct {
 	At       string `json:"at"`
 }
 
+func newEnrollAuditViews(records []control.EnrollAuditRecord) []enrollAuditView {
+	out := make([]enrollAuditView, 0, len(records))
+	for _, rec := range records {
+		out = append(out, enrollAuditView{
+			Success: rec.Success, Reason: rec.Reason, RunnerID: rec.RunnerID,
+			SourceIP: rec.SourceIP, At: rec.At.UTC().Format(time.RFC3339),
+		})
+	}
+	return out
+}
+
 // ownerScopeFor projects the request's principal onto the store's OwnerScope.
 // The bool reports whether a principal was present at all; false means the
 // route ran without authz middleware, which is a wiring bug and must be a 500
@@ -1178,89 +1124,6 @@ func ownerScopeFor(r *http.Request, globalScope string) (control.OwnerScope, boo
 	return control.OwnerScope{Namespace: p.Namespace}, true
 }
 
-func (m *managementModule) handleCreateRegistrationCode(w http.ResponseWriter, r *http.Request) {
-	if m.codes == nil {
-		registrationCodeUnavailable(w, r)
-		return
-	}
-	p, ok := principalFromRequest(r)
-	if !ok {
-		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
-		return
-	}
-	var req registrationCodeCreateRequest
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	requested, err := resolveRequestedNamespaces(p, req.AllowedNamespaces)
-	if err != nil {
-		if errors.Is(err, errRegistrationCodeMissingNamespaces) {
-			// A malformed request body, not a scope violation: the caller is
-			// entitled to mint a global code, it just didn't say for which
-			// namespaces. That is bad_request, not namespace_forbidden.
-			writeFail(w, r, http.StatusBadRequest, "bad_request", err.Error())
-			return
-		}
-		// The reason is a client-side scope error, not internal state, so it is
-		// safe to name the offending namespace back. It is one the caller sent.
-		writeFail(w, r, http.StatusForbidden, "namespace_forbidden", err.Error())
-		return
-	}
-	id, plaintext, err := control.GenerateRegistrationCode()
-	if err != nil {
-		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
-		return
-	}
-	now := time.Now().UTC()
-	expiresAt, err := resolveRegistrationCodeExpiry(now, m.registrationCodeTTL, req.ExpiresInSeconds)
-	if err != nil {
-		// 400, not 403: because the ceiling clamps _global creators too, there
-		// is no principal for whom this same request would succeed. 403 would
-		// wrongly imply "ask for a bigger scope"; the only way through is for
-		// an operator to change --registration-code-ttl, which is a deployment
-		// action, not an authorization one.
-		writeFail(w, r, http.StatusBadRequest, "bad_request", err.Error())
-		return
-	}
-	if req.MaxUses < 0 {
-		// Refused rather than clamped to 0. Clamping would turn "cap this at -1,
-		// obviously a bug in my client" into a code with no cap at all — the
-		// widest possible outcome, silently, from a request that was malformed.
-		writeFail(w, r, http.StatusBadRequest, "bad_request", "max_uses must not be negative")
-		return
-	}
-	code := control.RegistrationCode{
-		ID:                id,
-		CodeHash:          control.HashSecret(plaintext),
-		OwnerNamespace:    p.Namespace,
-		AllowedNamespaces: requested,
-		AllowedNodeTypes:  req.AllowedNodeTypes,
-		CreatedAt:         now,
-		ExpiresAt:         expiresAt,
-		MaxUses:           req.MaxUses,
-	}
-	if err := m.codes.Create(r.Context(), code); err != nil {
-		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
-		return
-	}
-	response := registrationCodeCreateResponse{
-		ID:      id,
-		Code:    plaintext,
-		MaxUses: code.MaxUses,
-	}
-	if !code.ExpiresAt.IsZero() {
-		response.ExpiresAt = code.ExpiresAt.UTC().Format(time.RFC3339)
-	}
-	// The plaintext code is deliberately returned exactly once. Intermediaries
-	// must not retain it in a browser cache or shared response cache.
-	w.Header().Set("Cache-Control", "no-store")
-	writeData(w, r, http.StatusOK, response)
-}
-
-// maxRegistrationCodeTTLSeconds is where seconds stop fitting in a
-// time.Duration (~292 years). It is an overflow guard, not a policy: a
-// requested lifetime beyond it would wrap negative and mint a code that is
-// already expired, which reads as "the server ignored my request".
 const maxRegistrationCodeTTLSeconds = int64(math.MaxInt64) / int64(time.Second)
 
 // resolveRegistrationCodeExpiry enforces the deployment ceiling on how long a
@@ -1275,19 +1138,16 @@ const maxRegistrationCodeTTLSeconds = int64(math.MaxInt64) / int64(time.Second)
 //
 // Requests over the ceiling are REFUSED, not silently clamped down to it. A
 // caller that asked for 90 days and got 24 hours without being told has a
-// code that dies two months before it expects to, and nothing in the response
-// says so. resolveRequestedNamespaces makes the same choice on the namespace
-// axis for the same reason.
+// code that dies two months before it expects to, with nothing in the response
+// saying so.
 //
 // An explicit 0 under a ceiling is likewise refused rather than reinterpreted:
 // 0 means "never expires", the deployment has declared that no such code may
 // be minted, and rewriting the request into the ceiling would hide the fact
 // that the caller asked for something else entirely.
 //
-// This function does not look at the principal. That is the point: a holder of
-// registration_code.create_global is clamped exactly like a tenant, so the
-// only way to widen the ceiling is to change the flag — an auditable operator
-// action on the host, not a scope someone can be granted.
+// This function does not look at the principal. Pool write-global callers are
+// bound by the same deployment ceiling as tenant callers.
 func resolveRegistrationCodeExpiry(now time.Time, ceiling time.Duration, requestedSeconds *int64) (time.Time, error) {
 	if requestedSeconds == nil {
 		if ceiling <= 0 {
@@ -1319,43 +1179,22 @@ func resolveRegistrationCodeExpiry(now time.Time, ceiling time.Duration, request
 	return now.Add(want).UTC(), nil
 }
 
-// errRegistrationCodeMissingNamespaces is the sentinel a _global creator hits
-// when it omits allowed_namespaces. Distinct from every other error this
-// function returns (all namespace_forbidden-worthy) so the handler can answer
-// 400 bad_request instead — this is a malformed request body, not a scope
-// violation the caller lacks the right to make.
-var errRegistrationCodeMissingNamespaces = errors.New("allowed_namespaces is required for a global registration code")
+// errRunnerPoolMissingNamespaces is returned when a global pool creator omits
+// its namespace ceiling.
+var errRunnerPoolMissingNamespaces = errors.New("allowed_namespaces is required for a global runner pool")
 
 // resolveRequestedNamespaces enforces the ceiling: a code may never grant a
 // namespace its creator does not itself hold.
 //
-// The allow decision reuses RunnerPolicy.AllowsNamespace by projecting the
-// principal into a one-element policy, rather than comparing strings here. Two
-// implementations of "is this namespace allowed" would drift, and the drift
-// would be a privilege escalation — the same reasoning RegistrationCode.Policy
-// documents.
-//
-// Note what the projection does to "*": AllowsNamespace compares
-// namespace.Namespace("*") against the principal's single allowed namespace, so
-// a wildcard request is simply a namespace nobody is named, and is rejected by
-// the ordinary path. It is not special-cased, which is why it cannot be
-// special-cased wrong — PROVIDED p.Namespace itself is a legal namespace name.
-// That proviso is the guard immediately below: p.Namespace comes from a token
-// file (cmd/server's loadAuthTokenMappings), and unlike every other reader of
-// a principal's namespace, this function is the first to place p.Namespace on
-// the *policy* side of AllowsNamespace. On the policy side "*" means match
-// everything, so an unvalidated p.Namespace of "*" would hand a tenant
-// principal a ceiling of "everything" — H1 again, through the one string this
-// fix forgot to re-check. namespace.Validate rejects "*" along with every
-// other illegal character, and covers the create_global branch too: that
-// branch never builds a ceiling, but handleCreateRegistrationCode still
-// stamps OwnerNamespace: p.Namespace regardless of branch, so an illegal
-// value must not reach either branch.
-func resolveRequestedNamespaces(p Principal, requested []string) ([]string, error) {
+// resolveRequestedNamespacesForGlobalScope validates a pool namespace ceiling.
+// Tenant callers may grant only their own namespace; callers with the supplied
+// global scope may grant any valid namespace or "*", but must state the grant
+// explicitly.
+func resolveRequestedNamespacesForGlobalScope(p Principal, requested []string, globalScope string) ([]string, error) {
 	if err := namespace.Validate(namespace.Namespace(p.Namespace)); err != nil {
 		return nil, fmt.Errorf("principal namespace %q is not a legal namespace name: %w", p.Namespace, err)
 	}
-	if p.HasScope(ScopeRegistrationCodeCreateGlobal) {
+	if p.HasScope(globalScope) {
 		// A platform operator may mint anything, including "*". Everything else
 		// still has to be a legal namespace name.
 		if len(requested) == 0 {
@@ -1365,7 +1204,7 @@ func resolveRequestedNamespaces(p Principal, requested []string) ([]string, erro
 			// silently expanding an omission to "*" is exactly the implicit
 			// maximal grant this whole fix exists to eliminate. Make the
 			// operator say what it wants.
-			return nil, errRegistrationCodeMissingNamespaces
+			return nil, errRunnerPoolMissingNamespaces
 		}
 		for _, ns := range requested {
 			if ns == "*" {
@@ -1396,98 +1235,4 @@ func resolveRequestedNamespaces(p Principal, requested []string) ([]string, erro
 		}
 	}
 	return append([]string(nil), requested...), nil
-}
-
-func (m *managementModule) handleListRegistrationCodes(w http.ResponseWriter, r *http.Request) {
-	if m.codes == nil {
-		registrationCodeUnavailable(w, r)
-		return
-	}
-	scope, ok := ownerScopeFor(r, ScopeRegistrationCodeListGlobal)
-	if !ok {
-		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
-		return
-	}
-	list, err := m.codes.List(r.Context(), scope)
-	if err != nil {
-		// store.ErrEnrollScopeCorrupted (a scope column that failed to decode)
-		// or any other store failure must not reach the caller as err.Error() —
-		// that could echo internal storage detail (org security policy §7:
-		// production exceptions return a generic message, detail stays
-		// server-side). This is deliberately NOT swallowed into an empty list:
-		// a corrupted row failing the WHOLE list is the store's contract (Task
-		// 7), and turning that into a silent empty page would hide the
-		// corruption from the one surface an operator could act on it from.
-		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
-		return
-	}
-	out := make([]registrationCodeView, 0, len(list))
-	for _, c := range list {
-		out = append(out, newRegistrationCodeView(c))
-	}
-	writeData(w, r, http.StatusOK, out)
-}
-
-func (m *managementModule) handleRevokeRegistrationCode(w http.ResponseWriter, r *http.Request) {
-	if m.codes == nil {
-		registrationCodeUnavailable(w, r)
-		return
-	}
-	id := r.PathValue("id")
-	if id == "" {
-		writeFail(w, r, http.StatusNotFound, "registration_code_not_found", "registration code not found")
-		return
-	}
-	scope, ok := ownerScopeFor(r, ScopeRegistrationCodeRevokeGlobal)
-	if !ok {
-		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
-		return
-	}
-	err := m.codes.Revoke(r.Context(), id, scope)
-	if errors.Is(err, control.ErrRegistrationCodeNotFound) {
-		writeFail(w, r, http.StatusNotFound, "registration_code_not_found", "registration code not found")
-		return
-	}
-	if err != nil {
-		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
-		return
-	}
-	writeData(w, r, http.StatusOK, map[string]string{"id": id, "status": "revoked"})
-}
-
-func (m *managementModule) handleRegistrationCodeAudit(w http.ResponseWriter, r *http.Request) {
-	if m.codes == nil {
-		registrationCodeUnavailable(w, r)
-		return
-	}
-	id := r.PathValue("id")
-	if id == "" {
-		writeFail(w, r, http.StatusNotFound, "registration_code_not_found", "registration code not found")
-		return
-	}
-	scope, ok := ownerScopeFor(r, ScopeRegistrationCodeAuditGlobal)
-	if !ok {
-		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
-		return
-	}
-	records, err := m.codes.EnrollAudit(r.Context(), id, scope)
-	if errors.Is(err, control.ErrRegistrationCodeNotFound) {
-		writeFail(w, r, http.StatusNotFound, "registration_code_not_found", "registration code not found")
-		return
-	}
-	if err != nil {
-		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
-		return
-	}
-	out := make([]enrollAuditView, 0, len(records))
-	for _, rec := range records {
-		out = append(out, enrollAuditView{
-			Success:  rec.Success,
-			Reason:   rec.Reason,
-			RunnerID: rec.RunnerID,
-			SourceIP: rec.SourceIP,
-			At:       rec.At.UTC().Format(time.RFC3339),
-		})
-	}
-	writeData(w, r, http.StatusOK, out)
 }

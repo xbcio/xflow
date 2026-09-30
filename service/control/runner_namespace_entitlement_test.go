@@ -51,6 +51,7 @@ func TestRegisterRejectsUnauthorizedNamespace(t *testing.T) {
 	c := newEntitlementTestCore(t, entitlementPolicyStore(t, []string{"team-a"}))
 
 	_, err := c.register(context.Background(), protocol.RegisterRunnerRequest{
+		InstanceUID: "test-instance",
 		RunnerID:    "runner-1",
 		Concurrency: 1,
 		AuthToken:   "team-a-token",
@@ -71,6 +72,7 @@ func TestRegisterAcceptsAuthorizedNamespace(t *testing.T) {
 	c := newEntitlementTestCore(t, entitlementPolicyStore(t, []string{"team-a"}))
 
 	if _, err := c.register(context.Background(), protocol.RegisterRunnerRequest{
+		InstanceUID: "test-instance",
 		RunnerID:    "runner-1",
 		Concurrency: 1,
 		AuthToken:   "team-a-token",
@@ -88,6 +90,7 @@ func TestEmptyAllowedNamespacesMeansDefaultOnly(t *testing.T) {
 	c := newEntitlementTestCore(t, entitlementPolicyStore(t, nil))
 
 	if _, err := c.register(context.Background(), protocol.RegisterRunnerRequest{
+		InstanceUID: "test-instance",
 		RunnerID:    "runner-1",
 		Concurrency: 1,
 		AuthToken:   "team-a-token",
@@ -97,6 +100,7 @@ func TestEmptyAllowedNamespacesMeansDefaultOnly(t *testing.T) {
 	}
 
 	_, err := c.register(context.Background(), protocol.RegisterRunnerRequest{
+		InstanceUID: "test-instance",
 		RunnerID:    "runner-2",
 		Concurrency: 1,
 		AuthToken:   "team-a-token",
@@ -115,6 +119,7 @@ func TestDisabledAuthenticatorStillAllowsAnyNamespace(t *testing.T) {
 	c := newEntitlementTestCore(t, DisabledAuthenticator{})
 
 	if _, err := c.register(context.Background(), protocol.RegisterRunnerRequest{
+		InstanceUID: "test-instance",
 		RunnerID:    "runner-1",
 		Concurrency: 1,
 		Namespaces:  []string{"team-b"},
@@ -134,6 +139,7 @@ func TestRegisterRejectsUndeclaredNamespaceWithoutGrant(t *testing.T) {
 	c := newEntitlementTestCore(t, entitlementPolicyStore(t, []string{"team-a"}))
 
 	_, err := c.register(context.Background(), protocol.RegisterRunnerRequest{
+		InstanceUID: "test-instance",
 		RunnerID:    "runner-1",
 		Concurrency: 1,
 		AuthToken:   "team-a-token",
@@ -152,6 +158,7 @@ func TestRegisterRejectsBlankNamespaceWithoutGrant(t *testing.T) {
 	c := newEntitlementTestCore(t, entitlementPolicyStore(t, []string{"team-a"}))
 
 	_, err := c.register(context.Background(), protocol.RegisterRunnerRequest{
+		InstanceUID: "test-instance",
 		RunnerID:    "runner-1",
 		Concurrency: 1,
 		AuthToken:   "team-a-token",
@@ -173,6 +180,7 @@ func TestRegisterUndeclaredNamespaceBackCompat(t *testing.T) {
 	c := newEntitlementTestCore(t, entitlementPolicyStore(t, nil))
 
 	if _, err := c.register(context.Background(), protocol.RegisterRunnerRequest{
+		InstanceUID: "test-instance",
 		RunnerID:    "runner-1",
 		Concurrency: 1,
 		AuthToken:   "team-a-token",
@@ -213,6 +221,7 @@ func TestNamespaceDenialIsObservable(t *testing.T) {
 	c.authObserver = obs
 
 	_, err := c.register(context.Background(), protocol.RegisterRunnerRequest{
+		InstanceUID: "test-instance",
 		RunnerID:    "runner-1",
 		Concurrency: 1,
 		AuthToken:   "team-a-token",

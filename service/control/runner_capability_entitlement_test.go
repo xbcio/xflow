@@ -31,6 +31,7 @@ func TestRegisterRejectsUnauthorizedCapability(t *testing.T) {
 	c := newEntitlementTestCore(t, capabilityEntitlementPolicyStore(t, []string{"xflow.function"}))
 
 	_, err := c.register(context.Background(), protocol.RegisterRunnerRequest{
+		InstanceUID:  "test-instance",
 		RunnerID:     "runner-1",
 		Concurrency:  1,
 		AuthToken:    "team-a-token",
@@ -49,6 +50,7 @@ func TestRegisterAcceptsAuthorizedCapabilities(t *testing.T) {
 	c := newEntitlementTestCore(t, capabilityEntitlementPolicyStore(t, []string{"xflow.function", "xflow.script"}))
 
 	if _, err := c.register(context.Background(), protocol.RegisterRunnerRequest{
+		InstanceUID: "test-instance",
 		RunnerID:    "runner-1",
 		Concurrency: 1,
 		AuthToken:   "team-a-token",
@@ -65,6 +67,7 @@ func TestRegisterWildcardPolicyAllowsDeclaredCapability(t *testing.T) {
 	c := newEntitlementTestCore(t, capabilityEntitlementPolicyStore(t, []string{"*"}))
 
 	if _, err := c.register(context.Background(), protocol.RegisterRunnerRequest{
+		InstanceUID:  "test-instance",
 		RunnerID:     "runner-1",
 		Concurrency:  1,
 		AuthToken:    "team-a-token",
@@ -80,6 +83,7 @@ func TestRegisterRejectsBlankCapability(t *testing.T) {
 			c := newEntitlementTestCore(t, capabilityEntitlementPolicyStore(t, []string{"*"}))
 
 			_, err := c.register(context.Background(), protocol.RegisterRunnerRequest{
+				InstanceUID:  "test-instance",
 				RunnerID:     "runner-1",
 				Concurrency:  1,
 				AuthToken:    "team-a-token",
@@ -102,6 +106,7 @@ func TestCapabilityDenialIsObservable(t *testing.T) {
 	c.authObserver = obs
 
 	_, err := c.register(context.Background(), protocol.RegisterRunnerRequest{
+		InstanceUID:  "test-instance",
 		RunnerID:     "runner-1",
 		Concurrency:  1,
 		AuthToken:    "team-a-token",

@@ -7,6 +7,7 @@ import (
 
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/service/protocol"
+	"github.com/xbcio/xflow/store"
 )
 
 // ErrEnrollRejected is the ONLY enrollment error that ever leaves this package.
@@ -22,25 +23,8 @@ var ErrEnrollRejected = errors.New("enrollment rejected")
 // lockout, and the fact that every rejection looks the same from outside.
 func (c *Core) Enroll(ctx context.Context, req protocol.EnrollRequest, info TransportInfo) (protocol.EnrollResponse, error) {
 	if c == nil || !EnrollDeclared(c.registrationCodes, c.issuedIdentities) {
-		// Enroll was not configured on this server. Same external error as a bad
-		// code: whether the feature is on is not something a caller needs to be
-		// told apart from a wrong guess.
 		return protocol.EnrollResponse{}, ErrEnrollRejected
 	}
-	// The limiter buckets by source. An empty SourceIP has no source to bucket
-	// by, and every enrollLimiter method (Allow/RecordFailure/RecordSuccess)
-	// short-circuits to a no-op on "" — so an empty SourceIP does not merge
-	// into a shared bucket, it silently bypasses the limiter entirely. This
-	// endpoint is unauthenticated and the limiter is its only brute-force
-	// control, so refuse rather than let any caller skip it.
-	//
-	// An empty SourceIP is not only "enroll was wired onto a transport that
-	// doesn't populate it" (a future caller passing a zero-value TransportInfo).
-	// sourceIPOf (the HTTP runner face's populator) can itself legitimately
-	// return "" — on an empty or malformed RemoteAddr, on a Unix domain socket
-	// listener (RemoteAddr commonly "" or "@"), or on a RemoteAddr with an
-	// empty host such as ":1234". Whatever the cause, there is no attributable
-	// source, so refuse.
 	if info.SourceIP == "" {
 		c.auditEnroll(ctx, "", false, "missing source ip", "", "")
 		return protocol.EnrollResponse{}, ErrEnrollRejected
@@ -52,83 +36,211 @@ func (c *Core) Enroll(ctx context.Context, req protocol.EnrollRequest, info Tran
 
 	code, err := c.registrationCodes.ResolveByPlaintext(ctx, req.RegistrationCode)
 	if err != nil {
-		// code.ID is empty here by construction — an unresolvable code has no id
-		// to attribute the attempt to. The record still lands, so a brute-force
-		// run is visible server-side.
 		c.enrollLimiter.RecordFailure(info.SourceIP)
 		c.auditEnroll(ctx, "", false, err.Error(), "", info.SourceIP)
 		return protocol.EnrollResponse{}, ErrEnrollRejected
 	}
-
-	if reason := enrollScopeReason(code, req); reason != "" {
+	if code.PoolID == "" {
 		c.enrollLimiter.RecordFailure(info.SourceIP)
-		c.auditEnroll(ctx, code.ID, false, reason, "", info.SourceIP)
+		c.auditEnroll(ctx, code.ID, false, "registration code has no pool", "", info.SourceIP)
 		return protocol.EnrollResponse{}, ErrEnrollRejected
 	}
+	return c.enrollPool(ctx, code, req, info.SourceIP)
+}
 
-	// Claim a use of the code BEFORE issuing anything. The order is deliberate
-	// and fail-closed: a crash between this and Issue burns one slot without
-	// enrolling a runner — visible in use_count and recoverable by minting a new
-	// code — whereas issuing first and counting after would silently overissue
-	// past the ceiling on exactly the crash the ceiling exists to survive.
-	//
-	// It runs after the scope check for the same reason it is not folded into
-	// ResolveByPlaintext: a request the scope check will reject must not spend
-	// one of the code's uses.
-	if err := c.registrationCodes.Consume(ctx, code.ID); err != nil {
-		// The reason is named in the audit trail and nowhere else; the caller
-		// gets the same ErrEnrollRejected every other rejection returns. That is
-		// not an existence oracle: reaching this line already proved the caller
-		// holds a live, in-scope code.
-		c.enrollLimiter.RecordFailure(info.SourceIP)
-		c.auditEnroll(ctx, code.ID, false, err.Error(), "", info.SourceIP)
+func (c *Core) enrollPool(ctx context.Context, code RegistrationCode, req protocol.EnrollRequest, sourceIP string) (protocol.EnrollResponse, error) {
+	reject := func(reason, runnerID string) (protocol.EnrollResponse, error) {
+		c.enrollLimiter.RecordFailure(sourceIP)
+		c.auditEnroll(ctx, code.ID, false, reason, runnerID, sourceIP)
 		return protocol.EnrollResponse{}, ErrEnrollRejected
 	}
-
-	// The runner id is generated here and nowhere else. req.ProposedRunnerID is
-	// read only for the audit trail; letting it decide the id would turn enroll
-	// into "become any runner you can name".
-	runnerID, token, err := GenerateRegistrationCode()
+	if c.pools == nil {
+		return reject("runner pool store not configured", "")
+	}
+	pool, err := c.pools.GetPool(ctx, code.PoolID, OwnerScope{All: true})
 	if err != nil {
-		c.auditEnroll(ctx, code.ID, false, "identity generation failed", "", info.SourceIP)
-		return protocol.EnrollResponse{}, ErrEnrollRejected
+		return reject("runner pool unavailable: "+err.Error(), "")
+	}
+	if pool.Paused {
+		return reject("runner pool paused", "")
+	}
+	if req.SystemID == "" {
+		return reject("system id required", "")
+	}
+	if req.InstanceUID == "" {
+		return reject("instance uid required", "")
+	}
+
+	effective, reason := poolEnrollRequest(pool, req)
+	if reason != "" {
+		return reject(reason, "")
 	}
 	prefix := c.enrollmentRunnerIDPrefixOrDefault()
-	runnerID = prefix + runnerID
-
-	now := time.Now().UTC()
-	issued := IssuedIdentity{
-		RunnerID:  runnerID,
-		TokenHash: HashSecret(token),
-		// The issued scope is the code's scope, narrowed to what the runner
-		// actually asked for. A runner that asks for one namespace does not get
-		// the code's full ceiling.
-		Scope:  issuedScopeWithPrefix(code, req, runnerID, prefix),
-		CodeID: code.ID,
-		// Snapshot the code's owner so revoking this identity later stays
-		// inside one tenant. Copied, not joined through CodeID: the identity
-		// outlives the code by design (see IssuedIdentity.Scope), so a deleted
-		// code must not erase who owns the runner.
-		OwnerNamespace: code.OwnerNamespace,
-		IssuedAt:       now,
+	candidateID, token, err := GenerateRegistrationCode()
+	if err != nil {
+		c.auditEnroll(ctx, code.ID, false, "identity generation failed", "", sourceIP)
+		return protocol.EnrollResponse{}, ErrEnrollRejected
 	}
-	// c.identityTTL == 0 (the default) leaves ExpiresAt zero, meaning "never
-	// expires" — the pre-feature behavior. Only WithIdentityTTL turns this on.
+	candidateID = prefix + candidateID
+	now := time.Now().UTC()
+	scope := pool.Policy()
+	scope.Name = candidateID
+	scope.IDPrefix = prefix
+	scope.AllowedNamespaces = append([]string(nil), effective.Namespaces...)
+	scope.AllowedNodeTypes = append([]string(nil), effective.NodeTypes...)
+
+	instanceResult, err := c.pools.EnrollInstance(ctx, store.EnrollInstanceRequest{
+		PoolID:            pool.ID,
+		SystemID:          req.SystemID,
+		InstanceUID:       req.InstanceUID,
+		CandidateRunnerID: candidateID,
+		Now:               now,
+	})
+	if err != nil {
+		return reject("runner instance enroll failed: "+err.Error(), "")
+	}
+	runnerID := instanceResult.Instance.RunnerID
+	scope.Name = runnerID
+
+	if instanceResult.Created {
+		if err := c.registrationCodes.Consume(ctx, code.ID); err != nil {
+			return reject(err.Error(), runnerID)
+		}
+		issued := c.newIssuedIdentity(code, scope, runnerID, token, pool.ID, now)
+		if err := c.issuedIdentities.Issue(ctx, issued); err != nil {
+			c.auditEnroll(ctx, code.ID, false, "identity persist failed", runnerID, sourceIP)
+			return protocol.EnrollResponse{}, ErrEnrollRejected
+		}
+		c.enrollLimiter.RecordSuccess(sourceIP)
+		c.auditEnroll(ctx, code.ID, true, "first", runnerID, sourceIP)
+		return enrollResponse(issued, token, effective.Namespaces, pool.Labels), nil
+	}
+
+	identity, found, err := c.issuedIdentities.Lookup(ctx, runnerID)
+	if err != nil {
+		c.auditEnroll(ctx, code.ID, false, "identity lookup failed", runnerID, sourceIP)
+		return protocol.EnrollResponse{}, ErrEnrollRejected
+	}
+	if !found {
+		issued := c.newIssuedIdentity(code, scope, runnerID, token, pool.ID, now)
+		if err := c.issuedIdentities.Issue(ctx, issued); err != nil {
+			c.auditEnroll(ctx, code.ID, false, "identity heal failed", runnerID, sourceIP)
+			return protocol.EnrollResponse{}, ErrEnrollRejected
+		}
+		c.enrollLimiter.RecordSuccess(sourceIP)
+		c.auditEnroll(ctx, code.ID, true, "healed", runnerID, sourceIP)
+		return enrollResponse(issued, token, effective.Namespaces, pool.Labels), nil
+	}
+	if !identity.RevokedAt.IsZero() {
+		return reject("issued identity revoked", runnerID)
+	}
+
+	generation := credentialGeneration(identity)
+	generation, err = c.issuedIdentities.RotateCredential(ctx, runnerID, generation, HashSecret(token), now.Add(c.rotationGrace))
+	if errors.Is(err, ErrCredentialGenerationConflict) {
+		identity, found, err = c.issuedIdentities.Lookup(ctx, runnerID)
+		if err == nil && found {
+			if !identity.RevokedAt.IsZero() {
+				err = ErrIssuedIdentityNotFound
+			} else {
+				generation, err = c.issuedIdentities.RotateCredential(ctx, runnerID, credentialGeneration(identity), HashSecret(token), now.Add(c.rotationGrace))
+			}
+		}
+	}
+	if err != nil || !found {
+		reason := "credential rotation failed"
+		if err != nil {
+			reason += ": " + err.Error()
+		}
+		return reject(reason, runnerID)
+	}
+	identity.CredentialGeneration = generation
+	c.enrollLimiter.RecordSuccess(sourceIP)
+	c.auditEnroll(ctx, code.ID, true, "reenroll", runnerID, sourceIP)
+	return enrollResponse(identity, token, effective.Namespaces, pool.Labels), nil
+}
+
+func (c *Core) newIssuedIdentity(code RegistrationCode, scope RunnerPolicy, runnerID, token, poolID string, now time.Time) IssuedIdentity {
+	issued := IssuedIdentity{
+		RunnerID:             runnerID,
+		TokenHash:            HashSecret(token),
+		Scope:                scope,
+		CodeID:               code.ID,
+		OwnerNamespace:       code.OwnerNamespace,
+		IssuedAt:             now,
+		PoolID:               poolID,
+		CredentialGeneration: 1,
+	}
 	if c.identityTTL > 0 {
 		issued.ExpiresAt = now.Add(c.identityTTL)
 	}
-	if err := c.issuedIdentities.Issue(ctx, issued); err != nil {
-		c.auditEnroll(ctx, code.ID, false, "identity persist failed", runnerID, info.SourceIP)
-		return protocol.EnrollResponse{}, ErrEnrollRejected
-	}
+	return issued
+}
 
-	c.enrollLimiter.RecordSuccess(info.SourceIP)
-	c.auditEnroll(ctx, code.ID, true, "", runnerID, info.SourceIP)
-	resp := protocol.EnrollResponse{RunnerID: runnerID, Token: token}
-	if !issued.ExpiresAt.IsZero() {
-		resp.ExpiresAt = issued.ExpiresAt.Format(time.RFC3339)
+func enrollResponse(identity IssuedIdentity, token string, namespaces []string, labels map[string]string) protocol.EnrollResponse {
+	resp := protocol.EnrollResponse{
+		RunnerID:             identity.RunnerID,
+		Token:                token,
+		Namespaces:           append([]string(nil), namespaces...),
+		CredentialGeneration: credentialGeneration(identity),
 	}
-	return resp, nil
+	if !identity.ExpiresAt.IsZero() {
+		resp.ExpiresAt = identity.ExpiresAt.Format(time.RFC3339)
+	}
+	if labels != nil {
+		resp.Labels = make(map[string]string, len(labels))
+		for key, value := range labels {
+			resp.Labels[key] = value
+		}
+	}
+	return resp
+}
+
+func credentialGeneration(identity IssuedIdentity) int64 {
+	if identity.CredentialGeneration == 0 {
+		return 1
+	}
+	return identity.CredentialGeneration
+}
+
+func poolEnrollRequest(pool RunnerPool, req protocol.EnrollRequest) (protocol.EnrollRequest, string) {
+	policy := pool.Policy()
+	if len(req.Namespaces) == 0 {
+		switch {
+		case pool.InheritNamespaces && concreteNamespaces(pool.AllowedNamespaces) && len(pool.AllowedNamespaces) <= store.MaxInheritedNamespaces:
+			req.Namespaces = append([]string(nil), pool.AllowedNamespaces...)
+		case concreteNamespaces(pool.AllowedNamespaces) && policy.AllowsNamespace(namespace.Default):
+			req.Namespaces = []string{string(namespace.Default)}
+		default:
+			return protocol.EnrollRequest{}, "namespaces required"
+		}
+	}
+	for _, ns := range req.Namespaces {
+		if err := namespace.Validate(namespace.Namespace(ns)); err != nil {
+			return protocol.EnrollRequest{}, "invalid namespace: " + ns
+		}
+		if !policy.AllowsNamespace(namespace.Namespace(ns)) {
+			return protocol.EnrollRequest{}, "namespace outside pool scope: " + ns
+		}
+	}
+	if len(req.NodeTypes) == 0 {
+		req.NodeTypes = append([]string(nil), pool.AllowedNodeTypes...)
+	}
+	for _, nodeType := range req.NodeTypes {
+		if !policy.Allows(nodeType) {
+			return protocol.EnrollRequest{}, "node type outside pool scope: " + nodeType
+		}
+	}
+	return req, ""
+}
+
+func concreteNamespaces(namespaces []string) bool {
+	for _, ns := range namespaces {
+		if ns == "*" {
+			return false
+		}
+	}
+	return true
 }
 
 // renewIdentity extends the caller's own issued identity by identityTTL.
@@ -191,29 +303,6 @@ func enrollScopeReason(code RegistrationCode, req protocol.EnrollRequest) string
 		}
 	}
 	return ""
-}
-
-// issuedScope narrows the code's ceiling to what the runner asked for. An empty
-// request list means "everything the code allows".
-func issuedScope(code RegistrationCode, req protocol.EnrollRequest, runnerID string) RunnerPolicy {
-	scope := code.Policy()
-	scope.Name = runnerID
-	if len(req.Namespaces) > 0 {
-		scope.AllowedNamespaces = append([]string(nil), req.Namespaces...)
-	}
-	if len(req.NodeTypes) > 0 {
-		scope.AllowedNodeTypes = append([]string(nil), req.NodeTypes...)
-	}
-	return scope
-}
-
-// issuedScopeWithPrefix adds the enrollment issuer's ID entitlement to the
-// narrowed scope. It is separate from issuedScope so the legacy narrowing
-// helper retains its established shape for callers that do not issue IDs.
-func issuedScopeWithPrefix(code RegistrationCode, req protocol.EnrollRequest, runnerID, prefix string) RunnerPolicy {
-	scope := issuedScope(code, req, runnerID)
-	scope.IDPrefix = prefix
-	return scope
 }
 
 // auditEnroll records the attempt. A failure to write the audit row must not

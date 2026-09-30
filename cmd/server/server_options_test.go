@@ -13,6 +13,7 @@ import (
 	xflowsdk "github.com/xbcio/xflow/sdk/xflow"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/protocol"
+	"github.com/xbcio/xflow/store"
 )
 
 // TestBuildServerOptionsReachesIdentityTTLEndToEnd is the reachability proof
@@ -54,9 +55,14 @@ func TestBuildServerOptionsReachesIdentityTTLEndToEnd(t *testing.T) {
 
 	codes := control.NewMemoryRegistrationCodeStore()
 	ids := control.NewMemoryIssuedIdentityStore()
+	pools := control.NewMemoryRunnerPoolStore()
+	if err := pools.CreatePool(context.Background(), store.RunnerPool{ID: "pool", Name: "pool", OwnerKind: store.PoolOwnerTenant, OwnerNamespace: "default", AllowedNamespaces: []string{"*"}, AllowedNodeTypes: []string{"*"}}); err != nil {
+		t.Fatal(err)
+	}
 	deps := serverDeps{
 		registrationCodeStore: codes,
 		issuedIdentityStore:   ids,
+		runnerPoolStore:       pools,
 	}
 
 	opts := buildServerOptions(cfg, deps)
@@ -73,7 +79,7 @@ func TestBuildServerOptionsReachesIdentityTTLEndToEnd(t *testing.T) {
 		t.Fatalf("GenerateRegistrationCode: %v", err)
 	}
 	if err := codes.Create(context.Background(), control.RegistrationCode{
-		ID: id, CodeHash: control.HashSecret(plaintext),
+		ID: id, CodeHash: control.HashSecret(plaintext), PoolID: "pool",
 		AllowedNamespaces: []string{"*"}, AllowedNodeTypes: []string{"*"},
 		CreatedAt: time.Unix(1700000000, 0).UTC(),
 	}); err != nil {
@@ -83,7 +89,7 @@ func TestBuildServerOptionsReachesIdentityTTLEndToEnd(t *testing.T) {
 	const ttl = 24 * time.Hour
 	before := time.Now().UTC()
 	resp, err := ts.Client().Post(ts.URL+protocol.EnrollPath, "application/json",
-		strings.NewReader(`{"registration_code":"`+plaintext+`","namespaces":["sas"]}`))
+		strings.NewReader(`{"registration_code":"`+plaintext+`","system_id":"host","instance_uid":"uid","namespaces":["sas"]}`))
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
@@ -130,9 +136,14 @@ func TestBuildServerOptionsWithoutIdentityTTLLeavesExpiresAtEmpty(t *testing.T) 
 
 	codes := control.NewMemoryRegistrationCodeStore()
 	ids := control.NewMemoryIssuedIdentityStore()
+	pools := control.NewMemoryRunnerPoolStore()
+	if err := pools.CreatePool(context.Background(), store.RunnerPool{ID: "pool", Name: "pool", OwnerKind: store.PoolOwnerTenant, OwnerNamespace: "default", AllowedNamespaces: []string{"*"}, AllowedNodeTypes: []string{"*"}}); err != nil {
+		t.Fatal(err)
+	}
 	deps := serverDeps{
 		registrationCodeStore: codes,
 		issuedIdentityStore:   ids,
+		runnerPoolStore:       pools,
 	}
 
 	opts := buildServerOptions(cfg, deps)
@@ -149,7 +160,7 @@ func TestBuildServerOptionsWithoutIdentityTTLLeavesExpiresAtEmpty(t *testing.T) 
 		t.Fatalf("GenerateRegistrationCode: %v", err)
 	}
 	if err := codes.Create(context.Background(), control.RegistrationCode{
-		ID: id, CodeHash: control.HashSecret(plaintext),
+		ID: id, CodeHash: control.HashSecret(plaintext), PoolID: "pool",
 		AllowedNamespaces: []string{"*"}, AllowedNodeTypes: []string{"*"},
 		CreatedAt: time.Unix(1700000000, 0).UTC(),
 	}); err != nil {
@@ -157,7 +168,7 @@ func TestBuildServerOptionsWithoutIdentityTTLLeavesExpiresAtEmpty(t *testing.T) 
 	}
 
 	resp, err := ts.Client().Post(ts.URL+protocol.EnrollPath, "application/json",
-		strings.NewReader(`{"registration_code":"`+plaintext+`","namespaces":["sas"]}`))
+		strings.NewReader(`{"registration_code":"`+plaintext+`","system_id":"host","instance_uid":"uid","namespaces":["sas"]}`))
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}

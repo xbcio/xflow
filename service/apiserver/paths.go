@@ -11,9 +11,8 @@ package apiserver
 const (
 	// PathWorkflows serves both POST (register a definition) and GET (the
 	// offset-paginated page list, spec §3.3) — the two are disambiguated by
-	// method, not by a separate path constant, exactly like
-	// PathManagementRegistrationCodes. Both hang off the principal's own
-	// namespace; neither reads a namespace from the request.
+	// method, not by a separate path constant. Both hang off the principal's
+	// own namespace; neither reads a namespace from the request.
 	PathWorkflows           = "/v1/workflows"
 	PathWorkflowByID        = "/v1/workflows/{id}"
 	PathWorkflowExecute     = "/v1/workflows/execute"
@@ -22,9 +21,7 @@ const (
 	// PathExecutions serves both POST (the entry-seed endpoint, runner protocol
 	// face, spec §0.1) and GET (the offset-paginated execution collection read,
 	// spec §3.3) — the two are disambiguated by method, not by a separate path
-	// constant, exactly like PathWorkflows and
-	// PathManagementRegistrationCodes. The two are not merely different verbs on
-	// one resource: POST is a runner admission mutation (OpExecutionSeed) and
+	// constant. The two are not merely different verbs on one resource: POST is a runner admission mutation (OpExecutionSeed) and
 	// GET is a tenant-scoped read (OpExecutionRead), and the authz wrapper takes
 	// that distinction from the registered pattern rather than from the request.
 	PathExecutions          = "/v1/executions"
@@ -61,12 +58,12 @@ const (
 	PathManagementDeadLetters  = "/v1/management/dead-letters/{execID}"
 	PathManagementDLReplay     = "/v1/management/dead-letters/{execID}/replay"
 
-	// PathManagementRegistrationCodes serves both POST (create) and GET (list) —
-	// the two are disambiguated by method, not by a separate path constant. See
-	// Task 8 addendum Ruling A: Produces is three Path* constants, not four.
-	PathManagementRegistrationCodes     = "/v1/management/registration-codes"
-	PathManagementRegistrationCodeByID  = "/v1/management/registration-codes/{id}"
-	PathManagementRegistrationCodeAudit = "/v1/management/registration-codes/{id}/audit"
+	PathManagementRunnerPools          = "/v1/management/runner-pools"
+	PathManagementRunnerPoolByID       = "/v1/management/runner-pools/{id}"
+	PathManagementRunnerPoolTokens     = "/v1/management/runner-pools/{id}/tokens"
+	PathManagementRunnerPoolTokenByID  = "/v1/management/runner-pools/{id}/tokens/{token_id}"
+	PathManagementRunnerPoolTokenAudit = "/v1/management/runner-pools/{id}/tokens/{token_id}/audit"
+	PathManagementRunnerPoolRunners    = "/v1/management/runner-pools/{id}/runners"
 
 	PathHealthz = "/healthz"
 	PathReadyz  = "/readyz"
@@ -119,9 +116,12 @@ var UserFacingPaths = []string{
 	PathManagementDeadLetters,
 	PathManagementDLReplay,
 
-	PathManagementRegistrationCodes,
-	PathManagementRegistrationCodeByID,
-	PathManagementRegistrationCodeAudit,
+	PathManagementRunnerPools,
+	PathManagementRunnerPoolByID,
+	PathManagementRunnerPoolTokens,
+	PathManagementRunnerPoolTokenByID,
+	PathManagementRunnerPoolTokenAudit,
+	PathManagementRunnerPoolRunners,
 
 	PathHealthz,
 	PathReadyz,

@@ -45,7 +45,7 @@
 //
 // # Transport shape
 //
-//	Primary transport: HTTP/1.1 JSON (all seven runner-facing routes)
+//	Primary transport: HTTP/1.1 JSON (every runner-facing route; RunnerFacingPaths is the list)
 //	   Register   POST /v1/runners/register
 //	   Heartbeat  POST /v1/runners/heartbeat
 //	   Poll       POST /v1/runners/poll
@@ -53,6 +53,9 @@
 //	   RenewLease POST /v1/runners/lease/renew   (HTTP only)
 //	   ActAck     POST /v1/runners/activation/ack
 //	   Metrics    POST /v1/runners/metrics        (HTTP only)
+//	   Enroll     POST /v1/runners/enroll         (HTTP only)
+//	   RenewID    POST /v1/runners/renew-identity (HTTP only)
+//	   Deregister POST /v1/runners/deregister     (HTTP only)
 //
 //	Unary gRPC transport (grpc_client.go + runnerpb/)
 //	   Register, Heartbeat, Poll, and Result are mapped. RenewLease,

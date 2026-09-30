@@ -26,6 +26,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strings"
@@ -100,6 +101,10 @@ type serverConfig struct {
 	// something an upgrade of this binary does to it. Meaningful only
 	// alongside --enroll.
 	runnerIdentityTTL time.Duration
+	// runnerInstanceIdleTTL and runnerInstancePruneInterval configure the
+	// leader-only pool-instance retirement worker. Zero keeps control defaults.
+	runnerInstanceIdleTTL       time.Duration
+	runnerInstancePruneInterval time.Duration
 	// registrationCodeTTL caps how long a registration code minted through the
 	// management API may live. Zero (the default) means no cap, for the same
 	// reason runnerIdentityTTL's zero does: an upgrade of this binary must not
@@ -111,6 +116,9 @@ type serverConfig struct {
 	// holder is clamped exactly like a tenant. Raising it is therefore an
 	// auditable act on this host, not a scope someone can be granted.
 	registrationCodeTTL time.Duration
+	// trustedProxies are the direct-peer CIDRs allowed to supply
+	// X-Forwarded-For to the runner protocol.
+	trustedProxies []netip.Prefix
 	// paramValidation is what workflow registration and inline execution do
 	// with ParamSpec issues: off, warn, or enforce. Empty (the default) means
 	// warn, so an upgrade of this binary never starts rejecting definitions
@@ -196,6 +204,7 @@ func main() {
 func parseServerConfig(args []string) (serverConfig, error) {
 	fs := flag.NewFlagSet("xflow-server", flag.ContinueOnError)
 	cfg := serverConfig{addr: ":8080", concurrency: 10}
+	var trustedProxyCIDRs string
 	fs.StringVar(&cfg.addr, "addr", cfg.addr, "HTTP listen address")
 	fs.StringVar(&cfg.grpcAddr, "grpc-addr", "", "gRPC Runner Protocol listen address (empty disables gRPC)")
 	fs.StringVar(&cfg.redis, "redis", "", "Redis address for Asynq backend (single-node; legacy compatible)")
@@ -218,8 +227,14 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	fs.BoolVar(&cfg.enroll, "enroll", false, "Enable the runner enrollment endpoint (/v1/runners/enroll)")
 	fs.DurationVar(&cfg.runnerIdentityTTL, "runner-identity-ttl", 0,
 		"How long an enrolled runner identity authenticates before it must renew (0 disables expiry)")
+	fs.DurationVar(&cfg.runnerInstanceIdleTTL, "runner-instance-idle-ttl", 0,
+		"How long a pool runner instance may be idle before leader-only pruning (0 = 24h default)")
+	fs.DurationVar(&cfg.runnerInstancePruneInterval, "runner-instance-prune-interval", 0,
+		"Leader-only pool runner instance prune cadence (0 = 1m default)")
 	fs.DurationVar(&cfg.registrationCodeTTL, "registration-code-ttl", 0,
 		"Ceiling on the lifetime of a registration code minted via the management API; also its default (0 disables expiry)")
+	fs.StringVar(&trustedProxyCIDRs, "trusted-proxies", "",
+		"Comma-separated CIDRs of reverse proxies trusted to supply X-Forwarded-For on runner requests")
 	var paramValidation string
 	fs.StringVar(&paramValidation, "param-validation", "",
 		"What workflow registration does with node param issues: off|warn|enforce (default warn; enforce rejects with 400 workflow_param_invalid)")
@@ -254,6 +269,11 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	if err := fs.Parse(args); err != nil {
 		return serverConfig{}, err
 	}
+	trustedProxies, err := parseTrustedProxyPrefixes(trustedProxyCIDRs)
+	if err != nil {
+		return serverConfig{}, err
+	}
+	cfg.trustedProxies = trustedProxies
 	switch cfg.mode {
 	case "dev", "production":
 		// valid
@@ -274,6 +294,12 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	}
 	if cfg.runnerIdentityTTL < 0 {
 		return serverConfig{}, fmt.Errorf("--runner-identity-ttl must not be negative")
+	}
+	if cfg.runnerInstanceIdleTTL < 0 {
+		return serverConfig{}, fmt.Errorf("--runner-instance-idle-ttl must not be negative")
+	}
+	if cfg.runnerInstancePruneInterval < 0 {
+		return serverConfig{}, fmt.Errorf("--runner-instance-prune-interval must not be negative")
 	}
 	if cfg.registrationCodeTTL < 0 {
 		return serverConfig{}, fmt.Errorf("--registration-code-ttl must not be negative")
@@ -394,6 +420,19 @@ func splitAddrs(s string) []string {
 	return addrs
 }
 
+func parseTrustedProxyPrefixes(raw string) ([]netip.Prefix, error) {
+	cidrs := splitAddrs(raw)
+	prefixes := make([]netip.Prefix, 0, len(cidrs))
+	for _, cidr := range cidrs {
+		prefix, err := netip.ParsePrefix(cidr)
+		if err != nil {
+			return nil, fmt.Errorf("--trusted-proxies contains invalid CIDR %q: %w", cidr, err)
+		}
+		prefixes = append(prefixes, prefix.Masked())
+	}
+	return prefixes, nil
+}
+
 // resolveBackendTarget decides which backend the server actually connects to.
 //
 // --memory is a safety net, not a preference: an operator who passes it is
@@ -432,6 +471,7 @@ type serverDeps struct {
 	auth                  control.Authenticator
 	registrationCodeStore control.RegistrationCodeStore
 	issuedIdentityStore   control.IssuedIdentityStore
+	runnerPoolStore       store.RunnerPoolStore
 	singleToken           bool
 	durableAudit          bool
 	supplyAtRest          *supplyenc.AtRest
@@ -471,6 +511,7 @@ func buildServerOptions(cfg serverConfig, deps serverDeps) []xflowsdk.ServerOpti
 		xflowsdk.WithServerHTTPAddr(cfg.addr),
 		xflowsdk.WithServerGRPCAddr(cfg.grpcAddr),
 		xflowsdk.WithServerTLS(cfg.tlsCert, cfg.tlsKey, cfg.tlsClientCA),
+		xflowsdk.WithServerTrustedProxies(cfg.trustedProxies),
 		xflowsdk.WithServerSupplyKeyRotation(cfg.supplyKeyRotation),
 		// The two runner-metrics flags are deliberately unbound:
 		// --enable-runner-metrics-proxy opens the inbox, --runner-metrics-interval
@@ -478,6 +519,7 @@ func buildServerOptions(cfg serverConfig, deps serverDeps) []xflowsdk.ServerOpti
 		// reporting fleet-wide, which is exactly the case an operator reaches
 		// for while the inbox is off.
 		xflowsdk.WithServerRunnerMetricsInterval(cfg.runnerMetricsInterval),
+		xflowsdk.WithServerRunnerInstancePruning(cfg.runnerInstanceIdleTTL, cfg.runnerInstancePruneInterval),
 	}
 	if cfg.enableRunnerMetricsProxy {
 		serverOpts = append(serverOpts, xflowsdk.WithServerRunnerMetricsProxy())
@@ -496,7 +538,10 @@ func buildServerOptions(cfg serverConfig, deps serverDeps) []xflowsdk.ServerOpti
 		serverOpts = append(serverOpts, xflowsdk.WithServerInsecureNoRunnerAuth())
 	}
 	if cfg.enroll {
-		serverOpts = append(serverOpts, xflowsdk.WithServerEnroll(deps.registrationCodeStore, deps.issuedIdentityStore))
+		serverOpts = append(serverOpts,
+			xflowsdk.WithServerEnroll(deps.registrationCodeStore, deps.issuedIdentityStore),
+			xflowsdk.WithServerRunnerPools(deps.runnerPoolStore),
+		)
 	}
 	// Unconditional: cfg.runnerIdentityTTL defaults to (and is validated to be
 	// no less than) zero, and zero has no observable effect unless --enroll is
@@ -685,13 +730,16 @@ func runServer(ctx context.Context, cfg serverConfig) error {
 	// after a restart.
 	var registrationCodeStore control.RegistrationCodeStore
 	var issuedIdentityStore control.IssuedIdentityStore
+	var runnerPoolStore store.RunnerPoolStore
 	if cfg.enroll {
 		if enrollDB != nil {
 			registrationCodeStore = sqlstore.NewRegistrationCodeStore(enrollDB)
 			issuedIdentityStore = sqlstore.NewIssuedIdentityStore(enrollDB)
+			runnerPoolStore = sqlstore.NewRunnerPoolStore(enrollDB)
 		} else {
 			registrationCodeStore = control.NewMemoryRegistrationCodeStore()
 			issuedIdentityStore = control.NewMemoryIssuedIdentityStore()
+			runnerPoolStore = control.NewMemoryRunnerPoolStore()
 		}
 	}
 
@@ -706,6 +754,7 @@ func runServer(ctx context.Context, cfg serverConfig) error {
 		auth:                  auth,
 		registrationCodeStore: registrationCodeStore,
 		issuedIdentityStore:   issuedIdentityStore,
+		runnerPoolStore:       runnerPoolStore,
 		singleToken:           singleToken,
 		durableAudit:          durableAudit,
 		supplyAtRest:          supplyAtRest,

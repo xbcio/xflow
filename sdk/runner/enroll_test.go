@@ -13,6 +13,7 @@ import (
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/protocol"
+	"github.com/xbcio/xflow/store"
 )
 
 func enrollTestConfig(srvURL string) runnerConfig {
@@ -38,7 +39,7 @@ func TestResolveRunnerIdentityPrefersTheStoredIdentity(t *testing.T) {
 	}
 
 	cfg := enrollTestConfig(srv.URL)
-	cfg.registrationCode = "code-that-must-not-be-used"
+	cfg.registrationToken = "code-that-must-not-be-used"
 
 	got, err := resolveRunnerIdentity(context.Background(), cfg, store)
 	if err != nil {
@@ -56,19 +57,19 @@ func TestResolveRunnerIdentityEnrollsAndPersists(t *testing.T) {
 			t.Errorf("path = %q, want %q", r.URL.Path, protocol.EnrollPath)
 		}
 		if got := r.Header.Get("Authorization"); got != "" {
-			t.Errorf("enroll carried Authorization %q; the registration code is the only credential it has", got)
+			t.Errorf("enroll carried Authorization %q; the registration token is the only credential it has", got)
 		}
 		if err := json.NewDecoder(r.Body).Decode(&seen); err != nil {
 			t.Errorf("decode request: %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(protocol.EnrollResponse{RunnerID: "issued-3", Token: "issued-token"})
+		_ = json.NewEncoder(w).Encode(protocol.EnrollResponse{Namespaces: []string{"default"}, RunnerID: "issued-3", Token: "issued-token"})
 	}))
 	defer srv.Close()
 
 	store := &ephemeralIdentityStore{}
 	cfg := enrollTestConfig(srv.URL)
-	cfg.registrationCode = "rc-abc"
+	cfg.registrationToken = "rc-abc"
 
 	got, err := resolveRunnerIdentity(context.Background(), cfg, store)
 	if err != nil {
@@ -77,8 +78,8 @@ func TestResolveRunnerIdentityEnrollsAndPersists(t *testing.T) {
 	if got.runnerID != "issued-3" || got.token != "issued-token" {
 		t.Fatalf("resolved identity = (%q, %q), want (issued-3, issued-token)", got.runnerID, got.token)
 	}
-	if seen.RegistrationCode != "rc-abc" || seen.ProposedRunnerID != "proposed-1" {
-		t.Fatalf("enroll request = %+v, want the code and the proposed ID carried through", seen)
+	if seen.RegistrationCode != "rc-abc" || seen.ProposedRunnerID != "" {
+		t.Fatalf("enroll request = %+v, want the token without a proposed ID", seen)
 	}
 	if len(seen.NodeTypes) != 2 || seen.NodeTypes[0] != "xflow.function" || seen.NodeTypes[1] != "xflow.group" {
 		t.Fatalf("enroll node types = %v, want [xflow.function xflow.group]", seen.NodeTypes)
@@ -119,12 +120,19 @@ func TestEnrollmentIssuedPolicyAllowsSDKGroupRegistration(t *testing.T) {
 	ctx := context.Background()
 	codes := control.NewMemoryRegistrationCodeStore()
 	ids := control.NewMemoryIssuedIdentityStore()
+	pools := control.NewMemoryRunnerPoolStore()
+	if err := pools.CreatePool(ctx, store.RunnerPool{
+		ID: "sdk-test-pool", Name: "sdk-test", OwnerKind: store.PoolOwnerTenant, OwnerNamespace: "default",
+		AllowedNamespaces: []string{"default"}, AllowedNodeTypes: []string{"xflow.function", engine.GroupNodeType}, CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreatePool: %v", err)
+	}
 	codeID, plaintext, err := control.GenerateRegistrationCode()
 	if err != nil {
 		t.Fatalf("GenerateRegistrationCode: %v", err)
 	}
 	if err := codes.Create(ctx, control.RegistrationCode{
-		ID: codeID, CodeHash: control.HashSecret(plaintext), CreatedAt: time.Now().UTC(),
+		ID: codeID, CodeHash: control.HashSecret(plaintext), PoolID: "sdk-test-pool", CreatedAt: time.Now().UTC(),
 		AllowedNamespaces: []string{"default"},
 		AllowedNodeTypes:  []string{"xflow.function", engine.GroupNodeType},
 	}); err != nil {
@@ -134,6 +142,7 @@ func TestEnrollmentIssuedPolicyAllowsSDKGroupRegistration(t *testing.T) {
 		Backend:           backendlocal.New(),
 		RegistrationCodes: codes,
 		IssuedIdentities:  ids,
+		RunnerPools:       pools,
 	})
 	if err != nil {
 		t.Fatalf("NewControlPlane: %v", err)
@@ -142,7 +151,7 @@ func TestEnrollmentIssuedPolicyAllowsSDKGroupRegistration(t *testing.T) {
 	defer ts.Close()
 
 	cfg := enrollTestConfig(ts.URL)
-	cfg.registrationCode = plaintext
+	cfg.registrationToken = plaintext
 	resolved, err := resolveRunnerIdentity(ctx, cfg, &ephemeralIdentityStore{})
 	if err != nil {
 		t.Fatalf("resolveRunnerIdentity: %v", err)
@@ -156,6 +165,7 @@ func TestEnrollmentIssuedPolicyAllowsSDKGroupRegistration(t *testing.T) {
 	}
 
 	_, err = protocol.NewClient(ts.URL, ts.Client()).WithToken(resolved.token).Register(ctx, protocol.RegisterRunnerRequest{
+		InstanceUID: "test-instance",
 		RunnerID:    resolved.runnerID,
 		Concurrency: 1,
 		Namespaces:  []string{"default"},
@@ -178,7 +188,7 @@ func TestResolveRunnerIdentityWithoutCodeLeavesTheStaticConfigAlone(t *testing.T
 		t.Fatalf("resolveRunnerIdentity with no stored identity and no code: %v", err)
 	}
 	if got.runnerID != "proposed-1" || got.token != "static-token" {
-		t.Fatalf("config was rewritten to (%q, %q); with no registration code the static --token path must be untouched",
+		t.Fatalf("config was rewritten to (%q, %q); with no registration token the static --token path must be untouched",
 			got.runnerID, got.token)
 	}
 }
@@ -186,15 +196,15 @@ func TestResolveRunnerIdentityWithoutCodeLeavesTheStaticConfigAlone(t *testing.T
 func TestResolveRunnerIdentitySurfacesEnrollFailure(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
-		_, _ = w.Write([]byte("registration code already used"))
+		_, _ = w.Write([]byte("registration token already used"))
 	}))
 	defer srv.Close()
 
 	cfg := enrollTestConfig(srv.URL)
-	cfg.registrationCode = "spent"
+	cfg.registrationToken = "spent"
 
 	if _, err := resolveRunnerIdentity(context.Background(), cfg, &ephemeralIdentityStore{}); err == nil {
-		t.Fatal("resolveRunnerIdentity returned nil error on a rejected registration code")
+		t.Fatal("resolveRunnerIdentity returned nil error on a rejected registration token")
 	}
 }
 
@@ -216,7 +226,7 @@ func TestResolveRunnerIdentityRefusesPlaintextEnrollUnderGRPCTransport(t *testin
 	defer srv.Close()
 
 	cfg := grpcEnrollTestConfig(srv.URL)
-	cfg.registrationCode = "rc-abc"
+	cfg.registrationToken = "rc-abc"
 
 	_, err := resolveRunnerIdentity(context.Background(), cfg, &ephemeralIdentityStore{})
 	if err == nil {
@@ -226,7 +236,7 @@ func TestResolveRunnerIdentityRefusesPlaintextEnrollUnderGRPCTransport(t *testin
 		t.Fatalf("error %q does not name --allow-plaintext", err.Error())
 	}
 	if strings.Contains(err.Error(), "rc-abc") {
-		t.Fatalf("error %q echoes the registration code", err.Error())
+		t.Fatalf("error %q echoes the registration token", err.Error())
 	}
 }
 
@@ -237,12 +247,12 @@ func TestResolveRunnerIdentityAllowsPlaintextEnrollUnderGRPCTransportWithOptIn(t
 			t.Errorf("decode request: %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(protocol.EnrollResponse{RunnerID: "issued-5", Token: "issued-token-5"})
+		_ = json.NewEncoder(w).Encode(protocol.EnrollResponse{Namespaces: []string{"default"}, RunnerID: "issued-5", Token: "issued-token-5"})
 	}))
 	defer srv.Close()
 
 	cfg := grpcEnrollTestConfig(srv.URL)
-	cfg.registrationCode = "rc-abc"
+	cfg.registrationToken = "rc-abc"
 	cfg.allowPlaintext = true
 
 	got, err := resolveRunnerIdentity(context.Background(), cfg, &ephemeralIdentityStore{})
@@ -263,10 +273,10 @@ func TestResolveRunnerIdentityGRPCWithStaticTokenIgnoresPlaintextServerURL(t *te
 
 	got, err := resolveRunnerIdentity(context.Background(), cfg, &ephemeralIdentityStore{})
 	if err != nil {
-		t.Fatalf("resolveRunnerIdentity with a static token and no registration code: %v", err)
+		t.Fatalf("resolveRunnerIdentity with a static token and no registration token: %v", err)
 	}
 	if got.runnerID != "proposed-1" || got.token != "static-token" {
-		t.Fatalf("config was rewritten to (%q, %q); with no registration code the gate must not fire",
+		t.Fatalf("config was rewritten to (%q, %q); with no registration token the gate must not fire",
 			got.runnerID, got.token)
 	}
 }

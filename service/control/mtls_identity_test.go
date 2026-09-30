@@ -205,6 +205,7 @@ func registerOverTLS(t *testing.T, auth Authenticator, ca *x509.Certificate, cli
 func postRegister(t *testing.T, client *http.Client, baseURL string) int {
 	t.Helper()
 	body, err := json.Marshal(protocol.RegisterRunnerRequest{
+		InstanceUID:  "test-instance",
 		RunnerID:     "runner-1",
 		Concurrency:  1,
 		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},

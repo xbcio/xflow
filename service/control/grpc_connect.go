@@ -47,12 +47,16 @@ func (s *GRPCServer) connect(stream protocol.RunnerConnectStream) error {
 	}
 
 	hello := first.Hello
+	if hello.InstanceUID == "" {
+		return runnerStatus(ErrInstanceUIDRequired)
+	}
 	registered, err := s.core.register(ctx, protocol.RegisterRunnerRequest{
 		RunnerID:     hello.RunnerID,
 		Concurrency:  hello.Concurrency,
 		Capabilities: hello.Capabilities,
 		Labels:       hello.Labels,
 		Namespaces:   hello.Namespaces,
+		InstanceUID:  hello.InstanceUID,
 		AuthToken:    authToken,
 	}, transport)
 	if err != nil {

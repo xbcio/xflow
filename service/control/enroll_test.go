@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/service/protocol"
+	"github.com/xbcio/xflow/store"
 )
 
 // enrollFixture builds a Core wired only for enroll, plus a live code.
@@ -25,6 +26,14 @@ func enrollFixture(t *testing.T, namespaces, nodeTypes []string) (*Core, *Memory
 	t.Helper()
 	codes := NewMemoryRegistrationCodeStore()
 	ids := NewMemoryIssuedIdentityStore()
+	pools := NewMemoryRunnerPoolStore()
+	const poolID = "test-pool"
+	if err := pools.CreatePool(context.Background(), RunnerPool{
+		ID: poolID, Name: "test", OwnerKind: store.PoolOwnerTenant, OwnerNamespace: "test",
+		AllowedNamespaces: namespaces, AllowedNodeTypes: nodeTypes, CreatedAt: time.Unix(1700000000, 0).UTC(),
+	}); err != nil {
+		t.Fatalf("CreatePool: %v", err)
+	}
 	id, plaintext, err := GenerateRegistrationCode()
 	if err != nil {
 		t.Fatalf("GenerateRegistrationCode: %v", err)
@@ -32,6 +41,7 @@ func enrollFixture(t *testing.T, namespaces, nodeTypes []string) (*Core, *Memory
 	err = codes.Create(context.Background(), RegistrationCode{
 		ID:                id,
 		CodeHash:          HashSecret(plaintext),
+		PoolID:            poolID,
 		AllowedNamespaces: namespaces,
 		AllowedNodeTypes:  nodeTypes,
 		CreatedAt:         time.Unix(1700000000, 0).UTC(),
@@ -43,13 +53,14 @@ func enrollFixture(t *testing.T, namespaces, nodeTypes []string) (*Core, *Memory
 		registrationCodes: codes,
 		issuedIdentities:  ids,
 		enrollLimiter:     newEnrollLimiter(defaultEnrollFailureLimit, defaultEnrollLockout),
+		pools:             pools,
 	}
 	return core, codes, ids, plaintext
 }
 
 func TestEnrollIssuesAServerGeneratedIdentity(t *testing.T) {
 	core, _, ids, code := enrollFixture(t, []string{"sas"}, []string{"kafka.trigger"})
-	resp, err := core.Enroll(context.Background(), protocol.EnrollRequest{
+	resp, err := core.Enroll(context.Background(), protocol.EnrollRequest{SystemID: "test-system", InstanceUID: "test-instance",
 		RegistrationCode: code,
 		ProposedRunnerID: "attacker-chosen-id",
 		Namespaces:       []string{"sas"},
@@ -101,6 +112,13 @@ func TestEnrollSnapshotsTheCodeOwnerNamespace(t *testing.T) {
 	ctx := context.Background()
 	codes := NewMemoryRegistrationCodeStore()
 	ids := NewMemoryIssuedIdentityStore()
+	pools := NewMemoryRunnerPoolStore()
+	if err := pools.CreatePool(ctx, RunnerPool{
+		ID: "owner-pool", Name: "owner", OwnerKind: store.PoolOwnerTenant, OwnerNamespace: "nsA",
+		AllowedNamespaces: []string{"sas"}, AllowedNodeTypes: []string{"kafka.trigger"}, CreatedAt: time.Unix(1700000000, 0).UTC(),
+	}); err != nil {
+		t.Fatalf("CreatePool: %v", err)
+	}
 	codeID, plaintext, err := GenerateRegistrationCode()
 	if err != nil {
 		t.Fatalf("GenerateRegistrationCode: %v", err)
@@ -108,6 +126,7 @@ func TestEnrollSnapshotsTheCodeOwnerNamespace(t *testing.T) {
 	err = codes.Create(ctx, RegistrationCode{
 		ID:                codeID,
 		CodeHash:          HashSecret(plaintext),
+		PoolID:            "owner-pool",
 		OwnerNamespace:    "nsA",
 		AllowedNamespaces: []string{"sas"},
 		AllowedNodeTypes:  []string{"kafka.trigger"},
@@ -120,9 +139,10 @@ func TestEnrollSnapshotsTheCodeOwnerNamespace(t *testing.T) {
 		registrationCodes: codes,
 		issuedIdentities:  ids,
 		enrollLimiter:     newEnrollLimiter(defaultEnrollFailureLimit, defaultEnrollLockout),
+		pools:             pools,
 	}
 
-	resp, err := core.Enroll(ctx, protocol.EnrollRequest{
+	resp, err := core.Enroll(ctx, protocol.EnrollRequest{SystemID: "test-system", InstanceUID: "test-instance",
 		RegistrationCode: plaintext,
 		Namespaces:       []string{"sas"},
 		NodeTypes:        []string{"kafka.trigger"},
@@ -146,7 +166,7 @@ func TestEnrollRejectionsAreIndistinguishable(t *testing.T) {
 	// Unknown / revoked / out-of-scope must produce the SAME external error.
 	// Anything else lets a prober enumerate which codes exist (spec §2.3.4).
 	unknownCore, _, _, _ := enrollFixture(t, []string{"sas"}, []string{"*"})
-	_, unknownErr := unknownCore.Enroll(context.Background(), protocol.EnrollRequest{
+	_, unknownErr := unknownCore.Enroll(context.Background(), protocol.EnrollRequest{SystemID: "test-system", InstanceUID: "test-instance",
 		RegistrationCode: "no-such-code", Namespaces: []string{"sas"},
 	}, TransportInfo{SourceIP: "10.0.0.1"})
 
@@ -155,12 +175,12 @@ func TestEnrollRejectionsAreIndistinguishable(t *testing.T) {
 	if err := revokedCodes.Revoke(context.Background(), list[0].ID, OwnerScope{All: true}); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
-	_, revokedErr := revokedCore.Enroll(context.Background(), protocol.EnrollRequest{
+	_, revokedErr := revokedCore.Enroll(context.Background(), protocol.EnrollRequest{SystemID: "test-system", InstanceUID: "test-instance",
 		RegistrationCode: revokedCode, Namespaces: []string{"sas"},
 	}, TransportInfo{SourceIP: "10.0.0.2"})
 
 	scopeCore, _, _, scopeCode := enrollFixture(t, []string{"sas"}, []string{"*"})
-	_, scopeErr := scopeCore.Enroll(context.Background(), protocol.EnrollRequest{
+	_, scopeErr := scopeCore.Enroll(context.Background(), protocol.EnrollRequest{SystemID: "test-system", InstanceUID: "test-instance",
 		RegistrationCode: scopeCode, Namespaces: []string{"someone-elses-namespace"},
 	}, TransportInfo{SourceIP: "10.0.0.3"})
 
@@ -187,12 +207,12 @@ func TestEnrollAuditsBothOutcomesWithSourceIP(t *testing.T) {
 	list, _ := codes.List(context.Background(), OwnerScope{All: true})
 	codeID := list[0].ID
 
-	if _, err := core.Enroll(context.Background(), protocol.EnrollRequest{
+	if _, err := core.Enroll(context.Background(), protocol.EnrollRequest{SystemID: "test-system", InstanceUID: "test-instance",
 		RegistrationCode: code, Namespaces: []string{"nope"},
 	}, TransportInfo{SourceIP: "10.0.0.9"}); err == nil {
 		t.Fatal("out-of-scope enroll must fail")
 	}
-	if _, err := core.Enroll(context.Background(), protocol.EnrollRequest{
+	if _, err := core.Enroll(context.Background(), protocol.EnrollRequest{SystemID: "test-system", InstanceUID: "test-instance",
 		RegistrationCode: code, Namespaces: []string{"sas"},
 	}, TransportInfo{SourceIP: "10.0.0.9"}); err != nil {
 		t.Fatalf("in-scope enroll must succeed: %v", err)
@@ -261,7 +281,7 @@ func TestEnrollLockoutBlocksBeforeTouchingTheStore(t *testing.T) {
 
 	const ip = "10.0.0.7"
 	for i := 0; i < defaultEnrollFailureLimit; i++ {
-		if _, err := core.Enroll(context.Background(), protocol.EnrollRequest{
+		if _, err := core.Enroll(context.Background(), protocol.EnrollRequest{SystemID: "test-system", InstanceUID: "test-instance",
 			RegistrationCode: "wrong", Namespaces: []string{"sas"},
 		}, TransportInfo{SourceIP: ip}); err == nil {
 			t.Fatalf("attempt %d unexpectedly succeeded", i+1)
@@ -276,7 +296,7 @@ func TestEnrollLockoutBlocksBeforeTouchingTheStore(t *testing.T) {
 	// The next attempt is rejected by the limiter. It must look identical to a
 	// normal rejection — a distinct "you are locked out" reply is itself a
 	// signal that the prior guesses were being counted.
-	_, err = core.Enroll(context.Background(), protocol.EnrollRequest{
+	_, err = core.Enroll(context.Background(), protocol.EnrollRequest{SystemID: "test-system", InstanceUID: "test-instance",
 		RegistrationCode: "wrong", Namespaces: []string{"sas"},
 	}, TransportInfo{SourceIP: ip})
 	if !errors.Is(err, ErrEnrollRejected) {
@@ -292,7 +312,7 @@ func TestEnrollLockoutBlocksBeforeTouchingTheStore(t *testing.T) {
 	// source is locked out. Without this, none of the assertions above can
 	// tell "the limiter blocked it" apart from "the code was wrong anyway":
 	// every attempt so far used the code "wrong".
-	_, err = core.Enroll(context.Background(), protocol.EnrollRequest{
+	_, err = core.Enroll(context.Background(), protocol.EnrollRequest{SystemID: "test-system", InstanceUID: "test-instance",
 		RegistrationCode: plaintext, Namespaces: []string{"sas"},
 	}, TransportInfo{SourceIP: ip})
 	if !errors.Is(err, ErrEnrollRejected) {
@@ -304,7 +324,7 @@ func TestEnrollLockoutBlocksBeforeTouchingTheStore(t *testing.T) {
 	}
 
 	// A different source is unaffected.
-	if _, err := core.Enroll(context.Background(), protocol.EnrollRequest{
+	if _, err := core.Enroll(context.Background(), protocol.EnrollRequest{SystemID: "test-system", InstanceUID: "test-instance",
 		RegistrationCode: "wrong", Namespaces: []string{"sas"},
 	}, TransportInfo{SourceIP: "10.0.0.8"}); !errors.Is(err, ErrEnrollRejected) {
 		t.Fatalf("unrelated source err = %v, want the same ErrEnrollRejected", err)
@@ -313,7 +333,7 @@ func TestEnrollLockoutBlocksBeforeTouchingTheStore(t *testing.T) {
 
 func TestEnrollDisabledWhenNoCodeStoreConfigured(t *testing.T) {
 	core := &Core{}
-	if _, err := core.Enroll(context.Background(), protocol.EnrollRequest{
+	if _, err := core.Enroll(context.Background(), protocol.EnrollRequest{SystemID: "test-system", InstanceUID: "test-instance",
 		RegistrationCode: "anything",
 	}, TransportInfo{SourceIP: "10.0.0.1"}); !errors.Is(err, ErrEnrollRejected) {
 		t.Fatalf("err = %v, want ErrEnrollRejected when enroll is not configured", err)
@@ -353,7 +373,7 @@ func TestEnrollRejectsEmptySourceIP(t *testing.T) {
 	// faces populate SourceIP. If enroll is ever wired onto another one, this must
 	// fail loudly instead of silently sharing a bucket.
 	core, _, _, plaintext := enrollFixture(t, []string{"sas"}, []string{"*"})
-	_, err := core.Enroll(context.Background(), protocol.EnrollRequest{
+	_, err := core.Enroll(context.Background(), protocol.EnrollRequest{SystemID: "test-system", InstanceUID: "test-instance",
 		RegistrationCode: plaintext,
 		Namespaces:       []string{"sas"},
 	}, TransportInfo{})

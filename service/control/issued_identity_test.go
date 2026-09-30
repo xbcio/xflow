@@ -16,7 +16,7 @@ import (
 
 func issueTestIdentity(t *testing.T, st IssuedIdentityStore, runnerID, token string, scope RunnerPolicy) {
 	t.Helper()
-	err := st.Issue(context.Background(), IssuedIdentity{
+	err := st.Issue(context.Background(), IssuedIdentity{PoolID: "test-pool",
 		RunnerID:  runnerID,
 		TokenHash: HashSecret(token),
 		Scope:     scope,
@@ -49,6 +49,21 @@ func TestIssuedIdentityAuthenticatorAcceptsTheIssuedToken(t *testing.T) {
 	}
 }
 
+func TestIssuedIdentityAuthenticatorRejectsIdentityWithoutPool(t *testing.T) {
+	ids := NewMemoryIssuedIdentityStore()
+	const token = "poolless-token"
+	if err := ids.Issue(context.Background(), IssuedIdentity{
+		RunnerID: "runner-poolless", TokenHash: HashSecret(token),
+		Scope: RunnerPolicy{AllowedNodeTypes: []string{"*"}},
+	}); err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	_, err := NewIssuedIdentityAuthenticator(ids).AuthenticateOngoing("runner-poolless", token, TransportInfo{})
+	if !errors.Is(err, ErrAuthUnknownToken) || !strings.Contains(err.Error(), "identity has no pool") {
+		t.Fatalf("AuthenticateOngoing error = %v, want ErrAuthUnknownToken with pool reason", err)
+	}
+}
+
 func TestIssuedIdentityAuthenticatorRejectsWrongCredentials(t *testing.T) {
 	st := NewMemoryIssuedIdentityStore()
 	issueTestIdentity(t, st, "runner-1", "tok-secret", RunnerPolicy{Name: "n"})
@@ -76,7 +91,7 @@ func TestIssuedIdentityAuthenticatorRejectsWrongCredentials(t *testing.T) {
 func TestMemoryIssuedIdentityStoreReturnsDefensiveCopies(t *testing.T) {
 	ctx := context.Background()
 	st := NewMemoryIssuedIdentityStore()
-	id := IssuedIdentity{
+	id := IssuedIdentity{PoolID: "test-pool",
 		RunnerID:  "runner-1",
 		TokenHash: HashSecret("tok-secret"),
 		Scope:     RunnerPolicy{Name: "n", AllowedNodeTypes: []string{"kafka.trigger"}, AllowedNamespaces: []string{"sas"}},
@@ -329,7 +344,7 @@ func TestMultiAuthenticatorMembersReturnsACopy(t *testing.T) {
 func TestMemoryIssuedIdentityStoreClonePreservesNilSlices(t *testing.T) {
 	ctx := context.Background()
 	st := NewMemoryIssuedIdentityStore()
-	id := IssuedIdentity{
+	id := IssuedIdentity{PoolID: "test-pool",
 		RunnerID:  "runner-1",
 		TokenHash: HashSecret("tok-secret"),
 		Scope:     RunnerPolicy{Name: "n"}, // AllowedNodeTypes / AllowedNamespaces left nil
@@ -383,8 +398,11 @@ func TestMemoryIssuedIdentityStoreSatisfiesContract(t *testing.T) {
 type failingIssuedIdentityStore struct{ err error }
 
 func (s failingIssuedIdentityStore) Issue(context.Context, IssuedIdentity) error { return s.err }
+func (s failingIssuedIdentityStore) RotateCredential(context.Context, string, int64, [32]byte, time.Time) (int64, error) {
+	return 0, s.err
+}
 func (s failingIssuedIdentityStore) Lookup(context.Context, string) (IssuedIdentity, bool, error) {
-	return IssuedIdentity{}, false, s.err
+	return IssuedIdentity{PoolID: "test-pool"}, false, s.err
 }
 func (s failingIssuedIdentityStore) List(context.Context) ([]IssuedIdentity, error) {
 	return nil, s.err
@@ -433,7 +451,7 @@ func TestAuthenticateRejectsExpiredAndRevokedIdenticallyToCallers(t *testing.T) 
 	// substring of "unknown auth token" and would make that check unfailable.
 	const secret = "s3cret-runner-token"
 
-	live := IssuedIdentity{
+	live := IssuedIdentity{PoolID: "test-pool",
 		RunnerID: "r", TokenHash: HashSecret(secret), CodeID: "c",
 		IssuedAt: base.Add(-time.Hour), ExpiresAt: base.Add(time.Hour),
 	}
@@ -737,7 +755,7 @@ func TestAuthDeniedLogNamesTheLifecycleReason(t *testing.T) {
 	// short token would make the "token never reaches the log" check unfailable.
 	const secret = "s3cret-runner-token"
 
-	live := IssuedIdentity{
+	live := IssuedIdentity{PoolID: "test-pool",
 		RunnerID: "runner-1", TokenHash: HashSecret(secret), CodeID: "c",
 		IssuedAt: base.Add(-time.Hour), ExpiresAt: base.Add(time.Hour),
 	}
@@ -855,5 +873,41 @@ func TestAuthDeniedLogNamesTheLifecycleReason(t *testing.T) {
 			t.Fatalf("unknown-token rejection logs %q, which already contains %q; "+
 				"the lifecycle reasons are then indistinguishable from it", unknownText, word)
 		}
+	}
+}
+
+func TestIssuedIdentityAuthenticatorAcceptsPreviousTokenOnlyDuringGrace(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 9, 29, 2, 0, 0, 0, time.UTC)
+	st := NewMemoryIssuedIdentityStore()
+	identity := IssuedIdentity{PoolID: "test-pool",
+		RunnerID: "runner-rotated", TokenHash: HashSecret("old-token"),
+		Scope:                RunnerPolicy{Name: "rotated", AllowedNodeTypes: []string{"xflow.function"}},
+		CredentialGeneration: 1, IssuedAt: base.Add(-time.Hour),
+	}
+	if err := st.Issue(ctx, identity); err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	graceEnd := base.Add(time.Minute)
+	generation, err := st.RotateCredential(ctx, identity.RunnerID, 1, HashSecret("new-token"), graceEnd)
+	if err != nil || generation != 2 {
+		t.Fatalf("RotateCredential = (%d, %v), want (2, nil)", generation, err)
+	}
+
+	auth := NewIssuedIdentityAuthenticator(st)
+	auth.now = func() time.Time { return base }
+	if _, err := auth.AuthenticateOngoing(identity.RunnerID, "old-token", TransportInfo{}); err != nil {
+		t.Fatalf("old token during grace: %v", err)
+	}
+	if _, err := auth.AuthenticateRegister(identity.RunnerID, "new-token", TransportInfo{}); err != nil {
+		t.Fatalf("new token during grace: %v", err)
+	}
+
+	auth.now = func() time.Time { return graceEnd }
+	if _, err := auth.AuthenticateOngoing(identity.RunnerID, "old-token", TransportInfo{}); !errors.Is(err, ErrAuthUnknownToken) {
+		t.Fatalf("old token at grace deadline = %v, want ErrAuthUnknownToken", err)
+	}
+	if _, err := auth.AuthenticateOngoing(identity.RunnerID, "new-token", TransportInfo{}); err != nil {
+		t.Fatalf("new token after grace: %v", err)
 	}
 }

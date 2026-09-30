@@ -458,7 +458,7 @@ func TestDecideIdentityRenewalRefusesPlaintextWithoutOptIn(t *testing.T) {
 	if warnMsg == "" {
 		t.Fatal("warnMsg is empty, want an actionable message naming --allow-plaintext")
 	}
-	if strings.Contains(warnMsg, "refusing to enroll") || strings.Contains(warnMsg, "registration code") {
+	if strings.Contains(warnMsg, "refusing to enroll") || strings.Contains(warnMsg, "registration token") {
 		t.Fatalf("warnMsg = %q surfaces validateEnrollTransportSecurity's own enroll-specific wording verbatim", warnMsg)
 	}
 	if !strings.Contains(warnMsg, "allow-plaintext") {

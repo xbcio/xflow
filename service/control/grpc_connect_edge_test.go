@@ -50,6 +50,7 @@ func TestGRPCConnectAuthenticatesHelloFromBearerMetadata(t *testing.T) {
 		// HelloFrame has no token-bearing payload field. A frame alone must not
 		// bypass the configured authenticator.
 		if err := stream.Send(protocol.RunnerFrame{Hello: &protocol.HelloFrame{
+			InstanceUID:  "test-instance",
 			RunnerID:     "runner-connect-no-metadata",
 			Concurrency:  1,
 			Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
@@ -76,6 +77,7 @@ func TestGRPCConnectAuthenticatesHelloFromBearerMetadata(t *testing.T) {
 		defer func() { _ = stream.Close() }()
 
 		if err := stream.Send(protocol.RunnerFrame{Hello: &protocol.HelloFrame{
+			InstanceUID:  "test-instance",
 			RunnerID:     "runner-connect-metadata",
 			Concurrency:  1,
 			Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
@@ -110,6 +112,7 @@ func TestGRPCConnectControlObservationActiveWorkersDoesNotOverflowInt(t *testing
 	defer func() { _ = stream.Close() }()
 
 	if err := stream.Send(protocol.RunnerFrame{Hello: &protocol.HelloFrame{
+		InstanceUID: "test-instance",
 		RunnerID:    "runner-connect-active-workers-overflow",
 		Concurrency: 1,
 	}}); err != nil {
@@ -159,5 +162,22 @@ func TestGRPCConnectControlObservationActiveWorkersDoesNotOverflowInt(t *testing
 			t.Fatalf("maximum ActiveWorkers was neither rejected nor safely recorded before deadline: %v", ctx.Err())
 		case <-ticker.C:
 		}
+	}
+}
+
+func TestGRPCConnectHelloRequiresInstanceUID(t *testing.T) {
+	client := startGRPCTestServer(t, &fakeControlEngine{}, NewMemoryRunnerDirectory())
+	stream, err := client.Connect(context.Background())
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if err := stream.Send(protocol.RunnerFrame{Hello: &protocol.HelloFrame{
+		RunnerID: "runner-no-instance", Concurrency: 1,
+	}}); err != nil {
+		t.Fatalf("Send HELLO: %v", err)
+	}
+	_, err = stream.Recv()
+	if got := status.Code(err); got != codes.InvalidArgument {
+		t.Fatalf("Recv status = %v (%v), want InvalidArgument", got, err)
 	}
 }

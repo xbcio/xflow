@@ -18,8 +18,10 @@ import (
 )
 
 type runnerConfigFile struct {
-	Runner struct {
+	RegistrationToken *string `yaml:"registration_token"`
+	Runner            struct {
 		ID           *string           `yaml:"id"`
+		SystemID     *string           `yaml:"system_id"`
 		Concurrency  *int              `yaml:"concurrency"`
 		Capabilities *[]string         `yaml:"capabilities"`
 		Labels       map[string]string `yaml:"labels"`
@@ -102,7 +104,8 @@ func defaultRunnerConfig() runnerConfig {
 		serverURL:                "http://localhost:8080",
 		transport:                transportGRPC,
 		grpcTarget:               "localhost:9090",
-		runnerID:                 fmt.Sprintf("runner-%d", os.Getpid()),
+		runnerID:                 defaultRunnerID(),
+		systemID:                 defaultRunnerSystemID(),
 		concurrency:              1,
 		capRaw:                   "xflow.function",
 		capabilities:             parseCapabilities("xflow.function"),
@@ -152,6 +155,9 @@ func loadRunnerConfigFromBytesForProfile(data []byte, profile Profile) (runnerCo
 		return runnerConfig{}, err
 	}
 
+	if file.RegistrationToken != nil {
+		cfg.registrationToken = *file.RegistrationToken
+	}
 	if file.Server.URL != nil {
 		cfg.serverURL = *file.Server.URL
 	}
@@ -163,6 +169,10 @@ func loadRunnerConfigFromBytesForProfile(data []byte, profile Profile) (runnerCo
 	}
 	if file.Runner.ID != nil {
 		cfg.runnerID = *file.Runner.ID
+		cfg.runnerIDExplicit = true
+	}
+	if file.Runner.SystemID != nil {
+		cfg.systemID = *file.Runner.SystemID
 	}
 	if file.Runner.Concurrency != nil {
 		cfg.concurrency = *file.Runner.Concurrency
@@ -288,6 +298,7 @@ var runnerConfigIssueOrder = []string{
 	"transport",
 	"grpc-target",
 	"id",
+	"system-id",
 	"concurrency",
 	"browser-cdp-max-contexts",
 	"cap",
@@ -320,6 +331,10 @@ func applyLookupEnvOverrides(cfg runnerConfig, lookupEnv func(string) (string, b
 	}
 	if v, ok := lookupEnv("XFLOW_RUNNER_ID"); ok {
 		cfg.runnerID = v
+		cfg.runnerIDExplicit = true
+	}
+	if v, ok := lookupEnv("XFLOW_RUNNER_SYSTEM_ID"); ok {
+		cfg.systemID = v
 	}
 	if v, ok := lookupEnv("XFLOW_RUNNER_CONCURRENCY"); ok {
 		n, err := strconv.Atoi(v)
@@ -395,8 +410,8 @@ func applyLookupEnvOverrides(cfg runnerConfig, lookupEnv func(string) (string, b
 	if v, ok := lookupEnv("XFLOW_RUNNER_IDENTITY_FILE"); ok {
 		cfg.identityFile = v
 	}
-	if v, ok := lookupEnv("XFLOW_RUNNER_REGISTRATION_CODE"); ok {
-		cfg.registrationCode = v
+	if v, ok := lookupEnv("XFLOW_RUNNER_REGISTRATION_TOKEN"); ok {
+		cfg.registrationToken = v
 	}
 	if v, ok := lookupEnv("XFLOW_RUNNER_ALLOW_PLAINTEXT"); ok {
 		b, err := strconv.ParseBool(v)
@@ -451,6 +466,17 @@ func parseLabels(raw []string) map[string]string {
 		labels[key] = value
 	}
 	return labels
+}
+
+func defaultRunnerSystemID() string {
+	if podName := strings.TrimSpace(os.Getenv("POD_NAME")); podName != "" {
+		return podName
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(hostname)
 }
 
 // detectRunnerLabels derives labels from the process environment so a fleet is
@@ -621,7 +647,7 @@ func validateRunnerConfig(cfg runnerConfig) error {
 		return err
 	}
 
-	// A configured registration code means this run *may*, at enrollment time,
+	// A configured registration token means this run *may*, at enrollment time,
 	// send an HTTP request carrying that code regardless of --transport (see
 	// validateEnrollTransportSecurity). A token-requiring profile also needs to
 	// inspect its identity store when no static token is present: a persisted
@@ -629,13 +655,13 @@ func validateRunnerConfig(cfg runnerConfig) error {
 	// resolveRunnerIdentity's precedence (stored identity, then registration
 	// code, then static configuration) without doing enrollment/network I/O.
 	hasStaticToken := strings.TrimSpace(cfg.token) != ""
-	hasRegistrationCode := strings.TrimSpace(cfg.registrationCode) != ""
+	hasRegistrationToken := strings.TrimSpace(cfg.registrationToken) != ""
 	// A profile that constrains the runner ID must load the stored identity
 	// even when a static token is present: resolveRunnerIdentity always gives
 	// a stored identity precedence, so that is the ID that will actually reach
 	// the control plane. Without this lookup, `config validate` could bless a
 	// static ID while a non-conforming stored ID was about to be used instead.
-	needStoredIdentity := hasRegistrationCode || (cfg.profile.RequireToken && !hasStaticToken) ||
+	needStoredIdentity := hasRegistrationToken || (cfg.profile.RequireToken && !hasStaticToken) ||
 		cfg.profile.RequiredRunnerIDPrefix != ""
 	storedIdentity := false
 	var stored identity
@@ -651,19 +677,22 @@ func validateRunnerConfig(cfg runnerConfig) error {
 			if err := validateProfileRunnerID(cfg.profile, stored.RunnerID); err != nil {
 				return err
 			}
-		case !hasRegistrationCode:
+		case !hasRegistrationToken:
 			// With no stored identity or enrollment, cfg.runnerID is final.
 			if err := validateProfileRunnerID(cfg.profile, cfg.runnerID); err != nil {
 				return err
 			}
 		}
 	}
-	if hasRegistrationCode && !storedIdentity {
+	if hasRegistrationToken && !storedIdentity {
+		if cfg.runnerIDExplicit {
+			return errors.New("runner id must not be configured when enrolling with a registration token")
+		}
 		if err := validateEnrollTransportSecurity(cfg); err != nil {
 			return err
 		}
 	}
-	if cfg.profile.RequireToken && !hasStaticToken && !storedIdentity && !hasRegistrationCode {
+	if cfg.profile.RequireToken && !hasStaticToken && !storedIdentity && !hasRegistrationToken {
 		return requireProfileToken(cfg)
 	}
 
@@ -845,6 +874,11 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 	if base.changed["id"] {
 		clearRunnerConfigIssue(&cfg, "id")
 		cfg.runnerID = base.runnerID
+		cfg.runnerIDExplicit = true
+	}
+	if base.changed["system-id"] {
+		clearRunnerConfigIssue(&cfg, "system-id")
+		cfg.systemID = base.systemID
 	}
 	if base.changed["concurrency"] {
 		clearRunnerConfigIssue(&cfg, "concurrency")
@@ -917,8 +951,8 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 	if base.changed["identity-file"] {
 		cfg.identityFile = base.identityFile
 	}
-	if base.changed["registration-code"] {
-		cfg.registrationCode = base.registrationCode
+	if base.changed["registration-token"] {
+		cfg.registrationToken = base.registrationToken
 	}
 	if base.changed["allow-plaintext"] {
 		clearRunnerConfigIssue(&cfg, "allow-plaintext")
@@ -1007,6 +1041,8 @@ func sampleRunnerConfigYAML(profile Profile) string {
 func genericSampleRunnerConfigYAML() string {
 	return `runner:
   id: "runner-1"
+  # Stable pool instance key; defaults to POD_NAME, then hostname.
+  # system_id: "runner-pod-1"
   concurrency: 2
   labels:
     mode: "remote"
@@ -1061,10 +1097,12 @@ browser_cdp:
   queue_timeout: "5s"
   connect_timeout: "5s"
 
+# registration_token: "REPLACE-ME" # enroll only when no identity is stored
+
 # identity:
 #   # "ephemeral" (default) keeps the enrolled identity in memory only;
 #   # "file" persists it so a restart reuses the same runner ID and token
-#   # instead of consuming another registration code.
+#   # instead of consuming another registration token.
 #   store: "file"
 #   file: "/var/lib/xflow/runner-identity.json"
 

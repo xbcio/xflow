@@ -210,13 +210,16 @@ func (x *RunnerDrainObservation) GetActiveActivations() uint32 {
 }
 
 type RegisterRequest struct {
-	state         protoimpl.MessageState     `protogen:"open.v1"`
-	RunnerId      string                     `protobuf:"bytes,1,opt,name=runner_id,json=runnerId,proto3" json:"runner_id,omitempty"`
-	Concurrency   int32                      `protobuf:"varint,2,opt,name=concurrency,proto3" json:"concurrency,omitempty"`
-	Capabilities  []*Capability              `protobuf:"bytes,3,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
-	Labels        map[string]string          `protobuf:"bytes,4,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	Namespaces    []string                   `protobuf:"bytes,5,rep,name=namespaces,proto3" json:"namespaces,omitempty"`
-	Activations   []*ActivationInventoryItem `protobuf:"bytes,6,rep,name=activations,proto3" json:"activations,omitempty"`
+	state        protoimpl.MessageState     `protogen:"open.v1"`
+	RunnerId     string                     `protobuf:"bytes,1,opt,name=runner_id,json=runnerId,proto3" json:"runner_id,omitempty"`
+	Concurrency  int32                      `protobuf:"varint,2,opt,name=concurrency,proto3" json:"concurrency,omitempty"`
+	Capabilities []*Capability              `protobuf:"bytes,3,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
+	Labels       map[string]string          `protobuf:"bytes,4,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Namespaces   []string                   `protobuf:"bytes,5,rep,name=namespaces,proto3" json:"namespaces,omitempty"`
+	Activations  []*ActivationInventoryItem `protobuf:"bytes,6,rep,name=activations,proto3" json:"activations,omitempty"`
+	// instance_uid identifies the registering process instance; see
+	// protocol.RegisterRunnerRequest.InstanceUID.
+	InstanceUid   string `protobuf:"bytes,7,opt,name=instance_uid,json=instanceUid,proto3" json:"instance_uid,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -291,6 +294,13 @@ func (x *RegisterRequest) GetActivations() []*ActivationInventoryItem {
 		return x.Activations
 	}
 	return nil
+}
+
+func (x *RegisterRequest) GetInstanceUid() string {
+	if x != nil {
+		return x.InstanceUid
+	}
+	return ""
 }
 
 // ActivationInventoryItem reports a single trigger activation the runner is
@@ -1028,12 +1038,14 @@ func (*RunnerFrame_Bye) isRunnerFrame_Frame() {}
 func (*RunnerFrame_ControlObservation) isRunnerFrame_Frame() {}
 
 type HelloFrame struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RunnerId      string                 `protobuf:"bytes,1,opt,name=runner_id,json=runnerId,proto3" json:"runner_id,omitempty"`
-	Concurrency   int32                  `protobuf:"varint,2,opt,name=concurrency,proto3" json:"concurrency,omitempty"`
-	Capabilities  []*Capability          `protobuf:"bytes,3,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
-	Labels        map[string]string      `protobuf:"bytes,4,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	Namespaces    []string               `protobuf:"bytes,5,rep,name=namespaces,proto3" json:"namespaces,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	RunnerId     string                 `protobuf:"bytes,1,opt,name=runner_id,json=runnerId,proto3" json:"runner_id,omitempty"`
+	Concurrency  int32                  `protobuf:"varint,2,opt,name=concurrency,proto3" json:"concurrency,omitempty"`
+	Capabilities []*Capability          `protobuf:"bytes,3,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
+	Labels       map[string]string      `protobuf:"bytes,4,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Namespaces   []string               `protobuf:"bytes,5,rep,name=namespaces,proto3" json:"namespaces,omitempty"`
+	// instance_uid: see RegisterRequest.instance_uid.
+	InstanceUid   string `protobuf:"bytes,6,opt,name=instance_uid,json=instanceUid,proto3" json:"instance_uid,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1101,6 +1113,13 @@ func (x *HelloFrame) GetNamespaces() []string {
 		return x.Namespaces
 	}
 	return nil
+}
+
+func (x *HelloFrame) GetInstanceUid() string {
+	if x != nil {
+		return x.InstanceUid
+	}
+	return ""
 }
 
 type ResultFrame struct {
@@ -1729,7 +1748,7 @@ const file_service_protocol_runnerpb_runner_proto_rawDesc = "" +
 	"generation\x18\x01 \x01(\x04R\n" +
 	"generation\x12#\n" +
 	"\rrecovery_only\x18\x02 \x01(\bR\frecoveryOnly\x12-\n" +
-	"\x12active_activations\x18\x03 \x01(\rR\x11activeActivations\"\xfe\x02\n" +
+	"\x12active_activations\x18\x03 \x01(\rR\x11activeActivations\"\xa1\x03\n" +
 	"\x0fRegisterRequest\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12 \n" +
 	"\vconcurrency\x18\x02 \x01(\x05R\vconcurrency\x12?\n" +
@@ -1738,7 +1757,8 @@ const file_service_protocol_runnerpb_runner_proto_rawDesc = "" +
 	"\n" +
 	"namespaces\x18\x05 \x03(\tR\n" +
 	"namespaces\x12J\n" +
-	"\vactivations\x18\x06 \x03(\v2(.xflow.runner.v1.ActivationInventoryItemR\vactivations\x1a9\n" +
+	"\vactivations\x18\x06 \x03(\v2(.xflow.runner.v1.ActivationInventoryItemR\vactivations\x12!\n" +
+	"\finstance_uid\x18\a \x01(\tR\vinstanceUid\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xce\x01\n" +
@@ -1817,7 +1837,7 @@ const file_service_protocol_runnerpb_runner_proto_rawDesc = "" +
 	"\x06result\x18\x02 \x01(\v2\x1c.xflow.runner.v1.ResultFrameH\x00R\x06result\x12-\n" +
 	"\x03bye\x18\x03 \x01(\v2\x19.xflow.runner.v1.ByeFrameH\x00R\x03bye\x12[\n" +
 	"\x13control_observation\x18\x04 \x01(\v2(.xflow.runner.v1.ControlObservationFrameH\x00R\x12controlObservationB\a\n" +
-	"\x05frame\"\xa8\x02\n" +
+	"\x05frame\"\xcb\x02\n" +
 	"\n" +
 	"HelloFrame\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12 \n" +
@@ -1826,7 +1846,8 @@ const file_service_protocol_runnerpb_runner_proto_rawDesc = "" +
 	"\x06labels\x18\x04 \x03(\v2'.xflow.runner.v1.HelloFrame.LabelsEntryR\x06labels\x12\x1e\n" +
 	"\n" +
 	"namespaces\x18\x05 \x03(\tR\n" +
-	"namespaces\x1a9\n" +
+	"namespaces\x12!\n" +
+	"\finstance_uid\x18\x06 \x01(\tR\vinstanceUid\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"h\n" +

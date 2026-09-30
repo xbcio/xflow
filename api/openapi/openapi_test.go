@@ -312,35 +312,16 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 			},
 		},
 		{
-			name:   "registration code create request",
-			schema: "RegistrationCodeCreateRequest",
-			value: apiserver.ExampleRegistrationCodeCreateRequest(
-				[]string{"team-a"}, []string{"http.request"}, ptrInt64(86400),
-			),
-		},
-		{
 			name:   "registration code create response",
-			schema: "RegistrationCodeCreateResponse",
-			value: apiserver.ExampleRegistrationCodeCreateResponse(
+			schema: "RunnerPoolTokenCreateResponse",
+			value: apiserver.ExampleRunnerPoolTokenCreateResponse(
 				"rc-01H8XG", "plaintext-once", now.Add(24*time.Hour), 3,
 			),
 		},
 		{
-			// The absent-lifetime shape. expires_in_seconds is a pointer with
-			// omitempty precisely so "take the deployment default" and "never
-			// expires" (an explicit 0) stay distinguishable on the wire; a
-			// non-pointer field would collapse them and this case would look
-			// identical to the one above with 0.
-			name:   "registration code create request (no lifetime)",
-			schema: "RegistrationCodeCreateRequest",
-			value: apiserver.ExampleRegistrationCodeCreateRequest(
-				[]string{"team-a"}, []string{"http.request"}, nil,
-			),
-		},
-		{
 			name:   "registration code view",
-			schema: "RegistrationCodeView",
-			value: apiserver.ExampleRegistrationCodeView(
+			schema: "RunnerPoolTokenView",
+			value: apiserver.ExampleRunnerPoolTokenView(
 				"rc-01H8XG", now, now.Add(24*time.Hour),
 				[]string{"team-a"}, []string{"http.request"}, false,
 			),
@@ -351,8 +332,8 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 			// include it — a schema that demands expires_at would reject every
 			// code minted on a deployment without a lifetime ceiling.
 			name:   "registration code view (never expires)",
-			schema: "RegistrationCodeView",
-			value: apiserver.ExampleRegistrationCodeView(
+			schema: "RunnerPoolTokenView",
+			value: apiserver.ExampleRunnerPoolTokenView(
 				"rc-01H8XH", now, time.Time{},
 				[]string{"team-a"}, []string{"http.request"}, true,
 			),
@@ -362,13 +343,13 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 			// create handler persists allowed_node_types verbatim and the
 			// field is optional, so a code minted without it holds a nil slice
 			// — which marshals to `null`, not `[]`, and the array schemas
-			// reject it. Both fields are in RegistrationCodeView's required
+			// reject it. Both fields are in RunnerPoolTokenView's required
 			// list, so dropping the projection's normalization fails this case
 			// twice over: null against `type: array`, and (once the key is
 			// gone entirely) a missing required property.
 			name:   "registration code view (nil scope lists)",
-			schema: "RegistrationCodeView",
-			value: apiserver.ExampleRegistrationCodeView(
+			schema: "RunnerPoolTokenView",
+			value: apiserver.ExampleRunnerPoolTokenView(
 				"rc-01H8XJ", now, time.Time{}, nil, nil, false,
 			),
 		},
@@ -675,9 +656,6 @@ func TestContractPathsAreAllRegistered(t *testing.T) {
 		}
 	}
 }
-
-// ptrInt64 exists because a *int64 field cannot be given a literal inline.
-func ptrInt64(v int64) *int64 { return &v }
 
 func TestRunnerDrainSnapshotContract(t *testing.T) {
 	schemaRef := loadSpec(t).Components.Schemas["RunnerDrainSnapshot"]

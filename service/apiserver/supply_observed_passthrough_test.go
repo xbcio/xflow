@@ -57,6 +57,7 @@ func TestSupplyObservedPassthroughReturnsTheLiveSink(t *testing.T) {
 
 	// 1) 注册一个 runner，拿它的 session id。
 	regBody, _ := json.Marshal(protocol.RegisterRunnerRequest{
+		InstanceUID: "test-instance",
 		RunnerID:    "runner-1",
 		Concurrency: 1,
 	})

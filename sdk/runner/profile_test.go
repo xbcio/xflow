@@ -148,7 +148,7 @@ func TestProfileRequiresRunnerIDPrefixAcrossConfigAndIdentitySources(t *testing.
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(protocol.EnrollResponse{RunnerID: "wrong-runner", Token: "issued-token"})
+			_ = json.NewEncoder(w).Encode(protocol.EnrollResponse{Namespaces: []string{"default"}, RunnerID: "wrong-runner", Token: "issued-token"})
 		}))
 		defer server.Close()
 
@@ -164,7 +164,7 @@ func TestProfileRequiresRunnerIDPrefixAcrossConfigAndIdentitySources(t *testing.
 			out:     &bytes.Buffer{},
 			err:     &bytes.Buffer{},
 		}, profile,
-			"run", "--server", server.URL, "--allow-plaintext", "--registration-code", "one-time-code",
+			"run", "--server", server.URL, "--allow-plaintext", "--registration-token", "one-time-code",
 			"--identity-store", "file", "--identity-file", identityPath)
 		if err == nil || !strings.Contains(err.Error(), `requires runner ID prefix "dedicated-runner-"`) {
 			t.Fatalf("error = %v, want enrollment identity prefix error", err)
@@ -304,7 +304,7 @@ func TestProfileRequiresCredentialBeforeRunnerCreation(t *testing.T) {
 		t.Fatalf("error = %v, want missing token error", err)
 	}
 	if constructed {
-		t.Fatal("runner was constructed without a static token, stored identity, or registration code")
+		t.Fatal("runner was constructed without a static token, stored identity, or registration token")
 	}
 }
 
@@ -327,8 +327,8 @@ func TestProfileConfigValidateAcceptsEveryCredentialSource(t *testing.T) {
 			args: []string{"--identity-store", "file", "--identity-file", identityPath},
 		},
 		{
-			name: "registration code",
-			args: []string{"--registration-code", "one-time-code"},
+			name: "registration token",
+			args: []string{"--registration-token", "one-time-code"},
 		},
 	}
 	for _, tt := range tests {
@@ -378,10 +378,10 @@ func TestProfileRunEnrollsBeforeRunnerCreation(t *testing.T) {
 			t.Errorf("decode enrollment request: %v", err)
 		}
 		if req.RegistrationCode != "one-time-code" {
-			t.Errorf("registration code = %q, want one-time-code", req.RegistrationCode)
+			t.Errorf("registration token = %q, want one-time-code", req.RegistrationCode)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(protocol.EnrollResponse{RunnerID: "issued-runner", Token: "issued-token"})
+		_ = json.NewEncoder(w).Encode(protocol.EnrollResponse{Namespaces: []string{"default"}, RunnerID: "issued-runner", Token: "issued-token"})
 	}))
 	defer server.Close()
 
@@ -398,9 +398,9 @@ func TestProfileRunEnrollsBeforeRunnerCreation(t *testing.T) {
 		out:     &bytes.Buffer{},
 		err:     &bytes.Buffer{},
 	}, testWorkloadProfile(),
-		"run", "--server", server.URL, "--allow-plaintext", "--registration-code", "one-time-code")
+		"run", "--server", server.URL, "--allow-plaintext", "--registration-token", "one-time-code")
 	if err != nil {
-		t.Fatalf("run with registration code: %v", err)
+		t.Fatalf("run with registration token: %v", err)
 	}
 }
 
@@ -507,9 +507,9 @@ func TestProfileVerifyUsesResolvedStoredAndEnrolledIdentities(t *testing.T) {
 			wantToken: "stored-verify-token",
 		},
 		{
-			name: "registration code",
+			name: "registration token",
 			setup: func(_ *testing.T, _ string) []string {
-				return []string{"--registration-code", "verify-code"}
+				return []string{"--registration-token", "verify-code"}
 			},
 			wantID:    "issued-verify",
 			wantToken: "issued-verify-token",
@@ -521,11 +521,11 @@ func TestProfileVerifyUsesResolvedStoredAndEnrolledIdentities(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case protocol.EnrollPath:
-					if tt.name != "registration code" {
+					if tt.name != "registration token" {
 						t.Errorf("stored identity unexpectedly enrolled")
 					}
 					w.Header().Set("Content-Type", "application/json")
-					_ = json.NewEncoder(w).Encode(protocol.EnrollResponse{RunnerID: "issued-verify", Token: "issued-verify-token"})
+					_ = json.NewEncoder(w).Encode(protocol.EnrollResponse{Namespaces: []string{"default"}, RunnerID: "issued-verify", Token: "issued-verify-token"})
 				case protocol.RegisterRunnerPath:
 					if got, want := r.Header.Get("Authorization"), "Bearer "+tt.wantToken; got != want {
 						t.Errorf("Authorization = %q, want %q", got, want)

@@ -19,6 +19,7 @@ func TestGRPCConnectProjectsControlAndObservations(t *testing.T) {
 		t.Fatalf("Connect() error = %v", err)
 	}
 	if err := stream.Send(protocol.RunnerFrame{Hello: &protocol.HelloFrame{
+		InstanceUID: "test-instance",
 		RunnerID:    "runner-connect",
 		Concurrency: 2,
 	}}); err != nil {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -74,8 +75,12 @@ type serverConfig struct {
 	// the shared "is enrollment on" predicate this pair feeds both here (the
 	// posture gate) and in control.NewControlPlane (composing the
 	// authenticator, mounting the endpoint).
-	registrationCodes control.RegistrationCodeStore
-	issuedIdentities  control.IssuedIdentityStore
+	registrationCodes           control.RegistrationCodeStore
+	issuedIdentities            control.IssuedIdentityStore
+	runnerPools                 store.RunnerPoolStore
+	runnerInstanceIdleTTL       time.Duration
+	runnerInstancePruneInterval time.Duration
+	trustedProxies              []netip.Prefix
 	// identityTTL is how long a newly enrolled identity authenticates before
 	// it must renew. Zero means never expires. Set only by
 	// WithServerIdentityTTL.
@@ -163,6 +168,32 @@ func WithServerEnroll(codes control.RegistrationCodeStore, ids control.IssuedIde
 	}
 }
 
+// WithServerRunnerPools installs the store shared by pool management and
+// pool-bound enrollment. Nil leaves RunnerPool management unavailable and
+// pool-bound registration codes rejected.
+func WithServerRunnerPools(pools store.RunnerPoolStore) ServerOption {
+	return func(c *serverConfig) { c.runnerPools = pools }
+}
+
+// WithServerRunnerInstancePruning configures the leader-only lifecycle worker
+// that retires idle pool instances. Zero values keep the control-plane defaults
+// (24 hours idle, one-minute sweep cadence).
+func WithServerRunnerInstancePruning(idleTTL, interval time.Duration) ServerOption {
+	return func(c *serverConfig) {
+		c.runnerInstanceIdleTTL = idleTTL
+		c.runnerInstancePruneInterval = interval
+	}
+}
+
+// WithServerTrustedProxies configures the direct-peer CIDRs allowed to supply
+// X-Forwarded-For on runner-protocol HTTP requests. Empty preserves the legacy
+// RemoteAddr-only behavior.
+func WithServerTrustedProxies(prefixes []netip.Prefix) ServerOption {
+	return func(c *serverConfig) {
+		c.trustedProxies = append([]netip.Prefix(nil), prefixes...)
+	}
+}
+
 // WithServerEnrollmentRunnerIDPrefix sets the prefix for server-issued
 // enrollment runner IDs. An empty value preserves the default "runner-".
 // Invalid non-empty values make NewServer return an error before it exposes a
@@ -182,15 +213,9 @@ func WithServerIdentityTTL(d time.Duration) ServerOption {
 	return func(c *serverConfig) { c.identityTTL = d }
 }
 
-// WithServerRegistrationCodeTTL caps how long a registration code minted
-// through the management API may live. Zero (the default) means no cap, which
-// is the pre-feature behavior: an upgrade must not silently start expiring
-// codes an operator mints the day they deploy it.
-//
-// The cap is a ceiling, not just a default — a create request may ask for a
-// shorter lifetime but a longer one is refused, and the refusal applies to a
-// registration_code.create_global holder exactly as it does to a tenant. The
-// only way to widen it is to change this value, which is a deployment action.
+// WithServerRegistrationCodeTTL caps how long a pool registration token minted
+// through the management API may live. Zero (the default) means no cap.
+// The cap is a ceiling shared by tenant and write-global callers.
 func WithServerRegistrationCodeTTL(d time.Duration) ServerOption {
 	return func(c *serverConfig) { c.registrationCodeTTL = d }
 }
@@ -642,22 +667,26 @@ func buildServerAPIConfig(cfg ServerConfig, sc *serverConfig) apiserver.Config {
 	}
 
 	return apiserver.Config{
-		RedisAddr:                cfg.RedisAddr,
-		RedisConfig:              cfg.RedisConfig,
-		Store:                    cfg.Store,
-		Supplies:                 supplies,
-		Artifacts:                sc.artifacts,
-		Auth:                     sc.auth,
-		RegistrationCodes:        sc.registrationCodes,
-		IssuedIdentities:         sc.issuedIdentities,
-		IdentityTTL:              sc.identityTTL,
-		EnrollmentRunnerIDPrefix: sc.enrollmentRunnerIDPrefix,
-		RegistrationCodeTTL:      sc.registrationCodeTTL,
-		WorkflowAuth:             sc.workflowAuth,
-		RequireWorkflowAuth:      sc.requireWorkflowAuth,
-		PrincipalAuth:            sc.principalAuth,
-		Authorizer:               sc.authorizer,
-		AuditSink:                sc.auditSink,
+		RedisAddr:                   cfg.RedisAddr,
+		RedisConfig:                 cfg.RedisConfig,
+		Store:                       cfg.Store,
+		Supplies:                    supplies,
+		Artifacts:                   sc.artifacts,
+		Auth:                        sc.auth,
+		RegistrationCodes:           sc.registrationCodes,
+		IssuedIdentities:            sc.issuedIdentities,
+		RunnerPools:                 sc.runnerPools,
+		RunnerInstanceIdleTTL:       sc.runnerInstanceIdleTTL,
+		RunnerInstancePruneInterval: sc.runnerInstancePruneInterval,
+		TrustedProxies:              sc.trustedProxies,
+		IdentityTTL:                 sc.identityTTL,
+		EnrollmentRunnerIDPrefix:    sc.enrollmentRunnerIDPrefix,
+		RegistrationCodeTTL:         sc.registrationCodeTTL,
+		WorkflowAuth:                sc.workflowAuth,
+		RequireWorkflowAuth:         sc.requireWorkflowAuth,
+		PrincipalAuth:               sc.principalAuth,
+		Authorizer:                  sc.authorizer,
+		AuditSink:                   sc.auditSink,
 
 		// Production posture. Off unless WithServerProduction was passed, so
 		// embedders and tests that never declare it are untouched.

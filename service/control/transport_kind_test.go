@@ -161,7 +161,7 @@ func TestInProcessClientStampsItsTransportKind(t *testing.T) {
 		call func() error
 	}{
 		{"register", func() error {
-			_, err := c.Register(ctx, protocol.RegisterRunnerRequest{RunnerID: "embedded", Concurrency: 1})
+			_, err := c.Register(ctx, protocol.RegisterRunnerRequest{InstanceUID: "test-instance", RunnerID: "embedded", Concurrency: 1})
 			return err
 		}},
 		{"heartbeat", func() error {

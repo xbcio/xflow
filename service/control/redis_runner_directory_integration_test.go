@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -238,6 +239,7 @@ func redisRunnerDirectoryAllKeys(keys redisRunnerDirectoryKeys) []string {
 		keys.deactivationObligationDrainGeneration,
 		keys.runnerActivationInventory,
 		keys.runnerDrainObservation,
+		keys.runnerInstanceUID,
 		keys.handoffState,
 		keys.handoffGeneration,
 		keys.handoffLeaseMeta,
@@ -301,6 +303,7 @@ func cleanupRedisRunnerDirectoryDynamicKeys(ctx context.Context, rdb *redis.Clie
 	for _, prefix := range []string{
 		keys.prefix + ":assignment:lease-meta:",
 		keys.prefix + ":runner:leased-assignments:",
+		keys.prefix + redisHandoffClaimIndexSuffix,
 	} {
 		if err := deleteRedisKeysWithPrefix(ctx, rdb, prefix); err != nil {
 			return err
@@ -406,5 +409,125 @@ func TestRedisRunnerDirectoryRealRedisLegacyLeaseMetaReap(t *testing.T) {
 	}
 	if got, err := rdb.HLen(ctx, legacyKey).Result(); err != nil || got != 1 {
 		t.Fatalf("HLEN legacy lease metadata = %d, err = %v; want only the reachable field", got, err)
+	}
+}
+
+func TestRedisRunnerDirectoryRemoveRunnerDeletesEveryPerRunnerField(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	directory := NewRedisRunnerDirectory(rdb)
+	runnerID := "runner-remove-all"
+	registerRedisDirectoryRunner(t, ctx, directory, runnerID, 1)
+
+	hashes := []string{
+		directory.keys.runnerSession,
+		directory.keys.runnerCapacity,
+		directory.keys.runnerInflight,
+		directory.keys.runnerCapabilities,
+		directory.keys.runnerLabels,
+		directory.keys.runnerPolicy,
+		directory.keys.runnerNamespaces,
+		directory.keys.runnerHeartbeat,
+		directory.keys.runnerClaimCount,
+		directory.keys.runnerLeaseCount,
+		directory.keys.runnerControlDesired,
+		directory.keys.runnerControlGeneration,
+		directory.keys.runnerControlRequestedAt,
+		directory.keys.runnerControlActor,
+		directory.keys.runnerControlReason,
+		directory.keys.runnerControlDrainDeadline,
+		directory.keys.runnerActivationInventory,
+		directory.keys.runnerDrainObservation,
+		directory.keys.runnerInstanceUID,
+	}
+	for _, key := range hashes {
+		value := "seed"
+		if key == directory.keys.runnerClaimCount || key == directory.keys.runnerLeaseCount {
+			value = "0"
+		}
+		if err := rdb.HSet(ctx, key, runnerID, value).Err(); err != nil {
+			t.Fatalf("seed %q: %v", key, err)
+		}
+	}
+	derived := []string{
+		directory.keys.runnerLeasedAssignmentsKey(runnerID),
+		directory.keys.handoffClaimIndexKey(runnerID),
+	}
+	for _, key := range derived {
+		if err := rdb.SAdd(ctx, key, "stale").Err(); err != nil {
+			t.Fatalf("seed derived key %q: %v", key, err)
+		}
+	}
+
+	if err := directory.RemoveRunner(ctx, runnerID); err != nil {
+		t.Fatalf("RemoveRunner: %v", err)
+	}
+	for _, key := range hashes {
+		exists, err := rdb.HExists(ctx, key, runnerID).Result()
+		if err != nil {
+			t.Fatalf("HExists(%q): %v", key, err)
+		}
+		if exists {
+			t.Errorf("runner field remains in %q", key)
+		}
+	}
+	for _, key := range derived {
+		exists, err := rdb.Exists(ctx, key).Result()
+		if err != nil {
+			t.Fatalf("Exists(%q): %v", key, err)
+		}
+		if exists != 0 {
+			t.Errorf("runner-derived key remains: %q", key)
+		}
+	}
+	if err := directory.RemoveRunner(ctx, runnerID); err != nil {
+		t.Fatalf("idempotent RemoveRunner: %v", err)
+	}
+}
+
+func TestRedisRunnerDirectoryRemoveRunnerRejectsEveryOutstandingWorkClass(t *testing.T) {
+	tests := []struct {
+		name string
+		seed func(context.Context, *RedisRunnerDirectory, *redis.Client, string) error
+	}{
+		{name: "claim count", seed: func(ctx context.Context, d *RedisRunnerDirectory, rdb *redis.Client, runnerID string) error {
+			return rdb.HSet(ctx, d.keys.runnerClaimCount, runnerID, "1").Err()
+		}},
+		{name: "claim ledger", seed: func(ctx context.Context, d *RedisRunnerDirectory, rdb *redis.Client, runnerID string) error {
+			return rdb.HSet(ctx, d.keys.claimsRunner, "claim", runnerID).Err()
+		}},
+		{name: "finalized lease", seed: func(ctx context.Context, d *RedisRunnerDirectory, rdb *redis.Client, runnerID string) error {
+			if err := rdb.HSet(ctx, d.keys.assignmentRunner, "assignment", runnerID).Err(); err != nil {
+				return err
+			}
+			return rdb.HSet(ctx, d.keys.assignmentState, "assignment", redisAssignmentLeased).Err()
+		}},
+		{name: "handoff", seed: func(ctx context.Context, d *RedisRunnerDirectory, rdb *redis.Client, runnerID string) error {
+			return rdb.HSet(ctx, d.keys.handoffRunner, "claim", runnerID).Err()
+		}},
+		{name: "activation cleanup", seed: func(ctx context.Context, d *RedisRunnerDirectory, rdb *redis.Client, runnerID string) error {
+			if err := rdb.HSet(ctx, d.keys.deactivationObligationRunner, "obligation", runnerID).Err(); err != nil {
+				return err
+			}
+			return rdb.HSet(ctx, d.keys.deactivationObligationState, "obligation", string(DeactivationObligationReady)).Err()
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			_, rdb := newRedisRunnerDirectoryTestClient(t)
+			directory := NewRedisRunnerDirectory(rdb)
+			runnerID := "runner-blocked"
+			registerRedisDirectoryRunner(t, ctx, directory, runnerID, 1)
+			if err := tc.seed(ctx, directory, rdb, runnerID); err != nil {
+				t.Fatalf("seed blocker: %v", err)
+			}
+			if err := directory.RemoveRunner(ctx, runnerID); !errors.Is(err, ErrRunnerHasOutstandingWork) {
+				t.Fatalf("RemoveRunner = %v, want ErrRunnerHasOutstandingWork", err)
+			}
+			if _, ok := directory.Runner(ctx, runnerID); !ok {
+				t.Fatal("blocked RemoveRunner mutated runner registration")
+			}
+		})
 	}
 }

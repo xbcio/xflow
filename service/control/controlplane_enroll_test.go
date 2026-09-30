@@ -11,6 +11,7 @@ import (
 
 	backendlocal "github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/service/protocol"
+	"github.com/xbcio/xflow/store"
 )
 
 // TestControlPlaneMountsEnrollWhenStoresConfigured is the wiring test: the unit
@@ -24,7 +25,7 @@ func TestControlPlaneMountsEnrollWhenStoresConfigured(t *testing.T) {
 		t.Fatalf("GenerateRegistrationCode: %v", err)
 	}
 	if err := codes.Create(context.Background(), RegistrationCode{
-		ID: id, CodeHash: HashSecret(plaintext),
+		ID: id, CodeHash: HashSecret(plaintext), PoolID: "test-pool",
 		AllowedNamespaces: []string{"*"}, AllowedNodeTypes: []string{"*"},
 		CreatedAt: time.Unix(1700000000, 0).UTC(),
 	}); err != nil {
@@ -38,7 +39,7 @@ func TestControlPlaneMountsEnrollWhenStoresConfigured(t *testing.T) {
 	defer srv.Close()
 
 	resp, err := srv.Client().Post(srv.URL+protocol.EnrollPath, "application/json",
-		strings.NewReader(`{"registration_code":"`+plaintext+`","namespaces":["sas"]}`))
+		strings.NewReader(`{"registration_code":"`+plaintext+`","system_id":"test-system","instance_uid":"test-instance","namespaces":["sas"]}`))
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
@@ -130,10 +131,18 @@ func TestEnrollCompositionIgnoresDisabledAuthenticator(t *testing.T) {
 // argument may be nil to exercise the "enroll not configured" behavior.
 func newTestControlPlaneWithEnroll(t *testing.T, codes RegistrationCodeStore, ids IssuedIdentityStore) *ControlPlane {
 	t.Helper()
+	pools := NewMemoryRunnerPoolStore()
+	if err := pools.CreatePool(context.Background(), RunnerPool{
+		ID: "test-pool", Name: "test", OwnerKind: store.PoolOwnerTenant, OwnerNamespace: "default",
+		AllowedNamespaces: []string{"*"}, AllowedNodeTypes: []string{"*"}, CreatedAt: time.Unix(1700000000, 0).UTC(),
+	}); err != nil {
+		t.Fatalf("CreatePool: %v", err)
+	}
 	cp, err := NewControlPlane(Config{
 		Backend:           backendlocal.New(),
 		RegistrationCodes: codes,
 		IssuedIdentities:  ids,
+		RunnerPools:       pools,
 	})
 	if err != nil {
 		t.Fatalf("NewControlPlane: %v", err)

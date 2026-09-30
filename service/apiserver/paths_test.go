@@ -148,14 +148,13 @@ var guardSamples = []guardSample{
 	{"PathManagementDeadLetters", PathManagementDeadLetters, http.MethodGet, "/v1/management/dead-letters/ex-1"},
 	{"PathManagementDLReplay", PathManagementDLReplay, http.MethodPost, "/v1/management/dead-letters/ex-1/replay"},
 
-	// Registration-code routes (Task 8). newFullGuardMux's Config carries no
-	// RegistrationCodes/IssuedIdentities store, so mgmt.codes is nil on this
-	// fixture — but per Ruling W the routes are mounted on principalAuth alone,
-	// so they still resolve here; guard 2's behavioral half below still gets its
-	// 401 (the authz wrapper runs before the nil-store handler body).
-	{"PathManagementRegistrationCodes", PathManagementRegistrationCodes, http.MethodPost, "/v1/management/registration-codes"},
-	{"PathManagementRegistrationCodeByID", PathManagementRegistrationCodeByID, http.MethodDelete, "/v1/management/registration-codes/rc-1"},
-	{"PathManagementRegistrationCodeAudit", PathManagementRegistrationCodeAudit, http.MethodGet, "/v1/management/registration-codes/rc-1/audit"},
+	{"PathManagementRunnerPoolTokenAudit", PathManagementRunnerPoolTokenAudit, http.MethodGet, "/v1/management/runner-pools/pool-1/tokens/token-1/audit"},
+
+	{"PathManagementRunnerPools", PathManagementRunnerPools, http.MethodPost, "/v1/management/runner-pools"},
+	{"PathManagementRunnerPoolByID", PathManagementRunnerPoolByID, http.MethodGet, "/v1/management/runner-pools/pool-1"},
+	{"PathManagementRunnerPoolTokens", PathManagementRunnerPoolTokens, http.MethodPost, "/v1/management/runner-pools/pool-1/tokens"},
+	{"PathManagementRunnerPoolTokenByID", PathManagementRunnerPoolTokenByID, http.MethodDelete, "/v1/management/runner-pools/pool-1/tokens/token-1"},
+	{"PathManagementRunnerPoolRunners", PathManagementRunnerPoolRunners, http.MethodGet, "/v1/management/runner-pools/pool-1/runners"},
 
 	{"PathHealthz", PathHealthz, http.MethodGet, "/healthz"},
 	{"PathReadyz", PathReadyz, http.MethodGet, "/readyz"},

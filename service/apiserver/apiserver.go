@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -85,6 +86,20 @@ type Config struct {
 	// nothing to authenticate against.
 	RegistrationCodes control.RegistrationCodeStore
 	IssuedIdentities  control.IssuedIdentityStore
+	// RunnerPools backs pool-bound enrollment and the management runner-pool API.
+	// The same instance is passed to control and management so newly minted
+	// pool tokens are immediately usable by enroll.
+	RunnerPools control.RunnerPoolStore
+	// RunnerInstanceIdleTTL is the heartbeat/enrollment idle window before an
+	// active pool instance enters the leader-only prune saga. Zero uses the
+	// control-plane default.
+	RunnerInstanceIdleTTL time.Duration
+	// RunnerInstancePruneInterval is the leader-only prune cadence. Zero uses
+	// the control-plane default.
+	RunnerInstancePruneInterval time.Duration
+	// TrustedProxies contains direct-peer CIDRs allowed to supply
+	// X-Forwarded-For to the runner protocol. Empty ignores forwarding headers.
+	TrustedProxies []netip.Prefix
 	// IdentityTTL is how long a newly enrolled identity authenticates before
 	// it must renew. Zero (the default) means never expires. See
 	// control.Config.IdentityTTL, which this threads to verbatim.
@@ -321,18 +336,12 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 		mgmt := newManagementModule(s.cp)
 		mgmt.metrics = cfg.Metrics
 		mgmt.ready = s.readiness
-		// Registration-code management API (Task 8): post-construction field
-		// injection, same shape as metrics/ready above. This is deliberately NOT
-		// a newManagementModule(cp, codes, issued) signature change — that
-		// constructor has 8 call sites today (1 production + 7 tests across
-		// deadletter_http_test.go, envelope_migration_test.go,
-		// deadletter_unified_test.go, management_scope_test.go), none of which
-		// need or want a registration-code store. A signature change would force
-		// every one of them to grow two more nil arguments for no behavioral
-		// reason; setting the fields here after construction touches none of
-		// them. See Task 8 addendum Ruling Q.
+		// Runner-pool token and issued-identity management dependencies are
+		// injected after construction so unrelated management-module tests keep
+		// their narrow setup.
 		mgmt.codes = cfg.RegistrationCodes
 		mgmt.issued = cfg.IssuedIdentities
+		mgmt.pools = cfg.RunnerPools
 		mgmt.registrationCodeTTL = cfg.RegistrationCodeTTL
 		if cfg.PrincipalAuth != nil {
 			mgmt.principalAuth = cfg.PrincipalAuth
@@ -427,20 +436,24 @@ const entryActivationStoreTTL = 24 * time.Hour
 // caller's responsibility to construct.
 func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 	ccfg := control.Config{
-		Auth:                     cfg.Auth,
-		RegistrationCodes:        cfg.RegistrationCodes,
-		IssuedIdentities:         cfg.IssuedIdentities,
-		IdentityTTL:              cfg.IdentityTTL,
-		LeaseTTL:                 cfg.LeaseTTL,
-		EnrollmentRunnerIDPrefix: cfg.EnrollmentRunnerIDPrefix,
-		Logger:                   cfg.Logger,
-		Metrics:                  cfg.Metrics,
-		Tracer:                   cfg.Tracer,
-		Supplies:                 cfg.Supplies,
-		EnableSupplyEncryption:   cfg.EnableSupplyEncryption,
-		SupplyKeyRotationPeriod:  cfg.SupplyKeyRotationPeriod,
-		EnableMetricsProxy:       cfg.EnableRunnerMetricsProxy,
-		MetricsReportInterval:    cfg.RunnerMetricsInterval,
+		Auth:                        cfg.Auth,
+		RegistrationCodes:           cfg.RegistrationCodes,
+		IssuedIdentities:            cfg.IssuedIdentities,
+		RunnerPools:                 cfg.RunnerPools,
+		RunnerInstanceIdleTTL:       cfg.RunnerInstanceIdleTTL,
+		RunnerInstancePruneInterval: cfg.RunnerInstancePruneInterval,
+		TrustedProxies:              cfg.TrustedProxies,
+		IdentityTTL:                 cfg.IdentityTTL,
+		LeaseTTL:                    cfg.LeaseTTL,
+		EnrollmentRunnerIDPrefix:    cfg.EnrollmentRunnerIDPrefix,
+		Logger:                      cfg.Logger,
+		Metrics:                     cfg.Metrics,
+		Tracer:                      cfg.Tracer,
+		Supplies:                    cfg.Supplies,
+		EnableSupplyEncryption:      cfg.EnableSupplyEncryption,
+		SupplyKeyRotationPeriod:     cfg.SupplyKeyRotationPeriod,
+		EnableMetricsProxy:          cfg.EnableRunnerMetricsProxy,
+		MetricsReportInterval:       cfg.RunnerMetricsInterval,
 	}
 
 	useRedis := cfg.RedisConfig != nil || cfg.RedisAddr != ""

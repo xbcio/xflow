@@ -198,43 +198,30 @@ func ExampleDeadLetterReplayResponse(outcome, auditID, executionID, nodeID, acti
 	}
 }
 
-// ExampleRegistrationCodeCreateRequest builds a registrationCodeCreateRequest
-// (POST /v1/management/registration-codes). expiresInSeconds is a pointer in
-// the real type — absent and 0 are different requests — so the contract test
-// can exercise both the "asked for a lifetime" and the "took the deployment
-// default" shapes against the same schema.
-func ExampleRegistrationCodeCreateRequest(namespaces, nodeTypes []string, expiresInSeconds *int64) any {
-	return registrationCodeCreateRequest{
-		AllowedNamespaces: namespaces,
-		AllowedNodeTypes:  nodeTypes,
-		ExpiresInSeconds:  expiresInSeconds,
-	}
-}
-
-// ExampleRegistrationCodeCreateResponse builds the one response shape that
-// carries plaintext registration code material. A non-zero expiration and
-// bounded use count exercise both fields a management UI needs without a
+// ExampleRunnerPoolTokenCreateResponse builds the pool-token response shape
+// that carries plaintext registration token material. A non-zero expiration
+// and bounded use count exercise both fields a management UI needs without a
 // follow-up list call.
-func ExampleRegistrationCodeCreateResponse(id, code string, expiresAt time.Time, maxUses int) any {
-	response := registrationCodeCreateResponse{ID: id, Code: code, MaxUses: maxUses}
+func ExampleRunnerPoolTokenCreateResponse(id, code string, expiresAt time.Time, maxUses int) any {
+	response := runnerPoolTokenCreateResponse{ID: id, Code: code, MaxUses: maxUses}
 	if !expiresAt.IsZero() {
 		response.ExpiresAt = expiresAt.UTC().Format(time.RFC3339)
 	}
 	return response
 }
 
-// ExampleRegistrationCodeView builds a registrationCodeView (GET
-// /v1/management/registration-codes). Carries neither the plaintext nor the
-// hash, which is the property the schema exists to pin down.
+// ExampleRunnerPoolTokenView builds the stored-token view returned by
+// GET /v1/management/runner-pools/{id}/tokens. It carries neither plaintext
+// nor hash, which is the property the schema exists to pin down.
 //
 // It takes a domain RegistrationCode and runs it through the handler's own
-// newRegistrationCodeView rather than filling the view's fields directly.
+// newRunnerPoolTokenView rather than filling the view's fields directly.
 // That is the whole point: the projection is where nil slices become `[]` and
 // where a zero ExpiresAt becomes an absent key, so an example that bypassed it
 // would validate a shape no handler ever writes — and the nil-slice case,
 // which is the one that broke the contract, would be untestable from here.
-func ExampleRegistrationCodeView(id string, createdAt, expiresAt time.Time, namespaces, nodeTypes []string, revoked bool) any {
-	return newRegistrationCodeView(control.RegistrationCode{
+func ExampleRunnerPoolTokenView(id string, createdAt, expiresAt time.Time, namespaces, nodeTypes []string, revoked bool) any {
+	return newRunnerPoolTokenView(control.RegistrationCode{
 		ID:                id,
 		AllowedNamespaces: namespaces,
 		AllowedNodeTypes:  nodeTypes,

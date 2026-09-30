@@ -23,6 +23,7 @@ var legacyRunnerLongFlags = map[string]struct{}{
 	"id":                 {},
 	"poll-wait":          {},
 	"server":             {},
+	"system-id":          {},
 }
 
 // NewCommand creates a standalone runner command using profile. It exposes the

@@ -24,6 +24,7 @@ func TestHTTPRunnerRegisterPollAndResult(t *testing.T) {
 	defer server.Close()
 
 	register := protocol.RegisterRunnerRequest{
+		InstanceUID:  "test-instance",
 		RunnerID:     "runner-1",
 		Concurrency:  2,
 		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
@@ -101,6 +102,7 @@ func TestHTTPPollRejectsStaleSession(t *testing.T) {
 	defer server.Close()
 
 	register := protocol.RegisterRunnerRequest{
+		InstanceUID:  "test-instance",
 		RunnerID:     "runner-1",
 		Concurrency:  1,
 		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
@@ -129,6 +131,7 @@ func TestHTTPRegisterRejectsInvalidNamespace(t *testing.T) {
 	defer server.Close()
 
 	register := protocol.RegisterRunnerRequest{
+		InstanceUID:  "test-instance",
 		RunnerID:     "runner-1",
 		Concurrency:  1,
 		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
@@ -148,6 +151,7 @@ func TestHTTPRunnerSessionRequired(t *testing.T) {
 	defer server.Close()
 
 	register := protocol.RegisterRunnerRequest{
+		InstanceUID:  "test-instance",
 		RunnerID:     "runner-1",
 		Concurrency:  1,
 		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},

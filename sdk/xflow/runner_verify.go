@@ -70,6 +70,7 @@ func VerifyRunner(ctx context.Context, cfg RunnerConfig) (VerifyResult, error) {
 		Capabilities: runnerCapabilities(cfg.Capabilities),
 		Labels:       runnerRegistrationLabels(cfg.Labels, protocol.LinkedXflowVersion()),
 		Namespaces:   runnersvc.NamespaceStrings(cfg.Namespaces),
+		InstanceUID:  runnerInstanceUIDOrDefault(cfg.InstanceUID),
 		// Constant in buildRunnerServiceConfig, so constant here. Activations
 		// is left empty: a preflight has no prior session to renew.
 		SupportsEncryption: true,

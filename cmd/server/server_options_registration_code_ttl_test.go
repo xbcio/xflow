@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	xflowsdk "github.com/xbcio/xflow/sdk/xflow"
 	"github.com/xbcio/xflow/service/apiserver"
 	"github.com/xbcio/xflow/service/control"
+	"github.com/xbcio/xflow/store"
 )
 
 func TestParseServerConfigRegistrationCodeTTLFlag(t *testing.T) {
@@ -58,7 +60,7 @@ func newRegistrationCodeTTLBinary(t *testing.T, ttlFlag string) (*httptest.Serve
 	t.Helper()
 	path := writeTokenFile(t, "tokens.json",
 		`[{"token":"tok-ops","subject":"op","namespace":"namespaceA","scopes":`+
-			`["management.registration_code.create","management.registration_code.list"]}]`,
+			`["management.runner_pool.read","management.runner_pool.write"]}]`,
 		0600)
 	// -mode dev for the same reason the identity-TTL test uses it: this
 	// in-memory, no-MySQL setup fails the production gate on grounds that have
@@ -76,12 +78,21 @@ func newRegistrationCodeTTLBinary(t *testing.T, ttlFlag string) (*httptest.Serve
 		t.Fatalf("loadAuthTokenMappings: %v", err)
 	}
 	auth := apiserver.NewBearerPrincipalAuthMulti(mappings)
+	pools := control.NewMemoryRunnerPoolStore()
+	if err := pools.CreatePool(context.Background(), store.RunnerPool{
+		ID: "pool-test", Name: "workers", OwnerKind: store.PoolOwnerTenant,
+		OwnerNamespace: "namespaceA", AllowedNamespaces: []string{"namespaceA"},
+		AllowedNodeTypes: []string{"xflow.http"},
+	}); err != nil {
+		t.Fatalf("CreatePool: %v", err)
+	}
 	deps := serverDeps{
 		workflowAuth:          auth,
 		principalAuth:         auth,
 		audit:                 apiserver.NewInMemoryAuditSink(),
 		registrationCodeStore: control.NewMemoryRegistrationCodeStore(),
 		issuedIdentityStore:   control.NewMemoryIssuedIdentityStore(),
+		runnerPoolStore:       pools,
 	}
 	srv, err := xflowsdk.NewServer(xflowsdk.ServerConfig{}, buildServerOptions(cfg, deps)...)
 	if err != nil {
@@ -92,10 +103,10 @@ func newRegistrationCodeTTLBinary(t *testing.T, ttlFlag string) (*httptest.Serve
 	return ts, "tok-ops"
 }
 
-func createRegistrationCodeStatus(t *testing.T, ts *httptest.Server, token, body string) int {
+func createRunnerPoolTokenStatus(t *testing.T, ts *httptest.Server, token, body string) int {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost,
-		ts.URL+"/v1/management/registration-codes", strings.NewReader(body))
+		ts.URL+"/v1/management/runner-pools/pool-test/tokens", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
@@ -117,12 +128,12 @@ func createRegistrationCodeStatus(t *testing.T, ts *httptest.Server, token, body
 // hand-set field.
 func TestBuildServerOptionsReachesRegistrationCodeTTLEndToEnd(t *testing.T) {
 	ts, token := newRegistrationCodeTTLBinary(t, "1h")
-	const body = `{"allowed_namespaces":["namespaceA"],"expires_in_seconds":`
+	const body = `{"expires_in_seconds":`
 
-	if got := createRegistrationCodeStatus(t, ts, token, body+`60}`); got != http.StatusOK {
+	if got := createRunnerPoolTokenStatus(t, ts, token, body+`60}`); got != http.StatusOK {
 		t.Fatalf("status = %d for a 60s request under a 1h ceiling, want 200", got)
 	}
-	if got := createRegistrationCodeStatus(t, ts, token, body+`7200}`); got != http.StatusBadRequest {
+	if got := createRunnerPoolTokenStatus(t, ts, token, body+`7200}`); got != http.StatusBadRequest {
 		t.Fatalf("status = %d for a 2h request under a 1h ceiling, want 400; "+
 			"--registration-code-ttl did not reach the handler", got)
 	}
@@ -137,8 +148,8 @@ func TestBuildServerOptionsWithoutRegistrationCodeTTLLeavesCodesUnbounded(t *tes
 	ts, token := newRegistrationCodeTTLBinary(t, "0")
 	// 0 asks for a code that never expires. Under a ceiling that is a 400;
 	// with no ceiling it is the whole point of the pre-feature behavior.
-	if got := createRegistrationCodeStatus(t, ts, token,
-		`{"allowed_namespaces":["namespaceA"],"expires_in_seconds":0}`); got != http.StatusOK {
+	if got := createRunnerPoolTokenStatus(t, ts, token,
+		`{"expires_in_seconds":0}`); got != http.StatusOK {
 		t.Fatalf("status = %d for a never-expires request with no ceiling, want 200", got)
 	}
 }

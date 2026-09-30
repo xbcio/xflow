@@ -15,6 +15,15 @@ import (
 // replaced by a newer registration for the same runner ID.
 var ErrRunnerSessionStale = errors.New("runner session stale")
 
+// ErrRunnerIDConflict reports that a registration named a runner ID whose
+// current session belongs to a different, still-live process instance.
+// Registration used to replace such a session unconditionally, so two
+// replicas that shared an ID took turns evicting each other without either
+// seeing an error. The caller retries through its normal reconnect backoff;
+// the conflict clears once the other instance deregisters or stops
+// heartbeating for DefaultRunnerLiveTTL.
+var ErrRunnerIDConflict = errors.New("runner id conflict: another live instance holds this runner id")
+
 // AssignmentID uniquely identifies one queued assignment tracked by the
 // control-plane directory.
 type AssignmentID string
@@ -55,6 +64,13 @@ type RegisterRunnerRequest struct {
 	// prove which old trigger generations it still hosts before inheriting their
 	// drain cleanup obligations.
 	Activations []protocol.ActivationInventoryItem
+	// InstanceUID identifies the process instance behind this registration
+	// (the pod UID under Kubernetes). When both it and the current session's
+	// UID are non-empty, differ, and the current session heartbeated within
+	// DefaultRunnerLiveTTL, Register refuses with ErrRunnerIDConflict instead
+	// of replacing the live session. Core rejects an empty incoming UID before
+	// it reaches this directory-level guard.
+	InstanceUID string
 	Now         time.Time
 }
 
@@ -204,6 +220,32 @@ type RunnerDirectory interface {
 	ReleaseLeased(ctx context.Context, req ReleaseLeasedRequest) error
 	ClearAssignment(ctx context.Context, assignmentID AssignmentID) error
 	Runner(ctx context.Context, runnerID string) (RunnerSnapshot, bool)
+}
+
+// RunnerDeregisterer is an optional directory capability: it ends the live
+// window of one session so the live-instance guard (ErrRunnerIDConflict) stops
+// protecting it. It is session-fenced and deletes nothing — claims, leases and
+// handoffs stay exactly where a crashed session would leave them, so the next
+// Register rebinds them through the usual path.
+type RunnerDeregisterer interface {
+	Deregister(ctx context.Context, runnerID, sessionID string) error
+}
+
+// ErrRunnerHasOutstandingWork is returned by RunnerRemover.RemoveRunner while
+// the runner still holds claims, finalized leases, handoffs or activation
+// cleanup obligations. The prune saga retries on its next sweep; the debt
+// drains through the ordinary claim-expiry and lease-sweeper paths.
+var ErrRunnerHasOutstandingWork = errors.New("runner has outstanding work")
+
+// RunnerRemover is an optional directory capability used by the prune saga
+// (stage 3.7). RemoveRunner deletes every per-runner record the directory
+// keeps (session, capacity, labels, policy, namespaces, heartbeat, instance
+// UID, control state, activation inventory, claim cursor, ...), but only when
+// the runner has no outstanding work; otherwise it returns
+// ErrRunnerHasOutstandingWork and changes nothing. Removing an absent runner
+// returns nil. It must be atomic (one Lua script / one lock).
+type RunnerRemover interface {
+	RemoveRunner(ctx context.Context, runnerID string) error
 }
 
 // ClaimReclaimer is an optional durable-directory capability used by the

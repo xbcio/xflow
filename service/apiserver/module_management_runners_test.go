@@ -422,12 +422,16 @@ type stubIssuedIdentityLister struct {
 	err     error
 }
 
+func (s *stubIssuedIdentityLister) RotateCredential(context.Context, string, int64, [32]byte, time.Time) (int64, error) {
+	return 0, nil
+}
+
 func (s *stubIssuedIdentityLister) Issue(context.Context, store.IssuedIdentity) error {
 	return errors.New("stubIssuedIdentityLister: Issue not implemented")
 }
 
 func (s *stubIssuedIdentityLister) Lookup(context.Context, string) (store.IssuedIdentity, bool, error) {
-	return store.IssuedIdentity{}, false, errors.New("stubIssuedIdentityLister: Lookup not implemented")
+	return store.IssuedIdentity{PoolID: "test-pool"}, false, errors.New("stubIssuedIdentityLister: Lookup not implemented")
 }
 
 func (s *stubIssuedIdentityLister) List(context.Context) ([]store.IssuedIdentity, error) {
@@ -439,7 +443,7 @@ func (s *stubIssuedIdentityLister) List(context.Context) ([]store.IssuedIdentity
 	}
 	out := make([]store.IssuedIdentity, 0, len(s.ids))
 	for _, id := range s.ids {
-		out = append(out, store.IssuedIdentity{RunnerID: id})
+		out = append(out, store.IssuedIdentity{PoolID: "test-pool", RunnerID: id})
 	}
 	return out, nil
 }
@@ -646,7 +650,7 @@ func TestRevokeRunnerIdentitySuccess(t *testing.T) {
 	h := newRunnerRevokeIdentityTestServer(t)
 	defer h.srv.Close()
 	ctx := context.Background()
-	if err := h.issued.Issue(ctx, control.IssuedIdentity{RunnerID: "runner-1", OwnerNamespace: "namespaceA"}); err != nil {
+	if err := h.issued.Issue(ctx, control.IssuedIdentity{PoolID: "test-pool", RunnerID: "runner-1", OwnerNamespace: "namespaceA"}); err != nil {
 		t.Fatalf("seed Issue: %v", err)
 	}
 	body := h.doJSON(t, http.MethodPost, "/v1/management/runners/runner-1/revoke-identity", "", http.StatusOK)
@@ -684,7 +688,7 @@ func TestRevokeRunnerIdentityRepeatIsNoop(t *testing.T) {
 	h := newRunnerRevokeIdentityTestServer(t)
 	defer h.srv.Close()
 	ctx := context.Background()
-	if err := h.issued.Issue(ctx, control.IssuedIdentity{RunnerID: "runner-2", OwnerNamespace: "namespaceA"}); err != nil {
+	if err := h.issued.Issue(ctx, control.IssuedIdentity{PoolID: "test-pool", RunnerID: "runner-2", OwnerNamespace: "namespaceA"}); err != nil {
 		t.Fatalf("seed Issue: %v", err)
 	}
 	h.doJSON(t, http.MethodPost, "/v1/management/runners/runner-2/revoke-identity", "", http.StatusOK)
@@ -705,7 +709,7 @@ func TestRevokeRunnerIdentityRefusesOtherNamespace(t *testing.T) {
 	h := newRunnerRevokeIdentityTestServerAs(t, "namespaceB")
 	defer h.srv.Close()
 	ctx := context.Background()
-	if err := h.issued.Issue(ctx, control.IssuedIdentity{RunnerID: "runner-a", OwnerNamespace: "namespaceA"}); err != nil {
+	if err := h.issued.Issue(ctx, control.IssuedIdentity{PoolID: "test-pool", RunnerID: "runner-a", OwnerNamespace: "namespaceA"}); err != nil {
 		t.Fatalf("seed Issue: %v", err)
 	}
 	// Not-found, not forbidden: a distinct code would make this endpoint an
@@ -730,7 +734,7 @@ func TestRevokeRunnerIdentityGlobalScopeReachesOtherNamespace(t *testing.T) {
 	h := newRunnerRevokeIdentityTestServerAs(t, "namespaceB", ScopeManagementRunnerRevokeIdentityGlobal)
 	defer h.srv.Close()
 	ctx := context.Background()
-	if err := h.issued.Issue(ctx, control.IssuedIdentity{RunnerID: "runner-a", OwnerNamespace: "namespaceA"}); err != nil {
+	if err := h.issued.Issue(ctx, control.IssuedIdentity{PoolID: "test-pool", RunnerID: "runner-a", OwnerNamespace: "namespaceA"}); err != nil {
 		t.Fatalf("seed Issue: %v", err)
 	}
 	h.doJSON(t, http.MethodPost, "/v1/management/runners/runner-a/revoke-identity", "", http.StatusOK)
@@ -748,7 +752,7 @@ func TestRevokeRunnerIdentityGlobalScopeReachesOtherNamespace(t *testing.T) {
 func TestRevokeRunnerIdentityLegacyRowNeedsGlobalScope(t *testing.T) {
 	seed := func(h *runnerRevokeIdentityTestServer) {
 		t.Helper()
-		err := h.issued.Issue(context.Background(), control.IssuedIdentity{RunnerID: "runner-legacy"})
+		err := h.issued.Issue(context.Background(), control.IssuedIdentity{PoolID: "test-pool", RunnerID: "runner-legacy"})
 		if err != nil {
 			t.Fatalf("seed Issue: %v", err)
 		}

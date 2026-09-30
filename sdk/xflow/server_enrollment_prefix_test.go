@@ -15,12 +15,13 @@ func TestWithServerEnrollmentRunnerIDPrefixReachesIssuedPolicy(t *testing.T) {
 	ctx := context.Background()
 	codes := control.NewMemoryRegistrationCodeStore()
 	ids := control.NewMemoryIssuedIdentityStore()
+	pools, poolID := newSDKEnrollmentTestPool(t, []string{"team-a"}, []string{"xflow.function"})
 	id, code, err := control.GenerateRegistrationCode()
 	if err != nil {
 		t.Fatalf("GenerateRegistrationCode: %v", err)
 	}
 	if err := codes.Create(ctx, control.RegistrationCode{
-		ID: id, CodeHash: control.HashSecret(code), CreatedAt: time.Now().UTC(),
+		ID: id, CodeHash: control.HashSecret(code), PoolID: poolID, CreatedAt: time.Now().UTC(),
 		AllowedNamespaces: []string{"team-a"}, AllowedNodeTypes: []string{"xflow.function"},
 	}); err != nil {
 		t.Fatalf("codes.Create: %v", err)
@@ -28,6 +29,7 @@ func TestWithServerEnrollmentRunnerIDPrefixReachesIssuedPolicy(t *testing.T) {
 
 	srv, err := NewServer(ServerConfig{},
 		WithServerEnroll(codes, ids),
+		WithServerRunnerPools(pools),
 		WithServerEnrollmentRunnerIDPrefix("sas-runner-"),
 	)
 	if err != nil {
@@ -36,7 +38,7 @@ func TestWithServerEnrollmentRunnerIDPrefixReachesIssuedPolicy(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	issued, err := protocol.NewClient(ts.URL, ts.Client()).Enroll(ctx, protocol.EnrollRequest{
+	issued, err := protocol.NewClient(ts.URL, ts.Client()).Enroll(ctx, protocol.EnrollRequest{SystemID: "test-system", InstanceUID: "test-instance",
 		RegistrationCode: code,
 		Namespaces:       []string{"team-a"},
 		NodeTypes:        []string{"xflow.function"},

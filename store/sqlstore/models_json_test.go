@@ -100,7 +100,7 @@ func TestEveryJSONColumnUsesJSONBytes(t *testing.T) {
 	models := []any{
 		dbSupply{}, dbExecution{}, dbNode{}, dbSignal{},
 		dbArtifactBlob{}, dbArtifact{}, dbRegistrationCode{},
-		dbEnrollAudit{}, dbIssuedIdentity{},
+		dbEnrollAudit{}, dbIssuedIdentity{}, dbRunnerPool{}, dbRunnerInstance{},
 	}
 	want := reflect.TypeOf(jsonBytes(nil))
 	jsonColumns := 0

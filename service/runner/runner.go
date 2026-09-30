@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/namespace"
@@ -39,7 +40,9 @@ type ProtocolClient interface {
 }
 
 type Config struct {
-	RunnerID          string
+	RunnerID string
+	// InstanceUID is sent on Register; see protocol.RegisterRunnerRequest.
+	InstanceUID       string
 	Concurrency       int
 	Labels            map[string]string
 	Capabilities      []protocol.Capability
@@ -165,6 +168,9 @@ type Runner struct {
 }
 
 func New(client ProtocolClient, registry engine.HandlerRegistry, config Config) *Runner {
+	if config.InstanceUID == "" {
+		config.InstanceUID = "proc:" + uuid.NewString()
+	}
 	if config.Concurrency <= 0 {
 		config.Concurrency = 1
 	}
@@ -219,6 +225,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		Namespaces:         NamespaceStrings(r.config.Namespaces),
 		Activations:        inventory,
 		SupportsEncryption: r.config.SupportsEncryption,
+		InstanceUID:        r.config.InstanceUID,
 	})
 	if err != nil {
 		return runContextError(ctx, err)
@@ -297,8 +304,10 @@ func (r *Runner) Run(ctx context.Context) error {
 	// finish in-flight tasks. Workers see ctx cancellation and exit.
 	waitDone := make(chan struct{})
 	go func() { wg.Wait(); close(waitDone) }()
+	drained := false
 	select {
 	case <-waitDone:
+		drained = true
 	case <-time.After(defaultRunnerShutdownTimeout):
 	}
 
@@ -307,6 +316,14 @@ func (r *Runner) Run(ctx context.Context) error {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), defaultRunnerShutdownTimeout)
 		r.activationTracker.Shutdown(shutdownCtx)
 		shutdownCancel()
+	}
+
+	// Give the live session up only on a clean, operator-requested stop. A
+	// transport failure is followed by a reconnect of this same instance, and
+	// a drain that timed out still has workers holding leases; in both cases
+	// the session must stay protected until it ages out.
+	if ctx.Err() != nil && drained {
+		r.deregister(sessionID)
 	}
 
 	if pollErr != nil {
@@ -734,4 +751,28 @@ func (r *Runner) processMetricsInterval(resp protocol.HeartbeatResponse) {
 		return
 	}
 	r.metricsReporter.SetInterval(time.Duration(resp.MetricsReportIntervalSeconds) * time.Second)
+}
+
+// deregisterTimeout bounds the goodbye call. It runs after ctx is cancelled,
+// on the shutdown path, so it must not hold up process exit for long; a call
+// that does not make it simply leaves the session to age out.
+const deregisterTimeout = 3 * time.Second
+
+// deregisterClient is the optional protocol capability behind deregister.
+// Only the HTTP client implements it; for every other transport deregister is
+// a no-op.
+type deregisterClient interface {
+	Deregister(ctx context.Context, req protocol.DeregisterRequest) error
+}
+
+func (r *Runner) deregister(sessionID string) {
+	client, ok := r.client.(deregisterClient)
+	if !ok || sessionID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), deregisterTimeout)
+	defer cancel()
+	if err := client.Deregister(ctx, protocol.DeregisterRequest{RunnerID: r.config.RunnerID, SessionID: sessionID}); err != nil {
+		slog.Default().Warn("runner deregister failed; session will age out", "runner_id", r.config.RunnerID, "err", err)
+	}
 }

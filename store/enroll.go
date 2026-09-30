@@ -76,6 +76,16 @@ var (
 	// management path; it must never be surfaced on the runner-facing
 	// authentication path, where every failure looks like ErrAuthUnknownToken.
 	ErrIssuedIdentityNotFound = errors.New("store: issued identity not found")
+
+	// ErrIssuedIdentityExists is returned by Issue when runnerID already has an
+	// identity. Issue is insert-only: overwriting would let a second enroll that
+	// drew the same ID replace the first runner's token and scope in place,
+	// which is an identity takeover the caller never asked for.
+	ErrIssuedIdentityExists = errors.New("store: issued identity already exists")
+
+	// ErrCredentialGenerationConflict is returned by RotateCredential when the
+	// stored generation is not the expected one: another rotation won.
+	ErrCredentialGenerationConflict = errors.New("store: credential generation conflict")
 )
 
 // HashSecret is the one-way transform applied to every credential this
@@ -192,6 +202,14 @@ type RegistrationCode struct {
 	// code's blast radius: how long it works, and how many runners it can make.
 	// Setting one does not bound the other.
 	MaxUses int
+	// PoolID binds the code to a RunnerPool, making it one of the pool's
+	// registration tokens: enroll then takes the pool's ceiling, labels and
+	// instance limit instead of the code's own AllowedNamespaces /
+	// AllowedNodeTypes (which are copied from the pool at creation and kept
+	// only for display). "" is a legacy, pool-less code with the pre-pool
+	// behaviour. A pool-bound code always has MaxUses == 0; the pool's
+	// MaxInstances is the limit.
+	PoolID string
 	// UseCount is how many runners this code has enrolled. It is advanced only
 	// by Consume, never by ResolveByPlaintext — a lookup that mutated state
 	// would burn a slot on every enroll the scope check later rejects, and would
@@ -370,6 +388,19 @@ type IssuedIdentity struct {
 	// revoking a code does not narrow identities already issued from it, by
 	// design, so revoking one runner needs its own switch.
 	RevokedAt time.Time
+	// PoolID is the pool this identity was enrolled into, "" for legacy.
+	PoolID string
+	// CredentialGeneration counts token rotations; the first issue is 1 (0 on
+	// rows written before the field existed, read as 1). RotateCredential
+	// advances it by compare-and-swap.
+	CredentialGeneration int64
+	// PreviousTokenHash / PreviousTokenValidUntil keep the token of the
+	// previous generation accepted until the deadline, so a runner whose
+	// re-enroll response was lost or reordered, or a process still reporting
+	// in-flight results on its way out, is not locked out mid-rotation. A
+	// zero PreviousTokenValidUntil means no previous token is accepted.
+	PreviousTokenHash       [32]byte
+	PreviousTokenValidUntil time.Time
 }
 
 // Clone returns a copy of id whose Scope's AllowedNodeTypes / AllowedNamespaces
@@ -390,7 +421,18 @@ func (id IssuedIdentity) Clone() IssuedIdentity {
 
 // IssuedIdentityStore persists identities minted by enroll.
 type IssuedIdentityStore interface {
+	// Issue inserts a new identity. It never overwrites: an existing runnerID
+	// returns an error and leaves the stored row untouched.
 	Issue(ctx context.Context, id IssuedIdentity) error
+	// RotateCredential replaces the token of a live (not revoked, not expired)
+	// identity. It is a compare-and-swap on CredentialGeneration: when the
+	// stored generation (0 read as 1) equals expectGeneration, it moves the
+	// current TokenHash to PreviousTokenHash with PreviousTokenValidUntil =
+	// previousValidUntil, stores newHash, and returns expectGeneration+1.
+	// Otherwise it returns ErrCredentialGenerationConflict and changes nothing.
+	// An absent, revoked or expired identity returns ErrIssuedIdentityNotFound.
+	// It never touches RunnerID, Scope, ExpiresAt or RevokedAt.
+	RotateCredential(ctx context.Context, runnerID string, expectGeneration int64, newHash [32]byte, previousValidUntil time.Time) (int64, error)
 	// Lookup returns the identity for runnerID. Absent → (zero, false, nil).
 	// A storage or decode failure → (zero, false, err); callers must not read
 	// that as "absent" — control.IssuedIdentityAuthenticator relies on the

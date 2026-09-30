@@ -201,6 +201,8 @@ var autoMigrateModels = []any{
 	&dbRegistrationCode{},
 	&dbEnrollAudit{},
 	&dbIssuedIdentity{},
+	&dbRunnerPool{},
+	&dbRunnerInstance{},
 }
 
 // AutoMigrate creates or updates tables. Use only for development/testing;
