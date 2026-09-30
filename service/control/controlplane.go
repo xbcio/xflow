@@ -284,6 +284,10 @@ type ControlPlane struct {
 	// apiserver can merge it into the scrape endpoint.
 	metricsInbox *MetricsInbox
 
+	// runnerDescriptorConflicts receives the per-type conflict gauge each
+	// LiveRunnerNodeTypes aggregation reports. Nil when Config.Metrics is nil.
+	runnerDescriptorConflicts RunnerDescriptorConflictObserver
+
 	lifecycleMu                sync.Mutex
 	started                    bool
 	stopped                    bool
@@ -649,29 +653,35 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	httpServer.core.metricsReportInterval = cfg.MetricsReportInterval
 	grpcServer.core.metricsReportInterval = cfg.MetricsReportInterval
 
+	var runnerDescriptorConflicts RunnerDescriptorConflictObserver
+	if cfg.Metrics != nil {
+		runnerDescriptorConflicts = metrics.NewRunnerDescriptorMetrics(cfg.Metrics)
+	}
+
 	return &ControlPlane{
-		backend:                  cfg.Backend,
-		eng:                      eng,
-		runners:                  runners,
-		managementRunners:        managementRunners,
-		runnerControlMetrics:     runnerControlMetrics,
-		dispatcher:               dispatcher,
-		httpServer:               httpServer,
-		grpcServer:               grpcServer,
-		sweeper:                  sweeper,
-		instancePruner:           instancePruner,
-		instancePruneInterval:    instancePruneInterval,
-		elector:                  elector,
-		logger:                   cfg.Logger,
-		entryActivations:         cfg.EntryActivationStore,
-		entryManager:             entryManager,
-		entryReconciler:          entryReconciler,
-		workflowRegistry:         workflowRegistry,
-		workflowProjectionWorker: workflowProjectionWorker,
-		supplyObserved:           supplyObserved,
-		supplyEncryptor:          supplyEnc,
-		supplyKeyRotationPeriod:  cfg.SupplyKeyRotationPeriod,
-		metricsInbox:             metricsInbox,
+		backend:                   cfg.Backend,
+		eng:                       eng,
+		runners:                   runners,
+		managementRunners:         managementRunners,
+		runnerControlMetrics:      runnerControlMetrics,
+		dispatcher:                dispatcher,
+		httpServer:                httpServer,
+		grpcServer:                grpcServer,
+		sweeper:                   sweeper,
+		instancePruner:            instancePruner,
+		instancePruneInterval:     instancePruneInterval,
+		elector:                   elector,
+		logger:                    cfg.Logger,
+		entryActivations:          cfg.EntryActivationStore,
+		entryManager:              entryManager,
+		entryReconciler:           entryReconciler,
+		workflowRegistry:          workflowRegistry,
+		workflowProjectionWorker:  workflowProjectionWorker,
+		supplyObserved:            supplyObserved,
+		supplyEncryptor:           supplyEnc,
+		supplyKeyRotationPeriod:   cfg.SupplyKeyRotationPeriod,
+		metricsInbox:              metricsInbox,
+		runnerDescriptorConflicts: runnerDescriptorConflicts,
 	}, nil
 }
 
