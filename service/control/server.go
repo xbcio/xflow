@@ -248,12 +248,25 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
+// maxRegisterRunnerBodyBytes caps an HTTP register body: the descriptor
+// envelope limit plus 1 MiB for the rest of the request (capabilities, labels,
+// namespaces, activation inventory). Without it the one request that carries
+// descriptors would be the only uncapped runner-protocol read.
+const maxRegisterRunnerBodyBytes = protocol.MaxRunnerDescriptorEnvelopeBytes + 1<<20
+
 func (s *Server) HandleRegisterRunner(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
+	defer func() { _ = r.Body.Close() }()
 	var req protocol.RegisterRunnerRequest
-	if !decodeJSON(w, r, &req) {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRegisterRunnerBodyBytes)).Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeRunnerError(w, ErrRegisterBodyTooLarge)
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
 	overrideTokenFromHeader(r, &req.AuthToken)
@@ -608,7 +621,7 @@ func writeRunnerError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusForbidden, ErrAuthCapabilityDenied.Error())
 	case errors.Is(err, ErrMetricsProxyDisabled):
 		writeError(w, http.StatusServiceUnavailable, err.Error())
-	case errors.Is(err, ErrMetricsPayloadTooLarge):
+	case errors.Is(err, ErrMetricsPayloadTooLarge), errors.Is(err, ErrRegisterBodyTooLarge):
 		writeError(w, http.StatusRequestEntityTooLarge, err.Error())
 	case errors.Is(err, ErrMetricsEncodingUnsupported):
 		writeError(w, http.StatusUnsupportedMediaType, err.Error())

@@ -69,6 +69,9 @@ var (
 	// ErrMetricsPayloadTooLarge means the report exceeded
 	// protocol.MaxRunnerMetricsBytes. The body is not decoded.
 	ErrMetricsPayloadTooLarge = errors.New("runner metrics payload too large")
+	// ErrRegisterBodyTooLarge means an HTTP register body exceeded
+	// maxRegisterRunnerBodyBytes. The body is not decoded.
+	ErrRegisterBodyTooLarge = errors.New("runner register request too large")
 	// ErrMetricsEncodingUnsupported means the report was not gzip'd.
 	ErrMetricsEncodingUnsupported = errors.New("runner metrics payload must be gzip encoded")
 )

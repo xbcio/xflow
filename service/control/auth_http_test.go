@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/xbcio/xflow/service/protocol"
@@ -148,6 +149,56 @@ func TestHTTPRegisterRejectsBlankCapability(t *testing.T) {
 		Capabilities: []protocol.Capability{{NodeType: " \t "}},
 	})
 	assertHTTPRegisterError(t, resp, http.StatusBadRequest, ErrInvalidCapability.Error())
+}
+
+func TestHTTPRegisterBodySizeCap(t *testing.T) {
+	// registerWithPad posts a well-formed register whose descriptors_json is
+	// padded to padBytes, so only the body size differs between the cases.
+	registerWithPad := func(t *testing.T, srv *httptest.Server, padBytes int) *http.Response {
+		t.Helper()
+		envelope := `{"schema":"` + protocol.RunnerDescriptorSchema + `","descriptors":[],"pad":"` + strings.Repeat("x", padBytes) + `"}`
+		return postAuthed(t, srv.URL+protocol.RegisterRunnerPath, "secret-token", protocol.RegisterRunnerRequest{
+			InstanceUID:     "test-instance",
+			RunnerID:        "order-runner-1",
+			Concurrency:     1,
+			Capabilities:    []protocol.Capability{{NodeType: "xflow.function"}},
+			DescriptorsJSON: json.RawMessage(envelope),
+		})
+	}
+
+	t.Run("OversizedReturns413", func(t *testing.T) {
+		srv, dir := newAuthedServer(t)
+		resp := registerWithPad(t, srv, maxRegisterRunnerBodyBytes)
+		assertHTTPRegisterError(t, resp, http.StatusRequestEntityTooLarge, ErrRegisterBodyTooLarge.Error())
+		if _, ok := dir.Runner(context.Background(), "order-runner-1"); ok {
+			t.Fatal("oversized register was applied")
+		}
+	})
+	t.Run("FullEnvelopeUnderCapAccepted", func(t *testing.T) {
+		// A body carrying a descriptor envelope at its own limit must still fit.
+		srv, dir := newAuthedServer(t)
+		resp := registerWithPad(t, srv, protocol.MaxRunnerDescriptorEnvelopeBytes-100)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		if _, ok := dir.Runner(context.Background(), "order-runner-1"); !ok {
+			t.Fatal("runner not registered")
+		}
+	})
+	t.Run("MalformedStill400", func(t *testing.T) {
+		srv, _ := newAuthedServer(t)
+		req, err := http.NewRequest(http.MethodPost, srv.URL+protocol.RegisterRunnerPath, strings.NewReader(`{not json`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer secret-token")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertHTTPRegisterError(t, resp, http.StatusBadRequest, "invalid JSON")
+	})
 }
 
 func assertHTTPRegisterError(t *testing.T, resp *http.Response, wantStatus int, wantMessage string) {
