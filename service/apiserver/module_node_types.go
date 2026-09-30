@@ -23,8 +23,9 @@ import (
 type nodeDescriptorSource func() []registry.RegisteredDescriptor
 
 // runnerNodeTypeSource returns the descriptors the live runners serving ns
-// reported, aggregated by (type, version). It is set by the embedding host
-// from the control plane's runner directory; nil means no runner types.
+// reported, aggregated by (type, version). newWorkflowControlModule sets it
+// from the control plane (ControlPlane.LiveRunnerNodeTypes); nil means no
+// runner types.
 type runnerNodeTypeSource func(ctx context.Context, ns namespace.Namespace) ([]control.AggregatedDescriptor, error)
 
 // builtinNodeTypePrefix marks builtin node types. A runner never contributes

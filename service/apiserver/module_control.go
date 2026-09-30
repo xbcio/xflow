@@ -80,6 +80,8 @@ type workflowControlModule struct {
 	nodeDescriptors nodeDescriptorSource
 	// runnerNodeTypes feeds the runner-reported part of a namespace-scoped
 	// GET /v1/node-types; nil means runners contribute nothing.
+	// newWorkflowControlModule sets it to the control plane's live runner
+	// node types, so every APIServer (embedded or cmd/server) serves them.
 	runnerNodeTypes runnerNodeTypeSource
 }
 
@@ -87,7 +89,12 @@ func newWorkflowControlModule(cp *control.ControlPlane, auth WorkflowAuthenticat
 	if tracer == nil {
 		tracer = tracing.NoopTracer{}
 	}
-	return &workflowControlModule{cp: cp, eng: cp.Engine(), auth: auth, log: log, tracer: tracer}
+	return &workflowControlModule{
+		cp: cp, eng: cp.Engine(), auth: auth, log: log, tracer: tracer,
+		runnerNodeTypes: func(ctx context.Context, ns namespace.Namespace) ([]control.AggregatedDescriptor, error) {
+			return cp.LiveRunnerNodeTypes(ctx, ns, time.Now())
+		},
+	}
 }
 
 func (m *workflowControlModule) Name() string { return "workflow-control" }

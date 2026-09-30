@@ -9,8 +9,10 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/service/control"
+	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -320,5 +322,40 @@ func TestNodeTypesAuthzBranchNamespace(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The production constructor wires the control plane's live runner node
+// types, so a runner registered on the control plane's directory reaches a
+// namespace-scoped list without any host-side hook.
+func TestNewWorkflowControlModuleServesControlPlaneRunnerNodeTypes(t *testing.T) {
+	dir := control.NewMemoryRunnerDirectory()
+	cp, err := control.NewControlPlane(control.Config{Backend: local.New(), RunnerDirectory: dir})
+	if err != nil {
+		t.Fatalf("NewControlPlane: %v", err)
+	}
+	raw, err := json.Marshal(types.Descriptor{Type: "acme.wired", DisplayName: "Wired"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dir.Register(context.Background(), control.RegisterRunnerRequest{
+		RunnerID:     "runner-wired",
+		Capacity:     1,
+		Capabilities: []protocol.Capability{{NodeType: "acme.wired", NodeVersion: 1}},
+		Descriptors:  []control.RunnerNodeDescriptor{{Type: "acme.wired", Version: 1, Hash: "h", JSON: raw}},
+		Policy:       control.RunnerPolicy{AllowedNodeTypes: []string{"*"}, AllowedNamespaces: []string{"*"}},
+		Namespaces:   []namespace.Namespace{namespace.Default},
+		InstanceUID:  "instance-wired",
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	mux := nodeTypesMux(newWorkflowControlModule(cp, nil, nil, nil))
+	s, ok := findNodeTypeSchema(listNodeTypeSchemas(t, mux, "/v1/node-types?namespace=default"), "acme.wired", 1)
+	if !ok || s.Source != nodeFormSourceRunner {
+		t.Fatalf("acme.wired@1 = %+v (found %v), want a runner-sourced entry", s, ok)
+	}
+	if _, ok := findNodeTypeSchema(listNodeTypeSchemas(t, mux, "/v1/node-types"), "acme.wired", 1); ok {
+		t.Fatal("unscoped list served a runner type")
 	}
 }
