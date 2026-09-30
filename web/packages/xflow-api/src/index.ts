@@ -28,6 +28,15 @@ export interface ListWorkflowsOptions {
   pageSize?: number;
 }
 
+/** Options for GET /v1/node-types. */
+export interface ListNodeTypesOptions {
+  /**
+   * Namespace the caller edits in. Sent as `?namespace=`; an omitted or empty
+   * value requests the server registry only.
+   */
+  namespace?: string;
+}
+
 /** The `{list,total}` payload returned by GET /v1/workflows. */
 export interface WorkflowListPage {
   list: WorkflowSummary[];
@@ -144,11 +153,14 @@ export interface XFlowApiClient {
   waitExecution(id: string, options?: WaitExecutionOptions): Promise<WaitExecutionResult>;
   /**
    * GET /v1/node-types: the NodeFormSchema of every node type registered in
-   * the server process (runner-only custom types are absent), plus the
-   * server's param validation mode. Responses carry an ETag and
-   * `Cache-Control: no-cache`, so the browser HTTP cache revalidates them.
+   * the server process, plus the server's param validation mode. With a
+   * `namespace`, the server authorizes a read of that namespace and also
+   * merges the types live runners entitled to it report (`source: "runner"`,
+   * `runner_pools`); without one it serves the server registry only.
+   * Responses carry an ETag and `Cache-Control: no-cache`, so the browser HTTP
+   * cache revalidates them.
    */
-  listNodeTypes(): Promise<NodeTypesResponse>;
+  listNodeTypes(options?: ListNodeTypesOptions): Promise<NodeTypesResponse>;
   /**
    * GET /v1/node-types/{type}?version=: one schema. An omitted (or 0) version
    * selects the latest; an unknown type or version rejects with status 404.
@@ -797,8 +809,11 @@ export function createXFlowApiClient(options: XFlowApiClientOptions): XFlowApiCl
         }
       );
     },
-    listNodeTypes() {
-      return request<NodeTypesResponse>(fetcher, joinUrl(options.baseUrl, "/node-types")).then(mapNodeTypes);
+    listNodeTypes(listOptions) {
+      const path = withQuery("/node-types", {
+        namespace: listOptions?.namespace ? listOptions.namespace : undefined
+      });
+      return request<NodeTypesResponse>(fetcher, joinUrl(options.baseUrl, path)).then(mapNodeTypes);
     },
     getNodeType(type, version) {
       const path = withQuery(nodeTypePath(type), {

@@ -475,6 +475,41 @@ describe("node types", () => {
     expect(fetcher).toHaveBeenCalledWith("/v1/node-types", undefined);
   });
 
+  it("scopes node types to a namespace only when one is given", async () => {
+    const fetcher = vi.fn().mockImplementation(async () => success({ param_validation_mode: "warn", node_types: [] }));
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    await client.listNodeTypes({ namespace: "team a/b" });
+    await client.listNodeTypes({ namespace: "" });
+    await client.listNodeTypes({});
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+      "/v1/node-types?namespace=team+a%2Fb",
+      "/v1/node-types",
+      "/v1/node-types"
+    ]);
+  });
+
+  it("passes the runner source keys through unchanged", async () => {
+    const runnerSchema = {
+      spec: "node-form/v1",
+      node_type: "acme.analyse",
+      node_version: 2,
+      kind: "action",
+      display_name: "Analyse",
+      fields: [],
+      source: "runner",
+      runner_pools: ["gpu", "prod"]
+    };
+    const fetcher = vi.fn().mockResolvedValue(success({ param_validation_mode: "warn", node_types: [schema, runnerSchema] }));
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    const response = await client.listNodeTypes({ namespace: "default" });
+    expect(response.node_types).toEqual([schema, runnerSchema]);
+    expect(response.node_types[0]).not.toHaveProperty("source");
+    expect(response.node_types[1]?.source).toBe("runner");
+    expect(response.node_types[1]?.runner_pools).toEqual(["gpu", "prod"]);
+  });
+
   it("gets one node type, passing the version only when given", async () => {
     const fetcher = vi.fn().mockImplementation(async () => success(schema));
     const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
