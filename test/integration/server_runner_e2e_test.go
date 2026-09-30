@@ -24,7 +24,11 @@ import (
 
 type e2eSubmitReq struct {
 	Workflow *types.WorkflowDef `json:"workflow"`
-	Params   map[string]any     `json:"params"`
+	Params   map[string]any     `json:"params,omitempty"`
+	// Entry and Input select the explicit-entry (Invoke) shape of the same
+	// route; a multi-entry definition needs it, because Submit starts every root.
+	Entry string         `json:"entry,omitempty"`
+	Input map[string]any `json:"input,omitempty"`
 }
 
 type e2eSubmitResp struct {
@@ -69,7 +73,17 @@ func decodeSubmitResponse(t *testing.T, resp *http.Response) e2eSubmitResp {
 // Finding 1: accept *http.Client so server.Close() cleans up idle connections.
 func submitWorkflowHTTP(t *testing.T, baseURL string, client *http.Client, wf *types.WorkflowDef, params map[string]any) types.ExecutionID {
 	t.Helper()
-	body := e2eSubmitReq{Workflow: wf, Params: params}
+	return postExecuteHTTP(t, baseURL, client, e2eSubmitReq{Workflow: wf, Params: params})
+}
+
+// invokeWorkflowHTTP starts wf from the named entry over the same route.
+func invokeWorkflowHTTP(t *testing.T, baseURL string, client *http.Client, wf *types.WorkflowDef, entry string, input map[string]any) types.ExecutionID {
+	t.Helper()
+	return postExecuteHTTP(t, baseURL, client, e2eSubmitReq{Workflow: wf, Entry: entry, Input: input})
+}
+
+func postExecuteHTTP(t *testing.T, baseURL string, client *http.Client, body e2eSubmitReq) types.ExecutionID {
+	t.Helper()
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(body); err != nil {
 		t.Fatalf("encode: %v", err)
