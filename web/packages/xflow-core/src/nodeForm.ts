@@ -191,7 +191,17 @@ export interface NodeFormSchema {
   groups?: NodeFormGroup[];
   one_of?: NodeFormOneOf[];
   fields: NodeFormField[];
+  /**
+   * "runner" when live runners reported this schema (served only for a
+   * namespaced request); absent means the server's own registry.
+   */
+  source?: NodeFormSource;
+  /** Sorted pool names reporting a runner schema; absent when no pool reports it. */
+  runner_pools?: string[];
 }
+
+/** NodeFormSchema.source: where a schema came from; absent = server registry. */
+export type NodeFormSource = "runner";
 
 /** Server-side param validation mode (Doc A §2.4, Doc C §1 rule 3). */
 export type ParamValidationMode = "off" | "warn" | "enforce";
