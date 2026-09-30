@@ -230,7 +230,7 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+PathNodeTypes, authz(OpWorkflowRead, false, m.handleListNodeTypes, nil))
 	mux.HandleFunc("GET "+PathNodeTypeByType, authz(OpWorkflowRead, false, m.handleGetNodeType, nil))
 	mux.HandleFunc("POST "+PathWorkflowExecute, authz(OpWorkflowCreate, true, m.handleExecuteWorkflow, newExecutionIDResolver()))
-	mux.HandleFunc("POST "+PathWorkflowExecuteByID, authz(OpWorkflowInvoke, true, m.handleExecuteWorkflowByID, workflowIDResolver()))
+	mux.HandleFunc("POST "+PathWorkflowExecuteByID, authz(OpWorkflowInvoke, true, m.handleExecuteWorkflowByID, invokeByIDResolver()))
 	// Entry-seed endpoint (exact path, POST only). The authz wrapper injects
 	// the principal's namespace into the request context; handleSeedExecution
 	// reads it via namespace.FromContext — never from the client body.
@@ -362,6 +362,33 @@ func (m *workflowControlModule) handleRevokeSignalByID(w http.ResponseWriter, r 
 func newExecutionIDResolver() func(*http.Request) (string, string, string, string) {
 	return func(*http.Request) (string, string, string, string) {
 		return "", "", string(engine.NewExecutionID()), ""
+	}
+}
+
+// invokeByIDResolver is the resource resolver for POST /v1/workflows/{id}/execute
+// — invoke a REGISTERED workflow by id (spec §7).
+//
+// It differs from newExecutionIDResolver in exactly one slot: the resource names
+// the path's workflow, so the admission audit row carries a real resource and
+// workflow_id. It differs from workflowIDResolver in the executionID slot, and
+// that difference is the point: workflowIDResolver returns the WORKFLOW id there,
+// which authzWrap then injects as the execution id and engine.Submit/Invoke
+// adopts rather than minting a fresh one (engine.preallocOrNewExecutionID). Every
+// by-id invoke of one workflow then collapses onto a single execution id, and
+// because the engine keys its outbox, node state and advance markers by that id,
+// the second and later invokes are admitted (200, with an execution id) but never
+// dispatched — they never reach a terminal status and the caller burns its full
+// budget. That is not theoretical: the webscan RemoteExecutor invokes this route
+// once per batch (executor/remote.go), and a map node claimed as a single group
+// lease serves a whole batch, so any scan wider than one batch hits it.
+//
+// A fresh pre-allocated id keeps engine semantics (Submit/Invoke are "start a NEW
+// execution") and stays coherent with what the engine now does, without giving up
+// the resource/workflow dimensions an audit row is meant to carry.
+func invokeByIDResolver() func(*http.Request) (string, string, string, string) {
+	return func(r *http.Request) (string, string, string, string) {
+		id := r.PathValue("id")
+		return "workflow/" + id, id, string(engine.NewExecutionID()), ""
 	}
 }
 
