@@ -78,6 +78,9 @@ type workflowControlModule struct {
 	// nodeDescriptors feeds GET /v1/node-types; nil means
 	// registry.Descriptors (see module_node_types.go).
 	nodeDescriptors nodeDescriptorSource
+	// runnerNodeTypes feeds the runner-reported part of a namespace-scoped
+	// GET /v1/node-types; nil means runners contribute nothing.
+	runnerNodeTypes runnerNodeTypeSource
 }
 
 func newWorkflowControlModule(cp *control.ControlPlane, auth WorkflowAuthenticator, log engine.Logger, tracer tracing.Tracer) *workflowControlModule {
@@ -136,8 +139,10 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 	mux.HandleFunc("PUT "+PathWorkflowByID, wrap("replace_workflow", m.handleReplaceWorkflow))
 	mux.HandleFunc("DELETE "+PathWorkflowByID, wrap("deregister_workflow", m.handleDeregisterWorkflow))
 	// Node-type schemas (editor forms) are mounted in both branches, like
-	// GET /v1/workflows; the registry they project is process-global, not
-	// namespaced.
+	// GET /v1/workflows; the server registry they project is process-global,
+	// not namespaced. This branch has no principal to authorize a namespace
+	// against, so a ?namespace= other than the request's own (Default) is
+	// refused inside the handler (see nodeTypesScope).
 	mux.HandleFunc("GET "+PathNodeTypes, wrap("read_node_types", m.handleListNodeTypes))
 	mux.HandleFunc("GET "+PathNodeTypeByType, wrap("read_node_types", m.handleGetNodeType))
 	mux.HandleFunc("POST "+PathWorkflowExecute, wrap("execute_workflow", m.handleExecuteWorkflow))
@@ -225,10 +230,12 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE "+PathWorkflowByID, authz(OpWorkflowRegister, true, m.handleDeregisterWorkflow, workflowIDResolver()))
 	// GET /v1/node-types[/{type}] reuses OpWorkflowRead: a principal that may
 	// read workflow definitions may read the node schemas they are written
-	// against. No resource resolver: the registry is not a per-namespace
-	// resource.
-	mux.HandleFunc("GET "+PathNodeTypes, authz(OpWorkflowRead, false, m.handleListNodeTypes, nil))
-	mux.HandleFunc("GET "+PathNodeTypeByType, authz(OpWorkflowRead, false, m.handleGetNodeType, nil))
+	// against. The resolver carries an optional ?namespace= as the resource
+	// namespace, so a scoped request (the only one that merges runner-reported
+	// types, which belong to tenant pools) is authorized against that
+	// namespace; an unscoped one is decided on the operation alone.
+	mux.HandleFunc("GET "+PathNodeTypes, authz(OpWorkflowRead, false, m.handleListNodeTypes, nodeTypesNamespaceResolver()))
+	mux.HandleFunc("GET "+PathNodeTypeByType, authz(OpWorkflowRead, false, m.handleGetNodeType, nodeTypesNamespaceResolver()))
 	// GET /v1/current-user reports the verified principal itself. No resource
 	// resolver: the resource IS the caller, so there is no id to resolve and no
 	// namespace to compare — the wrapper already bound the response to the

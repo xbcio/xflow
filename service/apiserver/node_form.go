@@ -47,7 +47,16 @@ type nodeFormSchema struct {
 	Groups       []nodeFormGroup `json:"groups,omitempty"`
 	OneOf        []nodeFormOneOf `json:"one_of,omitempty"`
 	Fields       []nodeFormField `json:"fields"`
+	// Source is nodeFormSourceRunner for a schema live runners reported;
+	// absent means the server's own registry.
+	Source string `json:"source,omitempty"`
+	// RunnerPools is the sorted set of pool names reporting a runner schema;
+	// absent for server schemas and runners registered without a pool.
+	RunnerPools []string `json:"runner_pools,omitempty"`
 }
+
+// nodeFormSourceRunner is NodeFormSchema.source for runner-reported types.
+const nodeFormSourceRunner = "runner"
 
 type nodeFormPort struct {
 	Name        string `json:"name"`

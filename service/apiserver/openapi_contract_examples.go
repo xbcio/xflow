@@ -244,13 +244,13 @@ func ExampleNodeTypesResponse() any {
 // ExampleNodeFormSchema builds a GET /v1/node-types/{type} payload from a
 // synthetic descriptor that sets every projected member at least once
 // (conditions with eq/in/truthy/all_of/any_of/not, every rule kind, item,
-// sub-fields, options_when, groups, one_of), so an omitempty or tag mistake on
-// a member no builtin uses still surfaces.
+// sub-fields, options_when, groups, one_of, and the runner source keys), so
+// an omitempty or tag mistake on a member no builtin uses still surfaces.
 func ExampleNodeFormSchema() any {
 	yes := true
 	lo, hi := 0.0, 10.0
 	two := 2
-	return projectNodeForm(registry.RegisteredDescriptor{Type: "example.node", Version: 2, Descriptor: types.Descriptor{
+	s := projectNodeForm(registry.RegisteredDescriptor{Type: "example.node", Version: 2, Descriptor: types.Descriptor{
 		Type:         "example.node",
 		Kind:         types.NodeKindAction,
 		DisplayName:  "Example",
@@ -285,4 +285,7 @@ func ExampleNodeFormSchema() any {
 			{Name: "hidden", Type: types.ParamString, VisibleWhen: &types.Condition{Not: &types.Condition{}}},
 		},
 	}}, nil)
+	s.Source = nodeFormSourceRunner
+	s.RunnerPools = []string{"analytics"}
+	return s
 }
