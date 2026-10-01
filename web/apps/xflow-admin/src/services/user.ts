@@ -19,6 +19,18 @@ export interface CurrentIdentity {
   scopes: string[];
 }
 
+/** /v1 统一信封；身份在 data 里，不是响应体顶层。 */
+interface CurrentUserEnvelope {
+  success: boolean;
+  code: string;
+  message: string;
+  data?: CurrentIdentity;
+}
+
 export async function fetchCurrentUser(): Promise<CurrentIdentity> {
-  return request<CurrentIdentity>('/v1/current-user', { method: 'GET' });
+  const envelope = await request<CurrentUserEnvelope>('/v1/current-user', { method: 'GET' });
+  if (!envelope?.success || !envelope.data) {
+    throw new Error(envelope?.message || 'current-user response carried no identity');
+  }
+  return envelope.data;
 }
