@@ -84,6 +84,12 @@ func TestTransientClusterSuspendWorkflowFails(t *testing.T) {
 		}
 		return isTerminalStatus(snap.Status)
 	})
+	// Hooks fire after the terminal state is committed, so a reader that sees
+	// the state can still be ahead of them; under -race on a loaded host that
+	// gap is long enough to observe. Wait for the hooks themselves.
+	waitForTransientCondition(t, 10*time.Second, func() bool {
+		return hooks.nodeCompleteStatus("wait") != "" && hooks.executionCompleteStatus(id) != ""
+	})
 
 	if hooks.nodeCompleteStatus("wait") != types.NodeStatusFailed {
 		t.Fatalf("wait hook status = %s, want failed", hooks.nodeCompleteStatus("wait"))
