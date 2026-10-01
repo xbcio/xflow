@@ -20,6 +20,7 @@ package masterkey
 import (
 	"crypto/hkdf"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -87,6 +88,41 @@ func Load(envValue string, filePath string) (*Key, error) {
 	k := &Key{}
 	copy(k.raw[:], raw)
 	return k, nil
+}
+
+// ErrPreviousEqualsCurrent means the previous-key input holds the same value
+// as the current key. That is always an operator mistake during a rotation
+// (the old and new values were swapped or copied into both slots), and
+// accepting it would let a reseal job report success while re-sealing nothing.
+var ErrPreviousEqualsCurrent = errors.New("masterkey: previous key equals current key")
+
+// LoadPrevious resolves the key being rotated OUT (XFLOW_MASTER_KEY_PREVIOUS /
+// --master-key-previous-file). It exists only for the rotation window: while
+// it is configured, rows sealed under it stay readable, and a reseal pass
+// rewrites them under current so it can be removed afterwards.
+//
+// It applies exactly the same validation as Load — env over file, 0600 file,
+// 32 decoded bytes, value never echoed — and returns ErrNotConfigured when
+// neither source is set, which is the normal steady state. current must be
+// non-nil: a previous key without a current key has nothing to rotate to.
+func LoadPrevious(envValue, filePath string, current *Key) (*Key, error) {
+	if current == nil {
+		if envValue != "" || filePath != "" {
+			return nil, errors.New("masterkey: previous key configured without a current key")
+		}
+		return nil, ErrNotConfigured
+	}
+	prev, err := Load(envValue, filePath)
+	if err != nil {
+		if errors.Is(err, ErrNotConfigured) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("previous %w", err)
+	}
+	if subtle.ConstantTimeCompare(prev.raw[:], current.raw[:]) == 1 {
+		return nil, ErrPreviousEqualsCurrent
+	}
+	return prev, nil
 }
 
 // Derive returns a purpose-scoped 32-byte subkey via HKDF-SHA256. Distinct
