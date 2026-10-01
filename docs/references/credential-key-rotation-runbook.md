@@ -19,19 +19,23 @@ buried in its section.
 | Axis | What it protects | Who / what rotates it | Safe today? |
 |---|---|---|---|
 | **1. Supply transport key** | supply content in flight from control plane to runner (`GET /v1/supplies/{name}` with `Accept: application/x-xflow-encrypted`) | the control plane, unattended, on a schedule (`DefaultSupplyKeyRotationPeriod`, 24h); a runner adopts a rotation on its next heartbeat | **Yes.** Automated, in-flight only, reissuable at will, no stored data depends on it. See §2. |
-| **2. Supply at-rest KEK** (`XFLOW_MASTER_KEY` / `--master-key-file`) | the `content` column of every stored supply row in MySQL | manual — and **there is no way to do it today** | **NO — NOT POSSIBLE.** Replacing the master key makes every previously stored supply row undecryptable, which stops every runner from hosting any trigger. It requires a code change (a previous-key configuration surface **and** a re-encryption path) plus an owner decision. Read §3 before touching this key. |
-| **3. Runner credentials** (static bearer token, enrollment-issued identity, mTLS material) | a runner's authentication to the control plane | manual, per runner (or per fleet) | **Partly.** A static token and a client certificate can each be replaced, at the cost of restarts. An enrollment-issued token **cannot** be rotated in place — renewal extends its expiry and never changes the token. See §4. |
+| **2. Supply at-rest KEK** (`XFLOW_MASTER_KEY` / `--master-key-file`) | the `content` column of every stored supply row in MySQL | manual, offline-window — `xflow supply reseal` (`cmd/xflow/supply_reseal.go`) | **Yes, offline-window only.** A previous-key configuration surface (`masterkey.LoadPrevious`) and a re-encryption path (`(*sqlstore.Provider).ResealSupplies`, wired to `xflow supply reseal`) now exist. Rotating **without** loading the previous key still destroys access to every stored row (§3.4 is unchanged and still describes that failure). This path has never been rehearsed in a real environment; see §3. |
+| **3. Runner credentials** (static bearer token, enrollment-issued identity, mTLS material) | a runner's authentication to the control plane | manual, per runner (or per fleet) | **Partly.** A static token and a client certificate can each be replaced. The **server side** of both (the policy file and the TLS material) hot-reloads via `SIGHUP` with no restart; the **runner side** of both still requires a restart per runner. An enrollment-issued token **cannot** be rotated in place — renewal extends its expiry and never changes the token. See §4. |
 
 > **Operators: if you came here to rotate a key, find your axis first.** Axis 1
-> and axis 3 have procedures. Axis 2 has a refusal, and following a
-> "how to rotate the at-rest key" procedure — from anywhere, including a generic
-> KMS key-rotation playbook written for a different system — destroys access to
-> all stored supply content. There is no recovery without the old key.
+> and axis 3 have procedures. Axis 2 also has one now, but it is
+> **offline-window only** and has never been rehearsed in a real environment —
+> read §3 in full before starting, and do not treat a generic KMS
+> key-rotation playbook written for a different system as a substitute for
+> the procedure below. Skipping the previous-key step (§3.4) still destroys
+> access to all stored supply content, with no way back.
 
-Cross-cutting: axes 2 and 3 are **offline changes** (each needs at least a
-process restart), so they couple to the maintenance window in
-[maintenance-window-runbook.md](maintenance-window-runbook.md). Axis 1 needs no
-window at all.
+Cross-cutting: axis 2 is an **offline change** (it needs at least a process
+restart on every server), so it couples to the maintenance window in
+[maintenance-window-runbook.md](maintenance-window-runbook.md). Axis 3's
+**server-side** material (runner auth policy, server TLS cert/key/client-CA)
+now hot-reloads via `SIGHUP` and needs no window; axis 3's **runner-side**
+material still requires restarting each runner. Axis 1 needs no window at all.
 
 ## 2. Axis 1 — supply transport key (automated, safe)
 
@@ -160,110 +164,71 @@ previous value is not retained (`service/control/supply_encryption.go:143-166`).
 key is still decryptable only while it occupies the runner keyring's previous
 slot (`service/crypto/supplyenc/supplyenc.go:155-165`).
 
-## 3. Axis 2 — supply at-rest KEK: **ROTATION IS NOT POSSIBLE TODAY**
+## 3. Axis 2 — supply at-rest KEK: offline-window rotation (unrehearsed)
 
-### 3.1 The refusal
+### 3.1 Summary
 
-> **Do not rotate the at-rest KEK. There is no procedure that leaves the stored
-> data readable, because none exists in the code.**
+> **This axis is rotatable, but only through an offline maintenance window,
+> and the procedure below has never been exercised in a real environment in
+> this repository.** Treat every step as unverified until it has been
+> rehearsed once against a non-production database.
 >
-> The KEK (`XFLOW_MASTER_KEY` or `--master-key-file`) is, today, a
-> **write-once, never-change** secret: it is exactly as load-bearing as the
-> supply data itself. Treat the two with the same care, and treat "the KEK must
-> never be lost" as an operational invariant of the deployment.
+> The KEK (`XFLOW_MASTER_KEY` or `--master-key-file`) still protects data with
+> the same weight as the supply content itself: losing it with no previous
+> key configured, or skipping the reseal step below, destroys that data with
+> no way back. The two capabilities that used to be missing now exist:
 >
-> Making rotation possible is **a code change plus an owner decision** (§3.5),
-> not an operator procedure. This section therefore documents what is missing
-> and what would have to be built first. It deliberately contains no
-> step-by-step rotation to follow.
+> - a previous-key configuration surface
+>   (`masterkey.LoadPrevious`, `service/crypto/masterkey/masterkey.go`;
+>   `supplyenc.NewAtRestWithPrevious`, `service/crypto/supplyenc/atrest.go`), and
+> - a re-encryption path (`(*sqlstore.Provider).ResealSupplies`,
+>   `store/sqlstore/supply_reseal.go`) exposed as an operator command
+>   (`xflow supply reseal`, `cmd/xflow/supply_reseal.go`).
+>
+> Rotating **without** loading the previous key is exactly the failure this
+> runbook warned about before these existed, and §3.4 below still describes
+> that chain unchanged — it is now the documented consequence of skipping
+> step (b), not a description of a missing capability.
 
 ### 3.2 What it protects
 
 - Every stored supply row's `content` column in MySQL, sealed on write and
   opened on read (`store/sqlstore/supply.go:123-129`, `:46-54`).
 - It is derived, not stored: `supplyenc.NewAtRest(mk.Derive(supplyenc.SupplyContentInfo))`
-  (`cmd/server/main.go:583-585`) from the single master key loaded at
-  `cmd/server/main.go:581`. `Derive` is deterministic HKDF-SHA256 scoped by an
-  info string, which is what makes previously stored ciphertext readable after a
-  restart (`service/crypto/masterkey/masterkey.go:92-110`).
+  (`cmd/server/supply_keys.go`) from the single master key loaded at server
+  startup. `Derive` is deterministic HKDF-SHA256 scoped by an info string,
+  which is what makes previously stored ciphertext readable after a restart
+  (`service/crypto/masterkey/masterkey.go`).
 - The transport key is *not* this key, and the two have opposite lifetimes by
   design: "the transport key is short-lived and reissued at will, while this one
   must stay derivable for the lifetime of the stored data"
-  (`service/crypto/supplyenc/atrest.go:12-15`).
+  (`service/crypto/supplyenc/atrest.go`).
 
-### 3.3 Why rotation is impossible today — link by link
+### 3.3 The two keys the rotation window uses
 
-Each link below was verified against the code, and the two negative links were
-proved by the searches named inline.
+Two keys cover exactly **one** rotation. A previous key is accepted by
+`AtRest.Open` for reading only; every `Seal` (new write, and every row a
+reseal pass rewrites) always uses the current key
+(`service/crypto/supplyenc/atrest.go`, `NewAtRestWithPrevious`). This is a hard
+ceiling, not a convenience limit: `Keyring` holds at most current + previous,
+so starting a second rotation before the first one's reseal pass has reported
+`failed=0` strands whatever is still sealed under the oldest key with no key
+left in the keyring that can open it.
 
-1. **One master key, from one value.** `masterkey.Load(os.Getenv("XFLOW_MASTER_KEY"), cfg.masterKeyFile)`
-   returns a single `*Key` (`cmd/server/main.go:581`;
-   `service/crypto/masterkey/masterkey.go:53-90`). `--master-key-file` is one
-   path holding one value (`cmd/server/main.go:133-135`, `:214`).
-2. **The at-rest encryptor is built with exactly one key.**
-   `NewAtRest` does `NewKeyring(key)` with a single key
-   (`service/crypto/supplyenc/atrest.go:21-26`). It exposes only `Seal` (`:28-31`)
-   and `Open` (`:49-58`) — no way to add a second key, and no way to reach the
-   keyring it holds.
-3. **Nothing constructs a two-key at-rest keyring.** `NewKeyring` takes variadic
-   keys (`service/crypto/supplyenc/supplyenc.go:144-153`) and the keyring holds
-   up to current + previous (`:137-142`), but the only two-key construction in
-   production code is the runner's **transport** keyring
-   (`service/runner/runner.go:701-706`). The other callers are
-   `service/crypto/supplyenc/atrest.go:25`
-   (one key) and tests.
-4. **Even a two-key keyring would not survive a second rotation.** `Rotate`
-   installs `[]*Key{newKey, keys[0]}` (`service/crypto/supplyenc/supplyenc.go:155-165`,
-   the assignment at `:163`): the oldest key is evicted, and a second rotation
-   drops the key the oldest rows are sealed under.
-5. **No configuration surface for a previous / old master key exists.**
-   *Search:* `grep -rniE "previous.?master|old.?master|master.?key.?previous|prev.?kek|fallback.?key|secondary.?master|master.?key.?ring" --include=*.go .`
-   → no matches. The only master-key inputs anywhere in the tree are
-   `XFLOW_MASTER_KEY` and `--master-key-file`, each a single value
-   (`cmd/server/main.go:581`, `:214`, `:882`;
-   `service/crypto/masterkey/masterkey.go:45-47`).
-6. **No re-encryption / re-wrap / migration path exists for stored supply rows.**
-   *Search:* `grep -rni "reencrypt|re-encrypt|rewrap|re-wrap|rekey|re-key|migrat" --include=*.go service/crypto store cmd`
-   → the only hits are the word "migration" in comments about unrelated schema
-   `AutoMigrate` work and about a *damaged* envelope
-   (`service/crypto/supplyenc/atrest.go:45`). Nothing iterates supply rows to
-   re-seal them; `Seal` is called only from the write path
-   (`store/sqlstore/supply.go:123-129`), and `cmd/xflow` ships only
-   `dead-letter list|replay|reconcile` (`cmd/xflow/command.go:14-16`,
-   `cmd/xflow/dead_letter.go:139-140`, `:187-188`,
-   `cmd/xflow/dead_letter_reconcile.go:34-35`).
-   Note the second consequence: because `PUT /v1/supplies/{name}` is sealed and
-   the write path is in-process only
-   (`service/apiserver/module_supply.go:60-65`;
-   `service/apiserver/authz.go:127-130`), an operator cannot even re-put the
-   content by hand through the API.
-7. **The key ID is in the envelope and decryption is keyed on it.** The envelope
-   carries `kid` (`service/crypto/supplyenc/supplyenc.go:96-101`) and `Decrypt`
-   looks the key up by it, failing with `ErrUnknownKey` =
-   `"supplyenc: no key matches kid"` (`:129-135`, `:207-210`).
-8. **The info string is a one-way door, by intent.** `SupplyContentInfo` carries
-   a version suffix "instead of ever being edited in place" because changing it
-   "makes every previously stored row unreadable"
-   (`service/crypto/supplyenc/atrest.go:7-10`), and the guard test states the
-   same thing: it "re-keys the store and makes every supply row already written
-   undecryptable, with no migration path"
-   (`service/crypto/supplyenc/key_scope_and_sniff_test.go:39-44`).
-9. **The design document already says rotation needs a full re-encryption.**
-   `docs/design/SUPPLY-NODE.md` §10 (`:554-626`) lists the KEK's loss consequence
-   as "需重发 + 重包 DEK" (`:560`) and notes that hardcoding a key would make
-   rotation "需要发版加全量重新加密"; the same section records
-   "**未做**：无 KMS 集成，KEK 由部署方注入" (`:626`).
+- `masterkey.LoadPrevious` rejects a previous value equal to the current key
+  (`ErrPreviousEqualsCurrent`) — a rotation that installs the same key twice
+  would "succeed" while resealing nothing.
+- `masterkey.LoadPrevious` rejects a previous key configured without a current
+  key — there is nothing to rotate *to*.
+- Neither loader ever echoes a bad key value in its error text.
 
-**Conclusion: CONFIRMED — at-rest KEK rotation is not possible today.** Two
-capabilities are missing, and neither is a configuration matter: a way to load a
-*previous* key so stored rows remain decryptable, and a way to *re-encrypt*
-stored rows so the previous key stops being needed.
+### 3.4 What happens if you replace the KEK WITHOUT loading the previous key
 
-### 3.4 What actually happens if you replace the KEK anyway
-
-For an operator who does it regardless, this is the concrete chain. It is worth
-reading before acting, because the symptom appears far from the cause and the
-server does not tell you why.
+This is not a hypothetical: it is the concrete failure that skipping step (b)
+in §3.5, or letting `XFLOW_MASTER_KEY_PREVIOUS` / `--master-key-previous-file`
+go unset during a cutover, still produces today. It is worth reading in full
+before touching this key, because the symptom appears far from the cause and
+the server does not tell you why.
 
 1. Server: `GET /v1/supplies/{name}` → `GetSupply` → `AtRest.Open` fails with
    `ErrUnknownKey`, wrapped as
@@ -283,90 +248,170 @@ server does not tell you why.
    `NotReadyError` (`:229-233`, message `supply not ready: <nodes>`, `:34-40`).
 4. Activation is declined **before** the subscription starts — deliberately, so
    traffic stays in Kafka with consumer-group lag as the signal
-   (`service/runner/trigger_activation_handler.go:184-192`). By `AtRest.Open`'s
-   own reasoning, "the supply gate would then decline every activation, so no
-   runner would host any trigger" (`service/crypto/supplyenc/atrest.go:33-48`).
+   (`service/runner/trigger_activation_handler.go:184-192`).
 5. Runner readiness never flips: `/readyz` reports not ready with reason
    `no supply has been fetched yet`, because only a successful fetch moves that
    state (`sdk/runner/lifecycle.go:95-102`, `:111-129`).
-6. **Recovery is not possible from the new key.** The rows are still sealed
-   under the old `kid`; putting the old key back is the only way to read them
-   again (`service/crypto/supplyenc/supplyenc.go:207-210`). If the old key value
-   is gone, the content is gone — and remember that supply rows are the input to
-   the supply gate, so the workflows they feed do not run either. The design's
-   own answer to KEK loss is to re-issue content and re-wrap, not to decrypt
-   (`docs/design/SUPPLY-NODE.md` §10) — and re-issuing means an in-process
-   `sdk/xflow.Server.UpdateSupply`, because the HTTP write verb is sealed
-   (`service/apiserver/authz.go:127-130`).
+6. **Recovery is not possible from the new key alone.** The rows are still
+   sealed under the old `kid`; the only way to read them again is to restart
+   with the old key loaded as the previous key
+   (`XFLOW_MASTER_KEY_PREVIOUS` / `--master-key-previous-file`) and then run
+   `xflow supply reseal`. If the old key value itself is gone, the content is
+   gone — and remember that supply rows are the input to the supply gate, so
+   the workflows they feed do not run either.
 
 One asymmetry is worth stating, because it makes the *upgrade* direction look
-safe and the *rotation* direction fatal: `Open` passes through anything that
-does not look like an envelope, which is what lets a deployment with
-pre-encryption plaintext rows start encrypting without breaking them
-(`service/crypto/supplyenc/atrest.go:33-52`;
-`service/crypto/supplyenc/supplyenc.go:248-268`). Plaintext→encrypted is safe.
-Encrypted→different-key is not.
+safe and the *rotation-without-previous-key* direction fatal: `Open` passes
+through anything that does not look like an envelope, which is what lets a
+deployment with pre-encryption plaintext rows start encrypting without
+breaking them (`service/crypto/supplyenc/atrest.go:33-52`;
+`service/crypto/supplyenc/supplyenc.go:248-268`). Plaintext→encrypted is safe
+with no previous key needed. Encrypted→different-key is only safe with the
+old key loaded as previous through the window below.
 
-### 3.5 What must happen before a KEK rotation is possible (owner decision)
+### 3.5 Procedure — offline maintenance window (unrehearsed)
 
-This runbook does **not** assign an owner or a deadline; that is D6 in
-[RELEASE-GATES.md](../design/RELEASE-GATES.md) §6.1 and it remains `OPEN`. What
-follows is the shape of the work, described where it would go. Nothing here is
-implemented, and none of it should be started without that decision.
+This is an **offline-window** operation: every server that talks to this
+MySQL database restarts twice. Coordinate it as a
+[maintenance-window-runbook.md](maintenance-window-runbook.md) event, not as a
+live change.
 
-1. **A configuration surface for the previous key.** Loading two keys is not a
-   flag on `masterkey.Load`: it returns one `*Key`
-   (`service/crypto/masterkey/masterkey.go:53-90`). A previous-key input would
-   need a new API in `service/crypto/masterkey` (e.g. a pair-loading entry point)
-   with the same validation obligations the existing loader already carries —
-   reject a group/world-readable key file (`:63-65`), accept exactly 32 decoded
-   bytes (`:84-86`), and never echo the value in an error (`:79-83`). The
-   at-rest encryptor would then be built with a two-key keyring
-   (`service/crypto/supplyenc/atrest.go:21-26`), the current key for `Seal` and
-   both for `Open`. Note the constraint at
-   `service/crypto/supplyenc/supplyenc.go:155-165`: a two-key keyring is enough
-   for exactly **one** rotation, so the re-encryption step below is not optional
-   even with the config surface in place.
-2. **A re-encryption path for already-stored rows.** Something must read each
-   supply row, decrypt it with the previous key, re-seal it with the current
-   one, and write it back. It has to live where the row and the store are
-   (`store/sqlstore/supply.go`) and be exposed as an operator entry point
-   (`cmd/xflow`, which today has only the dead-letter commands). Design
-   constraints from the existing code: `content_hash` is computed over the
-   **plaintext** (`store/sqlstore/supply.go:116-121`) and is verified on every
-   read (`:55-75`), so re-sealing must leave the plaintext and the hash
-   unchanged; the job must be idempotent and resumable; and `PutSupply`'s
-   `If-Match`/revision guard (`:81-108`) is the existing concurrency contract to
-   respect.
-3. **An offline operating window.** The cutover needs both keys accepted while
-   the job runs and a restart to load the new one, which is exactly what
-   [maintenance-window-runbook.md](maintenance-window-runbook.md) covers.
-4. **A decision about the KEK's own backup.** Nothing in this repository
-   provides one, and a KEK that exists only as one environment variable is a
-   single point of failure for all stored supply content. This is a deployment
-   decision, not a code change.
-5. **A rehearsal.** No rotation on any axis has been exercised in a real
-   environment here, and this axis is the one where a mistake is unrecoverable.
+**(a) Back up the old KEK out of band, and generate the new one.**
 
-### 3.6 The one operational rule for this axis today
+The old KEK value must survive somewhere outside this procedure (secret
+manager, offline vault) until step (d) below has completed with `failed=0`.
+Generate the replacement the same way the current one was generated:
 
-**Never lose the KEK, and never change it.** Concretely: back it up out of band,
-inject it from secret management rather than a shell history or an image
-(`service/crypto/masterkey/masterkey.go:3-8`), keep the key file at `0600`
-(enforced: a group/world-readable file is a startup error, `:63-65`), and
-remember that a *bad* key value is fatal in every mode rather than quietly
-ignored, precisely because silently ignoring it "writes plaintext to disk while
-everything appears to work" (`:49-52`, `:79-86`).
+```
+openssl rand -base64 32
+```
+
+**(b) Restart every server with both keys configured.**
+
+Set the new value as the current key and the old value as the previous key,
+by environment variable:
+
+```
+XFLOW_MASTER_KEY=<new base64 key>
+XFLOW_MASTER_KEY_PREVIOUS=<old base64 key>
+```
+
+or by file (`--master-key-file` / `--master-key-previous-file`, each `0600`).
+Env takes precedence over its corresponding file, exactly like the existing
+`XFLOW_MASTER_KEY` / `--master-key-file` precedence
+(`service/crypto/masterkey/masterkey.go`).
+
+`loadSupplyAtRest` (`cmd/server/supply_keys.go`) rejects a previous value equal
+to the current one and a previous value configured without a current one —
+both are always startup errors, in every mode, never a silent fallback.
+
+On success the server logs a startup line naming both facts out loud:
+
+```
+WARNING supply at-rest KEK rotation window open: sealing under kid=<new kid>, also accepting the previous key; run `xflow supply reseal` then remove XFLOW_MASTER_KEY_PREVIOUS / --master-key-previous-file
+```
+
+Every server instance pointed at this MySQL database must be restarted with
+both keys before proceeding — a server still running with only the old key
+still writes new rows correctly (old key = its only key), but a server
+already on the new key needs the previous key to *read* rows written before
+the cutover.
+
+**(c) Reseal.**
+
+Dry run first, to see the classification without writing anything:
+
+```
+xflow supply reseal --dry-run --mysql-dsn "$XFLOW_MYSQL_DSN"
+```
+
+Then run it for real, unscoped (no `--namespace`) — a rotation is only
+finished by an unscoped pass, because a scoped pass leaves every row outside
+that namespace still sealed under the previous key:
+
+```
+xflow supply reseal --mysql-dsn "$XFLOW_MYSQL_DSN"
+```
+
+The command prints a JSON report (`sqlstore.ResealReport`) with `scanned`,
+`resealed`, `already_current`, `failed`, `dry_run`, and — when `failed > 0` —
+a `failures` list naming each row's `namespace`, `name`, and `reason` (never
+the stored bytes, which may be ciphertext of a credential). It exits non-zero
+whenever `failed > 0`, specifically so a script cannot mistake a partial pass
+for a completed rotation.
+
+**Require `failed=0` before continuing.** If any row failed, it is still
+sealed under the previous key (or, for a genuinely corrupted row, under
+neither) — the previous key must stay configured, and the reseal command
+re-run, until this reports zero failures. `xflow supply reseal` is idempotent
+and resumable: rows already sealed under the current key are counted as
+`already_current` and left untouched, so re-running only touches what is
+still outstanding.
+
+Resealing leaves `content_hash` and `revision` unchanged — the reseal pass
+rewrites only the envelope, not the plaintext, so consumers that compare
+`content_hash` never see a reseal as a content change
+(`store/sqlstore/supply_reseal.go`). Each row is locked (`SELECT ... FOR
+UPDATE`) and resealed in its own transaction, the same lock `PutSupply` takes,
+so the pass is safe to run against a database taking concurrent
+`PutSupply` writes — but run it inside the maintenance window regardless,
+since the point of the window is the two restarts, not the reseal pass
+itself.
+
+**(d) Restart without the previous key.**
+
+Once (c) has reported `failed=0`, restart every server again with
+`XFLOW_MASTER_KEY_PREVIOUS` / `--master-key-previous-file` removed. This
+closes the rotation window: from this point the previous key is no longer
+accepted for `Open`, and a stray row still sealed under it (there should be
+none, if (c) reported zero failures) becomes unreadable again.
+
+**(e) Verify.**
+
+- `GET /v1/supplies/{name}` for a representative supply in each namespace
+  returns 200, not 500.
+- Runner `/readyz` reports ready, not `no supply has been fetched yet`
+  (`sdk/runner/lifecycle.go:111-129`).
+- `xflow_supply_fetch_total{result="error"}` is not rising and
+  `xflow_supply_not_ready` is at its pre-rotation baseline (§6).
+
+**Do not start another rotation before this one's reseal has reported
+`failed=0`.** Two keys cover exactly one rotation (§3.3); starting a second
+one while the first is still in its window stacks a third key against a
+keyring that only holds two.
+
+### 3.6 What this procedure does not give you
+
+- **A rehearsal.** This procedure has never been exercised end to end in a
+  real environment in this repository. Rehearse it against a disposable copy
+  of the database before relying on it in production.
+- **A backup for the KEK itself.** Nothing in this repository provides one;
+  step (a) is a deployment-side responsibility, not a code path.
+- **Owner and deadline.** D6 in
+  [RELEASE-GATES.md](../design/RELEASE-GATES.md) §6.1 records that a code path
+  now exists for this axis and remains `OPEN` for the owner/deadline decision
+  and for whether a rehearsal is required before this runbook counts as
+  approved procedure.
+
+### 3.7 The one operational rule for this axis
+
+**Never lose the KEK, and never change it outside this procedure.**
+Concretely: back it up out of band, inject it from secret management rather
+than a shell history or an image (`service/crypto/masterkey/masterkey.go`),
+keep every key file at `0600` (enforced: a group/world-readable file is a
+startup error), and remember that a *bad* key value is fatal in every mode
+rather than quietly ignored, precisely because silently ignoring it "writes
+plaintext to disk while everything appears to work".
 
 Also know which direction a missing key fails in:
 
 - `--mode=production`: the server **refuses to start**, because
   `RequireSupplyEncryptionAtRest` is unmet
-  (`service/apiserver/production.go:47-50`, `:102-104`, `:209`; remediation text
-  `XFLOW_MASTER_KEY or --master-key-file`, `cmd/server/main.go:882`).
+  (`service/apiserver/production.go`; remediation text
+  `XFLOW_MASTER_KEY or --master-key-file`, `cmd/server/main.go`).
 - `--mode=dev`: it starts and warns on stderr —
   `WARNING no XFLOW_MASTER_KEY: supply content is stored in plaintext`
-  (`cmd/server/main.go:704-706`) — and supply content is then stored
+  (`cmd/server/main.go`) — and supply content is then stored
   unencrypted (`store/sqlstore/supply.go:15-22`, `:123-129`).
 
 ## 4. Axis 3 — runner credentials (partially possible)
@@ -411,18 +456,21 @@ the same `id_prefix` are both accepted. Each entry needs `id_prefix` (`:239-241`
 plus at least one of `token`, `token_file`, `mtls_subject` (`:260-262`), and a
 token may come from a `0600` file instead of inline (`:129-138`, `:268-282`).
 
-**But the window costs two restarts.** Hot reload "is not implemented yet"
-(`service/control/auth.go:147-150`): the file is read once in
-`NewFilePolicyStore` (`:177-187`, called at `cmd/server/main.go:781`), `Reload`
-(`:205-231`) has no production call site, and no SIGHUP handler exists anywhere in
-the repository. A changed `runners.yaml` therefore takes effect only at server
-start, i.e. inside a maintenance window
-([maintenance-window-runbook.md](maintenance-window-runbook.md)).
+**But the window used to cost two restarts — it no longer does.** Hot reload
+is implemented: `FilePolicyStore.Reload` (`service/control/auth.go`) re-parses
+`runners.yaml` and atomically swaps in the new snapshot — but only after every
+check (policy file permission, YAML parse, `resolveConfig` including the
+`token_file` 0600 check) has succeeded; a failed reload leaves the previous
+snapshot serving unchanged. `cmd/server` wires this to `SIGHUP`: sending the
+signal to the server process re-reads the file named by `--auth-policy` (only
+when that flag is set) without restarting anything (`cmd/server/reload.go`,
+`cmd/server/main.go`). A changed `runners.yaml` therefore takes effect on the
+next `SIGHUP`, not at the next server start.
 
 **When to rotate.** A leaked or suspected token; a person leaving; a periodic
 credential policy; or tidying a token that was injected by hand.
 
-**Procedure (no auth-failure window, two maintenance windows).**
+**Procedure (no auth-failure window, no restart).**
 
 1. Generate a new high-entropy token. Do not put it in the policy file's history,
    a ticket, an image, or source — the repository's own deployment example says
@@ -431,16 +479,30 @@ credential policy; or tidying a token that was injected by hand.
 2. Add a **second** entry to `runners.yaml`: same `id_prefix`, same
    `allowed_node_types` / `allowed_namespaces`, a new `token`, and the same
    `tls_subject` if the runner is mTLS-bound.
-3. Restart the server in a maintenance window (this is the dual-token window
-   opening: both tokens now authenticate).
+3. Send `SIGHUP` to the server process (`kill -HUP <server pid>`; the dual-token
+   window is opening: both tokens now authenticate). Check the log for the
+   reload outcome (§4.4) before proceeding — a reload that failed (malformed
+   YAML, a `token_file` that regressed to 0644, a moved/missing file) logs the
+   error and leaves the **previous** policy in force, so the new entry is not
+   live yet and runners on the old token are unaffected.
 4. Move runners onto the new token one at a time
    (`XFLOW_RUNNER_TOKEN`, or `--token`), restarting each. Verify each one
    authenticates before moving on (§4.4).
-5. Remove the old entry and restart the server again (window closing).
+5. Remove the old entry from `runners.yaml` and send `SIGHUP` again (window
+   closing). Re-check the log line for the same reload-outcome confirmation.
+
+**Multi-replica deployments:** `SIGHUP` is process-local. Every server replica
+that talks to this `runners.yaml` (or its own copy of it) must be signalled
+individually — there is no fan-out. A replica that is not signalled keeps
+serving its previous snapshot until it is, which for step 3 above means it
+still accepts only the old token, and for step 5 means it still accepts the
+old token too. Confirm the reload log line on **each** replica, not just one,
+before treating a step as complete fleet-wide.
 
 **Fast path (accepts an auth-failure window).** Replace the token in place and do
-steps 3–4 together; every runner that has not yet restarted fails authentication
-until it does. Acceptable only for a runner you can afford to have down.
+step 3 (`SIGHUP`) and step 4 together; every runner that has not yet restarted
+fails authentication until it does. Acceptable only for a runner you can afford
+to have down.
 
 **What breaks if you get it wrong.** Mismatch presents as a plain authentication
 failure: `unknown auth token` / `missing auth token`
@@ -449,7 +511,8 @@ reconnect loop retries. By design you cannot tell expired, revoked, and wrong
 from the caller's side (see `docs/design/RUNNER-IDENTITY-LIFECYCLE-TODO.md:118-121`);
 the distinction lives in the server-side log.
 
-**Rollback.** Put the old entry back and restart. Because revocation is
+**Rollback.** Put the old entry back in `runners.yaml` and send `SIGHUP` —
+no restart needed for the policy to take effect again. Because revocation is
 immediate, there is no "old token still valid somewhere" hazard to chase.
 
 **Precondition that must be true before any of this matters:** if `--auth-policy`
@@ -498,28 +561,65 @@ being checked is theatre; confirm the posture first (`--mode=production` makes
 - Server side: `--tls-cert`, `--tls-key`, `--tls-client-ca`
   (`cmd/server/main.go:211-212`; client CA at `:213`); the client-CA file enables mutual TLS with
   `tls.RequireAndVerifyClientCert` (`service/apiserver/run.go:77-88`).
-- **Both sides read their material once, at startup.** Runner:
-  `buildRunnerTLSConfig` (`sdk/xflow/runner.go:994-1023`). Server: `loadTLS`
-  (`service/apiserver/run.go:58-90`). There is no hot reload and no automatic
-  certificate renewal anywhere. Every certificate or CA change is a restart.
-- **A dual-CA window exists, and it comes from PEM-bundle semantics.** Both sides
-  build their pool with `AppendCertsFromPEM`, which appends *every* certificate in
-  the file (runner `sdk/xflow/runner.go:1004-1008`; server
-  `service/apiserver/run.go:82-86`). So: put old and new CA in the bundle →
-  restart the server → roll runner leaves → shrink the bundle → restart again.
-  If the new leaf keeps the same issuing CA, only the leaf changes and the CA
-  step is unnecessary.
+- **Both sides used to read their material once, at startup — the server side
+  no longer does.** Runner: `buildRunnerTLSConfig`
+  (`sdk/xflow/runner.go:994-1023`) still reads once; there is no runner-side
+  hot reload or automatic certificate renewal, and every runner-side
+  certificate or CA change is still a restart. Server: `loadTLS`
+  (`service/apiserver/run.go`) now builds a `*TLSReloader`
+  (`service/apiserver/tls_reload.go`) instead of loading a static
+  `tls.Config`; `tls.Config.GetCertificate` and `GetConfigForClient` read
+  through it on every handshake, and `cmd/server` wires a `SIGHUP` handler to
+  its `Reload` method. Sending `SIGHUP` to the server process re-reads
+  `--tls-cert` / `--tls-key` / `--tls-client-ca` from the same paths and swaps
+  them in **only if every file parses**; a bad file leaves the previous
+  certificate and CA pool serving unchanged and logs the error. This closes
+  the server-side half of the gap this runbook used to describe — the
+  runner-side half (`buildRunnerTLSConfig`) is unchanged.
+- **A dual-CA window still exists, and it no longer needs a restart on the
+  server side.** Both sides build their pool with `AppendCertsFromPEM`, which
+  appends *every* certificate in the file (runner `sdk/xflow/runner.go:1004-1008`;
+  server `service/apiserver/tls_reload.go`). So: put old and new CA in the
+  bundle → `SIGHUP` the server (no restart) → roll runner leaves (still a
+  restart per runner) → shrink the bundle → `SIGHUP` again. If the new leaf
+  keeps the same issuing CA, only the leaf changes and the CA step is
+  unnecessary.
 - **mTLS pins the subject separately from the token.** A policy entry may carry
   `mtls_subject` (`service/control/auth.go:129-138`), matched case-insensitively
   against the peer CN (`:325`, `:336-340`). A new certificate with a *different*
-  CN needs that policy entry updated in the same restart — the second-entry trick
-  from §4.1 only helps if you also accept the new CN.
+  CN needs that policy entry updated in `runners.yaml` and reloaded — the
+  `SIGHUP` from §4.1 and the `SIGHUP` for TLS material in this section are
+  independent registrations on the same signal (`cmd/server/reload.go`), so one
+  `kill -HUP` picks up both if both files changed; the second-entry trick from
+  §4.1 only helps if you also accept the new CN.
+- **Procedure (server side, no restart; runner side, still a restart).**
+  1. Stage the new certificate/key (and CA bundle, for a CA rollover) at the
+     paths named by `--tls-cert` / `--tls-key` / `--tls-client-ca`.
+  2. `kill -HUP <server pid>`.
+  3. Check the log for the TLS reload outcome (§4.4) before treating it as
+     done — a bad file (mismatched key, corrupt PEM, a moved/missing path)
+     logs the error and the server keeps serving the **previous** certificate
+     and CA pool; nothing is torn down.
+  4. Roll runner leaves that need to trust a new CA or present a new client
+     cert, restarting each (`buildRunnerTLSConfig` reads once, at process
+     start — see above).
+  5. Once every runner has converged, shrink a dual-CA bundle if one was used,
+     and `SIGHUP` again.
+- **Multi-replica deployments:** exactly like §4.1, `SIGHUP` is process-local.
+  Signal every server replica that terminates TLS, and confirm the reload log
+  line on each one — a replica that is not signalled keeps serving its
+  previous certificate/CA pool.
 - **What a TLS mistake looks like:** authentication simply fails, and for the
   supply path the failure is worse than a 401 — if the supply fetch cannot be
   made, the readiness gate declines forever and the runner "never hosts its
   triggers at all" (`sdk/xflow/runner.go:1028-1033`; `service/runner/doc.go:92-98`).
-- **Rollback.** Restore the previous certificate/CA files and restart. Keep the
-  old material until the fleet has converged.
+  A *rejected reload* is a different, milder failure: the server logs the
+  error and keeps its previous material, so a mistyped path or a bad file
+  produces a log line, not an outage.
+- **Rollback.** Server side: restore the previous certificate/CA files at the
+  same paths and `SIGHUP` again — no restart needed either way. Runner side:
+  restore the previous certificate/CA files and restart. Keep the old
+  material until the fleet has converged.
 
 ### 4.4 Verification for axis 3
 
@@ -527,6 +627,14 @@ being checked is theatre; confirm the posture first (`--mode=production` makes
   (`observability/metrics/control.go:21`, `:103`; help text
   `observability/metrics/metrics.go:421`). A rotation in progress shows as
   `result="deny"` until the last runner has moved.
+- Log (server-side TLS reload): `xflow-server: tls material reload succeeded`
+  or `xflow-server: tls material reload failed, keeping previous
+  configuration: <err>` (`cmd/server/reload.go`). The same reloader also logs
+  `xflow-server: auth policy reload succeeded` / `... reload failed, keeping
+  previous configuration: <err>` for the policy axis (§4.1), and
+  `xflow-server: auth policy entry name=... id_prefix=... token=<fingerprint>`
+  per entry on a successful policy reload — never the token itself or file
+  contents.
 - Log: `auth_denied` with `op`, `runner`, `token`, `cn`, `err`
   (`service/control/core.go:181-200`). The `token` field is a fingerprint, not
   the token — `TokenFingerprint` is the first 8 hex characters of SHA-256
@@ -538,14 +646,15 @@ being checked is theatre; confirm the posture first (`--mode=production` makes
 | Axis | If rotated correctly | If mishandled | If the material is destroyed | Reversible? |
 |---|---|---|---|---|
 | 1. Transport key | In-flight content re-encrypts; runners converge on their next heartbeat; nothing at rest is affected | A replica that encrypts with a superseded key declines supply fetches and hosts no triggers while heartbeating healthily (`service/control/supply_key_rotation.go:76-83`); back-to-back rotations can evict a keyring slot (bounded by the 1-minute floor) | Redis key lost → runners re-register; self-healing by design (`service/control/supply_encryption.go:64-68`) | Yes, by rotating again |
-| 2. At-rest KEK | **Not achievable today** (§3) | Every stored supply row becomes undecryptable → 500 on every supply fetch → every activation declined on every runner → no trigger hosted fleet-wide (§3.4) | Same outcome, with no way back: no re-encryption path, and the rows' only recovery is the old key or re-issuing the content | **No.** Only restoring the old KEK; rows written under the new key then become the unreadable ones |
-| 3a. Static runner token | Fleet-wide credential replacement; runners restart onto the new token | Affected runners fail auth (`unknown auth token`) and retry; blast radius is exactly the runners you did not update yet | Token lost = rotate again (new entries, new restarts) | Yes |
+| 2. At-rest KEK | Every stored row stays readable through the window (§3.5) and ends up sealed under the new key once `xflow supply reseal` reports `failed=0` | Skipping the previous-key step: every stored supply row becomes undecryptable → 500 on every supply fetch → every activation declined on every runner → no trigger hosted fleet-wide (§3.4) | If the previous key value is lost before reseal finishes: same outcome as mishandled, with no way back for the rows still sealed under it | **Only if the previous key was loaded during the window.** Without it, restoring the old KEK is the only recovery, and rows already resealed under the new key are then the unreadable ones |
+| 3a. Static runner token | Server side: `SIGHUP` reload, no restart; fleet-wide credential replacement as runners restart onto the new token | Affected runners fail auth (`unknown auth token`) and retry; blast radius is exactly the runners you did not update yet. A **rejected reload** (malformed YAML, 0644 `token_file`, missing file) is not a blast radius at all — the server logs the error and keeps the previous policy in force, so no runner is affected until the file is fixed and reloaded | Token lost = rotate again (new entries, new `SIGHUP`, new per-runner restarts) | Yes |
 | 3b. Enrollment-issued identity | Revoke + re-enroll per runner | Expired/revoked/unknown are indistinguishable to the caller by design; a whole fleet can fail auth at once if a TTL is introduced without planning (`docs/design/RUNNER-IDENTITY-LIFECYCLE-TODO.md:129-132`) | Revoked identity needs a new registration code | Yes, but not in place |
-| 3c. mTLS material | Bundle-based CA rollover, leaf-by-leaf | Runner cannot reach the control plane; on the supply path that means it never hosts a trigger (`sdk/xflow/runner.go:1028-1033`) | Re-issue from the CA; if the CA private key is lost, the whole mTLS fleet must be re-issued | Yes, with restarts |
+| 3c. mTLS material | Server side: bundle-based CA rollover via `SIGHUP`, no restart; runner side: leaf-by-leaf, still a restart | Runner cannot reach the control plane; on the supply path that means it never hosts a trigger (`sdk/xflow/runner.go:1028-1033`). A **rejected server-side reload** (bad cert/key/CA file) is not a blast radius — the server keeps serving its previous certificate/CA pool and logs the error | Re-issue from the CA; if the CA private key is lost, the whole mTLS fleet must be re-issued | Yes, server side with `SIGHUP`, runner side with restarts |
 
 The asymmetry is the point: axis 1 and axis 3 mistakes are **recoverable
-credential problems**, while an axis 2 mistake is an **unrecoverable data-access
-problem**.
+credential problems**. Axis 2 is recoverable only when the offline-window
+procedure in §3.5 is followed in full; skipping the previous-key step turns it
+into the same unrecoverable data-access problem it used to always be.
 
 ## 6. Observability: what actually exists
 
@@ -679,6 +788,8 @@ signature, and check the *most recent configuration change* first.
   encryption/rotation clause and no repair path for a changed key.
 - **Deployment configuration for these credentials.** See
   [deployment-examples.md](deployment-examples.md) §2 (`runners.yaml`), §4
-  (alert rules) and §5 (pre-flight checklist). Note that the §5 checklist does
-  **not** mention the master key — the KEK has no checklist entry today, which is
-  part of what §3.5 has to fix.
+  (alert rules) and §5 (pre-flight checklist). The §5 checklist covers the
+  *current* master key (`--master-key-file` / `XFLOW_MASTER_KEY`) but has no
+  entry for the previous-key flag. Adding one (`--master-key-previous-file` /
+  `XFLOW_MASTER_KEY_PREVIOUS`, rotation window only) is outside this runbook's
+  scope; §3.5 is the rotation procedure itself, not a deployment checklist.

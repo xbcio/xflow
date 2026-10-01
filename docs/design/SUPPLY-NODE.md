@@ -567,8 +567,12 @@ consumer 侧「hash 未变不重建」同时失效。守护测试见
 `store/storetest/supply.go` (`TestSupplyContentHashBasedOnPlaintext` 等)。
 
 **KEK 不存 MySQL、不写死在源码里。** 前者让密钥与它保护的数据在同一份 dump
-里；后者进 git 后永久不可撤销、随二进制分发到每个 runner、轮换需要发版加
-全量重新加密。
+里；后者进 git 后永久不可撤销、随二进制分发到每个 runner。KEK 轮换现有代码
+路径：`masterkey.LoadPrevious` 提供 previous-key 配置面，
+`(*sqlstore.Provider).ResealSupplies`（落地为 `xflow supply reseal`）提供全量
+重新加密，二者组合走离线停机窗口——不再需要发版；该流程详见
+[credential-key-rotation-runbook.md](../references/credential-key-rotation-runbook.md)
+§3，且**从未在真实环境演练过**。
 
 **加密边界是分层而非端到端**：server 写入时用 DEK 加密落库，发给 runner 时
 解密后用传输 key 重新加密，中间在内存里过一道明文。这是为保留 ContentHash
