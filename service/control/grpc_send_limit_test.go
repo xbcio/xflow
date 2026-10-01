@@ -175,3 +175,88 @@ func TestRunnerGRPCOptionsDeliverLeaseAboveDefaultLimit(t *testing.T) {
 		})
 	}
 }
+
+func TestGRPCPollFailsGroupLeaseAboveRunnerMessageLimit(t *testing.T) {
+	ctx := context.Background()
+	eng := &groupFakeEngine{}
+	runners := NewMemoryRunnerDirectory()
+	client := startRunnerGRPCTestServer(t, eng, runners, RunnerGRPCServerOptions(),
+		[]grpc.DialOption{grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(4 * MaxRegisterRunnerBodyBytes))})
+	reg, err := client.Register(ctx, protocol.RegisterRunnerRequest{
+		InstanceUID: "test-instance",
+		RunnerID:    "runner-1",
+		Concurrency: 1,
+		Capabilities: []protocol.Capability{
+			{NodeType: "xflow.group", Features: []string{engine.FeatureGroupExecV1}},
+			{NodeType: "xflow.function"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	assignment := groupTestAssignment()
+	eng.groupBuildLease = &engine.TaskLease{
+		LeaseID:    "lease-grp-big",
+		LeaseToken: "token-grp-big",
+		Attempt:    2,
+		Task:       assignment.Task,
+		NodeType:   "xflow.group",
+	}
+	eng.groupBuildPayload = &engine.GroupLeasePayload{
+		ProtocolVersion: 1,
+		GroupExecID:     "gexec-big",
+		Input:           &types.Input{Data: map[string]any{"blob": strings.Repeat("x", MaxRegisterRunnerBodyBytes+1)}},
+	}
+	if _, err := runners.EnqueueAssignment(ctx, assignment); err != nil {
+		t.Fatalf("EnqueueAssignment(group) error = %v", err)
+	}
+
+	got, err := client.Poll(ctx, protocol.PollTaskRequest{RunnerID: "runner-1", SessionID: reg.SessionID, Capacity: 1})
+	if err != nil {
+		t.Fatalf("Poll() error = %v, want a no-task answer that keeps the session alive", err)
+	}
+	if got.Lease != nil {
+		t.Fatalf("Poll() delivered group lease %q above the message limit", got.Lease.LeaseID)
+	}
+	res := eng.groupCommittedRes
+	if res.Outcome != engine.GroupOutcomeFailed || res.ProtocolVersion != 1 || res.GroupExecID != "gexec-big" || res.Attempt != 2 {
+		t.Fatalf("committed group result = %+v, want failed, protocol 1, gexec-big, attempt 2", res)
+	}
+	if !strings.Contains(res.Error, LeaseTooLargeErrorCode) {
+		t.Fatalf("committed group error = %q, want it to carry %s", res.Error, LeaseTooLargeErrorCode)
+	}
+
+	replay, err := client.Poll(ctx, protocol.PollTaskRequest{RunnerID: "runner-1", SessionID: reg.SessionID, Capacity: 1, RecoveryOnly: true})
+	if err != nil {
+		t.Fatalf("recovery Poll() error = %v", err)
+	}
+	if replay.Lease != nil {
+		t.Fatalf("recovery Poll() replayed failed group lease %q", replay.Lease.LeaseID)
+	}
+
+	// Concurrency is 1, so the next task is claimable only if the failed group
+	// lease released its capacity.
+	next := engine.TaskLease{
+		LeaseID:    "lease-next",
+		LeaseToken: "token-next",
+		Attempt:    1,
+		Task:       engine.Task{ExecutionID: "exec-next", NodeName: "next", NodeIdx: 0},
+		NodeType:   "xflow.function",
+	}
+	eng.buildLease = &next
+	if _, err := runners.EnqueueAssignment(ctx, Assignment{
+		AssignmentID: BuildAssignmentID(&next.Task),
+		Task:         next.Task,
+		Routing:      engine.TaskRouting{NodeType: next.NodeType},
+	}); err != nil {
+		t.Fatalf("EnqueueAssignment(next) error = %v", err)
+	}
+	after, err := client.Poll(ctx, protocol.PollTaskRequest{RunnerID: "runner-1", SessionID: reg.SessionID, Capacity: 1})
+	if err != nil {
+		t.Fatalf("Poll() after failure error = %v", err)
+	}
+	if after.Lease == nil || after.Lease.LeaseID != "lease-next" {
+		t.Fatalf("Poll() after failure lease = %+v, want lease-next on released capacity", after.Lease)
+	}
+}
