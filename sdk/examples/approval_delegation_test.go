@@ -2,6 +2,7 @@ package examples_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -136,18 +137,28 @@ func TestApprovalDelegateAndAddSignerRoundTrip(t *testing.T) {
 }
 
 // approvalSuspensionHooks records when a node suspends, so the test can send each
-// signal only once the gate is waiting for it.
+// signal only once the gate is waiting for it. The hook fires on an engine
+// worker goroutine while the test goroutine polls, so the map is guarded.
 type approvalSuspensionHooks struct {
 	engine.BaseHooks
 
+	mu        sync.Mutex
 	suspended map[string]int
 }
 
 func (h *approvalSuspensionHooks) OnNodeSuspended(_ context.Context, _ types.ExecutionID, name string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if h.suspended == nil {
 		h.suspended = make(map[string]int)
 	}
 	h.suspended[name]++
+}
+
+func (h *approvalSuspensionHooks) count(nodeName string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.suspended[nodeName]
 }
 
 func (h *approvalSuspensionHooks) waitForSuspensions(t *testing.T, nodeName string, want int) {
@@ -155,16 +166,16 @@ func (h *approvalSuspensionHooks) waitForSuspensions(t *testing.T, nodeName stri
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if h.suspended[nodeName] >= want {
+		if h.count(nodeName) >= want {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("%s suspended %d times, want >= %d", nodeName, h.suspended[nodeName], want)
+	t.Fatalf("%s suspended %d times, want >= %d", nodeName, h.count(nodeName), want)
 }
 
 // suspensions is read after the run has finished, so the count is final and has
 // a single right answer.
 func (h *approvalSuspensionHooks) suspensions(nodeName string) int {
-	return h.suspended[nodeName]
+	return h.count(nodeName)
 }
