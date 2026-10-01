@@ -1,6 +1,7 @@
 package control
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -328,7 +329,32 @@ func (s *Server) HandlePollTask(w http.ResponseWriter, r *http.Request) {
 		writeRunnerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, resp)
+	body, err := encodeJSONBody(resp)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrInternalServer.Error())
+		return
+	}
+	// Same bound as the gRPC transport (see GRPCServer.PollTask), measured on
+	// the exact bytes the runner would read. A runner's HTTP client caps its
+	// response reads at this size, so an oversize lease would be refused and
+	// redelivered forever; it is failed here instead.
+	if size := len(body); resp.Lease != nil && size > MaxRegisterRunnerBodyBytes {
+		writeJSON(w, http.StatusOK, s.core.failOversizeLease(r.Context(), req, resp, size, "runner HTTP response limit"))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+}
+
+// encodeJSONBody encodes body exactly as writeJSON would write it, trailing
+// newline included, so a handler can measure a response before sending it.
+func encodeJSONBody(body any) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(body); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func (s *Server) HandleReportResult(w http.ResponseWriter, r *http.Request) {

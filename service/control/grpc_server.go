@@ -3,7 +3,6 @@ package control
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -19,7 +18,6 @@ import (
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/service/protocol/runnerpb"
-	"github.com/xbcio/xflow/types"
 )
 
 // GRPCServer adapts the generated RunnerProtocolServer onto the transport-agnostic
@@ -190,43 +188,10 @@ func (s *GRPCServer) PollTask(ctx context.Context, req *runnerpb.PollTaskRequest
 		return nil, status.Error(codes.Internal, ErrInternalServer.Error())
 	}
 	if size := proto.Size(out); resp.Lease != nil && size > MaxRegisterRunnerBodyBytes {
-		return s.failOversizeLease(ctx, in, resp, size)
-	}
-	return out, nil
-}
-
-// failOversizeLease answers a poll whose lease encodes past the runner gRPC
-// message limit. The lease is already finalized in the directory, so letting
-// the transport reject the send would not lose it: it would be redelivered,
-// fail the same way, and loop (see failUndeliverableLease). The lease is
-// failed permanently instead and the runner gets an ordinary no-task answer,
-// so one oversize task does not also end the runner's session.
-func (s *GRPCServer) failOversizeLease(ctx context.Context, req protocol.PollTaskRequest, resp protocol.PollTaskResponse, size int) (*runnerpb.PollTaskResponse, error) {
-	lease := resp.Lease
-	cause := types.NewPermanentError(LeaseTooLargeErrorCode, fmt.Sprintf(
-		"task lease encodes to %d bytes, above the %d-byte runner gRPC message limit", size, MaxRegisterRunnerBodyBytes))
-	logArgs := []any{
-		"ns", string(lease.Namespace),
-		"exec", string(lease.Task.ExecutionID),
-		"node", lease.Task.NodeName,
-		"node_idx", lease.Task.NodeIdx,
-		"attempt", lease.Attempt,
-		"lease", string(lease.LeaseID),
-		"runner", req.RunnerID,
-		"bytes", size,
-		"limit", MaxRegisterRunnerBodyBytes,
-	}
-	if s.core.logger != nil {
-		s.core.logger.Error("task lease exceeds runner gRPC message limit; failing task", logArgs...)
-	}
-	if err := s.core.failUndeliverableLease(ctx, req.RunnerID, req.SessionID, lease, cause); err != nil && s.core.logger != nil {
-		// The lease stays finalized, so the next replay or reclaim comes back
-		// through this branch and retries the failure.
-		s.core.logger.Error("fail oversize task lease", append(logArgs, "err", err)...)
-	}
-	out, err := protocol.PollTaskResponseToProto(protocol.PollTaskResponse{Wait: s.core.pollWait, Control: resp.Control})
-	if err != nil {
-		return nil, status.Error(codes.Internal, ErrInternalServer.Error())
+		out, err = protocol.PollTaskResponseToProto(s.core.failOversizeLease(ctx, in, resp, size, "runner gRPC message limit"))
+		if err != nil {
+			return nil, status.Error(codes.Internal, ErrInternalServer.Error())
+		}
 	}
 	return out, nil
 }
