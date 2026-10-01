@@ -181,9 +181,13 @@ type PolicyConfig struct {
 }
 
 // FilePolicyStore is a bearer-token + optional mTLS authenticator loaded
-// from disk. Hot reload is not implemented yet — the swap is atomic (via
-// atomic.Pointer) so a future fsnotify watcher can plug in with a single
-// snapshot.Store call.
+// from disk. Hot reload is implemented: Reload atomically swaps in a freshly
+// parsed snapshot via atomic.Pointer, and only after every check (policy file
+// permission, YAML parse, resolveConfig including the token_file 0600 check)
+// has succeeded — a failed Reload call leaves the previous snapshot serving
+// unchanged. cmd/server wires this to SIGHUP (see cmd/server's reloader);
+// nothing in this package calls Reload on its own, since the trigger and
+// production posture belong to the host.
 type FilePolicyStore struct {
 	// dryRun logs violations but returns the permissivePolicy so the request
 	// proceeds. Meant for the --auth-mode dry-run rollout path.
@@ -347,6 +351,48 @@ func TokenFingerprint(token string) string {
 	}
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])[:8]
+}
+
+// PolicyEntrySummary is a log-safe, post-Reload view of one runners.yaml
+// entry: enough for an operator to confirm which entries are live without
+// ever carrying a token, a token_file path, or file contents.
+type PolicyEntrySummary struct {
+	Name     string
+	IDPrefix string
+	// TokenFingerprint is "none" when the entry has no token bound (mTLS-only
+	// entries), and otherwise the same first-8-hex-chars digest TokenFingerprint
+	// produces for the token that was configured — computed here from the
+	// entry's already-hashed tokenHash, so the plaintext token is never held
+	// past resolveConfig and never needs to be re-derived to log this.
+	TokenFingerprint string
+}
+
+// DescribeEntries returns a log-safe summary of every entry in the current
+// snapshot, in file order. Intended for the log line a policy reload emits on
+// success (see cmd/server's reloader) — never for anything that could end up
+// on a response to an untrusted caller, since the name/id_prefix pairing is
+// itself deployment topology information.
+func (s *FilePolicyStore) DescribeEntries() []PolicyEntrySummary {
+	if s == nil {
+		return nil
+	}
+	snap := s.snap.Load()
+	if snap == nil {
+		return nil
+	}
+	out := make([]PolicyEntrySummary, 0, len(snap.entries))
+	for _, e := range snap.entries {
+		fp := "none"
+		if e.hasToken {
+			fp = hex.EncodeToString(e.tokenHash[:])[:8]
+		}
+		out = append(out, PolicyEntrySummary{
+			Name:             e.name,
+			IDPrefix:         e.idPrefix,
+			TokenFingerprint: fp,
+		})
+	}
+	return out
 }
 
 func (s *FilePolicyStore) authenticate(runnerID, token string, info TransportInfo) (RunnerPolicy, error) {
