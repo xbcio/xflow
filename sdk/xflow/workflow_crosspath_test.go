@@ -339,3 +339,36 @@ func TestCrossPathCustomTypeOmittedDefaultStillConflicts(t *testing.T) {
 	sameID(t, "POST with the Default", c.post(c.sdkBody(custom()), http.StatusCreated), id)
 	c.post(c.strip(c.sdkBody(custom()), "work", "level"), http.StatusConflict)
 }
+
+// TestCrossPathExplicitEmptyBuiltinParamStillConflicts pins the second
+// documented residual: an explicit "" is a value, not an omission, so neither
+// the builder nor the canonical form fills it. node.HTTP("", url) therefore
+// stores method "" and is a different identity from a body that omits method
+// (canonicalized to its Default "GET"), although the handler runs both as GET.
+func TestCrossPathExplicitEmptyBuiltinParamStillConflicts(t *testing.T) {
+	emptyMethod := func(name string) *WorkflowBuilder {
+		wf := Workflow(name)
+		start := wf.Node("start", node.Start())
+		call := wf.Node("call", node.HTTP("", "https://example.invalid/"))
+		wf.Connect(start, call)
+		return wf
+	}
+
+	t.Run("SDK then HTTP omitted", func(t *testing.T) {
+		c := newCrossPath(t)
+		body := c.sdkBody(emptyMethod("empty-a"))
+		if got := body["nodes"].([]any)[1].(map[string]any)["parameters"].(map[string]any)["method"]; got != "" {
+			t.Fatalf("SDK stored method = %#v, want the explicit \"\"", got)
+		}
+		id := c.sdkAdd(emptyMethod("empty-a"))
+		sameID(t, "POST with the explicit \"\"", c.post(c.sdkBody(emptyMethod("empty-a")), http.StatusCreated), id)
+		c.post(c.strip(c.sdkBody(emptyMethod("empty-a")), "call", "method"), http.StatusConflict)
+	})
+	t.Run("HTTP omitted then SDK", func(t *testing.T) {
+		c := newCrossPath(t)
+		c.post(c.strip(c.sdkBody(emptyMethod("empty-b")), "call", "method"), http.StatusCreated)
+		if _, err := c.srv.Engine().AddWorkflow(context.Background(), emptyMethod("empty-b")); !errors.Is(err, backend.ErrWorkflowConflict) {
+			t.Fatalf("Engine().AddWorkflow err = %v, want ErrWorkflowConflict", err)
+		}
+	})
+}
