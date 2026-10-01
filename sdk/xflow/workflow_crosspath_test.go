@@ -241,6 +241,29 @@ func TestCrossPathRegistrationMatrix(t *testing.T) {
 		sameID(t, "ReplaceWorkflow", got, id)
 	})
 
+	// Replace no-op checks compare audit fingerprints over the full stored
+	// definition, and the HTTP-stripped record omits the Defaults the builder
+	// writes. So an embedded replace over it is a real replace with a new id,
+	// although the runtime identity is equal (ADR-D4 §3.1). A following SDK
+	// add is idempotent on the replaced record.
+	t.Run("5b HTTP stripped then embedded replace mints a new id", func(t *testing.T) {
+		c := newCrossPath(t)
+		id := c.post(c.strippedBody(crossPathWorkflow("m5b")), http.StatusCreated)
+		before := c.record(id)
+		got, err := c.srv.ReplaceWorkflow(context.Background(), crossPathWorkflow("m5b"))
+		if err != nil {
+			t.Fatalf("Server.ReplaceWorkflow: %v", err)
+		}
+		if got == "" || got == id {
+			t.Fatalf("ReplaceWorkflow id = %q, want a new id distinct from %q", got, id)
+		}
+		after := c.record(got)
+		if after.DefinitionHash != before.DefinitionHash {
+			t.Fatalf("replace changed the runtime hash: %q -> %q", before.DefinitionHash, after.DefinitionHash)
+		}
+		sameID(t, "SDK add", c.sdkAdd(crossPathWorkflow("m5b")), got)
+	})
+
 	t.Run("6 HTTP stripped then HTTP with defaults", func(t *testing.T) {
 		c := newCrossPath(t)
 		id := c.post(c.strippedBody(crossPathWorkflow("m6")), http.StatusCreated)

@@ -107,6 +107,7 @@ The runtime hash is taken over a canonical form of the definition in which every
 - A builtin `ParamSpec.Default` is part of hash identity. Changing one is a hash-format change and needs a prefix bump.
 - On an SDK build the canonical form is the identity (the builder already wrote those Defaults), so no SDK hash changed. Records hashed before this (bare `sha256:` hashes written by the HTTP path) are recomputed on their next registration and CAS-upgraded to the `runtime-sha256:` form; there is no migration pass.
 - Registration through `POST /v1/workflows` or the embedded `AddWorkflow` is idempotent on the runtime identity: a definition that differs from the stored one only in editor metadata (§2.2) or by omitted builtin Defaults returns the existing workflow id and leaves the stored definition unchanged. Replace no-op checks (`PUT /v1/workflows/{id}`, embedded `ReplaceWorkflow`) compare audit fingerprints instead, so a metadata-only change is still written as a new revision.
+- Because the replace no-op check compares the full stored definition, an embedded `ReplaceWorkflow` of an SDK build over a record registered through HTTP with builtin Defaults omitted is a real replace: it writes a new record with a new workflow id, although the runtime hash is unchanged. A following `AddWorkflow` or `POST` of either form is idempotent on the replaced record.
 
 ## 4. Consequences
 
