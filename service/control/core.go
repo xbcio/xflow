@@ -72,6 +72,10 @@ var (
 	// ErrRegisterBodyTooLarge means an HTTP register body exceeded
 	// MaxRegisterRunnerBodyBytes. The body is not decoded.
 	ErrRegisterBodyTooLarge = errors.New("runner register request too large")
+	// ErrRequestBodyTooLarge means an HTTP runner-protocol request body other
+	// than register, metrics, or enroll exceeded MaxRegisterRunnerBodyBytes.
+	// The body is not decoded.
+	ErrRequestBodyTooLarge = errors.New("runner request too large")
 	// ErrMetricsEncodingUnsupported means the report was not gzip'd.
 	ErrMetricsEncodingUnsupported = errors.New("runner metrics payload must be gzip encoded")
 )

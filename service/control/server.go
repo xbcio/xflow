@@ -628,9 +628,17 @@ func addressInPrefixes(addr netip.Addr, prefixes []netip.Prefix) bool {
 	return false
 }
 
+// decodeJSON decodes a runner-protocol request body capped at
+// MaxRegisterRunnerBodyBytes, the same bound the gRPC transport applies as its
+// receive limit, answering 413 when the cap trips and 400 for malformed JSON.
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	defer func() { _ = r.Body.Close() }()
-	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, MaxRegisterRunnerBodyBytes)).Decode(dst); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeRunnerError(w, ErrRequestBodyTooLarge)
+			return false
+		}
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return false
 	}
@@ -666,7 +674,7 @@ func writeRunnerError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusForbidden, ErrAuthCapabilityDenied.Error())
 	case errors.Is(err, ErrMetricsProxyDisabled):
 		writeError(w, http.StatusServiceUnavailable, err.Error())
-	case errors.Is(err, ErrMetricsPayloadTooLarge), errors.Is(err, ErrRegisterBodyTooLarge):
+	case errors.Is(err, ErrMetricsPayloadTooLarge), errors.Is(err, ErrRegisterBodyTooLarge), errors.Is(err, ErrRequestBodyTooLarge):
 		writeError(w, http.StatusRequestEntityTooLarge, err.Error())
 	case errors.Is(err, ErrMetricsEncodingUnsupported):
 		writeError(w, http.StatusUnsupportedMediaType, err.Error())
