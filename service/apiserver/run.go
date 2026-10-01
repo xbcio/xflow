@@ -14,6 +14,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/xbcio/xflow/observability/tracing"
+	"github.com/xbcio/xflow/service/control"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -131,6 +132,9 @@ func (s *APIServer) Run(ctx context.Context) error {
 			return fmt.Errorf("grpc listen: %w", err)
 		}
 		var opts []grpc.ServerOption
+		// Receive limit matching the HTTP register cap; server-wide, see
+		// control.RunnerGRPCServerOptions.
+		opts = append(opts, control.RunnerGRPCServerOptions()...)
 		if tlsCfg != nil {
 			opts = append(opts, grpc.Creds(credentials.NewTLS(tlsCfg)))
 			log.Printf("apiserver: gRPC listening on %s (mTLS=%v)", s.cfg.GRPCAddr, tlsCfg.ClientAuth == tls.RequireAndVerifyClientCert)
