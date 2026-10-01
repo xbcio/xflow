@@ -126,7 +126,9 @@ describe("node form: opening every builtin node writes nothing (Doc C §5.1 #1)"
       expect(serialize(handleSave.mock.calls[0]?.[0])).toBe(before);
       expect(consoleError).not.toHaveBeenCalled();
     },
-    60_000
+    // Each family mounts and selects every builtin node in one test: ~30s
+    // uninstrumented, and well over 60s under v8 coverage on a loaded host.
+    180_000
   );
 });
 
