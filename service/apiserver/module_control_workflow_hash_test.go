@@ -122,7 +122,6 @@ func TestRegisterWorkflowOmittedDefaultIsIdempotent(t *testing.T) {
 	postRegisterID(t, srv.URL, changed, http.StatusConflict)
 }
 
-
 // legacySHA256 is the "sha256:" hash the HTTP path stored before it hashed
 // with workflowhash.Runtime: SHA-256 over json.Marshal of the full definition.
 func legacySHA256(t *testing.T, def *types.WorkflowDef) string {
@@ -226,7 +225,6 @@ func TestRegisterWorkflowLostUpgradeRaceRefetches(t *testing.T) {
 		t.Fatalf("lost upgrades = %d, want 1 (the reconcile must have hit the CAS path)", reg.lost)
 	}
 }
-
 
 // TestPutWorkflowMetadataOnlyChangeIsAReplace pins that PUT keeps
 // full-definition no-op semantics: a change the runtime hash ignores (here the
