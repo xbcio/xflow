@@ -11,8 +11,9 @@ import (
 // reports for ns, aggregated by (type, version) — the runner-reported part
 // of a namespace-scoped GET /v1/node-types. Records are filtered to ns before
 // aggregating, so a conflict winner and the pool list only ever come from
-// runners that namespace may see. Conflicts are logged and gauged on every
-// call.
+// runners that namespace may see. Conflicts are logged and gauged from an
+// aggregation of the unfiltered fleet instead, so the gauge reads the same
+// whichever namespace was requested.
 //
 // It reads the raw runner directory, not RunnerDirectory(): the management
 // decorator installed when metrics are configured does not forward optional
@@ -28,7 +29,6 @@ func (cp *ControlPlane) LiveRunnerNodeTypes(ctx context.Context, ns namespace.Na
 	if err != nil {
 		return nil, err
 	}
-	aggregated := AggregateRunnerDescriptors(FilterRunnerDescriptorRecords(records, ns))
-	ReportRunnerDescriptorConflicts(ctx, cp.logger, cp.runnerDescriptorConflicts, aggregated)
-	return aggregated, nil
+	cp.runnerDescriptorConflicts.report(ctx, AggregateRunnerDescriptors(records))
+	return AggregateRunnerDescriptors(FilterRunnerDescriptorRecords(records, ns)), nil
 }

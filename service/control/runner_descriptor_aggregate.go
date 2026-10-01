@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"sort"
+	"sync"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
@@ -27,7 +28,7 @@ type AggregatedDescriptor struct {
 }
 
 // RunnerDescriptorConflictObserver receives, per node type, how many
-// (type, version) descriptor conflicts the latest aggregation saw. Values are
+// (type, version) descriptor conflicts the live fleet reports. Values are
 // gauges: 0 means the type is consistent.
 type RunnerDescriptorConflictObserver interface {
 	OnRunnerDescriptorConflicts(ctx context.Context, nodeType string, conflicts int)
@@ -56,7 +57,7 @@ func FilterRunnerDescriptorRecords(records []RunnerDescriptorRecord, ns namespac
 // the most recently registered runner wins, ties going to the smaller runner
 // ID, so the result (and any ETag over it) is deterministic. The result is
 // sorted by type then version. It is a pure function: see
-// ReportRunnerDescriptorConflicts for the log and metric.
+// runnerDescriptorConflictReporter for the log and metric.
 func AggregateRunnerDescriptors(records []RunnerDescriptorRecord) []AggregatedDescriptor {
 	type key struct {
 		nodeType string
@@ -119,11 +120,35 @@ func AggregateRunnerDescriptors(records []RunnerDescriptorRecord) []AggregatedDe
 	return out
 }
 
-// ReportRunnerDescriptorConflicts logs a warning for every conflicting
-// (type, version) and sets the per-type conflict gauge for every type in the
-// aggregation, 0 included, so a resolved conflict reads as resolved. Both
-// logger and observer may be nil; an observer panic is swallowed.
-func ReportRunnerDescriptorConflicts(ctx context.Context, logger engine.Logger, observer RunnerDescriptorConflictObserver, aggregated []AggregatedDescriptor) {
+// runnerDescriptorConflictReporter turns aggregations of the whole live
+// fleet into the conflict log and gauge. It must only ever be fed unfiltered
+// aggregations: the gauge has no namespace label, so a namespace-filtered
+// view would make it read whichever namespace was aggregated last.
+//
+// It remembers which node types it has gauged. A type that drops out of a
+// later aggregation (its last reporter went away) is set back to 0 once and
+// then forgotten, so a resolved or vanished conflict never keeps its last
+// value. Safe for concurrent use; logger and observer may be nil, and an
+// observer panic is swallowed.
+type runnerDescriptorConflictReporter struct {
+	logger   engine.Logger
+	observer RunnerDescriptorConflictObserver
+
+	mu     sync.Mutex
+	gauged map[string]struct{}
+}
+
+func newRunnerDescriptorConflictReporter(logger engine.Logger, observer RunnerDescriptorConflictObserver) *runnerDescriptorConflictReporter {
+	return &runnerDescriptorConflictReporter{logger: logger, observer: observer}
+}
+
+// report logs a warning for every conflicting (type, version) and sets the
+// per-type conflict gauge for every type in the fleet-wide aggregation, 0
+// included, plus 0 for every previously gauged type no longer present.
+func (r *runnerDescriptorConflictReporter) report(ctx context.Context, aggregated []AggregatedDescriptor) {
+	if r == nil {
+		return
+	}
 	perType := make(map[string]int)
 	var order []string
 	for _, a := range aggregated {
@@ -135,18 +160,35 @@ func ReportRunnerDescriptorConflicts(ctx context.Context, logger engine.Logger, 
 			continue
 		}
 		perType[a.Type]++
-		if logger != nil {
-			logger.Warn("runner_descriptor_conflict",
+		if r.logger != nil {
+			r.logger.Warn("runner_descriptor_conflict",
 				"node_type", a.Type, "node_version", a.Version,
 				"distinct_hashes", a.DistinctHashes, "winner_hash", a.Hash, "pools", a.Pools)
 		}
 	}
-	if observer == nil {
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var vanished []string
+	for nodeType := range r.gauged {
+		if _, ok := perType[nodeType]; !ok {
+			vanished = append(vanished, nodeType)
+		}
+	}
+	sort.Strings(vanished)
+	r.gauged = make(map[string]struct{}, len(order))
+	for _, nodeType := range order {
+		r.gauged[nodeType] = struct{}{}
+	}
+	if r.observer == nil {
 		return
 	}
 	defer func() { _ = recover() }()
 	for _, nodeType := range order {
-		observer.OnRunnerDescriptorConflicts(ctx, nodeType, perType[nodeType])
+		r.observer.OnRunnerDescriptorConflicts(ctx, nodeType, perType[nodeType])
+	}
+	for _, nodeType := range vanished {
+		r.observer.OnRunnerDescriptorConflicts(ctx, nodeType, 0)
 	}
 }
 

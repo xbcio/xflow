@@ -284,9 +284,10 @@ type ControlPlane struct {
 	// apiserver can merge it into the scrape endpoint.
 	metricsInbox *MetricsInbox
 
-	// runnerDescriptorConflicts receives the per-type conflict gauge each
-	// LiveRunnerNodeTypes aggregation reports. Nil when Config.Metrics is nil.
-	runnerDescriptorConflicts RunnerDescriptorConflictObserver
+	// runnerDescriptorConflicts logs and gauges descriptor conflicts across
+	// the whole live fleet each time LiveRunnerNodeTypes reads it. Its
+	// observer is nil when Config.Metrics is nil.
+	runnerDescriptorConflicts *runnerDescriptorConflictReporter
 
 	lifecycleMu                sync.Mutex
 	started                    bool
@@ -653,10 +654,11 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	httpServer.core.metricsReportInterval = cfg.MetricsReportInterval
 	grpcServer.core.metricsReportInterval = cfg.MetricsReportInterval
 
-	var runnerDescriptorConflicts RunnerDescriptorConflictObserver
+	var runnerDescriptorConflictObserver RunnerDescriptorConflictObserver
 	if cfg.Metrics != nil {
-		runnerDescriptorConflicts = metrics.NewRunnerDescriptorMetrics(cfg.Metrics)
+		runnerDescriptorConflictObserver = metrics.NewRunnerDescriptorMetrics(cfg.Metrics)
 	}
+	runnerDescriptorConflicts := newRunnerDescriptorConflictReporter(cfg.Logger, runnerDescriptorConflictObserver)
 
 	return &ControlPlane{
 		backend:                   cfg.Backend,

@@ -173,7 +173,7 @@ func TestReportRunnerDescriptorConflicts(t *testing.T) {
 	})
 	logger := &recordingLogger{}
 	observer := &recordingConflictObserver{}
-	ReportRunnerDescriptorConflicts(context.Background(), logger, observer, aggregated)
+	newRunnerDescriptorConflictReporter(logger, observer).report(context.Background(), aggregated)
 
 	if !reflect.DeepEqual(observer.got, map[string]int{"acme.a": 2, "acme.b": 0}) {
 		t.Fatalf("conflict gauges = %v, want acme.a=2 acme.b=0", observer.got)
@@ -182,8 +182,44 @@ func TestReportRunnerDescriptorConflicts(t *testing.T) {
 	if len(warns) != 2 || warns[0].level != "warn" || warns[0].field("node_type") != "acme.a" {
 		t.Fatalf("warns = %+v, want one per conflicting version", warns)
 	}
-	// Nil logger and observer are no-ops.
-	ReportRunnerDescriptorConflicts(context.Background(), nil, nil, aggregated)
+	// Nil logger and observer, and a nil reporter, are no-ops.
+	newRunnerDescriptorConflictReporter(nil, nil).report(context.Background(), aggregated)
+	var nilReporter *runnerDescriptorConflictReporter
+	nilReporter.report(context.Background(), aggregated)
+}
+
+// A type whose reporters all go away is set back to 0 once, then no longer
+// gauged.
+func TestRunnerDescriptorConflictReporterResetsVanishedTypes(t *testing.T) {
+	at := time.Unix(1, 0)
+	observer := &recordingConflictObserver{}
+	reporter := newRunnerDescriptorConflictReporter(nil, observer)
+	reporter.report(context.Background(), AggregateRunnerDescriptors([]RunnerDescriptorRecord{
+		aggRecord("r1", "p", at, nil, aggDescriptor("acme.a", 1, "x"), aggDescriptor("acme.b", 1, "same")),
+		aggRecord("r2", "p", at, nil, aggDescriptor("acme.a", 1, "y"), aggDescriptor("acme.b", 1, "same")),
+	}))
+	if !reflect.DeepEqual(observer.got, map[string]int{"acme.a": 1, "acme.b": 0}) {
+		t.Fatalf("conflict gauges = %v, want acme.a=1 acme.b=0", observer.got)
+	}
+
+	observer.got = nil
+	reporter.report(context.Background(), AggregateRunnerDescriptors([]RunnerDescriptorRecord{
+		aggRecord("r3", "p", at, nil, aggDescriptor("acme.b", 1, "same")),
+	}))
+	if !reflect.DeepEqual(observer.got, map[string]int{"acme.a": 0, "acme.b": 0}) {
+		t.Fatalf("after acme.a vanished: gauges = %v, want acme.a reset to 0", observer.got)
+	}
+
+	observer.got = nil
+	reporter.report(context.Background(), nil)
+	if !reflect.DeepEqual(observer.got, map[string]int{"acme.b": 0}) {
+		t.Fatalf("after the fleet emptied: gauges = %v, want only acme.b reset", observer.got)
+	}
+	observer.got = nil
+	reporter.report(context.Background(), nil)
+	if len(observer.got) != 0 {
+		t.Fatalf("forgotten types gauged again: %v", observer.got)
+	}
 }
 
 // TestAggregateRunnerDescriptorsConcurrentWithDirectory reads a directory

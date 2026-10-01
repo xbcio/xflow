@@ -79,3 +79,33 @@ func TestControlPlaneLiveRunnerNodeTypesWithoutDescriptorDirectory(t *testing.T)
 		t.Fatalf("LiveRunnerNodeTypes = %+v, %v; want nil, nil", got, err)
 	}
 }
+
+// The conflict gauge is computed over the unfiltered fleet: a type whose
+// reporters disagree across two namespaces reads as conflicting whichever
+// namespace was requested, even one that sees only a single hash.
+func TestControlPlaneLiveRunnerNodeTypesGaugesTheWholeFleet(t *testing.T) {
+	dir := NewMemoryRunnerDirectory()
+	cp, err := NewControlPlane(Config{Backend: backendlocal.New(), RunnerDirectory: dir})
+	if err != nil {
+		t.Fatalf("NewControlPlane: %v", err)
+	}
+	observer := &recordingConflictObserver{}
+	cp.runnerDescriptorConflicts = newRunnerDescriptorConflictReporter(nil, observer)
+	base := time.Now().UTC()
+	registerNodeTypesRunner(t, dir, "runner-a", "tenant-a", base, contractDescriptor("acme.t", 1, "A"))
+	registerNodeTypesRunner(t, dir, "runner-b", "tenant-b", base, contractDescriptor("acme.t", 1, "B"))
+
+	for _, ns := range []namespace.Namespace{"tenant-a", "tenant-b", "tenant-c"} {
+		observer.got = nil
+		got, err := cp.LiveRunnerNodeTypes(context.Background(), ns, base.Add(time.Second))
+		if err != nil {
+			t.Fatalf("LiveRunnerNodeTypes(%s): %v", ns, err)
+		}
+		if ns != "tenant-c" && (len(got) != 1 || got[0].DistinctHashes != 1) {
+			t.Fatalf("LiveRunnerNodeTypes(%s) = %+v, want one non-conflicting entry", ns, got)
+		}
+		if observer.got["acme.t"] != 1 {
+			t.Fatalf("after a %s request: gauges = %v, want acme.t=1", ns, observer.got)
+		}
+	}
+}

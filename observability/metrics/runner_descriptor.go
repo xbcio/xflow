@@ -40,10 +40,11 @@ func (r RunnerDescriptorMetrics) OnRunnerDescriptorRejected(ctx context.Context,
 	r.Metrics.Inc(metricRunnerDescriptorRejected, withNamespace(ctx, map[string]string{"reason": reason}))
 }
 
-// OnRunnerDescriptorConflicts records how many versions of nodeType the live
-// fleet reports with disagreeing descriptors. It is a gauge per node type,
-// set on every aggregation (0 when consistent). Node types are bounded by
-// what runners are entitled to register, never by runner or execution.
+// OnRunnerDescriptorConflicts records how many versions of nodeType the whole
+// live fleet reports with disagreeing descriptors. It is a gauge per node
+// type, set on every fleet-wide aggregation (0 when consistent, and reset to
+// 0 once a type's last reporter goes away). Node types are bounded by what
+// runners are entitled to register, never by runner or execution.
 func (r RunnerDescriptorMetrics) OnRunnerDescriptorConflicts(_ context.Context, nodeType string, conflicts int) {
 	r.Metrics.Set(metricRunnerDescriptorConflicts, map[string]string{"node_type": nodeType}, float64(conflicts))
 }
