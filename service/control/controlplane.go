@@ -288,6 +288,9 @@ type ControlPlane struct {
 	// the whole live fleet each time LiveRunnerNodeTypes reads it. Its
 	// observer is nil when Config.Metrics is nil.
 	runnerDescriptorConflicts *runnerDescriptorConflictReporter
+	// runnerNodeTypes caches LiveRunnerNodeTypes' fleet-wide directory read
+	// for runnerNodeTypesCacheTTL. Nil reads the directory on every call.
+	runnerNodeTypes *runnerNodeTypesCache
 
 	lifecycleMu                sync.Mutex
 	started                    bool
@@ -684,6 +687,7 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		supplyKeyRotationPeriod:   cfg.SupplyKeyRotationPeriod,
 		metricsInbox:              metricsInbox,
 		runnerDescriptorConflicts: runnerDescriptorConflicts,
+		runnerNodeTypes:           newRunnerNodeTypesCache(runnerNodeTypesCacheTTL),
 	}, nil
 }
 

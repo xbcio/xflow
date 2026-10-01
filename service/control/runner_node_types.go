@@ -15,6 +15,11 @@ import (
 // aggregation of the unfiltered fleet instead, so the gauge reads the same
 // whichever namespace was requested.
 //
+// The fleet-wide read is cached for runnerNodeTypesCacheTTL against now (see
+// runnerNodeTypesCache), and the conflict log and gauge run once per read,
+// not once per request. A registration or expiry therefore shows up within
+// that TTL rather than on the very next request.
+//
 // It reads the raw runner directory, not RunnerDirectory(): the management
 // decorator installed when metrics are configured does not forward optional
 // capabilities such as RunnerDescriptorDirectory. A directory without that
@@ -25,10 +30,15 @@ func (cp *ControlPlane) LiveRunnerNodeTypes(ctx context.Context, ns namespace.Na
 	if !ok || dir == nil {
 		return nil, nil
 	}
-	records, err := dir.LiveRunnerDescriptors(ctx, now)
+	records, err := cp.runnerNodeTypes.get(ctx, now,
+		func(ctx context.Context) ([]RunnerDescriptorRecord, error) {
+			return dir.LiveRunnerDescriptors(ctx, now)
+		},
+		func(ctx context.Context, records []RunnerDescriptorRecord) {
+			cp.runnerDescriptorConflicts.report(ctx, AggregateRunnerDescriptors(records))
+		})
 	if err != nil {
 		return nil, err
 	}
-	cp.runnerDescriptorConflicts.report(ctx, AggregateRunnerDescriptors(records))
 	return AggregateRunnerDescriptors(FilterRunnerDescriptorRecords(records, ns)), nil
 }

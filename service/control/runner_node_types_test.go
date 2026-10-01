@@ -95,9 +95,11 @@ func TestControlPlaneLiveRunnerNodeTypesGaugesTheWholeFleet(t *testing.T) {
 	registerNodeTypesRunner(t, dir, "runner-a", "tenant-a", base, contractDescriptor("acme.t", 1, "A"))
 	registerNodeTypesRunner(t, dir, "runner-b", "tenant-b", base, contractDescriptor("acme.t", 1, "B"))
 
-	for _, ns := range []namespace.Namespace{"tenant-a", "tenant-b", "tenant-c"} {
+	for i, ns := range []namespace.Namespace{"tenant-a", "tenant-b", "tenant-c"} {
 		observer.got = nil
-		got, err := cp.LiveRunnerNodeTypes(context.Background(), ns, base.Add(time.Second))
+		// Step past the read cache so every request re-aggregates the fleet.
+		now := base.Add(time.Second + time.Duration(i)*runnerNodeTypesCacheTTL)
+		got, err := cp.LiveRunnerNodeTypes(context.Background(), ns, now)
 		if err != nil {
 			t.Fatalf("LiveRunnerNodeTypes(%s): %v", ns, err)
 		}
