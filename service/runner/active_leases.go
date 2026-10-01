@@ -14,6 +14,9 @@ import "sync"
 // It leaves when execution finishes, whether the report landed or not: once
 // the handler has returned, a replay is a legitimate redelivery of unreported
 // work rather than a second concurrent execution.
+//
+// There is one set per Runner, shared by every Run: a reconnect's new session
+// must report leases the previous session's workers are still executing.
 type activeLeases struct {
 	mu  sync.Mutex
 	ids map[string]int

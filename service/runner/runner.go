@@ -172,6 +172,18 @@ type Runner struct {
 	// protocol.HeartbeatResponse). A nil acker leaves failures logged locally
 	// only, same as before this feature existed.
 	acker *activationAcker
+	// active is the set of leases this process's workers hold. It is owned by
+	// the Runner, not by one Run, because a transport-error reconnect re-enters
+	// Run while workers of the previous session are still executing: the
+	// server rebinds those leases to the new session and replays any lease a
+	// poll does not name, so a per-Run set would hand a still-running lease to
+	// a second worker. The old worker's eventual report carries the old
+	// session and is refused as stale; the lease then leaves this set and the
+	// server's replay is a sequential redelivery of unreported work.
+	active *activeLeases
+	// shutdownTimeout bounds Run's wait for busy workers once polling stops.
+	// Always defaultRunnerShutdownTimeout outside tests.
+	shutdownTimeout time.Duration
 }
 
 func New(client ProtocolClient, registry engine.HandlerRegistry, config Config) *Runner {
@@ -201,6 +213,8 @@ func New(client ProtocolClient, registry engine.HandlerRegistry, config Config) 
 		supplyGate:        config.SupplyGate,
 		metricsReporter:   config.MetricsReporter,
 		controlGate:       newRunnerControlGate(),
+		active:            newActiveLeases(),
+		shutdownTimeout:   defaultRunnerShutdownTimeout,
 	}
 	if config.ActivationTracker != nil {
 		if ackClient, ok := client.(activationAckClient); ok {
@@ -270,7 +284,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	var inFlight atomic.Int32
-	active := newActiveLeases()
+	active := r.active
 	leaseCh := make(chan *engine.TaskLease, r.config.Concurrency)
 	var errOnce sync.Once
 	errCh := make(chan error, 1)
@@ -316,8 +330,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	select {
 	case <-waitDone:
 		drained = true
-	case <-time.After(defaultRunnerShutdownTimeout):
+	case <-time.After(r.shutdownTimeout):
 	}
+	releaseUnstartedLeases(leaseCh, &inFlight, active)
 
 	// Shutdown activation tracker if configured.
 	if r.activationTracker != nil {
@@ -415,6 +430,26 @@ func (r *Runner) pollLoop(ctx context.Context, sessionID string, leaseCh chan<- 
 			active.remove(string(resp.Lease.LeaseID))
 			inFlight.Add(-1)
 			return nil
+		}
+	}
+}
+
+// releaseUnstartedLeases unmarks leases pollLoop accepted but no worker took
+// before the run ended. The active set outlives the run, so a lease left in it
+// would be reported on every later poll and suppress the server's replay of
+// work this process never started. pollLoop must have returned: it is the only
+// sender on leaseCh.
+func releaseUnstartedLeases(leaseCh chan *engine.TaskLease, inFlight *atomic.Int32, active *activeLeases) {
+	for {
+		select {
+		case lease := <-leaseCh:
+			if lease == nil {
+				return
+			}
+			active.remove(string(lease.LeaseID))
+			inFlight.Add(-1)
+		default:
+			return
 		}
 	}
 }
