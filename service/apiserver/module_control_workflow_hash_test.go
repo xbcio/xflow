@@ -15,6 +15,7 @@ import (
 	"github.com/xbcio/xflow/backend/workflowhash"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -299,6 +300,110 @@ func TestPutWorkflowUnchangedLegacyRecordIsNoOp(t *testing.T) {
 	if after.RegistryRevision != legacy.RegistryRevision || after.DefinitionHash != legacy.DefinitionHash {
 		t.Fatalf("unchanged PUT over a legacy record wrote it: rev %d -> %d, hash %q -> %q",
 			legacy.RegistryRevision, after.RegistryRevision, legacy.DefinitionHash, after.DefinitionHash)
+	}
+}
+
+// TestPutWorkflowRepeatedIdenticalPutIsNoOp pins the no-op replace over a
+// record whose stored definition already carries its id: one last written by
+// PUT, or a legacy "sha256:" record written that way. An identical PUT without
+// a client mutation id returns the same id, keeps the revision and hash, and
+// never reaches the CAS (so it neither upgrades a legacy hash nor records a
+// mutation). Retries that carry a client mutation id still replay through the
+// operation ledger; module_control_atomic_replace_test.go pins that.
+func TestPutWorkflowRepeatedIdenticalPutIsNoOp(t *testing.T) {
+	tests := []struct {
+		name string
+		// seed stores the record and returns its id plus the PUT body that is
+		// identical to the stored definition.
+		seed func(t *testing.T, base backend.WorkflowRegistry, srvURL string) (types.WorkflowID, *types.WorkflowDef)
+	}{
+		{
+			name: "last written by PUT",
+			seed: func(t *testing.T, _ backend.WorkflowRegistry, srvURL string) (types.WorkflowID, *types.WorkflowDef) {
+				t.Helper()
+				id := postRegisterID(t, srvURL, waitWorkflow("repeat-put", false), http.StatusCreated)
+				edited := waitWorkflow("repeat-put", false)
+				edited.ID = string(id)
+				edited.Description = "edited in the editor"
+				resp := putWorkflow(t, srvURL, "tok-full", string(id), edited)
+				defer func() { _ = resp.Body.Close() }()
+				if resp.StatusCode != http.StatusOK {
+					t.Fatalf("changing PUT status = %d, want 200", resp.StatusCode)
+				}
+				same := waitWorkflow("repeat-put", false)
+				same.ID = string(id)
+				same.Description = "edited in the editor"
+				return id, same
+			},
+		},
+		{
+			name: "legacy record carrying its id",
+			seed: func(t *testing.T, base backend.WorkflowRegistry, _ string) (types.WorkflowID, *types.WorkflowDef) {
+				t.Helper()
+				const id = types.WorkflowID("legacy-put-written")
+				def := waitWorkflow("repeat-put", false)
+				def.ID = string(id)
+				def.Namespace = "namespaceA"
+				g, err := graph.Compile(def)
+				if err != nil {
+					t.Fatalf("Compile: %v", err)
+				}
+				ctx := namespace.WithNamespace(context.Background(), "namespaceA")
+				if _, err := base.AddWorkflow(ctx, backend.WorkflowRecord{
+					ID:             id,
+					Key:            workflowRegistryKey("namespaceA", def.Name, def.Version),
+					Namespace:      "namespaceA",
+					Name:           def.Name,
+					Version:        def.Version,
+					DefinitionHash: legacySHA256(t, def),
+					Definition:     def,
+					Graph:          g,
+				}); err != nil {
+					t.Fatalf("seed AddWorkflow: %v", err)
+				}
+				same := waitWorkflow("repeat-put", false)
+				same.ID = string(id)
+				return id, same
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := local.New().WorkflowRegistry()
+			hooked := newHookedAtomicWorkflowRegistry(base)
+			srv, _ := newWorkflowReplaceDependencyTestServer(t, hooked, control.NewMemoryEntryActivationStore(), nil)
+			id, same := tt.seed(t, base, srv.URL)
+			before, err := base.GetWorkflow(context.Background(), id)
+			if err != nil {
+				t.Fatalf("GetWorkflow(%q) before identical PUT: %v", id, err)
+			}
+			if before.Definition == nil || before.Definition.ID != string(id) {
+				t.Fatalf("stored definition id = %v, want it to carry %q", before.Definition, id)
+			}
+			callsBefore, _, _, _ := hooked.observations()
+
+			resp := putWorkflow(t, srv.URL, "tok-full", string(id), same)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("identical PUT status = %d, want 200", resp.StatusCode)
+			}
+			var out registerWorkflowResponse
+			decodeEnvelope(t, resp, &out)
+			if out.WorkflowID != id {
+				t.Fatalf("identical PUT workflow_id = %q, want %q", out.WorkflowID, id)
+			}
+			after, err := base.GetWorkflow(context.Background(), id)
+			if err != nil {
+				t.Fatalf("GetWorkflow(%q) after identical PUT: %v", id, err)
+			}
+			if after.RegistryRevision != before.RegistryRevision || after.DefinitionHash != before.DefinitionHash {
+				t.Fatalf("identical PUT wrote the record: rev %d -> %d, hash %q -> %q",
+					before.RegistryRevision, after.RegistryRevision, before.DefinitionHash, after.DefinitionHash)
+			}
+			if callsAfter, _, _, _ := hooked.observations(); callsAfter != callsBefore {
+				t.Fatalf("CompareAndReplace calls = %d -> %d, want the identical PUT to skip the CAS", callsBefore, callsAfter)
+			}
+		})
 	}
 }
 

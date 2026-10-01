@@ -1627,10 +1627,15 @@ func (m *workflowControlModule) replaceWorkflowByID(ctx context.Context, ns name
 	if err != nil {
 		return "", registrationDiagnostics{}, err
 	}
-	if unchangedExceptStampedID(existing, replacement, id) {
-		// A record registered by POST stores its definition without an id,
-		// while PUT stamps the path id onto def above. Content is identical,
-		// so this is the no-op replace, not a new revision (Doc C §5.1 #2).
+	// An identical PUT is the no-op replace, not a new revision (Doc C §5.1 #2).
+	// The shortcut must not pre-empt operation-ledger replay: a record whose
+	// stored definition already carries the path id was last written by PUT,
+	// possibly under this very client mutation id, and a retry of that
+	// mutation must replay through CompareAndReplaceWorkflow (which is the
+	// ledger lookup). A POST-written record (no stored id) has no HTTP ledger
+	// entry, and a request without a client mutation id gets a fresh one that
+	// no ledger entry can match, so both are safe to short-circuit.
+	if unchangedExceptStampedID(existing, replacement, id) && (existing.Definition.ID == "" || mutationID == "") {
 		return existing.ID, diag, nil
 	}
 	if mutationID == "" {
@@ -1746,10 +1751,14 @@ func workflowRegistryKey(ns, name, version string) string {
 var hashParamSpecs workflowhash.ParamSpecLookup = node.BuiltinParamSpecs
 
 // unchangedExceptStampedID reports whether replacement differs from existing
-// only by the path id PUT stamps onto the definition: same registry key, and
-// the stored definition, once given that id, hashes identically.
+// at most by the path id PUT stamps onto the definition: same registry key,
+// and the stored definition, which carries either no id (written by POST) or
+// the path id (written by PUT), hashes identically once given that id.
 func unchangedExceptStampedID(existing, replacement backend.WorkflowRecord, id types.WorkflowID) bool {
-	if existing.Key != replacement.Key || existing.Definition == nil || existing.Definition.ID != "" {
+	if existing.Key != replacement.Key || existing.Definition == nil {
+		return false
+	}
+	if existing.Definition.ID != "" && existing.Definition.ID != string(id) {
 		return false
 	}
 	stamped := *existing.Definition
