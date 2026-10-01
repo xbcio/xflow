@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -12,11 +13,13 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/service/protocol/runnerpb"
+	"github.com/xbcio/xflow/types"
 )
 
 // GRPCServer adapts the generated RunnerProtocolServer onto the transport-agnostic
@@ -33,18 +36,30 @@ type GRPCServerOption func(*GRPCServer)
 // RunnerGRPCServerOptions returns the grpc.ServerOptions every grpc.Server
 // hosting the runner protocol must be built with. Today that is a receive
 // limit of MaxRegisterRunnerBodyBytes, so a Register the HTTP transport
-// accepts is not rejected with ResourceExhausted by grpc-go's 4 MiB default.
+// accepts is not rejected with ResourceExhausted by grpc-go's 4 MiB default,
+// and a send limit of the same size, matching what a runner built with
+// RunnerGRPCDialOptions accepts. Without the send limit grpc-go would send up
+// to MaxInt32, and an oversize message would fail on the runner as an opaque
+// ResourceExhausted instead of on the server, where it can be logged.
 //
-// The limit is server-wide, not Register-only: Heartbeat, PollTask,
+// PollTask does not rely on the send limit for leases: it measures the
+// encoded response itself and fails a lease too large to deliver (see
+// failUndeliverableLease), because a lease the transport refuses is not lost
+// but redelivered indefinitely.
+//
+// Both limits are server-wide, not Register-only: Heartbeat, PollTask,
 // ReportResult and every Connect stream message may now also be up to 8 MiB
 // instead of 4 MiB. grpc-go enforces MaxRecvMsgSize in the transport while
 // reading a message, before any handler or interceptor sees it, and offers no
 // per-method override; an interceptor can only tighten after the full message
 // is already buffered, so it could not be the mechanism that loosens one
 // method. Any other service registered on the same grpc.Server inherits the
-// limit too.
+// limits too.
 func RunnerGRPCServerOptions() []grpc.ServerOption {
-	return []grpc.ServerOption{grpc.MaxRecvMsgSize(MaxRegisterRunnerBodyBytes)}
+	return []grpc.ServerOption{
+		grpc.MaxRecvMsgSize(MaxRegisterRunnerBodyBytes),
+		grpc.MaxSendMsgSize(MaxRegisterRunnerBodyBytes),
+	}
 }
 
 // WithGRPCAuthenticator installs a runner-protocol authenticator on the gRPC
@@ -158,6 +173,45 @@ func (s *GRPCServer) PollTask(ctx context.Context, req *runnerpb.PollTaskRequest
 		return nil, runnerStatus(err)
 	}
 	out, err := protocol.PollTaskResponseToProto(resp)
+	if err != nil {
+		return nil, status.Error(codes.Internal, ErrInternalServer.Error())
+	}
+	if size := proto.Size(out); resp.Lease != nil && size > MaxRegisterRunnerBodyBytes {
+		return s.failOversizeLease(ctx, in, resp, size)
+	}
+	return out, nil
+}
+
+// failOversizeLease answers a poll whose lease encodes past the runner gRPC
+// message limit. The lease is already finalized in the directory, so letting
+// the transport reject the send would not lose it: it would be redelivered,
+// fail the same way, and loop (see failUndeliverableLease). The lease is
+// failed permanently instead and the runner gets an ordinary no-task answer,
+// so one oversize task does not also end the runner's session.
+func (s *GRPCServer) failOversizeLease(ctx context.Context, req protocol.PollTaskRequest, resp protocol.PollTaskResponse, size int) (*runnerpb.PollTaskResponse, error) {
+	lease := resp.Lease
+	cause := types.NewPermanentError(LeaseTooLargeErrorCode, fmt.Sprintf(
+		"task lease encodes to %d bytes, above the %d-byte runner gRPC message limit", size, MaxRegisterRunnerBodyBytes))
+	logArgs := []any{
+		"ns", string(lease.Namespace),
+		"exec", string(lease.Task.ExecutionID),
+		"node", lease.Task.NodeName,
+		"node_idx", lease.Task.NodeIdx,
+		"attempt", lease.Attempt,
+		"lease", string(lease.LeaseID),
+		"runner", req.RunnerID,
+		"bytes", size,
+		"limit", MaxRegisterRunnerBodyBytes,
+	}
+	if s.core.logger != nil {
+		s.core.logger.Error("task lease exceeds runner gRPC message limit; failing task", logArgs...)
+	}
+	if err := s.core.failUndeliverableLease(ctx, req.RunnerID, req.SessionID, lease, cause); err != nil && s.core.logger != nil {
+		// The lease stays finalized, so the next replay or reclaim comes back
+		// through this branch and retries the failure.
+		s.core.logger.Error("fail oversize task lease", append(logArgs, "err", err)...)
+	}
+	out, err := protocol.PollTaskResponseToProto(protocol.PollTaskResponse{Wait: s.core.pollWait, Control: resp.Control})
 	if err != nil {
 		return nil, status.Error(codes.Internal, ErrInternalServer.Error())
 	}
