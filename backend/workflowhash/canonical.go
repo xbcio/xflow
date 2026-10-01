@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 
+	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -60,7 +61,10 @@ func Canonical(def *types.WorkflowDef, specs ParamSpecLookup) *types.WorkflowDef
 // canonicalParams returns the canonical params of one node and whether they
 // differ from params. params is never mutated.
 func canonicalParams(kind types.NodeKind, nodeType string, version int, params map[string]any, specs ParamSpecLookup) (map[string]any, bool) {
-	if declaresSubgraphBody(params) {
+	// The same check the compiler and execution use, keyed on the value's
+	// shape (params.body decodes as an xflow.subgraph node), never on node
+	// type, so a request-payload "body" (xflow.http) is never mistaken for one.
+	if graph.DeclaresSubgraphBody(params) {
 		body, changed := canonicalBody(params[subgraphBodyParam], specs)
 		if !changed {
 			return params, false
@@ -90,26 +94,6 @@ func canonicalParams(kind types.NodeKind, nodeType string, version int, params m
 		return params, false
 	}
 	return out, true
-}
-
-// declaresSubgraphBody mirrors engine/graph.DeclaresSubgraphBody, the check
-// the compiler and execution use: params.body decodes as a node whose type is
-// xflow.subgraph. Keyed on the value's shape, never on node type, so a
-// request-payload "body" (xflow.http) is never mistaken for one.
-func declaresSubgraphBody(params map[string]any) bool {
-	raw, ok := params[subgraphBodyParam]
-	if !ok {
-		return false
-	}
-	data, err := json.Marshal(raw)
-	if err != nil {
-		return false
-	}
-	var nd types.NodeDef
-	if err := json.Unmarshal(data, &nd); err != nil {
-		return false
-	}
-	return nd.Type == types.SubgraphNodeType
 }
 
 // canonicalBody fills the members of an xflow.subgraph body and reports
