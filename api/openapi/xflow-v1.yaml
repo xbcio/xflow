@@ -2838,7 +2838,16 @@ components:
           type: string
         definition_hash:
           type: string
-          description: Hash of the stored definition; changes whenever the definition does.
+          description: |
+            Opaque identifier of the stored definition's runtime semantics.
+            Compare it only for equality; its format is not part of the
+            contract. It ignores the description, ids and editor metadata, and
+            a builtin node parameter left out hashes like its declared default,
+            so it does not change on every definition change: detect a
+            metadata edit through `registry_revision`. The server may rewrite
+            it in place to a newer hash format (for example `sha256:` to
+            `runtime-sha256:`) without any change to the definition; such an
+            upgrade still advances `registry_revision`.
         registry_revision:
           type: integer
           format: uint64
