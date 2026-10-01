@@ -175,7 +175,9 @@ func waitForCompletion(ctx context.Context, t *testing.T, state engine.StateStor
 	defer ticker.Stop()
 	for {
 		snap, err := state.GetExecution(ctx, id)
-		if err == nil && types.IsTerminalExecutionStatus(snap.Status) {
+		// GetExecution reports a not-yet-visible execution as (nil, nil), so a
+		// nil snapshot means "keep polling", not a terminal answer.
+		if err == nil && snap != nil && types.IsTerminalExecutionStatus(snap.Status) {
 			out := map[string]any{}
 			for _, n := range outputNodes {
 				if v, e := state.GetOutput(ctx, id, n); e == nil && v != nil {
