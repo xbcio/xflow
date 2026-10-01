@@ -141,7 +141,11 @@ paths:
             definition: a definition that differs from the stored one only in
             its description, ids or editor metadata (node position, UI, notes)
             is not a conflict, and a builtin node parameter left out counts as
-            its declared default. Use `PUT /v1/workflows/{id}` to change the
+            its declared default. An explicit empty value (for example
+            `"method": ""`) is a value, not an omission: it is not filled with
+            the default, so it conflicts with a stored definition that leaves
+            the parameter out or spells out its default. A custom node type's
+            defaults are never filled. Use `PUT /v1/workflows/{id}` to change the
             stored definition.
           headers:
             X-Request-Id:
