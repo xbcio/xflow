@@ -4,16 +4,18 @@
 |------|-------|
 | Status | Accepted / Partially Implemented — Go side complete; TypeScript conversion layer and server storage not yet implemented |
 | Owner | xflow team |
-| Related | `types/workflow.go`, `sdk/xflow/workflow_identity.go` |
+| Related | `types/workflow.go`, `backend/workflowhash/`, `node/builtin_specs.go` |
 
 ## Implementation Status
 
 **Go side (implemented):**
-- `runtimeHash` / `runtimeHashPayload` / `runtimeNodeHashPayload` / `runtimeSelectorHashPayload` / `runtimeHashGroupPayload` — `sdk/xflow/workflow_identity.go:61-104`
+- Runtime hash (`workflowhash.Runtime`) and its payload mirrors live in `backend/workflowhash/workflowhash.go`; every registration path (SDK Engine, HTTP `POST`/`PUT /v1/workflows`, embedded `Server.AddWorkflow`/`ReplaceWorkflow`) hashes through it. `sdk/xflow/workflow_identity.go` keeps thin wrappers.
 - Editor fields (`NodeDef.Position`, `NodeDef.UI`, `NodeDef.Notes`, `NodeDef.ID`) excluded from runtime hash per §2.1–§2.2
-- `Groups` and `DependencyEdges` included in runtime hash via `canonicalizeGroups`/`canonicalizeDependencyEdges` — `sdk/xflow/workflow_identity.go:213-248`
-- Separate audit fingerprint (`legacyDefinitionHash`) — `sdk/xflow/workflow_identity.go:255`
-- Hash-local `runtimeSelectorHashPayload` mirror with frozen pre-§9.4 tags to decouple wire rename from hash — `sdk/xflow/workflow_identity.go:183`
+- `Groups` and `DependencyEdges` included in runtime hash via `canonicalizeGroups`/`canonicalizeDependencyEdges`
+- Separate audit fingerprint (`workflowhash.Audit`), recorded as `WorkflowRecord.AuditFingerprint` on every path
+- Hash-local `runtimeSelectorHashPayload` mirror with frozen pre-§9.4 tags to decouple wire rename from hash
+- Canonical builtin defaults before hashing (§3.1): `workflowhash.Canonical` over `node.BuiltinParamSpecs`
+- Legacy-hash reconcile with CAS upgrade (`workflowhash.Reconcile` / `ReconcileAdd`), shared by the SDK and the apiserver
 
 **Not yet implemented:**
 - `WorkflowEditorMetadata` Go struct (§2.3) — zero hits in codebase
@@ -94,6 +96,17 @@ The canonical runtime hash is computed over the runtime-semantic subset only:
 - Includes: everything else, including `WorkflowDef.PinData` and the runtime subset of each node (with `NodeDef.Timeout` and `NodeDef.Output` since v2). Re-registering the same `name@version` with only a node timeout or output policy changed is therefore a conflict.
 
 A separate audit fingerprint (`sha256:audit:v1:`) is computed over the full `WorkflowDef` JSON (including editor metadata) for export/audit traceability. It must NOT be used for conflict detection.
+
+### 3.1 Canonical builtin defaults
+
+The runtime hash is taken over a canonical form of the definition in which every **builtin** node's missing or `null` parameter is filled with its `ParamSpec.Default`. An omitted builtin parameter and the same parameter spelled out as its Default are therefore one runtime identity, whichever path registered the workflow: the SDK builder writes Defaults into the definition, while the HTTP path stores the body as sent.
+
+- The canonical form exists only in memory. The stored definition is never modified, and execution still reads the stored definition.
+- The fill rule mirrors the SDK builder's: a missing or `null` parameter is filled; an explicit `""` is kept; only top-level ParamSpecs are filled; a body-bearing parent (`params.body` is an `xflow.subgraph`) is skipped while its body members are filled; disabled nodes are filled; lookup is kind-aware (action, trigger, supply).
+- Only builtin node types are canonicalized, from a fixed table (`node.BuiltinParamSpecs`), never from the live node registry or runner-reported descriptors. The hash must not depend on what a process registered, and "omitted equals Default" is proven only for builtins, whose Defaults equal their handler fallbacks. A custom node type with a Default therefore stays path-sensitive: the SDK form and the same body with that parameter omitted conflict.
+- A builtin `ParamSpec.Default` is part of hash identity. Changing one is a hash-format change and needs a prefix bump.
+- On an SDK build the canonical form is the identity (the builder already wrote those Defaults), so no SDK hash changed. Records hashed before this (bare `sha256:` hashes written by the HTTP path) are recomputed on their next registration and CAS-upgraded to the `runtime-sha256:` form; there is no migration pass.
+- Registration through `POST /v1/workflows` or the embedded `AddWorkflow` is idempotent on the runtime identity: a definition that differs from the stored one only in editor metadata (§2.2) or by omitted builtin Defaults returns the existing workflow id and leaves the stored definition unchanged. Replace no-op checks (`PUT /v1/workflows/{id}`, embedded `ReplaceWorkflow`) compare audit fingerprints instead, so a metadata-only change is still written as a new revision.
 
 ## 4. Consequences
 
