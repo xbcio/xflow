@@ -27,6 +27,10 @@ export default defineConfig({
     // four DOM-heavy files concurrently can starve Vitest's 5s per-test timer
     // on a cold CI worker, so keep file execution deterministic and serial.
     fileParallelism: false,
+    // v8 coverage instrumentation slows the DOM-heavy editor files several
+    // times over; under `vitest run --coverage` the default 5s per-test timer
+    // fails tests that pass uninstrumented. Only the coverage run gets more.
+    testTimeout: process.argv.includes("--coverage") ? 30_000 : 5_000,
     globals: true,
     setupFiles: ["./vitest.setup.ts"],
     include: [
