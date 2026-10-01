@@ -605,7 +605,22 @@ func TestNamespaceIsolationRunnerAssignmentDoesNotCrossNamespace(t *testing.T) {
 		t.Fatalf("register runner-a: %v", err)
 	}
 
-	// Enqueue an assignment that belongs to namespace B.
+	// Enqueue an assignment that belongs to namespace B. Its execution must
+	// exist and be live in namespace B: the claim path skips assignments whose
+	// execution is gone or terminal, so without it runner-b's positive control
+	// below would fail for a reason unrelated to namespace isolation.
+	g, err := graph.Compile(testWorkflow("assign-wf"))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	ctxB := namespace.WithNamespace(ctx, namespace.Namespace(testNamespaceB))
+	if err := f.cp.Engine().(*engine.Engine).State().CreateExecution(ctxB, &engine.ExecutionSnapshot{
+		ID:     "exec-b",
+		Graph:  g,
+		Status: types.ExecutionStatusRunning,
+	}); err != nil {
+		t.Fatalf("create namespaceB execution: %v", err)
+	}
 	task := engine.Task{
 		ExecutionID:  "exec-b",
 		NodeName:     "start",
