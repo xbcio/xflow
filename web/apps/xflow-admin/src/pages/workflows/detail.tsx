@@ -50,8 +50,10 @@ export default function WorkflowDetailPage() {
   // namespace so the library carries the runner types that namespace can use.
   // A failure is not fatal: the editor falls back to the "no schema" form
   // (common fields + JSON tab) and says so in the Inspector; the toast
-  // explains why.
+  // explains why. While an existing workflow is still loading its namespace
+  // is unknown, so the fetch waits rather than issuing a wasted unscoped one.
   useEffect(() => {
+    if (loading) return undefined;
     let cancelled = false;
     api.listNodeTypes({ namespace: nodeTypesNamespace }).then(
       (response) => {
@@ -64,7 +66,7 @@ export default function WorkflowDetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [api, message, nodeTypesNamespace]);
+  }, [api, loading, message, nodeTypesNamespace]);
 
   const loadWorkflow = useCallback(async () => {
     if (isNewWorkflow) {
