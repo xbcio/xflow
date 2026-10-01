@@ -3,8 +3,6 @@ package apiserver
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1582,7 +1580,7 @@ func (m *workflowControlModule) replaceWorkflow(ctx context.Context, ns namespac
 	if err != nil {
 		return "", registrationDiagnostics{}, err
 	}
-	if sameFullDefinition(existing.Definition, replacement.Definition) {
+	if sameAuditFingerprint(existing, replacement) {
 		return m.addWorkflowRecord(ctx, ns, registry, replacement, diag)
 	}
 
@@ -1756,32 +1754,31 @@ func unchangedExceptStampedID(existing, replacement backend.WorkflowRecord, id t
 	}
 	stamped := *existing.Definition
 	stamped.ID = string(id)
-	return sameFullDefinition(&stamped, replacement.Definition)
+	return sameAuditFingerprint(backend.WorkflowRecord{Definition: &stamped}, replacement)
 }
 
-// sameFullDefinition reports whether a and b are the same full definition,
-// editor metadata included. Replace no-op checks use it rather than the
-// registry's runtime hash, so a metadata-only replace is still written.
-func sameFullDefinition(a, b *types.WorkflowDef) bool {
-	if a == nil || b == nil {
+// sameAuditFingerprint reports whether replacement is the same full definition
+// as existing, editor metadata included. Replace no-op checks compare audit
+// fingerprints rather than the runtime conflict hash, so a metadata-only
+// replace is still written.
+//
+// existing's fingerprint is recomputed from its stored definition whenever
+// there is one: a record written before registrations carried a fingerprint
+// has none, and recomputing is the same value for one that does. Without a
+// stored definition the stored fingerprint is used, and without either the
+// check falls back to the runtime hash.
+func sameAuditFingerprint(existing, replacement backend.WorkflowRecord) bool {
+	if replacement.AuditFingerprint == "" {
 		return false
 	}
-	ha, hb := definitionHash(a), definitionHash(b)
-	return ha != "" && ha == hb
-}
-
-// definitionHash returns a stable SHA-256 fingerprint over the JSON-encoded
-// definition, editor metadata included. It is never the registry conflict
-// hash (that is workflowhash.Runtime); it only detects a no-op replace.
-// Marshal errors collapse to an empty hash, which sameFullDefinition treats as
-// a change.
-func definitionHash(def *types.WorkflowDef) string {
-	data, err := json.Marshal(def)
-	if err != nil {
-		return ""
+	if existing.Definition != nil {
+		audit, err := workflowhash.Audit(existing.Definition)
+		return err == nil && audit == replacement.AuditFingerprint
 	}
-	sum := sha256.Sum256(data)
-	return "sha256:" + hex.EncodeToString(sum[:])
+	if existing.AuditFingerprint != "" {
+		return existing.AuditFingerprint == replacement.AuditFingerprint
+	}
+	return existing.DefinitionHash != "" && existing.DefinitionHash == replacement.DefinitionHash
 }
 
 // handleSeedExecution serves POST /v1/executions: it atomically seeds an

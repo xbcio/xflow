@@ -226,3 +226,133 @@ func TestRegisterWorkflowLostUpgradeRaceRefetches(t *testing.T) {
 		t.Fatalf("lost upgrades = %d, want 1 (the reconcile must have hit the CAS path)", reg.lost)
 	}
 }
+
+
+// TestPutWorkflowMetadataOnlyChangeIsAReplace pins that PUT keeps
+// full-definition no-op semantics: a change the runtime hash ignores (here the
+// description) is still written as a new revision, while the identical PUT
+// after it is a no-op.
+func TestPutWorkflowMetadataOnlyChangeIsAReplace(t *testing.T) {
+	srv, cp := newRegisterTestServer(t)
+	reg := cp.WorkflowRegistry()
+
+	id := postRegisterID(t, srv.URL, waitWorkflow("meta", false), http.StatusCreated)
+	before, err := reg.GetWorkflow(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetWorkflow: %v", err)
+	}
+
+	edited := waitWorkflow("meta", false)
+	edited.ID = string(id)
+	edited.Description = "edited in the editor"
+	putStatus := func(def *types.WorkflowDef) {
+		t.Helper()
+		resp := putWorkflow(t, srv.URL, "tok-full", string(id), def)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("PUT status = %d, want 200", resp.StatusCode)
+		}
+	}
+	putStatus(edited)
+	after, err := reg.GetWorkflow(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetWorkflow after PUT: %v", err)
+	}
+	if after.RegistryRevision == before.RegistryRevision || after.Definition.Description != "edited in the editor" {
+		t.Fatalf("metadata-only PUT was dropped: revision %d -> %d, description %q",
+			before.RegistryRevision, after.RegistryRevision, after.Definition.Description)
+	}
+	if after.DefinitionHash != before.DefinitionHash {
+		t.Fatalf("runtime hash moved on a metadata-only change: %q -> %q", before.DefinitionHash, after.DefinitionHash)
+	}
+	if after.AuditFingerprint == before.AuditFingerprint {
+		t.Fatal("audit fingerprint did not move on a metadata-only change")
+	}
+
+	putStatus(edited)
+	again, err := reg.GetWorkflow(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetWorkflow after identical PUT: %v", err)
+	}
+	if again.RegistryRevision != after.RegistryRevision {
+		t.Fatalf("identical PUT wrote a revision: %d -> %d", after.RegistryRevision, again.RegistryRevision)
+	}
+}
+
+// TestPutWorkflowUnchangedLegacyRecordIsNoOp pins the audit compare against a
+// record written before registrations carried a fingerprint: its fingerprint
+// is recomputed from the stored definition.
+func TestPutWorkflowUnchangedLegacyRecordIsNoOp(t *testing.T) {
+	srv, cp := newRegisterTestServer(t)
+	reg := cp.WorkflowRegistry()
+	legacy := seedLegacyRecord(t, reg, waitWorkflow("legacy-put", false))
+
+	same := waitWorkflow("legacy-put", false)
+	same.ID = string(legacy.ID)
+	resp := putWorkflow(t, srv.URL, "tok-full", string(legacy.ID), same)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT status = %d, want 200", resp.StatusCode)
+	}
+	after, err := reg.GetWorkflow(context.Background(), legacy.ID)
+	if err != nil {
+		t.Fatalf("GetWorkflow: %v", err)
+	}
+	if after.RegistryRevision != legacy.RegistryRevision || after.DefinitionHash != legacy.DefinitionHash {
+		t.Fatalf("unchanged PUT over a legacy record wrote it: rev %d -> %d, hash %q -> %q",
+			legacy.RegistryRevision, after.RegistryRevision, legacy.DefinitionHash, after.DefinitionHash)
+	}
+}
+
+// TestReplaceWorkflowComparesAuditFingerprints pins the embedded replace no-op:
+// an identical definition keeps the record and its id, even over a record whose
+// stored hash string differs (a legacy "sha256:" one), while a metadata-only
+// change is a real replace.
+func TestReplaceWorkflowComparesAuditFingerprints(t *testing.T) {
+	srv, cp := newReplaceTestServer(t)
+	reg := cp.WorkflowRegistry()
+	ctx := namespace.WithNamespace(context.Background(), namespace.Default)
+
+	def := waitWorkflow("embedded", false)
+	def.Namespace = string(namespace.Default)
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	legacy, err := reg.AddWorkflow(ctx, backend.WorkflowRecord{
+		Key:            workflowRegistryKey(string(namespace.Default), def.Name, def.Version),
+		Namespace:      string(namespace.Default),
+		Name:           def.Name,
+		DefinitionHash: legacySHA256(t, def),
+		Definition:     def,
+		Graph:          g,
+	})
+	if err != nil {
+		t.Fatalf("seed AddWorkflow: %v", err)
+	}
+
+	id, _, err := srv.ReplaceWorkflow(ctx, namespace.Default, waitWorkflow("embedded", false))
+	if err != nil {
+		t.Fatalf("identical ReplaceWorkflow: %v", err)
+	}
+	if id != legacy.ID {
+		t.Fatalf("identical ReplaceWorkflow id = %q, want the existing %q", id, legacy.ID)
+	}
+
+	edited := waitWorkflow("embedded", false)
+	edited.Description = "new description"
+	newID, _, err := srv.ReplaceWorkflow(ctx, namespace.Default, edited)
+	if err != nil {
+		t.Fatalf("metadata-only ReplaceWorkflow: %v", err)
+	}
+	if newID == legacy.ID {
+		t.Fatal("metadata-only ReplaceWorkflow kept the old record; the change was dropped")
+	}
+	rec, err := reg.GetWorkflow(ctx, newID)
+	if err != nil {
+		t.Fatalf("GetWorkflow(new): %v", err)
+	}
+	if rec.Definition.Description != "new description" {
+		t.Fatalf("stored description = %q, want the replacement's", rec.Definition.Description)
+	}
+}
