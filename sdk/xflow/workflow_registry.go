@@ -151,7 +151,7 @@ func (e *Engine) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.Wo
 		AuditFingerprint: audit,
 		Definition:       def,
 		Graph:            g,
-	}, nil)
+	}, hashParamSpecs)
 	if err != nil {
 		rollbackHandlers()
 		return "", err

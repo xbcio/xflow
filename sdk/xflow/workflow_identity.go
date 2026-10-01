@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/xbcio/xflow/backend/workflowhash"
+	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -25,11 +26,19 @@ const (
 // this package's encoding pins can inspect it.
 type runtimeHashPayload = workflowhash.RuntimePayload
 
+// hashParamSpecs is the ParamSpec lookup every SDK registration hashes with.
+// It is the builtin-only table, never the live registry, so an omitted builtin
+// param hashes like its Default and the hash matches what the HTTP path
+// computes for the same workflow. On an SDK build canonicalization is the
+// identity (TestCanonicalIsIdentityOnSDKBuilds): the builder already wrote
+// those Defaults.
+var hashParamSpecs workflowhash.ParamSpecLookup = node.BuiltinParamSpecs
+
 // runtimeHash is the registry conflict-detection hash. It delegates to
 // workflowhash.Runtime, the single implementation every registration path
 // shares.
 func runtimeHash(def *types.WorkflowDef) (string, error) {
-	return workflowhash.Runtime(def, nil)
+	return workflowhash.Runtime(def, hashParamSpecs)
 }
 
 // legacyDefinitionHash is the audit fingerprint. It delegates to
@@ -42,5 +51,5 @@ func legacyDefinitionHash(def *types.WorkflowDef) (string, error) {
 // record. It delegates to workflowhash.Reconcile; see there for the per-format
 // rules.
 func reconcileDefinitionHash(storedHash string, storedDef *types.WorkflowDef) (effectiveHash string, needsUpgrade bool, err error) {
-	return workflowhash.Reconcile(storedHash, storedDef, nil)
+	return workflowhash.Reconcile(storedHash, storedDef, hashParamSpecs)
 }
