@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/xbcio/xflow/backend"
+	"github.com/xbcio/xflow/backend/workflowhash"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/types"
@@ -136,11 +137,12 @@ func (e *Engine) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.Wo
 		e.mu.Unlock()
 	}
 
-	// created tracks whether this call persisted a brand-new record (vs.
-	// matching an existing/idempotent one), so a later reconcile failure only
-	// removes records we ourselves created.
-	created := true
-	rec, err := e.workflowRegistry.AddWorkflow(ctx, backend.WorkflowRecord{
+	// ReconcileAdd matches a stored record whose hash is in a legacy or stale
+	// format (upgrading it), and rejects a stale v1 hash hit that is a real
+	// change. created tracks whether this call may have persisted the record
+	// (vs. matching an existing one through reconciliation), so a later
+	// trigger reconcile failure only removes records we ourselves created.
+	rec, created, err := workflowhash.ReconcileAdd(ctx, e.workflowRegistry, backend.WorkflowRecord{
 		Key:              workflowKey(def),
 		Namespace:        def.Namespace,
 		Name:             def.Name,
@@ -150,78 +152,9 @@ func (e *Engine) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.Wo
 		Definition:       def,
 		Graph:            g,
 	})
-	if err == nil && strings.HasPrefix(rec.DefinitionHash, runtimeHashPrefix) && rec.Definition != nil {
-		// The registry matched on hash equality alone. A stored v1 hash may
-		// predate node Timeout/Output joining the runtime hash, in which case
-		// it also matches a definition that differs from the stored one only
-		// in those fields (for example, a timeout removed). Recompute from the
-		// stored definition to tell the two apart; a record this call just
-		// created recomputes to the same hash.
-		stored, hashErr := runtimeHash(rec.Definition)
-		if hashErr != nil {
-			rollbackHandlers()
-			return "", hashErr
-		}
-		if stored != hash {
-			// Correct the stale hash so the stored definition itself
-			// re-registers idempotently. Best effort: a lost CAS means
-			// another registrar already rewrote the record.
-			_ = e.workflowRegistry.UpdateDefinitionHash(ctx, rec.ID, rec.DefinitionHash, stored)
-			rollbackHandlers()
-			return "", backend.ErrWorkflowConflict
-		}
-	}
 	if err != nil {
-		// Legacy-hash compatibility: when a workflow was first registered
-		// before commit 3ef36d9 (or before F0-A3 tightened the runtime hash),
-		// the stored DefinitionHash is in a format that will never equal the
-		// freshly-computed runtime hash, so the registry rejects
-		// the re-registration as a conflict. Recompute the runtime hash from
-		// the stored Definition and, if it matches, atomically upgrade the
-		// record's DefinitionHash so future registrations are idempotent.
-		if !errors.Is(err, backend.ErrWorkflowConflict) {
-			rollbackHandlers()
-			return "", err
-		}
-		existing, lookupErr := e.workflowRegistry.GetWorkflowByKey(ctx, workflowKey(def))
-		if lookupErr != nil {
-			// Preserve the original conflict error if the lookup fails —
-			// the caller's contract is "conflict", not "lookup failed".
-			rollbackHandlers()
-			return "", err
-		}
-		effective, needsUpgrade, reconcileErr := reconcileDefinitionHash(existing.DefinitionHash, existing.Definition)
-		if reconcileErr != nil {
-			rollbackHandlers()
-			return "", reconcileErr
-		}
-		if effective != hash {
-			// Real semantic conflict: the stored definition produces a
-			// different runtime hash than the new one. Surface the original
-			// ErrWorkflowConflict.
-			rollbackHandlers()
-			return "", err
-		}
-		if needsUpgrade {
-			if upgradeErr := e.workflowRegistry.UpdateDefinitionHash(ctx, existing.ID, existing.DefinitionHash, hash); upgradeErr != nil {
-				// CAS mismatch means another registrar concurrently
-				// upgraded (or replaced) the record. Re-fetch and re-check
-				// once: if it now matches the new hash, treat as idempotent;
-				// otherwise surface the original conflict.
-				reloaded, reloadErr := e.workflowRegistry.GetWorkflowByKey(ctx, workflowKey(def))
-				if reloadErr == nil && reloaded.DefinitionHash == hash {
-					existing = reloaded
-				} else {
-					rollbackHandlers()
-					return "", err
-				}
-			} else {
-				existing.DefinitionHash = hash
-			}
-		}
-		// Matched an already-registered record; we did not create it.
-		created = false
-		rec = existing
+		rollbackHandlers()
+		return "", err
 	}
 	if e.triggerRuntime != nil {
 		if err := e.triggerRuntime.ReconcileWorkflow(ctx, rec); err != nil {
