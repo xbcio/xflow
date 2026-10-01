@@ -128,29 +128,42 @@ func AggregateRunnerDescriptors(records []RunnerDescriptorRecord) []AggregatedDe
 // It remembers which node types it has gauged. A type that drops out of a
 // later aggregation (its last reporter went away) is set back to 0 once and
 // then forgotten, so a resolved or vanished conflict never keeps its last
-// value. Safe for concurrent use; logger and observer may be nil, and an
-// observer panic is swallowed.
+// value. It also remembers the set of conflicting (type, version) pairs and
+// logs only when that set changes: a mixed-version rolling deploy is the
+// normal cause of a conflict, so a warning per read would fire steadily at
+// editor request rate for the whole deploy. Safe for concurrent use; logger
+// and observer may be nil, and an observer panic is swallowed.
 type runnerDescriptorConflictReporter struct {
 	logger   engine.Logger
 	observer RunnerDescriptorConflictObserver
 
-	mu     sync.Mutex
-	gauged map[string]struct{}
+	mu         sync.Mutex
+	gauged     map[string]struct{}
+	conflicted map[runnerDescriptorConflictKey]struct{}
+}
+
+type runnerDescriptorConflictKey struct {
+	nodeType string
+	version  int
 }
 
 func newRunnerDescriptorConflictReporter(logger engine.Logger, observer RunnerDescriptorConflictObserver) *runnerDescriptorConflictReporter {
 	return &runnerDescriptorConflictReporter{logger: logger, observer: observer}
 }
 
-// report logs a warning for every conflicting (type, version) and sets the
-// per-type conflict gauge for every type in the fleet-wide aggregation, 0
-// included, plus 0 for every previously gauged type no longer present.
+// report sets the per-type conflict gauge for every type in the fleet-wide
+// aggregation, 0 included, plus 0 for every previously gauged type no longer
+// present. When the set of conflicting (type, version) pairs differs from the
+// previous report it logs a warning for every current conflict, or one info
+// line when the last conflict resolved.
 func (r *runnerDescriptorConflictReporter) report(ctx context.Context, aggregated []AggregatedDescriptor) {
 	if r == nil {
 		return
 	}
 	perType := make(map[string]int)
 	var order []string
+	var conflicts []AggregatedDescriptor
+	conflicted := make(map[runnerDescriptorConflictKey]struct{})
 	for _, a := range aggregated {
 		if _, seen := perType[a.Type]; !seen {
 			order = append(order, a.Type)
@@ -160,15 +173,26 @@ func (r *runnerDescriptorConflictReporter) report(ctx context.Context, aggregate
 			continue
 		}
 		perType[a.Type]++
-		if r.logger != nil {
-			r.logger.Warn("runner_descriptor_conflict",
-				"node_type", a.Type, "node_version", a.Version,
-				"distinct_hashes", a.DistinctHashes, "winner_hash", a.Hash, "pools", a.Pools)
-		}
+		conflicts = append(conflicts, a)
+		conflicted[runnerDescriptorConflictKey{nodeType: a.Type, version: a.Version}] = struct{}{}
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if !sameRunnerDescriptorConflicts(r.conflicted, conflicted) {
+		hadConflicts := len(r.conflicted) > 0
+		r.conflicted = conflicted
+		if r.logger != nil {
+			for _, a := range conflicts {
+				r.logger.Warn("runner_descriptor_conflict",
+					"node_type", a.Type, "node_version", a.Version,
+					"distinct_hashes", a.DistinctHashes, "winner_hash", a.Hash, "pools", a.Pools)
+			}
+			if len(conflicts) == 0 && hadConflicts {
+				r.logger.Info("runner_descriptor_conflicts_resolved")
+			}
+		}
+	}
 	var vanished []string
 	for nodeType := range r.gauged {
 		if _, ok := perType[nodeType]; !ok {
@@ -190,6 +214,18 @@ func (r *runnerDescriptorConflictReporter) report(ctx context.Context, aggregate
 	for _, nodeType := range vanished {
 		r.observer.OnRunnerDescriptorConflicts(ctx, nodeType, 0)
 	}
+}
+
+func sameRunnerDescriptorConflicts(a, b map[runnerDescriptorConflictKey]struct{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if _, ok := b[k]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func sortedStringSet(set map[string]struct{}) []string {

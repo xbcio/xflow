@@ -222,6 +222,50 @@ func TestRunnerDescriptorConflictReporterResetsVanishedTypes(t *testing.T) {
 	}
 }
 
+// The conflict warning fires when the set of conflicting (type, version)
+// pairs changes, not on every report; resolving the last conflict logs once.
+func TestRunnerDescriptorConflictReporterLogsOnChange(t *testing.T) {
+	at := time.Unix(1, 0)
+	logger := &recordingLogger{}
+	reporter := newRunnerDescriptorConflictReporter(logger, nil)
+	oneConflict := AggregateRunnerDescriptors([]RunnerDescriptorRecord{
+		aggRecord("r1", "p", at, nil, aggDescriptor("acme.a", 1, "x"), aggDescriptor("acme.b", 1, "same")),
+		aggRecord("r2", "p", at, nil, aggDescriptor("acme.a", 1, "y"), aggDescriptor("acme.b", 1, "same")),
+	})
+	twoConflicts := AggregateRunnerDescriptors([]RunnerDescriptorRecord{
+		aggRecord("r1", "p", at, nil, aggDescriptor("acme.a", 1, "x"), aggDescriptor("acme.b", 1, "same")),
+		aggRecord("r2", "p", at, nil, aggDescriptor("acme.a", 1, "y"), aggDescriptor("acme.b", 1, "other")),
+	})
+	consistent := AggregateRunnerDescriptors([]RunnerDescriptorRecord{
+		aggRecord("r1", "p", at, nil, aggDescriptor("acme.a", 1, "x")),
+	})
+	warns := func() int { return len(logger.withMsg("runner_descriptor_conflict")) }
+
+	for i := 0; i < 3; i++ {
+		reporter.report(context.Background(), oneConflict)
+	}
+	if got := warns(); got != 1 {
+		t.Fatalf("after three identical reports: %d warnings, want 1", got)
+	}
+	reporter.report(context.Background(), twoConflicts)
+	reporter.report(context.Background(), twoConflicts)
+	if got := warns(); got != 3 {
+		t.Fatalf("after the conflict set grew: %d warnings, want 3 (one per current conflict)", got)
+	}
+	reporter.report(context.Background(), consistent)
+	reporter.report(context.Background(), consistent)
+	if got := warns(); got != 3 {
+		t.Fatalf("resolution logged a conflict warning: %d warnings", got)
+	}
+	if got := len(logger.withMsg("runner_descriptor_conflicts_resolved")); got != 1 {
+		t.Fatalf("resolved logged %d times, want 1", got)
+	}
+	reporter.report(context.Background(), oneConflict)
+	if got := warns(); got != 4 {
+		t.Fatalf("a returning conflict was not logged: %d warnings, want 4", got)
+	}
+}
+
 // TestAggregateRunnerDescriptorsConcurrentWithDirectory reads a directory
 // while it is being re-registered, exercising the directory-to-aggregator path
 // under -race.
