@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -698,4 +699,245 @@ func sameBacklogWithoutIndex(t *testing.T, available map[types.ExecutionID]time.
 	}
 	rdb.AddHook(&keyspaceScanHook{})
 	return discoveryCalls(t, ctx, state, page, len(available))
+}
+
+// failingIndexZAddClient can be made to refuse readiness-index registrations.
+//
+// The refusal is a REAL one — the ZADD is issued on an already-canceled
+// context, so go-redis fails it before it reaches the server — rather than a
+// hook rewriting the reply. That matters twice over: go-redis v9 does not
+// propagate a hook's SetErr out of the generic command types anyway, and the
+// production failure being reproduced is exactly this one ("outbox readiness
+// index refresh failed ... op mark err context canceled"). Every other command,
+// and every index command that is not a registration, reaches miniredis
+// untouched, so the transition the caller reports on still applies while its
+// registration does not — which is the asymmetry the index lives with.
+type failingIndexZAddClient struct {
+	*redis.Client
+	mu   sync.Mutex
+	fail bool
+}
+
+func (c *failingIndexZAddClient) setFail(fail bool) {
+	c.mu.Lock()
+	c.fail = fail
+	c.mu.Unlock()
+}
+
+func (c *failingIndexZAddClient) failing() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.fail
+}
+
+func (c *failingIndexZAddClient) ZAdd(ctx context.Context, key string, members ...redis.Z) *redis.IntCmd {
+	if c.failing() && strings.HasSuffix(key, outboxReadyIndexSuffix) {
+		canceled, cancel := context.WithCancel(ctx)
+		cancel()
+		return c.Client.ZAdd(canceled, key, members...)
+	}
+	return c.Client.ZAdd(ctx, key, members...)
+}
+
+// newFailingIndexTestStore is newOutboxIndexTestStore over a client that can be
+// told to refuse registrations. The plain client comes back too, so a test can
+// hook it and read the keyspace directly.
+func newFailingIndexTestStore(t *testing.T) (*Store, *redis.Client, *failingIndexZAddClient) {
+	t.Helper()
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(mr.Close)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	wrapped := &failingIndexZAddClient{Client: rdb}
+	return New(wrapped, nil, time.Hour), rdb, wrapped
+}
+
+// TestOutboxReadyIndexWritesSurviveACanceledCaller pins that no index write
+// depends on its caller's liveness.
+//
+// Every one of them reports a transition Redis has already applied, so a
+// canceled caller — an entry-seed admission the runner abandoned, a dropped
+// connection, a shutdown — is not a reason to skip the write. It is not free to
+// skip one either: the index is not part of the atomic transition, nothing
+// replays it, and the knock-on is a registration the throttled sweep recovers
+// only after a full cursor round. That round is what a remote-send workflow was
+// measured running into on the shared test Redis, where the store logged "op
+// mark err context canceled" and more than half of the executions with due
+// outbox work were ones the index could not answer with.
+func TestOutboxReadyIndexWritesSurviveACanceledCaller(t *testing.T) {
+	state, rdb, _ := newOutboxIndexTestStore(t)
+	live := namespace.WithNamespace(context.Background(), namespace.Default)
+	const id = types.ExecutionID("exec-canceled-0")
+	seedReadyOutbox(t, state, live, id, time.Now().Add(-time.Second))
+
+	// The caller's context, canceled. Values survive it, which is what keeps a
+	// detached write attributable to the same namespace.
+	canceled, cancel := context.WithCancel(live)
+	defer cancel()
+	cancel()
+
+	registered := func() bool {
+		_, present := indexScore(t, live, rdb, namespace.Default, id)
+		return present
+	}
+	cases := []struct {
+		name string
+		// prepare puts the index into the state the write has to move it out of.
+		prepare func(t *testing.T)
+		write   func()
+		want    bool
+		why     string
+	}{
+		{
+			name:    "mark",
+			prepare: func(t *testing.T) { t.Helper(); removeIndexMember(t, live, rdb, id) },
+			write:   func() { state.markOutboxReadyIndex(canceled, namespace.Default, id) },
+			want:    true,
+			why: "a registration dropped because the caller gave up leaves work the " +
+				"index will never learn about",
+		},
+		{
+			name:    "apply-rearm",
+			prepare: func(t *testing.T) { t.Helper(); removeIndexMember(t, live, rdb, id) },
+			write: func() {
+				state.applyOutboxReadyIndex(canceled, namespace.Default, id, float64(time.Now().UTC().UnixMilli()), true)
+			},
+			want: true,
+			why: "the claim that reads the exact ready score has already happened; " +
+				"dropping the re-arm hides the work it just measured",
+		},
+		{
+			name: "apply-prune",
+			prepare: func(t *testing.T) {
+				t.Helper()
+				removeReadySet(t, live, rdb, id)
+			},
+			write: func() { state.applyOutboxReadyIndex(canceled, namespace.Default, id, 0, false) },
+			want:  false,
+			why: "the prune is a ZREM, a verify read and a repair; a cancellation " +
+				"between them is how an index member outlives its ready set",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.prepare(t)
+			// The write must be the only thing that can move the member: absent
+			// before an add, present before a prune.
+			if present := registered(); present == tc.want {
+				t.Fatalf("precondition: index member present = %v before the write, want %v", present, !tc.want)
+			}
+			tc.write()
+			if got := registered(); got != tc.want {
+				t.Fatalf("index member present = %v, want %v — %s", got, tc.want, tc.why)
+			}
+		})
+	}
+}
+
+func removeIndexMember(t *testing.T, ctx context.Context, rdb *redis.Client, id types.ExecutionID) {
+	t.Helper()
+	if err := rdb.ZRem(ctx, outboxReadyIndexKey(namespace.Default), string(id)).Err(); err != nil {
+		t.Fatalf("ZREM index member: %v", err)
+	}
+}
+
+// removeReadySet drops an execution's ready ZSET, which is what the index
+// outliving its key looks like from the store's side. Redis drops an emptied
+// ZSET itself, so this is the same state a fully drained execution leaves.
+func removeReadySet(t *testing.T, ctx context.Context, rdb *redis.Client, id types.ExecutionID) {
+	t.Helper()
+	if err := rdb.Del(ctx, outboxReadyKey(namespace.Default, id)).Err(); err != nil {
+		t.Fatalf("DEL ready set: %v", err)
+	}
+}
+
+// TestOutboxReadyIndexFailureWithdrawsTheSweepThrottle pins the one-way latch
+// that the file note used to call "the residual", and that an observed
+// discovery stall on a shared test Redis turned into a production-shaped
+// defect: an index that carried work once kept the keyspace sweep at a tenth of
+// its cadence for the life of the process, so work the index could no longer
+// register was found one cursor round at a time.
+//
+// A read that answers with nothing does NOT withdraw the throttle — an idle
+// index is not a broken one, and throttling the sweep away from an idle index
+// is the accelerator working. What withdraws it is a FAILURE, which is the only
+// place the store holds positive evidence that the index is not carrying its
+// work; here that is a refused registration.
+func TestOutboxReadyIndexFailureWithdrawsTheSweepThrottle(t *testing.T) {
+	const calls = outboxIndexSweepEveryCalls
+
+	state, rdb, indexFail := newFailingIndexTestStore(t)
+	ctx := namespace.WithNamespace(context.Background(), namespace.Default)
+	const id = types.ExecutionID("exec-latch-0")
+	seedReadyOutbox(t, state, ctx, id, time.Now().Add(-time.Second))
+
+	scans := &pagedScanHook{}
+	rdb.AddHook(scans)
+
+	sweeps := func() int { return len(scans.cursorsFor(namespace.Default, "outbox:ready")) }
+	discover := func(count int) {
+		t.Helper()
+		for i := 0; i < count; i++ {
+			if _, err := state.ListOutboxExecutions(ctx, 64); err != nil {
+				t.Fatalf("ListOutboxExecutions() error = %v", err)
+			}
+		}
+	}
+
+	// The warm-up overlap proves the index; the measured window is steady state.
+	discover(calls)
+	before := sweeps()
+	discover(calls)
+	if throttled := sweeps() - before; throttled != 1 {
+		t.Fatalf("steady-state sweeps over %d discovery calls with a proven index = %d, "+
+			"want 1; the warm-up did not establish the throttle this test withdraws",
+			calls, throttled)
+	}
+
+	// The index stops answering: the read returns nothing while the ready work
+	// behind it is still there for the sweep to find. On its own this does NOT
+	// withdraw the throttle, which is exactly why a failed registration has to.
+	removeIndexMember(t, ctx, rdb, id)
+	before = sweeps()
+	discover(calls)
+	if idle := sweeps() - before; idle != 1 {
+		t.Fatalf("sweeps over %d discovery calls with a proven but idle index = %d, want "+
+			"1 — an index that has nothing to say is not an index that has failed, and "+
+			"unthrottling on an empty read would surrender the accelerator every time "+
+			"the backlog drained", calls, idle)
+	}
+
+	// One refused registration is that evidence. The throttle goes with it.
+	indexFail.setFail(true)
+	state.markOutboxReadyIndex(ctx, namespace.Default, id)
+	if _, present := indexScore(t, ctx, rdb, namespace.Default, id); present {
+		t.Fatal("precondition: the registration must have been refused, or the latch this " +
+			"test withdraws was never exercised")
+	}
+
+	before = sweeps()
+	discover(calls)
+	if got := sweeps() - before; got != calls {
+		t.Fatalf("sweeps over %d discovery calls after a refused registration = %d, "+
+			"want %d — a throttle earned by an index that has since stopped accepting "+
+			"this process's work keeps hiding a whole cursor round of it", calls, got, calls)
+	}
+
+	// And it is re-earned rather than surrendered: the first call after the
+	// index answers with work again restores it, so a transient failure costs
+	// one sweep and no more.
+	indexFail.setFail(false)
+	state.markOutboxReadyIndex(ctx, namespace.Default, id)
+	discover(1)
+	before = sweeps()
+	discover(calls)
+	if got := sweeps() - before; got != 1 {
+		t.Fatalf("sweeps over %d discovery calls once the index answered again = %d, "+
+			"want 1 — withdrawing the throttle must cost the accelerator nothing "+
+			"permanent", calls, got)
+	}
 }

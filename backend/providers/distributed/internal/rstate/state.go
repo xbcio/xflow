@@ -63,8 +63,11 @@ type Store struct {
 	// outboxIndexOn switches the best-effort readiness index off entirely.
 	// outboxIndexProven records that the index has been observed carrying work
 	// in this process, which is the only state in which the sweep may be
-	// throttled. Both are written from producer goroutines, hence atomics. See
-	// state_outbox_index.go for the contract they belong to.
+	// throttled. It is set by a discovery read that returned work and cleared
+	// by every index failure, so an index that goes quiet stops throttling the
+	// sweep that is its only fallback. Both are written from producer
+	// goroutines, hence atomics. See state_outbox_index.go for the contract they
+	// belong to.
 	outboxIndexOn     atomic.Bool
 	outboxIndexProven atomic.Bool
 	// outboxIndexLogMu guards outboxIndexLastLog, which rate-limits the

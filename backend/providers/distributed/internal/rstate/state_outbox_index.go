@@ -226,10 +226,19 @@ import (
 // registration succeeding proves only that ZADD works, while a read returning
 // work proves the loop the dispatcher actually depends on is closed.
 //
-// The residual this leaves: an index that carried work and then stopped
-// registering keeps the sweep at one call in ten. That is the state
+// THAT TRUST IS WITHDRAWN THE MOMENT IT IS REFUTED. A proven index that stops
+// carrying work would otherwise keep the sweep at one call in ten — the state
 // xflow_outbox_ready rising against a flat xflow_outbox_drain_discovered
-// reports, and ConfigureOutboxReadyIndex(false) is the operator's way back.
+// reports — and nothing would bring it back short of a restart. So every
+// failure, on either side, clears the latch (see noteOutboxIndexFailure): the
+// next call sweeps and reads, re-proves the index if it answers with work, and
+// settles into the pre-index cadence if it does not. The accelerator can
+// therefore stop accelerating on its own, but it can never keep the fallback
+// from running.
+//
+// Note that ConfigureOutboxReadyIndex(false) remains the operator's way to
+// take the index out of the picture entirely, but it is no longer the only way
+// back from an index that has gone quiet.
 //
 // ---------------------------------------------------------------------------
 // What is verified, and what is not
@@ -266,7 +275,40 @@ const (
 	// logged. It is a floor between lines, not a sample rate, so the first
 	// failure of an outage is always visible and the rest of it is not.
 	outboxIndexLogInterval = time.Minute
+
+	// outboxIndexWriteTimeout bounds a maintenance write detached from its
+	// caller's cancellation. It is deliberately short: the write is one to four
+	// single-key commands, and a store that cannot answer them inside this
+	// window has already told the caller everything it needs — the registration
+	// is lost and the sweep recovers it. Holding a request or a drain open for
+	// longer than this buys nothing.
+	outboxIndexWriteTimeout = 5 * time.Second
 )
+
+// detachedIndexContext returns the context a maintenance write runs on: the
+// caller's values and provenance, without the caller's cancellation.
+//
+// The index is written AFTER the transition it reports on has already been
+// applied by Redis, so the caller's cancellation is not a reason to skip it —
+// and a canceled request context is routine here (the entry-seed client
+// abandons a slow admission, a connection drops, the host shuts down). Losing
+// the write is not free, though. It is not an atomic transition, so nothing
+// replays it; the keyspace sweep is the only recovery, and once the index has
+// proven it carries work the sweep runs one call in
+// outboxIndexSweepEveryCalls. A registration dropped because its caller gave up
+// therefore hides one execution's work for a full cursor round.
+//
+// Measured on the shared test Redis this was found on (a 30k-90k key space
+// behind a ~250ms round trip): the deployed store logged "op mark err context
+// canceled", and a read of that same index reported 116 of the 164 executions
+// with due outbox work as something the index could not answer with. The
+// workflow hops that depend on that discovery took minutes each, against a
+// 240s caller budget.
+//
+// Values are kept because namespace.FromContext reads the namespace off them.
+func detachedIndexContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), outboxIndexWriteTimeout)
+}
 
 // outboxReadyIndexKey returns the readiness index for one namespace.
 func outboxReadyIndexKey(t namespace.Namespace) string {
@@ -286,10 +328,18 @@ func (s *Store) outboxIndexEnabled() bool { return s.outboxIndexOn.Load() }
 // contract: it reports nothing and never fails its caller. A registration that
 // is skipped is recovered by the keyspace sweep within the bound the file note
 // states.
+//
+// The write runs detached from the caller's cancellation — see
+// detachedIndexContext. A caller that gave up (an abandoned entry-seed
+// admission is the common case) has still had its transition applied, and a
+// registration dropped here is precisely the kind the throttled sweep recovers
+// slowly.
 func (s *Store) markOutboxReadyIndex(ctx context.Context, t namespace.Namespace, id types.ExecutionID) {
 	if !s.outboxIndexEnabled() {
 		return
 	}
+	ctx, cancel := detachedIndexContext(ctx)
+	defer cancel()
 	if err := s.rdb.ZAdd(ctx, outboxReadyIndexKey(t), redis.Z{
 		Score:  float64(time.Now().UTC().UnixMilli()),
 		Member: string(id),
@@ -341,6 +391,15 @@ func (s *Store) applyOutboxReadyIndex(ctx context.Context, t namespace.Namespace
 	if !s.outboxIndexEnabled() {
 		return
 	}
+	// Every write below reports a state the store has already applied — the
+	// claim happened, the create or cleanup happened — so none of it may be
+	// skipped because the caller gave up. The prune is the sharpest case: its
+	// ZREM and its verify read and repair are a SEQUENCE, and a cancellation
+	// between them drops a registration a concurrent producer just wrote, which
+	// is the lost-work direction the protocol exists to close. See
+	// detachedIndexContext.
+	ctx, cancel := detachedIndexContext(ctx)
+	defer cancel()
 	indexKey := outboxReadyIndexKey(t)
 	if ready {
 		if err := s.rdb.ZAdd(ctx, indexKey, redis.Z{Score: readScore, Member: string(id)}).Err(); err != nil {
@@ -577,13 +636,31 @@ func (s *Store) repairStaleOutboxIndexMembers(ctx context.Context, indexKey stri
 	return nil
 }
 
-// noteOutboxIndexFailure records a best-effort index failure. It is deliberately
-// a log line and not an error: the caller has already applied its transition,
-// and the sweep is the recovery path, so there is nothing to propagate to.
+// noteOutboxIndexFailure records a best-effort index failure and withdraws this
+// process's trust in the index. It is deliberately a log line and not an error:
+// the caller has already applied its transition, and the sweep is the recovery
+// path, so there is nothing to propagate to.
+//
+// WITHDRAWING THE THROTTLE IS THE POINT. outboxIndexProven exists to say "the
+// index is carrying this process's work, so the sweep may back off to one call
+// in outboxIndexSweepEveryCalls". A failure is direct evidence that it is NOT:
+// a registration that could not be written is work the index will never have,
+// and a read that failed is work the index cannot answer this call with. The
+// latch used to be one-way, so a single such failure — or an outage that ended
+// hours earlier — kept the sweep at a tenth of its cadence for the life of the
+// process, which is the state the file note calls "the residual".
+//
+// Clearing it is cheap and self-limiting in both directions. The next call
+// sweeps AND reads (readIndex is true whenever !indexProven), so it re-proves
+// the index the moment a read returns work — a transient failure therefore
+// costs exactly one sweep. And an index that is genuinely not delivering never
+// re-proves, which is the pre-index behaviour: sweep on every call, which is
+// the only state that can still find the work.
 //
 // The log is rate-limited because this runs on the outbox hot path: an outage
 // that fails every refresh would otherwise produce one line per transition.
 func (s *Store) noteOutboxIndexFailure(ctx context.Context, op string, err error) {
+	s.outboxIndexProven.Store(false)
 	if s.logger == nil {
 		return
 	}

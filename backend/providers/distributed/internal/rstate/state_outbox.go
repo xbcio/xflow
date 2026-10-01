@@ -574,13 +574,18 @@ func (s *Store) scanOutboxMetricsForNamespace(ctx context.Context, t namespace.N
 // orphans. See readOutboxReadyIndex.
 //
 // THE SWEEP IS THROTTLED ONLY ONCE THE INDEX HAS PROVEN ITSELF. While the index
-// has carried work at some point in this process, the scan runs once every
+// has carried work in this process, the scan runs once every
 // outboxIndexSweepEveryCalls calls; at all other times it runs on every call,
 // which is the pre-index behaviour. A store whose index is disabled, absent,
 // empty or failing therefore behaves exactly as it did before the index
 // existed rather than degrading to a tenth of the discovery it used to do. The
 // bound that throttling buys: a registration the index never received is found
 // within outboxIndexSweepEveryCalls drains plus one full cursor round.
+//
+// "Failing" includes an index that used to work: the proof is withdrawn by any
+// index failure, so a healthy index that goes quiet reverts to the cadence
+// above instead of keeping the throttle it no longer earns. See
+// noteOutboxIndexFailure.
 func (s *Store) ListOutboxExecutions(ctx context.Context, limit int) ([]types.ExecutionID, error) {
 	if limit <= 0 {
 		return nil, nil
