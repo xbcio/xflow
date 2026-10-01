@@ -254,11 +254,21 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// maxRegisterRunnerBodyBytes caps an HTTP register body: the descriptor
-// envelope limit plus 1 MiB for the rest of the request (capabilities, labels,
-// namespaces, activation inventory). Without it the one request that carries
-// descriptors would be the only uncapped runner-protocol read.
-const maxRegisterRunnerBodyBytes = protocol.MaxRunnerDescriptorEnvelopeBytes + 1<<20
+// maxRegisterRunnerBodyBytes caps an HTTP register body at 8 MiB: the
+// descriptor envelope limit plus 7 MiB for the rest of the request. Without a
+// cap the one request that carries descriptors would be the only uncapped
+// runner-protocol read.
+//
+// The headroom is sized for the activation inventory, the only unbounded
+// field: nothing limits how many trigger activations one runner hosts, and a
+// realistic item (workflow ID, 64-char version, entry unit, replica,
+// generation) encodes to ~225 bytes. A 1 MiB headroom therefore stopped at
+// ~4.5k activations, and an old runner with no descriptors at all hit 413
+// near ~9k where it used to register. 7 MiB carries ~32k activations (plus
+// capabilities and labels, which stay in the tens of KiB) while still
+// bounding a single decode. Raise it rather than tighten it if a fleet ever
+// hosts more per runner.
+const maxRegisterRunnerBodyBytes = protocol.MaxRunnerDescriptorEnvelopeBytes + 7<<20
 
 func (s *Server) HandleRegisterRunner(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {

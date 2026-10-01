@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -198,6 +199,40 @@ func TestHTTPRegisterBodySizeCap(t *testing.T) {
 			t.Fatal(err)
 		}
 		assertHTTPRegisterError(t, resp, http.StatusBadRequest, "invalid JSON")
+	})
+	t.Run("LargeActivationInventoryAccepted", func(t *testing.T) {
+		// An old runner sends no descriptors but may host thousands of trigger
+		// activations. 12k realistic inventory items (~2.7 MiB) is past the old
+		// 2 MiB cap and must still register.
+		srv, dir := newAuthedServer(t)
+		inventory := make([]protocol.ActivationInventoryItem, 12_000)
+		for i := range inventory {
+			inventory[i] = protocol.ActivationInventoryItem{
+				WorkflowID:      fmt.Sprintf("wf-%s-%06d", strings.Repeat("o", 24), i),
+				WorkflowVersion: strings.Repeat("a", 64),
+				EntryUnitID:     fmt.Sprintf("entry-%s-%02d", strings.Repeat("e", 16), i%8),
+				ReplicaIndex:    3,
+				Generation:      1234567890,
+			}
+		}
+		body := protocol.RegisterRunnerRequest{
+			InstanceUID:  "test-instance",
+			RunnerID:     "order-runner-1",
+			Concurrency:  1,
+			Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+			Activations:  inventory,
+		}
+		if raw, err := json.Marshal(body); err != nil || len(raw) <= 2<<20 {
+			t.Fatalf("inventory body is %d bytes (%v), want over 2 MiB", len(raw), err)
+		}
+		resp := postAuthed(t, srv.URL+protocol.RegisterRunnerPath, "secret-token", body)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		if _, ok := dir.Runner(context.Background(), "order-runner-1"); !ok {
+			t.Fatal("runner not registered")
+		}
 	})
 }
 
