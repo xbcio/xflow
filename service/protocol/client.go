@@ -4,11 +4,28 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 )
+
+// MaxRunnerResponseBodyBytes caps a runner-protocol HTTP response body the
+// Client will read: 8 MiB, the same bound as control.MaxRegisterRunnerBodyBytes
+// and the gRPC transport's message limit. The control plane fails a lease that
+// would encode past it rather than send it, so a larger body is never a valid
+// answer.
+const MaxRunnerResponseBodyBytes = MaxRunnerDescriptorEnvelopeBytes + 7<<20
+
+// maxRunnerErrorBodyBytes bounds how much of a non-2xx body is quoted in the
+// returned error.
+const maxRunnerErrorBodyBytes = 4 << 10
+
+// ErrRunnerResponseTooLarge reports a runner-protocol HTTP response body
+// larger than MaxRunnerResponseBodyBytes. The body is discarded unread past
+// the limit.
+var ErrRunnerResponseTooLarge = errors.New("runner protocol response body exceeds size limit")
 
 type Client struct {
 	baseURL string
@@ -150,11 +167,20 @@ func (c *Client) post(ctx context.Context, path string, body any, out any) error
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		data, _ := io.ReadAll(resp.Body)
+		// Bounded read: an error body is diagnostic only, so it never needs
+		// more than a short prefix.
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, maxRunnerErrorBodyBytes))
 		return fmt.Errorf("runner protocol %s: status %d: %s", path, resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 	if out == nil {
 		return nil
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, MaxRunnerResponseBodyBytes+1))
+	if err != nil {
+		return fmt.Errorf("runner protocol %s: read response: %w", path, err)
+	}
+	if len(data) > MaxRunnerResponseBodyBytes {
+		return fmt.Errorf("runner protocol %s: %w (limit %d bytes)", path, ErrRunnerResponseTooLarge, MaxRunnerResponseBodyBytes)
+	}
+	return json.Unmarshal(data, out)
 }
