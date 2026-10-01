@@ -122,7 +122,15 @@ func TestWorkflowTriggerCoverage(t *testing.T) {
 	}
 
 	var missing []string
+	kinds := 0
 	for _, triggerType := range registry.TriggerTypes() {
+		// Same exclusion as TestWorkflowNodeCoverage: sibling tests register
+		// "test."-prefixed fixture triggers into the global registry, and
+		// whether they are present depends only on test order.
+		if strings.HasPrefix(triggerType, testFixtureNodeTypePrefix) {
+			continue
+		}
+		kinds++
 		if _, ok := seen[triggerType]; !ok {
 			missing = append(missing, triggerType)
 		}
@@ -131,7 +139,7 @@ func TestWorkflowTriggerCoverage(t *testing.T) {
 	if len(missing) > 0 {
 		t.Errorf("registered trigger kinds no tier definition covers (%d): %v", len(missing), missing)
 	}
-	t.Logf("trigger coverage: %d/%d kinds", len(seen), len(registry.TriggerTypes()))
+	t.Logf("trigger coverage: %d/%d kinds", len(seen), kinds)
 }
 
 // TestWorkflowCoverageSummary logs per-definition size and kinds, so a CI log
