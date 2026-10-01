@@ -3,13 +3,11 @@ package apiserver
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -50,43 +48,61 @@ func WithHTTPTimeouts(t HTTPTimeouts) Option {
 	return func(s *APIServer) { s.timeouts = t }
 }
 
-// loadTLS resolves the server TLS config from cfg.TLS. Returns (nil, nil) when
-// no cert was configured (plaintext, dev default). When a client CA is supplied
-// without a server cert, the server still requires clients to present a cert
-// signed by that CA — but a server cert is required to terminate TLS, so this
-// combination is rejected.
-func (s *APIServer) loadTLS() (*tls.Config, error) {
+// loadTLS resolves the server TLS config from cfg.TLS. Returns (nil, nil, nil)
+// when no cert was configured (plaintext, dev default). When a client CA is
+// supplied without a server cert, the server still requires clients to present
+// a cert signed by that CA — but a server cert is required to terminate TLS,
+// so this combination is rejected.
+//
+// The returned *tls.Config reads certificate and (for mTLS) client-CA material
+// through the returned *TLSReloader on every handshake via GetCertificate and
+// GetConfigForClient, rather than the static Certificates/ClientCAs fields —
+// this is what lets TLSReloader.Reload take effect without restarting the
+// listener. MinVersion and the other static settings are unaffected by a
+// reload; only the reloader's own fields ever change.
+func (s *APIServer) loadTLS() (*tls.Config, *TLSReloader, error) {
 	t := s.cfg.TLS
 	if t == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	switch {
 	case t.Cert == "" && t.Key == "" && t.ClientCA == "":
-		return nil, nil
+		return nil, nil, nil
 	case t.Cert == "" || t.Key == "":
-		return nil, fmt.Errorf("--tls-cert and --tls-key must be provided together")
+		return nil, nil, fmt.Errorf("--tls-cert and --tls-key must be provided together")
 	}
-	cert, err := tls.LoadX509KeyPair(t.Cert, t.Key)
+	reloader, err := newTLSReloader(t.Cert, t.Key, t.ClientCA)
 	if err != nil {
-		return nil, fmt.Errorf("load tls keypair: %w", err)
+		return nil, nil, err
 	}
 	tlsCfg := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
+		MinVersion: tls.VersionTLS12,
+		// NextProtos must be set here, on the base config GetConfigForClient
+		// closes over, rather than left for net/http or grpc-go to inject: both
+		// http.Server.ServeTLS and grpc/credentials.NewTLS only add "h2" (and,
+		// for net/http, "http/1.1") to a *clone* of this config made at listener
+		// construction time, not to this pointer itself. Once GetConfigForClient
+		// is non-nil, crypto/tls replaces the live connection's config wholesale
+		// with whatever it returns (see tls.Conn.readClientHello) — so a clone
+		// derived from this pointer without NextProtos already set would negotiate
+		// no ALPN protocol at all, breaking HTTP/2 and gRPC (which requires "h2")
+		// silently. Listing both here keeps plain HTTP/1.1 clients working too.
+		NextProtos: []string{"h2", "http/1.1"},
+		// GetCertificate/GetConfigForClient always read the reloader's live
+		// snapshot; Certificates/ClientCAs are deliberately left unset so a
+		// stale copy can never win a handshake decided by them instead.
+		GetCertificate: reloader.GetCertificate,
 	}
-	if t.ClientCA != "" {
-		caPEM, err := os.ReadFile(t.ClientCA)
-		if err != nil {
-			return nil, fmt.Errorf("read tls client CA: %w", err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(caPEM) {
-			return nil, fmt.Errorf("tls client CA %q contains no valid certs", t.ClientCA)
-		}
-		tlsCfg.ClientCAs = pool
+	tlsCfg.GetConfigForClient = reloader.GetConfigForClient(tlsCfg)
+	if reloader.clientAuthType() == tls.RequireAndVerifyClientCert {
+		// ClientAuth on the base config only affects the initial handshake
+		// negotiation before GetConfigForClient's returned config takes over;
+		// setting it here keeps tlsCfg.ClientAuth truthful for any caller (e.g.
+		// the mTLS log line below) that reads it directly rather than through a
+		// live handshake.
 		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
 	}
-	return tlsCfg, nil
+	return tlsCfg, reloader, nil
 }
 
 // Run starts the APIServer's transports (gRPC, metrics, HTTP) and blocks until
@@ -99,11 +115,12 @@ func (s *APIServer) Run(ctx context.Context) error {
 		return err
 	}
 
-	tlsCfg, err := s.loadTLS()
+	tlsCfg, tlsReloader, err := s.loadTLS()
 	if err != nil {
 		_ = s.Shutdown(ctx)
 		return err
 	}
+	s.tlsReloader.Store(tlsReloader)
 
 	// gRPC Runner Protocol listener.
 	var grpcServer *grpc.Server

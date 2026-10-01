@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/netip"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -229,6 +230,13 @@ type APIServer struct {
 	// ControlPlane.
 	enableManagement bool
 	readiness        *apiServerReadiness
+
+	// tlsReloader holds the live TLS material once Run has called loadTLS. Nil
+	// when no TLS was configured (plaintext) or before Run has started the
+	// transports. Set exactly once per Run call; TLSReloader itself is safe
+	// for concurrent Reload calls against concurrent handshakes. Atomic because
+	// Run writes it while a host's SIGHUP goroutine may already be reading it.
+	tlsReloader atomic.Pointer[TLSReloader]
 }
 
 // New assembles an APIServer from cfg. If no ControlPlane is injected via
@@ -571,6 +579,13 @@ func (s *APIServer) Shutdown(ctx context.Context) error {
 // IsLeader reports whether this replica currently holds leadership.
 // Transparent passthrough to the underlying ControlPlane.
 func (s *APIServer) IsLeader() bool { return s.cp.IsLeader() }
+
+// TLSReloader returns the live TLS material holder Run installed, or nil when
+// TLS was never configured (plaintext) or Run has not started the transports
+// yet. A caller (typically a host process's SIGHUP handler) uses the returned
+// value's Reload method to re-read the certificate/key/client-CA files
+// without restarting the listener; see TLSReloader.Reload.
+func (s *APIServer) TLSReloader() *TLSReloader { return s.tlsReloader.Load() }
 
 // Backend returns the control-plane backend provider. It is the authoritative
 // execution-state store (engine StateStore) and, for the distributed backend,
