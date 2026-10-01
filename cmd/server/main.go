@@ -47,7 +47,6 @@ import (
 	xflowsdk "github.com/xbcio/xflow/sdk/xflow"
 	"github.com/xbcio/xflow/service/apiserver"
 	"github.com/xbcio/xflow/service/control"
-	"github.com/xbcio/xflow/service/crypto/masterkey"
 	"github.com/xbcio/xflow/service/crypto/supplyenc"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/store/sqlstore"
@@ -155,9 +154,12 @@ type serverConfig struct {
 	// masterKeyFile is the path to a 0600 file holding the base64 master key.
 	// XFLOW_MASTER_KEY takes precedence when both are set.
 	masterKeyFile string
-	logFormat     string
-	metricsAddr   string
-	metricsPath   string
+	// masterKeyPreviousFile holds the KEK being rotated out; set only during a
+	// rotation window. XFLOW_MASTER_KEY_PREVIOUS takes precedence.
+	masterKeyPreviousFile string
+	logFormat             string
+	metricsAddr           string
+	metricsPath           string
 	// enableRunnerMetricsProxy turns on the runner metrics proxy: runners push
 	// their registry to this server, which merges it into /metrics. Off by
 	// default because single-domain deployments can scrape runners directly.
@@ -246,6 +248,7 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	fs.StringVar(&cfg.tlsKey, "tls-key", "", "Path to server TLS private key (required with --tls-cert)")
 	fs.StringVar(&cfg.tlsClientCA, "tls-client-ca", "", "Path to CA bundle to verify runner certs (enables mTLS)")
 	fs.StringVar(&cfg.masterKeyFile, "master-key-file", "", "Path to a 0600 file holding the base64-encoded 32-byte master encryption key; XFLOW_MASTER_KEY takes precedence. Required in production: without it supply content is stored in plaintext. Generate with: openssl rand -base64 32")
+	fs.StringVar(&cfg.masterKeyPreviousFile, "master-key-previous-file", "", "KEK rotation only: path to a 0600 file holding the master key being rotated out; XFLOW_MASTER_KEY_PREVIOUS takes precedence. Rows sealed under it stay readable until `xflow supply reseal` rewrites them; remove it afterwards")
 	fs.StringVar(&cfg.logFormat, "log-format", "text", "Log format: text or json")
 	fs.StringVar(&cfg.metricsAddr, "metrics-addr", "", "Prometheus metrics listen address (empty disables metrics)")
 	fs.StringVar(&cfg.metricsPath, "metrics-path", "/metrics", "Prometheus metrics path")
@@ -647,16 +650,15 @@ func runServer(ctx context.Context, cfg serverConfig) error {
 		singleToken = true
 	}
 	// Master key: env wins over file. ErrNotConfigured is not fatal here —
-	// validateProduction decides, so dev keeps working without a key.
-	var supplyAtRest *supplyenc.AtRest
-	mk, mkErr := masterkey.Load(os.Getenv("XFLOW_MASTER_KEY"), cfg.masterKeyFile)
-	switch {
-	case mkErr == nil:
-		dek := mk.Derive(supplyenc.SupplyContentInfo)
-		supplyAtRest = supplyenc.NewAtRest(dek)
-	case errors.Is(mkErr, masterkey.ErrNotConfigured):
-		// Handled by validateProduction below.
-	default:
+	// validateProduction decides, so dev keeps working without a key. The
+	// previous-key pair is set only during a KEK rotation window.
+	supplyAtRest, mkErr := loadSupplyAtRest(supplyKeyInputs{
+		currentEnv:   os.Getenv("XFLOW_MASTER_KEY"),
+		currentFile:  cfg.masterKeyFile,
+		previousEnv:  os.Getenv("XFLOW_MASTER_KEY_PREVIOUS"),
+		previousFile: cfg.masterKeyPreviousFile,
+	}, os.Stderr)
+	if mkErr != nil {
 		// A key that was supplied but is unusable is always fatal, in every
 		// mode: continuing would silently write plaintext after the operator
 		// explicitly asked for encryption.
