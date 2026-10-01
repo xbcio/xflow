@@ -181,6 +181,13 @@ type Runner struct {
 	// session and is refused as stale; the lease then leaves this set and the
 	// server's replay is a sequential redelivery of unreported work.
 	active *activeLeases
+	// inFlight counts leases this process's workers hold, from poll to the end
+	// of the report attempt. Runner-owned like active and for the same
+	// reason: a reconnect re-enters Run while the previous session's workers
+	// may still be executing, and a per-Run counter would let the new session
+	// claim Concurrency more leases on top of them and heartbeat an InFlight
+	// that omits them.
+	inFlight atomic.Int32
 	// shutdownTimeout bounds Run's wait for busy workers once polling stops.
 	// Always defaultRunnerShutdownTimeout outside tests.
 	shutdownTimeout time.Duration
@@ -283,7 +290,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		})
 	}
 
-	var inFlight atomic.Int32
+	inFlight := &r.inFlight
 	active := r.active
 	leaseCh := make(chan *engine.TaskLease, r.config.Concurrency)
 	var errOnce sync.Once
@@ -300,7 +307,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	// Independent heartbeat goroutine — survives while workers are blocked on
 	// long handlers, reflecting the true in-flight count to the server.
 	heartbeatCtx, hbCancel := context.WithCancel(ctx)
-	go r.heartbeatLoop(heartbeatCtx, sessionID, &inFlight, signalError)
+	go r.heartbeatLoop(heartbeatCtx, sessionID, inFlight, signalError)
 
 	// Metrics reporting shares heartbeatCtx: both are session-scoped, and a
 	// reconnect must restart the reporter with the new sessionID rather than
@@ -315,11 +322,11 @@ func (r *Runner) Run(ctx context.Context) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r.workerLoop(ctx, sessionID, leaseCh, &inFlight, active, signalError)
+			r.workerLoop(ctx, sessionID, leaseCh, inFlight, active, signalError)
 		}()
 	}
 
-	pollErr := r.pollLoop(ctx, sessionID, leaseCh, &inFlight, active)
+	pollErr := r.pollLoop(ctx, sessionID, leaseCh, inFlight, active)
 	hbCancel()
 	// pollLoop is the only sender, so closing here is safe. It is what ends the
 	// workers on a transport error, where ctx stays live for the reconnect:
@@ -339,7 +346,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		drained = true
 	case <-time.After(r.shutdownTimeout):
 	}
-	releaseUnstartedLeases(leaseCh, &inFlight, active)
+	releaseUnstartedLeases(leaseCh, inFlight, active)
 
 	// Shutdown activation tracker if configured.
 	if r.activationTracker != nil {
