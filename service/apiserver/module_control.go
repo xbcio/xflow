@@ -15,10 +15,12 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/xbcio/xflow/backend"
+	"github.com/xbcio/xflow/backend/workflowhash"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/control"
@@ -696,7 +698,7 @@ func rejectFAFWorkflowRegistrationBeforeAdmission(w http.ResponseWriter, r *http
 // embedded server calls in-process.
 //
 // Sharing it is the point. Registration identity is three coupled choices --
-// workflowRegistryKey, definitionHash, and the entry-activation derivation --
+// workflowRegistryKey, the runtime hash, and the entry-activation derivation --
 // and a second implementation that picked any of them differently would
 // register a workflow the dispatcher then failed to resolve. ns is supplied by
 // the caller and written onto def; it is never read from def itself, so an
@@ -776,9 +778,16 @@ func (m *workflowControlModule) buildWorkflowRecord(ctx context.Context, ns name
 	}
 	// ParamSpec validation runs after the compiler accepted the definition, so
 	// a structural error keeps its workflow_compile_failed answer. It never
-	// modifies def: the HTTP path writes no defaults, so definitionHash is
-	// unchanged by this step.
+	// modifies def: the HTTP path writes no defaults.
 	paramIssues, err := m.checkWorkflowParams(ctx, def)
+	if err != nil {
+		return backend.WorkflowRecord{}, registrationDiagnostics{}, err
+	}
+	// The registry conflict hash is the runtime hash every registration path
+	// shares, so the SDK and HTTP agree on one workflow's identity. Builtin
+	// Defaults are filled in memory before hashing, never into def: an omitted
+	// builtin param hashes like the Default the SDK builder writes.
+	hash, err := workflowhash.Runtime(def, hashParamSpecs)
 	if err != nil {
 		return backend.WorkflowRecord{}, registrationDiagnostics{}, err
 	}
@@ -789,7 +798,7 @@ func (m *workflowControlModule) buildWorkflowRecord(ctx context.Context, ns name
 		Namespace:      string(ns),
 		Name:           def.Name,
 		Version:        def.Version,
-		DefinitionHash: definitionHash(def),
+		DefinitionHash: hash,
 		Definition:     def,
 		Graph:          g,
 	}
@@ -1560,7 +1569,7 @@ func (m *workflowControlModule) replaceWorkflow(ctx context.Context, ns namespac
 	if err != nil {
 		return "", registrationDiagnostics{}, err
 	}
-	if existing.DefinitionHash == replacement.DefinitionHash {
+	if sameFullDefinition(existing.Definition, replacement.Definition) {
 		return m.addWorkflowRecord(ctx, ns, registry, replacement, diag)
 	}
 
@@ -1720,6 +1729,11 @@ func workflowRegistryKey(ns, name, version string) string {
 	return fmt.Sprintf("%s/%s@%s", ns, name, version)
 }
 
+// hashParamSpecs is the ParamSpec lookup registration hashes with: the
+// builtin-only table, never the live node registry, so the hash does not depend
+// on what a process registered and matches the SDK's hash for one workflow.
+var hashParamSpecs workflowhash.ParamSpecLookup = node.BuiltinParamSpecs
+
 // unchangedExceptStampedID reports whether replacement differs from existing
 // only by the path id PUT stamps onto the definition: same registry key, and
 // the stored definition, once given that id, hashes identically.
@@ -1729,14 +1743,25 @@ func unchangedExceptStampedID(existing, replacement backend.WorkflowRecord, id t
 	}
 	stamped := *existing.Definition
 	stamped.ID = string(id)
-	return definitionHash(&stamped) == replacement.DefinitionHash
+	return sameFullDefinition(&stamped, replacement.Definition)
+}
+
+// sameFullDefinition reports whether a and b are the same full definition,
+// editor metadata included. Replace no-op checks use it rather than the
+// registry's runtime hash, so a metadata-only replace is still written.
+func sameFullDefinition(a, b *types.WorkflowDef) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	ha, hb := definitionHash(a), definitionHash(b)
+	return ha != "" && ha == hb
 }
 
 // definitionHash returns a stable SHA-256 fingerprint over the JSON-encoded
-// definition. It is used by the registry for conflict detection (a re-register
-// of an identical definition is idempotent; a changed definition under the same
-// key is rejected as a conflict). Marshal errors collapse to an empty hash,
-// which the registry treats as a distinct (always-conflicting) value.
+// definition, editor metadata included. It is never the registry conflict
+// hash (that is workflowhash.Runtime); it only detects a no-op replace.
+// Marshal errors collapse to an empty hash, which sameFullDefinition treats as
+// a change.
 func definitionHash(def *types.WorkflowDef) string {
 	data, err := json.Marshal(def)
 	if err != nil {
