@@ -11,7 +11,7 @@ import (
 
 func mustRuntime(t *testing.T, def *types.WorkflowDef) string {
 	t.Helper()
-	h, err := Runtime(def)
+	h, err := Runtime(def, nil)
 	if err != nil {
 		t.Fatalf("Runtime: %v", err)
 	}

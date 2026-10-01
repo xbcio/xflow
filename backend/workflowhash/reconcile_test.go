@@ -55,7 +55,7 @@ func TestReconcile(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, upgrade, err := Reconcile(tt.stored, tt.storedDef)
+			got, upgrade, err := Reconcile(tt.stored, tt.storedDef, nil)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("Reconcile(%q) error = nil, want error", tt.stored)
@@ -128,7 +128,7 @@ func TestReconcileAdd(t *testing.T) {
 
 	t.Run("fresh record is created", func(t *testing.T) {
 		reg := &fakeRegistry{}
-		got, created, err := ReconcileAdd(ctx, reg, newRecord(t, reconcileDef()))
+		got, created, err := ReconcileAdd(ctx, reg, newRecord(t, reconcileDef()), nil)
 		if err != nil || !created || got.ID != "wf-new" {
 			t.Fatalf("ReconcileAdd = (%q, %v, %v), want (wf-new, true, nil)", got.ID, created, err)
 		}
@@ -137,7 +137,7 @@ func TestReconcileAdd(t *testing.T) {
 	t.Run("legacy hash is upgraded", func(t *testing.T) {
 		reg := &fakeRegistry{rec: &backend.WorkflowRecord{ID: "wf-old", Key: "default/wf@v1", DefinitionHash: "sha256:deadbeef", Definition: reconcileDef()}}
 		rec := newRecord(t, reconcileDef())
-		got, created, err := ReconcileAdd(ctx, reg, rec)
+		got, created, err := ReconcileAdd(ctx, reg, rec, nil)
 		if err != nil || created || got.ID != "wf-old" {
 			t.Fatalf("ReconcileAdd = (%q, %v, %v), want (wf-old, false, nil)", got.ID, created, err)
 		}
@@ -150,7 +150,7 @@ func TestReconcileAdd(t *testing.T) {
 		other := reconcileDef()
 		other.Nodes[0].Type = "xflow.end"
 		reg := &fakeRegistry{rec: &backend.WorkflowRecord{ID: "wf-old", Key: "default/wf@v1", DefinitionHash: "sha256:deadbeef", Definition: other}}
-		if _, _, err := ReconcileAdd(ctx, reg, newRecord(t, reconcileDef())); !errors.Is(err, backend.ErrWorkflowConflict) {
+		if _, _, err := ReconcileAdd(ctx, reg, newRecord(t, reconcileDef()), nil); !errors.Is(err, backend.ErrWorkflowConflict) {
 			t.Fatalf("ReconcileAdd error = %v, want ErrWorkflowConflict", err)
 		}
 		if reg.updates != 0 {
@@ -165,7 +165,7 @@ func TestReconcileAdd(t *testing.T) {
 			casErr: errors.New("cas mismatch"),
 			onCAS:  func(r *backend.WorkflowRecord) { r.DefinitionHash = rec.DefinitionHash },
 		}
-		got, created, err := ReconcileAdd(ctx, reg, rec)
+		got, created, err := ReconcileAdd(ctx, reg, rec, nil)
 		if err != nil || created || got.ID != "wf-old" {
 			t.Fatalf("ReconcileAdd = (%q, %v, %v), want (wf-old, false, nil)", got.ID, created, err)
 		}
@@ -177,7 +177,7 @@ func TestReconcileAdd(t *testing.T) {
 			casErr: errors.New("cas mismatch"),
 			onCAS:  func(r *backend.WorkflowRecord) { r.DefinitionHash = "sha256:replaced" },
 		}
-		if _, _, err := ReconcileAdd(ctx, reg, newRecord(t, reconcileDef())); !errors.Is(err, backend.ErrWorkflowConflict) {
+		if _, _, err := ReconcileAdd(ctx, reg, newRecord(t, reconcileDef()), nil); !errors.Is(err, backend.ErrWorkflowConflict) {
 			t.Fatalf("ReconcileAdd error = %v, want ErrWorkflowConflict", err)
 		}
 	})
@@ -188,7 +188,7 @@ func TestReconcileAdd(t *testing.T) {
 		stale := staleV1(t, withTimeout)
 		reg := &fakeRegistry{rec: &backend.WorkflowRecord{ID: "wf-old", Key: "default/wf@v1", DefinitionHash: stale, Definition: withTimeout}}
 		// Dropping the timeout hashes to the stale v1 hash: a plain hash hit.
-		if _, _, err := ReconcileAdd(ctx, reg, newRecord(t, reconcileDef())); !errors.Is(err, backend.ErrWorkflowConflict) {
+		if _, _, err := ReconcileAdd(ctx, reg, newRecord(t, reconcileDef()), nil); !errors.Is(err, backend.ErrWorkflowConflict) {
 			t.Fatalf("ReconcileAdd error = %v, want ErrWorkflowConflict", err)
 		}
 		if want := mustRuntime(t, withTimeout); reg.rec.DefinitionHash != want {
@@ -199,7 +199,7 @@ func TestReconcileAdd(t *testing.T) {
 	t.Run("non-conflict registry error passes through", func(t *testing.T) {
 		boom := errors.New("boom")
 		reg := &errRegistry{err: boom}
-		if _, _, err := ReconcileAdd(ctx, reg, newRecord(t, reconcileDef())); !errors.Is(err, boom) {
+		if _, _, err := ReconcileAdd(ctx, reg, newRecord(t, reconcileDef()), nil); !errors.Is(err, boom) {
 			t.Fatalf("ReconcileAdd error = %v, want %v", err, boom)
 		}
 	})

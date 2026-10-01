@@ -29,7 +29,11 @@ import (
 //
 // For a legacy (non-runtime) hash with a nil storedDef an error is returned.
 // This guards against registries that store the hash without the definition.
-func Reconcile(storedHash string, storedDef *types.WorkflowDef) (effectiveHash string, needsUpgrade bool, err error) {
+//
+// Every recomputation is Runtime(storedDef, specs), so a stored definition
+// that omits builtin params reconciles with one that spells out their
+// Defaults.
+func Reconcile(storedHash string, storedDef *types.WorkflowDef, specs ParamSpecLookup) (effectiveHash string, needsUpgrade bool, err error) {
 	if strings.HasPrefix(storedHash, RuntimePrefixV2) {
 		return storedHash, false, nil
 	}
@@ -37,7 +41,7 @@ func Reconcile(storedHash string, storedDef *types.WorkflowDef) (effectiveHash s
 		if storedDef == nil {
 			return storedHash, false, nil
 		}
-		recomputed, err := Runtime(storedDef)
+		recomputed, err := Runtime(storedDef, specs)
 		if err != nil {
 			return "", false, fmt.Errorf("reconcile definition hash: %w", err)
 		}
@@ -46,7 +50,7 @@ func Reconcile(storedHash string, storedDef *types.WorkflowDef) (effectiveHash s
 	if storedDef == nil {
 		return "", false, fmt.Errorf("reconcile definition hash: stored definition is nil for legacy hash %q", storedHash)
 	}
-	recomputed, err := Runtime(storedDef)
+	recomputed, err := Runtime(storedDef, specs)
 	if err != nil {
 		return "", false, fmt.Errorf("reconcile definition hash: %w", err)
 	}
@@ -74,17 +78,20 @@ type Registry interface {
 //     registration: a legacy stored hash is CAS-upgraded to rec's hash, and a
 //     lost CAS is re-fetched once.
 //
+// specs is the lookup rec.DefinitionHash was computed with; every hash
+// ReconcileAdd recomputes uses it too.
+//
 // It returns the stored record and whether this call may have created it.
 // created is false only when the registration matched an existing record
 // through reconciliation; a plain registry success reports true, because the
 // registry does not distinguish a fresh write from an idempotent hash match.
-func ReconcileAdd(ctx context.Context, reg Registry, rec backend.WorkflowRecord) (stored backend.WorkflowRecord, created bool, err error) {
+func ReconcileAdd(ctx context.Context, reg Registry, rec backend.WorkflowRecord, specs ParamSpecLookup) (stored backend.WorkflowRecord, created bool, err error) {
 	hash := rec.DefinitionHash
 	got, err := reg.AddWorkflow(ctx, rec)
 	if err == nil {
 		if strings.HasPrefix(got.DefinitionHash, RuntimePrefixV1) && got.Definition != nil {
 			// A record this call just created recomputes to the same hash.
-			recomputed, hashErr := Runtime(got.Definition)
+			recomputed, hashErr := Runtime(got.Definition, specs)
 			if hashErr != nil {
 				return backend.WorkflowRecord{}, false, hashErr
 			}
@@ -107,7 +114,7 @@ func ReconcileAdd(ctx context.Context, reg Registry, rec backend.WorkflowRecord)
 		// caller's contract is "conflict", not "lookup failed".
 		return backend.WorkflowRecord{}, false, err
 	}
-	effective, needsUpgrade, reconcileErr := Reconcile(existing.DefinitionHash, existing.Definition)
+	effective, needsUpgrade, reconcileErr := Reconcile(existing.DefinitionHash, existing.Definition, specs)
 	if reconcileErr != nil {
 		return backend.WorkflowRecord{}, false, reconcileErr
 	}

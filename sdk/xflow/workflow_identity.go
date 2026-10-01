@@ -29,7 +29,7 @@ type runtimeHashPayload = workflowhash.RuntimePayload
 // workflowhash.Runtime, the single implementation every registration path
 // shares.
 func runtimeHash(def *types.WorkflowDef) (string, error) {
-	return workflowhash.Runtime(def)
+	return workflowhash.Runtime(def, nil)
 }
 
 // legacyDefinitionHash is the audit fingerprint. It delegates to
@@ -42,5 +42,5 @@ func legacyDefinitionHash(def *types.WorkflowDef) (string, error) {
 // record. It delegates to workflowhash.Reconcile; see there for the per-format
 // rules.
 func reconcileDefinitionHash(storedHash string, storedDef *types.WorkflowDef) (effectiveHash string, needsUpgrade bool, err error) {
-	return workflowhash.Reconcile(storedHash, storedDef)
+	return workflowhash.Reconcile(storedHash, storedDef, nil)
 }

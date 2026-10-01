@@ -66,7 +66,11 @@ const (
 // Node Timeout and Output are included (v2). A definition that sets neither
 // on any node keeps the "runtime-sha256:v1:<hex>" form, byte-identical to the
 // pre-v2 hash; otherwise the form is "runtime-sha256:v2:<hex>".
-func Runtime(def *types.WorkflowDef) (string, error) {
+//
+// The hash is taken over Canonical(def, specs), so an omitted param of a type
+// specs knows hashes like its Default. A nil specs hashes def as written.
+func Runtime(def *types.WorkflowDef, specs ParamSpecLookup) (string, error) {
+	def = Canonical(def, specs)
 	payload := RuntimePayload{
 		Namespace:       def.Namespace,
 		Name:            def.Name,
