@@ -37,6 +37,16 @@ export interface ListNodeTypesOptions {
   namespace?: string;
 }
 
+/** Options for GET /v1/node-types/{type}. */
+export interface GetNodeTypeOptions {
+  /**
+   * Namespace the caller edits in. Sent as `?namespace=`; with it the server
+   * can also answer from the types live runners entitled to that namespace
+   * report. An omitted or empty value looks up the server registry only.
+   */
+  namespace?: string;
+}
+
 /** The `{list,total}` payload returned by GET /v1/workflows. */
 export interface WorkflowListPage {
   list: WorkflowSummary[];
@@ -162,10 +172,12 @@ export interface XFlowApiClient {
    */
   listNodeTypes(options?: ListNodeTypesOptions): Promise<NodeTypesResponse>;
   /**
-   * GET /v1/node-types/{type}?version=: one schema. An omitted (or 0) version
-   * selects the latest; an unknown type or version rejects with status 404.
+   * GET /v1/node-types/{type}?version=&namespace=: one schema. An omitted (or
+   * 0) version selects the latest; an unknown type or version rejects with
+   * status 404. A `namespace` scopes the lookup like listNodeTypes, so a
+   * runner-reported type resolves too.
    */
-  getNodeType(type: string, version?: number): Promise<NodeFormSchema>;
+  getNodeType(type: string, version?: number, options?: GetNodeTypeOptions): Promise<NodeFormSchema>;
 }
 
 /**
@@ -815,9 +827,10 @@ export function createXFlowApiClient(options: XFlowApiClientOptions): XFlowApiCl
       });
       return request<NodeTypesResponse>(fetcher, joinUrl(options.baseUrl, path)).then(mapNodeTypes);
     },
-    getNodeType(type, version) {
+    getNodeType(type, version, getOptions) {
       const path = withQuery(nodeTypePath(type), {
-        version: version === undefined ? undefined : String(version)
+        version: version === undefined ? undefined : String(version),
+        namespace: getOptions?.namespace ? getOptions.namespace : undefined
       });
       return request<NodeFormSchema>(fetcher, joinUrl(options.baseUrl, path)).then((response) =>
         mapNodeFormSchema(response.data, response)

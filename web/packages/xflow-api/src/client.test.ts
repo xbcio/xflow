@@ -519,6 +519,42 @@ describe("node types", () => {
     expect(fetcher.mock.calls.map(([url]) => url)).toEqual(["/v1/node-types/xflow.wait", "/v1/node-types/xflow.wait?version=2"]);
   });
 
+  it("scopes one node type to a namespace only when one is given", async () => {
+    const fetcher = vi.fn().mockImplementation(async () => success(schema));
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    await client.getNodeType("acme.analyse", undefined, { namespace: "team a/b" });
+    await client.getNodeType("acme.analyse", 2, { namespace: "default" });
+    await client.getNodeType("acme.analyse", undefined, { namespace: "" });
+    await client.getNodeType("acme.analyse", undefined, {});
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+      "/v1/node-types/acme.analyse?namespace=team+a%2Fb",
+      "/v1/node-types/acme.analyse?version=2&namespace=default",
+      "/v1/node-types/acme.analyse",
+      "/v1/node-types/acme.analyse"
+    ]);
+  });
+
+  it("passes the runner source keys of one node type through unchanged", async () => {
+    const runnerSchema = {
+      spec: "node-form/v1",
+      node_type: "acme.analyse",
+      node_version: 2,
+      kind: "action",
+      display_name: "Analyse",
+      fields: [],
+      source: "runner",
+      runner_pools: ["gpu"]
+    };
+    const fetcher = vi.fn().mockResolvedValue(success(runnerSchema));
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    const got = await client.getNodeType("acme.analyse", 2, { namespace: "default" });
+    expect(got).toEqual(runnerSchema);
+    expect(got.source).toBe("runner");
+    expect(got.runner_pools).toEqual(["gpu"]);
+  });
+
   it("surfaces 404 for an unknown node type", async () => {
     const fetcher = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ success: false, code: "node_type_not_found", message: "node type not found", trace_id: "t" }), {
