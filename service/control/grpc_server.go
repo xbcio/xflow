@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
@@ -28,6 +29,23 @@ type GRPCServer struct {
 
 // GRPCServerOption configures a gRPC control-plane server.
 type GRPCServerOption func(*GRPCServer)
+
+// RunnerGRPCServerOptions returns the grpc.ServerOptions every grpc.Server
+// hosting the runner protocol must be built with. Today that is a receive
+// limit of MaxRegisterRunnerBodyBytes, so a Register the HTTP transport
+// accepts is not rejected with ResourceExhausted by grpc-go's 4 MiB default.
+//
+// The limit is server-wide, not Register-only: Heartbeat, PollTask,
+// ReportResult and every Connect stream message may now also be up to 8 MiB
+// instead of 4 MiB. grpc-go enforces MaxRecvMsgSize in the transport while
+// reading a message, before any handler or interceptor sees it, and offers no
+// per-method override; an interceptor can only tighten after the full message
+// is already buffered, so it could not be the mechanism that loosens one
+// method. Any other service registered on the same grpc.Server inherits the
+// limit too.
+func RunnerGRPCServerOptions() []grpc.ServerOption {
+	return []grpc.ServerOption{grpc.MaxRecvMsgSize(MaxRegisterRunnerBodyBytes)}
+}
 
 // WithGRPCAuthenticator installs a runner-protocol authenticator on the gRPC
 // server. Default is the permissive DisabledAuthenticator.

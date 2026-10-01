@@ -254,7 +254,7 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// maxRegisterRunnerBodyBytes caps an HTTP register body at 8 MiB: the
+// MaxRegisterRunnerBodyBytes caps an HTTP register body at 8 MiB: the
 // descriptor envelope limit plus 7 MiB for the rest of the request. Without a
 // cap the one request that carries descriptors would be the only uncapped
 // runner-protocol read.
@@ -268,7 +268,10 @@ func (s *Server) Handler() http.Handler {
 // capabilities and labels, which stay in the tens of KiB) while still
 // bounding a single decode. Raise it rather than tighten it if a fleet ever
 // hosts more per runner.
-const maxRegisterRunnerBodyBytes = protocol.MaxRunnerDescriptorEnvelopeBytes + 7<<20
+//
+// The gRPC transport applies the same bound as its receive limit; see
+// RunnerGRPCServerOptions.
+const MaxRegisterRunnerBodyBytes = protocol.MaxRunnerDescriptorEnvelopeBytes + 7<<20
 
 func (s *Server) HandleRegisterRunner(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
@@ -276,7 +279,7 @@ func (s *Server) HandleRegisterRunner(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = r.Body.Close() }()
 	var req protocol.RegisterRunnerRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRegisterRunnerBodyBytes)).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, MaxRegisterRunnerBodyBytes)).Decode(&req); err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
 			writeRunnerError(w, ErrRegisterBodyTooLarge)

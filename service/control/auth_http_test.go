@@ -169,7 +169,7 @@ func TestHTTPRegisterBodySizeCap(t *testing.T) {
 
 	t.Run("OversizedReturns413", func(t *testing.T) {
 		srv, dir := newAuthedServer(t)
-		resp := registerWithPad(t, srv, maxRegisterRunnerBodyBytes)
+		resp := registerWithPad(t, srv, MaxRegisterRunnerBodyBytes)
 		assertHTTPRegisterError(t, resp, http.StatusRequestEntityTooLarge, ErrRegisterBodyTooLarge.Error())
 		if _, ok := dir.Runner(context.Background(), "order-runner-1"); ok {
 			t.Fatal("oversized register was applied")
