@@ -31,7 +31,11 @@ function isTestSource(sourceDirectory, filePath) {
   const relative = path.relative(sourceDirectory, filePath);
   return (
     /(?:^|[/\\])__tests__(?:[/\\]|$)/.test(relative) ||
-    /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(relative)
+    /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(relative) ||
+    // A package's top-level src/testing/ is its test-support subpath (for
+    // example @xflow/composer/testing, which imports vitest). It may import
+    // fixtures; production code may not import it (see isFixtureImport).
+    /^testing(?:[/\\]|$)/.test(relative)
   );
 }
 
@@ -46,16 +50,21 @@ function importSpecifiers(source) {
 }
 
 function isFixtureImport(specifier) {
-  return specifier.split(/[\\/]/).some((segment) => /^(?:mocks?|fixtures?)$/i.test(segment));
+  return specifier.split(/[\\/]/).some((segment) => /^(?:mocks?|fixtures?|testing)$/i.test(segment));
 }
 
 function runSelfTest() {
   const fixtureSource = `
     import workflow from "@/fixtures/workflow";
     const mock = import("../mocks/api");
+    import { mountComposer } from "@xflow/composer/testing";
   `;
   const detected = importSpecifiers(fixtureSource).filter(isFixtureImport);
-  if (detected.length !== 2 || isFixtureImport("@/features/mockery")) {
+  if (
+    detected.length !== 3 ||
+    isFixtureImport("@/features/mockery") ||
+    isFixtureImport("@testing-library/react")
+  ) {
     throw new Error("production-fixtures self-test failed");
   }
 }
