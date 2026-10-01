@@ -71,8 +71,9 @@ paths:
         key already holds a definition that differs only in description, ids
         or editor metadata, or only by a builtin node parameter given as its
         declared default versus left out, the call returns 201 with the
-        existing workflow id and writes nothing; the stored definition is not
-        updated. Update metadata through `PUT /v1/workflows/{id}`.
+        existing workflow id and leaves the stored definition unchanged (only
+        its `definition_hash` may be upgraded to a newer format). Update
+        metadata through `PUT /v1/workflows/{id}`.
       tags: [Workflows]
       parameters:
         - $ref: "#/components/parameters/XRequestId"
