@@ -1135,7 +1135,11 @@ func newRunnerProtocolClient(cfg RunnerConfig, o *runnerOptions) (runnersvc.Prot
 		if tlsCfg != nil {
 			creds = credentials.NewTLS(tlsCfg)
 		}
-		conn, err := grpc.NewClient(cfg.GRPCTarget, grpc.WithTransportCredentials(creds))
+		// The runner-protocol message limits must match the server's
+		// control.RunnerGRPCServerOptions; grpc-go's 4 MiB receive default
+		// would reject a lease or response the server is allowed to send.
+		dialOpts := append([]grpc.DialOption{grpc.WithTransportCredentials(creds)}, control.RunnerGRPCDialOptions()...)
+		conn, err := grpc.NewClient(cfg.GRPCTarget, dialOpts...)
 		if err != nil {
 			return nil, nil, fmt.Errorf("dial gRPC server %q: %w", cfg.GRPCTarget, err)
 		}
