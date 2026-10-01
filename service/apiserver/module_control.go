@@ -812,7 +812,12 @@ func (m *workflowControlModule) addWorkflowRecord(ctx context.Context, ns namesp
 		}
 		return "", registrationDiagnostics{}, errors.New("apiserver: no workflow registry configured")
 	}
-	stored, err := registry.AddWorkflow(ctx, rec)
+	// ReconcileAdd is the registration the SDK Engine runs too: a stored hash
+	// in a legacy format (an HTTP "sha256:" record) or a stale v1 hash is
+	// recomputed from the stored definition, and a match is an idempotent
+	// registration that CAS-upgrades the stored hash. Only a real runtime
+	// difference is ErrWorkflowConflict.
+	stored, _, err := workflowhash.ReconcileAdd(ctx, registry, rec, hashParamSpecs)
 	if err != nil {
 		if m.log != nil {
 			m.log.Error("register_workflow_failed", "err", err)

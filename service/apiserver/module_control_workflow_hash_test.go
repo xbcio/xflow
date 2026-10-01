@@ -2,11 +2,19 @@ package apiserver
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/xbcio/xflow/backend"
+	"github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/backend/workflowhash"
+	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -87,4 +95,109 @@ func TestRegisterWorkflowOmittedDefaultIsIdempotent(t *testing.T) {
 	changed := waitWorkflow("idem", false)
 	changed.Nodes[1].Parameters["signal_name"] = "other"
 	postRegisterID(t, srv.URL, changed, http.StatusConflict)
+}
+
+
+// legacySHA256 is the "sha256:" hash the HTTP path stored before it hashed
+// with workflowhash.Runtime: SHA-256 over json.Marshal of the full definition.
+func legacySHA256(t *testing.T, def *types.WorkflowDef) string {
+	t.Helper()
+	data, err := json.Marshal(def)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	sum := sha256.Sum256(data)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// seedLegacyRecord stores def under a pre-runtime-hash "sha256:" record, as an
+// older server's POST wrote it.
+func seedLegacyRecord(t *testing.T, reg backend.WorkflowRegistry, def *types.WorkflowDef) backend.WorkflowRecord {
+	t.Helper()
+	def.Namespace = "namespaceA"
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	ctx := namespace.WithNamespace(context.Background(), "namespaceA")
+	rec, err := reg.AddWorkflow(ctx, backend.WorkflowRecord{
+		Key:            workflowRegistryKey("namespaceA", def.Name, def.Version),
+		Namespace:      "namespaceA",
+		Name:           def.Name,
+		Version:        def.Version,
+		DefinitionHash: legacySHA256(t, def),
+		Definition:     def,
+		Graph:          g,
+	})
+	if err != nil {
+		t.Fatalf("seed AddWorkflow: %v", err)
+	}
+	return rec
+}
+
+// TestRegisterWorkflowReconcilesLegacyHash pins that re-POSTing the definition
+// behind a legacy "sha256:" record is idempotent -- 201 with the existing id --
+// and upgrades the stored hash in place, even when the re-POST spells out a
+// builtin Default the stored definition omits. A real change still conflicts.
+func TestRegisterWorkflowReconcilesLegacyHash(t *testing.T) {
+	for _, withMode := range []bool{false, true} {
+		srv, cp := newRegisterTestServer(t)
+		reg := cp.WorkflowRegistry()
+		legacy := seedLegacyRecord(t, reg, waitWorkflow("legacy", false))
+
+		id := postRegisterID(t, srv.URL, waitWorkflow("legacy", withMode), http.StatusCreated)
+		if id != legacy.ID {
+			t.Fatalf("withMode=%v: POST id = %q, want the legacy record %q", withMode, id, legacy.ID)
+		}
+		got, err := reg.GetWorkflow(context.Background(), id)
+		if err != nil {
+			t.Fatalf("GetWorkflow: %v", err)
+		}
+		want, err := workflowhash.Runtime(got.Definition, hashParamSpecs)
+		if err != nil {
+			t.Fatalf("Runtime: %v", err)
+		}
+		if got.DefinitionHash != want {
+			t.Fatalf("withMode=%v: stored hash = %q, want it upgraded to %q", withMode, got.DefinitionHash, want)
+		}
+		if _, ok := got.Definition.Nodes[1].Parameters["mode"]; ok {
+			t.Fatalf("withMode=%v: reconcile rewrote the stored definition", withMode)
+		}
+
+		changed := waitWorkflow("legacy", withMode)
+		changed.Nodes[1].Parameters["signal_name"] = "other"
+		postRegisterID(t, srv.URL, changed, http.StatusConflict)
+	}
+}
+
+// lostUpgradeRegistry loses the CAS hash upgrade to a concurrent registrar: it
+// applies the upgrade itself, then reports the caller's CAS as failed.
+type lostUpgradeRegistry struct {
+	backend.WorkflowRegistry
+	lost int
+}
+
+func (r *lostUpgradeRegistry) UpdateDefinitionHash(ctx context.Context, id types.WorkflowID, expectedOldHash, newHash string) error {
+	if err := r.WorkflowRegistry.UpdateDefinitionHash(ctx, id, expectedOldHash, newHash); err != nil {
+		return err
+	}
+	r.lost++
+	return errors.New("definition hash changed concurrently")
+}
+
+// TestRegisterWorkflowLostUpgradeRaceRefetches pins the lost-CAS path: the
+// re-fetched record already carries the new hash, so the POST is still an
+// idempotent 201 with the existing id.
+func TestRegisterWorkflowLostUpgradeRaceRefetches(t *testing.T) {
+	reg := &lostUpgradeRegistry{WorkflowRegistry: local.New().WorkflowRegistry()}
+	srv, _ := newWorkflowReplaceDependencyTestServer(t, reg, nil, nil)
+	legacy := seedLegacyRecord(t, reg.WorkflowRegistry, waitWorkflow("race", false))
+
+	id := postRegisterID(t, srv.URL, waitWorkflow("race", true), http.StatusCreated)
+	if id != legacy.ID {
+		t.Fatalf("POST id = %q, want the legacy record %q", id, legacy.ID)
+	}
+	if reg.lost != 1 {
+		t.Fatalf("lost upgrades = %d, want 1 (the reconcile must have hit the CAS path)", reg.lost)
+	}
 }
