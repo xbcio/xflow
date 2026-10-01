@@ -11,8 +11,22 @@
 # v2.0 增强：
 #   1. 全链路错误处理（HTTP/DB 节点均配置 error 出口）
 #   2. 审批操作扩展：转签、加签、超时自动驳回
+#      这几个动作 xflow.approval 节点已实现，但它们是**信号 action**，
+#      不是节点参数：调用方发信号时在 payload 里带
+#        action: approve | reject | return | delegate | add_signer | force
+#      （delegate/add_signer 另带 assignee，add_signer 可带 position: before|after；
+#       force 需节点配置 force_approvers，且只在该名单内的人发得起）。
 #   3. 完整审计追踪：每级审批人、操作、时间、意见
+#      节点发布 decisions：每条含 approver/action/comment/at（转签与加签另带
+#      assignee/position），全量在册，不随模式变化。"any" 模式判定的那一次还会
+#      把 approver/comment 一并放到节点输出顶层；"all"/"sequential" 模式只放
+#      approved，谁批的要看 decisions。
 #   4. 节点模板 node_templates：减少审批节点重复定义（DSL 扩展提案）
+#
+# 仍属提案、后端尚未实现的部分（本文件保留它们只为展示意图，节点会忽略）：
+#   node_templates 展开、节点级 title/detail 展示字段、标准审批模板里的
+#   actions/reminder（UI 操作清单与提醒策略），以及 collectApprovalTrail
+#   这类自定义 function 的具体实现。
 
 spec: "1.0"
 name: "purchase-approval"
@@ -82,14 +96,23 @@ params:
 # 模板展开在编译阶段第一步完成，后续步骤处理展开后的完整节点定义。
 # ──────────────────────────────────────
 node_templates:
-  # 标准审批节点：统一 actions、timeout、reminder、on_timeout
+  # 标准审批节点：统一 approvers、mode、timeout、timeout_action
+  #
+  # 只有 approvers / mode / timeout / timeout_action / force_approvers 是
+  # xflow.approval 真实读取的参数。下面的 title / detail / actions / reminder
+  # 是编辑器与节点模板提案要用的展示与交互声明，节点本身不读，写在这里只为
+  # 说明各自的意图；真正生效的审批配置是 approvers + mode + timeout_action。
   standard_approval:
     type: xflow.approval
     parameters:
+      # 提案：展示字段（节点不读）
       detail:
         applicant: "${{ $params.applicant_id }}"
         amount: "${{ $params.amount }}"
         items: "$params.items"
+      # 提案：UI 操作清单。key 是门户上的操作键（结果语义），发信号时用的是
+      # 上面第 2 条那组真实 action 取值（approve/reject/…），两者不是同一个
+      # 命名空间；节点也不接受用这份清单开关动作。
       actions:
         - key: approved
           label: "同意"
@@ -103,8 +126,10 @@ node_templates:
           label: "加签"
           require_assignee: true
           position: before          # before=前加签 after=后加签
+      # 真实参数
       timeout: "${{ $vars.approval_timeout }}"
-      on_timeout: rejected          # 超时自动驳回
+      timeout_action: reject        # 超时自动驳回（另一个取值是 route，走 timeout 出口）
+      # 提案：提醒策略，节点不读
       reminder:
         interval: "${{ $vars.reminder_interval }}"
         max_count: "${{ $vars.reminder_max_count }}"
@@ -113,6 +138,7 @@ node_templates:
   approval_check:
     type: xflow.switch
     parameters:
+      mode: rules                   # xflow.switch 必填参数
       outputs: [approved, rejected]
       rules: []                    # 子节点需覆盖
       default_output: rejected     # 默认驳回
@@ -175,14 +201,15 @@ nodes:
   - name: l1_manager
     template: standard_approval
     parameters:
-      assignee: "${{ $nodes['fetch_approvers'].manager_id }}"
+      approvers: ["${{ $nodes['fetch_approvers'].manager_id }}"]
+      mode: "any"
       title: "${{ sprintf('采购审批：%s（¥%.2f）', $params.title, $params.amount) }}"
 
   - name: l1_check
     template: approval_check
     parameters:
       rules:
-        - condition: "$nodes['l1_manager'].action == 'approved'"
+        - condition: "$nodes['l1_manager'].approved == true"
           output: approved
       default_output: rejected
 
@@ -192,7 +219,8 @@ nodes:
   - name: l2_manager
     template: standard_approval
     parameters:
-      assignee: "${{ $nodes['fetch_approvers'].manager_id }}"
+      approvers: ["${{ $nodes['fetch_approvers'].manager_id }}"]
+      mode: "any"
       title: "${{ sprintf('采购审批（一级）：%s（¥%.2f）', $params.title, $params.amount) }}"
       detail:
         note: "审批通过后将提交部门负责人复核"
@@ -201,14 +229,15 @@ nodes:
     template: approval_check
     parameters:
       rules:
-        - condition: "$nodes['l2_manager'].action == 'approved'"
+        - condition: "$nodes['l2_manager'].approved == true"
           output: approved
       default_output: rejected
 
   - name: l2_director
     template: standard_approval
     parameters:
-      assignee: "${{ $nodes['fetch_approvers'].director_id }}"
+      approvers: ["${{ $nodes['fetch_approvers'].director_id }}"]
+      mode: "any"
       title: "${{ sprintf('采购审批（二级）：%s（¥%.2f）', $params.title, $params.amount) }}"
       detail:
         manager_comment: "${{ $nodes['l2_manager'].comment ?? '' }}"
@@ -217,7 +246,7 @@ nodes:
     template: approval_check
     parameters:
       rules:
-        - condition: "$nodes['l2_director'].action == 'approved'"
+        - condition: "$nodes['l2_director'].approved == true"
           output: approved
       default_output: rejected
 
@@ -227,7 +256,8 @@ nodes:
   - name: l3_manager
     template: standard_approval
     parameters:
-      assignee: "${{ $nodes['fetch_approvers'].manager_id }}"
+      approvers: ["${{ $nodes['fetch_approvers'].manager_id }}"]
+      mode: "any"
       title: "${{ sprintf('采购审批（一级）：%s（¥%.2f）', $params.title, $params.amount) }}"
       detail:
         note: "审批通过后将依次提交部门负责人、VP 及财务审批"
@@ -236,14 +266,15 @@ nodes:
     template: approval_check
     parameters:
       rules:
-        - condition: "$nodes['l3_manager'].action == 'approved'"
+        - condition: "$nodes['l3_manager'].approved == true"
           output: approved
       default_output: rejected
 
   - name: l3_director
     template: standard_approval
     parameters:
-      assignee: "${{ $nodes['fetch_approvers'].director_id }}"
+      approvers: ["${{ $nodes['fetch_approvers'].director_id }}"]
+      mode: "any"
       title: "${{ sprintf('采购审批（二级）：%s（¥%.2f）', $params.title, $params.amount) }}"
       detail:
         manager_comment: "${{ $nodes['l3_manager'].comment ?? '' }}"
@@ -252,20 +283,22 @@ nodes:
     template: approval_check
     parameters:
       rules:
-        - condition: "$nodes['l3_director'].action == 'approved'"
+        - condition: "$nodes['l3_director'].approved == true"
           output: approved
       default_output: rejected
 
   - name: l3_vp
     template: standard_approval
     parameters:
-      assignee: "${{ $nodes['fetch_approvers'].vp_id }}"
+      approvers: ["${{ $nodes['fetch_approvers'].vp_id }}"]
+      mode: "any"
       title: "${{ sprintf('采购审批（VP）：%s（¥%.2f）', $params.title, $params.amount) }}"
 
   - name: l3_finance
     template: standard_approval
     parameters:
-      assignee: "${{ $nodes['fetch_approvers'].finance_id }}"
+      approvers: ["${{ $nodes['fetch_approvers'].finance_id }}"]
+      mode: "any"
       title: "${{ sprintf('采购审批（财务）：%s（¥%.2f）', $params.title, $params.amount) }}"
       detail:
         budget_remaining: "${{ $nodes['fetch_approvers'].budget_remaining }}"
@@ -281,7 +314,7 @@ nodes:
       mode: rules
       outputs: [approved, rejected]
       rules:
-        - condition: "$nodes['l3_parallel_merge'].vp.action == 'approved' && $nodes['l3_parallel_merge'].finance.action == 'approved'"
+        - condition: "$nodes['l3_parallel_merge'].vp.approved == true && $nodes['l3_parallel_merge'].finance.approved == true"
           output: approved
       default_output: rejected
 
