@@ -109,6 +109,14 @@ The runtime hash is taken over a canonical form of the definition in which every
 - Registration through `POST /v1/workflows` or the embedded `AddWorkflow` is idempotent on the runtime identity: a definition that differs from the stored one only in editor metadata (§2.2) or by omitted builtin Defaults returns the existing workflow id and leaves the stored definition unchanged. Replace no-op checks (`PUT /v1/workflows/{id}`, embedded `ReplaceWorkflow`) compare audit fingerprints instead, so a metadata-only change is still written as a new revision.
 - Because the replace no-op check compares the full stored definition, an embedded `ReplaceWorkflow` of an SDK build over a record registered through HTTP with builtin Defaults omitted is a real replace: it writes a new record with a new workflow id, although the runtime hash is unchanged. A following `AddWorkflow` or `POST` of either form is idempotent on the replaced record.
 
+### 3.2 Upgrade notes
+
+These belong in the release notes of the release that introduces §3.1.
+
+- **Mixed SDK versions on one Redis.** An SDK binary built before §3.1 re-checks a stored `runtime-sha256:v1:` hash by hashing the raw stored definition. On a record registered through HTTP with builtin Defaults omitted, that raw hash differs from the canonical one, so the old binary reports `ErrWorkflowConflict` (as it already did before §3.1) and best-effort CAS-rewrites the stored hash to its raw form. The next registration by a new binary or server upgrades it back. While both versions register the same workflow, its stored hash flaps between the two forms and each rewrite advances `registry_revision`. No definition and no `runtime-sha256:v2:` hash is ever changed by this. Upgrade every SDK binary that registers against a shared Redis before relying on cross-path idempotency.
+- **One-time stale-revision conflict on PUT.** The first registration (`POST`, `AddWorkflow`) of a legacy `sha256:` record upgrades its hash in place, which advances `registry_revision`. A `PUT /v1/workflows/{id}` that read the record before that upgrade and writes after it fails once with a stale-revision 409; retrying it succeeds. Each legacy record can cause this at most once.
+- **No migration pass.** Legacy hashes are upgraded lazily on their next registration. An identical PUT over a legacy record registered by POST is a no-op and leaves the hash as it is; over a legacy record whose stored definition already carries its id (one last written by PUT), the identical PUT is written as a new revision that upgrades the hash.
+
 ## 4. Consequences
 
 - Moving or restyling a node no longer changes the runtime hash or triggers a version conflict.
