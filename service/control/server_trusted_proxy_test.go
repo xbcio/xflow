@@ -39,8 +39,8 @@ func TestServerSourceIPTrustedProxies(t *testing.T) {
 			name:       "all trusted falls back to leftmost",
 			trusted:    []string{"10.0.0.0/8"},
 			remoteAddr: "10.0.0.3:4321",
-			xff:        "10.1.0.1, 10.2.0.2",
-			want:       "10.1.0.1",
+			xff:        "10.0.0.11, 10.0.0.12",
+			want:       "10.0.0.11",
 		},
 		{
 			name:       "parse failure falls back to leftmost legal address",
