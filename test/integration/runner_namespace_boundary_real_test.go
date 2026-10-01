@@ -170,6 +170,7 @@ func TestRunnerNamespaceBoundaryRealRedisRejectsUnauthorizedNamespace(t *testing
 		runnerID := idPrefix // starts with idPrefix trivially
 		_, err := client.WithToken(token).Register(ctx, protocol.RegisterRunnerRequest{
 			RunnerID:    runnerID,
+			InstanceUID: "nsb-instance-" + runnerID,
 			Concurrency: 1,
 			Namespaces:  []string{otherNS},
 		})
@@ -189,6 +190,7 @@ func TestRunnerNamespaceBoundaryRealRedisRejectsUnauthorizedNamespace(t *testing
 		runnerID := idPrefix + "-ok"
 		if _, err := client.WithToken(token).Register(ctx, protocol.RegisterRunnerRequest{
 			RunnerID:    runnerID,
+			InstanceUID: "nsb-instance-" + runnerID,
 			Concurrency: 1,
 			Namespaces:  []string{grantedNS},
 		}); err != nil {
@@ -230,6 +232,7 @@ func TestRunnerNamespaceBoundaryRealRedisUndeclaredNamespaceGate(t *testing.T) {
 		runnerID := idPrefix
 		_, err = client.WithToken(token).Register(ctx, protocol.RegisterRunnerRequest{
 			RunnerID:    runnerID,
+			InstanceUID: "nsb-instance-" + runnerID,
 			Concurrency: 1,
 			// Namespaces intentionally omitted.
 		})
@@ -261,6 +264,7 @@ func TestRunnerNamespaceBoundaryRealRedisUndeclaredNamespaceGate(t *testing.T) {
 		runnerID := idPrefix
 		if _, err := client.WithToken(token).Register(ctx, protocol.RegisterRunnerRequest{
 			RunnerID:    runnerID,
+			InstanceUID: "nsb-instance-" + runnerID,
 			Concurrency: 1,
 			// Namespaces intentionally omitted.
 		}); err != nil {
@@ -379,14 +383,14 @@ func TestRunnerNamespaceBoundaryRealRedisClaimForRunnerScopesByNamespace(t *test
 	client := newNSBGRPCClient(t, dir, policyStore)
 
 	regA, err := client.WithToken(tokenA).Register(ctx, protocol.RegisterRunnerRequest{
-		RunnerID: idA, Concurrency: 10, Namespaces: []string{string(nsA)},
+		RunnerID: idA, InstanceUID: "nsb-instance-" + idA, Concurrency: 10, Namespaces: []string{string(nsA)},
 		Capabilities: []protocol.Capability{{NodeType: nodeType}},
 	})
 	if err != nil {
 		t.Fatalf("register runner A: %v", err)
 	}
 	regB, err := client.WithToken(tokenB).Register(ctx, protocol.RegisterRunnerRequest{
-		RunnerID: idB, Concurrency: 10, Namespaces: []string{string(nsB)},
+		RunnerID: idB, InstanceUID: "nsb-instance-" + idB, Concurrency: 10, Namespaces: []string{string(nsB)},
 		Capabilities: []protocol.Capability{{NodeType: nodeType}},
 	})
 	if err != nil {
@@ -445,7 +449,7 @@ func TestRunnerNamespaceBoundaryRealRedisOngoingAuthRejectsBadToken(t *testing.T
 
 	runnerID := idPrefix
 	goodClient := base.WithToken(goodToken)
-	reg, err := goodClient.Register(ctx, protocol.RegisterRunnerRequest{RunnerID: runnerID, Concurrency: 1})
+	reg, err := goodClient.Register(ctx, protocol.RegisterRunnerRequest{RunnerID: runnerID, InstanceUID: "nsb-instance-" + runnerID, Concurrency: 1})
 	if err != nil {
 		t.Fatalf("register with the good token: %v", err)
 	}
