@@ -589,6 +589,15 @@ func (r *Runner) executeAndReport(ctx context.Context, sessionID string, lease *
 		TraceCarrier: tracing.InjectCarrier(reportCtx),
 	}
 	reportResp, err := r.client.ReportResult(reportCtx, req)
+	if errors.Is(err, protocol.ErrRunnerRequestTooLarge) {
+		// The same body can never be accepted, and an unlanded report leaves
+		// the lease finalized for the server to replay, so retrying the
+		// handler would loop forever. Fail the lease permanently instead.
+		span.RecordError(err)
+		slog.Default().Warn("task report too large; reporting permanent failure",
+			"runner_id", r.config.RunnerID, "lease_id", string(lease.LeaseID), "err", err)
+		reportResp, err = r.client.ReportResult(reportCtx, oversizeReport(req, err))
+	}
 	if err != nil {
 		signalError(runContextError(ctx, err))
 		return
@@ -596,6 +605,27 @@ func (r *Runner) executeAndReport(ctx context.Context, sessionID string, lease *
 	if !reportResp.Accepted {
 		signalError(fmt.Errorf("task result rejected: %s", reportResp.Error))
 	}
+}
+
+// oversizeReport replaces a report the server cannot accept with a small
+// permanent failure for the same lease. The echoed lease keeps only what the
+// server fences the report against (task identity, lease ID, token, attempt,
+// namespace); the server commits against its own authoritative lease, so the
+// dropped input and payloads are never read from the echo.
+func oversizeReport(req protocol.ReportResultRequest, cause error) protocol.ReportResultRequest {
+	slim := *req.Lease
+	slim.Input = nil
+	slim.GroupPayload = nil
+	slim.SubgraphPayload = nil
+	if p := slim.Task.Payload; p != nil {
+		// BuildAssignmentID reads only the signal name and trigger.
+		slim.Task.Payload = &types.SignalPayload{Triggered: p.Triggered, Name: p.Name}
+	}
+	req.Lease = &slim
+	req.GroupResult = nil
+	req.Result = engine.TaskResult{Error: errors.Join(types.ErrPermanent,
+		fmt.Errorf("task result too large to report: %w", cause))}
+	return req
 }
 
 // observeHeartbeat forwards a heartbeat attempt's outcome to the lifecycle
