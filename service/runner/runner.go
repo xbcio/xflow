@@ -321,9 +321,16 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	pollErr := r.pollLoop(ctx, sessionID, leaseCh, &inFlight, active)
 	hbCancel()
+	// pollLoop is the only sender, so closing here is safe. It is what ends the
+	// workers on a transport error, where ctx stays live for the reconnect:
+	// an idle worker exits at once, a busy one finishes its current lease and
+	// then exits. Without it every reconnect parked Concurrency idle workers on
+	// this channel for the life of ctx and Run sat out the shutdown timeout.
+	close(leaseCh)
 
 	// Graceful shutdown: stop polling, then wait (bounded) for workers to
-	// finish in-flight tasks. Workers see ctx cancellation and exit.
+	// finish in-flight tasks. Workers exit on ctx cancellation or once the
+	// closed leaseCh is empty.
 	waitDone := make(chan struct{})
 	go func() { wg.Wait(); close(waitDone) }()
 	drained := false
@@ -442,8 +449,8 @@ func (r *Runner) pollLoop(ctx context.Context, sessionID string, leaseCh chan<- 
 func releaseUnstartedLeases(leaseCh chan *engine.TaskLease, inFlight *atomic.Int32, active *activeLeases) {
 	for {
 		select {
-		case lease := <-leaseCh:
-			if lease == nil {
+		case lease, ok := <-leaseCh:
+			if !ok || lease == nil {
 				return
 			}
 			active.remove(string(lease.LeaseID))
@@ -454,14 +461,15 @@ func releaseUnstartedLeases(leaseCh chan *engine.TaskLease, inFlight *atomic.Int
 	}
 }
 
-// workerLoop drains leaseCh and executes one lease at a time per worker.
+// workerLoop drains leaseCh and executes one lease at a time per worker. It
+// returns when ctx is cancelled or once leaseCh is closed and empty.
 func (r *Runner) workerLoop(ctx context.Context, sessionID string, leaseCh <-chan *engine.TaskLease, inFlight *atomic.Int32, active *activeLeases, signalError func(error)) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case lease := <-leaseCh:
-			if lease == nil {
+		case lease, ok := <-leaseCh:
+			if !ok || lease == nil {
 				return
 			}
 			r.executeAndReport(ctx, sessionID, lease, inFlight, active, signalError)
