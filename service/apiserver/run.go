@@ -132,8 +132,8 @@ func (s *APIServer) Run(ctx context.Context) error {
 			return fmt.Errorf("grpc listen: %w", err)
 		}
 		var opts []grpc.ServerOption
-		// Receive limit matching the HTTP register cap; server-wide, see
-		// control.RunnerGRPCServerOptions.
+		// Send and receive limits matching the HTTP register cap; server-wide,
+		// see control.RunnerGRPCServerOptions.
 		opts = append(opts, control.RunnerGRPCServerOptions()...)
 		if tlsCfg != nil {
 			opts = append(opts, grpc.Creds(credentials.NewTLS(tlsCfg)))
