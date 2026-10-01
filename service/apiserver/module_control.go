@@ -1634,8 +1634,13 @@ func (m *workflowControlModule) replaceWorkflowByID(ctx context.Context, ns name
 	// mutation must replay through CompareAndReplaceWorkflow (which is the
 	// ledger lookup). A POST-written record (no stored id) has no HTTP ledger
 	// entry, and a request without a client mutation id gets a fresh one that
-	// no ledger entry can match, so both are safe to short-circuit.
-	if unchangedExceptStampedID(existing, replacement, id) && (existing.Definition.ID == "" || mutationID == "") {
+	// no ledger entry can match, so both are safe to short-circuit. A
+	// PUT-written record may still have an unprojected intent from a mutation
+	// that committed but failed to project; a retry then falls through to the
+	// CAS so it projects the current definition instead of reporting success
+	// while activations lag.
+	if unchangedExceptStampedID(existing, replacement, id) &&
+		(existing.Definition.ID == "" || (mutationID == "" && !m.activationProjectionMayBePending(ctx, ns, registry))) {
 		return existing.ID, diag, nil
 	}
 	if mutationID == "" {
@@ -1764,6 +1769,26 @@ func unchangedExceptStampedID(existing, replacement backend.WorkflowRecord, id t
 	stamped := *existing.Definition
 	stamped.ID = string(id)
 	return sameAuditFingerprint(backend.WorkflowRecord{Definition: &stamped}, replacement)
+}
+
+// activationProjectionMayBePending reports whether ns may hold an unprojected
+// workflow activation intent. The outbox lists intents per namespace, not per
+// workflow, so any pending intent counts; a listing error also counts, keeping
+// the identical-PUT shortcut conservative. A registry without an outbox has no
+// intents to wait on.
+func (m *workflowControlModule) activationProjectionMayBePending(ctx context.Context, ns namespace.Namespace, registry backend.WorkflowRegistry) bool {
+	outbox, ok := registry.(backend.WorkflowActivationProjectionOutbox)
+	if !ok {
+		return false
+	}
+	refs, _, err := outbox.ListPendingWorkflowActivationProjections(ctx, ns, 0, 1)
+	if err != nil {
+		if m.log != nil {
+			m.log.Error("replace_workflow_list_pending_projections_failed", "namespace", string(ns), "err", err)
+		}
+		return true
+	}
+	return len(refs) > 0
 }
 
 // sameAuditFingerprint reports whether replacement is the same full definition

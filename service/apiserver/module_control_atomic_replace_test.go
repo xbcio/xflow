@@ -257,6 +257,45 @@ func TestReplaceWorkflowProjectionFailureCommitsAndLeavesIntentPending(t *testin
 	}
 }
 
+// TestPutWorkflowIdenticalRetryAfterProjectionFailureProjects pins that an
+// identical PUT without X-Request-Id, retried after a PUT that committed but
+// failed to project, still drives the activations instead of taking the
+// identical-PUT shortcut while an intent is pending.
+func TestPutWorkflowIdenticalRetryAfterProjectionFailureProjects(t *testing.T) {
+	base := local.New().WorkflowRegistry()
+	hooked := newHookedAtomicWorkflowRegistry(base)
+	activationStore := &failingDesiredUpsertStore{EntryActivationStore: control.NewMemoryEntryActivationStore()}
+	srv, cp := newWorkflowReplaceDependencyTestServer(t, hooked, activationStore, nil)
+
+	resp := postWorkflows(t, srv.URL, "tok-full", configuredTriggerWorkflow("topic-original"))
+	defer func() { _ = resp.Body.Close() }()
+	var created registerWorkflowResponse
+	decodeEnvelope(t, resp, &created)
+	id := string(created.WorkflowID)
+
+	for range 3 {
+		activationStore.failNextDesiredUpsert(errors.New("injected durable projection failure"))
+	}
+	firstPut := putWorkflow(t, srv.URL, "tok-full", id, configuredTriggerWorkflow("topic-committed"))
+	defer func() { _ = firstPut.Body.Close() }()
+	if firstPut.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("first PUT status = %d, want 500 after projection failure", firstPut.StatusCode)
+	}
+	assertWorkflowTopic(t, cp.WorkflowRegistry(), created.WorkflowID, "topic-committed")
+	assertWorkflowActivationNotDesired(t, cp.EntryActivationStore(), created.WorkflowID)
+	callsBefore, _, _, _ := hooked.observations()
+
+	retry := putWorkflow(t, srv.URL, "tok-full", id, configuredTriggerWorkflow("topic-committed"))
+	defer func() { _ = retry.Body.Close() }()
+	if retry.StatusCode != http.StatusOK {
+		t.Fatalf("identical retry PUT status = %d, want 200", retry.StatusCode)
+	}
+	if callsAfter, _, _, _ := hooked.observations(); callsAfter != callsBefore+1 {
+		t.Fatalf("CompareAndReplace calls = %d -> %d, want the retry to reach the CAS once", callsBefore, callsAfter)
+	}
+	assertWorkflowActivationDesired(t, cp.EntryActivationStore(), created.WorkflowID, "topic-committed")
+}
+
 func TestPutWorkflowLedgerReplayWithBusyProjectionReturnsInternalServerError(t *testing.T) {
 	base := local.New().WorkflowRegistry()
 	durable := base.(backend.DurableWorkflowReplaceCapability)
