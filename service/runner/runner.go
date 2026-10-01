@@ -293,16 +293,20 @@ func (r *Runner) Run(ctx context.Context) error {
 	inFlight := &r.inFlight
 	active := r.active
 	leaseCh := make(chan *engine.TaskLease, r.config.Concurrency)
-	// pollCtx lets a heartbeat or report failure end the session. Without it
-	// the error sat in errCh until polling stopped on its own, and with every
-	// worker busy the poll loop is idle, so a dead session went unnoticed
-	// until a slot freed. Workers keep ctx: a busy one finishes its lease,
-	// which stays in the Runner-owned active set and in-flight count for the
-	// next session to report.
+	// pollCtx lets a heartbeat failure end the session. Without it the error
+	// sat in errCh until polling stopped on its own, and with every worker
+	// busy the poll loop is idle, so a dead session went unnoticed until a
+	// slot freed. Workers keep ctx: a busy one finishes its lease, which stays
+	// in the Runner-owned active set and in-flight count for the next session
+	// to report.
 	pollCtx, pollCancel := context.WithCancel(ctx)
 	defer pollCancel()
 	var errOnce sync.Once
 	errCh := make(chan error, 1)
+	// signalError only records the error. Workers use it: a failed or refused
+	// report is about one lease (deadline backstop, sweeper reclaim, report
+	// timeout), not the session, and ending the session would make the
+	// re-register invalidate every sibling lease still running.
 	signalError := func(err error) {
 		errOnce.Do(func() {
 			select {
@@ -310,13 +314,18 @@ func (r *Runner) Run(ctx context.Context) error {
 			default:
 			}
 		})
+	}
+	// endSession also stops polling. Only heartbeats keep the session alive
+	// server-side, so only a heartbeat failure means the session is gone.
+	endSession := func(err error) {
+		signalError(err)
 		pollCancel()
 	}
 
 	// Independent heartbeat goroutine — survives while workers are blocked on
 	// long handlers, reflecting the true in-flight count to the server.
 	heartbeatCtx, hbCancel := context.WithCancel(ctx)
-	go r.heartbeatLoop(heartbeatCtx, sessionID, inFlight, signalError)
+	go r.heartbeatLoop(heartbeatCtx, sessionID, inFlight, endSession)
 
 	// Metrics reporting shares heartbeatCtx: both are session-scoped, and a
 	// reconnect must restart the reporter with the new sessionID rather than
@@ -657,11 +666,11 @@ func (r *Runner) observeHeartbeat(ctx context.Context, ok bool) {
 // reconnect. Activation directives piggybacked on the heartbeat response are
 // forwarded to the activation tracker when configured; supply hints are
 // forwarded to the supply gate.
-func (r *Runner) heartbeatLoop(ctx context.Context, sessionID string, inFlight *atomic.Int32, signalError func(error)) {
+func (r *Runner) heartbeatLoop(ctx context.Context, sessionID string, inFlight *atomic.Int32, endSession func(error)) {
 	resp, err := r.heartbeat(ctx, sessionID, int(inFlight.Load()))
 	if err != nil {
 		r.observeHeartbeat(ctx, false)
-		signalError(err)
+		endSession(err)
 		return
 	}
 	r.observeHeartbeat(ctx, true)
@@ -681,7 +690,7 @@ func (r *Runner) heartbeatLoop(ctx context.Context, sessionID string, inFlight *
 			resp, err := r.heartbeat(ctx, sessionID, int(inFlight.Load()))
 			if err != nil {
 				r.observeHeartbeat(ctx, false)
-				signalError(err)
+				endSession(err)
 				return
 			}
 			r.observeHeartbeat(ctx, true)
