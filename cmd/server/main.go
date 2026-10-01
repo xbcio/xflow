@@ -224,7 +224,7 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	fs.IntVar(&cfg.concurrency, "concurrency", cfg.concurrency, "Queue consumer concurrency")
 	fs.IntVar(&cfg.outboxDiscoveryPage, "outbox-discovery-page", 0,
 		"Outbox dispatcher discovery page: Redis keyspace keys examined per drain (0 = engine default)")
-	fs.StringVar(&cfg.authPolicy, "auth-policy", "", "Path to runners.yaml (empty = auth disabled)")
+	fs.StringVar(&cfg.authPolicy, "auth-policy", "", "Path to runners.yaml (empty = auth disabled); SIGHUP re-reads this file without a restart")
 	fs.BoolVar(&cfg.authDryRun, "auth-dry-run", false, "Log auth violations but let requests through (rollout aid)")
 	fs.BoolVar(&cfg.enroll, "enroll", false, "Enable the runner enrollment endpoint (/v1/runners/enroll)")
 	fs.DurationVar(&cfg.runnerIdentityTTL, "runner-identity-ttl", 0,
@@ -244,9 +244,9 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	fs.StringVar(&cfg.authTokensFile, "auth-tokens-file", "", "JSON file of [{token,subject,namespace,scopes}] mappings; each token binds to its own namespace (multi-namespace). Takes precedence over --api-auth-token. File must be 0600.")
 	fs.BoolVar(&cfg.requireAPIAuth, "require-api-auth", false, "Fail to start if no workflow API authenticator is configured (production fail-closed)")
 	fs.BoolVar(&cfg.management, "management", false, "Enable ops management module (/healthz /readyz /v1/management/*); /v1/management/* gated by --api-auth-token")
-	fs.StringVar(&cfg.tlsCert, "tls-cert", "", "Path to server TLS certificate (enables TLS)")
-	fs.StringVar(&cfg.tlsKey, "tls-key", "", "Path to server TLS private key (required with --tls-cert)")
-	fs.StringVar(&cfg.tlsClientCA, "tls-client-ca", "", "Path to CA bundle to verify runner certs (enables mTLS)")
+	fs.StringVar(&cfg.tlsCert, "tls-cert", "", "Path to server TLS certificate (enables TLS); SIGHUP re-reads this file (with --tls-key and --tls-client-ca) without a restart")
+	fs.StringVar(&cfg.tlsKey, "tls-key", "", "Path to server TLS private key (required with --tls-cert); SIGHUP re-reads this file without a restart")
+	fs.StringVar(&cfg.tlsClientCA, "tls-client-ca", "", "Path to CA bundle to verify runner certs (enables mTLS); SIGHUP re-reads this file without a restart")
 	fs.StringVar(&cfg.masterKeyFile, "master-key-file", "", "Path to a 0600 file holding the base64-encoded 32-byte master encryption key; XFLOW_MASTER_KEY takes precedence. Required in production: without it supply content is stored in plaintext. Generate with: openssl rand -base64 32")
 	fs.StringVar(&cfg.masterKeyPreviousFile, "master-key-previous-file", "", "KEK rotation only: path to a 0600 file holding the master key being rotated out; XFLOW_MASTER_KEY_PREVIOUS takes precedence. Rows sealed under it stay readable until `xflow supply reseal` rewrites them; remove it afterwards")
 	fs.StringVar(&cfg.logFormat, "log-format", "text", "Log format: text or json")
@@ -790,6 +790,25 @@ func runServer(ctx context.Context, cfg serverConfig) error {
 	// drain; main's ctx never cancels, leaving signals as the only trigger.
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// SIGHUP hot-reloads runner auth policy and, when TLS is configured, the
+	// server certificate/key/client-CA — both without restarting this process.
+	// Registered before srv.Run so no signal delivered after this point can
+	// race the wiring; the TLS getter defers reading srv.TLSReloader() until a
+	// signal actually arrives, since Run has not yet started the transports
+	// (and therefore not yet populated it) at this point in the function.
+	//
+	// Policy reload is deliberately conditional on --auth-policy: a
+	// DisabledAuthenticator has no file to re-read, and buildAuthenticator only
+	// returns a *control.FilePolicyStore when --auth-policy was set.
+	reload := newReloader()
+	if policyStore, ok := auth.(*control.FilePolicyStore); ok && cfg.authPolicy != "" {
+		reload.add("auth policy", newPolicyReloadFunc(policyStore, cfg.authPolicy, m))
+	}
+	reload.add("tls material", newTLSReloadFunc(srv.TLSReloader))
+	sig, stopSignal := notifyReloadSignal()
+	defer stopSignal()
+	go reload.run(ctx, sig)
 
 	// Run starts the reconcile worker along with the transports.
 	return srv.Run(ctx)
