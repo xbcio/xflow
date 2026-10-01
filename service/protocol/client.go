@@ -27,6 +27,17 @@ const maxRunnerErrorBodyBytes = 4 << 10
 // the limit.
 var ErrRunnerResponseTooLarge = errors.New("runner protocol response body exceeds size limit")
 
+// MaxRunnerRequestBodyBytes is the largest runner-protocol JSON request body
+// the control plane decodes: the same 8 MiB it applies to every runner route.
+// The Client refuses to send a larger body, since the server would only
+// answer 413.
+const MaxRunnerRequestBodyBytes = MaxRunnerResponseBodyBytes
+
+// ErrRunnerRequestTooLarge reports a runner-protocol request body larger than
+// MaxRunnerRequestBodyBytes, whether the Client caught it before sending or
+// the server answered 413. Resending the same body cannot succeed.
+var ErrRunnerRequestTooLarge = errors.New("runner protocol request body exceeds size limit")
+
 type Client struct {
 	baseURL string
 	http    *http.Client
@@ -151,6 +162,9 @@ func (c *Client) post(ctx context.Context, path string, body any, out any) error
 	if err := json.NewEncoder(&buf).Encode(body); err != nil {
 		return err
 	}
+	if buf.Len() > MaxRunnerRequestBodyBytes {
+		return fmt.Errorf("runner protocol %s: %w (%d bytes, limit %d)", path, ErrRunnerRequestTooLarge, buf.Len(), MaxRunnerRequestBodyBytes)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, &buf)
 	if err != nil {
 		return err
@@ -170,6 +184,9 @@ func (c *Client) post(ctx context.Context, path string, body any, out any) error
 		// Bounded read: an error body is diagnostic only, so it never needs
 		// more than a short prefix.
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, maxRunnerErrorBodyBytes))
+		if resp.StatusCode == http.StatusRequestEntityTooLarge {
+			return fmt.Errorf("runner protocol %s: %w: status %d: %s", path, ErrRunnerRequestTooLarge, resp.StatusCode, strings.TrimSpace(string(data)))
+		}
 		return fmt.Errorf("runner protocol %s: status %d: %s", path, resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 	if out == nil {
