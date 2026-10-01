@@ -293,6 +293,14 @@ func (r *Runner) Run(ctx context.Context) error {
 	inFlight := &r.inFlight
 	active := r.active
 	leaseCh := make(chan *engine.TaskLease, r.config.Concurrency)
+	// pollCtx lets a heartbeat or report failure end the session. Without it
+	// the error sat in errCh until polling stopped on its own, and with every
+	// worker busy the poll loop is idle, so a dead session went unnoticed
+	// until a slot freed. Workers keep ctx: a busy one finishes its lease,
+	// which stays in the Runner-owned active set and in-flight count for the
+	// next session to report.
+	pollCtx, pollCancel := context.WithCancel(ctx)
+	defer pollCancel()
 	var errOnce sync.Once
 	errCh := make(chan error, 1)
 	signalError := func(err error) {
@@ -302,6 +310,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			default:
 			}
 		})
+		pollCancel()
 	}
 
 	// Independent heartbeat goroutine — survives while workers are blocked on
@@ -326,7 +335,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		}()
 	}
 
-	pollErr := r.pollLoop(ctx, sessionID, leaseCh, inFlight, active)
+	pollErr := r.pollLoop(pollCtx, sessionID, leaseCh, inFlight, active)
 	hbCancel()
 	// pollLoop is the only sender, so closing here is safe. It is what ends the
 	// workers on a transport error, where ctx stays live for the reconnect:
