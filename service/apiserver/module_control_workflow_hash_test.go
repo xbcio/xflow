@@ -81,6 +81,31 @@ func TestRegisterWorkflowStoresCanonicalRuntimeHash(t *testing.T) {
 	}
 }
 
+// TestRegisterWorkflowRecordsAuditFingerprint pins that POST records the
+// full-definition audit fingerprint the SDK records: the sha256 of the stored
+// definition as sent, under the audit prefix.
+func TestRegisterWorkflowRecordsAuditFingerprint(t *testing.T) {
+	srv, cp := newRegisterTestServer(t)
+
+	def := waitWorkflow("audit", false)
+	def.Description = "editor note"
+	id := postRegisterID(t, srv.URL, def, http.StatusCreated)
+	rec, err := cp.WorkflowRegistry().GetWorkflow(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetWorkflow: %v", err)
+	}
+	want, err := workflowhash.Audit(rec.Definition)
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	if rec.AuditFingerprint != want {
+		t.Fatalf("AuditFingerprint = %q, want %q", rec.AuditFingerprint, want)
+	}
+	if got := strings.TrimPrefix(rec.AuditFingerprint, workflowhash.AuditPrefix); "sha256:"+got != legacySHA256(t, rec.Definition) {
+		t.Fatalf("audit hex %q differs from the legacy full-definition sha256", got)
+	}
+}
+
 // TestRegisterWorkflowOmittedDefaultIsIdempotent pins that an omitted builtin
 // param and its spelled-out Default are one registration identity.
 func TestRegisterWorkflowOmittedDefaultIsIdempotent(t *testing.T) {

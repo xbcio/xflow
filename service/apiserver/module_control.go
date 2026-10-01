@@ -791,16 +791,24 @@ func (m *workflowControlModule) buildWorkflowRecord(ctx context.Context, ns name
 	if err != nil {
 		return backend.WorkflowRecord{}, registrationDiagnostics{}, err
 	}
+	// The audit fingerprint covers the full definition, editor metadata
+	// included. It is the same value the SDK records, and never the conflict
+	// hash.
+	audit, err := workflowhash.Audit(def)
+	if err != nil {
+		return backend.WorkflowRecord{}, registrationDiagnostics{}, err
+	}
 
 	rec := backend.WorkflowRecord{
-		ID:             id,
-		Key:            workflowRegistryKey(string(ns), def.Name, def.Version),
-		Namespace:      string(ns),
-		Name:           def.Name,
-		Version:        def.Version,
-		DefinitionHash: hash,
-		Definition:     def,
-		Graph:          g,
+		ID:               id,
+		Key:              workflowRegistryKey(string(ns), def.Name, def.Version),
+		Namespace:        string(ns),
+		Name:             def.Name,
+		Version:          def.Version,
+		DefinitionHash:   hash,
+		AuditFingerprint: audit,
+		Definition:       def,
+		Graph:            g,
 	}
 	return rec, registrationDiagnostics{Warnings: g.Warnings(), ParamIssues: paramIssues}, nil
 }
