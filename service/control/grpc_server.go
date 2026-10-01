@@ -62,6 +62,19 @@ func RunnerGRPCServerOptions() []grpc.ServerOption {
 	}
 }
 
+// RunnerGRPCDialOptions returns the grpc.DialOptions every runner-protocol
+// client connection must be built with: send and receive limits of
+// MaxRegisterRunnerBodyBytes, the same as RunnerGRPCServerOptions. Without
+// them grpc-go's 4 MiB default receive limit rejects a server message the
+// server is allowed to send, and the runner sees only an opaque
+// ResourceExhausted.
+func RunnerGRPCDialOptions() []grpc.DialOption {
+	return []grpc.DialOption{grpc.WithDefaultCallOptions(
+		grpc.MaxCallRecvMsgSize(MaxRegisterRunnerBodyBytes),
+		grpc.MaxCallSendMsgSize(MaxRegisterRunnerBodyBytes),
+	)}
+}
+
 // WithGRPCAuthenticator installs a runner-protocol authenticator on the gRPC
 // server. Default is the permissive DisabledAuthenticator.
 func WithGRPCAuthenticator(a Authenticator) GRPCServerOption {

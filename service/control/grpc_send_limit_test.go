@@ -8,7 +8,9 @@ import (
 	"testing"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/xbcio/xflow/engine"
@@ -128,5 +130,48 @@ func TestGRPCPollFailsLeaseAboveRunnerMessageLimit(t *testing.T) {
 	}
 	if replay.Lease != nil {
 		t.Fatalf("recovery Poll() replayed failed lease %q", replay.Lease.LeaseID)
+	}
+}
+
+func TestRunnerGRPCOptionsDeliverLeaseAboveDefaultLimit(t *testing.T) {
+	// 5.5 MiB: past grpc-go's 4 MiB default receive limit, inside the cap.
+	const largeLeaseBytes = 11 << 19
+	if largeLeaseBytes <= 4<<20 || largeLeaseBytes >= MaxRegisterRunnerBodyBytes {
+		t.Fatalf("fixture size %d must sit between 4 MiB and %d", largeLeaseBytes, MaxRegisterRunnerBodyBytes)
+	}
+	tests := []struct {
+		name       string
+		serverOpts []grpc.ServerOption
+		dialOpts   []grpc.DialOption
+		wantCode   codes.Code
+	}{
+		{"BothRunnerOptionSetsDeliver", RunnerGRPCServerOptions(), RunnerGRPCDialOptions(), codes.OK},
+		{"DefaultsReject", nil, nil, codes.ResourceExhausted},
+		{"DefaultDialRejects", RunnerGRPCServerOptions(), nil, codes.ResourceExhausted},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			eng := &fakeControlEngine{}
+			runners := NewMemoryRunnerDirectory()
+			client := startRunnerGRPCTestServer(t, eng, runners, tt.serverOpts, tt.dialOpts)
+			session := enqueueLeaseOfSize(t, client, eng, runners, largeLeaseBytes)
+
+			got, err := client.Poll(context.Background(), protocol.PollTaskRequest{RunnerID: "runner-1", SessionID: session, Capacity: 1})
+			if code := status.Code(err); code != tt.wantCode {
+				t.Fatalf("Poll() code = %v (err %v), want %v", code, err, tt.wantCode)
+			}
+			if tt.wantCode != codes.OK {
+				return
+			}
+			if got.Lease == nil || got.Lease.LeaseID != "lease-big" {
+				t.Fatalf("Poll() lease = %+v, want lease-big", got.Lease)
+			}
+			if blob, _ := got.Lease.Input.Data["blob"].(string); len(blob) != largeLeaseBytes {
+				t.Fatalf("delivered input blob length = %d, want %d", len(blob), largeLeaseBytes)
+			}
+			if eng.committedLease != nil {
+				t.Fatalf("deliverable lease was failed: %+v", eng.committedResult)
+			}
+		})
 	}
 }
