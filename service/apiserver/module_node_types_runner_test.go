@@ -371,7 +371,6 @@ func TestNewWorkflowControlModuleServesControlPlaneRunnerNodeTypes(t *testing.T)
 	}
 }
 
-
 // TestNodeTypesAuthzBranchRefusesForeignNamespace pins the tenant boundary
 // under ScopeAuthorizer, which never compares ResourceNamespace: a tenant-a
 // principal asking for ?namespace=tenant-b must get 403, not tenant-b's runner
