@@ -51,9 +51,13 @@ func nodeTypesNamespaceResolver() func(*http.Request) (string, string, string, s
 // nodeTypesScope reads the optional ?namespace= of a node-types request.
 // scoped=false means the request asked for the server registry only. It
 // writes the failure itself and returns ok=false on a malformed namespace
-// (400), or, on the legacy bearer branch where no principal exists to
-// authorize a namespace, on any namespace other than the request's own (403).
-// On the authz branch the wrapper has already authorized the namespace.
+// (400), or on any namespace other than the request's own (403). The request's
+// own namespace is the verified principal's on the authz branch and the
+// configured one on the legacy bearer branch. The check does not defer to the
+// authorizer: only NamespaceAwareAuthorizer compares ResourceNamespace, and
+// unlike other routes no namespace-scoped store read stands behind this one,
+// so under ScopeAuthorizer or a custom authorizer a foreign namespace would
+// otherwise disclose another tenant's runner schemas and pool names.
 func (m *workflowControlModule) nodeTypesScope(w http.ResponseWriter, r *http.Request) (ns namespace.Namespace, scoped, ok bool) {
 	q := r.URL.Query()
 	if !q.Has("namespace") {
@@ -64,7 +68,7 @@ func (m *workflowControlModule) nodeTypesScope(w http.ResponseWriter, r *http.Re
 		writeFail(w, r, http.StatusBadRequest, "namespace_invalid", "namespace is invalid")
 		return "", false, false
 	}
-	if m.principalAuth == nil && ns != namespace.FromContext(r.Context()) {
+	if ns != namespace.FromContext(r.Context()) {
 		writeFail(w, r, http.StatusForbidden, "forbidden", "forbidden")
 		return "", false, false
 	}

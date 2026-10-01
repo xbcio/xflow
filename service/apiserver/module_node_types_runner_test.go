@@ -370,3 +370,32 @@ func TestNewWorkflowControlModuleServesControlPlaneRunnerNodeTypes(t *testing.T)
 		t.Fatal("runner type still listed after the live TTL")
 	}
 }
+
+
+// TestNodeTypesAuthzBranchRefusesForeignNamespace pins the tenant boundary
+// under ScopeAuthorizer, which never compares ResourceNamespace: a tenant-a
+// principal asking for ?namespace=tenant-b must get 403, not tenant-b's runner
+// schemas, while its own namespace is still served.
+func TestNodeTypesAuthzBranchRefusesForeignNamespace(t *testing.T) {
+	auth := staticPrincipalAuth{principal: Principal{Subject: "alice", Namespace: "tenant-a", Scopes: []string{"workflow"}}}
+	m := authzModule(t, auth, ScopeAuthorizer{}, NewInMemoryAuditSink())
+	m.nodeDescriptors = fakeDescriptors()
+	m.runnerNodeTypes = fakeRunnerNodeTypes(nil, nil,
+		runnerAggregate(t, "acme.a", 1, "A", []string{"pool-a"}, "tenant-a"),
+		runnerAggregate(t, "acme.b", 1, "B", []string{"pool-b"}, "tenant-b"),
+	)
+	mux := http.NewServeMux()
+	m.registerAuthzRoutes(mux)
+	for _, path := range []string{"/v1/node-types?namespace=tenant-b", "/v1/node-types/acme.b?namespace=tenant-b"} {
+		if rec := getNodeTypes(t, mux, path, nil); rec.Code != http.StatusForbidden {
+			t.Errorf("%s: status %d, want 403: %s", path, rec.Code, rec.Body.String())
+		}
+	}
+	got := listNodeTypeSchemas(t, mux, "/v1/node-types?namespace=tenant-a")
+	if _, ok := findNodeTypeSchema(got, "acme.a", 1); !ok {
+		t.Errorf("own namespace: acme.a missing from %d schemas", len(got))
+	}
+	if _, ok := findNodeTypeSchema(got, "acme.b", 1); ok {
+		t.Error("own namespace: acme.b from tenant-b leaked")
+	}
+}
