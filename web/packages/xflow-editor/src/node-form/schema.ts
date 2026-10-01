@@ -20,6 +20,7 @@ export type {
   NodeFormPort,
   NodeFormPorts,
   NodeFormSchema,
+  NodeFormSource,
   NodeFormSpecVersion,
   NodeTypesResponse,
   ParamValidationMode,

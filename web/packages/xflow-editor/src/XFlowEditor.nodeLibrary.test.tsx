@@ -168,4 +168,50 @@ describe("node library from /v1/node-types (Doc C §6.3)", () => {
     const line = screen.getByText("节点类型未在 server 注册，参数按 JSON 编辑: fax:custom.runner.fax").closest("p");
     expect(line?.textContent).toMatch(/^warn/);
   });
+
+  it("badges a runner-reported type with a Runner tag and names its pools in the tooltip", async () => {
+    const withRunner: NodeTypesResponse = {
+      ...nodeTypes,
+      node_types: [
+        ...nodeTypes.node_types,
+        schema({
+          node_type: "acme.analyse",
+          node_version: 2,
+          display_name: "Analyse",
+          ports: { inputs: [{ name: "main" }], outputs: [{ name: "main" }] },
+          source: "runner",
+          runner_pools: ["gpu", "prod"]
+        }),
+        schema({ node_type: "acme.poolless", display_name: "Poolless", source: "runner" })
+      ]
+    };
+    const handleChange = vi.fn();
+    render(<XFlowEditor nodeTypes={withRunner} value={workflow} onChange={handleChange} />);
+
+    const analyse = tile("acme.analyse");
+    expect(analyse.dataset.source).toBe("runner");
+    expect(analyse.getAttribute("aria-label")).toBe("Analyse (Runner)");
+    // No presentation entry: the kind-based fallback group and generic icon.
+    expect(groupOf(analyse)).toBe("其他");
+    expect(iconOf(analyse)).toBe("appstore");
+    const badge = analyse.querySelector(".xflow-editor__node-tile-source");
+    expect(badge?.textContent).toBe("Runner");
+    expect(badge?.getAttribute("aria-hidden")).toBe("true");
+    // Server-registry tiles carry no source badge.
+    expect(tile("xflow.http").dataset.source).toBeUndefined();
+    expect(tile("xflow.http").querySelector(".xflow-editor__node-tile-source")).toBeNull();
+
+    fireEvent.mouseEnter(analyse);
+    const pools = await screen.findByText("Runner 资源池 gpu, prod");
+    expect(pools.className).toBe("xflow-editor-node-tile__tooltip-source");
+    expect(screen.getByText("输入 main · 输出 main")).toBeTruthy();
+
+    fireEvent.mouseEnter(tile("acme.poolless"));
+    expect(await screen.findByText("Runner 上报 · 未归属资源池")).toBeTruthy();
+
+    // Adding a runner type writes identity and placement only, like any other.
+    fireEvent.click(analyse);
+    expect(lastNode(handleChange)).toMatchObject({ type: "acme.analyse", kind: "action", ui: { label: "Analyse" } });
+    expect(Object.keys(lastNode(handleChange)).sort()).toEqual(["kind", "name", "position", "type", "ui"]);
+  });
 });

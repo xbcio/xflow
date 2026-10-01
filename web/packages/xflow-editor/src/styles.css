@@ -191,6 +191,8 @@
   --xflow-node-tone-green-border: rgba(26, 155, 103, .38);
   --xflow-node-tone-amber-border: rgba(201, 134, 0, .38);
   --xflow-node-tone-violet-border: rgba(118, 86, 214, .38);
+  /* Darker than the cyan tone text so the 9px source badge clears 4.5:1. */
+  --xflow-node-source-text: #066377;
 }
 
 .xflow-editor[data-theme-variant="blueprint"][data-theme="dark"] {
@@ -377,6 +379,8 @@
   --xflow-node-tone-green-border: rgba(22, 139, 99, .38);
   --xflow-node-tone-amber-border: rgba(184, 119, 0, .38);
   --xflow-node-tone-violet-border: rgba(113, 84, 206, .38);
+  /* Darker than the cyan tone text so the 9px source badge clears 4.5:1. */
+  --xflow-node-source-text: #066377;
 }
 
 .xflow-editor {
@@ -411,6 +415,11 @@
   --xflow-control-radius: 6px;
   --xflow-control-radius-sm: 4px;
   --xflow-popup-shadow: 0 12px 30px var(--xflow-node-shadow);
+  /* Node-library source badge ("Runner"); follows the active theme's cyan tone.
+     The light themes override --xflow-node-source-text above for contrast. */
+  --xflow-node-source-text: var(--xflow-node-tone-cyan-text);
+  --xflow-node-source-bg: var(--xflow-node-tone-cyan-bg);
+  --xflow-node-source-border: var(--xflow-node-tone-cyan-border);
   background: var(--xflow-editor-app);
   color: var(--xflow-editor-text);
   display: flex;
@@ -1264,6 +1273,23 @@
   font-weight: 300;
   line-height: 1;
   text-align: right;
+}
+
+/* A runner-reported tile gains a column for its source badge. */
+.xflow-editor .xflow-editor-node-tile[data-source="runner"] {
+  grid-template-columns: 25px minmax(0, 1fr) auto 18px;
+}
+
+.xflow-editor .xflow-editor__node-tile-source {
+  background: var(--xflow-node-source-bg);
+  border-color: var(--xflow-node-source-border);
+  border-radius: var(--xflow-control-radius-sm);
+  color: var(--xflow-node-source-text);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 14px;
+  margin-inline-end: 0;
+  padding-inline: 4px;
 }
 
 .xflow-editor-outline-list {
@@ -3340,6 +3366,11 @@
 
 .xflow-editor .xflow-editor-node-tile__tooltip > span:not(:first-child) {
   color: var(--xflow-text-secondary);
+}
+
+/* Same specificity as the rule above and later, so the source line keeps its tone. */
+.xflow-editor .xflow-editor-node-tile__tooltip > span.xflow-editor-node-tile__tooltip-source {
+  color: var(--xflow-node-source-text);
 }
   box-shadow: var(--xflow-popup-shadow);
 }

@@ -97,7 +97,7 @@ import {
   withDynamicPortsFallback,
   type DanglingEdge
 } from "./node-form";
-import type { NodeFormKind, NodeFormPort, NodeFormPorts, NodeFormSchema } from "./node-form/schema";
+import type { NodeFormKind, NodeFormPort, NodeFormPorts, NodeFormSchema, NodeFormSource } from "./node-form/schema";
 // Composer form styles first so the editor's scoped overrides win on equal specificity.
 import "@xflow/composer/form/styles.css";
 import "./styles.css";
@@ -616,6 +616,12 @@ const editorTagClassNames = {
   root: "xflow-editor-runtime-tag__root"
 };
 
+/** The "Runner" badge on a runner-reported library tile; colored by --xflow-node-source-*. */
+const editorNodeSourceTagClassNames = {
+  content: "xflow-editor__node-tile-source-label",
+  root: "xflow-editor__node-tile-source-root"
+};
+
 const editorTooltipClassNames = {
   container: "xflow-editor-tooltip__container",
   root: "xflow-editor-tooltip"
@@ -709,6 +715,10 @@ interface NodeDescriptor {
   kind?: NonNullable<WorkflowNode["kind"]>;
   description?: string;
   ports?: NodeFormPorts;
+  /** "runner" for a type live runners reported; absent = server registry or offline list. */
+  source?: NodeFormSource;
+  /** Pool names reporting a runner type; empty when its runners have no pool. */
+  pools?: string[];
 }
 
 interface EditorPanelProps {
@@ -826,8 +836,9 @@ interface ConnectionReference {
  * builtin shows up without a frontend change. This list is kept, not deleted,
  * because the editor must stay usable offline and in hosts that never call the
  * API; it is also the presentation source (group, tone, icon) for these types.
- * Custom types registered only on runners are in neither list until runners
- * report their descriptors (Doc C §8 item 3); such nodes still load and edit as
+ * Custom types registered only on runners reach the library through the
+ * response itself once the host requests it for a namespace (`source:
+ * "runner"`); offline they are absent, and such nodes still load and edit as
  * no-schema nodes (Doc C §2.1).
  */
 const fallbackNodeDescriptors: NodeDescriptor[] = ([
@@ -920,7 +931,12 @@ function nodeLibraryDescriptors(nodeTypes: NodeTypesResponse | undefined): NodeD
       type: schema.node_type,
       kind,
       ...(schema.description ? { description: schema.description } : {}),
-      ...(schema.ports ? { ports: schema.ports } : {})
+      ...(schema.ports ? { ports: schema.ports } : {}),
+      // Runner types usually have no presentation entry, so they keep the
+      // kind-based fallback group; the tile badges where they came from.
+      ...(schema.source === "runner"
+        ? { source: schema.source, pools: Array.isArray(schema.runner_pools) ? schema.runner_pools : [] }
+        : {})
     };
   });
   const descriptors = [...derived, ...engineDeclaredNodeDescriptors.filter((descriptor) => !latest.has(descriptor.type))].sort(
@@ -1736,13 +1752,21 @@ function serializeJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
+/** Tooltip line naming where a runner-reported type came from, or undefined for server types. */
+function describeSource(descriptor: NodeDescriptor): string | undefined {
+  if (descriptor.source !== "runner") return undefined;
+  return descriptor.pools?.length ? `Runner 资源池 ${descriptor.pools.join(", ")}` : "Runner 上报 · 未归属资源池";
+}
+
 function nodeTileTooltip(descriptor: NodeDescriptor): React.ReactNode {
   const ports = describePorts(descriptor.ports);
-  if (!ports && !descriptor.description) return descriptor.type;
+  const source = describeSource(descriptor);
+  if (!ports && !source && !descriptor.description) return descriptor.type;
   return (
     <span className="xflow-editor-node-tile__tooltip">
       <span>{descriptor.type}</span>
       {ports ? <span>{ports}</span> : null}
+      {source ? <span className="xflow-editor-node-tile__tooltip-source">{source}</span> : null}
       {descriptor.description ? <span>{descriptor.description}</span> : null}
     </span>
   );
@@ -1849,9 +1873,10 @@ function NodeLibrary({
                 {descriptors.map((descriptor) => (
                   <Tooltip classNames={editorTooltipClassNames} key={descriptor.type} title={nodeTileTooltip(descriptor)}>
                     <button
-                      aria-label={descriptor.label}
+                      aria-label={descriptor.source === "runner" ? `${descriptor.label} (Runner)` : descriptor.label}
                       className="xflow-editor-node-tile"
                       data-node-type={descriptor.type}
+                      data-source={descriptor.source}
                       data-tone={descriptor.tone}
                       draggable
                       type="button"
@@ -1868,6 +1893,16 @@ function NodeLibrary({
                         <strong>{descriptor.label}</strong>
                         <small>{descriptor.type}</small>
                       </span>
+                      {descriptor.source === "runner" ? (
+                        <Tag
+                          aria-hidden="true"
+                          className="xflow-editor__node-tile-source"
+                          classNames={editorNodeSourceTagClassNames}
+                          variant="outlined"
+                        >
+                          Runner
+                        </Tag>
+                      ) : null}
                       <span aria-hidden="true" className="xflow-editor-node-tile__add">＋</span>
                     </button>
                   </Tooltip>
