@@ -66,6 +66,13 @@ paths:
         server-side registry (spec §7). Namespace is resolved server-side from
         the authenticated principal — never from the request body (§6.2).
         Returns 201 with a Location header pointing at the new resource.
+
+        Registration is idempotent on the runtime-semantic definition. When the
+        key already holds a definition that differs only in description, ids
+        or editor metadata, or only by a builtin node parameter given as its
+        declared default versus left out, the call returns 201 with the
+        existing workflow id and writes nothing; the stored definition is not
+        updated. Update metadata through `PUT /v1/workflows/{id}`.
       tags: [Workflows]
       parameters:
         - $ref: "#/components/parameters/XRequestId"
@@ -125,6 +132,30 @@ paths:
                           code: required
                           message: duration is required
                           severity: error
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "409":
+          description: |
+            A different definition already occupies the (namespace, name,
+            version) key. Registration identity is the runtime-semantic
+            definition: a definition that differs from the stored one only in
+            its description, ids or editor metadata (node position, UI, notes)
+            is not a conflict, and a builtin node parameter left out counts as
+            its declared default. Use `PUT /v1/workflows/{id}` to change the
+            stored definition.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                workflowConflict:
+                  summary: The key holds a definition with different runtime semantics.
+                  value:
+                    success: false
+                    code: workflow_conflict
+                    message: workflow definition conflicts with an existing registration
                     trace_id: 0123456789abcdef0123456789abcdef
         default:
           $ref: "#/components/responses/DefaultError"
