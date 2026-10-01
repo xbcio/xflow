@@ -755,6 +755,14 @@ func (s *Server) Engine() *Engine { return s.sdkEngine }
 // It does not transfer lifecycle ownership; Server remains the lifecycle owner.
 func (s *Server) ControlServer() *control.Server { return s.api.ControlServer() }
 
+// TLSReloader returns the live TLS material holder installed once Run starts
+// the transports, or nil when TLS was never configured (plaintext) or Run has
+// not started yet. A caller (typically a host process's SIGHUP handler) uses
+// the returned value's Reload method to re-read the certificate/key/client-CA
+// files without restarting the listener. Transparent passthrough to the
+// underlying APIServer; see apiserver.TLSReloader.Reload.
+func (s *Server) TLSReloader() *apiserver.TLSReloader { return s.api.TLSReloader() }
+
 // Start begins dispatching queued tasks to runners and starts background
 // maintenance (lease sweeping, leader election, audit reconciliation). Does not
 // block.
