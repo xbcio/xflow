@@ -14,6 +14,10 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
+// testFixtureNodeTypePrefix marks node types that exist only as fixtures of
+// this test package.
+const testFixtureNodeTypePrefix = "test."
+
 // TestWorkflowNodeCoverage asserts the tier definitions together exercise every
 // registered action type the graph compiler accepts.
 //
@@ -52,6 +56,14 @@ func TestWorkflowNodeCoverage(t *testing.T) {
 		if deprecated[nodeType] {
 			continue
 		}
+		// Sibling tests in this package register "test."-prefixed fixture
+		// handlers into the process-global registry (supply gating, WASM
+		// version switch, ...). Whether they are present here depends only on
+		// test order, and they are not product types a tier definition could
+		// exercise, so they are not coverage gaps.
+		if strings.HasPrefix(nodeType, testFixtureNodeTypePrefix) {
+			continue
+		}
 		if len(seen[nodeType]) > 0 {
 			covered = append(covered, nodeType)
 			continue
@@ -87,7 +99,7 @@ func TestWorkflowNodeCoverage(t *testing.T) {
 	}
 
 	t.Logf("node coverage: %d/%d registered action types (%d deprecated excluded) across %d definitions",
-		len(covered), len(registry.Types())-len(deprecated), len(deprecated), len(workflows.Definitions()))
+		len(covered), len(covered)+len(missing), len(deprecated), len(workflows.Definitions()))
 }
 
 // TestWorkflowTriggerCoverage asserts every registered trigger kind appears as
