@@ -77,8 +77,10 @@ func fetchNodeType(t *testing.T, baseURL, query, nodeType string) (nodeTypeEntry
 func waitForNodeType(t *testing.T, baseURL, query, nodeType string, present bool) nodeTypeEntry {
 	t.Helper()
 	// Control caches the fleet descriptor read for ~2s, so a change can take
-	// that long to surface on top of registration latency.
-	deadline := time.Now().Add(10 * time.Second)
+	// that long to surface on top of registration latency. The budget is
+	// generous because under the full race gate registration alone has been
+	// observed to exceed 10s on a loaded host.
+	deadline := time.Now().Add(30 * time.Second)
 	for {
 		entry, ok := fetchNodeType(t, baseURL, query, nodeType)
 		if ok == present {
