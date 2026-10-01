@@ -16,8 +16,10 @@ var errHeartbeatSessionGone = errors.New("heartbeat: unknown session")
 
 // heartbeatFailClient hands session 1 one lease per poll until Concurrency
 // leases are out, then fails session 1's heartbeats once failHeartbeats is
-// closed. Like the server, it replays to a later session every lease that was
-// handed out, is not yet reported and is not named in ActiveLeaseIDs.
+// closed. Like the server, it refuses reports under a replaced session and
+// replays to a later session every lease that was handed out, is not yet
+// reported and is not named in ActiveLeaseIDs. It has no RenewLease and its
+// leases carry no token, so lease renewal is not exercised.
 type heartbeatFailClient struct {
 	concurrency    int
 	failHeartbeats <-chan struct{}
@@ -26,7 +28,8 @@ type heartbeatFailClient struct {
 	session    int
 	handedOut  []string
 	reported   map[string]bool
-	executions map[string]int
+	attempts   map[string]int // every report, refused or accepted
+	executions map[string]int // accepted reports only
 	replays    int
 	s2Beats    []int
 }
@@ -82,6 +85,12 @@ func (c *heartbeatFailClient) ReportResult(_ context.Context, req protocol.Repor
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	id := string(req.Lease.LeaseID)
+	c.attempts[id]++
+	// Like the server's ValidateSession: a report under a session the runner
+	// has since replaced is refused and the lease stays unreported.
+	if req.SessionID != fmt.Sprintf("session-%d", c.session) {
+		return protocol.ReportResultResponse{Accepted: false, Error: "unknown session"}, nil
+	}
 	c.executions[id]++
 	c.reported[id] = true
 	return protocol.ReportResultResponse{Accepted: true}, nil
@@ -97,13 +106,25 @@ func (c *heartbeatFailClient) snapshot() (beats []int, executions map[string]int
 	return append([]int(nil), c.s2Beats...), executions, c.replays
 }
 
+func (c *heartbeatFailClient) reportAttempts() map[string]int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	attempts := make(map[string]int, len(c.attempts))
+	for k, v := range c.attempts {
+		attempts[k] = v
+	}
+	return attempts
+}
+
 var _ ProtocolClient = (*heartbeatFailClient)(nil)
 
 // A heartbeat failure must end the session even while every worker is busy
 // and the poll loop is idle, so the caller re-registers at once rather than
 // when a slot frees. The busy workers keep running under the next session,
 // which must count them and name their leases instead of letting the server
-// replay them to a second worker.
+// replay them to a second worker while they run. Their results are refused as
+// stale once they finish, so each lease is redelivered once, after the first
+// run ends: sequential redelivery, never a concurrent double run.
 func TestRunEndsSessionWhenHeartbeatFailsWithAllWorkersBusy(t *testing.T) {
 	const concurrency = 2
 	ctx, cancel := context.WithCancel(context.Background())
@@ -121,6 +142,7 @@ func TestRunEndsSessionWhenHeartbeatFailsWithAllWorkersBusy(t *testing.T) {
 		concurrency:    concurrency,
 		failHeartbeats: failHeartbeats,
 		reported:       map[string]bool{},
+		attempts:       map[string]int{},
 		executions:     map[string]int{},
 	}
 	r := New(client, registry, Config{
@@ -185,7 +207,7 @@ func TestRunEndsSessionWhenHeartbeatFailsWithAllWorkersBusy(t *testing.T) {
 	}
 
 	release()
-	waitFor("both leases to report", func() bool {
+	waitFor("both leases to be accepted", func() bool {
 		_, executions, _ := client.snapshot()
 		return len(executions) == concurrency
 	})
@@ -198,13 +220,18 @@ func TestRunEndsSessionWhenHeartbeatFailsWithAllWorkersBusy(t *testing.T) {
 	_, executions, replays := client.snapshot()
 	for id, n := range executions {
 		if n != 1 {
-			t.Errorf("lease %s executed %d times, want 1", id, n)
+			t.Errorf("lease %s accepted %d times, want 1", id, n)
 		}
 	}
-	if replays != 0 {
-		t.Errorf("server replayed %d leases, want 0", replays)
+	for id, n := range client.reportAttempts() {
+		if n != 2 {
+			t.Errorf("lease %s reported %d times, want 2: refused under session-1, accepted after one replay", id, n)
+		}
+	}
+	if replays != concurrency {
+		t.Errorf("server replayed %d leases, want %d: one per stale-session refusal", replays, concurrency)
 	}
 	if got := handler.maxRunning.Load(); got > concurrency {
-		t.Errorf("max concurrent handlers = %d, want at most %d", got, concurrency)
+		t.Errorf("max concurrent handlers = %d, want at most %d: a lease ran twice at once", got, concurrency)
 	}
 }
