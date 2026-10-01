@@ -802,6 +802,13 @@ func (s *Server) SupplyObserved() control.SupplyObservedSink { return s.api.Supp
 // RegisterGRPC registers the Runner Protocol gRPC service onto g, matching
 // the service surface exposed by cmd/server. Optional: only needed when the
 // host program owns its own grpc.Server.
+//
+// A host building its own grpc.Server must pass
+// control.RunnerGRPCServerOptions() to grpc.NewServer, as Run does. Without
+// them g keeps grpc-go's 4 MiB receive limit, rejecting a Register the HTTP
+// transport accepts, and its unbounded send limit, so a message above what a
+// runner accepts fails on the runner as an opaque ResourceExhausted rather
+// than on the server.
 func (s *Server) RegisterGRPC(g *grpc.Server) { s.api.RegisterGRPC(g) }
 
 // Run starts the server's transports (gRPC, metrics, HTTP — whichever
