@@ -338,7 +338,6 @@ func TestEmbeddedServerRunsMapBodyArtifact(t *testing.T) {
 
 	startEmbeddedRunner(t, ts.URL, ts.Client())
 
-	auditMark := maxAuditID(t, ctx, provider)
 	execID := seedEmbeddedExecution(t, ts.URL, wfID, []any{3, 4})
 	detail := g1WaitForTerminal(t, ts.URL, embeddedToken, execID, 90*time.Second)
 	if detail.Status != types.ExecutionStatusSuccess {
@@ -366,7 +365,7 @@ func TestEmbeddedServerRunsMapBodyArtifact(t *testing.T) {
 	}
 
 	assertEmbeddedArtifactStored(t, ctx, provider, artifacts)
-	assertEmbeddedSeedAudited(t, ctx, provider, auditMark)
+	assertEmbeddedSeedRequiresAuth(t, ts.URL, wfID)
 }
 
 // assertEmbeddedArtifactStored pins that the guest bytes really landed in MySQL
@@ -424,64 +423,40 @@ func assertEmbeddedArtifactStored(t *testing.T, ctx context.Context, provider *s
 	}
 }
 
-// assertEmbeddedSeedAudited pins that the seed went through the authorizing
-// path rather than an unauthenticated fallback: an admitted mutation writes an
-// audit row before the handler runs, and fails closed if the sink is
-// unavailable. Without WithServerPrincipalAuth the route would either 404 or
-// run unaudited, and the execution assertions alone cannot tell those apart.
+// assertEmbeddedSeedRequiresAuth pins that the seed route is the
+// authenticated one rather than an unauthenticated fallback: without
+// WithServerPrincipalAuth the route would either 404 or accept any caller, and
+// the execution assertions alone cannot tell those apart.
 //
-// Scoping note: the seed's audit row canNOT be found by execution_id. The
-// /v1/executions route resolves its audit execution id with
-// newExecutionIDResolver, which mints a FRESH random id per request, while a
-// seeded execution's id is derived deterministically from the admission key
-// inside the engine. The two never match, so the audit row for a seed points
-// at an execution id that does not exist. That is a real correlation gap
-// (tracked separately) — asserting on execution_id here would only hide it
-// behind a red test of our own making. The rows are instead bounded by
-// sinceID, the max audit id observed before the seed, so a row another test
-// left behind cannot satisfy this.
-func assertEmbeddedSeedAudited(t *testing.T, ctx context.Context, provider *sqlstore.Provider, sinceID int64) {
+// It probes authentication directly instead of reading the audit ledger,
+// because execution.seed is deliberately not audited per request (see
+// auditedPerRequest in service/apiserver/authz_wrap.go: the seed is the
+// collection pipeline's data plane and its row volume made the synchronous
+// ledger the bottleneck). Authentication and authorization still run before
+// that decision, which is exactly what is asserted here.
+func assertEmbeddedSeedRequiresAuth(t *testing.T, baseURL string, wfID types.WorkflowID) {
 	t.Helper()
-	var rows []struct {
-		ID          int64
-		Principal   string
-		Operation   string
-		Decision    string
-		Namespace   string
-		Phase       string
-		ExecutionID string
+	req := protocol.SeedExecutionRequest{
+		ProtocolVersion: protocol.EntrySeedProtocolVersion,
+		WorkflowID:      string(wfID),
+		WorkflowVersion: "v1",
+		EntryUnitID:     "start",
+		AdmissionKey:    fmt.Sprintf("embedded-artifact-unauth-%d", time.Now().UnixNano()),
+		Outcome:         string(engine.GroupOutcomeSuccess),
+		Exits: []protocol.BoundaryExit{{
+			NodeName: "start",
+			Port:     "main",
+			Data:     map[string]any{"rows": []any{1}},
+		}},
 	}
-	if err := provider.DB().WithContext(ctx).
-		Table("xflow_audit_events").
-		Select("id, principal, operation, decision, namespace, phase, execution_id").
-		Where("id > ? AND operation = ?", sinceID, apiserver.OpExecutionSeed).
-		Order("id").
-		Find(&rows).Error; err != nil {
-		t.Fatalf("query xflow_audit_events: %v", err)
-	}
-	var admitted bool
-	for _, r := range rows {
-		if r.Phase == "admission" && r.Decision == string(apiserver.DecisionAllow) &&
-			r.Principal == "embedded-host" && r.Namespace == string(namespace.Default) {
-			admitted = true
+	for _, tc := range []struct{ name, token string }{
+		{"no token", ""},
+		{"wrong token", embeddedToken + "-wrong"},
+	} {
+		resp, raw := g1DoAuth(t, http.MethodPost, baseURL, "/v1/executions", tc.token, req)
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("POST /v1/executions with %s = %d, want %d (body=%s); the seed route "+
+				"is not behind the principal authenticator", tc.name, resp.StatusCode, http.StatusUnauthorized, raw)
 		}
 	}
-	if !admitted {
-		t.Fatalf("no admitted %s audit row after id %d (rows=%+v); the seed did not go "+
-			"through the authenticated, audited path", apiserver.OpExecutionSeed, sinceID, rows)
-	}
-}
-
-// maxAuditID reads the current high-water mark of the audit table so a later
-// assertion can bound itself to rows this test produced.
-func maxAuditID(t *testing.T, ctx context.Context, provider *sqlstore.Provider) int64 {
-	t.Helper()
-	var max struct{ ID int64 }
-	if err := provider.DB().WithContext(ctx).
-		Table("xflow_audit_events").
-		Select("COALESCE(MAX(id), 0) AS id").
-		Scan(&max).Error; err != nil {
-		t.Fatalf("read max audit id: %v", err)
-	}
-	return max.ID
 }
