@@ -9,9 +9,11 @@
 #   level_3: 金额 >= 10,000  → 直属主管 → 部门负责人 → VP + 财务并行
 #
 # v2.0 增强：
-#   1. 错误处理链路：除错误处理路径自身外，HTTP/DB 节点都接了 error 出口。
-#      该路径上的两个数据库节点（log_result、update_error）故意不接——它们
-#      就在 handle_error 的下游，再回跳会成环。
+#   1. 错误处理链路：除错误处理路径自身外，HTTP/DB/function 节点都接了 error 出口。
+#      该路径上的节点（handle_error、update_error、notify_error、log_result）故意
+#      不接——它们就在 handle_error 的下游，再回跳会成环。HTTP/DB 节点要同时选
+#      on_error: error_output 才会走 error 端口；function 节点的处理器错误直接发到
+#      error 端口，无需 on_error。
 #   2. 审批操作扩展：转签、加签、超时自动驳回
 #      这几个动作 xflow.approval 节点已实现，但它们是**信号 action**，
 #      不是节点参数：调用方发信号时在 payload 里带
@@ -20,20 +22,20 @@
 #       force 需节点配置 force_approvers，且只在该名单内的人发得起）。
 #   3. 完整审计追踪：每级审批人、操作、时间、意见
 #      节点发布 decisions：每条含 approver/action/comment/at（转签与加签另带
-#      assignee/position），全量在册，不随模式变化。"any" 模式判定的那一次还会
-#      把 approver/comment 一并放到节点输出顶层；"all"/"sequential" 模式只放
-#      approved，谁批的要看 decisions。
-#   4. 节点模板 node_templates：减少审批节点重复定义（DSL 扩展提案）
+#      assignee/position），全量在册，不随模式变化。顶层 approved 是判定结果；
+#      reject/return 在任何模式下都带 approver/comment，"any" 模式的 approve
+#      判定同样带；"all"/"sequential" 下谁批的要看 decisions。
 #
-# 仍属提案、后端尚未实现的部分（本文件保留它们只为展示意图）：
-#   node_templates 展开、节点级 title/detail 展示字段、标准审批模板里的
-#   actions/reminder（UI 操作清单与提醒策略），以及 collectApprovalTrail
-#   这类自定义 function 的具体实现。
+# 审批节点只写 xflow.approval 真实读取的参数：approvers / mode / timeout /
+# timeout_action。timeout_action: reject 表示超时从 rejected 出口离开，与人工
+# 驳回同路。returned（退回）出口本样例未接线：退回后由申请人在门户修改并重新
+# 提交，不产生新的执行。
 #
-# ⚠ 因此本文件当前**不可执行**：下面 12 个审批/校验节点只写了 template 没有
-#   type，参数校验与注册能通过（编译器接受空 type），运行时却会以
-#   "no handler registered for node type" 失败。等 node_templates 展开实现，
-#   或把这 12 个节点的 type 与参数展开写全，它才能作为完整样例跑起来。
+# 运行前提（跑通本样例所需的宿主配合）：
+#   - 宿主注册 collectApprovalTrail 与 buildErrorContext 两个 Go function
+#     （xflow.function 按 function_name 查找，节点本身不带实现）。
+#   - db_conn / internal_api 凭证与 org_service 地址是占位值，需替换。
+#   - xflow.notification 只记录通知请求（输出 data.sent=true），不真正投递。
 
 spec: "1.0"
 name: "purchase-approval"
@@ -46,15 +48,13 @@ context:
       level_1_max: 1000
       level_2_max: 10000
     approval_timeout: 72h
-    reminder_interval: 24h
-    reminder_max_count: 2
 
   config:
     org_service: "https://org.internal.example.com"
 
 settings:
   # settings 层没有 timeout 字段（写了不会被读取）；时限是节点级 timeout，
-  # 下面的审批模板用的就是 $vars.approval_timeout。
+  # 下面的审批节点用的就是 $vars.approval_timeout。
   timezone: "Asia/Shanghai"
 
 credentials:
@@ -93,63 +93,6 @@ params:
     type: array
     required: true
     display_name: "采购明细"
-
-# ──────────────────────────────────────
-# 节点模板（DSL 扩展提案）
-# 节点通过 template 字段引用模板，自身 parameters 与模板深度合并（节点级优先）。
-# 合并规则：
-#   - 对象（map）：递归深度合并，节点级 key 覆盖模板同名 key
-#   - 数组（list）：整体替换，不做 append 或元素级合并
-#   - 标量（string/number/bool）：节点级覆盖模板值
-# 模板展开在编译阶段第一步完成，后续步骤处理展开后的完整节点定义。
-# ──────────────────────────────────────
-node_templates:
-  # 标准审批节点：统一 approvers、mode、timeout、timeout_action
-  #
-  # 只有 approvers / mode / timeout / timeout_action / force_approvers 是
-  # xflow.approval 真实读取的参数。下面的 title / detail / actions / reminder
-  # 是编辑器与节点模板提案要用的展示与交互声明，节点本身不读，写在这里只为
-  # 说明各自的意图；真正生效的审批配置是 approvers + mode + timeout_action。
-  standard_approval:
-    type: xflow.approval
-    parameters:
-      # 提案：展示字段（节点不读）
-      detail:
-        applicant: "${{ $params.applicant_id }}"
-        amount: "${{ $params.amount }}"
-        items: "$params.items"
-      # 提案：UI 操作清单。key 是门户上的操作键（结果语义），发信号时用的是
-      # 上面第 2 条那组真实 action 取值（approve/reject/…），两者不是同一个
-      # 命名空间；节点也不接受用这份清单开关动作。
-      actions:
-        - key: approved
-          label: "同意"
-        - key: rejected
-          label: "驳回"
-          require_comment: true
-        - key: delegate
-          label: "转签"
-          require_assignee: true
-        - key: add_signer
-          label: "加签"
-          require_assignee: true
-          position: before          # before=前加签 after=后加签
-      # 真实参数
-      timeout: "${{ $vars.approval_timeout }}"
-      timeout_action: reject        # 超时自动驳回（另一个取值是 route，走 timeout 出口）
-      # 提案：提醒策略，节点不读
-      reminder:
-        interval: "${{ $vars.reminder_interval }}"
-        max_count: "${{ $vars.reminder_max_count }}"
-
-  # 审批结果判断：统一 outputs，子节点只需覆盖首条 condition
-  approval_check:
-    type: xflow.switch
-    parameters:
-      mode: rules                   # xflow.switch 必填参数
-      outputs: [approved, rejected]
-      rules: []                    # 子节点需覆盖
-      default_output: rejected     # 默认驳回
 
 # ──────────────────────────────────────
 # 节点定义
@@ -213,114 +156,73 @@ nodes:
   # Level 1：直属主管审批
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   - name: l1_manager
-    template: standard_approval
+    type: xflow.approval
     parameters:
       approvers: ["${{ $nodes['fetch_approvers'].manager_id }}"]
       mode: "any"
-      title: "${{ sprintf('采购审批：%s（¥%.2f）', $params.title, $params.amount) }}"
-
-  - name: l1_check
-    template: approval_check
-    parameters:
-      rules:
-        - condition: "$nodes['l1_manager'].approved == true"
-          output: approved
-      default_output: rejected
+      timeout: "${{ $vars.approval_timeout }}"
+      timeout_action: reject
 
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   # Level 2：直属主管 → 部门负责人
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   - name: l2_manager
-    template: standard_approval
+    type: xflow.approval
     parameters:
       approvers: ["${{ $nodes['fetch_approvers'].manager_id }}"]
       mode: "any"
-      title: "${{ sprintf('采购审批（一级）：%s（¥%.2f）', $params.title, $params.amount) }}"
-      detail:
-        note: "审批通过后将提交部门负责人复核"
-
-  - name: l2_manager_check
-    template: approval_check
-    parameters:
-      rules:
-        - condition: "$nodes['l2_manager'].approved == true"
-          output: approved
-      default_output: rejected
+      timeout: "${{ $vars.approval_timeout }}"
+      timeout_action: reject
 
   - name: l2_director
-    template: standard_approval
+    type: xflow.approval
     parameters:
       approvers: ["${{ $nodes['fetch_approvers'].director_id }}"]
       mode: "any"
-      title: "${{ sprintf('采购审批（二级）：%s（¥%.2f）', $params.title, $params.amount) }}"
-      detail:
-        manager_comment: "${{ $nodes['l2_manager'].comment ?? '' }}"
-
-  - name: l2_director_check
-    template: approval_check
-    parameters:
-      rules:
-        - condition: "$nodes['l2_director'].approved == true"
-          output: approved
-      default_output: rejected
+      timeout: "${{ $vars.approval_timeout }}"
+      timeout_action: reject
 
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   # Level 3：直属主管 → 部门负责人 → VP + 财务并行
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   - name: l3_manager
-    template: standard_approval
+    type: xflow.approval
     parameters:
       approvers: ["${{ $nodes['fetch_approvers'].manager_id }}"]
       mode: "any"
-      title: "${{ sprintf('采购审批（一级）：%s（¥%.2f）', $params.title, $params.amount) }}"
-      detail:
-        note: "审批通过后将依次提交部门负责人、VP 及财务审批"
-
-  - name: l3_manager_check
-    template: approval_check
-    parameters:
-      rules:
-        - condition: "$nodes['l3_manager'].approved == true"
-          output: approved
-      default_output: rejected
+      timeout: "${{ $vars.approval_timeout }}"
+      timeout_action: reject
 
   - name: l3_director
-    template: standard_approval
+    type: xflow.approval
     parameters:
       approvers: ["${{ $nodes['fetch_approvers'].director_id }}"]
       mode: "any"
-      title: "${{ sprintf('采购审批（二级）：%s（¥%.2f）', $params.title, $params.amount) }}"
-      detail:
-        manager_comment: "${{ $nodes['l3_manager'].comment ?? '' }}"
-
-  - name: l3_director_check
-    template: approval_check
-    parameters:
-      rules:
-        - condition: "$nodes['l3_director'].approved == true"
-          output: approved
-      default_output: rejected
+      timeout: "${{ $vars.approval_timeout }}"
+      timeout_action: reject
 
   - name: l3_vp
-    template: standard_approval
+    type: xflow.approval
     parameters:
       approvers: ["${{ $nodes['fetch_approvers'].vp_id }}"]
       mode: "any"
-      title: "${{ sprintf('采购审批（VP）：%s（¥%.2f）', $params.title, $params.amount) }}"
+      timeout: "${{ $vars.approval_timeout }}"
+      timeout_action: reject
 
   - name: l3_finance
-    template: standard_approval
+    type: xflow.approval
     parameters:
       approvers: ["${{ $nodes['fetch_approvers'].finance_id }}"]
       mode: "any"
-      title: "${{ sprintf('采购审批（财务）：%s（¥%.2f）', $params.title, $params.amount) }}"
-      detail:
-        budget_remaining: "${{ $nodes['fetch_approvers'].budget_remaining }}"
+      timeout: "${{ $vars.approval_timeout }}"
+      timeout_action: reject
 
   - name: l3_parallel_merge
     type: xflow.merge
     # 两条入边各自声明端口，merge 的输出即按端口名建键：
     # 下游读 $nodes['l3_parallel_merge'].vp / .finance。
+    # wait_all 等两条 approved 都到达；若某条走了 rejected，它进这个 merge 的
+    # 入边按跳过结算，merge 仍会执行，由 l3_final_check 判定是否两边都通过。
     inputs:
       - name: vp
       - name: finance
@@ -333,7 +235,8 @@ nodes:
       mode: rules
       outputs: [approved, rejected]
       rules:
-        - condition: "$nodes['l3_parallel_merge'].vp.approved == true && $nodes['l3_parallel_merge'].finance.approved == true"
+        # 缺一边时该端口的值为 nil；先落到 {} 再取字段，否则取 nil 的成员会运行期报错
+        - condition: "($nodes['l3_parallel_merge'].vp ?? {}).approved == true && ($nodes['l3_parallel_merge'].finance ?? {}).approved == true"
           output: approved
       default_output: rejected
 
@@ -341,11 +244,9 @@ nodes:
   # 审批结果处理（三条路径在此汇合）
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  # 注：route_by_amount 保证同一执行中只有一条路径激活，
-  # 因此 wait_any 等价于"等待唯一到达的那条路径"，不会重复触发。
-  #
-  # 这些汇合点的多条入边互斥（同一 switch 的不同分支），所以它们都只有
-  # main 一个端口：显式声明它是为了说明"谁到都行"，而不是漏写端口名。
+  # 注：route_by_amount 保证同一执行中只有一条路径激活，因此这里的多条入边
+  # 互斥（l1/l2 的通过路径与 l3 的最终判定只会有一条到达）。只有 main 一个
+  # 端口：显式声明它是为了说明"谁到都行"，而不是漏写端口名。
   - name: merge_approved
     type: xflow.merge
     inputs:
@@ -404,6 +305,10 @@ nodes:
       data:
         approval_chain: "${{ $nodes['collect_approved_trail'].chain }}"
 
+  # 驳回在此汇合：各审批节点的 rejected 出口（含 timeout_action: reject 的超时
+  # 自动驳回），外加并行档位里 l3_final_check 的 rejected。顺序档位互斥，但
+  # 并行两条各自驳回时会先后到达两条入边——wait_any 在第一条到达时调度执行，
+  # 后到的入边不再触发第二次。
   - name: merge_rejected
     type: xflow.merge
     inputs:
@@ -485,6 +390,10 @@ nodes:
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   - name: handle_error
     type: xflow.function
+    # 四个 error 出口在这里汇合：全部入边结算后节点执行一次，先到的错误即输入。
+    # 声明 main 说明这是唯一端口，而不是漏写端口名。
+    inputs:
+      - name: main
     parameters:
       function_name: buildErrorContext
       params:
@@ -548,10 +457,6 @@ connections:
 
   # ── Level 1 路径 ──
   l1_manager:
-    main:
-      - node: l1_check
-
-  l1_check:
     approved:
       - node: merge_approved
     rejected:
@@ -559,20 +464,12 @@ connections:
 
   # ── Level 2 路径 ──
   l2_manager:
-    main:
-      - node: l2_manager_check
-
-  l2_manager_check:
     approved:
       - node: l2_director
     rejected:
       - node: merge_rejected
 
   l2_director:
-    main:
-      - node: l2_director_check
-
-  l2_director_check:
     approved:
       - node: merge_approved
     rejected:
@@ -580,20 +477,12 @@ connections:
 
   # ── Level 3 路径 ──
   l3_manager:
-    main:
-      - node: l3_manager_check
-
-  l3_manager_check:
     approved:
       - node: l3_director
     rejected:
       - node: merge_rejected
 
   l3_director:
-    main:
-      - node: l3_director_check
-
-  l3_director_check:
     approved:
       - node: l3_vp
       - node: l3_finance
@@ -601,14 +490,18 @@ connections:
       - node: merge_rejected
 
   l3_vp:
-    main:
+    approved:
       - node: l3_parallel_merge
         input: vp
+    rejected:
+      - node: merge_rejected
 
   l3_finance:
-    main:
+    approved:
       - node: l3_parallel_merge
         input: finance
+    rejected:
+      - node: merge_rejected
 
   l3_parallel_merge:
     main:
@@ -629,6 +522,8 @@ connections:
     main:
       - node: update_approved
       - node: notify_approved
+    error:
+      - node: handle_error
 
   update_approved:
     main:
@@ -649,6 +544,8 @@ connections:
     main:
       - node: update_rejected
       - node: notify_rejected
+    error:
+      - node: handle_error
 
   update_rejected:
     main:
@@ -682,6 +579,10 @@ connections:
 # ──────────────────────────────────────
 # 输出定义
 # ──────────────────────────────────────
+# 注：outputs 目前是声明性定义，运行时消费者尚未接线。status 想读的是
+# log_result 的输出，而数据库 insert 的输出只有 last_insert_id/rows_affected，
+# 真正的取值会落到 ?? 的兜底 'completed'；等 outputs 接线时应改读携带决策
+# 结果的来源。
 outputs:
   status:
     value: "${{ $nodes['log_result'].status ?? 'completed' }}"

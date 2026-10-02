@@ -108,9 +108,7 @@ var knownInvalidSamples = map[string][]string{}
 // acknowledgement, not a silencer -- a sample that gains an untyped node without
 // appearing here fails the corpus, and an entry whose sample turns out to be
 // fully typed fails too.
-var knownUnrunnableSamples = map[string]string{
-	"purchase-approval.yaml": "12 approval nodes carry only `template:`, and node_templates expansion is not implemented (see the file header)",
-}
+var knownUnrunnableSamples = map[string]string{}
 
 // registerUnderEnforce validates def directly (to report every issue, not just
 // the first failure) and then registers it through the real enforce-mode
