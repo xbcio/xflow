@@ -1776,21 +1776,23 @@ test-workflows-required: check-go
 
 # test-workflows-stress runs the concurrent load suite over the three tiers and
 # prints one perf.metric line per tier. It is separate from test-perf because
-# that target is a benchmark run: -bench=. plus -race, reported as benchmark
-# lines.
+# that target is a benchmark run: -bench=., reported as benchmark lines.
 #
 # Do not read that separation as a selection guarantee: -bench=. does NOT
 # exclude Test functions (`go test -bench=.` runs them too -- measured: the
 # exprx package runs 37 of its tests under it; only -run does the excluding).
 # So the nightly perf-sample job, which passes -bench=., already executes this
-# suite -- and there the high tier needs MySQL that the job does not provide,
-# so it skips and leaves that tier with no metric line. Wiring this target into
-# a job with MySQL is what would close that gap.
+# suite; the job provides Redis, Kafka and MySQL, so all three tiers run there
+# and their perf.metric lines are collected into the results artifact. This
+# target remains the explicit, fail-loud entry (REQUIRE flags below): nothing
+# in the nightly sets those, so if the job's MySQL service ever breaks, its
+# high tier silently skips again while this target would fail.
 #
-# It is the one test target here that does NOT pass -race, on purpose: the
-# suite reports latency percentiles, and race instrumentation changes the
-# measurement it exists to produce. Concurrency correctness is covered by the
-# race-enabled test-workflows run and the engine's own race suites.
+# It is the one target under test-workflows* that does NOT pass -race, on
+# purpose: the suite reports latency percentiles, and race instrumentation
+# changes the measurement it exists to produce. (test-perf also runs without
+# -race.) Concurrency correctness is covered by the race-enabled test-workflows
+# run and the engine's own race suites.
 #
 # Redis and MySQL are REQUIRED rather than optional: the point of the target is
 # the report, and a skip would produce no metric line at all while still

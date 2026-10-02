@@ -347,7 +347,11 @@ gate and is not the focused G1 evidence entry.
 CI (.github/workflows/ci.yml) invokes `test-integration-required` only: the
 workflow-tier `TestWorkflow*` functions live in `test/integration/` and are
 picked up by that target's shard discovery, not by any `test-workflows*` call.
-A target that CI never names is a target nothing keeps green.
+The stress suite is reached from the other direction: the nightly
+`perf-sample.yml` job runs `test/perf`'s Test functions too (`-bench=.` does
+not exclude them), and the job provides Redis, Kafka and MySQL, so all three
+tiers run there and their `perf.metric` lines land in the job's results
+artifact. CI still names none of the `test-workflows*` targets directly.
 
 ### Other test suites
 

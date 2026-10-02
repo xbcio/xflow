@@ -23,7 +23,9 @@ jobs:
     name: Perf Sample
     runs-on: ubuntu-latest
     # `make perf-sample` runs the perf-bench suite (whose own Go watchdog is
-    # 30m) plus the E2E load test against the service stack.
+    # 30m) plus the E2E load test against the service stack. The same sweep
+    # also executes test/perf's Test functions, including the three-tier
+    # workflow stress suite (see the mysql service below).
     timeout-minutes: 60
     # Sampling only — never block merges on runner-noisy bench numbers.
     continue-on-error: true
@@ -37,6 +39,23 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      # The sweep inside `make perf-sample` also executes the workflow-tier
+      # stress suite (TestWorkflowTierStress): -bench=. does not exclude Test
+      # functions, only -run does. Its high tier needs MySQL, and without this
+      # service that tier skips and the results artifact loses its perf.metric
+      # line. The suite owns its own DDL, so no schema step is needed.
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: xflow
+          MYSQL_DATABASE: xflow
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pxflow"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
       kafka:
         image: docker.io/apache/kafka:3.7.2
         env:
@@ -81,6 +100,7 @@ jobs:
         run: make perf-sample
         env:
           XFLOW_TEST_REDIS_ADDR: 127.0.0.1:6379
+          XFLOW_TEST_MYSQL_DSN: "root:xflow@tcp(127.0.0.1:3306)/xflow?parseTime=true"
           XFLOW_TEST_KAFKA_BROKERS: 127.0.0.1:9092
           REDIS_ADDR: redis://127.0.0.1:6379/0
           KAFKA_BROKERS: 127.0.0.1:9092
