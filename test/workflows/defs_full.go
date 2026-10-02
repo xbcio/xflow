@@ -265,16 +265,24 @@ func FullWorkflow(tc FullTriggerConfig) *xflow.WorkflowBuilder {
 		Topic(tc.KafkaTopic).
 		Group(tc.KafkaGroup).
 		StartOffset("earliest"))
-	triggerJoin := wf.Node("trigger_join", node.Merge(node.MergeWaitAny))
-	// A merge keys its output by upstream node name, and the four skipped
-	// entries arrive as empty inputs, so the event is the one non-empty arm's
-	// `trigger` (read through $input for the reason triggerWorkflow documents).
+	// The join declares one input port per entry and each edge names it, so the
+	// merge publishes the arriving entry's payload under that port. The four
+	// entries that never fire arrive as empty inputs, which is why the record
+	// node filters for the non-empty one.
+	triggerJoin := wf.Node("trigger_join", node.Merge(node.MergeWaitAny)).
+		Inputs("on_timer", "on_cron", "on_webhook", "on_redis", "on_kafka")
 	triggerRecord := wf.Node("trigger_record", node.Expr(`{"lane": "trigger", "event": first(filter(
 		[$input.on_timer, $input.on_cron, $input.on_webhook, $input.on_redis, $input.on_kafka],
 		len(#) > 0)).trigger}`))
 	triggerDone := wf.Node("trigger_done", node.End())
-	for _, entry := range []*xflow.NodeRef{onTimer, onCron, onWebhook, onRedis, onKafka} {
-		wf.Connect(entry.Output("main"), triggerJoin)
+	for _, arm := range []struct {
+		entry *xflow.NodeRef
+		port  string
+	}{
+		{onTimer, "on_timer"}, {onCron, "on_cron"}, {onWebhook, "on_webhook"},
+		{onRedis, "on_redis"}, {onKafka, "on_kafka"},
+	} {
+		wf.Connect(arm.entry.Output("main"), triggerJoin.Input(arm.port))
 	}
 	wf.Connect(triggerJoin.Output("main"), triggerRecord).
 		Connect(triggerRecord.Output("main"), triggerDone)
