@@ -344,13 +344,22 @@ behavior report at `test/integration/testdata/g1_e2e_report.json`.
 `make test-integration-required` remains the full Redis/MySQL/Kafka integration
 gate and is not the focused G1 evidence entry.
 
+CI (.github/workflows/ci.yml) invokes `test-integration-required` only: the
+workflow-tier `TestWorkflow*` functions live in `test/integration/` and are
+picked up by that target's shard discovery, not by any `test-workflows*` call.
+A target that CI never names is a target nothing keeps green.
+
 ### Other test suites
 
 | Target | Directory | Notes |
 |---|---|---|
 | `make test-script-wasm` | `node/internal/code/script`, `node/internal/code/script/js`, `node/internal/code/script/wasm` | Serialized script/qjs gate plus one isolated WASM package run (45m watchdog) |
 | `make test-coverage` | all Go packages | Race-enabled atomic coverage; ordinary/script packages use 5m and WASM runs once in isolation (45m) |
-| `make test-perf` | `test/perf/` | Benchmarks, needs `make env-up` (Redis + Kafka) |
+| `make test-examples` | `sdk/examples/` | The embedded-SDK examples, race-enabled; in-memory only, no external services |
+| `make test-workflows` | `test/workflows/`, `test/integration/` | The workflow QA tier corpus (low/medium/high/trigger/full) over the real server+runner topology; a missing Redis/MySQL/Kafka skips its tier |
+| `make test-workflows-required` | same | The same suite with `XFLOW_REQUIRE_*` set: a missing dependency fails the target instead of silently skipping a tier |
+| `make test-workflows-stress` | `test/perf/` | The concurrent load suite over the three tiers, one `perf.metric` line per tier; Redis and MySQL required, deliberately not race-enabled (instrumentation would change the latency it reports) |
+| `make test-perf` | `test/perf/` | Benchmarks, needs `make env-up` (Redis + Kafka). Note that `-bench=.` runs the package's Test functions too |
 | `make test-soak` | `test/soak/` | HA soak smoke, runs on in-process miniredis; no real Redis required |
 | `make test-concurrency` | `backend/providers/...` | Concurrency stress, gated by `concurrency` build tag |
 | `make validate-openapi` | `api/openapi/` | Spectral + Redocly + Go OpenAPI fixture/round-trip tests |
