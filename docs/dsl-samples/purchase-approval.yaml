@@ -396,8 +396,9 @@ nodes:
     parameters:
       channel: email
       to: "${{ $params.applicant_id }}"
+      # 通知节点读的是 message（正文），没有 template 参数——写了不会生效。
       subject: "采购申请已通过：{{ $params.title }}"
-      template: approval_passed
+      message: "您的采购申请《{{ $params.title }}》已通过审批。"
       data:
         approval_chain: "${{ $nodes['collect_approved_trail'].chain }}"
 
@@ -451,8 +452,9 @@ nodes:
     parameters:
       channel: email
       to: "${{ $params.applicant_id }}"
+      # 通知节点读的是 message（正文），没有 template 参数——写了不会生效。
       subject: "采购申请已驳回：{{ $params.title }}"
-      template: approval_rejected
+      message: "您的采购申请《{{ $params.title }}》已被驳回，原因：{{ $nodes['collect_rejected_trail'].reject_reason ?? '见审批意见' }}"
       data:
         approval_chain: "${{ $nodes['collect_rejected_trail'].chain }}"
         reject_reason: "${{ $nodes['collect_rejected_trail'].reject_reason }}"
@@ -506,8 +508,9 @@ nodes:
     parameters:
       channel: email
       to: "${{ $params.applicant_id }}"
+      # 通知节点读的是 message（正文），没有 template 参数——写了不会生效。
       subject: "采购申请处理异常：{{ $params.title }}"
-      template: approval_error
+      message: "您的采购申请《{{ $params.title }}》处理时发生异常，请联系管理员。"
       data:
         error: "${{ $nodes['handle_error'].message }}"
 
