@@ -16,8 +16,8 @@ import (
 
 	"github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/engine/graph"
-	"github.com/xbcio/xflow/exprx"
 	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/exprx"
 	"github.com/xbcio/xflow/namespace"
 	_ "github.com/xbcio/xflow/node" // builtin node and trigger types
 	"github.com/xbcio/xflow/service/apiserver"
