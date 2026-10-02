@@ -1408,69 +1408,6 @@
     },
     {
       "spec": "node-form/v1",
-      "node_type": "xflow.split",
-      "node_version": 1,
-      "kind": "action",
-      "display_name": "Split",
-      "ports": {
-        "inputs": [
-          {
-            "name": "main",
-            "display_name": "Main"
-          }
-        ],
-        "outputs": [
-          {
-            "name": "main",
-            "display_name": "Main"
-          }
-        ]
-      },
-      "fields": [
-        {
-          "name": "items",
-          "path": "/parameters/items",
-          "label": "Items",
-          "type": "string",
-          "widget": "expression",
-          "required": true,
-          "help": "Expression that evaluates to the array to split",
-          "expression": {
-            "mode": "pure"
-          },
-          "rules": [
-            {
-              "type": "format",
-              "format": "expression"
-            }
-          ]
-        },
-        {
-          "name": "batch_size",
-          "path": "/parameters/batch_size",
-          "label": "Batch Size",
-          "type": "number",
-          "fallback": 1,
-          "help": "Items per batch (omit for one-item-per-execution)",
-          "expression": {
-            "mode": "template"
-          }
-        },
-        {
-          "name": "continue_on_error",
-          "path": "/parameters/continue_on_error",
-          "label": "Continue On Error",
-          "type": "boolean",
-          "default": false,
-          "help": "Continue splitting when a downstream branch fails",
-          "expression": {
-            "mode": "template"
-          }
-        }
-      ]
-    },
-    {
-      "spec": "node-form/v1",
       "node_type": "xflow.start",
       "node_version": 1,
       "kind": "action",

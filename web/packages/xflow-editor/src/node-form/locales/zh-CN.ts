@@ -22,7 +22,6 @@ const messages: Record<string, string> = {
   "Merge": "合并",
   "Notification": "通知",
   "Script": "脚本",
-  "Split": "拆分",
   "Start": "开始",
   "Switch": "多路分支",
   "Aggregate": "聚合",
@@ -162,7 +161,7 @@ const messages: Record<string, string> = {
   "Condition": "条件",
   "Boolean expression to evaluate": "要求值的布尔表达式",
 
-  // ---------------------------------------------------------- map / split
+  // ---------------------------------------------------------- map
   "Items": "数据项",
   "Expression that evaluates to the array to iterate": "求值为待遍历数组的表达式",
   "Batch Size": "批大小",
@@ -176,9 +175,6 @@ const messages: Record<string, string> = {
   "Expression": "表达式",
   "Expression evaluated once per item over $item/$index/$items; mutually exclusive with body, and exactly one of the two is required":
     "对每个数据项求值一次的表达式，可用 $item/$index/$items；与 body 互斥，二者必须且只能设置一个",
-  "Expression that evaluates to the array to split": "求值为待拆分数组的表达式",
-  "Items per batch (omit for one-item-per-execution)": "每批的数据项数（不设置则每项单独执行）",
-  "Continue splitting when a downstream branch fails": "下游分支失败时继续拆分",
 
   // ---------------------------------------------------------- merge
   "Merge strategy: \"wait_all\" or \"wait_any\"": "合并策略：\"wait_all\" 或 \"wait_any\"",

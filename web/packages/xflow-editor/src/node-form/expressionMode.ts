@@ -32,7 +32,6 @@ const EVALUABLE_PARAMS: Readonly<Record<string, readonly string[]>> = {
   "xflow.if": ["condition"],
   "xflow.switch": ["expression"],
   "xflow.map": ["items", "expression"],
-  "xflow.split": ["items"],
   "xflow.function": ["code"],
   "xflow.script": ["code"],
   "xflow.transform.set": ["expressions"],
