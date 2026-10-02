@@ -191,8 +191,9 @@ type Runner struct {
 	// claim Concurrency more leases on top of them and heartbeat an InFlight
 	// that omits them.
 	inFlight atomic.Int32
-	// shutdownTimeout bounds Run's wait for busy workers once polling stops.
-	// Always defaultRunnerShutdownTimeout outside tests.
+	// shutdownTimeout bounds Run's wait for busy workers after an operator
+	// stop; a session that fails does not wait. Always
+	// defaultRunnerShutdownTimeout outside tests.
 	shutdownTimeout time.Duration
 	// heartbeatGrace is how long heartbeats may keep failing, measured from
 	// the last success (or from registration), before the session is ended.
@@ -376,13 +377,24 @@ func (r *Runner) Run(ctx context.Context) error {
 	// Graceful shutdown: stop polling, then wait (bounded) for workers to
 	// finish in-flight tasks. Workers exit on ctx cancellation or once the
 	// closed leaseCh is empty.
-	waitDone := make(chan struct{})
-	go func() { wg.Wait(); close(waitDone) }()
+	//
+	// Only an operator stop (ctx cancelled) waits. A session that ended on an
+	// error returns at once so the caller re-registers: its busy workers keep
+	// running under ctx, and their leases stay in the Runner-owned active set
+	// and in-flight count, so the next session reports them. Waiting here
+	// would only leave the runner unregistered for up to shutdownTimeout while
+	// that work runs. The skipped workers touch nothing of the next Run: each
+	// Run has its own leaseCh and errCh, and they leave active and inFlight
+	// when their report attempt ends, then exit on the closed leaseCh.
 	drained := false
-	select {
-	case <-waitDone:
-		drained = true
-	case <-time.After(r.shutdownTimeout):
+	if ctx.Err() != nil {
+		waitDone := make(chan struct{})
+		go func() { wg.Wait(); close(waitDone) }()
+		select {
+		case <-waitDone:
+			drained = true
+		case <-time.After(r.shutdownTimeout):
+		}
 	}
 	releaseUnstartedLeases(leaseCh, inFlight, active)
 
