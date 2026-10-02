@@ -128,8 +128,9 @@ func (s *countingIssuedIdentityStore) Lookup(ctx context.Context, runnerID strin
 // probe existence to decide whether a request carries an issued credential at
 // all, and must then authenticate against that same row rather than fetching it
 // a second time. Against a remote SQL store the duplicate read doubled the
-// round trips of every runner request — measured in the SAS deployment as ~26
-// identity reads/sec serving ~8.5 admission requests/sec.
+// round trips of every runner request — measured in the SAS deployment as 1.95
+// identity reads per runner request over an 11-minute window (11366 reads
+// serving 5835 requests), and 1.01 after this fix.
 func TestIssuedIdentityPrincipalAuthenticatorLooksUpTheIdentityOnce(t *testing.T) {
 	counted := &countingIssuedIdentityStore{
 		IssuedIdentityStore: issuedIdentityForPrincipalAuth(t, []string{"team-a"}),

@@ -926,15 +926,13 @@ func (s *countingIssuedIdentityStore) Lookup(ctx context.Context, runnerID strin
 	return s.IssuedIdentityStore.Lookup(ctx, runnerID)
 }
 
-// TestAuthenticateIssuedIdentityMatchesTheLookupPath pins the equivalence
-// between the single-read entry point and the lookup-then-authenticate path: a
-// caller holding an already-fetched row must render exactly the same verdict,
-// with the same reason text, for every rejection the authenticator can produce.
-// The apiserver's runner principal authenticator is such a caller — it has to
-// probe existence to decide whether a request carries an issued credential at
-// all — and any drift between the two paths would silently change what that
-// authenticator accepts.
-func TestAuthenticateIssuedIdentityMatchesTheLookupPath(t *testing.T) {
+// TestAuthenticateIssuedIdentityEnforcesEveryCheck holds the single-read entry
+// point to explicit expectations rather than to the lookup path. After the
+// delegation the two are the same implementation — the lookup path ends by
+// calling this one — so comparing them to each other would agree even with a
+// check deleted from both. What each fixture states instead is the verdict the
+// authenticator owes its caller, and both entry points are held to it.
+func TestAuthenticateIssuedIdentityEnforcesEveryCheck(t *testing.T) {
 	base := time.Date(2026, 10, 2, 2, 0, 0, 0, time.UTC)
 	const good = "tok-secret"
 	acceptedScope := RunnerPolicy{
@@ -945,6 +943,7 @@ func TestAuthenticateIssuedIdentityMatchesTheLookupPath(t *testing.T) {
 		id       IssuedIdentity
 		runnerID string
 		token    string
+		want     error
 	}{
 		{
 			name: "accepted",
@@ -956,37 +955,46 @@ func TestAuthenticateIssuedIdentityMatchesTheLookupPath(t *testing.T) {
 			name: "wrong token",
 			id: IssuedIdentity{PoolID: "pool-1", RunnerID: "runner-1", TokenHash: HashSecret(good),
 				Scope: acceptedScope, IssuedAt: base.Add(-time.Hour)},
-			runnerID: "runner-1", token: "not-the-token",
+			runnerID: "runner-1", token: "not-the-token", want: ErrAuthUnknownToken,
 		},
 		{
 			name: "empty token",
 			id: IssuedIdentity{PoolID: "pool-1", RunnerID: "runner-1", TokenHash: HashSecret(good),
 				Scope: acceptedScope, IssuedAt: base.Add(-time.Hour)},
-			runnerID: "runner-1", token: "",
+			runnerID: "runner-1", token: "", want: ErrAuthMissingToken,
 		},
 		{
 			name: "revoked",
 			id: IssuedIdentity{PoolID: "pool-1", RunnerID: "runner-1", TokenHash: HashSecret(good),
 				Scope: acceptedScope, IssuedAt: base.Add(-time.Hour), RevokedAt: base.Add(-time.Minute)},
-			runnerID: "runner-1", token: good,
+			runnerID: "runner-1", token: good, want: ErrAuthUnknownToken,
 		},
 		{
 			name: "expired",
 			id: IssuedIdentity{PoolID: "pool-1", RunnerID: "runner-1", TokenHash: HashSecret(good),
 				Scope: acceptedScope, IssuedAt: base.Add(-time.Hour), ExpiresAt: base.Add(-time.Minute)},
-			runnerID: "runner-1", token: good,
+			runnerID: "runner-1", token: good, want: ErrAuthUnknownToken,
 		},
 		{
 			name: "prefix denied",
 			id: IssuedIdentity{PoolID: "pool-1", RunnerID: "runner-1", TokenHash: HashSecret(good),
 				Scope: RunnerPolicy{Name: "runner-1", IDPrefix: "other-"}, IssuedAt: base.Add(-time.Hour)},
-			runnerID: "runner-1", token: good,
+			runnerID: "runner-1", token: good, want: ErrAuthUnknownToken,
 		},
 		{
 			name: "no pool",
 			id: IssuedIdentity{RunnerID: "runner-1", TokenHash: HashSecret(good),
 				Scope: acceptedScope, IssuedAt: base.Add(-time.Hour)},
-			runnerID: "runner-1", token: good,
+			runnerID: "runner-1", token: good, want: ErrAuthUnknownToken,
+		},
+		{
+			// The lookup path cannot reach this state — it queries BY runnerID —
+			// but the row entry point takes both from its caller, so it has to
+			// refuse rather than hand runner-1's policy to runner-2.
+			name: "runner id mismatch",
+			id: IssuedIdentity{PoolID: "pool-1", RunnerID: "runner-1", TokenHash: HashSecret(good),
+				Scope: acceptedScope, IssuedAt: base.Add(-time.Hour)},
+			runnerID: "runner-2", token: good, want: ErrAuthUnknownToken,
 		},
 	}
 
@@ -1001,7 +1009,7 @@ func TestAuthenticateIssuedIdentityMatchesTheLookupPath(t *testing.T) {
 
 			viaLookup, lookupErr := auth.AuthenticateOngoing(tc.runnerID, tc.token, TransportInfo{})
 
-			row, ok, err := st.Lookup(context.Background(), tc.runnerID)
+			row, ok, err := st.Lookup(context.Background(), tc.id.RunnerID)
 			if err != nil || !ok {
 				t.Fatalf("Lookup = (%+v, %v, %v), want a stored row", row, ok, err)
 			}
@@ -1012,34 +1020,48 @@ func TestAuthenticateIssuedIdentityMatchesTheLookupPath(t *testing.T) {
 					"authenticate the row it was handed, not fetch the same key again", reads)
 			}
 
-			if (lookupErr == nil) != (rowErr == nil) {
-				t.Fatalf("verdict mismatch: lookup path = %v, row path = %v", lookupErr, rowErr)
-			}
-			if lookupErr != nil {
-				if lookupErr.Error() != rowErr.Error() {
-					t.Fatalf("reason mismatch: lookup path = %q, row path = %q", lookupErr.Error(), rowErr.Error())
+			if tc.want == nil {
+				if lookupErr != nil || rowErr != nil {
+					t.Fatalf("accepted case: lookup path = %v, row path = %v, want nil from both", lookupErr, rowErr)
+				}
+				if !reflect.DeepEqual(viaRow, row.Scope) {
+					t.Fatalf("accepted policy = %+v, want the row's stored scope %+v", viaRow, row.Scope)
+				}
+				if !reflect.DeepEqual(viaLookup, viaRow) {
+					t.Fatalf("policy mismatch between paths: %+v vs %+v", viaLookup, viaRow)
 				}
 				return
 			}
-			if !reflect.DeepEqual(viaLookup, viaRow) {
-				t.Fatalf("policy mismatch: lookup path = %+v, row path = %+v", viaLookup, viaRow)
+			if !errors.Is(lookupErr, tc.want) {
+				t.Fatalf("lookup path error = %v, want %v", lookupErr, tc.want)
 			}
-			if !reflect.DeepEqual(viaRow, row.Scope) {
-				t.Fatalf("accepted policy = %+v, want the row's stored scope %+v", viaRow, row.Scope)
+			if !errors.Is(rowErr, tc.want) {
+				t.Fatalf("row path error = %v, want %v", rowErr, tc.want)
 			}
 		})
 	}
 }
 
-// TestAuthenticateIssuedIdentityOnNilAuthenticator covers the receiver a
-// partially constructed server can hand to the apiserver path: it must answer
-// the same constant denial as the lookup path instead of panicking.
-func TestAuthenticateIssuedIdentityOnNilAuthenticator(t *testing.T) {
+// TestAuthenticateIssuedIdentityOnUnusableAuthenticator covers the receivers a
+// partially constructed server can hand to the apiserver path: both must answer
+// the same constant denial as the lookup path instead of panicking, and the
+// store-less one must not authenticate a caller-supplied row that the lookup
+// path could never have produced.
+func TestAuthenticateIssuedIdentityOnUnusableAuthenticator(t *testing.T) {
 	var auth *IssuedIdentityAuthenticator
 	if _, err := auth.AuthenticateIssuedIdentity(IssuedIdentity{}, "runner-1", "tok"); !errors.Is(err, ErrAuthUnknownToken) {
 		t.Fatalf("nil authenticator error = %v, want ErrAuthUnknownToken", err)
 	}
 	if _, err := auth.AuthenticateIssuedIdentity(IssuedIdentity{}, "runner-1", ""); !errors.Is(err, ErrAuthMissingToken) {
 		t.Fatalf("nil authenticator empty-token error = %v, want ErrAuthMissingToken", err)
+	}
+
+	storeless := NewIssuedIdentityAuthenticator(nil)
+	row := IssuedIdentity{PoolID: "pool-1", RunnerID: "runner-1", TokenHash: HashSecret("tok")}
+	if _, err := storeless.AuthenticateIssuedIdentity(row, "runner-1", "tok"); !errors.Is(err, ErrAuthUnknownToken) {
+		t.Fatalf("store-less authenticator error = %v, want ErrAuthUnknownToken", err)
+	}
+	if _, err := storeless.AuthenticateOngoing("runner-1", "tok", TransportInfo{}); !errors.Is(err, ErrAuthUnknownToken) {
+		t.Fatalf("store-less lookup path error = %v, want ErrAuthUnknownToken", err)
 	}
 }

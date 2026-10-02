@@ -184,14 +184,15 @@ func (a *IssuedIdentityAuthenticator) authenticate(runnerID, token string) (Runn
 // the store traffic on every runner request — on a remote SQL store, twice the
 // round trips on the hottest path a runner has.
 //
-// The caller owns the freshness contract: id must come from THIS
-// authenticator's store. A value from anywhere else bypasses the store's own
-// view of revocation and expiry, which is the whole point of looking it up.
+// The caller owns the freshness contract: id must be the result of a Lookup
+// performed for THIS authentication, against THIS authenticator's store — not a
+// cached or re-derived value. Anything staler bypasses the store's own view of
+// revocation and expiry, which is the whole point of looking it up.
 func (a *IssuedIdentityAuthenticator) AuthenticateIssuedIdentity(id IssuedIdentity, runnerID, token string) (RunnerPolicy, error) {
 	if token == "" {
 		return RunnerPolicy{}, ErrAuthMissingToken
 	}
-	if a == nil {
+	if a == nil || a.store == nil {
 		return RunnerPolicy{}, ErrAuthUnknownToken
 	}
 	want := HashSecret(token)
@@ -207,6 +208,15 @@ func (a *IssuedIdentityAuthenticator) AuthenticateIssuedIdentity(id IssuedIdenti
 	// an invalid token must not become an identity-existence timing oracle.
 	if id.PoolID == "" {
 		return RunnerPolicy{}, fmt.Errorf("%w: identity has no pool", ErrAuthUnknownToken)
+	}
+	// The lookup path gets this for free: it queries BY runnerID, so the row it
+	// authenticates necessarily belongs to that runner. This entry point takes
+	// both from the caller and must reconcile them itself rather than hand one
+	// runner the policy of another. An empty RunnerID is left alone — it marks a
+	// row written before the field was populated, and the lookup path never
+	// relied on it either.
+	if id.RunnerID != "" && id.RunnerID != runnerID {
+		return RunnerPolicy{}, fmt.Errorf("%w: issued identity runner ID mismatch", ErrAuthUnknownToken)
 	}
 	// Lifecycle checks run AFTER both constant-time comparisons, never before: a
 	// pre-compare check would answer "does this runner id exist and is it

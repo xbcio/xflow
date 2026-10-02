@@ -159,9 +159,11 @@ func (a *IssuedIdentityPrincipalAuthenticator) Authenticate(r *http.Request) (Pr
 	// The row fetched above is handed to the authenticator instead of letting it
 	// look the same runner up again: this runs on every runner request, and a
 	// second primary-key read against a remote store is pure added latency on
-	// the hottest path. The verdict is identical — both reads are non-atomic
-	// even when issued twice, and this one is at least as fresh as the second
-	// would have been.
+	// the hottest path. The verdict is unchanged in kind — both reads were
+	// non-atomic even when issued twice, so a revocation landing after the
+	// authoritative read was already only observed by the next request. Using
+	// the probe row widens that window by at most the round trip removed here;
+	// it never narrows it, and the next request re-probes.
 	policy, err := a.authenticator.AuthenticateIssuedIdentity(id, runnerID, token)
 	if err != nil {
 		return Principal{}, ErrWorkflowUnauthenticated
