@@ -1776,7 +1776,16 @@ test-workflows-required: check-go
 
 # test-workflows-stress runs the concurrent load suite over the three tiers and
 # prints one perf.metric line per tier. It is separate from test-perf because
-# that target runs -bench=. only, which never executes these Test* functions.
+# that target is a benchmark run: -bench=. plus -race, reported as benchmark
+# lines.
+#
+# Do not read that separation as a selection guarantee: -bench=. does NOT
+# exclude Test functions (`go test -bench=.` runs them too -- measured: the
+# exprx package runs 37 of its tests under it; only -run does the excluding).
+# So the nightly perf-sample job, which passes -bench=., already executes this
+# suite -- and there the high tier needs MySQL that the job does not provide,
+# so it skips and leaves that tier with no metric line. Wiring this target into
+# a job with MySQL is what would close that gap.
 #
 # It is the one test target here that does NOT pass -race, on purpose: the
 # suite reports latency percentiles, and race instrumentation changes the
