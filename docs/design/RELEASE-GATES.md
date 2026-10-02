@@ -228,7 +228,7 @@ namespace boundary 全链路代码与越权测试已完成（Phase 6-8，详见 
 at-least-once 与宿主幂等键、支持拓扑矩阵、HA / 多 namespace 的「不承诺」清单、以及实验性功能清单。
 该节与本文档 §1–§4.1 的分层门槛和反声明是同一套边界；两者不一致时以本文档为准（门槛文档是判据来源）。
 
-一句话版本：**handler 与 Runner Protocol at-least-once；HTTP 是生产 runner 通道，gRPC streaming / credit-flow 与 Loop/Split / Node Group 为实验性；
+一句话版本：**handler 与 Runner Protocol at-least-once；HTTP 是生产 runner 通道，gRPC streaming / credit-flow 与 Loop / Node Group 为实验性；
 leader election 不等于 control-plane HA；G2 达成前不承诺 HA 或多 namespace 生产隔离。**
 
 ## 5. 配置要求清单

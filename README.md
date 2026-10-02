@@ -148,7 +148,7 @@ are listed as open in
   transport optimizations. HTTP long-poll is the production channel. gRPC is
   also missing the activation-ack path, so a gated activation under a
   gRPC-only deployment can only be cleared by restarting the runner.
-- **Loop / Split** expansion paths are experimental and are excluded from
+- **Loop** expansion paths are experimental and are excluded from
   static-DAG completion guarantees.
 - **Node Group co-location** is implemented but experimental/limited, and is
   opt-in through `WorkflowOptions.experimental_node_group`.

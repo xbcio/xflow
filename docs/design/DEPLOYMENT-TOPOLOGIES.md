@@ -240,7 +240,7 @@ runner 可横向扩缩容：跑多个 runner 实例即可线性扩展执行吞�
 - **已实现** runner matching 的 `node_type` / `node_version` 精确匹配、runner policy 过滤与容量 gating；tags / env / region / 权重调度仍在规划。
 - **已实现** Redis-backed durable assignment / claim / leased handoff、claim expiry 回收、重连 lease replay（按 runner 上报的 `active_lease_ids` 排除在执行中的 lease），以及 lease TTL + sweeper 回收与 re-enqueue。handler 与协议响应仍是 at-least-once，必须使用业务幂等键。
 - 当前 leader election 只协调 leader-only maintenance；它不是完整 control-plane HA 或 failover SLO 的替代品。生产就绪仍依赖 Redis 高可用部署和 kill/restart/failover 验证。
-- Loop/Split 仍是实验性扩展路径，未纳入静态 DAG completion 或 server/runner production-ready 保证。
+- Loop 仍是实验性扩展路径，未纳入静态 DAG completion 或 server/runner production-ready 保证。
 - **已实现** Redis 作为权威状态、store/sqlstore 作为 best-effort audit trail 的 dual-write contract；审计 reconciliation CLI 仍在规划。
 
 ### 3.2 与 engine 两接口的对应
@@ -423,7 +423,7 @@ reclaim）的互斥，尚未提供 Raft 元数据复制、跨副本 API ownershi
 
 HTTP long poll 与 gRPC Runner Protocol 均可用。**streaming 与 credit-flow
 control 仍为实验性传输优化**：它们不得绕过 durable assignment、lease 或
-outbox 语义，也不构成 release gate 已满足的证据。Loop/Split 也仍是实验性
+outbox 语义，也不构成 release gate 已满足的证据。Loop 也仍是实验性
 扩展路径，未纳入静态 DAG completion 与 server/runner production-ready
 保证。
 
@@ -615,13 +615,13 @@ Relay Gateway 用于 runner 无法直连 server、不能互相直连或需要本
 | runner 执行面 | **MVP 已实现** | `cmd/runner` 可连接 server，注册 capability，通过 Runner Protocol 执行 lease 并上报 result |
 | Task Dispatcher + durable handoff | **MVP 已实现** | `service/control.Dispatcher` 将 queued task 持久化为 `RedisRunnerDirectory` assignment；claim TTL、finalize、reconnect replay 与 fenced release 支持跨 server 进程恢复 |
 | Runner Protocol | **MVP 已实现（传输）** | `service/protocol` 提供 HTTP+JSON DTO、路由常量和 client，另有 gRPC 通道（`grpc_client.go`、`runnerpb/`）；streaming / credit-flow control 仍为实验性 |
-| Loop/Split | **实验性** | 扩展/子执行路径未进入静态 DAG completion 与 server/runner production-ready 保证 |
+| Loop | **实验性** | 扩展/子执行路径未进入静态 DAG completion 与 server/runner production-ready 保证 |
 | Relay Gateway | **规划** | 网络隔离中继拓扑已定义，尚无独立进程实现 |
 | 跨域 runner 指标采集 | **已实现** | runner `--report-metrics` → server `/v1/runners/metrics` → 并入 server `/metrics`（§4.7）；Redis 共享 inbox 支持多副本，`IsLive` 过期，`runner_id` 由 server 覆盖 |
 | 批次任务队列隔离 | **已实现** | 两个后端各自分离批次通道并加权调度（§4.3）；升级须 consumer 先于 producer |
 | 控制面 HA / 多 namespace 生产隔离 | **未验收** | leader election 只 gate maintenance（§4.5）；G2 仍需真实环境报告；对外声明见 [RELEASE-GATES.md](./RELEASE-GATES.md) §4.2 与 §6 |
 
-一句话：**local / cluster 已可用；server / runner 的 durable handoff MVP 已落地；remote SDK、Relay Gateway、Loop/Split 正式版与 streaming / credit-flow control 仍在规划或实验阶段。完整 control-plane HA 仍需独立验证与设计。**
+一句话：**local / cluster 已可用；server / runner 的 durable handoff MVP 已落地；remote SDK、Relay Gateway、Loop 正式版与 streaming / credit-flow control 仍在规划或实验阶段。完整 control-plane HA 仍需独立验证与设计。**
 
 ### 7.1 实验性功能与非承诺（对外声明口径）
 
@@ -630,7 +630,7 @@ Relay Gateway 用于 runner 无法直连 server、不能互相直连或需要本
 | 能力 | 口径 | 仓库证据 |
 |---|---|---|
 | gRPC streaming / credit-flow control | **实验性传输优化**，非生产可靠性承诺；HTTP long-poll 是生产通道。gRPC 还缺 ActivationAck，gated activation 只能靠重启 runner 恢复 | §4.5/§4.6；`service/runner/doc.go:6`、`service/protocol/doc.go:12`、`service/control/doc.go:18`（"gRPC (experimental, incomplete)"）；`test/integration/server_runner_e2e_test.go:178,202-205`（credit-flow 明示为 experimental，不在 release-gate 断言内） |
-| Loop / Split | **实验性**扩展路径，未纳入静态 DAG completion 与 server/runner production-ready 保证 | §7 本表 Loop/Split 行；`engine/interfaces.go:195`、`engine/commit.go:108` |
+| Loop | **实验性**扩展路径，未纳入静态 DAG completion 与 server/runner production-ready 保证 | §7 本表 Loop 行；README「Supported Topologies and Guarantees」的 Experimental capabilities |
 | Node Group co-location | **实验/受限**，经 `WorkflowOptions.experimental_node_group` 显式开启 | [NODE-GROUP-COLOCATION.md](./NODE-GROUP-COLOCATION.md) 头部 Status；`types/workflow.go:53-59`；`api/openapi/xflow-v1.yaml:2234` |
 | Kafka aggregate `on_overflow` | 默认 `discard` 是**永久丢弃**；三个取值 `discard` / `block` / `dead_letter`，未识别取值使 activation 失败而非回退 | `node/trigger/kafka/aggregate.go:116-122,1326-1335`；`observability/metrics/metrics.go:446-447,454`（`xflow_trigger_messages_discarded_total`、`xflow_trigger_messages_dead_lettered_total`、`xflow_trigger_consumption_blocked`） |
 | leader election | 只协调 leader-only maintenance，**不是** control-plane HA / failover SLO | §4.5；[RELEASE-GATES.md](./RELEASE-GATES.md) §4 反声明 |
