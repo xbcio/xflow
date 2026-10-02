@@ -145,7 +145,7 @@ func (a *IssuedIdentityPrincipalAuthenticator) Authenticate(r *http.Request) (Pr
 	// may proceed to the regular authenticator. Once an issued ID exists, though,
 	// a missing/wrong token, revocation, expiry, or policy failure is terminal;
 	// it must never downgrade into a static bearer principal.
-	_, exists, lookupErr := a.store.Lookup(r.Context(), runnerID)
+	id, exists, lookupErr := a.store.Lookup(r.Context(), runnerID)
 	if lookupErr != nil {
 		return Principal{}, ErrWorkflowUnauthenticated
 	}
@@ -156,7 +156,13 @@ func (a *IssuedIdentityPrincipalAuthenticator) Authenticate(r *http.Request) (Pr
 	if !ok {
 		return Principal{}, ErrWorkflowUnauthenticated
 	}
-	policy, err := a.authenticator.AuthenticateOngoing(runnerID, token, httpTransportInfoFromRequest(r))
+	// The row fetched above is handed to the authenticator instead of letting it
+	// look the same runner up again: this runs on every runner request, and a
+	// second primary-key read against a remote store is pure added latency on
+	// the hottest path. The verdict is identical — both reads are non-atomic
+	// even when issued twice, and this one is at least as fresh as the second
+	// would have been.
+	policy, err := a.authenticator.AuthenticateIssuedIdentity(id, runnerID, token)
 	if err != nil {
 		return Principal{}, ErrWorkflowUnauthenticated
 	}

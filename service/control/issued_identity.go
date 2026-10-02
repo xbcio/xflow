@@ -170,6 +170,30 @@ func (a *IssuedIdentityAuthenticator) authenticate(runnerID, token string) (Runn
 	if !ok {
 		return RunnerPolicy{}, ErrAuthUnknownToken
 	}
+	return a.AuthenticateIssuedIdentity(id, runnerID, token)
+}
+
+// AuthenticateIssuedIdentity applies the credential compare and lifecycle
+// checks to an identity the caller already fetched from this authenticator's
+// store.
+//
+// It exists for callers that must look the identity up anyway: the apiserver's
+// runner principal authenticator probes existence to decide whether a request
+// carries an issued credential at all, and then delegates here. Without it that
+// probe and the authentication each issue their own primary-key read, doubling
+// the store traffic on every runner request — on a remote SQL store, twice the
+// round trips on the hottest path a runner has.
+//
+// The caller owns the freshness contract: id must come from THIS
+// authenticator's store. A value from anywhere else bypasses the store's own
+// view of revocation and expiry, which is the whole point of looking it up.
+func (a *IssuedIdentityAuthenticator) AuthenticateIssuedIdentity(id IssuedIdentity, runnerID, token string) (RunnerPolicy, error) {
+	if token == "" {
+		return RunnerPolicy{}, ErrAuthMissingToken
+	}
+	if a == nil {
+		return RunnerPolicy{}, ErrAuthUnknownToken
+	}
 	want := HashSecret(token)
 	currentMatch := subtle.ConstantTimeCompare(want[:], id.TokenHash[:])
 	previousMatch := subtle.ConstantTimeCompare(want[:], id.PreviousTokenHash[:])

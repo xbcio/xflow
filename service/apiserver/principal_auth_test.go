@@ -110,6 +110,93 @@ func TestIssuedIdentityPrincipalAuthenticatorChecksIdentityLifecycleAndScope(t *
 	}
 }
 
+// countingIssuedIdentityStore records the store reads one authentication
+// performs. Lookup is the only method this path uses; everything else is
+// forwarded to the embedded store.
+type countingIssuedIdentityStore struct {
+	control.IssuedIdentityStore
+	lookups int
+}
+
+func (s *countingIssuedIdentityStore) Lookup(ctx context.Context, runnerID string) (control.IssuedIdentity, bool, error) {
+	s.lookups++
+	return s.IssuedIdentityStore.Lookup(ctx, runnerID)
+}
+
+// TestIssuedIdentityPrincipalAuthenticatorLooksUpTheIdentityOnce pins the
+// single-read contract on the hottest path a runner has: the authenticator must
+// probe existence to decide whether a request carries an issued credential at
+// all, and must then authenticate against that same row rather than fetching it
+// a second time. Against a remote SQL store the duplicate read doubled the
+// round trips of every runner request — measured in the SAS deployment as ~26
+// identity reads/sec serving ~8.5 admission requests/sec.
+func TestIssuedIdentityPrincipalAuthenticatorLooksUpTheIdentityOnce(t *testing.T) {
+	counted := &countingIssuedIdentityStore{
+		IssuedIdentityStore: issuedIdentityForPrincipalAuth(t, []string{"team-a"}),
+	}
+	auth := NewIssuedIdentityPrincipalAuthenticator(counted)
+
+	if _, err := auth.Authenticate(issuedPrincipalRequest()); err != nil {
+		t.Fatalf("Authenticate issued identity: %v", err)
+	}
+	if counted.lookups != 1 {
+		t.Fatalf("store lookups for an accepted credential = %d, want 1", counted.lookups)
+	}
+
+	counted.lookups = 0
+	unknown := issuedPrincipalRequest()
+	unknown.Header.Set(protocol.RunnerIDHeader, "runner-absent")
+	if _, err := auth.Authenticate(unknown); !errors.Is(err, ErrPrincipalNotApplicable) {
+		t.Fatalf("unknown runner id error = %v, want ErrPrincipalNotApplicable", err)
+	}
+	if counted.lookups != 1 {
+		t.Fatalf("store lookups for an unknown runner id = %d, want 1: the existence probe "+
+			"is the only read this path may issue", counted.lookups)
+	}
+}
+
+// TestIssuedIdentityPrincipalAuthenticatorRejectsRowMutations proves the
+// single-read path still enforces every check the lookup path enforces: the
+// store row handed to the authenticator is the only input, and a wrong token,
+// a revoked row, an expired row, or a mismatched ID prefix must each be refused
+// with the terminal error rather than falling through to another authenticator.
+func TestIssuedIdentityPrincipalAuthenticatorRejectsRowMutations(t *testing.T) {
+	const good = "issued-token"
+	mutations := []struct {
+		name   string
+		change func(*control.IssuedIdentity)
+	}{
+		{"wrong token", func(*control.IssuedIdentity) {}},
+		{"revoked", func(id *control.IssuedIdentity) { id.RevokedAt = time.Now().UTC() }},
+		{"expired", func(id *control.IssuedIdentity) { id.ExpiresAt = time.Now().UTC().Add(-time.Minute) }},
+		{"no pool", func(id *control.IssuedIdentity) { id.PoolID = "" }},
+		{"prefix mismatch", func(id *control.IssuedIdentity) { id.Scope.IDPrefix = "other-" }},
+	}
+
+	for _, tc := range mutations {
+		t.Run(tc.name, func(t *testing.T) {
+			store := control.NewMemoryIssuedIdentityStore()
+			id := control.IssuedIdentity{
+				PoolID: "test-pool", RunnerID: "runner-mutated", TokenHash: control.HashSecret(good),
+				Scope:    control.RunnerPolicy{Name: "runner-mutated", IDPrefix: "runner-", AllowedNamespaces: []string{"team-a"}},
+				IssuedAt: time.Now().UTC(),
+			}
+			tc.change(&id)
+			if err := store.Issue(context.Background(), id); err != nil {
+				t.Fatalf("Issue: %v", err)
+			}
+			req := issuedPrincipalRequest()
+			req.Header.Set(protocol.RunnerIDHeader, id.RunnerID)
+			if tc.name == "wrong token" {
+				req.Header.Set("Authorization", "Bearer not-"+good)
+			}
+			if _, err := NewIssuedIdentityPrincipalAuthenticator(store).Authenticate(req); !errors.Is(err, ErrWorkflowUnauthenticated) {
+				t.Fatalf("mutated identity error = %v, want terminal ErrWorkflowUnauthenticated", err)
+			}
+		})
+	}
+}
+
 func TestMultiPrincipalAuthenticatorDoesNotDowngradeInvalidIssuedIdentity(t *testing.T) {
 	issued := NewIssuedIdentityPrincipalAuthenticator(issuedIdentityForPrincipalAuth(t, []string{"team-a"}))
 	static := NewBearerPrincipalAuth("static-token", "operator", []string{"workflow"})
