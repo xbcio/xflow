@@ -43,6 +43,10 @@ type nodeEntry struct {
 	runnerSelector     *types.RunnerSelector
 	timeout            time.Duration
 	activationReplicas uint32
+	// inputs are the node's declared input ports. Empty means the node has only
+	// the implicit main port and accepts any edge label (with a compile warning
+	// when it fans in); a declaration makes the labels binding.
+	inputs []types.PortDecl
 }
 
 type edge struct {
@@ -231,6 +235,24 @@ func (n *NodeRef) Output(port string) types.OutputPort {
 // Input returns a reference to the named input port of this node.
 func (n *NodeRef) Input(port string) types.InputPort {
 	return types.InputPort{Node: n.name, Port: port}
+}
+
+// Inputs declares this node's input ports.
+//
+// A node that declares none has only the implicit main port: every incoming
+// edge lands on main unless it names a port, and a node that fans in over
+// several edges is warned about at compile time because those upstreams would
+// all share one key. Declaring the ports makes the labels binding -- an edge
+// onto an undeclared port is then a compile error -- and is what the DSL's
+// `inputs:` field does for a hand-written definition.
+func (n *NodeRef) Inputs(names ...string) *NodeRef {
+	if n == nil {
+		return n
+	}
+	for _, name := range names {
+		n.entry.inputs = append(n.entry.inputs, types.PortDecl{Name: name})
+	}
+	return n
 }
 
 // NodePort returns the node name and "main" port — the default endpoint
@@ -575,6 +597,7 @@ func (w *WorkflowBuilder) assembleNodes(def *types.WorkflowDef) {
 			RunnerSelector:     cloneRunnerSelector(entry.runnerSelector),
 			Timeout:            entry.timeout,
 			ActivationReplicas: entry.activationReplicas,
+			Inputs:             append([]types.PortDecl(nil), entry.inputs...),
 		})
 	}
 }
