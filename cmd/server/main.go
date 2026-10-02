@@ -115,6 +115,17 @@ type serverConfig struct {
 	// holder is clamped exactly like a tenant. Raising it is therefore an
 	// auditable act on this host, not a scope someone can be granted.
 	registrationCodeTTL time.Duration
+	// runnerIdentityCacheTTL bounds a process-local read-through cache over the
+	// issued-identity store. Zero (the default) means no cache, for the same
+	// reason the two TTLs above default to zero: an upgrade of this binary must
+	// not change how long a revoked credential keeps authenticating.
+	//
+	// Where it is on, this TTL is the ONLY staleness bound for a process that did
+	// not itself perform the revocation — a sibling replica, or an operator at a
+	// SQL prompt. A mutation through this process's own store evicts immediately
+	// regardless of the TTL, so the TTL prices exactly the cross-process window.
+	// Clamped to store.MaxIssuedIdentityCacheTTL; negative disables.
+	runnerIdentityCacheTTL time.Duration
 	// trustedProxies are the direct-peer CIDRs allowed to supply
 	// X-Forwarded-For to the runner protocol.
 	trustedProxies []netip.Prefix
@@ -235,6 +246,9 @@ func parseServerConfig(args []string) (serverConfig, error) {
 		"Leader-only pool runner instance prune cadence (0 = 1m default)")
 	fs.DurationVar(&cfg.registrationCodeTTL, "registration-code-ttl", 0,
 		"Ceiling on the lifetime of a registration code minted via the management API; also its default (0 disables expiry)")
+	fs.DurationVar(&cfg.runnerIdentityCacheTTL, "runner-identity-cache-ttl", 0,
+		"Process-local read-through cache for issued-identity lookups (0 disables; capped at 5m). "+
+			"Bounds how long a revocation performed by ANOTHER process takes to reach this one's credential checks")
 	fs.StringVar(&trustedProxyCIDRs, "trusted-proxies", "",
 		"Comma-separated CIDRs of reverse proxies trusted to supply X-Forwarded-For on runner requests")
 	var paramValidation string
@@ -736,7 +750,11 @@ func runServer(ctx context.Context, cfg serverConfig) error {
 	if cfg.enroll {
 		if enrollDB != nil {
 			registrationCodeStore = sqlstore.NewRegistrationCodeStore(enrollDB)
-			issuedIdentityStore = sqlstore.NewIssuedIdentityStore(enrollDB)
+			// The SQL store is the only one worth wrapping: the in-memory
+			// alternative is already a map read. ttl <= 0 returns the store
+			// unchanged, so the default costs nothing here.
+			issuedIdentityStore = store.NewCachedIssuedIdentityStore(
+				sqlstore.NewIssuedIdentityStore(enrollDB), cfg.runnerIdentityCacheTTL, nil)
 			runnerPoolStore = sqlstore.NewRunnerPoolStore(enrollDB)
 		} else {
 			registrationCodeStore = control.NewMemoryRegistrationCodeStore()
