@@ -111,6 +111,18 @@ type cyclicReliabilityEnv struct {
 }
 
 func newCyclicReliabilityEnv(t *testing.T, addr string) *cyclicReliabilityEnv {
+	return newCyclicReliabilityEnvWithAttempts(t, addr, 3)
+}
+
+// newCyclicReliabilityEnvWithAttempts is newCyclicReliabilityEnv with an
+// explicit outbox max-delivery-attempts budget. Most subtests check the
+// outbox immediately after a synchronous commit failure, so the budget never
+// matters to them; ProcessRebuild_BackgroundDispatcherAutoReplays strands an
+// entry across env1's slow Bind/stop teardown (its own background
+// OutboxDispatcher keeps ticking on a 1s interval while stopConsumer's
+// graceful asynq shutdown runs), so a low budget there races the dispatcher
+// into dead-lettering the very entry the test needs env2 to replay.
+func newCyclicReliabilityEnvWithAttempts(t *testing.T, addr string, maxAttempts int) *cyclicReliabilityEnv {
 	t.Helper()
 	backend, err := distributed.New(addr, nil, distributed.WithConsumer(true))
 	if err != nil {
@@ -119,7 +131,7 @@ func newCyclicReliabilityEnv(t *testing.T, addr string) *cyclicReliabilityEnv {
 	queue := &cyclicFakeQueue{}
 	eng := engine.New(backend.State(), queue,
 		engine.WithDefaultLeaseTTL(time.Minute),
-		engine.WithOutboxMaxDeliveryAttempts(3),
+		engine.WithOutboxMaxDeliveryAttempts(maxAttempts),
 	)
 	stop := backend.Bind(eng)
 
@@ -279,7 +291,16 @@ func TestCyclicReliabilityRealRedis(t *testing.T) {
 		defer cancel()
 
 		// Phase 1: produce a stranded durable cyclic intent under a queue outage.
-		env1 := newCyclicReliabilityEnv(t, addr)
+		// env1 keeps its own background OutboxDispatcher running (via Bind) until
+		// env1.stop() below, and stop() blocks on asynq's graceful consumer
+		// shutdown before it ever cancels that dispatcher — so the dispatcher gets
+		// one or more extra 1s-interval ticks against the still-broken queue while
+		// this goroutine waits inside stop(). A low max-attempts budget would let
+		// those extra ticks dead-letter the stranded entry before env2 exists to
+		// replay it, which is a race against this test's own fixture, not the
+		// production replay path under test. A high budget keeps that race from
+		// ever being reachable within this test's timeout.
+		env1 := newCyclicReliabilityEnvWithAttempts(t, addr, 1000)
 		g := cyclicReliabilityGraph(t, "cyclic-a0-rebuild", 10)
 		id, startTask := env1.submitCyclic(t, ctx, g, map[string]any{"round": 1})
 		t.Cleanup(func() { deleteAtomicReliabilityKeys(t, env1.rdb, id) })
@@ -317,12 +338,19 @@ func TestCyclicReliabilityRealRedis(t *testing.T) {
 		defer ticker.Stop()
 		deadline := time.Now().Add(15 * time.Second)
 		for {
-			entries, err := env2.state.ListOutbox(ctx, id, time.Now().Add(time.Second), 16)
-			if err != nil {
-				t.Fatalf("post-rebuild ListOutbox() error = %v", err)
-			}
 			delivered := env2.queue.drain()
-			if len(entries) == 0 && len(delivered) >= 1 {
+			if len(delivered) >= 1 {
+				// The redelivery itself is proven by drain() alone: Enqueue runs
+				// strictly before AckOutbox in FlushOutbox (see cyclicFakeQueue's
+				// doc comment), so a task observed here was already committed to
+				// the queue. Re-checking ListOutbox for entries==0 in the SAME
+				// iteration would race the dispatcher's own ack: ListOutbox and
+				// drain() are two separate round trips, so a dispatcher flush that
+				// lands between them makes drain() non-empty while the ListOutbox
+				// call moments earlier still saw the stranded entry. Gating on
+				// both in one iteration risks requiring a coincidence that may
+				// never recur, since drain() is destructive and this task would
+				// otherwise be discarded with no second chance to observe it.
 				got := delivered[len(delivered)-1]
 				if got.NodeName != "start" || got.ActivationID != expectedActivation {
 					t.Fatalf("redelivered task = %s@%d, want start@%d", got.NodeName, got.ActivationID, expectedActivation)
@@ -330,9 +358,18 @@ func TestCyclicReliabilityRealRedis(t *testing.T) {
 				break
 			}
 			if time.Now().After(deadline) {
+				entries, err := env2.state.ListOutbox(ctx, id, time.Now().Add(time.Second), 16)
+				if err != nil {
+					t.Fatalf("post-rebuild ListOutbox() error = %v", err)
+				}
 				t.Fatalf("timeout waiting for background OutboxDispatcher replay: outbox entries=%d, delivered=%d", len(entries), env2.queue.count())
 			}
 			<-ticker.C
+		}
+		// The dispatcher's flush acks the entry strictly after the Enqueue this
+		// loop already observed, so by now the outbox must be empty.
+		if entries, err := env2.state.ListOutbox(ctx, id, time.Now().Add(time.Second), 16); err != nil || len(entries) != 0 {
+			t.Fatalf("outbox after redelivery entries=%+v err=%v, want empty", entries, err)
 		}
 	})
 
