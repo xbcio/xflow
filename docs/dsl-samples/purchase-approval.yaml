@@ -51,7 +51,8 @@ context:
     org_service: "https://org.internal.example.com"
 
 settings:
-  timeout: 168h
+  # settings 层没有 timeout 字段（写了不会被读取）；时限是节点级 timeout，
+  # 下面的审批模板用的就是 $vars.approval_timeout。
   timezone: "Asia/Shanghai"
 
 credentials:
