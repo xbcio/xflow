@@ -35,7 +35,8 @@ outbox，把提交路径一分为二：新的 `commitAcyclicTaskResult` 让终�
 落在一个受栅栏的事务里；旧路径原封不动改名为 `commitLegacyTaskResult`。
 
 分流条件当时是「无环 且 非 suspend 且 非扩展」。三类东西没迁移：cyclic 图、suspend、
-loop/split 扩展。suspend 后来自己拆了出去（`commitSuspendedTaskResult`），所以留在
+loop/split 扩展（split 节点类型已于 2026-10-02 移除，扩展机制现在只指 `xflow.map`
+的 body 形态）。suspend 后来自己拆了出去（`commitSuspendedTaskResult`），所以留在
 legacy 上的只剩 cyclic 与扩展。
 
 名字里的 "legacy" 因此是**字面意义**的（老实现的残骸），但今天已经误导：这条路径

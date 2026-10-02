@@ -328,7 +328,8 @@ body 的 span 仍没有真正的 OTel parent」——查证时发现缺口比记
 
 **功能后果**：任何 handler 只要在输出里用了 `_loop` 这个字段名，就把自己变成了
 扇出节点。它没有 body，扩展出的每个批次撞 `ErrNoMapBody`、重试、整条执行挂到
-deadline。`xflow.split` 的编译期拒绝（`split_rejection_test.go`）实测过这个下场。
+deadline。历史上的 `xflow.split` 就是这条路径的实测样本，那次实测直接促成了它的
+编译期拒绝（该节点类型已于 2026-10-02 整体移除，拒绝作为墓碑保留）。
 
 判据改为 `g.BodyAt(nodeIdx) != nil`：一个节点扩展，当且仅当编译器给它投影了子图
 body。这是图的结构性质，payload 无权回答。`BodyAt` 的权威性由快照守卫兜底——
@@ -342,7 +343,8 @@ body。这是图的结构性质，payload 无权回答。`BodyAt` 的权威性�
 且必须落在 `projectNodeBodies` 这个**两条编译路径共用**的 pass 上
 （`assertFanOutNodesResolved`），而不是只在 `Compile` 侧的 `validateNodeBody` 里。
 
-标记键随之从 `node/internal/flow/map.go` 与 `split.go` 移除，不改名。一个「必须存在
+标记键随之从 `node/internal/flow/map.go` 与 `split.go` 移除，不改名（split.go 已随
+xflow.split 节点类型于 2026-10-02 整体删除）。一个「必须存在
 才正确、却没有任何东西能校验它存在」的键，叫什么名字都是负债。
 
 覆盖：`engine/expansion_criterion_test.go`（无 body 的节点带满标记键也不扩展 /
@@ -409,8 +411,8 @@ object 与 string 两种请求体都会触发，走的内部路径还不一样�
 #### `bannedBodyMemberTypes` 退回字面量，但禁令的可扩展那半移到了成员判定
 
 先前它「从 transform 集派生」，那是错的：`xflow.map` 的 expression 形态**根本没有
-body 给值判据看**。所以这张表是三个字面量，各有一条值看不见的理由：
-`xflow.subgraph` 是容器本身，`xflow.split` 到处被拒，`xflow.map` 在 body 形态下
+body 给值判据看**。所以这张表是两个字面量，各有一条值看不见的理由：
+`xflow.subgraph` 是容器本身，`xflow.map` 在 body 形态下
 无条件扩展（expression 形态不扩展、本可豁免，但禁令刻意停在类型一级：成员的形态
 只差一次参数改动，一条改个参数就能悄悄解除的禁令不算禁令）。
 
