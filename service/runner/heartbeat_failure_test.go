@@ -8,11 +8,16 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/service/protocol"
 )
 
-var errHeartbeatSessionGone = errors.New("heartbeat: unknown session")
+// errHeartbeatSessionGone is what the gRPC transport returns for an unknown
+// runner session, which the heartbeat loop ends the session on at once.
+var errHeartbeatSessionGone = status.Error(codes.NotFound, "runner not found")
 
 // heartbeatFailClient hands session 1 one lease per poll until Concurrency
 // leases are out, then fails session 1's heartbeats once failHeartbeats is

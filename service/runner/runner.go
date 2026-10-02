@@ -11,6 +11,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/namespace"
@@ -191,7 +194,21 @@ type Runner struct {
 	// shutdownTimeout bounds Run's wait for busy workers once polling stops.
 	// Always defaultRunnerShutdownTimeout outside tests.
 	shutdownTimeout time.Duration
+	// heartbeatGrace is how long heartbeats may keep failing, measured from
+	// the last success (or from registration), before the session is ended.
+	// Always defaultHeartbeatGrace outside tests.
+	heartbeatGrace time.Duration
+	// now is the clock heartbeatGrace is measured on. Always time.Now outside
+	// tests.
+	now func() time.Time
 }
+
+// defaultHeartbeatGrace is half the server's live window. A transient blip
+// (one dropped request, a brief server restart) must not end the session:
+// re-registering invalidates every lease the session's workers still run.
+// Half the window leaves time to re-register before the server stops counting
+// this runner live and routes its work elsewhere.
+const defaultHeartbeatGrace = protocol.RunnerLiveTTL / 2
 
 func New(client ProtocolClient, registry engine.HandlerRegistry, config Config) *Runner {
 	if config.InstanceUID == "" {
@@ -222,6 +239,8 @@ func New(client ProtocolClient, registry engine.HandlerRegistry, config Config) 
 		controlGate:       newRunnerControlGate(),
 		active:            newActiveLeases(),
 		shutdownTimeout:   defaultRunnerShutdownTimeout,
+		heartbeatGrace:    defaultHeartbeatGrace,
+		now:               time.Now,
 	}
 	if config.ActivationTracker != nil {
 		if ackClient, ok := client.(activationAckClient); ok {
@@ -316,7 +335,8 @@ func (r *Runner) Run(ctx context.Context) error {
 		})
 	}
 	// endSession also stops polling. Only heartbeats keep the session alive
-	// server-side, so only a heartbeat failure means the session is gone.
+	// server-side, so only a heartbeat failure the loop stopped tolerating
+	// means the session is gone.
 	endSession := func(err error) {
 		signalError(err)
 		pollCancel()
@@ -662,23 +682,55 @@ func (r *Runner) observeHeartbeat(ctx context.Context, ok bool) {
 }
 
 // heartbeatLoop sends heartbeats on its own ticker, independent of task
-// execution. A heartbeat failure signals the run to exit so the caller can
-// reconnect. Activation directives piggybacked on the heartbeat response are
+// execution. Activation directives piggybacked on the heartbeat response are
 // forwarded to the activation tracker when configured; supply hints are
 // forwarded to the supply gate.
+//
+// A failed heartbeat is tolerated and retried on the next tick until
+// heartbeatGrace has passed since the last success (or since the loop started,
+// right after registration); then endSession ends the run so the caller
+// re-registers. An error that says the session itself is invalid ends it at
+// once, since retrying cannot revive it; see sessionInvalid for which errors
+// a transport lets the runner recognize.
 func (r *Runner) heartbeatLoop(ctx context.Context, sessionID string, inFlight *atomic.Int32, endSession func(error)) {
-	resp, err := r.heartbeat(ctx, sessionID, int(inFlight.Load()))
-	if err != nil {
-		r.observeHeartbeat(ctx, false)
-		endSession(err)
+	lastOK := r.now()
+	failures := 0
+	// beat reports whether the loop should keep going.
+	beat := func() bool {
+		resp, err := r.heartbeat(ctx, sessionID, int(inFlight.Load()))
+		if err != nil {
+			r.observeHeartbeat(ctx, false)
+			if ctx.Err() != nil {
+				// The run is stopping; a heartbeat cut short by it is not a
+				// session failure.
+				return false
+			}
+			failures++
+			if sessionInvalid(err) {
+				endSession(err)
+				return false
+			}
+			if since := r.now().Sub(lastOK); since > r.heartbeatGrace {
+				endSession(fmt.Errorf("heartbeat failed %d times over %s: %w", failures, since.Round(time.Millisecond), err))
+				return false
+			}
+			slog.Default().Warn("runner heartbeat failed; keeping the session",
+				"runner_id", r.config.RunnerID, "consecutive_failures", failures, "err", err)
+			return true
+		}
+		failures = 0
+		lastOK = r.now()
+		r.observeHeartbeat(ctx, true)
+		r.applyRunnerControl(resp.Control)
+		r.processActivations(ctx, resp)
+		r.processSupplyHints(ctx, resp)
+		r.processSupplyKeyRotation(resp)
+		r.processMetricsInterval(resp)
+		return true
+	}
+	if !beat() {
 		return
 	}
-	r.observeHeartbeat(ctx, true)
-	r.applyRunnerControl(resp.Control)
-	r.processActivations(ctx, resp)
-	r.processSupplyHints(ctx, resp)
-	r.processSupplyKeyRotation(resp)
-	r.processMetricsInterval(resp)
 
 	ticker := time.NewTicker(r.config.HeartbeatInterval)
 	defer ticker.Stop()
@@ -687,19 +739,31 @@ func (r *Runner) heartbeatLoop(ctx context.Context, sessionID string, inFlight *
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			resp, err := r.heartbeat(ctx, sessionID, int(inFlight.Load()))
-			if err != nil {
-				r.observeHeartbeat(ctx, false)
-				endSession(err)
+			if !beat() {
 				return
 			}
-			r.observeHeartbeat(ctx, true)
-			r.applyRunnerControl(resp.Control)
-			r.processActivations(ctx, resp)
-			r.processSupplyHints(ctx, resp)
-			r.processSupplyKeyRotation(resp)
-			r.processMetricsInterval(resp)
 		}
+	}
+}
+
+// sessionInvalid reports whether a heartbeat error means the server no longer
+// accepts this session, so retrying it within heartbeatGrace is pointless:
+// the runner or session is unknown, the session was replaced by a newer
+// registration, or the credential was refused (revoked, expired, unknown).
+//
+// Only the gRPC transport lets the runner recognize these: the server maps
+// them to NotFound, FailedPrecondition and Unauthenticated, and GRPCClient
+// returns the status unchanged. The HTTP Client returns a plain error that
+// carries the status code only in its text (404, 409, 401), and the in-process
+// client returns service/control sentinels this package does not import, so
+// on those transports an invalid session is retried until heartbeatGrace
+// runs out like any other failure.
+func sessionInvalid(err error) bool {
+	switch status.Code(err) {
+	case codes.NotFound, codes.FailedPrecondition, codes.Unauthenticated:
+		return true
+	default:
+		return false
 	}
 }
 
