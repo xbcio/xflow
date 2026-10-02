@@ -109,6 +109,54 @@ func TestExecutor_RunsAPackageWithNoKnowledgeOfItsCaller(t *testing.T) {
 	}
 }
 
+// TestExecutor_CarriesEveryFanInPortAcrossTheBoundary pins what a group entry
+// receives when its callers fan in: the port map, not just the main payload.
+// The inner entry node has no in-edges of its own (external edges are not part
+// of the projected package), so this channel is the only one that can carry the
+// non-main ports — before, they were dropped here and the entry saw either one
+// payload or nothing at all.
+func TestExecutor_CarriesEveryFanInPortAcrossTheBoundary(t *testing.T) {
+	pkg := buildTwoNodeChainPackage(t)
+	reg := testRegistry(t)
+	ex := NewExecutor(reg, NewPackageCache(PackageCacheConfig{
+		MaxEntries: 4, MaxPackageBytes: 1 << 20,
+	}), func() Backend { return local.New(local.WithRegistry(reg), local.WithConcurrency(1)) })
+
+	hash, err := graph.ComputePackageHash(pkg)
+	if err != nil {
+		t.Fatalf("compute package hash: %v", err)
+	}
+
+	res, err := ex.Execute(context.Background(), Request{
+		Package:     pkg,
+		PackageHash: hash,
+		// The fan-in shape: two ports, no main.
+		Input: &types.Input{Inputs: map[string]any{
+			"inventory": map[string]any{"in_stock": true},
+			"price":     map[string]any{"total": 42.0},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res.Outcome != OutcomeSuccess {
+		t.Fatalf("outcome = %v, want success (error: %s)", res.Outcome, res.Error)
+	}
+	if len(res.Exits) == 0 {
+		t.Fatal("expected exit results")
+	}
+	got := res.Exits[0].Data
+	inv, ok := got["inventory"].(map[string]any)
+	if !ok || inv["in_stock"] != true {
+		t.Fatalf("exit data inventory = %#v, want the port payload: the entry node "+
+			"did not receive the fan-in's ports", got["inventory"])
+	}
+	price, ok := got["price"].(map[string]any)
+	if !ok || price["total"] != 42.0 {
+		t.Fatalf("exit data price = %#v, want the port payload", got["price"])
+	}
+}
+
 // I1: Executor.Execute registers per-execution collector handlers (Register in
 // collector.go) but, before this fix, never unregistered them -- every call
 // leaked its entries into the outer registry for the life of the process.

@@ -460,10 +460,20 @@ func (fc *failureCapture) fatal() *engine.ObservedNodeFailure {
 	return &fc.failures[len(fc.failures)-1]
 }
 
-// inputDataAsParams extracts Data from the entry input as submission params.
+// inputDataAsParams extracts the entry input as submission params.
+//
+// A fan-in delivers its payloads on ports, so the whole port map is the group's
+// input — main included, when an edge targets it. Forwarding only Data dropped
+// every other port at this boundary, and nothing downstream could recover them:
+// the inner entry node has no in-edges of its own (the external edges are not
+// part of the projected package), so the inner assembly sees a root node and
+// takes the submission params as its input.
 func inputDataAsParams(input *types.Input) map[string]any {
 	if input == nil {
 		return nil
+	}
+	if len(input.Inputs) > 0 {
+		return input.Inputs
 	}
 	return input.Data
 }
