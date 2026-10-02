@@ -96,6 +96,27 @@ func CheckExprSyntax(code string) error {
 	return err
 }
 
+// CheckExprSyntaxInEnv is CheckExprSyntax against a concrete environment.
+//
+// The difference matters for a name the expression language does not know:
+// CheckExprSyntax allows ANY undefined identifier (it exists for expressions
+// whose roots are only present at evaluation time), so `toJson(...)` -- one
+// letter off the builtin `toJSON` -- passes it and fails on the first
+// evaluation instead. Compiling against an environment rejects that name at
+// design time, which is what an authoring check needs.
+//
+// Callers pass an environment shaped like the runtime one (the roots as empty
+// maps). Like CheckExprSyntax it bypasses the program cache, and for the same
+// reason: a cached program would be reused for a real evaluation whose env was
+// never consulted here.
+func CheckExprSyntaxInEnv(code string, env map[string]any) error {
+	opts := make([]expr.Option, 0, len(exprFunctions)+1)
+	opts = append(opts, expr.Env(env))
+	opts = append(opts, exprFunctions...)
+	_, err := expr.Compile(code, opts...)
+	return err
+}
+
 // EvalExpr compiles (with caching) and runs code against env, returning the
 // result. Set asBool to require the expression to evaluate to a boolean
 // (used by conditional nodes like xflow.if and rules-mode xflow.switch).
