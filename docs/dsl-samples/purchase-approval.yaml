@@ -472,7 +472,7 @@ nodes:
       credential: db_conn
       data:
         request_id: "${{ $params.request_id }}"
-        workflow_id: "${{ $workflow.id }}"
+        workflow_name: "${{ $workflow.name }}"
         execution_id: "${{ $execution.id }}"
         completed_at: "${{ now() }}"
 
@@ -485,7 +485,7 @@ nodes:
       function_name: buildErrorContext
       params:
         request_id: "${{ $params.request_id }}"
-        workflow_id: "${{ $workflow.id }}"
+        workflow_name: "${{ $workflow.name }}"
         execution_id: "${{ $execution.id }}"
 
   - name: update_error
