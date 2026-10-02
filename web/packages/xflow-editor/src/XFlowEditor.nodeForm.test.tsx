@@ -85,24 +85,46 @@ const families: Family[] = [
   ["unknown keys", plausibleValue, { extra_top: { a: 1 } }]
 ];
 
-function familyWorkflow([family, of, common]: Family): WorkflowDef {
-  const nodes: WorkflowNode[] = nodeTypes.node_types.map((schema, index) => {
-    const parameters: Record<string, unknown> = {};
-    for (const field of schema.fields) {
-      const value = of(field);
-      if (value !== undefined) parameters[field.name] = value;
-    }
-    if (family === "unknown keys") Object.assign(parameters, { zz_unknown: [1, { deep: null }], __other: "x" });
-    return { name: `n${index}`, type: schema.node_type, ...common, parameters } as WorkflowNode;
-  });
-  return { id: `wf-${family}`, name: family, nodes, connections: {} };
+function nodeFor([family, of, common]: Family, schema: (typeof nodeTypes.node_types)[number], index: number): WorkflowNode {
+  const parameters: Record<string, unknown> = {};
+  for (const field of schema.fields) {
+    const value = of(field);
+    if (value !== undefined) parameters[field.name] = value;
+  }
+  if (family === "unknown keys") Object.assign(parameters, { zz_unknown: [1, { deep: null }], __other: "x" });
+  return { name: `n${index}`, type: schema.node_type, ...common, parameters } as WorkflowNode;
 }
 
+/** Chunk size for the per-family node-type split: small enough that each test
+ * stays a few seconds even under v8 coverage, large enough to keep the test
+ * count (29 types / chunk) manageable. */
+const chunkSize = 5;
+function chunk<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size));
+  return chunks;
+}
+
+function chunkWorkflow(family: Family, schemas: (typeof nodeTypes.node_types)[number][], offset: number): WorkflowDef {
+  const [name] = family;
+  const nodes = schemas.map((schema, index) => nodeFor(family, schema, offset + index));
+  return { id: `wf-${name}-${offset}`, name, nodes, connections: {} };
+}
+
+const chunkedCases = families.flatMap(([name, ...rest]) => {
+  const family: Family = [name, ...rest] as Family;
+  return chunk(nodeTypes.node_types, chunkSize).map((schemas, chunkIndex) => {
+    const types = schemas.map((schema) => schema.node_type).join(", ");
+    const label = `${name} #${chunkIndex + 1} (${types})`;
+    return [label, family, schemas, chunkIndex * chunkSize] as const;
+  });
+});
+
 describe("node form: opening every builtin node writes nothing (Doc C §5.1 #1)", () => {
-  it.each(families.map((family) => [family[0], family] as const))(
+  it.each(chunkedCases)(
     "%s",
-    async (_name, family) => {
-      const workflow = familyWorkflow(family);
+    async (_label, family, schemas, offset) => {
+      const workflow = chunkWorkflow(family, schemas, offset);
       const before = serialize(workflow);
       const handleChange = vi.fn();
       const handleSave = vi.fn(async (next: WorkflowDef) => next);
@@ -126,9 +148,9 @@ describe("node form: opening every builtin node writes nothing (Doc C §5.1 #1)"
       expect(serialize(handleSave.mock.calls[0]?.[0])).toBe(before);
       expect(consoleError).not.toHaveBeenCalled();
     },
-    // Each family mounts and selects every builtin node in one test: ~30s
-    // uninstrumented, and well over 60s under v8 coverage on a loaded host.
-    180_000
+    // Chunks of chunkSize node types each: a few seconds per case even under
+    // v8 coverage on a loaded host, versus the old 180s all-29-types case.
+    45_000
   );
 });
 
