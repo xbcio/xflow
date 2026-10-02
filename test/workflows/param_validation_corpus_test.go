@@ -101,15 +101,36 @@ func stringKeys(v any) any {
 // fixing the sample turns this test red until the entry is removed.
 var knownInvalidSamples = map[string][]string{}
 
+// knownUnrunnableSamples names samples that declare nodes WITHOUT a type and so
+// can never execute: the compiler accepts an empty type (an unregistered custom
+// type is a legitimate shape), registration succeeds, and the failure only
+// appears when the node is first dispatched. The entry is a written
+// acknowledgement, not a silencer -- a sample that gains an untyped node without
+// appearing here fails the corpus, and an entry whose sample turns out to be
+// fully typed fails too.
+var knownUnrunnableSamples = map[string]string{
+	"purchase-approval.yaml": "12 approval nodes carry only `template:`, and node_templates expansion is not implemented (see the file header)",
+}
+
 // registerUnderEnforce validates def directly (to report every issue, not just
 // the first failure) and then registers it through the real enforce-mode
 // registration path. wantErrors, when non-nil, is the exact expected set of
-// error issues for a known-invalid definition.
-func registerUnderEnforce(t *testing.T, srv *apiserver.APIServer, def *types.WorkflowDef, wantErrors []string) {
+// error issues for a known-invalid definition. untypedAllowance is the reason
+// this definition may declare untyped nodes ("" means it may not); the untyped
+// node names are returned so a caller that grants the allowance can check it is
+// actually needed.
+func registerUnderEnforce(t *testing.T, srv *apiserver.APIServer, def *types.WorkflowDef, wantErrors []string, untypedAllowance string) []string {
 	t.Helper()
 	var skipped []string
+	var untyped []string
 	issues := execution.ValidateWorkflowParamsWithOptions(def, execution.RegistryDescriptorLookup,
 		execution.ParamValidationOptions{OnUnknownType: func(nodeType string, _ int, node string) {
+			// An empty type is not "unknown in this process": no type was
+			// declared at all, and no process would register it.
+			if nodeType == "" {
+				untyped = append(untyped, node)
+				return
+			}
 			skipped = append(skipped, node+" ("+nodeType+")")
 		}})
 	errs := errorIssues(issues)
@@ -123,7 +144,7 @@ func registerUnderEnforce(t *testing.T, srv *apiserver.APIServer, def *types.Wor
 		if _, err := srv.RegisterWorkflowReport(context.Background(), namespace.Default, def); !errors.As(err, &paramErr) {
 			t.Fatalf("known-invalid definition registered under enforce: err=%v", err)
 		}
-		return
+		return untyped
 	}
 	if len(errs) > 0 {
 		t.Errorf("error-severity param issues:\n  %s", strings.Join(errs, "\n  "))
@@ -136,6 +157,16 @@ func registerUnderEnforce(t *testing.T, srv *apiserver.APIServer, def *types.Wor
 	if len(skipped) > 0 {
 		t.Logf("skipped (type not registered in this process): %s", strings.Join(skipped, ", "))
 	}
+	switch {
+	case len(untyped) == 0 && untypedAllowance == "":
+	case len(untyped) == 0:
+		t.Errorf("untypedAllowance is set but every node declares a type; remove the allowance: %s", untypedAllowance)
+	case untypedAllowance == "":
+		t.Errorf("nodes with no type can register but never run (%s); give them a type or record the sample in knownUnrunnableSamples",
+			strings.Join(untyped, ", "))
+	default:
+		t.Logf("known unrunnable (%s): %s", untypedAllowance, strings.Join(untyped, ", "))
+	}
 
 	res, err := srv.RegisterWorkflowReport(context.Background(), namespace.Default, def)
 	var paramErr *execution.ParamIssuesError
@@ -147,6 +178,7 @@ func registerUnderEnforce(t *testing.T, srv *apiserver.APIServer, def *types.Wor
 	case res.ID == "":
 		t.Error("registration returned no id")
 	}
+	return untyped
 }
 
 func TestDSLSamplesRegisterUnderEnforce(t *testing.T) {
@@ -168,12 +200,17 @@ func TestDSLSamplesRegisterUnderEnforce(t *testing.T) {
 			if err := yaml.Unmarshal(raw, &doc); err != nil {
 				t.Fatalf("parse YAML: %v", err)
 			}
-			registerUnderEnforce(t, newEnforceAPIServer(t), jsonRoundTrip(t, stringKeys(doc)), knownInvalidSamples[name])
+			registerUnderEnforce(t, newEnforceAPIServer(t), jsonRoundTrip(t, stringKeys(doc)), knownInvalidSamples[name], knownUnrunnableSamples[name])
 		})
 	}
 	for name := range knownInvalidSamples {
 		if _, err := os.Stat(filepath.Join("..", "..", "docs", "dsl-samples", name)); err != nil {
 			t.Errorf("knownInvalidSamples names %s, which no longer exists: %v", name, err)
+		}
+	}
+	for name := range knownUnrunnableSamples {
+		if _, err := os.Stat(filepath.Join("..", "..", "docs", "dsl-samples", name)); err != nil {
+			t.Errorf("knownUnrunnableSamples names %s, which no longer exists: %v", name, err)
 		}
 	}
 }
@@ -261,7 +298,7 @@ func TestTierDefinitionsRegisterUnderEnforce(t *testing.T) {
 				t.Fatalf("build: %v", err)
 			}
 			// A fresh server per definition: tiers may share a name@version.
-			registerUnderEnforce(t, newEnforceAPIServer(t), jsonRoundTrip(t, def), nil)
+			registerUnderEnforce(t, newEnforceAPIServer(t), jsonRoundTrip(t, def), nil, "")
 		})
 	}
 }
