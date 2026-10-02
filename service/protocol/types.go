@@ -185,6 +185,12 @@ type RegisterRunnerResponse struct {
 	SupplyKey string `json:"supply_key,omitempty"`
 }
 
+// RunnerLiveTTL is how long the control plane counts a runner session live
+// after its last successful heartbeat, on the server's clock. It lives here,
+// not in service/control, so a runner can size its heartbeat tolerance against
+// the same window without importing the server.
+const RunnerLiveTTL = 30 * time.Second
+
 type HeartbeatRequest struct {
 	RunnerID  string `json:"runner_id"`
 	SessionID string `json:"session_id"`

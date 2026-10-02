@@ -8,7 +8,9 @@ import (
 )
 
 const (
-	DefaultRunnerLiveTTL = 30 * time.Second
+	// DefaultRunnerLiveTTL is protocol.RunnerLiveTTL, the window a runner's
+	// heartbeat tolerance is sized against; see there.
+	DefaultRunnerLiveTTL = protocol.RunnerLiveTTL
 	// DefaultSelectorFallback is the grace period a "default"-mode activation
 	// waits before falling back to any capable runner when no label-matching
 	// runner is available. 30s ≈ 3 reconcile ticks — long enough for transient
