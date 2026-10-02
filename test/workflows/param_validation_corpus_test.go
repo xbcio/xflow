@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/exprx"
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/namespace"
 	_ "github.com/xbcio/xflow/node" // builtin node and trigger types
@@ -174,6 +176,81 @@ func TestDSLSamplesRegisterUnderEnforce(t *testing.T) {
 			t.Errorf("knownInvalidSamples names %s, which no longer exists: %v", name, err)
 		}
 	}
+}
+
+// TestDSLSampleExpressionsCompile closes a gap the registration corpus leaves
+// open: a `${{ ... }}` template is compiled when its node first evaluates a
+// parameter, so a sample can register cleanly and still fail on its first run.
+// `toJson` where the expression language spells the builtin `toJSON`, and
+// `?? null` where its null literal is `nil`, are both invisible to every other
+// check here -- and both sat in docs/dsl-samples/purchase-approval.yaml until
+// this test existed.
+func TestDSLSampleExpressionsCompile(t *testing.T) {
+	paths, err := filepath.Glob(filepath.Join("..", "..", "docs", "dsl-samples", "*.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) == 0 {
+		t.Fatal("no DSL samples found")
+	}
+	total := 0
+	for _, path := range paths {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			templates := templateExpressions(string(raw))
+			total += len(templates)
+			for _, expr := range templates {
+				// Compiled against a runtime-shaped env, so a name the language
+				// does not know is rejected here rather than on first
+				// evaluation.
+				if err := exprx.CheckExprSyntaxInEnv(expr, sampleTemplateEnv()); err != nil {
+					t.Errorf("${{ %s }}: %v", expr, err)
+				}
+			}
+		})
+	}
+	// A corpus that extracted nothing would pass every subtest above: the
+	// extractor, not the samples, would be the thing under test.
+	if total == 0 {
+		t.Fatal("no ${{ }} templates found in any sample; the extractor is broken")
+	}
+	t.Logf("checked %d templates across %d samples", total, len(paths))
+}
+
+// sampleTemplateEnv is the runtime expression environment with every root
+// present but empty. Its SHAPE is what the check needs -- the roots are
+// map[string]any at runtime too -- so an expression that names a root or a
+// function that does not exist fails to compile.
+func sampleTemplateEnv() map[string]any {
+	return map[string]any{
+		"$input":     map[string]any{},
+		"$inputs":    map[string]any{},
+		"$nodes":     map[string]any{},
+		"$params":    map[string]any{},
+		"$vars":      map[string]any{},
+		"$config":    map[string]any{},
+		"$runtime":   map[string]any{},
+		"$supplies":  map[string]any{},
+		"$execution": map[string]any{},
+		"$workflow":  map[string]any{},
+	}
+}
+
+// templateExprPattern matches the ${{ ... }} form. The non-greedy body stops at
+// the first `}}`; an expression containing a `}}` (a nested map literal) would
+// be cut short, which is why the check reports the fragment it compiled.
+var templateExprPattern = regexp.MustCompile(`\$\{\{(.*?)\}\}`)
+
+func templateExpressions(doc string) []string {
+	matches := templateExprPattern.FindAllStringSubmatch(doc, -1)
+	out := make([]string, 0, len(matches))
+	for _, m := range matches {
+		out = append(out, strings.TrimSpace(m[1]))
+	}
+	return out
 }
 
 func TestTierDefinitionsRegisterUnderEnforce(t *testing.T) {
