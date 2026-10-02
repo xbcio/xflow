@@ -2422,6 +2422,13 @@ nodes:
 
 ## 7. Pin Data（测试数据钉住）
 
+> **⚠️ 未实现 — 没有任何运行时消费者。** `pin_data` 与 `settings.pin_data_mode`
+> 在类型上存在（`types.WorkflowDef.PinData`、`types.WorkflowSettings.PinDataMode`），
+> 也参与工作流指纹计算（`backend/workflowhash`），但引擎、runner、SDK 里没有
+> 任何代码读它们：被钉住的节点照样入队、照样发起真实的 HTTP/gRPC 调用。**下面
+> 这一节描述的是尚未落地的设计意图，不是现有能力。** 需要固定输入做调试时，
+> 目前只能把节点参数写成常量或改走 `xflow.function`。
+
 ### 7.1 概述
 
 Pin Data 允许在工作流级别为指定节点提供静态模拟输出数据。钉住的节点跳过实际执行（不入队 Asynq），直接使用 mock 数据作为节点输出，下游节点通过 `$nodes['xxx']` / `$input` 正常访问。
