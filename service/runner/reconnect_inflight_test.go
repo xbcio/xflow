@@ -177,22 +177,42 @@ func TestRunnerCountsPreviousSessionInFlightAfterReconnect(t *testing.T) {
 			}
 		}
 	}
-	// With every slot busy, give the poll loop many PollWait rounds (paced by
+	// handler.started firing only means the lease that fills the last slot
+	// has been handed to a worker; it says nothing about when the heartbeat
+	// goroutine's *next* send observes the resulting inFlight. A heartbeat
+	// call reads inFlight.Load() and then independently races to acquire
+	// client.mu and append — that read can happen before the fill, while the
+	// append lands after this goroutine has already taken a naive snapshot,
+	// recording a stale (pre-fill) value at an index that looks like "after
+	// base". So base must be the index of the first heartbeat that actually
+	// reports the full concurrency, not merely the first snapshot taken after
+	// handler.started.
+	var base int
+	waitFor("a heartbeat reporting full concurrency", func() bool {
+		_, hb, _ := client.snapshot()
+		for i, n := range hb {
+			if n == concurrency {
+				base = i
+				return true
+			}
+		}
+		return false
+	})
+	// From that point, give the poll loop many PollWait rounds (paced by
 	// heartbeats) in which it must not poll.
-	_, base, _ := client.snapshot()
 	waitFor("ten more heartbeats", func() bool {
 		_, hb, _ := client.snapshot()
-		return len(hb) >= len(base)+10
+		return len(hb) >= base+10
 	})
 	polls, heartbeats, _ := client.snapshot()
 	if polls != 1 {
 		t.Fatalf("second session polled %d times while %d workers were busy, want 1 (the poll that filled the last slot)",
 			polls, concurrency)
 	}
-	for i, n := range heartbeats[len(base):] {
+	for i, n := range heartbeats[base:] {
 		if n != concurrency {
 			t.Fatalf("second-session heartbeat %d InFlight = %d while %d handlers run, want %d",
-				len(base)+i, n, handler.running.Load(), concurrency)
+				base+i, n, handler.running.Load(), concurrency)
 		}
 	}
 	for i, n := range heartbeats {
