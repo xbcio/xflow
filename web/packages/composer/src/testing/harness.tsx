@@ -2,7 +2,7 @@
 // applyPatches, a patch log and a warning log. Always renders in StrictMode.
 
 import { act, render, type RenderResult } from "@testing-library/react";
-import { StrictMode, useCallback, useState } from "react";
+import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
 import { applyPatches, type ComposerSpec, type Patch, type Warning } from "../core";
 import { Composer } from "../react/Composer";
 import type { Registry, RenderKernel, ValidationResult } from "../react/contract";
@@ -43,12 +43,34 @@ export function mountComposer(options: MountOptions): Mounted {
     const [value, setValue] = useState<object>(options.value);
     current = value;
     setHost = setValue;
+    // Tracks every ackDelayMs timer this instance has scheduled so the
+    // unmount cleanup below can cancel the ones still pending. Without this,
+    // a timer that outlives the test (the test ends, or calls m.unmount(),
+    // before ackDelayMs elapses) fires setValue against a jsdom environment
+    // the test runner has already torn down, surfacing as an uncaught
+    // "window is not defined" after the test that scheduled it has finished.
+    const pendingTimers = useRef(new Set<ReturnType<typeof setTimeout>>());
+    useEffect(() => {
+      const timers = pendingTimers.current;
+      return () => {
+        for (const timer of timers) clearTimeout(timer);
+        timers.clear();
+      };
+    }, []);
     const onChange = useCallback((patches: Patch[]) => {
       log.push(patches);
       if (options.ignoreChanges) return;
       const apply = () => setValue((prev) => applyPatches(prev, patches));
-      if (options.ackDelayMs) setTimeout(() => act(apply), options.ackDelayMs);
-      else apply();
+      if (options.ackDelayMs) {
+        const timers = pendingTimers.current;
+        const timer = setTimeout(() => {
+          timers.delete(timer);
+          act(apply);
+        }, options.ackDelayMs);
+        timers.add(timer);
+      } else {
+        apply();
+      }
     }, []);
     const onWarning = useCallback((warning: Warning) => warnings.push(warning), []);
     return (
