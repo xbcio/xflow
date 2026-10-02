@@ -1,6 +1,10 @@
 # XFlow DSL 完整规范
 
 > 本文档包含 XFlow 的完整 DSL 定义，包括语法规范、Connections 机制和表达式引擎说明。
+>
+> 可直接加载的样例在 [`docs/dsl-samples/`](../dsl-samples/)：每个文件头部写明了它
+> 自己的前置条件（占位域名、需要的服务、runner 能力），以及其中哪些部分仍是提案。
+> 它们由 `test/workflows` 的语料测试解析并注册。
 
 ## 目录
 
