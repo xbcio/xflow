@@ -2060,7 +2060,7 @@ nodes:
 >
 > ⚠️ **body 输出应避免 `_` 前缀键**：`_error`/`_index` 是框架为失败项保留的占位符键。若 body 自身的输出恰好带有 `_error` 键（例如 body 的终止节点自己产出了名为 `_error` 的字段），该项在 `results` 数组中会与一次真实的失败在结构上完全无法区分——这是已知、接受的数据质量缺口（不在本设计范围内修复），作者应确保 body 的正常输出不使用 `_` 前缀的键名。
 >
-> **当前实现状态**：`xflow.map` 的两种形态均已落地。**body 形态**——`expandLoopSplit`（`engine/expand.go`，map/split 共用的批扩展机制）为每个 batch 创建 sub-execution 并调用 `runBatchBody`，后者通过 `BatchBodyExecutor.ExecuteBatchBody` 把 body 投影成的 `SubgraphPackage` 逐项真正执行（每项一次内嵌引擎运行），再用 `BatchResultForCommit` 把逐项结果折叠成该批的结果与批级成败判定。`completeLoopSplit` 把各批的 `items` 数组按批次顺序拼接成扁平的 `results` 数组，失败项以 `{_error, _index}` 占位符落在原本的下标位置，使 `count` 恒等于输入长度。**expression 形态**——`MapNode.Execute`（`node/internal/flow/map.go` 的 `evalItemsInline`）就地逐项求值，直接返回同一份 `{results, count}` 契约，不发扇出描述符、不创建 sub-execution。上述 body 语法与 `continue_on_error` 结构均已生效，不再是规划设计。`body_concurrency` 只对 body 形态有意义：expression 形态没有子执行可并发，`evalItemsInline` 恒为就地串行求值。`xflow.split` 没有 `body` 概念（它通过下游 `connections` 扇出，见下文 Split 节点一节），本节的 body 语法与结果结构均只适用于 `xflow.map`。两种形态都不发任何标记键：引擎从编译期投影的 body 判定扩展与否，`_loop`/`_split` 已移除。原 P1-4 已通过批次任务与普通节点任务分通道关闭；`body_concurrency` 只限制单批 body worker，不是 runner 全局预算。runner 级资源治理仍由活动 roadmap 跟踪，不属于本 DSL 的稳定契约。
+> **当前实现状态**：`xflow.map` 的两种形态均已落地。**body 形态**——`expandLoopSplit`（`engine/expand.go`，map 的批扩展机制）为每个 batch 创建 sub-execution 并调用 `runBatchBody`，后者通过 `BatchBodyExecutor.ExecuteBatchBody` 把 body 投影成的 `SubgraphPackage` 逐项真正执行（每项一次内嵌引擎运行），再用 `BatchResultForCommit` 把逐项结果折叠成该批的结果与批级成败判定。`completeLoopSplit` 把各批的 `items` 数组按批次顺序拼接成扁平的 `results` 数组，失败项以 `{_error, _index}` 占位符落在原本的下标位置，使 `count` 恒等于输入长度。**expression 形态**——`MapNode.Execute`（`node/internal/flow/map.go` 的 `evalItemsInline`）就地逐项求值，直接返回同一份 `{results, count}` 契约，不发扇出描述符、不创建 sub-execution。上述 body 语法与 `continue_on_error` 结构均已生效，不再是规划设计。`body_concurrency` 只对 body 形态有意义：expression 形态没有子执行可并发，`evalItemsInline` 恒为就地串行求值。两种形态都不发任何标记键：引擎从编译期投影的 body 判定扩展与否，`_loop`/`_split` 已移除。原 P1-4 已通过批次任务与普通节点任务分通道关闭；`body_concurrency` 只限制单批 body worker，不是 runner 全局预算。runner 级资源治理仍由活动 roadmap 跟踪，不属于本 DSL 的稳定契约。
 > **跨域引用编译规则**：
 > - `body` 内 `$nodes['x']` 中 `x` 不在 `body.nodes` 中时，编译器视为**跨域引用**
 > - 跨域引用仅允许读取 loop 节点的上游祖先节点（DAG 拓扑序中确定在 loop 之前完成的节点）
@@ -2118,70 +2118,6 @@ stock_ok: "${{ $input.inventory.in_stock }}"
 # $nodes['final_merge'] 即最先到达分支的原始输出
 result: "${{ $nodes['final_merge'].status }}"
 ```
-
-#### Split 节点
-
-> **⚠️ 未实现 — 编译期拒绝。** `xflow.split` 从未实现过。它的 handler
-> (`node/internal/flow/split.go`) 确实会产出扇出结构，引擎的 `isLoopSplitOutput`
-> 也确实把它展开成 batch 任务；但 batch 执行要求一个已投影的 body，而
-> `xflow.split` 根本没有 `body` 参数，`projectNodeBodies` 因此不会给它投影
-> （投影的判据是「`body` 参数的值解得出一个 `type: xflow.subgraph` 的节点」，
-> 见 `engine/graph/compile.go` 的 `declaresSubgraphBody`）。实测结果：提交一个含 split 的工作流不会报错，而是**永远挂起**——每个
-> batch 失败、退避重试，直到执行超时。
->
-> 因此 `graph.Compile` 现在会在编译期直接拒绝 `xflow.split` 节点，把这个静默挂起
-> 变成定义工作流时的明确报错。**下面这一节描述的是从未落地的设计意图，不是现有
-> 能力。** 需要按项迭代请改用 `xflow.map` + `body`。
-
-将数组拆分为独立数据项，每项沿下游 connections 路径独立执行。与 `xflow.map` 的区别：map 通过内嵌 `body` 子图定义迭代体，split 通过下游 connections 定义扇出路径，用 `xflow.merge` 汇合结果。
-
-```yaml
-- name: fan_out
-  type: xflow.split
-  parameters:
-    items: expression            # 数组表达式（必填）
-    batch_size: int              # 每批并发数量（可选，默认无限制，即全部并行）
-    continue_on_error: bool      # 单项失败是否继续（可选，默认 false）
-```
-
-**执行行为**：
-
-1. 对 `items` 数组的每个元素，引擎为下游路径创建一个独立的执行分支
-2. 每个分支中，下游节点通过 `$input` 访问当前元素
-3. 所有分支执行完毕后，split 节点的 `main` 端口输出结果数组（与 loop 的 `result` 格式相同）
-4. 下游 merge 节点可汇合这些并行分支
-
-**示例**：
-
-```yaml
-nodes:
-  - name: split_orders
-    type: xflow.split
-    parameters:
-      items: "$nodes['fetch'].orders"
-      batch_size: 5
-
-  - name: process_order
-    type: xflow.http
-    parameters:
-      method: POST
-      url: "{{ $config.order_service }}/process"
-      body:
-        order_id: "${{ $input.id }}"
-
-connections:
-  split_orders:
-    main:
-      - node: process_order
-```
-
-> **何时用 split vs loop**：
-> - 扇出路径是**现有 connections 中的多节点链路**（含分支、合并等复杂拓扑）→ 用 `split`
-> - 扇出路径是**简单的几步操作**，不想污染顶层节点命名空间 → 用 `loop`（body 子图隔离）
->
-> **`$input` vs `$item` 命名差异**：
-> - `split` 的下游是顶层 connections 中的常规节点，每个并行分支将数组元素作为上游输出传递，因此 `$input`（标准上游访问器）自然指向当前元素。
-> - `loop` 的 `body` 是隔离子图，子图内节点拥有自己的 connections 和 `$input`。若复用 `$input` 表示迭代元素会与子图内部连线数据冲突，因此使用独立的 `$item` 消除歧义。
 
 #### Wait 节点
 
