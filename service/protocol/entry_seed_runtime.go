@@ -274,7 +274,9 @@ func (h *HTTPEntrySeedRuntime) seedExecutionFromEntry(ctx context.Context, req t
 		return types.EntrySeedResponse{}, fmt.Errorf("entry-seed: request failed: %w", err)
 	}
 	defer func() {
-		_, _ = io.Copy(io.Discard, httpResp.Body)
+		// Bounded drain: a body past the limit is closed rather than read to
+		// its end, which costs at most the connection's reuse.
+		_, _ = io.Copy(io.Discard, io.LimitReader(httpResp.Body, MaxRunnerResponseBodyBytes))
 		_ = httpResp.Body.Close()
 	}()
 
@@ -306,7 +308,13 @@ func (h *HTTPEntrySeedRuntime) seedExecutionFromEntry(ctx context.Context, req t
 			ExecutionID string `json:"execution_id"`
 			Error       string `json:"error"`
 		}
-		_ = json.NewDecoder(httpResp.Body).Decode(&body)
+		data, err := readEntrySeedBody(httpResp.Body)
+		if err != nil {
+			// An unreadable or oversized 409 is never a handled conflict:
+			// returning an error keeps the offset uncommitted.
+			return types.EntrySeedResponse{}, err
+		}
+		_ = json.Unmarshal(data, &body)
 		if body.State == "conflict" {
 			// Genuine admission conflict — handled; caller commits the offset.
 			return types.EntrySeedResponse{
@@ -318,7 +326,7 @@ func (h *HTTPEntrySeedRuntime) seedExecutionFromEntry(ctx context.Context, req t
 		// so the caller does NOT commit the offset (offset-safety: Kafka must
 		// redeliver to the current-generation owner). The reason string is a
 		// server-controlled classifier only; it carries no token/URL/params.
-		return types.EntrySeedResponse{}, fmt.Errorf("entry-seed: rejected by generation fence: %s", body.Error)
+		return types.EntrySeedResponse{}, fmt.Errorf("entry-seed: rejected by generation fence: %s", boundedReason(body.Error))
 	}
 
 	// Any other non-2xx is transient/unexpected → error (no offset commit).
@@ -326,8 +334,12 @@ func (h *HTTPEntrySeedRuntime) seedExecutionFromEntry(ctx context.Context, req t
 		return types.EntrySeedResponse{}, fmt.Errorf("entry-seed: unexpected status %d", httpResp.StatusCode)
 	}
 
+	data, err := readEntrySeedBody(httpResp.Body)
+	if err != nil {
+		return types.EntrySeedResponse{}, err
+	}
 	var wireResp SeedExecutionResponse
-	if err := json.NewDecoder(httpResp.Body).Decode(&wireResp); err != nil {
+	if err := json.Unmarshal(data, &wireResp); err != nil {
 		return types.EntrySeedResponse{}, fmt.Errorf("entry-seed: decode response: %w", err)
 	}
 
@@ -344,6 +356,30 @@ func (h *HTTPEntrySeedRuntime) seedExecutionFromEntry(ctx context.Context, req t
 			ExecutionID: types.ExecutionID(wireResp.ExecutionID),
 		}, nil
 	default:
-		return types.EntrySeedResponse{}, fmt.Errorf("entry-seed: unknown response state %q", wireResp.State)
+		return types.EntrySeedResponse{}, fmt.Errorf("entry-seed: unknown response state %q", boundedReason(wireResp.State))
 	}
+}
+
+// readEntrySeedBody reads a seed admission response body under the same
+// MaxRunnerResponseBodyBytes cap as the runner Client: it reads one byte past
+// the limit so an oversized body is detected rather than silently truncated,
+// and reports it as ErrRunnerResponseTooLarge.
+func readEntrySeedBody(body io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, MaxRunnerResponseBodyBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("entry-seed: read response: %w", err)
+	}
+	if len(data) > MaxRunnerResponseBodyBytes {
+		return nil, fmt.Errorf("entry-seed: %w (limit %d bytes)", ErrRunnerResponseTooLarge, MaxRunnerResponseBodyBytes)
+	}
+	return data, nil
+}
+
+// boundedReason truncates a server-supplied classifier to
+// maxRunnerErrorBodyBytes before it is quoted in an error.
+func boundedReason(s string) string {
+	if len(s) > maxRunnerErrorBodyBytes {
+		return s[:maxRunnerErrorBodyBytes]
+	}
+	return s
 }
