@@ -316,7 +316,7 @@ context:
 
 # 全局配置
 settings:
-  timeout: 3600s
+  # 没有 workflow 级 timeout 字段：时限是节点级 timeout（NodeDef.timeout）
   concurrency: 10
   timezone: "Asia/Shanghai"
 
@@ -451,10 +451,13 @@ nodes:
 
       body:
         order_id: "${{ $params.order_id }}"
-        amount: "${{ $inputs.price.total }}"
+        # process_payment 只有一条入边（来自 merge_checks），所以 merge 那份
+        # 按端口建键的映射就是它的 $input。
+        amount: "${{ $input.price.total }}"
 
       options:
-        timeout: 60000
+        # duration 必须带单位：这个值按 Go 的 time.ParseDuration 解析。
+        timeout: "60s"
 
   # 7. 支付结果分支（使用 xflow.switch 多路判断）
   - name: payment_result
@@ -623,6 +626,13 @@ outputs:
 > trigger 激活参数不求值）已全部关闭。实现位于 `exprx/`（模板与求值）、
 > `execution/params.go`（统一求值层）、`engine/graph/activation_params.go`
 > （trigger 激活参数）。
+>
+> **追加更正（2026-10-02）**：上面这句"均已实现"在本章的一条规则上不成立过——
+> `$inputs` 按**端口名**建键的语义，引擎从未实现：`engine/input.go` 一直按上游
+> **节点名**建键，节点级 `inputs:` 声明除参与指纹计算外没有任何读者。现在两侧
+> 都已实现：引擎按连线的 `input:`（缺省 `main`）建键，声明成为编译期约束，
+> 未声明的扇入发出编译 warning。校验在 `engine/graph/input_ports.go`，语义见
+> 上文「`$input` vs `$inputs`」小节。
 >
 > **求值发生在两个地方**，因为一个 trigger 从来不是被调度的任务，而是一个入口
 > 索引，它的参数永远不会经过任务边界：
@@ -846,12 +856,21 @@ price: "${{ $inputs.price.total }}"
 amount: "${{ $nodes['calculate_price'].total }}"
 ```
 
-> **`$input` vs `$inputs`**：
-> - `$input` 是 `$inputs.main` 的语法糖，用于访问上游传入的数据。
-> - `$inputs.port_name` 用于节点有多条入边时，按端口名区分各上游的数据。
-> - 未声明 `inputs` 的节点隐含 `main` 输入端口（connections 中未指定 `input:` 的连线默认进入 `main` 端口）。
-> - 声明了 `inputs` 的节点仅包含所声明的端口；若未包含 `main`，则 `$input` 为 `nil`。
-> - 未声明 `inputs` 且有多条入边：编译 **warning**，建议声明 `inputs` 端口。
+> **`$input` vs `$inputs`**（2026-10-02 起为已实现语义）：
+> - `$input` 是节点的主输入。只有一条入边时它就是那条边的上游输出；多条入边时它
+>   等于 `$inputs.main`（没有任何入边指向 `main` 时为 `nil`）。
+> - `$inputs.port_name` 用于节点有多条入边时，按端口名区分各上游的数据。端口名取
+>   连线上的 `input:`，未指定即隐含的 `main`。引擎装配输入时按键建立，**只有多条
+>   入边的节点才有 `$inputs`**（单入边节点的 `$inputs` 为 nil）。
+> - 未声明 `inputs` 的节点隐含 `main` 输入端口，并接受任意 `input:` 标签——这是为
+>   兼容声明式端口出现之前编写的流程。
+> - 声明了 `inputs` 的节点仅包含所声明的端口，且声明**有约束力**：连线指向未声明
+>   的端口是编译错误；`required: true` 的端口没有任何连线也是编译错误。
+> - 未声明 `inputs` 且有多条入边：编译 **warning**。这些入边会全部落在 `main` 上，
+>   只有最后一个非空上游可读；若它们互斥（同一 if/switch 的不同分支），可忽略。
+> - 同一条键上，空值不覆盖已有值：某条上游未产出（分支未执行）时，它的 nil 不会
+>   抹掉别的上游写进该端口的数据。
+> - 若节点声明了 `inputs` 但不含 `main`，`$input` 为 `nil`。
 
 #### 未执行节点的引用行为
 
@@ -2082,9 +2101,12 @@ stock_ok: "${{ $nodes['merge_checks'].inventory.in_stock }}"
 total:    "${{ $nodes['merge_checks'].price.total }}"
 
 # 下游访问示例（声明式端口，推荐）
-# 如果下游节点声明了 inputs，可通过端口名访问，解耦节点名
-stock_ok: "${{ $inputs.inventory.in_stock }}"
-total:    "${{ $inputs.price.total }}"
+#
+# 用 $inputs 读端口要同时满足两件事：节点声明了这些端口，且每条入边带上了对应
+# 的 input: 标签——只声明端口而不标连线，连线仍落在隐含的 main 上。
+# 若下游只有一条入边（常见于"merge → 单个消费者"），拿到的就是 merge 那份
+# 按端口建键的映射，直接读 $input.inventory 即可：
+stock_ok: "${{ $input.inventory.in_stock }}"
 ```
 
 `wait_any` 模式 — 直接返回最先完成的那个分支的输出（无 key 包装）：
