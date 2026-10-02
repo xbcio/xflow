@@ -272,7 +272,10 @@ export function declaredOutputPorts(node: {
     case "xflow.if":
       return { ports: [...dynamicPorts, "true", "false"], hasMain: false };
     case "xflow.approval":
-      return { ports: [...dynamicPorts, "approved", "rejected", "timeout"], hasMain: false };
+      // "returned" is the port an approver's `return` action leaves by; the
+      // list has to match the node's declared outputs or the editor refuses to
+      // draw the edge the engine accepts.
+      return { ports: [...dynamicPorts, "approved", "rejected", "returned", "timeout"], hasMain: false };
     case "xflow.wait":
       return { ports: [...dynamicPorts, "timeout", "error"], hasMain: true };
     case "xflow.http":

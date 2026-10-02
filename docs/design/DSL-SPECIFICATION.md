@@ -1325,7 +1325,7 @@ XFlow 的 connections 仅描述拓扑关系（谁连到谁），条件逻辑由 
 | 条件判断 | xflow.if | 二元条件分支（true/false） | main | true, false | ❌ | 不适用 |
 | 多路分支 | xflow.switch | 根据条件多路分支 | main | _(无静态)_ | ✅ `parameters.outputs` | 不适用 |
 | 等待 | xflow.wait | 等待事件或时间 | main | main, timeout, error | ❌ | 可选 |
-| 审批 | xflow.approval | 人工审批网关 | main | approved, rejected, timeout | ❌ | 可选 |
+| 审批 | xflow.approval | 人工审批网关 | main | approved, rejected, returned, timeout | ❌ | 可选 |
 | 合并 | xflow.merge | 合并多个分支 | 动态（`input: xxx`） | main | ❌ | 可选 |
 | 脚本 | xflow.script | 沙箱化动态脚本（JS via goja/qjs，或 wasm via wazero） | main | main, error | ❌ | 可选 |
 | 通知 | xflow.notification | 记录标准化通知请求，交由下游发送 | main | main, error | ❌ | 可选 |

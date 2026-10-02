@@ -8,7 +8,7 @@ describe("declaredOutputPorts", () => {
       hasMain: false
     });
     expect(declaredOutputPorts({ type: "xflow.approval" })).toEqual({
-      ports: ["approved", "rejected", "timeout"],
+      ports: ["approved", "rejected", "returned", "timeout"],
       hasMain: false
     });
   });
