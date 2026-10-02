@@ -7,16 +7,16 @@ import (
 )
 
 const (
-	// DefaultIssuedIdentityCacheTTL is the entry lifetime an embedding host is
-	// expected to hand the constructor when it wants the cache and has no reason
-	// to pick its own number (SAS does exactly that). It is a deliberate middle
-	// ground: long enough that the ~10-13 runner requests/sec a host sees collapse
-	// to about one store read per runner per half-minute, short enough that a
-	// revocation performed by a *different* process — another replica, or an
-	// operator at a SQL prompt — reaches this process's credential checks within
-	// half a minute. Nothing in this package applies it implicitly: a caller that
-	// passes 0 gets no cache, because the shared cmd/server binary must be inert
-	// until an operator asks for otherwise.
+	// DefaultIssuedIdentityCacheTTL is the entry lifetime a host gets when it wants
+	// the cache and has no reason to pick its own number: cmd/server makes it the
+	// --runner-identity-cache-ttl default, and embedding hosts pass it explicitly.
+	// It is a deliberate middle ground: long enough that the ~10-13 runner
+	// requests/sec a host sees collapse to about one store read per runner per
+	// half-minute, short enough that a revocation performed by a *different*
+	// process — another replica, or an operator at a SQL prompt — reaches this
+	// process's credential checks within half a minute. This package applies
+	// nothing implicitly: turning the cache off is passing 0, which returns the
+	// inner store untouched.
 	DefaultIssuedIdentityCacheTTL = 30 * time.Second
 
 	// MaxIssuedIdentityCacheTTL caps what a host may configure. For any process that

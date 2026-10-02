@@ -116,15 +116,16 @@ type serverConfig struct {
 	// auditable act on this host, not a scope someone can be granted.
 	registrationCodeTTL time.Duration
 	// runnerIdentityCacheTTL bounds a process-local read-through cache over the
-	// issued-identity store. Zero (the default) means no cache, for the same
-	// reason the two TTLs above default to zero: an upgrade of this binary must
-	// not change how long a revoked credential keeps authenticating.
+	// issued-identity store. It is ON by default, because the read it removes sits
+	// on the hottest path a runner has and costs 80-2500ms against a remote store,
+	// while the staleness it introduces is bounded and priced below.
 	//
-	// Where it is on, this TTL is the ONLY staleness bound for a process that did
-	// not itself perform the revocation — a sibling replica, or an operator at a
-	// SQL prompt. A mutation through this process's own store evicts immediately
-	// regardless of the TTL, so the TTL prices exactly the cross-process window.
-	// Clamped to store.MaxIssuedIdentityCacheTTL; negative disables.
+	// This TTL is the ONLY staleness bound for a process that did not itself
+	// perform the revocation — a sibling replica, or an operator at a SQL prompt.
+	// A mutation through this process's own store evicts immediately regardless of
+	// the TTL, so the TTL prices exactly the cross-process window. Clamped to
+	// store.MaxIssuedIdentityCacheTTL; 0 disables the cache; negative is rejected
+	// at startup.
 	runnerIdentityCacheTTL time.Duration
 	// trustedProxies are the direct-peer CIDRs allowed to supply
 	// X-Forwarded-For to the runner protocol.
@@ -246,7 +247,7 @@ func parseServerConfig(args []string) (serverConfig, error) {
 		"Leader-only pool runner instance prune cadence (0 = 1m default)")
 	fs.DurationVar(&cfg.registrationCodeTTL, "registration-code-ttl", 0,
 		"Ceiling on the lifetime of a registration code minted via the management API; also its default (0 disables expiry)")
-	fs.DurationVar(&cfg.runnerIdentityCacheTTL, "runner-identity-cache-ttl", 0,
+	fs.DurationVar(&cfg.runnerIdentityCacheTTL, "runner-identity-cache-ttl", store.DefaultIssuedIdentityCacheTTL,
 		"Process-local read-through cache for issued-identity lookups (0 disables; capped at 5m). "+
 			"Bounds how long a revocation performed by ANOTHER process takes to reach this one's credential checks")
 	fs.StringVar(&trustedProxyCIDRs, "trusted-proxies", "",
@@ -320,6 +321,12 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	}
 	if cfg.registrationCodeTTL < 0 {
 		return serverConfig{}, fmt.Errorf("--registration-code-ttl must not be negative")
+	}
+	if cfg.runnerIdentityCacheTTL < 0 {
+		// 0 is the documented way to turn the cache off; a negative value is an
+		// operator who meant something this binary cannot honour, so it fails
+		// loudly rather than silently disabling.
+		return serverConfig{}, fmt.Errorf("--runner-identity-cache-ttl must not be negative (use 0 to disable)")
 	}
 	cfg.paramValidation = xflowsdk.ParamValidationMode(paramValidation)
 	if cfg.paramValidation != "" && !cfg.paramValidation.Valid() {
@@ -751,8 +758,9 @@ func runServer(ctx context.Context, cfg serverConfig) error {
 		if enrollDB != nil {
 			registrationCodeStore = sqlstore.NewRegistrationCodeStore(enrollDB)
 			// The SQL store is the only one worth wrapping: the in-memory
-			// alternative is already a map read. ttl <= 0 returns the store
-			// unchanged, so the default costs nothing here.
+			// alternative is already a map read. An operator who wants the
+			// pre-cache behaviour passes --runner-identity-cache-ttl=0, which
+			// returns this store unchanged.
 			issuedIdentityStore = store.NewCachedIssuedIdentityStore(
 				sqlstore.NewIssuedIdentityStore(enrollDB), cfg.runnerIdentityCacheTTL, nil)
 			runnerPoolStore = sqlstore.NewRunnerPoolStore(enrollDB)
