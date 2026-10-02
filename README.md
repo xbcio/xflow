@@ -225,4 +225,4 @@ See `docs/` for detailed design documentation:
 - [docs/design/ARCHITECTURE.md](docs/design/ARCHITECTURE.md) — Current implemented architecture (engine/execution/backend layering)
 - [docs/design/DEPLOYMENT-TOPOLOGIES.md](docs/design/DEPLOYMENT-TOPOLOGIES.md) — SDK modes, server/runner cluster, current vs planned
 - [docs/design/CORE-COMPONENTS.md](docs/design/CORE-COMPONENTS.md) — Target design for server clustering
-- [docs/dsl-samples/](docs/dsl-samples/) — Runnable DSL examples (e.g. `purchase-approval.yaml`)
+- [docs/dsl-samples/](docs/dsl-samples/) — Worked DSL samples. Each file states its own prerequisites in its header: the ones that run against real services name placeholders, and parts still awaiting implementation are marked as proposals there (`purchase-approval.yaml`'s approval nodes, for instance, need `node_templates` expansion that does not exist yet). All of them are parsed and registered by `test/workflows`' sample corpus test.
