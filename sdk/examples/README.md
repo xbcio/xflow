@@ -7,6 +7,7 @@ These examples are executable Go tests for the embedded SDK surface.
 - `basic_test.go` shows local-mode DAG basics: direct handlers, port routing, and error-output branching.
 - `vulnerability_approval_test.go` shows the production-oriented approval shape for distributed services: typed node handlers, built-in approval gates, external signals, inspection, and rejected/approved branches.
 - `cyclic_vulnerability_approval_test.go` shows an opt-in cyclic approval workflow: explicit `xflow.start`, rejected security review returning to remediation, validation looping back into review, and final change approval/deployment/closure.
+- `approval_delegation_test.go` shows the approval ledger's chain-amending actions: an approver delegating their slot, an approver adding a signer, and the resulting suspension counts and decision trail.
 - `runner_selector_test.go` shows workflow-level default runner placement with a node-level local approval override.
 
 ## Local vs cluster handlers
@@ -17,9 +18,11 @@ For distributed services, define reusable typed nodes and instantiate them in
 the workflow:
 
 ```go
+import "github.com/xbcio/xflow/types"
+
 var NormalizeVulnerability = node.Define("demo.vuln.normalize",
-	func(ctx context.Context, input *node.Input) (*node.Output, error) {
-		return &node.Output{Data: input.Data}, nil
+	func(ctx context.Context, input *types.Input) (*types.Output, error) {
+		return &types.Output{Data: input.Data}, nil
 	},
 )
 
