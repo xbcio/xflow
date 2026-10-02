@@ -51,9 +51,14 @@ const HighReleaseSignal = "hold/release"
 // empty *dynamicpb.Message, which carries no message descriptor, and protobuf
 // panics on the nil descriptor before the node can return anything. A panic is
 // not something a workflow can route around, so the tier drives the path that
-// works — a NotFound status is classified permanent and reaches the error port —
-// and the success path is covered separately as a known defect rather than
-// quietly dropped.
+// works — a NotFound status is classified permanent and reaches the error port.
+//
+// NOTHING ELSE COVERS THE SUCCESS PATH. This comment used to say it was
+// "covered separately as a known defect"; there is no such test — the gRPC node
+// has unit tests for its factory and its validation errors, an integration test
+// for error classification, and no test that ever gets a response back. So the
+// defect is open and unpinned: whoever fixes grpc.go should add the success-path
+// test that this tier cannot host.
 //
 // supply.external and supply.static are declaration-only node types: neither
 // registers a handler, and the engine skips both at execution. Their whole
