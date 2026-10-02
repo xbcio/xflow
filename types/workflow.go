@@ -158,6 +158,15 @@ type Position struct {
 	Y float64 `json:"y,omitempty"`
 }
 
+// DefaultInputPort is the input port a node has when it declares no `inputs:`,
+// and the port a connection targets when it carries no `input:` label.
+//
+// Fan-in inputs are keyed by port (Input.Inputs, exposed as $inputs), so every
+// unlabelled edge of a node lands on this one key. A node that fans in without
+// declaring its ports is warned about at compile time: two upstreams sharing a
+// key means only one of them can be read.
+const DefaultInputPort = "main"
+
 // PortDecl declares an input port on a node.
 type PortDecl struct {
 	Name     string `json:"name,omitempty"`

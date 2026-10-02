@@ -138,17 +138,43 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 		}
 		input.Data = StripNodeState(cloneMap(data))
 	default:
-		// Fan-in: expose all upstream outputs keyed by node name.
+		// Fan-in: expose every upstream output under the input port its edge
+		// targets, which is what $inputs is defined as -- the connection's
+		// `input:` label, falling back to the implicit main port. Two edges that
+		// name no port therefore share one key; that is the case the compiler
+		// warns about, because only one of the two payloads can be read.
+		//
+		// A nil output never overwrites a value already collected under the same
+		// key. An upstream that did not run has no output (GetOutput returns nil
+		// for it), and letting that nil win would turn "one arm of the fan-in was
+		// skipped" into "this port carries nothing". The key stays present either
+		// way, so $inputs.x still resolves -- to nil -- for a port nothing
+		// produced.
 		inputs := make(map[string]any, len(inEdges))
 		for _, edge := range inEdges {
+			port := edge.DstPort
+			if port == "" {
+				port = types.DefaultInputPort
+			}
 			name := g.NodeName(edge.SrcIdx)
 			data, err := e.state.GetOutput(ctx, t.ExecutionID, name)
 			if err != nil {
 				return nil, fmt.Errorf("get upstream output %q/%q: %w", t.ExecutionID, name, err)
 			}
-			inputs[name] = StripNodeState(cloneMap(data))
+			value := StripNodeState(cloneMap(data))
+			if prev, seen := inputs[port]; seen && prev != nil && value == nil {
+				continue
+			}
+			inputs[port] = value
 		}
 		input.Inputs = inputs
+		// main is the port $input reads, so a fan-in whose edges name no port
+		// still hands its data to the node's main input. Without this the node
+		// would see $inputs.main while $input stayed nil, and $input is the name
+		// every handler authored before ports existed reads.
+		if main, ok := inputs[types.DefaultInputPort].(map[string]any); ok {
+			input.Data = cloneMap(main)
+		}
 	}
 	applyExecutionScope(input, snap.Scope)
 	if err := prefetchNodesRefs(ctx, e, t, g, input); err != nil {
