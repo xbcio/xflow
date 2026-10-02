@@ -427,6 +427,15 @@ outbox 语义，也不构成 release gate 已满足的证据。Loop/Split 也仍
 扩展路径，未纳入静态 DAG completion 与 server/runner production-ready
 保证。
 
+**Runner Protocol 消息上限与升级顺序。** 两种传输下 runner protocol 单条
+消息（HTTP 请求/响应 body、gRPC message）上限均为 8 MiB
+（`protocol.MaxRunnerResponseBodyBytes` / `MaxRunnerRequestBodyBytes`）。
+新版 runner 拒收超过 8 MiB 的 server→runner 消息，并把超过 8 MiB 的结果上报
+转为永久失败（`ErrRunnerRequestTooLarge`）；新版 server 会在下发前直接失败
+编码后超限的 lease。旧版 server 不执行该上限，可能把超限 lease 发给新 runner，
+后者只会反复拒收而不会让该 lease 失败。因此**升级时必须先升级全部 server，
+再升级 runner**；回滚顺序相反（先回滚 runner）。
+
 ### 4.6 传输差异：gRPC 缺 ActivationAck
 
 `HeartbeatResponse` 的控制载荷在**两种传输下都已完整**：
