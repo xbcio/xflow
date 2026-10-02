@@ -20,6 +20,10 @@ type stubIssuedIdentityStore struct {
 	rotations  int
 	lists      int
 	lookupErr  error
+	// mutationErr makes Issue/Revoke/Renew fail AFTER recording the call, which is
+	// how a timed-out mutation looks to its caller: the store may or may not have
+	// committed, and nothing about the error tells the caller which.
+	mutationErr error
 
 	lookupGate    chan struct{} // non-nil: Lookup blocks until it is closed
 	lookupEntered chan struct{} // non-nil: signalled once Lookup is inside
@@ -39,6 +43,9 @@ func (s *stubIssuedIdentityStore) Issue(_ context.Context, id IssuedIdentity) er
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.issues++
+	if s.mutationErr != nil {
+		return s.mutationErr
+	}
 	s.identities[id.RunnerID] = id.Clone()
 	return nil
 }
@@ -84,6 +91,9 @@ func (s *stubIssuedIdentityStore) Revoke(_ context.Context, runnerID string, sco
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.revokes++
+	if s.mutationErr != nil {
+		return s.mutationErr
+	}
 	if id, ok := s.identities[runnerID]; ok {
 		id.RevokedAt = time.Now().UTC()
 		s.identities[runnerID] = id
@@ -95,6 +105,9 @@ func (s *stubIssuedIdentityStore) Renew(_ context.Context, runnerID string, expi
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.renews++
+	if s.mutationErr != nil {
+		return s.mutationErr
+	}
 	if id, ok := s.identities[runnerID]; ok {
 		id.ExpiresAt = expiresAt
 		s.identities[runnerID] = id
@@ -106,6 +119,9 @@ func (s *stubIssuedIdentityStore) RotateCredential(_ context.Context, runnerID s
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.rotations++
+	if s.mutationErr != nil {
+		return 0, s.mutationErr
+	}
 	id, ok := s.identities[runnerID]
 	if !ok {
 		return 0, nil
@@ -532,6 +548,16 @@ func TestCachedIssuedIdentityStoreSweepsExpiredEntries(t *testing.T) {
 		t.Fatalf("entries = %d after sweeping past the TTL (was %d), want the expired "+
 			"entries reclaimed: lazy expiry alone cannot bound the map", after, filled)
 	}
+	// Assert a specific expired key is gone, not merely that some count dropped: a
+	// sweep that reclaimed a single entry per cooldown would satisfy a count-only
+	// assertion while leaving the map effectively unbounded.
+	cached.mu.Lock()
+	_, survivor := cached.entries[runnerIDForIndex(5)]
+	cached.mu.Unlock()
+	if survivor {
+		t.Fatalf("an expired entry survived the sweep; reclamation has to scale with the "+
+			"expired set, not merely happen")
+	}
 }
 
 func runnerIDForIndex(i int) string {
@@ -577,4 +603,210 @@ type recordingCacheObserver struct {
 func (o *recordingCacheObserver) OnIssuedIdentityCache(result string) { o.results = append(o.results, result) }
 func (o *recordingCacheObserver) OnIssuedIdentityCacheEntries(count int) {
 	o.counts = append(o.counts, count)
+}
+
+// TestCachedIssuedIdentityStoreEvictsEvenWhenTheMutationFails pins the claim the
+// commit calls security-relevant: eviction is deferred around the inner call, so it
+// runs when the mutation returns an error too. A Revoke that timed out may still
+// have committed, and a cache that only evicted on success would go on serving the
+// row this process just tried to revoke.
+func TestCachedIssuedIdentityStoreEvictsEvenWhenTheMutationFails(t *testing.T) {
+	ctx := context.Background()
+	inner := newStubIssuedIdentityStore(cacheTestIdentity("runner-1", "tok", "team-a"))
+	cached, _ := newTestCachedStore(t, inner, time.Minute)
+	boom := errors.New("context deadline exceeded")
+
+	mutations := []struct {
+		name string
+		call func() error
+	}{
+		{"Issue", func() error { return cached.Issue(ctx, cacheTestIdentity("runner-1", "tok2", "team-b")) }},
+		{"Revoke", func() error { return cached.Revoke(ctx, "runner-1", OwnerScope{}) }},
+		{"Renew", func() error { return cached.Renew(ctx, "runner-1", time.Now().UTC().Add(time.Hour)) }},
+		{"RotateCredential", func() error {
+			_, err := cached.RotateCredential(ctx, "runner-1", 1, HashSecret("tok3"), time.Now().UTC().Add(time.Minute))
+			return err
+		}},
+	}
+	for _, tc := range mutations {
+		t.Run(tc.name, func(t *testing.T) {
+			inner.mu.Lock()
+			inner.mutationErr = nil
+			inner.mu.Unlock()
+			if _, _, err := cached.Lookup(ctx, "runner-1"); err != nil {
+				t.Fatalf("warm-up Lookup: %v", err)
+			}
+
+			inner.mu.Lock()
+			inner.mutationErr = boom
+			inner.mu.Unlock()
+			if err := tc.call(); !errors.Is(err, boom) {
+				t.Fatalf("mutation error = %v, want the injected %v", err, boom)
+			}
+
+			cached.mu.Lock()
+			_, present := cached.entries["runner-1"]
+			cached.mu.Unlock()
+			if present {
+				t.Fatalf("the entry survived a failed %s: eviction must not be "+
+					"conditional on success, because an error does not tell the caller "+
+					"whether the store committed", tc.name)
+			}
+		})
+	}
+}
+
+// TestCachedIssuedIdentityStoreHitReturnsAPrivateCopy covers the branch the
+// insert-time copy test does not: mutating what a HIT returned must not reach the
+// entry, or the next request authenticates against a caller's edits.
+func TestCachedIssuedIdentityStoreHitReturnsAPrivateCopy(t *testing.T) {
+	ctx := context.Background()
+	inner := newStubIssuedIdentityStore(cacheTestIdentity("runner-1", "tok", "team-a"))
+	cached, _ := newTestCachedStore(t, inner, time.Minute)
+
+	if _, _, err := cached.Lookup(ctx, "runner-1"); err != nil { // miss, fills the entry
+		t.Fatalf("warm-up Lookup: %v", err)
+	}
+	hit, _, err := cached.Lookup(ctx, "runner-1")
+	if err != nil {
+		t.Fatalf("hit Lookup: %v", err)
+	}
+	hit.Scope.AllowedNamespaces[0] = "mutated"
+	hit.RunnerID = "mutated"
+
+	again, _, err := cached.Lookup(ctx, "runner-1")
+	if err != nil {
+		t.Fatalf("second hit Lookup: %v", err)
+	}
+	if again.RunnerID != "runner-1" || again.Scope.AllowedNamespaces[0] != "team-a" {
+		t.Fatalf("hit returned %+v, want the unmutated entry: dropping Clone() on the hit "+
+			"path hands every caller a live view of the cache's own state", again)
+	}
+	if lookups, _, _, _ := inner.counters(); lookups != 1 {
+		t.Fatalf("inner Lookups = %d, want 1 (everything after the first was a hit)", lookups)
+	}
+}
+
+// TestCachedIssuedIdentityStoreDoesNotServeAnAlreadyExpiredRow covers the clamp's
+// other half. A row whose ExpiresAt is already behind the read is still returned —
+// the authenticator, not the cache, decides it is unusable — but it must not be
+// parked for a TTL: the deadline lands in the past, so the next lookup re-reads.
+func TestCachedIssuedIdentityStoreDoesNotServeAnAlreadyExpiredRow(t *testing.T) {
+	ctx := context.Background()
+	id := cacheTestIdentity("runner-1", "tok")
+	id.ExpiresAt = time.Unix(1700000000, 0).UTC().Add(-time.Minute)
+	inner := newStubIssuedIdentityStore(id)
+	cached, _ := newTestCachedStore(t, inner, time.Hour)
+
+	if _, found, err := cached.Lookup(ctx, "runner-1"); err != nil || !found {
+		t.Fatalf("first Lookup = (_, %v, %v), want the row returned to the caller", found, err)
+	}
+	if _, _, err := cached.Lookup(ctx, "runner-1"); err != nil {
+		t.Fatalf("second Lookup: %v", err)
+	}
+	if lookups, _, _, _ := inner.counters(); lookups != 2 {
+		t.Fatalf("inner Lookups = %d, want 2: a row that was already expired at read time "+
+			"must be re-read on the next lookup, not served from cache for a TTL", lookups)
+	}
+}
+
+func TestCachedIssuedIdentityStoreCapsEntries(t *testing.T) {
+	ctx := context.Background()
+	inner := newStubIssuedIdentityStore()
+	for i := 0; i < 8; i++ {
+		id := cacheTestIdentity(runnerIDForIndex(i), "tok")
+		inner.identities[id.RunnerID] = id
+	}
+	cached, _ := newTestCachedStore(t, inner, time.Minute)
+	cached.maxEntries = 4
+
+	for i := 0; i < 8; i++ {
+		if _, _, err := cached.Lookup(ctx, runnerIDForIndex(i)); err != nil {
+			t.Fatalf("Lookup %d: %v", i, err)
+		}
+	}
+	cached.mu.Lock()
+	entries := len(cached.entries)
+	cached.mu.Unlock()
+	if entries > 4 {
+		t.Fatalf("entries = %d, want at most the 4-entry cap: a map keyed by a "+
+			"caller-supplied string needs a hard bound, because the store's collation "+
+			"makes more distinct keys match a real row than there are runners", entries)
+	}
+}
+
+func TestCachedIssuedIdentityStoreSweepRespectsItsGates(t *testing.T) {
+	ctx := context.Background()
+	inner := newStubIssuedIdentityStore()
+	for i := 0; i < issuedIdentityCacheSweepThreshold+10; i++ {
+		id := cacheTestIdentity(runnerIDForIndex(i), "tok")
+		inner.identities[id.RunnerID] = id
+	}
+	cached, setNow := newTestCachedStore(t, inner, 10*time.Second)
+	cached.maxEntries = issuedIdentityCacheSweepThreshold + 10
+	base := time.Unix(1700000000, 0).UTC()
+
+	for i := 0; i < 10; i++ {
+		if _, _, err := cached.Lookup(ctx, runnerIDForIndex(i)); err != nil {
+			t.Fatalf("Lookup %d: %v", i, err)
+		}
+	}
+	setNow(base.Add(time.Hour))
+	if _, _, err := cached.Lookup(ctx, runnerIDForIndex(10)); err != nil {
+		t.Fatalf("Lookup past the cooldown: %v", err)
+	}
+	cached.mu.Lock()
+	swept := !cached.lastSweep.IsZero()
+	cached.mu.Unlock()
+	if swept {
+		t.Fatalf("a sweep ran with only 11 entries in the map: walking the whole map on "+
+			"every miss below the threshold would put an O(n) cost on the auth hot path")
+	}
+}
+
+// lockProbingObserver reports whether it was called while the cache mutex was held.
+type lockProbingObserver struct {
+	store     *cachedIssuedIdentityStore
+	sawLocked bool
+}
+
+func (o *lockProbingObserver) OnIssuedIdentityCache(string) {}
+
+func (o *lockProbingObserver) OnIssuedIdentityCacheEntries(int) {
+	if !o.store.mu.TryLock() {
+		o.sawLocked = true
+		return
+	}
+	o.store.mu.Unlock()
+}
+
+// TestCachedIssuedIdentityStoreNotifiesObserversOutsideTheLock pins the contract the
+// interface documents. An observer is host-supplied code: called under the cache
+// mutex, a callback that blocks stalls every Lookup on every key, and one that
+// re-enters the store deadlocks outright. Both precedents in this repo
+// (execution/subgraph/cache.go, node/internal/code/script/wasm/host.go) notify
+// after unlocking.
+func TestCachedIssuedIdentityStoreNotifiesObserversOutsideTheLock(t *testing.T) {
+	ctx := context.Background()
+	inner := newStubIssuedIdentityStore(cacheTestIdentity("runner-1", "tok"))
+	obs := &lockProbingObserver{}
+	wrapped := NewCachedIssuedIdentityStore(inner, time.Minute, obs)
+	cached, ok := wrapped.(*cachedIssuedIdentityStore)
+	if !ok {
+		t.Fatalf("NewCachedIssuedIdentityStore returned %T", wrapped)
+	}
+	now := time.Unix(1700000000, 0).UTC()
+	cached.now = func() time.Time { return now }
+	obs.store = cached
+
+	if _, _, err := cached.Lookup(ctx, "runner-1"); err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if err := cached.Revoke(ctx, "runner-1", OwnerScope{}); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if obs.sawLocked {
+		t.Fatalf("the entries callback ran with the cache mutex held: a host observer that " +
+			"blocks there stalls every lookup, and one that re-enters the store deadlocks")
+	}
 }
