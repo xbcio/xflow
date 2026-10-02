@@ -267,6 +267,9 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := validateInputPorts(def, g); err != nil {
+		return nil, err
+	}
 	if err := buildDependencyEdges(def, depPorts, g, nil, nil); err != nil {
 		return nil, err
 	}
@@ -659,6 +662,9 @@ func buildEdges(def *types.WorkflowDef, g *Graph) ([]dependencyPort, error) {
 				if g.nodes[dstIdx].Kind == types.NodeKindSupply {
 					return nil, fmt.Errorf("%w: supply node %q is the destination of a data edge from %s:%s",
 						ErrSupplyInDataflow, c.Node, srcName, port)
+				}
+				if err := declaredInputPorts(&def.Nodes[dstIdx]).validateEdgeTarget(srcName, c.Node, c.Input); err != nil {
+					return nil, err
 				}
 				edge := Edge{
 					SrcIdx:  srcIdx,
