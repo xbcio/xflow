@@ -23,10 +23,15 @@
 #      approved，谁批的要看 decisions。
 #   4. 节点模板 node_templates：减少审批节点重复定义（DSL 扩展提案）
 #
-# 仍属提案、后端尚未实现的部分（本文件保留它们只为展示意图，节点会忽略）：
+# 仍属提案、后端尚未实现的部分（本文件保留它们只为展示意图）：
 #   node_templates 展开、节点级 title/detail 展示字段、标准审批模板里的
 #   actions/reminder（UI 操作清单与提醒策略），以及 collectApprovalTrail
 #   这类自定义 function 的具体实现。
+#
+# ⚠ 因此本文件当前**不可执行**：下面 12 个审批/校验节点只写了 template 没有
+#   type，参数校验与注册能通过（编译器接受空 type），运行时却会以
+#   "no handler registered for node type" 失败。等 node_templates 展开实现，
+#   或把这 12 个节点的 type 与参数展开写全，它才能作为完整样例跑起来。
 
 spec: "1.0"
 name: "purchase-approval"
@@ -155,6 +160,8 @@ nodes:
 
   - name: create_record
     type: xflow.database
+    # 错误出口必须在节点上选择策略，否则下面 connections 里的 error 连线永远不会走
+    on_error: error_output
     parameters:
       operation: insert
       table: approval_records
@@ -169,6 +176,13 @@ nodes:
 
   - name: fetch_approvers
     type: xflow.http
+    on_error: error_output
+    # 重试是节点级参数（NodeDef.retry），不是 xflow.http 的 options.retry——
+    # 后者节点不读。
+    retry:
+      enabled: true
+      max_attempts: 3
+      strategy: exponential
     parameters:
       method: GET
       url: "{{ $config.org_service }}/api/v1/approval-chain"
@@ -177,11 +191,8 @@ nodes:
         user_id: "${{ $params.applicant_id }}"
         amount: "${{ $params.amount }}"
       options:
-        timeout: 10000
-        retry:
-          enabled: true
-          max_attempts: 3
-          strategy: exponential
+        # 时长要带单位：这里按 Go 的 duration 解析，"10000" 解析不出来。
+        timeout: "10s"
 
   - name: route_by_amount
     type: xflow.switch
@@ -305,6 +316,11 @@ nodes:
 
   - name: l3_parallel_merge
     type: xflow.merge
+    # 两条入边各自声明端口，merge 的输出即按端口名建键：
+    # 下游读 $nodes['l3_parallel_merge'].vp / .finance。
+    inputs:
+      - name: vp
+      - name: finance
     parameters:
       mode: wait_all
 
@@ -324,8 +340,13 @@ nodes:
 
   # 注：route_by_amount 保证同一执行中只有一条路径激活，
   # 因此 wait_any 等价于"等待唯一到达的那条路径"，不会重复触发。
+  #
+  # 这些汇合点的多条入边互斥（同一 switch 的不同分支），所以它们都只有
+  # main 一个端口：显式声明它是为了说明"谁到都行"，而不是漏写端口名。
   - name: merge_approved
     type: xflow.merge
+    inputs:
+      - name: main
     parameters:
       mode: wait_any
 
@@ -339,13 +360,13 @@ nodes:
         amount: "${{ $params.amount }}"
         final_status: "approved"
         approval_levels: "${{ $vars.approval_levels }}"
-        l1_manager: "${{ $nodes['l1_manager'] ?? null }}"
-        l2_manager: "${{ $nodes['l2_manager'] ?? null }}"
-        l2_director: "${{ $nodes['l2_director'] ?? null }}"
-        l3_manager: "${{ $nodes['l3_manager'] ?? null }}"
-        l3_director: "${{ $nodes['l3_director'] ?? null }}"
-        l3_vp: "${{ $nodes['l3_vp'] ?? null }}"
-        l3_finance: "${{ $nodes['l3_finance'] ?? null }}"
+        l1_manager: "${{ $nodes['l1_manager'] ?? nil }}"
+        l2_manager: "${{ $nodes['l2_manager'] ?? nil }}"
+        l2_director: "${{ $nodes['l2_director'] ?? nil }}"
+        l3_manager: "${{ $nodes['l3_manager'] ?? nil }}"
+        l3_director: "${{ $nodes['l3_director'] ?? nil }}"
+        l3_vp: "${{ $nodes['l3_vp'] ?? nil }}"
+        l3_finance: "${{ $nodes['l3_finance'] ?? nil }}"
       # 返回值结构：
       # {
       #   "chain": [
@@ -357,6 +378,7 @@ nodes:
 
   - name: update_approved
     type: xflow.database
+    on_error: error_output
     parameters:
       operation: update
       table: approval_records
@@ -366,7 +388,7 @@ nodes:
       data:
         status: "approved"
         approved_at: "${{ now() }}"
-        approval_chain: "${{ toJson($nodes['collect_approved_trail'].chain) }}"
+        approval_chain: "${{ toJSON($nodes['collect_approved_trail'].chain) }}"
 
   - name: notify_approved
     type: xflow.notification
@@ -380,6 +402,8 @@ nodes:
 
   - name: merge_rejected
     type: xflow.merge
+    inputs:
+      - name: main
     parameters:
       mode: wait_any
 
@@ -393,13 +417,13 @@ nodes:
         amount: "${{ $params.amount }}"
         final_status: "rejected"
         approval_levels: "${{ $vars.approval_levels }}"
-        l1_manager: "${{ $nodes['l1_manager'] ?? null }}"
-        l2_manager: "${{ $nodes['l2_manager'] ?? null }}"
-        l2_director: "${{ $nodes['l2_director'] ?? null }}"
-        l3_manager: "${{ $nodes['l3_manager'] ?? null }}"
-        l3_director: "${{ $nodes['l3_director'] ?? null }}"
-        l3_vp: "${{ $nodes['l3_vp'] ?? null }}"
-        l3_finance: "${{ $nodes['l3_finance'] ?? null }}"
+        l1_manager: "${{ $nodes['l1_manager'] ?? nil }}"
+        l2_manager: "${{ $nodes['l2_manager'] ?? nil }}"
+        l2_director: "${{ $nodes['l2_director'] ?? nil }}"
+        l3_manager: "${{ $nodes['l3_manager'] ?? nil }}"
+        l3_director: "${{ $nodes['l3_director'] ?? nil }}"
+        l3_vp: "${{ $nodes['l3_vp'] ?? nil }}"
+        l3_finance: "${{ $nodes['l3_finance'] ?? nil }}"
       # 返回值额外包含 reject_reason：
       # {
       #   "chain": [...],
@@ -408,6 +432,7 @@ nodes:
 
   - name: update_rejected
     type: xflow.database
+    on_error: error_output
     parameters:
       operation: update
       table: approval_records
@@ -417,7 +442,7 @@ nodes:
       data:
         status: "rejected"
         rejected_at: "${{ now() }}"
-        approval_chain: "${{ toJson($nodes['collect_rejected_trail'].chain) }}"
+        approval_chain: "${{ toJSON($nodes['collect_rejected_trail'].chain) }}"
         reject_reason: "${{ $nodes['collect_rejected_trail'].reject_reason }}"
 
   - name: notify_rejected
@@ -433,6 +458,8 @@ nodes:
 
   - name: final_merge
     type: xflow.merge
+    inputs:
+      - name: main
     parameters:
       mode: wait_any
 
