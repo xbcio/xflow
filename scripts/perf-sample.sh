@@ -85,9 +85,15 @@ fi
 
 # Collect structured perf.metric lines into a single parseable block so the CI
 # sampling job can trend p50/p95/p99 + throughput without re-parsing free text.
-echo >> "${OUT}"
-echo "# structured metrics (key=value, one per line)" >> "${OUT}"
-grep -h '^perf\.metric ' "${OUT}" >> "${OUT}" 2>/dev/null || true
+# Capture first, then append: GNU grep refuses to read a file that is also its
+# stdout ("input file is also the output"), which made a direct
+# `grep ... "${OUT}" >> "${OUT}"` a silent no-op on the CI runner.
+metrics="$(grep -h '^perf\.metric ' "${OUT}" 2>/dev/null || true)"
+{
+  echo
+  echo "# structured metrics (key=value, one per line)"
+  if [[ -n "${metrics}" ]]; then printf '%s\n' "${metrics}"; fi
+} >> "${OUT}"
 
 echo >> "${OUT}"
 echo "# end of sample" >> "${OUT}"
