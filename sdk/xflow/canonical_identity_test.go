@@ -54,7 +54,6 @@ func canonicalCorpus() map[string]func(*WorkflowBuilder) {
 		"xflow.switch expression":         func(w *WorkflowBuilder) { w.Node("n", node.SwitchExpr("'a'", "b")) },
 		"xflow.merge wait_all":            func(w *WorkflowBuilder) { w.Node("n", node.Merge(node.MergeWaitAll)) },
 		"xflow.merge wait_any":            func(w *WorkflowBuilder) { w.Node("n", node.Merge(node.MergeWaitAny)) },
-		"xflow.split":                     func(w *WorkflowBuilder) { w.Node("n", node.Split("{{ $input.items }}")) },
 		"xflow.map without body":          func(w *WorkflowBuilder) { w.Node("n", node.Map("{{ $input.items }}", 0)) },
 		"xflow.map with body":             func(w *WorkflowBuilder) { w.Node("n", node.Map("{{ $input.items }}", 2)).Body(bodyOf("body")) },
 		"xflow.map with nested body":      nestedMap(bodyOf),

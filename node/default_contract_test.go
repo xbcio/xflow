@@ -212,22 +212,6 @@ func TestDefaultContractMergeOnOthers(t *testing.T) {
 	})
 }
 
-// --- xflow.split ----------------------------------------------------------
-
-// split.continue_on_error has no reader at all: the handler does not read it
-// and the compiler rejects xflow.split outright (engine/graph/compile.go). The
-// contract holds trivially -- absent and the Default produce the same output
-// -- and this test pins that until a reader exists.
-func TestDefaultContractSplitContinueOnError(t *testing.T) {
-	def := descriptorDefault(t, "xflow.split", 1, "continue_on_error")
-	h := actionHandler(t, "xflow.split")
-	base := map[string]any{"items": "items"}
-	data := map[string]any{"items": []any{1, 2}}
-	assertSameBehaviour(t, defaultVariants(t, base, "continue_on_error", def), func(t *testing.T, params map[string]any) any {
-		return outcomeOf(h.Execute(context.Background(), &types.Input{Params: params, Data: data}))
-	})
-}
-
 // --- xflow.wait -----------------------------------------------------------
 
 func TestDefaultContractWaitMode(t *testing.T) {
@@ -395,16 +379,6 @@ func TestFallbackContractMerge(t *testing.T) {
 				Params: params,
 				Inputs: map[string]any{"a": map[string]any{"v": 1}, "b": map[string]any{"w": 2}},
 			}))
-		}),
-	})
-}
-
-func TestFallbackContractSplit(t *testing.T) {
-	h := actionHandler(t, "xflow.split")
-	data := map[string]any{"items": []any{1, 2, 3}}
-	runFallbackChecks(t, "xflow.split", 1, map[string]func(*testing.T, nodeinternal.Fallback){
-		"batch_size": sameAsFallback(map[string]any{"items": "items"}, func(t *testing.T, params map[string]any) any {
-			return outcomeOf(h.Execute(context.Background(), &types.Input{Params: params, Data: data}))
 		}),
 	})
 }

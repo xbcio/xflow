@@ -178,11 +178,11 @@ func TestBodyMemberDeclaringItsOwnSubgraphBodyIsRejected(t *testing.T) {
 	}
 }
 
-// 三个保留类型不得作为 body 成员出现。它们各自的理由值判据看不见，所以这张表
+// 两个保留类型不得作为 body 成员出现。它们各自的理由值判据看不见，所以这张表
 // 必须留着——xflow.map 的 expression 形态根本没有 body，但它的 handler 无条件
 // 发扩展标记，照样在 body 里 fan-out。
 func TestReservedTypesAreRejectedAsBodyMembers(t *testing.T) {
-	for _, memberType := range []string{"xflow.split", "xflow.map", subgraphNodeType} {
+	for _, memberType := range []string{"xflow.map", subgraphNodeType} {
 		t.Run(memberType, func(t *testing.T) {
 			if !bannedBodyMemberTypes[memberType] {
 				t.Fatalf("%q is not in bannedBodyMemberTypes", memberType)

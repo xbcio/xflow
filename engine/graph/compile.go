@@ -63,10 +63,6 @@ var transformNodeTypes = map[string]bool{
 //
 // It is a literal list rather than a value check because the property is about
 // what the HANDLER does, which no parameter can show.
-//
-// xflow.split is not here. It is rejected outright in registerNodes: it fans
-// out through downstream connections rather than a body, so there is nothing
-// for the engine to expand and every batch fails.
 var fanOutNodeTypes = map[string]bool{
 	"xflow.map": true,
 }
@@ -76,7 +72,6 @@ var fanOutNodeTypes = map[string]bool{
 //
 //   - xflow.subgraph is the body container itself. It has no unit-layer
 //     semantics and is already rejected at the top level.
-//   - xflow.split is rejected everywhere (see registerNodes).
 //   - xflow.map is a fan-out node (see fanOutNodeTypes). In its body form it
 //     expands, so nesting one inside a body is exactly the recursion this ban
 //     exists for. Its expression form does not expand and would be harmless,
@@ -91,7 +86,6 @@ var fanOutNodeTypes = map[string]bool{
 // that grows a body tomorrow is banned from nesting the day it lands, with no
 // list to update.
 var bannedBodyMemberTypes = map[string]bool{
-	"xflow.split":    true,
 	"xflow.map":      true,
 	subgraphNodeType: true,
 }
@@ -429,12 +423,16 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 		if nd.Type == "xflow.start" || nd.Kind == types.NodeKindTrigger {
 			g.entryIndexes[nd.Name] = i
 		}
+		// xflow.split was removed on 2026-10-02: its handler never had a working
+		// execution path, so no workflow could depend on it. The rule below is a
+		// tombstone, and it stays because Compile is the only check every
+		// submission path shares -- the SDK rejects a workflow naming a type it
+		// has no handler for before it compiles, but the HTTP register and
+		// execute paths never run that scan, so without this rule a stale
+		// definition would register cleanly and fail only at first dispatch.
 		if nd.Type == "xflow.split" {
-			return 0, fmt.Errorf("node %q: xflow.split is not implemented and cannot run: "+
-				"its handler emits a fan-out shape the engine expands into batch tasks, but a batch "+
-				"has no body to run (xflow.split declares no body parameter, so projectNodeBodies "+
-				"never projects one), so every batch fails and the execution never completes. "+
-				"Use xflow.map with a body instead", nd.Name)
+			return 0, fmt.Errorf("node %q: xflow.split was removed and cannot run: "+
+				"use xflow.map with a body instead", nd.Name)
 		}
 		if err := validateNodeBody(nd); err != nil {
 			return 0, err
@@ -864,7 +862,7 @@ func extractMergeMode(nd types.NodeDef) string {
 //     to reject.
 //  5. A node whose body IS a sub-graph (declaresSubgraphBody — the value's
 //     shape, not the node's type) has that sub-graph validated: its members may
-//     not be xflow.split / xflow.subgraph / xflow.map, and may not themselves
+//     not be xflow.subgraph / xflow.map, and may not themselves
 //     declare a sub-graph body. v1 forbids nesting because recursive fan-out
 //     makes the sub-execution tree unbounded, and checking each member's own
 //     parameters is what makes that ban hold for a node type that grows a body

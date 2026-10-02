@@ -36,13 +36,12 @@ func TestFullWorkflowCoversEveryNodeType(t *testing.T) {
 	}
 	seen := workflows.NodeTypesIn(def)
 
-	deprecated := setOf(workflows.DeprecatedNodeTypes)
 	want := append(append(append([]string{}, registry.Types()...), registry.TriggerTypes()...),
 		workflows.DeclarationOnlyNodeTypes...)
 
 	var missing []string
 	for _, nodeType := range want {
-		if !deprecated[nodeType] && seen[nodeType] == 0 {
+		if seen[nodeType] == 0 {
 			missing = append(missing, nodeType)
 		}
 	}
@@ -58,7 +57,7 @@ func TestFullWorkflowCoversEveryNodeType(t *testing.T) {
 	known[workflows.SubgraphNodeType] = true
 	var unknown []string
 	for nodeType := range seen {
-		if !known[nodeType] || deprecated[nodeType] {
+		if !known[nodeType] {
 			unknown = append(unknown, nodeType)
 		}
 	}

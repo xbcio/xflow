@@ -39,7 +39,6 @@ var builtinFallbacks = []Fallback{
 	{Type: "xflow.browser.cdp", Version: 1, Param: "target_host", Derived: "the host of entry_url"},
 	{Type: "xflow.http", Version: 1, Param: "mode", Value: "json"},
 	{Type: "xflow.merge", Version: 1, Param: "mode", Value: "wait_all"},
-	{Type: "xflow.split", Version: 1, Param: "batch_size", Value: float64(1)},
 	{Type: "xflow.switch", Version: 1, Param: "default_output", Value: "default"},
 	{Type: "xflow.switch", Version: 1, Param: "mode", Value: "rules"},
 	{Type: "xflow.wait", Version: 1, Param: "signal_name", Derived: "<node name>/signal, when signals is empty"},

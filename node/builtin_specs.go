@@ -90,7 +90,6 @@ func builtinDescribers() []types.DescriptorProvider {
 		&flow.IfNode{},
 		&flow.SwitchNode{},
 		&flow.MergeNode{},
-		&flow.SplitNode{},
 		&flow.MapNode{},
 		&flow.WaitNode{},
 		&group.ApprovalNode{},

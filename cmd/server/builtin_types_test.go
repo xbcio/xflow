@@ -27,7 +27,6 @@ var builtinNodeTypes = []string{
 	"xflow.merge",
 	"xflow.notification",
 	"xflow.script",
-	"xflow.split",
 	"xflow.start",
 	"xflow.switch",
 	"xflow.transform.aggregate",

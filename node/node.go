@@ -53,7 +53,6 @@ type IfNode = flow.IfNode
 type SwitchRule = flow.SwitchRule
 type SwitchNode = flow.SwitchNode
 type MergeNode = flow.MergeNode
-type SplitNode = flow.SplitNode
 type MapNode = flow.MapNode
 type WaitMode = flow.WaitMode
 type WaitNode = flow.WaitNode
@@ -327,13 +326,6 @@ func SwitchExpr(expression string, defaultOutput string) *SwitchNode {
 	return flow.SwitchExpr(expression, defaultOutput)
 }
 func Merge(mode MergeMode) *MergeNode { return flow.Merge(mode) }
-
-// Deprecated: xflow.split was never implemented. graph.Compile rejects any
-// workflow containing a split node -- before that rejection existed, such a
-// workflow did not fail, it hung until its deadline (a split node expands into
-// batch tasks, but batches need a projected body and split has no body
-// parameter). Use Map with a body instead.
-func Split(itemsExpr string) *SplitNode { return flow.Split(itemsExpr) }
 
 func Map(itemsExpr string, batchSize int) *MapNode { return flow.Map(itemsExpr, batchSize) }
 func Wait(signalName string) *WaitNode             { return flow.Wait(signalName) }

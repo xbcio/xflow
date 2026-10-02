@@ -32,16 +32,6 @@ const BodyParam = "body"
 // it is the shape WorkflowBuilder.Body compiles a nested builder into.
 const SubgraphNodeType = types.SubgraphNodeType
 
-// DeprecatedNodeTypes are registered action types that no workflow may contain.
-// xflow.split is the sole entry: graph.Compile rejects any definition carrying
-// it, because split expands into batch tasks and batches need a projected body
-// that split has no parameter for. Before that rejection existed such a workflow
-// did not fail — it hung until its deadline.
-//
-// The coverage suite subtracts these from the registry's type set, so the reason
-// is recorded once here instead of being open-coded into the assertion.
-var DeprecatedNodeTypes = []string{"xflow.split"}
-
 // DeclarationOnlyNodeTypes are node types a definition may carry that the
 // handler registry never lists. Both supply kinds are declarations: neither
 // registers a handler and the engine skips both at execution, so they are absent

@@ -26,11 +26,9 @@ const testFixtureNodeTypePrefix = "test."
 // definition drops a node, and a suite asserting against the stale copy reports
 // coverage the workflows no longer have.
 //
-// xflow.split is subtracted rather than excused: graph.Compile rejects it, so no
-// workflow can contain it and it is not a coverage gap. The browser node is not
-// subtracted — TestWorkflowBrowserCDPFailsClosed runs its real handler and
-// asserts the fail-closed classification. Nothing here is coverage by
-// declaration.
+// The browser node is not subtracted — TestWorkflowBrowserCDPFailsClosed runs
+// its real handler and asserts the fail-closed classification. Nothing here is
+// coverage by declaration.
 func TestWorkflowNodeCoverage(t *testing.T) {
 	seen := map[string][]string{} // node type -> definitions carrying it
 	for _, def := range workflows.Definitions() {
@@ -46,16 +44,8 @@ func TestWorkflowNodeCoverage(t *testing.T) {
 		}
 	}
 
-	deprecated := map[string]bool{}
-	for _, nodeType := range workflows.DeprecatedNodeTypes {
-		deprecated[nodeType] = true
-	}
-
 	var missing, covered []string
 	for _, nodeType := range registry.Types() {
-		if deprecated[nodeType] {
-			continue
-		}
 		// Sibling tests in this package register "test."-prefixed fixture
 		// handlers into the process-global registry (supply gating, WASM
 		// version switch, ...). Whether they are present here depends only on
@@ -98,8 +88,8 @@ func TestWorkflowNodeCoverage(t *testing.T) {
 		t.Errorf("tier definitions use node types absent from the registry: %v", unknown)
 	}
 
-	t.Logf("node coverage: %d/%d registered action types (%d deprecated excluded) across %d definitions",
-		len(covered), len(covered)+len(missing), len(deprecated), len(workflows.Definitions()))
+	t.Logf("node coverage: %d/%d registered action types across %d definitions",
+		len(covered), len(covered)+len(missing), len(workflows.Definitions()))
 }
 
 // TestWorkflowTriggerCoverage asserts every registered trigger kind appears as

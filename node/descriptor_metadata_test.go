@@ -125,7 +125,6 @@ func TestBuiltinDefaultsGolden(t *testing.T) {
 		"xflow.map@1/body_concurrency":           "int:1",
 		"xflow.map@1/continue_on_error":          "bool:false",
 		"xflow.merge@1/on_others":                "string:cancel",
-		"xflow.split@1/continue_on_error":        "bool:false",
 		"xflow.supply.external@0/require_ready":  "bool:true",
 		"xflow.supply.static@0/require_ready":    "bool:true",
 		"xflow.trigger.cron@1/timezone":          "string:UTC",

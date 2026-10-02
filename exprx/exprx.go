@@ -1,6 +1,6 @@
 // Package exprx provides expression evaluation helpers originally used only by
-// builtin nodes (xflow.if, xflow.switch, xflow.map, xflow.split,
-// xflow.function, xflow.script).
+// builtin nodes (xflow.if, xflow.switch, xflow.map, xflow.function,
+// xflow.script).
 //
 // It was promoted from node/internal/utils/exprx to a top-level package because
 // the execution layer needs to perform template evaluation at the handler

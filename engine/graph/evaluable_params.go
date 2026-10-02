@@ -41,7 +41,6 @@ var evaluableParams = map[string]map[string]bool{
 	// The condition sub-field is exempted by evaluableSubFields below.
 	"xflow.switch": {"expression": true},
 	"xflow.map":    {"items": true, "expression": true},
-	"xflow.split":  {"items": true},
 	// xflow.function's and xflow.script's "code" is the program itself, not a
 	// template around one -- function.go:120 evaluates it as an expr, and
 	// script.go hands it to a script engine verbatim. Either way "{{" inside it
