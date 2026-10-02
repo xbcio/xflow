@@ -178,6 +178,9 @@ func registerUnderEnforce(t *testing.T, srv *apiserver.APIServer, def *types.Wor
 	case res.ID == "":
 		t.Error("registration returned no id")
 	}
+	for _, w := range res.Warnings {
+		t.Logf("compile warning: %s", w)
+	}
 	return untyped
 }
 
