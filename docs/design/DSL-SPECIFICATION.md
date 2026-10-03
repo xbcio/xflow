@@ -264,9 +264,14 @@ groups:
 
 # 组级 on_error 语义（NODE-GROUP-COLOCATION.md §12.2 记录了完整实现决定）：
 #   stop（默认/空值）    — 任一成员终止失败即整组失败，fatal=true，执行整体失败
-#   continue             — 组失败不致命，执行继续；已知遗留限制：failed 计数器与
-#                          Fatal 无关地递增，remaining 归零时仍可能把整个执行判定为
-#                          Failed——这不是本特性引入的，是独立的既有缺陷
+#   continue             — 组失败不致命，执行继续：commit 上报的 Outcome 是
+#                          success 而非 failed（与节点级 continue 把 NodeStatus
+#                          设为 continued 而非 failed 同理），真实失败仍通过
+#                          Fatal=false 时 commit 自带的错误信息，以及
+#                          xflow_group_commit_total{outcome="failed_tolerated"}
+#                          指标保持可观测。下游沿组执行器实际产出的真实边触发
+#                          （组失败前可能已产出的部分 exits，也可能一个都没有）
+#                          ——没有像 error_output 那样的声明式路由目标
 #   error_output         — 任一成员终止失败：组的其余成员不再执行，组改为在声明的
 #                          error_outputs 目标上 fire，payload 为
 #                          {"group": <组名>, "error": {"message": <错误信息>}}，
