@@ -594,6 +594,9 @@ being checked is theatre; confirm the posture first (`--mode=production` makes
   After a successful runner-side reload, idle HTTP keep-alive connections are
   closed (`http.Client.CloseIdleConnections`) so a connection already
   established under the old client certificate is not reused.
+- **The runner's HTTP transport dials the control plane directly.** It does
+  not honour `HTTP_PROXY`/`HTTPS_PROXY`: net/http would verify a proxied
+  HTTPS tunnel against a static CA pool and bypass the reloadable one.
 - **The gRPC transport is only partially covered, because grpc-go gives it no
   per-dial hook.** The client leaf certificate is reloaded the same way (gRPC's
   `credentials.NewTLS` config also carries `GetClientCertificate`, read fresh
