@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -111,6 +112,117 @@ func startLegacyRunner(t *testing.T, ctx context.Context, h *serverRunnerHarness
 	go func() { errCh <- runner.Run(ctx) }()
 	waitForE2ERunner(t, h.runners, runnerID)
 	return errCh
+}
+
+// alwaysFailHandler is a handler that always returns a permanent error, used
+// to drive a group member into terminal failure for the error_output e2e
+// test below.
+type alwaysFailHandler struct {
+	invocations atomic.Int32
+	errMsg      string
+}
+
+func (h *alwaysFailHandler) Descriptor() types.Descriptor {
+	return types.Descriptor{Type: "test.group.alwaysfail"}
+}
+
+func (h *alwaysFailHandler) Execute(_ context.Context, _ *types.Input) (*types.Output, error) {
+	h.invocations.Add(1)
+	return nil, fmt.Errorf("%w: %s", types.ErrPermanent, h.errMsg)
+}
+
+// TestGroupBinaryE2E_OnErrorOutputRoutesOnMemberFailure verifies the group-
+// level on_error=error_output mechanism end-to-end against a real server,
+// runner, and Redis backend: a group member fails terminally, the group's
+// remaining members (and the ordinary success-path downstream "out") never
+// execute, the group instead commits on its declared error_outputs target
+// ("errHandler"), and the execution completes SUCCESSFULLY (error_output's
+// contract matches a node's: the failure was handled, not propagated) with
+// the error payload readable under the group's own name.
+func TestGroupBinaryE2E_OnErrorOutputRoutesOnMemberFailure(t *testing.T) {
+	addr := requireRedis(t)
+	h := newServerRunnerHarness(t, addr, 2)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sinkHandler := &alwaysFailHandler{errMsg: "sink boom"}
+	memberHandler := &groupMemberHandler{}
+	_, errCh := startGroupRunner(t, ctx, h, groupRunnerOpts{
+		runnerID: "group-runner-error-output",
+		handlers: map[string]types.ActionHandler{
+			"test.group.member":     memberHandler,
+			"test.group.alwaysfail": sinkHandler,
+		},
+	})
+
+	// Workflow: group "g" (g.source -> g.sink, g.sink always fails), declared
+	// error_outputs target "errHandler", ordinary success path g.sink -> "out".
+	wf := &types.WorkflowDef{
+		Name: "group-e2e-error-output",
+		Nodes: []types.NodeDef{
+			{Name: "g.source", Type: "test.group.member", Kind: types.NodeKindAction},
+			{Name: "g.sink", Type: "test.group.alwaysfail", Kind: types.NodeKindAction},
+			{Name: "out", Type: "test.group.member", Kind: types.NodeKindAction},
+			{Name: "errHandler", Type: "test.group.member", Kind: types.NodeKindAction},
+		},
+		Connections: types.Connections{
+			"g.source": {"main": {Targets: []types.Connection{{Node: "g.sink", Input: "main"}}}},
+			"g.sink":   {"main": {Targets: []types.Connection{{Node: "out", Input: "main"}}}},
+		},
+		Groups: []types.GroupDef{{
+			Name:         "g",
+			Members:      []string{"g.source", "g.sink"},
+			OnError:      string(types.OnErrorOutput),
+			ErrorOutputs: []types.Connection{{Node: "errHandler"}},
+		}},
+	}
+
+	execID := submitWorkflowHTTP(t, h.httpSrv.URL, h.httpSrv.Client(), wf, map[string]any{
+		"seed": "will-fail",
+	})
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer waitCancel()
+	result := waitForCompletion(waitCtx, t, h.state, execID, "out", "errHandler", "g")
+
+	if result.Status != types.ExecutionStatusSuccess {
+		t.Fatalf("execution status = %s, want success (error_output handles the failure)", result.Status)
+	}
+	if _, ok := result.Output["out"]; ok {
+		t.Fatalf("output[out] present = %v, want absent: the success-path downstream must not run", result.Output["out"])
+	}
+	errHandlerOut, ok := result.Output["errHandler"].(map[string]any)
+	if !ok {
+		t.Fatalf("output[errHandler] = %T, want map", result.Output["errHandler"])
+	}
+	if errHandlerOut["processed"] != true {
+		t.Fatalf("output[errHandler] missing processed=true: %v", errHandlerOut)
+	}
+	groupOut, ok := result.Output["g"].(map[string]any)
+	if !ok {
+		t.Fatalf("output[g] = %T, want map (the group's own error payload)", result.Output["g"])
+	}
+	if groupOut["group"] != "g" {
+		t.Fatalf("output[g] = %v, want group=g", groupOut)
+	}
+	errField, ok := groupOut["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("output[g].error = %T, want map", groupOut["error"])
+	}
+	if msg, _ := errField["message"].(string); msg == "" {
+		t.Fatalf("output[g].error.message is empty, want the sink failure message")
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Logf("runner shutdown error (non-fatal): %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("runner did not stop in time")
+	}
 }
 
 // TestGroupBinaryE2E_NormalHappyPath verifies end-to-end group execution with
