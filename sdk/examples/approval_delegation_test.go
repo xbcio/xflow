@@ -2,11 +2,9 @@ package examples_test
 
 import (
 	"context"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/sdk/xflow"
 	"github.com/xbcio/xflow/types"
@@ -24,7 +22,7 @@ const delegatedApprovalNode = "DelegatedApproval"
 // their slot on, and the execution would park until its timeout.
 func TestApprovalDelegateAndAddSignerRoundTrip(t *testing.T) {
 	ctx := context.Background()
-	hooks := &approvalSuspensionHooks{}
+	hooks := newSuspensionHooks()
 	eng, err := xflow.NewLocal(xflow.WithHooks(hooks))
 	if err != nil {
 		t.Fatalf("NewLocal() error = %v", err)
@@ -79,8 +77,13 @@ func TestApprovalDelegateAndAddSignerRoundTrip(t *testing.T) {
 			types.VerifiedActorKey: "erin", "action": "approve",
 		}, 5},
 	}
+	// Each wait is bounded: a signal delivered while the gate is not armed is
+	// dropped, so a suspension that never happens must fail the wait rather than
+	// park the test until the package timeout. 30s covers the six waits below.
+	waitCtx, cancelWaits := context.WithTimeout(ctx, 30*time.Second)
+	defer cancelWaits()
 	for _, step := range steps {
-		hooks.waitForSuspensions(t, delegatedApprovalNode, step.armedAfter)
+		hooks.waitForSuspensions(t, waitCtx, delegatedApprovalNode, step.armedAfter)
 		if err := eng.Signal(ctx, id, step.signal, step.body); err != nil {
 			t.Fatalf("Signal(%s) error = %v", step.signal, err)
 		}
@@ -131,51 +134,7 @@ func TestApprovalDelegateAndAddSignerRoundTrip(t *testing.T) {
 	// before the last one. The delegator's refused approval is not among them --
 	// it resumed the gate no more than it decided anything, because the name it
 	// was delivered on was no longer one the gate waits for.
-	if got := hooks.suspensions(delegatedApprovalNode); got != 5 {
+	if got := hooks.count(delegatedApprovalNode); got != 5 {
 		t.Fatalf("%s suspended %d times, want 5", delegatedApprovalNode, got)
 	}
-}
-
-// approvalSuspensionHooks records when a node suspends, so the test can send each
-// signal only once the gate is waiting for it. The hook fires on an engine
-// worker goroutine while the test goroutine polls, so the map is guarded.
-type approvalSuspensionHooks struct {
-	engine.BaseHooks
-
-	mu        sync.Mutex
-	suspended map[string]int
-}
-
-func (h *approvalSuspensionHooks) OnNodeSuspended(_ context.Context, _ types.ExecutionID, name string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.suspended == nil {
-		h.suspended = make(map[string]int)
-	}
-	h.suspended[name]++
-}
-
-func (h *approvalSuspensionHooks) count(nodeName string) int {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.suspended[nodeName]
-}
-
-func (h *approvalSuspensionHooks) waitForSuspensions(t *testing.T, nodeName string, want int) {
-	t.Helper()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if h.count(nodeName) >= want {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatalf("%s suspended %d times, want >= %d", nodeName, h.count(nodeName), want)
-}
-
-// suspensions is read after the run has finished, so the count is final and has
-// a single right answer.
-func (h *approvalSuspensionHooks) suspensions(nodeName string) int {
-	return h.count(nodeName)
 }
