@@ -203,6 +203,133 @@ afterEach(() => {
 });
 
 describe("XFlowPreview", () => {
+  it("passes defaultViewport through to ReactFlow and disables auto-fit", () => {
+    const frameCallbacks: FrameRequestCallback[] = [];
+    const requestFrame = vi.fn((callback: FrameRequestCallback) => {
+      frameCallbacks.push(callback);
+      return frameCallbacks.length;
+    });
+    vi.stubGlobal("requestAnimationFrame", requestFrame);
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+
+    render(
+      <XFlowPreview
+        workflow={{
+          id: "wf-viewport",
+          name: "Viewport flow",
+          nodes: [{ name: "start", type: "xflow.start" }],
+          connections: {}
+        }}
+        defaultViewport={{ x: 10, y: 20, zoom: 1.5 }}
+      />
+    );
+
+    const flowProps = latestFlowProps();
+    expect(flowProps.defaultViewport).toEqual({ x: 10, y: 20, zoom: 1.5 });
+
+    act(() => {
+      flowProps.onInit?.({
+        fitBounds: reactFlowMock.fitBounds,
+        getNodes: () => [{ id: "source-id" }],
+        getNodesBounds: reactFlowMock.getNodesBounds
+      });
+    });
+
+    // A defaultViewport means InitialViewFitter's effect must not even
+    // schedule a retry frame (ADR-D4 §2.3): the measured auto-fit must never
+    // run, or it would clobber the restored pan/zoom.
+    expect(requestFrame).not.toHaveBeenCalled();
+    expect(reactFlowMock.fitBounds).not.toHaveBeenCalled();
+  });
+
+  it("auto-fits when no defaultViewport is supplied", () => {
+    const frameCallbacks: FrameRequestCallback[] = [];
+    const requestFrame = vi.fn((callback: FrameRequestCallback) => {
+      frameCallbacks.push(callback);
+      return frameCallbacks.length;
+    });
+    vi.stubGlobal("requestAnimationFrame", requestFrame);
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    reactFlowMock.fitBounds.mockResolvedValue(true);
+    reactFlowMock.getNodesBounds.mockReturnValue({ x: 0, y: 0, width: 500, height: 200 });
+
+    render(
+      <XFlowPreview
+        workflow={{
+          id: "wf-no-viewport",
+          name: "No viewport flow",
+          nodes: [{ name: "start", type: "xflow.start" }],
+          connections: {}
+        }}
+      />
+    );
+
+    const flowProps = latestFlowProps();
+    expect(flowProps.defaultViewport).toBeUndefined();
+
+    act(() => {
+      flowProps.onInit?.({
+        fitBounds: reactFlowMock.fitBounds,
+        getNodes: () => [{ id: "source-id" }],
+        getNodesBounds: reactFlowMock.getNodesBounds
+      });
+    });
+
+    expect(requestFrame).toHaveBeenCalledTimes(1);
+    act(() => {
+      frameCallbacks.shift()?.(0);
+    });
+
+    // No defaultViewport: InitialViewFitter runs its measured auto-fit on
+    // the first frame, proving the two branches are genuinely distinct.
+    expect(reactFlowMock.fitBounds).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports the settled viewport through onMoveEnd, not before", () => {
+    const onViewportChange = vi.fn();
+    render(
+      <XFlowPreview
+        workflow={{
+          id: "wf-viewport-report",
+          name: "Viewport report flow",
+          nodes: [{ name: "start", type: "xflow.start" }],
+          connections: {}
+        }}
+        onViewportChange={onViewportChange}
+      />
+    );
+
+    const flowProps = latestFlowProps();
+    expect(flowProps.onMoveEnd).toBeTypeOf("function");
+    expect(onViewportChange).not.toHaveBeenCalled();
+
+    act(() => {
+      (flowProps.onMoveEnd as (event: unknown, viewport: { x: number; y: number; zoom: number }) => void)(
+        undefined,
+        { x: 42, y: -7, zoom: 0.8 }
+      );
+    });
+
+    expect(onViewportChange).toHaveBeenCalledTimes(1);
+    expect(onViewportChange).toHaveBeenCalledWith({ x: 42, y: -7, zoom: 0.8 });
+  });
+
+  it("wires no onMoveEnd handler when onViewportChange is not supplied", () => {
+    render(
+      <XFlowPreview
+        workflow={{
+          id: "wf-no-callback",
+          name: "No callback flow",
+          nodes: [{ name: "start", type: "xflow.start" }],
+          connections: {}
+        }}
+      />
+    );
+
+    const flowProps = latestFlowProps();
+    expect(flowProps.onMoveEnd).toBeUndefined();
+  });
+
   it("renders workflow nodes with runtime status", () => {
     const { container } = render(
       <XFlowPreview
