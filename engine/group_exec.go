@@ -120,7 +120,7 @@ func (e *Engine) commitGroup(ctx context.Context, g *graph.Graph, lease *GroupLe
 	if execErr != nil {
 		outcome = GroupOutcomeFailed
 		errMsg = execErr.Error()
-		if routeToErrorOutput {
+		if !fatal {
 			// Every backend's CommitGroup/SeedExecutionFromEntry increments its
 			// failed-unit counter whenever Outcome==GroupOutcomeFailed,
 			// regardless of Fatal (backend/providers/local/group_state.go,
@@ -128,17 +128,23 @@ func (e *Engine) commitGroup(ctx context.Context, g *graph.Graph, lease *GroupLe
 			// backend/providers/local/entry_admission.go) — and a non-zero
 			// failed count finalizes the WHOLE EXECUTION as Failed once the
 			// remaining-unit counter reaches zero, even for a unit this engine
-			// itself decided was non-fatal. error_output's contract is the same
-			// as a node's: the node/group "handled" the error and the execution
-			// is not failed by it (ApplyOnError's error_output sets
-			// NodeStatus: types.NodeStatusSuccess, never NodeStatusFailed, for
-			// exactly this reason). Reporting GroupOutcomeSuccess here is what
-			// keeps a routed group from silently finalizing its execution as
-			// Failed through that counter — the backends have no OTHER signal
-			// that would tell them not to count it. errMsg/reqExits below still
-			// carry the real failure (committed under the group's own name/
-			// "error" port), so the information is not lost, only not counted
-			// as a terminal execution failure.
+			// itself decided was non-fatal. This used to be gated on
+			// routeToErrorOutput alone, which fixed error_output but left
+			// on_error=continue's member failure still finalizing the execution
+			// Failed through this exact counter (the latent bug
+			// NODE-GROUP-COLOCATION.md §12.2 documented as out of scope for the
+			// error_output feature). Both policies share the same contract: the
+			// node/group "handled" the error and the execution is not failed by
+			// it (ApplyOnError's error_output AND continue both set NodeStatus
+			// to a non-failed value for exactly this reason). Reporting
+			// GroupOutcomeSuccess for every non-fatal failure — not just a
+			// routed one — is what keeps a tolerated group from silently
+			// finalizing its execution as Failed through that counter — the
+			// backends have no OTHER signal that would tell them not to count
+			// it. errMsg/reqExits below still carry the real failure (routed
+			// under the group's own name/"error" port for error_output, or
+			// simply absent from reqExits for continue), so the information is
+			// not lost, only not counted as a terminal execution failure.
 			outcome = GroupOutcomeSuccess
 		}
 	}
