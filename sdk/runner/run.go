@@ -336,6 +336,12 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 	// log, and this deliberately passes names rather than credential maps.
 	slog.Info("runner starting", "credential_names", configuredCredentialNames(cfg.credentials))
 
+	defer func() {
+		if closeErr := runner.Close(); closeErr != nil {
+			slog.Error("runner shutdown failed", "error", closeErr)
+		}
+	}()
+
 	// SIGHUP hot-reloads this runner's bearer token (when statically
 	// configured — see newCredentialReloadFunc) and mTLS client
 	// certificate/key/server CA, all without restarting the process. Wired
@@ -345,16 +351,24 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 	// registering a handler for entirely, since inproc carries only a token
 	// and secures nothing over the wire that a signal would ever need to
 	// rotate.
+	//
+	// Registered AFTER runner.Close's defer above: Go's LIFO defer order
+	// therefore runs stopReload() FIRST on the way out of runRunner, and only
+	// then runner.Close(). That ordering matters: stopReload deregisters the
+	// SIGHUP channel and waits for its goroutine to drain (signal.Stop plus
+	// <-done — see installCredentialReloadSignal), so a SIGHUP already
+	// buffered in the channel is guaranteed to finish running
+	// newCredentialReloadFunc, and therefore Runner.Reload, before Close ever
+	// runs. The opposite source order (this block first, Close's defer
+	// second) would make Close's defer run FIRST instead, leaving a narrow
+	// window where an already-buffered signal still fires Reload against a
+	// runner whose Close has already released its resources — harmless today
+	// only because Reload touches nothing but atomic pointers, but not a
+	// contract worth relying on.
 	if reloadable, ok := runner.(credentialReloadingRunner); ok && cfg.transport != xflowsdk.RunnerTransportInProc {
 		stopReload := installCredentialReloadSignal(runCtx, newCredentialReloadFunc(baseCfg, store, reloadable))
 		defer stopReload()
 	}
-
-	defer func() {
-		if closeErr := runner.Close(); closeErr != nil {
-			slog.Error("runner shutdown failed", "error", closeErr)
-		}
-	}()
 
 	// Which transports can actually report is the SDK's decision (only the HTTP
 	// protocol client implements MetricsReportClient), so this only says what
