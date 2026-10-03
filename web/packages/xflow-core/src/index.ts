@@ -118,18 +118,23 @@ export interface DependencyEdge {
   supply: string;
 }
 
-export interface WorkflowNode {
+/**
+ * A node on the wire: the shape `WireWorkflowDef.nodes` carries over
+ * GET/POST/PUT /v1/workflows (ADR-D4 §2.1-§2.2). It has no `position`, `ui`,
+ * or `notes` -- those are editor-only and live exclusively in
+ * `WorkflowEditorMetadata` (see `./editorMetadata`), kept server-side on the
+ * same record but never inline on a node.
+ */
+export interface WireWorkflowNode {
   id?: string;
   name?: string;
   type?: string;
   kind?: NodeKind;
   version?: number;
   template?: string;
-  position?: Position;
   disabled?: boolean;
   on_error?: ErrorPolicy;
   runner_selector?: RunnerSelector;
-  notes?: string;
   inputs?: PortDecl[];
   output_schema?: Record<string, unknown>;
   output?: NodeOutputPolicy;
@@ -137,10 +142,16 @@ export interface WorkflowNode {
   timeout?: number;
   activation_replicas?: number;
   parameters?: Record<string, unknown>;
-  ui?: Record<string, unknown>;
 }
 
-export interface WorkflowDef {
+/**
+ * The wire shape of a workflow definition: no node carries `position`, `ui`,
+ * or `notes` (ADR-D4 §2.1-§2.2). This is what `@xflow/api` sends and receives
+ * as the `WorkflowDefWithEditorMetadata`'s `WorkflowDef` part; its sibling
+ * `editor_metadata` is a separate top-level field, modeled by
+ * `WorkflowEditorMetadata` (see `./editorMetadata`), never a field of this type.
+ */
+export interface WireWorkflowDef {
   spec?: string;
   id?: string;
   namespace?: string;
@@ -157,12 +168,39 @@ export interface WorkflowDef {
   credentials?: Record<string, WorkflowCredential>;
   params?: Record<string, WorkflowParam>;
   node_templates?: Record<string, NodeTemplate>;
-  nodes?: WorkflowNode[];
+  nodes?: WireWorkflowNode[];
   groups?: GroupDef[];
   connections?: Connections;
   outputs?: Record<string, WorkflowOutput>;
   pin_data?: Record<string, unknown>;
   dependency_edges?: DependencyEdge[];
+}
+
+/**
+ * A node in the editor's internal (merged) model: everything a
+ * `WireWorkflowNode` has, plus the editor-only `position`, `ui`, and `notes`
+ * fields merged in from `WorkflowEditorMetadata` (ADR-D4 §2.5). This is the
+ * shape `@xflow/editor` and `@xflow/preview` operate on; it is unchanged from
+ * before ADR-D4 so editor UI code needs no churn. `@xflow/api` is the only
+ * place that converts between this and `WireWorkflowNode`
+ * (`splitEditorMetadata` / `mergeEditorMetadata` in `./editorMetadata`).
+ */
+export interface WorkflowNode extends WireWorkflowNode {
+  position?: Position;
+  notes?: string;
+  ui?: Record<string, unknown>;
+}
+
+/**
+ * The editor's internal (merged) workflow model: a `WireWorkflowDef` whose
+ * nodes may carry `position`/`ui`/`notes` inline. Unchanged from before
+ * ADR-D4 (ADR §2.5) -- `@xflow/editor`, `@xflow/preview`, and `toGraphModel`
+ * below all read and write this shape. Only `@xflow/api`'s `getWorkflow` /
+ * `saveWorkflow` / `createWorkflow` convert at the network boundary via
+ * `splitEditorMetadata` / `mergeEditorMetadata`.
+ */
+export interface WorkflowDef extends Omit<WireWorkflowDef, "nodes"> {
+  nodes?: WorkflowNode[];
 }
 
 export type WorkflowStatus =
@@ -424,3 +462,4 @@ export function toGraphModel(workflow: WorkflowDef): GraphModel {
 }
 
 export * from "./nodeForm";
+export * from "./editorMetadata";
