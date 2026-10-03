@@ -245,7 +245,13 @@ groups:
     runner_selector:      # 组级 runner 选择器（可选；成员节点不得再单独设 selector）
       mode: string
       match_labels: object
-    on_error: string      # 组级错误策略（可选，仅支持 stop|continue）
+    on_error: string      # 组级错误策略（可选，支持 stop|continue|error_output）
+    error_outputs:        # error_outputs 的目标列表；on_error: error_output 时必填且非空，
+                           # 其他策略下设置即报编译错误（声明了却不可达的路由视为同一类静默空操作）。
+                           # 每个目标必须是组外的真实节点（不能是本组成员——组一旦失败就没有
+                           # 运行中的组内引擎实例可投递），且遵守目标节点自身声明的 inputs。
+      - node: string       # 目标节点名
+        input: string      # 可选，默认 main
     retry:                # 组级重试（整组重跑，可选）
       enabled: bool
       max_attempts: int
@@ -255,6 +261,28 @@ groups:
       multiplier: number
     timeout: duration     # 组业务 deadline（可选）
     mode: string          # "" (durable，默认) | "transient"
+
+# 组级 on_error 语义（NODE-GROUP-COLOCATION.md §12.2 记录了完整实现决定）：
+#   stop（默认/空值）    — 任一成员终止失败即整组失败，fatal=true，执行整体失败
+#   continue             — 组失败不致命，执行继续；已知遗留限制：failed 计数器与
+#                          Fatal 无关地递增，remaining 归零时仍可能把整个执行判定为
+#                          Failed——这不是本特性引入的，是独立的既有缺陷
+#   error_output         — 任一成员终止失败：组的其余成员不再执行，组改为在声明的
+#                          error_outputs 目标上 fire，payload 为
+#                          {"group": <组名>, "error": {"message": <错误信息>}}，
+#                          可通过 $('<组名>').json.error 在下游读取（与节点级
+#                          error_output 的 $input.error 结构一致，但没有单独的
+#                          "失败成员名"字段——组失败的错误是一个纯字符串，不像节点级
+#                          failure 自带 types.Error.NodeName）。commit 上报的
+#                          Outcome 是 success 而非 failed：这样才不会触发各 backend
+#                          的 failed 计数器把整个执行判成 Failed——与节点级
+#                          error_output 把 NodeStatus 设为 success 而非 failed
+#                          是同一个理由。
+# main_output 在组级始终拒绝编译：节点失败时还有自己刚产出的成功输出可以合并进
+# error 字段，组失败前没有提交任何东西，没有单个成员输出能代表"组的主输出"，造不出
+# 有意义的 payload。
+# 取消（cancel）/超时（timeout）结果不受 on_error 影响，始终 fatal，不会路由到
+# error_outputs——这不是 OnError 要容忍或路由的失败类型。
 
 # 依赖边（可选，supply 节点消费声明；详见 §6.3 Supply 节点）
 # 不与 connections 合并：dependency_edges 不携带数据，不参与 unit 层拓扑

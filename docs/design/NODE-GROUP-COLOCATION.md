@@ -17,7 +17,7 @@ group as a single vertex in the durable scheduling topology.
 ## 2. Architecture Layers
 
 ```
-types/group.go           GroupDef contract (Name, Members, RunnerSelector, OnError, Retry, Timeout, Mode)
+types/group.go           GroupDef contract (Name, Members, RunnerSelector, OnError, ErrorOutputs, Retry, Timeout, Mode)
 engine/graph/            Compile-time IR: GroupMeta, UnitMeta (two-layer scheduling), boundary edges
 engine/                  Runtime types: GroupLease, GroupResult, GroupCommitRequest, scheduling intents
 backend/.../rstate/      Redis atomic state: group_state.go (commit Lua), entry_admission.go
@@ -36,7 +36,8 @@ type GroupDef struct {
     Name           string
     Members        []string           // single source of truth for membership
     RunnerSelector *RunnerSelector    // placement; members must NOT set their own
-    OnError        string             // "stop" (default) | group-level error policy
+    OnError        string             // "stop" (default) | "continue" | "error_output"
+    ErrorOutputs   []Connection       // required iff OnError == "error_output"; routing targets for the group's synthesized "error" port
     Retry          *RetrySettings     // group-level retry = replay from entry
     Timeout        time.Duration      // business deadline (not lease TTL)
     Mode           string             // "" = durable | "transient"
@@ -170,6 +171,8 @@ Operations: `lease_acquired`, `lease_expired`, `committed`, `admission_accepted`
 - Cross-group edges must not form cycles at unit level
 - Portability: rejects non-portable members (validates handler availability)
 - Secret literals rejected in group members
+- `OnError` restricted to `""` | `stop` | `continue` | `error_output` (`validateGroupOnError`); `main_output` and unknown values rejected
+- `ErrorOutputs` required iff `OnError == error_output`, and rejected otherwise (`validateGroupErrorOutputs`); each target must be a real node outside the group, not a supply node, and must respect the target's own declared input ports (`resolveGroupErrorOutputs`)
 
 ## 8. Capability and Routing
 
@@ -214,6 +217,9 @@ Group execution requires the `group.exec.v1` feature capability. Runners that do
 | Backpressure via offset non-commit | Natural flow control; no distributed protocol needed |
 | Signal journal replay on resume — **已移除**（见 §6：组级持久化挂起已从代码库删除；`sdk/xflow/runner.go` 用 `runnersvc.WithSuspendDisabled()`，`group_exec_trigger_runtime.go` 硬设 `SuspendDisabled: true`） | Deterministic re-execution from entry input; no partial member state persisted |
 | Activation directives piggybacked on heartbeat | No extra RPC; runner learns assignments on next heartbeat response |
+| `error_output` is a synthetic unit-level edge, not a `BoundaryOutputs` entry | A group has no member edge to derive a failure port from; `GroupMeta.ErrorOutputs` + a `UnitEdge.ErrorEdge` flag keep the synthetic route in the same scheduling machinery as a real boundary edge without polluting `BoundaryOutputs`'s "derived purely from real member edges" invariant |
+| Routed `error_output` commit reports `GroupOutcomeSuccess`, not `GroupOutcomeFailed` | Every backend's failed-unit counter fires on `Outcome==Failed` regardless of `Fatal`, and finalizes the WHOLE EXECUTION as Failed once remaining-units hits zero; mirrors `ApplyOnError`'s node-level `error_output`, which sets `NodeStatus: types.NodeStatusSuccess` for the same reason |
+| `fatal`/`routeToErrorOutput` are caller-decided in `commitGroup`, never re-derived from `execErr != nil` | `CommitGroupResult`'s canceled/timeout outcome must stay unconditionally fatal even under `on_error: continue`/`error_output`; re-deriving from `execErr != nil` cannot distinguish that case from an ordinary tolerated/routed failure |
 
 ## 12. Known Limitations & Future Work
 
@@ -322,61 +328,175 @@ items listed below under §12.1. What remains open is in §12.2.
   for a supply's content to become available — the supply collection face is
   gated by `SupplyGate.Admit` at activation time, independent of whether the
   consuming workflow's own trigger uses entry-seed hosting at all.
-- **Group-level `on_error: error_output` / `main_output` is unbuilt, and is now
-  rejected at compile time rather than silently degraded.** Two independent
-  investigations (2026-08-11) found there is **no group-level error port to
-  wire to** — this is a new mechanism, not a blank to fill:
+- **Group-level `on_error: error_output` is implemented (2026-10-03);
+  `main_output` stays rejected at compile time.** The two prior investigations
+  (2026-08-11, 2026-08-14, preserved below for provenance) found correctly
+  that no group-level error port existed to route to and that the obstacle was
+  real, not a wiring gap. The mechanism below is what was built to close it —
+  smaller than the "new compile-time IR" scope the investigations anticipated,
+  because it deliberately does NOT make a group a node-name-indexed connection
+  source (that would have required reordering `compileGroups` ahead of
+  `buildEdges` and teaching every `g.index` consumer about group names). It
+  stays entirely inside the two-layer unit IR instead.
+
+  - `types.GroupDef` gained `ErrorOutputs []Connection`: the downstream
+    targets for the group's synthesized "error" port. Required and validated
+    only when `OnError == error_output` (`validateGroupErrorOutputs`,
+    `engine/graph/group_compile.go`) — declaring one without the other is
+    rejected the same way an unimplemented policy used to be, because it is
+    the same silent-no-op failure mode.
+  - `compileOneGroup` resolves each `ErrorOutputs` target to a
+    `graph.BoundaryEndpoint` (`resolveGroupErrorOutputs`): the target must be a
+    real node outside the group (not a member — there is no running engine
+    instance left inside an abandoned group to deliver to), must not be a
+    supply node, and must respect the target's own declared input ports via
+    the same `declaredInputPorts.validateEdgeTarget` an ordinary connection
+    uses. Resolved endpoints are stored on `GroupMeta.ErrorOutputs`.
+  - `buildUnitEdges` (`engine/graph/unit.go`) synthesizes one `UnitEdge` per
+    resolved `GroupMeta.ErrorOutputs` entry, from the group's own unit to the
+    target's unit, marked `ErrorEdge: true`. Its `Src.NodeIdx` is `-1` (the
+    group itself is the source, not a member) and `Src.Port` is the reserved
+    `errorOutputPort` ("error"). This is the "no legal exit to compute
+    arrivals from" problem the investigations named: an `ErrorEdge` is a
+    first-class member of the SAME unit edge lists `BoundaryOutputs`-derived
+    edges live in, so it participates in the ordinary static in-degree count
+    and `detectUnitCycle` without a second scheduling mechanism. It is kept
+    out of `GroupMeta.BoundaryOutputs` itself — that field stays "derived
+    purely from real member-level edges" exactly as the investigations found;
+    the synthetic edge lives in the new `GroupMeta.ErrorOutputs` field instead,
+    which is what makes the "non-fatal branch reaches `downstreamUnitArrivals`
+    with no legal exit" problem no longer apply — there IS now a legal exit,
+    it is just not a `BoundaryOutputs` one.
+  - `commitGroup` (`engine/group_exec.go`) takes the fatal/routing decision as
+    a caller-supplied `routeToErrorOutput bool` rather than re-deriving it
+    (see below for why), and when true: skips the real `exits` the executor
+    reported entirely (a terminal member failure means the member subgraph
+    never reached its normal boundary outputs), activates every `ErrorEdge`
+    unconditionally in `downstreamUnitArrivals`, and appends one synthetic
+    `GroupExitResult{NodeIdx: -1, NodeName: meta.Name, Port: "error", Data:
+    groupErrorOutputData(...)}` to the commit's `Exits`. The payload is
+    `{"group": <name>, "error": {"message": <errMsg>}}` — the same shape
+    `engine/errorpolicy.go`'s `buildErrData` uses for a node's own
+    `error_output`, stored under the GROUP's own name (not any member's) so a
+    downstream node reads it via `$('g').json.error` exactly like a node's
+    output: `GetOutput`/`outputKey` are keyed by a bare name string in every
+    backend, never by node index, so there is nothing group-specific a lookup
+    needs to know. There is deliberately no separate "failed member name"
+    field: unlike a node's `types.Error.NodeName`, a group failure's error is a
+    plain string (`subgraph.Result.Error`, copied from the inner execution's
+    terminal error by `service/runner/group_runtime.go`'s `ExecuteRequest`),
+    not a structured value a caller could attach a member identity to today —
+    the member's name is present in that string's text, just not available as
+    its own field.
+  - **The commit's reported `Outcome` is `GroupOutcomeSuccess`, not
+    `GroupOutcomeFailed`, when routing.** This was the one piece the
+    investigations did not have visibility into because it lives in the
+    backends, not the engine: `backend/providers/local/group_state.go`,
+    `backend/providers/distributed/internal/rstate/group_state.go`, and
+    `backend/providers/local/entry_admission.go` all increment their
+    failed-unit counter whenever `Outcome == GroupOutcomeFailed`, regardless
+    of `Fatal`, and a non-zero failed count finalizes the WHOLE EXECUTION as
+    Failed once the remaining-unit counter reaches zero — even for a unit this
+    engine itself decided was non-fatal. (This same counter is why
+    `on_error: continue` has its own long-standing latent bug: a `continue`d
+    group failure also still finalizes the execution Failed through this
+    exact counter, independent of this feature — out of scope here, not
+    masked by it, and not newly introduced by it.) Reporting
+    `GroupOutcomeSuccess` for a routed `error_output` commit is what matches
+    the node-level contract it mirrors: `ApplyOnError`'s `error_output` sets
+    `NodeStatus: types.NodeStatusSuccess`, never `NodeStatusFailed`, for
+    exactly this reason — the node/group "handled" the error, so the
+    execution must not be failed by it. The real failure is not lost: it still
+    travels as `GroupCommitRequest.Error` and as the synthetic exit's payload;
+    it is simply not counted as a terminal execution failure.
+  - **`fatal` and `routeToErrorOutput` are caller-decided, never re-derived
+    inside `commitGroup`.** The two production callers disagree in one case:
+    `executeGroup`'s `GroupExecutor.ExecuteGroup` only ever reports an
+    ordinary handler failure, so group-level `OnError` governs its fatality
+    unconditionally. `CommitGroupResult`'s remote wire path carries a distinct
+    canceled/timeout `GroupOutcome` classification
+    (`GroupOutcomeTimeout`/`GroupOutcomeCanceled`) that must stay fatal
+    regardless of `on_error: continue`/`error_output` — a cancellation is not
+    the failure `OnError` exists to tolerate or route. An earlier draft of
+    this feature had `commitGroup` unconditionally overwrite the caller's
+    `fatal` with `groupOnErrorFatal(meta.OnError)` whenever `execErr != nil` —
+    true for every non-success outcome, including canceled/timeout — which
+    would have silently downgraded a cancellation to a routed/tolerated
+    non-fatal commit on any group configured with `on_error: continue` or
+    `error_output`. `TestCommitGroupResult_CanceledOutcomeIsFatalDespiteErrorOutput`
+    (`engine/group_error_output_test.go`) pins that this stays fatal and
+    unrouted.
+  - `GroupMeta.ErrorOutputs` (a plain `[]BoundaryEndpoint`) travels inside
+    `GroupMeta`, which already rides the existing `Groups []GroupMeta`
+    serialization path (`graphHashPayload`, `graphSerializedForm`) with no new
+    wire plumbing: it enters the graph hash automatically, round-trips through
+    snapshot `MarshalJSON`/`UnmarshalJSON` as part of `g.groups`, and is
+    rebuilt deterministically by `buildUnits`/`buildUnitEdges` on every
+    decode, the same way `BoundaryOutputs` always has been.
+  - Runtime coverage: `engine/group_error_output_test.go` (member failure
+    routes to the error target with the success-path downstream skipped and
+    the execution finishing successfully; the ordinary success path is
+    unchanged by the feature's presence; a terminal failure after exhausted
+    retries still routes identically — `commitGroup` does not distinguish "the
+    only attempt" from "the last of several," since `GroupMeta.Retry` has no
+    runtime enforcement to begin with, see `validateGroupRetry`; and
+    cancellation/timeout stay fatal and unrouted on both the local-executor and
+    remote `CommitGroupResult` entrypoints). `test/integration/group_binary_e2e_test.go`'s
+    `TestGroupBinaryE2E_OnErrorOutputRoutesOnMemberFailure` exercises the same
+    contract against a real server, runner, and Redis backend.
+
+  <details>
+  <summary>Provenance: the two prior investigations that scoped this before it was built</summary>
+
+  Two independent investigations (2026-08-11) found there is **no group-level error
+  port to wire to** — this was a new mechanism, not a blank to fill:
 
   - `GroupMeta.BoundaryOutputs` (`engine/graph/unit.go`, built by
     `buildUnitEdges`) is derived purely from real member-level edges that cross
-    the group boundary. Nothing ever synthesizes an entry into it.
-  - `compileOneGroup` (`engine/graph/group_compile.go`) stores `GroupDef.OnError`
-    as a plain string and never reads it to manufacture an edge or port.
-  - `CommitGroupResult` (`engine/group_lease.go`) validates every exit against
+    the group boundary. Nothing synthesized an entry into it.
+  - `compileOneGroup` (`engine/graph/group_compile.go`) stored `GroupDef.OnError`
+    as a plain string and never read it to manufacture an edge or port.
+  - `CommitGroupResult` (`engine/group_lease.go`) validated every exit against
     `(nodeIdx, port)` pairs in `BoundaryOutputs`. A fabricated "group failed"
-    exit is rejected today as an invalid boundary output.
+    exit was rejected as an invalid boundary output.
 
-  So narrowing `groupOnErrorFatal` to `OnErrorStop` alone does not enable
-  routing — it **strands the failure**: the non-fatal branch reaches
+  So narrowing `groupOnErrorFatal` to `OnErrorStop` alone would not have enabled
+  routing — it would have **stranded the failure**: the non-fatal branch reached
   `downstreamUnitArrivals` with no legal exit to compute arrivals from, leaving
-  a group that is neither fatal nor advancing.
+  a group that was neither fatal nor advancing.
 
-  **What changed (2026-08-14): `validateGroupOnError` now rejects the two
-  output policies — and any unknown value — in `compileGroups`.** The value was
+  **2026-08-14: `validateGroupOnError` was changed to reject the two output
+  policies — and any unknown value — in `compileGroups`.** The value was
   previously accepted and run as `stop`, so an author who asked for the failure
   to be routed to a downstream branch got the whole execution failed instead,
   with no diagnostic, on the path least likely to be exercised before
   production. `OnError` had no validation at all, so a typo (`fail`, which
   `types/group.go`'s own doc comment warns does not exist, or `error-output`)
-  degraded the same way. A group now accepts only `""`, `"stop"`, `"continue"`.
+  degraded the same way. A group accepted only `""`, `"stop"`, `"continue"`.
 
-  The gate lives in `graph.Compile`, not in the builder: `GroupRef.OnError`
+  The gate lived in `graph.Compile`, not in the builder: `GroupRef.OnError`
   takes a `types.OnError`, so `types.OnErrorOutput` is a type-legal argument
-  and nothing in the SDK's assembly half can refuse it. `AddWorkflow` is the
-  only production path to a compiled graph, so that is where it is caught, and
-  `TestBuilderGroupOnErrorOutputRejected` pins the SDK-reachability of the gate
-  separately from the graph-package unit test.
+  and nothing in the SDK's assembly half could refuse it. `AddWorkflow` is the
+  only production path to a compiled graph, so that is where it was caught.
 
-  Snapshot decode (`Graph.UnmarshalJSON`) deliberately does **not** apply the
-  validation. A graph persisted by a writer predating the gate would otherwise
+  Snapshot decode (`Graph.UnmarshalJSON`) deliberately did **not** apply the
+  validation — a graph persisted by a writer predating the gate would otherwise
   become undecodable mid-rolling-upgrade; `groupOnErrorFatal`'s catch-all is
-  fatal, which is the safe reading of a value it cannot honor.
+  fatal, the safe reading of a value it cannot honor. This remains true: the
+  implemented mechanism above still only validates `OnError`/`ErrorOutputs` at
+  `graph.Compile`, not at decode.
 
-  Building the real mechanism still means: new compile-time IR expressing a
-  group-level error/main output edge, a matching `validateGroupPortability`
-  rule, graph-hash and snapshot round-trip implications, synthesis logic
-  duplicated across both commit paths (`commitGroup` and the production remote
-  `CommitGroupResult`), a decision on what output payload a group-level failure
-  carries (a group has no single member output to copy), and new branch coverage
-  in both the local and Redis backends. The milestone-B plan anticipated this as
-  a "synthetic boundary outcome" and specified the fallback — when no legal
-  endpoint exists to map onto, it stays a group failure rather than fabricating
-  an endpoint.
+  </details>
+- **`main_output` on a group remains rejected, by design, not by remaining
+  scope.** Unlike a node — which has its own successful output to merge the
+  error into — a group that failed before committing has no single member
+  output to stand in for "the group's main result." There is no
+  `error_outputs`-shaped escape hatch for it the way there is for
+  `error_output`; building one would mean inventing a payload with no
+  principled source, which is the same objection the investigations raised
+  for the mechanism as a whole, just not resolvable by giving it a target
+  list.
 
-  Runtime coverage of the routing itself remains zero, and now cannot be
-  written without first building the mechanism: the group executor fixtures
-  always return success, so the `execErr != nil` branch is never driven at the
-  engine layer.
 - **Activation replica count > 1 per entry unit** (spec §11.6 explicit-replica
   scaling). There is one active hosting runner per entry unit today.
 - **Full runner→control activation ACK RPC.** The retired path's ACK was dead
