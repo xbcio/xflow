@@ -82,21 +82,65 @@ func (e *Engine) executeGroup(ctx context.Context, task *Task, flush bool) error
 	e.notifyGroupLeaseAcquired(ctx)
 
 	exits, fatal, execErr := e.groupExecutor.ExecuteGroup(ctx, task, meta)
-	return e.commitGroup(ctx, g, lease, meta, exits, fatal, execErr, flush)
+	// This is the local/embedded executor path: ExecuteGroup only ever
+	// reports an ordinary handler failure (or none) through execErr/fatal —
+	// unlike CommitGroupResult's remote wire path, it has no distinct
+	// canceled/timeout OUTCOME classification (GroupResult.Outcome) layered
+	// on top. So group-level OnError governs this failure unconditionally:
+	// recompute fatal from meta.OnError exactly as before this feature, and
+	// decide error_output routing from the result.
+	if execErr != nil {
+		fatal = groupOnErrorFatal(meta.OnError)
+	}
+	routeToErrorOutput := execErr != nil && !fatal && meta.OnError == string(types.OnErrorOutput)
+	return e.commitGroup(ctx, g, lease, meta, exits, fatal, execErr, flush, routeToErrorOutput)
 }
 
 // commitGroup commits one group unit's terminal result, propagates downstream
 // unit arrivals, and finalizes the execution when all units are done.
-func (e *Engine) commitGroup(ctx context.Context, g *graph.Graph, lease *GroupLease, meta graph.GroupMeta, exits []GroupExit, fatal bool, execErr error, flush bool) error {
+//
+// fatal and routeToErrorOutput are both caller-decided, not re-derived here.
+// This matters because the two production callers disagree in one case:
+// executeGroup's ExecuteGroup only ever reports an ordinary handler failure,
+// so group-level OnError governs its fatality unconditionally; but
+// CommitGroupResult's remote wire path carries a distinct canceled/timeout
+// OUTCOME classification (GroupResult.Outcome) that must stay fatal
+// regardless of on_error=continue/error_output — a cancellation is not the
+// failure OnError exists to tolerate or route. Earlier revisions had
+// commitGroup unconditionally overwrite the caller's fatal with
+// groupOnErrorFatal(meta.OnError) whenever execErr != nil (true for every
+// non-success outcome, including canceled/timeout), silently downgrading a
+// cancellation to a routed/tolerated non-fatal commit on any group configured
+// with on_error=continue or error_output. Trusting the caller's verdict here
+// closes that.
+func (e *Engine) commitGroup(ctx context.Context, g *graph.Graph, lease *GroupLease, meta graph.GroupMeta, exits []GroupExit, fatal bool, execErr error, flush bool, routeToErrorOutput bool) error {
 	gs := e.state.(GroupStateStore) // executeGroup already asserted
 	outcome := GroupOutcomeSuccess
 	errMsg := ""
 	if execErr != nil {
 		outcome = GroupOutcomeFailed
 		errMsg = execErr.Error()
-		// group-level OnError: reuse node OnError semantics to decide whether
-		// to fail the entire execution.
-		fatal = groupOnErrorFatal(meta.OnError)
+		if routeToErrorOutput {
+			// Every backend's CommitGroup/SeedExecutionFromEntry increments its
+			// failed-unit counter whenever Outcome==GroupOutcomeFailed,
+			// regardless of Fatal (backend/providers/local/group_state.go,
+			// backend/providers/distributed/internal/rstate/group_state.go,
+			// backend/providers/local/entry_admission.go) — and a non-zero
+			// failed count finalizes the WHOLE EXECUTION as Failed once the
+			// remaining-unit counter reaches zero, even for a unit this engine
+			// itself decided was non-fatal. error_output's contract is the same
+			// as a node's: the node/group "handled" the error and the execution
+			// is not failed by it (ApplyOnError's error_output sets
+			// NodeStatus: types.NodeStatusSuccess, never NodeStatusFailed, for
+			// exactly this reason). Reporting GroupOutcomeSuccess here is what
+			// keeps a routed group from silently finalizing its execution as
+			// Failed through that counter — the backends have no OTHER signal
+			// that would tell them not to count it. errMsg/reqExits below still
+			// carry the real failure (committed under the group's own name/
+			// "error" port), so the information is not lost, only not counted
+			// as a terminal execution failure.
+			outcome = GroupOutcomeSuccess
+		}
 	}
 
 	// Downstream unit arrival descriptions. Arrival counting (in-degree DECR /
@@ -104,13 +148,19 @@ func (e *Engine) commitGroup(ctx context.Context, g *graph.Graph, lease *GroupLe
 	// SAME atomic transition — not by a subsequent AdvanceNode call — because a
 	// group has no per-node state, and AdvanceNode's source guard would
 	// fail-closed.
+	//
+	// A failed group that routes to error_output reports no real member exits
+	// (the failure means the member subgraph did not reach its normal boundary
+	// outputs) — only the synthesized error edges light up. A failed group that
+	// is non-fatal under "continue" reports whatever exits the executor DID
+	// manage to produce before the failure, same as before this feature.
 	var downstream []DownstreamArrival
 	if !fatal {
-		downstream = e.downstreamUnitArrivals(g, meta.UnitIdx, exits)
+		downstream = e.downstreamUnitArrivals(g, meta.UnitIdx, exits, routeToErrorOutput)
 	}
 
 	// GroupExit (executor report) → GroupExitResult (commit request, Task 8).
-	reqExits := make([]GroupExitResult, 0, len(exits))
+	reqExits := make([]GroupExitResult, 0, len(exits)+1)
 	for _, ex := range exits {
 		reqExits = append(reqExits, GroupExitResult{
 			NodeIdx:       nodeIdxOf(g, ex.NodeName),
@@ -118,6 +168,23 @@ func (e *Engine) commitGroup(ctx context.Context, g *graph.Graph, lease *GroupLe
 			Port:          ex.Port,
 			Data:          ex.Data,
 			PrivateOutput: groupExitOutputIsPrivate(g, ex.NodeName),
+		})
+	}
+	if routeToErrorOutput {
+		// The error payload is stored under the GROUP's own name, not any
+		// member's — GetOutput/$('name') is keyed purely by name string
+		// (memoryNodeKey/outputKey take a name, never a node index), so a
+		// downstream node's $('group_name').json reads this exactly like a
+		// node's own output. NodeIdx has no real node to point at (-1, matching
+		// the synthetic edge's Src.NodeIdx); nothing dereferences it for this
+		// exit because the destination side of the arrival drives scheduling,
+		// not this record.
+		reqExits = append(reqExits, GroupExitResult{
+			NodeIdx:       -1,
+			NodeName:      meta.Name,
+			Port:          "error",
+			Data:          groupErrorOutputData(meta, execErr),
+			PrivateOutput: false,
 		})
 	}
 
@@ -181,6 +248,35 @@ func (e *Engine) commitGroup(ctx context.Context, g *graph.Graph, lease *GroupLe
 	return nil
 }
 
+// groupErrorOutputData builds the payload committed under the group's own
+// name/"error" port when a failed group routes to error_output. It carries
+// the group name and the error message — the "error" and "error details"
+// NODE-GROUP-COLOCATION.md §12.2 calls for — structured the same way a node's
+// own error_output payload is (engine/errorpolicy.go buildErrData), so a
+// downstream consumer can read $('group').json.error the same way it would
+// read a node's.
+//
+// There is deliberately no separate "failed member name" field: unlike a
+// node-level failure (types.Error.NodeName, set by the handler boundary that
+// calls a single node), a group failure's execErr is subgraph.Result.Error —
+// a plain string copied from the inner execution's terminal error
+// (service/runner/group_runtime.go's ExecuteRequest) — not a structured value
+// a group-exec caller could attach a member identity to. Member identity is
+// not systematically lost: GroupRuntime's inner engine runs its own node
+// commits and the inner execution's own audit/error carries the failing
+// member's name in its message text (the same text this function reads), it
+// is just not available here as a separate structured field.
+func groupErrorOutputData(meta graph.GroupMeta, execErr error) map[string]any {
+	errMsg := ""
+	if execErr != nil {
+		errMsg = execErr.Error()
+	}
+	return map[string]any{
+		"group": meta.Name,
+		"error": map[string]any{"message": errMsg},
+	}
+}
+
 // nodeIdxOf resolves a member name to a node index. The name is always from
 // the current graph's members/exits so it is guaranteed to exist.
 func nodeIdxOf(g *graph.Graph, name string) int {
@@ -209,24 +305,23 @@ func groupExitOutputIsPrivate(g *graph.Graph, name string) bool {
 
 // groupOnErrorFatal maps the group's OnError strategy to whether a group
 // failure fails the whole execution. Uses the node OnError constants
-// (types/node.go): OnErrorContinue => non-fatal (execution continues);
-// OnErrorStop or empty/default => fatal.
+// (types/node.go): OnErrorContinue and OnErrorOutput => non-fatal (execution
+// continues, the latter additionally routing to the group's declared
+// error_outputs — see commitGroup's routeToErrorOutput); OnErrorStop or
+// empty/default => fatal.
 //
-// error_output and main_output never reach here: validateGroupOnError
-// (engine/graph/group_compile.go) rejects them at compile time, because routing
-// a group-level failure requires a group error output port that does not exist
-// — GroupMeta.BoundaryOutputs is derived solely from real member edges crossing
-// the boundary, compileOneGroup never reads OnError to synthesize one, and
-// CommitGroupResult rejects any exit whose (nodeIdx, port) is absent from
-// BoundaryOutputs. Building it is a new mechanism, scoped in
-// NODE-GROUP-COLOCATION.md §12.2.
+// main_output never reaches here: validateGroupOnError
+// (engine/graph/group_compile.go) rejects it at compile time, because unlike a
+// node, a group that failed before committing has no single member output to
+// stand in for "the group's main result" — there is no principled payload
+// main_output could carry. See NODE-GROUP-COLOCATION.md §12.2.
 //
 // The catch-all is deliberate rather than a switch: an unknown value cannot
 // arrive (compile rejects it), and fatal is the safe reading if one somehow did
 // — a graph snapshot decoded from an older writer that predates the validation
 // would fail the execution rather than silently continue past a failed group.
 func groupOnErrorFatal(onErr string) bool {
-	return onErr != string(types.OnErrorContinue)
+	return onErr != string(types.OnErrorContinue) && onErr != string(types.OnErrorOutput)
 }
 
 // downstreamUnitArrivals maps a source unit's fired boundary exits to per-
@@ -234,7 +329,18 @@ func groupOnErrorFatal(onErr string) bool {
 // (atomic.go). The active boundary ports select which downstream edges carry
 // an active arrival (execute) vs an inactive one (skip propagation). Consumed
 // by CommitGroup, which does the atomic in-degree/active/threshold counting.
-func (e *Engine) downstreamUnitArrivals(g *graph.Graph, srcUnit int, exits []GroupExit) []DownstreamArrival {
+//
+// g.UnitOutEdges(srcUnit) mixes two edge families for a group unit: ordinary
+// member boundary edges (graph.UnitEdge.ErrorEdge == false) and the
+// synthetic error edges from GroupMeta.ErrorOutputs (ErrorEdge == true). Only
+// one family is ever active for a given commit: a successful group lights up
+// real exits and never routeToErrorOutput; a failed group routed to
+// error_output reports no real exits (see commitGroup) and routeToErrorOutput
+// activates every error edge unconditionally — the group has exactly one
+// error port and it fired. Both families still contribute their
+// ArrivalCount so a downstream unit's static in-degree is correct regardless
+// of which branch actually becomes active.
+func (e *Engine) downstreamUnitArrivals(g *graph.Graph, srcUnit int, exits []GroupExit, routeToErrorOutput bool) []DownstreamArrival {
 	active := make(map[string]bool, len(exits))
 	for _, ex := range exits {
 		active[boundaryKey(nodeIdxOf(g, ex.NodeName), ex.Port)] = true
@@ -259,7 +365,11 @@ func (e *Engine) downstreamUnitArrivals(g *graph.Graph, srcUnit int, exits []Gro
 			}
 		}
 		a.ArrivalCount++
-		if active[boundaryKey(ue.Src.NodeIdx, ue.Src.Port)] {
+		if ue.ErrorEdge {
+			if routeToErrorOutput {
+				a.ActiveCount++
+			}
+		} else if active[boundaryKey(ue.Src.NodeIdx, ue.Src.Port)] {
 			a.ActiveCount++
 		}
 		byDst[ue.DstUnit] = a

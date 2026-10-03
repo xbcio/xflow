@@ -296,11 +296,18 @@ func (e *Engine) CommitGroupResult(ctx context.Context, lease *TaskLease, res Gr
 	// failure, releasing downstream on a result nothing understood. This used
 	// to guard only "suspended" (durable group suspend, since removed); the
 	// rest of the space was silently accepted.
+	//
+	// routeToErrorOutput is deliberately gated on GroupOutcomeFailed alone:
+	// GroupOutcomeTimeout/GroupOutcomeCanceled are unconditionally fatal and
+	// never consult OnError at all (see commitGroup's parameter doc for why
+	// that must stay true even when on_error=error_output is configured).
 	fatal := false
+	routeToErrorOutput := false
 	switch res.Outcome {
 	case GroupOutcomeSuccess:
 	case GroupOutcomeFailed:
 		fatal = groupOnErrorFatal(gm.OnError)
+		routeToErrorOutput = !fatal && gm.OnError == string(types.OnErrorOutput)
 	case GroupOutcomeTimeout, GroupOutcomeCanceled:
 		fatal = true
 	default:
@@ -329,7 +336,7 @@ func (e *Engine) CommitGroupResult(ctx context.Context, lease *TaskLease, res Gr
 		IssuedAt:     lease.IssuedAt,
 	}
 
-	err = e.commitGroup(ctx, g, groupLease, gm, exits, fatal, groupResultError(res), true)
+	err = e.commitGroup(ctx, g, groupLease, gm, exits, fatal, groupResultError(res), true, routeToErrorOutput)
 	if err != nil {
 		// The group's state transition already applied; only the downstream
 		// delivery failed. Keep the classification so the caller releases the
