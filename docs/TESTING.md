@@ -114,6 +114,16 @@ host-less `OnInstanceRecycled` stream (`TestReclaimReportsCountAndCause` and
 same way if a foreign reclaim landed in their window. They have not been observed
 to flake, but they are the same defect shape and need an owner.
 
+2026-10-04: one producer in that class is closed. doom's and recyclePlanned's
+asynchronous rebuild failures now report to the observer captured when the
+rebuild was spawned rather than to whatever is installed when it fails
+(`pool.go`, pinned by `TestDoomRebuildFailureAttributesToTheSpawnTimeObserver`),
+so a late `rebuild_failed` can no longer land in the next test's recorder — that
+mis-attribution is what failed `TestDoomClassifiesExpiredContextAsTimeout` and
+`TestDrainPoolNotifiesObserverPoolSwapped` in full-package runs. The reclaim
+path (the sweep's drain reports and instance counts) still reads the
+process-wide observer at report time and keeps the exposure described above.
+
 Measured 2026-09-17 (8-core host, workspace-local `GOCACHE`): the same
 `-race` invocation on a compile-dominated subset costs **2m28s cold vs 28s
 warm — 5.2x** — because wazero's guest-module cache is a separate directory

@@ -120,6 +120,63 @@ func TestDoomReportsRebuildFailure(t *testing.T) {
 	}
 }
 
+// TestDoomRebuildFailureAttributesToTheSpawnTimeObserver pins the capture in
+// doom: the failed rebuild reports to the observer installed when the rebuild
+// was SPAWNED, not to whichever observer is installed when it finishes.
+//
+// Without the capture the failure lands in the next observer installed — in a
+// full-package run, the next test's recorder, which is how
+// TestDoomClassifiesExpiredContextAsTimeout and
+// TestDrainPoolNotifiesObserverPoolSwapped acquired a foreign "rebuild_failed".
+// The rebuild cannot finish between the doom and the observer swap below (it
+// builds a whole instance), so pre-capture this test fails by waiting out the
+// spawn-time observer.
+func TestDoomRebuildFailureAttributesToTheSpawnTimeObserver(t *testing.T) {
+	spawned := &recordingObserver{}
+	SetObserver(nil)
+	SetObserver(spawned)
+	defer SetObserver(nil)
+
+	ctx := context.Background()
+	h := newTestReactorHost(t)
+	e, err := h.engineFor(ctx, reactorWasm)
+	if err != nil {
+		t.Fatalf("engineFor: %v", err)
+	}
+	if err := e.swapConfig(ctx, []byte(`{"rules":[]}`), 1, 1); err != nil {
+		t.Fatalf("swap: %v", err)
+	}
+	inst, pool, err := e.borrow(ctx)
+	if err != nil {
+		t.Fatalf("borrow: %v", err)
+	}
+	// Poison the live pool's replay config so the async rebuild fails, exactly as
+	// TestDoomReportsRebuildFailure does.
+	pool.cfg = []byte(`{"rules":[{"bad":true}]}`)
+
+	e.doom(ctx, pool, inst)
+
+	late := &recordingObserver{}
+	SetObserver(nil)
+	SetObserver(late)
+	defer SetObserver(nil)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !hasCause(spawned.recycledCauses(), "rebuild_failed") && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if causes := spawned.recycledCauses(); !hasCause(causes, "rebuild_failed") {
+		t.Fatalf("the spawn-time observer never saw the failed rebuild (causes = %#v): the "+
+			"report was attributed to the observer installed when the rebuild finished, "+
+			"not the one that spawned it", causes)
+	}
+	if causes := late.recycledCauses(); hasCause(causes, "rebuild_failed") {
+		t.Fatalf("the observer installed after the doom saw the rebuild failure (causes = "+
+			"%#v); a late report must stay attributed to the installation that spawned it",
+			causes)
+	}
+}
+
 func hasCause(causes []string, want string) bool {
 	for _, c := range causes {
 		if c == want {

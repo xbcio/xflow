@@ -656,6 +656,12 @@ func (e *reactorEngine) doom(ctx context.Context, p *activePool, inst *pooledIns
 	if e.active.Load() != p {
 		return // pool superseded; don't replenish a dying generation
 	}
+	// Capture the observer on the spawning goroutine, never inside the closure:
+	// the rebuild outlives this call, and a report delivered to whatever happens
+	// to be installed when it fails is how a late failure leaks into an unrelated
+	// observer -- in the test process, into the NEXT test's recorder. See
+	// SetObserver's contract note.
+	rebuildObserver := obs()
 	go func() {
 		repl, err := e.newInstance(bg, p.cfg)
 		if err != nil {
@@ -663,7 +669,7 @@ func (e *reactorEngine) doom(ctx context.Context, p *activePool, inst *pooledIns
 			// this rebuild. That is a capacity loss, so it must be visible —
 			// silent shrinkage looks identical to contention from outside, and
 			// the pool's width is what bounds wasm concurrency.
-			obs().OnInstanceRecycled(bg, "rebuild_failed")
+			rebuildObserver.OnInstanceRecycled(bg, "rebuild_failed")
 			return
 		}
 		if e.active.Load() != p {
@@ -697,10 +703,11 @@ func (e *reactorEngine) recyclePlanned(p *activePool, inst *pooledInstance) {
 	if e.active.Load() != p {
 		return
 	}
+	rebuildObserver := obs() // see doom: capture on the spawner, not in the closure
 	go func() {
 		repl, err := e.newInstance(bg, p.cfg)
 		if err != nil {
-			obs().OnInstanceRecycled(bg, "rebuild_failed")
+			rebuildObserver.OnInstanceRecycled(bg, "rebuild_failed")
 			return
 		}
 		if e.active.Load() != p {

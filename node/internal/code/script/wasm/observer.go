@@ -151,6 +151,12 @@ func init() {
 // silently lose all its observations, which is worse than failing loudly.
 // Pass nil explicitly to remove the observer before installing a new one
 // (tests use this as their teardown path).
+//
+// Removal does not silence work already in flight. Asynchronous producers
+// capture the observer installed when their work was spawned, so a late report
+// is attributed to the installation that initiated it rather than to whatever
+// is installed when it finishes. Implementations must tolerate calls after they
+// have been removed.
 func SetObserver(o Observer) {
 	observerMu.Lock()
 	defer observerMu.Unlock()
