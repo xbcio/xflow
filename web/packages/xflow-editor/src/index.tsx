@@ -74,6 +74,7 @@ import type {
   ParamIssue,
   RuntimeNodeSnapshot,
   RuntimeSnapshot,
+  Viewport,
   WorkflowDef,
   WorkflowNode
 } from "@xflow/core";
@@ -292,6 +293,20 @@ export interface XFlowEditorProps {
   onAppearanceChange?: (appearance: XFlowEditorAppearance) => void;
   /** Called whenever the user selects a workbench visual language. */
   onThemeVariantChange?: (themeVariant: XFlowEditorThemeVariant) => void;
+  /**
+   * Restores the canvas pan/zoom saved in `WorkflowEditorMetadata.viewport`
+   * (ADR-D4 §2.3), e.g. after `mergeEditorMetadata` on load. Omit it to keep
+   * the canvas's own measured auto-fit. Changing it (a new workflow loaded)
+   * re-applies the viewport.
+   */
+  defaultViewport?: Viewport;
+  /**
+   * Reports the canvas pan/zoom after the user stops panning or zooming, so
+   * the host can fold it into `editor_metadata.viewport` on the next save
+   * (`splitEditorMetadata` reads it from wherever the host keeps it, not from
+   * `WorkflowDef`, since the viewport has no field there).
+   */
+  onViewportChange?: (viewport: Viewport) => void;
 }
 
 interface EditorThemePalette {
@@ -3082,7 +3097,9 @@ export function XFlowEditor({
   appearance: controlledAppearance,
   themeVariant: controlledThemeVariant,
   onAppearanceChange,
-  onThemeVariantChange
+  onThemeVariantChange,
+  defaultViewport,
+  onViewportChange
 }: XFlowEditorProps): React.ReactElement {
   // Memoised per response inside localizeNodeTypes, so identity-keyed caches
   // downstream (node library, form compiler) keep hitting.
@@ -4062,6 +4079,8 @@ export function XFlowEditor({
                 onDeleteNode={deleteSelectedNode}
                 onDropNode={dropNode}
                 danglingPorts={canvasDanglingPorts}
+                defaultViewport={defaultViewport}
+                onViewportChange={onViewportChange}
               />
             </div>
           </div>
