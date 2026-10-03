@@ -47,9 +47,9 @@ func TestSupplyAppliedBeforeEngineExistsWedge(t *testing.T) {
 		// The real pointer content is opaque to this layer; what matters is
 		// that a consumer of "wasm-artifacts" is meant to configure its pool
 		// from it.
-		Content: []byte(`{"rules":[{"name":"from-pointer","expr":"true"}]}`),
-		Hash:    "pointer-h1",
-		Revision: 1,
+		Content:   []byte(`{"rules":[{"name":"from-pointer","expr":"true"}]}`),
+		Hash:      "pointer-h1",
+		Revision:  1,
 		FetchedAt: time.Now(),
 	}); err != nil {
 		t.Fatalf("Apply pointer content: %v", err)
