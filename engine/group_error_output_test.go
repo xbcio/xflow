@@ -315,6 +315,100 @@ func TestCommitGroupResult_CanceledOutcomeIsFatalDespiteErrorOutput(t *testing.T
 	}
 }
 
+// TestCommitGroupResult_DuplicateFailedCommitDoesNotDoubleRoute proves that a
+// replayed CommitGroupResult call for the SAME lease (e.g. a redelivered
+// runner report, or a retried RPC after a response was lost in transit) does
+// not route to error_outputs a second time: either the group unit's own fence
+// rejects the replay (CommitOutcomeDuplicateTerminal, pinned generically for
+// an arbitrary Exits/Outcome payload — including this feature's synthetic
+// error exit — by statestoretest.RunGroupStateContract's
+// DuplicateCommitIdempotent/DuplicateCommitDoesNotOverwriteOutput against both
+// real backends), or, as here where the group unit is the execution's only
+// unit, the execution itself has already finished and CommitGroupResult's own
+// loadActiveGraph/executionActive check short-circuits the replay as
+// execution_inactive before ever reaching the group-unit fence at all. Either
+// outcome is a rejection; what matters is that the replay's lastCommit never
+// overwrites the ACCEPTED commit's Exits/Downstream with a second copy.
+func TestCommitGroupResult_DuplicateFailedCommitDoesNotDoubleRoute(t *testing.T) {
+	eng, g, execID := setupGroupLeaseTestWithErrorOutput(t)
+	ctx := context.Background()
+
+	gm := g.Groups()[0]
+	task := &Task{
+		ExecutionID:  execID,
+		NodeName:     gm.Name,
+		NodeIdx:      gm.EntryIdx,
+		UnitIdx:      gm.UnitIdx,
+		Type:         TaskTypeGroupExec,
+		ActivationID: 0,
+	}
+	lease, _, err := eng.BuildGroupLease(ctx, task)
+	if err != nil {
+		t.Fatalf("BuildGroupLease: %v", err)
+	}
+
+	result := GroupResult{
+		Outcome: GroupOutcomeFailed,
+		Error:   "member boom",
+	}
+
+	first, err := eng.CommitGroupResult(ctx, lease, result)
+	if err != nil {
+		t.Fatalf("first CommitGroupResult: %v", err)
+	}
+	if first != CommitOutcomeAccepted {
+		t.Fatalf("first outcome = %q, want accepted", first)
+	}
+
+	state := eng.state.(*fakeGroupLeaseState)
+	state.mu.Lock()
+	firstExitCount := len(state.lastCommit.Exits)
+	firstDownstreamCount := len(state.lastCommit.Downstream)
+	state.mu.Unlock()
+	if firstExitCount != 1 {
+		t.Fatalf("first commit wrote %d exits, want 1 (the synthetic error exit)", firstExitCount)
+	}
+
+	// Replay: same lease (same LeaseToken/Attempt), same result, exactly as a
+	// redelivered runner report or a retried RPC would present it. The first
+	// commit already finalized the execution (error_output reports
+	// GroupOutcomeSuccess, remaining hits 0), so CommitGroupResult's own
+	// loadActiveGraph/executionActive check short-circuits the replay as
+	// execution_inactive before ever reaching gs.CommitGroup — the same
+	// precedence the real backends use (commitGroupLua checks exec:status
+	// terminal strings and returns {3,...} before consulting the group unit's
+	// own fence at all; see commitGroupLua's doc comment on the deliberate
+	// local-vs-redis fence-ordering divergence, which is unrelated to this
+	// case because here the EXECUTION, not just the group unit, is already
+	// terminal). A still-ACTIVE execution with an already-committed group unit
+	// is the case the group-unit-level fence itself (f.committed /
+	// committed_lease_token / status=='done') exists for, and is pinned by the
+	// pre-existing TestCommitGroup_UnknownExitPrivacyFailsClosed-style
+	// coverage; execution_inactive is the correct outcome once the WHOLE
+	// execution has already finished, not duplicate_terminal.
+	second, err := eng.CommitGroupResult(ctx, lease, result)
+	if err != nil {
+		t.Fatalf("second (replayed) CommitGroupResult: %v", err)
+	}
+	if second != CommitOutcomeExecutionInactive {
+		t.Fatalf("replayed outcome = %q, want execution_inactive (must not re-route)", second)
+	}
+
+	state.mu.Lock()
+	// lastCommit must be untouched by the rejected replay: still exactly the
+	// one real exit and one real downstream arrival from the first commit, not
+	// doubled.
+	secondExitCount := len(state.lastCommit.Exits)
+	secondDownstreamCount := len(state.lastCommit.Downstream)
+	state.mu.Unlock()
+	if secondExitCount != firstExitCount {
+		t.Errorf("lastCommit.Exits changed on replay: %d -> %d, want unchanged", firstExitCount, secondExitCount)
+	}
+	if secondDownstreamCount != firstDownstreamCount {
+		t.Errorf("lastCommit.Downstream changed on replay: %d -> %d, want unchanged", firstDownstreamCount, secondDownstreamCount)
+	}
+}
+
 // setupGroupLeaseTestWithErrorOutput mirrors setupGroupLeaseTest but compiles
 // a group with on_error=error_output and a valid error_outputs target, for
 // tests that need the fakeGroupLeaseState/lastCommit introspection style
