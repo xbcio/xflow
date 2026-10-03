@@ -36,9 +36,9 @@
 //   - MetricsReportClient (ReportMetrics) — the HTTP and in-process clients
 //     implement it; allows the runner to proxy its Prometheus registry through
 //     the server when cross-domain scraping is not possible.
-//   - activationAckClient (ActivationAck) — the HTTP and in-process clients
-//     implement it; sends a negative ack when an ActivateDirective could not be
-//     applied.
+//   - activationAckClient (ActivationAck) — the HTTP, gRPC, and in-process
+//     clients all implement it; sends a negative ack when an ActivateDirective
+//     could not be applied.
 //
 // The runner does NOT import redis, asynq, or any storage driver. Any
 // connectivity it needs is satisfied by a custom *http.Client passed at
@@ -105,9 +105,10 @@
 //     least one integration-level test; a unit test where you set the field
 //     directly proves nothing about the wiring.
 //
-//   - gRPC capability gaps: gRPC-transport runners never renew leases, send
-//     activation acks, or report metrics. Do not add fallback logic that assumes
-//     those calls succeeded on the gRPC path — they are skipped by the
-//     leaseRenewClient / MetricsReportClient / activationAckClient type
-//     assertions at startup, and adding silent fallbacks would hide the gap.
+//   - gRPC capability gaps: gRPC-transport runners never renew leases or report
+//     metrics. Do not add fallback logic that assumes those calls succeeded on
+//     the gRPC path — they are skipped by the leaseRenewClient /
+//     MetricsReportClient type assertions at startup, and adding silent
+//     fallbacks would hide the gap. activationAckClient is NOT in this list:
+//     the gRPC client implements it via the AckActivation RPC.
 package runner

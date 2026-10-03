@@ -17,7 +17,8 @@ type LeaseRenewer interface {
 // leaseRenewClient is the optional protocol capability for extending a lease.
 // The HTTP client implements it; the gRPC client does not, so a gRPC runner
 // never renews and its long handlers stay subject to the raw TTL — the same
-// explicit gap as MetricsReportClient and activationAckClient.
+// explicit gap as MetricsReportClient. activationAckClient is no longer in
+// that list: both the HTTP and gRPC clients implement it.
 type leaseRenewClient interface {
 	RenewLease(ctx context.Context, req protocol.RenewLeaseRequest) (protocol.RenewLeaseResponse, error)
 }

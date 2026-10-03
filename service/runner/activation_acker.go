@@ -17,8 +17,9 @@ const activationAckTimeout = 10 * time.Second
 // activationAckClient is the subset of the runner protocol used to report a
 // failed activation back to the server. Kept separate from ProtocolClient so
 // activationAcker can be constructed and tested without a full runner or a
-// transport that implements every RPC (e.g. the gRPC transport does not carry
-// activation directives at all yet, so it has no need for this method).
+// transport that implements every RPC. Both the HTTP and gRPC clients
+// implement it today (gRPC via the AckActivation RPC); the in-process
+// transport also implements it directly against Core.
 type activationAckClient interface {
 	ActivationAck(ctx context.Context, ack protocol.ActivationAck) error
 }

@@ -37,7 +37,8 @@ const runnerIDLabel = "runner_id"
 
 // MetricsReportClient is the optional protocol capability for shipping metrics.
 // The HTTP client implements it; the gRPC client does not, so a gRPC runner
-// never reports (see the activationAckClient precedent in activation_acker.go).
+// never reports. This is a narrower gap than it once was: activationAckClient
+// (activation_acker.go) is now implemented by both transports.
 type MetricsReportClient interface {
 	ReportMetrics(ctx context.Context, runnerID, sessionID string, body []byte) error
 }

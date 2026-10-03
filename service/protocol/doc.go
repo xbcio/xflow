@@ -58,8 +58,8 @@
 //	   Deregister POST /v1/runners/deregister     (HTTP only)
 //
 //	Unary gRPC transport (grpc_client.go + runnerpb/)
-//	   Register, Heartbeat, Poll, and Result are mapped. RenewLease,
-//	   ActivationAck, and Metrics remain HTTP-only, so unary gRPC is not a
+//	   Register, Heartbeat, Poll, Result, and ActivationAck are mapped.
+//	   RenewLease and Metrics remain HTTP-only, so unary gRPC is not a
 //	   complete production lifecycle transport.
 //
 // gRPC also exposes Connect, a bidirectional control stream. Its first
