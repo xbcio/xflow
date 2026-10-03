@@ -218,6 +218,18 @@ type runnerService interface {
 	Close() error
 }
 
+// credentialReloadingRunner is the optional capability a runnerService may
+// satisfy: *xflow.Runner implements Reload for the HTTP and gRPC transports
+// (RunnerTransportInProc's Reload is a documented no-op — see xflow.Runner.
+// Reload's doc). The seam here mirrors the activationAckClient/
+// leaseRenewClient pattern already used by service/runner's own protocol
+// client: an optional capability tested with a type assertion rather than
+// widening runnerService itself, so a test double that implements only
+// Run/Close is still a valid runnerService.
+type credentialReloadingRunner interface {
+	Reload(xflowsdk.CredentialReloaderSource) error
+}
+
 var newRunnerService = func(cfg xflowsdk.RunnerConfig, opts ...xflowsdk.RunnerOption) (runnerService, error) {
 	return xflowsdk.NewRunner(cfg, opts...)
 }
@@ -250,6 +262,14 @@ func configuredCredentialNames(credentials map[string]map[string]any) []string {
 func runRunner(ctx context.Context, cfg runnerConfig) error {
 	restoreHTTPHostPolicy := installRunnerHTTPHostPolicy(cfg)
 	defer restoreHTTPHostPolicy()
+
+	// baseCfg is cfg before the identity overlay below mutates runnerID/token
+	// in place. The SIGHUP reload wiring re-resolves credentials starting from
+	// this value, not from cfg after identity resolution, so a re-resolve
+	// re-reads the config file/env/flags the same way resolveRunnerConfig did
+	// at startup instead of starting from whatever enrollment happened to
+	// leave in cfg.token.
+	baseCfg := cfg
 
 	// Identity is settled before anything else: it rewrites cfg.runnerID and
 	// cfg.token, and every client built below reads them.
@@ -315,6 +335,20 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 	// successfully. Configuration/load failures therefore produce no credential
 	// log, and this deliberately passes names rather than credential maps.
 	slog.Info("runner starting", "credential_names", configuredCredentialNames(cfg.credentials))
+
+	// SIGHUP hot-reloads this runner's bearer token (when statically
+	// configured — see newCredentialReloadFunc) and mTLS client
+	// certificate/key/server CA, all without restarting the process. Wired
+	// only when the transport actually implements Reload meaningfully: the
+	// HTTP and gRPC transports do (xflow.Runner.Reload), and
+	// RunnerTransportInProc's Reload is a documented no-op that this skips
+	// registering a handler for entirely, since inproc carries only a token
+	// and secures nothing over the wire that a signal would ever need to
+	// rotate.
+	if reloadable, ok := runner.(credentialReloadingRunner); ok && cfg.transport != xflowsdk.RunnerTransportInProc {
+		stopReload := installCredentialReloadSignal(runCtx, newCredentialReloadFunc(baseCfg, store, reloadable))
+		defer stopReload()
+	}
 
 	defer func() {
 		if closeErr := runner.Close(); closeErr != nil {
