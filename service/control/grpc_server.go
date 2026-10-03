@@ -214,6 +214,19 @@ func (s *GRPCServer) ReportResult(ctx context.Context, req *runnerpb.ReportResul
 	return &runnerpb.ReportResultResponse{Accepted: resp.Accepted, Error: resp.Error}, nil
 }
 
+// AckActivation reports the outcome of an activate/deactivate directive back
+// to the server, mirroring HandleActivationAck exactly: both call
+// Core.activationAck, which owns authz, namespace scoping, fencing/generation
+// checks, and idempotency, so neither transport duplicates that logic.
+func (s *GRPCServer) AckActivation(ctx context.Context, req *runnerpb.ActivationAckRequest) (*runnerpb.ActivationAckResponse, error) {
+	in := protocol.ActivationAckRequestFromProto(req)
+	overrideTokenFromMetadata(ctx, &in.AuthToken)
+	if err := s.core.activationAck(ctx, in, grpcTransportInfo(ctx)); err != nil {
+		return nil, runnerStatus(err)
+	}
+	return &runnerpb.ActivationAckResponse{}, nil
+}
+
 // overrideTokenFromMetadata pulls the Authorization: Bearer <token> value out
 // of gRPC metadata and, if present, overrides whatever the request payload
 // carried. Matches the HTTP contract: header transport is authoritative.
@@ -257,11 +270,6 @@ func grpcTransportInfo(ctx context.Context) TransportInfo {
 }
 
 // runnerStatus maps transport-agnostic Core sentinel errors to gRPC status codes.
-//
-// NOTE: The gRPC transport does NOT yet expose an ActivationAck RPC. gRPC-only
-// runners cannot send activation acks; the fence path is silent-dead in that
-// deployment mode. The HTTP transport carries it today; a gRPC RPC + proto
-// definition is needed when gRPC-only runners exist. (Task 6 scope: HTTP only.)
 func runnerStatus(err error) error {
 	switch {
 	case errors.Is(err, ErrRunnerIDRequired), errors.Is(err, ErrRunnerSessionRequired), errors.Is(err, ErrConcurrencyRequired), errors.Is(err, ErrInstanceUIDRequired), errors.Is(err, ErrInvalidNamespace), errors.Is(err, ErrLabelConflict), errors.Is(err, ErrLeaseRequired), errors.Is(err, ErrMissingWorkflowVersion):
