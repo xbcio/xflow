@@ -291,7 +291,7 @@ G1 生产部署必须配置以下能力，详细示例见 [deployment-examples.m
 
 | # | 待决策事项 | 决策角色（非具名个人） | 该决策解锁 / 作为前置的证据 | 状态 |
 |---|---|---|---|---|
-| D1 | **批准支持矩阵**：明确支持的依赖版本与拓扑（Redis 单实例 / Sentinel / Cluster，MySQL 版本，Kafka 是否必需，runner 传输），以及被排除项（PostgreSQL 当前无 typed error classifier；gRPC-only 无 ActivationAck 自愈；Relay Gateway / remote SDK 不在范围内）。 | 产品负责人 + 运行时/后端负责人 | 使 README 的拓扑矩阵、[deployment-examples.md](../references/deployment-examples.md) 与 §5 配置清单成为**经批准**的支持边界；G2 环境必须与矩阵一致 | **OPEN — 未批准** |
+| D1 | **批准支持矩阵**：明确支持的依赖版本与拓扑（Redis 单实例 / Sentinel / Cluster，MySQL 版本，Kafka 是否必需，runner 传输），以及被排除项（PostgreSQL 当前无 typed error classifier；Relay Gateway / remote SDK 不在范围内）。 | 产品负责人 + 运行时/后端负责人 | 使 README 的拓扑矩阵、[deployment-examples.md](../references/deployment-examples.md) 与 §5 配置清单成为**经批准**的支持边界；G2 环境必须与矩阵一致 | **OPEN — 未批准** |
 | D2 | **是否引入版本化 migration framework**：若引入，须同时批准离线迁移的停机窗口与回退方案；若不引入，须明确接受「无版本化迁移」这一现状。 | 运行时/后端负责人 + DBA / 存储负责人 | `db/xflow_schema.sql:262-265` 已声明该块为 BREAKING / OFFLINE MIGRATION 且 mixed-version operation 不受支持；D2 决定后续 schema 变更能否滚动升级 | **OPEN — 未批准** |
 | D3 | **批准停机窗口**：应用 `db/xflow_schema.sql` 的离线迁移、`make env-migrate` 演练以及备份/恢复演练所需的具体窗口（时长、通告方式）。 | 运维/on-call 负责人 + 产品负责人（业务影响） | D 阶段退出谓词中的「迁移在已批准的 offline 窗口中完成，并有恢复步骤」；窗口未批准前不得执行生产迁移 | **OPEN — 未批准** |
 | D4 | **是否投入真实 HA 环境**（≥ 2 server、真实 Redis Sentinel/Cluster、持久化 Store、Kafka、≥ 2 runner）。 | 产品负责人 + 基础设施/平台负责人（预算与采购） | G2 / B2 的 HA soak 报告；在报告填实前，README 的「不承诺 HA」保持不变 | **OPEN — 未批准** |

@@ -45,6 +45,6 @@ worktree 中，从未进 git，穷尽检索后确认无法恢复。这 10 条按
 | P0-1：门控拒绝的 activation 不自愈 | `test/integration/supply_gating_test.go:313,546,711` | `fix/activation-ack-retry`：ActivationAck→Fence→退避→重派闭环 |
 | P0-4：supply 加密是死代码 | `service/apiserver/supply_encryption_wiring_test.go:22` | KEK/DEK/传输 key 三层接线；`fix(apiserver): wire cp SupplyEncryptor into supply module` |
 | P1-2：runner 指标只能自曝 | `service/runner/metrics_reporter.go`，`service/control/server.go`，`test/integration/runner_metrics_proxy_e2e_test.go` | `--report-metrics` → `POST /v1/runners/metrics` → 并入 `/metrics`；已实现 |
-| P1-3：gRPC 传输不携带 hint 与 activation | `service/protocol/runnerpb/runner.proto` 的 `message HeartbeatResponse`，`service/control/grpc_server.go:110` | `HeartbeatResponse` 补全四个字段；gRPC `ActivationAck` RPC 缺失归入「已知代价」 |
+| P1-3：gRPC 传输不携带 hint 与 activation | `service/protocol/runnerpb/runner.proto` 的 `message HeartbeatResponse`，`service/control/grpc_server.go:110` | `HeartbeatResponse` 补全四个字段；gRPC `ActivationAck` RPC 此后补齐，见 [SUPPLY-NODE.md §9(a)](./SUPPLY-NODE.md#9-known-gaps-and-costs) |
 | P1-4：wasm supply 热更新无生产接线 | `service/control/supply_consumer_binding_test.go`，`test/integration/wasm_supply_binding_e2e_test.go:159` | `fix/wasm-supply-wiring`：`DeriveEntryActivations` 产出 `SupplyConsumerBinding` 随激活下发 |
 | 待验证（全包 `-count=2` 竞态） | `wasm/supply_consumer_test.go:185`，`script/wasm_supply_seam_test.go`，`wasm/latency_budget_test.go` | 两处全局状态泄漏已修；预算测试改为检测污染并拒判 |
