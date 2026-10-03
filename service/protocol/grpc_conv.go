@@ -335,6 +335,42 @@ func ReportResultRequestFromProto(req *runnerpb.ReportResultRequest) (ReportResu
 	}, nil
 }
 
+// ActivationAckRequestToProto converts the HTTP-shaped ActivationAck DTO to its
+// gRPC wire message. AuthToken is deliberately NOT carried onto the proto
+// message: like every other request, the token travels in gRPC metadata (see
+// GRPCClient.withAuth / overrideTokenFromMetadata), never in the message body.
+func ActivationAckRequestToProto(ack ActivationAck) *runnerpb.ActivationAckRequest {
+	return &runnerpb.ActivationAckRequest{
+		RunnerId:        ack.RunnerID,
+		SessionId:       ack.SessionID,
+		WorkflowId:      ack.WorkflowID,
+		WorkflowVersion: ack.WorkflowVersion,
+		GroupId:         ack.GroupID,
+		ReplicaIndex:    ack.ReplicaIndex,
+		Generation:      ack.Generation,
+		Status:          string(ack.Status),
+		Error:           ack.Error,
+	}
+}
+
+// ActivationAckRequestFromProto converts a gRPC ActivationAckRequest back to
+// the transport-agnostic ActivationAck DTO Core.activationAck consumes.
+// AuthToken is left empty; the gRPC server fills it from metadata the same way
+// the HTTP handler fills it from the Authorization header.
+func ActivationAckRequestFromProto(req *runnerpb.ActivationAckRequest) ActivationAck {
+	return ActivationAck{
+		RunnerID:        req.GetRunnerId(),
+		SessionID:       req.GetSessionId(),
+		WorkflowID:      req.GetWorkflowId(),
+		WorkflowVersion: req.GetWorkflowVersion(),
+		GroupID:         req.GetGroupId(),
+		ReplicaIndex:    req.GetReplicaIndex(),
+		Generation:      req.GetGeneration(),
+		Status:          ActivationStatus(req.GetStatus()),
+		Error:           req.GetError(),
+	}
+}
+
 func cloneLabels(labels map[string]string) map[string]string {
 	if len(labels) == 0 {
 		return nil
