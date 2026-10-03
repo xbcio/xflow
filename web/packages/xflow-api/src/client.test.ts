@@ -208,10 +208,10 @@ describe("createXFlowApiClient", () => {
       }
     });
 
-    const workflow = await client.getWorkflow("wf /?#%");
+    const result = await client.getWorkflow("wf /?#%");
 
     expect(requested).toEqual(["https://xflow.test/api/workflows/wf%20%2F%3F%23%25"]);
-    expect(workflow).toMatchObject({ id: "wf /?#%", name: "Demo" });
+    expect(result.workflow).toMatchObject({ id: "wf /?#%", name: "Demo" });
   });
 
   it("creates workflow definitions through the configured base URL", async () => {
@@ -264,6 +264,155 @@ describe("createXFlowApiClient", () => {
       }
     ]);
     expect(result).toEqual({ workflowId: "wf-1" } satisfies RegisterWorkflowResult);
+  });
+
+  it("merges editor_metadata onto nodes when loading a workflow (ADR-D4 §2.5)", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/api",
+      fetcher: async () =>
+        success({
+          id: "wf-1",
+          name: "Demo",
+          nodes: [{ id: "n-start", name: "start", type: "xflow.start" }],
+          editor_metadata: {
+            positions: { "n-start": { x: 1, y: 2 } },
+            ui: { "n-start": { color: "blue" } },
+            notes: { "n-start": "ask before approving" },
+            viewport: { x: 10, y: 20, zoom: 1.5 }
+          }
+        })
+    });
+
+    const result = await client.getWorkflow("wf-1");
+
+    expect(result.workflow.nodes?.[0]).toEqual({
+      id: "n-start",
+      name: "start",
+      type: "xflow.start",
+      position: { x: 1, y: 2 },
+      ui: { color: "blue" },
+      notes: "ask before approving"
+    });
+    // The wire sibling itself never leaks into the merged def.
+    expect(result.workflow).not.toHaveProperty("editor_metadata");
+    expect(result.viewport).toEqual({ x: 10, y: 20, zoom: 1.5 });
+  });
+
+  it("merges with no editor-only fields when the response carries no editor_metadata", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/api",
+      fetcher: async () =>
+        success({ id: "wf-1", name: "Demo", nodes: [{ id: "n-start", name: "start" }] })
+    });
+
+    const result = await client.getWorkflow("wf-1");
+
+    expect(result.workflow.nodes?.[0]).toEqual({ id: "n-start", name: "start" });
+    expect(result.viewport).toBeUndefined();
+  });
+
+  it("sends the caller's viewport in editor_metadata when saving a workflow", async () => {
+    const requests: Array<{ body?: unknown }> = [];
+    const client = createXFlowApiClient({
+      baseUrl: "/api",
+      fetcher: async (_input, init) => {
+        requests.push({ body: init?.body ? JSON.parse(String(init.body)) : undefined });
+        return success({ workflow_id: "wf-1" });
+      }
+    });
+
+    await client.saveWorkflow(
+      { id: "wf-1", name: "Saved flow", nodes: [{ name: "start" }] },
+      { viewport: { x: 1, y: 2, zoom: 1 } }
+    );
+
+    expect(requests).toEqual([
+      {
+        body: {
+          id: "wf-1",
+          name: "Saved flow",
+          nodes: [{ name: "start" }],
+          editor_metadata: { viewport: { x: 1, y: 2, zoom: 1 } }
+        }
+      }
+    ]);
+  });
+
+  it("splits position/ui/notes off nodes into editor_metadata when creating a workflow", async () => {
+    const requests: Array<{ body?: unknown }> = [];
+    const client = createXFlowApiClient({
+      baseUrl: "/api",
+      fetcher: async (_input, init) => {
+        requests.push({ body: init?.body ? JSON.parse(String(init.body)) : undefined });
+        return success({ workflow_id: "wf-new" }, 201);
+      }
+    });
+
+    await client.createWorkflow({
+      name: "New workflow",
+      nodes: [
+        { id: "n-start", name: "start", type: "xflow.start", position: { x: 10, y: 20 }, notes: "n", ui: { label: "Start" } }
+      ]
+    });
+
+    expect(requests).toEqual([
+      {
+        body: {
+          name: "New workflow",
+          nodes: [{ id: "n-start", name: "start", type: "xflow.start" }],
+          editor_metadata: {
+            positions: { "n-start": { x: 10, y: 20 } },
+            notes: { "n-start": "n" },
+            ui: { "n-start": { label: "Start" } }
+          }
+        }
+      }
+    ]);
+  });
+
+  it("splits position/ui/notes off nodes into editor_metadata when saving a workflow", async () => {
+    const requests: Array<{ body?: unknown }> = [];
+    const client = createXFlowApiClient({
+      baseUrl: "/api",
+      fetcher: async (_input, init) => {
+        requests.push({ body: init?.body ? JSON.parse(String(init.body)) : undefined });
+        return success({ workflow_id: "wf-1" });
+      }
+    });
+
+    await client.saveWorkflow({
+      id: "wf-1",
+      name: "Saved flow",
+      nodes: [{ name: "start", position: { x: 1 } }]
+    });
+
+    expect(requests).toEqual([
+      {
+        body: {
+          id: "wf-1",
+          name: "Saved flow",
+          nodes: [{ name: "start" }],
+          editor_metadata: { positions: { start: { x: 1 } } }
+        }
+      }
+    ]);
+  });
+
+  it("sends no editor_metadata when saving a workflow with no editor-only fields", async () => {
+    const requests: Array<{ body?: unknown }> = [];
+    const client = createXFlowApiClient({
+      baseUrl: "/api",
+      fetcher: async (_input, init) => {
+        requests.push({ body: init?.body ? JSON.parse(String(init.body)) : undefined });
+        return success({ workflow_id: "wf-1" });
+      }
+    });
+
+    await client.saveWorkflow({ id: "wf-1", name: "Saved flow", nodes: [{ name: "start" }] });
+
+    expect(requests).toEqual([
+      { body: { id: "wf-1", name: "Saved flow", nodes: [{ name: "start" }] } }
+    ]);
   });
 
   const issue = {

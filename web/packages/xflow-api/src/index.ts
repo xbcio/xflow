@@ -6,9 +6,13 @@ import type {
   ParamValidationMode,
   RuntimeNodeSnapshot,
   RuntimeSnapshot,
+  Viewport,
   WorkflowDef,
-  WorkflowStatus as RuntimeWorkflowStatus
+  WorkflowEditorMetadata,
+  WorkflowStatus as RuntimeWorkflowStatus,
+  WireWorkflowDef
 } from "@xflow/core";
+import { mergeEditorMetadata, splitEditorMetadata } from "@xflow/core";
 
 /** One summary row returned by GET /v1/workflows. */
 export interface WorkflowSummary {
@@ -115,6 +119,29 @@ export interface WaitExecutionTimeout {
 export type WaitExecutionResult = ExecutionDetail | WaitExecutionTimeout;
 
 /**
+ * Result of reading a workflow definition (GET /v1/workflows/{id}).
+ * `workflow` is the editor's internal (merged) model: `editor_metadata`'s
+ * `positions`/`ui`/`notes` are already folded onto their nodes
+ * (`mergeEditorMetadata`, ADR-D4 §2.5). `viewport` is carried alongside
+ * because it has no field on `WorkflowDef` to merge onto; absent when the
+ * stored `editor_metadata` had none.
+ */
+export interface GetWorkflowResult {
+  workflow: WorkflowDef;
+  viewport?: Viewport;
+}
+
+/**
+ * Options for `createWorkflow`/`saveWorkflow` carrying editor-only state that
+ * has no field on `WorkflowDef`: the canvas pan/zoom to persist in
+ * `editor_metadata.viewport` alongside the per-node `positions`/`ui`/`notes`
+ * `splitEditorMetadata` already derives from the definition's nodes.
+ */
+export interface SaveWorkflowOptions {
+  viewport?: Viewport;
+}
+
+/**
  * Result of registering a workflow (POST /v1/workflows, PUT /v1/workflows/{id}).
  *
  * The server never echoes the full definition back from these endpoints; it
@@ -155,9 +182,16 @@ export interface XFlowApiClient {
   listWorkflows(): Promise<WorkflowSummary[]>;
   /** Fetches a paginated workflow collection and retains its exact `total`. */
   listWorkflows(options: ListWorkflowsOptions): Promise<WorkflowListPage>;
-  createWorkflow(workflow?: WorkflowDef): Promise<RegisterWorkflowResult>;
-  getWorkflow(id: string): Promise<WorkflowDef>;
-  saveWorkflow(workflow: WorkflowDef): Promise<RegisterWorkflowResult>;
+  createWorkflow(workflow?: WorkflowDef, options?: SaveWorkflowOptions): Promise<RegisterWorkflowResult>;
+  /**
+   * Reads a workflow definition and merges its `editor_metadata` sibling
+   * (ADR-D4 §2.5): `positions`/`ui`/`notes` land back on their nodes in the
+   * returned `workflow`, and the canvas `viewport` -- which has no field on
+   * `WorkflowDef` to merge onto -- is returned alongside it so a host can
+   * restore it (e.g. `XFlowEditor`'s `defaultViewport` prop).
+   */
+  getWorkflow(id: string): Promise<GetWorkflowResult>;
+  saveWorkflow(workflow: WorkflowDef, options?: SaveWorkflowOptions): Promise<RegisterWorkflowResult>;
   runWorkflow(workflowId: string): Promise<ExecuteWorkflowResult>;
   getExecution(id: string): Promise<ExecutionDetail>;
   waitExecution(id: string, options?: WaitExecutionOptions): Promise<WaitExecutionResult>;
@@ -294,6 +328,15 @@ interface RegisterWorkflowWire {
   warnings?: string[];
   param_issues?: ParamIssue[];
 }
+
+/**
+ * The GET/POST/PUT /v1/workflows[/{id}] wire body: a `WireWorkflowDef` plus
+ * an optional `editor_metadata` sibling (ADR-D4 §2.1/§2.3, D2;
+ * `WorkflowDefWithEditorMetadata` in api/openapi/xflow-v1.yaml).
+ * `editor_metadata` is never a field of the Go `WorkflowDef` type, so it is
+ * modeled here the same way: a sibling, not a nested property.
+ */
+type WireWorkflowDefWithMetadata = WireWorkflowDef & { editor_metadata?: WorkflowEditorMetadata };
 
 interface ExecuteWorkflowWire {
   execution_id: string;
@@ -518,6 +561,39 @@ function failureParamIssues(failure: Envelope<unknown> | undefined): ParamIssue[
   if (!Array.isArray(list)) return undefined;
   const issues = list.map(parseParamIssue);
   return issues.every((issue): issue is ParamIssue => issue !== undefined) ? issues : undefined;
+}
+
+/**
+ * Splits an editor-side `WorkflowDef` into the `WireWorkflowDefWithMetadata`
+ * body `createWorkflow`/`saveWorkflow` send (ADR-D4 §2.5): `position`/`ui`/
+ * `notes` move off each node and into the `editor_metadata` sibling, and an
+ * explicit `viewport` (the caller's canvas pan/zoom, which has no field on
+ * `WorkflowDef`) is folded into the same sibling. `splitEditorMetadata`'s
+ * diagnostics (`NODE_METADATA_KEYED_BY_NAME`) are dropped here -- the server
+ * re-derives and returns the same findings via `RegisterWorkflowResult.warnings`,
+ * so surfacing them twice would double every id-less-node warning for one save.
+ */
+function splitForWire(workflow: WorkflowDef, viewport?: Viewport): WireWorkflowDefWithMetadata {
+  const { def, metadata } = splitEditorMetadata(workflow);
+  if (viewport !== undefined) metadata.viewport = viewport;
+  return Object.keys(metadata).length > 0 ? { ...def, editor_metadata: metadata } : def;
+}
+
+/**
+ * Merges a `WireWorkflowDefWithMetadata` response body back into the editor's
+ * internal (merged) `WorkflowDef` shape (ADR-D4 §2.5): `editor_metadata`'s
+ * `positions`/`ui`/`notes` are restored onto their nodes and the sibling
+ * field itself is dropped. The `viewport` is returned alongside, since it has
+ * no field on `WorkflowDef` to merge onto. `mergeEditorMetadata`'s
+ * diagnostics are discarded for the same reason as `splitForWire`'s: they
+ * mirror server-side findings a caller already sees in `warnings` on write,
+ * and GET has no `warnings` slot to place them in.
+ */
+function mapWorkflowDef(wire: WireWorkflowDefWithMetadata): GetWorkflowResult {
+  const { editor_metadata: metadata, ...rest } = wire;
+  const result: GetWorkflowResult = { workflow: mergeEditorMetadata(rest, metadata).def };
+  if (metadata?.viewport !== undefined) result.viewport = metadata.viewport;
+  return result;
 }
 
 function mapRegisterWorkflow(response: ApiResponse<unknown>): RegisterWorkflowResult {
@@ -764,19 +840,21 @@ export function createXFlowApiClient(options: XFlowApiClientOptions): XFlowApiCl
 
   return {
     listWorkflows: createListWorkflows(fetcher, options.baseUrl),
-    createWorkflow(workflow) {
+    createWorkflow(workflow, saveOptions) {
       return request<RegisterWorkflowWire>(fetcher, joinUrl(options.baseUrl, "/workflows"), {
         method: "POST",
         headers: {
           "content-type": "application/json"
         },
-        body: JSON.stringify(workflow ?? {})
+        body: JSON.stringify(workflow ? splitForWire(workflow, saveOptions?.viewport) : {})
       }).then(mapRegisterWorkflow);
     },
     getWorkflow(id) {
-      return request<WorkflowDef>(fetcher, joinUrl(options.baseUrl, workflowPath(id))).then(({ data }) => data);
+      return request<WireWorkflowDefWithMetadata>(fetcher, joinUrl(options.baseUrl, workflowPath(id))).then(
+        ({ data }) => mapWorkflowDef(data)
+      );
     },
-    saveWorkflow(workflow) {
+    saveWorkflow(workflow, saveOptions) {
       if (!workflow.id) {
         // A plain Error, not XFlowApiError: no request was ever sent, so there
         // is no HTTP status to report. Fabricating status:400 would make a
@@ -791,7 +869,7 @@ export function createXFlowApiClient(options: XFlowApiClientOptions): XFlowApiCl
           headers: {
             "content-type": "application/json"
           },
-          body: JSON.stringify(workflow)
+          body: JSON.stringify(splitForWire(workflow, saveOptions?.viewport))
         }
       ).then(mapRegisterWorkflow);
     },
