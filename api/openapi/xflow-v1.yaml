@@ -82,7 +82,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/WorkflowDef"
+              $ref: "#/components/schemas/WorkflowDefWithEditorMetadata"
       responses:
         "201":
           description: Workflow registered.
@@ -255,7 +255,7 @@ paths:
                   - type: object
                     properties:
                       data:
-                        $ref: "#/components/schemas/WorkflowDef"
+                        $ref: "#/components/schemas/WorkflowDefWithEditorMetadata"
         default:
           $ref: "#/components/responses/DefaultError"
     put:
@@ -283,14 +283,17 @@ paths:
       requestBody:
         required: true
         description: |
-          Complete replacement as a types.WorkflowDef JSON object. `id` may be
-          omitted; if supplied it must match the path. `namespace` may also be
-          omitted and cannot select the target because the server overwrites it
-          with the authenticated principal's namespace.
+          Complete replacement as a types.WorkflowDef JSON object, plus an
+          optional `editor_metadata` sibling (ADR-D4 D2). `id` may be omitted;
+          if supplied it must match the path. `namespace` may also be omitted
+          and cannot select the target because the server overwrites it with
+          the authenticated principal's namespace. A PUT that changes only
+          `editor_metadata` is still a normal revision: `registry_revision`
+          advances, but the runtime conflict hash does not change (D3).
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/WorkflowDef"
+              $ref: "#/components/schemas/WorkflowDefWithEditorMetadata"
       responses:
         "200":
           description: Workflow replaced.
@@ -2927,6 +2930,10 @@ components:
 
     NodeDef:
       type: object
+      description: |
+        NodeDef carries no editor-only fields (ADR-D4 D6). Visual position,
+        UI theme, and author notes live exclusively in EditorMetadata, keyed
+        by this node's `id` (or `name` when `id` is absent).
       required: [name, type]
       properties:
         id:
@@ -2941,16 +2948,12 @@ components:
           type: integer
         template:
           type: string
-        position:
-          $ref: "#/components/schemas/Position"
         disabled:
           type: boolean
         on_error:
           type: string
         runner_selector:
           $ref: "#/components/schemas/RunnerSelector"
-        notes:
-          type: string
         inputs:
           type: array
           items:
@@ -2961,9 +2964,6 @@ components:
         output:
           $ref: "#/components/schemas/NodeOutputPolicy"
         parameters:
-          type: object
-          additionalProperties: true
-        ui:
           type: object
           additionalProperties: true
         retry:
@@ -3058,6 +3058,57 @@ components:
           type: number
         y:
           type: number
+
+    Viewport:
+      type: object
+      description: Editor canvas pan/zoom state.
+      properties:
+        x:
+          type: number
+        y:
+          type: number
+        zoom:
+          type: number
+
+    WorkflowEditorMetadata:
+      type: object
+      description: |
+        Editor-only sibling of WorkflowDef (ADR-D4 §2.2-§2.3, D1): visual node
+        positions, canvas viewport, per-node UI state, and author notes. None
+        of these fields have any execution effect and none participate in the
+        runtime conflict hash. Every node-keyed map is keyed by the node's
+        stable id (`NodeDef.id`), falling back to `NodeDef.name` when the node
+        has no id -- a fallback that triggers a NODE_METADATA_KEYED_BY_NAME
+        warning in the response's `warnings` array. A key matching no node is
+        dropped silently.
+      properties:
+        positions:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/Position"
+        viewport:
+          $ref: "#/components/schemas/Viewport"
+        ui:
+          type: object
+          additionalProperties: true
+        notes:
+          type: object
+          additionalProperties:
+            type: string
+
+    WorkflowDefWithEditorMetadata:
+      description: |
+        The wire shape for GET /v1/workflows/{id} responses and the
+        POST/PUT /v1/workflows request and response bodies: every WorkflowDef
+        field plus an optional `editor_metadata` sibling (ADR-D4 §2.3/§4, D2).
+        `editor_metadata` is never part of the runtime conflict hash; a change
+        to it alone still advances `registry_revision` on PUT (D3).
+      allOf:
+        - $ref: "#/components/schemas/WorkflowDef"
+        - type: object
+          properties:
+            editor_metadata:
+              $ref: "#/components/schemas/WorkflowEditorMetadata"
 
     PortDecl:
       type: object

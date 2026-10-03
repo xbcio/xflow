@@ -399,7 +399,7 @@ func TestReplaceWorkflowContract(t *testing.T) {
 	if media == nil || media.Schema == nil || media.Schema.Value == nil {
 		t.Fatal("replace workflow application/json schema is missing")
 	}
-	if got, want := media.Schema.Ref, "#/components/schemas/WorkflowDef"; got != want {
+	if got, want := media.Schema.Ref, "#/components/schemas/WorkflowDefWithEditorMetadata"; got != want {
 		t.Fatalf("replace workflow request schema ref = %q, want %q", got, want)
 	}
 	for _, field := range media.Schema.Value.Required {
