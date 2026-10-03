@@ -2,9 +2,9 @@
 
 | Item | Value |
 |------|-------|
-| Status | Accepted / Implemented (Go + HTTP API). TypeScript conversion layer in `web/` not yet implemented. |
+| Status | Implemented (Go + HTTP API + TypeScript web client/editor). Deferred: `WorkflowDraft`/publish split, `WorkflowDefinitionVersion` history (see "Not yet implemented" below). |
 | Owner | xflow team |
-| Related | `types/editor_metadata.go`, `types/workflow.go`, `backend/workflowhash/`, `backend/workflow_registry.go`, `backend/providers/distributed/internal/workflowreg/`, `service/apiserver/module_control.go`, `service/apiserver/module_control_editor_metadata.go`, `api/openapi/xflow-v1.yaml`, `node/builtin_specs.go` |
+| Related | `types/editor_metadata.go`, `types/workflow.go`, `backend/workflowhash/`, `backend/workflow_registry.go`, `backend/providers/distributed/internal/workflowreg/`, `service/apiserver/module_control.go`, `service/apiserver/module_control_editor_metadata.go`, `api/openapi/xflow-v1.yaml`, `node/builtin_specs.go`, `web/packages/xflow-core/src/editorMetadata.ts`, `web/packages/xflow-api/src/index.ts`, `web/packages/xflow-editor/src/index.tsx`, `web/packages/xflow-preview/src/index.tsx` |
 
 ## Implementation Status
 
@@ -24,10 +24,14 @@
 - Canonical builtin defaults before hashing (§3.1): `workflowhash.Canonical` over `node.BuiltinParamSpecs`.
 - Legacy-hash reconcile with CAS upgrade (`workflowhash.Reconcile` / `ReconcileAdd`), shared by the SDK and the apiserver.
 
-**Not yet implemented:**
-- TypeScript `splitEditorMetadata` / `mergeEditorMetadata` (§2.5) — not in `web/packages/xflow-core/`.
-- The web editor (`xflow-editor`, `xflow-api`, `xflow-admin`) does not yet read or write `editor_metadata`; it still carries no node-level visual state at all client-side beyond what React Flow holds transiently.
-- `WorkflowDraft` / `WorkflowDefinitionVersion` as separate, independently-addressable storage objects (§4's literal phrasing) — not built. `EditorMetadata` instead lives as a field on the existing `WorkflowRecord`/Redis hash (D4), which is sufficient for everything this ADR requires; see "Deviations" for why a second storage object was not built.
+**TypeScript web client/editor side (implemented):**
+- `splitEditorMetadata(def)` / `mergeEditorMetadata(wireDef, metadata)` (§2.5) in `web/packages/xflow-core/src/editorMetadata.ts`, mirroring `types.ValidateEditorMetadata`'s key-resolution semantics (id-keyed kept silently; name-fallback kept plus a byte-identical `NODE_METADATA_KEYED_BY_NAME` diagnostic; unmatched key dropped silently).
+- `xflow-core`'s `WorkflowDef`/`WorkflowNode` stay the editor's internal merged model (position/ui/notes inline on nodes, as React Flow and the rest of the editor already expect); new `WireWorkflowNode`/`WireWorkflowDef` types (no position/ui/notes) model the actual wire shape, matching Go's `NodeDef`/`WorkflowDefWithEditorMetadata`.
+- `xflow-api`'s `getWorkflow`/`createWorkflow`/`saveWorkflow` convert at the network boundary only: `splitForWire` on write, `mapWorkflowDef` on read. Diagnostics from split/merge are discarded at this boundary — the server independently re-derives and returns the same findings via `RegisterWorkflowResult.warnings` on write.
+- Canvas viewport persistence: `XFlowPreview` accepts `defaultViewport`/`onViewportChange` (React Flow's native `defaultViewport` + `onMoveEnd`), threaded through `XFlowEditor` and wired into `xflow-admin`'s workflow detail page, which restores the saved viewport on load and sends the live viewport on save.
+
+**Not yet implemented (deferred, out of this ADR's required scope):**
+- `WorkflowDraft` / `WorkflowDefinitionVersion` as separate, independently-addressable storage objects (§4's literal phrasing) — not built. `EditorMetadata` instead lives as a field on the existing `WorkflowRecord`/Redis hash (D4), which is sufficient for everything this ADR requires; see "Deviations" for why a second storage object was not built. A draft/publish split and a definition version history remain future work if a product need for them arises.
 
 ## Deviations from the original decision (binding overrides)
 
@@ -101,7 +105,7 @@ Metadata keys MUST use `NodeDef.ID` when present. If `NodeDef.ID` is absent, the
 
 Go needs no `SplitEditorMetadata`/`MergeEditorMetadata` pair: since `NodeDef` carries no position/UI/notes fields to split out or merge back in, there is nothing to convert between two representations of `WorkflowDef`. The only Go-side operation is validation: `types.ValidateEditorMetadata(def, metadata)` checks metadata keys against the definition's nodes and returns a sanitized copy plus diagnostics (§2.4).
 
-The TypeScript implementation (not yet built) still needs two inverses, because the editor's in-memory `WorkflowNode`/`WorkflowDef` types in `web/packages/xflow-core/` currently carry `position`/`ui`/`notes` inline and will migrate to the split representation gradually:
+The TypeScript implementation (`web/packages/xflow-core/src/editorMetadata.ts`) provides the two inverses, because the editor's in-memory `WorkflowNode`/`WorkflowDef` types in `web/packages/xflow-core/` are kept as the merged model — they carry `position`/`ui`/`notes` inline, matching what React Flow and the rest of the editor already expect — while the wire shape (`WireWorkflowNode`/`WireWorkflowDef`) carries neither:
 
 - `splitEditorMetadata(def)` — returns `{ def, metadata, diagnostics }`. The returned `def` has `position`, `ui`, and `notes` stripped from each node; `pin_data` is left in place.
 - `mergeEditorMetadata(def, metadata)` — returns `{ def, diagnostics }`. It restores `position`, `ui`, and `notes` onto nodes keyed by `NodeDef.ID` (or `NodeDef.Name`). It does not touch `def.pin_data`.
