@@ -423,3 +423,73 @@ func TestRegisterDescriptorsJSONProtoRoundTrip(t *testing.T) {
 		}
 	})
 }
+
+// TestActivationAckRequestProtoRoundTrip proves every ActivationAck field
+// (except AuthToken, which travels via gRPC metadata, never the message body
+// — see ActivationAckRequestToProto's doc) survives the proto round trip
+// byte-identically, so the gRPC transport decodes to the same DTO
+// Core.activationAck already validates for HTTP.
+func TestActivationAckRequestProtoRoundTrip(t *testing.T) {
+	original := ActivationAck{
+		RunnerID:        "runner-1",
+		SessionID:       "sess-1",
+		WorkflowID:      "wf-1",
+		WorkflowVersion: "v1",
+		GroupID:         "entry-1",
+		ReplicaIndex:    3,
+		Generation:      42,
+		Status:          ActivationStatusDeactivated,
+		Error:           "",
+	}
+	got := ActivationAckRequestFromProto(ActivationAckRequestToProto(original))
+	if got != original {
+		t.Fatalf("activation ack round trip = %+v, want %+v", got, original)
+	}
+}
+
+// TestActivationAckRequestProtoRoundTripFailedStatus proves the failed status
+// and its error string survive the round trip, the two fields the ack path
+// relies on most (Core.activationAck gates on Status, and the error is the
+// only channel an operator sees for WHY an activation failed).
+func TestActivationAckRequestProtoRoundTripFailedStatus(t *testing.T) {
+	original := ActivationAck{
+		RunnerID:        "runner-1",
+		SessionID:       "sess-1",
+		WorkflowID:      "wf-1",
+		WorkflowVersion: "v1",
+		GroupID:         "entry-1",
+		Generation:      7,
+		Status:          ActivationStatusFailed,
+		Error:           "supply not ready: rules",
+	}
+	pb := ActivationAckRequestToProto(original)
+	if pb.GetStatus() != string(ActivationStatusFailed) {
+		t.Fatalf("proto status = %q, want %q", pb.GetStatus(), ActivationStatusFailed)
+	}
+	got := ActivationAckRequestFromProto(pb)
+	if got.Status != ActivationStatusFailed {
+		t.Fatalf("Status = %q, want %q", got.Status, ActivationStatusFailed)
+	}
+	if got.Error != original.Error {
+		t.Fatalf("Error = %q, want %q", got.Error, original.Error)
+	}
+}
+
+// TestActivationAckRequestToProtoDoesNotCarryAuthToken proves AuthToken never
+// lands on the wire message: it travels via gRPC metadata (GRPCClient.withAuth
+// / overrideTokenFromMetadata), exactly like every other runner-protocol RPC,
+// so it can never be logged or replayed from a captured request body.
+func TestActivationAckRequestToProtoDoesNotCarryAuthToken(t *testing.T) {
+	pb := ActivationAckRequestToProto(ActivationAck{
+		RunnerID:  "runner-1",
+		SessionID: "sess-1",
+		AuthToken: "super-secret-token",
+	})
+	// There is no AuthToken/Token field on ActivationAckRequest at all; the
+	// strongest check available is that none of the string fields leak it.
+	for _, v := range []string{pb.GetRunnerId(), pb.GetSessionId(), pb.GetWorkflowId(), pb.GetWorkflowVersion(), pb.GetGroupId(), pb.GetStatus(), pb.GetError()} {
+		if v == "super-secret-token" {
+			t.Fatal("AuthToken leaked onto an ActivationAckRequest field")
+		}
+	}
+}
