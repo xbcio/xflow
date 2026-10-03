@@ -20,7 +20,7 @@ buried in its section.
 |---|---|---|---|
 | **1. Supply transport key** | supply content in flight from control plane to runner (`GET /v1/supplies/{name}` with `Accept: application/x-xflow-encrypted`) | the control plane, unattended, on a schedule (`DefaultSupplyKeyRotationPeriod`, 24h); a runner adopts a rotation on its next heartbeat | **Yes.** Automated, in-flight only, reissuable at will, no stored data depends on it. See §2. |
 | **2. Supply at-rest KEK** (`XFLOW_MASTER_KEY` / `--master-key-file`) | the `content` column of every stored supply row in MySQL | manual, offline-window — `xflow supply reseal` (`cmd/xflow/supply_reseal.go`) | **Yes, offline-window only.** A previous-key configuration surface (`masterkey.LoadPrevious`) and a re-encryption path (`(*sqlstore.Provider).ResealSupplies`, wired to `xflow supply reseal`) now exist. Rotating **without** loading the previous key still destroys access to every stored row (§3.4 is unchanged and still describes that failure). This path has never been rehearsed in a real environment; see §3. |
-| **3. Runner credentials** (static bearer token, enrollment-issued identity, mTLS material) | a runner's authentication to the control plane | manual, per runner (or per fleet) | **Partly.** A static token and a client certificate can each be replaced. The **server side** of both (the policy file and the TLS material) hot-reloads via `SIGHUP` with no restart; the **runner side** of both still requires a restart per runner. An enrollment-issued token **cannot** be rotated in place — renewal extends its expiry and never changes the token. See §4. |
+| **3. Runner credentials** (static bearer token, enrollment-issued identity, mTLS material) | a runner's authentication to the control plane | manual, per runner (or per fleet) | **Partly.** A static token and a client certificate can each be replaced. Both the **server side** (the policy file and the TLS material, via `SIGHUP`) and the **runner side** (bearer token and mTLS client certificate/server CA, via `SIGHUP` for the standalone process or an explicit `Reload` call for an embedded one) hot-reload with no restart for the HTTP transport; the experimental gRPC transport reloads the client certificate but not the trusted CA pool until its next reconnect (see §4.3). An enrollment-issued token **cannot** be rotated in place — renewal extends its expiry and never changes the token. See §4. |
 
 > **Operators: if you came here to rotate a key, find your axis first.** Axis 1
 > and axis 3 have procedures. Axis 2 also has one now, but it is
@@ -34,8 +34,11 @@ Cross-cutting: axis 2 is an **offline change** (it needs at least a process
 restart on every server), so it couples to the maintenance window in
 [maintenance-window-runbook.md](maintenance-window-runbook.md). Axis 3's
 **server-side** material (runner auth policy, server TLS cert/key/client-CA)
-now hot-reloads via `SIGHUP` and needs no window; axis 3's **runner-side**
-material still requires restarting each runner. Axis 1 needs no window at all.
+hot-reloads via `SIGHUP` and needs no window; axis 3's **runner-side**
+material (bearer token, mTLS client certificate, server CA) now hot-reloads
+too — `SIGHUP` for the standalone process, an explicit `Reload` call for an
+embedded one — for the HTTP transport, with the gRPC transport's CA pool
+reload deferred to the next reconnect (§4.3). Axis 1 needs no window at all.
 
 ## 2. Axis 1 — supply transport key (automated, safe)
 
@@ -485,9 +488,15 @@ credential policy; or tidying a token that was injected by hand.
    YAML, a `token_file` that regressed to 0644, a moved/missing file) logs the
    error and leaves the **previous** policy in force, so the new entry is not
    live yet and runners on the old token are unaffected.
-4. Move runners onto the new token one at a time
-   (`XFLOW_RUNNER_TOKEN`, or `--token`), restarting each. Verify each one
-   authenticates before moving on (§4.4).
+4. Move runners onto the new token: update each runner's config file,
+   environment, or `--token` flag with the new value, then either send
+   `SIGHUP` to the standalone runner process (`kill -HUP <runner pid>`) or
+   call `Runner.Reload` on an embedded one — no restart needed on the HTTP
+   transport (the production channel). The gRPC transport's token is also
+   reloaded this way; only its trusted-CA pool is deferred to the next
+   reconnect (§4.3). An **enrollment-issued** runner has no static token to
+   rotate this way at all — see §4.2, and skip straight to re-enrollment for
+   that case. Verify each one authenticates before moving on (§4.4).
 5. Remove the old entry from `runners.yaml` and send `SIGHUP` again (window
    closing). Re-check the log line for the same reload-outcome confirmation.
 
@@ -500,9 +509,10 @@ old token too. Confirm the reload log line on **each** replica, not just one,
 before treating a step as complete fleet-wide.
 
 **Fast path (accepts an auth-failure window).** Replace the token in place and do
-step 3 (`SIGHUP`) and step 4 together; every runner that has not yet restarted
-fails authentication until it does. Acceptable only for a runner you can afford
-to have down.
+step 3 (`SIGHUP`) and step 4 together; every runner whose own config/env has
+not yet been updated and reloaded (or restarted, for a runner on an older
+build without this capability) fails authentication until it is. Acceptable
+only for a runner you can afford to have down briefly.
 
 **What breaks if you get it wrong.** Mismatch presents as a plain authentication
 failure: `unknown auth token` / `missing auth token`
@@ -561,27 +571,47 @@ being checked is theatre; confirm the posture first (`--mode=production` makes
 - Server side: `--tls-cert`, `--tls-key`, `--tls-client-ca`
   (`cmd/server/main.go:211-212`; client CA at `:213`); the client-CA file enables mutual TLS with
   `tls.RequireAndVerifyClientCert` (`service/apiserver/run.go:77-88`).
-- **Both sides used to read their material once, at startup — the server side
-  no longer does.** Runner: `buildRunnerTLSConfig`
-  (`sdk/xflow/runner.go:994-1023`) still reads once; there is no runner-side
-  hot reload or automatic certificate renewal, and every runner-side
-  certificate or CA change is still a restart. Server: `loadTLS`
-  (`service/apiserver/run.go`) now builds a `*TLSReloader`
-  (`service/apiserver/tls_reload.go`) instead of loading a static
-  `tls.Config`; `tls.Config.GetCertificate` and `GetConfigForClient` read
-  through it on every handshake, and `cmd/server` wires a `SIGHUP` handler to
-  its `Reload` method. Sending `SIGHUP` to the server process re-reads
-  `--tls-cert` / `--tls-key` / `--tls-client-ca` from the same paths and swaps
-  them in **only if every file parses**; a bad file leaves the previous
-  certificate and CA pool serving unchanged and logs the error. This closes
-  the server-side half of the gap this runbook used to describe — the
-  runner-side half (`buildRunnerTLSConfig`) is unchanged.
-- **A dual-CA window still exists, and it no longer needs a restart on the
-  server side.** Both sides build their pool with `AppendCertsFromPEM`, which
-  appends *every* certificate in the file (runner `sdk/xflow/runner.go:1004-1008`;
-  server `service/apiserver/tls_reload.go`). So: put old and new CA in the
-  bundle → `SIGHUP` the server (no restart) → roll runner leaves (still a
-  restart per runner) → shrink the bundle → `SIGHUP` again. If the new leaf
+- **Both sides used to read their material once, at startup — neither side
+  still does.** Server: `loadTLS` (`service/apiserver/run.go`) builds a
+  `*TLSReloader` (`service/apiserver/tls_reload.go`) instead of loading a
+  static `tls.Config`; `tls.Config.GetCertificate` and `GetConfigForClient`
+  read through it on every handshake, and `cmd/server` wires a `SIGHUP`
+  handler to its `Reload` method. Runner: `NewRunner` builds a
+  `*xflow.CredentialReloader` (`sdk/xflow/runner_credential_reload.go`)
+  whenever a token or TLS material is configured; the HTTP transport's
+  `*http.Transport` reads the client certificate through
+  `tls.Config.GetClientCertificate` on every handshake and the trusted-CA pool
+  through a `DialTLSContext` hook on every dial, so a reload takes effect on
+  the connection's next request with no client rebuild. `sdk/runner` wires a
+  `SIGHUP` handler to the embedded `xflow.Runner`'s `Reload` method (see §4.1
+  step 4); an embedded host with no process-level signal handling of its own
+  calls `Reload` directly. In both cases sending the signal, or calling
+  `Reload`, re-reads `--tls-server-ca` / `--tls-client-cert` /
+  `--tls-client-key` from the same paths (or the same config
+  file/environment, for the runner, re-resolved the way startup resolved
+  them) and swaps them in **only if every file parses**; a bad file leaves
+  the previous certificate and CA pool serving unchanged and logs the error.
+  After a successful runner-side reload, idle HTTP keep-alive connections are
+  closed (`http.Client.CloseIdleConnections`) so a connection already
+  established under the old client certificate is not reused.
+- **The gRPC transport is only partially covered, because grpc-go gives it no
+  per-dial hook.** The client leaf certificate is reloaded the same way (gRPC's
+  `credentials.NewTLS` config also carries `GetClientCertificate`, read fresh
+  on every handshake), but the trusted-CA pool is read once at dial time and
+  grpc-go reuses the connection indefinitely, so a reloaded CA pool only takes
+  effect on that transport's **next reconnect** (a transport failure, or a
+  process restart) — not immediately like the HTTP transport. HTTP long-poll
+  is the production Runner Protocol channel; gRPC is experimental, and this
+  gap is a direct consequence of that transport's connection-reuse model, not
+  an oversight to be closed here.
+- **A dual-CA window still exists, and it no longer needs a restart on either
+  side for the HTTP transport.** Both sides build their pool with
+  `AppendCertsFromPEM`, which appends *every* certificate in the file (runner
+  `sdk/xflow/runner_credential_reload.go`; server
+  `service/apiserver/tls_reload.go`). So: put old and new CA in the bundle →
+  `SIGHUP` the server (no restart) → `SIGHUP` each HTTP-transport runner (no
+  restart) or restart a gRPC-transport one (next reconnect picks up the new
+  pool otherwise) → shrink the bundle → `SIGHUP`/reload again. If the new leaf
   keeps the same issuing CA, only the leaf changes and the CA step is
   unnecessary.
 - **mTLS pins the subject separately from the token.** A policy entry may carry
@@ -592,34 +622,44 @@ being checked is theatre; confirm the posture first (`--mode=production` makes
   independent registrations on the same signal (`cmd/server/reload.go`), so one
   `kill -HUP` picks up both if both files changed; the second-entry trick from
   §4.1 only helps if you also accept the new CN.
-- **Procedure (server side, no restart; runner side, still a restart).**
+- **Procedure (both sides, no restart for HTTP; gRPC's CA pool waits for a
+  reconnect).**
   1. Stage the new certificate/key (and CA bundle, for a CA rollover) at the
-     paths named by `--tls-cert` / `--tls-key` / `--tls-client-ca`.
+     paths named by `--tls-cert` / `--tls-key` / `--tls-client-ca` on the
+     server, and by `--tls-server-ca` / `--tls-client-cert` /
+     `--tls-client-key` (or the equivalent config file/environment entries)
+     on each runner.
   2. `kill -HUP <server pid>`.
   3. Check the log for the TLS reload outcome (§4.4) before treating it as
      done — a bad file (mismatched key, corrupt PEM, a moved/missing path)
      logs the error and the server keeps serving the **previous** certificate
      and CA pool; nothing is torn down.
-  4. Roll runner leaves that need to trust a new CA or present a new client
-     cert, restarting each (`buildRunnerTLSConfig` reads once, at process
-     start — see above).
+  4. `kill -HUP <runner pid>` for each standalone HTTP-transport runner (or
+     call `Runner.Reload` for an embedded one). Check each runner's log for
+     `runner: credential reload succeeded` / `... failed, keeping previous
+     credentials: <err>` before moving to the next. A gRPC-transport runner's
+     client certificate reloads the same way; its CA pool does not take
+     effect until that runner's next reconnect, so plan a rolling restart for
+     it if the CA itself changed.
   5. Once every runner has converged, shrink a dual-CA bundle if one was used,
-     and `SIGHUP` again.
-- **Multi-replica deployments:** exactly like §4.1, `SIGHUP` is process-local.
-  Signal every server replica that terminates TLS, and confirm the reload log
-  line on each one — a replica that is not signalled keeps serving its
-  previous certificate/CA pool.
+     and `SIGHUP`/reload again.
+- **Multi-replica / multi-runner deployments:** exactly like §4.1, `SIGHUP` is
+  process-local. Signal every server replica that terminates TLS, and every
+  standalone runner process individually — there is no fan-out. A process
+  that is not signalled (or an embedded host whose `Reload` was not called)
+  keeps serving its previous certificate/CA pool.
 - **What a TLS mistake looks like:** authentication simply fails, and for the
   supply path the failure is worse than a 401 — if the supply fetch cannot be
   made, the readiness gate declines forever and the runner "never hosts its
   triggers at all" (`sdk/xflow/runner.go:1028-1033`; `service/runner/doc.go:92-98`).
-  A *rejected reload* is a different, milder failure: the server logs the
-  error and keeps its previous material, so a mistyped path or a bad file
-  produces a log line, not an outage.
-- **Rollback.** Server side: restore the previous certificate/CA files at the
-  same paths and `SIGHUP` again — no restart needed either way. Runner side:
-  restore the previous certificate/CA files and restart. Keep the old
-  material until the fleet has converged.
+  A *rejected reload* is a different, milder failure on both sides: the
+  process logs the error and keeps its previous material, so a mistyped path
+  or a bad file produces a log line, not an outage.
+- **Rollback.** Either side: restore the previous certificate/CA files at the
+  same paths and `SIGHUP`/`Reload` again — no restart needed on the HTTP
+  transport either way. A gRPC-transport runner's CA pool rollback waits for
+  its next reconnect, same as a forward rotation. Keep the old material until
+  the fleet has converged.
 
 ### 4.4 Verification for axis 3
 
@@ -635,6 +675,13 @@ being checked is theatre; confirm the posture first (`--mode=production` makes
   `xflow-server: auth policy entry name=... id_prefix=... token=<fingerprint>`
   per entry on a successful policy reload — never the token itself or file
   contents.
+- Log (runner-side credential reload): `runner: credential reload succeeded`
+  or `runner: credential reload failed, keeping previous credentials: <err>`
+  (`sdk/runner/reload.go`), emitted by the standalone process's `SIGHUP`
+  handler. An embedded host calling `xflow.Runner.Reload` directly gets the
+  error (or nil) as its return value instead and is responsible for its own
+  log line; `Reload`'s own errors, like the server-side reloader's, never
+  contain the token or key material (`sdk/xflow/runner_credential_reload.go`).
 - Log: `auth_denied` with `op`, `runner`, `token`, `cn`, `err`
   (`service/control/core.go:181-200`). The `token` field is a fingerprint, not
   the token — `TokenFingerprint` is the first 8 hex characters of SHA-256
@@ -647,9 +694,9 @@ being checked is theatre; confirm the posture first (`--mode=production` makes
 |---|---|---|---|---|
 | 1. Transport key | In-flight content re-encrypts; runners converge on their next heartbeat; nothing at rest is affected | A replica that encrypts with a superseded key declines supply fetches and hosts no triggers while heartbeating healthily (`service/control/supply_key_rotation.go:76-83`); back-to-back rotations can evict a keyring slot (bounded by the 1-minute floor) | Redis key lost → runners re-register; self-healing by design (`service/control/supply_encryption.go:64-68`) | Yes, by rotating again |
 | 2. At-rest KEK | Every stored row stays readable through the window (§3.5) and ends up sealed under the new key once `xflow supply reseal` reports `failed=0` | Skipping the previous-key step: every stored supply row becomes undecryptable → 500 on every supply fetch → every activation declined on every runner → no trigger hosted fleet-wide (§3.4) | If the previous key value is lost before reseal finishes: same outcome as mishandled, with no way back for the rows still sealed under it | **Only if the previous key was loaded during the window.** Without it, restoring the old KEK is the only recovery, and rows already resealed under the new key are then the unreadable ones |
-| 3a. Static runner token | Server side: `SIGHUP` reload, no restart; fleet-wide credential replacement as runners restart onto the new token | Affected runners fail auth (`unknown auth token`) and retry; blast radius is exactly the runners you did not update yet. A **rejected reload** (malformed YAML, 0644 `token_file`, missing file) is not a blast radius at all — the server logs the error and keeps the previous policy in force, so no runner is affected until the file is fixed and reloaded | Token lost = rotate again (new entries, new `SIGHUP`, new per-runner restarts) | Yes |
+| 3a. Static runner token | Both sides: `SIGHUP` reload (server policy; standalone runner) or `Reload` call (embedded runner), no restart on either side for the HTTP transport | Affected runners fail auth (`unknown auth token`) and retry; blast radius is exactly the runners you did not update and reload/restart yet. A **rejected reload** on either side (malformed YAML/0644 `token_file`/missing file on the server; an unreadable path on the runner) is not a blast radius at all — the process logs the error and keeps the previous credentials in force, so nothing is affected until the file is fixed and reloaded | Token lost = rotate again (new policy entry, new `SIGHUP`, new per-runner reload/restart) | Yes |
 | 3b. Enrollment-issued identity | Revoke + re-enroll per runner | Expired/revoked/unknown are indistinguishable to the caller by design; a whole fleet can fail auth at once if a TTL is introduced without planning (`docs/design/RUNNER-IDENTITY-LIFECYCLE-TODO.md:129-132`) | Revoked identity needs a new registration code | Yes, but not in place |
-| 3c. mTLS material | Server side: bundle-based CA rollover via `SIGHUP`, no restart; runner side: leaf-by-leaf, still a restart | Runner cannot reach the control plane; on the supply path that means it never hosts a trigger (`sdk/xflow/runner.go:1028-1033`). A **rejected server-side reload** (bad cert/key/CA file) is not a blast radius — the server keeps serving its previous certificate/CA pool and logs the error | Re-issue from the CA; if the CA private key is lost, the whole mTLS fleet must be re-issued | Yes, server side with `SIGHUP`, runner side with restarts |
+| 3c. mTLS material | Both sides: bundle-based CA rollover via `SIGHUP`/`Reload`, no restart for the HTTP transport; the gRPC transport's client certificate reloads the same way but its CA pool waits for that runner's next reconnect | Runner cannot reach the control plane; on the supply path that means it never hosts a trigger (`sdk/xflow/runner.go:1028-1033`). A **rejected reload** on either side (bad cert/key/CA file) is not a blast radius — the process keeps serving its previous certificate/CA pool and logs the error | Re-issue from the CA; if the CA private key is lost, the whole mTLS fleet must be re-issued | Yes, both sides with `SIGHUP`/`Reload` on the HTTP transport; the gRPC transport's CA pool only on its next reconnect |
 
 The asymmetry is the point: axis 1 and axis 3 mistakes are **recoverable
 credential problems**. Axis 2 is recoverable only when the offline-window
