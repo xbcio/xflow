@@ -11,14 +11,25 @@ type GroupDef struct {
 	RunnerSelector *RunnerSelector `json:"runner_selector,omitempty"`
 	// OnError 是组级失败策略。空值等价于 OnErrorStop。
 	//
-	// 组级只支持 OnErrorStop 与 OnErrorContinue（以及等价的空值）；
-	// OnErrorOutput / OnErrorMainOutput 与任何未知取值都在 graph.Compile
-	// 被拒绝（validateGroupOnError）。原因是组没有错误输出端口可路由：
-	// GroupMeta.BoundaryOutputs 只由真实跨界成员边推导，编译期不会为
-	// OnError 合成端口，CommitGroupResult 也会拒绝不在 BoundaryOutputs 里
-	// 的 exit。建这个机制的范围见 NODE-GROUP-COLOCATION.md §12.2。
-	// 不存在 OnErrorFail。
+	// 组级支持 OnErrorStop、OnErrorContinue（以及等价的空值）与
+	// OnErrorOutput；OnErrorMainOutput 与任何未知取值都在 graph.Compile
+	// 被拒绝（validateGroupOnError）。不存在 OnErrorFail。
+	//
+	// OnErrorOutput 要求 ErrorOutputs 至少声明一条目标——组没有像节点那样
+	// 预先编译好的 "error" 端口可路由，ErrorOutputs 就是这条路由的声明。
+	// 任一成员终止失败（重试耗尽）时，组的其余成员不再执行，组改为在其声明的
+	// error 端口上 fire，错误信息（失败成员名、错误、错误详情）落在组名下的
+	// 输出（与节点输出同一存取路径，下游通过 $('group_name').json 读取）。
+	// 语义与机制见 NODE-GROUP-COLOCATION.md §12.2（原「未支持」记录已更新为
+	// 实现决定）。
 	OnError string `json:"on_error,omitempty"`
+	// ErrorOutputs declares the downstream targets for the group's
+	// synthesized "error" output port. Only meaningful when OnError is
+	// OnErrorOutput; validateGroupOnError rejects a non-empty ErrorOutputs on
+	// any other policy (a declared-but-unreachable route is a compile error,
+	// not a silent no-op) and rejects OnErrorOutput with an empty
+	// ErrorOutputs (nothing to route to).
+	ErrorOutputs []Connection `json:"error_outputs,omitempty"`
 	// Retry 是组级重试；组级 retry = 从入口整组重跑。
 	Retry *RetrySettings `json:"retry,omitempty"`
 	// Timeout 是组的业务 deadline（非 lease TTL）。
