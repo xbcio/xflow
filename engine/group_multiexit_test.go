@@ -285,8 +285,20 @@ func (s *drivingState) CommitNode(_ context.Context, req CommitNodeRequest) (Com
 	defer s.mu.Unlock()
 	key := string(req.ExecutionID) + "/" + req.NodeName
 	ns := s.nodes[key]
+	// A system commit (the skip cascade's atomic.go caller sets req.System,
+	// mirroring the real local/Redis backends — see
+	// backend/providers/local/atomic_state.go's req.System branch) never
+	// acquired a node lease first: AdvanceNode/CommitGroup schedule the skip
+	// directly from a zero-active downstream arrival, with no prior
+	// AcquireTaskLease call for that node. ns == nil is therefore the expected
+	// shape for a skip's first commit, not a stale/unknown node — only an
+	// ordinary (non-System) commit requires a pre-existing running snapshot.
 	if ns == nil {
-		return CommitNodeResult{Outcome: CommitOutcomeStaleToken}, nil
+		if !req.System {
+			return CommitNodeResult{Outcome: CommitOutcomeStaleToken}, nil
+		}
+		ns = &NodeSnapshot{ExecutionID: req.ExecutionID, Name: req.NodeName, NodeIdx: req.NodeIdx}
+		s.nodes[key] = ns
 	}
 	if types.IsTerminalNodeStatus(ns.Status) {
 		return CommitNodeResult{Outcome: CommitOutcomeDuplicateTerminal}, nil
