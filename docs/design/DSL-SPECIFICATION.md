@@ -1849,14 +1849,17 @@ browser_cdp:
 - name: grpc_call
   type: xflow.grpc
   parameters:
-    service: string
-    method: string
-    host: string
-    request: object
+    service: string          # 完全限定服务名（如 inventory.InventoryService）
+    method: string           # RPC 方法名
+    host: string             # gRPC server host:port
+    request: object          # 请求体，以 google.protobuf.Struct 发送
+    metadata: object         # gRPC metadata（headers），顶层参数
     options:
-      timeout: int
-      metadata: object
+      timeout: duration      # Go duration，如 "5s"
+      tls: bool              # 是否使用 TLS
 ```
+
+消息契约是 `google.protobuf.Struct` 双向：`request` 以 Struct 发出，服务端必须以 Struct 应答，响应的字段直接成为节点输出（JSON 类型，数值为 float64）。不支持任意 protobuf 消息类型——节点没有描述符来源。RPC 状态码按永久/瞬态分类：`NotFound`、`InvalidArgument`、`PermissionDenied`、`Unauthenticated`、`AlreadyExists`、`Unimplemented`、`FailedPrecondition`、`OutOfRange` 为永久错误，其余（如 `Unavailable`）可重试。
 
 #### Function 节点
 
