@@ -41,9 +41,12 @@ type GRPCNode struct {
 //
 // The message contract is google.protobuf.Struct in both directions: the
 // request object is sent as a Struct, and the service must answer with one.
-// The response's fields become the node's output data (JSON types: numbers
-// arrive as float64). Arbitrary protobuf message types are not supported --
-// the node has no descriptor source to build them from.
+// The response's fields become the node's output data (JSON types; finite
+// numbers arrive as float64, non-finite ones as strings). Arbitrary protobuf
+// message types are not supported -- the node has no descriptor source to
+// build them from, and it cannot verify the response type: a service answering
+// with a different message either fails to decode (classified transient as
+// grpc.Internal) or decodes into wrong fields.
 func GRPC(service, method, host string) *GRPCNode {
 	return &GRPCNode{Service: service, Method: method, Host: host}
 }

@@ -1859,7 +1859,7 @@ browser_cdp:
       tls: bool              # 是否使用 TLS
 ```
 
-消息契约是 `google.protobuf.Struct` 双向：`request` 以 Struct 发出，服务端必须以 Struct 应答，响应的字段直接成为节点输出（JSON 类型，数值为 float64）。不支持任意 protobuf 消息类型——节点没有描述符来源。RPC 状态码按永久/瞬态分类：`NotFound`、`InvalidArgument`、`PermissionDenied`、`Unauthenticated`、`AlreadyExists`、`Unimplemented`、`FailedPrecondition`、`OutOfRange` 为永久错误，其余（如 `Unavailable`）可重试。
+消息契约是 `google.protobuf.Struct` 双向：`request` 以 Struct 发出，服务端必须以 Struct 应答，响应的字段直接成为节点输出（JSON 类型；有限数值为 float64，非有限值为字符串）。不支持任意 protobuf 消息类型——节点没有描述符来源，也不校验响应类型：服务端应答其他消息类型时，要么解码失败（按 `grpc.Internal` 归为可重试），要么解出错误的字段。RPC 状态码按永久/瞬态分类：`NotFound`、`InvalidArgument`、`PermissionDenied`、`Unauthenticated`、`AlreadyExists`、`Unimplemented`、`FailedPrecondition`、`OutOfRange` 为永久错误，其余（如 `Unavailable`）可重试。
 
 #### Function 节点
 
