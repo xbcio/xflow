@@ -478,9 +478,8 @@ func (w *WorkflowBuilder) compileBodies(visited map[*WorkflowBuilder]bool) error
 // The members round-trip through JSON rather than being embedded as structs.
 // Parameters must hold immutable value types only (the value-domain guard
 // rejects the pointer fields a NodeDef carries, such as *RetrySettings), and
-// the body reaches the
-// compiler as opaque JSON anyway — decodeSubgraphMembers re-marshals whatever
-// is here.
+// the body reaches the compiler as opaque JSON anyway — decodeSubgraphMembers
+// re-marshals whatever is here.
 func subgraphBodyParam(def *types.WorkflowDef) (map[string]any, error) {
 	shape := map[string]any{
 		"nodes":       def.Nodes,
