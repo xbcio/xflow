@@ -225,6 +225,93 @@ func TestGroupBinaryE2E_OnErrorOutputRoutesOnMemberFailure(t *testing.T) {
 	}
 }
 
+// TestGroupBinaryE2E_OnErrorContinueCompletesExecution verifies the group-
+// level on_error=continue mechanism end-to-end against a real server, runner,
+// and Redis backend (the companion fix to
+// TestGroupBinaryE2E_OnErrorOutputRoutesOnMemberFailure for the sibling
+// policy): a group member fails terminally, the group reports no real
+// boundary exits (the member subgraph never reached g.sink's normal output,
+// same as error_output's routed case), the ordinary success-path downstream
+// "out" never executes, and — this is the bug this test pins — the execution
+// still completes SUCCESSFULLY rather than finalizing Failed through the
+// backends' failed-unit counter. The real failure stays observable in the
+// execution's own Inspect-visible error field.
+func TestGroupBinaryE2E_OnErrorContinueCompletesExecution(t *testing.T) {
+	addr := requireRedis(t)
+	h := newServerRunnerHarness(t, addr, 2)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sinkHandler := &alwaysFailHandler{errMsg: "sink boom"}
+	memberHandler := &groupMemberHandler{}
+	_, errCh := startGroupRunner(t, ctx, h, groupRunnerOpts{
+		runnerID: "group-runner-continue",
+		handlers: map[string]types.ActionHandler{
+			"test.group.member":     memberHandler,
+			"test.group.alwaysfail": sinkHandler,
+		},
+	})
+
+	// Workflow: group "g" (g.source -> g.sink, g.sink always fails) with
+	// on_error=continue (no error_outputs), ordinary success path g.sink ->
+	// "out".
+	wf := &types.WorkflowDef{
+		Name: "group-e2e-continue",
+		Nodes: []types.NodeDef{
+			{Name: "g.source", Type: "test.group.member", Kind: types.NodeKindAction},
+			{Name: "g.sink", Type: "test.group.alwaysfail", Kind: types.NodeKindAction},
+			{Name: "out", Type: "test.group.member", Kind: types.NodeKindAction},
+		},
+		Connections: types.Connections{
+			"g.source": {"main": {Targets: []types.Connection{{Node: "g.sink", Input: "main"}}}},
+			"g.sink":   {"main": {Targets: []types.Connection{{Node: "out", Input: "main"}}}},
+		},
+		Groups: []types.GroupDef{{
+			Name:    "g",
+			Members: []string{"g.source", "g.sink"},
+			OnError: string(types.OnErrorContinue),
+		}},
+	}
+
+	execID := submitWorkflowHTTP(t, h.httpSrv.URL, h.httpSrv.Client(), wf, map[string]any{
+		"seed": "will-fail",
+	})
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer waitCancel()
+	result := waitForCompletion(waitCtx, t, h.state, execID, "out", "g")
+
+	if result.Status != types.ExecutionStatusSuccess {
+		t.Fatalf("execution status = %s, want success (continue must not fail the execution)", result.Status)
+	}
+	if _, ok := result.Output["out"]; ok {
+		t.Fatalf("output[out] present = %v, want absent: the success-path downstream must not run", result.Output["out"])
+	}
+	// The execution snapshot's own Error field is intentionally empty on a
+	// non-failed terminal status (engine.TerminalExecutionError), exactly as
+	// it is for a routed error_output commit — a success must never inherit a
+	// stale reason. The real, tolerated failure stays observable through the
+	// member handler's own invocation count (it did run and did fail) and the
+	// xflow_group_commit_total{outcome="failed_tolerated"} metric
+	// (notifyGroupCommit in commitGroup), pinned at the engine level by
+	// TestGroupOnErrorContinue_RealFailureStillObservable and
+	// TestNotifyGroupCommit_FailedTolerated.
+	if sinkHandler.invocations.Load() == 0 {
+		t.Fatal("sink handler never invoked — the member failure this test exercises did not happen")
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Logf("runner shutdown error (non-fatal): %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("runner did not stop in time")
+	}
+}
+
 // TestGroupBinaryE2E_NormalHappyPath verifies end-to-end group execution with
 // the in-process server and runner: submit → dispatch → group execute → commit.
 // The workflow has a two-node group (source→sink) with an external downstream
