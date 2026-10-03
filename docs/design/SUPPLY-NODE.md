@@ -6,7 +6,8 @@
 > Related: [WASM-ENGINE-POOLING.md](./WASM-ENGINE-POOLING.md) (the primary
 > consumer today), [NODE-GROUP-COLOCATION.md](./NODE-GROUP-COLOCATION.md)
 > (the activation/reconciler machinery supply reuses), [DEPLOYMENT-TOPOLOGIES.md
-> §4.6](./DEPLOYMENT-TOPOLOGIES.md) (the gRPC heartbeat transport gap).
+> §4.6](./DEPLOYMENT-TOPOLOGIES.md) (gRPC's `ActivationAck` RPC, now at parity
+> with HTTP).
 > Code: `types/workflow.go` (`NodeKindSupply`, `DependencyEdge`),
 > `engine/graph/dependency.go`, `engine/graph/unit.go`, `store/supply.go`,
 > `node/supply/{supply.go,registry.go,params.go}`,
@@ -506,9 +507,10 @@ proto), `service/control/grpc_server.go` fills them on the response, and
 this document described the proto as having "exactly one field"; that is no
 longer true.
 
-The remaining gRPC gap is `ActivationAck` — see (a) above and
-[DEPLOYMENT-TOPOLOGIES.md §4.6](./DEPLOYMENT-TOPOLOGIES.md#46-传输差异gRPC-缺-ActivationAck).
-It is a self-healing gap, not a supply-latency one.
+`ActivationAck` now has parity across both transports — see
+[DEPLOYMENT-TOPOLOGIES.md §4.6](./DEPLOYMENT-TOPOLOGIES.md#46-activationack-现已同时覆盖-http-与-grpc).
+Transport parity was never a correctness gap for supply convergence; see (a)
+above.
 
 Supply-specific note that stands regardless of transport: losing a hint is
 never a correctness problem, only a latency one. Hints are computed by
