@@ -443,11 +443,13 @@ func setupGroupLeaseTestWithErrorOutput(t *testing.T) (*Engine, *graph.Graph, ty
 
 	execID := types.ExecutionID("exec-group-lease-error-output-1")
 	state := &fakeGroupLeaseState{fakeState: newFakeState()}
-	state.fakeState.CreateExecution(context.Background(), &ExecutionSnapshot{
+	if err := state.fakeState.CreateExecution(context.Background(), &ExecutionSnapshot{
 		ID:     execID,
 		Graph:  g,
 		Status: types.ExecutionStatusRunning,
-	})
+	}); err != nil {
+		t.Fatalf("CreateExecution: %v", err)
+	}
 
 	q := &fakeQueue{}
 	eng := New(state, q)
