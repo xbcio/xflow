@@ -523,3 +523,31 @@ func TestReloadableHTTPTransportPresentsReloadedRootCAs(t *testing.T) {
 	}
 	_ = resp2.Body.Close()
 }
+
+// The reloadable transport replaces http.DefaultTransport for the Runner
+// Protocol client, so it must keep its dial, handshake and idle limits, and it
+// must not route through an environment proxy, whose HTTPS tunnel would verify
+// against TLSClientConfig instead of the live CA pool.
+func TestReloadableHTTPTransportKeepsDefaultLimitsWithoutProxy(t *testing.T) {
+	reloader, err := newCredentialReloader(RunnerConfig{})
+	if err != nil {
+		t.Fatalf("newCredentialReloader: %v", err)
+	}
+	transport := newReloadableHTTPTransport(reloader, &tls.Config{MinVersion: tls.VersionTLS12})
+	def := http.DefaultTransport.(*http.Transport)
+	if transport.Proxy != nil {
+		t.Fatal("Proxy is set, want a direct dial to the control plane")
+	}
+	if transport.TLSHandshakeTimeout != def.TLSHandshakeTimeout || transport.TLSHandshakeTimeout == 0 {
+		t.Fatalf("TLSHandshakeTimeout = %v, want the default %v", transport.TLSHandshakeTimeout, def.TLSHandshakeTimeout)
+	}
+	if transport.IdleConnTimeout != def.IdleConnTimeout || transport.MaxIdleConns != def.MaxIdleConns {
+		t.Fatalf("idle limits = %v/%d, want %v/%d", transport.IdleConnTimeout, transport.MaxIdleConns, def.IdleConnTimeout, def.MaxIdleConns)
+	}
+	if transport.DialTLSContext == nil || transport.TLSClientConfig.GetClientCertificate == nil {
+		t.Fatal("live TLS hooks are missing")
+	}
+	if transport.TLSClientConfig.MinVersion != tls.VersionTLS12 {
+		t.Fatalf("MinVersion = %x, want TLS 1.2", transport.TLSClientConfig.MinVersion)
+	}
+}

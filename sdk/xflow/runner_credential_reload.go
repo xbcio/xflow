@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"sync/atomic"
+	"time"
 )
 
 // runnerCredentialMaterial is one atomically-swapped snapshot of the
@@ -187,36 +188,47 @@ func newReloadableHTTPTransport(r *CredentialReloader, baseTLSCfg *tls.Config) *
 	base.Certificates = nil
 	base.RootCAs = nil
 	base.GetClientCertificate = r.GetClientCertificate
-	dialer := &net.Dialer{}
-	return &http.Transport{
-		TLSClientConfig: base,
-		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			cfg := base.Clone()
-			cfg.RootCAs = r.rootCAs()
-			// http.Transport's own TLS dial path derives ServerName from the
-			// dial address when the config leaves it empty; DialTLSContext
-			// bypasses that derivation entirely (per net/http's docs: "it is
-			// the caller's responsibility to set up ServerName"), so this
-			// must do it explicitly or every handshake fails verification
-			// with "either ServerName or InsecureSkipVerify must be
-			// specified" regardless of how correct the RootCAs pool is.
-			if cfg.ServerName == "" {
-				if host, _, splitErr := net.SplitHostPort(addr); splitErr == nil {
-					cfg.ServerName = host
-				} else {
-					cfg.ServerName = addr
-				}
+	// Start from http.DefaultTransport's timeouts and idle-pool limits, but
+	// dial the control plane directly (no environment proxy): net/http
+	// tunnels an HTTPS request through a proxy itself and verifies it against
+	// TLSClientConfig, bypassing DialTLSContext and therefore the live CA pool.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.TLSClientConfig = base
+	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		cfg := base.Clone()
+		cfg.RootCAs = r.rootCAs()
+		// http.Transport's own TLS dial path derives ServerName from the
+		// dial address when the config leaves it empty; DialTLSContext
+		// bypasses that derivation entirely (per net/http's docs: "it is
+		// the caller's responsibility to set up ServerName"), so this
+		// must do it explicitly or every handshake fails verification
+		// with "either ServerName or InsecureSkipVerify must be
+		// specified" regardless of how correct the RootCAs pool is.
+		if cfg.ServerName == "" {
+			if host, _, splitErr := net.SplitHostPort(addr); splitErr == nil {
+				cfg.ServerName = host
+			} else {
+				cfg.ServerName = addr
 			}
-			rawConn, err := dialer.DialContext(ctx, network, addr)
-			if err != nil {
-				return nil, err
-			}
-			tlsConn := tls.Client(rawConn, cfg)
-			if err := tlsConn.HandshakeContext(ctx); err != nil {
-				_ = rawConn.Close()
-				return nil, err
-			}
-			return tlsConn, nil
-		},
+		}
+		rawConn, err := dialer.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		tlsConn := tls.Client(rawConn, cfg)
+		handshakeCtx := ctx
+		if timeout := transport.TLSHandshakeTimeout; timeout > 0 {
+			var cancel context.CancelFunc
+			handshakeCtx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
+		if err := tlsConn.HandshakeContext(handshakeCtx); err != nil {
+			_ = rawConn.Close()
+			return nil, err
+		}
+		return tlsConn, nil
 	}
+	return transport
 }
