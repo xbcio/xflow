@@ -28,6 +28,7 @@ import {
   type NodeProps,
   type OnBeforeDelete,
   type ReactFlowInstance,
+  type Viewport as ReactFlowViewport,
   useReactFlow
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
@@ -39,6 +40,7 @@ import {
   type Position as NodePosition,
   type RuntimeNodeSnapshot,
   type RuntimeSnapshot,
+  type Viewport,
   type WorkflowDef
 } from "@xflow/core";
 import "./styles.css";
@@ -96,6 +98,19 @@ export interface XFlowPreviewProps {
    * warning color and labeled; the preview never removes them.
    */
   danglingPorts?: readonly DanglingPort[];
+  /**
+   * Restores the canvas pan/zoom saved in `WorkflowEditorMetadata.viewport`
+   * (ADR-D4 §2.3). When supplied, the preview applies it on mount instead of
+   * {@link InitialViewFitter}'s measured auto-fit, so a reload lands where the
+   * author left the canvas rather than re-fitting to the graph bounds.
+   */
+  defaultViewport?: Viewport;
+  /**
+   * Reports the canvas pan/zoom after the user stops panning or zooming
+   * (React Flow's `onMoveEnd`). The preview never persists this itself; the
+   * owner decides when/whether to save it as part of `editor_metadata`.
+   */
+  onViewportChange?: (viewport: Viewport) => void;
 }
 
 /** One output port of a node that the owner reports as no longer existing. */
@@ -231,17 +246,24 @@ function useFitMeasuredNodes(): () => void {
   }, [flow]);
 }
 
-/** Fits once after the controlled nodes have received measured dimensions. */
+/**
+ * Fits once after the controlled nodes have received measured dimensions.
+ * Disabled entirely when the owner supplied a `defaultViewport` to restore
+ * (ADR-D4 §2.3): a measured auto-fit would immediately overwrite the
+ * author's saved pan/zoom.
+ */
 function InitialViewFitter({
-  flow
+  flow,
+  disabled
 }: {
   flow: ReactFlowInstance<PreviewFlowNode, Edge> | null;
+  disabled?: boolean;
 }): null {
   const hasFittedInitialView = React.useRef(false);
   const fitViewFrame = React.useRef<number | undefined>(undefined);
 
   React.useEffect(() => {
-    if (!flow || hasFittedInitialView.current) return;
+    if (!flow || disabled || hasFittedInitialView.current) return;
 
     let attempts = 0;
     const tryFit = () => {
@@ -689,7 +711,9 @@ export function XFlowPreview({
   onDeleteConnection,
   onDeleteNode,
   onDropNode,
-  danglingPorts
+  danglingPorts,
+  defaultViewport,
+  onViewportChange
 }: XFlowPreviewProps): React.ReactElement {
   const graph = React.useMemo(() => toGraphModel(workflow), [workflow]);
   const [internalSelectedNodeId, setInternalSelectedNodeId] = React.useState<string | undefined>();
@@ -732,6 +756,9 @@ export function XFlowPreview({
   const handleFlowInit = React.useCallback((instance: ReactFlowInstance<PreviewFlowNode, Edge>) => {
     setFlowInstance(instance);
   }, []);
+  const handleMoveEnd = React.useCallback((_event: unknown, viewport: ReactFlowViewport) => {
+    onViewportChange?.({ x: viewport.x, y: viewport.y, zoom: viewport.zoom });
+  }, [onViewportChange]);
   const handleDragOver = React.useCallback((event: React.DragEvent<HTMLDivElement>) => {
     if (!canDropNode) return;
     // Without preventDefault the browser refuses the drop outright, which would
@@ -925,6 +952,8 @@ export function XFlowPreview({
             onInit={handleFlowInit}
             minZoom={0.4}
             maxZoom={1.6}
+            defaultViewport={defaultViewport as ReactFlowViewport | undefined}
+            onMoveEnd={onViewportChange ? handleMoveEnd : undefined}
             nodesDraggable={canDragNodes}
             nodesConnectable={canConnect}
             edgesFocusable={canDeleteConnections}
@@ -943,7 +972,7 @@ export function XFlowPreview({
             } : undefined}
             attributionPosition="bottom-left"
           >
-            <InitialViewFitter flow={flowInstance} />
+            <InitialViewFitter flow={flowInstance} disabled={defaultViewport !== undefined} />
             <Background color="var(--xflow-preview-canvas-grid)" gap={20} size={1} />
             <PreviewControls />
             <MiniMap
