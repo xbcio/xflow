@@ -867,6 +867,11 @@ func (s *Server) startReconciler(ctx context.Context) {
 // Use IsRetryableRegistrationError to tell a conflict apart from a backend
 // failure that is worth retrying; the two calls share the startup-registration
 // contract documented on ReplaceWorkflow.
+//
+// AddWorkflow carries no editor_metadata parameter. WorkflowBuilder/NodeDef
+// expose no position/UI/notes input to begin with (ADR-D4 D6), so there is
+// nothing natural to plumb one through; editor_metadata is HTTP-only, set via
+// POST/PUT /v1/workflows[/{id}] (service/apiserver).
 func (s *Server) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.WorkflowID, error) {
 	res, err := s.addWorkflow(ctx, wf, false)
 	return res.ID, err
@@ -876,6 +881,11 @@ func (s *Server) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.Wo
 // registered under the same name and version is removed first rather than
 // rejected as a conflict. Re-registering an unchanged workflow is still
 // idempotent and removes nothing.
+//
+// Like AddWorkflow, ReplaceWorkflow carries no editor_metadata parameter; see
+// the note on AddWorkflow. A replace driven by this embedded path always
+// stores a nil EditorMetadata, which is a real change (and a new revision) if
+// the record it replaces had a non-nil one.
 //
 // It is the call an embedded host makes when its workflow is built from its own
 // configuration. Such a definition changes whenever the configuration does — a
