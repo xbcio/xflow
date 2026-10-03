@@ -19,11 +19,12 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	RunnerProtocol_Connect_FullMethodName      = "/xflow.runner.v1.RunnerProtocol/Connect"
-	RunnerProtocol_Register_FullMethodName     = "/xflow.runner.v1.RunnerProtocol/Register"
-	RunnerProtocol_Heartbeat_FullMethodName    = "/xflow.runner.v1.RunnerProtocol/Heartbeat"
-	RunnerProtocol_PollTask_FullMethodName     = "/xflow.runner.v1.RunnerProtocol/PollTask"
-	RunnerProtocol_ReportResult_FullMethodName = "/xflow.runner.v1.RunnerProtocol/ReportResult"
+	RunnerProtocol_Connect_FullMethodName       = "/xflow.runner.v1.RunnerProtocol/Connect"
+	RunnerProtocol_Register_FullMethodName      = "/xflow.runner.v1.RunnerProtocol/Register"
+	RunnerProtocol_Heartbeat_FullMethodName     = "/xflow.runner.v1.RunnerProtocol/Heartbeat"
+	RunnerProtocol_PollTask_FullMethodName      = "/xflow.runner.v1.RunnerProtocol/PollTask"
+	RunnerProtocol_ReportResult_FullMethodName  = "/xflow.runner.v1.RunnerProtocol/ReportResult"
+	RunnerProtocol_AckActivation_FullMethodName = "/xflow.runner.v1.RunnerProtocol/AckActivation"
 )
 
 // RunnerProtocolClient is the client API for RunnerProtocol service.
@@ -53,6 +54,14 @@ type RunnerProtocolClient interface {
 	PollTask(ctx context.Context, in *PollTaskRequest, opts ...grpc.CallOption) (*PollTaskResponse, error)
 	// ReportResult commits a finished task result back to the server.
 	ReportResult(ctx context.Context, in *ReportResultRequest, opts ...grpc.CallOption) (*ReportResultResponse, error)
+	// AckActivation reports the outcome of an activate/deactivate directive
+	// back to the server. Mirrors the HTTP ActivationAckPath endpoint exactly:
+	// same authz, namespace scoping (resolved server-side from the runner's
+	// registration, never from the request), fencing/generation checks, and
+	// idempotency. The response carries no payload — success is the RPC
+	// returning without error, matching the HTTP transport's 200 with an empty
+	// body.
+	AckActivation(ctx context.Context, in *ActivationAckRequest, opts ...grpc.CallOption) (*ActivationAckResponse, error)
 }
 
 type runnerProtocolClient struct {
@@ -116,6 +125,16 @@ func (c *runnerProtocolClient) ReportResult(ctx context.Context, in *ReportResul
 	return out, nil
 }
 
+func (c *runnerProtocolClient) AckActivation(ctx context.Context, in *ActivationAckRequest, opts ...grpc.CallOption) (*ActivationAckResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ActivationAckResponse)
+	err := c.cc.Invoke(ctx, RunnerProtocol_AckActivation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RunnerProtocolServer is the server API for RunnerProtocol service.
 // All implementations must embed UnimplementedRunnerProtocolServer
 // for forward compatibility.
@@ -143,6 +162,14 @@ type RunnerProtocolServer interface {
 	PollTask(context.Context, *PollTaskRequest) (*PollTaskResponse, error)
 	// ReportResult commits a finished task result back to the server.
 	ReportResult(context.Context, *ReportResultRequest) (*ReportResultResponse, error)
+	// AckActivation reports the outcome of an activate/deactivate directive
+	// back to the server. Mirrors the HTTP ActivationAckPath endpoint exactly:
+	// same authz, namespace scoping (resolved server-side from the runner's
+	// registration, never from the request), fencing/generation checks, and
+	// idempotency. The response carries no payload — success is the RPC
+	// returning without error, matching the HTTP transport's 200 with an empty
+	// body.
+	AckActivation(context.Context, *ActivationAckRequest) (*ActivationAckResponse, error)
 	mustEmbedUnimplementedRunnerProtocolServer()
 }
 
@@ -167,6 +194,9 @@ func (UnimplementedRunnerProtocolServer) PollTask(context.Context, *PollTaskRequ
 }
 func (UnimplementedRunnerProtocolServer) ReportResult(context.Context, *ReportResultRequest) (*ReportResultResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReportResult not implemented")
+}
+func (UnimplementedRunnerProtocolServer) AckActivation(context.Context, *ActivationAckRequest) (*ActivationAckResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AckActivation not implemented")
 }
 func (UnimplementedRunnerProtocolServer) mustEmbedUnimplementedRunnerProtocolServer() {}
 func (UnimplementedRunnerProtocolServer) testEmbeddedByValue()                        {}
@@ -268,6 +298,24 @@ func _RunnerProtocol_ReportResult_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RunnerProtocol_AckActivation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ActivationAckRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerProtocolServer).AckActivation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerProtocol_AckActivation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerProtocolServer).AckActivation(ctx, req.(*ActivationAckRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RunnerProtocol_ServiceDesc is the grpc.ServiceDesc for RunnerProtocol service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -290,6 +338,10 @@ var RunnerProtocol_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReportResult",
 			Handler:    _RunnerProtocol_ReportResult_Handler,
+		},
+		{
+			MethodName: "AckActivation",
+			Handler:    _RunnerProtocol_AckActivation_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

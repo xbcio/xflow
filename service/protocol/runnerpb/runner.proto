@@ -31,6 +31,15 @@ service RunnerProtocol {
 
   // ReportResult commits a finished task result back to the server.
   rpc ReportResult(ReportResultRequest) returns (ReportResultResponse);
+
+  // AckActivation reports the outcome of an activate/deactivate directive
+  // back to the server. Mirrors the HTTP ActivationAckPath endpoint exactly:
+  // same authz, namespace scoping (resolved server-side from the runner's
+  // registration, never from the request), fencing/generation checks, and
+  // idempotency. The response carries no payload — success is the RPC
+  // returning without error, matching the HTTP transport's 200 with an empty
+  // body.
+  rpc AckActivation(ActivationAckRequest) returns (ActivationAckResponse);
 }
 
 message Capability {
@@ -163,6 +172,30 @@ message ReportResultResponse {
   bool accepted = 1;
   string error = 2;
 }
+
+// ActivationAckRequest mirrors protocol.ActivationAck field-for-field. Status
+// is carried as the same lowercase string the JSON wire uses ("active",
+// "deactivated", "failed") rather than a proto enum, so the two transports
+// decode to byte-identical protocol.ActivationStatus values without a mapping
+// table that could drift.
+message ActivationAckRequest {
+  string runner_id = 1;
+  string session_id = 2;
+  string workflow_id = 3;
+  // workflow_version is REQUIRED for a failed or deactivated status; see
+  // protocol.ActivationAck.WorkflowVersion.
+  string workflow_version = 4;
+  string group_id = 5;
+  uint32 replica_index = 6;
+  uint64 generation = 7;
+  string status = 8;
+  string error = 9;
+}
+
+// ActivationAckResponse is deliberately empty: the HTTP transport answers a
+// successful ack with 200 and an empty JSON object, carrying no payload.
+// Failure is reported as a gRPC status, mirroring the HTTP non-2xx path.
+message ActivationAckResponse {}
 
 message RunnerFrame {
   oneof frame {
