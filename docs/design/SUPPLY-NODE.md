@@ -471,12 +471,16 @@ per-key、**内存、不持久化**（与 `noMatchSince` 同一把 `r.mu`，每�
   点**。空 `WorkflowVersion` 被当作格式非法请求（`ErrMissingWorkflowVersion` →
   400），**不是**向后兼容路径：ack 能力与该字段是同一特性的两半、同批引入，不存在
   只实现前者的 runner。
-- **gRPC 传输没有 ActivationAck 的 RPC/proto 定义**，因此 gRPC-only 部署下
-  ack 无处可发、静默丢弃、fence 永不发生，退化为「只能重启 runner」——这不是
-  延迟问题，是**自愈能力的完全缺失**。这是 gRPC 目前**唯一**的控制面缺口
-  （心跳载荷已补齐，见 §9(b)），
-  在 [DEPLOYMENT-TOPOLOGIES.md §4.6](./DEPLOYMENT-TOPOLOGIES.md#46-传输差异gRPC-缺-ActivationAck)
-  已追加记录。
+- **gRPC 传输现已实现 ActivationAck**：`runner.proto` 新增
+  `AckActivation(ActivationAckRequest) returns (ActivationAckResponse)`，
+  字段与 `protocol.ActivationAck` 逐一对应（`AuthToken` 除外，走 metadata）。
+  `GRPCServer.AckActivation`（`service/control/grpc_server.go`）与 HTTP 的
+  `Server.HandleActivationAck` 调用同一个 `Core.activationAck`，鉴权、
+  namespace 解析、fencing/generation 校验、幂等性全部复用。
+  `protocol.GRPCClient` 实现了 `activationAckClient`，因此 gRPC-only 部署
+  下的 runner 现在也能把 ack 发出去，不再需要重启 runner 才能清掉一个被
+  gate decline 的 activation。详见
+  [DEPLOYMENT-TOPOLOGIES.md §4.6](./DEPLOYMENT-TOPOLOGIES.md#46-activationack-现已同时覆盖-http-与-grpc)。
 
 测试支撑：`test/integration/supply_gating_test.go` 的
 `TestSupplyGateRetriesWithoutRestart` 证明完整闭环（gate decline → ack → fence →
