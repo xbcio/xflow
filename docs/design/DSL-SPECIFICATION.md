@@ -167,29 +167,28 @@ node_templates:
     parameters: object    # 模板参数（被引用节点的 parameters 深度合并覆盖）
 
 # 节点定义
+# 注：节点不携带任何编辑器专用字段（position/notes/ui 等）；这些字段只存在于
+# 服务端的 editor_metadata（WorkflowEditorMetadata），按节点 id（无 id 时按
+# name 兜底）建立索引，与运行时定义完全分离，不参与运行时哈希。
+# 参见 docs/design/ADR-D4-runtime-editor-metadata-split.md 与
+# PUT/POST /v1/workflows 请求体的 editor_metadata 字段（api/openapi/xflow-v1.yaml）。
 nodes:
-  - id: string            # 节点 ID（可选，UUID v4；UI 创建时必带，YAML 手写时可省略由系统生成）    name: string          # 节点名称
+  - id: string            # 节点 ID（可选，UUID v4；UI 创建时必带，YAML 手写时可省略由系统生成；同时也是 editor_metadata 的索引键）
+    name: string          # 节点名称
     type: string          # 节点类型（xflow.http/xflow.grpc/xflow.if等）
     kind: string          # 节点角色（可选，action|trigger|supply；普通节点默认 action）
     version: int          # Handler 主版本（可选；review 中的 handler_version 即此字段）
     template: string      # 引用 node_templates 中的模板名（可选，与 type 互斥：template 提供 type）
-    position: [x, y]      # UI 位置坐标（可选）
     disabled: bool        # 是否禁用（可选，见下方「禁用行为」）
     on_error: string      # 错误处理策略（可选，stop|error_output|main_output|continue，覆盖全局 settings.on_error）
     runner_selector:      # 节点级 runner 选择器（可选；覆盖顶层 runner_selector）
       mode: string        #   default | required
       match_labels: object
     timeout: duration     # 单次执行超时（可选，三态：>0 = 该预算；0 = 继承引擎默认 engine.DefaultNodeTimeout；<0 = 显式无上限。仅约束单次尝试，不含重试累计；超时为终态，不重投，见下方「节点超时语义」）
-    notes: string         # 节点备注（可选）
     inputs:               # 声明式输入端口（可选）
       - name: string      #   端口名称
         required: bool    #   是否必须连线
     output_schema: object # 输出数据 Schema（可选，JSON Schema 子集，用于编译期字段校验）
-    ui: object            # UI 元数据（可选，运行时忽略，用于编辑器状态持久化）
-                          #   collapsed: bool       - 节点折叠状态
-                          #   color: string         - 节点颜色
-                          #   group: string         - 分组标签
-                          #   width: int            - 节点宽度
     retry:                # 节点级重试策略（可选；覆盖 settings.retry）
       enabled: bool
       max_attempts: int
