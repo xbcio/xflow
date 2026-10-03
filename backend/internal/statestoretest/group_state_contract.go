@@ -288,6 +288,36 @@ func RunGroupStateContract(t *testing.T, newStore func(*testing.T) GroupStore) {
 		}
 	})
 
+	// on_error=continue / error_output regression (NODE-GROUP-COLOCATION.md
+	// §12.2): the engine reports Outcome=GroupOutcomeSuccess with Fatal=false
+	// for a tolerated member failure (engine/group_exec.go's commitGroup), and
+	// this is the ONLY signal that tells the backend not to count it toward
+	// the failed-unit counter — Error is non-empty (the real failure still
+	// travels on the commit) and Fatal is false at the same time, which is
+	// exactly the combination the old "any Outcome==failed increments the
+	// counter regardless of Fatal" bug could not distinguish from a genuine
+	// failure. If a backend regressed to keying the failed counter off
+	// Error!="" or Fatal alone instead of Outcome, this still-success
+	// execution would finalize Failed.
+	t.Run("NonFatalSuccessOutcomeWithErrorDoesNotFailExecution", func(t *testing.T) {
+		s, id, gu := seed(t, singleGroupGraph(t))
+		if ok, _ := s.AcquireGroupLease(ctx, lease(id, gu, "T1")); !ok {
+			t.Fatal("acquire must succeed")
+		}
+		req := commit(id, gu, "T1")
+		req.Outcome = engine.GroupOutcomeSuccess
+		req.Fatal = false
+		req.Error = "member boom (tolerated)"
+		res, err := s.CommitGroup(ctx, req)
+		if err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		if !res.ExecutionDone || res.ExecutionStatus != types.ExecutionStatusSuccess {
+			t.Fatalf("non-fatal success-outcome commit must complete the execution as success: done=%v status=%v",
+				res.ExecutionDone, res.ExecutionStatus)
+		}
+	})
+
 	// Negative half: a successful commit must leave no reason behind, or a
 	// backend that echoes the request's Error field unconditionally would pass
 	// the assertion above.
