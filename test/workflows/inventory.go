@@ -16,6 +16,7 @@ package workflows
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/xbcio/xflow/node"
@@ -159,13 +160,30 @@ func WithVars(def *types.WorkflowDef, vars map[string]any) {
 // has.
 func NodeTypesIn(def *types.WorkflowDef) map[string]int {
 	counts := make(map[string]int)
-	walkNodes(def.Nodes, counts)
+	walkNodes(def.Nodes, func(_, nodeType string) { counts[nodeType]++ })
 	return counts
 }
 
-func walkNodes(nodes []types.NodeDef, counts map[string]int) {
+// NodeNamesIn returns the name of every node an execution can report a status
+// for: all declared nodes in authoring order, body members right after the node
+// carrying them, and declaration-only nodes (the supply kinds) left out because
+// they never execute. It exists so a diagnostic dump names the nodes the
+// definition actually has — a hand-copied list goes stale the moment a node is
+// moved, and it is the dump's only consumer.
+func NodeNamesIn(def *types.WorkflowDef) []string {
+	names := make([]string, 0, len(def.Nodes))
+	walkNodes(def.Nodes, func(name, nodeType string) {
+		if slices.Contains(DeclarationOnlyNodeTypes, nodeType) {
+			return
+		}
+		names = append(names, name)
+	})
+	return names
+}
+
+func walkNodes(nodes []types.NodeDef, visit func(name, nodeType string)) {
 	for _, n := range nodes {
-		counts[n.Type]++
+		visit(n.Name, n.Type)
 		raw, ok := n.Parameters[BodyParam]
 		if !ok {
 			continue
@@ -174,11 +192,11 @@ func walkNodes(nodes []types.NodeDef, counts map[string]int) {
 		if !ok {
 			continue
 		}
-		walkBody(body, counts)
+		walkBody(body, visit)
 	}
 }
 
-func walkBody(body map[string]any, counts map[string]int) {
+func walkBody(body map[string]any, visit func(name, nodeType string)) {
 	nested, err := decodeBodyMembers(body)
 	if err != nil {
 		// A malformed body is the graph compiler's error to report, not this
@@ -186,7 +204,7 @@ func walkBody(body map[string]any, counts map[string]int) {
 		// the calling test fails loudly on the same definition.
 		return
 	}
-	walkNodes(nested, counts)
+	walkNodes(nested, visit)
 }
 
 // decodeBodyMembers pulls the member node definitions out of the body shape

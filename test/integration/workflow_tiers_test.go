@@ -110,7 +110,7 @@ func TestWorkflowTierMediumDistributed(t *testing.T) {
 			execID := submitWorkflowHTTP(t, h.httpSrv.URL, h.httpSrv.Client(), def, tc.input)
 			result := waitDistributedCompletion(t, h, execID, "renamed", "script")
 			if result.Status != types.ExecutionStatusSuccess {
-				dumpNodes(t, h, execID, mediumNodeNames()...)
+				dumpNodes(t, h, execID, workflows.NodeNamesIn(def)...)
 				t.Fatalf("status = %s, want success (error=%s)", result.Status, result.Error)
 			}
 
@@ -187,7 +187,7 @@ func TestWorkflowTierHighDistributed(t *testing.T) {
 	waitNodeSuspended(t, h, execID, "hold")
 	postSignal(t, h, execID, workflows.HighReleaseSignal, map[string]any{"release": true})
 
-	result := waitDistributedCompletionDumping(t, h, execID, highNodeNames(), "summarize", "approved")
+	result := waitDistributedCompletionDumping(t, h, execID, workflows.NodeNamesIn(def), "summarize", "approved")
 	if result.Status != types.ExecutionStatusSuccess {
 		t.Fatalf("status = %s, want success", result.Status)
 	}
@@ -212,26 +212,6 @@ func TestWorkflowTierHighDistributed(t *testing.T) {
 }
 
 // --- helpers ---
-
-// mediumNodeNames lists the medium tier's nodes in execution order. It exists so
-// a failed run can name the node that stuck instead of reporting only the
-// terminal status, which on this topology is all the result carries.
-func mediumNodeNames() []string {
-	return []string{
-		"start", "seed", "tag", "enrich", "rehydrate", "normalize", "dedupe",
-		"ordered", "capped", "rollup", "renamed", "script", "route",
-		"fan", "dq", "single_lane", "join", "notify", "done",
-	}
-}
-
-// highNodeNames lists the high tier's nodes for the same reason as
-// mediumNodeNames.
-func highNodeNames() []string {
-	return []string{
-		"start", "db_insert", "db_load", "risk", "risk_gap", "gate", "hold",
-		"tick", "approved", "timed_out", "rejected", "join", "summarize", "done",
-	}
-}
 
 // dumpNodes logs each node's status and error. Only for failure paths.
 func dumpNodes(t *testing.T, h *serverRunnerHarness, id types.ExecutionID, names ...string) {
