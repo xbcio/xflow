@@ -389,26 +389,38 @@ items listed below under §12.1. What remains open is in §12.2.
     the member's name is present in that string's text, just not available as
     its own field.
   - **The commit's reported `Outcome` is `GroupOutcomeSuccess`, not
-    `GroupOutcomeFailed`, when routing.** This was the one piece the
-    investigations did not have visibility into because it lives in the
-    backends, not the engine: `backend/providers/local/group_state.go`,
+    `GroupOutcomeFailed`, when the engine decided the failure is non-fatal.**
+    This was the one piece the investigations did not have visibility into
+    because it lives in the backends, not the engine:
+    `backend/providers/local/group_state.go`,
     `backend/providers/distributed/internal/rstate/group_state.go`, and
     `backend/providers/local/entry_admission.go` all increment their
     failed-unit counter whenever `Outcome == GroupOutcomeFailed`, regardless
     of `Fatal`, and a non-zero failed count finalizes the WHOLE EXECUTION as
     Failed once the remaining-unit counter reaches zero — even for a unit this
-    engine itself decided was non-fatal. (This same counter is why
-    `on_error: continue` has its own long-standing latent bug: a `continue`d
-    group failure also still finalizes the execution Failed through this
-    exact counter, independent of this feature — out of scope here, not
-    masked by it, and not newly introduced by it.) Reporting
-    `GroupOutcomeSuccess` for a routed `error_output` commit is what matches
-    the node-level contract it mirrors: `ApplyOnError`'s `error_output` sets
-    `NodeStatus: types.NodeStatusSuccess`, never `NodeStatusFailed`, for
+    engine itself decided was non-fatal. This was first fixed for a routed
+    `error_output` commit, and then — closing a gap that commit left open —
+    extended to EVERY non-fatal failure, including a tolerated `on_error:
+    continue` member failure that never routes anywhere:
+    `commitGroup` (`engine/group_exec.go`) reports `GroupOutcomeSuccess`
+    whenever `fatal` is false, not only when `routeToErrorOutput` is true.
+    `continue` and `error_output` share the same contract this mirrors:
+    `ApplyOnError` sets `NodeStatus: types.NodeStatusSuccess` (`error_output`)
+    or `types.NodeStatusContinued` (`continue`), never `NodeStatusFailed`, for
     exactly this reason — the node/group "handled" the error, so the
-    execution must not be failed by it. The real failure is not lost: it still
-    travels as `GroupCommitRequest.Error` and as the synthetic exit's payload;
-    it is simply not counted as a terminal execution failure.
+    execution must not be failed by it. The real failure is not lost: it
+    still travels as `GroupCommitRequest.Error` (and, for `error_output`, as
+    the synthetic exit's payload); it is simply not counted as a terminal
+    execution failure. A tolerated `continue` failure stays observable
+    through the `xflow_group_commit_total{outcome="failed_tolerated"}` metric
+    (`commitGroup`'s `notifyGroupCommit` call) and through whatever real
+    exits the executor managed to produce before the failure — unlike
+    `error_output`, `continue` has no declared target to route to, so it
+    reports exactly those real exits (possibly none, if the group failed
+    before producing any) rather than a synthesized error edge; the
+    downstream fan-out follows from whichever of those exits actually fired,
+    the same unit-arrival mechanism `error_output` uses for its synthetic
+    edge.
   - **`fatal` and `routeToErrorOutput` are caller-decided, never re-derived
     inside `commitGroup`.** The two production callers disagree in one case:
     `executeGroup`'s `GroupExecutor.ExecuteGroup` only ever reports an
@@ -443,6 +455,19 @@ items listed below under §12.1. What remains open is in §12.2.
     cancellation/timeout stay fatal and unrouted on both the local-executor and
     remote `CommitGroupResult` entrypoints). `test/integration/group_binary_e2e_test.go`'s
     `TestGroupBinaryE2E_OnErrorOutputRoutesOnMemberFailure` exercises the same
+    contract against a real server, runner, and Redis backend.
+  - `on_error: continue` coverage: `engine/group_continue_test.go` (a
+    `continue`d member failure completes the execution successfully instead
+    of finalizing Failed through the failed-unit counter; the commit still
+    carries `Fatal: false` and the real error message; cancellation stays
+    fatal despite `continue`, mirroring the `error_output` cancellation
+    pin). `backend/internal/statestoretest/group_state_contract.go`'s
+    `NonFatalSuccessOutcomeWithErrorDoesNotFailExecution` pins the shared
+    backend mechanism (`Outcome: GroupOutcomeSuccess` with `Fatal: false`
+    and a non-empty `Error` must not fail the execution) against both the
+    local and Redis/Lua backends, including the real-Redis contract run.
+    `test/integration/group_binary_e2e_test.go`'s
+    `TestGroupBinaryE2E_OnErrorContinueCompletesExecution` exercises the same
     contract against a real server, runner, and Redis backend.
 
   <details>
