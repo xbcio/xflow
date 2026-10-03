@@ -371,8 +371,6 @@ nodes:
   - name: validate_order
     type: xflow.http
     version: 1
-    position: [250, 300]
-    notes: "验证订单信息"
     retry:
       enabled: true
       max_attempts: 3
@@ -402,7 +400,6 @@ nodes:
   # 2. 验证结果分支（使用 xflow.if 二元判断）
   - name: check_validation
     type: xflow.if
-    position: [450, 300]
 
     parameters:
       condition: "$nodes['validate_order'].is_valid == true"
@@ -410,7 +407,6 @@ nodes:
   # 3. 检查库存
   - name: check_inventory
     type: xflow.grpc
-    position: [650, 200]
 
     parameters:
       service: inventory.InventoryService
@@ -424,7 +420,6 @@ nodes:
   # 4. 计算价格
   - name: calculate_price
     type: xflow.function
-    position: [650, 300]
 
     parameters:
       code: "$nodes['validate_order'].items | map(#.price * #.quantity * 0.9) | sum()"
@@ -432,7 +427,6 @@ nodes:
   # 5. 合并并行结果（声明式输入端口）
   - name: merge_checks
     type: xflow.merge
-    position: [850, 250]
     inputs:
       - name: inventory
         required: true
@@ -445,7 +439,6 @@ nodes:
   # 6. 支付处理
   - name: process_payment
     type: xflow.http
-    position: [1050, 250]
 
     parameters:
       method: POST
@@ -465,7 +458,6 @@ nodes:
   # 7. 支付结果分支（使用 xflow.switch 多路判断）
   - name: payment_result
     type: xflow.switch
-    position: [1250, 250]
 
     parameters:
       outputs: [success, failed]
@@ -477,7 +469,6 @@ nodes:
   # 8. 发送成功通知
   - name: send_success_email
     type: xflow.http
-    position: [1450, 150]
 
     parameters:
       channel: email
@@ -488,7 +479,6 @@ nodes:
   # 9. 更新订单状态
   - name: update_order
     type: xflow.database
-    position: [1650, 150]
 
     parameters:
       operation: update
@@ -506,7 +496,6 @@ nodes:
   # 10. 发送失败通知
   - name: send_failure_email
     type: xflow.http
-    position: [1450, 350]
 
     parameters:
       channel: email
@@ -516,7 +505,6 @@ nodes:
   # 11. 无效订单通知
   - name: invalid_notification
     type: xflow.http
-    position: [650, 450]
 
     parameters:
       channel: email
@@ -525,7 +513,6 @@ nodes:
   # 12. 最终合并
   - name: final_merge
     type: xflow.merge
-    position: [1850, 250]
 
     parameters:
       mode: wait_any
@@ -533,7 +520,6 @@ nodes:
   # 13. 记录日志
   - name: log_result
     type: xflow.database
-    position: [2050, 250]
 
     parameters:
       operation: insert
