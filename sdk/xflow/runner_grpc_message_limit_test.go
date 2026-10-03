@@ -54,8 +54,12 @@ func TestRunnerGRPCClientReceivesLeaseAboveDefaultLimit(t *testing.T) {
 	target := "passthrough:///" + lis.Addr().String()
 
 	t.Run("RunnerClientReceives", func(t *testing.T) {
-		client, closeFn, err := newRunnerProtocolClient(
-			RunnerConfig{Transport: RunnerTransportGRPC, GRPCTarget: target}, runnerOptionsFrom(nil))
+		cfg := RunnerConfig{Transport: RunnerTransportGRPC, GRPCTarget: target}
+		reloader, err := newCredentialReloader(cfg)
+		if err != nil {
+			t.Fatalf("newCredentialReloader: %v", err)
+		}
+		client, closeFn, err := newRunnerProtocolClient(cfg, runnerOptionsFrom(nil), reloader)
 		if err != nil {
 			t.Fatalf("newRunnerProtocolClient(gRPC): %v", err)
 		}

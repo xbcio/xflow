@@ -304,6 +304,19 @@ type Runner struct {
 	metrics           *metrics.Metrics
 	closeOnce         sync.Once
 	closeErr          error
+	// credReloader holds the live token/TLS material for the HTTP and gRPC
+	// transports. Nil under RunnerTransportInProc, which has nothing for
+	// Reload to re-read (see newRunnerProtocolClient). Reload is a no-op
+	// returning nil when this is nil, so an InProc host calling it anyway
+	// (e.g. a signal handler shared across transports) is not an error.
+	credReloader *CredentialReloader
+	// protocolClient is the concrete client Reload asks to close idle HTTP
+	// connections after a successful swap, so a keep-alive connection
+	// established under the OLD client certificate is not reused — the next
+	// request redials and presents the new one. Only the HTTP transport's
+	// *protocol.Client needs this (http.Client.CloseIdleConnections); the
+	// gRPC client is asserted for separately inside Reload.
+	protocolClient runnersvc.ProtocolClient
 }
 
 // NewRunner creates an embeddable runner. Register node handlers before
@@ -354,7 +367,21 @@ func NewRunner(cfg RunnerConfig, opts ...RunnerOption) (*Runner, error) {
 		}
 	}()
 
-	client, cleanup, err := newRunnerProtocolClient(cfg, o)
+	// credReloader is nil under RunnerTransportInProc, which carries only a
+	// token and secures nothing over the wire (see newRunnerProtocolClient).
+	// For the HTTP and gRPC transports it is built — and its token/TLS
+	// material fully validated — before anything else below, matching
+	// buildRunnerTLSConfig's existing fail-at-construction behavior for a bad
+	// --tls-client-cert.
+	var credReloader *CredentialReloader
+	if cfg.Transport != RunnerTransportInProc {
+		credReloader, err = newCredentialReloader(cfg)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	client, cleanup, err := newRunnerProtocolClient(cfg, o, credReloader)
 	if err != nil {
 		return nil, err
 	}
@@ -390,6 +417,8 @@ func NewRunner(cfg RunnerConfig, opts ...RunnerOption) (*Runner, error) {
 		releaseBrowserCDP: releaseBrowserCDP,
 		pool:              svcCfg.ResourcePool,
 		metrics:           o.metrics,
+		credReloader:      credReloader,
+		protocolClient:    client,
 	}
 	constructed = true
 	return r, nil
@@ -537,6 +566,52 @@ func (r *Runner) Close() error {
 		r.closeErr = releaseRunnerResources(r.releaseBrowserCDP, r.releaseObservers, r.cleanup, r.pool)
 	})
 	return r.closeErr
+}
+
+// Reload re-reads this runner's control-plane credentials — the bearer token
+// and, when configured, the mTLS client certificate / server CA bundle —
+// from src and swaps them in only if every piece of material parses. On any
+// error the previous credentials keep serving unchanged, and the error is
+// returned so the caller can log it; this method itself never logs anything,
+// since a non-interactive host may want to fold the error into its own log
+// line instead (cmd/runner and sdk/runner's SIGHUP handler do this — see
+// sdk/runner's reload wiring).
+//
+// This is the explicit-call counterpart to cmd/server's SIGHUP-driven
+// reload: an embedded host owns its own process lifecycle and signal
+// handling (or has none, e.g. under a supervisor that delivers rotation a
+// different way), so NewRunner installs no signal handler of its own and a
+// host that wants SIGHUP-triggered rotation wires it itself, calling Reload
+// from that handler.
+//
+// Effects after a successful Reload:
+//   - A request already in flight finishes on the credentials it started
+//     with; only a request that has not yet attached its Authorization header
+//     or has not yet dialed sees the new material (SetToken and
+//     GetClientCertificate/DialTLSContext are read fresh per request/dial).
+//   - Idle HTTP keep-alive connections are closed (CloseIdleConnections) so a
+//     connection already established under the OLD client certificate is not
+//     reused; the next request redials and presents the new one. The gRPC
+//     transport has no equivalent call — see newRunnerProtocolClient's note
+//     on why a reloaded CA pool there only takes effect on grpc-go's next
+//     reconnect.
+//   - RunnerTransportInProc carries only a token and secures nothing over the
+//     wire, so this is a no-op returning nil for that transport.
+func (r *Runner) Reload(src CredentialReloaderSource) error {
+	if r.credReloader == nil {
+		return nil
+	}
+	if err := r.credReloader.Reload(src); err != nil {
+		return err
+	}
+	switch c := r.protocolClient.(type) {
+	case *protocol.Client:
+		c.SetToken(src.Token)
+		c.CloseIdleConnections()
+	case *protocol.GRPCClient:
+		c.SetToken(src.Token)
+	}
+	return nil
 }
 
 func releaseRunnerResources(releaseBrowserCDP, releaseObservers, cleanup func(), pool types.ResourcePool) error {
@@ -1111,7 +1186,17 @@ func runnerSeedBaseURL(cfg RunnerConfig) string {
 	return strings.TrimRight(cfg.ServerURL, "/")
 }
 
-func newRunnerProtocolClient(cfg RunnerConfig, o *runnerOptions) (runnersvc.ProtocolClient, func(), error) {
+// newRunnerProtocolClient builds the Runner Protocol client, wiring it to
+// reloader so a later Reload (SIGHUP for cmd/runner and sdk/runner, an
+// explicit Runner.Reload call for an embedded host) takes effect on the next
+// request or handshake without rebuilding the client or the connection.
+//
+// reloader is non-nil for the HTTP and gRPC transports whenever
+// buildRunnerServiceConfig constructed one for this RunnerConfig (see
+// NewRunner); it is unused (and credential hot reload does not apply) for
+// RunnerTransportInProc, which carries only a token and secures nothing over
+// the wire.
+func newRunnerProtocolClient(cfg RunnerConfig, o *runnerOptions, reloader *CredentialReloader) (runnersvc.ProtocolClient, func(), error) {
 	if cfg.Transport == RunnerTransportInProc {
 		if o.controlPlane == nil {
 			return nil, nil, fmt.Errorf("xflow: RunnerConfig.Transport is %q but no control plane was supplied: "+
@@ -1125,14 +1210,24 @@ func newRunnerProtocolClient(cfg RunnerConfig, o *runnerOptions) (runnersvc.Prot
 		// wire transports carry it (see control.InProcessRunnerClient).
 		return o.controlPlane.InProcessRunnerClient(cfg.Token), func() {}, nil
 	}
-	tlsCfg, err := buildRunnerTLSConfig(cfg)
-	if err != nil {
-		return nil, nil, err
-	}
 	switch cfg.Transport {
 	case RunnerTransportGRPC:
+		baseTLSCfg := &tls.Config{MinVersion: tls.VersionTLS12}
 		creds := insecure.NewCredentials()
-		if tlsCfg != nil {
+		if reloader.tlsConfigured() {
+			tlsCfg := baseTLSCfg.Clone()
+			tlsCfg.GetClientCertificate = reloader.GetClientCertificate
+			tlsCfg.RootCAs = reloader.rootCAs()
+			// grpc-go dials once and reuses the connection; a reloaded
+			// RootCAs pool therefore only takes effect on this transport's
+			// NEXT dial (a reconnect after a transport failure, or a fresh
+			// process), not on an already-established HTTP/2 connection —
+			// unlike the HTTP transport's DialTLSContext, grpc-go gives
+			// credentials.TransportCredentials no equivalent per-dial hook
+			// to re-read RootCAs from. GetClientCertificate is read fresh on
+			// every TLS handshake regardless, so a reloaded client leaf is
+			// presented on the next grpc-go-initiated reconnect even without
+			// a RootCAs change forcing one.
 			creds = credentials.NewTLS(tlsCfg)
 		}
 		// The runner-protocol message limits must match the server's
@@ -1144,20 +1239,16 @@ func newRunnerProtocolClient(cfg RunnerConfig, o *runnerOptions) (runnersvc.Prot
 			return nil, nil, fmt.Errorf("dial gRPC server %q: %w", cfg.GRPCTarget, err)
 		}
 		client := protocol.NewGRPCClient(conn)
+		client.SetToken(reloader.Token())
 		closeConn := func() { _ = conn.Close() }
-		if cfg.Token != "" {
-			return client.WithToken(cfg.Token), closeConn, nil
-		}
 		return client, closeConn, nil
 	default:
-		httpClient, err := newRunnerHTTPClient(cfg, 0)
+		httpClient, err := newReloadableRunnerHTTPClient(reloader, 0)
 		if err != nil {
 			return nil, nil, err
 		}
 		client := protocol.NewClient(cfg.ServerURL, httpClient)
-		if cfg.Token != "" {
-			return client.WithToken(cfg.Token), func() {}, nil
-		}
+		client.SetToken(reloader.Token())
 		return client, func() {}, nil
 	}
 }
@@ -1214,6 +1305,30 @@ func newRunnerHTTPClient(cfg RunnerConfig, timeout time.Duration) (*http.Client,
 		c.Transport = &http.Transport{TLSClientConfig: tlsCfg}
 	}
 	return c, nil
+}
+
+// newReloadableRunnerHTTPClient builds an *http.Client for the Runner
+// Protocol transport whose TLS material (client certificate and server CA
+// pool) is read live from reloader on every dial and handshake, so a
+// CredentialReloader.Reload call takes effect on this client's next request
+// with no rebuild. The bearer token is NOT read through reloader here — the
+// caller attaches it to the protocol.Client/GRPCClient via SetToken, which
+// has its own atomic swap (see newRunnerProtocolClient).
+//
+// Unlike newRunnerHTTPClient, this always installs a custom *http.Transport,
+// even for a plaintext configuration: GetClientCertificate and
+// DialTLSContext must be present from the start so a later Reload that
+// *adds* TLS material (plaintext -> TLS) takes effect without rebuilding the
+// client. A plaintext DialTLSContext's inner tls.Client dial is simply never
+// reached in practice, because http.Transport only calls DialTLSContext for
+// an "https" scheme; this transport is otherwise byte-identical to
+// http.DefaultTransport for a plain "http" origin.
+func newReloadableRunnerHTTPClient(reloader *CredentialReloader, timeout time.Duration) (*http.Client, error) {
+	baseTLSCfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: newReloadableHTTPTransport(reloader, baseTLSCfg),
+	}, nil
 }
 
 // NewRunnerHTTPClient builds an *http.Client honoring cfg's TLS material

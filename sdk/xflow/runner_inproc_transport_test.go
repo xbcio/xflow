@@ -42,6 +42,7 @@ func TestNewRunnerProtocolClientSelectsTheInProcessClient(t *testing.T) {
 	client, closeFn, err := newRunnerProtocolClient(
 		RunnerConfig{Transport: RunnerTransportInProc},
 		&runnerOptions{controlPlane: cp},
+		nil, // RunnerTransportInProc never consults the reloader
 	)
 	if err != nil {
 		t.Fatalf("newRunnerProtocolClient: %v", err)
@@ -66,8 +67,7 @@ func TestNewRunnerProtocolClientSelectsTheInProcessClient(t *testing.T) {
 // An in-process runner has no origin to dial, so ServerURL is not a
 // configuration error for it. This is the whole point of the transport: a host
 // embedding both halves must not be forced to invent a URL for itself.
-func TestNewRunnerInProcAcceptsAnEmptyServerURL(t *testing.T) {
-	cp := newInProcTestControlServer(t)
+func TestNewRunnerInProcAcceptsAnEmptyServerURL(t *testing.T) {	cp := newInProcTestControlServer(t)
 
 	r, err := NewRunner(RunnerConfig{
 		Transport:    RunnerTransportInProc,
@@ -108,9 +108,11 @@ func TestNewRunnerStillRequiresServerURLForTheWireTransports(t *testing.T) {
 func TestNewRunnerControlPlaneDoesNotDivertTheWireTransports(t *testing.T) {
 	cp := newInProcTestControlServer(t)
 
+	grpcCfg := RunnerConfig{Transport: RunnerTransportGRPC, GRPCTarget: "passthrough:///127.0.0.1:1"}
 	client, closeFn, err := newRunnerProtocolClient(
-		RunnerConfig{Transport: RunnerTransportGRPC, GRPCTarget: "passthrough:///127.0.0.1:1"},
+		grpcCfg,
 		&runnerOptions{controlPlane: cp},
+		mustTestCredentialReloader(t, grpcCfg),
 	)
 	if err != nil {
 		t.Fatalf("newRunnerProtocolClient(gRPC): %v", err)

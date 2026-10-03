@@ -54,7 +54,7 @@ func VerifyRunner(ctx context.Context, cfg RunnerConfig) (VerifyResult, error) {
 	// there is no control-plane handle to pass and RunnerTransportInProc is not
 	// a meaningful transport here — newRunnerProtocolClient rejects it with a
 	// clear error rather than probing a loopback the caller never configured.
-	client, cleanup, err := newRunnerProtocolClient(cfg, runnerOptionsFrom(nil))
+	client, cleanup, err := newVerifyRunnerProtocolClient(cfg)
 	if err != nil {
 		return VerifyResult{}, err
 	}
@@ -93,4 +93,27 @@ func VerifyRunner(ctx context.Context, cfg RunnerConfig) (VerifyResult, error) {
 		SessionID:       registered.SessionID,
 		SupplyKeyIssued: registered.SupplyKey != "",
 	}, nil
+}
+
+// newVerifyRunnerProtocolClient builds the one-shot CredentialReloader
+// newRunnerProtocolClient requires for the HTTP and gRPC transports, then
+// builds the client. Verify is a single connect-register-heartbeat preflight
+// with no reconnect loop and no Runner to call Reload on later, so the
+// reloader built here is used once and discarded — but it still fails
+// exactly like NewRunner's does on a bad --tls-client-cert, which keeps
+// VerifyRunner's "simulate what the real runner would do" guarantee (see the
+// doc comment above) intact for TLS errors too. RunnerTransportInProc needs
+// no reloader at all (newRunnerProtocolClient never consults it for that
+// transport), so this skips construction entirely rather than failing on
+// unrelated TLS fields a RunnerTransportInProc config happens to carry.
+func newVerifyRunnerProtocolClient(cfg RunnerConfig) (runnersvc.ProtocolClient, func(), error) {
+	var reloader *CredentialReloader
+	if cfg.Transport != RunnerTransportInProc {
+		var err error
+		reloader, err = newCredentialReloader(cfg)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	return newRunnerProtocolClient(cfg, runnerOptionsFrom(nil), reloader)
 }

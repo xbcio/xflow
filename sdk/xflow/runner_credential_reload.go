@@ -1,0 +1,222 @@
+package xflow
+
+import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"sync/atomic"
+)
+
+// runnerCredentialMaterial is one atomically-swapped snapshot of the
+// runner-side credentials used to reach the control plane: the bearer token
+// and, when mTLS is configured, the client leaf certificate plus the pool
+// used to verify the server's certificate. All of it is set (or left at zero
+// value together) by the same Reload call, mirroring apiserver.tlsMaterial —
+// a handshake or request in flight never observes a new certificate paired
+// with an old CA pool, or a new token paired with material it was never
+// validated against.
+type runnerCredentialMaterial struct {
+	token    string
+	cert     *tls.Certificate // nil: no client certificate configured
+	rootCAs  *x509.CertPool   // nil: no private CA configured (system roots)
+	tlsPlain bool             // true: no TLS material was configured at all
+}
+
+// CredentialReloader holds the runner's control-plane credentials — the
+// bearer token and the mTLS client certificate / server CA bundle — behind an
+// atomic pointer, and is the seam that lets them change without restarting
+// the process. It is built once by NewRunner (whenever RunnerConfig carried a
+// token or TLS material) and is what Runner.Reload re-reads.
+//
+// Every *http.Client the runner builds for the control plane (the Runner
+// Protocol client, the artifact-fetch client, the entry-seed/supply-fetch
+// client) shares one CredentialReloader instance, so one Reload call updates
+// every one of them: GetClientCertificate and the DialTLSContext hook on the
+// shared *http.Transport both read through the same atomic snapshot this
+// holds, and the gRPC transport's credentials.NewTLS config does too.
+//
+// Reload is fail-closed: on any read or parse error, the previous snapshot
+// keeps serving and the error is returned without ever logging a token value
+// or key material.
+type CredentialReloader struct {
+	current atomic.Pointer[runnerCredentialMaterial]
+}
+
+// CredentialReloaderSource supplies the live values a Reload call re-reads.
+// A host passes the same values it would pass to RunnerConfig; the standalone
+// command re-resolves them from the config file/env/flags first (see
+// sdk/runner's SIGHUP wiring), so a rotated secret becomes visible to this
+// source before Reload is called.
+type CredentialReloaderSource struct {
+	// Token is the runner's live bearer token. Empty means no auth.
+	Token string
+	// TLSServerCA, TLSClientCert, TLSClientKey mirror RunnerConfig's fields of
+	// the same name: all empty means plaintext, TLSClientCert and
+	// TLSClientKey must be supplied together, and TLSServerCA alone is TLS
+	// with no client certificate.
+	TLSServerCA   string
+	TLSClientCert string
+	TLSClientKey  string
+}
+
+// newCredentialReloader builds a reloader already holding cfg's credentials,
+// read and validated the same way buildRunnerTLSConfig validates them at
+// startup. An error here means NewRunner itself fails to construct — the same
+// failure mode a bad --tls-client-cert has always had.
+func newCredentialReloader(cfg RunnerConfig) (*CredentialReloader, error) {
+	r := &CredentialReloader{}
+	mat, err := loadRunnerCredentialMaterial(CredentialReloaderSource{
+		Token:         cfg.Token,
+		TLSServerCA:   cfg.TLSServerCA,
+		TLSClientCert: cfg.TLSClientCert,
+		TLSClientKey:  cfg.TLSClientKey,
+	})
+	if err != nil {
+		return nil, err
+	}
+	r.current.Store(mat)
+	return r, nil
+}
+
+// loadRunnerCredentialMaterial reads and fully validates src into a fresh
+// snapshot without mutating any reloader. Reload and newCredentialReloader
+// both go through this so "read" and "swap" are two separate steps: the swap
+// only happens once every read has already succeeded, which is what makes
+// Reload fail-closed.
+func loadRunnerCredentialMaterial(src CredentialReloaderSource) (*runnerCredentialMaterial, error) {
+	mat := &runnerCredentialMaterial{token: src.Token}
+	if src.TLSServerCA == "" && src.TLSClientCert == "" && src.TLSClientKey == "" {
+		mat.tlsPlain = true
+		return mat, nil
+	}
+	if src.TLSServerCA != "" {
+		caPEM, err := os.ReadFile(src.TLSServerCA)
+		if err != nil {
+			return nil, fmt.Errorf("read server CA: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("server CA %q contains no valid certs", src.TLSServerCA)
+		}
+		mat.rootCAs = pool
+	}
+	switch {
+	case src.TLSClientCert == "" && src.TLSClientKey == "":
+		// TLS only, no client auth.
+	case src.TLSClientCert != "" && src.TLSClientKey != "":
+		cert, err := tls.LoadX509KeyPair(src.TLSClientCert, src.TLSClientKey)
+		if err != nil {
+			return nil, fmt.Errorf("load client keypair: %w", err)
+		}
+		mat.cert = &cert
+	default:
+		return nil, fmt.Errorf("TLSClientCert and TLSClientKey must be provided together")
+	}
+	return mat, nil
+}
+
+// Reload re-reads src and swaps it in only if every piece of material parses.
+// On any error the previous snapshot keeps serving, unchanged, and the error
+// is returned so the caller can log it — never with a token value or key
+// material inside it, since this function's own errors only ever name a path
+// or a parse failure, never a secret.
+func (r *CredentialReloader) Reload(src CredentialReloaderSource) error {
+	mat, err := loadRunnerCredentialMaterial(src)
+	if err != nil {
+		return err
+	}
+	r.current.Store(mat)
+	return nil
+}
+
+// snapshot returns the current material. Never nil after successful
+// construction.
+func (r *CredentialReloader) snapshot() *runnerCredentialMaterial {
+	return r.current.Load()
+}
+
+// Token returns the live bearer token.
+func (r *CredentialReloader) Token() string {
+	return r.snapshot().token
+}
+
+// GetClientCertificate implements the tls.Config.GetClientCertificate hook:
+// every handshake reads through the holder, so a Reload's new leaf
+// certificate is presented on the very next connection. Returning a
+// zero-value *tls.Certificate (no error) is the documented way to present no
+// certificate, which is correct when no client cert was ever configured — the
+// dial still proceeds as server-authenticated-only TLS.
+func (r *CredentialReloader) GetClientCertificate(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+	mat := r.snapshot()
+	if mat.cert == nil {
+		return &tls.Certificate{}, nil
+	}
+	return mat.cert, nil
+}
+
+// rootCAs returns the live server-CA pool, or nil for the system pool.
+func (r *CredentialReloader) rootCAs() *x509.CertPool {
+	return r.snapshot().rootCAs
+}
+
+// tlsConfigured reports whether any TLS material is live right now, mirroring
+// buildRunnerTLSConfig's "all empty means plaintext" rule.
+func (r *CredentialReloader) tlsConfigured() bool {
+	return !r.snapshot().tlsPlain
+}
+
+// newReloadableHTTPTransport builds an *http.Transport whose TLS material is
+// read live from r on every dial and every handshake, so a Reload takes
+// effect on the next request with no client rebuild. baseTLSCfg carries the
+// static settings (MinVersion today); its Certificates/RootCAs are stripped —
+// GetClientCertificate and DialTLSContext below are what actually supply
+// them, each from the reloader's current snapshot.
+//
+// DialTLSContext (not a static RootCAs field) is what makes the CA pool
+// reloadable: crypto/tls has no client-side analogue of the server's
+// GetConfigForClient hook, so the only way to hand a dial the live pool is to
+// build a fresh *tls.Config per connection attempt — the same shape
+// apiserver.TLSReloader.GetConfigForClient uses on the server side, just
+// invoked from the dial path instead of from a handshake callback.
+func newReloadableHTTPTransport(r *CredentialReloader, baseTLSCfg *tls.Config) *http.Transport {
+	base := baseTLSCfg.Clone()
+	base.Certificates = nil
+	base.RootCAs = nil
+	base.GetClientCertificate = r.GetClientCertificate
+	dialer := &net.Dialer{}
+	return &http.Transport{
+		TLSClientConfig: base,
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			cfg := base.Clone()
+			cfg.RootCAs = r.rootCAs()
+			// http.Transport's own TLS dial path derives ServerName from the
+			// dial address when the config leaves it empty; DialTLSContext
+			// bypasses that derivation entirely (per net/http's docs: "it is
+			// the caller's responsibility to set up ServerName"), so this
+			// must do it explicitly or every handshake fails verification
+			// with "either ServerName or InsecureSkipVerify must be
+			// specified" regardless of how correct the RootCAs pool is.
+			if cfg.ServerName == "" {
+				if host, _, splitErr := net.SplitHostPort(addr); splitErr == nil {
+					cfg.ServerName = host
+				} else {
+					cfg.ServerName = addr
+				}
+			}
+			rawConn, err := dialer.DialContext(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			tlsConn := tls.Client(rawConn, cfg)
+			if err := tlsConn.HandshakeContext(ctx); err != nil {
+				_ = rawConn.Close()
+				return nil, err
+			}
+			return tlsConn, nil
+		},
+	}
+}
