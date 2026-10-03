@@ -57,7 +57,7 @@ func (s *httpStream) run() {
 	}
 
 	// Register with the control plane.
-	s.authToken = s.client.token
+	s.authToken = s.client.currentToken()
 	registerResp, err := s.client.Register(s.ctx, RegisterRunnerRequest{
 		RunnerID:        hello.RunnerID,
 		Concurrency:     hello.Concurrency,

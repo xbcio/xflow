@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"sync/atomic"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -19,8 +20,12 @@ import (
 // set as the HTTP Client (and the runner.ProtocolClient interface), so a runner
 // switches transports purely by injecting a different client.
 type GRPCClient struct {
-	grpc  runnerpb.RunnerProtocolClient
-	token string
+	grpc runnerpb.RunnerProtocolClient
+	// token mirrors Client.token: an atomic pointer so SetToken can rotate the
+	// bearer credential on a *GRPCClient already wired into a running
+	// runnersvc.Runner. See Client.token's doc for the WithToken copy-safety
+	// argument, which applies identically here.
+	token atomic.Pointer[string]
 }
 
 // NewGRPCClient wraps an established gRPC connection. The caller owns the
@@ -30,21 +35,44 @@ func NewGRPCClient(conn grpc.ClientConnInterface) *GRPCClient {
 }
 
 // WithToken returns a client that attaches Authorization: Bearer <token> to
-// every outgoing RPC via gRPC metadata. Mirrors HTTP Client.WithToken.
+// every outgoing RPC via gRPC metadata. Mirrors HTTP Client.WithToken,
+// including constructing a fresh struct rather than struct-copying c, for the
+// same no-copy-lock reason documented there.
 func (c *GRPCClient) WithToken(token string) *GRPCClient {
-	cp := *c
-	cp.token = token
-	return &cp
+	cp := &GRPCClient{grpc: c.grpc}
+	cp.setToken(token)
+	return cp
+}
+
+// SetToken swaps this client's bearer token in place; see Client.SetToken.
+func (c *GRPCClient) SetToken(token string) {
+	c.setToken(token)
+}
+
+func (c *GRPCClient) setToken(token string) {
+	if token == "" {
+		c.token.Store(nil)
+		return
+	}
+	c.token.Store(&token)
+}
+
+func (c *GRPCClient) currentToken() string {
+	if p := c.token.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 // withAuth appends authorization metadata to the outgoing context. Uses
 // AppendToOutgoingContext so callers who already set metadata (test doubles,
 // interceptors) do not lose their values.
 func (c *GRPCClient) withAuth(ctx context.Context) context.Context {
-	if c.token == "" {
+	token := c.currentToken()
+	if token == "" {
 		return ctx
 	}
-	return metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+c.token)
+	return metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token)
 }
 
 func (c *GRPCClient) Register(ctx context.Context, req RegisterRunnerRequest) (RegisterRunnerResponse, error) {

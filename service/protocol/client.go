@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 )
 
 // MaxRunnerResponseBodyBytes caps a runner-protocol HTTP response body the
@@ -41,7 +42,12 @@ var ErrRunnerRequestTooLarge = errors.New("runner protocol request body exceeds 
 type Client struct {
 	baseURL string
 	http    *http.Client
-	token   string
+	// token is held behind an atomic pointer, not a plain string, so SetToken
+	// can swap it on a *Client already handed to a long-lived caller (the
+	// runner-side credential hot reloader does exactly this) without a data
+	// race against an in-flight request reading it from post/ReportMetrics.
+	// A nil pointer means "no token", matching the old zero-value string.
+	token atomic.Pointer[string]
 }
 
 func NewClient(baseURL string, httpClient *http.Client) *Client {
@@ -57,11 +63,53 @@ func NewClient(baseURL string, httpClient *http.Client) *Client {
 // WithToken returns a client that adds Authorization: Bearer <token> to every
 // request. Empty token disables the header (same behavior as calling NewClient
 // alone). Kept as a copy-returning setter so callers can build per-runner
-// clients from a shared base without mutating shared state.
+// clients from a shared base without mutating shared state: a fresh Client is
+// constructed rather than struct-copying c (which would copy the
+// atomic.Pointer's no-copy lock, flagged by go vet), so the returned client's
+// SetToken calls never affect c's token or any other copy's.
 func (c *Client) WithToken(token string) *Client {
-	cp := *c
-	cp.token = token
-	return &cp
+	cp := &Client{baseURL: c.baseURL, http: c.http}
+	cp.setToken(token)
+	return cp
+}
+
+// SetToken swaps this client's bearer token in place, taking effect on the
+// next request this *Client sends; a request already past the header-write
+// step keeps using whatever token it already read. Pass "" to clear it (no
+// Authorization header). This is the seam the runner-side credential
+// reloader uses: unlike WithToken, it mutates the receiver instead of
+// returning a copy, so a *Client already wired into a long-lived runnersvc.Runner
+// picks up a rotated token without rebuilding the runner.
+func (c *Client) SetToken(token string) {
+	c.setToken(token)
+}
+
+func (c *Client) setToken(token string) {
+	if token == "" {
+		c.token.Store(nil)
+		return
+	}
+	c.token.Store(&token)
+}
+
+// currentToken reads the live token, or "" when none is set.
+func (c *Client) currentToken() string {
+	if p := c.token.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
+// CloseIdleConnections closes this client's idle keep-alive connections,
+// delegating to the underlying *http.Client. The runner-side credential hot
+// reloader calls this right after a successful Reload so a connection
+// already established under a now-superseded mTLS client certificate is not
+// reused — the next request redials and presents the new one. A no-op when
+// the underlying client's Transport does not support it (anything other
+// than *http.Transport, which http.Client.CloseIdleConnections already
+// handles by doing nothing).
+func (c *Client) CloseIdleConnections() {
+	c.http.CloseIdleConnections()
 }
 
 func (c *Client) Register(ctx context.Context, req RegisterRunnerRequest) (RegisterRunnerResponse, error) {
@@ -119,8 +167,8 @@ func (c *Client) ReportMetrics(ctx context.Context, runnerID, sessionID string, 
 	req.Header.Set("Content-Encoding", "gzip")
 	req.Header.Set(RunnerIDHeader, runnerID)
 	req.Header.Set(SessionIDHeader, sessionID)
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
+	if token := c.currentToken(); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
 	resp, err := c.http.Do(req)
@@ -170,8 +218,8 @@ func (c *Client) post(ctx context.Context, path string, body any, out any) error
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
+	if token := c.currentToken(); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
 	resp, err := c.http.Do(req)
