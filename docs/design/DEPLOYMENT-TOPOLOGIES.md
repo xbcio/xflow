@@ -436,7 +436,7 @@ outbox 语义，也不构成 release gate 已满足的证据。Loop 也仍是实
 后者只会反复拒收而不会让该 lease 失败。因此**升级时必须先升级全部 server，
 再升级 runner**；回滚顺序相反（先回滚 runner）。
 
-### 4.6 传输差异：gRPC 缺 ActivationAck
+### 4.6 ActivationAck 现已同时覆盖 HTTP 与 gRPC
 
 `HeartbeatResponse` 的控制载荷在**两种传输下都已完整**：
 `runnerpb.HeartbeatResponse` 有 `server_time`、`supply_hints`、
@@ -444,20 +444,24 @@ outbox 语义，也不构成 release gate 已满足的证据。Loop 也仍是实
 （`service/protocol/runnerpb/runner.proto:78-86`），
 `grpc_conv.go:159-193` 两个方向都往返（activation 与 lease 同样走 JSON bytes，
 避免在 proto 里建模 `map[string]any` params），`control/grpc_server.go:110`
-回填全部字段。**activation 下发与 supply hint 在 gRPC 下不再是缺口**——
+回填全部字段。**activation 下发与 supply hint 在 gRPC 下不是缺口**——
 早期版本的 proto 确实只有 `server_time`，本节此前的描述已过期。
 
-仍存在的传输差异只有一处：
+曾经存在的唯一传输差异——gRPC 没有 `ActivationAck` 对应的 RPC——已经补齐：
+`runner.proto` 新增 `AckActivation(ActivationAckRequest) returns
+(ActivationAckResponse)`，字段与 HTTP 的 `protocol.ActivationAck` DTO 逐一对应
+（`AuthToken` 除外，它和其余所有 RPC 一样走 gRPC metadata，不进消息体）。
+`GRPCServer.AckActivation`（`control/grpc_server.go`）与 HTTP 的
+`Server.HandleActivationAck`（`control/server.go`）调用同一个
+`Core.activationAck`，因此 authz、namespace scoping、fencing/generation 检查、
+幂等性全部复用而非重复实现。`protocol.GRPCClient` 实现了
+`activationAckClient`，所以 gRPC-only 部署下的 runner 现在也能把 ack 发出去，
+`MarkActivationFailed` / `Store.Fence` 会被正常触发——gRPC-only 部署下
+**不再需要重启 runner 才能清掉一个被 gate decline 的 activation**。详见
+[SUPPLY-NODE.md §9(a)](./SUPPLY-NODE.md#9-known-gaps-and-costs)。
 
-- **ActivationAck**：gRPC proto 没有 `ActivationAck` 对应的 RPC 定义
-  （`runner.proto` 只有 `Connect`/`Register`/`Heartbeat`/`PollTask`/
-  `ReportResult`），因此 gRPC-only 部署下 runner 的 ack 无处可发、静默丢弃、
-  `MarkActivationFailed` / `Store.Fence` 永不被触发。这意味着 gRPC-only 部署
-  **仍退化为「只能重启 runner 恢复一个被 gate decline 的 activation」**——
-  这是**自愈能力的完全缺失**，不是延迟退化。HTTP 传输下此闭环已完整实现，详见
-  [SUPPLY-NODE.md §9(a)](./SUPPLY-NODE.md#9-known-gaps-and-costs)。
-
-HTTP 是首选传输，gRPC 是实验性的；跨网络域走 Relay Gateway 而非 gRPC。
+HTTP 仍是首选传输，gRPC streaming/credit-flow 仍是实验性的；跨网络域走 Relay
+Gateway 而非 gRPC。
 
 ### 4.7 跨网络域的指标采集：runner 上报 + server 代理
 
@@ -629,7 +633,7 @@ Relay Gateway 用于 runner 无法直连 server、不能互相直连或需要本
 
 | 能力 | 口径 | 仓库证据 |
 |---|---|---|
-| gRPC streaming / credit-flow control | **实验性传输优化**，非生产可靠性承诺；HTTP long-poll 是生产通道。gRPC 还缺 ActivationAck，gated activation 只能靠重启 runner 恢复 | §4.5/§4.6；`service/runner/doc.go:6`、`service/protocol/doc.go:12`、`service/control/doc.go:18`（"gRPC (experimental, incomplete)"）；`test/integration/server_runner_e2e_test.go:178,202-205`（credit-flow 明示为 experimental，不在 release-gate 断言内） |
+| gRPC streaming / credit-flow control | **实验性传输优化**，非生产可靠性承诺；HTTP long-poll 是生产通道。gRPC 的 ActivationAck 已补齐（见 §4.6），但 lease 续期（`leaseRenewClient`）与指标上报（`MetricsReportClient`）仍只有 HTTP/in-process 传输实现 | §4.5/§4.6；`service/runner/doc.go:6`、`service/protocol/doc.go:12`、`service/control/doc.go:18`（"gRPC (experimental, incomplete)"）；`test/integration/server_runner_e2e_test.go:178,202-205`（credit-flow 明示为 experimental，不在 release-gate 断言内） |
 | Loop | **实验性**扩展路径，未纳入静态 DAG completion 与 server/runner production-ready 保证 | §7 本表 Loop 行；README「Supported Topologies and Guarantees」的 Experimental capabilities |
 | Node Group co-location | **实验/受限**，经 `WorkflowOptions.experimental_node_group` 显式开启 | [NODE-GROUP-COLOCATION.md](./NODE-GROUP-COLOCATION.md) 头部 Status；`types/workflow.go:53-59`；`api/openapi/xflow-v1.yaml:2234` |
 | Kafka aggregate `on_overflow` | 默认 `discard` 是**永久丢弃**；三个取值 `discard` / `block` / `dead_letter`，未识别取值使 activation 失败而非回退 | `node/trigger/kafka/aggregate.go:116-122,1326-1335`；`observability/metrics/metrics.go:446-447,454`（`xflow_trigger_messages_discarded_total`、`xflow_trigger_messages_dead_lettered_total`、`xflow_trigger_consumption_blocked`） |
