@@ -366,10 +366,21 @@ func TestCyclicReliabilityRealRedis(t *testing.T) {
 			}
 			<-ticker.C
 		}
-		// The dispatcher's flush acks the entry strictly after the Enqueue this
-		// loop already observed, so by now the outbox must be empty.
-		if entries, err := env2.state.ListOutbox(ctx, id, time.Now().Add(time.Second), 16); err != nil || len(entries) != 0 {
-			t.Fatalf("outbox after redelivery entries=%+v err=%v, want empty", entries, err)
+		// The dispatcher acks the entry strictly after the Enqueue this loop
+		// observed, so the ack may still be in flight here: poll for it.
+		ackDeadline := time.Now().Add(10 * time.Second)
+		for {
+			entries, err := env2.state.ListOutbox(ctx, id, time.Now().Add(time.Second), 16)
+			if err != nil {
+				t.Fatalf("post-redelivery ListOutbox() error = %v", err)
+			}
+			if len(entries) == 0 {
+				break
+			}
+			if time.Now().After(ackDeadline) {
+				t.Fatalf("outbox after redelivery entries=%+v, want empty", entries)
+			}
+			time.Sleep(20 * time.Millisecond)
 		}
 	})
 
