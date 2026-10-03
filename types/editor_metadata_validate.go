@@ -5,15 +5,6 @@ import (
 	"sort"
 )
 
-// nodeMetadataKey returns the stable editor identity for a node: NodeDef.ID
-// when present, else NodeDef.Name (ADR §2.4).
-func nodeMetadataKey(n NodeDef) string {
-	if n.ID != "" {
-		return n.ID
-	}
-	return n.Name
-}
-
 // ValidateEditorMetadata checks md's node-keyed maps (Positions, UI, Notes)
 // against def's nodes and returns a sanitized copy plus any diagnostics.
 //
