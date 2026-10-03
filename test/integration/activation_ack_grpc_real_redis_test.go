@@ -256,10 +256,14 @@ func TestGRPCActivationAckClearsGatedActivationRealRedis(t *testing.T) {
 	}
 
 	// --- Round 2: reconcile redispatches the now-unassigned activation at a
-	// higher generation. No runner restart was involved — the self-heal loop
-	// closes purely through the gRPC ack + reconcile cycle. ---
-	if err := reconciler.Reconcile(ctx, time.Now()); err != nil {
-		t.Fatalf("Reconcile (round 2): %v", err)
+	// higher generation. Passing a synthetic future "now" (mirroring
+	// TestSupplyGateRetriesWithoutRestart) advances past the reconciler's
+	// retry backoff (DefaultActivationRetryBackoffMin = 10s) without the test
+	// sleeping in real wall-clock time. No runner restart was involved — the
+	// self-heal loop closes purely through the gRPC ack + reconcile cycle.
+	futureNow := time.Now().Add(15 * time.Second)
+	if err := reconciler.Reconcile(ctx, futureNow); err != nil {
+		t.Fatalf("Reconcile (round 2, past backoff): %v", err)
 	}
 
 	select {
