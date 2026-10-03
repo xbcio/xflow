@@ -67,7 +67,8 @@ func TestNewRunnerProtocolClientSelectsTheInProcessClient(t *testing.T) {
 // An in-process runner has no origin to dial, so ServerURL is not a
 // configuration error for it. This is the whole point of the transport: a host
 // embedding both halves must not be forced to invent a URL for itself.
-func TestNewRunnerInProcAcceptsAnEmptyServerURL(t *testing.T) {	cp := newInProcTestControlServer(t)
+func TestNewRunnerInProcAcceptsAnEmptyServerURL(t *testing.T) {
+	cp := newInProcTestControlServer(t)
 
 	r, err := NewRunner(RunnerConfig{
 		Transport:    RunnerTransportInProc,
