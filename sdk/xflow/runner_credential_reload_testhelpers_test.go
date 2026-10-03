@@ -1,14 +1,19 @@
 package xflow
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 // mustTestCredentialReloader builds a *CredentialReloader from cfg's
@@ -23,18 +28,6 @@ func mustTestCredentialReloader(t *testing.T, cfg RunnerConfig) *CredentialReloa
 		t.Fatalf("newCredentialReloader: %v", err)
 	}
 	return r
-}
-
-// writeTestCAFile writes cert's PEM encoding to a 0600 file in a fresh temp
-// dir and returns its path, matching the shape --tls-server-ca and the mTLS
-// client-CA tests already expect.
-func writeTestCAFile(t *testing.T, cert *x509.Certificate) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "ca.pem")
-	if err := os.WriteFile(path, encodeCertPEM(t, cert), 0o600); err != nil {
-		t.Fatalf("write CA bundle: %v", err)
-	}
-	return path
 }
 
 // clientCNRecorder captures, per request, the CommonName of whichever client
@@ -91,4 +84,49 @@ func newMTLSTestServer(t *testing.T, caCert *x509.Certificate) (*httptest.Server
 	}
 	srv.StartTLS()
 	return srv, rec
+}
+
+// newServerCATestServer starts an httptest TLS server whose leaf certificate
+// is signed by caCert/caKey (instead of httptest's own self-signed leaf),
+// and requires no client certificate. It exists for the server-CA reload
+// test: a client's RootCAs pool can only be meaningfully exercised against a
+// server whose leaf is actually issued by the CA under test, which
+// httptest.NewTLSServer's own self-signed certificate is not.
+func newServerCATestServer(t *testing.T, caCert *x509.Certificate, caKey *ecdsa.PrivateKey) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate server leaf key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: "127.0.0.1"},
+		DNSNames:     []string{"127.0.0.1"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &leafKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("create server leaf certificate: %v", err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("parse server leaf certificate: %v", err)
+	}
+	srv.TLS = &tls.Config{
+		Certificates: []tls.Certificate{{
+			Certificate: [][]byte{der},
+			PrivateKey:  leafKey,
+			Leaf:        leaf,
+		}},
+	}
+	srv.StartTLS()
+	return srv
 }
