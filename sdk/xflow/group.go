@@ -11,6 +11,7 @@ type groupEntry struct {
 	members            []string
 	runnerSelector     *types.RunnerSelector
 	onError            types.OnError
+	errorOutputs       []types.Connection
 	retry              *types.RetrySettings
 	timeout            time.Duration
 	mode               string
@@ -39,7 +40,18 @@ func (g *GroupRef) ActivationReplicas(replicas uint32) *GroupRef {
 	g.entry.activationReplicas = replicas
 	return g
 }
-func (g *GroupRef) OnError(oe types.OnError) *GroupRef    { g.entry.onError = oe; return g }
+func (g *GroupRef) OnError(oe types.OnError) *GroupRef { g.entry.onError = oe; return g }
+
+// ErrorOutputs declares the downstream targets for the group's synthesized
+// "error" output port. Only meaningful when OnError is OnErrorOutput;
+// graph.Compile rejects a non-empty ErrorOutputs under any other policy, and
+// rejects OnErrorOutput with no targets (see NODE-GROUP-COLOCATION.md §12.2).
+// build() stays permissive the same way OnError's type-legal-but-unchecked
+// values do — validation runs at graph.Compile, not here.
+func (g *GroupRef) ErrorOutputs(targets ...types.Connection) *GroupRef {
+	g.entry.errorOutputs = append([]types.Connection(nil), targets...)
+	return g
+}
 func (g *GroupRef) Retry(r types.RetrySettings) *GroupRef { g.entry.retry = &r; return g }
 func (g *GroupRef) Timeout(d time.Duration) *GroupRef     { g.entry.timeout = d; return g }
 func (g *GroupRef) Transient() *GroupRef {
@@ -60,6 +72,7 @@ func (w *WorkflowBuilder) assembleGroups(def *types.WorkflowDef) {
 			Members:            append([]string(nil), e.members...),
 			RunnerSelector:     cloneRunnerSelector(e.runnerSelector),
 			OnError:            string(e.onError),
+			ErrorOutputs:       append([]types.Connection(nil), e.errorOutputs...),
 			Retry:              e.retry,
 			Timeout:            e.timeout,
 			Mode:               e.mode,
