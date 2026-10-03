@@ -21,7 +21,6 @@ import (
 	grpcstatus "google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/dynamicpb"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -39,6 +38,12 @@ type GRPCNode struct {
 // GRPC creates a gRPC unary call node.
 //
 //	node.GRPC("inventory.InventoryService", "GetStock", "localhost:50051")
+//
+// The message contract is google.protobuf.Struct in both directions: the
+// request object is sent as a Struct, and the service must answer with one.
+// The response's fields become the node's output data (JSON types: numbers
+// arrive as float64). Arbitrary protobuf message types are not supported --
+// the node has no descriptor source to build them from.
 func GRPC(service, method, host string) *GRPCNode {
 	return &GRPCNode{Service: service, Method: method, Host: host}
 }
@@ -71,7 +76,7 @@ func (n *GRPCNode) Descriptor() types.Descriptor {
 				Group: "request"},
 			{Name: "host", DisplayName: "Host", Type: types.ParamString, Required: true, Description: "gRPC server host:port",
 				Group: "request", Constraints: nodeinternal.Format(nodeinternal.FormatHostPort)},
-			{Name: "request", DisplayName: "Request", Type: types.ParamObject, Required: false, Description: "Request message payload",
+			{Name: "request", DisplayName: "Request", Type: types.ParamObject, Required: false, Description: "Request message payload (sent as google.protobuf.Struct)",
 				Group: "request"},
 			{Name: "metadata", DisplayName: "Metadata", Type: types.ParamObject, Required: false, Description: "gRPC metadata (headers)",
 				Group: "request"},
@@ -176,7 +181,13 @@ func (n *GRPCNode) Execute(ctx context.Context, input *types.Input) (*types.Outp
 		return nil, types.NewPermanentError("grpc.build_request", fmt.Sprintf("xflow.grpc: build request message: %v", err))
 	}
 
-	respMsg := &dynamicpb.Message{}
+	// The response is decoded on arrival, so its message descriptor must already
+	// exist: a zero-value dynamicpb.Message carries none, and the decode
+	// dereferenced it the moment the first successful response arrived -- a panic
+	// inside conn.Invoke, which the runner's execution goroutine cannot recover
+	// from. The node's contract is Struct in, Struct out (see GRPC's doc
+	// comment), so the same well-known type is the decode target.
+	respMsg := &structpb.Struct{}
 	err = conn.Invoke(dialCtx, fullMethod, reqMsg, respMsg)
 	if err != nil {
 		if st, ok := grpcstatus.FromError(err); ok {
@@ -192,16 +203,10 @@ func (n *GRPCNode) Execute(ctx context.Context, input *types.Input) (*types.Outp
 		return nil, types.NewTransientError("grpc.invoke", err.Error())
 	}
 
-	respBytes, err := protojson.Marshal(proto.Message(respMsg))
-	if err != nil {
-		return nil, types.NewTransientError("grpc.marshal_response", fmt.Sprintf("marshal response: %v", err))
-	}
-
-	var respData map[string]any
-	if err := json.Unmarshal(respBytes, &respData); err != nil {
-		return &types.Output{Data: map[string]any{"raw": string(respBytes)}}, nil
-	}
-	return &types.Output{Data: respData}, nil
+	// AsMap is the Struct's JSON projection -- string keys, JSON types, numbers
+	// as float64 -- which is exactly what the marshal/unmarshal round trip this
+	// replaces produced.
+	return &types.Output{Data: respMsg.AsMap()}, nil
 }
 
 func structFromJSON(data []byte) (proto.Message, error) {

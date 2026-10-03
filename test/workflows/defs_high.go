@@ -46,19 +46,15 @@ const HighReleaseSignal = "hold/release"
 //	     │                                          └ timeout → timed_out ┤
 //	     └ rejected → reject ────────────────────────────────────────────┴→ summarize → done
 //
-// The gRPC node is wired through its error port because its success path is
-// currently broken: node/internal/action/grpc.go unmarshals the response into an
-// empty *dynamicpb.Message, which carries no message descriptor, and protobuf
-// panics on the nil descriptor before the node can return anything. A panic is
-// not something a workflow can route around, so the tier drives the path that
-// works — a NotFound status is classified permanent and reaches the error port.
-//
-// NOTHING ELSE COVERS THE SUCCESS PATH. This comment used to say it was
-// "covered separately as a known defect"; there is no such test — the gRPC node
-// has unit tests for its factory and its validation errors, an integration test
-// for error classification, and no test that ever gets a response back. So the
-// defect is open and unpinned: whoever fixes grpc.go should add the success-path
-// test that this tier cannot host.
+// The gRPC node is wired through its error port because that is the path this
+// tier exists to exercise (risk_gap recovery): a NotFound status is classified
+// permanent and reaches the error port. Until 2026-10-04 the tier had no choice
+// — the node had no working success path at all (it decoded responses into an
+// empty *dynamicpb.Message whose nil descriptor panicked on the first real
+// response), so the error port was the only path that worked. The success path
+// now works (google.protobuf.Struct in and out) and is pinned by
+// node/internal/action's grpc_success_test.go, the test this tier still cannot
+// host because its endpoint answers NotFound.
 //
 // supply.external and supply.static are declaration-only node types: neither
 // registers a handler, and the engine skips both at execution. Their whole
