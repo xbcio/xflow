@@ -145,9 +145,10 @@ are listed as open in
 **Experimental capabilities**
 
 - **gRPC Runner Protocol streaming and credit-flow control** are experimental
-  transport optimizations. HTTP long-poll is the production channel. gRPC is
-  also missing the activation-ack path, so a gated activation under a
-  gRPC-only deployment can only be cleared by restarting the runner.
+  transport optimizations. HTTP long-poll is the production channel. gRPC now
+  carries the activation-ack path too (`AckActivation` RPC, mirroring the HTTP
+  endpoint's authz, namespace scoping, fencing, and idempotency), but lease
+  renewal and metrics reporting are still HTTP/in-process only.
 - **Loop** expansion paths are experimental and are excluded from
   static-DAG completion guarantees.
 - **Node Group co-location** is implemented but experimental/limited, and is
