@@ -114,6 +114,19 @@ func (c *GRPCClient) ReportResult(ctx context.Context, req ReportResultRequest) 
 	return ReportResultResponse{Accepted: resp.GetAccepted(), Error: resp.GetError()}, nil
 }
 
+// ActivationAck reports the outcome of an activate directive back to the
+// server over gRPC. Implements activationAckClient (service/runner), the same
+// interface the HTTP Client satisfies, so Runner.New wires an activationAcker
+// over a gRPC-transport runner exactly as it does over HTTP.
+func (c *GRPCClient) ActivationAck(ctx context.Context, ack ActivationAck) error {
+	in := ActivationAckRequestToProto(ack)
+	_, err := c.grpc.AckActivation(c.withAuth(ctx), in)
+	if err != nil {
+		return requestSizeError("AckActivation", in, err)
+	}
+	return nil
+}
+
 // grpcMessageSizePattern matches the "(N vs. M)" message-size statuses grpc-go
 // raises with codes.ResourceExhausted, capturing the offending message size N:
 // the client's own send limit ("trying to send message larger than max"), and
