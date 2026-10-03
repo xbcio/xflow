@@ -39,6 +39,10 @@ type storedWorkflowRecord struct {
 	RegistryRevision uint64             `json:"registry_revision"`
 	AuditFingerprint string             `json:"audit_fingerprint,omitempty"`
 	Definition       *types.WorkflowDef `json:"definition,omitempty"`
+	// EditorMetadata mirrors backend.WorkflowRecord.EditorMetadata. Its
+	// absence (a legacy record written before this field existed) decodes to
+	// nil without error -- no migration pass is needed.
+	EditorMetadata *types.WorkflowEditorMetadata `json:"editor_metadata,omitempty"`
 	// Graph is decoded as raw JSON here (not *graph.Graph) so a Graph decode
 	// failure does not abort decoding the whole record. unmarshalWorkflowRecord
 	// can then fall back to recompiling Definition for legacy snapshots.
@@ -1716,6 +1720,7 @@ func marshalWorkflowRecordPayload(rec backend.WorkflowRecord) ([]byte, error) {
 		RegistryRevision: rec.RegistryRevision,
 		AuditFingerprint: rec.AuditFingerprint,
 		Definition:       rec.Definition,
+		EditorMetadata:   rec.EditorMetadata,
 		Graph:            rawGraph,
 	}
 	payload, err := json.Marshal(stored)
@@ -1792,6 +1797,7 @@ func unmarshalWorkflowRecord(raw []byte) (backend.WorkflowRecord, error) {
 		RegistryRevision: stored.RegistryRevision,
 		AuditFingerprint: stored.AuditFingerprint,
 		Definition:       stored.Definition,
+		EditorMetadata:   stored.EditorMetadata,
 	}
 	if len(stored.Graph) > 0 {
 		g := &graph.Graph{}

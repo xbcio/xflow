@@ -93,6 +93,11 @@ type NodeOutputPolicy struct {
 }
 
 // NodeDef describes a single node in the workflow graph.
+//
+// NodeDef carries no editor-only fields. Visual position, UI theme, and
+// author notes live exclusively in WorkflowEditorMetadata (ADR-D4 §2.2),
+// keyed by ID (or Name when ID is empty). ID itself stays on NodeDef: it is
+// the metadata key, not metadata.
 type NodeDef struct {
 	ID             string            `json:"id,omitempty"`
 	Name           string            `json:"name,omitempty"`
@@ -100,16 +105,13 @@ type NodeDef struct {
 	Kind           NodeKind          `json:"kind,omitempty"`
 	Version        int               `json:"version,omitempty"`
 	Template       string            `json:"template,omitempty"`
-	Position       *Position         `json:"position,omitempty"`
 	Disabled       bool              `json:"disabled,omitempty"`
 	OnError        string            `json:"on_error,omitempty"`
 	RunnerSelector *RunnerSelector   `json:"runner_selector,omitempty"`
-	Notes          string            `json:"notes,omitempty"`
 	Inputs         []PortDecl        `json:"inputs,omitempty"`
 	OutputSchema   map[string]any    `json:"output_schema,omitempty"`
 	Output         *NodeOutputPolicy `json:"output,omitempty"`
 	Parameters     map[string]any    `json:"parameters,omitempty"`
-	UI             map[string]any    `json:"ui,omitempty"`
 	// Retry overrides WorkflowSettings.Retry for this node. Nil means inherit
 	// the workflow default; the workflow default of nil means no retries.
 	Retry *RetrySettings `json:"retry,omitempty"`

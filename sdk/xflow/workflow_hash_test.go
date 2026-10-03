@@ -23,16 +23,12 @@ func baseRuntimeDef() *types.WorkflowDef {
 				Kind:       types.NodeKindAction,
 				Version:    1,
 				Parameters: map[string]any{"foo": "bar"},
-				Position:   &types.Position{X: 10, Y: 20},
-				UI:         map[string]any{"color": "red"},
-				Notes:      "note-a",
 			},
 			{
-				ID:       "n2",
-				Name:     "review",
-				Type:     "xflow.function",
-				Kind:     types.NodeKindAction,
-				Position: &types.Position{X: 100, Y: 200},
+				ID:   "n2",
+				Name: "review",
+				Type: "xflow.function",
+				Kind: types.NodeKindAction,
 			},
 		},
 		Connections: types.Connections{
@@ -64,33 +60,35 @@ func TestRuntimeHashExcludesEditorMetadata(t *testing.T) {
 	base := baseRuntimeDef()
 	baseHash := mustRuntimeHash(t, base)
 
-	moved := baseRuntimeDef()
-	moved.Nodes[0].Position = &types.Position{X: 999, Y: 999}
-	if got := mustRuntimeHash(t, moved); got != baseHash {
-		t.Fatalf("runtime hash changed after moving Position: %s != %s", got, baseHash)
-	}
-
-	styled := baseRuntimeDef()
-	styled.Nodes[0].UI = map[string]any{"color": "blue", "size": 42}
-	if got := mustRuntimeHash(t, styled); got != baseHash {
-		t.Fatalf("runtime hash changed after changing UI: %s != %s", got, baseHash)
-	}
-
-	noted := baseRuntimeDef()
-	noted.Nodes[0].Notes = "completely different note"
-	if got := mustRuntimeHash(t, noted); got != baseHash {
-		t.Fatalf("runtime hash changed after changing Notes: %s != %s", got, baseHash)
+	// NodeDef carries no Position/UI/Notes fields at all post-D6; only
+	// NodeDef.ID can vary independently of runtime semantics, and that
+	// exclusion is covered by TestRuntimeHashExcludesNodeID. This test now
+	// only needs to confirm two structurally distinct-but-runtime-equivalent
+	// definitions (same nodes/connections/pin_data, different IDs) hash the
+	// same -- which TestRuntimeHashExcludesNodeID already proves directly, so
+	// this leaves one more confirmation: changing a node's ID string value
+	// still produces the baseline hash.
+	renamedIDs := baseRuntimeDef()
+	renamedIDs.Nodes[0].ID = "n1-moved"
+	if got := mustRuntimeHash(t, renamedIDs); got != baseHash {
+		t.Fatalf("runtime hash changed after changing NodeDef.ID: %s != %s", got, baseHash)
 	}
 }
 
-func TestLegacyHashIncludesEditorMetadata(t *testing.T) {
+func TestLegacyHashIncludesNodeID(t *testing.T) {
+	// NodeDef carries no Position/UI/Notes fields post-D6 -- that coverage now
+	// lives in backend/workflowhash's TestAuditDiffersOnMetadataOnlyChange,
+	// which exercises workflowhash.Audit(def, metadata) directly. This SDK
+	// path only ever fingerprints with a nil WorkflowEditorMetadata
+	// (legacyDefinitionHash), so what it can still prove is that the audit
+	// fingerprint remains sensitive to NodeDef.ID, unlike the runtime hash.
 	base := baseRuntimeDef()
 	baseHash := mustLegacyHash(t, base)
 
-	moved := baseRuntimeDef()
-	moved.Nodes[0].Position = &types.Position{X: 999, Y: 999}
-	if got := mustLegacyHash(t, moved); got == baseHash {
-		t.Fatalf("legacy hash did not change after moving Position")
+	renamedIDs := baseRuntimeDef()
+	renamedIDs.Nodes[0].ID = "n1-moved"
+	if got := mustLegacyHash(t, renamedIDs); got == baseHash {
+		t.Fatalf("legacy hash did not change after changing NodeDef.ID")
 	}
 }
 

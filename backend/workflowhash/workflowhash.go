@@ -6,9 +6,9 @@
 // The package has three hash responsibilities:
 //   - Runtime: runtime-semantic fields only. Used for registry conflict
 //     detection. Prefix: RuntimePrefixV1 or RuntimePrefixV2.
-//   - Audit: the full WorkflowDef, including editor metadata. Used for
-//     audit/export traceability, never for conflict detection. Prefix:
-//     AuditPrefix.
+//   - Audit: the full WorkflowDef plus its WorkflowEditorMetadata sibling.
+//     Used for audit/export traceability and the replace no-op check, never
+//     for conflict detection. Prefix: AuditPrefix.
 //   - graph.Graph.Hash() (in package engine/graph, not here): structural
 //     compile hash over the compiled graph IR; orthogonal to the JSON
 //     definition form.
@@ -42,8 +42,8 @@ const (
 	// Timeout or private Output -- fields the v1 algorithm left out. A v2 hash
 	// is always current.
 	RuntimePrefixV2 = "runtime-sha256:v2:"
-	// AuditPrefix marks the audit fingerprint produced by Audit
-	// (full-definition, includes editor metadata). It is stored in
+	// AuditPrefix marks the audit fingerprint produced by Audit (full
+	// definition plus editor metadata). It is stored in
 	// WorkflowRecord.AuditFingerprint and must NOT be used as the
 	// conflict-detection hash.
 	AuditPrefix = "sha256:audit:v1:"
@@ -51,14 +51,17 @@ const (
 
 // Runtime produces a canonical hash over the runtime-semantic fields of def.
 // It excludes:
-//   - editor metadata (NodeDef.Position, NodeDef.UI, NodeDef.Notes) -- purely
-//     visual, never affects execution output;
 //   - descriptive fields (WorkflowDef.Description) -- human documentation, no
 //     execution effect;
 //   - stable editor identity (NodeDef.ID) -- durable editor-assigned handle
 //     that survives re-imports and must not invalidate a workflow;
 //   - instance identifiers (WorkflowDef.ID) -- runtime instance pointers, not
 //     part of the workflow definition.
+//
+// Editor-only visual state (position, UI theme, author notes) needs no
+// exclusion here: it is not a field of types.NodeDef or types.WorkflowDef at
+// all, and lives solely in types.WorkflowEditorMetadata, which Runtime never
+// reads.
 //
 // pin_data IS included because it fixes node inputs and therefore affects
 // execution output.
@@ -123,18 +126,36 @@ func Runtime(def *types.WorkflowDef, specs ParamSpecLookup) (string, error) {
 	return prefix + hex.EncodeToString(sum[:]), nil
 }
 
-// Audit returns a SHA-256 fingerprint over the entire WorkflowDef (including
-// editor metadata). It is kept for audit/export traceability and must not be
-// used for conflict detection.
+// Audit returns a SHA-256 fingerprint over the full WorkflowDef and its
+// editor metadata (ADR-D4 §2.3/§3). It is kept for audit/export traceability
+// and for the replace no-op check (sameAuditFingerprint), and must never be
+// used for registry conflict detection. Including metadata is deliberate: a
+// metadata-only PUT must still differ from the stored fingerprint so the
+// replace path writes it as a new revision (ADR §3.1, D3).
+//
+// md may be nil, meaning no editor metadata was ever supplied; this is
+// distinct from a non-nil &types.WorkflowEditorMetadata{}, which marshals its
+// own fields away (all omitempty) but still occupies the "editor_metadata"
+// JSON slot with {} rather than null, so the two inputs fingerprint
+// differently.
 //
 // The returned string has the form "sha256:audit:v1:<hex>".
-func Audit(def *types.WorkflowDef) (string, error) {
-	data, err := json.Marshal(def)
+func Audit(def *types.WorkflowDef, md *types.WorkflowEditorMetadata) (string, error) {
+	data, err := json.Marshal(auditPayload{Definition: def, EditorMetadata: md})
 	if err != nil {
 		return "", err
 	}
 	sum := sha256.Sum256(data)
 	return AuditPrefix + hex.EncodeToString(sum[:]), nil
+}
+
+// auditPayload pairs the definition with its editor metadata sibling so the
+// audit fingerprint covers both without embedding EditorMetadata on
+// types.WorkflowDef itself (which would also require Runtime to grow an
+// exclusion for it).
+type auditPayload struct {
+	Definition     *types.WorkflowDef             `json:"definition,omitempty"`
+	EditorMetadata *types.WorkflowEditorMetadata `json:"editor_metadata,omitempty"`
 }
 
 // RuntimePayload is the normalized, struct-based runtime identity Runtime
@@ -174,13 +195,13 @@ type RuntimePayload struct {
 }
 
 // runtimeNodeHashPayload is the runtime-semantic subset of NodeDef used by
-// Runtime. Editor metadata fields (Position, UI, Notes) and the stable editor
-// identity (ID) are intentionally omitted:
-//   - Position/UI/Notes are visual and never affect execution output.
-//   - ID is a durable editor-assigned handle. Re-importing a workflow must
-//     not invalidate its registry record just because the editor assigned a
-//     different stable ID this time. NodeDef.Name carries the runtime
-//     identity used by connections and pin_data, and IS included.
+// Runtime. The stable editor identity (ID) is intentionally omitted: it is a
+// durable editor-assigned handle, and re-importing a workflow must not
+// invalidate its registry record just because the editor assigned a
+// different stable ID this time. NodeDef.Name carries the runtime identity
+// used by connections and pin_data, and IS included. NodeDef itself carries
+// no position/UI/notes fields to omit -- those live solely in
+// types.WorkflowEditorMetadata.
 type runtimeNodeHashPayload struct {
 	Name           string                      `json:"name,omitempty"`
 	Type           string                      `json:"type,omitempty"`

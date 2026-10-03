@@ -42,9 +42,12 @@ func runtimeHash(def *types.WorkflowDef) (string, error) {
 }
 
 // legacyDefinitionHash is the audit fingerprint. It delegates to
-// workflowhash.Audit and must not be used for conflict detection.
+// workflowhash.Audit and must not be used for conflict detection. The SDK
+// builder path carries no editor metadata (WorkflowBuilder exposes no
+// position/UI/notes input), so it always fingerprints with a nil
+// WorkflowEditorMetadata; only the HTTP API path can supply one.
 func legacyDefinitionHash(def *types.WorkflowDef) (string, error) {
-	return workflowhash.Audit(def)
+	return workflowhash.Audit(def, nil)
 }
 
 // reconcileDefinitionHash returns the effective runtime hash of a stored

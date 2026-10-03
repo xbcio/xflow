@@ -31,7 +31,13 @@ type WorkflowRecord struct {
 	RegistryRevision uint64
 	AuditFingerprint string
 	Definition       *types.WorkflowDef
-	Graph            *graph.Graph
+	// EditorMetadata is the editor-only sibling of Definition (ADR-D4 §2.2,
+	// §4): visual node positions, canvas viewport, per-node UI state, and
+	// author notes. It participates in AuditFingerprint but never in
+	// DefinitionHash, and has no effect on compiled Graph. Nil means no
+	// editor metadata has ever been stored for this record.
+	EditorMetadata *types.WorkflowEditorMetadata
+	Graph          *graph.Graph
 }
 
 // WorkflowRevision is the immutable identity used by atomic registry

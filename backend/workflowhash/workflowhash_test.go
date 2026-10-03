@@ -111,21 +111,63 @@ func TestRuntimeExcludesMetadataAuditIncludesIt(t *testing.T) {
 	base := &types.WorkflowDef{Name: "wf", Nodes: []types.NodeDef{{Name: "a", Type: "xflow.start"}}}
 	edited := &types.WorkflowDef{
 		ID: "wf-1", Name: "wf", Description: "d",
-		Nodes: []types.NodeDef{{ID: "n1", Name: "a", Type: "xflow.start", Notes: "n", Position: &types.Position{X: 1}}},
+		Nodes: []types.NodeDef{{ID: "n1", Name: "a", Type: "xflow.start"}},
+	}
+	editedMetadata := &types.WorkflowEditorMetadata{
+		Notes:     map[string]string{"n1": "n"},
+		Positions: map[string]types.Position{"n1": {X: 1}},
 	}
 	if a, b := mustRuntime(t, base), mustRuntime(t, edited); a != b {
 		t.Fatalf("Runtime changed with metadata: %q != %q", a, b)
 	}
-	a, err := Audit(base)
+	a, err := Audit(base, nil)
 	if err != nil {
 		t.Fatalf("Audit(base): %v", err)
 	}
-	b, err := Audit(edited)
+	b, err := Audit(edited, editedMetadata)
 	if err != nil {
 		t.Fatalf("Audit(edited): %v", err)
 	}
 	if a == b || !strings.HasPrefix(a, AuditPrefix) {
 		t.Fatalf("Audit = (%q, %q), want distinct %q-prefixed fingerprints", a, b, AuditPrefix)
+	}
+}
+
+func TestAuditDiffersOnMetadataOnlyChange(t *testing.T) {
+	def := &types.WorkflowDef{Name: "wf", Nodes: []types.NodeDef{{ID: "n1", Name: "a", Type: "xflow.start"}}}
+	a, err := Audit(def, &types.WorkflowEditorMetadata{Positions: map[string]types.Position{"n1": {X: 1}}})
+	if err != nil {
+		t.Fatalf("Audit a: %v", err)
+	}
+	b, err := Audit(def, &types.WorkflowEditorMetadata{Positions: map[string]types.Position{"n1": {X: 2}}})
+	if err != nil {
+		t.Fatalf("Audit b: %v", err)
+	}
+	if a == b {
+		t.Fatalf("Audit fingerprints equal despite a metadata-only position change: %q", a)
+	}
+}
+
+func TestAuditNilAndZeroMetadataDiffer(t *testing.T) {
+	// A nil *WorkflowEditorMetadata marshals its editor_metadata slot as JSON
+	// null; a non-nil &WorkflowEditorMetadata{} marshals every field away
+	// (all omitempty) to {}. null and {} are different JSON values, so the
+	// two fingerprints are deliberately NOT required to match -- "no
+	// metadata was ever supplied" and "metadata was supplied and is empty"
+	// are distinguishable inputs, which matters for a replace no-op check
+	// that must tell "caller sent editor_metadata: {}" apart from "caller
+	// omitted editor_metadata entirely".
+	def := &types.WorkflowDef{Name: "wf", Nodes: []types.NodeDef{{Name: "a", Type: "xflow.start"}}}
+	a, err := Audit(def, nil)
+	if err != nil {
+		t.Fatalf("Audit nil: %v", err)
+	}
+	b, err := Audit(def, &types.WorkflowEditorMetadata{})
+	if err != nil {
+		t.Fatalf("Audit zero-value: %v", err)
+	}
+	if a == b {
+		t.Fatalf("Audit(nil) and Audit(zero-value) unexpectedly equal: %q", a)
 	}
 }
 

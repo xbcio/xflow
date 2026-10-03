@@ -83,8 +83,16 @@ func TestRegisterWorkflowStoresCanonicalRuntimeHash(t *testing.T) {
 }
 
 // TestRegisterWorkflowRecordsAuditFingerprint pins that POST records the
-// full-definition audit fingerprint the SDK records: the sha256 of the stored
-// definition as sent, under the audit prefix.
+// full-definition audit fingerprint the SDK records: Audit's fingerprint
+// over the stored definition and its (possibly absent) editor metadata
+// sibling, under the audit prefix.
+//
+// Audit's payload shape changed from "bare json.Marshal(def)" to
+// "{definition, editor_metadata}" when editor_metadata became a wrapper
+// field rather than inline NodeDef fields (ADR-D4 D1/D6): the fingerprint is
+// no longer byte-identical to a bare marshal of the definition, by design,
+// since it must also cover editor_metadata. There is no backward-compat
+// requirement to preserve the old byte-for-byte form (D6).
 func TestRegisterWorkflowRecordsAuditFingerprint(t *testing.T) {
 	srv, cp := newRegisterTestServer(t)
 
@@ -95,15 +103,12 @@ func TestRegisterWorkflowRecordsAuditFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetWorkflow: %v", err)
 	}
-	want, err := workflowhash.Audit(rec.Definition)
+	want, err := workflowhash.Audit(rec.Definition, rec.EditorMetadata)
 	if err != nil {
 		t.Fatalf("Audit: %v", err)
 	}
 	if rec.AuditFingerprint != want {
 		t.Fatalf("AuditFingerprint = %q, want %q", rec.AuditFingerprint, want)
-	}
-	if got := strings.TrimPrefix(rec.AuditFingerprint, workflowhash.AuditPrefix); "sha256:"+got != legacySHA256(t, rec.Definition) {
-		t.Fatalf("audit hex %q differs from the legacy full-definition sha256", got)
 	}
 }
 

@@ -609,14 +609,14 @@ func (m *workflowControlModule) handleRegisterWorkflow(w http.ResponseWriter, r 
 	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
-	var def types.WorkflowDef
-	if !decodeJSON(w, r, &def) {
+	def, metadata, ok := decodeWorkflowDefinitionWithMetadata(w, r)
+	if !ok {
 		return
 	}
 	// Namespace is authoritative from the context, never the body.
 	ns := namespace.FromContext(r.Context())
 
-	id, diag, err := m.registerWorkflow(r.Context(), ns, &def)
+	id, diag, err := m.registerWorkflowWithMetadata(r.Context(), ns, def, metadata)
 	if err != nil {
 		if writeParamInvalid(w, r, err) {
 			return
@@ -702,6 +702,14 @@ func rejectFAFWorkflowRegistrationBeforeAdmission(w http.ResponseWriter, r *http
 // the caller and written onto def; it is never read from def itself, so an
 // in-process caller cannot register into another namespace either.
 func (m *workflowControlModule) registerWorkflow(ctx context.Context, ns namespace.Namespace, def *types.WorkflowDef) (id types.WorkflowID, diag registrationDiagnostics, err error) {
+	return m.registerWorkflowWithMetadata(ctx, ns, def, nil)
+}
+
+// registerWorkflowWithMetadata is registerWorkflow, additionally accepting
+// the editor_metadata sibling the HTTP POST /v1/workflows body may carry
+// (§D2). Embedded/SDK callers have no such input and go through
+// registerWorkflow, which passes nil.
+func (m *workflowControlModule) registerWorkflowWithMetadata(ctx context.Context, ns namespace.Namespace, def *types.WorkflowDef, metadata *types.WorkflowEditorMetadata) (id types.WorkflowID, diag registrationDiagnostics, err error) {
 	defer func() { m.observeRegistration(ctx, ns, "add", err) }()
 	registry := m.registry()
 	if registry == nil {
@@ -710,7 +718,7 @@ func (m *workflowControlModule) registerWorkflow(ctx context.Context, ns namespa
 		}
 		return "", registrationDiagnostics{}, errors.New("apiserver: no workflow registry configured")
 	}
-	rec, diag, err := m.buildWorkflowRecord(ctx, ns, "", def)
+	rec, diag, err := m.buildWorkflowRecord(ctx, ns, "", def, metadata)
 	if err != nil {
 		return "", registrationDiagnostics{}, err
 	}
@@ -760,8 +768,11 @@ func (m *workflowControlModule) observeRegistration(ctx context.Context, ns name
 	m.registrationMetrics.ObserveRegistration(namespace.WithNamespace(ctx, ns), operation, outcome)
 }
 
-func (m *workflowControlModule) buildWorkflowRecord(ctx context.Context, ns namespace.Namespace, id types.WorkflowID, def *types.WorkflowDef) (backend.WorkflowRecord, registrationDiagnostics, error) {
+func (m *workflowControlModule) buildWorkflowRecord(ctx context.Context, ns namespace.Namespace, id types.WorkflowID, def *types.WorkflowDef, metadata *types.WorkflowEditorMetadata) (backend.WorkflowRecord, registrationDiagnostics, error) {
 	if err := validateWorkflowRegistrationDefinition(def); err != nil {
+		return backend.WorkflowRecord{}, registrationDiagnostics{}, err
+	}
+	if err := validateEditorMetadataSize(metadata); err != nil {
 		return backend.WorkflowRecord{}, registrationDiagnostics{}, err
 	}
 	if def != nil {
@@ -781,6 +792,12 @@ func (m *workflowControlModule) buildWorkflowRecord(ctx context.Context, ns name
 	if err != nil {
 		return backend.WorkflowRecord{}, registrationDiagnostics{}, err
 	}
+	// Editor metadata keys are validated against the compiled definition's
+	// nodes: a key matching no node is dropped silently (stale debris from a
+	// renamed/removed node), and a key resolved only by NodeDef.Name (the
+	// node has no ID) is kept but surfaces a NODE_METADATA_KEYED_BY_NAME
+	// warning alongside the compiler's own warnings.
+	metadata, metadataDiagnostics := types.ValidateEditorMetadata(def, metadata)
 	// The registry conflict hash is the runtime hash every registration path
 	// shares, so the SDK and HTTP agree on one workflow's identity. Builtin
 	// Defaults are filled in memory before hashing, never into def: an omitted
@@ -789,10 +806,10 @@ func (m *workflowControlModule) buildWorkflowRecord(ctx context.Context, ns name
 	if err != nil {
 		return backend.WorkflowRecord{}, registrationDiagnostics{}, err
 	}
-	// The audit fingerprint covers the full definition, editor metadata
-	// included. It is the same value the SDK records, and never the conflict
-	// hash.
-	audit, err := workflowhash.Audit(def)
+	// The audit fingerprint covers the full definition plus its editor
+	// metadata sibling. It is never the conflict hash: a metadata-only change
+	// must still differ here so a replace writes it as a new revision (D3).
+	audit, err := workflowhash.Audit(def, metadata)
 	if err != nil {
 		return backend.WorkflowRecord{}, registrationDiagnostics{}, err
 	}
@@ -806,9 +823,11 @@ func (m *workflowControlModule) buildWorkflowRecord(ctx context.Context, ns name
 		DefinitionHash:   hash,
 		AuditFingerprint: audit,
 		Definition:       def,
+		EditorMetadata:   metadata,
 		Graph:            g,
 	}
-	return rec, registrationDiagnostics{Warnings: g.Warnings(), ParamIssues: paramIssues}, nil
+	warnings := append(append([]string(nil), g.Warnings()...), metadataDiagnostics...)
+	return rec, registrationDiagnostics{Warnings: warnings, ParamIssues: paramIssues}, nil
 }
 
 func (m *workflowControlModule) addWorkflowRecord(ctx context.Context, ns namespace.Namespace, registry backend.WorkflowRegistry, rec backend.WorkflowRecord, diag registrationDiagnostics) (types.WorkflowID, registrationDiagnostics, error) {
@@ -1338,7 +1357,7 @@ func (m *workflowControlModule) handleGetWorkflow(w http.ResponseWriter, r *http
 		writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
 		return
 	}
-	writeData(w, r, http.StatusOK, rec.Definition)
+	writeData(w, r, http.StatusOK, workflowResponseBody(rec))
 }
 
 // handleReplaceWorkflow serves PUT /v1/workflows/{id} (spec §7 + Addition 1):
@@ -1357,8 +1376,8 @@ func (m *workflowControlModule) handleReplaceWorkflow(w http.ResponseWriter, r *
 		writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
 		return
 	}
-	var def types.WorkflowDef
-	if !decodeJSON(w, r, &def) {
+	def, metadata, ok := decodeWorkflowDefinitionWithMetadata(w, r)
+	if !ok {
 		return
 	}
 	if def.ID != "" && def.ID != string(id) {
@@ -1370,7 +1389,7 @@ func (m *workflowControlModule) handleReplaceWorkflow(w http.ResponseWriter, r *
 	if mutationID != "" {
 		mutationID = "http:" + mutationID
 	}
-	replacedID, diag, err := m.replaceWorkflowByID(r.Context(), ns, id, &def, mutationID)
+	replacedID, diag, err := m.replaceWorkflowByIDWithMetadata(r.Context(), ns, id, def, mutationID, metadata)
 	if err != nil {
 		if writeParamInvalid(w, r, err) {
 			return
@@ -1563,12 +1582,20 @@ func sameWorkflowRevision(a, b backend.WorkflowRecord) bool {
 // deliberately gives a changed definition a new ID; HTTP PUT, by contrast,
 // preserves its path ID in replaceWorkflowByID below.
 func (m *workflowControlModule) replaceWorkflow(ctx context.Context, ns namespace.Namespace, def *types.WorkflowDef) (id types.WorkflowID, diag registrationDiagnostics, err error) {
+	return m.replaceWorkflowWithMetadata(ctx, ns, def, nil)
+}
+
+// replaceWorkflowWithMetadata is replaceWorkflow, additionally accepting the
+// editor_metadata sibling an HTTP POST /v1/workflows body may carry when it
+// resolves to a replace (§D2). Embedded/SDK callers have no such input and go
+// through replaceWorkflow, which passes nil.
+func (m *workflowControlModule) replaceWorkflowWithMetadata(ctx context.Context, ns namespace.Namespace, def *types.WorkflowDef, metadata *types.WorkflowEditorMetadata) (id types.WorkflowID, diag registrationDiagnostics, err error) {
 	defer func() { m.observeRegistration(ctx, ns, "replace", err) }()
 	registry := m.registry()
 	if registry == nil {
 		return "", registrationDiagnostics{}, errors.New("apiserver: no workflow registry configured")
 	}
-	replacement, diag, err := m.buildWorkflowRecord(ctx, ns, "", def)
+	replacement, diag, err := m.buildWorkflowRecord(ctx, ns, "", def, metadata)
 	if err != nil {
 		return "", registrationDiagnostics{}, err
 	}
@@ -1595,6 +1622,15 @@ func (m *workflowControlModule) replaceWorkflow(ctx context.Context, ns namespac
 // key is free. All conflict checks and index changes occur in the registry's
 // single atomic compare-and-swap rather than a racy lookup/remove/add sequence.
 func (m *workflowControlModule) replaceWorkflowByID(ctx context.Context, ns namespace.Namespace, id types.WorkflowID, def *types.WorkflowDef, mutationID string) (newID types.WorkflowID, diag registrationDiagnostics, err error) {
+	return m.replaceWorkflowByIDWithMetadata(ctx, ns, id, def, mutationID, nil)
+}
+
+// replaceWorkflowByIDWithMetadata is replaceWorkflowByID, additionally
+// accepting the editor_metadata sibling the HTTP PUT /v1/workflows/{id} body
+// may carry (§D2). A metadata-only change still differs under
+// sameAuditFingerprint, so it is written as a normal new revision (D3); the
+// runtime hash and compiled graph are unaffected either way.
+func (m *workflowControlModule) replaceWorkflowByIDWithMetadata(ctx context.Context, ns namespace.Namespace, id types.WorkflowID, def *types.WorkflowDef, mutationID string, metadata *types.WorkflowEditorMetadata) (newID types.WorkflowID, diag registrationDiagnostics, err error) {
 	defer func() { m.observeRegistration(ctx, ns, "replace_by_id", err) }()
 	if id == "" {
 		return "", registrationDiagnostics{}, backend.ErrWorkflowNotFound
@@ -1623,7 +1659,7 @@ func (m *workflowControlModule) replaceWorkflowByID(ctx context.Context, ns name
 	}
 	def.ID = string(id)
 	def.Namespace = string(ns)
-	replacement, diag, err := m.buildWorkflowRecord(ctx, ns, id, def)
+	replacement, diag, err := m.buildWorkflowRecord(ctx, ns, id, def, metadata)
 	if err != nil {
 		return "", registrationDiagnostics{}, err
 	}
@@ -1768,7 +1804,7 @@ func unchangedExceptStampedID(existing, replacement backend.WorkflowRecord, id t
 	}
 	stamped := *existing.Definition
 	stamped.ID = string(id)
-	return sameAuditFingerprint(backend.WorkflowRecord{Definition: &stamped}, replacement)
+	return sameAuditFingerprint(backend.WorkflowRecord{Definition: &stamped, EditorMetadata: existing.EditorMetadata}, replacement)
 }
 
 // activationProjectionMayBePending reports whether ns may hold an unprojected
@@ -1806,7 +1842,7 @@ func sameAuditFingerprint(existing, replacement backend.WorkflowRecord) bool {
 		return false
 	}
 	if existing.Definition != nil {
-		audit, err := workflowhash.Audit(existing.Definition)
+		audit, err := workflowhash.Audit(existing.Definition, existing.EditorMetadata)
 		return err == nil && audit == replacement.AuditFingerprint
 	}
 	if existing.AuditFingerprint != "" {
