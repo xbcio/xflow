@@ -39,9 +39,18 @@ type BoundaryEndpoint struct {
 
 // UnitEdge is a scheduling edge between two units; it preserves the original
 // endpoint information so downstream code can read data by (member, port).
+//
+// ErrorEdge marks a synthetic edge from a group's declared "error" output
+// (GroupDef.ErrorOutputs) rather than a real member-level data edge. Its
+// Src.NodeIdx is always -1 (no member produced it; the group itself did) and
+// Src.Port is always errorOutputPort. It still participates in the ordinary
+// unit in-degree / cycle-detection machinery below: the destination's static
+// in-degree counts it like any other legal incoming edge, so fan-in math (wait_
+// all/wait_any) stays correct whether or not the group ever actually fails.
 type UnitEdge struct {
 	SrcUnit, DstUnit int
 	Src, Dst         BoundaryEndpoint
+	ErrorEdge        bool `json:",omitempty"`
 }
 
 // BoundaryEdge describes a single original node-level edge that crosses a group
@@ -51,17 +60,31 @@ type BoundaryEdge struct {
 	SrcUnit, DstUnit int
 }
 
+// errorOutputPort is the fixed, reserved port name for a group's synthesized
+// error output (GroupDef.ErrorOutputs). It never collides with a real member
+// port name because it never appears in BoundaryOutputs — it is a group-level
+// port with no backing member edge.
+const errorOutputPort = "error"
+
 // GroupMeta is the compiled artifact for a co-location group.
 type GroupMeta struct {
-	Name               string
-	Members            []int
-	EntryIdx           int
-	UnitIdx            int
-	Trigger            bool
-	BoundaryInputs     []BoundaryEdge
-	BoundaryOutputs    []BoundaryEdge
-	RunnerSelector     *types.RunnerSelector
-	OnError            string
+	Name            string
+	Members         []int
+	EntryIdx        int
+	UnitIdx         int
+	Trigger         bool
+	BoundaryInputs  []BoundaryEdge
+	BoundaryOutputs []BoundaryEdge
+	RunnerSelector  *types.RunnerSelector
+	OnError         string
+	// ErrorOutputs is the resolved destination set for the group's
+	// synthesized "error" output port (GroupDef.ErrorOutputs), only populated
+	// when OnError is "error_output". Each entry's Dst identifies a real
+	// downstream node/port; there is no Src member because the edge
+	// originates from the group's synthetic error output, not from any one
+	// member. Resolved once at compile time (compileOneGroup) and consumed by
+	// buildUnitEdges to synthesize the matching UnitEdge/BoundaryEdge pairs.
+	ErrorOutputs       []BoundaryEndpoint `json:",omitempty"`
 	Retry              *types.RetrySettings
 	Timeout            time.Duration
 	Mode               string
@@ -124,7 +147,8 @@ func buildUnits(g *Graph) error {
 }
 
 // buildUnitEdges traverses original node edges, skips intra-unit edges, and
-// records cross-unit edges with stable sorting.
+// records cross-unit edges with stable sorting. It then synthesizes one
+// ErrorEdge per group ErrorOutputs entry (see UnitEdge.ErrorEdge).
 func buildUnitEdges(g *Graph) {
 	// BoundaryInputs/BoundaryOutputs are appended to below. buildUnits can run
 	// more than once on the same Graph (snapshot UnmarshalJSON rebuilds the unit
@@ -157,6 +181,27 @@ func buildUnitEdges(g *Graph) {
 				gm := &g.groups[g.units[du].GroupIdx]
 				gm.BoundaryInputs = append(gm.BoundaryInputs, be)
 			}
+		}
+	}
+	// Synthetic error edges: one per GroupMeta.ErrorOutputs entry, from the
+	// group's own unit to the resolved target's unit. These carry no backing
+	// member-level Edge (the group itself is the source, not a member), so
+	// they are added directly to the unit edge lists rather than derived from
+	// g.outEdges above. The destination's static in-degree counts them like
+	// any other legal incoming edge — see UnitEdge.ErrorEdge.
+	for gi := range g.groups {
+		gm := &g.groups[gi]
+		su := gm.UnitIdx
+		for _, dst := range gm.ErrorOutputs {
+			du := g.nodeUnit[dst.NodeIdx]
+			ue := UnitEdge{SrcUnit: su, DstUnit: du,
+				Src:       BoundaryEndpoint{NodeIdx: -1, Port: errorOutputPort},
+				Dst:       dst,
+				ErrorEdge: true,
+			}
+			g.unitOutEdges[su] = append(g.unitOutEdges[su], ue)
+			g.unitInEdges[du] = append(g.unitInEdges[du], ue)
+			g.unitInDegree[du]++
 		}
 	}
 	for i := range g.unitOutEdges {

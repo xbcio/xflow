@@ -32,10 +32,13 @@ func compileGroups(g *Graph, def *types.WorkflowDef) error {
 		if err := validateGroupOnError(gd.Name, gd.OnError); err != nil {
 			return err
 		}
+		if err := validateGroupErrorOutputs(gd.Name, gd.OnError, gd.ErrorOutputs); err != nil {
+			return err
+		}
 		if err := validateGroupRetry(gd.Name, gd.Retry); err != nil {
 			return err
 		}
-		meta, err := compileOneGroup(g, gd, len(g.groups))
+		meta, err := compileOneGroup(g, def, gd, len(g.groups))
 		if err != nil {
 			return fmt.Errorf("group %q: %w", gd.Name, err)
 		}
@@ -53,34 +56,52 @@ func compileGroups(g *Graph, def *types.WorkflowDef) error {
 // validateGroupOnError restricts a group's on_error to the policies the group
 // executor actually implements.
 //
-// groupOnErrorFatal (engine/group_exec.go) maps continue => non-fatal and
-// everything else => fatal. So error_output and main_output are *accepted* by
-// the type but run as stop: the author asks for the failure to be routed to a
-// downstream branch and gets the whole execution failed instead, with no
-// diagnostic on the path least likely to be exercised before production.
+// error_output is implemented: a failing group routes to its declared
+// ErrorOutputs targets (see compileOneGroup / buildUnitEdges's synthetic
+// ErrorEdge) instead of failing the whole execution. main_output stays
+// rejected — unlike a node, which has its own successful output to merge the
+// error into on main_output, a group that failed before committing has no
+// single member output to stand in for "the group's main result", so there is
+// no principled payload main_output could carry. See
+// NODE-GROUP-COLOCATION.md §12.2 for the mechanism this implements.
 //
-// Routing them is a new mechanism, not a wiring gap. GroupMeta.BoundaryOutputs
-// is derived purely from member edges that cross the boundary, compileOneGroup
-// never synthesizes one from OnError, and CommitGroupResult rejects any exit
-// whose (nodeIdx, port) is absent from BoundaryOutputs — so a fabricated
-// "group failed" exit is rejected today. See NODE-GROUP-COLOCATION.md §12.2.
-//
-// Unknown values are rejected for the same reason: OnError was a plain string
-// with no validation, so `fail` (which types/group.go's own doc comment warns
-// does not exist) or `error-output` also compiled clean and ran as fatal.
+// Unknown values are rejected because OnError was a plain string with no
+// validation, so `fail` (which types/group.go's own doc comment warns does
+// not exist) or `error-output` also compiled clean and ran as fatal.
 func validateGroupOnError(name, onErr string) error {
 	switch onErr {
-	case "", string(types.OnErrorStop), string(types.OnErrorContinue):
+	case "", string(types.OnErrorStop), string(types.OnErrorContinue), string(types.OnErrorOutput):
 		return nil
-	case string(types.OnErrorOutput), string(types.OnErrorMainOutput):
+	case string(types.OnErrorMainOutput):
 		return fmt.Errorf("group %q: on_error=%q is not supported on a group: "+
-			"a group has no error output port to route to (only %q, %q, %q are supported)",
-			name, onErr, "", types.OnErrorStop, types.OnErrorContinue)
+			"a group has no single member output to stand in for the group's main "+
+			"result when it fails before committing (only %q, %q, %q, %q are supported)",
+			name, onErr, "", types.OnErrorStop, types.OnErrorContinue, types.OnErrorOutput)
 	default:
 		return fmt.Errorf("group %q: on_error=%q is not a known policy "+
-			"(only %q, %q, %q are supported on a group)",
-			name, onErr, "", types.OnErrorStop, types.OnErrorContinue)
+			"(only %q, %q, %q, %q are supported on a group)",
+			name, onErr, "", types.OnErrorStop, types.OnErrorContinue, types.OnErrorOutput)
 	}
+}
+
+// validateGroupErrorOutputs cross-validates GroupDef.OnError against
+// GroupDef.ErrorOutputs: the two must agree, or the configuration either
+// routes nowhere (error_output with no targets) or declares a route that is
+// never taken (targets declared under any other policy) — both silent
+// no-ops that a compile error catches instead of a production incident.
+func validateGroupErrorOutputs(name string, onErr string, errorOutputs []types.Connection) error {
+	if onErr == string(types.OnErrorOutput) {
+		if len(errorOutputs) == 0 {
+			return fmt.Errorf("group %q: on_error=%q requires at least one error_outputs target",
+				name, types.OnErrorOutput)
+		}
+		return nil
+	}
+	if len(errorOutputs) > 0 {
+		return fmt.Errorf("group %q: error_outputs is set but on_error=%q does not route to it; "+
+			"set on_error: %q or remove error_outputs", name, onErr, types.OnErrorOutput)
+	}
+	return nil
 }
 
 // validateGroupRetry rejects GroupDef.Retry outright: no runtime code
@@ -115,7 +136,7 @@ func validateGroupRetry(name string, retry *types.RetrySettings) error {
 		name)
 }
 
-func compileOneGroup(g *Graph, gd types.GroupDef, groupIdx int) (GroupMeta, error) {
+func compileOneGroup(g *Graph, def *types.WorkflowDef, gd types.GroupDef, groupIdx int) (GroupMeta, error) {
 	if len(gd.Members) == 0 {
 		return GroupMeta{}, fmt.Errorf("no members")
 	}
@@ -156,6 +177,10 @@ func compileOneGroup(g *Graph, gd types.GroupDef, groupIdx int) (GroupMeta, erro
 	if err := assertEntryDominates(g, entry, set); err != nil {
 		return GroupMeta{}, err
 	}
+	errorOutputs, err := resolveGroupErrorOutputs(g, def, gd, set)
+	if err != nil {
+		return GroupMeta{}, err
+	}
 	return GroupMeta{
 		Name:               gd.Name,
 		Members:            members,
@@ -164,11 +189,68 @@ func compileOneGroup(g *Graph, gd types.GroupDef, groupIdx int) (GroupMeta, erro
 		Trigger:            trigger,
 		RunnerSelector:     gd.RunnerSelector,
 		OnError:            gd.OnError,
+		ErrorOutputs:       errorOutputs,
 		Retry:              gd.Retry,
 		Timeout:            gd.Timeout,
 		Mode:               gd.Mode,
 		ActivationReplicas: gd.ActivationReplicas,
 	}, nil
+}
+
+// resolveGroupErrorOutputs resolves GroupDef.ErrorOutputs targets to
+// BoundaryEndpoint entries. Each target must name a real node outside this
+// group (a target inside the group would be a member the group itself is
+// about to abandon mid-execution — there is no running engine instance left
+// to deliver to once the group fails) and must respect the target's own
+// declared input ports, exactly like an ordinary connection
+// (buildEdges/declaredInputPorts). Duplicate (node, port) targets are
+// rejected: a routed failure fires each target edge's arrival exactly once,
+// so a duplicate could not express anything a single entry does not already.
+func resolveGroupErrorOutputs(g *Graph, def *types.WorkflowDef, gd types.GroupDef, members map[int]bool) ([]BoundaryEndpoint, error) {
+	if len(gd.ErrorOutputs) == 0 {
+		return nil, nil
+	}
+	out := make([]BoundaryEndpoint, 0, len(gd.ErrorOutputs))
+	dup := map[string]bool{}
+	for _, target := range gd.ErrorOutputs {
+		idx, ok := g.index[target.Node]
+		if !ok {
+			return nil, fmt.Errorf("group %q: error_outputs references unknown node %q", gd.Name, target.Node)
+		}
+		if members[idx] {
+			return nil, fmt.Errorf("group %q: error_outputs target %q is a member of this group", gd.Name, target.Node)
+		}
+		if g.nodes[idx].Kind == types.NodeKindSupply {
+			return nil, fmt.Errorf("group %q: error_outputs target %q is a supply node", gd.Name, target.Node)
+		}
+		port := types.DefaultInputPort
+		if target.Input != "" {
+			port = target.Input
+		}
+		key := fmt.Sprintf("%d\x00%s", idx, port)
+		if dup[key] {
+			return nil, fmt.Errorf("group %q: error_outputs targets %s:%s more than once", gd.Name, target.Node, port)
+		}
+		dup[key] = true
+		var dstDef *types.NodeDef
+		for i := range def.Nodes {
+			if def.Nodes[i].Name == target.Node {
+				dstDef = &def.Nodes[i]
+				break
+			}
+		}
+		if err := declaredInputPorts(dstDef).validateEdgeTarget(gd.Name, target.Node, target.Input); err != nil {
+			return nil, fmt.Errorf("group %q: %w", gd.Name, err)
+		}
+		out = append(out, BoundaryEndpoint{NodeIdx: idx, Port: port})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].NodeIdx != out[j].NodeIdx {
+			return out[i].NodeIdx < out[j].NodeIdx
+		}
+		return out[i].Port < out[j].Port
+	})
+	return out, nil
 }
 
 // resolveGroupEntry determines the unique entry node for a group.
