@@ -2,8 +2,8 @@ import { history, useIntl, useModel, useParams } from '@umijs/max';
 import { App, Button, Result, Spin } from 'antd';
 import { createXFlowApiClient, executionDetailToRuntimeSnapshot } from '@xflow/api';
 import { XFlowEditor, type XFlowEditorSaveResult } from '@xflow/editor';
-import type { NodeTypesResponse, RuntimeSnapshot, WorkflowDef } from '@xflow/core';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { NodeTypesResponse, RuntimeSnapshot, Viewport, WorkflowDef } from '@xflow/core';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 const NEW_WORKFLOW_ROUTE = 'new';
 
@@ -37,6 +37,12 @@ export default function WorkflowDetailPage() {
   const [loading, setLoading] = useState(!isNewWorkflow);
   const [loadError, setLoadError] = useState<string>();
   const [nodeTypes, setNodeTypes] = useState<NodeTypesResponse>();
+  // The canvas pan/zoom restored from editor_metadata.viewport (ADR-D4 §2.3).
+  // Kept in a ref, not state: it is written on every pan/zoom (XFlowEditor's
+  // onViewportChange) and only ever read back at the next save, so it must
+  // never trigger a re-render of its own.
+  const viewportRef = useRef<Viewport | undefined>(undefined);
+  const [defaultViewport, setDefaultViewport] = useState<Viewport>();
   const { initialState } = useModel('@@initialState');
   const { message } = App.useApp();
 
@@ -71,6 +77,8 @@ export default function WorkflowDetailPage() {
   const loadWorkflow = useCallback(async () => {
     if (isNewWorkflow) {
       setWorkflow(createEmptyWorkflow());
+      viewportRef.current = undefined;
+      setDefaultViewport(undefined);
       setLoadError(undefined);
       setLoading(false);
       return;
@@ -82,8 +90,10 @@ export default function WorkflowDetailPage() {
       // The current GET response is the workflow definition without its route id.
       // Keep the route identity when hydrating so subsequent save/run operations
       // update this workflow instead of treating it as a new draft.
-      const loadedWorkflow = await api.getWorkflow(workflowId);
-      setWorkflow({ ...loadedWorkflow, id: workflowId });
+      const loaded = await api.getWorkflow(workflowId);
+      setWorkflow({ ...loaded.workflow, id: workflowId });
+      viewportRef.current = loaded.viewport;
+      setDefaultViewport(loaded.viewport);
     } catch (error) {
       setWorkflow(undefined);
       setLoadError(messageFor(error));
@@ -100,18 +110,25 @@ export default function WorkflowDetailPage() {
   // warn-mode param_issues on their fields; an enforce-mode 400 rejects with
   // an XFlowApiError whose `paramIssues` the editor reads the same way.
   const saveWorkflow = useCallback(async (nextWorkflow: WorkflowDef): Promise<XFlowEditorSaveResult> => {
+    const saveOptions = { viewport: viewportRef.current };
     if (!nextWorkflow.id) {
-      const result = await api.createWorkflow(nextWorkflow);
+      const result = await api.createWorkflow(nextWorkflow, saveOptions);
       const createdWorkflow = { ...nextWorkflow, id: result.workflowId };
       setWorkflow(createdWorkflow);
       history.replace(`/workflows/${result.workflowId}`);
       return { workflow: createdWorkflow, paramIssues: result.paramIssues };
     }
 
-    const result = await api.saveWorkflow(nextWorkflow);
+    const result = await api.saveWorkflow(nextWorkflow, saveOptions);
     setWorkflow(nextWorkflow);
     return { workflow: nextWorkflow, paramIssues: result.paramIssues };
   }, [api]);
+
+  // Recorded on every pan/zoom, not persisted until the next save (XFlowPreview's
+  // onMoveEnd debounces this to "settled", not every animation frame).
+  const handleViewportChange = useCallback((viewport: Viewport) => {
+    viewportRef.current = viewport;
+  }, []);
 
   const runWorkflow = useCallback(async (nextWorkflow: WorkflowDef): Promise<RuntimeSnapshot> => {
     if (!nextWorkflow.id) {
@@ -158,6 +175,8 @@ export default function WorkflowDetailPage() {
         onChange={setWorkflow}
         onSave={saveWorkflow}
         onRun={runWorkflow}
+        defaultViewport={defaultViewport}
+        onViewportChange={handleViewportChange}
       />
     </main>
   );
