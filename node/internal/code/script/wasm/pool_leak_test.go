@@ -120,18 +120,21 @@ func TestDoomReportsRebuildFailure(t *testing.T) {
 	}
 }
 
-// TestDoomRebuildFailureAttributesToTheSpawnTimeObserver pins the capture in
-// doom: the failed rebuild reports to the observer installed when the rebuild
-// was SPAWNED, not to whichever observer is installed when it finishes.
+// assertRebuildFailureAttribution pins that a failed asynchronous rebuild
+// reports to the observer installed when the rebuild was SPAWNED, not to
+// whichever observer is installed when it finishes.
 //
 // Without the capture the failure lands in the next observer installed — in a
 // full-package run, the next test's recorder, which is how
 // TestDoomClassifiesExpiredContextAsTimeout and
 // TestDrainPoolNotifiesObserverPoolSwapped acquired a foreign "rebuild_failed".
-// The rebuild cannot finish between the doom and the observer swap below (it
-// builds a whole instance), so pre-capture this test fails by waiting out the
-// spawn-time observer.
-func TestDoomRebuildFailureAttributesToTheSpawnTimeObserver(t *testing.T) {
+// The rebuild cannot finish between the trigger and the observer swap below (it
+// builds a whole instance), so pre-capture this fails by waiting out the
+// spawn-time observer. trigger drives ONE producer: doom and recyclePlanned
+// each carry their own capture, so each needs its own test.
+func assertRebuildFailureAttribution(t *testing.T, trigger func(e *reactorEngine, p *activePool, inst *pooledInstance)) {
+	t.Helper()
+
 	spawned := &recordingObserver{}
 	SetObserver(nil)
 	SetObserver(spawned)
@@ -154,7 +157,7 @@ func TestDoomRebuildFailureAttributesToTheSpawnTimeObserver(t *testing.T) {
 	// TestDoomReportsRebuildFailure does.
 	pool.cfg = []byte(`{"rules":[{"bad":true}]}`)
 
-	e.doom(ctx, pool, inst)
+	trigger(e, pool, inst)
 
 	late := &recordingObserver{}
 	SetObserver(nil)
@@ -171,10 +174,25 @@ func TestDoomRebuildFailureAttributesToTheSpawnTimeObserver(t *testing.T) {
 			"not the one that spawned it", causes)
 	}
 	if causes := late.recycledCauses(); hasCause(causes, "rebuild_failed") {
-		t.Fatalf("the observer installed after the doom saw the rebuild failure (causes = "+
-			"%#v); a late report must stay attributed to the installation that spawned it",
-			causes)
+		t.Fatalf("the observer installed after the rebuild was triggered saw the failure "+
+			"(causes = %#v); a late report must stay attributed to the installation that "+
+			"spawned it", causes)
 	}
+}
+
+func TestDoomRebuildFailureAttributesToTheSpawnTimeObserver(t *testing.T) {
+	assertRebuildFailureAttribution(t, func(e *reactorEngine, p *activePool, inst *pooledInstance) {
+		e.doom(context.Background(), p, inst)
+	})
+}
+
+// recyclePlanned has its own capture and its own trigger: the doom test above
+// never exercises it, so reverting just that capture would otherwise stay
+// green.
+func TestRecyclePlannedRebuildFailureAttributesToTheSpawnTimeObserver(t *testing.T) {
+	assertRebuildFailureAttribution(t, func(e *reactorEngine, p *activePool, inst *pooledInstance) {
+		e.recyclePlanned(p, inst)
+	})
 }
 
 func hasCause(causes []string, want string) bool {

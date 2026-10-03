@@ -152,11 +152,12 @@ func init() {
 // Pass nil explicitly to remove the observer before installing a new one
 // (tests use this as their teardown path).
 //
-// Removal does not silence work already in flight. Asynchronous producers
-// capture the observer installed when their work was spawned, so a late report
-// is attributed to the installation that initiated it rather than to whatever
-// is installed when it finishes. Implementations must tolerate calls after they
-// have been removed.
+// Removal does not silence every in-flight report: asynchronous producers that
+// capture the observer at spawn time — the pool's rebuild reports — keep
+// delivering to the installation that initiated them, so implementations must
+// tolerate calls after removal. Producers that read the observer at report time
+// (the reclamation sweep's drain and count reports) go quiet with the removal
+// instead: the capture is per producer, not an interface-wide guarantee.
 func SetObserver(o Observer) {
 	observerMu.Lock()
 	defer observerMu.Unlock()
