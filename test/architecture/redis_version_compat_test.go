@@ -78,7 +78,12 @@ func TestProductionCodeAvoidsRedis62OnlyCommands(t *testing.T) {
 		if entry.IsDir() {
 			switch entry.Name() {
 			// Vendored or generated trees: not ours to fix, and huge.
-			case ".git", "vendor", "node_modules", "testdata":
+			case "vendor", "node_modules", "testdata":
+				return fs.SkipDir
+			}
+			// Like the go tool, ignore "." and "_" directories (.git, a local
+			// .tmp/gomodcache, ...): they hold no package of this module.
+			if path != repoRoot && (strings.HasPrefix(entry.Name(), ".") || strings.HasPrefix(entry.Name(), "_")) {
 				return fs.SkipDir
 			}
 			return nil
