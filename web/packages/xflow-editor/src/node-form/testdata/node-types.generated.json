@@ -658,7 +658,7 @@
           "path": "/parameters/request",
           "label": "Request",
           "type": "object",
-          "help": "Request message payload",
+          "help": "Request message payload (sent as google.protobuf.Struct)",
           "group": "request",
           "expression": {
             "mode": "template"
