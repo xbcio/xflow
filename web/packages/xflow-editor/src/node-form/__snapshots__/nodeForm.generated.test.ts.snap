@@ -1364,7 +1364,7 @@ exports[`A6-generated node-types fixture > xflow.grpc@1 snapshot 1`] = `
       },
       "f.parameters.request": {
         "props": {
-          "description": "Request message payload",
+          "description": "Request message payload (sent as google.protobuf.Struct)",
           "expect": {
             "type": "object",
           },

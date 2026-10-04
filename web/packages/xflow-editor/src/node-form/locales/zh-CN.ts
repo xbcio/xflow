@@ -129,7 +129,7 @@ const messages: Record<string, string> = {
   "RPC method name": "RPC 方法名",
   "Host": "主机",
   "gRPC server host:port": "gRPC 服务地址 host:port",
-  "Request message payload": "请求消息体",
+  "Request message payload (sent as google.protobuf.Struct)": "请求消息体（以 google.protobuf.Struct 发送）",
   "Metadata": "元数据",
   "gRPC metadata (headers)": "gRPC 元数据（请求头）",
   "Options": "选项",
