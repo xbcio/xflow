@@ -106,6 +106,16 @@ type EntryActivationMetrics interface {
 	// poll, and counting those would report reconcile-pass frequency rather
 	// than fallback events.
 	OnGroupSelectorFallback()
+	// OnGroupActivationRedelivered reports that the reconciler re-sent a
+	// directive from the runner's own hosted-activation report: action
+	// "activate" when the report showed the assigned activation was not
+	// hosted, "deactivate" when it showed an activation the ledger no longer
+	// assigns to that runner. It is the observable form of "a directive was
+	// lost and has now been recovered" — the failure this whole path exists
+	// to make visible — and, unlike the counters above, it is reported for
+	// GROUP entry units only for the same reason they are: these are the
+	// xflow_group_* activation-controller series.
+	OnGroupActivationRedelivered(action string)
 }
 
 // EntryActivationReconcilerConfig configures an EntryActivationReconciler.
@@ -380,6 +390,10 @@ func (r *EntryActivationReconciler) Reconcile(ctx context.Context, now time.Time
 		return err
 	}
 	live := r.liveRunners(ctx, now)
+	// Each live runner's own report of what it hosts is read once per pass and
+	// shared by every activation, so report-driven reconciliation costs one
+	// read per runner rather than one per assignment.
+	hosted := r.loadHostedActivations(ctx, live)
 	seen := make(map[engine.EntryActivationKey]struct{})
 	var activations []engine.EntryActivation
 	for _, ns := range r.cfg.Namespaces {
@@ -402,7 +416,7 @@ func (r *EntryActivationReconciler) Reconcile(ctx context.Context, now time.Time
 		act := &activations[i]
 		key := keyOf(act)
 		seen[key] = struct{}{}
-		if err := r.reconcileExisting(ctx, act, live, owners, now); err != nil {
+		if err := r.reconcileExisting(ctx, act, live, owners, hosted, now); err != nil {
 			failed[key] = struct{}{}
 			r.logReconcileError(act, err)
 		}
@@ -551,8 +565,14 @@ func (r *EntryActivationReconciler) recordGroupSelectorFallback(act *engine.Entr
 	r.cfg.Metrics.OnGroupSelectorFallback()
 }
 
-func (r *EntryActivationReconciler) reconcileExisting(ctx context.Context, act *engine.EntryActivation, live []RunnerSnapshot, owners map[logicalActivationKey]map[string]struct{}, now time.Time) error {
+func (r *EntryActivationReconciler) reconcileExisting(ctx context.Context, act *engine.EntryActivation, live []RunnerSnapshot, owners map[logicalActivationKey]map[string]struct{}, hosted hostedActivationsView, now time.Time) error {
 	key := keyOf(act)
+
+	// Report-driven reconciliation runs before any ownership decision, so it
+	// sees the ledger record as this pass read it. The reverse direction needs
+	// nothing from the branches below: it only compares "who reports hosting
+	// this" against "whom the ledger assigns it to", whatever that is.
+	r.cleanupForeignHostedActivations(ctx, act, live, hosted)
 
 	// A cleared / non-desired activation should not hold an assignment. Fence any
 	// stale owner, tell it to deactivate, and leave it unassigned.
@@ -602,9 +622,11 @@ func (r *EntryActivationReconciler) reconcileExisting(ctx context.Context, act *
 		// cadence) and so never lapses while passes are running. It is deliberately
 		// NOT a detector for "live but no longer hosting": a runner that kept its
 		// heartbeat and selector but lost the Activate directive still matches, so
-		// it is renewed indefinitely rather than fenced. Redelivering that directive
-		// is a separate problem — RunnerSnapshot carries no hosted-activation set to
-		// detect it with.
+		// it is renewed indefinitely rather than fenced. That state is detected —
+		// and repaired by resending the directive, never by fencing — from the
+		// runner's own hosted-activation report in redeliverMissingActivation
+		// (entry_activation_redelivery.go), which is why this branch keeps the
+		// lease alive: the assignment is correct, only its delivery failed.
 		revivable := !expired || now.Sub(act.LeaseDeadline) <= r.leaseGrace()
 		if ownerMatches && !siblingAlreadyOwns && revivable {
 			owners[logical][act.RunnerID] = struct{}{}
@@ -613,6 +635,13 @@ func (r *EntryActivationReconciler) reconcileExisting(ctx context.Context, act *
 			// wires this to the runner's ActivationAck; until then this is the best
 			// available success signal — the owner still matches desired state.)
 			r.clearRetryBackoff(key)
+			// "Still matches" is a statement about the RUNNER, not about the
+			// activation: a runner that lost the Activate directive still
+			// heartbeats and still matches its selector, so the renewal below
+			// would keep renewing an assignment that hosts nothing, forever.
+			// The runner's own report is the only witness to that state; when
+			// it says the activation is missing, re-send the directive.
+			r.redeliverMissingActivation(ctx, act, hosted)
 			// Proactively renew the lease when it is within the renew threshold of
 			// expiry, keeping the generation stable so the hosting runner is not
 			// disrupted.

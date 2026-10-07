@@ -817,6 +817,18 @@ func (r *Runner) heartbeat(ctx context.Context, sessionID string, inFlight int) 
 		SupplyObserved: r.observedSupplies(),
 		SupplyKeyID:    r.supplyKeyID(),
 	}
+	// Report the hosted activation set on every heartbeat — the same
+	// tracker-derived inventory the register path sends (see Run), reused as
+	// the one conversion so the two reports cannot describe the same tracker
+	// differently. Freshness is what makes the report useful: the server
+	// compares each report against the assignment ledger to notice a directive
+	// that never arrived, and a stale report would either trigger spurious
+	// redeliveries or mask a real gap. The allocation is per-heartbeat and
+	// proportional to the activation count (order of ten), the same cost the
+	// drain observation already pays.
+	if r.activationTracker != nil {
+		req.HostedActivations = &protocol.HostedActivationsReport{Activations: r.activationTracker.Inventory()}
+	}
 	if generation, draining := r.controlGate.drainingGeneration(); draining {
 		req.DrainObservation = &protocol.RunnerDrainObservation{
 			Generation:        generation,

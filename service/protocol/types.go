@@ -172,6 +172,19 @@ type RunnerDrainObservation struct {
 	ActiveActivations uint32 `json:"active_activations"`
 }
 
+// HostedActivationsReport is a runner's heartbeat-time report of the trigger
+// activations it currently hosts. The pointer on HeartbeatRequest is the
+// presence flag: an old runner leaves it nil (server records nothing, and
+// reconciliation skips that runner), while a reporting runner with nothing
+// hosted sends a non-nil report with an empty list — "I report, and I host
+// nothing" is a different statement from "I do not report", and only the
+// presence flag can tell them apart.
+//
+// It carries identity + generation only, never secret params.
+type HostedActivationsReport struct {
+	Activations []ActivationInventoryItem `json:"activations,omitempty"`
+}
+
 type RegisterRunnerResponse struct {
 	RunnerID  string `json:"runner_id"`
 	SessionID string `json:"session_id"`
@@ -219,6 +232,14 @@ type HeartbeatRequest struct {
 	// The ID is a 4-byte fingerprint of the key, not key material. Empty when
 	// this runner holds no key or does not use supply encryption.
 	SupplyKeyID string `json:"supply_key_id,omitempty"`
+	// HostedActivations reports the activations this runner currently hosts,
+	// on EVERY heartbeat. It is the only signal that distinguishes "the runner
+	// is hosting the assignment" from "the application-layer Activate
+	// directive never reached it" — the runner's heartbeat and selector stay
+	// healthy in both cases, so nothing else can tell them apart. Nil from an
+	// old runner; a non-nil report with no activations is the explicit
+	// "hosting nothing" statement.
+	HostedActivations *HostedActivationsReport `json:"hosted_activations,omitempty"`
 }
 
 type HeartbeatResponse struct {

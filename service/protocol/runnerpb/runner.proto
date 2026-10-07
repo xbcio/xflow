@@ -87,13 +87,23 @@ message RegisterRequest {
 
 // ActivationInventoryItem reports a single trigger activation the runner is
 // currently hosting. Sent during Register so the control plane can reconcile
-// on reconnect.
+// on reconnect, and on every heartbeat inside HostedActivationsReport so the
+// control plane can notice a directive that never arrived.
 message ActivationInventoryItem {
   string workflow_id = 1;
   string entry_unit_id = 2;
   uint64 generation = 3;
   string workflow_version = 4;
   uint32 replica_index = 5;
+}
+
+// HostedActivationsReport is present only when the runner reports. Old
+// runners leave the field unset; the nested message gives presence so an
+// absent field is never mistaken for "hosts nothing". An empty activations
+// list is the explicit, meaningful report that this runner currently hosts no
+// activation.
+message HostedActivationsReport {
+  repeated ActivationInventoryItem activations = 1;
 }
 
 message RegisterResponse {
@@ -114,6 +124,12 @@ message HeartbeatRequest {
   // only when it differs from its own, making rotation delivery convergent.
   string supply_key_id = 7;
   RunnerDrainObservation drain_observation = 8;
+  // hosted_activations reports the activations this runner currently hosts.
+  // Unset means the runner does not report (an old binary); present with an
+  // empty list means it reports and hosts nothing. The server records it per
+  // runner so reconciliation can redeliver an Activate whose directive never
+  // reached the runner instead of renewing an assignment that hosts nothing.
+  HostedActivationsReport hosted_activations = 9;
 }
 
 message HeartbeatResponse {

@@ -187,29 +187,52 @@ func RegisterResponseFromProto(resp *runnerpb.RegisterResponse) RegisterRunnerRe
 	}
 }
 
+// HostedActivationsToProto converts the heartbeat carrier. nil stays nil (the
+// runner does not report); a non-nil report with an empty list converts to a
+// present message with no items, which is the distinct "hosts nothing" signal.
+func HostedActivationsToProto(report *HostedActivationsReport) *runnerpb.HostedActivationsReport {
+	if report == nil {
+		return nil
+	}
+	return &runnerpb.HostedActivationsReport{
+		Activations: ActivationInventoryToProto(report.Activations),
+	}
+}
+
+func HostedActivationsFromProto(report *runnerpb.HostedActivationsReport) *HostedActivationsReport {
+	if report == nil {
+		return nil
+	}
+	return &HostedActivationsReport{
+		Activations: ActivationInventoryFromProto(report.GetActivations()),
+	}
+}
+
 func HeartbeatRequestToProto(req HeartbeatRequest) *runnerpb.HeartbeatRequest {
 	return &runnerpb.HeartbeatRequest{
-		RunnerId:         req.RunnerID,
-		Capacity:         int32(req.Capacity),
-		InFlight:         int32(req.InFlight),
-		Timestamp:        req.Timestamp,
-		SessionId:        req.SessionID,
-		SupplyObserved:   cloneLabels(req.SupplyObserved),
-		SupplyKeyId:      req.SupplyKeyID,
-		DrainObservation: RunnerDrainObservationToProto(req.DrainObservation),
+		RunnerId:          req.RunnerID,
+		Capacity:          int32(req.Capacity),
+		InFlight:          int32(req.InFlight),
+		Timestamp:         req.Timestamp,
+		SessionId:         req.SessionID,
+		SupplyObserved:    cloneLabels(req.SupplyObserved),
+		SupplyKeyId:       req.SupplyKeyID,
+		DrainObservation:  RunnerDrainObservationToProto(req.DrainObservation),
+		HostedActivations: HostedActivationsToProto(req.HostedActivations),
 	}
 }
 
 func HeartbeatRequestFromProto(req *runnerpb.HeartbeatRequest) HeartbeatRequest {
 	return HeartbeatRequest{
-		RunnerID:         req.GetRunnerId(),
-		SessionID:        req.GetSessionId(),
-		Capacity:         int(req.GetCapacity()),
-		InFlight:         int(req.GetInFlight()),
-		Timestamp:        req.GetTimestamp(),
-		SupplyObserved:   cloneLabels(req.GetSupplyObserved()),
-		SupplyKeyID:      req.GetSupplyKeyId(),
-		DrainObservation: RunnerDrainObservationFromProto(req.GetDrainObservation()),
+		RunnerID:          req.GetRunnerId(),
+		SessionID:         req.GetSessionId(),
+		Capacity:          int(req.GetCapacity()),
+		InFlight:          int(req.GetInFlight()),
+		Timestamp:         req.GetTimestamp(),
+		SupplyObserved:    cloneLabels(req.GetSupplyObserved()),
+		SupplyKeyID:       req.GetSupplyKeyId(),
+		DrainObservation:  RunnerDrainObservationFromProto(req.GetDrainObservation()),
+		HostedActivations: HostedActivationsFromProto(req.GetHostedActivations()),
 	}
 }
 

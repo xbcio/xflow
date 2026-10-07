@@ -491,6 +491,19 @@ func (c *Core) heartbeat(ctx context.Context, req protocol.HeartbeatRequest, inf
 		}
 		resp.Activations = activations
 	}
+	// The runner's own report of what it hosts is recorded while the heartbeat
+	// is still known-good (runners.Heartbeat above already validated the
+	// session). Presence is the contract: nil means an old runner that does
+	// not report, and nothing is written for it; a non-nil empty report is the
+	// explicit "hosting nothing". A failed write fails the heartbeat for the
+	// same reason a failed directive read does — dropping it silently would
+	// make reconciliation treat a reporting runner as a non-reporting one,
+	// which is a silent downgrade of the signal that detects lost directives.
+	if req.HostedActivations != nil {
+		if err := c.recordHostedActivations(ctx, req.RunnerID, req.SessionID, req.HostedActivations.Activations); err != nil {
+			return protocol.HeartbeatResponse{}, normalizeRunnerError(err, c.logger, "heartbeat_hosted_activations")
+		}
+	}
 	// Drain-triggered deactivations are a durable receipt workflow rather than a
 	// drain-once reconciler queue. Merge them after the legacy directives so
 	// normal activation migration remains backward compatible while a lost
@@ -585,6 +598,20 @@ func (c *Core) deactivationDirectives(ctx context.Context, runnerID, sessionID s
 		return nil, nil
 	}
 	return directory.DeactivationDirectives(ctx, runnerID, sessionID)
+}
+
+// recordHostedActivations stores one runner's heartbeat report of what it
+// currently hosts. A directory without the ActivationDeliveryDirectory
+// capability ignores it, keeping the pre-existing behavior for custom
+// directories: the report is advisory input to redelivery, never an
+// authority, so its absence degrades to "cannot detect lost directives"
+// rather than to a wrong decision.
+func (c *Core) recordHostedActivations(ctx context.Context, runnerID, sessionID string, items []protocol.ActivationInventoryItem) error {
+	directory, ok := c.runners.(ActivationDeliveryDirectory)
+	if !ok || directory == nil {
+		return nil
+	}
+	return directory.RecordHostedActivations(ctx, runnerID, sessionID, items)
 }
 
 // reportMetrics retains one runner's Prometheus snapshot.

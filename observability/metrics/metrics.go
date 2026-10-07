@@ -365,6 +365,7 @@ var metricHelp = map[string]string{
 	"xflow_group_admission_duration_seconds":         "Duration of the backend admission round trip (store.SeedExecutionFromEntry only) for a GROUP entry unit, excluding topology resolution and the generation fence performed by the caller in service/control/core.go.",
 	"xflow_group_activation_total":                   "Activation controller actions, partitioned by action (activate/deactivate).",
 	"xflow_group_activation_generation_fenced_total": "Activation attempts rejected due to generation fence.",
+	"xflow_group_activation_redelivered_total":       "Activation directives re-sent after a runner's hosted-activation report disagreed with the assignment ledger, partitioned by action (activate/deactivate). An activate is a directive the runner never received; a deactivate is a hosted activation the ledger no longer assigns to that runner and session.",
 	"xflow_group_activation_active":                  "Number of currently active group activations.",
 	"xflow_group_selector_fallback_total":            "Default-selector fallback assignments: the grace period for a label-matching runner elapsed, so the group was assigned to a non-matching runner instead. Capability and namespace checks are never relaxed by this fallback — only the label selector is.",
 	"xflow_group_lease_acquired_total":               "Group unit leases successfully acquired, by either the local (in-process) or remote (runner-embedded) executor path.",
