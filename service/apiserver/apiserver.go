@@ -78,7 +78,12 @@ type Config struct {
 	// legitimate task lets the sweeper preempt live work and run it twice. See
 	// control.Config.LeaseTTL, which this threads to verbatim.
 	LeaseTTL time.Duration
-	Auth     control.Authenticator
+	// DeadQueuedAssignmentReapPeriod and DeadQueuedAssignmentReapBatch tune the
+	// LeaseSweeper's dead-queued-assignment reaper (see control.Config, which
+	// this threads to verbatim). Zero values keep the control-plane defaults.
+	DeadQueuedAssignmentReapPeriod time.Duration
+	DeadQueuedAssignmentReapBatch  int
+	Auth                           control.Authenticator
 	// RegistrationCodes / IssuedIdentities turn on the runner enrollment
 	// endpoint (/v1/runners/enroll). Both must be non-nil for enrollment to be
 	// live — control.NewControlPlane treats this pair as a single decision
@@ -444,24 +449,26 @@ const entryActivationStoreTTL = 24 * time.Hour
 // caller's responsibility to construct.
 func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 	ccfg := control.Config{
-		Auth:                        cfg.Auth,
-		RegistrationCodes:           cfg.RegistrationCodes,
-		IssuedIdentities:            cfg.IssuedIdentities,
-		RunnerPools:                 cfg.RunnerPools,
-		RunnerInstanceIdleTTL:       cfg.RunnerInstanceIdleTTL,
-		RunnerInstancePruneInterval: cfg.RunnerInstancePruneInterval,
-		TrustedProxies:              cfg.TrustedProxies,
-		IdentityTTL:                 cfg.IdentityTTL,
-		LeaseTTL:                    cfg.LeaseTTL,
-		EnrollmentRunnerIDPrefix:    cfg.EnrollmentRunnerIDPrefix,
-		Logger:                      cfg.Logger,
-		Metrics:                     cfg.Metrics,
-		Tracer:                      cfg.Tracer,
-		Supplies:                    cfg.Supplies,
-		EnableSupplyEncryption:      cfg.EnableSupplyEncryption,
-		SupplyKeyRotationPeriod:     cfg.SupplyKeyRotationPeriod,
-		EnableMetricsProxy:          cfg.EnableRunnerMetricsProxy,
-		MetricsReportInterval:       cfg.RunnerMetricsInterval,
+		Auth:                           cfg.Auth,
+		RegistrationCodes:              cfg.RegistrationCodes,
+		IssuedIdentities:               cfg.IssuedIdentities,
+		RunnerPools:                    cfg.RunnerPools,
+		RunnerInstanceIdleTTL:          cfg.RunnerInstanceIdleTTL,
+		RunnerInstancePruneInterval:    cfg.RunnerInstancePruneInterval,
+		TrustedProxies:                 cfg.TrustedProxies,
+		IdentityTTL:                    cfg.IdentityTTL,
+		LeaseTTL:                       cfg.LeaseTTL,
+		DeadQueuedAssignmentReapPeriod: cfg.DeadQueuedAssignmentReapPeriod,
+		DeadQueuedAssignmentReapBatch:  cfg.DeadQueuedAssignmentReapBatch,
+		EnrollmentRunnerIDPrefix:       cfg.EnrollmentRunnerIDPrefix,
+		Logger:                         cfg.Logger,
+		Metrics:                        cfg.Metrics,
+		Tracer:                         cfg.Tracer,
+		Supplies:                       cfg.Supplies,
+		EnableSupplyEncryption:         cfg.EnableSupplyEncryption,
+		SupplyKeyRotationPeriod:        cfg.SupplyKeyRotationPeriod,
+		EnableMetricsProxy:             cfg.EnableRunnerMetricsProxy,
+		MetricsReportInterval:          cfg.RunnerMetricsInterval,
 	}
 
 	useRedis := cfg.RedisConfig != nil || cfg.RedisAddr != ""

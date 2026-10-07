@@ -595,3 +595,49 @@ func TestControlPlaneStartFailsClosedWithoutTaskHandlerBinder(t *testing.T) {
 		t.Fatal("Start() = nil, want error for backend without TaskHandlerBinder capability")
 	}
 }
+
+// TestNewControlPlaneThreadsDeadQueuedReapConfig pins the last hop of the
+// dead-queued-assignment reaper's configuration: Config -> sweeperCfg ->
+// LeaseSweeper. The sweeper's own handling of these values is covered by
+// lease_sweeper_queued_test.go; what this covers is that a host setting them on
+// the control plane actually reaches the sweeper instead of being silently
+// dropped at the config literal.
+func TestNewControlPlaneThreadsDeadQueuedReapConfig(t *testing.T) {
+	cp, err := NewControlPlane(Config{
+		Backend:                        backendlocal.New(),
+		DeadQueuedAssignmentReapPeriod: 30 * time.Second,
+		DeadQueuedAssignmentReapBatch:  8192,
+	})
+	if err != nil {
+		t.Fatalf("NewControlPlane() error = %v", err)
+	}
+	if cp.sweeper == nil {
+		t.Fatal("sweeper = nil, want a sweeper carrying the configured cadence")
+	}
+	if cp.sweeper.deadQueuedPeriod != 30*time.Second {
+		t.Errorf("dead-queued period = %v, want 30s", cp.sweeper.deadQueuedPeriod)
+	}
+	if cp.sweeper.deadQueuedBatch != 8192 {
+		t.Errorf("dead-queued batch = %d, want 8192", cp.sweeper.deadQueuedBatch)
+	}
+}
+
+// And the zero case keeps the sweeper defaults, so an embedder that never sets
+// the knobs gets exactly the previous behavior.
+func TestNewControlPlaneDefaultsDeadQueuedReap(t *testing.T) {
+	cp, err := NewControlPlane(Config{Backend: backendlocal.New()})
+	if err != nil {
+		t.Fatalf("NewControlPlane() error = %v", err)
+	}
+	if cp.sweeper == nil {
+		t.Fatal("sweeper = nil")
+	}
+	if cp.sweeper.deadQueuedPeriod != DefaultDeadQueuedAssignmentReapPeriod {
+		t.Errorf("dead-queued period = %v, want the default %v",
+			cp.sweeper.deadQueuedPeriod, DefaultDeadQueuedAssignmentReapPeriod)
+	}
+	if cp.sweeper.deadQueuedBatch != defaultDeadQueuedAssignmentReapBatch {
+		t.Errorf("dead-queued batch = %d, want the default %d",
+			cp.sweeper.deadQueuedBatch, defaultDeadQueuedAssignmentReapBatch)
+	}
+}

@@ -202,6 +202,33 @@ func TestServerLeaseTTLDefaultsToUnset(t *testing.T) {
 	}
 }
 
+// The dead-queued-assignment reaper is the only drain for assignments whose
+// execution is gone. Each one is unclaimable forever, yet every runner's claim
+// scan walks past the ones sitting in front of live work, so a pass rate below
+// their arrival rate grows an unclaimable prefix without bound. Sizing the
+// rate is a deployment property — how dead the shared queue runs — which is
+// why both halves are options rather than constants.
+func TestWithServerDeadQueuedAssignmentReapReachesTheAPIConfig(t *testing.T) {
+	sc := &serverConfig{}
+	WithServerDeadQueuedAssignmentReap(30*time.Second, 8192)(sc)
+
+	cfg := buildServerAPIConfig(ServerConfig{}, sc)
+	if cfg.DeadQueuedAssignmentReapPeriod != 30*time.Second || cfg.DeadQueuedAssignmentReapBatch != 8192 {
+		t.Errorf("dead-queued reap = period %v batch %d, want 30s and 8192",
+			cfg.DeadQueuedAssignmentReapPeriod, cfg.DeadQueuedAssignmentReapBatch)
+	}
+}
+
+// Unset stays unset: zero must reach control.Config as zero so the sweeper
+// keeps its own defaults.
+func TestServerDeadQueuedAssignmentReapDefaultsToUnset(t *testing.T) {
+	cfg := buildServerAPIConfig(ServerConfig{}, &serverConfig{})
+	if cfg.DeadQueuedAssignmentReapPeriod != 0 || cfg.DeadQueuedAssignmentReapBatch != 0 {
+		t.Errorf("dead-queued reap = period %v batch %d without the option, want 0 and 0",
+			cfg.DeadQueuedAssignmentReapPeriod, cfg.DeadQueuedAssignmentReapBatch)
+	}
+}
+
 func TestWithServerRunnerInstancePruningReachesTheAPIConfig(t *testing.T) {
 	sc := &serverConfig{}
 	WithServerRunnerInstancePruning(2*time.Hour, 3*time.Minute)(sc)

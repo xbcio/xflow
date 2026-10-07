@@ -56,6 +56,21 @@ type Config struct {
 	// PollWait overrides the long-poll wait duration returned to runners when
 	// no task is available. Zero means the Server/GRPCServer default (1s).
 	PollWait time.Duration
+	// DeadQueuedAssignmentReapPeriod and DeadQueuedAssignmentReapBatch tune the
+	// LeaseSweeper's dead-queued-assignment reaper: 'queued' assignments whose
+	// execution is gone are removed from the directory at this cadence, up to
+	// this many per pass. Zero values keep the sweeper defaults
+	// (DefaultDeadQueuedAssignmentReapPeriod, 4096).
+	//
+	// The rate is an availability knob, not just housekeeping: such entries can
+	// never be claimed, yet every runner's claim scan still walks past them, and
+	// they accumulate in front of the live entries. A pass rate below the
+	// arrival rate of dead entries grows that prefix without bound, and each
+	// resume position that resets to the head must cross it again. Raise the
+	// batch (or shorten the period) when the assignment queue grows despite a
+	// healthy claim rate; the cost is Redis load per pass on shared state.
+	DeadQueuedAssignmentReapPeriod time.Duration
+	DeadQueuedAssignmentReapBatch  int
 	// RuntimeEvidenceBuffer, when non-nil, is wired into the internal engine as
 	// a read-only evidence sink. NewControlPlane converts only this typed
 	// buffer to an engine Option; it does not expose arbitrary []engine.Option.
@@ -506,6 +521,10 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		Elector:         elector,
 		Logger:          cfg.Logger,
 		RunnerDirectory: runners,
+		// Dead-queued-assignment reaping is a RunnerDirectory capability, so the
+		// cadence threads straight through; zero keeps the sweeper defaults.
+		DeadQueuedAssignmentReapPeriod: cfg.DeadQueuedAssignmentReapPeriod,
+		DeadQueuedAssignmentReapBatch:  cfg.DeadQueuedAssignmentReapBatch,
 		// The orphaned-handoff pass is the one reaper that cannot be a directory
 		// capability: settling that debt means asking the engine whether a lease
 		// still exists, and the component holding both the engine and the

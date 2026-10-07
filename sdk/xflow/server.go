@@ -102,9 +102,13 @@ type serverConfig struct {
 	production     bool
 	productionDecl apiserver.ProductionDeclaration
 
-	tracer                   tracing.Tracer
-	concurrency              int
-	leaseTTL                 time.Duration
+	tracer      tracing.Tracer
+	concurrency int
+	leaseTTL    time.Duration
+	// deadQueuedReapPeriod / deadQueuedReapBatch tune the LeaseSweeper's
+	// dead-queued-assignment reaper; see WithServerDeadQueuedAssignmentReap.
+	deadQueuedReapPeriod     time.Duration
+	deadQueuedReapBatch      int
 	outboxDiscoveryPage      int
 	outputCompression        bool
 	enableRunnerMetricsProxy bool
@@ -388,6 +392,27 @@ func WithServerConcurrency(n int) ServerOption {
 // recovery latency, not the runner's renewal interval.
 func WithServerLeaseTTL(d time.Duration) ServerOption {
 	return func(c *serverConfig) { c.leaseTTL = d }
+}
+
+// WithServerDeadQueuedAssignmentReap tunes the LeaseSweeper's dead-queued-
+// assignment reaper: 'queued' assignments whose execution is gone are removed
+// from the runner directory at this cadence, up to batch per pass. Zero values
+// keep the sweeper defaults (5m, 4096).
+//
+// The rate is an availability knob, not just housekeeping. Such entries can
+// never be claimed — the execution they name no longer exists — but every
+// runner's claim scan still walks past them on the way to live work, and they
+// accumulate in front of the live entries. A pass rate below the arrival rate
+// of dead entries grows that unclaimable prefix without bound, and every resume
+// position that resets to the head (a queue shrink does that) must cross it
+// again. Raise the batch — or shorten the period — when the assignment queue
+// grows despite a healthy claim rate; the cost is Redis load per pass on shared
+// state.
+func WithServerDeadQueuedAssignmentReap(period time.Duration, batch int) ServerOption {
+	return func(c *serverConfig) {
+		c.deadQueuedReapPeriod = period
+		c.deadQueuedReapBatch = batch
+	}
 }
 
 // WithServerOutboxDiscoveryPage sizes the durable outbox dispatcher's per-drain
@@ -704,6 +729,9 @@ func buildServerAPIConfig(cfg ServerConfig, sc *serverConfig) apiserver.Config {
 		Tracer:          sc.tracer,
 		Concurrency:     sc.concurrency,
 		LeaseTTL:        sc.leaseTTL,
+
+		DeadQueuedAssignmentReapPeriod: sc.deadQueuedReapPeriod,
+		DeadQueuedAssignmentReapBatch:  sc.deadQueuedReapBatch,
 
 		OutboxDiscoveryPage: sc.outboxDiscoveryPage,
 
