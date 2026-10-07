@@ -35,12 +35,6 @@ jobs:
     # ceiling plus lint/vet/vuln-scan overhead, and is finite so a hung job
     # cannot reach the 6h default.
     timeout-minutes: 75
-    env:
-      # Pin the WASM compilation cache to the path this job restores and saves
-      # below, instead of letting it follow os.UserCacheDir(), so the cache
-      # steps and the compiler cannot disagree about where it lives. Kept
-      # outside the workspace so it cannot affect worktree-cleanliness gates.
-      XFLOW_WASM_CACHE_DIR: ${{ runner.temp }}/xflow-wasm-cache
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -98,6 +92,19 @@ jobs:
 
       - name: Unit tests
         run: make test
+        env:
+          # Pin the WASM compilation cache to the path the cache steps above
+          # restore and save, instead of letting it follow os.UserCacheDir(),
+          # so the cache steps and the compiler cannot disagree about where it
+          # lives. Step-level, not job-level: the `runner` context is not
+          # available in a job-level `env:`, and referencing it there makes
+          # GitHub reject the whole workflow at parse time. Set on the steps
+          # that compile wasm guests — this one (via the script seam's guest
+          # tests) and the coverage step below (via the WASM package); the
+          # concurrency/stress suites never load the wasm package. Kept
+          # outside the workspace so it cannot affect worktree-cleanliness
+          # gates.
+          XFLOW_WASM_CACHE_DIR: ${{ runner.temp }}/xflow-wasm-cache
 
       - name: Concurrency tests
         run: make test-concurrency
@@ -108,6 +115,10 @@ jobs:
       # test-coverage is the single, isolated CI execution of the WASM suite.
       - name: Coverage + single WASM regression
         run: make test-coverage
+        env:
+          # Same pin as the Unit tests step above; see there for why it is
+          # step-level and why it matches the cache step's path.
+          XFLOW_WASM_CACHE_DIR: ${{ runner.temp }}/xflow-wasm-cache
 
       - name: Upload coverage
         if: success()
@@ -132,12 +143,6 @@ jobs:
     # 4 shards x 600s package timeout = 40m, plus service readiness and the
     # integration build.
     timeout-minutes: 50
-    env:
-      # The same WASM compilation cache as the `test` job, under an identical
-      # key so the two jobs share one archive: this job compiles wasm guests
-      # too, via test/integration/wasm_supply_binding_e2e_test.go and
-      # sas_tagging_e2e_test.go.
-      XFLOW_WASM_CACHE_DIR: ${{ runner.temp }}/xflow-wasm-cache
     services:
       redis:
         image: redis:7.2
@@ -225,6 +230,12 @@ jobs:
       - name: Integration tests
         run: make test-integration-required 2>&1 | tee integration-test-output.json
         env:
+          # The same WASM compilation cache as the `test` job, under an
+          # identical key so the two jobs share one archive: this job compiles
+          # wasm guests too, via test/integration/wasm_supply_binding_e2e_test.go
+          # and sas_tagging_e2e_test.go. Step-level because the `runner` context
+          # is not available in a job-level `env:`.
+          XFLOW_WASM_CACHE_DIR: ${{ runner.temp }}/xflow-wasm-cache
           XFLOW_TEST_REDIS_ADDR: 127.0.0.1:6379
           XFLOW_TEST_MYSQL_DSN: "root:xflow@tcp(127.0.0.1:3306)/xflow?parseTime=true"
           XFLOW_TEST_KAFKA_BROKERS: 127.0.0.1:9092
