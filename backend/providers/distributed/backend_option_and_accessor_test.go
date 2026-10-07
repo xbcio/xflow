@@ -149,11 +149,13 @@ func TestTriggerPrimitivesAccessorIsBackedByTheBackendsOwnRedis(t *testing.T) {
 // of which still passed). Three real call sites hand this accessor a TTL and
 // not one of them notices when it is thrown away.
 //
-// rstate's Upsert EXPIREs only the activation hash key (KEYS[2]); the workflow
-// watermark key (KEYS[1]) is written with SET and never expires. So after one
-// Upsert exactly one key in the whole database should carry a TTL, and it
-// should equal the ttl argument exactly (EXPIRE takes whole seconds and both
-// probed durations here are whole seconds, so no truncation ambiguity).
+// rstate's Upsert EXPIREs the activation hash key (KEYS[2]) and its
+// per-workflow activation index (KEYS[3]), both under the same TTL; the
+// workflow watermark key (KEYS[1]) is written with SET and never expires. So
+// after one Upsert exactly two keys in the whole database should carry a TTL,
+// and each should equal the ttl argument exactly (EXPIRE takes whole seconds
+// and both probed durations here are whole seconds, so no truncation
+// ambiguity).
 func TestNewEntryActivationStoreHonorsTheConfiguredTTLOnTheBackendsRedis(t *testing.T) {
 	for _, ttl := range []time.Duration{2 * time.Second, 9 * time.Second} {
 		t.Run(ttl.String(), func(t *testing.T) {
@@ -185,21 +187,23 @@ func TestNewEntryActivationStoreHonorsTheConfiguredTTLOnTheBackendsRedis(t *test
 					"reachable through the backend's own Redis client", err)
 			}
 
-			var expiring []string
+			expiring := make(map[string]time.Duration)
 			for _, k := range mr.Keys() {
-				if mr.TTL(k) > 0 {
-					expiring = append(expiring, k)
+				if keyTTL := mr.TTL(k); keyTTL > 0 {
+					expiring[k] = keyTTL
 				}
 			}
-			if len(expiring) != 1 {
+			if len(expiring) != 2 {
 				t.Fatalf("keys with a positive TTL after Upsert = %v, want exactly "+
-					"1 (the activation hash); the workflow watermark key must stay "+
-					"persistent", expiring)
+					"2 (the activation hash and its workflow activation index); the "+
+					"workflow watermark key must stay persistent", expiring)
 			}
-			if got := mr.TTL(expiring[0]); got != ttl {
-				t.Fatalf("activation key TTL = %v, want exactly the configured %v: "+
-					"NewEntryActivationStore is not passing the ttl argument through "+
-					"to the store it builds", got, ttl)
+			for key, got := range expiring {
+				if got != ttl {
+					t.Fatalf("key %q TTL = %v, want exactly the configured %v: "+
+						"NewEntryActivationStore is not passing the ttl argument "+
+						"through to the store it builds", key, got, ttl)
+				}
 			}
 		})
 	}
