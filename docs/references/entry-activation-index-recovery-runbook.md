@@ -17,7 +17,7 @@ call on the reconciler, heartbeat, and projection paths
 > (`TestEntryActivationIndexManualRecoveryLeversRebuildsLostState`,
 > `backend/providers/distributed/internal/rstate/entry_activation_index_regression_test.go:389`),
 > against miniredis. It has never been rehearsed against a live deployment. The
-> procedure below is derived from source; §4's sweep-cost estimate is the one
+> procedure below is derived from source; §3's sweep-cost estimate is the one
 > number to establish for your deployment before you need this runbook under
 > pressure.
 
@@ -50,11 +50,12 @@ Two failure modes exist:
 - **F1 — the index no longer names a live record.** Either (a) the workflow's tag
   is missing from `wfs`, or (b) a record key is missing from its per-workflow
   index. List then silently omits those records. Case (a) is the dangerous one:
-  it is the single index link with no automatic repair once `:ready` is set —
-  every other link is re-derived from the records' own writes, but a missing tag
-  makes the whole workflow invisible, with no reconciliation and no unassignment,
-  until the ready gate is reset (`entry_activation.go:123`). Nothing in the
-  process that lost the tag can observe the loss.
+  it is the one index link with no rebuild behind it once `:ready` is set. Its
+  only automatic repair is the next write to that workflow — every write
+  re-registers the tag unconditionally — so a tag lost with no subsequent write
+  leaves the whole workflow invisible, with no reconciliation and no
+  unassignment, until the ready gate is reset (`entry_activation.go:123`).
+  Nothing in the process that lost the tag can observe the loss.
 - **F2 — the rebuild cannot run.** `:ready` stays unset, List keeps serving the
   scan path — correct results, but every call is a full sweep. Rebuild attempts
   fail and are logged when a logger is installed (the distributed backend
@@ -105,10 +106,10 @@ What happens next, in any process that serves a List for that namespace:
 
 1. That call re-probes `:ready`, finds it unset, serves from the scan path, and
    asks for a rebuild.
-2. The rebuild is single-flight and debounced per process (at most one attempt
-   per 30 s, `entry_activation_index.go:50`) and serialized across processes by
-   the `:rebuild` lock (TTL 30 min, `:54`); each attempt is bounded by a 25-min
-   budget (`:58`).
+2. The rebuild is single-flight and debounced per process, per namespace (at
+   most one attempt per 30 s, `entry_activation_index.go:50`) and serialized
+   across processes by the `:rebuild` lock (TTL 30 min, `:54`); each attempt is
+   bounded by a 25-min budget (`:58`).
 3. The rebuild re-derives all three sets and re-sets `:ready`
    (`entry_activation_index.go:138`).
 
@@ -144,9 +145,10 @@ The rebuild is **additive only**:
 - It never deletes index members, record keys, or watermarks. Stale members
   (records that have expired) are harmless: the read path reads members via
   `HGETALL`, and an empty record contributes nothing.
-- A record written *during* the sweep is covered by its own write path, which
-  maintains its tag and index member in the same slot as the record; a sweep
-  that misses it changes nothing.
+- A record written *during* the sweep is covered by its own write path: the
+  per-workflow index member is maintained in the record's slot in the same Lua
+  call, and the enumeration tag is registered in a separate fail-closed call
+  before the record is written. A sweep that misses the record changes nothing.
 - Repeating it, or (after deleting the lock) running two concurrently, is
   wasteful but cannot corrupt state.
 
