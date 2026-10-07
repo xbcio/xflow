@@ -55,23 +55,33 @@ type deactivationAckKey struct {
 // in the batch and push back the runner's next heartbeat tick.
 //
 // acked remembers, per (WorkflowID, WorkflowVersion, EntryUnitID, ReplicaIndex),
-// the highest generation already acked. Generation is monotonic within a single
-// EntryActivationKey (which includes version and replica) and assigned by the reconciler on
-// every redispatch, so a supply that stays unavailable makes the runner
-// re-attempt (and re-fail) the SAME generation on every heartbeat — deduping
-// on it turns that into exactly one ack per redispatch instead of one per
-// retry, which is what keeps a long outage from becoming an ack storm. When a
-// higher generation does arrive (a genuine redispatch), the entry is
-// overwritten rather than left to accumulate, so the map's size is bounded by
-// the number of distinct activations this runner has ever attempted, not by
-// how many times any one of them has been retried.
+// the highest generation whose failure ack was successfully DELIVERED.
+// Generation is monotonic within a single EntryActivationKey (which includes
+// version and replica) and assigned by the reconciler on every redispatch, so
+// a supply that stays unavailable makes the runner re-attempt (and re-fail)
+// the SAME generation on every heartbeat — deduping on a delivered ack turns
+// that into exactly one ack per redispatch instead of one per retry, which is
+// what keeps a long outage from becoming an ack storm. When a higher
+// generation does arrive (a genuine redispatch), the entry is overwritten
+// rather than left to accumulate, so the map's size is bounded by the number
+// of distinct activations this runner has ever attempted, not by how many
+// times any one of them has been retried.
+//
+// "Delivered" is the load-bearing word: a failed send must NOT count, or a
+// single lost request would permanently suppress the failure signal for that
+// (key, generation) — the server would never learn this runner cannot take
+// the activation, and its report-driven redelivery would keep missing the
+// reason. activationAckInFlight is the other half of that: it dedups
+// concurrent/repeated attempts while one send is still outstanding, so
+// retrying after a failure cannot turn into an ack storm.
 type activationAcker struct {
 	client   activationAckClient
 	runnerID string
 	logger   *slog.Logger
 
-	mu    sync.Mutex
-	acked map[activationAckKey]uint64
+	mu                    sync.Mutex
+	acked                 map[activationAckKey]uint64
+	activationAckInFlight map[activationAckKey]uint64
 	// Deactivation receipts are durable cleanup evidence, unlike failed
 	// activation acks. Do not mark one delivered until the HTTP call succeeds;
 	// a lost response must be retried when the server re-delivers its obligation.
@@ -84,35 +94,62 @@ func newActivationAcker(client activationAckClient, runnerID string, logger *slo
 		logger = slog.Default()
 	}
 	return &activationAcker{
-		client:               client,
-		runnerID:             runnerID,
-		logger:               logger,
-		acked:                make(map[activationAckKey]uint64),
-		deactivated:          make(map[deactivationAckKey]bool),
-		deactivationInFlight: make(map[deactivationAckKey]bool),
+		client:                client,
+		runnerID:              runnerID,
+		logger:                logger,
+		acked:                 make(map[activationAckKey]uint64),
+		activationAckInFlight: make(map[activationAckKey]uint64),
+		deactivated:           make(map[deactivationAckKey]bool),
+		deactivationInFlight:  make(map[deactivationAckKey]bool),
 	}
 }
 
-// shouldAck reports whether (key, generation) has not yet been acked and, if
-// so, records it as acked. Synchronous and cheap — this is what makes
-// ackFailed's dedup decision race-free even when called back-to-back from the
-// same goroutine: the second call for an identical failure observes the
-// first call's bookkeeping before any goroutine is spawned.
-func (a *activationAcker) shouldAck(key activationAckKey, generation uint64) bool {
+// beginActivationAck reserves (key, generation) for one send and reports
+// whether the caller should proceed. It returns false when a delivery for the
+// same or a newer generation already succeeded, or while one is in flight —
+// the same "do not mark delivered until the call succeeds" discipline the
+// deactivation receipts use. Synchronous and cheap, so ackFailed's dedup
+// decision is race-free even when called back-to-back: the second call
+// observes the first call's in-flight entry before any goroutine is spawned.
+func (a *activationAcker) beginActivationAck(key activationAckKey, generation uint64) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if last, ok := a.acked[key]; ok && last >= generation {
 		return false
 	}
-	a.acked[key] = generation
+	if pending, ok := a.activationAckInFlight[key]; ok && pending >= generation {
+		return false
+	}
+	a.activationAckInFlight[key] = generation
 	return true
 }
 
-// ackFailed reports one failed activate directive, deduped per
-// (WorkflowID, WorkflowVersion, EntryUnitID, ReplicaIndex, Generation) and sent asynchronously
-// so the caller (ActivationTracker's callback, invoked from ProcessDirectives)
-// never blocks on network I/O. err.Error() is the only thing that travels in
-// the ack body — never the directive's Params or any supply content.
+// finishActivationAck releases the in-flight reservation. Only a successful
+// send advances acked; a failed one clears the reservation so the next
+// onActivateFailed for this activation (every redelivery of the directive
+// re-triggers it) can try again.
+func (a *activationAcker) finishActivationAck(key activationAckKey, generation uint64, delivered bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.activationAckInFlight, key)
+	if delivered {
+		if last, ok := a.acked[key]; !ok || generation > last {
+			a.acked[key] = generation
+		}
+	}
+}
+
+// ackFailed reports one failed activate directive, deduped per successfully
+// delivered (WorkflowID, WorkflowVersion, EntryUnitID, ReplicaIndex,
+// Generation) with an in-flight guard, and sent asynchronously so the caller
+// (ActivationTracker's callback, invoked from ProcessDirectives) never blocks
+// on network I/O. err.Error() is the only thing that travels in the ack body —
+// never the directive's Params or any supply content.
+//
+// A send that fails releases its reservation instead of recording the ack, so
+// the next failure for the same directive retries it: with server-side
+// redelivery pacing the directive arrives again (same generation) and the
+// handler fails again, which re-enters this method.
 func (a *activationAcker) ackFailed(sessionID string, d protocol.ActivateDirective, err error) {
 	key := activationAckKey{
 		WorkflowID:      d.WorkflowID,
@@ -120,7 +157,7 @@ func (a *activationAcker) ackFailed(sessionID string, d protocol.ActivateDirecti
 		EntryUnitID:     d.EntryUnitID,
 		ReplicaIndex:    d.ReplicaIndex,
 	}
-	if !a.shouldAck(key, d.Generation) {
+	if !a.beginActivationAck(key, d.Generation) {
 		return
 	}
 
@@ -153,6 +190,7 @@ func (a *activationAcker) ackFailed(sessionID string, d protocol.ActivateDirecti
 	go func() {
 		defer func() {
 			if rec := recover(); rec != nil {
+				a.finishActivationAck(key, d.Generation, false)
 				a.logger.Error("activation ack panicked",
 					"workflow_id", d.WorkflowID,
 					"group_id", d.EntryUnitID,
@@ -163,7 +201,9 @@ func (a *activationAcker) ackFailed(sessionID string, d protocol.ActivateDirecti
 		}()
 		ctx, cancel := context.WithTimeout(context.Background(), activationAckTimeout)
 		defer cancel()
-		if sendErr := a.client.ActivationAck(ctx, ack); sendErr != nil {
+		sendErr := a.client.ActivationAck(ctx, ack)
+		a.finishActivationAck(key, d.Generation, sendErr == nil)
+		if sendErr != nil {
 			a.logger.Warn("activation ack failed",
 				"workflow_id", d.WorkflowID,
 				"group_id", d.EntryUnitID,

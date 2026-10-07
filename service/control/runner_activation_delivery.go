@@ -2,9 +2,12 @@ package control
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -88,8 +91,29 @@ type HostedActivationsReport struct {
 // name. Same activation identity => same field => a re-enqueue overwrites its
 // predecessor, which is a feature: the newest directive for an activation is
 // the only one worth delivering.
+//
+// The rendering is length-prefixed components fed into SHA-256, the same
+// scheme as deactivationObligationID (runner_activation_cleanup.go). A plain
+// delimiter join is NOT safe here because workflowVersion and entryUnitID are
+// workflow-definition-controlled strings: ("v1/x", "tg") and ("v1", "x/tg")
+// would render identically and two distinct activations would evict each
+// other's directives forever, with the perpetual absence tripping the
+// redelivery loop.
 func activationDirectiveKey(namespace, workflowID, workflowVersion, entryUnitID string, replicaIndex uint32) string {
-	return fmt.Sprintf("%s/%s/%s/%s/%d", namespace, workflowID, workflowVersion, entryUnitID, replicaIndex)
+	hash := sha256.New()
+	for _, component := range []string{
+		namespace,
+		workflowID,
+		workflowVersion,
+		entryUnitID,
+		strconv.FormatUint(uint64(replicaIndex), 10),
+	} {
+		var length [8]byte
+		binary.BigEndian.PutUint64(length[:], uint64(len(component)))
+		_, _ = hash.Write(length[:])
+		_, _ = hash.Write([]byte(component))
+	}
+	return hex.EncodeToString(hash.Sum(nil))
 }
 
 func activationDirectiveKeyOfActivate(d protocol.ActivateDirective) string {

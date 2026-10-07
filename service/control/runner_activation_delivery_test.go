@@ -460,3 +460,42 @@ func TestMemoryHostedActivationsReportFreshness(t *testing.T) {
 		t.Fatalf("stale report: ok=%v err=%v, want ok=false", ok, err)
 	}
 }
+
+// TestActivationDirectiveKeyIsDelimiterSafe pins the F6 fix: the dedup key is
+// a length-prefixed SHA-256 of the identity components, so two distinct
+// activations whose components only differ in how a delimiter would have split
+// them can never share a queue field and evict each other.
+func TestActivationDirectiveKeyIsDelimiterSafe(t *testing.T) {
+	left := activationDirectiveKey("default", "wf-a", "v1/x", "tg", 0)
+	right := activationDirectiveKey("default", "wf-a", "v1", "x/tg", 0)
+	if left == right {
+		t.Fatalf("ambiguous components collided on one key: %q", left)
+	}
+	// Identical identities still render identically — the dedup feature the
+	// key exists for is unchanged.
+	if activationDirectiveKey("default", "wf-a", "v1", "tg", 2) != activationDirectiveKey("default", "wf-a", "v1", "tg", 2) {
+		t.Fatal("same identity rendered two different keys")
+	}
+	if activationDirectiveKey("default", "wf-a", "v1", "tg", 0) == activationDirectiveKey("default", "wf-a", "v1", "tg", 1) {
+		t.Fatal("different replicas rendered the same key")
+	}
+
+	// End to end: both ambiguous activations can be pending at once.
+	ctx := context.Background()
+	directory := NewMemoryRunnerDirectory()
+	first := protocol.ActivateDirective{Namespace: "default", WorkflowID: "wf-a", WorkflowVersion: "v1/x", EntryUnitID: "tg", Generation: 1}
+	second := protocol.ActivateDirective{Namespace: "default", WorkflowID: "wf-a", WorkflowVersion: "v1", EntryUnitID: "x/tg", Generation: 1}
+	if err := directory.EnqueueActivationDirective(ctx, "runner-1", "sess-1", first); err != nil {
+		t.Fatalf("enqueue first: %v", err)
+	}
+	if err := directory.EnqueueActivationDirective(ctx, "runner-1", "sess-1", second); err != nil {
+		t.Fatalf("enqueue second: %v", err)
+	}
+	activates, _, err := directory.ActivationDirectives(ctx, "runner-1", "sess-1")
+	if err != nil {
+		t.Fatalf("ActivationDirectives: %v", err)
+	}
+	if len(activates) != 2 {
+		t.Fatalf("drained %d activates, want both ambiguous identities to survive", len(activates))
+	}
+}

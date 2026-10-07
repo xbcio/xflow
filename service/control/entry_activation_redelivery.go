@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"time"
 
 	"github.com/xbcio/xflow/engine"
 )
@@ -19,7 +20,16 @@ import (
 // offers the ActivationDeliveryDirectory capability AND the runner reports a
 // fresh, session-matching report; a runner that does not report (an old
 // binary) is skipped entirely, which keeps this a pure addition on top of the
-// existing lease-based reconciliation.
+// existing lease-based reconciliation. The one exception is an activation
+// whose ledger record predates session tracking (empty SessionID): its report
+// is the only addressable session, so it is accepted as the delivery address
+// without weakening any generation or ownership check.
+//
+// The activate direction is paced by the same retryBackoff the runner-decline
+// path uses (see the healthy branch of reconcileExisting): without it, a lost
+// directive and a lost ack would form a livelock — every reconcile pass
+// re-sends, the metric climbs forever, and the escalation ladder is never
+// reached.
 
 // hostedActivationsView is one reconcile pass's cached read of every live
 // runner's most recent hosted-activation report. The pass reads each runner
@@ -45,6 +55,44 @@ type hostedRunnerActivations struct {
 func (v hostedActivationsView) reportFor(runnerID string) (hostedRunnerActivations, bool) {
 	report, ok := v.reports[runnerID]
 	return report, ok
+}
+
+// hostedReportVerdict classifies what (if anything) the owner's own report
+// says about one activation. It is the shared judgment behind both the
+// scheduling decision (may the backoff be cleared this pass?) and the
+// redelivery gate, so the two can never disagree about what the runner said.
+type hostedReportVerdict int
+
+const (
+	// hostedReportNoEvidence: no capability, no report for the owner, or a
+	// report from a different session. Says nothing about the activation.
+	hostedReportNoEvidence hostedReportVerdict = iota
+	// hostedReportConfirmed: the owner's current, session-matching report
+	// contains the identity at a generation at or above the ledger's.
+	hostedReportConfirmed
+	// hostedReportMissing: the owner's current, session-matching report does
+	// NOT contain the identity, or contains a stale generation. The runner is
+	// alive, reachable, and telling us it is not hosting this activation.
+	hostedReportMissing
+)
+
+// verdictFor renders the verdict for act against this pass's reports. The
+// session rule mirrors redeliverMissingActivation: an empty act.SessionID
+// (record predating session tracking) accepts any fresh report for the owner
+// as evidence, a recorded one requires the report to match it. Reports are
+// fresh by construction (loadHostedActivations only caches fresh reads).
+func (v hostedActivationsView) verdictFor(act *engine.EntryActivation) hostedReportVerdict {
+	report, ok := v.reports[act.RunnerID]
+	if !ok {
+		return hostedReportNoEvidence
+	}
+	if act.SessionID != "" && report.session != act.SessionID {
+		return hostedReportNoEvidence
+	}
+	if generation, reported := report.index[deactivationInventoryKeyFromActivation(act)]; reported && generation >= act.Generation {
+		return hostedReportConfirmed
+	}
+	return hostedReportMissing
 }
 
 // loadHostedActivations reads every live runner's report once. A read error is
@@ -114,22 +162,30 @@ func deactivationInventoryKeyFromActivation(act *engine.EntryActivation) deactiv
 // would tear down the newer subscription and install the older one. That is
 // why the generation comes from a fresh store read, never from arithmetic on
 // the pass's snapshot.
-func (r *EntryActivationReconciler) redeliverMissingActivation(ctx context.Context, act *engine.EntryActivation, hosted hostedActivationsView) {
-	if r.cfg.Delivery == nil || act.SessionID == "" {
+//
+// Pacing: an actual send is recorded as a failure on the key's retryBackoff
+// entry, so the next attempt waits out the same jittered backoff a runner
+// decline would produce, and a permanently missing activation escalates
+// through the "entry activation repeatedly failing" ladder instead of
+// re-sending once per pass forever. The send itself is skipped while the
+// backoff window is open (no directive, no metric, no failure count).
+//
+// Session addressing: a record with an empty SessionID predates session
+// tracking (the owner is known, the session is not) and Reconciler.Renew
+// never backfills it, so such a record would otherwise never be repairable.
+// Its owner's current report session is the only address that exists for it;
+// the directive goes there, with every generation and ownership check below
+// unchanged.
+func (r *EntryActivationReconciler) redeliverMissingActivation(ctx context.Context, act *engine.EntryActivation, hosted hostedActivationsView, now time.Time) {
+	if r.cfg.Delivery == nil {
 		return
 	}
-	report, ok := hosted.reportFor(act.RunnerID)
-	// A report from a different session cannot speak for this assignment: it
-	// was written before the reconnect that produced the recorded session, so
-	// its "hosts nothing" may simply be the state the reconnect wiped.
-	if !ok || report.session != act.SessionID {
+	if hosted.verdictFor(act) != hostedReportMissing {
 		return
 	}
-	identity := deactivationInventoryKeyFromActivation(act)
-	if generation, reported := report.index[identity]; reported && generation >= act.Generation {
-		// Hosted at the current (or a newer) generation — nothing to repair.
-		return
-	}
+	// verdictFor == hostedReportMissing guarantees a report for this owner
+	// whose session this assignment may trust (matching, or act has none).
+	report, _ := hosted.reportFor(act.RunnerID)
 
 	// Re-read the store before sending anything: the pass's snapshot may be
 	// stale relative to a concurrent fence/reassign, and a directive derived
@@ -149,20 +205,40 @@ func (r *EntryActivationReconciler) redeliverMissingActivation(ctx context.Conte
 		}
 		return
 	}
-	if !found || !current.Desired || current.RunnerID != act.RunnerID || current.SessionID != act.SessionID {
+	if !found || !current.Desired || current.RunnerID != act.RunnerID {
+		return
+	}
+	if current.SessionID != "" && current.SessionID != act.SessionID {
 		return
 	}
 	// Re-check against the freshly read generation: between the pass snapshot
 	// and now the assignment may have advanced, in which case the report may
 	// already cover it.
-	if generation, reported := report.index[identity]; reported && generation >= current.Generation {
+	if generation, reported := report.index[deactivationInventoryKeyFromActivation(&current)]; reported && generation >= current.Generation {
+		return
+	}
+	// Backoff window still open from the previous redelivery: skip without
+	// counting anything — a withheld attempt is not a failure.
+	if r.retryBlocked(key, now) {
 		return
 	}
 
-	r.deliverActivationDirective(ctx, current.RunnerID, current.SessionID, r.activateDirectiveFor(ctx, &current, current.Generation))
+	deliverSession := current.SessionID
+	if deliverSession == "" {
+		deliverSession = report.session
+	}
+	r.deliverActivationDirective(ctx, current.RunnerID, deliverSession, r.activateDirectiveFor(ctx, &current, current.Generation))
 	r.recordGroupActivationRedelivered(&current, "activate")
+	// One attempt was made; pace the next one. This is recorded from the
+	// freshly read record, so the retained failure state names the generation
+	// the directive carried.
+	r.recordActivationFailure(key, activationFailureInfo{
+		reason:     redeliveryReasonRunnerNotHosting,
+		runnerID:   current.RunnerID,
+		generation: current.Generation,
+	}, now)
 	if r.cfg.Logger != nil {
-		reported, _ := report.index[identity]
+		reported, _ := report.index[deactivationInventoryKeyFromActivation(&current)]
 		r.cfg.Logger.Warn("entry activation: redelivered activate directive the runner did not report hosting",
 			"workflow_id", current.WorkflowID,
 			"workflow_version", current.WorkflowVersion,

@@ -387,3 +387,143 @@ func (c *flakyDeactivationAckClient) ActivationAck(_ context.Context, ack protoc
 	}
 	return nil
 }
+
+// TestActivationAckRetriesAfterTransportFailure pins the F1b fix: a failed
+// send must NOT count as acked. Before it, the dedup map was written before
+// the HTTP call, so one lost request permanently suppressed the failure
+// signal for that (activation, generation) — the server never learned why the
+// runner could not take the activation. Now the reservation is released on
+// failure and the next onActivateFailed (which every redelivery re-triggers)
+// sends again, while an in-flight or already-delivered ack still dedups.
+func TestActivationAckRetriesAfterTransportFailure(t *testing.T) {
+	client := newScriptedActivationAckClient()
+	acker := newActivationAcker(client, "runner-1", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	d := protocol.ActivateDirective{WorkflowID: "wf-1", WorkflowVersion: "v1", EntryUnitID: "grp-a", Generation: 5}
+	activateErr := errors.New("supply not ready")
+
+	// First failure: the send is observed entering the client, then fails.
+	acker.ackFailed("session-1", d, activateErr)
+	client.waitForCall(t, 1)
+
+	// A repeated failure while the first send is still in flight must not
+	// dispatch a second request.
+	acker.ackFailed("session-1", d, activateErr)
+	if got := client.callCount(); got != 1 {
+		t.Fatalf("calls while one is in flight = %d, want 1", got)
+	}
+	client.releaseCall(t, 1, errors.New("transport down"))
+
+	// The failed send releases its reservation: the record must not be marked
+	// delivered, and the next failure for the same directive must send again.
+	waitForActivationAckState(t, acker, d, func(a *activationAcker) bool {
+		_, busy := a.activationAckInFlight[activationAckKeyOf(d)]
+		return !busy
+	}, "in-flight reservation released after a failed send")
+	if got := client.callCount(); got != 1 {
+		t.Fatalf("calls before the retry = %d, want 1", got)
+	}
+
+	acker.ackFailed("session-1", d, activateErr)
+	client.waitForCall(t, 2)
+	client.releaseCall(t, 2, nil)
+	waitForActivationAckState(t, acker, d, func(a *activationAcker) bool {
+		return a.acked[activationAckKeyOf(d)] >= d.Generation
+	}, "ack recorded after a successful send")
+
+	// A delivered ack still dedups: another failure for the same generation
+	// dispatches nothing.
+	acker.ackFailed("session-1", d, activateErr)
+	if got := client.callCount(); got != 2 {
+		t.Fatalf("calls after a delivered ack = %d, want still 2", got)
+	}
+}
+
+func activationAckKeyOf(d protocol.ActivateDirective) activationAckKey {
+	return activationAckKey{
+		WorkflowID:      d.WorkflowID,
+		WorkflowVersion: d.WorkflowVersion,
+		EntryUnitID:     d.EntryUnitID,
+		ReplicaIndex:    d.ReplicaIndex,
+	}
+}
+
+// scriptedActivationAckClient blocks every call until the test releases it, so
+// in-flight and post-failure ordering are deterministic rather than polled.
+type scriptedActivationAckClient struct {
+	mu      sync.Mutex
+	calls   int
+	release []chan error
+	entered chan int
+}
+
+func newScriptedActivationAckClient() *scriptedActivationAckClient {
+	return &scriptedActivationAckClient{entered: make(chan int, 8)}
+}
+
+func (c *scriptedActivationAckClient) ActivationAck(context.Context, protocol.ActivationAck) error {
+	c.mu.Lock()
+	c.calls++
+	call := c.calls
+	ch := make(chan error, 1)
+	c.release = append(c.release, ch)
+	c.mu.Unlock()
+	c.entered <- call
+	return <-ch
+}
+
+func (c *scriptedActivationAckClient) callCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+func (c *scriptedActivationAckClient) waitForCall(t *testing.T, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		select {
+		case n := <-c.entered:
+			if n >= want {
+				return
+			}
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for call %d (observed %d)", want, c.callCount())
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+func (c *scriptedActivationAckClient) releaseCall(t *testing.T, call int, err error) {
+	t.Helper()
+	c.mu.Lock()
+	if call > len(c.release) {
+		c.mu.Unlock()
+		t.Fatalf("release call %d before it was entered", call)
+	}
+	ch := c.release[call-1]
+	c.mu.Unlock()
+	ch <- err
+}
+
+// waitForActivationAckState polls the acker's internal bookkeeping under its
+// own mutex until cond holds. Every condition used here is a terminal state
+// (a reservation is removed, an ack is recorded) reached in bounded time, so
+// the poll can only confirm it, never manufacture it.
+func waitForActivationAckState(t *testing.T, acker *activationAcker, d protocol.ActivateDirective, cond func(*activationAcker) bool, what string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		acker.mu.Lock()
+		ok := cond(acker)
+		acker.mu.Unlock()
+		if ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for: %s", what)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
