@@ -18,10 +18,14 @@ type fakeEntryActivationMetrics struct {
 	fenced           int
 	activeSets       []float64
 	selectorFallback int
+	redeliveries     map[string]int
 }
 
 func newFakeEntryActivationMetrics() *fakeEntryActivationMetrics {
-	return &fakeEntryActivationMetrics{actionCounts: make(map[string]int)}
+	return &fakeEntryActivationMetrics{
+		actionCounts: make(map[string]int),
+		redeliveries: make(map[string]int),
+	}
 }
 
 func (f *fakeEntryActivationMetrics) OnGroupActivation(action string) {
@@ -38,6 +42,10 @@ func (f *fakeEntryActivationMetrics) SetGroupActivationActive(value float64) {
 
 func (f *fakeEntryActivationMetrics) OnGroupSelectorFallback() {
 	f.selectorFallback++
+}
+
+func (f *fakeEntryActivationMetrics) OnGroupActivationRedelivered(action string) {
+	f.redeliveries[action]++
 }
 
 // lastActive returns the most recently Set gauge value, or -1 if Set was

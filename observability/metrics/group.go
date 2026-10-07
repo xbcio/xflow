@@ -92,6 +92,18 @@ func (g *GroupMetrics) OnGroupActivationFenced() {
 	g.m.Inc("xflow_group_activation_generation_fenced_total", nil)
 }
 
+// OnGroupActivationRedelivered increments the redelivered directive counter
+// with the action label. Action values: activate, deactivate.
+//
+// It counts directives RE-SENT because the runner's hosted-activation report
+// disagreed with the assignment ledger — the observable form of a directive
+// that was lost and has now been recovered. The caller
+// (entry_activation_reconciler.go) reports only GROUP entry units, mirroring
+// the other xflow_group_* series.
+func (g *GroupMetrics) OnGroupActivationRedelivered(action string) {
+	g.m.Inc("xflow_group_activation_redelivered_total", map[string]string{"action": action})
+}
+
 // SetGroupActivationActive sets the gauge of currently active group activations.
 func (g *GroupMetrics) SetGroupActivationActive(value float64) {
 	g.m.Set("xflow_group_activation_active", nil, value)

@@ -478,21 +478,50 @@ func (c *Core) heartbeat(ctx context.Context, req protocol.HeartbeatRequest, inf
 		return protocol.HeartbeatResponse{}, normalizeRunnerError(err, c.logger, "heartbeat")
 	}
 	resp := protocol.HeartbeatResponse{ServerTime: time.Now().Unix()}
-	// The node-generic entry reconciler supplies activation directives when wired.
-	if c.entryReconciler != nil {
-		resp.Activations = c.entryReconciler.DirectivesForRunner(req.RunnerID)
+	// The runner's own report of what it hosts is recorded while the heartbeat
+	// is still known-good (runners.Heartbeat above already validated the
+	// session). Presence is the contract: nil means an old runner that does
+	// not report, and nothing is written for it; a non-nil empty report is the
+	// explicit "hosting nothing". A failed write fails the heartbeat for the
+	// same reason a failed directive read does — dropping it silently would
+	// make reconciliation treat a reporting runner as a non-reporting one,
+	// which is a silent downgrade of the signal that detects lost directives.
+	if req.HostedActivations != nil {
+		if err := c.recordHostedActivations(ctx, req.RunnerID, req.SessionID, req.HostedActivations.Activations); err != nil {
+			return protocol.HeartbeatResponse{}, normalizeRunnerError(err, c.logger, "heartbeat_hosted_activations")
+		}
 	}
 	// Drain-triggered deactivations are a durable receipt workflow rather than a
-	// drain-once reconciler queue. Merge them after the legacy directives so
-	// normal activation migration remains backward compatible while a lost
-	// heartbeat response is retried until the matching receipt arrives.
-	if directives, err := c.deactivationDirectives(ctx, req.RunnerID, req.SessionID); err != nil {
+	// drain-once reconciler queue. Read (not yet merged) here, before the
+	// destructive drain below: a lost heartbeat response is retried until the
+	// matching receipt arrives, so reading early costs nothing.
+	deactivationReceipts, err := c.deactivationDirectives(ctx, req.RunnerID, req.SessionID)
+	if err != nil {
 		return protocol.HeartbeatResponse{}, normalizeRunnerError(err, c.logger, "heartbeat_deactivation_directives")
-	} else if len(directives) > 0 {
+	}
+	// The node-generic entry reconciler supplies activation directives when
+	// wired, and its read is DESTRUCTIVE: the durable queue deletes what it
+	// returns. It therefore runs LAST among the steps that can fail — if any
+	// earlier step failed, the queued directives are untouched and the
+	// runner's next heartbeat retries and takes them, whereas draining first
+	// would let a later failure drop a response whose directives were already
+	// removed (a disconnect between two commands is enough). A failed drain
+	// still fails the heartbeat: the runner retries, and a silent empty
+	// response would look exactly like "nothing pending".
+	if c.entryReconciler != nil {
+		activations, err := c.entryReconciler.DirectivesForRunnerPersistent(ctx, req.RunnerID, req.SessionID)
+		if err != nil {
+			return protocol.HeartbeatResponse{}, normalizeRunnerError(err, c.logger, "heartbeat_activation_directives")
+		}
+		resp.Activations = activations
+	}
+	// Merge the receipts after the drain so the response shape stays
+	// backward compatible (reconciler directives first, receipts appended).
+	if len(deactivationReceipts) > 0 {
 		if resp.Activations == nil {
 			resp.Activations = &protocol.HeartbeatActivations{}
 		}
-		resp.Activations.Deactivate = append(resp.Activations.Deactivate, directives...)
+		resp.Activations.Deactivate = append(resp.Activations.Deactivate, deactivationReceipts...)
 	}
 	// Supply hints/observed reporting: both optional, wired only when
 	// Config.Supplies is provided (see ControlPlane assembly). Nil means this
@@ -576,6 +605,20 @@ func (c *Core) deactivationDirectives(ctx context.Context, runnerID, sessionID s
 		return nil, nil
 	}
 	return directory.DeactivationDirectives(ctx, runnerID, sessionID)
+}
+
+// recordHostedActivations stores one runner's heartbeat report of what it
+// currently hosts. A directory without the ActivationDeliveryDirectory
+// capability ignores it, keeping the pre-existing behavior for custom
+// directories: the report is advisory input to redelivery, never an
+// authority, so its absence degrades to "cannot detect lost directives"
+// rather than to a wrong decision.
+func (c *Core) recordHostedActivations(ctx context.Context, runnerID, sessionID string, items []protocol.ActivationInventoryItem) error {
+	directory, ok := c.runners.(ActivationDeliveryDirectory)
+	if !ok || directory == nil {
+		return nil
+	}
+	return directory.RecordHostedActivations(ctx, runnerID, sessionID, items)
 }
 
 // reportMetrics retains one runner's Prometheus snapshot.

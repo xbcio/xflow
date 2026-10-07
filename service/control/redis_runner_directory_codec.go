@@ -239,6 +239,22 @@ func (keys redisRunnerDirectoryKeys) handoffClaimIndexPrefix() string {
 	return keys.prefix + redisHandoffClaimIndexSuffix
 }
 
+// activationDirectiveQueueKey returns the per-runner-session hash of pending
+// activation directives. The session is part of the key, not a field inside it:
+// a directive enqueued for an old session must be unreachable from the new
+// session's drain by construction, not by a filter that could be forgotten.
+// Like assignmentLeaseMetaKey it is derived from the prefix, so it carries the
+// same Cluster hash tag as the directory transitions that name it.
+func (keys redisRunnerDirectoryKeys) activationDirectiveQueueKey(runnerID, sessionID string) string {
+	return keys.prefix + ":runner:directives:" + runnerID + ":" + sessionID
+}
+
+// runnerHostedActivationsKey returns the per-runner key holding the runner's
+// most recent hosted-activation report (one JSON value with its own TTL).
+func (keys redisRunnerDirectoryKeys) runnerHostedActivationsKey(runnerID string) string {
+	return keys.prefix + ":runner:hosted:" + runnerID
+}
+
 // redisActivationInventoryItem intentionally encodes generation as a string:
 // JSON/Lua number conversion would otherwise lose exact uint64 fencing values
 // above 2^53 while a reconnect decides whether it may inherit cleanup work.

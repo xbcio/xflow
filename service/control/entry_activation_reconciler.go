@@ -106,6 +106,16 @@ type EntryActivationMetrics interface {
 	// poll, and counting those would report reconcile-pass frequency rather
 	// than fallback events.
 	OnGroupSelectorFallback()
+	// OnGroupActivationRedelivered reports that the reconciler re-sent a
+	// directive from the runner's own hosted-activation report: action
+	// "activate" when the report showed the assigned activation was not
+	// hosted, "deactivate" when it showed an activation the ledger no longer
+	// assigns to that runner. It is the observable form of "a directive was
+	// lost and has now been recovered" — the failure this whole path exists
+	// to make visible — and, unlike the counters above, it is reported for
+	// GROUP entry units only for the same reason they are: these are the
+	// xflow_group_* activation-controller series.
+	OnGroupActivationRedelivered(action string)
 }
 
 // EntryActivationReconcilerConfig configures an EntryActivationReconciler.
@@ -153,9 +163,17 @@ type EntryActivationReconcilerConfig struct {
 	Logger engine.Logger
 	// Metrics, when set, receives GROUP entry-unit activation-controller
 	// events (xflow_group_activation_total / _generation_fenced_total /
-	// _active / _selector_fallback_total). nil disables reporting; non-group
-	// entry units are excluded either way (see EntryActivationMetrics doc).
+	// _active / _selector_fallback_total / _redelivered_total). nil disables
+	// reporting; non-group entry units are excluded either way (see
+	// EntryActivationMetrics doc).
 	Metrics EntryActivationMetrics
+	// Delivery is the optional durable directive-delivery capability. When the
+	// directory provides it, activate/deactivate directives are enqueued into
+	// it keyed by the owning session — so ANY control pod can hand them to the
+	// runner on its next heartbeat — and the reconciler reads each runner's
+	// hosted-activation report from it to notice a directive that never
+	// arrived. nil preserves the original leader-local, drain-once behavior.
+	Delivery ActivationDeliveryDirectory
 }
 
 // entryRunnerDirectives holds pending activate/deactivate messages for a runner.
@@ -288,6 +306,15 @@ const (
 	fenceReasonDrainPendingFence  = "drain_pending_fence"
 )
 
+// redeliveryReasonRunnerNotHosting is the retained-failure reason recorded when
+// the reconciler re-sends an Activate because the owner's own hosted-activation
+// report does not show it hosting the assignment. It is not a fence — nothing
+// is revoked and the assignment keeps its owner — but it is recorded on the
+// same retained failure state so a run of redeliveries escalates through the
+// same "entry activation repeatedly failing" ladder as a run of fences, and it
+// is what makes the backoff that paces redeliveries computable.
+const redeliveryReasonRunnerNotHosting = "runner_not_hosting_activation"
+
 // activationFailureRecord is the outcome of recording one failure, assembled
 // under r.mu so the escalation can be reported after the lock is released (a
 // logger must never be called while holding it).
@@ -372,6 +399,10 @@ func (r *EntryActivationReconciler) Reconcile(ctx context.Context, now time.Time
 		return err
 	}
 	live := r.liveRunners(ctx, now)
+	// Each live runner's own report of what it hosts is read once per pass and
+	// shared by every activation, so report-driven reconciliation costs one
+	// read per runner rather than one per assignment.
+	hosted := r.loadHostedActivations(ctx, live)
 	seen := make(map[engine.EntryActivationKey]struct{})
 	var activations []engine.EntryActivation
 	for _, ns := range r.cfg.Namespaces {
@@ -394,7 +425,7 @@ func (r *EntryActivationReconciler) Reconcile(ctx context.Context, now time.Time
 		act := &activations[i]
 		key := keyOf(act)
 		seen[key] = struct{}{}
-		if err := r.reconcileExisting(ctx, act, live, owners, now); err != nil {
+		if err := r.reconcileExisting(ctx, act, live, owners, hosted, now); err != nil {
 			failed[key] = struct{}{}
 			r.logReconcileError(act, err)
 		}
@@ -543,15 +574,21 @@ func (r *EntryActivationReconciler) recordGroupSelectorFallback(act *engine.Entr
 	r.cfg.Metrics.OnGroupSelectorFallback()
 }
 
-func (r *EntryActivationReconciler) reconcileExisting(ctx context.Context, act *engine.EntryActivation, live []RunnerSnapshot, owners map[logicalActivationKey]map[string]struct{}, now time.Time) error {
+func (r *EntryActivationReconciler) reconcileExisting(ctx context.Context, act *engine.EntryActivation, live []RunnerSnapshot, owners map[logicalActivationKey]map[string]struct{}, hosted hostedActivationsView, now time.Time) error {
 	key := keyOf(act)
+
+	// Report-driven reconciliation runs before any ownership decision, so it
+	// sees the ledger record as this pass read it. The reverse direction needs
+	// nothing from the branches below: it only compares "who reports hosting
+	// this" against "whom the ledger assigns it to", whatever that is.
+	r.cleanupForeignHostedActivations(ctx, act, live, hosted)
 
 	// A cleared / non-desired activation should not hold an assignment. Fence any
 	// stale owner, tell it to deactivate, and leave it unassigned.
 	if !act.Desired {
 		if act.RunnerID != "" {
 			prevRunner := act.RunnerID
-			prevSession := act.SessionID
+			prevSession := r.currentSessionFor(prevRunner, live, act.SessionID)
 			prevGen := act.Generation
 			if _, err := r.fenceAndDeactivate(ctx, act, prevRunner, prevSession, prevGen, fenceReasonNotDesired); err != nil {
 				return err
@@ -594,17 +631,32 @@ func (r *EntryActivationReconciler) reconcileExisting(ctx context.Context, act *
 		// cadence) and so never lapses while passes are running. It is deliberately
 		// NOT a detector for "live but no longer hosting": a runner that kept its
 		// heartbeat and selector but lost the Activate directive still matches, so
-		// it is renewed indefinitely rather than fenced. Redelivering that directive
-		// is a separate problem — RunnerSnapshot carries no hosted-activation set to
-		// detect it with.
+		// it is renewed indefinitely rather than fenced. That state is detected —
+		// and repaired by resending the directive, never by fencing — from the
+		// runner's own hosted-activation report in redeliverMissingActivation
+		// (entry_activation_redelivery.go), which is why this branch keeps the
+		// lease alive: the assignment is correct, only its delivery failed.
 		revivable := !expired || now.Sub(act.LeaseDeadline) <= r.leaseGrace()
 		if ownerMatches && !siblingAlreadyOwns && revivable {
 			owners[logical][act.RunnerID] = struct{}{}
-			// Owner still valid: the activation is being hosted successfully, so any
-			// backoff from a prior failure on this key no longer applies. (Task 5
-			// wires this to the runner's ActivationAck; until then this is the best
-			// available success signal — the owner still matches desired state.)
-			r.clearRetryBackoff(key)
+			// Clear any backoff from a prior failure on this key ONLY when this
+			// pass has no evidence of a problem. The owner's own report is now
+			// that evidence: "confirmed hosted" (or no report to judge by)
+			// means the prior failure no longer applies, while "reported
+			// missing" means the redelivery below is still needed and MUST
+			// stay paced — clearing here would re-send once per pass, the
+			// livelock this scheduling half exists to prevent.
+			if hosted.verdictFor(act) != hostedReportMissing {
+				r.clearRetryBackoff(key)
+			}
+			// "Still matches" is a statement about the RUNNER, not about the
+			// activation: a runner that lost the Activate directive still
+			// heartbeats and still matches its selector, so the renewal below
+			// would keep renewing an assignment that hosts nothing, forever.
+			// The runner's own report is the only witness to that state; when
+			// it says the activation is missing, re-send the directive (paced
+			// by the shared backoff, see redeliverMissingActivation).
+			r.redeliverMissingActivation(ctx, act, hosted, now)
 			// Proactively renew the lease when it is within the renew threshold of
 			// expiry, keeping the generation stable so the hosting runner is not
 			// disrupted.
@@ -632,7 +684,7 @@ func (r *EntryActivationReconciler) reconcileExisting(ctx context.Context, act *
 			return nil
 		}
 		prevRunner := act.RunnerID
-		prevSession := act.SessionID
+		prevSession := r.currentSessionFor(prevRunner, live, act.SessionID)
 		prevGen := act.Generation
 		fenced, err := r.fenceAndDeactivate(ctx, act, prevRunner, prevSession, prevGen, ownerInvalidFenceReason(expired, ownerLive, ownerMatches, siblingAlreadyOwns))
 		if err != nil {
@@ -714,7 +766,7 @@ func (r *EntryActivationReconciler) assignUnowned(ctx context.Context, act *engi
 		return err
 	}
 	if assigned {
-		r.enqueueActivate(chosen.RunnerID, r.activateDirectiveFor(ctx, act, nextGen))
+		r.deliverActivationDirective(ctx, chosen.RunnerID, chosen.SessionID, r.activateDirectiveFor(ctx, act, nextGen))
 		r.recordGroupActivation(act, "activate")
 		if owners[logical] == nil {
 			owners[logical] = make(map[string]struct{})
@@ -846,6 +898,24 @@ func (r *EntryActivationReconciler) runnerIsLive(runnerID string, live []RunnerS
 		}
 	}
 	return false
+}
+
+// currentSessionFor resolves the session a directive for runnerID must be
+// addressed to: the recorded one when the ledger has it, otherwise the
+// runner's current session from this pass's live snapshots. Empty means no
+// session is known (a record predating session tracking whose runner is not
+// live this pass) — the durable queue has no key to write in that case, and
+// the deliver helpers fall back to a warn-and-drop rather than a dead-letter.
+func (r *EntryActivationReconciler) currentSessionFor(runnerID string, live []RunnerSnapshot, recorded string) string {
+	if recorded != "" {
+		return recorded
+	}
+	for _, snap := range live {
+		if snap.RunnerID == runnerID {
+			return snap.SessionID
+		}
+	}
+	return ""
 }
 
 func (r *EntryActivationReconciler) runnerIsDraining(ctx context.Context, runnerID string) bool {
@@ -1005,7 +1075,17 @@ func (r *EntryActivationReconciler) reconcileRunnerInventory(ctx context.Context
 				revokeReason = fenceReasonInventoryStaleGen
 			}
 			prevGen := act.Generation
-			if _, err := r.fenceAndDeactivate(ctx, act, runnerID, act.SessionID, prevGen, revokeReason); err != nil {
+			// The revoke targets the session that just sent this inventory —
+			// that IS runnerID's current session, and the only addressable one
+			// here (this path holds no live-snapshot list). A record predating
+			// session tracking gets it resolved rather than dead-lettered; an
+			// empty sessionID (legacy caller without a session) stays empty and
+			// the deliver helper warns and drops.
+			revokeSession := act.SessionID
+			if revokeSession == "" {
+				revokeSession = sessionID
+			}
+			if _, err := r.fenceAndDeactivate(ctx, act, runnerID, revokeSession, prevGen, revokeReason); err != nil {
 				if r.cfg.Logger != nil {
 					r.cfg.Logger.Warn("entry activation inventory revoke failed",
 						"workflow_id", act.WorkflowID,
@@ -1168,7 +1248,7 @@ func (r *EntryActivationReconciler) fenceAndDeactivate(ctx context.Context, act 
 	if err := r.cfg.Store.Fence(ctx, key, generation); err != nil {
 		return false, err
 	}
-	r.enqueueDeactivate(runnerID, deactivateDirectiveFor(act, generation))
+	r.deliverDeactivationDirective(ctx, runnerID, sessionID, deactivateDirectiveFor(act, generation))
 	r.recordGroupActivation(act, "deactivate")
 	r.recordAssignmentFenced(act, runnerID, generation, reason, time.Now())
 	return true, nil
@@ -1700,6 +1780,139 @@ func (r *EntryActivationReconciler) DirectivesForRunner(runnerID string) *protoc
 	}
 	delete(r.directives, runnerID)
 	return result
+}
+
+// DirectivesForRunnerPersistent returns the directives pending for a runner's
+// CURRENT session: from the durable per-session queue when the directory
+// provides the capability, from the leader-local map otherwise. Errors are
+// returned rather than swallowed — the heartbeat handler turns them into a
+// failed heartbeat so the runner retries its heartbeat instead of silently
+// never receiving a directive (the pattern Core.deactivationDirectives already
+// established for the durable deactivation ledger). A nil result means "no
+// directives", exactly like DirectivesForRunner.
+//
+// sessionID is required for the durable path: the queue is scoped to a
+// session, and a heartbeat without one has already been rejected by the
+// caller. An empty session (custom callers that bypass the protocol) falls
+// back to the legacy in-memory drain rather than guessing at a key.
+//
+// Read/write symmetry: the in-memory map is only ever WRITTEN when the
+// capability is absent (see deliverActivationDirective) — with the capability
+// wired, a session-less directive is dropped with a WARN rather than written
+// here, precisely so this drain never becomes the only reader of a queue
+// nothing else can see.
+func (r *EntryActivationReconciler) DirectivesForRunnerPersistent(ctx context.Context, runnerID, sessionID string) (*protocol.HeartbeatActivations, error) {
+	if r.cfg.Delivery == nil || sessionID == "" {
+		return r.DirectivesForRunner(runnerID), nil
+	}
+	activates, deactivates, err := r.cfg.Delivery.ActivationDirectives(ctx, runnerID, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if len(activates) == 0 && len(deactivates) == 0 {
+		return nil, nil
+	}
+	out := &protocol.HeartbeatActivations{}
+	if len(activates) > 0 {
+		out.Activate = activates
+	}
+	if len(deactivates) > 0 {
+		out.Deactivate = deactivates
+	}
+	return out, nil
+}
+
+// deliverActivationDirective enqueues one Activate for the runner's session.
+//
+// Without the durable-queue capability the original leader-local queue is the
+// only channel, and the heartbeat drain still reads it — that path is
+// byte-identical to the behavior before the durable path existed. With the
+// capability wired, a session-less directive has NO channel: the durable queue
+// is keyed by session and the heartbeat always carries one, while the
+// leader-local map is drained by nobody (DirectivesForRunnerPersistent reads
+// the durable queue whenever the capability is present), so writing there
+// would be a silent dead letter that also grows forever. It is dropped with a
+// WARN instead — and it is recoverable: redeliverMissingActivation no longer
+// requires the ledger's session, it reads the owner's current report and
+// addresses the directive there.
+//
+// A failed durable enqueue is likewise logged and dropped rather than failing
+// the reconcile pass: the assignment itself already committed, and a directive
+// that never entered the queue is exactly what the next pass's hosted-report
+// check recovers. There is deliberately no in-memory fallback on a
+// durable-enqueue error: that would deliver from the one pod whose queue only
+// ITS heartbeats drain, i.e. reintroduce the very loss this path removes,
+// while hiding the failure.
+func (r *EntryActivationReconciler) deliverActivationDirective(ctx context.Context, runnerID, sessionID string, d protocol.ActivateDirective) {
+	if runnerID == "" {
+		return
+	}
+	if r.cfg.Delivery == nil {
+		r.enqueueActivate(runnerID, d)
+		return
+	}
+	if sessionID == "" {
+		if r.cfg.Logger != nil {
+			r.cfg.Logger.Warn("entry activation: activate directive has no session to address; dropped for report-driven recovery",
+				"workflow_id", d.WorkflowID,
+				"workflow_version", d.WorkflowVersion,
+				"entry_unit_id", d.EntryUnitID,
+				"replica_index", d.ReplicaIndex,
+				"generation", d.Generation,
+				"runner_id", runnerID)
+		}
+		return
+	}
+	if err := r.cfg.Delivery.EnqueueActivationDirective(ctx, runnerID, sessionID, d); err != nil {
+		if r.cfg.Logger != nil {
+			r.cfg.Logger.Warn("entry activation: enqueue activate directive failed",
+				"workflow_id", d.WorkflowID,
+				"entry_unit_id", d.EntryUnitID,
+				"replica_index", d.ReplicaIndex,
+				"runner_id", runnerID,
+				"session_id", sessionID,
+				"err", err)
+		}
+	}
+}
+
+// deliverDeactivationDirective mirrors deliverActivationDirective for stops,
+// including the session-less drop. Its recovery path is the reverse direction
+// of the report reconciliation: the runner that never heard the stop keeps
+// reporting the activation as hosted, and cleanupForeignHostedActivations
+// re-sends the deactivate to its CURRENT session — the report carries that
+// session even when the ledger record never did.
+func (r *EntryActivationReconciler) deliverDeactivationDirective(ctx context.Context, runnerID, sessionID string, d protocol.DeactivateDirective) {
+	if runnerID == "" {
+		return
+	}
+	if r.cfg.Delivery == nil {
+		r.enqueueDeactivate(runnerID, d)
+		return
+	}
+	if sessionID == "" {
+		if r.cfg.Logger != nil {
+			r.cfg.Logger.Warn("entry activation: deactivate directive has no session to address; dropped for report-driven recovery",
+				"workflow_id", d.WorkflowID,
+				"workflow_version", d.WorkflowVersion,
+				"entry_unit_id", d.EntryUnitID,
+				"replica_index", d.ReplicaIndex,
+				"generation", d.Generation,
+				"runner_id", runnerID)
+		}
+		return
+	}
+	if err := r.cfg.Delivery.EnqueueDeactivationDirective(ctx, runnerID, sessionID, d); err != nil {
+		if r.cfg.Logger != nil {
+			r.cfg.Logger.Warn("entry activation: enqueue deactivate directive failed",
+				"workflow_id", d.WorkflowID,
+				"entry_unit_id", d.EntryUnitID,
+				"replica_index", d.ReplicaIndex,
+				"runner_id", runnerID,
+				"session_id", sessionID,
+				"err", err)
+		}
+	}
 }
 
 func (r *EntryActivationReconciler) enqueueActivate(runnerID string, d protocol.ActivateDirective) {

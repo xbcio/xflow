@@ -21,12 +21,12 @@ import (
 // 必须按三元组去重，否则会形成 ack 风暴。generation 单调递增，所以每次真正的
 // 重派都会产生新三元组并允许一次新的 ack。
 //
-// The dedup decision (activationAcker.shouldAck) runs synchronously before a
-// send goroutine is ever spawned, so calling ackFailed twice back-to-back
-// from this goroutine deterministically dispatches exactly one HTTP call —
-// there is no race between "check" and "spawn" to fool. What's left to
-// verify by polling is that the single dispatched call actually lands on the
-// wire with the right path and body.
+// The dedup decision (activationAcker.beginActivationAck) runs synchronously
+// before a send goroutine is ever spawned, so calling ackFailed twice
+// back-to-back from this goroutine deterministically dispatches exactly one
+// HTTP call — there is no race between "check" and "spawn" to fool. What's
+// left to verify by polling is that the single dispatched call actually lands
+// on the wire with the right path and body.
 func TestActivationAckIsSentOncePerGeneration(t *testing.T) {
 	var mu sync.Mutex
 	var acks []protocol.ActivationAck
@@ -386,4 +386,199 @@ func (c *flakyDeactivationAckClient) ActivationAck(_ context.Context, ack protoc
 		return errors.New("temporary receipt failure")
 	}
 	return nil
+}
+
+// TestActivationAckRetriesAfterTransportFailure pins the F1b fix: a failed
+// send must NOT count as acked. Before it, the dedup map was written before
+// the HTTP call, so one lost request permanently suppressed the failure
+// signal for that (activation, generation) — the server never learned why the
+// runner could not take the activation. Now the reservation is released on
+// failure and the next onActivateFailed (which every redelivery re-triggers)
+// sends again, while an in-flight or already-delivered ack still dedups.
+func TestActivationAckRetriesAfterTransportFailure(t *testing.T) {
+	client := newScriptedActivationAckClient()
+	acker := newActivationAcker(client, "runner-1", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	d := protocol.ActivateDirective{WorkflowID: "wf-1", WorkflowVersion: "v1", EntryUnitID: "grp-a", Generation: 5}
+	activateErr := errors.New("supply not ready")
+
+	// First failure: the send is observed entering the client, then fails.
+	acker.ackFailed("session-1", d, activateErr)
+	client.waitForCall(t, 1)
+
+	// A repeated failure while the first send is still in flight must not
+	// dispatch a second request.
+	acker.ackFailed("session-1", d, activateErr)
+	if got := client.callCount(); got != 1 {
+		t.Fatalf("calls while one is in flight = %d, want 1", got)
+	}
+	client.releaseCall(t, 1, errors.New("transport down"))
+
+	// The failed send releases its reservation: the record must not be marked
+	// delivered, and the next failure for the same directive must send again.
+	waitForActivationAckState(t, acker, d, func(a *activationAcker) bool {
+		_, busy := a.activationAckInFlight[activationAckKeyOf(d)]
+		return !busy
+	}, "in-flight reservation released after a failed send")
+	if got := client.callCount(); got != 1 {
+		t.Fatalf("calls before the retry = %d, want 1", got)
+	}
+
+	acker.ackFailed("session-1", d, activateErr)
+	client.waitForCall(t, 2)
+	client.releaseCall(t, 2, nil)
+	waitForActivationAckState(t, acker, d, func(a *activationAcker) bool {
+		return a.acked[activationAckKeyOf(d)] >= d.Generation
+	}, "ack recorded after a successful send")
+
+	// A delivered ack still dedups: another failure for the same generation
+	// dispatches nothing.
+	acker.ackFailed("session-1", d, activateErr)
+	if got := client.callCount(); got != 2 {
+		t.Fatalf("calls after a delivered ack = %d, want still 2", got)
+	}
+}
+
+func activationAckKeyOf(d protocol.ActivateDirective) activationAckKey {
+	return activationAckKey{
+		WorkflowID:      d.WorkflowID,
+		WorkflowVersion: d.WorkflowVersion,
+		EntryUnitID:     d.EntryUnitID,
+		ReplicaIndex:    d.ReplicaIndex,
+	}
+}
+
+// scriptedActivationAckClient blocks every call until the test releases it, so
+// in-flight and post-failure ordering are deterministic rather than polled.
+type scriptedActivationAckClient struct {
+	mu      sync.Mutex
+	calls   int
+	release []chan error
+	entered chan int
+}
+
+func newScriptedActivationAckClient() *scriptedActivationAckClient {
+	return &scriptedActivationAckClient{entered: make(chan int, 8)}
+}
+
+func (c *scriptedActivationAckClient) ActivationAck(context.Context, protocol.ActivationAck) error {
+	c.mu.Lock()
+	c.calls++
+	call := c.calls
+	ch := make(chan error, 1)
+	c.release = append(c.release, ch)
+	c.mu.Unlock()
+	c.entered <- call
+	return <-ch
+}
+
+func (c *scriptedActivationAckClient) callCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+func (c *scriptedActivationAckClient) waitForCall(t *testing.T, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		select {
+		case n := <-c.entered:
+			if n >= want {
+				return
+			}
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for call %d (observed %d)", want, c.callCount())
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+func (c *scriptedActivationAckClient) releaseCall(t *testing.T, call int, err error) {
+	t.Helper()
+	c.mu.Lock()
+	if call > len(c.release) {
+		c.mu.Unlock()
+		t.Fatalf("release call %d before it was entered", call)
+	}
+	ch := c.release[call-1]
+	c.mu.Unlock()
+	ch <- err
+}
+
+// waitForActivationAckState polls the acker's internal bookkeeping under its
+// own mutex until cond holds. Every condition used here is a terminal state
+// (a reservation is removed, an ack is recorded) reached in bounded time, so
+// the poll can only confirm it, never manufacture it.
+func waitForActivationAckState(t *testing.T, acker *activationAcker, d protocol.ActivateDirective, cond func(*activationAcker) bool, what string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		acker.mu.Lock()
+		ok := cond(acker)
+		acker.mu.Unlock()
+		if ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for: %s", what)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// TestActivationAckReservationSurvivesStaleCompletion pins the interleaving
+// the conditional delete exists for: an older generation's send completing
+// must not erase a newer generation's reservation, which would let a repeated
+// failure for the newer generation dispatch a duplicate HTTP call.
+func TestActivationAckReservationSurvivesStaleCompletion(t *testing.T) {
+	acker := newActivationAcker(&okAckClient{onAck: func(protocol.ActivationAck) {}}, "runner-1", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	key := activationAckKey{WorkflowID: "wf-1", WorkflowVersion: "v1", EntryUnitID: "grp-a"}
+
+	// (b) A newer generation takes the slot while gen 1 is still in flight.
+	if !acker.beginActivationAck(key, 1) {
+		t.Fatal("gen 1 must be admitted")
+	}
+	if !acker.beginActivationAck(key, 2) {
+		t.Fatal("gen 2 must be admitted while gen 1 is in flight")
+	}
+	// Gen 1 completes after gen 2 took the slot: it must not erase it.
+	acker.finishActivationAck(key, 1, true)
+	acker.mu.Lock()
+	pending, present := acker.activationAckInFlight[key]
+	acker.mu.Unlock()
+	if !present || pending != 2 {
+		t.Fatalf("in-flight after the stale completion = %d (present=%v), want gen 2", pending, present)
+	}
+	// A repeated failure for gen 2 stays deduped while its send is in flight.
+	if acker.beginActivationAck(key, 2) {
+		t.Fatal("gen 2 must stay deduped while its own send is in flight")
+	}
+	// Its own failure releases the reservation, so the retry is admitted.
+	acker.finishActivationAck(key, 2, false)
+	if !acker.beginActivationAck(key, 2) {
+		t.Fatal("a failed gen 2 send must be retryable")
+	}
+	acker.finishActivationAck(key, 2, true)
+	if acker.beginActivationAck(key, 2) {
+		t.Fatal("a delivered gen 2 must stay deduped")
+	}
+
+	// (a) A failed generation's own completion releases its reservation, and a
+	// stale completion of an older generation cannot re-open a newer one.
+	if !acker.beginActivationAck(key, 3) {
+		t.Fatal("gen 3 must be admitted")
+	}
+	acker.finishActivationAck(key, 1, false) // stale completion, must be a no-op
+	acker.mu.Lock()
+	pending, present = acker.activationAckInFlight[key]
+	acker.mu.Unlock()
+	if !present || pending != 3 {
+		t.Fatalf("in-flight after a stale failure completion = %d (present=%v), want gen 3", pending, present)
+	}
+	acker.finishActivationAck(key, 3, false)
+	if !acker.beginActivationAck(key, 3) {
+		t.Fatal("a failed gen 3 send must be retryable")
+	}
 }

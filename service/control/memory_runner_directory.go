@@ -71,16 +71,22 @@ func WithMemoryRunnerDirectoryClock(clock func() time.Time) MemoryRunnerDirector
 // MemoryRunnerDirectory keeps runner registration and assignment state in
 // process for embedded and test deployments.
 type MemoryRunnerDirectory struct {
-	mu                        sync.RWMutex
-	runners                   map[string]*memoryRunnerState
-	queue                     []Assignment
-	seen                      map[AssignmentID]struct{}
-	claims                    map[ClaimID]memoryClaim
-	handoffs                  map[ClaimID]memoryHandoff
-	handoffByAssignment       map[AssignmentID]map[ClaimID]struct{}
-	controls                  map[string]*memoryRunnerControl
-	deactivationObligations   map[string]DeactivationObligation
-	activationInventory       map[string]map[deactivationInventoryKey]uint64
+	mu                      sync.RWMutex
+	runners                 map[string]*memoryRunnerState
+	queue                   []Assignment
+	seen                    map[AssignmentID]struct{}
+	claims                  map[ClaimID]memoryClaim
+	handoffs                map[ClaimID]memoryHandoff
+	handoffByAssignment     map[AssignmentID]map[ClaimID]struct{}
+	controls                map[string]*memoryRunnerControl
+	deactivationObligations map[string]DeactivationObligation
+	activationInventory     map[string]map[deactivationInventoryKey]uint64
+	// activationDirectives and hostedActivations back the optional
+	// ActivationDeliveryDirectory capability (see
+	// memory_runner_activation_delivery.go): pending directives per runner
+	// session, and each runner's most recent hosted-activation report.
+	activationDirectives      map[memoryActivationDirectiveQueueKey]*memoryActivationDirectiveQueue
+	hostedActivations         map[string]memoryHostedActivationsReport
 	controlReceiptRetention   time.Duration
 	drainObservationFreshness time.Duration
 	drainDeadline             time.Duration
@@ -155,6 +161,8 @@ func NewMemoryRunnerDirectory(opts ...MemoryRunnerDirectoryOption) *MemoryRunner
 		controls:                  make(map[string]*memoryRunnerControl),
 		deactivationObligations:   make(map[string]DeactivationObligation),
 		activationInventory:       make(map[string]map[deactivationInventoryKey]uint64),
+		activationDirectives:      make(map[memoryActivationDirectiveQueueKey]*memoryActivationDirectiveQueue),
+		hostedActivations:         make(map[string]memoryHostedActivationsReport),
 		controlReceiptRetention:   cfg.controlReceiptRetention,
 		drainObservationFreshness: cfg.drainObservationFreshness,
 		drainDeadline:             cfg.drainDeadline,
