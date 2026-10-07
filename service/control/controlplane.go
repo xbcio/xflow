@@ -566,6 +566,14 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		if lister, ok := runners.(ActivationRunnerLister); ok {
 			recCfg.Lister = lister
 		}
+		// Same pattern for durable directive delivery: Redis and memory
+		// directories implement it, so directives survive a leader change and
+		// the reconciler can reconcile against each runner's hosted-activation
+		// report. A directory without the capability keeps the leader-local
+		// in-memory queue (the pre-existing behavior).
+		if delivery, ok := runners.(ActivationDeliveryDirectory); ok {
+			recCfg.Delivery = delivery
+		}
 		entryReconciler = NewEntryActivationReconciler(recCfg)
 		httpServer.core.entryReconciler = entryReconciler
 		grpcServer.core.entryReconciler = entryReconciler

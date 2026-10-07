@@ -153,9 +153,17 @@ type EntryActivationReconcilerConfig struct {
 	Logger engine.Logger
 	// Metrics, when set, receives GROUP entry-unit activation-controller
 	// events (xflow_group_activation_total / _generation_fenced_total /
-	// _active / _selector_fallback_total). nil disables reporting; non-group
-	// entry units are excluded either way (see EntryActivationMetrics doc).
+	// _active / _selector_fallback_total / _redelivered_total). nil disables
+	// reporting; non-group entry units are excluded either way (see
+	// EntryActivationMetrics doc).
 	Metrics EntryActivationMetrics
+	// Delivery is the optional durable directive-delivery capability. When the
+	// directory provides it, activate/deactivate directives are enqueued into
+	// it keyed by the owning session — so ANY control pod can hand them to the
+	// runner on its next heartbeat — and the reconciler reads each runner's
+	// hosted-activation report from it to notice a directive that never
+	// arrived. nil preserves the original leader-local, drain-once behavior.
+	Delivery ActivationDeliveryDirectory
 }
 
 // entryRunnerDirectives holds pending activate/deactivate messages for a runner.
@@ -714,7 +722,7 @@ func (r *EntryActivationReconciler) assignUnowned(ctx context.Context, act *engi
 		return err
 	}
 	if assigned {
-		r.enqueueActivate(chosen.RunnerID, r.activateDirectiveFor(ctx, act, nextGen))
+		r.deliverActivationDirective(ctx, chosen.RunnerID, chosen.SessionID, r.activateDirectiveFor(ctx, act, nextGen))
 		r.recordGroupActivation(act, "activate")
 		if owners[logical] == nil {
 			owners[logical] = make(map[string]struct{})
@@ -1168,7 +1176,7 @@ func (r *EntryActivationReconciler) fenceAndDeactivate(ctx context.Context, act 
 	if err := r.cfg.Store.Fence(ctx, key, generation); err != nil {
 		return false, err
 	}
-	r.enqueueDeactivate(runnerID, deactivateDirectiveFor(act, generation))
+	r.deliverDeactivationDirective(ctx, runnerID, sessionID, deactivateDirectiveFor(act, generation))
 	r.recordGroupActivation(act, "deactivate")
 	r.recordAssignmentFenced(act, runnerID, generation, reason, time.Now())
 	return true, nil
@@ -1700,6 +1708,95 @@ func (r *EntryActivationReconciler) DirectivesForRunner(runnerID string) *protoc
 	}
 	delete(r.directives, runnerID)
 	return result
+}
+
+// DirectivesForRunnerPersistent returns the directives pending for a runner's
+// CURRENT session: from the durable per-session queue when the directory
+// provides the capability, from the leader-local map otherwise. Errors are
+// returned rather than swallowed — the heartbeat handler turns them into a
+// failed heartbeat so the runner retries its heartbeat instead of silently
+// never receiving a directive (the pattern Core.deactivationDirectives already
+// established for the durable deactivation ledger). A nil result means "no
+// directives", exactly like DirectivesForRunner.
+//
+// sessionID is required for the durable path: the queue is scoped to a
+// session, and a heartbeat without one has already been rejected by the
+// caller. An empty session (custom callers that bypass the protocol) falls
+// back to the legacy in-memory drain rather than guessing at a key.
+func (r *EntryActivationReconciler) DirectivesForRunnerPersistent(ctx context.Context, runnerID, sessionID string) (*protocol.HeartbeatActivations, error) {
+	if r.cfg.Delivery == nil || sessionID == "" {
+		return r.DirectivesForRunner(runnerID), nil
+	}
+	activates, deactivates, err := r.cfg.Delivery.ActivationDirectives(ctx, runnerID, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if len(activates) == 0 && len(deactivates) == 0 {
+		return nil, nil
+	}
+	out := &protocol.HeartbeatActivations{}
+	if len(activates) > 0 {
+		out.Activate = activates
+	}
+	if len(deactivates) > 0 {
+		out.Deactivate = deactivates
+	}
+	return out, nil
+}
+
+// deliverActivationDirective enqueues one Activate for the runner's session.
+//
+// When the durable queue is unavailable (no capability, or no session to key
+// it by) this falls back to the original leader-local queue, byte-identical to
+// the behavior before the durable path existed. A failed durable enqueue is
+// logged and dropped rather than failing the reconcile pass: the assignment
+// itself already committed, and a directive that never entered the queue is
+// exactly what the next pass's hosted-report check recovers (see
+// redeliverMissingActivation) — it re-derives the directive from the store.
+// There is deliberately no in-memory fallback on a durable-enqueue error: that
+// would deliver from the one pod whose queue only ITS heartbeats drain, i.e.
+// reintroduce the very loss this path removes, while hiding the failure.
+func (r *EntryActivationReconciler) deliverActivationDirective(ctx context.Context, runnerID, sessionID string, d protocol.ActivateDirective) {
+	if runnerID == "" {
+		return
+	}
+	if r.cfg.Delivery == nil || sessionID == "" {
+		r.enqueueActivate(runnerID, d)
+		return
+	}
+	if err := r.cfg.Delivery.EnqueueActivationDirective(ctx, runnerID, sessionID, d); err != nil {
+		if r.cfg.Logger != nil {
+			r.cfg.Logger.Warn("entry activation: enqueue activate directive failed",
+				"workflow_id", d.WorkflowID,
+				"entry_unit_id", d.EntryUnitID,
+				"replica_index", d.ReplicaIndex,
+				"runner_id", runnerID,
+				"session_id", sessionID,
+				"err", err)
+		}
+	}
+}
+
+// deliverDeactivationDirective mirrors deliverActivationDirective for stops.
+func (r *EntryActivationReconciler) deliverDeactivationDirective(ctx context.Context, runnerID, sessionID string, d protocol.DeactivateDirective) {
+	if runnerID == "" {
+		return
+	}
+	if r.cfg.Delivery == nil || sessionID == "" {
+		r.enqueueDeactivate(runnerID, d)
+		return
+	}
+	if err := r.cfg.Delivery.EnqueueDeactivationDirective(ctx, runnerID, sessionID, d); err != nil {
+		if r.cfg.Logger != nil {
+			r.cfg.Logger.Warn("entry activation: enqueue deactivate directive failed",
+				"workflow_id", d.WorkflowID,
+				"entry_unit_id", d.EntryUnitID,
+				"replica_index", d.ReplicaIndex,
+				"runner_id", runnerID,
+				"session_id", sessionID,
+				"err", err)
+		}
+	}
 }
 
 func (r *EntryActivationReconciler) enqueueActivate(runnerID string, d protocol.ActivateDirective) {

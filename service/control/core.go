@@ -478,9 +478,18 @@ func (c *Core) heartbeat(ctx context.Context, req protocol.HeartbeatRequest, inf
 		return protocol.HeartbeatResponse{}, normalizeRunnerError(err, c.logger, "heartbeat")
 	}
 	resp := protocol.HeartbeatResponse{ServerTime: time.Now().Unix()}
-	// The node-generic entry reconciler supplies activation directives when wired.
+	// The node-generic entry reconciler supplies activation directives when
+	// wired. A durable-queue read failure fails the heartbeat instead of
+	// reporting "no directives": the runner then retries and the next
+	// heartbeat delivers them, whereas a silent empty response would look
+	// exactly like "nothing pending" and lose the directive until some later
+	// reconcile pass noticed.
 	if c.entryReconciler != nil {
-		resp.Activations = c.entryReconciler.DirectivesForRunner(req.RunnerID)
+		activations, err := c.entryReconciler.DirectivesForRunnerPersistent(ctx, req.RunnerID, req.SessionID)
+		if err != nil {
+			return protocol.HeartbeatResponse{}, normalizeRunnerError(err, c.logger, "heartbeat_activation_directives")
+		}
+		resp.Activations = activations
 	}
 	// Drain-triggered deactivations are a durable receipt workflow rather than a
 	// drain-once reconciler queue. Merge them after the legacy directives so
