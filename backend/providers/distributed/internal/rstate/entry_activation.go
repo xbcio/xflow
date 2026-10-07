@@ -551,6 +551,12 @@ func (s *EntryActivationStore) Upsert(ctx context.Context, act engine.EntryActiv
 // re-runs the SADD. A hanging tag — mark succeeded but the write then failed
 // or was rejected — is harmless: the enumeration only names index keys, and an
 // empty per-workflow index reads as no records.
+//
+// The SADD costs one extra client round trip on every write that goes through
+// here. That is deliberate and not to be shaved: the set lives outside the
+// record's hash slot so it cannot ride the record's Lua call, and an in-process
+// "already registered" memo would suppress the only automatic repair for a tag
+// lost by something this process never observed.
 func (s *EntryActivationStore) markEntryActivationWorkflowIndexed(ctx context.Context, ns namespace.Namespace, wf types.WorkflowID) error {
 	if err := s.rdb.SAdd(ctx, entryActivationWorkflowSetRedisKey(ns), entryActivationWorkflowTag(ns, wf)).Err(); err != nil {
 		return fmt.Errorf("register entry activation workflow tag %q: %w", entryActivationWorkflowSetRedisKey(ns), err)
