@@ -29,12 +29,13 @@ type helperCallCounts struct {
 func TestProductionScansUseClusterAwareHelpers(t *testing.T) {
 	internalRoot := internalSourceRoot(t)
 	expected := map[string]helperCallCounts{
-		"rstate/entry_activation.go": {scanAll: 1},
-		"rstate/lease_repair.go":     {scanPage: 1},
-		"rstate/receipt_reader.go":   {scanAll: 1},
-		"rstate/state_lease.go":      {scanAll: 1},
-		"rstate/state_outbox.go":     {scanAll: 2, scanPage: 1},
-		"timeout/monitor.go":         {scanAll: 1},
+		"rstate/entry_activation.go":       {scanAll: 1},
+		"rstate/entry_activation_index.go": {scanAll: 1},
+		"rstate/lease_repair.go":           {scanPage: 1},
+		"rstate/receipt_reader.go":         {scanAll: 1},
+		"rstate/state_lease.go":            {scanAll: 1},
+		"rstate/state_outbox.go":           {scanAll: 2, scanPage: 1},
+		"timeout/monitor.go":               {scanAll: 1},
 	}
 	actual := make(map[string]helperCallCounts)
 	var nakedScans []string

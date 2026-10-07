@@ -83,6 +83,57 @@ func entryActivationNamespacePath(ns namespace.Namespace) string {
 	return url.PathEscape(string(ns))
 }
 
+// entryActivationWorkflowIndexRedisKeyForTag builds the per-workflow activation
+// index key from an already-computed workflow digest tag. The index shares the
+// workflow digest hash tag with the activation records and the revision
+// watermark, so a record write and its index refresh happen in one slot and
+// therefore in one Lua call.
+func entryActivationWorkflowIndexRedisKeyForTag(ns namespace.Namespace, workflowTag string) string {
+	return fmt.Sprintf("xflow:ns:%s:entryactidx:{%s}", entryActivationNamespacePath(ns), workflowTag)
+}
+
+// entryActivationWorkflowIndexRedisKey is the per-workflow activation index: a
+// set holding the full key names of that workflow's modern records.
+func entryActivationWorkflowIndexRedisKey(ns namespace.Namespace, wf types.WorkflowID) string {
+	return entryActivationWorkflowIndexRedisKeyForTag(ns, entryActivationWorkflowTag(ns, wf))
+}
+
+// entryActivationWorkflowSetRedisKey enumerates the workflow digest tags that
+// have a per-workflow index in this namespace. It deliberately carries no hash
+// tag — it aggregates every workflow in the namespace, so it cannot belong to
+// any one workflow's slot. Writers therefore SADD it outside Lua, best-effort
+// and idempotent; a dropped tag is refilled by the next write or by an index
+// rebuild.
+func entryActivationWorkflowSetRedisKey(ns namespace.Namespace) string {
+	return fmt.Sprintf("xflow:ns:%s:entryactidx:wfs", entryActivationNamespacePath(ns))
+}
+
+// entryActivationLegacyIndexRedisKey indexes the frozen legacy-layout record
+// keys. The legacy layout has no writers left, so nothing maintains this set
+// atomically; only the one-shot index rebuild populates it.
+func entryActivationLegacyIndexRedisKey(ns namespace.Namespace) string {
+	return fmt.Sprintf("xflow:ns:%s:entryactidx:legacy", entryActivationNamespacePath(ns))
+}
+
+// entryActivationIndexReadyRedisKey gates List onto the indexed read path. It is
+// set — permanently, and only — by a rebuild that completed a full scan; until
+// then List keeps using the scan path and keeps requesting a rebuild.
+func entryActivationIndexReadyRedisKey(ns namespace.Namespace) string {
+	return fmt.Sprintf("xflow:ns:%s:entryactidx:ready", entryActivationNamespacePath(ns))
+}
+
+// entryActivationIndexRebuildLockRedisKey is the cross-process mutex that keeps
+// at most one index rebuild per namespace in flight.
+func entryActivationIndexRebuildLockRedisKey(ns namespace.Namespace) string {
+	return fmt.Sprintf("xflow:ns:%s:entryactidx:rebuild", entryActivationNamespacePath(ns))
+}
+
+// entryActivationLegacyKeyPrefix is the legacy record key prefix for one raw
+// (unescaped) namespace. It mirrors entryActivationScanPattern's prefix.
+func entryActivationLegacyKeyPrefix(ns namespace.Namespace) string {
+	return fmt.Sprintf("xflow:ns:%s:entryact:{", ns)
+}
+
 // entryActivationScanPattern is the legacy layout scan pattern and is retained
 // unchanged for replica-zero compatibility.
 func entryActivationScanPattern(ns namespace.Namespace) string {
@@ -107,12 +158,24 @@ func (s *EntryActivationStore) legacyKeyFor(k engine.EntryActivationKey) string 
 // modern activation slot and remains Redis Cluster safe. A return value of -1
 // means neither a modern hash nor a legacy snapshot was available.
 //
+// touch_activation refreshes the record and its per-workflow index together:
+// KEYS[2] carries the same workflow digest hash tag as KEYS[1], so both keys
+// live in one slot and one script can maintain them atomically. Every path that
+// creates or refreshes a record must call it — an index whose TTL lags its
+// record's would drop the record from List while it is still live.
+//
+// KEYS: 1=modern activation hash 2=workflow activation index
 // ARGV: 1=ttl_s 2=legacyFieldCount 3..=legacy field/value pairs, followed by
 // transition-specific arguments. transition_arg is the first such argument.
 const prepareEntryActivationTransitionLua = `
 local ttl = tonumber(ARGV[1])
 local legacy_field_count = tonumber(ARGV[2])
 local transition_arg = 3 + legacy_field_count * 2
+local function touch_activation()
+    redis.call('EXPIRE', KEYS[1], ttl)
+    redis.call('SADD', KEYS[2], KEYS[1])
+    redis.call('EXPIRE', KEYS[2], ttl)
+end
 if redis.call('EXISTS', KEYS[1]) == 0 then
     if legacy_field_count == 0 then
         return -1
@@ -120,7 +183,7 @@ if redis.call('EXISTS', KEYS[1]) == 0 then
     for i = 3, transition_arg - 1, 2 do
         redis.call('HSET', KEYS[1], ARGV[i], ARGV[i + 1])
     end
-    redis.call('EXPIRE', KEYS[1], ttl)
+    touch_activation()
 end
 `
 
@@ -128,7 +191,7 @@ end
 // a no-op (returns 0) when the supplied generation does not strictly exceed the
 // stored generation.
 //
-// KEYS: 1=modern activation hash
+// KEYS: 1=modern activation hash 2=workflow activation index
 // Transition ARGV: runnerID, sessionID, generation, leaseDeadlineUnixNano
 // Returns 1 on success, 0 on rejection, -1 when the activation does not exist.
 const assignEntryActivationLuaSrc = prepareEntryActivationTransitionLua + `
@@ -144,7 +207,7 @@ redis.call('HSET', KEYS[1],
     'generation', ARGV[transition_arg + 2],
     'lease_deadline', ARGV[transition_arg + 3],
     'assigned_package_hash', pkg)
-redis.call('EXPIRE', KEYS[1], ttl)
+touch_activation()
 return 1
 `
 
@@ -154,7 +217,7 @@ var assignEntryActivationLua = redis.NewScript(assignEntryActivationLuaSrc)
 // current owner, and raises the generation floor to at least the supplied
 // generation.
 //
-// KEYS: 1=modern activation hash
+// KEYS: 1=modern activation hash 2=workflow activation index
 // Transition ARGV: generation
 // Returns 1 on success, -1 when the activation does not exist.
 const fenceEntryActivationLuaSrc = prepareEntryActivationTransitionLua + `
@@ -168,7 +231,7 @@ redis.call('HSET', KEYS[1],
     'session_id', '',
     'lease_deadline', '0',
     'assigned_package_hash', '')
-redis.call('EXPIRE', KEYS[1], ttl)
+touch_activation()
 return 1
 `
 
@@ -179,7 +242,7 @@ var fenceEntryActivationLua = redis.NewScript(fenceEntryActivationLuaSrc)
 // succeeds only when the supplied generation equals the stored generation and
 // an owner is set.
 //
-// KEYS: 1=modern activation hash
+// KEYS: 1=modern activation hash 2=workflow activation index
 // Transition ARGV: generation, leaseDeadlineUnixNano
 // Returns 1 on success, 0 on rejection, -1 when the activation does not exist.
 const renewEntryActivationLuaSrc = prepareEntryActivationTransitionLua + `
@@ -192,7 +255,7 @@ if (redis.call('HGET', KEYS[1], 'runner_id') or '') == '' then
     return 0
 end
 redis.call('HSET', KEYS[1], 'lease_deadline', ARGV[transition_arg + 1])
-redis.call('EXPIRE', KEYS[1], ttl)
+touch_activation()
 return 1
 `
 
@@ -246,13 +309,13 @@ return current
 var advanceEntryActivationWorkflowRevisionLua = redis.NewScript(advanceEntryActivationWorkflowRevisionLuaSrc)
 
 // upsertEntryActivationLua atomically compares the workflow watermark and the
-// activation revision before writing desired-state fields. Watermark and record
-// keys share a workflow digest hash tag, so this script is Redis Cluster safe.
-// Assignment fields are initialized only when the modern record is first
-// created; values copied from a legacy key keep an existing owner visible during
-// the layout transition.
+// activation revision before writing desired-state fields. Watermark, record,
+// and workflow activation index keys share a workflow digest hash tag, so this
+// script is Redis Cluster safe. Assignment fields are initialized only when the
+// modern record is first created; values copied from a legacy key keep an
+// existing owner visible during the layout transition.
 //
-// KEYS: 1=workflow watermark 2=activation hash
+// KEYS: 1=workflow watermark 2=activation hash 3=workflow activation index
 // ARGV: 1=revision 2=ttl_s, 3..15=desired fields,
 //
 //	16..20=legacy assignment defaults, 21=legacy registry revision
@@ -310,6 +373,8 @@ if existed == 0 then
         'assigned_package_hash', ARGV[20])
 end
 redis.call('EXPIRE', KEYS[2], tonumber(ARGV[2]))
+redis.call('SADD', KEYS[3], KEYS[2])
+redis.call('EXPIRE', KEYS[3], tonumber(ARGV[2]))
 return 1
 `
 
@@ -332,6 +397,7 @@ func (s *EntryActivationStore) AdvanceWorkflowRevision(ctx context.Context, ns n
 func (s *EntryActivationStore) Upsert(ctx context.Context, act engine.EntryActivation) error {
 	key := workflowScopedEntryActivationRedisKey(act.Namespace, act.WorkflowID, act.WorkflowVersion, act.EntryUnitID, act.ReplicaIndex)
 	watermarkKey := entryActivationWorkflowRevisionRedisKey(act.Namespace, act.WorkflowID)
+	indexKey := entryActivationWorkflowIndexRedisKey(act.Namespace, act.WorkflowID)
 
 	var selectorJSON string
 	if act.Selector != nil {
@@ -390,8 +456,8 @@ func (s *EntryActivationStore) Upsert(ctx context.Context, act engine.EntryActiv
 	if err != nil {
 		return fmt.Errorf("read legacy entry activation for upsert %q: %w", key, err)
 	}
-	if _, err := upsertEntryActivationLua.Run(ctx, s.rdb,
-		[]string{watermarkKey, key},
+	applied, err := upsertEntryActivationLua.Run(ctx, s.rdb,
+		[]string{watermarkKey, key, indexKey},
 		act.RegistryRevision, int(s.ttl.Seconds()),
 		string(act.Namespace), string(act.WorkflowID), act.WorkflowVersion,
 		act.EntryUnitID, act.ReplicaIndex, act.NodeType, paramsJSON,
@@ -402,10 +468,26 @@ func (s *EntryActivationStore) Upsert(ctx context.Context, act engine.EntryActiv
 		defaultRedisField(legacyFields, "lease_deadline", "0"),
 		legacyFields["assigned_package_hash"],
 		defaultRedisField(legacyFields, "registry_revision", "0"),
-	).Result(); err != nil {
+	).Int64()
+	if err != nil {
 		return fmt.Errorf("upsert entry activation %q: %w", key, err)
 	}
+	if applied == 1 {
+		s.markEntryActivationWorkflowIndexed(ctx, act.Namespace, act.WorkflowID)
+	}
 	return nil
+}
+
+// markEntryActivationWorkflowIndexed registers the workflow digest tag in the
+// namespace enumeration set, which is how the indexed read path discovers the
+// per-workflow index keys. That set key carries no hash tag (it aggregates
+// every workflow in the namespace), so it cannot be touched from the record's
+// Lua slot; the SADD is best-effort and idempotent — the next write or an index
+// rebuild fills a dropped tag back in. The error is dropped on purpose: a
+// lagging enumeration delays visibility only until the next write, and must
+// never fail the activation write itself.
+func (s *EntryActivationStore) markEntryActivationWorkflowIndexed(ctx context.Context, ns namespace.Namespace, wf types.WorkflowID) {
+	_ = s.rdb.SAdd(ctx, entryActivationWorkflowSetRedisKey(ns), entryActivationWorkflowTag(ns, wf)).Err()
 }
 
 func entryActivationKeyFromActivation(act engine.EntryActivation) engine.EntryActivationKey {
@@ -459,10 +541,31 @@ type scannedEntryActivation struct {
 	modern     bool
 }
 
-// List returns all activations in the namespace. Both modern and legacy key
-// layouts match the scan pattern. Duplicate identities are collapsed with the
-// modern record taking precedence; a legacy-only record remains visible.
+// List returns all activations in the namespace.
+//
+// The namespace is served from the maintained key index once a one-shot rebuild
+// has flipped the ready gate; until then List keeps the original
+// full-namespace scan and asks for a background rebuild (at most one runs per
+// namespace across processes) so later calls stop scanning. Both paths return
+// the same set: duplicate identities are collapsed with the modern record
+// taking precedence, a legacy-only record remains visible, and records below
+// the workflow watermark read back as non-desired.
 func (s *EntryActivationStore) List(ctx context.Context, ns namespace.Namespace) ([]engine.EntryActivation, error) {
+	ready, err := s.rdb.Exists(ctx, entryActivationIndexReadyRedisKey(ns)).Result()
+	if err != nil {
+		return nil, fmt.Errorf("check entry activation index readiness: %w", err)
+	}
+	if ready == 0 {
+		s.triggerEntryActivationIndexRebuild(ns)
+		return s.scanEntryActivations(ctx, ns)
+	}
+	return s.listIndexedEntryActivations(ctx, ns)
+}
+
+// scanEntryActivations is the pre-index List: it walks both key layouts with
+// SCAN. It serves every call until the index rebuild completes, and it is the
+// rebuild's own source of truth.
+func (s *EntryActivationStore) scanEntryActivations(ctx context.Context, ns namespace.Namespace) ([]engine.EntryActivation, error) {
 	patterns := []string{entryActivationScanPattern(ns)}
 	if modernPattern := workflowScopedEntryActivationScanPattern(ns); modernPattern != patterns[0] {
 		patterns = append(patterns, modernPattern)
@@ -481,24 +584,109 @@ func (s *EntryActivationStore) List(ctx context.Context, ns namespace.Namespace)
 			if len(fields) == 0 {
 				continue
 			}
-			act, err := decodeEntryActivation(fields)
-			if err != nil {
+			if err := s.mergeScannedEntryActivation(records, ns, redisKey, fields); err != nil {
 				return nil, err
-			}
-			// A legacy namespace containing Redis glob metacharacters can make
-			// its old scan pattern over-inclusive. Trust the stored identity.
-			if act.Namespace != ns {
-				continue
-			}
-			identity := entryActivationKeyFromActivation(act)
-			modern := redisKey == s.keyFor(identity)
-			previous, exists := records[identity]
-			if !exists || modern && !previous.modern {
-				records[identity] = scannedEntryActivation{activation: act, modern: modern}
 			}
 		}
 	}
+	return s.finalizeScannedEntryActivations(ctx, records)
+}
 
+// listIndexedEntryActivations reads the namespace through the maintained index
+// instead of scanning it: the workflow enumeration set names the per-workflow
+// index keys, the legacy set names the frozen pre-migration record keys, and
+// the union of their members is read directly. Members whose record expired
+// are skipped, so a stale index member never surfaces as a record.
+func (s *EntryActivationStore) listIndexedEntryActivations(ctx context.Context, ns namespace.Namespace) ([]engine.EntryActivation, error) {
+	workflowTags, err := s.rdb.SMembers(ctx, entryActivationWorkflowSetRedisKey(ns)).Result()
+	if err != nil {
+		return nil, fmt.Errorf("read entry activation workflow index set: %w", err)
+	}
+	indexKeys := make([]string, 0, len(workflowTags)+1)
+	for _, tag := range workflowTags {
+		indexKeys = append(indexKeys, entryActivationWorkflowIndexRedisKeyForTag(ns, tag))
+	}
+	indexKeys = append(indexKeys, entryActivationLegacyIndexRedisKey(ns))
+
+	memberPipe := s.rdb.Pipeline()
+	memberCmds := make([]*redis.StringSliceCmd, len(indexKeys))
+	for i, indexKey := range indexKeys {
+		memberCmds[i] = memberPipe.SMembers(ctx, indexKey)
+	}
+	if _, err := memberPipe.Exec(ctx); err != nil {
+		return nil, fmt.Errorf("read entry activation index members: %w", err)
+	}
+	seen := make(map[string]struct{})
+	for _, cmd := range memberCmds {
+		members, err := cmd.Result()
+		if err != nil {
+			return nil, fmt.Errorf("read entry activation index members: %w", err)
+		}
+		for _, member := range members {
+			seen[member] = struct{}{}
+		}
+	}
+
+	members := make([]string, 0, len(seen))
+	for member := range seen {
+		members = append(members, member)
+	}
+	sort.Strings(members)
+
+	records := make(map[engine.EntryActivationKey]scannedEntryActivation)
+	for start := 0; start < len(members); start += entryActivationIndexReadBatch {
+		batch := members[start:min(start+entryActivationIndexReadBatch, len(members))]
+		readPipe := s.rdb.Pipeline()
+		readCmds := make([]*redis.MapStringStringCmd, len(batch))
+		for i, member := range batch {
+			readCmds[i] = readPipe.HGetAll(ctx, member)
+		}
+		if _, err := readPipe.Exec(ctx); err != nil {
+			return nil, fmt.Errorf("read indexed entry activations: %w", err)
+		}
+		for i, cmd := range readCmds {
+			fields, err := cmd.Result()
+			if err != nil {
+				return nil, fmt.Errorf("read entry activation %q: %w", batch[i], err)
+			}
+			if len(fields) == 0 {
+				continue
+			}
+			if err := s.mergeScannedEntryActivation(records, ns, batch[i], fields); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return s.finalizeScannedEntryActivations(ctx, records)
+}
+
+// mergeScannedEntryActivation decodes one record read by either path and folds
+// it into records. Duplicate identities collapse with the modern record taking
+// precedence; a legacy-only record stays visible. Keeping this shared is what
+// makes the indexed and scanned paths return identical sets.
+func (s *EntryActivationStore) mergeScannedEntryActivation(records map[engine.EntryActivationKey]scannedEntryActivation, ns namespace.Namespace, redisKey string, fields map[string]string) error {
+	act, err := decodeEntryActivation(fields)
+	if err != nil {
+		return err
+	}
+	// A legacy namespace containing Redis glob metacharacters can make its old
+	// scan pattern over-inclusive (and a pre-rebuild index could carry the same
+	// spill). Trust the stored identity.
+	if act.Namespace != ns {
+		return nil
+	}
+	identity := entryActivationKeyFromActivation(act)
+	modern := redisKey == s.keyFor(identity)
+	previous, exists := records[identity]
+	if !exists || modern && !previous.modern {
+		records[identity] = scannedEntryActivation{activation: act, modern: modern}
+	}
+	return nil
+}
+
+// finalizeScannedEntryActivations applies the workflow watermark to every
+// merged record and materializes the result slice.
+func (s *EntryActivationStore) finalizeScannedEntryActivations(ctx context.Context, records map[engine.EntryActivationKey]scannedEntryActivation) ([]engine.EntryActivation, error) {
 	out := make([]engine.EntryActivation, 0, len(records))
 	for _, record := range records {
 		act, err := s.authoritativeEntryActivation(ctx, record.activation)
@@ -543,6 +731,13 @@ const entryActivationTransitionAbsent int64 = -1
 // modern hash is absent, it reads the legacy hash and retries with that snapshot
 // as script arguments. Upsert and the retry both mutate the same modern key, so
 // Redis serializes them even though the legacy read came from another slot.
+//
+// The per-workflow index key is passed with the record key: both share the
+// workflow digest hash tag, and each script refreshes the index whenever it
+// creates or refreshes the record. A result other than -1 (including a
+// generation rejection) means the record exists and the enumeration set must
+// name its workflow — on a legacy promotion the reject path can still have
+// created the modern record.
 func (s *EntryActivationStore) runEntryActivationTransition(
 	ctx context.Context,
 	key engine.EntryActivationKey,
@@ -550,9 +745,14 @@ func (s *EntryActivationStore) runEntryActivationTransition(
 	transitionArgs ...any,
 ) (int64, error) {
 	modernKey := s.keyFor(key)
-	result, err := script.Run(ctx, s.rdb, []string{modernKey}, s.entryActivationTransitionArgs(nil, transitionArgs...)...).Int64()
-	if err != nil || result != entryActivationTransitionAbsent {
+	indexKey := entryActivationWorkflowIndexRedisKey(key.Namespace, key.WorkflowID)
+	result, err := script.Run(ctx, s.rdb, []string{modernKey, indexKey}, s.entryActivationTransitionArgs(nil, transitionArgs...)...).Int64()
+	if err != nil {
 		return result, err
+	}
+	if result != entryActivationTransitionAbsent {
+		s.markEntryActivationWorkflowIndexed(ctx, key.Namespace, key.WorkflowID)
+		return result, nil
 	}
 
 	legacyKey := s.legacyKeyFor(key)
@@ -560,7 +760,14 @@ func (s *EntryActivationStore) runEntryActivationTransition(
 	if err != nil {
 		return 0, fmt.Errorf("read legacy entry activation for transition %q: %w", legacyKey, err)
 	}
-	return script.Run(ctx, s.rdb, []string{modernKey}, s.entryActivationTransitionArgs(legacyFields, transitionArgs...)...).Int64()
+	result, err = script.Run(ctx, s.rdb, []string{modernKey, indexKey}, s.entryActivationTransitionArgs(legacyFields, transitionArgs...)...).Int64()
+	if err != nil {
+		return result, err
+	}
+	if result != entryActivationTransitionAbsent {
+		s.markEntryActivationWorkflowIndexed(ctx, key.Namespace, key.WorkflowID)
+	}
+	return result, nil
 }
 
 func (s *EntryActivationStore) entryActivationTransitionArgs(legacyFields map[string]string, transitionArgs ...any) []any {
