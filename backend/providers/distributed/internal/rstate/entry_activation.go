@@ -183,10 +183,14 @@ func (s *EntryActivationStore) legacyKeyFor(k engine.EntryActivationKey) string 
 // expiry from its members' remaining TTLs (see entryActivationIndexTTLs), and
 // an unconditional EXPIRE with the store TTL would shorten that derivation —
 // letting the index expire before a member written under a longer previous TTL.
-// Read the index TTL before the SADD (which would create a missing key):
-// -2 means the key does not exist (just created, take the TTL), -1 means a
-// derived permanent index (leave it alone), and a positive value is only
-// extended when it is shorter than this write's TTL.
+// Read the index TTL before the SADD (which would create a missing key) and
+// write the TTL unless the key already outlives this write. The single
+// inequality deliberately covers every reply: -2 (missing — the SADD is about
+// to create the key), 0 (already due; Redis clamps an elapsed TTL to zero while
+// the key is not reclaimed yet — without the TTL the just-added member would
+// vanish with the key), and any positive reply shorter than this write's TTL
+// all take the TTL; only -1 (a derived permanent index) and a longer positive
+// reply are left alone.
 //
 // KEYS: 1=modern activation hash 2=workflow activation index
 // ARGV: 1=ttl_s 2=legacyFieldCount 3..=legacy field/value pairs, followed by
@@ -199,7 +203,7 @@ local function touch_activation()
     redis.call('EXPIRE', KEYS[1], ttl)
     local index_remaining_ms = redis.call('PTTL', KEYS[2])
     redis.call('SADD', KEYS[2], KEYS[1])
-    if index_remaining_ms == -2 or (index_remaining_ms > 0 and index_remaining_ms < ttl * 1000) then
+    if index_remaining_ms ~= -1 and index_remaining_ms < ttl * 1000 then
         redis.call('EXPIRE', KEYS[2], ttl)
     end
 end
@@ -344,8 +348,9 @@ var advanceEntryActivationWorkflowRevisionLua = redis.NewScript(advanceEntryActi
 //
 // The index refresh mirrors touch_activation's extend-only rule: the pre-SADD
 // PTTL leaves a permanent (rebuild-derived) index key alone and extends a
-// shorter TTL to this write's, so a rebuild's max-member derivation is never
-// shortened into expiring before a live record.
+// shorter TTL — including the clamped zero of a key already due — to this
+// write's, so a rebuild's max-member derivation is never shortened into
+// expiring before a live record.
 //
 // KEYS: 1=workflow watermark 2=activation hash 3=workflow activation index
 // ARGV: 1=revision 2=ttl_s, 3..15=desired fields,
@@ -408,7 +413,7 @@ local activation_ttl = tonumber(ARGV[2])
 redis.call('EXPIRE', KEYS[2], activation_ttl)
 local index_remaining_ms = redis.call('PTTL', KEYS[3])
 redis.call('SADD', KEYS[3], KEYS[2])
-if index_remaining_ms == -2 or (index_remaining_ms > 0 and index_remaining_ms < activation_ttl * 1000) then
+if index_remaining_ms ~= -1 and index_remaining_ms < activation_ttl * 1000 then
     redis.call('EXPIRE', KEYS[3], activation_ttl)
 end
 return 1
@@ -604,12 +609,18 @@ type scannedEntryActivation struct {
 // A failed readiness probe falls back to the scan path rather than failing the
 // read: a transient probe error must not turn a working read into a hard error
 // (the reconciler aborts its whole pass on one), and the failure direction is
-// the pre-index behaviour — scan, correct, just slower. No rebuild is
-// requested on that path, so a Redis that is erroring on EXISTS is not asked
-// to scan for it too; the next healthy List re-probes.
+// the pre-index behaviour — scan, correct, just slower. The fallback is logged
+// when a logger is installed, because a probe that keeps failing otherwise
+// degrades every List silently. No rebuild is requested on that path, so a
+// Redis that is erroring on EXISTS is not asked to scan for it too; the next
+// healthy List re-probes.
 func (s *EntryActivationStore) List(ctx context.Context, ns namespace.Namespace) ([]engine.EntryActivation, error) {
 	ready, err := s.rdb.Exists(ctx, entryActivationIndexReadyRedisKey(ns)).Result()
 	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("entry activation index readiness probe failed; falling back to the scan path",
+				"namespace", string(ns), "err", err)
+		}
 		return s.scanEntryActivations(ctx, ns)
 	}
 	if ready == 0 {
