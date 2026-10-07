@@ -31,6 +31,11 @@ paths = [
   '''^web/apps/[^/]+/dist/''',
   '''^web/apps/[^/]+/node_modules/''',
   '''^\.superpowers/''',
+  # Local agent-session state (gitignored via **/.omc/*) and turbopack's
+  # binary cache (gitignored via web/.gitignore): generated, never tracked,
+  # and together the largest remaining source of local-run noise.
+  '''^\.omc/''',
+  '''^web/apps/[^/]+/\.turbopack/''',
 ]
 
 # The rule allowlist below matches SECRET VALUES, not paths.
