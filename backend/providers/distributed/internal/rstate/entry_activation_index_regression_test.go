@@ -3,6 +3,8 @@ package rstate
 import (
 	"context"
 	"errors"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -509,4 +511,102 @@ func entryActivationSetContainsUnit(activations []engine.EntryActivation, unit s
 		}
 	}
 	return false
+}
+
+// entryActivationRecordingLogger records Warn messages and ignores everything
+// else. It is safe for concurrent use: the race sub-test fires warnings from
+// the List goroutine while another goroutine swaps the installed logger.
+type entryActivationRecordingLogger struct {
+	mu    sync.Mutex
+	warns []string
+}
+
+func (l *entryActivationRecordingLogger) record(msg string) {
+	l.mu.Lock()
+	l.warns = append(l.warns, msg)
+	l.mu.Unlock()
+}
+
+func (l *entryActivationRecordingLogger) warnings() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.warns...)
+}
+
+func (l *entryActivationRecordingLogger) Debug(msg string, args ...any)     {}
+func (l *entryActivationRecordingLogger) Debugf(format string, args ...any) {}
+func (l *entryActivationRecordingLogger) Info(msg string, args ...any)      {}
+func (l *entryActivationRecordingLogger) Infof(format string, args ...any)  {}
+func (l *entryActivationRecordingLogger) Warn(msg string, args ...any)      { l.record(msg) }
+func (l *entryActivationRecordingLogger) Warnf(format string, args ...any)  { l.record(format) }
+func (l *entryActivationRecordingLogger) Error(msg string, args ...any)     {}
+func (l *entryActivationRecordingLogger) Errorf(format string, args ...any) {}
+func (l *entryActivationRecordingLogger) Panic(msg string, args ...any)     {}
+func (l *entryActivationRecordingLogger) Panicf(format string, args ...any) {}
+
+// SetLogger is an exported method, so a caller may install a logger after the
+// store has started serving; nothing enforces the construction-time-only
+// calling pattern the previous implementation assumed. The logger therefore
+// lives behind an atomic pointer: this test proves the fallback path reads
+// whoever is installed at the time of the call, and that installing a logger
+// while List runs is free of data races (meaningful under -race, where a plain
+// field is reported as a write/read race).
+func TestEntryActivationStoreSetLoggerIsSafeUnderUse(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("the fallback warn reaches the installed logger", func(t *testing.T) {
+		client, _ := newEntryActivationIndexFaultClient(t)
+		client.existsErr = errors.New("exists unavailable")
+		store := NewEntryActivationStore(client, time.Hour)
+		recorder := &entryActivationRecordingLogger{}
+		store.SetLogger(recorder)
+
+		if _, err := store.List(ctx, "setlogger-fallback-ns"); err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		warns := recorder.warnings()
+		if len(warns) != 1 || !strings.Contains(warns[0], "readiness probe failed") {
+			t.Fatalf("want exactly one readiness-probe warn, got %v", warns)
+		}
+
+		store.SetLogger(nil)
+		if _, err := store.List(ctx, "setlogger-fallback-ns"); err != nil {
+			t.Fatalf("List (nil logger): %v", err)
+		}
+		if got := len(recorder.warnings()); got != 1 {
+			t.Fatalf("a nil logger must disable logging; warnings=%d, want 1", got)
+		}
+	})
+
+	t.Run("concurrent SetLogger and List are race-free", func(t *testing.T) {
+		client, _ := newEntryActivationIndexFaultClient(t)
+		client.existsErr = errors.New("exists unavailable")
+		store := NewEntryActivationStore(client, time.Hour)
+		first := &entryActivationRecordingLogger{}
+		second := &entryActivationRecordingLogger{}
+		store.SetLogger(first)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 500; i++ {
+				if i%2 == 0 {
+					store.SetLogger(second)
+				} else {
+					store.SetLogger(first)
+				}
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 500; i++ {
+				if _, err := store.List(ctx, "setlogger-race-ns"); err != nil {
+					t.Errorf("List: %v", err)
+					return
+				}
+			}
+		}()
+		wg.Wait()
+	})
 }

@@ -121,9 +121,11 @@ func (s *EntryActivationStore) triggerEntryActivationIndexRebuild(ns namespace.N
 		}()
 		ctx, cancel := context.WithTimeout(context.Background(), entryActivationIndexRebuildTimeout)
 		defer cancel()
-		if err := s.rebuildEntryActivationIndex(ctx, ns); err != nil && s.logger != nil {
-			s.logger.Warn("entry activation index rebuild failed; List keeps serving the scan path",
-				"namespace", string(ns), "err", err)
+		if err := s.rebuildEntryActivationIndex(ctx, ns); err != nil {
+			if logger := s.entryActivationLogger(); logger != nil {
+				logger.Warn("entry activation index rebuild failed; List keeps serving the scan path",
+					"namespace", string(ns), "err", err)
+			}
 		}
 	}()
 }

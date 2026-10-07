@@ -30,8 +30,11 @@ func (s *Store) SetLogger(l engine.Logger) { s.logger = l }
 // SetLogger installs the logger used to report background entry activation
 // index-rebuild failures. The rebuild is best-effort by construction — List
 // keeps serving the scan path while it is failing — so without a logger the
-// failures would be silent.
-func (s *EntryActivationStore) SetLogger(l engine.Logger) { s.logger = l }
+// failures would be silent. Safe to call at any time: the logger is held
+// behind an atomic pointer, so a call after the store has started serving
+// replaces the previous logger for all later readers (a nil logger disables
+// logging).
+func (s *EntryActivationStore) SetLogger(l engine.Logger) { s.logger.Store(&l) }
 
 // ConfigureTransient sets transient (fire-and-forget) retention. The active TTL
 // starts when an execution is created and ordinary state mutations do not renew

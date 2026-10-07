@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -36,12 +37,13 @@ type EntryActivationStore struct {
 	ttl time.Duration
 
 	// Index-rebuild trigger state. The maps are lazily initialized under
-	// rebuildMu; logger is written once from SetLogger at construction and only
-	// read afterwards.
+	// rebuildMu; logger sits behind an atomic pointer so SetLogger may be
+	// called at any time, replacing the installed logger without racing the
+	// List fallback and the rebuild goroutine that read it.
 	rebuildMu          sync.Mutex
 	rebuildInFlight    map[namespace.Namespace]struct{}
 	rebuildLastAttempt map[namespace.Namespace]time.Time
-	logger             engine.Logger
+	logger             atomic.Pointer[engine.Logger]
 }
 
 // NewEntryActivationStore returns a Redis-backed EntryActivationStore. ttl
@@ -49,6 +51,17 @@ type EntryActivationStore struct {
 // it.
 func NewEntryActivationStore(rdb redis.UniversalClient, ttl time.Duration) *EntryActivationStore {
 	return &EntryActivationStore{rdb: rdb, ttl: ttl}
+}
+
+// entryActivationLogger returns the installed logger, or nil when none is set.
+// It centralizes the double nil check the atomic pointer needs: Load returns
+// nil when SetLogger never ran, and a pointer to a nil interface after
+// SetLogger(nil).
+func (s *EntryActivationStore) entryActivationLogger() engine.Logger {
+	if l := s.logger.Load(); l != nil {
+		return *l
+	}
+	return nil
 }
 
 // entryActivationRedisKey builds the hash key for one activation. The identity
@@ -617,8 +630,8 @@ type scannedEntryActivation struct {
 func (s *EntryActivationStore) List(ctx context.Context, ns namespace.Namespace) ([]engine.EntryActivation, error) {
 	ready, err := s.rdb.Exists(ctx, entryActivationIndexReadyRedisKey(ns)).Result()
 	if err != nil {
-		if s.logger != nil {
-			s.logger.Warn("entry activation index readiness probe failed; falling back to the scan path",
+		if logger := s.entryActivationLogger(); logger != nil {
+			logger.Warn("entry activation index readiness probe failed; falling back to the scan path",
 				"namespace", string(ns), "err", err)
 		}
 		return s.scanEntryActivations(ctx, ns)
