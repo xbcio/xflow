@@ -9,7 +9,9 @@
 # Baseline, established by scanning all 1090 commits of history with the stock
 # ruleset: five hits, all four distinct values below. No real credential has
 # ever been committed. That is the number a future run should be compared
-# against, and it is why the allowlist can afford to be this narrow.
+# against, and it is why the allowlist can afford to be this narrow. Three
+# later test fixtures (two generic-api-key, one AWS-key-shaped editor-test
+# literal) are pinned the same way below.
 
 [extend]
 useDefault = true
@@ -34,7 +36,7 @@ paths = [
 # The rule allowlist below matches SECRET VALUES, not paths.
 #
 # Allowlisting a path would mean a real credential added to any of these files
-# later goes unreported, and three of the four are test files that grow. Pinning
+# later goes unreported, and most of these are test files that grow. Pinning
 # the exact value keeps the file in scope: a new secret next to an exempted one
 # still fails the build.
 [[rules]]
@@ -59,4 +61,27 @@ id = "generic-api-key"
     # so the next false positive is a decision someone makes on purpose.
     '''^evalDetailKeyCap\+1$''',
     '''^submit/invoke$''',
+
+    # The bearer token the runner control HTTP-metrics test hands to an
+    # in-process httptest server. Sequential hex, minted for one test binary.
+    '''^0123456789abcdef0123456789abcdef$''',
+
+    # The stub supply_key an httptest responder returns to the runner verify
+    # command (base64 of "supply-key"), asserting only that an issued key is
+    # accepted. It moved from cmd/runner to sdk/runner; pinning the value
+    # covers both the history hit and the current file.
+    '''^c3VwcGx5LWtleQ==$''',
+  ]
+
+# The editor's node-form heuristic test asserts that looksLikeSecret() returns
+# true for a credential-shaped literal, so its fixture must keep an AWS access
+# key's shape (AKIA + 16 base32 chars, here the sequential alphabet). Pinned by
+# value only: any other AWS-shaped string anywhere stays in scope.
+[[rules]]
+id = "aws-access-token"
+
+  [rules.allowlist]
+  regexTarget = "secret"
+  regexes = [
+    '''^AKIAABCDEFGHIJKLMNOP$''',
   ]
