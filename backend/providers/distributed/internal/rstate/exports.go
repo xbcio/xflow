@@ -27,6 +27,12 @@ func (s *Store) SetLeaseObserver(o LeaseObserver) {
 // SetLogger installs the logger used for best-effort audit-write failures.
 func (s *Store) SetLogger(l engine.Logger) { s.logger = l }
 
+// SetLogger installs the logger used to report background entry activation
+// index-rebuild failures. The rebuild is best-effort by construction — List
+// keeps serving the scan path while it is failing — so without a logger the
+// failures would be silent.
+func (s *EntryActivationStore) SetLogger(l engine.Logger) { s.logger = l }
+
 // ConfigureTransient sets transient (fire-and-forget) retention. The active TTL
 // starts when an execution is created and ordinary state mutations do not renew
 // it, so callers must set activeTTL above the maximum execution wall-clock

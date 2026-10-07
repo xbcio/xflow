@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -33,6 +34,14 @@ var (
 type EntryActivationStore struct {
 	rdb redis.UniversalClient
 	ttl time.Duration
+
+	// Index-rebuild trigger state. The maps are lazily initialized under
+	// rebuildMu; logger is written once from SetLogger at construction and only
+	// read afterwards.
+	rebuildMu          sync.Mutex
+	rebuildInFlight    map[namespace.Namespace]struct{}
+	rebuildLastAttempt map[namespace.Namespace]time.Time
+	logger             engine.Logger
 }
 
 // NewEntryActivationStore returns a Redis-backed EntryActivationStore. ttl
@@ -101,9 +110,12 @@ func entryActivationWorkflowIndexRedisKey(ns namespace.Namespace, wf types.Workf
 // entryActivationWorkflowSetRedisKey enumerates the workflow digest tags that
 // have a per-workflow index in this namespace. It deliberately carries no hash
 // tag — it aggregates every workflow in the namespace, so it cannot belong to
-// any one workflow's slot. Writers therefore SADD it outside Lua, best-effort
-// and idempotent; a dropped tag is refilled by the next write or by an index
-// rebuild.
+// any one workflow's slot. Writers therefore SADD it outside Lua, fail-closed:
+// markEntryActivationWorkflowIndexed propagates a failed SADD into the caller's
+// write instead of dropping it, because a missing tag hides the workflow's
+// records from List with no automatic repair once the ready gate is set.
+// Deleting the namespace's ready key forces a full rebuild — the recovery lever
+// for a tag lost to something this process never observed.
 func entryActivationWorkflowSetRedisKey(ns namespace.Namespace) string {
 	return fmt.Sprintf("xflow:ns:%s:entryactidx:wfs", entryActivationNamespacePath(ns))
 }
@@ -116,8 +128,11 @@ func entryActivationLegacyIndexRedisKey(ns namespace.Namespace) string {
 }
 
 // entryActivationIndexReadyRedisKey gates List onto the indexed read path. It is
-// set — permanently, and only — by a rebuild that completed a full scan; until
-// then List keeps using the scan path and keeps requesting a rebuild.
+// set — and only — by a rebuild that completed a full scan; until then List
+// keeps using the scan path and keeps requesting a rebuild. Deleting it is the
+// manual recovery lever: the next List scans again and a fresh rebuild repopulates
+// every index set, which is the only full re-verification available once the
+// gate is set.
 func entryActivationIndexReadyRedisKey(ns namespace.Namespace) string {
 	return fmt.Sprintf("xflow:ns:%s:entryactidx:ready", entryActivationNamespacePath(ns))
 }
@@ -164,6 +179,15 @@ func (s *EntryActivationStore) legacyKeyFor(k engine.EntryActivationKey) string 
 // creates or refreshes a record must call it — an index whose TTL lags its
 // record's would drop the record from List while it is still live.
 //
+// The index refresh only ever extends: a rebuild derives each index key's
+// expiry from its members' remaining TTLs (see entryActivationIndexTTLs), and
+// an unconditional EXPIRE with the store TTL would shorten that derivation —
+// letting the index expire before a member written under a longer previous TTL.
+// Read the index TTL before the SADD (which would create a missing key):
+// -2 means the key does not exist (just created, take the TTL), -1 means a
+// derived permanent index (leave it alone), and a positive value is only
+// extended when it is shorter than this write's TTL.
+//
 // KEYS: 1=modern activation hash 2=workflow activation index
 // ARGV: 1=ttl_s 2=legacyFieldCount 3..=legacy field/value pairs, followed by
 // transition-specific arguments. transition_arg is the first such argument.
@@ -173,8 +197,11 @@ local legacy_field_count = tonumber(ARGV[2])
 local transition_arg = 3 + legacy_field_count * 2
 local function touch_activation()
     redis.call('EXPIRE', KEYS[1], ttl)
+    local index_remaining_ms = redis.call('PTTL', KEYS[2])
     redis.call('SADD', KEYS[2], KEYS[1])
-    redis.call('EXPIRE', KEYS[2], ttl)
+    if index_remaining_ms == -2 or (index_remaining_ms > 0 and index_remaining_ms < ttl * 1000) then
+        redis.call('EXPIRE', KEYS[2], ttl)
+    end
 end
 if redis.call('EXISTS', KEYS[1]) == 0 then
     if legacy_field_count == 0 then
@@ -315,6 +342,11 @@ var advanceEntryActivationWorkflowRevisionLua = redis.NewScript(advanceEntryActi
 // modern record is first created; values copied from a legacy key keep an
 // existing owner visible during the layout transition.
 //
+// The index refresh mirrors touch_activation's extend-only rule: the pre-SADD
+// PTTL leaves a permanent (rebuild-derived) index key alone and extends a
+// shorter TTL to this write's, so a rebuild's max-member derivation is never
+// shortened into expiring before a live record.
+//
 // KEYS: 1=workflow watermark 2=activation hash 3=workflow activation index
 // ARGV: 1=revision 2=ttl_s, 3..15=desired fields,
 //
@@ -372,9 +404,13 @@ if existed == 0 then
         'lease_deadline', ARGV[19],
         'assigned_package_hash', ARGV[20])
 end
-redis.call('EXPIRE', KEYS[2], tonumber(ARGV[2]))
+local activation_ttl = tonumber(ARGV[2])
+redis.call('EXPIRE', KEYS[2], activation_ttl)
+local index_remaining_ms = redis.call('PTTL', KEYS[3])
 redis.call('SADD', KEYS[3], KEYS[2])
-redis.call('EXPIRE', KEYS[3], tonumber(ARGV[2]))
+if index_remaining_ms == -2 or (index_remaining_ms > 0 and index_remaining_ms < activation_ttl * 1000) then
+    redis.call('EXPIRE', KEYS[3], activation_ttl)
+end
 return 1
 `
 
@@ -398,6 +434,15 @@ func (s *EntryActivationStore) Upsert(ctx context.Context, act engine.EntryActiv
 	key := workflowScopedEntryActivationRedisKey(act.Namespace, act.WorkflowID, act.WorkflowVersion, act.EntryUnitID, act.ReplicaIndex)
 	watermarkKey := entryActivationWorkflowRevisionRedisKey(act.Namespace, act.WorkflowID)
 	indexKey := entryActivationWorkflowIndexRedisKey(act.Namespace, act.WorkflowID)
+
+	// The workflow tag is registered before the record is written, unconditionally
+	// and fail-closed: once the ready gate is set, this enumeration is the only
+	// link without a rebuild behind it, and a missing tag makes the workflow
+	// invisible even though its records exist. A failure here leaves nothing
+	// half-applied — the record write below simply does not run.
+	if err := s.markEntryActivationWorkflowIndexed(ctx, act.Namespace, act.WorkflowID); err != nil {
+		return err
+	}
 
 	var selectorJSON string
 	if act.Selector != nil {
@@ -456,7 +501,7 @@ func (s *EntryActivationStore) Upsert(ctx context.Context, act engine.EntryActiv
 	if err != nil {
 		return fmt.Errorf("read legacy entry activation for upsert %q: %w", key, err)
 	}
-	applied, err := upsertEntryActivationLua.Run(ctx, s.rdb,
+	if _, err := upsertEntryActivationLua.Run(ctx, s.rdb,
 		[]string{watermarkKey, key, indexKey},
 		act.RegistryRevision, int(s.ttl.Seconds()),
 		string(act.Namespace), string(act.WorkflowID), act.WorkflowVersion,
@@ -468,12 +513,8 @@ func (s *EntryActivationStore) Upsert(ctx context.Context, act engine.EntryActiv
 		defaultRedisField(legacyFields, "lease_deadline", "0"),
 		legacyFields["assigned_package_hash"],
 		defaultRedisField(legacyFields, "registry_revision", "0"),
-	).Int64()
-	if err != nil {
+	).Result(); err != nil {
 		return fmt.Errorf("upsert entry activation %q: %w", key, err)
-	}
-	if applied == 1 {
-		s.markEntryActivationWorkflowIndexed(ctx, act.Namespace, act.WorkflowID)
 	}
 	return nil
 }
@@ -482,12 +523,21 @@ func (s *EntryActivationStore) Upsert(ctx context.Context, act engine.EntryActiv
 // namespace enumeration set, which is how the indexed read path discovers the
 // per-workflow index keys. That set key carries no hash tag (it aggregates
 // every workflow in the namespace), so it cannot be touched from the record's
-// Lua slot; the SADD is best-effort and idempotent — the next write or an index
-// rebuild fills a dropped tag back in. The error is dropped on purpose: a
-// lagging enumeration delays visibility only until the next write, and must
-// never fail the activation write itself.
-func (s *EntryActivationStore) markEntryActivationWorkflowIndexed(ctx context.Context, ns namespace.Namespace, wf types.WorkflowID) {
-	_ = s.rdb.SAdd(ctx, entryActivationWorkflowSetRedisKey(ns), entryActivationWorkflowTag(ns, wf)).Err()
+// Lua slot — and it is the one index link with no rebuild behind it once the
+// ready gate is set. It is therefore fail-closed: a failed SADD aborts the
+// caller's write instead of being dropped, because "record exists but tag does
+// not" makes the whole workflow invisible to List (no reconciliation, no
+// unassignment) until a manual ready-gate reset. Callers invoke it *before*
+// writing the record, so a failure leaves nothing half-applied and the
+// caller's retry (the reconciler's next pass, the projection's 30s retry)
+// re-runs the SADD. A hanging tag — mark succeeded but the write then failed
+// or was rejected — is harmless: the enumeration only names index keys, and an
+// empty per-workflow index reads as no records.
+func (s *EntryActivationStore) markEntryActivationWorkflowIndexed(ctx context.Context, ns namespace.Namespace, wf types.WorkflowID) error {
+	if err := s.rdb.SAdd(ctx, entryActivationWorkflowSetRedisKey(ns), entryActivationWorkflowTag(ns, wf)).Err(); err != nil {
+		return fmt.Errorf("register entry activation workflow tag %q: %w", entryActivationWorkflowSetRedisKey(ns), err)
+	}
+	return nil
 }
 
 func entryActivationKeyFromActivation(act engine.EntryActivation) engine.EntryActivationKey {
@@ -550,10 +600,17 @@ type scannedEntryActivation struct {
 // the same set: duplicate identities are collapsed with the modern record
 // taking precedence, a legacy-only record remains visible, and records below
 // the workflow watermark read back as non-desired.
+//
+// A failed readiness probe falls back to the scan path rather than failing the
+// read: a transient probe error must not turn a working read into a hard error
+// (the reconciler aborts its whole pass on one), and the failure direction is
+// the pre-index behaviour — scan, correct, just slower. No rebuild is
+// requested on that path, so a Redis that is erroring on EXISTS is not asked
+// to scan for it too; the next healthy List re-probes.
 func (s *EntryActivationStore) List(ctx context.Context, ns namespace.Namespace) ([]engine.EntryActivation, error) {
 	ready, err := s.rdb.Exists(ctx, entryActivationIndexReadyRedisKey(ns)).Result()
 	if err != nil {
-		return nil, fmt.Errorf("check entry activation index readiness: %w", err)
+		return s.scanEntryActivations(ctx, ns)
 	}
 	if ready == 0 {
 		s.triggerEntryActivationIndexRebuild(ns)
@@ -734,10 +791,14 @@ const entryActivationTransitionAbsent int64 = -1
 //
 // The per-workflow index key is passed with the record key: both share the
 // workflow digest hash tag, and each script refreshes the index whenever it
-// creates or refreshes the record. A result other than -1 (including a
-// generation rejection) means the record exists and the enumeration set must
-// name its workflow — on a legacy promotion the reject path can still have
-// created the modern record.
+// creates or refreshes the record.
+//
+// The workflow enumeration tag is registered before the first script run,
+// unconditionally and fail-closed (see markEntryActivationWorkflowIndexed): a
+// transition can create the modern record on either the fast path or the
+// legacy-snapshot retry — including a reject path that promoted a legacy
+// snapshot before failing its CAS — so a single pre-write registration covers
+// every outcome, and a failed registration aborts with nothing half-applied.
 func (s *EntryActivationStore) runEntryActivationTransition(
 	ctx context.Context,
 	key engine.EntryActivationKey,
@@ -746,12 +807,15 @@ func (s *EntryActivationStore) runEntryActivationTransition(
 ) (int64, error) {
 	modernKey := s.keyFor(key)
 	indexKey := entryActivationWorkflowIndexRedisKey(key.Namespace, key.WorkflowID)
+	if err := s.markEntryActivationWorkflowIndexed(ctx, key.Namespace, key.WorkflowID); err != nil {
+		return 0, err
+	}
+
 	result, err := script.Run(ctx, s.rdb, []string{modernKey, indexKey}, s.entryActivationTransitionArgs(nil, transitionArgs...)...).Int64()
 	if err != nil {
 		return result, err
 	}
 	if result != entryActivationTransitionAbsent {
-		s.markEntryActivationWorkflowIndexed(ctx, key.Namespace, key.WorkflowID)
 		return result, nil
 	}
 
@@ -760,14 +824,7 @@ func (s *EntryActivationStore) runEntryActivationTransition(
 	if err != nil {
 		return 0, fmt.Errorf("read legacy entry activation for transition %q: %w", legacyKey, err)
 	}
-	result, err = script.Run(ctx, s.rdb, []string{modernKey, indexKey}, s.entryActivationTransitionArgs(legacyFields, transitionArgs...)...).Int64()
-	if err != nil {
-		return result, err
-	}
-	if result != entryActivationTransitionAbsent {
-		s.markEntryActivationWorkflowIndexed(ctx, key.Namespace, key.WorkflowID)
-	}
-	return result, nil
+	return script.Run(ctx, s.rdb, []string{modernKey, indexKey}, s.entryActivationTransitionArgs(legacyFields, transitionArgs...)...).Int64()
 }
 
 func (s *EntryActivationStore) entryActivationTransitionArgs(legacyFields map[string]string, transitionArgs ...any) []any {

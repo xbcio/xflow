@@ -97,13 +97,12 @@ func TestEntryActivationIndexMaintainedOnUpsert(t *testing.T) {
 		t.Fatalf("workflow enumeration set = %v, want [%q]", tags, wantTag)
 	}
 
-	ttl, err := rdb.TTL(ctx, indexKey).Result()
-	if err != nil {
-		t.Fatalf("TTL %q: %v", indexKey, err)
-	}
-	if ttl <= 0 || ttl > store.ttl {
-		t.Fatalf("workflow index TTL = %v, want within (0, %v]", ttl, store.ttl)
-	}
+	// The load-bearing invariant is one-sided: the index must never expire
+	// before a record it has to expose, so its remaining TTL is at least its
+	// member's. A longer index TTL is legal — a rebuild derives it from a member
+	// written under a longer previous TTL — and a range assertion like (0, ttl]
+	// would pin the write path to shortening that derivation.
+	assertEntryActivationIndexTTLCoversMembers(t, rdb, indexKey, wantMember)
 }
 
 // A legacy-only record promoted by Assign/Renew/Fence must land in the
@@ -334,7 +333,10 @@ func TestEntryActivationIndexedListSkipsDanglingMembers(t *testing.T) {
 
 // Every write must refresh the index TTL together with the record's, or an
 // index written once and refreshed often would expire out from under a live
-// record.
+// record. The refreshed TTL is subject to the extend-only rule — it may only
+// grow to this write's TTL, never shrink below a member's remaining TTL — so
+// the real invariant asserted here is "index TTL ≥ member remaining TTL" after
+// every write, not a range.
 func TestEntryActivationIndexTTLRefreshesOnWrite(t *testing.T) {
 	ctx := context.Background()
 	store, rdb, srv := newEntryActivationIndexTestStore(t, time.Hour)
@@ -350,6 +352,8 @@ func TestEntryActivationIndexTTLRefreshesOnWrite(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 	indexKey := entryActivationWorkflowIndexRedisKey(act.Namespace, act.WorkflowID)
+	member := store.keyFor(entryActivationKeyFromActivation(act))
+	assertEntryActivationIndexTTLCoversMembers(t, rdb, indexKey, member)
 	initial, err := rdb.TTL(ctx, indexKey).Result()
 	if err != nil {
 		t.Fatalf("TTL initial: %v", err)
@@ -366,6 +370,7 @@ func TestEntryActivationIndexTTLRefreshesOnWrite(t *testing.T) {
 	if _, ok, err := store.Get(ctx, entryActivationKeyFromActivation(act)); err != nil || !ok {
 		t.Fatalf("record must outlive the fast-forward: ok=%v err=%v", ok, err)
 	}
+	assertEntryActivationIndexTTLCoversMembers(t, rdb, indexKey, member)
 
 	refreshed := act
 	refreshed.PackageHash = "pkg-ttl-rewritten"
@@ -379,6 +384,7 @@ func TestEntryActivationIndexTTLRefreshesOnWrite(t *testing.T) {
 	if afterWrite <= aged {
 		t.Fatalf("write did not refresh the index TTL: aged=%v after=%v", aged, afterWrite)
 	}
+	assertEntryActivationIndexTTLCoversMembers(t, rdb, indexKey, member)
 }
 
 // List must keep serving the scan result and ask for a rebuild exactly once the

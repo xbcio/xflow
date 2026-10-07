@@ -346,7 +346,13 @@ func (b *Backend) RedisClient() redis.Cmdable { return b.rdb }
 // store without importing the internal rstate package. ttl bounds how long an
 // untouched activation record survives; every write refreshes it.
 func (b *Backend) NewEntryActivationStore(ttl time.Duration) engine.EntryActivationStore {
-	return rstate.NewEntryActivationStore(b.rdb, ttl)
+	store := rstate.NewEntryActivationStore(b.rdb, ttl)
+	if b.logger != nil {
+		// The store's background index rebuilds are best-effort; without the
+		// backend's logger their failures would be silent.
+		store.SetLogger(b.logger)
+	}
+	return store
 }
 
 // LeaderElector returns the Redis-backed leader election coordinator shared

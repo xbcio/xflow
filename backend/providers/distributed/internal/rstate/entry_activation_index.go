@@ -42,6 +42,12 @@ import (
 )
 
 const (
+	// entryActivationIndexRebuildDebounce bounds how often one process starts a
+	// rebuild attempt for a namespace. While the ready gate is unset every List
+	// call asks for a rebuild; the debounce collapses that into at most one
+	// attempt per interval per process. Cross-process pacing is the rebuild
+	// lock's TTL, not this value.
+	entryActivationIndexRebuildDebounce = 30 * time.Second
 	// entryActivationIndexRebuildLockTTL bounds one rebuild attempt's lock. It
 	// outlives entryActivationIndexRebuildTimeout so an attempt that runs out of
 	// time releases its lock by token while it still owns it.
@@ -74,16 +80,51 @@ return 0
 
 var releaseEntryActivationIndexRebuildLockLua = redis.NewScript(releaseEntryActivationIndexRebuildLockLuaSrc)
 
-// triggerEntryActivationIndexRebuild launches a best-effort, single-flight
-// index rebuild in the background. List must never wait for a rebuild: the
-// caller already received the scan-based result, and the rebuild only improves
-// later calls. The goroutine uses its own bounded context so a caller that
-// cancels its request context cannot abort the rebuild.
+// triggerEntryActivationIndexRebuild launches an index rebuild in the
+// background. List must never wait for a rebuild: the caller already received
+// the scan-based result, and the rebuild only improves later calls. The
+// goroutine uses its own bounded context so a caller that cancels its request
+// context cannot abort the rebuild.
+//
+// Triggering is single-flight and debounced per namespace in this process: with
+// the ready gate unset, every List call asks for a rebuild, and without the
+// debounce each one would spawn a goroutine plus a cross-process SetNX round
+// trip. The debounce is not the retry policy — the rebuild lock's TTL is. A
+// failed attempt is logged (when a logger is installed) and leaves List on the
+// scan path, which is correct, just slower; the lock expiring paces the next
+// cross-process attempt.
 func (s *EntryActivationStore) triggerEntryActivationIndexRebuild(ns namespace.Namespace) {
+	s.rebuildMu.Lock()
+	if _, inFlight := s.rebuildInFlight[ns]; inFlight {
+		s.rebuildMu.Unlock()
+		return
+	}
+	if last, attempted := s.rebuildLastAttempt[ns]; attempted && time.Since(last) < entryActivationIndexRebuildDebounce {
+		s.rebuildMu.Unlock()
+		return
+	}
+	if s.rebuildInFlight == nil {
+		s.rebuildInFlight = make(map[namespace.Namespace]struct{})
+	}
+	if s.rebuildLastAttempt == nil {
+		s.rebuildLastAttempt = make(map[namespace.Namespace]time.Time)
+	}
+	s.rebuildLastAttempt[ns] = time.Now()
+	s.rebuildInFlight[ns] = struct{}{}
+	s.rebuildMu.Unlock()
+
 	go func() {
+		defer func() {
+			s.rebuildMu.Lock()
+			delete(s.rebuildInFlight, ns)
+			s.rebuildMu.Unlock()
+		}()
 		ctx, cancel := context.WithTimeout(context.Background(), entryActivationIndexRebuildTimeout)
 		defer cancel()
-		_ = s.rebuildEntryActivationIndex(ctx, ns)
+		if err := s.rebuildEntryActivationIndex(ctx, ns); err != nil && s.logger != nil {
+			s.logger.Warn("entry activation index rebuild failed; List keeps serving the scan path",
+				"namespace", string(ns), "err", err)
+		}
 	}()
 }
 
