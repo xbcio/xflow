@@ -153,12 +153,15 @@ type RedisRunnerDirectory struct {
 	executions                engine.ExecutionStatusReader
 	keys                      redisRunnerDirectoryKeys
 
-	// claimCursorMu guards claimCursors, the per-runner resume position into
-	// the shared assignment queue. It is process-local scheduling state, not
-	// authority: losing it (restart, eviction) only means a runner restarts its
-	// sweep from the head. See claimFromQueuePage.
+	// claimCursorMu guards claimCursors and claimWalks, the per-runner resume
+	// position into the shared assignment queue and whether the last scan for
+	// that runner stopped at its scan budget with queue left unexamined. Both
+	// are process-local scheduling state, not authority: losing them (restart,
+	// eviction) only means a runner restarts its sweep from the head and at the
+	// idle cadence. See claimFromQueuePage.
 	claimCursorMu sync.Mutex
 	claimCursors  map[string]int
+	claimWalks    map[string]bool
 
 	// queuedReap is the same kind of process-local state for the
 	// queued-assignment reaper's walk of assignment:state. See
@@ -167,6 +170,7 @@ type RedisRunnerDirectory struct {
 }
 
 var _ RunnerDirectory = (*RedisRunnerDirectory)(nil)
+var _ ClaimWalkReporter = (*RedisRunnerDirectory)(nil)
 var _ RunnerRemover = (*RedisRunnerDirectory)(nil)
 var _ ClaimReclaimer = (*RedisRunnerDirectory)(nil)
 var _ ActivationRunnerLister = (*RedisRunnerDirectory)(nil)
@@ -202,6 +206,7 @@ func NewRedisRunnerDirectory(rdb redis.Cmdable, opts ...RedisRunnerDirectoryOpti
 		executions:                cfg.executions,
 		keys:                      newRedisRunnerDirectoryKeys(redisRunnerDirectoryKeyPrefix),
 		claimCursors:              make(map[string]int),
+		claimWalks:                make(map[string]bool),
 	}
 }
 
@@ -462,9 +467,10 @@ func (d *RedisRunnerDirectory) ClaimForRunner(ctx context.Context, req ClaimRequ
 		return Claim{}, false, err
 	}
 	if !found {
-		// The runner is gone, so its resume position is stale state that would
-		// otherwise linger in the process-local cursor map.
+		// The runner is gone, so its resume position and pending-walk marker
+		// are stale state that would otherwise linger in the process-local maps.
 		d.storeClaimCursor(req.RunnerID, 0)
+		d.storeClaimWalk(req.RunnerID, false)
 		return Claim{}, false, ErrRunnerNotFound
 	}
 	if req.SessionID == "" || runner.sessionID != req.SessionID {
@@ -489,6 +495,12 @@ func (d *RedisRunnerDirectory) ClaimForRunner(ctx context.Context, req ClaimRequ
 		// This is an additional, runner-requested suppression only. The Lua
 		// transition below still fences DRAINING atomically for old runners that
 		// do not know how to set RecoveryOnly.
+		//
+		// No scan happens on this path, so a pending-walk marker left by an
+		// earlier poll is cleared rather than reported: it would otherwise keep
+		// the poll loop at the short walk cadence while the runner is asking for
+		// recovery only.
+		d.storeClaimWalk(req.RunnerID, false)
 		return Claim{}, false, nil
 	}
 
@@ -510,6 +522,11 @@ func (d *RedisRunnerDirectory) ClaimForRunner(ctx context.Context, req ClaimRequ
 		if resolved {
 			return claim, ok, nil
 		}
+	} else {
+		// A full runner does not scan the queue, so any walk from an earlier
+		// poll is not in progress for it: clear the marker so the poll loop
+		// falls back to the idle long-poll cadence while it waits for headroom.
+		d.storeClaimWalk(req.RunnerID, false)
 	}
 
 	status, err := d.claim(ctx, req.RunnerID, req.SessionID, "", "", "")
@@ -531,12 +548,37 @@ func (d *RedisRunnerDirectory) ClaimForRunner(ctx context.Context, req ClaimRequ
 // a whole-list read made each poll O(queue) and the fleet O(runners x queue).
 const redisClaimQueuePage = 64
 
-// claimFromQueuePage reads one bounded page of the assignment queue starting at
+// redisClaimScanBudget bounds how many queue entries one poll may walk past
+// while every page it reads yields nothing this runner can claim. One page per
+// poll is what made the unclaimable prefix expensive: the prefix is the
+// residue of expired executions, the dead-queued reaper drains it at its own
+// bounded rate, and while it is long the cursor crosses it at one page per
+// pollWait — so a cursor reset to the head (which a queue shrink causes; see
+// loadClaimCursor's guard) means minutes of claiming nothing, however many live
+// entries sit behind the prefix. The budget is counted in entries rather than
+// wall-clock time so a slow shared Redis stretches one page's cost but cannot
+// shrink how far a poll reaches; it is a multiple of the page so the walk
+// advances whole pages on the common path.
+const redisClaimScanBudget = 16 * redisClaimQueuePage
+
+// redisClaimAttemptsPerPoll bounds how many claim transitions one poll may
+// attempt. A single-page scan bounded this implicitly; a walk that spans pages
+// must bound it explicitly, or a queue whose candidates keep losing their races
+// ('retry') could make one poll run an unbounded number of Lua transitions.
+// Reaching the bound steps the cursor past the page being attempted — a retried
+// entry stays retryable, because its state changed, its payload was replaced,
+// or it is no longer in the list, so re-reading the same page would re-attempt
+// the same entries — and positions left unattempted are revisited on the next
+// sweep, like positions skipped by a concurrent removal.
+const redisClaimAttemptsPerPoll = redisClaimQueuePage
+
+// claimFromQueuePage walks bounded pages of the assignment queue starting at
 // this runner's persisted cursor and attempts to claim the first candidate it is
-// eligible for. It reports resolved=true when it reached a definite answer
-// (a claim, or "none"/"draining"); resolved=false means the page held nothing
-// this runner could claim and the caller should still run the empty transition
-// so draining and session fencing keep their meaning.
+// eligible for, up to the scan budget's worth of entries per poll. It reports
+// resolved=true when it reached a definite answer (a claim, or
+// "none"/"draining"); resolved=false means the walk found nothing this runner
+// could claim and the caller should still run the empty transition so draining
+// and session fencing keep their meaning.
 //
 // The cursor is deliberately anchored rather than free-running. LREM (in the
 // claim and requeue transitions) deletes by value, so a removal ahead of a
@@ -560,112 +602,150 @@ func (d *RedisRunnerDirectory) claimFromQueuePage(
 	if total == 0 || cursor < 0 || cursor >= int(total) {
 		cursor = 0
 	}
-	assignmentIDs, err := d.rdb.LRange(ctx, d.keys.queue, int64(cursor), int64(cursor+redisClaimQueuePage-1)).Result()
-	if err != nil {
-		return Claim{}, false, false, fmt.Errorf("read redis assignment queue: %w", err)
-	}
-	if len(assignmentIDs) == 0 {
-		d.storeClaimCursor(req.RunnerID, 0)
-		return Claim{}, false, false, nil
-	}
 
-	raws, err := d.rdb.HMGet(ctx, d.keys.assignmentData, assignmentIDs...).Result()
-	if err != nil {
-		return Claim{}, false, false, fmt.Errorf("read redis assignments: %w", err)
-	}
-
-	// Resolve the whole page before claiming anything. The eligibility filters used
-	// to run inside the claim loop, which made their cost invisible; hoisting them
-	// out is what lets the liveness question below be asked once for the page
-	// instead of once per attempt.
-	type claimCandidate struct {
-		assignmentID string
-		raw          string
-		assignment   Assignment
-	}
-	candidates := make([]claimCandidate, 0, len(assignmentIDs))
-	assignments := make([]Assignment, 0, len(assignmentIDs))
-	for i, assignmentID := range assignmentIDs {
-		raw, _ := raws[i].(string)
-		if raw == "" {
-			// The payload expired between LRange and HMGet, or was never written;
-			// either way there is nothing claimable here.
-			continue
+	attempts := 0
+	for scanned := 0; scanned < redisClaimScanBudget; {
+		page := redisClaimQueuePage
+		if remaining := redisClaimScanBudget - scanned; remaining < page {
+			page = remaining
 		}
-		assignment, err := unmarshalRedisAssignment(raw)
+		assignmentIDs, err := d.rdb.LRange(ctx, d.keys.queue, int64(cursor), int64(cursor+page-1)).Result()
 		if err != nil {
-			return Claim{}, false, false, err
+			return Claim{}, false, false, fmt.Errorf("read redis assignment queue: %w", err)
 		}
-		if !MatchCapabilities(capabilities, assignment.Routing) || !runner.policy.Allows(assignment.Routing.NodeType) {
-			continue
-		}
-		if !canServeNamespace(runner.namespaces, assignment.Namespace) {
-			continue
-		}
-		if rs := assignment.Routing.RunnerSelector; rs != nil && !MatchLabels(labels, rs.MatchLabels) {
-			continue
-		}
-		candidates = append(candidates, claimCandidate{assignmentID: assignmentID, raw: raw, assignment: assignment})
-		assignments = append(assignments, assignment)
-	}
-	if len(candidates) == 0 {
-		d.storeClaimCursor(req.RunnerID, nextClaimCursor(cursor, len(assignmentIDs), int(total)))
-		return Claim{}, false, false, nil
-	}
-
-	// Drop the assignments whose execution is already gone before claiming any of
-	// them. Claiming one is not a no-op: it runs an entire Lua transition, allocates
-	// a claim slot, and is then walked back by finalize/release when the dispatch
-	// finds nothing to run. On a queue whose head has outlived its executions that
-	// is nearly all of the page, so the claim path spent its whole budget
-	// materializing leases for work that no longer existed — which is both wasted
-	// work and, because a claim resets the resume cursor, the reason a live entry
-	// further down the queue was never reached at all.
-	//
-	// Removal stays with the dead-queued reaper: it owns the atomic transitions
-	// (queue, seen set, claim maps) and a wrong removal here would lose work.
-	leaseable, err := d.leaseableExecutions(ctx, assignments)
-	if err != nil {
-		return Claim{}, false, false, err
-	}
-
-	for _, c := range candidates {
-		if !leaseable[c.assignment.Task.ExecutionID] {
-			continue
-		}
-		claimID := ClaimID(uuid.NewString())
-		status, err := d.claim(ctx, req.RunnerID, req.SessionID, c.assignmentID, c.raw, claimID)
-		if err != nil {
-			return Claim{}, false, false, err
-		}
-		switch status {
-		case "claimed":
-			// The cursor is deliberately NOT reset to the head here. It used to be,
-			// so that an element shifted left by a concurrent LREM could not be
-			// stranded — but a claim removes the entry the cursor points at, so
-			// leaving it where it is already names the next entry, and the
-			// wrap-to-head on an exhausted page still revisits anything skipped by a
-			// shift. Resetting instead sent every poll back over the same prefix:
-			// with a page of dead assignments in front of the live ones, each poll
-			// re-walked that whole prefix before it could claim anything, and an
-			// unadvanced cursor cannot step over a prefix the way a skipped page can.
-			return Claim{ClaimID: claimID, Assignment: c.assignment}, true, true, nil
-		case "retry":
-			continue
-		case "none", "draining":
+		if len(assignmentIDs) == 0 {
 			d.storeClaimCursor(req.RunnerID, 0)
-			return Claim{}, false, true, nil
-		case "not_found", "stale":
-			return Claim{}, false, false, runnerSessionStatusError(status)
-		default:
-			return Claim{}, false, false, fmt.Errorf("claim redis assignment: unexpected result %q", status)
+			d.storeClaimWalk(req.RunnerID, false)
+			return Claim{}, false, false, nil
+		}
+
+		raws, err := d.rdb.HMGet(ctx, d.keys.assignmentData, assignmentIDs...).Result()
+		if err != nil {
+			return Claim{}, false, false, fmt.Errorf("read redis assignments: %w", err)
+		}
+
+		// Resolve the whole page before claiming anything. The eligibility filters used
+		// to run inside the claim loop, which made their cost invisible; hoisting them
+		// out is what lets the liveness question below be asked once for the page
+		// instead of once per attempt.
+		type claimCandidate struct {
+			assignmentID string
+			raw          string
+			assignment   Assignment
+		}
+		candidates := make([]claimCandidate, 0, len(assignmentIDs))
+		assignments := make([]Assignment, 0, len(assignmentIDs))
+		for i, assignmentID := range assignmentIDs {
+			raw, _ := raws[i].(string)
+			if raw == "" {
+				// The payload expired between LRange and HMGet, or was never written;
+				// either way there is nothing claimable here.
+				continue
+			}
+			assignment, err := unmarshalRedisAssignment(raw)
+			if err != nil {
+				return Claim{}, false, false, err
+			}
+			if !MatchCapabilities(capabilities, assignment.Routing) || !runner.policy.Allows(assignment.Routing.NodeType) {
+				continue
+			}
+			if !canServeNamespace(runner.namespaces, assignment.Namespace) {
+				continue
+			}
+			if rs := assignment.Routing.RunnerSelector; rs != nil && !MatchLabels(labels, rs.MatchLabels) {
+				continue
+			}
+			candidates = append(candidates, claimCandidate{assignmentID: assignmentID, raw: raw, assignment: assignment})
+			assignments = append(assignments, assignment)
+		}
+
+		stopped := false
+		if len(candidates) > 0 {
+			// Drop the assignments whose execution is already gone before claiming any of
+			// them. Claiming one is not a no-op: it runs an entire Lua transition, allocates
+			// a claim slot, and is then walked back by finalize/release when the dispatch
+			// finds nothing to run. On a queue whose head has outlived its executions that
+			// is nearly all of the page, so the claim path spent its whole budget
+			// materializing leases for work that no longer existed — which is both wasted
+			// work and, because a claim resets the resume cursor, the reason a live entry
+			// further down the queue was never reached at all.
+			//
+			// Removal stays with the dead-queued reaper: it owns the atomic transitions
+			// (queue, seen set, claim maps) and a wrong removal here would lose work.
+			leaseable, err := d.leaseableExecutions(ctx, assignments)
+			if err != nil {
+				return Claim{}, false, false, err
+			}
+
+		claimAttempts:
+			for _, c := range candidates {
+				if !leaseable[c.assignment.Task.ExecutionID] {
+					continue
+				}
+				claimID := ClaimID(uuid.NewString())
+				status, err := d.claim(ctx, req.RunnerID, req.SessionID, c.assignmentID, c.raw, claimID)
+				if err != nil {
+					return Claim{}, false, false, err
+				}
+				switch status {
+				case "claimed":
+					// The cursor is deliberately NOT reset to the head here. It used to be,
+					// so that an element shifted left by a concurrent LREM could not be
+					// stranded — but a claim removes the entry the cursor points at, so
+					// leaving it where it is already names the next entry, and the
+					// wrap-to-head on an exhausted page still revisits anything skipped by a
+					// shift. Resetting instead sent every poll back over the same prefix:
+					// with a page of dead assignments in front of the live ones, each poll
+					// re-walked that whole prefix before it could claim anything, and an
+					// unadvanced cursor cannot step over a prefix the way a skipped page can.
+					d.storeClaimWalk(req.RunnerID, false)
+					return Claim{ClaimID: claimID, Assignment: c.assignment}, true, true, nil
+				case "retry":
+					// 'retry' is a verdict on the entry, not a transient hold: the
+					// state changed (a peer claimed it), the payload was replaced,
+					// or the list no longer contains it — so re-attempting the same
+					// entries would repeat the same verdicts. Attempting the page's
+					// other entries is how the walk escapes it; once the attempt
+					// budget is spent, the step below past the page is the other
+					// half. See redisClaimAttemptsPerPoll.
+					attempts++
+					if attempts >= redisClaimAttemptsPerPoll {
+						stopped = true
+						break claimAttempts
+					}
+					continue
+				case "none", "draining":
+					d.storeClaimCursor(req.RunnerID, 0)
+					d.storeClaimWalk(req.RunnerID, false)
+					return Claim{}, false, true, nil
+				case "not_found", "stale":
+					return Claim{}, false, false, runnerSessionStatusError(status)
+				default:
+					return Claim{}, false, false, fmt.Errorf("claim redis assignment: unexpected result %q", status)
+				}
+			}
+		}
+
+		// Nothing on this page was claimable (or the attempt budget stopped the
+		// scan part-way through it). Wrap to the head at end-of-queue or once the
+		// cursor has passed the length sampled at entry; otherwise resume from
+		// the next page — in this poll, while the scan budget lasts.
+		scanned += len(assignmentIDs)
+		cursor = nextClaimCursor(cursor, len(assignmentIDs), int(total))
+		d.storeClaimCursor(req.RunnerID, cursor)
+		if stopped || cursor == 0 {
+			// A stopped walk has queue left to examine, so it resumes at the
+			// short cadence; a wrap is a completed sweep and resumes at the idle
+			// one.
+			d.storeClaimWalk(req.RunnerID, stopped && cursor != 0)
+			return Claim{}, false, false, nil
 		}
 	}
 
-	// Nothing on this page was claimable. Wrap to the head at end-of-queue or
-	// once the cursor has passed the length sampled at entry; otherwise resume
-	// from the next page on the following poll.
-	d.storeClaimCursor(req.RunnerID, nextClaimCursor(cursor, len(assignmentIDs), int(total)))
+	// The scan budget ran out with queue left unexamined. Report the walk as
+	// pending so the poll loop resumes it at the short cadence instead of the
+	// idle one.
+	d.storeClaimWalk(req.RunnerID, true)
 	return Claim{}, false, false, nil
 }
 
@@ -698,6 +778,31 @@ func (d *RedisRunnerDirectory) storeClaimCursor(runnerID string, cursor int) {
 		d.claimCursors = make(map[string]int)
 	}
 	d.claimCursors[runnerID] = cursor
+}
+
+// storeClaimWalk records whether the last claim scan for the runner stopped at
+// its scan budget with queue left unexamined. Only that exit sets it: every
+// definite answer (a claim, 'none'/'draining', an empty page, a wrapped sweep)
+// clears it, so the poll loop's short wait applies exactly while a walk is in
+// progress.
+func (d *RedisRunnerDirectory) storeClaimWalk(runnerID string, walking bool) {
+	d.claimCursorMu.Lock()
+	defer d.claimCursorMu.Unlock()
+	if !walking {
+		delete(d.claimWalks, runnerID)
+		return
+	}
+	if d.claimWalks == nil {
+		d.claimWalks = make(map[string]bool)
+	}
+	d.claimWalks[runnerID] = true
+}
+
+// ClaimWalkPending implements ClaimWalkReporter.
+func (d *RedisRunnerDirectory) ClaimWalkPending(runnerID string) bool {
+	d.claimCursorMu.Lock()
+	defer d.claimCursorMu.Unlock()
+	return d.claimWalks[runnerID]
 }
 
 // MarkClaimLeaseMayExist writes the durable pre-Build*Lease crash fence. The

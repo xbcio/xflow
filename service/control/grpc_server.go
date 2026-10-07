@@ -140,10 +140,11 @@ func NewGRPCServer(engine EngineFacade, runners RunnerDirectory, opts ...GRPCSer
 	}
 	srv := &GRPCServer{
 		core: &Core{
-			engine:   engine,
-			runners:  runners,
-			pollWait: time.Second,
-			tracer:   tracing.NoopTracer{},
+			engine:       engine,
+			runners:      runners,
+			pollWait:     time.Second,
+			pollWalkWait: defaultPollWalkWait,
+			tracer:       tracing.NoopTracer{},
 		},
 	}
 	for _, o := range opts {

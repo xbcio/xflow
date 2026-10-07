@@ -183,18 +183,20 @@ func TestReapDeadQueuedAssignmentsDrainsMoreThanOneLegacyPass(t *testing.T) {
 // TestClaimForRunnerKeepsItsCursorOnASuccessfulClaim pins that a claim no longer
 // rewinds the resume position to the head of the queue.
 //
-// The cursor has to be somewhere other than zero for this to be observable, which
-// is why it is reached by paging past a dead prefix first. Rewinding it sent every
-// subsequent poll back over that same prefix — work the skipped-page path can step
-// over in one read, but a cursor pinned at zero cannot.
+// The prefix is exactly one page and the live entry sits on the one after it, so
+// the walk crosses the dead page and claims within the same poll; the cursor is
+// what has to be observed, and it has to be somewhere other than zero when the
+// claim lands. Rewinding it sent every subsequent poll back over that same
+// prefix — work the walk can step over in one read, but a cursor pinned at zero
+// cannot.
 func TestClaimForRunnerKeepsItsCursorOnASuccessfulClaim(t *testing.T) {
 	ctx := context.Background()
 	reader := newBatchRecordingExecutionStatusReader()
 	_, directory, _ := newQueuedReapDirectory(t, reader)
 	session := registerRedisDirectoryRunner(t, ctx, directory, "runner-1", 4)
 
-	// One page of dead assignments, so the first poll takes the skipped-page path
-	// and leaves the cursor at the start of the second page.
+	// One page of dead assignments, so the walk crosses a whole dead page
+	// before it can reach the live entry behind it.
 	for i := 0; i < redisClaimQueuePage; i++ {
 		enqueueForExecution(t, ctx, directory, types.ExecutionID(fmt.Sprintf("exec-gone-%d", i)))
 	}
@@ -203,28 +205,66 @@ func TestClaimForRunnerKeepsItsCursorOnASuccessfulClaim(t *testing.T) {
 
 	claim, ok, err := directory.ClaimForRunner(ctx, redisDirectoryClaimRequest(session, 4))
 	if err != nil {
-		t.Fatalf("ClaimForRunner() poll 1 error = %v", err)
-	}
-	if ok {
-		t.Fatalf("ClaimForRunner() poll 1 claimed %q, want no claim from a page that is entirely dead", claim.Assignment.AssignmentID)
-	}
-	if got := directory.loadClaimCursor("runner-1"); got != redisClaimQueuePage {
-		t.Fatalf("cursor after the skipped page = %d, want %d", got, redisClaimQueuePage)
-	}
-
-	claim, ok, err = directory.ClaimForRunner(ctx, redisDirectoryClaimRequest(session, 4))
-	if err != nil {
-		t.Fatalf("ClaimForRunner() poll 2 error = %v", err)
+		t.Fatalf("ClaimForRunner() error = %v", err)
 	}
 	if !ok {
-		t.Fatal("ClaimForRunner() poll 2 ok=false, want the live assignment on the second page")
+		t.Fatal("ClaimForRunner() ok=false, want the live assignment behind the dead page reached by the walk")
 	}
 	if got := claim.Assignment.Task.ExecutionID; got != "exec-live" {
-		t.Fatalf("ClaimForRunner() poll 2 claimed execution %q, want %q", got, "exec-live")
+		t.Fatalf("ClaimForRunner() claimed execution %q, want %q", got, "exec-live")
 	}
 	if got := directory.loadClaimCursor("runner-1"); got != redisClaimQueuePage {
 		t.Fatalf("cursor after a successful claim = %d, want it left at %d rather than rewound to the head",
 			got, redisClaimQueuePage)
+	}
+}
+
+// TestClaimForRunnerStopsAWalkAtItsScanBudget pins the walk's read bound: a poll
+// crosses at most redisClaimScanBudget entries of a queue that yields nothing,
+// then reports the walk as pending so the next poll resumes it promptly.
+//
+// This is the difference between a queue shrink costing one poll's budget and
+// costing the whole prefix. Without the bound, one poll would walk a prefix of
+// any length — a single poll's worth of minutes on one runner's critical path;
+// without the pending report, the resumption would wait out the idle long-poll
+// cadence between every budget's worth of entries.
+func TestClaimForRunnerStopsAWalkAtItsScanBudget(t *testing.T) {
+	ctx := context.Background()
+	reader := newBatchRecordingExecutionStatusReader()
+	_, directory, _ := newQueuedReapDirectory(t, reader)
+	session := registerRedisDirectoryRunner(t, ctx, directory, "runner-1", 4)
+
+	const dead = redisClaimScanBudget + redisClaimQueuePage
+	for i := 0; i < dead; i++ {
+		enqueueForExecution(t, ctx, directory, types.ExecutionID(fmt.Sprintf("exec-gone-%d", i)))
+	}
+
+	claim, ok, err := directory.ClaimForRunner(ctx, redisDirectoryClaimRequest(session, 4))
+	if err != nil {
+		t.Fatalf("ClaimForRunner() poll 1 error = %v", err)
+	}
+	if ok {
+		t.Fatalf("ClaimForRunner() poll 1 claimed %q from a queue with nothing claimable", claim.Assignment.AssignmentID)
+	}
+	if got := directory.loadClaimCursor("runner-1"); got != redisClaimScanBudget {
+		t.Fatalf("cursor after one poll = %d, want exactly the scan budget %d", got, redisClaimScanBudget)
+	}
+	if !directory.ClaimWalkPending("runner-1") {
+		t.Fatal("ClaimWalkPending() = false after a poll that stopped at its scan budget, want true so the walk resumes at the short cadence")
+	}
+
+	// The next poll resumes from the budget's end and finishes the sweep: the
+	// queue that remains is shorter than the budget, so the wrap completes the
+	// sweep and clears the pending marker.
+	_, ok, err = directory.ClaimForRunner(ctx, redisDirectoryClaimRequest(session, 4))
+	if err != nil {
+		t.Fatalf("ClaimForRunner() poll 2 error = %v", err)
+	}
+	if ok {
+		t.Fatal("ClaimForRunner() poll 2 ok=true, want no claim from a queue of dead entries")
+	}
+	if directory.ClaimWalkPending("runner-1") {
+		t.Fatal("ClaimWalkPending() = true after the sweep wrapped, want false")
 	}
 }
 

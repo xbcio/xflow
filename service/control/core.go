@@ -87,6 +87,11 @@ type Core struct {
 	engine   EngineFacade
 	runners  RunnerDirectory
 	pollWait time.Duration
+	// pollWalkWait, when > 0, is the reduced long-poll wait returned while the
+	// runner's last claim scan stopped at its scan budget with queue left
+	// unexamined (see ClaimWalkReporter). Zero disables the reduction and keeps
+	// the idle long-poll cadence everywhere.
+	pollWalkWait time.Duration
 	// auth resolves credentials to a RunnerPolicy on every call. Nil == the
 	// disabled authenticator, matching legacy behavior.
 	auth         Authenticator
@@ -914,6 +919,31 @@ func (c *Core) reapOrphanedHandoff(ctx context.Context, claim Claim) (bool, erro
 	return true, nil
 }
 
+// defaultPollWalkWait is the reduced long-poll wait returned while a claim walk
+// is pending (see ClaimWalkReporter). It is small because the walk is already
+// bounded per poll: the wait is only the gap between one poll's scan budget and
+// the next poll's, and the point of the marker is to cross an unclaimable
+// prefix in seconds rather than in a long-poll cadence per page.
+const defaultPollWalkWait = 100 * time.Millisecond
+
+// ClaimWalkReporter is an optional RunnerDirectory capability: a directory whose
+// claim scan can stop at a read budget mid-queue reports that state so the poll
+// loop can resume the walk promptly instead of at the idle long-poll cadence.
+//
+// The two waits answer different questions. A runner with nothing to claim
+// anywhere waits out pollWait — the queue is empty or its work is elsewhere, and
+// there is no reason to poll faster. A runner whose scan stopped at its budget
+// has queue left unexamined behind it, and on a queue with a long unclaimable
+// prefix that difference is minutes: page by page at the idle cadence, a resume
+// position reset to the head takes far longer to cross the prefix than the
+// prefix is worth. Directories without this capability keep the previous
+// cadence exactly.
+type ClaimWalkReporter interface {
+	// ClaimWalkPending reports whether the last claim scan for this runner
+	// stopped at its scan budget with queue left unexamined.
+	ClaimWalkPending(runnerID string) bool
+}
+
 func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info TransportInfo) (protocol.PollTaskResponse, error) {
 	if req.RunnerID == "" || req.SessionID == "" {
 		return protocol.PollTaskResponse{}, ErrRunnerSessionRequired
@@ -938,7 +968,17 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 			return protocol.PollTaskResponse{}, normalizeRunnerError(err, c.logger, "poll")
 		}
 		if !ok {
-			return withControl(protocol.PollTaskResponse{Wait: c.pollWait}), nil
+			// A scan that stopped at its budget has more of the shared queue
+			// behind it. Returning the idle wait there would make the runner
+			// re-cross the queue at idle cadence — minutes for a long unclaimable
+			// prefix (see redisClaimScanBudget) — so wake it at the short walk
+			// cadence while queue is left to examine. Directories that cannot
+			// report a walk keep the previous cadence exactly.
+			wait := c.pollWait
+			if reporter, ok := c.runners.(ClaimWalkReporter); ok && c.pollWalkWait > 0 && reporter.ClaimWalkPending(req.RunnerID) {
+				wait = c.pollWalkWait
+			}
+			return withControl(protocol.PollTaskResponse{Wait: wait}), nil
 		}
 
 		// Inject the assignment's authoritative namespace so the downstream

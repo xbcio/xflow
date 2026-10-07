@@ -239,6 +239,7 @@ func NewServer(engine EngineFacade, runners RunnerDirectory, opts ...ServerOptio
 			engine:        engine,
 			runners:       runners,
 			pollWait:      time.Second,
+			pollWalkWait:  defaultPollWalkWait,
 			tracer:        tracing.NoopTracer{},
 			rotationGrace: 60 * time.Second,
 		},
