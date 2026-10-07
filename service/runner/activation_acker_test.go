@@ -21,12 +21,12 @@ import (
 // 必须按三元组去重，否则会形成 ack 风暴。generation 单调递增，所以每次真正的
 // 重派都会产生新三元组并允许一次新的 ack。
 //
-// The dedup decision (activationAcker.shouldAck) runs synchronously before a
-// send goroutine is ever spawned, so calling ackFailed twice back-to-back
-// from this goroutine deterministically dispatches exactly one HTTP call —
-// there is no race between "check" and "spawn" to fool. What's left to
-// verify by polling is that the single dispatched call actually lands on the
-// wire with the right path and body.
+// The dedup decision (activationAcker.beginActivationAck) runs synchronously
+// before a send goroutine is ever spawned, so calling ackFailed twice
+// back-to-back from this goroutine deterministically dispatches exactly one
+// HTTP call — there is no race between "check" and "spawn" to fool. What's
+// left to verify by polling is that the single dispatched call actually lands
+// on the wire with the right path and body.
 func TestActivationAckIsSentOncePerGeneration(t *testing.T) {
 	var mu sync.Mutex
 	var acks []protocol.ActivationAck
@@ -525,5 +525,60 @@ func waitForActivationAckState(t *testing.T, acker *activationAcker, d protocol.
 			t.Fatalf("timed out waiting for: %s", what)
 		}
 		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// TestActivationAckReservationSurvivesStaleCompletion pins the interleaving
+// the conditional delete exists for: an older generation's send completing
+// must not erase a newer generation's reservation, which would let a repeated
+// failure for the newer generation dispatch a duplicate HTTP call.
+func TestActivationAckReservationSurvivesStaleCompletion(t *testing.T) {
+	acker := newActivationAcker(&okAckClient{onAck: func(protocol.ActivationAck) {}}, "runner-1", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	key := activationAckKey{WorkflowID: "wf-1", WorkflowVersion: "v1", EntryUnitID: "grp-a"}
+
+	// (b) A newer generation takes the slot while gen 1 is still in flight.
+	if !acker.beginActivationAck(key, 1) {
+		t.Fatal("gen 1 must be admitted")
+	}
+	if !acker.beginActivationAck(key, 2) {
+		t.Fatal("gen 2 must be admitted while gen 1 is in flight")
+	}
+	// Gen 1 completes after gen 2 took the slot: it must not erase it.
+	acker.finishActivationAck(key, 1, true)
+	acker.mu.Lock()
+	pending, present := acker.activationAckInFlight[key]
+	acker.mu.Unlock()
+	if !present || pending != 2 {
+		t.Fatalf("in-flight after the stale completion = %d (present=%v), want gen 2", pending, present)
+	}
+	// A repeated failure for gen 2 stays deduped while its send is in flight.
+	if acker.beginActivationAck(key, 2) {
+		t.Fatal("gen 2 must stay deduped while its own send is in flight")
+	}
+	// Its own failure releases the reservation, so the retry is admitted.
+	acker.finishActivationAck(key, 2, false)
+	if !acker.beginActivationAck(key, 2) {
+		t.Fatal("a failed gen 2 send must be retryable")
+	}
+	acker.finishActivationAck(key, 2, true)
+	if acker.beginActivationAck(key, 2) {
+		t.Fatal("a delivered gen 2 must stay deduped")
+	}
+
+	// (a) A failed generation's own completion releases its reservation, and a
+	// stale completion of an older generation cannot re-open a newer one.
+	if !acker.beginActivationAck(key, 3) {
+		t.Fatal("gen 3 must be admitted")
+	}
+	acker.finishActivationAck(key, 1, false) // stale completion, must be a no-op
+	acker.mu.Lock()
+	pending, present = acker.activationAckInFlight[key]
+	acker.mu.Unlock()
+	if !present || pending != 3 {
+		t.Fatalf("in-flight after a stale failure completion = %d (present=%v), want gen 3", pending, present)
+	}
+	acker.finishActivationAck(key, 3, false)
+	if !acker.beginActivationAck(key, 3) {
+		t.Fatal("a failed gen 3 send must be retryable")
 	}
 }

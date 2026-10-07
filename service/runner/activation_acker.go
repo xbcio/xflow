@@ -128,10 +128,22 @@ func (a *activationAcker) beginActivationAck(key activationAckKey, generation ui
 // send advances acked; a failed one clears the reservation so the next
 // onActivateFailed for this activation (every redelivery of the directive
 // re-triggers it) can try again.
+//
+// The delete is conditional on the reservation still being THIS generation's.
+// A newer generation can legitimately take the slot while an older send is in
+// flight (beginActivationAck admits it because pending < generation), and an
+// unconditional delete here would let the stale completion erase the newer
+// reservation — a second failure for the newer generation would then dispatch
+// a duplicate ack HTTP call. Since begin only ever writes a strictly greater
+// value than what it found, the value observed here is either this
+// generation's own, a higher generation's, or already gone: deleting only on
+// an exact match is safe in every ordering.
 func (a *activationAcker) finishActivationAck(key activationAckKey, generation uint64, delivered bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	delete(a.activationAckInFlight, key)
+	if current, ok := a.activationAckInFlight[key]; ok && current == generation {
+		delete(a.activationAckInFlight, key)
+	}
 	if delivered {
 		if last, ok := a.acked[key]; !ok || generation > last {
 			a.acked[key] = generation
