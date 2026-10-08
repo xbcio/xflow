@@ -408,10 +408,16 @@ items listed below under §12.1. What remains open is in §12.2.
     single-attempt commit path only ever has one failing member to report,
     but the shape leaves room for a future caller that collects more than
     one without a breaking change. `engine.GroupResult.FailedMember` (the
-    singular string one layer up, carried end to end including over
-    `service/protocol`'s `GroupResultWire`/`ReportResultRequest` wire
-    conversions) is the structured source this payload's `failed_members`
-    is built from, not the same field under a different name.
+    singular string one layer up) is the structured source this payload's
+    `failed_members` is built from, not the same field under a different
+    name. It is carried end to end over `service/protocol`'s
+    `GroupResultWire`/`ReportResultRequest` wire conversions on both runner
+    transports: HTTP always has, and gRPC since the `group_result_json`
+    field was added to `runnerpb.ReportResultRequest` (previously gRPC's
+    `ReportResultRequestToProto`/`FromProto` dropped `GroupResult` entirely,
+    so a gRPC-reported group result committed through the ordinary node path
+    and was rejected as a misleading stale lease token rather than reaching
+    `CommitGroupResult` at all).
   - **The commit's reported `Outcome` is `GroupOutcomeSuccess`, not
     `GroupOutcomeFailed`, when the engine decided the failure is non-fatal.**
     This was the one piece the investigations did not have visibility into
