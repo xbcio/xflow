@@ -50,9 +50,9 @@ var (
 	// CommitTaskResultWithOutcome itself now refuses with the engine-internal
 	// ErrGroupLeaseNotSupported — lets the runner see a clear, actionable
 	// error instead of a generic 500.
-	ErrGroupResultMissing = errors.New("group lease reported with no group result")
-	ErrEngineNotConfigured   = errors.New("engine not configured")
-	ErrUnauthenticated       = errors.New("unauthenticated")
+	ErrGroupResultMissing  = errors.New("group lease reported with no group result")
+	ErrEngineNotConfigured = errors.New("engine not configured")
+	ErrUnauthenticated     = errors.New("unauthenticated")
 	// ErrStaleGeneration is returned when an entry seed carries an activation
 	// generation older than the currently-assigned generation AND targets an
 	// admission key that has not yet been accepted. It fences a forged or stale
@@ -90,6 +90,28 @@ var (
 	// ErrMetricsEncodingUnsupported means the report was not gzip'd.
 	ErrMetricsEncodingUnsupported = errors.New("runner metrics payload must be gzip encoded")
 )
+
+// isStaleTokenEquivalent reports whether err belongs to the lease-rejection
+// family that every transport carries IN-BAND rather than as a generic
+// 500 / codes.Internal: HTTP answers 409 with the response body, gRPC answers
+// Accepted=false (unary) or an Ack frame (Connect stream). There are two
+// members and they must agree everywhere a transport decides:
+//
+//   - engine.ErrInvalidLeaseToken — the commit path's fencing refusal.
+//   - ErrGroupResultMissing — its group-path equivalent. reportResult
+//     classifies a group lease reported with no GroupResult as
+//     CommitOutcomeStaleToken (same capacity-release path, same
+//     RemoveSeen=false), so leaving it to fall into writeRunnerError's default
+//     would hand the runner a 500 for a rejection its retry cannot fix — the
+//     exact misreport this helper exists to prevent.
+//
+// Defined once because three call sites (HandleReportResult, the gRPC unary
+// ReportResult, and the Connect stream's result branch) must stay in lockstep;
+// a new transport that special-cases one sentinel but not the other is how the
+// group rejection silently regressed to a 500 before.
+func isStaleTokenEquivalent(err error) bool {
+	return errors.Is(err, engine.ErrInvalidLeaseToken) || errors.Is(err, ErrGroupResultMissing)
+}
 
 // Core holds the transport-independent Runner Protocol logic shared by the HTTP
 // and gRPC servers. Each method takes and returns protocol DTOs and signals

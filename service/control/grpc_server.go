@@ -205,9 +205,11 @@ func (s *GRPCServer) ReportResult(ctx context.Context, req *runnerpb.ReportResul
 	overrideTokenFromMetadata(ctx, &in.AuthToken)
 	resp, err := s.core.reportResult(ctx, in, grpcTransportInfo(ctx))
 	if err != nil {
-		if errors.Is(err, engine.ErrInvalidLeaseToken) {
+		if isStaleTokenEquivalent(err) {
 			// Carry the rejection in-band so the runner sees Accepted=false with
-			// a reason, mirroring the HTTP 409 contract.
+			// a reason, mirroring the HTTP 409 contract. ErrGroupResultMissing
+			// rides along: it is the group path's stale-token equivalent, so it
+			// must not fall through to runnerStatus' unmapped Internal.
 			return &runnerpb.ReportResultResponse{Accepted: false, Error: resp.Error}, nil
 		}
 		return nil, runnerStatus(err)

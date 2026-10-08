@@ -8,7 +8,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/service/protocol/runnerpb"
 )
@@ -137,7 +136,11 @@ func (s *GRPCServer) connect(stream protocol.RunnerConnectStream) error {
 					Result:    frame.Result.Result,
 					AuthToken: authToken,
 				}, transport)
-				if err != nil && !errors.Is(err, engine.ErrInvalidLeaseToken) {
+				// A stale-token-equivalent rejection (ErrInvalidLeaseToken, or
+				// the group path's ErrGroupResultMissing) rides the Ack frame
+				// below as Accepted=false; only a genuine transport/internal
+				// failure drops the stream.
+				if err != nil && !isStaleTokenEquivalent(err) {
 					return runnerStatus(err)
 				}
 				if err := stream.Send(protocol.ServerFrame{Ack: &protocol.AckFrame{

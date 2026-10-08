@@ -369,7 +369,7 @@ func (s *Server) HandleReportResult(w http.ResponseWriter, r *http.Request) {
 	overrideTokenFromHeader(r, &req.AuthToken)
 	resp, err := s.core.reportResult(r.Context(), req, s.httpTransportInfo(r))
 	if err != nil {
-		if errors.Is(err, engine.ErrInvalidLeaseToken) {
+		if isStaleTokenEquivalent(err) {
 			writeJSON(w, http.StatusConflict, resp)
 			return
 		}
