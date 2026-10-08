@@ -317,6 +317,11 @@ type Runner struct {
 	// returning nil when this is nil, so an InProc host calling it anyway
 	// (e.g. a signal handler shared across transports) is not an error.
 	credReloader *CredentialReloader
+	// reloadMu serializes Reload, so the reloader's snapshot and the token the
+	// protocol client holds are always swapped together: without it, two
+	// concurrent Reloads could leave the protocol client on the earlier
+	// call's token while the reloader holds the later one's.
+	reloadMu sync.Mutex
 	// protocolClient is the concrete client Reload hands the new bearer token
 	// to (protocol.Client and protocol.GRPCClient keep their own atomic copy).
 	// Closing idle connections is the reloader's job, since it tracks every
@@ -615,6 +620,8 @@ func (r *Runner) Reload(src CredentialReloaderSource) error {
 	if r.credReloader == nil {
 		return nil
 	}
+	r.reloadMu.Lock()
+	defer r.reloadMu.Unlock()
 	if err := r.credReloader.Reload(src); err != nil {
 		return err
 	}

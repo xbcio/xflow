@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -987,5 +988,46 @@ func TestRunnerReloadRefusesToWeakenServerVerification(t *testing.T) {
 	// Adding a CA is a strengthening, so it is allowed.
 	if err := plain.Reload(CredentialReloaderSource{Token: "token-c", TLSServerCA: caPath}); err != nil {
 		t.Fatalf("Reload adding a server CA: %v", err)
+	}
+}
+
+// TestRunnerReloadKeepsTheProtocolTokenInStepWithTheReloader exercises
+// concurrent Runner.Reload calls: once they settle, the token the protocol
+// client sends must be the reloader's current one, not an earlier call's.
+// Run with -race.
+func TestRunnerReloadKeepsTheProtocolTokenInStepWithTheReloader(t *testing.T) {
+	var lastAuth atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lastAuth.Store(r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	r, err := NewRunner(RunnerConfig{ServerURL: srv.URL, RunnerID: "concurrent", Token: "token-0", ArtifactCacheDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	defer r.Close()
+
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < 50; i++ {
+				if err := r.Reload(CredentialReloaderSource{Token: fmt.Sprintf("token-%d-%d", g, i)}); err != nil {
+					t.Errorf("Reload: %v", err)
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	protoClient := r.protocolClient.(*protocol.Client)
+	if _, err := protoClient.Heartbeat(context.Background(), protocol.HeartbeatRequest{RunnerID: "concurrent"}); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	if got, want := lastAuth.Load(), "Bearer "+r.credReloader.Token(); got != want {
+		t.Fatalf("protocol client sent %q, reloader holds %q", got, want)
 	}
 }
