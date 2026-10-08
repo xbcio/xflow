@@ -394,6 +394,65 @@ func ActivationAckRequestFromProto(req *runnerpb.ActivationAckRequest) Activatio
 	}
 }
 
+// RenewLeaseRequestToProto converts the HTTP-shaped RenewLeaseRequest DTO to
+// its gRPC wire message. AuthToken travels on the message for DTO parity, but
+// (like every other request) the gRPC server ignores it in favor of the
+// Authorization metadata set by GRPCClient.withAuth.
+func RenewLeaseRequestToProto(req RenewLeaseRequest) *runnerpb.RenewLeaseRequest {
+	return &runnerpb.RenewLeaseRequest{
+		RunnerId:   req.RunnerID,
+		SessionId:  req.SessionID,
+		LeaseId:    req.LeaseID,
+		LeaseToken: req.LeaseToken,
+		ExtendMs:   req.Extend,
+		AuthToken:  req.AuthToken,
+	}
+}
+
+// RenewLeaseRequestFromProto converts a gRPC RenewLeaseRequest back to the
+// transport-agnostic DTO Core.renewLease consumes. AuthToken is left empty;
+// the gRPC server fills it from metadata the same way the HTTP handler fills
+// it from the Authorization header.
+func RenewLeaseRequestFromProto(req *runnerpb.RenewLeaseRequest) RenewLeaseRequest {
+	return RenewLeaseRequest{
+		RunnerID:   req.GetRunnerId(),
+		SessionID:  req.GetSessionId(),
+		LeaseID:    req.GetLeaseId(),
+		LeaseToken: req.GetLeaseToken(),
+		Extend:     req.GetExtendMs(),
+	}
+}
+
+// RenewLeaseResponseToProto converts the HTTP-shaped RenewLeaseResponse DTO
+// to its gRPC wire message. Deadline travels as UnixNano (same pattern as
+// HeartbeatRequest.Timestamp) to avoid a proto Timestamp import; a zero
+// time.Time (the refusal case) encodes as 0.
+func RenewLeaseResponseToProto(resp RenewLeaseResponse) *runnerpb.RenewLeaseResponse {
+	var deadline int64
+	if !resp.Deadline.IsZero() {
+		deadline = resp.Deadline.UnixNano()
+	}
+	return &runnerpb.RenewLeaseResponse{
+		Renewed:          resp.Renewed,
+		DeadlineUnixNano: deadline,
+		Error:            resp.Error,
+	}
+}
+
+// RenewLeaseResponseFromProto converts a gRPC RenewLeaseResponse back to the
+// transport-agnostic DTO. A zero deadline_unix_nano decodes to the zero
+// time.Time, matching the HTTP transport's refusal shape.
+func RenewLeaseResponseFromProto(resp *runnerpb.RenewLeaseResponse) RenewLeaseResponse {
+	out := RenewLeaseResponse{
+		Renewed: resp.GetRenewed(),
+		Error:   resp.GetError(),
+	}
+	if n := resp.GetDeadlineUnixNano(); n != 0 {
+		out.Deadline = time.Unix(0, n).UTC()
+	}
+	return out
+}
+
 func cloneLabels(labels map[string]string) map[string]string {
 	if len(labels) == 0 {
 		return nil

@@ -156,6 +156,119 @@ func TestGRPCRegisterPollAndResultRoundTrip(t *testing.T) {
 	}
 }
 
+// TestGRPCRenewLeaseRoundTrip proves the gRPC transport reaches the same
+// Core.renewLease the HTTP transport uses (see TestRenewUnaffectedBeforeDeadline),
+// extending a node lease's deadline and reporting the server's new deadline
+// back over the wire. This closes RUNTIME-GAPS-TODO item 1: before the
+// RenewLease RPC existed, GRPCClient did not implement leaseRenewClient, so
+// service/runner/runner.go's type assertion never started a renewal loop for
+// a gRPC-transport runner, and a long-running node lease outlived its TTL
+// unrenewed until the sweeper reclaimed and redispatched it.
+func TestGRPCRenewLeaseRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	dir := NewMemoryRunnerDirectory()
+	fake := &deadlineTestEngine{nodeRenewResult: true}
+	client := startGRPCTestServer(t, fake, dir)
+
+	registerResp, err := client.Register(ctx, protocol.RegisterRunnerRequest{
+		InstanceUID:  "test-instance",
+		RunnerID:     "runner-renew",
+		Concurrency:  1,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+	})
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	task := engine.Task{
+		ExecutionID: "exec-renew-1",
+		NodeName:    "step1",
+		NodeIdx:     0,
+		Type:        engine.TaskTypeNodeExec,
+	}
+	mustEnqueueAssignment(t, ctx, dir, Assignment{
+		AssignmentID: BuildAssignmentID(&task),
+		Task:         task,
+		Routing:      engine.TaskRouting{NodeType: "xflow.function"},
+	})
+	session := RunnerSession{RunnerID: registerResp.RunnerID, SessionID: registerResp.SessionID}
+	claim := mustClaimAssignment(t, ctx, dir, session)
+	futureDeadline := time.Now().Add(30 * time.Minute)
+	lease := &engine.TaskLease{
+		LeaseID:           "lease-renew-1",
+		LeaseToken:        "token-renew-1",
+		Task:              task,
+		Attempt:           1,
+		NodeType:          "xflow.function",
+		IssuedAt:          time.Now().Add(-1 * time.Minute),
+		TTL:               60 * time.Second,
+		ExecutionDeadline: futureDeadline,
+	}
+	if err := dir.FinalizeClaim(ctx, claim.ClaimID, lease); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := client.RenewLease(ctx, protocol.RenewLeaseRequest{
+		RunnerID:   registerResp.RunnerID,
+		SessionID:  registerResp.SessionID,
+		LeaseID:    "lease-renew-1",
+		LeaseToken: "token-renew-1",
+		Extend:     30_000,
+	})
+	if err != nil {
+		t.Fatalf("RenewLease() error = %v", err)
+	}
+	if !resp.Renewed {
+		t.Fatalf("RenewLease() Renewed=false, want true: %+v", resp)
+	}
+	if resp.Deadline.IsZero() {
+		t.Fatal("RenewLease() returned a zero deadline for a successful renewal")
+	}
+	if fake.commitTimeoutCalled {
+		t.Fatal("CommitTaskTimeout was called for a lease that has not expired")
+	}
+}
+
+// TestGRPCRenewLeaseRefusalIsNotATransportError proves a renewal the server
+// refuses (lease not found) surfaces as a normal Renewed=false response over
+// gRPC, not an RPC error — mirroring the HTTP transport's
+// TestClientRenewLeaseRefusalIsNotAnError. The runner's renewal loop
+// (service/runner/lease_renew.go) depends on telling this apart from a
+// transport fault: a refusal cancels the handler, a transport fault retries.
+func TestGRPCRenewLeaseRefusalIsNotATransportError(t *testing.T) {
+	ctx := context.Background()
+	dir := NewMemoryRunnerDirectory()
+	fake := &deadlineTestEngine{}
+	client := startGRPCTestServer(t, fake, dir)
+
+	registerResp, err := client.Register(ctx, protocol.RegisterRunnerRequest{
+		InstanceUID:  "test-instance",
+		RunnerID:     "runner-refuse",
+		Concurrency:  1,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+	})
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	resp, err := client.RenewLease(ctx, protocol.RenewLeaseRequest{
+		RunnerID:   registerResp.RunnerID,
+		SessionID:  registerResp.SessionID,
+		LeaseID:    "no-such-lease",
+		LeaseToken: "no-such-token",
+		Extend:     30_000,
+	})
+	if err != nil {
+		t.Fatalf("RenewLease() error = %v, want a Renewed=false response", err)
+	}
+	if resp.Renewed {
+		t.Fatal("RenewLease() reported renewed for an unknown lease")
+	}
+	if resp.Error == "" {
+		t.Fatal("expected a refusal reason, got empty")
+	}
+}
+
 func TestGRPCReportResultRejectsStaleLeaseToken(t *testing.T) {
 	eng := &fakeControlEngine{commitErr: engine.ErrInvalidLeaseToken}
 	runners := NewMemoryRunnerDirectory()

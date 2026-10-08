@@ -228,6 +228,20 @@ func (s *GRPCServer) AckActivation(ctx context.Context, req *runnerpb.Activation
 	return &runnerpb.ActivationAckResponse{}, nil
 }
 
+// RenewLease extends an active lease's deadline, mirroring HandleRenewLease
+// exactly: both call Core.renewLease, which owns session validation, lease
+// lookup, execution-deadline enforcement, and the group/node renewal split,
+// so neither transport duplicates that logic.
+func (s *GRPCServer) RenewLease(ctx context.Context, req *runnerpb.RenewLeaseRequest) (*runnerpb.RenewLeaseResponse, error) {
+	in := protocol.RenewLeaseRequestFromProto(req)
+	overrideTokenFromMetadata(ctx, &in.AuthToken)
+	resp, err := s.core.renewLease(ctx, in, grpcTransportInfo(ctx))
+	if err != nil {
+		return nil, runnerStatus(err)
+	}
+	return protocol.RenewLeaseResponseToProto(resp), nil
+}
+
 // overrideTokenFromMetadata pulls the Authorization: Bearer <token> value out
 // of gRPC metadata and, if present, overrides whatever the request payload
 // carried. Matches the HTTP contract: header transport is authoritative.

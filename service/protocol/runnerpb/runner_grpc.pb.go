@@ -25,6 +25,7 @@ const (
 	RunnerProtocol_PollTask_FullMethodName      = "/xflow.runner.v1.RunnerProtocol/PollTask"
 	RunnerProtocol_ReportResult_FullMethodName  = "/xflow.runner.v1.RunnerProtocol/ReportResult"
 	RunnerProtocol_AckActivation_FullMethodName = "/xflow.runner.v1.RunnerProtocol/AckActivation"
+	RunnerProtocol_RenewLease_FullMethodName    = "/xflow.runner.v1.RunnerProtocol/RenewLease"
 )
 
 // RunnerProtocolClient is the client API for RunnerProtocol service.
@@ -62,6 +63,11 @@ type RunnerProtocolClient interface {
 	// returning without error, matching the HTTP transport's 200 with an empty
 	// body.
 	AckActivation(ctx context.Context, in *ActivationAckRequest, opts ...grpc.CallOption) (*ActivationAckResponse, error)
+	// RenewLease extends an active lease's deadline. Mirrors the HTTP
+	// RenewLeasePath endpoint exactly: both transports call Core.renewLease,
+	// so session validation, lease lookup, execution-deadline enforcement, and
+	// the group/node renewal split are never duplicated between them.
+	RenewLease(ctx context.Context, in *RenewLeaseRequest, opts ...grpc.CallOption) (*RenewLeaseResponse, error)
 }
 
 type runnerProtocolClient struct {
@@ -135,6 +141,16 @@ func (c *runnerProtocolClient) AckActivation(ctx context.Context, in *Activation
 	return out, nil
 }
 
+func (c *runnerProtocolClient) RenewLease(ctx context.Context, in *RenewLeaseRequest, opts ...grpc.CallOption) (*RenewLeaseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RenewLeaseResponse)
+	err := c.cc.Invoke(ctx, RunnerProtocol_RenewLease_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RunnerProtocolServer is the server API for RunnerProtocol service.
 // All implementations must embed UnimplementedRunnerProtocolServer
 // for forward compatibility.
@@ -170,6 +186,11 @@ type RunnerProtocolServer interface {
 	// returning without error, matching the HTTP transport's 200 with an empty
 	// body.
 	AckActivation(context.Context, *ActivationAckRequest) (*ActivationAckResponse, error)
+	// RenewLease extends an active lease's deadline. Mirrors the HTTP
+	// RenewLeasePath endpoint exactly: both transports call Core.renewLease,
+	// so session validation, lease lookup, execution-deadline enforcement, and
+	// the group/node renewal split are never duplicated between them.
+	RenewLease(context.Context, *RenewLeaseRequest) (*RenewLeaseResponse, error)
 	mustEmbedUnimplementedRunnerProtocolServer()
 }
 
@@ -197,6 +218,9 @@ func (UnimplementedRunnerProtocolServer) ReportResult(context.Context, *ReportRe
 }
 func (UnimplementedRunnerProtocolServer) AckActivation(context.Context, *ActivationAckRequest) (*ActivationAckResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AckActivation not implemented")
+}
+func (UnimplementedRunnerProtocolServer) RenewLease(context.Context, *RenewLeaseRequest) (*RenewLeaseResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RenewLease not implemented")
 }
 func (UnimplementedRunnerProtocolServer) mustEmbedUnimplementedRunnerProtocolServer() {}
 func (UnimplementedRunnerProtocolServer) testEmbeddedByValue()                        {}
@@ -316,6 +340,24 @@ func _RunnerProtocol_AckActivation_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RunnerProtocol_RenewLease_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RenewLeaseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerProtocolServer).RenewLease(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerProtocol_RenewLease_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerProtocolServer).RenewLease(ctx, req.(*RenewLeaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RunnerProtocol_ServiceDesc is the grpc.ServiceDesc for RunnerProtocol service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -342,6 +384,10 @@ var RunnerProtocol_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AckActivation",
 			Handler:    _RunnerProtocol_AckActivation_Handler,
+		},
+		{
+			MethodName: "RenewLease",
+			Handler:    _RunnerProtocol_RenewLease_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
