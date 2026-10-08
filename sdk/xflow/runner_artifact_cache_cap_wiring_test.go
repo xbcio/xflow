@@ -83,7 +83,7 @@ func TestRunnerArtifactResolverRespectsMaxBytes(t *testing.T) {
 		ArtifactCacheDir:      t.TempDir(),
 		ArtifactCacheMaxBytes: 2 * entrySize, // room for exactly two of the three artifacts below
 	}
-	resolve, err := newRunnerArtifactResolver(cfg)
+	resolve, err := newRunnerArtifactResolver(cfg, nil)
 	if err != nil {
 		t.Fatalf("newRunnerArtifactResolver: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestRunnerArtifactResolverNegativeMaxBytesIsUnbounded(t *testing.T) {
 		ArtifactCacheDir:      t.TempDir(),
 		ArtifactCacheMaxBytes: -1, // explicitly unbounded, distinct from zero's "use the default"
 	}
-	resolve, err := newRunnerArtifactResolver(cfg)
+	resolve, err := newRunnerArtifactResolver(cfg, nil)
 	if err != nil {
 		t.Fatalf("newRunnerArtifactResolver: %v", err)
 	}

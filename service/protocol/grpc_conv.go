@@ -331,12 +331,25 @@ func ReportResultRequestToProto(req ReportResultRequest) (*runnerpb.ReportResult
 	if err != nil {
 		return nil, err
 	}
+	// Empty, not omitted: req.GroupResult == nil is the only case that leaves
+	// group_result_json unset. MarshalGroupResult always encodes at least
+	// ProtocolVersion/Outcome, so a non-nil GroupResult can never marshal to
+	// zero bytes — the receiving side's "empty means nil" check never confuses
+	// the two.
+	var groupResultJSON []byte
+	if req.GroupResult != nil {
+		groupResultJSON, err = MarshalGroupResult(*req.GroupResult)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return &runnerpb.ReportResultRequest{
-		RunnerId:     req.RunnerID,
-		LeaseJson:    leaseJSON,
-		ResultJson:   resultJSON,
-		SessionId:    req.SessionID,
-		TraceCarrier: cloneLabels(req.TraceCarrier),
+		RunnerId:        req.RunnerID,
+		LeaseJson:       leaseJSON,
+		ResultJson:      resultJSON,
+		SessionId:       req.SessionID,
+		TraceCarrier:    cloneLabels(req.TraceCarrier),
+		GroupResultJson: groupResultJSON,
 	}, nil
 }
 
@@ -349,12 +362,21 @@ func ReportResultRequestFromProto(req *runnerpb.ReportResultRequest) (ReportResu
 	if err != nil {
 		return ReportResultRequest{}, err
 	}
+	var groupResult *engine.GroupResult
+	if raw := req.GetGroupResultJson(); len(raw) > 0 {
+		gr, err := UnmarshalGroupResult(raw)
+		if err != nil {
+			return ReportResultRequest{}, err
+		}
+		groupResult = &gr
+	}
 	return ReportResultRequest{
 		RunnerID:     req.GetRunnerId(),
 		SessionID:    req.GetSessionId(),
 		Lease:        lease,
 		Result:       result,
 		TraceCarrier: cloneLabels(req.GetTraceCarrier()),
+		GroupResult:  groupResult,
 	}, nil
 }
 
@@ -392,6 +414,65 @@ func ActivationAckRequestFromProto(req *runnerpb.ActivationAckRequest) Activatio
 		Status:          ActivationStatus(req.GetStatus()),
 		Error:           req.GetError(),
 	}
+}
+
+// RenewLeaseRequestToProto converts the HTTP-shaped RenewLeaseRequest DTO to
+// its gRPC wire message. AuthToken travels on the message for DTO parity, but
+// (like every other request) the gRPC server ignores it in favor of the
+// Authorization metadata set by GRPCClient.withAuth.
+func RenewLeaseRequestToProto(req RenewLeaseRequest) *runnerpb.RenewLeaseRequest {
+	return &runnerpb.RenewLeaseRequest{
+		RunnerId:   req.RunnerID,
+		SessionId:  req.SessionID,
+		LeaseId:    req.LeaseID,
+		LeaseToken: req.LeaseToken,
+		ExtendMs:   req.Extend,
+		AuthToken:  req.AuthToken,
+	}
+}
+
+// RenewLeaseRequestFromProto converts a gRPC RenewLeaseRequest back to the
+// transport-agnostic DTO Core.renewLease consumes. AuthToken is left empty;
+// the gRPC server fills it from metadata the same way the HTTP handler fills
+// it from the Authorization header.
+func RenewLeaseRequestFromProto(req *runnerpb.RenewLeaseRequest) RenewLeaseRequest {
+	return RenewLeaseRequest{
+		RunnerID:   req.GetRunnerId(),
+		SessionID:  req.GetSessionId(),
+		LeaseID:    req.GetLeaseId(),
+		LeaseToken: req.GetLeaseToken(),
+		Extend:     req.GetExtendMs(),
+	}
+}
+
+// RenewLeaseResponseToProto converts the HTTP-shaped RenewLeaseResponse DTO
+// to its gRPC wire message. Deadline travels as UnixNano (same pattern as
+// HeartbeatRequest.Timestamp) to avoid a proto Timestamp import; a zero
+// time.Time (the refusal case) encodes as 0.
+func RenewLeaseResponseToProto(resp RenewLeaseResponse) *runnerpb.RenewLeaseResponse {
+	var deadline int64
+	if !resp.Deadline.IsZero() {
+		deadline = resp.Deadline.UnixNano()
+	}
+	return &runnerpb.RenewLeaseResponse{
+		Renewed:          resp.Renewed,
+		DeadlineUnixNano: deadline,
+		Error:            resp.Error,
+	}
+}
+
+// RenewLeaseResponseFromProto converts a gRPC RenewLeaseResponse back to the
+// transport-agnostic DTO. A zero deadline_unix_nano decodes to the zero
+// time.Time, matching the HTTP transport's refusal shape.
+func RenewLeaseResponseFromProto(resp *runnerpb.RenewLeaseResponse) RenewLeaseResponse {
+	out := RenewLeaseResponse{
+		Renewed: resp.GetRenewed(),
+		Error:   resp.GetError(),
+	}
+	if n := resp.GetDeadlineUnixNano(); n != 0 {
+		out.Deadline = time.Unix(0, n).UTC()
+	}
+	return out
 }
 
 func cloneLabels(labels map[string]string) map[string]string {

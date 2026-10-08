@@ -49,6 +49,12 @@ type Graph struct {
 	transientTTL           time.Duration
 	transientCompletionTTL time.Duration
 
+	// pinDataMode is the normalized settings.pin_data_mode ("test_only" or
+	// "always") of a graph that has at least one NodeMeta.PinOutput, and empty
+	// for every other graph -- which keeps it out of the hash payload and the
+	// snapshot of every graph without pins.
+	pinDataMode string
+
 	// Two-layer IR: durable scheduling topology (P0-2). When no groups are
 	// defined the unit graph mirrors the node graph 1:1.
 	groups       []GroupMeta
@@ -126,6 +132,7 @@ func (g *Graph) NodeAt(i int) NodeMeta {
 	n.RunnerSelector = cloneRunnerSelector(n.RunnerSelector)
 	n.Retry = cloneRetry(n.Retry)
 	n.Output = cloneNodeOutputPolicy(n.Output)
+	n.PinOutput = cloneStringAnyMap(n.PinOutput)
 	return n
 }
 
@@ -191,6 +198,21 @@ func (g *Graph) FAF() bool { return g.faf }
 
 // Transient reports whether this graph opts into per-workflow transient mode.
 func (g *Graph) Transient() bool { return g.transient }
+
+// PinDataMode returns the effective pin_data_mode of a graph that carries at
+// least one pinned node (PinDataModeTestOnly or PinDataModeAlways), and "" for
+// a graph with none.
+func (g *Graph) PinDataMode() string { return g.pinDataMode }
+
+// PinnedOutput returns a deep copy of the mock output pinned on node i and
+// whether the node is pinned at all. It does not decide whether the pin applies
+// to a given execution; that is PinDataMode against the execution's test flag.
+func (g *Graph) PinnedOutput(i int) (map[string]any, bool) {
+	if i < 0 || i >= len(g.nodes) || g.nodes[i].PinOutput == nil {
+		return nil, false
+	}
+	return cloneStringAnyMap(g.nodes[i].PinOutput), true
+}
 
 // TransientTTL returns the per-workflow transient active TTL override.
 // Zero means use the engine-wide default.
@@ -330,6 +352,18 @@ type NodeMeta struct {
 	// and snapshots remain byte-identical. Zero and one both mean one hosted
 	// activation; the raw value is retained to preserve definition intent.
 	ActivationReplicas uint32 `json:",omitempty"`
+	// PinOutput is the workflow's pin_data entry for this node: the mock output
+	// the engine commits in place of running the handler (status pinned). It is
+	// assigned at compile time only when pin_data_mode is not "disabled", the
+	// node is not disabled, and the node is a shape the pin hook can intercept
+	// (see assignPinData); every other node keeps it nil. Whether a test_only
+	// pin applies to one execution is decided at runtime from
+	// ExecutionSnapshot.TestRun, against Graph.PinDataMode.
+	//
+	// omitempty is load-bearing for the same reason as Body: NodeMeta is hashed
+	// field-by-field, so an unpinned node must not contribute a "PinOutput":null
+	// and move every persisted graph's hash.
+	PinOutput map[string]any `json:",omitempty"`
 }
 
 // Edge represents a directed connection between two nodes.

@@ -859,11 +859,22 @@ func (d *MemoryRunnerDirectory) LookupLease(_ context.Context, runnerID, session
 		return nil, false, nil
 	}
 	current, ok := state.finalizedLease[assignmentID]
-	if !ok || !matchesReleasedLease(current, req) {
+	if ok && matchesReleasedLease(current, req) && (key.NodeName == "" || key.namesTask(&current.Task)) {
+		lease := current
+		return &lease, true, nil
+	}
+	// Map batches share their parent's lease identity; find the one this key
+	// names (see LeaseLookupKey).
+	if key.NodeName == "" || key.LeaseToken == "" {
 		return nil, false, nil
 	}
-	lease := current
-	return &lease, true, nil
+	for _, sibling := range state.finalizedLease {
+		if sibling.LeaseToken == key.LeaseToken && key.namesTask(&sibling.Task) {
+			lease := sibling
+			return &lease, true, nil
+		}
+	}
+	return nil, false, nil
 }
 
 // SetRunnerControl atomically persists an idempotent desired-state transition
@@ -1379,6 +1390,13 @@ func matchesReleasedLease(current engine.TaskLease, req ReleaseLeasedRequest) bo
 }
 
 func (s *memoryRunnerState) resolveAssignmentID(req ReleaseLeasedRequest) (AssignmentID, bool) {
+	// A map node and its batches share one lease identity, so the indexes name
+	// only the last of them finalized; an explicit matching ID wins.
+	if req.AssignmentID != "" && (req.LeaseToken != "" || req.LeaseID != "") {
+		if current, ok := s.finalizedLease[req.AssignmentID]; ok && matchesReleasedLease(current, req) {
+			return req.AssignmentID, true
+		}
+	}
 	if req.LeaseToken != "" {
 		if assignmentID, ok := s.leaseByToken[req.LeaseToken]; ok {
 			return assignmentID, true

@@ -205,9 +205,11 @@ func (s *GRPCServer) ReportResult(ctx context.Context, req *runnerpb.ReportResul
 	overrideTokenFromMetadata(ctx, &in.AuthToken)
 	resp, err := s.core.reportResult(ctx, in, grpcTransportInfo(ctx))
 	if err != nil {
-		if errors.Is(err, engine.ErrInvalidLeaseToken) {
+		if isStaleTokenEquivalent(err) {
 			// Carry the rejection in-band so the runner sees Accepted=false with
-			// a reason, mirroring the HTTP 409 contract.
+			// a reason, mirroring the HTTP 409 contract. ErrGroupResultMissing
+			// rides along: it is the group path's stale-token equivalent, so it
+			// must not fall through to runnerStatus' unmapped Internal.
 			return &runnerpb.ReportResultResponse{Accepted: false, Error: resp.Error}, nil
 		}
 		return nil, runnerStatus(err)
@@ -226,6 +228,20 @@ func (s *GRPCServer) AckActivation(ctx context.Context, req *runnerpb.Activation
 		return nil, runnerStatus(err)
 	}
 	return &runnerpb.ActivationAckResponse{}, nil
+}
+
+// RenewLease extends an active lease's deadline, mirroring HandleRenewLease
+// exactly: both call Core.renewLease, which owns session validation, lease
+// lookup, execution-deadline enforcement, and the group/node renewal split,
+// so neither transport duplicates that logic.
+func (s *GRPCServer) RenewLease(ctx context.Context, req *runnerpb.RenewLeaseRequest) (*runnerpb.RenewLeaseResponse, error) {
+	in := protocol.RenewLeaseRequestFromProto(req)
+	overrideTokenFromMetadata(ctx, &in.AuthToken)
+	resp, err := s.core.renewLease(ctx, in, grpcTransportInfo(ctx))
+	if err != nil {
+		return nil, runnerStatus(err)
+	}
+	return protocol.RenewLeaseResponseToProto(resp), nil
 }
 
 // overrideTokenFromMetadata pulls the Authorization: Bearer <token> value out

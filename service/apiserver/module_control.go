@@ -447,6 +447,7 @@ type executeWorkflowRequest struct {
 	Entry    string             `json:"entry,omitempty"`
 	Input    map[string]any     `json:"input,omitempty"`
 	Params   map[string]any     `json:"params,omitempty"`
+	Test     bool               `json:"test,omitempty"`
 }
 
 type executeWorkflowResponse struct {
@@ -464,6 +465,7 @@ type executeRegisteredRequest struct {
 	Entry  string         `json:"entry,omitempty"`
 	Input  map[string]any `json:"input,omitempty"`
 	Params map[string]any `json:"params,omitempty"`
+	Test   bool           `json:"test,omitempty"`
 }
 
 type signalRequest struct {
@@ -540,6 +542,7 @@ func (m *workflowControlModule) handleExecuteWorkflow(w http.ResponseWriter, r *
 	// Without this, production mode with a SQL store fails submit with a
 	// NOT-NULL violation on xflow_executions.workflow_def.
 	ctx = engine.WithWorkflowDef(ctx, req.Workflow)
+	ctx = engine.WithTestRun(ctx, req.Test)
 	var id types.ExecutionID
 	if req.Entry != "" {
 		id, err = m.eng.Invoke(ctx, g, req.Entry, req.Input)
@@ -1459,6 +1462,7 @@ func (m *workflowControlModule) handleExecuteWorkflowByID(w http.ResponseWriter,
 	// persist workflow_def (NOT NULL) — mirroring the inline-execute path.
 	ctx := engine.WithWorkflowDef(r.Context(), rec.Definition)
 	ctx = engine.WithTraceCarrier(ctx, tracing.InjectCarrier(ctx))
+	ctx = engine.WithTestRun(ctx, req.Test)
 	var execID types.ExecutionID
 	if req.Entry != "" {
 		execID, err = m.eng.Invoke(ctx, rec.Graph, req.Entry, req.Input)

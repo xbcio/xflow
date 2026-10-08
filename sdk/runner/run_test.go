@@ -334,6 +334,73 @@ func TestRunCommandTLSFlagBeatsTheEnvironment(t *testing.T) {
 	runCommand(t, "run", "--server", "https://server:8080", "--tls-server-ca", "/from/flag.pem")
 }
 
+// The standalone runner's --map-batch-concurrency/--map-item-concurrency were
+// bound, parsed, and validated but never copied into xflowsdk.RunnerConfig —
+// toSDKRunnerConfig's literal omitted both fields, so every standalone runner
+// silently ran on the SDK's GOMAXPROCS default no matter what was configured.
+// This mirrors TestRunCommandPropagatesCapabilitiesToTheSDK for the two new
+// fields.
+func TestRunCommandPropagatesMapConcurrencyToTheSDK(t *testing.T) {
+	restore := stubRunnerServiceFactory(func(cfg xflowsdk.RunnerConfig) error {
+		if cfg.MapBatchConcurrency != 4 || cfg.MapItemConcurrency != 8 {
+			t.Errorf("MapBatchConcurrency/MapItemConcurrency = %d/%d, want 4/8",
+				cfg.MapBatchConcurrency, cfg.MapItemConcurrency)
+		}
+		return nil
+	})
+	defer restore()
+
+	runCommand(t, "run", "--server", "http://server:8080", "--allow-plaintext",
+		"--map-batch-concurrency", "4", "--map-item-concurrency", "8")
+}
+
+// An explicit 0 means "use the SDK default" (xflowsdk.RunnerConfig.
+// MapBatchConcurrency/MapItemConcurrency's own doc), not "unset". It must
+// reach the SDK as 0, and must not be rejected by CLI-layer validation the
+// way --concurrency 0 is — this is the browser-cdp-max-contexts-shaped flag,
+// not the concurrency-shaped one.
+func TestRunCommandPropagatesExplicitZeroMapConcurrencyToTheSDK(t *testing.T) {
+	restore := stubRunnerServiceFactory(func(cfg xflowsdk.RunnerConfig) error {
+		if cfg.MapBatchConcurrency != 0 || cfg.MapItemConcurrency != 0 {
+			t.Errorf("MapBatchConcurrency/MapItemConcurrency = %d/%d, want 0/0",
+				cfg.MapBatchConcurrency, cfg.MapItemConcurrency)
+		}
+		return nil
+	})
+	defer restore()
+
+	runCommand(t, "run", "--server", "http://server:8080", "--allow-plaintext",
+		"--map-batch-concurrency", "0", "--map-item-concurrency", "0")
+}
+
+// The flag must beat a config file value, like every other runner setting.
+func TestRunCommandMapConcurrencyFlagBeatsConfigFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runner.yaml")
+	data := []byte(`
+runner:
+  id: file-runner
+  map_batch_concurrency: 2
+  map_item_concurrency: 3
+server:
+  url: http://file-server:8080
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	restore := stubRunnerServiceFactory(func(cfg xflowsdk.RunnerConfig) error {
+		if cfg.MapBatchConcurrency != 6 || cfg.MapItemConcurrency != 7 {
+			t.Errorf("MapBatchConcurrency/MapItemConcurrency = %d/%d, want 6/7",
+				cfg.MapBatchConcurrency, cfg.MapItemConcurrency)
+		}
+		return nil
+	})
+	defer restore()
+
+	runCommand(t, "run", "--config", path, "--allow-plaintext",
+		"--map-batch-concurrency", "6", "--map-item-concurrency", "7")
+}
+
 // And with no flag the environment still applies.
 func TestRunCommandTLSEnvAppliesWithoutAFlag(t *testing.T) {
 	t.Setenv("XFLOW_RUNNER_TLS_SERVER_CA", "/from/env.pem")

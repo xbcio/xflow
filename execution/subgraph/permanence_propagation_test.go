@@ -147,3 +147,69 @@ func TestExecutor_UnclassifiedFailureLeavesResultTransient(t *testing.T) {
 			"could have succeeded")
 	}
 }
+
+// TestExecutor_FailedMemberNamesTheFailingNode proves Result.FailedMember
+// carries the name of the member node whose fatal failure ended the
+// execution -- the identity engine/group_exec.go's groupErrorOutputData needs
+// to populate a group error_output payload's "failed_members" key. The
+// package's only node is named "a" (buildSingleNodePackage), so that is the
+// name a correct propagation must report.
+func TestExecutor_FailedMemberNamesTheFailingNode(t *testing.T) {
+	pkg := buildSingleNodePackage("test.transientfail")
+	reg := execution.NewRegistry()
+	reg.RegisterGlobal("test.transientfail", transientHandler{})
+	ex := NewExecutor(reg, NewPackageCache(PackageCacheConfig{
+		MaxEntries: 4, MaxPackageBytes: 1 << 20,
+	}), func() Backend { return local.New(local.WithRegistry(reg), local.WithConcurrency(1)) })
+	hash, err := graph.ComputePackageHash(pkg)
+	if err != nil {
+		t.Fatalf("compute package hash: %v", err)
+	}
+
+	res, err := ex.Execute(context.Background(), Request{
+		Package:     pkg,
+		PackageHash: hash,
+		Input:       &types.Input{Data: map[string]any{"seed": 1}},
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res.Outcome != OutcomeFailed {
+		t.Fatalf("outcome = %v, want failed", res.Outcome)
+	}
+	if res.FailedMember != "a" {
+		t.Errorf("FailedMember = %q, want %q", res.FailedMember, "a")
+	}
+}
+
+// TestExecutor_ResolveFailureLeavesFailedMemberEmpty proves that a failure
+// which never reaches a member node -- Resolve rejecting the package because
+// a declared Requirement has no registered handler -- reports no
+// FailedMember. There is no member identity to offer here (the package never
+// ran at all), and the empty value on a zero Result must read as "unknown",
+// never as a guessed name.
+func TestExecutor_ResolveFailureLeavesFailedMemberEmpty(t *testing.T) {
+	reg := execution.NewRegistry()
+	ex := NewExecutor(reg, NewPackageCache(PackageCacheConfig{
+		MaxEntries: 4, MaxPackageBytes: 1 << 20,
+	}), func() Backend { return local.New(local.WithRegistry(reg), local.WithConcurrency(1)) })
+	// test.unregistered has no handler registered, so Resolve's inventory
+	// check fails the Requirements validation before Submit is ever reached.
+	pkg := buildSingleNodePackage("test.unregistered")
+	hash, err := graph.ComputePackageHash(pkg)
+	if err != nil {
+		t.Fatalf("compute package hash: %v", err)
+	}
+
+	res, err := ex.Execute(context.Background(), Request{
+		Package:     pkg,
+		PackageHash: hash,
+		Input:       &types.Input{Data: map[string]any{"seed": 1}},
+	})
+	if err == nil {
+		t.Fatalf("execute: want error for an unregistered Requirement, got nil (res=%+v)", res)
+	}
+	if res.FailedMember != "" {
+		t.Errorf("FailedMember = %q, want empty on a Resolve-rejected package", res.FailedMember)
+	}
+}

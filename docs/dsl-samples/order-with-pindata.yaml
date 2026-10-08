@@ -9,13 +9,11 @@
 # pin_data 效果：
 #   fetch_order 和 check_inventory 跳过真实 HTTP 调用，
 #   直接使用 mock 数据，下游节点正常运行。
-#   仅在 test/debug 模式生效（pin_data_mode: test_only）。
+#   仅在测试执行中生效（pin_data_mode: test_only）。
 #
-# ⚠ pin_data / pin_data_mode 目前是**提案**：类型上有这两个字段
-#   （types.WorkflowDef.PinData / WorkflowSettings.PinDataMode），也参与工作流
-#   指纹计算，但没有任何运行时消费者——引擎不会用它们替换节点输出，下面的
-#   fetch_order / check_inventory 仍会发真实 HTTP 请求（URL 是示例域名）。
-#   本文件保留它们是为了展示意图，不要照着它以为调试桩可以直接用。
+# 测试执行：Go SDK 用 xflow.WithTestRun()，HTTP execute 请求体带 "test": true。
+#   普通执行中 fetch_order / check_inventory 仍会发真实 HTTP 请求（URL 是示例域名）。
+#   钉住的节点在执行详情中状态为 pinned。
 
 spec: "1.0"
 name: "order-with-pindata"
@@ -30,7 +28,7 @@ settings:
   # timezone / on_error / pin_data_mode / retry），写了也不会被读取；单次执行
   # 的时限是节点级 timeout。
   timezone: "Asia/Shanghai"
-  pin_data_mode: test_only        # 提案：见文件头，运行时未实现
+  pin_data_mode: test_only        # 只在测试执行中生效，见文件头
 
 context:
   config:
@@ -172,7 +170,7 @@ connections:
 # ──────────────────────────────────────
 # 钉住 fetch_order 和 check_inventory，跳过真实 HTTP 调用。
 # 下游节点通过 $nodes['xxx'] 正常访问 mock 数据。
-# 仅 test/debug 模式生效（settings.pin_data_mode: test_only）。
+# 仅测试执行生效（settings.pin_data_mode: test_only）。
 pin_data:
   fetch_order:
     order_id: "ORD-TEST-001"

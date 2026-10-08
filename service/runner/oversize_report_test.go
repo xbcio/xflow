@@ -182,3 +182,21 @@ func TestRunnerReportsOversizeResultAsPermanentFailure(t *testing.T) {
 		})
 	}
 }
+
+// A map batch's assignment ID carries its parent_lease_id, so the slimmed
+// echo must keep it or the server's fallback lookup names another generation.
+func TestOversizeReportKeepsBatchParentLeaseID(t *testing.T) {
+	lease := engine.TaskLease{
+		LeaseID: "lease-1",
+		Task: engine.Task{ExecutionID: "exec-1", NodeName: "m/_batch/0", Type: engine.TaskTypeNodeBatch,
+			Payload: &types.SignalPayload{Data: map[string]any{"parent_lease_id": "lease-1", "items": []any{1, 2}}}},
+	}
+	got := oversizeReport(protocol.ReportResultRequest{Lease: &lease}, errors.New("too large"))
+	data := got.Lease.Task.Payload.Data
+	if len(data) != 1 || data["parent_lease_id"] != "lease-1" {
+		t.Fatalf("slimmed payload data = %v, want only parent_lease_id", data)
+	}
+	if _, ok := lease.Task.Payload.Data["items"]; !ok {
+		t.Fatal("oversizeReport mutated the original payload")
+	}
+}

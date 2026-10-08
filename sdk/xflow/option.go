@@ -180,6 +180,18 @@ type invokeConfig struct {
 	fafRuntime *types.Runtime
 	traceID    string
 	spanID     string
+	testRun    bool
+}
+
+// WithTestRun marks this invocation as a test run.
+//
+// A test run is what settings.pin_data_mode: test_only (the default) keys on:
+// pinned nodes skip their handler and commit the pin_data mock as their output
+// with status "pinned". Outside a test run those nodes execute for real. The
+// flag is stored on the execution, so it holds for every node of the run,
+// including ones scheduled after a restart.
+func WithTestRun() InvokeOption {
+	return func(c *invokeConfig) { c.testRun = true }
 }
 
 // WithExecutionTTL overrides the backend execution TTL for this invocation.

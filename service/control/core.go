@@ -40,8 +40,19 @@ var (
 	ErrInvalidCapability     = errors.New("invalid runner capability")
 	ErrRunnerNotFound        = errors.New("runner not found")
 	ErrLeaseRequired         = errors.New("runner_id, session_id and lease are required")
-	ErrEngineNotConfigured   = errors.New("engine not configured")
-	ErrUnauthenticated       = errors.New("unauthenticated")
+	// ErrGroupResultMissing is returned when a report for a group-exec lease
+	// carries no GroupResult. A group unit leases through its own group-scoped
+	// state, never through its entry node's, so there is nothing for the
+	// ordinary node commit path (CommitTaskResultWithOutcome) to fence against
+	// correctly; the only valid commit path for a group lease is
+	// commitGroupResult, which requires a GroupResult. Rejecting this
+	// explicitly — rather than falling through to the node path, which
+	// CommitTaskResultWithOutcome itself now refuses with the engine-internal
+	// ErrGroupLeaseNotSupported — lets the runner see a clear, actionable
+	// error instead of a generic 500.
+	ErrGroupResultMissing  = errors.New("group lease reported with no group result")
+	ErrEngineNotConfigured = errors.New("engine not configured")
+	ErrUnauthenticated     = errors.New("unauthenticated")
 	// ErrStaleGeneration is returned when an entry seed carries an activation
 	// generation older than the currently-assigned generation AND targets an
 	// admission key that has not yet been accepted. It fences a forged or stale
@@ -79,6 +90,28 @@ var (
 	// ErrMetricsEncodingUnsupported means the report was not gzip'd.
 	ErrMetricsEncodingUnsupported = errors.New("runner metrics payload must be gzip encoded")
 )
+
+// isStaleTokenEquivalent reports whether err belongs to the lease-rejection
+// family that every transport carries IN-BAND rather than as a generic
+// 500 / codes.Internal: HTTP answers 409 with the response body, gRPC answers
+// Accepted=false (unary) or an Ack frame (Connect stream). There are two
+// members and they must agree everywhere a transport decides:
+//
+//   - engine.ErrInvalidLeaseToken — the commit path's fencing refusal.
+//   - ErrGroupResultMissing — its group-path equivalent. reportResult
+//     classifies a group lease reported with no GroupResult as
+//     CommitOutcomeStaleToken (same capacity-release path, same
+//     RemoveSeen=false), so leaving it to fall into writeRunnerError's default
+//     would hand the runner a 500 for a rejection its retry cannot fix — the
+//     exact misreport this helper exists to prevent.
+//
+// Defined once because three call sites (HandleReportResult, the gRPC unary
+// ReportResult, and the Connect stream's result branch) must stay in lockstep;
+// a new transport that special-cases one sentinel but not the other is how the
+// group rejection silently regressed to a 500 before.
+func isStaleTokenEquivalent(err error) bool {
+	return errors.Is(err, engine.ErrInvalidLeaseToken) || errors.Is(err, ErrGroupResultMissing)
+}
 
 // Core holds the transport-independent Runner Protocol logic shared by the HTTP
 // and gRPC servers. Each method takes and returns protocol DTOs and signals
@@ -1130,7 +1163,14 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 			}
 			c.requeueClaimAfterDispatchFailure(ctx, claim)
 			return protocol.PollTaskResponse{}, recoverErr
-		case errors.Is(err, engine.ErrExecutionInactive):
+		case errors.Is(err, engine.ErrExecutionInactive), errors.Is(err, engine.ErrSystemTaskHandled):
+			// Both mean there is nothing for a runner to run. ErrSystemTaskHandled
+			// is the engine resolving the task itself during BuildTaskLease (a
+			// pinned node committing its pin_data mock): the commit and its
+			// downstream advance are already durable, so the assignment is
+			// settled as dropped. Requeueing it would replay the same handled
+			// commit on every claim and never settle. Mirrors
+			// execution.Dispatcher.HandleTask.
 			dispatchSpan.End()
 			if settleErr := c.dropClaimAfterHandoffResolution(ctx, claim); settleErr != nil {
 				c.requeueClaimAfterDispatchFailure(ctx, claim)
@@ -1250,6 +1290,8 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 		AssignmentID: BuildAssignmentID(&req.Lease.Task),
 		LeaseID:      req.Lease.LeaseID,
 		LeaseToken:   req.Lease.LeaseToken,
+		NodeName:     req.Lease.Task.NodeName,
+		NodeIdx:      req.Lease.Task.NodeIdx,
 	})
 	if lerr != nil {
 		return protocol.ReportResultResponse{}, normalizeRunnerError(lerr, c.logger, "report_result")
@@ -1306,9 +1348,23 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 
 	var outcome engine.CommitOutcome
 	var err error
-	if req.GroupResult != nil && isGroupTask(&authoritativeLease.Task) {
+	switch {
+	case isGroupTask(&authoritativeLease.Task) && req.GroupResult == nil:
+		// Reject before ever reaching the engine. The node commit path
+		// (CommitTaskResultWithOutcome) now refuses a group lease outright
+		// (022bcfc, ErrGroupLeaseNotSupported) rather than fencing a node that
+		// never leased, but its zero-value outcome deliberately does not
+		// release capacity -- that guard protects the engine's own contract,
+		// it is not this path's error-reporting layer. Classify explicitly
+		// here instead: CommitOutcomeStaleToken already means "release leased
+		// capacity, do not treat as duplicate-accepted" (ReleasesLeasedCapacity,
+		// RemoveSeen below), which is exactly the immediate-release behavior
+		// this report had before 022bcfc sharpened the prior accidental
+		// stale-token misclassification into a hard refusal.
+		outcome, err = engine.CommitOutcomeStaleToken, ErrGroupResultMissing
+	case req.GroupResult != nil && isGroupTask(&authoritativeLease.Task):
 		outcome, err = c.commitGroupResult(ctx, authoritativeLease, *req.GroupResult)
-	} else {
+	default:
 		outcome, err = c.engine.CommitTaskResultWithOutcome(ctx, authoritativeLease, req.Result)
 	}
 	if err != nil {
@@ -1336,6 +1392,10 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 			if directoryStillResolved {
 				c.observeReportDivergence(ctx)
 			}
+			return protocol.ReportResultResponse{Accepted: false, Error: err.Error()}, err
+		}
+		if errors.Is(err, ErrGroupResultMissing) {
+			c.observeReportRejected(ctx, ReportRejectedGroupResultMissing)
 			return protocol.ReportResultResponse{Accepted: false, Error: err.Error()}, err
 		}
 		return protocol.ReportResultResponse{}, normalizeRunnerError(err, c.logger, "report_result")
@@ -1547,6 +1607,7 @@ func normalizeRunnerError(err error, logger engine.Logger, op string) error {
 		errors.Is(err, ErrRunnerSessionStale),
 		errors.Is(err, ErrRunnerIDConflict),
 		errors.Is(err, ErrMissingWorkflowVersion),
+		errors.Is(err, ErrGroupResultMissing),
 		errors.Is(err, engine.ErrInvalidLeaseToken):
 		return err
 	default:

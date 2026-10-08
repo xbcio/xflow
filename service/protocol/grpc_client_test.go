@@ -3,6 +3,7 @@ package protocol
 import (
 	"context"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -97,12 +98,95 @@ func TestGRPCClientActivationAckPropagatesError(t *testing.T) {
 	}
 }
 
+// TestGRPCClientRenewLeaseSendsRequest verifies the client marshals every
+// RenewLeaseRequest field onto the wire request and decodes a successful
+// renewal's deadline back off the wire (UnixNano round-trip), mirroring the
+// HTTP transport's TestClientRenewLease.
+func TestGRPCClientRenewLeaseSendsRequest(t *testing.T) {
+	deadline := time.Now().UTC().Add(90 * time.Second).Truncate(time.Second)
+	fake := &fakeRunnerProtocolClient{renewLeaseResp: &runnerpb.RenewLeaseResponse{
+		Renewed:          true,
+		DeadlineUnixNano: deadline.UnixNano(),
+	}}
+	client := &GRPCClient{grpc: fake}
+
+	resp, err := client.RenewLease(context.Background(), RenewLeaseRequest{
+		RunnerID:   "runner-1",
+		SessionID:  "sess-1",
+		LeaseID:    "lease-1",
+		LeaseToken: "token-1",
+		Extend:     90_000,
+	})
+	if err != nil {
+		t.Fatalf("RenewLease() error = %v", err)
+	}
+	if !resp.Renewed || !resp.Deadline.Equal(deadline) {
+		t.Fatalf("RenewLease() = %+v, want renewed with deadline %v", resp, deadline)
+	}
+	if fake.renewLeaseReq == nil {
+		t.Fatal("RenewLease() did not call gRPC client")
+	}
+	got := fake.renewLeaseReq
+	if got.GetRunnerId() != "runner-1" || got.GetSessionId() != "sess-1" ||
+		got.GetLeaseId() != "lease-1" || got.GetLeaseToken() != "token-1" || got.GetExtendMs() != 90_000 {
+		t.Fatalf("request = %+v, want the fence token, session, and extend to reach the server verbatim", got)
+	}
+}
+
+// TestGRPCClientRenewLeaseRefusalIsNotAnError mirrors the HTTP transport's
+// TestClientRenewLeaseRefusalIsNotAnError: a lease the server refuses to
+// renew is a normal response (Renewed=false), not a transport error. The
+// runner's renewal loop (service/runner/lease_renew.go) depends on this
+// distinction to tell "cancel the handler" from "retry the network call".
+func TestGRPCClientRenewLeaseRefusalIsNotAnError(t *testing.T) {
+	fake := &fakeRunnerProtocolClient{renewLeaseResp: &runnerpb.RenewLeaseResponse{
+		Renewed: false,
+		Error:   "lease not found",
+	}}
+	client := &GRPCClient{grpc: fake}
+
+	resp, err := client.RenewLease(context.Background(), RenewLeaseRequest{
+		RunnerID: "runner-1", SessionID: "sess-1", LeaseID: "l", LeaseToken: "t",
+	})
+	if err != nil {
+		t.Fatalf("RenewLease() error = %v, want a Renewed=false response", err)
+	}
+	if resp.Renewed {
+		t.Fatal("RenewLease() reported renewed for a refusal")
+	}
+	if resp.Error != "lease not found" {
+		t.Errorf("resp.Error = %q, want the server's reason", resp.Error)
+	}
+}
+
+// TestGRPCClientRenewLeasePropagatesTransportError verifies a gRPC-level
+// failure (not a Renewed=false response) surfaces to the caller as an error,
+// mirroring the HTTP client's non-2xx-to-error behavior.
+func TestGRPCClientRenewLeasePropagatesTransportError(t *testing.T) {
+	fake := &fakeRunnerProtocolClient{renewLeaseErr: status.Error(codes.Unauthenticated, "stale session")}
+	client := &GRPCClient{grpc: fake}
+
+	_, err := client.RenewLease(context.Background(), RenewLeaseRequest{
+		RunnerID: "runner-1", SessionID: "sess-1", LeaseID: "l", LeaseToken: "t",
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("status code = %v, want Unauthenticated", status.Code(err))
+	}
+}
+
 type fakeRunnerProtocolClient struct {
 	registerReq  *runnerpb.RegisterRequest
 	registerResp *runnerpb.RegisterResponse
 
 	ackActivationReq *runnerpb.ActivationAckRequest
 	ackActivationErr error
+
+	renewLeaseReq  *runnerpb.RenewLeaseRequest
+	renewLeaseResp *runnerpb.RenewLeaseResponse
+	renewLeaseErr  error
 }
 
 func (*fakeRunnerProtocolClient) Connect(context.Context, ...grpc.CallOption) (grpc.BidiStreamingClient[runnerpb.RunnerFrame, runnerpb.ServerFrame], error) {
@@ -132,4 +216,15 @@ func (f *fakeRunnerProtocolClient) AckActivation(_ context.Context, in *runnerpb
 		return nil, f.ackActivationErr
 	}
 	return &runnerpb.ActivationAckResponse{}, nil
+}
+
+func (f *fakeRunnerProtocolClient) RenewLease(_ context.Context, in *runnerpb.RenewLeaseRequest, _ ...grpc.CallOption) (*runnerpb.RenewLeaseResponse, error) {
+	f.renewLeaseReq = in
+	if f.renewLeaseErr != nil {
+		return nil, f.renewLeaseErr
+	}
+	if f.renewLeaseResp != nil {
+		return f.renewLeaseResp, nil
+	}
+	return &runnerpb.RenewLeaseResponse{}, nil
 }

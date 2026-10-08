@@ -291,6 +291,12 @@ type ExecutionSnapshot struct {
 	// sole readback was the SQL audit row (executions.error_msg), invisible to
 	// callers of the inspect API.
 	Error string `json:"error,omitempty"`
+	// TestRun marks an execution started in test mode (xflow.WithTestRun, or
+	// "test": true on the HTTP invoke body). Its only consumer today is the
+	// pin_data_mode=test_only gate: pinned nodes are served from pin_data only
+	// when this is true. Backends must persist it with the snapshot, since the
+	// gate is evaluated at dispatch time, possibly on another replica.
+	TestRun bool `json:"test_run,omitempty"`
 }
 
 // TerminalExecutionError picks the execution-level failure reason to persist

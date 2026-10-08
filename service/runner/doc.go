@@ -30,9 +30,9 @@
 // four required methods (Register, Heartbeat, Poll, ReportResult) and several
 // optional capabilities detected via type assertion at startup:
 //
-//   - leaseRenewClient (RenewLease) — the HTTP and in-process clients implement
-//     it; the gRPC client does not, so gRPC-transport runners never renew leases
-//     and rely on the server-side sweeper for reclaim after a crash.
+//   - leaseRenewClient (RenewLease) — the HTTP, gRPC, and in-process clients
+//     all implement it, so every transport renews leases in-band and relies on
+//     the server-side sweeper only for reclaim after a crash.
 //   - MetricsReportClient (ReportMetrics) — the HTTP and in-process clients
 //     implement it; allows the runner to proxy its Prometheus registry through
 //     the server when cross-domain scraping is not possible.
@@ -61,7 +61,7 @@
 //	      ▼                                                      │
 //	N × workerLoop ◄────────────────────────────────────────────┘
 //	      │  Poll → lease → executeAndReport → ReportResult
-//	      │  optional: renewLeaseLoop (background, HTTP only)
+//	      │  optional: renewLeaseLoop (background, HTTP and gRPC)
 //	      ▼
 //	Runner.Run returns (transport error or ctx.Err())
 //	      → caller reconnects (cmd/runner reconnect loop)
@@ -105,10 +105,10 @@
 //     least one integration-level test; a unit test where you set the field
 //     directly proves nothing about the wiring.
 //
-//   - gRPC capability gaps: gRPC-transport runners never renew leases or report
-//     metrics. Do not add fallback logic that assumes those calls succeeded on
-//     the gRPC path — they are skipped by the leaseRenewClient /
-//     MetricsReportClient type assertions at startup, and adding silent
-//     fallbacks would hide the gap. activationAckClient is NOT in this list:
-//     the gRPC client implements it via the AckActivation RPC.
+//   - gRPC capability gaps: gRPC-transport runners never report metrics. Do not
+//     add fallback logic that assumes ReportMetrics succeeded on the gRPC path
+//     — it is skipped by the MetricsReportClient type assertion at startup,
+//     and adding silent fallbacks would hide the gap. leaseRenewClient and
+//     activationAckClient are NOT in this list: the gRPC client implements
+//     both, via the RenewLease and AckActivation RPCs respectively.
 package runner

@@ -10,9 +10,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	xflowsdk "github.com/xbcio/xflow/sdk/xflow"
 	"github.com/xbcio/xflow/service/protocol"
 )
 
@@ -66,7 +68,7 @@ func TestRunIdentityRenewalNoExpiryRetiresTheLoop(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
-		runIdentityRenewal(ctx, fake, "runner-1", "tok", testLogger())
+		runIdentityRenewal(ctx, fake, "runner-1", testLogger())
 		close(done)
 	}()
 
@@ -108,7 +110,7 @@ func TestRunIdentityRenewalRenewsBeforeExpiry(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		runIdentityRenewal(ctx, fake, "runner-1", "tok", testLogger())
+		runIdentityRenewal(ctx, fake, "runner-1", testLogger())
 		close(done)
 	}()
 
@@ -160,7 +162,7 @@ func TestRunIdentityRenewalSurvivesAnInitialError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		runIdentityRenewal(ctx, fake, "runner-1", "tok", testLogger())
+		runIdentityRenewal(ctx, fake, "runner-1", testLogger())
 		close(done)
 	}()
 
@@ -196,9 +198,30 @@ func TestRenewOnceUnparsableExpiryIsFailedNotNoExpiry(t *testing.T) {
 			return protocol.RenewIdentityResponse{ExpiresAt: "not-a-timestamp"}, nil
 		},
 	}
-	_, outcome := renewOnce(context.Background(), fake, "runner-1", "tok", testLogger())
+	_, outcome := renewOnce(context.Background(), fake, "runner-1", testLogger())
 	if outcome != renewFailed {
 		t.Fatalf("outcome = %v, want renewFailed", outcome)
+	}
+}
+
+// TestRenewOnceSendsNoTokenInTheBody pins that the renewal request body
+// carries no token. The server lets the Authorization header win, so a body
+// token only ever matters as the stale startup value it would be after a
+// credential reload.
+func TestRenewOnceSendsNoTokenInTheBody(t *testing.T) {
+	var sent protocol.RenewIdentityRequest
+	fake := &fakeRenewClient{
+		respond: func(_ int, req protocol.RenewIdentityRequest) (protocol.RenewIdentityResponse, error) {
+			sent = req
+			return protocol.RenewIdentityResponse{}, nil
+		},
+	}
+	renewOnce(context.Background(), fake, "runner-1", testLogger())
+	if sent.RunnerID != "runner-1" {
+		t.Fatalf("RunnerID = %q, want %q", sent.RunnerID, "runner-1")
+	}
+	if sent.AuthToken != "" {
+		t.Fatal("renewal request body carried a token, want none")
 	}
 }
 
@@ -218,7 +241,7 @@ func TestRunIdentityRenewalExitsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		runIdentityRenewal(ctx, fake, "runner-1", "tok", testLogger())
+		runIdentityRenewal(ctx, fake, "runner-1", testLogger())
 		close(done)
 	}()
 
@@ -267,7 +290,7 @@ func TestRunIdentityRenewalPastDeadlineFallsBackToRetryWait(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		runIdentityRenewal(ctx, fake, "runner-1", "tok", testLogger())
+		runIdentityRenewal(ctx, fake, "runner-1", testLogger())
 		close(done)
 	}()
 
@@ -311,7 +334,7 @@ func TestRenewClientForCarriesAuthorizationHeader(t *testing.T) {
 	cfg.runnerID = "runner-1"
 	cfg.token = "t-1"
 
-	rc, err := renewClientFor(cfg)
+	rc, err := renewClientFor(cfg, nil)
 	if err != nil {
 		t.Fatalf("renewClientFor: %v", err)
 	}
@@ -372,7 +395,7 @@ func TestDecideIdentityRenewalStaticTokenDoesNotStart(t *testing.T) {
 	cfg.token = "static-token"
 
 	store := &ephemeralIdentityStore{}
-	rc, start, warnMsg, warnErr := decideIdentityRenewal(cfg, store)
+	rc, start, warnMsg, warnErr := decideIdentityRenewal(cfg, store, nil)
 	if start {
 		t.Fatal("start = true for a static-token deployment (empty identity store), want false")
 	}
@@ -410,7 +433,7 @@ func TestDecideIdentityRenewalIssuedIdentityStarts(t *testing.T) {
 		t.Fatalf("seed store: %v", err)
 	}
 
-	rc, start, warnMsg, warnErr := decideIdentityRenewal(cfg, store)
+	rc, start, warnMsg, warnErr := decideIdentityRenewal(cfg, store, nil)
 	if warnErr != nil {
 		t.Fatalf("warnErr = %v, want nil", warnErr)
 	}
@@ -445,7 +468,7 @@ func TestDecideIdentityRenewalRefusesPlaintextWithoutOptIn(t *testing.T) {
 		t.Fatalf("seed store: %v", err)
 	}
 
-	rc, start, warnMsg, warnErr := decideIdentityRenewal(cfg, store)
+	rc, start, warnMsg, warnErr := decideIdentityRenewal(cfg, store, nil)
 	if start {
 		t.Fatal("start = true for a plaintext server without --allow-plaintext, want false")
 	}
@@ -463,5 +486,70 @@ func TestDecideIdentityRenewalRefusesPlaintextWithoutOptIn(t *testing.T) {
 	}
 	if !strings.Contains(warnMsg, "allow-plaintext") {
 		t.Fatalf("warnMsg = %q, want it to name the --allow-plaintext escape hatch", warnMsg)
+	}
+}
+
+// TestRenewClientFollowsRunnerReload is the M1 regression: the renewal loop
+// runs for the life of the process, so its client must follow the runner's
+// credential reload. Built over a real xflow.Runner, a Reload that rotates the
+// token must reach the next RenewIdentity call. Before the fix the renewal
+// client was built once from cfg (NewRunnerHTTPClient + WithToken) and kept
+// the startup token and TLS material forever.
+func TestRenewClientFollowsRunnerReload(t *testing.T) {
+	var gotAuth, gotBodyToken atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth.Store(r.Header.Get("Authorization"))
+		var body protocol.RenewIdentityRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "bad body", http.StatusBadRequest)
+			return
+		}
+		gotBodyToken.Store(body.AuthToken)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(protocol.RenewIdentityResponse{})
+	}))
+	defer srv.Close()
+
+	cfg := defaultRunnerConfig()
+	cfg.transport = transportHTTP
+	cfg.serverURL = srv.URL
+	cfg.allowPlaintext = true
+	cfg.runnerID = "runner-1"
+	cfg.token = "token-a"
+	sdkCfg, err := toSDKRunnerConfig(cfg)
+	if err != nil {
+		t.Fatalf("toSDKRunnerConfig: %v", err)
+	}
+	sdkCfg.ArtifactCacheDir = t.TempDir()
+	runner, err := xflowsdk.NewRunner(sdkCfg)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	defer runner.Close()
+
+	rc, err := renewClientFor(cfg, runner)
+	if err != nil {
+		t.Fatalf("renewClientFor: %v", err)
+	}
+	// renew goes through renewOnce, so the request body checked below is the
+	// one the renewal loop actually builds.
+	renew := func() string {
+		t.Helper()
+		if _, outcome := renewOnce(context.Background(), rc, cfg.runnerID, testLogger()); outcome != renewNoExpiry {
+			t.Fatalf("renewOnce outcome = %v, want renewNoExpiry", outcome)
+		}
+		if got := gotBodyToken.Load().(string); got != "" {
+			t.Fatalf("request body carried auth_token %q, want none: only the live header may authenticate", got)
+		}
+		return gotAuth.Load().(string)
+	}
+	if got := renew(); got != "Bearer token-a" {
+		t.Fatalf("before Reload: Authorization = %q, want %q", got, "Bearer token-a")
+	}
+	if err := runner.Reload(xflowsdk.CredentialReloaderSource{Token: "token-b"}); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if got := renew(); got != "Bearer token-b" {
+		t.Fatalf("after Reload: Authorization = %q, want %q (renewal kept the startup credentials)", got, "Bearer token-b")
 	}
 }

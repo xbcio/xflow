@@ -93,7 +93,10 @@ func (e *Engine) executeGroup(ctx context.Context, task *Task, flush bool) error
 		fatal = groupOnErrorFatal(meta.OnError)
 	}
 	routeToErrorOutput := execErr != nil && !fatal && meta.OnError == string(types.OnErrorOutput)
-	return e.commitGroup(ctx, g, lease, meta, exits, fatal, execErr, flush, routeToErrorOutput)
+	// The GroupExecutor interface (test-only fake; see its doc comment) has no
+	// notion of a failed member's identity, so this path never has one to
+	// offer -- "" here matches the pre-existing omission semantics.
+	return e.commitGroup(ctx, g, lease, meta, exits, fatal, execErr, "", flush, routeToErrorOutput)
 }
 
 // commitGroup commits one group unit's terminal result, propagates downstream
@@ -113,7 +116,7 @@ func (e *Engine) executeGroup(ctx context.Context, task *Task, flush bool) error
 // cancellation to a routed/tolerated non-fatal commit on any group configured
 // with on_error=continue or error_output. Trusting the caller's verdict here
 // closes that.
-func (e *Engine) commitGroup(ctx context.Context, g *graph.Graph, lease *GroupLease, meta graph.GroupMeta, exits []GroupExit, fatal bool, execErr error, flush bool, routeToErrorOutput bool) error {
+func (e *Engine) commitGroup(ctx context.Context, g *graph.Graph, lease *GroupLease, meta graph.GroupMeta, exits []GroupExit, fatal bool, execErr error, failedMember string, flush bool, routeToErrorOutput bool) error {
 	gs := e.state.(GroupStateStore) // executeGroup already asserted
 	outcome := GroupOutcomeSuccess
 	errMsg := ""
@@ -189,7 +192,7 @@ func (e *Engine) commitGroup(ctx context.Context, g *graph.Graph, lease *GroupLe
 			NodeIdx:       -1,
 			NodeName:      meta.Name,
 			Port:          "error",
-			Data:          groupErrorOutputData(meta, execErr),
+			Data:          groupErrorOutputData(meta, execErr, failedMember),
 			PrivateOutput: false,
 		})
 	}
@@ -262,25 +265,43 @@ func (e *Engine) commitGroup(ctx context.Context, g *graph.Graph, lease *GroupLe
 // downstream consumer can read $('group').json.error the same way it would
 // read a node's.
 //
-// There is deliberately no separate "failed member name" field: unlike a
-// node-level failure (types.Error.NodeName, set by the handler boundary that
-// calls a single node), a group failure's execErr is subgraph.Result.Error —
-// a plain string copied from the inner execution's terminal error
-// (service/runner/group_runtime.go's ExecuteRequest) — not a structured value
-// a group-exec caller could attach a member identity to. Member identity is
-// not systematically lost: GroupRuntime's inner engine runs its own node
-// commits and the inner execution's own audit/error carries the failing
-// member's name in its message text (the same text this function reads), it
-// is just not available here as a separate structured field.
-func groupErrorOutputData(meta graph.GroupMeta, execErr error) map[string]any {
+// failedMember is the identity of the member node whose fatal failure
+// produced execErr, when the caller has one to offer (see
+// subgraph.Result.FailedMember and its propagation through
+// GroupRuntime.ExecuteRequest to GroupResult.FailedMember). It is added to
+// the payload under "failed_members" ([]any, currently always zero-or-one
+// name) only when non-empty: unlike a node-level failure
+// (types.Error.NodeName, set by the handler boundary that calls a single
+// node), identity used to be unrecoverable for a group because execErr was
+// subgraph.Result.Error — a plain string copied from the inner execution's
+// terminal error (service/runner/group_runtime.go's ExecuteRequest) — with
+// nothing a group-exec caller could attach a member identity to. That
+// collapse point is now closed for the production CommitGroupResult path
+// (engine/group_lease.go); the local GroupExecutor test fake still has no
+// such identity to offer and passes "", which keeps the key omitted exactly
+// as before this field existed.
+//
+// []any, not []string: this map is stored as output Data and round-trips
+// through JSON on the Redis backend (rstate), which decodes a JSON array back
+// into []any — the memory backend keeps whatever Go value was stored, with no
+// such round trip. A []string literal here would therefore read back as
+// []string on memory and []any on Redis, and an expr/function node doing a
+// type assertion or a DeepEqual-style comparison against this field would see
+// a different shape depending on which backend committed it. []any already
+// is that shape, consistently, in both backends.
+func groupErrorOutputData(meta graph.GroupMeta, execErr error, failedMember string) map[string]any {
 	errMsg := ""
 	if execErr != nil {
 		errMsg = execErr.Error()
 	}
-	return map[string]any{
+	data := map[string]any{
 		"group": meta.Name,
 		"error": map[string]any{"message": errMsg},
 	}
+	if failedMember != "" {
+		data["failed_members"] = []any{failedMember}
+	}
+	return data
 }
 
 // nodeIdxOf resolves a member name to a node index. The name is always from

@@ -2081,7 +2081,7 @@ nodes:
 >
 > ⚠️ **body 输出应避免 `_` 前缀键**：`_error`/`_index` 是框架为失败项保留的占位符键。若 body 自身的输出恰好带有 `_error` 键（例如 body 的终止节点自己产出了名为 `_error` 的字段），该项在 `results` 数组中会与一次真实的失败在结构上完全无法区分——这是已知、接受的数据质量缺口（不在本设计范围内修复），作者应确保 body 的正常输出不使用 `_` 前缀的键名。
 >
-> **当前实现状态**：`xflow.map` 的两种形态均已落地。**body 形态**——`expandLoopSplit`（`engine/expand.go`，map 的批扩展机制）为每个 batch 创建 sub-execution 并调用 `runBatchBody`，后者通过 `BatchBodyExecutor.ExecuteBatchBody` 把 body 投影成的 `SubgraphPackage` 逐项真正执行（每项一次内嵌引擎运行），再用 `BatchResultForCommit` 把逐项结果折叠成该批的结果与批级成败判定。`completeLoopSplit` 把各批的 `items` 数组按批次顺序拼接成扁平的 `results` 数组，失败项以 `{_error, _index}` 占位符落在原本的下标位置，使 `count` 恒等于输入长度。**expression 形态**——`MapNode.Execute`（`node/internal/flow/map.go` 的 `evalItemsInline`）就地逐项求值，直接返回同一份 `{results, count}` 契约，不发扇出描述符、不创建 sub-execution。上述 body 语法与 `continue_on_error` 结构均已生效，不再是规划设计。`body_concurrency` 只对 body 形态有意义：expression 形态没有子执行可并发，`evalItemsInline` 恒为就地串行求值。两种形态都不发任何标记键：引擎从编译期投影的 body 判定扩展与否，`_loop`/`_split` 已移除。原 P1-4 已通过批次任务与普通节点任务分通道关闭；`body_concurrency` 只限制单批 body worker，不是 runner 全局预算。runner 级资源治理仍由活动 roadmap 跟踪，不属于本 DSL 的稳定契约。
+> **当前实现状态**：`xflow.map` 的两种形态均已落地。**body 形态**——`expandLoopSplit`（`engine/expand.go`，map 的批扩展机制）为每个 batch 创建 sub-execution 并调用 `runBatchBody`，后者通过 `BatchBodyExecutor.ExecuteBatchBody` 把 body 投影成的 `SubgraphPackage` 逐项真正执行（每项一次内嵌引擎运行），再用 `BatchResultForCommit` 把逐项结果折叠成该批的结果与批级成败判定。`completeLoopSplit` 把各批的 `items` 数组按批次顺序拼接成扁平的 `results` 数组，失败项以 `{_error, _index}` 占位符落在原本的下标位置，使 `count` 恒等于输入长度。**expression 形态**——`MapNode.Execute`（`node/internal/flow/map.go` 的 `evalItemsInline`）就地逐项求值，直接返回同一份 `{results, count}` 契约，不发扇出描述符、不创建 sub-execution。上述 body 语法与 `continue_on_error` 结构均已生效，不再是规划设计。`body_concurrency` 只对 body 形态有意义：expression 形态没有子执行可并发，`evalItemsInline` 恒为就地串行求值。两种形态都不发任何标记键：引擎从编译期投影的 body 判定扩展与否，`_loop`/`_split` 已移除。原 P1-4 已通过批次任务与普通节点任务分通道关闭；`body_concurrency` 只限制单批 body worker，不是 runner 全局预算。runner 级资源治理（`xflow.RunnerConfig.MapBatchConcurrency`/`MapItemConcurrency`，见 `execution/subgraph/map_concurrency_limiter.go`）已接线；独立 runner 通过 `runner.map_batch_concurrency`/`runner.map_item_concurrency`（YAML）或 `--map-batch-concurrency`/`--map-item-concurrency`（CLI flag）暴露同一对预算，二者均为 0 时沿用 SDK 的 `GOMAXPROCS(0)` 默认值，CLI flag 覆盖 YAML。该收口仍以活动 roadmap 跟踪的发布证据缺口为前提，不代表 Node Group 已脱离 Experimental。
 > **跨域引用编译规则**：
 > - `body` 内 `$nodes['x']` 中 `x` 不在 `body.nodes` 中时，编译器视为**跨域引用**
 > - 跨域引用仅允许读取 loop 节点的上游祖先节点（DAG 拓扑序中确定在 loop 之前完成的节点）
@@ -2383,16 +2383,9 @@ nodes:
 
 ## 7. Pin Data（测试数据钉住）
 
-> **⚠️ 未实现 — 没有任何运行时消费者。** `pin_data` 与 `settings.pin_data_mode`
-> 在类型上存在（`types.WorkflowDef.PinData`、`types.WorkflowSettings.PinDataMode`），
-> 也参与工作流指纹计算（`backend/workflowhash`），但引擎、runner、SDK 里没有
-> 任何代码读它们：被钉住的节点照样入队、照样发起真实的 HTTP/gRPC 调用。**下面
-> 这一节描述的是尚未落地的设计意图，不是现有能力。** 需要固定输入做调试时，
-> 目前只能把节点参数写成常量或改走 `xflow.function`。
-
 ### 7.1 概述
 
-Pin Data 允许在工作流级别为指定节点提供静态模拟输出数据。钉住的节点跳过实际执行（不入队 Asynq），直接使用 mock 数据作为节点输出，下游节点通过 `$nodes['xxx']` / `$input` 正常访问。
+Pin Data 允许在工作流级别为指定节点提供静态模拟输出数据。钉住的节点不发起租约、不经 runner 执行 handler，引擎直接把 mock 数据作为节点输出提交，状态记为 `pinned`；下游节点通过 `$nodes['xxx']` / `$input` 正常访问。
 
 **典型用途**：
 - 调试时跳过慢节点（HTTP/gRPC 调用），加速工作流验证
@@ -2405,8 +2398,8 @@ Pin Data 允许在工作流级别为指定节点提供静态模拟输出数据�
 
 ```yaml
 pin_data:
-  node_name:                    # key = 节点名（必须存在于 nodes 中）
-    field_a: value              # mock 输出数据（任意结构）
+  node_name:                    # key = 节点名（应存在于 nodes 中）
+    field_a: value              # mock 输出数据（必须是对象）
     field_b: value
 ```
 
@@ -2419,47 +2412,68 @@ settings:
 
 | 值 | 行为 |
 |---|------|
-| `test_only`（默认） | 仅 test/debug 模式生效，production 执行忽略 pin_data |
-| `always` | 所有执行模式都生效（慎用，调试专用场景） |
-| `disabled` | 完全忽略 pin_data（等同于没写） |
+| `test_only`（默认） | 仅测试执行生效，普通执行忽略 pin_data |
+| `always` | 所有执行都生效（慎用，调试专用场景；编译时告警） |
+| `disabled` | 完全忽略 pin_data（编译结果与没写 pin_data 完全一致，图哈希相同） |
+
+其他取值是编译错误。
+
+**测试执行**：执行是否为测试执行在发起时决定，并持久化在执行记录上（`ExecutionSnapshot.TestRun`），对该次执行的所有节点（包括重启后才调度的节点）一致生效：
+
+- Go SDK：`eng.Invoke(ctx, wfID, entry, input, xflow.WithTestRun())`
+- HTTP：`POST /v1/workflows/execute` 与 `POST /v1/workflows/{id}/execute` 的请求体带 `"test": true`
+
+未标记为测试执行的执行一律是普通执行。
 
 ### 7.3 与 `disabled` 的区别
 
 | 维度 | `disabled: true` | `pin_data` |
 |------|-----------------|------------|
-| 执行 | 跳过，状态 `skipped` | 跳过实际执行，状态 `pinned`（视为 `success`） |
-| 输出 | `$nodes['x']` → `nil` | `$nodes['x']` → pin_data 中的 mock 数据 |
-| 下游影响 | 下游可调度但拿不到数据 | 下游正常运行，数据完整 |
+| 执行 | 见 §3.1「节点禁用行为」 | 不执行 handler，状态 `pinned`（终态，视为 `success`） |
+| 输出 | — | `$nodes['x']` → pin_data 中的 mock 数据 |
+| 下游影响 | — | 下游正常运行，数据完整 |
 | 用途 | 临时移除节点 | 跳过慢节点，加速调试 |
-| 优先级 | — | `disabled: true` 的节点如果在 pin_data 中也有数据，`disabled` 优先（状态为 `skipped`，pin_data 被忽略） |
+| 优先级 | — | `disabled: true` 的节点如果在 pin_data 中也有数据，`disabled` 优先：pin 被忽略并给出编译告警 |
+
+> 当前实现说明：`disabled` 的运行时语义（§3.1「节点禁用行为」所述置 `skipped`）尚未实现，disabled 节点目前仍会真实执行。pin_data 对它只保证 pin 不生效，不改变它的执行方式。
 
 ### 7.4 运行时行为
 
 ```
-Executor 调度节点前检查：
+节点任务出队后、发起租约前检查：
   │
-  ├─ 节点 disabled? → 状态置 skipped，输出 nil，推进下游
-  │
-  ├─ 节点在 pin_data 中？
-  │    ├─ pin_data_mode == disabled → 正常执行
-  │    ├─ pin_data_mode == test_only && execution.mode != test → 正常执行
-  │    └─ 生效 → 状态置 pinned，输出 = pin_data[node_name]，推进下游
-  │
-  └─ 正常执行 → 入队 Asynq → Runner 执行
+  ├─ 节点在编译期被分配了 pin（见 §7.5 的忽略规则）？
+  │    ├─ 否 → 正常执行（发租约 → Runner 执行 handler）
+  │    ├─ pin_data_mode == test_only 且本次不是测试执行 → 正常执行
+  │    └─ 生效 → 原子提交：状态 pinned，输出 = pin_data[node_name]，
+  │              沿 main 端口推进下游；不发租约
 ```
 
 **`pinned` 状态语义**：
-- 在依赖判定中等同 `success`
-- 下游节点通过 `$nodes['xxx']`、`$input`、`$inputs.port` 正常访问 mock 数据
-- 执行日志中标记为 `pinned`，便于区分真实执行结果
+- 是终态：重复投递的任务不会再次提交或执行，迟到的 skip 级联也不会覆盖它
+- 在依赖判定和执行结果判定中等同 `success`，输出端口为 `main`
+- 下游节点通过 `$nodes['xxx']`、`$input`、`$inputs.port` 正常访问 mock 数据；`output.private: true` 的节点，其 mock 输出同样按私有输出处理
+- 执行详情（Inspect / `GET /v1/executions/{id}`）中节点状态为 `pinned`，便于区分真实执行结果
+
+**当前版本不支持钉住的节点**（编译时告警并忽略该条目，节点照常真实执行）：
+- co-location 组（`groups`）成员：组以整体下发，不经单节点调度
+- `xflow.map` 等 body 子工作流的成员
+- supply 节点：不参与调度
+- `options.allow_cycles: true` 的循环工作流
+- `options.faf: true` 的工作流：直接派发，不经调度
 
 ### 7.5 编译器校验规则
 
 | 规则 | 级别 | 说明 |
 |------|------|------|
-| pin_data 中的节点名不存在于 nodes | **warning** | 可能是拼写错误或节点已被移除 |
-| pin_data 数据不满足节点 output_schema 的 required 字段 | **warning** | mock 数据不完整，下游可能拿到 nil |
-| production 工作流配置 pin_data_mode: always | **warning** | 生产环境使用 pin_data 存在风险 |
+| pin_data_mode 不是 test_only / always / disabled | **error** | 编译失败 |
+| pin_data 中的节点名不存在于 nodes | **warning** | 可能是拼写错误或节点已被移除；条目被忽略 |
+| pin_data 数据不是对象 | **warning** | 条目被忽略 |
+| pin_data 数据不满足节点 output_schema 的 required 字段 | **warning** | mock 数据不完整，下游可能拿到 nil；pin 仍生效 |
+| 配置 pin_data_mode: always 且至少有一个节点被钉住 | **warning** | 凡配 always 即告警：所有执行都会跳过这些节点的真实调用 |
+| 节点 disabled、或属于 §7.4 所列不支持的类别 | **warning** | 条目被忽略 |
+
+告警随工作流注册（创建 / 替换）响应的 `warnings` 返回，不阻止注册。
 
 ### 7.6 示例
 

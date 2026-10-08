@@ -240,7 +240,8 @@ func (m *Monitor) isTimeoutTargetDead(ctx context.Context, t namespace.Namespace
 		switch types.NodeStatus(nodeStatus) {
 		case types.NodeStatusSuccess, types.NodeStatusFailed,
 			types.NodeStatusSkipped, types.NodeStatusCanceled,
-			types.NodeStatusContinued, types.NodeStatusRunning,
+			types.NodeStatusContinued, types.NodeStatusPinned,
+			types.NodeStatusRunning,
 			types.NodeStatusCommitting, types.NodeStatusWaiting,
 			types.NodeStatusPending:
 			return true

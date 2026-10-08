@@ -236,3 +236,54 @@ func TestCommitTaskTimeoutRejectsGroupLease(t *testing.T) {
 			"the guard must reject before any state mutation", gm.Name)
 	}
 }
+
+// TestCommitTaskResultWithOutcomeRejectsGroupLease proves the identical guard
+// on CommitTaskResultWithOutcome (the ReportResult commit path): a group lease
+// handed to it — e.g. because a gRPC runner dropped GroupResult and reported
+// the group's TaskResult as an ordinary node result — is refused with the
+// deliberate ErrGroupLeaseNotSupported, not the accidental, misleading
+// stale-token error the unguarded node-commit path used to produce.
+//
+// It also pins the capacity-release side effect: the zero-value outcome this
+// guard returns must report ReleasesLeasedCapacity() == false, matching
+// CommitGroupResult's own validation-failure returns (e.g. "unknown group
+// outcome %q") rather than CommitOutcomeStaleToken's "yes, release" verdict.
+// A malformed/misrouted report was never classified; treating it as settled
+// would release the runner's capacity for work the server never actually
+// committed.
+func TestCommitTaskResultWithOutcomeRejectsGroupLease(t *testing.T) {
+	eng, g, execID := setupGroupLeaseTest(t)
+	ctx := context.Background()
+
+	gm := g.Groups()[0]
+	task := &Task{
+		ExecutionID:  execID,
+		NodeName:     gm.Name,
+		NodeIdx:      gm.EntryIdx,
+		UnitIdx:      gm.UnitIdx,
+		Type:         TaskTypeGroupExec,
+		ActivationID: 0,
+	}
+
+	lease, _, err := eng.BuildGroupLease(ctx, task)
+	if err != nil {
+		t.Fatalf("BuildGroupLease: %v", err)
+	}
+
+	outcome, err := eng.CommitTaskResultWithOutcome(ctx, lease, TaskResult{})
+	if !errors.Is(err, ErrGroupLeaseNotSupported) {
+		t.Fatalf("CommitTaskResultWithOutcome() error = %v, want ErrGroupLeaseNotSupported "+
+			"(group leases must be refused by the guard, not the accidental stale-token path)", err)
+	}
+	if outcome.ReleasesLeasedCapacity() {
+		t.Fatalf("CommitTaskResultWithOutcome() outcome = %q releases capacity, want it not to "+
+			"(an unclassified/misrouted report must not be treated as a settled lease)", outcome)
+	}
+
+	// The entry node must NOT have been written terminal by a failed commit.
+	node, _ := eng.state.GetNode(ctx, execID, gm.Name)
+	if node != nil && types.IsTerminalNodeStatus(node.Status) {
+		t.Fatalf("entry node %q was written terminal by a group-lease CommitTaskResultWithOutcome; "+
+			"the guard must reject before any state mutation", gm.Name)
+	}
+}

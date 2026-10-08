@@ -71,7 +71,7 @@ func TestRunnerArtifactResolverCachePartitionsByNamespace(t *testing.T) {
 		RunnerID:         "wiring-probe-runner",
 		ArtifactCacheDir: t.TempDir(),
 	}
-	resolve, err := newRunnerArtifactResolver(cfg)
+	resolve, err := newRunnerArtifactResolver(cfg, nil)
 	if err != nil {
 		t.Fatalf("newRunnerArtifactResolver: %v", err)
 	}

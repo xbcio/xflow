@@ -81,7 +81,13 @@ func (s *memoryState) CommitNode(_ context.Context, req engine.CommitNodeRequest
 		// a declaration-only node, so reading NodeIdx here silently refused the
 		// cascade — and a refused system commit is reported as handled, so the
 		// intent was acked and dropped instead of the branch being consumed.
-		if s.scheduled[memoryCounterKey(req.ExecutionID, req.UnitIdx)] != "skip" {
+		//
+		// A pinned commit is the one system commit for a unit the graph decided
+		// to EXECUTE (or a root, which has no marker): the engine serves it from
+		// pin_data instead of leasing it. It must therefore never land on a unit
+		// marked "skip", and every other system commit must.
+		marker := s.scheduled[memoryCounterKey(req.ExecutionID, req.UnitIdx)]
+		if (req.Status == types.NodeStatusPinned) == (marker == "skip") {
 			return engine.CommitNodeResult{Outcome: engine.CommitOutcomeStaleToken}, nil
 		}
 		if current != nil && current.Status != types.NodeStatusPending {

@@ -594,8 +594,33 @@ func (r *Runner) executeAndReport(ctx context.Context, sessionID string, lease *
 		// Group task — execute on embedded group runtime.
 		gr, err := r.config.GroupRuntime.Execute(execCtx, lease)
 		if err != nil {
-			result = engine.TaskResult{Error: err}
+			// GroupRuntime.Execute returns a non-nil error only when the group
+			// never ran at all (package compile/validation failure, or a nil
+			// lease/payload) — not a member node's runtime failure, which it
+			// already folds into a (GroupResult{Outcome: Failed}, nil) return.
+			// Reporting this as an ordinary TaskResult{Error: err} with
+			// groupResult left nil used to make the control plane commit it
+			// through the node path instead of CommitGroupResult: the group's
+			// entry node never entered "running" under its own per-node lease
+			// (groups lease through group-scoped state, not the entry node's),
+			// so the commit was rejected as a misleading stale lease token
+			// (now ErrGroupLeaseNotSupported after 022bcfc) instead of
+			// finalizing the group through its own OnError policy. Synthesize
+			// the same (Outcome: Failed) shape Execute itself produces for a
+			// member failure, stamping the identity fields Execute's error
+			// return bypasses, so this is indistinguishable from any other
+			// non-fatal/fatal group failure once it reaches commitGroup.
 			span.RecordError(err)
+			gr = engine.GroupResult{
+				Outcome: engine.GroupOutcomeFailed,
+				Error:   err.Error(),
+			}
+			if lease.GroupPayload != nil {
+				gr.ProtocolVersion = lease.GroupPayload.ProtocolVersion
+				gr.GroupExecID = lease.GroupPayload.GroupExecID
+			}
+			gr.Attempt = lease.Attempt
+			groupResult = &gr
 		} else {
 			groupResult = &gr
 		}
@@ -675,13 +700,36 @@ func oversizeReport(req protocol.ReportResultRequest, cause error) protocol.Repo
 	slim.GroupPayload = nil
 	slim.SubgraphPayload = nil
 	if p := slim.Task.Payload; p != nil {
-		// BuildAssignmentID reads only the signal name and trigger.
+		// BuildAssignmentID reads only the signal name and trigger, plus a
+		// map batch's parent_lease_id.
 		slim.Task.Payload = &types.SignalPayload{Triggered: p.Triggered, Name: p.Name}
+		if gen, ok := p.Data["parent_lease_id"]; ok {
+			slim.Task.Payload.Data = map[string]any{"parent_lease_id": gen}
+		}
 	}
 	req.Lease = &slim
-	req.GroupResult = nil
-	req.Result = engine.TaskResult{Error: errors.Join(types.ErrPermanent,
-		fmt.Errorf("task result too large to report: %w", cause))}
+	cause = errors.Join(types.ErrPermanent, fmt.Errorf("task result too large to report: %w", cause))
+	if slim.Task.Type == engine.TaskTypeGroupExec {
+		// A group task's oversize report must still carry a GroupResult, not
+		// fall back to req.Result: the control plane's ReportResult handler
+		// only commits through CommitGroupResult when GroupResult is non-nil
+		// (see the isGroupTask branch in core.go) — nil-ing it here would
+		// recreate the exact misrouted-commit bug this function's sibling
+		// fix (above, in run) just closed, once per oversize group report.
+		// ProtocolVersion/GroupExecID come from req.GroupResult, which run
+		// always sets for a group task before calling ReportResult (either
+		// the runtime's real result or that sibling fix's synthesized
+		// failure) — the nil check is defensive, not expected to trigger.
+		gr := engine.GroupResult{Outcome: engine.GroupOutcomeFailed, Error: cause.Error(), Attempt: slim.Attempt}
+		if req.GroupResult != nil {
+			gr.ProtocolVersion = req.GroupResult.ProtocolVersion
+			gr.GroupExecID = req.GroupResult.GroupExecID
+		}
+		req.GroupResult = &gr
+	} else {
+		req.GroupResult = nil
+		req.Result = engine.TaskResult{Error: cause}
+	}
 	return req
 }
 

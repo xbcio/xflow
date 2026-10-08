@@ -597,3 +597,22 @@ func TestDispatcherSystemTaskDropIsClassified(t *testing.T) {
 		}
 	})
 }
+
+// A batch the directory refuses as a duplicate is still acked, but counted:
+// a refused batch that was not a redelivery leaves its barrier short.
+func TestDispatcherCountsDuplicateBatchEnqueue(t *testing.T) {
+	ctx := context.Background()
+	obs := &fakeDispatcherObserver{}
+	dispatcher := NewDispatcher(&fakeDispatchEngine{routing: engine.TaskRouting{NodeType: "xflow.function"}},
+		NewMemoryRunnerDirectory(), WithDispatcherObserver(obs))
+	batch := mapBatchTask("L1", 0)
+	node := &engine.Task{ExecutionID: "exec-1", NodeName: "node-a", Type: engine.TaskTypeNodeExec, ActivationID: 1}
+	for _, task := range []*engine.Task{&batch, &batch, node, node} {
+		if err := dispatcher.HandleTask(ctx, task); err != nil {
+			t.Fatalf("HandleTask(%s) error = %v", task.NodeName, err)
+		}
+	}
+	if got := obs.dropped; len(got) != 1 || got[0] != dispatchDropBatchDuplicate {
+		t.Fatalf("drop observer reasons = %v, want [%s]", got, dispatchDropBatchDuplicate)
+	}
+}

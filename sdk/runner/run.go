@@ -47,18 +47,26 @@ type runnerConfig struct {
 	// runnerIDExplicit records that an operator set the ID (file, env, or
 	// flag) rather than inheriting defaultRunnerID. Enrollment overrides the ID
 	// with the server-issued one, and an explicit value is worth a warning.
-	runnerIDExplicit  bool
-	concurrency       int
-	changed           map[string]bool
-	resolutionIssues  map[string]error
-	capRaw            string
-	capabilities      []protocol.Capability
-	labelRaw          []string
-	labels            map[string]string
-	namespaceRaw      []string
-	namespaces        []namespace.Namespace
-	heartbeatInterval string
-	pollWait          string
+	runnerIDExplicit bool
+	concurrency      int
+	// mapBatchConcurrency/mapItemConcurrency cap this runner's own map-node
+	// resource budget (xflowsdk.RunnerConfig.MapBatchConcurrency/
+	// MapItemConcurrency). Zero means "unset": the SDK defaults each to
+	// runtime.GOMAXPROCS(0). Unlike concurrency, zero is valid here and is not
+	// rejected by CLI-layer validation — only a negative value is, and that
+	// check lives in the SDK (buildRunnerServiceConfig), not here.
+	mapBatchConcurrency int
+	mapItemConcurrency  int
+	changed             map[string]bool
+	resolutionIssues    map[string]error
+	capRaw              string
+	capabilities        []protocol.Capability
+	labelRaw            []string
+	labels              map[string]string
+	namespaceRaw        []string
+	namespaces          []namespace.Namespace
+	heartbeatInterval   string
+	pollWait            string
 	// seedRequestTimeout bounds one entry-seed admission round trip (one trigger
 	// batch), which is the POST that admits a whole batch's results. Empty means
 	// "unset": the SDK keeps protocol.DefaultEntrySeedRequestTimeout (15s). Kept
@@ -155,6 +163,10 @@ func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
 	cmd.Flags().StringVar(&cfg.runnerID, "id", cfg.runnerID, "Runner ID")
 	cmd.Flags().StringVar(&cfg.systemID, "system-id", cfg.systemID, "Stable runner-pool instance key (default: XFLOW_RUNNER_SYSTEM_ID, POD_NAME, then hostname)")
 	cmd.Flags().IntVar(&cfg.concurrency, "concurrency", cfg.concurrency, "Runner concurrency")
+	cmd.Flags().IntVar(&cfg.mapBatchConcurrency, "map-batch-concurrency", cfg.mapBatchConcurrency,
+		"Maximum number of map batches actively executing in this runner; 0 defaults to GOMAXPROCS")
+	cmd.Flags().IntVar(&cfg.mapItemConcurrency, "map-item-concurrency", cfg.mapItemConcurrency,
+		"Maximum total number of map body items executing in this runner across all admitted batches and trigger-hosted groups; 0 defaults to GOMAXPROCS")
 	cmd.Flags().StringVar(&cfg.capRaw, "cap", cfg.capRaw, "Comma-separated node type capabilities")
 	cmd.Flags().StringArrayVar(&cfg.labelRaw, "label", cfg.labelRaw, "Runner label as key=value; repeatable")
 	cmd.Flags().StringArrayVar(&cfg.namespaceRaw, "namespace", cfg.namespaceRaw, "Namespace this runner serves; repeatable (default: default)")
@@ -228,6 +240,18 @@ type runnerService interface {
 // Run/Close is still a valid runnerService.
 type credentialReloadingRunner interface {
 	Reload(xflowsdk.CredentialReloaderSource) error
+}
+
+// controlPlaneClientRunner is the optional capability the identity-renewal
+// loop builds its client from: *xflow.Runner hands out an *http.Client that
+// follows its Reload (xflow.Runner.ControlPlaneHTTPClient). Optional for the
+// same reason as credentialReloadingRunner — a test double implementing only
+// Run/Close stays a valid runnerService, and renewal then falls back to a
+// static client built from cfg. The live client's origin is the runner's own
+// ServerURL; it is not passed in, so it cannot drift from what the runner
+// itself was configured with.
+type controlPlaneClientRunner interface {
+	ControlPlaneHTTPClient(time.Duration) (*http.Client, error)
 }
 
 var newRunnerService = func(cfg xflowsdk.RunnerConfig, opts ...xflowsdk.RunnerOption) (runnerService, error) {
@@ -407,10 +431,10 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 	// the gate; every one of its "do not start" outcomes fails open (at most
 	// a Warn), because none of them is a reason an already-valid identity
 	// should stop serving traffic.
-	if rc, start, warnMsg, warnErr := decideIdentityRenewal(cfg, store); warnErr != nil {
+	if rc, start, warnMsg, warnErr := decideIdentityRenewal(cfg, store, runner); warnErr != nil {
 		slog.Warn(warnMsg, "runner_id", cfg.runnerID, "error", warnErr)
 	} else if start {
-		go startIdentityRenewal(runCtx, rc, cfg.runnerID, cfg.token, slog.Default())
+		go startIdentityRenewal(runCtx, rc, cfg.runnerID, slog.Default())
 	}
 
 	err = runner.Run(runCtx)
@@ -513,21 +537,23 @@ func toSDKRunnerConfig(cfg runnerConfig) (xflowsdk.RunnerConfig, error) {
 		}
 	}
 	return xflowsdk.RunnerConfig{
-		ServerURL:          cfg.serverURL,
-		Transport:          cfg.transport,
-		GRPCTarget:         cfg.grpcTarget,
-		RunnerID:           cfg.runnerID,
-		Concurrency:        cfg.concurrency,
-		Capabilities:       capabilityNodeTypes(cfg.capabilities),
-		Labels:             cloneStringMap(cfg.labels),
-		Namespaces:         cfg.namespaces,
-		Token:              cfg.token,
-		TLSServerCA:        cfg.tlsServerCA,
-		TLSClientCert:      cfg.tlsClientCert,
-		TLSClientKey:       cfg.tlsClientKey,
-		HeartbeatInterval:  heartbeat,
-		PollWait:           pollWait,
-		SeedRequestTimeout: seedRequestTimeout,
+		ServerURL:           cfg.serverURL,
+		Transport:           cfg.transport,
+		GRPCTarget:          cfg.grpcTarget,
+		RunnerID:            cfg.runnerID,
+		Concurrency:         cfg.concurrency,
+		MapBatchConcurrency: cfg.mapBatchConcurrency,
+		MapItemConcurrency:  cfg.mapItemConcurrency,
+		Capabilities:        capabilityNodeTypes(cfg.capabilities),
+		Labels:              cloneStringMap(cfg.labels),
+		Namespaces:          cfg.namespaces,
+		Token:               cfg.token,
+		TLSServerCA:         cfg.tlsServerCA,
+		TLSClientCert:       cfg.tlsClientCert,
+		TLSClientKey:        cfg.tlsClientKey,
+		HeartbeatInterval:   heartbeat,
+		PollWait:            pollWait,
+		SeedRequestTimeout:  seedRequestTimeout,
 		BrowserCDP: xnode.BrowserCDPConfig{
 			Endpoints:      copyTrimmedHosts(cfg.browserCDPEndpoints),
 			MaxContexts:    cfg.browserCDPMaxContexts,
@@ -645,16 +671,30 @@ func runnerHasIssuedIdentity(store identityStore) (bool, error) {
 }
 
 // renewClientFor builds the HTTP protocol client the renewal loop calls
-// through.
+// through, for the life of the process.
 //
-// This mirrors the client sdk/xflow's newRunnerProtocolClient builds for the
-// HTTP transport -- TLS material via NewRunnerHTTPClient, then WithToken --
-// and NOT the enrollment client (resolveRunnerIdentity, above), which has no
-// token to attach because enrollment is the one call made before a token
-// exists. Renewal already holds one, and an already-enrolled runner's request
+// It carries the runner's token -- unlike the enrollment client
+// (resolveRunnerIdentity, above), which has none because enrollment is the
+// one call made before a token exists. An already-enrolled runner's request
 // must carry it or the server authenticates against an empty string and
 // renewal fails every time with no crash and no red test to catch it.
-func renewClientFor(cfg runnerConfig) (renewClient, error) {
+//
+// When runner offers ControlPlaneHTTPClient (every *xflow.Runner does), the
+// client is built from it, so a SIGHUP that rotates the client certificate,
+// the server CA or the token reaches renewal as well. A client built once
+// from cfg would keep the old material for the life of the process: after a
+// CA or certificate rotation every renewal would fail until the identity
+// expired and the runner lost authentication altogether. That client then
+// attaches the live token itself, so none is set here. Only a runner without
+// the capability (a test double) gets the static client.
+func renewClientFor(cfg runnerConfig, runner runnerService) (renewClient, error) {
+	if live, ok := runner.(controlPlaneClientRunner); ok {
+		httpClient, err := live.ControlPlaneHTTPClient(enrollHTTPTimeout)
+		if err != nil {
+			return nil, fmt.Errorf("renew: build http client: %w", err)
+		}
+		return protocol.NewClient(cfg.serverURL, httpClient), nil
+	}
 	sdkCfg, err := toSDKRunnerConfig(cfg)
 	if err != nil {
 		return nil, err
@@ -687,7 +727,7 @@ func renewClientFor(cfg runnerConfig) (renewClient, error) {
 //     then proceed to run the rest of the runner unaffected -- none of these
 //     checks failing is a reason an already-valid identity should stop
 //     serving traffic.
-func decideIdentityRenewal(cfg runnerConfig, store identityStore) (rc renewClient, start bool, warnMsg string, warnErr error) {
+func decideIdentityRenewal(cfg runnerConfig, store identityStore, runner runnerService) (rc renewClient, start bool, warnMsg string, warnErr error) {
 	hasIssued, herr := runnerHasIssuedIdentity(store)
 	if herr != nil {
 		// Unable to tell whether this identity was issued; the identity is
@@ -708,7 +748,7 @@ func decideIdentityRenewal(cfg runnerConfig, store identityStore) (rc renewClien
 		// headline here.
 		return nil, false, "runner identity renewal disabled: renewing over a plaintext --server would send the runner token in the clear; use https or --allow-plaintext", verr
 	}
-	client, cerr := renewClientFor(cfg)
+	client, cerr := renewClientFor(cfg, runner)
 	if cerr != nil {
 		// A renewal client that cannot be built is not a reason to refuse to
 		// run: taking the fleet down over a mis-typed TLS path would turn a
@@ -744,10 +784,10 @@ var startIdentityRenewal = runIdentityRenewal
 // store -- identity file schema is unchanged by this task), it proves the
 // identity has not been revoked while this runner was down, and -- when the
 // server reports no expiry at all -- it retires the loop.
-func runIdentityRenewal(ctx context.Context, c renewClient, runnerID, token string, log *slog.Logger) {
+func runIdentityRenewal(ctx context.Context, c renewClient, runnerID string, log *slog.Logger) {
 	var deadline time.Time
 	for {
-		next, outcome := renewOnce(ctx, c, runnerID, token, log)
+		next, outcome := renewOnce(ctx, c, runnerID, log)
 		switch outcome {
 		case renewAborted:
 			return
@@ -797,10 +837,15 @@ func runIdentityRenewal(ctx context.Context, c renewClient, runnerID, token stri
 
 // renewOnce performs one renewal attempt.
 //
+// The request body carries no token: c sends the live one in the
+// Authorization header, which is what the server authenticates. A token
+// captured here at startup would go stale after a credential reload, and
+// putting it in the body would send that stale value on every renewal.
+//
 // The log line carries the runner id and the error and nothing else -- never
 // the token, which exists on this side only inside the protocol client.
-func renewOnce(ctx context.Context, c renewClient, runnerID, token string, log *slog.Logger) (time.Time, renewOutcome) {
-	resp, err := c.RenewIdentity(ctx, protocol.RenewIdentityRequest{RunnerID: runnerID, AuthToken: token})
+func renewOnce(ctx context.Context, c renewClient, runnerID string, log *slog.Logger) (time.Time, renewOutcome) {
+	resp, err := c.RenewIdentity(ctx, protocol.RenewIdentityRequest{RunnerID: runnerID})
 	if ctx.Err() != nil {
 		return time.Time{}, renewAborted
 	}

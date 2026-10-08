@@ -15,6 +15,7 @@ type spanIDCtxKey struct{}
 type traceCarrierCtxKey struct{}
 type executionScopeCtxKey struct{}
 type executionTransientCtxKey struct{}
+type testRunCtxKey struct{}
 
 // WithExecutionTTL attaches a retention TTL hint for a single execution
 // submission. StateStore implementations may use it to choose key or record
@@ -166,4 +167,22 @@ func WithExecutionTransient(ctx context.Context, hint TransientHint) context.Con
 func ExecutionTransientFromContext(ctx context.Context) (TransientHint, bool) {
 	hint, ok := ctx.Value(executionTransientCtxKey{}).(TransientHint)
 	return hint, ok
+}
+
+// WithTestRun marks a single execution submission as a test run. The engine
+// persists the flag on the ExecutionSnapshot (ExecutionSnapshot.TestRun), where
+// the pin_data_mode=test_only gate reads it at dispatch time. A false value is
+// ignored, so callers can pass a request flag through unconditionally.
+func WithTestRun(ctx context.Context, testRun bool) context.Context {
+	if !testRun {
+		return ctx
+	}
+	return context.WithValue(ctx, testRunCtxKey{}, true)
+}
+
+// TestRunFromContext reports whether the submission context was marked as a
+// test run by WithTestRun.
+func TestRunFromContext(ctx context.Context) bool {
+	v, _ := ctx.Value(testRunCtxKey{}).(bool)
+	return v
 }

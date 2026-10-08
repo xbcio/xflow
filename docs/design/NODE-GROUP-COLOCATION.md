@@ -381,13 +381,43 @@ items listed below under §12.1. What remains open is in §12.2.
     downstream node reads it via `$('g').json.error` exactly like a node's
     output: `GetOutput`/`outputKey` are keyed by a bare name string in every
     backend, never by node index, so there is nothing group-specific a lookup
-    needs to know. There is deliberately no separate "failed member name"
-    field: unlike a node's `types.Error.NodeName`, a group failure's error is a
-    plain string (`subgraph.Result.Error`, copied from the inner execution's
-    terminal error by `service/runner/group_runtime.go`'s `ExecuteRequest`),
-    not a structured value a caller could attach a member identity to today —
-    the member's name is present in that string's text, just not available as
-    its own field.
+    needs to know. **The payload also carries a `failed_members: []any` key
+    when the caller has that identity to offer** (added 2026-10-08, closing the
+    gap this section used to describe): `execution/subgraph.Result` gained a
+    `FailedMember` field set from the same `engine.ObservedNodeFailure` its
+    `Error`/`Permanent` fields were already derived from
+    (`failureCapture.fatal()` in `execution/subgraph/subgraph.go`'s `Execute`);
+    `service/runner/group_runtime.go`'s `ExecuteRequest` copies it onto
+    `engine.GroupResult.FailedMember`; `engine/group_lease.go`'s
+    `CommitGroupResult` passes it through to `commitGroup`, which hands it to
+    `groupErrorOutputData` as a `failedMember string` parameter. The key is
+    added to the payload only when `failedMember != ""` — a submit-time
+    failure (the package never reached a member), a timeout, a cancellation,
+    or the local `GroupExecutor` test fake (which has no such identity to
+    offer) all omit it exactly as before this field existed; the omission
+    reads as "unknown", never as "no member failed". The value is `[]any`
+    (holding one string), not `[]string`: this map is stored as output Data,
+    and the Redis backend (`rstate`) round-trips it through JSON, which
+    decodes a JSON array back into `[]any` — the memory backend keeps
+    whatever Go value was stored, with no such round trip. A `[]string`
+    literal would read back as `[]string` on memory and `[]any` on Redis,
+    which an `expr`/function node doing a type assertion or a
+    `DeepEqual`-style comparison against this field would see differently
+    depending on which backend committed the group; `[]any` is already that
+    shape, consistently, on both. The field holds one name today because the
+    single-attempt commit path only ever has one failing member to report,
+    but the shape leaves room for a future caller that collects more than
+    one without a breaking change. `engine.GroupResult.FailedMember` (the
+    singular string one layer up) is the structured source this payload's
+    `failed_members` is built from, not the same field under a different
+    name. It is carried end to end over `service/protocol`'s
+    `GroupResultWire`/`ReportResultRequest` wire conversions on both runner
+    transports: HTTP always has, and gRPC since the `group_result_json`
+    field was added to `runnerpb.ReportResultRequest` (previously gRPC's
+    `ReportResultRequestToProto`/`FromProto` dropped `GroupResult` entirely,
+    so a gRPC-reported group result committed through the ordinary node path
+    and was rejected as a misleading stale lease token rather than reaching
+    `CommitGroupResult` at all).
   - **The commit's reported `Outcome` is `GroupOutcomeSuccess`, not
     `GroupOutcomeFailed`, when the engine decided the failure is non-fatal.**
     This was the one piece the investigations did not have visibility into
@@ -523,7 +553,12 @@ items listed below under §12.1. What remains open is in §12.2.
   list.
 
 - **Activation replica count > 1 per entry unit** (spec §11.6 explicit-replica
-  scaling). There is one active hosting runner per entry unit today.
+  scaling): implemented (2026-08-28, `0d30009`, `8e1aa3e`; graph IR and rstate
+  replica plumbing 2026-09-01, `5520a01`). `ActivationReplicas` flows through
+  the graph IR and snapshots; `EntryActivationManager` emits one activation per
+  declared replica (zero and one both mean one); the reconciler only assigns
+  `ReplicaIndex > 0` to runners advertising `FeatureEntryActivationReplicaV1`.
+  This entry previously said one active hosting runner per entry unit.
 - **Full runner→control activation ACK RPC.** The retired path's ACK was dead
   code; renewal is now via reconnect inventory + proactive reconcile. A dedicated
   ACK RPC is future work if tighter delivery confirmation is needed.

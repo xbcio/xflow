@@ -26,7 +26,7 @@ var _ engine.DurableLeaseSuspender = (*Store)(nil)
 // signal/waiter key pairs. All keys share the execution hash tag.
 var suspendTaskLeaseWithOutboxLua = redis.NewScript(`
 local terminal = function(value)
-    return value == 'success' or value == 'failed' or value == 'skipped' or value == 'canceled' or value == 'continued'
+    return value == 'success' or value == 'failed' or value == 'skipped' or value == 'canceled' or value == 'continued' or value == 'pinned'
 end
 if redis.call('GET', KEYS[1]) ~= 'committing' then
     return 0

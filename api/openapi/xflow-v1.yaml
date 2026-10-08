@@ -2073,6 +2073,12 @@ components:
         params:
           type: object
           additionalProperties: true
+        test:
+          type: boolean
+          description: |
+            Run as a test execution. Under settings.pin_data_mode test_only
+            (the default), only test executions serve pin_data mocks for the
+            pinned nodes instead of running them.
 
     ExecuteRegisteredRequest:
       type: object
@@ -2086,6 +2092,12 @@ components:
         params:
           type: object
           additionalProperties: true
+        test:
+          type: boolean
+          description: |
+            Run as a test execution. Under settings.pin_data_mode test_only
+            (the default), only test executions serve pin_data mocks for the
+            pinned nodes instead of running them.
 
     ExecuteWorkflowResponse:
       type: object
@@ -2285,7 +2297,7 @@ components:
 
     NodeStatus:
       type: string
-      enum: [pending, running, committing, success, failed, skipped, suspended, continued, canceled, waiting]
+      enum: [pending, running, committing, success, failed, skipped, pinned, suspended, continued, canceled, waiting]
 
     RunnerListItem:
       type: object

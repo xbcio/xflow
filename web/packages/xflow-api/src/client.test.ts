@@ -605,6 +605,23 @@ describe("executionDetailToRuntimeSnapshot", () => {
       }
     });
   });
+
+  it("accepts a pinned node and projects it as success", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () =>
+        success({
+          execution_id: "exec-pin",
+          status: "success",
+          nodes: [{ name: "fetch", status: "pinned", output: { value: "mock" } }]
+        })
+    });
+
+    const detail = await client.getExecution("exec-pin");
+
+    expect(detail.nodes).toEqual([{ name: "fetch", status: "pinned", output: { value: "mock" } }]);
+    expect(executionDetailToRuntimeSnapshot(detail).nodes).toEqual({ fetch: { status: "success" } });
+  });
 });
 
 describe("node types", () => {

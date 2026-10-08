@@ -127,6 +127,20 @@ func (c *GRPCClient) ActivationAck(ctx context.Context, ack ActivationAck) error
 	return nil
 }
 
+// RenewLease extends an active lease's deadline over gRPC. Implements
+// leaseRenewClient (service/runner), the same interface the HTTP Client
+// satisfies, so Runner.New wires a renewal loop over a gRPC-transport runner
+// exactly as it does over HTTP: the type assertion at service/runner/runner.go
+// now succeeds for both transports.
+func (c *GRPCClient) RenewLease(ctx context.Context, req RenewLeaseRequest) (RenewLeaseResponse, error) {
+	in := RenewLeaseRequestToProto(req)
+	resp, err := c.grpc.RenewLease(c.withAuth(ctx), in)
+	if err != nil {
+		return RenewLeaseResponse{}, requestSizeError("RenewLease", in, err)
+	}
+	return RenewLeaseResponseFromProto(resp), nil
+}
+
 // grpcMessageSizePattern matches the "(N vs. M)" message-size statuses grpc-go
 // raises with codes.ResourceExhausted, capturing the offending message size N:
 // the client's own send limit ("trying to send message larger than max"), and

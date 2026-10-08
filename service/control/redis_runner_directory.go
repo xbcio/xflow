@@ -1531,14 +1531,91 @@ func (d *RedisRunnerDirectory) ReleaseLeased(ctx context.Context, req ReleaseLea
 // the assignment is still leased to (runnerID, sessionID). ok=false means no
 // match (not found, already released, wrong runner/session, or identity
 // mismatch); err is non-nil only on internal failure.
+//
+// A key that names its task (NodeName set) must resolve to that task. Map
+// batches share their parent's lease identity, so when the indexes name a
+// sibling, or nothing, the runner's own leased assignments are searched for the
+// one holding this token under this task.
 func (d *RedisRunnerDirectory) LookupLease(ctx context.Context, runnerID, sessionID string, key LeaseLookupKey) (*engine.TaskLease, bool, error) {
 	assignmentID, ok, err := d.resolveLeaseAssignmentID(ctx, key)
 	if err != nil {
 		return nil, false, err
 	}
-	if !ok {
+	var lease *engine.TaskLease
+	if ok {
+		if lease, ok, err = d.lookupLeaseAt(ctx, runnerID, sessionID, assignmentID); err != nil {
+			return nil, false, err
+		}
+	}
+	if key.NodeName == "" || (ok && key.namesTask(&lease.Task)) {
+		return lease, ok, nil
+	}
+	if key.LeaseToken == "" {
 		return nil, false, nil
 	}
+	// Same two-pass shape as replay: the per-runner index first, and the full
+	// state hash only when the index names fewer live leases than the runner's
+	// lease count, i.e. when it is known to be short.
+	visited := make(map[string]struct{})
+	for pass := 0; pass < 2; pass++ {
+		candidates, err := d.leasedAssignmentCandidates(ctx, runnerID, pass > 0)
+		if err != nil {
+			return nil, false, err
+		}
+		live := 0
+		for _, candidate := range candidates {
+			if _, done := visited[candidate]; done {
+				continue
+			}
+			visited[candidate] = struct{}{}
+			state, err := d.rdb.HGet(ctx, d.keys.assignmentState, candidate).Result()
+			if err != nil && !errors.Is(err, redis.Nil) {
+				return nil, false, fmt.Errorf("lookup sibling lease state %q: %w", candidate, err)
+			}
+			owner, err := d.rdb.HGet(ctx, d.keys.assignmentRunner, candidate).Result()
+			if err != nil && !errors.Is(err, redis.Nil) {
+				return nil, false, fmt.Errorf("lookup sibling lease owner %q: %w", candidate, err)
+			}
+			if state != redisAssignmentLeased || owner != runnerID {
+				continue
+			}
+			live++
+			if candidate == assignmentID {
+				continue
+			}
+			token, err := d.rdb.HGet(ctx, d.keys.assignmentLeaseToken, candidate).Result()
+			if err != nil && !errors.Is(err, redis.Nil) {
+				return nil, false, fmt.Errorf("lookup sibling lease token %q: %w", candidate, err)
+			}
+			if token != string(key.LeaseToken) {
+				continue
+			}
+			sibling, found, err := d.lookupLeaseAt(ctx, runnerID, sessionID, candidate)
+			if err != nil {
+				return nil, false, err
+			}
+			if !found || !key.namesTask(&sibling.Task) {
+				continue
+			}
+			return sibling, true, nil
+		}
+		if pass > 0 {
+			break
+		}
+		count, err := d.rdb.HGet(ctx, d.keys.runnerLeaseCount, runnerID).Int()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			return nil, false, fmt.Errorf("read runner lease count %q: %w", runnerID, err)
+		}
+		if live >= count {
+			break
+		}
+	}
+	return nil, false, nil
+}
+
+// lookupLeaseAt returns the finalized lease stored under assignmentID when it
+// is still leased to (runnerID, sessionID).
+func (d *RedisRunnerDirectory) lookupLeaseAt(ctx context.Context, runnerID, sessionID, assignmentID string) (*engine.TaskLease, bool, error) {
 	state, err := d.rdb.HGet(ctx, d.keys.assignmentState, assignmentID).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
 		return nil, false, fmt.Errorf("lookup lease state %q: %w", assignmentID, err)
@@ -1625,7 +1702,24 @@ func (d *RedisRunnerDirectory) RefreshLeaseMeta(ctx context.Context, runnerID, s
 // resolveLeaseAssignmentID resolves a finalized assignment ID from a lease
 // identity, mirroring ReleaseLeased's token > leaseID > assignmentID precedence
 // but read-only. ok=false means no index entry matches.
+//
+// An explicit AssignmentID whose stored identity matches wins over the
+// indexes: a map node and all of its batches share one lease identity, so the
+// single-value indexes name only whichever of them finalized last.
 func (d *RedisRunnerDirectory) resolveLeaseAssignmentID(ctx context.Context, key LeaseLookupKey) (string, bool, error) {
+	if key.AssignmentID != "" && (key.LeaseToken != "" || key.LeaseID != "") {
+		field, want := d.keys.assignmentLeaseToken, string(key.LeaseToken)
+		if want == "" {
+			field, want = d.keys.assignmentLeaseID, string(key.LeaseID)
+		}
+		stored, err := d.rdb.HGet(ctx, field, string(key.AssignmentID)).Result()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			return "", false, fmt.Errorf("resolve explicit lease assignment: %w", err)
+		}
+		if err == nil && stored == want {
+			return string(key.AssignmentID), true, nil
+		}
+	}
 	if key.LeaseToken != "" {
 		assignmentID, err := d.rdb.HGet(ctx, d.keys.leaseByToken, string(key.LeaseToken)).Result()
 		if err == nil {
@@ -2782,7 +2876,9 @@ return 'released'
 const redisReleaseLeasedLua = `
 if not redis.call('HGET', KEYS[1], ARGV[1]) then return 'not_found' end
 local assignmentID = nil
-if ARGV[4] ~= '' then assignmentID = redis.call('HGET', KEYS[10], ARGV[4]) end
+if ARGV[2] ~= '' and ARGV[4] ~= '' and redis.call('HGET', KEYS[7], ARGV[2]) == ARGV[4] then assignmentID = ARGV[2] end
+if not assignmentID and ARGV[2] ~= '' and ARGV[4] == '' and ARGV[3] ~= '' and redis.call('HGET', KEYS[6], ARGV[2]) == ARGV[3] then assignmentID = ARGV[2] end
+if not assignmentID and ARGV[4] ~= '' then assignmentID = redis.call('HGET', KEYS[10], ARGV[4]) end
 if not assignmentID and ARGV[3] ~= '' then assignmentID = redis.call('HGET', KEYS[9], ARGV[3]) end
 if not assignmentID or assignmentID == '' then assignmentID = ARGV[2] end
 if assignmentID == '' then return 'noop' end

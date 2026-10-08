@@ -45,7 +45,7 @@ if executionStatus == false then
     return {3, 0, '', effectivePrivate}
 end
 local terminal = function(value)
-    return value == 'success' or value == 'failed' or value == 'skipped' or value == 'canceled' or value == 'continued'
+    return value == 'success' or value == 'failed' or value == 'skipped' or value == 'canceled' or value == 'continued' or value == 'pinned'
 end
 local status = redis.call('GET', KEYS[5])
 local expectedActivation = tonumber(ARGV[5] or '0')
@@ -67,8 +67,14 @@ if executionStatus == 'success' or executionStatus == 'failed' or executionStatu
     return {3, 0, executionStatus, effectivePrivate}
 end
 if isSystem == 1 then
+    -- A system commit is either a skip-cascade resolution, which requires the
+    -- unit's "skip" scheduling marker, or a pinned node served from pin_data,
+    -- which the graph scheduled to execute (or is a root with no marker) and
+    -- must therefore never land on a unit marked "skip". Same fence as the
+    -- memory backend's CommitNode.
     local action = redis.call('HGET', KEYS[11], 'action') or ''
-    if action ~= 'skip' or (status and status ~= 'pending') then
+    local pinned = ARGV[1] == 'pinned'
+    if (pinned and action == 'skip') or (not pinned and action ~= 'skip') or (status and status ~= 'pending') then
         return {0, 0, '', effectivePrivate}
     end
 else
@@ -237,7 +243,7 @@ return {1, done, finalStatus, effectivePrivate}
 // reported back rather than left to be inferred from the outbox.
 var advanceNodeLua = redis.NewScript(`
 local terminal = function(value)
-    return value == 'success' or value == 'failed' or value == 'skipped' or value == 'canceled' or value == 'continued'
+    return value == 'success' or value == 'failed' or value == 'skipped' or value == 'canceled' or value == 'continued' or value == 'pinned'
 end
 local executionStatus = redis.call('GET', KEYS[1])
 if executionStatus == 'success' or executionStatus == 'failed' or executionStatus == 'canceled' or executionStatus == 'timeout' then
@@ -587,7 +593,7 @@ local nstatus = redis.call('GET', nodeStatusKey)
 local auditID = requestID .. ':' .. nowMs
 
 local isTerminal = nstatus == 'success' or nstatus == 'failed' or nstatus == 'skipped'
-    or nstatus == 'canceled' or nstatus == 'continued'
+    or nstatus == 'canceled' or nstatus == 'continued' or nstatus == 'pinned'
 
 -- Intent-branched terminal/non-terminal guard.
 --

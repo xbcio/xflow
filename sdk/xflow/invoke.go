@@ -39,6 +39,9 @@ func (e *Engine) Invoke(ctx context.Context, workflowID types.WorkflowID, entry 
 	if cfg.execTTL > 0 {
 		ctx = enginecore.WithExecutionTTL(ctx, cfg.execTTL)
 	}
+	if cfg.testRun {
+		ctx = enginecore.WithTestRun(ctx, true)
+	}
 	if cfg.traceID != "" {
 		ctx = enginecore.WithTraceID(ctx, cfg.traceID)
 	}

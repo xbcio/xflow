@@ -21,6 +21,7 @@ func newRootCommand(out io.Writer) *cobra.Command {
 	root.SetErr(out)
 	root.AddCommand(newDeadLetterCommand(out))
 	root.AddCommand(newSupplyCommand(out))
+	root.AddCommand(newExecutionCommand(out))
 	return root
 }
 

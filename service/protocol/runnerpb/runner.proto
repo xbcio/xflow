@@ -40,6 +40,12 @@ service RunnerProtocol {
   // returning without error, matching the HTTP transport's 200 with an empty
   // body.
   rpc AckActivation(ActivationAckRequest) returns (ActivationAckResponse);
+
+  // RenewLease extends an active lease's deadline. Mirrors the HTTP
+  // RenewLeasePath endpoint exactly: both transports call Core.renewLease,
+  // so session validation, lease lookup, execution-deadline enforcement, and
+  // the group/node renewal split are never duplicated between them.
+  rpc RenewLease(RenewLeaseRequest) returns (RenewLeaseResponse);
 }
 
 message Capability {
@@ -182,6 +188,18 @@ message ReportResultRequest {
   // that do not populate it simply leave it empty and the server falls back to
   // the lease's dispatch carrier.
   map<string, string> trace_carrier = 5;
+  // group_result_json is the JSON-encoded protocol.GroupResultWire (via
+  // MarshalGroupResult/UnmarshalGroupResult), set instead of result_json's
+  // content being meaningful when the runner reports a group execution
+  // outcome. Empty means no GroupResult (an ordinary node task, or an old
+  // runner/server predating this field) — never confuse that with a group
+  // task reporting an empty group result, which cannot happen since
+  // MarshalGroupResult always encodes at least ProtocolVersion/Outcome. Carried
+  // as JSON bytes, not a structured message, for the same reason result_json
+  // is: it embeds []GroupExitResult with a map[string]any Data field that maps
+  // poorly onto protobuf, and the JSON codec is already built, tested, and
+  // used by the HTTP transport.
+  bytes group_result_json = 6;
 }
 
 message ReportResultResponse {
@@ -212,6 +230,30 @@ message ActivationAckRequest {
 // successful ack with 200 and an empty JSON object, carrying no payload.
 // Failure is reported as a gRPC status, mirroring the HTTP non-2xx path.
 message ActivationAckResponse {}
+
+// RenewLeaseRequest mirrors protocol.RenewLeaseRequest field-for-field.
+// AuthToken is carried on the message for parity with the DTO, but the gRPC
+// server ignores it in favor of the Authorization metadata, same as every
+// other request (see overrideTokenFromMetadata).
+message RenewLeaseRequest {
+  string runner_id = 1;
+  string session_id = 2;
+  string lease_id = 3;
+  string lease_token = 4;
+  // extend_ms is the requested extension in milliseconds; see
+  // protocol.RenewLeaseRequest.Extend.
+  int64 extend_ms = 5;
+  string auth_token = 6;
+}
+
+// RenewLeaseResponse mirrors protocol.RenewLeaseResponse field-for-field.
+// deadline_unix_nano is 0 when Renewed is false, matching the HTTP
+// transport's zero-value time.Time on a refusal.
+message RenewLeaseResponse {
+  bool renewed = 1;
+  int64 deadline_unix_nano = 2;
+  string error = 3;
+}
 
 message RunnerFrame {
   oneof frame {

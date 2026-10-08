@@ -54,6 +54,10 @@ type wireNodeMeta struct {
 	// wire object, so no separate encode/decode step exists to forget.
 	Body               *NodeBodyPackage `json:"body,omitempty"`
 	ActivationReplicas uint32           `json:"activation_replicas,omitempty"`
+	// PinOutput carries NodeMeta.PinOutput. Without it a snapshot-loaded graph
+	// (every cluster dispatch after a cache miss) would silently run a pinned
+	// node for real.
+	PinOutput map[string]any `json:"pin_output,omitempty"`
 }
 
 func toWireNodeMeta(n NodeMeta) wireNodeMeta {
@@ -74,6 +78,7 @@ func toWireNodeMeta(n NodeMeta) wireNodeMeta {
 		Timeout:            n.Timeout,
 		Body:               n.Body,
 		ActivationReplicas: n.ActivationReplicas,
+		PinOutput:          n.PinOutput,
 	}
 }
 
@@ -137,6 +142,7 @@ func decodeWireNodes(raw []wireNodeMeta) ([]NodeMeta, bool, error) {
 			Timeout:            w.Timeout,
 			Body:               w.Body,
 			ActivationReplicas: w.ActivationReplicas,
+			PinOutput:          w.PinOutput,
 		}
 		if !p.present {
 			nodes[i].GroupIdx = -1
@@ -383,6 +389,7 @@ func assignGraphHash(g *Graph) error {
 		Transient:              g.transient,
 		TransientTTL:           g.transientTTL,
 		TransientCompletionTTL: g.transientCompletionTTL,
+		PinDataMode:            g.pinDataMode,
 		Groups:                 g.groups,
 		Units:                  g.units,
 		UnitOutEdges:           g.unitOutEdges,
@@ -420,10 +427,13 @@ type graphHashPayload struct {
 	Transient              bool          `json:",omitempty"`
 	TransientTTL           time.Duration `json:",omitempty"`
 	TransientCompletionTTL time.Duration `json:",omitempty"`
-	Groups                 []GroupMeta
-	Units                  []UnitMeta
-	UnitOutEdges           [][]UnitEdge
-	UnitInDegree           []int
+	// PinDataMode is empty for every graph without a pinned node, so omitempty
+	// keeps those hashes unchanged.
+	PinDataMode  string `json:",omitempty"`
+	Groups       []GroupMeta
+	Units        []UnitMeta
+	UnitOutEdges [][]UnitEdge
+	UnitInDegree []int
 	// SupplyRefs must carry an explicit omitempty: this struct's fields have no
 	// json tags, so without it every pre-existing graph's hash payload would
 	// gain a "SupplyRefs":null and its graphHash would change, invalidating the
@@ -486,6 +496,7 @@ type graphSerializedForm struct {
 	Transient              bool          `json:"transient,omitempty"`
 	TransientTTL           time.Duration `json:"transient_ttl,omitempty"`
 	TransientCompletionTTL time.Duration `json:"transient_completion_ttl,omitempty"`
+	PinDataMode            string        `json:"pin_data_mode,omitempty"`
 	Groups                 []GroupMeta   `json:"groups,omitempty"`
 	// SupplyRefs maps a consumer node index to the supply node names it depends
 	// on. Unlike the unit IR it cannot be re-derived on decode: it comes from
@@ -529,6 +540,7 @@ func (g *Graph) MarshalJSON() ([]byte, error) {
 		Transient:              g.transient,
 		TransientTTL:           g.transientTTL,
 		TransientCompletionTTL: g.transientCompletionTTL,
+		PinDataMode:            g.pinDataMode,
 		Groups:                 g.groups,
 		SupplyRefs:             g.supplyRefs,
 		NodesRefs:              g.nodesRefs,
@@ -651,6 +663,7 @@ func (g *Graph) UnmarshalJSON(data []byte) error {
 	g.transient = sf.Transient
 	g.transientTTL = sf.TransientTTL
 	g.transientCompletionTTL = sf.TransientCompletionTTL
+	g.pinDataMode = sf.PinDataMode
 	g.groups = sf.Groups
 	g.supplyRefs = sf.SupplyRefs
 	g.nodesRefs = sf.NodesRefs

@@ -186,6 +186,12 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 		pipe.Set(ctx, execKey(t, e.ID, "scope"), string(scopeJSON), ttl)
 		keys = append(keys, execKey(t, e.ID, "scope"))
 	}
+	// TestRun gates pin_data under settings.pin_data_mode: test_only, so it must
+	// survive the round trip: a lost flag silently runs pinned nodes for real.
+	if e.TestRun {
+		pipe.Set(ctx, execKey(t, e.ID, "test_run"), "1", ttl)
+		keys = append(keys, execKey(t, e.ID, "test_run"))
+	}
 	if e.TraceID != "" {
 		pipe.Set(ctx, execKey(t, e.ID, "trace_id"), e.TraceID, ttl)
 		keys = append(keys, execKey(t, e.ID, "trace_id"))
@@ -296,6 +302,7 @@ func (s *Store) cleanupCreatedExecution(ctx context.Context, e *engine.Execution
 		execKey(t, e.ID, "trace_id"),
 		execKey(t, e.ID, "span_id"),
 		execKey(t, e.ID, "trace_carrier"),
+		execKey(t, e.ID, "test_run"),
 		transientMarkKey(t, e.ID),
 		terminalMarkKey(t, e.ID),
 		retentionRecordKey(t, e.ID),
@@ -761,6 +768,7 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 	paramsCmd := pipe.Get(ctx, execKey(t, id, "params"))
 	runtimeCmd := pipe.Get(ctx, execKey(t, id, "runtime"))
 	scopeCmd := pipe.Get(ctx, execKey(t, id, "scope"))
+	testRunCmd := pipe.Get(ctx, execKey(t, id, "test_run"))
 	traceIDCmd := pipe.Get(ctx, execKey(t, id, "trace_id"))
 	spanIDCmd := pipe.Get(ctx, execKey(t, id, "span_id"))
 	carrierCmd := pipe.Get(ctx, execKey(t, id, "trace_carrier"))
@@ -806,6 +814,12 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 	} else if err != redis.Nil {
 		return nil, fmt.Errorf("get execution scope %q: %w", id, err)
 	}
+	var testRun bool
+	if raw, err := testRunCmd.Result(); err == nil {
+		testRun = raw == "1"
+	} else if err != redis.Nil {
+		return nil, fmt.Errorf("get execution test_run %q: %w", id, err)
+	}
 	var traceID string
 	if raw, err := traceIDCmd.Result(); err == nil {
 		traceID = raw
@@ -842,6 +856,7 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 		Params:       params,
 		Runtime:      runtime,
 		Scope:        scope,
+		TestRun:      testRun,
 		TraceID:      traceID,
 		SpanID:       spanID,
 		TraceCarrier: traceCarrier,

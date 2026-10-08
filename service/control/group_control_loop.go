@@ -293,11 +293,9 @@ func (c *Core) renewLease(ctx context.Context, req protocol.RenewLeaseRequest, i
 	// is untouched: the risk is confined to one new branch here rather than a
 	// fork in crash recovery.
 	//
-	// KNOWN LIMIT: gRPC runners never renew at all because
-	// service/runner/runner.go:110 gates renewal behind a leaseRenewClient type
-	// assertion the gRPC client does not satisfy. So this backstop is HTTP-only.
-	// That matches the project's stated direction (HTTP is the primary runner
-	// transport); fixing gRPC is out of scope.
+	// Both HTTP and gRPC runners reach this backstop: GRPCClient implements
+	// leaseRenewClient (RenewLease RPC), so service/runner/runner.go:581's type
+	// assertion starts a renewal loop on either transport.
 	//
 	// The branch is node-only: CommitTaskTimeout is a node commit path and
 	// refuses group leases (ErrGroupLeaseNotSupported). A group's deadline lives

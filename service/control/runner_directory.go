@@ -42,10 +42,21 @@ type Assignment struct {
 
 // BuildAssignmentID derives the stable control-plane identity for a queued
 // assignment from immutable task fields.
+//
+// A map batch's NodeName (m/_batch/<i>) is the same in every expansion
+// generation, so its ID also carries the parent lease that expanded it.
+// Without it, a batch a dead runner left leased makes the same-numbered batch
+// of every later generation an enqueue duplicate, and that generation's
+// barrier never fills until the stranded-lease reaper runs.
 func BuildAssignmentID(task *engine.Task) AssignmentID {
 	payload := ""
 	if task.Payload != nil {
 		payload = fmt.Sprintf("%s:%d", task.Payload.Name, task.Payload.Triggered)
+		if task.Type == engine.TaskTypeNodeBatch {
+			if gen, _ := task.Payload.Data["parent_lease_id"].(string); gen != "" {
+				payload += "@" + gen
+			}
+		}
 	}
 	return AssignmentID(fmt.Sprintf("%s/%s/%d/%d/%d/%s", task.ExecutionID, task.NodeName, task.NodeIdx, task.ActivationID, task.AutoDepth, payload))
 }
@@ -268,10 +279,22 @@ type ClaimReclaimer interface {
 // LeaseLookupKey identifies one finalized lease by its immutable identity. The
 // caller fills whichever fields it has; the directory resolves token > id >
 // assignmentID, mirroring ReleaseLeased.
+//
+// NodeName and NodeIdx, when NodeName is set, name the task the lease must be
+// for. The report path needs them because AssignmentID cannot do that job
+// there: the echoed task loses ActivationID and AutoDepth (json:"-"), so an ID
+// rebuilt from it never matches, and a map node and its batches share one
+// lease identity.
 type LeaseLookupKey struct {
 	AssignmentID AssignmentID
 	LeaseID      engine.LeaseID
 	LeaseToken   engine.LeaseToken
+	NodeName     string
+	NodeIdx      int
+}
+
+func (k LeaseLookupKey) namesTask(task *engine.Task) bool {
+	return task.NodeName == k.NodeName && task.NodeIdx == k.NodeIdx
 }
 
 // LeaseLookup is an optional directory capability that returns the
