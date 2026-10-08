@@ -1130,7 +1130,14 @@ func (c *Core) pollTask(ctx context.Context, req protocol.PollTaskRequest, info 
 			}
 			c.requeueClaimAfterDispatchFailure(ctx, claim)
 			return protocol.PollTaskResponse{}, recoverErr
-		case errors.Is(err, engine.ErrExecutionInactive):
+		case errors.Is(err, engine.ErrExecutionInactive), errors.Is(err, engine.ErrSystemTaskHandled):
+			// Both mean there is nothing for a runner to run. ErrSystemTaskHandled
+			// is the engine resolving the task itself during BuildTaskLease (a
+			// pinned node committing its pin_data mock): the commit and its
+			// downstream advance are already durable, so the assignment is
+			// settled as dropped. Requeueing it would replay the same handled
+			// commit on every claim and never settle. Mirrors
+			// execution.Dispatcher.HandleTask.
 			dispatchSpan.End()
 			if settleErr := c.dropClaimAfterHandoffResolution(ctx, claim); settleErr != nil {
 				c.requeueClaimAfterDispatchFailure(ctx, claim)
