@@ -34,6 +34,12 @@ const defaultLeaderLeaseTTL = 15 * time.Second
 // code can implement it without importing a concrete broker package.
 type QueueObserver = queue.Observer
 
+// QueueStatsObserver receives periodic queue-depth samples from a consumer's
+// queues (pending/active/retry counts and oldest-pending age). It is a
+// technology-neutral alias for queue.StatsObserver, kept structural so metrics
+// code can implement it without importing a concrete broker package.
+type QueueStatsObserver = queue.StatsObserver
+
 // AuditObserver, LeaseObserver, and AuditStats are the state-store
 // observability contracts. They live in the internal rstate package; these
 // aliases preserve the distributed public API so existing metrics
@@ -87,6 +93,8 @@ type config struct {
 	transientCompletionTTL time.Duration
 	transport              queue.Transport
 	queueObserver          queue.Observer
+	queueStatsObserver     queue.StatsObserver
+	queueStatsInterval     time.Duration
 	redisConfig            *RedisConfig
 	outboxDiscoveryPage    int
 	outboxReadyIndex       bool
@@ -278,6 +286,29 @@ func WithQueueObserver(obs QueueObserver) Option {
 	}
 }
 
+// WithQueueStatsObserver installs a periodic queue-depth observer on the
+// consumer. The sample is the broker-side residency signal: it shows a backlog
+// while tasks are still queued, including the case a stalled consumer cannot
+// report at all. Sampling is disabled unless a consumer is started
+// (WithConsumer) and the transport supports it.
+func WithQueueStatsObserver(obs QueueStatsObserver) Option {
+	return func(c *config) {
+		if obs != nil {
+			c.queueStatsObserver = obs
+		}
+	}
+}
+
+// WithQueueStatsInterval overrides how often the queue-depth observer is
+// sampled. Values <= 0 mean queue.DefaultStatsInterval.
+func WithQueueStatsInterval(d time.Duration) Option {
+	return func(c *config) {
+		if d > 0 {
+			c.queueStatsInterval = d
+		}
+	}
+}
+
 // WithRedisConfig injects a Redis HA connection description. When present,
 // New builds the appropriate go-redis client (single/sentinel/cluster) using
 // redis.NewUniversalClient and ignores the redisAddr argument. When absent,
@@ -291,22 +322,27 @@ func WithRedisConfig(rc RedisConfig) Option {
 // internal state, timeout, trigger, and workflow-registry subpackages.
 // Call Bind() after creating the engine to start the consumer and monitors.
 type Backend struct {
-	state            *rstate.Store
-	transport        queue.Transport
-	registry         *execution.Registry
-	workflowReg      *workflowreg.Registry
-	triggerRuntime   *trigger.Primitives
-	rdb              redis.UniversalClient
-	timeoutMonitor   *timeout.Monitor
-	concurrency      int
-	consumer         bool
-	transient        bool
-	resourcePool     types.ResourcePool
-	artifactCode     func(ctx context.Context, digest string) ([]byte, error)
-	leaderElector    backend.LeaderElector
-	shutdownObserver ShutdownObserver
-	logger           engine.Logger
-	testHooks        bindStartHooks
+	state          *rstate.Store
+	transport      queue.Transport
+	registry       *execution.Registry
+	workflowReg    *workflowreg.Registry
+	triggerRuntime *trigger.Primitives
+	rdb            redis.UniversalClient
+	timeoutMonitor *timeout.Monitor
+	concurrency    int
+	consumer       bool
+	transient      bool
+	resourcePool   types.ResourcePool
+
+	// queueStatsObserver/queueStatsInterval drive the consumer's periodic
+	// queue-depth samples. Nil observer disables sampling.
+	queueStatsObserver queue.StatsObserver
+	queueStatsInterval time.Duration
+	artifactCode       func(ctx context.Context, digest string) ([]byte, error)
+	leaderElector      backend.LeaderElector
+	shutdownObserver   ShutdownObserver
+	logger             engine.Logger
+	testHooks          bindStartHooks
 
 	// outboxDiscoveryPage is the outbox dispatcher's per-drain discovery page;
 	// zero leaves engine.DefaultOutboxDiscoveryPage in place.
@@ -457,6 +493,8 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 		logger:           cfg.logger,
 
 		outboxDiscoveryPage: cfg.outboxDiscoveryPage,
+		queueStatsObserver:  cfg.queueStatsObserver,
+		queueStatsInterval:  cfg.queueStatsInterval,
 	}, nil
 }
 
@@ -760,7 +798,12 @@ func (b *Backend) bindHandler(eng *engine.Engine, handler func(context.Context, 
 	// 1. Start the consumer (broker-side task delivery). This is the only step
 	//    that can fail against a real broker; its error must propagate.
 	stopConsumer, err := b.transport.StartConsumer(
-		queue.ConsumerConfig{Concurrency: b.concurrency, Transient: b.transient},
+		queue.ConsumerConfig{
+			Concurrency:   b.concurrency,
+			Transient:     b.transient,
+			StatsObserver: b.queueStatsObserver,
+			StatsInterval: b.queueStatsInterval,
+		},
 		queue.TaskHandler(resolvedHandler),
 	)
 	if err != nil {

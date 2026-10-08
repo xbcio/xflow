@@ -496,6 +496,10 @@ func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 			opts = append(opts,
 				distributed.WithAuditObserver(metrics.NewAuditMetrics(cfg.Metrics)),
 				distributed.WithLeaseObserver(metrics.NewLeaseMetrics(cfg.Metrics)),
+				// Queue depth/oldest-pending age: the pre-loss residency signal
+				// that keeps working even when the consumer is too stalled to
+				// report anything itself.
+				distributed.WithQueueStatsObserver(metrics.NewQueueStatsMetrics(cfg.Metrics)),
 			)
 		}
 		var b *distributed.Backend

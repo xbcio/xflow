@@ -27,6 +27,31 @@ type Observer interface {
 // consumer loop for every delivered task.
 type TaskHandler func(ctx context.Context, t *engine.Task) error
 
+// StatsObserver receives periodic queue-depth samples from a consumer's
+// queues. It is the broker-side half of the residency signal: it reports a
+// backlog while tasks are still queued, where the consumer-side delivery-lag
+// histogram can only report what it has already consumed. Without it, a
+// completely stalled consumer is invisible until tasks start dropping.
+//
+// The parameters are primitives rather than a struct because the interface must
+// be implementable outside this internal package: the distributed backend
+// re-exports it as an alias and the metrics adapter lives in
+// observability/metrics, which must not import backend providers.
+type StatsObserver interface {
+	// OnQueueStats reports one sample of the named queue: the pending, active
+	// and retry task counts and the age of the oldest pending task (how long
+	// the head of the queue has been waiting). Implementations must be
+	// non-blocking; a sample that fails to read is simply not reported, so a
+	// missing sample means "not measured", never "zero".
+	OnQueueStats(queue string, pending, active, retry int, oldestPendingAge time.Duration)
+}
+
+// DefaultStatsInterval is how often a consumer samples its queues when
+// ConsumerConfig.StatsInterval is unset. It is deliberately slow: this is an
+// alerting signal read in minutes, and on a shared Redis the sample is real
+// load that must stay negligible next to task traffic.
+const DefaultStatsInterval = 30 * time.Second
+
 // ConsumerConfig configures a Transport's consumer loop.
 type ConsumerConfig struct {
 	// Concurrency is the number of tasks a consumer may process in parallel.
@@ -37,6 +62,15 @@ type ConsumerConfig struct {
 	// broker-native policy (e.g. Asynq's SkipRetry). Default/durable mode
 	// (false) keeps retryable failures retryable.
 	Transient bool
+
+	// StatsObserver, when non-nil, receives a periodic sample of the queues
+	// this consumer reads. A nil observer disables sampling entirely; a
+	// transport that cannot measure its queues never calls it.
+	StatsObserver StatsObserver
+
+	// StatsInterval overrides DefaultStatsInterval. Values <= 0 mean the
+	// default.
+	StatsInterval time.Duration
 }
 
 // Transport is the pluggable task transport: it both produces (enqueues) and

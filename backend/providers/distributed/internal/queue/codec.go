@@ -2,6 +2,7 @@ package queue
 
 import (
 	"encoding/json"
+	"time"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
@@ -23,6 +24,16 @@ type queuedTask struct {
 	AutoDepth    int                 `json:"_auto_depth,omitempty"`
 	ActivationID int                 `json:"_activation_id,omitempty"`
 	UnitIdx      *int                `json:"_unit_idx,omitempty"`
+	// DeliverableAtMs is Task.DeliverableAt in Unix milliseconds. Zero (the
+	// omitempty case) means "not carried", which is exactly how a payload
+	// written by a revision that predates the field decodes — the consumer
+	// observes no latency rather than a fabricated one.
+	DeliverableAtMs int64 `json:"_deliverable_at_ms,omitempty"`
+	// IntentCreatedAtMs is Task.IntentCreatedAt in Unix milliseconds, the age
+	// anchor for the inactive-execution provability test. Same zero contract
+	// as DeliverableAtMs: absent means "not carried", and the classifier then
+	// falls back to DeliverableAt rather than fabricating an age.
+	IntentCreatedAtMs int64 `json:"_intent_created_at_ms,omitempty"`
 }
 
 // Marshal encodes a task into a transport payload, preserving the scheduler
@@ -32,10 +43,12 @@ func Marshal(t *engine.Task) ([]byte, error) {
 		return json.Marshal((*queuedTask)(nil))
 	}
 	return json.Marshal(queuedTask{
-		Task:         *t,
-		AutoDepth:    t.AutoDepth,
-		ActivationID: t.ActivationID,
-		UnitIdx:      unitIdxPtr(t.UnitIdx),
+		Task:              *t,
+		AutoDepth:         t.AutoDepth,
+		ActivationID:      t.ActivationID,
+		UnitIdx:           unitIdxPtr(t.UnitIdx),
+		DeliverableAtMs:   timeMillis(t.DeliverableAt),
+		IntentCreatedAtMs: timeMillis(t.IntentCreatedAt),
 	})
 }
 
@@ -45,12 +58,23 @@ func MarshalWithNamespace(t *engine.Task, namespaceID namespace.Namespace) ([]by
 		return json.Marshal((*queuedTask)(nil))
 	}
 	return json.Marshal(queuedTask{
-		Task:         *t,
-		Namespace:    namespaceID,
-		AutoDepth:    t.AutoDepth,
-		ActivationID: t.ActivationID,
-		UnitIdx:      unitIdxPtr(t.UnitIdx),
+		Task:              *t,
+		Namespace:         namespaceID,
+		AutoDepth:         t.AutoDepth,
+		ActivationID:      t.ActivationID,
+		UnitIdx:           unitIdxPtr(t.UnitIdx),
+		DeliverableAtMs:   timeMillis(t.DeliverableAt),
+		IntentCreatedAtMs: timeMillis(t.IntentCreatedAt),
 	})
+}
+
+// timeMillis encodes a scheduler timestamp; the zero time stays 0 so the wire
+// field is omitted entirely (see queuedTask.DeliverableAtMs).
+func timeMillis(at time.Time) int64 {
+	if at.IsZero() {
+		return 0
+	}
+	return at.UTC().UnixMilli()
 }
 
 // unitIdxPtr omits the wire field entirely when the task's UnitIdx is already
@@ -81,6 +105,12 @@ func Unmarshal(data []byte) (*engine.Task, namespace.Namespace, error) {
 	task := qt.Task
 	task.AutoDepth = qt.AutoDepth
 	task.ActivationID = qt.ActivationID
+	if qt.DeliverableAtMs > 0 {
+		task.DeliverableAt = time.UnixMilli(qt.DeliverableAtMs).UTC()
+	}
+	if qt.IntentCreatedAtMs > 0 {
+		task.IntentCreatedAt = time.UnixMilli(qt.IntentCreatedAtMs).UTC()
+	}
 	if qt.UnitIdx != nil {
 		task.UnitIdx = *qt.UnitIdx
 	} else {

@@ -229,6 +229,10 @@ type stubQueueObserver struct{}
 
 func (stubQueueObserver) OnEnqueue(string, time.Duration, error) {}
 
+type stubQueueStatsObserver struct{}
+
+func (stubQueueStatsObserver) OnQueueStats(string, int, int, int, time.Duration) {}
+
 // TestOptionNilGuardsLeaveAnAlreadyConfiguredValueAlone pins the `if x != nil`
 // guard present in every one of these Option constructors: WithAuditObserver,
 // WithLeaseObserver, WithStateLogger, WithQueueObserver, WithShutdownObserver
@@ -282,6 +286,29 @@ func TestOptionNilGuardsLeaveAnAlreadyConfiguredValueAlone(t *testing.T) {
 		WithQueueObserver(nil)(c)
 		if c.queueObserver != sentinel {
 			t.Fatalf("queueObserver = %#v, want the sentinel to survive a nil call", c.queueObserver)
+		}
+	})
+
+	t.Run("WithQueueStatsObserver", func(t *testing.T) {
+		sentinel := stubQueueStatsObserver{}
+		c := &config{}
+		WithQueueStatsObserver(sentinel)(c)
+		WithQueueStatsObserver(nil)(c)
+		if c.queueStatsObserver != sentinel {
+			t.Fatalf("queueStatsObserver = %#v, want the sentinel to survive a nil call", c.queueStatsObserver)
+		}
+	})
+
+	t.Run("WithQueueStatsInterval", func(t *testing.T) {
+		c := &config{}
+		c.queueStatsInterval = 5 * time.Second
+		WithQueueStatsInterval(0)(c)
+		if c.queueStatsInterval != 5*time.Second {
+			t.Fatalf("queueStatsInterval = %v, want a non-positive value to leave it alone", c.queueStatsInterval)
+		}
+		WithQueueStatsInterval(15 * time.Second)(c)
+		if c.queueStatsInterval != 15*time.Second {
+			t.Fatalf("queueStatsInterval = %v, want 15s", c.queueStatsInterval)
 		}
 	})
 

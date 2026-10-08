@@ -184,3 +184,160 @@ func TestTransportConsumerDefaultsToDefaultNamespace(t *testing.T) {
 		t.Fatalf("namespace = %q, want default", gotNamespace)
 	}
 }
+
+// recordingStatsObserver captures queue-stats samples for the consumer-side
+// sampler test.
+type recordingStatsObserver struct {
+	mu      sync.Mutex
+	samples []statsSample
+	ch      chan struct{}
+}
+
+type statsSample struct {
+	queue   string
+	pending int
+	active  int
+	retry   int
+	age     time.Duration
+}
+
+func (o *recordingStatsObserver) OnQueueStats(queue string, pending, active, retry int, oldestPendingAge time.Duration) {
+	o.mu.Lock()
+	o.samples = append(o.samples, statsSample{queue: queue, pending: pending, active: active, retry: retry, age: oldestPendingAge})
+	o.mu.Unlock()
+	select {
+	case o.ch <- struct{}{}:
+	default:
+	}
+}
+
+// TestConsumerSamplesQueueStats pins the broker-side residency signal: a
+// consumer configured with a stats observer must report both queues it reads
+// (depth and oldest-pending age), and stopping the consumer must not panic
+// while the sampler is in flight.
+func TestConsumerSamplesQueueStats(t *testing.T) {
+	server, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer server.Close()
+
+	transport := NewWithConnOpt(asynqlib.RedisClientOpt{Addr: server.Addr()})
+	defer func() { _ = transport.Close() }()
+
+	// Block the handler so the task is measurable as pending or active while
+	// the sample is taken, instead of being consumed and completed.
+	release := make(chan struct{})
+	started := make(chan struct{}, 1)
+	obs := &recordingStatsObserver{ch: make(chan struct{}, 8)}
+
+	stop, err := transport.StartConsumer(queue.ConsumerConfig{
+		Concurrency:   1,
+		StatsObserver: obs,
+		StatsInterval: 20 * time.Millisecond,
+	}, func(ctx context.Context, t *engine.Task) error {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StartConsumer() error = %v", err)
+	}
+
+	task := &engine.Task{
+		ExecutionID: types.ExecutionID("exec-stats"),
+		NodeName:    "start",
+		NodeIdx:     0,
+		Type:        engine.TaskTypeNodeExec,
+	}
+	if err := transport.Enqueue(context.Background(), task); err != nil {
+		t.Fatalf("Enqueue() error = %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("consumer did not start the task")
+	}
+
+	// The sampler fires immediately at StartConsumer and then every 20ms, and
+	// every sample reports both queues. Wait until the recorded samples contain
+	// the actual observation under test — the in-flight task visible as
+	// pending or active on the default queue — and both queue names, bounded by
+	// the deadline. Exiting on "one sample per queue name" alone was the flake
+	// this loop used to have: the immediate pre-enqueue sample satisfies that
+	// condition, so the loop could stop before any sample was taken after
+	// Enqueue, and the visibility assertion then raced the sampler (observed
+	// once under a full-package -race run). Waiting for the observation itself
+	// removes the dependency on sampler/enqueue interleaving: the handler
+	// blocks on release, so once the task has been enqueued it cannot complete
+	// or leave pending/active, and every subsequent sample reports it. The
+	// only way to reach the deadline is a sampler that never observes an
+	// enqueued task — a real failure, not a scheduling race.
+	deadline := time.After(5 * time.Second)
+	seen := map[string]bool{}
+	visible := false
+	for !visible || !seen[defaultQueueName] || !seen[batchQueueName] {
+		obs.mu.Lock()
+		for _, s := range obs.samples {
+			seen[s.queue] = true
+			if s.queue == defaultQueueName && s.pending+s.active > 0 {
+				visible = true
+			}
+		}
+		obs.mu.Unlock()
+		if visible && seen[defaultQueueName] && seen[batchQueueName] {
+			break
+		}
+		select {
+		case <-obs.ch:
+		case <-deadline:
+			obs.mu.Lock()
+			samples := append([]statsSample(nil), obs.samples...)
+			obs.mu.Unlock()
+			t.Fatalf("queue stats samples = %+v, want both %s and %s and an in-flight %s task "+
+				"reported as pending or active", samples, defaultQueueName, batchQueueName, defaultQueueName)
+		}
+	}
+
+	close(release)
+	stop()
+}
+
+// TestStartConsumerStopIsIdempotent pins the restored contract: the stop
+// function is safe to call more than once, both for the plain consumer and for
+// one with the stats sampler — whose done-channel close made a second call
+// panic with "close of closed channel" before the Once was added.
+func TestStartConsumerStopIsIdempotent(t *testing.T) {
+	server, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer server.Close()
+
+	transport := New(server.Addr())
+	defer func() { _ = transport.Close() }()
+
+	handle := func(context.Context, *engine.Task) error { return nil }
+
+	stop, err := transport.StartConsumer(queue.ConsumerConfig{Concurrency: 1}, handle)
+	if err != nil {
+		t.Fatalf("StartConsumer() error = %v", err)
+	}
+	stop()
+	stop()
+
+	obs := &recordingStatsObserver{ch: make(chan struct{}, 8)}
+	stopWithStats, err := transport.StartConsumer(queue.ConsumerConfig{
+		Concurrency:   1,
+		StatsObserver: obs,
+		StatsInterval: 20 * time.Millisecond,
+	}, handle)
+	if err != nil {
+		t.Fatalf("StartConsumer(stats) error = %v", err)
+	}
+	stopWithStats()
+	stopWithStats()
+}
