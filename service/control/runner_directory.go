@@ -297,6 +297,20 @@ func (k LeaseLookupKey) namesTask(task *engine.Task) bool {
 	return task.NodeName == k.NodeName && task.NodeIdx == k.NodeIdx
 }
 
+// leaseIdentityMatches reports whether a finalized lease's stored identity
+// carries the lookup key's lease identity. The token is compared first and the
+// leaseID second, mirroring the by-token > by-id index precedence every
+// resolver uses. A key that names neither identity matches nothing.
+func leaseIdentityMatches(leaseToken engine.LeaseToken, leaseID engine.LeaseID, key LeaseLookupKey) bool {
+	if key.LeaseToken != "" {
+		return leaseToken == key.LeaseToken
+	}
+	if key.LeaseID != "" {
+		return leaseID == key.LeaseID
+	}
+	return false
+}
+
 // LeaseLookup is an optional directory capability that returns the
 // server-authoritative finalized lease for one (runner, session, lease-identity)
 // triple. It is the authority source for namespace on the report path: the lease
