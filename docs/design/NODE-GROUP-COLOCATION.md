@@ -553,12 +553,12 @@ items listed below under §12.1. What remains open is in §12.2.
   list.
 
 - **Activation replica count > 1 per entry unit** (spec §11.6 explicit-replica
-  scaling): implemented (2026-09-01, `5520a01`). `ActivationReplicas` flows
-  through the graph IR and snapshots; `EntryActivationManager` emits one
-  activation per declared replica (zero and one both mean one); the reconciler
-  only assigns `ReplicaIndex > 0` to runners advertising
-  `FeatureEntryActivationReplicaV1`. This entry previously said one active
-  hosting runner per entry unit.
+  scaling): implemented (2026-08-28, `0d30009`, `8e1aa3e`; graph IR and rstate
+  replica plumbing 2026-09-01, `5520a01`). `ActivationReplicas` flows through
+  the graph IR and snapshots; `EntryActivationManager` emits one activation per
+  declared replica (zero and one both mean one); the reconciler only assigns
+  `ReplicaIndex > 0` to runners advertising `FeatureEntryActivationReplicaV1`.
+  This entry previously said one active hosting runner per entry unit.
 - **Full runner→control activation ACK RPC.** The retired path's ACK was dead
   code; renewal is now via reconnect inventory + proactive reconcile. A dedicated
   ACK RPC is future work if tighter delivery confirmation is needed.
