@@ -58,6 +58,10 @@ type wireNodeMeta struct {
 	// (every cluster dispatch after a cache miss) would silently run a pinned
 	// node for real.
 	PinOutput map[string]any `json:"pin_output,omitempty"`
+	// Disabled carries NodeMeta.Disabled. Without it a snapshot-loaded graph
+	// (every cluster dispatch after a cache miss) would silently run a
+	// disabled node for real.
+	Disabled bool `json:"disabled,omitempty"`
 }
 
 func toWireNodeMeta(n NodeMeta) wireNodeMeta {
@@ -79,6 +83,7 @@ func toWireNodeMeta(n NodeMeta) wireNodeMeta {
 		Body:               n.Body,
 		ActivationReplicas: n.ActivationReplicas,
 		PinOutput:          n.PinOutput,
+		Disabled:           n.Disabled,
 	}
 }
 
@@ -143,6 +148,7 @@ func decodeWireNodes(raw []wireNodeMeta) ([]NodeMeta, bool, error) {
 			Body:               w.Body,
 			ActivationReplicas: w.ActivationReplicas,
 			PinOutput:          w.PinOutput,
+			Disabled:           w.Disabled,
 		}
 		if !p.present {
 			nodes[i].GroupIdx = -1
@@ -669,11 +675,17 @@ func (g *Graph) UnmarshalJSON(data []byte) error {
 	g.nodesRefs = sf.NodesRefs
 	// Bodies need no line here: they travel inside Nodes as NodeMeta.Body.
 	// Rebuild supplyIndexes from node kinds — the same deterministic derivation
-	// Compile performs, so a round-tripped graph needs no WorkflowDef.
+	// Compile performs, so a round-tripped graph needs no WorkflowDef. The
+	// graph-level disabled cache is re-derived the same way, from the
+	// NodeMeta.Disabled flags that just decoded.
 	g.supplyIndexes = make(map[string]int)
+	g.hasDisabled = false
 	for i := range g.nodes {
 		if g.nodes[i].Kind == types.NodeKindSupply {
 			g.supplyIndexes[g.nodes[i].Name] = i
+		}
+		if g.nodes[i].Disabled {
+			g.hasDisabled = true
 		}
 	}
 	if err := buildUnits(g); err != nil {

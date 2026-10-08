@@ -250,6 +250,7 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 	runExecutionStatusAgreesWithSnapshot(t, state)
 	runCommitNodeAgainstMissingExecution(t, state)
 	runPinnedNodeIsTerminal(t, state)
+	runDisabledNodeSkippedOnExecuteUnit(t, state)
 }
 
 // runExecutionStatusAgreesWithSnapshot pins that the narrow status read and the
@@ -1036,5 +1037,89 @@ func runPinnedNodeIsTerminal(t *testing.T, state engine.StateStore) {
 	}
 	if ns == nil || ns.Status != types.NodeStatusPinned {
 		t.Fatalf("pinned node overwritten by a running upsert: %+v", ns)
+	}
+}
+
+// runDisabledNodeSkippedOnExecuteUnit pins the backend half of a
+// definition-disabled node: the engine serves it through a System commit
+// carrying NodeStatusSkipped on a unit that has NO skip marker -- the unit was
+// scheduled to execute, the node is simply never leased. The system fence used
+// to admit "skipped" only on skip-marked units (the cascade), so this is the
+// third legal shape. The "main" port rides the commit because a disabled
+// node's downstream is a normal dependency that must still schedule, unlike
+// the cascade's portless skip.
+//
+// A backend that refuses the commit reports it as a stale token, and the
+// engine acks the intent as handled: the node would never terminalize and its
+// downstream would never run -- a hang, not an error. The last block pins the
+// other direction: the widening covers exactly this one shape, and any other
+// status still needs the skip marker.
+func runDisabledNodeSkippedOnExecuteUnit(t *testing.T, state engine.StateStore) {
+	t.Helper()
+	ctx := context.Background()
+	atomic, ok := state.(engine.AtomicStateStore)
+	if !ok {
+		t.Fatalf("%T does not implement engine.AtomicStateStore", state)
+	}
+	id := types.ExecutionID("exec-contract-disabled")
+	g := ContractGraph()
+	if err := state.CreateExecution(ctx, &engine.ExecutionSnapshot{
+		ID:     id,
+		Graph:  g,
+		Status: types.ExecutionStatusRunning,
+	}); err != nil {
+		t.Fatalf("CreateExecution(disabled) error = %v", err)
+	}
+	startIdx, _ := g.NodeIndex("start")
+	unitIdx := g.UnitIndexForNode(startIdx)
+	port := "main"
+	res, err := atomic.CommitNode(ctx, engine.CommitNodeRequest{
+		ExecutionID: id,
+		NodeName:    "start",
+		NodeIdx:     startIdx,
+		UnitIdx:     unitIdx,
+		Status:      types.NodeStatusSkipped,
+		Port:        port,
+		System:      true,
+		AdvanceTask: &engine.Task{
+			ExecutionID: id,
+			NodeName:    "start",
+			NodeIdx:     startIdx,
+			UnitIdx:     unitIdx,
+			Type:        engine.TaskTypeNodeAdvance,
+			Port:        &port,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CommitNode(disabled skip) error = %v", err)
+	}
+	if res.Outcome != engine.CommitOutcomeAccepted || !res.Applied {
+		t.Fatalf("CommitNode(disabled skip) = %+v, want accepted and applied: the "+
+			"system fence must admit skipped on an execute-scheduled unit", res)
+	}
+	ns, err := state.GetNode(ctx, id, "start")
+	if err != nil {
+		t.Fatalf("GetNode(disabled) error = %v", err)
+	}
+	if ns == nil || ns.Status != types.NodeStatusSkipped || ns.Port != "main" {
+		t.Fatalf("GetNode(disabled) = %+v, want skipped with port main", ns)
+	}
+
+	finishIdx, _ := g.NodeIndex("finish")
+	finishUnit := g.UnitIndexForNode(finishIdx)
+	res, err = atomic.CommitNode(ctx, engine.CommitNodeRequest{
+		ExecutionID: id,
+		NodeName:    "finish",
+		NodeIdx:     finishIdx,
+		UnitIdx:     finishUnit,
+		Status:      types.NodeStatusSuccess,
+		System:      true,
+	})
+	if err != nil {
+		t.Fatalf("CommitNode(bogus system success) error = %v", err)
+	}
+	if res.Applied {
+		t.Fatalf("CommitNode(bogus system success) applied (%+v): the widening "+
+			"covers skipped only; other system statuses still need the skip marker", res)
 	}
 }

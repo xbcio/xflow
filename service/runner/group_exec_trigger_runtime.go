@@ -54,9 +54,9 @@ func (g *groupExecTriggerRuntime) ExecuteGroup(ctx context.Context, input map[st
 	// which does carry a FailedMember field now and crosses both runner
 	// transports). This path never crosses the wire at all — the group runs in
 	// this process, for this Kafka batch — so it reads the executor's own
-	// subgraph.Result and keeps the full classification (including FailedMember)
-	// that types.GroupExecResult still has no field for, rather than narrowing to
-	// whatever a wire round trip would carry.
+	// subgraph.Result and carries the full classification (including
+	// FailedMember, surfaced below as types.GroupExecResult.FailedMember)
+	// rather than narrowing to whatever a wire round trip would carry.
 	res, err := g.runtime.ExecuteSubgraph(ctx, subgraph.Request{
 		Package:         g.pkg,
 		PackageHash:     g.packageHash,
@@ -75,6 +75,9 @@ func (g *groupExecTriggerRuntime) ExecuteGroup(ctx context.Context, input map[st
 		Outcome: string(res.Outcome),
 		Exits:   exits,
 		Error:   res.Error,
+		// The failing member's name, when the executor identified one. See
+		// types.GroupExecResult.FailedMember for when this stays empty.
+		FailedMember: res.FailedMember,
 		// "Deterministic" here and "Permanent" upstream name the same property
 		// from the two ends: the producer says the failure will not change on a
 		// retry, the consumer reads that as "redelivering this batch is

@@ -1258,6 +1258,83 @@ func (d *RedisRunnerDirectory) leasedAssignmentCandidates(ctx context.Context, r
 	return assignmentIDs, nil
 }
 
+// leasedAssignmentVerdict steers walkLeasedAssignments from its visit callback.
+type leasedAssignmentVerdict int
+
+const (
+	// walkLeasedSkip: not a match; keep walking.
+	walkLeasedSkip leasedAssignmentVerdict = iota
+	// walkLeasedKeep: a fallback match. It becomes the walk's result only when
+	// no later candidate is taken; the first kept candidate wins.
+	walkLeasedKeep
+	// walkLeasedTake: the best match; the walk stops here.
+	walkLeasedTake
+)
+
+// walkLeasedAssignments walks the assignments runnerID currently holds as
+// leased, in the same two-pass shape as every other lease scan: the per-runner
+// index first, and the full assignment-state hash only when the index names
+// fewer live leases than the runner's own count says it should.
+//
+// visit decides each live candidate's verdict; it is never called for a
+// candidate whose state or owner does not match the runner. The walk returns
+// the first taken candidate, else the first kept one.
+func (d *RedisRunnerDirectory) walkLeasedAssignments(ctx context.Context, runnerID string, visit func(assignmentID string) (*engine.TaskLease, leasedAssignmentVerdict, error)) (*engine.TaskLease, bool, error) {
+	var kept *engine.TaskLease
+	visited := make(map[string]struct{})
+	for pass := 0; pass < 2; pass++ {
+		candidates, err := d.leasedAssignmentCandidates(ctx, runnerID, pass > 0)
+		if err != nil {
+			return nil, false, err
+		}
+		live := 0
+		for _, candidate := range candidates {
+			if _, done := visited[candidate]; done {
+				continue
+			}
+			visited[candidate] = struct{}{}
+			state, err := d.rdb.HGet(ctx, d.keys.assignmentState, candidate).Result()
+			if err != nil && !errors.Is(err, redis.Nil) {
+				return nil, false, fmt.Errorf("walk leased assignment state %q: %w", candidate, err)
+			}
+			owner, err := d.rdb.HGet(ctx, d.keys.assignmentRunner, candidate).Result()
+			if err != nil && !errors.Is(err, redis.Nil) {
+				return nil, false, fmt.Errorf("walk leased assignment owner %q: %w", candidate, err)
+			}
+			if state != redisAssignmentLeased || owner != runnerID {
+				continue
+			}
+			live++
+			lease, verdict, err := visit(candidate)
+			if err != nil {
+				return nil, false, err
+			}
+			switch verdict {
+			case walkLeasedTake:
+				return lease, true, nil
+			case walkLeasedKeep:
+				if kept == nil {
+					kept = lease
+				}
+			}
+		}
+		if pass > 0 {
+			break
+		}
+		count, err := d.rdb.HGet(ctx, d.keys.runnerLeaseCount, runnerID).Int()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			return nil, false, fmt.Errorf("read runner lease count %q: %w", runnerID, err)
+		}
+		if live >= count {
+			break
+		}
+	}
+	if kept != nil {
+		return kept, true, nil
+	}
+	return nil, false, nil
+}
+
 // pruneLeasedAssignmentIndex drops an index entry that no longer names a live
 // lease for its runner. It is best effort on purpose: a stale entry costs one
 // bounded read on the next poll, and a poll that failed over index hygiene would
@@ -1536,6 +1613,9 @@ func (d *RedisRunnerDirectory) ReleaseLeased(ctx context.Context, req ReleaseLea
 // batches share their parent's lease identity, so when the indexes name a
 // sibling, or nothing, the runner's own leased assignments are searched for the
 // one holding this token under this task.
+//
+// A key that names no task (a renewal) falls back to any live assignment of
+// this runner under the identity; see lookupRenewalLease.
 func (d *RedisRunnerDirectory) LookupLease(ctx context.Context, runnerID, sessionID string, key LeaseLookupKey) (*engine.TaskLease, bool, error) {
 	assignmentID, ok, err := d.resolveLeaseAssignmentID(ctx, key)
 	if err != nil {
@@ -1547,70 +1627,94 @@ func (d *RedisRunnerDirectory) LookupLease(ctx context.Context, runnerID, sessio
 			return nil, false, err
 		}
 	}
-	if key.NodeName == "" || (ok && key.namesTask(&lease.Task)) {
-		return lease, ok, nil
+	if key.NodeName == "" {
+		if ok {
+			return lease, true, nil
+		}
+		// A renewal names no task; the index alone cannot resolve it. See
+		// lookupRenewalLease.
+		return d.lookupRenewalLease(ctx, runnerID, sessionID, key, assignmentID)
+	}
+	if ok && key.namesTask(&lease.Task) {
+		return lease, true, nil
 	}
 	if key.LeaseToken == "" {
 		return nil, false, nil
 	}
-	// Same two-pass shape as replay: the per-runner index first, and the full
-	// state hash only when the index names fewer live leases than the runner's
-	// lease count, i.e. when it is known to be short.
-	visited := make(map[string]struct{})
-	for pass := 0; pass < 2; pass++ {
-		candidates, err := d.leasedAssignmentCandidates(ctx, runnerID, pass > 0)
-		if err != nil {
-			return nil, false, err
+	return d.walkLeasedAssignments(ctx, runnerID, func(candidate string) (*engine.TaskLease, leasedAssignmentVerdict, error) {
+		if candidate == assignmentID {
+			return nil, walkLeasedSkip, nil
 		}
-		live := 0
-		for _, candidate := range candidates {
-			if _, done := visited[candidate]; done {
-				continue
-			}
-			visited[candidate] = struct{}{}
-			state, err := d.rdb.HGet(ctx, d.keys.assignmentState, candidate).Result()
-			if err != nil && !errors.Is(err, redis.Nil) {
-				return nil, false, fmt.Errorf("lookup sibling lease state %q: %w", candidate, err)
-			}
-			owner, err := d.rdb.HGet(ctx, d.keys.assignmentRunner, candidate).Result()
-			if err != nil && !errors.Is(err, redis.Nil) {
-				return nil, false, fmt.Errorf("lookup sibling lease owner %q: %w", candidate, err)
-			}
-			if state != redisAssignmentLeased || owner != runnerID {
-				continue
-			}
-			live++
-			if candidate == assignmentID {
-				continue
-			}
-			token, err := d.rdb.HGet(ctx, d.keys.assignmentLeaseToken, candidate).Result()
-			if err != nil && !errors.Is(err, redis.Nil) {
-				return nil, false, fmt.Errorf("lookup sibling lease token %q: %w", candidate, err)
-			}
-			if token != string(key.LeaseToken) {
-				continue
-			}
-			sibling, found, err := d.lookupLeaseAt(ctx, runnerID, sessionID, candidate)
-			if err != nil {
-				return nil, false, err
-			}
-			if !found || !key.namesTask(&sibling.Task) {
-				continue
-			}
-			return sibling, true, nil
-		}
-		if pass > 0 {
-			break
-		}
-		count, err := d.rdb.HGet(ctx, d.keys.runnerLeaseCount, runnerID).Int()
+		token, err := d.rdb.HGet(ctx, d.keys.assignmentLeaseToken, candidate).Result()
 		if err != nil && !errors.Is(err, redis.Nil) {
-			return nil, false, fmt.Errorf("read runner lease count %q: %w", runnerID, err)
+			return nil, walkLeasedSkip, fmt.Errorf("lookup sibling lease token %q: %w", candidate, err)
 		}
-		if live >= count {
-			break
+		if token != string(key.LeaseToken) {
+			return nil, walkLeasedSkip, nil
 		}
+		sibling, found, err := d.lookupLeaseAt(ctx, runnerID, sessionID, candidate)
+		if err != nil {
+			return nil, walkLeasedSkip, err
+		}
+		if !found || !key.namesTask(&sibling.Task) {
+			return nil, walkLeasedSkip, nil
+		}
+		return sibling, walkLeasedTake, nil
+	})
+}
+
+// lookupRenewalLease resolves a renewal key -- one that names no task -- to any
+// live assignment this runner holds under the key's lease identity.
+//
+// A map node and its batches share one lease identity while the by-token /
+// by-id indexes hold one assignment per identity, so a batch renewal misses the
+// index whenever the assignment it names belongs to another runner, was
+// released, or lost its metadata: the renewal used to be refused outright and
+// the runner cancelled a healthy batch. Falling back to the runner's own leased
+// set keeps the renewal resolvable exactly as the report path does (see
+// LookupLease). The engine renews the same target -- the parent node -- through
+// any of them, so which live sibling resolves is immaterial to the lease.
+//
+// A batch assignment is preferred over its parent map node. The resolved lease
+// feeds the renewal deadline backstop, and a batch carries no ExecutionDeadline
+// while its parent does; resolving a batch's renewal to the parent would let
+// the parent's absolute deadline fire a timeout commit against an expansion
+// that is still making progress. The parent's deadline remains reachable
+// through its own lease while the map node itself is being executed.
+func (d *RedisRunnerDirectory) lookupRenewalLease(ctx context.Context, runnerID, sessionID string, key LeaseLookupKey, resolvedID string) (*engine.TaskLease, bool, error) {
+	if key.LeaseToken == "" && key.LeaseID == "" {
+		return nil, false, nil
 	}
-	return nil, false, nil
+	return d.walkLeasedAssignments(ctx, runnerID, func(candidate string) (*engine.TaskLease, leasedAssignmentVerdict, error) {
+		if candidate == resolvedID {
+			// The index already named this one and lookupLeaseAt refused it
+			// (wrong runner session, released, or expired metadata); it cannot
+			// resolve now either.
+			return nil, walkLeasedSkip, nil
+		}
+		token, err := d.rdb.HGet(ctx, d.keys.assignmentLeaseToken, candidate).Result()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			return nil, walkLeasedSkip, fmt.Errorf("lookup renewal lease token %q: %w", candidate, err)
+		}
+		leaseID, err := d.rdb.HGet(ctx, d.keys.assignmentLeaseID, candidate).Result()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			return nil, walkLeasedSkip, fmt.Errorf("lookup renewal lease id %q: %w", candidate, err)
+		}
+		if !leaseIdentityMatches(engine.LeaseToken(token), engine.LeaseID(leaseID), key) {
+			return nil, walkLeasedSkip, nil
+		}
+		lease, found, err := d.lookupLeaseAt(ctx, runnerID, sessionID, candidate)
+		if err != nil {
+			return nil, walkLeasedSkip, err
+		}
+		if !found {
+			return nil, walkLeasedSkip, nil
+		}
+		if lease.SubgraphPayload != nil {
+			return lease, walkLeasedTake, nil
+		}
+		return lease, walkLeasedKeep, nil
+	})
 }
 
 // lookupLeaseAt returns the finalized lease stored under assignmentID when it
@@ -1659,9 +1763,10 @@ func (d *RedisRunnerDirectory) lookupLeaseAt(ctx context.Context, runnerID, sess
 	return lease, true, nil
 }
 
-// RefreshLeaseMeta re-arms one finalized lease's metadata expiry.
+// RefreshLeaseMeta re-arms the metadata expiry of every live assignment the
+// runner holds under the key's lease identity.
 //
-// FinalizeClaim arms that expiry once, for the lease's own TTL plus one
+// FinalizeClaim arms each expiry once, for the lease's own TTL plus one
 // claim-recovery margin — about 90s for a default 60s lease — and nothing used
 // to extend it. A node that legitimately outlives that window then loses the
 // metadata its own renewals and reports are resolved through: LookupLease
@@ -1671,32 +1776,52 @@ func (d *RedisRunnerDirectory) lookupLeaseAt(ctx context.Context, runnerID, sess
 // extension so the directory expiry tracks the lease the engine actually
 // granted.
 //
+// A renewal key resolves to one assignment while a map node and its batches
+// share one identity, so refreshing only that assignment would let every
+// sibling's expiry drift to its finalized deadline while the engine lease keeps
+// being extended: the sibling's own next renewal then loses the metadata it is
+// resolved through and the batch is cancelled. The runner renews the same
+// target through any sibling, so one successful renewal must refresh them all.
+//
 // Absent metadata reports "expired" rather than an error: the lease is already
 // unrecoverable by then, and the renewal that led here has already succeeded,
 // so failing it would only widen the damage.
 func (d *RedisRunnerDirectory) RefreshLeaseMeta(ctx context.Context, runnerID, sessionID string, key LeaseLookupKey, live time.Duration) error {
-	assignmentID, ok, err := d.resolveLeaseAssignmentID(ctx, key)
-	if err != nil {
-		return err
-	}
-	if !ok {
+	if key.LeaseToken == "" && key.LeaseID == "" {
 		return nil
 	}
-	status, err := d.evalStatus(ctx, redisRefreshLeaseMetaLua, []string{
-		d.keys.assignmentState,
-		d.keys.assignmentRunner,
-		d.keys.assignmentSession,
-		d.keys.assignmentLeaseMetaKey(assignmentID),
-	}, assignmentID, runnerID, sessionID, strconv.FormatInt(d.assignmentLeaseMetaTTLMillisFor(live), 10))
-	if err != nil {
-		return fmt.Errorf("refresh redis lease metadata: %w", err)
-	}
-	switch status {
-	case "refreshed", "noop", "expired":
-		return nil
-	default:
-		return fmt.Errorf("refresh redis lease metadata: unexpected result %q", status)
-	}
+	ttl := strconv.FormatInt(d.assignmentLeaseMetaTTLMillisFor(live), 10)
+	_, _, err := d.walkLeasedAssignments(ctx, runnerID, func(candidate string) (*engine.TaskLease, leasedAssignmentVerdict, error) {
+		token, err := d.rdb.HGet(ctx, d.keys.assignmentLeaseToken, candidate).Result()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			return nil, walkLeasedSkip, fmt.Errorf("refresh lease metadata token %q: %w", candidate, err)
+		}
+		leaseID, err := d.rdb.HGet(ctx, d.keys.assignmentLeaseID, candidate).Result()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			return nil, walkLeasedSkip, fmt.Errorf("refresh lease metadata id %q: %w", candidate, err)
+		}
+		if !leaseIdentityMatches(engine.LeaseToken(token), engine.LeaseID(leaseID), key) {
+			return nil, walkLeasedSkip, nil
+		}
+		// The Lua re-checks state, runner and session, so a candidate that a
+		// release or re-register overtook is a no-op rather than an error.
+		status, err := d.evalStatus(ctx, redisRefreshLeaseMetaLua, []string{
+			d.keys.assignmentState,
+			d.keys.assignmentRunner,
+			d.keys.assignmentSession,
+			d.keys.assignmentLeaseMetaKey(candidate),
+		}, candidate, runnerID, sessionID, ttl)
+		if err != nil {
+			return nil, walkLeasedSkip, fmt.Errorf("refresh redis lease metadata: %w", err)
+		}
+		switch status {
+		case "refreshed", "noop", "expired":
+			return nil, walkLeasedSkip, nil
+		default:
+			return nil, walkLeasedSkip, fmt.Errorf("refresh redis lease metadata: unexpected result %q", status)
+		}
+	})
+	return err
 }
 
 // resolveLeaseAssignmentID resolves a finalized assignment ID from a lease

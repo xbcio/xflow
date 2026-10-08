@@ -176,7 +176,15 @@ func (f *fakeState) CommitNode(_ context.Context, req CommitNodeRequest) (Commit
 	}
 
 	if req.System {
-		if marker := f.atomicSchedule[fakeAtomicCounterKey(req.ExecutionID, req.NodeIdx)]; (req.Status == types.NodeStatusPinned) == (marker == "skip") {
+		// Same three legal shapes as the real backends' CommitNode fence:
+		// pinned without a skip marker (pin_data served on an execute-scheduled
+		// unit), skipped without one (a definition-disabled node), and skipped
+		// with one (the skip cascade).
+		marker := f.atomicSchedule[fakeAtomicCounterKey(req.ExecutionID, req.NodeIdx)]
+		skipMarked := marker == "skip"
+		pinned := req.Status == types.NodeStatusPinned
+		skipped := req.Status == types.NodeStatusSkipped
+		if (pinned && skipMarked) || (!pinned && !skipped && !skipMarked) {
 			return CommitNodeResult{Outcome: CommitOutcomeStaleToken}, nil
 		}
 		if current != nil && current.Status != types.NodeStatusPending {

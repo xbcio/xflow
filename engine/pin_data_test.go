@@ -147,39 +147,30 @@ func TestPinnedNode_TestOnlyFollowsTheExecutionFlag(t *testing.T) {
 	}
 }
 
-// TestPinnedNode_DisabledModeAndDisabledNodeRunForReal pins both precedence
-// rules: pin_data_mode=disabled and a disabled node each leave the node with no
-// pin, so it is leased like any other node.
-func TestPinnedNode_DisabledModeAndDisabledNodeRunForReal(t *testing.T) {
+// TestPinnedNode_DisabledModeRunsForReal pins the mode precedence rule:
+// pin_data_mode=disabled leaves the node with no pin, so it is leased like any
+// other node. The other precedence rule -- a disabled NODE -- now means the
+// node is served as skipped instead of being leased, and lives in
+// TestDisabledNode_BeatsPinData (engine/disabled_test.go).
+func TestPinnedNode_DisabledModeRunsForReal(t *testing.T) {
 	ctx := context.Background()
-	for _, tc := range []struct {
-		name     string
-		mode     string
-		disabled bool
-	}{
-		{name: "mode disabled", mode: types.PinDataModeDisabled},
-		{name: "node disabled", mode: types.PinDataModeAlways, disabled: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			g := compilePinChain(t, tc.mode, tc.disabled)
-			if g.PinDataMode() != "" {
-				t.Fatalf("PinDataMode() = %q, want none", g.PinDataMode())
-			}
-			if _, ok := g.PinnedOutput(0); ok {
-				t.Fatal("fetch carries a pin, want none")
-			}
-			state := newFakeState()
-			queue := &fakeQueue{}
-			eng := New(state, queue)
-			id, err := eng.Submit(WithTestRun(ctx, true), g, nil)
-			if err != nil {
-				t.Fatalf("Submit() error = %v", err)
-			}
-			lease, err := eng.BuildTaskLease(ctx, drainOne(t, ctx, eng, queue, id))
-			if err != nil || lease == nil {
-				t.Fatalf("BuildTaskLease = %v, %v; want a real lease", lease, err)
-			}
-		})
+	g := compilePinChain(t, types.PinDataModeDisabled, false)
+	if g.PinDataMode() != "" {
+		t.Fatalf("PinDataMode() = %q, want none", g.PinDataMode())
+	}
+	if _, ok := g.PinnedOutput(0); ok {
+		t.Fatal("fetch carries a pin, want none")
+	}
+	state := newFakeState()
+	queue := &fakeQueue{}
+	eng := New(state, queue)
+	id, err := eng.Submit(WithTestRun(ctx, true), g, nil)
+	if err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+	lease, err := eng.BuildTaskLease(ctx, drainOne(t, ctx, eng, queue, id))
+	if err != nil || lease == nil {
+		t.Fatalf("BuildTaskLease = %v, %v; want a real lease", lease, err)
 	}
 }
 

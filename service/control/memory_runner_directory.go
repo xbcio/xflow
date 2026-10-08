@@ -831,6 +831,10 @@ func (d *MemoryRunnerDirectory) ListRunners(_ context.Context) ([]string, error)
 // req.Lease.Namespace. ok=false means no finalized lease matches (not found,
 // already released, wrong runner/session, or token/leaseID mismatch); err is
 // non-nil only on internal failure.
+//
+// A key that names no task (a renewal) falls back to any live assignment of
+// this runner under the identity, preferring a batch over its parent map node
+// for the deadline-backstop reason in the Redis directory's lookupRenewalLease.
 func (d *MemoryRunnerDirectory) LookupLease(_ context.Context, runnerID, sessionID string, key LeaseLookupKey) (*engine.TaskLease, bool, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -854,18 +858,39 @@ func (d *MemoryRunnerDirectory) LookupLease(_ context.Context, runnerID, session
 		LeaseID:      key.LeaseID,
 		LeaseToken:   key.LeaseToken,
 	}
-	assignmentID, ok := state.resolveAssignmentID(req)
-	if !ok {
-		return nil, false, nil
+	assignmentID, resolved := state.resolveAssignmentID(req)
+	if resolved {
+		if current, live := state.finalizedLease[assignmentID]; live && matchesReleasedLease(current, req) && (key.NodeName == "" || key.namesTask(&current.Task)) {
+			lease := current
+			return &lease, true, nil
+		}
 	}
-	current, ok := state.finalizedLease[assignmentID]
-	if ok && matchesReleasedLease(current, req) && (key.NodeName == "" || key.namesTask(&current.Task)) {
-		lease := current
-		return &lease, true, nil
+	if key.NodeName == "" {
+		// A renewal names no task. Map batches share their parent's lease
+		// identity while the indexes hold one assignment per identity, so fall
+		// back to any live assignment this runner holds under the same
+		// identity, preferring a batch over its parent map node (see the Redis
+		// directory's lookupRenewalLease for why the parent must not win).
+		var fallback *engine.TaskLease
+		for _, candidate := range state.finalizedLease {
+			if !leaseIdentityMatches(candidate.LeaseToken, candidate.LeaseID, key) {
+				continue
+			}
+			lease := candidate
+			if lease.SubgraphPayload != nil {
+				return &lease, true, nil
+			}
+			if fallback == nil {
+				fallback = &lease
+			}
+		}
+		return fallback, fallback != nil, nil
 	}
 	// Map batches share their parent's lease identity; find the one this key
-	// names (see LeaseLookupKey).
-	if key.NodeName == "" || key.LeaseToken == "" {
+	// names (see LeaseLookupKey). A task-naming key the identity resolver could
+	// not place is refused here rather than guessed among its siblings, and the
+	// report path always carries the token.
+	if !resolved || key.LeaseToken == "" {
 		return nil, false, nil
 	}
 	for _, sibling := range state.finalizedLease {
