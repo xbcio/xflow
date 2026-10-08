@@ -33,6 +33,11 @@ const (
 	// engine refused its token at commit. This is the only reason that is
 	// evidence of the two lease views disagreeing.
 	ReportRejectedEngineStaleToken = "engine_stale_token"
+	// ReportRejectedGroupResultMissing: the report targets a group-exec lease
+	// but carries no GroupResult, so there is no valid commit path for it
+	// (see ErrGroupResultMissing). Not an engine rejection — the report never
+	// reaches the engine.
+	ReportRejectedGroupResultMissing = "group_result_missing"
 )
 
 // ReportRejectionObserver receives one event per rejected runner result report.

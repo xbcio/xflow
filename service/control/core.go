@@ -40,6 +40,17 @@ var (
 	ErrInvalidCapability     = errors.New("invalid runner capability")
 	ErrRunnerNotFound        = errors.New("runner not found")
 	ErrLeaseRequired         = errors.New("runner_id, session_id and lease are required")
+	// ErrGroupResultMissing is returned when a report for a group-exec lease
+	// carries no GroupResult. A group unit leases through its own group-scoped
+	// state, never through its entry node's, so there is nothing for the
+	// ordinary node commit path (CommitTaskResultWithOutcome) to fence against
+	// correctly; the only valid commit path for a group lease is
+	// commitGroupResult, which requires a GroupResult. Rejecting this
+	// explicitly — rather than falling through to the node path, which
+	// CommitTaskResultWithOutcome itself now refuses with the engine-internal
+	// ErrGroupLeaseNotSupported — lets the runner see a clear, actionable
+	// error instead of a generic 500.
+	ErrGroupResultMissing = errors.New("group lease reported with no group result")
 	ErrEngineNotConfigured   = errors.New("engine not configured")
 	ErrUnauthenticated       = errors.New("unauthenticated")
 	// ErrStaleGeneration is returned when an entry seed carries an activation
@@ -1315,9 +1326,23 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 
 	var outcome engine.CommitOutcome
 	var err error
-	if req.GroupResult != nil && isGroupTask(&authoritativeLease.Task) {
+	switch {
+	case isGroupTask(&authoritativeLease.Task) && req.GroupResult == nil:
+		// Reject before ever reaching the engine. The node commit path
+		// (CommitTaskResultWithOutcome) now refuses a group lease outright
+		// (022bcfc, ErrGroupLeaseNotSupported) rather than fencing a node that
+		// never leased, but its zero-value outcome deliberately does not
+		// release capacity -- that guard protects the engine's own contract,
+		// it is not this path's error-reporting layer. Classify explicitly
+		// here instead: CommitOutcomeStaleToken already means "release leased
+		// capacity, do not treat as duplicate-accepted" (ReleasesLeasedCapacity,
+		// RemoveSeen below), which is exactly the immediate-release behavior
+		// this report had before 022bcfc sharpened the prior accidental
+		// stale-token misclassification into a hard refusal.
+		outcome, err = engine.CommitOutcomeStaleToken, ErrGroupResultMissing
+	case req.GroupResult != nil && isGroupTask(&authoritativeLease.Task):
 		outcome, err = c.commitGroupResult(ctx, authoritativeLease, *req.GroupResult)
-	} else {
+	default:
 		outcome, err = c.engine.CommitTaskResultWithOutcome(ctx, authoritativeLease, req.Result)
 	}
 	if err != nil {
@@ -1345,6 +1370,10 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 			if directoryStillResolved {
 				c.observeReportDivergence(ctx)
 			}
+			return protocol.ReportResultResponse{Accepted: false, Error: err.Error()}, err
+		}
+		if errors.Is(err, ErrGroupResultMissing) {
+			c.observeReportRejected(ctx, ReportRejectedGroupResultMissing)
 			return protocol.ReportResultResponse{Accepted: false, Error: err.Error()}, err
 		}
 		return protocol.ReportResultResponse{}, normalizeRunnerError(err, c.logger, "report_result")
@@ -1556,6 +1585,7 @@ func normalizeRunnerError(err error, logger engine.Logger, op string) error {
 		errors.Is(err, ErrRunnerSessionStale),
 		errors.Is(err, ErrRunnerIDConflict),
 		errors.Is(err, ErrMissingWorkflowVersion),
+		errors.Is(err, ErrGroupResultMissing),
 		errors.Is(err, engine.ErrInvalidLeaseToken):
 		return err
 	default:
