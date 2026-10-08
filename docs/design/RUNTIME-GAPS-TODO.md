@@ -8,8 +8,14 @@ Node Group 组级 `on_error`、gRPC `AckActivation`、G1 clean-SHA 重签 `c39a2
 `fd5d8e9` 共 48 个 commit，含并入的 main 提交 `786835a` 与 merge 提交 `e1486ce`）
 关闭了原条目 1–6、9（配置面）、12（工具面）、13、14，以及同期新登记的 gRPC 组
 结果传输缺口与组失败上报缺口；新登记的另外三处（`disabled` 的运行时消费者、组
-结果失败成员的对外类型、map batch 续期的目录元数据）仍然开放。条目已按体例重排
-编号，旧号保留在「已关闭」条目的括注里。
+结果失败成员的对外类型、map batch 续期的目录元数据）当时仍然开放。条目已按体例
+重排编号，旧号保留在「已关闭」条目的括注里。
+
+2026-10-08 第三轮收口（分支 `fix/runtime-gaps-remainder`，自 `3833377`；截至本提交
+共 9 个 commit）关闭了第二轮新登记的三处（本轮编号 1、6、8）：`disabled` 的运行时
+语义、组结果失败成员的对外类型、map batch 续期的目录元数据。条目已再次重排编号，
+旧号保留在「已关闭」条目的括注里；本轮验证同时登记了两处新缺口（见 P3），剩余条目
+均为功能缺口或需要真实环境/人工裁定。
 
 每条都写明出处：缺口本身的现状说明留在所属设计文档里，这里只记「打算改的东西」。
 关闭一条时，把它移到文末「已关闭」并写上 commit。
@@ -20,67 +26,103 @@ Node Group 组级 `on_error`、gRPC `AckActivation`、G1 clean-SHA 重签 `c39a2
 
 ## 待办
 
-### P1 — 会造成重复执行、静默失效或发布门不稳
-
-1. **`disabled` 节点没有运行时消费者。** `NodeDef.Disabled` 在非测试代码里只有三处
-   读取：`execution/param_validation.go` 只跳过参数校验、`backend/workflowhash` 只让
-   它参与哈希、`engine/graph/pin_data.go` 只在 pin 语境下发一条告警。
-   [DSL-SPECIFICATION.md](./DSL-SPECIFICATION.md) §3.1「节点禁用行为」承诺的语义
-   （编译后变 `skipped`、计为完成、下游读 nil、保留边）均未实现——disabled 节点照样
-   真实执行。要么实现运行时语义，要么在 DSL 面显式拒绝，避免静默失效。（§7.3 已
-   注明未实现。）
-
 ### P2 — 功能不完整，现有部署可绕开
 
-2. **runner 的 Runner Protocol HTTP 传输不走环境代理。** 可重载 transport 有意置空
+1. **runner 的 Runner Protocol HTTP 传输不走环境代理。** 可重载 transport 有意置空
    `Proxy`（经代理的 HTTPS 隧道会绕过可重载 CA 池，`0551269`）。必须经 HTTP 代理
    访问控制面的部署目前无法使用；需要的话改为自建 CONNECT 隧道并在隧道上用实时 CA
    握手。附注：出站代理行为目前不一致——gRPC 传输默认读环境代理，静态客户端装 TLS 时
    不走代理。
 
-3. **entry-seed 托管只支持 Kafka。** 其他 trigger 类型接到 entry-seed 路径上会
+2. **entry-seed 托管只支持 Kafka。** 其他 trigger 类型接到 entry-seed 路径上会
    fail-closed（[NODE-GROUP-COLOCATION.md](./NODE-GROUP-COLOCATION.md)「Non-Kafka
    trigger types are fail-closed」一条）。
 
-4. **pull 模式的 `xflow.supply.http` 未实现。** runner 主动按计划拉取 supply 的路径
+3. **pull 模式的 `xflow.supply.http` 未实现。** runner 主动按计划拉取 supply 的路径
    不存在，只能用 `xflow.supply.external` / `static`
    （[DSL-SPECIFICATION.md](./DSL-SPECIFICATION.md) Supply 一节已标记「尚未实现，
    不要在 DSL 里使用」）。
 
-5. **子工作流复用（`xflow.subworkflow`）未实现。**
+4. **子工作流复用（`xflow.subworkflow`）未实现。**
    [DSL-SPECIFICATION.md](./DSL-SPECIFICATION.md) §6.4 标为「计划扩展，当前版本未实现」。
-
-6. **`types.GroupExecResult` 没有失败成员名的承载字段。** 触发路径的
-   `groupExecTriggerRuntime.ExecuteGroup` 从 `subgraph.Result` 拿得到完整分类（含
-   `FailedMember`），但对外类型装不下，Kafka 批量消费端拿不到失败成员名
-   （`service/runner/group_exec_trigger_runtime.go` 注释自述）。修法：给
-   `GroupExecResult` 补承载字段，或把失败分类并入 `Error` 的结构化载荷。
 
 ### P3 — 已知限制，记录在案
 
-7. **ADR-D4 刻意延后的两项：** 草稿与发布分离（`WorkflowDraft`）、定义版本历史
+5. **ADR-D4 刻意延后的两项：** 草稿与发布分离（`WorkflowDraft`）、定义版本历史
    （`WorkflowDefinitionVersion`）。见
    [ADR-D4-runtime-editor-metadata-split.md](./ADR-D4-runtime-editor-metadata-split.md)。
 
-8. **map batch 的租约续期仍走单值索引。** `LeaseLookupKey` 的 NodeName/NodeIdx 只在
-   汇报路径填充（2026-10-08 的 D2 修复），续期路径不带——map 节点与其 batch 落在同一
-   runner 上时，batch 的续期可能解析到父或兄弟 assignment；共享同一 lease 使引擎侧
-   续期目标相同，但 `RefreshLeaseMeta` 只刷新被解析 assignment 的元数据 TTL，长跑
-   batch 的目录元数据可能提前过期。未深入分析。彻底修法需要续期也携带任务定位
-   （协议变更），或给 batch 独立租约身份。
+6. **两个目录后端的租约解析围栏不一致**（2026-10-08 第三轮收口验证新登记）。
+   (i) Redis 在 by-token 未命中、by-id 命中时不校验存储 token，memory 校验：持有
+   正确 leaseID 但 token 不匹配的请求（同一 runner+session）在 Redis 上解析到该
+   租约、memory 上被拒；此形态在 P3-8 修复前后一致（修复两个版本都以 scratch 测试
+   确认 `found=true`，pre-existing）。修法方向是解析命中后补存储 token 对比，但需
+   先确认「按 leaseID 解析」的既有调用方都携带 token 且不依赖该放行。(ii) memory
+   的租约记录不含会话，重新注册后旧会话 finalize 的租约对新会话仍可解析，Redis 按
+   `assignmentSession` 拒绝——目标语义未裁定，可达性未分析。两条均未深入分析、
+   未实现。
+
+7. **续期刷新的按身份走查有成本**（2026-10-08 第三轮收口随 P3-8 修复引入）。每次
+   成功续期从 1 次 Lua 变为对 runner 全部活跃分配的一次走查（每个候选约 4 次未
+   pipeline 的往返 + 每次身份命中 1 次 Lua；per-runner 索引短于 `runnerLeaseCount`
+   时还要全量 `HGetAll`）。walker 不像 `replayLease` 那样在确认 live 后回填索引，
+   短索引会持续触发全表扫直到下一次 poll 顺势修复。成本影响面未量化（本机无真实
+   Redis）。建议：pipeline HGET，或在第二趟确认 live 时回填索引；验证判定风险中。
 
 ### 需要真实环境或人工批准，不能靠改代码关闭
 
-9. **G2：多副本 control-plane HA soak 与真实多 namespace 隔离验收。** 要求见
+8. **G2：多副本 control-plane HA soak 与真实多 namespace 隔离验收。** 要求见
     [RELEASE-GATES.md](./RELEASE-GATES.md) 的 G2 定义；`make test-soak` 不是该证据
     （见 README 的说明）。
 
-10. **RELEASE-GATES §6 的 D1–D8** 全部为「OPEN — 未批准」，需要对应负责人裁定。
+9. **RELEASE-GATES §6 的 D1–D8** 全部为「OPEN — 未批准」，需要对应负责人裁定。
 
-11. **KEK 轮换（`xflow supply reseal`）与 server/runner 凭据热加载都没有在真实环境
+10. **KEK 轮换（`xflow supply reseal`）与 server/runner 凭据热加载都没有在真实环境
     演练过**，runbook 的 owner 与期限属于 D6。
 
 ## 已关闭
+
+- **`disabled` 节点没有运行时消费者**（2026-10-08 第二轮收口期间新登记）—— `1aa019e`、
+  `55e8c46`、`35892ec`、`f568a82`（2026-10-08）：编译期 `assignDisabledNodes` 把
+  `NodeMeta.Disabled` 标记进图（参与图哈希），六类引擎无法拦截的形态（trigger、
+  supply、co-location 组成员、body 成员、allow_cycles、faf）由静默真实执行改为
+  编译报错；运行时 `handleDisabledNode` 拦截 disabled 节点的 `TaskTypeNodeExec`
+  任务，以系统提交原子落 `skipped` + 端口 `main` 并推进下游（不签发租约，下游照常
+  调度、读到 nil）；系统围栏（rstate Lua 与 local 后端）新增第三种合法形态——
+  无 skip 标记的 execute 单元上的 `skipped`（contract 用例
+  `runDisabledNodeSkippedOnExecuteUnit` 覆盖）；pin 与 disabled 同配时 disabled
+  优先（编译告警）；DSL-SPECIFICATION §3.1/§7.5 已重写（去掉「尚未实现」横幅）。
+  独立复核（verifier-remainder）：PASS、0 阻断；4 处 mutation 验证（图标记调用点、
+  rstate 与 local 两端围栏、engine 端口）。非阻断遗留：`Graph.UnmarshalJSON` 不
+  复核 disabled 形态合法性；`compile.go` 重复调用 `assignPinData` 造成告警文本
+  重复（既有，非本 diff）；三条可选测试空白（保留边的直接边数断言、混合 fan-in、
+  wait_any 与 disabled 同图）。
+
+- **`types.GroupExecResult` 没有失败成员名的承载字段**（2026-10-08 第二轮收口期间
+  新登记）—— `1e0ebd4`（2026-10-08）：对外类型补 `FailedMember`（普通节点名；
+  环境性失败或组整体未跑时为空，仅 `Outcome != "success"` 时有意义），runner 的
+  `ExecuteGroup` 从 `subgraph.Result` 拷贝，Kafka 批量消费端拿到失败成员名；
+  types/runner/kafka 测试同步更新，mutation 验证。
+
+- **map batch 的租约续期仍走单值索引**（2026-10-08 第二轮收口期间新登记）——
+  `5c07169`、`7f288c2`（2026-10-08）：侦察更正了本条登记时的判断——续期受损不要求
+  父子同 runner（索引可指向另一个 runner 的分配或已释放的分配），后果也更重：续期
+  被拒（`lease not found`）后 runner 在首个续期 tick（min(TTL/3, 10s)）取消健康
+  batch；另一条路径是 `RefreshLeaseMeta` 只刷新被解析的 assignment，共享身份下其余
+  分配的目录元数据在 finalize 时的窗口（TTL + 回收余量，默认约 90s）到期后再也无法
+  续期。修法（服务端，无协议变更——本条登记时设想的协议补 NodeName 或 batch 独立
+  身份均不需要）：索引未命中时按身份回退到本 runner 的活跃分配集合（per-runner
+  索引，短于 `runnerLeaseCount` 时补扫全状态哈希），且优先解析到 batch
+  （`SubgraphPayload != nil`）——解析出的租约喂给 `group_control_loop` 的续期
+  deadline 兜底，只有父 map 节点的租约带 `ExecutionDeadline`，解析到父会让仍在推进
+  的 batch 续期触发父的超时提交；`RefreshLeaseMeta` 改为刷新身份下本 runner 的全部
+  活跃分配。Redis 与 memory 双侧，20 个新测试（含全链路续期与 deadline 用例，
+  以及跨 runner、过期会话、错误 token、refresh 作用域、短索引补扫、batch 释放后
+  回落父节点 6 类围栏反例，后者 `3093295`）；7 处 mutation 验证（回退两处 fallback、
+  反转两种后端的 batch 偏好、只刷新一个分配、砍掉 walker 第二趟、丢掉 refresh
+  身份过滤，各自转红）。独立复核（verifier）：PASS、0 阻断（围栏反例与 mutation
+  在 `/tmp` 副本复核，未动工作树）；两条非阻断发现已登记为待办 6、7。未验证：
+  真实 Redis 契约（与 P1-3/P1-4 同口径，miniredis + memory 覆盖）。
 
 - **gRPC 传输不续租约**（原 P1-1）—— `f11425c`（2026-10-08）：`runner.proto` 加
   `RenewLease` RPC 与 `RenewLeaseRequest/Response`（deadline 用 unix nano），服务端
@@ -111,7 +153,7 @@ Node Group 组级 `on_error`、gRPC `AckActivation`、G1 clean-SHA 重签 `c39a2
   `engine.Task.ActivationID/AutoDepth` 是 `json:"-"`，从 echo 的 lease 重建的
   AssignmentID 与入队侧从不相等的（Invoke 起的执行全 activation>0），汇报路由此前
   完全依赖 token 单值索引。未验证：真环境 e2e（本机无 podman/MySQL，对照实验未跑）。
-  遗留见 P3-8（renew 路径）。
+  遗留的 renew 路径已由第三轮收口关闭（见文末 map batch 续期条目）。
 
 - **`pin_data` / `settings.pin_data_mode` 没有运行时消费者**（原 P1-4）—— `43624e6`、
   `24289a9`、`35bb063`、`9483af8`、`17e3cb4`、`f77f5c3`、`b2f9e60`、`28158e4`
