@@ -421,6 +421,7 @@ func transientExecutionKeys(t namespace.Namespace, id types.ExecutionID, g *grap
 		execKey(t, id, "trace_id"),
 		execKey(t, id, "span_id"),
 		execKey(t, id, "trace_carrier"),
+		execKey(t, id, "test_run"),
 		// NOTE: the transient marker is deliberately ABSENT from this list.
 		//
 		// It used to be included, so that completion shortened the marker along

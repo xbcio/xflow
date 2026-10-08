@@ -316,7 +316,7 @@ if effectivePrivate == 1 then
     redis.call('EXPIRE', KEYS[3], ttl)
 end
 local existing = redis.call('GET', KEYS[1])
-if existing == 'success' or existing == 'failed' or existing == 'skipped' or existing == 'canceled' or existing == 'continued' then
+if existing == 'success' or existing == 'failed' or existing == 'skipped' or existing == 'canceled' or existing == 'continued' or existing == 'pinned' then
     local oldActivation = tonumber(redis.call('HGET', KEYS[3], 'activation_id') or '0')
     local newActivation = tonumber(ARGV[4] or '0')
     if newActivation <= oldActivation then
@@ -357,7 +357,7 @@ if expectedActivation > 0 then
         return {0, status}
     end
 end
-if status == 'success' or status == 'failed' or status == 'skipped' or status == 'canceled' or status == 'continued' then
+if status == 'success' or status == 'failed' or status == 'skipped' or status == 'canceled' or status == 'continued' or status == 'pinned' then
     redis.call('ZREM', KEYS[3], ARGV[4])
     return {1, status}
 end
@@ -383,7 +383,7 @@ return {1, 'committing'}
 // Returns {committed, signal name, signal payload JSON, multi-payload JSON}.
 var suspendTaskLeaseLua = redis.NewScript(`
 local terminal = function(value)
-    return value == 'success' or value == 'failed' or value == 'skipped' or value == 'canceled' or value == 'continued'
+    return value == 'success' or value == 'failed' or value == 'skipped' or value == 'canceled' or value == 'continued' or value == 'pinned'
 end
 if redis.call('GET', KEYS[1]) ~= 'committing' then
     return {0, '', '', ''}
@@ -498,7 +498,7 @@ if taskActivation > 0 and prevActivation > taskActivation then
 	return {0, status or '', prevAttempt, prevActivation, prevAutoDepth, prevLeaseToken, prevIssuedAtMs, prevLeaseTTLms}
 end
 
-if status == 'success' or status == 'failed' or status == 'skipped' or status == 'canceled' or status == 'continued' then
+if status == 'success' or status == 'failed' or status == 'skipped' or status == 'canceled' or status == 'continued' or status == 'pinned' then
 	if taskActivation <= 0 or prevActivation >= taskActivation then
 		return {0, status, prevAttempt, prevActivation, prevAutoDepth, prevLeaseToken, prevIssuedAtMs, prevLeaseTTLms}
 	end
@@ -614,7 +614,7 @@ local status = redis.call('GET', KEYS[1])
 if not status then
     return 0
 end
-if status == 'success' or status == 'failed' or status == 'skipped' or status == 'canceled' or status == 'continued' then
+if status == 'success' or status == 'failed' or status == 'skipped' or status == 'canceled' or status == 'continued' or status == 'pinned' then
     redis.call('ZREM', KEYS[3], ARGV[2])
     return 0
 end
@@ -676,7 +676,7 @@ for i = 2, #KEYS do
     local ns = redis.call('GET', KEYS[i])
     if ns == 'failed' then
         anyFailed = true
-    elseif ns ~= 'success' and ns ~= 'skipped' and ns ~= 'canceled' and ns ~= 'continued' then
+    elseif ns ~= 'success' and ns ~= 'skipped' and ns ~= 'canceled' and ns ~= 'continued' and ns ~= 'pinned' then
         return 0
     end
 end

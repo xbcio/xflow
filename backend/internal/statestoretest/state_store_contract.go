@@ -36,6 +36,7 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 		Params:  map[string]any{"claim_id": "c-1", "retry_budget": float64(2)},
 		Runtime: &types.Runtime{Vars: map[string]any{"namespace_id": "namespace-a"}},
 		Scope:   map[string]any{"$index": float64(3)},
+		TestRun: true,
 	}); err != nil {
 		t.Fatalf("CreateExecution() error = %v", err)
 	}
@@ -74,6 +75,12 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 	// memory backend and fail on Redis for a reason unrelated to the contract.
 	if snap.Scope["$index"] != float64(3) {
 		t.Fatalf("Scope = %#v, want $index 3", snap.Scope)
+	}
+	// TestRun is what settings.pin_data_mode: test_only reads to decide whether
+	// pin_data applies. A backend that drops it runs every pinned node for real
+	// in a test run, with no error anywhere.
+	if !snap.TestRun {
+		t.Fatalf("TestRun = false, want true: test_only pin_data is gated on this flag")
 	}
 
 	loaded, err := state.LoadGraph(ctx, id)
@@ -242,6 +249,7 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 	runCancelSuspendedNode(t, state)
 	runExecutionStatusAgreesWithSnapshot(t, state)
 	runCommitNodeAgainstMissingExecution(t, state)
+	runPinnedNodeIsTerminal(t, state)
 }
 
 // runExecutionStatusAgreesWithSnapshot pins that the narrow status read and the
@@ -702,6 +710,9 @@ func runExecutionErrorRoundTrip(t *testing.T, state engine.StateStore) {
 	if snap.Error != "" {
 		t.Fatalf("ExecutionSnapshot.Error = %q on a successful execution, want empty", snap.Error)
 	}
+	if snap.TestRun {
+		t.Fatalf("ExecutionSnapshot.TestRun = true on an execution created without it")
+	}
 }
 
 // ContractGraph returns the two-node graph used by RunStateStoreContract.
@@ -913,5 +924,117 @@ func runCommitNodeAgainstMissingExecution(t *testing.T, state engine.StateStore)
 	if res.Applied {
 		t.Errorf("CommitNode(missing execution).Applied = true: the commit was written "+
 			"against an execution record that does not exist (outcome %q)", res.Outcome)
+	}
+}
+
+// runPinnedNodeIsTerminal pins the backend half of pin_data: the engine serves
+// a pinned node through a System commit carrying NodeStatusPinned, the mock
+// output and the downstream advance, without ever issuing a lease.
+//
+// Every backend must accept that commit on a unit that has no skip marker
+// (the system fence used to accept only skip cascades), store the output where
+// downstream input resolution reads it, and from then on treat "pinned" as
+// terminal: a redelivered pin is a duplicate, a late skip cascade is stale, and
+// a running upsert does not resurrect the node. A backend whose terminal
+// predicates miss "pinned" would re-run the node for real on redelivery.
+func runPinnedNodeIsTerminal(t *testing.T, state engine.StateStore) {
+	t.Helper()
+	ctx := context.Background()
+	atomic, ok := state.(engine.AtomicStateStore)
+	if !ok {
+		t.Fatalf("%T does not implement engine.AtomicStateStore", state)
+	}
+	id := types.ExecutionID("exec-contract-pinned")
+	g := ContractGraph()
+	if err := state.CreateExecution(ctx, &engine.ExecutionSnapshot{
+		ID:     id,
+		Graph:  g,
+		Status: types.ExecutionStatusRunning,
+	}); err != nil {
+		t.Fatalf("CreateExecution(pinned) error = %v", err)
+	}
+	startIdx, _ := g.NodeIndex("start")
+	unitIdx := g.UnitIndexForNode(startIdx)
+	port := "main"
+	mock := map[string]any{"order_id": "o-1"}
+	pin := engine.CommitNodeRequest{
+		ExecutionID: id,
+		NodeName:    "start",
+		NodeIdx:     startIdx,
+		UnitIdx:     unitIdx,
+		Status:      types.NodeStatusPinned,
+		Output:      mock,
+		StoreOutput: true,
+		Port:        port,
+		System:      true,
+		AdvanceTask: &engine.Task{
+			ExecutionID: id,
+			NodeName:    "start",
+			NodeIdx:     startIdx,
+			UnitIdx:     unitIdx,
+			Type:        engine.TaskTypeNodeAdvance,
+			Port:        &port,
+		},
+	}
+	res, err := atomic.CommitNode(ctx, pin)
+	if err != nil {
+		t.Fatalf("CommitNode(pinned) error = %v", err)
+	}
+	if res.Outcome != engine.CommitOutcomeAccepted || !res.Applied {
+		t.Fatalf("CommitNode(pinned) = %+v, want accepted and applied: the system "+
+			"fence must admit a pinned commit on a unit without a skip marker", res)
+	}
+	ns, err := state.GetNode(ctx, id, "start")
+	if err != nil {
+		t.Fatalf("GetNode(pinned) error = %v", err)
+	}
+	if ns == nil || ns.Status != types.NodeStatusPinned {
+		t.Fatalf("GetNode(pinned) = %+v, want status pinned", ns)
+	}
+	out, err := state.GetOutput(ctx, id, "start")
+	if err != nil {
+		t.Fatalf("GetOutput(pinned) error = %v", err)
+	}
+	if out["order_id"] != "o-1" {
+		t.Fatalf("GetOutput(pinned) = %#v, want the mock output", out)
+	}
+
+	res, err = atomic.CommitNode(ctx, pin)
+	if err != nil {
+		t.Fatalf("CommitNode(pinned again) error = %v", err)
+	}
+	if res.Applied || res.Outcome == engine.CommitOutcomeAccepted {
+		t.Fatalf("CommitNode(pinned again) = %+v, want a non-applied refusal: "+
+			"pinned is terminal", res)
+	}
+	res, err = atomic.CommitNode(ctx, engine.CommitNodeRequest{
+		ExecutionID: id,
+		NodeName:    "start",
+		NodeIdx:     startIdx,
+		UnitIdx:     unitIdx,
+		Status:      types.NodeStatusSkipped,
+		System:      true,
+	})
+	if err != nil {
+		t.Fatalf("CommitNode(skip after pin) error = %v", err)
+	}
+	if res.Applied {
+		t.Fatalf("CommitNode(skip after pin) applied (%+v): a skip must not overwrite "+
+			"a pinned node", res)
+	}
+	if err := state.UpsertNode(ctx, &engine.NodeSnapshot{
+		ExecutionID: id,
+		Name:        "start",
+		NodeIdx:     startIdx,
+		Status:      types.NodeStatusRunning,
+	}); err != nil {
+		t.Fatalf("UpsertNode(running after pin) error = %v", err)
+	}
+	ns, err = state.GetNode(ctx, id, "start")
+	if err != nil {
+		t.Fatalf("GetNode(after upsert) error = %v", err)
+	}
+	if ns == nil || ns.Status != types.NodeStatusPinned {
+		t.Fatalf("pinned node overwritten by a running upsert: %+v", ns)
 	}
 }
