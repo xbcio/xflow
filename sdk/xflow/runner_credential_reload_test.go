@@ -630,6 +630,9 @@ func newCredReloadOriginServer(t *testing.T, serverLeaf tls.Certificate, clientC
 		case r.URL.Path == "/v1/executions":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"state":"accepted","execution_id":"exec-1"}`))
+		case r.URL.Path == protocol.HeartbeatPath:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
 		case r.URL.Path == "/v1/artifacts/"+store.ContentHash(artifact):
 			w.Header().Set("Content-Type", "application/octet-stream")
 			_, _ = w.Write(artifact)
@@ -935,6 +938,86 @@ func TestNewRunnerHandsItsReloaderToTheOriginClients(t *testing.T) {
 	if tracked != 3 {
 		t.Fatalf("reloader tracks %d transports, want 3: the artifact client was not built over it", tracked)
 	}
+}
+
+// TestRunnerReloadRotatesTheLiveRunnerEndToEnd drives the rotation through
+// NewRunner and Runner.Reload rather than through the reloader directly, so
+// it pins Reload's own wiring: handing the new token to the protocol client,
+// and closing the idle keep-alive connections of every HTTP client built over
+// the reloader. Removing either from Reload turns this red — the protocol
+// client would keep sending token-a, or reuse the connection established
+// under client-a's certificate.
+func TestRunnerReloadRotatesTheLiveRunnerEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	serverCA, serverCAPEM, serverCAKey := generateCredReloadTestCA(t, "e2e server CA")
+	clientCA, _, clientCAKey := generateCredReloadTestCA(t, "e2e client CA")
+	serverCAPath := writeCredReloadPEM(t, filepath.Join(dir, "server-ca.pem"), serverCAPEM)
+	certA, keyA := filepath.Join(dir, "a.crt"), filepath.Join(dir, "a.key")
+	writeCredReloadClientLeaf(t, clientCA, clientCAKey, "client-a", certA, keyA)
+	certB, keyB := filepath.Join(dir, "b.crt"), filepath.Join(dir, "b.key")
+	writeCredReloadClientLeaf(t, clientCA, clientCAKey, "client-b", certB, keyB)
+
+	srv, calls := newCredReloadOriginServer(t, issueCredReloadServerLeaf(t, serverCA, serverCAKey), clientCA, nil)
+	defer srv.Close()
+
+	cfg := RunnerConfig{
+		ServerURL:        srv.URL,
+		RunnerID:         "e2e",
+		Token:            "token-a",
+		TLSServerCA:      serverCAPath,
+		TLSClientCert:    certA,
+		TLSClientKey:     keyA,
+		ArtifactCacheDir: t.TempDir(),
+	}
+	r, err := NewRunner(cfg)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	defer r.Close()
+	protoClient, ok := r.protocolClient.(*protocol.Client)
+	if !ok {
+		t.Fatalf("protocol client = %T, want *protocol.Client", r.protocolClient)
+	}
+	hostClient, err := r.ControlPlaneHTTPClient(cfg, 5*time.Second)
+	if err != nil {
+		t.Fatalf("ControlPlaneHTTPClient: %v", err)
+	}
+
+	// exercise sends one heartbeat through the protocol client and one
+	// request through the host client, and returns what the server saw.
+	exercise := func() []originCall {
+		t.Helper()
+		before := len(calls())
+		if _, err := protoClient.Heartbeat(context.Background(), protocol.HeartbeatRequest{RunnerID: "e2e"}); err != nil {
+			t.Fatalf("heartbeat: %v", err)
+		}
+		resp, err := hostClient.Post(srv.URL+protocol.HeartbeatPath, "application/json", strings.NewReader(`{}`))
+		if err != nil {
+			t.Fatalf("host client request: %v", err)
+		}
+		_ = resp.Body.Close()
+		return calls()[before:]
+	}
+	check := func(round string, got []originCall, wantCN, wantToken string) {
+		t.Helper()
+		if len(got) != 2 {
+			t.Fatalf("%s: server saw %d requests, want 2", round, len(got))
+		}
+		for i, c := range got {
+			if c.cn != wantCN || c.auth != "Bearer "+wantToken {
+				t.Errorf("%s: request %d presented CN %q with %q, want CN %q with %q",
+					round, i, c.cn, c.auth, wantCN, "Bearer "+wantToken)
+			}
+		}
+	}
+
+	check("before Reload", exercise(), "client-a", "token-a")
+	if err := r.Reload(CredentialReloaderSource{
+		Token: "token-b", TLSServerCA: serverCAPath, TLSClientCert: certB, TLSClientKey: keyB,
+	}); err != nil {
+		t.Fatalf("Runner.Reload: %v", err)
+	}
+	check("after Runner.Reload", exercise(), "client-b", "token-b")
 }
 
 // TestRunnerReloadRefusesToWeakenServerVerification pins the fail-closed rule
