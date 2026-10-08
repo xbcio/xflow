@@ -437,6 +437,12 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	if cfg.Metrics != nil {
 		dispatcherOpts = append(dispatcherOpts, WithDispatcherObserver(metrics.NewDispatcherMetrics(cfg.Metrics)))
 	}
+	// The dispatcher's lost-task log is rate-limited internally; without a
+	// logger a task dropped for a vanished execution would be counted but never
+	// readable in logs, which is half of what makes the drop visible.
+	if cfg.Logger != nil {
+		dispatcherOpts = append(dispatcherOpts, WithDispatcherLogger(cfg.Logger))
+	}
 	dispatcher := NewDispatcher(eng, runners, dispatcherOpts...)
 
 	var serverOpts []ServerOption

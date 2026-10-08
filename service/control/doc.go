@@ -111,6 +111,24 @@
 //     check elector.IsLeader() before performing global mutations in a
 //     background loop.
 //
+//   - HandleTask's inactive-execution branch has five dispositions, and they
+//     are not interchangeable: a classified "gone" execution (no state, no
+//     terminal marker, and the delivery's measured age inside the retention
+//     window) is a window-bounded loss claim and must return a permanent error
+//     so the transport archives instead of acking; "unattributed" (no evidence
+//     but the age exceeded the window, or no stamp to measure it) is neither loss nor
+//     health and also returns a permanent error, but is counted and logged
+//     separately so it is not paged as loss; a "terminal" verdict is a benign
+//     late duplicate and returns nil; the bare ErrExecutionInactive sentinel
+//     (with engine.Engine, a node-level stale route) also returns nil; and
+//     "classify_error" (a classification read failed) is counted and returned
+//     unmarked so a retry-capable transport retries it. All five are counted
+//     through the optional DispatcherDropObserver; gone and unattributed are
+//     logged (rate limited, error and warning). System-task (advance/skip)
+//     errors from the engine take the same mapping, so those deliveries are
+//     not silent either. Do not re-collapse the dispositions into `return
+//     nil` — that is the silent drop this branch exists to remove.
+//
 //   - DeadLetterManager is a list/replay API, not a background scanner.
 //     Replay moves one dead-letter entry back to ready in Redis; it does not
 //     scan the queue. Do not add a Run() method or a background scan loop

@@ -123,7 +123,11 @@ func TestObserverAdaptersIncrementExpectedMetrics(t *testing.T) {
 	NewAuditMetrics(metrics).OnAuditFailed(ctx, "save_signal", assertErr{})
 	NewSweepMetrics(metrics).OnSweepReclaim(ctx, "exec-1", "node-1", 1500)
 	NewSweepMetrics(metrics).OnSweepReclaimResult(ctx, "reclaimed", time.Millisecond)
-	NewDispatcherMetrics(metrics).OnDispatchTransient(ctx, "no_capacity")
+	dispatcher := NewDispatcherMetrics(metrics)
+	dispatcher.OnDispatchTransient(ctx, "no_capacity")
+	dispatcher.OnDispatchDropped(ctx, "execution_gone")
+	dispatcher.OnTaskDeliveryLag(ctx, 2*time.Second)
+	NewQueueStatsMetrics(metrics).OnQueueStats("xflow:default", 7, 3, 1, 90*time.Second)
 	NewAuthMetrics(metrics).OnAuthDecision(ctx, "register", "deny", "enforcing")
 	NewCommitMetrics(metrics).OnCommitOutcome(ctx, engine.CommitOutcomeAccepted)
 	outbox := NewOutboxMetrics(metrics)
@@ -145,6 +149,16 @@ func TestObserverAdaptersIncrementExpectedMetrics(t *testing.T) {
 		`xflow_audit_write_total{namespace="default",op="save_signal",result="failed"} 1`,
 		`xflow_lease_sweep_reclaimed_total{namespace="default",result="reclaimed"} 1`,
 		`xflow_dispatch_transient_total{namespace="default",reason="no_capacity"} 1`,
+		`xflow_dispatch_dropped_total{namespace="default",reason="execution_gone"} 1`,
+		`xflow_task_delivery_lag_seconds_count{namespace="default"} 1`,
+		// The 2s observation must land in a real bucket, not +Inf: the default
+		// Observe buckets stop at 10s, which is exactly why delivery lag uses
+		// the dedicated second-to-hour bucket set.
+		`xflow_task_delivery_lag_seconds_bucket{namespace="default",le="5"} 1`,
+		`xflow_queue_depth{queue="xflow:default",state="pending"} 7`,
+		`xflow_queue_depth{queue="xflow:default",state="active"} 3`,
+		`xflow_queue_depth{queue="xflow:default",state="retry"} 1`,
+		`xflow_queue_oldest_pending_age_seconds{queue="xflow:default"} 90`,
 		`xflow_runner_auth_decisions_total{auth_mode="enforcing",namespace="default",result="deny"} 1`,
 		`xflow_lease_age_seconds_count{namespace="default",result="reclaimed"} 1`,
 		`xflow_commit_outcomes_total{namespace="default",outcome="accepted"} 1`,
@@ -218,3 +232,64 @@ func TestRunnerMetricsProxyHelpTextsRegistered(t *testing.T) {
 type assertErr struct{}
 
 func (assertErr) Error() string { return "boom" }
+
+// TestDeliveryLagHelpDoesNotClaimLoss pins the corrected reading of the lag
+// series: a sample above the retention TTL proves the execution's state was
+// exposed to expiry while the task waited, NOT that the work was lost, because
+// commits and advances re-EXPIRE the status key and the task can still route
+// to the live execution. The old text called those samples "direct proof of
+// the loss" and was falsified by exactly that path. It must also not claim to
+// be the exclusive pre-loss signal: xflow_queue_oldest_pending_age_seconds
+// reports the same condition from the broker side. And it must carry the same
+// falsifiable reading as the drop counter it points at: the gone verdict is a
+// claim, not proof, so no "confirmed"/"confirms" wording may survive here.
+func TestDeliveryLagHelpDoesNotClaimLoss(t *testing.T) {
+	help, ok := metricHelp["xflow_task_delivery_lag_seconds"]
+	if !ok || help == "" {
+		t.Fatal("metricHelp[xflow_task_delivery_lag_seconds] is missing or empty")
+	}
+	for _, forbidden := range []string{"proof of the loss", "the only signal", "confirm"} {
+		if strings.Contains(help, forbidden) {
+			t.Fatalf("delivery-lag help overclaims %q:\n%s", forbidden, help)
+		}
+	}
+	for _, want := range []string{
+		"re-EXPIRE",
+		"exposed to expiry",
+		"a claim, not proof",
+		`reason="execution_unattributed"`,
+		"xflow_queue_oldest_pending_age_seconds",
+	} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("delivery-lag help missing %q:\n%s", want, help)
+		}
+	}
+}
+
+// TestDroppedHelpDocumentsTheTriState pins the drop counter's help as a
+// falsifiable claim: it names the unattributed middle, bounds the gone verdict
+// to the retention window, counts system-task deliveries, and — since false
+// positives and unprovable losses both exist — must NOT present execution_gone
+// as a lower bound on loss. The previous revision pinned the overclaim
+// ("LOWER BOUND") as required text, which is what locked it in.
+func TestDroppedHelpDocumentsTheTriState(t *testing.T) {
+	help, ok := metricHelp["xflow_dispatch_dropped_total"]
+	if !ok || help == "" {
+		t.Fatal("metricHelp[xflow_dispatch_dropped_total] is missing or empty")
+	}
+	for _, want := range []string{
+		"execution_unattributed",
+		"inside the execution's retention window",
+		"upper bound",
+		"System-task (advance/skip) deliveries for an inactive execution are counted under the same reasons",
+	} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("dropped-total help missing %q:\n%s", want, help)
+		}
+	}
+	for _, forbidden := range []string{"LOWER BOUND", "provable lost work", "not counted here"} {
+		if strings.Contains(help, forbidden) {
+			t.Fatalf("dropped-total help still carries the falsified claim %q:\n%s", forbidden, help)
+		}
+	}
+}

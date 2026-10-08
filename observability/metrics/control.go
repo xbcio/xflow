@@ -25,6 +25,8 @@ const (
 	metricRunnerClaimReclaimed       = "xflow_runner_claim_reclaimed_total"
 	metricRunnerLeaseReplayed        = "xflow_runner_lease_replayed_total"
 	metricDispatchTransient          = "xflow_dispatch_transient_total"
+	metricDispatchDropped            = "xflow_dispatch_dropped_total"
+	metricTaskDeliveryLag            = "xflow_task_delivery_lag_seconds"
 	metricSupplyHintReadErrors       = "xflow_supply_hint_read_errors_total"
 )
 
@@ -64,6 +66,19 @@ type runnerClaimObserver interface {
 
 type dispatcherObserver interface {
 	OnDispatchTransient(ctx context.Context, reason string)
+}
+
+// dispatcherDropObserver mirrors service/control's optional
+// DispatcherDropObserver extension: dispatched tasks dropped without an
+// assignment, partitioned by bounded reason.
+type dispatcherDropObserver interface {
+	OnDispatchDropped(ctx context.Context, reason string)
+}
+
+// deliveryLagObserver mirrors service/control's optional DeliveryLagObserver
+// extension: how long a consumed task waited after becoming deliverable.
+type deliveryLagObserver interface {
+	OnTaskDeliveryLag(ctx context.Context, lag time.Duration)
 }
 
 type supplyHintObserver interface {
@@ -264,4 +279,23 @@ func (d DispatcherMetrics) OnDispatchTransient(ctx context.Context, reason strin
 	d.Metrics.Inc(metricDispatchTransient, withNamespace(ctx, map[string]string{"reason": reason}))
 }
 
-var _ dispatcherObserver = DispatcherMetrics{}
+// OnDispatchDropped counts one task dropped without an assignment, by reason.
+// See metricHelp for what each reason means: execution_gone is a window-bounded
+// loss claim (not proof — see metricHelp), execution_unattributed may hold late
+// duplicates beside loss, and the rest are benign.
+func (d DispatcherMetrics) OnDispatchDropped(ctx context.Context, reason string) {
+	d.Metrics.Inc(metricDispatchDropped, withNamespace(ctx, map[string]string{"reason": reason}))
+}
+
+// OnTaskDeliveryLag records how long a consumed task waited between becoming
+// deliverable and being consumed. Read its tail against the execution TTL: it
+// is the pre-loss warning for queue residency.
+func (d DispatcherMetrics) OnTaskDeliveryLag(ctx context.Context, lag time.Duration) {
+	d.Metrics.ObserveLag(metricTaskDeliveryLag, withNamespace(ctx, nil), lag)
+}
+
+var (
+	_ dispatcherObserver     = DispatcherMetrics{}
+	_ dispatcherDropObserver = DispatcherMetrics{}
+	_ deliveryLagObserver    = DispatcherMetrics{}
+)

@@ -37,6 +37,7 @@ type Metrics struct {
 	histograms      map[metricVecKey]*prometheus.HistogramVec
 	bytesHistograms map[metricVecKey]*prometheus.HistogramVec
 	countHistograms map[metricVecKey]*prometheus.HistogramVec
+	lagHistograms   map[metricVecKey]*prometheus.HistogramVec
 	gauges          map[metricVecKey]*prometheus.GaugeVec
 }
 
@@ -62,6 +63,7 @@ func NewWithRegistry(registry *prometheus.Registry) *Metrics {
 		histograms:      make(map[metricVecKey]*prometheus.HistogramVec),
 		bytesHistograms: make(map[metricVecKey]*prometheus.HistogramVec),
 		countHistograms: make(map[metricVecKey]*prometheus.HistogramVec),
+		lagHistograms:   make(map[metricVecKey]*prometheus.HistogramVec),
 		gauges:          make(map[metricVecKey]*prometheus.GaugeVec),
 	}
 }
@@ -116,6 +118,30 @@ func (m *Metrics) Observe(name string, labels map[string]string, value time.Dura
 		return
 	}
 	histogram := m.histogram(name, labelNames(labels))
+	if histogram == nil {
+		return
+	}
+	metric, err := histogram.GetMetricWith(prometheus.Labels(labels))
+	if err != nil {
+		return
+	}
+	metric.Observe(value.Seconds())
+}
+
+// ObserveLag records a queue/residency latency observation (seconds) using
+// buckets that span the retention scales this system actually operates at:
+// from a second to an hour, with twice the default observer's top end.
+//
+// The default Observe buckets stop at 10 seconds, which is far below the
+// deliverable→consumed latencies that matter here: every sample past ten
+// seconds would land in +Inf, so a histogram built to show queue residency
+// approaching an execution TTL could not distinguish 30s from 600s. Alerting
+// on "lag is within X of the retention TTL" needs the tail resolved.
+func (m *Metrics) ObserveLag(name string, labels map[string]string, value time.Duration) {
+	if m == nil || name == "" || value < 0 {
+		return
+	}
+	histogram := m.lagHistogram(name, labelNames(labels))
 	if histogram == nil {
 		return
 	}
@@ -256,6 +282,35 @@ func (m *Metrics) bytesHistogram(name string, labels []string) *prometheus.Histo
 	return histogram
 }
 
+// lagBuckets spans seconds to an hour. The top end deliberately reaches past
+// any plausible execution TTL so a sample that HAS outlived the retention is
+// still resolved (the +Inf bucket would answer "more than an hour" for both a
+// two-minute and a two-hour wait). The low end keeps sub-10s residency
+// resolvable, which is what a healthy queue looks like.
+var lagBuckets = []float64{1, 5, 15, 30, 60, 120, 300, 600, 1200, 1800, 3600}
+
+func (m *Metrics) lagHistogram(name string, labels []string) *prometheus.HistogramVec {
+	key := newMetricVecKey(name, labels)
+	m.mu.Lock()
+	if histogram := m.lagHistograms[key]; histogram != nil {
+		m.mu.Unlock()
+		return histogram
+	}
+	histogram := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    name,
+		Help:    helpText(name),
+		Buckets: lagBuckets,
+	}, labels)
+	if err := m.registry.Register(histogram); err != nil {
+		m.mu.Unlock()
+		log.Printf("xflow metrics: register lag histogram %q failed: %v", name, err)
+		return nil
+	}
+	m.lagHistograms[key] = histogram
+	m.mu.Unlock()
+	return histogram
+}
+
 // countBuckets spans single-record batches to the default aggregate max_size
 // (100), with headroom above it so a raised max_size still lands in a real
 // bucket rather than +Inf.
@@ -376,6 +431,8 @@ var metricHelp = map[string]string{
 	"xflow_group_exec_duration_seconds":              "Duration from group lease issue to commit, recorded alongside xflow_group_commit_total for every counted commit.",
 	"xflow_group_package_cache_total":                "Sub-graph package cache resolutions on the runner, partitioned by result (hit/miss). A miss means the package had to be shipped in the lease payload.",
 	"xflow_dispatch_transient_total":                 "Transient dispatch failures scheduled for retry, partitioned by reason.",
+	"xflow_dispatch_dropped_total":                   "Dispatched tasks dropped without a runner assignment, partitioned by reason. reason=execution_gone is a loss claim bounded to the evidence window: no live state, no terminal marker, and the delivery's measured age — from the durable intent's creation, or its deliverable stamp when it carries none — is inside the execution's retention window, so a terminal transition during that span would still be readable. It is a claim, not proof: the terminal marker write is best-effort, so a benign drop in a lost-marker failure shape reads the same way. reason=execution_unattributed is the unprovable middle: no live state and no terminal evidence, and either the age exceeded the retention window, the task carried no stamp to measure it, or the backend could not prove the window its writes used, so a benign late duplicate of a long-finished execution is indistinguishable from work lost to expiry — during a backlog longer than the retention both land here, and it must not be read or paged as confirmed loss. reason=execution_terminal is a benign late or duplicate delivery for an execution that already finished. reason=node_stale is a stale node route on a live execution (duplicate delivery, newer activation, terminal node, node mid-commit). reason=classify_error is an inactive verdict whose classification read failed; the task is returned unmarked (retryable on a retry-capable transport) and is counted as neither loss nor health. The two no-evidence reasons do not bound true loss with execution_gone as a floor: gone can undercount (losses whose age could not be bounded land in unattributed) and overcount (benign drops in the lost-marker failure shape above), so read it as a loss signal, not a lower bound on loss. gone plus unattributed is the upper bound: every adjudicated no-evidence drop lands in one of the two, so actual lost work among them lies between zero and their sum. Both count dropped deliveries, not lost executions. System-task (advance/skip) deliveries for an inactive execution are counted under the same reasons. Read it beside xflow_task_delivery_lag_seconds: the lag tail approaching or exceeding the retention is the warning; execution_gone is the age-bounded loss claim that follows.",
+	"xflow_task_delivery_lag_seconds":                "Seconds between a queued task becoming deliverable (its outbox entry's availability time, or its creation time when it had none) and being consumed by the dispatcher, as a histogram whose buckets span one second to one hour. Read the tail against the execution's retention TTL: this rises before tasks start outliving their executions, alongside the broker-side xflow_queue_oldest_pending_age_seconds (same condition, measured at the queue head rather than on consumption). A sample above the TTL is NOT direct proof that the work was lost: commits and advances re-EXPIRE the execution's status while the task waits, so a task can outlive the TTL it was enqueued under and still route to a live execution — what a sample above the TTL proves is that the execution's state was exposed to expiry for part of that wait. A loss claim is xflow_dispatch_dropped_total{reason=\"execution_gone\"}, and it is a claim, not proof: its verdict requires the delivery's measured age to be inside the retention window — a task whose wait exceeded the window, or whose window the backend cannot prove, is classified reason=\"execution_unattributed\" instead (cannot tell loss from a late duplicate) — and the best-effort terminal-marker write it rests on means a benign drop in the lost-marker shape carries the same reason. Tasks with no deliverable stamp (direct-enqueue paths with no durable outbox intent) are not observed, so a thin or missing series means \"not measurable here\", not \"no lag\": on such a path read the queue's own oldest-pending age instead.",
 	"xflow_execution_completed_total":                "Workflow executions completed, partitioned by terminal status.",
 	"xflow_lease_acquire_total":                      "Lease acquisition attempts, partitioned by result.",
 	"xflow_lease_acquire_duration_seconds":           "Latency of lease acquisition attempts.",
@@ -427,6 +484,8 @@ var metricHelp = map[string]string{
 	"xflow_outbox_drain_discovered":                  "Executions the most recent outbox drain discovered with ready work. A gauge of the last pass, not a counter, so a drop after the backlog clears is the healthy reading. Persistently zero or flat while xflow_outbox_ready is non-zero means discovery is not finding the backlog: on a keyspace-scanned store, raise the discovery page (engine.WithOutboxDiscoveryPage). Without this series an operator had no way to see that at all.",
 	"xflow_outbox_drain_duration_seconds":            "Wall-clock duration of one whole outbox drain: discovery, the flush of every execution the page yielded, and the throttled backlog scan. A drain that routinely exceeds the dispatcher's tick interval means the loop is running back to back, so dispatch is bounded by its own work rather than by the tick.",
 	"xflow_outbox_oldest_pending_age_seconds":        "Age of the oldest pending outbox message.",
+	"xflow_queue_depth":                              "Tasks sitting in a consumer queue, partitioned by queue and state (pending/active/retry), sampled on the queue-stats interval. This is the broker-side backlog: pending rising while active stays flat means consumption is not keeping up, and it is the only series that can show a completely stalled consumer — consumer-side observations only report tasks already consumed. Scheduled tasks are deliberately excluded: timers, suspend wakeups and retry backoff are legitimate park states, not backlog. Read it against xflow_task_delivery_lag_seconds and xflow_dispatch_dropped_total: depth shows the pressure, delivery lag shows how close the wait is to the execution TTL, and the drop counter shows when it crossed (reason=\"execution_gone\" while the measured age is still inside the retention window, reason=\"execution_unattributed\" once it passed).",
+	"xflow_queue_oldest_pending_age_seconds":         "Age of the oldest pending task in a consumer queue, partitioned by queue, sampled on the queue-stats interval. This is the queue-residency clock: the wait the head of the queue has already accumulated. When this age approaches the execution retention TTL (execTTL, or the transient active TTL), queued work is about to outlive its execution; past the TTL the drops move xflow_dispatch_dropped_total — reason=\"execution_unattributed\" once the measured age exceeds the retention window (late duplicates and true losses both land there), and reason=\"execution_gone\" only for drops whose measured age is still inside the window. This is the broker-side alerting signal for the condition, while the drop counter is the aftermath. Sampling failures simply produce no sample, so a gap means \"not measured\", never zero.",
 	"xflow_outbox_errors_total":                      "Outbox dispatch errors, partitioned by operation.",
 	"xflow_report_rejections_total":                  "Runner result reports rejected by the report path, partitioned by the fence that rejected them (reason=directory_unavailable/directory_lease_not_found/directory_immutable_mismatch/engine_stale_token). Every one of these is an HTTP 409, so before this series the two structurally different causes were indistinguishable: a directory that could not resolve the lease, versus an engine that refused a token the directory HAD resolved. Read xflow_lease_view_divergence_total beside it.",
 	"xflow_lease_view_divergence_total":              "Engine-rejected result reports where the directory still resolved the SAME lease the runner echoed (same assignment, same lease id, same token) when the commit was fenced. The directory record is real and the engine's node has moved past it, so the two lease views disagree for one assignment. Read against xflow_report_rejections_total{reason=\"engine_stale_token\"}: they should match while the directory record survives the commit, and a shortfall means the directory let the lease go between the report's lookup and its commit. A non-zero rate is the state the R6 409 investigation could not observe: nothing logs it and it surfaces only as a bare 409.",
