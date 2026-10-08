@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -228,6 +229,73 @@ func TestReportResultRequestProtoRoundTripEmptyCarrier(t *testing.T) {
 	}
 	if len(got.TraceCarrier) != 0 {
 		t.Fatalf("expected no carrier on round-trip, got %v", got.TraceCarrier)
+	}
+}
+
+// TestReportResultRequestProtoRoundTripGroupResult proves the gRPC
+// ReportResultRequest now carries GroupResult (including FailedMember and a
+// per-exit Data map) through the proto layer in both directions, closing the
+// gap where a group task's result silently reported as an ordinary node
+// result over gRPC and was rejected as a stale lease token.
+func TestReportResultRequestProtoRoundTripGroupResult(t *testing.T) {
+	original := ReportResultRequest{
+		RunnerID:  "runner-1",
+		SessionID: "session-1",
+		Lease:     &engine.TaskLease{LeaseID: "lease-1", LeaseToken: "tok"},
+		GroupResult: &engine.GroupResult{
+			ProtocolVersion: 1,
+			GroupExecID:     "exec-789",
+			Attempt:         2,
+			Outcome:         engine.GroupOutcomeFailed,
+			Exits: []engine.GroupExitResult{
+				{NodeName: "a", Port: "main", Data: map[string]any{"k": "v"}},
+			},
+			Error:        "member B failed",
+			FailedMember: "B",
+		},
+	}
+	pb, err := ReportResultRequestToProto(original)
+	if err != nil {
+		t.Fatalf("to proto: %v", err)
+	}
+	if len(pb.GetGroupResultJson()) == 0 {
+		t.Fatal("group_result_json is empty (gRPC proto did not carry GroupResult)")
+	}
+	got, err := ReportResultRequestFromProto(pb)
+	if err != nil {
+		t.Fatalf("from proto: %v", err)
+	}
+	if got.GroupResult == nil {
+		t.Fatal("GroupResult lost on round trip")
+	}
+	if !reflect.DeepEqual(*original.GroupResult, *got.GroupResult) {
+		t.Fatalf("GroupResult round trip = %+v, want %+v", *got.GroupResult, *original.GroupResult)
+	}
+}
+
+// TestReportResultRequestProtoRoundTripNilGroupResult proves an ordinary node
+// task's report (GroupResult == nil) round-trips with GroupResult still nil —
+// the new field must not change existing node-task behavior.
+func TestReportResultRequestProtoRoundTripNilGroupResult(t *testing.T) {
+	original := ReportResultRequest{
+		RunnerID:  "runner-1",
+		SessionID: "session-1",
+		Lease:     &engine.TaskLease{LeaseID: "lease-1", LeaseToken: "tok"},
+		Result:    engine.TaskResult{Output: &types.Output{Data: map[string]any{"k": "v"}}},
+	}
+	pb, err := ReportResultRequestToProto(original)
+	if err != nil {
+		t.Fatalf("to proto: %v", err)
+	}
+	if len(pb.GetGroupResultJson()) != 0 {
+		t.Fatalf("expected no group_result_json, got %q", pb.GetGroupResultJson())
+	}
+	got, err := ReportResultRequestFromProto(pb)
+	if err != nil {
+		t.Fatalf("from proto: %v", err)
+	}
+	if got.GroupResult != nil {
+		t.Fatalf("expected nil GroupResult on round-trip, got %+v", got.GroupResult)
 	}
 }
 

@@ -188,6 +188,18 @@ message ReportResultRequest {
   // that do not populate it simply leave it empty and the server falls back to
   // the lease's dispatch carrier.
   map<string, string> trace_carrier = 5;
+  // group_result_json is the JSON-encoded protocol.GroupResultWire (via
+  // MarshalGroupResult/UnmarshalGroupResult), set instead of result_json's
+  // content being meaningful when the runner reports a group execution
+  // outcome. Empty means no GroupResult (an ordinary node task, or an old
+  // runner/server predating this field) — never confuse that with a group
+  // task reporting an empty group result, which cannot happen since
+  // MarshalGroupResult always encodes at least ProtocolVersion/Outcome. Carried
+  // as JSON bytes, not a structured message, for the same reason result_json
+  // is: it embeds []GroupExitResult with a map[string]any Data field that maps
+  // poorly onto protobuf, and the JSON codec is already built, tested, and
+  // used by the HTTP transport.
+  bytes group_result_json = 6;
 }
 
 message ReportResultResponse {

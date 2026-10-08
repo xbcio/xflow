@@ -874,9 +874,21 @@ type ReportResultRequest struct {
 	// trace_id/span_id string reconstruction). Additive map field; older peers
 	// that do not populate it simply leave it empty and the server falls back to
 	// the lease's dispatch carrier.
-	TraceCarrier  map[string]string `protobuf:"bytes,5,rep,name=trace_carrier,json=traceCarrier,proto3" json:"trace_carrier,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	TraceCarrier map[string]string `protobuf:"bytes,5,rep,name=trace_carrier,json=traceCarrier,proto3" json:"trace_carrier,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// group_result_json is the JSON-encoded protocol.GroupResultWire (via
+	// MarshalGroupResult/UnmarshalGroupResult), set instead of result_json's
+	// content being meaningful when the runner reports a group execution
+	// outcome. Empty means no GroupResult (an ordinary node task, or an old
+	// runner/server predating this field) — never confuse that with a group
+	// task reporting an empty group result, which cannot happen since
+	// MarshalGroupResult always encodes at least ProtocolVersion/Outcome. Carried
+	// as JSON bytes, not a structured message, for the same reason result_json
+	// is: it embeds []GroupExitResult with a map[string]any Data field that maps
+	// poorly onto protobuf, and the JSON codec is already built, tested, and
+	// used by the HTTP transport.
+	GroupResultJson []byte `protobuf:"bytes,6,opt,name=group_result_json,json=groupResultJson,proto3" json:"group_result_json,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *ReportResultRequest) Reset() {
@@ -940,6 +952,13 @@ func (x *ReportResultRequest) GetSessionId() string {
 func (x *ReportResultRequest) GetTraceCarrier() map[string]string {
 	if x != nil {
 		return x.TraceCarrier
+	}
+	return nil
+}
+
+func (x *ReportResultRequest) GetGroupResultJson() []byte {
+	if x != nil {
+		return x.GroupResultJson
 	}
 	return nil
 }
@@ -2211,7 +2230,7 @@ const file_service_protocol_runnerpb_runner_proto_rawDesc = "" +
 	"lease_json\x18\x01 \x01(\fR\tleaseJson\x12\x1d\n" +
 	"\n" +
 	"wait_nanos\x18\x02 \x01(\x03R\twaitNanos\x12A\n" +
-	"\acontrol\x18\x03 \x01(\v2'.xflow.runner.v1.RunnerControlDirectiveR\acontrol\"\xaf\x02\n" +
+	"\acontrol\x18\x03 \x01(\v2'.xflow.runner.v1.RunnerControlDirectiveR\acontrol\"\xdb\x02\n" +
 	"\x13ReportResultRequest\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12\x1d\n" +
 	"\n" +
@@ -2220,7 +2239,8 @@ const file_service_protocol_runnerpb_runner_proto_rawDesc = "" +
 	"resultJson\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x04 \x01(\tR\tsessionId\x12[\n" +
-	"\rtrace_carrier\x18\x05 \x03(\v26.xflow.runner.v1.ReportResultRequest.TraceCarrierEntryR\ftraceCarrier\x1a?\n" +
+	"\rtrace_carrier\x18\x05 \x03(\v26.xflow.runner.v1.ReportResultRequest.TraceCarrierEntryR\ftraceCarrier\x12*\n" +
+	"\x11group_result_json\x18\x06 \x01(\fR\x0fgroupResultJson\x1a?\n" +
 	"\x11TraceCarrierEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"H\n" +

@@ -331,12 +331,25 @@ func ReportResultRequestToProto(req ReportResultRequest) (*runnerpb.ReportResult
 	if err != nil {
 		return nil, err
 	}
+	// Empty, not omitted: req.GroupResult == nil is the only case that leaves
+	// group_result_json unset. MarshalGroupResult always encodes at least
+	// ProtocolVersion/Outcome, so a non-nil GroupResult can never marshal to
+	// zero bytes — the receiving side's "empty means nil" check never confuses
+	// the two.
+	var groupResultJSON []byte
+	if req.GroupResult != nil {
+		groupResultJSON, err = MarshalGroupResult(*req.GroupResult)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return &runnerpb.ReportResultRequest{
-		RunnerId:     req.RunnerID,
-		LeaseJson:    leaseJSON,
-		ResultJson:   resultJSON,
-		SessionId:    req.SessionID,
-		TraceCarrier: cloneLabels(req.TraceCarrier),
+		RunnerId:        req.RunnerID,
+		LeaseJson:       leaseJSON,
+		ResultJson:      resultJSON,
+		SessionId:       req.SessionID,
+		TraceCarrier:    cloneLabels(req.TraceCarrier),
+		GroupResultJson: groupResultJSON,
 	}, nil
 }
 
@@ -349,12 +362,21 @@ func ReportResultRequestFromProto(req *runnerpb.ReportResultRequest) (ReportResu
 	if err != nil {
 		return ReportResultRequest{}, err
 	}
+	var groupResult *engine.GroupResult
+	if raw := req.GetGroupResultJson(); len(raw) > 0 {
+		gr, err := UnmarshalGroupResult(raw)
+		if err != nil {
+			return ReportResultRequest{}, err
+		}
+		groupResult = &gr
+	}
 	return ReportResultRequest{
 		RunnerID:     req.GetRunnerId(),
 		SessionID:    req.GetSessionId(),
 		Lease:        lease,
 		Result:       result,
 		TraceCarrier: cloneLabels(req.GetTraceCarrier()),
+		GroupResult:  groupResult,
 	}, nil
 }
 
