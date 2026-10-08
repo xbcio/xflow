@@ -232,6 +232,18 @@ type WorkflowSettings struct {
 	Retry       *RetrySettings `json:"retry,omitempty"`
 }
 
+// Values of WorkflowSettings.PinDataMode. The empty string means
+// PinDataModeTestOnly.
+const (
+	// PinDataModeTestOnly applies pin_data only to executions started as test
+	// runs (xflow.WithTestRun, or "test": true on the HTTP invoke body).
+	PinDataModeTestOnly = "test_only"
+	// PinDataModeAlways applies pin_data to every execution.
+	PinDataModeAlways = "always"
+	// PinDataModeDisabled ignores pin_data entirely.
+	PinDataModeDisabled = "disabled"
+)
+
 // RetrySettings configures automatic retry behaviour for the workflow.
 type RetrySettings struct {
 	Enabled         bool    `json:"enabled,omitempty"`

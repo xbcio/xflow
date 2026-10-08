@@ -299,6 +299,9 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	if err := validateBodyOuterRefs(g); err != nil {
 		return nil, err
 	}
+	if err := assignPinData(def, g); err != nil {
+		return nil, err
+	}
 	if err := buildUnits(g); err != nil {
 		return nil, fmt.Errorf("build units: %w", err)
 	}

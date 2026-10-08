@@ -424,6 +424,7 @@ func attachSubmissionMetadata(ctx context.Context, snap *ExecutionSnapshot) {
 	if scope := ExecutionScopeFromContext(ctx); len(scope) > 0 {
 		snap.Scope = cloneMap(scope)
 	}
+	snap.TestRun = TestRunFromContext(ctx)
 }
 
 // attachTransientHint enriches the submission context with the per-workflow

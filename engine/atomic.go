@@ -789,6 +789,8 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 			Status:        types.NodeStatusSkipped,
 			PrivateOutput: privateOutput,
 		}, result, flush)
+	case TaskTypeNodeExec:
+		return e.handlePinnedNode(ctx, task, flush)
 	case TaskTypeGroupExec:
 		if e.groupExecutor == nil {
 			// No local executor — let the Dispatcher route this to a remote runner.

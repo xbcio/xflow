@@ -176,7 +176,7 @@ func (f *fakeState) CommitNode(_ context.Context, req CommitNodeRequest) (Commit
 	}
 
 	if req.System {
-		if f.atomicSchedule[fakeAtomicCounterKey(req.ExecutionID, req.NodeIdx)] != "skip" {
+		if marker := f.atomicSchedule[fakeAtomicCounterKey(req.ExecutionID, req.NodeIdx)]; (req.Status == types.NodeStatusPinned) == (marker == "skip") {
 			return CommitNodeResult{Outcome: CommitOutcomeStaleToken}, nil
 		}
 		if current != nil && current.Status != types.NodeStatusPending {

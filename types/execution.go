@@ -30,6 +30,10 @@ const (
 	NodeStatusContinued  NodeStatus = "continued"
 	NodeStatusCanceled   NodeStatus = "canceled"
 	NodeStatusWaiting    NodeStatus = "waiting"
+	// NodeStatusPinned is a node the engine resolved from the workflow's
+	// pin_data instead of running its handler: its output is the pinned mock
+	// value and downstream treats it exactly like success.
+	NodeStatusPinned NodeStatus = "pinned"
 )
 
 // IsTerminalExecutionStatus reports whether s is an execution terminal state.
@@ -44,7 +48,7 @@ func IsTerminalExecutionStatus(s ExecutionStatus) bool {
 // IsTerminalNodeStatus reports whether s is a node terminal state.
 func IsTerminalNodeStatus(s NodeStatus) bool {
 	switch s {
-	case NodeStatusSuccess, NodeStatusFailed, NodeStatusSkipped, NodeStatusCanceled, NodeStatusContinued:
+	case NodeStatusSuccess, NodeStatusFailed, NodeStatusSkipped, NodeStatusCanceled, NodeStatusContinued, NodeStatusPinned:
 		return true
 	}
 	return false
