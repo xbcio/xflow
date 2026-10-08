@@ -27,7 +27,6 @@ import (
 // of race `go test -race` exists to catch.
 type identityRenewalCall struct {
 	runnerID string
-	token    string
 }
 
 // stubIdentityRenewalSeam swaps startIdentityRenewal for a stub that reports
@@ -38,8 +37,8 @@ type identityRenewalCall struct {
 func stubIdentityRenewalSeam() (calls chan identityRenewalCall, restore func()) {
 	previous := startIdentityRenewal
 	calls = make(chan identityRenewalCall, 1)
-	startIdentityRenewal = func(_ context.Context, _ renewClient, runnerID, token string, _ *slog.Logger) {
-		calls <- identityRenewalCall{runnerID: runnerID, token: token}
+	startIdentityRenewal = func(_ context.Context, _ renewClient, runnerID string, _ *slog.Logger) {
+		calls <- identityRenewalCall{runnerID: runnerID}
 	}
 	return calls, func() { startIdentityRenewal = previous }
 }
@@ -148,7 +147,7 @@ func stopRunRunner(t *testing.T, cancel context.CancelFunc, done chan error) {
 // TestRunRunnerStartsIdentityRenewalForAnIssuedIdentity is the brief's first
 // case: a file-backed store already holding an issued identity, reached over
 // https, must both decide start=true and actually launch the goroutine
-// (through startIdentityRenewal) with the runnerID/token resolveRunnerIdentity
+// (through startIdentityRenewal) with the runnerID resolveRunnerIdentity
 // settled on -- not merely the ones the test configured before the store
 // overwrote them.
 func TestRunRunnerStartsIdentityRenewalForAnIssuedIdentity(t *testing.T) {
@@ -182,10 +181,10 @@ func TestRunRunnerStartsIdentityRenewalForAnIssuedIdentity(t *testing.T) {
 
 	select {
 	case call := <-calls:
-		if call.runnerID != "issued-runner" || call.token != "issued-token" {
-			t.Fatalf("startIdentityRenewal called with (%q, %q), want (%q, %q) -- the identity "+
+		if call.runnerID != "issued-runner" {
+			t.Fatalf("startIdentityRenewal called with %q, want %q -- the identity "+
 				"resolveRunnerIdentity settled on, not whatever cfg carried beforehand",
-				call.runnerID, call.token, "issued-runner", "issued-token")
+				call.runnerID, "issued-runner")
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("startIdentityRenewal was never called for an issued identity over https")

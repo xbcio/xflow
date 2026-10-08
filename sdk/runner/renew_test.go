@@ -68,7 +68,7 @@ func TestRunIdentityRenewalNoExpiryRetiresTheLoop(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
-		runIdentityRenewal(ctx, fake, "runner-1", "tok", testLogger())
+		runIdentityRenewal(ctx, fake, "runner-1", testLogger())
 		close(done)
 	}()
 
@@ -110,7 +110,7 @@ func TestRunIdentityRenewalRenewsBeforeExpiry(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		runIdentityRenewal(ctx, fake, "runner-1", "tok", testLogger())
+		runIdentityRenewal(ctx, fake, "runner-1", testLogger())
 		close(done)
 	}()
 
@@ -162,7 +162,7 @@ func TestRunIdentityRenewalSurvivesAnInitialError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		runIdentityRenewal(ctx, fake, "runner-1", "tok", testLogger())
+		runIdentityRenewal(ctx, fake, "runner-1", testLogger())
 		close(done)
 	}()
 
@@ -198,9 +198,30 @@ func TestRenewOnceUnparsableExpiryIsFailedNotNoExpiry(t *testing.T) {
 			return protocol.RenewIdentityResponse{ExpiresAt: "not-a-timestamp"}, nil
 		},
 	}
-	_, outcome := renewOnce(context.Background(), fake, "runner-1", "tok", testLogger())
+	_, outcome := renewOnce(context.Background(), fake, "runner-1", testLogger())
 	if outcome != renewFailed {
 		t.Fatalf("outcome = %v, want renewFailed", outcome)
+	}
+}
+
+// TestRenewOnceSendsNoTokenInTheBody pins that the renewal request body
+// carries no token. The server lets the Authorization header win, so a body
+// token only ever matters as the stale startup value it would be after a
+// credential reload.
+func TestRenewOnceSendsNoTokenInTheBody(t *testing.T) {
+	var sent protocol.RenewIdentityRequest
+	fake := &fakeRenewClient{
+		respond: func(_ int, req protocol.RenewIdentityRequest) (protocol.RenewIdentityResponse, error) {
+			sent = req
+			return protocol.RenewIdentityResponse{}, nil
+		},
+	}
+	renewOnce(context.Background(), fake, "runner-1", testLogger())
+	if sent.RunnerID != "runner-1" {
+		t.Fatalf("RunnerID = %q, want %q", sent.RunnerID, "runner-1")
+	}
+	if sent.AuthToken != "" {
+		t.Fatal("renewal request body carried a token, want none")
 	}
 }
 
@@ -220,7 +241,7 @@ func TestRunIdentityRenewalExitsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		runIdentityRenewal(ctx, fake, "runner-1", "tok", testLogger())
+		runIdentityRenewal(ctx, fake, "runner-1", testLogger())
 		close(done)
 	}()
 
@@ -269,7 +290,7 @@ func TestRunIdentityRenewalPastDeadlineFallsBackToRetryWait(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		runIdentityRenewal(ctx, fake, "runner-1", "tok", testLogger())
+		runIdentityRenewal(ctx, fake, "runner-1", testLogger())
 		close(done)
 	}()
 
@@ -475,9 +496,15 @@ func TestDecideIdentityRenewalRefusesPlaintextWithoutOptIn(t *testing.T) {
 // client was built once from cfg (NewRunnerHTTPClient + WithToken) and kept
 // the startup token and TLS material forever.
 func TestRenewClientFollowsRunnerReload(t *testing.T) {
-	var gotAuth atomic.Value
+	var gotAuth, gotBodyToken atomic.Value
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth.Store(r.Header.Get("Authorization"))
+		var body protocol.RenewIdentityRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "bad body", http.StatusBadRequest)
+			return
+		}
+		gotBodyToken.Store(body.AuthToken)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(protocol.RenewIdentityResponse{})
 	}))
@@ -504,10 +531,15 @@ func TestRenewClientFollowsRunnerReload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renewClientFor: %v", err)
 	}
+	// renew goes through renewOnce, so the request body checked below is the
+	// one the renewal loop actually builds.
 	renew := func() string {
 		t.Helper()
-		if _, err := rc.RenewIdentity(context.Background(), protocol.RenewIdentityRequest{RunnerID: cfg.runnerID}); err != nil {
-			t.Fatalf("RenewIdentity: %v", err)
+		if _, outcome := renewOnce(context.Background(), rc, cfg.runnerID, testLogger()); outcome != renewNoExpiry {
+			t.Fatalf("renewOnce outcome = %v, want renewNoExpiry", outcome)
+		}
+		if got := gotBodyToken.Load().(string); got != "" {
+			t.Fatalf("request body carried auth_token %q, want none: only the live header may authenticate", got)
 		}
 		return gotAuth.Load().(string)
 	}

@@ -434,7 +434,7 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 	if rc, start, warnMsg, warnErr := decideIdentityRenewal(cfg, store, runner); warnErr != nil {
 		slog.Warn(warnMsg, "runner_id", cfg.runnerID, "error", warnErr)
 	} else if start {
-		go startIdentityRenewal(runCtx, rc, cfg.runnerID, cfg.token, slog.Default())
+		go startIdentityRenewal(runCtx, rc, cfg.runnerID, slog.Default())
 	}
 
 	err = runner.Run(runCtx)
@@ -784,10 +784,10 @@ var startIdentityRenewal = runIdentityRenewal
 // store -- identity file schema is unchanged by this task), it proves the
 // identity has not been revoked while this runner was down, and -- when the
 // server reports no expiry at all -- it retires the loop.
-func runIdentityRenewal(ctx context.Context, c renewClient, runnerID, token string, log *slog.Logger) {
+func runIdentityRenewal(ctx context.Context, c renewClient, runnerID string, log *slog.Logger) {
 	var deadline time.Time
 	for {
-		next, outcome := renewOnce(ctx, c, runnerID, token, log)
+		next, outcome := renewOnce(ctx, c, runnerID, log)
 		switch outcome {
 		case renewAborted:
 			return
@@ -837,10 +837,15 @@ func runIdentityRenewal(ctx context.Context, c renewClient, runnerID, token stri
 
 // renewOnce performs one renewal attempt.
 //
+// The request body carries no token: c sends the live one in the
+// Authorization header, which is what the server authenticates. A token
+// captured here at startup would go stale after a credential reload, and
+// putting it in the body would send that stale value on every renewal.
+//
 // The log line carries the runner id and the error and nothing else -- never
 // the token, which exists on this side only inside the protocol client.
-func renewOnce(ctx context.Context, c renewClient, runnerID, token string, log *slog.Logger) (time.Time, renewOutcome) {
-	resp, err := c.RenewIdentity(ctx, protocol.RenewIdentityRequest{RunnerID: runnerID, AuthToken: token})
+func renewOnce(ctx context.Context, c renewClient, runnerID string, log *slog.Logger) (time.Time, renewOutcome) {
+	resp, err := c.RenewIdentity(ctx, protocol.RenewIdentityRequest{RunnerID: runnerID})
 	if ctx.Err() != nil {
 		return time.Time{}, renewAborted
 	}
