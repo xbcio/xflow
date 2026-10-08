@@ -52,6 +52,29 @@ func (s *APIServer) ReplaceWorkflowReport(ctx context.Context, ns namespace.Name
 	return s.registerReport(ctx, ns, def, true)
 }
 
+// ReplaceWorkflowReportWithMetadata is ReplaceWorkflowReport, additionally
+// carrying the editor_metadata sibling through to the stored record instead
+// of clearing it. A nil metadata behaves exactly like ReplaceWorkflowReport.
+func (s *APIServer) ReplaceWorkflowReportWithMetadata(ctx context.Context, ns namespace.Namespace, def *types.WorkflowDef, metadata *types.WorkflowEditorMetadata) (WorkflowRegistrationResult, error) {
+	if s.ctrl == nil {
+		return WorkflowRegistrationResult{}, errors.New("apiserver: workflow control module not initialized")
+	}
+	if def == nil {
+		return WorkflowRegistrationResult{}, errors.New("apiserver: workflow definition must not be nil")
+	}
+	if err := validateWorkflowRegistrationDefinition(def); err != nil {
+		return WorkflowRegistrationResult{}, err
+	}
+	if ns == "" {
+		ns = namespace.Default
+	}
+	id, diag, err := s.ctrl.replaceWorkflowWithMetadata(ctx, ns, def, metadata)
+	if err != nil {
+		return WorkflowRegistrationResult{}, err
+	}
+	return WorkflowRegistrationResult{ID: id, Warnings: diag.Warnings, ParamIssues: diag.ParamIssues}, nil
+}
+
 func (s *APIServer) registerReport(ctx context.Context, ns namespace.Namespace, def *types.WorkflowDef, replace bool) (WorkflowRegistrationResult, error) {
 	if s.ctrl == nil {
 		return WorkflowRegistrationResult{}, errors.New("apiserver: workflow control module not initialized")

@@ -19,6 +19,10 @@
 // its API with the xflow feature off. Attempts are counted in
 // xflow_workflow_registration_total, by operation and outcome.
 //
+// ReplaceWorkflow always clears a record's existing editor_metadata, since
+// the embedded builder carries none to supply; ReplaceWorkflowWithMetadata is
+// the explicit opt-in for an embedded host that wants to carry one through.
+//
 // NewRunner is the corresponding embedded execution-plane facade for a process
 // that registers node handlers and executes remote leases. Its assembly keeps
 // runtime dependencies consistent across task, group, subgraph, trigger, and

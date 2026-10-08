@@ -962,8 +962,30 @@ func (s *Server) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.Wo
 // outcome, namespace}, partitioned by that same taxonomy, so "the API is up but
 // xflow is not registered" is a series an alert can read rather than a log line
 // someone has to find.
+//
+// ReplaceWorkflow always clears any editor_metadata an earlier HTTP PUT
+// stored for this (namespace, name, version): the embedded path carries no
+// metadata input (WorkflowBuilder/NodeDef expose none, ADR-D4 D6), so every
+// replace through it writes a nil EditorMetadata. Call
+// ReplaceWorkflowWithMetadata instead to carry metadata through explicitly.
 func (s *Server) ReplaceWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.WorkflowID, error) {
 	res, err := s.addWorkflow(ctx, wf, true)
+	return res.ID, err
+}
+
+// ReplaceWorkflowWithMetadata is ReplaceWorkflow, additionally carrying an
+// explicit editor_metadata sibling through to the stored record instead of
+// clearing it. A nil metadata behaves exactly like ReplaceWorkflow (clears
+// whatever was stored). This is the SDK's explicit opt-in counterpart to
+// ReplaceWorkflow's documented clear-on-replace behavior; it does not change
+// that behavior for callers who keep using ReplaceWorkflow.
+//
+// Unlike HTTP PUT /v1/workflows/{id}, which replaces by path ID and may
+// rename the record, this resolves by (namespace, name, version) like every
+// other embedded registration path and, on a real change, mints a new ID
+// (see ReplaceWorkflow's doc comment above for that distinction).
+func (s *Server) ReplaceWorkflowWithMetadata(ctx context.Context, wf *WorkflowBuilder, metadata *types.WorkflowEditorMetadata) (types.WorkflowID, error) {
+	res, err := s.addWorkflowWithMetadata(ctx, wf, metadata)
 	return res.ID, err
 }
 
@@ -994,11 +1016,46 @@ func (s *Server) ReplaceWorkflowWithReport(ctx context.Context, wf *WorkflowBuil
 }
 
 func (s *Server) addWorkflow(ctx context.Context, wf *WorkflowBuilder, replace bool) (WorkflowRegistration, error) {
+	def, err := s.buildWorkflowForRegistration(ctx, wf)
+	if err != nil {
+		return WorkflowRegistration{}, err
+	}
+	register := s.api.RegisterWorkflowReport
+	if replace {
+		register = s.api.ReplaceWorkflowReport
+	}
+	res, err := register(ctx, namespace.Namespace(def.Namespace), def)
+	if err != nil {
+		return WorkflowRegistration{}, err
+	}
+	return s.logAndWrapRegistration(def, res), nil
+}
+
+// addWorkflowWithMetadata is ReplaceWorkflowWithMetadata's implementation: it
+// always replaces (there is no embedded "add with metadata" path) and carries
+// metadata through to APIServer.ReplaceWorkflowReportWithMetadata instead of
+// the nil ReplaceWorkflow sends.
+func (s *Server) addWorkflowWithMetadata(ctx context.Context, wf *WorkflowBuilder, metadata *types.WorkflowEditorMetadata) (WorkflowRegistration, error) {
+	def, err := s.buildWorkflowForRegistration(ctx, wf)
+	if err != nil {
+		return WorkflowRegistration{}, err
+	}
+	res, err := s.api.ReplaceWorkflowReportWithMetadata(ctx, namespace.Namespace(def.Namespace), def, metadata)
+	if err != nil {
+		return WorkflowRegistration{}, err
+	}
+	return s.logAndWrapRegistration(def, res), nil
+}
+
+// buildWorkflowForRegistration is the shared prelude of every embedded
+// registration path: validate the builder, build its definition, refuse FAF,
+// and resolve artifacts. It performs no registry call.
+func (s *Server) buildWorkflowForRegistration(ctx context.Context, wf *WorkflowBuilder) (*types.WorkflowDef, error) {
 	if wf == nil {
-		return WorkflowRegistration{}, definitionRefused{errors.New("xflow: workflow must not be nil")}
+		return nil, definitionRefused{errors.New("xflow: workflow must not be nil")}
 	}
 	if len(wf.directHandlers()) > 0 {
-		return WorkflowRegistration{}, definitionRefused{fmt.Errorf("xflow: workflow %q declares local node handlers, "+
+		return nil, definitionRefused{fmt.Errorf("xflow: workflow %q declares local node handlers, "+
 			"which a control-plane Server cannot execute: register the node types on "+
 			"the runner instead", wf.name)}
 	}
@@ -1010,35 +1067,32 @@ func (s *Server) addWorkflow(ctx context.Context, wf *WorkflowBuilder, replace b
 	// as set for OneOf.
 	def, err := wf.build()
 	if err != nil {
-		return WorkflowRegistration{}, definitionRefused{err}
+		return nil, definitionRefused{err}
 	}
 	// FAF has no durable execution state, so it cannot pass through a
 	// control-plane Server. Keep this ahead of artifact resolution and registry
 	// admission so the refusal has no persistence or audit-facing effects.
 	if def.Options != nil && def.Options.FAF {
-		return WorkflowRegistration{}, definitionRefused{fmt.Errorf("xflow: workflow %q enables options.faf, which a control-plane Server cannot register", def.Name)}
+		return nil, definitionRefused{fmt.Errorf("xflow: workflow %q enables options.faf, which a control-plane Server cannot register", def.Name)}
 	}
 	if s.artifacts != nil {
 		if err := resolveArtifacts(ctx, def, s.artifacts); err != nil {
-			return WorkflowRegistration{}, err
+			return nil, err
 		}
 	}
-	register := s.api.RegisterWorkflowReport
-	if replace {
-		register = s.api.ReplaceWorkflowReport
-	}
-	res, err := register(ctx, namespace.Namespace(def.Namespace), def)
-	if err != nil {
-		return WorkflowRegistration{}, err
-	}
-	// ParamIssues are already logged by the apiserver registration path;
-	// the compile warnings used to be discarded here.
+	return def, nil
+}
+
+// logAndWrapRegistration logs res's compile warnings (ParamIssues are already
+// logged by the apiserver registration path) and wraps res as the public
+// WorkflowRegistration result.
+func (s *Server) logAndWrapRegistration(def *types.WorkflowDef, res apiserver.WorkflowRegistrationResult) WorkflowRegistration {
 	if s.logger != nil {
 		for _, w := range res.Warnings {
 			s.logger.Warn("workflow_compile_warning", "workflow", def.Name, "warning", w)
 		}
 	}
-	return WorkflowRegistration{ID: res.ID, Warnings: res.Warnings, ParamIssues: res.ParamIssues}, nil
+	return WorkflowRegistration{ID: res.ID, Warnings: res.Warnings, ParamIssues: res.ParamIssues}
 }
 
 // WithServerParamValidation sets how the server treats ParamSpec validation
