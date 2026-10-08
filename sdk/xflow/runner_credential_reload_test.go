@@ -898,6 +898,23 @@ func TestControlPlaneHTTPClientSendsTheTokenOnlyToTheRunnersOrigin(t *testing.T)
 	}
 }
 
+// TestRunnerOriginClientRejectsAnOriginItCannotIdentify pins that a
+// ServerURL without a scheme and host fails construction under a reloader.
+// The transport attaches the token only to that origin, so accepting it would
+// send every artifact, seed and supply request unauthenticated, silently.
+func TestRunnerOriginClientRejectsAnOriginItCannotIdentify(t *testing.T) {
+	for _, serverURL := range []string{"xflow.internal:8080", "/v1", "http://[::1"} {
+		cfg := RunnerConfig{ServerURL: serverURL, Token: "t"}
+		reloader := mustTestCredentialReloader(t, cfg)
+		if _, _, err := newRunnerOriginHTTPClient(cfg, reloader, time.Second); err == nil {
+			t.Errorf("ServerURL %q: newRunnerOriginHTTPClient returned no error", serverURL)
+		}
+	}
+	if _, err := NewRunner(RunnerConfig{ServerURL: "xflow.internal:8080", RunnerID: "bad-origin", Token: "t"}); err == nil {
+		t.Fatal("NewRunner accepted a ServerURL with no scheme and host")
+	}
+}
+
 // TestReloadableGRPCCredentialsOverrideServerNameLeavesTheBaseAlone pins that
 // the deprecated OverrideServerName does not write the base config every
 // ClientHandshake clones concurrently.

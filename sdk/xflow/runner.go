@@ -1398,16 +1398,21 @@ func newReloadableRunnerHTTPClient(reloader *CredentialReloader, timeout time.Du
 // a caller that copied cfg.Token into a struct field would keep sending it
 // after a Reload. Without one (assemblies that bypass NewRunner) the client is
 // static and the caller sends cfg.Token itself, as before.
+//
+// Under a reloader, a ServerURL that does not parse to a scheme and host is an
+// error: the transport attaches the token only to that origin, so an origin it
+// cannot identify would send every request unauthenticated, silently.
 func newRunnerOriginHTTPClient(cfg RunnerConfig, reloader *CredentialReloader, timeout time.Duration) (*http.Client, string, error) {
 	if reloader == nil {
 		c, err := newRunnerHTTPClient(cfg, timeout)
 		return c, cfg.Token, err
 	}
-	base := newReloadableHTTPTransport(reloader, &tls.Config{MinVersion: tls.VersionTLS12})
-	transport := &reloadedBearerTransport{base: base, reloader: reloader}
-	if origin, err := url.Parse(runnerSeedBaseURL(cfg)); err == nil {
-		transport.scheme, transport.host = origin.Scheme, origin.Host
+	origin, err := url.Parse(runnerSeedBaseURL(cfg))
+	if err != nil || origin.Scheme == "" || origin.Host == "" {
+		return nil, "", fmt.Errorf("xflow: RunnerConfig.ServerURL must be an absolute URL with a scheme and host")
 	}
+	base := newReloadableHTTPTransport(reloader, &tls.Config{MinVersion: tls.VersionTLS12})
+	transport := &reloadedBearerTransport{base: base, reloader: reloader, scheme: origin.Scheme, host: origin.Host}
 	return &http.Client{Timeout: timeout, Transport: transport}, "", nil
 }
 
