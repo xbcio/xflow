@@ -34,6 +34,25 @@ func (e *Engine) CommitTaskResultWithOutcome(ctx context.Context, lease *TaskLea
 	if lease.SubgraphPayload != nil {
 		return e.CommitSubgraphResult(ctx, lease, result)
 	}
+	// A group lease must commit through CommitGroupResult, never through this
+	// method: a group unit leases through its own state (group:<unitIdx>:
+	// status/meta), not through its entry node's (see CommitTaskTimeout's
+	// identical guard below for the full explanation). Without this guard, a
+	// caller that reaches here with a group lease anyway — e.g. the gRPC
+	// transport dropping GroupResult and falling back to reporting the
+	// group's TaskResult as if it were an ordinary node result — fell through
+	// to the acyclic node commit path, which fenced against a node that never
+	// entered "running" and returned a misleading CommitOutcomeStaleToken
+	// instead of a clear diagnostic. The zero-value outcome ("") this returns
+	// deliberately does NOT release the runner's leased capacity (see
+	// CommitOutcome.ReleasesLeasedCapacity): the report was never classified,
+	// matching CommitGroupResult's own validation-failure returns
+	// (e.g. "unknown group outcome %q") rather than StaleToken's "yes,
+	// release" semantics, which would wrongly treat a malformed report as a
+	// settled lease.
+	if lease.Task.Type == TaskTypeGroupExec {
+		return "", ErrGroupLeaseNotSupported
+	}
 	t := &lease.Task
 	g, err := e.loadGraph(ctx, t.ExecutionID)
 	if err != nil {
@@ -115,7 +134,11 @@ func (e *Engine) CommitTaskResultWithOutcome(ctx context.Context, lease *TaskLea
 // group-aware timeout commit would be a separate path; today no group lease
 // carries ExecutionDeadline, so the renewLease backstop never reaches this
 // method with one. The guard makes that invariant a deliberate refusal rather
-// than a load-bearing accident.
+// than a load-bearing accident. CommitTaskResultWithOutcome carries the
+// identical guard for the same reason: a gRPC runner that drops GroupResult
+// and reports a group's TaskResult as an ordinary node result hit this exact
+// stale-token misdiagnosis on the result-reporting path, not just the
+// timeout backstop.
 func (e *Engine) CommitTaskTimeout(ctx context.Context, lease *TaskLease, cause error) error {
 	if lease == nil {
 		return ErrInvalidLeaseToken
