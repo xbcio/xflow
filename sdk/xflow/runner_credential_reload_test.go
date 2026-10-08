@@ -848,6 +848,56 @@ func TestReloadedBearerTransportKeepsTheTokenOnItsOrigin(t *testing.T) {
 	}
 }
 
+// TestControlPlaneHTTPClientSendsTheTokenOnlyToTheRunnersOrigin pins that the
+// host-facing client takes its origin from the runner, not from its caller:
+// a request through it to any other host carries no Authorization header,
+// and only the ServerURL NewRunner was built with receives the live token.
+func TestControlPlaneHTTPClientSendsTheTokenOnlyToTheRunnersOrigin(t *testing.T) {
+	var foreignAuth atomic.Value
+	foreignAuth.Store("")
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		foreignAuth.Store(r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer foreign.Close()
+	var originAuth atomic.Value
+	originAuth.Store("")
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originAuth.Store(r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer origin.Close()
+
+	r, err := NewRunner(RunnerConfig{
+		ServerURL:        origin.URL,
+		RunnerID:         "origin-pin",
+		Token:            "runner-token",
+		ArtifactCacheDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	defer r.Close()
+	client, err := r.ControlPlaneHTTPClient(5 * time.Second)
+	if err != nil {
+		t.Fatalf("ControlPlaneHTTPClient: %v", err)
+	}
+
+	for _, target := range []string{foreign.URL + "/v1/anything", origin.URL + "/v1/anything"} {
+		resp, err := client.Get(target)
+		if err != nil {
+			t.Fatalf("GET %s: %v", target, err)
+		}
+		_ = resp.Body.Close()
+	}
+	if got := foreignAuth.Load().(string); got != "" {
+		t.Fatalf("a host other than the runner's ServerURL received Authorization %q", got)
+	}
+	if got := originAuth.Load().(string); got != "Bearer runner-token" {
+		t.Fatalf("runner origin saw Authorization %q, want the live token", got)
+	}
+}
+
 // TestRunnerGRPCTransportReadsReloadedCAPoolOnHandshake is the gRPC CA
 // rotation regression. The server's leaf is signed by caNew; the runner starts
 // out trusting only caOld, so its connection attempts fail. After a Reload to
@@ -978,7 +1028,7 @@ func TestRunnerReloadRotatesTheLiveRunnerEndToEnd(t *testing.T) {
 	if !ok {
 		t.Fatalf("protocol client = %T, want *protocol.Client", r.protocolClient)
 	}
-	hostClient, err := r.ControlPlaneHTTPClient(cfg, 5*time.Second)
+	hostClient, err := r.ControlPlaneHTTPClient(5 * time.Second)
 	if err != nil {
 		t.Fatalf("ControlPlaneHTTPClient: %v", err)
 	}

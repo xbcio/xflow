@@ -247,9 +247,11 @@ type credentialReloadingRunner interface {
 // follows its Reload (xflow.Runner.ControlPlaneHTTPClient). Optional for the
 // same reason as credentialReloadingRunner — a test double implementing only
 // Run/Close stays a valid runnerService, and renewal then falls back to a
-// static client built from cfg.
+// static client built from cfg. The live client's origin is the runner's own
+// ServerURL; it is not passed in, so it cannot drift from what the runner
+// itself was configured with.
 type controlPlaneClientRunner interface {
-	ControlPlaneHTTPClient(xflowsdk.RunnerConfig, time.Duration) (*http.Client, error)
+	ControlPlaneHTTPClient(time.Duration) (*http.Client, error)
 }
 
 var newRunnerService = func(cfg xflowsdk.RunnerConfig, opts ...xflowsdk.RunnerOption) (runnerService, error) {
@@ -686,16 +688,16 @@ func runnerHasIssuedIdentity(store identityStore) (bool, error) {
 // attaches the live token itself, so none is set here. Only a runner without
 // the capability (a test double) gets the static client.
 func renewClientFor(cfg runnerConfig, runner runnerService) (renewClient, error) {
-	sdkCfg, err := toSDKRunnerConfig(cfg)
-	if err != nil {
-		return nil, err
-	}
 	if live, ok := runner.(controlPlaneClientRunner); ok {
-		httpClient, err := live.ControlPlaneHTTPClient(sdkCfg, enrollHTTPTimeout)
+		httpClient, err := live.ControlPlaneHTTPClient(enrollHTTPTimeout)
 		if err != nil {
 			return nil, fmt.Errorf("renew: build http client: %w", err)
 		}
 		return protocol.NewClient(cfg.serverURL, httpClient), nil
+	}
+	sdkCfg, err := toSDKRunnerConfig(cfg)
+	if err != nil {
+		return nil, err
 	}
 	httpClient, err := xflowsdk.NewRunnerHTTPClient(sdkCfg, enrollHTTPTimeout)
 	if err != nil {

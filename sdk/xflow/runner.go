@@ -317,6 +317,10 @@ type Runner struct {
 	// returning nil when this is nil, so an InProc host calling it anyway
 	// (e.g. a signal handler shared across transports) is not an error.
 	credReloader *CredentialReloader
+	// controlPlaneCfg is the RunnerConfig NewRunner was built from. It is the
+	// only source of ControlPlaneHTTPClient's origin, so the live token can
+	// never be pointed at a host the runner itself was not configured for.
+	controlPlaneCfg RunnerConfig
 	// reloadMu serializes Reload, so the reloader's snapshot and the token the
 	// protocol client holds are always swapped together: without it, two
 	// concurrent Reloads could leave the protocol client on the earlier
@@ -431,6 +435,7 @@ func NewRunner(cfg RunnerConfig, opts ...RunnerOption) (*Runner, error) {
 		pool:              svcCfg.ResourcePool,
 		metrics:           o.metrics,
 		credReloader:      credReloader,
+		controlPlaneCfg:   cfg,
 		protocolClient:    client,
 	}
 	constructed = true
@@ -636,11 +641,14 @@ func (r *Runner) Reload(src CredentialReloaderSource) error {
 }
 
 // ControlPlaneHTTPClient returns an *http.Client for a host's own calls to
-// the control-plane origin (RunnerConfig.ServerURL) that follows this
-// runner's Reload: its TLS material is read on every dial and its bearer
-// token is attached to every request for that origin, exactly like the
-// runner's artifact and entry-seed/supply clients. A caller using it must not
-// attach its own Authorization header, since it would be replaced.
+// this runner's control-plane origin (the RunnerConfig.ServerURL NewRunner was
+// given) that follows this runner's Reload: its TLS material is read on every
+// dial and its bearer token is attached to every request for that origin,
+// exactly like the runner's artifact and entry-seed/supply clients. Requests
+// to any other host go out without it. The origin is deliberately not a
+// parameter: the client carries the runner's live credential, so a caller
+// must not be able to aim it elsewhere. A caller using it must not attach its
+// own Authorization header for the origin, since it would be replaced.
 //
 // sdk/runner's identity-renewal loop uses it: that loop runs for the life of
 // the process, so a client built once from RunnerConfig would keep presenting
@@ -649,9 +657,9 @@ func (r *Runner) Reload(src CredentialReloaderSource) error {
 //
 // Call it once and keep the client; every call builds a new transport. Under
 // RunnerTransportInProc there is no reloader, and this returns the same
-// static client NewRunnerHTTPClient builds.
-func (r *Runner) ControlPlaneHTTPClient(cfg RunnerConfig, timeout time.Duration) (*http.Client, error) {
-	client, _, err := newRunnerOriginHTTPClient(cfg, r.credReloader, timeout)
+// static client NewRunnerHTTPClient builds from the runner's configuration.
+func (r *Runner) ControlPlaneHTTPClient(timeout time.Duration) (*http.Client, error) {
+	client, _, err := newRunnerOriginHTTPClient(r.controlPlaneCfg, r.credReloader, timeout)
 	return client, err
 }
 
