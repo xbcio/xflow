@@ -4,10 +4,11 @@
 Node Group 组级 `on_error`、gRPC `AckActivation`、G1 clean-SHA 重签 `c39a271`）之后
 仍开放的条目。按「不做会怎样」排序，不按工作量。
 
-2026-10-08 第二轮收口（分支 `fix/runtime-gaps-closeout`，26 个 commit）关闭了原条目
-1–6、9（配置面）、12（工具面）、13、14，并新增四条：`disabled` 的运行时消费者、
-gRPC 组结果承载的两处缺口（传输与类型）、map batch 续期的目录元数据。条目已按体例
-重排编号，旧号保留在「已关闭」条目的括注里。
+2026-10-08 第二轮收口（分支 `fix/runtime-gaps-closeout`，相对基线 `e3478d7` 共
+42 个 commit）关闭了原条目 1–6、9（配置面）、12（工具面）、13、14，以及同期新
+登记的 gRPC 组结果传输缺口；新登记的另外三处（`disabled` 的运行时消费者、组结果
+失败成员的对外类型、map batch 续期的目录元数据）仍然开放。条目已按体例重排编号，
+旧号保留在「已关闭」条目的括注里。
 
 每条都写明出处：缺口本身的现状说明留在所属设计文档里，这里只记「打算改的东西」。
 关闭一条时，把它移到文末「已关闭」并写上 commit。
@@ -48,15 +49,7 @@ gRPC 组结果承载的两处缺口（传输与类型）、map batch 续期的�
 5. **子工作流复用（`xflow.subworkflow`）未实现。**
    [DSL-SPECIFICATION.md](./DSL-SPECIFICATION.md) §6.4 标为「计划扩展，当前版本未实现」。
 
-6. **gRPC 传输的 `ReportResult` 整体丢弃 GroupResult。**
-   `ReportResultRequestToProto`/`FromProto` 只转换
-   RunnerID/LeaseJson/ResultJson/SessionID/TraceCarrier，`ReportResultRequest.GroupResult`
-   在 gRPC 侧不承载（`service/protocol/types.go` 自述为 "an existing, separate gap"）
-   ——经 gRPC 上报的组结果（Kafka 组执行等）到不了控制面，HTTP 传输不受影响。修法：
-   给 `runnerpb` 的 ReportResult 消息补组结果字段与双向映射（失败成员名已在
-   `protocol.GroupResultWire` 上，见原 P3-13）。
-
-7. **`types.GroupExecResult` 没有失败成员名的承载字段。** 触发路径的
+6. **`types.GroupExecResult` 没有失败成员名的承载字段。** 触发路径的
    `groupExecTriggerRuntime.ExecuteGroup` 从 `subgraph.Result` 拿得到完整分类（含
    `FailedMember`），但对外类型装不下，Kafka 批量消费端拿不到失败成员名
    （`service/runner/group_exec_trigger_runtime.go` 注释自述）。修法：给
@@ -64,11 +57,11 @@ gRPC 组结果承载的两处缺口（传输与类型）、map batch 续期的�
 
 ### P3 — 已知限制，记录在案
 
-8. **ADR-D4 刻意延后的两项：** 草稿与发布分离（`WorkflowDraft`）、定义版本历史
+7. **ADR-D4 刻意延后的两项：** 草稿与发布分离（`WorkflowDraft`）、定义版本历史
    （`WorkflowDefinitionVersion`）。见
    [ADR-D4-runtime-editor-metadata-split.md](./ADR-D4-runtime-editor-metadata-split.md)。
 
-9. **map batch 的租约续期仍走单值索引。** `LeaseLookupKey` 的 NodeName/NodeIdx 只在
+8. **map batch 的租约续期仍走单值索引。** `LeaseLookupKey` 的 NodeName/NodeIdx 只在
    汇报路径填充（2026-10-08 的 D2 修复），续期路径不带——map 节点与其 batch 落在同一
    runner 上时，batch 的续期可能解析到父或兄弟 assignment；共享同一 lease 使引擎侧
    续期目标相同，但 `RefreshLeaseMeta` 只刷新被解析 assignment 的元数据 TTL，长跑
@@ -77,13 +70,13 @@ gRPC 组结果承载的两处缺口（传输与类型）、map batch 续期的�
 
 ### 需要真实环境或人工批准，不能靠改代码关闭
 
-10. **G2：多副本 control-plane HA soak 与真实多 namespace 隔离验收。** 要求见
+9. **G2：多副本 control-plane HA soak 与真实多 namespace 隔离验收。** 要求见
     [RELEASE-GATES.md](./RELEASE-GATES.md) 的 G2 定义；`make test-soak` 不是该证据
     （见 README 的说明）。
 
-11. **RELEASE-GATES §6 的 D1–D8** 全部为「OPEN — 未批准」，需要对应负责人裁定。
+10. **RELEASE-GATES §6 的 D1–D8** 全部为「OPEN — 未批准」，需要对应负责人裁定。
 
-12. **KEK 轮换（`xflow supply reseal`）与 server/runner 凭据热加载都没有在真实环境
+11. **KEK 轮换（`xflow supply reseal`）与 server/runner 凭据热加载都没有在真实环境
     演练过**，runbook 的 owner 与期限属于 D6。
 
 ## 已关闭
@@ -111,11 +104,13 @@ gRPC 组结果承载的两处缺口（传输与类型）、map batch 续期的�
   存储 token 匹配时优先（Redis Go+Lua 与 memory 双侧），汇报解析在索引不匹配时经
   既有 per-runner leased-assignments 集合按任务匹配（无新索引，围栏不放宽）。附带
   `1e7c42e`：duplicate 的 batch 入队计入
-  `xflow_dispatch_dropped_total{reason="batch_duplicate"}`。修复中确认的事实：
+  `xflow_dispatch_dropped_total{reason="batch_duplicate"}`。复核阶段修正：`36d1908`
+  （sweeper 重建过期租约任务时保留 `TaskType`）、`bda9fea`（单值索引不匹配时按任务
+  两遍扫描回退，换代际后不再解析落空）。修复中确认的事实：
   `engine.Task.ActivationID/AutoDepth` 是 `json:"-"`，从 echo 的 lease 重建的
   AssignmentID 与入队侧从不相等的（Invoke 起的执行全 activation>0），汇报路由此前
   完全依赖 token 单值索引。未验证：真环境 e2e（本机无 podman/MySQL，对照实验未跑）。
-  遗留见 P3-9（renew 路径）。
+  遗留见 P3-8（renew 路径）。
 
 - **`pin_data` / `settings.pin_data_mode` 没有运行时消费者**（原 P1-4）—— `43624e6`、
   `24289a9`、`35bb063`、`9483af8`、`17e3cb4`、`f77f5c3`、`b2f9e60`、`28158e4`
@@ -126,9 +121,11 @@ gRPC 组结果承载的两处缺口（传输与类型）、map batch 续期的�
   的执行上下文由 `WithTestRun` 提供（SDK / HTTP 请求体 `test` 字段，持久化在 Redis
   `test_run` 键；SQL 不投影，与 ExecutionRecord 既有的 Scope/TraceCarrier 同口径）；
   pin 不支持场景（组成员、body 成员、supply、allow_cycles、faf、不存在节点、非对象
-  mock）编译告警后忽略 pin、节点真实执行。待验证：真 Redis 契约（本机无 Redis，
-  miniredis+memory 通过）、浏览器端。DSL-SPEC §7 已重写（去掉「未实现」横幅），
-  §7.5 第三规则改「凡配 always 即告警」。
+  mock）编译告警后忽略 pin、节点真实执行。注意：`settings.pin_data_mode` 的未知值
+  由编译期静默忽略改为编译报错，存量定义需先确认取值合法。复核阶段修正：`59ff4c4`
+  （系统任务提交后的认领结算并入 inactive 分支，消除 `ErrSystemTaskHandled` 的重复
+  入队循环）。待验证：真 Redis 契约（本机无 Redis，miniredis+memory 通过）、浏览器端。
+  DSL-SPEC §7 已重写（去掉「未实现」横幅），§7.5 第三规则改「凡配 always 即告警」。
 
 - **gRPC 传输不代理指标**（原 P2-5）—— 2026-10-08 按裁定与
   [SUPPLY-NODE-TODO.md](./SUPPLY-NODE-TODO.md) 的「已知且接受的代价，不单独立项」
@@ -145,6 +142,9 @@ gRPC 组结果承载的两处缺口（传输与类型）、map batch 续期的�
   关空闲连接串成一步。两轮专项安全审查 PASS（无 Critical/High；并发测试对 mutex
   属回归检查而非必要性证明，如实记录）。未验证：真实 SIGHUP 演练、mTLS 下的续期。
   runbook §4.3 覆盖表与已知边界（CA bundle 内容不可校验、客户端应建一次复用）已同步。
+  复核阶段修正：`be892ef`（`OverrideServerName` 不再写凭据内部状态）、`9c6238e`
+  （无法解析的 runner origin 构造期报错，不再静默丢掉 token）、`956e7d3`（身份续期
+  请求体不再携带旧 token）。
 
 - **MAP 的 runner 级资源治理只剩配置面与证据缺口**（原 P2-9）—— `c0b39ca`
   （2026-10-08）：独立 runner CLI/YAML 暴露 `--map-batch-concurrency` /
@@ -160,16 +160,28 @@ gRPC 组结果承载的两处缺口（传输与类型）、map batch 续期的�
 - **组级 `error_output` 的错误载荷没有结构化的失败成员名**（原 P3-13）—— `13cc289`、
   `2b2836a`（2026-10-08）：失败成员身份从 `subgraph.Result` 结构化上传
   （`Result.FailedMember` → `engine.GroupResult.FailedMember` → 组错误载荷
-  `data["failed_members"]`），`protocol.GroupResultWire` 补 `failed_member,omitempty`
-  双向映射。gRPC 传输的组结果承载是独立缺口，见 P2-6。
+  `data["failed_members"]`；载荷形状用 `[]any` 保持跨后端一致，见 `f7eb946`），
+  `protocol.GroupResultWire` 补 `failed_member,omitempty` 双向映射。gRPC 传输的组
+  结果承载缺口在复核阶段一并关闭，见下一条。
+
+- **gRPC 传输的 `ReportResult` 整体丢弃 GroupResult**（2026-10-08 收口期间新登记）
+  —— `f85540a`、`022bcfc`、`36c4a1e`（2026-10-08）：`runnerpb` 的 `ReportResult` 补
+  `bytes group_result_json = 6`，双向复用 `protocol.MarshalGroupResult`/
+  `UnmarshalGroupResult`（nil 与空字节的 presence 规则无歧义），组结果现在经 HTTP
+  与 gRPC 两条传输都完整到达控制面；`engine.CommitTaskResultWithOutcome` 补组租约
+  守卫（组租约必须走组提交路径），旧客户端经 gRPC 上报组结果时得到明确拒绝。实情
+  修正：修复前的失败形态不是「空成功」，而是零值结果提交被后端围栏按过期 token
+  拒绝——错误信息误导、组结果永不成功上报；HTTP 传输一直正常。
+  [NODE-GROUP-COLOCATION.md](./NODE-GROUP-COLOCATION.md) 的失败成员段已同步（`36c4a1e`）。
 
 - **嵌入式 `Server.ReplaceWorkflow` 会清空编辑器元数据**（原 P3-14）—— `6501ad0`
   （2026-10-08）：新增 `ReplaceWorkflowWithMetadata`（apiserver 侧
   `ReplaceWorkflowReportWithMetadata` 薄封装），嵌入式宿主可显式携带元数据；原
   `ReplaceWorkflow` 的清空行为与既有测试不变。
 
-- **entry unit 的显式 activation 副本扩展**（原 P2-8）—— `5520a01`（2026-09-01）：
-  `ActivationReplicas` 类型/SDK、`FeatureEntryActivationReplicaV1` 能力位、reconciler
-  多副本与端到端测试；该 commit 在 clean 候选 `c39a271` 之内。出处文档已同步
+- **entry unit 的显式 activation 副本扩展**（原 P2-8）—— 控制面 per-replica emit 与
+  `ActivationReplicas` 见 `0d30009`（2026-08-28），能力位常量
+  `FeatureEntryActivationReplicaV1` 见同日 `8e1aa3e`；graph IR 流转与 rstate 副本键
+  见 `5520a01`（2026-09-01），该 commit 在 clean 候选 `c39a271` 之内。出处文档已同步
   （2026-10-08）：[NODE-GROUP-COLOCATION.md](./NODE-GROUP-COLOCATION.md) §12.2 的
   单副本说明已改为已实现。
