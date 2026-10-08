@@ -6,11 +6,11 @@
 
 runner 的身份（`runner_id` + `token`）来自入册（enrollment），由 `sdk/runner/identity.go` 与 `sdk/runner/enroll.go` 实现。
 
-- `--identity-store=ephemeral`（默认）：身份只保存在内存里，进程重启后会丢失，需要重新入册（消耗一个新的注册码）。
-- `--identity-store=file --identity-file=<path>`：身份以 JSON 持久化到 `<path>`，重启后复用，不会再消耗注册码。写入时按 0600 创建；加载时 `fileIdentityStore.Load` 会拒绝任何 group/other 可读的身份文件（判据是 `mode & 0o077 != 0`，因此 0600 与 0400 都可接受），并报错要求手工收紧权限，而不是静默忽略权限问题。
-- `--registration-code`（或 `XFLOW_RUNNER_REGISTRATION_CODE`）：仅在身份存储里**还没有**身份时才会被使用（`resolveRunnerIdentity` 的优先级：已存身份 > 注册码 > 都没有则维持原样，即走已配置的静态 `--id`/`--token`）。**注册码是一次性的**：只要使用 `ephemeral` 存储（或每次重启都清空 `--identity-file`），每次重启都要一个新码；只有 `--identity-store=file` 且文件持久化在磁盘上才能免去这一步。
-- **入册后 `--id` 不生效。** `--id`（即 `ProposedRunnerID`）只作为审计提示随入册请求一起发给服务端；服务端文档明确写了永不采纳这个提议 ID（否则"以已存在的 ID 入册"就是身份接管路径）。入册成功后，`cfg.runnerID` 会被服务端签发的 ID 整体覆盖。
-  **`--id` 在未入册路径下仍然生效**：如果既没有已存身份、也没有配置 `--registration-code`（纯静态 `--id` + `--token` 部署，或走 YAML 显式将 `runner.id` 置空），`--id` 的值会原样作为 `runnerID` 使用；后者（YAML 里显式 `id: ""`）还会触发 `sdk/runner/run.go` 的 `runWithSignals` 里的兜底：`cfg.runnerID == ""` 时自动填 `fmt.Sprintf("runner-%d", os.Getpid())`。
+- `--identity-store=ephemeral`（默认）：身份只保存在内存里，进程重启后会丢失，需要重新入册（再次使用注册令牌完成入册）。
+- `--identity-store=file --identity-file=<path>`：身份以 JSON 持久化到 `<path>`，重启后复用，不会再消耗注册令牌。写入时按 0600 创建；加载时 `fileIdentityStore.Load` 会拒绝任何 group/other 可读的身份文件（判据是 `mode & 0o077 != 0`，因此 0600 与 0400 都可接受），并报错要求手工收紧权限，而不是静默忽略权限问题。
+- `--registration-token`（或 `XFLOW_RUNNER_REGISTRATION_TOKEN`，注册令牌由 SAS 百宝箱签发、池作用域）：仅在身份存储里**还没有**身份时才会被使用（`resolveRunnerIdentity` 的优先级：已存身份 > 注册令牌 > 都没有则维持原样，即走已配置的静态 `--id`/`--token`）。**注册令牌不是一次性的**：服务端默认 `max_uses=0`（不限次数），有效期内可反复用于入册；但用 `ephemeral` 存储（或每次重启都清空 `--identity-file`）时每次重启都会重新入册、各消耗一次使用次数，只有 `--identity-store=file` 且文件持久化在磁盘上才能免去这一步。
+- **入册模式下不得配置 `--id`，入册后 ID 一律由服务端唯一签发。** 检测到「没有已存身份 + 配了注册令牌 + 显式配置了 `--id`（flag/env/YAML 任一来源）」时，`resolveRunnerIdentity` 会在发出任何网络请求前直接报 `runner id must not be configured when enrolling with a registration token` 拒绝启动——服务端是唯一 ID 签发者，配置与否不会改变结果，因此失败发生在请求之前，而不是被静默覆盖。入册成功后用于后续运行的身份 ID 一律是服务端签发值，并持久化在 `--identity-file` 里供重启复用。
+  **`--id` 在未入册路径下仍然生效**：如果既没有已存身份、也没有配置 `--registration-token`（纯静态 `--id` + `--token` 部署，或走 YAML 显式将 `runner.id` 置空），`--id` 的值会原样作为 `runnerID` 使用；后者（YAML 里显式 `id: ""`）还会触发 `sdk/runner/run.go` 的 `runWithSignals` 里的兜底：`cfg.runnerID == ""` 时自动填 `fmt.Sprintf("runner-%d", os.Getpid())`。
 - enroll 端点只挂在控制面的 HTTP 服务上，**没有 gRPC 版本**。`resolveRunnerIdentity` 入册请求始终经由 HTTP 发出，与 `--transport` 无关；因此 `--transport=grpc` 的 runner 若要入册，`--server` 仍必须是一个可达的 http(s) origin（同时还要配 `--grpc-target` 供任务流量使用）。
 
 ## 传输安全
@@ -20,12 +20,12 @@ runner 默认拒绝在没有任何 TLS 材料的情况下启动，因为 bearer 
 - **常规启动**（`sdk/runner/config.go` 的 `validateTransportSecurity`）：`--transport=http` 时，`https://` 的 `--server` 即视为已加密；`--transport=grpc` 时没有 URL scheme 可看，只认 TLS 材料——`--tls-server-ca` / `--tls-client-cert` / `--tls-client-key` **三者任一非空**就放行。注意这只是"会不会明文过网"的门禁，不是 mTLS 的配置要求：真要做 mTLS，`--tls-client-cert` 与 `--tls-client-key` 必须成对配齐，但那是服务端握手的要求，门禁本身并不检查。两种 transport 下都可以用 `--allow-plaintext` 显式放行。
 - **入册门禁**（`sdk/runner/enroll.go` 的 `validateEnrollTransportSecurity`）：由于入册请求固定走 HTTP（见上一节），这里单独判 `--server` 的 scheme 必须是 `https://`，否则同样要求 `--allow-plaintext`。这一判据独立于 `--transport`：一个 `--transport=grpc` 且已配好 gRPC TLS 材料的 runner，只要这次运行确实会入册、`--server` 仍是 `http://` 且没有 `--allow-plaintext`，就会被拒绝。
 
-  这条门禁的触发条件是**两个条件的合取**——配了 `--registration-code`，**且**身份存储里还没有已存身份——在两个时刻各执行一次：
+  这条门禁的触发条件是**两个条件的合取**——配了 `--registration-token`，**且**身份存储里还没有已存身份——在两个时刻各执行一次：
 
   1. **配置校验时**（`sdk/runner/config.go` 的 `validateRunnerConfig`）。这一步是 `config validate`、`verify`、`run` **三个子命令共用**的，所以 `config validate` 不会再放行一个 `run` 必然拒绝的配置——**就这条门禁而言**，把它当作发布前置检查是可靠的（`config validate` 覆盖不到的部分见下面 `verify` 那一节）。
   2. **真正发出入册请求前**（`sdk/runner/enroll.go` 的 `resolveRunnerIdentity`）。作为最后一道防线保留，不因为第 1 步已经查过就省略。
 
-  只看「配了 `--registration-code`」是不够的：`resolveRunnerIdentity` 会先查身份存储，一旦已有已存身份就直接复用、立即返回，根本不会走到入册这一步——哪怕 `--registration-code` 仍留在 env 或发布脚本里（重启并不会特意清空它，这在现实部署里很常见）。身份已持久化时这次运行本就不会入册，因此不触发这条门禁；没配 `--registration-code` 时同样不触发——这次运行本来就没有码可用来入册。
+  只看「配了 `--registration-token`」是不够的：`resolveRunnerIdentity` 会先查身份存储，一旦已有已存身份就直接复用、立即返回，根本不会走到入册这一步——哪怕 `--registration-token` 仍留在 env 或发布脚本里（重启并不会特意清空它，这在现实部署里很常见）。身份已持久化时这次运行本就不会入册，因此不触发这条门禁；没配 `--registration-token` 时同样不触发——这次运行本来就没有码可用来入册。
 
 `--allow-plaintext` 一旦打开，对上面两条门禁都生效（入册门禁的两个执行时刻也一并放行），因为它绕开的是"是否需要 TLS"这个判断本身，不是分别配置。
 
@@ -47,8 +47,8 @@ runner 默认拒绝在没有任何 TLS 材料的情况下启动，因为 bearer 
 
 - `--require-supply-encryption`：默认关闭。开启后，如果 runner 成功注册但控制面在注册响应里没有签发供应加密密钥，视为致命错误——runner 会把这个错误记为 `lifecycleState.fatal`（此时 `/readyz` 恒 503，原因是这条错误文案本身），并取消运行上下文使进程退出，而不是继续以明文方式拉取供应内容。默认关闭是因为"控制面没配供应加密器"本身是一种合法部署形态。
 - `xflow-runner verify` 子命令做同样的检查，但发生在启动之前：它复用与 `run` 完全相同的配置翻译路径（`toSDKRunnerConfig` + `xflowsdk.VerifyRunner`），如果 `--require-supply-encryption` 与实际注册结果不符，会在终端直接报错退出，而不是等到进程跑起来再 CrashLoopBackOff。
-- **`verify` 与 `run` 使用相同的身份解析路径。** 它会先加载并采用 `--identity-store=file` 中已持久化的身份；若其中没有身份且提供了 `--registration-code`，则会发起入册并使用控制面签发的身份继续预检。因此，`verify` 验证的是实际会被 `run` 使用的身份鉴权、连接、TLS 材料、控制面可达性及 `--require-supply-encryption`，而不只是静态配置。
-  **这也意味着它不是无副作用的预检。** 首次以注册码运行 `verify` 可能消耗注册码的可用次数，并在 file store 中写入身份；`--identity-store=ephemeral` 则不会保留该身份。生产发布应先完成入册并持久化身份，再用 `verify` 做可重复的启动前检查；若只想做无鉴权的连通性探测，不要传 `--registration-code`。
+- **`verify` 与 `run` 使用相同的身份解析路径。** 它会先加载并采用 `--identity-store=file` 中已持久化的身份；若其中没有身份且提供了 `--registration-token`，则会发起入册并使用控制面签发的身份继续预检。因此，`verify` 验证的是实际会被 `run` 使用的身份鉴权、连接、TLS 材料、控制面可达性及 `--require-supply-encryption`，而不只是静态配置。
+  **这也意味着它不是无副作用的预检。** 首次以注册令牌运行 `verify` 可能消耗令牌的可用次数，并在 file store 中写入身份；`--identity-store=ephemeral` 则不会保留该身份。生产发布应先完成入册并持久化身份，再用 `verify` 做可重复的启动前检查；若只想做无鉴权的连通性探测，不要传 `--registration-token`。
 
 ## ActivationReplicas 与 HPA 的手工同步
 
