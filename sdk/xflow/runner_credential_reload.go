@@ -382,9 +382,11 @@ func (c *reloadableGRPCCredentials) Clone() credentials.TransportCredentials {
 	return &reloadableGRPCCredentials{reloader: c.reloader, base: c.base.Clone()}
 }
 
-// OverrideServerName is deprecated in grpc-go; it is kept for the interface,
-// and like credentials.NewTLS's implementation only records the name.
-func (c *reloadableGRPCCredentials) OverrideServerName(name string) error {
-	c.base.ServerName = name
-	return nil
+// OverrideServerName exists only to satisfy credentials.TransportCredentials;
+// grpc-go has deprecated it and never calls it (the channel authority, set by
+// grpc.WithAuthority, is what ClientHandshake verifies against). It refuses
+// rather than writing c.base, which ClientHandshake clones concurrently on
+// every handshake: the write would be a data race for no effect.
+func (c *reloadableGRPCCredentials) OverrideServerName(string) error {
+	return errors.New("xflow: runner gRPC credentials do not support OverrideServerName; use grpc.WithAuthority")
 }

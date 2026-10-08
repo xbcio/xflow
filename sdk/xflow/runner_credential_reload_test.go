@@ -898,6 +898,19 @@ func TestControlPlaneHTTPClientSendsTheTokenOnlyToTheRunnersOrigin(t *testing.T)
 	}
 }
 
+// TestReloadableGRPCCredentialsOverrideServerNameLeavesTheBaseAlone pins that
+// the deprecated OverrideServerName does not write the base config every
+// ClientHandshake clones concurrently.
+func TestReloadableGRPCCredentialsOverrideServerNameLeavesTheBaseAlone(t *testing.T) {
+	creds := newReloadableGRPCCredentials(mustTestCredentialReloader(t, RunnerConfig{ServerURL: "https://x.invalid"}), &tls.Config{MinVersion: tls.VersionTLS12})
+	if err := creds.OverrideServerName("other.invalid"); err == nil {
+		t.Fatal("OverrideServerName returned nil, want an error")
+	}
+	if creds.base.ServerName != "" {
+		t.Fatalf("base ServerName = %q, want it untouched", creds.base.ServerName)
+	}
+}
+
 // TestRunnerGRPCTransportReadsReloadedCAPoolOnHandshake is the gRPC CA
 // rotation regression. The server's leaf is signed by caNew; the runner starts
 // out trusting only caOld, so its connection attempts fail. After a Reload to
