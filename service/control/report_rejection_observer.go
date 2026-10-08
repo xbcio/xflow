@@ -104,6 +104,8 @@ func (c *Core) reportLeaseStillResolvable(ctx context.Context, runnerID, session
 		AssignmentID: BuildAssignmentID(&echoed.Task),
 		LeaseID:      echoed.LeaseID,
 		LeaseToken:   echoed.LeaseToken,
+		NodeName:     echoed.Task.NodeName,
+		NodeIdx:      echoed.Task.NodeIdx,
 	})
 	if err != nil || !found || resolved == nil {
 		return false

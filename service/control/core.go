@@ -1250,6 +1250,8 @@ func (c *Core) reportResult(ctx context.Context, req protocol.ReportResultReques
 		AssignmentID: BuildAssignmentID(&req.Lease.Task),
 		LeaseID:      req.Lease.LeaseID,
 		LeaseToken:   req.Lease.LeaseToken,
+		NodeName:     req.Lease.Task.NodeName,
+		NodeIdx:      req.Lease.Task.NodeIdx,
 	})
 	if lerr != nil {
 		return protocol.ReportResultResponse{}, normalizeRunnerError(lerr, c.logger, "report_result")
