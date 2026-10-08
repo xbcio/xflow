@@ -199,11 +199,14 @@ nodes:
     parameters: object    # 节点参数
 
 # 节点禁用行为
-# disabled: true 的节点在编译后被标记为 skipped：
-#   - 引擎不执行该节点，状态直接置为 skipped
+# disabled: true 的节点在编译后被标记，引擎不执行它：
+#   - 状态直接置为 skipped（终态）
 #   - skipped 视为「已完成」：下游节点的依赖判定中，skipped 等同于 success
 #   - 下游节点通过 $nodes['disabled_node'] 访问时返回 nil（与未执行节点一致）
 #   - 连线保留（不重连）：disabled 节点的出边目标仍然生效，入边来源仍然计入上游
+# 支持范围：trigger / supply 节点、co-location 组成员、body 子工作流成员，
+# 以及 allow_cycles / faf 工作流中的节点不支持 disabled——这些形态在编译期
+# 报错（显式拒绝，不会静默真实执行）
 # 典型用途：调试时临时跳过某节点，不破坏工作流拓扑
 
 # Handler 版本解析
@@ -2429,18 +2432,22 @@ settings:
 
 | 维度 | `disabled: true` | `pin_data` |
 |------|-----------------|------------|
-| 执行 | 见 §3.1「节点禁用行为」 | 不执行 handler，状态 `pinned`（终态，视为 `success`） |
-| 输出 | — | `$nodes['x']` → pin_data 中的 mock 数据 |
-| 下游影响 | — | 下游正常运行，数据完整 |
-| 用途 | 临时移除节点 | 跳过慢节点，加速调试 |
-| 优先级 | — | `disabled: true` 的节点如果在 pin_data 中也有数据，`disabled` 优先：pin 被忽略并给出编译告警 |
-
-> 当前实现说明：`disabled` 的运行时语义（§3.1「节点禁用行为」所述置 `skipped`）尚未实现，disabled 节点目前仍会真实执行。pin_data 对它只保证 pin 不生效，不改变它的执行方式。
+| 执行 | 不执行节点，状态 `skipped`（终态，视为 `success`） | 不执行 handler，状态 `pinned`（终态，视为 `success`） |
+| 输出 | 无输出；`$nodes['x']` → nil | `$nodes['x']` → pin_data 中的 mock 数据 |
+| 下游影响 | 下游正常运行（读到 nil） | 下游正常运行，数据完整 |
+| 用途 | 临时移除节点（保留拓扑） | 跳过慢节点，加速调试 |
+| 优先级 | 节点同时配 `disabled` 与 `pin_data` 时 `disabled` 优先：pin 被忽略并给出编译告警（见 §7.5） | — |
+| 支持范围 | trigger / supply 节点、组成员、body 成员、allow_cycles / faf 工作流不支持，编译期报错（见 §7.5） | 见 §7.4 所列不支持类别，编译告警并忽略条目 |
 
 ### 7.4 运行时行为
 
 ```
 节点任务出队后、发起租约前检查：
+  │
+  ├─ 节点在编译期被标记 disabled（§3.1）？
+  │    ├─ 否 → 继续下面的 pin 检查
+  │    └─ 是 → 原子提交：状态 skipped，无输出，
+  │              沿 main 端口推进下游；不发租约
   │
   ├─ 节点在编译期被分配了 pin（见 §7.5 的忽略规则）？
   │    ├─ 否 → 正常执行（发租约 → Runner 执行 handler）
@@ -2448,6 +2455,11 @@ settings:
   │    └─ 生效 → 原子提交：状态 pinned，输出 = pin_data[node_name]，
   │              沿 main 端口推进下游；不发租约
 ```
+
+**`skipped` 状态语义**（disabled 节点与 skip 级联共用）：
+- 是终态：重复投递的任务不会再次提交或执行
+- 在依赖判定和执行结果判定中等同 `success`
+- disabled 节点沿 `main` 端口完成提交，下游照常调度并读到 nil；这与 skip 级联不同——级联沿空端口传播，把下游一并跳过
 
 **`pinned` 状态语义**：
 - 是终态：重复投递的任务不会再次提交或执行，迟到的 skip 级联也不会覆盖它
@@ -2471,7 +2483,8 @@ settings:
 | pin_data 数据不是对象 | **warning** | 条目被忽略 |
 | pin_data 数据不满足节点 output_schema 的 required 字段 | **warning** | mock 数据不完整，下游可能拿到 nil；pin 仍生效 |
 | 配置 pin_data_mode: always 且至少有一个节点被钉住 | **warning** | 凡配 always 即告警：所有执行都会跳过这些节点的真实调用 |
-| 节点 disabled、或属于 §7.4 所列不支持的类别 | **warning** | 条目被忽略 |
+| 节点 disabled、或属于 §7.4 所列不支持的类别 | **warning** | pin 条目被忽略（disabled 优先） |
+| disabled 用于不支持的形态：trigger / supply 节点、co-location 组成员、body 成员、allow_cycles / faf 工作流 | **error** | 编译失败：这些形态的 disabled 无法被引擎拦截，显式拒绝而非静默真实执行 |
 
 告警随工作流注册（创建 / 替换）响应的 `warnings` 返回，不阻止注册。
 
