@@ -675,8 +675,12 @@ func oversizeReport(req protocol.ReportResultRequest, cause error) protocol.Repo
 	slim.GroupPayload = nil
 	slim.SubgraphPayload = nil
 	if p := slim.Task.Payload; p != nil {
-		// BuildAssignmentID reads only the signal name and trigger.
+		// BuildAssignmentID reads only the signal name and trigger, plus a
+		// map batch's parent_lease_id.
 		slim.Task.Payload = &types.SignalPayload{Triggered: p.Triggered, Name: p.Name}
+		if gen, ok := p.Data["parent_lease_id"]; ok {
+			slim.Task.Payload.Data = map[string]any{"parent_lease_id": gen}
+		}
 	}
 	req.Lease = &slim
 	req.GroupResult = nil
