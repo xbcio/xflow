@@ -69,7 +69,7 @@ func assignPinData(def *types.WorkflowDef, g *Graph) error {
 		meta := &g.nodes[idx]
 		switch {
 		case disabled[name]:
-			g.addWarning(fmt.Sprintf("pin_data: 节点 %q 已 disabled，disabled 优先，该条目被忽略", name))
+			g.addWarning(fmt.Sprintf("pin_data: 节点 %q 已 disabled 且配了 pin_data，pin 被忽略（disabled 的运行时语义尚未实现，本处只保证 pin 不生效）", name))
 			continue
 		case meta.Kind == types.NodeKindSupply:
 			g.addWarning(fmt.Sprintf("pin_data: 节点 %q 是 supply 节点，不参与调度，该条目被忽略", name))

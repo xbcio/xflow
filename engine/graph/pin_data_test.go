@@ -125,8 +125,8 @@ func TestAssignPinData_UnsupportedShapesAreIgnoredWithWarning(t *testing.T) {
 	if _, ok := g.PinnedOutput(0); ok || g.PinDataMode() != "" {
 		t.Fatal("disabled node received a pin")
 	}
-	if !hasWarning(g, "disabled 优先") {
-		t.Fatalf("warnings %q lack the disabled precedence note", g.Warnings())
+	if !hasWarning(g, "已 disabled 且配了 pin_data，pin 被忽略") {
+		t.Fatalf("warnings %q lack the disabled-and-pinned note", g.Warnings())
 	}
 
 	def = pinDef(types.PinDataModeAlways)
