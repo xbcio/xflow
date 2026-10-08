@@ -2,7 +2,9 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/xbcio/xflow/engine/graph"
@@ -154,7 +156,10 @@ func TestGroupErrorOutput_MemberFailureRoutesToErrorTarget(t *testing.T) {
 // failedMember (what the production CommitGroupResult path now supplies from
 // GroupResult.FailedMember, itself copied from subgraph.Result.FailedMember),
 // the payload must carry it under "failed_members" alongside the pre-existing
-// "group"/"error" keys, unchanged.
+// "group"/"error" keys, unchanged. The slice is asserted as []any, not
+// []string: see groupErrorOutputData's doc comment on why -- a []string here
+// would read back as []string on the memory backend but []any after a Redis
+// JSON round trip, and this field must have one shape on both.
 func TestGroupErrorOutputData_IncludesFailedMembersWhenKnown(t *testing.T) {
 	meta := graph.GroupMeta{Name: "g"}
 	data := groupErrorOutputData(meta, errors.New("member boom"), "g.sink")
@@ -169,12 +174,47 @@ func TestGroupErrorOutputData_IncludesFailedMembersWhenKnown(t *testing.T) {
 	if errField["message"] != "member boom" {
 		t.Fatalf("error message = %v, want %q", errField["message"], "member boom")
 	}
-	failedMembers, ok := data["failed_members"].([]string)
+	failedMembers, ok := data["failed_members"].([]any)
 	if !ok {
-		t.Fatalf("error output data = %+v, want a \"failed_members\" []string", data)
+		t.Fatalf("error output data = %+v, want a \"failed_members\" []any", data)
 	}
 	if len(failedMembers) != 1 || failedMembers[0] != "g.sink" {
 		t.Errorf("failed_members = %v, want [\"g.sink\"]", failedMembers)
+	}
+}
+
+// TestGroupErrorOutputData_FailedMembersShapeSurvivesJSONRoundTrip proves
+// that the "failed_members" value groupErrorOutputData produces decodes back
+// to the SAME shape ([]any holding a string) after a JSON marshal/unmarshal
+// cycle -- the transformation the Redis state store (rstate) applies to
+// stored output Data, but the in-memory backend (memstore) does not. Without
+// this, an expr/function node reading $('g').json.failed_members via a type
+// assertion or a DeepEqual-style comparison would see a different Go type
+// depending on which backend committed the group, which is exactly the
+// cross-backend inconsistency this field must not have.
+func TestGroupErrorOutputData_FailedMembersShapeSurvivesJSONRoundTrip(t *testing.T) {
+	meta := graph.GroupMeta{Name: "g"}
+	data := groupErrorOutputData(meta, errors.New("member boom"), "g.sink")
+
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+
+	before, ok := data["failed_members"].([]any)
+	if !ok {
+		t.Fatalf("pre-round-trip failed_members = %T, want []any", data["failed_members"])
+	}
+	after, ok := decoded["failed_members"].([]any)
+	if !ok {
+		t.Fatalf("post-round-trip failed_members = %T, want []any (shape changed across the JSON round trip)", decoded["failed_members"])
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Errorf("failed_members changed across the JSON round trip: before=%#v after=%#v", before, after)
 	}
 }
 
@@ -501,9 +541,9 @@ func TestCommitGroupResult_PropagatesFailedMemberIntoErrorOutput(t *testing.T) {
 	if len(exits) != 1 {
 		t.Fatalf("lastCommit.Exits = %+v, want exactly 1 (the synthetic error exit)", exits)
 	}
-	failedMembers, ok := exits[0].Data["failed_members"].([]string)
+	failedMembers, ok := exits[0].Data["failed_members"].([]any)
 	if !ok {
-		t.Fatalf("error output data = %+v, want a \"failed_members\" []string", exits[0].Data)
+		t.Fatalf("error output data = %+v, want a \"failed_members\" []any", exits[0].Data)
 	}
 	if len(failedMembers) != 1 || failedMembers[0] != "B" {
 		t.Errorf("failed_members = %v, want [\"B\"]", failedMembers)

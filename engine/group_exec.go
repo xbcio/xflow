@@ -269,8 +269,8 @@ func (e *Engine) commitGroup(ctx context.Context, g *graph.Graph, lease *GroupLe
 // produced execErr, when the caller has one to offer (see
 // subgraph.Result.FailedMember and its propagation through
 // GroupRuntime.ExecuteRequest to GroupResult.FailedMember). It is added to
-// the payload under "failed_members" ([]string, currently always
-// zero-or-one name) only when non-empty: unlike a node-level failure
+// the payload under "failed_members" ([]any, currently always zero-or-one
+// name) only when non-empty: unlike a node-level failure
 // (types.Error.NodeName, set by the handler boundary that calls a single
 // node), identity used to be unrecoverable for a group because execErr was
 // subgraph.Result.Error — a plain string copied from the inner execution's
@@ -280,6 +280,15 @@ func (e *Engine) commitGroup(ctx context.Context, g *graph.Graph, lease *GroupLe
 // (engine/group_lease.go); the local GroupExecutor test fake still has no
 // such identity to offer and passes "", which keeps the key omitted exactly
 // as before this field existed.
+//
+// []any, not []string: this map is stored as output Data and round-trips
+// through JSON on the Redis backend (rstate), which decodes a JSON array back
+// into []any — the memory backend keeps whatever Go value was stored, with no
+// such round trip. A []string literal here would therefore read back as
+// []string on memory and []any on Redis, and an expr/function node doing a
+// type assertion or a DeepEqual-style comparison against this field would see
+// a different shape depending on which backend committed it. []any already
+// is that shape, consistently, in both backends.
 func groupErrorOutputData(meta graph.GroupMeta, execErr error, failedMember string) map[string]any {
 	errMsg := ""
 	if execErr != nil {
@@ -290,7 +299,7 @@ func groupErrorOutputData(meta graph.GroupMeta, execErr error, failedMember stri
 		"error": map[string]any{"message": errMsg},
 	}
 	if failedMember != "" {
-		data["failed_members"] = []string{failedMember}
+		data["failed_members"] = []any{failedMember}
 	}
 	return data
 }
