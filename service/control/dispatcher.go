@@ -63,6 +63,12 @@ const (
 	// returned unmarked so a retry-capable transport retries it. See the mode
 	// note on HandleTask for what a fire-and-forget transport does instead.
 	dispatchDropClassifyError = "classify_error"
+	// dispatchDropBatchDuplicate is a map batch the runner directory refused
+	// as a duplicate of one it already holds. The delivery is still acked; it
+	// is counted because a refused batch that was not really a redelivery
+	// leaves its expansion barrier one child short until the parent lease
+	// expires.
+	dispatchDropBatchDuplicate = "batch_duplicate"
 )
 
 // dispatcherDropLogInterval bounds how often the lost-task path writes a log
@@ -276,7 +282,7 @@ func (d *Dispatcher) HandleTask(ctx context.Context, task *engine.Task) error {
 		d.observeTransient(ctx, "no_runner_directory")
 		return &Transient{Err: ErrNoMatchingRunner}
 	}
-	_, err = d.runners.EnqueueAssignment(ctx, Assignment{
+	enqueued, err := d.runners.EnqueueAssignment(ctx, Assignment{
 		AssignmentID: BuildAssignmentID(task),
 		Task:         *task,
 		Routing:      routing,
@@ -285,6 +291,9 @@ func (d *Dispatcher) HandleTask(ctx context.Context, task *engine.Task) error {
 	if err != nil {
 		d.observeTransient(ctx, dispatchTransientReason(err))
 		return &Transient{Err: err}
+	}
+	if !enqueued && task.Type == engine.TaskTypeNodeBatch {
+		d.observeDrop(ctx, dispatchDropBatchDuplicate)
 	}
 	return nil
 }
