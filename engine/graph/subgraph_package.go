@@ -590,6 +590,13 @@ func compileTrusted(def *types.WorkflowDef, visibleSupplies, visibleOuterNodes [
 		if _, dup := g.index[nd.Name]; dup {
 			return nil, fmt.Errorf("duplicate node name: %s", nd.Name)
 		}
+		if nd.Disabled {
+			// The graph-level disabled hook only intercepts the outer
+			// workflow's own node units; a projected package never runs
+			// through it, so the flag would be silently ignored here. Same
+			// explicit-rejection rule as assignDisabledNodes.
+			return nil, fmt.Errorf("projected package %q: node %q: disabled is not supported in projected packages", def.Name, nd.Name)
+		}
 		g.index[nd.Name] = i
 		g.nodes[i] = NodeMeta{
 			Name:               nd.Name,

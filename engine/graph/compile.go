@@ -299,6 +299,14 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	if err := validateBodyOuterRefs(g); err != nil {
 		return nil, err
 	}
+	// assignDisabledNodes before assignPinData: disabled takes precedence over
+	// a pin on the same node, so the flag is resolved first.
+	if err := assignDisabledNodes(def, g); err != nil {
+		return nil, err
+	}
+	if err := assignPinData(def, g); err != nil {
+		return nil, err
+	}
 	if err := assignPinData(def, g); err != nil {
 		return nil, err
 	}

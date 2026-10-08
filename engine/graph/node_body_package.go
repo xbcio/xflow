@@ -202,6 +202,16 @@ func outerRefNames(refs []BodyOuterRef) []string {
 // references. Shared with validateNodeBody so the validation and the projection
 // cannot disagree about what a valid body is.
 func compileBodyMembers(mapNodeName string, nodes []types.NodeDef, conns types.Connections) (*Graph, int, []BodyOuterRef, error) {
+	// A body runs as its own projected execution; the graph-level disabled hook
+	// (assignDisabledNodes) only intercepts the outer workflow's own nodes, so
+	// a disabled member could never be honoured. Reject it here, where every
+	// body validation and projection path converges -- validateNodeBody and the
+	// projection itself share this function, so they cannot disagree.
+	for i := range nodes {
+		if nodes[i].Disabled {
+			return nil, 0, nil, fmt.Errorf("node %q: body member %q: disabled is not supported inside a body", mapNodeName, nodes[i].Name)
+		}
+	}
 	bodyDef := &types.WorkflowDef{Nodes: nodes, Connections: conns}
 	n := len(nodes)
 	bg := &Graph{

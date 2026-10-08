@@ -55,6 +55,15 @@ type Graph struct {
 	// snapshot of every graph without pins.
 	pinDataMode string
 
+	// hasDisabled reports whether any node carries NodeMeta.Disabled. It is a
+	// derived cache -- true iff at least one node has the flag -- and is
+	// deliberately neither serialized nor hashed: NodeMeta.Disabled already
+	// travels inside Nodes and already moves the hash for the graphs that use
+	// it, so a second copy could only ever disagree with it. UnmarshalJSON
+	// re-derives the cache from the decoded nodes, the same way supplyIndexes
+	// is re-derived from node kinds.
+	hasDisabled bool
+
 	// Two-layer IR: durable scheduling topology (P0-2). When no groups are
 	// defined the unit graph mirrors the node graph 1:1.
 	groups       []GroupMeta
@@ -214,6 +223,21 @@ func (g *Graph) PinnedOutput(i int) (map[string]any, bool) {
 	return cloneStringAnyMap(g.nodes[i].PinOutput), true
 }
 
+// HasDisabledNodes reports whether any node of this graph carries the
+// definition's disabled flag. The engine's disabled-node hook short-circuits
+// on this before any per-task work, so a graph without disabled nodes pays one
+// bool read per exec task.
+func (g *Graph) HasDisabledNodes() bool { return g.hasDisabled }
+
+// NodeDisabled reports whether the node at position i is disabled. An
+// out-of-range index reports false so callers can use it as a plain predicate.
+func (g *Graph) NodeDisabled(i int) bool {
+	if i < 0 || i >= len(g.nodes) {
+		return false
+	}
+	return g.nodes[i].Disabled
+}
+
 // TransientTTL returns the per-workflow transient active TTL override.
 // Zero means use the engine-wide default.
 func (g *Graph) TransientTTL() time.Duration { return g.transientTTL }
@@ -364,6 +388,17 @@ type NodeMeta struct {
 	// field-by-field, so an unpinned node must not contribute a "PinOutput":null
 	// and move every persisted graph's hash.
 	PinOutput map[string]any `json:",omitempty"`
+	// Disabled is the definition's disabled flag for this node, assigned by
+	// assignDisabledNodes. A disabled node is never executed: the engine's
+	// disabled-node hook commits it as skipped with its "main" port active, so
+	// downstream nodes still run and read nil for it (DSL-SPECIFICATION §3.1).
+	// Shapes the hook cannot intercept are rejected at compile time instead of
+	// being marked here.
+	//
+	// omitempty is load-bearing for the same reason as Body's and PinOutput's:
+	// NodeMeta is hashed field-by-field, so a non-disabled node must not
+	// contribute a "Disabled":false and move every persisted graph's hash.
+	Disabled bool `json:",omitempty"`
 }
 
 // Edge represents a directed connection between two nodes.
