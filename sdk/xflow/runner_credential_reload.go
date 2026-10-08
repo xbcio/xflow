@@ -147,12 +147,41 @@ func loadRunnerCredentialMaterial(src CredentialReloaderSource) (*runnerCredenti
 // is returned so the caller can log it — never with a token value or key
 // material inside it, since this function's own errors only ever name a path
 // or a parse failure, never a secret.
+//
+// A reload that would weaken server verification is refused the same way:
+// dropping every TLS setting while TLS is configured, or dropping the server
+// CA while a private CA is trusted. Either would otherwise apply silently —
+// verification would fall back to the system roots, and the gRPC transport,
+// which decides TLS-or-plaintext once at dial time, would keep the TLS
+// handshake with no private CA to check it against. A config edit that
+// empties these settings is far more often a mistake than an intent; a real
+// move off a private CA is made with a restart.
 func (r *CredentialReloader) Reload(src CredentialReloaderSource) error {
 	mat, err := loadRunnerCredentialMaterial(src)
 	if err != nil {
 		return err
 	}
+	if err := checkRunnerTrustNotWeakened(r.snapshot(), mat); err != nil {
+		return err
+	}
 	r.current.Store(mat)
+	return nil
+}
+
+// checkRunnerTrustNotWeakened rejects the two reload transitions that would
+// silently loosen how the runner verifies the control plane.
+func checkRunnerTrustNotWeakened(prev, next *runnerCredentialMaterial) error {
+	if prev == nil {
+		return nil
+	}
+	if !prev.tlsPlain && next.tlsPlain {
+		return errors.New("refusing to reload: the new configuration drops all TLS settings " +
+			"(server CA, client certificate and key) while TLS is configured; restart the runner to stop using TLS")
+	}
+	if prev.rootCAs != nil && next.rootCAs == nil {
+		return errors.New("refusing to reload: the new configuration drops the server CA, " +
+			"which would fall back to the system trust store; restart the runner to stop trusting a private CA")
+	}
 	return nil
 }
 

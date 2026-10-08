@@ -587,8 +587,9 @@ being checked is theatre; confirm the posture first (`--mode=production` makes
   `Reload`, re-reads `--tls-server-ca` / `--tls-client-cert` /
   `--tls-client-key` from the same paths (or the same config
   file/environment, for the runner, re-resolved the way startup resolved
-  them) and swaps them in **only if every file parses**; a bad file leaves
-  the previous certificate and CA pool serving unchanged and logs the error.
+  them) and swaps them in **only if every file parses** and the result does
+  not weaken server verification (see below); otherwise the previous
+  certificate and CA pool keep serving unchanged and the error is logged.
   After a successful runner-side reload, the idle HTTP keep-alive connections
   of every runner HTTP client are closed so a connection already established
   under the old client certificate is not reused.
@@ -613,9 +614,17 @@ being checked is theatre; confirm the posture first (`--mode=production` makes
   `NewRunnerHTTPClient` reads the files once and never changes. The only
   call made through it in `sdk/runner` is enrollment, before the runner
   exists, so it has nothing to reload.
-  Whether a runner speaks TLS at all is fixed at startup on the gRPC
-  transport (and by the `ServerURL` scheme on HTTP), so a reload cannot move
-  a runner between plaintext and TLS.
+- **A reload cannot weaken server verification.** A runner-side reload that
+  drops every TLS setting while TLS is configured, or drops the server CA
+  while a private CA is trusted, is rejected like a bad file: the error is
+  logged and the previous material keeps serving. Accepting it would
+  silently fall back to the system trust store (and on gRPC keep a TLS
+  handshake with no private CA to check it against). To really stop using
+  TLS or a private CA, restart the runner with the new configuration. Adding
+  TLS material, or replacing a CA with another CA, reloads normally. Whether
+  the gRPC transport speaks TLS at all is fixed at startup (and by the
+  `ServerURL` scheme on HTTP), so a reload never moves a runner from
+  plaintext to TLS either.
 - **The runner's HTTP transport dials the control plane directly.** It does
   not honour `HTTP_PROXY`/`HTTPS_PROXY`: net/http would verify a proxied
   HTTPS tunnel against a static CA pool and bypass the reloadable one.

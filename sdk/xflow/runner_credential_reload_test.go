@@ -935,3 +935,57 @@ func TestNewRunnerHandsItsReloaderToTheOriginClients(t *testing.T) {
 		t.Fatalf("reloader tracks %d transports, want 3: the artifact client was not built over it", tracked)
 	}
 }
+
+// TestRunnerReloadRefusesToWeakenServerVerification pins the fail-closed rule
+// for trust: a reload that empties every TLS setting, or drops the private
+// server CA, is rejected and the previous material keeps serving.
+func TestRunnerReloadRefusesToWeakenServerVerification(t *testing.T) {
+	dir := t.TempDir()
+	ca, caPEM, caKey := generateCredReloadTestCA(t, "weaken CA")
+	caPath := writeCredReloadPEM(t, filepath.Join(dir, "ca.pem"), caPEM)
+	cert, key := filepath.Join(dir, "c.crt"), filepath.Join(dir, "c.key")
+	writeCredReloadClientLeaf(t, ca, caKey, "client", cert, key)
+
+	cases := []struct {
+		name string
+		src  CredentialReloaderSource
+	}{
+		{"every TLS setting emptied", CredentialReloaderSource{Token: "token-b"}},
+		{"server CA dropped, client cert kept", CredentialReloaderSource{Token: "token-b", TLSClientCert: cert, TLSClientKey: key}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, err := NewRunner(RunnerConfig{
+				ServerURL: "https://127.0.0.1:1", RunnerID: "weaken", Token: "token-a",
+				TLSServerCA: caPath, TLSClientCert: cert, TLSClientKey: key,
+				ArtifactCacheDir: t.TempDir(),
+			})
+			if err != nil {
+				t.Fatalf("NewRunner: %v", err)
+			}
+			defer r.Close()
+			if err := r.Reload(tc.src); err == nil {
+				t.Fatal("Reload weakening server verification: want error, got nil")
+			}
+			if got := r.credReloader.Token(); got != "token-a" {
+				t.Fatalf("token after a refused Reload = %q, want token-a", got)
+			}
+			if r.credReloader.rootCAs() == nil || !r.credReloader.tlsConfigured() {
+				t.Fatal("a refused Reload still replaced the TLS material")
+			}
+		})
+	}
+
+	// A runner that never had a private CA may still reload without one.
+	plain, err := newCredentialReloader(RunnerConfig{Token: "token-a"})
+	if err != nil {
+		t.Fatalf("newCredentialReloader: %v", err)
+	}
+	if err := plain.Reload(CredentialReloaderSource{Token: "token-b"}); err != nil {
+		t.Fatalf("plaintext-to-plaintext Reload: %v", err)
+	}
+	// Adding a CA is a strengthening, so it is allowed.
+	if err := plain.Reload(CredentialReloaderSource{Token: "token-c", TLSServerCA: caPath}); err != nil {
+		t.Fatalf("Reload adding a server CA: %v", err)
+	}
+}
