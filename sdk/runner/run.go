@@ -242,6 +242,16 @@ type credentialReloadingRunner interface {
 	Reload(xflowsdk.CredentialReloaderSource) error
 }
 
+// controlPlaneClientRunner is the optional capability the identity-renewal
+// loop builds its client from: *xflow.Runner hands out an *http.Client that
+// follows its Reload (xflow.Runner.ControlPlaneHTTPClient). Optional for the
+// same reason as credentialReloadingRunner — a test double implementing only
+// Run/Close stays a valid runnerService, and renewal then falls back to a
+// static client built from cfg.
+type controlPlaneClientRunner interface {
+	ControlPlaneHTTPClient(xflowsdk.RunnerConfig, time.Duration) (*http.Client, error)
+}
+
 var newRunnerService = func(cfg xflowsdk.RunnerConfig, opts ...xflowsdk.RunnerOption) (runnerService, error) {
 	return xflowsdk.NewRunner(cfg, opts...)
 }
@@ -419,7 +429,7 @@ func runRunner(ctx context.Context, cfg runnerConfig) error {
 	// the gate; every one of its "do not start" outcomes fails open (at most
 	// a Warn), because none of them is a reason an already-valid identity
 	// should stop serving traffic.
-	if rc, start, warnMsg, warnErr := decideIdentityRenewal(cfg, store); warnErr != nil {
+	if rc, start, warnMsg, warnErr := decideIdentityRenewal(cfg, store, runner); warnErr != nil {
 		slog.Warn(warnMsg, "runner_id", cfg.runnerID, "error", warnErr)
 	} else if start {
 		go startIdentityRenewal(runCtx, rc, cfg.runnerID, cfg.token, slog.Default())
@@ -659,19 +669,33 @@ func runnerHasIssuedIdentity(store identityStore) (bool, error) {
 }
 
 // renewClientFor builds the HTTP protocol client the renewal loop calls
-// through.
+// through, for the life of the process.
 //
-// This mirrors the client sdk/xflow's newRunnerProtocolClient builds for the
-// HTTP transport -- TLS material via NewRunnerHTTPClient, then WithToken --
-// and NOT the enrollment client (resolveRunnerIdentity, above), which has no
-// token to attach because enrollment is the one call made before a token
-// exists. Renewal already holds one, and an already-enrolled runner's request
+// It carries the runner's token -- unlike the enrollment client
+// (resolveRunnerIdentity, above), which has none because enrollment is the
+// one call made before a token exists. An already-enrolled runner's request
 // must carry it or the server authenticates against an empty string and
 // renewal fails every time with no crash and no red test to catch it.
-func renewClientFor(cfg runnerConfig) (renewClient, error) {
+//
+// When runner offers ControlPlaneHTTPClient (every *xflow.Runner does), the
+// client is built from it, so a SIGHUP that rotates the client certificate,
+// the server CA or the token reaches renewal as well. A client built once
+// from cfg would keep the old material for the life of the process: after a
+// CA or certificate rotation every renewal would fail until the identity
+// expired and the runner lost authentication altogether. That client then
+// attaches the live token itself, so none is set here. Only a runner without
+// the capability (a test double) gets the static client.
+func renewClientFor(cfg runnerConfig, runner runnerService) (renewClient, error) {
 	sdkCfg, err := toSDKRunnerConfig(cfg)
 	if err != nil {
 		return nil, err
+	}
+	if live, ok := runner.(controlPlaneClientRunner); ok {
+		httpClient, err := live.ControlPlaneHTTPClient(sdkCfg, enrollHTTPTimeout)
+		if err != nil {
+			return nil, fmt.Errorf("renew: build http client: %w", err)
+		}
+		return protocol.NewClient(cfg.serverURL, httpClient), nil
 	}
 	httpClient, err := xflowsdk.NewRunnerHTTPClient(sdkCfg, enrollHTTPTimeout)
 	if err != nil {
@@ -701,7 +725,7 @@ func renewClientFor(cfg runnerConfig) (renewClient, error) {
 //     then proceed to run the rest of the runner unaffected -- none of these
 //     checks failing is a reason an already-valid identity should stop
 //     serving traffic.
-func decideIdentityRenewal(cfg runnerConfig, store identityStore) (rc renewClient, start bool, warnMsg string, warnErr error) {
+func decideIdentityRenewal(cfg runnerConfig, store identityStore, runner runnerService) (rc renewClient, start bool, warnMsg string, warnErr error) {
 	hasIssued, herr := runnerHasIssuedIdentity(store)
 	if herr != nil {
 		// Unable to tell whether this identity was issued; the identity is
@@ -722,7 +746,7 @@ func decideIdentityRenewal(cfg runnerConfig, store identityStore) (rc renewClien
 		// headline here.
 		return nil, false, "runner identity renewal disabled: renewing over a plaintext --server would send the runner token in the clear; use https or --allow-plaintext", verr
 	}
-	client, cerr := renewClientFor(cfg)
+	client, cerr := renewClientFor(cfg, runner)
 	if cerr != nil {
 		// A renewal client that cannot be built is not a reason to refuse to
 		// run: taking the fleet down over a mis-typed TLS path would turn a

@@ -10,9 +10,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	xflowsdk "github.com/xbcio/xflow/sdk/xflow"
 	"github.com/xbcio/xflow/service/protocol"
 )
 
@@ -311,7 +313,7 @@ func TestRenewClientForCarriesAuthorizationHeader(t *testing.T) {
 	cfg.runnerID = "runner-1"
 	cfg.token = "t-1"
 
-	rc, err := renewClientFor(cfg)
+	rc, err := renewClientFor(cfg, nil)
 	if err != nil {
 		t.Fatalf("renewClientFor: %v", err)
 	}
@@ -372,7 +374,7 @@ func TestDecideIdentityRenewalStaticTokenDoesNotStart(t *testing.T) {
 	cfg.token = "static-token"
 
 	store := &ephemeralIdentityStore{}
-	rc, start, warnMsg, warnErr := decideIdentityRenewal(cfg, store)
+	rc, start, warnMsg, warnErr := decideIdentityRenewal(cfg, store, nil)
 	if start {
 		t.Fatal("start = true for a static-token deployment (empty identity store), want false")
 	}
@@ -410,7 +412,7 @@ func TestDecideIdentityRenewalIssuedIdentityStarts(t *testing.T) {
 		t.Fatalf("seed store: %v", err)
 	}
 
-	rc, start, warnMsg, warnErr := decideIdentityRenewal(cfg, store)
+	rc, start, warnMsg, warnErr := decideIdentityRenewal(cfg, store, nil)
 	if warnErr != nil {
 		t.Fatalf("warnErr = %v, want nil", warnErr)
 	}
@@ -445,7 +447,7 @@ func TestDecideIdentityRenewalRefusesPlaintextWithoutOptIn(t *testing.T) {
 		t.Fatalf("seed store: %v", err)
 	}
 
-	rc, start, warnMsg, warnErr := decideIdentityRenewal(cfg, store)
+	rc, start, warnMsg, warnErr := decideIdentityRenewal(cfg, store, nil)
 	if start {
 		t.Fatal("start = true for a plaintext server without --allow-plaintext, want false")
 	}
@@ -463,5 +465,59 @@ func TestDecideIdentityRenewalRefusesPlaintextWithoutOptIn(t *testing.T) {
 	}
 	if !strings.Contains(warnMsg, "allow-plaintext") {
 		t.Fatalf("warnMsg = %q, want it to name the --allow-plaintext escape hatch", warnMsg)
+	}
+}
+
+// TestRenewClientFollowsRunnerReload is the M1 regression: the renewal loop
+// runs for the life of the process, so its client must follow the runner's
+// credential reload. Built over a real xflow.Runner, a Reload that rotates the
+// token must reach the next RenewIdentity call. Before the fix the renewal
+// client was built once from cfg (NewRunnerHTTPClient + WithToken) and kept
+// the startup token and TLS material forever.
+func TestRenewClientFollowsRunnerReload(t *testing.T) {
+	var gotAuth atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth.Store(r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(protocol.RenewIdentityResponse{})
+	}))
+	defer srv.Close()
+
+	cfg := defaultRunnerConfig()
+	cfg.transport = transportHTTP
+	cfg.serverURL = srv.URL
+	cfg.allowPlaintext = true
+	cfg.runnerID = "runner-1"
+	cfg.token = "token-a"
+	sdkCfg, err := toSDKRunnerConfig(cfg)
+	if err != nil {
+		t.Fatalf("toSDKRunnerConfig: %v", err)
+	}
+	sdkCfg.ArtifactCacheDir = t.TempDir()
+	runner, err := xflowsdk.NewRunner(sdkCfg)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	defer runner.Close()
+
+	rc, err := renewClientFor(cfg, runner)
+	if err != nil {
+		t.Fatalf("renewClientFor: %v", err)
+	}
+	renew := func() string {
+		t.Helper()
+		if _, err := rc.RenewIdentity(context.Background(), protocol.RenewIdentityRequest{RunnerID: cfg.runnerID}); err != nil {
+			t.Fatalf("RenewIdentity: %v", err)
+		}
+		return gotAuth.Load().(string)
+	}
+	if got := renew(); got != "Bearer token-a" {
+		t.Fatalf("before Reload: Authorization = %q, want %q", got, "Bearer token-a")
+	}
+	if err := runner.Reload(xflowsdk.CredentialReloaderSource{Token: "token-b"}); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if got := renew(); got != "Bearer token-b" {
+		t.Fatalf("after Reload: Authorization = %q, want %q (renewal kept the startup credentials)", got, "Bearer token-b")
 	}
 }

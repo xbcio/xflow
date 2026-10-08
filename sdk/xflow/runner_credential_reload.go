@@ -48,10 +48,13 @@ type runnerCredentialMaterial struct {
 //   - The gRPC Runner Protocol transport: client certificate and CA pool per
 //     TLS handshake (reloadableGRPCCredentials); the token through
 //     protocol.GRPCClient.SetToken.
+//   - Runner.ControlPlaneHTTPClient, which sdk/runner's identity-renewal loop
+//     calls through: the same per-dial TLS material and per-request token as
+//     the artifact and entry-seed/supply clients.
 //
-// Not covered: NewRunnerHTTPClient, the exported one-shot client cmd/runner's
-// enrollment bootstrap uses before a Runner exists, reads cfg once and stays
-// static; and RunnerTransportInProc builds no reloader at all.
+// Not covered: NewRunnerHTTPClient reads cfg once and stays static — it is
+// for calls made before a Runner exists (sdk/runner's enrollment); and
+// RunnerTransportInProc builds no reloader at all.
 //
 // Reload is fail-closed: on any read or parse error, the previous snapshot
 // keeps serving and the error is returned without ever logging a token value

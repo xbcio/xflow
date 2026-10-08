@@ -628,6 +628,26 @@ func (r *Runner) Reload(src CredentialReloaderSource) error {
 	return nil
 }
 
+// ControlPlaneHTTPClient returns an *http.Client for a host's own calls to
+// the control-plane origin (RunnerConfig.ServerURL) that follows this
+// runner's Reload: its TLS material is read on every dial and its bearer
+// token is attached to every request for that origin, exactly like the
+// runner's artifact and entry-seed/supply clients. A caller using it must not
+// attach its own Authorization header, since it would be replaced.
+//
+// sdk/runner's identity-renewal loop uses it: that loop runs for the life of
+// the process, so a client built once from RunnerConfig would keep presenting
+// the old certificate, and trusting the old CA, after a rotation, until
+// renewal failed and the identity expired.
+//
+// Call it once and keep the client; every call builds a new transport. Under
+// RunnerTransportInProc there is no reloader, and this returns the same
+// static client NewRunnerHTTPClient builds.
+func (r *Runner) ControlPlaneHTTPClient(cfg RunnerConfig, timeout time.Duration) (*http.Client, error) {
+	client, _, err := newRunnerOriginHTTPClient(cfg, r.credReloader, timeout)
+	return client, err
+}
+
 func releaseRunnerResources(releaseBrowserCDP, releaseObservers, cleanup func(), pool types.ResourcePool) error {
 	if releaseBrowserCDP != nil {
 		releaseBrowserCDP()
@@ -1387,8 +1407,8 @@ func newRunnerOriginHTTPClient(cfg RunnerConfig, reloader *CredentialReloader, t
 //
 // The returned client is static. It reads cfg's files once, here, and is not
 // connected to any Runner's CredentialReloader, so Runner.Reload does not
-// change what it presents or trusts. Build a new one after rotating the
-// material if it is kept beyond a one-shot call.
+// change what it presents or trusts. For a client that outlives a rotation,
+// use Runner.ControlPlaneHTTPClient once a Runner exists.
 func NewRunnerHTTPClient(cfg RunnerConfig, timeout time.Duration) (*http.Client, error) {
 	return newRunnerHTTPClient(cfg, timeout)
 }

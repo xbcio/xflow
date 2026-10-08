@@ -601,13 +601,21 @@ being checked is theatre; confirm the posture first (`--mode=production` makes
   | Runner Protocol, gRPC transport | per RPC | per handshake | per handshake |
   | Artifact fetch (`GET /v1/artifacts/{digest}`) | per request | per handshake | per dial |
   | Entry seed (`POST /v1/executions`) and supply fetch (`GET /v1/supplies/{name}`), one shared client | per request | per handshake | per dial |
-  | `xflow.NewRunnerHTTPClient` (the enrollment bootstrap's one-shot client, built before a `Runner` exists) | not reloaded | not reloaded | not reloaded |
+  | Identity renewal (`POST` renew, standalone runner with an enrollment-issued identity; long-lived, runs for the life of the process) | per request | per handshake | per dial |
+  | Enrollment (`xflow.NewRunnerHTTPClient`, one call made before the `Runner` exists) | not reloaded | not reloaded | not reloaded |
 
-  `NewRunnerHTTPClient` is static on purpose: it serves one call made before
-  registration, and a client built from it later must be rebuilt to see new
-  material. Whether a runner speaks TLS at all is fixed at startup on the
-  gRPC transport (and by the `ServerURL` scheme on HTTP), so a reload cannot
-  move a runner between plaintext and TLS.
+  The renewal client is built from the running `Runner`
+  (`Runner.ControlPlaneHTTPClient`), so a rotation reaches it like the others.
+  Before that fix it was built once from the startup configuration: after a
+  CA or client-certificate rotation every renewal failed until the issued
+  identity expired and the runner lost authentication. An embedded host that
+  keeps its own long-lived client should get it the same way;
+  `NewRunnerHTTPClient` reads the files once and never changes. The only
+  call made through it in `sdk/runner` is enrollment, before the runner
+  exists, so it has nothing to reload.
+  Whether a runner speaks TLS at all is fixed at startup on the gRPC
+  transport (and by the `ServerURL` scheme on HTTP), so a reload cannot move
+  a runner between plaintext and TLS.
 - **The runner's HTTP transport dials the control plane directly.** It does
   not honour `HTTP_PROXY`/`HTTPS_PROXY`: net/http would verify a proxied
   HTTPS tunnel against a static CA pool and bypass the reloadable one.
