@@ -49,6 +49,10 @@ type GroupResultWire struct {
 	Outcome         engine.GroupOutcome   `json:"outcome"`
 	Exits           []GroupExitResultWire `json:"exits,omitempty"`
 	Error           string                `json:"error,omitempty"`
+	// FailedMember mirrors engine.GroupResult.FailedMember: the failing
+	// member node's name when the runner identified one, empty when unknown
+	// (never evidence that no member failed).
+	FailedMember string `json:"failed_member,omitempty"`
 }
 
 // GroupExitResultWire is a single boundary exit port output on the wire.
@@ -155,6 +159,7 @@ func MarshalGroupResult(res engine.GroupResult) ([]byte, error) {
 		Outcome:         res.Outcome,
 		Exits:           exits,
 		Error:           res.Error,
+		FailedMember:    res.FailedMember,
 	}
 	return json.Marshal(wire)
 }
@@ -180,5 +185,6 @@ func UnmarshalGroupResult(data []byte) (engine.GroupResult, error) {
 		Outcome:         wire.Outcome,
 		Exits:           exits,
 		Error:           wire.Error,
+		FailedMember:    wire.FailedMember,
 	}, nil
 }

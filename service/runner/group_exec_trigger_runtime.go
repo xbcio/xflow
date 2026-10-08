@@ -50,11 +50,15 @@ var _ types.TriggerRuntime = (*groupExecTriggerRuntime)(nil)
 // canceled verdict once it did run.
 func (g *groupExecTriggerRuntime) ExecuteGroup(ctx context.Context, input map[string]any) (types.GroupExecResult, error) {
 	// ExecuteSubgraph, not ExecuteRequest: the latter maps onto
-	// engine.GroupResult, the control plane's wire shape, which carries no
-	// failure classification (protocol.GroupResultWire has no such field). This
-	// path never crosses the wire — the group runs in this process, for this
-	// Kafka batch — so it reads the executor's own result and keeps the
-	// classification the failing member set.
+	// engine.GroupResult, the control plane's wire shape (protocol.GroupResultWire,
+	// which does carry a FailedMember field now, but only reaches the control
+	// plane over the HTTP transport's ReportResult — the gRPC transport's
+	// ReportResultRequestToProto/FromProto still drop GroupResult entirely, an
+	// existing, separate gap). This path never crosses the wire at all — the
+	// group runs in this process, for this Kafka batch — so it reads the
+	// executor's own subgraph.Result and keeps the full classification
+	// (including FailedMember) that types.GroupExecResult still has no field
+	// for, rather than narrowing to whatever a wire round trip would carry.
 	res, err := g.runtime.ExecuteSubgraph(ctx, subgraph.Request{
 		Package:         g.pkg,
 		PackageHash:     g.packageHash,

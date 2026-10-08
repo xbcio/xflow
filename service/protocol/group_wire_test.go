@@ -150,6 +150,67 @@ func TestGroupResultWire_FailedWithError(t *testing.T) {
 	}
 }
 
+// TestGroupResultWire_FailedMemberRoundTrip pins that engine.GroupResult's
+// FailedMember (added so the control plane can name the member node whose
+// fatal failure produced a group error, see engine/group.go) survives the
+// wire boundary. Before this, GroupResultWire mapped every GroupResult field
+// except this one, so a runner's identification of the failing member was
+// silently dropped between MarshalGroupResult and UnmarshalGroupResult.
+func TestGroupResultWire_FailedMemberRoundTrip(t *testing.T) {
+	result := engine.GroupResult{
+		ProtocolVersion: 1,
+		GroupExecID:     "exec-789",
+		Attempt:         1,
+		Outcome:         engine.GroupOutcomeFailed,
+		Error:           "member B failed",
+		FailedMember:    "B",
+	}
+
+	data, err := MarshalGroupResult(result)
+	if err != nil {
+		t.Fatalf("MarshalGroupResult: %v", err)
+	}
+
+	decoded, err := UnmarshalGroupResult(data)
+	if err != nil {
+		t.Fatalf("UnmarshalGroupResult: %v", err)
+	}
+
+	if decoded.FailedMember != "B" {
+		t.Errorf("FailedMember = %q, want %q", decoded.FailedMember, "B")
+	}
+}
+
+// TestGroupResultWire_FailedMemberOmittedWhenUnknown mirrors the empty-value
+// semantics of the other optional fields on GroupResultWire (e.g. Error): an
+// empty FailedMember means "unknown", not "no member failed", and must
+// round-trip as empty rather than some other sentinel.
+func TestGroupResultWire_FailedMemberOmittedWhenUnknown(t *testing.T) {
+	result := engine.GroupResult{
+		ProtocolVersion: 1,
+		GroupExecID:     "exec-790",
+		Attempt:         1,
+		Outcome:         engine.GroupOutcomeFailed,
+		Error:           "execution deadline exceeded",
+	}
+
+	data, err := MarshalGroupResult(result)
+	if err != nil {
+		t.Fatalf("MarshalGroupResult: %v", err)
+	}
+	if strings.Contains(string(data), "failed_member") {
+		t.Errorf("wire payload = %s, want failed_member omitted when unknown", data)
+	}
+
+	decoded, err := UnmarshalGroupResult(data)
+	if err != nil {
+		t.Fatalf("UnmarshalGroupResult: %v", err)
+	}
+	if decoded.FailedMember != "" {
+		t.Errorf("FailedMember = %q, want empty (unknown)", decoded.FailedMember)
+	}
+}
+
 func TestCapability_NewFieldsBackwardsCompat(t *testing.T) {
 	// Old-format capability (only node_type + node_version).
 	oldJSON := `{"node_type":"http.request","node_version":1}`
