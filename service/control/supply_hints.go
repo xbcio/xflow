@@ -210,19 +210,26 @@ func (h *SupplyHinter) HintsForRunner(ctx context.Context, runnerID string) map[
 }
 
 // SupplyObservedSink records what each runner reports as its applied content.
-// A simple in-memory map is enough: the question it answers ("is everyone on
-// revision N") is about the present moment, and a leader change legitimately
-// resets it — the next heartbeat round refills it.
+// The question it answers ("is everyone on revision N") is about the present
+// moment, so nothing here is durable: a leader change or restart legitimately
+// resets it, and the next heartbeat round refills it. What it must NOT be is
+// process-local — the read arrives through a load balancer, so a sink that
+// only knows this process's heartbeats answers for a fraction of the fleet.
+// See selectSupplyObserved for how a backend picks an implementation.
 type SupplyObservedSink interface {
 	Record(runnerID string, observed map[string]string)
 	// Snapshot returns runner ID → (supply name → applied hash).
 	Snapshot() map[string]map[string]string
 }
 
-// MemorySupplyObserved is the in-memory SupplyObservedSink. A leader failover
-// legitimately loses this state — it is diagnostic ("has everyone converged"),
-// never a gate on anything, and the next heartbeat round from every runner
-// refills it within one heartbeat interval.
+// MemorySupplyObserved is the process-local SupplyObservedSink, the fallback
+// for single-replica and test deployments (see selectSupplyObserved). A leader
+// failover legitimately loses this state — it is diagnostic ("has everyone
+// converged"), never a gate on anything, and the next heartbeat round from
+// every runner refills it within one heartbeat interval. In a multi-replica
+// deployment that same property is a defect: each replica only ever sees the
+// runners whose heartbeats it happened to receive, so the snapshot flaps with
+// the load balancer.
 type MemorySupplyObserved struct {
 	mu   sync.Mutex
 	byRn map[string]map[string]string

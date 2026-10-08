@@ -93,13 +93,20 @@ type Config struct {
 	WorkflowRegistry backend.WorkflowRegistry
 	// Supplies, when non-nil, backs the heartbeat-piggybacked supply hint
 	// (server→runner) and observed-hash (runner→server) channels: a
-	// SupplyHinter and a MemorySupplyObserved are constructed and wired into
+	// SupplyHinter and a SupplyObservedSink are constructed and wired into
 	// both the HTTP and gRPC Core instances. Nil means neither is constructed
 	// and heartbeat bodies are byte-identical to before this field existed —
 	// this is the "wiring is optional" requirement: a deployment with no
 	// store.Supplies configured (e.g. no PrincipalAuth for the supply HTTP
 	// module) sees no behavior change at all.
 	Supplies store.Supplies
+	// SupplyObservedSink overrides the sink that retains runner-reported
+	// applied supply hashes. When nil, selectSupplyObserved picks one from the
+	// backend: Redis-backed when the backend exposes a Redis client (so a
+	// report that lands on replica A is visible to a reader on replica B),
+	// process memory otherwise. Ignored unless both Supplies and
+	// EntryActivationStore are set.
+	SupplyObservedSink SupplyObservedSink
 	// EnableSupplyEncryption, when true, enables AES-256-GCM encryption of
 	// supply content delivered to runners. The server generates a key at startup
 	// and distributes it to runners on registration. Requires Supplies to be
@@ -211,6 +218,28 @@ func selectRunnerDirectory(cfg Config, observer RunnerClaimObserver) RunnerDirec
 	return NewMemoryRunnerDirectory()
 }
 
+// selectSupplyObserved resolves the sink for runner-reported applied supply
+// hashes. It mirrors selectRunnerDirectory: an explicit Config override wins,
+// a Redis-backed backend shares observations across replicas, and a deployment
+// without Redis keeps the process-local map it has always had.
+//
+// The Redis branch is not an optimization. The question this sink answers —
+// "has every runner converged on revision N" — is asked through a
+// load-balanced read, and a process-local map only knows the runners whose
+// heartbeats this replica happened to receive: the answer would flip with
+// whichever replica serves the read.
+func selectSupplyObserved(cfg Config) SupplyObservedSink {
+	if cfg.SupplyObservedSink != nil {
+		return cfg.SupplyObservedSink
+	}
+	if provider, ok := cfg.Backend.(redisClientProvider); ok {
+		if client := provider.RedisClient(); client != nil {
+			return NewRedisSupplyObserved(client, DefaultSupplyObservedRetention, cfg.Logger)
+		}
+	}
+	return NewMemorySupplyObserved()
+}
+
 // workflowRegistryProvider is the optional backend capability that exposes a
 // durable workflow registry. The distributed and local providers implement it;
 // backends that do not simply leave the control-plane registry nil.
@@ -282,8 +311,9 @@ type ControlPlane struct {
 
 	// supplyObserved is the optional sink of runner-reported applied supply
 	// hashes. Non-nil only when both Config.EntryActivationStore and
-	// Config.Supplies are provided. Exposed via SupplyObserved() for
-	// diagnostics/management reads.
+	// Config.Supplies are provided; shared across replicas when the backend
+	// exposes Redis (see selectSupplyObserved). Exposed via SupplyObserved()
+	// for diagnostics/management reads.
 	supplyObserved SupplyObservedSink
 
 	// supplyEncryptor is the optional AES-256-GCM encryptor for supply content.
@@ -631,7 +661,7 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		if cfg.Metrics != nil {
 			hinter.SetSupplyHintObserver(metrics.NewSupplyHintMetrics(cfg.Metrics))
 		}
-		observed := NewMemorySupplyObserved()
+		observed := selectSupplyObserved(cfg)
 		httpServer.core.supplyHinter = hinter
 		grpcServer.core.supplyHinter = hinter
 		httpServer.core.supplyObserved = observed
@@ -727,7 +757,9 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 // SupplyObserved returns the sink of runner-reported applied supply hashes, or
 // nil when no store.Supplies was configured (Config.Supplies). Read-only;
 // intended for management/diagnostic surfaces that answer "has runner X
-// applied revision Y yet".
+// applied revision Y yet" — and, through Snapshot, "has every runner applied
+// revision Y yet", which is why the sink is shared across replicas whenever
+// the backend exposes Redis (see selectSupplyObserved).
 func (cp *ControlPlane) SupplyObserved() SupplyObservedSink { return cp.supplyObserved }
 
 // SupplyEncryptor returns the supply content encryptor, or nil when encryption
