@@ -83,6 +83,18 @@ type Result struct {
 	// Meaningful only when Outcome is OutcomeFailed. A timeout or a cancel is
 	// environmental and never permanent; a success has nothing to classify.
 	Permanent bool
+	// FailedMember is the name of the member node whose fatal failure ended
+	// this sub-graph execution, when that identity is available. It is set
+	// from the same engine.ObservedNodeFailure the Error text and Permanent
+	// flag above are already derived from (failureCapture.fatal() in Execute),
+	// so it costs nothing additional to capture — the identity was already in
+	// hand and simply was not kept.
+	//
+	// Empty when there is no such identity to report: a submit-time failure
+	// (Submit rejects the package/graph/params before any member runs), a
+	// timeout, or a cancellation. Callers must not infer a member name from an
+	// empty value — absence here means "unknown", not "no member failed".
+	FailedMember string
 }
 
 // Executor runs sub-graph packages on a fresh embedded backend per execution.
@@ -381,6 +393,11 @@ func (e *Executor) Execute(ctx context.Context, req Request) (Result, error) {
 			// re-derived from result.Error, which by this point is that member's
 			// own free-form message.
 			result.Permanent = f.Permanent
+			// f.NodeName is the member the inner engine actually observed
+			// failing — the same identity ObservedNodeFailure already carries
+			// for Err/Permanent above. Kept as a separate structured field so a
+			// caller (the group runtime) can report it without parsing Error.
+			result.FailedMember = f.NodeName
 		} else {
 			result.Error = "inner execution failed"
 		}

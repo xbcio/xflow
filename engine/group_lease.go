@@ -336,7 +336,7 @@ func (e *Engine) CommitGroupResult(ctx context.Context, lease *TaskLease, res Gr
 		IssuedAt:     lease.IssuedAt,
 	}
 
-	err = e.commitGroup(ctx, g, groupLease, gm, exits, fatal, groupResultError(res), true, routeToErrorOutput)
+	err = e.commitGroup(ctx, g, groupLease, gm, exits, fatal, groupResultError(res), res.FailedMember, true, routeToErrorOutput)
 	if err != nil {
 		// The group's state transition already applied; only the downstream
 		// delivery failed. Keep the classification so the caller releases the

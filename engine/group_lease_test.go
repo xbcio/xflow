@@ -351,7 +351,7 @@ func TestCommitGroup_UnknownExitPrivacyFailsClosed(t *testing.T) {
 		NodeName: "unknown-exit",
 		Port:     "main",
 		Data:     map[string]any{"result": "must not be public"},
-	}}, false, nil, false, false)
+	}}, false, nil, "", false, false)
 	if err != nil {
 		t.Fatalf("commitGroup: %v", err)
 	}

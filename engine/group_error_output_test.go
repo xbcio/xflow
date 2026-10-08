@@ -142,6 +142,54 @@ func TestGroupErrorOutput_MemberFailureRoutesToErrorTarget(t *testing.T) {
 	if errField["message"] != "member boom" {
 		t.Fatalf("error message = %v, want %q", errField["message"], "member boom")
 	}
+	if _, ok := data["failed_members"]; ok {
+		t.Errorf("error output data = %+v, want no \"failed_members\" key: "+
+			"the local GroupExecutor test fake has no member identity to offer, "+
+			"and the key must be omitted rather than carry a guessed name", data)
+	}
+}
+
+// TestGroupErrorOutputData_IncludesFailedMembersWhenKnown pins the unit
+// contract groupErrorOutputData itself promises: given a non-empty
+// failedMember (what the production CommitGroupResult path now supplies from
+// GroupResult.FailedMember, itself copied from subgraph.Result.FailedMember),
+// the payload must carry it under "failed_members" alongside the pre-existing
+// "group"/"error" keys, unchanged.
+func TestGroupErrorOutputData_IncludesFailedMembersWhenKnown(t *testing.T) {
+	meta := graph.GroupMeta{Name: "g"}
+	data := groupErrorOutputData(meta, errors.New("member boom"), "g.sink")
+
+	if data["group"] != "g" {
+		t.Fatalf("error output data = %+v, want group=g", data)
+	}
+	errField, ok := data["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("error output data = %+v, want an \"error\" map", data)
+	}
+	if errField["message"] != "member boom" {
+		t.Fatalf("error message = %v, want %q", errField["message"], "member boom")
+	}
+	failedMembers, ok := data["failed_members"].([]string)
+	if !ok {
+		t.Fatalf("error output data = %+v, want a \"failed_members\" []string", data)
+	}
+	if len(failedMembers) != 1 || failedMembers[0] != "g.sink" {
+		t.Errorf("failed_members = %v, want [\"g.sink\"]", failedMembers)
+	}
+}
+
+// TestGroupErrorOutputData_OmitsFailedMembersWhenEmpty is
+// TestGroupErrorOutputData_IncludesFailedMembersWhenKnown's counter-case: an
+// empty failedMember (the caller has no identity to offer) must omit the key
+// entirely rather than carry an empty slice or a placeholder -- "unknown",
+// not "no member failed".
+func TestGroupErrorOutputData_OmitsFailedMembersWhenEmpty(t *testing.T) {
+	meta := graph.GroupMeta{Name: "g"}
+	data := groupErrorOutputData(meta, errors.New("member boom"), "")
+
+	if _, ok := data["failed_members"]; ok {
+		t.Errorf("error output data = %+v, want no \"failed_members\" key for an empty failedMember", data)
+	}
 }
 
 // TestGroupErrorOutput_SuccessPathUnchanged proves adding error_outputs to a
@@ -406,6 +454,59 @@ func TestCommitGroupResult_DuplicateFailedCommitDoesNotDoubleRoute(t *testing.T)
 	}
 	if secondDownstreamCount != firstDownstreamCount {
 		t.Errorf("lastCommit.Downstream changed on replay: %d -> %d, want unchanged", firstDownstreamCount, secondDownstreamCount)
+	}
+}
+
+// TestCommitGroupResult_PropagatesFailedMemberIntoErrorOutput proves the
+// production path end to end: GroupResult.FailedMember (set by
+// GroupRuntime.ExecuteRequest from subgraph.Result.FailedMember on a real
+// runner report) reaches the committed error_output payload's
+// "failed_members" key via CommitGroupResult -> commitGroup ->
+// groupErrorOutputData, closing the collapse point groupResultError's doc
+// comment used to describe as unrecoverable.
+func TestCommitGroupResult_PropagatesFailedMemberIntoErrorOutput(t *testing.T) {
+	eng, g, execID := setupGroupLeaseTestWithErrorOutput(t)
+	ctx := context.Background()
+
+	gm := g.Groups()[0]
+	task := &Task{
+		ExecutionID:  execID,
+		NodeName:     gm.Name,
+		NodeIdx:      gm.EntryIdx,
+		UnitIdx:      gm.UnitIdx,
+		Type:         TaskTypeGroupExec,
+		ActivationID: 0,
+	}
+	lease, _, err := eng.BuildGroupLease(ctx, task)
+	if err != nil {
+		t.Fatalf("BuildGroupLease: %v", err)
+	}
+
+	outcome, err := eng.CommitGroupResult(ctx, lease, GroupResult{
+		Outcome:      GroupOutcomeFailed,
+		Error:        "member boom",
+		FailedMember: "B",
+	})
+	if err != nil {
+		t.Fatalf("CommitGroupResult: %v", err)
+	}
+	if outcome != CommitOutcomeAccepted {
+		t.Fatalf("outcome = %q, want accepted", outcome)
+	}
+
+	state := eng.state.(*fakeGroupLeaseState)
+	state.mu.Lock()
+	exits := state.lastCommit.Exits
+	state.mu.Unlock()
+	if len(exits) != 1 {
+		t.Fatalf("lastCommit.Exits = %+v, want exactly 1 (the synthetic error exit)", exits)
+	}
+	failedMembers, ok := exits[0].Data["failed_members"].([]string)
+	if !ok {
+		t.Fatalf("error output data = %+v, want a \"failed_members\" []string", exits[0].Data)
+	}
+	if len(failedMembers) != 1 || failedMembers[0] != "B" {
+		t.Errorf("failed_members = %v, want [\"B\"]", failedMembers)
 	}
 }
 

@@ -381,13 +381,32 @@ items listed below under §12.1. What remains open is in §12.2.
     downstream node reads it via `$('g').json.error` exactly like a node's
     output: `GetOutput`/`outputKey` are keyed by a bare name string in every
     backend, never by node index, so there is nothing group-specific a lookup
-    needs to know. There is deliberately no separate "failed member name"
-    field: unlike a node's `types.Error.NodeName`, a group failure's error is a
-    plain string (`subgraph.Result.Error`, copied from the inner execution's
-    terminal error by `service/runner/group_runtime.go`'s `ExecuteRequest`),
-    not a structured value a caller could attach a member identity to today —
-    the member's name is present in that string's text, just not available as
-    its own field.
+    needs to know. **The payload also carries a `failed_members: []string` key
+    when the caller has that identity to offer** (added 2026-10-08, closing the
+    gap this section used to describe): `execution/subgraph.Result` gained a
+    `FailedMember` field set from the same `engine.ObservedNodeFailure` its
+    `Error`/`Permanent` fields were already derived from
+    (`failureCapture.fatal()` in `execution/subgraph/subgraph.go`'s `Execute`);
+    `service/runner/group_runtime.go`'s `ExecuteRequest` copies it onto
+    `engine.GroupResult.FailedMember`; `engine/group_lease.go`'s
+    `CommitGroupResult` passes it through to `commitGroup`, which hands it to
+    `groupErrorOutputData` as a `failedMember string` parameter. The key is
+    added to the payload only when `failedMember != ""` — a submit-time
+    failure (the package never reached a member), a timeout, a cancellation,
+    or the local `GroupExecutor` test fake (which has no such identity to
+    offer) all omit it exactly as before this field existed; the omission
+    reads as "unknown", never as "no member failed". The field is a
+    `[]string` rather than a bare string because today's single-attempt
+    commit path only ever has one failing member to report, but the shape
+    leaves room for a future caller that collects more than one without a
+    breaking change. One transport gap remains: `service/protocol`'s
+    `GroupResultWire`/`ReportResultRequest` wire conversions
+    (`MarshalGroupResult`/`UnmarshalGroupResult`) do not carry
+    `FailedMember` across a networked runner↔control-plane hop today, so a
+    distributed-mode group failure still omits `failed_members` even when the
+    runner captured the identity; only the in-process `ReportResultRequest.
+    GroupResult *engine.GroupResult` path (embedded/local topologies, which
+    skip `GroupResultWire` entirely) carries it end to end.
   - **The commit's reported `Outcome` is `GroupOutcomeSuccess`, not
     `GroupOutcomeFailed`, when the engine decided the failure is non-fatal.**
     This was the one piece the investigations did not have visibility into

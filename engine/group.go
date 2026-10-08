@@ -41,6 +41,13 @@ type GroupResult struct {
 	Outcome         GroupOutcome
 	Exits           []GroupExitResult
 	Error           string
+	// FailedMember is the name of the member node whose fatal failure produced
+	// Error, when the runner that ran the group was able to identify it (see
+	// execution/subgraph.Result.FailedMember, which this is copied from).
+	// Empty when that identity is unavailable — a submit-time failure, a
+	// timeout, a cancellation, or a runner that predates this field. Absence
+	// here must be read as "unknown", never as "no member failed".
+	FailedMember string
 }
 
 // GroupLease 是整组的所有权租约，语义对齐既有 TaskLease。

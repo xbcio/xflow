@@ -150,6 +150,13 @@ func TestGroupRuntime_MemberFailure(t *testing.T) {
 	if result.Error == "" {
 		t.Fatal("expected non-empty error")
 	}
+	// FailedMember must survive the subgraph.Result -> engine.GroupResult
+	// mapping (ExecuteRequest) unchanged: it is the identity
+	// engine/group_exec.go's groupErrorOutputData needs to populate a group
+	// error_output payload's "failed_members" key.
+	if result.FailedMember != "a" {
+		t.Errorf("FailedMember = %q, want %q", result.FailedMember, "a")
+	}
 }
 
 func TestGroupRuntime_DeadlineTimeout(t *testing.T) {

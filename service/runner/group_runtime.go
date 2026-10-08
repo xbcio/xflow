@@ -161,8 +161,9 @@ func (r *GroupRuntime) ExecuteRequest(ctx context.Context, req subgraph.Request)
 	}
 
 	result := engine.GroupResult{
-		Outcome: engine.GroupOutcome(res.Outcome),
-		Error:   res.Error,
+		Outcome:      engine.GroupOutcome(res.Outcome),
+		Error:        res.Error,
+		FailedMember: res.FailedMember,
 	}
 	// See the doc comment on the equivalent conversion in Execute below for
 	// why res.Exits carries no outer-graph NodeIdx.
