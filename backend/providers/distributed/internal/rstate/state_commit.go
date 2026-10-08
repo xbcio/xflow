@@ -280,8 +280,10 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 		// finished execution's output at its full active TTL.
 		//
 		// Order matters — before evictExecutionCaches, which drops the cached
-		// transient decision this needs.
+		// transient decision this needs. The terminal marker goes in the same
+		// transient window, right after shortening has resolved that decision.
 		s.shortenTransientCompletionTTLBestEffort(ctx, req.ExecutionID)
+		s.markExecutionTerminalBestEffort(ctx, req.ExecutionID, out.ExecutionStatus)
 		s.evictExecutionCaches(req.ExecutionID)
 	}
 	// isTransient, not s.transient: req.Output is the node's payload, so a

@@ -50,8 +50,13 @@ func (s *Store) CheckCompletion(ctx context.Context, id types.ExecutionID, total
 	}
 	switch result {
 	case 1:
+		// checkCompletionLua finalizes the execution inside the script, so this
+		// is another terminal transition that never passes through
+		// UpdateExecutionStatus and has to record the marker itself.
+		s.markExecutionTerminalBestEffort(ctx, id, types.ExecutionStatusSuccess)
 		return true, false, nil
 	case -1:
+		s.markExecutionTerminalBestEffort(ctx, id, types.ExecutionStatusFailed)
 		return true, true, nil
 	default:
 		return false, false, nil

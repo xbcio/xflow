@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -117,6 +118,19 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 	// enough for the first node commit to project its payload into SQL.
 	if perExecTransient {
 		s.markExecutionTransient(ctx, pipe, e.ID, hint.TTL, hint.CompletionTTL, ttl)
+	}
+	// Persist the retention this execution was created with so
+	// GetExecutionRetention can still answer with the TTL the writes actually
+	// used after the process-local override is gone and, more generally, so
+	// its absence remains a meaningful signal (see retentionRecordKey). Every
+	// execution gets one, not only overridden ones: a record written only for
+	// overrides would make an ordinary execution's absent record
+	// indistinguishable from an expired override's, and GetExecutionRetention
+	// treats absence as "window unknown".
+	if recorded := s.recordedRetention(ttl); recorded.Milliseconds() > 0 {
+		if recordTTL := s.retentionRecordTTL(recorded); recordTTL > 0 {
+			pipe.Set(ctx, retentionRecordKey(t, e.ID), strconv.FormatInt(recorded.Milliseconds(), 10), recordTTL)
+		}
 	}
 
 	var rec *store.ExecutionRecord
@@ -283,6 +297,8 @@ func (s *Store) cleanupCreatedExecution(ctx context.Context, e *engine.Execution
 		execKey(t, e.ID, "span_id"),
 		execKey(t, e.ID, "trace_carrier"),
 		transientMarkKey(t, e.ID),
+		terminalMarkKey(t, e.ID),
+		retentionRecordKey(t, e.ID),
 		remainingNodesKey(t, e.ID),
 		failedNodesKey(t, e.ID),
 		leaseExpiryZSetKey(t, e.ID),
@@ -385,6 +401,11 @@ func (s *Store) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID,
 		if err := s.shortenTransientCompletionTTL(ctx, id, keys...); err != nil {
 			return err
 		}
+		// Order matters: the marker is read by the engine's inactive-execution
+		// classifier after the status key is gone, and it must keep the active
+		// retention — so it is written before evictExecutionCaches drops the
+		// transient decision the marker's TTL resolution needs.
+		s.markExecutionTerminalBestEffort(ctx, id, status)
 		// Redis persists the graph for later inspection/reload; the in-process
 		// cache and per-execution TTL override must not survive a terminal state.
 		s.evictExecutionCaches(id)
@@ -399,6 +420,164 @@ func (s *Store) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID,
 	_ = s.PublishExecutionEvent(ctx, engine.ExecutionEvent{ExecutionID: id, Status: status, Error: errMsg})
 	return nil
 }
+
+// markExecutionTerminalBestEffort records the terminal marker that lets the
+// engine's inactive-execution classifier tell a benign late delivery from lost
+// work after the status key is gone.
+//
+// Only transient executions get one. A durable execution's status key already
+// keeps the full active retention — nothing shortens it — so a marker there
+// would duplicate, key for key, a record that expires at the same moment. A
+// transient execution's status key is shortened to the completion TTL in the
+// very transition that terminalizes it, and the marker is then the only record
+// of the terminal outcome for the rest of the active retention. That window is
+// exactly where the classification matters: a backlogged task can be consumed
+// long after the completion TTL lapsed, and without the marker "no status"
+// would read as "work never ran" on an execution that completed normally.
+//
+// Best effort by the same argument as shortenTransientCompletionTTLBestEffort:
+// the terminal transition is already durable, so failing the caller would make
+// it retry a transition that succeeded. The failure is logged rather than
+// swallowed because losing the marker converts benign late deliveries into
+// false loss verdicts once the backlog outlives the completion TTL.
+func (s *Store) markExecutionTerminalBestEffort(ctx context.Context, id types.ExecutionID, status types.ExecutionStatus) {
+	if !types.IsTerminalExecutionStatus(status) || !s.isTransient(ctx, id) {
+		return
+	}
+	ttl := s.getExecTTL(ctx, id)
+	if ttl <= 0 {
+		return
+	}
+	t := namespace.FromContext(ctx)
+	if err := s.rdb.Set(ctx, terminalMarkKey(t, id), string(status), ttl).Err(); err != nil && s.logger != nil {
+		s.logger.Error("mark_execution_terminal_failed", "execution_id", string(id), "status", string(status), "err", err)
+	}
+}
+
+// GetExecutionTerminalStatus implements engine.ExecutionTerminalReader: the
+// terminal outcome recorded by markExecutionTerminalBestEffort, read after the
+// status key itself may already have expired.
+func (s *Store) GetExecutionTerminalStatus(ctx context.Context, id types.ExecutionID) (types.ExecutionStatus, bool, error) {
+	t := namespace.FromContext(ctx)
+	val, err := s.rdb.Get(ctx, terminalMarkKey(t, id)).Result()
+	if err == redis.Nil {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("get execution terminal marker %q: %w", id, err)
+	}
+	return types.ExecutionStatus(val), true, nil
+}
+
+var _ engine.ExecutionTerminalReader = (*Store)(nil)
+
+// retentionRecordTTLFactor is how much longer the persisted retention record
+// lives than the longest retention any resolution could report.
+//
+// The record is written once, at creation, while the execution's evidence
+// keys can keep being re-EXPIREd until its last state write, and a delivery
+// can still be inside its window when it is consumed up to one retention
+// after that write (the status key survives one retention past the write, and
+// a task whose age is at most one retention is consumed no later than one
+// further retention after that). The margin buys the record that one extra
+// retention, on the same argument transientMarkerTTLFactor documents: a
+// forgotten or absent refresh defers the record's expiry instead of letting
+// it die under evidence it still describes. A longer-lived execution can
+// still outlive its record first; absence then answers "unknown" and the
+// classifier lands in unattributed, which is the deliberate under-report —
+// never an over-stated window.
+const retentionRecordTTLFactor = 2
+
+// recordedRetention bounds the value the retention record may store for an
+// execution created with `retention`: it is capped by the deployment default
+// execTTL.
+//
+// A terminal write on a replica that does not hold the process-local override
+// (or whose transient marker has already lapsed) resolves its TTL through
+// getExecTTL and lands on execTTL, so a recorded value above it could name a
+// window the terminal evidence never had. Under-stating the window is safe
+// here — it only moves drops to unattributed; over-stating it is the
+// false-loss shape the record exists to prevent.
+func (s *Store) recordedRetention(retention time.Duration) time.Duration {
+	if s.execTTL > 0 && s.execTTL < retention {
+		return s.execTTL
+	}
+	return retention
+}
+
+// retentionRecordTTL sizes the persisted retention record's lifetime for an
+// execution whose resolved retention is `retention`. It takes the longest TTL
+// any resolution could report so the record cannot expire while a fallback
+// value smaller than itself would still be wanted, then applies
+// retentionRecordTTLFactor. A non-positive result means the store has no
+// expiry at all and no record is written; absence then reads as "unknown".
+func (s *Store) retentionRecordTTL(retention time.Duration) time.Duration {
+	ttl := retention
+	if s.execTTL > ttl {
+		ttl = s.execTTL
+	}
+	if s.transientTTL > ttl {
+		ttl = s.transientTTL
+	}
+	if ttl <= 0 {
+		return 0
+	}
+	return ttl * retentionRecordTTLFactor
+}
+
+// GetExecutionRetention implements engine.ExecutionRetentionReader: the active
+// retention that bounds how long any record of the execution — its status key
+// or its terminal marker — can survive after its last write. The engine's
+// inactive-execution classifier compares a delivery's queue wait against this
+// window; beyond it, a task for an execution that finished long ago is
+// indistinguishable from one for an execution that expired under its queued
+// work, and the verdict becomes "unattributed" rather than a false loss
+// report.
+//
+// Resolution order: the process-local per-execution override, then the
+// retention record persisted at creation (written for every execution), then
+// engine.ExecutionRetentionUnknown. There is deliberately no value fallback:
+// the local map is deleted at terminalization and never survives a restart or
+// a replica change, and once the record is gone too the TTL that actually
+// bounded the writes cannot be confirmed — getExecTTL could report the longer
+// global TTL for an execution whose override (or shorter transient TTL) is
+// what its terminal evidence lived by, over-stating the window and turning a
+// benign late duplicate into a reported loss. Unknown lands such deliveries
+// in unattributed: still counted, still permanent, still logged, but not a
+// loss claim. The method must never report a window larger than the one the
+// status and marker writes actually used.
+func (s *Store) GetExecutionRetention(ctx context.Context, id types.ExecutionID) (time.Duration, error) {
+	s.ttlMu.RLock()
+	override := s.execTTLs[id]
+	s.ttlMu.RUnlock()
+	if override > 0 {
+		return override, nil
+	}
+	t := namespace.FromContext(ctx)
+	val, err := s.rdb.Get(ctx, retentionRecordKey(t, id)).Result()
+	switch {
+	case err == nil:
+		ms, parseErr := strconv.ParseInt(val, 10, 64)
+		if parseErr != nil {
+			return 0, fmt.Errorf("parse persisted retention for %q: %w", id, parseErr)
+		}
+		if ms <= 0 {
+			return 0, fmt.Errorf("persisted retention for %q is %d, want a positive duration", id, ms)
+		}
+		return time.Duration(ms) * time.Millisecond, nil
+	case errors.Is(err, redis.Nil):
+		// The record is the only durable statement of what this execution's
+		// writes were bounded by, and it is gone (its own TTL passed, or the
+		// execution predates the record). The fallback is not a lower bound on
+		// that value, so report unknown rather than a window that may exceed
+		// the evidence the writes left behind.
+		return engine.ExecutionRetentionUnknown, nil
+	default:
+		return 0, fmt.Errorf("get execution retention %q: %w", id, err)
+	}
+}
+
+var _ engine.ExecutionRetentionReader = (*Store)(nil)
 
 // projectExecutionStatus mirrors an execution's terminal state onto the SQL
 // audit trail. The atomic commit paths (commitNodeLua, commitGroupLua,

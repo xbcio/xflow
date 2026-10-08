@@ -406,6 +406,12 @@ func (s *Store) refreshTransientTTL(_ context.Context, _ types.ExecutionID, _ ..
 // It replaces the per-mutation-maintained :keys set as the source of truth for
 // completion-time TTL shortening.
 func transientExecutionKeys(t namespace.Namespace, id types.ExecutionID, g *graph.Graph) []string {
+	// NOTE: the terminal marker (terminalMarkKey) is deliberately ABSENT from
+	// this list. It is written with the execution's ACTIVE retention and exists
+	// precisely to outlive the shortened keys: shortening it to the completion
+	// TTL would re-create the exact gap it closes, where a backlogged task
+	// consumed after the completion TTL reads an execution that finished
+	// normally as lost work.
 	keys := []string{
 		execKey(t, id, "status"),
 		execKey(t, id, "graph"),

@@ -57,6 +57,47 @@ func remainingNodesKey(t namespace.Namespace, id types.ExecutionID) string {
 func failedNodesKey(t namespace.Namespace, id types.ExecutionID) string {
 	return execKey(t, id, "failed_nodes")
 }
+
+// terminalMarkKey holds the terminal marker: the execution status recorded when
+// a transition terminalized the execution, with the execution's ACTIVE
+// retention and deliberately excluded from completion-time TTL shortening.
+//
+// It exists because the status key's lifetime is not the classification window.
+// A transient execution's status key is shortened to the completion TTL the
+// moment it goes terminal, and a durable execution's status key simply expires;
+// when a queued task for that execution is consumed long afterwards (the queue
+// backlog this system can accumulate), "no status" would otherwise read as
+// "work never ran" — a false loss verdict on a benign late duplicate, on every
+// execution that ever finished. The marker is what keeps the terminal verdict
+// readable for the whole active retention.
+//
+// It shares the {id} hash tag with the rest of the execution's keys, so a
+// classifier can read it in the same slot as the status key.
+func terminalMarkKey(t namespace.Namespace, id types.ExecutionID) string {
+	return execKey(t, id, "terminal")
+}
+
+// retentionRecordKey holds the retention an execution was actually created
+// with, written for every execution inside the create transaction (and by the
+// entry-seed admission path). It exists because the process-local
+// per-execution override cache is deleted at terminalization
+// (evictExecutionCaches) and never survives a restart or a replica change:
+// without the record, resolution would fall back to getExecTTL and could
+// report the longer global TTL for an execution whose writes used a shorter
+// override, over-stating the evidence window and turning a benign late
+// duplicate into a reported loss.
+//
+// Absence is deliberately meaningful: it is the "cannot confirm" answer, not
+// a licence to use the fallback. GetExecutionRetention answers
+// engine.ExecutionRetentionUnknown when this key is gone, and the classifier
+// lands such drops in unattributed. The record is sized by
+// retentionRecordTTL to outlive the evidence it describes by one further
+// retention; an execution that outlives even that (or one created before the
+// record existed) degrades to "unknown", which under-reports rather than
+// over-reports the loss claim.
+func retentionRecordKey(t namespace.Namespace, id types.ExecutionID) string {
+	return execKey(t, id, "retention")
+}
 func advanceMarkerKey(t namespace.Namespace, id types.ExecutionID, name string, activationID int) string {
 	return execKey(t, id, fmt.Sprintf("node:%s:advance:%d", name, activationID))
 }

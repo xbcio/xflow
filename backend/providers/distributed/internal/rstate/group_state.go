@@ -457,8 +457,10 @@ func (s *Store) CommitGroup(ctx context.Context, req engine.GroupCommitRequest) 
 		// store holds — without the shortening they keep the full active TTL.
 		//
 		// Order matters — before evictExecutionCaches, which drops the cached
-		// transient decision this needs.
+		// transient decision this needs. The terminal marker goes in the same
+		// transient window, right after shortening has resolved that decision.
 		s.shortenTransientCompletionTTLBestEffort(ctx, req.ExecutionID)
+		s.markExecutionTerminalBestEffort(ctx, req.ExecutionID, out.ExecutionStatus)
 		s.evictExecutionCaches(req.ExecutionID)
 		// commitGroupLua finalizes the execution itself, so this is the only
 		// place the terminal state can reach the SQL audit trail.

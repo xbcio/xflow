@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -248,6 +249,30 @@ func (s *Store) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 		}
 	}
 
+	// Persist the retention record for the same reason createExecution does:
+	// GetExecutionRetention treats its absence as "window unknown", so a
+	// creation path that skips the record would degrade every later no-evidence
+	// drop on this execution to unattributed. The value is the retention the
+	// seeded writes use, capped so it can never exceed what a terminal write
+	// could have used (recordedRetention, and store-wide transient mode shortens
+	// the execution's real terminal retention below the seed TTL): under-stating
+	// the window is safe, over-stating it is the failure the record exists to
+	// prevent. Written before the Lua creates the execution, like the transient
+	// marker above; Redis is authoritative and the write is cheap, so a failure
+	// fails the admission rather than admitting an execution whose loss signal
+	// can never be proven.
+	retention := s.recordedRetention(ttl)
+	if s.transient && s.transientTTL > 0 && s.transientTTL < retention {
+		retention = s.transientTTL
+	}
+	if ms := retention.Milliseconds(); ms > 0 {
+		if recordTTL := s.retentionRecordTTL(retention); recordTTL > 0 {
+			if err := s.rdb.Set(ctx, retentionRecordKey(t, execID), strconv.FormatInt(ms, 10), recordTTL).Err(); err != nil {
+				return engine.SeedExecutionFromEntryResponse{}, fmt.Errorf("persist retention for %q: %w", execID, err)
+			}
+		}
+	}
+
 	// Prime the verdict when the graph is NOT transient: admission is
 	// authoritative for this execution (it is the code that decided), and the
 	// projection below would otherwise ask isTransient, find no marker -- none
@@ -409,6 +434,10 @@ func (s *Store) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 		// trigger-group-seeded execution has no SQL row at all and is invisible
 		// to the audit trail once its Redis keys expire.
 		s.markOutboxReadyIndex(ctx, t, execID)
+		// The seed terminalizes the execution inside the Lua when its graph was
+		// fully resolved by the admission itself; record the terminal marker for
+		// the same reason the commit paths do.
+		s.markExecutionTerminalBestEffort(ctx, execID, finalStatus)
 		s.projectSeededExecution(ctx, execID, finalStatus, req)
 		return engine.SeedExecutionFromEntryResponse{
 			State:       engine.AdmissionStateAccepted,
