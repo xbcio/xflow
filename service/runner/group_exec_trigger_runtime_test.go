@@ -152,6 +152,9 @@ func TestGroupExecTriggerRuntime_DeterministicFromMemberClassification(t *testin
 			if res.Outcome != "failed" {
 				t.Fatalf("outcome = %s, want failed", res.Outcome)
 			}
+			if res.FailedMember != "a" {
+				t.Fatalf("FailedMember = %q, want %q (the member whose fatal failure ended the run)", res.FailedMember, "a")
+			}
 			if !strings.Contains(res.Error, trapMsg) {
 				t.Fatalf("error = %q, want it to carry the member's own message %q", res.Error, trapMsg)
 			}

@@ -198,6 +198,16 @@ type GroupExecResult struct {
 	Exits   []BoundaryExit
 	Error   string
 
+	// FailedMember is the name of the member node whose fatal failure produced
+	// Outcome != "success", copied from subgraph.Result.FailedMember by the
+	// runner's ExecuteGroup. Empty when no single member names the failure: a
+	// deadline or cancel is environmental, and a group that could not run at
+	// all leaves via the error return instead. It is a plain node name (not an
+	// index) so a Kafka batch consumer can put "which node" in front of an
+	// operator without reaching into the engine's classification. Only meaningful
+	// when Outcome != "success".
+	FailedMember string
+
 	// Deterministic indicates the failure is permanent — retrying the same
 	// input will produce the same failure (e.g. rule compilation error,
 	// schema validation failure). Consumers use this to decide whether to

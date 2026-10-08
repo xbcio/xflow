@@ -591,17 +591,23 @@ func TestSeedKafkaEntryBatchViaGroupExec_FailureCauseIsLogged(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
 		deterministic bool
+		failedMember  string
 		wantState     string
 		wantCommitted string
 	}{
-		{"transient", false, "error", "committed=false"},
-		{"deterministic", true, "deterministic_error", "committed=false"},
+		{"transient", false, "cleaner", "error", "committed=false"},
+		{"deterministic", true, "cleaner", "deterministic_error", "committed=false"},
+		// No member named the failure (a deadline or cancel): the cause must
+		// read exactly as it did before FailedMember existed, not acquire a
+		// dangling member= fragment.
+		{"no member named", false, "", "error", "committed=false"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			buf := captureAdmissionLog(t)
 			rt := &mockGroupExecRuntime{execResult: types.GroupExecResult{
 				Outcome:       "failed",
 				Error:         "wasm trap: unreachable in clean guest",
+				FailedMember:  tc.failedMember,
 				Deterministic: tc.deterministic,
 			}}
 			in := &types.TriggerActivateInput{NodeName: "trig", WorkflowID: "wf", Params: map[string]any{}}
@@ -613,13 +619,19 @@ func TestSeedKafkaEntryBatchViaGroupExec_FailureCauseIsLogged(t *testing.T) {
 			seedEntryBatchViaGroupExec(context.Background(), in, rt, msgs, false)
 
 			got := buf.String()
-			for _, want := range []string{
+			wants := []string{
 				"wasm trap: unreachable in clean guest", // the cause itself
 				"outcome=failed",                        // and what the group reported
 				"state=" + tc.wantState,
 				tc.wantCommitted,
 				"partition=4", "start_offset=100", "end_offset=137", "count=2",
-			} {
+			}
+			if tc.failedMember != "" {
+				wants = append(wants, "member="+tc.failedMember)
+			} else if strings.Contains(got, "member=") {
+				t.Errorf("log carries a member= fragment with no member named.\nlog: %s", got)
+			}
+			for _, want := range wants {
 				if !strings.Contains(got, want) {
 					t.Errorf("admission failure log is missing %q; without it an "+
 						"operator sees only a counter increment.\nlog: %s", want, got)

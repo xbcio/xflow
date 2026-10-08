@@ -302,7 +302,16 @@ func seedEntryBatchViaGroupExec(ctx context.Context, in *types.TriggerActivateIn
 	if execRes.Outcome != "success" {
 		// The group ran but did not succeed. Retry semantics depend on whether
 		// the failure is deterministic (retrying won't help) or transient.
+		//
+		// The failing member's name is the one field an operator can act on
+		// directly, so it rides the same cause string the log carries —
+		// OnBatchAdmission takes only a state enum and cannot hold it. Empty
+		// when no single member names the failure (deadline, cancel); the
+		// cause then reads exactly as it did before this field existed.
 		cause := fmt.Sprintf("group outcome=%s: %s", execRes.Outcome, execRes.Error)
+		if execRes.FailedMember != "" {
+			cause = fmt.Sprintf("group outcome=%s member=%s: %s", execRes.Outcome, execRes.FailedMember, execRes.Error)
+		}
 		reason := admissionReasonForOutcome(execRes.Outcome)
 		if execRes.Deterministic {
 			// Retrying cannot repair a deterministic failure, but committing it would
