@@ -1553,27 +1553,61 @@ func (d *RedisRunnerDirectory) LookupLease(ctx context.Context, runnerID, sessio
 	if key.LeaseToken == "" {
 		return nil, false, nil
 	}
-	candidates, err := d.leasedAssignmentCandidates(ctx, runnerID, false)
-	if err != nil {
-		return nil, false, err
-	}
-	for _, candidate := range candidates {
-		if candidate == assignmentID {
-			continue
-		}
-		token, err := d.rdb.HGet(ctx, d.keys.assignmentLeaseToken, candidate).Result()
-		if errors.Is(err, redis.Nil) || (err == nil && token != string(key.LeaseToken)) {
-			continue
-		}
-		if err != nil {
-			return nil, false, fmt.Errorf("lookup sibling lease token %q: %w", candidate, err)
-		}
-		sibling, found, err := d.lookupLeaseAt(ctx, runnerID, sessionID, candidate)
+	// Same two-pass shape as replay: the per-runner index first, and the full
+	// state hash only when the index names fewer live leases than the runner's
+	// lease count, i.e. when it is known to be short.
+	visited := make(map[string]struct{})
+	for pass := 0; pass < 2; pass++ {
+		candidates, err := d.leasedAssignmentCandidates(ctx, runnerID, pass > 0)
 		if err != nil {
 			return nil, false, err
 		}
-		if found && key.namesTask(&sibling.Task) {
+		live := 0
+		for _, candidate := range candidates {
+			if _, done := visited[candidate]; done {
+				continue
+			}
+			visited[candidate] = struct{}{}
+			state, err := d.rdb.HGet(ctx, d.keys.assignmentState, candidate).Result()
+			if err != nil && !errors.Is(err, redis.Nil) {
+				return nil, false, fmt.Errorf("lookup sibling lease state %q: %w", candidate, err)
+			}
+			owner, err := d.rdb.HGet(ctx, d.keys.assignmentRunner, candidate).Result()
+			if err != nil && !errors.Is(err, redis.Nil) {
+				return nil, false, fmt.Errorf("lookup sibling lease owner %q: %w", candidate, err)
+			}
+			if state != redisAssignmentLeased || owner != runnerID {
+				continue
+			}
+			live++
+			if candidate == assignmentID {
+				continue
+			}
+			token, err := d.rdb.HGet(ctx, d.keys.assignmentLeaseToken, candidate).Result()
+			if err != nil && !errors.Is(err, redis.Nil) {
+				return nil, false, fmt.Errorf("lookup sibling lease token %q: %w", candidate, err)
+			}
+			if token != string(key.LeaseToken) {
+				continue
+			}
+			sibling, found, err := d.lookupLeaseAt(ctx, runnerID, sessionID, candidate)
+			if err != nil {
+				return nil, false, err
+			}
+			if !found || !key.namesTask(&sibling.Task) {
+				continue
+			}
 			return sibling, true, nil
+		}
+		if pass > 0 {
+			break
+		}
+		count, err := d.rdb.HGet(ctx, d.keys.runnerLeaseCount, runnerID).Int()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			return nil, false, fmt.Errorf("read runner lease count %q: %w", runnerID, err)
+		}
+		if live >= count {
+			break
 		}
 	}
 	return nil, false, nil

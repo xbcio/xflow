@@ -122,3 +122,37 @@ func TestMemoryRunnerDirectoryMapReleaseKeepsBatchRecord(t *testing.T) {
 	dir := NewMemoryRunnerDirectory()
 	testMapReleaseKeepsBatchRecord(t, dir, registerMemoryBatchRunner(t, context.Background(), dir, "runner-1"))
 }
+
+// The per-runner leased index is best effort (written by FinalizeClaim, pruned
+// by replay, absent for leases finalized before it existed). A report must not
+// be accepted or refused depending on it, so both backends must agree when it
+// is short.
+func testSiblingBatchReportSurvivesShortIndex(t *testing.T, dir sharedLeaseDirectory, session RunnerSession, dropIndex func()) {
+	ctx := context.Background()
+	batches := []engine.Task{mapBatchTask("L1", 0), mapBatchTask("L1", 1)}
+	for _, b := range batches {
+		finalizeSharedLease(t, ctx, dir, session, b)
+	}
+	dropIndex()
+	got, found, err := dir.LookupLease(ctx, session.RunnerID, session.SessionID, echoedLookupKey(t, batches[0]))
+	if err != nil || !found || got.Task.NodeName != batches[0].NodeName {
+		t.Fatalf("report for %s with a short index found=%v err=%v", batches[0].NodeName, found, err)
+	}
+}
+
+func TestRedisRunnerDirectorySiblingBatchReportSurvivesShortIndex(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	dir := NewRedisRunnerDirectory(rdb)
+	session := registerRedisDirectoryRunner(t, ctx, dir, "runner-1", 4)
+	testSiblingBatchReportSurvivesShortIndex(t, dir, session, func() {
+		if err := rdb.Del(ctx, dir.keys.runnerLeasedAssignmentsKey(session.RunnerID)).Err(); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestMemoryRunnerDirectorySiblingBatchReportSurvivesShortIndex(t *testing.T) {
+	dir := NewMemoryRunnerDirectory()
+	testSiblingBatchReportSurvivesShortIndex(t, dir, registerMemoryBatchRunner(t, context.Background(), dir, "runner-1"), func() {})
+}
