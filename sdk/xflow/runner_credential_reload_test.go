@@ -1,6 +1,7 @@
 package xflow
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -11,13 +12,26 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+
+	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/service/protocol"
+	runnersvc "github.com/xbcio/xflow/service/runner"
+	"github.com/xbcio/xflow/store"
+	"github.com/xbcio/xflow/types"
 )
 
 // The certificate-generation helpers below are deliberately independent of
@@ -549,5 +563,375 @@ func TestReloadableHTTPTransportKeepsDefaultLimitsWithoutProxy(t *testing.T) {
 	}
 	if transport.TLSClientConfig.MinVersion != tls.VersionTLS12 {
 		t.Fatalf("MinVersion = %x, want TLS 1.2", transport.TLSClientConfig.MinVersion)
+	}
+}
+
+// --- Every runner client, not just the protocol client, follows Reload ---
+
+// issueCredReloadServerLeaf issues a server-auth leaf for 127.0.0.1 signed by
+// ca/caKey, ready to serve from a tls.Config.
+func issueCredReloadServerLeaf(t *testing.T, ca *x509.Certificate, caKey *ecdsa.PrivateKey) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate server leaf key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: "127.0.0.1"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca, &key.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("create server leaf: %v", err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("parse server leaf: %v", err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}
+}
+
+// originCall is one request the control-plane stand-in observed.
+type originCall struct {
+	path string
+	cn   string
+	auth string
+}
+
+// newCredReloadOriginServer stands in for the control plane's HTTP API: its
+// leaf is signed by serverCA, it requires a client certificate signed by
+// clientCA, and it answers the three runner-side endpoints — supply fetch,
+// entry seed, artifact fetch — recording the client CN and Authorization
+// header of each request.
+func newCredReloadOriginServer(t *testing.T, serverLeaf tls.Certificate, clientCA *x509.Certificate, artifact []byte) (*httptest.Server, func() []originCall) {
+	t.Helper()
+	var mu sync.Mutex
+	var calls []originCall
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cn := ""
+		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+			cn = r.TLS.PeerCertificates[0].Subject.CommonName
+		}
+		mu.Lock()
+		calls = append(calls, originCall{path: r.URL.Path, cn: cn, auth: r.Header.Get("Authorization")})
+		mu.Unlock()
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/v1/supplies/"):
+			content := []byte(`{"v":1}`)
+			w.Header().Set("ETag", store.ContentHash(content))
+			w.Header().Set("X-Supply-Revision", "1")
+			_, _ = w.Write(content)
+		case r.URL.Path == "/v1/executions":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"state":"accepted","execution_id":"exec-1"}`))
+		case r.URL.Path == "/v1/artifacts/"+store.ContentHash(artifact):
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(artifact)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	pool := x509.NewCertPool()
+	pool.AddCert(clientCA)
+	srv.TLS = &tls.Config{
+		Certificates: []tls.Certificate{serverLeaf},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    pool,
+		MinVersion:   tls.VersionTLS12,
+	}
+	srv.StartTLS()
+	return srv, func() []originCall {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]originCall(nil), calls...)
+	}
+}
+
+func writeCredReloadPEM(t *testing.T, path string, pemBytes []byte) string {
+	t.Helper()
+	if err := os.WriteFile(path, pemBytes, 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+	return path
+}
+
+// TestRunnerOriginClientsFollowReload proves the artifact-fetch client and the
+// entry-seed/supply-fetch client — not only the Runner Protocol client — pick
+// up a Reload's token, client certificate and server CA on their next request,
+// with no rebuild. Before the fix both were built from RunnerConfig once and
+// kept the original token and TLS material for the life of the process.
+//
+// The clients are taken from the assembly buildRunnerServiceConfig produced,
+// given the reloader the way NewRunner gives it. The entry-seed runtime is
+// built per activation inside runnersvc, so it is reconstructed here from the
+// fetcher's Client and Token — the same instance and value the activation
+// handler is handed (wireRunnerTriggerHosting passes seedClient and seedToken
+// to both).
+func TestRunnerOriginClientsFollowReload(t *testing.T) {
+	dir := t.TempDir()
+	serverCA, serverCAPEM, serverCAKey := generateCredReloadTestCA(t, "origin server CA")
+	_, otherCAPEM, _ := generateCredReloadTestCA(t, "unrelated CA")
+	clientCA, _, clientCAKey := generateCredReloadTestCA(t, "origin client CA")
+	serverCAPath := writeCredReloadPEM(t, filepath.Join(dir, "server-ca.pem"), serverCAPEM)
+	otherCAPath := writeCredReloadPEM(t, filepath.Join(dir, "other-ca.pem"), otherCAPEM)
+	certA, keyA := filepath.Join(dir, "a.crt"), filepath.Join(dir, "a.key")
+	writeCredReloadClientLeaf(t, clientCA, clientCAKey, "client-a", certA, keyA)
+	certB, keyB := filepath.Join(dir, "b.crt"), filepath.Join(dir, "b.key")
+	writeCredReloadClientLeaf(t, clientCA, clientCAKey, "client-b", certB, keyB)
+
+	artifact := []byte("credential reload artifact probe")
+	srv, calls := newCredReloadOriginServer(t, issueCredReloadServerLeaf(t, serverCA, serverCAKey), clientCA, artifact)
+	defer srv.Close()
+
+	cfg := RunnerConfig{
+		ServerURL:        srv.URL,
+		RunnerID:         "reload-probe",
+		Token:            "token-a",
+		TLSServerCA:      serverCAPath,
+		TLSClientCert:    certA,
+		TLSClientKey:     keyA,
+		Capabilities:     []string{"xflow.trigger.kafka"},
+		ArtifactCacheDir: t.TempDir(),
+	}
+	reloader := mustTestCredentialReloader(t, cfg)
+	svcCfg, err := buildRunnerServiceConfig(cfg, func(o *runnerOptions) { o.credReloader = reloader })
+	if err != nil {
+		t.Fatalf("buildRunnerServiceConfig: %v", err)
+	}
+	if svcCfg.SupplyGate == nil {
+		t.Fatal("SupplyGate is nil; the trigger-hosting branch did not run")
+	}
+	fetcher, ok := svcCfg.SupplyGate.Fetcher().(*runnersvc.HTTPSupplyFetcher)
+	if !ok {
+		t.Fatalf("supply fetcher = %T, want *runnersvc.HTTPSupplyFetcher", svcCfg.SupplyGate.Fetcher())
+	}
+	if fetcher.Token != "" {
+		t.Fatal("supply fetcher carries a copied static token; it would keep sending it after Reload")
+	}
+	seed := &protocol.HTTPEntrySeedRuntime{BaseURL: srv.URL, Client: fetcher.Client, Token: fetcher.Token, RunnerID: cfg.RunnerID}
+
+	// exercise drives one request through each client and returns the
+	// requests the server saw for them, or the first client error.
+	exercise := func() ([]originCall, error) {
+		before := len(calls())
+		if _, _, _, err := fetcher.Fetch(context.Background(), "probe-supply"); err != nil {
+			return nil, fmt.Errorf("supply fetch: %w", err)
+		}
+		if _, err := seed.SeedExecutionFromEntry(context.Background(), types.EntrySeedRequest{
+			AdmissionKey: "k", WorkflowID: "wf", EntryUnitID: "entry", Outcome: "success",
+		}); err != nil {
+			return nil, fmt.Errorf("entry seed: %w", err)
+		}
+		// A fresh cache directory per call is not possible here, so each
+		// round fetches under its own namespace: the namespace-partitioned
+		// cache misses and the request reaches the origin every time.
+		ctx := namespace.WithNamespace(context.Background(), namespace.Namespace(fmt.Sprintf("round-%d", before)))
+		if _, err := svcCfg.ArtifactCodeResolver(ctx, store.ContentHash(artifact)); err != nil {
+			return nil, fmt.Errorf("artifact fetch: %w", err)
+		}
+		return calls()[before:], nil
+	}
+	assertAll := func(round string, got []originCall, wantCN, wantToken string) {
+		t.Helper()
+		if len(got) != 3 {
+			t.Fatalf("%s: server saw %d requests, want 3 (supply, seed, artifact): %+v", round, len(got), got)
+		}
+		for _, c := range got {
+			if c.cn != wantCN {
+				t.Errorf("%s: %s presented CN %q, want %q", round, c.path, c.cn, wantCN)
+			}
+			if c.auth != "Bearer "+wantToken {
+				t.Errorf("%s: %s sent Authorization %q, want %q", round, c.path, c.auth, "Bearer "+wantToken)
+			}
+		}
+	}
+
+	got, err := exercise()
+	if err != nil {
+		t.Fatalf("before Reload: %v", err)
+	}
+	assertAll("before Reload", got, "client-a", "token-a")
+
+	// Rotate the token and the client certificate.
+	if err := reloader.Reload(CredentialReloaderSource{
+		Token: "token-b", TLSServerCA: serverCAPath, TLSClientCert: certB, TLSClientKey: keyB,
+	}); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	reloader.closeIdleConnections()
+	got, err = exercise()
+	if err != nil {
+		t.Fatalf("after Reload: %v", err)
+	}
+	assertAll("after Reload", got, "client-b", "token-b")
+
+	// Rotate the trusted CA to one that did not sign the server's leaf: every
+	// client must now refuse the server, proving the pool is read per dial.
+	if err := reloader.Reload(CredentialReloaderSource{
+		Token: "token-b", TLSServerCA: otherCAPath, TLSClientCert: certB, TLSClientKey: keyB,
+	}); err != nil {
+		t.Fatalf("Reload to the unrelated CA: %v", err)
+	}
+	reloader.closeIdleConnections()
+	before := len(calls())
+	if _, _, _, err := fetcher.Fetch(context.Background(), "probe-supply"); err == nil {
+		t.Error("supply fetch trusted the server after the CA pool was rotated away from its issuer")
+	}
+	if _, err := seed.SeedExecutionFromEntry(context.Background(), types.EntrySeedRequest{AdmissionKey: "k2", WorkflowID: "wf", EntryUnitID: "entry", Outcome: "success"}); err == nil {
+		t.Error("entry seed trusted the server after the CA pool was rotated away from its issuer")
+	}
+	if _, err := svcCfg.ArtifactCodeResolver(namespace.WithNamespace(context.Background(), "round-ca"), store.ContentHash(artifact)); err == nil {
+		t.Error("artifact fetch trusted the server after the CA pool was rotated away from its issuer")
+	}
+	if n := len(calls()) - before; n != 0 {
+		t.Fatalf("server served %d requests under an untrusted CA pool, want 0", n)
+	}
+
+	// And back: the same clients recover with no rebuild.
+	if err := reloader.Reload(CredentialReloaderSource{
+		Token: "token-c", TLSServerCA: serverCAPath, TLSClientCert: certA, TLSClientKey: keyA,
+	}); err != nil {
+		t.Fatalf("Reload back to the server CA: %v", err)
+	}
+	reloader.closeIdleConnections()
+	got, err = exercise()
+	if err != nil {
+		t.Fatalf("after restoring the CA: %v", err)
+	}
+	assertAll("after restoring the CA", got, "client-a", "token-c")
+}
+
+// TestReloadedBearerTransportKeepsTheTokenOnItsOrigin pins the redirect
+// guarantee reloadedBearerTransport documents: the live token is attached only
+// to requests for the configured origin.
+func TestReloadedBearerTransportKeepsTheTokenOnItsOrigin(t *testing.T) {
+	var foreignAuth string
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		foreignAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer foreign.Close()
+	var originAuth string
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originAuth = r.Header.Get("Authorization")
+		http.Redirect(w, r, foreign.URL+"/elsewhere", http.StatusFound)
+	}))
+	defer origin.Close()
+
+	cfg := RunnerConfig{ServerURL: origin.URL, Token: "origin-token"}
+	client, token, err := newRunnerOriginHTTPClient(cfg, mustTestCredentialReloader(t, cfg), 5*time.Second)
+	if err != nil {
+		t.Fatalf("newRunnerOriginHTTPClient: %v", err)
+	}
+	if token != "" {
+		t.Fatalf("returned token = %q, want empty: the transport supplies it", token)
+	}
+	resp, err := client.Get(origin.URL + "/v1/artifacts/x")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	_ = resp.Body.Close()
+	if originAuth != "Bearer origin-token" {
+		t.Fatalf("origin saw Authorization %q, want the live token", originAuth)
+	}
+	if foreignAuth != "" {
+		t.Fatalf("redirect target on another host received Authorization %q", foreignAuth)
+	}
+}
+
+// TestRunnerGRPCTransportReadsReloadedCAPoolOnHandshake is the gRPC CA
+// rotation regression. The server's leaf is signed by caNew; the runner starts
+// out trusting only caOld, so its connection attempts fail. After a Reload to
+// caNew — with the same *grpc.ClientConn, no restart and no redial by the
+// caller — grpc-go's own reconnect must succeed. With credentials.NewTLS, as
+// before the fix, the pool captured at construction is used for every
+// handshake and the RPC below never succeeds.
+func TestRunnerGRPCTransportReadsReloadedCAPoolOnHandshake(t *testing.T) {
+	dir := t.TempDir()
+	_, caOldPEM, _ := generateCredReloadTestCA(t, "grpc CA old")
+	caNew, caNewPEM, caNewKey := generateCredReloadTestCA(t, "grpc CA new")
+	caOldPath := writeCredReloadPEM(t, filepath.Join(dir, "ca-old.pem"), caOldPEM)
+	caNewPath := writeCredReloadPEM(t, filepath.Join(dir, "ca-new.pem"), caNewPEM)
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := grpc.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{
+		Certificates: []tls.Certificate{issueCredReloadServerLeaf(t, caNew, caNewKey)},
+		MinVersion:   tls.VersionTLS12,
+	})))
+	healthpb.RegisterHealthServer(srv, health.NewServer())
+	go func() { _ = srv.Serve(lis) }()
+	defer srv.Stop()
+
+	cfg := RunnerConfig{Transport: RunnerTransportGRPC, GRPCTarget: lis.Addr().String(), TLSServerCA: caOldPath}
+	reloader := mustTestCredentialReloader(t, cfg)
+	conn, err := dialRunnerGRPC(cfg, reloader)
+	if err != nil {
+		t.Fatalf("dialRunnerGRPC: %v", err)
+	}
+	defer conn.Close()
+	healthClient := healthpb.NewHealthClient(conn)
+
+	// Fails fast: without WaitForReady an RPC returns as soon as the channel
+	// reports the handshake failure.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	_, err = healthClient.Check(ctx, &healthpb.HealthCheckRequest{})
+	cancel()
+	if err == nil {
+		t.Fatal("RPC succeeded while trusting only caOld; the server leaf is signed by caNew")
+	}
+
+	if err := reloader.Reload(CredentialReloaderSource{TLSServerCA: caNewPath}); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	// Skip the reconnect backoff so the test does not wait it out; the
+	// reconnect itself is grpc-go's, not a redial by this test.
+	conn.ResetConnectBackoff()
+	ctx, cancel = context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, err := healthClient.Check(ctx, &healthpb.HealthCheckRequest{}, grpc.WaitForReady(true)); err != nil {
+		t.Fatalf("RPC after reloading the CA pool to caNew: %v (the pool was not re-read on reconnect)", err)
+	}
+}
+
+// TestNewRunnerHandsItsReloaderToTheOriginClients pins the NewRunner wiring:
+// the reloader the runner's Reload swaps is the one the assembly's origin
+// clients were built over. Asserted through the options NewRunner hands to
+// buildRunnerServiceConfig, since the clients themselves are not reachable
+// from a *Runner.
+func TestNewRunnerHandsItsReloaderToTheOriginClients(t *testing.T) {
+	r, err := NewRunner(RunnerConfig{ServerURL: "http://127.0.0.1:1", RunnerID: "wiring", Token: "t"})
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	defer r.Close()
+	if r.credReloader == nil {
+		t.Fatal("NewRunner built no CredentialReloader for the HTTP transport")
+	}
+	cfg := RunnerConfig{ServerURL: "http://127.0.0.1:1", Token: "static"}
+	client, token, err := newRunnerOriginHTTPClient(cfg, r.credReloader, time.Second)
+	if err != nil {
+		t.Fatalf("newRunnerOriginHTTPClient: %v", err)
+	}
+	if token != "" {
+		t.Fatalf("token = %q, want empty under a reloader", token)
+	}
+	if _, ok := client.Transport.(*reloadedBearerTransport); !ok {
+		t.Fatalf("transport = %T, want *reloadedBearerTransport", client.Transport)
+	}
+	r.credReloader.transportsMu.Lock()
+	tracked := len(r.credReloader.transports)
+	r.credReloader.transportsMu.Unlock()
+	// The protocol client's transport, plus the artifact client's, plus the
+	// one just built. (No trigger capability, so no seed client.)
+	if tracked != 3 {
+		t.Fatalf("reloader tracks %d transports, want 3: the artifact client was not built over it", tracked)
 	}
 }

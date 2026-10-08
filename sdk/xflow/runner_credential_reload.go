@@ -4,12 +4,16 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
+
+	"google.golang.org/grpc/credentials"
 )
 
 // runnerCredentialMaterial is one atomically-swapped snapshot of the
@@ -33,18 +37,33 @@ type runnerCredentialMaterial struct {
 // the process. It is built once by NewRunner (whenever RunnerConfig carried a
 // token or TLS material) and is what Runner.Reload re-reads.
 //
-// Every *http.Client the runner builds for the control plane (the Runner
-// Protocol client, the artifact-fetch client, the entry-seed/supply-fetch
-// client) shares one CredentialReloader instance, so one Reload call updates
-// every one of them: GetClientCertificate and the DialTLSContext hook on the
-// shared *http.Transport both read through the same atomic snapshot this
-// holds, and the gRPC transport's credentials.NewTLS config does too.
+// Every client NewRunner points at the control plane reads through the same
+// CredentialReloader, so one Reload call updates all of them:
+//   - The Runner Protocol HTTP client: client certificate and CA pool per dial
+//     (newReloadableHTTPTransport); the token through protocol.Client.SetToken,
+//     which Runner.Reload calls.
+//   - The artifact-fetch client and the entry-seed/supply-fetch client (one
+//     instance shared by both): client certificate and CA pool per dial, and
+//     the bearer token per request (reloadedBearerTransport).
+//   - The gRPC Runner Protocol transport: client certificate and CA pool per
+//     TLS handshake (reloadableGRPCCredentials); the token through
+//     protocol.GRPCClient.SetToken.
+//
+// Not covered: NewRunnerHTTPClient, the exported one-shot client cmd/runner's
+// enrollment bootstrap uses before a Runner exists, reads cfg once and stays
+// static; and RunnerTransportInProc builds no reloader at all.
 //
 // Reload is fail-closed: on any read or parse error, the previous snapshot
 // keeps serving and the error is returned without ever logging a token value
 // or key material.
 type CredentialReloader struct {
 	current atomic.Pointer[runnerCredentialMaterial]
+
+	// transports are the HTTP transports built over this reloader. Runner.Reload
+	// closes their idle connections after a successful swap, so a keep-alive
+	// connection established under the OLD material is not reused.
+	transportsMu sync.Mutex
+	transports   []*http.Transport
 }
 
 // CredentialReloaderSource supplies the live values a Reload call re-reads.
@@ -164,6 +183,24 @@ func (r *CredentialReloader) rootCAs() *x509.CertPool {
 	return r.snapshot().rootCAs
 }
 
+// closeIdleConnections closes the idle keep-alive connections of every HTTP
+// transport built over r, so the next request on each of them redials and
+// handshakes with the current material.
+func (r *CredentialReloader) closeIdleConnections() {
+	r.transportsMu.Lock()
+	transports := append([]*http.Transport(nil), r.transports...)
+	r.transportsMu.Unlock()
+	for _, t := range transports {
+		t.CloseIdleConnections()
+	}
+}
+
+func (r *CredentialReloader) trackTransport(t *http.Transport) {
+	r.transportsMu.Lock()
+	r.transports = append(r.transports, t)
+	r.transportsMu.Unlock()
+}
+
 // tlsConfigured reports whether any TLS material is live right now, mirroring
 // buildRunnerTLSConfig's "all empty means plaintext" rule.
 func (r *CredentialReloader) tlsConfigured() bool {
@@ -230,5 +267,92 @@ func newReloadableHTTPTransport(r *CredentialReloader, baseTLSCfg *tls.Config) *
 		}
 		return tlsConn, nil
 	}
+	r.trackTransport(transport)
 	return transport
+}
+
+// reloadedBearerTransport attaches the reloader's live bearer token to every
+// request bound for the control-plane origin. It serves the clients whose
+// callers (objectstore.HTTPStore, runnersvc.HTTPSupplyFetcher, the entry-seed
+// runtime) would otherwise copy a token into a struct field once at
+// construction: those are handed an empty Token, so they set no Authorization
+// header of their own, and this transport supplies the current one instead.
+//
+// The token is only attached when the request's scheme and host match the
+// configured origin. A redirect to any other host therefore leaves without
+// it, which is the same guarantee net/http gives a header set on the original
+// request.
+type reloadedBearerTransport struct {
+	base     *http.Transport
+	reloader *CredentialReloader
+	scheme   string
+	host     string
+}
+
+func (t *reloadedBearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if token := t.reloader.Token(); token != "" && t.host != "" &&
+		req.URL.Scheme == t.scheme && req.URL.Host == t.host {
+		// RoundTrip must not modify the caller's request.
+		req = req.Clone(req.Context())
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	return t.base.RoundTrip(req)
+}
+
+// CloseIdleConnections lets http.Client.CloseIdleConnections reach the
+// wrapped transport.
+func (t *reloadedBearerTransport) CloseIdleConnections() {
+	t.base.CloseIdleConnections()
+}
+
+// reloadableGRPCCredentials is the gRPC transport's counterpart of
+// newReloadableHTTPTransport. credentials.NewTLS takes its *tls.Config once,
+// and that config's RootCAs pool is used for every later handshake; this type
+// instead builds a fresh config for each ClientHandshake, with the reloader's
+// current CA pool and its GetClientCertificate hook, and hands it to
+// credentials.NewTLS. Every connection grpc-go establishes after a Reload,
+// including its own reconnects, therefore verifies the server against the
+// new pool and presents the new leaf.
+//
+// A connection already established keeps the material it handshook with:
+// grpc-go offers no per-connection hook to re-handshake, and the runner does
+// not tear down a live connection on Reload.
+type reloadableGRPCCredentials struct {
+	reloader *CredentialReloader
+	base     *tls.Config
+}
+
+func newReloadableGRPCCredentials(r *CredentialReloader, baseTLSCfg *tls.Config) *reloadableGRPCCredentials {
+	base := baseTLSCfg.Clone()
+	base.Certificates = nil
+	base.RootCAs = nil
+	base.GetClientCertificate = nil
+	return &reloadableGRPCCredentials{reloader: r, base: base}
+}
+
+func (c *reloadableGRPCCredentials) ClientHandshake(ctx context.Context, authority string, rawConn net.Conn) (net.Conn, credentials.AuthInfo, error) {
+	cfg := c.base.Clone()
+	cfg.RootCAs = c.reloader.rootCAs()
+	cfg.GetClientCertificate = c.reloader.GetClientCertificate
+	return credentials.NewTLS(cfg).ClientHandshake(ctx, authority, rawConn)
+}
+
+// ServerHandshake is never called: these credentials only dial.
+func (c *reloadableGRPCCredentials) ServerHandshake(net.Conn) (net.Conn, credentials.AuthInfo, error) {
+	return nil, nil, errors.New("xflow: runner gRPC credentials are client-only")
+}
+
+func (c *reloadableGRPCCredentials) Info() credentials.ProtocolInfo {
+	return credentials.NewTLS(c.base).Info()
+}
+
+func (c *reloadableGRPCCredentials) Clone() credentials.TransportCredentials {
+	return &reloadableGRPCCredentials{reloader: c.reloader, base: c.base.Clone()}
+}
+
+// OverrideServerName is deprecated in grpc-go; it is kept for the interface,
+// and like credentials.NewTLS's implementation only records the name.
+func (c *reloadableGRPCCredentials) OverrideServerName(name string) error {
+	c.base.ServerName = name
+	return nil
 }
