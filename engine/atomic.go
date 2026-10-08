@@ -790,6 +790,9 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 			PrivateOutput: privateOutput,
 		}, result, flush)
 	case TaskTypeNodeExec:
+		if handled, err := e.handleDisabledNode(ctx, task, flush); handled {
+			return handled, err
+		}
 		return e.handlePinnedNode(ctx, task, flush)
 	case TaskTypeGroupExec:
 		if e.groupExecutor == nil {
