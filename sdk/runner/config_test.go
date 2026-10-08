@@ -45,6 +45,60 @@ heartbeat:
 	}
 }
 
+// map_batch_concurrency/map_item_concurrency are the YAML names for
+// xflowsdk.RunnerConfig.MapBatchConcurrency/MapItemConcurrency. Unlike
+// concurrency, 0 is a meaningful explicit value (it means "use the SDK's
+// GOMAXPROCS default"), so loading must distinguish "absent from the file"
+// (defaultRunnerConfig's zero value) from "set to 0" the same way
+// browser_cdp.max_contexts does via a *int field.
+func TestLoadRunnerConfigFromYAMLMapConcurrency(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runner.yaml")
+	data := []byte(`
+runner:
+  id: file-runner
+  map_batch_concurrency: 4
+  map_item_concurrency: 0
+server:
+  url: http://file-server:8080
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadRunnerConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.mapBatchConcurrency != 4 {
+		t.Fatalf("mapBatchConcurrency = %d, want 4", cfg.mapBatchConcurrency)
+	}
+	if cfg.mapItemConcurrency != 0 {
+		t.Fatalf("mapItemConcurrency = %d, want 0", cfg.mapItemConcurrency)
+	}
+}
+
+// Omitting the keys entirely must leave the SDK-default-selecting zero value,
+// not error — these fields have no "required" validation, unlike concurrency.
+func TestLoadRunnerConfigFromYAMLMapConcurrencyDefaultsToZero(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runner.yaml")
+	data := []byte(`
+runner:
+  id: file-runner
+server:
+  url: http://file-server:8080
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadRunnerConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.mapBatchConcurrency != 0 || cfg.mapItemConcurrency != 0 {
+		t.Fatalf("mapBatchConcurrency/mapItemConcurrency = %d/%d, want 0/0",
+			cfg.mapBatchConcurrency, cfg.mapItemConcurrency)
+	}
+}
+
 func TestRunCommandUsesConfigFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "runner.yaml")
 	data := []byte(`

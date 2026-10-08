@@ -47,18 +47,26 @@ type runnerConfig struct {
 	// runnerIDExplicit records that an operator set the ID (file, env, or
 	// flag) rather than inheriting defaultRunnerID. Enrollment overrides the ID
 	// with the server-issued one, and an explicit value is worth a warning.
-	runnerIDExplicit  bool
-	concurrency       int
-	changed           map[string]bool
-	resolutionIssues  map[string]error
-	capRaw            string
-	capabilities      []protocol.Capability
-	labelRaw          []string
-	labels            map[string]string
-	namespaceRaw      []string
-	namespaces        []namespace.Namespace
-	heartbeatInterval string
-	pollWait          string
+	runnerIDExplicit bool
+	concurrency      int
+	// mapBatchConcurrency/mapItemConcurrency cap this runner's own map-node
+	// resource budget (xflowsdk.RunnerConfig.MapBatchConcurrency/
+	// MapItemConcurrency). Zero means "unset": the SDK defaults each to
+	// runtime.GOMAXPROCS(0). Unlike concurrency, zero is valid here and is not
+	// rejected by CLI-layer validation — only a negative value is, and that
+	// check lives in the SDK (buildRunnerServiceConfig), not here.
+	mapBatchConcurrency int
+	mapItemConcurrency  int
+	changed             map[string]bool
+	resolutionIssues    map[string]error
+	capRaw              string
+	capabilities        []protocol.Capability
+	labelRaw            []string
+	labels              map[string]string
+	namespaceRaw        []string
+	namespaces          []namespace.Namespace
+	heartbeatInterval   string
+	pollWait            string
 	// seedRequestTimeout bounds one entry-seed admission round trip (one trigger
 	// batch), which is the POST that admits a whole batch's results. Empty means
 	// "unset": the SDK keeps protocol.DefaultEntrySeedRequestTimeout (15s). Kept
@@ -155,6 +163,10 @@ func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
 	cmd.Flags().StringVar(&cfg.runnerID, "id", cfg.runnerID, "Runner ID")
 	cmd.Flags().StringVar(&cfg.systemID, "system-id", cfg.systemID, "Stable runner-pool instance key (default: XFLOW_RUNNER_SYSTEM_ID, POD_NAME, then hostname)")
 	cmd.Flags().IntVar(&cfg.concurrency, "concurrency", cfg.concurrency, "Runner concurrency")
+	cmd.Flags().IntVar(&cfg.mapBatchConcurrency, "map-batch-concurrency", cfg.mapBatchConcurrency,
+		"Maximum number of map batches actively executing in this runner; 0 defaults to GOMAXPROCS")
+	cmd.Flags().IntVar(&cfg.mapItemConcurrency, "map-item-concurrency", cfg.mapItemConcurrency,
+		"Maximum total number of map body items executing in this runner across all admitted batches and trigger-hosted groups; 0 defaults to GOMAXPROCS")
 	cmd.Flags().StringVar(&cfg.capRaw, "cap", cfg.capRaw, "Comma-separated node type capabilities")
 	cmd.Flags().StringArrayVar(&cfg.labelRaw, "label", cfg.labelRaw, "Runner label as key=value; repeatable")
 	cmd.Flags().StringArrayVar(&cfg.namespaceRaw, "namespace", cfg.namespaceRaw, "Namespace this runner serves; repeatable (default: default)")
@@ -513,21 +525,23 @@ func toSDKRunnerConfig(cfg runnerConfig) (xflowsdk.RunnerConfig, error) {
 		}
 	}
 	return xflowsdk.RunnerConfig{
-		ServerURL:          cfg.serverURL,
-		Transport:          cfg.transport,
-		GRPCTarget:         cfg.grpcTarget,
-		RunnerID:           cfg.runnerID,
-		Concurrency:        cfg.concurrency,
-		Capabilities:       capabilityNodeTypes(cfg.capabilities),
-		Labels:             cloneStringMap(cfg.labels),
-		Namespaces:         cfg.namespaces,
-		Token:              cfg.token,
-		TLSServerCA:        cfg.tlsServerCA,
-		TLSClientCert:      cfg.tlsClientCert,
-		TLSClientKey:       cfg.tlsClientKey,
-		HeartbeatInterval:  heartbeat,
-		PollWait:           pollWait,
-		SeedRequestTimeout: seedRequestTimeout,
+		ServerURL:           cfg.serverURL,
+		Transport:           cfg.transport,
+		GRPCTarget:          cfg.grpcTarget,
+		RunnerID:            cfg.runnerID,
+		Concurrency:         cfg.concurrency,
+		MapBatchConcurrency: cfg.mapBatchConcurrency,
+		MapItemConcurrency:  cfg.mapItemConcurrency,
+		Capabilities:        capabilityNodeTypes(cfg.capabilities),
+		Labels:              cloneStringMap(cfg.labels),
+		Namespaces:          cfg.namespaces,
+		Token:               cfg.token,
+		TLSServerCA:         cfg.tlsServerCA,
+		TLSClientCert:       cfg.tlsClientCert,
+		TLSClientKey:        cfg.tlsClientKey,
+		HeartbeatInterval:   heartbeat,
+		PollWait:            pollWait,
+		SeedRequestTimeout:  seedRequestTimeout,
 		BrowserCDP: xnode.BrowserCDPConfig{
 			Endpoints:      copyTrimmedHosts(cfg.browserCDPEndpoints),
 			MaxContexts:    cfg.browserCDPMaxContexts,

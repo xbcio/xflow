@@ -20,13 +20,19 @@ import (
 type runnerConfigFile struct {
 	RegistrationToken *string `yaml:"registration_token"`
 	Runner            struct {
-		ID           *string           `yaml:"id"`
-		SystemID     *string           `yaml:"system_id"`
-		Concurrency  *int              `yaml:"concurrency"`
-		Capabilities *[]string         `yaml:"capabilities"`
-		Labels       map[string]string `yaml:"labels"`
-		Namespaces   *[]string         `yaml:"namespaces"`
-		AutoLabels   *bool             `yaml:"auto_labels"`
+		ID          *string `yaml:"id"`
+		SystemID    *string `yaml:"system_id"`
+		Concurrency *int    `yaml:"concurrency"`
+		// MapBatchConcurrency/MapItemConcurrency cap this runner's own map-node
+		// resource budget. Unlike Concurrency, 0 is a valid explicit value (it
+		// means "use the SDK's GOMAXPROCS default"), so these stay *int like
+		// MaxContexts rather than being validated against <= 0.
+		MapBatchConcurrency *int              `yaml:"map_batch_concurrency"`
+		MapItemConcurrency  *int              `yaml:"map_item_concurrency"`
+		Capabilities        *[]string         `yaml:"capabilities"`
+		Labels              map[string]string `yaml:"labels"`
+		Namespaces          *[]string         `yaml:"namespaces"`
+		AutoLabels          *bool             `yaml:"auto_labels"`
 	} `yaml:"runner"`
 	Server struct {
 		URL        *string `yaml:"url"`
@@ -176,6 +182,12 @@ func loadRunnerConfigFromBytesForProfile(data []byte, profile Profile) (runnerCo
 	}
 	if file.Runner.Concurrency != nil {
 		cfg.concurrency = *file.Runner.Concurrency
+	}
+	if file.Runner.MapBatchConcurrency != nil {
+		cfg.mapBatchConcurrency = *file.Runner.MapBatchConcurrency
+	}
+	if file.Runner.MapItemConcurrency != nil {
+		cfg.mapItemConcurrency = *file.Runner.MapItemConcurrency
 	}
 	if file.Runner.Capabilities != nil {
 		cfg.capRaw = strings.Join(*file.Runner.Capabilities, ",")
@@ -883,6 +895,12 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 	if base.changed["concurrency"] {
 		clearRunnerConfigIssue(&cfg, "concurrency")
 		cfg.concurrency = base.concurrency
+	}
+	if base.changed["map-batch-concurrency"] {
+		cfg.mapBatchConcurrency = base.mapBatchConcurrency
+	}
+	if base.changed["map-item-concurrency"] {
+		cfg.mapItemConcurrency = base.mapItemConcurrency
 	}
 	if base.changed["browser-cdp-endpoints"] {
 		cfg.browserCDPEndpoints = normalizeExplicitEmptyStringArray(base.browserCDPEndpoints)
