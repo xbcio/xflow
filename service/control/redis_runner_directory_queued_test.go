@@ -699,3 +699,48 @@ func TestRedisRunnerDirectoryQueuedReapRestoresTheClaimableHead(t *testing.T) {
 			claim.Assignment.Task.ExecutionID, "exec-tail")
 	}
 }
+
+// TestRedisRunnerDirectoryQueuedReapDrainsPastThePipelineWidth keeps the
+// batched removals complete when one pass carries more candidates than a
+// single pipeline: the page's dead entries span several batches, every one of
+// them is still removed, the live tail survives, and the pass stays idempotent.
+func TestRedisRunnerDirectoryQueuedReapDrainsPastThePipelineWidth(t *testing.T) {
+	ctx := context.Background()
+	reader := newFakeExecutionStatusReader()
+	server, directory, rdb := newQueuedReapDirectory(t, reader)
+
+	const deadCount = redisReapPipelineBatch + 37
+	for i := 0; i < deadCount; i++ {
+		executionID := types.ExecutionID("exec-wide-" + strconv.Itoa(i))
+		assignment := queuedReapTestAssignment(AssignmentID(string(executionID)+"/node/activation-1"), executionID)
+		mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
+	}
+	live := queuedReapTestAssignment("exec-wide-live/node/activation-1", "exec-wide-live")
+	reader.set("exec-wide-live", types.ExecutionStatusRunning)
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, live)
+
+	reap, err := directory.ReapDeadQueuedAssignments(ctx, deadCount)
+	if err != nil {
+		t.Fatalf("ReapDeadQueuedAssignments() error = %v", err)
+	}
+	if reap.Released != deadCount {
+		t.Fatalf("reclaimed = %d, want all %d dead assignments across the batches", reap.Released, deadCount)
+	}
+	if queue, err := rdb.LRange(ctx, directory.keys.queue, 0, -1).Result(); err != nil {
+		t.Fatalf("read queue: %v", err)
+	} else if len(queue) != 1 || queue[0] != string(live.AssignmentID) {
+		t.Fatalf("queue = %v, want exactly the live assignment %q", queue, live.AssignmentID)
+	}
+	for i := 0; i < deadCount; i++ {
+		assignmentID := AssignmentID("exec-wide-" + strconv.Itoa(i) + "/node/activation-1")
+		assertQueuedReapRemovedAssignment(t, ctx, server, rdb, directory, assignmentID)
+	}
+
+	reap, err = directory.ReapDeadQueuedAssignments(ctx, deadCount)
+	if err != nil {
+		t.Fatalf("second ReapDeadQueuedAssignments() error = %v", err)
+	}
+	if reap.Released != 0 {
+		t.Fatalf("second reclaimed = %d, want 0 with only the live tail left", reap.Released)
+	}
+}

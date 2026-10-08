@@ -6,6 +6,8 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
@@ -34,6 +36,17 @@ import (
 // spent minutes learning that the entries were already dead, which is the same
 // cost that capped the older value.
 const defaultDeadQueuedAssignmentReapBatch = 4096
+
+// redisReapPipelineBatch bounds the removal transitions that one pipeline
+// carries. A batch-sized pass hands the directory thousands of candidates,
+// and every removal is still its own atomic Lua transition — the script below
+// is unchanged — but issuing the transitions one round trip at a time made
+// the pass cost thousands of link round trips with the server idle between
+// them, which on a link of tens of milliseconds pinned a pass at tens of
+// removals per second. Pipelining in batches of this size keeps the link busy,
+// while one batch stays small enough that its server time does not become a
+// stall on shared Redis.
+const redisReapPipelineBatch = 128
 
 // DeadQueuedAssignmentReaper is the durable-directory capability that reclaims
 // assignments left in 'queued' state after the execution they belong to has
@@ -274,20 +287,33 @@ func (d *RedisRunnerDirectory) reapDeadQueuedAssignmentPage(ctx context.Context,
 		return reclaimed, inspected, err
 	}
 
-	reclaimed = 0
+	// The dead candidates are collected first, then removed in pipelined
+	// batches. Every removal is still exactly one atomic transition — the
+	// safety argument above is untouched — but issuing them one round trip at a
+	// time made the pass cost thousands of link latencies with the server idle
+	// between them; on a batch-sized pass that was the whole wall time. The
+	// limit caps the transitions one pass attempts, taken in the page's sorted
+	// order so a bounded pass still picks the same entries every call.
+	dead := make([]string, 0, len(parsed))
 	for _, c := range parsed {
-		if reclaimed >= limit {
-			break
-		}
 		if leaseable[c.assignment.Task.ExecutionID] {
 			continue
 		}
-		didReap, err := d.reapQueuedAssignment(ctx, AssignmentID(c.assignmentID))
+		if len(dead) >= limit {
+			break
+		}
+		dead = append(dead, c.assignmentID)
+	}
+	reclaimed = 0
+	for start := 0; start < len(dead); start += redisReapPipelineBatch {
+		end := start + redisReapPipelineBatch
+		if end > len(dead) {
+			end = len(dead)
+		}
+		reaped, err := d.reapQueuedAssignments(ctx, dead[start:end])
+		reclaimed += reaped
 		if err != nil {
 			return reclaimed, inspected, err
-		}
-		if didReap {
-			reclaimed++
 		}
 	}
 	return reclaimed, inspected, nil
@@ -354,35 +380,54 @@ func (d *RedisRunnerDirectory) leaseableExecutions(ctx context.Context, assignme
 	return live, nil
 }
 
-// reapQueuedAssignment performs the atomic removal. ok is false when the
-// transition declined — the assignment was claimed, leased or already removed
-// between the scan and the call — which is not an error: every one of those
-// outcomes means the entry is no longer this reaper's to remove.
-func (d *RedisRunnerDirectory) reapQueuedAssignment(ctx context.Context, assignmentID AssignmentID) (bool, error) {
-	status, err := d.evalStatus(ctx, redisReapDeadQueuedAssignmentLua, []string{
-		d.keys.queue,
-		d.keys.seen,
-		d.keys.assignmentData,
-		d.keys.assignmentState,
-		d.keys.assignmentClaim,
-		d.keys.assignmentRunner,
-		d.keys.assignmentSession,
-		d.keys.assignmentLeaseID,
-		d.keys.assignmentLeaseToken,
-		d.keys.assignmentLeaseMetaKey(string(assignmentID)),
-		d.keys.assignmentLeaseMetaLegacy,
-	}, string(assignmentID))
-	if err != nil {
-		return false, fmt.Errorf("reap dead queued assignment %q: %w", assignmentID, err)
+// reapQueuedAssignments performs the atomic removals for one pipeline batch.
+// Each transition keeps its own fence — the script decides, per assignment,
+// whether the record is still 'queued' — so batching changes how the
+// transitions travel, not what any of them does, and a concurrent claim races
+// each one exactly as it did when they went one at a time. A declined
+// transition ('skipped') is the normal outcome of such a race and not an
+// error; a command error is attributed to its candidate, which a
+// pipeline-level error alone cannot do, and reported once the batch settled.
+func (d *RedisRunnerDirectory) reapQueuedAssignments(ctx context.Context, assignmentIDs []string) (int, error) {
+	if len(assignmentIDs) == 0 {
+		return 0, nil
 	}
-	switch status {
-	case "reaped":
-		return true, nil
-	case "skipped":
-		return false, nil
-	default:
-		return false, fmt.Errorf("reap dead queued assignment %q: unexpected result %q", assignmentID, status)
+	pipe := d.rdb.Pipeline()
+	cmds := make([]*redis.Cmd, 0, len(assignmentIDs))
+	for _, assignmentID := range assignmentIDs {
+		cmds = append(cmds, pipe.Eval(ctx, redisReapDeadQueuedAssignmentLua, []string{
+			d.keys.queue,
+			d.keys.seen,
+			d.keys.assignmentData,
+			d.keys.assignmentState,
+			d.keys.assignmentClaim,
+			d.keys.assignmentRunner,
+			d.keys.assignmentSession,
+			d.keys.assignmentLeaseID,
+			d.keys.assignmentLeaseToken,
+			d.keys.assignmentLeaseMetaKey(assignmentID),
+			d.keys.assignmentLeaseMetaLegacy,
+		}, assignmentID))
 	}
+	// Every command has settled by the time Exec returns, each carrying its own
+	// error, so the results are read per command below rather than from the
+	// pipeline-level error.
+	_, _ = pipe.Exec(ctx)
+	reclaimed := 0
+	for i, cmd := range cmds {
+		status, err := cmd.Text()
+		if err != nil {
+			return reclaimed, fmt.Errorf("reap dead queued assignment %q: %w", assignmentIDs[i], err)
+		}
+		switch status {
+		case "reaped":
+			reclaimed++
+		case "skipped":
+		default:
+			return reclaimed, fmt.Errorf("reap dead queued assignment %q: unexpected result %q", assignmentIDs[i], status)
+		}
+	}
+	return reclaimed, nil
 }
 
 // redisReapDeadQueuedAssignmentLua removes one assignment record whose
