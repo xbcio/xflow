@@ -5,9 +5,9 @@ Node Group 组级 `on_error`、gRPC `AckActivation`、G1 clean-SHA 重签 `c39a2
 仍开放的条目。按「不做会怎样」排序，不按工作量。
 
 2026-10-08 第二轮收口（分支 `fix/runtime-gaps-closeout`，相对基线 `e3478d7` 共
-43 个 commit）关闭了原条目 1–6、9（配置面）、12（工具面）、13、14，以及同期新
-登记的 gRPC 组结果传输缺口；新登记的另外四处（`disabled` 的运行时消费者、组结果
-失败成员的对外类型、map batch 续期的目录元数据、组失败上报的组结果路径）仍然开放。
+47 个 commit）关闭了原条目 1–6、9（配置面）、12（工具面）、13、14，以及同期新
+登记的 gRPC 组结果传输缺口与组失败上报缺口；新登记的另外三处（`disabled` 的
+运行时消费者、组结果失败成员的对外类型、map batch 续期的目录元数据）仍然开放。
 条目已按体例重排编号，旧号保留在「已关闭」条目的括注里。
 
 每条都写明出处：缺口本身的现状说明留在所属设计文档里，这里只记「打算改的东西」。
@@ -55,23 +55,13 @@ Node Group 组级 `on_error`、gRPC `AckActivation`、G1 clean-SHA 重签 `c39a2
    （`service/runner/group_exec_trigger_runtime.go` 注释自述）。修法：给
    `GroupExecResult` 补承载字段，或把失败分类并入 `Error` 的结构化载荷。
 
-7. **组任务的失败/超限上报走不进组结果路径（复核阶段发现）。** runner 的组执行
-   error 与结果 oversize 分支（`service/runner/runner.go`）在两条传输上都上报
-   「带组租约、`GroupResult == nil`」的请求，core 走普通提交被 2026-10-08 的新组
-   租约守卫拒绝：目录容量不再随拒绝立即释放（修复前被围栏按过期 token 拒绝时会），
-   要等租约过期由 sweeper 回收；`normalizeRunnerError` 未映射该错误，runner 收到
-   通用 500。根因是修复前就存在的缺口——组失败从未经组结果路径提交。修法（可
-   并用）：runner 侧对组租约的组执行 error 合成 `GroupOutcomeFailed` 的
-   `GroupResult`（根治，失败也走组提交路径）；core 侧把「组租约 + 空组结果」映射为
-   明确拒绝并释放容量。出处：2026-10-08 最终复验（`verifier-closeout`）。
-
 ### P3 — 已知限制，记录在案
 
-8. **ADR-D4 刻意延后的两项：** 草稿与发布分离（`WorkflowDraft`）、定义版本历史
+7. **ADR-D4 刻意延后的两项：** 草稿与发布分离（`WorkflowDraft`）、定义版本历史
    （`WorkflowDefinitionVersion`）。见
    [ADR-D4-runtime-editor-metadata-split.md](./ADR-D4-runtime-editor-metadata-split.md)。
 
-9. **map batch 的租约续期仍走单值索引。** `LeaseLookupKey` 的 NodeName/NodeIdx 只在
+8. **map batch 的租约续期仍走单值索引。** `LeaseLookupKey` 的 NodeName/NodeIdx 只在
    汇报路径填充（2026-10-08 的 D2 修复），续期路径不带——map 节点与其 batch 落在同一
    runner 上时，batch 的续期可能解析到父或兄弟 assignment；共享同一 lease 使引擎侧
    续期目标相同，但 `RefreshLeaseMeta` 只刷新被解析 assignment 的元数据 TTL，长跑
@@ -80,13 +70,13 @@ Node Group 组级 `on_error`、gRPC `AckActivation`、G1 clean-SHA 重签 `c39a2
 
 ### 需要真实环境或人工批准，不能靠改代码关闭
 
-10. **G2：多副本 control-plane HA soak 与真实多 namespace 隔离验收。** 要求见
+9. **G2：多副本 control-plane HA soak 与真实多 namespace 隔离验收。** 要求见
     [RELEASE-GATES.md](./RELEASE-GATES.md) 的 G2 定义；`make test-soak` 不是该证据
     （见 README 的说明）。
 
-11. **RELEASE-GATES §6 的 D1–D8** 全部为「OPEN — 未批准」，需要对应负责人裁定。
+10. **RELEASE-GATES §6 的 D1–D8** 全部为「OPEN — 未批准」，需要对应负责人裁定。
 
-12. **KEK 轮换（`xflow supply reseal`）与 server/runner 凭据热加载都没有在真实环境
+11. **KEK 轮换（`xflow supply reseal`）与 server/runner 凭据热加载都没有在真实环境
     演练过**，runbook 的 owner 与期限属于 D6。
 
 ## 已关闭
@@ -120,7 +110,7 @@ Node Group 组级 `on_error`、gRPC `AckActivation`、G1 clean-SHA 重签 `c39a2
   `engine.Task.ActivationID/AutoDepth` 是 `json:"-"`，从 echo 的 lease 重建的
   AssignmentID 与入队侧从不相等的（Invoke 起的执行全 activation>0），汇报路由此前
   完全依赖 token 单值索引。未验证：真环境 e2e（本机无 podman/MySQL，对照实验未跑）。
-  遗留见 P3-9（renew 路径）。
+  遗留见 P3-8（renew 路径）。
 
 - **`pin_data` / `settings.pin_data_mode` 没有运行时消费者**（原 P1-4）—— `43624e6`、
   `24289a9`、`35bb063`、`9483af8`、`17e3cb4`、`f77f5c3`、`b2f9e60`、`28158e4`
@@ -179,11 +169,19 @@ Node Group 组级 `on_error`、gRPC `AckActivation`、G1 clean-SHA 重签 `c39a2
   `bytes group_result_json = 6`，双向复用 `protocol.MarshalGroupResult`/
   `UnmarshalGroupResult`（nil 与空字节的 presence 规则无歧义），组结果现在经 HTTP
   与 gRPC 两条传输都完整到达控制面；`engine.CommitTaskResultWithOutcome` 补组租约
-  守卫（组租约必须走组提交路径），组租约上的非组提交在 engine 层被明确拒绝（错误
-  映射与容量回收的剩余缺口见 P2-7）。实情修正：修复前的失败形态不是「空成功」，
-  而是零值结果提交被后端围栏按过期 token 拒绝——错误信息误导、组结果永不成功
-  上报；HTTP 传输一直正常。
+  守卫（组租约必须走组提交路径）；组租约上缺组结果的上报的完整处置（显式拒绝、
+  容量释放与错误映射）见下一条。
   [NODE-GROUP-COLOCATION.md](./NODE-GROUP-COLOCATION.md) 的失败成员段已同步（`36c4a1e`）。
+
+- **组任务的失败/超限上报走不进组结果路径**（2026-10-08 复核阶段新登记）——
+  `c0d2619`、`eac88b3`（2026-10-08）：runner 侧组执行 error 与结果 oversize 分支
+  改为合成 `GroupOutcomeFailed` 的 `GroupResult`（身份字段齐全；组失败与普通节点
+  失败一样走结果提交路径；组级重试本就完全由 lease 过期驱动，失败结果不触发
+  重试）；core 侧把「组租约 + 空组结果」显式判定为 stale-token 等价结果——立即
+  释放目录容量（对齐修复前行为），并新增 `ErrGroupResultMissing` 与
+  `ReportRejectedGroupResultMissing` 埋点，runner 收到明确错误而非 500。未验证：
+  真实 transport 端到端（两分支由进程内测试 + mutation 验证覆盖；wire 层由
+  `f85540a` 覆盖）。
 
 - **嵌入式 `Server.ReplaceWorkflow` 会清空编辑器元数据**（原 P3-14）—— `6501ad0`
   （2026-10-08）：新增 `ReplaceWorkflowWithMetadata`（apiserver 侧
