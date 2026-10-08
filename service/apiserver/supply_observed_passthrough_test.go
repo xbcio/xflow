@@ -8,6 +8,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/alicebob/miniredis/v2"
+
+	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/protocol"
@@ -113,5 +116,96 @@ func TestSupplyObservedIsNilWithoutSupplies(t *testing.T) {
 	}
 	if sink := srv.SupplyObserved(); sink != nil {
 		t.Fatalf("SupplyObserved() = %#v, want nil（未配置 Supplies）", sink)
+	}
+}
+
+// 多副本回归：runner 的心跳只落到一个副本（负载均衡不保证落点），但「所有人
+// 是否都应用了 revision N」是任何一个副本都要能回答的问题。内存 sink 下副本 B
+// 永远看不到副本 A 收到的心跳，两个副本给出的答案互相矛盾——这正是嵌入方
+// （SAS 测试环境）产物页「生效状态」在 就绪/未知 之间闪烁的根因。两个副本共享
+// 一个 Redis（distributed backend 暴露 RedisClient），快照才是全舰队一致的。
+//
+// 这个测试在旧装配（observed := NewMemorySupplyObserved()）上必红：副本 B 的
+// 快照是空的，而它从来没有见过 runner-1 的心跳，无从补。
+func TestSupplyObservedIsSharedAcrossReplicas(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(mr.Close)
+
+	supplies := memstore.New()
+	newReplica := func() (*APIServer, *control.ControlPlane) {
+		backend, err := distributed.New(mr.Addr(), nil)
+		if err != nil {
+			t.Fatalf("distributed.New: %v", err)
+		}
+		cp, err := control.NewControlPlane(control.Config{
+			Backend:              backend,
+			Supplies:             supplies,
+			EntryActivationStore: control.NewMemoryEntryActivationStore(),
+		})
+		if err != nil {
+			t.Fatalf("control.NewControlPlane: %v", err)
+		}
+		srv, err := New(Config{
+			Supplies: supplies,
+			PrincipalAuth: staticPrincipalAuth{principal: Principal{
+				Subject: "test-user", Namespace: "ns1", Scopes: []string{"supply.read"},
+			}},
+			Authorizer: ScopeAuthorizer{},
+			AuditSink:  NewInMemoryAuditSink(),
+		}, WithControlPlane(cp))
+		if err != nil {
+			t.Fatalf("apiserver.New: %v", err)
+		}
+		return srv, cp
+	}
+
+	// 副本 A 收心跳。
+	srvA, cpA := newReplica()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := cpA.Start(ctx); err != nil {
+		t.Fatalf("cpA.Start: %v", err)
+	}
+	defer func() { _ = cpA.Shutdown(context.Background()) }()
+	muxA := srvA.Handler()
+
+	regBody, _ := json.Marshal(protocol.RegisterRunnerRequest{
+		InstanceUID: "test-instance",
+		RunnerID:    "runner-1",
+		Concurrency: 1,
+	})
+	regRec := httptest.NewRecorder()
+	muxA.ServeHTTP(regRec, httptest.NewRequest(http.MethodPost, protocol.RegisterRunnerPath, bytes.NewReader(regBody)))
+	if regRec.Code != http.StatusOK {
+		t.Fatalf("register = %d, body=%s", regRec.Code, regRec.Body)
+	}
+	var reg protocol.RegisterRunnerResponse
+	if err := json.Unmarshal(regRec.Body.Bytes(), &reg); err != nil {
+		t.Fatalf("decode register response %s: %v", regRec.Body, err)
+	}
+	hbBody, _ := json.Marshal(protocol.HeartbeatRequest{
+		RunnerID:       "runner-1",
+		SessionID:      reg.SessionID,
+		Capacity:       1,
+		SupplyObserved: map[string]string{"rules": "sha256:abc"},
+	})
+	hbRec := httptest.NewRecorder()
+	muxA.ServeHTTP(hbRec, httptest.NewRequest(http.MethodPost, protocol.HeartbeatPath, bytes.NewReader(hbBody)))
+	if hbRec.Code != http.StatusOK {
+		t.Fatalf("heartbeat = %d, body=%s", hbRec.Code, hbRec.Body)
+	}
+
+	// 副本 B 只读：它没有 Start，也没有收到过任何心跳。
+	srvB, _ := newReplica()
+	sinkB := srvB.SupplyObserved()
+	if sinkB == nil {
+		t.Fatal("副本 B 的 SupplyObserved() = nil，但控制面是带 Supplies 装配的")
+	}
+	if got := sinkB.Snapshot()["runner-1"]["rules"]; got != "sha256:abc" {
+		t.Fatalf("副本 B 看到的快照里没有副本 A 收到的报告：%#v；"+
+			"心跳落到哪个副本不由调用方决定，两个副本必须共享同一份 sink", sinkB.Snapshot())
 	}
 }
