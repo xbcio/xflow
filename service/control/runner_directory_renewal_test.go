@@ -176,6 +176,29 @@ func TestMemoryRunnerDirectoryRenewalSurvivesIndexLoss(t *testing.T) {
 	})
 }
 
+// finalizeSharedIdentityAssignment finalizes one more assignment under the
+// shared identity L1. The claim carries ActiveLeaseIDs because otherwise every
+// claim after the first replays the finalized lease of a sibling — replay
+// matches on (runner, session, state==leased) alone — and there would be no
+// claim left for FinalizeClaim to finalize.
+func finalizeSharedIdentityAssignment(t *testing.T, ctx context.Context, directory *RedisRunnerDirectory, session RunnerSession, assignment Assignment, lease *engine.TaskLease) {
+	t.Helper()
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
+	req := redisDirectoryClaimRequest(session, 1)
+	req.Capacity = 3
+	req.ActiveLeaseIDs = []string{"L1"}
+	claim, ok, err := directory.ClaimForRunner(ctx, req)
+	if err != nil || !ok {
+		t.Fatalf("ClaimForRunner() ok=%v err=%v", ok, err)
+	}
+	if claim.Assignment.AssignmentID != assignment.AssignmentID {
+		t.Fatalf("ClaimForRunner() claimed %q, want %q", claim.Assignment.AssignmentID, assignment.AssignmentID)
+	}
+	if err := directory.FinalizeClaim(ctx, claim.ClaimID, lease); err != nil {
+		t.Fatalf("FinalizeClaim(): %v", err)
+	}
+}
+
 // finalizeSharedIdentityGroup finalizes a map node and two of its batches under
 // one identity, shaped like dispatchSubgraphLease: the parent without a
 // payload, the batches with one.
@@ -270,5 +293,79 @@ func TestRenewLeaseBatchRenewalIgnoresParentDeadline(t *testing.T) {
 	}
 	if fake.commitTimeoutCalled {
 		t.Fatal("the batch renewal fired the parent's deadline; the fallback resolved to the parent map node")
+	}
+}
+
+// TestRedisRunnerDirectoryRefreshLeaseMetaRefreshesEverySharedAssignment: one
+// successful renewal must re-arm the metadata of every assignment the runner
+// holds under the identity. Refreshing only the index-resolved sibling lets the
+// others expire at their finalized deadline while the engine lease keeps being
+// extended, and their own renewal then fails.
+func TestRedisRunnerDirectoryRefreshLeaseMetaRefreshesEverySharedAssignment(t *testing.T) {
+	const claimTTL = 2 * time.Second
+	ctx, server, directory, session := newRedisRunnerDirectoryLeaseMetaTestDirectory(t, claimTTL, 4)
+	parent := mapParentTask()
+	assignments := []Assignment{{AssignmentID: BuildAssignmentID(&parent), Task: parent, Routing: engine.TaskRouting{NodeType: "xflow.function"}}}
+	for _, batch := range []engine.Task{mapBatchTask("L1", 0), mapBatchTask("L1", 1)} {
+		assignments = append(assignments, Assignment{AssignmentID: BuildAssignmentID(&batch), Task: batch, Routing: engine.TaskRouting{NodeType: "xflow.function"}})
+	}
+	for i, assignment := range assignments {
+		lease := redisRunnerDirectoryLeaseMetaTestLease(assignment, "L1", 3*time.Second)
+		if i > 0 {
+			lease.SubgraphPayload = batchLeasePayload(i - 1)
+		}
+		finalizeSharedIdentityAssignment(t, ctx, directory, session, assignment, lease)
+	}
+	for _, assignment := range assignments {
+		assertRedisRunnerDirectoryLeaseMetaTTL(t, server, directory.keys.assignmentLeaseMetaKey(string(assignment.AssignmentID)), 3*time.Second+claimTTL)
+	}
+
+	// Burn most of the original window: the resolver alone would re-arm one of
+	// the three.
+	server.FastForward(4 * time.Second)
+	if err := directory.RefreshLeaseMeta(ctx, session.RunnerID, session.SessionID, renewalLookupKey("L1", "token-L1"), 20*time.Second); err != nil {
+		t.Fatalf("RefreshLeaseMeta() error = %v", err)
+	}
+	for _, assignment := range assignments {
+		assertRedisRunnerDirectoryLeaseMetaTTL(t, server, directory.keys.assignmentLeaseMetaKey(string(assignment.AssignmentID)), 20*time.Second+claimTTL)
+	}
+}
+
+// TestRenewLeaseRefreshesEverySharedAssignment is the end-to-end half: a
+// renewal the engine accepted must leave every assignment of the identity with
+// its directory expiry pushed forward.
+func TestRenewLeaseRefreshesEverySharedAssignment(t *testing.T) {
+	const claimTTL = 2 * time.Second
+	ctx, server, directory, session := newRedisRunnerDirectoryLeaseMetaTestDirectory(t, claimTTL, 4)
+	parent := mapParentTask()
+	assignments := []Assignment{{AssignmentID: BuildAssignmentID(&parent), Task: parent, Routing: engine.TaskRouting{NodeType: "xflow.function"}}}
+	for _, batch := range []engine.Task{mapBatchTask("L1", 0), mapBatchTask("L1", 1)} {
+		assignments = append(assignments, Assignment{AssignmentID: BuildAssignmentID(&batch), Task: batch, Routing: engine.TaskRouting{NodeType: "xflow.function"}})
+	}
+	for i, assignment := range assignments {
+		lease := redisRunnerDirectoryLeaseMetaTestLease(assignment, "L1", 3*time.Second)
+		if i > 0 {
+			lease.SubgraphPayload = batchLeasePayload(i - 1)
+		}
+		finalizeSharedIdentityAssignment(t, ctx, directory, session, assignment, lease)
+	}
+	server.FastForward(4 * time.Second)
+
+	core := &Core{engine: &groupFakeEngine{nodeRenewResult: true}, runners: directory, pollWait: time.Second}
+	resp, err := core.renewLease(ctx, protocol.RenewLeaseRequest{
+		RunnerID:   session.RunnerID,
+		SessionID:  session.SessionID,
+		LeaseID:    "L1",
+		LeaseToken: "token-L1",
+		Extend:     30000,
+	}, TransportInfo{})
+	if err != nil {
+		t.Fatalf("renewLease() error = %v", err)
+	}
+	if !resp.Renewed {
+		t.Fatalf("renewLease() Renewed=false (err=%q)", resp.Error)
+	}
+	for _, assignment := range assignments {
+		assertRedisRunnerDirectoryLeaseMetaTTL(t, server, directory.keys.assignmentLeaseMetaKey(string(assignment.AssignmentID)), 30*time.Second+claimTTL)
 	}
 }
