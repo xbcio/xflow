@@ -787,6 +787,7 @@ func taskFromExpiredLease(lease *engine.ExpiredLease) *engine.Task {
 		UnitIdx:      lease.UnitIdx,
 		ActivationID: lease.ActivationID,
 		AutoDepth:    lease.AutoDepth,
+		Type:         lease.TaskType,
 		Payload:      lease.Payload,
 	}
 }

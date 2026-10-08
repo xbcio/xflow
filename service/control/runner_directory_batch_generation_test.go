@@ -105,3 +105,17 @@ func claimMemoryBatch(t *testing.T, ctx context.Context, dir *MemoryRunnerDirect
 	}
 	return claim
 }
+
+// The sweeper rebuilds the assignment ID from the expired lease; a batch's ID
+// depends on its task type, so the rebuild must keep it.
+func TestTaskFromExpiredLeaseKeepsBatchAssignmentID(t *testing.T) {
+	task := mapBatchTask("L1", 0)
+	expired := engine.ExpiredLease{
+		ExecutionID: task.ExecutionID, NodeName: task.NodeName, NodeIdx: task.NodeIdx,
+		ActivationID: task.ActivationID, AutoDepth: task.AutoDepth,
+		TaskType: task.Type, Payload: task.Payload,
+	}
+	if got, want := BuildAssignmentID(taskFromExpiredLease(&expired)), BuildAssignmentID(&task); got != want {
+		t.Fatalf("assignment ID from expired lease = %q, want %q", got, want)
+	}
+}
