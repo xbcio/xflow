@@ -75,6 +75,8 @@ export type ExecutionNodeStatus =
   | "success"
   | "failed"
   | "skipped"
+  /** Served from pin_data: the handler did not run; output is the mock. */
+  | "pinned"
   | "suspended"
   | "continued"
   | "canceled"
@@ -269,6 +271,7 @@ const executionNodeStatuses = new Set<string>([
   "success",
   "failed",
   "skipped",
+  "pinned",
   "suspended",
   "continued",
   "canceled",
@@ -819,6 +822,9 @@ function executionNodeStatusToRuntimeStatus(status: ExecutionNodeStatus): Runtim
     case "committing":
       return "running";
     case "success":
+    // A pinned node completed with its pin_data mock as output; the runtime
+    // status vocabulary has no separate state for it.
+    case "pinned":
       return "success";
     case "failed":
       return "failed";
