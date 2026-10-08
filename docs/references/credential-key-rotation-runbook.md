@@ -611,9 +611,14 @@ being checked is theatre; confirm the posture first (`--mode=production` makes
   CA or client-certificate rotation every renewal failed until the issued
   identity expired and the runner lost authentication. An embedded host that
   keeps its own long-lived client should get it the same way;
-  `NewRunnerHTTPClient` reads the files once and never changes. The only
-  call made through it in `sdk/runner` is enrollment, before the runner
-  exists, so it has nothing to reload.
+  `NewRunnerHTTPClient` reads the files once and never changes. That client
+  attaches the runner's live token only to the runner's own `ServerURL`; the
+  origin is taken from the runner, not from the caller, so it cannot be aimed
+  at another host. Build it once and keep it: every call registers one more
+  transport with the runner's reloader for the life of the runner, so calling
+  it per request grows memory slowly and makes each reload close more idle
+  pools. The only call made through `NewRunnerHTTPClient` in `sdk/runner` is
+  enrollment, before the runner exists, so it has nothing to reload.
 - **A reload cannot weaken server verification.** A runner-side reload that
   drops every TLS setting while TLS is configured, or drops the server CA
   while a private CA is trusted, is rejected like a bad file: the error is
@@ -625,6 +630,12 @@ being checked is theatre; confirm the posture first (`--mode=production` makes
   the gRPC transport speaks TLS at all is fixed at startup (and by the
   `ServerURL` scheme on HTTP), so a reload never moves a runner from
   plaintext to TLS either.
+- **A reload cannot check what a CA bundle trusts.** It verifies that the new
+  `TLSServerCA` file parses, not what it contains: a bundle that also holds a
+  public root, or any other unintended CA, is accepted and trusted from the
+  next handshake. Keeping the private CA bundle private is a job for
+  configuration management and file permissions on that path, not something
+  `Reload` can enforce.
 - **The runner's HTTP transport dials the control plane directly.** It does
   not honour `HTTP_PROXY`/`HTTPS_PROXY`: net/http would verify a proxied
   HTTPS tunnel against a static CA pool and bypass the reloadable one.
