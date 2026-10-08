@@ -75,6 +75,36 @@ type Task struct {
 	// UnitIdx 是任务所属 durable unit 的下标。普通 node 任务恒等于其 node 下标
 	// （无 group 时 unit 索引 == node 索引，退化等价）；group 任务指向 group unit。
 	UnitIdx int `json:"-"`
+
+	// DeliverableAt is the instant the task became deliverable to the queue:
+	// the outbox entry's AvailableAt when it had one (delayed/timer intents),
+	// otherwise its CreatedAt. It exists so the consuming side can measure how
+	// long a task waited between becoming deliverable and being consumed — the
+	// direct evidence that queue residency is approaching the execution's
+	// retention TTL. The zero value means "not carried" (legacy payloads, and
+	// direct-enqueue paths with no durable intent behind them), in which case
+	// no latency is observed rather than a fabricated one.
+	//
+	// It is internal queue metadata, not part of the public runner JSON
+	// contract, exactly like the fields above.
+	DeliverableAt time.Time `json:"-"`
+
+	// IntentCreatedAt is the instant the durable intent that produced this task
+	// was recorded (the outbox entry's CreatedAt). It is the age anchor for the
+	// inactive-execution provability test, and it is deliberately separate from
+	// DeliverableAt: a delayed intent (a timer suspend wakeup, a retry replay)
+	// carries an AvailableAt in the future, so measuring its age from
+	// DeliverableAt at consumption time would report roughly zero even though
+	// the intent — and any terminal transition it should have observed — is
+	// hours old. Age runs from creation because a terminal marker is written no
+	// earlier than creation and lives one retention: if less than a retention
+	// has passed since creation, a terminal transition during that span would
+	// still be readable. The zero value means "not carried" (legacy payloads,
+	// direct-enqueue paths), and the classifier falls back to DeliverableAt.
+	//
+	// It is internal queue metadata, not part of the public runner JSON
+	// contract, exactly like the fields above.
+	IntentCreatedAt time.Time `json:"-"`
 }
 
 // UnitIdxUnknown is the sentinel value for Task.UnitIdx meaning "the durable

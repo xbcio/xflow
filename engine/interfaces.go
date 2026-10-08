@@ -175,6 +175,70 @@ type ExecutionStatusReader interface {
 	GetExecutionStatus(ctx context.Context, id types.ExecutionID) (status types.ExecutionStatus, found bool, err error)
 }
 
+// ExecutionTerminalReader reads the terminal marker a backend may keep after an
+// execution's status record is gone.
+//
+// It exists because the classification of an inactive execution cannot assume
+// the status key's lifetime equals the retention the caller cares about. In
+// transient mode the completion TTL deliberately shortens the status key to a
+// fraction of the active TTL, and in a short-TTL durable deployment the status
+// key simply expires. A task can then be consumed long after its execution
+// finished (queue backlog), and without a marker the control plane would read
+// "no status" as "work was never executed" — a false data-loss alarm on every
+// late duplicate, exactly during the backlog incident the classification is for.
+//
+// Implementations write the marker whenever an execution reaches a terminal
+// state, with a retention at least the execution's ACTIVE retention, and never
+// shorten it with the rest of the execution's keys. found=false is the honest
+// "no marker" answer; backends without expiring state (the in-memory store) may
+// omit this interface entirely, because a status record there is never removed
+// by time — the classifier falls back to Gone when the interface is absent,
+// which is the correct answer for a backend whose absence really is absence.
+type ExecutionTerminalReader interface {
+	GetExecutionTerminalStatus(ctx context.Context, id types.ExecutionID) (status types.ExecutionStatus, found bool, err error)
+}
+
+// ExecutionRetentionReader reports the backend's evidence window for an
+// execution: the active retention (execTTL, or a transient execution's active
+// TTL) that bounds how long any record of the execution — the status key or a
+// terminal marker — can survive after its last write. It is what lets the
+// classifier bound its own verdict.
+//
+// The window exists because a terminal marker's lifetime is finite while a
+// queue backlog is not: past the window, an execution that finished long ago
+// is indistinguishable from one that expired under its queued work, and a
+// "no evidence" verdict would report the former as lost work. The classifier
+// therefore only calls a stamped delivery Gone when its wait is inside the
+// window; beyond it (or with no stamp to measure the wait) the verdict is
+// Unattributed, which claims neither loss nor health.
+//
+// Return 0 when no expiry applies — an in-memory store, or a deployment with
+// time-unbounded state. Absence of evidence is then conclusive and the
+// classifier keeps its original Gone verdict. Backends with expiring state
+// should implement this and must return the TTL that actually bounds their
+// status/marker writes, so the two cannot drift apart.
+//
+// Return ExecutionRetentionUnknown when the backend cannot determine the
+// retention that actually bounded the execution's writes — for example, the
+// record of a per-execution override has itself expired, so the best
+// available fallback would report a longer window than the writes can
+// support. The classifier then refuses the comparison and lands a no-evidence
+// delivery in Unattributed: reporting a window the backend cannot stand
+// behind is the one failure direction this contract exists to prevent, and
+// under-reporting the loss claim is the deliberate cost.
+type ExecutionRetentionReader interface {
+	GetExecutionRetention(ctx context.Context, id types.ExecutionID) (time.Duration, error)
+}
+
+// ExecutionRetentionUnknown is the value an ExecutionRetentionReader returns
+// when it cannot confirm the retention that bounded an execution's writes.
+// It is negative — no real retention is — and distinct from 0, which keeps
+// its meaning of "no expiry applies, so absence is conclusive". The
+// classifier maps it to Unattributed rather than ever comparing a delivery's
+// age against it; see ExecutionRetentionReader and
+// Engine.inactiveExecutionError.
+const ExecutionRetentionUnknown time.Duration = -1
+
 // ExecutionStatusBatchReader is the optional batch form of ExecutionStatusReader:
 // it answers the same activeness question for many executions in one round trip.
 //

@@ -425,15 +425,27 @@ func (e *Engine) FlushOutbox(ctx context.Context, id types.ExecutionID) error {
 		for i, entry := range entries {
 			if entry.Task.Type == TaskTypeNodeAdvance || entry.Task.Type == TaskTypeNodeSkip {
 				handled, err := e.handleSystemTask(ctx, &entry.Task, false)
-				if err != nil {
-					e.recordOutboxDeliveryFailure(ctx, state, id, entry, err)
-					keeper.forget(entry.ID)
-					if firstErr == nil {
-						firstErr = fmt.Errorf("handle outbox system task %q for %q: %w", entry.ID, id, err)
+				switch {
+				case err != nil:
+					var inactive *ExecutionInactiveError
+					if !errors.As(err, &inactive) {
+						e.recordOutboxDeliveryFailure(ctx, state, id, entry, err)
+						keeper.forget(entry.ID)
+						if firstErr == nil {
+							firstErr = fmt.Errorf("handle outbox system task %q for %q: %w", entry.ID, id, err)
+						}
+						continue
 					}
-					continue
-				}
-				if !handled {
+					// A classified inactive execution cannot consume this
+					// intent, and the intent never reached the broker, so there
+					// is no queued delivery here to dead-letter: settle it by
+					// acknowledging below rather than recording a delivery
+					// failure, which would retry an intent no execution can
+					// ever accept. This is also why the drop is not counted
+					// here — this in-process resolution has no observer, and
+					// the consumer path (Dispatcher.HandleTask) is the sink the
+					// system-task classification exists for.
+				case !handled:
 					err := fmt.Errorf("outbox task %q for %q was not handled", entry.ID, id)
 					e.recordOutboxDeliveryFailure(ctx, state, id, entry, err)
 					keeper.forget(entry.ID)
@@ -441,16 +453,46 @@ func (e *Engine) FlushOutbox(ctx context.Context, id types.ExecutionID) error {
 						firstErr = err
 					}
 					continue
+				default:
+					appended = true
 				}
-				appended = true
 			} else {
+				// Stamp the task with the two instants the consuming side needs.
+				// DeliverableAt is the instant the task became deliverable, so
+				// the dispatcher can measure queue residency — the direct
+				// evidence that work is approaching (or past) the execution's
+				// retention TTL. AvailableAt wins when set: a delayed intent's
+				// availability is the moment it may legitimately be delivered,
+				// and measuring from CreatedAt would count the intended delay
+				// as wait. IntentCreatedAt is when the durable intent was
+				// recorded, and it is the age anchor for the classifier's
+				// provability test: for a delayed intent the two differ, and
+				// measuring the provability window from availability would
+				// read a two-hour-old timer wakeup for a cancelled execution as
+				// brand new and misreport the benign drop as gone. A zero
+				// CreatedAt (legacy entry) leaves IntentCreatedAt zero — the
+				// classifier then falls back to the deliverable stamp — rather
+				// than fabricating an age; with neither stamp set, the task
+				// reads as "not measurable" rather than as an epoch-old
+				// delivery.
+				task := entry.Task
+				if task.DeliverableAt.IsZero() {
+					if !entry.AvailableAt.IsZero() {
+						task.DeliverableAt = entry.AvailableAt
+					} else if !entry.CreatedAt.IsZero() {
+						task.DeliverableAt = entry.CreatedAt
+					}
+				}
+				if task.IntentCreatedAt.IsZero() && !entry.CreatedAt.IsZero() {
+					task.IntentCreatedAt = entry.CreatedAt
+				}
 				var enqueueErr error
 				if entry.AvailableAt.After(time.Now()) {
-					enqueueErr = e.queue.EnqueueDelayed(ctx, &entry.Task, time.Until(entry.AvailableAt))
+					enqueueErr = e.queue.EnqueueDelayed(ctx, &task, time.Until(entry.AvailableAt))
 				} else if nb, ok := e.queue.(NonBlockingTaskQueue); ok {
-					enqueueErr = nb.TryEnqueue(ctx, &entry.Task)
+					enqueueErr = nb.TryEnqueue(ctx, &task)
 				} else {
-					enqueueErr = e.queue.Enqueue(ctx, &entry.Task)
+					enqueueErr = e.queue.Enqueue(ctx, &task)
 				}
 				if errors.Is(enqueueErr, ErrQueueFull) {
 					// Backpressure, not failure. Leave this entry and every
@@ -546,6 +588,14 @@ func (e *Engine) afterAtomicCommitWithFlush(ctx context.Context, req CommitNodeR
 // HandleSystemTask consumes internal advance and skip tasks locally. It never
 // creates a runner lease, so control-plane and embedded dispatchers must call
 // it before routing a task to a handler.
+//
+// handled reports that the engine owns the task type and the caller must not
+// route it — NOT that work was done. The two cases must not be conflated:
+// (true, nil) is a task that was actually processed (or a benign duplicate
+// resolved locally), while (true, err) is a task the engine owns but could not
+// process. For an inactive execution the error is a classified
+// ExecutionInactiveError, so the delivery sink can count the drop instead of
+// acking it as the pre-classification (true, nil) did.
 func (e *Engine) HandleSystemTask(ctx context.Context, task *Task) (bool, error) {
 	return e.handleSystemTask(ctx, task, true)
 }
@@ -605,7 +655,13 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 			return true, err
 		}
 		if !active {
-			return true, nil
+			// An advance intent for an execution that no longer exists is a
+			// dropped delivery, not a handled one: it is the intent that would
+			// have enqueued the downstream node-exec task, so its loss must be
+			// classified like any other. The error carries the classification
+			// (gone / terminal / unattributed) for the delivery sink; the
+			// handled=true return keeps the task from being routed to a runner.
+			return true, e.inactiveExecutionError(ctx, task.ExecutionID, task.provabilityAnchor())
 		}
 		var port string
 		if task.Port != nil {
@@ -673,7 +729,9 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 			return true, err
 		}
 		if !active {
-			return true, nil
+			// Same as the advance branch above: a skip intent the engine owns
+			// but cannot apply is a classified drop, not a handled task.
+			return true, e.inactiveExecutionError(ctx, task.ExecutionID, task.provabilityAnchor())
 		}
 		if task.NodeIdx < 0 || task.NodeIdx >= g.NodeCount() {
 			return true, fmt.Errorf("skip node index %d is out of range", task.NodeIdx)

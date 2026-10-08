@@ -137,6 +137,78 @@ func TestEngineSubmitKeepsInitialOutboxWhenQueueIsUnavailable(t *testing.T) {
 	}
 }
 
+// TestFlushOutboxStampsIntentCreationAndAvailability pins the two delivery
+// stamps a claimed outbox entry produces. A delayed intent (timer wakeup,
+// retry replay) must carry its availability as the delivery-lag stamp AND its
+// creation as the provability anchor: without the second, the classifier
+// measures the wait from the instant a two-hour timer fires, reads it as ~0,
+// and misreports a benign cancelled execution's late wakeup as gone. A plain
+// available-now entry stamps both from its creation, since that instant is
+// both.
+func TestFlushOutboxStampsIntentCreationAndAvailability(t *testing.T) {
+	ctx := context.Background()
+	state := newFakeState()
+	queue := &fakeQueue{}
+	eng := New(state, queue)
+
+	id, err := eng.Submit(ctx, compileAtomicOutboxGraph(t, nil), nil)
+	if err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+	queue.Drain() // drop the delivered copy of the initial start intent
+
+	putEntry := func(entry OutboxEntry) {
+		t.Helper()
+		state.mu.Lock()
+		if state.atomicOutbox[id] == nil {
+			state.atomicOutbox[id] = map[string]OutboxEntry{}
+		}
+		state.atomicOutbox[id][entry.ID] = entry
+		state.mu.Unlock()
+		if err := eng.FlushOutbox(ctx, id); err != nil {
+			t.Fatalf("FlushOutbox(%q) error = %v", entry.ID, err)
+		}
+	}
+	drainOne := func(entryID string) *Task {
+		t.Helper()
+		delivered := queue.Drain()
+		if len(delivered) != 1 {
+			t.Fatalf("FlushOutbox(%q) delivered %d tasks, want 1", entryID, len(delivered))
+		}
+		return delivered[0]
+	}
+
+	created := time.Now().Add(-2 * time.Hour).UTC().Truncate(time.Millisecond)
+	available := time.Now().Add(-time.Minute).UTC().Truncate(time.Millisecond)
+	putEntry(OutboxEntry{
+		ID:          "delayed-1",
+		Task:        Task{ExecutionID: id, NodeName: "start", Type: TaskTypeNodeResume},
+		AvailableAt: available,
+		CreatedAt:   created,
+	})
+	delayed := drainOne("delayed-1")
+	if !delayed.DeliverableAt.Equal(available) {
+		t.Fatalf("delayed DeliverableAt = %v, want its availability %v", delayed.DeliverableAt, available)
+	}
+	if !delayed.IntentCreatedAt.Equal(created) {
+		t.Fatalf("delayed IntentCreatedAt = %v, want its creation %v: the provability anchor "+
+			"must be the intent's age, not the instant its timer fired", delayed.IntentCreatedAt, created)
+	}
+
+	putEntry(OutboxEntry{
+		ID:        "plain-1",
+		Task:      Task{ExecutionID: id, NodeName: "start", Type: TaskTypeNodeExec},
+		CreatedAt: created,
+	})
+	plain := drainOne("plain-1")
+	if !plain.DeliverableAt.Equal(created) {
+		t.Fatalf("plain DeliverableAt = %v, want its creation %v (no availability stamp)", plain.DeliverableAt, created)
+	}
+	if !plain.IntentCreatedAt.Equal(created) {
+		t.Fatalf("plain IntentCreatedAt = %v, want its creation %v", plain.IntentCreatedAt, created)
+	}
+}
+
 func TestEngineRetryOutboxSurvivesQueueOutage(t *testing.T) {
 	ctx := context.Background()
 	state := newFakeState()

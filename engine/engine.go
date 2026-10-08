@@ -397,19 +397,16 @@ func (e *Engine) loadActiveGraph(ctx context.Context, id types.ExecutionID) (*gr
 // sequential GETs and four JSON decodes instead of one GET. Every commit, lease,
 // advance, signal, group and subgraph transition pays that, so the narrow read
 // is the common case and the fallback is for backends that predate it.
+//
+// The status/found pair comes from executionStatus (engine/inactive.go), which
+// the inactive-path classifier shares; the reader preference and the fallback
+// live there so the two cannot drift into reading different state.
 func (e *Engine) executionActive(ctx context.Context, id types.ExecutionID) (bool, error) {
-	if reader, ok := e.state.(ExecutionStatusReader); ok {
-		status, found, err := reader.GetExecutionStatus(ctx, id)
-		if err != nil {
-			return false, err
-		}
-		return found && !types.IsTerminalExecutionStatus(status), nil
-	}
-	snap, err := e.state.GetExecution(ctx, id)
+	status, found, err := e.executionStatus(ctx, id)
 	if err != nil {
 		return false, err
 	}
-	return snap != nil && !types.IsTerminalExecutionStatus(snap.Status), nil
+	return found && !types.IsTerminalExecutionStatus(status), nil
 }
 
 func attachSubmissionMetadata(ctx context.Context, snap *ExecutionSnapshot) {

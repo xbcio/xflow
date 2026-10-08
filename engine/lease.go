@@ -221,7 +221,20 @@ func (e *Engine) TaskRouting(ctx context.Context, t *Task) (TaskRouting, error) 
 		return TaskRouting{}, err
 	}
 	if !active {
-		return TaskRouting{}, ErrExecutionInactive
+		// Classified rather than the bare sentinel: the dispatch sink needs to
+		// tell a window-bounded loss claim (execution gone before its queued
+		// work ran, and the delivery's measured age is inside the backend's
+		// evidence window) from a benign late delivery (execution already
+		// terminal) and from the unattributable middle (no evidence, age
+		// beyond the window). The typed error unwraps to ErrExecutionInactive,
+		// so every existing errors.Is caller keeps its current behavior. This
+		// is the only production TaskRouting caller's branch. Read cost on
+		// this inactive path only: the status read, the marker read when the
+		// status is absent, and the retention read when both are absent.
+		// loadActiveGraph already asked its own status question on the
+		// cache-hit branch and on a cache miss that still loads a graph, but
+		// that read only answers "non-terminal?" — it is not reused here.
+		return TaskRouting{}, e.inactiveExecutionError(ctx, t.ExecutionID, t.provabilityAnchor())
 	}
 	if _, err := e.checkTaskRouteActive(ctx, g, t); err != nil {
 		return TaskRouting{}, err

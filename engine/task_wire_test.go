@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/types"
 )
@@ -15,6 +16,11 @@ func TestTaskJSONUsesStableWireFieldNames(t *testing.T) {
 		Type:         TaskTypeNodeExec,
 		AutoDepth:    7,
 		ActivationID: 11,
+		// The deliverable and intent-creation stamps are internal queue
+		// metadata like the fields above; they must not surface in the public
+		// runner JSON contract.
+		DeliverableAt:   time.Unix(1_700_000_000, 0),
+		IntentCreatedAt: time.Unix(1_699_990_000, 0),
 	}
 
 	data, err := json.Marshal(task)
@@ -35,7 +41,7 @@ func TestTaskJSONUsesStableWireFieldNames(t *testing.T) {
 	if _, ok := got["ExecutionID"]; ok {
 		t.Fatalf("unexpected Go field name in wire payload: %s", data)
 	}
-	for _, key := range []string{"auto_depth", "activation_id"} {
+	for _, key := range []string{"auto_depth", "activation_id", "deliverable_at", "DeliverableAt", "intent_created_at", "IntentCreatedAt"} {
 		if _, ok := got[key]; ok {
 			t.Fatalf("internal scheduler field %q leaked into wire payload: %s", key, data)
 		}
