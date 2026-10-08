@@ -175,14 +175,19 @@ Node Group 组级 `on_error`、gRPC `AckActivation`、G1 clean-SHA 重签 `c39a2
   [NODE-GROUP-COLOCATION.md](./NODE-GROUP-COLOCATION.md) 的失败成员段已同步（`36c4a1e`）。
 
 - **组任务的失败/超限上报走不进组结果路径**（2026-10-08 复核阶段新登记）——
-  `c0d2619`、`eac88b3`（2026-10-08）：runner 侧组执行 error 与结果 oversize 分支
-  改为合成 `GroupOutcomeFailed` 的 `GroupResult`（身份字段齐全；组失败与普通节点
-  失败一样走结果提交路径；组级重试本就完全由 lease 过期驱动，失败结果不触发
-  重试）；core 侧把「组租约 + 空组结果」显式判定为 stale-token 等价结果——立即
-  释放目录容量（对齐修复前行为），并新增 `ErrGroupResultMissing` 与
-  `ReportRejectedGroupResultMissing` 埋点，runner 收到明确错误而非 500。未验证：
-  真实 transport 端到端（两分支由进程内测试 + mutation 验证覆盖；wire 层由
-  `f85540a` 覆盖）。
+  `c0d2619`、`eac88b3`、`3a859c4`（2026-10-08）：runner 侧组执行 error 与结果
+  oversize 分支改为合成 `GroupOutcomeFailed` 的 `GroupResult`（身份字段齐全；
+  组失败与普通节点失败一样走结果提交路径；组级重试本就完全由 lease 过期驱动，
+  失败结果不触发重试）；core 侧把「组租约 + 空组结果」显式判定为 stale-token
+  等价结果——立即释放目录容量（对齐修复前行为），并新增
+  `ErrGroupResultMissing` 与 `ReportRejectedGroupResultMissing` 埋点。复核阶段
+  发现 `eac88b3` 的哨兵错误在传输层没有映射（HTTP 落 500、gRPC 落
+  `codes.Internal`）：`3a859c4` 补齐——三条传输（HTTP handler、gRPC unary、
+  Connect 流）统一经 `isStaleTokenEquivalent` 按 stale-token 契约带内回传，
+  HTTP 409 + Accepted=false、gRPC Accepted=false、Connect 的 Ack 帧且不断流，
+  runner 收到的是明确拒绝而非 500。未验证：真实 transport 端到端（两分支与
+  三处映射由进程内/handler 级测试 + mutation 验证覆盖；wire 层由 `f85540a`
+  覆盖）。
 
 - **嵌入式 `Server.ReplaceWorkflow` 会清空编辑器元数据**（原 P3-14）—— `6501ad0`
   （2026-10-08）：新增 `ReplaceWorkflowWithMetadata`（apiserver 侧
