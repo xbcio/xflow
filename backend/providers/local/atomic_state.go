@@ -82,12 +82,21 @@ func (s *memoryState) CommitNode(_ context.Context, req engine.CommitNodeRequest
 		// cascade — and a refused system commit is reported as handled, so the
 		// intent was acked and dropped instead of the branch being consumed.
 		//
-		// A pinned commit is the one system commit for a unit the graph decided
-		// to EXECUTE (or a root, which has no marker): the engine serves it from
-		// pin_data instead of leasing it. It must therefore never land on a unit
-		// marked "skip", and every other system commit must.
+		// The legal system-commit shapes for a unit, keyed by its "skip"
+		// scheduling marker:
+		//   - pinned  + no marker: a pinned node served from pin_data on a unit
+		//     the graph decided to EXECUTE (or a root, which has no marker);
+		//   - skipped + no marker: a definition-disabled node, scheduled to
+		//     execute but never leased (its "main" port stays active);
+		//   - skipped + "skip" marker: a skip-cascade resolution.
+		// A pinned commit on a skip-marked unit, and any other status without
+		// the marker, are stale or rogue and are refused. Every other
+		// combination keeps its previous verdict.
 		marker := s.scheduled[memoryCounterKey(req.ExecutionID, req.UnitIdx)]
-		if (req.Status == types.NodeStatusPinned) == (marker == "skip") {
+		skipMarked := marker == "skip"
+		pinned := req.Status == types.NodeStatusPinned
+		skipped := req.Status == types.NodeStatusSkipped
+		if (pinned && skipMarked) || (!pinned && !skipped && !skipMarked) {
 			return engine.CommitNodeResult{Outcome: engine.CommitOutcomeStaleToken}, nil
 		}
 		if current != nil && current.Status != types.NodeStatusPending {

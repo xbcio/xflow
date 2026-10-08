@@ -67,14 +67,17 @@ if executionStatus == 'success' or executionStatus == 'failed' or executionStatu
     return {3, 0, executionStatus, effectivePrivate}
 end
 if isSystem == 1 then
-    -- A system commit is either a skip-cascade resolution, which requires the
-    -- unit's "skip" scheduling marker, or a pinned node served from pin_data,
-    -- which the graph scheduled to execute (or is a root with no marker) and
-    -- must therefore never land on a unit marked "skip". Same fence as the
-    -- memory backend's CommitNode.
+    -- The legal system-commit shapes for a unit, keyed by its "skip"
+    -- scheduling marker: pinned without the marker (a pin_data node on an
+    -- execute-scheduled unit or a root); skipped without the marker (a
+    -- definition-disabled node, scheduled to execute but never leased); and
+    -- skipped with the marker (a skip-cascade resolution). A pinned commit
+    -- on a skip-marked unit, and any other status without the marker, are
+    -- stale or rogue. Same fence as the memory backend's CommitNode.
     local action = redis.call('HGET', KEYS[11], 'action') or ''
     local pinned = ARGV[1] == 'pinned'
-    if (pinned and action == 'skip') or (not pinned and action ~= 'skip') or (status and status ~= 'pending') then
+    local skipped = ARGV[1] == 'skipped'
+    if (pinned and action == 'skip') or (not pinned and not skipped and action ~= 'skip') or (status and status ~= 'pending') then
         return {0, 0, '', effectivePrivate}
     end
 else
