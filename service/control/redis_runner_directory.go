@@ -372,7 +372,7 @@ func (d *RedisRunnerDirectory) Register(ctx context.Context, req RegisterRunnerR
 		return RunnerSession{}, err
 	}
 	session := RunnerSession{RunnerID: req.RunnerID, SessionID: uuid.NewString()}
-	status, err := d.evalStatus(ctx, redisRegisterRunnerLua, []string{
+	status, err := d.evalStatus(ctx, redisRegisterRunnerLua, d.appendLaneRequeueKeys([]string{
 		d.keys.queue,
 		d.keys.assignmentData,
 		d.keys.assignmentState,
@@ -421,8 +421,9 @@ func (d *RedisRunnerDirectory) Register(ctx context.Context, req RegisterRunnerR
 		d.keys.handoffClaimIndexKey(req.RunnerID),
 		d.keys.runnerInstanceUID,
 		d.keys.runnerDescriptors,
-	}, req.RunnerID, session.SessionID, strconv.Itoa(req.Capacity), string(capabilities), string(policy), string(namespaces), strconv.FormatInt(now.UnixMilli(), 10), string(labels), activations,
-		req.InstanceUID, strconv.FormatInt(DefaultRunnerLiveTTL.Milliseconds(), 10), descriptors)
+	}), req.RunnerID, session.SessionID, strconv.Itoa(req.Capacity), string(capabilities), string(policy), string(namespaces), strconv.FormatInt(now.UnixMilli(), 10), string(labels), activations,
+		req.InstanceUID, strconv.FormatInt(DefaultRunnerLiveTTL.Milliseconds(), 10), descriptors,
+		d.laneRequeueCandidateCount(), d.laneRequeueModeArg())
 	if err != nil {
 		return RunnerSession{}, fmt.Errorf("register redis runner: %w", err)
 	}
@@ -500,8 +501,11 @@ func (d *RedisRunnerDirectory) EnqueueAssignment(ctx context.Context, assignment
 	if err != nil {
 		return false, err
 	}
-	status, err := d.evalStatus(ctx, redisEnqueueAssignmentLua, []string{
-		d.keys.queue,
+	candidates, targets, marker := d.enqueueQueueKeys(assignment)
+	keys := make([]string, 0, len(candidates)+len(targets)+10)
+	keys = append(keys, candidates...)
+	keys = append(keys, targets...)
+	keys = append(keys,
 		d.keys.seen,
 		d.keys.assignmentData,
 		d.keys.assignmentState,
@@ -511,7 +515,11 @@ func (d *RedisRunnerDirectory) EnqueueAssignment(ctx context.Context, assignment
 		d.keys.assignmentLeaseID,
 		d.keys.assignmentLeaseToken,
 		d.keys.assignmentLeaseMetaKey(string(assignment.AssignmentID)),
-	}, string(assignment.AssignmentID), payload)
+		d.keys.assignmentLane,
+	)
+	status, err := d.evalStatus(ctx, redisEnqueueAssignmentLua, keys,
+		string(assignment.AssignmentID), payload,
+		strconv.Itoa(len(candidates)), strconv.Itoa(len(targets)), marker)
 	if err != nil {
 		return false, fmt.Errorf("enqueue redis assignment: %w", err)
 	}
@@ -523,6 +531,35 @@ func (d *RedisRunnerDirectory) EnqueueAssignment(ctx context.Context, assignment
 	default:
 		return false, fmt.Errorf("enqueue redis assignment: unexpected result %q", status)
 	}
+}
+
+// enqueueQueueKeys resolves where a new assignment is offered: the LREM
+// candidate set every queue key is cleared from, the RPUSH target set the
+// write mode selects, and the lane marker value (empty = write no marker).
+// The candidate set is every configured lane plus the legacy queue — a stale
+// copy of this assignment can only ever sit on one of those keys, and clearing
+// all of them here is what keeps a re-enqueue from stranding a duplicate that
+// the claim walk would only skip. Resolution goes through resolveQueueLane,
+// the same function the claim walk uses, so the keys a writer offers an
+// assignment to can never drift from the keys a reader walks.
+func (d *RedisRunnerDirectory) enqueueQueueKeys(assignment Assignment) (candidates, targets []string, marker string) {
+	candidates = d.laneQueueKeys()
+	placement := resolveLanePlacement(d.lanes, d.laneWriteModeOrDefault(), assignment.Routing.NodeType)
+	targets = make([]string, 0, len(placement.targets))
+	for _, lane := range placement.targets {
+		if lane == "" {
+			targets = append(targets, d.keys.queue)
+			continue
+		}
+		targets = append(targets, d.keys.laneQueueKey(lane))
+	}
+	if !placement.hasMarker {
+		return candidates, targets, ""
+	}
+	if placement.marker == "" {
+		return candidates, targets, d.keys.queue
+	}
+	return candidates, targets, d.keys.laneQueueKey(placement.marker)
 }
 
 // ClaimForRunner first replays one unfinished lease owned by the current
@@ -963,7 +1000,7 @@ func (d *RedisRunnerDirectory) SettleClaimHandoff(ctx context.Context, claimID C
 	if !ok {
 		return nil
 	}
-	status, err := d.evalStatus(ctx, redisSettleHandoffLua, []string{
+	status, err := d.evalStatus(ctx, redisSettleHandoffLua, d.appendLaneRequeueKeys([]string{
 		d.keys.queue,
 		d.keys.seen,
 		d.keys.assignmentData,
@@ -988,7 +1025,8 @@ func (d *RedisRunnerDirectory) SettleClaimHandoff(ctx context.Context, claimID C
 		d.keys.handoffRecoveryReady,
 		d.keys.handoffRecoveryDeadline,
 		d.keys.assignmentLeaseMetaKey(assignmentID),
-	}, string(claimID), string(disposition), assignmentID)
+	}), string(claimID), string(disposition), assignmentID,
+		d.laneRequeueCandidateCount(), d.laneRequeueModeArg())
 	if err != nil {
 		return fmt.Errorf("settle redis handoff: %w", err)
 	}
@@ -1582,7 +1620,7 @@ func (d *RedisRunnerDirectory) ReleaseClaim(ctx context.Context, claimID ClaimID
 	if !ok {
 		return nil
 	}
-	status, err := d.evalStatus(ctx, redisReleaseClaimLua, []string{
+	status, err := d.evalStatus(ctx, redisReleaseClaimLua, d.appendLaneRequeueKeys([]string{
 		d.keys.queue,
 		d.keys.seen,
 		d.keys.assignmentData,
@@ -1609,7 +1647,8 @@ func (d *RedisRunnerDirectory) ReleaseClaim(ctx context.Context, claimID ClaimID
 		d.keys.handoffLeaseToken,
 		d.keys.handoffRecoveryReady,
 		d.keys.handoffRecoveryDeadline,
-	}, string(claimID), string(reason), assignmentID, d.keys.handoffClaimIndexPrefix())
+	}), string(claimID), string(reason), assignmentID, d.keys.handoffClaimIndexPrefix(),
+		d.laneRequeueCandidateCount(), d.laneRequeueModeArg())
 	if err != nil {
 		return fmt.Errorf("release redis claim: %w", err)
 	}
@@ -2420,7 +2459,7 @@ func atoiDefault(raw string) int {
 // this can never observe one. 'leased' assignments that stranded after their
 // lease metadata TTL'd out are the stranded-lease reaper's job, not this scan's.
 func (d *RedisRunnerDirectory) ReclaimExpiredClaims(ctx context.Context) error {
-	reclaimed, err := d.rdb.Eval(ctx, redisRecoverExpiredClaimsLua, []string{
+	reclaimed, err := d.rdb.Eval(ctx, redisRecoverExpiredClaimsLua, d.appendLaneRequeueKeys([]string{
 		d.keys.queue,
 		d.keys.assignmentData,
 		d.keys.assignmentState,
@@ -2443,7 +2482,8 @@ func (d *RedisRunnerDirectory) ReclaimExpiredClaims(ctx context.Context) error {
 		d.keys.handoffLeaseToken,
 		d.keys.handoffRecoveryReady,
 		d.keys.handoffRecoveryDeadline,
-	}, strconv.FormatInt(time.Now().UTC().UnixMilli(), 10), d.keys.handoffClaimIndexPrefix()).Int64()
+	}), strconv.FormatInt(time.Now().UTC().UnixMilli(), 10), d.keys.handoffClaimIndexPrefix(),
+		d.laneRequeueCandidateCount(), d.laneRequeueModeArg()).Int64()
 	if err != nil {
 		return fmt.Errorf("recover expired redis claims: %w", err)
 	}
@@ -2531,7 +2571,67 @@ func canServeNamespace(namespaces []namespace.Namespace, t namespace.Namespace) 
 	return false
 }
 
-const redisRegisterRunnerLua = `
+// redisLaneRequeueLua is the shared lane-aware requeue helper spliced into the
+// head of every Lua script that can return an assignment to the queue or take
+// it out of one. The removal-only scripts (the dead-queued reap and the clear
+// transition) use laneDrop and nothing else. It mirrors enqueueQueueKeys on the
+// Go side, and relies on its callers appending, in this order, the candidate
+// queue keys (every configured lane, then the legacy queue) and the lane marker
+// hash to KEYS, and two trailing ARGV values: the candidate count and the lane
+// write mode.
+//
+// The requeue contract per write mode:
+//   - legacy_only: the entry goes back to the legacy queue and the marker is
+//     removed — an old reader that only scans the legacy queue must see it, so
+//     a marker left over from a previous dual window must not divert it.
+//   - dual: the entry goes back to the lane its marker names (legacy when the
+//     marker is missing or names a key this configuration no longer serves),
+//     and additionally to the legacy queue, deduplicated when the two agree.
+//   - lane_only: the entry goes back to the marker's lane, legacy as fallback.
+//
+// Every mode clears the whole candidate set first: a stale copy on any lane
+// would only ever be skipped, never removed, by the claim walk, and nothing
+// else on the completion or reclaim paths collects it.
+const redisLaneRequeueLua = `
+local laneCandidates = tonumber(ARGV[#ARGV - 1])
+local laneMode = ARGV[#ARGV]
+local laneBase = #KEYS - laneCandidates
+local laneLegacy = KEYS[#KEYS - 1]
+local laneMarker = KEYS[#KEYS]
+local function laneClear(id)
+  local i
+  for i = laneBase, #KEYS - 1 do
+    redis.call('LREM', KEYS[i], 0, id)
+  end
+end
+local function lanePush(id)
+  local target = laneLegacy
+  if laneMode ~= 'legacy_only' then
+    local marked = redis.call('HGET', laneMarker, id)
+    if marked and marked ~= '' then
+      local i
+      for i = laneBase, #KEYS - 1 do
+        if KEYS[i] == marked then target = marked break end
+      end
+    end
+  end
+  redis.call('LPUSH', target, id)
+  if laneMode == 'dual' and target ~= laneLegacy then
+    redis.call('LPUSH', laneLegacy, id)
+  end
+  if laneMode ~= 'legacy_only' then
+    redis.call('HSET', laneMarker, id, target)
+  else
+    redis.call('HDEL', laneMarker, id)
+  end
+end
+local function laneDrop(id)
+  laneClear(id)
+  redis.call('HDEL', laneMarker, id)
+end
+`
+
+const redisRegisterRunnerLua = redisLaneRequeueLua + `
 local oldRunner = ARGV[1]
 local newSession = ARGV[2]
 -- Instance guard: mirrors instanceConflict in memory_runner_directory.go and
@@ -2579,8 +2679,8 @@ for _, claimID in ipairs(redis.call('HKEYS', KEYS[8])) do
         redis.call('HDEL', KEYS[4], assignmentID)
         redis.call('HDEL', KEYS[5], assignmentID)
         redis.call('HDEL', KEYS[6], assignmentID)
-        redis.call('LREM', KEYS[1], 0, assignmentID)
-        if redis.call('HEXISTS', KEYS[2], assignmentID) == 1 then redis.call('LPUSH', KEYS[1], assignmentID) end
+        laneClear(assignmentID)
+        if redis.call('HEXISTS', KEYS[2], assignmentID) == 1 then lanePush(assignmentID) end
       end
       redis.call('HDEL', KEYS[7], claimID)
       redis.call('HDEL', KEYS[8], claimID)
@@ -2695,28 +2795,52 @@ return 'ok'
 // creating. Every non-released state still rejects: 'queued' (already waiting),
 // 'claimed' (a runner is materializing a lease), 'leased' (a runner is running
 // it) — re-queueing any of those would hand the same task to a second runner.
+// Queue keys are dynamic once lanes are configured: KEYS[1..ARGV[3]] are the
+// LREM candidate set (every configured lane queue, then the legacy queue),
+// KEYS[ARGV[3]+1..ARGV[3]+ARGV[4]] are the RPUSH target set, and the fixed
+// bookkeeping keys follow at KEYS[ARGV[3]+ARGV[4]+1..+10]. A re-enqueue must
+// LREM every candidate — a stale copy can sit on any lane the entry was placed
+// on before, and a stale copy that is merely skipped by the claim walk would
+// never be removed otherwise — while RPUSH names only the queues the write
+// mode selects. ARGV[5] is the lane marker value; empty means "do not write a
+// marker" (legacy-only mode and deployments without lanes), which is
+// equivalent to a missing marker because the requeue transitions read a
+// missing marker as legacy.
 const redisEnqueueAssignmentLua = `
-local seen = redis.call('SADD', KEYS[2], ARGV[1]) == 0
+local candidates = tonumber(ARGV[3])
+local targets = tonumber(ARGV[4])
+local base = candidates + targets
+local seen = redis.call('SADD', KEYS[base+1], ARGV[1]) == 0
 if seen then
-  local state = redis.call('HGET', KEYS[4], ARGV[1])
+  local state = redis.call('HGET', KEYS[base+3], ARGV[1])
   if state and state ~= 'released' then
     return 'duplicate'
   end
 end
-redis.call('HSET', KEYS[3], ARGV[1], ARGV[2])
-redis.call('HSET', KEYS[4], ARGV[1], 'queued')
-redis.call('HDEL', KEYS[5], ARGV[1])
-redis.call('HDEL', KEYS[6], ARGV[1])
-redis.call('HDEL', KEYS[7], ARGV[1])
-redis.call('HDEL', KEYS[8], ARGV[1])
-redis.call('HDEL', KEYS[9], ARGV[1])
-redis.call('DEL', KEYS[10])
-redis.call('LREM', KEYS[1], 0, ARGV[1])
-redis.call('RPUSH', KEYS[1], ARGV[1])
+redis.call('HSET', KEYS[base+2], ARGV[1], ARGV[2])
+redis.call('HSET', KEYS[base+3], ARGV[1], 'queued')
+redis.call('HDEL', KEYS[base+4], ARGV[1])
+redis.call('HDEL', KEYS[base+5], ARGV[1])
+redis.call('HDEL', KEYS[base+6], ARGV[1])
+redis.call('HDEL', KEYS[base+7], ARGV[1])
+redis.call('HDEL', KEYS[base+8], ARGV[1])
+redis.call('DEL', KEYS[base+9])
+local i
+for i = 1, candidates do
+  redis.call('LREM', KEYS[i], 0, ARGV[1])
+end
+for i = candidates + 1, candidates + targets do
+  redis.call('RPUSH', KEYS[i], ARGV[1])
+end
+if ARGV[5] ~= '' then
+  redis.call('HSET', KEYS[base+10], ARGV[1], ARGV[5])
+else
+  redis.call('HDEL', KEYS[base+10], ARGV[1])
+end
 return 'enqueued'
 `
 
-const redisRecoverExpiredClaimsLua = `
+const redisRecoverExpiredClaimsLua = redisLaneRequeueLua + `
 local function deleteHandoff(claimID, assignmentID)
   redis.call('HDEL', KEYS[12], claimID)
   redis.call('HDEL', KEYS[13], claimID)
@@ -2773,8 +2897,8 @@ local function reclaim(claimID)
     redis.call('HDEL', KEYS[4], assignmentID)
     redis.call('HDEL', KEYS[5], assignmentID)
     redis.call('HDEL', KEYS[6], assignmentID)
-    redis.call('LREM', KEYS[1], 0, assignmentID)
-    if redis.call('HEXISTS', KEYS[2], assignmentID) == 1 then redis.call('LPUSH', KEYS[1], assignmentID) end
+    laneClear(assignmentID)
+    if redis.call('HEXISTS', KEYS[2], assignmentID) == 1 then lanePush(assignmentID) end
     recovered = true
   end
   redis.call('HDEL', KEYS[7], claimID)
@@ -2937,7 +3061,7 @@ redis.call('HSET', KEYS[4], ARGV[1], tostring(now + tonumber(ARGV[3])))
 return 'taken'
 `
 
-const redisSettleHandoffLua = `
+const redisSettleHandoffLua = redisLaneRequeueLua + `
 local claimID = ARGV[1]
 local assignmentID = redis.call('HGET', KEYS[8], claimID)
 local runnerID = redis.call('HGET', KEYS[9], claimID)
@@ -2964,10 +3088,10 @@ if ARGV[2] == 'requeue' then
   redis.call('HDEL', KEYS[5], assignmentID)
   redis.call('HDEL', KEYS[6], assignmentID)
   redis.call('HDEL', KEYS[7], assignmentID)
-  redis.call('LREM', KEYS[1], 0, assignmentID)
-  if redis.call('HEXISTS', KEYS[3], assignmentID) == 1 then redis.call('LPUSH', KEYS[1], assignmentID) end
+  laneClear(assignmentID)
+  if redis.call('HEXISTS', KEYS[3], assignmentID) == 1 then lanePush(assignmentID) end
 elseif ARGV[2] == 'drop' then
-  redis.call('LREM', KEYS[1], 0, assignmentID)
+  laneDrop(assignmentID)
   redis.call('SREM', KEYS[2], assignmentID)
   redis.call('HDEL', KEYS[3], assignmentID)
   redis.call('HDEL', KEYS[4], assignmentID)
@@ -2998,7 +3122,7 @@ redis.call('HDEL', KEYS[23], claimID)
 return 'settled'
 `
 
-const redisReleaseClaimLua = `
+const redisReleaseClaimLua = redisLaneRequeueLua + `
 local claimID = ARGV[1]
 local assignmentID = redis.call('HGET', KEYS[11], claimID)
 local runnerID = redis.call('HGET', KEYS[12], claimID)
@@ -3034,10 +3158,10 @@ if redis.call('HGET', KEYS[4], assignmentID) == 'claimed' and redis.call('HGET',
     redis.call('HDEL', KEYS[6], assignmentID)
     redis.call('HDEL', KEYS[7], assignmentID)
     redis.call('DEL', KEYS[10])
-    redis.call('LREM', KEYS[1], 0, assignmentID)
-    if redis.call('HEXISTS', KEYS[3], assignmentID) == 1 then redis.call('LPUSH', KEYS[1], assignmentID) end
+    laneClear(assignmentID)
+    if redis.call('HEXISTS', KEYS[3], assignmentID) == 1 then lanePush(assignmentID) end
   elseif ARGV[2] == 'drop' then
-    redis.call('LREM', KEYS[1], 0, assignmentID)
+    laneDrop(assignmentID)
     redis.call('SREM', KEYS[2], assignmentID)
     redis.call('HDEL', KEYS[3], assignmentID)
     redis.call('HDEL', KEYS[4], assignmentID)
