@@ -43,6 +43,8 @@ type redisRunnerDirectoryConfig struct {
 	clock                     func() time.Time
 	observer                  RunnerClaimObserver
 	executions                engine.ExecutionStatusReader
+	lanes                     []string
+	laneWriteMode             LaneWriteMode
 }
 
 // WithRedisRunnerDirectoryClaimTTL sets the maximum time a poll claim can
@@ -52,6 +54,28 @@ func WithRedisRunnerDirectoryClaimTTL(ttl time.Duration) RedisRunnerDirectoryOpt
 		if ttl > 0 {
 			cfg.claimTTL = ttl
 		}
+	}
+}
+
+// WithRedisRunnerDirectoryLanes enables node-type queue lanes for the listed
+// routing node types, in priority order. An empty list (the default) keeps
+// every assignment on the shared legacy queue, exactly as before lanes
+// existed, and disables the lane write mode below entirely.
+func WithRedisRunnerDirectoryLanes(lanes []string) RedisRunnerDirectoryOption {
+	return func(cfg *redisRunnerDirectoryConfig) {
+		cfg.lanes = append([]string(nil), lanes...)
+	}
+}
+
+// WithRedisRunnerDirectoryLaneWriteMode selects which queue keys a new
+// assignment is offered to while lanes are configured. It is meaningful only
+// alongside WithRedisRunnerDirectoryLanes; without lanes every mode degenerates
+// to the legacy single-queue write. An unrecognized mode also falls back to
+// legacy-only, so a config typo can never split writes away from the queue
+// every reader still walks.
+func WithRedisRunnerDirectoryLaneWriteMode(mode LaneWriteMode) RedisRunnerDirectoryOption {
+	return func(cfg *redisRunnerDirectoryConfig) {
+		cfg.laneWriteMode = mode
 	}
 }
 
@@ -151,6 +175,8 @@ type RedisRunnerDirectory struct {
 	clock                     func() time.Time
 	observer                  RunnerClaimObserver
 	executions                engine.ExecutionStatusReader
+	lanes                     []string
+	laneWriteMode             LaneWriteMode
 	keys                      redisRunnerDirectoryKeys
 
 	// claimCursorMu guards claimCursors and claimWalks, the per-runner resume
@@ -204,6 +230,8 @@ func NewRedisRunnerDirectory(rdb redis.Cmdable, opts ...RedisRunnerDirectoryOpti
 		clock:                     cfg.clock,
 		observer:                  cfg.observer,
 		executions:                cfg.executions,
+		lanes:                     normalizeLaneNodeTypes(cfg.lanes),
+		laneWriteMode:             cfg.laneWriteMode,
 		keys:                      newRedisRunnerDirectoryKeys(redisRunnerDirectoryKeyPrefix),
 		claimCursors:              make(map[string]int),
 		claimWalks:                make(map[string]bool),
@@ -235,6 +263,53 @@ func (d *RedisRunnerDirectory) clockNow() time.Time {
 		return d.clock().UTC()
 	}
 	return time.Now().UTC()
+}
+
+// laneWriteModeOrDefault resolves the effective lane write mode. A directory
+// without lanes (including the literals a few real-Redis tests build by hand)
+// and an unrecognized mode both resolve to legacy-only, so a config typo can
+// never split writes onto a lane that no configured reader walks.
+func (d *RedisRunnerDirectory) laneWriteModeOrDefault() LaneWriteMode {
+	return resolveLaneWriteMode(d.lanes, d.laneWriteMode)
+}
+
+// laneQueueKeys resolves the queue keys a lane configuration names, in
+// priority order, always ending with the legacy queue. Claim walks and
+// enqueue target sets must both flow through this one function so the keys a
+// writer offers an assignment to can never drift from the keys a reader walks.
+func (d *RedisRunnerDirectory) laneQueueKeys() []string {
+	if len(d.lanes) == 0 {
+		return []string{d.keys.queue}
+	}
+	keys := make([]string, 0, len(d.lanes)+1)
+	for _, lane := range d.lanes {
+		keys = append(keys, d.keys.laneQueueKey(lane))
+	}
+	return append(keys, d.keys.queue)
+}
+
+// appendLaneRequeueKeys appends the lane requeue KEYS tail — every candidate
+// queue key (lanes first, legacy last) and then the lane marker hash — to a
+// script's key list. Callers must also pass laneRequeueCandidateCount and
+// laneRequeueModeArg as the trailing ARGV values; redisLaneRequeueLua reads
+// the candidate count from the second-to-last ARGV and the write mode from the
+// last.
+func (d *RedisRunnerDirectory) appendLaneRequeueKeys(keys []string) []string {
+	keys = append(keys, d.laneQueueKeys()...)
+	return append(keys, d.keys.assignmentLane)
+}
+
+// laneRequeueCandidateCount fixes where the candidate keys start in KEYS: the
+// requeue helper derives laneBase as #KEYS minus this count.
+func (d *RedisRunnerDirectory) laneRequeueCandidateCount() string {
+	return strconv.Itoa(len(d.laneQueueKeys()))
+}
+
+// laneRequeueModeArg is the effective lane write mode the requeue helper
+// applies. With no lanes configured it is legacy-only over a single legacy
+// candidate — the pre-lane behavior.
+func (d *RedisRunnerDirectory) laneRequeueModeArg() string {
+	return string(d.laneWriteModeOrDefault())
 }
 
 func (d *RedisRunnerDirectory) runnerDrainObservationFreshness() time.Duration {

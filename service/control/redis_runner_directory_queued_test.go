@@ -535,6 +535,57 @@ func TestSelectRunnerDirectoryInjectsExecutionStatusProbe(t *testing.T) {
 	}
 }
 
+// TestSelectRunnerDirectoryWiresAssignmentQueueLanes is the wiring check for the
+// config hop: selectRunnerDirectory is the one production call site that turns
+// Config into a directory, and both its backends must receive the lane knobs
+// there. Without this, lanes can be configured and deployed while every
+// assignment silently stays on the legacy queue.
+func TestSelectRunnerDirectoryWiresAssignmentQueueLanes(t *testing.T) {
+	provider := redisBackendStub{Provider: backendlocal.New(), rdb: newMiniRedis(t)}
+
+	directory := selectRunnerDirectory(Config{
+		Backend:                      provider,
+		AssignmentQueueLanes:         []string{memoryLaneTestType},
+		AssignmentQueueLaneWriteMode: LaneWriteDual,
+	}, nil)
+	redisDirectory, ok := directory.(*RedisRunnerDirectory)
+	if !ok {
+		t.Fatalf("selectRunnerDirectory() = %T, want *RedisRunnerDirectory", directory)
+	}
+	if len(redisDirectory.lanes) != 1 || redisDirectory.lanes[0] != memoryLaneTestType {
+		t.Fatalf("redis directory lanes = %v, want [%s]", redisDirectory.lanes, memoryLaneTestType)
+	}
+	if redisDirectory.laneWriteMode != LaneWriteDual {
+		t.Fatalf("redis directory lane write mode = %q, want %q", redisDirectory.laneWriteMode, LaneWriteDual)
+	}
+
+	// The default Config keeps the exact single-queue behavior of today.
+	directory = selectRunnerDirectory(Config{Backend: provider}, nil)
+	if redisDirectory, ok = directory.(*RedisRunnerDirectory); !ok {
+		t.Fatalf("selectRunnerDirectory() = %T, want *RedisRunnerDirectory", directory)
+	}
+	if len(redisDirectory.lanes) != 0 || redisDirectory.laneWriteMode != "" {
+		t.Fatalf("default config lanes/mode = %v/%q, want none",
+			redisDirectory.lanes, redisDirectory.laneWriteMode)
+	}
+
+	// The memory fallback of the same call site receives the same knobs.
+	directory = selectRunnerDirectory(Config{
+		AssignmentQueueLanes:         []string{memoryLaneTestType},
+		AssignmentQueueLaneWriteMode: LaneWriteDual,
+	}, nil)
+	memoryDirectory, ok := directory.(*MemoryRunnerDirectory)
+	if !ok {
+		t.Fatalf("selectRunnerDirectory() = %T, want *MemoryRunnerDirectory", directory)
+	}
+	if len(memoryDirectory.lanes) != 1 || memoryDirectory.lanes[0] != memoryLaneTestType {
+		t.Fatalf("memory directory lanes = %v, want [%s]", memoryDirectory.lanes, memoryLaneTestType)
+	}
+	if memoryDirectory.laneWriteMode != LaneWriteDual {
+		t.Fatalf("memory directory lane write mode = %q, want %q", memoryDirectory.laneWriteMode, LaneWriteDual)
+	}
+}
+
 // TestRedisRunnerDirectoryQueuedReapAgainstRealStateStore runs the reaper
 // against the real distributed state store rather than the fake probe. The
 // execution is seeded as the transient status key it actually is, and the

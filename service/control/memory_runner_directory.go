@@ -22,6 +22,28 @@ type memoryRunnerDirectoryConfig struct {
 	drainObservationFreshness time.Duration
 	drainDeadline             time.Duration
 	clock                     func() time.Time
+	lanes                     []string
+	laneWriteMode             LaneWriteMode
+}
+
+// WithMemoryRunnerDirectoryLanes configures the node-type queue lanes this
+// directory serves. It mirrors the Redis option of the same name: an empty
+// whitelist keeps the single-queue behavior every deployment has today, and a
+// lane name is a routing node type (see resolveQueueLane).
+func WithMemoryRunnerDirectoryLanes(lanes []string) MemoryRunnerDirectoryOption {
+	return func(cfg *memoryRunnerDirectoryConfig) {
+		cfg.lanes = append([]string(nil), normalizeLaneNodeTypes(lanes)...)
+	}
+}
+
+// WithMemoryRunnerDirectoryLaneWriteMode selects which queues a new assignment
+// is written to while lanes roll out. It mirrors the Redis option of the same
+// name, including the gate: a mode that splits writes takes effect only when
+// lanes are configured.
+func WithMemoryRunnerDirectoryLaneWriteMode(mode LaneWriteMode) MemoryRunnerDirectoryOption {
+	return func(cfg *memoryRunnerDirectoryConfig) {
+		cfg.laneWriteMode = mode
+	}
 }
 
 // WithMemoryRunnerDirectoryControlReceiptRetention sets how long completed
@@ -71,10 +93,30 @@ func WithMemoryRunnerDirectoryClock(clock func() time.Time) MemoryRunnerDirector
 // MemoryRunnerDirectory keeps runner registration and assignment state in
 // process for embedded and test deployments.
 type MemoryRunnerDirectory struct {
-	mu                      sync.RWMutex
-	runners                 map[string]*memoryRunnerState
-	queue                   []Assignment
-	seen                    map[AssignmentID]struct{}
+	mu      sync.RWMutex
+	runners map[string]*memoryRunnerState
+	// queue is the legacy queue, the one every deployment writes to today.
+	// laneQueues holds one queue per configured lane, keyed by the lane's node
+	// type, and laneMarkers records which of the two an assignment was placed
+	// on (the empty lane name is the legacy queue). The three together are the
+	// in-process equivalent of the Redis directory's queue keys and lane marker
+	// hash: a dual-written entry has a copy in each of its placement's queues,
+	// and the marker is what a requeue reads to put the entry back where it
+	// came from. See resolveLanePlacement for the placement rules, which both
+	// directories resolve through.
+	queue         []Assignment
+	laneQueues    map[string][]Assignment
+	laneMarkers   map[AssignmentID]string
+	lanes         []string
+	laneWriteMode LaneWriteMode
+	seen          map[AssignmentID]struct{}
+	// released records the assignments the stale-token ReleaseLeased path
+	// released without clearing their seen mark: the in-memory half of the
+	// Redis directory's 'released' assignment state. A released assignment is
+	// no longer owned — its queue residue must not be claimed — but it must
+	// still be admitted by EnqueueAssignment, exactly as the Redis transitions
+	// admit it. The record lives and dies with the seen mark.
+	released                map[AssignmentID]struct{}
 	claims                  map[ClaimID]memoryClaim
 	handoffs                map[ClaimID]memoryHandoff
 	handoffByAssignment     map[AssignmentID]map[ClaimID]struct{}
@@ -154,7 +196,12 @@ func NewMemoryRunnerDirectory(opts ...MemoryRunnerDirectoryOption) *MemoryRunner
 	}
 	return &MemoryRunnerDirectory{
 		runners:                   make(map[string]*memoryRunnerState),
+		laneQueues:                make(map[string][]Assignment),
+		laneMarkers:               make(map[AssignmentID]string),
+		lanes:                     cfg.lanes,
+		laneWriteMode:             cfg.laneWriteMode,
 		seen:                      make(map[AssignmentID]struct{}),
+		released:                  make(map[AssignmentID]struct{}),
 		claims:                    make(map[ClaimID]memoryClaim),
 		handoffs:                  make(map[ClaimID]memoryHandoff),
 		handoffByAssignment:       make(map[AssignmentID]map[ClaimID]struct{}),

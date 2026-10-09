@@ -71,6 +71,22 @@ type Config struct {
 	// healthy claim rate; the cost is Redis load per pass on shared state.
 	DeadQueuedAssignmentReapPeriod time.Duration
 	DeadQueuedAssignmentReapBatch  int
+	// AssignmentQueueLanes enables node-type queue lanes in the runner
+	// directory: each listed routing node type gets its own assignment queue,
+	// so a runner serving one node type no longer queues behind work it cannot
+	// claim. Names must match Routing.NodeType exactly. A type that is not
+	// listed — and every type, while the list is empty (the default) — stays on
+	// the shared legacy queue, exactly as before lanes existed.
+	AssignmentQueueLanes []string
+	// AssignmentQueueLaneWriteMode selects which queue keys a newly enqueued
+	// assignment is offered to while lanes are configured: LaneWriteLegacyOnly,
+	// LaneWriteDual, or LaneWriteLaneOnly. It is meaningful only alongside
+	// AssignmentQueueLanes; an empty or unrecognized value falls back to
+	// legacy-only, so a config typo can never split writes away from the queue
+	// every reader still walks. Roll out in dual (both copies, mixed-version
+	// readers all see the work) and only move to lane-only once the fleet
+	// reads lanes.
+	AssignmentQueueLaneWriteMode LaneWriteMode
 	// RuntimeEvidenceBuffer, when non-nil, is wired into the internal engine as
 	// a read-only evidence sink. NewControlPlane converts only this typed
 	// buffer to an engine Option; it does not expose arbitrary []engine.Option.
@@ -212,10 +228,25 @@ func selectRunnerDirectory(cfg Config, observer RunnerClaimObserver) RunnerDirec
 					opts = append(opts, WithRedisRunnerDirectoryExecutionStatus(reader))
 				}
 			}
+			// The lane knobs default to empty/legacy-only, which the directory
+			// resolves to the single-queue behavior; passing them unconditionally
+			// keeps this call site the one place that decides, so the two
+			// backends below cannot drift apart.
+			opts = append(opts,
+				WithRedisRunnerDirectoryLanes(cfg.AssignmentQueueLanes),
+				WithRedisRunnerDirectoryLaneWriteMode(cfg.AssignmentQueueLaneWriteMode),
+			)
 			return NewRedisRunnerDirectory(client, opts...)
 		}
 	}
-	return NewMemoryRunnerDirectory()
+	// The memory directory backs single-node deployments and tests; it serves
+	// the same lanes from the same Config fields, through the shared placement
+	// and mode resolvers, so the two backends cannot disagree about where an
+	// entry goes or which entry a runner may claim.
+	return NewMemoryRunnerDirectory(
+		WithMemoryRunnerDirectoryLanes(cfg.AssignmentQueueLanes),
+		WithMemoryRunnerDirectoryLaneWriteMode(cfg.AssignmentQueueLaneWriteMode),
+	)
 }
 
 // selectSupplyObserved resolves the sink for runner-reported applied supply

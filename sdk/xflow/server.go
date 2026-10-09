@@ -107,15 +107,19 @@ type serverConfig struct {
 	leaseTTL    time.Duration
 	// deadQueuedReapPeriod / deadQueuedReapBatch tune the LeaseSweeper's
 	// dead-queued-assignment reaper; see WithServerDeadQueuedAssignmentReap.
-	deadQueuedReapPeriod     time.Duration
-	deadQueuedReapBatch      int
-	outboxDiscoveryPage      int
-	outputCompression        bool
-	enableRunnerMetricsProxy bool
-	runnerMetricsInterval    time.Duration
-	enableManagement         bool
-	supplyKeyRotation        time.Duration
-	middleware               []func(http.Handler) http.Handler
+	deadQueuedReapPeriod time.Duration
+	deadQueuedReapBatch  int
+	// assignmentQueueLanes / assignmentQueueLaneWriteMode configure the runner
+	// directory's node-type queue lanes; see WithServerAssignmentQueueLanes.
+	assignmentQueueLanes         []string
+	assignmentQueueLaneWriteMode control.LaneWriteMode
+	outboxDiscoveryPage          int
+	outputCompression            bool
+	enableRunnerMetricsProxy     bool
+	runnerMetricsInterval        time.Duration
+	enableManagement             bool
+	supplyKeyRotation            time.Duration
+	middleware                   []func(http.Handler) http.Handler
 	// paramValidation is WithServerParamValidation's mode; empty means
 	// types.DefaultParamValidationMode.
 	paramValidation types.ParamValidationMode
@@ -412,6 +416,32 @@ func WithServerDeadQueuedAssignmentReap(period time.Duration, batch int) ServerO
 	return func(c *serverConfig) {
 		c.deadQueuedReapPeriod = period
 		c.deadQueuedReapBatch = batch
+	}
+}
+
+// WithServerAssignmentQueueLanes enables node-type queue lanes in the runner
+// directory: each listed routing node type gets its own assignment queue, so a
+// runner serving one node type no longer queues behind work it cannot claim —
+// the queue-latency fix for a high-volume type sharing one queue with a large
+// low-volume fleet. Names must match Routing.NodeType exactly.
+//
+// Rollout: configure the lanes and write in control.LaneWriteDual first — both
+// a lane copy and the legacy copy are written, so readers still on older builds
+// see the work too — and move to control.LaneWriteLaneOnly only once every
+// reader understands lanes. An empty list (the default) keeps the legacy single
+// queue; an unrecognized mode falls back to legacy-only.
+func WithServerAssignmentQueueLanes(lanes []string) ServerOption {
+	return func(c *serverConfig) {
+		c.assignmentQueueLanes = append([]string(nil), lanes...)
+	}
+}
+
+// WithServerAssignmentQueueLaneWriteMode selects which queue keys a newly
+// enqueued assignment is offered to while lanes are configured; see
+// WithServerAssignmentQueueLanes for the rollout order.
+func WithServerAssignmentQueueLaneWriteMode(mode control.LaneWriteMode) ServerOption {
+	return func(c *serverConfig) {
+		c.assignmentQueueLaneWriteMode = mode
 	}
 }
 
@@ -732,6 +762,8 @@ func buildServerAPIConfig(cfg ServerConfig, sc *serverConfig) apiserver.Config {
 
 		DeadQueuedAssignmentReapPeriod: sc.deadQueuedReapPeriod,
 		DeadQueuedAssignmentReapBatch:  sc.deadQueuedReapBatch,
+		AssignmentQueueLanes:           sc.assignmentQueueLanes,
+		AssignmentQueueLaneWriteMode:   sc.assignmentQueueLaneWriteMode,
 
 		OutboxDiscoveryPage: sc.outboxDiscoveryPage,
 

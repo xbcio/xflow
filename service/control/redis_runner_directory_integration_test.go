@@ -173,6 +173,10 @@ func redisRunnerDirectoryAllKeys(keys redisRunnerDirectoryKeys) []string {
 	return []string{
 		keys.queue,
 		keys.seen,
+		// The lane membership marker. Lane queue keys themselves are
+		// configuration-driven and cannot be enumerated here; a real-Redis
+		// test that configures lanes owns their removal.
+		keys.assignmentLane,
 		keys.assignmentData,
 		keys.assignmentState,
 		keys.assignmentClaim,

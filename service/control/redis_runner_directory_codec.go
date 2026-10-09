@@ -18,8 +18,12 @@ import (
 type redisRunnerDirectoryKeys struct {
 	prefix string
 
-	queue                string
-	seen                 string
+	queue string
+	seen  string
+	// assignmentLane is the HASH recording, per assignment ID, the lane key
+	// the assignment was placed on. The requeue transitions carry only an ID,
+	// so this marker is how they learn which lane to push the entry back to.
+	assignmentLane       string
 	assignmentData       string
 	assignmentState      string
 	assignmentClaim      string
@@ -124,6 +128,7 @@ func newRedisRunnerDirectoryKeys(prefix string) redisRunnerDirectoryKeys {
 		prefix:                                prefix,
 		queue:                                 prefix + ":queue",
 		seen:                                  prefix + ":seen",
+		assignmentLane:                        prefix + ":assignment:lane",
 		assignmentData:                        prefix + ":assignment:data",
 		assignmentState:                       prefix + ":assignment:state",
 		assignmentClaim:                       prefix + ":assignment:claim",
@@ -203,6 +208,15 @@ func newRedisRunnerDirectoryKeys(prefix string) redisRunnerDirectoryKeys {
 // prefix supplies the shared Redis Cluster hash tag for every Lua key.
 func (keys redisRunnerDirectoryKeys) assignmentLeaseMetaKey(assignmentID string) string {
 	return keys.prefix + ":assignment:lease-meta:" + assignmentID
+}
+
+// laneQueueKey returns the queue key of a node-type lane. Lane keys are
+// configuration-driven and cannot be enumerated as struct fields; like the
+// other derived keys, the key is composed from the prefix, so it carries the
+// same Cluster hash tag as the Lua transitions that mix it with the legacy
+// queue key.
+func (keys redisRunnerDirectoryKeys) laneQueueKey(nodeType string) string {
+	return keys.queue + ":lane:" + nodeType
 }
 
 // runnerLeasedAssignmentsKey returns the per-runner set of assignment IDs that

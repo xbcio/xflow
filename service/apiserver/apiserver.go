@@ -83,7 +83,13 @@ type Config struct {
 	// this threads to verbatim). Zero values keep the control-plane defaults.
 	DeadQueuedAssignmentReapPeriod time.Duration
 	DeadQueuedAssignmentReapBatch  int
-	Auth                           control.Authenticator
+	// AssignmentQueueLanes / AssignmentQueueLaneWriteMode configure the runner
+	// directory's node-type queue lanes (see control.Config, whose fields these
+	// mirror and are threaded to verbatim). Empty lanes keep the legacy single
+	// queue.
+	AssignmentQueueLanes         []string
+	AssignmentQueueLaneWriteMode control.LaneWriteMode
+	Auth                         control.Authenticator
 	// RegistrationCodes / IssuedIdentities turn on the runner enrollment
 	// endpoint (/v1/runners/enroll). Both must be non-nil for enrollment to be
 	// live — control.NewControlPlane treats this pair as a single decision
@@ -460,6 +466,8 @@ func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 		LeaseTTL:                       cfg.LeaseTTL,
 		DeadQueuedAssignmentReapPeriod: cfg.DeadQueuedAssignmentReapPeriod,
 		DeadQueuedAssignmentReapBatch:  cfg.DeadQueuedAssignmentReapBatch,
+		AssignmentQueueLanes:           cfg.AssignmentQueueLanes,
+		AssignmentQueueLaneWriteMode:   cfg.AssignmentQueueLaneWriteMode,
 		EnrollmentRunnerIDPrefix:       cfg.EnrollmentRunnerIDPrefix,
 		Logger:                         cfg.Logger,
 		Metrics:                        cfg.Metrics,
