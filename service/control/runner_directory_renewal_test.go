@@ -628,6 +628,65 @@ func TestRedisRunnerDirectoryRenewalScansPastShortIndex(t *testing.T) {
 		t.Fatalf("renewal resolved to %q (payload=%v), want the batch %q via the second pass",
 			got.Task.NodeName, got.SubgraphPayload != nil, batch.NodeName)
 	}
+	// The pass that had to scan restores what it confirmed: the batch is back in
+	// the per-runner index, so the next walk resolves it from the bounded first
+	// pass instead of scanning the directory again.
+	indexed, err := rdb.SIsMember(ctx, dir.keys.runnerLeasedAssignmentsKey(session.RunnerID), string(BuildAssignmentID(&batch))).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !indexed {
+		t.Fatal("the fallback pass confirmed the batch live but did not restore its index entry")
+	}
+}
+
+// TestRedisRunnerDirectoryRenewalFallbackSkipsForeignLeases: the fallback pass
+// holds every leased assignment in the directory, not just this runner's, so
+// each candidate is filtered on owner before it can do anything. A foreign
+// lease under the same identity — the common shape once a map's batches are
+// spread across runners — must neither resolve the renewal nor be recorded in
+// this runner's index by the pass's backfill.
+func TestRedisRunnerDirectoryRenewalFallbackSkipsForeignLeases(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	dir := NewRedisRunnerDirectory(rdb)
+	session := registerRedisDirectoryRunner(t, ctx, dir, "runner-1", 4)
+	other := registerRedisDirectoryRunner(t, ctx, dir, "runner-2", 4)
+
+	finalizeRenewalLease(t, ctx, dir, session, mapParentTask(), nil)
+	batch := mapBatchTask("L1", 0)
+	finalizeRenewalLease(t, ctx, dir, session, batch, batchLeasePayload(0))
+	foreign := mapBatchTask("L1", 1)
+	finalizeRenewalLease(t, ctx, dir, other, foreign, batchLeasePayload(1))
+
+	// Force the fallback (drop the identity index) and shorten the per-runner
+	// index (drop the batch) so the second pass scans the foreign lease too,
+	// with the count left correct.
+	if err := rdb.HDel(ctx, dir.keys.leaseByToken, "tok-L1").Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rdb.HDel(ctx, dir.keys.leaseByID, "L1").Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rdb.SRem(ctx, dir.keys.runnerLeasedAssignmentsKey(session.RunnerID), string(BuildAssignmentID(&batch))).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, found, err := dir.LookupLease(ctx, session.RunnerID, session.SessionID, renewalLookupKey("L1", "tok-L1"))
+	if err != nil || !found {
+		t.Fatalf("renewal with a foreign lease in the fallback scan found=%v err=%v", found, err)
+	}
+	if got.SubgraphPayload == nil || got.Task.NodeName != batch.NodeName {
+		t.Fatalf("renewal resolved to %q (payload=%v), want this runner's batch %q",
+			got.Task.NodeName, got.SubgraphPayload != nil, batch.NodeName)
+	}
+	indexed, err := rdb.SIsMember(ctx, dir.keys.runnerLeasedAssignmentsKey(session.RunnerID), string(BuildAssignmentID(&foreign))).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if indexed {
+		t.Fatal("the fallback pass recorded another runner's lease in this runner's index")
+	}
 }
 
 // TestRedisRunnerDirectoryRefreshLeaseMetaLeavesOtherIdentitiesAlone: the
