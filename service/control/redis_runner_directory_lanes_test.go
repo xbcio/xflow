@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/service/protocol"
+	"github.com/xbcio/xflow/types"
 )
 
 func TestNormalizeLaneNodeTypesTrimsDedupesAndKeepsOrder(t *testing.T) {
@@ -688,6 +690,104 @@ func TestClaimWalkPendingIsPerTarget(t *testing.T) {
 	}
 }
 
+// laneLease builds the finalized lease the release transitions need.
+func laneLease(t *testing.T, leaseID, leaseToken string, assignment Assignment) *engine.TaskLease {
+	t.Helper()
+	return &engine.TaskLease{
+		LeaseID:    engine.LeaseID(leaseID),
+		LeaseToken: engine.LeaseToken(leaseToken),
+		Attempt:    1,
+		Task:       assignment.Task,
+		Input:      &types.Input{Data: map[string]any{}},
+		NodeType:   assignment.Routing.NodeType,
+		IssuedAt:   time.Now().UTC(),
+		TTL:        time.Minute,
+	}
+}
+
+// TestTerminalReleaseClearsEveryLaneCopy is F1. A dual-written entry is claimed
+// off its lane, which leaves the legacy copy unreachable — the claim walk only
+// ever skips it. The terminal release (Accepted / DuplicateTerminal /
+// ExecutionInactive) deletes the record itself, so it is the last chance to
+// collect that copy and the marker; nothing else on the completion path does.
+func TestTerminalReleaseClearsEveryLaneCopy(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	laneType := "xflow.sas.webscan-sink"
+	directory := NewRedisRunnerDirectory(rdb,
+		WithRedisRunnerDirectoryLanes([]string{laneType}),
+		WithRedisRunnerDirectoryLaneWriteMode(LaneWriteDual),
+	)
+	session := registerLaneRunner(t, ctx, directory, "runner-terminal-lane", 1, laneType)
+	assignment := redisDirectoryTestAssignment(AssignmentID("exec-lanes/terminal/activation-1"))
+	assignment.Routing.NodeType = laneType
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
+	claim := claimRedisDirectoryAssignment(t, ctx, directory, session, 1)
+	lease := laneLease(t, "lease-terminal", "token-terminal", assignment)
+	if err := directory.FinalizeClaim(ctx, claim.ClaimID, lease); err != nil {
+		t.Fatalf("FinalizeClaim() error = %v", err)
+	}
+	if err := directory.ReleaseLeased(ctx, ReleaseLeasedRequest{
+		RunnerID:     session.RunnerID,
+		AssignmentID: assignment.AssignmentID,
+		LeaseID:      lease.LeaseID,
+		LeaseToken:   lease.LeaseToken,
+		RemoveSeen:   true,
+	}); err != nil {
+		t.Fatalf("ReleaseLeased(RemoveSeen=true) error = %v", err)
+	}
+	assertLaneQueuePlacement(t, ctx, rdb, directory, laneType, assignment.AssignmentID, 0, 0, "")
+}
+
+// TestStaleTokenReleaseKeepsTheQueueCopiesForTheReEnqueue is the other half of
+// F1: RemoveSeen=false is the stale-token outcome, where the plane still owns
+// the entry and the caller re-enqueues it through EnqueueAssignment. That
+// re-enqueue is what clears stale copies and rewrites the marker, so this
+// transition must leave the queue alone — a removal here would race it.
+func TestStaleTokenReleaseKeepsTheQueueCopiesForTheReEnqueue(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	laneType := "xflow.sas.webscan-sink"
+	directory := NewRedisRunnerDirectory(rdb,
+		WithRedisRunnerDirectoryLanes([]string{laneType}),
+		WithRedisRunnerDirectoryLaneWriteMode(LaneWriteDual),
+	)
+	session := registerLaneRunner(t, ctx, directory, "runner-stale-lane", 1, laneType)
+	assignment := redisDirectoryTestAssignment(AssignmentID("exec-lanes/stale-token/activation-1"))
+	assignment.Routing.NodeType = laneType
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
+	claim := claimRedisDirectoryAssignment(t, ctx, directory, session, 1)
+	lease := laneLease(t, "lease-stale", "token-stale", assignment)
+	if err := directory.FinalizeClaim(ctx, claim.ClaimID, lease); err != nil {
+		t.Fatalf("FinalizeClaim() error = %v", err)
+	}
+	if err := directory.ReleaseLeased(ctx, ReleaseLeasedRequest{
+		RunnerID:     session.RunnerID,
+		AssignmentID: assignment.AssignmentID,
+		LeaseID:      lease.LeaseID,
+		LeaseToken:   lease.LeaseToken,
+		RemoveSeen:   false, // StaleToken: the engine did not apply the commit
+	}); err != nil {
+		t.Fatalf("ReleaseLeased(RemoveSeen=false) error = %v", err)
+	}
+
+	// The claim took the lane copy; the legacy copy and the marker survive,
+	// because the entry is still owned and about to be re-offered.
+	assertLaneQueuePlacement(t, ctx, rdb, directory, laneType, assignment.AssignmentID, 0, 1, "lane")
+
+	enqueued, err := directory.EnqueueAssignment(ctx, assignment)
+	if err != nil {
+		t.Fatalf("EnqueueAssignment() error = %v", err)
+	}
+	if !enqueued {
+		t.Fatal("EnqueueAssignment() after a stale-token release returned duplicate; " +
+			"the assignment is now unreachable — the dispatcher drops a duplicate silently")
+	}
+	// A fresh dual placement, with the stale legacy copy cleared rather than
+	// duplicated.
+	assertLaneQueuePlacement(t, ctx, rdb, directory, laneType, assignment.AssignmentID, 1, 1, "lane")
+}
+
 // TestRequeueFollowsTheMarkerOntoEveryConfiguredLane proves the marker, not the
 // legacy queue, decides the lane when several lanes are configured — the entry
 // must land on its own lane and never on a sibling.
@@ -723,5 +823,78 @@ func TestRequeueFollowsTheMarkerOntoEveryConfiguredLane(t *testing.T) {
 		t.Fatal(err)
 	} else if len(got) != 0 {
 		t.Fatalf("legacy queue = %q, want no copy in lane-only mode", got)
+	}
+}
+
+// TestReapDropClearsEveryLaneCopy is the dead-queued reap's half of the lane
+// cleanup contract. A dead entry that was dual-written sits on its lane and on
+// the legacy queue; the reap is the last transition that will ever see it, so
+// the removal has to take every copy and the marker with it.
+func TestReapDropClearsEveryLaneCopy(t *testing.T) {
+	ctx := context.Background()
+	reader := newFakeExecutionStatusReader()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	laneType := "xflow.sas.webscan-sink"
+	directory := NewRedisRunnerDirectory(rdb,
+		WithRedisRunnerDirectoryClaimTTL(time.Minute),
+		WithRedisRunnerDirectoryExecutionStatus(reader),
+		WithRedisRunnerDirectoryLanes([]string{laneType}),
+		WithRedisRunnerDirectoryLaneWriteMode(LaneWriteDual),
+	)
+	assignment := redisDirectoryTestAssignment(AssignmentID("exec-lanes/reap/activation-1"))
+	assignment.Routing.NodeType = laneType
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
+	assertLaneQueuePlacement(t, ctx, rdb, directory, laneType, assignment.AssignmentID, 1, 1, "lane")
+
+	// The reader knows nothing about the execution: its transient keys have
+	// expired, which is the shape the reap exists for.
+	result, err := directory.ReapDeadQueuedAssignments(ctx, 16)
+	if err != nil {
+		t.Fatalf("ReapDeadQueuedAssignments() error = %v", err)
+	}
+	if result.Released != 1 {
+		t.Fatalf("reap released %d, want 1", result.Released)
+	}
+	assertLaneQueuePlacement(t, ctx, rdb, directory, laneType, assignment.AssignmentID, 0, 0, "")
+
+	id := string(assignment.AssignmentID)
+	if got := rdb.HGet(ctx, directory.keys.assignmentState, id).Val(); got != "" {
+		t.Fatalf("assignment state = %q, want the record removed", got)
+	}
+	if got := rdb.HGet(ctx, directory.keys.assignmentData, id).Val(); got != "" {
+		t.Fatalf("assignment data = %q, want the record removed", got)
+	}
+	if member, err := rdb.SIsMember(ctx, directory.keys.seen, id).Result(); err != nil {
+		t.Fatalf("read seen set: %v", err)
+	} else if member {
+		t.Fatalf("seen still holds %q after the reap", id)
+	}
+}
+
+// TestClearAssignmentDropsEveryLaneCopy pins the same contract on the clear
+// transition, the other removal that ends a record and so must not leave a
+// lane copy or a marker behind.
+func TestClearAssignmentDropsEveryLaneCopy(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	laneType := "xflow.sas.webscan-sink"
+	directory := NewRedisRunnerDirectory(rdb,
+		WithRedisRunnerDirectoryLanes([]string{laneType}),
+		WithRedisRunnerDirectoryLaneWriteMode(LaneWriteDual),
+	)
+	assignment := redisDirectoryTestAssignment(AssignmentID("exec-lanes/clear/activation-1"))
+	assignment.Routing.NodeType = laneType
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
+	assertLaneQueuePlacement(t, ctx, rdb, directory, laneType, assignment.AssignmentID, 1, 1, "lane")
+
+	if err := directory.ClearAssignment(ctx, assignment.AssignmentID); err != nil {
+		t.Fatalf("ClearAssignment() error = %v", err)
+	}
+	assertLaneQueuePlacement(t, ctx, rdb, directory, laneType, assignment.AssignmentID, 0, 0, "")
+	if got := rdb.HGet(ctx, directory.keys.assignmentState, string(assignment.AssignmentID)).Val(); got != "" {
+		t.Fatalf("assignment state = %q, want the record cleared", got)
+	}
+	if got := rdb.HGet(ctx, directory.keys.assignmentData, string(assignment.AssignmentID)).Val(); got != "" {
+		t.Fatalf("assignment data = %q, want the record cleared", got)
 	}
 }

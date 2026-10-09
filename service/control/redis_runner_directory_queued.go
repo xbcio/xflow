@@ -395,7 +395,7 @@ func (d *RedisRunnerDirectory) reapQueuedAssignments(ctx context.Context, assign
 	pipe := d.rdb.Pipeline()
 	cmds := make([]*redis.Cmd, 0, len(assignmentIDs))
 	for _, assignmentID := range assignmentIDs {
-		cmds = append(cmds, pipe.Eval(ctx, redisReapDeadQueuedAssignmentLua, []string{
+		cmds = append(cmds, pipe.Eval(ctx, redisReapDeadQueuedAssignmentLua, d.appendLaneRequeueKeys([]string{
 			d.keys.queue,
 			d.keys.seen,
 			d.keys.assignmentData,
@@ -407,7 +407,7 @@ func (d *RedisRunnerDirectory) reapQueuedAssignments(ctx context.Context, assign
 			d.keys.assignmentLeaseToken,
 			d.keys.assignmentLeaseMetaKey(assignmentID),
 			d.keys.assignmentLeaseMetaLegacy,
-		}, assignmentID))
+		}), assignmentID, d.laneRequeueCandidateCount(), d.laneRequeueModeArg()))
 	}
 	// Every command has settled by the time Exec returns, each carrying its own
 	// error, so the results are read per command below rather than from the
@@ -438,8 +438,17 @@ func (d *RedisRunnerDirectory) reapQueuedAssignments(ctx context.Context, assign
 //	6=assignment:runner 7=assignment:session 8=assignment:lease-id
 //	9=assignment:lease-token 10=this assignment's lease-metadata key
 //	11=pre-U-7 shared lease-metadata hash
+//	then, appended by appendLaneRequeueKeys: every candidate queue key (lanes,
+//	then the legacy queue) and last the lane marker hash.
 //
-// ARGV: 1=assignmentID
+// ARGV: 1=assignmentID, then the lane candidate count and the lane write mode
+// (read by redisLaneRequeueLua; the mode is unused on this path).
+//
+// The lane-aware tail is what makes this removal a *drop*: the record is gone,
+// so every queue copy of it must go with it — including the one on a lane,
+// which is a key the record's state never named. The marker first identified
+// that lane at enqueue; dropping it here keeps a re-enqueue of the same ID from
+// inheriting a placement for a record that no longer exists.
 //
 // The state fence is the whole safety argument, and it is sufficient on its
 // own: redisClaimAssignmentLua both requires state=='queued' and writes
@@ -462,10 +471,10 @@ func (d *RedisRunnerDirectory) reapQueuedAssignments(ctx context.Context, assign
 // cleared the claim and lease fields) and they stop a partial or
 // previous-version record from leaving behind a field some other reader would
 // interpret as live state.
-const redisReapDeadQueuedAssignmentLua = `
+const redisReapDeadQueuedAssignmentLua = redisLaneRequeueLua + `
 local assignmentID = ARGV[1]
 if redis.call('HGET', KEYS[4], assignmentID) ~= 'queued' then return 'skipped' end
-redis.call('LREM', KEYS[1], 0, assignmentID)
+laneDrop(assignmentID)
 redis.call('SREM', KEYS[2], assignmentID)
 redis.call('HDEL', KEYS[3], assignmentID)
 redis.call('HDEL', KEYS[4], assignmentID)

@@ -1816,7 +1816,7 @@ func (d *RedisRunnerDirectory) ReleaseLeased(ctx context.Context, req ReleaseLea
 	if err != nil {
 		return err
 	}
-	status, err := d.evalStatus(ctx, redisReleaseLeasedLua, []string{
+	status, err := d.evalStatus(ctx, redisReleaseLeasedLua, d.appendLaneRequeueKeys([]string{
 		d.keys.runnerSession,
 		d.keys.assignmentData,
 		d.keys.assignmentState,
@@ -1840,8 +1840,9 @@ func (d *RedisRunnerDirectory) ReleaseLeased(ctx context.Context, req ReleaseLea
 		d.keys.handoffLeaseToken,
 		d.keys.handoffRecoveryReady,
 		d.keys.handoffRecoveryDeadline,
-	}, req.RunnerID, string(req.AssignmentID), string(req.LeaseID), string(req.LeaseToken),
-		boolRedisArg(req.RemoveSeen), assignmentID)
+	}), req.RunnerID, string(req.AssignmentID), string(req.LeaseID), string(req.LeaseToken),
+		boolRedisArg(req.RemoveSeen), assignmentID,
+		d.laneRequeueCandidateCount(), d.laneRequeueModeArg())
 	if err != nil {
 		return fmt.Errorf("release redis lease: %w", err)
 	}
@@ -2158,7 +2159,7 @@ func (d *RedisRunnerDirectory) claimRunnerID(ctx context.Context, claimID ClaimI
 // capacity before engine reclaim but intentionally retains the finalized
 // handoff debt until the sweeper observes a conclusive engine outcome.
 func (d *RedisRunnerDirectory) ReleaseExpiredLease(ctx context.Context, req ExpiredDirectoryLeaseRequest) (ExpiredDirectoryLeaseOutcome, error) {
-	status, err := d.evalStatus(ctx, redisReleaseExpiredLeaseLua, []string{
+	status, err := d.evalStatus(ctx, redisReleaseExpiredLeaseLua, d.appendLaneRequeueKeys([]string{
 		d.keys.assignmentData,
 		d.keys.assignmentState,
 		d.keys.assignmentRunner,
@@ -2181,7 +2182,8 @@ func (d *RedisRunnerDirectory) ReleaseExpiredLease(ctx context.Context, req Expi
 		d.keys.handoffLeaseToken,
 		d.keys.handoffRecoveryReady,
 		d.keys.handoffRecoveryDeadline,
-	}, string(req.AssignmentID), string(req.LeaseID), string(req.LeaseToken))
+	}), string(req.AssignmentID), string(req.LeaseID), string(req.LeaseToken),
+		d.laneRequeueCandidateCount(), d.laneRequeueModeArg())
 	if err != nil {
 		return "", fmt.Errorf("release expired redis lease: %w", err)
 	}
@@ -2227,7 +2229,7 @@ func (d *RedisRunnerDirectory) SettleFinalizedHandoff(ctx context.Context, assig
 // ClearAssignment removes the assignment from durable queue, claim, lease,
 // dedupe, and matching handoff records.
 func (d *RedisRunnerDirectory) ClearAssignment(ctx context.Context, assignmentID AssignmentID) error {
-	status, err := d.evalStatus(ctx, redisClearAssignmentLua, []string{
+	status, err := d.evalStatus(ctx, redisClearAssignmentLua, d.appendLaneRequeueKeys([]string{
 		d.keys.queue,
 		d.keys.seen,
 		d.keys.assignmentData,
@@ -2258,7 +2260,7 @@ func (d *RedisRunnerDirectory) ClearAssignment(ctx context.Context, assignmentID
 		d.keys.handoffRecoveryReady,
 		d.keys.handoffRecoveryDeadline,
 		d.keys.assignmentLeaseMetaLegacy,
-	}, string(assignmentID))
+	}), string(assignmentID), d.laneRequeueCandidateCount(), d.laneRequeueModeArg())
 	if err != nil {
 		return fmt.Errorf("clear redis assignment: %w", err)
 	}
@@ -3339,7 +3341,7 @@ redis.call('HDEL', KEYS[26], claimID)
 return 'released'
 `
 
-const redisReleaseLeasedLua = `
+const redisReleaseLeasedLua = redisLaneRequeueLua + `
 if not redis.call('HGET', KEYS[1], ARGV[1]) then return 'not_found' end
 local assignmentID = nil
 if ARGV[2] ~= '' and ARGV[4] ~= '' and redis.call('HGET', KEYS[7], ARGV[2]) == ARGV[4] then assignmentID = ARGV[2] end
@@ -3361,6 +3363,21 @@ if currentLeaseToken ~= '' and redis.call('HGET', KEYS[10], currentLeaseToken) =
 local leases = tonumber(redis.call('HGET', KEYS[11], ARGV[1]) or '0')
 if leases > 0 then redis.call('HINCRBY', KEYS[11], ARGV[1], -1) end
 if ARGV[5] == '1' then
+  -- Terminal. The caller sets this flag only for the Accepted,
+  -- DuplicateTerminal and ExecutionInactive outcomes (undeliverable_lease.go),
+  -- which all mean the work is settled and this assignment is never re-queued.
+  -- The record itself is deleted in this branch, so every copy of it — on any
+  -- lane and on the legacy queue — and its lane marker go with it: a copy left
+  -- behind would only ever be skipped, never removed, by the claim walk, and
+  -- nothing else on the completion path would collect it.
+  --
+  -- The released branch below (RemoveSeen=false) must NOT clear any of these.
+  -- That path is the stale-token outcome: the plane still owns the entry, and
+  -- the caller re-enqueues it through EnqueueAssignment, which is what clears
+  -- the stale copies and rewrites the marker under the current write mode.
+  -- Adding a removal there would race that re-enqueue and could drop an entry
+  -- that was just placed back on a queue.
+  laneDrop(assignmentID)
   redis.call('SREM', KEYS[12], assignmentID)
   redis.call('HDEL', KEYS[2], assignmentID)
   redis.call('HDEL', KEYS[3], assignmentID)
@@ -3414,7 +3431,12 @@ redis.call('HDEL', KEYS[11], claimID)
 return 'settled'
 `
 
-const redisClearAssignmentLua = `
+// Like the reap transition, this one ends in laneDrop: the record is being
+// erased, so every queue copy of it and its lane marker go with it. The clear
+// is reached only where the caller has decided the assignment is terminally
+// done (see ClearAssignment), which is the same direction the marker's other
+// removal points take.
+const redisClearAssignmentLua = redisLaneRequeueLua + `
 local assignmentID = ARGV[1]
 local claimID = redis.call('HGET', KEYS[5], assignmentID)
 local runnerID = redis.call('HGET', KEYS[6], assignmentID)
@@ -3439,7 +3461,7 @@ local leaseID = redis.call('HGET', KEYS[8], assignmentID)
 local leaseToken = redis.call('HGET', KEYS[9], assignmentID)
 if leaseID and redis.call('HGET', KEYS[16], leaseID) == assignmentID then redis.call('HDEL', KEYS[16], leaseID) end
 if leaseToken and redis.call('HGET', KEYS[17], leaseToken) == assignmentID then redis.call('HDEL', KEYS[17], leaseToken) end
-redis.call('LREM', KEYS[1], 0, assignmentID)
+laneDrop(assignmentID)
 redis.call('SREM', KEYS[2], assignmentID)
 redis.call('HDEL', KEYS[3], assignmentID)
 redis.call('HDEL', KEYS[4], assignmentID)
@@ -3473,7 +3495,7 @@ end
 return 'cleared'
 `
 
-const redisReleaseExpiredLeaseLua = `
+const redisReleaseExpiredLeaseLua = redisLaneRequeueLua + `
 local assignmentID = ARGV[1]
 local leaseID = ARGV[2]
 local leaseToken = ARGV[3]
@@ -3496,7 +3518,10 @@ if runnerID then
   if leases > 0 then redis.call('HINCRBY', KEYS[10], runnerID, -1) end
 end
 redis.call('SREM', KEYS[11], assignmentID)
-redis.call('LREM', KEYS[12], 0, assignmentID)
+-- This is a terminal cleanup: the record is gone, so every lane candidate copy
+-- and the lane marker go with it. A leftover copy would be skipped forever by
+-- the claim walk, and a leftover marker with it.
+laneDrop(assignmentID)
 -- Keep the finalized handoff record until engine reclaim proves the same token
 -- is no longer live. Its assignment index survives this capacity cleanup.
 return 'released'
