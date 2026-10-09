@@ -190,9 +190,12 @@ type RedisRunnerDirectory struct {
 	claimWalks    map[string]bool
 
 	// queuedReap is the same kind of process-local state for the
-	// queued-assignment reaper's walk of assignment:state. See
-	// ReapDeadQueuedAssignments.
-	queuedReap queuedReapCursor
+	// queued-assignment reaper's walk of assignment:state, and laneMarkerReap
+	// for the reconciliation lap it runs over the lane marker hash. Separate
+	// cursors because they are separate structures: one position cannot
+	// describe progress through both. See ReapDeadQueuedAssignments.
+	queuedReap     queuedReapCursor
+	laneMarkerReap queuedReapCursor
 }
 
 var _ RunnerDirectory = (*RedisRunnerDirectory)(nil)

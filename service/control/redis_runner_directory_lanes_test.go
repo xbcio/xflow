@@ -898,3 +898,279 @@ func TestClearAssignmentDropsEveryLaneCopy(t *testing.T) {
 		t.Fatalf("assignment data = %q, want the record cleared", got)
 	}
 }
+
+// TestReconcileSweepsOrphanedLaneMarkers is F2's primary shape: the residue a
+// completion by an older control plane leaves. That version knows neither lanes
+// nor markers, so it removes the record and the legacy copy and nothing else.
+// The marker hash is then the only structure that can still enumerate the lane
+// copy, and the absent payload is what proves the record is gone.
+func TestReconcileSweepsOrphanedLaneMarkers(t *testing.T) {
+	ctx := context.Background()
+	reader := newFakeExecutionStatusReader()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	laneType := "xflow.sas.webscan-sink"
+	directory := NewRedisRunnerDirectory(rdb,
+		WithRedisRunnerDirectoryClaimTTL(time.Minute),
+		WithRedisRunnerDirectoryExecutionStatus(reader),
+		WithRedisRunnerDirectoryLanes([]string{laneType}),
+		WithRedisRunnerDirectoryLaneWriteMode(LaneWriteDual),
+	)
+	id := AssignmentID("exec-lanes/orphan/activation-1")
+	laneKey := directory.keys.laneQueueKey(laneType)
+	if err := rdb.RPush(ctx, laneKey, string(id)).Err(); err != nil {
+		t.Fatalf("seed lane copy: %v", err)
+	}
+	if err := rdb.RPush(ctx, directory.keys.queue, string(id)).Err(); err != nil {
+		t.Fatalf("seed legacy copy: %v", err)
+	}
+	if err := rdb.HSet(ctx, directory.keys.assignmentLane, string(id), laneKey).Err(); err != nil {
+		t.Fatalf("seed lane marker: %v", err)
+	}
+
+	result, err := directory.ReapDeadQueuedAssignments(ctx, 16)
+	if err != nil {
+		t.Fatalf("ReapDeadQueuedAssignments() error = %v", err)
+	}
+	// The state lap sees nothing (there is no state field to read); the marker
+	// lap sees exactly one candidate and releases it. Pinning both counters
+	// keeps the ratio the pass reports a measure of residue.
+	if result.Inspected != 1 || result.Released != 1 {
+		t.Fatalf("reap = {inspected %d, released %d}, want {1, 1}", result.Inspected, result.Released)
+	}
+	assertLaneQueuePlacement(t, ctx, rdb, directory, laneType, id, 0, 0, "")
+}
+
+// TestReconcileLeavesMarkersWithALivePayload is the common case the second lap
+// must not touch: the marker hash holds a field for every queued record, so the
+// pass walks past live ones on every call. A marker with a payload behind it is
+// not a candidate of any shape this pass drains, whatever its placement says.
+func TestReconcileLeavesMarkersWithALivePayload(t *testing.T) {
+	ctx := context.Background()
+	reader := newFakeExecutionStatusReader()
+	reader.set("exec-1", types.ExecutionStatusRunning)
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	laneType := "xflow.sas.webscan-sink"
+	directory := NewRedisRunnerDirectory(rdb,
+		WithRedisRunnerDirectoryClaimTTL(time.Minute),
+		WithRedisRunnerDirectoryExecutionStatus(reader),
+		WithRedisRunnerDirectoryLanes([]string{laneType}),
+		WithRedisRunnerDirectoryLaneWriteMode(LaneWriteDual),
+	)
+	assignment := redisDirectoryTestAssignment(AssignmentID("exec-lanes/live/activation-1"))
+	assignment.Routing.NodeType = laneType
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
+
+	result, err := directory.ReapDeadQueuedAssignments(ctx, 16)
+	if err != nil {
+		t.Fatalf("ReapDeadQueuedAssignments() error = %v", err)
+	}
+	// The state lap still inspects the live entry — it is a candidate of that
+	// shape — and correctly releases nothing; the marker lap adds no candidate.
+	if result.Inspected != 1 || result.Released != 0 {
+		t.Fatalf("reap = {inspected %d, released %d}, want {1, 0}", result.Inspected, result.Released)
+	}
+	assertLaneQueuePlacement(t, ctx, rdb, directory, laneType, assignment.AssignmentID, 1, 1, "lane")
+	if got := rdb.HGet(ctx, directory.keys.assignmentState, string(assignment.AssignmentID)).Val(); got != "queued" {
+		t.Fatalf("assignment state = %q, want it still queued", got)
+	}
+}
+
+// TestReconcileSurvivesAMarkerValueThatNamesNoQueue drives the reconciler with
+// a marker field whose value is not a queue key at all — the shape a field
+// written by something other than the two lane writers would have. The pass
+// must clean the residue out (it is an orphan like any other) without issuing
+// an LREM at the bogus key: that LREM would raise WRONGTYPE against a non-list
+// key and abort the batch from its head position, where this entry sorts first
+// on every pass.
+func TestReconcileSurvivesAMarkerValueThatNamesNoQueue(t *testing.T) {
+	ctx := context.Background()
+	reader := newFakeExecutionStatusReader()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	laneType := "xflow.sas.webscan-sink"
+	directory := NewRedisRunnerDirectory(rdb,
+		WithRedisRunnerDirectoryClaimTTL(time.Minute),
+		WithRedisRunnerDirectoryExecutionStatus(reader),
+		WithRedisRunnerDirectoryLanes([]string{laneType}),
+		WithRedisRunnerDirectoryLaneWriteMode(LaneWriteDual),
+	)
+	id := AssignmentID("exec-lanes/bogus-marker/activation-1")
+	// The value points at an existing hash key, so an unguarded LREM would be a
+	// WRONGTYPE error rather than a harmless LREM-against-a-missing-key no-op.
+	if err := rdb.HSet(ctx, directory.keys.assignmentLane, string(id), directory.keys.assignmentLane).Err(); err != nil {
+		t.Fatalf("seed bogus marker: %v", err)
+	}
+
+	result, err := directory.ReapDeadQueuedAssignments(ctx, 16)
+	if err != nil {
+		t.Fatalf("ReapDeadQueuedAssignments() error = %v", err)
+	}
+	if result.Inspected != 1 || result.Released != 1 {
+		t.Fatalf("reap = {inspected %d, released %d}, want {1, 1}", result.Inspected, result.Released)
+	}
+	if got := rdb.HExists(ctx, directory.keys.assignmentLane, string(id)).Val(); got {
+		t.Fatal("bogus marker field survived the reconciliation")
+	}
+}
+
+// TestReconcileGuardSparesAnAssignmentWhosePayloadCameBack drives the guard
+// transition directly with an id whose payload is present — the state the page
+// prefilter is supposed to have filtered out, and so the state a record reaches
+// when an enqueue lands between the prefilter's read and the transition. The
+// re-check is the half that makes the sweep safe; without it this call would
+// erase a live record's queue entries and marker.
+func TestReconcileGuardSparesAnAssignmentWhosePayloadCameBack(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	laneType := "xflow.sas.webscan-sink"
+	directory := NewRedisRunnerDirectory(rdb,
+		WithRedisRunnerDirectoryLanes([]string{laneType}),
+		WithRedisRunnerDirectoryLaneWriteMode(LaneWriteDual),
+	)
+	assignment := redisDirectoryTestAssignment(AssignmentID("exec-lanes/guard/activation-1"))
+	assignment.Routing.NodeType = laneType
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
+
+	reconciled, err := directory.reconcileOrphanedLaneMarkers(ctx, []string{string(assignment.AssignmentID)})
+	if err != nil {
+		t.Fatalf("reconcileOrphanedLaneMarkers() error = %v", err)
+	}
+	if reconciled != 0 {
+		t.Fatalf("reconciled %d, want the guard to spare a record whose payload is present", reconciled)
+	}
+	assertLaneQueuePlacement(t, ctx, rdb, directory, laneType, assignment.AssignmentID, 1, 1, "lane")
+}
+
+// TestReconcileThenReEnqueueRebuildsTheRecord closes the race the guard
+// transition's payload re-check exists for, in the order the reconciler wins:
+// the orphan is swept first, and the enqueue that follows must rebuild a
+// coherent record rather than be deduplicated into an unreachable one.
+func TestReconcileThenReEnqueueRebuildsTheRecord(t *testing.T) {
+	ctx := context.Background()
+	reader := newFakeExecutionStatusReader()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	laneType := "xflow.sas.webscan-sink"
+	directory := NewRedisRunnerDirectory(rdb,
+		WithRedisRunnerDirectoryClaimTTL(time.Minute),
+		WithRedisRunnerDirectoryExecutionStatus(reader),
+		WithRedisRunnerDirectoryLanes([]string{laneType}),
+		WithRedisRunnerDirectoryLaneWriteMode(LaneWriteDual),
+	)
+	assignment := redisDirectoryTestAssignment(AssignmentID("exec-lanes/revive/activation-1"))
+	assignment.Routing.NodeType = laneType
+	id := assignment.AssignmentID
+	laneKey := directory.keys.laneQueueKey(laneType)
+	if err := rdb.RPush(ctx, laneKey, string(id)).Err(); err != nil {
+		t.Fatalf("seed lane copy: %v", err)
+	}
+	if err := rdb.RPush(ctx, directory.keys.queue, string(id)).Err(); err != nil {
+		t.Fatalf("seed legacy copy: %v", err)
+	}
+	if err := rdb.HSet(ctx, directory.keys.assignmentLane, string(id), laneKey).Err(); err != nil {
+		t.Fatalf("seed lane marker: %v", err)
+	}
+	if _, err := directory.ReapDeadQueuedAssignments(ctx, 16); err != nil {
+		t.Fatalf("ReapDeadQueuedAssignments() error = %v", err)
+	}
+	assertLaneQueuePlacement(t, ctx, rdb, directory, laneType, id, 0, 0, "")
+
+	enqueued, err := directory.EnqueueAssignment(ctx, assignment)
+	if err != nil {
+		t.Fatalf("EnqueueAssignment() error = %v", err)
+	}
+	if !enqueued {
+		t.Fatal("EnqueueAssignment() after the sweep returned duplicate; the assignment is unreachable")
+	}
+	assertLaneQueuePlacement(t, ctx, rdb, directory, laneType, id, 1, 1, "lane")
+}
+
+// TestReapBudgetIsSharedByBothLaps pins the pass contract: limit is a property
+// of the pass, not of a lap. The state lap spends it first — its behavior may
+// not move — and the marker lap only ever sees what is left.
+func TestReapBudgetIsSharedByBothLaps(t *testing.T) {
+	ctx := context.Background()
+	reader := newFakeExecutionStatusReader()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	laneType := "xflow.sas.webscan-sink"
+	directory := NewRedisRunnerDirectory(rdb,
+		WithRedisRunnerDirectoryClaimTTL(time.Minute),
+		WithRedisRunnerDirectoryExecutionStatus(reader),
+		WithRedisRunnerDirectoryLanes([]string{laneType}),
+		WithRedisRunnerDirectoryLaneWriteMode(LaneWriteDual),
+	)
+	dead := redisDirectoryTestAssignment(AssignmentID("exec-lanes/budget/activation-1"))
+	dead.Routing.NodeType = laneType
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, dead)
+
+	orphanID := AssignmentID("exec-lanes/budget/orphan-1")
+	laneKey := directory.keys.laneQueueKey(laneType)
+	if err := rdb.RPush(ctx, laneKey, string(orphanID)).Err(); err != nil {
+		t.Fatalf("seed orphan lane copy: %v", err)
+	}
+	if err := rdb.HSet(ctx, directory.keys.assignmentLane, string(orphanID), laneKey).Err(); err != nil {
+		t.Fatalf("seed orphan marker: %v", err)
+	}
+
+	result, err := directory.ReapDeadQueuedAssignments(ctx, 1)
+	if err != nil {
+		t.Fatalf("ReapDeadQueuedAssignments() error = %v", err)
+	}
+	if result.Released != 1 {
+		t.Fatalf("reap released %d, want the pass to spend its whole budget once", result.Released)
+	}
+	// The state lap ran first, so the dead record is the one that went; the
+	// orphan is still there, waiting for the next cadence.
+	if got := rdb.HGet(ctx, directory.keys.assignmentState, string(dead.AssignmentID)).Val(); got != "" {
+		t.Fatalf("assignment state of the dead record = %q, want it reaped", got)
+	}
+	assertLaneQueuePlacement(t, ctx, rdb, directory, laneType, orphanID, 1, 0, "lane")
+}
+
+// TestReconcileDrainsALaneThatIsNoLongerConfigured is the rollback end state:
+// no lanes configured, and markers still naming lane keys from a previous
+// window. The marker is what knows that key — no configuration does any more —
+// so the sweep must follow the marker rather than the whitelist.
+func TestReconcileDrainsALaneThatIsNoLongerConfigured(t *testing.T) {
+	ctx := context.Background()
+	reader := newFakeExecutionStatusReader()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	directory := NewRedisRunnerDirectory(rdb,
+		WithRedisRunnerDirectoryClaimTTL(time.Minute),
+		WithRedisRunnerDirectoryExecutionStatus(reader),
+	)
+	laneType := "xflow.sas.webscan-sink"
+	laneKey := directory.keys.laneQueueKey(laneType)
+
+	onLane := AssignmentID("exec-lanes/rollback/lane-1")
+	if err := rdb.RPush(ctx, laneKey, string(onLane)).Err(); err != nil {
+		t.Fatalf("seed lane copy: %v", err)
+	}
+	if err := rdb.RPush(ctx, directory.keys.queue, string(onLane)).Err(); err != nil {
+		t.Fatalf("seed legacy copy: %v", err)
+	}
+	if err := rdb.HSet(ctx, directory.keys.assignmentLane, string(onLane), laneKey).Err(); err != nil {
+		t.Fatalf("seed lane marker: %v", err)
+	}
+	// A record whose node type no lane ever owned gets a marker naming the
+	// legacy queue, which must be cleared exactly like any other placement.
+	onLegacy := AssignmentID("exec-lanes/rollback/legacy-1")
+	if err := rdb.RPush(ctx, directory.keys.queue, string(onLegacy)).Err(); err != nil {
+		t.Fatalf("seed legacy copy: %v", err)
+	}
+	if err := rdb.HSet(ctx, directory.keys.assignmentLane, string(onLegacy), directory.keys.queue).Err(); err != nil {
+		t.Fatalf("seed legacy marker: %v", err)
+	}
+
+	result, err := directory.ReapDeadQueuedAssignments(ctx, 16)
+	if err != nil {
+		t.Fatalf("ReapDeadQueuedAssignments() error = %v", err)
+	}
+	if result.Released != 2 {
+		t.Fatalf("reap released %d, want both orphans swept", result.Released)
+	}
+	assertLaneQueuePlacement(t, ctx, rdb, directory, laneType, onLane, 0, 0, "")
+	if got, err := rdb.LRange(ctx, directory.keys.queue, 0, -1).Result(); err != nil {
+		t.Fatal(err)
+	} else if len(got) != 0 {
+		t.Fatalf("legacy queue = %q, want both orphans swept", got)
+	}
+}

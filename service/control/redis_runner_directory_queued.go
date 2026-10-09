@@ -60,16 +60,17 @@ type DeadQueuedAssignmentReaper interface {
 	// several replicas, and safe to run against a live directory: it never
 	// touches an assignment that is claimable or currently leased.
 	//
-	// Inspected counts the assignment-state entries this pass read whose
-	// recorded state is 'queued'. That is the whole shape it drains, and it is
-	// deliberately narrower than the hash it scans: an entry in any other state
-	// is not a candidate of this shape, and counting it would make the ratio
-	// against the removed count a measure of how full the directory is rather
-	// than of how much of its candidate set the pass releases. Most inspected
-	// entries are expected NOT to be removed on a healthy fleet — the pass walks
-	// the head of a live queue and correctly leaves claimable work alone — so a
-	// high inspected/released ratio is only a defect signal when the queue is
-	// not converging.
+	// Inspected counts the candidates of the two shapes this pass drains that
+	// the pass read: assignment-state entries whose recorded state is 'queued',
+	// and lane marker fields whose assignment payload is already gone. Both are
+	// deliberately narrower than the structures they scan: an entry in any
+	// other state, or a marker with a payload behind it, is not a candidate,
+	// and counting it would make the ratio against the removed count a measure
+	// of how full the directory is rather than of how much of its candidate set
+	// the pass releases. Most inspected state entries are expected NOT to be
+	// removed on a healthy fleet — the pass walks the head of a live queue and
+	// correctly leaves claimable work alone — so a high inspected/released
+	// ratio is only a defect signal when the queue is not converging.
 	ReapDeadQueuedAssignments(ctx context.Context, limit int) (ReapResult, error)
 }
 
@@ -159,13 +160,56 @@ func (c *queuedReapCursor) store(cursor uint64) {
 // positional fragility. One page's payloads are read with a single HMGet, and
 // each candidate that survives the filter costs one status read plus one
 // bounded transition.
+//
+// # The second candidate source: orphaned lane markers
+//
+// This pass runs two laps under one removal budget, because the residue a lane
+// rollout leaves behind comes in two shapes and only one of them is a 'queued'
+// record. The first lap is the state-hash walk described above. The second
+// walks the lane marker hash (assignment:lane) for fields whose assignment
+// payload is already gone: the record they mark no longer exists, so the marker
+// and every queue copy of it are residue. That shape is what a completion by an
+// older control plane leaves (it knows neither lanes nor markers, so it clears
+// the legacy copy and the record, and leaves the lane copy and its marker), and
+// it is also the safety net for any marker a removal path ever fails to drop.
+//
+// The second lap needs no liveness probe — a missing payload is the proof, and
+// the guard transition re-checks it atomically — so a marker whose payload is
+// present is never touched, however stale its placement looks. It runs even
+// with no lanes configured, which is what lets a rollback drain the markers and
+// lane copies written during a previous lane window.
+//
+// The two laps share one cursor family but not a position: each hash has its
+// own resume point, and each lap spends what is left of the removal budget
+// after the one before it.
 func (d *RedisRunnerDirectory) ReapDeadQueuedAssignments(ctx context.Context, limit int) (ReapResult, error) {
 	if limit <= 0 || d.executions == nil {
 		// Without a status reader the directory cannot tell a live assignment
 		// from a dead one, so it reclaims nothing rather than guessing from key
-		// names or from age.
+		// names or from age. The marker lap is gated with it: this is one pass
+		// with one contract, and a deployment that cannot prove a queued
+		// assignment dead does not get half of the reaper.
 		return ReapResult{}, nil
 	}
+	result, err := d.reapDeadQueuedStateLap(ctx, limit)
+	if err != nil {
+		return result, err
+	}
+	if remaining := limit - result.Released; remaining > 0 {
+		markerResult, markerErr := d.reapOrphanedLaneMarkersLap(ctx, remaining)
+		result.Inspected += markerResult.Inspected
+		result.Released += markerResult.Released
+		if markerErr != nil {
+			return result, markerErr
+		}
+	}
+	return result, nil
+}
+
+// reapDeadQueuedStateLap is the state-hash lap of ReapDeadQueuedAssignments:
+// one bounded walk over assignment:state, removing the assignments recorded
+// 'queued' whose execution can no longer be leased.
+func (d *RedisRunnerDirectory) reapDeadQueuedStateLap(ctx context.Context, limit int) (ReapResult, error) {
 	batch := defaultDeadQueuedAssignmentReapBatch
 	if limit < batch {
 		batch = limit
@@ -216,6 +260,154 @@ func (d *RedisRunnerDirectory) ReapDeadQueuedAssignments(ctx context.Context, li
 			return result, nil
 		}
 	}
+}
+
+// reapOrphanedLaneMarkersLap is the second lap of ReapDeadQueuedAssignments:
+// one bounded walk over the lane marker hash, removing the marker fields whose
+// assignment payload is gone and the queue copies they name.
+//
+// It answers a different question from the state lap, and needs a different
+// source to answer it. An old control plane's completion path leaves no
+// assignment:state field behind — it deletes the record's own hash fields, so
+// the state hash cannot see the residue at all. The marker is the only index of
+// "this assignment was placed on a lane", and therefore the only structure that
+// can enumerate what the record's removal failed to collect.
+//
+// The lap is deliberately blind to every record whose payload is still present:
+// a marker with a live record behind it is correct whatever it says, including
+// the placement a relabeled lane configuration left behind, and reconciling it
+// would be a guess about a record that is still someone's work. Only absence is
+// proof, and the guard transition re-checks it atomically (see
+// redisReconcileLaneMarkerLua).
+//
+// One page's payload presence is read in a single HMGet, and only the fields
+// that fail it cost a transition — the same shape as the state lap, for the
+// same reason: on a live deployment most markers are backed by a live record,
+// and a per-candidate read would spend the pass's whole cost on the ones that
+// are not candidates at all.
+func (d *RedisRunnerDirectory) reapOrphanedLaneMarkersLap(ctx context.Context, limit int) (ReapResult, error) {
+	batch := defaultDeadQueuedAssignmentReapBatch
+	if limit < batch {
+		batch = limit
+	}
+	// Bounded exactly like the state lap: a marker hash that keeps returning
+	// live records must not keep this lap turning without ever reaching a
+	// removal, and the resume point must survive a page that failed part-way.
+	inspectCap := 4 * limit
+	maxPages := inspectCap/batch + 1
+
+	cursor := d.laneMarkerReap.load()
+	scanned := 0
+	var result ReapResult
+	for pages := 0; ; pages++ {
+		pairs, next, err := d.rdb.HScan(ctx, d.keys.assignmentLane, cursor, "", int64(batch)).Result()
+		if err != nil {
+			d.laneMarkerReap.store(cursor)
+			return result, fmt.Errorf("reap orphaned lane markers: scan lane markers: %w", err)
+		}
+		pageReclaimed, pageInspected, err := d.reapOrphanedLaneMarkerPage(ctx, pairs, limit-result.Released)
+		result.Released += pageReclaimed
+		result.Inspected += pageInspected
+		scanned += len(pairs) / 2
+		if err != nil {
+			d.laneMarkerReap.store(cursor)
+			return result, err
+		}
+		if result.Released >= limit {
+			// Hold the page head so the markers this call did not reach are
+			// re-inspected rather than skipped; each call still removes up to
+			// limit, so a page cannot pin the cursor forever.
+			d.laneMarkerReap.store(cursor)
+			return result, nil
+		}
+		cursor = next
+		if cursor == 0 || scanned >= inspectCap || pages+1 >= maxPages {
+			d.laneMarkerReap.store(cursor)
+			return result, nil
+		}
+	}
+}
+
+// reapOrphanedLaneMarkerPage reconciles the orphaned markers of one scan page.
+// It reads the page's payloads in one call and hands the ids that have none to
+// the guard transitions; inspected counts those ids, which is the shape this
+// lap drains and the same rule the state lap's counter follows. A marker whose
+// payload is present is not counted — it is not a candidate — which is what
+// keeps the pass's inspected/released ratio a measure of residue rather than of
+// directory size.
+func (d *RedisRunnerDirectory) reapOrphanedLaneMarkerPage(ctx context.Context, pairs []string, limit int) (reclaimed, inspected int, err error) {
+	if limit <= 0 {
+		return 0, 0, nil
+	}
+	ids := make([]string, 0, len(pairs)/2)
+	for i := 0; i+1 < len(pairs); i += 2 {
+		ids = append(ids, pairs[i])
+	}
+	if len(ids) == 0 {
+		return 0, 0, nil
+	}
+	raws, err := d.rdb.HMGet(ctx, d.keys.assignmentData, ids...).Result()
+	if err != nil {
+		return 0, 0, fmt.Errorf("reap orphaned lane markers: read assignment payloads: %w", err)
+	}
+	orphans := make([]string, 0, len(ids))
+	for i, assignmentID := range ids {
+		raw, _ := raws[i].(string)
+		if raw != "" {
+			continue
+		}
+		orphans = append(orphans, assignmentID)
+	}
+	// Sorted for the same reason the other reap laps sort: a bounded pass
+	// should pick the same entries every call rather than depend on hash
+	// iteration order, so a backlog drains deterministically instead of
+	// starving whichever entry keeps losing the race to the limit.
+	sort.Strings(orphans)
+	inspected = len(orphans)
+	if len(orphans) > limit {
+		orphans = orphans[:limit]
+	}
+	reclaimed, err = d.reconcileOrphanedLaneMarkers(ctx, orphans)
+	return reclaimed, inspected, err
+}
+
+// reconcileOrphanedLaneMarkers issues the guard transitions for one batch of
+// orphaned markers. Like the other reaper batches, the transitions travel
+// pipelined while each one keeps its own fence, and a command error is
+// attributed to its candidate rather than to the batch.
+func (d *RedisRunnerDirectory) reconcileOrphanedLaneMarkers(ctx context.Context, assignmentIDs []string) (int, error) {
+	if len(assignmentIDs) == 0 {
+		return 0, nil
+	}
+	pipe := d.rdb.Pipeline()
+	cmds := make([]*redis.Cmd, 0, len(assignmentIDs))
+	for _, assignmentID := range assignmentIDs {
+		cmds = append(cmds, pipe.Eval(ctx, redisReconcileLaneMarkerLua, []string{
+			d.keys.assignmentLane,
+			d.keys.assignmentData,
+			d.keys.queue,
+			d.keys.seen,
+		}, assignmentID))
+	}
+	// Every command has settled by the time Exec returns, each carrying its own
+	// error, so the results are read per command below rather than from the
+	// pipeline-level error.
+	_, _ = pipe.Exec(ctx)
+	reconciled := 0
+	for i, cmd := range cmds {
+		status, err := cmd.Text()
+		if err != nil {
+			return reconciled, fmt.Errorf("reconcile lane marker %q: %w", assignmentIDs[i], err)
+		}
+		switch status {
+		case "reconciled":
+			reconciled++
+		case "skipped":
+		default:
+			return reconciled, fmt.Errorf("reconcile lane marker %q: unexpected result %q", assignmentIDs[i], status)
+		}
+	}
+	return reconciled, nil
 }
 
 // reapDeadQueuedAssignmentPage removes the dead queued assignments of one scan
@@ -486,4 +678,56 @@ redis.call('HDEL', KEYS[9], assignmentID)
 redis.call('DEL', KEYS[10])
 redis.call('HDEL', KEYS[11], assignmentID)
 return 'reaped'
+`
+
+// redisReconcileLaneMarkerLua removes one orphaned lane marker and the queue
+// copies it names.
+//
+// KEYS: 1=lane marker hash 2=assignment:data 3=legacy queue 4=seen
+//
+// ARGV: 1=assignmentID
+//
+// The payload fence is the whole safety argument. assignment:data holds a
+// record's payload for exactly as long as the record exists: it is written by
+// the enqueue transition in the same atomic step that writes the state field
+// and pushes the queue entry, and deleted — in the same step as the marker and
+// every queue copy — by each of the four transitions that end a record (the
+// reap above, the clear transition, and the two terminal release paths). So a
+// missing payload is not a heuristic about age or liveness: it is the record's
+// absence, and it is a fact this script re-checks itself rather than trusting
+// the caller's read of it.
+//
+// That re-check is what closes the race with a concurrent re-enqueue. Enqueue
+// runs first: the payload is back, and this script skips. This script runs
+// first: it clears a record that was already gone, and the enqueue that follows
+// rebuilds the payload, the marker, and the queue entries in its own atomic
+// step — including the LREM that clears any copy this script's own LREM missed.
+// Either order leaves a coherent record.
+//
+// The queue copies are removed by name rather than from a fixed key list: in
+// dual and lane-only mode the marker's value is the lane key the record was
+// written to, which is a configuration-derived key that no static key list can
+// name — and during a rollback the marker is exactly what still knows a lane
+// that is no longer configured. A marker that never named a lane (the legacy
+// fallback the enqueue transition records for a node type no lane owns) is
+// equal to the legacy key, so the LREM is issued once. The value is always a
+// directory key: the only writers of this hash are the enqueue transition and
+// the requeue helper, and both store a key out of the candidate list they were
+// given. That invariant is still checked before the LREM, because one field
+// written by something else must not turn into a WRONGTYPE abort that blocks
+// the whole reconciliation pass: a value that is neither the legacy key nor
+// lane-prefixed is cleaned out (the HDEL and SREM below) without an LREM at it.
+const redisReconcileLaneMarkerLua = `
+local assignmentID = ARGV[1]
+if redis.call('HEXISTS', KEYS[2], assignmentID) == 1 then return 'skipped' end
+local marked = redis.call('HGET', KEYS[1], assignmentID)
+if not marked then return 'skipped' end
+local lanePrefix = KEYS[3] .. ':lane:'
+if marked ~= '' and marked ~= KEYS[3] and string.sub(marked, 1, #lanePrefix) == lanePrefix then
+  redis.call('LREM', marked, 0, assignmentID)
+end
+redis.call('LREM', KEYS[3], 0, assignmentID)
+redis.call('SREM', KEYS[4], assignmentID)
+redis.call('HDEL', KEYS[1], assignmentID)
+return 'reconciled'
 `
