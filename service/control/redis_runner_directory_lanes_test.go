@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -518,6 +519,173 @@ func TestRequeueEndToEndThroughARealClaim(t *testing.T) {
 		t.Fatalf("SettleClaimHandoff(requeue) error = %v", err)
 	}
 	assertLaneQueuePlacement(t, ctx, rdb, directory, laneType, assignment.AssignmentID, 1, 1, "lane")
+}
+
+// registerLaneRunner registers a runner that advertises exactly the node types
+// given, so claim walks can be driven against lane targets.
+func registerLaneRunner(
+	t *testing.T,
+	ctx context.Context,
+	directory *RedisRunnerDirectory,
+	runnerID string,
+	capacity int,
+	nodeTypes ...string,
+) RunnerSession {
+	t.Helper()
+	capabilities := make([]protocol.Capability, 0, len(nodeTypes))
+	for _, nodeType := range nodeTypes {
+		capabilities = append(capabilities, protocol.Capability{NodeType: nodeType})
+	}
+	session, err := directory.Register(ctx, RegisterRunnerRequest{
+		RunnerID:     runnerID,
+		Capacity:     capacity,
+		Capabilities: capabilities,
+		Policy:       RunnerPolicy{AllowedNodeTypes: append([]string(nil), nodeTypes...)},
+		Now:          time.Unix(10, 0),
+	})
+	if err != nil {
+		t.Fatalf("Register(%q) error = %v", runnerID, err)
+	}
+	return session
+}
+
+// TestClaimTargetsWalkLanesBeforeTheLegacyQueue pins the walk order and the
+// capability filter: every lane the runner can serve, in configuration order,
+// then the legacy queue exactly once — and the legacy queue even when no lane
+// applies, so an older writer's entries stay reachable.
+func TestClaimTargetsWalkLanesBeforeTheLegacyQueue(t *testing.T) {
+	sinkLane := "xflow.sas.webscan-sink"
+	ulpLane := "xflow.sas.ulp-result"
+	directory := NewRedisRunnerDirectory(nil, WithRedisRunnerDirectoryLanes([]string{sinkLane, ulpLane}))
+
+	all := directory.claimTargets([]protocol.Capability{{NodeType: sinkLane}, {NodeType: ulpLane}, {NodeType: "xflow.function"}})
+	want := []string{directory.keys.laneQueueKey(sinkLane), directory.keys.laneQueueKey(ulpLane), directory.keys.queue}
+	if !slices.Equal(all, want) {
+		t.Fatalf("claimTargets() = %q, want %q", all, want)
+	}
+	partial := directory.claimTargets([]protocol.Capability{{NodeType: ulpLane}})
+	wantPartial := []string{directory.keys.laneQueueKey(ulpLane), directory.keys.queue}
+	if !slices.Equal(partial, wantPartial) {
+		t.Fatalf("claimTargets() without the sink capability = %q, want %q", partial, wantPartial)
+	}
+	unserved := directory.claimTargets([]protocol.Capability{{NodeType: "xflow.function"}})
+	if !slices.Equal(unserved, []string{directory.keys.queue}) {
+		t.Fatalf("claimTargets() with no lane capability = %q, want the legacy queue alone", unserved)
+	}
+	bare := NewRedisRunnerDirectory(nil)
+	if got := bare.claimTargets([]protocol.Capability{{NodeType: sinkLane}}); !slices.Equal(got, []string{bare.keys.queue}) {
+		t.Fatalf("claimTargets() without lanes = %q, want the legacy queue alone", got)
+	}
+}
+
+// TestClaimReachesALaneEntryBehindADeepLegacyBacklog is the residency fix in
+// one assertion: the legacy queue holds several polls' worth of unclaimable
+// residue, so a lane entry could not be reached within a poll by a walk that
+// had to start there.
+func TestClaimReachesALaneEntryBehindADeepLegacyBacklog(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	laneType := "xflow.sas.webscan-sink"
+	directory := NewRedisRunnerDirectory(rdb,
+		WithRedisRunnerDirectoryLanes([]string{laneType}),
+		WithRedisRunnerDirectoryLaneWriteMode(LaneWriteLaneOnly),
+	)
+	for i := range 4 * redisClaimScanBudget {
+		if err := rdb.RPush(ctx, directory.keys.queue, fmt.Sprintf("dead-%d", i)).Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	session := registerLaneRunner(t, ctx, directory, "runner-lane-backlog", 1, laneType)
+	assignment := redisDirectoryTestAssignment(AssignmentID("exec-lanes/backlog/activation-1"))
+	assignment.Routing.NodeType = laneType
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
+
+	claim := claimRedisDirectoryAssignment(t, ctx, directory, session, 1)
+	if claim.Assignment.AssignmentID != assignment.AssignmentID {
+		t.Fatalf("claimed %q, want the lane entry %q", claim.Assignment.AssignmentID, assignment.AssignmentID)
+	}
+}
+
+// TestClaimPrefersTheLaneOverAnEarlierLegacyEntry fixes the walk order from the
+// other side: with a claimable entry on both queues, the lane comes first even
+// though the legacy entry was enqueued first.
+func TestClaimPrefersTheLaneOverAnEarlierLegacyEntry(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	laneType := "xflow.sas.webscan-sink"
+	directory := NewRedisRunnerDirectory(rdb,
+		WithRedisRunnerDirectoryLanes([]string{laneType}),
+		WithRedisRunnerDirectoryLaneWriteMode(LaneWriteLaneOnly),
+	)
+	legacyAssignment := redisDirectoryTestAssignment(AssignmentID("exec-lanes/order/activation-legacy"))
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, legacyAssignment)
+	laneAssignment := redisDirectoryTestAssignment(AssignmentID("exec-lanes/order/activation-lane"))
+	laneAssignment.Routing.NodeType = laneType
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, laneAssignment)
+
+	session := registerLaneRunner(t, ctx, directory, "runner-lane-order", 2, laneType, "xflow.function")
+	first := claimRedisDirectoryAssignment(t, ctx, directory, session, 2)
+	if first.Assignment.AssignmentID != laneAssignment.AssignmentID {
+		t.Fatalf("first claim = %q, want the lane entry %q", first.Assignment.AssignmentID, laneAssignment.AssignmentID)
+	}
+	second := claimRedisDirectoryAssignment(t, ctx, directory, session, 2)
+	if second.Assignment.AssignmentID != legacyAssignment.AssignmentID {
+		t.Fatalf("second claim = %q, want the legacy entry %q", second.Assignment.AssignmentID, legacyAssignment.AssignmentID)
+	}
+}
+
+// TestClaimSkipsAnEmptyLaneAndStillWalksLegacy guards the empty target: a lane
+// that happens to hold nothing must cost its probe and nothing else, and must
+// not end the walk before the legacy queue is examined.
+func TestClaimSkipsAnEmptyLaneAndStillWalksLegacy(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	laneType := "xflow.sas.webscan-sink"
+	directory := NewRedisRunnerDirectory(rdb,
+		WithRedisRunnerDirectoryLanes([]string{laneType}),
+		WithRedisRunnerDirectoryLaneWriteMode(LaneWriteLaneOnly),
+	)
+	legacyAssignment := redisDirectoryTestAssignment(AssignmentID("exec-lanes/empty-lane/activation-1"))
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, legacyAssignment)
+
+	session := registerLaneRunner(t, ctx, directory, "runner-empty-lane", 1, laneType, "xflow.function")
+	claim := claimRedisDirectoryAssignment(t, ctx, directory, session, 1)
+	if claim.Assignment.AssignmentID != legacyAssignment.AssignmentID {
+		t.Fatalf("claimed %q, want the legacy entry %q", claim.Assignment.AssignmentID, legacyAssignment.AssignmentID)
+	}
+}
+
+// TestClaimWalkPendingIsPerTarget checks that a lane with more unclaimable
+// entries than one scan budget leaves the walk pending, the same way a deep
+// legacy queue does — the poll loop's short resume cadence has to apply to a
+// lane walk too, or a busy lane would be swept at the idle cadence.
+func TestClaimWalkPendingIsPerTarget(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	laneType := "xflow.sas.webscan-sink"
+	directory := NewRedisRunnerDirectory(rdb,
+		WithRedisRunnerDirectoryLanes([]string{laneType}),
+		WithRedisRunnerDirectoryLaneWriteMode(LaneWriteLaneOnly),
+	)
+	// Entries with no payload are filtered out of every page, so the walk spends
+	// its whole budget stepping over them.
+	for i := range 2 * redisClaimScanBudget {
+		if err := rdb.RPush(ctx, directory.keys.laneQueueKey(laneType), fmt.Sprintf("payload-less-%d", i)).Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	session := registerLaneRunner(t, ctx, directory, "runner-lane-pending", 1, laneType)
+	if _, ok, err := directory.ClaimForRunner(ctx, redisDirectoryClaimRequest(session, 1)); err != nil {
+		t.Fatalf("ClaimForRunner() error = %v", err)
+	} else if ok {
+		t.Fatal("ClaimForRunner() claimed a payload-less lane entry")
+	}
+	if !directory.ClaimWalkPending(session.RunnerID) {
+		t.Fatal("ClaimWalkPending() = false after a lane walk stopped at its scan budget, want true")
+	}
+	if got := directory.loadClaimCursorForTarget(session.RunnerID, directory.keys.laneQueueKey(laneType)); got != redisClaimScanBudget {
+		t.Fatalf("lane cursor = %d, want %d", got, redisClaimScanBudget)
+	}
 }
 
 // TestRequeueFollowsTheMarkerOntoEveryConfiguredLane proves the marker, not the

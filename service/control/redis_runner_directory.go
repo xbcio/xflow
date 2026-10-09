@@ -579,9 +579,9 @@ func (d *RedisRunnerDirectory) ClaimForRunner(ctx context.Context, req ClaimRequ
 		return Claim{}, false, err
 	}
 	if !found {
-		// The runner is gone, so its resume position and pending-walk marker
+		// The runner is gone, so its resume positions and pending-walk marker
 		// are stale state that would otherwise linger in the process-local maps.
-		d.storeClaimCursor(req.RunnerID, 0)
+		d.clearClaimCursors(req.RunnerID)
 		d.storeClaimWalk(req.RunnerID, false)
 		return Claim{}, false, ErrRunnerNotFound
 	}
@@ -641,7 +641,9 @@ func (d *RedisRunnerDirectory) ClaimForRunner(ctx context.Context, req ClaimRequ
 		d.storeClaimWalk(req.RunnerID, false)
 	}
 
-	status, err := d.claim(ctx, req.RunnerID, req.SessionID, "", "", "")
+	// The empty transition asks about the runner, not about an entry: no
+	// candidate is named, so the queue key is never touched.
+	status, err := d.claim(ctx, d.keys.queue, req.RunnerID, req.SessionID, "", "", "")
 	if err != nil {
 		return Claim{}, false, err
 	}
@@ -684,21 +686,32 @@ const redisClaimScanBudget = 16 * redisClaimQueuePage
 // sweep, like positions skipped by a concurrent removal.
 const redisClaimAttemptsPerPoll = redisClaimQueuePage
 
-// claimFromQueuePage walks bounded pages of the assignment queue starting at
-// this runner's persisted cursor and attempts to claim the first candidate it is
-// eligible for, up to the scan budget's worth of entries per poll. It reports
-// resolved=true when it reached a definite answer (a claim, or
-// "none"/"draining"); resolved=false means the walk found nothing this runner
-// could claim and the caller should still run the empty transition so draining
-// and session fencing keep their meaning.
+// claimFromQueuePage walks the queue targets this runner can serve — the
+// configured lanes it has a capability for, in configuration order, then the
+// legacy queue — and attempts to claim the first eligible candidate, up to a
+// scan budget's worth of entries per target per poll. It reports resolved=true
+// when it reached a definite answer (a claim, or "none"/"draining" — both of
+// which describe the runner rather than one target, so the walk stops there);
+// resolved=false means no target yielded anything this runner could claim and
+// the caller should still run the empty transition so draining and session
+// fencing keep their meaning.
 //
-// The cursor is deliberately anchored rather than free-running. LREM (in the
-// claim and requeue transitions) deletes by value, so a removal ahead of a
-// positional cursor shifts the tail left and would skip an element. Resetting
-// the cursor to the head on a claim, on a short (end-of-queue) page, and once it
-// has walked past the length sampled at entry guarantees a skipped position is
-// revisited on the next sweep instead of being stranded. If a skipped element is
-// still 'queued' when the sweep wraps, it is re-examined then.
+// The targets are probed in one round trip, and an empty target costs exactly
+// that probe: no page is read from it and no cursor is kept for it. Lanes come
+// before the legacy queue so an entry on a small, quiet lane is seen within one
+// poll cycle instead of behind whatever backlog the legacy queue holds — which
+// is the whole point of the split. The legacy queue is always walked, so
+// entries written by an older control plane, or on another machine before lanes
+// were configured, stay reachable.
+//
+// The cursor is deliberately anchored rather than free-running, and it is kept
+// per target. LREM (in the claim and requeue transitions) deletes by value, so
+// a removal ahead of a positional cursor shifts the tail left and would skip an
+// element. Resetting the cursor to the head on a short (end-of-queue) page, and
+// once it has walked past the length sampled at entry, guarantees a skipped
+// position is revisited on the next sweep instead of being stranded. If a
+// skipped element is still 'queued' when the sweep wraps, it is re-examined
+// then.
 func (d *RedisRunnerDirectory) claimFromQueuePage(
 	ctx context.Context,
 	req ClaimRequest,
@@ -706,34 +719,133 @@ func (d *RedisRunnerDirectory) claimFromQueuePage(
 	capabilities []protocol.Capability,
 	labels map[string]string,
 ) (Claim, bool, bool, error) {
-	total, err := d.rdb.LLen(ctx, d.keys.queue).Result()
+	targets := d.claimTargets(capabilities)
+	lengths, err := d.claimQueueLengths(ctx, targets)
 	if err != nil {
-		return Claim{}, false, false, fmt.Errorf("read redis assignment queue length: %w", err)
+		return Claim{}, false, false, err
 	}
-	cursor := d.loadClaimCursor(req.RunnerID)
-	if total == 0 || cursor < 0 || cursor >= int(total) {
+
+	pending := false
+	for _, target := range targets {
+		walk, err := d.walkClaimTarget(ctx, req, runner, capabilities, labels, target, lengths[target])
+		if err != nil {
+			return Claim{}, false, false, err
+		}
+		if walk.resolved {
+			// A definite answer applies to the poll as a whole, so the remaining
+			// targets are not worth another round trip. walkClaimTarget has
+			// already cleared the pending-walk marker on these paths.
+			return walk.claim, walk.claim.ClaimID != "", true, nil
+		}
+		pending = pending || walk.pending
+	}
+	// The scan budget ran out with queue left unexamined on at least one target.
+	// Report the walk as pending so the poll loop resumes it at the short cadence
+	// instead of the idle one.
+	d.storeClaimWalk(req.RunnerID, pending)
+	return Claim{}, false, false, nil
+}
+
+// claimTargets resolves the queue keys one poll walks, in order: every
+// configured lane this runner has a capability for, then the legacy queue. A
+// lane whose node type the runner cannot serve is skipped because every entry
+// on it would fail MatchCapabilities in the walk anyway; the legacy queue is
+// never skipped, so entries an older control plane wrote, or another machine
+// wrote before lanes were configured, stay reachable.
+func (d *RedisRunnerDirectory) claimTargets(capabilities []protocol.Capability) []string {
+	targets := make([]string, 0, len(d.lanes)+1)
+	for _, lane := range d.lanes {
+		if !canRunRouting(capabilities, engine.TaskRouting{NodeType: lane}) {
+			continue
+		}
+		targets = append(targets, d.keys.laneQueueKey(lane))
+	}
+	return append(targets, d.keys.queue)
+}
+
+// claimQueueLengths reads every target's depth in one round trip, so probing N
+// targets costs one round trip rather than N. With a single target it is a
+// plain LLEN: that is the pre-lane shape, and it is also the common one.
+func (d *RedisRunnerDirectory) claimQueueLengths(ctx context.Context, targets []string) (map[string]int64, error) {
+	if len(targets) == 1 {
+		total, err := d.rdb.LLen(ctx, targets[0]).Result()
+		if err != nil {
+			return nil, fmt.Errorf("read redis assignment queue length: %w", err)
+		}
+		return map[string]int64{targets[0]: total}, nil
+	}
+	pipe := d.rdb.Pipeline()
+	commands := make([]*redis.IntCmd, 0, len(targets))
+	for _, target := range targets {
+		commands = append(commands, pipe.LLen(ctx, target))
+	}
+	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+		return nil, fmt.Errorf("read redis assignment queue lengths: %w", err)
+	}
+	lengths := make(map[string]int64, len(targets))
+	for i, target := range targets {
+		lengths[target] = commands[i].Val()
+	}
+	return lengths, nil
+}
+
+// claimTargetWalk is what walking one queue target yielded for one poll.
+type claimTargetWalk struct {
+	// claim is the claimed assignment; zero when nothing was claimed.
+	claim Claim
+	// resolved is true when the walk reached a definite answer for the poll: a
+	// claim, or a "none"/"draining" verdict.
+	resolved bool
+	// pending is true when the target has queue left unexamined, so the poll
+	// loop should resume at the short cadence. It is only meaningful on an
+	// unresolved walk.
+	pending bool
+}
+
+// walkClaimTarget walks bounded pages of one queue target starting at the
+// runner's persisted cursor for that target, and attempts to claim the first
+// candidate it is eligible for. total is the depth probed for the target a
+// moment earlier; it only bounds the wrap-around test, so a concurrent change
+// is harmless.
+func (d *RedisRunnerDirectory) walkClaimTarget(
+	ctx context.Context,
+	req ClaimRequest,
+	runner redisClaimRunner,
+	capabilities []protocol.Capability,
+	labels map[string]string,
+	target string,
+	total int64,
+) (claimTargetWalk, error) {
+	if total <= 0 {
+		// An empty target costs the probe and nothing else: no page is read, and
+		// there is no cursor to reset because it is already at the head.
+		d.storeClaimCursorForTarget(req.RunnerID, target, 0)
+		return claimTargetWalk{}, nil
+	}
+	cursor := d.loadClaimCursorForTarget(req.RunnerID, target)
+	if cursor < 0 || cursor >= int(total) {
 		cursor = 0
 	}
 
 	attempts := 0
-	for scanned := 0; scanned < redisClaimScanBudget; {
+	scanned := 0
+	for scanned < redisClaimScanBudget {
 		page := redisClaimQueuePage
 		if remaining := redisClaimScanBudget - scanned; remaining < page {
 			page = remaining
 		}
-		assignmentIDs, err := d.rdb.LRange(ctx, d.keys.queue, int64(cursor), int64(cursor+page-1)).Result()
+		assignmentIDs, err := d.rdb.LRange(ctx, target, int64(cursor), int64(cursor+page-1)).Result()
 		if err != nil {
-			return Claim{}, false, false, fmt.Errorf("read redis assignment queue: %w", err)
+			return claimTargetWalk{}, fmt.Errorf("read redis assignment queue: %w", err)
 		}
 		if len(assignmentIDs) == 0 {
-			d.storeClaimCursor(req.RunnerID, 0)
-			d.storeClaimWalk(req.RunnerID, false)
-			return Claim{}, false, false, nil
+			d.storeClaimCursorForTarget(req.RunnerID, target, 0)
+			return claimTargetWalk{}, nil
 		}
 
 		raws, err := d.rdb.HMGet(ctx, d.keys.assignmentData, assignmentIDs...).Result()
 		if err != nil {
-			return Claim{}, false, false, fmt.Errorf("read redis assignments: %w", err)
+			return claimTargetWalk{}, fmt.Errorf("read redis assignments: %w", err)
 		}
 
 		// Resolve the whole page before claiming anything. The eligibility filters used
@@ -756,7 +868,7 @@ func (d *RedisRunnerDirectory) claimFromQueuePage(
 			}
 			assignment, err := unmarshalRedisAssignment(raw)
 			if err != nil {
-				return Claim{}, false, false, err
+				return claimTargetWalk{}, err
 			}
 			if !MatchCapabilities(capabilities, assignment.Routing) || !runner.policy.Allows(assignment.Routing.NodeType) {
 				continue
@@ -786,7 +898,7 @@ func (d *RedisRunnerDirectory) claimFromQueuePage(
 			// (queue, seen set, claim maps) and a wrong removal here would lose work.
 			leaseable, err := d.leaseableExecutions(ctx, assignments)
 			if err != nil {
-				return Claim{}, false, false, err
+				return claimTargetWalk{}, err
 			}
 
 		claimAttempts:
@@ -795,9 +907,9 @@ func (d *RedisRunnerDirectory) claimFromQueuePage(
 					continue
 				}
 				claimID := ClaimID(uuid.NewString())
-				status, err := d.claim(ctx, req.RunnerID, req.SessionID, c.assignmentID, c.raw, claimID)
+				status, err := d.claim(ctx, target, req.RunnerID, req.SessionID, c.assignmentID, c.raw, claimID)
 				if err != nil {
-					return Claim{}, false, false, err
+					return claimTargetWalk{}, err
 				}
 				switch status {
 				case "claimed":
@@ -811,7 +923,7 @@ func (d *RedisRunnerDirectory) claimFromQueuePage(
 					// re-walked that whole prefix before it could claim anything, and an
 					// unadvanced cursor cannot step over a prefix the way a skipped page can.
 					d.storeClaimWalk(req.RunnerID, false)
-					return Claim{ClaimID: claimID, Assignment: c.assignment}, true, true, nil
+					return claimTargetWalk{claim: Claim{ClaimID: claimID, Assignment: c.assignment}, resolved: true}, nil
 				case "retry":
 					// 'retry' is a verdict on the entry, not a transient hold: the
 					// state changed (a peer claimed it), the payload was replaced,
@@ -827,13 +939,13 @@ func (d *RedisRunnerDirectory) claimFromQueuePage(
 					}
 					continue
 				case "none", "draining":
-					d.storeClaimCursor(req.RunnerID, 0)
+					d.storeClaimCursorForTarget(req.RunnerID, target, 0)
 					d.storeClaimWalk(req.RunnerID, false)
-					return Claim{}, false, true, nil
+					return claimTargetWalk{resolved: true}, nil
 				case "not_found", "stale":
-					return Claim{}, false, false, runnerSessionStatusError(status)
+					return claimTargetWalk{}, runnerSessionStatusError(status)
 				default:
-					return Claim{}, false, false, fmt.Errorf("claim redis assignment: unexpected result %q", status)
+					return claimTargetWalk{}, fmt.Errorf("claim redis assignment: unexpected result %q", status)
 				}
 			}
 		}
@@ -844,21 +956,17 @@ func (d *RedisRunnerDirectory) claimFromQueuePage(
 		// the next page — in this poll, while the scan budget lasts.
 		scanned += len(assignmentIDs)
 		cursor = nextClaimCursor(cursor, len(assignmentIDs), int(total))
-		d.storeClaimCursor(req.RunnerID, cursor)
+		d.storeClaimCursorForTarget(req.RunnerID, target, cursor)
 		if stopped || cursor == 0 {
 			// A stopped walk has queue left to examine, so it resumes at the
 			// short cadence; a wrap is a completed sweep and resumes at the idle
 			// one.
-			d.storeClaimWalk(req.RunnerID, stopped && cursor != 0)
-			return Claim{}, false, false, nil
+			return claimTargetWalk{pending: stopped && cursor != 0}, nil
 		}
 	}
 
-	// The scan budget ran out with queue left unexamined. Report the walk as
-	// pending so the poll loop resumes it at the short cadence instead of the
-	// idle one.
-	d.storeClaimWalk(req.RunnerID, true)
-	return Claim{}, false, false, nil
+	// The scan budget ran out with queue left unexamined.
+	return claimTargetWalk{pending: true}, nil
 }
 
 // nextClaimCursor is where the following poll resumes. A short (end-of-queue) page
@@ -873,23 +981,53 @@ func nextClaimCursor(cursor, pageLen, total int) int {
 	return next
 }
 
-func (d *RedisRunnerDirectory) loadClaimCursor(runnerID string) int {
-	d.claimCursorMu.Lock()
-	defer d.claimCursorMu.Unlock()
-	return d.claimCursors[runnerID]
+// claimCursorField names one runner's resume position on one queue target. The
+// separator cannot occur in a runner ID or a key, so a field never collides
+// with another runner's.
+func claimCursorField(runnerID, target string) string {
+	return runnerID + "\x00" + target
 }
 
-func (d *RedisRunnerDirectory) storeClaimCursor(runnerID string, cursor int) {
+func (d *RedisRunnerDirectory) loadClaimCursorForTarget(runnerID, target string) int {
 	d.claimCursorMu.Lock()
 	defer d.claimCursorMu.Unlock()
+	return d.claimCursors[claimCursorField(runnerID, target)]
+}
+
+func (d *RedisRunnerDirectory) storeClaimCursorForTarget(runnerID, target string, cursor int) {
+	d.claimCursorMu.Lock()
+	defer d.claimCursorMu.Unlock()
+	field := claimCursorField(runnerID, target)
 	if cursor <= 0 {
-		delete(d.claimCursors, runnerID)
+		delete(d.claimCursors, field)
 		return
 	}
 	if d.claimCursors == nil {
 		d.claimCursors = make(map[string]int)
 	}
-	d.claimCursors[runnerID] = cursor
+	d.claimCursors[field] = cursor
+}
+
+// loadClaimCursor is the legacy queue's resume position — the only one that
+// existed before queue lanes. Production claim walks read their resume
+// position per target through loadClaimCursorForTarget; this single-target
+// wrapper remains for the pre-lanes liveness tests that drive it directly.
+func (d *RedisRunnerDirectory) loadClaimCursor(runnerID string) int {
+	return d.loadClaimCursorForTarget(runnerID, d.keys.queue)
+}
+
+// clearClaimCursors drops every resume position held for a runner, on every
+// target. A runner that deregistered or was replaced has no position worth
+// resuming from on any queue, and leaving them behind would leak one map entry
+// per target per dead runner.
+func (d *RedisRunnerDirectory) clearClaimCursors(runnerID string) {
+	d.claimCursorMu.Lock()
+	defer d.claimCursorMu.Unlock()
+	for field := range d.claimCursors {
+		if len(field) > len(runnerID) && field[:len(runnerID)] == runnerID && field[len(runnerID)] == 0 {
+			delete(d.claimCursors, field)
+		}
+	}
 }
 
 // storeClaimWalk records whether the last claim scan for the runner stopped at
@@ -1488,9 +1626,13 @@ func (d *RedisRunnerDirectory) releaseStrandedLease(ctx context.Context, assignm
 }
 
 // claim materializes one queued assignment into a claim owned by this runner.
-func (d *RedisRunnerDirectory) claim(ctx context.Context, runnerID, sessionID, assignmentID, expectedData string, claimID ClaimID) (string, error) {
+// claim reserves one queued assignment for the runner, removing it from the
+// target queue it was found on. The target is where the entry was read from,
+// not necessarily the legacy queue: an assignment a lane holds must leave that
+// lane, and the transition's LREM is what makes the claim exclusive.
+func (d *RedisRunnerDirectory) claim(ctx context.Context, target, runnerID, sessionID, assignmentID, expectedData string, claimID ClaimID) (string, error) {
 	status, err := d.evalStatus(ctx, redisClaimAssignmentLua, []string{
-		d.keys.queue,
+		target,
 		d.keys.assignmentData,
 		d.keys.assignmentState,
 		d.keys.assignmentClaim,
@@ -3454,7 +3596,7 @@ func (d *RedisRunnerDirectory) RemoveRunner(ctx context.Context, runnerID string
 	}
 	switch status {
 	case "removed":
-		d.storeClaimCursor(runnerID, 0)
+		d.clearClaimCursors(runnerID)
 		return nil
 	case "outstanding":
 		return ErrRunnerHasOutstandingWork
