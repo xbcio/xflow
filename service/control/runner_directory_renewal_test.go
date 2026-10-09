@@ -435,6 +435,59 @@ func TestMemoryRunnerDirectoryRenewalRefusesStaleSession(t *testing.T) {
 	})
 }
 
+// testReplacementSessionAdoptsFinalizedLease is the other half of the
+// stale-session fence: refusing the replaced session is only correct because
+// the replacement owns the leases. Re-registration transfers them — Redis
+// rebinds every leased assignment's session in the register transition, memory
+// preserves finalizedLease with no per-lease session at all — so the resumed
+// process must resolve them under the new session, or every resume would
+// strand the leases the drained session held. Both the renewal key and the
+// task-naming report key must resolve.
+func testReplacementSessionAdoptsFinalizedLease(t *testing.T, ctx context.Context, dir sharedLeaseDirectory, original RunnerSession, replace func() RunnerSession) {
+	batch := mapBatchTask("L1", 0)
+	finalizeRenewalLease(t, ctx, dir, original, batch, batchLeasePayload(0))
+	replacement := replace()
+	if replacement.SessionID == original.SessionID {
+		t.Fatalf("re-register returned the same session %q", original.SessionID)
+	}
+
+	if lease, found, err := dir.LookupLease(ctx, replacement.RunnerID, replacement.SessionID, renewalLookupKey("L1", "tok-L1")); err != nil || !found {
+		t.Fatalf("renewal under the replacement session found=%v err=%v, want the adopted lease", found, err)
+	} else if lease.SubgraphPayload == nil || lease.Task.NodeName != batch.NodeName {
+		t.Fatalf("renewal under the replacement session resolved %q (payload=%v), want batch %q",
+			lease.Task.NodeName, lease.SubgraphPayload != nil, batch.NodeName)
+	}
+
+	reportKey := renewalLookupKey("L1", "tok-L1")
+	reportKey.AssignmentID = BuildAssignmentID(&batch)
+	reportKey.NodeName = batch.NodeName
+	reportKey.NodeIdx = batch.NodeIdx
+	if lease, found, err := dir.LookupLease(ctx, replacement.RunnerID, replacement.SessionID, reportKey); err != nil || !found {
+		t.Fatalf("report lookup under the replacement session found=%v err=%v, want the adopted lease", found, err)
+	} else if lease.Task.NodeName != batch.NodeName {
+		t.Fatalf("report lookup under the replacement session resolved %q, want batch %q", lease.Task.NodeName, batch.NodeName)
+	}
+}
+
+func TestRedisRunnerDirectoryReplacementSessionAdoptsFinalizedLease(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	dir := NewRedisRunnerDirectory(rdb)
+	original := registerRedisDirectoryRunner(t, ctx, dir, "runner-1", 4)
+	testReplacementSessionAdoptsFinalizedLease(t, ctx, dir, original, func() RunnerSession {
+		return registerRedisDirectoryRunner(t, ctx, dir, "runner-1", 4)
+	})
+}
+
+func TestMemoryRunnerDirectoryReplacementSessionAdoptsFinalizedLease(t *testing.T) {
+	ctx := context.Background()
+	dir := NewMemoryRunnerDirectory()
+	original := registerMemoryBatchRunner(t, ctx, dir, "runner-1")
+	testReplacementSessionAdoptsFinalizedLease(t, ctx, dir, original, func() RunnerSession {
+		return registerMemoryBatchRunner(t, ctx, dir, "runner-1")
+	})
+}
+
 // testRenewalRefusesWrongToken: the lease id is right but the token is not.
 // The fallback must filter on the token first, exactly like the resolver.
 func testRenewalRefusesWrongToken(t *testing.T, ctx context.Context, dir sharedLeaseDirectory, session RunnerSession, dropIndex func()) {
@@ -468,6 +521,44 @@ func TestMemoryRunnerDirectoryRenewalRefusesWrongToken(t *testing.T) {
 	testRenewalRefusesWrongToken(t, ctx, dir, session, func() {
 		dropMemoryLeaseIndexes(dir, session, "L1", "tok-L1")
 	})
+}
+
+// testRenewalRefusesWrongTokenDespiteIndex: the lease id names a live lease of
+// this runner, the token does not. The by-token index misses on the wrong token
+// and the by-id index then resolves the assignment — resolution must not stop
+// there. The lease it hands back carries a token the key does not name, which
+// is exactly what memory's matchesReleasedLease refuses; the lookup is a read
+// of the runner's own identity, not a weaker one than the report path, so both
+// backends must refuse. The index is deliberately left intact: this is the
+// by-id path, not the walker fallback that testRenewalRefusesWrongToken covers.
+func testRenewalRefusesWrongTokenDespiteIndex(t *testing.T, ctx context.Context, dir sharedLeaseDirectory, session RunnerSession) {
+	batch := mapBatchTask("L1", 0)
+	finalizeRenewalLease(t, ctx, dir, session, batch, batchLeasePayload(0))
+
+	if lease, found, err := dir.LookupLease(ctx, session.RunnerID, session.SessionID, renewalLookupKey("L1", "tok-wrong")); err != nil || found {
+		t.Fatalf("LookupLease() lease=%+v found=%v err=%v, want not found for a wrong token resolved by the by-id index", lease, found, err)
+	}
+
+	reportKey := renewalLookupKey("L1", "tok-wrong")
+	reportKey.AssignmentID = BuildAssignmentID(&batch)
+	reportKey.NodeName = batch.NodeName
+	reportKey.NodeIdx = batch.NodeIdx
+	if lease, found, err := dir.LookupLease(ctx, session.RunnerID, session.SessionID, reportKey); err != nil || found {
+		t.Fatalf("LookupLease() lease=%+v found=%v err=%v, want not found for a wrong token even with the assignment named", lease, found, err)
+	}
+}
+
+func TestRedisRunnerDirectoryRenewalRefusesWrongTokenDespiteIndex(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	dir := NewRedisRunnerDirectory(rdb)
+	testRenewalRefusesWrongTokenDespiteIndex(t, ctx, dir, registerRedisDirectoryRunner(t, ctx, dir, "runner-1", 4))
+}
+
+func TestMemoryRunnerDirectoryRenewalRefusesWrongTokenDespiteIndex(t *testing.T) {
+	ctx := context.Background()
+	dir := NewMemoryRunnerDirectory()
+	testRenewalRefusesWrongTokenDespiteIndex(t, ctx, dir, registerMemoryBatchRunner(t, ctx, dir, "runner-1"))
 }
 
 // testRenewalFallsBackToParentAfterBatchesRelease: the batch preference must
@@ -536,6 +627,65 @@ func TestRedisRunnerDirectoryRenewalScansPastShortIndex(t *testing.T) {
 	if got.SubgraphPayload == nil || got.Task.NodeName != batch.NodeName {
 		t.Fatalf("renewal resolved to %q (payload=%v), want the batch %q via the second pass",
 			got.Task.NodeName, got.SubgraphPayload != nil, batch.NodeName)
+	}
+	// The pass that had to scan restores what it confirmed: the batch is back in
+	// the per-runner index, so the next walk resolves it from the bounded first
+	// pass instead of scanning the directory again.
+	indexed, err := rdb.SIsMember(ctx, dir.keys.runnerLeasedAssignmentsKey(session.RunnerID), string(BuildAssignmentID(&batch))).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !indexed {
+		t.Fatal("the fallback pass confirmed the batch live but did not restore its index entry")
+	}
+}
+
+// TestRedisRunnerDirectoryRenewalFallbackSkipsForeignLeases: the fallback pass
+// holds every leased assignment in the directory, not just this runner's, so
+// each candidate is filtered on owner before it can do anything. A foreign
+// lease under the same identity — the common shape once a map's batches are
+// spread across runners — must neither resolve the renewal nor be recorded in
+// this runner's index by the pass's backfill.
+func TestRedisRunnerDirectoryRenewalFallbackSkipsForeignLeases(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	dir := NewRedisRunnerDirectory(rdb)
+	session := registerRedisDirectoryRunner(t, ctx, dir, "runner-1", 4)
+	other := registerRedisDirectoryRunner(t, ctx, dir, "runner-2", 4)
+
+	finalizeRenewalLease(t, ctx, dir, session, mapParentTask(), nil)
+	batch := mapBatchTask("L1", 0)
+	finalizeRenewalLease(t, ctx, dir, session, batch, batchLeasePayload(0))
+	foreign := mapBatchTask("L1", 1)
+	finalizeRenewalLease(t, ctx, dir, other, foreign, batchLeasePayload(1))
+
+	// Force the fallback (drop the identity index) and shorten the per-runner
+	// index (drop the batch) so the second pass scans the foreign lease too,
+	// with the count left correct.
+	if err := rdb.HDel(ctx, dir.keys.leaseByToken, "tok-L1").Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rdb.HDel(ctx, dir.keys.leaseByID, "L1").Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rdb.SRem(ctx, dir.keys.runnerLeasedAssignmentsKey(session.RunnerID), string(BuildAssignmentID(&batch))).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, found, err := dir.LookupLease(ctx, session.RunnerID, session.SessionID, renewalLookupKey("L1", "tok-L1"))
+	if err != nil || !found {
+		t.Fatalf("renewal with a foreign lease in the fallback scan found=%v err=%v", found, err)
+	}
+	if got.SubgraphPayload == nil || got.Task.NodeName != batch.NodeName {
+		t.Fatalf("renewal resolved to %q (payload=%v), want this runner's batch %q",
+			got.Task.NodeName, got.SubgraphPayload != nil, batch.NodeName)
+	}
+	indexed, err := rdb.SIsMember(ctx, dir.keys.runnerLeasedAssignmentsKey(session.RunnerID), string(BuildAssignmentID(&foreign))).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if indexed {
+		t.Fatal("the fallback pass recorded another runner's lease in this runner's index")
 	}
 }
 

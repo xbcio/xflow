@@ -1525,15 +1525,32 @@ const (
 	walkLeasedTake
 )
 
+// leasedAssignmentIdentity carries the identity fields of one walk candidate,
+// read in the walk's own pipeline so visit does not pay a serial read for them.
+type leasedAssignmentIdentity struct {
+	leaseID    engine.LeaseID
+	leaseToken engine.LeaseToken
+}
+
 // walkLeasedAssignments walks the assignments runnerID currently holds as
 // leased, in the same two-pass shape as every other lease scan: the per-runner
 // index first, and the full assignment-state hash only when the index names
 // fewer live leases than the runner's own count says it should.
 //
+// Each pass reads its candidates in one pipeline — state, owner and the lease
+// identity, four fields per candidate in a single round trip. The fallback pass
+// holds every leased assignment in the directory, so a walk used to cost a
+// serial read per candidate across the whole fleet on a path the renewal loop
+// reaches at lease-renewal rates; the pipeline makes it two round trips per
+// pass no matter how many candidates that is. A candidate the full scan
+// confirms live and owned is recorded in the per-runner index, so the pass that
+// had to scan does not have to keep scanning (replayLease backfills on the poll
+// path for the same reason).
+//
 // visit decides each live candidate's verdict; it is never called for a
 // candidate whose state or owner does not match the runner. The walk returns
 // the first taken candidate, else the first kept one.
-func (d *RedisRunnerDirectory) walkLeasedAssignments(ctx context.Context, runnerID string, visit func(assignmentID string) (*engine.TaskLease, leasedAssignmentVerdict, error)) (*engine.TaskLease, bool, error) {
+func (d *RedisRunnerDirectory) walkLeasedAssignments(ctx context.Context, runnerID string, visit func(assignmentID string, identity leasedAssignmentIdentity) (*engine.TaskLease, leasedAssignmentVerdict, error)) (*engine.TaskLease, bool, error) {
 	var kept *engine.TaskLease
 	visited := make(map[string]struct{})
 	for pass := 0; pass < 2; pass++ {
@@ -1541,25 +1558,46 @@ func (d *RedisRunnerDirectory) walkLeasedAssignments(ctx context.Context, runner
 		if err != nil {
 			return nil, false, err
 		}
-		live := 0
+		pending := make([]string, 0, len(candidates))
 		for _, candidate := range candidates {
 			if _, done := visited[candidate]; done {
 				continue
 			}
 			visited[candidate] = struct{}{}
-			state, err := d.rdb.HGet(ctx, d.keys.assignmentState, candidate).Result()
-			if err != nil && !errors.Is(err, redis.Nil) {
-				return nil, false, fmt.Errorf("walk leased assignment state %q: %w", candidate, err)
-			}
-			owner, err := d.rdb.HGet(ctx, d.keys.assignmentRunner, candidate).Result()
-			if err != nil && !errors.Is(err, redis.Nil) {
-				return nil, false, fmt.Errorf("walk leased assignment owner %q: %w", candidate, err)
-			}
-			if state != redisAssignmentLeased || owner != runnerID {
+			pending = append(pending, candidate)
+		}
+		pipe := d.rdb.Pipeline()
+		states := make([]*redis.StringCmd, len(pending))
+		owners := make([]*redis.StringCmd, len(pending))
+		leaseIDs := make([]*redis.StringCmd, len(pending))
+		leaseTokens := make([]*redis.StringCmd, len(pending))
+		for i, candidate := range pending {
+			states[i] = pipe.HGet(ctx, d.keys.assignmentState, candidate)
+			owners[i] = pipe.HGet(ctx, d.keys.assignmentRunner, candidate)
+			leaseIDs[i] = pipe.HGet(ctx, d.keys.assignmentLeaseID, candidate)
+			leaseTokens[i] = pipe.HGet(ctx, d.keys.assignmentLeaseToken, candidate)
+		}
+		if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+			return nil, false, fmt.Errorf("walk leased assignment candidates: %w", err)
+		}
+		live := 0
+		for i, candidate := range pending {
+			if states[i].Val() != redisAssignmentLeased || owners[i].Val() != runnerID {
 				continue
 			}
 			live++
-			lease, verdict, err := visit(candidate)
+			if pass > 0 {
+				// This candidate came from the full scan, so the index did not
+				// know about it. Recording a lease that was just confirmed live
+				// and owned is the safe direction for the index to be wrong in: a
+				// later walk re-checks it, and an extra entry costs one bounded
+				// read where a missing one would cost the lease its resolution.
+				d.indexLeasedAssignment(ctx, runnerID, candidate)
+			}
+			lease, verdict, err := visit(candidate, leasedAssignmentIdentity{
+				leaseID:    engine.LeaseID(leaseIDs[i].Val()),
+				leaseToken: engine.LeaseToken(leaseTokens[i].Val()),
+			})
 			if err != nil {
 				return nil, false, err
 			}
@@ -1887,6 +1925,18 @@ func (d *RedisRunnerDirectory) LookupLease(ctx context.Context, runnerID, sessio
 			return nil, false, err
 		}
 	}
+	// The indexes resolve on one identity field — by-token on the token, by-id
+	// on the lease id — and the raw-assignmentID fallback resolves on nothing,
+	// so an index hit can hand back a lease the key's identity does not name;
+	// the reachable shape is a matching lease id under the wrong token. The
+	// contract above calls that a mismatch, not a match, and memory enforces it
+	// on every path (matchesReleasedLease), so the resolved lease answers for
+	// the key here too. A key that names no identity has nothing to answer to
+	// and keeps the old behavior.
+	if ok && (key.LeaseToken != "" || key.LeaseID != "") && !leaseIdentityMatches(lease.LeaseToken, lease.LeaseID, key) {
+		lease = nil
+		ok = false
+	}
 	if key.NodeName == "" {
 		if ok {
 			return lease, true, nil
@@ -1901,15 +1951,11 @@ func (d *RedisRunnerDirectory) LookupLease(ctx context.Context, runnerID, sessio
 	if key.LeaseToken == "" {
 		return nil, false, nil
 	}
-	return d.walkLeasedAssignments(ctx, runnerID, func(candidate string) (*engine.TaskLease, leasedAssignmentVerdict, error) {
+	return d.walkLeasedAssignments(ctx, runnerID, func(candidate string, identity leasedAssignmentIdentity) (*engine.TaskLease, leasedAssignmentVerdict, error) {
 		if candidate == assignmentID {
 			return nil, walkLeasedSkip, nil
 		}
-		token, err := d.rdb.HGet(ctx, d.keys.assignmentLeaseToken, candidate).Result()
-		if err != nil && !errors.Is(err, redis.Nil) {
-			return nil, walkLeasedSkip, fmt.Errorf("lookup sibling lease token %q: %w", candidate, err)
-		}
-		if token != string(key.LeaseToken) {
+		if identity.leaseToken != key.LeaseToken {
 			return nil, walkLeasedSkip, nil
 		}
 		sibling, found, err := d.lookupLeaseAt(ctx, runnerID, sessionID, candidate)
@@ -1945,22 +1991,14 @@ func (d *RedisRunnerDirectory) lookupRenewalLease(ctx context.Context, runnerID,
 	if key.LeaseToken == "" && key.LeaseID == "" {
 		return nil, false, nil
 	}
-	return d.walkLeasedAssignments(ctx, runnerID, func(candidate string) (*engine.TaskLease, leasedAssignmentVerdict, error) {
+	return d.walkLeasedAssignments(ctx, runnerID, func(candidate string, identity leasedAssignmentIdentity) (*engine.TaskLease, leasedAssignmentVerdict, error) {
 		if candidate == resolvedID {
-			// The index already named this one and lookupLeaseAt refused it
-			// (wrong runner session, released, or expired metadata); it cannot
-			// resolve now either.
+			// The index already named this one and LookupLease refused it —
+			// wrong runner session, released, expired metadata, or a key
+			// identity it does not carry; it cannot resolve now either.
 			return nil, walkLeasedSkip, nil
 		}
-		token, err := d.rdb.HGet(ctx, d.keys.assignmentLeaseToken, candidate).Result()
-		if err != nil && !errors.Is(err, redis.Nil) {
-			return nil, walkLeasedSkip, fmt.Errorf("lookup renewal lease token %q: %w", candidate, err)
-		}
-		leaseID, err := d.rdb.HGet(ctx, d.keys.assignmentLeaseID, candidate).Result()
-		if err != nil && !errors.Is(err, redis.Nil) {
-			return nil, walkLeasedSkip, fmt.Errorf("lookup renewal lease id %q: %w", candidate, err)
-		}
-		if !leaseIdentityMatches(engine.LeaseToken(token), engine.LeaseID(leaseID), key) {
+		if !leaseIdentityMatches(identity.leaseToken, identity.leaseID, key) {
 			return nil, walkLeasedSkip, nil
 		}
 		lease, found, err := d.lookupLeaseAt(ctx, runnerID, sessionID, candidate)
@@ -2051,16 +2089,8 @@ func (d *RedisRunnerDirectory) RefreshLeaseMeta(ctx context.Context, runnerID, s
 		return nil
 	}
 	ttl := strconv.FormatInt(d.assignmentLeaseMetaTTLMillisFor(live), 10)
-	_, _, err := d.walkLeasedAssignments(ctx, runnerID, func(candidate string) (*engine.TaskLease, leasedAssignmentVerdict, error) {
-		token, err := d.rdb.HGet(ctx, d.keys.assignmentLeaseToken, candidate).Result()
-		if err != nil && !errors.Is(err, redis.Nil) {
-			return nil, walkLeasedSkip, fmt.Errorf("refresh lease metadata token %q: %w", candidate, err)
-		}
-		leaseID, err := d.rdb.HGet(ctx, d.keys.assignmentLeaseID, candidate).Result()
-		if err != nil && !errors.Is(err, redis.Nil) {
-			return nil, walkLeasedSkip, fmt.Errorf("refresh lease metadata id %q: %w", candidate, err)
-		}
-		if !leaseIdentityMatches(engine.LeaseToken(token), engine.LeaseID(leaseID), key) {
+	_, _, err := d.walkLeasedAssignments(ctx, runnerID, func(candidate string, identity leasedAssignmentIdentity) (*engine.TaskLease, leasedAssignmentVerdict, error) {
+		if !leaseIdentityMatches(identity.leaseToken, identity.leaseID, key) {
 			return nil, walkLeasedSkip, nil
 		}
 		// The Lua re-checks state, runner and session, so a candidate that a

@@ -17,6 +17,14 @@ Node Group 组级 `on_error`、gRPC `AckActivation`、G1 clean-SHA 重签 `c39a2
 旧号保留在「已关闭」条目的括注里；本轮验证同时登记了两处新缺口（见 P3），剩余条目
 均为功能缺口或需要真实环境/人工裁定。
 
+2026-10-09 尾项收口（分支 `fix/runtime-gaps-tail`，自 `35cda96`；共 2 个 commit，
+`aff9023`、`01eae49`）关闭了第三轮登记的 P3 两项（原编号 6、7）：两个目录后端的
+租约解析围栏不对称、续期刷新按身份走查的成本。条目重排编号 1–8；其中原编号 6(ii)
+的登记前提经实验更正（见「已关闭」）。独立复核（verifier-p47，opus）：PASS、0 阻断
+（逐行语义比对、修复前红/修复后绿对照、4 处 mutation 独立复现、3 项管线边界探针）。
+未验证：真实 Redis（8 个 RealRedis 用例环境门控 SKIP）与成本实测（仅结构性证据）——
+与全文件口径一致。
+
 每条都写明出处：缺口本身的现状说明留在所属设计文档里，这里只记「打算改的东西」。
 关闭一条时，把它移到文末「已关闭」并写上 commit。
 
@@ -52,35 +60,60 @@ Node Group 组级 `on_error`、gRPC `AckActivation`、G1 clean-SHA 重签 `c39a2
    （`WorkflowDefinitionVersion`）。见
    [ADR-D4-runtime-editor-metadata-split.md](./ADR-D4-runtime-editor-metadata-split.md)。
 
-6. **两个目录后端的租约解析围栏不一致**（2026-10-08 第三轮收口验证新登记）。
-   (i) Redis 在 by-token 未命中、by-id 命中时不校验存储 token，memory 校验：持有
-   正确 leaseID 但 token 不匹配的请求（同一 runner+session）在 Redis 上解析到该
-   租约、memory 上被拒；此形态在 P3-8 修复前后一致（修复两个版本都以 scratch 测试
-   确认 `found=true`，pre-existing）。修法方向是解析命中后补存储 token 对比，但需
-   先确认「按 leaseID 解析」的既有调用方都携带 token 且不依赖该放行。(ii) memory
-   的租约记录不含会话，重新注册后旧会话 finalize 的租约对新会话仍可解析，Redis 按
-   `assignmentSession` 拒绝——目标语义未裁定，可达性未分析。两条均未深入分析、
-   未实现。
-
-7. **续期刷新的按身份走查有成本**（2026-10-08 第三轮收口随 P3-8 修复引入）。每次
-   成功续期从 1 次 Lua 变为对 runner 全部活跃分配的一次走查（每个候选约 4 次未
-   pipeline 的往返 + 每次身份命中 1 次 Lua；per-runner 索引短于 `runnerLeaseCount`
-   时还要全量 `HGetAll`）。walker 不像 `replayLease` 那样在确认 live 后回填索引，
-   短索引会持续触发全表扫直到下一次 poll 顺势修复。成本影响面未量化（本机无真实
-   Redis）。建议：pipeline HGET，或在第二趟确认 live 时回填索引；验证判定风险中。
-
 ### 需要真实环境或人工批准，不能靠改代码关闭
 
-8. **G2：多副本 control-plane HA soak 与真实多 namespace 隔离验收。** 要求见
+6. **G2：多副本 control-plane HA soak 与真实多 namespace 隔离验收。** 要求见
     [RELEASE-GATES.md](./RELEASE-GATES.md) 的 G2 定义；`make test-soak` 不是该证据
     （见 README 的说明）。
 
-9. **RELEASE-GATES §6 的 D1–D8** 全部为「OPEN — 未批准」，需要对应负责人裁定。
+7. **RELEASE-GATES §6 的 D1–D8** 全部为「OPEN — 未批准」，需要对应负责人裁定。
 
-10. **KEK 轮换（`xflow supply reseal`）与 server/runner 凭据热加载都没有在真实环境
-    演练过**，runbook 的 owner 与期限属于 D6。
+8. **KEK 轮换（`xflow supply reseal`）与 server/runner 凭据热加载都没有在真实环境
+   演练过**，runbook 的 owner 与期限属于 D6。
 
 ## 已关闭
+
+- **两个目录后端的租约解析围栏不一致**（原 P3-6，2026-10-08 第三轮收口验证新登记）
+  —— `aff9023`（2026-10-09）：(i) 已修：Redis `LookupLease` 在解析命中
+  （`resolveLeaseAssignmentID` → `lookupLeaseAt`）后补做身份复检
+  （`leaseIdentityMatches`，token 优先），与 memory 的 `matchesReleasedLease` 对齐——
+  接口注释本就写明 identity mismatch ⇒ `ok=false`，本次让 Redis 兑现它。契约层面的
+  前提已核实：合法调用方（core 汇报、report-observer 自检、续期/刷新）全部携带
+  token+leaseID，且共享身份下 token 与 leaseID 同值，by-id 回退不受影响。新增围栏
+  用例 `Test{Redis,Memory}RunnerDirectoryRenewalRefusesWrongTokenDespiteIndex`（索引
+  完好、by-id 命中的形态）：修复前 Redis 红（返回 `found=true`）、memory 绿，修复后
+  双侧绿；mutation 验证（关掉复检）仅该用例转红（复核在全包范围复现一致）。汇报
+  路径本有 `leaseImmutableMismatch` 兜底，本条真正打开的是无下游校验的续期/刷新
+  路径；修复后 observer 的归因与 memory 对齐（复核确认）。(ii) 登记前提经实验更正、按
+  「无行为分歧」关闭：Redis 的 register 转换自 `e8a27dfa`（2026-09-17）起就把该 runner
+  全部 leased 分配的 `assignmentSession` 重绑到替换会话，因此「旧会话 finalize 的租约
+  对新会话可解析」在两侧都成立（Redis 靠重绑、memory 无逐租约会话但保留
+  `finalizedLease` 并由 state 级围栏放行当前会话）；「旧会话被拒」两侧亦然（Redis 逐租
+  约会话、memory state 级围栏），既有 `testRenewalRefusesStaleSession` 双侧已钉。新增
+  `Test{Redis,Memory}RunnerDirectoryReplacementSessionAdoptsFinalizedLease`
+  钉住采纳语义（续期键与汇报键两种形态，两侧）。memory 记录不含会话、Redis 逐租约会话
+  的代码形状差异保留，行为等价由上述用例保证。未验证：真实 Redis（miniredis + memory，
+  同全文件口径）。
+
+- **续期刷新的按身份走查有成本**（原 P3-7，2026-10-08 第三轮收口随 P3-8 修复引入）
+  —— `01eae49`（2026-10-09）：walker 每次 pass 改为一条 pipeline 读每候选 4 字段
+  （`state`/`owner`/`assignmentLeaseID`/`assignmentLeaseToken`），3 个 visitor（汇报
+  兄弟扫描、续期回退、`RefreshLeaseMeta`）的身份过滤改吃 pipeline 结果（新类型
+  `leasedAssignmentIdentity`），逐候选串行往返从约 4 次降到 0；第二趟全表扫描确认
+  live+owned 的候选回填 per-runner 索引（镜像 `replayLease` 先例），短索引不再持续
+  触发全表扫直到下一次 poll 顺势修复。verdict 语义（Take/Keep/Skip 顺序、`live`
+  计数、`live >= count` 短路、visited 去重）不变，由续期族/刷新族全量测试钉住；
+  2 处 mutation 验证（去掉回填 → `TestRedisRunnerDirectoryRenewalScansPastShortIndex`
+  红；`leasedAssignmentIdentity` 的身份字段接线换错 → 13 个用例转红，全包口径；
+  复核另以「回填前移到 owner 检查之前」验证外来租约用例能捕获）。新增/扩展测试：
+  第二趟回填断言、他 runner 租约在第二趟被跳过且不误回填
+  （`TestRedisRunnerDirectoryRenewalFallbackSkipsForeignLeases`）。成本影响面仍未
+  量化（本机无真实 Redis，如实记录）；本条登记的「每候选约 4 次未 pipeline 往返」
+  与「短索引持续全表扫」两个形态均已消除。复核登记的非阻断项：walker 的聚合错误
+  文案不再带候选 ID（排障粒度降低）；`pipe.Exec` 首错语义在「Nil 先到 + 后续
+  WRONGTYPE」的 key 类型损坏部署下会静默跳过（异常形态，不处理）；回填先于
+  visitor、与 SADD 之间被 release 会留一条有界读可清除的陈旧索引条目（与
+  `replayLease` 同取舍）。
 
 - **`disabled` 节点没有运行时消费者**（2026-10-08 第二轮收口期间新登记）—— `1aa019e`、
   `55e8c46`、`35892ec`、`f568a82`（2026-10-08）：编译期 `assignDisabledNodes` 把
