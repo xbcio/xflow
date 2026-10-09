@@ -1174,3 +1174,80 @@ func TestReconcileDrainsALaneThatIsNoLongerConfigured(t *testing.T) {
 		t.Fatalf("legacy queue = %q, want both orphans swept", got)
 	}
 }
+
+// TestAssignmentQueueDepthsCountsEveryLaneAndLegacy drives the depth reader
+// against real LIST state: the dual-written lane entry counts once on its lane
+// and once on legacy (queue lengths, not distinct assignments), an unowned node
+// type counts on legacy only, and a configured lane that was never written
+// reports a present zero rather than being missing.
+func TestAssignmentQueueDepthsCountsEveryLaneAndLegacy(t *testing.T) {
+	laneType := "xflow.sas.webscan-sink"
+	idleLaneType := "xflow.sas.ulp-result"
+	ctx := context.Background()
+	mr, rdb := newRedisRunnerDirectoryTestClient(t)
+	defer mr.Close()
+	directory := NewRedisRunnerDirectory(rdb,
+		WithRedisRunnerDirectoryLanes([]string{laneType, idleLaneType}),
+		WithRedisRunnerDirectoryLaneWriteMode(LaneWriteDual),
+	)
+
+	onLane := redisDirectoryTestAssignment("exec-lanes/depth/on-lane")
+	onLane.Routing.NodeType = laneType
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, onLane)
+	for _, id := range []AssignmentID{"exec-lanes/depth/legacy-a", "exec-lanes/depth/legacy-b"} {
+		mustEnqueueRedisDirectoryAssignment(t, ctx, directory, redisDirectoryTestAssignment(id))
+	}
+
+	depths, err := directory.AssignmentQueueDepths(ctx)
+	if err != nil {
+		t.Fatalf("AssignmentQueueDepths() error = %v", err)
+	}
+	want := map[string]int64{
+		QueueLaneLegacy: 3,
+		laneType:        1,
+		idleLaneType:    0,
+	}
+	if len(depths) != len(want) {
+		t.Fatalf("depths = %v, want %v", depths, want)
+	}
+	for lane, depth := range want {
+		if depths[lane] != depth {
+			t.Fatalf("depths[%q] = %d, want %d (all: %v)", lane, depths[lane], depth, depths)
+		}
+	}
+}
+
+// TestAssignmentQueueDepthsWithoutLanesReportsLegacyOnly pins the degenerate
+// configuration against the same shape the pre-lane directory had: one queue,
+// reported under QueueLaneLegacy.
+func TestAssignmentQueueDepthsWithoutLanesReportsLegacyOnly(t *testing.T) {
+	ctx := context.Background()
+	mr, rdb := newRedisRunnerDirectoryTestClient(t)
+	defer mr.Close()
+	directory := NewRedisRunnerDirectory(rdb)
+
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, redisDirectoryTestAssignment("exec-lanes/depth/no-lanes"))
+
+	depths, err := directory.AssignmentQueueDepths(ctx)
+	if err != nil {
+		t.Fatalf("AssignmentQueueDepths() error = %v", err)
+	}
+	if len(depths) != 1 || depths[QueueLaneLegacy] != 1 {
+		t.Fatalf("depths = %v, want only legacy=1", depths)
+	}
+}
+
+// TestAssignmentQueueDepthsSurfacesReadFailure pins that a failing read is an
+// error and never a zeroed depth: a caller must be able to tell "the queue
+// drained" from "the read failed", which is exactly the distinction a zero
+// return would erase.
+func TestAssignmentQueueDepthsSurfacesReadFailure(t *testing.T) {
+	ctx := context.Background()
+	mr, rdb := newRedisRunnerDirectoryTestClient(t)
+	directory := NewRedisRunnerDirectory(rdb, WithRedisRunnerDirectoryLanes([]string{"xflow.sas.webscan-sink"}))
+	mr.Close()
+
+	if depths, err := directory.AssignmentQueueDepths(ctx); err == nil {
+		t.Fatalf("AssignmentQueueDepths() = %v with no error, want the read failure surfaced", depths)
+	}
+}

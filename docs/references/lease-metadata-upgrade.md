@@ -393,3 +393,39 @@ reaper 用两个独立来源找候选，因为任一趟单跑都会漏掉一类�
   `runner:lease-count` 是否长期不回落。
 - **不使用前缀 `SCAN`**：与 §6 同样的原因，Redis Cluster 下按节点应答会漏键。
 
+## 8. 队列分道（queue lanes）新增的键
+
+本节与 U-7 无关，是同一个 runner-directory 键空间下**另一项特性**的键。控制面
+可以把每个路由节点类型（`Routing.NodeType`）的 assignment 放进它**自己的**
+队列，让只服务某一类节点的 runner 不再排在它无法认领的工作后面。
+**默认（lanes 未配置）不创建也不使用下面任何键**，行为与分道特性存在之前完全
+一致。
+
+| 键 | Redis 类型 | 生命周期 |
+|---|---|---|
+| `xflow:runner-directory:{control}:queue:lane:<node-type>` | **List**；`<node-type>` 是配置中列出的 `Routing.NodeType`，逐条成键（如 `...:queue:lane:xflow.sas.webscan-sink`） | 节点类型未配置时键不存在。入队与回队路径写入；认领（LREM）、终端清理与死队列清扫删除。没有 TTL——与 legacy 队列 `...:queue` 相同。 |
+| `xflow:runner-directory:{control}:assignment:lane` | 一个 shared **Hash**；field 为 assignment ID，值为该 assignment 当前落位队列的**全名** | 入队/回队时写入；终端路径（ClearAssignment、ReleaseLeased 的终端分支、ReleaseExpiredLease）与死队列清扫删除。没有 TTL。field 缺失按 legacy 处理（旧数据迁移口径）。 |
+
+写入哪些键由**写模式**决定：`legacy_only`（只写 `...:queue`，等同分道之前）、
+`dual`（同时写到道键与 `...:queue`，两份副本）、`lane_only`（只写道键）。
+读侧始终只认「已配置的 lanes 键 ∪ `...:queue`」；一份工作无论有几份副本，都
+最多被认领一次。
+
+运维要点：
+
+- **深度观测**：`xflow_assignment_queue_depth{lane="<node-type>|legacy"}`，由
+  lease sweeper 每个周期 leader-gated 上报。读失败时**不归零也不上报**——缺
+  series 表示一个采集周期内的读取异常，不要读成「队列已排空」。
+- **滚动升级与回退顺序**：新写入先保持在 `dual`（旧版二进制仍能从 `...:queue`
+  认领每一份工作）；确认舰队升级完成后才切 `lane_only`。**版本回退**前必须先把
+  写模式退回 `legacy_only`、再把 lanes 白名单置空，并确认 `...:queue:lane:*` 与
+  `assignment:lane` 的残留 field 已经排空——旧版二进制既不认识道键，也不会消费
+  它们，回退后仍写在道键上的工作对旧版不可见。
+- **残留口径**：`dual` 期间每个 assignment 天然有两份队列副本；被认领的一份由
+  claim 步骤移除，落选副本由终端路径或后台清扫按 `assignment:lane` 标记回收。
+  两个深度长期失衡（道键深度只增不减）说明清扫落后于写入，应检查 sweeper。
+  死队列清扫的 inspected 计数现在同时包含 state 与 lane 标记两趟候选，以它做
+  比值的仪表盘读数会相应变化。
+- 所有新键与 §1 同一逻辑前缀 `xflow:runner-directory:{control}`，即与既有键共享
+  `{control}` hash tag，Redis Cluster 下仍落在同一 slot。
+

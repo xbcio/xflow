@@ -27,3 +27,28 @@ type AssignmentQueueDepthReporter interface {
 	// "configured and idle" rather than a missing series.
 	AssignmentQueueDepths(ctx context.Context) (map[string]int64, error)
 }
+
+var _ AssignmentQueueDepthReporter = (*RedisRunnerDirectory)(nil)
+
+// AssignmentQueueDepths reads the depth of every assignment queue in one round
+// trip: the configured lanes and the legacy queue. It reuses the claim walk's
+// batch reader, so the keys reported are exactly the keys a claim walks — a
+// lane a writer offers an assignment to cannot go unreported here.
+//
+// During a dual-write rollout one assignment is counted once on its lane and
+// once on legacy. The depths are queue lengths, not distinct assignment counts,
+// which is what the write mode makes them; read the two together as the split
+// of the backlog rather than summing them.
+func (d *RedisRunnerDirectory) AssignmentQueueDepths(ctx context.Context) (map[string]int64, error) {
+	keys := d.laneQueueKeys()
+	lengths, err := d.claimQueueLengths(ctx, keys)
+	if err != nil {
+		return nil, err
+	}
+	depths := make(map[string]int64, len(keys))
+	depths[QueueLaneLegacy] = lengths[d.keys.queue]
+	for _, lane := range d.lanes {
+		depths[lane] = lengths[d.keys.laneQueueKey(lane)]
+	}
+	return depths, nil
+}

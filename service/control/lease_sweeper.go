@@ -78,6 +78,7 @@ type LeaseSweeper struct {
 	timingObserver SweepTimingObserver
 	passObserver   SweepPassObserver
 	passCandidates SweepPassCandidateObserver
+	depthObserver  SweepQueueDepthObserver
 	elector        backend.LeaderElector
 	clock          func() time.Time
 	sleepFunc      func(context.Context, time.Duration) error
@@ -187,6 +188,26 @@ type SweepPassCandidateObserver interface {
 	// pass a gate skipped — a zero there would be indistinguishable from a pass
 	// that inspected nothing.
 	OnSweepPassCandidates(ctx context.Context, pass, outcome string, inspected int)
+}
+
+// SweepQueueDepthObserver is an optional extension implemented by observability
+// adapters that need how much work is waiting in the assignment queues, not
+// only what the maintenance passes did with it. LeaseSweeper discovers it from
+// LeaseSweeperConfig.Observer the same way it discovers SweepTimingObserver, so
+// every existing observer contract is unchanged.
+//
+// It exists because queue depth is a standing condition rather than a pass
+// outcome: the runner-directory LIST has no depth series at all (the broker's
+// xflow_queue_depth samples asynq's queues), so a backlog the claim walk is not
+// draining — the shape behind an assignment residency measured in minutes —
+// is invisible to every existing signal until the reapers eventually act on it.
+type SweepQueueDepthObserver interface {
+	// OnAssignmentQueueDepth reports one queue's depth. lane is the node type
+	// the lane serves, or QueueLaneLegacy for the shared legacy queue; the
+	// empty lane name never reaches this call. A queue that is configured but
+	// empty is reported as a zero, so an idle lane and a lane that was never
+	// read are distinguishable.
+	OnAssignmentQueueDepth(ctx context.Context, lane string, depth int64)
 }
 
 // LeaseSweeperConfig configures a sweeper.
@@ -312,6 +333,10 @@ func NewLeaseSweeper(state LeaseLister, eng execution.Engine, cfg LeaseSweeperCo
 	if observer, ok := cfg.Observer.(SweepPassCandidateObserver); ok {
 		passCandidates = observer
 	}
+	var depthObserver SweepQueueDepthObserver
+	if observer, ok := cfg.Observer.(SweepQueueDepthObserver); ok {
+		depthObserver = observer
+	}
 	return &LeaseSweeper{
 		state:            state,
 		engine:           eng,
@@ -323,6 +348,7 @@ func NewLeaseSweeper(state LeaseLister, eng execution.Engine, cfg LeaseSweeperCo
 		timingObserver:   timingObserver,
 		passObserver:     passObserver,
 		passCandidates:   passCandidates,
+		depthObserver:    depthObserver,
 		elector:          cfg.Elector,
 		clock:            func() time.Time { return time.Now().UTC() },
 		sleepFunc:        sleepWithContext,
@@ -351,6 +377,7 @@ func (s *LeaseSweeper) Run(ctx context.Context) {
 	s.ReapStrandedLeasesOnce(ctx)
 	s.ReapDeadQueuedAssignmentsOnce(ctx)
 	s.ReapOrphanedHandoffsOnce(ctx)
+	s.ReportQueueDepthsOnce(ctx)
 	for {
 		if err := s.sleepFunc(ctx, s.period); err != nil {
 			return
@@ -360,6 +387,46 @@ func (s *LeaseSweeper) Run(ctx context.Context) {
 		s.ReapStrandedLeasesOnce(ctx)
 		s.ReapDeadQueuedAssignmentsOnce(ctx)
 		s.ReapOrphanedHandoffsOnce(ctx)
+		s.ReportQueueDepthsOnce(ctx)
+	}
+}
+
+// ReportQueueDepthsOnce reads every assignment queue's depth from the
+// directory and hands each to the observer, at the sweep cadence.
+//
+// It is leader-gated like the maintenance passes, for a different reason: the
+// queues are cluster-wide, so a replica reporting its own read of the same LIST
+// would publish a second copy of the same series and the two would fight over
+// the gauge value. The gate keeps exactly one reporter per cluster, and it is
+// the same gate the passes use so "who reports" needs no separate rule.
+//
+// It is deliberately NOT reported as a maintenance pass: the depth is a
+// standing condition rather than work done, and putting it in the pass
+// enumeration would add a pass label value that never releases anything.
+// Failing to read the depth is therefore not a sweep error either — it is
+// logged and retried on the next cadence, and the depth series simply goes
+// stale rather than the gauge being zeroed, which would read as "the queue
+// drained".
+func (s *LeaseSweeper) ReportQueueDepthsOnce(ctx context.Context) {
+	if s.depthObserver == nil {
+		return
+	}
+	if s.elector != nil && !s.elector.IsLeader() {
+		return
+	}
+	reporter, ok := s.directory.(AssignmentQueueDepthReporter)
+	if !ok {
+		return
+	}
+	depths, err := reporter.AssignmentQueueDepths(ctx)
+	if err != nil {
+		if s.log != nil {
+			s.log.Error("read assignment queue depths", "err", err)
+		}
+		return
+	}
+	for lane, depth := range depths {
+		s.depthObserver.OnAssignmentQueueDepth(ctx, lane, depth)
 	}
 }
 

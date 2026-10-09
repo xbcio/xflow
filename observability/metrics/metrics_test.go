@@ -123,6 +123,7 @@ func TestObserverAdaptersIncrementExpectedMetrics(t *testing.T) {
 	NewAuditMetrics(metrics).OnAuditFailed(ctx, "save_signal", assertErr{})
 	NewSweepMetrics(metrics).OnSweepReclaim(ctx, "exec-1", "node-1", 1500)
 	NewSweepMetrics(metrics).OnSweepReclaimResult(ctx, "reclaimed", time.Millisecond)
+	NewSweepMetrics(metrics).OnAssignmentQueueDepth(ctx, "legacy", 4)
 	dispatcher := NewDispatcherMetrics(metrics)
 	dispatcher.OnDispatchTransient(ctx, "no_capacity")
 	dispatcher.OnDispatchDropped(ctx, "execution_gone")
@@ -148,6 +149,7 @@ func TestObserverAdaptersIncrementExpectedMetrics(t *testing.T) {
 	for _, want := range []string{
 		`xflow_audit_write_total{namespace="default",op="save_signal",result="failed"} 1`,
 		`xflow_lease_sweep_reclaimed_total{namespace="default",result="reclaimed"} 1`,
+		`xflow_assignment_queue_depth{lane="legacy"} 4`,
 		`xflow_dispatch_transient_total{namespace="default",reason="no_capacity"} 1`,
 		`xflow_dispatch_dropped_total{namespace="default",reason="execution_gone"} 1`,
 		`xflow_task_delivery_lag_seconds_count{namespace="default"} 1`,
@@ -175,6 +177,53 @@ func TestObserverAdaptersIncrementExpectedMetrics(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("metrics body missing %q:\n%s", want, body)
 		}
+	}
+}
+
+// TestAssignmentQueueDepthIsALevelWithoutNamespace pins the two deliberate
+// choices in this series: a gauge (the level must be able to fall when the
+// backlog drains — a counter could only ever rise) and no namespace label
+// (the assignment queues are cluster-wide, so attributing a depth to a tenant
+// would be a fabricated dimension). An idle lane is reported as a zero, so
+// "configured and drained" is distinguishable from "never read".
+func TestAssignmentQueueDepthIsALevelWithoutNamespace(t *testing.T) {
+	metrics := New()
+	observer := NewSweepMetrics(metrics)
+	ctx := context.Background()
+	observer.OnAssignmentQueueDepth(ctx, "legacy", 4)
+	observer.OnAssignmentQueueDepth(ctx, "xflow.sas.webscan-sink", 0)
+
+	body := func() string {
+		req := httptest.NewRequest("GET", "/metrics", nil)
+		rec := httptest.NewRecorder()
+		metrics.Handler().ServeHTTP(rec, req)
+		return rec.Body.String()
+	}()
+
+	for _, want := range []string{
+		`xflow_assignment_queue_depth{lane="legacy"} 4`,
+		`xflow_assignment_queue_depth{lane="xflow.sas.webscan-sink"} 0`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics body missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, `xflow_assignment_queue_depth{namespace=`) ||
+		strings.Contains(body, `xflow_assignment_queue_depth{lane="legacy",namespace=`) {
+		t.Fatalf("depth series carries a namespace label:\n%s", body)
+	}
+
+	// The next read must move the same series down: that is what Set is for,
+	// and it is the movement a counter cannot express.
+	observer.OnAssignmentQueueDepth(ctx, "legacy", 1)
+	body = func() string {
+		req := httptest.NewRequest("GET", "/metrics", nil)
+		rec := httptest.NewRecorder()
+		metrics.Handler().ServeHTTP(rec, req)
+		return rec.Body.String()
+	}()
+	if !strings.Contains(body, `xflow_assignment_queue_depth{lane="legacy"} 1`) {
+		t.Fatalf("depth did not fall with the backlog:\n%s", body)
 	}
 }
 

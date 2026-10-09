@@ -27,6 +27,7 @@ const (
 	metricDispatchTransient          = "xflow_dispatch_transient_total"
 	metricDispatchDropped            = "xflow_dispatch_dropped_total"
 	metricTaskDeliveryLag            = "xflow_task_delivery_lag_seconds"
+	metricAssignmentQueueDepth       = "xflow_assignment_queue_depth"
 	metricSupplyHintReadErrors       = "xflow_supply_hint_read_errors_total"
 )
 
@@ -57,6 +58,13 @@ type sweepPassObserver interface {
 type sweepPassCandidateObserver interface {
 	sweepPassObserver
 	OnSweepPassCandidates(ctx context.Context, pass, outcome string, inspected int)
+}
+
+// sweepQueueDepthObserver mirrors service/control's optional
+// SweepQueueDepthObserver extension: the standing depth of each assignment
+// queue, as opposed to what a maintenance pass did with it.
+type sweepQueueDepthObserver interface {
+	OnAssignmentQueueDepth(ctx context.Context, lane string, depth int64)
 }
 
 type runnerClaimObserver interface {
@@ -237,11 +245,35 @@ func (s SweepMetrics) OnSweepPassCandidates(ctx context.Context, pass, outcome s
 	s.Metrics.Add(metricLeaseMaintenanceCandidates, withNamespace(ctx, map[string]string{"pass": pass}), float64(inspected))
 }
 
+// OnAssignmentQueueDepth records one assignment queue's depth.
+//
+// lane is forwarded as-is; service/control resolves the shared legacy queue to
+// the literal "legacy" before calling, so the label never carries the empty
+// string the directory uses internally, and the set of label values is the
+// configured lanes plus that one — bounded by configuration, not by traffic.
+//
+// Deliberately no namespace label, unlike almost every method in this file:
+// the assignment queues are cluster-wide (one per lane node type plus the
+// shared legacy queue), so a depth is a property of the queue itself and there
+// is no tenant to attribute it to. A namespace label here would be a
+// fabricated dimension.
+//
+// Set is used rather than Inc because a depth is a level, not a count of
+// events: it must go down when the backlog drains, which is exactly the
+// movement a counter cannot show. A missing series means the reporter did not
+// read (not leader, no capability, read failed) — it is never zeroed on
+// failure, because a zeroed gauge reads as "the queue drained" and would hide
+// the very backlog this series exists to show.
+func (s SweepMetrics) OnAssignmentQueueDepth(_ context.Context, lane string, depth int64) {
+	s.Metrics.Set(metricAssignmentQueueDepth, map[string]string{"lane": lane}, float64(depth))
+}
+
 var (
 	_ sweepObserver              = SweepMetrics{}
 	_ sweepTimingObserver        = SweepMetrics{}
 	_ sweepPassObserver          = SweepMetrics{}
 	_ sweepPassCandidateObserver = SweepMetrics{}
+	_ sweepQueueDepthObserver    = SweepMetrics{}
 )
 
 // RunnerClaimMetrics observes durable runner-directory claim recovery and
