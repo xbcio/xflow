@@ -1887,6 +1887,18 @@ func (d *RedisRunnerDirectory) LookupLease(ctx context.Context, runnerID, sessio
 			return nil, false, err
 		}
 	}
+	// The indexes resolve on one identity field — by-token on the token, by-id
+	// on the lease id — and the raw-assignmentID fallback resolves on nothing,
+	// so an index hit can hand back a lease the key's identity does not name;
+	// the reachable shape is a matching lease id under the wrong token. The
+	// contract above calls that a mismatch, not a match, and memory enforces it
+	// on every path (matchesReleasedLease), so the resolved lease answers for
+	// the key here too. A key that names no identity has nothing to answer to
+	// and keeps the old behavior.
+	if ok && (key.LeaseToken != "" || key.LeaseID != "") && !leaseIdentityMatches(lease.LeaseToken, lease.LeaseID, key) {
+		lease = nil
+		ok = false
+	}
 	if key.NodeName == "" {
 		if ok {
 			return lease, true, nil
@@ -1947,9 +1959,9 @@ func (d *RedisRunnerDirectory) lookupRenewalLease(ctx context.Context, runnerID,
 	}
 	return d.walkLeasedAssignments(ctx, runnerID, func(candidate string) (*engine.TaskLease, leasedAssignmentVerdict, error) {
 		if candidate == resolvedID {
-			// The index already named this one and lookupLeaseAt refused it
-			// (wrong runner session, released, or expired metadata); it cannot
-			// resolve now either.
+			// The index already named this one and LookupLease refused it —
+			// wrong runner session, released, expired metadata, or a key
+			// identity it does not carry; it cannot resolve now either.
 			return nil, walkLeasedSkip, nil
 		}
 		token, err := d.rdb.HGet(ctx, d.keys.assignmentLeaseToken, candidate).Result()
