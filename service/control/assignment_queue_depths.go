@@ -30,6 +30,8 @@ type AssignmentQueueDepthReporter interface {
 
 var _ AssignmentQueueDepthReporter = (*RedisRunnerDirectory)(nil)
 
+var _ AssignmentQueueDepthReporter = (*MemoryRunnerDirectory)(nil)
+
 // AssignmentQueueDepths reads the depth of every assignment queue in one round
 // trip: the configured lanes and the legacy queue. It reuses the claim walk's
 // batch reader, so the keys reported are exactly the keys a claim walks — a

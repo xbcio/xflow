@@ -365,6 +365,153 @@ func (d *MemoryRunnerDirectory) Heartbeat(_ context.Context, req HeartbeatReques
 	return nil
 }
 
+// memoryQueueTargets returns the queue identities a claim walk visits, in
+// priority order: every configured lane this runner can serve, then the legacy
+// queue (the empty lane name). It mirrors RedisRunnerDirectory.claimTargets,
+// including the capability filter, so an entry on a lane the runner cannot
+// serve is never walked.
+func (d *MemoryRunnerDirectory) memoryQueueTargets(capabilities []protocol.Capability) []string {
+	targets := make([]string, 0, len(d.lanes)+1)
+	for _, lane := range d.lanes {
+		if !canRunRouting(capabilities, engine.TaskRouting{NodeType: lane}) {
+			continue
+		}
+		targets = append(targets, lane)
+	}
+	return append(targets, "")
+}
+
+func (d *MemoryRunnerDirectory) memoryQueueLocked(lane string) []Assignment {
+	if lane == "" {
+		return d.queue
+	}
+	return d.laneQueues[lane]
+}
+
+func (d *MemoryRunnerDirectory) setMemoryQueueLocked(lane string, queue []Assignment) {
+	if lane == "" {
+		d.queue = queue
+		return
+	}
+	d.laneQueues[lane] = queue
+}
+
+// memoryLaneServes reports whether a lane name is one this configuration still
+// serves. It is the in-memory half of the requeue helper's candidate scan: a
+// marker naming a lane that is no longer configured falls back to the legacy
+// queue rather than being pushed onto a lane no reader walks.
+func (d *MemoryRunnerDirectory) memoryLaneServes(lane string) bool {
+	if lane == "" {
+		return true
+	}
+	_, ok := resolveQueueLane(d.lanes, lane)
+	return ok
+}
+
+// memoryLaneClearLocked removes every copy of the assignment from the candidate
+// queues — the configured lanes and the legacy queue — and touches nothing
+// else. A copy on a de-configured lane is deliberately left alone: that is the
+// residue the Redis directory's marker reconciler exists for, and clearing it
+// here would make the double disagree with the implementation it stands in for.
+func (d *MemoryRunnerDirectory) memoryLaneClearLocked(assignmentID AssignmentID) {
+	d.removeFromMemoryQueueLocked("", assignmentID)
+	for _, lane := range d.lanes {
+		d.removeFromMemoryQueueLocked(lane, assignmentID)
+	}
+}
+
+func (d *MemoryRunnerDirectory) removeFromMemoryQueueLocked(lane string, assignmentID AssignmentID) {
+	queue := d.memoryQueueLocked(lane)
+	filtered := queue[:0]
+	for _, assignment := range queue {
+		if assignment.AssignmentID == assignmentID {
+			continue
+		}
+		filtered = append(filtered, assignment)
+	}
+	d.setMemoryQueueLocked(lane, filtered)
+}
+
+// memoryLanePushLocked returns an assignment to the head of the queue its marker
+// names. It is the in-memory mirror of redisLaneRequeueLua's lanePush: every
+// candidate queue is cleared first, legacy-only removes the marker, dual pushes
+// a second copy onto the legacy queue when the target is a lane, and the marker
+// is rewritten to the placement the entry actually got.
+func (d *MemoryRunnerDirectory) memoryLanePushLocked(assignment Assignment) {
+	id := assignment.AssignmentID
+	d.memoryLaneClearLocked(id)
+	mode := resolveLaneWriteMode(d.lanes, d.laneWriteMode)
+	target := ""
+	if mode != LaneWriteLegacyOnly {
+		if marked, ok := d.laneMarkers[id]; ok && d.memoryLaneServes(marked) {
+			target = marked
+		}
+	}
+	d.setMemoryQueueLocked(target, append([]Assignment{assignment}, d.memoryQueueLocked(target)...))
+	if mode == LaneWriteDual && target != "" {
+		d.setMemoryQueueLocked("", append([]Assignment{assignment}, d.queue...))
+	}
+	if mode != LaneWriteLegacyOnly {
+		d.laneMarkers[id] = target
+		return
+	}
+	delete(d.laneMarkers, id)
+}
+
+// assignmentInFlightLocked reports whether the assignment is already claimed or
+// leased. A queue copy of an in-flight assignment is the residue of a dual write
+// rather than a claimable entry: the Redis directory decides this from the
+// record's 'queued' state inside its claim transition, and this is the same
+// fence expressed over the in-memory bookkeeping. Without it a dual-written
+// entry could be handed to a runner twice.
+func (d *MemoryRunnerDirectory) assignmentInFlightLocked(assignmentID AssignmentID) bool {
+	for _, claim := range d.claims {
+		if claim.assignment.AssignmentID == assignmentID {
+			return true
+		}
+	}
+	for _, state := range d.runners {
+		if state == nil {
+			continue
+		}
+		if _, ok := state.finalizedLease[assignmentID]; ok {
+			return true
+		}
+		if _, ok := state.leasedAssignments[assignmentID]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// assignmentReleasedLocked reports whether the assignment sits in the released
+// state, the stale-token residue ReleaseLeased(RemoveSeen=false) leaves behind.
+// The Redis directory reads the same state inside its claim transition and
+// answers 'retry' there: the queue residue may not be handed out again, even
+// though it stays visible to queue depth and to EnqueueAssignment. Without this
+// the in-memory directory would re-claim a copy the durable one refuses.
+func (d *MemoryRunnerDirectory) assignmentReleasedLocked(assignmentID AssignmentID) bool {
+	_, ok := d.released[assignmentID]
+	return ok
+}
+
+// AssignmentQueueDepths reports the depth of every assignment queue this
+// directory holds: each configured lane plus the legacy queue under
+// QueueLaneLegacy. It mirrors RedisRunnerDirectory.AssignmentQueueDepths,
+// including the legacy entry being present when empty, so a test double
+// reports the depths the durable directory would.
+func (d *MemoryRunnerDirectory) AssignmentQueueDepths(_ context.Context) (map[string]int64, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	depths := make(map[string]int64, len(d.lanes)+1)
+	depths[QueueLaneLegacy] = int64(len(d.queue))
+	for _, lane := range d.lanes {
+		depths[lane] = int64(len(d.laneQueues[lane]))
+	}
+	return depths, nil
+}
+
 // EnqueueAssignment queues an assignment, deduplicating against the seen set.
 //
 // A seen mark alone is not enough to reject: it says the assignment has been
@@ -386,8 +533,17 @@ func (d *MemoryRunnerDirectory) EnqueueAssignment(_ context.Context, assignment 
 		return false, nil
 	}
 	d.seen[assignment.AssignmentID] = struct{}{}
-	d.removeQueuedAssignmentLocked(assignment.AssignmentID)
-	d.queue = append(d.queue, assignment)
+	delete(d.released, assignment.AssignmentID)
+	placement := resolveLanePlacement(d.lanes, resolveLaneWriteMode(d.lanes, d.laneWriteMode), assignment.Routing.NodeType)
+	d.memoryLaneClearLocked(assignment.AssignmentID)
+	for _, lane := range placement.targets {
+		d.setMemoryQueueLocked(lane, append(d.memoryQueueLocked(lane), assignment))
+	}
+	if placement.hasMarker {
+		d.laneMarkers[assignment.AssignmentID] = placement.marker
+	} else {
+		delete(d.laneMarkers, assignment.AssignmentID)
+	}
 	return true, nil
 }
 
@@ -395,10 +551,25 @@ func (d *MemoryRunnerDirectory) EnqueueAssignment(_ context.Context, assignment 
 // plane: waiting in the queue, reserved by an unfinalized claim, or held under
 // a finalized lease. This is the in-memory equivalent of the Redis directory's
 // queued/claimed/leased states; anything else is the released state.
+//
+// The released state is also recorded explicitly, and it wins over the queue
+// scan: a stale-token release leaves its queue residue behind, and that residue
+// is visible here as a queue copy without being live. Trusting the scan would
+// make EnqueueAssignment reject the re-dispatch the Redis transition admits.
 func (d *MemoryRunnerDirectory) assignmentLiveLocked(assignmentID AssignmentID) bool {
+	if d.assignmentReleasedLocked(assignmentID) {
+		return false
+	}
 	for _, queued := range d.queue {
 		if queued.AssignmentID == assignmentID {
 			return true
+		}
+	}
+	for _, lane := range d.lanes {
+		for _, queued := range d.laneQueues[lane] {
+			if queued.AssignmentID == assignmentID {
+				return true
+			}
 		}
 	}
 	for _, claim := range d.claims {
@@ -462,43 +633,49 @@ func (d *MemoryRunnerDirectory) ClaimForRunner(_ context.Context, req ClaimReque
 		return Claim{}, false, nil
 	}
 
-	for i, assignment := range d.queue {
-		if !MatchCapabilities(state.snapshot.Capabilities, assignment.Routing) {
-			continue
-		}
-		if !state.policy.Allows(assignment.Routing.NodeType) {
-			continue
-		}
-		if !state.canServeNamespace(assignment.Namespace) {
-			continue
-		}
-		if rs := assignment.Routing.RunnerSelector; rs != nil && !MatchLabels(state.snapshot.Labels, rs.MatchLabels) {
-			continue
-		}
+	for _, target := range d.memoryQueueTargets(state.snapshot.Capabilities) {
+		queue := d.memoryQueueLocked(target)
+		for i, assignment := range queue {
+			if d.assignmentInFlightLocked(assignment.AssignmentID) || d.assignmentReleasedLocked(assignment.AssignmentID) {
+				continue
+			}
+			if !MatchCapabilities(state.snapshot.Capabilities, assignment.Routing) {
+				continue
+			}
+			if !state.policy.Allows(assignment.Routing.NodeType) {
+				continue
+			}
+			if !state.canServeNamespace(assignment.Namespace) {
+				continue
+			}
+			if rs := assignment.Routing.RunnerSelector; rs != nil && !MatchLabels(state.snapshot.Labels, rs.MatchLabels) {
+				continue
+			}
 
-		claimID := ClaimID(uuid.NewString())
-		d.queue = append(d.queue[:i], d.queue[i+1:]...)
-		d.claims[claimID] = memoryClaim{runnerID: req.RunnerID, assignment: assignment}
-		generation := uint64(0)
-		if control != nil {
-			generation = control.generation
+			claimID := ClaimID(uuid.NewString())
+			d.setMemoryQueueLocked(target, append(queue[:i], queue[i+1:]...))
+			d.claims[claimID] = memoryClaim{runnerID: req.RunnerID, assignment: assignment}
+			generation := uint64(0)
+			if control != nil {
+				generation = control.generation
+			}
+			d.handoffs[claimID] = memoryHandoff{
+				runnerID:   req.RunnerID,
+				sessionID:  req.SessionID,
+				assignment: assignment,
+				debt: HandoffDebt{
+					State:               HandoffDebtReserved,
+					AdmissionGeneration: generation,
+				},
+			}
+			d.addHandoffLocked(claimID, d.handoffs[claimID])
+			state.activeClaims[claimID] = assignment.AssignmentID
+			state.activeOrder = append(state.activeOrder, claimID)
+			return Claim{
+				ClaimID:    claimID,
+				Assignment: assignment,
+			}, true, nil
 		}
-		d.handoffs[claimID] = memoryHandoff{
-			runnerID:   req.RunnerID,
-			sessionID:  req.SessionID,
-			assignment: assignment,
-			debt: HandoffDebt{
-				State:               HandoffDebtReserved,
-				AdmissionGeneration: generation,
-			},
-		}
-		d.addHandoffLocked(claimID, d.handoffs[claimID])
-		state.activeClaims[claimID] = assignment.AssignmentID
-		state.activeOrder = append(state.activeOrder, claimID)
-		return Claim{
-			ClaimID:    claimID,
-			Assignment: assignment,
-		}, true, nil
 	}
 
 	return Claim{}, false, nil
@@ -654,9 +831,11 @@ func (d *MemoryRunnerDirectory) SettleClaimHandoff(_ context.Context, claimID Cl
 	d.deleteHandoffLocked(claimID, handoff.assignment.AssignmentID)
 	switch disposition {
 	case HandoffDispositionRequeue:
-		d.queue = append([]Assignment{claim.assignment}, d.queue...)
+		d.memoryLanePushLocked(claim.assignment)
 	case HandoffDispositionDrop:
+		d.removeQueuedAssignmentLocked(claim.assignment.AssignmentID)
 		delete(d.seen, claim.assignment.AssignmentID)
+		delete(d.released, claim.assignment.AssignmentID)
 	}
 	return nil
 }
@@ -684,9 +863,11 @@ func (d *MemoryRunnerDirectory) ReleaseClaim(_ context.Context, claimID ClaimID,
 
 	switch reason {
 	case ReleaseClaimRequeue:
-		d.queue = append([]Assignment{claim.assignment}, d.queue...)
+		d.memoryLanePushLocked(claim.assignment)
 	case ReleaseClaimDrop:
+		d.removeQueuedAssignmentLocked(claim.assignment.AssignmentID)
 		delete(d.seen, claim.assignment.AssignmentID)
+		delete(d.released, claim.assignment.AssignmentID)
 	case ReleaseClaimKeepSeen:
 	}
 	return nil
@@ -712,7 +893,9 @@ func (d *MemoryRunnerDirectory) ReleaseExpiredLease(_ context.Context, req Expir
 		delete(state.finalizedLease, req.AssignmentID)
 		delete(state.leasedAssignments, req.AssignmentID)
 		state.removeLeaseIndexes(req.AssignmentID, lease)
+		d.removeQueuedAssignmentLocked(req.AssignmentID)
 		delete(d.seen, req.AssignmentID)
+		delete(d.released, req.AssignmentID)
 		return ExpiredDirectoryLeaseReleased, nil
 	}
 	return ExpiredDirectoryLeaseAlreadyReleased, nil
@@ -754,7 +937,21 @@ func (d *MemoryRunnerDirectory) ReleaseLeased(_ context.Context, req ReleaseLeas
 	state.removeLeaseIndexes(assignmentID, current)
 	d.deleteFinalizedHandoffLocked(assignmentID, current.LeaseID, current.LeaseToken)
 	if req.RemoveSeen {
+		// RemoveSeen=true is the terminal outcome (Accepted, DuplicateTerminal,
+		// ExecutionInactive): the assignment is done, so this is the last point
+		// that will ever see it, and every queue copy and the lane marker go
+		// with the bookkeeping. The stale-token path (RemoveSeen=false) must
+		// leave them alone: the caller re-enqueues that assignment through
+		// EnqueueAssignment, which clears and rewrites them itself.
+		d.removeQueuedAssignmentLocked(assignmentID)
 		delete(d.seen, assignmentID)
+		delete(d.released, assignmentID)
+	} else {
+		// The stale-token path leaves the queue residue and the seen mark for
+		// the caller's re-enqueue, but records the released state so the
+		// residue cannot be claimed in the meantime. Mirrors the 'released'
+		// assignment state the Redis transition writes.
+		d.released[assignmentID] = struct{}{}
 	}
 	return nil
 }
@@ -767,6 +964,7 @@ func (d *MemoryRunnerDirectory) ClearAssignment(_ context.Context, assignmentID 
 
 	d.removeQueuedAssignmentLocked(assignmentID)
 	delete(d.seen, assignmentID)
+	delete(d.released, assignmentID)
 	d.deleteHandoffByAssignmentLocked(assignmentID)
 	for claimID, claim := range d.claims {
 		if claim.assignment.AssignmentID != assignmentID {
@@ -1108,7 +1306,7 @@ func (d *MemoryRunnerDirectory) requeueActiveClaimsLocked(state *memoryRunnerSta
 		}
 		delete(d.claims, claimID)
 		d.deleteHandoffLocked(claimID, claim.assignment.AssignmentID)
-		d.queue = append([]Assignment{claim.assignment}, d.queue...)
+		d.memoryLanePushLocked(claim.assignment)
 	}
 	state.activeClaims = make(map[ClaimID]AssignmentID)
 	state.activeOrder = nil
@@ -1137,15 +1335,18 @@ func (d *MemoryRunnerDirectory) rebindHandoffsLocked(previous, next *memoryRunne
 		delete(d.claims, claimID)
 		d.deleteHandoffLocked(claimID, claim.assignment.AssignmentID)
 	}
+	// Pushed one at a time rather than as one batch so each entry lands on the
+	// queue its own marker names: a batch prepend can only target one queue, and
+	// register is a requeue transition like the other three.
+	for _, assignment := range requeue {
+		d.memoryLanePushLocked(assignment)
+	}
 	for claimID, handoff := range d.handoffs {
 		if handoff.runnerID != next.snapshot.RunnerID || handoff.debt.State != HandoffDebtFinalized {
 			continue
 		}
 		handoff.sessionID = next.sessionID
 		d.handoffs[claimID] = handoff
-	}
-	if len(requeue) > 0 {
-		d.queue = append(requeue, d.queue...)
 	}
 }
 
@@ -1416,15 +1617,13 @@ func (d *MemoryRunnerDirectory) handoffStatsLocked(runnerID string, state *memor
 	return stats
 }
 
+// removeQueuedAssignmentLocked drops the assignment: every queue copy of it and
+// its lane marker. It is the in-memory mirror of the Redis laneDrop helper, and
+// every path that ends an assignment's life goes through it — the clear
+// transition, the drop dispositions, and the terminal release.
 func (d *MemoryRunnerDirectory) removeQueuedAssignmentLocked(assignmentID AssignmentID) {
-	filtered := d.queue[:0]
-	for _, assignment := range d.queue {
-		if assignment.AssignmentID == assignmentID {
-			continue
-		}
-		filtered = append(filtered, assignment)
-	}
-	d.queue = filtered
+	d.memoryLaneClearLocked(assignmentID)
+	delete(d.laneMarkers, assignmentID)
 }
 
 // headroom is the number of additional tasks this runner can accept. It is the

@@ -291,3 +291,71 @@ func TestNewAPIServerPropagatesLeaseTTL(t *testing.T) {
 		t.Fatalf("engine LeaseTTL = %v, want engine.DefaultLeaseTTL (%v)", got, engine.DefaultLeaseTTL)
 	}
 }
+
+// TestNewAPIServerPropagatesAssignmentQueueLanes verifies the full chain for
+// the queue-lane knobs: Config.AssignmentQueueLanes and
+// AssignmentQueueLaneWriteMode flow through buildControlPlane into
+// control.Config and reach the runner directory selectRunnerDirectory builds.
+// Asserted on that directory — placement and depth are its observable end — so
+// a break anywhere along the chain fails here rather than leaving lanes
+// configured on every layer and active nowhere.
+//
+// This is the same shape of defect as TestNewAPIServerPropagatesLeaseTTL: the
+// control layer already accepted lanes, but apiserver.Config had no field for
+// them, so no caller could reach it.
+func TestNewAPIServerPropagatesAssignmentQueueLanes(t *testing.T) {
+	const laneType = "xflow.sas.webscan-sink"
+	srv, err := New(Config{
+		Concurrency:                  1,
+		AssignmentQueueLanes:         []string{laneType},
+		AssignmentQueueLaneWriteMode: control.LaneWriteDual,
+	})
+	if err != nil {
+		t.Fatalf("New(AssignmentQueueLanes=%q): %v", laneType, err)
+	}
+	directory := srv.cp.RunnerDirectory()
+	reporter, ok := directory.(control.AssignmentQueueDepthReporter)
+	if !ok {
+		t.Fatalf("runner directory %T does not report queue depths", directory)
+	}
+	depths, err := reporter.AssignmentQueueDepths(t.Context())
+	if err != nil {
+		t.Fatalf("AssignmentQueueDepths() error = %v", err)
+	}
+	if _, ok := depths[laneType]; !ok {
+		t.Fatalf("depths = %v, want the configured lane present", depths)
+	}
+
+	// Dual mode is what makes the lane reachable for readers that still only
+	// walk the legacy queue: one enqueue must land on both.
+	if enqueued, err := directory.EnqueueAssignment(t.Context(), control.Assignment{
+		AssignmentID: control.AssignmentID("exec-apiserver-lanes/node/activation-1"),
+		Routing:      engine.TaskRouting{NodeType: laneType},
+	}); err != nil || !enqueued {
+		t.Fatalf("EnqueueAssignment() = %v, %v, want true, nil", enqueued, err)
+	}
+	depths, err = reporter.AssignmentQueueDepths(t.Context())
+	if err != nil {
+		t.Fatalf("AssignmentQueueDepths() error = %v", err)
+	}
+	if depths[laneType] != 1 || depths[control.QueueLaneLegacy] != 1 {
+		t.Fatalf("depths after one dual enqueue = %v, want lane=1 legacy=1", depths)
+	}
+
+	// Unset keeps the single legacy queue: only the legacy entry is reported.
+	srvDefault, err := New(Config{Concurrency: 1})
+	if err != nil {
+		t.Fatalf("New(): %v", err)
+	}
+	reporter, ok = srvDefault.cp.RunnerDirectory().(control.AssignmentQueueDepthReporter)
+	if !ok {
+		t.Fatalf("runner directory %T does not report queue depths", srvDefault.cp.RunnerDirectory())
+	}
+	depths, err = reporter.AssignmentQueueDepths(t.Context())
+	if err != nil {
+		t.Fatalf("AssignmentQueueDepths() error = %v", err)
+	}
+	if len(depths) != 1 {
+		t.Fatalf("depths = %v, want only the legacy queue", depths)
+	}
+}
