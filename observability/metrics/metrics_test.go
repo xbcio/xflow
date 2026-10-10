@@ -342,3 +342,14 @@ func TestDroppedHelpDocumentsTheTriState(t *testing.T) {
 		}
 	}
 }
+
+func TestAssignmentQueueOldestAgeIsALevelInSeconds(t *testing.T) {
+	metrics := New()
+	NewSweepMetrics(metrics).OnAssignmentQueueOldestAge(context.Background(), "legacy", 90*time.Second)
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	rec := httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(rec, req)
+	if want := `xflow_assignment_queue_oldest_age_seconds{lane="legacy"} 90`; !strings.Contains(rec.Body.String(), want) {
+		t.Fatalf("metrics body missing %q:\n%s", want, rec.Body.String())
+	}
+}

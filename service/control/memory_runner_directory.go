@@ -104,9 +104,12 @@ type MemoryRunnerDirectory struct {
 	// and the marker is what a requeue reads to put the entry back where it
 	// came from. See resolveLanePlacement for the placement rules, which both
 	// directories resolve through.
-	queue         []Assignment
-	laneQueues    map[string][]Assignment
-	laneMarkers   map[AssignmentID]string
+	queue       []Assignment
+	laneQueues  map[string][]Assignment
+	laneMarkers map[AssignmentID]string
+	// queuedAt mirrors the Redis queued-at hash: when each queued entry last
+	// entered a queue, for the oldest-age report only.
+	queuedAt      map[AssignmentID]time.Time
 	lanes         []string
 	laneWriteMode LaneWriteMode
 	seen          map[AssignmentID]struct{}
@@ -198,6 +201,7 @@ func NewMemoryRunnerDirectory(opts ...MemoryRunnerDirectoryOption) *MemoryRunner
 		runners:                   make(map[string]*memoryRunnerState),
 		laneQueues:                make(map[string][]Assignment),
 		laneMarkers:               make(map[AssignmentID]string),
+		queuedAt:                  make(map[AssignmentID]time.Time),
 		lanes:                     cfg.lanes,
 		laneWriteMode:             cfg.laneWriteMode,
 		seen:                      make(map[AssignmentID]struct{}),
@@ -451,6 +455,7 @@ func (d *MemoryRunnerDirectory) memoryLanePushLocked(assignment Assignment) {
 	if mode == LaneWriteDual && target != "" {
 		d.setMemoryQueueLocked("", append([]Assignment{assignment}, d.queue...))
 	}
+	d.queuedAt[id] = d.clockNow()
 	if mode != LaneWriteLegacyOnly {
 		d.laneMarkers[id] = target
 		return
@@ -512,6 +517,39 @@ func (d *MemoryRunnerDirectory) AssignmentQueueDepths(_ context.Context) (map[st
 	return depths, nil
 }
 
+// AssignmentQueueOldestAges mirrors RedisRunnerDirectory.AssignmentQueueOldestAges:
+// the same head sample size, the same "absent when nothing sampled is stamped"
+// rule, and ages measured on the directory clock.
+func (d *MemoryRunnerDirectory) AssignmentQueueOldestAges(_ context.Context) (map[string]time.Duration, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	now := d.clockNow()
+	ages := make(map[string]time.Duration, len(d.lanes)+1)
+	sample := func(name string, queue []Assignment) {
+		var oldest time.Time
+		for i := 0; i < len(queue) && i < assignmentQueueAgeSample; i++ {
+			at, ok := d.queuedAt[queue[i].AssignmentID]
+			if ok && (oldest.IsZero() || at.Before(oldest)) {
+				oldest = at
+			}
+		}
+		if oldest.IsZero() {
+			return
+		}
+		age := now.Sub(oldest)
+		if age < 0 {
+			age = 0
+		}
+		ages[name] = age
+	}
+	sample(QueueLaneLegacy, d.queue)
+	for _, lane := range d.lanes {
+		sample(lane, d.laneQueues[lane])
+	}
+	return ages, nil
+}
+
 // EnqueueAssignment queues an assignment, deduplicating against the seen set.
 //
 // A seen mark alone is not enough to reject: it says the assignment has been
@@ -539,6 +577,7 @@ func (d *MemoryRunnerDirectory) EnqueueAssignment(_ context.Context, assignment 
 	for _, lane := range placement.targets {
 		d.setMemoryQueueLocked(lane, append(d.memoryQueueLocked(lane), assignment))
 	}
+	d.queuedAt[assignment.AssignmentID] = d.clockNow()
 	if placement.hasMarker {
 		d.laneMarkers[assignment.AssignmentID] = placement.marker
 	} else {
@@ -654,6 +693,7 @@ func (d *MemoryRunnerDirectory) ClaimForRunner(_ context.Context, req ClaimReque
 
 			claimID := ClaimID(uuid.NewString())
 			d.setMemoryQueueLocked(target, append(queue[:i], queue[i+1:]...))
+			delete(d.queuedAt, assignment.AssignmentID)
 			d.claims[claimID] = memoryClaim{runnerID: req.RunnerID, assignment: assignment}
 			generation := uint64(0)
 			if control != nil {
@@ -1624,6 +1664,7 @@ func (d *MemoryRunnerDirectory) handoffStatsLocked(runnerID string, state *memor
 func (d *MemoryRunnerDirectory) removeQueuedAssignmentLocked(assignmentID AssignmentID) {
 	d.memoryLaneClearLocked(assignmentID)
 	delete(d.laneMarkers, assignmentID)
+	delete(d.queuedAt, assignmentID)
 }
 
 // headroom is the number of additional tasks this runner can accept. It is the

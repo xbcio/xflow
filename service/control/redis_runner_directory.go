@@ -292,18 +292,20 @@ func (d *RedisRunnerDirectory) laneQueueKeys() []string {
 }
 
 // appendLaneRequeueKeys appends the lane requeue KEYS tail — every candidate
-// queue key (lanes first, legacy last) and then the lane marker hash — to a
+// queue key (lanes first, legacy last), the lane marker hash, and then the
+// queued-at hash — to a
 // script's key list. Callers must also pass laneRequeueCandidateCount and
 // laneRequeueModeArg as the trailing ARGV values; redisLaneRequeueLua reads
 // the candidate count from the second-to-last ARGV and the write mode from the
 // last.
 func (d *RedisRunnerDirectory) appendLaneRequeueKeys(keys []string) []string {
 	keys = append(keys, d.laneQueueKeys()...)
-	return append(keys, d.keys.assignmentLane)
+	return append(keys, d.keys.assignmentLane, d.keys.assignmentQueuedAt)
 }
 
 // laneRequeueCandidateCount fixes where the candidate keys start in KEYS: the
-// requeue helper derives laneBase as #KEYS minus this count.
+// requeue helper derives laneBase as #KEYS minus this count minus one (the
+// marker and queued-at hashes follow the candidates).
 func (d *RedisRunnerDirectory) laneRequeueCandidateCount() string {
 	return strconv.Itoa(len(d.laneQueueKeys()))
 }
@@ -505,7 +507,7 @@ func (d *RedisRunnerDirectory) EnqueueAssignment(ctx context.Context, assignment
 		return false, err
 	}
 	candidates, targets, marker := d.enqueueQueueKeys(assignment)
-	keys := make([]string, 0, len(candidates)+len(targets)+10)
+	keys := make([]string, 0, len(candidates)+len(targets)+11)
 	keys = append(keys, candidates...)
 	keys = append(keys, targets...)
 	keys = append(keys,
@@ -519,6 +521,7 @@ func (d *RedisRunnerDirectory) EnqueueAssignment(ctx context.Context, assignment
 		d.keys.assignmentLeaseToken,
 		d.keys.assignmentLeaseMetaKey(string(assignment.AssignmentID)),
 		d.keys.assignmentLane,
+		d.keys.assignmentQueuedAt,
 	)
 	status, err := d.evalStatus(ctx, redisEnqueueAssignmentLua, keys,
 		string(assignment.AssignmentID), payload,
@@ -1700,6 +1703,7 @@ func (d *RedisRunnerDirectory) claim(ctx context.Context, target, runnerID, sess
 		d.keys.handoffLeaseToken,
 		d.keys.handoffRecoveryReady,
 		d.keys.handoffClaimIndexKey(runnerID),
+		d.keys.assignmentQueuedAt,
 	}, runnerID, sessionID, assignmentID, expectedData, string(claimID), strconv.FormatInt(d.claimTTLMillis(), 10), strconv.FormatInt(time.Now().UTC().UnixMilli(), 10))
 	if err != nil {
 		return "", fmt.Errorf("claim redis assignment: %w", err)
@@ -2772,12 +2776,13 @@ func canServeNamespace(namespaces []namespace.Namespace, t namespace.Namespace) 
 const redisLaneRequeueLua = `
 local laneCandidates = tonumber(ARGV[#ARGV - 1])
 local laneMode = ARGV[#ARGV]
-local laneBase = #KEYS - laneCandidates
-local laneLegacy = KEYS[#KEYS - 1]
-local laneMarker = KEYS[#KEYS]
+local laneBase = #KEYS - 1 - laneCandidates
+local laneLegacy = KEYS[#KEYS - 2]
+local laneMarker = KEYS[#KEYS - 1]
+local laneQueuedAt = KEYS[#KEYS]
 local function laneClear(id)
   local i
-  for i = laneBase, #KEYS - 1 do
+  for i = laneBase, #KEYS - 2 do
     redis.call('LREM', KEYS[i], 0, id)
   end
 end
@@ -2787,7 +2792,7 @@ local function lanePush(id)
     local marked = redis.call('HGET', laneMarker, id)
     if marked and marked ~= '' then
       local i
-      for i = laneBase, #KEYS - 1 do
+      for i = laneBase, #KEYS - 2 do
         if KEYS[i] == marked then target = marked break end
       end
     end
@@ -2801,10 +2806,13 @@ local function lanePush(id)
   else
     redis.call('HDEL', laneMarker, id)
   end
+  local now = redis.call('TIME')
+  redis.call('HSET', laneQueuedAt, id, string.format('%.0f', tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)))
 end
 local function laneDrop(id)
   laneClear(id)
   redis.call('HDEL', laneMarker, id)
+  redis.call('HDEL', laneQueuedAt, id)
 end
 `
 
@@ -2982,7 +2990,8 @@ return 'ok'
 // mode selects. ARGV[5] is the lane marker value; empty means "do not write a
 // marker" (legacy-only mode and deployments without lanes), which is
 // equivalent to a missing marker because the requeue transitions read a
-// missing marker as legacy.
+// missing marker as legacy. KEYS[base+11] is the queued-at hash, stamped with
+// the Redis server's TIME so every writer and the age reader share one clock.
 const redisEnqueueAssignmentLua = `
 local candidates = tonumber(ARGV[3])
 local targets = tonumber(ARGV[4])
@@ -3014,6 +3023,8 @@ if ARGV[5] ~= '' then
 else
   redis.call('HDEL', KEYS[base+10], ARGV[1])
 end
+local now = redis.call('TIME')
+redis.call('HSET', KEYS[base+11], ARGV[1], string.format('%.0f', tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)))
 return 'enqueued'
 `
 
@@ -3110,6 +3121,7 @@ if redis.call('HGET', KEYS[2], ARGV[3]) ~= ARGV[4] then return 'retry' end
 if redis.call('LREM', KEYS[1], 0, ARGV[3]) == 0 then return 'retry' end
 
 redis.call('HSET', KEYS[3], ARGV[3], 'claimed')
+redis.call('HDEL', KEYS[28], ARGV[3])
 redis.call('HSET', KEYS[4], ARGV[3], ARGV[5])
 redis.call('HSET', KEYS[5], ARGV[3], ARGV[1])
 redis.call('HSET', KEYS[6], ARGV[3], ARGV[2])

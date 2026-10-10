@@ -110,6 +110,7 @@ func TestLaneKeysShareTheDirectoryHashTag(t *testing.T) {
 		directory.keys.queue,
 		directory.keys.laneQueueKey("xflow.sas.webscan-sink"),
 		directory.keys.assignmentLane,
+		directory.keys.assignmentQueuedAt,
 	}
 	for _, key := range keys {
 		if !strings.Contains(key, "{control}") {

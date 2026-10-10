@@ -177,6 +177,7 @@ func redisRunnerDirectoryAllKeys(keys redisRunnerDirectoryKeys) []string {
 		// configuration-driven and cannot be enumerated here; a real-Redis
 		// test that configures lanes owns their removal.
 		keys.assignmentLane,
+		keys.assignmentQueuedAt,
 		keys.assignmentData,
 		keys.assignmentState,
 		keys.assignmentClaim,
