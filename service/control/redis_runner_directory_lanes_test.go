@@ -1252,3 +1252,41 @@ func TestAssignmentQueueDepthsSurfacesReadFailure(t *testing.T) {
 		t.Fatalf("AssignmentQueueDepths() = %v with no error, want the read failure surfaced", depths)
 	}
 }
+
+type recordingClaimPollObserver struct {
+	RunnerClaimObserver
+	targets, roundTrips []int
+}
+
+func (o *recordingClaimPollObserver) OnRunnerClaimPoll(_ context.Context, targets, roundTrips int) {
+	o.targets = append(o.targets, targets)
+	o.roundTrips = append(o.roundTrips, roundTrips)
+}
+
+// TestClaimPollObservesWalkedTargetsAndRoundTrips pins the poll cost
+// observation: an empty lane costs only the shared probe and is not counted
+// as walked, and the legacy walk's page read, payload read and claim
+// transition are each one round trip.
+func TestClaimPollObservesWalkedTargetsAndRoundTrips(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	laneType := "xflow.sas.webscan-sink"
+	observer := &recordingClaimPollObserver{RunnerClaimObserver: noopRunnerClaimObserver{}}
+	directory := NewRedisRunnerDirectory(rdb,
+		WithRedisRunnerDirectoryLanes([]string{laneType}),
+		WithRedisRunnerDirectoryLaneWriteMode(LaneWriteLaneOnly),
+		WithRedisRunnerDirectoryObserver(observer),
+	)
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, redisDirectoryTestAssignment("exec-lanes/poll-cost/activation-1"))
+	session := registerLaneRunner(t, ctx, directory, "runner-poll-cost", 1, laneType, "xflow.function")
+	claimRedisDirectoryAssignment(t, ctx, directory, session, 1)
+
+	if len(observer.targets) != 1 || observer.targets[0] != 1 || observer.roundTrips[0] != 4 {
+		t.Fatalf("observed targets=%v roundTrips=%v, want one poll with 1 target and 4 round trips (probe, page, payloads, claim)", observer.targets, observer.roundTrips)
+	}
+}
+
+type noopRunnerClaimObserver struct{}
+
+func (noopRunnerClaimObserver) OnRunnerClaimReclaimed(context.Context, int) {}
+func (noopRunnerClaimObserver) OnRunnerLeaseReplayed(context.Context)       {}

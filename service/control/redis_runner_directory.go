@@ -732,19 +732,27 @@ func (d *RedisRunnerDirectory) claimFromQueuePage(
 	}
 
 	pending := false
+	walked := 0
+	roundTrips := 1 // the depth probe
 	for _, target := range targets {
 		walk, err := d.walkClaimTarget(ctx, req, runner, capabilities, labels, target, lengths[target])
 		if err != nil {
 			return Claim{}, false, false, err
 		}
+		if walk.roundTrips > 0 {
+			walked++
+		}
+		roundTrips += walk.roundTrips
 		if walk.resolved {
 			// A definite answer applies to the poll as a whole, so the remaining
 			// targets are not worth another round trip. walkClaimTarget has
 			// already cleared the pending-walk marker on these paths.
+			d.observeClaimPoll(ctx, walked, roundTrips)
 			return walk.claim, walk.claim.ClaimID != "", true, nil
 		}
 		pending = pending || walk.pending
 	}
+	d.observeClaimPoll(ctx, walked, roundTrips)
 	// The scan budget ran out with queue left unexamined on at least one target.
 	// Report the walk as pending so the poll loop resumes it at the short cadence
 	// instead of the idle one.
@@ -806,6 +814,10 @@ type claimTargetWalk struct {
 	// loop should resume at the short cadence. It is only meaningful on an
 	// unresolved walk.
 	pending bool
+	// roundTrips counts the Redis calls this target's walk issued (page reads,
+	// payload reads, liveness probes, claim transitions), for the poll cost
+	// observation.
+	roundTrips int
 }
 
 // walkClaimTarget walks bounded pages of one queue target starting at the
@@ -835,21 +847,24 @@ func (d *RedisRunnerDirectory) walkClaimTarget(
 
 	attempts := 0
 	scanned := 0
+	trips := 0
 	for scanned < redisClaimScanBudget {
 		page := redisClaimQueuePage
 		if remaining := redisClaimScanBudget - scanned; remaining < page {
 			page = remaining
 		}
 		assignmentIDs, err := d.rdb.LRange(ctx, target, int64(cursor), int64(cursor+page-1)).Result()
+		trips++
 		if err != nil {
 			return claimTargetWalk{}, fmt.Errorf("read redis assignment queue: %w", err)
 		}
 		if len(assignmentIDs) == 0 {
 			d.storeClaimCursorForTarget(req.RunnerID, target, 0)
-			return claimTargetWalk{}, nil
+			return claimTargetWalk{roundTrips: trips}, nil
 		}
 
 		raws, err := d.rdb.HMGet(ctx, d.keys.assignmentData, assignmentIDs...).Result()
+		trips++
 		if err != nil {
 			return claimTargetWalk{}, fmt.Errorf("read redis assignments: %w", err)
 		}
@@ -897,12 +912,18 @@ func (d *RedisRunnerDirectory) walkClaimTarget(
 			// finds nothing to run. On a queue whose head has outlived its executions that
 			// is nearly all of the page, so the claim path spent its whole budget
 			// materializing leases for work that no longer existed — which is both wasted
-			// work and, because a claim resets the resume cursor, the reason a live entry
-			// further down the queue was never reached at all.
+			// work and, back when a claim reset the resume cursor (it no longer does; see
+			// the 'claimed' case below), the reason a live entry further down the queue
+			// was never reached at all.
 			//
 			// Removal stays with the dead-queued reaper: it owns the atomic transitions
 			// (queue, seen set, claim maps) and a wrong removal here would lose work.
 			leaseable, err := d.leaseableExecutions(ctx, assignments)
+			if d.executions != nil {
+				// One status read per namespace on the page; counted as one, which
+				// is exact for the single-namespace page that is the common case.
+				trips++
+			}
 			if err != nil {
 				return claimTargetWalk{}, err
 			}
@@ -914,6 +935,7 @@ func (d *RedisRunnerDirectory) walkClaimTarget(
 				}
 				claimID := ClaimID(uuid.NewString())
 				status, err := d.claim(ctx, target, req.RunnerID, req.SessionID, c.assignmentID, c.raw, claimID)
+				trips++
 				if err != nil {
 					return claimTargetWalk{}, err
 				}
@@ -929,7 +951,7 @@ func (d *RedisRunnerDirectory) walkClaimTarget(
 					// re-walked that whole prefix before it could claim anything, and an
 					// unadvanced cursor cannot step over a prefix the way a skipped page can.
 					d.storeClaimWalk(req.RunnerID, false)
-					return claimTargetWalk{claim: Claim{ClaimID: claimID, Assignment: c.assignment}, resolved: true}, nil
+					return claimTargetWalk{claim: Claim{ClaimID: claimID, Assignment: c.assignment}, resolved: true, roundTrips: trips}, nil
 				case "retry":
 					// 'retry' is a verdict on the entry, not a transient hold: the
 					// state changed (a peer claimed it), the payload was replaced,
@@ -947,7 +969,7 @@ func (d *RedisRunnerDirectory) walkClaimTarget(
 				case "none", "draining":
 					d.storeClaimCursorForTarget(req.RunnerID, target, 0)
 					d.storeClaimWalk(req.RunnerID, false)
-					return claimTargetWalk{resolved: true}, nil
+					return claimTargetWalk{resolved: true, roundTrips: trips}, nil
 				case "not_found", "stale":
 					return claimTargetWalk{}, runnerSessionStatusError(status)
 				default:
@@ -967,12 +989,12 @@ func (d *RedisRunnerDirectory) walkClaimTarget(
 			// A stopped walk has queue left to examine, so it resumes at the
 			// short cadence; a wrap is a completed sweep and resumes at the idle
 			// one.
-			return claimTargetWalk{pending: stopped && cursor != 0}, nil
+			return claimTargetWalk{pending: stopped && cursor != 0, roundTrips: trips}, nil
 		}
 	}
 
 	// The scan budget ran out with queue left unexamined.
-	return claimTargetWalk{pending: true}, nil
+	return claimTargetWalk{pending: true, roundTrips: trips}, nil
 }
 
 // nextClaimCursor is where the following poll resumes. A short (end-of-queue) page

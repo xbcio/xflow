@@ -353,3 +353,16 @@ func TestAssignmentQueueOldestAgeIsALevelInSeconds(t *testing.T) {
 		t.Fatalf("metrics body missing %q:\n%s", want, rec.Body.String())
 	}
 }
+
+func TestRunnerClaimPollCostIsObservedAsCounts(t *testing.T) {
+	metrics := New()
+	NewRunnerClaimMetrics(metrics).OnRunnerClaimPoll(context.Background(), 2, 9)
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	rec := httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(rec, req)
+	for _, want := range []string{"xflow_runner_claim_poll_targets_sum 2", "xflow_runner_claim_poll_round_trips_sum 9"} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("metrics body missing %q", want)
+		}
+	}
+}
