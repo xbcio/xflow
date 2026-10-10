@@ -932,3 +932,66 @@ func TestRedisRunnerDirectoryListRunners(t *testing.T) {
 		t.Fatal("ListRunners against a closed Redis returned nil error; a down backend must not look like an empty fleet")
 	}
 }
+
+// TestRedisRunnerDirectoryReleaseClaimSemantics mirrors
+// TestMemoryRunnerDirectoryReleaseClaimSemantics: both directories must agree
+// on what each release reason leaves behind.
+func TestRedisRunnerDirectoryReleaseClaimSemantics(t *testing.T) {
+	tests := []struct {
+		name              string
+		reason            ReleaseClaimReason
+		wantNext          AssignmentID
+		wantReenqueueAOne bool
+	}{
+		{name: "requeue", reason: ReleaseClaimRequeue, wantNext: "exec-1/node-a/activation-1", wantReenqueueAOne: false},
+		{name: "drop", reason: ReleaseClaimDrop, wantNext: "exec-1/node-b/activation-1", wantReenqueueAOne: true},
+		{name: "keep seen", reason: ReleaseClaimKeepSeen, wantNext: "exec-1/node-b/activation-1", wantReenqueueAOne: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			_, rdb := newRedisRunnerDirectoryTestClient(t)
+			dir := NewRedisRunnerDirectory(rdb)
+			session := registerRedisDirectoryRunner(t, ctx, dir, "runner-1", 1)
+			first := redisDirectoryTestAssignment("exec-1/node-a/activation-1")
+			second := redisDirectoryTestAssignment("exec-1/node-b/activation-1")
+			for _, a := range []Assignment{first, second} {
+				if ok, err := dir.EnqueueAssignment(ctx, a); err != nil || !ok {
+					t.Fatalf("EnqueueAssignment(%s) = %v, %v", a.AssignmentID, ok, err)
+				}
+			}
+			claim := claimRedisDirectoryAssignment(t, ctx, dir, session, 1)
+			if claim.Assignment.AssignmentID != first.AssignmentID {
+				t.Fatalf("claim assignment = %q, want %q", claim.Assignment.AssignmentID, first.AssignmentID)
+			}
+			if err := dir.ReleaseClaim(ctx, claim.ClaimID, tt.reason); err != nil {
+				t.Fatalf("ReleaseClaim() error = %v", err)
+			}
+			if n, err := rdb.HExists(ctx, dir.keys.claimsAssignment, string(claim.ClaimID)).Result(); err != nil || n {
+				t.Fatalf("claim accounting survived %s: exists=%v err=%v", tt.reason, n, err)
+			}
+			if tt.reason == ReleaseClaimKeepSeen {
+				// Distinguishes keep_seen from drop: both re-enqueue, only
+				// keep_seen keeps the seen mark and the released record.
+				if seen, err := rdb.SIsMember(ctx, dir.keys.seen, string(first.AssignmentID)).Result(); err != nil || !seen {
+					t.Fatalf("seen mark after keep_seen = %v, err=%v, want true", seen, err)
+				}
+				if state, err := rdb.HGet(ctx, dir.keys.assignmentState, string(first.AssignmentID)).Result(); err != nil || state != redisAssignmentReleased {
+					t.Fatalf("assignment state after keep_seen = %q, err=%v, want %q", state, err, redisAssignmentReleased)
+				}
+			}
+			// Capacity 1: the next claim only succeeds if the runner count was freed.
+			next := claimRedisDirectoryAssignment(t, ctx, dir, session, 1)
+			if next.Assignment.AssignmentID != tt.wantNext {
+				t.Fatalf("next claim assignment = %q, want %q", next.Assignment.AssignmentID, tt.wantNext)
+			}
+			enqueued, err := dir.EnqueueAssignment(ctx, first)
+			if err != nil {
+				t.Fatalf("EnqueueAssignment() error = %v", err)
+			}
+			if enqueued != tt.wantReenqueueAOne {
+				t.Fatalf("EnqueueAssignment() after %s = %v, want %v", tt.reason, enqueued, tt.wantReenqueueAOne)
+			}
+		})
+	}
+}
