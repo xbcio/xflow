@@ -3348,6 +3348,15 @@ if redis.call('HGET', KEYS[4], assignmentID) == 'claimed' and redis.call('HGET',
     redis.call('HDEL', KEYS[8], assignmentID)
     redis.call('HDEL', KEYS[9], assignmentID)
     redis.call('DEL', KEYS[10])
+  elseif ARGV[2] == 'keep_seen' then
+    -- Unowned but still seen: the 'released' state EnqueueAssignment admits,
+    -- so a re-dispatch is the way it runs again (same as the memory directory).
+    redis.call('HSET', KEYS[4], assignmentID, 'released')
+    redis.call('HDEL', KEYS[5], assignmentID)
+    redis.call('HDEL', KEYS[6], assignmentID)
+    redis.call('HDEL', KEYS[7], assignmentID)
+    redis.call('DEL', KEYS[10])
+    laneClear(assignmentID)
   else
     return 'noop'
   end
