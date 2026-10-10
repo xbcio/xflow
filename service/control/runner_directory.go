@@ -211,7 +211,8 @@ const (
 	ReleaseClaimDrop ReleaseClaimReason = "drop"
 	// ReleaseClaimKeepSeen clears claim accounting and keeps the seen mark
 	// without re-queueing: the assignment becomes unowned (released) and only
-	// a later EnqueueAssignment dispatches it again.
+	// a later EnqueueAssignment dispatches it again. No reaper scans released
+	// records; re-dispatch is the only path that converges them.
 	ReleaseClaimKeepSeen ReleaseClaimReason = "keep_seen"
 )
 

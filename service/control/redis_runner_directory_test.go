@@ -970,6 +970,16 @@ func TestRedisRunnerDirectoryReleaseClaimSemantics(t *testing.T) {
 			if n, err := rdb.HExists(ctx, dir.keys.claimsAssignment, string(claim.ClaimID)).Result(); err != nil || n {
 				t.Fatalf("claim accounting survived %s: exists=%v err=%v", tt.reason, n, err)
 			}
+			if tt.reason == ReleaseClaimKeepSeen {
+				// Distinguishes keep_seen from drop: both re-enqueue, only
+				// keep_seen keeps the seen mark and the released record.
+				if seen, err := rdb.SIsMember(ctx, dir.keys.seen, string(first.AssignmentID)).Result(); err != nil || !seen {
+					t.Fatalf("seen mark after keep_seen = %v, err=%v, want true", seen, err)
+				}
+				if state, err := rdb.HGet(ctx, dir.keys.assignmentState, string(first.AssignmentID)).Result(); err != nil || state != redisAssignmentReleased {
+					t.Fatalf("assignment state after keep_seen = %q, err=%v, want %q", state, err, redisAssignmentReleased)
+				}
+			}
 			// Capacity 1: the next claim only succeeds if the runner count was freed.
 			next := claimRedisDirectoryAssignment(t, ctx, dir, session, 1)
 			if next.Assignment.AssignmentID != tt.wantNext {
