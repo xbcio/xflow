@@ -92,8 +92,9 @@ var _ AssignmentQueueOldestAgeReporter = (*MemoryRunnerDirectory)(nil)
 // redisAssignmentQueueOldestAgesLua reads the head sample of every queue in
 // KEYS[1..#KEYS-1] against the queued-at hash KEYS[#KEYS], and returns the
 // server's TIME in milliseconds followed by each queue's earliest stamp (-2
-// when the queue is empty, -1 when it is not but no sampled entry is stamped). It is read-only, and it uses the server
-// clock for "now" so the age never mixes the writer's clock with the reader's.
+// when the queue is empty, -1 when it is not but no sampled entry is
+// stamped). It is read-only, and it uses the server clock for "now" so the
+// age never mixes the writer's clock with the reader's.
 const redisAssignmentQueueOldestAgesLua = `
 local sample = tonumber(ARGV[1])
 local stamps = KEYS[#KEYS]
