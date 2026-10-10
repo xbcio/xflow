@@ -28,6 +28,9 @@ const (
 	metricDispatchDropped            = "xflow_dispatch_dropped_total"
 	metricTaskDeliveryLag            = "xflow_task_delivery_lag_seconds"
 	metricAssignmentQueueDepth       = "xflow_assignment_queue_depth"
+	metricAssignmentQueueOldestAge   = "xflow_assignment_queue_oldest_age_seconds"
+	metricRunnerClaimPollTargets     = "xflow_runner_claim_poll_targets"
+	metricRunnerClaimPollRoundTrips  = "xflow_runner_claim_poll_round_trips"
 	metricSupplyHintReadErrors       = "xflow_supply_hint_read_errors_total"
 )
 
@@ -65,6 +68,10 @@ type sweepPassCandidateObserver interface {
 // queue, as opposed to what a maintenance pass did with it.
 type sweepQueueDepthObserver interface {
 	OnAssignmentQueueDepth(ctx context.Context, lane string, depth int64)
+}
+
+type sweepQueueAgeObserver interface {
+	OnAssignmentQueueOldestAge(ctx context.Context, lane string, age time.Duration)
 }
 
 type runnerClaimObserver interface {
@@ -268,12 +275,26 @@ func (s SweepMetrics) OnAssignmentQueueDepth(_ context.Context, lane string, dep
 	s.Metrics.Set(metricAssignmentQueueDepth, map[string]string{"lane": lane}, float64(depth))
 }
 
+// OnAssignmentQueueOldestAge records the age, in seconds, of the earliest
+// queued-at stamp among the first entries at the head (oldest end) of one
+// assignment queue. The sample is the head few entries, not the whole queue,
+// so the value is "the oldest wait at the front", which is where the claim
+// walk starts. An empty queue is reported as zero so a drained queue does not
+// freeze at its last age. Entries an older writer queued carry no stamp and
+// are skipped; a non-empty queue with no stamped entry in its sample is not
+// reported. A failed read leaves the last value. The labels match
+// OnAssignmentQueueDepth.
+func (s SweepMetrics) OnAssignmentQueueOldestAge(_ context.Context, lane string, age time.Duration) {
+	s.Metrics.Set(metricAssignmentQueueOldestAge, map[string]string{"lane": lane}, age.Seconds())
+}
+
 var (
 	_ sweepObserver              = SweepMetrics{}
 	_ sweepTimingObserver        = SweepMetrics{}
 	_ sweepPassObserver          = SweepMetrics{}
 	_ sweepPassCandidateObserver = SweepMetrics{}
 	_ sweepQueueDepthObserver    = SweepMetrics{}
+	_ sweepQueueAgeObserver      = SweepMetrics{}
 )
 
 // RunnerClaimMetrics observes durable runner-directory claim recovery and
@@ -296,7 +317,21 @@ func (r RunnerClaimMetrics) OnRunnerLeaseReplayed(ctx context.Context) {
 	r.Metrics.Inc(metricRunnerLeaseReplayed, withNamespace(ctx, nil))
 }
 
+// OnRunnerClaimPoll records one claim poll's walk cost as two count
+// histograms: queue targets walked and Redis round trips issued. No labels —
+// the distribution across the fleet is what bounds the poll-wide cost.
+func (r RunnerClaimMetrics) OnRunnerClaimPoll(_ context.Context, targets, roundTrips int) {
+	r.Metrics.ObserveCount(metricRunnerClaimPollTargets, nil, targets)
+	r.Metrics.ObserveCount(metricRunnerClaimPollRoundTrips, nil, roundTrips)
+}
+
 var _ runnerClaimObserver = RunnerClaimMetrics{}
+
+type runnerClaimPollObserver interface {
+	OnRunnerClaimPoll(ctx context.Context, targets, roundTrips int)
+}
+
+var _ runnerClaimPollObserver = RunnerClaimMetrics{}
 
 // DispatcherMetrics observes retryable dispatcher placement failures.
 type DispatcherMetrics struct {

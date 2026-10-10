@@ -23,7 +23,13 @@ type redisRunnerDirectoryKeys struct {
 	// assignmentLane is the HASH recording, per assignment ID, the lane key
 	// the assignment was placed on. The requeue transitions carry only an ID,
 	// so this marker is how they learn which lane to push the entry back to.
-	assignmentLane       string
+	assignmentLane string
+	// assignmentQueuedAt is the HASH recording, per assignment ID, the Redis
+	// server time in milliseconds at which the entry last entered a queue — an
+	// enqueue (tail) or a requeue (head). It only feeds the oldest-entry age
+	// metric; nothing reads it for correctness, and a missing field (an entry
+	// an older writer queued) is simply not sampled.
+	assignmentQueuedAt   string
 	assignmentData       string
 	assignmentState      string
 	assignmentClaim      string
@@ -129,6 +135,7 @@ func newRedisRunnerDirectoryKeys(prefix string) redisRunnerDirectoryKeys {
 		queue:                                 prefix + ":queue",
 		seen:                                  prefix + ":seen",
 		assignmentLane:                        prefix + ":assignment:lane",
+		assignmentQueuedAt:                    prefix + ":assignment:queued_at",
 		assignmentData:                        prefix + ":assignment:data",
 		assignmentState:                       prefix + ":assignment:state",
 		assignmentClaim:                       prefix + ":assignment:claim",

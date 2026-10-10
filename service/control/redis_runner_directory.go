@@ -292,18 +292,20 @@ func (d *RedisRunnerDirectory) laneQueueKeys() []string {
 }
 
 // appendLaneRequeueKeys appends the lane requeue KEYS tail — every candidate
-// queue key (lanes first, legacy last) and then the lane marker hash — to a
+// queue key (lanes first, legacy last), the lane marker hash, and then the
+// queued-at hash — to a
 // script's key list. Callers must also pass laneRequeueCandidateCount and
 // laneRequeueModeArg as the trailing ARGV values; redisLaneRequeueLua reads
 // the candidate count from the second-to-last ARGV and the write mode from the
 // last.
 func (d *RedisRunnerDirectory) appendLaneRequeueKeys(keys []string) []string {
 	keys = append(keys, d.laneQueueKeys()...)
-	return append(keys, d.keys.assignmentLane)
+	return append(keys, d.keys.assignmentLane, d.keys.assignmentQueuedAt)
 }
 
 // laneRequeueCandidateCount fixes where the candidate keys start in KEYS: the
-// requeue helper derives laneBase as #KEYS minus this count.
+// requeue helper derives laneBase as #KEYS minus this count minus one (the
+// marker and queued-at hashes follow the candidates).
 func (d *RedisRunnerDirectory) laneRequeueCandidateCount() string {
 	return strconv.Itoa(len(d.laneQueueKeys()))
 }
@@ -505,7 +507,7 @@ func (d *RedisRunnerDirectory) EnqueueAssignment(ctx context.Context, assignment
 		return false, err
 	}
 	candidates, targets, marker := d.enqueueQueueKeys(assignment)
-	keys := make([]string, 0, len(candidates)+len(targets)+10)
+	keys := make([]string, 0, len(candidates)+len(targets)+11)
 	keys = append(keys, candidates...)
 	keys = append(keys, targets...)
 	keys = append(keys,
@@ -519,6 +521,7 @@ func (d *RedisRunnerDirectory) EnqueueAssignment(ctx context.Context, assignment
 		d.keys.assignmentLeaseToken,
 		d.keys.assignmentLeaseMetaKey(string(assignment.AssignmentID)),
 		d.keys.assignmentLane,
+		d.keys.assignmentQueuedAt,
 	)
 	status, err := d.evalStatus(ctx, redisEnqueueAssignmentLua, keys,
 		string(assignment.AssignmentID), payload,
@@ -729,19 +732,27 @@ func (d *RedisRunnerDirectory) claimFromQueuePage(
 	}
 
 	pending := false
+	walked := 0
+	roundTrips := 1 // the depth probe
 	for _, target := range targets {
 		walk, err := d.walkClaimTarget(ctx, req, runner, capabilities, labels, target, lengths[target])
 		if err != nil {
 			return Claim{}, false, false, err
 		}
+		if walk.roundTrips > 0 {
+			walked++
+		}
+		roundTrips += walk.roundTrips
 		if walk.resolved {
 			// A definite answer applies to the poll as a whole, so the remaining
 			// targets are not worth another round trip. walkClaimTarget has
 			// already cleared the pending-walk marker on these paths.
+			d.observeClaimPoll(ctx, walked, roundTrips)
 			return walk.claim, walk.claim.ClaimID != "", true, nil
 		}
 		pending = pending || walk.pending
 	}
+	d.observeClaimPoll(ctx, walked, roundTrips)
 	// The scan budget ran out with queue left unexamined on at least one target.
 	// Report the walk as pending so the poll loop resumes it at the short cadence
 	// instead of the idle one.
@@ -803,6 +814,10 @@ type claimTargetWalk struct {
 	// loop should resume at the short cadence. It is only meaningful on an
 	// unresolved walk.
 	pending bool
+	// roundTrips counts the Redis calls this target's walk issued (page reads,
+	// payload reads, liveness probes, claim transitions), for the poll cost
+	// observation.
+	roundTrips int
 }
 
 // walkClaimTarget walks bounded pages of one queue target starting at the
@@ -832,21 +847,24 @@ func (d *RedisRunnerDirectory) walkClaimTarget(
 
 	attempts := 0
 	scanned := 0
+	trips := 0
 	for scanned < redisClaimScanBudget {
 		page := redisClaimQueuePage
 		if remaining := redisClaimScanBudget - scanned; remaining < page {
 			page = remaining
 		}
 		assignmentIDs, err := d.rdb.LRange(ctx, target, int64(cursor), int64(cursor+page-1)).Result()
+		trips++
 		if err != nil {
 			return claimTargetWalk{}, fmt.Errorf("read redis assignment queue: %w", err)
 		}
 		if len(assignmentIDs) == 0 {
 			d.storeClaimCursorForTarget(req.RunnerID, target, 0)
-			return claimTargetWalk{}, nil
+			return claimTargetWalk{roundTrips: trips}, nil
 		}
 
 		raws, err := d.rdb.HMGet(ctx, d.keys.assignmentData, assignmentIDs...).Result()
+		trips++
 		if err != nil {
 			return claimTargetWalk{}, fmt.Errorf("read redis assignments: %w", err)
 		}
@@ -894,12 +912,18 @@ func (d *RedisRunnerDirectory) walkClaimTarget(
 			// finds nothing to run. On a queue whose head has outlived its executions that
 			// is nearly all of the page, so the claim path spent its whole budget
 			// materializing leases for work that no longer existed — which is both wasted
-			// work and, because a claim resets the resume cursor, the reason a live entry
-			// further down the queue was never reached at all.
+			// work and, back when a claim reset the resume cursor (it no longer does; see
+			// the 'claimed' case below), the reason a live entry further down the queue
+			// was never reached at all.
 			//
 			// Removal stays with the dead-queued reaper: it owns the atomic transitions
 			// (queue, seen set, claim maps) and a wrong removal here would lose work.
 			leaseable, err := d.leaseableExecutions(ctx, assignments)
+			if d.executions != nil {
+				// One status read per namespace on the page; counted as one, which
+				// is exact for the single-namespace page that is the common case.
+				trips++
+			}
 			if err != nil {
 				return claimTargetWalk{}, err
 			}
@@ -911,6 +935,7 @@ func (d *RedisRunnerDirectory) walkClaimTarget(
 				}
 				claimID := ClaimID(uuid.NewString())
 				status, err := d.claim(ctx, target, req.RunnerID, req.SessionID, c.assignmentID, c.raw, claimID)
+				trips++
 				if err != nil {
 					return claimTargetWalk{}, err
 				}
@@ -926,7 +951,7 @@ func (d *RedisRunnerDirectory) walkClaimTarget(
 					// re-walked that whole prefix before it could claim anything, and an
 					// unadvanced cursor cannot step over a prefix the way a skipped page can.
 					d.storeClaimWalk(req.RunnerID, false)
-					return claimTargetWalk{claim: Claim{ClaimID: claimID, Assignment: c.assignment}, resolved: true}, nil
+					return claimTargetWalk{claim: Claim{ClaimID: claimID, Assignment: c.assignment}, resolved: true, roundTrips: trips}, nil
 				case "retry":
 					// 'retry' is a verdict on the entry, not a transient hold: the
 					// state changed (a peer claimed it), the payload was replaced,
@@ -944,7 +969,7 @@ func (d *RedisRunnerDirectory) walkClaimTarget(
 				case "none", "draining":
 					d.storeClaimCursorForTarget(req.RunnerID, target, 0)
 					d.storeClaimWalk(req.RunnerID, false)
-					return claimTargetWalk{resolved: true}, nil
+					return claimTargetWalk{resolved: true, roundTrips: trips}, nil
 				case "not_found", "stale":
 					return claimTargetWalk{}, runnerSessionStatusError(status)
 				default:
@@ -964,12 +989,12 @@ func (d *RedisRunnerDirectory) walkClaimTarget(
 			// A stopped walk has queue left to examine, so it resumes at the
 			// short cadence; a wrap is a completed sweep and resumes at the idle
 			// one.
-			return claimTargetWalk{pending: stopped && cursor != 0}, nil
+			return claimTargetWalk{pending: stopped && cursor != 0, roundTrips: trips}, nil
 		}
 	}
 
 	// The scan budget ran out with queue left unexamined.
-	return claimTargetWalk{pending: true}, nil
+	return claimTargetWalk{pending: true, roundTrips: trips}, nil
 }
 
 // nextClaimCursor is where the following poll resumes. A short (end-of-queue) page
@@ -1700,6 +1725,7 @@ func (d *RedisRunnerDirectory) claim(ctx context.Context, target, runnerID, sess
 		d.keys.handoffLeaseToken,
 		d.keys.handoffRecoveryReady,
 		d.keys.handoffClaimIndexKey(runnerID),
+		d.keys.assignmentQueuedAt,
 	}, runnerID, sessionID, assignmentID, expectedData, string(claimID), strconv.FormatInt(d.claimTTLMillis(), 10), strconv.FormatInt(time.Now().UTC().UnixMilli(), 10))
 	if err != nil {
 		return "", fmt.Errorf("claim redis assignment: %w", err)
@@ -2772,12 +2798,13 @@ func canServeNamespace(namespaces []namespace.Namespace, t namespace.Namespace) 
 const redisLaneRequeueLua = `
 local laneCandidates = tonumber(ARGV[#ARGV - 1])
 local laneMode = ARGV[#ARGV]
-local laneBase = #KEYS - laneCandidates
-local laneLegacy = KEYS[#KEYS - 1]
-local laneMarker = KEYS[#KEYS]
+local laneBase = #KEYS - 1 - laneCandidates
+local laneLegacy = KEYS[#KEYS - 2]
+local laneMarker = KEYS[#KEYS - 1]
+local laneQueuedAt = KEYS[#KEYS]
 local function laneClear(id)
   local i
-  for i = laneBase, #KEYS - 1 do
+  for i = laneBase, #KEYS - 2 do
     redis.call('LREM', KEYS[i], 0, id)
   end
 end
@@ -2787,7 +2814,7 @@ local function lanePush(id)
     local marked = redis.call('HGET', laneMarker, id)
     if marked and marked ~= '' then
       local i
-      for i = laneBase, #KEYS - 1 do
+      for i = laneBase, #KEYS - 2 do
         if KEYS[i] == marked then target = marked break end
       end
     end
@@ -2801,10 +2828,13 @@ local function lanePush(id)
   else
     redis.call('HDEL', laneMarker, id)
   end
+  local now = redis.call('TIME')
+  redis.call('HSET', laneQueuedAt, id, string.format('%.0f', tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)))
 end
 local function laneDrop(id)
   laneClear(id)
   redis.call('HDEL', laneMarker, id)
+  redis.call('HDEL', laneQueuedAt, id)
 end
 `
 
@@ -2982,7 +3012,8 @@ return 'ok'
 // mode selects. ARGV[5] is the lane marker value; empty means "do not write a
 // marker" (legacy-only mode and deployments without lanes), which is
 // equivalent to a missing marker because the requeue transitions read a
-// missing marker as legacy.
+// missing marker as legacy. KEYS[base+11] is the queued-at hash, stamped with
+// the Redis server's TIME so every writer and the age reader share one clock.
 const redisEnqueueAssignmentLua = `
 local candidates = tonumber(ARGV[3])
 local targets = tonumber(ARGV[4])
@@ -3014,6 +3045,8 @@ if ARGV[5] ~= '' then
 else
   redis.call('HDEL', KEYS[base+10], ARGV[1])
 end
+local now = redis.call('TIME')
+redis.call('HSET', KEYS[base+11], ARGV[1], string.format('%.0f', tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)))
 return 'enqueued'
 `
 
@@ -3110,6 +3143,7 @@ if redis.call('HGET', KEYS[2], ARGV[3]) ~= ARGV[4] then return 'retry' end
 if redis.call('LREM', KEYS[1], 0, ARGV[3]) == 0 then return 'retry' end
 
 redis.call('HSET', KEYS[3], ARGV[3], 'claimed')
+redis.call('HDEL', KEYS[28], ARGV[3])
 redis.call('HSET', KEYS[4], ARGV[3], ARGV[5])
 redis.call('HSET', KEYS[5], ARGV[3], ARGV[1])
 redis.call('HSET', KEYS[6], ARGV[3], ARGV[2])

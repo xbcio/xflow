@@ -79,6 +79,7 @@ type LeaseSweeper struct {
 	passObserver   SweepPassObserver
 	passCandidates SweepPassCandidateObserver
 	depthObserver  SweepQueueDepthObserver
+	ageObserver    SweepQueueAgeObserver
 	elector        backend.LeaderElector
 	clock          func() time.Time
 	sleepFunc      func(context.Context, time.Duration) error
@@ -210,6 +211,14 @@ type SweepQueueDepthObserver interface {
 	OnAssignmentQueueDepth(ctx context.Context, lane string, depth int64)
 }
 
+// SweepQueueAgeObserver is the optional extension that receives the age of
+// the oldest sampled entry on each assignment queue, alongside its depth. It
+// is discovered from LeaseSweeperConfig.Observer like SweepQueueDepthObserver.
+// A queue with no stamped entry in its head sample is not reported at all.
+type SweepQueueAgeObserver interface {
+	OnAssignmentQueueOldestAge(ctx context.Context, lane string, age time.Duration)
+}
+
 // LeaseSweeperConfig configures a sweeper.
 type LeaseSweeperConfig struct {
 	// Period is the interval between sweep scans. Defaults to DefaultSweepPeriod.
@@ -337,6 +346,10 @@ func NewLeaseSweeper(state LeaseLister, eng execution.Engine, cfg LeaseSweeperCo
 	if observer, ok := cfg.Observer.(SweepQueueDepthObserver); ok {
 		depthObserver = observer
 	}
+	var ageObserver SweepQueueAgeObserver
+	if observer, ok := cfg.Observer.(SweepQueueAgeObserver); ok {
+		ageObserver = observer
+	}
 	return &LeaseSweeper{
 		state:            state,
 		engine:           eng,
@@ -349,6 +362,7 @@ func NewLeaseSweeper(state LeaseLister, eng execution.Engine, cfg LeaseSweeperCo
 		passObserver:     passObserver,
 		passCandidates:   passCandidates,
 		depthObserver:    depthObserver,
+		ageObserver:      ageObserver,
 		elector:          cfg.Elector,
 		clock:            func() time.Time { return time.Now().UTC() },
 		sleepFunc:        sleepWithContext,
@@ -407,26 +421,40 @@ func (s *LeaseSweeper) Run(ctx context.Context) {
 // logged and retried on the next cadence, and the depth series simply goes
 // stale rather than the gauge being zeroed, which would read as "the queue
 // drained".
+//
+// The oldest-entry age rides the same cadence and gate, and follows the same
+// failure rule independently: a failed age read leaves the depths reported and
+// the age series stale, and the reverse.
 func (s *LeaseSweeper) ReportQueueDepthsOnce(ctx context.Context) {
-	if s.depthObserver == nil {
+	if s.depthObserver == nil && s.ageObserver == nil {
 		return
 	}
 	if s.elector != nil && !s.elector.IsLeader() {
 		return
 	}
-	reporter, ok := s.directory.(AssignmentQueueDepthReporter)
-	if !ok {
-		return
-	}
-	depths, err := reporter.AssignmentQueueDepths(ctx)
-	if err != nil {
-		if s.log != nil {
-			s.log.Error("read assignment queue depths", "err", err)
+	if reporter, ok := s.directory.(AssignmentQueueDepthReporter); ok && s.depthObserver != nil {
+		depths, err := reporter.AssignmentQueueDepths(ctx)
+		if err != nil {
+			if s.log != nil {
+				s.log.Error("read assignment queue depths", "err", err)
+			}
+		} else {
+			for lane, depth := range depths {
+				s.depthObserver.OnAssignmentQueueDepth(ctx, lane, depth)
+			}
 		}
-		return
 	}
-	for lane, depth := range depths {
-		s.depthObserver.OnAssignmentQueueDepth(ctx, lane, depth)
+	if reporter, ok := s.directory.(AssignmentQueueOldestAgeReporter); ok && s.ageObserver != nil {
+		ages, err := reporter.AssignmentQueueOldestAges(ctx)
+		if err != nil {
+			if s.log != nil {
+				s.log.Error("read assignment queue oldest ages", "err", err)
+			}
+			return
+		}
+		for lane, age := range ages {
+			s.ageObserver.OnAssignmentQueueOldestAge(ctx, lane, age)
+		}
 	}
 }
 

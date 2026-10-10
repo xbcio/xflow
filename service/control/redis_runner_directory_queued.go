@@ -387,6 +387,7 @@ func (d *RedisRunnerDirectory) reconcileOrphanedLaneMarkers(ctx context.Context,
 			d.keys.assignmentData,
 			d.keys.queue,
 			d.keys.seen,
+			d.keys.assignmentQueuedAt,
 		}, assignmentID))
 	}
 	// Every command has settled by the time Exec returns, each carrying its own
@@ -729,5 +730,6 @@ end
 redis.call('LREM', KEYS[3], 0, assignmentID)
 redis.call('SREM', KEYS[4], assignmentID)
 redis.call('HDEL', KEYS[1], assignmentID)
+redis.call('HDEL', KEYS[5], assignmentID)
 return 'reconciled'
 `
