@@ -518,8 +518,8 @@ func (d *MemoryRunnerDirectory) AssignmentQueueDepths(_ context.Context) (map[st
 }
 
 // AssignmentQueueOldestAges mirrors RedisRunnerDirectory.AssignmentQueueOldestAges:
-// the same head sample size, the same "absent when nothing sampled is stamped"
-// rule, and ages measured on the directory clock.
+// the same head sample size, zero for an empty queue, absent for a non-empty
+// queue with nothing stamped in its sample, and ages on the directory clock.
 func (d *MemoryRunnerDirectory) AssignmentQueueOldestAges(_ context.Context) (map[string]time.Duration, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -527,6 +527,10 @@ func (d *MemoryRunnerDirectory) AssignmentQueueOldestAges(_ context.Context) (ma
 	now := d.clockNow()
 	ages := make(map[string]time.Duration, len(d.lanes)+1)
 	sample := func(name string, queue []Assignment) {
+		if len(queue) == 0 {
+			ages[name] = 0
+			return
+		}
 		var oldest time.Time
 		for i := 0; i < len(queue) && i < assignmentQueueAgeSample; i++ {
 			at, ok := d.queuedAt[queue[i].AssignmentID]

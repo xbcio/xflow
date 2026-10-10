@@ -279,9 +279,11 @@ func (s SweepMetrics) OnAssignmentQueueDepth(_ context.Context, lane string, dep
 // queued-at stamp among the first entries at the head (oldest end) of one
 // assignment queue. The sample is the head few entries, not the whole queue,
 // so the value is "the oldest wait at the front", which is where the claim
-// walk starts. Entries an older writer queued carry no stamp and are skipped;
-// a queue with no stamped entry in its sample is not reported, so the series
-// goes stale rather than reading zero. The labels match OnAssignmentQueueDepth.
+// walk starts. An empty queue is reported as zero so a drained queue does not
+// freeze at its last age. Entries an older writer queued carry no stamp and
+// are skipped; a non-empty queue with no stamped entry in its sample is not
+// reported. A failed read leaves the last value. The labels match
+// OnAssignmentQueueDepth.
 func (s SweepMetrics) OnAssignmentQueueOldestAge(_ context.Context, lane string, age time.Duration) {
 	s.Metrics.Set(metricAssignmentQueueOldestAge, map[string]string{"lane": lane}, age.Seconds())
 }

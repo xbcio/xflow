@@ -76,11 +76,12 @@ const assignmentQueueAgeSample = 8
 // stuck: the webscan sink residency was minutes on a queue a few entries deep.
 // The age is the direct reading of that residency.
 type AssignmentQueueOldestAgeReporter interface {
-	// AssignmentQueueOldestAges returns one entry per queue whose head sample
-	// carried at least one queued-at stamp. A queue that is empty, or whose
-	// sampled entries all predate the stamp, is absent rather than zero: zero
-	// would read as "nothing is waiting", and an absent series is the honest
-	// "not measured".
+	// AssignmentQueueOldestAges returns an entry for every empty queue (age
+	// zero: nothing is waiting, so a drained queue does not leave the last age
+	// frozen) and for every queue whose head sample carried at least one
+	// queued-at stamp. A non-empty queue whose sampled entries all predate the
+	// stamp is absent: it has waiters whose age is unknown, and zero would
+	// claim otherwise.
 	AssignmentQueueOldestAges(ctx context.Context) (map[string]time.Duration, error)
 }
 
@@ -90,8 +91,8 @@ var _ AssignmentQueueOldestAgeReporter = (*MemoryRunnerDirectory)(nil)
 
 // redisAssignmentQueueOldestAgesLua reads the head sample of every queue in
 // KEYS[1..#KEYS-1] against the queued-at hash KEYS[#KEYS], and returns the
-// server's TIME in milliseconds followed by each queue's earliest stamp (-1
-// when no sampled entry is stamped). It is read-only, and it uses the server
+// server's TIME in milliseconds followed by each queue's earliest stamp (-2
+// when the queue is empty, -1 when it is not but no sampled entry is stamped). It is read-only, and it uses the server
 // clock for "now" so the age never mixes the writer's clock with the reader's.
 const redisAssignmentQueueOldestAgesLua = `
 local sample = tonumber(ARGV[1])
@@ -99,9 +100,10 @@ local stamps = KEYS[#KEYS]
 local now = redis.call('TIME')
 local result = { string.format('%.0f', tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)) }
 for i = 1, #KEYS - 1 do
-  local oldest = -1
+  local oldest = -2
   local ids = redis.call('LRANGE', KEYS[i], 0, sample - 1)
   if #ids > 0 then
+    oldest = -1
     local values = redis.call('HMGET', stamps, unpack(ids))
     for j = 1, #values do
       local v = tonumber(values[j])
@@ -140,6 +142,10 @@ func (d *RedisRunnerDirectory) AssignmentQueueOldestAges(ctx context.Context) (m
 		oldest, err := strconv.ParseInt(raw[i+1], 10, 64)
 		if err != nil {
 			return nil, fmt.Errorf("read assignment queue oldest ages: parse stamp: %w", err)
+		}
+		if oldest == -2 {
+			ages[laneOf[key]] = 0
+			continue
 		}
 		if oldest < 0 {
 			continue

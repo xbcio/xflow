@@ -97,12 +97,13 @@ func TestAssignmentQueueOldestAgesSamplesTheHead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AssignmentQueueOldestAges() error = %v", err)
 	}
-	want := map[string]time.Duration{QueueLaneLegacy: 60 * time.Second, memoryLaneTestType: 30 * time.Second}
+	want := map[string]time.Duration{QueueLaneLegacy: 60 * time.Second, memoryLaneTestType: 30 * time.Second, idleLane: 0}
 	if !maps.Equal(ages, want) {
-		t.Fatalf("ages = %v, want %v (idle lane absent)", ages, want)
+		t.Fatalf("ages = %v, want %v (idle lane zero)", ages, want)
 	}
 
-	// A queue holding only unstamped entries is not measured at all.
+	// A non-empty queue holding only unstamped entries is not measured; the
+	// empty lane still reads zero.
 	if err := rdb.Del(ctx, directory.keys.assignmentQueuedAt).Err(); err != nil {
 		t.Fatal(err)
 	}
@@ -110,8 +111,33 @@ func TestAssignmentQueueOldestAgesSamplesTheHead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AssignmentQueueOldestAges() error = %v", err)
 	}
-	if len(ages) != 0 {
-		t.Fatalf("ages without stamps = %v, want nothing reported", ages)
+	if want := map[string]time.Duration{idleLane: 0}; !maps.Equal(ages, want) {
+		t.Fatalf("ages without stamps = %v, want %v", ages, want)
+	}
+}
+
+// TestAssignmentQueueOldestAgesDrainedQueueReadsZero pins the drain
+// transition: a queue that had an age reports zero once it is empty, so the
+// gauge does not freeze at the last waiting entry's age.
+func TestAssignmentQueueOldestAgesDrainedQueueReadsZero(t *testing.T) {
+	ctx := context.Background()
+	mr, rdb := newRedisRunnerDirectoryTestClient(t)
+	directory := NewRedisRunnerDirectory(rdb)
+	session := registerRedisDirectoryRunner(t, ctx, directory, "runner-drain-age", 1)
+	mr.SetTime(time.UnixMilli(10_000))
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, redisDirectoryTestAssignment("exec-age/drain/a"))
+	mr.SetTime(time.UnixMilli(25_000))
+	ages, err := directory.AssignmentQueueOldestAges(ctx)
+	if err != nil || ages[QueueLaneLegacy] != 15*time.Second {
+		t.Fatalf("ages before drain = %v err=%v, want legacy=15s", ages, err)
+	}
+	claimRedisDirectoryAssignment(t, ctx, directory, session, 1)
+	ages, err = directory.AssignmentQueueOldestAges(ctx)
+	if err != nil {
+		t.Fatalf("AssignmentQueueOldestAges() error = %v", err)
+	}
+	if v, ok := ages[QueueLaneLegacy]; !ok || v != 0 {
+		t.Fatalf("ages after drain = %v, want legacy=0 reported", ages)
 	}
 }
 
@@ -144,7 +170,7 @@ func TestMemoryAssignmentQueueOldestAgesMirrorsRedis(t *testing.T) {
 	}
 	now = now.Add(45 * time.Second)
 	ages, _ := dir.AssignmentQueueOldestAges(ctx)
-	if want := map[string]time.Duration{memoryLaneTestType: 45 * time.Second}; !maps.Equal(ages, want) {
+	if want := map[string]time.Duration{QueueLaneLegacy: 0, memoryLaneTestType: 45 * time.Second}; !maps.Equal(ages, want) {
 		t.Fatalf("ages = %v, want %v", ages, want)
 	}
 
@@ -152,8 +178,8 @@ func TestMemoryAssignmentQueueOldestAgesMirrorsRedis(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("ClaimForRunner() ok=%v err=%v", ok, err)
 	}
-	if ages, _ := dir.AssignmentQueueOldestAges(ctx); len(ages) != 0 {
-		t.Fatalf("ages after claim = %v, want nothing", ages)
+	if ages, _ := dir.AssignmentQueueOldestAges(ctx); !maps.Equal(ages, map[string]time.Duration{QueueLaneLegacy: 0, memoryLaneTestType: 0}) {
+		t.Fatalf("ages after claim = %v, want both queues drained to zero", ages)
 	}
 	if _, ok := dir.queuedAt[assignment.AssignmentID]; ok {
 		t.Fatal("claim left the queued-at stamp behind")
@@ -165,7 +191,7 @@ func TestMemoryAssignmentQueueOldestAgesMirrorsRedis(t *testing.T) {
 	}
 	now = now.Add(5 * time.Second)
 	ages, _ = dir.AssignmentQueueOldestAges(ctx)
-	if want := map[string]time.Duration{memoryLaneTestType: 5 * time.Second}; !maps.Equal(ages, want) {
+	if want := map[string]time.Duration{QueueLaneLegacy: 0, memoryLaneTestType: 5 * time.Second}; !maps.Equal(ages, want) {
 		t.Fatalf("ages after requeue = %v, want %v (measured from the requeue)", ages, want)
 	}
 }
