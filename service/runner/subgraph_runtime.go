@@ -107,11 +107,9 @@ func NewSubgraphRuntime(reg *execution.Registry, cache *PackageCache, opts ...Su
 		}
 		return local.New(backendOpts...)
 	}, execOpts...)
-	// No outer deadline to forward: this runtime is built once at runner
-	// startup, before any lease (and its payload.Deadline, which
-	// BuildSubgraphLease never populates today -- see SUBGRAPH-ENGINE-TODO.md)
-	// exists. See MapBodyExecutor's deadline field doc in
-	// execution/subgraph/map_body.go.
+	// No constructor-time deadline: this runtime is built once at runner
+	// startup, before any lease exists. Each batch's own bound arrives as
+	// payload.Deadline and is forwarded per request in Execute.
 	return &SubgraphRuntime{bodies: subgraph.NewMapBodyExecutor(executor, true, time.Time{})}
 }
 
@@ -146,6 +144,10 @@ func (r *SubgraphRuntime) Execute(ctx context.Context, lease *engine.TaskLease) 
 		OuterNodes:      payload.OuterNodes,
 		TraceID:         payload.TraceID,
 		SpanID:          payload.SpanID,
+		// The map node's timeout from the parent lease's original issue time,
+		// stamped by BuildSubgraphLease. Without it a runner's body could keep
+		// running long after the node that spawned it timed out.
+		Deadline: payload.Deadline,
 	})
 	if err != nil {
 		// The body could not be RUN at all — package validation, compile,
