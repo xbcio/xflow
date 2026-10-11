@@ -233,9 +233,9 @@ nodes:
 # 与 at-least-once 契约的关系：超时节点不再重投，但宿主幂等键仍为必需——超时前 handler
 # 可能已产生副作用（如已发出 HTTP 请求），下游/重放仍可能重复观测该副作用，须靠幂等键兜底。
 # 已知限制（诚实声明，非承诺覆盖）：
-#   (1) 服务端 backstop 仅 HTTP runner 覆盖：gRPC runner 不续约（service/runner/runner.go
-#       将续约限制在 leaseRenewClient 类型断言之后，gRPC client 不满足），故 gRPC 路径
-#       无服务端超时兜底。
+#   (1) 服务端 backstop 对 HTTP 与 gRPC runner 均生效：两者都实现 RenewLease
+#       （service/protocol/grpc_client.go 的 GRPCClient.RenewLease），runner 的续约环
+#       在 leaseRenewClient 类型断言通过后启动，两种传输都满足。
 #   (2) group lease 不被 backstop 覆盖：engine.ErrGroupLeaseNotSupported，CommitTaskTimeout
 #       拒绝 group lease。group 的 deadline 在 GroupLeasePayload.Deadline，不在
 #       TaskLease.ExecutionDeadline。

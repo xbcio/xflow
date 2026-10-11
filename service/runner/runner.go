@@ -120,7 +120,7 @@ type Config struct {
 	// Renewal tunes the per-task lease renewal loop. Zero values take the
 	// defaults (interval min(TTL/3, 10s), 3 consecutive transport failures
 	// before the handler is cancelled). Renewal only happens when the protocol
-	// client implements leaseRenewClient — the gRPC client does not.
+	// client implements leaseRenewClient; both the HTTP and gRPC clients do.
 	Renewal RenewalConfig
 	// TimeoutObserver, when set, records node execution timeout/duration
 	// events from the in-process executor (handler deadline fired, abandoned
