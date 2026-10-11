@@ -242,6 +242,14 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 		}
 	}
 
+	if len(def.Params) > 0 {
+		g.params = make(map[string]types.ParamDef, len(def.Params))
+		for name, pd := range def.Params {
+			pd.Default = cloneAny(pd.Default)
+			pd.Validation = cloneStringAnyMap(pd.Validation)
+			g.params[name] = pd
+		}
+	}
 	if def.Context != nil {
 		g.vars = cloneStringAnyMap(def.Context.Vars)
 		g.config = cloneStringAnyMap(def.Context.Config)

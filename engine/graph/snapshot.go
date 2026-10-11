@@ -513,6 +513,8 @@ type graphSerializedForm struct {
 	// $nodes['name'] in its parameters. Cannot be re-derived on decode because
 	// the extraction is a compile-time pass that UnmarshalJSON does not run.
 	NodesRefs map[int][]string `json:"nodes_refs,omitempty"`
+	// Params carries the top-level params schema; see Graph.params.
+	Params map[string]types.ParamDef `json:"params,omitempty"`
 }
 
 // MarshalJSON implements json.Marshaler so that encoding/json can serialize a
@@ -550,6 +552,7 @@ func (g *Graph) MarshalJSON() ([]byte, error) {
 		Groups:                 g.groups,
 		SupplyRefs:             g.supplyRefs,
 		NodesRefs:              g.nodesRefs,
+		Params:                 g.params,
 	})
 }
 
@@ -673,6 +676,7 @@ func (g *Graph) UnmarshalJSON(data []byte) error {
 	g.groups = sf.Groups
 	g.supplyRefs = sf.SupplyRefs
 	g.nodesRefs = sf.NodesRefs
+	g.params = sf.Params
 	// Bodies need no line here: they travel inside Nodes as NodeMeta.Body.
 	// Rebuild supplyIndexes from node kinds — the same deterministic derivation
 	// Compile performs, so a round-tripped graph needs no WorkflowDef. The

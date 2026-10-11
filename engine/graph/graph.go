@@ -97,6 +97,12 @@ type Graph struct {
 	// and re-extracting from parameters would be maintaining a second
 	// implementation of the extraction logic.
 	nodesRefs map[int][]string
+
+	// params is the workflow's top-level params schema (WorkflowDef.Params),
+	// enforced at Submit/Invoke by ApplyParams. It travels in the snapshot so
+	// a decoded graph enforces the same schema, but stays out of the hash
+	// payload so graphs without params keep their existing hash.
+	params map[string]types.ParamDef
 }
 
 // BodyAt returns the projected body package for the node at nodeIdx, or nil
