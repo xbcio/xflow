@@ -103,6 +103,11 @@ type Graph struct {
 	// a decoded graph enforces the same schema, but stays out of the hash
 	// payload so graphs without params keep their existing hash.
 	params map[string]types.ParamDef
+
+	// expandedDef is the definition Compile actually compiled: the caller's
+	// def after node_templates expansion. Like warnings it belongs to one
+	// compilation, so it is neither serialized nor hashed.
+	expandedDef *types.WorkflowDef
 }
 
 // BodyAt returns the projected body package for the node at nodeIdx, or nil
@@ -521,5 +526,11 @@ func (g *Graph) SupplyNodeIndexes() map[string]int {
 
 // Warnings returns the non-fatal diagnostics collected during compilation.
 func (g *Graph) Warnings() []string { return g.warnings }
+
+// ExpandedDefinition returns the definition this graph was compiled from after
+// node_templates expansion -- the caller's own def when no node uses a
+// template. Nil for a graph decoded from a snapshot. Callers must treat it as
+// read-only.
+func (g *Graph) ExpandedDefinition() *types.WorkflowDef { return g.expandedDef }
 
 func (g *Graph) addWarning(msg string) { g.warnings = append(g.warnings, msg) }

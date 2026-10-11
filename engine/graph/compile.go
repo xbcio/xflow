@@ -167,6 +167,10 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	if def == nil {
 		return nil, errors.New("workflow definition is nil")
 	}
+	def, err := ExpandNodeTemplates(def)
+	if err != nil {
+		return nil, err
+	}
 	n := len(def.Nodes)
 	if n == 0 {
 		return nil, errors.New("workflow has no nodes")
@@ -179,6 +183,7 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	}
 
 	g := &Graph{
+		expandedDef:     def,
 		name:            def.Name,
 		workflowVersion: def.Version,
 		compilerVersion: compilerVersion,
