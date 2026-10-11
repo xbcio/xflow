@@ -185,6 +185,9 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 		if err := validateRetryStrategy("settings", def.Settings.Retry); err != nil {
 			return nil, err
 		}
+		if err := validateSettingsOnError(def.Settings.OnError); err != nil {
+			return nil, err
+		}
 	}
 
 	g := &Graph{
@@ -377,6 +380,9 @@ func validateFAF(def *types.WorkflowDef) error {
 	if def.Settings != nil && def.Settings.Retry != nil {
 		return errors.New("faf workflow cannot define workflow retries")
 	}
+	if def.Settings != nil && def.Settings.OnError != "" && def.Settings.OnError != string(types.OnErrorStop) {
+		return fmt.Errorf("faf workflow cannot define settings.on_error %q", def.Settings.OnError)
+	}
 	if len(def.Nodes) != 1 {
 		return fmt.Errorf("faf workflow must contain exactly one node, got %d", len(def.Nodes))
 	}
@@ -445,7 +451,7 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 			Type:               nd.Type,
 			Kind:               nd.Kind,
 			Version:            nd.Version,
-			OnError:            nd.OnError,
+			OnError:            resolveOnError(nd.OnError, def.Settings),
 			Output:             cloneNodeOutputPolicy(nd.Output),
 			RunnerSelector:     runnerSelector,
 			MergeMode:          extractMergeMode(nd),
@@ -734,6 +740,26 @@ func resolveRetry(node *types.RetrySettings, settings *types.WorkflowSettings) *
 		return settings.Retry.Clone()
 	}
 	return nil
+}
+
+// resolveOnError returns the node's effective on_error: an explicit node value
+// wins, otherwise settings.on_error applies. Groups do not inherit it.
+func resolveOnError(node string, settings *types.WorkflowSettings) string {
+	if node != "" || settings == nil {
+		return node
+	}
+	return settings.OnError
+}
+
+// validateSettingsOnError rejects a workflow default on_error the engine does
+// not implement.
+func validateSettingsOnError(onErr string) error {
+	switch types.OnError(onErr) {
+	case "", types.OnErrorStop, types.OnErrorOutput, types.OnErrorMainOutput, types.OnErrorContinue:
+		return nil
+	}
+	return fmt.Errorf("settings.on_error %q must be one of %q, %q, %q, %q",
+		onErr, types.OnErrorStop, types.OnErrorOutput, types.OnErrorMainOutput, types.OnErrorContinue)
 }
 
 // validateRetryStrategy rejects a retry strategy the engine does not implement.
