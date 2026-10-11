@@ -37,12 +37,21 @@ func cronDescriptorDefault(t *testing.T, name string) any {
 // the first emitted event's time.
 func firedLocation(t *testing.T, params map[string]any) string {
 	t.Helper()
+	return firedLocationIn(t, params, "")
+}
+
+// firedLocationIn is firedLocation with a workflow settings.timezone supplied
+// on the activation input.
+func firedLocationIn(t *testing.T, params map[string]any, workflowTZ string) string {
+	t.Helper()
 	rt := triggertest.NewFakeRuntime()
 	sub, err := New().Activate(context.Background(), &types.TriggerActivateInput{
 		WorkflowID: "wf-1",
 		NodeName:   "cron",
 		Params:     params,
 		Runtime:    rt,
+
+		WorkflowTimezone: workflowTZ,
 	})
 	if err != nil {
 		t.Fatalf("Activate(%v): %v", params, err)
@@ -88,5 +97,37 @@ func TestDefaultContractCronTimezone(t *testing.T) {
 	}
 	if got["control"] == got["absent"] {
 		t.Errorf("control zone read as %q like absent; the probe does not observe timezone", got["control"])
+	}
+}
+
+// TestCronTimezonePrecedence pins the resolution order: the node's own
+// timezone, then the workflow settings.timezone, then UTC.
+func TestCronTimezonePrecedence(t *testing.T) {
+	cases := map[string]struct {
+		params     map[string]any
+		workflowTZ string
+		want       string
+	}{
+		"node wins":           {map[string]any{"expression": "@every 1s", "timezone": "Asia/Tokyo"}, "Asia/Shanghai", "Asia/Tokyo"},
+		"workflow when unset": {map[string]any{"expression": "@every 1s"}, "Asia/Shanghai", "Asia/Shanghai"},
+		"UTC when neither":    {map[string]any{"expression": "@every 1s"}, "", "UTC"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := firedLocationIn(t, tc.params, tc.workflowTZ); got != tc.want {
+				t.Fatalf("location = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCronUnsetTimezoneIsOmitted: an unset node timezone must stay
+// distinguishable from an explicit "UTC", or the workflow default could never
+// apply to a Go-built cron node.
+func TestCronUnsetTimezoneIsOmitted(t *testing.T) {
+	params := New().Cron("* * * * *").RawParams().(map[string]any)
+	if _, ok := params["timezone"]; ok {
+		t.Fatalf("RawParams() = %v, want no timezone key when unset", params)
 	}
 }

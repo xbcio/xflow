@@ -22,7 +22,7 @@ type Node struct {
 }
 
 func New() *Node {
-	return &Node{Expression: "* * * * *", Timezone: "UTC"}
+	return &Node{Expression: "* * * * *"}
 }
 
 func (n *Node) Cron(expression string) *Node {
@@ -45,7 +45,7 @@ func (n *Node) Descriptor() types.Descriptor {
 			// @every / @hourly descriptors.
 			{Name: "expression", DisplayName: "Expression", Type: types.ParamString, Required: true, Description: "Cron schedule, five fields (e.g. \"*/5 * * * *\") or a descriptor such as \"@every 1m\"",
 				Widget: nodeinternal.WidgetCron, Constraints: nodeinternal.Format(nodeinternal.FormatCron)},
-			{Name: "timezone", DisplayName: "Timezone", Type: types.ParamString, Required: false, Default: "UTC", Description: "IANA time zone name the schedule is evaluated in"},
+			{Name: "timezone", DisplayName: "Timezone", Type: types.ParamString, Required: false, Default: "", Description: "IANA time zone name the schedule is evaluated in; empty inherits the workflow settings.timezone (UTC if none)"},
 		},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 	}
@@ -53,7 +53,11 @@ func (n *Node) Descriptor() types.Descriptor {
 
 func (n *Node) NodeType() string { return "xflow.trigger.cron" }
 func (n *Node) RawParams() any {
-	return map[string]any{"expression": n.Expression, "timezone": n.Timezone}
+	params := map[string]any{"expression": n.Expression}
+	if n.Timezone != "" {
+		params["timezone"] = n.Timezone
+	}
+	return params
 }
 func (n *Node) OnError(s types.OnError) types.Builder {
 	n.SetOnError(s)
@@ -66,7 +70,12 @@ func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (ty
 	if expr == "" {
 		return nil, fmt.Errorf("cron expression is required")
 	}
+	// Precedence: the node's own timezone, then the workflow's
+	// settings.timezone, then UTC.
 	tz := cast.ToString(in.Params["timezone"])
+	if tz == "" {
+		tz = in.WorkflowTimezone
+	}
 	if tz == "" {
 		tz = "UTC"
 	}

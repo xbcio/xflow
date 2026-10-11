@@ -41,6 +41,11 @@ type TriggerActivateInput struct {
 	// value is the JSON-decoded supply content (map[string]any). nil when no
 	// supplies are declared or none have content yet.
 	Supplies map[string]any
+	// WorkflowTimezone is the workflow's settings.timezone (IANA name, already
+	// validated at compile), or "" when the workflow declares none. Triggers
+	// that evaluate wall-clock schedules use it when their own timezone
+	// parameter is unset.
+	WorkflowTimezone string
 }
 
 func (i *TriggerActivateInput) Emit(ctx context.Context, event *TriggerEvent) (ExecutionID, error) {

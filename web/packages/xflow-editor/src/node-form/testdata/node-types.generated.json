@@ -2100,8 +2100,8 @@
           "path": "/parameters/timezone",
           "label": "Timezone",
           "type": "string",
-          "default": "UTC",
-          "help": "IANA time zone name the schedule is evaluated in",
+          "default": "",
+          "help": "IANA time zone name the schedule is evaluated in; empty inherits the workflow settings.timezone (UTC if none)",
           "expression": {
             "mode": "template"
           }
