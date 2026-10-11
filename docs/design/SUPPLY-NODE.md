@@ -512,14 +512,14 @@ longer true.
 Transport parity was never a correctness gap for supply convergence; see (a)
 above.
 
-Supply-specific note that stands regardless of transport: losing a hint is
-never a correctness problem, only a latency one. Hints are computed by
-`SupplyHinter.HintsForRunner` (`service/control/supply_hints.go`) purely as an
-optimization; the real convergence guarantee is `SupplyGate.Admit` at
-activation time plus the TTL-based re-check. If hints are lost — partition,
-runner restart, server leadership change — an already-hosted consumer's
-content-refresh latency degrades from "one heartbeat interval" to "one TTL poll
-interval," never to "never."
+Supply-specific note that stands regardless of transport: hints are computed by
+`SupplyHinter.HintsForRunner` (`service/control/supply_hints.go`) as a latency
+optimization over `SupplyGate.Admit` at activation time. **There is no TTL-based
+re-check today** (no poll loop exists in `service/runner/`). If hints are lost —
+partition, runner restart, server leadership change — an already-hosted
+consumer keeps its last-good content until a later hint arrives; it does not
+converge on its own within any bounded interval. This is an open gap, not an
+accepted cost.
 
 **(c) Cross-runner pool swaps are not synchronized; the skew is observable,
 not eliminated.** When a supply's content changes, each runner hosting a

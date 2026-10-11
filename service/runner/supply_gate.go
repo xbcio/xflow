@@ -423,10 +423,13 @@ func hashPrefix(hash string) string {
 // hash differs from what this process has, fetch once and publish.
 //
 // A hint is advisory. Losing one is not an error and is not retried here — the
-// activation-time fetch (Admit) and the TTL watcher are the convergence
-// guarantees. That separation is deliberate: a design where the piggybacked
-// notification is the only channel keeps a stale value forever the first time
-// a message is dropped (network partition, runner restart, server failover).
+// activation-time fetch (Admit) is the only other convergence path. There is
+// no TTL poll loop today: a hint dropped while a consumer is already admitted
+// leaves that consumer on its last-good value until the next hint arrives.
+// Keeping the notification advisory is still deliberate: a design where the
+// piggybacked notification is the only channel keeps a stale value forever
+// the first time a message is dropped (network partition, runner restart,
+// server failover).
 //
 // Scope note: this affects only WHEN an already-hosted runner refreshes
 // content it already consumes. It has nothing to do with whether an
@@ -475,7 +478,7 @@ func (g *SupplyGate) applyOneHint(ctx context.Context, name string) {
 		Revision: revision, FetchedAt: time.Now(),
 	}); err != nil {
 		// A consumer rejected it (e.g. the wasm canary said no). last-good is
-		// preserved by construction; the next hint or TTL poll retries.
+		// preserved by construction; the next hint retries.
 		g.logHintOutcome(slog.LevelWarn, "supply hint: content rejected by a consumer", name, resource, fetchedHash)
 		return
 	}

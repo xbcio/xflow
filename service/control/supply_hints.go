@@ -121,9 +121,11 @@ func (h *SupplyHinter) notifyReadError(ctx context.Context, ns, cause string) {
 // byte-identical for runners with no supplies.
 //
 // Hints are an optimization, never a correctness guarantee: they can be lost to a
-// partition, a runner restart, or a leader change. The activation-time fetch and
-// the TTL watcher are what actually guarantee convergence. Making a hint the only
-// notification channel is how a stale value survives indefinitely.
+// partition, a runner restart, or a leader change. The activation-time fetch is
+// the only other refresh path — there is no TTL watcher, so a lost hint leaves an
+// already-hosted consumer on its last-good value until a later hint lands.
+// Making a hint the only notification channel is how a stale value survives
+// indefinitely.
 //
 // NOTE on scope: this only affects WHEN an already-hosted runner refreshes its
 // content. It has nothing to do with whether an activation ever GETS hosted in
