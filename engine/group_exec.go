@@ -31,8 +31,8 @@ func WithGroupExecutor(ge GroupExecutor) Option {
 }
 
 // executeGroup handles a TaskTypeGroupExec task: acquires a group lease, calls
-// the GroupExecutor, and commits the result. commitGroup (Task 12) will
-// implement the actual downstream propagation; for now it is a stub.
+// the GroupExecutor, and commits the result (commitGroup below propagates the
+// group's exits, or its error_outputs route, downstream).
 func (e *Engine) executeGroup(ctx context.Context, task *Task, flush bool) error {
 	if e.groupExecutor == nil {
 		return fmt.Errorf("no group executor configured for group %q", task.NodeName)
