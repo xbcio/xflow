@@ -290,6 +290,9 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	if err := buildNodesRefs(g, false, nil); err != nil {
 		return nil, err
 	}
+	if err := validateOutputSchemaRefs(def); err != nil {
+		return nil, err
+	}
 	// validateBodyOuterRefs adjudicates the cross-domain $nodes references
 	// projectNodeBodies collected. It runs here, and NOT inside that pass, for
 	// two independent reasons spelled out on the function itself: GroupIdx is
