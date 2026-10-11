@@ -369,11 +369,29 @@ GET    /v1/executions/{id}/wait             等待完成
 
 POST   /v1/executions                       entry-seed（runner 调用）
 
+GET    /v1/node-types                       已注册节点类型的 NodeFormSchema 列表
+GET    /v1/node-types/{type}                单个节点类型（?version= 选版本，缺省取最新）
+GET    /v1/current-user                     调用方自身的已验证身份（仅 principal 认证路径注册）
+
 GET    /v1/supplies/{name}                  取 supply 内容（裸流）
 GET    /v1/artifacts/{digest}               取产物字节（裸流，另支持 HEAD）
 
 GET    /v1/management/leader                leader 状态
+GET    /v1/management/runners               runner 列表
 GET    /v1/management/runners/{id}          单 runner 查询
+POST   /v1/management/runners/{id}/drain    排空（不远程停进程，不强取消已租任务）
+POST   /v1/management/runners/{id}/resume   恢复接单
+POST   /v1/management/runners/{id}/revoke-identity  吊销该 runner 已签发的身份
+POST   /v1/management/runner-pools          创建 runner 池
+GET    /v1/management/runner-pools          池列表
+GET    /v1/management/runner-pools/{id}     读取池
+PATCH  /v1/management/runner-pools/{id}     更新池
+DELETE /v1/management/runner-pools/{id}     删除池
+POST   /v1/management/runner-pools/{id}/tokens                    签发注册 token
+GET    /v1/management/runner-pools/{id}/tokens                    token 列表
+DELETE /v1/management/runner-pools/{id}/tokens/{token_id}         吊销 token
+GET    /v1/management/runner-pools/{id}/tokens/{token_id}/audit   token 审计
+GET    /v1/management/runner-pools/{id}/runners                   池内 runner 实例
 GET    /v1/management/executions/{id}       execution 查询（管理视角）
 GET    /v1/management/dead-letters/{execID}          列表（游标分页，保持不动）
 POST   /v1/management/dead-letters/{execID}/replay   重放
@@ -477,11 +495,10 @@ entry-seed 的 409 响应有**两种不同 body**，客户端据此决定是否�
 
 前端 `web/packages/xflow-api/src/index.ts` 已在调用、服务端**不存在**的路由：
 
-- `GET /workflows`（列表）
 - `GET /workflows/{id}/runtime` → **废除**，无服务端对应概念
 
-（`GET /workflows/{id}`、`PUT /workflows/{id}`、`POST /workflows/{id}/runs`→`POST /v1/workflows/{id}/execute`
-已在 workflows 路由迁移中实现。）
+（`GET /workflows`（列表，见 §9.6）、`GET /workflows/{id}`、`PUT /workflows/{id}`、
+`POST /workflows/{id}/runs`→`POST /v1/workflows/{id}/execute` 已在 workflows 路由迁移中实现。）
 
 ### 9.3 响应形状
 

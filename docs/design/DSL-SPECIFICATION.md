@@ -2154,7 +2154,7 @@ result: "${{ $nodes['final_merge'].status }}"
     mode: signal|timer       # 等待模式（必填）
 
     # signal 模式：等待外部信号唤醒（人工审批、Webhook 回调等）
-    signal_name: string      # 信号名称，通过 API POST /executions/{id}/signal 触发
+    signal_name: string      # 信号名称，通过 API POST /v1/executions/{id}/signals 触发
                              # body: { "name": "<signal_name>", "payload": {} }
     timeout: duration        # 超时时间（可选，超时走 timeout 输出端口）
 
@@ -2183,7 +2183,7 @@ connections:
 ```
 
 > **唤醒方式**：调用 `Engine.SendSignal(executionID, signal)` 或通过 HTTP API：
-> `POST /api/v1/executions/{execution_id}/signal`
+> `POST /v1/executions/{execution_id}/signals`
 > `{"name": "manager_approved", "payload": {"approved_by": "alice"}}`
 >
 > `signal.Payload` 作为 wait 节点的输出，下游可通过 `$input.approved_by` 访问。
