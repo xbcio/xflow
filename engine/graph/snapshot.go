@@ -391,6 +391,7 @@ func assignGraphHash(g *Graph) error {
 		TransientTTL:           g.transientTTL,
 		TransientCompletionTTL: g.transientCompletionTTL,
 		PinDataMode:            g.pinDataMode,
+		Timezone:               g.timezone,
 		Groups:                 g.groups,
 		Units:                  g.units,
 		UnitOutEdges:           g.unitOutEdges,
@@ -430,7 +431,10 @@ type graphHashPayload struct {
 	TransientCompletionTTL time.Duration `json:",omitempty"`
 	// PinDataMode is empty for every graph without a pinned node, so omitempty
 	// keeps those hashes unchanged.
-	PinDataMode  string `json:",omitempty"`
+	PinDataMode string `json:",omitempty"`
+	// Timezone is empty unless settings.timezone is set; omitempty keeps
+	// every other graph hash unchanged.
+	Timezone     string `json:",omitempty"`
 	Groups       []GroupMeta
 	Units        []UnitMeta
 	UnitOutEdges [][]UnitEdge
@@ -498,6 +502,7 @@ type graphSerializedForm struct {
 	TransientTTL           time.Duration `json:"transient_ttl,omitempty"`
 	TransientCompletionTTL time.Duration `json:"transient_completion_ttl,omitempty"`
 	PinDataMode            string        `json:"pin_data_mode,omitempty"`
+	Timezone               string        `json:"timezone,omitempty"`
 	Groups                 []GroupMeta   `json:"groups,omitempty"`
 	// SupplyRefs maps a consumer node index to the supply node names it depends
 	// on. Unlike the unit IR it cannot be re-derived on decode: it comes from
@@ -544,6 +549,7 @@ func (g *Graph) MarshalJSON() ([]byte, error) {
 		TransientTTL:           g.transientTTL,
 		TransientCompletionTTL: g.transientCompletionTTL,
 		PinDataMode:            g.pinDataMode,
+		Timezone:               g.timezone,
 		Groups:                 g.groups,
 		SupplyRefs:             g.supplyRefs,
 		NodesRefs:              g.nodesRefs,
@@ -668,6 +674,7 @@ func (g *Graph) UnmarshalJSON(data []byte) error {
 	g.transientTTL = sf.TransientTTL
 	g.transientCompletionTTL = sf.TransientCompletionTTL
 	g.pinDataMode = sf.PinDataMode
+	g.timezone = sf.Timezone
 	g.groups = sf.Groups
 	g.supplyRefs = sf.SupplyRefs
 	g.nodesRefs = sf.NodesRefs

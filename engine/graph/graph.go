@@ -55,6 +55,11 @@ type Graph struct {
 	// snapshot of every graph without pins.
 	pinDataMode string
 
+	// timezone is the validated settings.timezone (IANA name), or empty when
+	// the workflow declares none. Triggers that evaluate wall-clock schedules
+	// (xflow.trigger.cron) fall back to it when their own timezone is unset.
+	timezone string
+
 	// hasDisabled reports whether any node carries NodeMeta.Disabled. It is a
 	// derived cache -- true iff at least one node has the flag -- and is
 	// deliberately neither serialized nor hashed: NodeMeta.Disabled already
@@ -223,6 +228,9 @@ func (g *Graph) Transient() bool { return g.transient }
 // least one pinned node (PinDataModeTestOnly or PinDataModeAlways), and "" for
 // a graph with none.
 func (g *Graph) PinDataMode() string { return g.pinDataMode }
+
+// Timezone returns the workflow-level settings.timezone, or "" when unset.
+func (g *Graph) Timezone() string { return g.timezone }
 
 // PinnedOutput returns a deep copy of the mock output pinned on node i and
 // whether the node is pinned at all. It does not decide whether the pin applies

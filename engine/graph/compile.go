@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/xbcio/xflow/types"
 )
@@ -216,6 +217,12 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	}
 	if g.allowCycles && g.maxAutoDepth <= 0 {
 		g.maxAutoDepth = DefaultMaxAutoDepth
+	}
+	if def.Settings != nil && def.Settings.Timezone != "" {
+		if _, err := time.LoadLocation(def.Settings.Timezone); err != nil {
+			return nil, fmt.Errorf("settings.timezone %q is not a valid IANA time zone: %w", def.Settings.Timezone, err)
+		}
+		g.timezone = def.Settings.Timezone
 	}
 
 	// Reject reserved "xflow.group_*" types in user-authored workflows. These
