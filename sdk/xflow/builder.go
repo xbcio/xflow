@@ -24,6 +24,7 @@ type WorkflowBuilder struct {
 	triggers       map[string]types.TriggerHandler // portable typed trigger handlers
 	options        *types.WorkflowOptions
 	runnerSelector *types.RunnerSelector
+	onError        types.OnError
 	groups         []*groupEntry
 	depEdges       []depEdge
 }
@@ -199,6 +200,14 @@ func (w *WorkflowBuilder) Version(version string) *WorkflowBuilder {
 
 func (w *WorkflowBuilder) RunnerSelector(selector types.RunnerSelector) *WorkflowBuilder {
 	w.runnerSelector = cloneRunnerSelector(&selector)
+	return w
+}
+
+// OnError sets the workflow default error-handling strategy
+// (settings.on_error). Nodes without their own OnError inherit it; groups do
+// not.
+func (w *WorkflowBuilder) OnError(strategy types.OnError) *WorkflowBuilder {
+	w.onError = strategy
 	return w
 }
 
@@ -425,6 +434,9 @@ func (w *WorkflowBuilder) buildInternal(visited map[*WorkflowBuilder]bool) (*typ
 		RunnerSelector: cloneRunnerSelector(w.runnerSelector),
 		Options:        cloneWorkflowOptions(w.options),
 		Connections:    make(types.Connections),
+	}
+	if w.onError != "" {
+		def.Settings = &types.WorkflowSettings{OnError: string(w.onError)}
 	}
 	w.assembleNodes(def)
 	w.assembleConnections(def)
