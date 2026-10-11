@@ -1650,18 +1650,19 @@ func (r *EntryActivationReconciler) MarkActivationFailed(ctx context.Context, ru
 // trigger parameters the WorkflowDef already holds — no new secret surface.
 func (r *EntryActivationReconciler) activateDirectiveFor(ctx context.Context, act *engine.EntryActivation, gen uint64) protocol.ActivateDirective {
 	d := protocol.ActivateDirective{
-		Namespace:       string(act.Namespace),
-		WorkflowID:      string(act.WorkflowID),
-		WorkflowVersion: act.WorkflowVersion,
-		EntryUnitID:     act.EntryUnitID,
-		ReplicaIndex:    act.ReplicaIndex,
-		NodeType:        act.NodeType,
-		Params:          act.Params,
-		Generation:      gen,
-		PackageHash:     act.PackageHash,
-		Kind:            activationKindFor(act),
-		Supplies:        act.Supplies,
-		SupplyConsumers: act.SupplyConsumers,
+		Namespace:        string(act.Namespace),
+		WorkflowID:       string(act.WorkflowID),
+		WorkflowVersion:  act.WorkflowVersion,
+		EntryUnitID:      act.EntryUnitID,
+		ReplicaIndex:     act.ReplicaIndex,
+		NodeType:         act.NodeType,
+		Params:           act.Params,
+		Generation:       gen,
+		PackageHash:      act.PackageHash,
+		Kind:             activationKindFor(act),
+		Supplies:         act.Supplies,
+		SupplyConsumers:  act.SupplyConsumers,
+		WorkflowTimezone: act.WorkflowTimezone,
 	}
 	if act.NodeType == engine.GroupNodeType {
 		d.Package = r.projectPackageForGroup(ctx, act)
