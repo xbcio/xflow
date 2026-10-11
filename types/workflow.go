@@ -245,13 +245,41 @@ const (
 )
 
 // RetrySettings configures automatic retry behaviour for the workflow.
+// Enabled is tri-state: nil means enabled whenever MaxAttempts > 0; only an
+// explicit false disables retries.
 type RetrySettings struct {
-	Enabled         bool    `json:"enabled,omitempty"`
+	Enabled         *bool   `json:"enabled,omitempty"`
 	MaxAttempts     int     `json:"max_attempts,omitempty"`
 	Strategy        string  `json:"strategy,omitempty"`
 	InitialInterval int     `json:"initial_interval,omitempty"`
 	MaxInterval     int     `json:"max_interval,omitempty"`
 	Multiplier      float64 `json:"multiplier,omitempty"`
+}
+
+// Values of RetrySettings.Strategy. The empty string means
+// RetryStrategyExponential.
+const (
+	RetryStrategyFixed       = "fixed"
+	RetryStrategyExponential = "exponential"
+)
+
+// IsEnabled reports whether r requests retries: non-nil, not explicitly
+// disabled, and MaxAttempts > 0.
+func (r *RetrySettings) IsEnabled() bool {
+	return r != nil && (r.Enabled == nil || *r.Enabled) && r.MaxAttempts > 0
+}
+
+// Clone returns a deep copy of r.
+func (r *RetrySettings) Clone() *RetrySettings {
+	if r == nil {
+		return nil
+	}
+	cp := *r
+	if r.Enabled != nil {
+		v := *r.Enabled
+		cp.Enabled = &v
+	}
+	return &cp
 }
 
 // CredentialDef references a named credential stored in a secrets manager.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
@@ -314,5 +315,23 @@ func TestRetry_BackoffMonotonicityAndJitter(t *testing.T) {
 	// Different exec ids → different jitter
 	if retryBackoff(3, settings, "exec-x", "node") == retryBackoff(3, settings, "exec-y", "node") {
 		t.Logf("note: jitter happened to collide across exec ids; acceptable but unusual")
+	}
+}
+
+func TestRetryBackoffFixedStrategy(t *testing.T) {
+	s := &types.RetrySettings{Strategy: types.RetryStrategyFixed, InitialInterval: 1000, Multiplier: 3}
+	for attempt := 0; attempt < 5; attempt++ {
+		d := retryBackoff(attempt, s, "exec", "node")
+		if d < 800*time.Millisecond || d > 1200*time.Millisecond {
+			t.Fatalf("attempt %d: delay %v outside fixed 1s±20%%", attempt, d)
+		}
+	}
+	capped := &types.RetrySettings{Strategy: types.RetryStrategyFixed, InitialInterval: 5000, MaxInterval: 1000}
+	if d := retryBackoff(3, capped, "exec", "node"); d > 1200*time.Millisecond {
+		t.Fatalf("fixed delay %v not capped by max_interval", d)
+	}
+	exp := &types.RetrySettings{InitialInterval: 1000}
+	if d := retryBackoff(3, exp, "exec", "node"); d < 6*time.Second {
+		t.Fatalf("exponential delay %v, want ~8s", d)
 	}
 }

@@ -199,14 +199,9 @@ func cloneStringSlice(src []string) []string {
 }
 
 // cloneRetry returns a fresh *types.RetrySettings so callers cannot mutate the
-// Graph's internal value. RetrySettings is a value-only struct (no maps/slices/
-// pointers), so a shallow pointer copy is a complete deep copy.
+// Graph's internal value.
 func cloneRetry(r *types.RetrySettings) *types.RetrySettings {
-	if r == nil {
-		return nil
-	}
-	cp := *r
-	return &cp
+	return r.Clone()
 }
 
 func cloneNodeOutputPolicy(policy *types.NodeOutputPolicy) *types.NodeOutputPolicy {

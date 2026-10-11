@@ -181,6 +181,11 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	if err := validateWorkflowRunnerSelector(def.RunnerSelector); err != nil {
 		return nil, err
 	}
+	if def.Settings != nil {
+		if err := validateRetryStrategy("settings", def.Settings.Retry); err != nil {
+			return nil, err
+		}
+	}
 
 	g := &Graph{
 		expandedDef:     def,
@@ -430,6 +435,9 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 		runnerSelector, err := resolveRunnerSelector(def.RunnerSelector, nd.RunnerSelector)
 		if err != nil {
 			return 0, fmt.Errorf("node %q: %w", nd.Name, err)
+		}
+		if err := validateRetryStrategy(fmt.Sprintf("node %q", nd.Name), nd.Retry); err != nil {
+			return 0, err
 		}
 		g.index[nd.Name] = i
 		g.nodes[i] = NodeMeta{
@@ -712,17 +720,32 @@ func buildEdges(def *types.WorkflowDef, g *Graph) ([]dependencyPort, error) {
 
 // resolveRetry chooses the effective retry settings for a node: per-node
 // overrides win; otherwise the workflow-level WorkflowSettings.Retry applies;
-// otherwise no retry. Returns nil when retries are disabled.
+// otherwise no retry. Returns nil when retries are disabled. A node retry with
+// an explicit enabled=false disables retries for that node and does not fall
+// back to the workflow default.
 func resolveRetry(node *types.RetrySettings, settings *types.WorkflowSettings) *types.RetrySettings {
-	if node != nil && node.MaxAttempts > 0 {
-		cp := *node
-		return &cp
+	if node != nil && node.Enabled != nil && !*node.Enabled {
+		return nil
 	}
-	if settings != nil && settings.Retry != nil && settings.Retry.MaxAttempts > 0 {
-		cp := *settings.Retry
-		return &cp
+	if node.IsEnabled() {
+		return node.Clone()
+	}
+	if settings != nil && settings.Retry.IsEnabled() {
+		return settings.Retry.Clone()
 	}
 	return nil
+}
+
+// validateRetryStrategy rejects a retry strategy the engine does not implement.
+func validateRetryStrategy(where string, r *types.RetrySettings) error {
+	if r == nil {
+		return nil
+	}
+	switch r.Strategy {
+	case "", types.RetryStrategyFixed, types.RetryStrategyExponential:
+		return nil
+	}
+	return fmt.Errorf("%s: retry.strategy %q must be %q or %q", where, r.Strategy, types.RetryStrategyFixed, types.RetryStrategyExponential)
 }
 
 func validateWorkflowRunnerSelector(selector *types.RunnerSelector) error {
