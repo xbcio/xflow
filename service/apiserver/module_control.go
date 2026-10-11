@@ -514,7 +514,7 @@ func (m *workflowControlModule) handleExecuteWorkflow(w http.ResponseWriter, r *
 	}
 	// The inline definition gets the same ParamSpec check a registered one
 	// does; it is the other path a node definition enters the server by.
-	paramIssues, err := m.checkWorkflowParams(r.Context(), req.Workflow)
+	paramIssues, err := m.checkWorkflowParams(r.Context(), g.ExpandedDefinition())
 	if err != nil {
 		if !writeParamInvalid(w, r, err) {
 			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
@@ -797,9 +797,10 @@ func (m *workflowControlModule) buildWorkflowRecord(ctx context.Context, ns name
 		return backend.WorkflowRecord{}, registrationDiagnostics{}, &WorkflowCompileError{err: err}
 	}
 	// ParamSpec validation runs after the compiler accepted the definition, so
-	// a structural error keeps its workflow_compile_failed answer. It never
-	// modifies def: the HTTP path writes no defaults.
-	paramIssues, err := m.checkWorkflowParams(ctx, def)
+	// a structural error keeps its workflow_compile_failed answer. It checks
+	// the template-expanded def (templated nodes only get a type there) and
+	// never modifies def: the HTTP path writes no defaults.
+	paramIssues, err := m.checkWorkflowParams(ctx, g.ExpandedDefinition())
 	if err != nil {
 		return backend.WorkflowRecord{}, registrationDiagnostics{}, err
 	}
