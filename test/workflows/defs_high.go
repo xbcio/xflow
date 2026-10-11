@@ -74,7 +74,7 @@ const HighReleaseSignal = "hold/release"
 // Input: none. Runtime vars: VarGRPCHost, VarDBTable, VarDBRowID.
 // Credential: CredentialDB.
 func HighWorkflow() *xflow.WorkflowBuilder {
-	wf := xflow.Workflow("high-tier")
+	wf := xflow.Workflow("high-tier").Credential(CredentialDB, "database")
 
 	policy := wf.Node("policy", node.SupplyStatic([]byte(`{"max_amount": 1000}`)))
 	rules := wf.Node("rules", node.SupplyExternal("qa_rules"))

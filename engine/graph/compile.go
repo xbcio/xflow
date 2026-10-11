@@ -181,6 +181,9 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	if err := validateWorkflowRunnerSelector(def.RunnerSelector); err != nil {
 		return nil, err
 	}
+	if err := validateCredentialRefs(def); err != nil {
+		return nil, err
+	}
 	if def.Settings != nil {
 		if err := validateRetryStrategy("settings", def.Settings.Retry); err != nil {
 			return nil, err
