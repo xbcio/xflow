@@ -13,6 +13,8 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
+var _ engine.DurableSignalDeliverer = (*Store)(nil)
+
 func (s *Store) SuspendOrConsume(ctx context.Context, id types.ExecutionID, name string, spec *types.SuspendSpec) (*types.SignalPayload, error) {
 	if s.transient {
 		// Store-wide transient mode disables suspend at the engine layer
