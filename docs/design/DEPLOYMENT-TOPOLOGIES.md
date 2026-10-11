@@ -241,7 +241,7 @@ runner 可横向扩缩容：跑多个 runner 实例即可线性扩展执行吞�
 - **已实现** Redis-backed durable assignment / claim / leased handoff、claim expiry 回收、重连 lease replay（按 runner 上报的 `active_lease_ids` 排除在执行中的 lease），以及 lease TTL + sweeper 回收与 re-enqueue。handler 与协议响应仍是 at-least-once，必须使用业务幂等键。
 - 当前 leader election 只协调 leader-only maintenance；它不是完整 control-plane HA 或 failover SLO 的替代品。生产就绪仍依赖 Redis 高可用部署和 kill/restart/failover 验证。
 - Loop 仍是实验性扩展路径，未纳入静态 DAG completion 或 server/runner production-ready 保证。
-- **已实现** Redis 作为权威状态、store/sqlstore 作为 best-effort audit trail 的 dual-write contract；审计 reconciliation CLI 仍在规划。
+- **已实现** Redis 作为权威状态、store/sqlstore 作为 best-effort audit trail 的 dual-write contract；dead-letter 对账走 `xflow dead-letter reconcile`，执行状态漂移只读比对走 `xflow execution diff`；通用的 `xflow-server audit reconcile` 审计对账 CLI 仍在规划（进程内由 leader 门控的 `AuditReconcileWorker` 已在运行）。
 
 ### 3.2 与 engine 两接口的对应
 
