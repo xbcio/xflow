@@ -553,6 +553,10 @@ func (m *workflowControlModule) handleExecuteWorkflow(w http.ResponseWriter, r *
 				writeFail(w, r, http.StatusBadRequest, "workflow_faf_unsupported", "FAF workflows require direct dispatch")
 				return
 			}
+			if errors.Is(err, graph.ErrInvalidParams) {
+				writeFail(w, r, http.StatusBadRequest, "workflow_params_invalid", err.Error())
+				return
+			}
 			if errors.Is(err, engine.ErrEntryNotFound) {
 				writeFail(w, r, http.StatusBadRequest, "workflow_entry_not_found", err.Error())
 				return
@@ -565,6 +569,10 @@ func (m *workflowControlModule) handleExecuteWorkflow(w http.ResponseWriter, r *
 		if err != nil {
 			if errors.Is(err, engine.ErrFAFRequiresDirectDispatch) {
 				writeFail(w, r, http.StatusBadRequest, "workflow_faf_unsupported", "FAF workflows require direct dispatch")
+				return
+			}
+			if errors.Is(err, graph.ErrInvalidParams) {
+				writeFail(w, r, http.StatusBadRequest, "workflow_params_invalid", err.Error())
 				return
 			}
 			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
@@ -1471,6 +1479,10 @@ func (m *workflowControlModule) handleExecuteWorkflowByID(w http.ResponseWriter,
 				writeFail(w, r, http.StatusBadRequest, "workflow_faf_unsupported", "FAF workflows require direct dispatch")
 				return
 			}
+			if errors.Is(err, graph.ErrInvalidParams) {
+				writeFail(w, r, http.StatusBadRequest, "workflow_params_invalid", err.Error())
+				return
+			}
 			if errors.Is(err, engine.ErrEntryNotFound) {
 				writeFail(w, r, http.StatusBadRequest, "workflow_entry_not_found", err.Error())
 				return
@@ -1483,6 +1495,10 @@ func (m *workflowControlModule) handleExecuteWorkflowByID(w http.ResponseWriter,
 		if err != nil {
 			if errors.Is(err, engine.ErrFAFRequiresDirectDispatch) {
 				writeFail(w, r, http.StatusBadRequest, "workflow_faf_unsupported", "FAF workflows require direct dispatch")
+				return
+			}
+			if errors.Is(err, graph.ErrInvalidParams) {
+				writeFail(w, r, http.StatusBadRequest, "workflow_params_invalid", err.Error())
 				return
 			}
 			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
