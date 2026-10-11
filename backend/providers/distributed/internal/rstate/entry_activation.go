@@ -412,6 +412,7 @@ redis.call('HSET', KEYS[2],
     'requirements', ARGV[12],
     'supplies', ARGV[13],
     'supply_consumers', ARGV[14],
+    'workflow_timezone', ARGV[22],
     'desired', ARGV[15],
     'registry_revision', incoming)
 if existed == 0 then
@@ -531,6 +532,7 @@ func (s *EntryActivationStore) Upsert(ctx context.Context, act engine.EntryActiv
 		defaultRedisField(legacyFields, "lease_deadline", "0"),
 		legacyFields["assigned_package_hash"],
 		defaultRedisField(legacyFields, "registry_revision", "0"),
+		act.WorkflowTimezone,
 	).Result(); err != nil {
 		return fmt.Errorf("upsert entry activation %q: %w", key, err)
 	}
@@ -926,6 +928,7 @@ func decodeEntryActivation(fields map[string]string) (engine.EntryActivation, er
 		RunnerID:            fields["runner_id"],
 		SessionID:           fields["session_id"],
 		AssignedPackageHash: fields["assigned_package_hash"],
+		WorkflowTimezone:    fields["workflow_timezone"],
 	}
 	if replica := fields["replica_index"]; replica != "" {
 		parsed, err := strconv.ParseUint(replica, 10, 32)
