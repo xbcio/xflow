@@ -316,7 +316,8 @@ func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.Acti
 			RequestTimeout: h.seedRequestTimeoutOrDefault(),
 			Observer:       h.seedObserver,
 		},
-		Supplies: resolveSuppliesForTrigger(d.Supplies),
+		Supplies:         resolveSuppliesForTrigger(d.Supplies),
+		WorkflowTimezone: d.WorkflowTimezone,
 	}
 
 	sub, err := handler.Activate(ctx, input)
@@ -380,7 +381,8 @@ func (h *TriggerActivationHandler) activateGroup(ctx context.Context, d protocol
 			pkg:         pkg,
 			packageHash: d.PackageHash,
 		},
-		Supplies: resolveSuppliesForTrigger(d.Supplies),
+		Supplies:         resolveSuppliesForTrigger(d.Supplies),
+		WorkflowTimezone: d.WorkflowTimezone,
 	}
 
 	sub, err := handler.Activate(ctx, input)
