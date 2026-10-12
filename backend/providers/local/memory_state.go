@@ -132,6 +132,7 @@ func (s *memoryState) CreateExecutionWithOutbox(_ context.Context, e *engine.Exe
 
 var _ engine.ConcurrencyLimitedStateStore = (*memoryState)(nil)
 var _ engine.ConcurrencyQueueExpirer = (*memoryState)(nil)
+var _ engine.ConcurrencyQueueInspector = (*memoryState)(nil)
 
 // workflowSlot names the slot set one admitted execution was charged to. It is
 // recorded at admission because a release must free the SAME set, and by
@@ -394,6 +395,31 @@ func (s *memoryState) ExpireQueuedExecutions(_ context.Context, limit int) (int,
 		_ = s.updateExecutionStatusLocked(id, types.ExecutionStatusTimeout, engine.ConcurrencyQueueTimeoutError)
 	}
 	return len(expired), nil
+}
+
+// ConcurrencyQueuePosition reports where one queued execution stands in its
+// workflow's line, 1-based, or 0 when it is not queued.
+//
+// The line is a slice, so the position is its index: the head is the execution
+// the next release promotes, which is exactly what a waiting submitter wants to
+// know. An execution that was never queued, or whose wait already ended in a
+// promotion, an expiry or a cancellation, is not in the map and answers 0.
+func (s *memoryState) ConcurrencyQueuePosition(_ context.Context, id types.ExecutionID) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	waiting, ok := s.queued[id]
+	if !ok {
+		return 0, nil
+	}
+	for i, queued := range waiting.slot.queued {
+		if queued == id {
+			return i + 1, nil
+		}
+	}
+	// The map and the line disagree, which can only mean a half-finished
+	// departure. Reporting 0 is the honest answer to "where does it stand":
+	// nowhere this store can point at.
+	return 0, nil
 }
 
 func (s *memoryState) createExecutionLocked(e *engine.ExecutionSnapshot) {
