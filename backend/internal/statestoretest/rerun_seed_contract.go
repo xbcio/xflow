@@ -58,6 +58,9 @@ func RunExecutionSeedContract(t *testing.T, newStore ConcurrencyStoreFactory) {
 	t.Run("FinalizesWhenEverythingIsResolved", func(t *testing.T) {
 		seedFinalizesWhenEverythingIsResolved(t, newStore(t))
 	})
+	t.Run("RecordsTheRerunOrigin", func(t *testing.T) {
+		seedRecordsTheRerunOrigin(t, newStore(t))
+	})
 	t.Run("RefusesWithoutPersistingOverTheLimit", func(t *testing.T) {
 		seedRefusesWithoutPersistingOverTheLimit(t, newStore(t))
 	})
@@ -412,6 +415,40 @@ func seedFinalizesWhenEverythingIsResolved(t *testing.T, state engine.StateStore
 	}
 	if entries := readyOutbox(t, state, ctx, snap.ID); len(entries) != 0 {
 		t.Fatalf("ready outbox = %+v, want none: every unit was resolved", seedOutboxNames(entries))
+	}
+}
+
+// seedRecordsTheRerunOrigin pins the link a seeded execution carries: the
+// execution it derives from and the node it starts at. Both are what an
+// operator reads to tell a rerun from an original run, and the seed is the only
+// creation path that produces them.
+func seedRecordsTheRerunOrigin(t *testing.T, state engine.StateStore) {
+	ctx := context.Background()
+	g := seedContractGraph(t, "seed-origin")
+	seeder := seedCapability(t, state)
+	snap := seedSnapshot(t, g)
+	snap.ParentID = "exec-seed-parent"
+	snap.RerunFrom = "mid"
+
+	if _, err := seeder.SeedExecution(ctx, engine.SeedExecutionRequest{
+		Execution: snap,
+		Units:     []engine.SeedUnit{seedUnitResolving(t, g, "start", "main", map[string]any{"value": 1}, "mid")},
+	}); err != nil {
+		t.Fatalf("SeedExecution() error = %v", err)
+	}
+
+	persisted, err := state.GetExecution(ctx, snap.ID)
+	if err != nil {
+		t.Fatalf("GetExecution(%q) error = %v", snap.ID, err)
+	}
+	if persisted == nil {
+		t.Fatalf("GetExecution(%q) = nil, want the seeded execution", snap.ID)
+	}
+	if persisted.ParentID != snap.ParentID {
+		t.Fatalf("ParentID = %q, want %q", persisted.ParentID, snap.ParentID)
+	}
+	if persisted.RerunFrom != snap.RerunFrom {
+		t.Fatalf("RerunFrom = %q, want %q", persisted.RerunFrom, snap.RerunFrom)
 	}
 }
 

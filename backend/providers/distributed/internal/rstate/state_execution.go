@@ -236,6 +236,19 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 		pipe.Set(ctx, execKey(t, e.ID, "trace_carrier"), string(carrierJSON), ttl)
 		keys = append(keys, execKey(t, e.ID, "trace_carrier"))
 	}
+	// The execution this one derives from, and — for a rerun — the node it starts
+	// at. Immutable, written once with the execution itself: the link is what
+	// makes a derived execution traceable after the execution it derives from
+	// has expired, and a reader that found the execution without it could not
+	// tell a derived run from an original one.
+	if e.ParentID != "" {
+		pipe.Set(ctx, execKey(t, e.ID, "parent"), string(e.ParentID), ttl)
+		keys = append(keys, execKey(t, e.ID, "parent"))
+	}
+	if e.RerunFrom != "" {
+		pipe.Set(ctx, execKey(t, e.ID, "rerun_from"), e.RerunFrom, ttl)
+		keys = append(keys, execKey(t, e.ID, "rerun_from"))
+	}
 	// Acyclic executions use these counters as the O(1) completion source of
 	// truth. Cyclic graphs retain their activation-based completion protocol.
 	// UnitCount() is used instead of NodeCount() so that grouped nodes count as
@@ -954,6 +967,8 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 	spanIDCmd := pipe.Get(ctx, execKey(t, id, "span_id"))
 	carrierCmd := pipe.Get(ctx, execKey(t, id, "trace_carrier"))
 	errorCmd := pipe.Get(ctx, execKey(t, id, "error"))
+	parentCmd := pipe.Get(ctx, execKey(t, id, "parent"))
+	rerunFromCmd := pipe.Get(ctx, execKey(t, id, "rerun_from"))
 	// Exec surfaces the first command error, and redis.Nil is the expected answer
 	// for most of these keys. The per-command results below are authoritative.
 	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
@@ -1030,6 +1045,21 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 	} else if err != redis.Nil {
 		return nil, fmt.Errorf("get execution error %q: %w", id, err)
 	}
+	// The execution this one was derived from, and -- for a rerun -- the node it
+	// starts at. Absent for every execution an engine started itself, which is
+	// why both tolerate redis.Nil.
+	var parentID string
+	if raw, err := parentCmd.Result(); err == nil {
+		parentID = raw
+	} else if err != redis.Nil {
+		return nil, fmt.Errorf("get execution parent %q: %w", id, err)
+	}
+	var rerunFrom string
+	if raw, err := rerunFromCmd.Result(); err == nil {
+		rerunFrom = raw
+	} else if err != redis.Nil {
+		return nil, fmt.Errorf("get execution rerun origin %q: %w", id, err)
+	}
 	return &engine.ExecutionSnapshot{
 		ID:           id,
 		Graph:        g,
@@ -1042,5 +1072,7 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 		SpanID:       spanID,
 		TraceCarrier: traceCarrier,
 		Error:        execErr,
+		ParentID:     types.ExecutionID(parentID),
+		RerunFrom:    rerunFrom,
 	}, nil
 }

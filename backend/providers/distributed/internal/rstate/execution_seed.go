@@ -350,6 +350,24 @@ func (s *Store) SeedExecution(ctx context.Context, req engine.SeedExecutionReque
 		}
 	}
 
+	// The execution this one derives from, and — for a rerun — the node it starts
+	// at (see the ExecutionSeeder contract, step 2). Written before the Lua, with
+	// the retention record above and for the same reason: it is immutable
+	// metadata about the execution, and a projection that reads the execution
+	// must never find it without the origin it was created from.
+	if req.Execution.ParentID != "" || req.Execution.RerunFrom != "" {
+		linkPipe := s.rdb.TxPipeline()
+		if req.Execution.ParentID != "" {
+			linkPipe.Set(ctx, execKey(t, execID, "parent"), string(req.Execution.ParentID), ttl)
+		}
+		if req.Execution.RerunFrom != "" {
+			linkPipe.Set(ctx, execKey(t, execID, "rerun_from"), req.Execution.RerunFrom, ttl)
+		}
+		if _, err := linkPipe.Exec(ctx); err != nil {
+			return engine.SeedExecutionResponse{}, fmt.Errorf("persist rerun origin for %q: %w", execID, err)
+		}
+	}
+
 	// Prime the verdict when the graph is NOT transient: this call is
 	// authoritative for the execution, and the SQL projection below would
 	// otherwise ask isTransient, find no marker -- none is written for a durable
@@ -391,13 +409,13 @@ func (s *Store) SeedExecution(ctx context.Context, req engine.SeedExecutionReque
 		countersFlag = 1
 	}
 	keys := []string{
-		execKey(t, execID, "status"),  // 1
-		execKey(t, execID, "graph"),   // 2
-		remainingNodesKey(t, execID),  // 3
-		failedNodesKey(t, execID),     // 4
-		concurrencyTagKey(t, execID),  // 5
-		outboxReadyKey(t, execID),     // 6
-		outboxBodyKey(t, execID),      // 7
+		execKey(t, execID, "status"), // 1
+		execKey(t, execID, "graph"),  // 2
+		remainingNodesKey(t, execID), // 3
+		failedNodesKey(t, execID),    // 4
+		concurrencyTagKey(t, execID), // 5
+		outboxReadyKey(t, execID),    // 6
+		outboxBodyKey(t, execID),     // 7
 	}
 	args := []any{
 		int(ttl.Seconds()), // 1
