@@ -474,13 +474,17 @@ paths:
                     trace_id: 0123456789abcdef0123456789abcdef
         "429":
           description: |
-            The workflow is at the concurrency limit its own definition declares
-            (`settings.concurrency`). The submission was refused before anything
-            was persisted — there is no execution to inspect or cancel — and the
-            code is `workflow_concurrency_limit`. `Retry-After` is a floor rather
-            than a prediction: the refused submission is not queued anywhere, so
-            the server has no slot-release time to promise, and the header exists
-            so a client can back off instead of spinning.
+            The workflow refused the submission because of its own declared
+            limits (`settings.concurrency`), before anything was persisted —
+            there is no execution to inspect or cancel. Two codes share this
+            status: `workflow_concurrency_limit` when the running executions are
+            already at `limit`, and `workflow_concurrency_queue_full` when the
+            queue backlog is at `max_queued`. Both are retryable, and the code
+            says which wait is in front of the caller — a slot to free or a
+            backlog to drain. `Retry-After` is a floor rather than a prediction:
+            the server has no release time to promise (the submission is not
+            queued when it is refused), and the header exists so a client can
+            back off instead of spinning.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
@@ -500,6 +504,37 @@ paths:
                     success: false
                     code: workflow_concurrency_limit
                     message: workflow is at its concurrency limit
+                    trace_id: 0123456789abcdef0123456789abcdef
+                workflowConcurrencyQueueFull:
+                  summary: The workflow's queue backlog is at its max_queued bound.
+                  value:
+                    success: false
+                    code: workflow_concurrency_queue_full
+                    message: workflow concurrency queue is full
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "503":
+          description: |
+            The workflow declares `mode: queue` and this server's state store
+            cannot park executions, so the submission was refused rather than
+            silently downgraded — admitting it would break the limit the
+            definition declared. The code is `workflow_concurrency_unavailable`
+            and it is not retryable in any useful sense: the answer changes when
+            the deployment does, not when the caller retries. There is no
+            `Retry-After` for that reason.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                workflowConcurrencyUnavailable:
+                  summary: The server's state store cannot queue, and the workflow asked for queue mode.
+                  value:
+                    success: false
+                    code: workflow_concurrency_unavailable
+                    message: workflow concurrency queue is not available on this server
                     trace_id: 0123456789abcdef0123456789abcdef
         default:
           $ref: "#/components/responses/DefaultError"
@@ -536,10 +571,11 @@ paths:
                         $ref: "#/components/schemas/ExecuteWorkflowResponse"
         "429":
           description: |
-            The workflow is at the concurrency limit its own definition declares
-            (`settings.concurrency`). Same contract as
-            POST /v1/workflows/execute: nothing was persisted, the code is
-            `workflow_concurrency_limit`, and `Retry-After` is a floor.
+            The workflow refused the submission because of its own declared
+            limits (`settings.concurrency`). Same contract as
+            POST /v1/workflows/execute: nothing was persisted, `Retry-After` is
+            a floor, and the code is `workflow_concurrency_limit` for a reached
+            limit or `workflow_concurrency_queue_full` for a full queue.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
@@ -559,6 +595,34 @@ paths:
                     success: false
                     code: workflow_concurrency_limit
                     message: workflow is at its concurrency limit
+                    trace_id: 0123456789abcdef0123456789abcdef
+                workflowConcurrencyQueueFull:
+                  summary: The workflow's queue backlog is at its max_queued bound.
+                  value:
+                    success: false
+                    code: workflow_concurrency_queue_full
+                    message: workflow concurrency queue is full
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "503":
+          description: |
+            The workflow declares `mode: queue` and this server's state store
+            cannot park executions. Same contract as POST /v1/workflows/execute:
+            the code is `workflow_concurrency_unavailable`, nothing was
+            persisted, and retrying does not change the answer.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                workflowConcurrencyUnavailable:
+                  summary: The server's state store cannot queue, and the workflow asked for queue mode.
+                  value:
+                    success: false
+                    code: workflow_concurrency_unavailable
+                    message: workflow concurrency queue is not available on this server
                     trace_id: 0123456789abcdef0123456789abcdef
         default:
           $ref: "#/components/responses/DefaultError"
