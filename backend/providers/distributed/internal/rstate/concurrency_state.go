@@ -160,6 +160,70 @@ const (
 	concurrencyAdmitRefusedQueueFull = 3
 )
 
+// workflowAdmitResult is what one slot decision decided, in the shape both
+// admission paths read it: how the submission landed, where it stands if it is
+// waiting, whether this call is what put it there, and what that freed up.
+type workflowAdmitResult struct {
+	// code is one of the concurrencyAdmit* reply codes.
+	code int64
+	// position is the 1-based place in line when the submission was queued.
+	position int64
+	// added is true when this call put the member in the slot set or the line,
+	// as opposed to finding it there from an earlier attempt of the same
+	// admission. Only an addition this call made may be given back.
+	added bool
+	// promoted are the execution IDs this call promoted into free slots.
+	promoted []string
+}
+
+// admitWorkflowSlot runs the workflow's slot decision. Both admission paths go
+// through it — the ordinary submission and the entry seed — because the decision
+// must not be able to differ between them: a seed that charged a slot the submit
+// path would have refused, or ordered the line differently, is exactly the
+// divergence the shared script and this shared call exist to prevent.
+//
+// The tag is registered before the charge (registerConcurrencyWorkflow), so a
+// charged slot is always already discoverable by the sweeper.
+func (s *Store) admitWorkflowSlot(ctx context.Context, t namespace.Namespace, id types.ExecutionID, admission engine.ConcurrencyAdmission) (workflowAdmitResult, error) {
+	queueMode := admission.Mode == types.ConcurrencyModeQueue
+	deadlineMs := int64(0)
+	if queueMode && admission.QueueTimeout > 0 {
+		// The clock starts here, when the execution is parked. Measured from
+		// promotion it could never fire — a promoted execution is not waiting for
+		// anything — and a workflow whose limit never frees would hold
+		// submissions past their declared bound forever.
+		deadlineMs = time.Now().UTC().Add(admission.QueueTimeout).UnixMilli()
+	}
+	reply, err := workflowAdmitLua.Run(ctx, s.rdb,
+		concurrencyAdmitKeys(t, admission.Workflow),
+		concurrencySlotMember(id), admission.Limit,
+		time.Now().UTC().Unix(), int(s.concurrencySlotTTL().Seconds()),
+		concurrencyModeFlag(queueMode), admission.MaxQueued, deadlineMs,
+	).Slice()
+	if err != nil && err != redis.Nil {
+		return workflowAdmitResult{}, fmt.Errorf("admit workflow %q: %w", admission.Workflow, err)
+	}
+	return workflowAdmitResult{
+		code:     luaReplyInt(reply, 0),
+		position: luaReplyInt(reply, 1),
+		added:    luaReplyInt(reply, 2) == 1,
+		promoted: luaReplyStrings(reply, 3),
+	}, nil
+}
+
+// concurrencyRefusal maps an admit reply code to the sentinel the caller
+// reports, or nil when the code is not a refusal. It lives beside the codes so a
+// new one cannot be added without a decision about what callers see.
+func concurrencyRefusal(code int64) error {
+	switch code {
+	case concurrencyAdmitRefusedLimit:
+		return engine.ErrConcurrencyLimit
+	case concurrencyAdmitRefusedQueueFull:
+		return engine.ErrConcurrencyQueueFull
+	}
+	return nil
+}
+
 // CreateExecutionWithConcurrency admits one submission against its workflow's
 // slot set, then persists it.
 //
@@ -175,33 +239,14 @@ func (s *Store) CreateExecutionWithConcurrency(ctx context.Context, execution *e
 	// scope could disagree, and the context's is the one a later release will
 	// read back.
 	t := namespace.FromContext(ctx)
-	workflow := admission.Workflow
-	tag := workflowDigestTag(t, workflow)
+	tag := workflowDigestTag(t, admission.Workflow)
 	s.registerConcurrencyWorkflow(ctx, t, tag)
-	queueMode := admission.Mode == types.ConcurrencyModeQueue
-	deadlineMs := int64(0)
-	if queueMode && admission.QueueTimeout > 0 {
-		// The clock starts here, when the execution is parked. Measured from
-		// promotion it could never fire — a promoted execution is not waiting
-		// for anything — and a workflow whose limit never frees would hold
-		// submissions past their declared bound forever.
-		deadlineMs = time.Now().UTC().Add(admission.QueueTimeout).UnixMilli()
+	admit, err := s.admitWorkflowSlot(ctx, t, execution.ID, admission)
+	if err != nil {
+		return engine.ConcurrencyAdmissionResult{}, err
 	}
-	reply, err := workflowAdmitLua.Run(ctx, s.rdb,
-		concurrencyAdmitKeys(t, workflow),
-		concurrencySlotMember(execution.ID), admission.Limit,
-		time.Now().UTC().Unix(), int(s.concurrencySlotTTL().Seconds()),
-		concurrencyModeFlag(queueMode), admission.MaxQueued, deadlineMs,
-	).Slice()
-	if err != nil && err != redis.Nil {
-		return engine.ConcurrencyAdmissionResult{}, fmt.Errorf("admit workflow %q: %w", workflow, err)
-	}
-	code := luaReplyInt(reply, 0)
-	switch code {
-	case concurrencyAdmitRefusedLimit:
-		return engine.ConcurrencyAdmissionResult{}, engine.ErrConcurrencyLimit
-	case concurrencyAdmitRefusedQueueFull:
-		return engine.ConcurrencyAdmissionResult{}, engine.ErrConcurrencyQueueFull
+	if refused := concurrencyRefusal(admit.code); refused != nil {
+		return engine.ConcurrencyAdmissionResult{}, refused
 	}
 
 	// The slot is charged (or the line place is taken). Every failure from here
@@ -210,7 +255,7 @@ func (s *Store) CreateExecutionWithConcurrency(ctx context.Context, execution *e
 	// sweep exists, and for a queued execution it also has to leave the line.
 	hold := time.Time{}
 	queueWait := time.Duration(0)
-	if code == concurrencyAdmitQueued {
+	if admit.code == concurrencyAdmitQueued {
 		hold = queuedOutboxHold
 		// A parked execution has to outlive its own wait: its keys are written
 		// with the ordinary retention, which knows nothing about the line in
@@ -223,9 +268,9 @@ func (s *Store) CreateExecutionWithConcurrency(ctx context.Context, execution *e
 		s.releaseWorkflowSlotBestEffort(ctx, execution.ID, t, tag)
 		return engine.ConcurrencyAdmissionResult{}, err
 	}
-	s.completePromotions(ctx, t, tag, luaReplyStrings(reply, 2))
-	if code == concurrencyAdmitQueued {
-		return engine.ConcurrencyAdmissionResult{Queued: true, QueuePosition: int(luaReplyInt(reply, 1))}, nil
+	s.completePromotions(ctx, t, tag, admit.promoted)
+	if admit.code == concurrencyAdmitQueued {
+		return engine.ConcurrencyAdmissionResult{Queued: true, QueuePosition: int(admit.position)}, nil
 	}
 	return engine.ConcurrencyAdmissionResult{}, nil
 }
@@ -537,7 +582,14 @@ func (s *Store) workflowTagFor(ctx context.Context, id types.ExecutionID, t name
 // which is what the caller asked — while a real read failure is returned so a
 // caller can tell "not queued" from "could not tell".
 func (s *Store) ConcurrencyQueuePosition(ctx context.Context, id types.ExecutionID) (int, error) {
-	t := namespace.FromContext(ctx)
+	return s.queuePositionFor(ctx, namespace.FromContext(ctx), id)
+}
+
+// queuePositionFor answers where one queued execution stands in its workflow's
+// line, for a caller that already resolved the namespace it is asking about —
+// which the seed path has, because a seed carries its own namespace and a read
+// scoped by the wrong one would silently answer "not queued".
+func (s *Store) queuePositionFor(ctx context.Context, t namespace.Namespace, id types.ExecutionID) (int, error) {
 	tag, err := s.workflowTagFor(ctx, id, t)
 	if err != nil || tag == "" {
 		return 0, err

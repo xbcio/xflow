@@ -696,10 +696,23 @@ return anyFailed and -1 or 1
 // ARGV[3] = admission score (unix seconds), ARGV[4] = TTL seconds for the keys,
 // ARGV[5] = 1 queue mode / 0 reject mode, ARGV[6] = max_queued (0 unbounded),
 // ARGV[7] = queue deadline (unix milliseconds, 0 = no bound)
-// Returns {code, position, promoted...}: code 1 admitted, 2 queued,
+// Returns {code, position, added, promoted...}: code 1 admitted, 2 queued,
 // 0 refused at the limit, 3 refused because the queue is full. position is the
-// 1-based place in the line for a queued submission (0 otherwise), and the rest
-// are the execution IDs this call promoted into free slots.
+// 1-based place in the line for a queued submission (0 otherwise), added is 1
+// when this call is what put the member in the slot set or the line, and the
+// rest are the execution IDs this call promoted into free slots.
+//
+// The decision is idempotent on the member. A member already in the slot set or
+// the line was charged by an earlier attempt of the SAME admission — the
+// entry-seed path derives its execution ID from the admission key, so a
+// redelivered batch asks for the same member — and this call reports what that
+// attempt decided instead of charging a second slot. Without this, a seed whose
+// response was lost would leave the workflow one short of its limit forever, and
+// a redelivery of a batch whose execution already finished would charge a slot
+// for it with nothing left to release. added is what tells the two apart: only a
+// charge this call made may be given back (see the seed path's duplicate
+// handling), because only then is it certain the member was not already
+// accounted for.
 //
 // The namespace workflow index is NOT written here, and that is the point: it
 // deliberately carries no {...} tag (it aggregates every workflow in the
@@ -717,32 +730,43 @@ return anyFailed and -1 or 1
 // waiter goes first and the newcomer takes what is left, which is exactly the
 // order this loop puts them in.
 var workflowAdmitLua = redis.NewScript(`
+local member = ARGV[1]
 local limit = tonumber(ARGV[2])
 local now = tonumber(ARGV[3])
 local ttl = tonumber(ARGV[4])
 local mode = tonumber(ARGV[5])
 redis.call('SET', KEYS[4], limit, 'EX', ttl)
+-- Idempotency first, before the capacity check: a member that is already here
+-- was charged by an earlier attempt of the same admission, and re-deciding it
+-- would either charge twice or refuse a submission that already has its slot.
+if redis.call('ZSCORE', KEYS[1], member) then
+    return {1, 0, 0}
+end
+local rank = redis.call('ZRANK', KEYS[2], member)
+if rank then
+    return {2, rank + 1, 0}
+end
 local holders = redis.call('ZCARD', KEYS[1])
 local waiting = redis.call('ZCARD', KEYS[2])
 if holders < limit and waiting == 0 then
-    redis.call('ZADD', KEYS[1], now, ARGV[1])
+    redis.call('ZADD', KEYS[1], now, member)
     redis.call('EXPIRE', KEYS[1], ttl)
-    return {1, 0}
+    return {1, 0, 1}
 end
 if mode == 0 then
-    return {0, 0}
+    return {0, 0, 0}
 end
 local maxQueued = tonumber(ARGV[6])
 if maxQueued > 0 and waiting >= maxQueued then
-    return {3, 0}
+    return {3, 0, 0}
 end
 local seq = redis.call('INCR', KEYS[3])
 redis.call('EXPIRE', KEYS[3], ttl)
-redis.call('ZADD', KEYS[2], seq, ARGV[1])
+redis.call('ZADD', KEYS[2], seq, member)
 redis.call('EXPIRE', KEYS[2], ttl)
 local deadline = tonumber(ARGV[7])
 if deadline > 0 then
-    redis.call('ZADD', KEYS[5], deadline, ARGV[1])
+    redis.call('ZADD', KEYS[5], deadline, member)
     redis.call('EXPIRE', KEYS[5], ttl)
 end
 local position = redis.call('ZCARD', KEYS[2])
@@ -757,7 +781,7 @@ while redis.call('ZCARD', KEYS[1]) < limit do
     table.insert(promoted, head[1])
 end
 redis.call('EXPIRE', KEYS[1], ttl)
-local out = {2, position}
+local out = {2, position, 1}
 for _, id in ipairs(promoted) do
     table.insert(out, id)
 end
