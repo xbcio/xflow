@@ -48,6 +48,11 @@ type Store struct {
 	leaseRepairMu      sync.Mutex
 	leaseRepairCursors map[namespace.Namespace]redisx.Cursors
 
+	// concurrencySweepMu keeps two maintenance loops from sweeping the same
+	// workflow slot sets at the same time. The sweep is idempotent, so this is
+	// about not multiplying the index reads, not correctness.
+	concurrencySweepMu sync.Mutex
+
 	// outboxDiscoveryCursors advance the bounded outbox discovery scan the same
 	// way leaseRepairCursors do: one node-local cursor per Redis master and
 	// namespace, so a resumed scan neither reuses a cursor across masters nor
