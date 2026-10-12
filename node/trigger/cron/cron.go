@@ -3,6 +3,7 @@ package cron
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	nodeinternal "github.com/xbcio/xflow/node/internal"
@@ -22,7 +23,7 @@ type Node struct {
 }
 
 func New() *Node {
-	return &Node{Expression: "* * * * *", Timezone: "UTC"}
+	return &Node{Expression: "* * * * *"}
 }
 
 func (n *Node) Cron(expression string) *Node {
@@ -45,7 +46,7 @@ func (n *Node) Descriptor() types.Descriptor {
 			// @every / @hourly descriptors.
 			{Name: "expression", DisplayName: "Expression", Type: types.ParamString, Required: true, Description: "Cron schedule, five fields (e.g. \"*/5 * * * *\") or a descriptor such as \"@every 1m\"",
 				Widget: nodeinternal.WidgetCron, Constraints: nodeinternal.Format(nodeinternal.FormatCron)},
-			{Name: "timezone", DisplayName: "Timezone", Type: types.ParamString, Required: false, Default: "UTC", Description: "IANA time zone name the schedule is evaluated in"},
+			{Name: "timezone", DisplayName: "Timezone", Type: types.ParamString, Required: false, Default: "", Description: "IANA time zone name the schedule is evaluated in; empty inherits the workflow settings.timezone (UTC if none)"},
 		},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 	}
@@ -53,7 +54,11 @@ func (n *Node) Descriptor() types.Descriptor {
 
 func (n *Node) NodeType() string { return "xflow.trigger.cron" }
 func (n *Node) RawParams() any {
-	return map[string]any{"expression": n.Expression, "timezone": n.Timezone}
+	params := map[string]any{"expression": n.Expression}
+	if n.Timezone != "" {
+		params["timezone"] = n.Timezone
+	}
+	return params
 }
 func (n *Node) OnError(s types.OnError) types.Builder {
 	n.SetOnError(s)
@@ -66,7 +71,12 @@ func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (ty
 	if expr == "" {
 		return nil, fmt.Errorf("cron expression is required")
 	}
+	// Precedence: the node's own timezone, then the workflow's
+	// settings.timezone, then UTC.
 	tz := cast.ToString(in.Params["timezone"])
+	if tz == "" {
+		tz = in.WorkflowTimezone
+	}
 	if tz == "" {
 		tz = "UTC"
 	}
@@ -79,7 +89,26 @@ func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (ty
 	if _, err := c.AddFunc(expr, func() {
 		event := newCronTriggerEvent(in.WorkflowID, in.NodeName, time.Now().In(loc))
 		if ok, err := in.Runtime.Dedup(runCtx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+event.ID, 2*time.Minute); err == nil && ok {
-			_, _ = in.Emit(runCtx, event)
+			if _, err := in.Emit(runCtx, event); err != nil {
+				// A firing that was refused is DROPPED, and that is the whole
+				// handling: a schedule is a stream of moments, so the next firing
+				// is a fresh attempt and replaying this one would turn a busy
+				// workflow into a backlog of stale ticks. The refusal an operator
+				// will see here is the workflow's own concurrency limit
+				// (engine.ErrConcurrencyLimit); a QUEUE-mode workflow does not
+				// produce it, because its over-limit firings are parked and
+				// admitted later instead of refused.
+				//
+				// The log is not decoration. Nothing durable records the dropped
+				// tick — no execution, no offset, no state — so without this line
+				// a schedule that is being refused is indistinguishable from a
+				// schedule that never fired.
+				slog.Warn("cron trigger firing was not admitted; the tick is dropped",
+					"workflow_id", in.WorkflowID,
+					"node", in.NodeName,
+					"event", event.ID,
+					"err", err)
+			}
 		}
 	}); err != nil {
 		cancel()

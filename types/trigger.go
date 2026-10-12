@@ -41,6 +41,11 @@ type TriggerActivateInput struct {
 	// value is the JSON-decoded supply content (map[string]any). nil when no
 	// supplies are declared or none have content yet.
 	Supplies map[string]any
+	// WorkflowTimezone is the workflow's settings.timezone (IANA name, already
+	// validated at compile), or "" when the workflow declares none. Triggers
+	// that evaluate wall-clock schedules use it when their own timezone
+	// parameter is unset.
+	WorkflowTimezone string
 }
 
 func (i *TriggerActivateInput) Emit(ctx context.Context, event *TriggerEvent) (ExecutionID, error) {
@@ -131,10 +136,27 @@ type BoundaryExit struct {
 }
 
 // EntrySeedResponse is the control-plane response.
+//
+// The four handled outcomes are mutually exclusive and one of them is always
+// set when a response is returned without an error; a response that sets none
+// is a protocol disagreement the caller must not treat as handled.
 type EntrySeedResponse struct {
-	Accepted    bool
-	Duplicate   bool
-	Conflict    bool
+	Accepted  bool
+	Duplicate bool
+	Conflict  bool
+	// Refused is true when the workflow's concurrency policy refused the
+	// admission: nothing was persisted, and the entry-unit result is still the
+	// caller's — so the caller must NOT commit the offset, and the batch is
+	// redelivered and retried. It is deliberately not folded into Conflict (which
+	// DOES commit: another runner already holds the result) or into the error
+	// path (which is a transport fault rather than a decision the workflow made).
+	Refused bool
+	// QueueFull narrows Refused: the refusal was the queue-mode backlog being at
+	// max_queued rather than a slot being unavailable. Both waits are retryable,
+	// but they are different waits — a slot to free versus a backlog to drain —
+	// and the runner reports them separately for the same reason the HTTP layer
+	// gives them different codes.
+	QueueFull   bool
 	ExecutionID ExecutionID
 }
 
@@ -162,8 +184,11 @@ type EntrySeedResponse struct {
 type EntrySeedObserver interface {
 	// OnEntrySeedAdmission reports one admission attempt. outcome is a closed
 	// enum produced by the runtime, never free text: "accepted", "duplicate",
-	// "conflict", "timeout", "error". d is how long the round trip took,
-	// including any queueing inside the HTTP client.
+	// "conflict", "refused", "queue_full", "timeout", "error". "refused" and
+	// "queue_full" are the workflow's own concurrency policy declining the seed —
+	// a designed throttle, not a fault, and the only series in which an operator
+	// can see that a correctly-configured deployment is being held back. d is how
+	// long the round trip took, including any queueing inside the HTTP client.
 	OnEntrySeedAdmission(ctx context.Context, outcome string, d time.Duration)
 }
 

@@ -12,6 +12,17 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
+// queuedOutboxHold is the availability stamped on the initial intents of a
+// QUEUE-mode execution: far enough in the future that no read path will ever
+// consider one due, which is how "persisted but not deliverable" is expressed
+// without a second outbox structure.
+//
+// It is a fixed instant rather than a deadline the store re-evaluates. A queued
+// execution's intents become deliverable when it is promoted, not when some
+// time passes, so anything that made them due by clock alone would start a
+// queued execution that holds no slot.
+var queuedOutboxHold = time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
+
 // memoryState implements engine.StateStore using in-memory maps protected by a mutex.
 // It is suitable for single-process (local) execution only.
 type memoryState struct {
@@ -43,6 +54,15 @@ type memoryState struct {
 	subExecs       map[string][]*engine.SubExecution       // key: execID+"/"+nodeName
 	groupUnits     map[string]*groupUnitState              // key: "<execID>/<unitIdx>"
 	admissions     map[engine.AdmissionKey]*admissionEntry // trigger admission keys
+	// workflowSlots is the workflow-scoped concurrency slot set, keyed by
+	// graph.ConcurrencyKey(ns, workflow name), and slotHolders records which set
+	// each admitted execution was charged to so a terminal transition can
+	// release it without consulting a graph. queued is the mirror image for
+	// QUEUE-mode executions that hold no slot yet: their set, so a promotion or
+	// a cancellation can find the line they are standing in.
+	workflowSlots map[string]*workflowSlot
+	slotHolders   map[types.ExecutionID]*workflowSlot
+	queued        map[types.ExecutionID]*queuedExecution
 
 	// done channels allow Wait() callers to block until execution completes.
 	doneCh        map[types.ExecutionID]chan struct{}
@@ -110,6 +130,353 @@ func (s *memoryState) CreateExecutionWithOutbox(_ context.Context, e *engine.Exe
 	return nil
 }
 
+var _ engine.ConcurrencyLimitedStateStore = (*memoryState)(nil)
+var _ engine.ConcurrencyQueueExpirer = (*memoryState)(nil)
+var _ engine.ConcurrencyQueueInspector = (*memoryState)(nil)
+
+// workflowSlot names the slot set one admitted execution was charged to. It is
+// recorded at admission because a release must free the SAME set, and by
+// terminal-write time the graph the admission read may no longer be around.
+type workflowSlot struct {
+	key     string
+	holders map[types.ExecutionID]bool
+	// limit is the capacity the most recently admitted submission declared.
+	// Promotions read it at release time, when the submitting graph is long
+	// gone, so it has to be remembered here. A lowered limit therefore lets the
+	// running holders finish and stops the line at the new capacity; raising it
+	// frees capacity the next release, or the next admission, fills.
+	limit int
+	// queued is the FIFO line of executions waiting for a holder slot, head
+	// first. Order is the whole point of the structure: the execution that has
+	// waited longest is the one promoted next.
+	queued []types.ExecutionID
+}
+
+// queuedExecution is one execution standing in a workflow's line: the set it
+// waits for, and the instant its queue timeout expires (zero when the workflow
+// declared none).
+type queuedExecution struct {
+	slot     *workflowSlot
+	deadline time.Time
+}
+
+// CreateExecutionWithConcurrency admits one submission against its workflow's
+// slot set, then writes the execution and its initial intents under the same
+// mutex acquisition. Doing the three in one critical section is what makes the
+// limit sound: a slot charged for an execution that failed to persist would
+// leak until restart, and an execution persisted without its slot would
+// over-admit.
+//
+// A refused submission writes nothing. The engine relies on that to report a
+// 429 for a rejection rather than leaving a zero-node execution behind.
+func (s *memoryState) CreateExecutionWithConcurrency(_ context.Context, e *engine.ExecutionSnapshot, entries []engine.OutboxEntry, admission engine.ConcurrencyAdmission) (engine.ConcurrencyAdmissionResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	pending, err := s.chargeOrParkLocked(e.ID, admission)
+	if err != nil {
+		return engine.ConcurrencyAdmissionResult{}, err
+	}
+	status := types.ExecutionStatusRunning
+	hold := time.Time{}
+	if pending {
+		status, hold = types.ExecutionStatusQueued, queuedOutboxHold
+	}
+	admitted := *e
+	admitted.Status = status
+	s.createExecutionLocked(&admitted)
+	s.writeInitialIntentsLocked(e.ID, entries, hold)
+	if !pending {
+		return engine.ConcurrencyAdmissionResult{}, nil
+	}
+	return engine.ConcurrencyAdmissionResult{Queued: true, QueuePosition: s.queuePositionLocked(e.ID)}, nil
+}
+
+// chargeOrParkLocked decides where one admission lands and records the
+// decision: a charged slot, or a place at the end of the workflow's line.
+//
+// It is the decision alone, with no execution written under it, because the two
+// paths that call it write different things — a submission writes its initial
+// intents, an entry seed writes an admission — and the decision is the part
+// that must not diverge between them. Everything a caller writes afterwards
+// happens in the same critical section, so the slot (or the place) is durable
+// before anything depends on it.
+func (s *memoryState) chargeOrParkLocked(id types.ExecutionID, admission engine.ConcurrencyAdmission) (bool, error) {
+	slot := s.slotForLocked(graph.ConcurrencyKey(admission.Namespace, admission.Workflow))
+	slot.limit = admission.Limit
+
+	if admission.Mode == types.ConcurrencyModeQueue {
+		return s.parkOrChargeLocked(slot, id, admission)
+	}
+	if len(slot.holders) >= admission.Limit {
+		return false, engine.ErrConcurrencyLimit
+	}
+	s.chargeSlotLocked(slot, id)
+	return false, nil
+}
+
+// chargeSlotLocked records that one execution holds a slot in the set.
+func (s *memoryState) chargeSlotLocked(slot *workflowSlot, id types.ExecutionID) {
+	slot.holders[id] = true
+	if s.slotHolders == nil {
+		s.slotHolders = make(map[types.ExecutionID]*workflowSlot)
+	}
+	s.slotHolders[id] = slot
+}
+
+// slotForLocked returns the workflow's slot state, creating it on first use.
+func (s *memoryState) slotForLocked(key string) *workflowSlot {
+	slot := s.workflowSlots[key]
+	if slot == nil {
+		slot = &workflowSlot{key: key, holders: make(map[types.ExecutionID]bool)}
+		if s.workflowSlots == nil {
+			s.workflowSlots = make(map[string]*workflowSlot)
+		}
+		s.workflowSlots[key] = slot
+	}
+	return slot
+}
+
+// parkOrChargeLocked places an over-limit submission in the workflow's FIFO
+// line, or charges it a slot when the workflow has room and nobody is waiting.
+//
+// The line is what decides: a free slot belongs to the execution that has been
+// waiting longest, so a fresh submission is admitted directly only when the
+// line is empty. Admitting it ahead of the line would be exactly the
+// starvation FIFO exists to prevent, and it is reachable — capacity frees up
+// between a release and the next admission without the head having been
+// promoted only in the crash window the reconciler repairs.
+func (s *memoryState) parkOrChargeLocked(slot *workflowSlot, id types.ExecutionID, admission engine.ConcurrencyAdmission) (bool, error) {
+	if len(slot.holders) < slot.limit && len(slot.queued) == 0 {
+		s.chargeSlotLocked(slot, id)
+		return false, nil
+	}
+	if admission.MaxQueued > 0 && len(slot.queued) >= admission.MaxQueued {
+		// Refused before anything is written, like a reject-mode refusal: a
+		// full queue is a 429 the caller can retry, not a persisted execution
+		// waiting nowhere.
+		return false, engine.ErrConcurrencyQueueFull
+	}
+
+	slot.queued = append(slot.queued, id)
+	if s.queued == nil {
+		s.queued = make(map[types.ExecutionID]*queuedExecution)
+	}
+	var deadline time.Time
+	if admission.QueueTimeout > 0 {
+		deadline = time.Now().UTC().Add(admission.QueueTimeout)
+	}
+	s.queued[id] = &queuedExecution{slot: slot, deadline: deadline}
+	return true, nil
+}
+
+// queuePositionLocked reports where one queued execution stands in its line,
+// 1-based, or 0 when it is not waiting.
+func (s *memoryState) queuePositionLocked(id types.ExecutionID) int {
+	waiting, ok := s.queued[id]
+	if !ok {
+		return 0
+	}
+	for i, queued := range waiting.slot.queued {
+		if queued == id {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+// holdOutboxLocked parks every deliverable intent the execution holds.
+//
+// The seed path writes its intents through the same helpers a running
+// execution uses, so the parked case re-stamps them here rather than threading
+// a hold parameter through those helpers: the decision to hold belongs to the
+// admission, not to whichever function happened to write the entry. An intent
+// that is already held or already leased is left alone.
+func (s *memoryState) holdOutboxLocked(id types.ExecutionID) {
+	for entryID, held := range s.outbox[id] {
+		if !held.entry.AvailableAt.IsZero() {
+			continue
+		}
+		held.entry.AvailableAt = queuedOutboxHold
+		s.outbox[id][entryID] = held
+	}
+}
+
+// writeInitialIntentsLocked persists an execution's root intents, stamped with
+// the availability they start out at.
+//
+// A queued execution's intents are stamped queuedOutboxHold: they exist in full
+// — a crash cannot lose them, and promotion does not have to reconstruct them —
+// but nothing considers them due until the execution holds a slot.
+func (s *memoryState) writeInitialIntentsLocked(id types.ExecutionID, entries []engine.OutboxEntry, availableAt time.Time) {
+	for _, entry := range entries {
+		if entry.Task.Type == engine.TaskTypeNodeSkip {
+			s.scheduled[memoryCounterKey(id, entry.Task.UnitIdx)] = "skip"
+		}
+		if !availableAt.IsZero() {
+			entry.AvailableAt = availableAt
+		}
+		s.putOutboxEntryLocked(id, entry)
+	}
+}
+
+// releaseWorkflowSlotLocked frees the concurrency state an execution held. It is
+// called from every path that moves an execution into a terminal status, so no
+// engine call site can forget it; a non-terminal transition (canceling) keeps
+// the slot, because the execution still holds the resources the limit protects.
+//
+// A queued execution holds no slot but does hold a place in line, and its
+// intents were never deliverable, so leaving the line is the whole release and
+// the parked intents are dropped with it — a canceled or timed-out execution
+// that never ran has nothing left to deliver.
+func (s *memoryState) releaseWorkflowSlotLocked(id types.ExecutionID) {
+	slot, held := s.slotHolders[id]
+	if held {
+		delete(s.slotHolders, id)
+		delete(slot.holders, id)
+	} else if waiting, ok := s.queued[id]; ok {
+		delete(s.queued, id)
+		waiting.slot.removeQueued(id)
+		s.dropHeldOutboxLocked(id)
+		slot = waiting.slot
+	} else {
+		return
+	}
+	// Whatever capacity the departure freed goes to the head of the line. A
+	// queued execution's own departure frees none, but the loop is the same
+	// either way: it fills capacity when there is any and does nothing when
+	// there is not.
+	s.promoteLocked(slot)
+	if len(slot.holders) == 0 && len(slot.queued) == 0 {
+		delete(s.workflowSlots, slot.key)
+	}
+}
+
+// removeQueued takes one execution out of the line, keeping the order of the
+// rest. The line is short (bounded by max_queued) and this runs once per
+// promotion or cancellation, so the copy is cheaper than a linked structure
+// would be to reason about.
+func (slot *workflowSlot) removeQueued(id types.ExecutionID) {
+	for i, queued := range slot.queued {
+		if queued == id {
+			slot.queued = append(slot.queued[:i], slot.queued[i+1:]...)
+			return
+		}
+	}
+}
+
+// promoteLocked fills the workflow's free capacity from the head of its line.
+// It loops because a single promotion can free the capacity another promotion
+// needs — a workflow admitted below its limit after a limit raise, or a
+// reconciler-repaired set, promotes as many as fit rather than one per event.
+func (s *memoryState) promoteLocked(slot *workflowSlot) {
+	for slot.limit > 0 && len(slot.holders) < slot.limit && len(slot.queued) > 0 {
+		id := slot.queued[0]
+		slot.queued = slot.queued[1:]
+		delete(s.queued, id)
+		slot.holders[id] = true
+		if s.slotHolders == nil {
+			s.slotHolders = make(map[types.ExecutionID]*workflowSlot)
+		}
+		s.slotHolders[id] = slot
+		s.completePromotionLocked(id)
+	}
+}
+
+// completePromotionLocked starts a promoted execution.
+//
+// The two halves move together: an execution that is running while its intents
+// stay held never starts at all, and one whose intents became deliverable while
+// it still reads queued would run while holding no slot — the failure the limit
+// exists to prevent. The status is what a caller polls, the availability is
+// what the dispatcher reads, and neither is meaningful without the other.
+func (s *memoryState) completePromotionLocked(id types.ExecutionID) {
+	if entry, ok := s.executions[id]; ok && entry.snap.Status == types.ExecutionStatusQueued {
+		entry.snap.Status = types.ExecutionStatusRunning
+		s.publishLocked(engine.ExecutionEvent{ExecutionID: id, Status: types.ExecutionStatusRunning})
+	}
+	for entryID, held := range s.outbox[id] {
+		if !held.entry.AvailableAt.Equal(queuedOutboxHold) {
+			continue
+		}
+		held.entry.AvailableAt = time.Time{}
+		s.outbox[id][entryID] = held
+	}
+}
+
+// dropHeldOutboxLocked discards the intents a queued execution parked. Only
+// held entries go: an entry that became deliverable was promoted work, and
+// discarding it would drop a task the execution still owes.
+func (s *memoryState) dropHeldOutboxLocked(id types.ExecutionID) {
+	for entryID, held := range s.outbox[id] {
+		if held.entry.AvailableAt.Equal(queuedOutboxHold) {
+			delete(s.outbox[id], entryID)
+		}
+	}
+	if len(s.outbox[id]) == 0 {
+		delete(s.outbox, id)
+	}
+}
+
+// ExpireQueuedExecutions drives every queued execution whose queue timeout has
+// passed into the timeout terminal state, and reports how many it expired.
+//
+// The clock starts when the execution is parked, which is the only instant that
+// makes queue_timeout mean what it says: a bound on how long a submission may
+// wait for a slot. Measured from promotion it could never fire at all — a
+// promoted execution is not waiting for anything — and a workflow whose limit
+// never frees would hold submissions forever.
+func (s *memoryState) ExpireQueuedExecutions(_ context.Context, limit int) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.queued) == 0 {
+		return 0, nil
+	}
+	now := time.Now().UTC()
+	expired := make([]types.ExecutionID, 0, len(s.queued))
+	for id, waiting := range s.queued {
+		if limit > 0 && len(expired) >= limit {
+			break
+		}
+		if waiting.deadline.IsZero() || waiting.deadline.After(now) {
+			continue
+		}
+		expired = append(expired, id)
+	}
+	for _, id := range expired {
+		// Through the same terminal write every other path uses, so the queue
+		// departure, the event and the error read-back cannot diverge from a
+		// cancellation.
+		_ = s.updateExecutionStatusLocked(id, types.ExecutionStatusTimeout, engine.ConcurrencyQueueTimeoutError)
+	}
+	return len(expired), nil
+}
+
+// ConcurrencyQueuePosition reports where one queued execution stands in its
+// workflow's line, 1-based, or 0 when it is not queued.
+//
+// The line is a slice, so the position is its index: the head is the execution
+// the next release promotes, which is exactly what a waiting submitter wants to
+// know. An execution that was never queued, or whose wait already ended in a
+// promotion, an expiry or a cancellation, is not in the map and answers 0.
+func (s *memoryState) ConcurrencyQueuePosition(_ context.Context, id types.ExecutionID) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	waiting, ok := s.queued[id]
+	if !ok {
+		return 0, nil
+	}
+	for i, queued := range waiting.slot.queued {
+		if queued == id {
+			return i + 1, nil
+		}
+	}
+	// The map and the line disagree, which can only mean a half-finished
+	// departure. Reporting 0 is the honest answer to "where does it stand":
+	// nowhere this store can point at.
+	return 0, nil
+}
+
 func (s *memoryState) createExecutionLocked(e *engine.ExecutionSnapshot) {
 	cp := *e
 	s.executions[e.ID] = &execEntry{snap: cp}
@@ -135,6 +502,14 @@ func (s *memoryState) createExecutionLocked(e *engine.ExecutionSnapshot) {
 func (s *memoryState) UpdateExecutionStatus(_ context.Context, id types.ExecutionID, status types.ExecutionStatus, errMsg string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.updateExecutionStatusLocked(id, status, errMsg)
+}
+
+// updateExecutionStatusLocked is the terminal-write body shared by the public
+// method and the store's own background transitions (the queue timeout). They
+// have to agree on everything — the CAS fence, the reason read-back, the slot
+// release, the event — and the only way to guarantee that is to have one.
+func (s *memoryState) updateExecutionStatusLocked(id types.ExecutionID, status types.ExecutionStatus, errMsg string) error {
 	entry, ok := s.executions[id]
 	if !ok {
 		return nil
@@ -159,10 +534,13 @@ func (s *memoryState) UpdateExecutionStatus(_ context.Context, id types.Executio
 		entry.snap.Error = errMsg
 	}
 	// Close the done channel on terminal status so Wait() unblocks.
-	if isTerminalStatus(status) && !entry.closed {
-		entry.closed = true
-		if ch, ok := s.doneCh[id]; ok {
-			close(ch)
+	if isTerminalStatus(status) {
+		s.releaseWorkflowSlotLocked(id)
+		if !entry.closed {
+			entry.closed = true
+			if ch, ok := s.doneCh[id]; ok {
+				close(ch)
+			}
 		}
 	}
 	s.publishLocked(engine.ExecutionEvent{ExecutionID: id, Status: status, Error: errMsg})
@@ -1163,7 +1541,11 @@ func (s *memoryState) CompleteSubExecution(_ context.Context, parentExecID types
 			sub.Status = status
 			sub.Result = result
 		}
-		if sub.Status == types.ExecutionStatusRunning {
+		// The same rule the expansion path applies: only a terminal child is
+		// done. "Not running" also matches a child that is parked in a
+		// non-terminal state, and treating that as finished would hand the
+		// parent a batch with a hole in it.
+		if !types.IsTerminalExecutionStatus(sub.Status) {
 			allDone = false
 		}
 	}

@@ -132,12 +132,21 @@ func (r *triggerRuntime) ReconcileWorkflow(ctx context.Context, rec backend.Work
 			activateErr = err
 			break
 		}
+		// settings.timezone, already validated when the definition compiled.
+		var workflowTZ string
+		if rec.Graph != nil {
+			workflowTZ = rec.Graph.Timezone()
+		} else if rec.Definition.Settings != nil {
+			workflowTZ = rec.Definition.Settings.Timezone
+		}
 		sub, err := h.Activate(ctx, &types.TriggerActivateInput{
 			WorkflowID: rec.ID,
 			NodeName:   p.nd.Name,
 			Params:     params,
 			Runtime:    r,
 			Supplies:   supply.Default.Decoded(),
+
+			WorkflowTimezone: workflowTZ,
 		})
 		if err != nil {
 			activateErr = err

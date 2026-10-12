@@ -243,6 +243,10 @@ func (e *Engine) Submit(ctx context.Context, g *graph.Graph, params map[string]a
 	if g != nil && g.FAF() {
 		return "", ErrFAFRequiresDirectDispatch
 	}
+	params, err := g.ApplyParams(params)
+	if err != nil {
+		return "", err
+	}
 	id := preallocOrNewExecutionID(ctx)
 	snap := &ExecutionSnapshot{
 		ID:     id,
@@ -266,6 +270,10 @@ func (e *Engine) Invoke(ctx context.Context, g *graph.Graph, entryName string, p
 	entryIdx, ok := g.EntryIndex(entryName)
 	if !ok {
 		return "", fmt.Errorf("entry node %q: %w", entryName, ErrEntryNotFound)
+	}
+	params, err := g.ApplyParams(params)
+	if err != nil {
+		return "", err
 	}
 
 	id := preallocOrNewExecutionID(ctx)

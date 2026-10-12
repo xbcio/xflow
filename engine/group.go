@@ -87,6 +87,17 @@ type GroupCommitRequest struct {
 	Exits        []GroupExitResult
 	Error        string
 	Fatal        bool
+	// Transient carries the group's declared mode (groups[].mode: transient)
+	// into the commit so the backend can hold the group's artifacts — boundary
+	// exits, unit status, lease keys — to the short completion retention instead
+	// of the execution TTL once the execution reaches a terminal state. While
+	// the execution runs, the keys keep the normal retention so downstream
+	// $('exit') reads stay valid; see the transient group design.
+	//
+	// The flag is engine-derived from the compiled graph, never
+	// runner-controlled. A backend that does not implement TTL-bounded
+	// retention treats it as a no-op.
+	Transient bool
 	// Downstream 是本次组执行点亮的下游 unit 到达描述（复用 DownstreamArrival，
 	// 见 atomic.go）。commit 在同一原子转换里对每个下游 unit 做 DECR in-degree +
 	// active 计数 + wait_all/wait_any 阈值判定，并按结果写 execute/skip outbox intent。
@@ -152,4 +163,38 @@ type GroupLeaseExpirer interface {
 // so a crash in the gap between the two writes would strand the unit forever.
 type GroupLeaseReclaimer interface {
 	RevokeGroupLeaseWithOutbox(ctx context.Context, id types.ExecutionID, unitIdx int, token LeaseToken, entry OutboxEntry) (revoked bool, err error)
+}
+
+// GroupUnitPhase is a group unit's durable lifecycle phase as the store
+// records it — the group-level analogue of a node's NodeStatus, with the
+// coarser vocabulary a unit actually has.
+type GroupUnitPhase string
+
+const (
+	// GroupUnitPhasePending is a unit the store knows about (leased before, or
+	// seeded) that is not currently leased — retry-ready.
+	GroupUnitPhasePending GroupUnitPhase = "pending"
+	// GroupUnitPhaseRunning is a unit currently held under a lease.
+	GroupUnitPhaseRunning GroupUnitPhase = "running"
+	// GroupUnitPhaseDone is a committed unit, or one a seed admitted as already
+	// complete.
+	GroupUnitPhaseDone GroupUnitPhase = "done"
+)
+
+// GroupUnitPhaseReader is the read side of a group unit's durable state, the
+// group analogue of StateStore.GetNode.
+//
+// It exists because a group has no per-member node status: members run inside
+// the runner's embedded engine (service/runner/group_runtime.go), so the only
+// durable record of a member is its boundary exit plus the unit's own
+// status/meta. Inspect has to tell "this member never ran" from "this member's
+// records expired" — for a transient group those are different answers whose
+// keys are equally absent — and only the unit's own record distinguishes them.
+type GroupUnitPhaseReader interface {
+	// GetGroupUnitPhase returns the unit's recorded phase. found=false means the
+	// store holds no record of the unit at all: never leased or seeded, or its
+	// keys have expired. Callers that must not conflate those two states (see
+	// engine.Inspect on transient groups) decide from the surrounding evidence
+	// which one the absence means.
+	GetGroupUnitPhase(ctx context.Context, id types.ExecutionID, unitIdx int) (phase GroupUnitPhase, found bool, err error)
 }

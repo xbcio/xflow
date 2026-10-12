@@ -252,10 +252,11 @@ type HeartbeatResponse struct {
 	// supplies this runner hosts a consumer for. A differing hash tells the runner
 	// to fetch once; an equal hash costs nothing.
 	//
-	// This is a latency optimization, NOT the correctness channel: hints are lost
-	// to partitions, restarts and leader changes. Convergence is guaranteed by the
-	// activation-time fetch plus TTL polling. Only hashes travel here, so the
-	// heartbeat body does not grow with content size.
+	// This is a latency optimization over the activation-time fetch: hints are
+	// lost to partitions, restarts and leader changes, and there is no TTL poll
+	// loop behind them today, so a lost hint leaves an already-hosted consumer
+	// on its last-good value until a later hint arrives. Only hashes travel
+	// here, so the heartbeat body does not grow with content size.
 	SupplyHints map[string]string `json:"supply_hints,omitempty"`
 	// SupplyKeyRotation carries a base64-encoded new AES-256 key when the server
 	// rotates the supply encryption key. The runner installs it as current and

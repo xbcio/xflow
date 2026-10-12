@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/xbcio/xflow/types"
 )
@@ -167,6 +168,10 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	if def == nil {
 		return nil, errors.New("workflow definition is nil")
 	}
+	def, err := ExpandNodeTemplates(def)
+	if err != nil {
+		return nil, err
+	}
 	n := len(def.Nodes)
 	if n == 0 {
 		return nil, errors.New("workflow has no nodes")
@@ -177,8 +182,20 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	if err := validateWorkflowRunnerSelector(def.RunnerSelector); err != nil {
 		return nil, err
 	}
+	if err := validateCredentialRefs(def); err != nil {
+		return nil, err
+	}
+	if def.Settings != nil {
+		if err := validateRetryStrategy("settings", def.Settings.Retry); err != nil {
+			return nil, err
+		}
+		if err := validateSettingsOnError(def.Settings.OnError); err != nil {
+			return nil, err
+		}
+	}
 
 	g := &Graph{
+		expandedDef:     def,
 		name:            def.Name,
 		workflowVersion: def.Version,
 		compilerVersion: compilerVersion,
@@ -200,6 +217,12 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	}
 	if g.allowCycles && g.maxAutoDepth <= 0 {
 		g.maxAutoDepth = DefaultMaxAutoDepth
+	}
+	if def.Settings != nil && def.Settings.Timezone != "" {
+		if _, err := time.LoadLocation(def.Settings.Timezone); err != nil {
+			return nil, fmt.Errorf("settings.timezone %q is not a valid IANA time zone: %w", def.Settings.Timezone, err)
+		}
+		g.timezone = def.Settings.Timezone
 	}
 
 	// Reject reserved "xflow.group_*" types in user-authored workflows. These
@@ -242,6 +265,14 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 		}
 	}
 
+	if len(def.Params) > 0 {
+		g.params = make(map[string]types.ParamDef, len(def.Params))
+		for name, pd := range def.Params {
+			pd.Default = cloneAny(pd.Default)
+			pd.Validation = cloneStringAnyMap(pd.Validation)
+			g.params[name] = pd
+		}
+	}
 	if def.Context != nil {
 		g.vars = cloneStringAnyMap(def.Context.Vars)
 		g.config = cloneStringAnyMap(def.Context.Config)
@@ -290,6 +321,9 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	if err := buildNodesRefs(g, false, nil); err != nil {
 		return nil, err
 	}
+	if err := validateOutputSchemaRefs(def); err != nil {
+		return nil, err
+	}
 	// validateBodyOuterRefs adjudicates the cross-domain $nodes references
 	// projectNodeBodies collected. It runs here, and NOT inside that pass, for
 	// two independent reasons spelled out on the function itself: GroupIdx is
@@ -308,6 +342,9 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 		return nil, err
 	}
 	if err := assignPinData(def, g); err != nil {
+		return nil, err
+	}
+	if err := resolveConcurrency(def, g); err != nil {
 		return nil, err
 	}
 	if err := buildUnits(g); err != nil {
@@ -355,6 +392,15 @@ func validateFAF(def *types.WorkflowDef) error {
 	}
 	if def.Settings != nil && def.Settings.Retry != nil {
 		return errors.New("faf workflow cannot define workflow retries")
+	}
+	if def.Settings != nil && def.Settings.OnError != "" && def.Settings.OnError != string(types.OnErrorStop) {
+		return fmt.Errorf("faf workflow cannot define settings.on_error %q", def.Settings.OnError)
+	}
+	if def.Settings != nil && def.Settings.Concurrency != nil && def.Settings.Concurrency.Limit > 0 {
+		// A FAF execution persists nothing, so there is no durable slot to hold
+		// and no way to make the admission atomic with the dispatch. Fail closed
+		// rather than silently running unlimited.
+		return errors.New("faf workflow cannot define settings.concurrency with a non-zero limit")
 	}
 	if len(def.Nodes) != 1 {
 		return fmt.Errorf("faf workflow must contain exactly one node, got %d", len(def.Nodes))
@@ -415,13 +461,16 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 		if err != nil {
 			return 0, fmt.Errorf("node %q: %w", nd.Name, err)
 		}
+		if err := validateRetryStrategy(fmt.Sprintf("node %q", nd.Name), nd.Retry); err != nil {
+			return 0, err
+		}
 		g.index[nd.Name] = i
 		g.nodes[i] = NodeMeta{
 			Name:               nd.Name,
 			Type:               nd.Type,
 			Kind:               nd.Kind,
 			Version:            nd.Version,
-			OnError:            nd.OnError,
+			OnError:            resolveOnError(nd.OnError, def.Settings),
 			Output:             cloneNodeOutputPolicy(nd.Output),
 			RunnerSelector:     runnerSelector,
 			MergeMode:          extractMergeMode(nd),
@@ -696,17 +745,52 @@ func buildEdges(def *types.WorkflowDef, g *Graph) ([]dependencyPort, error) {
 
 // resolveRetry chooses the effective retry settings for a node: per-node
 // overrides win; otherwise the workflow-level WorkflowSettings.Retry applies;
-// otherwise no retry. Returns nil when retries are disabled.
+// otherwise no retry. Returns nil when retries are disabled. A node retry with
+// an explicit enabled=false disables retries for that node and does not fall
+// back to the workflow default.
 func resolveRetry(node *types.RetrySettings, settings *types.WorkflowSettings) *types.RetrySettings {
-	if node != nil && node.MaxAttempts > 0 {
-		cp := *node
-		return &cp
+	if node != nil && node.Enabled != nil && !*node.Enabled {
+		return nil
 	}
-	if settings != nil && settings.Retry != nil && settings.Retry.MaxAttempts > 0 {
-		cp := *settings.Retry
-		return &cp
+	if node.IsEnabled() {
+		return node.Clone()
+	}
+	if settings != nil && settings.Retry.IsEnabled() {
+		return settings.Retry.Clone()
 	}
 	return nil
+}
+
+// resolveOnError returns the node's effective on_error: an explicit node value
+// wins, otherwise settings.on_error applies. Groups do not inherit it.
+func resolveOnError(node string, settings *types.WorkflowSettings) string {
+	if node != "" || settings == nil {
+		return node
+	}
+	return settings.OnError
+}
+
+// validateSettingsOnError rejects a workflow default on_error the engine does
+// not implement.
+func validateSettingsOnError(onErr string) error {
+	switch types.OnError(onErr) {
+	case "", types.OnErrorStop, types.OnErrorOutput, types.OnErrorMainOutput, types.OnErrorContinue:
+		return nil
+	}
+	return fmt.Errorf("settings.on_error %q must be one of %q, %q, %q, %q",
+		onErr, types.OnErrorStop, types.OnErrorOutput, types.OnErrorMainOutput, types.OnErrorContinue)
+}
+
+// validateRetryStrategy rejects a retry strategy the engine does not implement.
+func validateRetryStrategy(where string, r *types.RetrySettings) error {
+	if r == nil {
+		return nil
+	}
+	switch r.Strategy {
+	case "", types.RetryStrategyFixed, types.RetryStrategyExponential:
+		return nil
+	}
+	return fmt.Errorf("%s: retry.strategy %q must be %q or %q", where, r.Strategy, types.RetryStrategyFixed, types.RetryStrategyExponential)
 }
 
 func validateWorkflowRunnerSelector(selector *types.RunnerSelector) error {

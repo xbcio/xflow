@@ -111,7 +111,7 @@ func DefaultFullTriggerConfig() FullTriggerConfig {
 // Input: `amount` (number). Runtime vars: VarHTTPURL, VarRecipient,
 // VarGRPCHost, VarDBTable, VarDBRowID (see FullVars). Credential: CredentialDB.
 func FullWorkflow(tc FullTriggerConfig) *xflow.WorkflowBuilder {
-	wf := xflow.Workflow("full-coverage")
+	wf := xflow.Workflow("full-coverage").Credential(CredentialDB, "database")
 
 	// --- declarations ---
 	policy := wf.Node("policy", node.SupplyStatic([]byte(`{"max_amount": 1000}`)))

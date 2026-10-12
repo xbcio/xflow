@@ -15,7 +15,7 @@ import (
 const retryBackoffCap = 5 * time.Minute
 
 // retryBackoff returns the delay to wait before the next retry attempt.
-// Exponential with deterministic jitter derived from the (execution, node,
+// Exponential (or constant for the fixed strategy) with deterministic jitter derived from the (execution, node,
 // attempt) tuple — we cannot use math/rand because workflow scripts run in a
 // determinism-locked sandbox and we want callers to be able to reason about
 // timing. Jitter is bounded to ±20%.
@@ -38,7 +38,8 @@ func retryBackoff(attempt int, settings *types.RetrySettings, execID types.Execu
 	// exceeds math.MaxInt64 (which would wrap negative and bypass the cap).
 	capF := float64(retryBackoffCap)
 	d := float64(base)
-	for i := 0; i < attempt && i < 32; i++ {
+	fixed := settings != nil && settings.Strategy == types.RetryStrategyFixed
+	for i := 0; !fixed && i < attempt && i < 32; i++ {
 		d *= multiplier
 		if d >= capF {
 			d = capF
@@ -88,7 +89,7 @@ func jitterFor(execID types.ExecutionID, nodeName string, attempt int, d time.Du
 // are disabled. The compiler already resolved per-node vs workflow defaults
 // into NodeMeta.Retry.
 func retryFor(meta graph.NodeMeta) *types.RetrySettings {
-	if meta.Retry != nil && meta.Retry.MaxAttempts > 0 {
+	if meta.Retry.IsEnabled() {
 		return meta.Retry
 	}
 	return nil

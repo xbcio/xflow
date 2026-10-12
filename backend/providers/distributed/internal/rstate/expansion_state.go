@@ -136,9 +136,18 @@ if child.status == 'running' then
     redis.call('HSET', KEYS[3], ARGV[5], encoded)
 end
 redis.call('EXPIRE', KEYS[3], tonumber(ARGV[8]))
+-- Only a terminal child is done. Testing for 'running' instead would count any
+-- other non-terminal status as finished, and a child parked in one has no
+-- result to contribute -- the parent would consume a batch with a hole in it.
+-- Children are created running and end terminal, so this changes nothing today
+-- and is what keeps a future status from being read as completion. Mirrors
+-- types.IsTerminalExecutionStatus.
+local isTerminal = function(v)
+    return v == 'success' or v == 'failed' or v == 'canceled' or v == 'timeout'
+end
 local children = redis.call('HVALS', KEYS[3])
 for i = 1, #children do
-    if cjson.decode(children[i]).status == 'running' then
+    if not isTerminal(cjson.decode(children[i]).status) then
         return {1, 0}
     end
 end

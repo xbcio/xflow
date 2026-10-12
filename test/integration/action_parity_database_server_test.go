@@ -258,6 +258,7 @@ func TestDatabaseActionErrorParityServerRunner(t *testing.T) {
 				InitialInterval: 50,
 			}
 			def := ParityWorkflow(source, retry)
+			def.Credentials = map[string]types.CredentialDef{"db": {Name: "db"}}
 
 			// server-runner topology (real Redis/HTTP + real MySQL).
 			serverOut := RunParityServerRunner(t, addr, def, register, nil, tc.name, "server-runner")
@@ -560,6 +561,7 @@ func TestDatabaseActionErrorParityServerRunnerProductionWiring(t *testing.T) {
 				InitialInterval: 50,
 			}
 			def := ParityWorkflow(source, retry)
+			def.Credentials = map[string]types.CredentialDef{"db": {Name: "db"}}
 
 			pool := resource.NewDefaultResourcePool(types.DefaultResourcePoolConfig())
 			t.Cleanup(func() {

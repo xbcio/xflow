@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -69,6 +70,12 @@ func (f *fakeControlFacade) Invoke(ctx context.Context, _ *graph.Graph, entry st
 }
 
 func (f *fakeControlFacade) Inspect(context.Context, types.ExecutionID, ...string) (engine.ExecutionDetail, error) {
+	return f.inspect, f.inspectErr
+}
+
+// InspectStatus answers from the same fixture as Inspect, so a test that sets
+// one detail cannot get a different status through the other call.
+func (f *fakeControlFacade) InspectStatus(context.Context, types.ExecutionID) (engine.ExecutionDetail, error) {
 	return f.inspect, f.inspectErr
 }
 
@@ -322,6 +329,24 @@ func TestWorkflowControlExecuteMissingEntryReturns400(t *testing.T) {
 	env := decodeEnvelope(t, resp, nil)
 	if env.Code != "workflow_entry_not_found" {
 		t.Fatalf("code = %q, want workflow_entry_not_found", env.Code)
+	}
+}
+
+func TestWorkflowControlExecuteInvalidParamsReturns400(t *testing.T) {
+	f := &fakeControlFacade{invokeErr: fmt.Errorf("param %q is required: %w", "amount", graph.ErrInvalidParams)}
+	mux := newControlMux(f)
+
+	resp := doJSON(t, mux, http.MethodPost, "/v1/workflows/execute", executeWorkflowRequest{
+		Workflow: validWorkflow(),
+		Entry:    "start",
+	})
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for invalid params", resp.StatusCode)
+	}
+	env := decodeEnvelope(t, resp, nil)
+	if env.Code != "workflow_params_invalid" {
+		t.Fatalf("code = %q, want workflow_params_invalid", env.Code)
 	}
 }
 

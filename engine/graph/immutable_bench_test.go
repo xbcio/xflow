@@ -29,7 +29,7 @@ func benchGraph(b *testing.B) *Graph {
 					"nested": map[string]any{"value": "v", "deep": map[string]any{"x": 1}},
 					"list":   []any{map[string]any{"k": "v"}, []string{"a", "b"}},
 				},
-				Retry: &types.RetrySettings{Enabled: true, MaxAttempts: 3},
+				Retry: &types.RetrySettings{MaxAttempts: 3},
 			},
 		},
 		Connections: types.Connections{

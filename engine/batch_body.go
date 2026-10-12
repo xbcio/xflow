@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
@@ -125,6 +126,11 @@ type BatchBodyRequest struct {
 	// non-instrumented caller.
 	TraceID string
 	SpanID  string
+	// Deadline is the batch's absolute stop instant (SubgraphLeasePayload.
+	// Deadline). Zero means unbounded. The executor forwards it to every item's
+	// nested execution, tightened by any deadline of its own, so the body
+	// cannot outlive the map node that spawned it.
+	Deadline time.Time
 }
 
 // WithBatchBodyExecutor supplies the body sub-graph executor used by

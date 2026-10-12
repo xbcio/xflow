@@ -102,7 +102,7 @@ const MSG = {
   noTemplateInCode: "代码中的 ${{ }} 不会被渲染",
   secretLike: "值看起来像凭据，请改用凭据引用",
   unregistered: "该节点类型未在 server 注册，参数按 JSON 编辑",
-  template: "节点模板（template / node_templates）目前不会被引擎解析"
+  template: "该节点引用节点模板：编译时先展开 node_templates，表单只显示节点自身覆盖的参数"
 } as const;
 
 const FORMAT_MESSAGES: Readonly<Record<string, string>> = {

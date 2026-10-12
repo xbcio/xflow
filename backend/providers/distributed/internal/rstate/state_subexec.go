@@ -111,7 +111,13 @@ func (s *Store) CompleteSubExecution(ctx context.Context, parentExecID types.Exe
 		if err := json.Unmarshal([]byte(v), &entry); err != nil {
 			continue
 		}
-		if entry.Status == types.ExecutionStatusRunning {
+		// Only a terminal child is done. "Not running" is the wider set: it also
+		// contains every status a child can be parked in, and a parked child has
+		// no result to contribute — reading it as finished would hand the parent
+		// a batch with a hole in it. Children are created running and end
+		// terminal, so this changes nothing today and is what keeps a future
+		// status from being read as completion.
+		if !types.IsTerminalExecutionStatus(entry.Status) {
 			return false, nil
 		}
 	}

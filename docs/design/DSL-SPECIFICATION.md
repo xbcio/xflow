@@ -118,7 +118,7 @@ context:
 
 # 全局配置
 settings:
-  concurrency: int        # 最大并发数
+  concurrency: int | object # 工作流级并发上限；裸 int 等价 {limit: N, mode: queue}，详见下方注释
   timezone: string        # 时区
   on_error: string        # 全局默认错误策略（可选，stop|error_output|main_output|continue，默认 stop）
   pin_data_mode: string   # pin_data 生效策略（可选，test_only|always|disabled，默认 test_only）
@@ -129,6 +129,28 @@ settings:
     initial_interval: int # 初始退避间隔，毫秒；<=0 使用引擎默认值
     max_interval: int     # 单次退避上限，毫秒；<=0 使用引擎默认值
     multiplier: number    # 指数退避倍率；<=0 使用默认 2.0
+
+# settings.concurrency 语义（工作流级并发上限）
+# 两种写法等价：裸 int `concurrency: N` == `concurrency: {limit: N, mode: queue}`；
+# 想拒绝超限提交必须显式写 mode: reject。
+#   limit: int           # 并发执行数上限；0 = 不限（默认；字段缺省即不限）
+#   mode: string         # queue（默认）| reject
+#   max_queued: int      # 仅 queue：排队积压上限，超出按 429 拒绝（可选）
+#   queue_timeout: dur   # 仅 queue：排队等待上限，从入队起算（可选）
+# 计数单位是工作流执行，键为 namespace + 工作流名（不区分版本）；subgraph/map 的子执行
+# 在父执行的槽位内运行，不计数。FAF 工作流不允许非零 limit（编译期报错）。
+# 超限行为：
+#   reject — 不持久化任何东西，execute 返回 429 workflow_concurrency_limit，
+#            Retry-After 是等待下限而不是预测。
+#   queue  — 以新状态 queued（非终态）持久化并进入 FIFO 队列；execute 200 响应新增
+#            status（排队时为 queued）与 queue_position（仅排队时出现）。
+#            排队中的执行：Inspect/list 显示 queued 与队列位置；Wait 继续阻塞；
+#            signal 先存、晋升后投递；节点/lease 等运行期计时从晋升起算。
+#            queue_timeout 到期 → status=timeout，error="concurrency queue timeout"；
+#            max_queued 超出 → 429 workflow_concurrency_queue_full；后端不支持排队 →
+#            503 workflow_concurrency_unavailable（不静默降级为立即执行）。
+# 释放与晋升：执行进入终态（success/failed/canceled/timeout）时释放槽位并原子晋升队首；
+# 调低 limit 不抢占在跑的执行，调高会触发晋升；崩溃窗口由对账器兜底。
 
 # 高级执行选项
 options:
@@ -233,9 +255,9 @@ nodes:
 # 与 at-least-once 契约的关系：超时节点不再重投，但宿主幂等键仍为必需——超时前 handler
 # 可能已产生副作用（如已发出 HTTP 请求），下游/重放仍可能重复观测该副作用，须靠幂等键兜底。
 # 已知限制（诚实声明，非承诺覆盖）：
-#   (1) 服务端 backstop 仅 HTTP runner 覆盖：gRPC runner 不续约（service/runner/runner.go
-#       将续约限制在 leaseRenewClient 类型断言之后，gRPC client 不满足），故 gRPC 路径
-#       无服务端超时兜底。
+#   (1) 服务端 backstop 对 HTTP 与 gRPC runner 均生效：两者都实现 RenewLease
+#       （service/protocol/grpc_client.go 的 GRPCClient.RenewLease），runner 的续约环
+#       在 leaseRenewClient 类型断言通过后启动，两种传输都满足。
 #   (2) group lease 不被 backstop 覆盖：engine.ErrGroupLeaseNotSupported，CommitTaskTimeout
 #       拒绝 group lease。group 的 deadline 在 GroupLeasePayload.Deadline，不在
 #       TaskLease.ExecutionDeadline。
@@ -263,7 +285,42 @@ groups:
       max_interval: int
       multiplier: number
     timeout: duration     # 组业务 deadline（可选）
-    mode: string          # "" (durable，默认) | "transient"
+    mode: string          # "" (durable，默认) | "transient"（语义见下文「组级 mode」）
+
+# 组级 mode 语义（完整定义见 NODE-GROUP-COLOCATION.md §3.5）：
+#   ""（durable，默认）— 组的产物与 execution 同一保留期；行为与既有版本一致。
+#   transient          — 该组提交的产物在 **execution 进入终态时**缩短到 completion TTL，
+#                        而不是在组 commit 时。覆盖：每个成员的边界 exit 输出及其
+#                        node_meta（私有输出标记必须与输出同寿）、组名对应的
+#                        error_output payload、组 unit 的 status/meta fence key。
+#   运行期间不缩短：同一次 execution 内下游 $('<成员名>') 的读取与 durable 组完全一致，
+#   transient 不是更短的 active TTL，只改 execution 结束之后的事。
+#   completion TTL 解析顺序：options.transient_completion_ttl → execution 的 transient
+#   标记 / 部署级 transient completion TTL → 30s。结果被 execution 的 active TTL 封顶，
+#   缩短绝不延长。fence key（组 unit 的 status/meta）另有下限
+#   max(completionTTL, 2 × lease_ttl)：持有上一轮 lease token 的陈旧 runner 不能在
+#   拒绝它 commit 的记录消失之后仍把它递上来。
+#   保留期内 Inspect 正常展示成员与已提交的 exit；产物过期后该成员显示为 expired
+#   （只读判定，不落库），而不是 pending——终态 execution 下「无组 unit 记录」意味着
+#   记录已过期，而不是「从未运行」。
+#   SQL 投影不受该 mode 影响：组提交路径不写节点结果投影（durable 组同样没有），只有
+#   execution 状态行照常投影；workflow 自身 transient 时该行照旧跳过。
+#   本地内存后端没有 TTL，transient 保留策略在那里是明确记录的无操作：exits 在进程
+#   存活期内始终可读（共享契约测试见 backend/internal/statestoretest）。
+#
+#   编译期约束（engine/graph/group_mode.go）：
+#     1. 只接受 "" 与 "transient"，其他值（含大小写变体）报编译错误。旧版本对未知值
+#        静默放行并按 durable 保留策略执行，正是 transient 要避免的失败方向。
+#     2. 成员不得是 suspending 节点（xflow.wait / xflow.approval），成员 subgraph body
+#        内嵌套的节点同样不得是。挂起的成员会停住组 lease 无法恢复的子执行，而 transient
+#        组的恢复方式是「从组入口整体重放」。
+#     3. 带 activation_replicas > 1 的 trigger 入口组不得使用 transient：各副本从同一
+#        consumer group 各自 admit execution，一个保留窗口覆盖不到全部。
+#     4. workflow 自身 options.transient 时组再标 transient 是冗余而非冲突：后端取两者
+#        中更短的保留期。
+#
+#   可加载样例：docs/dsl-samples/group-transient-enrichment.yaml。
+#   限制与已知缺口见 NODE-GROUP-COLOCATION.md §12。
 
 # 组级 on_error 语义（NODE-GROUP-COLOCATION.md §12.2 记录了完整实现决定）：
 #   stop（默认/空值）    — 任一成员终止失败即整组失败，fatal=true，执行整体失败
@@ -2154,7 +2211,7 @@ result: "${{ $nodes['final_merge'].status }}"
     mode: signal|timer       # 等待模式（必填）
 
     # signal 模式：等待外部信号唤醒（人工审批、Webhook 回调等）
-    signal_name: string      # 信号名称，通过 API POST /executions/{id}/signal 触发
+    signal_name: string      # 信号名称，通过 API POST /v1/executions/{id}/signals 触发
                              # body: { "name": "<signal_name>", "payload": {} }
     timeout: duration        # 超时时间（可选，超时走 timeout 输出端口）
 
@@ -2183,7 +2240,7 @@ connections:
 ```
 
 > **唤醒方式**：调用 `Engine.SendSignal(executionID, signal)` 或通过 HTTP API：
-> `POST /api/v1/executions/{execution_id}/signal`
+> `POST /v1/executions/{execution_id}/signals`
 > `{"name": "manager_approved", "payload": {"approved_by": "alice"}}`
 >
 > `signal.Payload` 作为 wait 节点的输出，下游可通过 `$input.approved_by` 访问。

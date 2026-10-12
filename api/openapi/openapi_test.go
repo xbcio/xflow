@@ -98,6 +98,14 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 			value:  apiserver.ExampleExecuteWorkflowResponse(execID),
 		},
 		{
+			// The parked shape: status queued plus the place in line. Both
+			// fields are omitempty, so without this case a renamed or dropped
+			// tag would still validate as a bare execution_id.
+			name:   "execute workflow response (queued)",
+			schema: "ExecuteWorkflowResponse",
+			value:  apiserver.ExampleExecuteWorkflowResponseQueued(execID, 2),
+		},
+		{
 			name:   "register workflow response with param issues",
 			schema: "RegisterWorkflowResponse",
 			value:  apiserver.ExampleRegisterWorkflowResponseWithParamIssues("wf-01H8XG"),

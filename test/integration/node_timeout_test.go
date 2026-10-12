@@ -467,7 +467,7 @@ func TestTimeoutDoesNotRetry(t *testing.T) {
 			Timeout: 500 * time.Millisecond,
 			// Retry is configured and would re-run a transient failure. A
 			// timeout must NOT be retried even with this set.
-			Retry: &types.RetrySettings{Enabled: true, MaxAttempts: 3},
+			Retry: &types.RetrySettings{MaxAttempts: 3},
 		}},
 	}
 	execID := submitWorkflowHTTP(t, h.httpSrv.URL, h.httpSrv.Client(), wf, map[string]any{"seed": "noretry"})

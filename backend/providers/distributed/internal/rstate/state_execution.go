@@ -16,14 +16,14 @@ import (
 )
 
 func (s *Store) CreateExecution(ctx context.Context, e *engine.ExecutionSnapshot) error {
-	return s.createExecution(ctx, e, nil)
+	return s.createExecution(ctx, e, nil, time.Time{}, 0)
 }
 
 // CreateExecutionWithOutbox commits execution metadata and its initial durable
 // delivery intents in one Redis transaction. The SQL audit projection remains
 // a best-effort follow-up and is not part of scheduling correctness.
 func (s *Store) CreateExecutionWithOutbox(ctx context.Context, e *engine.ExecutionSnapshot, entries []engine.OutboxEntry) error {
-	return s.createExecution(ctx, e, entries)
+	return s.createExecution(ctx, e, entries, time.Time{}, 0)
 }
 
 // createExecution persists the execution, its outbox entries, and the SQL audit
@@ -35,7 +35,24 @@ func (s *Store) CreateExecutionWithOutbox(ctx context.Context, e *engine.Executi
 // fails on dequeue and is retried/dead-lettered by asynq (self-healing, not
 // data corruption). Keeping the outbox in the same pipeline is intentional: it
 // is the common (no-SQL-failure) path that must never strand a root task.
-func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot, entries []engine.OutboxEntry) error {
+//
+// holdUntil parks every entry of this execution: the bodies and skip markers are
+// written as usual, but the ready ZSET scores them far in the future, so no
+// delivery path and no discovery index considers them work. It is how a QUEUE
+// mode submission is persisted without being startable, and it is deliberately
+// a property of the entry's SCORE rather than of its body: the body's
+// availability stays the caller's own, so once promotion scores the entry back
+// to now, what the store hands the dispatcher says "available" in both places.
+//
+// queueWait is the execution's declared queue_timeout, and it is added to — not
+// substituted for — whatever retention this execution would otherwise get. A
+// parked execution's keys are written once and then sit untouched until
+// promotion, so a retention that does not cover the wait expires them mid-queue:
+// the execution disappears while its place in line remains, and the line then
+// spends a promotion on nothing. The extension is recorded as the execution's
+// own retention so later writers, which include the promotion's own status
+// refresh, do not shorten it back.
+func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot, entries []engine.OutboxEntry, holdUntil time.Time, queueWait time.Duration) error {
 	ttl := s.execTTL
 
 	// Per-execution transient hint from workflow options (via submission context).
@@ -102,6 +119,17 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 		// documented constraint (transientTTL > max execution wall-clock), instead
 		// of relying on a per-mutation refresh (see refreshTransientTTL).
 		ttl = s.transientTTL
+	}
+
+	// The queue wait is added last, after every other rule has had its say, so
+	// it lengthens whatever retention the execution actually got — a transient
+	// execution's short TTL included. A zero retention means unbounded in this
+	// store, and unbounded plus a wait is still unbounded.
+	if queueWait > 0 && ttl > 0 {
+		ttl += queueWait
+		s.ttlMu.Lock()
+		s.execTTLs[e.ID] = ttl
+		s.ttlMu.Unlock()
 	}
 
 	// Serialize graph for persistence (allows recovery after queue consumer restart).
@@ -232,6 +260,10 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 		readyKey := outboxReadyKey(t, e.ID)
 		bodyKey := outboxBodyKey(t, e.ID)
 		availableNow := time.Now().UTC().UnixMilli()
+		held := int64(0)
+		if !holdUntil.IsZero() {
+			held = holdUntil.UTC().UnixMilli()
+		}
 		for _, entry := range entries {
 			if entry.ID == "" {
 				return fmt.Errorf("create execution %q: empty outbox entry ID", e.ID)
@@ -243,6 +275,9 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 			availableAt := availableNow
 			if !entry.AvailableAt.IsZero() {
 				availableAt = entry.AvailableAt.UTC().UnixMilli()
+			}
+			if held != 0 {
+				availableAt = held
 			}
 			pipe.HSet(ctx, bodyKey, entry.ID, encoded)
 			pipe.ZAdd(ctx, readyKey, redis.Z{Score: float64(availableAt), Member: entry.ID})
@@ -408,6 +443,10 @@ func (s *Store) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID,
 		if err := s.shortenTransientCompletionTTL(ctx, id, keys...); err != nil {
 			return err
 		}
+		// Group-key pass, best-effort by construction: this path is a cancel or
+		// timeout, and a retention miss on a group's artifacts must not fail a
+		// cancellation the caller asked for and Redis has already applied.
+		s.shortenTransientGroupCompletionTTLBestEffort(ctx, id)
 		// Order matters: the marker is read by the engine's inactive-execution
 		// classifier after the status key is gone, and it must keep the active
 		// retention — so it is written before evictExecutionCaches drops the
@@ -416,6 +455,11 @@ func (s *Store) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID,
 		// Redis persists the graph for later inspection/reload; the in-process
 		// cache and per-execution TTL override must not survive a terminal state.
 		s.evictExecutionCaches(id)
+		// The workflow's slot is released after the terminal write is durable,
+		// never before: a slot freed while the execution is still winding down
+		// would admit a replacement that overlaps it, which is exactly what the
+		// limit exists to prevent.
+		s.releaseWorkflowSlotAfterTerminal(ctx, id, status)
 	} else if applied == 1 {
 		if err := s.refreshTransientTTL(ctx, id, keys...); err != nil {
 			return err

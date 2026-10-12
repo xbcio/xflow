@@ -17,6 +17,7 @@ import (
 
 // Compile-time interface satisfaction.
 var _ engine.EntryAdmissionStore = (*Store)(nil)
+var _ engine.ConcurrencyLimitedEntryAdmissionStore = (*Store)(nil)
 
 // seedExecutionFromEntryLua atomically admits an entry-unit (single node or
 // group node) result. It performs all steps in one transition:
@@ -33,28 +34,41 @@ var _ engine.EntryAdmissionStore = (*Store)(nil)
 // KEYS: 1=admission 2=exec:status 3=exec:graph 4=remaining 5=failed
 //
 //	6=group:status 7=group:meta 8=outbox:ready 9=outbox:body
-//	10.. = per exit: output key + node meta key (2 keys each)
-//	10+2*exitCount..end = per downstream: inDegree, active, schedule (3 each)
+//	10=concurrency back-reference (exec:conc_wf)
+//	11.. = per exit: output key + node meta key (2 keys each)
+//	11+2*exitCount..end = per downstream: inDegree, active, schedule (3 each)
 //
 // ARGV: 1=resultHash 2=ttl_s 3=graphJSON 4=outcome(success|failed)
 //
 //	5=exitCount 6=downstreamCount
-//	7.. = per exit: encoded exit data + private-output bit (2 args each)
-//	7+2*exitCount.. = per downstream: arrivalCount, activeCount, mergeMode,
+//	7=the status the execution starts at (running, or queued for an admission
+//	  that took a place in the workflow's line instead of a slot)
+//	8=outbox readiness score in unix milliseconds (the parked sentinel for a
+//	  queued admission, 0 for work that is due now)
+//	9=the workflow's concurrency tag, storing which slot set this execution has
+//	  to leave when it finishes (empty when the workflow declares no limit)
+//	10.. = per exit: encoded exit data + private-output bit (2 args each)
+//	10+2*exitCount.. = per downstream: arrivalCount, activeCount, mergeMode,
 //	                   executeID, executeBody, skipID, skipBody, nodeName (8 each)
 //	then rootSkipCount, then per unselected root: skipID, skipBody (2 each)
+//
+// The concurrency key is always declared, even by a caller that passes an empty
+// tag: it carries the execution's own hash tag, so naming it keeps every key in
+// one slot whether or not the workflow limits concurrency.
 //
 // The unselected-root tail (engine.UnselectedRootSkips) follows the downstream
 // keys: one schedule key per root. Appending it at the end leaves every earlier
 // slot where it was. A missing count reads as zero.
 //
 // Returns {code, finalStatus, skips}: code 1=accepted, 2=duplicate, 3=conflict;
-// skips is the flat {name, count, ...} list of the downstream units this
-// admission resolved as skip rather than execute. The Go wrapper reads the
-// first two and treats a two-element reply as "no skips", which is both a
-// script revision predating this element and an admission that genuinely
-// skipped nothing — the same shape, decoded the same way, so the wider reply
-// cannot fail an admission Redis has already accepted.
+// finalStatus is the status the Lua left the execution at, empty when the
+// admission started it and something else will finish it; skips is the flat
+// {name, count, ...} list of the downstream units this admission resolved as
+// skip rather than execute. The Go wrapper reads the first two and treats a
+// two-element reply as "no skips", which is both a script revision predating
+// this element and an admission that genuinely skipped nothing — the same
+// shape, decoded the same way, so the wider reply cannot fail an admission
+// Redis has already accepted.
 //
 // nodeName rides in a slot the skip branch alone reads: an admission request is
 // assembled fresh by the caller and handed straight to the script, never
@@ -69,11 +83,17 @@ if existing and existing ~= '' then
     return {3, ''}
 end
 local ttl = tonumber(ARGV[2])
+local outboxScore = tonumber(ARGV[8] or '0')
 -- Step 1: Write admission key (stores the result hash).
 redis.call('SET', KEYS[1], ARGV[1], 'EX', ttl)
--- Step 2: Create execution.
-redis.call('SET', KEYS[2], 'running', 'EX', ttl)
+-- Step 2: Create execution, at the status its admission landed on.
+redis.call('SET', KEYS[2], ARGV[7], 'EX', ttl)
 redis.call('SET', KEYS[3], ARGV[3], 'EX', ttl)
+-- Step 2b: The workflow this execution contends for, so the release that follows
+-- its terminal status can find the slot set (or the place in line) to give back.
+if ARGV[9] ~= '' then
+    redis.call('SET', KEYS[10], ARGV[9], 'EX', ttl)
+end
 -- Step 3: remaining/failed counters are pre-seeded via TxPipeline (see Go wrapper).
 -- Step 4: Mark group unit as done.
 redis.call('SET', KEYS[6], 'done', 'EX', ttl)
@@ -81,9 +101,9 @@ redis.call('HSET', KEYS[7], 'committed_lease_token', 'seed-triggered')
 redis.call('EXPIRE', KEYS[7], ttl)
 -- Step 5: Boundary outputs.
 local exitCount = tonumber(ARGV[5] or '0')
-local keypos = 10
+local keypos = 11
 for i = 1, exitCount do
-    local dataPos = 7 + (i - 1) * 2
+    local dataPos = 10 + (i - 1) * 2
     redis.call('SET', KEYS[keypos], ARGV[dataPos], 'EX', ttl)
     if tonumber(ARGV[dataPos + 1]) == 1 then
         redis.call('HSET', KEYS[keypos + 1], 'private_output', '1')
@@ -115,7 +135,7 @@ end
 local skips = {}
 if remaining > 0 then
     local n = tonumber(ARGV[6] or '0')
-    local argpos = 7 + 2 * exitCount
+    local argpos = 10 + 2 * exitCount
     for i = 1, n do
         local inDegreeKey = KEYS[keypos]
         local activeKey = KEYS[keypos + 1]
@@ -160,7 +180,7 @@ if remaining > 0 then
                     table.insert(skips, 1)
                 end
                 if redis.call('HSETNX', KEYS[9], outboxID, outboxBody) == 1 then
-                    redis.call('ZADD', KEYS[8], 0, outboxID)
+                    redis.call('ZADD', KEYS[8], outboxScore, outboxID)
                 end
             end
         end
@@ -174,8 +194,8 @@ end
 -- They are not reported in skips: that list is the downstream fan-in decision.
 if remaining > 0 then
     local downstreamCount = tonumber(ARGV[6] or '0')
-    local rootArg = 7 + 2 * exitCount + 8 * downstreamCount
-    local rootKey = 10 + 2 * exitCount + 3 * downstreamCount
+    local rootArg = 10 + 2 * exitCount + 8 * downstreamCount
+    local rootKey = 11 + 2 * exitCount + 3 * downstreamCount
     local rootCount = tonumber(ARGV[rootArg] or '0')
     for i = 1, rootCount do
         local scheduleKey = KEYS[rootKey + i - 1]
@@ -184,7 +204,7 @@ if remaining > 0 then
         if redis.call('HSETNX', scheduleKey, 'action', 'skip') == 1 then
             redis.call('EXPIRE', scheduleKey, ttl)
             if redis.call('HSETNX', KEYS[9], skipID, skipBody) == 1 then
-                redis.call('ZADD', KEYS[8], 0, skipID)
+                redis.call('ZADD', KEYS[8], outboxScore, skipID)
             end
         end
     end
@@ -202,12 +222,77 @@ return {1, finalStatus, skips}
 // decrements remaining, and applies downstream fan-in. Both phases are
 // deterministic and idempotent — the Lua short-circuits on existing admission key.
 func (s *Store) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecutionFromEntryRequest) (engine.SeedExecutionFromEntryResponse, error) {
+	return s.seedExecutionFromEntry(ctx, req, nil)
+}
+
+// SeedExecutionFromEntryWithConcurrency implements
+// engine.ConcurrencyLimitedEntryAdmissionStore: the same admission, judged
+// against the seeded graph's concurrency policy before anything is written.
+//
+// The slot decision is a SEPARATE transition from the seed, because the slot set
+// is tagged by workflow while every key the seed writes is tagged by the
+// deterministic execution ID, and Redis Cluster refuses a script that names both.
+// The order — charge first, then seed — is what makes the pair sound: a refused
+// admission has written nothing when it returns, and an execution can never be
+// created running without the slot it was admitted on. The window between the
+// two is real and is closed by the reconciler rather than by atomicity, exactly
+// as it is on the submission path (see concurrency_reconcile.go).
+//
+// A charge this call made is therefore never given back by this call's error
+// handling. An error from the seed Lua cannot be told apart from a seed that
+// applied and whose reply was lost, and releasing the slot of a running
+// execution would over-admit — the one failure the limit exists to prevent —
+// while leaving a leaked slot only costs capacity until the next sweep, which
+// finds a member naming no live execution and clears it. The two replies where
+// the store does know better — duplicate and conflict — give back exactly the
+// charge this call added (see below).
+func (s *Store) SeedExecutionFromEntryWithConcurrency(ctx context.Context, req engine.SeedExecutionFromEntryRequest, admission engine.ConcurrencyAdmission) (engine.SeedExecutionFromEntryResponse, error) {
+	return s.seedExecutionFromEntry(ctx, req, &admission)
+}
+
+// seedExecutionFromEntry is the seed body both entry points share; admission is
+// nil when the seeded graph declares no concurrency limit, which is the plain
+// admission with no slot consulted at all.
+func (s *Store) seedExecutionFromEntry(ctx context.Context, req engine.SeedExecutionFromEntryRequest, admission *engine.ConcurrencyAdmission) (engine.SeedExecutionFromEntryResponse, error) {
 	execID := engine.DeterministicExecutionID(req.AdmissionKey)
 	t := req.Namespace
 	if t == "" {
 		t = namespace.FromContext(ctx)
 	}
 	ttl := s.execTTL
+
+	// Step 0: the slot decision. It runs before anything is written because a
+	// refusal has to leave nothing behind — no execution, no admission, not even
+	// the transient marker below — so that the entry-unit result still belongs to
+	// the caller and can be retried once a slot frees or the backlog drains.
+	// A refusal is an answer the caller acts on, not an error: the broker is told
+	// to hold the offset, which is only possible if the call reads as a decision.
+	status := types.ExecutionStatusRunning
+	outboxScore := int64(0)
+	concTag := ""
+	var admit workflowAdmitResult
+	if admission != nil {
+		concTag = workflowDigestTag(t, admission.Workflow)
+		// Same wait as the submission path registers: a seed that ends up in the
+		// line has to stay discoverable to the expiry sweep for as long as it may
+		// wait, or its deadline passes with nothing left to notice it.
+		s.registerConcurrencyWorkflow(ctx, t, concTag, concurrencyIndexWait(*admission))
+		var err error
+		admit, err = s.admitWorkflowSlot(ctx, t, execID, *admission)
+		if err != nil {
+			return engine.SeedExecutionFromEntryResponse{}, fmt.Errorf("admit workflow %q for %q: %w", admission.Workflow, req.AdmissionKey, err)
+		}
+		if refused := concurrencyRefusal(admit.code); refused != nil {
+			return engine.SeedAdmissionRefusal(refused)
+		}
+		if admit.code == concurrencyAdmitQueued {
+			// The execution is created queued and its intents are scored into the
+			// future, exactly as a queued submission's are, so it cannot run until
+			// a release promotes it.
+			status = types.ExecutionStatusQueued
+			outboxScore = queuedOutboxHold.UnixMilli()
+		}
+	}
 
 	// A transient workflow admitted here declares that its payloads must not be
 	// projected to SQL. The seed path is where that promise is easiest to lose:
@@ -247,6 +332,21 @@ func (s *Store) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 			// and the broker will redeliver it once the error propagates.
 			return engine.SeedExecutionFromEntryResponse{}, fmt.Errorf("mark transient execution %q: %w", execID, err)
 		}
+	}
+
+	// The queue wait is added last, after every other retention rule has had its
+	// say, so it lengthens whatever retention the execution actually got — a
+	// transient execution's short TTL included. A parked execution's keys are
+	// written once and then sit untouched until promotion, so a retention that
+	// does not cover the wait expires them mid-queue and leaves the line with a
+	// member naming nothing. This mirrors createExecution's own rule for a queued
+	// submission, down to recording the extension as the execution's retention so
+	// a later writer does not shorten it back.
+	if admission != nil && status == types.ExecutionStatusQueued && admission.QueueTimeout > 0 && ttl > 0 {
+		ttl += admission.QueueTimeout
+		s.ttlMu.Lock()
+		s.execTTLs[execID] = ttl
+		s.ttlMu.Unlock()
 	}
 
 	// Persist the retention record for the same reason createExecution does:
@@ -320,6 +420,10 @@ func (s *Store) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 		groupUnitMetaKey(t, execID, req.EntryUnitIdx),   // 7
 		outboxReadyKey(t, execID),                       // 8
 		outboxBodyKey(t, execID),                        // 9
+		// The workflow this execution contends for, so its release can find the
+		// slot set to leave. Declared whether or not there is a limit: it carries
+		// the execution's own hash tag, so naming it keeps every key in one slot.
+		concurrencyTagKey(t, execID), // 10
 	}
 
 	// Build ARGV.
@@ -330,6 +434,9 @@ func (s *Store) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 		string(req.Outcome),    // 4
 		len(req.Exits),         // 5
 		len(req.Downstream),    // 6
+		string(status),         // 7
+		outboxScore,            // 8
+		concTag,                // 9
 	}
 
 	// Exit outputs (keys + args).
@@ -411,10 +518,10 @@ func (s *Store) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 	}
 
 	code := redisResultInt(res[0])
-	// finalStatus is non-empty only when the seed itself completed the whole
-	// execution (remaining hit 0 inside the Lua). Otherwise the execution is
-	// still running and later commits carry it to a terminal state.
-	finalStatus := types.ExecutionStatusRunning
+	// The status the execution is left at: what its admission started it as
+	// (queued, or running), unless the Lua itself completed the whole execution
+	// (remaining hit 0 inside it), in which case it names the terminal status.
+	finalStatus := status
 	if len(res) >= 2 {
 		if fs := redisResultString(res[1]); fs != "" {
 			finalStatus = types.ExecutionStatus(fs)
@@ -438,24 +545,59 @@ func (s *Store) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 		// fully resolved by the admission itself; record the terminal marker for
 		// the same reason the commit paths do.
 		s.markExecutionTerminalBestEffort(ctx, execID, finalStatus)
+		s.releaseWorkflowSlotAfterTerminal(ctx, execID, finalStatus)
 		s.projectSeededExecution(ctx, execID, finalStatus, req)
-		return engine.SeedExecutionFromEntryResponse{
+		resp := engine.SeedExecutionFromEntryResponse{
 			State:       engine.AdmissionStateAccepted,
 			ExecutionID: execID,
-			Duplicate:   false,
 			Skipped:     skipped,
-		}, nil
-	case 2: // duplicate (same hash)
+		}
+		// Queued describes where the execution ended up, not where it was
+		// admitted: an admission that drove its execution straight to a terminal
+		// status (a fatal entry-unit outcome with nothing downstream) has already
+		// left the line by the release above, and reporting it as still waiting
+		// would hand the caller a position that does not exist.
+		if status == types.ExecutionStatusQueued && !types.IsTerminalExecutionStatus(finalStatus) {
+			resp.Queued = true
+			resp.QueuePosition = int(admit.position)
+		}
+		return resp, nil
+	case 2, 3: // duplicate (same hash) / conflict (different hash)
+		state := engine.AdmissionStateAccepted
+		duplicate := true
+		if code == 3 {
+			state, duplicate = engine.AdmissionStateConflict, false
+		}
+		// A reply of duplicate or conflict means the admission key was already
+		// occupied, so this call created nothing — but it may still have charged
+		// a slot on the way in, and that charge has to be given back. The case is
+		// a redelivery of a batch whose execution has already finished: its slot
+		// was released when it terminated, so the membership test that makes
+		// admission idempotent found nothing to short-circuit on and charged
+		// again. The reservation is provably safe because added is only true when
+		// the member was in NEITHER the slot set nor the line: it is this call's
+		// own charge and nothing else's, so removing it cannot take a slot from
+		// the execution the reply names. Without this the workflow would run one
+		// short of its limit until the reconciler swept a slot that was never
+		// the finished execution's to begin with.
+		if admit.added {
+			s.releaseWorkflowSlotBestEffort(ctx, execID, t, concTag)
+		}
+		// The position is reported for the execution the response names, so a
+		// retry of a seed that is still waiting sees where it still stands. A
+		// read failure leaves it at 0 rather than failing the reply: the caller's
+		// offset commit hangs on the duplicate/conflict answer, and a position
+		// that could not be read is not worth withholding it for.
+		position := 0
+		if pos, err := s.queuePositionFor(ctx, t, execID); err == nil {
+			position = pos
+		}
 		return engine.SeedExecutionFromEntryResponse{
-			State:       engine.AdmissionStateAccepted,
-			ExecutionID: execID,
-			Duplicate:   true,
-		}, nil
-	case 3: // conflict (different hash)
-		return engine.SeedExecutionFromEntryResponse{
-			State:       engine.AdmissionStateConflict,
-			ExecutionID: execID,
-			Duplicate:   false,
+			State:         state,
+			ExecutionID:   execID,
+			Duplicate:     duplicate,
+			Queued:        position > 0,
+			QueuePosition: position,
 		}, nil
 	default:
 		return engine.SeedExecutionFromEntryResponse{}, fmt.Errorf("seed triggered group %q: unknown code %d", req.AdmissionKey, code)

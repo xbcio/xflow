@@ -428,7 +428,11 @@ paths:
               $ref: "#/components/schemas/ExecuteWorkflowRequest"
       responses:
         "200":
-          description: Execution started.
+          description: |
+            The submission was accepted. `data.status` says where it landed:
+            `running` for an execution that started, `queued` for one waiting
+            for a workflow concurrency slot, in which case
+            `data.queue_position` carries its 1-based place in line.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
@@ -472,6 +476,80 @@ paths:
                           message: duration is required
                           severity: error
                     trace_id: 0123456789abcdef0123456789abcdef
+        "429":
+          description: |
+            The workflow refused the submission because of its own declared
+            limits (`settings.concurrency`), before anything was persisted —
+            there is no execution to inspect or cancel. Two codes share this
+            status: `workflow_concurrency_limit` when the running executions are
+            already at `limit`, and `workflow_concurrency_queue_full` when the
+            queue backlog is at `max_queued`. Both are retryable, and the code
+            says which wait is in front of the caller — a slot to free or a
+            backlog to drain. `Retry-After` is a floor rather than a prediction:
+            the server has no release time to promise (the submission is not
+            queued when it is refused), and the header exists so a client can
+            back off instead of spinning.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+            Retry-After:
+              description: Seconds to wait before retrying, as a floor.
+              schema:
+                type: integer
+                example: 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                workflowConcurrencyLimit:
+                  summary: The workflow is already running as many executions as its limit allows.
+                  value:
+                    success: false
+                    code: workflow_concurrency_limit
+                    message: workflow is at its concurrency limit
+                    trace_id: 0123456789abcdef0123456789abcdef
+                workflowConcurrencyQueueFull:
+                  summary: The workflow's queue backlog is at its max_queued bound.
+                  value:
+                    success: false
+                    code: workflow_concurrency_queue_full
+                    message: workflow concurrency queue is full
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "503":
+          description: |
+            The definition declares a concurrency limit this server's state
+            store cannot honour, so the submission was refused rather than
+            silently downgraded — admitting it would break the limit the
+            definition declared. Two causes share the code
+            `workflow_concurrency_unavailable`: the workflow asks for
+            `mode: queue` and the store cannot park executions, or the store
+            cannot enforce a limit at all. It is not retryable in any useful
+            sense: the answer changes when the deployment does, not when the
+            caller retries. There is no `Retry-After` for that reason, and
+            nothing was persisted in either case.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                workflowConcurrencyUnavailable:
+                  summary: The server's state store cannot queue, and the workflow asked for queue mode.
+                  value:
+                    success: false
+                    code: workflow_concurrency_unavailable
+                    message: workflow concurrency queue is not available on this server
+                    trace_id: 0123456789abcdef0123456789abcdef
+                workflowConcurrencyLimitsUnavailable:
+                  summary: The server's state store cannot enforce a concurrency limit at all.
+                  value:
+                    success: false
+                    code: workflow_concurrency_unavailable
+                    message: workflow concurrency is not available on this server
+                    trace_id: 0123456789abcdef0123456789abcdef
         default:
           $ref: "#/components/responses/DefaultError"
 
@@ -492,7 +570,11 @@ paths:
               $ref: "#/components/schemas/ExecuteRegisteredRequest"
       responses:
         "200":
-          description: Execution started.
+          description: |
+            The submission was accepted. `data.status` says where it landed:
+            `running` for an execution that started, `queued` for one waiting
+            for a workflow concurrency slot, in which case
+            `data.queue_position` carries its 1-based place in line.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
@@ -505,6 +587,70 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/ExecuteWorkflowResponse"
+        "429":
+          description: |
+            The workflow refused the submission because of its own declared
+            limits (`settings.concurrency`). Same contract as
+            POST /v1/workflows/execute: nothing was persisted, `Retry-After` is
+            a floor, and the code is `workflow_concurrency_limit` for a reached
+            limit or `workflow_concurrency_queue_full` for a full queue.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+            Retry-After:
+              description: Seconds to wait before retrying, as a floor.
+              schema:
+                type: integer
+                example: 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                workflowConcurrencyLimit:
+                  summary: The workflow is already running as many executions as its limit allows.
+                  value:
+                    success: false
+                    code: workflow_concurrency_limit
+                    message: workflow is at its concurrency limit
+                    trace_id: 0123456789abcdef0123456789abcdef
+                workflowConcurrencyQueueFull:
+                  summary: The workflow's queue backlog is at its max_queued bound.
+                  value:
+                    success: false
+                    code: workflow_concurrency_queue_full
+                    message: workflow concurrency queue is full
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "503":
+          description: |
+            The definition declares a concurrency limit this server's state
+            store cannot honour — either it cannot park executions for
+            `mode: queue`, or it cannot enforce a limit at all. Same contract as
+            POST /v1/workflows/execute: the code is
+            `workflow_concurrency_unavailable`, nothing was persisted, and
+            retrying does not change the answer.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                workflowConcurrencyUnavailable:
+                  summary: The server's state store cannot queue, and the workflow asked for queue mode.
+                  value:
+                    success: false
+                    code: workflow_concurrency_unavailable
+                    message: workflow concurrency queue is not available on this server
+                    trace_id: 0123456789abcdef0123456789abcdef
+                workflowConcurrencyLimitsUnavailable:
+                  summary: The server's state store cannot enforce a concurrency limit at all.
+                  value:
+                    success: false
+                    code: workflow_concurrency_unavailable
+                    message: workflow concurrency is not available on this server
+                    trace_id: 0123456789abcdef0123456789abcdef
         default:
           $ref: "#/components/responses/DefaultError"
 
@@ -639,7 +785,7 @@ paths:
                   value:
                     success: false
                     code: execution_status_invalid
-                    message: status must be one of pending, running, success, failed, canceling, canceled, timeout
+                    message: status must be one of pending, queued, running, success, failed, canceling, canceled, timeout
                     trace_id: 0123456789abcdef0123456789abcdef
                 unparsableBound:
                   summary: A created_at bound is not an RFC3339 date-time.
@@ -2105,6 +2251,21 @@ components:
       properties:
         execution_id:
           type: string
+        status:
+          # Where the submission landed: `running` when the execution started,
+          # `queued` when it is waiting for a workflow concurrency slot
+          # (settings.concurrency with mode: queue) and no work has started. It
+          # is the execution's status read back after the submission, so a short
+          # execution that already finished reports its terminal status instead.
+          $ref: "#/components/schemas/ExecutionStatus"
+        queue_position:
+          type: integer
+          minimum: 1
+          description: |
+            Place in line, 1-based, present only while `status` is `queued`. `1`
+            is the head — the submission the next release promotes. Absent for
+            every other status: a running execution is not waiting for anything,
+            and `0` would read as a position a client could display.
         param_issues:
           type: array
           items:
@@ -2198,6 +2359,16 @@ components:
           $ref: "#/components/schemas/ExecutionStatus"
         error:
           type: string
+        queue_position:
+          type: integer
+          description: |
+            Where a `queued` execution stands in its workflow's concurrency
+            queue: 1 is the head, the execution the next slot release promotes.
+            Absent (and 0 when explicitly read) for every execution that is not
+            queued — including all executions of workflows that never queue —
+            and for stores that cannot report a position. It is a snapshot of a
+            line that moves, so it can be stale by the time it is read; it is
+            never a promise of when the execution will start.
         nodes:
           type: array
           items:
@@ -2230,7 +2401,7 @@ components:
 
     ExecutionStatus:
       type: string
-      enum: [pending, running, success, failed, canceling, canceled, timeout]
+      enum: [pending, queued, running, success, failed, canceling, canceled, timeout]
 
     ExecutionListResponse:
       type: object
@@ -2297,7 +2468,14 @@ components:
 
     NodeStatus:
       type: string
-      enum: [pending, running, committing, success, failed, skipped, pinned, suspended, continued, canceled, waiting]
+      enum: [pending, running, committing, success, failed, skipped, pinned, expired, suspended, continued, canceled, waiting]
+      description: |
+        Lifecycle state of a node in an execution detail. `expired` is
+        derived, not stored: it marks a member of a transient group
+        (`groups[].mode: transient`) whose records are gone because the
+        execution is terminal and the group's artifacts have passed their
+        completion TTL. Within that window the member's exit output is served
+        normally.
 
     RunnerListItem:
       type: object
@@ -2964,6 +3142,20 @@ components:
           type: boolean
         on_error:
           type: string
+          enum: ["", stop, error_output, main_output, continue]
+          description: |
+            Node failure policy, applied once the node's retries are
+            exhausted. Omit or use an empty value to inherit
+            `settings.on_error`, whose own default is `stop`.
+
+            - `stop`: the execution fails; the node is `failed`.
+            - `error_output`: the failure leaves through this node's `error`
+              port; the node is `success` and the execution continues.
+            - `main_output`: the failure leaves through the `main` port; the
+              node is `success` and downstream reads the error as
+              `$input.error`.
+            - `continue`: the failure leaves through the `main` port; the node
+              is `continued` and no `error` field is injected.
         runner_selector:
           $ref: "#/components/schemas/RunnerSelector"
         inputs:
@@ -3026,10 +3218,29 @@ components:
         on_error:
           type: string
           default: stop
-          enum: ["", stop, continue]
+          enum: ["", stop, continue, error_output]
           description: |
             Group failure policy. Omit or use an empty value for the default
-            `stop`; only `stop` and `continue` are supported for groups.
+            `stop`. `continue` and `error_output` are supported;
+            `error_output` requires at least one `error_outputs` target, and
+            `error_outputs` under any other policy is rejected — a route no
+            policy reaches is the same silent no-op class as one that routes
+            nowhere. `main_output` is rejected: unlike a node, a group that
+            failed before committing has no single member output to stand in
+            for the group's main result.
+        error_outputs:
+          type: array
+          items:
+            $ref: "#/components/schemas/Connection"
+          description: |
+            Downstream targets for the group's synthesized `error` output
+            port. Required and non-empty when `on_error` is `error_output`;
+            targets declared under any other policy are a compile error.
+            Each target must be a real node outside the group — a failed
+            group has no running member engine left to deliver to — and must
+            respect the target's declared inputs. An empty array is
+            equivalent to omission and is legal under the policies that do
+            not route to it.
         retry:
           type: "null"
           deprecated: true
@@ -3044,12 +3255,25 @@ components:
           description: Go duration (nanoseconds) for the group's business deadline.
         mode:
           type: string
-          deprecated: true
+          enum: ["", transient]
+          default: ""
           description: |
-            Compatibility-only group metadata. The compiler preserves this
-            value, but the current runtime does not consume group mode, so it
-            has no execution effect (including no transient storage or TTL
-            behavior). Omit it from new definitions.
+            Group retention mode. The empty default (`durable`) keeps the
+            group's artifacts — its boundary exit outputs, and the group
+            unit's status and lease fence keys — for the execution's own
+            retention. `transient` shortens them to a completion TTL once the
+            execution reaches a terminal status, not when the group commits,
+            so reads the same execution makes behave exactly as in a durable
+            group. The TTL resolves from `options.transient_completion_ttl`,
+            then the execution's transient marker or the deployment-wide
+            transient completion TTL, then 30s, capped at the execution's
+            active TTL; the lease fence keys are additionally floored at two
+            lease windows. Unknown values are rejected at compile time, as are
+            transient groups with a suspending member or with
+            `activation_replicas` > 1 on a trigger-entry group. Once the
+            artifacts have expired, Inspect reports the member as `expired`.
+            Only retention differs; execution, commit, and replay semantics
+            are the same as a durable group's.
         activation_replicas:
           type: integer
           format: uint32
@@ -3221,6 +3445,13 @@ components:
           type: string
         on_error:
           type: string
+          enum: ["", stop, error_output, main_output, continue]
+          description: |
+            Workflow default failure policy, applied to nodes that do not
+            declare their own `on_error`. Omit or use an empty value for
+            `stop`; a node's explicit `on_error` wins over this value, and
+            groups do not inherit it. Any other value is rejected at compile
+            time.
         pin_data_mode:
           type: string
         retry:

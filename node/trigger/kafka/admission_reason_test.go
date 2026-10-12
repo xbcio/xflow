@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/types"
 )
@@ -26,8 +27,15 @@ import (
 //	                most expensive of the four, and the flat counter hid it
 //	                inside the same number as the other three.
 //	unknown_state   the control plane answered with none of
-//	                accepted/duplicate/conflict — a protocol disagreement no
-//	                other signal reports.
+//	                accepted/duplicate/conflict/refused — a protocol
+//	                disagreement no other signal reports.
+//
+// A concurrency refusal is the one batch outcome that is not a failure at all
+// and still withholds the offset: the workflow's own policy declined the seed,
+// nothing was persisted, and the batch is retried after a backoff. It is its own
+// state (refused), with the reason narrowing WHICH wait it is — concurrency_limit
+// for a slot, queue_full for the queue-mode backlog — because an operator needs
+// to tell a throttle from an outage and then tell the two throttles apart.
 //
 // The cause text does reach the log, and that is how a human diagnoses ONE
 // incident. But free text supports no rate, no ratio, and no alert: you cannot
@@ -111,6 +119,36 @@ func TestBatchAdmissionErrorsAreDistinguishable(t *testing.T) {
 			commit: false,
 		},
 		{
+			// The workflow is at its concurrency limit in REJECT mode. Not an
+			// error: the control plane is healthy and did what the definition
+			// asked. Not a commit either — nothing was persisted, so the
+			// completed group work stays ours and the batch must come back.
+			name: "workflow is at its concurrency limit",
+			rt: &mockGroupExecRuntime{
+				mockEntrySeedRuntime: mockEntrySeedRuntime{
+					response: types.EntrySeedResponse{Refused: true},
+				},
+				execResult: types.GroupExecResult{Outcome: "success"},
+			},
+			want:   "refused/concurrency_limit",
+			commit: false,
+		},
+		{
+			// The same withhold, a different wait: the queue-mode backlog is at
+			// max_queued. Separated from the case above because "wait for a slot"
+			// and "wait for the queue to drain" are not the same instruction to an
+			// operator.
+			name: "workflow concurrency queue is full",
+			rt: &mockGroupExecRuntime{
+				mockEntrySeedRuntime: mockEntrySeedRuntime{
+					response: types.EntrySeedResponse{Refused: true, QueueFull: true},
+				},
+				execResult: types.GroupExecResult{Outcome: "success"},
+			},
+			want:   "refused/queue_full",
+			commit: false,
+		},
+		{
 			name: "success",
 			rt: &mockGroupExecRuntime{
 				mockEntrySeedRuntime: mockEntrySeedRuntime{
@@ -175,6 +213,14 @@ func TestBatchAdmissionReasonsAreDistinct(t *testing.T) {
 			mockEntrySeedRuntime: mockEntrySeedRuntime{response: types.EntrySeedResponse{}},
 			execResult:           types.GroupExecResult{Outcome: "success"},
 		},
+		"workflow refused at its limit": {
+			mockEntrySeedRuntime: mockEntrySeedRuntime{response: types.EntrySeedResponse{Refused: true}},
+			execResult:           types.GroupExecResult{Outcome: "success"},
+		},
+		"workflow queue is full": {
+			mockEntrySeedRuntime: mockEntrySeedRuntime{response: types.EntrySeedResponse{Refused: true, QueueFull: true}},
+			execResult:           types.GroupExecResult{Outcome: "success"},
+		},
 	}
 
 	seen := make(map[string]string, len(runtimes))
@@ -233,5 +279,105 @@ func TestRawBatchAdmissionUnknownStateIsObserved(t *testing.T) {
 		t.Errorf("admissions = %v, want exactly [error/unknown_state]. Without an "+
 			"observation here the partition stalls while every admission metric "+
 			"reads as an idle topic.", pairs)
+	}
+}
+
+// TestRawBatchAdmissionRefusalWithholdsCommit is the runner-level half of the
+// concurrency-limit contract: a kafka-style batch seed against a workflow that
+// refuses it must NOT commit the offset.
+//
+// Committing here is the one failure that cannot be recovered from — the batch
+// carries the only copy of the entry-unit result, and the refusal means nothing
+// was persisted server-side, so the messages would be gone with no execution
+// behind them. The refusal is not an error and the control plane is healthy,
+// which is exactly why the decision cannot be inferred from whether the call
+// returned an error: it has to come from the response's refused flag.
+func TestRawBatchAdmissionRefusalWithholdsCommit(t *testing.T) {
+	in := &types.TriggerActivateInput{NodeName: "trig", WorkflowID: "wf", Params: map[string]any{}}
+
+	for _, tc := range []struct {
+		name string
+		resp types.EntrySeedResponse
+		want string
+	}{
+		{"at the limit", types.EntrySeedResponse{Refused: true}, "refused/concurrency_limit"},
+		{"queue full", types.EntrySeedResponse{Refused: true, QueueFull: true}, "refused/queue_full"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := &recordingBatchObserver{}
+			SetObserver(o)
+			defer SetObserver(nil)
+
+			rt := &mockEntrySeedRuntime{response: tc.resp}
+			msgs := []Message{{Topic: "adm", Partition: 0, Offset: 7}}
+
+			if seedEntryBatchMessages(context.Background(), in, rt, msgs) {
+				t.Fatal("a refused admission must not commit the offset — the batch " +
+					"is the only copy of a result the control plane never persisted")
+			}
+			pairs := o.admissionPairs()
+			if len(pairs) != 1 || pairs[0] != tc.want {
+				t.Errorf("admissions = %v, want exactly [%s]", pairs, tc.want)
+			}
+		})
+	}
+}
+
+// TestPerMessageSeedRefusalIsBoundedByCancellation pins the one thing that ends
+// the per-record retry loop other than an admission: the activation shutting
+// down.
+//
+// The loop has to hold the record — that is what stops a later commit from
+// advancing past it (see TestKafkaEntrySeed_RefusedRecordIsRetriedNotSkipped) —
+// which makes the cancellation path load-bearing rather than incidental. A
+// permanently refusing workflow must not keep a worker past its context, or
+// shutdown would wait on a partition that will never progress. The window
+// between the two assertions is shorter than the retry's own 1s window on
+// purpose: the record is held from the FIRST refusal, not only from the second
+// attempt.
+func TestPerMessageSeedRefusalIsBoundedByCancellation(t *testing.T) {
+	msgs := []Message{{Topic: "t", Partition: 0, Offset: 400, Value: []byte("over-limit")}}
+	recorder := &commitRecordingConsumer{inner: newScriptedConsumer(msgs)}
+	admitter := &mockEntrySeedRuntime{response: types.EntrySeedResponse{Refused: true}}
+	rt := &entrySeedTestRuntime{
+		admitter: admitter,
+		dedup:    func(context.Context, string, time.Duration) (bool, error) { return true, nil },
+	}
+	in := &types.TriggerActivateInput{
+		WorkflowID: "wf1",
+		NodeName:   "trigger",
+		Params:     map[string]any{"entry_unit_id": "g1", "workflow_version": "v1"},
+		Runtime:    rt,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan bool, 1)
+	go func() { done <- seedEntryBatch(ctx, in, recorder, msgs[0]) }()
+
+	select {
+	case ok := <-done:
+		t.Fatalf("seedEntryBatch returned %v while the record was still refused; the "+
+			"caller's worker would move on and the next commit would skip it", ok)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case ok := <-done:
+		if ok {
+			t.Fatal("a canceled refusal reported handled, which would commit the offset")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("seedEntryBatch did not return after cancellation: shutdown would " +
+			"wait on a partition that cannot progress")
+	}
+
+	if commits := recorder.getCommits(); len(commits) != 0 {
+		t.Fatalf("commit count = %d, want 0 (a refused seed persists nothing)", len(commits))
+	}
+	if got := admitter.callCount.Load(); got != 1 {
+		t.Fatalf("admission calls = %d, want 1: cancellation before the retry window "+
+			"elapses must not produce another attempt", got)
 	}
 }

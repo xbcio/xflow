@@ -828,3 +828,27 @@ func TestTriggerActivationHandler_GroupSeedTimeoutReachesTheEmbeddedRuntime(t *t
 			"kept the default deadline, and it is the path carrying the largest batch", got)
 	}
 }
+
+// TestTriggerActivationHandler_ActivatePassesWorkflowTimezone: the directive's
+// workflow settings.timezone reaches the trigger's activation input.
+func TestTriggerActivationHandler_ActivatePassesWorkflowTimezone(t *testing.T) {
+	fh := &fakeTriggerHandler{}
+	lookup := fakeLookup{handlers: map[string]types.TriggerHandler{"fake": fh}}
+	h := NewTriggerActivationHandler("https://control.internal", "secret-bearer", lookup)
+
+	d := protocol.ActivateDirective{
+		Namespace:        "ns1",
+		WorkflowID:       "wf1",
+		WorkflowVersion:  "v1",
+		EntryUnitID:      "t1",
+		NodeType:         "fake",
+		Generation:       1,
+		WorkflowTimezone: "Asia/Shanghai",
+	}
+	if err := h.Activate(context.Background(), d); err != nil {
+		t.Fatalf("Activate returned error: %v", err)
+	}
+	if fh.gotInput == nil || fh.gotInput.WorkflowTimezone != "Asia/Shanghai" {
+		t.Fatalf("activation input = %+v, want WorkflowTimezone Asia/Shanghai", fh.gotInput)
+	}
+}

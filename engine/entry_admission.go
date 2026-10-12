@@ -45,6 +45,16 @@ const (
 	// AdmissionStateConflict means the key was already admitted with a different
 	// result hash — a concurrent runner produced a different outcome.
 	AdmissionStateConflict AdmissionState = "conflict"
+	// AdmissionStateOverLimit means the workflow's concurrency limit refused the
+	// seed in REJECT mode. Nothing was persisted for it, so the caller still owns
+	// the entry-unit result: a Kafka trigger withholds the offset and retries.
+	AdmissionStateOverLimit AdmissionState = "over_limit"
+	// AdmissionStateQueueFull means the workflow's QUEUE-mode backlog was at
+	// max_queued and the seed was refused. Like AdmissionStateOverLimit, this is
+	// a retryable refusal with nothing persisted — the two are distinct because
+	// they name different waits (a slot to free, a backlog to drain), exactly as
+	// ErrConcurrencyLimit and ErrConcurrencyQueueFull do for submissions.
+	AdmissionStateQueueFull AdmissionState = "queue_full"
 )
 
 // ResultHash is the content-addressed hash of an entry-unit result, used to
@@ -128,19 +138,49 @@ type SeedExecutionFromEntryRequest struct {
 
 // SeedExecutionFromEntryResponse is the control-plane response.
 type SeedExecutionFromEntryResponse struct {
-	// State is accepted or conflict.
+	// State is accepted, conflict, over_limit or queue_full.
 	State AdmissionState
 	// ExecutionID is the stable, deterministic execution ID for this admission key.
 	ExecutionID types.ExecutionID
 	// Duplicate is true when the same key+hash was already accepted (idempotent
 	// retry); the same execution ID is returned.
 	Duplicate bool
+	// Queued is true when the admitted execution was parked in its workflow's
+	// QUEUE-mode line instead of started. It is the seed-path counterpart of
+	// ConcurrencyAdmissionResult.Queued and carries the same meaning: the caller
+	// must not expect the execution's work to be deliverable until a release
+	// promotes it.
+	Queued bool
+	// QueuePosition is the queued execution's 1-based place in line, or 0 when
+	// Queued is false. Position 1 is the head: the execution the next release
+	// promotes.
+	QueuePosition int
 	// Skipped reports the downstream units this admission resolved as skip (see
 	// SkippedUnit). An admission is a scheduling transition like any other: it
 	// decrements the new execution's in-degree counters and picks execute or
 	// skip per downstream unit. Nil when the backend does not report it or when
 	// nothing was skipped.
 	Skipped []SkippedUnit
+}
+
+// SeedAdmissionRefusal maps a refused slot decision to the response an entry
+// seed returns for it, or returns the error unchanged when it is not a refusal.
+//
+// It lives here rather than in each backend because it is a decision about the
+// response contract, not about storage: a refusal is an administration the
+// caller acts on (retry once a slot frees, or once the backlog drains) rather
+// than a failed call, so it travels in State — and which sentinel means which
+// state has to read the same from every backend. The response names no
+// execution: nothing was persisted for it, and an ID would invite a caller to
+// inspect an execution that does not exist.
+func SeedAdmissionRefusal(err error) (SeedExecutionFromEntryResponse, error) {
+	switch {
+	case errors.Is(err, ErrConcurrencyLimit):
+		return SeedExecutionFromEntryResponse{State: AdmissionStateOverLimit}, nil
+	case errors.Is(err, ErrConcurrencyQueueFull):
+		return SeedExecutionFromEntryResponse{State: AdmissionStateQueueFull}, nil
+	}
+	return SeedExecutionFromEntryResponse{}, err
 }
 
 // --- EntryAdmissionStore ---
@@ -192,6 +232,16 @@ type EntryAdmissionStore interface {
 // cannot be evaluated safely. This is a missing value, not a wrong one: the
 // resulting series is a lower bound whenever the caller could not resolve
 // group membership, mirroring Cut C-1's tolerance for a legacy NodeType=="".
+//
+// A graph that declares settings.concurrency routes through
+// ConcurrencyLimitedEntryAdmissionStore instead, so an entry-seeded execution
+// contends for a slot exactly as a submitted one does. That capability is
+// required, not optional, once the graph declares a limit: a backend that can
+// seed entries but cannot enforce the limit fails closed with
+// ErrConcurrencyUnsupported, which is the same answer every other submission
+// path gives. Refusals are reported in the response's State rather than as an
+// error, because they are admissions the caller can act on (retry later)
+// rather than failed calls.
 func (e *Engine) SeedExecutionFromEntry(ctx context.Context, req SeedExecutionFromEntryRequest) (SeedExecutionFromEntryResponse, error) {
 	store, ok := e.state.(EntryAdmissionStore)
 	if !ok {
@@ -213,8 +263,14 @@ func (e *Engine) SeedExecutionFromEntry(ctx context.Context, req SeedExecutionFr
 		req.EntryUnitIdx < req.Graph.UnitCount() &&
 		req.Graph.UnitKindAt(req.EntryUnitIdx) == graph.UnitGroup
 
+	// The admission is built from the seed's own graph, exactly as a submission
+	// builds its own: the definition that will run is the definition that is
+	// judged, so a limit added by a re-published version applies to the seeds
+	// that resolve to that version and to no others.
+	admission := concurrencyAdmissionFor(ctx, req.Graph)
+
 	start := time.Now()
-	resp, err := store.SeedExecutionFromEntry(ctx, admissionReq)
+	resp, err := e.seedEntryAdmission(ctx, store, admissionReq, admission)
 	d := time.Since(start)
 
 	if isGroupEntry {
@@ -223,12 +279,28 @@ func (e *Engine) SeedExecutionFromEntry(ctx context.Context, req SeedExecutionFr
 	// Only on a real admission. A duplicate retry applied no transition, so its
 	// response carries no skips; a conflict or a transport error applied
 	// nothing at all, and counting the skips of a transition that did not
-	// happen would inflate the one series an operator alerts on.
+	// happen would inflate the one series an operator alerts on. A refusal
+	// applies nothing either, for the same reason and one more: nothing exists
+	// on the execution side of it yet.
 	if err == nil && !resp.Duplicate && resp.State == AdmissionStateAccepted {
 		e.notifySkip(ctx, flowEntry, resp.Skipped)
 	}
 
 	return resp, err
+}
+
+// seedEntryAdmission routes one seed to the store capability its graph calls
+// for: the concurrency-limited admission when the graph declares a limit (fail
+// closed when the store cannot apply one), the plain admission otherwise.
+func (e *Engine) seedEntryAdmission(ctx context.Context, store EntryAdmissionStore, req SeedExecutionFromEntryRequest, admission *ConcurrencyAdmission) (SeedExecutionFromEntryResponse, error) {
+	if admission == nil {
+		return store.SeedExecutionFromEntry(ctx, req)
+	}
+	limited, ok := e.state.(ConcurrencyLimitedEntryAdmissionStore)
+	if !ok {
+		return SeedExecutionFromEntryResponse{}, fmt.Errorf("workflow %q: %w", admission.Workflow, ErrConcurrencyUnsupported)
+	}
+	return limited.SeedExecutionFromEntryWithConcurrency(ctx, req, *admission)
 }
 
 // cloneEntryAdmissionExits makes the store-owned copy of runner boundary
@@ -395,8 +467,10 @@ func entryAdmissionExitPrivateOutput(g *graph.Graph, nodeName string) bool {
 // error always wins ("error") regardless of what resp happens to hold;
 // otherwise resp.Duplicate distinguishes an idempotent duplicate-accepted
 // retry ("duplicate") from a first-time admission, which is classified by
-// resp.State — AdmissionStateAccepted ("accepted") or AdmissionStateConflict
-// ("conflict"), the only two values AdmissionState defines.
+// resp.State — AdmissionStateAccepted ("accepted"), AdmissionStateConflict
+// ("conflict"), or one of the two retryable refusals, which are reported as
+// "refused" rather than being folded into "accepted": a refused seed created no
+// execution, and an operator counting admissions must not see it as one.
 func classifyAdmissionOutcome(resp SeedExecutionFromEntryResponse, err error) string {
 	if err != nil {
 		return "error"
@@ -404,8 +478,11 @@ func classifyAdmissionOutcome(resp SeedExecutionFromEntryResponse, err error) st
 	if resp.Duplicate {
 		return "duplicate"
 	}
-	if resp.State == AdmissionStateConflict {
+	switch resp.State {
+	case AdmissionStateConflict:
 		return "conflict"
+	case AdmissionStateOverLimit, AdmissionStateQueueFull:
+		return "refused"
 	}
 	return "accepted"
 }

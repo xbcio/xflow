@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -33,6 +35,56 @@ func (f *fakeEntryAdmissionState) SeedExecutionFromEntry(_ context.Context, req 
 }
 
 var _ EntryAdmissionStore = (*fakeEntryAdmissionState)(nil)
+
+// fakeLimitedEntryAdmissionState additionally applies a workflow's concurrency
+// policy and records the admission it was handed, so a test can assert that the
+// engine judged a seed by the definition it was seeded with — the limit a
+// re-published version declares applies to the seeds that resolve to it and to
+// no others, which is only true if the engine reads the limit off the seed's own
+// compiled graph.
+type fakeLimitedEntryAdmissionState struct {
+	*fakeEntryAdmissionState
+	limitedCalls int
+	admissions   []ConcurrencyAdmission
+}
+
+func (f *fakeLimitedEntryAdmissionState) SeedExecutionFromEntryWithConcurrency(ctx context.Context, req SeedExecutionFromEntryRequest, admission ConcurrencyAdmission) (SeedExecutionFromEntryResponse, error) {
+	f.limitedCalls++
+	f.admissions = append(f.admissions, admission)
+	return f.fakeEntryAdmissionState.SeedExecutionFromEntry(ctx, req)
+}
+
+var _ ConcurrencyLimitedEntryAdmissionStore = (*fakeLimitedEntryAdmissionState)(nil)
+
+// limitedEntryAdmissionEngine builds an engine over the limiter-capable fake.
+func limitedEntryAdmissionEngine(t *testing.T, resp SeedExecutionFromEntryResponse, err error) (*Engine, *fakeLimitedEntryAdmissionState) {
+	t.Helper()
+	state := &fakeLimitedEntryAdmissionState{
+		fakeEntryAdmissionState: &fakeEntryAdmissionState{fakeState: newFakeState(), resp: resp, err: err},
+	}
+	return New(state, &fakeQueue{}), state
+}
+
+// entryAdmissionConcurrencyGraph compiles the single-root trigger group a
+// Kafka-style seed carries, with the workflow-level concurrency setting under
+// test attached to it.
+func entryAdmissionConcurrencyGraph(t *testing.T, settings *types.ConcurrencySettings) *graph.Graph {
+	t.Helper()
+	g, err := graph.Compile(&types.WorkflowDef{
+		Name:     "entry-admission-limited",
+		Settings: &types.WorkflowSettings{Concurrency: settings},
+		Nodes: []types.NodeDef{
+			{Name: "entry", Kind: types.NodeKindTrigger},
+			{Name: "body", Kind: types.NodeKindAction},
+		},
+		Connections: types.Connections{"entry": {"main": {Targets: []types.Connection{{Node: "body", Input: "main"}}}}},
+		Groups:      []types.GroupDef{{Name: "tg", Members: []string{"entry", "body"}}},
+	})
+	if err != nil {
+		t.Fatalf("compile limited entry-admission graph: %v", err)
+	}
+	return g
+}
 
 // findNonGroupUnit locates a UnitNode-kind unit's index in g — the negative
 // control counterpart to findGroupUnit (group_observer_test.go), used to drive
@@ -358,6 +410,20 @@ func TestSeedExecutionFromEntry_GroupAdmission_OutcomeClassification(t *testing.
 			err:  errors.New("backend unavailable"),
 			want: "error",
 		},
+		{
+			// A refusal is neither an accepted admission nor an error: it created
+			// no execution, and an operator counting admissions must not see it as
+			// one. Both refusal states collapse to the same label because they name
+			// different waits, not different outcomes for the metric.
+			name: "over limit",
+			resp: SeedExecutionFromEntryResponse{State: AdmissionStateOverLimit},
+			want: "refused",
+		},
+		{
+			name: "queue full",
+			resp: SeedExecutionFromEntryResponse{State: AdmissionStateQueueFull},
+			want: "refused",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -497,4 +563,148 @@ func TestSeedExecutionFromEntry_NilObserverDoesNotPanic(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SeedExecutionFromEntry: %v", err)
 	}
+}
+
+// TestSeedExecutionFromEntry_AppliesTheGraphsConcurrencyPolicy is the wiring
+// test for decision 5's accept half: a seed whose graph declares a limit is
+// admitted through the concurrency capability, with the admission built from
+// that very graph. It is the case a Kafka trigger group depends on — the seed
+// arrives with no Submit/Invoke behind it, so nothing else would have consulted
+// the limit at all.
+func TestSeedExecutionFromEntry_AppliesTheGraphsConcurrencyPolicy(t *testing.T) {
+	settings := &types.ConcurrencySettings{
+		Limit:        2,
+		Mode:         types.ConcurrencyModeQueue,
+		MaxQueued:    3,
+		QueueTimeout: 45 * time.Second,
+	}
+	g := entryAdmissionConcurrencyGraph(t, settings)
+
+	eng, state := limitedEntryAdmissionEngine(t,
+		SeedExecutionFromEntryResponse{State: AdmissionStateAccepted, ExecutionID: "exec-limited"}, nil)
+	ctx := namespace.WithNamespace(context.Background(), "tenant-a")
+
+	resp, err := eng.SeedExecutionFromEntry(ctx, SeedExecutionFromEntryRequest{
+		AdmissionKey: "k-limited",
+		Graph:        g,
+		EntryUnitIdx: findGroupUnit(t, g),
+		Outcome:      GroupOutcomeSuccess,
+	})
+	if err != nil {
+		t.Fatalf("SeedExecutionFromEntry: %v", err)
+	}
+	if resp.State != AdmissionStateAccepted {
+		t.Fatalf("resp.State = %q, want accepted", resp.State)
+	}
+
+	if state.limitedCalls != 1 {
+		t.Fatalf("concurrency-limited admissions = %d, want exactly 1: a seed whose graph declares a limit must be judged by it", state.limitedCalls)
+	}
+	want := ConcurrencyAdmission{
+		Namespace:    "tenant-a",
+		Workflow:     g.Name(),
+		Limit:        2,
+		Mode:         types.ConcurrencyModeQueue,
+		MaxQueued:    3,
+		QueueTimeout: 45 * time.Second,
+	}
+	if got := state.admissions[0]; got != want {
+		t.Fatalf("admission = %+v, want %+v", got, want)
+	}
+}
+
+// TestSeedExecutionFromEntry_WithoutALimitUsesThePlainAdmission is the negative
+// control for the test above: a graph that declares no limit must not reach the
+// concurrency capability at all. The plain admission is cheaper, and routing
+// every seed through a slot decision would make an unlimited workflow contend
+// for slot state it has no use for.
+func TestSeedExecutionFromEntry_WithoutALimitUsesThePlainAdmission(t *testing.T) {
+	g := entryAdmissionConcurrencyGraph(t, nil)
+
+	eng, state := limitedEntryAdmissionEngine(t,
+		SeedExecutionFromEntryResponse{State: AdmissionStateAccepted, ExecutionID: "exec-plain"}, nil)
+
+	if _, err := eng.SeedExecutionFromEntry(context.Background(), SeedExecutionFromEntryRequest{
+		AdmissionKey: "k-plain",
+		Graph:        g,
+		EntryUnitIdx: findGroupUnit(t, g),
+		Outcome:      GroupOutcomeSuccess,
+	}); err != nil {
+		t.Fatalf("SeedExecutionFromEntry: %v", err)
+	}
+
+	if state.limitedCalls != 0 {
+		t.Fatalf("concurrency-limited admissions = %d, want 0: the graph declares no limit", state.limitedCalls)
+	}
+	if state.calls != 1 {
+		t.Fatalf("plain admissions = %d, want exactly 1", state.calls)
+	}
+}
+
+// TestSeedExecutionFromEntry_ConcurrencyCapabilityMissingFailsClosed pins
+// decision 2 on the seed path: a store that can seed entries but cannot enforce
+// a limit must refuse a seed whose graph declares one, rather than admitting it
+// unlimited. Silently running unbounded is the failure the limit exists to
+// prevent, and a trigger group's traffic is exactly what it was declared to
+// bound.
+func TestSeedExecutionFromEntry_ConcurrencyCapabilityMissingFailsClosed(t *testing.T) {
+	g := entryAdmissionConcurrencyGraph(t, &types.ConcurrencySettings{Limit: 1})
+
+	// fakeEntryAdmissionState implements EntryAdmissionStore only.
+	state := &fakeEntryAdmissionState{fakeState: newFakeState(), resp: SeedExecutionFromEntryResponse{State: AdmissionStateAccepted}}
+	eng := New(state, &fakeQueue{})
+
+	_, err := eng.SeedExecutionFromEntry(context.Background(), SeedExecutionFromEntryRequest{
+		AdmissionKey: "k-unsupported",
+		Graph:        g,
+		EntryUnitIdx: findGroupUnit(t, g),
+		Outcome:      GroupOutcomeSuccess,
+	})
+	if !errors.Is(err, ErrConcurrencyUnsupported) {
+		t.Fatalf("err = %v, want ErrConcurrencyUnsupported", err)
+	}
+	if state.calls != 0 {
+		t.Fatalf("plain admissions = %d, want 0: failing closed must not fall back to an unlimited admission", state.calls)
+	}
+}
+
+// TestSeedAdmissionRefusal pins the mapping both backends share: the two
+// retryable refusals travel as response states, not as errors, and anything else
+// is passed through untouched. A refusal reported as an error would be retried
+// by the caller as a failed call rather than held until a slot frees, and one
+// reported as "accepted" would have the offset committed for an execution that
+// does not exist.
+func TestSeedAdmissionRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want AdmissionState
+	}{
+		{name: "limit", err: ErrConcurrencyLimit, want: AdmissionStateOverLimit},
+		{name: "queue full", err: ErrConcurrencyQueueFull, want: AdmissionStateQueueFull},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := SeedAdmissionRefusal(tc.err)
+			if err != nil {
+				t.Fatalf("SeedAdmissionRefusal(%v) error = %v, want the refusal reported as a state", tc.err, err)
+			}
+			if resp.State != tc.want {
+				t.Fatalf("state = %q, want %q", resp.State, tc.want)
+			}
+			if resp.ExecutionID != "" {
+				t.Fatalf("refusal named execution %q, want none: nothing was persisted for it", resp.ExecutionID)
+			}
+		})
+	}
+
+	t.Run("unrelated error passes through", func(t *testing.T) {
+		want := errors.New("backend unavailable")
+		resp, err := SeedAdmissionRefusal(want)
+		if !errors.Is(err, want) {
+			t.Fatalf("err = %v, want the original error", err)
+		}
+		if resp.State != "" {
+			t.Fatalf("state = %q, want empty", resp.State)
+		}
+	})
 }

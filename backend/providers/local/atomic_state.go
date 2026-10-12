@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/xbcio/xflow/engine"
@@ -17,11 +19,25 @@ type memoryOutboxEntry struct {
 	// not both deliver it. Ack stays the only removal path, so a deliverer that
 	// dies leaves the entry to become listable again on its own.
 	leasedUntil time.Time
+	// deadMeta mirrors the Redis per-entry dead-letter meta hash: the node,
+	// activation, and intent captured from the failing delivery when the entry
+	// was dead-lettered. Nil while the entry is ready; replay drops it.
+	deadMeta *memoryDeadLetterMeta
 }
 
-// memoryReplayReceipt is the authoritative in-memory record of one replay,
-// keyed by execution→requestID. It survives the dead entry's removal so a
-// retried replay with the same RequestID returns already_replayed.
+// memoryDeadLetterMeta is the immutable guard metadata ReplayDeadLetter
+// evaluates. activation is kept in its stored string form so an absent value
+// is distinguishable from activation 0, exactly as in the Redis meta hash.
+type memoryDeadLetterMeta struct {
+	node       string
+	activation string
+	intent     string
+}
+
+// memoryReplayReceipt is the authoritative in-memory record of one replay
+// attempt, keyed by execution→requestID. It is written for a replay and for
+// every decidable rejection, and survives the dead entry's removal so a retry
+// with the same RequestID recovers the original outcome and AuditID.
 type memoryReplayReceipt struct {
 	auditID      string
 	node         string
@@ -424,7 +440,17 @@ func (s *memoryState) RecordOutboxFailure(_ context.Context, id types.ExecutionI
 			deadEntries = make(map[string]memoryOutboxEntry)
 			s.deadOutbox[id] = deadEntries
 		}
+		// Capture the replay guard metadata from the failing delivery, as
+		// recordOutboxFailureLua writes the per-entry dead meta hash.
+		stored.deadMeta = &memoryDeadLetterMeta{
+			node:       entry.Task.NodeName,
+			activation: strconv.Itoa(entry.Task.ActivationID),
+			intent:     deadLetterIntent(entryID),
+		}
 		deadEntries[entryID] = stored
+		// Clear a stale replay index mapping so a second dead-letter cycle does
+		// not permanently block re-replay under a new RequestID.
+		delete(s.replayEntryIdx[id], entryID)
 		result.DeadLettered = true
 		return result, nil
 	}
@@ -513,11 +539,19 @@ func (s *memoryState) ListDeadLetters(_ context.Context, id types.ExecutionID, p
 	return engine.DeadLetterList{Entries: page2, NextCursor: nextCursor}, nil
 }
 
-// ReplayDeadLetter moves a dead-lettered entry back to the ready set. The
-// memory mutex serializes replays so concurrent calls collapse: exactly one
-// returns ReplayReplayed, the rest return ReplayAlreadyReplayed with the
-// original AuditID. Terminal/expired executions, terminal nodes, and stale
-// activations are rejected without mutating state.
+// ReplayDeadLetter moves a dead-lettered entry back to the ready set,
+// mirroring replayDeadLetterLua in the Redis backend step for step so both
+// backends return the same outcome for the same state. The memory mutex
+// serializes replays so concurrent calls collapse: exactly one returns
+// ReplayReplayed, the rest return ReplayAlreadyReplayed with the original
+// AuditID.
+//
+// Order of evaluation: a receipt under the same RequestID (or a successful
+// replay of the entry under another RequestID) recovers the stored outcome;
+// then a missing entry is a stable not_found with no receipt; then the
+// fail-closed metadata guard, the execution status guard (only "running" may
+// replay), the intent-branched node guard, and the activation guard. Every
+// decidable rejection writes a receipt so a retry recovers the same rejection.
 func (s *memoryState) ReplayDeadLetter(_ context.Context, req engine.ReplayDeadLetterRequest) (engine.ReplayDeadLetterResult, error) {
 	if req.EntryID == "" {
 		return engine.ReplayDeadLetterResult{Outcome: engine.ReplayNotFound, ExecutionID: req.ExecutionID}, nil
@@ -529,49 +563,78 @@ func (s *memoryState) ReplayDeadLetter(_ context.Context, req engine.ReplayDeadL
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// 1. Idempotency: same RequestID or same entry already replayed.
-	if receipts, ok := s.replayReceipts[req.ExecutionID]; ok {
-		if r, ok := receipts[requestID]; ok {
-			return engine.ReplayDeadLetterResult{Outcome: engine.ReplayAlreadyReplayed, AuditID: r.auditID, ExecutionID: req.ExecutionID, NodeID: r.node, ActivationID: r.activation}, nil
-		}
+	// 1. Idempotency: a receipt under this RequestID recovers its outcome; a
+	//    successful replay of this entry under another RequestID collapses to
+	//    that receipt. The entry index is only written on success.
+	if r, ok := s.replayReceipts[req.ExecutionID][requestID]; ok {
+		return r.result(req.ExecutionID), nil
 	}
-	if idx, ok := s.replayEntryIdx[req.ExecutionID]; ok {
-		if priorReqID, ok := idx[req.EntryID]; ok && priorReqID != "" {
-			if r, ok := s.replayReceipts[req.ExecutionID][priorReqID]; ok {
-				return engine.ReplayDeadLetterResult{Outcome: engine.ReplayAlreadyReplayed, AuditID: r.auditID, ExecutionID: req.ExecutionID, NodeID: r.node, ActivationID: r.activation}, nil
-			}
+	if priorReqID := s.replayEntryIdx[req.ExecutionID][req.EntryID]; priorReqID != "" {
+		if r, ok := s.replayReceipts[req.ExecutionID][priorReqID]; ok {
+			return r.result(req.ExecutionID), nil
 		}
 	}
 
-	// 2. Execution status guard.
-	exec, ok := s.executions[req.ExecutionID]
-	if !ok || exec == nil {
-		return engine.ReplayDeadLetterResult{Outcome: engine.ReplayRejectedInactive, ExecutionID: req.ExecutionID}, nil
-	}
-	if types.IsTerminalExecutionStatus(exec.snap.Status) {
-		return engine.ReplayDeadLetterResult{Outcome: engine.ReplayRejectedTerminal, ExecutionID: req.ExecutionID}, nil
-	}
-
-	// 3. Read dead entry + node guard.
+	// 2. A missing entry is a stable not_found with no receipt.
 	deadEntries := s.deadOutbox[req.ExecutionID]
 	stored, ok := deadEntries[req.EntryID]
 	if !ok {
 		return engine.ReplayDeadLetterResult{Outcome: engine.ReplayNotFound, ExecutionID: req.ExecutionID}, nil
 	}
-	nodeName := stored.entry.Task.NodeName
-	entryActivation := stored.entry.Task.ActivationID
-	if nodeName != "" {
-		node := s.nodes[memoryNodeKey(req.ExecutionID, nodeName)]
-		if node != nil && isTerminalNode(node.Status) {
-			return engine.ReplayDeadLetterResult{Outcome: engine.ReplayRejectedNodeTerminal, ExecutionID: req.ExecutionID, NodeID: nodeName, ActivationID: fmt.Sprintf("%d", entryActivation)}, nil
+	var meta memoryDeadLetterMeta
+	if stored.deadMeta != nil {
+		meta = *stored.deadMeta
+	}
+	auditID := requestID + ":" + strconv.FormatInt(time.Now().UTC().UnixMilli(), 10)
+	reject := func(outcome engine.DeadLetterReplayOutcome) (engine.ReplayDeadLetterResult, error) {
+		return s.writeReplayReceiptLocked(req, requestID, auditID, meta, outcome).result(req.ExecutionID), nil
+	}
+
+	// 3. Fail-closed metadata guard: without node and activation the
+	//    activation-safe guards cannot be evaluated.
+	if meta.node == "" || meta.activation == "" {
+		return reject(engine.ReplayRejectedMetadataMissing)
+	}
+
+	// 4. Execution status guard. Only an explicitly running execution may
+	//    replay; canceling must not be bypassed.
+	exec := s.executions[req.ExecutionID]
+	if exec == nil {
+		return reject(engine.ReplayRejectedInactive)
+	}
+	if exec.snap.Status != types.ExecutionStatusRunning {
+		return reject(engine.ReplayRejectedTerminal)
+	}
+
+	// 5. Intent-branched node guard. advance requires a terminal source; every
+	//    other intent rejects a terminal node and must find a node status its
+	//    intent allows, otherwise the guard state is unrecognised.
+	node := s.nodes[memoryNodeKey(req.ExecutionID, meta.node)]
+	nodeTerminal := node != nil && isTerminalNode(node.Status)
+	if meta.intent == "advance" {
+		if !nodeTerminal {
+			return reject(engine.ReplayRejectedMetadataMissing)
 		}
-		if entryActivation > 0 && node != nil && node.ActivationID != 0 && node.ActivationID != entryActivation {
-			return engine.ReplayDeadLetterResult{Outcome: engine.ReplayRejectedActivationMismatch, ExecutionID: req.ExecutionID, NodeID: nodeName, ActivationID: fmt.Sprintf("%d", entryActivation)}, nil
+	} else {
+		if nodeTerminal {
+			return reject(engine.ReplayRejectedNodeTerminal)
+		}
+		if !replayIntentAllowsNode(meta.intent, node) {
+			return reject(engine.ReplayRejectedMetadataMissing)
 		}
 	}
 
-	// 4. Atomic dead->ready move: preserve body, reset attempts.
+	// 6. Activation guard. root/execute/skip with no node yet have no current
+	//    activation to compare against.
+	skipActivation := node == nil && (meta.intent == "root" || meta.intent == "execute" || meta.intent == "skip")
+	if !skipActivation && strconv.Itoa(node.ActivationID) != meta.activation {
+		return reject(engine.ReplayRejectedActivationMismatch)
+	}
+
+	// 7. Atomic dead->ready move: preserve body, reset attempts, drop meta.
 	stored.entry.Attempts = 0
+	stored.leasedUntil = time.Time{}
+	stored.deadMeta = nil
 	readyEntries := s.outbox[req.ExecutionID]
 	if readyEntries == nil {
 		readyEntries = make(map[string]memoryOutboxEntry)
@@ -583,42 +646,107 @@ func (s *memoryState) ReplayDeadLetter(_ context.Context, req engine.ReplayDeadL
 		delete(s.deadOutbox, req.ExecutionID)
 	}
 
-	// 5. Write authoritative receipt + entry index.
-	auditID := requestID + ":" + fmt.Sprintf("%d", time.Now().UTC().UnixMilli())
+	// 8. Authoritative receipt + entry index.
+	receipt := s.writeReplayReceiptLocked(req, requestID, auditID, meta, engine.ReplayReplayed)
+	if s.replayEntryIdx[req.ExecutionID] == nil {
+		s.replayEntryIdx[req.ExecutionID] = make(map[string]string)
+	}
+	s.replayEntryIdx[req.ExecutionID][req.EntryID] = requestID
+	return engine.ReplayDeadLetterResult{Outcome: engine.ReplayReplayed, AuditID: receipt.auditID, ExecutionID: req.ExecutionID, NodeID: receipt.node, ActivationID: receipt.activation}, nil
+}
+
+// replayIntentAllowsNode reports whether node's status is an eligible
+// non-terminal value for a non-advance intent. A nil node is an absent status,
+// which only the scheduling-stage intents accept. An unknown or empty intent
+// (a legacy entry) is never eligible.
+func replayIntentAllowsNode(intent string, node *engine.NodeSnapshot) bool {
+	if node == nil {
+		return intent == "root" || intent == "execute" || intent == "skip"
+	}
+	switch node.Status {
+	case types.NodeStatusPending:
+		return intent == "root" || intent == "retry" || intent == "requeue" || intent == "resume" || intent == "execute" || intent == "skip"
+	case types.NodeStatusRunning, types.NodeStatusCommitting, types.NodeStatusWaiting:
+		return intent == "root" || intent == "retry" || intent == "requeue" || intent == "execute" || intent == "skip"
+	case types.NodeStatusSuspended:
+		return intent == "resume"
+	}
+	return false
+}
+
+// writeReplayReceiptLocked stores the immutable receipt for one replay
+// decision under requestID. It carries only operational metadata, never the
+// task body.
+func (s *memoryState) writeReplayReceiptLocked(req engine.ReplayDeadLetterRequest, requestID, auditID string, meta memoryDeadLetterMeta, outcome engine.DeadLetterReplayOutcome) *memoryReplayReceipt {
 	receipt := &memoryReplayReceipt{
-		auditID: auditID, node: nodeName,
-		activation: fmt.Sprintf("%d", entryActivation),
-		entryID:    req.EntryID, operator: req.Operator, reason: req.Reason,
-		outcome: engine.ReplayReplayed, occurredAtMs: time.Now().UTC().UnixMilli(),
+		auditID: auditID, node: meta.node, activation: meta.activation,
+		entryID: req.EntryID, operator: req.Operator, reason: req.Reason,
+		outcome: outcome, occurredAtMs: time.Now().UTC().UnixMilli(),
 	}
 	if s.replayReceipts[req.ExecutionID] == nil {
 		s.replayReceipts[req.ExecutionID] = make(map[string]*memoryReplayReceipt)
 	}
 	s.replayReceipts[req.ExecutionID][requestID] = receipt
-	if s.replayEntryIdx[req.ExecutionID] == nil {
-		s.replayEntryIdx[req.ExecutionID] = make(map[string]string)
-	}
-	s.replayEntryIdx[req.ExecutionID][req.EntryID] = requestID
+	return receipt
+}
 
-	return engine.ReplayDeadLetterResult{Outcome: engine.ReplayReplayed, AuditID: auditID, ExecutionID: req.ExecutionID, NodeID: nodeName, ActivationID: receipt.activation}, nil
+// result recovers a receipt as a replay result. A recovered replayed receipt
+// surfaces as already_replayed; a rejection recovers as itself.
+func (r *memoryReplayReceipt) result(id types.ExecutionID) engine.ReplayDeadLetterResult {
+	outcome := r.outcome
+	if outcome == engine.ReplayReplayed {
+		outcome = engine.ReplayAlreadyReplayed
+	}
+	return engine.ReplayDeadLetterResult{Outcome: outcome, AuditID: r.auditID, ExecutionID: id, NodeID: r.node, ActivationID: r.activation}
+}
+
+// deadLetterIntent extracts the intent prefix (root/retry/requeue/resume/
+// advance/execute/skip) from an outbox entry ID, as the Redis backend records
+// it in the dead-letter meta. An ID without a prefix yields "".
+func deadLetterIntent(entryID string) string {
+	if i := strings.IndexByte(entryID, '/'); i >= 0 {
+		return entryID[:i]
+	}
+	return ""
 }
 
 // ListOutboxExecutions identifies executions with at least one durable intent
 // so the background dispatcher can recover delivery after process restart.
+//
+// An execution parked by the workflow concurrency limit is deliberately not
+// reported: every intent it holds is scored at queuedOutboxHold until promotion,
+// so listing it would hand the dispatcher an execution that can produce nothing
+// — one no-op flush per drain pass, per parked submission, competing for the
+// same discovery page as the work that is actually due. Promotion releases the
+// hold, and the next drain finds the execution as usual.
 func (s *memoryState) ListOutboxExecutions(_ context.Context, limit int) ([]types.ExecutionID, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ids := make([]types.ExecutionID, 0, len(s.outbox))
 	for id, entries := range s.outbox {
-		if len(entries) > 0 {
-			ids = append(ids, id)
+		if len(entries) == 0 || allOutboxEntriesHeld(entries) {
+			continue
 		}
+		ids = append(ids, id)
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	if limit > 0 && len(ids) > limit {
 		ids = ids[:limit]
 	}
 	return ids, nil
+}
+
+// allOutboxEntriesHeld reports whether every intent belongs to an execution
+// that the concurrency limit has not promoted yet. A mixed set — the instant a
+// promotion leaves behind — is reported, because something in it is
+// deliverable and the dispatcher is the only reader that can say so.
+func allOutboxEntriesHeld(entries map[string]memoryOutboxEntry) bool {
+	for _, held := range entries {
+		if !held.entry.AvailableAt.Equal(queuedOutboxHold) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *memoryState) putOutboxLocked(id types.ExecutionID, entryID string, task engine.Task, availableAt time.Time) bool {
@@ -670,6 +798,7 @@ func (s *memoryState) finishExecutionLocked(id types.ExecutionID, entry *execEnt
 	if status == types.ExecutionStatusFailed && errMsg != "" {
 		entry.snap.Error = errMsg
 	}
+	s.releaseWorkflowSlotLocked(id)
 	if !entry.closed {
 		entry.closed = true
 		if done := s.doneCh[id]; done != nil {

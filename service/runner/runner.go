@@ -98,9 +98,9 @@ type Config struct {
 	SupplyRegistry *supply.Registry
 	// SupplyGate, when set, receives heartbeat-piggybacked supply hints
 	// (HeartbeatResponse.SupplyHints) and fetches once per changed hash. nil
-	// means hints are silently ignored — this runner relies solely on the
-	// activation-time fetch and TTL polling for convergence, which is still
-	// correct, just slower for supplies whose activation already happened.
+	// means hints are silently ignored — this runner then refreshes supply
+	// content only at activation time (there is no TTL poll loop), so a
+	// supply whose activation already happened stays on its admitted value.
 	SupplyGate *SupplyGate
 	// ArtifactCodeResolver, when set, resolves script artifacts by content-
 	// addressable digest. ScriptNode calls Input.ArtifactCode(ctx, digest) at
@@ -120,7 +120,7 @@ type Config struct {
 	// Renewal tunes the per-task lease renewal loop. Zero values take the
 	// defaults (interval min(TTL/3, 10s), 3 consecutive transport failures
 	// before the handler is cancelled). Renewal only happens when the protocol
-	// client implements leaseRenewClient — the gRPC client does not.
+	// client implements leaseRenewClient; both the HTTP and gRPC clients do.
 	Renewal RenewalConfig
 	// TimeoutObserver, when set, records node execution timeout/duration
 	// events from the in-process executor (handler deadline fired, abandoned

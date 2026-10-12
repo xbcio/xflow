@@ -214,6 +214,12 @@ export type WorkflowStatus =
 export type NodeStatus =
   | "pending"
   | "running"
+  /**
+   * A lease holder is committing this node's results: the attempt is over but
+   * its write has not landed yet. Transitional; `@xflow/api`'s
+   * `executionDetailToRuntimeSnapshot` still reports it as `running`.
+   */
+  | "committing"
   | "success"
   | "failed"
   | "skipped"
@@ -221,6 +227,13 @@ export type NodeStatus =
   | "continued"
   | "suspended"
   | "waiting"
+  /**
+   * The node's records are gone: a member of a `groups[].mode: transient`
+   * group whose execution is terminal and whose artifacts passed the
+   * completion TTL. A read-side verdict derived at inspect time, never stored
+   * (`types.NodeStatusExpired` in the Go contracts).
+   */
+  | "expired"
   | "canceled";
 
 export interface RuntimeNodeSnapshot {

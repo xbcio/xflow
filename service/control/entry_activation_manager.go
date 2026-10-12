@@ -34,12 +34,15 @@ const (
 // how the reconciler detects a material within-version content change to an
 // already-assigned activation and re-delivers the new params at a new generation.
 // encoding/json sorts map keys, so the encoding is deterministic.
-func nodeTriggerPackageHash(nodeType string, version int, params map[string]any) string {
+func nodeTriggerPackageHash(nodeType string, version int, params map[string]any, workflowTimezone string) string {
+	// WorkflowTimezone is part of the fingerprint so a settings.timezone change
+	// re-delivers the activation; omitempty keeps every existing hash stable.
 	payload := struct {
-		NodeType string         `json:"node_type"`
-		Version  int            `json:"version"`
-		Params   map[string]any `json:"params,omitempty"`
-	}{NodeType: nodeType, Version: version, Params: params}
+		NodeType         string         `json:"node_type"`
+		Version          int            `json:"version"`
+		Params           map[string]any `json:"params,omitempty"`
+		WorkflowTimezone string         `json:"workflow_timezone,omitempty"`
+	}{NodeType: nodeType, Version: version, Params: params, WorkflowTimezone: workflowTimezone}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		// Fall back to a type+version-only fingerprint if params are not
@@ -87,6 +90,8 @@ type EntryUnitActivation struct {
 	// ActivationReplicas is the raw DSL value. Zero and one both produce one
 	// durable activation; values greater than one produce that many siblings.
 	ActivationReplicas uint32
+	// WorkflowTimezone is the graph's settings.timezone ("" when unset).
+	WorkflowTimezone string
 }
 
 // projectGroupPackage indirects graph.ProjectGroupPackage so the derivation's
@@ -412,6 +417,7 @@ func DeriveEntryActivations(g *graph.Graph) ([]EntryUnitActivation, error) {
 				Supplies:           SuppliesForEntryUnit(g, i),
 				SupplyConsumers:    supplyConsumers,
 				ActivationReplicas: gm.ActivationReplicas,
+				WorkflowTimezone:   g.Timezone(),
 			})
 		case graph.UnitNode:
 			nodeIdx := g.UnitNodeIndex(i)
@@ -441,12 +447,13 @@ func DeriveEntryActivations(g *graph.Graph) ([]EntryUnitActivation, error) {
 				EntryUnitID:        nm.Name,
 				NodeType:           nm.Type,
 				Params:             params,
-				PackageHash:        nodeTriggerPackageHash(nm.Type, nm.Version, params),
+				PackageHash:        nodeTriggerPackageHash(nm.Type, nm.Version, params, g.Timezone()),
 				Selector:           nm.RunnerSelector,
 				Requirements:       reqs,
 				Supplies:           SuppliesForEntryUnit(g, i),
 				SupplyConsumers:    supplyConsumers,
 				ActivationReplicas: nm.ActivationReplicas,
+				WorkflowTimezone:   g.Timezone(),
 			})
 		}
 	}
@@ -517,6 +524,7 @@ func (m *EntryActivationManager) AddOrUpdateWorkflowRevision(ctx context.Context
 				Requirements:     requirements,
 				Supplies:         eu.Supplies,
 				SupplyConsumers:  eu.SupplyConsumers,
+				WorkflowTimezone: eu.WorkflowTimezone,
 				Desired:          true,
 				RegistryRevision: registryRevision,
 			}

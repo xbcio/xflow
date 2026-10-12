@@ -1,0 +1,109 @@
+# ============================================================
+# 边缘侧 transient 组 — 短保留期共置富化样例
+# ============================================================
+#
+# 该样例只展示 DSL 结构。example.test / localhost 均为占位地址，
+# 不代表任何真实集群；所有值都是非秘密占位值。
+#
+# 场景：Kafka 的 order.created 由边缘 runner 直接消费，两步富化在同一台
+# runner 上本地执行，只把稀疏结果经 publish_result 回传控制面。
+# 组 edge_enrich 声明 mode: transient —— 组内产物不跟随 workflow 的
+# durable 保留期，而是在 **execution 进入终态时**缩短到 completion TTL。
+#
+# mode 的确切语义（完整定义见 docs/design/NODE-GROUP-COLOCATION.md §3.5）：
+#   - 被缩短的是组提交的产物：每个成员的边界 exit 输出及其 node_meta、
+#     组名对应的 error_output payload、组 unit 的 status/meta fence key。
+#   - 运行期间不缩短：同一次 execution 内下游 $('enrich_order') 之类的读取
+#     与 durable 组完全一致，transient 不是更短的 active TTL。
+#   - completion TTL 解析顺序：options.transient_completion_ttl → execution 的
+#     transient 标记 / 部署级 transient completion TTL → 30s；结果被
+#     execution 的 active TTL 封顶（缩短绝不延长）。
+#   - fence key 另有下限 max(completionTTL, 2 × lease_ttl)：持有上一轮 lease
+#     token 的陈旧 runner 不能在拒绝它 commit 的记录消失之后仍把它递上来。
+#   - 保留期内 Inspect 正常展示成员与已提交的 exit；产物过期后成员显示为
+#     expired（只读判定，不落库），而不是 pending。
+#   - SQL 投影不受影响：组提交路径不写节点结果投影（durable 组同样没有），
+#     只有 execution 状态行照常投影。
+#   - 本地内存后端没有 TTL 概念，该 mode 在那里是明确记录的无操作：exits 在
+#     进程存活期内始终可读。不要据此判断 Redis 后端的保留行为。
+#
+# 编译期约束（engine/graph/group_mode.go，违反任一条直接编译失败）：
+#   1. mode 只接受 ""（durable，默认）与 "transient"；未知值（含大小写变体）
+#      报错，不会静默按 durable 执行。
+#   2. transient 组成员不得是 suspending 节点（xflow.wait / xflow.approval），
+#      成员 subgraph body 内嵌套的节点同样不得是：挂起的成员会停住组 lease
+#      无法恢复的子执行，而 transient 组的恢复方式是「从组入口整体重放」。
+#   3. 带 activation_replicas > 1 的 trigger 入口组不得使用 transient：各副本
+#      从同一 consumer group 各自 admit execution，一个保留窗口覆盖不到全部。
+#   4. workflow 自身 transient 时组再标 transient 是冗余而非冲突。
+#
+# 运维前提：
+#   - 目标 runner 必须注册 group.exec.v1 能力，并声明 match_labels 里的
+#     tier: edge；required 模式下没有匹配 runner 时组不会派发，也不会回退。
+#   - 宿主注册 enrichOrder / scoreOrder 两个 Go function（xflow.function 按
+#     function_name 查找，节点本身不带实现）。
+#   - 组边界 exit 是下游唯一能看到的数据：execution 终态后它只活一个
+#     completion TTL，需要长期留存的结果必须在组外落库或投递。
+#
+# 详见 docs/design/DSL-SPECIFICATION.md「组级 mode 语义」与
+# docs/design/NODE-GROUP-COLOCATION.md §3.5 / §7 / §12。
+
+spec: "1.0"
+name: "group-transient-enrichment"
+version: "1.0.0"
+description: "边缘 runner 上的 Kafka 消费 + 共置富化组，展示 groups[].mode: transient 的短保留期语义"
+
+nodes:
+  # 1. 组入口：Kafka 消费在边缘 runner 上就地发生，消息不进控制面。
+  - name: order_events
+    type: xflow.trigger.kafka
+    kind: trigger
+    parameters:
+      brokers: ["localhost:9092"]
+      topic: order.created
+      group: order-created-edge
+
+  # 2. 组内第一步：本地富化，不产生跨 WAN 往返。
+  - name: enrich_order
+    type: xflow.function
+    parameters:
+      function_name: enrichOrder
+
+  # 3. 组内第二步：本地打分，产物是组的边界 exit。
+  - name: score_order
+    type: xflow.function
+    parameters:
+      function_name: scoreOrder
+
+  # 4. 组外下游：只回传稀疏结果。这一步是 durable 的——需要长期留存的东西
+  #    必须在这里落地，不能留在组内 exit 上。
+  - name: publish_result
+    type: xflow.http
+    parameters:
+      url: "https://sink.example.test/orders/scored"
+      method: POST
+
+groups:
+  - name: edge_enrich
+    members: [order_events, enrich_order, score_order]
+    runner_selector:
+      # required：组必须落在声明 tier: edge 的 runner 上，没有匹配时不派发
+      # （default 允许回退到任意有 headroom 的 runner，会放弃数据就近性）。
+      mode: required
+      match_labels:
+        tier: edge
+    on_error: stop
+    # 该组的 exits / unit 状态 / fence key 在 execution 终态时缩短到
+    # completion TTL；运行期间保留行为与 durable 组一致。
+    mode: transient
+
+connections:
+  order_events:
+    main:
+      - node: enrich_order
+  enrich_order:
+    main:
+      - node: score_order
+  score_order:
+    main:
+      - node: publish_result

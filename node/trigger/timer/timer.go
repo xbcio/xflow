@@ -3,6 +3,7 @@ package timer
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	nodeinternal "github.com/xbcio/xflow/node/internal"
@@ -65,7 +66,22 @@ func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (ty
 			case t := <-ticker.C:
 				event := newTimerTriggerEvent(in.WorkflowID, in.NodeName, interval, t)
 				if ok, err := in.Runtime.Dedup(runCtx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+event.ID, interval*2); err == nil && ok {
-					_, _ = in.Emit(runCtx, event)
+					if _, err := in.Emit(runCtx, event); err != nil {
+						// A refused firing is dropped: a tick is a moment, and the
+						// next one carries its own event. Dropping it silently would
+						// be indistinguishable from a timer that never fired —
+						// nothing durable records the attempt, so this line is the
+						// only evidence. The refusal an operator will see here is
+						// the workflow's own concurrency limit
+						// (engine.ErrConcurrencyLimit); a QUEUE-mode workflow never
+						// produces it, because its over-limit firings are parked and
+						// admitted later instead of refused.
+						slog.Warn("timer trigger firing was not admitted; the tick is dropped",
+							"workflow_id", in.WorkflowID,
+							"node", in.NodeName,
+							"event", event.ID,
+							"err", err)
+					}
 				}
 			case <-runCtx.Done():
 				return

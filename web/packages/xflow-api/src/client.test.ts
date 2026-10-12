@@ -622,6 +622,25 @@ describe("executionDetailToRuntimeSnapshot", () => {
     expect(detail.nodes).toEqual([{ name: "fetch", status: "pinned", output: { value: "mock" } }]);
     expect(executionDetailToRuntimeSnapshot(detail).nodes).toEqual({ fetch: { status: "success" } });
   });
+
+  it("accepts an expired node and keeps it in the runtime projection", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () =>
+        success({
+          execution_id: "exec-expired",
+          status: "success",
+          nodes: [{ name: "ingest", status: "expired" }]
+        })
+    });
+
+    const detail = await client.getExecution("exec-expired");
+
+    expect(detail.nodes).toEqual([{ name: "ingest", status: "expired" }]);
+    // A node whose records are gone must not be reported as pending: that is
+    // the one thing the status exists to deny (types/execution.go).
+    expect(executionDetailToRuntimeSnapshot(detail).nodes).toEqual({ ingest: { status: "expired" } });
+  });
 });
 
 describe("node types", () => {

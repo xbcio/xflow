@@ -118,6 +118,14 @@ func (t TriggerMetrics) OnBatchFlushOutcome(ctx context.Context, topic, trigger,
 // three redeliver, and only one of them wastes completed downstream work per
 // occurrence.
 //
+// state="refused" is not an error at all: the workflow's own concurrency policy
+// declined the batch, nothing was persisted, and the offsets are held back and
+// retried. It is its own state rather than another error reason because it is
+// the only one of these that a correctly-configured deployment is SUPPOSED to
+// produce, so its rate must be readable without looking like an outage. Its
+// reason narrows which wait is holding the batch back — concurrency_limit (a
+// slot) versus queue_full (the queue-mode backlog at max_queued).
+//
 // Both labels are closed enums built inside the kafka trigger package. Neither
 // is derived from a message, a hash, or a runtime's free-text error — the
 // cause text belongs in the log, where unbounded values are safe.

@@ -77,6 +77,12 @@ export type ExecutionNodeStatus =
   | "skipped"
   /** Served from pin_data: the handler did not run; output is the mock. */
   | "pinned"
+  /**
+   * A member of a transient group whose records expired: the execution is
+   * terminal and the group's artifacts have passed their completion TTL, so
+   * nothing about the node is readable any more.
+   */
+  | "expired"
   | "suspended"
   | "continued"
   | "canceled"
@@ -272,6 +278,7 @@ const executionNodeStatuses = new Set<string>([
   "failed",
   "skipped",
   "pinned",
+  "expired",
   "suspended",
   "continued",
   "canceled",
@@ -767,9 +774,12 @@ function createListWorkflows(
 
 /**
  * Converts an execution-detail response into the runtime projection consumed by
- * `@xflow/core` renderers. The execution service exposes two transitional
- * statuses that the core projection does not: `canceling` and `committing` are
- * represented as `running` until their terminal state is observed.
+ * `@xflow/core` renderers. Two transitional statuses are collapsed:
+ * `canceling` (execution) and `committing` (node) are represented as `running`
+ * until their terminal state is observed. Every other status is carried
+ * through unchanged, `expired` included: reporting it as `pending` would
+ * assert that a node whose records are gone never ran, which is the one thing
+ * the status exists to deny (types/execution.go).
  */
 export function executionDetailToRuntimeSnapshot(detail: ExecutionDetail): RuntimeSnapshot {
   const snapshot: RuntimeSnapshot = {
@@ -826,6 +836,12 @@ function executionNodeStatusToRuntimeStatus(status: ExecutionNodeStatus): Runtim
     // status vocabulary has no separate state for it.
     case "pinned":
       return "success";
+    case "expired":
+      // The node's records are gone (a transient group past its completion
+      // TTL). The member ran, or may have; nothing about it is readable any
+      // more, and "pending" would assert precisely the thing that is not
+      // known, so the status is carried through for the renderers to show.
+      return "expired";
     case "failed":
       return "failed";
     case "skipped":

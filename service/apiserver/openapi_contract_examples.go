@@ -92,9 +92,21 @@ func ExampleParamInvalidErrorEnvelope() any {
 }
 
 // ExampleExecuteWorkflowResponse builds an executeWorkflowResponse (POST
-// /v1/workflows/execute, /v1/workflows/{id}/execute).
+// /v1/workflows/execute, /v1/workflows/{id}/execute) for a submission that
+// started.
 func ExampleExecuteWorkflowResponse(id types.ExecutionID) any {
-	return executeWorkflowResponse{ExecutionID: id}
+	return executeWorkflowResponse{ExecutionID: id, Status: types.ExecutionStatusRunning}
+}
+
+// ExampleExecuteWorkflowResponseQueued builds the same response for a
+// submission the workflow's concurrency limit parked: the status says nothing
+// has started and the position says how much is ahead of it.
+func ExampleExecuteWorkflowResponseQueued(id types.ExecutionID, position int) any {
+	return executeWorkflowResponse{
+		ExecutionID:   id,
+		Status:        types.ExecutionStatusQueued,
+		QueuePosition: position,
+	}
 }
 
 // ExampleSignalRequest builds a signalRequest (POST /v1/executions/{id}/signals).

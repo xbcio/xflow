@@ -13,6 +13,7 @@ import (
 
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/backend/providers/local"
+	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/node/trigger"
 	"github.com/xbcio/xflow/types"
 )
@@ -207,4 +208,32 @@ func TestTriggerReconcileWorkflow(t *testing.T) {
 			t.Fatalf("subscription count = %d, want 1", got)
 		}
 	})
+}
+
+// TestTriggerReconcilePassesWorkflowTimezone: the in-process activation path
+// hands the compiled graph's settings.timezone to the trigger.
+func TestTriggerReconcilePassesWorkflowTimezone(t *testing.T) {
+	var got string
+	tr := trigger.Define("test.trigger.reconcile.timezone", func(_ context.Context, in *types.TriggerActivateInput) (types.TriggerSubscription, error) {
+		got = in.WorkflowTimezone
+		return types.CloseFunc(func(context.Context) error { return nil }), nil
+	})
+	registry.RegisterTrigger(tr)
+	def := &types.WorkflowDef{
+		Name:     "wf-tz",
+		Settings: &types.WorkflowSettings{Timezone: "Asia/Shanghai"},
+		Nodes:    []types.NodeDef{{Name: "t", Kind: types.NodeKindTrigger, Type: tr.Descriptor().Type}},
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	rt := newTriggerRuntime(nil, local.New().TriggerPrimitives())
+	defer func() { _ = rt.Close(context.Background()) }()
+	if err := rt.ReconcileWorkflow(context.Background(), backend.WorkflowRecord{ID: "wf-tz", Definition: def, Graph: g}); err != nil {
+		t.Fatalf("ReconcileWorkflow: %v", err)
+	}
+	if got != "Asia/Shanghai" {
+		t.Fatalf("WorkflowTimezone = %q, want Asia/Shanghai", got)
+	}
 }

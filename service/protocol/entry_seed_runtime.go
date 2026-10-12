@@ -49,6 +49,12 @@ const DefaultEntrySeedRequestTimeout = 15 * time.Second
 //     {"error":"stale_generation"}) → non-nil error, so the caller leaves the
 //     Kafka offset uncommitted and the message is redelivered to the current
 //     generation owner (offset-safety; prevents silent message loss)
+//   - HTTP 429 with body State=="over_limit" or "queue_full" →
+//     EntrySeedResponse{Refused:true} (QueueFull set for the latter), NOT an
+//     error: the workflow's own concurrency policy refused the seed and nothing
+//     was persisted, so the caller withholds the offset and retries after a
+//     backoff (decision 5). A 429 this build cannot classify is an error
+//     instead, which also withholds the offset.
 //   - any other non-2xx status or a transport/decode error → non-nil error, so
 //     the caller leaves the Kafka offset uncommitted and Kafka redelivers.
 //
@@ -191,8 +197,25 @@ func (h *HTTPEntrySeedRuntime) observeAdmission(ctx context.Context, resp types.
 // whereas a reset or a refused connection is an infrastructure fault. Folded
 // together, the series cannot say which of the two is happening — which is
 // exactly the position the runner's log line left an integrator in.
+//
+// "refused" and "queue_full" are separated from both for the third reason an
+// admission can be withheld: the workflow's own concurrency policy said no. That
+// is a designed throttle, not a fault, and an operator who cannot see it in its
+// own series reads a correctly-behaving deployment as a broken one.
 func admissionOutcome(resp types.EntrySeedResponse, err error) string {
 	switch {
+	case resp.Refused && resp.QueueFull:
+		// Separate from "refused" for the same reason the two refusals get
+		// different HTTP codes: a reached limit waits for a slot, a full backlog
+		// waits for the queue to drain, and a deployment whose batches are being
+		// held back needs to know which of the two it is hitting.
+		return "queue_full"
+	case resp.Refused:
+		// A refusal withholds the offset like a timeout and an error do, but it is
+		// neither: the control plane is healthy and the workflow is doing exactly
+		// what its definition asked. Folding it into "error" would put a designed
+		// throttle into the same series as an outage.
+		return "refused"
 	case resp.Conflict:
 		return "conflict"
 	case resp.Accepted && resp.Duplicate:
@@ -327,6 +350,34 @@ func (h *HTTPEntrySeedRuntime) seedExecutionFromEntry(ctx context.Context, req t
 		// redeliver to the current-generation owner). The reason string is a
 		// server-controlled classifier only; it carries no token/URL/params.
 		return types.EntrySeedResponse{}, fmt.Errorf("entry-seed: rejected by generation fence: %s", boundedReason(body.Error))
+	}
+
+	// A refusal is an answer, not a failure: the workflow is at capacity and the
+	// entry-unit result is still the caller's, so the offset stays uncommitted and
+	// the batch is retried (decision 5). It travels as a 429 with the state in the
+	// body — the same status and code vocabulary the execute path uses — and is
+	// mapped back to a response flag rather than to an error, because the caller's
+	// correct reaction depends on knowing this was a decision and not a fault.
+	if httpResp.StatusCode == http.StatusTooManyRequests {
+		data, err := readEntrySeedBody(httpResp.Body)
+		if err != nil {
+			// An unreadable or oversized refusal is never a classified one: an
+			// error keeps the offset uncommitted either way.
+			return types.EntrySeedResponse{}, err
+		}
+		var body SeedExecutionRefusal
+		_ = json.Unmarshal(data, &body)
+		switch body.State {
+		case SeedStateOverLimit:
+			return types.EntrySeedResponse{Refused: true}, nil
+		case SeedStateQueueFull:
+			return types.EntrySeedResponse{Refused: true, QueueFull: true}, nil
+		}
+		// A 429 this build does not classify is a protocol disagreement. Reported
+		// as an error — which withholds the offset — rather than silently
+		// committed as handled.
+		return types.EntrySeedResponse{}, fmt.Errorf("entry-seed: refused with unknown state %q (code %s)",
+			boundedReason(body.State), boundedReason(body.Error))
 	}
 
 	// Any other non-2xx is transient/unexpected → error (no offset commit).

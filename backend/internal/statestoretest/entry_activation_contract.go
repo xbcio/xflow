@@ -200,6 +200,29 @@ func RunEntryActivationContract(t *testing.T, newStore func(*testing.T) engine.E
 		}
 	})
 
+	// WorkflowTimezone is desired state: it must round-trip on create and be
+	// refreshed on re-upsert, like every other desired-state field.
+	t.Run("UpsertRefreshesWorkflowTimezone", func(t *testing.T) {
+		s := newStore(t)
+		act := sampleEntryActivation("u-tz")
+		act.WorkflowTimezone = "Asia/Shanghai"
+		if err := s.Upsert(ctx, act); err != nil {
+			t.Fatalf("Upsert (first): %v", err)
+		}
+		got, ok, err := s.Get(ctx, entryActivationKey(act))
+		if err != nil || !ok || got.WorkflowTimezone != "Asia/Shanghai" {
+			t.Fatalf("Get after create: tz=%q ok=%v err=%v", got.WorkflowTimezone, ok, err)
+		}
+		act.WorkflowTimezone = ""
+		if err := s.Upsert(ctx, act); err != nil {
+			t.Fatalf("Upsert (second): %v", err)
+		}
+		got, ok, err = s.Get(ctx, entryActivationKey(act))
+		if err != nil || !ok || got.WorkflowTimezone != "" {
+			t.Fatalf("Get after re-upsert: tz=%q ok=%v err=%v", got.WorkflowTimezone, ok, err)
+		}
+	})
+
 	// A record with no consumer bindings must read back nil, not an empty
 	// slice: the directive's wire format relies on omitempty, and a backend
 	// that materializes an empty slice would change every existing directive's

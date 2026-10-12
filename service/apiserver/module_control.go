@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -452,9 +453,54 @@ type executeWorkflowRequest struct {
 
 type executeWorkflowResponse struct {
 	ExecutionID types.ExecutionID `json:"execution_id"`
+	// Status is where the submission landed: "running" for an execution that
+	// started, "queued" for one waiting for a workflow-concurrency slot
+	// (settings.concurrency with mode=queue). Without it a caller cannot tell
+	// the two apart from the response, and "accepted" would be a lie for the
+	// parked case — nothing runs until a slot frees.
+	//
+	// It is the execution's status read back after the submission, not a
+	// recording of the admission decision: a submission that finished before the
+	// response was written reports that instead, which is fresher and no less
+	// true.
+	Status types.ExecutionStatus `json:"status,omitempty"`
+	// QueuePosition is the place in line, 1-based, and it is present only while
+	// the execution is queued — 1 is the head, the submission the next release
+	// promotes. A caller holding a position knows its work has not started and
+	// how much is ahead of it.
+	QueuePosition int `json:"queue_position,omitempty"`
 	// ParamIssues is set only by the inline POST /v1/workflows/execute: a
 	// registered workflow was validated when it was registered.
 	ParamIssues []graph.ParamIssue `json:"param_issues,omitempty"`
+}
+
+// submissionResponse builds the answer to a submission that succeeded.
+//
+// The status and the place in line are read back rather than threaded out of
+// Submit/Invoke. Those are public SDK entry points whose signatures are fixed,
+// and a second pair that returned more would be a second definition of what a
+// submission returns; the read hits the store the submission just wrote to, so
+// it cannot lag behind it, and it costs one read instead of Inspect's walk over
+// every node of the graph.
+//
+// The read-back is best effort on purpose. The execution exists and its ID is
+// the answer to the request — a status that could not be read is a missing
+// detail, not a failed submission, so it is logged and the response goes out
+// without it.
+func (m *workflowControlModule) submissionResponse(ctx context.Context, id types.ExecutionID, issues []graph.ParamIssue) executeWorkflowResponse {
+	resp := executeWorkflowResponse{ExecutionID: id, ParamIssues: issues}
+	detail, err := m.eng.InspectStatus(ctx, id)
+	if err != nil {
+		if m.log != nil {
+			m.log.Error("execute_status_readback_failed", "execution_id", string(id), "err", err)
+		}
+		return resp
+	}
+	resp.Status = detail.Status
+	if detail.Status == types.ExecutionStatusQueued {
+		resp.QueuePosition = detail.QueuePosition
+	}
+	return resp
 }
 
 // executeRegisteredRequest is the body for POST /v1/workflows/{id}/execute
@@ -477,6 +523,95 @@ type waitTimeoutResponse struct {
 	ExecutionID types.ExecutionID     `json:"execution_id"`
 	Status      types.ExecutionStatus `json:"status"`
 	TimedOut    bool                  `json:"timed_out"`
+}
+
+// concurrencyRetryAfterSeconds is the Retry-After a refused submission carries.
+//
+// The server cannot know when a slot frees: the refused submission is not
+// parked anywhere, so there is no release time to promise. One second is a
+// floor that keeps a client from spinning, not a prediction, and the header is
+// documented that way in the OpenAPI spec.
+const concurrencyRetryAfterSeconds = 1
+
+// writeConcurrencyRefused answers a submission the workflow's own concurrency
+// limit refused (engine.ErrConcurrencyLimit).
+//
+// 429 rather than 503: the request is well-formed and the server is healthy —
+// this one workflow is at capacity, which is state the caller created and can
+// wait out. Retry is the correct client behaviour, so the failure carries a
+// Retry-After even though it is only a floor.
+func writeConcurrencyRefused(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Retry-After", strconv.Itoa(concurrencyRetryAfterSeconds))
+	writeFail(w, r, http.StatusTooManyRequests, "workflow_concurrency_limit",
+		"workflow is at its concurrency limit")
+}
+
+// writeConcurrencyQueueFull answers a QUEUE-mode submission that would exceed
+// the workflow's max_queued backlog (engine.ErrConcurrencyQueueFull).
+//
+// 429 like the limit refusal, and retryable for the same reason: the backlog is
+// the workflow's own state, the request is well-formed and the server is
+// healthy. It carries its own code because the two wait for different things —
+// a slot to free versus the queue to drain — and a caller that cannot tell them
+// apart cannot size its backoff.
+func writeConcurrencyQueueFull(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Retry-After", strconv.Itoa(concurrencyRetryAfterSeconds))
+	writeFail(w, r, http.StatusTooManyRequests, "workflow_concurrency_queue_full",
+		"workflow concurrency queue is full")
+}
+
+// writeConcurrencyUnavailable answers a QUEUE-mode submission against a store
+// that cannot park executions (engine.ErrConcurrencyQueueUnsupported).
+//
+// 503, not 429: retrying does not change the answer until the deployment does.
+// The workflow asked for a capability this server does not have, which is the
+// server's state rather than the caller's, and the code says so explicitly
+// instead of hiding it behind internal_error — an operator reading the code
+// alone has to be able to tell "this backend cannot queue" from "the request
+// was wrong".
+func writeConcurrencyUnavailable(w http.ResponseWriter, r *http.Request) {
+	writeFail(w, r, http.StatusServiceUnavailable, "workflow_concurrency_unavailable",
+		"workflow concurrency queue is not available on this server")
+}
+
+// writeConcurrencyLimitsUnavailable answers a submission against a store that
+// cannot enforce a concurrency limit AT ALL (engine.ErrConcurrencyUnsupported).
+//
+// It shares the queue case's status and code deliberately: both mean "the
+// definition asked for a limit and this deployment cannot honour it", and a
+// caller's move is identical — the answer changes when the deployment does, not
+// when the caller retries. Only the message differs, because the two say which
+// capability is missing: none, versus the queue half of it.
+//
+// 503 rather than 500 is the point of the mapping. The engine fails closed here
+// (running unlimited would defeat a limit the author declared to protect a
+// downstream), so this is a designed refusal with a known cause — filing it
+// under internal_error would send an operator looking for a bug in a
+// deployment that is behaving exactly as specified.
+func writeConcurrencyLimitsUnavailable(w http.ResponseWriter, r *http.Request) {
+	writeFail(w, r, http.StatusServiceUnavailable, "workflow_concurrency_unavailable",
+		"workflow concurrency is not available on this server")
+}
+
+// writeConcurrencyFailure maps the concurrency sentinels a submission can
+// return onto their responses, reporting whether it wrote one. The call sites
+// keep their own error handling for everything else, which is what lets the
+// four submit/invoke paths share one mapping instead of repeating three
+// errors.Is checks each.
+func writeConcurrencyFailure(w http.ResponseWriter, r *http.Request, err error) bool {
+	switch {
+	case errors.Is(err, engine.ErrConcurrencyLimit):
+		writeConcurrencyRefused(w, r)
+	case errors.Is(err, engine.ErrConcurrencyQueueFull):
+		writeConcurrencyQueueFull(w, r)
+	case errors.Is(err, engine.ErrConcurrencyQueueUnsupported):
+		writeConcurrencyUnavailable(w, r)
+	case errors.Is(err, engine.ErrConcurrencyUnsupported):
+		writeConcurrencyLimitsUnavailable(w, r)
+	default:
+		return false
+	}
+	return true
 }
 
 // handleExecuteWorkflow serves POST /v1/workflows/execute (spec §7 + §9.1): it
@@ -514,7 +649,7 @@ func (m *workflowControlModule) handleExecuteWorkflow(w http.ResponseWriter, r *
 	}
 	// The inline definition gets the same ParamSpec check a registered one
 	// does; it is the other path a node definition enters the server by.
-	paramIssues, err := m.checkWorkflowParams(r.Context(), req.Workflow)
+	paramIssues, err := m.checkWorkflowParams(r.Context(), g.ExpandedDefinition())
 	if err != nil {
 		if !writeParamInvalid(w, r, err) {
 			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
@@ -549,8 +684,15 @@ func (m *workflowControlModule) handleExecuteWorkflow(w http.ResponseWriter, r *
 		// An unknown entry node is a client error (400): the missing resource is
 		// the entry in the submitted graph, not an execution in the store.
 		if err != nil {
+			if writeConcurrencyFailure(w, r, err) {
+				return
+			}
 			if errors.Is(err, engine.ErrFAFRequiresDirectDispatch) {
 				writeFail(w, r, http.StatusBadRequest, "workflow_faf_unsupported", "FAF workflows require direct dispatch")
+				return
+			}
+			if errors.Is(err, graph.ErrInvalidParams) {
+				writeFail(w, r, http.StatusBadRequest, "workflow_params_invalid", err.Error())
 				return
 			}
 			if errors.Is(err, engine.ErrEntryNotFound) {
@@ -563,15 +705,22 @@ func (m *workflowControlModule) handleExecuteWorkflow(w http.ResponseWriter, r *
 	} else {
 		id, err = m.eng.Submit(ctx, g, req.Params)
 		if err != nil {
+			if writeConcurrencyFailure(w, r, err) {
+				return
+			}
 			if errors.Is(err, engine.ErrFAFRequiresDirectDispatch) {
 				writeFail(w, r, http.StatusBadRequest, "workflow_faf_unsupported", "FAF workflows require direct dispatch")
+				return
+			}
+			if errors.Is(err, graph.ErrInvalidParams) {
+				writeFail(w, r, http.StatusBadRequest, "workflow_params_invalid", err.Error())
 				return
 			}
 			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}
 	}
-	writeData(w, r, http.StatusOK, executeWorkflowResponse{ExecutionID: id, ParamIssues: paramIssues})
+	writeData(w, r, http.StatusOK, m.submissionResponse(ctx, id, paramIssues))
 }
 
 // registerWorkflowResponse echoes the persisted workflow ID (server-assigned
@@ -789,9 +938,10 @@ func (m *workflowControlModule) buildWorkflowRecord(ctx context.Context, ns name
 		return backend.WorkflowRecord{}, registrationDiagnostics{}, &WorkflowCompileError{err: err}
 	}
 	// ParamSpec validation runs after the compiler accepted the definition, so
-	// a structural error keeps its workflow_compile_failed answer. It never
-	// modifies def: the HTTP path writes no defaults.
-	paramIssues, err := m.checkWorkflowParams(ctx, def)
+	// a structural error keeps its workflow_compile_failed answer. It checks
+	// the template-expanded def (templated nodes only get a type there) and
+	// never modifies def: the HTTP path writes no defaults.
+	paramIssues, err := m.checkWorkflowParams(ctx, g.ExpandedDefinition())
 	if err != nil {
 		return backend.WorkflowRecord{}, registrationDiagnostics{}, err
 	}
@@ -1124,7 +1274,7 @@ func executionListFilterFrom(w http.ResponseWriter, r *http.Request) (store.Exec
 		status := types.ExecutionStatus(raw)
 		if !knownExecutionListStatus(status) {
 			writeFail(w, r, http.StatusBadRequest, "execution_status_invalid",
-				"status must be one of pending, running, success, failed, canceling, canceled, timeout")
+				"status must be one of pending, queued, running, success, failed, canceling, canceled, timeout")
 			return store.ExecutionFilter{}, false
 		}
 		filter.Status = status
@@ -1159,6 +1309,7 @@ func executionListFilterFrom(w http.ResponseWriter, r *http.Request) (store.Exec
 func knownExecutionListStatus(s types.ExecutionStatus) bool {
 	switch s {
 	case types.ExecutionStatusPending,
+		types.ExecutionStatusQueued,
 		types.ExecutionStatusRunning,
 		types.ExecutionStatusSuccess,
 		types.ExecutionStatusFailed,
@@ -1467,8 +1618,15 @@ func (m *workflowControlModule) handleExecuteWorkflowByID(w http.ResponseWriter,
 	if req.Entry != "" {
 		execID, err = m.eng.Invoke(ctx, rec.Graph, req.Entry, req.Input)
 		if err != nil {
+			if writeConcurrencyFailure(w, r, err) {
+				return
+			}
 			if errors.Is(err, engine.ErrFAFRequiresDirectDispatch) {
 				writeFail(w, r, http.StatusBadRequest, "workflow_faf_unsupported", "FAF workflows require direct dispatch")
+				return
+			}
+			if errors.Is(err, graph.ErrInvalidParams) {
+				writeFail(w, r, http.StatusBadRequest, "workflow_params_invalid", err.Error())
 				return
 			}
 			if errors.Is(err, engine.ErrEntryNotFound) {
@@ -1481,15 +1639,22 @@ func (m *workflowControlModule) handleExecuteWorkflowByID(w http.ResponseWriter,
 	} else {
 		execID, err = m.eng.Submit(ctx, rec.Graph, req.Params)
 		if err != nil {
+			if writeConcurrencyFailure(w, r, err) {
+				return
+			}
 			if errors.Is(err, engine.ErrFAFRequiresDirectDispatch) {
 				writeFail(w, r, http.StatusBadRequest, "workflow_faf_unsupported", "FAF workflows require direct dispatch")
+				return
+			}
+			if errors.Is(err, graph.ErrInvalidParams) {
+				writeFail(w, r, http.StatusBadRequest, "workflow_params_invalid", err.Error())
 				return
 			}
 			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}
 	}
-	writeData(w, r, http.StatusOK, executeWorkflowResponse{ExecutionID: execID})
+	writeData(w, r, http.StatusOK, m.submissionResponse(ctx, execID, nil))
 }
 
 // deregisterWorkflow is the clear-activations -> remove-record path both entry
@@ -1932,6 +2097,16 @@ func (m *workflowControlModule) handleSeedExecution(w http.ResponseWriter, r *ht
 			writeJSON(w, http.StatusNotFound, errorResponse{Error: "workflow_unknown"})
 			return
 		}
+		// The seeded workflow declares a concurrency limit this deployment cannot
+		// enforce. The engine fails closed rather than seeding an execution the
+		// limit was written to prevent, and the runner must treat it like the
+		// queue-unavailable case on the submission face: 503 with the same code,
+		// because the answer changes when the deployment does and not when the
+		// runner retries. Bare body per §0.1/§8.2, like the other seed failures.
+		if errors.Is(err, engine.ErrConcurrencyUnsupported) || errors.Is(err, engine.ErrConcurrencyQueueUnsupported) {
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "workflow_concurrency_unavailable"})
+			return
+		}
 		if m.log != nil {
 			m.log.Error("seed_execution_failed", "err", err)
 		}
@@ -1945,10 +2120,31 @@ func (m *workflowControlModule) handleSeedExecution(w http.ResponseWriter, r *ht
 		})
 		return
 	}
+	// A refused seed is not a failed call and not an admission either: the
+	// workflow's concurrency policy said no and nothing was persisted, so the
+	// entry-unit result is still the runner's. 429 with the state in the body —
+	// the same status, the same code vocabulary and the same Retry-After floor
+	// the execute path uses for the same two refusals — is what tells the runner
+	// to withhold the Kafka offset and retry rather than commit a batch no
+	// execution will ever run (decision 5).
+	if resp.State == engine.AdmissionStateOverLimit || resp.State == engine.AdmissionStateQueueFull {
+		w.Header().Set("Retry-After", strconv.Itoa(concurrencyRetryAfterSeconds))
+		code := "workflow_concurrency_limit"
+		if resp.State == engine.AdmissionStateQueueFull {
+			code = "workflow_concurrency_queue_full"
+		}
+		writeJSON(w, http.StatusTooManyRequests, protocol.SeedExecutionRefusal{
+			State: string(resp.State),
+			Error: code,
+		})
+		return
+	}
 	writeJSON(w, http.StatusOK, protocol.SeedExecutionResponse{
-		State:       string(resp.State),
-		ExecutionID: string(resp.ExecutionID),
-		Duplicate:   resp.Duplicate,
+		State:         string(resp.State),
+		ExecutionID:   string(resp.ExecutionID),
+		Duplicate:     resp.Duplicate,
+		Queued:        resp.Queued,
+		QueuePosition: resp.QueuePosition,
 	})
 }
 

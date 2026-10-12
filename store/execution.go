@@ -102,6 +102,7 @@ func (f ExecutionFilter) Validate() error {
 func knownExecutionStatus(s types.ExecutionStatus) bool {
 	switch s {
 	case types.ExecutionStatusPending,
+		types.ExecutionStatusQueued,
 		types.ExecutionStatusRunning,
 		types.ExecutionStatusSuccess,
 		types.ExecutionStatusFailed,

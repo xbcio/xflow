@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -12,7 +13,14 @@ type ExecutionDetail struct {
 	ExecutionID types.ExecutionID     `json:"execution_id"`
 	Status      types.ExecutionStatus `json:"status"`
 	Error       string                `json:"error,omitempty"`
-	Nodes       []NodeDetail          `json:"nodes,omitempty"`
+	// QueuePosition is where a queued execution stands in line, 1-based, or 0
+	// when it is not queued — which includes every execution of a workflow that
+	// never queues and every store that cannot report a position. Reporting is
+	// best effort: a store that was asked and failed leaves this at 0 rather
+	// than failing the inspection, because the status and the nodes are the
+	// audit answer and the position is an extra.
+	QueuePosition int          `json:"queue_position,omitempty"`
+	Nodes         []NodeDetail `json:"nodes,omitempty"`
 }
 
 // NodeDetail is an audit snapshot for a workflow node.
@@ -34,9 +42,16 @@ type NodeDetail struct {
 	Output       map[string]any `json:"output,omitempty"`
 }
 
-// Inspect returns execution status and, when requested or discoverable from the
-// stored graph, per-node status/output details for audit and approval flows.
-func (e *Engine) Inspect(ctx context.Context, id types.ExecutionID, nodeNames ...string) (ExecutionDetail, error) {
+// InspectStatus returns the execution-level half of Inspect: status, error and,
+// for a queued execution, its place in line — without loading the graph or any
+// node.
+//
+// It exists for callers that need one status and nothing else. The submission
+// path is what made the split necessary: it has just written the execution and
+// has to tell the caller whether the work started or is waiting for a slot, and
+// Inspect's per-node reads would put a whole graph's worth of reads on that
+// request to answer a one-field question.
+func (e *Engine) InspectStatus(ctx context.Context, id types.ExecutionID) (ExecutionDetail, error) {
 	snap, err := e.state.GetExecution(ctx, id)
 	if err != nil {
 		return ExecutionDetail{}, fmt.Errorf("inspect execution %q: %w", id, err)
@@ -49,6 +64,26 @@ func (e *Engine) Inspect(ctx context.Context, id types.ExecutionID, nodeNames ..
 		ExecutionID: id,
 		Status:      snap.Status,
 		Error:       snap.Error,
+	}
+	if snap.Status == types.ExecutionStatusQueued {
+		// Best effort, and deliberately not an error when it fails: the caller
+		// asked to inspect an execution and the status is the answer to that.
+		// A position it could not read is a missing extra, not a failed read.
+		if inspector, ok := e.state.(ConcurrencyQueueInspector); ok {
+			if position, err := inspector.ConcurrencyQueuePosition(ctx, id); err == nil {
+				detail.QueuePosition = position
+			}
+		}
+	}
+	return detail, nil
+}
+
+// Inspect returns execution status and, when requested or discoverable from the
+// stored graph, per-node status/output details for audit and approval flows.
+func (e *Engine) Inspect(ctx context.Context, id types.ExecutionID, nodeNames ...string) (ExecutionDetail, error) {
+	detail, err := e.InspectStatus(ctx, id)
+	if err != nil {
+		return ExecutionDetail{}, err
 	}
 
 	g, err := e.state.LoadGraph(ctx, id)
@@ -83,9 +118,79 @@ func (e *Engine) Inspect(ctx context.Context, id types.ExecutionID, nodeNames ..
 		if err != nil {
 			return ExecutionDetail{}, err
 		}
+		if err := e.markExpiredTransientGroupNode(ctx, id, g, detail.Status, &node); err != nil {
+			return ExecutionDetail{}, err
+		}
 		detail.Nodes = append(detail.Nodes, node)
 	}
 	return detail, nil
+}
+
+// markExpiredTransientGroupNode rewrites "we know nothing about this node" into
+// "its records expired" for a member of a transient group (groups[].mode:
+// transient) whose artifacts have passed the mode's completion TTL.
+//
+// The two states it separates are indistinguishable from a node-level read. A
+// group writes no per-member node status — members run inside the runner's own
+// embedded engine — so a member with no exit output reads the same whether the
+// group has not run yet or its keys expired. What distinguishes them is the
+// group unit's own record plus the execution's state: the execution is terminal,
+// the unit has no record left, and the mode is what removed it. Leaving that as
+// "pending" would assert the node never ran, which is the one answer the mode
+// makes unknowable; "expired" states what is actually known.
+//
+// Scoped deliberately:
+//   - only a node with no status verdict of its own is rewritten, so positive
+//     evidence (a snapshot, an output) always wins;
+//   - only a terminal execution: while the run is live, a member with no record
+//     is genuinely not-yet-run, and nothing shortens a transient group's keys
+//     before the execution ends;
+//   - only a transient group: a durable group's artifacts live as long as the
+//     execution's, so an absent record there is the pre-existing group-readback
+//     gap, not expiry, and rewriting it would be a new lie;
+//   - only when the store can answer. A store without the readback capability
+//     leaves the previous answer in place rather than guessing.
+func (e *Engine) markExpiredTransientGroupNode(
+	ctx context.Context,
+	id types.ExecutionID,
+	g *graph.Graph,
+	execStatus types.ExecutionStatus,
+	node *NodeDetail,
+) error {
+	if g == nil || !types.IsTerminalExecutionStatus(execStatus) {
+		return nil
+	}
+	if node.Status != types.NodeStatusPending && node.Status != "" {
+		return nil
+	}
+	if node.Output != nil {
+		return nil
+	}
+	idx, ok := g.NodeIndex(node.Name)
+	if !ok {
+		return nil
+	}
+	unitIdx := g.UnitIndexForNode(idx)
+	if unitIdx < 0 || unitIdx >= g.UnitCount() || g.UnitKindAt(unitIdx) != graph.UnitGroup {
+		return nil
+	}
+	if !g.GroupMetaAt(unitIdx).Transient() {
+		return nil
+	}
+	reader, ok := e.state.(GroupUnitPhaseReader)
+	if !ok {
+		return nil
+	}
+	// A store error propagates like every other read on this path
+	// (inspectNode's GetNode/GetOutput): reporting a wrong "pending" silently
+	// would be worse than failing the inspect.
+	if _, found, err := reader.GetGroupUnitPhase(ctx, id, unitIdx); err != nil {
+		return fmt.Errorf("inspect group unit %q/#%d: %w", id, unitIdx, err)
+	} else if found {
+		return nil
+	}
+	node.Status = types.NodeStatusExpired
+	return nil
 }
 
 func (e *Engine) inspectNode(

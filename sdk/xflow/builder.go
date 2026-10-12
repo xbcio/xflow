@@ -24,6 +24,8 @@ type WorkflowBuilder struct {
 	triggers       map[string]types.TriggerHandler // portable typed trigger handlers
 	options        *types.WorkflowOptions
 	runnerSelector *types.RunnerSelector
+	onError        types.OnError
+	credentials    map[string]types.CredentialDef
 	groups         []*groupEntry
 	depEdges       []depEdge
 }
@@ -199,6 +201,24 @@ func (w *WorkflowBuilder) Version(version string) *WorkflowBuilder {
 
 func (w *WorkflowBuilder) RunnerSelector(selector types.RunnerSelector) *WorkflowBuilder {
 	w.runnerSelector = cloneRunnerSelector(&selector)
+	return w
+}
+
+// OnError sets the workflow default error-handling strategy
+// (settings.on_error). Nodes without their own OnError inherit it; groups do
+// not.
+func (w *WorkflowBuilder) OnError(strategy types.OnError) *WorkflowBuilder {
+	w.onError = strategy
+	return w
+}
+
+// Credential declares a named credential (top-level credentials block). Nodes
+// may only reference declared credential names; Compile rejects the rest.
+func (w *WorkflowBuilder) Credential(name, credType string) *WorkflowBuilder {
+	if w.credentials == nil {
+		w.credentials = make(map[string]types.CredentialDef)
+	}
+	w.credentials[name] = types.CredentialDef{Name: name, Type: credType}
 	return w
 }
 
@@ -425,6 +445,15 @@ func (w *WorkflowBuilder) buildInternal(visited map[*WorkflowBuilder]bool) (*typ
 		RunnerSelector: cloneRunnerSelector(w.runnerSelector),
 		Options:        cloneWorkflowOptions(w.options),
 		Connections:    make(types.Connections),
+	}
+	if len(w.credentials) > 0 {
+		def.Credentials = make(map[string]types.CredentialDef, len(w.credentials))
+		for k, v := range w.credentials {
+			def.Credentials[k] = v
+		}
+	}
+	if w.onError != "" {
+		def.Settings = &types.WorkflowSettings{OnError: string(w.onError)}
 	}
 	w.assembleNodes(def)
 	w.assembleConnections(def)

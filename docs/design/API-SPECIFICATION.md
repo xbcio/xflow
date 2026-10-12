@@ -369,11 +369,29 @@ GET    /v1/executions/{id}/wait             等待完成
 
 POST   /v1/executions                       entry-seed（runner 调用）
 
+GET    /v1/node-types                       已注册节点类型的 NodeFormSchema 列表
+GET    /v1/node-types/{type}                单个节点类型（?version= 选版本，缺省取最新）
+GET    /v1/current-user                     调用方自身的已验证身份（仅 principal 认证路径注册）
+
 GET    /v1/supplies/{name}                  取 supply 内容（裸流）
 GET    /v1/artifacts/{digest}               取产物字节（裸流，另支持 HEAD）
 
 GET    /v1/management/leader                leader 状态
+GET    /v1/management/runners               runner 列表
 GET    /v1/management/runners/{id}          单 runner 查询
+POST   /v1/management/runners/{id}/drain    排空（不远程停进程，不强取消已租任务）
+POST   /v1/management/runners/{id}/resume   恢复接单
+POST   /v1/management/runners/{id}/revoke-identity  吊销该 runner 已签发的身份
+POST   /v1/management/runner-pools          创建 runner 池
+GET    /v1/management/runner-pools          池列表
+GET    /v1/management/runner-pools/{id}     读取池
+PATCH  /v1/management/runner-pools/{id}     更新池
+DELETE /v1/management/runner-pools/{id}     删除池
+POST   /v1/management/runner-pools/{id}/tokens                    签发注册 token
+GET    /v1/management/runner-pools/{id}/tokens                    token 列表
+DELETE /v1/management/runner-pools/{id}/tokens/{token_id}         吊销 token
+GET    /v1/management/runner-pools/{id}/tokens/{token_id}/audit   token 审计
+GET    /v1/management/runner-pools/{id}/runners                   池内 runner 实例
 GET    /v1/management/executions/{id}       execution 查询（管理视角）
 GET    /v1/management/dead-letters/{execID}          列表（游标分页，保持不动）
 POST   /v1/management/dead-letters/{execID}/replay   重放
@@ -442,9 +460,44 @@ entry-seed 的 409 响应有**两种不同 body**，客户端据此决定是否�
 
 判错方向会导致 **generation 升级期间静默丢消息**。
 
+同一个端点还有第三种承重形状：**429 拒绝**。工作流自己的并发策略（`settings.concurrency`）
+拒绝了这次 seed，服务端什么都没持久化，entry-unit 的结果仍然属于 runner：
+
+| 情形 | body | 客户端行为 |
+| --- | --- | --- |
+| REJECT 模式已达 limit | `{"state":"over_limit","error":"workflow_concurrency_limit"}` | **不提交 offset**（本次未持久化，结果仍属调用方，退避后重试） |
+| QUEUE 模式积压达 `max_queued` | `{"state":"queue_full","error":"workflow_concurrency_queue_full"}` | **不提交 offset**（同上；等的是队列排空而非槽位） |
+
+此外还有 503（**不可重试**，与上表两种 429 相反）：seed 的工作流声明了并发上限、
+而本部署的状态存储无法执行它——`{"error":"workflow_concurrency_unavailable"}`，
+裸 errorResponse，与用户面 execute 的同码 503 同义。引擎在这里 fail-closed（放行
+等于废掉作者用来保护下游的上限），因此没有 `Retry-After`：答案随部署改变，不随
+runner 重试改变。**调用方必须重试这一条记录直到它被接受**：一次 429 拒绝不提交
+offset，若直接跳过、让后面的记录提交，就等于静默丢掉它（见 §8.2 下方对逐条路径的
+说明）。
+
+两种状态分开是必要的：客户端动作相同（不提交、退避、重试），但要等的东西不同
+（等槽位 vs 等队列）。`Retry-After` 取值 1 秒，与用户面 execute 的同两种拒绝一致
+——它是**下限**而非释放时间的承诺（槽位何时空出不可知）。仓库内自带的 runner 只读
+状态码、不读该头，两条路径都自己重投，且共用同一套节奏（`aggregateRetryDelay`：
+前八次按 flush 间隔，entry-seed 形态下为 1 秒；之后翻倍，上限 30 秒）。差别只在
+**手里攥着什么**：批次路径把整批留在手里重推整批；逐条路径（未开 `aggregate` 的
+默认形态）的 worker 在同一个分区上原地重试**同一条记录**，重试携带同一个 admission
+key——key 由记录自身身份（topic/partition/offset）构造，所以第二次尝试是重试，
+不是一次新准入。阻塞这条路径是**要害**而非副作用：worker 每分区串行，等待期间该
+分区不会准入后面的记录，也就没有任何后续 commit 能越过被拒的那条——这正是「不提交」
+等于「会被重投」而不是「被跳过」的原因。反过来，两条路径都只重投**拒绝**：传输错误
+与未知状态立即让位给 Kafka 重投，因为其中有些（generation 栅栏、协议分歧）重试永远
+不会成功，无界重试比一次重投更糟。拒绝本身必须**被计数和记录**
+（`xflow_trigger_batch_admissions_total{state="refused"}`，其 `reason` 区分
+`concurrency_limit` 与 `queue_full`；分区停摆由 `xflow_trigger_consumption_blocked`
+报出），否则一次限流读起来和「这个 topic 没流量」完全一样。客户端必须把这个 429
+判成**决定**而不是故障——判成故障会把它记进错误率，掩盖「配置正确、正在限流」这一
+事实；判成成功则会为一条从不存在的 execution 提交 offset，等于静默丢消息。
+
 这个判别目前依赖「`state` 字段存不存在」这一隐式契约。**本规范明确该端点不信封化**
-（理由见 §0.1），因此这个判别保持原样。任何要给它加信封的提案，必须同时把判别改为
-看 `code` 值，并在真实的 generation 升级场景下验证——不能只跑单测。
+（理由见 §0.1），因此 409 的那个判别保持原样。任何要给它加信封的提案，必须同时把
+判别改为看 `code` 值，并在真实的 generation 升级场景下验证——不能只跑单测。
 
 ### 8.3 纪律要求
 
@@ -477,11 +530,10 @@ entry-seed 的 409 响应有**两种不同 body**，客户端据此决定是否�
 
 前端 `web/packages/xflow-api/src/index.ts` 已在调用、服务端**不存在**的路由：
 
-- `GET /workflows`（列表）
 - `GET /workflows/{id}/runtime` → **废除**，无服务端对应概念
 
-（`GET /workflows/{id}`、`PUT /workflows/{id}`、`POST /workflows/{id}/runs`→`POST /v1/workflows/{id}/execute`
-已在 workflows 路由迁移中实现。）
+（`GET /workflows`（列表，见 §9.6）、`GET /workflows/{id}`、`PUT /workflows/{id}`、
+`POST /workflows/{id}/runs`→`POST /v1/workflows/{id}/execute` 已在 workflows 路由迁移中实现。）
 
 ### 9.3 响应形状
 

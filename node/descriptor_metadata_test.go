@@ -127,7 +127,7 @@ func TestBuiltinDefaultsGolden(t *testing.T) {
 		"xflow.merge@1/on_others":                "string:cancel",
 		"xflow.supply.external@0/require_ready":  "bool:true",
 		"xflow.supply.static@0/require_ready":    "bool:true",
-		"xflow.trigger.cron@1/timezone":          "string:UTC",
+		"xflow.trigger.cron@1/timezone":          "string:",
 		"xflow.trigger.kafka@1/max_inflight":     "float64:64",
 		"xflow.trigger.kafka@1/start_offset":     "string:latest",
 		"xflow.trigger.redis@1/max_inflight":     "float64:64",

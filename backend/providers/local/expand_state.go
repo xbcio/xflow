@@ -109,7 +109,13 @@ func (s *memoryState) CompleteExpandedSubExecution(_ context.Context, lease *eng
 		return false, false, nil, nil
 	}
 	for _, sub := range subs {
-		if sub.Status == types.ExecutionStatusRunning {
+		// "Done" means terminal, not "not running". A child can sit in a status
+		// that neither runs nor finished — there is no work of its own to
+		// report yet — and reading that as finished would fold a missing result
+		// into the batch the parent is about to consume, silently. The children
+		// this store writes are created running and end terminal, so the only
+		// states this changes are the ones a future status would introduce.
+		if !types.IsTerminalExecutionStatus(sub.Status) {
 			return false, true, nil, nil
 		}
 	}
