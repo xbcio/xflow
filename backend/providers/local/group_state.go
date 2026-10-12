@@ -40,6 +40,32 @@ var _ engine.GroupStateStore = (*memoryState)(nil)
 var _ engine.GroupLeaseReader = (*memoryState)(nil)
 var _ engine.GroupLeaseExpirer = (*memoryState)(nil)
 var _ engine.GroupLeaseReclaimer = (*memoryState)(nil)
+var _ engine.GroupUnitPhaseReader = (*memoryState)(nil)
+
+// GetGroupUnitPhase reports the unit's recorded phase. There is no expiry here
+// — the map has no TTL — so found=false means only "never leased or seeded",
+// and a member of a transient group in this backend reports its pre-existing
+// status rather than the expired verdict the Redis backend derives. That is the
+// documented no-op retention behavior (see CommitGroup).
+func (s *memoryState) GetGroupUnitPhase(_ context.Context, id types.ExecutionID, unitIdx int) (engine.GroupUnitPhase, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.groupUnits[groupKey(id, unitIdx)]
+	if st == nil {
+		return "", false, nil
+	}
+	switch st.status {
+	case groupUnitPending:
+		return engine.GroupUnitPhasePending, true, nil
+	case groupUnitRunning:
+		return engine.GroupUnitPhaseRunning, true, nil
+	case groupUnitDone:
+		return engine.GroupUnitPhaseDone, true, nil
+	}
+	// An unexpected value is still a record: report the presence, not a phase
+	// this backend cannot name.
+	return "", true, nil
+}
 
 func groupKey(id types.ExecutionID, unitIdx int) string {
 	return fmt.Sprintf("%s/%d", id, unitIdx)

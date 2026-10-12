@@ -164,3 +164,37 @@ type GroupLeaseExpirer interface {
 type GroupLeaseReclaimer interface {
 	RevokeGroupLeaseWithOutbox(ctx context.Context, id types.ExecutionID, unitIdx int, token LeaseToken, entry OutboxEntry) (revoked bool, err error)
 }
+
+// GroupUnitPhase is a group unit's durable lifecycle phase as the store
+// records it — the group-level analogue of a node's NodeStatus, with the
+// coarser vocabulary a unit actually has.
+type GroupUnitPhase string
+
+const (
+	// GroupUnitPhasePending is a unit the store knows about (leased before, or
+	// seeded) that is not currently leased — retry-ready.
+	GroupUnitPhasePending GroupUnitPhase = "pending"
+	// GroupUnitPhaseRunning is a unit currently held under a lease.
+	GroupUnitPhaseRunning GroupUnitPhase = "running"
+	// GroupUnitPhaseDone is a committed unit, or one a seed admitted as already
+	// complete.
+	GroupUnitPhaseDone GroupUnitPhase = "done"
+)
+
+// GroupUnitPhaseReader is the read side of a group unit's durable state, the
+// group analogue of StateStore.GetNode.
+//
+// It exists because a group has no per-member node status: members run inside
+// the runner's embedded engine (service/runner/group_runtime.go), so the only
+// durable record of a member is its boundary exit plus the unit's own
+// status/meta. Inspect has to tell "this member never ran" from "this member's
+// records expired" — for a transient group those are different answers whose
+// keys are equally absent — and only the unit's own record distinguishes them.
+type GroupUnitPhaseReader interface {
+	// GetGroupUnitPhase returns the unit's recorded phase. found=false means the
+	// store holds no record of the unit at all: never leased or seeded, or its
+	// keys have expired. Callers that must not conflate those two states (see
+	// engine.Inspect on transient groups) decide from the surrounding evidence
+	// which one the absence means.
+	GetGroupUnitPhase(ctx context.Context, id types.ExecutionID, unitIdx int) (phase GroupUnitPhase, found bool, err error)
+}

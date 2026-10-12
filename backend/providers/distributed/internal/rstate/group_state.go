@@ -482,6 +482,26 @@ func (s *Store) CommitGroup(ctx context.Context, req engine.GroupCommitRequest) 
 var _ engine.GroupLeaseReader = (*Store)(nil)
 var _ engine.GroupLeaseExpirer = (*Store)(nil)
 var _ engine.GroupLeaseReclaimer = (*Store)(nil)
+var _ engine.GroupUnitPhaseReader = (*Store)(nil)
+
+// GetGroupUnitPhase reads the unit's status key alone. found=false covers both
+// "never leased or seeded" and "the key expired" — the two states a transient
+// group's completion TTL deliberately collapses Redis-side; the caller
+// (engine.Inspect) tells them apart from the execution's own state. The lease
+// meta hash is deliberately not consulted: its fields are cleared on commit, so
+// it cannot answer the phase, and a read across two keys would not be atomic
+// anyway.
+func (s *Store) GetGroupUnitPhase(ctx context.Context, id types.ExecutionID, unitIdx int) (engine.GroupUnitPhase, bool, error) {
+	t := namespace.FromContext(ctx)
+	val, err := s.rdb.Get(ctx, groupUnitStatusKey(t, id, unitIdx)).Result()
+	if err == redis.Nil {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("get group unit phase %q/#%d: %w", id, unitIdx, err)
+	}
+	return engine.GroupUnitPhase(val), true, nil
+}
 
 func (s *Store) GetGroupLease(ctx context.Context, id types.ExecutionID, unitIdx int) (*engine.GroupLease, error) {
 	t := namespace.FromContext(ctx)

@@ -16,6 +16,7 @@ type GroupStore interface {
 	engine.GroupStateStore
 	engine.GroupLeaseReader
 	engine.GroupLeaseExpirer
+	engine.GroupUnitPhaseReader
 }
 
 // singleGroupGraph: ingest(trigger)->analyze, both in same group, no external nodes => UnitCount=1.
@@ -748,6 +749,36 @@ func RunGroupStateContract(t *testing.T, newStore func(*testing.T) GroupStore) {
 		if out == nil || out["k"] != "v" {
 			t.Fatalf("GetOutput after a transient group's terminal commit = %+v, want k=v: "+
 				"the mode changes retention, not the data", out)
+		}
+	})
+
+	// GetGroupUnitPhase is what lets a reader tell "this unit has a record" from
+	// "there is nothing left" — the distinction engine.Inspect needs to report a
+	// member of a transient group as expired instead of pending after the
+	// completion TTL. The contract is only about the record: phase values, and
+	// whether anything ever expires, differ per backend (the local backend has no
+	// TTL at all).
+	t.Run("GroupUnitPhaseReflectsRecordPresence", func(t *testing.T) {
+		s, id, gu := seed(t, twoUnitGraph(t))
+
+		if _, found, err := s.GetGroupUnitPhase(ctx, id, gu); err != nil || found {
+			t.Fatalf("phase before any lease/seed = (found:%v err:%v), want found=false, nil", found, err)
+		}
+
+		if ok, _ := s.AcquireGroupLease(ctx, lease(id, gu, "T1")); !ok {
+			t.Fatal("acquire must succeed")
+		}
+		if phase, found, err := s.GetGroupUnitPhase(ctx, id, gu); err != nil || !found || phase != engine.GroupUnitPhaseRunning {
+			t.Fatalf("phase while leased = (%q found:%v err:%v), want (%q true nil)",
+				phase, found, err, engine.GroupUnitPhaseRunning)
+		}
+
+		if _, err := s.CommitGroup(ctx, commit(id, gu, "T1")); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		if phase, found, err := s.GetGroupUnitPhase(ctx, id, gu); err != nil || !found || phase != engine.GroupUnitPhaseDone {
+			t.Fatalf("phase after commit = (%q found:%v err:%v), want (%q true nil)",
+				phase, found, err, engine.GroupUnitPhaseDone)
 		}
 	})
 }

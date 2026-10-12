@@ -34,6 +34,15 @@ const (
 	// pin_data instead of running its handler: its output is the pinned mock
 	// value and downstream treats it exactly like success.
 	NodeStatusPinned NodeStatus = "pinned"
+	// NodeStatusExpired is a read-side-only verdict for a member of a transient
+	// group (groups[].mode: transient) whose records are gone rather than never
+	// written: the execution is terminal and the group's artifacts — boundary
+	// exits, unit status, lease fence — have passed the completion TTL that the
+	// mode applies. The member ran, or may have; nothing about it is readable
+	// any more, and reporting "pending" would assert the one thing that is
+	// false. Nothing stores this status: it is derived at inspect time from the
+	// group unit's own record (engine.GroupUnitPhaseReader).
+	NodeStatusExpired NodeStatus = "expired"
 )
 
 // IsTerminalExecutionStatus reports whether s is an execution terminal state.

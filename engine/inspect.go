@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -83,9 +84,79 @@ func (e *Engine) Inspect(ctx context.Context, id types.ExecutionID, nodeNames ..
 		if err != nil {
 			return ExecutionDetail{}, err
 		}
+		if err := e.markExpiredTransientGroupNode(ctx, id, g, snap.Status, &node); err != nil {
+			return ExecutionDetail{}, err
+		}
 		detail.Nodes = append(detail.Nodes, node)
 	}
 	return detail, nil
+}
+
+// markExpiredTransientGroupNode rewrites "we know nothing about this node" into
+// "its records expired" for a member of a transient group (groups[].mode:
+// transient) whose artifacts have passed the mode's completion TTL.
+//
+// The two states it separates are indistinguishable from a node-level read. A
+// group writes no per-member node status — members run inside the runner's own
+// embedded engine — so a member with no exit output reads the same whether the
+// group has not run yet or its keys expired. What distinguishes them is the
+// group unit's own record plus the execution's state: the execution is terminal,
+// the unit has no record left, and the mode is what removed it. Leaving that as
+// "pending" would assert the node never ran, which is the one answer the mode
+// makes unknowable; "expired" states what is actually known.
+//
+// Scoped deliberately:
+//   - only a node with no status verdict of its own is rewritten, so positive
+//     evidence (a snapshot, an output) always wins;
+//   - only a terminal execution: while the run is live, a member with no record
+//     is genuinely not-yet-run, and nothing shortens a transient group's keys
+//     before the execution ends;
+//   - only a transient group: a durable group's artifacts live as long as the
+//     execution's, so an absent record there is the pre-existing group-readback
+//     gap, not expiry, and rewriting it would be a new lie;
+//   - only when the store can answer. A store without the readback capability
+//     leaves the previous answer in place rather than guessing.
+func (e *Engine) markExpiredTransientGroupNode(
+	ctx context.Context,
+	id types.ExecutionID,
+	g *graph.Graph,
+	execStatus types.ExecutionStatus,
+	node *NodeDetail,
+) error {
+	if g == nil || !types.IsTerminalExecutionStatus(execStatus) {
+		return nil
+	}
+	if node.Status != types.NodeStatusPending && node.Status != "" {
+		return nil
+	}
+	if node.Output != nil {
+		return nil
+	}
+	idx, ok := g.NodeIndex(node.Name)
+	if !ok {
+		return nil
+	}
+	unitIdx := g.UnitIndexForNode(idx)
+	if unitIdx < 0 || unitIdx >= g.UnitCount() || g.UnitKindAt(unitIdx) != graph.UnitGroup {
+		return nil
+	}
+	if !g.GroupMetaAt(unitIdx).Transient() {
+		return nil
+	}
+	reader, ok := e.state.(GroupUnitPhaseReader)
+	if !ok {
+		return nil
+	}
+	// A store error propagates like every other read on this path
+	// (inspectNode's GetNode/GetOutput): reporting a wrong "pending" silently
+	// would be worse than failing the inspect.
+	if _, found, err := reader.GetGroupUnitPhase(ctx, id, unitIdx); err != nil {
+		return fmt.Errorf("inspect group unit %q/#%d: %w", id, unitIdx, err)
+	} else if found {
+		return nil
+	}
+	node.Status = types.NodeStatusExpired
+	return nil
 }
 
 func (e *Engine) inspectNode(
