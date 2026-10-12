@@ -344,6 +344,9 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	if err := assignPinData(def, g); err != nil {
 		return nil, err
 	}
+	if err := resolveConcurrency(def, g); err != nil {
+		return nil, err
+	}
 	if err := buildUnits(g); err != nil {
 		return nil, fmt.Errorf("build units: %w", err)
 	}
@@ -392,6 +395,12 @@ func validateFAF(def *types.WorkflowDef) error {
 	}
 	if def.Settings != nil && def.Settings.OnError != "" && def.Settings.OnError != string(types.OnErrorStop) {
 		return fmt.Errorf("faf workflow cannot define settings.on_error %q", def.Settings.OnError)
+	}
+	if def.Settings != nil && def.Settings.Concurrency != nil && def.Settings.Concurrency.Limit > 0 {
+		// A FAF execution persists nothing, so there is no durable slot to hold
+		// and no way to make the admission atomic with the dispatch. Fail closed
+		// rather than silently running unlimited.
+		return errors.New("faf workflow cannot define settings.concurrency with a non-zero limit")
 	}
 	if len(def.Nodes) != 1 {
 		return fmt.Errorf("faf workflow must contain exactly one node, got %d", len(def.Nodes))

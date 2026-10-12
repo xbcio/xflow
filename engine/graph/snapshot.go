@@ -392,6 +392,7 @@ func assignGraphHash(g *Graph) error {
 		TransientCompletionTTL: g.transientCompletionTTL,
 		PinDataMode:            g.pinDataMode,
 		Timezone:               g.timezone,
+		Concurrency:            g.concurrency,
 		Groups:                 g.groups,
 		Units:                  g.units,
 		UnitOutEdges:           g.unitOutEdges,
@@ -434,7 +435,11 @@ type graphHashPayload struct {
 	PinDataMode string `json:",omitempty"`
 	// Timezone is empty unless settings.timezone is set; omitempty keeps
 	// every other graph hash unchanged.
-	Timezone     string `json:",omitempty"`
+	Timezone string `json:",omitempty"`
+	// Concurrency is nil for every graph without a limit, so omitempty keeps
+	// those hashes unchanged. A graph that declares one hashes differently,
+	// which is correct: the limit is part of what the graph means.
+	Concurrency  *types.ConcurrencySettings `json:",omitempty"`
 	Groups       []GroupMeta
 	Units        []UnitMeta
 	UnitOutEdges [][]UnitEdge
@@ -503,7 +508,10 @@ type graphSerializedForm struct {
 	TransientCompletionTTL time.Duration `json:"transient_completion_ttl,omitempty"`
 	PinDataMode            string        `json:"pin_data_mode,omitempty"`
 	Timezone               string        `json:"timezone,omitempty"`
-	Groups                 []GroupMeta   `json:"groups,omitempty"`
+	// Concurrency is omitempty so a snapshot written before this setting existed
+	// decodes with a nil block, and a graph without a limit writes no field.
+	Concurrency *types.ConcurrencySettings `json:"concurrency,omitempty"`
+	Groups      []GroupMeta                `json:"groups,omitempty"`
 	// SupplyRefs maps a consumer node index to the supply node names it depends
 	// on. Unlike the unit IR it cannot be re-derived on decode: it comes from
 	// WorkflowDef.DependencyEdges, which is not part of the snapshot. The
@@ -550,6 +558,7 @@ func (g *Graph) MarshalJSON() ([]byte, error) {
 		TransientCompletionTTL: g.transientCompletionTTL,
 		PinDataMode:            g.pinDataMode,
 		Timezone:               g.timezone,
+		Concurrency:            g.concurrency,
 		Groups:                 g.groups,
 		SupplyRefs:             g.supplyRefs,
 		NodesRefs:              g.nodesRefs,
@@ -675,6 +684,7 @@ func (g *Graph) UnmarshalJSON(data []byte) error {
 	g.transientCompletionTTL = sf.TransientCompletionTTL
 	g.pinDataMode = sf.PinDataMode
 	g.timezone = sf.Timezone
+	g.concurrency = sf.Concurrency
 	g.groups = sf.Groups
 	g.supplyRefs = sf.SupplyRefs
 	g.nodesRefs = sf.NodesRefs

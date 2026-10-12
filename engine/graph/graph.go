@@ -59,6 +59,13 @@ type Graph struct {
 	// the workflow declares none. Triggers that evaluate wall-clock schedules
 	// (xflow.trigger.cron) fall back to it when their own timezone is unset.
 	timezone string
+	// concurrency is the normalized settings.concurrency block. Nil for a graph
+	// that sets no limit, which keeps it out of the hash payload and the
+	// snapshot of every unlimited graph. It is resolved at compile time so the
+	// admission path never re-validates a mode string, and it is keyed by
+	// namespace+workflow NAME rather than version (see ConcurrencyKey), so a
+	// version bump does not orphan the slots its predecessor's executions hold.
+	concurrency *types.ConcurrencySettings
 
 	// hasDisabled reports whether any node carries NodeMeta.Disabled. It is a
 	// derived cache -- true iff at least one node has the flag -- and is
@@ -231,6 +238,17 @@ func (g *Graph) PinDataMode() string { return g.pinDataMode }
 
 // Timezone returns the workflow-level settings.timezone, or "" when unset.
 func (g *Graph) Timezone() string { return g.timezone }
+
+// Concurrency returns a copy of the graph's normalized settings.concurrency
+// block, or nil when the graph declares no limit. A copy rather than the
+// pointer so a caller cannot mutate the immutable Graph through it.
+func (g *Graph) Concurrency() *types.ConcurrencySettings {
+	if g.concurrency == nil {
+		return nil
+	}
+	cp := *g.concurrency
+	return &cp
+}
 
 // PinnedOutput returns a deep copy of the mock output pinned on node i and
 // whether the node is pinned at all. It does not decide whether the pin applies
