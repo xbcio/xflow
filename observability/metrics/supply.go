@@ -180,9 +180,17 @@ func (s SupplyMetrics) OnEngineCount(ctx context.Context, n int) {
 // --- supply gate observer surface ---
 
 // OnSupplyFetch records one content fetch attempt. result is "ok" or "error".
-func (s SupplyMetrics) OnSupplyFetch(ctx context.Context, name, result string) {
+// source is what asked for the fetch: "admission", "hint", or "poll".
+//
+// The source label is what separates "this runner is current because the
+// control plane's hints are reaching it" from "this runner is current because
+// it re-reads everything on a timer". Both are healthy, but a fleet where
+// almost every fetch says poll is a fleet whose hints are being lost, and the
+// fix for that is on the control-plane side, where no other series here would
+// point.
+func (s SupplyMetrics) OnSupplyFetch(ctx context.Context, name, result, source string) {
 	s.Metrics.Inc(metricSupplyFetchTotal, withNamespace(ctx, map[string]string{
-		"name": name, "result": result,
+		"name": name, "result": result, "source": source,
 	}))
 }
 

@@ -1041,12 +1041,12 @@ type supplyGateFanout struct {
 	lifecycle runnersvc.LifecycleObserver
 }
 
-func (f supplyGateFanout) OnSupplyFetch(ctx context.Context, name, result string) {
+func (f supplyGateFanout) OnSupplyFetch(ctx context.Context, name, result, source string) {
 	if f.metrics != nil {
-		f.metrics.OnSupplyFetch(ctx, name, result)
+		f.metrics.OnSupplyFetch(ctx, name, result, source)
 	}
 	if f.lifecycle != nil {
-		f.lifecycle.OnSupplyFetch(ctx, name, result)
+		f.lifecycle.OnSupplyFetch(ctx, name, result, source)
 	}
 }
 

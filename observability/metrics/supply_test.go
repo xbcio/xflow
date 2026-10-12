@@ -157,13 +157,15 @@ func TestSupplyMetricsOnSupplyFetch(t *testing.T) {
 	s := NewSupplyMetrics(m)
 	ctx := context.Background()
 
-	s.OnSupplyFetch(ctx, "rules", "ok")
-	s.OnSupplyFetch(ctx, "rules", "error")
+	s.OnSupplyFetch(ctx, "rules", "ok", "admission")
+	s.OnSupplyFetch(ctx, "rules", "error", "hint")
+	s.OnSupplyFetch(ctx, "rules", "ok", "poll")
 
 	body := gatherMetricsBody(t, m)
 	for _, want := range []string{
-		`xflow_supply_fetch_total{name="rules",namespace="default",result="ok"} 1`,
-		`xflow_supply_fetch_total{name="rules",namespace="default",result="error"} 1`,
+		`xflow_supply_fetch_total{name="rules",namespace="default",result="ok",source="admission"} 1`,
+		`xflow_supply_fetch_total{name="rules",namespace="default",result="error",source="hint"} 1`,
+		`xflow_supply_fetch_total{name="rules",namespace="default",result="ok",source="poll"} 1`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("metrics body missing %q:\n%s", want, body)

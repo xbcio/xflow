@@ -12,6 +12,7 @@ import (
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/supply"
+	"github.com/xbcio/xflow/service/protocol"
 )
 
 // --- test doubles ---
@@ -409,6 +410,62 @@ func TestRunPollerJittersTheConfiguredInterval(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The fetch metric has to say which channel kept this runner current: a fleet
+// where nearly every fetch is a poll is one whose heartbeat hints are not
+// landing, and that is a control-plane problem no other series points at.
+func TestSupplyFetchSourceIsReportedPerChannel(t *testing.T) {
+	reg := supply.NewRegistry()
+	f := newMutableFetcher()
+	f.set("shared-rules", `v1`)
+	g := NewSupplyGate(f, reg, quietLogger())
+	rec := &recordingGateObserver{}
+	g.SetObserver(rec)
+	defer g.SetObserver(nil)
+
+	ctx := context.Background()
+	if err := g.Admit(ctx, "wf", []engine.SupplyRequirement{
+		{Node: "rules", Resource: "shared-rules", RequireReady: true},
+	}); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	g.ApplyHints(ctx, []protocol.SupplyHint{
+		{Namespace: string(namespace.Default), Node: "rules", Hash: "sha256:changed"},
+	})
+	g.pollHosted(ctx)
+
+	var sources []string
+	for _, c := range rec.fetches {
+		sources = append(sources, c.source)
+	}
+	want := []string{supplySourceAdmission, supplySourceHint, supplySourcePoll}
+	if !reflect.DeepEqual(sources, want) {
+		t.Fatalf("fetch sources = %v, want %v (one per channel, in call order)", sources, want)
+	}
+}
+
+// Even the empty case is worth pinning: an unset SupplyPollInterval is not a
+// missing poller.
+func TestRunPollerStartsWithAnUnsetInterval(t *testing.T) {
+	f := newMutableFetcher()
+	g := NewSupplyGate(f, supply.NewRegistry(), quietLogger())
+	// Seed a hosted key so a poll round would be observable if one ran.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := g.Admit(ctx, "wf", []engine.SupplyRequirement{{Node: "rules", Resource: "rules"}}); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	base := f.calls.Load()
+
+	ticker := installFakePoller(g)
+	done := make(chan struct{})
+	go func() { defer close(done); g.RunPoller(ctx, 0) }()
+	ticker.tick()
+	waitForFetchCalls(t, f, base+1)
+
+	cancel()
+	<-done
 }
 
 // RunPoller is called from Run on whatever gate the config carries, including

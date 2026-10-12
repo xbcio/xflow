@@ -50,8 +50,13 @@ func (e *NotReadyError) Error() string {
 // observability/metrics/supply.go.
 type SupplyGateObserver interface {
 	// OnSupplyFetch records one content fetch attempt. result is "ok" or
-	// "error".
-	OnSupplyFetch(ctx context.Context, name, result string)
+	// "error"; source is what asked for it — "admission" (an activation-time
+	// Admit), "hint" (a heartbeat-piggybacked hash), or "poll" (the TTL poll).
+	// The three are separate series on purpose: a fleet where most fetches are
+	// "poll" is one whose hints are not arriving, and a "poll" rate that tracks
+	// the hosted supply count is the poll working as designed rather than a
+	// retry storm.
+	OnSupplyFetch(ctx context.Context, name, result, source string)
 	// OnSupplyNotReady reports whether Admit is currently declining for a
 	// missing required supply. Must be reported for every requirement on
 	// every Admit call — both true and false — so the gauge always reflects
@@ -63,6 +68,19 @@ type SupplyGateObserver interface {
 	// in both directions.
 	OnSupplyServingUnavailable(ctx context.Context, name string, serving bool)
 }
+
+// The closed set of supply fetch sources, reported as the source label of
+// xflow_supply_fetch_total. A new caller of notifyFetch takes one of these
+// rather than inventing a value: each distinct string becomes its own series,
+// so an unlisted one silently splits the metric instead of failing.
+const (
+	// supplySourceAdmission is the activation-time fetch (Admit).
+	supplySourceAdmission = "admission"
+	// supplySourceHint is a fetch triggered by a heartbeat-piggybacked hash.
+	supplySourceHint = "hint"
+	// supplySourcePoll is a fetch the TTL poll made.
+	supplySourcePoll = "poll"
+)
 
 // SupplyGate is the activation-time readiness gate. It fetches any required
 // supply this process does not have yet, publishes it into the registry, and
@@ -322,7 +340,7 @@ func (g *SupplyGate) AdmitWithDeclarations(ctx context.Context, workflowID strin
 		}
 		content, hash, revision, err := g.fetcher.Fetch(supplyCtx, req.Resource)
 		if err != nil {
-			g.notifyFetch(supplyCtx, req.Resource, "error")
+			g.notifyFetch(supplyCtx, req.Resource, "error", supplySourceAdmission)
 			// Both "never written" and "cannot reach the server" mean the same
 			// thing for the decision: this runner has no content. They differ only
 			// in what an operator should look at, hence the log level split.
@@ -340,7 +358,7 @@ func (g *SupplyGate) AdmitWithDeclarations(ctx context.Context, workflowID strin
 			}
 			continue
 		}
-		g.notifyFetch(supplyCtx, req.Resource, "ok")
+		g.notifyFetch(supplyCtx, req.Resource, "ok", supplySourceAdmission)
 		if err := g.registry.Apply(supplyCtx, supply.Snapshot{
 			Namespace: k.Namespace,
 			Name:      k.Name,
@@ -485,12 +503,12 @@ func (g *SupplyGate) logDeclaredNodeUnusable(_ context.Context, req engine.Suppl
 // callers in this codebase (every pre-existing supply_gate_test.go case) never
 // install an observer. Each snaps the observer pointer under a read lock so the
 // call is data-race-free relative to a concurrent SetObserver.
-func (g *SupplyGate) notifyFetch(ctx context.Context, name, result string) {
+func (g *SupplyGate) notifyFetch(ctx context.Context, name, result, source string) {
 	g.observerMu.RLock()
 	o := g.observer
 	g.observerMu.RUnlock()
 	if o != nil {
-		o.OnSupplyFetch(ctx, name, result)
+		o.OnSupplyFetch(ctx, name, result, source)
 	}
 }
 
@@ -588,7 +606,7 @@ func (g *SupplyGate) ApplyHints(ctx context.Context, hints []protocol.SupplyHint
 		if _, already := g.hintsInFlight.LoadOrStore(k, struct{}{}); already {
 			continue
 		}
-		g.refreshOne(namespace.WithNamespace(ctx, k.Namespace), k, h.Hash)
+		g.refreshOne(namespace.WithNamespace(ctx, k.Namespace), k, h.Hash, supplySourceHint)
 	}
 }
 
@@ -608,7 +626,12 @@ func (g *SupplyGate) ApplyHints(ctx context.Context, hints []protocol.SupplyHint
 // the fetch is skipped when the cached content already matches it, which is the
 // "already on this content: zero cost" case for a hint. The poll passes "" —
 // discovering the server's current hash is the whole point of a tick.
-func (g *SupplyGate) refreshOne(ctx context.Context, k supply.Key, wantHash string) {
+//
+// source names the caller for the fetch metric (supplySourceHint or
+// supplySourcePoll). It is passed rather than inferred from wantHash, because
+// the label's whole point is to tell an operator which channel is actually
+// keeping this runner current.
+func (g *SupplyGate) refreshOne(ctx context.Context, k supply.Key, wantHash, source string) {
 	defer g.hintsInFlight.Delete(k)
 	if wantHash != "" {
 		if cur, ok := g.registry.Get(k); ok && cur.Hash == wantHash {
@@ -621,11 +644,11 @@ func (g *SupplyGate) refreshOne(ctx context.Context, k supply.Key, wantHash stri
 	resource := g.resourceFor(k)
 	content, fetchedHash, revision, err := g.fetcher.Fetch(ctx, resource)
 	if err != nil {
-		g.notifyFetch(ctx, resource, "error")
+		g.notifyFetch(ctx, resource, "error", source)
 		g.logRefreshOutcome(slog.LevelWarn, "supply refresh: fetch failed", k, resource, "")
 		return
 	}
-	g.notifyFetch(ctx, resource, "ok")
+	g.notifyFetch(ctx, resource, "ok", source)
 	if err := g.registry.Apply(ctx, supply.Snapshot{
 		Namespace: k.Namespace, Name: k.Name, Content: content, Hash: fetchedHash,
 		Revision: revision, FetchedAt: time.Now(),
@@ -703,7 +726,7 @@ func (g *SupplyGate) pollHosted(ctx context.Context) {
 		// An empty wantHash means "fetch it whatever we have": the poll's job is
 		// to discover the server's current hash, so it cannot skip the fetch on
 		// a hash it already believes. The fetch result decides what changes.
-		g.refreshOne(namespace.WithNamespace(ctx, k.Namespace), k, "")
+		g.refreshOne(namespace.WithNamespace(ctx, k.Namespace), k, "", supplySourcePoll)
 	}
 }
 

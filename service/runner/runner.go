@@ -162,8 +162,8 @@ type LifecycleObserver interface {
 	// fetch that will never happen.
 	OnSupplyGateWired(present bool)
 	// OnSupplyFetch mirrors SupplyGateObserver.OnSupplyFetch. result is "ok"
-	// or "error".
-	OnSupplyFetch(ctx context.Context, name, result string)
+	// or "error"; source is "admission", "hint", or "poll".
+	OnSupplyFetch(ctx context.Context, name, result, source string)
 }
 
 type Runner struct {
