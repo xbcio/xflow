@@ -44,6 +44,15 @@ var ErrConcurrencyQueueUnsupported = errors.New("state store does not support co
 // gives them different codes so a caller can tell which one it hit.
 var ErrConcurrencyQueueFull = errors.New("workflow concurrency queue is full")
 
+// ConcurrencyQueueTimeoutError is the execution-level reason recorded when a
+// queued execution waits past its queue_timeout and is driven into the timeout
+// terminal state.
+//
+// It is a constant rather than a literal at each site because it is the only
+// thing a caller has to tell this timeout from the execution's own: every
+// backend writes this exact text, and the contract tests read it back.
+const ConcurrencyQueueTimeoutError = "concurrency queue timeout"
+
 // ConcurrencyAdmission describes the slot one submission contends for.
 //
 // Limit and Mode are resolved from the submitting execution's own compiled
