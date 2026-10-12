@@ -43,6 +43,12 @@ type memoryState struct {
 	subExecs       map[string][]*engine.SubExecution       // key: execID+"/"+nodeName
 	groupUnits     map[string]*groupUnitState              // key: "<execID>/<unitIdx>"
 	admissions     map[engine.AdmissionKey]*admissionEntry // trigger admission keys
+	// workflowSlots is the workflow-scoped concurrency slot set, keyed by
+	// graph.ConcurrencyKey(ns, workflow name), and slotHolders records which set
+	// each admitted execution was charged to so a terminal transition can
+	// release it without consulting a graph.
+	workflowSlots map[string]*workflowSlot
+	slotHolders   map[types.ExecutionID]*workflowSlot
 
 	// done channels allow Wait() callers to block until execution completes.
 	doneCh        map[types.ExecutionID]chan struct{}
@@ -110,6 +116,81 @@ func (s *memoryState) CreateExecutionWithOutbox(_ context.Context, e *engine.Exe
 	return nil
 }
 
+var _ engine.ConcurrencyLimitedStateStore = (*memoryState)(nil)
+
+// workflowSlot names the slot set one admitted execution was charged to. It is
+// recorded at admission because a release must free the SAME set, and by
+// terminal-write time the graph the admission read may no longer be around.
+type workflowSlot struct {
+	key     string
+	holders map[types.ExecutionID]bool
+}
+
+// CreateExecutionWithConcurrency admits one submission against its workflow's
+// slot set, then writes the execution and its initial intents under the same
+// mutex acquisition. Doing the three in one critical section is what makes the
+// limit sound: a slot charged for an execution that failed to persist would
+// leak until restart, and an execution persisted without its slot would
+// over-admit.
+//
+// A refused submission writes nothing. The engine relies on that to report a
+// 429 for a rejection rather than leaving a zero-node execution behind.
+func (s *memoryState) CreateExecutionWithConcurrency(_ context.Context, e *engine.ExecutionSnapshot, entries []engine.OutboxEntry, admission engine.ConcurrencyAdmission) (engine.ConcurrencyAdmissionResult, error) {
+	// QUEUE mode is not implemented here. It is refused before the lock, and so
+	// before anything is written: a store that admitted an over-limit
+	// submission instead would silently break the limit the definition
+	// declared, and queue mode is the default of the bare-int shorthand.
+	if admission.Mode == types.ConcurrencyModeQueue {
+		return engine.ConcurrencyAdmissionResult{}, engine.ErrConcurrencyQueueUnsupported
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key := graph.ConcurrencyKey(admission.Namespace, admission.Workflow)
+	slot := s.workflowSlots[key]
+	if slot == nil {
+		slot = &workflowSlot{key: key, holders: make(map[types.ExecutionID]bool)}
+		if s.workflowSlots == nil {
+			s.workflowSlots = make(map[string]*workflowSlot)
+		}
+		s.workflowSlots[key] = slot
+	}
+	if len(slot.holders) >= admission.Limit {
+		return engine.ConcurrencyAdmissionResult{}, engine.ErrConcurrencyLimit
+	}
+
+	slot.holders[e.ID] = true
+	if s.slotHolders == nil {
+		s.slotHolders = make(map[types.ExecutionID]*workflowSlot)
+	}
+	s.slotHolders[e.ID] = slot
+	s.createExecutionLocked(e)
+	for _, entry := range entries {
+		if entry.Task.Type == engine.TaskTypeNodeSkip {
+			s.scheduled[memoryCounterKey(e.ID, entry.Task.UnitIdx)] = "skip"
+		}
+		s.putOutboxEntryLocked(e.ID, entry)
+	}
+	return engine.ConcurrencyAdmissionResult{}, nil
+}
+
+// releaseWorkflowSlotLocked frees the slot an admitted execution holds. It is
+// called from every path that moves an execution into a terminal status, so no
+// engine call site can forget it; a non-terminal transition (canceling) keeps
+// the slot, because the execution still holds the resources the limit protects.
+func (s *memoryState) releaseWorkflowSlotLocked(id types.ExecutionID) {
+	slot, held := s.slotHolders[id]
+	if !held {
+		return
+	}
+	delete(s.slotHolders, id)
+	delete(slot.holders, id)
+	if len(slot.holders) == 0 {
+		delete(s.workflowSlots, slot.key)
+	}
+}
+
 func (s *memoryState) createExecutionLocked(e *engine.ExecutionSnapshot) {
 	cp := *e
 	s.executions[e.ID] = &execEntry{snap: cp}
@@ -159,10 +240,13 @@ func (s *memoryState) UpdateExecutionStatus(_ context.Context, id types.Executio
 		entry.snap.Error = errMsg
 	}
 	// Close the done channel on terminal status so Wait() unblocks.
-	if isTerminalStatus(status) && !entry.closed {
-		entry.closed = true
-		if ch, ok := s.doneCh[id]; ok {
-			close(ch)
+	if isTerminalStatus(status) {
+		s.releaseWorkflowSlotLocked(id)
+		if !entry.closed {
+			entry.closed = true
+			if ch, ok := s.doneCh[id]; ok {
+				close(ch)
+			}
 		}
 	}
 	s.publishLocked(engine.ExecutionEvent{ExecutionID: id, Status: status, Error: errMsg})

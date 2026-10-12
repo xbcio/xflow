@@ -1,0 +1,368 @@
+package statestoretest
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/types"
+)
+
+// ConcurrencyStoreFactory returns a fresh StateStore for one sub-test. The
+// factory must register a cleanup with t.Cleanup so the underlying resource
+// (in-memory state, miniredis instance, etc.) is released.
+type ConcurrencyStoreFactory func(t *testing.T) engine.StateStore
+
+// RunConcurrencyAdmissionContract exercises engine.ConcurrencyLimitedStateStore
+// against a concrete backend.
+//
+// Every backend that implements the capability must pass this suite, so the
+// two implementations cannot drift on what a slot means. The cases are chosen
+// around the two failure modes that are invisible from the engine: an
+// admission that persists before it checks the limit (a rejection that leaks a
+// zero-node execution), and a release that is wired at one engine call site
+// instead of into the store's terminal writers (slots that leak until restart,
+// silently lowering the effective limit).
+func RunConcurrencyAdmissionContract(t *testing.T, newStore ConcurrencyStoreFactory) {
+	t.Helper()
+	t.Run("AdmitsUntilTheLimit", func(t *testing.T) {
+		admissionAdmitsUntilTheLimit(t, newStore(t))
+	})
+	t.Run("RefusesWithoutPersisting", func(t *testing.T) {
+		admissionRefusesWithoutPersisting(t, newStore(t))
+	})
+	t.Run("RefusesQueueMode", func(t *testing.T) {
+		admissionRefusesQueueMode(t, newStore(t))
+	})
+	t.Run("KeyedByNameNotVersion", func(t *testing.T) {
+		admissionKeyedByNameNotVersion(t, newStore(t))
+	})
+	t.Run("KeyedByNamespace", func(t *testing.T) {
+		admissionKeyedByNamespace(t, newStore(t))
+	})
+	t.Run("ReleaseOnTerminalStatus", func(t *testing.T) {
+		admissionReleasesOnTerminalStatus(t, newStore(t))
+	})
+	t.Run("ReleaseOnAtomicCompletion", func(t *testing.T) {
+		admissionReleasesOnAtomicCompletion(t, newStore(t))
+	})
+	t.Run("LimitOfOneSerializes", func(t *testing.T) {
+		admissionLimitOfOneSerializes(t, newStore(t))
+	})
+}
+
+// concurrencyGraph compiles the one-root workflow the admission cases submit.
+// settings.concurrency is not read by the store — the admission carries the
+// policy — so each case states the limit on the admission itself and the graph
+// only has to be a real, compilable definition with one root.
+func concurrencyGraph(t *testing.T, name string) *graph.Graph {
+	t.Helper()
+	g, err := graph.Compile(&types.WorkflowDef{
+		Name:    name,
+		Version: "1",
+		Nodes:   []types.NodeDef{{Name: "start", Type: "test.echo"}},
+	})
+	if err != nil {
+		t.Fatalf("Compile(%s) error = %v", name, err)
+	}
+	return g
+}
+
+// concurrencyAdmissionFor builds the admission one submission contends for, as
+// the engine builds it from a compiled graph.
+//
+// The admission carries the namespace explicitly rather than reading it from
+// ctx so the key-scope cases can vary one field at a time.
+func concurrencyAdmissionFor(t *testing.T, g *graph.Graph, limit int) engine.ConcurrencyAdmission {
+	t.Helper()
+	return engine.ConcurrencyAdmission{
+		Namespace: "default",
+		Workflow:  g.Name(),
+		Limit:     limit,
+		Mode:      types.ConcurrencyModeReject,
+	}
+}
+
+// concurrencySnapshot builds one submission as the engine would: a fresh ID, a
+// running snapshot carrying the compiled graph, and the one root delivery
+// intent that makes the admission atomic with. The task mirrors
+// engine.submitInitialTasks exactly — notably it carries no ActivationID, as
+// acyclic roots do not — so a backend that only satisfied this suite for
+// hand-built tasks would still be caught here.
+func concurrencySnapshot(t *testing.T, g *graph.Graph) (*engine.ExecutionSnapshot, []engine.OutboxEntry) {
+	t.Helper()
+	id := engine.NewExecutionID()
+	snap := &engine.ExecutionSnapshot{ID: id, Graph: g, Status: types.ExecutionStatusRunning}
+	entries := []engine.OutboxEntry{{
+		ID: "root/" + string(id) + "/start/0",
+		Task: engine.Task{
+			ExecutionID: id,
+			NodeName:    "start",
+			NodeIdx:     0,
+			Type:        engine.TaskTypeNodeExec,
+		},
+	}}
+	return snap, entries
+}
+
+func concurrencyCapability(t *testing.T, state engine.StateStore) engine.ConcurrencyLimitedStateStore {
+	t.Helper()
+	limited, ok := state.(engine.ConcurrencyLimitedStateStore)
+	if !ok {
+		t.Fatalf("state store %T does not implement engine.ConcurrencyLimitedStateStore", state)
+	}
+	return limited
+}
+
+func admissionAdmitsUntilTheLimit(t *testing.T, state engine.StateStore) {
+	limited := concurrencyCapability(t, state)
+	ctx := context.Background()
+	g := concurrencyGraph(t, "conc-admit")
+	admission := concurrencyAdmissionFor(t, g, 3)
+
+	for i := 0; i < admission.Limit; i++ {
+		snap, entries := concurrencySnapshot(t, g)
+		res, err := limited.CreateExecutionWithConcurrency(ctx, snap, entries, admission)
+		if err != nil {
+			t.Fatalf("submission %d error = %v, want admission", i, err)
+		}
+		if res.Queued {
+			t.Fatalf("submission %d reported Queued=%v in reject mode", i, res.Queued)
+		}
+		loaded, err := state.GetExecution(ctx, snap.ID)
+		if err != nil {
+			t.Fatalf("GetExecution(%q) error = %v", snap.ID, err)
+		}
+		if loaded == nil {
+			t.Fatalf("admitted execution %q was not persisted", snap.ID)
+		}
+	}
+}
+
+func admissionRefusesWithoutPersisting(t *testing.T, state engine.StateStore) {
+	limited := concurrencyCapability(t, state)
+	ctx := context.Background()
+	g := concurrencyGraph(t, "conc-refuse")
+	admission := concurrencyAdmissionFor(t, g, 1)
+
+	first, entries := concurrencySnapshot(t, g)
+	if _, err := limited.CreateExecutionWithConcurrency(ctx, first, entries, admission); err != nil {
+		t.Fatalf("first submission error = %v", err)
+	}
+
+	refused, refusedEntries := concurrencySnapshot(t, g)
+	if _, err := limited.CreateExecutionWithConcurrency(ctx, refused, refusedEntries, admission); !errors.Is(err, engine.ErrConcurrencyLimit) {
+		t.Fatalf("over-limit submission error = %v, want ErrConcurrencyLimit", err)
+	}
+	loaded, err := state.GetExecution(ctx, refused.ID)
+	if err != nil {
+		t.Fatalf("GetExecution(refused) error = %v", err)
+	}
+	// GetExecution reports "no such execution" with a nil snapshot on both
+	// backends; the refusal must leave exactly that, not a zero-node running
+	// execution the list API would show.
+	if loaded != nil {
+		t.Fatalf("refused execution was persisted: %+v", loaded)
+	}
+}
+
+func admissionRefusesQueueMode(t *testing.T, state engine.StateStore) {
+	limited := concurrencyCapability(t, state)
+	ctx := context.Background()
+	g := concurrencyGraph(t, "conc-queue")
+	admission := concurrencyAdmissionFor(t, g, 1)
+	admission.Mode = types.ConcurrencyModeQueue
+
+	snap, entries := concurrencySnapshot(t, g)
+	_, err := limited.CreateExecutionWithConcurrency(ctx, snap, entries, admission)
+	if err == nil {
+		// A store that reports success here is admitting an over-limit
+		// submission with no queue to park it in, which is the silent-limit-
+		// break the two-phase rollout exists to prevent.
+		t.Fatal("queue-mode admission succeeded, want a refusal")
+	}
+	if !errors.Is(err, engine.ErrConcurrencyQueueUnsupported) {
+		t.Fatalf("queue-mode admission error = %v, want ErrConcurrencyQueueUnsupported", err)
+	}
+	loaded, err := state.GetExecution(ctx, snap.ID)
+	if err != nil {
+		t.Fatalf("GetExecution(queued) error = %v", err)
+	}
+	if loaded != nil {
+		t.Fatalf("queue-mode refusal persisted an execution: %+v", loaded)
+	}
+}
+
+// admissionKeyedByNameNotVersion pins the key scope: two versions of the same
+// workflow name share one slot set. Keying by version would let a re-published
+// definition run limit x versions concurrently and orphan the slots the
+// previous version's executions still hold.
+func admissionKeyedByNameNotVersion(t *testing.T, state engine.StateStore) {
+	limited := concurrencyCapability(t, state)
+	ctx := context.Background()
+	v1 := concurrencyGraph(t, "conc-version")
+	v2, err := graph.Compile(&types.WorkflowDef{
+		Name:    "conc-version",
+		Version: "2",
+		Nodes:   []types.NodeDef{{Name: "start", Type: "test.echo"}},
+	})
+	if err != nil {
+		t.Fatalf("Compile(v2) error = %v", err)
+	}
+
+	admission := concurrencyAdmissionFor(t, v1, 1)
+	snap, entries := concurrencySnapshot(t, v1)
+	if _, err := limited.CreateExecutionWithConcurrency(ctx, snap, entries, admission); err != nil {
+		t.Fatalf("v1 submission error = %v", err)
+	}
+
+	snap2, entries2 := concurrencySnapshot(t, v2)
+	if _, err := limited.CreateExecutionWithConcurrency(ctx, snap2, entries2, admission); !errors.Is(err, engine.ErrConcurrencyLimit) {
+		t.Fatalf("v2 submission while v1 holds the only slot error = %v, want ErrConcurrencyLimit", err)
+	}
+}
+
+// admissionKeyedByNamespace pins tenant isolation: the same workflow name in
+// another namespace gets its own limit, or one tenant's backlog would throttle
+// another's.
+func admissionKeyedByNamespace(t *testing.T, state engine.StateStore) {
+	limited := concurrencyCapability(t, state)
+	ctx := context.Background()
+	g := concurrencyGraph(t, "conc-ns")
+
+	first := concurrencyAdmissionFor(t, g, 1)
+	snap, entries := concurrencySnapshot(t, g)
+	if _, err := limited.CreateExecutionWithConcurrency(ctx, snap, entries, first); err != nil {
+		t.Fatalf("default-namespace submission error = %v", err)
+	}
+
+	other := first
+	other.Namespace = "other-tenant"
+	snap2, entries2 := concurrencySnapshot(t, g)
+	if _, err := limited.CreateExecutionWithConcurrency(ctx, snap2, entries2, other); err != nil {
+		t.Fatalf("other-namespace submission error = %v, want its own slot", err)
+	}
+}
+
+// admissionReleasesOnTerminalStatus is the release half of the contract, driven
+// through UpdateExecutionStatus: whatever moves an execution to a terminal
+// status has to free its slot, or the effective limit decays with every
+// completed execution until a restart clears the leak.
+func admissionReleasesOnTerminalStatus(t *testing.T, state engine.StateStore) {
+	limited := concurrencyCapability(t, state)
+	ctx := context.Background()
+	g := concurrencyGraph(t, "conc-release")
+	admission := concurrencyAdmissionFor(t, g, 1)
+
+	snap, entries := concurrencySnapshot(t, g)
+	if _, err := limited.CreateExecutionWithConcurrency(ctx, snap, entries, admission); err != nil {
+		t.Fatalf("first submission error = %v", err)
+	}
+	if err := state.UpdateExecutionStatus(ctx, snap.ID, types.ExecutionStatusSuccess, ""); err != nil {
+		t.Fatalf("UpdateExecutionStatus(success) error = %v", err)
+	}
+
+	second, entries2 := concurrencySnapshot(t, g)
+	if _, err := limited.CreateExecutionWithConcurrency(ctx, second, entries2, admission); err != nil {
+		t.Fatalf("submission after the slot was released error = %v, want admission", err)
+	}
+}
+
+// admissionReleasesOnAtomicCompletion drives the release through the atomic
+// commit path instead of UpdateExecutionStatus. The two are separate writers in
+// every backend, and a release wired into only one of them leaks a slot for
+// every execution that finishes through the other — which is the common case.
+func admissionReleasesOnAtomicCompletion(t *testing.T, state engine.StateStore) {
+	limited := concurrencyCapability(t, state)
+	atomic, ok := state.(engine.AtomicStateStore)
+	if !ok {
+		t.Skipf("%T does not implement AtomicStateStore", state)
+	}
+	ctx := context.Background()
+	g := concurrencyGraph(t, "conc-atomic-release")
+	admission := concurrencyAdmissionFor(t, g, 1)
+
+	snap, entries := concurrencySnapshot(t, g)
+	if _, err := limited.CreateExecutionWithConcurrency(ctx, snap, entries, admission); err != nil {
+		t.Fatalf("first submission error = %v", err)
+	}
+
+	// Lease the root as the dispatcher would, then commit it: a one-unit graph
+	// finishes on that commit, which is what must release the slot. Attempt is
+	// stated on the lease because the commit fences on it.
+	lease := &engine.TaskLease{
+		LeaseID:    engine.LeaseID("contract-lease"),
+		LeaseToken: engine.LeaseToken("contract-token"),
+		Attempt:    1,
+		Task:       entries[0].Task,
+		IssuedAt:   time.Now().UTC(),
+		TTL:        time.Minute,
+	}
+	if _, acquired, err := state.AcquireTaskLease(ctx, lease); err != nil || !acquired {
+		t.Fatalf("AcquireTaskLease() acquired=%v err=%v, want true/nil", acquired, err)
+	}
+	res, err := atomic.CommitNode(ctx, engine.CommitNodeRequest{
+		ExecutionID: snap.ID,
+		NodeName:    "start",
+		NodeIdx:     0,
+		UnitIdx:     0,
+		LeaseID:     lease.LeaseID,
+		LeaseToken:  lease.LeaseToken,
+		Attempt:     1,
+		Status:      types.NodeStatusSuccess,
+	})
+	if err != nil {
+		t.Fatalf("CommitNode() error = %v", err)
+	}
+	if !res.ExecutionDone {
+		t.Fatalf("CommitNode() ExecutionDone = false, want the one-unit graph to finish")
+	}
+
+	second, entries2 := concurrencySnapshot(t, g)
+	if _, err := limited.CreateExecutionWithConcurrency(ctx, second, entries2, admission); err != nil {
+		t.Fatalf("submission after atomic completion error = %v, want the slot released", err)
+	}
+}
+
+// admissionLimitOfOneSerializes is the concurrent half: N submitters race for
+// one slot. Exactly one may be admitted, and the store must report the losers
+// as refusals rather than over-admitting.
+func admissionLimitOfOneSerializes(t *testing.T, state engine.StateStore) {
+	limited := concurrencyCapability(t, state)
+	ctx := context.Background()
+	g := concurrencyGraph(t, "conc-serialize")
+	admission := concurrencyAdmissionFor(t, g, 1)
+
+	const submitters = 8
+	type outcome struct {
+		id  types.ExecutionID
+		err error
+	}
+	results := make(chan outcome, submitters)
+	for i := 0; i < submitters; i++ {
+		go func() {
+			snap, entries := concurrencySnapshot(t, g)
+			_, err := limited.CreateExecutionWithConcurrency(ctx, snap, entries, admission)
+			results <- outcome{id: snap.ID, err: err}
+		}()
+	}
+
+	var admitted []types.ExecutionID
+	for i := 0; i < submitters; i++ {
+		res := <-results
+		switch {
+		case res.err == nil:
+			admitted = append(admitted, res.id)
+		case errors.Is(res.err, engine.ErrConcurrencyLimit):
+			// expected for every loser
+		default:
+			t.Fatalf("unexpected submission error = %v", res.err)
+		}
+	}
+	if len(admitted) != 1 {
+		t.Fatalf("admitted %d submissions, want exactly 1", len(admitted))
+	}
+}
