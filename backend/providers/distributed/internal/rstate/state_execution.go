@@ -420,6 +420,11 @@ func (s *Store) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID,
 		// Redis persists the graph for later inspection/reload; the in-process
 		// cache and per-execution TTL override must not survive a terminal state.
 		s.evictExecutionCaches(id)
+		// The workflow's slot is released after the terminal write is durable,
+		// never before: a slot freed while the execution is still winding down
+		// would admit a replacement that overlaps it, which is exactly what the
+		// limit exists to prevent.
+		s.releaseWorkflowSlotAfterTerminal(ctx, id, status)
 	} else if applied == 1 {
 		if err := s.refreshTransientTTL(ctx, id, keys...); err != nil {
 			return err

@@ -685,6 +685,55 @@ redis.call('SET', KEYS[1], final, 'EX', tonumber(ARGV[1]))
 return anyFailed and -1 or 1
 `)
 
+// workflowAdmitLua charges one workflow slot, refusing when the workflow is at
+// its limit. This is the whole limit: concurrent submissions from different
+// replicas serialize on the slot ZSET, so the check-and-charge cannot race.
+//
+// KEYS[1] = workflow slot ZSET, KEYS[2] = namespace workflow index SET
+// ARGV[1] = slot member (the execution ID), ARGV[2] = limit,
+// ARGV[3] = admission score (unix seconds), ARGV[4] = workflow tag,
+// ARGV[5] = TTL seconds for the set and index
+// Returns 1 admitted, 0 at the limit.
+//
+// Queue mode never reaches this script: the Go side refuses it, because a slot
+// charged for an execution the queue then fails to persist would be a phantom
+// holder with no record to reconcile against.
+var workflowAdmitLua = redis.NewScript(`
+local limit = tonumber(ARGV[2])
+if redis.call('ZCARD', KEYS[1]) >= limit then
+    return 0
+end
+redis.call('ZADD', KEYS[1], tonumber(ARGV[3]), ARGV[1])
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[5]))
+redis.call('SADD', KEYS[2], ARGV[4])
+redis.call('EXPIRE', KEYS[2], tonumber(ARGV[5]))
+return 1
+`)
+
+// workflowReleaseLua frees the slot one execution holds. It is idempotent: a
+// member that is already gone releases nothing and returns 0, which is what
+// lets every terminal writer call it unconditionally.
+//
+// KEYS[1] = workflow slot ZSET, KEYS[2] = namespace workflow index SET
+// ARGV[1] = slot member, ARGV[2] = workflow tag
+// Returns 1 released, 0 already absent.
+//
+// The empty-set cleanup is what keeps the index honest: the namespace index
+// enumerates the workflow tags the reconciler has to sweep, so a tag left
+// behind by a drained set would send every sweep to a key that no longer
+// exists.
+var workflowReleaseLua = redis.NewScript(`
+local removed = redis.call('ZREM', KEYS[1], ARGV[1])
+if removed == 0 then
+    return 0
+end
+if redis.call('ZCARD', KEYS[1]) == 0 then
+    redis.call('DEL', KEYS[1])
+    redis.call('SREM', KEYS[2], ARGV[2])
+end
+return 1
+`)
+
 // ---------------------------------------------------------------------------
 // Store implements engine.StateStore.
 // ---------------------------------------------------------------------------

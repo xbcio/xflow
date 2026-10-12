@@ -467,6 +467,7 @@ func (s *Store) CommitGroup(ctx context.Context, req engine.GroupCommitRequest) 
 		s.shortenTransientGroupCompletionTTLBestEffort(ctx, req.ExecutionID)
 		s.markExecutionTerminalBestEffort(ctx, req.ExecutionID, out.ExecutionStatus)
 		s.evictExecutionCaches(req.ExecutionID)
+		s.releaseWorkflowSlotAfterTerminal(ctx, req.ExecutionID, out.ExecutionStatus)
 		// commitGroupLua finalizes the execution itself, so this is the only
 		// place the terminal state can reach the SQL audit trail.
 		s.projectExecutionStatus(ctx, req.ExecutionID, out.ExecutionStatus,

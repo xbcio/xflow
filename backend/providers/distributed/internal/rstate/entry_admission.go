@@ -438,6 +438,7 @@ func (s *Store) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 		// fully resolved by the admission itself; record the terminal marker for
 		// the same reason the commit paths do.
 		s.markExecutionTerminalBestEffort(ctx, execID, finalStatus)
+		s.releaseWorkflowSlotAfterTerminal(ctx, execID, finalStatus)
 		s.projectSeededExecution(ctx, execID, finalStatus, req)
 		return engine.SeedExecutionFromEntryResponse{
 			State:       engine.AdmissionStateAccepted,
