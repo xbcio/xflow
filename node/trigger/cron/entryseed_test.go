@@ -39,20 +39,22 @@ func minuteSchedule(t *testing.T) cronlib.Schedule {
 }
 
 // TestCronEntrySeedFireKey pins the fire key of one firing:
-// trigger:<workflow>:<entry unit>:cron:<scheduled minute in UTC RFC3339>.
+// trigger:<workflow>:<entry unit>:cron:<scheduled instant in UTC RFC3339>.
 //
-// The minute comes from the FIRING INSTANT truncated, which is the same
-// truncation the event ID uses. Two replicas of this schedule must derive the
-// same key from the same minute or the firing runs twice; a key that drifted
-// from the event ID would make the two deduplicators disagree about which
-// firing an event is.
+// The id comes from the instant the SCHEDULE named, not from the moment the
+// callback ran. Two replicas of this schedule must derive the same key from the
+// same scheduled instant or the firing runs twice; a key that drifted from the
+// event ID would make the two deduplicators disagree about which firing an event
+// is.
 func TestCronEntrySeedFireKey(t *testing.T) {
 	rt := triggertest.NewFakeEntrySeedRuntime()
 	tr := New()
 	in := seedInput(rt, "*/1 * * * *")
-	firedAt := time.Date(2026, 10, 12, 3, 4, 30, 0, time.UTC)
+	scheduled := time.Date(2026, 10, 12, 3, 4, 0, 0, time.UTC)
+	// Observed half a minute late: the identity must not move with it.
+	observed := time.Date(2026, 10, 12, 3, 4, 30, 0, time.UTC)
 
-	tr.admitScheduledFire(context.Background(), in, rt, minuteSchedule(t), firedAt)
+	tr.admitScheduledFire(context.Background(), in, rt, minuteSchedule(t), cronFire{scheduled: scheduled, observed: observed})
 
 	calls := rt.Seeds()
 	if len(calls) != 1 {
@@ -69,19 +71,21 @@ func TestCronEntrySeedFireKey(t *testing.T) {
 }
 
 // TestCronEntrySeedTwoReplicasFireOnce is the property the fire key exists for:
-// two replicas of the same activation, firing the same scheduled minute, must
+// two replicas of the same activation, running the same scheduled instant, must
 // produce exactly ONE execution. Both admit; the server's admission-key
 // deduplication is what folds the second into a duplicate.
 func TestCronEntrySeedTwoReplicasFireOnce(t *testing.T) {
 	rt := triggertest.NewFakeEntrySeedRuntime()
 	in := seedInput(rt, "*/1 * * * *")
 	sched := minuteSchedule(t)
-	firedAt := time.Date(2026, 10, 12, 3, 4, 2, 0, time.UTC)
+	scheduled := time.Date(2026, 10, 12, 3, 4, 0, 0, time.UTC)
 
 	// Two independent Node values: replica index is not part of the fire key in
-	// this path, so the two must collide on the server.
-	New().admitScheduledFire(context.Background(), in, rt, sched, firedAt)
-	New().admitScheduledFire(context.Background(), in, rt, sched, firedAt)
+	// this path, so the two must collide on the server. The second replica runs
+	// its callback noticeably later than the first — that is what the scheduled
+	// instant is derived for, and it must not move the key.
+	New().admitScheduledFire(context.Background(), in, rt, sched, cronFire{scheduled: scheduled, observed: scheduled.Add(20 * time.Millisecond)})
+	New().admitScheduledFire(context.Background(), in, rt, sched, cronFire{scheduled: scheduled, observed: scheduled.Add(40 * time.Second)})
 
 	if got := rt.SeedCount(); got != 2 {
 		t.Fatalf("admissions = %d, want 2 (both replicas submit)", got)
@@ -104,7 +108,8 @@ func TestCronEntrySeedRefusalIsNotRetried(t *testing.T) {
 	})
 	tr := New()
 	in := seedInput(rt, "*/1 * * * *")
-	tr.admitScheduledFire(context.Background(), in, rt, minuteSchedule(t), time.Now())
+	now := time.Now()
+	tr.admitScheduledFire(context.Background(), in, rt, minuteSchedule(t), cronFire{scheduled: now, observed: now})
 
 	if got := rt.SeedCount(); got != 1 {
 		t.Fatalf("admissions = %d, want 1: a refused firing is dropped, not retried", got)
@@ -125,7 +130,8 @@ func TestCronEntrySeedTransportFailureIsBounded(t *testing.T) {
 		return types.EntrySeedResponse{}, context.DeadlineExceeded
 	})
 	tr := New()
-	tr.admitScheduledFire(context.Background(), seedInput(rt, "*/1 * * * *"), rt, minuteSchedule(t), time.Now())
+	now := time.Now()
+	tr.admitScheduledFire(context.Background(), seedInput(rt, "*/1 * * * *"), rt, minuteSchedule(t), cronFire{scheduled: now, observed: now})
 
 	calls := rt.Seeds()
 	if len(calls) != 4 {
@@ -175,27 +181,31 @@ func TestCronEntrySeedKeepsLegacyPathForAnEngineRuntime(t *testing.T) {
 }
 
 // TestCronEntrySeedFireIDMatchesEventID asserts the two identities a firing has
-// cannot drift: the same instant must produce the event ID's minute and the
-// fire key's id.
+// cannot drift: the fire key's id and the event's scheduled_time must name the
+// same instant, and a zone setting must not move it.
 func TestCronEntrySeedFireIDMatchesEventID(t *testing.T) {
-	firedAt := time.Date(2026, 10, 12, 3, 4, 59, 999, time.UTC)
-	event := newCronTriggerEvent("wf-1", "entry", firedAt)
-	scheduled, _ := event.Data["scheduled_time"].(string)
-	if got, want := cronFireID(firedAt), scheduled; got != want {
-		t.Fatalf("cronFireID() = %q, event scheduled_time = %q; they must name the same minute", got, want)
+	scheduled := time.Date(2026, 10, 12, 3, 4, 0, 0, time.UTC)
+	event := newCronTriggerEvent("wf-1", "entry", cronFire{
+		scheduled: scheduled,
+		observed:  scheduled.Add(59*time.Second + 999*time.Millisecond),
+	})
+	fromEvent, _ := event.Data["scheduled_time"].(string)
+	if got, want := cronFireID(scheduled), fromEvent; got != want {
+		t.Fatalf("cronFireID() = %q, event scheduled_time = %q; they must name the same instant", got, want)
 	}
-	if event.ID != "wf-1/entry/"+scheduled {
-		t.Fatalf("event ID = %q, want it built from the same minute", event.ID)
+	if event.ID != "wf-1/entry/"+fromEvent {
+		t.Fatalf("event ID = %q, want it built from the same instant", event.ID)
 	}
-	// A non-UTC schedule truncates to the same instant: every IANA zone differs
-	// from UTC by whole minutes, so the minute boundary is a global one.
+	// The fire key is the instant rendered in UTC, so the zone a schedule is
+	// evaluated in cannot change the identity replicas collide on — a schedule in
+	// Asia/Shanghai and the same schedule in UTC admit under one key.
 	shanghai, err := time.LoadLocation("Asia/Shanghai")
 	if err != nil {
 		t.Fatalf("load location: %v", err)
 	}
-	if got := cronFireID(firedAt.In(shanghai)); got != cronFireID(firedAt) {
-		t.Fatalf("fire id in Asia/Shanghai = %q, in UTC = %q; the minute must not depend on the zone",
-			got, cronFireID(firedAt))
+	if got := cronFireID(scheduled.In(shanghai)); got != cronFireID(scheduled) {
+		t.Fatalf("fire id in Asia/Shanghai = %q, in UTC = %q; the identity must not depend on the zone",
+			got, cronFireID(scheduled))
 	}
 }
 

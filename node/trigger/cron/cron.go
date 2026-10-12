@@ -85,13 +85,22 @@ func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (ty
 	if err != nil {
 		return nil, err
 	}
+	// The schedule is parsed here rather than left to AddFunc because the firing's
+	// identity comes from it: the cursor needs the schedule to answer which
+	// instant a firing belongs to, and both paths must answer that the same way.
+	sched, err := cronlib.ParseStandard(expr)
+	if err != nil {
+		return nil, err
+	}
 	if seedadmit.Enabled(in) {
-		return n.activateEntrySeed(ctx, in, expr, loc)
+		return n.activateEntrySeed(ctx, in, sched, loc)
 	}
 	runCtx, cancel := context.WithCancel(ctx)
+	cursor := newScheduleCursor(sched, time.Now().In(loc))
 	c := cronlib.New(cronlib.WithLocation(loc))
-	if _, err := c.AddFunc(expr, func() {
-		event := newCronTriggerEvent(in.WorkflowID, in.NodeName, time.Now().In(loc))
+	c.Schedule(sched, cronlib.FuncJob(func() {
+		observed := time.Now().In(loc)
+		event := newCronTriggerEvent(in.WorkflowID, in.NodeName, cursor.next(observed))
 		if ok, err := in.Runtime.Dedup(runCtx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+event.ID, 2*time.Minute); err == nil && ok {
 			if _, err := in.Emit(runCtx, event); err != nil {
 				// A firing that was refused is DROPPED, and that is the whole
@@ -114,10 +123,7 @@ func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (ty
 					"err", err)
 			}
 		}
-	}); err != nil {
-		cancel()
-		return nil, err
-	}
+	}))
 	c.Start()
 	return types.CloseFunc(func(context.Context) error {
 		cancel()
@@ -138,28 +144,22 @@ var admitRetry = seedadmit.DefaultRetry
 // activateEntrySeed hosts the cron on a runner that admits through the control
 // plane's entry-seed endpoint instead of emitting into an embedded engine.
 // Every replica runs the same schedule and submits the same fire key for a
-// scheduled minute, and the server's admission-key deduplication is what turns
+// scheduled instant, and the server's admission-key deduplication is what turns
 // that into one execution per firing — so there is no leader election and no
 // runner-side lock (spec 2026-10-12 §4).
-//
-// The schedule is parsed explicitly rather than left to cronlib's AddFunc
-// because the admit window is the interval to the NEXT firing: a retry that
-// outlived it would let two firings contend for one retry budget.
-func (n *Node) activateEntrySeed(ctx context.Context, in *types.TriggerActivateInput, expression string, loc *time.Location) (types.TriggerSubscription, error) {
+func (n *Node) activateEntrySeed(ctx context.Context, in *types.TriggerActivateInput, sched cronlib.Schedule, loc *time.Location) (types.TriggerSubscription, error) {
 	rt, ok := in.Runtime.(types.EntrySeedRuntime)
 	if !ok {
 		// seedadmit.Enabled proved the capability a moment ago; fail closed
 		// rather than fall back onto Emit, which this runtime cannot serve.
 		return nil, fmt.Errorf("cron trigger: entry-seed activation requires an entry-seed runtime")
 	}
-	sched, err := cronlib.ParseStandard(expression)
-	if err != nil {
-		return nil, err
-	}
 	runCtx, cancel := context.WithCancel(ctx)
+	cursor := newScheduleCursor(sched, time.Now().In(loc))
 	c := cronlib.New(cronlib.WithLocation(loc))
 	c.Schedule(sched, cronlib.FuncJob(func() {
-		n.admitScheduledFire(runCtx, in, rt, sched, time.Now().In(loc))
+		observed := time.Now().In(loc)
+		n.admitScheduledFire(runCtx, in, rt, sched, cursor.next(observed))
 	}))
 	c.Start()
 	return types.CloseFunc(func(context.Context) error {
@@ -173,24 +173,16 @@ func (n *Node) activateEntrySeed(ctx context.Context, in *types.TriggerActivateI
 	}), nil
 }
 
-// admitScheduledFire admits one firing at firedAt, the instant the callback
-// ran.
+// admitScheduledFire admits one firing.
 //
 // It is a method rather than an inline closure body so a test can fire it at a
 // chosen instant: a five-field cron fires at minute granularity, so there is no
 // way to reach the next firing inside a test without waiting a minute, and no
 // way to assert what the fire key is for a given instant without one.
-func (n *Node) admitScheduledFire(ctx context.Context, in *types.TriggerActivateInput, rt types.EntrySeedRuntime, sched cronlib.Schedule, firedAt time.Time) {
-	event := newCronTriggerEvent(in.WorkflowID, in.NodeName, firedAt)
-	req := seedadmit.NewRequest(in, seedadmit.KindCron, cronFireID(firedAt), event)
-	window := sched.Next(firedAt).Sub(firedAt)
-	if window <= 0 {
-		// A schedule with no next firing gives no upper bound; the fire's own
-		// minute is the smallest cadence a five-field cron can express, so it is
-		// the tightest bound available rather than an arbitrary one.
-		window = time.Minute
-	}
-	admitCtx, admitCancel := context.WithTimeout(ctx, window)
+func (n *Node) admitScheduledFire(ctx context.Context, in *types.TriggerActivateInput, rt types.EntrySeedRuntime, sched cronlib.Schedule, fire cronFire) {
+	event := newCronTriggerEvent(in.WorkflowID, in.NodeName, fire)
+	req := seedadmit.NewRequest(in, seedadmit.KindCron, cronFireID(fire.scheduled), event)
+	admitCtx, admitCancel := context.WithTimeout(ctx, firingWindow(sched, fire.scheduled))
 	defer admitCancel()
 	result, err := seedadmit.Admit(admitCtx, rt, req, admitRetry)
 	switch result {
@@ -214,39 +206,38 @@ func (n *Node) admitScheduledFire(ctx context.Context, in *types.TriggerActivate
 
 // newCronTriggerEvent builds the event for one firing. It is a function rather
 // than an inline closure body for the same reason timer's newTimerTriggerEvent
-// is: the minute truncation below decides the event ID, and the event ID is the
-// deduplication key. Inside a closure driven by the real clock there is no way
-// to assert that truncation without racing a minute boundary.
+// is: the scheduled instant decides the event ID, and the event ID is the
+// deduplication key; inside a closure driven by the real clock there is no way to
+// assert which instant a firing was attributed to without racing the boundary.
 //
-// The truncation is what makes two replicas firing the same schedule agree on
-// one identity. Widening it to an hour would fold every firing in an hour into
-// one ID and the deduper would drop all but the first; removing it would give
-// each replica a distinct sub-second ID and every firing would run twice.
-func newCronTriggerEvent(workflowID types.WorkflowID, nodeName string, t time.Time) *types.TriggerEvent {
-	scheduled := cronScheduledMinute(t)
+// The scheduled instant — not the observation — is the identity, because that is
+// the only thing two replicas of one schedule necessarily agree on: their
+// callbacks run at different moments, and one of them may run late enough to
+// cross into the next minute. Publishing the scheduled instant as `scheduled_time`
+// and the observation as Time keeps both facts available instead of trading one
+// for the other.
+func newCronTriggerEvent(workflowID types.WorkflowID, nodeName string, fire cronFire) *types.TriggerEvent {
+	scheduled := fire.scheduled.Format(time.RFC3339Nano)
 	return &types.TriggerEvent{
-		ID:     fmt.Sprintf("%s/%s/%s", workflowID, nodeName, scheduled.Format(time.RFC3339)),
+		ID:     fmt.Sprintf("%s/%s/%s", workflowID, nodeName, scheduled),
 		Kind:   "cron",
 		Source: nodeName,
-		Time:   t,
-		Data:   map[string]any{"scheduled_time": scheduled.Format(time.RFC3339)},
+		Time:   fire.observed,
+		Data:   map[string]any{"scheduled_time": scheduled},
 	}
 }
 
-// cronScheduledMinute is the minute a firing belongs to. Minute truncation is
-// timezone-independent (every IANA zone differs from UTC by a whole number of
-// minutes), so two replicas evaluating the same schedule in the same zone — or
-// in different zones that happen to be configured — derive the same instant.
-func cronScheduledMinute(t time.Time) time.Time {
-	return t.Truncate(time.Minute)
-}
-
-// cronFireID is the entry-seed fire-key id of one firing: the scheduled minute
-// in UTC RFC3339. It is derived from the same truncation the event ID uses, so
-// the identity the embedded engine's deduper sees and the identity the control
-// plane's admission sees cannot drift apart.
-func cronFireID(firedAt time.Time) string {
-	return cronScheduledMinute(firedAt).UTC().Format(time.RFC3339)
+// cronFireID is the entry-seed fire-key id of one firing: the scheduled instant
+// in UTC RFC3339Nano.
+//
+// It is derived from the same instant the event ID is, so the identity the
+// embedded engine's deduper sees and the identity the control plane's admission
+// sees cannot drift apart. Nanoseconds are carried because a schedule can name a
+// sub-second cadence (@every 1500ms); for the whole-second cadences every cron
+// expression not spelled in milliseconds produces, the formatting is identical to
+// RFC3339.
+func cronFireID(scheduled time.Time) string {
+	return scheduled.UTC().Format(time.RFC3339Nano)
 }
 
 func init() { registry.RegisterTrigger(&Node{}) }
