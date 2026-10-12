@@ -25,15 +25,24 @@ var ErrConcurrencyLimit = errors.New("workflow concurrency limit reached")
 var ErrConcurrencyUnsupported = errors.New("state store does not support execution concurrency limits")
 
 // ErrConcurrencyQueueUnsupported is returned when a workflow asks for QUEUE
-// mode, which no StateStore implements yet.
+// mode and the wired StateStore cannot park an execution.
 //
-// It exists so queue mode can land in two phases without a release window in
-// which an over-limit submission is admitted: until the queue is implemented,
-// queue mode is refused rather than silently downgraded to admit-anyway. That
-// refusal is the store's decision, not the engine's — only the store knows
-// whether it can park an execution — and it is what a store must return when
-// it cannot.
+// It exists so an over-limit submission is never silently downgraded: a store
+// that can enforce a limit but cannot queue must refuse, because admitting the
+// submission would break the limit the definition declared, and rejecting it
+// would fail a submission the author expected to be held. The refusal is the
+// store's decision, not the engine's — only the store knows whether it can park
+// an execution — and it is what a store must return when it cannot.
 var ErrConcurrencyQueueUnsupported = errors.New("state store does not support concurrency queue mode")
+
+// ErrConcurrencyQueueFull is returned by a QUEUE-mode submission that would
+// exceed the workflow's max_queued backlog. Nothing was persisted for it.
+//
+// It is a distinct sentinel from ErrConcurrencyLimit because the two say
+// different things to a caller: a full queue is a backlog to wait out, and a
+// reached limit is a slot to wait out. Both are retryable, and the HTTP layer
+// gives them different codes so a caller can tell which one it hit.
+var ErrConcurrencyQueueFull = errors.New("workflow concurrency queue is full")
 
 // ConcurrencyAdmission describes the slot one submission contends for.
 //
@@ -68,7 +77,8 @@ type ConcurrencyAdmissionResult struct {
 	// until promotion makes them deliverable.
 	Queued bool
 	// QueuePosition is the queued execution's 1-based position, or 0 when
-	// Queued is false.
+	// Queued is false. Position 1 is the head: the execution the next release
+	// promotes.
 	QueuePosition int
 }
 

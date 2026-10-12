@@ -140,13 +140,17 @@ func (e *Engine) startLimitedExecution(ctx context.Context, snap *ExecutionSnaps
 	}
 	res, err := state.CreateExecutionWithConcurrency(ctx, snap, entries, *admission)
 	if err != nil {
-		// QUEUE mode is refused by the store, and it is refused before anything
-		// is written. Its sentinel is returned as-is rather than dressed up as a
-		// creation failure: a definition that uses the queue is not a broken
-		// submission, it is asking for a capability the store has said it lacks,
-		// and that distinction is what makes the refusal actionable.
-		if errors.Is(err, ErrConcurrencyQueueUnsupported) {
+		// QUEUE mode refused by the store is returned as-is rather than dressed
+		// up as a creation failure: a definition that uses the queue is not a
+		// broken submission, it is asking for a capability the store has said it
+		// lacks, and that distinction is what makes the refusal actionable.
+		// A full queue is the same shape of answer — a refusal the submitter can
+		// act on — so it keeps its sentinel and gains the workflow it belongs to.
+		switch {
+		case errors.Is(err, ErrConcurrencyQueueUnsupported):
 			return "", fmt.Errorf("workflow %q: %w", admission.Workflow, ErrConcurrencyQueueUnsupported)
+		case errors.Is(err, ErrConcurrencyQueueFull):
+			return "", fmt.Errorf("workflow %q: %w", admission.Workflow, ErrConcurrencyQueueFull)
 		}
 		return "", fmt.Errorf("create execution: %w", err)
 	}
