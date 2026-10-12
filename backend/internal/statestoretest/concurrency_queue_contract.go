@@ -47,6 +47,9 @@ func RunConcurrencyQueueContract(t *testing.T, newStore ConcurrencyStoreFactory)
 	t.Run("ExpiresAQueuedExecutionPastItsTimeout", func(t *testing.T) {
 		queueExpiresAQueuedExecutionPastItsTimeout(t, newStore(t))
 	})
+	t.Run("ReportsThePositionOfAQueuedExecution", func(t *testing.T) {
+		queueReportsThePositionOfAQueuedExecution(t, newStore(t))
+	})
 }
 
 // queueAdmissionFor builds the QUEUE-mode admission one submission contends
@@ -343,4 +346,77 @@ func queueExpiresAQueuedExecutionPastItsTimeout(t *testing.T, state engine.State
 	if expired, err := expirer.ExpireQueuedExecutions(ctx, 0); err != nil || expired != 0 {
 		t.Fatalf("second ExpireQueuedExecutions() = %d (err %v), want 0: nothing is queued any more", expired, err)
 	}
+}
+
+// queueReportsThePositionOfAQueuedExecution pins the read path a waiting caller
+// has: the admission result says where a submission entered the line, and only
+// the store can say where it stands now. The position has to be the line's own
+// order — the execution the next release will promote is 1 — and it has to be
+// 0, not an error and not 1, for an execution that is not waiting at all.
+func queueReportsThePositionOfAQueuedExecution(t *testing.T, state engine.StateStore) {
+	inspector, ok := state.(engine.ConcurrencyQueueInspector)
+	if !ok {
+		t.Skipf("%T does not implement engine.ConcurrencyQueueInspector", state)
+	}
+	ctx := context.Background()
+	g := concurrencyGraph(t, "conc-queue-position")
+	admission := queueAdmissionFor(t, g, 1, 0, 0)
+
+	holder, _ := queueSubmit(t, state, ctx, g, admission)
+	head, headRes := queueSubmit(t, state, ctx, g, admission)
+	behind, behindRes := queueSubmit(t, state, ctx, g, admission)
+	if !headRes.Queued || headRes.QueuePosition != 1 {
+		t.Fatalf("head admission = %+v, want position 1", headRes)
+	}
+	if !behindRes.Queued || behindRes.QueuePosition != 2 {
+		t.Fatalf("second admission = %+v, want position 2", behindRes)
+	}
+
+	if got := queuePosition(t, inspector, ctx, head); got != 1 {
+		t.Fatalf("position of the head = %d, want 1", got)
+	}
+	if got := queuePosition(t, inspector, ctx, behind); got != 2 {
+		t.Fatalf("position of the second in line = %d, want 2", got)
+	}
+	// An execution that holds a slot is not waiting, and 1 would be a lie the
+	// caller could act on — it would read as "next to be promoted".
+	if got := queuePosition(t, inspector, ctx, holder); got != 0 {
+		t.Fatalf("position of the running holder = %d, want 0", got)
+	}
+
+	// The line moves, and the position with it: canceling the head promotes
+	// nobody (the holder still holds the only slot) but does advance whoever was
+	// behind it.
+	if err := state.UpdateExecutionStatus(ctx, head, types.ExecutionStatusCanceling, ""); err != nil {
+		t.Fatalf("UpdateExecutionStatus(canceling) error = %v", err)
+	}
+	if err := state.UpdateExecutionStatus(ctx, head, types.ExecutionStatusCanceled, ""); err != nil {
+		t.Fatalf("UpdateExecutionStatus(canceled) error = %v", err)
+	}
+	if got := queuePosition(t, inspector, ctx, behind); got != 1 {
+		t.Fatalf("position after the head left = %d, want 1", got)
+	}
+	if got := queuePosition(t, inspector, ctx, head); got != 0 {
+		t.Fatalf("position of a canceled queued execution = %d, want 0", got)
+	}
+
+	// Promotion is the other departure, and it also ends the wait.
+	if err := state.UpdateExecutionStatus(ctx, holder, types.ExecutionStatusSuccess, ""); err != nil {
+		t.Fatalf("release holder error = %v", err)
+	}
+	if got := queuePosition(t, inspector, ctx, behind); got != 0 {
+		t.Fatalf("position after promotion = %d, want 0: it is running now", got)
+	}
+}
+
+// queuePosition reads one execution's place in line, failing the test on a real
+// read error so a store that cannot answer is distinguished from one that
+// answers 0.
+func queuePosition(t *testing.T, inspector engine.ConcurrencyQueueInspector, ctx context.Context, id types.ExecutionID) int {
+	t.Helper()
+	position, err := inspector.ConcurrencyQueuePosition(ctx, id)
+	if err != nil {
+		t.Fatalf("ConcurrencyQueuePosition(%q) error = %v", id, err)
+	}
+	return position
 }
