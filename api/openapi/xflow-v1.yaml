@@ -16,6 +16,14 @@ info:
     /readyz probes, which load balancers parse directly and must not be
     enveloped (§7).
 
+    The webhook entry route POST|{method} /v1/hooks/{namespace}/{workflow_id}/
+    {entry_unit} is the third exception, for the same underlying reason: it is
+    not addressed by a platform client but by an external system, and it speaks
+    the entry-seed admission shape (bare `state`/`execution_id` objects and bare
+    `error` objects) that the runner protocol face defines. Its authentication
+    is not bearerAuth either — it is a per-entry HMAC signature over the request
+    body, so its operation carries `security: []`. See its own description.
+
     Delivery semantics, stated once here instead of per endpoint: the handler
     boundary and the Runner Protocol are at-least-once — lease replay, node
     execution timeout and failover can each invoke the same handler twice — so
@@ -52,6 +60,12 @@ tags:
     description: "Ops surface: leader status, runner/execution inspect, dead-letter list/replay."
   - name: Probes
     description: Liveness and readiness probes (not enveloped, not authenticated).
+  - name: Webhooks
+    description: |
+      Server-hosted webhook entry routes. Registered by the server (a runner has
+      no inbound address), authenticated per entry by an HMAC signature rather
+      than by bearerAuth, and answered with the bare entry-seed shapes rather
+      than the Envelope.
 
 security:
   - bearerAuth: []
@@ -1230,6 +1244,146 @@ paths:
         default:
           $ref: "#/components/responses/DefaultError"
 
+  /v1/hooks/{namespace}/{workflow_id}/{entry_unit}:
+    post:
+      operationId: deliverWebhookEntry
+      summary: Deliver an event to a server-hosted webhook entry
+      description: |
+        Admits one event into the execution of a workflow whose entry unit is a
+        `xflow.trigger.webhook` node. A runner cannot host this route — it is an
+        outbound execution node with no stable address and no inbound port — so
+        the server hosts it and admits the request through the same entry-seed
+        admission a runner would have used: the event is deduplicated on its
+        event id, subject to the workflow's concurrency policy, and fans out to
+        the same downstream nodes.
+
+        **Method.** The HTTP method is a property of the entry, not of the
+        route: the entry's webhook node declares `method` (POST, PUT, ...), and a
+        request using any other verb is answered 405 with an `Allow` header. This
+        path item documents the operation once, under `post`, because that is the
+        verb webhook senders overwhelmingly use.
+
+        **Authentication.** Not bearerAuth. The sender signs the request body
+        with HMAC-SHA256 under the secret the entry names (its `secret_supply`
+        parameter, resolved server-side from the supply store), and sends it in
+        `X-XFlow-Signature` as `sha256=<hex>`. The comparison is constant-time.
+        A definition whose server-hosted webhook entry names no secret cannot be
+        registered at all, so this route is never an unauthenticated
+        execution-creating endpoint.
+
+        **Event identity.** The event id is taken from the header the entry
+        declares (`event_id_header`); without one it is `sha256(body)` bucketed
+        to the minute. A redelivery of the same event never creates a second
+        execution and is answered with the execution id that already exists —
+        409 `conflict` when the redelivered payload carries a different observed
+        time, `duplicate` on the accepted same-content case.
+
+        **Limits.** The body is read under the entry's declared
+        `max_body_bytes` (default 1 MiB) and answered 413 when exceeded.
+
+        **Body.** The request body is the event payload, sent as-is. It is
+        delivered to downstream nodes as `$input.trigger.raw` (and, decoded into
+        `$input.trigger.data`, alongside the method, path and headers the server
+        observed).
+      tags: [Webhooks]
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/WebhookNamespace"
+        - $ref: "#/components/parameters/WebhookWorkflowId"
+        - $ref: "#/components/parameters/WebhookEntryUnit"
+        - $ref: "#/components/parameters/WebhookSignature"
+      requestBody:
+        required: true
+        description: The event payload. Its bytes are exactly what the signature covers.
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+          text/plain:
+            schema:
+              type: string
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: |
+            The event was admitted (or was already admitted under this id). The
+            execution id is the same one a redelivery returns.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookEntryAdmission"
+        "401":
+          description: |
+            Signature missing, malformed, or not the HMAC of the body under the
+            entry's secret. Deliberately one answer for all three.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookEntryError"
+        "404":
+          description: |
+            No such workflow, no such entry unit, or the path's namespace does
+            not own the workflow. The three are not distinguished.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookEntryError"
+        "405":
+          description: The entry declares a different HTTP method; `Allow` names it.
+          headers:
+            Allow:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookEntryError"
+        "409":
+          description: |
+            The event id was already admitted with a different result. The body
+            still names the execution that exists.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookEntryAdmission"
+        "413":
+          description: The body exceeded the entry's `max_body_bytes`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookEntryError"
+        "429":
+          description: |
+            The workflow's concurrency policy refused the event. Nothing was
+            persisted; retry after the floor stated in `Retry-After` and in the
+            body's `retry_after_seconds`.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookEntryRefusal"
+        "503":
+          description: |
+            The entry's signing secret could not be resolved, so no caller can be
+            authenticated. Nothing was admitted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookEntryError"
+        default:
+          description: Unexpected server failure. Generic body — no internal detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookEntryError"
+
   /v1/management/leader:
     get:
       operationId: getLeader
@@ -2042,6 +2196,43 @@ components:
       schema:
         type: string
         pattern: '^[A-Za-z0-9._-]{1,128}$'
+    WebhookNamespace:
+      name: namespace
+      in: path
+      required: true
+      description: |
+        Namespace the entry was registered in. It is a CLAIM: the server resolves
+        the workflow and compares, and a segment naming another tenant's
+        namespace is answered 404 rather than served. The admission always runs
+        under the record's own namespace.
+      schema:
+        type: string
+    WebhookWorkflowId:
+      name: workflow_id
+      in: path
+      required: true
+      description: Server-assigned workflow id of the definition holding the entry.
+      schema:
+        type: string
+    WebhookEntryUnit:
+      name: entry_unit
+      in: path
+      required: true
+      description: |
+        Name of the webhook trigger node (the entry unit) within that workflow.
+      schema:
+        type: string
+    WebhookSignature:
+      name: X-XFlow-Signature
+      in: header
+      required: true
+      description: |
+        `sha256=<hex>` — the HMAC-SHA256 of the exact request body bytes under
+        the entry's signing secret. The scheme tag is required. The value is
+        never echoed, logged, or reported in an error.
+      schema:
+        type: string
+        pattern: '^sha256=[0-9a-f]{64}$'
 
   headers:
     XRequestId:
@@ -2337,6 +2528,84 @@ components:
         status:
           type: string
           example: ok
+
+    WebhookEntryAdmission:
+      type: object
+      description: |
+        The bare (non-enveloped) entry-seed admission result, as the runner
+        protocol face defines it (spec §0.1/§8.2). `state` is the discriminator:
+        `accepted` (a new execution, or `duplicate: true` for a redelivery the
+        engine recognised as the same result), `queued` (accepted into the
+        workflow's concurrency queue), or `conflict` (the event id was already
+        admitted with a different result — the 409 case, which still carries the
+        existing execution id). A refusal is the separate 429 shape.
+      required: [state, execution_id]
+      properties:
+        state:
+          type: string
+          enum: [accepted, queued, conflict]
+          example: accepted
+        execution_id:
+          type: string
+          description: |
+            Execution this event belongs to. For a redelivery it is the id of the
+            execution the first delivery created.
+          example: exec-01H8XG
+        duplicate:
+          type: boolean
+          description: True when the event id was already admitted with the same result.
+        queued:
+          type: boolean
+          description: True when the admission was queued rather than started immediately.
+        queue_position:
+          type: integer
+          description: Position in the workflow's concurrency queue, when queued.
+
+    WebhookEntryRefusal:
+      type: object
+      description: |
+        The bare refusal shape (429): nothing was persisted and the caller still
+        owns the event, so it retries after `retry_after_seconds`.
+      required: [state, error]
+      properties:
+        state:
+          type: string
+          enum: [over_limit, queue_full]
+          example: over_limit
+        error:
+          type: string
+          enum: [workflow_concurrency_limit, workflow_concurrency_queue_full]
+          example: workflow_concurrency_limit
+        retry_after_seconds:
+          type: integer
+          description: |
+            Lower bound, in seconds, on how long to wait before retrying. It
+            carries the same floor as the Retry-After header, for senders that
+            read only the body.
+          example: 1
+
+    WebhookEntryError:
+      type: object
+      description: |
+        The bare failure shape: one generic `error` code, and no other field —
+        no signature, no secret, no internal path, no echo of the request.
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Stable snake_case code.
+          enum:
+            - signature_invalid
+            - workflow_not_found
+            - entry_unit_not_found
+            - method_not_allowed
+            - payload_too_large
+            - body_unreadable
+            - entry_unavailable
+            - route_not_found
+            - internal server error
+          example: signature_invalid
 
     ReadyResponse:
       type: object

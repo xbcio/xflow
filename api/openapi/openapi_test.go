@@ -121,6 +121,25 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 			value:  apiserver.ExampleParamInvalidErrorEnvelope(),
 		},
 		{
+			// The server-hosted webhook route answers with the bare entry-seed
+			// shapes rather than an Envelope, so each of its three bodies is
+			// validated against its own schema — the shared protocol DTOs are
+			// marshaled through the same Example* seam as every other handler type.
+			name:   "webhook entry admission",
+			schema: "WebhookEntryAdmission",
+			value:  apiserver.ExampleWebhookEntryAdmission(execID),
+		},
+		{
+			name:   "webhook entry refusal",
+			schema: "WebhookEntryRefusal",
+			value:  apiserver.ExampleWebhookEntryRefusal(),
+		},
+		{
+			name:   "webhook entry error",
+			schema: "WebhookEntryError",
+			value:  apiserver.ExampleWebhookEntryError(),
+		},
+		{
 			// Every node type registered in this test process (the builtins
 			// the server links), through the real projector.
 			name:   "node types response",

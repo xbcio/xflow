@@ -7,6 +7,7 @@ import (
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/service/control"
+	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -54,6 +55,32 @@ func ExampleErrorEnvelope() any {
 // /v1/workflows, /v1/workflows/{id}).
 func ExampleRegisterWorkflowResponse(id string, warnings []string) any {
 	return registerWorkflowResponse{WorkflowID: types.WorkflowID(id), Warnings: warnings}
+}
+
+// ExampleWebhookEntryAdmission builds the accepted-delivery body of the
+// server-hosted webhook route (POST|{method} /v1/hooks/...). It returns the
+// protocol DTO the handler actually writes — the bare entry-seed shape, not an
+// Envelope — so a change to that shared DTO's tags turns the contract test red.
+func ExampleWebhookEntryAdmission(id types.ExecutionID) any {
+	return protocol.SeedExecutionResponse{State: "accepted", ExecutionID: string(id)}
+}
+
+// ExampleWebhookEntryRefusal builds the 429 body of the webhook route: a
+// concurrency refusal, with the retry floor the in-process caller would
+// otherwise have to invent.
+func ExampleWebhookEntryRefusal() any {
+	return protocol.SeedExecutionRefusal{
+		State:             "over_limit",
+		Error:             "workflow_concurrency_limit",
+		RetryAfterSeconds: concurrencyRetryAfterSeconds,
+	}
+}
+
+// ExampleWebhookEntryError builds the bare failure body of the webhook route
+// (401/404/405/413/503). It sets `additionalProperties: false` on the schema
+// side, so a field added to this shape without a contract update fails.
+func ExampleWebhookEntryError() any {
+	return errorResponse{Error: "signature_invalid"}
 }
 
 // exampleParamIssues is a non-zero ParamIssue list for the contract examples.
