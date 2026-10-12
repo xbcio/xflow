@@ -708,8 +708,14 @@ func TestListExecutionsRejectsUnusableFilters(t *testing.T) {
 	// A 400 must not be a disguised empty success: the same request one value
 	// over (a real status) is a 200. This is what distinguishes "rejected" from
 	// "there were no rows".
-	if status, body := getExecutionList(t, srv.URL, "tok-exec-a", "?status=success"); status != http.StatusOK {
-		t.Fatalf("status=success status = %d, want 200 (body=%s)", status, body)
+	//
+	// queued is in the list on purpose: it is the one status an operator has to
+	// be able to filter on to find the backlog, and a set that knew every status
+	// but that one would answer ?status=queued with a 400 that reads like a typo.
+	for _, status := range []string{"success", "queued"} {
+		if code, body := getExecutionList(t, srv.URL, "tok-exec-a", "?status="+status); code != http.StatusOK {
+			t.Fatalf("status=%s status = %d, want 200 (body=%s)", status, code, body)
+		}
 	}
 }
 
