@@ -851,6 +851,181 @@ paths:
         default:
           $ref: "#/components/responses/DefaultError"
 
+  /v1/executions/{id}/pause:
+    post:
+      operationId: pauseExecution
+      summary: Pause an execution
+      description: |
+        Suspends dispatch of a running execution and returns the resulting
+        execution detail. The status becomes `paused`, which is not terminal.
+
+        Work already leased to a runner is NOT interrupted: it runs to
+        completion and commits its result — including the commit that happens to
+        finish the execution — after which nothing new is dispatched. Suspended
+        nodes stay suspended, and a signal that arrives while paused is still
+        recorded; neither advances the run.
+
+        A paused execution keeps its concurrency slot: it still holds the run it
+        was admitted for, and releasing the slot would leave `resume` with
+        nowhere to return. `cancel` accepts a paused execution, which is the way
+        to release the slot without resuming.
+
+        Pausing an already-paused execution succeeds (the operation is
+        idempotent), so a retried request whose response was lost does not read
+        as a conflict. A `queued` execution cannot be paused — it has not
+        started, so there is no dispatch to hold — and neither can a terminal
+        one; both are 409.
+
+        Requires the `execution.control` scope.
+      tags: [Executions]
+      parameters:
+        - $ref: "#/components/parameters/ExecutionId"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: Paused, or already paused. The detail carries the current status.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ExecutionDetail"
+        "404":
+          description: No such execution in the caller's namespace.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                notFound:
+                  summary: The execution does not exist (or belongs to another namespace).
+                  value:
+                    success: false
+                    code: execution_not_found
+                    message: execution not found
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "409":
+          description: |
+            The execution is not in a pausable status. Check the `code`:
+            `execution_not_pausable` covers both the queued and the terminal
+            case, so a client that wants to tell them apart reads the status
+            from `GET /v1/executions/{id}`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                queued:
+                  summary: A queued execution has no running dispatch to hold.
+                  value:
+                    success: false
+                    code: execution_not_pausable
+                    message: execution is not in a pausable status
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "501":
+          description: This deployment cannot suspend dispatch at all (no pause capability).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                unsupported:
+                  summary: Neither the server nor its state store can hold dispatch.
+                  value:
+                    success: false
+                    code: execution_control_unsupported
+                    message: execution control is not supported
+                    trace_id: 0123456789abcdef0123456789abcdef
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/executions/{id}/resume:
+    post:
+      operationId: resumeExecution
+      summary: Resume an execution
+      description: |
+        Returns a paused execution to dispatch and queues the work the pause
+        held, then returns the resulting execution detail. The held work keeps
+        the deadline it was written with — a delayed intent is not pulled
+        forward — so an execution paused across a timer resumes on that timer's
+        original schedule, not immediately.
+
+        Only a `paused` execution can be resumed; every other status is 409
+        `execution_not_paused`, including a paused execution that reached a
+        terminal status while it was held (a task leased before the pause is
+        allowed to finish it).
+
+        Requires the `execution.control` scope.
+      tags: [Executions]
+      parameters:
+        - $ref: "#/components/parameters/ExecutionId"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: Resumed. The detail carries the current status.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ExecutionDetail"
+        "404":
+          description: No such execution in the caller's namespace.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                notFound:
+                  summary: The execution does not exist (or belongs to another namespace).
+                  value:
+                    success: false
+                    code: execution_not_found
+                    message: execution not found
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "409":
+          description: The execution is not paused.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                notPaused:
+                  summary: A resume is not a general restart.
+                  value:
+                    success: false
+                    code: execution_not_paused
+                    message: execution is not paused
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "501":
+          description: This deployment cannot suspend dispatch at all (no pause capability).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                unsupported:
+                  summary: Neither the server nor its state store can hold dispatch.
+                  value:
+                    success: false
+                    code: execution_control_unsupported
+                    message: execution control is not supported
+                    trace_id: 0123456789abcdef0123456789abcdef
+        default:
+          $ref: "#/components/responses/DefaultError"
+
   /v1/executions/{id}/signals:
     post:
       operationId: deliverSignal
