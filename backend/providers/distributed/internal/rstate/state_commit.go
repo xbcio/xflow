@@ -283,6 +283,11 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 		// transient decision this needs. The terminal marker goes in the same
 		// transient window, right after shortening has resolved that decision.
 		s.shortenTransientCompletionTTLBestEffort(ctx, req.ExecutionID)
+		// Separate pass, same window: this is the transition that finalizes the
+		// execution for every transient group that is not the last unit itself.
+		// It is not gated on isTransient — the group's mode is the workflow
+		// author's declaration and applies inside a durable workflow too.
+		s.shortenTransientGroupCompletionTTLBestEffort(ctx, req.ExecutionID)
 		s.markExecutionTerminalBestEffort(ctx, req.ExecutionID, out.ExecutionStatus)
 		s.evictExecutionCaches(req.ExecutionID)
 	}

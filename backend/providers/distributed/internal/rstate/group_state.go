@@ -460,6 +460,11 @@ func (s *Store) CommitGroup(ctx context.Context, req engine.GroupCommitRequest) 
 		// transient decision this needs. The terminal marker goes in the same
 		// transient window, right after shortening has resolved that decision.
 		s.shortenTransientCompletionTTLBestEffort(ctx, req.ExecutionID)
+		// The group whose commit just finalized the execution may itself be a
+		// transient group — the shape this exists for — so the group-key pass
+		// runs in the same window, before evictExecutionCaches drops the graph
+		// it enumerates from.
+		s.shortenTransientGroupCompletionTTLBestEffort(ctx, req.ExecutionID)
 		s.markExecutionTerminalBestEffort(ctx, req.ExecutionID, out.ExecutionStatus)
 		s.evictExecutionCaches(req.ExecutionID)
 		// commitGroupLua finalizes the execution itself, so this is the only

@@ -408,6 +408,10 @@ func (s *Store) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID,
 		if err := s.shortenTransientCompletionTTL(ctx, id, keys...); err != nil {
 			return err
 		}
+		// Group-key pass, best-effort by construction: this path is a cancel or
+		// timeout, and a retention miss on a group's artifacts must not fail a
+		// cancellation the caller asked for and Redis has already applied.
+		s.shortenTransientGroupCompletionTTLBestEffort(ctx, id)
 		// Order matters: the marker is read by the engine's inactive-execution
 		// classifier after the status key is gone, and it must keep the active
 		// retention — so it is written before evictExecutionCaches drops the
