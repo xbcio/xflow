@@ -663,7 +663,7 @@ func runServer(ctx context.Context, cfg serverConfig) error {
 		// namespace; the subject is server-configured, callers cannot self-report
 		// it. runServer rejects this in production mode (see validateProduction).
 		auth := apiserver.NewBearerPrincipalAuth(cfg.apiAuthToken, "xflow-operator",
-			[]string{"workflow", "execution", "deadletter.list", "deadletter.replay",
+			[]string{"workflow", "execution", "execution.control", "deadletter.list", "deadletter.replay",
 				"management.read", "management.write",
 				"management.leader.read", "management.runner.read"})
 		workflowAuth = auth

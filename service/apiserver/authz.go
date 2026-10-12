@@ -88,6 +88,14 @@ const (
 	OpExecutionSignal          = "execution.signal"
 	OpExecutionRevoke          = "execution.revoke"
 	OpExecutionCancel          = "execution.cancel"
+	// OpExecutionPause and OpExecutionResume suspend and release dispatch of a
+	// running execution. They are separate operations from cancel — and from
+	// each other — because each is its own state transition with its own
+	// refusal (a queued execution cannot be paused; a running one cannot be
+	// resumed), so a caller auditing a denial needs to know which one was
+	// attempted. Both map to the "execution.control" scope.
+	OpExecutionPause  = "execution.pause"
+	OpExecutionResume = "execution.resume"
 	// OpExecutionSeed is the mutation that seeds an execution from an entry unit
 	// (single node or group node) result via POST /v1/executions. It maps to the
 	// "execution" scope like the other execution operations.
@@ -186,6 +194,16 @@ func scopeForOperation(op string) string {
 		return "workflow"
 	case OpExecutionRead, OpExecutionSignal, OpExecutionRevoke, OpExecutionCancel, OpExecutionSeed:
 		return "execution"
+	case OpExecutionPause, OpExecutionResume:
+		// Deliberately NOT the "execution" scope that signal/cancel/read ride.
+		// Suspending a running execution is a dispatch-level control, not just
+		// another way to address one: a paused execution keeps its concurrency
+		// slot and stops making progress until an operator releases it, so the
+		// population trusted with "look at and signal an execution" is not
+		// automatically the population trusted to stop the pipeline. The scope
+		// is a new grant, and a token that predates it is refused (403) rather
+		// than silently granted the control.
+		return "execution.control"
 	case OpCurrentUserRead:
 		// Deliberately the console's baseline read scope rather than a scope of
 		// its own. The response is the caller's own credential, so a scope here
