@@ -10,6 +10,7 @@ import (
 )
 
 var _ engine.EntryAdmissionStore = (*memoryState)(nil)
+var _ engine.ConcurrencyLimitedEntryAdmissionStore = (*memoryState)(nil)
 
 // admissionEntry tracks a previously admitted entry-unit result.
 type admissionEntry struct {
@@ -20,37 +21,87 @@ type admissionEntry struct {
 // SeedExecutionFromEntry implements engine.EntryAdmissionStore. It
 // atomically admits an entry-unit result under the single-process mutex,
 // performing all 7 steps of the admission contract in one transition.
-func (s *memoryState) SeedExecutionFromEntry(_ context.Context, req engine.SeedExecutionFromEntryRequest) (engine.SeedExecutionFromEntryResponse, error) {
+func (s *memoryState) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecutionFromEntryRequest) (engine.SeedExecutionFromEntryResponse, error) {
+	return s.seedExecutionFromEntry(ctx, req, nil)
+}
+
+// SeedExecutionFromEntryWithConcurrency implements
+// engine.ConcurrencyLimitedEntryAdmissionStore: the same admission, judged
+// against the seeded graph's concurrency policy before anything is written.
+func (s *memoryState) SeedExecutionFromEntryWithConcurrency(ctx context.Context, req engine.SeedExecutionFromEntryRequest, admission engine.ConcurrencyAdmission) (engine.SeedExecutionFromEntryResponse, error) {
+	return s.seedExecutionFromEntry(ctx, req, &admission)
+}
+
+// seedExecutionFromEntry is the admission body both entry points share. Going
+// through one body is what keeps a seeded execution indistinguishable from a
+// submitted one: the seed writes its execution, its counters and its intents
+// with the same helpers a submission does, and an admission that lands in the
+// queue leaves the same state behind — status queued, intents held, a place in
+// line — because it is the same decision (chargeOrParkLocked) that put it
+// there.
+//
+// admission is nil when the seeded graph declares no concurrency limit, which
+// is the plain admission: no slot is consulted and the execution starts
+// running.
+func (s *memoryState) seedExecutionFromEntry(_ context.Context, req engine.SeedExecutionFromEntryRequest, admission *engine.ConcurrencyAdmission) (engine.SeedExecutionFromEntryResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	execID := engine.DeterministicExecutionID(req.AdmissionKey)
 
-	// Step 1: Check admission key occupancy.
+	// Step 1: Check admission key occupancy. This runs before the slot decision
+	// because it must be the first thing a retry meets: a redelivered batch
+	// neither charges a second slot nor loses the place in line its first
+	// attempt took.
 	if s.admissions == nil {
 		s.admissions = make(map[engine.AdmissionKey]*admissionEntry)
 	}
 	if existing, ok := s.admissions[req.AdmissionKey]; ok {
+		position := s.queuePositionLocked(existing.executionID)
 		if existing.resultHash == req.ResultHash {
 			// Duplicate accepted — same key, same hash.
 			return engine.SeedExecutionFromEntryResponse{
-				State:       engine.AdmissionStateAccepted,
-				ExecutionID: existing.executionID,
-				Duplicate:   true,
+				State:         engine.AdmissionStateAccepted,
+				ExecutionID:   existing.executionID,
+				Duplicate:     true,
+				Queued:        position > 0,
+				QueuePosition: position,
 			}, nil
 		}
 		// Conflict — same key, different hash.
 		return engine.SeedExecutionFromEntryResponse{
-			State:       engine.AdmissionStateConflict,
-			ExecutionID: existing.executionID,
+			State:         engine.AdmissionStateConflict,
+			ExecutionID:   existing.executionID,
+			Queued:        position > 0,
+			QueuePosition: position,
 		}, nil
 	}
 
-	// Step 2: Create execution.
+	// Step 2a: Slot decision. A refusal writes nothing at all — not the
+	// execution, not the admission — so the caller still owns the entry-unit
+	// result and can retry it once a slot frees or the backlog drains. That the
+	// refusal is a response state rather than an error is exactly what the
+	// caller needs: it is a decision the caller acts on, not a failed call.
+	pending := false
+	if admission != nil {
+		var err error
+		pending, err = s.chargeOrParkLocked(execID, *admission)
+		if err != nil {
+			return engine.SeedAdmissionRefusal(err)
+		}
+	}
+
+	// Step 2b: Create execution. A parked one is created queued in the same
+	// transition that took its place in line, so it is never observable running
+	// without a slot.
+	status := types.ExecutionStatusRunning
+	if pending {
+		status = types.ExecutionStatusQueued
+	}
 	snap := &engine.ExecutionSnapshot{
 		ID:     execID,
 		Graph:  req.Graph,
-		Status: types.ExecutionStatusRunning,
+		Status: status,
 		Params: req.Params,
 	}
 	s.createExecutionLocked(snap)
@@ -115,6 +166,22 @@ func (s *memoryState) SeedExecutionFromEntry(_ context.Context, req engine.SeedE
 			s.scheduled[counterKey] = "skip"
 			s.putOutboxLocked(execID, skipOutboxID(execID, skip.NodeName, 0), skip, time.Time{})
 		}
+	}
+
+	// Step 6d: Park what a queued admission just wrote. The intents above were
+	// written the way a running execution's are — they are the same intents,
+	// from the same helpers — so holding them is one pass over them rather than
+	// a hold parameter threaded through every writer.
+	//
+	// The position is read here, after the completion counting, because that is
+	// what decides whether the execution is still waiting: an admission that
+	// went straight to a terminal status (a fatal entry outcome with nothing
+	// downstream) left the line in step 6, and holding its intents at that point
+	// would leave them parked on an execution no release will ever mention.
+	result.QueuePosition = s.queuePositionLocked(execID)
+	result.Queued = result.QueuePosition > 0
+	if result.Queued {
+		s.holdOutboxLocked(execID)
 	}
 
 	// Step 7: Store admission entry.

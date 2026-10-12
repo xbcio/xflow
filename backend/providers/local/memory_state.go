@@ -173,17 +173,55 @@ func (s *memoryState) CreateExecutionWithConcurrency(_ context.Context, e *engin
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	pending, err := s.chargeOrParkLocked(e.ID, admission)
+	if err != nil {
+		return engine.ConcurrencyAdmissionResult{}, err
+	}
+	status := types.ExecutionStatusRunning
+	hold := time.Time{}
+	if pending {
+		status, hold = types.ExecutionStatusQueued, queuedOutboxHold
+	}
+	admitted := *e
+	admitted.Status = status
+	s.createExecutionLocked(&admitted)
+	s.writeInitialIntentsLocked(e.ID, entries, hold)
+	if !pending {
+		return engine.ConcurrencyAdmissionResult{}, nil
+	}
+	return engine.ConcurrencyAdmissionResult{Queued: true, QueuePosition: s.queuePositionLocked(e.ID)}, nil
+}
+
+// chargeOrParkLocked decides where one admission lands and records the
+// decision: a charged slot, or a place at the end of the workflow's line.
+//
+// It is the decision alone, with no execution written under it, because the two
+// paths that call it write different things — a submission writes its initial
+// intents, an entry seed writes an admission — and the decision is the part
+// that must not diverge between them. Everything a caller writes afterwards
+// happens in the same critical section, so the slot (or the place) is durable
+// before anything depends on it.
+func (s *memoryState) chargeOrParkLocked(id types.ExecutionID, admission engine.ConcurrencyAdmission) (bool, error) {
 	slot := s.slotForLocked(graph.ConcurrencyKey(admission.Namespace, admission.Workflow))
 	slot.limit = admission.Limit
 
 	if admission.Mode == types.ConcurrencyModeQueue {
-		return s.admitQueuedLocked(slot, e, entries, admission)
+		return s.parkOrChargeLocked(slot, id, admission)
 	}
 	if len(slot.holders) >= admission.Limit {
-		return engine.ConcurrencyAdmissionResult{}, engine.ErrConcurrencyLimit
+		return false, engine.ErrConcurrencyLimit
 	}
-	s.admitLocked(slot, e, entries)
-	return engine.ConcurrencyAdmissionResult{}, nil
+	s.chargeSlotLocked(slot, id)
+	return false, nil
+}
+
+// chargeSlotLocked records that one execution holds a slot in the set.
+func (s *memoryState) chargeSlotLocked(slot *workflowSlot, id types.ExecutionID) {
+	slot.holders[id] = true
+	if s.slotHolders == nil {
+		s.slotHolders = make(map[types.ExecutionID]*workflowSlot)
+	}
+	s.slotHolders[id] = slot
 }
 
 // slotForLocked returns the workflow's slot state, creating it on first use.
@@ -199,19 +237,8 @@ func (s *memoryState) slotForLocked(key string) *workflowSlot {
 	return slot
 }
 
-// admitLocked charges a slot and writes the execution and its initial intents.
-func (s *memoryState) admitLocked(slot *workflowSlot, e *engine.ExecutionSnapshot, entries []engine.OutboxEntry) {
-	slot.holders[e.ID] = true
-	if s.slotHolders == nil {
-		s.slotHolders = make(map[types.ExecutionID]*workflowSlot)
-	}
-	s.slotHolders[e.ID] = slot
-	s.createExecutionLocked(e)
-	s.writeInitialIntentsLocked(e.ID, entries, time.Time{})
-}
-
-// admitQueuedLocked places an over-limit submission in the workflow's FIFO
-// line, or starts it when the workflow has room and nobody is waiting.
+// parkOrChargeLocked places an over-limit submission in the workflow's FIFO
+// line, or charges it a slot when the workflow has room and nobody is waiting.
 //
 // The line is what decides: a free slot belongs to the execution that has been
 // waiting longest, so a fresh submission is admitted directly only when the
@@ -219,23 +246,19 @@ func (s *memoryState) admitLocked(slot *workflowSlot, e *engine.ExecutionSnapsho
 // starvation FIFO exists to prevent, and it is reachable — capacity frees up
 // between a release and the next admission without the head having been
 // promoted only in the crash window the reconciler repairs.
-func (s *memoryState) admitQueuedLocked(slot *workflowSlot, e *engine.ExecutionSnapshot, entries []engine.OutboxEntry, admission engine.ConcurrencyAdmission) (engine.ConcurrencyAdmissionResult, error) {
+func (s *memoryState) parkOrChargeLocked(slot *workflowSlot, id types.ExecutionID, admission engine.ConcurrencyAdmission) (bool, error) {
 	if len(slot.holders) < slot.limit && len(slot.queued) == 0 {
-		s.admitLocked(slot, e, entries)
-		return engine.ConcurrencyAdmissionResult{}, nil
+		s.chargeSlotLocked(slot, id)
+		return false, nil
 	}
 	if admission.MaxQueued > 0 && len(slot.queued) >= admission.MaxQueued {
 		// Refused before anything is written, like a reject-mode refusal: a
 		// full queue is a 429 the caller can retry, not a persisted execution
 		// waiting nowhere.
-		return engine.ConcurrencyAdmissionResult{}, engine.ErrConcurrencyQueueFull
+		return false, engine.ErrConcurrencyQueueFull
 	}
 
-	parked := *e
-	parked.Status = types.ExecutionStatusQueued
-	s.createExecutionLocked(&parked)
-	s.writeInitialIntentsLocked(e.ID, entries, queuedOutboxHold)
-	slot.queued = append(slot.queued, e.ID)
+	slot.queued = append(slot.queued, id)
 	if s.queued == nil {
 		s.queued = make(map[types.ExecutionID]*queuedExecution)
 	}
@@ -243,8 +266,40 @@ func (s *memoryState) admitQueuedLocked(slot *workflowSlot, e *engine.ExecutionS
 	if admission.QueueTimeout > 0 {
 		deadline = time.Now().UTC().Add(admission.QueueTimeout)
 	}
-	s.queued[e.ID] = &queuedExecution{slot: slot, deadline: deadline}
-	return engine.ConcurrencyAdmissionResult{Queued: true, QueuePosition: len(slot.queued)}, nil
+	s.queued[id] = &queuedExecution{slot: slot, deadline: deadline}
+	return true, nil
+}
+
+// queuePositionLocked reports where one queued execution stands in its line,
+// 1-based, or 0 when it is not waiting.
+func (s *memoryState) queuePositionLocked(id types.ExecutionID) int {
+	waiting, ok := s.queued[id]
+	if !ok {
+		return 0
+	}
+	for i, queued := range waiting.slot.queued {
+		if queued == id {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+// holdOutboxLocked parks every deliverable intent the execution holds.
+//
+// The seed path writes its intents through the same helpers a running
+// execution uses, so the parked case re-stamps them here rather than threading
+// a hold parameter through those helpers: the decision to hold belongs to the
+// admission, not to whichever function happened to write the entry. An intent
+// that is already held or already leased is left alone.
+func (s *memoryState) holdOutboxLocked(id types.ExecutionID) {
+	for entryID, held := range s.outbox[id] {
+		if !held.entry.AvailableAt.IsZero() {
+			continue
+		}
+		held.entry.AvailableAt = queuedOutboxHold
+		s.outbox[id][entryID] = held
+	}
 }
 
 // writeInitialIntentsLocked persists an execution's root intents, stamped with

@@ -25,3 +25,12 @@ func TestMemoryConcurrencyQueueContract(t *testing.T) {
 		return New().State()
 	})
 }
+
+// TestMemoryConcurrencySeedContract runs the entry-seed half of the same
+// contract: a trigger-group seed contends for a slot, and queues, exactly as a
+// submission does.
+func TestMemoryConcurrencySeedContract(t *testing.T) {
+	statestoretest.RunConcurrencySeedContract(t, func(t *testing.T) engine.StateStore {
+		return New().State()
+	})
+}
