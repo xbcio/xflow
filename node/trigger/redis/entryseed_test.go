@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -206,6 +207,117 @@ func TestRedisStreamEntrySeedRedeliveryIsDuplicate(t *testing.T) {
 	}
 	if got := rt.AcceptedCount(); got != 1 {
 		t.Fatalf("accepted = %d, want 1 (a redelivered entry is a duplicate)", got)
+	}
+}
+
+// TestRedisPubSubEntrySeedSkipsTheLock asserts the pub/sub lock is not taken on
+// the entry-seed path. The fake's TryLock fails closed, so a successful
+// Activate is itself the proof: a trigger that still called TryLock would have
+// failed to activate. The admission key is the weak one — a hash of channel and
+// payload bucketed to the second — which is why the replica count is held to
+// one at compile time instead of relying on it.
+func TestRedisPubSubEntrySeedSkipsTheLock(t *testing.T) {
+	restoreConsumer(t, newScriptedConsumer([]Message{{Channel: "events", Payload: []byte("one"), Time: time.Now()}}))
+
+	rt := triggertest.NewFakeEntrySeedRuntime()
+	tr := New().Addr("127.0.0.1:6379").Mode("pubsub").Channel("events")
+	sub, err := tr.Activate(context.Background(), &types.TriggerActivateInput{
+		WorkflowID: "wf-1",
+		NodeName:   "entry",
+		Params:     seedParams(tr),
+		Runtime:    rt,
+	})
+	if err != nil {
+		t.Fatalf("Activate: %v (the pub/sub lock must not be attempted on the entry-seed path)", err)
+	}
+	defer func() { _ = sub.Close(context.Background()) }()
+
+	if !rt.WaitForSeedCount(1, 2*time.Second) {
+		t.Fatal("redis pubsub trigger did not admit the message")
+	}
+	got := rt.Seeds()[0].Request.AdmissionKey
+	if !strings.HasPrefix(got, "trigger:wf-1:entry:redis:pubsub/") {
+		t.Fatalf("fire key = %q, want the weak pubsub shape", got)
+	}
+	// The key is the hash of channel+payload, bucketed to the message's own
+	// second: the same publish arriving at another replica derives this exact
+	// key, which is what makes the two collide into one execution.
+	sameSecond := time.Unix(time.Now().Unix(), 0)
+	want := "trigger:wf-1:entry:redis:" + redisFireID("pubsub",
+		Message{Channel: "events", Payload: []byte("one")}, &types.TriggerEvent{Time: sameSecond})
+	if !strings.HasPrefix(want, "trigger:wf-1:entry:redis:pubsub/") {
+		t.Fatalf("test fixture produced %q, which is not the pubsub shape", want)
+	}
+	if emits, dedups, locks := rt.LegacyCalls(); emits != 0 || dedups != 0 || locks != 0 {
+		t.Fatalf("legacy calls = emit:%d dedup:%d trylock:%d, want none", emits, dedups, locks)
+	}
+}
+
+// TestRedisPubSubEntrySeedMergesSameSecondIdenticalPublishes pins what the weak
+// key does and does not do. It merges deliveries a subscriber cannot itself
+// tell apart — same channel, same payload, same second — which is the property
+// that lets one replica stand in for several. It is deliberately NOT a
+// substitute for a single replica, because it also merges two genuinely
+// distinct publishes of the same payload in the same second.
+func TestRedisPubSubEntrySeedMergesSameSecondIdenticalPublishes(t *testing.T) {
+	published := time.Now().Truncate(time.Second).Add(500 * time.Millisecond)
+	restoreConsumer(t, newScriptedConsumer([]Message{
+		{Channel: "events", Payload: []byte("same"), Time: published},
+		{Channel: "events", Payload: []byte("same"), Time: published},
+	}))
+
+	rt := triggertest.NewFakeEntrySeedRuntime()
+	tr := New().Addr("127.0.0.1:6379").Mode("pubsub").Channel("events").MaxInflight(1)
+	sub, err := tr.Activate(context.Background(), &types.TriggerActivateInput{
+		WorkflowID: "wf-1",
+		NodeName:   "entry",
+		Params:     seedParams(tr),
+		Runtime:    rt,
+	})
+	if err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	defer func() { _ = sub.Close(context.Background()) }()
+
+	if !rt.WaitForSeedCount(2, 2*time.Second) {
+		t.Fatalf("attempts = %d, want 2", rt.SeedCount())
+	}
+	if got := rt.AcceptedCount(); got != 1 {
+		t.Fatalf("accepted = %d, want 1 (the second delivery is the weak key's duplicate)", got)
+	}
+}
+
+// TestRedisPubSubEntrySeedRefusalDropsTheMessage pins the pub/sub disposition
+// of a refusal: there is no acknowledgement and no redelivery behind it, so the
+// message is gone. That is why the log line is part of the contract rather than
+// decoration.
+func TestRedisPubSubEntrySeedRefusalDropsTheMessage(t *testing.T) {
+	restoreConsumer(t, newScriptedConsumer([]Message{{Channel: "events", Payload: []byte("two"), Time: time.Now()}}))
+
+	rt := triggertest.NewFakeEntrySeedRuntime()
+	rt.SetResponder(func(types.EntrySeedRequest, int) (types.EntrySeedResponse, error) {
+		return types.EntrySeedResponse{Refused: true}, nil
+	})
+	tr := New().Addr("127.0.0.1:6379").Mode("pubsub").Channel("events")
+	sub, err := tr.Activate(context.Background(), &types.TriggerActivateInput{
+		WorkflowID: "wf-1",
+		NodeName:   "entry",
+		Params:     seedParams(tr),
+		Runtime:    rt,
+	})
+	if err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	defer func() { _ = sub.Close(context.Background()) }()
+
+	if !rt.WaitForSeedCount(1, 2*time.Second) {
+		t.Fatal("redis pubsub trigger did not attempt an admission")
+	}
+	if got := rt.SeedCount(); got != 1 {
+		t.Fatalf("attempts = %d, want 1: a refusal is not retried in place", got)
+	}
+	if got := rt.AcceptedCount(); got != 0 {
+		t.Fatalf("accepted = %d, want 0 after a refusal", got)
 	}
 }
 

@@ -275,7 +275,18 @@ func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (ty
 		lock      types.TriggerLock
 		renewable types.RenewableTriggerLock
 	)
-	if cfg.Mode == "pubsub" {
+	// The pub/sub lock exists to keep ONE replica subscribed: a Pub/Sub channel
+	// has no consumer group, so every subscriber receives every message and N
+	// replicas would run N executions per publish. On the entry-seed path the
+	// lock is not taken at all — the control plane's admission-key
+	// deduplication is the single authority on how many executions a message
+	// produces, and a second, runner-side lock would be a second source of
+	// truth for the same question (spec 2026-10-12 §4). The replica count is
+	// held to one at compile time instead (engine/graph), because the fallback
+	// identity for pub/sub is a hash of channel and payload: it merges what two
+	// subscribers cannot tell apart, not what an operator actually wants
+	// duplicated.
+	if cfg.Mode == "pubsub" && !seedadmit.Enabled(in) {
 		l, ok, err := in.Runtime.TryLock(ctx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":pubsub", pubSubLockTTL)
 		if err != nil || !ok {
 			return nil, err
@@ -445,12 +456,17 @@ func newRedisTriggerEvent(nodeName, mode string, msg Message) *types.TriggerEven
 // and reports whether it is finished with.
 //
 // Only a complete admission — accepted, duplicate, queued or conflict — is
-// finished with. A refusal and a transport failure both leave the message
-// UNACKNOWLEDGED, which is what keeps it: an unacknowledged entry stays pending
-// and the consumer group's reclaim hands it back later, so the trigger gives up
-// the message to a redelivery rather than dropping it. The bounded retry around
-// the transport failure is what keeps a control plane that is down from parking
-// this consumer on one message forever.
+// finished with. What an unfinished message means depends on the mode, and the
+// two are not interchangeable:
+//
+//   - stream: the entry is left UNACKNOWLEDGED. It stays pending and the
+//     consumer group's reclaim hands it back later, so the trigger gives up the
+//     message to a redelivery rather than dropping it. The bounded retry around
+//     a transport failure is what keeps a control plane that is down from
+//     parking this consumer on one message forever.
+//   - pub/sub: there is no acknowledgement and no redelivery. An unfinished
+//     message is DROPPED, and the log line is the only record of it — which is
+//     the same contract a refused firing has on the schedule-driven triggers.
 func admitRedisMessage(ctx context.Context, in *types.TriggerActivateInput, mode string, msg Message, event *types.TriggerEvent) bool {
 	rt, ok := in.Runtime.(types.EntrySeedRuntime)
 	if !ok {
@@ -460,6 +476,10 @@ func admitRedisMessage(ctx context.Context, in *types.TriggerActivateInput, mode
 	}
 	req := seedadmit.NewRequest(in, seedadmit.KindRedis, redisFireID(mode, msg, event), event)
 	result, err := seedadmit.Admit(ctx, rt, req, admitRetry)
+	disposition := "leaving it for redelivery"
+	if mode == "pubsub" {
+		disposition = "the message is dropped"
+	}
 	switch result {
 	case seedadmit.Admitted:
 		return true
@@ -469,7 +489,7 @@ func admitRedisMessage(ctx context.Context, in *types.TriggerActivateInput, mode
 		// the attempt, so this line is the only evidence it happened — and the
 		// rate at which it repeats is how an operator sees that the trigger is
 		// feeding a workflow that cannot keep up.
-		slog.Warn("redis trigger message was refused; leaving it for redelivery",
+		slog.Warn("redis trigger message was refused; "+disposition,
 			"workflow_id", in.WorkflowID,
 			"node", in.NodeName,
 			"mode", mode,
@@ -477,7 +497,7 @@ func admitRedisMessage(ctx context.Context, in *types.TriggerActivateInput, mode
 			"fire_key", req.AdmissionKey)
 		return false
 	default:
-		slog.Warn("redis trigger message admission failed; leaving it for redelivery",
+		slog.Warn("redis trigger message admission failed; "+disposition,
 			"workflow_id", in.WorkflowID,
 			"node", in.NodeName,
 			"mode", mode,
