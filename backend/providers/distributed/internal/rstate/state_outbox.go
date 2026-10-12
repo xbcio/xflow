@@ -55,7 +55,27 @@ type redisOutboxEntry struct {
 // An entry whose body is gone was already acked; its stray ready member is
 // dropped here rather than leased, which is what the pre-lease read loop did.
 //
-// KEYS: 1=outbox:ready 2=outbox:body
+// A PAUSED EXECUTION CLAIMS NOTHING. The status is read inside this script
+// rather than by the caller because the claim is the delivery decision: a check
+// made before the script would race the very pause it is deciding, and a claim
+// that read "running" could still be granted after the pause became durable.
+// Reading it here is one extra command on a connection the script already has.
+//
+// The pause is not allowed to skip the reply's earliest field. That field
+// re-arms the readiness index, and a paused execution still HAS ready work — it
+// is undeliverable, not absent — so reporting "" would prune a member whose
+// work exists, and the resume would then wait for the keyspace sweep to
+// rediscover it. Reporting the true head keeps the index honest in both
+// directions, at the cost of one no-op drain per paused execution per tick.
+//
+// What this branch does NOT do is the ghost sweep: a body-less ready member
+// (the residue of an ack) survives until the pause ends. That does not
+// resurrect anything — the member has no body to deliver, and
+// recordOutboxFailureLua's guard already refuses to dead-letter one — and the
+// sweep of a bounded range only to throw it away is work a hold has no reason
+// to buy.
+//
+// KEYS: 1=outbox:ready 2=outbox:body 3=status
 // ARGV: 1=cutoff_ms (availability cutoff, also the lease clock) 2=limit
 //
 //	3=visibility_ms
@@ -71,20 +91,22 @@ type redisOutboxEntry struct {
 // than the ZRANGE the caller would otherwise issue. See applyOutboxReadyIndex.
 var leaseOutboxLua = redis.NewScript(`
 local cutoff = tonumber(ARGV[1])
-local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', cutoff, 'LIMIT', 0, tonumber(ARGV[2]))
 local out = {}
-for i = 1, #ids do
-    local entryID = ids[i]
-    local body = redis.call('HGET', KEYS[2], entryID)
-    if body then
-        local previous = redis.call('ZSCORE', KEYS[1], entryID)
-        redis.call('ZADD', KEYS[1], cutoff + tonumber(ARGV[3]), entryID)
-        out[#out + 1] = entryID
-        out[#out + 1] = body
-        out[#out + 1] = previous
-    else
-        redis.call('ZREM', KEYS[1], entryID)
-        redis.call('HDEL', KEYS[2], entryID)
+if redis.call('GET', KEYS[3]) ~= 'paused' then
+    local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', cutoff, 'LIMIT', 0, tonumber(ARGV[2]))
+    for i = 1, #ids do
+        local entryID = ids[i]
+        local body = redis.call('HGET', KEYS[2], entryID)
+        if body then
+            local previous = redis.call('ZSCORE', KEYS[1], entryID)
+            redis.call('ZADD', KEYS[1], cutoff + tonumber(ARGV[3]), entryID)
+            out[#out + 1] = entryID
+            out[#out + 1] = body
+            out[#out + 1] = previous
+        else
+            redis.call('ZREM', KEYS[1], entryID)
+            redis.call('HDEL', KEYS[2], entryID)
+        end
     end
 end
 local head = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
@@ -155,9 +177,21 @@ return 1
 // a member is the residue of an ack, and leaving it would break the
 // body-presence ⇔ ready-membership equivalence the dead-letter guard relies on.
 //
-// KEYS: 1=outbox:ready 2=outbox:body
+// A paused execution is reported as having nothing ready, at any cutoff — the
+// hold is a property of the execution and not of the instant asked about, so a
+// caller asking about next year must not be handed the work this year's pause
+// stopped. Claiming for delivery is LeaseOutbox's job and it refuses for the
+// same reason; this read is the other half of that refusal, because the engine
+// falls back to a plain list on a store without the lease, and a hold only one
+// of the two honours would be a hold that depends on which capability a store
+// declares.
+//
+// KEYS: 1=outbox:ready 2=outbox:body 3=status
 // ARGV: 1=cutoff_ms 2=limit
 var readOutboxLua = redis.NewScript(`
+if redis.call('GET', KEYS[3]) == 'paused' then
+    return {}
+end
 local cutoff = tonumber(ARGV[1])
 local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', cutoff, 'LIMIT', 0, tonumber(ARGV[2]))
 local out = {}
@@ -176,15 +210,16 @@ return out
 `)
 
 // ListOutbox reports ready delivery intents without changing any state. Entries
-// another deliverer currently holds a lease on are not ready and are omitted.
-// Claiming for delivery is LeaseOutbox's job.
+// another deliverer currently holds a lease on are not ready and are omitted,
+// and so is everything a paused execution owns — see readOutboxLua. Claiming
+// for delivery is LeaseOutbox's job.
 func (s *Store) ListOutbox(ctx context.Context, id types.ExecutionID, before time.Time, limit int) ([]engine.OutboxEntry, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
 	t := namespace.FromContext(ctx)
 	raw, err := readOutboxLua.Run(ctx, s.rdb,
-		[]string{outboxReadyKey(t, id), outboxBodyKey(t, id)},
+		[]string{outboxReadyKey(t, id), outboxBodyKey(t, id), execKey(t, id, "status")},
 		before.UnixMilli(), limit,
 	).Slice()
 	if err != nil {
@@ -207,6 +242,10 @@ func (s *Store) ListOutbox(ctx context.Context, id types.ExecutionID, before tim
 // other callers for engine.OutboxDeliveryLeaseTTL. Entries stay in Redis until
 // AckOutbox, so enqueue/ack response loss is still retried — once the lease
 // lapses or is released.
+//
+// A paused execution claims nothing, whatever its ready set holds: see
+// leaseOutboxLua, which is also where the pause is read, so the refusal cannot
+// race the pause itself.
 func (s *Store) LeaseOutbox(ctx context.Context, id types.ExecutionID, now time.Time, limit int) ([]engine.OutboxEntry, error) {
 	if limit <= 0 {
 		return nil, nil
@@ -214,7 +253,7 @@ func (s *Store) LeaseOutbox(ctx context.Context, id types.ExecutionID, now time.
 	t := namespace.FromContext(ctx)
 	deadline := now.UnixMilli() + engine.OutboxDeliveryLeaseTTL.Milliseconds()
 	res, err := leaseOutboxLua.Run(ctx, s.rdb,
-		[]string{outboxReadyKey(t, id), outboxBodyKey(t, id)},
+		[]string{outboxReadyKey(t, id), outboxBodyKey(t, id), execKey(t, id, "status")},
 		now.UnixMilli(), limit, engine.OutboxDeliveryLeaseTTL.Milliseconds(),
 	).Slice()
 	if err != nil {
