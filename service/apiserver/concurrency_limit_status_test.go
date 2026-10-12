@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -158,6 +160,71 @@ func TestExecuteWorkflowMapsQueueUnsupportedTo503(t *testing.T) {
 	// lift on the caller's timescale, and a header would say otherwise.
 	if got := resp.Header.Get("Retry-After"); got != "" {
 		t.Fatalf("Retry-After = %q on an unavailable capability, want none", got)
+	}
+	if env := decodeEnvelope(t, resp, nil); env.Code != "workflow_concurrency_unavailable" {
+		t.Fatalf("code = %q, want workflow_concurrency_unavailable", env.Code)
+	}
+}
+
+// TestExecuteWorkflowMapsConcurrencyUnsupportedTo503 covers the other half of
+// the unavailable capability: the store cannot enforce a limit AT ALL, so the
+// engine fails closed before anything is persisted (decision 2).
+//
+// Same status and same code as the queue case, because a caller's move is the
+// same — wait for the deployment — but a different message, because an operator
+// has to be able to tell "this backend cannot queue" from "this backend cannot
+// limit at all": the first is fixed by changing the workflow's mode, the second
+// only by changing the server. A 500 here would file a designed refusal under
+// internal_error and send that operator looking for a bug.
+func TestExecuteWorkflowMapsConcurrencyUnsupportedTo503(t *testing.T) {
+	f := &fakeControlFacade{invokeErr: engine.ErrConcurrencyUnsupported}
+	mux := newControlMux(f)
+
+	resp := doJSON(t, mux, http.MethodPost, "/v1/workflows/execute", executeWorkflowRequest{
+		Workflow: validWorkflow(),
+		Entry:    "start",
+	})
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Retry-After"); got != "" {
+		t.Fatalf("Retry-After = %q on an unavailable capability, want none", got)
+	}
+	env := decodeEnvelope(t, resp, nil)
+	if env.Code != "workflow_concurrency_unavailable" {
+		t.Fatalf("code = %q, want workflow_concurrency_unavailable", env.Code)
+	}
+	if env.Message == "" || env.Message == "internal server error" {
+		t.Fatalf("message = %q, want the capability that is missing", env.Message)
+	}
+}
+
+// TestExecuteRegisteredWorkflowMapsConcurrencyUnsupportedTo503 is the same
+// mapping on the by-id route, which has its own two call sites (submit and
+// invoke). Both routes share writeConcurrencyFailure, so this is the guard that
+// they still do.
+//
+// The module needs a real ControlPlane for the registry the by-id route
+// resolves through, so only the engine facade is faked — the same substitution
+// execution_id_audit_test.go uses.
+func TestExecuteRegisteredWorkflowMapsConcurrencyUnsupportedTo503(t *testing.T) {
+	backend := local.New()
+	registerSeedWorkflow(t, backend)
+	cp, err := control.NewControlPlane(control.Config{Backend: backend})
+	if err != nil {
+		t.Fatalf("NewControlPlane: %v", err)
+	}
+	m := &workflowControlModule{cp: cp, eng: &fakeControlFacade{submitErr: engine.ErrConcurrencyUnsupported}}
+	mux := http.NewServeMux()
+	m.RegisterHTTP(mux)
+
+	resp := doJSON(t, mux, http.MethodPost, "/v1/workflows/wf-1/execute", executeRegisteredRequest{})
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", resp.StatusCode)
 	}
 	if env := decodeEnvelope(t, resp, nil); env.Code != "workflow_concurrency_unavailable" {
 		t.Fatalf("code = %q, want workflow_concurrency_unavailable", env.Code)

@@ -12,6 +12,7 @@ import (
 
 	xbackend "github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/backend/providers/local"
+	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/protocol"
@@ -273,6 +274,58 @@ func TestSeedExecutionEndpointRefusesOverLimitWith429(t *testing.T) {
 	}
 	if refusal.Error != "workflow_concurrency_limit" {
 		t.Fatalf("error = %q, want workflow_concurrency_limit", refusal.Error)
+	}
+}
+
+// TestSeedExecutionEndpointMapsConcurrencyUnsupportedTo503 pins the fail-closed
+// case on the seed face: the seeded workflow declares a concurrency limit and
+// this deployment's store cannot enforce one, so the engine refuses the seed
+// rather than starting an execution the limit was written to prevent.
+//
+// 503 with the same code the submission face uses, not 500: it is a designed
+// refusal with a known cause, and a runner reading internal_error would retry a
+// batch that no retry can admit. Unknown-429 handling covers the reverse
+// direction; this is the one the SERVER reports.
+func TestSeedExecutionEndpointMapsConcurrencyUnsupportedTo503(t *testing.T) {
+	for _, err := range []error{engine.ErrConcurrencyUnsupported, engine.ErrConcurrencyQueueUnsupported} {
+		t.Run(err.Error(), func(t *testing.T) {
+			mux := newControlMux(&fakeControlFacade{seedErr: err})
+			body, marshalErr := json.Marshal(protocol.SeedExecutionRequest{
+				WorkflowID:   "wf-1",
+				EntryUnitID:  "kafka-in",
+				AdmissionKey: "default/wf-1/v1/kafka-in/topic/0/5-5",
+				Outcome:      "success",
+			})
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/v1/executions", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503", rec.Code)
+			}
+			if got := rec.Header().Get("Retry-After"); got != "" {
+				t.Fatalf("Retry-After = %q on an unavailable capability, want none", got)
+			}
+			// Bare body, not an envelope: entry-seed is a runner-protocol-face
+			// endpoint (§0.1/§8.2) and its failure bodies are load-bearing shapes.
+			var failure struct {
+				Error string `json:"error"`
+				Code  string `json:"code"`
+			}
+			if decodeErr := json.Unmarshal(rec.Body.Bytes(), &failure); decodeErr != nil {
+				t.Fatalf("decode body: %v", decodeErr)
+			}
+			if failure.Error != "workflow_concurrency_unavailable" {
+				t.Fatalf("error = %q, want workflow_concurrency_unavailable", failure.Error)
+			}
+			if failure.Code != "" {
+				t.Fatalf("body carries an envelope code field (%q); the runner face is not enveloped", failure.Code)
+			}
+		})
 	}
 }
 

@@ -574,6 +574,25 @@ func writeConcurrencyUnavailable(w http.ResponseWriter, r *http.Request) {
 		"workflow concurrency queue is not available on this server")
 }
 
+// writeConcurrencyLimitsUnavailable answers a submission against a store that
+// cannot enforce a concurrency limit AT ALL (engine.ErrConcurrencyUnsupported).
+//
+// It shares the queue case's status and code deliberately: both mean "the
+// definition asked for a limit and this deployment cannot honour it", and a
+// caller's move is identical — the answer changes when the deployment does, not
+// when the caller retries. Only the message differs, because the two say which
+// capability is missing: none, versus the queue half of it.
+//
+// 503 rather than 500 is the point of the mapping. The engine fails closed here
+// (running unlimited would defeat a limit the author declared to protect a
+// downstream), so this is a designed refusal with a known cause — filing it
+// under internal_error would send an operator looking for a bug in a
+// deployment that is behaving exactly as specified.
+func writeConcurrencyLimitsUnavailable(w http.ResponseWriter, r *http.Request) {
+	writeFail(w, r, http.StatusServiceUnavailable, "workflow_concurrency_unavailable",
+		"workflow concurrency is not available on this server")
+}
+
 // writeConcurrencyFailure maps the concurrency sentinels a submission can
 // return onto their responses, reporting whether it wrote one. The call sites
 // keep their own error handling for everything else, which is what lets the
@@ -587,6 +606,8 @@ func writeConcurrencyFailure(w http.ResponseWriter, r *http.Request, err error) 
 		writeConcurrencyQueueFull(w, r)
 	case errors.Is(err, engine.ErrConcurrencyQueueUnsupported):
 		writeConcurrencyUnavailable(w, r)
+	case errors.Is(err, engine.ErrConcurrencyUnsupported):
+		writeConcurrencyLimitsUnavailable(w, r)
 	default:
 		return false
 	}
@@ -2074,6 +2095,16 @@ func (m *workflowControlModule) handleSeedExecution(w http.ResponseWriter, r *ht
 		// reason string leaks no internal detail. Bare errorResponse per §0.1/§8.2.
 		if errors.Is(err, control.ErrEntrySeedWorkflowUnknown) {
 			writeJSON(w, http.StatusNotFound, errorResponse{Error: "workflow_unknown"})
+			return
+		}
+		// The seeded workflow declares a concurrency limit this deployment cannot
+		// enforce. The engine fails closed rather than seeding an execution the
+		// limit was written to prevent, and the runner must treat it like the
+		// queue-unavailable case on the submission face: 503 with the same code,
+		// because the answer changes when the deployment does and not when the
+		// runner retries. Bare body per §0.1/§8.2, like the other seed failures.
+		if errors.Is(err, engine.ErrConcurrencyUnsupported) || errors.Is(err, engine.ErrConcurrencyQueueUnsupported) {
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "workflow_concurrency_unavailable"})
 			return
 		}
 		if m.log != nil {
