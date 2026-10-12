@@ -174,12 +174,36 @@ func TestLocalScheduleBackfillRunsAPausedWindowAndIsIdempotent(t *testing.T) {
 	// Each run is the run of the instant that was planned, and it says so: a
 	// backfilled firing is marked a catch-up, which is the fact a workflow that
 	// bills a period branches on.
-	for i, f := range ran {
-		if !f.scheduled.Equal(result.Planned[i]) {
-			t.Errorf("run %d was for %s, want the planned instant %s", i, f.scheduled, result.Planned[i])
-		}
+	//
+	// The runs are matched to the plan as a SET rather than by index. The plan
+	// is ordered (oldest first) and the emission follows it, but the executions
+	// it starts do not run serially: the local pool runs them concurrently, so
+	// two adjacent instants can finish in either order. What must hold is that
+	// every planned instant ran exactly once — an ordered comparison would fail
+	// on the scheduler's interleaving rather than on anything about the
+	// backfill, which is the flake this shape removes.
+	matched := make([]bool, len(result.Planned))
+	for _, f := range ran {
 		if !f.catchup {
-			t.Errorf("run %d (instant %s) is not marked a catch-up", i, f.scheduled)
+			t.Errorf("the run for %s is not marked a catch-up", f.scheduled)
+		}
+		found := -1
+		for i, instant := range result.Planned {
+			if !matched[i] && f.scheduled.Equal(instant) {
+				found = i
+				break
+			}
+		}
+		if found < 0 {
+			t.Errorf("a run was for %s, which is not one of the planned instants %v (or ran twice)",
+				f.scheduled, result.Planned)
+			continue
+		}
+		matched[found] = true
+	}
+	for i, ok := range matched {
+		if !ok {
+			t.Errorf("the planned instant %s never ran", result.Planned[i])
 		}
 	}
 
