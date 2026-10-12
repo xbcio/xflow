@@ -118,13 +118,40 @@ message RegisterResponse {
   RunnerControlDirective control = 3;
 }
 
+// SupplyObservation is one entry of a runner's "this is the content I have in
+// effect" report. The namespace is part of the entry, not of the request: a
+// runner hosts supplies from every namespace it has activations in, so one
+// heartbeat reports entries from several namespaces at once.
+//
+// Only the hash travels, never content.
+message SupplyObservation {
+  string namespace = 1;
+  string node = 2;
+  string hash = 3;
+}
+
+// SupplyHint is one "the content you host under this identity is now this
+// hash" instruction. Same shape as SupplyObservation, opposite direction: the
+// hash is what the server has, and a differing hash tells the runner to fetch
+// once.
+message SupplyHint {
+  string namespace = 1;
+  string node = 2;
+  string hash = 3;
+}
+
 message HeartbeatRequest {
   string runner_id = 1;
   int32 capacity = 2;
   int32 in_flight = 3;
   int64 timestamp = 4;
   string session_id = 5;
-  map<string, string> supply_observed = 6;
+  // Field 6 was map<string, string> supply_observed, which could not express a
+  // namespace: the same supply node name in two namespaces collapsed into one
+  // entry, and whichever namespace reported last won. Replaced by the repeated
+  // field below; the number stays reserved so a stale peer fails loudly instead
+  // of having its map decoded as this.
+  reserved 6;
   // supply_key_id is the 4-byte fingerprint (not key material) of the supply
   // encryption key this runner holds. The server returns supply_key_rotation
   // only when it differs from its own, making rotation delivery convergent.
@@ -136,17 +163,25 @@ message HeartbeatRequest {
   // runner so reconciliation can redeliver an Activate whose directive never
   // reached the runner instead of renewing an assignment that hosts nothing.
   HostedActivationsReport hosted_activations = 9;
+  // supply_observed reports the content hash currently in effect for each
+  // supply this runner hosts a consumer for, identified by (namespace, name).
+  repeated SupplyObservation supply_observed = 10;
 }
 
 message HeartbeatResponse {
   int64 server_time = 1;
-  map<string, string> supply_hints = 2;
+  // Field 2 was map<string, string> supply_hints, replaced by the repeated
+  // field 6 below for the same reason as HeartbeatRequest.supply_observed.
+  reserved 2;
   string supply_key_rotation = 3;
   // activations_json carries the JSON-encoded HeartbeatActivations struct
   // (activate/deactivate directives). Using JSON bytes avoids modeling
   // map[string]any params in proto — same pattern as lease_json.
   bytes activations_json = 4;
   RunnerControlDirective control = 5;
+  // supply_hints carries the current content hash for every supply this runner
+  // hosts a consumer for, identified by (namespace, name).
+  repeated SupplyHint supply_hints = 6;
 }
 
 message PollTaskRequest {

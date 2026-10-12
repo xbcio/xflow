@@ -7,7 +7,21 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/node/supply"
+	"github.com/xbcio/xflow/service/protocol"
 )
+
+// obs builds one observation entry for the default namespace. Most cases here
+// exercise a single namespace; the cross-namespace case builds its entries
+// explicitly.
+func obs(node, hash string) protocol.SupplyObservation {
+	return protocol.SupplyObservation{Namespace: string(namespace.Default), Node: node, Hash: hash}
+}
+
+// okey is the snapshot key for a supply node in the default namespace.
+func okey(node string) supply.Key { return supply.KeyOf(namespace.Default, node) }
 
 func newRedisSupplyObservedForTest(t *testing.T) (*RedisSupplyObserved, *redis.Client) {
 	t.Helper()
@@ -18,17 +32,17 @@ func newRedisSupplyObservedForTest(t *testing.T) (*RedisSupplyObserved, *redis.C
 func TestRedisSupplyObservedRecordThenSnapshotRoundTrips(t *testing.T) {
 	sink, _ := newRedisSupplyObservedForTest(t)
 
-	sink.Record("runner-a", map[string]string{"rules": "hash-a"})
-	sink.Record("runner-b", map[string]string{"rules": "hash-b", "models": "hash-m"})
+	sink.Record("runner-a", []protocol.SupplyObservation{obs("rules", "hash-a")})
+	sink.Record("runner-b", []protocol.SupplyObservation{obs("rules", "hash-b"), obs("models", "hash-m")})
 
 	got := sink.Snapshot()
 	if len(got) != 2 {
 		t.Fatalf("Snapshot returned %d runners, want 2: %#v", len(got), got)
 	}
-	if got["runner-a"]["rules"] != "hash-a" {
+	if got["runner-a"][okey("rules")] != "hash-a" {
 		t.Errorf("runner-a = %#v, want rules=hash-a", got["runner-a"])
 	}
-	if got["runner-b"]["rules"] != "hash-b" || got["runner-b"]["models"] != "hash-m" {
+	if got["runner-b"][okey("rules")] != "hash-b" || got["runner-b"][okey("models")] != "hash-m" {
 		t.Errorf("runner-b = %#v, want both supplies", got["runner-b"])
 	}
 }
@@ -36,14 +50,14 @@ func TestRedisSupplyObservedRecordThenSnapshotRoundTrips(t *testing.T) {
 func TestRedisSupplyObservedRecordReplacesNotMerges(t *testing.T) {
 	sink, _ := newRedisSupplyObservedForTest(t)
 
-	sink.Record("runner-a", map[string]string{"rules": "hash-1", "models": "hash-m"})
-	sink.Record("runner-a", map[string]string{"rules": "hash-2"})
+	sink.Record("runner-a", []protocol.SupplyObservation{obs("rules", "hash-1"), obs("models", "hash-m")})
+	sink.Record("runner-a", []protocol.SupplyObservation{obs("rules", "hash-2")})
 
 	report := sink.Snapshot()["runner-a"]
-	if report["rules"] != "hash-2" {
-		t.Errorf("rules = %q, want the latest report hash-2", report["rules"])
+	if report[okey("rules")] != "hash-2" {
+		t.Errorf("rules = %q, want the latest report hash-2", report[okey("rules")])
 	}
-	if _, ok := report["models"]; ok {
+	if _, ok := report[okey("models")]; ok {
 		t.Errorf("report = %#v: a report replaces, never merges", report)
 	}
 }
@@ -51,7 +65,7 @@ func TestRedisSupplyObservedRecordReplacesNotMerges(t *testing.T) {
 func TestRedisSupplyObservedEmptyReportClears(t *testing.T) {
 	sink, rdb := newRedisSupplyObservedForTest(t)
 
-	sink.Record("runner-a", map[string]string{"rules": "hash-1"})
+	sink.Record("runner-a", []protocol.SupplyObservation{obs("rules", "hash-1")})
 	sink.Record("runner-a", nil)
 
 	if _, ok := sink.Snapshot()["runner-a"]; ok {
@@ -70,7 +84,7 @@ func TestRedisSupplyObservedExpiresReport(t *testing.T) {
 	mr, rdb := newRedisRunnerDirectoryTestClient(t)
 	sink := NewRedisSupplyObserved(rdb, 90*time.Second, nil)
 
-	sink.Record("runner-a", map[string]string{"rules": "hash-1"})
+	sink.Record("runner-a", []protocol.SupplyObservation{obs("rules", "hash-1")})
 	// Prove the report existed before asserting it is gone: a sink that never
 	// wrote anything would otherwise pass this test.
 	if before := sink.Snapshot(); len(before) != 1 {
@@ -91,7 +105,7 @@ func TestRedisSupplyObservedSnapshotPrunesStaleIndexMembers(t *testing.T) {
 	mr, rdb := newRedisRunnerDirectoryTestClient(t)
 	sink := NewRedisSupplyObserved(rdb, 90*time.Second, nil)
 
-	sink.Record("gone", map[string]string{"rules": "hash-1"})
+	sink.Record("gone", []protocol.SupplyObservation{obs("rules", "hash-1")})
 	mr.FastForward(91 * time.Second)
 	if got := sink.Snapshot(); len(got) != 0 {
 		t.Fatalf("Snapshot = %#v, want empty", got)
@@ -123,10 +137,10 @@ func TestRedisSupplyObservedSharesDataAcrossInstances(t *testing.T) {
 	replicaA := NewRedisSupplyObserved(rdb, DefaultSupplyObservedRetention, nil)
 	replicaB := NewRedisSupplyObserved(rdb, DefaultSupplyObservedRetention, nil)
 
-	replicaA.Record("runner-a", map[string]string{"rules": "hash-a"})
+	replicaA.Record("runner-a", []protocol.SupplyObservation{obs("rules", "hash-a")})
 
 	got := replicaB.Snapshot()
-	if got["runner-a"]["rules"] != "hash-a" {
+	if got["runner-a"][okey("rules")] != "hash-a" {
 		t.Errorf("replica B saw %#v, want the report replica A accepted", got)
 	}
 }
@@ -141,7 +155,7 @@ func TestRedisSupplyObservedLogsFailuresAndDegrades(t *testing.T) {
 
 	mr.Close()
 
-	sink.Record("runner-a", map[string]string{"rules": "hash-a"})
+	sink.Record("runner-a", []protocol.SupplyObservation{obs("rules", "hash-a")})
 	if got := sink.Snapshot(); got != nil {
 		t.Errorf("Snapshot after Redis loss = %#v, want nil", got)
 	}

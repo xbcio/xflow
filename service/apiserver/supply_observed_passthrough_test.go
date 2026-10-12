@@ -12,6 +12,8 @@ import (
 
 	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/backend/providers/local"
+	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/store/memstore"
@@ -80,10 +82,12 @@ func TestSupplyObservedPassthroughReturnsTheLiveSink(t *testing.T) {
 
 	// 2) 心跳上报「我已经应用了 rules → sha256:abc」。
 	hbBody, _ := json.Marshal(protocol.HeartbeatRequest{
-		RunnerID:       "runner-1",
-		SessionID:      reg.SessionID,
-		Capacity:       1,
-		SupplyObserved: map[string]string{"rules": "sha256:abc"},
+		RunnerID:  "runner-1",
+		SessionID: reg.SessionID,
+		Capacity:  1,
+		SupplyObserved: []protocol.SupplyObservation{
+			{Namespace: string(namespace.Default), Node: "rules", Hash: "sha256:abc"},
+		},
 	})
 	hbRec := httptest.NewRecorder()
 	mux.ServeHTTP(hbRec, httptest.NewRequest(http.MethodPost, protocol.HeartbeatPath, bytes.NewReader(hbBody)))
@@ -97,8 +101,8 @@ func TestSupplyObservedPassthroughReturnsTheLiveSink(t *testing.T) {
 		t.Fatal("SupplyObserved() = nil，但控制面是带 Supplies 装配的")
 	}
 	snap := sink.Snapshot()
-	if got := snap["runner-1"]["rules"]; got != "sha256:abc" {
-		t.Fatalf(`Snapshot()["runner-1"]["rules"] = %q, want "sha256:abc"；`+
+	if got := snap["runner-1"][supply.KeyOf(namespace.Default, "rules")]; got != "sha256:abc" {
+		t.Fatalf(`Snapshot()["runner-1"][(default, rules)] = %q, want "sha256:abc"；`+
 			`访问器返回的不是控制面正在写入的那个 sink，snapshot=%#v`, got, snap)
 	}
 }
@@ -187,10 +191,12 @@ func TestSupplyObservedIsSharedAcrossReplicas(t *testing.T) {
 		t.Fatalf("decode register response %s: %v", regRec.Body, err)
 	}
 	hbBody, _ := json.Marshal(protocol.HeartbeatRequest{
-		RunnerID:       "runner-1",
-		SessionID:      reg.SessionID,
-		Capacity:       1,
-		SupplyObserved: map[string]string{"rules": "sha256:abc"},
+		RunnerID:  "runner-1",
+		SessionID: reg.SessionID,
+		Capacity:  1,
+		SupplyObserved: []protocol.SupplyObservation{
+			{Namespace: string(namespace.Default), Node: "rules", Hash: "sha256:abc"},
+		},
 	})
 	hbRec := httptest.NewRecorder()
 	muxA.ServeHTTP(hbRec, httptest.NewRequest(http.MethodPost, protocol.HeartbeatPath, bytes.NewReader(hbBody)))
@@ -204,7 +210,7 @@ func TestSupplyObservedIsSharedAcrossReplicas(t *testing.T) {
 	if sinkB == nil {
 		t.Fatal("副本 B 的 SupplyObserved() = nil，但控制面是带 Supplies 装配的")
 	}
-	if got := sinkB.Snapshot()["runner-1"]["rules"]; got != "sha256:abc" {
+	if got := sinkB.Snapshot()["runner-1"][supply.KeyOf(namespace.Default, "rules")]; got != "sha256:abc" {
 		t.Fatalf("副本 B 看到的快照里没有副本 A 收到的报告：%#v；"+
 			"心跳落到哪个副本不由调用方决定，两个副本必须共享同一份 sink", sinkB.Snapshot())
 	}

@@ -853,10 +853,11 @@ func (s *Server) IsLeader() bool { return s.api.IsLeader() }
 // just published": compare the hash here against the ContentHash returned by
 // GetSupply for the same supply. Both are the same string.
 //
-// The inner key is the supply NODE name, not the resource name. Record is
-// whole-replacement rather than merge, and leader failover legitimately clears
-// the state — surface it as information, never as a precondition for
-// publishing.
+// The inner key is the supply's (namespace, name) identity — not the resource
+// name, and not the node name alone: two namespaces may each declare a supply
+// node of the same name, and they are two supplies. Record is whole-replacement
+// rather than merge, and leader failover legitimately clears the state — surface
+// it as information, never as a precondition for publishing.
 func (s *Server) SupplyObserved() control.SupplyObservedSink { return s.api.SupplyObserved() }
 
 // RegisterGRPC registers the Runner Protocol gRPC service onto g, matching

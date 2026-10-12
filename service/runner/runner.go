@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -846,7 +847,12 @@ func (r *Runner) processActivations(ctx context.Context, resp protocol.Heartbeat
 // themselves. So this is fired into its own goroutine — the heartbeat loop
 // moves on immediately — and SupplyGate.ApplyHints' own hintsInFlight map is
 // what stops two overlapping heartbeat rounds from double-fetching the same
-// name while an earlier fetch is still outstanding.
+// supply while an earlier fetch is still outstanding.
+//
+// ctx is the heartbeat's context and deliberately carries no namespace: every
+// hint names its own, and the gate builds each fetch's context from that. A
+// runner hosts several namespaces at once, so there is no single namespace this
+// call could be scoped to.
 func (r *Runner) processSupplyHints(ctx context.Context, resp protocol.HeartbeatResponse) {
 	if len(resp.SupplyHints) == 0 || r.supplyGate == nil {
 		return
@@ -902,14 +908,18 @@ func (r *Runner) supplyKeyID() string {
 	return f.Keyring.CurrentKeyID()
 }
 
-// observedSupplies reports the content hashes currently in effect here. nil
-// when this runner has no SupplyRegistry configured or hosts no supply, so the
-// heartbeat body is unchanged for runners that consume none.
+// observedSupplies reports the content hashes currently in effect here, one
+// entry per supply this runner hosts a consumer for. nil when this runner has no
+// SupplyRegistry configured or hosts no supply, so the heartbeat body is
+// unchanged for runners that consume none.
 //
-// The registry keys by (namespace, name); the heartbeat DTO still carries
-// name → hash, so this collapses the key back to the node name. Hashes only:
-// no content travels through this path.
-func (r *Runner) observedSupplies() map[string]string {
+// Each entry carries the supply's own (namespace, name) identity: this runner
+// may host supplies from several namespaces, and a name-only report would let
+// the server read one namespace's hash as another's. Sorted by that identity so
+// the heartbeat body is byte-stable across rounds — an unstable order would
+// make two identical reports compare unequal. Hashes only: no content travels
+// through this path.
+func (r *Runner) observedSupplies() []protocol.SupplyObservation {
 	if r.supplyRegistry == nil {
 		return nil
 	}
@@ -917,10 +927,20 @@ func (r *Runner) observedSupplies() map[string]string {
 	if len(observed) == 0 {
 		return nil
 	}
-	out := make(map[string]string, len(observed))
+	out := make([]protocol.SupplyObservation, 0, len(observed))
 	for k, hash := range observed {
-		out[k.Name] = hash
+		out = append(out, protocol.SupplyObservation{
+			Namespace: string(k.Namespace),
+			Node:      k.Name,
+			Hash:      hash,
+		})
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Namespace != out[j].Namespace {
+			return out[i].Namespace < out[j].Namespace
+		}
+		return out[i].Node < out[j].Node
+	})
 	return out
 }
 

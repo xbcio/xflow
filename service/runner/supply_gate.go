@@ -14,6 +14,7 @@ import (
 	"github.com/xbcio/xflow/exprx"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/supply"
+	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/store"
 )
 
@@ -435,12 +436,18 @@ func hashPrefix(hash string) string {
 // hash differs from what this process has, fetch once and publish.
 //
 // A hint is advisory. Losing one is not an error and is not retried here — the
-// activation-time fetch (Admit) is the other convergence path. There is no TTL
-// poll loop today: a hint dropped while a consumer is already admitted leaves
-// that consumer on its last-good value until the next hint arrives. Keeping the
-// notification advisory is still deliberate: a design where the piggybacked
-// notification is the only channel keeps a stale value forever the first time a
-// message is dropped (network partition, runner restart, server failover).
+// activation-time fetch (Admit) and the TTL poll are the other convergence
+// paths. Keeping the notification advisory is deliberate: a design where the
+// piggybacked notification is the only channel keeps a stale value forever the
+// first time a message is dropped (network partition, runner restart, server
+// failover).
+//
+// Each hint carries its supply's own (namespace, node) identity, and the fetch
+// below runs under a context carrying THAT namespace. This is not bookkeeping:
+// the HTTP fetcher sets its namespace header from the context
+// (supply_client.go), so a hint applied against the heartbeat's context — which
+// carries no namespace at all — would fetch from the default namespace and
+// publish one tenant's content under another tenant's supply.
 //
 // Scope note: this affects only WHEN an already-hosted runner refreshes
 // content it already consumes. It has nothing to do with whether an
@@ -448,30 +455,41 @@ func hashPrefix(hash string) string {
 // staying declined is a separate, currently-open gap (see the Task 18
 // addendum) that ApplyHints neither causes nor fixes; there is no hint for a
 // supply this process has no requirement for at all.
-func (g *SupplyGate) ApplyHints(ctx context.Context, hints map[string]string) {
+func (g *SupplyGate) ApplyHints(ctx context.Context, hints []protocol.SupplyHint) {
 	if g == nil || len(hints) == 0 {
 		return
 	}
-	// The hint carries a node name only; the namespace comes from ctx, which on
-	// this path is the heartbeat's context.
-	ns := namespace.FromContext(ctx)
-	for name, hash := range hints {
-		k := supply.KeyOf(ns, name)
-		// De-dupe: if a fetch for this key is already in flight (from an
-		// overlapping ApplyHints call, e.g. two heartbeat rounds whose fetches
-		// both outlived the heartbeat interval), skip rather than fire a second
-		// concurrent fetch. The in-flight one will land the same content this
-		// hint is asking for.
+	// A repeated entry is tolerated rather than trusted away: the loop below is
+	// the only place that decides how many fetches a round of hints costs, and
+	// the server's producer is not the only possible source of a duplicate.
+	seen := make(map[supply.Key]struct{}, len(hints))
+	for _, h := range hints {
+		if h.Node == "" {
+			continue
+		}
+		k := supply.KeyOf(namespace.Namespace(h.Namespace), h.Node)
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		// De-dupe against an in-flight fetch for the same key: overlapping
+		// heartbeat rounds whose fetches outlived the heartbeat interval would
+		// otherwise fire a second concurrent fetch. The in-flight one lands the
+		// same content this hint is asking for.
 		if _, already := g.hintsInFlight.LoadOrStore(k, struct{}{}); already {
 			continue
 		}
-		g.refreshOne(ctx, k, hash)
+		g.refreshOne(namespace.WithNamespace(ctx, k.Namespace), k, h.Hash)
 	}
 }
 
 // refreshOne fetches and applies a single supply, always clearing its in-flight
 // marker on return (including on every early-return path, which is why this is
 // its own function rather than inlined into ApplyHints' loop).
+//
+// ctx MUST already carry k's namespace: the fetch reads it from there (see
+// ApplyHints), and both callers build their context from the key rather than
+// from whatever context they happened to be handed.
 //
 // wantHash, when non-empty, is the content hash the caller was told is current:
 // the fetch is skipped when the cached content already matches it, which is the

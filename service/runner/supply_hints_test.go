@@ -3,17 +3,35 @@ package runner
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/service/protocol"
 )
 
 // --- SupplyGate.ApplyHints ---
+// hint builds one hint entry for a supply node in the default namespace. Most
+// cases in this file drive the gate with a bare context; the cross-namespace
+// cases build their hints explicitly.
+func hint(node, hash string) protocol.SupplyHint {
+	return protocol.SupplyHint{Namespace: string(namespace.Default), Node: node, Hash: hash}
+}
+
+// hints builds a hint slice from node/hash pairs given as alternating
+// arguments, for the multi-entry cases.
+func hints(pairs ...string) []protocol.SupplyHint {
+	out := make([]protocol.SupplyHint, 0, len(pairs)/2)
+	for i := 0; i+1 < len(pairs); i += 2 {
+		out = append(out, hint(pairs[i], pairs[i+1]))
+	}
+	return out
+}
 
 // An equal hash must cost nothing: no fetch at all.
 func TestApplyHintsSkipsWhenHashUnchanged(t *testing.T) {
@@ -24,7 +42,7 @@ func TestApplyHintsSkipsWhenHashUnchanged(t *testing.T) {
 	f := &stubFetcher{content: map[string][]byte{"shared-rules": []byte(`x`)}}
 	g := NewSupplyGate(f, reg, quietLogger())
 
-	g.ApplyHints(context.Background(), map[string]string{"rules": "h1"})
+	g.ApplyHints(context.Background(), hints("rules", "h1"))
 	if f.calls.Load() != 0 {
 		t.Fatalf("fetched %d times, want 0 (hash unchanged)", f.calls.Load())
 	}
@@ -51,7 +69,7 @@ func TestApplyHintsFetchesOnHashMismatch(t *testing.T) {
 
 	// New content arrives server-side; a hint reports a different hash.
 	f.content["shared-rules"] = []byte(`{"new":true,"v":2}`)
-	g.ApplyHints(context.Background(), map[string]string{"rules": "sha256:different-hash"})
+	g.ApplyHints(context.Background(), hints("rules", "sha256:different-hash"))
 
 	if f.calls.Load() != callsAfterAdmit+1 {
 		t.Fatalf("fetch calls = %d, want %d (exactly one hint-triggered fetch)", f.calls.Load(), callsAfterAdmit+1)
@@ -76,7 +94,7 @@ func TestApplyHintsUsesResourceMappingFromAdmit(t *testing.T) {
 	}
 
 	f.content["shared-resource-name"] = []byte(`v2`)
-	g.ApplyHints(context.Background(), map[string]string{"local-alias": "sha256:different"})
+	g.ApplyHints(context.Background(), hints("local-alias", "sha256:different"))
 
 	got, ok := reg.Get(defaultKey("local-alias"))
 	if !ok || string(got.Content) != `v2` {
@@ -94,7 +112,7 @@ func TestApplyHintsFetchFailureIsNonFatal(t *testing.T) {
 	f := &stubFetcher{err: errors.New("connection refused")}
 	g := NewSupplyGate(f, reg, quietLogger())
 
-	g.ApplyHints(context.Background(), map[string]string{"rules": "sha256:new-but-unreachable"})
+	g.ApplyHints(context.Background(), hints("rules", "sha256:new-but-unreachable"))
 
 	got, ok := reg.Get(defaultKey("rules"))
 	if !ok || string(got.Content) != `good` {
@@ -117,7 +135,7 @@ func TestApplyHintsRejectedContentPreservesLastGood(t *testing.T) {
 	g := NewSupplyGate(f, reg, quietLogger())
 	rc.setReject(true)
 
-	g.ApplyHints(context.Background(), map[string]string{"rules": "sha256:bad-content"})
+	g.ApplyHints(context.Background(), hints("rules", "sha256:bad-content"))
 
 	got, _ := reg.Get(defaultKey("rules"))
 	if !rc.reject {
@@ -164,14 +182,14 @@ func TestApplyHintsDedupesConcurrentFetchesForSameName(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		g.ApplyHints(context.Background(), map[string]string{"rules": "sha256:v1"})
+		g.ApplyHints(context.Background(), hints("rules", "sha256:v1"))
 	}()
 
 	<-started
 	// The first call is now blocked inside Fetch, holding the in-flight
 	// marker. This call, made on the test goroutine while the first is still
 	// blocked, must dedupe and return immediately without fetching.
-	g.ApplyHints(context.Background(), map[string]string{"rules": "sha256:v1"})
+	g.ApplyHints(context.Background(), hints("rules", "sha256:v1"))
 	if n := f.calls.Load(); n != 1 {
 		t.Fatalf("fetch calls after the second (deduped) call = %d, want exactly 1", n)
 	}
@@ -188,7 +206,7 @@ func TestApplyHintsDedupesConcurrentFetchesForSameName(t *testing.T) {
 // nil-safety of every other SupplyGate entry point.
 func TestApplyHintsNilSafety(t *testing.T) {
 	var g *SupplyGate
-	g.ApplyHints(context.Background(), map[string]string{"rules": "h1"}) // must not panic
+	g.ApplyHints(context.Background(), hints("rules", "h1")) // must not panic
 
 	reg := supply.NewRegistry()
 	f := &stubFetcher{}
@@ -244,8 +262,38 @@ func TestObservedSuppliesReadsFromRegistry(t *testing.T) {
 	}
 	r := &Runner{supplyRegistry: reg}
 	got := r.observedSupplies()
-	if len(got) != 1 || got["rules"] != "h-v1" {
-		t.Fatalf("observedSupplies() = %#v, want {rules: h-v1}", got)
+	want := []protocol.SupplyObservation{
+		{Namespace: string(namespace.Default), Node: "rules", Hash: "h-v1"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("observedSupplies() = %#v, want %#v", got, want)
+	}
+}
+
+// The report must name the namespace of each supply, and one runner hosts
+// supplies from several namespaces at once: two namespaces' same-named supply
+// nodes are two entries, not one that the later write overwrites.
+func TestObservedSuppliesReportsNamespacePerEntry(t *testing.T) {
+	reg := supply.NewRegistry()
+	ctx := context.Background()
+	for _, snap := range []supply.Snapshot{
+		{Namespace: "tenant-b", Name: "rules", Content: []byte(`v-b`), Hash: "h-b", Revision: 1},
+		{Namespace: "tenant-a", Name: "rules", Content: []byte(`v-a`), Hash: "h-a", Revision: 1},
+	} {
+		if err := reg.Apply(ctx, snap); err != nil {
+			t.Fatalf("seed %s: %v", snap.Namespace, err)
+		}
+	}
+	r := &Runner{supplyRegistry: reg}
+
+	got := r.observedSupplies()
+	want := []protocol.SupplyObservation{
+		{Namespace: "tenant-a", Node: "rules", Hash: "h-a"},
+		{Namespace: "tenant-b", Node: "rules", Hash: "h-b"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("observedSupplies() = %#v, want %#v (one entry per (namespace, name), sorted "+
+			"so the heartbeat body is byte-stable)", got, want)
 	}
 }
 
@@ -256,7 +304,7 @@ func TestProcessSupplyHintsNoopWithoutGate(t *testing.T) {
 	r := &Runner{}
 	// Must not panic.
 	r.processSupplyHints(context.Background(), protocol.HeartbeatResponse{
-		SupplyHints: map[string]string{"rules": "h1"},
+		SupplyHints: hints("rules", "h1"),
 	})
 }
 
@@ -289,7 +337,7 @@ func TestProcessSupplyHintsAppliesHintViaGate(t *testing.T) {
 	r := &Runner{supplyGate: g}
 
 	r.processSupplyHints(context.Background(), protocol.HeartbeatResponse{
-		SupplyHints: map[string]string{"rules": "sha256:whatever-changed"},
+		SupplyHints: hints("rules", "sha256:whatever-changed"),
 	})
 
 	// processSupplyHints fires the fetch in its own goroutine (documented: it
@@ -303,4 +351,76 @@ func TestProcessSupplyHintsAppliesHintViaGate(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("hint was not applied to the registry within the timeout")
+}
+
+// nsRecordingFetcher records the namespace each Fetch was called under. The
+// HTTP fetcher derives the request's namespace header from the context
+// (supply_client.go), so this is where "did the fetch ask for the right
+// namespace" is observable without an HTTP round trip.
+type nsRecordingFetcher struct {
+	stubFetcher
+	mu       sync.Mutex
+	nsByCall []namespace.Namespace
+}
+
+func (f *nsRecordingFetcher) Fetch(ctx context.Context, name string) ([]byte, string, uint64, error) {
+	f.mu.Lock()
+	f.nsByCall = append(f.nsByCall, namespace.FromContext(ctx))
+	f.mu.Unlock()
+	return f.stubFetcher.Fetch(ctx, name)
+}
+
+func (f *nsRecordingFetcher) namespaces() []namespace.Namespace {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]namespace.Namespace(nil), f.nsByCall...)
+}
+
+// A hint names its supply's namespace, and the fetch it triggers must run under
+// that namespace. The heartbeat's own context carries none — one runner hosts
+// several namespaces at once — so a fetch that inherited it would ask the
+// server for the DEFAULT namespace's content and publish it under the supply's
+// real (namespace, name) key: tenant A's node would run on tenant B's rules.
+func TestApplyHintsFetchContextCarriesTheHintsNamespace(t *testing.T) {
+	reg := supply.NewRegistry()
+	f := &nsRecordingFetcher{stubFetcher: stubFetcher{content: map[string][]byte{"shared-rules": []byte(`v2`)}}}
+	g := NewSupplyGate(f, reg, quietLogger())
+	// Admit would have recorded this mapping at activation time; the hint path
+	// has no other way to learn the resource name.
+	g.resources.Store(supply.KeyOf("tenant-a", "rules"), "shared-rules")
+
+	g.ApplyHints(context.Background(), []protocol.SupplyHint{
+		{Namespace: "tenant-a", Node: "rules", Hash: "sha256:changed"},
+	})
+
+	if got := f.namespaces(); len(got) != 1 || got[0] != "tenant-a" {
+		t.Fatalf("Fetch ran under namespaces %v, want exactly [tenant-a]", got)
+	}
+	if _, ok := reg.Get(supply.KeyOf("tenant-a", "rules")); !ok {
+		t.Fatal("the hinted content did not land under (tenant-a, rules)")
+	}
+	if _, ok := reg.Get(defaultKey("rules")); ok {
+		t.Fatal("the hinted content landed under (default, rules): a cross-namespace publish")
+	}
+}
+
+// A hint with no namespace resolves to the default namespace — the same
+// fallback namespace.FromContext applies — and the fetch must carry that
+// resolved value, not the empty string.
+func TestApplyHintsEmptyNamespaceResolvesToDefault(t *testing.T) {
+	reg := supply.NewRegistry()
+	f := &nsRecordingFetcher{stubFetcher: stubFetcher{content: map[string][]byte{"shared-rules": []byte(`v2`)}}}
+	g := NewSupplyGate(f, reg, quietLogger())
+	g.resources.Store(defaultKey("rules"), "shared-rules")
+
+	g.ApplyHints(context.Background(), []protocol.SupplyHint{
+		{Node: "rules", Hash: "sha256:changed"},
+	})
+
+	if got := f.namespaces(); len(got) != 1 || got[0] != namespace.Default {
+		t.Fatalf("Fetch ran under namespaces %v, want exactly [%s]", got, namespace.Default)
+	}
+	if _, ok := reg.Get(defaultKey("rules")); !ok {
+		t.Fatal("the hinted content did not land under (default, rules)")
+	}
 }
