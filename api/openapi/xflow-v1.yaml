@@ -2971,6 +2971,20 @@ components:
           type: boolean
         on_error:
           type: string
+          enum: ["", stop, error_output, main_output, continue]
+          description: |
+            Node failure policy, applied once the node's retries are
+            exhausted. Omit or use an empty value to inherit
+            `settings.on_error`, whose own default is `stop`.
+
+            - `stop`: the execution fails; the node is `failed`.
+            - `error_output`: the failure leaves through this node's `error`
+              port; the node is `success` and the execution continues.
+            - `main_output`: the failure leaves through the `main` port; the
+              node is `success` and downstream reads the error as
+              `$input.error`.
+            - `continue`: the failure leaves through the `main` port; the node
+              is `continued` and no `error` field is injected.
         runner_selector:
           $ref: "#/components/schemas/RunnerSelector"
         inputs:
@@ -3033,10 +3047,16 @@ components:
         on_error:
           type: string
           default: stop
-          enum: ["", stop, continue]
+          enum: ["", stop, continue, error_output]
           description: |
             Group failure policy. Omit or use an empty value for the default
-            `stop`; only `stop` and `continue` are supported for groups.
+            `stop`. `continue` and `error_output` are supported;
+            `error_output` requires at least one `error_outputs` target, and
+            `error_outputs` under any other policy is rejected — a route no
+            policy reaches is the same silent no-op class as one that routes
+            nowhere. `main_output` is rejected: unlike a node, a group that
+            failed before committing has no single member output to stand in
+            for the group's main result.
         retry:
           type: "null"
           deprecated: true
@@ -3241,6 +3261,13 @@ components:
           type: string
         on_error:
           type: string
+          enum: ["", stop, error_output, main_output, continue]
+          description: |
+            Workflow default failure policy, applied to nodes that do not
+            declare their own `on_error`. Omit or use an empty value for
+            `stop`; a node's explicit `on_error` wins over this value, and
+            groups do not inherit it. Any other value is rejected at compile
+            time.
         pin_data_mode:
           type: string
         retry:
