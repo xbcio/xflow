@@ -256,6 +256,7 @@ func TestLeaseSweeperRepairPassDoesNotReportCandidates(t *testing.T) {
 	wantPass := []passEvent{
 		{pass: SweepPassRepair, outcome: SweepPassOutcomeRan, released: 11},
 		{pass: SweepPassConcurrencySlot, outcome: SweepPassOutcomeUnsupported},
+		{pass: SweepPassConcurrencyQueue, outcome: SweepPassOutcomeUnsupported},
 	}
 	if got := observer.snapshot(); !equalPassEvents(got, wantPass) {
 		t.Fatalf("pass events = %+v, want %+v", got, wantPass)

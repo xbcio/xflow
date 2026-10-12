@@ -254,22 +254,25 @@ func TestLeaseSweeperReportsEveryMaintenancePassOutcome(t *testing.T) {
 
 // passEvents is the event stream one run of pass produces, in order.
 //
-// RepairOnce is the one entry that drives a second pass: the workflow slot
-// sweep shares its cadence (see lease_sweeper.go). These fakes implement the
-// repair capability but not the reconciler, so the ride-along reports
-// unsupported — its capability check precedes its cadence check, exactly as the
-// other passes' do — except under the leader gate, which it applies first and
-// reports for itself.
+// RepairOnce is the one entry that drives more than itself: the concurrency
+// maintenance rides its call, one event per half (see lease_sweeper.go). The
+// ride-alongs share the repair period but not the repair's cadence gate: a
+// repair that was cadence-skipped still runs them, so their events do not follow
+// that outcome. Only the leader gate applies to both, and it does so before
+// anything else. These fakes implement neither concurrency capability, so every
+// ungated ride-along reports unsupported.
 func passEvents(pass string, outcome string, released int) []passEvent {
 	events := []passEvent{{pass: pass, outcome: outcome, released: released}}
 	if pass != SweepPassRepair {
 		return events
 	}
-	slotOutcome := SweepPassOutcomeUnsupported
-	if outcome == SweepPassOutcomeSkippedNotLeader {
-		slotOutcome = SweepPassOutcomeSkippedNotLeader
+	rideAlong := func(name string) passEvent {
+		if outcome == SweepPassOutcomeSkippedNotLeader {
+			return passEvent{pass: name, outcome: SweepPassOutcomeSkippedNotLeader}
+		}
+		return passEvent{pass: name, outcome: SweepPassOutcomeUnsupported}
 	}
-	return append(events, passEvent{pass: SweepPassConcurrencySlot, outcome: slotOutcome})
+	return append(events, rideAlong(SweepPassConcurrencySlot), rideAlong(SweepPassConcurrencyQueue))
 }
 
 func equalPassEvents(got, want []passEvent) bool {
@@ -314,8 +317,9 @@ func TestLeaseSweeperPassMetricsAnswerWhetherAPassReleasedAnything(t *testing.T)
 
 	// Every other pass was never called on this sweeper, and that absence is
 	// exactly what "never ran" looks like — a different reading from the zero
-	// above. The slot sweep is included because nothing but RepairOnce drives it.
-	for _, pass := range []string{SweepPassRepair, SweepPassLegacyLeaseMeta, SweepPassDeadQueuedAssignment, SweepPassConcurrencySlot} {
+	// above. The concurrency passes are included because nothing but RepairOnce
+	// drives them.
+	for _, pass := range []string{SweepPassRepair, SweepPassLegacyLeaseMeta, SweepPassDeadQueuedAssignment, SweepPassConcurrencySlot, SweepPassConcurrencyQueue} {
 		if _, ok := findPassCounter(t, m, "xflow_lease_maintenance_pass_total",
 			map[string]string{"pass": pass}); ok {
 			t.Errorf("pass=%s has a series although nothing ran it", pass)
