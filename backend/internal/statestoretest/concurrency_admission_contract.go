@@ -8,6 +8,7 @@ import (
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -74,8 +75,10 @@ func concurrencyGraph(t *testing.T, name string) *graph.Graph {
 // concurrencyAdmissionFor builds the admission one submission contends for, as
 // the engine builds it from a compiled graph.
 //
-// The admission carries the namespace explicitly rather than reading it from
-// ctx so the key-scope cases can vary one field at a time.
+// The namespace is a parameter rather than read from ctx so the key-scope cases
+// can vary it; concurrencyAdmissionContext is paired with it below, because in
+// production the engine derives both from the same context and a store is
+// entitled to read either.
 func concurrencyAdmissionFor(t *testing.T, g *graph.Graph, limit int) engine.ConcurrencyAdmission {
 	t.Helper()
 	return engine.ConcurrencyAdmission{
@@ -84,6 +87,17 @@ func concurrencyAdmissionFor(t *testing.T, g *graph.Graph, limit int) engine.Con
 		Limit:     limit,
 		Mode:      types.ConcurrencyModeReject,
 	}
+}
+
+// concurrencyAdmissionContext binds an admission's namespace to the context the
+// submission runs under, which is the relationship the engine maintains
+// (concurrencyAdmissionFor reads the namespace off the very context it hands
+// the store).
+func concurrencyAdmissionContext(ctx context.Context, admission engine.ConcurrencyAdmission) context.Context {
+	if admission.Namespace == "" {
+		return ctx
+	}
+	return namespace.WithNamespace(ctx, namespace.Namespace(admission.Namespace))
 }
 
 // concurrencySnapshot builds one submission as the engine would: a fresh ID, a
@@ -235,14 +249,14 @@ func admissionKeyedByNamespace(t *testing.T, state engine.StateStore) {
 
 	first := concurrencyAdmissionFor(t, g, 1)
 	snap, entries := concurrencySnapshot(t, g)
-	if _, err := limited.CreateExecutionWithConcurrency(ctx, snap, entries, first); err != nil {
+	if _, err := limited.CreateExecutionWithConcurrency(concurrencyAdmissionContext(ctx, first), snap, entries, first); err != nil {
 		t.Fatalf("default-namespace submission error = %v", err)
 	}
 
 	other := first
 	other.Namespace = "other-tenant"
 	snap2, entries2 := concurrencySnapshot(t, g)
-	if _, err := limited.CreateExecutionWithConcurrency(ctx, snap2, entries2, other); err != nil {
+	if _, err := limited.CreateExecutionWithConcurrency(concurrencyAdmissionContext(ctx, other), snap2, entries2, other); err != nil {
 		t.Fatalf("other-namespace submission error = %v, want its own slot", err)
 	}
 }
