@@ -195,6 +195,16 @@ func (g *SupplyGate) AdmitWithDeclarations(ctx context.Context, workflowID strin
 	// It comes off ctx, which the activation path fills from the directive's own
 	// namespace — never from the requirement records, which carry names only.
 	ns := namespace.FromContext(ctx)
+	// Every per-supply call below runs under this namespace, re-stated onto the
+	// context rather than inherited from whatever the caller passed. That is not
+	// bookkeeping: the HTTP fetcher sets its request's namespace header from the
+	// context (supply_client.go), so a fetch that only happened to carry the
+	// right namespace would silently read the default namespace's content the
+	// moment a caller built its context differently — and it would then be
+	// published under this supply's real (namespace, name) key. The design's
+	// rule is that a fetch's namespace comes from the recorded identity, never
+	// from the call chain's ambient context.
+	supplyCtx := namespace.WithNamespace(ctx, ns)
 	var missing []string
 	for _, req := range reqs {
 		k := supply.KeyOf(ns, req.Node)
@@ -208,31 +218,31 @@ func (g *SupplyGate) AdmitWithDeclarations(ctx context.Context, workflowID strin
 		// supply. With a declaration present the cached content must still be
 		// resolved below, because "cached" is not "complete".
 		if len(declared) == 0 && g.registry.IsReady(k) {
-			g.notifyNotReady(ctx, workflowID, req.Node, false)
+			g.notifyNotReady(supplyCtx, workflowID, req.Node, false)
 			continue
 		}
-		content, hash, revision, err := g.fetcher.Fetch(ctx, req.Resource)
+		content, hash, revision, err := g.fetcher.Fetch(supplyCtx, req.Resource)
 		if err != nil {
-			g.notifyFetch(ctx, req.Resource, "error")
+			g.notifyFetch(supplyCtx, req.Resource, "error")
 			// Both "never written" and "cannot reach the server" mean the same
 			// thing for the decision: this runner has no content. They differ only
 			// in what an operator should look at, hence the log level split.
 			if errors.Is(err, ErrSupplyNotFound) {
-				g.log(ctx, slog.LevelInfo, "supply has no content yet", req, "")
+				g.log(supplyCtx, slog.LevelInfo, "supply has no content yet", req, "")
 			} else {
-				g.log(ctx, slog.LevelWarn, "supply fetch failed", req, "")
+				g.log(supplyCtx, slog.LevelWarn, "supply fetch failed", req, "")
 			}
 			if req.RequireReady {
 				missing = append(missing, req.Node)
-				g.notifyNotReady(ctx, workflowID, req.Node, true)
+				g.notifyNotReady(supplyCtx, workflowID, req.Node, true)
 			} else {
-				g.notifyNotReady(ctx, workflowID, req.Node, false)
-				g.notifyServingUnavailable(ctx, req.Node, true)
+				g.notifyNotReady(supplyCtx, workflowID, req.Node, false)
+				g.notifyServingUnavailable(supplyCtx, req.Node, true)
 			}
 			continue
 		}
-		g.notifyFetch(ctx, req.Resource, "ok")
-		if err := g.registry.Apply(ctx, supply.Snapshot{
+		g.notifyFetch(supplyCtx, req.Resource, "ok")
+		if err := g.registry.Apply(supplyCtx, supply.Snapshot{
 			Namespace: k.Namespace,
 			Name:      k.Name,
 			Content:   content,
@@ -244,12 +254,12 @@ func (g *SupplyGate) AdmitWithDeclarations(ctx context.Context, workflowID strin
 			// The snapshot is cached regardless, but a consumer that could not
 			// apply it has no usable derived state, so a required supply is not
 			// ready.
-			g.log(ctx, slog.LevelWarn, "supply content rejected by a consumer", req, hash)
+			g.log(supplyCtx, slog.LevelWarn, "supply content rejected by a consumer", req, hash)
 			if req.RequireReady {
 				missing = append(missing, req.Node)
-				g.notifyNotReady(ctx, workflowID, req.Node, true)
+				g.notifyNotReady(supplyCtx, workflowID, req.Node, true)
 			} else {
-				g.notifyNotReady(ctx, workflowID, req.Node, false)
+				g.notifyNotReady(supplyCtx, workflowID, req.Node, false)
 			}
 			continue
 		}
@@ -260,12 +270,12 @@ func (g *SupplyGate) AdmitWithDeclarations(ctx context.Context, workflowID strin
 		// against the wrong pointer — reporting a complete set as incomplete for
 		// one heartbeat, or accepting an incomplete one.
 		if nodeName, ok := g.unresolvableDeclaration(k, declared); ok {
-			g.logDeclaredNodeUnusable(ctx, req, nodeName, hash)
+			g.logDeclaredNodeUnusable(supplyCtx, req, nodeName, hash)
 			if req.RequireReady {
 				missing = append(missing, req.Node)
-				g.notifyNotReady(ctx, workflowID, req.Node, true)
+				g.notifyNotReady(supplyCtx, workflowID, req.Node, true)
 			} else {
-				g.notifyNotReady(ctx, workflowID, req.Node, false)
+				g.notifyNotReady(supplyCtx, workflowID, req.Node, false)
 			}
 			continue
 		}
@@ -274,18 +284,18 @@ func (g *SupplyGate) AdmitWithDeclarations(ctx context.Context, workflowID strin
 		// the case where the content is cached-but-rejected from a prior Apply
 		// with the same hash (a re-fetch that returned identical bytes).
 		if !g.registry.IsReady(k) {
-			g.log(ctx, slog.LevelWarn, "supply content previously rejected, still not ready", req, hash)
+			g.log(supplyCtx, slog.LevelWarn, "supply content previously rejected, still not ready", req, hash)
 			if req.RequireReady {
 				missing = append(missing, req.Node)
-				g.notifyNotReady(ctx, workflowID, req.Node, true)
+				g.notifyNotReady(supplyCtx, workflowID, req.Node, true)
 			} else {
-				g.notifyNotReady(ctx, workflowID, req.Node, false)
+				g.notifyNotReady(supplyCtx, workflowID, req.Node, false)
 			}
 			continue
 		}
-		g.notifyNotReady(ctx, workflowID, req.Node, false)
-		g.notifyServingUnavailable(ctx, req.Node, false)
-		g.log(ctx, slog.LevelInfo, "supply ready", req, hash)
+		g.notifyNotReady(supplyCtx, workflowID, req.Node, false)
+		g.notifyServingUnavailable(supplyCtx, req.Node, false)
+		g.log(supplyCtx, slog.LevelInfo, "supply ready", req, hash)
 	}
 	if len(missing) == 0 {
 		return nil

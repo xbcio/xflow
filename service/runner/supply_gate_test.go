@@ -42,6 +42,29 @@ func (f *stubFetcher) Fetch(_ context.Context, name string) ([]byte, string, uin
 // a bare context.Background() must look the content up under that same key.
 func defaultKey(name string) supply.Key { return supply.KeyOf(namespace.Default, name) }
 
+// nsRecordingFetcher records the namespace each Fetch was called under. The
+// HTTP fetcher derives the request's namespace header from the context
+// (supply_client.go), so this is where "did the fetch ask for the right
+// namespace" is observable without an HTTP round trip.
+type nsRecordingFetcher struct {
+	stubFetcher
+	mu       sync.Mutex
+	nsByCall []namespace.Namespace
+}
+
+func (f *nsRecordingFetcher) Fetch(ctx context.Context, name string) ([]byte, string, uint64, error) {
+	f.mu.Lock()
+	f.nsByCall = append(f.nsByCall, namespace.FromContext(ctx))
+	f.mu.Unlock()
+	return f.stubFetcher.Fetch(ctx, name)
+}
+
+func (f *nsRecordingFetcher) namespaces() []namespace.Namespace {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]namespace.Namespace(nil), f.nsByCall...)
+}
+
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
@@ -359,5 +382,61 @@ func TestActivateIsRefusedBeforeSubscribing(t *testing.T) {
 	}
 	if rec.activated.Load() {
 		t.Fatal("the trigger subscription must NOT start: it would commit Kafka offsets for messages nothing can process")
+	}
+}
+
+// Admit must run each supply's fetch under that supply's own namespace. The
+// HTTP fetcher takes the namespace from the context, so a fetch that ran under
+// the raw caller context would ask for the wrong namespace's content the moment
+// the caller's context did not carry one — and Admit would then publish it under
+// the supply's real (namespace, name) key.
+func TestAdmitFetchContextCarriesTheActivationNamespace(t *testing.T) {
+	f := &nsRecordingFetcher{stubFetcher: stubFetcher{
+		content: map[string][]byte{"shared-rules": []byte(`{"rules":[]}`)},
+	}}
+	reg := supply.NewRegistry()
+	g := NewSupplyGate(f, reg, quietLogger())
+
+	ctx := namespace.WithNamespace(context.Background(), "tenant-a")
+	if err := g.Admit(ctx, "wf", []engine.SupplyRequirement{
+		{Node: "rules", Resource: "shared-rules", RequireReady: true},
+	}); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+
+	if got := f.namespaces(); len(got) != 1 || got[0] != "tenant-a" {
+		t.Fatalf("Fetch ran under namespaces %v, want exactly [tenant-a]", got)
+	}
+	if _, ok := reg.Get(supply.KeyOf("tenant-a", "rules")); !ok {
+		t.Fatal("content was not cached under (tenant-a, rules)")
+	}
+	if _, ok := reg.Get(defaultKey("rules")); ok {
+		t.Fatal("content landed under (default, rules): the activation's namespace was dropped")
+	}
+}
+
+// A caller whose context carries no namespace at all must still produce an
+// explicitly DEFAULT-namespaced fetch, not one with no namespace — the fetcher
+// resolves the context, so the only values that can reach the wire are real
+// ones. This is the in-process/embedded caller whose context never went through
+// the activation path's namespace.WithNamespace.
+func TestAdmitWithoutContextNamespaceFetchesDefault(t *testing.T) {
+	f := &nsRecordingFetcher{stubFetcher: stubFetcher{
+		content: map[string][]byte{"shared-rules": []byte(`{"rules":[]}`)},
+	}}
+	reg := supply.NewRegistry()
+	g := NewSupplyGate(f, reg, quietLogger())
+
+	if err := g.Admit(context.Background(), "wf", []engine.SupplyRequirement{
+		{Node: "rules", Resource: "shared-rules", RequireReady: true},
+	}); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+
+	if got := f.namespaces(); len(got) != 1 || got[0] != namespace.Default {
+		t.Fatalf("Fetch ran under namespaces %v, want exactly [%s]", got, namespace.Default)
+	}
+	if _, ok := reg.Get(defaultKey("rules")); !ok {
+		t.Fatal("content was not cached under (default, rules)")
 	}
 }

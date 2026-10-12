@@ -353,29 +353,6 @@ func TestProcessSupplyHintsAppliesHintViaGate(t *testing.T) {
 	t.Fatal("hint was not applied to the registry within the timeout")
 }
 
-// nsRecordingFetcher records the namespace each Fetch was called under. The
-// HTTP fetcher derives the request's namespace header from the context
-// (supply_client.go), so this is where "did the fetch ask for the right
-// namespace" is observable without an HTTP round trip.
-type nsRecordingFetcher struct {
-	stubFetcher
-	mu       sync.Mutex
-	nsByCall []namespace.Namespace
-}
-
-func (f *nsRecordingFetcher) Fetch(ctx context.Context, name string) ([]byte, string, uint64, error) {
-	f.mu.Lock()
-	f.nsByCall = append(f.nsByCall, namespace.FromContext(ctx))
-	f.mu.Unlock()
-	return f.stubFetcher.Fetch(ctx, name)
-}
-
-func (f *nsRecordingFetcher) namespaces() []namespace.Namespace {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]namespace.Namespace(nil), f.nsByCall...)
-}
-
 // A hint names its supply's namespace, and the fetch it triggers must run under
 // that namespace. The heartbeat's own context carries none — one runner hosts
 // several namespaces at once — so a fetch that inherited it would ask the
