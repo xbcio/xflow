@@ -66,6 +66,12 @@ tags:
       no inbound address), authenticated per entry by an HMAC signature rather
       than by bearerAuth, and answered with the bare entry-seed shapes rather
       than the Envelope.
+  - name: Schedules
+    description: |
+      A workflow's cron and timer trigger nodes, and the runtime overlay an
+      operator writes against one without registering a new version: read the
+      effective timing, retime it, pause and resume it, drop the overlay, or
+      backfill a past range of its instants.
 
 security:
   - bearerAuth: []
@@ -664,6 +670,853 @@ paths:
                     success: false
                     code: workflow_concurrency_unavailable
                     message: workflow concurrency is not available on this server
+                    trace_id: 0123456789abcdef0123456789abcdef
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/workflows/{id}/schedules:
+    get:
+      operationId: listSchedules
+      summary: List a workflow's schedules
+      description: |
+        Every schedule the workflow's current version declares, each with its
+        runtime overlay applied, followed by overlays whose node the version no
+        longer declares.
+
+        A schedule is not an entity of its own: it is a trigger node with a
+        timing rule (a cron node or a timer node) plus whatever an operator has
+        changed about it without registering a new version. That is why these
+        routes live under the workflow — there is no `/v1/schedules`
+        collection, and no way to address one without naming its workflow.
+
+        Rows carry the EFFECTIVE timing: the overlay's value where it speaks,
+        the definition's where it does not. An overlay whose node is gone
+        (renamed, deleted, or changed to another type) is listed as `orphaned`
+        with an empty `kind` rather than dropped — the node may return under the
+        same name in the next version, and an overlay that silently vanished
+        would be indistinguishable from one that was never written.
+
+        The list is not paginated, and that is a property of the resource rather
+        than an omission: it is bounded by the number of trigger nodes in ONE
+        definition, so there is no unbounded scan for a page size to protect.
+        `total` is the exact number of rows.
+
+        Namespace comes from the authenticated principal and never from the
+        path. A workflow id owned by another namespace is answered 404
+        `workflow_not_found`, exactly as an unknown id is — a 403 would confirm
+        that the id exists.
+
+        Requires the `schedule.read` scope.
+      tags: [Schedules]
+      parameters:
+        - $ref: "#/components/parameters/WorkflowId"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: "Every schedule of the workflow — definition order first, then orphaned overlays."
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ScheduleListResponse"
+        "404":
+          description: |
+            No such workflow in the caller's namespace: `workflow_not_found` is
+            the same answer for an id that does not exist and one that exists in
+            another namespace.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                workflowNotFound:
+                  summary: The id is unknown, or belongs to another namespace.
+                  value:
+                    success: false
+                    code: workflow_not_found
+                    message: workflow not found
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "501":
+          description: |
+            This deployment has no schedule overlay store, so it cannot serve
+            schedules. The routes are registered anyway — a 404 would read as
+            "this server is older than the route", which is a different and
+            false statement; what is missing is the store behind them.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                notConfigured:
+                  summary: No schedule overlay store is configured on this server.
+                  value:
+                    success: false
+                    code: schedules_unavailable
+                    message: the schedules API is not configured on this server
+                    trace_id: 0123456789abcdef0123456789abcdef
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/workflows/{id}/schedules/{node}:
+    get:
+      operationId: getSchedule
+      summary: Read one schedule
+      description: |
+        One schedule: a trigger node of the workflow with its overlay applied, or
+        the orphaned overlay of a node the current version no longer declares.
+
+        `last_scheduled` and `next_fire` are null when the answer is unknown
+        rather than guessed: no firing has been recorded yet, this server cannot
+        read the trigger's watermark (`last_scheduled` — the watermark is written
+        by whichever process hosts the trigger), or the effective expression
+        cannot be parsed (`next_fire` — a definition may hold an expression the
+        trigger itself refuses at activation, and the view reports that as a
+        missing instant instead of failing the read).
+
+        Requires the `schedule.read` scope.
+      tags: [Schedules]
+      parameters:
+        - $ref: "#/components/parameters/WorkflowId"
+        - $ref: "#/components/parameters/ScheduleNode"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: The schedule, with its overlay applied.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ScheduleView"
+        "404":
+          description: |
+            Two codes share this status and are deliberately not distinguished
+            further: `workflow_not_found` when the workflow is unknown (or in
+            another namespace), `schedule_not_found` when the workflow exists but
+            the node is neither a schedule of it nor the address of an existing
+            overlay. A node that is not a schedule and a node that does not exist
+            answer the same way, because telling them apart would map out which
+            names a workflow declares.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                workflowNotFound:
+                  summary: The workflow id is unknown, or belongs to another namespace.
+                  value:
+                    success: false
+                    code: workflow_not_found
+                    message: workflow not found
+                    trace_id: 0123456789abcdef0123456789abcdef
+                scheduleNotFound:
+                  summary: The node is not a schedule of this workflow and has no overlay.
+                  value:
+                    success: false
+                    code: schedule_not_found
+                    message: schedule not found
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "501":
+          description: This deployment has no schedule overlay store.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                notConfigured:
+                  summary: No schedule overlay store is configured on this server.
+                  value:
+                    success: false
+                    code: schedules_unavailable
+                    message: the schedules API is not configured on this server
+                    trace_id: 0123456789abcdef0123456789abcdef
+        default:
+          $ref: "#/components/responses/DefaultError"
+    patch:
+      operationId: patchSchedule
+      summary: Retime a schedule without registering a new version
+      description: |
+        A partial update of one schedule's overlay, creating it when there is
+        none, and returns the resulting view. This is the operation the whole
+        feature exists for: a schedule has to change faster than a definition
+        does, and an operator retiming a nightly job must not have to publish a
+        new workflow version to do it.
+
+        The three states of a field are carried by the KEY of the request body:
+        absent leaves the overlay's field alone, a value overrides it, and an
+        explicit `null` reverts it to the definition's. The third is why
+        `DELETE .../override` is not the only way back — an operator who pinned
+        an expression and a timezone and then wants only the expression to
+        follow the definition again would otherwise have to drop both.
+
+        The write is validated against the live node's KIND before it is stored:
+        a timezone on a timer is refused (400 `invalid_schedule_field`) because
+        the timer handler has no such parameter, and storing it would report an
+        override as in effect while the trigger ran unchanged.
+
+        A patch that names at least one field always writes, bumping `revision`
+        even when the value is what it already was — that is what a conditional
+        writer expects. A patch that names nothing is a read: it answers with the
+        current view, checks `If-Match`, and writes nothing.
+
+        `paused` is not a field of this request on purpose: pausing has its own
+        route and its own audit row, and it is not a state to reach by including
+        a key in a request about a cron expression.
+
+        The reply is 200 when the write landed and the trigger host was told, and
+        202 when the write is durable but the host could not be notified. 202 is
+        not a failure: the state the caller asked for IS the state that was
+        stored, the `If-Match` chain is intact, and the change takes effect at
+        the host's next activation (any later write also re-announces it).
+
+        Requires the `schedule.write` scope — deliberately not
+        `schedule.backfill`: retiming a schedule and running its past instants
+        are different trust, and a principal granted one is not thereby granted
+        the other.
+      tags: [Schedules]
+      parameters:
+        - $ref: "#/components/parameters/WorkflowId"
+        - $ref: "#/components/parameters/ScheduleNode"
+        - $ref: "#/components/parameters/IfMatchRevision"
+        - $ref: "#/components/parameters/XRequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SchedulePatchRequest"
+      responses:
+        "200":
+          description: The overlay was stored and the trigger host was notified.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ScheduleView"
+        "202":
+          description: |
+            The overlay was stored, but the trigger host was not notified
+            (a reload failure). The `data` payload is the same view: the state
+            the caller asked for is the state that was stored.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ScheduleView"
+        "400":
+          description: |
+            Three refusals share this status, each with its own code:
+            `invalid_schedule_field` when a named field is not overridable for
+            this kind or holds a value the kind cannot use (the message names the
+            field), `bad_request` when the body is not JSON, and
+            `invalid_if_match` when the precondition is not a revision number.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                fieldNotOverridable:
+                  summary: A timer has no timezone to override.
+                  value:
+                    success: false
+                    code: invalid_schedule_field
+                    message: 'control: invalid schedule field "timezone": a timer schedule has no timezone'
+                    trace_id: 0123456789abcdef0123456789abcdef
+                unknownField:
+                  summary: The key is not an overridable schedule field.
+                  value:
+                    success: false
+                    code: invalid_schedule_field
+                    message: 'control: invalid schedule field "nope": not an overridable schedule field'
+                    trace_id: 0123456789abcdef0123456789abcdef
+                invalidIfMatch:
+                  summary: The precondition is not a revision number (the value is not echoed).
+                  value:
+                    success: false
+                    code: invalid_if_match
+                    message: If-Match must be the revision number a previous read reported, or 0 for create-only-if-absent
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "404":
+          description: |
+            `workflow_not_found`, or `schedule_not_found` — an orphaned overlay
+            cannot be patched either: a patch is validated against the node it
+            targets, and there is no kind left to refuse a timer's timezone with.
+            Deleting the orphan is what `DELETE .../override` is for.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                scheduleNotFound:
+                  summary: The node is not a schedule of this workflow and has no overlay.
+                  value:
+                    success: false
+                    code: schedule_not_found
+                    message: schedule not found
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "409":
+          description: |
+            The `If-Match` precondition does not hold: the schedule changed since
+            it was read, or the caller asked for a create-only write on an
+            overlay that already exists. Nothing was written — re-read the
+            schedule and retry with the current `revision`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                revisionConflict:
+                  summary: The overlay's revision is not the one the caller asserted.
+                  value:
+                    success: false
+                    code: schedule_revision_conflict
+                    message: the schedule changed since it was read; re-read it and retry with the current revision
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "501":
+          description: This deployment has no schedule overlay store.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                notConfigured:
+                  summary: No schedule overlay store is configured on this server.
+                  value:
+                    success: false
+                    code: schedules_unavailable
+                    message: the schedules API is not configured on this server
+                    trace_id: 0123456789abcdef0123456789abcdef
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/workflows/{id}/schedules/{node}/override:
+    delete:
+      operationId: deleteScheduleOverride
+      summary: Drop a schedule's overlay
+      description: |
+        Removes the overlay, returning the schedule to what its definition says,
+        and returns the resulting view (`overridden` false).
+
+        This is the only operation that works on an ORPHANED overlay — one whose
+        node the current version no longer declares — and that is the point: a
+        leftover row nobody can see is also a leftover row nobody can clean up.
+        Every other route resolves the node first and refuses without one.
+
+        Deleting an overlay that was never written is 404, not success: the
+        caller addressed something that does not exist rather than asking for a
+        state that already holds. The `If-Match` precondition applies as it does
+        on write.
+
+        Requires the `schedule.write` scope.
+      tags: [Schedules]
+      parameters:
+        - $ref: "#/components/parameters/WorkflowId"
+        - $ref: "#/components/parameters/ScheduleNode"
+        - $ref: "#/components/parameters/IfMatchRevision"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: The overlay is gone; the view describes the definition-backed schedule.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ScheduleView"
+        "202":
+          description: |
+            The overlay was removed, but the trigger host was not notified
+            (a reload failure). The removal is durable; the schedule stops
+            following the dropped overlay at the host's next activation.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ScheduleView"
+        "400":
+          description: The `If-Match` precondition is not a revision number (`invalid_if_match`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                invalidIfMatch:
+                  summary: The precondition is not a revision number (the value is not echoed).
+                  value:
+                    success: false
+                    code: invalid_if_match
+                    message: If-Match must be the revision number a previous read reported, or 0 for create-only-if-absent
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "404":
+          description: |
+            `workflow_not_found`, or `schedule_not_found` when there is no
+            overlay at that address to drop.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                noOverlay:
+                  summary: No overlay exists for that node.
+                  value:
+                    success: false
+                    code: schedule_not_found
+                    message: schedule not found
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "409":
+          description: The `If-Match` precondition does not hold; nothing was deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                revisionConflict:
+                  summary: The overlay's revision is not the one the caller asserted.
+                  value:
+                    success: false
+                    code: schedule_revision_conflict
+                    message: the schedule changed since it was read; re-read it and retry with the current revision
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "501":
+          description: This deployment has no schedule overlay store.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                notConfigured:
+                  summary: No schedule overlay store is configured on this server.
+                  value:
+                    success: false
+                    code: schedules_unavailable
+                    message: the schedules API is not configured on this server
+                    trace_id: 0123456789abcdef0123456789abcdef
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/workflows/{id}/schedules/{node}/pause:
+    post:
+      operationId: pauseSchedule
+      summary: Pause a schedule
+      description: |
+        Stops the schedule from firing without changing what it says, and returns
+        the resulting view (`paused` true).
+
+        Pausing is idempotent: pausing an already-paused schedule writes nothing
+        and bumps no `revision`, so a retried or concurrent pause cannot
+        invalidate another operator's `If-Match`.
+
+        Pausing does NOT take the schedule out of the trigger host's hands. The
+        host keeps the subscription and drops each firing, which is what keeps
+        the watermark advancing — and that is why resuming never replays the
+        paused window. Asking for those instants is what the backfill route is
+        for.
+
+        Nothing is validated about the expression: pause is the action an
+        operator reaches for when a schedule is misbehaving, and refusing it
+        because the definition holds an expression the trigger rejects would be
+        exactly backwards.
+
+        Requires the `schedule.write` scope.
+      tags: [Schedules]
+      parameters:
+        - $ref: "#/components/parameters/WorkflowId"
+        - $ref: "#/components/parameters/ScheduleNode"
+        - $ref: "#/components/parameters/IfMatchRevision"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: The schedule is paused (or already was).
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ScheduleView"
+        "202":
+          description: |
+            The pause was stored, but the trigger host was not notified
+            (a reload failure). The schedule keeps firing until the host reads
+            the new overlay at its next activation.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ScheduleView"
+        "400":
+          description: The `If-Match` precondition is not a revision number (`invalid_if_match`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                invalidIfMatch:
+                  summary: The precondition is not a revision number (the value is not echoed).
+                  value:
+                    success: false
+                    code: invalid_if_match
+                    message: If-Match must be the revision number a previous read reported, or 0 for create-only-if-absent
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "404":
+          description: |
+            `workflow_not_found`, or `schedule_not_found` — an orphaned overlay
+            has no firing to pause.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                scheduleNotFound:
+                  summary: The node is not a schedule of this workflow.
+                  value:
+                    success: false
+                    code: schedule_not_found
+                    message: schedule not found
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "409":
+          description: The `If-Match` precondition does not hold; the schedule is unchanged.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                revisionConflict:
+                  summary: The overlay's revision is not the one the caller asserted.
+                  value:
+                    success: false
+                    code: schedule_revision_conflict
+                    message: the schedule changed since it was read; re-read it and retry with the current revision
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "501":
+          description: This deployment has no schedule overlay store.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                notConfigured:
+                  summary: No schedule overlay store is configured on this server.
+                  value:
+                    success: false
+                    code: schedules_unavailable
+                    message: the schedules API is not configured on this server
+                    trace_id: 0123456789abcdef0123456789abcdef
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/workflows/{id}/schedules/{node}/resume:
+    post:
+      operationId: resumeSchedule
+      summary: Resume a paused schedule
+      description: |
+        Lets the schedule fire again and returns the resulting view (`paused`
+        false).
+
+        Resuming is not a catch-up: what the pause skipped stays skipped. The
+        watermark kept advancing while the schedule was paused, so the next
+        firing is the next instant of the schedule's own grid rather than the
+        first one missed.
+
+        Like pause it is idempotent — resuming a schedule that is not paused
+        writes nothing and bumps no revision.
+
+        Requires the `schedule.write` scope.
+      tags: [Schedules]
+      parameters:
+        - $ref: "#/components/parameters/WorkflowId"
+        - $ref: "#/components/parameters/ScheduleNode"
+        - $ref: "#/components/parameters/IfMatchRevision"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: The schedule fires again (or already did).
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ScheduleView"
+        "202":
+          description: |
+            The resume was stored, but the trigger host was not notified
+            (a reload failure). The schedule starts firing again at the host's
+            next activation, still without replaying the paused window.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ScheduleView"
+        "400":
+          description: The `If-Match` precondition is not a revision number (`invalid_if_match`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                invalidIfMatch:
+                  summary: The precondition is not a revision number (the value is not echoed).
+                  value:
+                    success: false
+                    code: invalid_if_match
+                    message: If-Match must be the revision number a previous read reported, or 0 for create-only-if-absent
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "404":
+          description: |
+            `workflow_not_found`, or `schedule_not_found` — an orphaned overlay
+            has no firing to resume.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                scheduleNotFound:
+                  summary: The node is not a schedule of this workflow.
+                  value:
+                    success: false
+                    code: schedule_not_found
+                    message: schedule not found
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "409":
+          description: The `If-Match` precondition does not hold; the schedule is unchanged.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                revisionConflict:
+                  summary: The overlay's revision is not the one the caller asserted.
+                  value:
+                    success: false
+                    code: schedule_revision_conflict
+                    message: the schedule changed since it was read; re-read it and retry with the current revision
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "501":
+          description: This deployment has no schedule overlay store.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                notConfigured:
+                  summary: No schedule overlay store is configured on this server.
+                  value:
+                    success: false
+                    code: schedules_unavailable
+                    message: the schedules API is not configured on this server
+                    trace_id: 0123456789abcdef0123456789abcdef
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/workflows/{id}/schedules/{node}/backfill:
+    post:
+      operationId: backfillSchedule
+      summary: Run a schedule's past instants over a range
+      description: |
+        Fires the instants of a PAST range, one at a time, oldest first, and
+        reports what happened to each. This is the explicit replay a pause does
+        not promise: resuming after a pause continues the schedule's grid, and
+        an operator who wants the instants the pause skipped asks for them here.
+
+        The range is `(from, to]`. An instant exactly at `from` is normally one
+        that already fired — it is where a watermark sits — and asking for its
+        re-run is a different request than asking for a range. A `to` in the
+        FUTURE is refused rather than clamped: an instant the schedule has not
+        reached yet belongs to the live trigger, and firing it here would either
+        suppress the real firing or be forgotten before it, depending on how far
+        ahead the range reaches.
+
+        The plan is capped at 1000 instants and the cap is a refusal, not a
+        truncation: a backfill is a request to have a named set of instants run,
+        and silently planning the oldest thousand of two thousand would leave the
+        operator believing they asked for less than they did. A dry run is bound
+        by the same cap — the plan is what is being capped — so a wide range is
+        explored by narrowing it until the plan fits.
+
+        The instants are the EFFECTIVE schedule's: the overlay's expression where
+        the operator retimed the node, the definition's where they did not, so a
+        backfill plans what the schedule the operator is looking at would have
+        fired.
+
+        Running it is safe to repeat. Each instant is identified by the schedule's
+        own timeline and claimed under the backfill's own deduplication, so an
+        instant that already ran is reported as a `duplicate` skip rather than run
+        again, and a partly successful range can simply be re-run.
+
+        A refusal is answered with the error alone: no plan is returned beside a
+        400, because a client reading one as "these ran" would be wrong. Narrow
+        the range the error asks for and dry-run that.
+
+        Requires the `schedule.backfill` scope, and NOT `schedule.write`: this is
+        the one schedule operation that starts executions, so it is the one whose
+        grant is separate.
+      tags: [Schedules]
+      parameters:
+        - $ref: "#/components/parameters/WorkflowId"
+        - $ref: "#/components/parameters/ScheduleNode"
+        - $ref: "#/components/parameters/XRequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScheduleBackfillRequest"
+      responses:
+        "200":
+          description: |
+            The range was planned. `dry_run` says whether it was also fired;
+            `emitted` and `skipped` together account for every planned instant.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ScheduleBackfillResult"
+        "400":
+          description: |
+            The range cannot be planned: `invalid_backfill_range` for an inverted
+            or empty range, a `to` in the future, a range holding more than 1000
+            instants, or a timestamp that is missing or not RFC3339 (the message
+            names the field). `schedule_not_found` is 404, not this.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                future:
+                  summary: A backfill reaches only instants the schedule has already reached.
+                  value:
+                    success: false
+                    code: invalid_backfill_range
+                    message: "control: invalid backfill range: to (2026-05-04T13:00:00Z) is in the future; a backfill reaches only instants the schedule has already reached"
+                    trace_id: 0123456789abcdef0123456789abcdef
+                overCap:
+                  summary: The range holds more instants than one request may plan.
+                  value:
+                    success: false
+                    code: invalid_backfill_range
+                    message: "control: invalid backfill range: the range holds more than 1000 instants; narrow it (or dry-run a narrower range first)"
+                    trace_id: 0123456789abcdef0123456789abcdef
+                missingField:
+                  summary: A required timestamp is missing or not RFC3339.
+                  value:
+                    success: false
+                    code: invalid_backfill_range
+                    message: from is required and must be an RFC3339 timestamp
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "404":
+          description: |
+            `workflow_not_found`, or `schedule_not_found` — an orphaned overlay
+            has no live rule to plan instants from.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                scheduleNotFound:
+                  summary: The node is not a schedule of this workflow.
+                  value:
+                    success: false
+                    code: schedule_not_found
+                    message: schedule not found
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "501":
+          description: |
+            Two codes share this status. `schedules_unavailable` when this
+            deployment has no overlay store at all, and `backfill_unavailable`
+            when it stores schedules but does not host the workflow's triggers —
+            firing an instant outside an activation is the trigger host's job, and
+            a control plane whose triggers run on runners has nothing here to
+            call. The plan is still answerable in that deployment: dry-run it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                noHost:
+                  summary: This server does not host the workflow's triggers.
+                  value:
+                    success: false
+                    code: backfill_unavailable
+                    message: this server does not host the workflow's triggers, so it cannot fire a backfilled instant
+                    trace_id: 0123456789abcdef0123456789abcdef
+                notConfigured:
+                  summary: No schedule overlay store is configured on this server.
+                  value:
+                    success: false
+                    code: schedules_unavailable
+                    message: the schedules API is not configured on this server
                     trace_id: 0123456789abcdef0123456789abcdef
         default:
           $ref: "#/components/responses/DefaultError"
@@ -2606,6 +3459,40 @@ components:
       schema:
         type: string
         pattern: '^sha256=[0-9a-f]{64}$'
+    ScheduleNode:
+      name: node
+      in: path
+      required: true
+      description: |
+        Name of the trigger node the schedule belongs to — the same identity the
+        definition, the entry unit and the audit row use. It names a cron or
+        timer node of the workflow in the `{id}` segment: a name that is not a
+        schedule of the current version is 404 `schedule_not_found`, unless an
+        overlay still exists for it (an orphan), which stays readable and
+        deletable precisely so it can be cleaned up.
+      schema:
+        type: string
+    IfMatchRevision:
+      name: If-Match
+      in: header
+      required: false
+      description: |
+        Conditional-write precondition, in the overlay store's own revision
+        vocabulary: absent is unconditional, `0` means "only if this schedule
+        has no overlay yet" (a create), and any other value means "only if the
+        overlay's current revision is exactly this". The revision comes from a
+        previous read — `revision` on a ScheduleView — so a lost update fails
+        with 409 `schedule_revision_conflict` instead of overwriting another
+        operator's change.
+
+        HTTP's symbolic `*` is refused (400 `invalid_if_match`) rather than
+        mapped onto one of the three cases: its meaning ("the resource exists")
+        has no counterpart here, and quietly choosing for the caller would give
+        them a guarantee they did not ask for. The presented value is never
+        echoed back.
+      schema:
+        type: string
+        pattern: '^[0-9]+$'
 
   headers:
     XRequestId:
@@ -4242,6 +5129,330 @@ components:
         value: {}
         display_name:
           type: string
+
+    ScheduleView:
+      type: object
+      description: |
+        One schedule: a trigger node's own timing with its runtime overlay
+        applied, plus the two instants that live in neither. It is a snapshot,
+        not a handle — `revision` is what a conditional write echoes back in
+        `If-Match`, so a caller never needs a second read to write safely.
+
+        `kind` is `cron` or `timer` for a live node and EMPTY for an orphaned
+        overlay: the kind is read from the node, and an orphaned overlay has no
+        node to read it from. The overlay deliberately stores no kind, because a
+        stored copy is exactly what goes stale when a node changes type.
+
+        `expression`, `timezone`, `misfire` and `overlap` are the EFFECTIVE
+        values — the overlay's where it speaks, the definition's where it does
+        not. `misfire` and `overlap` are reported resolved to the node's
+        documented defaults (`skip` and `allow`) where the definition is silent,
+        because "what will happen" is the question an operator is asking;
+        `overridden` is how the definition's own silence stays visible.
+      required: [workflow_id, node, kind, expression, paused, overridden, orphaned, last_scheduled, next_fire, revision]
+      properties:
+        workflow_id:
+          type: string
+          description: The `{id}` of the workflow that declares the node.
+        node:
+          type: string
+          description: |
+            Name of the trigger node. It is the overlay's key, so an overlay
+            follows the NAME across re-registrations, and one whose name is gone
+            from the new version becomes `orphaned` rather than being dropped.
+        kind:
+          type: string
+          enum: ["", cron, timer]
+          description: |
+            `cron` or `timer` for a live schedule; the empty string for an
+            orphaned overlay, which has no node left to read a kind from.
+        expression:
+          type: string
+          description: |
+            The effective timing rule: a cron node's `expression`, a timer's
+            `interval`.
+        timezone:
+          type: string
+          description: |
+            The effective cron timezone — the overlay's, else the node's
+            parameter, else the workflow's `settings.timezone`, else `UTC`. It is
+            what the schedule will run in, not what the definition spells out.
+            Absent for a timer, which has no zone (its grid is UTC).
+        misfire:
+          type: string
+          enum: [skip, fire_once, fire_all]
+          description: |
+            The effective misfire policy for missed firings. Cron only, and
+            reported resolved to the node's default (`skip`) when the definition
+            is silent.
+        overlap:
+          type: string
+          enum: [allow, skip]
+          description: |
+            The effective overlap policy for a firing that arrives while the
+            previous run is still going. Cron only, reported resolved to the
+            node's default (`allow`) when the definition is silent. `queue` is
+            deliberately not a value: serialising runs is the workflow's
+            concurrency setting (`settings.concurrency`), not a property of the
+            trigger, and the cron node rejects it for exactly that reason.
+        paused:
+          type: boolean
+          description: |
+            The schedule does not fire, but its watermark keeps advancing — which
+            is why resuming never replays the paused window and why
+            `POST .../backfill` exists for the instants an operator does want.
+        overridden:
+          type: boolean
+          description: |
+            An overlay row exists for this node, whether or not it changes
+            anything. False means every value above is the definition's own.
+        orphaned:
+          type: boolean
+          description: |
+            The overlay's node is no longer a trigger node of the workflow's
+            current version (renamed, deleted, or changed to another type). Such
+            rows are listed rather than deleted, and `DELETE .../override` is the
+            only operation that reaches them.
+        last_scheduled:
+          type: [string, "null"]
+          format: date-time
+          description: |
+            When the schedule last fired, from the trigger host's own watermark
+            — or null when that is unknown: no firing has been recorded yet, or
+            this server does not host the trigger and cannot read its state. Null
+            is an honest "unknown", never a guess.
+        next_fire:
+          type: [string, "null"]
+          format: date-time
+          description: |
+            The next instant the effective schedule would fire, derived from the
+            effective expression — or null when the expression cannot be parsed
+            (a definition may hold one the trigger itself refuses at activation,
+            and that is reported here rather than failing the whole read).
+        revision:
+          type: integer
+          minimum: 0
+          description: |
+            The overlay's write-side revision, bumped by every write (even one
+            that changes nothing). Zero when no overlay exists. It is the value
+            `If-Match` carries.
+        updated_at:
+          type: string
+          format: date-time
+          description: When the overlay was last written. Absent when there is none.
+        updated_by:
+          type: string
+          description: |
+            The subject of the principal whose change the overlay records, taken
+            from the authenticated request that wrote it. Absent for a deployment
+            that authenticates without principals, and when there is no overlay.
+      example:
+        workflow_id: wf-01H8XG
+        node: nightly
+        kind: cron
+        expression: 0 2 * * *
+        timezone: Europe/Berlin
+        misfire: skip
+        overlap: allow
+        paused: false
+        overridden: true
+        orphaned: false
+        last_scheduled: "2026-05-03T02:00:00Z"
+        next_fire: "2026-05-05T00:00:00Z"
+        revision: 3
+        updated_at: "2026-05-04T11:59:00Z"
+        updated_by: operator@example.com
+
+    ScheduleListResponse:
+      type: object
+      description: |
+        The `data` payload of the schedule collection response — the mandated
+        `{list, total}` shape (spec §3.3), never a bare array. There is no page
+        parameter to go with it: the collection is bounded by the number of
+        trigger nodes in one definition.
+      required: [list, total]
+      properties:
+        list:
+          type: array
+          description: |
+            Every schedule of the workflow, definition order first, then orphaned
+            overlays by node name. Empty collections are `[]`, never `null`.
+          items:
+            $ref: "#/components/schemas/ScheduleView"
+        total:
+          type: integer
+          description: The exact number of rows in `list`.
+          example: 2
+
+    SchedulePatchRequest:
+      type: object
+      description: |
+        A partial update of one schedule's overlay. Presence is carried by the
+        KEY rather than the value, because the three cases are genuinely
+        distinct: an absent key leaves the overlay's field alone, a key with a
+        value overrides it, and a key with an explicit `null` reverts that field
+        to the definition's. The third is what lets an operator who pinned an
+        expression and a timezone hand one of them back without dropping both.
+
+        An empty object — or no body at all — is a read with a precondition: it
+        answers with the current view and writes nothing, which is what makes
+        `If-Match` usable on its own. Naming a key always writes, bumping
+        `revision` even when the value is unchanged.
+
+        Which keys a schedule actually accepts depends on its kind: a timer node
+        declares only its interval, so `timezone`, `misfire` and `overlap` on a
+        timer are refused (400 `invalid_schedule_field`) rather than stored as an
+        override nothing reads.
+
+        `paused` is deliberately not a key here. Pausing has its own route and
+        its own audit row; it is not a state to reach by including a field in a
+        request about a cron expression.
+      additionalProperties: false
+      properties:
+        expression:
+          type: [string, "null"]
+          description: |
+            The timing rule: a cron expression for a cron node (`0 2 * * *`), an
+            interval for a timer (`1m`). Validated with the node's own parser, so
+            a rule the trigger would refuse at activation cannot be stored.
+          example: "0 3 * * *"
+        timezone:
+          type: [string, "null"]
+          description: |
+            An IANA time zone for a cron node. An unknown zone is refused (400)
+            rather than stored; a timer has no zone and refuses the key.
+          example: Europe/Berlin
+        misfire:
+          type: [string, "null"]
+          enum: ["skip", "fire_once", "fire_all", "null"]
+          description: |
+            Policy for firings missed while no trigger host was running, for a
+            cron node. Restated from the cron node's own enum so an unknown
+            policy is refused at write time instead of leaving the schedule
+            silently dead until someone notices it stopped firing.
+        overlap:
+          type: [string, "null"]
+          enum: ["allow", "skip", "null"]
+          description: |
+            Policy for a firing that arrives while the previous run is still
+            going, for a cron node.
+
+    ScheduleBackfillRequest:
+      type: object
+      description: |
+        The range to backfill and whether to plan it only. `from` is exclusive
+        and `to` inclusive: an instant exactly at `from` is normally one that
+        already fired, and asking for its re-run is a different request than
+        asking for a range.
+      required: [from, to]
+      additionalProperties: false
+      properties:
+        from:
+          type: string
+          format: date-time
+          description: Exclusive lower bound, RFC3339.
+          example: "2026-05-04T12:00:00Z"
+        to:
+          type: string
+          format: date-time
+          description: |
+            Inclusive upper bound, RFC3339. It must not be in the future: an
+            instant the schedule has not reached belongs to the live trigger.
+          example: "2026-05-04T12:03:00Z"
+        dry_run:
+          type: boolean
+          default: false
+          description: |
+            Plan without firing. This is how a range is inspected before it runs,
+            and it is bound by the same 1000-instant cap as a real run — the plan
+            is what the cap protects, so a dry run is not a way around it.
+
+    ScheduleBackfillResult:
+      type: object
+      description: |
+        What a backfill planned and what happened to each instant. Every planned
+        instant ends up in exactly one of `emitted` or `skipped`, so the two
+        lists are the whole answer — nothing is reported as a count alone, and a
+        partly successful range is honestly reported rather than summarised.
+      required: [from, to, dry_run, planned, emitted, skipped]
+      properties:
+        from:
+          type: string
+          format: date-time
+          description: The exclusive lower bound the request asked for.
+        to:
+          type: string
+          format: date-time
+          description: The inclusive upper bound the request asked for.
+        dry_run:
+          type: boolean
+          description: |
+            Whether anything was fired. A dry run leaves `emitted` and `skipped`
+            empty and reports only `planned`.
+        planned:
+          type: array
+          description: |
+            The instants the range holds, oldest first, as the EFFECTIVE schedule
+            identifies them. Empty is `[]`, never `null`.
+          items:
+            type: string
+            format: date-time
+        emitted:
+          type: array
+          description: The instants that started an execution, each with the execution it started.
+          items:
+            $ref: "#/components/schemas/ScheduleBackfillEmission"
+        skipped:
+          type: array
+          description: The instants that did not run, each with why.
+          items:
+            $ref: "#/components/schemas/ScheduleBackfillSkip"
+
+    ScheduleBackfillEmission:
+      type: object
+      description: One instant a backfill fired, and the execution it started.
+      required: [instant, execution_id]
+      properties:
+        instant:
+          type: string
+          format: date-time
+          description: The instant of the schedule's own timeline that was fired.
+        execution_id:
+          type: string
+          description: |
+            The execution that instant started. It is a normal execution of the
+            workflow: it contends for the workflow's concurrency limit like any
+            other admission, and it appears in the execution list.
+
+    ScheduleBackfillSkip:
+      type: object
+      description: |
+        One instant a backfill did not run, and why. The reason is stable wire
+        vocabulary — an operator decides what to do next from it — while
+        `detail` carries what the engine said and is present only for an actual
+        failure.
+      required: [instant, reason]
+      properties:
+        instant:
+          type: string
+          format: date-time
+          description: The instant of the schedule's own timeline that did not run.
+        reason:
+          type: string
+          enum: [duplicate, refused, failed]
+          description: |
+            `duplicate` — the instant had already fired, or already ran in an
+            earlier call to this route. Nothing is wrong and nothing needs doing;
+            it is what makes a repeated backfill safe. `refused` — the
+            workflow's own admission refused it (its concurrency limit in reject
+            mode, or a full concurrency queue), which is what a live firing of
+            that instant would have hit too. `failed` — the admission failed for
+            any other reason.
+        detail:
+          type: string
+          description: |
+            The underlying failure as the engine reported it. Absent for a
+            duplicate, which is not a failure.
 
     CurrentUserResponse:
       type: object

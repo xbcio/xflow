@@ -348,3 +348,112 @@ func ExampleNodeFormSchema() any {
 	s.RunnerPools = []string{"analytics"}
 	return s
 }
+
+// ExampleScheduleView builds the real scheduleViewResponse a schedule read
+// returns: a cron node with an overlay applied, both instants known, every
+// omitempty field populated (an omitted timezone or misfire would validate
+// vacuously against the schema and hide a renamed tag).
+func ExampleScheduleView(id, node string) any {
+	last := time.Date(2026, 5, 3, 2, 0, 0, 0, time.UTC)
+	next := time.Date(2026, 5, 5, 0, 0, 0, 0, time.UTC)
+	return scheduleViewBody(control.ScheduleView{
+		WorkflowID:    types.WorkflowID(id),
+		Node:          node,
+		Kind:          control.ScheduleKindCron,
+		Expression:    "0 2 * * *",
+		Timezone:      "Europe/Berlin",
+		Misfire:       "skip",
+		Overlap:       "allow",
+		Paused:        true,
+		Overridden:    true,
+		Orphaned:      false,
+		LastScheduled: &last,
+		NextFire:      &next,
+		Revision:      3,
+		UpdatedAt:     time.Date(2026, 5, 4, 11, 59, 0, 0, time.UTC),
+		UpdatedBy:     "operator@example.com",
+	})
+}
+
+// ExampleScheduleViewOrphaned builds the other wire shape a schedule read can
+// return: an overlay whose node the current version no longer declares. Kind is
+// empty (there is no node to read it from) and both instants are null, which is
+// what pins the nullable branch of last_scheduled/next_fire — the
+// definitions-backed case above is never null.
+func ExampleScheduleViewOrphaned(id, node string) any {
+	return scheduleViewBody(control.ScheduleView{
+		WorkflowID: types.WorkflowID(id),
+		Node:       node,
+		Expression: "*/5 * * * *",
+		Overridden: true,
+		Orphaned:   true,
+		Revision:   1,
+		UpdatedAt:  time.Date(2026, 5, 4, 11, 59, 0, 0, time.UTC),
+		UpdatedBy:  "operator@example.com",
+	})
+}
+
+// ExampleScheduleListResponse builds the real collection payload: writeList's
+// listPage over the same typed rows the handler builds, so the {list,total}
+// shape (and the row schema inside it) is bound to the implementation.
+func ExampleScheduleListResponse(id string) any {
+	return listPage{
+		List: []scheduleViewResponse{
+			ExampleScheduleView(id, "nightly").(scheduleViewResponse),
+			ExampleScheduleViewOrphaned(id, "retired").(scheduleViewResponse),
+		},
+		Total: 2,
+	}
+}
+
+// ExampleSchedulePatchRequest builds a decoded PATCH body — the
+// map[string]*string decodeSchedulePatch produces, which is what carries the
+// three states. It names one field with a value and one with an explicit null:
+// a schema that lost the nullable branch would reject the revert.
+func ExampleSchedulePatchRequest() any {
+	expression := "0 3 * * *"
+	return map[string]*string{
+		"expression": &expression,
+		"timezone":   nil,
+	}
+}
+
+// ExampleScheduleBackfillRequest builds a decoded backfill body (the handler's
+// own request struct) with both bounds and the plan-only flag set.
+func ExampleScheduleBackfillRequest() any {
+	return scheduleBackfillRequest{
+		From:   "2026-05-04T12:00:00Z",
+		To:     "2026-05-04T12:03:00Z",
+		DryRun: true,
+	}
+}
+
+// ExampleScheduleBackfillResult builds the real backfill response with all
+// three outcomes populated: an emission, a duplicate skip (no detail) and a
+// refusal carrying what the engine said.
+func ExampleScheduleBackfillResult(id types.ExecutionID) any {
+	from := time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 5, 4, 12, 3, 0, 0, time.UTC)
+	return scheduleBackfillResponse{
+		From:   from,
+		To:     to,
+		DryRun: false,
+		Planned: []time.Time{
+			time.Date(2026, 5, 4, 12, 1, 0, 0, time.UTC),
+			time.Date(2026, 5, 4, 12, 2, 0, 0, time.UTC),
+			time.Date(2026, 5, 4, 12, 3, 0, 0, time.UTC),
+		},
+		Emitted: []scheduleBackfillEmission{{
+			Instant:     time.Date(2026, 5, 4, 12, 1, 0, 0, time.UTC),
+			ExecutionID: string(id),
+		}},
+		Skipped: []scheduleBackfillSkipEntry{
+			{Instant: time.Date(2026, 5, 4, 12, 2, 0, 0, time.UTC), Reason: control.ScheduleBackfillDuplicate},
+			{
+				Instant: time.Date(2026, 5, 4, 12, 3, 0, 0, time.UTC),
+				Reason:  control.ScheduleBackfillRefused,
+				Detail:  "engine: workflow concurrency limit reached",
+			},
+		},
+	}
+}

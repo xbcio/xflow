@@ -4,6 +4,8 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -179,6 +181,47 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 			name:   "rerun execution response (queued)",
 			schema: "RerunExecutionResponse",
 			value:  apiserver.ExampleRerunExecutionResponse(execID, 2),
+		},
+		{
+			// The definition-backed shape: every omitempty field populated and
+			// both instants known. A renamed tag on any of them turns this red.
+			name:   "schedule view",
+			schema: "ScheduleView",
+			value:  apiserver.ExampleScheduleView("wf-01H8XG", "nightly"),
+		},
+		{
+			// The orphaned shape: empty kind, null instants. It is the case that
+			// pins last_scheduled/next_fire as nullable — the populated view
+			// above never exercises that branch.
+			name:   "schedule view (orphaned overlay)",
+			schema: "ScheduleView",
+			value:  apiserver.ExampleScheduleViewOrphaned("wf-01H8XG", "retired"),
+		},
+		{
+			name:   "schedule list response",
+			schema: "ScheduleListResponse",
+			value:  apiserver.ExampleScheduleListResponse("wf-01H8XG"),
+		},
+		{
+			// The decoded PATCH body: one field with a value, one with an
+			// explicit null. The null is the revert-to-definition case, so a
+			// schema that lost its nullable branch fails here rather than
+			// silently rejecting every revert a client sends.
+			name:   "schedule patch request (three-state)",
+			schema: "SchedulePatchRequest",
+			value:  apiserver.ExampleSchedulePatchRequest(),
+		},
+		{
+			name:   "schedule backfill request",
+			schema: "ScheduleBackfillRequest",
+			value:  apiserver.ExampleScheduleBackfillRequest(),
+		},
+		{
+			// All three skip reasons plus an emission, so the enum and the two
+			// list schemas are bound to the real response type.
+			name:   "schedule backfill result",
+			schema: "ScheduleBackfillResult",
+			value:  apiserver.ExampleScheduleBackfillResult(execID),
 		},
 		{
 			name:   "execute workflow request",
@@ -755,4 +798,226 @@ func TestRunnerDrainSnapshotContract(t *testing.T) {
 			t.Errorf("RunnerDrainSnapshot descriptions must state %q", semantic)
 		}
 	}
+}
+
+// derefString reads an optional spec string as "" when absent (kin-openapi
+// models a response description as a pointer, an operation's as a value).
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// scheduleOperation looks up one schedule operation by (path, method) so the
+// contract test can assert on the same object the spec serves.
+func scheduleOperation(t *testing.T, spec *openapi3.T, path, method string) *openapi3.Operation {
+	t.Helper()
+	item := spec.Paths.Value(path)
+	if item == nil {
+		t.Fatalf("%s is missing from the contract", path)
+	}
+	op := item.GetOperation(method)
+	if op == nil {
+		t.Fatalf("%s %s is missing from the contract", method, path)
+	}
+	return op
+}
+
+// scheduleResponseCodes collects the response codes an operation declares.
+func scheduleResponseCodes(op *openapi3.Operation) []string {
+	codes := make([]string, 0, len(op.Responses.Map()))
+	for code := range op.Responses.Map() {
+		codes = append(codes, code)
+	}
+	sort.Strings(codes)
+	return codes
+}
+
+// TestScheduleContract pins the parts of the schedule API that JSON Schema
+// cannot infer: which scope each route needs, which routes carry an If-Match
+// precondition, and the semantics that make the endpoints safe to retry (the
+// backfill cap, the duplicate skip, the orphan's delete-only reachability).
+//
+// The scopes matter most: schedule.read, schedule.write and schedule.backfill
+// are three separate grants, and the whole point of the split is that a
+// principal allowed to retime a schedule is not thereby allowed to run its past
+// instants. A description that stopped stating them would leave the split
+// undocumented, which is how the next route gets wired to the wrong one.
+func TestScheduleContract(t *testing.T) {
+	spec := loadSpec(t)
+	const base = "/v1/workflows/{id}/schedules"
+
+	type route struct {
+		path, method, operationID, scope string
+	}
+	routes := []route{
+		{base, "GET", "listSchedules", "schedule.read"},
+		{base + "/{node}", "GET", "getSchedule", "schedule.read"},
+		{base + "/{node}", "PATCH", "patchSchedule", "schedule.write"},
+		{base + "/{node}/override", "DELETE", "deleteScheduleOverride", "schedule.write"},
+		{base + "/{node}/pause", "POST", "pauseSchedule", "schedule.write"},
+		{base + "/{node}/resume", "POST", "resumeSchedule", "schedule.write"},
+		{base + "/{node}/backfill", "POST", "backfillSchedule", "schedule.backfill"},
+	}
+
+	for _, r := range routes {
+		t.Run(r.operationID, func(t *testing.T) {
+			op := scheduleOperation(t, spec, r.path, r.method)
+			if op.OperationID != r.operationID {
+				t.Errorf("operationId = %q, want %q", op.OperationID, r.operationID)
+			}
+			if len(op.Tags) == 0 || op.Tags[0] != "Schedules" {
+				t.Errorf("tags = %v, want the Schedules tag", op.Tags)
+			}
+			// Every schedule route is declared against the workflow path
+			// parameter, and the node names a trigger node of that workflow.
+			refs := make(map[string]bool)
+			for _, p := range op.Parameters {
+				if p.Value != nil && p.Value.In == "path" {
+					refs[p.Ref] = true
+				}
+			}
+			if !refs["#/components/parameters/WorkflowId"] {
+				t.Errorf("path parameters = %v, want the WorkflowId parameter", refs)
+			}
+			// The descriptions state the semantics in prose, so the checks
+			// below read a whitespace-normalized, case-folded copy: the spec
+			// capitalizes a word for emphasis ("ORPHANED") and wraps lines,
+			// and neither is what the pin is about.
+			description := strings.ToLower(strings.Join(strings.Fields(op.Description), " "))
+			if !strings.Contains(description, "`"+r.scope+"` scope") {
+				t.Errorf("description does not state the %s scope:\n%s", r.scope, description)
+			}
+			// A route that starts executions must say so, because that is what
+			// separates its scope from schedule.write.
+			if r.scope == "schedule.backfill" && !strings.Contains(description, "not `schedule.write`") {
+				t.Errorf("backfill description does not separate it from schedule.write:\n%s", description)
+			}
+			// Every route that writes an overlay announces "stored but the host
+			// was not told" as 202 rather than as a failure, and the routes that
+			// do not carry a status they cannot return. Backfill is the POST
+			// that writes no overlay: it starts executions, so it has no
+			// pending-reload state to report.
+			writesOverlay := r.operationID != "listSchedules" && r.operationID != "getSchedule" && r.operationID != "backfillSchedule"
+			if got := op.Responses.Value("202") != nil; got != writesOverlay {
+				t.Errorf("%s %s declares 202 = %v, want %v", r.method, r.path, got, writesOverlay)
+			}
+			// Availability is answered, not hidden: a deployment without an
+			// overlay store serves every one of these routes with 501.
+			if op.Responses.Value("501") == nil {
+				t.Errorf("%s %s does not declare the 501 a deployment without an overlay store returns", r.method, r.path)
+			}
+			// The tenant boundary is a 404, never a 403: telling the two apart
+			// would confirm that another namespace's workflow id exists.
+			notFound := op.Responses.Value("404")
+			if notFound == nil || notFound.Value == nil {
+				t.Fatalf("%s %s does not declare its 404", r.method, r.path)
+			}
+			description404 := strings.ToLower(strings.Join(strings.Fields(derefString(notFound.Value.Description)), " "))
+			if !strings.Contains(description404, "workflow_not_found") {
+				t.Errorf("404 description does not name workflow_not_found:\n%s", description404)
+			}
+		})
+	}
+
+	// The conditional-write precondition rides exactly the routes that write an
+	// overlay, and only those.
+	for _, r := range routes {
+		op := scheduleOperation(t, spec, r.path, r.method)
+		hasIfMatch := false
+		for _, p := range op.Parameters {
+			if p.Ref == "#/components/parameters/IfMatchRevision" {
+				hasIfMatch = true
+				if p.Value != nil && (p.Value.Name != "If-Match" || p.Value.In != "header" || p.Value.Required) {
+					t.Errorf("%s %s: If-Match must be an optional header, got %+v", r.method, r.path, p.Value)
+				}
+			}
+		}
+		writes := r.method == "PATCH" || r.method == "DELETE" || r.operationID == "pauseSchedule" || r.operationID == "resumeSchedule"
+		if writes && !hasIfMatch {
+			t.Errorf("%s %s does not carry the If-Match precondition", r.method, r.path)
+		}
+		if !writes && hasIfMatch {
+			t.Errorf("%s %s carries an If-Match precondition it cannot honour", r.method, r.path)
+		}
+	}
+
+	patch := scheduleOperation(t, spec, base+"/{node}", "PATCH")
+	if patch.RequestBody == nil || patch.RequestBody.Value == nil || !patch.RequestBody.Value.Required {
+		t.Fatal("PATCH request body must be present and required")
+	}
+	if got := patch.RequestBody.Value.Content.Get("application/json").Schema.Ref; got != "#/components/schemas/SchedulePatchRequest" {
+		t.Errorf("PATCH request schema = %q, want SchedulePatchRequest", got)
+	}
+	if got, want := scheduleResponseCodes(patch), []string{"200", "202", "400", "404", "409", "501", "default"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("PATCH responses = %v, want %v", got, want)
+	}
+	for _, status := range []string{"200", "202"} {
+		media := patch.Responses.Value(status).Value.Content.Get("application/json")
+		data := media.Schema.Value.AllOf[1].Value.Properties["data"]
+		if data == nil || data.Ref != "#/components/schemas/ScheduleView" {
+			t.Errorf("PATCH %s data schema = %#v, want ScheduleView", status, data)
+		}
+	}
+
+	backfill := scheduleOperation(t, spec, base+"/{node}/backfill", "POST")
+	description := strings.ToLower(strings.Join(strings.Fields(backfill.Description), " "))
+	for _, semantic := range []string{
+		"capped at 1000 instants",
+		"refusal, not a truncation",
+		"refused rather than clamped",
+		"safe to repeat",
+		"no plan is returned beside a 400",
+	} {
+		if !strings.Contains(description, semantic) {
+			t.Errorf("backfill description does not state %q", semantic)
+		}
+	}
+	if got := backfill.Responses.Value("200").Value.Content.Get("application/json").Schema.Value.AllOf[1].Value.Properties["data"].Ref; got != "#/components/schemas/ScheduleBackfillResult" {
+		t.Errorf("backfill 200 data schema = %q, want ScheduleBackfillResult", got)
+	}
+	if backfill.Responses.Value("501") == nil {
+		t.Error("backfill does not declare the 501 its trigger host may be missing")
+	}
+
+	deleteOverride := scheduleOperation(t, spec, base+"/{node}/override", "DELETE")
+	deleteDescription := strings.ToLower(strings.Join(strings.Fields(deleteOverride.Description), " "))
+	if !strings.Contains(deleteDescription, "orphaned overlay") {
+		t.Errorf("DELETE override does not document its reach over an orphaned overlay:\n%s", deleteDescription)
+	}
+
+	// The view schema's required list is the wire contract: these fields are
+	// always present, null only where the schema says so.
+	view := spec.Components.Schemas["ScheduleView"]
+	if view == nil || view.Value == nil {
+		t.Fatal("ScheduleView schema is missing")
+	}
+	required := make(map[string]bool, len(view.Value.Required))
+	for _, name := range view.Value.Required {
+		required[name] = true
+	}
+	for _, name := range []string{"workflow_id", "node", "kind", "expression", "paused", "overridden", "orphaned", "last_scheduled", "next_fire", "revision"} {
+		if !required[name] {
+			t.Errorf("ScheduleView must require %q", name)
+		}
+	}
+	for _, name := range []string{"last_scheduled", "next_fire"} {
+		// A 3.1 type ARRAY, not a single type: the field is always present, and
+		// null is the honest "unknown" (no firing recorded, or no trigger host
+		// to ask) rather than an absent key.
+		property := view.Value.Properties[name].Value.Type
+		if !property.Includes("string") || !property.IncludesNull() {
+			t.Errorf("ScheduleView.%s type = %v, want nullable string (unknown is not the same as absent)", name, property.Slice())
+		}
+	}
+	if kind := view.Value.Properties["kind"].Value.Enum; len(kind) != 3 {
+		t.Errorf("ScheduleView.kind enum = %v, want cron, timer and the empty kind of an orphan", kind)
+	}
+
+	skip := spec.Components.Schemas["ScheduleBackfillSkip"]
+	if skip == nil || skip.Value == nil {
+		t.Fatal("ScheduleBackfillSkip schema is missing")
+	}
+	assertStringEnum(t, skip.Value.Properties["reason"], "duplicate", "refused", "failed")
 }
