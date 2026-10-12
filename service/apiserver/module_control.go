@@ -501,6 +501,53 @@ func writeConcurrencyRefused(w http.ResponseWriter, r *http.Request) {
 		"workflow is at its concurrency limit")
 }
 
+// writeConcurrencyQueueFull answers a QUEUE-mode submission that would exceed
+// the workflow's max_queued backlog (engine.ErrConcurrencyQueueFull).
+//
+// 429 like the limit refusal, and retryable for the same reason: the backlog is
+// the workflow's own state, the request is well-formed and the server is
+// healthy. It carries its own code because the two wait for different things —
+// a slot to free versus the queue to drain — and a caller that cannot tell them
+// apart cannot size its backoff.
+func writeConcurrencyQueueFull(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Retry-After", strconv.Itoa(concurrencyRetryAfterSeconds))
+	writeFail(w, r, http.StatusTooManyRequests, "workflow_concurrency_queue_full",
+		"workflow concurrency queue is full")
+}
+
+// writeConcurrencyUnavailable answers a QUEUE-mode submission against a store
+// that cannot park executions (engine.ErrConcurrencyQueueUnsupported).
+//
+// 503, not 429: retrying does not change the answer until the deployment does.
+// The workflow asked for a capability this server does not have, which is the
+// server's state rather than the caller's, and the code says so explicitly
+// instead of hiding it behind internal_error — an operator reading the code
+// alone has to be able to tell "this backend cannot queue" from "the request
+// was wrong".
+func writeConcurrencyUnavailable(w http.ResponseWriter, r *http.Request) {
+	writeFail(w, r, http.StatusServiceUnavailable, "workflow_concurrency_unavailable",
+		"workflow concurrency queue is not available on this server")
+}
+
+// writeConcurrencyFailure maps the concurrency sentinels a submission can
+// return onto their responses, reporting whether it wrote one. The call sites
+// keep their own error handling for everything else, which is what lets the
+// four submit/invoke paths share one mapping instead of repeating three
+// errors.Is checks each.
+func writeConcurrencyFailure(w http.ResponseWriter, r *http.Request, err error) bool {
+	switch {
+	case errors.Is(err, engine.ErrConcurrencyLimit):
+		writeConcurrencyRefused(w, r)
+	case errors.Is(err, engine.ErrConcurrencyQueueFull):
+		writeConcurrencyQueueFull(w, r)
+	case errors.Is(err, engine.ErrConcurrencyQueueUnsupported):
+		writeConcurrencyUnavailable(w, r)
+	default:
+		return false
+	}
+	return true
+}
+
 // handleExecuteWorkflow serves POST /v1/workflows/execute (spec §7 + §9.1): it
 // compiles an INLINE definition and immediately starts an execution. It merges
 // the old submit ({workflow, params}) and invoke ({workflow, entry, input})
@@ -571,8 +618,7 @@ func (m *workflowControlModule) handleExecuteWorkflow(w http.ResponseWriter, r *
 		// An unknown entry node is a client error (400): the missing resource is
 		// the entry in the submitted graph, not an execution in the store.
 		if err != nil {
-			if errors.Is(err, engine.ErrConcurrencyLimit) {
-				writeConcurrencyRefused(w, r)
+			if writeConcurrencyFailure(w, r, err) {
 				return
 			}
 			if errors.Is(err, engine.ErrFAFRequiresDirectDispatch) {
@@ -593,8 +639,7 @@ func (m *workflowControlModule) handleExecuteWorkflow(w http.ResponseWriter, r *
 	} else {
 		id, err = m.eng.Submit(ctx, g, req.Params)
 		if err != nil {
-			if errors.Is(err, engine.ErrConcurrencyLimit) {
-				writeConcurrencyRefused(w, r)
+			if writeConcurrencyFailure(w, r, err) {
 				return
 			}
 			if errors.Is(err, engine.ErrFAFRequiresDirectDispatch) {
@@ -1198,6 +1243,7 @@ func executionListFilterFrom(w http.ResponseWriter, r *http.Request) (store.Exec
 func knownExecutionListStatus(s types.ExecutionStatus) bool {
 	switch s {
 	case types.ExecutionStatusPending,
+		types.ExecutionStatusQueued,
 		types.ExecutionStatusRunning,
 		types.ExecutionStatusSuccess,
 		types.ExecutionStatusFailed,
@@ -1506,8 +1552,7 @@ func (m *workflowControlModule) handleExecuteWorkflowByID(w http.ResponseWriter,
 	if req.Entry != "" {
 		execID, err = m.eng.Invoke(ctx, rec.Graph, req.Entry, req.Input)
 		if err != nil {
-			if errors.Is(err, engine.ErrConcurrencyLimit) {
-				writeConcurrencyRefused(w, r)
+			if writeConcurrencyFailure(w, r, err) {
 				return
 			}
 			if errors.Is(err, engine.ErrFAFRequiresDirectDispatch) {
@@ -1528,8 +1573,7 @@ func (m *workflowControlModule) handleExecuteWorkflowByID(w http.ResponseWriter,
 	} else {
 		execID, err = m.eng.Submit(ctx, rec.Graph, req.Params)
 		if err != nil {
-			if errors.Is(err, engine.ErrConcurrencyLimit) {
-				writeConcurrencyRefused(w, r)
+			if writeConcurrencyFailure(w, r, err) {
 				return
 			}
 			if errors.Is(err, engine.ErrFAFRequiresDirectDispatch) {
