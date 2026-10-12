@@ -77,6 +77,12 @@ export type ExecutionNodeStatus =
   | "skipped"
   /** Served from pin_data: the handler did not run; output is the mock. */
   | "pinned"
+  /**
+   * A member of a transient group whose records expired: the execution is
+   * terminal and the group's artifacts have passed their completion TTL, so
+   * nothing about the node is readable any more.
+   */
+  | "expired"
   | "suspended"
   | "continued"
   | "canceled"
@@ -272,6 +278,7 @@ const executionNodeStatuses = new Set<string>([
   "failed",
   "skipped",
   "pinned",
+  "expired",
   "suspended",
   "continued",
   "canceled",
@@ -826,6 +833,13 @@ function executionNodeStatusToRuntimeStatus(status: ExecutionNodeStatus): Runtim
     // status vocabulary has no separate state for it.
     case "pinned":
       return "success";
+    case "expired":
+      // The node's records are gone (a transient group past its completion
+      // TTL). The runtime vocabulary has no state for that either, and the
+      // node's live state is precisely what is unknown, so it projects to the
+      // no-evidence value — which is also what this member showed before the
+      // status existed.
+      return "pending";
     case "failed":
       return "failed";
     case "skipped":

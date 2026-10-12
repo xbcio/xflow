@@ -622,6 +622,26 @@ describe("executionDetailToRuntimeSnapshot", () => {
     expect(detail.nodes).toEqual([{ name: "fetch", status: "pinned", output: { value: "mock" } }]);
     expect(executionDetailToRuntimeSnapshot(detail).nodes).toEqual({ fetch: { status: "success" } });
   });
+
+  it("accepts an expired node and projects it as pending", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () =>
+        success({
+          execution_id: "exec-expired",
+          status: "success",
+          nodes: [{ name: "ingest", status: "expired" }]
+        })
+    });
+
+    const detail = await client.getExecution("exec-expired");
+
+    expect(detail.nodes).toEqual([{ name: "ingest", status: "expired" }]);
+    // The runtime vocabulary has no state for "the records are gone", and the
+    // node's live state is exactly what is unknown; pending is its no-evidence
+    // value, and what this member displayed before the status existed.
+    expect(executionDetailToRuntimeSnapshot(detail).nodes).toEqual({ ingest: { status: "pending" } });
+  });
 });
 
 describe("node types", () => {
