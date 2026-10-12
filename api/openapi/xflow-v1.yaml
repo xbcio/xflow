@@ -3051,12 +3051,25 @@ components:
           description: Go duration (nanoseconds) for the group's business deadline.
         mode:
           type: string
-          deprecated: true
+          enum: ["", transient]
+          default: ""
           description: |
-            Compatibility-only group metadata. The compiler preserves this
-            value, but the current runtime does not consume group mode, so it
-            has no execution effect (including no transient storage or TTL
-            behavior). Omit it from new definitions.
+            Group retention mode. The empty default (`durable`) keeps the
+            group's artifacts — its boundary exit outputs, and the group
+            unit's status and lease fence keys — for the execution's own
+            retention. `transient` shortens them to a completion TTL once the
+            execution reaches a terminal status, not when the group commits,
+            so reads the same execution makes behave exactly as in a durable
+            group. The TTL resolves from `options.transient_completion_ttl`,
+            then the execution's transient marker or the deployment-wide
+            transient completion TTL, then 30s, capped at the execution's
+            active TTL; the lease fence keys are additionally floored at two
+            lease windows. Unknown values are rejected at compile time, as are
+            transient groups with a suspending member or with
+            `activation_replicas` > 1 on a trigger-entry group. Once the
+            artifacts have expired, Inspect reports the member as `expired`.
+            Only retention differs; execution, commit, and replay semantics
+            are the same as a durable group's.
         activation_replicas:
           type: integer
           format: uint32
