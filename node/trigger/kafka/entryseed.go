@@ -194,7 +194,9 @@ func buildBatchExits(nodeName string, messages []Message) []types.BoundaryExit {
 // All three admission sites share it because the classification decides whether
 // a Kafka offset advances, and three copies of that decision are three places a
 // new response state can be handled differently. The per-message site
-// (seedEntryBatch) uses only its return value — see there.
+// (seedEntryBatch) reads both halves: the return value ends its retry loop on a
+// handled response, and resp.Refused tells it whether to retry what is left —
+// see there.
 //
 // A refusal is neither handled nor an error. Nothing was persisted, the
 // entry-unit result is still ours, and the workflow is at capacity: the offset
@@ -409,6 +411,15 @@ func seedEntryBatchViaGroupExec(ctx context.Context, in *types.TriggerActivateIn
 // responses commit the Kafka offset. Transient errors return false (no commit →
 // Kafka redelivery).
 //
+// A concurrency refusal is the one outcome this function does NOT return on: it
+// blocks this partition's worker and retries the SAME record with backoff until
+// the record is admitted, the context is canceled, or a non-refusal failure
+// ends it. The call therefore is not a "try once" — the caller's serial worker
+// makes it the partition's progress gate, which is exactly what the refusal
+// needs: returning would let the worker move on, and the next record's commit
+// would then advance the offset past a record nothing persisted, dropping it
+// silently. See waitEntrySeedRefusal for the cadence.
+//
 // This function is the entry-seed analogue of emitMessage for the
 // per-partition serial worker. It is NOT used by the legacy Emit path.
 func seedEntryBatch(ctx context.Context, in *types.TriggerActivateInput, consumer Consumer, msg Message) bool {
@@ -458,6 +469,13 @@ func seedEntryBatch(ctx context.Context, in *types.TriggerActivateInput, consume
 	if err != nil {
 		// Transient error (network timeout, etc.) — do NOT commit offset.
 		// Kafka will redeliver the message.
+		//
+		// Not retried in this loop, unlike a refusal: an error is not a decision
+		// the workflow made, and some of them cannot succeed on retry at all (a
+		// generation fence rejection belongs to the new owner; a protocol
+		// disagreement is not fixed by asking again). Retrying those would hold
+		// the partition forever with no bound, which is a worse failure than the
+		// redelivery this returns to.
 		return false
 	}
 
@@ -467,21 +485,80 @@ func seedEntryBatch(ctx context.Context, in *types.TriggerActivateInput, consume
 	// Conflict counts as handled — another runner already admitted a result for
 	// this key, so the message is consumed — while a refusal does not.
 	//
-	// What a withheld offset buys on THIS path is narrower than on the batch
-	// path: this worker moves on to the next message, so a refused one comes back
-	// only if the consumer restarts from its last committed offset before a later
-	// message commits past it. It is the same shape the legacy emit path already
-	// has (see emitMessage), and the mitigation is the same: the refusal is
-	// counted and logged, so a throttle cannot read as an idle topic. The batch
-	// path, which holds the whole batch and re-flushes it with backoff, is where
-	// a refusal is actually retried.
-	if !observeBatchAdmission(ctx, msg.Topic, resp, msg.Partition, msg.Offset, msg.Offset, 1) {
-		return false
+	// Every attempt goes through the classifier, refusals included: the refused
+	// counter and the throttled WARN are how a deployment sees that this
+	// partition is being held back rather than idle, and an attempt that only
+	// the retry loop saw would be invisible.
+	attempts := 0
+	blockedReported := false
+	defer func() {
+		if blockedReported {
+			// Cleared on EVERY exit path, cancellation included: a gauge left at 1
+			// by a shutdown would report the partition as blocked forever, and the
+			// next activation's reset is not guaranteed to reach the same series.
+			obs().OnConsumptionBlocked(ctx, msg.Topic, msg.Partition, false)
+		}
+	}()
+	for {
+		if observeBatchAdmission(ctx, msg.Topic, resp, msg.Partition, msg.Offset, msg.Offset, 1) {
+			break
+		}
+		if !resp.Refused {
+			// Neither handled nor a refusal: a response set no flag at all. Treated
+			// like an error — withheld, not retried — for the same reason.
+			return false
+		}
+		if !blockedReported {
+			blockedReported = true
+			obs().OnConsumptionBlocked(ctx, msg.Topic, msg.Partition, true)
+		}
+		attempts++
+		if !waitEntrySeedRefusal(ctx, attempts) {
+			return false
+		}
+		// The retry carries the SAME request, admission key included: the key is
+		// built from the record's own identity (topic/partition/offset), so a
+		// retry is a retry of that record and not a new admission. That is what
+		// makes it safe for the control plane to treat a second attempt after an
+		// admitted-but-uncommitted first one as a duplicate.
+		if resp, err = rt.SeedExecutionFromEntry(ctx, req); err != nil {
+			// Same as the first attempt's error: withhold and let Kafka redeliver.
+			return false
+		}
 	}
+
 	if commitErr := commitMessages(ctx, consumer, msg); commitErr != nil {
 		// Commit failed — the message will be redelivered. On redelivery,
 		// SeedExecutionFromEntry returns duplicate-accepted, which is safe.
 		return false
 	}
 	return true
+}
+
+// waitEntrySeedRefusal blocks this partition's worker until the next attempt of
+// a refused record is due, and reports whether the wait completed (false when
+// the context was canceled, i.e. the activation is shutting down).
+//
+// The cadence is the batch path's, on purpose: aggregateRetryDelay's flat
+// window (eight attempts at the flush cadence — one second in entry-seed mode)
+// keeps a workflow that frees a slot a moment later from paying any backoff
+// debt, and past it the delay doubles to the same 30s cap, so a workflow
+// pinned at its limit costs about two admissions a minute per partition
+// instead of a spin. The two paths differ only in what they hold: a batch
+// re-flushes the whole batch, a record blocks one partition's worker.
+//
+// Blocking is the point rather than a side effect. The worker is serial per
+// partition, so while this waits nothing behind the refused record is admitted
+// and no later commit can advance the offset past it — the property that makes
+// "do not commit" mean "will be retried" instead of "is being skipped".
+func waitEntrySeedRefusal(ctx context.Context, attempt int) bool {
+	delay := aggregateRetryDelay(defaultEntrySeedFlushInterval, attempt)
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }

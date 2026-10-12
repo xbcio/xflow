@@ -738,6 +738,12 @@ func (w *partitionWorker) run() {
 				// Entry-seed mode: admission drives the seed, which commits the
 				// offset internally on accept/duplicate/conflict. Do NOT
 				// double-commit here.
+				//
+				// This call blocks while the workflow's concurrency policy refuses
+				// the record: it retries the same record with backoff rather than
+				// returning, so this worker — serial per partition — is what keeps a
+				// later record from committing past a refused one. It still returns
+				// promptly on errors and on cancellation.
 				_ = seedEntryBatch(w.rt.runCtx, w.rt.in, w.rt.consumer, msg)
 			} else if emitMessage(w.rt.runCtx, w.rt.in, msg) {
 				_ = commitMessages(w.rt.baseCtx, w.rt.consumer, msg)

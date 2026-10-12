@@ -68,12 +68,21 @@ type Observer interface {
 	// OnConsumptionBlocked reports a partition halting or resuming consumption.
 	// blocked is the new state, reported on transitions only.
 	//
-	// Two conditions set it, and both mean "this partition is fetching nothing so
-	// that no record is lost": on_overflow=block sitting at its retained bound,
-	// and on_overflow=dead_letter holding a record whose dead-letter publish has
-	// not succeeded. They share a series because an operator's question is the
-	// same one — has this partition stopped, and is that why my lag looks fine —
-	// and the log line at each transition names which of the two it is.
+	// Three conditions set it, and all mean "this partition is not making
+	// progress so that no record is lost": on_overflow=block sitting at its
+	// retained bound, on_overflow=dead_letter holding a record whose
+	// dead-letter publish has not succeeded, and a per-record entry seed whose
+	// workflow's concurrency policy refused it — that last one holds the
+	// record and retries it with backoff instead of stepping over it. They
+	// share a series because an operator's question is the same one — has this
+	// partition stopped, and is that why my lag looks fine — and the log line at
+	// each transition names which of the three it is.
+	//
+	// The seed case is the one that is not backpressure from this process: the
+	// partition is waiting on the CONTROL PLANE to have room. Its rate is also
+	// visible as state="refused" on xflow_trigger_batch_admissions_total, which
+	// says why; this gauge says that the partition stopped, which the refusal
+	// counter alone cannot.
 	//
 	// Partition is a label here for the same reason it is on OnConsumerLag, and
 	// with more force: this is a per-partition state, and one blocked partition

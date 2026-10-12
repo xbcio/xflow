@@ -347,6 +347,7 @@ type recordingBatchObserver struct {
 	sizes      []int
 	admissions []string
 	reasons    []string // parallel to admissions
+	blocked    []string // "topic/partition=state" per transition
 }
 
 func (o *recordingBatchObserver) OnBatchFlushed(_ context.Context, _, trigger string, size int) {
@@ -361,6 +362,23 @@ func (o *recordingBatchObserver) OnBatchAdmission(_ context.Context, _, state, r
 	defer o.mu.Unlock()
 	o.admissions = append(o.admissions, state)
 	o.reasons = append(o.reasons, reason)
+}
+
+// OnConsumptionBlocked records the gauge's transitions. The cause is not in the
+// label set — the gauge says a partition STOPPED, and which of the reasons it
+// was is what OnBatchAdmission's state/reason pair carries — so the recorded
+// string is the series identity plus the state, which is what a test asserting
+// on transitions needs.
+func (o *recordingBatchObserver) OnConsumptionBlocked(_ context.Context, topic string, partition int, blocked bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.blocked = append(o.blocked, fmt.Sprintf("%s/%d=%t", topic, partition, blocked))
+}
+
+func (o *recordingBatchObserver) blockedTransitions() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]string(nil), o.blocked...)
 }
 
 // admissionPairs returns state+reason together. Asserting on state alone was

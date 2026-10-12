@@ -323,12 +323,19 @@ func TestRawBatchAdmissionRefusalWithholdsCommit(t *testing.T) {
 	}
 }
 
-// TestPerMessageSeedAdmissionRefusalWithholdsCommit covers the same contract on
-// the per-message entry-seed path, which classifies through the shared
-// classifier but commits itself. A refusal there has to withhold the offset too,
-// and the two paths disagreeing about a response state is precisely the drift
-// the shared classifier exists to prevent.
-func TestPerMessageSeedAdmissionRefusalWithholdsCommit(t *testing.T) {
+// TestPerMessageSeedRefusalIsBoundedByCancellation pins the one thing that ends
+// the per-record retry loop other than an admission: the activation shutting
+// down.
+//
+// The loop has to hold the record — that is what stops a later commit from
+// advancing past it (see TestKafkaEntrySeed_RefusedRecordIsRetriedNotSkipped) —
+// which makes the cancellation path load-bearing rather than incidental. A
+// permanently refusing workflow must not keep a worker past its context, or
+// shutdown would wait on a partition that will never progress. The window
+// between the two assertions is shorter than the retry's own 1s window on
+// purpose: the record is held from the FIRST refusal, not only from the second
+// attempt.
+func TestPerMessageSeedRefusalIsBoundedByCancellation(t *testing.T) {
 	msgs := []Message{{Topic: "t", Partition: 0, Offset: 400, Value: []byte("over-limit")}}
 	recorder := &commitRecordingConsumer{inner: newScriptedConsumer(msgs)}
 	admitter := &mockEntrySeedRuntime{response: types.EntrySeedResponse{Refused: true}}
@@ -343,10 +350,34 @@ func TestPerMessageSeedAdmissionRefusalWithholdsCommit(t *testing.T) {
 		Runtime:    rt,
 	}
 
-	if seedEntryBatch(context.Background(), in, recorder, msgs[0]) {
-		t.Fatal("seedEntryBatch reported handled for a refused admission")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan bool, 1)
+	go func() { done <- seedEntryBatch(ctx, in, recorder, msgs[0]) }()
+
+	select {
+	case ok := <-done:
+		t.Fatalf("seedEntryBatch returned %v while the record was still refused; the "+
+			"caller's worker would move on and the next commit would skip it", ok)
+	case <-time.After(200 * time.Millisecond):
 	}
+
+	cancel()
+	select {
+	case ok := <-done:
+		if ok {
+			t.Fatal("a canceled refusal reported handled, which would commit the offset")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("seedEntryBatch did not return after cancellation: shutdown would " +
+			"wait on a partition that cannot progress")
+	}
+
 	if commits := recorder.getCommits(); len(commits) != 0 {
 		t.Fatalf("commit count = %d, want 0 (a refused seed persists nothing)", len(commits))
+	}
+	if got := admitter.callCount.Load(); got != 1 {
+		t.Fatalf("admission calls = %d, want 1: cancellation before the retry window "+
+			"elapses must not produce another attempt", got)
 	}
 }
