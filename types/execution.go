@@ -24,6 +24,19 @@ const (
 	// a queued execution or give up on it, and what makes a queued execution
 	// still hold its place in line.
 	ExecutionStatusQueued ExecutionStatus = "queued"
+	// ExecutionStatusPaused is an operator-suspended execution. Work already
+	// leased to a runner runs to completion and commits its result; nothing in
+	// the ready set is delivered until the execution is resumed, and suspended
+	// nodes stay suspended — an arriving signal is still stored but does not
+	// advance anything.
+	//
+	// It is deliberately not terminal, and it deliberately keeps its workflow
+	// concurrency slot. The execution holds intermediate state that only a
+	// resume can put back to work, so releasing the slot would admit a
+	// replacement that competes with the work Resume restarts. A queued
+	// execution holds no such state and must not be paused at all — it is
+	// refused, because a submission that never started has nothing to suspend.
+	ExecutionStatusPaused ExecutionStatus = "paused"
 )
 
 // NodeStatus represents the lifecycle state of a workflow node.

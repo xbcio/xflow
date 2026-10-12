@@ -785,7 +785,7 @@ paths:
                   value:
                     success: false
                     code: execution_status_invalid
-                    message: status must be one of pending, queued, running, success, failed, canceling, canceled, timeout
+                    message: status must be one of pending, queued, paused, running, success, failed, canceling, canceled, timeout
                     trace_id: 0123456789abcdef0123456789abcdef
                 unparsableBound:
                   summary: A created_at bound is not an RFC3339 date-time.
@@ -2401,7 +2401,15 @@ components:
 
     ExecutionStatus:
       type: string
-      enum: [pending, queued, running, success, failed, canceling, canceled, timeout]
+      description: |
+        Lifecycle status of an execution. `pending` is the persisted default
+        before a store records a transition; live executions are `running`
+        (dispatched), `queued` (a queue-mode submission waiting for a workflow
+        concurrency slot) or `paused` (an operator suspended its dispatch).
+        Terminal statuses are `success`, `failed`, `canceled` and `timeout`.
+        `queued` and `paused` are NOT terminal: both can still be canceled, and
+        both are still waited on by GET /v1/executions/{id}/wait.
+      enum: [pending, queued, paused, running, success, failed, canceling, canceled, timeout]
 
     ExecutionListResponse:
       type: object
