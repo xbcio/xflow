@@ -910,21 +910,43 @@ return out
 // reachable through a crash between the release script's promotion and this
 // call, which is why the call is idempotent and the reconciler re-drives it.
 //
-// KEYS[1] = execution status key, KEYS[2] = execution outbox ready ZSET
+// Losing the CAS is the third outcome, and it is where the dropped count comes
+// from. The execution is no longer queued, so this promotion will never start
+// it — but the release that promoted it had already taken it out of the line,
+// which means a cancel racing this call releases a holder (not a waiter) and
+// that release never drops the parked intents itself. A cancel that runs to its
+// terminal write does clear them, through cleanupOnCancel; the window before
+// that write lands does not, and neither does any status that leaves queued
+// without that cleanup. Through that window the intents sit scored at a
+// sentinel nothing reads, so this branch drops them at the instant the CAS
+// finds the execution unstartable. The sentinel is what identifies them: a
+// promotion that DID happen moved every held intent to a due score, so intents
+// still all at the held score belong to an execution that never started,
+// whatever it is now (cancelled, timed out, or a status write that failed).
+// Doing it here rather than in the caller is what makes the decision atomic
+// with the CAS that found the execution unstartable.
+//
+// KEYS[1] = execution status key, KEYS[2] = execution outbox ready ZSET,
+// KEYS[3] = execution outbox body hash
 // ARGV[1] = the queued status, ARGV[2] = the running status,
 // ARGV[3] = status TTL seconds, ARGV[4] = held score (the parked sentinel),
 // ARGV[5] = score to release the parked intents to
-// Returns {started, released}.
+// Returns {started, released, dropped}.
 var promoteQueuedExecutionLua = redis.NewScript(`
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then
-    return {0, 0}
+    local held = redis.call('ZCOUNT', KEYS[2], ARGV[4], ARGV[4])
+    if held > 0 and held == redis.call('ZCARD', KEYS[2]) then
+        redis.call('DEL', KEYS[2], KEYS[3])
+        return {0, 0, 1}
+    end
+    return {0, 0, 0}
 end
 redis.call('SET', KEYS[1], ARGV[2], 'EX', tonumber(ARGV[3]))
 local due = redis.call('ZRANGEBYSCORE', KEYS[2], ARGV[4], ARGV[4])
 for _, member in ipairs(due) do
     redis.call('ZADD', KEYS[2], tonumber(ARGV[5]), member)
 end
-return {1, #due}
+return {1, #due, 0}
 `)
 
 // workflowFillLua hands free capacity to the head of the line and reports what

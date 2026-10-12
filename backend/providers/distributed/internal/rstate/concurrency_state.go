@@ -462,6 +462,13 @@ func (s *Store) releaseWorkflowSlot(ctx context.Context, id types.ExecutionID, t
 // best effort and it only ever removes intents that were never deliverable —
 // an execution parked in the line can hold no lease, because every read path
 // refuses to see a held intent.
+//
+// It is the caller-side half of a rule with one other implementation:
+// promoteQueuedExecutionLua performs the same deletion when a promotion loses
+// its CAS to a cancel it cannot report back here — the release had already
+// moved the member into the slot set, so wasQueued is 0 by then. That one is a
+// script because only a script can tell, at the instant of the lost CAS,
+// whether the intents were ever released; it deletes the same two keys.
 func (s *Store) dropParkedOutbox(ctx context.Context, t namespace.Namespace, id types.ExecutionID) {
 	if err := s.rdb.Del(ctx, outboxReadyKey(t, id), outboxBodyKey(t, id)).Err(); err != nil && s.logger != nil {
 		s.logger.Error("workflow_concurrency_parked_outbox_drop_failed", "execution_id", string(id), "err", err)
@@ -491,15 +498,19 @@ func (s *Store) completePromotions(ctx context.Context, t namespace.Namespace, t
 //
 // The CAS is on the queued status rather than applied blindly, because a cancel
 // can win the race between the release that promoted the execution and this
-// call. In that case nothing is started and the parked intents stay parked —
-// the cancel path drops them.
+// call. Nothing is started then — and the parked intents are dropped by the
+// script itself, not by the release that promoted it: that release sees a
+// HOLDER (the promotion already took the member out of the line), so its
+// wasQueued flag is 0 and it has nothing to drop, and the cancel's terminal
+// write, which would clear them, has not landed yet. See the script for how it
+// identifies those intents.
 func (s *Store) promoteExecution(ctx context.Context, t namespace.Namespace, id types.ExecutionID) error {
 	ttl := s.getExecTTL(ctx, id)
 	if ttl <= 0 {
 		ttl = s.execTTL
 	}
 	reply, err := promoteQueuedExecutionLua.Run(ctx, s.rdb,
-		[]string{execKey(t, id, "status"), outboxReadyKey(t, id)},
+		[]string{execKey(t, id, "status"), outboxReadyKey(t, id), outboxBodyKey(t, id)},
 		string(types.ExecutionStatusQueued), string(types.ExecutionStatusRunning),
 		int(ttl.Seconds()), queuedOutboxHold.UnixMilli(), time.Now().UTC().UnixMilli(),
 	).Slice()
