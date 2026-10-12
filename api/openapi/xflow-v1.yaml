@@ -2297,7 +2297,14 @@ components:
 
     NodeStatus:
       type: string
-      enum: [pending, running, committing, success, failed, skipped, pinned, suspended, continued, canceled, waiting]
+      enum: [pending, running, committing, success, failed, skipped, pinned, expired, suspended, continued, canceled, waiting]
+      description: |
+        Lifecycle state of a node in an execution detail. `expired` is
+        derived, not stored: it marks a member of a transient group
+        (`groups[].mode: transient`) whose records are gone because the
+        execution is terminal and the group's artifacts have passed their
+        completion TTL. Within that window the member's exit output is served
+        normally.
 
     RunnerListItem:
       type: object
