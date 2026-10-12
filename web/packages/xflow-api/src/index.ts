@@ -815,7 +815,14 @@ export function executionDetailToRuntimeSnapshot(detail: ExecutionDetail): Runti
   return snapshot;
 }
 
-function executionStatusToRuntimeStatus(status: ExecutionStatus): RuntimeWorkflowStatus {
+/**
+ * Projects one server-side execution status into the runtime vocabulary. It is
+ * exported for hosts that hold an execution response without a node list — a
+ * `waitExecution` call that timed out, for instance — so the collapse table
+ * lives in one place instead of being re-stated per host, where a status added
+ * later would be silently missed.
+ */
+export function executionStatusToRuntimeStatus(status: ExecutionStatus): RuntimeWorkflowStatus {
   switch (status) {
     case "pending":
       return "pending";
