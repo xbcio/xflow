@@ -1,6 +1,8 @@
 # Supply Node — Server-Driven Shared Config (D-supply)
 
-> Status: Implemented (Task 1–19 of the 2026-07-30 supply-node branch). Pull-mode
+> Status: Implemented (Task 1–19 of the 2026-07-30 supply-node branch, plus
+> namespace-scoped supply identity and the TTL poll landed 2026-10-12 — see the
+> identity note in §6 and the poll paragraph in §9(b)). Pull-mode
 > collection (a `.http` supply node that a runner actively fetches on a schedule)
 > is **not implemented** — see §9.
 > Related: [WASM-ENGINE-POOLING.md](./WASM-ENGINE-POOLING.md) (the primary
@@ -335,6 +337,35 @@ recorded directly in the shipped code, not just in a design note:
 // produces wrong data that looks right, which is worse than not serving.
 ```
 
+**The identity of a supply is the pair `(namespace, name)`, and the namespace
+comes from the activation.** Every in-process map that holds supply state — the
+registry's snapshots, its consumer sets, the gate's `resources` mapping and its
+in-flight set — is keyed by `supply.Key{Namespace, Name}` (`node/supply/registry.go`,
+`KeyOf`), and `supply.KeyOf` resolves an empty namespace to `namespace.Default`.
+The same node name in two namespaces is two supplies with two content hashes,
+two consumer sets and two readiness verdicts; nothing crosses between them.
+
+Where the namespace comes from is the part worth stating explicitly, because it
+is a security boundary, not a convenience:
+
+- `$supplies` is scoped to the activation's own namespace. `AdmitWithDeclarations`
+  reads it off the context the activation path filled from the directive, and
+  `exprx.SuppliesEnv(reg, ns)` renders exactly that namespace's view, so a
+  pointer supply in namespace A can never resolve a digest published in
+  namespace B. There is no DSL spelling for a cross-namespace reference, by
+  decision (2026-10-12, D1).
+- Every fetch runs under the supply's recorded namespace, not the caller's
+  ambient one. The gate re-states it onto the context (`namespace.WithNamespace`)
+  before each per-supply call, and the hint path builds its context from the
+  hint's own namespace, because `HTTPSupplyFetcher` sets the request's namespace
+  header from the context (`service/runner/supply_client.go`). A fetch that
+  inherited whatever context happened to be at hand would read the default
+  namespace's content and publish it under another tenant's key.
+- `ConsumerCount`, `IsReady`, `RegisterConsumer` and `UnregisterConsumer` all
+  normalize their key the same way, so a caller that passes an unnormalized key
+  addresses the default namespace's supply rather than silently creating a third
+  identity.
+
 **This is not to be confused with** the wasm reactor's own three-tier
 `Availability` ladder (`AvailUnavailable`/`AvailStale`/`AvailFresh`,
 `node/internal/code/script/wasm/pool.go`, `Availability` type) — that is a *consumer-side*
@@ -402,7 +433,7 @@ lock-free readers (`registry.go`, `republishDecodedLocked`).
 
 **Full-snapshot replace, never incremental.** Every content update — whether
 from an embedder's SDK write, static declaration, or a re-fetch triggered by a
-heartbeat hint — replaces the cached snapshot wholesale
+heartbeat hint or the TTL poll — replaces the cached snapshot wholesale
 (`node/supply/registry.go`, `Apply`/`republishDecodedLocked`). There is no diff/patch type
 anywhere in `node/supply`. This was a deliberate design choice, not an
 oversight: an incremental-update model reintroduces the cross-instance
@@ -488,24 +519,44 @@ per-key、**内存、不持久化**（与 `noMatchSince` 同一把 `r.mu`，每�
 backoff → supply 恢复 → reconcile 重派 → activation 成功接纳）。
 
 **(b) gRPC transport now carries both supply hints and activation directives.**
-`runnerpb.HeartbeatResponse` has four fields:
+`runnerpb.HeartbeatResponse` has six field positions — five live fields and one
+reserved:
 
 ```protobuf
 // service/protocol/runnerpb/runner.proto — HeartbeatResponse
 message HeartbeatResponse {
   int64 server_time = 1;
-  map<string, string> supply_hints = 2;
+  reserved 2;  // was map<string, string> supply_hints
   string supply_key_rotation = 3;
   bytes activations_json = 4;
+  RunnerControlDirective control = 5;
+  repeated SupplyHint supply_hints = 6;
+}
+
+// SupplyHint is one "the content you host under this identity is now this
+// hash" instruction; the request carries the mirror-image SupplyObservation.
+message SupplyHint {
+  string namespace = 1;
+  string node = 2;
+  string hash = 3;
 }
 ```
 
-`service/protocol/grpc_conv.go` (`HeartbeatResponse` round-trip) round-trips all four (activations, like
-leases, travel as JSON bytes to avoid modeling `map[string]any` params in
-proto), `service/control/grpc_server.go` fills them on the response, and
-`grpc_client.go` decodes them back on the runner. An earlier revision of
-this document described the proto as having "exactly one field"; that is no
-longer true.
+The old `map<string, string>` fields could not express a namespace: a runner
+hosting the same supply node name for two tenants collapsed both into one entry
+and whichever heartbeat wrote last won. The identity is `(namespace, node)`, so
+both directions now travel as repeated messages carrying it. This is a wire
+break on purpose (no transitional version, per the 2026-10-12 design's D5):
+server and runner must be upgraded together, and the old field numbers stay
+`reserved` so a stale peer fails loudly instead of having its map decoded as the
+new shape.
+
+`service/protocol/grpc_conv.go` (`HeartbeatResponse` round-trip) round-trips all
+of them (activations, like leases, travel as JSON bytes to avoid modeling
+`map[string]any` params in proto), `service/control/grpc_server.go` fills them on
+the response, and `grpc_client.go` decodes them back on the runner. An earlier
+revision of this document described the proto as having "exactly one field";
+that is no longer true.
 
 `ActivationAck` now has parity across both transports — see
 [DEPLOYMENT-TOPOLOGIES.md §4.6](./DEPLOYMENT-TOPOLOGIES.md#46-activationack-现已同时覆盖-http-与-grpc).
@@ -514,12 +565,16 @@ above.
 
 Supply-specific note that stands regardless of transport: hints are computed by
 `SupplyHinter.HintsForRunner` (`service/control/supply_hints.go`) as a latency
-optimization over `SupplyGate.Admit` at activation time. **There is no TTL-based
-re-check today** (no poll loop exists in `service/runner/`). If hints are lost —
-partition, runner restart, server leadership change — an already-hosted
-consumer keeps its last-good content until a later hint arrives; it does not
-converge on its own within any bounded interval. This is an open gap, not an
-accepted cost.
+optimization over `SupplyGate.Admit` at activation time, and they are advisory —
+a lost hint is not retried. What closes that gap is the TTL poll:
+`SupplyGate.RunPoller` (`service/runner/supply_gate.go`) re-reads every hosted
+supply once per interval, started by `Runner.Run` once the session is
+established. Default 60s, floor 10s, ±10% jitter, one unconditional GET per
+hosted `(namespace, name)` per tick, serial. It shares `refreshOne` and the
+gate's in-flight map with the hint path, so a hint and a tick that land on the
+same key cost one fetch. The rule it enforces is that the notification channel
+is never the only channel: partition, runner restart, or a server leadership
+change now delays convergence by at most one interval instead of forever.
 
 **(c) Cross-runner pool swaps are not synchronized; the skew is observable,
 not eliminated.** When a supply's content changes, each runner hosting a
