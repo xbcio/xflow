@@ -472,6 +472,35 @@ paths:
                           message: duration is required
                           severity: error
                     trace_id: 0123456789abcdef0123456789abcdef
+        "429":
+          description: |
+            The workflow is at the concurrency limit its own definition declares
+            (`settings.concurrency`). The submission was refused before anything
+            was persisted — there is no execution to inspect or cancel — and the
+            code is `workflow_concurrency_limit`. `Retry-After` is a floor rather
+            than a prediction: the refused submission is not queued anywhere, so
+            the server has no slot-release time to promise, and the header exists
+            so a client can back off instead of spinning.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+            Retry-After:
+              description: Seconds to wait before retrying, as a floor.
+              schema:
+                type: integer
+                example: 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                workflowConcurrencyLimit:
+                  summary: The workflow is already running as many executions as its limit allows.
+                  value:
+                    success: false
+                    code: workflow_concurrency_limit
+                    message: workflow is at its concurrency limit
+                    trace_id: 0123456789abcdef0123456789abcdef
         default:
           $ref: "#/components/responses/DefaultError"
 
@@ -505,6 +534,32 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/ExecuteWorkflowResponse"
+        "429":
+          description: |
+            The workflow is at the concurrency limit its own definition declares
+            (`settings.concurrency`). Same contract as
+            POST /v1/workflows/execute: nothing was persisted, the code is
+            `workflow_concurrency_limit`, and `Retry-After` is a floor.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+            Retry-After:
+              description: Seconds to wait before retrying, as a floor.
+              schema:
+                type: integer
+                example: 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                workflowConcurrencyLimit:
+                  summary: The workflow is already running as many executions as its limit allows.
+                  value:
+                    success: false
+                    code: workflow_concurrency_limit
+                    message: workflow is at its concurrency limit
+                    trace_id: 0123456789abcdef0123456789abcdef
         default:
           $ref: "#/components/responses/DefaultError"
 
