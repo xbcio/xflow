@@ -10,6 +10,7 @@ import (
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
 )
@@ -209,6 +210,22 @@ func (e *Engine) Stop() {
 			e.stopFns[i]()
 		}
 	})
+}
+
+// ReloadSchedule re-reads one trigger node's schedule overlay and applies it to
+// the subscription this process hosts. It is what control.ScheduleManager calls
+// after an operator retimes or pauses a schedule, and it is why the manager does
+// not have to know whether the host is in this process.
+//
+// An engine that hosts nothing (a non-owning Server facade, or one built
+// without a trigger runtime) reports success: there is no subscription here to
+// re-point, and the workflow is hosted by whatever process owns its entry
+// activations.
+func (e *Engine) ReloadSchedule(ctx context.Context, ns namespace.Namespace, workflowID types.WorkflowID, node string) error {
+	if e == nil || e.triggerRuntime == nil {
+		return nil
+	}
+	return e.triggerRuntime.ReloadSchedule(ctx, ns, workflowID, node)
 }
 
 // WebhookHandler returns the http.Handler that serves the routes this engine's

@@ -115,9 +115,12 @@ func TestActivationParamsMergeTheOverlay(t *testing.T) {
 		Overlap:    strPtr("skip"),
 	})
 
-	params, err := r.activationParams(context.Background(), rec, nodeDef(t, rec, "nightly"))
+	params, paused, err := r.activationParams(context.Background(), rec, nodeDef(t, rec, "nightly"))
 	if err != nil {
 		t.Fatalf("activationParams: %v", err)
+	}
+	if paused {
+		t.Fatalf("an overlay that does not pause reported paused")
 	}
 	if params["expression"] != "0 3 * * *" {
 		t.Errorf("expression = %v, want the overlay's -- the operator's change has no other effect", params["expression"])
@@ -140,9 +143,12 @@ func TestActivationParamsMergeTheOverlay(t *testing.T) {
 func TestActivationParamsRenderBeforeMerging(t *testing.T) {
 	r, rec, overrides := overlayHost(t)
 	// Without an overlay the template renders.
-	params, err := r.activationParams(context.Background(), rec, nodeDef(t, rec, "nightly"))
+	params, paused, err := r.activationParams(context.Background(), rec, nodeDef(t, rec, "nightly"))
 	if err != nil {
 		t.Fatalf("activationParams: %v", err)
+	}
+	if paused {
+		t.Fatalf("an overlay that does not pause reported paused")
 	}
 	if params["expression"] != "0 2 * * *" {
 		t.Errorf("expression = %v, want the rendered $config value", params["expression"])
@@ -150,7 +156,7 @@ func TestActivationParamsRenderBeforeMerging(t *testing.T) {
 
 	// With one, the overlay wins over what the template rendered.
 	putOverlay(t, overrides, rec, "nightly", &store.ScheduleOverride{Expression: strPtr("0 4 * * *")})
-	params, err = r.activationParams(context.Background(), rec, nodeDef(t, rec, "nightly"))
+	params, _, err = r.activationParams(context.Background(), rec, nodeDef(t, rec, "nightly"))
 	if err != nil {
 		t.Fatalf("activationParams: %v", err)
 	}
@@ -177,7 +183,7 @@ func TestActivationParamsTimerOverlayLandsOnItsInterval(t *testing.T) {
 		Misfire:  strPtr("fire_all"),
 	})
 
-	params, err := r.activationParams(context.Background(), rec, nodeDef(t, rec, "poll"))
+	params, _, err := r.activationParams(context.Background(), rec, nodeDef(t, rec, "poll"))
 	if err != nil {
 		t.Fatalf("activationParams: %v", err)
 	}
@@ -205,14 +211,14 @@ func TestActivationParamsIgnoreOverlaysTheApiWouldNotServe(t *testing.T) {
 	// A trigger kind with no schedule at all.
 	putOverlay(t, overrides, rec, "hook", &store.ScheduleOverride{Expression: strPtr("0 9 * * *")})
 
-	params, err := r.activationParams(context.Background(), rec, nodeDef(t, rec, "grouped"))
+	params, _, err := r.activationParams(context.Background(), rec, nodeDef(t, rec, "grouped"))
 	if err != nil {
 		t.Fatalf("activationParams: %v", err)
 	}
 	if params["expression"] != "*/5 * * * *" {
 		t.Errorf("grouped expression = %v, want the definition's", params["expression"])
 	}
-	params, err = r.activationParams(context.Background(), rec, nodeDef(t, rec, "hook"))
+	params, _, err = r.activationParams(context.Background(), rec, nodeDef(t, rec, "hook"))
 	if err != nil {
 		t.Fatalf("activationParams: %v", err)
 	}
@@ -226,9 +232,12 @@ func TestActivationParamsIgnoreOverlaysTheApiWouldNotServe(t *testing.T) {
 func TestActivationParamsWithoutAStore(t *testing.T) {
 	r, rec, _ := overlayHost(t)
 	r.overrides = nil
-	params, err := r.activationParams(context.Background(), rec, nodeDef(t, rec, "nightly"))
+	params, paused, err := r.activationParams(context.Background(), rec, nodeDef(t, rec, "nightly"))
 	if err != nil {
 		t.Fatalf("activationParams: %v", err)
+	}
+	if paused {
+		t.Fatalf("an overlay that does not pause reported paused")
 	}
 	if params["expression"] != "0 2 * * *" {
 		t.Errorf("expression = %v, want the rendered definition value", params["expression"])
@@ -243,7 +252,7 @@ func TestActivationParamsFailClosedOnAStoreFault(t *testing.T) {
 	r, rec, _ := overlayHost(t)
 	r.overrides = failingOverrideStore{err: errors.New("overlay store is unreachable")}
 
-	if _, err := r.activationParams(context.Background(), rec, nodeDef(t, rec, "nightly")); err == nil {
+	if _, _, err := r.activationParams(context.Background(), rec, nodeDef(t, rec, "nightly")); err == nil {
 		t.Fatal("a failed overlay read was swallowed; the trigger would run the definition's schedule")
 	}
 }
