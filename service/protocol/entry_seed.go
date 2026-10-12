@@ -97,4 +97,18 @@ const (
 type SeedExecutionRefusal struct {
 	State string `json:"state"`
 	Error string `json:"error"`
+	// RetryAfterSeconds is the same floor the Retry-After header carries, in the
+	// body so a caller that is not the repository's own runner can act on it.
+	//
+	// The header is not enough for every caller on this path. A webhook route
+	// that admits IN PROCESS (the server hosting the entry unit itself) has no
+	// HTTP response of its own to copy a header from — it builds one, and it can
+	// only do that from a value it can read off the response object. Omitting it
+	// leaves that caller inventing a backoff, which is how a refusal turns into
+	// a hot retry loop against a workflow that is already at its limit.
+	//
+	// It is a lower bound, not a release time: when a slot frees is not
+	// knowable, which is why the runner in this repository ignores both forms and
+	// applies its own cadence.
+	RetryAfterSeconds int `json:"retry_after_seconds,omitempty"`
 }

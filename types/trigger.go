@@ -158,6 +158,17 @@ type EntrySeedResponse struct {
 	// gives them different codes.
 	QueueFull   bool
 	ExecutionID ExecutionID
+	// RetryAfter is how long the control plane asked the caller to wait before
+	// retrying, carried on a refusal. Zero means the control plane did not say,
+	// and the caller applies its own cadence — which is what every caller in
+	// this repository does, so this is for an embedder that has no cadence of
+	// its own (a webhook route admitting in process, which must turn the
+	// refusal into a Retry-After header on its own response).
+	//
+	// It is a lower bound, not a release time: when a concurrency slot frees is
+	// not knowable, and the queue-mode backlog drains at the rate the running
+	// executions finish.
+	RetryAfter time.Duration
 }
 
 // EntrySeedObserver receives one observation per entry-seed admission attempt:

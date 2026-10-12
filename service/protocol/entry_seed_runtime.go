@@ -367,11 +367,19 @@ func (h *HTTPEntrySeedRuntime) seedExecutionFromEntry(ctx context.Context, req t
 		}
 		var body SeedExecutionRefusal
 		_ = json.Unmarshal(data, &body)
+		// The body's retry_after_seconds is passed through as the same floor the
+		// Retry-After header states. A non-positive value stays zero — "the
+		// control plane did not say" — rather than becoming a deadline, so a
+		// caller that honours it can tell the two apart.
+		retryAfter := time.Duration(0)
+		if body.RetryAfterSeconds > 0 {
+			retryAfter = time.Duration(body.RetryAfterSeconds) * time.Second
+		}
 		switch body.State {
 		case SeedStateOverLimit:
-			return types.EntrySeedResponse{Refused: true}, nil
+			return types.EntrySeedResponse{Refused: true, RetryAfter: retryAfter}, nil
 		case SeedStateQueueFull:
-			return types.EntrySeedResponse{Refused: true, QueueFull: true}, nil
+			return types.EntrySeedResponse{Refused: true, QueueFull: true, RetryAfter: retryAfter}, nil
 		}
 		// A 429 this build does not classify is a protocol disagreement. Reported
 		// as an error — which withholds the offset — rather than silently

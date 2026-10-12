@@ -275,6 +275,12 @@ func TestSeedExecutionEndpointRefusesOverLimitWith429(t *testing.T) {
 	if refusal.Error != "workflow_concurrency_limit" {
 		t.Fatalf("error = %q, want workflow_concurrency_limit", refusal.Error)
 	}
+	// The body carries the same floor as the header so an IN-PROCESS caller — the
+	// server-hosted webhook admission, which builds its own HTTP response and has
+	// no header to copy — can state a Retry-After at all.
+	if refusal.RetryAfterSeconds != concurrencyRetryAfterSeconds {
+		t.Fatalf("retry_after_seconds = %d, want %d", refusal.RetryAfterSeconds, concurrencyRetryAfterSeconds)
+	}
 }
 
 // TestSeedExecutionEndpointMapsConcurrencyUnsupportedTo503 pins the fail-closed

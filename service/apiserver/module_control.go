@@ -2136,6 +2136,11 @@ func (m *workflowControlModule) handleSeedExecution(w http.ResponseWriter, r *ht
 		writeJSON(w, http.StatusTooManyRequests, protocol.SeedExecutionRefusal{
 			State: string(resp.State),
 			Error: code,
+			// The body carries the same floor as the header. This route's callers
+			// are runners, which already have a cadence and read neither; the
+			// field is for the in-process webhook admission, which has no header
+			// of its own to copy and would otherwise invent a backoff.
+			RetryAfterSeconds: concurrencyRetryAfterSeconds,
 		})
 		return
 	}
