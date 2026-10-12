@@ -47,6 +47,12 @@ func RunConcurrencyAdmissionContract(t *testing.T, newStore ConcurrencyStoreFact
 	t.Run("ReleaseOnTerminalStatus", func(t *testing.T) {
 		admissionReleasesOnTerminalStatus(t, newStore(t))
 	})
+	t.Run("ReleaseOnEveryTerminalStatus", func(t *testing.T) {
+		admissionReleasesOnEveryTerminalStatus(t, newStore(t))
+	})
+	t.Run("KeepsSlotWhileCanceling", func(t *testing.T) {
+		admissionKeepsSlotWhileCanceling(t, newStore(t))
+	})
 	t.Run("ReleaseOnAtomicCompletion", func(t *testing.T) {
 		admissionReleasesOnAtomicCompletion(t, newStore(t))
 	})
@@ -282,6 +288,63 @@ func admissionReleasesOnTerminalStatus(t *testing.T, state engine.StateStore) {
 	second, entries2 := concurrencySnapshot(t, g)
 	if _, err := limited.CreateExecutionWithConcurrency(ctx, second, entries2, admission); err != nil {
 		t.Fatalf("submission after the slot was released error = %v, want admission", err)
+	}
+}
+
+// admissionReleasesOnEveryTerminalStatus widens the release case from "a
+// terminal status releases" to every one of them. A store that hooked one
+// writer, or one status, leaks a slot for every execution that finishes the
+// other way — and timeout and canceled are the two that arrive through paths
+// nobody exercises by hand.
+func admissionReleasesOnEveryTerminalStatus(t *testing.T, state engine.StateStore) {
+	limited := concurrencyCapability(t, state)
+	ctx := context.Background()
+	g := concurrencyGraph(t, "conc-terminal-statuses")
+	admission := concurrencyAdmissionFor(t, g, 1)
+
+	for _, status := range []types.ExecutionStatus{
+		types.ExecutionStatusSuccess,
+		types.ExecutionStatusFailed,
+		types.ExecutionStatusCanceled,
+		types.ExecutionStatusTimeout,
+	} {
+		snap, entries := concurrencySnapshot(t, g)
+		if _, err := limited.CreateExecutionWithConcurrency(ctx, snap, entries, admission); err != nil {
+			t.Fatalf("submission before %s error = %v, want admission", status, err)
+		}
+		if err := state.UpdateExecutionStatus(ctx, snap.ID, status, ""); err != nil {
+			t.Fatalf("UpdateExecutionStatus(%s) error = %v", status, err)
+		}
+		// The next iteration's submission is the probe: it can only be admitted
+		// if this status released the slot.
+	}
+	probe, entries := concurrencySnapshot(t, g)
+	if _, err := limited.CreateExecutionWithConcurrency(ctx, probe, entries, admission); err != nil {
+		t.Fatalf("submission after every terminal status error = %v, want the slot released", err)
+	}
+}
+
+// admissionKeepsSlotWhileCanceling pins the other half of the terminal rule:
+// canceling is not terminal. An execution that a cancel has asked to stop is
+// still running its handler, and freeing its slot would admit a replacement
+// that overlaps it — exactly what the limit exists to prevent.
+func admissionKeepsSlotWhileCanceling(t *testing.T, state engine.StateStore) {
+	limited := concurrencyCapability(t, state)
+	ctx := context.Background()
+	g := concurrencyGraph(t, "conc-canceling")
+	admission := concurrencyAdmissionFor(t, g, 1)
+
+	snap, entries := concurrencySnapshot(t, g)
+	if _, err := limited.CreateExecutionWithConcurrency(ctx, snap, entries, admission); err != nil {
+		t.Fatalf("first submission error = %v", err)
+	}
+	if err := state.UpdateExecutionStatus(ctx, snap.ID, types.ExecutionStatusCanceling, ""); err != nil {
+		t.Fatalf("UpdateExecutionStatus(canceling) error = %v", err)
+	}
+
+	second, entries2 := concurrencySnapshot(t, g)
+	if _, err := limited.CreateExecutionWithConcurrency(ctx, second, entries2, admission); !errors.Is(err, engine.ErrConcurrencyLimit) {
+		t.Fatalf("submission while the holder is canceling error = %v, want ErrConcurrencyLimit", err)
 	}
 }
 
