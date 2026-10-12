@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -479,6 +480,27 @@ type waitTimeoutResponse struct {
 	TimedOut    bool                  `json:"timed_out"`
 }
 
+// concurrencyRetryAfterSeconds is the Retry-After a refused submission carries.
+//
+// The server cannot know when a slot frees: the refused submission is not
+// parked anywhere, so there is no release time to promise. One second is a
+// floor that keeps a client from spinning, not a prediction, and the header is
+// documented that way in the OpenAPI spec.
+const concurrencyRetryAfterSeconds = 1
+
+// writeConcurrencyRefused answers a submission the workflow's own concurrency
+// limit refused (engine.ErrConcurrencyLimit).
+//
+// 429 rather than 503: the request is well-formed and the server is healthy —
+// this one workflow is at capacity, which is state the caller created and can
+// wait out. Retry is the correct client behaviour, so the failure carries a
+// Retry-After even though it is only a floor.
+func writeConcurrencyRefused(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Retry-After", strconv.Itoa(concurrencyRetryAfterSeconds))
+	writeFail(w, r, http.StatusTooManyRequests, "workflow_concurrency_limit",
+		"workflow is at its concurrency limit")
+}
+
 // handleExecuteWorkflow serves POST /v1/workflows/execute (spec §7 + §9.1): it
 // compiles an INLINE definition and immediately starts an execution. It merges
 // the old submit ({workflow, params}) and invoke ({workflow, entry, input})
@@ -549,6 +571,10 @@ func (m *workflowControlModule) handleExecuteWorkflow(w http.ResponseWriter, r *
 		// An unknown entry node is a client error (400): the missing resource is
 		// the entry in the submitted graph, not an execution in the store.
 		if err != nil {
+			if errors.Is(err, engine.ErrConcurrencyLimit) {
+				writeConcurrencyRefused(w, r)
+				return
+			}
 			if errors.Is(err, engine.ErrFAFRequiresDirectDispatch) {
 				writeFail(w, r, http.StatusBadRequest, "workflow_faf_unsupported", "FAF workflows require direct dispatch")
 				return
@@ -567,6 +593,10 @@ func (m *workflowControlModule) handleExecuteWorkflow(w http.ResponseWriter, r *
 	} else {
 		id, err = m.eng.Submit(ctx, g, req.Params)
 		if err != nil {
+			if errors.Is(err, engine.ErrConcurrencyLimit) {
+				writeConcurrencyRefused(w, r)
+				return
+			}
 			if errors.Is(err, engine.ErrFAFRequiresDirectDispatch) {
 				writeFail(w, r, http.StatusBadRequest, "workflow_faf_unsupported", "FAF workflows require direct dispatch")
 				return
@@ -1476,6 +1506,10 @@ func (m *workflowControlModule) handleExecuteWorkflowByID(w http.ResponseWriter,
 	if req.Entry != "" {
 		execID, err = m.eng.Invoke(ctx, rec.Graph, req.Entry, req.Input)
 		if err != nil {
+			if errors.Is(err, engine.ErrConcurrencyLimit) {
+				writeConcurrencyRefused(w, r)
+				return
+			}
 			if errors.Is(err, engine.ErrFAFRequiresDirectDispatch) {
 				writeFail(w, r, http.StatusBadRequest, "workflow_faf_unsupported", "FAF workflows require direct dispatch")
 				return
@@ -1494,6 +1528,10 @@ func (m *workflowControlModule) handleExecuteWorkflowByID(w http.ResponseWriter,
 	} else {
 		execID, err = m.eng.Submit(ctx, rec.Graph, req.Params)
 		if err != nil {
+			if errors.Is(err, engine.ErrConcurrencyLimit) {
+				writeConcurrencyRefused(w, r)
+				return
+			}
 			if errors.Is(err, engine.ErrFAFRequiresDirectDispatch) {
 				writeFail(w, r, http.StatusBadRequest, "workflow_faf_unsupported", "FAF workflows require direct dispatch")
 				return
