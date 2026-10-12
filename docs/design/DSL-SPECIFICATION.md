@@ -263,7 +263,42 @@ groups:
       max_interval: int
       multiplier: number
     timeout: duration     # 组业务 deadline（可选）
-    mode: string          # "" (durable，默认) | "transient"
+    mode: string          # "" (durable，默认) | "transient"（语义见下文「组级 mode」）
+
+# 组级 mode 语义（完整定义见 NODE-GROUP-COLOCATION.md §3.5）：
+#   ""（durable，默认）— 组的产物与 execution 同一保留期；行为与既有版本一致。
+#   transient          — 该组提交的产物在 **execution 进入终态时**缩短到 completion TTL，
+#                        而不是在组 commit 时。覆盖：每个成员的边界 exit 输出及其
+#                        node_meta（私有输出标记必须与输出同寿）、组名对应的
+#                        error_output payload、组 unit 的 status/meta fence key。
+#   运行期间不缩短：同一次 execution 内下游 $('<成员名>') 的读取与 durable 组完全一致，
+#   transient 不是更短的 active TTL，只改 execution 结束之后的事。
+#   completion TTL 解析顺序：options.transient_completion_ttl → execution 的 transient
+#   标记 / 部署级 transient completion TTL → 30s。结果被 execution 的 active TTL 封顶，
+#   缩短绝不延长。fence key（组 unit 的 status/meta）另有下限
+#   max(completionTTL, 2 × lease_ttl)：持有上一轮 lease token 的陈旧 runner 不能在
+#   拒绝它 commit 的记录消失之后仍把它递上来。
+#   保留期内 Inspect 正常展示成员与已提交的 exit；产物过期后该成员显示为 expired
+#   （只读判定，不落库），而不是 pending——终态 execution 下「无组 unit 记录」意味着
+#   记录已过期，而不是「从未运行」。
+#   SQL 投影不受该 mode 影响：组提交路径不写节点结果投影（durable 组同样没有），只有
+#   execution 状态行照常投影；workflow 自身 transient 时该行照旧跳过。
+#   本地内存后端没有 TTL，transient 保留策略在那里是明确记录的无操作：exits 在进程
+#   存活期内始终可读（共享契约测试见 backend/internal/statestoretest）。
+#
+#   编译期约束（engine/graph/group_mode.go）：
+#     1. 只接受 "" 与 "transient"，其他值（含大小写变体）报编译错误。旧版本对未知值
+#        静默放行并按 durable 保留策略执行，正是 transient 要避免的失败方向。
+#     2. 成员不得是 suspending 节点（xflow.wait / xflow.approval），成员 subgraph body
+#        内嵌套的节点同样不得是。挂起的成员会停住组 lease 无法恢复的子执行，而 transient
+#        组的恢复方式是「从组入口整体重放」。
+#     3. 带 activation_replicas > 1 的 trigger 入口组不得使用 transient：各副本从同一
+#        consumer group 各自 admit execution，一个保留窗口覆盖不到全部。
+#     4. workflow 自身 options.transient 时组再标 transient 是冗余而非冲突：后端取两者
+#        中更短的保留期。
+#
+#   可加载样例：docs/dsl-samples/group-transient-enrichment.yaml。
+#   限制与已知缺口见 NODE-GROUP-COLOCATION.md §12。
 
 # 组级 on_error 语义（NODE-GROUP-COLOCATION.md §12.2 记录了完整实现决定）：
 #   stop（默认/空值）    — 任一成员终止失败即整组失败，fatal=true，执行整体失败
