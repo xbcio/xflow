@@ -15,3 +15,13 @@ func TestMemoryConcurrencyAdmissionContract(t *testing.T) {
 		return New().State()
 	})
 }
+
+// TestMemoryConcurrencyQueueContract runs the queue half of the same contract:
+// parking, FIFO promotion, cancellation and the queue timeout. It is a separate
+// suite because a store can enforce a limit without being able to queue, and
+// this backend can.
+func TestMemoryConcurrencyQueueContract(t *testing.T) {
+	statestoretest.RunConcurrencyQueueContract(t, func(t *testing.T) engine.StateStore {
+		return New().State()
+	})
+}
