@@ -511,17 +511,47 @@ func TestActivateSkipsWithoutFiringOnTheDefaultPolicy(t *testing.T) {
 // triggertest.FakeEntrySeedRuntime keeps state but fails closed on Emit and
 // Dedup — correctly, for the runtime it stands in for. The production embedded
 // runtime has both halves, so the test composes them.
+//
+// It also answers the optional types.ExecutionStatusReader capability, the third
+// thing the production embedded runtime has and neither shared fake does: the
+// overlap policy asks whether the execution this trigger started last has
+// finished, and a fake that cannot answer would send every overlap test down the
+// degradation path instead of the one under test.
 type embeddedRuntime struct {
 	*triggertest.FakeRuntime
-	mu    sync.Mutex
-	state map[string]map[string][]byte
+	mu       sync.Mutex
+	state    map[string]map[string][]byte
+	statuses map[types.ExecutionID]types.ExecutionStatus
 }
 
 func newEmbeddedRuntime() *embeddedRuntime {
-	return &embeddedRuntime{FakeRuntime: triggertest.NewFakeRuntime(), state: map[string]map[string][]byte{}}
+	return &embeddedRuntime{
+		FakeRuntime: triggertest.NewFakeRuntime(),
+		state:       map[string]map[string][]byte{},
+		statuses:    map[types.ExecutionID]types.ExecutionStatus{},
+	}
 }
 
 var _ types.TriggerRuntime = (*embeddedRuntime)(nil)
+
+var _ types.ExecutionStatusReader = (*embeddedRuntime)(nil)
+
+// setExecutionStatus records what the store would answer for one execution.
+// Only the executions a test names are known; everything else is found=false,
+// which is the same "the store no longer has it" a real store reports for an
+// execution it never kept.
+func (r *embeddedRuntime) setExecutionStatus(id types.ExecutionID, status types.ExecutionStatus) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.statuses[id] = status
+}
+
+func (r *embeddedRuntime) GetExecutionStatus(_ context.Context, id types.ExecutionID) (types.ExecutionStatus, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	status, ok := r.statuses[id]
+	return status, ok, nil
+}
 
 func (r *embeddedRuntime) State(_ context.Context, scope string) types.TriggerState {
 	return embeddedState{rt: r, scope: scope}

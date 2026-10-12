@@ -183,6 +183,51 @@ func (c cronContract) firings(t *testing.T, param string, value any, set bool) i
 	return rt.SeedCount()
 }
 
+// embeddedFirings is firings on the embedded path, counting the activation-time
+// catch-up instead of the control plane's seed admissions. The overlap policy is
+// enforced on this path and not on the other one (the control-plane admission
+// returns no execution id to look up later), so the two params that need an
+// observable there need this helper.
+//
+// The trigger's last execution is recorded and still going, which is the state
+// the policy's two values disagree about.
+func (c cronContract) embeddedFirings(t *testing.T, param string, value any, set bool) int {
+	t.Helper()
+	ctx := context.Background()
+	const running = types.ExecutionID("exec-running")
+	rt := newEmbeddedRuntime()
+	rt.setExecutionStatus(running, types.ExecutionStatusRunning)
+	state := rt.State(ctx, watermarkScope("wf-1", "entry"))
+	if err := writeWatermark(ctx, state, c.last); err != nil {
+		t.Fatalf("writeWatermark: %v", err)
+	}
+	if err := state.Set(ctx, lastExecutionKey, []byte(running), 0); err != nil {
+		t.Fatalf("record last execution: %v", err)
+	}
+
+	params := map[string]any{
+		"expression":  c.expression,
+		"misfire":     string(misfireFireAll),
+		"max_catchup": float64(3),
+	}
+	maps.Copy(params, c.others)
+	if set {
+		params[param] = value
+	}
+
+	sub, err := New().Activate(ctx, &types.TriggerActivateInput{
+		WorkflowID: "wf-1",
+		NodeName:   "entry",
+		Params:     params,
+		Runtime:    rt,
+	})
+	if err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	defer func() { _ = sub.Close(ctx) }()
+	return rt.EmitCount()
+}
+
 // TestFallbackContractCron exercises every BuiltinFallbacks entry for the cron
 // trigger through Activate: the param absent, then the param set to the value
 // the table declares, both against a trigger that missed firings. Each check
@@ -227,6 +272,23 @@ func TestFallbackContractCron(t *testing.T) {
 			}
 			if absent, set := c.firings(t, "max_catchup", f.Value, false), c.firings(t, "max_catchup", f.Value, true); absent != 10 || set != 10 {
 				t.Fatalf("firings = %d absent, %d with %s=%v; want 10 each", absent, set, f.Param, f.Value)
+			}
+		},
+		// Behind by half an hour with three firings due, and the execution this
+		// trigger started last still going: the two policies disagree about every
+		// one of them, so the count tells them apart. The control below proves
+		// that, rather than assuming it — without it this check would pass for a
+		// fallback that had drifted to skip only if the firings were also
+		// missing for another reason.
+		"overlap": func(t *testing.T, f nodeinternal.Fallback) {
+			c := cronContract{expression: "*/1 * * * *", last: now.Add(-30 * time.Minute)}
+			if skip := c.embeddedFirings(t, "overlap", string(overlapSkip), true); skip != 0 {
+				t.Fatalf("firings with overlap=%s = %d, want none: the case cannot tell the policies apart",
+					overlapSkip, skip)
+			}
+			if absent, set := c.embeddedFirings(t, "overlap", f.Value, false), c.embeddedFirings(t, "overlap", f.Value, true); absent != 3 || set != 3 {
+				t.Fatalf("firings = %d absent, %d with %s=%v; want 3 each: the fallback must leave the "+
+					"firings of a schedule whose last run is still going to run", absent, set, f.Param, f.Value)
 			}
 		},
 	}

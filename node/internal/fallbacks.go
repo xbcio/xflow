@@ -47,6 +47,7 @@ var builtinFallbacks = []Fallback{
 	{Type: "xflow.trigger.cron", Version: 1, Param: "catchup_window", Value: "1h"},
 	{Type: "xflow.trigger.cron", Version: 1, Param: "max_catchup", Value: float64(10)},
 	{Type: "xflow.trigger.cron", Version: 1, Param: "misfire", Value: "skip"},
+	{Type: "xflow.trigger.cron", Version: 1, Param: "overlap", Value: "allow"},
 
 	// trigger.kafka
 	{Type: "xflow.trigger.kafka", Version: 1, Param: "aggregate.by", Value: "partition"},

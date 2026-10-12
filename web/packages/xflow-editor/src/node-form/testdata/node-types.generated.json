@@ -2168,6 +2168,29 @@
               "value": 1
             }
           ]
+        },
+        {
+          "name": "overlap",
+          "path": "/parameters/overlap",
+          "label": "Overlap Policy",
+          "type": "string",
+          "fallback": "allow",
+          "help": "What to do when an instant arrives while the run this trigger started last has not finished; empty is allow",
+          "expression": {
+            "mode": "template"
+          },
+          "options": [
+            {
+              "value": "allow",
+              "label": "Allow",
+              "description": "Start the run anyway; two runs of this schedule may be in flight at once (default)"
+            },
+            {
+              "value": "skip",
+              "label": "Skip",
+              "description": "Drop this firing if the execution this trigger started last has not finished"
+            }
+          ]
         }
       ]
     },

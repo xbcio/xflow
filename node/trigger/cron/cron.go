@@ -30,6 +30,9 @@ type Node struct {
 	// MaxCatchupValue bounds how many firings one activation catches up; zero
 	// means defaultMaxCatchup.
 	MaxCatchupValue int
+	// OverlapValue is the overlap policy name; empty means the default
+	// (overlapAllow).
+	OverlapValue string
 }
 
 func New() *Node {
@@ -65,6 +68,13 @@ func (n *Node) MaxCatchup(max int) *Node {
 	return n
 }
 
+// Overlap sets what happens when an instant arrives while the run this trigger
+// started last has not finished.
+func (n *Node) Overlap(policy string) *Node {
+	n.OverlapValue = policy
+	return n
+}
+
 func (n *Node) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.trigger.cron",
@@ -93,6 +103,16 @@ func (n *Node) Descriptor() types.Descriptor {
 			{Name: "max_catchup", DisplayName: "Max Catch-up", Type: types.ParamNumber, Required: false,
 				Description: "Most firings one activation catches up; the newest ones are kept",
 				Constraints: &types.Constraints{Min: nodeinternal.Float(1)}},
+			// No "queue" option: serialising runs is a workflow setting
+			// (settings.concurrency mode=queue, limit=1), and a trigger parameter
+			// could not enforce it against a workflow it does not configure. See
+			// parseOverlapPolicy.
+			{Name: "overlap", DisplayName: "Overlap Policy", Type: types.ParamString, Required: false,
+				Description: "What to do when an instant arrives while the run this trigger started last has not finished; empty is allow",
+				Enum: []types.EnumOption{
+					{Value: string(overlapAllow), DisplayName: "Allow", Description: "Start the run anyway; two runs of this schedule may be in flight at once (default)"},
+					{Value: string(overlapSkip), DisplayName: "Skip", Description: "Drop this firing if the execution this trigger started last has not finished"},
+				}},
 		},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 	}
@@ -116,6 +136,9 @@ func (n *Node) RawParams() any {
 	}
 	if n.MaxCatchupValue > 0 {
 		params["max_catchup"] = n.MaxCatchupValue
+	}
+	if n.OverlapValue != "" {
+		params["overlap"] = n.OverlapValue
 	}
 	return params
 }
@@ -157,6 +180,14 @@ func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (ty
 	if err != nil {
 		return nil, err
 	}
+	// The overlap policy is resolved here for the same reason, and it decides
+	// which of the two firing paths can enforce it: the policy needs the runtime
+	// to be able to read an execution's status, so a runtime that cannot says so
+	// once, now, instead of at the first instant it was meant to decide.
+	overlap, err := resolveOverlap(in)
+	if err != nil {
+		return nil, err
+	}
 	watermark := openActivationWatermark(ctx, in)
 	now := time.Now().In(loc)
 	// The plan is computed once, from the record the previous activation left
@@ -165,17 +196,29 @@ func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (ty
 	last, recorded := readWatermark(ctx, watermark)
 	plan := missedFires(sched, last, recorded, now, cfg)
 	if seedadmit.Enabled(in) {
+		if overlap.policy == overlapSkip {
+			// The control-plane admission path cannot enforce the policy: the
+			// admission result it gets back does not carry the admitted
+			// execution's id, so there is nothing to record and nothing to ask
+			// about at the next instant. Said once per activation, because an
+			// operator who asked for serialised runs and is getting overlapping
+			// ones has no other way to find out.
+			slog.Warn("cron trigger cannot enforce overlap=skip over the control-plane admission path; "+
+				"runs of this schedule may overlap",
+				"workflow_id", in.WorkflowID,
+				"node", in.NodeName)
+		}
 		return n.activateEntrySeed(ctx, in, sched, loc, plan, watermark, now)
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	cursor := newScheduleCursor(sched, now)
 	c := cronlib.New(cronlib.WithLocation(loc))
 	applyCatchup(runCtx, in, plan, now, watermark, func(fire cronFire) {
-		n.emitScheduledFire(runCtx, in, sched, fire, cfg, watermark)
+		n.emitScheduledFire(runCtx, in, sched, fire, cfg, overlap, watermark)
 	})
 	c.Schedule(sched, cronlib.FuncJob(func() {
 		observed := time.Now().In(loc)
-		n.emitScheduledFire(runCtx, in, sched, cursor.next(observed), cfg, watermark)
+		n.emitScheduledFire(runCtx, in, sched, cursor.next(observed), cfg, overlap, watermark)
 	}))
 	c.Start()
 	return types.CloseFunc(func(context.Context) error {
@@ -191,7 +234,7 @@ func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (ty
 
 // emitScheduledFire admits one firing through the embedded engine: the local
 // path's own admission, as opposed to the control plane's entry seed.
-func (n *Node) emitScheduledFire(ctx context.Context, in *types.TriggerActivateInput, sched cronlib.Schedule, fire cronFire, cfg catchupConfig, watermark types.TriggerState) {
+func (n *Node) emitScheduledFire(ctx context.Context, in *types.TriggerActivateInput, sched cronlib.Schedule, fire cronFire, cfg catchupConfig, overlap overlapPlan, watermark types.TriggerState) {
 	event := newCronTriggerEvent(in.WorkflowID, in.NodeName, fire)
 	// handled distinguishes "this instant has been decided" from "the store
 	// failed before anything was attempted": only the first moves the
@@ -201,7 +244,17 @@ func (n *Node) emitScheduledFire(ctx context.Context, in *types.TriggerActivateI
 	if ok, err := in.Runtime.Dedup(ctx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+event.ID, fireDedupTTL(sched, fire.scheduled, cfg)); err == nil {
 		handled = true
 		if ok {
-			if _, err := in.Emit(ctx, event); err != nil {
+			if !overlap.admits(ctx, watermark, in) {
+				// A firing the overlap policy dropped is DECIDED, like one the
+				// workflow refused: the instant is behind the trigger and the next
+				// one is a fresh attempt, so the watermark below moves past it. The
+				// log is the only trace — the workflow's own history shows a gap,
+				// not a reason.
+				slog.Warn("cron trigger skipped a firing; the execution it started last has not finished",
+					"workflow_id", in.WorkflowID,
+					"node", in.NodeName,
+					"event", event.ID)
+			} else if id, err := in.Emit(ctx, event); err != nil {
 				// A firing that was refused is DROPPED, and that is the whole
 				// handling: a schedule is a stream of moments, so the next firing
 				// is a fresh attempt and replaying this one would turn a busy
@@ -220,6 +273,11 @@ func (n *Node) emitScheduledFire(ctx context.Context, in *types.TriggerActivateI
 					"node", in.NodeName,
 					"event", event.ID,
 					"err", err)
+			} else {
+				// The id is recorded for the overlap policy's next decision. It is
+				// recorded from the admission rather than from the event, because
+				// only the runtime knows which execution this firing became.
+				recordLastExecution(ctx, watermark, in, id)
 			}
 		}
 	}
