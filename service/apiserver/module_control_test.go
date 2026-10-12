@@ -73,6 +73,12 @@ func (f *fakeControlFacade) Inspect(context.Context, types.ExecutionID, ...strin
 	return f.inspect, f.inspectErr
 }
 
+// InspectStatus answers from the same fixture as Inspect, so a test that sets
+// one detail cannot get a different status through the other call.
+func (f *fakeControlFacade) InspectStatus(context.Context, types.ExecutionID) (engine.ExecutionDetail, error) {
+	return f.inspect, f.inspectErr
+}
+
 func (f *fakeControlFacade) DeliverSignal(_ context.Context, _ types.ExecutionID, name string, data map[string]any) error {
 	f.signalName = name
 	f.signalData = data

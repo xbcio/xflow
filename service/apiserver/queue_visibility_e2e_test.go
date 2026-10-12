@@ -1,6 +1,7 @@
 package apiserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -93,5 +94,81 @@ func TestQueuedExecutionIsVisibleWithItsPosition(t *testing.T) {
 	if holderDetail.QueuePosition != 0 {
 		t.Fatalf("holder queue_position = %d, want 0: it is not waiting for anything",
 			holderDetail.QueuePosition)
+	}
+}
+
+// submitWorkflowRawE2E posts an inline definition and returns the decoded
+// execute response together with its `data` object as raw fields, so a test can
+// tell an absent field from a zero one.
+func submitWorkflowRawE2E(t *testing.T, baseURL string, wf *types.WorkflowDef) (executeWorkflowResponse, map[string]any) {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(executeWorkflowRequest{Workflow: wf}); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(baseURL+"/v1/workflows/execute", "application/json", &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("execute status = %d (body=%s), want 200", resp.StatusCode, bodyBytes)
+	}
+	dataBytes := extractData(t, bodyBytes)
+	var out executeWorkflowResponse
+	if err := json.Unmarshal(dataBytes, &out); err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(dataBytes, &raw); err != nil {
+		t.Fatal(err)
+	}
+	return out, raw
+}
+
+// TestExecuteResponseSaysWhereTheSubmissionLanded answers, at the moment of the
+// request, the question the response used to leave to a follow-up read: a 200
+// now says whether the work started or is waiting for a slot, and a queued
+// submission carries its place in line. "Accepted" alone is not an answer — a
+// parked submission has not been accepted by anything that will run it, and a
+// client that cannot tell the two apart has to poll to find out which one it
+// got.
+func TestExecuteResponseSaysWhereTheSubmissionLanded(t *testing.T) {
+	srv, err := New(Config{Concurrency: 1})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = srv.Shutdown(context.Background()) }()
+
+	httpSrv := httptest.NewServer(srv.Handler())
+	defer httpSrv.Close()
+
+	wf := queueModeWorkflow()
+	holder, holderRaw := submitWorkflowRawE2E(t, httpSrv.URL, wf)
+	if holder.Status != types.ExecutionStatusRunning {
+		t.Fatalf("holder status = %q, want %q", holder.Status, types.ExecutionStatusRunning)
+	}
+	// The field has to be absent, not zero: a client cannot tell 0 from "not
+	// queued" in a decoded struct, and only one of those is a place in line it
+	// could show.
+	if _, present := holderRaw["queue_position"]; present {
+		t.Fatalf("holder response carries queue_position = %v, want the field absent", holderRaw["queue_position"])
+	}
+
+	waiting, waitingRaw := submitWorkflowRawE2E(t, httpSrv.URL, wf)
+	if waiting.Status != types.ExecutionStatusQueued {
+		t.Fatalf("parked status = %q, want %q", waiting.Status, types.ExecutionStatusQueued)
+	}
+	if waiting.QueuePosition != 1 {
+		t.Fatalf("parked queue_position = %d, want 1", waiting.QueuePosition)
+	}
+	if _, present := waitingRaw["queue_position"]; !present {
+		t.Fatalf("parked response has no queue_position field; body fields = %v", waitingRaw)
 	}
 }

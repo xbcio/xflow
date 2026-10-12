@@ -453,9 +453,54 @@ type executeWorkflowRequest struct {
 
 type executeWorkflowResponse struct {
 	ExecutionID types.ExecutionID `json:"execution_id"`
+	// Status is where the submission landed: "running" for an execution that
+	// started, "queued" for one waiting for a workflow-concurrency slot
+	// (settings.concurrency with mode=queue). Without it a caller cannot tell
+	// the two apart from the response, and "accepted" would be a lie for the
+	// parked case — nothing runs until a slot frees.
+	//
+	// It is the execution's status read back after the submission, not a
+	// recording of the admission decision: a submission that finished before the
+	// response was written reports that instead, which is fresher and no less
+	// true.
+	Status types.ExecutionStatus `json:"status,omitempty"`
+	// QueuePosition is the place in line, 1-based, and it is present only while
+	// the execution is queued — 1 is the head, the submission the next release
+	// promotes. A caller holding a position knows its work has not started and
+	// how much is ahead of it.
+	QueuePosition int `json:"queue_position,omitempty"`
 	// ParamIssues is set only by the inline POST /v1/workflows/execute: a
 	// registered workflow was validated when it was registered.
 	ParamIssues []graph.ParamIssue `json:"param_issues,omitempty"`
+}
+
+// submissionResponse builds the answer to a submission that succeeded.
+//
+// The status and the place in line are read back rather than threaded out of
+// Submit/Invoke. Those are public SDK entry points whose signatures are fixed,
+// and a second pair that returned more would be a second definition of what a
+// submission returns; the read hits the store the submission just wrote to, so
+// it cannot lag behind it, and it costs one read instead of Inspect's walk over
+// every node of the graph.
+//
+// The read-back is best effort on purpose. The execution exists and its ID is
+// the answer to the request — a status that could not be read is a missing
+// detail, not a failed submission, so it is logged and the response goes out
+// without it.
+func (m *workflowControlModule) submissionResponse(ctx context.Context, id types.ExecutionID, issues []graph.ParamIssue) executeWorkflowResponse {
+	resp := executeWorkflowResponse{ExecutionID: id, ParamIssues: issues}
+	detail, err := m.eng.InspectStatus(ctx, id)
+	if err != nil {
+		if m.log != nil {
+			m.log.Error("execute_status_readback_failed", "execution_id", string(id), "err", err)
+		}
+		return resp
+	}
+	resp.Status = detail.Status
+	if detail.Status == types.ExecutionStatusQueued {
+		resp.QueuePosition = detail.QueuePosition
+	}
+	return resp
 }
 
 // executeRegisteredRequest is the body for POST /v1/workflows/{id}/execute
@@ -654,7 +699,7 @@ func (m *workflowControlModule) handleExecuteWorkflow(w http.ResponseWriter, r *
 			return
 		}
 	}
-	writeData(w, r, http.StatusOK, executeWorkflowResponse{ExecutionID: id, ParamIssues: paramIssues})
+	writeData(w, r, http.StatusOK, m.submissionResponse(ctx, id, paramIssues))
 }
 
 // registerWorkflowResponse echoes the persisted workflow ID (server-assigned
@@ -1588,7 +1633,7 @@ func (m *workflowControlModule) handleExecuteWorkflowByID(w http.ResponseWriter,
 			return
 		}
 	}
-	writeData(w, r, http.StatusOK, executeWorkflowResponse{ExecutionID: execID})
+	writeData(w, r, http.StatusOK, m.submissionResponse(ctx, execID, nil))
 }
 
 // deregisterWorkflow is the clear-activations -> remove-record path both entry
