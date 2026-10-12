@@ -3057,6 +3057,19 @@ components:
             nowhere. `main_output` is rejected: unlike a node, a group that
             failed before committing has no single member output to stand in
             for the group's main result.
+        error_outputs:
+          type: array
+          items:
+            $ref: "#/components/schemas/Connection"
+          description: |
+            Downstream targets for the group's synthesized `error` output
+            port. Required and non-empty when `on_error` is `error_output`;
+            targets declared under any other policy are a compile error.
+            Each target must be a real node outside the group — a failed
+            group has no running member engine left to deliver to — and must
+            respect the target's declared inputs. An empty array is
+            equivalent to omission and is legal under the policies that do
+            not route to it.
         retry:
           type: "null"
           deprecated: true
