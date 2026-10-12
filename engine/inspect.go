@@ -42,9 +42,16 @@ type NodeDetail struct {
 	Output       map[string]any `json:"output,omitempty"`
 }
 
-// Inspect returns execution status and, when requested or discoverable from the
-// stored graph, per-node status/output details for audit and approval flows.
-func (e *Engine) Inspect(ctx context.Context, id types.ExecutionID, nodeNames ...string) (ExecutionDetail, error) {
+// InspectStatus returns the execution-level half of Inspect: status, error and,
+// for a queued execution, its place in line — without loading the graph or any
+// node.
+//
+// It exists for callers that need one status and nothing else. The submission
+// path is what made the split necessary: it has just written the execution and
+// has to tell the caller whether the work started or is waiting for a slot, and
+// Inspect's per-node reads would put a whole graph's worth of reads on that
+// request to answer a one-field question.
+func (e *Engine) InspectStatus(ctx context.Context, id types.ExecutionID) (ExecutionDetail, error) {
 	snap, err := e.state.GetExecution(ctx, id)
 	if err != nil {
 		return ExecutionDetail{}, fmt.Errorf("inspect execution %q: %w", id, err)
@@ -67,6 +74,16 @@ func (e *Engine) Inspect(ctx context.Context, id types.ExecutionID, nodeNames ..
 				detail.QueuePosition = position
 			}
 		}
+	}
+	return detail, nil
+}
+
+// Inspect returns execution status and, when requested or discoverable from the
+// stored graph, per-node status/output details for audit and approval flows.
+func (e *Engine) Inspect(ctx context.Context, id types.ExecutionID, nodeNames ...string) (ExecutionDetail, error) {
+	detail, err := e.InspectStatus(ctx, id)
+	if err != nil {
+		return ExecutionDetail{}, err
 	}
 
 	g, err := e.state.LoadGraph(ctx, id)

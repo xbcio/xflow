@@ -136,3 +136,69 @@ func TestInspectReportsNoPositionWithoutTheCapability(t *testing.T) {
 		t.Fatalf("QueuePosition = %d without the capability, want 0", detail.QueuePosition)
 	}
 }
+
+// nodeReadCountingState counts the per-node reads an inspection performs, so
+// "this call does not enumerate the graph" is observable rather than inferred
+// from a comment.
+type nodeReadCountingState struct {
+	*queuePositionState
+	nodeReads int
+}
+
+func (s *nodeReadCountingState) GetNode(ctx context.Context, id types.ExecutionID, name string) (*NodeSnapshot, error) {
+	s.nodeReads++
+	return s.queuePositionState.GetNode(ctx, id, name)
+}
+
+// TestInspectStatusAnswersWithoutReadingNodes is the reason InspectStatus
+// exists. The submission path needs one status and nothing else; paying
+// Inspect's per-node reads to get it would put a whole graph's worth of reads on
+// the request that just created the execution. The contrast with Inspect is
+// asserted in the same test so the cheaper call cannot silently become the
+// expensive one.
+func TestInspectStatusAnswersWithoutReadingNodes(t *testing.T) {
+	ctx := context.Background()
+	state := &nodeReadCountingState{
+		queuePositionState: &queuePositionState{
+			fakeState: newFakeState(),
+			positions: map[types.ExecutionID]int{},
+		},
+	}
+	eng := New(state, &fakeQueue{})
+
+	queued := inspectQueuedExecution(t, state.fakeState, types.ExecutionStatusQueued)
+	state.positions[queued] = 2
+
+	detail, err := eng.InspectStatus(ctx, queued)
+	if err != nil {
+		t.Fatalf("InspectStatus(%q) error = %v", queued, err)
+	}
+	if detail.Status != types.ExecutionStatusQueued {
+		t.Fatalf("Status = %q, want %q", detail.Status, types.ExecutionStatusQueued)
+	}
+	if detail.QueuePosition != 2 {
+		t.Fatalf("QueuePosition = %d, want 2", detail.QueuePosition)
+	}
+	if state.nodeReads != 0 {
+		t.Fatalf("InspectStatus read %d node(s), want none: the graph walk belongs to Inspect", state.nodeReads)
+	}
+
+	if _, err := eng.Inspect(ctx, queued); err != nil {
+		t.Fatalf("Inspect(%q) error = %v", queued, err)
+	}
+	if state.nodeReads == 0 {
+		t.Fatal("Inspect read no nodes: the fixture no longer distinguishes the two calls")
+	}
+}
+
+// TestInspectStatusKeepsTheNotFoundError pins the error contract an execute
+// response depends on: a submission the store did not persist has to be
+// distinguishable from one that was persisted but cannot be read.
+func TestInspectStatusKeepsTheNotFoundError(t *testing.T) {
+	eng := New(&queuePositionState{fakeState: newFakeState(), positions: map[types.ExecutionID]int{}}, &fakeQueue{})
+
+	_, err := eng.InspectStatus(context.Background(), types.ExecutionID("exec-missing"))
+	if !errors.Is(err, ErrExecutionNotFound) {
+		t.Fatalf("InspectStatus(unknown) error = %v, want ErrExecutionNotFound", err)
+	}
+}
