@@ -360,9 +360,16 @@ func (s *memoryState) RenewOutbox(_ context.Context, id types.ExecutionID, renew
 // readyOutboxIDsLocked returns the sorted IDs of entries that are due and not
 // currently leased. Shared by the read and claim paths so the two can never
 // disagree about what "ready" means.
+//
+// A paused execution has no ready entries at any horizon, which is how a pause
+// suspends dispatch without moving anything: see dispatchHeldLocked. The
+// refusal is placed before the deadline test rather than expressed as a
+// deadline, because the hold is a property of the execution and not of the
+// instant asked about — a caller asking about next year must not be able to
+// deliver work this year's pause stopped.
 func (s *memoryState) readyOutboxIDsLocked(id types.ExecutionID, before time.Time, limit int) []string {
 	entries := s.outbox[id]
-	if len(entries) == 0 || limit == 0 {
+	if len(entries) == 0 || limit == 0 || s.dispatchHeldLocked(id) {
 		return nil
 	}
 	ids := make([]string, 0, len(entries))
