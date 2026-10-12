@@ -17,8 +17,11 @@ import (
 // The cap is a refusal, not a truncation: a backfill is a request to have a
 // named set of instants run, and silently planning the oldest thousand of two
 // thousand would leave the operator believing they asked for less than they did.
-// The dry run is how a wide range is explored — it returns the same plan and
-// costs nothing — and the error names the cap so the range can be narrowed.
+// A dry run reports that plan without firing anything, but it is bound by the
+// same cap — the plan is the thing being capped and it is the expensive part, so
+// a range too wide to run is also too wide to preview. A wide range is explored
+// by narrowing it until the plan fits, and the error names the cap to say how
+// far off the caller is.
 //
 // The number is the design's. It bounds both the work one request can queue and
 // the size of the response that reports it.
@@ -73,7 +76,8 @@ type ScheduleBackfillRequest struct {
 	From time.Time
 	To   time.Time
 	// DryRun plans without firing. It is the only way to see what a range would
-	// do before it does it, and the only way to explore a range the cap refuses.
+	// do before it does it; it is not a way around the cap, which counts the plan
+	// itself and so refuses a dry run as readily as a run.
 	DryRun bool
 }
 
