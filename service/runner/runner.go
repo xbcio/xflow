@@ -98,11 +98,18 @@ type Config struct {
 	// carries SupplyObserved — byte-identical to a runner with no supplies.
 	SupplyRegistry *supply.Registry
 	// SupplyGate, when set, receives heartbeat-piggybacked supply hints
-	// (HeartbeatResponse.SupplyHints) and fetches once per changed hash. nil
-	// means hints are silently ignored — this runner then refreshes supply
-	// content only at activation time (there is no TTL poll loop), so a
-	// supply whose activation already happened stays on its admitted value.
+	// (HeartbeatResponse.SupplyHints) and fetches once per changed hash. It is
+	// also the object whose TTL poll re-reads every hosted supply, so a hint
+	// that never arrives is not the end of the story. nil means neither
+	// channel exists — this runner then refreshes supply content only at
+	// activation time, so a supply whose activation already happened stays on
+	// its admitted value.
 	SupplyGate *SupplyGate
+	// SupplyPollInterval is how often the supply TTL poll re-reads every
+	// hosted supply. Zero uses DefaultSupplyPollInterval (60s); a non-zero
+	// value below MinSupplyPollInterval is raised to it. There is no way to
+	// switch the poll off: see RunPoller. Ignored when SupplyGate is nil.
+	SupplyPollInterval time.Duration
 	// ArtifactCodeResolver, when set, resolves script artifacts by content-
 	// addressable digest. ScriptNode calls Input.ArtifactCode(ctx, digest) at
 	// Execute time; the runner wires the read-through artifact cache here.
@@ -354,6 +361,18 @@ func (r *Runner) Run(ctx context.Context) error {
 	// keep shipping under a session the server has already replaced.
 	if r.metricsReporter != nil {
 		go r.metricsReporter.Run(heartbeatCtx, sessionID)
+	}
+
+	// The supply TTL poll starts once the session is established, which is when
+	// this runner's hosting set is authoritative: Admit has run for every
+	// activation this process holds, so the poll has keys to re-read, and a
+	// supply fetch has an origin to reach (the seed/supply client). It runs
+	// under pollCtx, not ctx, so a reconnect replaces the poller rather than
+	// adding a second one — pollCancel is deferred in Run, and the previous
+	// poller's worst case is one fetch still in flight during the handover,
+	// which the gate's in-flight map makes harmless.
+	if r.supplyGate != nil {
+		go r.supplyGate.RunPoller(pollCtx, r.config.SupplyPollInterval)
 	}
 
 	// Worker pool of Concurrency goroutines executing leases in parallel.

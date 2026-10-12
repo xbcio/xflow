@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"sort"
 	"strings"
 	"sync"
@@ -92,7 +93,17 @@ type SupplyGate struct {
 	// differ whenever a node overrides `resource`. This is populated at
 	// activation time, which is the only place the mapping is known; the hint
 	// path has no other way to recover it later.
+	//
+	// Its key set is also what the TTL poll iterates: the supplies this process
+	// "hosts" are exactly the ones some activation required here (see
+	// hostedKeys).
 	resources sync.Map // supply.Key -> string(resource name)
+
+	// newPollTicker builds the tick source RunPoller waits on. nil (the
+	// production value) means time.NewTicker. Tests replace it to drive ticks
+	// by hand: *time.Ticker's channel is not settable from outside, so a fake
+	// needs this seam rather than a fake clock.
+	newPollTicker func(time.Duration) pollTicker
 
 	// hintsInFlight marks supply keys currently being fetched. The caller
 	// (Runner.processSupplyHints) runs ApplyHints in its own goroutine per
@@ -109,6 +120,94 @@ func NewSupplyGate(f SupplyFetcher, reg *supply.Registry, logger *slog.Logger) *
 		reg = supply.Default
 	}
 	return &SupplyGate{fetcher: f, registry: reg, logger: logger}
+}
+
+// DefaultSupplyPollInterval is the supply TTL poll period used when the
+// configured interval is zero (unset).
+const DefaultSupplyPollInterval = 60 * time.Second
+
+// MinSupplyPollInterval is the lowest supply poll interval this process will
+// run, and the value a configured interval below it is raised to. Polling is
+// deliberately not disableable and not tunable to a hammering cadence: it is
+// the only convergence path for a supply whose heartbeat hint was lost (a
+// dropped message, a runner restart, a server failover), and each tick costs
+// one control-plane round trip per hosted supply.
+const MinSupplyPollInterval = 10 * time.Second
+
+// ValidateSupplyPollInterval reports whether a configured supply poll interval
+// is usable. Zero means unset and is accepted — the gate then applies
+// DefaultSupplyPollInterval.
+//
+// A non-zero value below MinSupplyPollInterval is refused rather than silently
+// raised or silently ignored: polling cannot be switched off, so an operator
+// who set 5s (or a negative value, which is what "disable this" looks like on
+// a duration knob) needs to hear about it at config time rather than discover a
+// different cadence running.
+func ValidateSupplyPollInterval(ttl time.Duration) error {
+	if ttl == 0 || ttl >= MinSupplyPollInterval {
+		return nil
+	}
+	return fmt.Errorf("supply poll interval %s is below the %s minimum (polling cannot be disabled)",
+		ttl, MinSupplyPollInterval)
+}
+
+// resolveSupplyPollInterval turns a configured interval into the one RunPoller
+// uses: unset (zero) and nonsensical (negative) both mean the default, and a
+// positive value below the floor is raised to it.
+//
+// The config surfaces (sdk/xflow.RunnerConfig, the standalone runner's flag/env
+// /YAML) already reject those cases through ValidateSupplyPollInterval, so this
+// is the backstop for a caller that builds Config directly: it resolves to a
+// running poller rather than to no poller, because "polling is off" is the one
+// outcome that must not be reachable.
+func resolveSupplyPollInterval(ttl time.Duration, logger *slog.Logger) time.Duration {
+	switch {
+	case ttl <= 0:
+		return DefaultSupplyPollInterval
+	case ttl < MinSupplyPollInterval:
+		if logger != nil {
+			logger.Warn("supply poll interval raised to the floor",
+				"configured", ttl, "using", MinSupplyPollInterval)
+		}
+		return MinSupplyPollInterval
+	default:
+		return ttl
+	}
+}
+
+// pollTicker is the tick source RunPoller waits on. It exists as an interface
+// only so a test can drive ticks by hand.
+type pollTicker interface {
+	C() <-chan time.Time
+	Stop()
+}
+
+// realPollTicker adapts *time.Ticker to pollTicker. *time.Ticker cannot be used
+// directly: its channel is a struct field, so a fake cannot stand in for it.
+type realPollTicker struct{ t *time.Ticker }
+
+func (r realPollTicker) C() <-chan time.Time { return r.t.C }
+func (r realPollTicker) Stop()               { r.t.Stop() }
+
+func newRealPollTicker(d time.Duration) pollTicker { return realPollTicker{t: time.NewTicker(d)} }
+
+// supplyPollJitter spreads a poll period by ±10% — the same shape as the
+// control plane's own retry jitter, and for the same reason: every runner in a
+// fleet starts its poller on its own clock, and without the spread a fleet
+// rolled out together fires its ticks together and turns a per-minute trickle
+// into a periodic spike.
+func supplyPollJitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+	spread := d / 10 // 10%
+	if spread <= 0 {
+		return d
+	}
+	// rand.Int63n panics on n <= 0; spread is > 0 here. The offset is in
+	// [-spread, +spread].
+	offset := rand.Int63n(int64(spread)*2+1) - int64(spread)
+	return d + time.Duration(offset)
 }
 
 // SetObserver installs the gate's observer. nil disables observation.
@@ -495,15 +594,20 @@ func (g *SupplyGate) ApplyHints(ctx context.Context, hints []protocol.SupplyHint
 
 // refreshOne fetches and applies a single supply, always clearing its in-flight
 // marker on return (including on every early-return path, which is why this is
-// its own function rather than inlined into ApplyHints' loop).
+// its own function rather than inlined into its callers' loops).
+//
+// Its two callers are the hint path (ApplyHints) and the TTL poll
+// (pollHosted), so everything here has to be true for both: the log lines name
+// the event, not the channel that asked for it.
 //
 // ctx MUST already carry k's namespace: the fetch reads it from there (see
-// ApplyHints), and both callers build their context from the key rather than
-// from whatever context they happened to be handed.
+// ApplyHints and pollHosted), and both callers build their context from the key
+// rather than from whatever context they happened to be handed.
 //
 // wantHash, when non-empty, is the content hash the caller was told is current:
 // the fetch is skipped when the cached content already matches it, which is the
-// "already on this content: zero cost" case for a hint.
+// "already on this content: zero cost" case for a hint. The poll passes "" —
+// discovering the server's current hash is the whole point of a tick.
 func (g *SupplyGate) refreshOne(ctx context.Context, k supply.Key, wantHash string) {
 	defer g.hintsInFlight.Delete(k)
 	if wantHash != "" {
@@ -518,7 +622,7 @@ func (g *SupplyGate) refreshOne(ctx context.Context, k supply.Key, wantHash stri
 	content, fetchedHash, revision, err := g.fetcher.Fetch(ctx, resource)
 	if err != nil {
 		g.notifyFetch(ctx, resource, "error")
-		g.logHintOutcome(slog.LevelWarn, "supply hint: fetch failed", k, resource, "")
+		g.logRefreshOutcome(slog.LevelWarn, "supply refresh: fetch failed", k, resource, "")
 		return
 	}
 	g.notifyFetch(ctx, resource, "ok")
@@ -527,15 +631,114 @@ func (g *SupplyGate) refreshOne(ctx context.Context, k supply.Key, wantHash stri
 		Revision: revision, FetchedAt: time.Now(),
 	}); err != nil {
 		// A consumer rejected it (e.g. the wasm canary said no). last-good is
-		// preserved by construction; the next hint retries.
-		g.logHintOutcome(slog.LevelWarn, "supply hint: content rejected by a consumer", k, resource, fetchedHash)
+		// preserved by construction; the next hint or tick retries.
+		g.logRefreshOutcome(slog.LevelWarn, "supply refresh: content rejected by a consumer", k, resource, fetchedHash)
 		return
 	}
-	g.logHintOutcome(slog.LevelInfo, "supply hint: applied", k, resource, fetchedHash)
+	g.logRefreshOutcome(slog.LevelInfo, "supply refresh: applied", k, resource, fetchedHash)
 }
 
-// logHintOutcome logs one refresh outcome via the shared g.log formatter,
+// logRefreshOutcome logs one refresh outcome via the shared g.log formatter,
 // carrying only the supply name/resource and a hash PREFIX — never content.
-func (g *SupplyGate) logHintOutcome(level slog.Level, msg string, k supply.Key, resource, hash string) {
+func (g *SupplyGate) logRefreshOutcome(level slog.Level, msg string, k supply.Key, resource, hash string) {
 	g.log(context.Background(), level, msg, engine.SupplyRequirement{Node: k.Name, Resource: resource}, hash)
+}
+
+// RunPoller refreshes every hosted supply once per interval until ctx is done.
+//
+// The heartbeat hint is the fast path, but it is notification-only: it is
+// piggybacked on a response the runner may never receive, and a runner that
+// restarts, a dropped response, or a server failover between two writes all
+// lose it. A supply then keeps whatever content it had — forever, because
+// nothing else in the system re-reads a supply that already has a snapshot. The
+// poll is what makes convergence independent of the notification channel: every
+// hosted key is re-read unconditionally, and the hash that comes back decides
+// whether anything changed.
+//
+// It shares refreshOne and hintsInFlight with ApplyHints, so a hint and a tick
+// that land on the same key cost one fetch, not two, and apply in one order.
+//
+// The caller runs this in its own goroutine. ttl goes through
+// resolveSupplyPollInterval first, so neither an unset nor a nonsensical
+// interval can leave this runner without a poller.
+func (g *SupplyGate) RunPoller(ctx context.Context, ttl time.Duration) {
+	if g == nil {
+		return
+	}
+	newTicker := g.newPollTicker
+	if newTicker == nil {
+		newTicker = newRealPollTicker
+	}
+	ticker := newTicker(supplyPollJitter(resolveSupplyPollInterval(ttl, g.logger)))
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C():
+			g.pollHosted(ctx)
+		}
+	}
+}
+
+// pollHosted refreshes each hosted supply once, serially.
+//
+// Serial is deliberate and cheap: a supply fetch is bounded by the fetcher's own
+// timeout, and the hosted set is small (one entry per supply node name some
+// activation of this process required). Fanning out would only add a second
+// concurrency bound to reason about on a path whose whole job is to be the
+// boring backstop.
+func (g *SupplyGate) pollHosted(ctx context.Context) {
+	for _, k := range g.hostedKeys() {
+		if ctx.Err() != nil {
+			return
+		}
+		// Same in-flight de-dupe as ApplyHints: a hint-triggered fetch for this
+		// key already in flight is asking the server for the same current
+		// content, so a second one would only waste a round trip and could
+		// apply two results out of order.
+		if _, already := g.hintsInFlight.LoadOrStore(k, struct{}{}); already {
+			continue
+		}
+		// An empty wantHash means "fetch it whatever we have": the poll's job is
+		// to discover the server's current hash, so it cannot skip the fetch on
+		// a hash it already believes. The fetch result decides what changes.
+		g.refreshOne(namespace.WithNamespace(ctx, k.Namespace), k, "")
+	}
+}
+
+// hostedKeys returns the supplies this process hosts, sorted by namespace then
+// name so a tick's fetch order is deterministic.
+//
+// "Hosted" is the key set Admit recorded — every (namespace, supply node) pair
+// some activation of this process required — and NOT the set of keys with a
+// registered consumer. A supply consumed only by expressions ($supplies.rules
+// read inside an xflow.if condition, with no wasm consumer ever registering)
+// has a consumer count of zero by construction: pruning it here would strand
+// exactly the supplies whose only reader is a condition, which is the case a
+// lost hint is least visible in. The set is bounded by what Admit has seen and
+// matches the registry's own snapshot lifetime, so the poll can never keep a
+// supply alive that the registry has already forgotten.
+//
+// Nothing is pruned when an activation goes away, for the same reason: the gate
+// is not told when the last activation requiring a key deactivates, and the
+// cost of a stale entry is one GET per interval against a supply count the
+// design keeps small (D3).
+func (g *SupplyGate) hostedKeys() []supply.Key {
+	var keys []supply.Key
+	g.resources.Range(func(k, _ any) bool {
+		key, ok := k.(supply.Key)
+		if !ok {
+			return true
+		}
+		keys = append(keys, key)
+		return true
+	})
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].Namespace != keys[j].Namespace {
+			return keys[i].Namespace < keys[j].Namespace
+		}
+		return keys[i].Name < keys[j].Name
+	})
+	return keys
 }
