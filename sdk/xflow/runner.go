@@ -29,7 +29,9 @@ import (
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/node/resource"
 	"github.com/xbcio/xflow/node/supply"
+	crontrigger "github.com/xbcio/xflow/node/trigger/cron"
 	kafkatrigger "github.com/xbcio/xflow/node/trigger/kafka"
+	timertrigger "github.com/xbcio/xflow/node/trigger/timer"
 	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/control"
@@ -1064,7 +1066,7 @@ func installProcessObservers(o *runnerOptions) (release func()) {
 	// Each successful setter adds its inverse immediately. If a later setter
 	// panics because that slot already belongs to another live runner, unwind
 	// only the slots installed by this attempt and re-panic unchanged.
-	releases := make([]func(), 0, 4)
+	releases := make([]func(), 0, 7)
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			releaseProcessObservers(releases)
@@ -1085,6 +1087,18 @@ func installProcessObservers(o *runnerOptions) (release func()) {
 	// committed, so consumer-group lag stays at zero.
 	kafkatrigger.SetObserver(metrics.NewTriggerMetrics(o.metrics))
 	releases = append(releases, func() { kafkatrigger.SetObserver(nil) })
+	// The same observer covers the firings cron and timer drop: a refused or
+	// unadmitted firing produces no execution, so without the counter a
+	// schedule throttled by its own workflow is indistinguishable from one that
+	// never fired. Installed here rather than in the trigger packages because
+	// the counter lives above them (observability imports the trigger packages,
+	// so they cannot import it) — and for the same reason it is this observer,
+	// not the trigger, that names the engine's concurrency limit out of the
+	// emit failures they report unclassified.
+	crontrigger.SetObserver(metrics.NewTriggerMetrics(o.metrics))
+	releases = append(releases, func() { crontrigger.SetObserver(nil) })
+	timertrigger.SetObserver(metrics.NewTriggerMetrics(o.metrics))
+	releases = append(releases, func() { timertrigger.SetObserver(nil) })
 	return func() { releaseProcessObservers(releases) }
 }
 

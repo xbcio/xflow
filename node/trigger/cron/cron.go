@@ -249,11 +249,13 @@ func (n *Node) emitScheduledFire(ctx context.Context, in *types.TriggerActivateI
 				// workflow refused: the instant is behind the trigger and the next
 				// one is a fresh attempt, so the watermark below moves past it. The
 				// log is the only trace — the workflow's own history shows a gap,
-				// not a reason.
+				// not a reason — and the counter is the same fact in a series an
+				// operator can alert on.
 				slog.Warn("cron trigger skipped a firing; the execution it started last has not finished",
 					"workflow_id", in.WorkflowID,
 					"node", in.NodeName,
 					"event", event.ID)
+				fireDrops.Observe(ctx, types.TriggerFireDroppedOverlap, nil)
 			} else if id, err := in.Emit(ctx, event); err != nil {
 				// A firing that was refused is DROPPED, and that is the whole
 				// handling: a schedule is a stream of moments, so the next firing
@@ -273,6 +275,12 @@ func (n *Node) emitScheduledFire(ctx context.Context, in *types.TriggerActivateI
 					"node", in.NodeName,
 					"event", event.ID,
 					"err", err)
+				// The error goes with the report rather than being classified here:
+				// whether it was the workflow's own concurrency limit is a question
+				// only package engine can answer, and node/ may not import engine
+				// (engine's own tests import node, which the import back would turn
+				// into a cycle). The observer narrows it.
+				fireDrops.Observe(ctx, types.TriggerFireDroppedEmitError, err)
 			} else {
 				// The id is recorded for the overlap policy's next decision. It is
 				// recorded from the admission rather than from the event, because
@@ -366,12 +374,14 @@ func (n *Node) admitScheduledFire(ctx context.Context, in *types.TriggerActivate
 			"workflow_id", in.WorkflowID,
 			"node", in.NodeName,
 			"fire_key", req.AdmissionKey)
+		fireDrops.Observe(ctx, types.TriggerFireDroppedRefused, nil)
 	case seedadmit.Dropped:
 		slog.Warn("cron trigger firing was not admitted; the tick is dropped",
 			"workflow_id", in.WorkflowID,
 			"node", in.NodeName,
 			"fire_key", req.AdmissionKey,
 			"err", err)
+		fireDrops.Observe(ctx, types.TriggerFireDroppedTransport, err)
 	}
 	// The watermark moves for all three outcomes by design: an admitted firing is
 	// behind us, and so is one the workflow refused or the transport lost — the

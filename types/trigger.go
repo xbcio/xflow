@@ -150,6 +150,59 @@ type TriggerState interface {
 	Delete(ctx context.Context, key string) error
 }
 
+// TriggerFireObserver counts a firing a trigger decided not to admit. A trigger
+// detects the drop and knows why; what it cannot do is report it, because the
+// only place a counter can live is observability, which depends on the trigger
+// packages and therefore cannot be depended on by them. The trigger packages
+// therefore hold an observer installed by the process that builds the runtime
+// (sdk/xflow, next to the kafka trigger's observer), and call it wherever a
+// firing is dropped.
+//
+// reason is one of the TriggerFireDropped* constants below. err is the failure
+// the drop came from, or nil when the trigger itself decided (the overlap
+// policy). It is passed for classification, not for display: an implementation
+// that can name the engine's sentinels narrows what the trigger could not, and
+// one that cannot must report reason unchanged. err's TEXT is never a label —
+// it is unbounded, and it belongs in the trigger's own log line.
+//
+// Neither the workflow nor the node is passed: a metric label set must stay
+// bounded, and both are definition data.
+type TriggerFireObserver interface {
+	OnTriggerFireDropped(ctx context.Context, reason string, err error)
+}
+
+// Why a trigger dropped a firing. These are the whole vocabulary: a series
+// partitioned by reason is only readable if each reason means one thing.
+const (
+	// TriggerFireDroppedRefused is a firing the workflow's OWN admission
+	// declined, on either hosting path: the control plane answered
+	// EntrySeedResponse.Refused, or the embedded engine returned its concurrency
+	// limit (which the observer narrows out of emit_error — see below). Nothing
+	// was persisted, so the firing is behind the trigger and the next one is a
+	// fresh attempt. The nearest thing to a schedule being throttled by its own
+	// workflow — expected under load, and the fix is capacity or a queue mode.
+	//
+	// It is one reason rather than two because it is one condition: an operator
+	// reading a series per deployment topology would see the same throttle
+	// spelled differently depending on where the trigger ran.
+	TriggerFireDroppedRefused = "refused"
+	// TriggerFireDroppedOverlap is a firing the trigger's overlap policy dropped
+	// because the execution it started last had not finished.
+	TriggerFireDroppedOverlap = "overlap"
+	// TriggerFireDroppedTransport is a firing whose admission failed after the
+	// bounded retries — the control plane was unreachable, or answered something
+	// the caller could not use.
+	TriggerFireDroppedTransport = "transport"
+	// TriggerFireDroppedEmitError is a firing the embedded engine would not take,
+	// reported with the error it returned. The trigger cannot tell WHICH failure
+	// it was — the engine's sentinels are not importable from node/, which the
+	// engine's own tests depend on — so the observer narrows the concurrency
+	// limit out of this reason (see TriggerFireObserver). What is left here is
+	// the engine rejecting the submission for anything else: an unknown workflow,
+	// a stopped engine.
+	TriggerFireDroppedEmitError = "emit_error"
+)
+
 // ExecutionStatusReader is an optional capability of TriggerRuntime that reads
 // back the lifecycle status of an execution the runtime admitted. A trigger that
 // must not start a second run while the previous one is still going (the cron

@@ -86,6 +86,10 @@ func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (ty
 							"node", in.NodeName,
 							"event", event.ID,
 							"err", err)
+						// Reported as emit_error with the error attached, like the cron
+						// trigger's: node/ may not import package engine, so which
+						// engine sentinel this is gets decided by the observer.
+						fireDrops.Observe(runCtx, types.TriggerFireDroppedEmitError, err)
 					}
 				}
 			case <-runCtx.Done():
@@ -137,16 +141,27 @@ func (n *Node) activateEntrySeed(ctx context.Context, in *types.TriggerActivateI
 				admitCtx, admitCancel := context.WithTimeout(runCtx, interval)
 				result, err := seedadmit.Admit(admitCtx, rt, req, admitRetry)
 				admitCancel()
-				if result == seedadmit.Dropped {
+				switch result {
+				case seedadmit.Refused:
+					// A refusal is the workflow's own concurrency policy declining
+					// the tick — a decision, not a fault. Logged and counted for the
+					// same reason the cron trigger logs and counts its own: nothing
+					// durable records that the tick was ever offered, so without them
+					// a throttled schedule is indistinguishable from an idle one.
+					slog.Warn("timer trigger firing was refused; the tick is dropped",
+						"workflow_id", in.WorkflowID,
+						"node", in.NodeName,
+						"fire_key", req.AdmissionKey)
+					fireDrops.Observe(runCtx, types.TriggerFireDroppedRefused, nil)
+				case seedadmit.Dropped:
 					// The tick is LOST — nothing durable records the attempt, so
-					// this line is the only evidence it ever happened. A refusal
-					// is the separate case below and is not logged here: it is a
-					// decision the workflow's own limit made, not a fault.
+					// this line is the only evidence it ever happened.
 					slog.Warn("timer trigger tick was not admitted; the tick is dropped",
 						"workflow_id", in.WorkflowID,
 						"node", in.NodeName,
 						"fire_key", req.AdmissionKey,
 						"err", err)
+					fireDrops.Observe(runCtx, types.TriggerFireDroppedTransport, err)
 				}
 			case <-runCtx.Done():
 				return
