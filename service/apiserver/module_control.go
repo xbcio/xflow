@@ -1208,7 +1208,7 @@ func executionListFilterFrom(w http.ResponseWriter, r *http.Request) (store.Exec
 		status := types.ExecutionStatus(raw)
 		if !knownExecutionListStatus(status) {
 			writeFail(w, r, http.StatusBadRequest, "execution_status_invalid",
-				"status must be one of pending, running, success, failed, canceling, canceled, timeout")
+				"status must be one of pending, queued, running, success, failed, canceling, canceled, timeout")
 			return store.ExecutionFilter{}, false
 		}
 		filter.Status = status
