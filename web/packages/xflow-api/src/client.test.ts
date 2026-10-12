@@ -623,6 +623,25 @@ describe("executionDetailToRuntimeSnapshot", () => {
     expect(executionDetailToRuntimeSnapshot(detail).nodes).toEqual({ fetch: { status: "success" } });
   });
 
+  it("accepts a queued execution and projects it as not yet started", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () =>
+        success({
+          execution_id: "exec-queued",
+          status: "queued",
+          nodes: [{ name: "ingest", status: "pending" }]
+        })
+    });
+
+    const detail = await client.getExecution("exec-queued");
+
+    // `queued` is in the OpenAPI ExecutionStatus enum and is what a queue-mode
+    // submission reports until a concurrency slot frees.
+    expect(detail.status).toBe("queued");
+    expect(executionDetailToRuntimeSnapshot(detail).status).toBe("pending");
+  });
+
   it("accepts an expired node and keeps it in the runtime projection", async () => {
     const client = createXFlowApiClient({
       baseUrl: "/v1",

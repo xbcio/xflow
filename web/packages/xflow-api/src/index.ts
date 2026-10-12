@@ -60,6 +60,13 @@ export interface WorkflowListPage {
 /** The status values returned by execution-detail and wait endpoints. */
 export type ExecutionStatus =
   | "pending"
+  /**
+   * A queue-mode submission waiting for a workflow concurrency slot: persisted
+   * in full, but nothing of it is deliverable until a slot frees. Deliberately
+   * not terminal — a queued execution can still be waited on and canceled
+   * (`types.ExecutionStatusQueued`).
+   */
+  | "queued"
   | "running"
   | "success"
   | "failed"
@@ -262,6 +269,7 @@ const INVALID_RESPONSE_MESSAGE = "invalid API response";
 
 const executionStatuses = new Set<string>([
   "pending",
+  "queued",
   "running",
   "success",
   "failed",
@@ -774,12 +782,13 @@ function createListWorkflows(
 
 /**
  * Converts an execution-detail response into the runtime projection consumed by
- * `@xflow/core` renderers. Two transitional statuses are collapsed:
+ * `@xflow/core` renderers. Three transitional statuses are collapsed:
  * `canceling` (execution) and `committing` (node) are represented as `running`
- * until their terminal state is observed. Every other status is carried
- * through unchanged, `expired` included: reporting it as `pending` would
- * assert that a node whose records are gone never ran, which is the one thing
- * the status exists to deny (types/execution.go).
+ * until their terminal state is observed, and `queued` (execution) as
+ * `pending`, since a parked submission has run nothing yet. Every other status
+ * is carried through unchanged, `expired` included: reporting it as `pending`
+ * would assert that a node whose records are gone never ran, which is the one
+ * thing the status exists to deny (types/execution.go).
  */
 export function executionDetailToRuntimeSnapshot(detail: ExecutionDetail): RuntimeSnapshot {
   const snapshot: RuntimeSnapshot = {
@@ -809,6 +818,12 @@ export function executionDetailToRuntimeSnapshot(detail: ExecutionDetail): Runti
 function executionStatusToRuntimeStatus(status: ExecutionStatus): RuntimeWorkflowStatus {
   switch (status) {
     case "pending":
+      return "pending";
+    case "queued":
+      // Accepted but parked behind the workflow's concurrency limit: nothing
+      // has run, so the runtime vocabulary's "not started yet" value is the
+      // honest projection. It stays a distinct server-side status because the
+      // queue is what a caller waits on or cancels.
       return "pending";
     case "running":
     case "canceling":
