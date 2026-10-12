@@ -428,7 +428,11 @@ paths:
               $ref: "#/components/schemas/ExecuteWorkflowRequest"
       responses:
         "200":
-          description: Execution started.
+          description: |
+            The submission was accepted. `data.status` says where it landed:
+            `running` for an execution that started, `queued` for one waiting
+            for a workflow concurrency slot, in which case
+            `data.queue_position` carries its 1-based place in line.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
@@ -556,7 +560,11 @@ paths:
               $ref: "#/components/schemas/ExecuteRegisteredRequest"
       responses:
         "200":
-          description: Execution started.
+          description: |
+            The submission was accepted. `data.status` says where it landed:
+            `running` for an execution that started, `queued` for one waiting
+            for a workflow concurrency slot, in which case
+            `data.queue_position` carries its 1-based place in line.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
@@ -2224,6 +2232,21 @@ components:
       properties:
         execution_id:
           type: string
+        status:
+          # Where the submission landed: `running` when the execution started,
+          # `queued` when it is waiting for a workflow concurrency slot
+          # (settings.concurrency with mode: queue) and no work has started. It
+          # is the execution's status read back after the submission, so a short
+          # execution that already finished reports its terminal status instead.
+          $ref: "#/components/schemas/ExecutionStatus"
+        queue_position:
+          type: integer
+          minimum: 1
+          description: |
+            Place in line, 1-based, present only while `status` is `queued`. `1`
+            is the head — the submission the next release promotes. Absent for
+            every other status: a running execution is not waiting for anything,
+            and `0` would read as a position a client could display.
         param_issues:
           type: array
           items:
