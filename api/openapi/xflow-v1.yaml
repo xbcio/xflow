@@ -758,7 +758,7 @@ paths:
                   value:
                     success: false
                     code: execution_status_invalid
-                    message: status must be one of pending, running, success, failed, canceling, canceled, timeout
+                    message: status must be one of pending, queued, running, success, failed, canceling, canceled, timeout
                     trace_id: 0123456789abcdef0123456789abcdef
                 unparsableBound:
                   summary: A created_at bound is not an RFC3339 date-time.
@@ -2317,6 +2317,16 @@ components:
           $ref: "#/components/schemas/ExecutionStatus"
         error:
           type: string
+        queue_position:
+          type: integer
+          description: |
+            Where a `queued` execution stands in its workflow's concurrency
+            queue: 1 is the head, the execution the next slot release promotes.
+            Absent (and 0 when explicitly read) for every execution that is not
+            queued — including all executions of workflows that never queue —
+            and for stores that cannot report a position. It is a snapshot of a
+            line that moves, so it can be stale by the time it is read; it is
+            never a promise of when the execution will start.
         nodes:
           type: array
           items:
@@ -2349,7 +2359,7 @@ components:
 
     ExecutionStatus:
       type: string
-      enum: [pending, running, success, failed, canceling, canceled, timeout]
+      enum: [pending, queued, running, success, failed, canceling, canceled, timeout]
 
     ExecutionListResponse:
       type: object
