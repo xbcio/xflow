@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/registry"
 
 	"github.com/xbcio/xflow/node/internal/utils/conv"
+	"github.com/xbcio/xflow/node/trigger/internal/seedadmit"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -57,6 +59,9 @@ func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (ty
 	if err != nil {
 		return nil, err
 	}
+	if seedadmit.Enabled(in) {
+		return n.activateEntrySeed(ctx, in, interval)
+	}
 	runCtx, cancel := context.WithCancel(ctx)
 	ticker := time.NewTicker(interval)
 	go func() {
@@ -94,11 +99,71 @@ func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (ty
 	}), nil
 }
 
-func newTimerTriggerEvent(workflowID types.WorkflowID, nodeName string, interval time.Duration, tick time.Time) *types.TriggerEvent {
-	scheduled := tick.UTC()
-	if interval > 0 {
-		scheduled = scheduled.Truncate(interval)
+// admitRetry is the retry policy one tick's admission uses. It is a variable so
+// a test can shrink the window: the production cadence is 200ms per retry,
+// which no test should have to wait out.
+var admitRetry = seedadmit.DefaultRetry
+
+// activateEntrySeed hosts the timer on a runner that admits through the
+// control plane's entry-seed endpoint instead of emitting into an embedded
+// engine. Every replica runs the same ticker and submits the same fire key, and
+// the server's admission-key deduplication is what turns that into one
+// execution per tick — so there is no leader election and no runner-side lock
+// (spec 2026-10-12 §4). The cost is N admissions per tick, which the default
+// single replica does not pay at all.
+func (n *Node) activateEntrySeed(ctx context.Context, in *types.TriggerActivateInput, interval time.Duration) (types.TriggerSubscription, error) {
+	rt, ok := in.Runtime.(types.EntrySeedRuntime)
+	if !ok {
+		// seedadmit.Enabled proved the capability a moment ago; a false here
+		// means the runtime changed between the two checks, which no
+		// implementation does. Fail closed rather than fall back onto Emit,
+		// which this runtime cannot serve anyway.
+		return nil, fmt.Errorf("timer trigger: entry-seed activation requires an entry-seed runtime")
 	}
+	runCtx, cancel := context.WithCancel(ctx)
+	ticker := time.NewTicker(interval)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case t := <-ticker.C:
+				event := newTimerTriggerEvent(in.WorkflowID, in.NodeName, interval, t)
+				scheduled := scheduledTick(interval, t)
+				req := seedadmit.NewRequest(in, seedadmit.KindTimer, strconv.FormatInt(scheduled.Unix(), 10), event)
+				// The tick's own window bounds the admission: a retry that
+				// outlives the next tick would make two admissions of two
+				// different ticks contend for the same retry budget, and the
+				// later one is the one an operator would rather have on time.
+				admitCtx, admitCancel := context.WithTimeout(runCtx, interval)
+				result, err := seedadmit.Admit(admitCtx, rt, req, admitRetry)
+				admitCancel()
+				if result == seedadmit.Dropped {
+					// The tick is LOST — nothing durable records the attempt, so
+					// this line is the only evidence it ever happened. A refusal
+					// is the separate case below and is not logged here: it is a
+					// decision the workflow's own limit made, not a fault.
+					slog.Warn("timer trigger tick was not admitted; the tick is dropped",
+						"workflow_id", in.WorkflowID,
+						"node", in.NodeName,
+						"fire_key", req.AdmissionKey,
+						"err", err)
+				}
+			case <-runCtx.Done():
+				return
+			}
+		}
+	}()
+	return types.CloseFunc(func(context.Context) error {
+		cancel()
+		return nil
+	}), nil
+}
+
+// newTimerTriggerEvent builds the event for one firing. It is a function rather
+// than an inline closure body so the tick truncation below can be asserted
+// without racing the clock.
+func newTimerTriggerEvent(workflowID types.WorkflowID, nodeName string, interval time.Duration, tick time.Time) *types.TriggerEvent {
+	scheduled := scheduledTick(interval, tick)
 	return &types.TriggerEvent{
 		ID:     fmt.Sprintf("%s/%s/%d", workflowID, nodeName, scheduled.UnixNano()),
 		Kind:   "timer",
@@ -106,6 +171,23 @@ func newTimerTriggerEvent(workflowID types.WorkflowID, nodeName string, interval
 		Time:   tick,
 		Data:   map[string]any{"scheduled_time": scheduled.Format(time.RFC3339Nano)},
 	}
+}
+
+// scheduledTick is the tick one delivered firing belongs to: the ticker's
+// delivery time truncated to the interval, in UTC.
+//
+// Both the event ID and the entry-seed fire key are derived from it, and they
+// must agree: the ID identifies the event to the embedded engine's deduper, the
+// fire key identifies it to the control plane's admission. The truncation is
+// also what makes two replicas that fire the same tick derive the same
+// identity — their ticker deliveries differ by microseconds, and without it
+// each would produce a distinct sub-second ID and every tick would run twice.
+func scheduledTick(interval time.Duration, tick time.Time) time.Time {
+	scheduled := tick.UTC()
+	if interval > 0 {
+		scheduled = scheduled.Truncate(interval)
+	}
+	return scheduled
 }
 
 func init() { registry.RegisterTrigger(&Node{}) }

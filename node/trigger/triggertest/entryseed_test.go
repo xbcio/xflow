@@ -82,6 +82,11 @@ func TestFakeEntrySeedRuntimeFailsClosedOnLegacyPath(t *testing.T) {
 	if _, _, err := rt.TryLock(context.Background(), "k", time.Minute); err == nil {
 		t.Fatal("TryLock succeeded, want failure on the legacy path")
 	}
+	// The calls are counted even though they fail, so a trigger test can assert
+	// "the trigger did not fall back" rather than only "the fallback errored".
+	if emit, dedup, tryLock := rt.LegacyCalls(); emit != 1 || dedup != 1 || tryLock != 1 {
+		t.Fatalf("LegacyCalls() = (%d, %d, %d), want (1, 1, 1)", emit, dedup, tryLock)
+	}
 }
 
 // TestFakeEntrySeedRuntimeStateRoundTrips asserts the state seam exists and is

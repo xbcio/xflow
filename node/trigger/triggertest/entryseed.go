@@ -51,6 +51,10 @@ type FakeEntrySeedRuntime struct {
 	state    map[string][]byte
 	nextID   int
 
+	legacyEmits    int
+	legacyDedups   int
+	legacyTryLocks int
+
 	respondMu sync.Mutex
 	respond   func(req types.EntrySeedRequest, attempt int) (types.EntrySeedResponse, error)
 
@@ -182,18 +186,42 @@ func (r *FakeEntrySeedRuntime) WaitForSeedCount(want int, timeout time.Duration)
 
 // Emit is not supported: this fake models the entry-seed runtime, whose
 // production counterpart fails closed on the legacy path.
+//
+// The call is COUNTED even though it fails. A test asserting that a trigger
+// took the seed path is asserting that it did not fall back, and an error
+// return alone does not distinguish "never tried" from "tried and gave up".
 func (r *FakeEntrySeedRuntime) Emit(context.Context, types.WorkflowID, string, *types.TriggerEvent) (types.ExecutionID, error) {
+	r.mu.Lock()
+	r.legacyEmits++
+	r.mu.Unlock()
 	return "", errLegacyPathUnsupported
 }
 
 // Dedup is not supported; admission deduplication is server-side on this path.
+// Counted for the same reason Emit is.
 func (r *FakeEntrySeedRuntime) Dedup(context.Context, string, time.Duration) (bool, error) {
+	r.mu.Lock()
+	r.legacyDedups++
+	r.mu.Unlock()
 	return false, errLegacyPathUnsupported
 }
 
-// TryLock is not supported: the seed path needs no runner-side lock.
+// TryLock is not supported: the seed path needs no runner-side lock. Counted
+// for the same reason Emit is.
 func (r *FakeEntrySeedRuntime) TryLock(context.Context, string, time.Duration) (types.TriggerLock, bool, error) {
+	r.mu.Lock()
+	r.legacyTryLocks++
+	r.mu.Unlock()
 	return nil, false, errLegacyPathUnsupported
+}
+
+// LegacyCalls reports how many times the fail-closed legacy methods were
+// called: emit, dedup and try-lock. All three must stay zero for a trigger
+// whose activation routes through the entry-seed path.
+func (r *FakeEntrySeedRuntime) LegacyCalls() (emit, dedup, tryLock int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.legacyEmits, r.legacyDedups, r.legacyTryLocks
 }
 
 // State returns the fake's in-memory TriggerState for scope. Unlike the
