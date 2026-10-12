@@ -64,6 +64,21 @@ const (
 	// runner-versus-engine one, which is the exact conflation this whole label
 	// exists to undo.
 	admissionReasonUnknownOutcome = "unknown_outcome"
+
+	// admissionReasonConcurrencyLimit: the workflow's concurrency policy refused
+	// the batch — it is at its limit in REJECT mode. Nothing was persisted, the
+	// entry-unit result is still ours, and the offset is withheld so Kafka
+	// redelivers (decision 5). Not an error reason: this is the workflow doing
+	// what its definition asked, and its rate is how an operator sees the
+	// throttle the author configured.
+	admissionReasonConcurrencyLimit = "concurrency_limit"
+
+	// admissionReasonConcurrencyQueueFull: as above, but the refusal was the
+	// queue-mode backlog being at max_queued rather than a slot being taken. The
+	// two waits are different — a slot to free versus a backlog to drain — and a
+	// runner that cannot tell them apart cannot say whether raising the limit or
+	// draining the queue is what unblocks it.
+	admissionReasonConcurrencyQueueFull = "queue_full"
 )
 
 // admissionReasonForOutcome maps a group outcome to its reason label, and is
@@ -173,6 +188,47 @@ func buildBatchExits(nodeName string, messages []Message) []types.BoundaryExit {
 	}}
 }
 
+// observeBatchAdmission classifies one batch admission response: it reports the
+// outcome and answers whether the caller may commit the batch's offsets.
+//
+// All three admission sites share it because the classification decides whether
+// a Kafka offset advances, and three copies of that decision are three places a
+// new response state can be handled differently. The per-message site
+// (seedEntryBatch) uses only its return value — see there.
+//
+// A refusal is neither handled nor an error. Nothing was persisted, the
+// entry-unit result is still ours, and the workflow is at capacity: the offset
+// stays uncommitted and the batch is retried (decision 5). It is reported under
+// its own state with the reason narrowed to which wait it is, so a throttled
+// deployment is visible as a throttle rather than as an outage.
+func observeBatchAdmission(ctx context.Context, topic string, resp types.EntrySeedResponse, partition int, firstOffset, lastOffset int64, count int) bool {
+	switch {
+	case resp.Refused && resp.QueueFull:
+		obs().OnBatchAdmission(ctx, topic, "refused", admissionReasonConcurrencyQueueFull)
+		logBatchAdmission(topic, partition, firstOffset, lastOffset, count, "refused",
+			"workflow concurrency queue is full")
+	case resp.Refused:
+		obs().OnBatchAdmission(ctx, topic, "refused", admissionReasonConcurrencyLimit)
+		logBatchAdmission(topic, partition, firstOffset, lastOffset, count, "refused",
+			"workflow is at its concurrency limit")
+	case resp.Duplicate:
+		obs().OnBatchAdmission(ctx, topic, "duplicate", admissionReasonNone)
+	case resp.Conflict:
+		obs().OnBatchAdmission(ctx, topic, "conflict", admissionReasonNone)
+	case resp.Accepted:
+		obs().OnBatchAdmission(ctx, topic, "accepted", admissionReasonNone)
+	default:
+		// None of the flags set: the control plane and this runner disagree
+		// about the protocol. The batch is not committed (the return below),
+		// and previously that happened without a single observation — the
+		// counter recorded nothing at all for this path.
+		obs().OnBatchAdmission(ctx, topic, "error", admissionReasonUnknownState)
+		logBatchAdmission(topic, partition, firstOffset, lastOffset, count, "error",
+			"admission response set none of accepted/duplicate/conflict/refused")
+	}
+	return resp.Accepted || resp.Duplicate || resp.Conflict
+}
+
 // seedEntryBatchMessages admits a whole batch through the entry-seed path.
 // It returns true when the admission was HANDLED and the caller may commit the
 // batch's offsets.
@@ -215,24 +271,8 @@ func seedEntryBatchMessages(ctx context.Context, in *types.TriggerActivateInput,
 			messages[len(messages)-1].Offset, len(messages), "error", err.Error())
 		return false
 	}
-	switch {
-	case resp.Duplicate:
-		obs().OnBatchAdmission(ctx, topic, "duplicate", admissionReasonNone)
-	case resp.Conflict:
-		obs().OnBatchAdmission(ctx, topic, "conflict", admissionReasonNone)
-	case resp.Accepted:
-		obs().OnBatchAdmission(ctx, topic, "accepted", admissionReasonNone)
-	default:
-		// None of the three set: the control plane and this runner disagree
-		// about the protocol. The batch is not committed (the return below),
-		// and previously that happened without a single observation — the
-		// counter recorded nothing at all for this path.
-		obs().OnBatchAdmission(ctx, topic, "error", admissionReasonUnknownState)
-		logBatchAdmission(topic, messages[0].Partition, messages[0].Offset,
-			messages[len(messages)-1].Offset, len(messages), "error",
-			"admission response set none of accepted/duplicate/conflict")
-	}
-	return resp.Accepted || resp.Duplicate || resp.Conflict
+	return observeBatchAdmission(ctx, topic, resp, messages[0].Partition,
+		messages[0].Offset, messages[len(messages)-1].Offset, len(messages))
 }
 
 // seedEntryBatchViaGroupExec is the trigger-group counterpart of
@@ -352,23 +392,11 @@ func seedEntryBatchViaGroupExec(ctx context.Context, in *types.TriggerActivateIn
 			len(messages), "error", "SeedExecutionFromEntry: "+err.Error())
 		return false
 	}
-	switch {
-	case resp.Duplicate:
-		obs().OnBatchAdmission(ctx, topic, "duplicate", admissionReasonNone)
-	case resp.Conflict:
-		obs().OnBatchAdmission(ctx, topic, "conflict", admissionReasonNone)
-	case resp.Accepted:
-		obs().OnBatchAdmission(ctx, topic, "accepted", admissionReasonNone)
-	default:
-		// See the identical branch in seedEntryBatchMessages. On this path the
-		// waste is larger: the group already RAN, so a protocol disagreement
-		// here throws away completed work and redelivers the whole batch.
-		obs().OnBatchAdmission(ctx, topic, "error", admissionReasonUnknownState)
-		logBatchAdmission(topic, first.Partition, first.Offset, last.Offset,
-			len(messages), "error",
-			"admission response set none of accepted/duplicate/conflict")
-	}
-	return resp.Accepted || resp.Duplicate || resp.Conflict
+	// This path observes through the same classifier as the raw-batch one, so a
+	// new response state cannot be handled in one and silently mishandled in the
+	// other. On this path a withheld commit costs more: the group already RAN, so
+	// a refusal here throws away completed work and redelivers the whole batch.
+	return observeBatchAdmission(ctx, topic, resp, first.Partition, first.Offset, last.Offset, len(messages))
 }
 
 // ---------------------------------------------------------------------------
@@ -433,18 +461,27 @@ func seedEntryBatch(ctx context.Context, in *types.TriggerActivateInput, consume
 		return false
 	}
 
-	// Accepted, duplicate-accepted, or conflict: the admission was handled.
-	// Commit the Kafka offset regardless — for conflict, another runner already
-	// admitted a result for this key, so the message is consumed.
-	if resp.Accepted || resp.Duplicate || resp.Conflict {
-		if commitErr := commitMessages(ctx, consumer, msg); commitErr != nil {
-			// Commit failed — the message will be redelivered. On redelivery,
-			// SeedExecutionFromEntry returns duplicate-accepted, which is safe.
-			return false
-		}
-		return true
+	// The commit decision is the shared classifier's, not a local flag check:
+	// every site that can advance an offset must agree on what counts as
+	// handled, or a new response state lands in one and is missed in another.
+	// Conflict counts as handled — another runner already admitted a result for
+	// this key, so the message is consumed — while a refusal does not.
+	//
+	// What a withheld offset buys on THIS path is narrower than on the batch
+	// path: this worker moves on to the next message, so a refused one comes back
+	// only if the consumer restarts from its last committed offset before a later
+	// message commits past it. It is the same shape the legacy emit path already
+	// has (see emitMessage), and the mitigation is the same: the refusal is
+	// counted and logged, so a throttle cannot read as an idle topic. The batch
+	// path, which holds the whole batch and re-flushes it with backoff, is where
+	// a refusal is actually retried.
+	if !observeBatchAdmission(ctx, msg.Topic, resp, msg.Partition, msg.Offset, msg.Offset, 1) {
+		return false
 	}
-
-	// Unknown state — defensive: don't commit.
-	return false
+	if commitErr := commitMessages(ctx, consumer, msg); commitErr != nil {
+		// Commit failed — the message will be redelivered. On redelivery,
+		// SeedExecutionFromEntry returns duplicate-accepted, which is safe.
+		return false
+	}
+	return true
 }
