@@ -28,7 +28,7 @@ func TestLifecycleStateReadyRequiresAllThreeConditions(t *testing.T) {
 		t.Fatal("ready with a wired gate that has never fetched anything")
 	}
 
-	s.OnSupplyFetch(context.Background(), "cfg", "ok")
+	s.OnSupplyFetch(context.Background(), "cfg", "ok", "admission")
 	if ready, why := s.Ready(); !ready {
 		t.Fatalf("not ready after all three conditions held: %s", why)
 	}

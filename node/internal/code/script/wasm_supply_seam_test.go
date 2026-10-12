@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/internal/code/script/wasm"
 	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/types"
@@ -141,10 +142,10 @@ func registerWasmSupplyConsumerForTest(t *testing.T, code string) string {
 	// t.Name() is unique per test and stable within a run; sanitized because a
 	// supply name stands in for a workflow node name.
 	supplyNode := "rules-" + strings.NewReplacer("/", "-", " ", "_").Replace(t.Name())
-	if err := RegisterWasmSupplyConsumer(code, supplyNode); err != nil {
+	if err := RegisterWasmSupplyConsumer(namespace.Default, code, supplyNode); err != nil {
 		t.Fatalf("RegisterWasmSupplyConsumer: %v", err)
 	}
-	t.Cleanup(func() { wasm.UnregisterSupplyConsumer(code, supplyNode, supply.Default) })
+	t.Cleanup(func() { wasm.UnregisterSupplyConsumer(namespace.Default, code, supplyNode, supply.Default) })
 	return supplyNode
 }
 
@@ -169,6 +170,7 @@ func TestScriptNodeRulesComeFromSupplyNotConfig(t *testing.T) {
 	supplyNode := registerWasmSupplyConsumerForTest(t, code)
 
 	if err := supply.Default.Apply(context.Background(), supply.Snapshot{
+		Namespace: namespace.Default,
 		Name:      supplyNode,
 		Content:   []byte(`{"rules":[{"name":"from-supply"}]}`),
 		Hash:      "h1",
@@ -305,6 +307,7 @@ func TestScriptNodeSourceDrivenGuestNeverSeesConfigKey(t *testing.T) {
 	supplyNode := registerWasmSupplyConsumerForTest(t, code)
 
 	if err := supply.Default.Apply(context.Background(), supply.Snapshot{
+		Namespace: namespace.Default,
 		Name:      supplyNode,
 		Content:   []byte(`{"rules":[]}`),
 		Hash:      "h1",

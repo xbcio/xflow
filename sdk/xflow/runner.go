@@ -148,6 +148,15 @@ type RunnerConfig struct {
 	HeartbeatInterval time.Duration
 	PollWait          time.Duration
 
+	// SupplyPollInterval is how often this runner re-reads every supply it
+	// hosts, independently of the control plane's supply hints. Zero uses
+	// runnersvc.DefaultSupplyPollInterval (60s); a non-zero value below
+	// runnersvc.MinSupplyPollInterval (10s) is rejected by NewRunner rather
+	// than silently raised. The poll cannot be switched off: it is the
+	// convergence path for a supply whose hint was never delivered, and
+	// nothing else re-reads a supply that already has content.
+	SupplyPollInterval time.Duration
+
 	// SeedRequestTimeout bounds one entry-seed admission round trip — the POST
 	// to /v1/executions that admits a whole trigger batch's results. Zero (the
 	// default) keeps protocol.DefaultEntrySeedRequestTimeout, 15s.
@@ -362,6 +371,13 @@ func NewRunner(cfg RunnerConfig, opts ...RunnerOption) (*Runner, error) {
 	if strings.TrimSpace(cfg.ServerURL) == "" && cfg.Transport != RunnerTransportInProc {
 		return nil, fmt.Errorf("xflow: RunnerConfig.ServerURL is required: it is the " +
 			"control plane server origin for leases, entry seeding, and artifact fetch")
+	}
+	// A supply poll interval is refused here rather than raised to the floor
+	// later: polling is always on, so an explicitly configured value below the
+	// floor is a mistake the caller should see at construction, not a cadence
+	// it silently does not get. Zero (unset) keeps the service default.
+	if err := runnersvc.ValidateSupplyPollInterval(cfg.SupplyPollInterval); err != nil {
+		return nil, fmt.Errorf("xflow: RunnerConfig.SupplyPollInterval: %w", err)
 	}
 	o := runnerOptionsFrom(opts)
 
@@ -833,6 +849,10 @@ func buildRunnerServiceConfig(cfg RunnerConfig, opts ...RunnerOption) (runnersvc
 		ArtifactCodeResolver: artifactCode,
 		SupportsEncryption:   true,
 		LifecycleObserver:    o.lifecycleObserver,
+		// Passed through verbatim, zero included: the service resolves unset to
+		// its own default, so the default lives in one place rather than being
+		// frozen into every caller's config.
+		SupplyPollInterval: cfg.SupplyPollInterval,
 	}
 	if cfg.HeartbeatInterval > 0 {
 		svcCfg.HeartbeatInterval = cfg.HeartbeatInterval
@@ -1021,12 +1041,12 @@ type supplyGateFanout struct {
 	lifecycle runnersvc.LifecycleObserver
 }
 
-func (f supplyGateFanout) OnSupplyFetch(ctx context.Context, name, result string) {
+func (f supplyGateFanout) OnSupplyFetch(ctx context.Context, name, result, source string) {
 	if f.metrics != nil {
-		f.metrics.OnSupplyFetch(ctx, name, result)
+		f.metrics.OnSupplyFetch(ctx, name, result, source)
 	}
 	if f.lifecycle != nil {
-		f.lifecycle.OnSupplyFetch(ctx, name, result)
+		f.lifecycle.OnSupplyFetch(ctx, name, result, source)
 	}
 }
 

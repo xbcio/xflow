@@ -637,9 +637,9 @@ func (s *APIServer) ControlServer() *control.Server { return s.cp.RunnerServer()
 // both sides are the same string, so no hashing is involved.
 //
 // Two properties a consumer must not design around:
-//   - The inner key is the supply NODE name, not the resource name
-//     (service/control/supply_hints.go:96 keys on req.Node while the hash comes
-//     from req.Resource).
+//   - The inner key is the supply's (namespace, name) identity, not the resource
+//     name: the reports key on the identity the runner applies content under,
+//     while the hash itself comes from the resource the node names.
 //   - Record is whole-replacement, not merge, and leader failover legitimately
 //     clears the whole thing. Display it; never gate publishing on it, or a
 //     routine failover wedges the publish path.

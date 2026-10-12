@@ -976,19 +976,20 @@ func (h *reactorHost) closeReclaimedModules(ctx context.Context, doomed []doomed
 
 // moduleSupplyRef names one supply slot a module is registered as a consumer of:
 // the registry holding it (tests use registries other than supply.Default) and
-// the supply name. It carries no content — see reactorHost.supplyRefs.
+// the supply's identity key (namespace + name). It carries no content — see
+// reactorHost.supplyRefs.
 type moduleSupplyRef struct {
-	reg  *supply.Registry
-	name string
+	reg *supply.Registry
+	key supply.Key
 }
 
-// noteSupplyRef records that moduleKey is a registered consumer of (reg, name).
+// noteSupplyRef records that moduleKey is a registered consumer of (reg, key).
 // Idempotent: the entry is a SET of slots, not a count, so re-registering the
 // same slot (a re-activation, a per-message guard, a legacy binding's retry)
 // leaves one entry. Called on the registration path, so it must not block on a
 // long operation.
 func (h *reactorHost) noteSupplyRef(moduleKey string, r moduleSupplyRef) {
-	if h == nil || moduleKey == "" || r.reg == nil || r.name == "" {
+	if h == nil || moduleKey == "" || r.reg == nil || r.key.Name == "" {
 		return
 	}
 	h.supplyRefsMu.Lock()
@@ -1082,13 +1083,13 @@ func (h *reactorHost) installModuleConfigFromRegistry(ctx context.Context, e *re
 	var cached int
 	var configish []candidate
 	for _, r := range refs {
-		snap, ok := r.reg.Get(r.name)
+		snap, ok := r.reg.Get(r.key)
 		if !ok {
 			continue
 		}
 		cached++
 		if ruleCount(snap.Content) >= 0 {
-			configish = append(configish, candidate{name: r.name, snap: snap})
+			configish = append(configish, candidate{name: r.key.Name, snap: snap})
 		}
 	}
 

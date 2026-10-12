@@ -185,6 +185,33 @@ type HostedActivationsReport struct {
 	Activations []ActivationInventoryItem `json:"activations,omitempty"`
 }
 
+// SupplyObservation is one runner-reported "this is the content I have in
+// effect" entry: a supply's identity — the (namespace, node) pair — and the
+// content hash applied here.
+//
+// The pair is carried per entry rather than derived from the request: one
+// runner hosts activations from every namespace it serves, so a single
+// heartbeat reports supplies belonging to several namespaces at once. A
+// name-only entry could not tell two namespaces' same-named supplies apart, and
+// the last writer would win.
+//
+// Only hashes travel here, never content.
+type SupplyObservation struct {
+	Namespace string `json:"namespace"`
+	Node      string `json:"node"`
+	Hash      string `json:"hash"`
+}
+
+// SupplyHint is one server-side "this supply's current content is this hash"
+// instruction — the same identity pair as SupplyObservation, in the opposite
+// direction. A hash differing from the runner's own tells it to fetch that one
+// supply once; an equal hash costs nothing.
+type SupplyHint struct {
+	Namespace string `json:"namespace"`
+	Node      string `json:"node"`
+	Hash      string `json:"hash"`
+}
+
 type RegisterRunnerResponse struct {
 	RunnerID  string `json:"runner_id"`
 	SessionID string `json:"session_id"`
@@ -216,12 +243,13 @@ type HeartbeatRequest struct {
 	// authority: the directory verifies session and generation atomically.
 	DrainObservation *RunnerDrainObservation `json:"drain_observation,omitempty"`
 	// SupplyObserved reports the content hash currently in effect for each supply
-	// this runner hosts a consumer for. Aggregated server-side it answers "are all
+	// this runner hosts a consumer for, keyed by the (namespace, node) pair that
+	// is a supply's identity. Aggregated server-side it answers "are all
 	// runners on revision N yet" — the direct analogue of Kubernetes'
 	// observedGeneration, which the platform otherwise has no equivalent of.
 	//
 	// It carries hashes, never content.
-	SupplyObserved map[string]string `json:"supply_observed,omitempty"`
+	SupplyObserved []SupplyObservation `json:"supply_observed,omitempty"`
 	// SupplyKeyID is the ID of the supply encryption key this runner currently
 	// holds. The server compares it against its own and returns the key in
 	// SupplyKeyRotation only when they differ, which makes rotation delivery
@@ -248,16 +276,16 @@ type HeartbeatResponse struct {
 	// Control lets a runner promptly converge its local poll gate after an
 	// operator changes desired state.
 	Control *RunnerControlDirective `json:"control,omitempty"`
-	// SupplyHints carries "supply node name → current content hash" for the
-	// supplies this runner hosts a consumer for. A differing hash tells the runner
-	// to fetch once; an equal hash costs nothing.
+	// SupplyHints carries the current content hash for the supplies this runner
+	// hosts a consumer for, each identified by its (namespace, node) pair. A
+	// differing hash tells the runner to fetch once; an equal hash costs nothing.
 	//
 	// This is a latency optimization over the activation-time fetch: hints are
-	// lost to partitions, restarts and leader changes, and there is no TTL poll
-	// loop behind them today, so a lost hint leaves an already-hosted consumer
-	// on its last-good value until a later hint arrives. Only hashes travel
-	// here, so the heartbeat body does not grow with content size.
-	SupplyHints map[string]string `json:"supply_hints,omitempty"`
+	// lost to partitions, restarts and leader changes, so a lost hint leaves an
+	// already-hosted consumer on its last-good value until the next hint arrives
+	// or the runner's TTL poll re-reads it. Only hashes travel here, so the
+	// heartbeat body does not grow with content size.
+	SupplyHints []SupplyHint `json:"supply_hints,omitempty"`
 	// SupplyKeyRotation carries a base64-encoded new AES-256 key when the server
 	// rotates the supply encryption key. The runner installs it as current and
 	// demotes the old current to previous. Absent when the runner's reported

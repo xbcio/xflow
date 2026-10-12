@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/service/protocol"
@@ -31,19 +32,22 @@ type countingObserver struct {
 	counts map[string]int
 }
 
-func (o *countingObserver) OnConsumerCount(_ context.Context, name string, n int) {
+// OnConsumerCount keys by namespace AND name: the same supply node name in two
+// namespaces is two supplies, and a name-only key would report one series for
+// both.
+func (o *countingObserver) OnConsumerCount(_ context.Context, ns namespace.Namespace, name string, n int) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.counts == nil {
 		o.counts = map[string]int{}
 	}
-	o.counts[name] = n
+	o.counts[string(ns)+"/"+name] = n
 }
 
-func (o *countingObserver) get(name string) int {
+func (o *countingObserver) get(ns namespace.Namespace, name string) int {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	return o.counts[name]
+	return o.counts[string(ns)+"/"+name]
 }
 
 // observeDefaultRegistry installs obs on supply.Default for the duration of the
@@ -206,7 +210,7 @@ func cleanupBindings(t *testing.T, bindings ...engine.SupplyConsumerBinding) {
 	t.Helper()
 	t.Cleanup(func() {
 		for _, b := range bindings {
-			node.UnregisterWasmSupplyConsumerByDigest(b.ModuleDigest, b.SupplyNode, wiringTestActivationOwner)
+			node.UnregisterWasmSupplyConsumerByDigest(namespace.Default, b.ModuleDigest, b.SupplyNode, wiringTestActivationOwner)
 		}
 	})
 }
@@ -313,7 +317,7 @@ func TestActivationRegistersWasmSupplyConsumer(t *testing.T) {
 		t.Fatal("the trigger handler was never activated; this test would be " +
 			"asserting the consumer count for the wrong reason")
 	}
-	if got := obs.get(f.supplyName); got != 1 {
+	if got := obs.get(namespace.Default, f.supplyName); got != 1 {
 		t.Fatalf("consumers for %q = %d, want 1 -- without a registration "+
 			"OnSupplyChanged can never fire and the module evaluates against no rules",
 			f.supplyName, got)
@@ -374,7 +378,7 @@ func TestGenerationUpgradeKeepsIdenticalBindingRegistered(t *testing.T) {
 		t.Fatalf("second activate: %v", err)
 	}
 
-	if got := obs.get(f.supplyName); got != 1 {
+	if got := obs.get(namespace.Default, f.supplyName); got != 1 {
 		t.Fatalf("consumers for %q = %d after a generation upgrade with identical "+
 			"bindings, want 1 -- the upgrade unregistered the registration it had "+
 			"just made", f.supplyName, got)
@@ -430,10 +434,10 @@ func TestGenerationUpgradeSwapsChangedBinding(t *testing.T) {
 		t.Fatalf("second activate: %v", err)
 	}
 
-	if got := obs.get(oldBinding.SupplyNode); got != 0 {
+	if got := obs.get(namespace.Default, oldBinding.SupplyNode); got != 0 {
 		t.Fatalf("consumers for the dropped supply %q = %d, want 0", oldBinding.SupplyNode, got)
 	}
-	if got := obs.get(newBinding.SupplyNode); got != 1 {
+	if got := obs.get(namespace.Default, newBinding.SupplyNode); got != 1 {
 		t.Fatalf("consumers for the new supply %q = %d, want 1", newBinding.SupplyNode, got)
 	}
 }
@@ -458,7 +462,7 @@ func TestDeactivateUnregistersSupplyConsumers(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("activate: %v", err)
 	}
-	if got := obs.get(f.supplyName); got != 1 {
+	if got := obs.get(namespace.Default, f.supplyName); got != 1 {
 		t.Fatalf("precondition: consumers = %d, want 1", got)
 	}
 
@@ -467,7 +471,7 @@ func TestDeactivateUnregistersSupplyConsumers(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("deactivate: %v", err)
 	}
-	if got := obs.get(f.supplyName); got != 0 {
+	if got := obs.get(namespace.Default, f.supplyName); got != 0 {
 		t.Fatalf("consumers for %q = %d after Deactivate, want 0", f.supplyName, got)
 	}
 	if !fh.sub.closed {
@@ -496,7 +500,7 @@ func TestActivationWithoutSupplyConsumersRegistersNothing(t *testing.T) {
 	if fh.gotInput == nil {
 		t.Fatal("the trigger handler was never activated")
 	}
-	if got := obs.get(supplyName); got != 0 {
+	if got := obs.get(namespace.Default, supplyName); got != 0 {
 		t.Fatalf("consumers for %q = %d, want 0 for a directive carrying no bindings", supplyName, got)
 	}
 }

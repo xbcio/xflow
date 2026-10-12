@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/node/supply"
 )
@@ -48,14 +49,14 @@ func TestSetWasmObserverForwardsPoolSwapNotifications(t *testing.T) {
 	name := randomSupplyName(t)
 	code := "AGFzbQEAAAA=" // minimal (invalid-for-real-use) placeholder; never executed by this test
 
-	if err := node.RegisterWasmSupplyConsumer(code, name); err != nil {
+	if err := node.RegisterWasmSupplyConsumer(namespace.Default, code, name); err != nil {
 		t.Fatalf("RegisterWasmSupplyConsumer: %v", err)
 	}
 	// No public Unregister wrapper exists at this layer; the random per-test
 	// name means the leftover registration cannot collide with any other
 	// test's content.
 	if err := supply.Default.Apply(context.Background(), supply.Snapshot{
-		Name: name, Content: []byte(`{"rules":[]}`), Hash: "h1", Revision: 1,
+		Namespace: namespace.Default, Name: name, Content: []byte(`{"rules":[]}`), Hash: "h1", Revision: 1,
 		FetchedAt: time.Now(),
 	}); err != nil {
 		// The placeholder module cannot actually build a pool, so OnSupplyChanged

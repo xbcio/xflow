@@ -439,11 +439,15 @@ outbox 语义，也不构成 release gate 已满足的证据。Loop 也仍是实
 ### 4.6 ActivationAck 现已同时覆盖 HTTP 与 gRPC
 
 `HeartbeatResponse` 的控制载荷在**两种传输下都已完整**：
-`runnerpb.HeartbeatResponse` 有 `server_time`、`supply_hints`、
-`supply_key_rotation`、`activations_json` 四个字段
-（`service/protocol/runnerpb/runner.proto:78-86`），
-`grpc_conv.go:159-193` 两个方向都往返（activation 与 lease 同样走 JSON bytes，
-避免在 proto 里建模 `map[string]any` params），`control/grpc_server.go:110`
+`runnerpb.HeartbeatResponse` 有 `server_time`、`supply_key_rotation`、
+`activations_json`、`control`、`supply_hints` 五个在用字段，外加一个
+`reserved 2`（原本是 `map<string, string> supply_hints`，无法表达 namespace，
+已换成 `repeated SupplyHint{namespace, node, hash}`；这是**有意的 wire 不兼容**，
+server/runner 必须同版本升级，旧编号保留 `reserved` 让旧 peer 直接报错而不是
+被解析成新结构。`HeartbeatRequest.supply_observed` 同理，旧编号 6 已 `reserved`）
+（`service/protocol/runnerpb/runner.proto`），
+`grpc_conv.go` 两个方向都往返（activation 与 lease 同样走 JSON bytes，
+避免在 proto 里建模 `map[string]any` params），`control/grpc_server.go`
 回填全部字段。**activation 下发与 supply hint 在 gRPC 下不是缺口**——
 早期版本的 proto 确实只有 `server_time`，本节此前的描述已过期。
 

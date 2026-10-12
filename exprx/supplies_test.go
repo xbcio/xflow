@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/types"
 )
@@ -23,7 +24,7 @@ func TestSuppliesExpressionReadsCurrentContent(t *testing.T) {
 	reg := supply.NewRegistry()
 	seedSupply(t, reg, "rules", `{"threshold":7}`, 3)
 
-	env := BuildExprEnv(&types.Input{}, SuppliesEnv(reg))
+	env := BuildExprEnv(&types.Input{}, SuppliesEnv(reg, namespace.Default))
 	out, err := EvalExpr(`$supplies.rules.threshold`, env, false)
 	if err != nil {
 		t.Fatalf("eval: %v", err)
@@ -41,7 +42,7 @@ func TestSuppliesExposesRevisionAndHash(t *testing.T) {
 	const content = `{"a":1}`
 	reg := supply.NewRegistry()
 	seedSupply(t, reg, "rules", content, 42)
-	env := BuildExprEnv(&types.Input{}, SuppliesEnv(reg))
+	env := BuildExprEnv(&types.Input{}, SuppliesEnv(reg, namespace.Default))
 
 	rev, err := EvalExpr(`$supplies.rules["$revision"]`, env, false)
 	if err != nil {
@@ -66,7 +67,7 @@ func TestSuppliesExposesRevisionAndHash(t *testing.T) {
 // A missing supply must evaluate to nil, not panic: require_ready:false lets a
 // node run before content ever arrived.
 func TestSuppliesMissingNameIsNil(t *testing.T) {
-	env := BuildExprEnv(&types.Input{}, SuppliesEnv(supply.NewRegistry()))
+	env := BuildExprEnv(&types.Input{}, SuppliesEnv(supply.NewRegistry(), namespace.Default))
 	out, err := EvalExpr(`$supplies.absent`, env, false)
 	if err != nil {
 		t.Fatalf("eval: %v", err)
@@ -93,7 +94,7 @@ func TestBuildExprEnvAlwaysExposesSupplies(t *testing.T) {
 //
 // TestBuildExprEnvAlwaysExposesSupplies above checks only that the key exists
 // and holds a map, and every other $supplies test injects an isolated registry
-// through SuppliesEnv(reg) into extra -- which the merge loop at the end of
+// through SuppliesEnv(reg, namespace.Default) into extra -- which the merge loop at the end of
 // BuildExprEnv writes over the default with. So replacing
 // supply.Default.Decoded() with an empty map satisfies the whole package while
 // no supply content ever reaches an expression on the paths that pass extra=nil:
@@ -125,7 +126,7 @@ func TestSuppliesNonObjectContent(t *testing.T) {
 	reg := supply.NewRegistry()
 	seedSupply(t, reg, "list", `[1,2,3]`, 1)
 	seedSupply(t, reg, "raw", "not json at all", 1)
-	env := BuildExprEnv(&types.Input{}, SuppliesEnv(reg))
+	env := BuildExprEnv(&types.Input{}, SuppliesEnv(reg, namespace.Default))
 
 	out, err := EvalExpr(`len($supplies.list)`, env, false)
 	if err != nil {
@@ -148,7 +149,7 @@ func TestSuppliesNonObjectContent(t *testing.T) {
 func TestConfigStaysWorkflowConfig(t *testing.T) {
 	reg := supply.NewRegistry()
 	seedSupply(t, reg, "rules", `{"from":"supply"}`, 1)
-	extra := SuppliesEnv(reg)
+	extra := SuppliesEnv(reg, namespace.Default)
 	env := BuildExprEnv(&types.Input{
 		Config: map[string]any{"env": "prod"},
 		Data:   map[string]any{"$config": map[string]any{"from": "upstream"}},
@@ -175,14 +176,53 @@ func TestConfigStaysWorkflowConfig(t *testing.T) {
 func TestDecodedMapIsReplacedNotMutated(t *testing.T) {
 	reg := supply.NewRegistry()
 	seedSupply(t, reg, "rules", `{"v":1}`, 1)
-	first := reg.Decoded()
+	first := reg.Decoded(namespace.Default)
 	seedSupply(t, reg, "rules", `{"v":2}`, 2)
-	second := reg.Decoded()
+	second := reg.Decoded(namespace.Default)
 
 	if firstVal := first["rules"].(map[string]any)["v"]; firstVal != float64(1) {
 		t.Fatalf("previously published map was mutated: v=%#v", firstVal)
 	}
 	if secondVal := second["rules"].(map[string]any)["v"]; secondVal != float64(2) {
 		t.Fatalf("new map missing the update: v=%#v", secondVal)
+	}
+}
+
+// SuppliesEnv is the expression root's window into one namespace: two
+// namespaces may each declare a supply node named "rules", and an expression
+// evaluated for namespace A must never resolve namespace B's content. Passing
+// the namespace through is what makes that true; the root used to be built from
+// a name-keyed registry with no namespace in the lookup at all.
+func TestSuppliesEnvIsScopedToOneNamespace(t *testing.T) {
+	reg := supply.NewRegistry()
+	ctx := context.Background()
+	if err := reg.Apply(ctx, supply.Snapshot{Namespace: "tenant-a", Name: "rules",
+		Content: []byte(`{"threshold":7}`), Hash: "h-a", Revision: 1}); err != nil {
+		t.Fatalf("seed tenant-a: %v", err)
+	}
+	if err := reg.Apply(ctx, supply.Snapshot{Namespace: "tenant-b", Name: "rules",
+		Content: []byte(`{"threshold":99}`), Hash: "h-b", Revision: 1}); err != nil {
+		t.Fatalf("seed tenant-b: %v", err)
+	}
+
+	out, err := EvalExpr(`$supplies.rules.threshold`,
+		BuildExprEnv(&types.Input{}, SuppliesEnv(reg, "tenant-a")), false)
+	if err != nil {
+		t.Fatalf("eval: %v", err)
+	}
+	if got, ok := out.(float64); !ok || got != 7 {
+		t.Fatalf("$supplies.rules.threshold in tenant-a = %#v, want 7: tenant-b's "+
+			"same-named supply answered this namespace's expression", out)
+	}
+
+	// A namespace with no content at all resolves to nil rather than borrowing
+	// another namespace's supply.
+	none, err := EvalExpr(`$supplies.rules`,
+		BuildExprEnv(&types.Input{}, SuppliesEnv(reg, "tenant-c")), false)
+	if err != nil {
+		t.Fatalf("eval tenant-c: %v", err)
+	}
+	if none != nil {
+		t.Fatalf("$supplies.rules in tenant-c = %#v, want nil", none)
 	}
 }

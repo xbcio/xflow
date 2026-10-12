@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/internal/code/script/engine"
 	"github.com/xbcio/xflow/node/supply"
 )
@@ -20,7 +21,7 @@ func newSourceDrivenModuleWithoutContent(t *testing.T) string {
 	t.Helper()
 	code := testReactorCode(t)
 	reg := supply.NewRegistry()
-	if err := RegisterSupplyConsumer(code, "rules", reg); err != nil {
+	if err := RegisterSupplyConsumer(namespace.Default, code, "rules", reg); err != nil {
 		t.Fatalf("RegisterSupplyConsumer: %v", err)
 	}
 	if _, err := sharedReactorHost.engineForCode(context.Background(), code); err != nil {
@@ -38,7 +39,7 @@ func newSourceDrivenModuleWithContent(t *testing.T, content []byte, revision uin
 	t.Helper()
 	code := testReactorCode(t)
 	reg := supply.NewRegistry()
-	if err := RegisterSupplyConsumer(code, "rules", reg); err != nil {
+	if err := RegisterSupplyConsumer(namespace.Default, code, "rules", reg); err != nil {
 		t.Fatalf("RegisterSupplyConsumer: %v", err)
 	}
 	if _, err := sharedReactorHost.engineForCode(context.Background(), code); err != nil {
@@ -153,7 +154,7 @@ func TestSupplyConfiguredFalseWhenLegacyPoolPredatesSupplyRegistration(t *testin
 	// source-driven.
 	reg := supply.NewRegistry()
 	digest := "sha256:" + mustModuleKey(t, code)
-	if err := RegisterSupplyConsumerByDigest(digest, "rules", "test-owner", reg); err != nil {
+	if err := RegisterSupplyConsumerByDigest(namespace.Default, digest, "rules", "test-owner", reg); err != nil {
 		t.Fatalf("RegisterSupplyConsumerByDigest: %v", err)
 	}
 
@@ -193,7 +194,7 @@ func TestSourceDrivenEngineRefusesLegacyPool(t *testing.T) {
 
 	reg := supply.NewRegistry()
 	digest := "sha256:" + mustModuleKey(t, code)
-	if err := RegisterSupplyConsumerByDigest(digest, "rules", "test-owner", reg); err != nil {
+	if err := RegisterSupplyConsumerByDigest(namespace.Default, digest, "rules", "test-owner", reg); err != nil {
 		t.Fatalf("RegisterSupplyConsumerByDigest: %v", err)
 	}
 
@@ -224,7 +225,7 @@ func TestUndeclaredSiblingIsRefusedAfterDigestRegistration(t *testing.T) {
 	// A DIFFERENT node, sharing the identical module, registers as a supply
 	// consumer. Nothing about the undeclared node changed.
 	reg := supply.NewRegistry()
-	if err := RegisterSupplyConsumerByDigest("sha256:"+mustModuleKey(t, code), "rules", "test-owner", reg); err != nil {
+	if err := RegisterSupplyConsumerByDigest(namespace.Default, "sha256:"+mustModuleKey(t, code), "rules", "test-owner", reg); err != nil {
 		t.Fatalf("RegisterSupplyConsumerByDigest: %v", err)
 	}
 

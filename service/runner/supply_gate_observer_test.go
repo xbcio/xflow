@@ -17,7 +17,7 @@ type recordingGateObserver struct {
 	unavailable []unavailableCall
 }
 
-type fetchCall struct{ name, result string }
+type fetchCall struct{ name, result, source string }
 type notReadyCall struct {
 	workflow, supply string
 	notReady         bool
@@ -27,8 +27,8 @@ type unavailableCall struct {
 	serving bool
 }
 
-func (r *recordingGateObserver) OnSupplyFetch(_ context.Context, name, result string) {
-	r.fetches = append(r.fetches, fetchCall{name, result})
+func (r *recordingGateObserver) OnSupplyFetch(_ context.Context, name, result, source string) {
+	r.fetches = append(r.fetches, fetchCall{name, result, source})
 }
 func (r *recordingGateObserver) OnSupplyNotReady(_ context.Context, workflow, supplyName string, notReady bool) {
 	r.notReady = append(r.notReady, notReadyCall{workflow, supplyName, notReady})
@@ -54,7 +54,7 @@ func TestAdmitNotifiesObserverOnSuccessfulFetch(t *testing.T) {
 		t.Fatalf("Admit: %v", err)
 	}
 
-	if len(rec.fetches) != 1 || rec.fetches[0] != (fetchCall{"shared-rules", "ok"}) {
+	if len(rec.fetches) != 1 || rec.fetches[0] != (fetchCall{"shared-rules", "ok", supplySourceAdmission}) {
 		t.Fatalf("fetches = %#v, want one ok fetch for shared-rules", rec.fetches)
 	}
 	if len(rec.notReady) != 1 || rec.notReady[0] != (notReadyCall{"wf1", "rules", false}) {
@@ -78,7 +78,7 @@ func TestAdmitNotifiesObserverOnFetchError(t *testing.T) {
 		t.Fatal("expected NotReadyError")
 	}
 
-	if len(rec.fetches) != 1 || rec.fetches[0] != (fetchCall{"shared-rules", "error"}) {
+	if len(rec.fetches) != 1 || rec.fetches[0] != (fetchCall{"shared-rules", "error", supplySourceAdmission}) {
 		t.Fatalf("fetches = %#v, want one error fetch for shared-rules", rec.fetches)
 	}
 	if len(rec.notReady) != 1 || rec.notReady[0] != (notReadyCall{"wf1", "rules", true}) {

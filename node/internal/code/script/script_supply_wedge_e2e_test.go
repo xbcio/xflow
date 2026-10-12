@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/internal/code/script/wasm"
 	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/types"
@@ -59,6 +60,7 @@ func TestWedgeContentAppliedBeforeEngineStillExecutes(t *testing.T) {
 	// Content arrives first, under the name the node declares. This is the
 	// state the runner is in when ApplyHints lands before activation.
 	if err := supply.Default.Apply(ctx, supply.Snapshot{
+		Namespace: namespace.Default,
 		Name:      supplyName,
 		Content:   []byte(`{"rules":[{"name":"from-supply"}]}`),
 		Hash:      "h1",
@@ -73,7 +75,7 @@ func TestWedgeContentAppliedBeforeEngineStillExecutes(t *testing.T) {
 	// which is the documented intent of both call sites. The notify finds no
 	// engine and succeeds, so the registry records the content as accepted and
 	// the owner set now contains this owner.
-	if err := wasm.RegisterSupplyConsumerByDigest(digest, supplyName, owner, supply.Default); err != nil {
+	if err := wasm.RegisterSupplyConsumerByDigest(namespace.Default, digest, supplyName, owner, supply.Default); err != nil {
 		t.Fatalf("warm-up register: %v", err)
 	}
 	if wasm.SupplyConfiguredByDigest(digest) {
@@ -84,7 +86,7 @@ func TestWedgeContentAppliedBeforeEngineStillExecutes(t *testing.T) {
 	DeclareWasmSupplyConsumers(workflow, nodeName, []string{supplyName})
 	t.Cleanup(func() {
 		UndeclareWasmSupplyConsumers(workflow, nodeName, []string{supplyName})
-		wasm.UnregisterSupplyConsumerByDigest(digest, supplyName, owner, supply.Default)
+		wasm.UnregisterSupplyConsumerByDigest(namespace.Default, digest, supplyName, owner, supply.Default)
 	})
 
 	input := &types.Input{

@@ -4,12 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"google.golang.org/grpc"
 
 	"github.com/xbcio/xflow/namespace"
+	runnersvc "github.com/xbcio/xflow/service/runner"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -198,5 +200,69 @@ func TestNewRunnerCarriesTheHeartbeatIntervalAndPollWait(t *testing.T) {
 	}
 	if svcCfg.PollWait != 4*time.Second {
 		t.Errorf("PollWait = %v, want 4s", svcCfg.PollWait)
+	}
+}
+
+// SupplyPollInterval has to reach the runner service, and an unset value has to
+// stay zero so the service's own default (60s) remains the only place that
+// default lives.
+func TestNewRunnerCarriesTheSupplyPollInterval(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		in   time.Duration
+		want time.Duration
+	}{
+		{"unset stays zero", 0, 0},
+		{"configured reaches the service", 15 * time.Second, 15 * time.Second},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			svcCfg, err := buildRunnerServiceConfig(RunnerConfig{
+				ServerURL:          "http://server:8080",
+				Capabilities:       []string{"xflow.function"},
+				SupplyPollInterval: tt.in,
+			})
+			if err != nil {
+				t.Fatalf("buildRunnerServiceConfig: %v", err)
+			}
+			if svcCfg.SupplyPollInterval != tt.want {
+				t.Fatalf("SupplyPollInterval = %v, want %v", svcCfg.SupplyPollInterval, tt.want)
+			}
+		})
+	}
+}
+
+// The supply poll is the convergence path for a supply whose hint was lost, so
+// an interval cannot be configured away: NewRunner refuses anything below the
+// service's floor instead of raising it silently, which is what an operator
+// would otherwise never learn about.
+func TestNewRunnerRefusesASupplyPollIntervalBelowTheFloor(t *testing.T) {
+	for _, bad := range []time.Duration{-time.Second, time.Second, runnersvc.MinSupplyPollInterval - time.Millisecond} {
+		_, err := NewRunner(RunnerConfig{
+			ServerURL:          "http://server:8080",
+			Capabilities:       []string{"xflow.function"},
+			SupplyPollInterval: bad,
+		})
+		if err == nil {
+			t.Fatalf("NewRunner accepted SupplyPollInterval = %v, want a config error", bad)
+		}
+		if !strings.Contains(err.Error(), "SupplyPollInterval") {
+			t.Fatalf("error = %v, want it to name SupplyPollInterval", err)
+		}
+	}
+
+	for _, ok := range []time.Duration{0, runnersvc.MinSupplyPollInterval, time.Minute} {
+		r, err := NewRunner(RunnerConfig{
+			ServerURL:          "http://server:8080",
+			Capabilities:       []string{"xflow.function"},
+			SupplyPollInterval: ok,
+		})
+		// A later construction step may legitimately fail in this bare config;
+		// what must not happen is the interval being refused.
+		if err != nil && strings.Contains(err.Error(), "SupplyPollInterval") {
+			t.Fatalf("NewRunner refused SupplyPollInterval = %v: %v", ok, err)
+		}
+		if r != nil {
+			t.Cleanup(func() { _ = r.Close() })
+		}
 	}
 }
