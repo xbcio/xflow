@@ -208,10 +208,17 @@ func (s *Store) CreateExecutionWithConcurrency(ctx context.Context, execution *e
 	// reconciler sweeps; that release is best effort for the same reason the
 	// sweep exists, and for a queued execution it also has to leave the line.
 	hold := time.Time{}
+	queueWait := time.Duration(0)
 	if code == concurrencyAdmitQueued {
 		hold = queuedOutboxHold
+		// A parked execution has to outlive its own wait: its keys are written
+		// with the ordinary retention, which knows nothing about the line in
+		// front of it, so the create path adds the declared wait on top
+		// (createExecution). Without that the execution silently expires
+		// mid-queue and its place in line becomes a member naming nothing.
+		queueWait = admission.QueueTimeout
 	}
-	if err := s.createExecutionAdmitted(ctx, execution, entries, tag, hold); err != nil {
+	if err := s.createExecutionAdmitted(ctx, execution, entries, tag, hold, queueWait); err != nil {
 		s.releaseWorkflowSlotBestEffort(ctx, execution.ID, t, tag)
 		return engine.ConcurrencyAdmissionResult{}, err
 	}
@@ -283,13 +290,15 @@ func luaReplyStrings(reply []any, from int) []string {
 // and its intents are scored into the future. The status is written by this
 // same call, in the same transaction as the intents, so there is no instant at
 // which a parked execution's work is deliverable without its status saying so.
-func (s *Store) createExecutionAdmitted(ctx context.Context, e *engine.ExecutionSnapshot, entries []engine.OutboxEntry, tag string, holdUntil time.Time) error {
+// queueWait is how long the execution may wait in line, which its retention has
+// to cover (see createExecution).
+func (s *Store) createExecutionAdmitted(ctx context.Context, e *engine.ExecutionSnapshot, entries []engine.OutboxEntry, tag string, holdUntil time.Time, queueWait time.Duration) error {
 	if !holdUntil.IsZero() {
 		parked := *e
 		parked.Status = types.ExecutionStatusQueued
 		e = &parked
 	}
-	if err := s.createExecution(ctx, e, entries, holdUntil); err != nil {
+	if err := s.createExecution(ctx, e, entries, holdUntil, queueWait); err != nil {
 		return err
 	}
 	t := namespace.FromContext(ctx)

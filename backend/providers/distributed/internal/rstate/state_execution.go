@@ -16,14 +16,14 @@ import (
 )
 
 func (s *Store) CreateExecution(ctx context.Context, e *engine.ExecutionSnapshot) error {
-	return s.createExecution(ctx, e, nil, time.Time{})
+	return s.createExecution(ctx, e, nil, time.Time{}, 0)
 }
 
 // CreateExecutionWithOutbox commits execution metadata and its initial durable
 // delivery intents in one Redis transaction. The SQL audit projection remains
 // a best-effort follow-up and is not part of scheduling correctness.
 func (s *Store) CreateExecutionWithOutbox(ctx context.Context, e *engine.ExecutionSnapshot, entries []engine.OutboxEntry) error {
-	return s.createExecution(ctx, e, entries, time.Time{})
+	return s.createExecution(ctx, e, entries, time.Time{}, 0)
 }
 
 // createExecution persists the execution, its outbox entries, and the SQL audit
@@ -43,7 +43,16 @@ func (s *Store) CreateExecutionWithOutbox(ctx context.Context, e *engine.Executi
 // a property of the entry's SCORE rather than of its body: the body's
 // availability stays the caller's own, so once promotion scores the entry back
 // to now, what the store hands the dispatcher says "available" in both places.
-func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot, entries []engine.OutboxEntry, holdUntil time.Time) error {
+//
+// queueWait is the execution's declared queue_timeout, and it is added to — not
+// substituted for — whatever retention this execution would otherwise get. A
+// parked execution's keys are written once and then sit untouched until
+// promotion, so a retention that does not cover the wait expires them mid-queue:
+// the execution disappears while its place in line remains, and the line then
+// spends a promotion on nothing. The extension is recorded as the execution's
+// own retention so later writers, which include the promotion's own status
+// refresh, do not shorten it back.
+func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot, entries []engine.OutboxEntry, holdUntil time.Time, queueWait time.Duration) error {
 	ttl := s.execTTL
 
 	// Per-execution transient hint from workflow options (via submission context).
@@ -110,6 +119,17 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 		// documented constraint (transientTTL > max execution wall-clock), instead
 		// of relying on a per-mutation refresh (see refreshTransientTTL).
 		ttl = s.transientTTL
+	}
+
+	// The queue wait is added last, after every other rule has had its say, so
+	// it lengthens whatever retention the execution actually got — a transient
+	// execution's short TTL included. A zero retention means unbounded in this
+	// store, and unbounded plus a wait is still unbounded.
+	if queueWait > 0 && ttl > 0 {
+		ttl += queueWait
+		s.ttlMu.Lock()
+		s.execTTLs[e.ID] = ttl
+		s.ttlMu.Unlock()
 	}
 
 	// Serialize graph for persistence (allows recovery after queue consumer restart).
