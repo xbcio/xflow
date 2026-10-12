@@ -846,9 +846,11 @@ function executionNodeStatusToRuntimeStatus(status: ExecutionNodeStatus): Runtim
     case "running":
     case "committing":
       return "running";
-    case "success":
     // A pinned node completed with its pin_data mock as output; the runtime
-    // status vocabulary has no separate state for it.
+    // status vocabulary has no separate state for it. The comment sits above
+    // the group rather than between the two clauses: an empty clause followed
+    // by a comment reads as a fallthrough to `no-fallthrough`.
+    case "success":
     case "pinned":
       return "success";
     case "expired":
