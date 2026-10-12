@@ -274,6 +274,21 @@ func (r *triggerRuntime) State(ctx context.Context, scope string) types.TriggerS
 	return r.primitives.State(ctx, scope)
 }
 
+// GetExecutionStatus implements the optional types.ExecutionStatusReader
+// capability by asking the primitives. That capability is not part of
+// backend.TriggerPrimitives, so a provider without one is a normal case rather
+// than an error: it is reported as types.ErrExecutionStatusUnavailable, which
+// callers treat exactly like an absent capability. Reporting it here means the
+// degrade decision lives with the trigger that has the safe default, not in
+// every provider.
+func (r *triggerRuntime) GetExecutionStatus(ctx context.Context, id types.ExecutionID) (types.ExecutionStatus, bool, error) {
+	reader, ok := r.primitives.(types.ExecutionStatusReader)
+	if !ok {
+		return "", false, types.ErrExecutionStatusUnavailable
+	}
+	return reader.GetExecutionStatus(ctx, id)
+}
+
 func (r *triggerRuntime) Webhooks() types.WebhookRuntime { return r.webhooks }
 
 // hasPrefix reports whether key starts with prefix.

@@ -39,7 +39,7 @@ func TestTriggerDedupNonPositiveTTLDefaultsToTwentyFourHours(t *testing.T) {
 				}
 			})
 
-			p := New(rdb)
+			p := New(rdb, nil)
 			ok, err := p.Dedup(ctx, key, tc.ttl)
 			if err != nil {
 				t.Fatalf("Dedup(ttl=%v) error = %v", tc.ttl, err)
@@ -90,7 +90,7 @@ func TestTriggerTryLockNonPositiveTTLDefaultsToOneMinute(t *testing.T) {
 				}
 			})
 
-			p := New(rdb)
+			p := New(rdb, nil)
 			lock, ok, err := p.TryLock(ctx, key, tc.ttl)
 			if err != nil {
 				t.Fatalf("TryLock(ttl=%v) error = %v", tc.ttl, err)
@@ -146,7 +146,7 @@ func TestTriggerLockRenewNonPositiveTTLDefaultsToOneMinuteAndDoesNotDeleteLock(t
 				}
 			})
 
-			p := New(rdb)
+			p := New(rdb, nil)
 			lock, ok, err := p.TryLock(ctx, key, time.Minute)
 			if err != nil {
 				t.Fatalf("TryLock() error = %v", err)

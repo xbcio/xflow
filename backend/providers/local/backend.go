@@ -114,12 +114,14 @@ func New(opts ...Option) *Backend {
 	q := newMemoryQueueWithCapacity(cfg.concurrency, cfg.queueCapacity)
 	q.SetLogger(cfg.logger)
 
+	state := newMemoryState()
+
 	return &Backend{
-		state:            newMemoryState(),
+		state:            state,
 		queue:            q,
 		registry:         reg,
 		workflowRegistry: newWorkflowRegistry(),
-		triggerRuntime:   newTriggerPrimitives(),
+		triggerRuntime:   newTriggerPrimitives(state),
 		resourcePool:     cfg.resourcePool,
 		artifactCode:     cfg.artifactCode,
 		logger:           cfg.logger,

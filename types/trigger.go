@@ -150,6 +150,30 @@ type TriggerState interface {
 	Delete(ctx context.Context, key string) error
 }
 
+// ExecutionStatusReader is an optional capability of TriggerRuntime that reads
+// back the lifecycle status of an execution the runtime admitted. A trigger that
+// must not start a second run while the previous one is still going (the cron
+// trigger's overlap policy) asks this question through a type assertion on the
+// TriggerRuntime it was activated with.
+//
+// The capability is optional because a trigger can be hosted by a runtime with
+// no execution store behind it, and a trigger that cannot see the other run's
+// status must say so rather than assume. A runtime that has no store to read
+// still implements this method and answers with ErrExecutionStatusUnavailable;
+// a runtime that implements nothing at all fails the type assertion. Callers
+// treat both the same way: fall back to the behaviour that needs no status.
+//
+// The shape matches engine.ExecutionStatusReader — same method, same
+// found/err split — so a store that already answers it for the engine answers
+// it here by being forwarded to, and the two can never disagree about what a
+// status read means.
+type ExecutionStatusReader interface {
+	// GetExecutionStatus reports one execution's lifecycle status. found=false
+	// means no such execution is recorded, which is not the zero status; an
+	// error means the question could not be answered at all.
+	GetExecutionStatus(ctx context.Context, id ExecutionID) (status ExecutionStatus, found bool, err error)
+}
+
 // EntrySeedRuntime is an optional capability of TriggerRuntime that supports
 // entry-unit seed (single node or group node) atomic admission. Kafka trigger
 // nodes check for this via type assertion when operating in seed mode. If

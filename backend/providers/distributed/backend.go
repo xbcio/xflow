@@ -481,7 +481,7 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 		transport:        transport,
 		registry:         registry,
 		workflowReg:      workflowreg.New(rdb),
-		triggerRuntime:   trigger.New(rdb),
+		triggerRuntime:   trigger.New(rdb, state),
 		rdb:              rdb,
 		concurrency:      cfg.concurrency,
 		consumer:         cfg.consumer,
