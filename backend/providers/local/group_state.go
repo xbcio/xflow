@@ -162,6 +162,21 @@ func (s *memoryState) CommitGroup(_ context.Context, req engine.GroupCommitReque
 	if entry == nil || isTerminalStatus(entry.snap.Status) {
 		return engine.GroupCommitResult{Applied: false, Outcome: engine.CommitOutcomeExecutionInactive}, nil
 	}
+	// req.Transient (groups[].mode: transient) is deliberately not acted on.
+	// The mode's only effect is retention: the group's artifacts — its boundary
+	// exits, unit status and lease fence — are held for a completion TTL once
+	// the execution is terminal, instead of for the execution TTL. This backend
+	// has no TTL to shorten: its state is a process-local map, and every key in
+	// it dies with the process, which is a strictly shorter lifetime than any
+	// completion TTL could promise. Evicting the exits at the execution's
+	// terminal transition would not realize the mode either — it would delete
+	// the result Wait/GetOutput reads after the run finishes, which for a
+	// group-only workflow is the execution's entire output. So the hint is a
+	// no-op here, pinned by statestoretest's transient group case: the mode may
+	// change retention, never the data. The Redis backend, which does have two
+	// retention windows to choose between, implements it in
+	// rstate/group_transient.go.
+	//
 	// 1. Persist boundary outputs (same path as CommitNode: s.outputs keyed by execID+"/"+name).
 	for _, ex := range req.Exits {
 		key := memoryNodeKey(req.ExecutionID, ex.NodeName)
