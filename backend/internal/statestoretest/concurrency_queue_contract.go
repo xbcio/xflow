@@ -50,6 +50,9 @@ func RunConcurrencyQueueContract(t *testing.T, newStore ConcurrencyStoreFactory)
 	t.Run("ReportsThePositionOfAQueuedExecution", func(t *testing.T) {
 		queueReportsThePositionOfAQueuedExecution(t, newStore(t))
 	})
+	t.Run("BuffersSignalsUntilPromotion", func(t *testing.T) {
+		queueBuffersSignalsUntilPromotion(t, newStore(t))
+	})
 }
 
 // queueAdmissionFor builds the QUEUE-mode admission one submission contends
@@ -406,6 +409,82 @@ func queueReportsThePositionOfAQueuedExecution(t *testing.T, state engine.StateS
 	}
 	if got := queuePosition(t, inspector, ctx, behind); got != 0 {
 		t.Fatalf("position after promotion = %d, want 0: it is running now", got)
+	}
+}
+
+// queueBuffersSignalsUntilPromotion pins decision 4's signal half: a signal
+// delivered to an execution that is still waiting for a slot is stored, not
+// dropped, and is consumed — not parked — once promotion lets the execution run.
+//
+// Both directions of the window are dangerous. Dropping the signal loses an
+// approval the caller was told was accepted, and nothing would ever retry it.
+// Consuming it instead would start a node of an execution that holds no slot,
+// which is the invariant the whole queue exists to keep. The queued execution
+// here has not run a single unit, so no waiter exists and "stored" is the only
+// correct verdict.
+func queueBuffersSignalsUntilPromotion(t *testing.T, state engine.StateStore) {
+	durable, ok := state.(engine.DurableSignalDeliverer)
+	if !ok {
+		t.Skipf("%T does not implement engine.DurableSignalDeliverer", state)
+	}
+	ctx := context.Background()
+	g := concurrencyGraph(t, "conc-queue-signal")
+	admission := queueAdmissionFor(t, g, 1, 0, 0)
+
+	holder, _ := queueSubmit(t, state, ctx, g, admission)
+	waiting, res := queueSubmit(t, state, ctx, g, admission)
+	if !res.Queued {
+		t.Fatal("over-limit submission was not parked")
+	}
+
+	data := map[string]any{"approved_by": "ops"}
+	node, _, committed, err := durable.DeliverSignalWithOutbox(ctx, waiting, "approval", data, engine.ResumeIntent{})
+	if err != nil {
+		t.Fatalf("DeliverSignalWithOutbox(queued) error = %v", err)
+	}
+	if node != "" || committed {
+		t.Fatalf("delivery to a queued execution = (node %q, committed %v), want it stored: the execution has not run, so there is no waiter to resume", node, committed)
+	}
+	if got := executionStatus(t, state, ctx, waiting); got != types.ExecutionStatusQueued {
+		t.Fatalf("status after the delivery = %q, want it still %q", got, types.ExecutionStatusQueued)
+	}
+	// Storing a signal is not starting work: the queued execution's intents stay
+	// held, so nothing can run while its slot is unavailable.
+	if entries := readyOutbox(t, state, ctx, waiting); len(entries) != 0 {
+		t.Fatalf("ready intents after a stored signal = %d, want none", len(entries))
+	}
+
+	// Promotion is what makes the buffered signal deliverable.
+	if err := state.UpdateExecutionStatus(ctx, holder, types.ExecutionStatusSuccess, ""); err != nil {
+		t.Fatalf("release holder error = %v", err)
+	}
+	if got := executionStatus(t, state, ctx, waiting); got != types.ExecutionStatusRunning {
+		t.Fatalf("promoted status = %q, want %q", got, types.ExecutionStatusRunning)
+	}
+
+	// The promoted execution reaches the node that waits for "approval" and
+	// finds the payload already there, so it consumes instead of parking.
+	spec := &types.SuspendSpec{Signals: []string{"approval"}}
+	payload, err := state.SuspendOrConsume(ctx, waiting, "wait-approval", spec)
+	if err != nil {
+		t.Fatalf("SuspendOrConsume() error = %v", err)
+	}
+	if payload == nil {
+		t.Fatal("the suspension parked: the signal buffered while queued was not delivered on promotion")
+	}
+	if payload.Triggered != types.SignalReceived || payload.Name != "approval" {
+		t.Fatalf("payload = %+v, want the buffered %q signal", payload, "approval")
+	}
+	if got := payload.Data["approved_by"]; got != "ops" {
+		t.Fatalf("payload data = %v, want the delivered value", payload.Data)
+	}
+	// Consuming the signal leaves no waiter behind for that node.
+	suspended, err := state.ListSuspendedNodes(ctx, waiting)
+	if err != nil {
+		t.Fatalf("ListSuspendedNodes() error = %v", err)
+	}
+	if len(suspended) != 0 {
+		t.Fatalf("suspended nodes after the consume = %v, want none", suspended)
 	}
 }
 
