@@ -65,6 +65,7 @@ func concurrencyTagKey(t namespace.Namespace, id types.ExecutionID) string {
 
 var _ engine.ConcurrencyLimitedStateStore = (*Store)(nil)
 var _ engine.ConcurrencyQueueExpirer = (*Store)(nil)
+var _ engine.ConcurrencyQueueInspector = (*Store)(nil)
 
 // registerConcurrencyWorkflow records that a workflow has slot state, so the
 // sweep can find the set it has to inspect.
@@ -524,6 +525,31 @@ func (s *Store) workflowTagFor(ctx context.Context, id types.ExecutionID, t name
 		return "", fmt.Errorf("read concurrency tag for %q: %w", id, err)
 	}
 	return tag, nil
+}
+
+// ConcurrencyQueuePosition reports where one queued execution stands in its
+// workflow's line, 1-based, or 0 when it is not queued.
+//
+// It reads the queue ZSET's own order rather than a stored position: the line
+// is a ranked set, so a rank IS the position, and any copy of it would be stale
+// the moment a release promotes the head. A missing back-reference or a member
+// that is no longer in the line both answer 0 — the execution is not waiting,
+// which is what the caller asked — while a real read failure is returned so a
+// caller can tell "not queued" from "could not tell".
+func (s *Store) ConcurrencyQueuePosition(ctx context.Context, id types.ExecutionID) (int, error) {
+	t := namespace.FromContext(ctx)
+	tag, err := s.workflowTagFor(ctx, id, t)
+	if err != nil || tag == "" {
+		return 0, err
+	}
+	rank, err := s.rdb.ZRank(ctx, concurrencyQueueKeyForTag(t, tag), concurrencySlotMember(id)).Result()
+	if err == redis.Nil {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read queue position for %q: %w", id, err)
+	}
+	return int(rank) + 1, nil
 }
 
 // releaseWorkflowSlotAfterTerminal is the post-terminal hook every terminal
