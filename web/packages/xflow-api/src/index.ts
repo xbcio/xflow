@@ -774,9 +774,12 @@ function createListWorkflows(
 
 /**
  * Converts an execution-detail response into the runtime projection consumed by
- * `@xflow/core` renderers. The execution service exposes two transitional
- * statuses that the core projection does not: `canceling` and `committing` are
- * represented as `running` until their terminal state is observed.
+ * `@xflow/core` renderers. Two transitional statuses are collapsed:
+ * `canceling` (execution) and `committing` (node) are represented as `running`
+ * until their terminal state is observed. Every other status is carried
+ * through unchanged, `expired` included: reporting it as `pending` would
+ * assert that a node whose records are gone never ran, which is the one thing
+ * the status exists to deny (types/execution.go).
  */
 export function executionDetailToRuntimeSnapshot(detail: ExecutionDetail): RuntimeSnapshot {
   const snapshot: RuntimeSnapshot = {
@@ -835,11 +838,10 @@ function executionNodeStatusToRuntimeStatus(status: ExecutionNodeStatus): Runtim
       return "success";
     case "expired":
       // The node's records are gone (a transient group past its completion
-      // TTL). The runtime vocabulary has no state for that either, and the
-      // node's live state is precisely what is unknown, so it projects to the
-      // no-evidence value — which is also what this member showed before the
-      // status existed.
-      return "pending";
+      // TTL). The member ran, or may have; nothing about it is readable any
+      // more, and "pending" would assert precisely the thing that is not
+      // known, so the status is carried through for the renderers to show.
+      return "expired";
     case "failed":
       return "failed";
     case "skipped":
