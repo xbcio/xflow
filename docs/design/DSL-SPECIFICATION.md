@@ -118,7 +118,7 @@ context:
 
 # 全局配置
 settings:
-  concurrency: int        # 最大并发数
+  concurrency: int | object # 工作流级并发上限；裸 int 等价 {limit: N, mode: queue}，详见下方注释
   timezone: string        # 时区
   on_error: string        # 全局默认错误策略（可选，stop|error_output|main_output|continue，默认 stop）
   pin_data_mode: string   # pin_data 生效策略（可选，test_only|always|disabled，默认 test_only）
@@ -129,6 +129,28 @@ settings:
     initial_interval: int # 初始退避间隔，毫秒；<=0 使用引擎默认值
     max_interval: int     # 单次退避上限，毫秒；<=0 使用引擎默认值
     multiplier: number    # 指数退避倍率；<=0 使用默认 2.0
+
+# settings.concurrency 语义（工作流级并发上限）
+# 两种写法等价：裸 int `concurrency: N` == `concurrency: {limit: N, mode: queue}`；
+# 想拒绝超限提交必须显式写 mode: reject。
+#   limit: int           # 并发执行数上限；0 = 不限（默认；字段缺省即不限）
+#   mode: string         # queue（默认）| reject
+#   max_queued: int      # 仅 queue：排队积压上限，超出按 429 拒绝（可选）
+#   queue_timeout: dur   # 仅 queue：排队等待上限，从入队起算（可选）
+# 计数单位是工作流执行，键为 namespace + 工作流名（不区分版本）；subgraph/map 的子执行
+# 在父执行的槽位内运行，不计数。FAF 工作流不允许非零 limit（编译期报错）。
+# 超限行为：
+#   reject — 不持久化任何东西，execute 返回 429 workflow_concurrency_limit，
+#            Retry-After 是等待下限而不是预测。
+#   queue  — 以新状态 queued（非终态）持久化并进入 FIFO 队列；execute 200 响应新增
+#            status（排队时为 queued）与 queue_position（仅排队时出现）。
+#            排队中的执行：Inspect/list 显示 queued 与队列位置；Wait 继续阻塞；
+#            signal 先存、晋升后投递；节点/lease 等运行期计时从晋升起算。
+#            queue_timeout 到期 → status=timeout，error="concurrency queue timeout"；
+#            max_queued 超出 → 429 workflow_concurrency_queue_full；后端不支持排队 →
+#            503 workflow_concurrency_unavailable（不静默降级为立即执行）。
+# 释放与晋升：执行进入终态（success/failed/canceled/timeout）时释放槽位并原子晋升队首；
+# 调低 limit 不抢占在跑的执行，调高会触发晋升；崩溃窗口由对账器兜底。
 
 # 高级执行选项
 options:
