@@ -220,14 +220,15 @@ func waitRetry(ctx context.Context, delay time.Duration) bool {
 // Data is the event under the same "trigger" key the embedded engine passes to
 // engine.Invoke, so a downstream node reads $input.trigger identically whether
 // its workflow runs in process or on a runner. The event is carried as the
-// decoded-map JSON shape, which is what the wire produces in both modes: the
-// local path hands the engine a *types.TriggerEvent in process and a
-// map[string]any over the wire, and a definition may rely on neither.
+// decoded-map JSON shape (types.TriggerEventData), which is what the wire
+// produces in both modes: the local path hands the engine a *types.TriggerEvent
+// in process and a map[string]any over the wire, and a definition may rely on
+// neither.
 func Exits(in *types.TriggerActivateInput, event *types.TriggerEvent) []types.BoundaryExit {
 	return []types.BoundaryExit{{
 		NodeName: in.NodeName,
 		Port:     "main",
-		Data:     map[string]any{"trigger": eventMap(event)},
+		Data:     map[string]any{"trigger": types.TriggerEventData(event)},
 	}}
 }
 
@@ -243,44 +244,4 @@ func NewRequest(in *types.TriggerActivateInput, kind, id string, event *types.Tr
 		Outcome:         "success",
 		Exits:           Exits(in, event),
 	}
-}
-
-// eventMap renders a trigger event as the decoded-map shape a downstream node
-// sees when the event crossed JSON. Keys mirror the JSON tags on
-// types.TriggerEvent; an absent field is omitted rather than written as a zero
-// value, so a node testing for its presence reads the same answer in both
-// deployment modes.
-func eventMap(event *types.TriggerEvent) map[string]any {
-	out := map[string]any{}
-	if event == nil {
-		return out
-	}
-	if event.ID != "" {
-		out["id"] = event.ID
-	}
-	if event.Kind != "" {
-		out["kind"] = event.Kind
-	}
-	if event.Source != "" {
-		out["source"] = event.Source
-	}
-	if !event.Time.IsZero() {
-		out["time"] = event.Time.UTC().Format(time.RFC3339Nano)
-	}
-	if len(event.Headers) > 0 {
-		out["headers"] = event.Headers
-	}
-	if len(event.Data) > 0 {
-		out["data"] = event.Data
-	}
-	if len(event.Raw) > 0 {
-		// Carried as the payload's own bytes rather than as the base64 JSON
-		// would produce for a []byte field: on this path the raw bytes ARE the
-		// message the trigger consumed, and the kafka trigger's seed exits carry
-		// their payload the same way. A reader of $input.trigger.raw therefore
-		// sees the payload itself in both deployment modes, which a base64
-		// envelope would not give it.
-		out["raw"] = string(event.Raw)
-	}
-	return out
 }

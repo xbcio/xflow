@@ -18,6 +18,52 @@ type TriggerEvent struct {
 	Raw     []byte            `json:"raw,omitempty"`
 }
 
+// TriggerEventData renders a trigger event as the decoded-map shape a downstream
+// node sees under $input.trigger when the event crossed JSON.
+//
+// Every delivery path that carries an event into a seeded execution renders it
+// through this ONE function — the trigger kinds that seed from a runner
+// (node/trigger/internal/seedadmit) and the server-hosted webhook route
+// (service/apiserver) alike — because a definition may read any of these keys,
+// and a path that built the map itself would drift the moment the shape changed.
+//
+// Keys mirror TriggerEvent's JSON tags, and an absent field is omitted rather
+// than written as a zero value, so a node testing for a key's presence reads the
+// same answer on every path.
+func TriggerEventData(event *TriggerEvent) map[string]any {
+	out := map[string]any{}
+	if event == nil {
+		return out
+	}
+	if event.ID != "" {
+		out["id"] = event.ID
+	}
+	if event.Kind != "" {
+		out["kind"] = event.Kind
+	}
+	if event.Source != "" {
+		out["source"] = event.Source
+	}
+	if !event.Time.IsZero() {
+		out["time"] = event.Time.UTC().Format(time.RFC3339Nano)
+	}
+	if len(event.Headers) > 0 {
+		out["headers"] = event.Headers
+	}
+	if len(event.Data) > 0 {
+		out["data"] = event.Data
+	}
+	if len(event.Raw) > 0 {
+		// Carried as the payload's own bytes rather than as the base64 JSON
+		// would produce for a []byte field: on this path the raw bytes ARE the
+		// message the trigger received (a Kafka batch, an HTTP body), so a reader
+		// of $input.trigger.raw sees the payload itself, which a base64 envelope
+		// would not give it.
+		out["raw"] = string(event.Raw)
+	}
+	return out
+}
+
 type TriggerHandler interface {
 	Handler
 	Activate(ctx context.Context, input *TriggerActivateInput) (TriggerSubscription, error)
