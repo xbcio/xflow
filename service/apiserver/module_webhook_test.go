@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
@@ -213,16 +214,23 @@ func TestWebhookEntryRejectsOversizedBody(t *testing.T) {
 	}
 }
 
-// TestWebhookEntryReplayedEventIDAdmitsOnce asserts the deduplication contract:
-// a redelivery of the same event — the sender's own event id — never creates a
-// second execution, and the answer names the execution that exists.
+// TestWebhookEntryReplayedEventIDIsADuplicate asserts the deduplication
+// contract: a redelivery of the same event — the sender's own event id, the same
+// body — never creates a second execution, names the execution that exists, and
+// is answered 200 with duplicate:true.
 //
-// The redelivery is answered with the engine's "conflict" state rather than
-// "duplicate": the exit payload carries the event's observed time, so two
-// deliveries of one event are the same admission key with a different result
-// hash, which is exactly what conflict means on this face. The property the
-// sender depends on — one execution, and its id — holds either way.
-func TestWebhookEntryReplayedEventIDAdmitsOnce(t *testing.T) {
+// The status is load-bearing, not decoration. The senders this route exists for
+// (a code host, a job scheduler) retry any non-2xx, so an answer of 409 to a
+// retry of a delivery that was in fact accepted produces an endless retry loop
+// for an event that already ran. Duplicate is what the engine would have
+// reported if it had been asked twice with the same content, which is why the
+// comparison must not include the observation time.
+//
+// The pause between the two deliveries is what makes the assertion able to
+// fail: with a coarse clock, two immediately successive requests could carry the
+// same observation time, and an implementation that hashed the observation time
+// would then look idempotent by accident.
+func TestWebhookEntryReplayedEventIDIsADuplicate(t *testing.T) {
 	srv, supplies := newWebhookServer(t)
 	putWebhookSecret(t, supplies, "hook-secret", webhookTestSecret)
 	id, _, err := srv.RegisterWorkflow(context.Background(), namespace.Default, webhookWorkflowDef(webhookTestParams()))
@@ -231,9 +239,12 @@ func TestWebhookEntryReplayedEventIDAdmitsOnce(t *testing.T) {
 	}
 
 	body := []byte(`{"order":"A-1"}`)
-	post := func() (int, protocol.SeedExecutionResponse) {
+	post := func(extra map[string]string) (int, protocol.SeedExecutionResponse) {
 		req := httptest.NewRequest(http.MethodPost, webhookHookPath(id, "in"), strings.NewReader(string(body)))
 		req.Header.Set("X-Event-Id", "evt-replay")
+		for name, value := range extra {
+			req.Header.Set(name, value)
+		}
 		signWebhookRequest(req, body, webhookTestSecret)
 		rec := serveWebhook(t, srv, req)
 		var resp protocol.SeedExecutionResponse
@@ -241,16 +252,90 @@ func TestWebhookEntryReplayedEventIDAdmitsOnce(t *testing.T) {
 		return rec.Code, resp
 	}
 
-	firstStatus, first := post()
+	firstStatus, first := post(nil)
 	if firstStatus != http.StatusOK || first.ExecutionID == "" {
 		t.Fatalf("first delivery: status = %d, execution = %q, want 200 with an id", firstStatus, first.ExecutionID)
 	}
-	secondStatus, second := post()
-	if secondStatus != http.StatusConflict && secondStatus != http.StatusOK {
-		t.Fatalf("redelivery: status = %d, want 200 (duplicate) or 409 (conflict)", secondStatus)
+	if first.Duplicate {
+		t.Fatal("the first delivery of an event was reported as a duplicate")
+	}
+
+	time.Sleep(2 * time.Millisecond)
+
+	// The extra header stands in for what a retrying sender's request picks up
+	// along the way — a new proxy hop, a new trace id. The delivery is the same
+	// one, so the answer must be the same duplicate: only the event id and the
+	// body identify a delivery.
+	secondStatus, second := post(map[string]string{"X-Forwarded-For": "203.0.113.9"})
+	if secondStatus != http.StatusOK {
+		t.Fatalf("redelivery: status = %d (%s), want 200 — a retry of an accepted delivery must not be refused",
+			secondStatus, second.State)
+	}
+	if !second.Duplicate {
+		t.Fatalf("redelivery: duplicate = false (state %q), want true — the caller cannot tell it made no second execution", second.State)
 	}
 	if second.ExecutionID != first.ExecutionID {
 		t.Fatalf("redelivery named execution %q, want the original %q", second.ExecutionID, first.ExecutionID)
+	}
+
+	// The definition's event id header is what carried the identity, so a
+	// delivery that omits it must not collapse into this one: it hashes its own
+	// body and lands on a different key.
+	req := httptest.NewRequest(http.MethodPost, webhookHookPath(id, "in"), strings.NewReader(string(body)))
+	signWebhookRequest(req, body, webhookTestSecret)
+	rec := serveWebhook(t, srv, req)
+	var unkeyed protocol.SeedExecutionResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &unkeyed); err != nil {
+		t.Fatalf("decode response %q: %v", rec.Body.String(), err)
+	}
+	if rec.Code != http.StatusOK || unkeyed.Duplicate || unkeyed.ExecutionID == first.ExecutionID {
+		t.Fatalf("a delivery with no event id header was collapsed into the keyed one: status = %d, resp = %+v", rec.Code, unkeyed)
+	}
+}
+
+// TestWebhookEntrySameEventIDWithDifferentBodyConflicts is the other half of the
+// deduplication contract, and the reason the conflict state was not simply
+// removed: one event id carrying two different payloads is two different
+// deliveries, and only one of them can be the event. Answering 200 to the second
+// would tell a sender that a body nobody ever executed had run.
+func TestWebhookEntrySameEventIDWithDifferentBodyConflicts(t *testing.T) {
+	srv, supplies := newWebhookServer(t)
+	putWebhookSecret(t, supplies, "hook-secret", webhookTestSecret)
+	id, _, err := srv.RegisterWorkflow(context.Background(), namespace.Default, webhookWorkflowDef(webhookTestParams()))
+	if err != nil {
+		t.Fatalf("RegisterWorkflow: %v", err)
+	}
+
+	firstBody := []byte(`{"order":"A-1"}`)
+	req := httptest.NewRequest(http.MethodPost, webhookHookPath(id, "in"), strings.NewReader(string(firstBody)))
+	req.Header.Set("X-Event-Id", "evt-reused")
+	signWebhookRequest(req, firstBody, webhookTestSecret)
+	rec := serveWebhook(t, srv, req)
+	var first protocol.SeedExecutionResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &first); err != nil {
+		t.Fatalf("decode first response %q: %v", rec.Body.String(), err)
+	}
+	if rec.Code != http.StatusOK || first.ExecutionID == "" {
+		t.Fatalf("first delivery: status = %d, resp = %+v, want 200 with an id", rec.Code, first)
+	}
+
+	secondBody := []byte(`{"order":"A-2"}`)
+	req = httptest.NewRequest(http.MethodPost, webhookHookPath(id, "in"), strings.NewReader(string(secondBody)))
+	req.Header.Set("X-Event-Id", "evt-reused")
+	signWebhookRequest(req, secondBody, webhookTestSecret)
+	rec = serveWebhook(t, srv, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("same event id with a different body: status = %d (%s), want 409", rec.Code, rec.Body.String())
+	}
+	var conflict protocol.SeedExecutionResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &conflict); err != nil {
+		t.Fatalf("decode conflict %q: %v", rec.Body.String(), err)
+	}
+	if conflict.State != string(engine.AdmissionStateConflict) {
+		t.Fatalf("state = %q, want %q", conflict.State, engine.AdmissionStateConflict)
+	}
+	if conflict.ExecutionID != first.ExecutionID {
+		t.Fatalf("conflict named execution %q, want the one that exists (%q)", conflict.ExecutionID, first.ExecutionID)
 	}
 }
 

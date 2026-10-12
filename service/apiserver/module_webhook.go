@@ -208,8 +208,9 @@ func (m *webhookModule) handleWebhookEntry(w http.ResponseWriter, r *http.Reques
 		Outcome:         outcome,
 		Exits:           exits,
 		// ResultHash is computed server-side, exactly as on the runner face: the
-		// caller supplies nothing it could be derived from.
-		ResultHash: engine.ComputeResultHash(outcome, exits),
+		// caller supplies nothing it could be derived from. It covers the REQUEST,
+		// not the exits — see webhookResultHash.
+		ResultHash: webhookResultHash(entryUnitID, event.ID, body),
 	}
 	// No activation record exists for a server-hosted unit, so the generation
 	// fence finds nothing to enforce and the seed is admitted on its own key.
@@ -373,6 +374,44 @@ func webhookEventID(params map[string]any, r *http.Request, body []byte, now tim
 	}
 	sum := sha256.Sum256(body)
 	return hex.EncodeToString(sum[:]) + "/" + strconv.FormatInt(now.Unix()/60, 10)
+}
+
+// webhookResultHash is the conflict-detection hash of one webhook delivery: the
+// event's identity and the body it carried, and nothing else.
+//
+// The exits are deliberately NOT what gets hashed. They carry the observed time
+// and the flattened request headers, and neither belongs to the delivery's
+// content. Hashing them is what made a redelivery a conflict rather than a
+// duplicate: a sender that never received an answer resends the same event with
+// the same body, the two payloads differ only in the observation time, and the
+// server answered 409 — which the senders this route exists for (a code host, a
+// job scheduler) read as "not accepted" and retry, forever. The observed time
+// still reaches the execution: it is in the exits. It is only kept out of the
+// comparison.
+//
+// Headers are excluded for the same reason, even though they too are delivered:
+// a sender may legally vary one between attempts — a signature re-signed over a
+// fresh timestamp, a new trace id — and its retry must still be recognized as
+// one delivery. What identifies a delivery is its event id (which is also the
+// admission key) and its body.
+//
+// The body enters the hash as a digest, both because it is unbounded input and
+// because the digest is already computed for the event-id fallback. So the same
+// event id WITH different content still hashes differently and is answered as
+// the conflict it is.
+//
+// It hashes through engine.ComputeResultHash over a projected exit rather than
+// inventing a second hashing convention for engine.ResultHash.
+func webhookResultHash(entryUnitID, eventID string, body []byte) engine.ResultHash {
+	sum := sha256.Sum256(body)
+	return engine.ComputeResultHash(engine.GroupOutcomeSuccess, []engine.BoundaryExit{{
+		NodeName: entryUnitID,
+		Port:     "main",
+		Data: map[string]any{
+			"trigger_id":        eventID,
+			"trigger_body_hash": hex.EncodeToString(sum[:]),
+		},
+	}})
 }
 
 // webhookHeaders flattens the request headers to the same first-value-per-name
