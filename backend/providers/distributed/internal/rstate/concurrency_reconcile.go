@@ -93,7 +93,8 @@ func (s *Store) reconcileConcurrencySlotsForNamespace(ctx context.Context, t nam
 }
 
 // sweepConcurrencySlotSet inspects one workflow's slot set and drops the
-// members that no longer name a live execution.
+// members that no longer name a live execution, finishing the promotions a
+// crash left half-done.
 func (s *Store) sweepConcurrencySlotSet(ctx context.Context, t namespace.Namespace, tag string, limit int) (int, error) {
 	slotKey := concurrencySlotKeyForTag(t, tag)
 	members, err := s.rdb.ZRangeWithScores(ctx, slotKey, 0, int64(limit-1)).Result()
@@ -116,7 +117,7 @@ func (s *Store) sweepConcurrencySlotSet(ctx context.Context, t namespace.Namespa
 		if exists, err := s.rdb.Exists(ctx, slotKey).Result(); err == nil && exists == 0 {
 			_ = s.rdb.SRem(ctx, concurrencyWorkflowIndexKey(t), tag).Err()
 		}
-		return 0, nil
+		return 0, s.fillConcurrencySlots(ctx, t, tag)
 	}
 
 	// One pipelined read for every member's execution status, rather than a
@@ -134,6 +135,7 @@ func (s *Store) sweepConcurrencySlotSet(ctx context.Context, t namespace.Namespa
 	}
 
 	stale := make([]any, 0, len(members))
+	stranded := make([]string, 0, len(members))
 	for i, cmd := range statuses {
 		id := types.ExecutionID(fmt.Sprint(members[i].Member))
 		raw, err := cmd.Result()
@@ -151,12 +153,22 @@ func (s *Store) sweepConcurrencySlotSet(ctx context.Context, t namespace.Namespa
 		if err != nil {
 			return 0, fmt.Errorf("read execution status for %q: %w", id, err)
 		}
-		if types.IsTerminalExecutionStatus(types.ExecutionStatus(raw)) {
+		switch status := types.ExecutionStatus(raw); {
+		case types.IsTerminalExecutionStatus(status):
 			stale = append(stale, concurrencySlotMember(id))
+		case status == types.ExecutionStatusQueued:
+			// A queued execution holding a slot is a promotion that was decided
+			// — the slot was handed to it — and never finished: its status and
+			// its intents are written in its own hash slot, which the release
+			// script cannot reach. Removing the member would strand it; not
+			// acting would leave a slot held by work that is not running. The
+			// repair is to finish the promotion.
+			stranded = append(stranded, string(id))
 		}
 	}
+	s.completePromotions(ctx, t, tag, stranded)
 	if len(stale) == 0 {
-		return 0, nil
+		return 0, s.fillConcurrencySlots(ctx, t, tag)
 	}
 
 	removed, err := s.rdb.ZRem(ctx, slotKey, stale...).Result()
@@ -164,7 +176,7 @@ func (s *Store) sweepConcurrencySlotSet(ctx context.Context, t namespace.Namespa
 		return 0, fmt.Errorf("sweep concurrency slots %q: %w", slotKey, err)
 	}
 	if removed == 0 {
-		return 0, nil
+		return 0, s.fillConcurrencySlots(ctx, t, tag)
 	}
 	// Dropping the last holder takes the set with it, exactly as a normal
 	// release does — otherwise the namespace index keeps naming a workflow
@@ -177,5 +189,32 @@ func (s *Store) sweepConcurrencySlotSet(ctx context.Context, t namespace.Namespa
 		_ = s.rdb.Del(ctx, slotKey).Err()
 		_ = s.rdb.SRem(ctx, concurrencyWorkflowIndexKey(t), tag).Err()
 	}
-	return int(removed), nil
+	return int(removed), s.fillConcurrencySlots(ctx, t, tag)
+}
+
+// fillConcurrencySlots hands free capacity to the head of the line, the repair
+// half of a sweep that released slots.
+//
+// Releasing a leaked slot frees capacity the line is owed, and nothing else
+// would hand it over: promotions happen on release, and the sweep is not a
+// release. Without this, a workflow whose slot leaked and whose line was
+// waiting would recover its limit and still not start the waiting work until
+// some later execution finished.
+//
+// It is also how a line entry naming an execution that was never created
+// resolves itself. Such a member is promoted once, spends a slot it cannot
+// start, and is dropped from the line by that promotion (ZPOPMIN removes it);
+// the next sweep finds the slot it took pointing at nothing and clears it, and
+// this fill then advances the real head. The cost is one sweep cycle for a
+// submission that crashed between taking its place in line and being written.
+func (s *Store) fillConcurrencySlots(ctx context.Context, t namespace.Namespace, tag string) error {
+	reply, err := workflowFillLua.Run(ctx, s.rdb,
+		concurrencyReleaseKeys(t, tag),
+		time.Now().UTC().Unix(), int(s.concurrencySlotTTL().Seconds()),
+	).StringSlice()
+	if err != nil && err != redis.Nil {
+		return fmt.Errorf("fill concurrency slots for %q: %w", tag, err)
+	}
+	s.completePromotions(ctx, t, tag, reply)
+	return nil
 }

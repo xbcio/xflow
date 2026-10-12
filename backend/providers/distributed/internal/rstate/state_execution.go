@@ -16,14 +16,14 @@ import (
 )
 
 func (s *Store) CreateExecution(ctx context.Context, e *engine.ExecutionSnapshot) error {
-	return s.createExecution(ctx, e, nil)
+	return s.createExecution(ctx, e, nil, time.Time{})
 }
 
 // CreateExecutionWithOutbox commits execution metadata and its initial durable
 // delivery intents in one Redis transaction. The SQL audit projection remains
 // a best-effort follow-up and is not part of scheduling correctness.
 func (s *Store) CreateExecutionWithOutbox(ctx context.Context, e *engine.ExecutionSnapshot, entries []engine.OutboxEntry) error {
-	return s.createExecution(ctx, e, entries)
+	return s.createExecution(ctx, e, entries, time.Time{})
 }
 
 // createExecution persists the execution, its outbox entries, and the SQL audit
@@ -35,7 +35,15 @@ func (s *Store) CreateExecutionWithOutbox(ctx context.Context, e *engine.Executi
 // fails on dequeue and is retried/dead-lettered by asynq (self-healing, not
 // data corruption). Keeping the outbox in the same pipeline is intentional: it
 // is the common (no-SQL-failure) path that must never strand a root task.
-func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot, entries []engine.OutboxEntry) error {
+//
+// holdUntil parks every entry of this execution: the bodies and skip markers are
+// written as usual, but the ready ZSET scores them far in the future, so no
+// delivery path and no discovery index considers them work. It is how a QUEUE
+// mode submission is persisted without being startable, and it is deliberately
+// a property of the entry's SCORE rather than of its body: the body's
+// availability stays the caller's own, so once promotion scores the entry back
+// to now, what the store hands the dispatcher says "available" in both places.
+func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot, entries []engine.OutboxEntry, holdUntil time.Time) error {
 	ttl := s.execTTL
 
 	// Per-execution transient hint from workflow options (via submission context).
@@ -232,6 +240,10 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 		readyKey := outboxReadyKey(t, e.ID)
 		bodyKey := outboxBodyKey(t, e.ID)
 		availableNow := time.Now().UTC().UnixMilli()
+		held := int64(0)
+		if !holdUntil.IsZero() {
+			held = holdUntil.UTC().UnixMilli()
+		}
 		for _, entry := range entries {
 			if entry.ID == "" {
 				return fmt.Errorf("create execution %q: empty outbox entry ID", e.ID)
@@ -243,6 +255,9 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 			availableAt := availableNow
 			if !entry.AvailableAt.IsZero() {
 				availableAt = entry.AvailableAt.UTC().UnixMilli()
+			}
+			if held != 0 {
+				availableAt = held
 			}
 			pipe.HSet(ctx, bodyKey, entry.ID, encoded)
 			pipe.ZAdd(ctx, readyKey, redis.Z{Score: float64(availableAt), Member: entry.ID})

@@ -689,42 +689,103 @@ return anyFailed and -1 or 1
 // its limit. This is the whole limit: concurrent submissions from different
 // replicas serialize on the slot ZSET, so the check-and-charge cannot race.
 //
-// KEYS[1] = workflow slot ZSET
+// KEYS[1] = workflow slot ZSET, KEYS[2] = queue ZSET,
+// KEYS[3] = queue sequence counter, KEYS[4] = capacity string,
+// KEYS[5] = queue deadline ZSET
 // ARGV[1] = slot member (the execution ID), ARGV[2] = limit,
-// ARGV[3] = admission score (unix seconds), ARGV[4] = TTL seconds for the set
-// Returns 1 admitted, 0 at the limit.
+// ARGV[3] = admission score (unix seconds), ARGV[4] = TTL seconds for the keys,
+// ARGV[5] = 1 queue mode / 0 reject mode, ARGV[6] = max_queued (0 unbounded),
+// ARGV[7] = queue deadline (unix milliseconds, 0 = no bound)
+// Returns {code, position, promoted...}: code 1 admitted, 2 queued,
+// 0 refused at the limit, 3 refused because the queue is full. position is the
+// 1-based place in the line for a queued submission (0 otherwise), and the rest
+// are the execution IDs this call promoted into free slots.
 //
 // The namespace workflow index is NOT written here, and that is the point: it
 // deliberately carries no {...} tag (it aggregates every workflow in the
-// namespace), so it can never share a slot with this script's key. Redis
+// namespace), so it can never share a slot with this script's keys. Redis
 // Cluster refuses a script whose keys hash to different slots, so keeping the
 // index out is what makes this script runnable there at all. The caller
 // registers the tag beforehand — before the charge, not after, so a slot that
 // is charged is always already discoverable by the sweeper.
 //
-// Queue mode never reaches this script: the Go side refuses it, because a slot
-// charged for an execution the queue then fails to persist would be a phantom
-// holder with no record to reconcile against.
+// Admission promotes when the line is non-empty and capacity is free. That
+// combination is not a normal state — a release fills capacity as it frees it —
+// but it is reachable: a re-published definition can raise the limit, and the
+// execution that declared the new number finds the waiters already there. Using
+// that free capacity for the newcomer instead would jump the line, so the
+// waiter goes first and the newcomer takes what is left, which is exactly the
+// order this loop puts them in.
 var workflowAdmitLua = redis.NewScript(`
 local limit = tonumber(ARGV[2])
-if redis.call('ZCARD', KEYS[1]) >= limit then
-    return 0
+local now = tonumber(ARGV[3])
+local ttl = tonumber(ARGV[4])
+local mode = tonumber(ARGV[5])
+redis.call('SET', KEYS[4], limit, 'EX', ttl)
+local holders = redis.call('ZCARD', KEYS[1])
+local waiting = redis.call('ZCARD', KEYS[2])
+if holders < limit and waiting == 0 then
+    redis.call('ZADD', KEYS[1], now, ARGV[1])
+    redis.call('EXPIRE', KEYS[1], ttl)
+    return {1, 0}
 end
-redis.call('ZADD', KEYS[1], tonumber(ARGV[3]), ARGV[1])
-redis.call('EXPIRE', KEYS[1], tonumber(ARGV[4]))
-return 1
+if mode == 0 then
+    return {0, 0}
+end
+local maxQueued = tonumber(ARGV[6])
+if maxQueued > 0 and waiting >= maxQueued then
+    return {3, 0}
+end
+local seq = redis.call('INCR', KEYS[3])
+redis.call('EXPIRE', KEYS[3], ttl)
+redis.call('ZADD', KEYS[2], seq, ARGV[1])
+redis.call('EXPIRE', KEYS[2], ttl)
+local deadline = tonumber(ARGV[7])
+if deadline > 0 then
+    redis.call('ZADD', KEYS[5], deadline, ARGV[1])
+    redis.call('EXPIRE', KEYS[5], ttl)
+end
+local position = redis.call('ZCARD', KEYS[2])
+local promoted = {}
+while redis.call('ZCARD', KEYS[1]) < limit do
+    local head = redis.call('ZPOPMIN', KEYS[2])
+    if #head == 0 then
+        break
+    end
+    redis.call('ZADD', KEYS[1], now, head[1])
+    redis.call('ZREM', KEYS[5], head[1])
+    table.insert(promoted, head[1])
+end
+redis.call('EXPIRE', KEYS[1], ttl)
+local out = {2, position}
+for _, id in ipairs(promoted) do
+    table.insert(out, id)
+end
+return out
 `)
 
 // workflowReleaseLua frees the slot one execution holds. It is idempotent: a
 // member that is already gone releases nothing and returns 0, which is what
 // lets every terminal writer call it unconditionally.
 //
-// KEYS[1] = workflow slot ZSET
-// ARGV[1] = slot member (the execution ID)
-// Returns {released, remaining}: released is 1 when this call removed the
-// member, and remaining is the set size afterwards (0 when the set is gone).
+// KEYS[1] = workflow slot ZSET, KEYS[2] = queue ZSET,
+// KEYS[3] = queue deadline ZSET, KEYS[4] = capacity string
+// ARGV[1] = slot member (the execution ID), ARGV[2] = promotion score
+// (unix seconds), ARGV[3] = TTL seconds for the set
+// Returns {drained, wasQueued, promoted...}: drained is 1 when the workflow's
+// concurrency state was emptied and deleted, wasQueued is 1 when the member was
+// still waiting in the line (so its parked intents belong to an execution that
+// never ran), and the rest are the execution IDs promoted into the freed
+// capacity.
 //
-// An emptied set is deleted here, at the same linearization point as the
+// The promotion is here, in the same script as the release, because the two are
+// one decision: capacity is free only after the release, and a promotion
+// computed outside this script could hand the same slot to two executions. The
+// promoted execution's own status and outbox are in its own hash slot and
+// cannot be touched from here — the caller finishes the promotion, and the
+// reconciler repairs the window if it does not (see completePromotions).
+//
+// An emptied state is deleted here, at the same linearization point as the
 // removal, so no admit can find a set that is about to disappear. Its entry in
 // the namespace workflow index is removed by the caller instead — the index key
 // cannot share this script's slot (see workflowAdmitLua), so the two cannot be
@@ -733,14 +794,126 @@ return 1
 // tag would hide a leaked slot.
 var workflowReleaseLua = redis.NewScript(`
 local removed = redis.call('ZREM', KEYS[1], ARGV[1])
-if removed == 0 then
-    return {0, redis.call('ZCARD', KEYS[1])}
+local wasQueued = redis.call('ZREM', KEYS[2], ARGV[1])
+redis.call('ZREM', KEYS[3], ARGV[1])
+local promoted = {}
+if removed == 1 then
+    local limit = tonumber(redis.call('GET', KEYS[4]) or '0')
+    while limit > 0 and redis.call('ZCARD', KEYS[1]) < limit do
+        local head = redis.call('ZPOPMIN', KEYS[2])
+        if #head == 0 then
+            break
+        end
+        redis.call('ZADD', KEYS[1], tonumber(ARGV[2]), head[1])
+        redis.call('ZREM', KEYS[3], head[1])
+        table.insert(promoted, head[1])
+    end
 end
-local card = redis.call('ZCARD', KEYS[1])
-if card == 0 then
+local out = {0, wasQueued}
+if redis.call('ZCARD', KEYS[1]) == 0 then
     redis.call('DEL', KEYS[1])
+    if redis.call('ZCARD', KEYS[2]) == 0 then
+        redis.call('DEL', KEYS[2])
+        redis.call('DEL', KEYS[3])
+        redis.call('DEL', KEYS[4])
+        out[1] = 1
+    end
+else
+    redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
 end
-return {removed, card}
+for _, id in ipairs(promoted) do
+    table.insert(out, id)
+end
+return out
+`)
+
+// promoteQueuedExecutionLua finishes one promotion: the execution leaves the
+// queued status and the intents it parked become due.
+//
+// The status is what the CAS is on, and the two halves are in this one script
+// because they belong together. An execution whose status still reads queued
+// while its intents are due would start work holding no slot; one that reads
+// running while its intents stay parked would never start at all. Both are
+// reachable through a crash between the release script's promotion and this
+// call, which is why the call is idempotent and the reconciler re-drives it.
+//
+// KEYS[1] = execution status key, KEYS[2] = execution outbox ready ZSET
+// ARGV[1] = the queued status, ARGV[2] = the running status,
+// ARGV[3] = status TTL seconds, ARGV[4] = held score (the parked sentinel),
+// ARGV[5] = score to release the parked intents to
+// Returns {started, released}.
+var promoteQueuedExecutionLua = redis.NewScript(`
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+    return {0, 0}
+end
+redis.call('SET', KEYS[1], ARGV[2], 'EX', tonumber(ARGV[3]))
+local due = redis.call('ZRANGEBYSCORE', KEYS[2], ARGV[4], ARGV[4])
+for _, member in ipairs(due) do
+    redis.call('ZADD', KEYS[2], tonumber(ARGV[5]), member)
+end
+return {1, #due}
+`)
+
+// workflowFillLua hands free capacity to the head of the line and reports what
+// it promoted.
+//
+// It exists for the repairs no release performs: a sweep that released a leaked
+// slot, or a limit that was raised while waiters were already queued. Without
+// it, capacity would be free and the line would still not advance, because
+// promotion happens on release and a sweep is not a release.
+//
+// KEYS[1] = workflow slot ZSET, KEYS[2] = queue ZSET,
+// KEYS[3] = queue deadline ZSET, KEYS[4] = capacity string
+// ARGV[1] = promotion score (unix seconds), ARGV[2] = TTL seconds
+var workflowFillLua = redis.NewScript(`
+local limit = tonumber(redis.call('GET', KEYS[4]) or '0')
+local filled = {}
+if limit > 0 then
+    while redis.call('ZCARD', KEYS[1]) < limit do
+        local head = redis.call('ZPOPMIN', KEYS[2])
+        if #head == 0 then
+            break
+        end
+        redis.call('ZADD', KEYS[1], tonumber(ARGV[1]), head[1])
+        redis.call('ZREM', KEYS[3], head[1])
+        table.insert(filled, head[1])
+    end
+end
+if #filled > 0 then
+    redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+end
+return filled
+`)
+
+// workflowQueueExpireLua removes the executions whose queue time has run out,
+// and reports them so the caller can drive each into the timeout terminal
+// state.
+//
+// Removing them here — from the line and from the deadline index at once, in
+// the workflow's own hash slot — is what stops the same execution being expired
+// twice by two replicas sweeping concurrently. The terminal write that follows
+// is a separate transition (the execution's keys are in another slot), so an
+// expiry whose status write is lost is retried by the next sweep: the execution
+// has left the line, and the reconcile pass finds it holding a slot while
+// still reading queued.
+//
+// A deadline without a line entry is dropped rather than reported. The member
+// was promoted, cancelled or expired by someone else, and the deadline is all
+// that is left of it.
+//
+// KEYS[1] = queue ZSET, KEYS[2] = queue deadline ZSET
+// ARGV[1] = now (unix milliseconds), ARGV[2] = batch limit
+var workflowQueueExpireLua = redis.NewScript(`
+local due = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', ARGV[1], 'LIMIT', 0, tonumber(ARGV[2]))
+local expired = {}
+for _, id in ipairs(due) do
+    redis.call('ZREM', KEYS[2], id)
+    if redis.call('ZSCORE', KEYS[1], id) then
+        redis.call('ZREM', KEYS[1], id)
+        table.insert(expired, id)
+    end
+end
+return expired
 `)
 
 // ---------------------------------------------------------------------------

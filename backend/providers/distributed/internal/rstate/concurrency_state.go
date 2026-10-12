@@ -64,6 +64,7 @@ func concurrencyTagKey(t namespace.Namespace, id types.ExecutionID) string {
 }
 
 var _ engine.ConcurrencyLimitedStateStore = (*Store)(nil)
+var _ engine.ConcurrencyQueueExpirer = (*Store)(nil)
 
 // registerConcurrencyWorkflow records that a workflow has slot state, so the
 // sweep can find the set it has to inspect.
@@ -111,18 +112,63 @@ func (s *Store) unregisterConcurrencyWorkflow(ctx context.Context, t namespace.N
 	}
 }
 
+// concurrencyAdmitKeys is the key list workflowAdmitLua declares, in order. The
+// list is built in one place because a script's KEYS and the keys it actually
+// names have to agree, and because every key in it must land in the workflow's
+// hash slot — Redis Cluster refuses a script whose keys do not.
+func concurrencyAdmitKeys(t namespace.Namespace, workflow string) []string {
+	tag := workflowDigestTag(t, workflow)
+	return []string{
+		concurrencySlotKey(t, workflow),
+		concurrencyQueueKeyForTag(t, tag),
+		concurrencyQueueSeqKeyForTag(t, tag),
+		concurrencyCapacityKeyForTag(t, tag),
+		concurrencyDeadlineKeyForTag(t, tag),
+	}
+}
+
+// concurrencyReleaseKeys is the key list workflowReleaseLua declares, in order.
+// It is a prefix of the admit list with the sequence counter left out: a
+// release neither reads nor advances the line's order.
+func concurrencyReleaseKeys(t namespace.Namespace, tag string) []string {
+	return []string{
+		concurrencySlotKeyForTag(t, tag),
+		concurrencyQueueKeyForTag(t, tag),
+		concurrencyDeadlineKeyForTag(t, tag),
+		concurrencyCapacityKeyForTag(t, tag),
+	}
+}
+
+// queuedOutboxHold is the readiness score stamped on a QUEUE-mode execution's
+// parked intents: far enough in the future that neither the delivery paths nor
+// the discovery index treats them as work.
+//
+// It is a fixed instant rather than a deadline the store re-evaluates, because
+// a queued execution's intents become due when it is promoted and not when some
+// time passes. The alternative — scoring them available-now and gating the
+// reads on the queued status — puts the parked backlog into the index as due
+// work, where it spends the discovery page budget the backlog exists to
+// compete for and hides the real work behind it.
+var queuedOutboxHold = time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// Admission reply codes, as workflowAdmitLua returns them.
+const (
+	concurrencyAdmitRefusedLimit     = 0
+	concurrencyAdmitAdmitted         = 1
+	concurrencyAdmitQueued           = 2
+	concurrencyAdmitRefusedQueueFull = 3
+)
+
 // CreateExecutionWithConcurrency admits one submission against its workflow's
 // slot set, then persists it.
 //
-// QUEUE mode is refused before anything is written. That refusal lives here
-// rather than in the engine because only the store knows whether it can park an
-// execution; a store that admitted an over-limit submission into a queue it
-// does not have would silently break the limit the definition declared.
+// REJECT mode over the limit persists nothing and returns ErrConcurrencyLimit.
+// QUEUE mode over the limit parks the submission: it is persisted in full and
+// its intents are scored into the future, so it exists durably and cannot run
+// until a release promotes it. A full queue is refused just as a reject-mode
+// submission is — the caller pays for it with a 429, not with an execution
+// waiting nowhere.
 func (s *Store) CreateExecutionWithConcurrency(ctx context.Context, execution *engine.ExecutionSnapshot, entries []engine.OutboxEntry, admission engine.ConcurrencyAdmission) (engine.ConcurrencyAdmissionResult, error) {
-	if admission.Mode == types.ConcurrencyModeQueue {
-		return engine.ConcurrencyAdmissionResult{}, engine.ErrConcurrencyQueueUnsupported
-	}
-
 	// The namespace is taken from the context, like every other scoped write in
 	// this store. The admission's own copy is not consulted: two sources for one
 	// scope could disagree, and the context's is the one a later release will
@@ -131,26 +177,96 @@ func (s *Store) CreateExecutionWithConcurrency(ctx context.Context, execution *e
 	workflow := admission.Workflow
 	tag := workflowDigestTag(t, workflow)
 	s.registerConcurrencyWorkflow(ctx, t, tag)
-	admitted, err := workflowAdmitLua.Run(ctx, s.rdb,
-		[]string{concurrencySlotKey(t, workflow)},
+	queueMode := admission.Mode == types.ConcurrencyModeQueue
+	deadlineMs := int64(0)
+	if queueMode && admission.QueueTimeout > 0 {
+		// The clock starts here, when the execution is parked. Measured from
+		// promotion it could never fire — a promoted execution is not waiting
+		// for anything — and a workflow whose limit never frees would hold
+		// submissions past their declared bound forever.
+		deadlineMs = time.Now().UTC().Add(admission.QueueTimeout).UnixMilli()
+	}
+	reply, err := workflowAdmitLua.Run(ctx, s.rdb,
+		concurrencyAdmitKeys(t, workflow),
 		concurrencySlotMember(execution.ID), admission.Limit,
 		time.Now().UTC().Unix(), int(s.concurrencySlotTTL().Seconds()),
-	).Int64()
+		concurrencyModeFlag(queueMode), admission.MaxQueued, deadlineMs,
+	).Slice()
 	if err != nil && err != redis.Nil {
 		return engine.ConcurrencyAdmissionResult{}, fmt.Errorf("admit workflow %q: %w", workflow, err)
 	}
-	if admitted == 0 {
+	code := luaReplyInt(reply, 0)
+	switch code {
+	case concurrencyAdmitRefusedLimit:
 		return engine.ConcurrencyAdmissionResult{}, engine.ErrConcurrencyLimit
+	case concurrencyAdmitRefusedQueueFull:
+		return engine.ConcurrencyAdmissionResult{}, engine.ErrConcurrencyQueueFull
 	}
 
-	// The slot is charged. Every failure from here has to give it back, or the
-	// workflow runs one short of its limit until the reconciler sweeps; that
-	// release is best effort for the same reason the sweep exists.
-	if err := s.createExecutionAdmitted(ctx, execution, entries, tag); err != nil {
+	// The slot is charged (or the line place is taken). Every failure from here
+	// has to give it back, or the workflow runs one short of its limit until the
+	// reconciler sweeps; that release is best effort for the same reason the
+	// sweep exists, and for a queued execution it also has to leave the line.
+	hold := time.Time{}
+	if code == concurrencyAdmitQueued {
+		hold = queuedOutboxHold
+	}
+	if err := s.createExecutionAdmitted(ctx, execution, entries, tag, hold); err != nil {
 		s.releaseWorkflowSlotBestEffort(ctx, execution.ID, t, tag)
 		return engine.ConcurrencyAdmissionResult{}, err
 	}
+	s.completePromotions(ctx, t, tag, luaReplyStrings(reply, 2))
+	if code == concurrencyAdmitQueued {
+		return engine.ConcurrencyAdmissionResult{Queued: true, QueuePosition: int(luaReplyInt(reply, 1))}, nil
+	}
 	return engine.ConcurrencyAdmissionResult{}, nil
+}
+
+// concurrencyModeFlag translates the mode into the integer the Lua compares
+// against: scripts have no type system to lean on, so the conversion lives in
+// one place rather than at the call site.
+func concurrencyModeFlag(queueMode bool) int {
+	if queueMode {
+		return 1
+	}
+	return 0
+}
+
+// luaReplyInt reads one integer element of a Lua reply. Redis replies with
+// strings for numbers in some positions and integers in others (a number a
+// script returned directly arrives as one; one read back from a key arrives as
+// a string), so both are accepted and an unreadable element is 0.
+func luaReplyInt(reply []any, i int) int64 {
+	if i >= len(reply) {
+		return 0
+	}
+	switch v := reply[i].(type) {
+	case int64:
+		return v
+	case string:
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return 0
+		}
+		return n
+	}
+	return 0
+}
+
+// luaReplyStrings reads the string elements of a Lua reply from index from on.
+// Elements that are not strings are skipped rather than coerced: the only
+// strings these scripts return are execution IDs.
+func luaReplyStrings(reply []any, from int) []string {
+	if from >= len(reply) {
+		return nil
+	}
+	out := make([]string, 0, len(reply)-from)
+	for _, raw := range reply[from:] {
+		if s, ok := raw.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // createExecutionAdmitted persists an execution admitted under the workflow
@@ -162,8 +278,18 @@ func (s *Store) CreateExecutionWithConcurrency(ctx context.Context, execution *e
 // lives with the execution, in the execution's own namespace, and is written
 // with the same retention as its other keys, so it is present exactly as long
 // as the execution it describes.
-func (s *Store) createExecutionAdmitted(ctx context.Context, e *engine.ExecutionSnapshot, entries []engine.OutboxEntry, tag string) error {
-	if err := s.createExecution(ctx, e, entries); err != nil {
+//
+// A non-zero holdUntil parks the execution: its status is persisted as queued
+// and its intents are scored into the future. The status is written by this
+// same call, in the same transaction as the intents, so there is no instant at
+// which a parked execution's work is deliverable without its status saying so.
+func (s *Store) createExecutionAdmitted(ctx context.Context, e *engine.ExecutionSnapshot, entries []engine.OutboxEntry, tag string, holdUntil time.Time) error {
+	if !holdUntil.IsZero() {
+		parked := *e
+		parked.Status = types.ExecutionStatusQueued
+		e = &parked
+	}
+	if err := s.createExecution(ctx, e, entries, holdUntil); err != nil {
 		return err
 	}
 	t := namespace.FromContext(ctx)
@@ -215,42 +341,168 @@ func (s *Store) releaseWorkflowSlot(ctx context.Context, id types.ExecutionID, t
 		}
 	}
 	// Registered before the release for the same reason admission registers
-	// before its charge: if this call turns out to drain the set, the tag has to
-	// be in the index for the sweep to notice anything the drain left behind,
+	// before its charge: if this call turns out to drain the state, the tag has
+	// to be in the index for the sweep to notice anything the drain left behind,
 	// and registering after a failure here would leave nothing to notice with.
 	s.registerConcurrencyWorkflow(ctx, t, tag)
-	res, err := workflowReleaseLua.Run(ctx, s.rdb,
-		[]string{concurrencySlotKeyForTag(t, tag)},
-		concurrencySlotMember(id),
+	reply, err := workflowReleaseLua.Run(ctx, s.rdb,
+		concurrencyReleaseKeys(t, tag),
+		concurrencySlotMember(id), time.Now().UTC().Unix(), int(s.concurrencySlotTTL().Seconds()),
 	).Slice()
 	if err != nil && err != redis.Nil {
 		return fmt.Errorf("release workflow slot for %q: %w", id, err)
 	}
-	// A set this call emptied is gone, so its index entry is now a tag the
-	// sweep would follow to a key that does not exist. Dropping it keeps the
-	// index proportional to the workflows that actually hold slots.
-	if card, ok := secondLuaInt(res); ok && card == 0 {
+	if luaReplyInt(reply, 1) == 1 {
+		// The execution was still waiting in the line, so it never ran: the
+		// intents it parked are the work of an execution that will not do it,
+		// and leaving them scored into the future costs storage until the
+		// execution's retention lapses with nothing ever reading them.
+		s.dropParkedOutbox(ctx, t, id)
+	}
+	s.completePromotions(ctx, t, tag, luaReplyStrings(reply, 2))
+	if luaReplyInt(reply, 0) == 1 {
+		// A state this call emptied is gone, so its index entry is now a tag the
+		// sweep would follow to a key that does not exist.
 		s.unregisterConcurrencyWorkflow(ctx, t, tag)
 	}
 	return nil
 }
 
-// secondLuaInt reads the trailing integer of a Lua reply whose first element is
-// a count the caller does not need. Redis replies with strings, so the value
-// arrives as one and has to be parsed rather than asserted.
-func secondLuaInt(reply []any) (int64, bool) {
-	if len(reply) < 2 {
-		return 0, false
+// dropParkedOutbox discards the intents of an execution that never ran. It is
+// best effort and it only ever removes intents that were never deliverable —
+// an execution parked in the line can hold no lease, because every read path
+// refuses to see a held intent.
+func (s *Store) dropParkedOutbox(ctx context.Context, t namespace.Namespace, id types.ExecutionID) {
+	if err := s.rdb.Del(ctx, outboxReadyKey(t, id), outboxBodyKey(t, id)).Err(); err != nil && s.logger != nil {
+		s.logger.Error("workflow_concurrency_parked_outbox_drop_failed", "execution_id", string(id), "err", err)
 	}
-	raw, ok := reply[1].(string)
-	if !ok {
-		return 0, false
+}
+
+// completePromotions finishes the promotions a slot transition decided. The
+// slot side of a promotion is atomic with the release that freed the capacity;
+// the promoted execution's own status and outbox live in its own hash slot and
+// cannot be written from there, so they are written here.
+//
+// Every failure is logged and left to the reconciler, which finds a promoted
+// execution the same way: holding a slot while its status still reads queued.
+// Failing the caller instead would report a release that has already been made
+// durable as failed, encouraging a retry that would release someone else's slot.
+func (s *Store) completePromotions(ctx context.Context, t namespace.Namespace, tag string, promoted []string) {
+	for _, raw := range promoted {
+		id := types.ExecutionID(raw)
+		if err := s.promoteExecution(ctx, t, id); err != nil && s.logger != nil {
+			s.logger.Error("workflow_concurrency_promotion_failed", "execution_id", raw, "workflow_tag", tag, "err", err)
+		}
 	}
-	n, err := strconv.ParseInt(raw, 10, 64)
+}
+
+// promoteExecution starts one promoted execution: the status leaves queued and
+// the intents it parked become due, in one script on the execution's own keys.
+//
+// The CAS is on the queued status rather than applied blindly, because a cancel
+// can win the race between the release that promoted the execution and this
+// call. In that case nothing is started and the parked intents stay parked —
+// the cancel path drops them.
+func (s *Store) promoteExecution(ctx context.Context, t namespace.Namespace, id types.ExecutionID) error {
+	ttl := s.getExecTTL(ctx, id)
+	if ttl <= 0 {
+		ttl = s.execTTL
+	}
+	reply, err := promoteQueuedExecutionLua.Run(ctx, s.rdb,
+		[]string{execKey(t, id, "status"), outboxReadyKey(t, id)},
+		string(types.ExecutionStatusQueued), string(types.ExecutionStatusRunning),
+		int(ttl.Seconds()), queuedOutboxHold.UnixMilli(), time.Now().UTC().UnixMilli(),
+	).Slice()
+	if err != nil && err != redis.Nil {
+		return fmt.Errorf("promote execution %q: %w", id, err)
+	}
+	if luaReplyInt(reply, 0) != 1 {
+		return nil
+	}
+	// The discovery index remembers the score the execution had when it was
+	// created, which is the held one. Re-registering publishes the score that
+	// makes it findable; without it the execution would be started and its work
+	// would still not be discovered until the next keyspace sweep.
+	s.markOutboxReadyIndex(ctx, t, id)
+	return nil
+}
+
+// ExpireQueuedExecutions drives every queued execution whose queue timeout has
+// passed into the timeout terminal state, and reports how many it expired.
+//
+// The line is the authority on what is still waiting: a deadline whose member
+// has left the line (promoted, cancelled, or expired by another replica) is
+// dropped without being reported. That check is what makes the sweep safe to
+// run from several control planes at once — the same member cannot be expired
+// twice, because the script that removes it from the line is the one that
+// reports it.
+func (s *Store) ExpireQueuedExecutions(ctx context.Context, limit int) (int, error) {
+	if limit <= 0 {
+		limit = defaultConcurrencySweepBatch
+	}
+	s.concurrencySweepMu.Lock()
+	defer s.concurrencySweepMu.Unlock()
+
+	namespaces, err := s.listNamespaces(ctx)
 	if err != nil {
-		return 0, false
+		return 0, fmt.Errorf("list namespaces for queue expiry: %w", err)
 	}
-	return n, true
+	expired := 0
+	for _, t := range namespaces {
+		if expired >= limit {
+			break
+		}
+		n, err := s.expireQueuedForNamespace(ctx, t, limit-expired)
+		if err != nil {
+			return expired, err
+		}
+		expired += n
+	}
+	return expired, nil
+}
+
+func (s *Store) expireQueuedForNamespace(ctx context.Context, t namespace.Namespace, limit int) (int, error) {
+	if limit <= 0 {
+		return 0, nil
+	}
+	tags, err := s.rdb.SMembers(ctx, concurrencyWorkflowIndexKey(t)).Result()
+	if err != nil && err != redis.Nil {
+		return 0, fmt.Errorf("read concurrency workflow index for namespace %q: %w", t, err)
+	}
+	expired := 0
+	now := time.Now().UTC().UnixMilli()
+	for _, tag := range tags {
+		if expired >= limit {
+			break
+		}
+		raw, err := workflowQueueExpireLua.Run(ctx, s.rdb,
+			[]string{concurrencyQueueKeyForTag(t, tag), concurrencyDeadlineKeyForTag(t, tag)},
+			now, limit-expired,
+		).StringSlice()
+		if err != nil && err != redis.Nil {
+			return expired, fmt.Errorf("expire queued executions for %q: %w", tag, err)
+		}
+		for _, id := range raw {
+			// Through the store's own terminal writer, so the expiry releases
+			// whatever the execution held and promotes the next in line exactly
+			// as a cancellation would. Its failure is logged rather than fatal:
+			// the next sweep finds the same member — the line entry is gone, so
+			// it is now a slot-less execution reading queued, which the reconcile
+			// pass repairs.
+			if err := s.UpdateExecutionStatus(ctx, types.ExecutionID(id), types.ExecutionStatusTimeout, engine.ConcurrencyQueueTimeoutError); err != nil {
+				if s.logger != nil {
+					s.logger.Error("workflow_concurrency_queue_timeout_failed", "execution_id", id, "err", err)
+				}
+				continue
+			}
+			// The member is out of the line already (the script above took it),
+			// so the release path cannot tell it was queued. It never ran, so
+			// its parked intents are dropped here instead.
+			s.dropParkedOutbox(ctx, t, types.ExecutionID(id))
+			expired++
+		}
+	}
+	return expired, nil
 }
 
 // workflowTagFor answers which workflow an execution was admitted under.

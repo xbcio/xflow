@@ -72,12 +72,16 @@ func admitForSweep(t *testing.T, ctx context.Context, state *Store, g *graph.Gra
 // registered first, exactly as admission writes it, then the slot itself. The
 // order is the point — a charged slot is always already discoverable by the
 // sweep, so nothing here can hide a leak from the mechanism that repairs it.
-func chargeSlotForSweep(t *testing.T, ctx context.Context, rdb *redis.Client, state *Store, tag string, member types.ExecutionID, limit int, score int64) {
+func chargeSlotForSweep(t *testing.T, ctx context.Context, rdb *redis.Client, state *Store, workflow string, member types.ExecutionID, limit int, score int64) {
 	t.Helper()
-	state.registerConcurrencyWorkflow(ctx, namespace.Default, tag)
-	if err := workflowAdmitLua.Run(ctx, rdb, []string{concurrencySlotKeyForTag(namespace.Default, tag)},
-		concurrencySlotMember(member), limit, score, 3600).Err(); err != nil {
+	state.registerConcurrencyWorkflow(ctx, namespace.Default, workflowDigestTag(namespace.Default, workflow))
+	reply, err := workflowAdmitLua.Run(ctx, rdb, concurrencyAdmitKeys(namespace.Default, workflow),
+		concurrencySlotMember(member), limit, score, 3600, 0, 0, 0).Slice()
+	if err != nil {
 		t.Fatalf("charge slot for %q error = %v", member, err)
+	}
+	if got := luaReplyInt(reply, 0); got != concurrencyAdmitAdmitted {
+		t.Fatalf("charge slot for %q code = %d, want %d (admitted)", member, got, concurrencyAdmitAdmitted)
 	}
 }
 
@@ -89,7 +93,6 @@ func TestSweepConcurrencySlotsRemovesLeakedCharge(t *testing.T) {
 	ctx := context.Background()
 	_, rdb, state := newMiniredisStore(t)
 	g := sweepGraph(t, "conc-sweep-leak")
-	tag := workflowDigestTag(namespace.Default, g.Name())
 	slotKey := concurrencySlotKey(namespace.Default, g.Name())
 
 	// Charge a slot by hand, exactly as admission would, and never create the
@@ -97,7 +100,7 @@ func TestSweepConcurrencySlotsRemovesLeakedCharge(t *testing.T) {
 	// window rather than as a submission in flight.
 	leaked := types.ExecutionID("leaked-execution")
 	old := time.Now().UTC().Add(-10 * time.Minute).Unix()
-	chargeSlotForSweep(t, ctx, rdb, state, tag, leaked, 1, old)
+	chargeSlotForSweep(t, ctx, rdb, state, g.Name(), leaked, 1, old)
 
 	swept, err := state.ReconcileConcurrencySlots(ctx, 64)
 	if err != nil {
@@ -158,7 +161,6 @@ func TestSweepConcurrencySlotsRemovesLostRelease(t *testing.T) {
 	ctx := context.Background()
 	_, rdb, state := newMiniredisStore(t)
 	g := sweepGraph(t, "conc-sweep-terminal")
-	tag := workflowDigestTag(namespace.Default, g.Name())
 	slotKey := concurrencySlotKey(namespace.Default, g.Name())
 
 	id := engine.NewExecutionID()
@@ -171,7 +173,7 @@ func TestSweepConcurrencySlotsRemovesLostRelease(t *testing.T) {
 		string(types.ExecutionStatusCanceled), 0).Err(); err != nil {
 		t.Fatalf("write terminal status error = %v", err)
 	}
-	chargeSlotForSweep(t, ctx, rdb, state, tag, id, 1, time.Now().UTC().Unix())
+	chargeSlotForSweep(t, ctx, rdb, state, g.Name(), id, 1, time.Now().UTC().Unix())
 
 	swept, err := state.ReconcileConcurrencySlots(ctx, 64)
 	if err != nil {
@@ -194,10 +196,9 @@ func TestSweepConcurrencySlotsKeepsFreshPhantom(t *testing.T) {
 	_, rdb, state := newMiniredisStore(t)
 	g := sweepGraph(t, "conc-sweep-grace")
 	slotKey := concurrencySlotKey(namespace.Default, g.Name())
-	tag := workflowDigestTag(namespace.Default, g.Name())
 
 	fresh := types.ExecutionID("fresh-execution")
-	chargeSlotForSweep(t, ctx, rdb, state, tag, fresh, 1, time.Now().UTC().Unix())
+	chargeSlotForSweep(t, ctx, rdb, state, g.Name(), fresh, 1, time.Now().UTC().Unix())
 
 	swept, err := state.ReconcileConcurrencySlots(ctx, 64)
 	if err != nil {
@@ -235,6 +236,120 @@ func TestSweepConcurrencySlotsDropsTagsForMissingSets(t *testing.T) {
 	}
 }
 
+// queueForSweep submits one QUEUE-mode execution through the real admission
+// path and returns its ID, so the sweep cases exercise the state production
+// writes rather than a hand-built imitation of it.
+func queueForSweep(t *testing.T, ctx context.Context, state *Store, g *graph.Graph, limit int) types.ExecutionID {
+	t.Helper()
+	id := engine.NewExecutionID()
+	snap := &engine.ExecutionSnapshot{ID: id, Graph: g, Status: types.ExecutionStatusRunning}
+	entries := []engine.OutboxEntry{{
+		ID: "root/" + string(id) + "/start/0",
+		Task: engine.Task{
+			ExecutionID: id,
+			NodeName:    "start",
+			NodeIdx:     0,
+			Type:        engine.TaskTypeNodeExec,
+		},
+	}}
+	admission := sweepAdmission(g, limit)
+	admission.Mode = types.ConcurrencyModeQueue
+	res, err := state.CreateExecutionWithConcurrency(ctx, snap, entries, admission)
+	if err != nil {
+		t.Fatalf("queue submission for %q error = %v", id, err)
+	}
+	if !res.Queued {
+		t.Fatalf("submission for %q = %+v, want it parked", id, res)
+	}
+	return id
+}
+
+// TestSweepConcurrencySlotsFinishesStrandedPromotion covers the promotion crash
+// window: the release that freed a slot promoted the head of the line (that
+// half is atomic with the release), and the process died before the promoted
+// execution's own status and intents were written. The member holds a slot
+// while reading queued, and removing it would strand the execution forever —
+// nothing else would ever start it. The repair is to finish the promotion.
+func TestSweepConcurrencySlotsFinishesStrandedPromotion(t *testing.T) {
+	ctx := context.Background()
+	_, rdb, state := newMiniredisStore(t)
+	g := sweepGraph(t, "conc-sweep-stranded")
+	tag := workflowDigestTag(namespace.Default, g.Name())
+	slotKey := concurrencySlotKey(namespace.Default, g.Name())
+
+	holder := admitForSweep(t, ctx, state, g, 1)
+	waiting := queueForSweep(t, ctx, state, g, 1)
+
+	// The release half only: drive the script the release path runs, without
+	// the Go-side promotion completion that follows it in production.
+	if _, err := workflowReleaseLua.Run(ctx, rdb, concurrencyReleaseKeys(namespace.Default, tag),
+		concurrencySlotMember(holder), time.Now().UTC().Unix(), 3600).Slice(); err != nil {
+		t.Fatalf("release script error = %v", err)
+	}
+	if score, err := rdb.ZScore(ctx, slotKey, string(waiting)).Result(); err != nil {
+		t.Fatalf("promoted member absent from the slot set: %v", err)
+	} else if score == 0 {
+		t.Fatal("promoted member scored 0, want a real admission score")
+	}
+	if got := queuedStatus(t, ctx, state, waiting); got != types.ExecutionStatusQueued {
+		t.Fatalf("status after the release script = %q, want %q (the crash the sweep repairs)", got, types.ExecutionStatusQueued)
+	}
+
+	if _, err := state.ReconcileConcurrencySlots(ctx, 64); err != nil {
+		t.Fatalf("ReconcileConcurrencySlots() error = %v", err)
+	}
+	if got := queuedStatus(t, ctx, state, waiting); got != types.ExecutionStatusRunning {
+		t.Fatalf("status after the sweep = %q, want the promotion finished", got)
+	}
+	if due, err := state.ListOutbox(ctx, waiting, time.Now().UTC(), 8); err != nil || len(due) != 1 {
+		t.Fatalf("ready intents after the sweep = %d (err %v), want the parked root released", len(due), err)
+	}
+}
+
+// TestSweepConcurrencySlotsFillsTheLineAfterRepair covers the other half of a
+// repair: releasing a leaked slot frees capacity the line is owed. Promotions
+// happen on release, and a sweep is not a release, so without the fill the
+// workflow would get its limit back and still not start the waiting work.
+func TestSweepConcurrencySlotsFillsTheLineAfterRepair(t *testing.T) {
+	ctx := context.Background()
+	_, rdb, state := newMiniredisStore(t)
+	g := sweepGraph(t, "conc-sweep-fill")
+	slotKey := concurrencySlotKey(namespace.Default, g.Name())
+
+	// A leaked charge with no execution holds the only slot, and a real
+	// submission waits behind it.
+	old := time.Now().UTC().Add(-10 * time.Minute).Unix()
+	chargeSlotForSweep(t, ctx, rdb, state, g.Name(), types.ExecutionID("leaked-holder"), 1, old)
+	waiting := queueForSweep(t, ctx, state, g, 1)
+
+	swept, err := state.ReconcileConcurrencySlots(ctx, 64)
+	if err != nil {
+		t.Fatalf("ReconcileConcurrencySlots() error = %v", err)
+	}
+	if swept != 1 {
+		t.Fatalf("ReconcileConcurrencySlots() swept = %d, want the leaked slot released", swept)
+	}
+	if got := queuedStatus(t, ctx, state, waiting); got != types.ExecutionStatusRunning {
+		t.Fatalf("waiter status after the sweep = %q, want it promoted into the freed slot", got)
+	}
+	if n, err := rdb.ZCard(ctx, slotKey).Result(); err != nil || n != 1 {
+		t.Fatalf("slot ZSET size after the sweep = %d (err %v), want the promoted waiter", n, err)
+	}
+}
+
+// queuedStatus reads one execution's lifecycle status.
+func queuedStatus(t *testing.T, ctx context.Context, state *Store, id types.ExecutionID) types.ExecutionStatus {
+	t.Helper()
+	status, found, err := state.GetExecutionStatus(ctx, id)
+	if err != nil {
+		t.Fatalf("GetExecutionStatus(%q) error = %v", id, err)
+	}
+	if !found {
+		t.Fatalf("GetExecutionStatus(%q) found = false", id)
+	}
+	return status
+}
+
 // TestSweepConcurrencySlotsStopsAtLimit keeps the pass bounded: the sweeper
 // calls it from a maintenance loop, and an unbounded sweep would turn one
 // workflow's backlog into a stall for every namespace behind it.
@@ -243,12 +358,11 @@ func TestSweepConcurrencySlotsStopsAtLimit(t *testing.T) {
 	_, rdb, state := newMiniredisStore(t)
 	g := sweepGraph(t, "conc-sweep-limit")
 	slotKey := concurrencySlotKey(namespace.Default, g.Name())
-	tag := workflowDigestTag(namespace.Default, g.Name())
 	old := time.Now().UTC().Add(-10 * time.Minute).Unix()
 
 	for i := 0; i < 5; i++ {
 		id := types.ExecutionID("leaked-" + string(rune('a'+i)))
-		chargeSlotForSweep(t, ctx, rdb, state, tag, id, 8, old)
+		chargeSlotForSweep(t, ctx, rdb, state, g.Name(), id, 8, old)
 	}
 
 	swept, err := state.ReconcileConcurrencySlots(ctx, 2)

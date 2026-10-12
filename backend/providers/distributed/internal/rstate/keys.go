@@ -234,6 +234,42 @@ func concurrencySlotKeyForTag(ns namespace.Namespace, workflowTag string) string
 	return fmt.Sprintf("xflow:ns:%s:conc:{%s}:slots", entryActivationNamespacePath(ns), workflowTag)
 }
 
+// concurrencyQueueKeyForTag is the workflow's FIFO line: a ZSET whose members
+// are execution IDs and whose scores are a monotonic sequence, so promotion
+// order is admission order and not the order Redis happens to return members
+// in. Everything the line needs to be promoted shares this key's hash slot —
+// the sequence it draws from, the capacity it fills to, and the deadlines that
+// expire it — which is what lets one script do all of it at once.
+func concurrencyQueueKeyForTag(ns namespace.Namespace, workflowTag string) string {
+	return fmt.Sprintf("xflow:ns:%s:conc:{%s}:queue", entryActivationNamespacePath(ns), workflowTag)
+}
+
+// concurrencyQueueSeqKeyForTag is the line's monotonic sequence counter. Scores
+// drawn from it never repeat, which is what makes FIFO order survive members
+// added and removed concurrently.
+func concurrencyQueueSeqKeyForTag(ns namespace.Namespace, workflowTag string) string {
+	return fmt.Sprintf("xflow:ns:%s:conc:{%s}:seq", entryActivationNamespacePath(ns), workflowTag)
+}
+
+// concurrencyCapacityKeyForTag is the capacity the workflow was last submitted
+// with, as a plain string. Promotion happens at release time, when the graph
+// that declared the limit is long gone, so the number has to be remembered
+// somewhere the release can reach — and it is written on every admission, so a
+// re-published definition's new limit takes effect on the next submission, as
+// the design requires.
+func concurrencyCapacityKeyForTag(ns namespace.Namespace, workflowTag string) string {
+	return fmt.Sprintf("xflow:ns:%s:conc:{%s}:limit", entryActivationNamespacePath(ns), workflowTag)
+}
+
+// concurrencyDeadlineKeyForTag indexes the queued executions that declared a
+// queue_timeout, scored by the instant they expire. A separate ZSET from the
+// line because a member's position is its wait order and its deadline is not:
+// two submissions with different timeouts keep their arrival order in the line
+// while their deadlines sort independently here.
+func concurrencyDeadlineKeyForTag(ns namespace.Namespace, workflowTag string) string {
+	return fmt.Sprintf("xflow:ns:%s:conc:{%s}:dl", entryActivationNamespacePath(ns), workflowTag)
+}
+
 // concurrencyWorkflowIndexKey enumerates the workflow tags that have a slot
 // ZSET in this namespace, so the reconciler can find the sets to sweep. It
 // deliberately carries no hash tag: it aggregates every workflow in the
