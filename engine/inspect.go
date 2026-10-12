@@ -118,7 +118,7 @@ func (e *Engine) Inspect(ctx context.Context, id types.ExecutionID, nodeNames ..
 		if err != nil {
 			return ExecutionDetail{}, err
 		}
-		if err := e.markExpiredTransientGroupNode(ctx, id, g, snap.Status, &node); err != nil {
+		if err := e.markExpiredTransientGroupNode(ctx, id, g, detail.Status, &node); err != nil {
 			return ExecutionDetail{}, err
 		}
 		detail.Nodes = append(detail.Nodes, node)
