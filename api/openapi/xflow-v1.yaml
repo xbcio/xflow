@@ -785,7 +785,7 @@ paths:
                   value:
                     success: false
                     code: execution_status_invalid
-                    message: status must be one of pending, queued, running, success, failed, canceling, canceled, timeout
+                    message: status must be one of pending, queued, paused, running, success, failed, canceling, canceled, timeout
                     trace_id: 0123456789abcdef0123456789abcdef
                 unparsableBound:
                   summary: A created_at bound is not an RFC3339 date-time.
@@ -848,6 +848,371 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/AcceptedResponse"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/executions/{id}/pause:
+    post:
+      operationId: pauseExecution
+      summary: Pause an execution
+      description: |
+        Suspends dispatch of a running execution and returns the resulting
+        execution detail. The status becomes `paused`, which is not terminal.
+
+        Work already leased to a runner is NOT interrupted: it runs to
+        completion and commits its result — including the commit that happens to
+        finish the execution — after which nothing new is dispatched. Suspended
+        nodes stay suspended, and a signal that arrives while paused is still
+        recorded; neither advances the run.
+
+        A paused execution keeps its concurrency slot: it still holds the run it
+        was admitted for, and releasing the slot would leave `resume` with
+        nowhere to return. `cancel` accepts a paused execution, which is the way
+        to release the slot without resuming.
+
+        Pausing an already-paused execution succeeds (the operation is
+        idempotent), so a retried request whose response was lost does not read
+        as a conflict. A `queued` execution cannot be paused — it has not
+        started, so there is no dispatch to hold — and neither can a terminal
+        one; both are 409.
+
+        Requires the `execution.control` scope.
+      tags: [Executions]
+      parameters:
+        - $ref: "#/components/parameters/ExecutionId"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: Paused, or already paused. The detail carries the current status.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ExecutionDetail"
+        "404":
+          description: No such execution in the caller's namespace.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                notFound:
+                  summary: The execution does not exist (or belongs to another namespace).
+                  value:
+                    success: false
+                    code: execution_not_found
+                    message: execution not found
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "409":
+          description: |
+            The execution is not in a pausable status. Check the `code`:
+            `execution_not_pausable` covers both the queued and the terminal
+            case, so a client that wants to tell them apart reads the status
+            from `GET /v1/executions/{id}`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                queued:
+                  summary: A queued execution has no running dispatch to hold.
+                  value:
+                    success: false
+                    code: execution_not_pausable
+                    message: execution is not in a pausable status
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "501":
+          description: This deployment cannot suspend dispatch at all (no pause capability).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                unsupported:
+                  summary: Neither the server nor its state store can hold dispatch.
+                  value:
+                    success: false
+                    code: execution_control_unsupported
+                    message: execution control is not supported
+                    trace_id: 0123456789abcdef0123456789abcdef
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/executions/{id}/resume:
+    post:
+      operationId: resumeExecution
+      summary: Resume an execution
+      description: |
+        Returns a paused execution to dispatch and queues the work the pause
+        held, then returns the resulting execution detail. The held work keeps
+        the deadline it was written with — a delayed intent is not pulled
+        forward — so an execution paused across a timer resumes on that timer's
+        original schedule, not immediately.
+
+        Only a `paused` execution can be resumed; every other status is 409
+        `execution_not_paused`, including a paused execution that reached a
+        terminal status while it was held (a task leased before the pause is
+        allowed to finish it).
+
+        Requires the `execution.control` scope.
+      tags: [Executions]
+      parameters:
+        - $ref: "#/components/parameters/ExecutionId"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: Resumed. The detail carries the current status.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ExecutionDetail"
+        "404":
+          description: No such execution in the caller's namespace.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                notFound:
+                  summary: The execution does not exist (or belongs to another namespace).
+                  value:
+                    success: false
+                    code: execution_not_found
+                    message: execution not found
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "409":
+          description: The execution is not paused.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                notPaused:
+                  summary: A resume is not a general restart.
+                  value:
+                    success: false
+                    code: execution_not_paused
+                    message: execution is not paused
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "501":
+          description: This deployment cannot suspend dispatch at all (no pause capability).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                unsupported:
+                  summary: Neither the server nor its state store can hold dispatch.
+                  value:
+                    success: false
+                    code: execution_control_unsupported
+                    message: execution control is not supported
+                    trace_id: 0123456789abcdef0123456789abcdef
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/executions/{id}/rerun:
+    post:
+      operationId: rerunExecution
+      summary: Rerun an execution from a node
+      description: |
+        Creates a NEW execution derived from a terminal one and returns the new
+        execution's id, starting at `from_node`.
+
+        Everything upstream of `from_node` is copied from the execution being
+        rerun — each node's stored output and chosen port, or the skip the
+        original resolved it with — and `from_node` and everything downstream of
+        it run again. The result is a complete execution, not a fragment, and it
+        carries `parent_execution_id` and `rerun_from` so the derivation stays
+        readable after the original's retention expires.
+
+        The execution being rerun is NEVER modified: no node result, lease or
+        audit row of it is disturbed. That is what makes this safe to offer for
+        any terminal execution, and it is also why a rerun is not a way to
+        "reset" an execution in place — a caller that wants the original
+        untouched and a second result gets exactly that, and a caller watching
+        the original sees nothing change.
+
+        `failed`, `canceled` and `timeout` sources are always accepted; a
+        `success` source requires `include_success` — rerunning what already
+        worked is a deliberate act. Every other status is 409
+        `execution_not_rerunnable`, including `paused`: a live execution is
+        allowed to finish (or is canceled), and deriving from a moving target
+        would copy a prefix that is still being written.
+
+        The new execution contends for its workflow's concurrency limit as any
+        other admission does: it is judged by the definition that ran, so a
+        limit lowered since then does not retroactively refuse it. Under
+        `mode: queue` it is parked with a `queue_position`; over the limit it is
+        429 with nothing persisted.
+
+        Requires the `execution.rerun` scope — deliberately not
+        `execution.control`: suspending a running pipeline and deriving a new
+        execution from a terminal one are different trust.
+      tags: [Executions]
+      parameters:
+        - $ref: "#/components/parameters/ExecutionId"
+        - $ref: "#/components/parameters/XRequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RerunExecutionRequest"
+      responses:
+        "200":
+          description: |
+            The rerun was admitted. `data.execution_id` is the NEW execution;
+            the execution this call addressed is unchanged.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/RerunExecutionResponse"
+        "400":
+          description: |
+            The request names no rerun point, or names one the execution's graph
+            does not define.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                fromNodeRequired:
+                  summary: An empty from_node is refused rather than defaulted — a default would silently re-run the whole workflow.
+                  value:
+                    success: false
+                    code: from_node_required
+                    message: from_node is required
+                    trace_id: 0123456789abcdef0123456789abcdef
+                nodeNotFound:
+                  summary: The node is not in the graph this execution ran.
+                  value:
+                    success: false
+                    code: rerun_node_not_found
+                    message: from_node is not in the execution's graph
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "404":
+          description: |
+            No such execution in the caller's namespace — or the execution's
+            definition is gone with its expired retention, which leaves nothing
+            to rerun.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                notFound:
+                  summary: The execution does not exist (or belongs to another namespace).
+                  value:
+                    success: false
+                    code: execution_not_found
+                    message: execution not found
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "409":
+          description: |
+            The execution cannot be rerun from that node. Three codes share this
+            status: `execution_not_rerunnable` for a source whose status is not
+            an acceptable one (pass `include_success` to accept a successful
+            source), `rerun_upstream_incomplete` when a node above the rerun
+            point has no result to copy — rerun from that node instead, which is
+            where the missing result stops being an input — and
+            `rerun_graph_unsupported` when the graph's shape cannot be seeded
+            from a node (a cyclic graph, or a group unit outside the rerun
+            subtree). The last is a property of the definition, so retrying
+            changes nothing.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                notRerunnable:
+                  summary: A live execution is not rerunnable.
+                  value:
+                    success: false
+                    code: execution_not_rerunnable
+                    message: execution is not in a rerunnable status
+                    trace_id: 0123456789abcdef0123456789abcdef
+                upstreamIncomplete:
+                  summary: A node upstream of the rerun point never reached an outcome, so there is nothing to copy.
+                  value:
+                    success: false
+                    code: rerun_upstream_incomplete
+                    message: a node upstream of the rerun point has no result to copy
+                    trace_id: 0123456789abcdef0123456789abcdef
+                graphUnsupported:
+                  summary: The definition cannot be seeded from a node.
+                  value:
+                    success: false
+                    code: rerun_graph_unsupported
+                    message: the execution's graph does not support rerun from a node
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "429":
+          description: |
+            The workflow refused the rerun because of its own declared limits
+            (`settings.concurrency`). Same contract as
+            POST /v1/workflows/execute: nothing was persisted, `Retry-After` is
+            a floor, and the code is `workflow_concurrency_limit` for a reached
+            limit or `workflow_concurrency_queue_full` for a full queue.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+            Retry-After:
+              description: Seconds to wait before retrying, as a floor.
+              schema:
+                type: integer
+                example: 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                workflowConcurrencyLimit:
+                  summary: The workflow is already running as many executions as its limit allows.
+                  value:
+                    success: false
+                    code: workflow_concurrency_limit
+                    message: workflow is at its concurrency limit
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "501":
+          description: |
+            This deployment cannot seed an execution (no rerun capability), so
+            there is no rerun to serve — the answer changes when the deployment
+            does, not when the caller retries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                unsupported:
+                  summary: Neither the server nor its state store can seed an execution.
+                  value:
+                    success: false
+                    code: execution_rerun_unsupported
+                    message: execution rerun is not supported
+                    trace_id: 0123456789abcdef0123456789abcdef
         default:
           $ref: "#/components/responses/DefaultError"
 
@@ -2286,6 +2651,40 @@ components:
           type: object
           additionalProperties: true
 
+    RerunExecutionRequest:
+      type: object
+      required: [from_node]
+      properties:
+        from_node:
+          type: string
+          description: |
+            The node the new execution starts at. Everything upstream of it is
+            copied from the source execution; it and everything downstream of it
+            run again.
+        include_success:
+          type: boolean
+          default: false
+          description: |
+            Accept a `success` source execution. `failed`, `canceled` and
+            `timeout` sources are accepted either way.
+
+    RerunExecutionResponse:
+      type: object
+      required: [execution_id]
+      properties:
+        execution_id:
+          type: string
+          description: The NEW execution. The source execution is unchanged.
+        status:
+          $ref: "#/components/schemas/ExecutionStatus"
+        queue_position:
+          type: integer
+          description: |
+            The new execution's 1-based place in its workflow's concurrency
+            queue while it is `queued`, 0 once it has started. Like the detail's
+            `queue_position` it is a snapshot of a line that moves, and it is
+            absent for an execution that never queued.
+
     AcceptedResponse:
       type: object
       required: [accepted]
@@ -2357,6 +2756,20 @@ components:
           type: string
         status:
           $ref: "#/components/schemas/ExecutionStatus"
+        parent_execution_id:
+          type: string
+          description: |
+            The execution this one derives from — set only on an execution
+            created by POST /v1/executions/{id}/rerun. The link is recorded on
+            the NEW execution; the source keeps no reference to its reruns, so a
+            client that wants the tree walks from the child up.
+        rerun_from:
+          type: string
+          description: |
+            The node the derivation started at: everything upstream of it was
+            copied from `parent_execution_id` rather than run again. Set
+            together with `parent_execution_id`, absent on every other
+            execution.
         error:
           type: string
         queue_position:
@@ -2401,7 +2814,15 @@ components:
 
     ExecutionStatus:
       type: string
-      enum: [pending, queued, running, success, failed, canceling, canceled, timeout]
+      description: |
+        Lifecycle status of an execution. `pending` is the persisted default
+        before a store records a transition; live executions are `running`
+        (dispatched), `queued` (a queue-mode submission waiting for a workflow
+        concurrency slot) or `paused` (an operator suspended its dispatch).
+        Terminal statuses are `success`, `failed`, `canceled` and `timeout`.
+        `queued` and `paused` are NOT terminal: both can still be canceled, and
+        both are still waited on by GET /v1/executions/{id}/wait.
+      enum: [pending, queued, paused, running, success, failed, canceling, canceled, timeout]
 
     ExecutionListResponse:
       type: object

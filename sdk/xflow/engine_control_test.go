@@ -2,6 +2,7 @@ package xflow
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -53,6 +54,199 @@ func TestEngineControlAPIInspectAndCancel(t *testing.T) {
 	}
 	if canceled.Status != types.ExecutionStatusCanceled {
 		t.Fatalf("execution status = %q, want canceled", canceled.Status)
+	}
+}
+
+// TestEngineControlAPIPauseResume drives the SDK hold end to end: an execution
+// parked on a wait node is paused, reports the paused status an operator acts
+// on, and comes back to running on resume.
+//
+// The node is left suspended on purpose — a paused execution's in-flight work is
+// not stopped, so the interesting state is precisely one that still has work
+// parked in it.
+func TestEngineControlAPIPauseResume(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	eng, err := NewLocal()
+	if err != nil {
+		t.Fatalf("NewLocal() error: %v", err)
+	}
+	defer eng.Stop()
+
+	wf := Workflow("control-pause")
+	start := wf.Node("start", node.Start())
+	wait := wf.Node("ApprovalWait", node.Wait("approval"))
+	wf.Connect(start, wait)
+
+	workflowID, err := eng.AddWorkflow(ctx, wf)
+	if err != nil {
+		t.Fatalf("AddWorkflow() error: %v", err)
+	}
+	id, err := eng.Invoke(ctx, workflowID, Start(), map[string]any{"ticket": "VULN-2"})
+	if err != nil {
+		t.Fatalf("Invoke() error: %v", err)
+	}
+	waitForNodeStatus(t, ctx, eng, id, "ApprovalWait", types.NodeStatusSuspended)
+
+	if err := eng.Pause(ctx, id); err != nil {
+		t.Fatalf("Pause() error: %v", err)
+	}
+	paused, err := eng.Inspect(ctx, id)
+	if err != nil {
+		t.Fatalf("Inspect() after pause error: %v", err)
+	}
+	if paused.Status != types.ExecutionStatusPaused {
+		t.Fatalf("execution status after Pause() = %q, want paused", paused.Status)
+	}
+
+	if err := eng.Resume(ctx, id); err != nil {
+		t.Fatalf("Resume() error: %v", err)
+	}
+	resumed, err := eng.Inspect(ctx, id)
+	if err != nil {
+		t.Fatalf("Inspect() after resume error: %v", err)
+	}
+	if resumed.Status != types.ExecutionStatusRunning {
+		t.Fatalf("execution status after Resume() = %q, want running", resumed.Status)
+	}
+}
+
+// TestEngineControlAPIRerunFromNode drives a rerun end to end on the local
+// backend: a canceled execution is derived from at the node it was parked on,
+// the new execution picks the work up there while the upstream result is copied
+// rather than re-run, and the execution it derived from is left as it was.
+//
+// The from-node is the suspended one because that is what makes the copy
+// observable: if the rerun re-ran the start node, or failed to record the
+// upstream result, this execution could not reach the wait node at all — its
+// in-degree would never be satisfied.
+func TestEngineControlAPIRerunFromNode(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	eng, err := NewLocal()
+	if err != nil {
+		t.Fatalf("NewLocal() error: %v", err)
+	}
+	defer eng.Stop()
+
+	wf := Workflow("control-rerun")
+	start := wf.Node("start", node.Start())
+	wait := wf.Node("ApprovalWait", node.Wait("approval"))
+	wf.Connect(start, wait)
+
+	workflowID, err := eng.AddWorkflow(ctx, wf)
+	if err != nil {
+		t.Fatalf("AddWorkflow() error: %v", err)
+	}
+	id, err := eng.Invoke(ctx, workflowID, Start(), map[string]any{"ticket": "VULN-3"})
+	if err != nil {
+		t.Fatalf("Invoke() error: %v", err)
+	}
+	waitForNodeStatus(t, ctx, eng, id, "ApprovalWait", types.NodeStatusSuspended)
+	if err := eng.Cancel(ctx, id); err != nil {
+		t.Fatalf("Cancel() error: %v", err)
+	}
+
+	rerun, err := eng.Rerun(ctx, id, "ApprovalWait")
+	if err != nil {
+		t.Fatalf("Rerun() error: %v", err)
+	}
+	if rerun.ExecutionID == "" || rerun.ExecutionID == id {
+		t.Fatalf("Rerun() ExecutionID = %q, want a new execution derived from %q", rerun.ExecutionID, id)
+	}
+	if rerun.Queued {
+		t.Fatalf("Rerun() = %+v, want a started execution: the definition declares no limit", rerun)
+	}
+
+	// The rerun reaches the wait node again, which is the copy working: the
+	// wait node's only predecessor was resolved from the parent's own result.
+	detail := waitForNodeStatus(t, ctx, eng, rerun.ExecutionID, "ApprovalWait", types.NodeStatusSuspended)
+	if detail.ParentID != id {
+		t.Fatalf("rerun parent = %q, want %q", detail.ParentID, id)
+	}
+	if detail.RerunFrom != "ApprovalWait" {
+		t.Fatalf("rerun from = %q, want %q", detail.RerunFrom, "ApprovalWait")
+	}
+
+	// The execution it derived from is untouched: a rerun is a new execution,
+	// not a rewrite.
+	parent, err := eng.Inspect(ctx, id)
+	if err != nil {
+		t.Fatalf("Inspect(parent) error: %v", err)
+	}
+	if parent.Status != types.ExecutionStatusCanceled {
+		t.Fatalf("parent status = %q, want it left at %q", parent.Status, types.ExecutionStatusCanceled)
+	}
+
+	// And the rerun is a live execution: the signal that would have resumed the
+	// original now drives this one to a terminal success.
+	if err := eng.Signal(ctx, rerun.ExecutionID, "approval", map[string]any{"approver": "alice"}); err != nil {
+		t.Fatalf("Signal(rerun) error: %v", err)
+	}
+	result, err := eng.Wait(ctx, rerun.ExecutionID)
+	if err != nil {
+		t.Fatalf("Wait(rerun) error: %v", err)
+	}
+	if result.Status != types.ExecutionStatusSuccess {
+		t.Fatalf("rerun status = %q, want %q", result.Status, types.ExecutionStatusSuccess)
+	}
+}
+
+// TestEngineControlAPIRerunGuards pins the request-level refusals the SDK owns:
+// a from-node is required, and a successful execution is only a rerun source
+// when the caller says so.
+func TestEngineControlAPIRerunGuards(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	eng, err := NewLocal()
+	if err != nil {
+		t.Fatalf("NewLocal() error: %v", err)
+	}
+	defer eng.Stop()
+
+	wf := Workflow("control-rerun-guards")
+	start := wf.Node("start", node.Start())
+	wait := wf.Node("ApprovalWait", node.Wait("approval"))
+	wf.Connect(start, wait)
+
+	workflowID, err := eng.AddWorkflow(ctx, wf)
+	if err != nil {
+		t.Fatalf("AddWorkflow() error: %v", err)
+	}
+	id, err := eng.Invoke(ctx, workflowID, Start(), map[string]any{"ticket": "VULN-4"})
+	if err != nil {
+		t.Fatalf("Invoke() error: %v", err)
+	}
+	if _, err := eng.Rerun(ctx, id, ""); err == nil {
+		t.Fatal("Rerun() with no from node returned no error")
+	}
+	// The execution is not terminal yet, so the status gate is what refuses it.
+	if _, err := eng.Rerun(ctx, id, "ApprovalWait"); !errors.Is(err, enginecore.ErrExecutionNotRerunnable) {
+		t.Fatalf("Rerun(a running execution) error = %v, want %v", err, enginecore.ErrExecutionNotRerunnable)
+	}
+	if _, err := eng.Rerun(ctx, id, "no-such-node"); !errors.Is(err, enginecore.ErrExecutionNotRerunnable) {
+		t.Fatalf("Rerun(unknown node) error = %v, want the status gate first: %v", err, enginecore.ErrExecutionNotRerunnable)
+	}
+
+	// Drive it to success, then check the include-success gate.
+	if err := eng.Signal(ctx, id, "approval", nil); err != nil {
+		t.Fatalf("Signal() error: %v", err)
+	}
+	if _, err := eng.Wait(ctx, id); err != nil {
+		t.Fatalf("Wait() error: %v", err)
+	}
+	if _, err := eng.Rerun(ctx, id, "ApprovalWait"); !errors.Is(err, enginecore.ErrExecutionNotRerunnable) {
+		t.Fatalf("Rerun(a success) error = %v, want %v", err, enginecore.ErrExecutionNotRerunnable)
+	}
+	rerun, err := eng.Rerun(ctx, id, "ApprovalWait", RerunIncludeSuccess())
+	if err != nil {
+		t.Fatalf("Rerun(a success, include_success) error: %v", err)
+	}
+	if rerun.ExecutionID == "" || rerun.ExecutionID == id {
+		t.Fatalf("Rerun() ExecutionID = %q, want a new execution", rerun.ExecutionID)
 	}
 }
 

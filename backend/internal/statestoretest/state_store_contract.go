@@ -30,13 +30,15 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 	g := ContractGraph()
 
 	if err := state.CreateExecution(ctx, &engine.ExecutionSnapshot{
-		ID:      id,
-		Graph:   g,
-		Status:  types.ExecutionStatusRunning,
-		Params:  map[string]any{"claim_id": "c-1", "retry_budget": float64(2)},
-		Runtime: &types.Runtime{Vars: map[string]any{"namespace_id": "namespace-a"}},
-		Scope:   map[string]any{"$index": float64(3)},
-		TestRun: true,
+		ID:        id,
+		Graph:     g,
+		Status:    types.ExecutionStatusRunning,
+		Params:    map[string]any{"claim_id": "c-1", "retry_budget": float64(2)},
+		Runtime:   &types.Runtime{Vars: map[string]any{"namespace_id": "namespace-a"}},
+		Scope:     map[string]any{"$index": float64(3)},
+		TestRun:   true,
+		ParentID:  "exec-contract-parent",
+		RerunFrom: "start",
 	}); err != nil {
 		t.Fatalf("CreateExecution() error = %v", err)
 	}
@@ -81,6 +83,16 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 	// in a test run, with no error anywhere.
 	if !snap.TestRun {
 		t.Fatalf("TestRun = false, want true: test_only pin_data is gated on this flag")
+	}
+	// The execution this one derives from, and the node a rerun starts at. Both
+	// are immutable metadata an operator reads to tell a derived execution from
+	// an original one, and a backend that drops them loses the only link that
+	// survives the parent's keys.
+	if snap.ParentID != "exec-contract-parent" {
+		t.Fatalf("ParentID = %q, want %q", snap.ParentID, "exec-contract-parent")
+	}
+	if snap.RerunFrom != "start" {
+		t.Fatalf("RerunFrom = %q, want %q", snap.RerunFrom, "start")
 	}
 
 	loaded, err := state.LoadGraph(ctx, id)

@@ -103,6 +103,7 @@ func knownExecutionStatus(s types.ExecutionStatus) bool {
 	switch s {
 	case types.ExecutionStatusPending,
 		types.ExecutionStatusQueued,
+		types.ExecutionStatusPaused,
 		types.ExecutionStatusRunning,
 		types.ExecutionStatusSuccess,
 		types.ExecutionStatusFailed,

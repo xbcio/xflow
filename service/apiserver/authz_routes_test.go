@@ -29,9 +29,17 @@ func (noQueue) Enqueue(context.Context, *engine.Task) error                     
 func (noQueue) EnqueueDelayed(context.Context, *engine.Task, time.Duration) error { return nil }
 
 // execRouteFixture wires a miniredis-backed distributed backend + control plane
-// + APIServer with a two-token registry: tok-full has the "execution" scope,
-// tok-none has only "workflow". Both are in namespaceA so authz passes the namespace
-// check and the decision is driven by scope alone.
+// + APIServer with a five-token registry: tok-full has the "execution",
+// "execution.control" and "execution.rerun" scopes in namespaceA, tok-none has
+// only "workflow" in namespaceA, tok-control holds the control scope WITHOUT
+// the rerun scope (and vice versa for tok-rerun), and tok-other carries all of
+// them in namespaceB so the namespace boundary — not the scope — is what a
+// cross-namespace call trips.
+//
+// tok-control / tok-rerun exist because the two grants are deliberately
+// separate: suspending a running pipeline and deriving a new execution from a
+// terminal one are different trust, and a single token holding both could not
+// tell a missing-scope 403 from a passing one.
 type execRouteFixture struct {
 	t       *testing.T
 	httpSrv *httptest.Server
@@ -58,8 +66,11 @@ func newExecRouteFixture(t *testing.T) *execRouteFixture {
 
 	audit := NewInMemoryAuditSink()
 	principalAuth := NewBearerPrincipalAuthMulti([]TokenPrincipalMapping{
-		{Token: "tok-full", Subject: "op-full", Namespace: "namespaceA", Scopes: []string{"workflow", "execution"}},
+		{Token: "tok-full", Subject: "op-full", Namespace: "namespaceA", Scopes: []string{"workflow", "execution", "execution.control", "execution.rerun"}},
 		{Token: "tok-none", Subject: "op-none", Namespace: "namespaceA", Scopes: []string{"workflow"}},
+		{Token: "tok-control", Subject: "op-control", Namespace: "namespaceA", Scopes: []string{"workflow", "execution", "execution.control"}},
+		{Token: "tok-rerun", Subject: "op-rerun", Namespace: "namespaceA", Scopes: []string{"workflow", "execution", "execution.rerun"}},
+		{Token: "tok-other", Subject: "op-other", Namespace: "namespaceB", Scopes: []string{"workflow", "execution", "execution.control", "execution.rerun"}},
 	})
 
 	srv, err := New(Config{
@@ -136,7 +147,19 @@ func TestExecutionRouteOperationMatrix(t *testing.T) {
 	}{
 		{"inspect", http.MethodGet, "/v1/executions/" + string(f.execID), nil, http.StatusOK, http.StatusForbidden, OpExecutionRead, false},
 		{"signal", http.MethodPost, "/v1/executions/" + string(f.execID) + "/signals", signalRequest{Name: "s1"}, http.StatusOK, http.StatusForbidden, OpExecutionSignal, true},
+		// The two control transitions run as a pair and before cancel, because
+		// this table drives one execution through real state changes: pause
+		// holds dispatch and resume releases it, so the pair only reaches 200 in
+		// this order, and cancel (which terminalizes and cannot be undone) would
+		// make both of them refuse with 409 afterwards. The 403 deny path is
+		// order-independent like every other row.
+		{"pause", http.MethodPost, "/v1/executions/" + string(f.execID) + "/pause", nil, http.StatusOK, http.StatusForbidden, OpExecutionPause, true},
+		{"resume", http.MethodPost, "/v1/executions/" + string(f.execID) + "/resume", nil, http.StatusOK, http.StatusForbidden, OpExecutionResume, true},
 		{"cancel", http.MethodPost, "/v1/executions/" + string(f.execID) + "/cancel", nil, http.StatusOK, http.StatusForbidden, OpExecutionCancel, true},
+		// rerun must follow cancel in this table: it needs a terminal source,
+		// and it creates a new execution rather than moving this one, so it is
+		// the one row that leaves the object under test untouched.
+		{"rerun", http.MethodPost, "/v1/executions/" + string(f.execID) + "/rerun", rerunRequest{FromNode: "start"}, http.StatusOK, http.StatusForbidden, OpExecutionRerun, true},
 		{"revoke", http.MethodDelete, "/v1/executions/" + string(f.execID) + "/signals/s1", nil, http.StatusOK, http.StatusForbidden, OpExecutionRevoke, true},
 	}
 	// wait is a long-poll, so it is exercised deny-only (authz fails before the
@@ -220,10 +243,16 @@ func TestExecutionMutationFailClosedHandlerNotReached(t *testing.T) {
 		{"signal", OpExecutionSignal},
 		{"revoke", OpExecutionRevoke},
 		{"cancel", OpExecutionCancel},
+		{"pause", OpExecutionPause},
+		{"resume", OpExecutionResume},
+		{"rerun", OpExecutionRerun},
 	}
 	for _, mt := range mutations {
 		t.Run(mt.name, func(t *testing.T) {
-			auth := staticPrincipalAuth{principal: Principal{Subject: "alice", Namespace: "namespaceA", Scopes: []string{"execution"}}}
+			// The principal carries both execution scopes: this test is about
+			// the audit fail-close, so the scope must not be what refuses it.
+			// Scope granularity itself is pinned by TestExecutionRouteOperationMatrix.
+			auth := staticPrincipalAuth{principal: Principal{Subject: "alice", Namespace: "namespaceA", Scopes: []string{"execution", "execution.control", "execution.rerun"}}}
 			mod := &workflowControlModule{}
 			mod.principalAuth = auth
 			mod.authorizer = NamespaceAwareAuthorizer{}

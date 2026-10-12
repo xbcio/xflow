@@ -132,6 +132,15 @@ func TestTransientClusterControlAPIsReturnClearErrors(t *testing.T) {
 	if err := eng.RevokeSignal(ctx, id, "approval"); !errors.Is(err, ErrTransientSignalsUnsupported) {
 		t.Fatalf("RevokeSignal() error = %v, want ErrTransientSignalsUnsupported", err)
 	}
+	if err := eng.Pause(ctx, id); !errors.Is(err, ErrTransientPauseUnsupported) {
+		t.Fatalf("Pause() error = %v, want ErrTransientPauseUnsupported", err)
+	}
+	if err := eng.Resume(ctx, id); !errors.Is(err, ErrTransientPauseUnsupported) {
+		t.Fatalf("Resume() error = %v, want ErrTransientPauseUnsupported", err)
+	}
+	if _, err := eng.Rerun(ctx, id, "node"); !errors.Is(err, ErrTransientRerunUnsupported) {
+		t.Fatalf("Rerun() error = %v, want ErrTransientRerunUnsupported", err)
+	}
 }
 
 func waitForTransientCondition(t *testing.T, timeout time.Duration, condition func() bool) {

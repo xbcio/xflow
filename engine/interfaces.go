@@ -154,6 +154,69 @@ type SuspendedNodeCanceler interface {
 	CancelSuspendedNode(ctx context.Context, id types.ExecutionID, nodeName string) (canceled bool, err error)
 }
 
+// ExecutionPauser is the optional StateStore capability that suspends and
+// resumes an execution's dispatch.
+//
+// Pause has to be a store transition rather than an engine-side flag, for the
+// same reason ConcurrencyLimitedStateStore is: the enforcement point is the
+// store's own dispatch transaction. The engine delivers work by claiming
+// outbox intents (AtomicStateStore.LeaseOutbox), and a check made anywhere
+// else — in the engine before claiming, or in the flusher after a claim — is a
+// check racing the very transition it is deciding: a claim that read "running"
+// can still be granted after the pause landed, because between the read and
+// the claim the pause may have become durable. The store that grants the claim
+// is the only place that can refuse it atomically with the pause, so every
+// backend that can hold an execution's work must refuse it there.
+//
+// What a pause does NOT stop is work already leased to a runner. That boundary
+// is the point of the status: a leased task is executing outside the store's
+// control, so its commit is accepted as usual — it may even finalize the
+// execution — while the downstream work that commit produces stays in the
+// outbox, undeliverable, until a resume releases it.
+//
+// A paused execution keeps its workflow concurrency slot, unlike a queued one.
+// It holds intermediate state — in-flight leases, counter positions, buffered
+// signals — that only a resume can put back to work, and releasing the slot
+// would admit a replacement competing with the work the resume restarts.
+//
+// Pause is deliberately refused for an execution that is not running. A queued
+// execution holds no intermediate state at all: nothing of it has ever been
+// dispatched, so there is nothing to suspend. The caller gets
+// ErrExecutionNotPausable, and cancels it instead if that is the intent.
+type ExecutionPauser interface {
+	// PauseExecution suspends dispatch of a running execution: its status
+	// becomes types.ExecutionStatusPaused and nothing more of its ready set is
+	// claimable, while the intents themselves are retained for a resume.
+	//
+	// An already-paused execution is a no-op success: the caller asked for a
+	// state the execution is already in, and reporting a conflict would make a
+	// retried pause — the ordinary shape after a response was lost — look like
+	// a failure. Every other status returns ErrExecutionNotPausable, and an
+	// absent execution returns it too: nothing was there to change.
+	PauseExecution(ctx context.Context, id types.ExecutionID) error
+	// ResumeExecution returns a paused execution to dispatch: its status
+	// becomes running again and the work the pause retained becomes claimable.
+	//
+	// An execution that is not paused returns ErrExecutionNotPaused —
+	// including one that reached a terminal state while it was paused, because
+	// its last leased task committed while it was suspended. Resume is the
+	// inverse of pause, not a way to start anything else.
+	ResumeExecution(ctx context.Context, id types.ExecutionID) error
+}
+
+// ErrExecutionNotPausable reports a pause of an execution that is not running:
+// queued, canceling, terminal, or absent. Nothing was changed.
+var ErrExecutionNotPausable = errors.New("execution is not pausable")
+
+// ErrExecutionNotPaused reports a resume of an execution that is not paused.
+// Nothing was changed.
+var ErrExecutionNotPaused = errors.New("execution is not paused")
+
+// ErrPauseUnsupported reports a StateStore that has not implemented
+// ExecutionPauser. It is not a verdict about the execution: the store cannot
+// suspend anything, so no execution on it can be paused.
+var ErrPauseUnsupported = errors.New("state store does not support execution pause")
+
 // ExecutionStatusReader reads back only an execution's lifecycle status.
 //
 // This exists because the hot paths do not want a snapshot. loadActiveGraph
