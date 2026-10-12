@@ -7,6 +7,7 @@ import (
 
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/types"
 )
 
 // ErrConcurrencyLimit is returned by a submission that a workflow's
@@ -134,6 +135,26 @@ type ConcurrencyQueueExpirer interface {
 	// to call concurrently: an execution a release or a cancel has already
 	// started is no longer queued and is not expired.
 	ExpireQueuedExecutions(ctx context.Context, limit int) (int, error)
+}
+
+// ConcurrencyQueueInspector is the optional StateStore capability that answers
+// where one queued execution stands in line.
+//
+// It is separate from ConcurrencyLimitedStateStore because the queue is read
+// long after the submission that filled it: the admission result tells the
+// submitter its position once, and only the store can say how far the line has
+// moved since. It is a read-only capability for the same reason — nothing about
+// an inspection may change the queue.
+//
+// A store that queues without implementing it simply reports no position:
+// callers must treat 0 as "unknown or not queued", never as "at the head".
+type ConcurrencyQueueInspector interface {
+	// ConcurrencyQueuePosition returns the 1-based position of a queued
+	// execution (1 is the head, the one the next release promotes), or 0 when
+	// the execution is not queued — already promoted, canceled, expired, or
+	// never queued at all. It is not an error to ask about an execution that
+	// is not queued.
+	ConcurrencyQueuePosition(ctx context.Context, id types.ExecutionID) (int, error)
 }
 
 // concurrencyAdmissionFor builds the admission one submission contends for from

@@ -13,7 +13,14 @@ type ExecutionDetail struct {
 	ExecutionID types.ExecutionID     `json:"execution_id"`
 	Status      types.ExecutionStatus `json:"status"`
 	Error       string                `json:"error,omitempty"`
-	Nodes       []NodeDetail          `json:"nodes,omitempty"`
+	// QueuePosition is where a queued execution stands in line, 1-based, or 0
+	// when it is not queued — which includes every execution of a workflow that
+	// never queues and every store that cannot report a position. Reporting is
+	// best effort: a store that was asked and failed leaves this at 0 rather
+	// than failing the inspection, because the status and the nodes are the
+	// audit answer and the position is an extra.
+	QueuePosition int          `json:"queue_position,omitempty"`
+	Nodes         []NodeDetail `json:"nodes,omitempty"`
 }
 
 // NodeDetail is an audit snapshot for a workflow node.
@@ -50,6 +57,16 @@ func (e *Engine) Inspect(ctx context.Context, id types.ExecutionID, nodeNames ..
 		ExecutionID: id,
 		Status:      snap.Status,
 		Error:       snap.Error,
+	}
+	if snap.Status == types.ExecutionStatusQueued {
+		// Best effort, and deliberately not an error when it fails: the caller
+		// asked to inspect an execution and the status is the answer to that.
+		// A position it could not read is a missing extra, not a failed read.
+		if inspector, ok := e.state.(ConcurrencyQueueInspector); ok {
+			if position, err := inspector.ConcurrencyQueuePosition(ctx, id); err == nil {
+				detail.QueuePosition = position
+			}
+		}
 	}
 
 	g, err := e.state.LoadGraph(ctx, id)
