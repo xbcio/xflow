@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -102,6 +103,34 @@ func (f *fakeState) CreateExecutionWithOutbox(_ context.Context, execution *Exec
 		f.putAtomicOutboxLocked(execution.ID, entry.ID, entry.Task, entry.AvailableAt)
 	}
 	return nil
+}
+
+var _ ConcurrencyLimitedStateStore = (*fakeState)(nil)
+
+// CreateExecutionWithConcurrency is the test reference implementation of slot
+// admission: the limit check, the slot charge, the execution write and its
+// initial outbox all happen under one mutex acquisition, which is the same
+// atomicity the production backends get from a single Lua script.
+func (f *fakeState) CreateExecutionWithConcurrency(_ context.Context, execution *ExecutionSnapshot, entries []OutboxEntry, admission ConcurrencyAdmission) (ConcurrencyAdmissionResult, error) {
+	if admission.Mode == types.ConcurrencyModeQueue {
+		return ConcurrencyAdmissionResult{}, ErrConcurrencyQueueUnsupported
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := graph.ConcurrencyKey(admission.Namespace, admission.Workflow)
+	if len(f.concurrencySlots[key]) >= admission.Limit {
+		return ConcurrencyAdmissionResult{}, ErrConcurrencyLimit
+	}
+	if f.concurrencySlots[key] == nil {
+		f.concurrencySlots[key] = make(map[types.ExecutionID]bool)
+	}
+	f.concurrencySlots[key][execution.ID] = true
+	f.concurrencyHolders[execution.ID] = key
+	f.createExecutionLocked(execution)
+	for _, entry := range entries {
+		f.putAtomicOutboxLocked(execution.ID, entry.ID, entry.Task, entry.AvailableAt)
+	}
+	return ConcurrencyAdmissionResult{}, nil
 }
 
 func (f *fakeState) ResetNodeForRetryWithOutbox(_ context.Context, id types.ExecutionID, nodeName string, token LeaseToken, entry OutboxEntry) (bool, error) {

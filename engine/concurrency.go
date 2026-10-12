@@ -1,0 +1,117 @@
+package engine
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/namespace"
+)
+
+// ErrConcurrencyLimit is returned by a submission that a workflow's
+// settings.concurrency refused. In REJECT mode nothing was persisted for it;
+// the HTTP layer maps it to 429 + Retry-After.
+var ErrConcurrencyLimit = errors.New("workflow concurrency limit reached")
+
+// ErrConcurrencyUnsupported is returned when a workflow declares a concurrency
+// limit but the wired StateStore cannot enforce one.
+//
+// It fails closed by design: silently running unlimited would defeat a limit
+// the author declared to protect a downstream, and a rolling deployment is
+// exactly the situation where that failure would otherwise hide. The check is
+// live (a type assertion at submission time), not a registration-time flag, so
+// a backend that gains the capability stops failing without a restart.
+var ErrConcurrencyUnsupported = errors.New("state store does not support execution concurrency limits")
+
+// ErrConcurrencyQueueUnsupported is returned when a workflow asks for QUEUE
+// mode on a backend that implements slot admission but not the queue.
+//
+// It exists so queue mode can land in two phases without a release window in
+// which an over-limit submission is admitted: until the queue is implemented,
+// queue mode is refused rather than silently downgraded to admit-anyway.
+var ErrConcurrencyQueueUnsupported = errors.New("state store does not support concurrency queue mode")
+
+// ConcurrencyAdmission describes the slot one submission contends for.
+//
+// Limit and Mode are resolved from the submitting execution's own compiled
+// graph, so a submission is judged by the definition it was submitted under:
+// lowering the limit never preempts a running execution, and raising it does
+// not retroactively re-judge one.
+type ConcurrencyAdmission struct {
+	// Namespace scopes the slot set, like every other key in the store.
+	Namespace string
+	// Workflow is the workflow NAME, not the version: slots are keyed by
+	// namespace+workflow so a version bump cannot orphan the slots the previous
+	// version's executions still hold (graph.ConcurrencyKey).
+	Workflow string
+	// Limit is the maximum number of concurrently running executions. Callers
+	// only reach the store when it is > 0.
+	Limit int
+	// Mode is types.ConcurrencyModeReject or types.ConcurrencyModeQueue.
+	Mode string
+	// MaxQueued caps the QUEUE-mode backlog. 0 means unbounded. Ignored in
+	// reject mode.
+	MaxQueued int
+	// QueueTimeout bounds how long a QUEUED execution may wait for a slot. The
+	// clock starts at admission. 0 means no bound. Ignored in reject mode.
+	QueueTimeout time.Duration
+}
+
+// ConcurrencyAdmissionResult reports what the admission did.
+type ConcurrencyAdmissionResult struct {
+	// Queued is true when the execution was parked instead of started. The
+	// caller must not flush its initial outbox: the store holds those intents
+	// until promotion makes them deliverable.
+	Queued bool
+	// QueuePosition is the queued execution's 1-based position, or 0 when
+	// Queued is false.
+	QueuePosition int
+}
+
+// ConcurrencyLimitedStateStore is the optional StateStore capability that
+// enforces settings.concurrency. It extends AtomicStateStore because slot
+// admission has to commit in the SAME atomic step as the execution's creation:
+// a slot reserved by an execution that failed to persist would leak, and an
+// execution persisted without its slot would over-admit.
+//
+// Implementations own both halves of the contract:
+//   - admission (this method) charges a slot in the same transition that
+//     persists the execution and its initial outbox, and returns
+//     ErrConcurrencyLimit without persisting anything when a reject-mode
+//     submission is over the limit;
+//   - release happens inside the store's own terminal-status writers, so no
+//     engine call site can forget it. Every path that moves an execution into
+//     types.IsTerminalExecutionStatus releases its slot idempotently, and a
+//     non-terminal transition (canceling) keeps it.
+type ConcurrencyLimitedStateStore interface {
+	AtomicStateStore
+	// CreateExecutionWithConcurrency persists a new execution under the
+	// supplied workflow's concurrency policy. See the interface doc for the
+	// atomicity contract.
+	CreateExecutionWithConcurrency(ctx context.Context, execution *ExecutionSnapshot, entries []OutboxEntry, admission ConcurrencyAdmission) (ConcurrencyAdmissionResult, error)
+}
+
+// concurrencyAdmissionFor builds the admission one submission contends for from
+// its own compiled graph, or nil when the graph declares no limit.
+//
+// It is deliberately the only place the two are joined: the engine has the
+// graph and the namespace, the store has the slots, and a second join site
+// could read a different definition than the one the execution persisted.
+func concurrencyAdmissionFor(ctx context.Context, g *graph.Graph) *ConcurrencyAdmission {
+	if g == nil {
+		return nil
+	}
+	settings := g.Concurrency()
+	if settings == nil || settings.Limit <= 0 {
+		return nil
+	}
+	return &ConcurrencyAdmission{
+		Namespace:    string(namespace.FromContext(ctx)),
+		Workflow:     g.Name(),
+		Limit:        settings.Limit,
+		Mode:         settings.EffectiveMode(),
+		MaxQueued:    settings.MaxQueued,
+		QueueTimeout: settings.QueueTimeout,
+	}
+}

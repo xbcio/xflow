@@ -71,7 +71,14 @@ func submitInitialTasks(id types.ExecutionID, g *graph.Graph) []initialTask {
 // outage cannot invalidate the execution: the background OutboxDispatcher
 // will retry delivery from durable state. Legacy StateStores keep their
 // original create-then-enqueue semantics for backwards compatibility.
+//
+// A graph that declares settings.concurrency takes the concurrency admission
+// path instead, and fails closed when the StateStore cannot enforce one.
 func (e *Engine) startExecution(ctx context.Context, snap *ExecutionSnapshot, tasks []initialTask) (types.ExecutionID, error) {
+	admission := concurrencyAdmissionFor(ctx, snap.Graph)
+	if admission != nil {
+		return e.startLimitedExecution(ctx, snap, tasks, admission)
+	}
 	if state, ok := e.state.(AtomicStateStore); ok {
 		entries := make([]OutboxEntry, 0, len(tasks))
 		for _, initial := range tasks {
@@ -103,6 +110,52 @@ func (e *Engine) startExecution(ctx context.Context, snap *ExecutionSnapshot, ta
 			return "", e.failInitialExecution(ctx, snap.ID, initial.operation, err)
 		}
 	}
+	return snap.ID, nil
+}
+
+// startLimitedExecution is the creation path for a graph that declares
+// settings.concurrency.
+//
+// Every refusal happens before the store is asked to persist anything, so a
+// rejected submission leaves no execution, no graph cache entry and no task —
+// which is what makes "reject" observable as a 429 rather than as a
+// zero-length execution.
+func (e *Engine) startLimitedExecution(ctx context.Context, snap *ExecutionSnapshot, tasks []initialTask, admission *ConcurrencyAdmission) (types.ExecutionID, error) {
+	// The capability assertion is deliberately made here and not at
+	// registration: a StateStore can gain the capability in a new build without
+	// the workflow having to be re-registered, and the failure mode of getting
+	// it wrong (running unlimited) is the one the limit exists to prevent.
+	state, ok := e.state.(ConcurrencyLimitedStateStore)
+	if !ok {
+		return "", fmt.Errorf("workflow %q: %w", admission.Workflow, ErrConcurrencyUnsupported)
+	}
+	// QUEUE mode lands in a second phase. Until then it must be refused rather
+	// than downgraded: admitting an over-limit submission would silently break
+	// the limit the author declared, and queue mode is the DEFAULT mode of the
+	// bare-int shorthand, so "silently admit" would be wrong for most
+	// definitions that use it.
+	if admission.Mode == types.ConcurrencyModeQueue {
+		return "", fmt.Errorf("workflow %q: %w", admission.Workflow, ErrConcurrencyQueueUnsupported)
+	}
+
+	entries := make([]OutboxEntry, 0, len(tasks))
+	for _, initial := range tasks {
+		entries = append(entries, OutboxEntry{
+			ID:   initialOutboxID(snap.ID, initial.task.NodeName, initial.task.ActivationID),
+			Task: initial.task,
+		})
+	}
+	res, err := state.CreateExecutionWithConcurrency(ctx, snap, entries, *admission)
+	if err != nil {
+		return "", fmt.Errorf("create execution: %w", err)
+	}
+	e.cacheExecutionGraph(snap.ID, snap.Graph)
+	if res.Queued {
+		// The store holds these intents until promotion; delivering them now
+		// would start a queued execution's roots while it holds no slot.
+		return snap.ID, nil
+	}
+	e.flushInitialOutbox(ctx, snap.ID)
 	return snap.ID, nil
 }
 
