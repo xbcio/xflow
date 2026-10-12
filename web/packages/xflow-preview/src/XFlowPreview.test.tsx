@@ -1,7 +1,7 @@
 import * as React from "react";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { WorkflowDef } from "@xflow/core";
+import type { NodeStatus, WorkflowDef } from "@xflow/core";
 import { XFlowPreview } from "./index";
 
 const reactFlowMock = vi.hoisted(() => ({
@@ -422,6 +422,45 @@ describe("XFlowPreview", () => {
     // ordering list silently drops every node carrying it.
     expect(screen.getByText("1 committing")).toBeTruthy();
     expect(screen.getByText("1 expired")).toBeTruthy();
+  });
+
+  it("counts every node status in the run summary", () => {
+    // The compile-time guard lives on summaryStatusOrder in index.tsx; this is
+    // its behavioural half: every status must actually reach a pill.
+    const nodeCountsByStatus: Record<NodeStatus, number> = {
+      pending: 1,
+      running: 1,
+      committing: 1,
+      success: 1,
+      failed: 1,
+      skipped: 1,
+      pinned: 1,
+      continued: 1,
+      suspended: 1,
+      waiting: 1,
+      expired: 1,
+      canceled: 1
+    };
+    const statuses = Object.keys(nodeCountsByStatus) as NodeStatus[];
+
+    render(
+      <XFlowPreview
+        workflow={{
+          id: "wf-every-status",
+          name: "Every status",
+          nodes: statuses.map((status) => ({ name: status, type: "xflow.http" }))
+        }}
+        runtime={{
+          status: "failed",
+          nodes: Object.fromEntries(statuses.map((status) => [status, { status }]))
+        }}
+      />
+    );
+
+    expect(screen.getByText(`${statuses.length} nodes`)).toBeTruthy();
+    for (const status of statuses) {
+      expect(screen.getByText(`1 ${status}`)).toBeTruthy();
+    }
   });
 
   it("retries the initial canvas fit until controlled nodes have measured dimensions", () => {

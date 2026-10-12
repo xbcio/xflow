@@ -652,26 +652,36 @@ function SummaryPill({ label }: { label: string }): React.ReactElement {
   return <span className="xflow-preview-summary__pill">{label}</span>;
 }
 
-function RunSummary({ summary }: { summary: RuntimeSummary }): React.ReactElement {
-  const statuses: NodeStatus[] = [
-    "running",
-    "committing",
-    "failed",
-    "waiting",
-    "suspended",
-    "success",
-    "skipped",
-    "pending",
-    "expired",
-    "canceled"
-  ];
+/**
+ * Run-summary pill order. Total over `NodeStatus` on purpose: a status missing
+ * from this list is silently dropped from the summary (its nodes show no pill
+ * at all), so `satisfies Record<NodeStatus, true>` turns an omission into a
+ * compile error instead of a UI gap.
+ */
+const summaryStatusOrder = {
+  running: true,
+  committing: true,
+  failed: true,
+  waiting: true,
+  suspended: true,
+  success: true,
+  pinned: true,
+  continued: true,
+  skipped: true,
+  pending: true,
+  expired: true,
+  canceled: true
+} satisfies Record<NodeStatus, true>;
 
+const summaryStatuses = Object.keys(summaryStatusOrder) as NodeStatus[];
+
+function RunSummary({ summary }: { summary: RuntimeSummary }): React.ReactElement {
   return (
     <div className="xflow-preview-summary" aria-label="Run summary">
       <span>Run summary</span>
       <div>
         <SummaryPill label={`${summary.total} nodes`} />
-        {statuses.map((status) => {
+        {summaryStatuses.map((status) => {
           const count = summary.counts[status] ?? 0;
           return count > 0 ? <SummaryPill key={status} label={`${count} ${status}`} /> : null;
         })}
