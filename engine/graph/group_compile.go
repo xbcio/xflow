@@ -38,6 +38,9 @@ func compileGroups(g *Graph, def *types.WorkflowDef) error {
 		if err := validateGroupRetry(gd.Name, gd.Retry); err != nil {
 			return err
 		}
+		if err := validateGroupMode(g, gd); err != nil {
+			return err
+		}
 		meta, err := compileOneGroup(g, def, gd, len(g.groups))
 		if err != nil {
 			return fmt.Errorf("group %q: %w", gd.Name, err)
