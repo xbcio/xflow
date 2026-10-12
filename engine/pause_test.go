@@ -139,3 +139,44 @@ func snapshotStatus(t *testing.T, state StateStore, id types.ExecutionID) types.
 	}
 	return snap.Status
 }
+
+// TestCancelAcceptsAPausedExecution pins the interaction that would otherwise
+// deadlock: a paused execution keeps its workflow concurrency slot, so if
+// Cancel refused it the slot could never be released — nothing else can finish
+// an execution whose dispatch is held — and the workflow would sit at its limit
+// for good.
+//
+// The engine's active check is "non-terminal", which a paused execution already
+// satisfies. This is the test that keeps it that way: narrowing that check to
+// running (the obvious-looking shape for "only a running execution can be
+// cancelled") would compile, pass every other cancel test, and leak one slot
+// per paused execution.
+func TestCancelAcceptsAPausedExecution(t *testing.T) {
+	ctx := context.Background()
+	state := newFakeState()
+	eng := New(state, &fakeQueue{})
+	g := compileLimitedGraph(t, 1)
+
+	first, err := eng.Submit(ctx, g, nil)
+	if err != nil {
+		t.Fatalf("first Submit() error = %v", err)
+	}
+	if err := eng.Pause(ctx, first); err != nil {
+		t.Fatalf("Pause() error = %v", err)
+	}
+	if _, err := eng.Submit(ctx, g, nil); !errors.Is(err, ErrConcurrencyLimit) {
+		t.Fatalf("Submit() beside a paused holder error = %v, want %v: a paused execution holds "+
+			"its slot", err, ErrConcurrencyLimit)
+	}
+
+	if err := eng.Cancel(ctx, first); err != nil {
+		t.Fatalf("Cancel(paused) error = %v", err)
+	}
+	if got := snapshotStatus(t, state, first); got != types.ExecutionStatusCanceled {
+		t.Fatalf("status after Cancel() = %q, want %q", got, types.ExecutionStatusCanceled)
+	}
+	if _, err := eng.Submit(ctx, g, nil); err != nil {
+		t.Fatalf("Submit() after canceling the paused execution error = %v, want the slot released",
+			err)
+	}
+}
