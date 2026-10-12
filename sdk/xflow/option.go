@@ -47,6 +47,13 @@ type engineConfig struct {
 	// at Execute time. nil = feature disabled.
 	artifactStore *store.ArtifactStore
 
+	// scheduleOverrides holds the runtime overlays an operator has placed on
+	// trigger nodes (a retimed cron expression, a pause). Read by the
+	// in-process trigger host at activation time — see WithScheduleOverrides.
+	// nil = no overlays, i.e. every trigger runs exactly what its definition
+	// says.
+	scheduleOverrides store.ScheduleOverrideStore
+
 	executionMode             ExecutionMode
 	executionModeSet          bool
 	transientTTL              time.Duration
@@ -169,6 +176,26 @@ func WithVersionPolicy(p execution.VersionPolicy) Option {
 // artifact_digest params fail at Execute with a permanent config error.
 func WithArtifactStore(s *store.ArtifactStore) Option {
 	return func(c *engineConfig) { c.artifactStore = s }
+}
+
+// WithScheduleOverrides provides the store holding trigger-node overlays: the
+// per-node runtime overrides that retime a cron schedule, or pause it, without
+// re-registering the workflow.
+//
+// The engine reads it in the trigger host, at activation time: an overlay is
+// merged into the node's activation parameters (a cron node's `expression`, its
+// `timezone` and policies; a timer node's `interval`) on top of the values the
+// definition rendered.
+//
+// It is the SAME store the schedule API writes through (control.ScheduleManager),
+// and that is the point: a process that serves the API and hosts its own
+// triggers must hand both the same store, or an operator's change is stored
+// where nothing reads it.
+//
+// nil (the default) means no overlays exist: every trigger activates with
+// exactly the parameters its definition declares.
+func WithScheduleOverrides(overrides store.ScheduleOverrideStore) Option {
+	return func(c *engineConfig) { c.scheduleOverrides = overrides }
 }
 
 // InvokeOption configures a single workflow invocation.

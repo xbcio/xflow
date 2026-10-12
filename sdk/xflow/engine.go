@@ -69,6 +69,9 @@ type Engine struct {
 	// artifactStore for ScriptFile resolution (AddWorkflow) and embedded-runner
 	// artifact_digest resolution (Execute). nil = disabled.
 	artifactStore *store.ArtifactStore
+	// scheduleOverrides holds the trigger-node overlays the in-process trigger
+	// host merges into a node's activation parameters. nil = no overlays.
+	scheduleOverrides store.ScheduleOverrideStore
 	// resourcePool is the process-owned pool supplied to embedded execution.
 	// FAF reuses it so resource-aware actions retain local execution parity
 	// without introducing any execution persistence.
@@ -141,6 +144,7 @@ func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error
 		globalHandlers:      make(map[string]types.ActionHandler),
 		fafHandlers:         make(map[types.WorkflowID]fafHandlerBinding),
 		artifactStore:       cfg.artifactStore,
+		scheduleOverrides:   cfg.scheduleOverrides,
 		resourcePool:        cfg.resourcePool,
 	}
 	e.triggerRuntime = newTriggerRuntime(e, provider.TriggerPrimitives())

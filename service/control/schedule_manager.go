@@ -703,6 +703,29 @@ func scheduleNodes(g *graph.Graph) ([]graph.NodeMeta, error) {
 	return out, nil
 }
 
+// IsIndependentSchedule reports whether node is one of the graph's independent
+// schedule nodes — the same rule the schedule API's listing and its writes use.
+//
+// It is exported for the trigger HOST, which must apply an overlay under exactly
+// the rule the API writes one under: a host that applied an overlay the API
+// reports as orphaned would run a schedule the operator was told is not in
+// effect, and a host that ignored one the API reports as in effect would run the
+// wrong one. A nil graph reports false — with no compiled definition there is
+// nothing to decide from, and the definition's own parameters are the safe
+// answer.
+func IsIndependentSchedule(g *graph.Graph, node string) bool {
+	nodes, err := scheduleNodes(g)
+	if err != nil {
+		return false
+	}
+	for i := range nodes {
+		if nodes[i].Name == node {
+			return true
+		}
+	}
+	return false
+}
+
 // scheduleParamString reads a string parameter the way the trigger handlers do:
 // a value that is not a string but has a textual form is reported as that form,
 // and a missing one as empty.

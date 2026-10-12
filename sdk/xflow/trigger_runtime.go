@@ -13,6 +13,8 @@ import (
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/node/supply"
+	"github.com/xbcio/xflow/service/control"
+	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -25,7 +27,12 @@ type triggerRuntime struct {
 	eng        *Engine
 	primitives backend.TriggerPrimitives
 	webhooks   *webhookRuntime
-	mu         sync.Mutex
+	// overrides holds the runtime overlays an operator has placed on trigger
+	// nodes, read at activation time. nil means no overlay store is configured,
+	// which is not a degraded mode: it is the deployment that never serves the
+	// schedules API, and every trigger then runs exactly what its definition says.
+	overrides store.ScheduleOverrideStore
+	mu        sync.Mutex
 	// idle is signaled when inflight drops to zero so Close can wait for
 	// in-flight activations to finish before tearing everything down.
 	idle *sync.Cond
@@ -64,6 +71,9 @@ func newTriggerRuntime(e *Engine, p backend.TriggerPrimitives) *triggerRuntime {
 		webhooks:     newWebhookRuntime(logger),
 		subs:         make(map[string]types.TriggerSubscription),
 		reservations: make(map[string]uint64),
+	}
+	if e != nil {
+		r.overrides = e.scheduleOverrides
 	}
 	r.idle = sync.NewCond(&r.mu)
 	return r
@@ -123,12 +133,7 @@ func (r *triggerRuntime) ReconcileWorkflow(ctx context.Context, rec backend.Work
 			activateErr = fmt.Errorf("trigger handler %q not registered", p.nd.Type)
 			break
 		}
-		// Render $config/$vars templates exactly as the control plane does for
-		// a remote-hosted trigger. This path reads the raw WorkflowDef rather
-		// than the compiled Graph, so without this call the two deployment
-		// modes disagree on what the same workflow means: distributed
-		// subscribes to the rendered topic, in-process to the template text.
-		params, err := graph.EvaluateActivationParams(rec.Graph, p.nd.Name, p.nd.Type, p.nd.Parameters)
+		params, err := r.activationParams(ctx, rec, p.nd)
 		if err != nil {
 			activateErr = err
 			break
@@ -195,6 +200,49 @@ func (r *triggerRuntime) ReconcileWorkflow(ctx context.Context, rec backend.Work
 	closeErr := closeSubscriptions(ctx, toClose)
 	r.finishInflight()
 	return closeErr
+}
+
+// activationParams resolves the parameters one trigger node activates with.
+//
+// Two layers sit on top of the definition here, and their order is load-bearing:
+//
+//  1. $config/$vars templates are rendered, exactly as the control plane does
+//     for a remote-hosted trigger. This path reads the raw WorkflowDef rather
+//     than the compiled Graph, so without this call the two deployment modes
+//     disagree on what the same workflow means: distributed subscribes to the
+//     rendered topic, in-process to the template text.
+//  2. The node's schedule overlay, if an operator has written one, is applied
+//     over the rendered values. It goes second because an overlay is a literal
+//     an operator typed — it is not a template and must never be fed back
+//     through $config.
+//
+// A store read that FAILS fails the activation rather than falling back to the
+// definition. That direction is deliberate: the overlays a read would have
+// returned include the paused ones, and activating on the strength of a failed
+// read is how a pause stops meaning anything. A trigger that is not a schedule,
+// and a schedule that is a member of a co-location group (a unit the API never
+// writes an overlay for), skip the read entirely.
+func (r *triggerRuntime) activationParams(ctx context.Context, rec backend.WorkflowRecord, nd types.NodeDef) (map[string]any, error) {
+	params, err := graph.EvaluateActivationParams(rec.Graph, nd.Name, nd.Type, nd.Parameters)
+	if err != nil {
+		return nil, err
+	}
+	if r.overrides == nil {
+		return params, nil
+	}
+	kind, isSchedule := control.ScheduleKindOf(nd.Type)
+	if !isSchedule || !control.IsIndependentSchedule(rec.Graph, nd.Name) {
+		return params, nil
+	}
+	ns := fafNamespace(rec.Namespace)
+	ov, err := r.overrides.GetScheduleOverride(ctx, ns, rec.ID, nd.Name)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return params, nil
+		}
+		return nil, fmt.Errorf("read schedule override for %s/%s: %w", rec.ID, nd.Name, err)
+	}
+	return control.MergeScheduleOverrideParams(kind, params, ov), nil
 }
 
 // finishInflight decrements the in-flight counter and wakes a waiting Close
