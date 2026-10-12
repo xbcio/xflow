@@ -56,6 +56,61 @@ func TestEngineControlAPIInspectAndCancel(t *testing.T) {
 	}
 }
 
+// TestEngineControlAPIPauseResume drives the SDK hold end to end: an execution
+// parked on a wait node is paused, reports the paused status an operator acts
+// on, and comes back to running on resume.
+//
+// The node is left suspended on purpose — a paused execution's in-flight work is
+// not stopped, so the interesting state is precisely one that still has work
+// parked in it.
+func TestEngineControlAPIPauseResume(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	eng, err := NewLocal()
+	if err != nil {
+		t.Fatalf("NewLocal() error: %v", err)
+	}
+	defer eng.Stop()
+
+	wf := Workflow("control-pause")
+	start := wf.Node("start", node.Start())
+	wait := wf.Node("ApprovalWait", node.Wait("approval"))
+	wf.Connect(start, wait)
+
+	workflowID, err := eng.AddWorkflow(ctx, wf)
+	if err != nil {
+		t.Fatalf("AddWorkflow() error: %v", err)
+	}
+	id, err := eng.Invoke(ctx, workflowID, Start(), map[string]any{"ticket": "VULN-2"})
+	if err != nil {
+		t.Fatalf("Invoke() error: %v", err)
+	}
+	waitForNodeStatus(t, ctx, eng, id, "ApprovalWait", types.NodeStatusSuspended)
+
+	if err := eng.Pause(ctx, id); err != nil {
+		t.Fatalf("Pause() error: %v", err)
+	}
+	paused, err := eng.Inspect(ctx, id)
+	if err != nil {
+		t.Fatalf("Inspect() after pause error: %v", err)
+	}
+	if paused.Status != types.ExecutionStatusPaused {
+		t.Fatalf("execution status after Pause() = %q, want paused", paused.Status)
+	}
+
+	if err := eng.Resume(ctx, id); err != nil {
+		t.Fatalf("Resume() error: %v", err)
+	}
+	resumed, err := eng.Inspect(ctx, id)
+	if err != nil {
+		t.Fatalf("Inspect() after resume error: %v", err)
+	}
+	if resumed.Status != types.ExecutionStatusRunning {
+		t.Fatalf("execution status after Resume() = %q, want running", resumed.Status)
+	}
+}
+
 func TestEngineControlAPIRevokePredeliveredSignal(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()

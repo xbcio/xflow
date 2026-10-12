@@ -122,6 +122,35 @@ func (e *Engine) Cancel(ctx context.Context, id types.ExecutionID) error {
 	return e.eng.Cancel(ctx, id)
 }
 
+// Pause suspends dispatch of a running execution.
+//
+// The execution's status becomes types.ExecutionStatusPaused and it keeps its
+// concurrency slot: it is still holding the run it was admitted for, and giving
+// the slot back would leave a resume with nowhere to return. Work already leased
+// to a runner runs to completion and commits, so a pause is not an instant stop;
+// what it stops is the dispatch of anything new. Suspended nodes stay suspended
+// and arriving signals are still recorded, they just do not advance the run.
+//
+// Resume is the way back. Cancel also accepts a paused execution, which is the
+// only escape from a pause that would otherwise hold its slot forever.
+func (e *Engine) Pause(ctx context.Context, id types.ExecutionID) error {
+	if e.executionMode == ExecutionModeTransient {
+		return ErrTransientPauseUnsupported
+	}
+	return e.eng.Pause(ctx, id)
+}
+
+// Resume returns a paused execution to dispatch and queues what the pause held.
+//
+// The work is delivered as soon as this returns, so the caller can inspect the
+// execution immediately afterwards and see it moving.
+func (e *Engine) Resume(ctx context.Context, id types.ExecutionID) error {
+	if e.executionMode == ExecutionModeTransient {
+		return ErrTransientPauseUnsupported
+	}
+	return e.eng.Resume(ctx, id)
+}
+
 // Inspect returns execution and node status details for audit and UI flows.
 //
 // When nodeNames are omitted, Inspect loads the stored graph and returns every

@@ -32,6 +32,18 @@ var (
 	// It aliases engine.ErrSuspendUnsupported so the cluster (distributed) transient path
 	// surfaces the same sentinel the in-process path used to return.
 	ErrTransientSuspendUnsupported = engine.ErrSuspendUnsupported
+	// ErrTransientPauseUnsupported reports that execution pause/resume is
+	// unavailable in transient mode.
+	//
+	// Transient mode is a retention contract: an execution's state lives under a
+	// TTL and is dropped at completion. A pause is a hold an operator ends
+	// whenever they are ready — it can outlive that TTL, and by the time the
+	// resume arrives the paused status may simply be gone, so a store that
+	// accepts the pause would be promising a hold it cannot keep. That is not
+	// the same refusal as engine.ErrPauseUnsupported (a store with no pause
+	// capability at all): the backend here has the capability and the mode
+	// declines to use it, so this is its own sentinel rather than an alias.
+	ErrTransientPauseUnsupported = errors.New("xflow: execution pause is unsupported in transient execution mode")
 	// ErrTransientRequiresCluster reports that transient execution mode needs a
 	// cluster/Redis backend. NewLocal does not support transient mode; use NewCluster.
 	ErrTransientRequiresCluster = errors.New("xflow: transient execution mode requires a cluster/Redis backend, use NewCluster")
