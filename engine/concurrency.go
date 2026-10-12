@@ -114,6 +114,28 @@ type ConcurrencyLimitedStateStore interface {
 	CreateExecutionWithConcurrency(ctx context.Context, execution *ExecutionSnapshot, entries []OutboxEntry, admission ConcurrencyAdmission) (ConcurrencyAdmissionResult, error)
 }
 
+// ConcurrencyQueueExpirer is the optional StateStore capability that enforces
+// queue_timeout: it drives every queued execution whose timeout has passed into
+// the timeout terminal state.
+//
+// It is a separate capability from ConcurrencyLimitedStateStore because the two
+// are driven from different places. Admission and release happen on the
+// submission path; expiry happens on a clock, in whatever background loop the
+// deployment owns — the control plane's concurrency maintenance in cluster
+// mode, the local backend's own ticker in-process. The split is not cosmetic:
+// an expiry driven from the engine would be per-process, so a process that
+// admitted a queued execution and then died would leave it queued past its
+// bound with nobody left to notice.
+type ConcurrencyQueueExpirer interface {
+	// ExpireQueuedExecutions drives every queued execution whose queue timeout
+	// has passed into types.ExecutionStatusTimeout with
+	// ConcurrencyQueueTimeoutError as its reason, and reports how many it
+	// expired. Bounded by limit (0 means the store's own batch size), and safe
+	// to call concurrently: an execution a release or a cancel has already
+	// started is no longer queued and is not expired.
+	ExpireQueuedExecutions(ctx context.Context, limit int) (int, error)
+}
+
 // concurrencyAdmissionFor builds the admission one submission contends for from
 // its own compiled graph, or nil when the graph declares no limit.
 //
