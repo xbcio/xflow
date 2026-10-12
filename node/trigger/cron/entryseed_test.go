@@ -54,7 +54,7 @@ func TestCronEntrySeedFireKey(t *testing.T) {
 	// Observed half a minute late: the identity must not move with it.
 	observed := time.Date(2026, 10, 12, 3, 4, 30, 0, time.UTC)
 
-	tr.admitScheduledFire(context.Background(), in, rt, minuteSchedule(t), cronFire{scheduled: scheduled, observed: observed})
+	tr.admitScheduledFire(context.Background(), in, rt, minuteSchedule(t), cronFire{scheduled: scheduled, observed: observed}, watermarkState(t, rt))
 
 	calls := rt.Seeds()
 	if len(calls) != 1 {
@@ -84,8 +84,8 @@ func TestCronEntrySeedTwoReplicasFireOnce(t *testing.T) {
 	// this path, so the two must collide on the server. The second replica runs
 	// its callback noticeably later than the first — that is what the scheduled
 	// instant is derived for, and it must not move the key.
-	New().admitScheduledFire(context.Background(), in, rt, sched, cronFire{scheduled: scheduled, observed: scheduled.Add(20 * time.Millisecond)})
-	New().admitScheduledFire(context.Background(), in, rt, sched, cronFire{scheduled: scheduled, observed: scheduled.Add(40 * time.Second)})
+	New().admitScheduledFire(context.Background(), in, rt, sched, cronFire{scheduled: scheduled, observed: scheduled.Add(20 * time.Millisecond)}, watermarkState(t, rt))
+	New().admitScheduledFire(context.Background(), in, rt, sched, cronFire{scheduled: scheduled, observed: scheduled.Add(40 * time.Second)}, watermarkState(t, rt))
 
 	if got := rt.SeedCount(); got != 2 {
 		t.Fatalf("admissions = %d, want 2 (both replicas submit)", got)
@@ -109,7 +109,7 @@ func TestCronEntrySeedRefusalIsNotRetried(t *testing.T) {
 	tr := New()
 	in := seedInput(rt, "*/1 * * * *")
 	now := time.Now()
-	tr.admitScheduledFire(context.Background(), in, rt, minuteSchedule(t), cronFire{scheduled: now, observed: now})
+	tr.admitScheduledFire(context.Background(), in, rt, minuteSchedule(t), cronFire{scheduled: now, observed: now}, watermarkState(t, rt))
 
 	if got := rt.SeedCount(); got != 1 {
 		t.Fatalf("admissions = %d, want 1: a refused firing is dropped, not retried", got)
@@ -131,7 +131,7 @@ func TestCronEntrySeedTransportFailureIsBounded(t *testing.T) {
 	})
 	tr := New()
 	now := time.Now()
-	tr.admitScheduledFire(context.Background(), seedInput(rt, "*/1 * * * *"), rt, minuteSchedule(t), cronFire{scheduled: now, observed: now})
+	tr.admitScheduledFire(context.Background(), seedInput(rt, "*/1 * * * *"), rt, minuteSchedule(t), cronFire{scheduled: now, observed: now}, watermarkState(t, rt))
 
 	calls := rt.Seeds()
 	if len(calls) != 4 {

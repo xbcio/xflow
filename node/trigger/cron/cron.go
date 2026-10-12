@@ -97,31 +97,44 @@ func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (ty
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	cursor := newScheduleCursor(sched, time.Now().In(loc))
+	watermark := openActivationWatermark(ctx, in)
 	c := cronlib.New(cronlib.WithLocation(loc))
 	c.Schedule(sched, cronlib.FuncJob(func() {
 		observed := time.Now().In(loc)
-		event := newCronTriggerEvent(in.WorkflowID, in.NodeName, cursor.next(observed))
-		if ok, err := in.Runtime.Dedup(runCtx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+event.ID, 2*time.Minute); err == nil && ok {
-			if _, err := in.Emit(runCtx, event); err != nil {
-				// A firing that was refused is DROPPED, and that is the whole
-				// handling: a schedule is a stream of moments, so the next firing
-				// is a fresh attempt and replaying this one would turn a busy
-				// workflow into a backlog of stale ticks. The refusal an operator
-				// will see here is the workflow's own concurrency limit
-				// (engine.ErrConcurrencyLimit); a QUEUE-mode workflow does not
-				// produce it, because its over-limit firings are parked and
-				// admitted later instead of refused.
-				//
-				// The log is not decoration. Nothing durable records the dropped
-				// tick — no execution, no offset, no state — so without this line
-				// a schedule that is being refused is indistinguishable from a
-				// schedule that never fired.
-				slog.Warn("cron trigger firing was not admitted; the tick is dropped",
-					"workflow_id", in.WorkflowID,
-					"node", in.NodeName,
-					"event", event.ID,
-					"err", err)
+		fire := cursor.next(observed)
+		event := newCronTriggerEvent(in.WorkflowID, in.NodeName, fire)
+		// handled distinguishes "this instant has been decided" from "the store
+		// failed before anything was attempted": only the first moves the
+		// watermark, so a firing that never happened is still visible to a later
+		// activation.
+		handled := false
+		if ok, err := in.Runtime.Dedup(runCtx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+event.ID, 2*time.Minute); err == nil {
+			handled = true
+			if ok {
+				if _, err := in.Emit(runCtx, event); err != nil {
+					// A firing that was refused is DROPPED, and that is the whole
+					// handling: a schedule is a stream of moments, so the next firing
+					// is a fresh attempt and replaying this one would turn a busy
+					// workflow into a backlog of stale ticks. The refusal an operator
+					// will see here is the workflow's own concurrency limit
+					// (engine.ErrConcurrencyLimit); a QUEUE-mode workflow does not
+					// produce it, because its over-limit firings are parked and
+					// admitted later instead of refused.
+					//
+					// The log is not decoration. The watermark records which instant
+					// this was, but not that it was refused — so without this line a
+					// schedule that is being refused is indistinguishable from a
+					// schedule that never fired.
+					slog.Warn("cron trigger firing was not admitted; the tick is dropped",
+						"workflow_id", in.WorkflowID,
+						"node", in.NodeName,
+						"event", event.ID,
+						"err", err)
+				}
 			}
+		}
+		if handled {
+			recordFiring(runCtx, watermark, in, fire.scheduled)
 		}
 	}))
 	c.Start()
@@ -156,10 +169,11 @@ func (n *Node) activateEntrySeed(ctx context.Context, in *types.TriggerActivateI
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	cursor := newScheduleCursor(sched, time.Now().In(loc))
+	watermark := openActivationWatermark(ctx, in)
 	c := cronlib.New(cronlib.WithLocation(loc))
 	c.Schedule(sched, cronlib.FuncJob(func() {
 		observed := time.Now().In(loc)
-		n.admitScheduledFire(runCtx, in, rt, sched, cursor.next(observed))
+		n.admitScheduledFire(runCtx, in, rt, sched, cursor.next(observed), watermark)
 	}))
 	c.Start()
 	return types.CloseFunc(func(context.Context) error {
@@ -179,7 +193,7 @@ func (n *Node) activateEntrySeed(ctx context.Context, in *types.TriggerActivateI
 // chosen instant: a five-field cron fires at minute granularity, so there is no
 // way to reach the next firing inside a test without waiting a minute, and no
 // way to assert what the fire key is for a given instant without one.
-func (n *Node) admitScheduledFire(ctx context.Context, in *types.TriggerActivateInput, rt types.EntrySeedRuntime, sched cronlib.Schedule, fire cronFire) {
+func (n *Node) admitScheduledFire(ctx context.Context, in *types.TriggerActivateInput, rt types.EntrySeedRuntime, sched cronlib.Schedule, fire cronFire, watermark types.TriggerState) {
 	event := newCronTriggerEvent(in.WorkflowID, in.NodeName, fire)
 	req := seedadmit.NewRequest(in, seedadmit.KindCron, cronFireID(fire.scheduled), event)
 	admitCtx, admitCancel := context.WithTimeout(ctx, firingWindow(sched, fire.scheduled))
@@ -189,8 +203,8 @@ func (n *Node) admitScheduledFire(ctx context.Context, in *types.TriggerActivate
 	case seedadmit.Refused:
 		// A refusal is a DECISION, not a fault: the workflow is at its own
 		// concurrency limit and nothing was persisted. The firing is dropped —
-		// the next one is a fresh attempt — and this line is the only record,
-		// because nothing durable saw the attempt.
+		// the next one is a fresh attempt — and this line is the only record of
+		// why, because the watermark below says only that the instant passed.
 		slog.Warn("cron trigger firing was refused; the tick is dropped",
 			"workflow_id", in.WorkflowID,
 			"node", in.NodeName,
@@ -202,6 +216,11 @@ func (n *Node) admitScheduledFire(ctx context.Context, in *types.TriggerActivate
 			"fire_key", req.AdmissionKey,
 			"err", err)
 	}
+	// The watermark moves for all three outcomes by design: an admitted firing is
+	// behind us, and so is one the workflow refused or the transport lost — the
+	// tick is dropped rather than retried, and the watermark's job is to say which
+	// instants are behind the trigger, not which of them produced an execution.
+	recordFiring(ctx, watermark, in, fire.scheduled)
 }
 
 // newCronTriggerEvent builds the event for one firing. It is a function rather
