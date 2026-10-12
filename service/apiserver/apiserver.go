@@ -41,6 +41,19 @@ type Config struct {
 	// Supplies backs the /v1/supplies endpoints. When nil the supply module is
 	// not registered at all (the routes 404). A *sqlstore.Provider satisfies it.
 	Supplies store.Supplies
+	// Schedules serves the /v1/workflows/{id}/schedules endpoints: the runtime
+	// overlays on a workflow's cron and timer trigger nodes. When nil the routes
+	// are still registered but answer 501 — a deployment without an overlay
+	// store still HAS the API, it just cannot serve it, and a 404 would read as
+	// "this server is older than the route".
+	//
+	// The manager's host callbacks (reload, backfill) are the trigger host's
+	// half of the contract: a control plane whose triggers run on runners has
+	// none to wire yet (see control.ScheduleManagerConfig). What such a server
+	// serves is the overlay itself — list, inspect, retime, pause, resume — and
+	// it reports "stored, not announced" (202) rather than claiming an
+	// immediacy it cannot deliver.
+	Schedules *control.ScheduleManager
 	// Artifacts backs GET/HEAD /v1/artifacts/{digest}, the endpoint runners use
 	// to fetch script bytes they have not cached. When nil the artifact module
 	// is not registered at all (the route 404s). Build it with
@@ -328,6 +341,7 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 	// store.Executions field the module declares. Nil stays nil and the handler
 	// answers 500 rather than an empty page.
 	ctrlModule.executions = cfg.Store
+	ctrlModule.schedules = cfg.Schedules
 	ctrlModule.registrationMetrics = metrics.NewWorkflowRegistrationMetrics(cfg.Metrics)
 	ctrlModule.paramValidation = cfg.ParamValidation.OrDefault()
 	ctrlModule.paramValidationMetrics = metrics.NewParamValidationMetrics(cfg.Metrics)
@@ -397,6 +411,29 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 		// ControlPlane.Authenticator's doc comment.
 		art.runnerAuth = s.cp.Authenticator()
 		s.modules = append(s.modules, art)
+	}
+	// The webhook module is the other side of "the control plane hosts the entry
+	// units": wherever entry units are dispatched as durable activations, a
+	// webhook entry has no runner to live on, so this process serves its route.
+	// The gate is the same one the activation path uses (an EntryActivationStore
+	// is configured), so "no activation is written for a webhook unit" and "this
+	// route exists" cannot drift apart -- a deployment that hosts no activations
+	// keeps the embedded engine's WebhookRuntime and serves no such route.
+	//
+	// Unlike every other module this one is NOT gated on PrincipalAuth: its
+	// authentication is the per-entry HMAC signature, not a platform principal
+	// (see module_webhook.go). It is gated on the supplies store instead, since
+	// a deployment that cannot read the secret can never authenticate a caller
+	// and would serve a route that answers 503 to everything.
+	if s.cp.EntryActivationStore() != nil && cfg.Supplies != nil {
+		hook := newWebhookModule(s.cp)
+		hook.supplies = cfg.Supplies
+		hook.log = cfg.Logger
+		s.modules = append(s.modules, hook)
+		// Registration must refuse a server-hosted webhook entry that declares
+		// no secret. The flag is derived from the same predicate that mounted the
+		// route above, so "this process serves webhook routes" has one answer.
+		ctrlModule.webhookRoutesHosted = true
 	}
 	return s, nil
 }

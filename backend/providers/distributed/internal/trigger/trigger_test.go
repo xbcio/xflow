@@ -49,8 +49,8 @@ func TestTriggerDedupIsSharedAcrossPrimitiveInstances(t *testing.T) {
 		}
 	})
 
-	first := New(rdb)
-	second := New(rdb)
+	first := New(rdb, nil)
+	second := New(rdb, nil)
 
 	ok, err := first.Dedup(ctx, key, time.Minute)
 	if err != nil {
@@ -80,8 +80,8 @@ func TestTriggerLockIsSharedAcrossPrimitiveInstances(t *testing.T) {
 		}
 	})
 
-	first := New(rdb)
-	second := New(rdb)
+	first := New(rdb, nil)
+	second := New(rdb, nil)
 
 	lock, ok, err := first.TryLock(ctx, key, time.Minute)
 	if err != nil {
@@ -130,8 +130,8 @@ func TestTriggerLockRenewPreservesOwnership(t *testing.T) {
 		}
 	})
 
-	first := New(rdb)
-	second := New(rdb)
+	first := New(rdb, nil)
+	second := New(rdb, nil)
 
 	lock, ok, err := first.TryLock(ctx, key, 50*time.Millisecond)
 	if err != nil {
@@ -187,7 +187,7 @@ func TestTriggerLockRenewPositiveSubMillisecondTTLDoesNotExpireImmediately(t *te
 	key := "test-trigger-lock-renew-sub-ms"
 	lockKey := triggerLockKey(namespace.FromContext(ctx), key)
 
-	first := New(rdb)
+	first := New(rdb, nil)
 
 	lock, ok, err := first.TryLock(ctx, key, 500*time.Microsecond)
 	if err != nil {
@@ -246,8 +246,8 @@ func TestTriggerLockReleaseDoesNotDeleteNewOwner(t *testing.T) {
 		}
 	})
 
-	first := New(rdb)
-	second := New(rdb)
+	first := New(rdb, nil)
+	second := New(rdb, nil)
 
 	lock, ok, err := first.TryLock(ctx, key, 50*time.Millisecond)
 	if err != nil {
@@ -318,8 +318,8 @@ func TestTriggerLockRenewReturnsFalseForAStaleToken(t *testing.T) {
 		}
 	})
 
-	first := New(rdb)
-	second := New(rdb)
+	first := New(rdb, nil)
+	second := New(rdb, nil)
 
 	lock, ok, err := first.TryLock(ctx, key, 50*time.Millisecond)
 	if err != nil {
@@ -393,8 +393,8 @@ func TestTriggerStateIsSharedAcrossPrimitiveInstances(t *testing.T) {
 		}
 	})
 
-	first := New(rdb)
-	second := New(rdb)
+	first := New(rdb, nil)
+	second := New(rdb, nil)
 
 	if err := first.State(ctx, scope).Set(ctx, key, value, time.Minute); err != nil {
 		t.Fatalf("State(first).Set() error = %v", err)
@@ -437,7 +437,7 @@ func TestTriggerNamespaceIsolation(t *testing.T) {
 		_ = rdb.Del(ctxB, triggerDedupKey(tnB, key), triggerLockKey(tnB, key), triggerStateKey(tnB, stateScope, key)).Err()
 	})
 
-	first := New(rdb)
+	first := New(rdb, nil)
 
 	// Dedup is independent per namespace.
 	ok, err := first.Dedup(ctxA, key, time.Minute)

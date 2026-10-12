@@ -214,8 +214,9 @@ func TestHTTPEntrySeed_RefusedOverLimit(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
 		_ = json.NewEncoder(w).Encode(SeedExecutionRefusal{
-			State: SeedStateOverLimit,
-			Error: "workflow_concurrency_limit",
+			State:             SeedStateOverLimit,
+			Error:             "workflow_concurrency_limit",
+			RetryAfterSeconds: 1,
 		})
 	}))
 	defer srv.Close()
@@ -236,6 +237,11 @@ func TestHTTPEntrySeed_RefusedOverLimit(t *testing.T) {
 	if resp.Accepted || resp.Duplicate || resp.Conflict {
 		t.Fatalf("a refusal must not set any handled flag, got %+v", resp)
 	}
+	// The body's floor reaches the caller as a duration. A caller that reads it
+	// (a webhook route admitting in process) has no header of its own to copy.
+	if resp.RetryAfter != time.Second {
+		t.Fatalf("RetryAfter = %v, want 1s", resp.RetryAfter)
+	}
 }
 
 // TestHTTPEntrySeed_RefusedQueueFull verifies the queue-full refusal maps to
@@ -247,8 +253,9 @@ func TestHTTPEntrySeed_RefusedQueueFull(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
 		_ = json.NewEncoder(w).Encode(SeedExecutionRefusal{
-			State: SeedStateQueueFull,
-			Error: "workflow_concurrency_queue_full",
+			State:             SeedStateQueueFull,
+			Error:             "workflow_concurrency_queue_full",
+			RetryAfterSeconds: 1,
 		})
 	}))
 	defer srv.Close()
@@ -265,6 +272,40 @@ func TestHTTPEntrySeed_RefusedQueueFull(t *testing.T) {
 	}
 	if resp.Accepted || resp.Duplicate || resp.Conflict {
 		t.Fatalf("a refusal must not set any handled flag, got %+v", resp)
+	}
+	if resp.RetryAfter != time.Second {
+		t.Fatalf("RetryAfter = %v, want 1s", resp.RetryAfter)
+	}
+}
+
+// TestHTTPEntrySeed_RefusalWithoutRetryAfter verifies the absence of the body's
+// floor stays "not stated" rather than becoming a deadline. Zero is the value a
+// caller must be able to recognise: an older control plane does not send the
+// field, and a caller that treated zero as "retry immediately" would spin
+// against a workflow that is already at its limit.
+func TestHTTPEntrySeed_RefusalWithoutRetryAfter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(SeedExecutionRefusal{
+			State: SeedStateOverLimit,
+			Error: "workflow_concurrency_limit",
+		})
+	}))
+	defer srv.Close()
+
+	rt := &HTTPEntrySeedRuntime{BaseURL: srv.URL, Client: srv.Client()}
+	resp, err := rt.SeedExecutionFromEntry(context.Background(), types.EntrySeedRequest{
+		AdmissionKey: "ak-limit-old", WorkflowID: "wf1", EntryUnitID: "g1", Outcome: "success",
+	})
+	if err != nil {
+		t.Fatalf("a refusal is an answer, not a failure; got err: %v", err)
+	}
+	if !resp.Refused {
+		t.Fatalf("Refused = false, want true")
+	}
+	if resp.RetryAfter != 0 {
+		t.Fatalf("RetryAfter = %v, want 0 when the control plane states no floor", resp.RetryAfter)
 	}
 }
 

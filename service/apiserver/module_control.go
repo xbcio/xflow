@@ -87,6 +87,24 @@ type workflowControlModule struct {
 	// runnerNodeTypesNow is the liveness clock of the constructor-wired
 	// runnerNodeTypes; nil means time.Now. A test seam only.
 	runnerNodeTypesNow func() time.Time
+	// webhookRoutesHosted reports whether THIS process serves the server-hosted
+	// webhook entry route, i.e. whether a webhook entry unit of a definition
+	// registered here has anywhere to run. It is the same condition the module
+	// wiring uses to mount the route (see APIServer.New), injected rather than
+	// recomputed so registration and route existence cannot disagree: when it is
+	// true a server-hosted webhook entry must declare its signing secret, and
+	// when it is false the definition keeps working on the embedded engine's
+	// WebhookRuntime with no secret at all.
+	webhookRoutesHosted bool
+	// schedules serves the schedule routes (see module_schedules.go). Nil means
+	// no overlay store is configured: the routes are still registered — an
+	// operator gets "not configured on this server" rather than a 404 that reads
+	// as an old server — and every one of them refuses.
+	//
+	// It is injected post-construction by APIServer.New (Config.Schedules), the
+	// same shape the executions store uses, because a constructor parameter
+	// would touch every test call site for no behavioral reason.
+	schedules *control.ScheduleManager
 }
 
 func newWorkflowControlModule(cp *control.ControlPlane, auth WorkflowAuthenticator, log engine.Logger, tracer tracing.Tracer) *workflowControlModule {
@@ -182,6 +200,7 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 	mux.HandleFunc("POST "+PathExecutionPause, wrap("execution.pause", m.handlePauseByID))
 	mux.HandleFunc("POST "+PathExecutionResume, wrap("execution.resume", m.handleResumeByID))
 	mux.HandleFunc("POST "+PathExecutionRerun, wrap("execution.rerun", m.handleRerunByID))
+	m.registerScheduleRoutesBare(mux, wrap)
 	// §9.1: revoke-signal moved from POST /v1/executions/{id}/revoke-signal
 	// (verb stuck in a path segment) to DELETE /v1/executions/{id}/signals/{name}
 	// — the signal name travels in the path, not the body (spec §7 route table).
@@ -300,6 +319,11 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	// the call creates: the created id is in the response, and an audit row that
 	// named it would be unrereadable from the request that produced it.
 	mux.HandleFunc("POST "+PathExecutionRerun, authz(OpExecutionRerun, true, m.handleRerunByID, execIDResolver("rerun")))
+	// Schedules are the runtime overlays on a workflow's trigger nodes. They are
+	// registered here rather than as a module of their own because they address
+	// the workflow subtree and resolve the same registry record this module
+	// already resolves.
+	m.registerScheduleRoutes(mux)
 	// 404 catch for unrecognized execution verbs. Unwrapped (no authz): the old
 	// resolver's ok=false path returned 404 before authz ran and wrote no audit
 	// row, and the catch preserves that. A method-qualified pattern alone would
@@ -964,6 +988,16 @@ func (m *workflowControlModule) buildWorkflowRecord(ctx context.Context, ns name
 	g, err := graph.Compile(def)
 	if err != nil {
 		return backend.WorkflowRecord{}, registrationDiagnostics{}, &WorkflowCompileError{err: err}
+	}
+	// A server-hosted webhook entry with no signing secret would be an
+	// unauthenticated endpoint that creates executions, so it is refused here
+	// rather than admitted at request time (spec §6, decision 5). The check is
+	// gated on this process actually serving the route: a deployment that does
+	// not has nothing to protect.
+	if m.webhookRoutesHosted {
+		if err := validateServerHostedWebhookSecrets(g); err != nil {
+			return backend.WorkflowRecord{}, registrationDiagnostics{}, err
+		}
 	}
 	// ParamSpec validation runs after the compiler accepted the definition, so
 	// a structural error keeps its workflow_compile_failed answer. It checks
@@ -1734,6 +1768,27 @@ func (m *workflowControlModule) deregisterWorkflow(ctx context.Context, ns names
 			return err
 		}
 	}
+	// Clear the schedules' overlays BEFORE removing the registry record, in the
+	// same order — and for the same reason — as the entry-activation clear
+	// above: a partial failure then leaves work a retry finishes, instead of an
+	// orphan nothing can reach. An overlay outliving its workflow is exactly that
+	// kind of orphan: every schedule route resolves the workflow first, so once
+	// the record is gone the leftover row is unreachable and invisible, and it
+	// would be silently inherited if the id were ever registered again.
+	//
+	// The cost of this order is that a failed removal leaves the workflow
+	// running with its schedules back on the definition's timing. That is
+	// visible (the schedule API reports the overlay gone) and correctable (the
+	// operator re-applies it), which is the trade the activation clear already
+	// makes.
+	if m.schedules != nil {
+		if _, err := m.schedules.DeleteWorkflowOverrides(ctx, ns, id); err != nil {
+			if m.log != nil {
+				m.log.Error("deregister_workflow_clear_schedules_failed", "err", err)
+			}
+			return err
+		}
+	}
 	// Remove the registry record. If removal reports a failure after the desired
 	// activations were cleared, read the record back before compensating. Some
 	// registries can fail before mutation while others can durably remove the
@@ -2098,83 +2153,12 @@ func (m *workflowControlModule) handleSeedExecution(w http.ResponseWriter, r *ht
 	// taken from the request context (injected by the authz wrapper), not the
 	// body. Fall back to the raw engine only when no ControlPlane is wired
 	// (unit tests with a fake facade); that path has no generation fence.
-	var resp engine.SeedExecutionFromEntryResponse
-	var err error
-	if m.cp != nil {
-		resp, err = m.cp.SeedExecutionFromEntry(r.Context(), engReq)
-	} else {
-		resp, err = m.eng.SeedExecutionFromEntry(r.Context(), engReq)
-	}
-	if err != nil {
-		// A stale activation generation for a not-yet-accepted admission key is a
-		// fencing rejection, not an internal fault — map it to 409 so the runner
-		// can distinguish "you lost the activation" from a transient server error.
-		// The body is the BARE errorResponse (not enveloped): entry-seed is a
-		// runner-protocol-face endpoint (spec §0.1) and its 409 body shape is a
-		// load-bearing offset-safety contract (spec §8.2). Enveloping it would
-		// risk silent message loss during a generation upgrade.
-		if errors.Is(err, control.ErrStaleGeneration) {
-			writeJSON(w, http.StatusConflict, errorResponse{Error: "stale_generation"})
-			return
-		}
-		// The seed references a workflow/entry unit the control plane cannot
-		// resolve (not registered, version mismatch, or unknown entry unit). This
-		// is a fail-closed rejection, not an internal fault — map it to 404 so the
-		// runner can distinguish it from a transient server error. The generic
-		// reason string leaks no internal detail. Bare errorResponse per §0.1/§8.2.
-		if errors.Is(err, control.ErrEntrySeedWorkflowUnknown) {
-			writeJSON(w, http.StatusNotFound, errorResponse{Error: "workflow_unknown"})
-			return
-		}
-		// The seeded workflow declares a concurrency limit this deployment cannot
-		// enforce. The engine fails closed rather than seeding an execution the
-		// limit was written to prevent, and the runner must treat it like the
-		// queue-unavailable case on the submission face: 503 with the same code,
-		// because the answer changes when the deployment does and not when the
-		// runner retries. Bare body per §0.1/§8.2, like the other seed failures.
-		if errors.Is(err, engine.ErrConcurrencyUnsupported) || errors.Is(err, engine.ErrConcurrencyQueueUnsupported) {
-			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "workflow_concurrency_unavailable"})
-			return
-		}
-		if m.log != nil {
-			m.log.Error("seed_execution_failed", "err", err)
-		}
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal server error"})
-		return
-	}
-	if resp.State == engine.AdmissionStateConflict {
-		writeJSON(w, http.StatusConflict, protocol.SeedExecutionResponse{
-			State:       "conflict",
-			ExecutionID: string(resp.ExecutionID),
-		})
-		return
-	}
-	// A refused seed is not a failed call and not an admission either: the
-	// workflow's concurrency policy said no and nothing was persisted, so the
-	// entry-unit result is still the runner's. 429 with the state in the body —
-	// the same status, the same code vocabulary and the same Retry-After floor
-	// the execute path uses for the same two refusals — is what tells the runner
-	// to withhold the Kafka offset and retry rather than commit a batch no
-	// execution will ever run (decision 5).
-	if resp.State == engine.AdmissionStateOverLimit || resp.State == engine.AdmissionStateQueueFull {
-		w.Header().Set("Retry-After", strconv.Itoa(concurrencyRetryAfterSeconds))
-		code := "workflow_concurrency_limit"
-		if resp.State == engine.AdmissionStateQueueFull {
-			code = "workflow_concurrency_queue_full"
-		}
-		writeJSON(w, http.StatusTooManyRequests, protocol.SeedExecutionRefusal{
-			State: string(resp.State),
-			Error: code,
-		})
-		return
-	}
-	writeJSON(w, http.StatusOK, protocol.SeedExecutionResponse{
-		State:         string(resp.State),
-		ExecutionID:   string(resp.ExecutionID),
-		Duplicate:     resp.Duplicate,
-		Queued:        resp.Queued,
-		QueuePosition: resp.QueuePosition,
-	})
+	//
+	// The admission result mapping is shared with the server-hosted webhook
+	// route (entry_seed_admission.go): both callers admit through this same
+	// entry and must answer with the same statuses and bodies.
+	resp, err := seedAdmission(r.Context(), m.cp, m.eng, engReq)
+	writeSeedAdmissionResult(w, m.log, resp, err)
 }
 
 // handleInspect serves GET /v1/executions/{id} (spec §7). It delegates to

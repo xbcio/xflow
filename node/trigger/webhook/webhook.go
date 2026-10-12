@@ -27,6 +27,7 @@ type Node struct {
 	PathValue          string
 	EventIDHeaderValue string
 	MaxBodyBytesValue  int64
+	SecretSupplyValue  string
 }
 
 // New returns a webhook trigger with the default 1 MiB body cap.
@@ -54,6 +55,13 @@ func (n *Node) MaxBodyBytes(max int64) *Node {
 	return n
 }
 
+// SecretSupply names the supply resource holding this entry's HMAC secret. It is
+// read by the server hosting the route; see the secret_supply ParamSpec.
+func (n *Node) SecretSupply(name string) *Node {
+	n.SecretSupplyValue = name
+	return n
+}
+
 func (n *Node) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.trigger.webhook",
@@ -64,6 +72,18 @@ func (n *Node) Descriptor() types.Descriptor {
 			{Name: "path", DisplayName: "Path", Type: types.ParamString, Required: true},
 			{Name: "event_id_header", DisplayName: "Event ID Header", Type: types.ParamString},
 			{Name: "max_body_bytes", DisplayName: "Max Body Bytes", Type: types.ParamNumber, Default: float64(defaultWebhookMaxBodyBytes)},
+			// secret_supply names the supply resource holding this entry's HMAC
+			// signing secret. It is read by the SERVER, not by this node: in a
+			// cluster deployment the control plane serves the route (a runner has
+			// no inbound address) and verifies the signature before admitting.
+			// Declaring it here is what makes the secret part of the workflow's
+			// configuration without being part of its definition — the definition
+			// is listed, diffed and copied between environments, a supply is not.
+			// It is not Required: a local-mode definition has no route to protect,
+			// and cluster registration enforces the reference where it matters
+			// (service/apiserver refuses to register a server-hosted webhook
+			// without one).
+			{Name: "secret_supply", DisplayName: "Secret Supply", Type: types.ParamString},
 		},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 	}
@@ -75,12 +95,21 @@ func (n *Node) RawParams() any {
 	if max <= 0 {
 		max = defaultWebhookMaxBodyBytes
 	}
-	return map[string]any{
+	params := map[string]any{
 		"method":          n.MethodValue,
 		"path":            n.PathValue,
 		"event_id_header": n.EventIDHeaderValue,
 		"max_body_bytes":  max,
 	}
+	// Omitted when unset, like cron's timezone: a definition that names no
+	// secret is a definition whose parameters — and therefore whose workflow
+	// hash — must stay what they were before the parameter existed. An empty
+	// string would also be a value the server has to treat as absent, and one
+	// spelling of "no secret" is better than two.
+	if n.SecretSupplyValue != "" {
+		params["secret_supply"] = n.SecretSupplyValue
+	}
+	return params
 }
 func (n *Node) OnError(s types.OnError) types.Builder {
 	n.SetOnError(s)

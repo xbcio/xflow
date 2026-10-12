@@ -13,6 +13,15 @@ func IsPermanent(err error) bool {
 	return errors.Is(err, ErrPermanent)
 }
 
+// ErrExecutionStatusUnavailable is the answer an ExecutionStatusReader gives
+// when it has no execution store to read: the capability is present, but this
+// runtime cannot answer the question. It is deliberately not a "not found" —
+// found=false already means the execution is gone, and a caller must be able to
+// tell "the run finished" from "I cannot see the run" — and not a transient
+// failure, so it is never retried. Callers degrade to the behaviour that needs
+// no status, exactly as they do when the capability is absent altogether.
+var ErrExecutionStatusUnavailable = errors.New("xflow: execution status unavailable")
+
 // ErrorKind classifies the source of a failure for retry and routing policy.
 // The four kinds below are the whole taxonomy; each carries its own rule.
 type ErrorKind string

@@ -224,7 +224,7 @@ SAS 是第一个宿主：它此前手工装配，配置里漏了 `SupportsEncryp
 
 | 角色 | 职责 | 不做什么 |
 |---|---|---|
-| **server**（Control Plane） | 接受工作流提交（HTTP/gRPC）、把 `WorkflowDef` 编译成 Graph IR、把节点任务派发到 Asynq、跟踪执行生命周期、提供查询 API、投递信号、租约清扫（`LeaseSweeper`）与超时监控（`timeout.Monitor`） | **不执行节点 handler**，不暴露 Redis 给 runner |
+| **server**（Control Plane） | 接受工作流提交（HTTP/gRPC）、把 `WorkflowDef` 编译成 Graph IR、把节点任务派发到 Asynq、跟踪执行生命周期、提供查询 API、投递信号、租约清扫（`LeaseSweeper`）与超时监控（`timeout.Monitor`）、托管 webhook 入口路由（§3.4） | **不执行节点 handler**，不暴露 Redis 给 runner |
 | **Task Dispatcher**（server 内部组件） | 作为 Asynq worker 消费 server 内部任务，持久化为 runner assignment；由 Core 在 runner claim 后签发/恢复 lease，并管理结果回收 | 不执行 handler，不把 Redis / Asynq 细节泄漏给 runner |
 | **Runner Protocol**（控制面-执行面协议） | 定义 runner 注册、心跳、容量、lease、result、cancel 的网络协议 | 不保存最终状态，不决定 DAG 调度 |
 | **runner**（执行面） | 连接 server 的 Runner Protocol，通过 registry 解析 handler、执行、回报结果 | 不接受外部 API 请求，不连接 Redis / Asynq |
@@ -278,6 +278,74 @@ server 和 runner 共享同一套 `engine/` 核心语义，但不共享 Redis �
 ```
 
 remote 客户端不碰 Redis、不执行节点，所有「提交 + 查询状态 + 投递信号」都打到 server。
+
+### 3.4 触发器托管位置：runner 托管与 server 托管
+
+控制面把每个 workflow 的入口单元（entry unit）派生成一份 activation 计划
+（`control.DeriveEntryActivations`），每个副本一条记录，runner 领到
+`ActivateDirective` 后自己起触发循环。**webhook 是唯一的例外**：它由 apiserver
+自己托管，不产生任何 activation。
+
+| 入口类型 | 托管方 | 触发时做什么 |
+|---|---|---|
+| `xflow.trigger.timer` / `.cron` | runner | 按排期算出 fire key，走 entry-seed 上报 |
+| `xflow.trigger.redis`（stream / pubsub） | runner | 消费到条目 / 消息后走 entry-seed 上报 |
+| `xflow.trigger.kafka`（聚合后） | runner | 同上 |
+| `xflow.trigger.webhook` | **server（apiserver）** | 直接向控制面的 seed 准入提交 |
+
+**为什么 webhook 不能交给 runner。** runner 是出站执行面：没有稳定地址、不开入站
+端口，而本地模式里服务该路由的 agent 在集群模式下不存在（§3.1 角色表：runner
+「不接受外部 API 请求」）。外部发送方（代码托管、支付回调）只能打到有公网入口的
+控制面，所以路由落在 apiserver 上。
+
+**server 托管的取舍**（`service/control/entry_activation_manager.go`）：入口单元的
+`ServerHosted` 为真时，控制面不为它建 activation 记录；已存在的记录被退役
+（`Desired=false`，保留 runner / session / generation 以便审计）；节点上写的
+`activation_replicas` 被忽略并留一条 warn 日志——一份定义从 runner 托管改成 server
+托管时，旧的副本不该被留下一个永远无人服务的 activation。
+
+**时间类触发器多副本只跑一次。** 所有副本按同一排期算出同一个 fire key
+`trigger:<workflow_id>:<entry_unit>:<kind>:<id>`
+（`node/trigger/internal/seedadmit`），服务端按 admission key 去重：一个 Accepted，
+其余拿到 Duplicate 和**同一个 execution ID**。`activation_replicas` 缺省（0 或 1）
+就是 1 个副本；调大是 HA 而不是吞吐提升，代价是 N 倍 seed 请求——tick 频率低，
+可以接受。Redis Pub/Sub 的 `activation_replicas > 1` 在编译期直接被拒
+（`engine/graph/trigger_replicas.go`）：频道没有 consumer group，每个副本都会收到
+每一条消息，而它的 fire key 只能按 channel + payload 秒级分桶，抬高副本数只会扩大
+「不同消息被静默合并」的窗口；stream 模式不受影响。时间类触发器的传输失败有上界
+重试、超界即丢弃并记日志，不补跑——下一个 tick 是新的 key。
+
+**webhook 路由与它的认证。**
+
+```
+POST|{method}  /v1/hooks/{namespace}/{workflow_id}/{entry_unit}
+```
+
+- HTTP 方法、body 上限、密钥来源都取自入口节点**自己的定义**（`method` /
+  `max_body_bytes` / `secret_supply`），不来自请求；方法不匹配答 405 并回 `Allow`。
+- 签名是 `X-XFlow-Signature: sha256=<hex>`，覆盖原始 body，用 `hmac.Equal` 常量时间
+  比较；密钥由节点上的 `secret_supply` 指向 supply 资源、由服务端读取，请求里永远
+  不带密钥。
+- **没有密钥的定义在注册期就被拒**（400，错误点名 `secret_supply`）。注册是操作员
+  还在场的最后一个时刻；放行一份没有密钥的定义，只会让它上线后对每个请求答 503，
+  在发送方看来像平台故障。
+- 失败一律给通用形状：签名不符 401、body 超限 413、目标不存在或入口不是 webhook
+  404、密钥暂时取不到 503；密钥与签名都不进日志、不回显。
+- 路由**不在 authz 包装器之内**：外部发送方没有平台 principal，签名就是它的认证。
+  这套归属记在 [API-SPECIFICATION.md](./API-SPECIFICATION.md) 的认证章节。
+- 幂等靠事件 ID：定义里配了 `event_id_header` 就用发送方的投递 ID，跨分钟也能收敛；
+  没配则退化为「body 哈希 + 分钟分桶」，同一分钟内的同 body 投递会被合并——需要区分
+  的发送方必须配这个 header。
+- 重投的是**请求内容**：同一事件 ID + 同一 body 答 200 `duplicate`（并给出已有执行
+  ID），因为发送方在没收到应答时重发的就是这一份。冲突判据因此只覆盖事件 ID 与
+  body，不覆盖服务端观测到的接收时刻——把观测时刻算进去，每次重投都会变成 409，而
+  GitHub、xxl-job 这类发送方对非 2xx 会一直重试。只有同一事件 ID 携带**不同 body**
+  （真正的另一次投递）才答 409。
+
+**对部署的影响。** webhook 路由必须能被发送方访问到，因此 apiserver 要挂在公网或
+对端可达的那一层入口上。多个 apiserver 副本服务同一条路由：去重仍由共享的权威状态
+按 admission key 完成，谁先到谁准入，其余拿到 Duplicate；但控制面 HA 本身尚未验收
+（§4.5、§7），这条语义的可用性上限跟着它走。
 
 ---
 
@@ -623,6 +691,7 @@ Relay Gateway 用于 runner 无法直连 server、不能互相直连或需要本
 | runner 执行面 | **MVP 已实现** | `cmd/runner` 可连接 server，注册 capability，通过 Runner Protocol 执行 lease 并上报 result |
 | Task Dispatcher + durable handoff | **MVP 已实现** | `service/control.Dispatcher` 将 queued task 持久化为 `RedisRunnerDirectory` assignment；claim TTL、finalize、reconnect replay 与 fenced release 支持跨 server 进程恢复 |
 | Runner Protocol | **MVP 已实现（传输）** | `service/protocol` 提供 HTTP+JSON DTO、路由常量和 client，另有 gRPC 通道（`grpc_client.go`、`runnerpb/`）；streaming / credit-flow control 仍为实验性 |
+| server 托管的 webhook 入口 | **已实现** | apiserver 服务 `/v1/hooks/{ns}/{wf}/{entry_unit}`（§3.4）；HMAC 签名 + 常量时间比较，密钥走 `secret_supply`，未配密钥的定义注册期即拒；webhook 入口不产生 activation，多副本靠 admission key 去重 |
 | Loop | **实验性** | 扩展/子执行路径未进入静态 DAG completion 与 server/runner production-ready 保证 |
 | Relay Gateway | **规划** | 网络隔离中继拓扑已定义，尚无独立进程实现 |
 | 跨域 runner 指标采集 | **已实现** | runner `--report-metrics` → server `/v1/runners/metrics` → 并入 server `/metrics`（§4.7）；Redis 共享 inbox 支持多副本，`IsLive` 过期，`runner_id` 由 server 覆盖 |
@@ -641,6 +710,7 @@ Relay Gateway 用于 runner 无法直连 server、不能互相直连或需要本
 | Loop | **实验性**扩展路径，未纳入静态 DAG completion 与 server/runner production-ready 保证 | §7 本表 Loop 行；README「Supported Topologies and Guarantees」的 Experimental capabilities |
 | Node Group co-location | **实验/受限**，经 `WorkflowOptions.experimental_node_group` 显式开启 | [NODE-GROUP-COLOCATION.md](./NODE-GROUP-COLOCATION.md) 头部 Status；`types/workflow.go:53-59`；`api/openapi/xflow-v1.yaml:2234` |
 | Kafka aggregate `on_overflow` | 默认 `discard` 是**永久丢弃**；三个取值 `discard` / `block` / `dead_letter`，未识别取值使 activation 失败而非回退 | `node/trigger/kafka/aggregate.go:116-122,1326-1335`；`observability/metrics/metrics.go:446-447,454`（`xflow_trigger_messages_discarded_total`、`xflow_trigger_messages_dead_lettered_total`、`xflow_trigger_consumption_blocked`） |
+| server 托管 webhook 入口的认证 | **只有每入口的 HMAC 签名**：该路由不在 principal/authz 包装器内（外部发送方没有平台身份）；密钥缺失时注册期即拒、运行期 503，不 fail open | §3.4；`service/apiserver/module_webhook.go`（`hmac.Equal` 常量时间比较、`secret_supply` 读 supply）；`service/apiserver/module_webhook_test.go`（401 / 404 / 405 / 413 / 503 与注册期拒绝） |
 | leader election | 只协调 leader-only maintenance，**不是** control-plane HA / failover SLO | §4.5；[RELEASE-GATES.md](./RELEASE-GATES.md) §4 反声明 |
 | Remote SDK / Relay Gateway / Raft | **规划或不建设**：remote 与 Relay Gateway 无实现，Raft 明确不引入 | §7 本表对应行；[CORE-COMPONENTS.md](./CORE-COMPONENTS.md):5 |
 

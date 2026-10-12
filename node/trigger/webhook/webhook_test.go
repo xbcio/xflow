@@ -141,6 +141,44 @@ func TestWebhookNodeTypeAndParamsAreFrozen(t *testing.T) {
 	}
 }
 
+// TestWebhookSecretSupplyIsEmittedOnlyWhenSet pins both halves of the
+// parameter's contract: a definition that names a secret carries the key, and one
+// that does not stays byte-for-byte what it was before the parameter existed —
+// which is what keeps the workflow hash of every already-registered server-hosted
+// webhook unchanged. The key is what the SERVER reads to find the secret; the
+// local runtime ignores it, so a definition without one is still a valid
+// definition, just not a registrable server-hosted entry (registration refuses
+// it — see service/apiserver's webhook tests).
+func TestWebhookSecretSupplyIsEmittedOnlyWhenSet(t *testing.T) {
+	if params := New().Method("POST").Path("/hooks/x").RawParams().(map[string]any); params["secret_supply"] != nil {
+		t.Fatalf("secret_supply = %#v on a node that names no secret, want the key omitted", params["secret_supply"])
+	}
+	params := New().SecretSupply("hook-secret").RawParams().(map[string]any)
+	if params["secret_supply"] != "hook-secret" {
+		t.Fatalf("secret_supply = %#v, want %q", params["secret_supply"], "hook-secret")
+	}
+
+	// The editor offers the parameter, and it is NOT Required: the local runtime
+	// never reads it, so requiring it would refuse definitions that need no
+	// signing key at all.
+	var found bool
+	for _, spec := range New().Descriptor().Params {
+		if spec.Name != "secret_supply" {
+			continue
+		}
+		found = true
+		if spec.Required {
+			t.Fatal("secret_supply is Required; it is read by the server only, so a local definition must not need it")
+		}
+		if spec.Type != types.ParamString {
+			t.Fatalf("secret_supply type = %q, want %q", spec.Type, types.ParamString)
+		}
+	}
+	if !found {
+		t.Fatal("the descriptor declares no secret_supply param, so no UI could ever set it")
+	}
+}
+
 func TestWebhookMaxBodyBytesFallsBackToDefault(t *testing.T) {
 	// A non-positive cap must not disable the limit — RawParams normalizes it
 	// back to the 1 MiB default, and webhookMaxBodyBytes does the same for the

@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -15,6 +16,11 @@ type triggerPrimitives struct {
 	locks    map[string]memoryTriggerLockRecord
 	state    map[string]map[string][]byte
 	lockSeed uint64
+	// status is the store the engine runs on, and the source of the optional
+	// types.ExecutionStatusReader capability: a trigger asking whether the
+	// execution it last admitted is still running reads exactly the status the
+	// engine wrote, from the same place the engine wrote it to.
+	status engine.ExecutionStatusReader
 }
 
 type memoryTriggerLockRecord struct {
@@ -22,11 +28,15 @@ type memoryTriggerLockRecord struct {
 	expires time.Time
 }
 
-func newTriggerPrimitives() *triggerPrimitives {
+// newTriggerPrimitives builds the local primitives over the state store they
+// must answer execution-status questions from. status may be nil only in tests
+// that do not exercise that capability; the method then says it cannot answer.
+func newTriggerPrimitives(status engine.ExecutionStatusReader) *triggerPrimitives {
 	return &triggerPrimitives{
-		dedup: make(map[string]time.Time),
-		locks: make(map[string]memoryTriggerLockRecord),
-		state: make(map[string]map[string][]byte),
+		dedup:  make(map[string]time.Time),
+		locks:  make(map[string]memoryTriggerLockRecord),
+		state:  make(map[string]map[string][]byte),
+		status: status,
 	}
 }
 
@@ -64,6 +74,17 @@ func (p *triggerPrimitives) TryLock(_ context.Context, key string, ttl time.Dura
 
 func (p *triggerPrimitives) State(_ context.Context, scope string) types.TriggerState {
 	return &triggerState{p: p, scope: scope}
+}
+
+// GetExecutionStatus implements the optional types.ExecutionStatusReader
+// capability by forwarding to the store. Without a store the honest answer is
+// ErrExecutionStatusUnavailable — not a status, and not found=false, which means
+// the execution is gone.
+func (p *triggerPrimitives) GetExecutionStatus(ctx context.Context, id types.ExecutionID) (types.ExecutionStatus, bool, error) {
+	if p.status == nil {
+		return "", false, types.ErrExecutionStatusUnavailable
+	}
+	return p.status.GetExecutionStatus(ctx, id)
 }
 
 type triggerLock struct {

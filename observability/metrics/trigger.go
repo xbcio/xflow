@@ -2,10 +2,13 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"time"
 
+	"github.com/xbcio/xflow/engine"
 	kafkatrigger "github.com/xbcio/xflow/node/trigger/kafka"
+	"github.com/xbcio/xflow/types"
 )
 
 // Trigger metric names.
@@ -21,6 +24,7 @@ const (
 	metricTriggerConsumptionBlocked  = "xflow_trigger_consumption_blocked"
 	metricTriggerOffsetCommit        = "xflow_trigger_offset_commit_duration_seconds"
 	metricTriggerOffsetCommitSize    = "xflow_trigger_offset_commit_size"
+	metricTriggerFireDropped         = "xflow_trigger_fire_dropped_total"
 )
 
 // TriggerMetrics observes trigger message-handling outcomes.
@@ -246,3 +250,62 @@ func (t TriggerMetrics) OnOffsetCommit(ctx context.Context, topic, result string
 }
 
 var _ kafkatrigger.Observer = TriggerMetrics{}
+
+var _ types.TriggerFireObserver = TriggerMetrics{}
+
+// OnTriggerFireDropped counts a firing a time-based trigger decided not to
+// admit: a cron firing or a timer tick that produced no execution, partitioned
+// by reason (refused/overlap/transport/emit_error, the
+// types.TriggerFireDropped* vocabulary).
+//
+// The series exists because a dropped firing is invisible everywhere else. The
+// trigger's watermark records that the instant passed, not that anything was
+// running, and a workflow that never ran leaves no execution to look at — so
+// without this counter a schedule that is throttled by its own workflow reads
+// exactly like a schedule that never fired, which is the same blind spot
+// xflow_trigger_messages_discarded_total closes for messages.
+//
+// err is classified, never labeled: the triggers report the failure they got, and
+// this is the layer that can name the engine's sentinels — node/ cannot import
+// engine at all (engine's own tests import node, so the import back would close a
+// cycle), which is why the narrowing lives here rather than where the drop
+// happened. The label set stays closed: the error's text is unbounded and
+// belongs in the trigger's log line.
+//
+// Read the reasons apart. refused is the workflow's OWN limit declining the
+// firing, on either hosting path (the control plane's admission response, or the
+// engine's concurrency limit as narrowed below): the schedule is fine and the
+// workflow is busy, so the fix is capacity or a queue mode, and a rate that
+// tracks a workload's peak is expected. overlap is the cron trigger's own policy
+// holding a firing back while the run it started last is still going, which is
+// the parameter doing its job rather than a fault. transport and emit_error are
+// the trigger failing to get its work in at all (unreachable control plane, an
+// engine that would not take the submission): those are the two that page, and
+// any sustained rate of either is lost work.
+//
+// The label set is bounded on purpose: the workflow and the node name are
+// definition data, they are not labels here, and the trigger's own Warn line
+// carries them.
+func (t TriggerMetrics) OnTriggerFireDropped(ctx context.Context, reason string, err error) {
+	t.Metrics.Inc(metricTriggerFireDropped, withNamespace(ctx, map[string]string{
+		"reason": fireDropReason(reason, err),
+	}))
+}
+
+// fireDropReason narrows the one reason a trigger cannot narrow itself.
+//
+// A trigger reports the concurrency limit as emit_error, because the sentinel
+// that identifies it lives in package engine and no production code under node/
+// may import that package. The two cases it merges are not the same event for an
+// operator — the concurrency limit is the workflow throttling its own schedule
+// and is expected under load, while anything else the engine rejects is a broken
+// submission — so they are split here, at the layer that owns the engine import.
+//
+// The comparison is on the sentinel, never on the message: the text is for the
+// log line, and it changes.
+func fireDropReason(reason string, err error) string {
+	if reason == types.TriggerFireDroppedEmitError && errors.Is(err, engine.ErrConcurrencyLimit) {
+		return types.TriggerFireDroppedRefused
+	}
+	return reason
+}

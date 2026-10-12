@@ -497,6 +497,9 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 		if err := validateNodeBody(nd); err != nil {
 			return 0, err
 		}
+		if err := validateTriggerReplicaCardinality(fmt.Sprintf("node %q", nd.Name), nd.Type, nd.Parameters, nd.ActivationReplicas); err != nil {
+			return 0, err
+		}
 		// Projection itself is deferred to projectNodeBodies, which runs after
 		// buildDependencyEdges: a body needs the parent node's visible-supply
 		// names (g.SupplyRefsFor(i)), and g.supplyRefs is not populated until that

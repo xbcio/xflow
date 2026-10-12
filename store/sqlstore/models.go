@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
 )
@@ -467,3 +468,66 @@ type dbRunnerInstance struct {
 }
 
 func (dbRunnerInstance) TableName() string { return "xflow_runner_instances" }
+
+// dbScheduleOverride is the internal GORM persistence type for
+// store.ScheduleOverride. Like every other model here it carries the schema
+// annotations while the domain type stays free of ORM concerns.
+//
+// The five overridable columns are NULLable, and NULL is the "not overridden"
+// state rather than an empty value: a row that pinned the definition's current
+// expression must stay distinguishable from one that follows the definition, or
+// DELETE .../override has nothing to restore to. The pointer fields below are
+// that distinction, one for one.
+type dbScheduleOverride struct {
+	ID         uint64           `gorm:"column:id;primaryKey;autoIncrement"`
+	Namespace  string           `gorm:"column:namespace;type:varchar(64);not null;uniqueIndex:uk_schedule_override,priority:1"`
+	WorkflowID types.WorkflowID `gorm:"column:workflow_id;type:varchar(64);not null;uniqueIndex:uk_schedule_override,priority:2"`
+	Node       string           `gorm:"column:node;type:varchar(255);not null;uniqueIndex:uk_schedule_override,priority:3"`
+	Expression *string          `gorm:"column:expression;type:varchar(255)"`
+	Timezone   *string          `gorm:"column:timezone;type:varchar(64)"`
+	Misfire    *string          `gorm:"column:misfire;type:varchar(32)"`
+	Overlap    *string          `gorm:"column:overlap;type:varchar(32)"`
+	Paused     *bool            `gorm:"column:paused"`
+	Revision   uint64           `gorm:"column:revision;not null;default:0"`
+	UpdatedBy  string           `gorm:"column:updated_by;type:varchar(255);not null;default:''"`
+	CreatedAt  time.Time        `gorm:"column:created_at;autoCreateTime:milli"`
+	UpdatedAt  time.Time        `gorm:"column:updated_at;autoUpdateTime:milli"`
+}
+
+func (dbScheduleOverride) TableName() string { return "xflow_schedule_overrides" }
+
+func fromDBScheduleOverride(d *dbScheduleOverride) *store.ScheduleOverride {
+	return &store.ScheduleOverride{
+		Namespace:  namespace.Namespace(d.Namespace),
+		WorkflowID: d.WorkflowID,
+		Node:       d.Node,
+		Expression: cloneString(d.Expression),
+		Timezone:   cloneString(d.Timezone),
+		Misfire:    cloneString(d.Misfire),
+		Overlap:    cloneString(d.Overlap),
+		Paused:     cloneBool(d.Paused),
+		Revision:   d.Revision,
+		UpdatedAt:  d.UpdatedAt,
+		UpdatedBy:  d.UpdatedBy,
+	}
+}
+
+// cloneString and cloneBool detach a pointer field from the row it was read
+// from, so a caller that mutates what it read cannot write through to GORM's
+// struct — and so a caller that hands a pointer back in does not alias the
+// stored one.
+func cloneString(v *string) *string {
+	if v == nil {
+		return nil
+	}
+	cp := *v
+	return &cp
+}
+
+func cloneBool(v *bool) *bool {
+	if v == nil {
+		return nil
+	}
+	cp := *v
+	return &cp
+}
