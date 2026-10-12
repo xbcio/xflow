@@ -196,6 +196,42 @@ describe("XFlowEditor", () => {
     expect(screen.getByRole("button", { name: "展开诊断台" })).toBeTruthy();
   });
 
+  it("exposes the new node statuses on the hooks the token rules target", () => {
+    // The fixture's `route_by_amount` is a switch node, which is what the
+    // editor selects by default, so one runtime entry drives both the outline
+    // row and the inspector's run panel.
+    const { rerender } = render(
+      <XFlowEditor value={workflow} runtime={{ nodes: { route_by_amount: { status: "committing" } } }} />
+    );
+
+    const outlineRow = within(screen.getByRole("region", { name: "大纲" })).getByRole("button", {
+      name: "选择节点 route_by_amount"
+    });
+    expect(outlineRow.querySelector(".xflow-editor-status-dot")?.getAttribute("data-status")).toBe(
+      "committing"
+    );
+
+    fireEvent.click(screen.getByRole("tab", { name: "运行" }));
+    expect(
+      screen.getByRole("tabpanel").querySelector(".xflow-editor-runtime-tag")?.getAttribute("data-status")
+    ).toBe("committing");
+
+    // Both statuses carry data-status rather than a preset color name, which is
+    // what lets the editor-scoped rules tone them from the shared
+    // --xflow-status-* tokens: no preset tells `committing` from `running`, or
+    // `expired` from a status the editor does not recognize.
+    rerender(
+      <XFlowEditor value={workflow} runtime={{ nodes: { route_by_amount: { status: "expired" } } }} />
+    );
+
+    expect(outlineRow.querySelector(".xflow-editor-status-dot")?.getAttribute("data-status")).toBe(
+      "expired"
+    );
+    expect(
+      screen.getByRole("tabpanel").querySelector(".xflow-editor-runtime-tag")?.getAttribute("data-status")
+    ).toBe("expired");
+  });
+
   it("defaults the editor theme to dark graphite", () => {
     render(<XFlowEditor value={workflow} />);
 
