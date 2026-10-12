@@ -48,6 +48,13 @@ apiserver 的用户面模块里、走 principal/authz 认证，但它的响应�
 认证与「面」正交：entry-seed 用 principal/authz 是因为它需要 namespace 防伪造
 （§6.3），这不影响它的响应契约归属。
 
+第二个需要这条判据的端点是 server 托管的 webhook 入口
+（`POST|{method} /v1/hooks/{namespace}/{workflow_id}/{entry_unit}`，§6.3）：它由
+apiserver 托管、注册在用户面模块里，认证却是入口自己的 HMAC 签名（外部发送方没有
+平台 principal 可出示），而响应类型仍是 `protocol.SeedExecutionResponse`。按同一条
+判据，它同样属于 runner 协议面、不包信封——「用哪套认证」从来不是判据，这个端点是把
+这句话逼到极限的例子。
+
 ---
 
 ## 1. 路径语法（用户面）
@@ -307,6 +314,14 @@ runner 协议**不加 `trace_id` 字段**，链路透传走 OTel `traceparent` �
 
 配守卫测试：**所有已注册路由都有对应 Op，且所有 Op 都有路由消费**。
 
+例外只有一条，且必须是显式的：server 托管的 webhook 入口
+（`/v1/hooks/{namespace}/{workflow_id}/{entry_unit}`）**不在 authz 包装器之内**，
+因此没有 Op，也不进 `scopeForOperation`——它的认证是入口自己的 HMAC 签名（§6.3）。
+`TestEveryProtectedUserPathRejectsUnauthenticated` 对这唯一一条路径显式豁免，并配了
+反向测试 `TestWebhookEntryRejectsBadSignature`：缺失、格式错、签名不匹配一律 401。
+豁免与「漏登记」在语句上无法区分，能区分它们的是那条反向测试；删掉它，这个豁免就
+退化成 §6.1 要防的那个洞。
+
 反向的死代码同样要防：`OpWorkflowDefinitionCreate`、`OpWorkflowDefinitionRead`、
 `OpWorkflowDefinitionValidate`、`OpWorkflowDefinitionPublish`、
 `OpWorkflowExecutionInvoke` 这 5 个 Op 常量除 `authz.go` 自身外**没有任何路由
@@ -324,12 +339,18 @@ entry-seed 端点（`handleSeedExecution`）目前做对了这一点，本规范
 携带的 `admission_key` 是幂等键，其命名空间归属由服务端裁定，防止伪造跨命名空间
 的 admission key。
 
-### 6.3 两套认证体系不混
+webhook 入口是唯一的例外，且是有意的：路径里的 namespace 是**声明**而不是来源，
+服务端把它与记录比对、不一致按 404 处理，准入跑在记录的 namespace 下（§6.3）。
+新增端点不得以它为范例——这条例外成立的前提是「外部发送方没有平台身份可出示」，
+没有这个前提的端点必须走 §6.2 的主规则。
+
+### 6.3 认证体系不混（三套，各有适用面）
 
 | 面 | 认证机制 |
 | --- | --- |
 | 用户面 / 管理面 | apiserver 的 principal/authz 体系，Bearer token，Op + scope |
 | runner 协议面 | `Core.authn()` 的 runner directory 认证，`AuthToken` 字段 + SessionID |
+| server 托管的 webhook 入口 | 入口自己的 HMAC 签名（`X-XFlow-Signature: sha256=<hex>`，常量时间比较），密钥取自 `secret_supply` 指向的 supply 资源；不在 authz 包装器内 |
 
 **跨界端点必须显式记录选了哪套及理由。** 现存三条跨界端点——runner 用同一个
 `--token` 走 principal/authz 打它们：
@@ -346,6 +367,20 @@ runner directory 认证只回答「这是不是一台已注册的 runner」。�
 
 推论：runner 进程同时持有两种身份（runner session + principal token），这是设计
 使然，不是配置错误。任何简化认证的提案必须先解释这三条端点的 namespace 从哪来。
+
+**第三套认证：server 托管的 webhook 入口（§7）。** 它既不是 principal/authz 也不是
+runner directory——发送方是外部系统（代码托管、支付回调），没有平台身份可出示。
+它的认证是**入口自己的 HMAC 签名**：密钥由工作流定义里的 `secret_supply` 指定、服务端
+从 supply 读取，签名覆盖原始 body 并用常量时间比较；请求既不能携带密钥，也不能选择
+用哪个密钥，未配密钥的定义在注册期就被拒。因为没有认证主体，它拿不到上面那条
+「namespace 从认证主体注入」的防伪造机制：路径里的 namespace 只是**声明**，服务端把
+它与记录里的 namespace 比对，不一致按 404 处理，而准入始终跑在**记录的** namespace 下。
+
+审计上的差别要写清楚：entry-seed 的准入不写每请求账本，那是被显式豁免的吞吐决定
+（见 `auditedPerRequest`），但它仍由包装器认证授权，**拒绝照旧入账**；webhook 入口在
+包装器之外，认证由 handler 自己完成，因此**签名被拒这条路径没有任何审计行**，只有一条
+不含密钥、不含签名的错误日志。这是「用签名换掉平台身份」必须付的代价，部署方若要
+审计这个入口，目前只能靠 apiserver 的日志。
 
 ---
 
@@ -368,6 +403,11 @@ DELETE /v1/executions/{id}/signals/{name}   撤销信号
 GET    /v1/executions/{id}/wait             等待完成
 
 POST   /v1/executions                       entry-seed（runner 调用）
+
+POST|{method} /v1/hooks/{namespace}/{workflow_id}/{entry_unit}
+                                            server 托管 webhook 入口——已实现；
+                                            方法取自入口节点自己的 method 参数；
+                                            响应形状与 entry-seed 同面（§0.1），不包信封
 
 GET    /v1/node-types                       已注册节点类型的 NodeFormSchema 列表
 GET    /v1/node-types/{type}                单个节点类型（?version= 选版本，缺省取最新）
