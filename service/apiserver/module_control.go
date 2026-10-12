@@ -181,6 +181,7 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 	mux.HandleFunc("POST "+PathExecutionCancel, wrap("execution.cancel", m.handleCancelByID))
 	mux.HandleFunc("POST "+PathExecutionPause, wrap("execution.pause", m.handlePauseByID))
 	mux.HandleFunc("POST "+PathExecutionResume, wrap("execution.resume", m.handleResumeByID))
+	mux.HandleFunc("POST "+PathExecutionRerun, wrap("execution.rerun", m.handleRerunByID))
 	// §9.1: revoke-signal moved from POST /v1/executions/{id}/revoke-signal
 	// (verb stuck in a path segment) to DELETE /v1/executions/{id}/signals/{name}
 	// — the signal name travels in the path, not the body (spec §7 route table).
@@ -294,6 +295,11 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	// signaling one.
 	mux.HandleFunc("POST "+PathExecutionPause, authz(OpExecutionPause, true, m.handlePauseByID, execIDResolver("pause")))
 	mux.HandleFunc("POST "+PathExecutionResume, authz(OpExecutionResume, true, m.handleResumeByID, execIDResolver("resume")))
+	// Rerun derives a NEW execution from a terminal one. The audited resource is
+	// the execution being rerun (the one the caller addressed), not the execution
+	// the call creates: the created id is in the response, and an audit row that
+	// named it would be unrereadable from the request that produced it.
+	mux.HandleFunc("POST "+PathExecutionRerun, authz(OpExecutionRerun, true, m.handleRerunByID, execIDResolver("rerun")))
 	// 404 catch for unrecognized execution verbs. Unwrapped (no authz): the old
 	// resolver's ok=false path returned 404 before authz ran and wrote no audit
 	// row, and the catch preserves that. A method-qualified pattern alone would
@@ -387,6 +393,10 @@ func (m *workflowControlModule) handlePauseByID(w http.ResponseWriter, r *http.R
 
 func (m *workflowControlModule) handleResumeByID(w http.ResponseWriter, r *http.Request) {
 	m.handleResume(w, r, types.ExecutionID(r.PathValue("id")))
+}
+
+func (m *workflowControlModule) handleRerunByID(w http.ResponseWriter, r *http.Request) {
+	m.handleRerun(w, r, types.ExecutionID(r.PathValue("id")))
 }
 
 func (m *workflowControlModule) handleRevokeSignalByID(w http.ResponseWriter, r *http.Request) {
@@ -2368,6 +2378,156 @@ func writeExecutionControlFail(w http.ResponseWriter, r *http.Request, err error
 	case errors.Is(err, engine.ErrPauseUnsupported):
 		writeFail(w, r, http.StatusNotImplemented, "execution_control_unsupported",
 			"execution control is not supported")
+		return
+	}
+	writeExecEngineFail(w, r, err)
+}
+
+// executionRerunner is the optional engine capability behind POST
+// /v1/executions/{id}/rerun. Like executionController it is an assertion rather
+// than a widening of control.EngineFacade, so a facade that cannot seed an
+// execution answers 501 instead of failing to compile.
+type executionRerunner interface {
+	Rerun(ctx context.Context, req engine.RerunRequest) (engine.RerunResult, error)
+}
+
+// executionRerun resolves the optional capability, reporting the engine's own
+// unsupported sentinel when the facade does not carry it. A store without the
+// seeding capability and a facade without the method are one operator-facing
+// fact ("this deployment cannot rerun"), so they share one code and message.
+func (m *workflowControlModule) executionRerun() (executionRerunner, error) {
+	rerunner, ok := m.eng.(executionRerunner)
+	if !ok {
+		return nil, engine.ErrRerunUnsupported
+	}
+	return rerunner, nil
+}
+
+// handleRerun serves POST /v1/executions/{id}/rerun (design §3 API).
+//
+// It creates a NEW execution derived from a terminal one, starting at
+// from_node: everything upstream of that node is copied from the execution
+// being rerun — its results, not its runtime state — and the node and its
+// downstream run again. The execution being rerun is never modified, which is
+// what makes this safe to offer for any terminal execution: no lease, fence or
+// audit row of the original is disturbed.
+//
+// The request carries the node and, optionally, whether a successful execution
+// is an acceptable source. The response is the new execution's id and status:
+// 200 with an envelope, matching the submission path, because what the caller
+// acts on next is an execution id, not this endpoint's URL.
+func (m *workflowControlModule) handleRerun(w http.ResponseWriter, r *http.Request, id types.ExecutionID) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	// The body is required: without a from_node there is no rerun point, and
+	// defaulting one would silently re-run the whole workflow instead.
+	var req rerunRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.FromNode == "" {
+		writeFail(w, r, http.StatusBadRequest, "from_node_required", "from_node is required")
+		return
+	}
+	rerunner, err := m.executionRerun()
+	if err != nil {
+		writeExecutionRerunFail(w, r, err)
+		return
+	}
+	// The trace carrier is propagated so the new execution's asynchronous
+	// dispatch spans stay under this request's trace, exactly as the execute
+	// path does. It is the one submission hook a rerun needs from the API
+	// layer: the definition is the parent's already, and the identity is the
+	// engine's to attach.
+	ctx := engine.WithTraceCarrier(r.Context(), tracing.InjectCarrier(r.Context()))
+	res, err := rerunner.Rerun(ctx, engine.RerunRequest{
+		ExecutionID:    id,
+		FromNode:       req.FromNode,
+		IncludeSuccess: req.IncludeSuccess,
+	})
+	if err != nil {
+		writeExecutionRerunFail(w, r, err)
+		return
+	}
+	writeData(w, r, http.StatusOK, m.rerunResponse(ctx, res))
+}
+
+// rerunRequest is the body for POST /v1/executions/{id}/rerun (design §3 API).
+type rerunRequest struct {
+	// FromNode is the node the new execution starts at. Required.
+	FromNode string `json:"from_node"`
+	// IncludeSuccess accepts a successful execution as the source. Failed,
+	// canceled and timeout executions are always accepted.
+	IncludeSuccess bool `json:"include_success,omitempty"`
+}
+
+// rerunExecutionResponse reports the execution a rerun created.
+type rerunExecutionResponse struct {
+	ExecutionID types.ExecutionID `json:"execution_id"`
+	// Status is the new execution's status, read back best effort: a rerun that
+	// could not be read still reports the id the caller has to act on.
+	Status types.ExecutionStatus `json:"status,omitempty"`
+	// QueuePosition is the new execution's place in its workflow's line, 0 when
+	// it started immediately.
+	QueuePosition int `json:"queue_position,omitempty"`
+}
+
+// rerunResponse builds the reply from what the rerun reported plus a status
+// read-back. The read-back is best effort for the same reason submission's is:
+// the created execution id is the answer, and the status is how the caller
+// learns whether the work started or is waiting for a slot.
+func (m *workflowControlModule) rerunResponse(ctx context.Context, res engine.RerunResult) rerunExecutionResponse {
+	resp := rerunExecutionResponse{ExecutionID: res.ExecutionID, QueuePosition: res.QueuePosition}
+	if res.QueuePosition > 0 {
+		resp.Status = types.ExecutionStatusQueued
+	}
+	detail, err := m.eng.InspectStatus(ctx, res.ExecutionID)
+	if err != nil {
+		if m.log != nil {
+			m.log.Error("rerun_status_readback_failed", "execution_id", string(res.ExecutionID), "err", err)
+		}
+		return resp
+	}
+	resp.Status = detail.Status
+	if detail.Status != types.ExecutionStatusQueued {
+		// A promoted execution is no longer waiting: a position reported by the
+		// admission would name a place it has already left.
+		resp.QueuePosition = 0
+	}
+	return resp
+}
+
+// writeExecutionRerunFail maps the rerun verdicts onto stable failure shapes.
+//
+// The refusals are deliberately distinct: "the execution is not one you can
+// rerun from" (409), "the node you named is not in it" (400), "its definition
+// cannot be seeded" (409) and "no result to copy" (409) are four different
+// operator mistakes, and the concurrency refusals keep their 429s because a
+// reached limit is a retry, not a failed rerun.
+func writeExecutionRerunFail(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case writeConcurrencyFailure(w, r, err):
+		return
+	case errors.Is(err, engine.ErrExecutionNotRerunnable):
+		writeFail(w, r, http.StatusConflict, "execution_not_rerunnable",
+			"execution is not in a rerunnable status")
+		return
+	case errors.Is(err, engine.ErrRerunNodeNotFound):
+		writeFail(w, r, http.StatusBadRequest, "rerun_node_not_found",
+			"from_node is not in the execution's graph")
+		return
+	case errors.Is(err, engine.ErrRerunUpstreamIncomplete):
+		writeFail(w, r, http.StatusConflict, "rerun_upstream_incomplete",
+			"a node upstream of the rerun point has no result to copy")
+		return
+	case errors.Is(err, engine.ErrRerunGraphUnsupported):
+		writeFail(w, r, http.StatusConflict, "rerun_graph_unsupported",
+			"the execution's graph does not support rerun from a node")
+		return
+	case errors.Is(err, engine.ErrRerunUnsupported):
+		writeFail(w, r, http.StatusNotImplemented, "execution_rerun_unsupported",
+			"execution rerun is not supported")
 		return
 	}
 	writeExecEngineFail(w, r, err)

@@ -109,6 +109,26 @@ func ExampleExecuteWorkflowResponseQueued(id types.ExecutionID, position int) an
 	}
 }
 
+// ExampleRerunExecutionRequest builds a rerunRequest (POST
+// /v1/executions/{id}/rerun) with a rerun point and the success opt-in, so both
+// body fields — including the one that is omitted by default — are non-zero.
+func ExampleRerunExecutionRequest() any {
+	return rerunRequest{FromNode: "Fetch", IncludeSuccess: true}
+}
+
+// ExampleRerunExecutionResponse builds a rerunExecutionResponse for a rerun the
+// workflow's concurrency limit parked, so the schema's queue_position is checked
+// against the real integer the handler writes. It does not pin the JSON tag
+// name: the field is optional, and the contract test accepts a value that omits
+// an optional property, so a renamed tag would still validate.
+func ExampleRerunExecutionResponse(id types.ExecutionID, position int) any {
+	return rerunExecutionResponse{
+		ExecutionID:   id,
+		Status:        types.ExecutionStatusQueued,
+		QueuePosition: position,
+	}
+}
+
 // ExampleSignalRequest builds a signalRequest (POST /v1/executions/{id}/signals).
 func ExampleSignalRequest(name string, data map[string]any) any {
 	return signalRequest{Name: name, Data: data}

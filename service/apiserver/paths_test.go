@@ -123,6 +123,7 @@ var guardSamples = []guardSample{
 	{"PathExecutionCancel", PathExecutionCancel, http.MethodPost, "/v1/executions/ex-1/cancel"},
 	{"PathExecutionPause", PathExecutionPause, http.MethodPost, "/v1/executions/ex-1/pause"},
 	{"PathExecutionResume", PathExecutionResume, http.MethodPost, "/v1/executions/ex-1/resume"},
+	{"PathExecutionRerun", PathExecutionRerun, http.MethodPost, "/v1/executions/ex-1/rerun"},
 	{"PathExecutionSignals", PathExecutionSignals, http.MethodPost, "/v1/executions/ex-1/signals"},
 	{"PathExecutionSignalByID", PathExecutionSignalByID, http.MethodDelete, "/v1/executions/ex-1/signals/s1"},
 	{"PathExecutionWait", PathExecutionWait, http.MethodGet, "/v1/executions/ex-1/wait"},

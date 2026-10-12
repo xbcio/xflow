@@ -99,7 +99,14 @@ const (
 	// OpExecutionSeed is the mutation that seeds an execution from an entry unit
 	// (single node or group node) result via POST /v1/executions. It maps to the
 	// "execution" scope like the other execution operations.
-	OpExecutionSeed    = "execution.seed"
+	OpExecutionSeed = "execution.seed"
+	// OpExecutionRerun derives a new execution from a terminal one, starting at
+	// a node. It is a creation operation, not a control on the execution it
+	// reads: the execution it derives from is never modified. Its scope is its
+	// own (execution.rerun) rather than execution.control, because the trust a
+	// rerun needs is "may start this work again" — which the population that
+	// owns the definition already has — not "may stop what is running".
+	OpExecutionRerun   = "execution.rerun"
 	OpDeadLetterList   = "deadletter.list"
 	OpDeadLetterReplay = "deadletter.replay"
 	// OpCurrentUserRead serves GET /v1/current-user: the caller's OWN verified
@@ -194,6 +201,13 @@ func scopeForOperation(op string) string {
 		return "workflow"
 	case OpExecutionRead, OpExecutionSignal, OpExecutionRevoke, OpExecutionCancel, OpExecutionSeed:
 		return "execution"
+	case OpExecutionRerun:
+		// A scope of its own: starting a new execution from a terminal one is
+		// not the same trust as suspending a running pipeline (execution.control)
+		// nor as signaling one (execution). It is a creation, so it rides the
+		// narrower grant a deployment can hand to the population allowed to
+		// re-run work without letting it stop anything.
+		return "execution.rerun"
 	case OpExecutionPause, OpExecutionResume:
 		// Deliberately NOT the "execution" scope that signal/cancel/read ride.
 		// Suspending a running execution is a dispatch-level control, not just
