@@ -44,6 +44,19 @@ var (
 	// capability at all): the backend here has the capability and the mode
 	// declines to use it, so this is its own sentinel rather than an alias.
 	ErrTransientPauseUnsupported = errors.New("xflow: execution pause is unsupported in transient execution mode")
+	// ErrTransientRerunUnsupported reports that rerun-from-node is unavailable
+	// in transient mode.
+	//
+	// A rerun copies the upstream nodes' results out of the execution it derives
+	// from, and transient mode is a retention contract: those results live under
+	// a TTL and are dropped at completion. The execution a caller would most
+	// want to rerun — one that just failed — is exactly the one whose prefix is
+	// already going away, so a rerun accepted here would produce an execution
+	// whose inputs are missing rather than one that starts from a known state.
+	// Its own sentinel rather than an alias of engine.ErrRerunUnsupported (a
+	// store with no seeding capability): the backend has the capability and the
+	// mode declines to use it.
+	ErrTransientRerunUnsupported = errors.New("xflow: execution rerun is unsupported in transient execution mode")
 	// ErrTransientRequiresCluster reports that transient execution mode needs a
 	// cluster/Redis backend. NewLocal does not support transient mode; use NewCluster.
 	ErrTransientRequiresCluster = errors.New("xflow: transient execution mode requires a cluster/Redis backend, use NewCluster")
