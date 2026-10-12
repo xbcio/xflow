@@ -111,6 +111,18 @@ var guardSamples = []guardSample{
 	{"PathWorkflowExecute", PathWorkflowExecute, http.MethodPost, "/v1/workflows/execute"},
 	{"PathWorkflowExecuteByID", PathWorkflowExecuteByID, http.MethodPost, "/v1/workflows/wf-1/execute"},
 
+	// The schedule routes are probed on the production-shape mux, which is built
+	// WITHOUT a schedule manager: that is deliberate and is what keeps the guard
+	// honest — the routes are registered unconditionally, so a deployment with no
+	// overlay store still resolves them (and answers 501) instead of 404-ing as
+	// if the server were older than the route.
+	{"PathWorkflowSchedules", PathWorkflowSchedules, http.MethodGet, "/v1/workflows/wf-1/schedules"},
+	{"PathWorkflowScheduleByNode", PathWorkflowScheduleByNode, http.MethodGet, "/v1/workflows/wf-1/schedules/nightly"},
+	{"PathWorkflowScheduleOverride", PathWorkflowScheduleOverride, http.MethodDelete, "/v1/workflows/wf-1/schedules/nightly/override"},
+	{"PathWorkflowSchedulePause", PathWorkflowSchedulePause, http.MethodPost, "/v1/workflows/wf-1/schedules/nightly/pause"},
+	{"PathWorkflowScheduleResume", PathWorkflowScheduleResume, http.MethodPost, "/v1/workflows/wf-1/schedules/nightly/resume"},
+	{"PathWorkflowScheduleBackfill", PathWorkflowScheduleBackfill, http.MethodPost, "/v1/workflows/wf-1/schedules/nightly/backfill"},
+
 	// PathExecutions is shared by two methods on the same path. The sample is
 	// the GET (the offset-paginated collection read, spec §3.3) rather than the
 	// POST entry-seed: both are registered on this fixture's production mux, so

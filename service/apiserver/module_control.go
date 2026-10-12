@@ -96,6 +96,15 @@ type workflowControlModule struct {
 	// when it is false the definition keeps working on the embedded engine's
 	// WebhookRuntime with no secret at all.
 	webhookRoutesHosted bool
+	// schedules serves the schedule routes (see module_schedules.go). Nil means
+	// no overlay store is configured: the routes are still registered — an
+	// operator gets "not configured on this server" rather than a 404 that reads
+	// as an old server — and every one of them refuses.
+	//
+	// It is injected post-construction by APIServer.New (Config.Schedules), the
+	// same shape the executions store uses, because a constructor parameter
+	// would touch every test call site for no behavioral reason.
+	schedules *control.ScheduleManager
 }
 
 func newWorkflowControlModule(cp *control.ControlPlane, auth WorkflowAuthenticator, log engine.Logger, tracer tracing.Tracer) *workflowControlModule {
@@ -191,6 +200,7 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 	mux.HandleFunc("POST "+PathExecutionPause, wrap("execution.pause", m.handlePauseByID))
 	mux.HandleFunc("POST "+PathExecutionResume, wrap("execution.resume", m.handleResumeByID))
 	mux.HandleFunc("POST "+PathExecutionRerun, wrap("execution.rerun", m.handleRerunByID))
+	m.registerScheduleRoutesBare(mux, wrap)
 	// §9.1: revoke-signal moved from POST /v1/executions/{id}/revoke-signal
 	// (verb stuck in a path segment) to DELETE /v1/executions/{id}/signals/{name}
 	// — the signal name travels in the path, not the body (spec §7 route table).
@@ -309,6 +319,11 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	// the call creates: the created id is in the response, and an audit row that
 	// named it would be unrereadable from the request that produced it.
 	mux.HandleFunc("POST "+PathExecutionRerun, authz(OpExecutionRerun, true, m.handleRerunByID, execIDResolver("rerun")))
+	// Schedules are the runtime overlays on a workflow's trigger nodes. They are
+	// registered here rather than as a module of their own because they address
+	// the workflow subtree and resolve the same registry record this module
+	// already resolves.
+	m.registerScheduleRoutes(mux)
 	// 404 catch for unrecognized execution verbs. Unwrapped (no authz): the old
 	// resolver's ok=false path returned 404 before authz ran and wrote no audit
 	// row, and the catch preserves that. A method-qualified pattern alone would
@@ -1749,6 +1764,27 @@ func (m *workflowControlModule) deregisterWorkflow(ctx context.Context, ns names
 		if err := mgr.RemoveWorkflowRevision(ctx, ns, toDeactivate.ID, toDeactivate.Version, toDeactivate.RegistryRevision, toDeactivate.Graph); err != nil {
 			if m.log != nil {
 				m.log.Error("deregister_workflow_clear_activations_failed", "err", err)
+			}
+			return err
+		}
+	}
+	// Clear the schedules' overlays BEFORE removing the registry record, in the
+	// same order — and for the same reason — as the entry-activation clear
+	// above: a partial failure then leaves work a retry finishes, instead of an
+	// orphan nothing can reach. An overlay outliving its workflow is exactly that
+	// kind of orphan: every schedule route resolves the workflow first, so once
+	// the record is gone the leftover row is unreachable and invisible, and it
+	// would be silently inherited if the id were ever registered again.
+	//
+	// The cost of this order is that a failed removal leaves the workflow
+	// running with its schedules back on the definition's timing. That is
+	// visible (the schedule API reports the overlay gone) and correctable (the
+	// operator re-applies it), which is the trade the activation clear already
+	// makes.
+	if m.schedules != nil {
+		if _, err := m.schedules.DeleteWorkflowOverrides(ctx, ns, id); err != nil {
+			if m.log != nil {
+				m.log.Error("deregister_workflow_clear_schedules_failed", "err", err)
 			}
 			return err
 		}

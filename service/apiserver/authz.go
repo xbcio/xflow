@@ -109,6 +109,30 @@ const (
 	OpExecutionRerun   = "execution.rerun"
 	OpDeadLetterList   = "deadletter.list"
 	OpDeadLetterReplay = "deadletter.replay"
+	// Schedule operations are the runtime overlay surface over a workflow's
+	// cron and timer trigger nodes. They are three operations with three scopes,
+	// not one operation with a read/write split, because the three carry
+	// genuinely different trust:
+	//
+	//   - OpScheduleRead (schedule.read) shows when a workflow's schedules fire.
+	//     A principal that may read the workflow definition may not automatically
+	//     read its schedules: the effective schedule and the last fire time are
+	//     operational facts about a running system, and a read-only definition
+	//     reviewer has no business with them.
+	//   - OpScheduleWrite (schedule.write) retimes, pauses, and resumes. It is
+	//     the trust to change WHEN a workflow runs, deliberately not bundled with
+	//     workflow.register: retiming a schedule is a smaller, reversible change
+	//     than publishing a new version, and a deployment that hands out the
+	//     former must not have to hand out the latter.
+	//   - OpScheduleBackfill (schedule.backfill) STARTS EXECUTIONS. It is not a
+	//     variant of write: a write changes what will happen next, while a
+	//     backfill runs history now, on demand, in a burst — bounded by the
+	//     workflow's own admission, but still a different act, and a deployment
+	//     can grant retiming to an operator while withholding the ability to
+	//     replay.
+	OpScheduleRead     = "schedule.read"
+	OpScheduleWrite    = "schedule.write"
+	OpScheduleBackfill = "schedule.backfill"
 	// OpCurrentUserRead serves GET /v1/current-user: the caller's OWN verified
 	// identity. It reports what the presented credential already carries — the
 	// subject the server authenticated, the namespace it is bound to, and the
@@ -232,6 +256,12 @@ func scopeForOperation(op string) string {
 		return "deadletter.list"
 	case OpDeadLetterReplay:
 		return "deadletter.replay"
+	case OpScheduleRead:
+		return "schedule.read"
+	case OpScheduleWrite:
+		return "schedule.write"
+	case OpScheduleBackfill:
+		return "schedule.backfill"
 	case OpManagementRead:
 		return "management.read"
 	case OpManagementLeaderRead:

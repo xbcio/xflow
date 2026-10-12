@@ -34,6 +34,25 @@ const (
 	PathExecutionSignalByID = "/v1/executions/{id}/signals/{name}"
 	PathExecutionWait       = "/v1/executions/{id}/wait"
 
+	// Schedules are the runtime overlays on a workflow's cron and timer trigger
+	// nodes: what an operator may retime or pause WITHOUT registering a new
+	// workflow version. They live under the workflow because a schedule has no
+	// existence apart from the node that declares it — there is no /v1/schedules
+	// collection, and no way to address one without naming its workflow. The
+	// {node} segment is the trigger node's name, the same identity the
+	// definition and the entry unit use.
+	//
+	// PathWorkflowScheduleByNode serves GET (one schedule) and PATCH (write its
+	// overlay); the verbs that are not the overlay itself — pause, resume,
+	// backfill, dropping the overlay — are separate paths, because each is a
+	// distinct operation with its own scope decision in the audit trail.
+	PathWorkflowSchedules        = "/v1/workflows/{id}/schedules"
+	PathWorkflowScheduleByNode   = "/v1/workflows/{id}/schedules/{node}"
+	PathWorkflowScheduleOverride = "/v1/workflows/{id}/schedules/{node}/override"
+	PathWorkflowSchedulePause    = "/v1/workflows/{id}/schedules/{node}/pause"
+	PathWorkflowScheduleResume   = "/v1/workflows/{id}/schedules/{node}/resume"
+	PathWorkflowScheduleBackfill = "/v1/workflows/{id}/schedules/{node}/backfill"
+
 	// PathNodeTypes lists the NodeFormSchema of every node type registered in
 	// the server process; PathNodeTypeByType serves one (?version= selects a
 	// version, latest when omitted).
@@ -113,6 +132,13 @@ var UserFacingPaths = []string{
 	PathWorkflowByID,
 	PathWorkflowExecute,
 	PathWorkflowExecuteByID,
+
+	PathWorkflowSchedules,
+	PathWorkflowScheduleByNode,
+	PathWorkflowScheduleOverride,
+	PathWorkflowSchedulePause,
+	PathWorkflowScheduleResume,
+	PathWorkflowScheduleBackfill,
 
 	PathExecutions,
 	PathExecutionByID,

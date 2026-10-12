@@ -652,6 +652,25 @@ func (m *ScheduleManager) view(ctx context.Context, wf ScheduleWorkflow, node st
 	return view, nil
 }
 
+// DeleteWorkflowOverrides removes every overlay of one workflow and reports how
+// many rows it removed. It is the cascade a workflow deletion runs: an overlay
+// has no meaning without the node it overlays, and a node has no meaning without
+// its workflow, so a row that outlived its workflow would be unreachable (every
+// route here resolves the workflow first) and would be silently inherited if the
+// id were ever registered again.
+//
+// It is deliberate that this is not addressed through Get or DeleteOverride: the
+// workflow is usually already gone from the caller's point of view, and the
+// cascade must work on the identity alone rather than on a resolvable graph.
+// Deleting nothing is not an error — the caller asked for a state, and the state
+// holds.
+func (m *ScheduleManager) DeleteWorkflowOverrides(ctx context.Context, ns namespace.Namespace, workflowID types.WorkflowID) (int, error) {
+	if m == nil || m.overrides == nil {
+		return 0, errors.New("control: no schedule store configured")
+	}
+	return m.overrides.DeleteScheduleOverridesForWorkflow(ctx, ns, workflowID)
+}
+
 // effectiveParam resolves one overridable value: the overlay where it speaks,
 // the node's rendered parameter where it does not.
 //

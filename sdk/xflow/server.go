@@ -720,12 +720,26 @@ func buildServerAPIConfig(cfg ServerConfig, sc *serverConfig) apiserver.Config {
 	if cfg.Store != nil {
 		supplies = cfg.Store
 	}
+	// The same store satisfies the schedule overlay contract when the backend
+	// has one (sqlstore does; the in-memory dev store does too). No trigger host
+	// is wired here: this process serves the control plane, and the triggers are
+	// hosted by runners (or by an embedded engine), so the overlays this server
+	// stores are read by whoever hosts the workflow — see control.ScheduleManager
+	// and apiserver.Config.Schedules. The manager is nil when the store has no
+	// overlay support, and the routes then answer 501 rather than pretending the
+	// resource does not exist.
+	var overrides store.ScheduleOverrideStore
+	if s, ok := cfg.Store.(store.ScheduleOverrideStore); ok {
+		overrides = s
+	}
+	schedules := control.NewScheduleManager(control.ScheduleManagerConfig{Overrides: overrides})
 
 	return apiserver.Config{
 		RedisAddr:                   cfg.RedisAddr,
 		RedisConfig:                 cfg.RedisConfig,
 		Store:                       cfg.Store,
 		Supplies:                    supplies,
+		Schedules:                   schedules,
 		Artifacts:                   sc.artifacts,
 		Auth:                        sc.auth,
 		RegistrationCodes:           sc.registrationCodes,

@@ -41,6 +41,19 @@ type Config struct {
 	// Supplies backs the /v1/supplies endpoints. When nil the supply module is
 	// not registered at all (the routes 404). A *sqlstore.Provider satisfies it.
 	Supplies store.Supplies
+	// Schedules serves the /v1/workflows/{id}/schedules endpoints: the runtime
+	// overlays on a workflow's cron and timer trigger nodes. When nil the routes
+	// are still registered but answer 501 — a deployment without an overlay
+	// store still HAS the API, it just cannot serve it, and a 404 would read as
+	// "this server is older than the route".
+	//
+	// The manager's host callbacks (reload, backfill) are the trigger host's
+	// half of the contract: a control plane whose triggers run on runners has
+	// none to wire yet (see control.ScheduleManagerConfig). What such a server
+	// serves is the overlay itself — list, inspect, retime, pause, resume — and
+	// it reports "stored, not announced" (202) rather than claiming an
+	// immediacy it cannot deliver.
+	Schedules *control.ScheduleManager
 	// Artifacts backs GET/HEAD /v1/artifacts/{digest}, the endpoint runners use
 	// to fetch script bytes they have not cached. When nil the artifact module
 	// is not registered at all (the route 404s). Build it with
@@ -328,6 +341,7 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 	// store.Executions field the module declares. Nil stays nil and the handler
 	// answers 500 rather than an empty page.
 	ctrlModule.executions = cfg.Store
+	ctrlModule.schedules = cfg.Schedules
 	ctrlModule.registrationMetrics = metrics.NewWorkflowRegistrationMetrics(cfg.Metrics)
 	ctrlModule.paramValidation = cfg.ParamValidation.OrDefault()
 	ctrlModule.paramValidationMetrics = metrics.NewParamValidationMetrics(cfg.Metrics)
