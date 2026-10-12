@@ -35,8 +35,8 @@ func RunConcurrencyAdmissionContract(t *testing.T, newStore ConcurrencyStoreFact
 	t.Run("RefusesWithoutPersisting", func(t *testing.T) {
 		admissionRefusesWithoutPersisting(t, newStore(t))
 	})
-	t.Run("RefusesQueueMode", func(t *testing.T) {
-		admissionRefusesQueueMode(t, newStore(t))
+	t.Run("QueueModeRefusalIsHonest", func(t *testing.T) {
+		admissionQueueModeRefusalIsHonest(t, newStore(t))
 	})
 	t.Run("KeyedByNameNotVersion", func(t *testing.T) {
 		admissionKeyedByNameNotVersion(t, newStore(t))
@@ -189,30 +189,62 @@ func admissionRefusesWithoutPersisting(t *testing.T, state engine.StateStore) {
 	}
 }
 
-func admissionRefusesQueueMode(t *testing.T, state engine.StateStore) {
+// admissionQueueModeRefusalIsHonest is the one thing every store must agree on
+// about QUEUE mode, whether or not it can queue: an over-limit submission is
+// either parked or refused, and a refusal leaves nothing behind.
+//
+// The third possibility — reporting success while admitting the submission over
+// the limit — is the silent limit break, and it is what makes this case worth
+// keeping in the shared suite even though both in-tree backends queue. A store
+// that refuses must use the sentinel, because a caller that cannot tell "this
+// store has no queue" from "this submission was rejected" cannot retry the
+// right way, and the HTTP layer maps the two to different statuses.
+//
+// The behaviour of a store that does queue is described by the queue contract
+// (RunConcurrencyQueueContract), which such a store runs in addition.
+func admissionQueueModeRefusalIsHonest(t *testing.T, state engine.StateStore) {
 	limited := concurrencyCapability(t, state)
 	ctx := context.Background()
 	g := concurrencyGraph(t, "conc-queue")
 	admission := concurrencyAdmissionFor(t, g, 1)
 	admission.Mode = types.ConcurrencyModeQueue
 
+	// Fill the only slot with a REJECT-mode submission, so the next one is over
+	// the limit whichever way this store handles QUEUE mode. The mode of the
+	// submission that holds a slot says nothing about the slot: it is the same
+	// set either way.
+	holder := concurrencyAdmissionFor(t, g, 1)
+	holderSnap, holderEntries := concurrencySnapshot(t, g)
+	if _, err := limited.CreateExecutionWithConcurrency(ctx, holderSnap, holderEntries, holder); err != nil {
+		t.Fatalf("filling the only slot error = %v", err)
+	}
+
 	snap, entries := concurrencySnapshot(t, g)
-	_, err := limited.CreateExecutionWithConcurrency(ctx, snap, entries, admission)
-	if err == nil {
-		// A store that reports success here is admitting an over-limit
-		// submission with no queue to park it in, which is the silent-limit-
-		// break the two-phase rollout exists to prevent.
-		t.Fatal("queue-mode admission succeeded, want a refusal")
-	}
-	if !errors.Is(err, engine.ErrConcurrencyQueueUnsupported) {
-		t.Fatalf("queue-mode admission error = %v, want ErrConcurrencyQueueUnsupported", err)
-	}
-	loaded, err := state.GetExecution(ctx, snap.ID)
-	if err != nil {
-		t.Fatalf("GetExecution(queued) error = %v", err)
-	}
-	if loaded != nil {
-		t.Fatalf("queue-mode refusal persisted an execution: %+v", loaded)
+	res, err := limited.CreateExecutionWithConcurrency(ctx, snap, entries, admission)
+	switch {
+	case err == nil && res.Queued:
+		// A store that parks submissions: the execution must be visible and
+		// must not be running, or it would be work over the limit wearing a
+		// queue's label.
+		loaded, loadErr := state.GetExecution(ctx, snap.ID)
+		if loadErr != nil {
+			t.Fatalf("GetExecution(queued) error = %v", loadErr)
+		}
+		if loaded == nil || loaded.Status != types.ExecutionStatusQueued {
+			t.Fatalf("queued submission persisted as %+v, want status %q", loaded, types.ExecutionStatusQueued)
+		}
+	case errors.Is(err, engine.ErrConcurrencyQueueUnsupported):
+		loaded, loadErr := state.GetExecution(ctx, snap.ID)
+		if loadErr != nil {
+			t.Fatalf("GetExecution(refused) error = %v", loadErr)
+		}
+		if loaded != nil {
+			t.Fatalf("queue-mode refusal persisted an execution: %+v", loaded)
+		}
+	case err == nil:
+		t.Fatalf("queue-mode submission reported %+v with no error, want it parked or refused: admitting it over the limit breaks the limit silently", res)
+	default:
+		t.Fatalf("queue-mode submission error = %v, want ErrConcurrencyQueueUnsupported or a parked execution", err)
 	}
 }
 
