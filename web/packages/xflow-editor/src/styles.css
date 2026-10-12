@@ -396,6 +396,18 @@
   --xflow-editor-text: var(--xflow-text);
   --xflow-editor-muted: var(--xflow-text-tertiary);
   --xflow-editor-blue: var(--xflow-focus);
+  /*
+   * Derived from the active theme's own disabled fill and text color, so one
+   * definition serves all four themes. The fill is legible as a dot or a
+   * border but not as text — as a glyph color it measures 3.6:1 on the dark
+   * node meta background and 2.1:1 on the light ones, below the 4.5:1 a 10-11px
+   * label needs. The mixed text tone clears 4.5:1 in every theme while staying
+   * in the same muted family, which is what `expired` and the states without an
+   * Ant Design preset are read from.
+   */
+  --xflow-status-disabled-text: color-mix(in srgb, var(--xflow-status-disabled) 50%, var(--xflow-text));
+  --xflow-status-disabled-border: color-mix(in srgb, var(--xflow-status-disabled) 58%, transparent);
+  --xflow-status-disabled-subtle: color-mix(in srgb, var(--xflow-status-disabled) 12%, transparent);
   --xflow-toolbar-height: 48px;
   --xflow-panel-rail-width: 52px;
   --xflow-panel-left-width: 300px;
@@ -1361,6 +1373,9 @@
   padding: 0 5px;
 }
 
+/* The base tone is the pending/unknown gray. `expired` is deliberately the same
+ * muted gray — its records are gone and nothing about it is in flight — but is
+ * stated explicitly so a later change to the fallback cannot move it. */
 .xflow-editor-status-dot {
   background: var(--xflow-status-disabled);
   border-radius: 999px;
@@ -1368,12 +1383,19 @@
   width: 6px;
 }
 
+.xflow-editor-status-dot[data-status="expired"] {
+  background: var(--xflow-status-disabled);
+}
+
 .xflow-editor-status-dot[data-status="success"] {
   background: var(--xflow-status-success);
 }
 
+/* `committing` is in flight — the lease holder is writing the result — so it
+ * carries the running tone rather than the gray it would otherwise inherit. */
 .xflow-editor-status-dot[data-status="running"],
-.xflow-editor-status-dot[data-status="waiting"] {
+.xflow-editor-status-dot[data-status="waiting"],
+.xflow-editor-status-dot[data-status="committing"] {
   background: var(--xflow-editor-blue);
 }
 
@@ -1749,6 +1771,8 @@
 .xflow-editor-preview .xflow-preview-node[data-status="success"],
 .xflow-editor-preview .xflow-preview-node[data-status="running"],
 .xflow-editor-preview .xflow-preview-node[data-status="waiting"],
+.xflow-editor-preview .xflow-preview-node[data-status="committing"],
+.xflow-editor-preview .xflow-preview-node[data-status="expired"],
 .xflow-editor-preview .xflow-preview-node[data-status="failed"] {
   border-color: var(--xflow-node-border);
 }
@@ -1758,8 +1782,13 @@
 }
 
 .xflow-editor-preview .xflow-preview-node[data-status="running"]::before,
-.xflow-editor-preview .xflow-preview-node[data-status="waiting"]::before {
+.xflow-editor-preview .xflow-preview-node[data-status="waiting"]::before,
+.xflow-editor-preview .xflow-preview-node[data-status="committing"]::before {
   background: var(--xflow-status-running);
+}
+
+.xflow-editor-preview .xflow-preview-node[data-status="expired"]::before {
+  background: var(--xflow-status-disabled);
 }
 
 .xflow-editor-preview .xflow-preview-node[data-status="failed"]::before {
@@ -1805,8 +1834,13 @@
 }
 
 .xflow-editor-preview .xflow-preview-node[data-status="running"] .xflow-preview-node__status,
-.xflow-editor-preview .xflow-preview-node[data-status="waiting"] .xflow-preview-node__status {
+.xflow-editor-preview .xflow-preview-node[data-status="waiting"] .xflow-preview-node__status,
+.xflow-editor-preview .xflow-preview-node[data-status="committing"] .xflow-preview-node__status {
   color: var(--xflow-status-running-text);
+}
+
+.xflow-editor-preview .xflow-preview-node[data-status="expired"] .xflow-preview-node__status {
+  color: var(--xflow-status-disabled-text);
 }
 
 .xflow-editor-preview .xflow-preview-node[data-status="success"] .xflow-preview-node__status {
@@ -3345,6 +3379,23 @@
   line-height: 16px;
   margin-inline-end: 0;
   padding-inline: 5px;
+}
+
+/* `committing` and `expired` have no Ant Design preset that tells them apart:
+ * the preset palette's nearest neighbours are the same blue `running` already
+ * uses and the same gray an unrecognized status falls back to. Both are toned
+ * from the shared status tokens instead, which is also what the embedded
+ * preview draws, so the inspector and the canvas cannot disagree. */
+.xflow-editor .xflow-editor-runtime-tag.ant-tag[data-status="committing"] {
+  background: var(--xflow-status-running-subtle);
+  border-color: var(--xflow-status-running-border);
+  color: var(--xflow-status-running-text);
+}
+
+.xflow-editor .xflow-editor-runtime-tag.ant-tag[data-status="expired"] {
+  background: var(--xflow-status-disabled-subtle);
+  border-color: var(--xflow-status-disabled-border);
+  color: var(--xflow-status-disabled-text);
 }
 
 .xflow-editor .xflow-editor-tooltip__container {

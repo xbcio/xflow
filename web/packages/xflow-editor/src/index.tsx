@@ -1232,6 +1232,13 @@ function groupIcon(group: NodeDescriptor["group"]): React.ReactNode {
   return <AuditOutlined />;
 }
 
+/**
+ * Ant Design preset for a runtime status, or `default` for the ones the preset
+ * palette cannot tell apart. `committing` and `expired` are two of those — the
+ * nearest preset is the blue `running` already uses, and the gray an
+ * unrecognized status falls back to — so the stylesheet tones them from the
+ * shared `--xflow-status-*` tokens through the tag's `data-status` instead.
+ */
 function statusColor(status: string | undefined): string {
   if (status === "success") return "green";
   if (status === "running" || status === "waiting") return "blue";
@@ -2171,7 +2178,7 @@ function RunPanel({
     <div className="xflow-editor-run-list">
       <div>
         <span>状态</span>
-        <Tag className="xflow-editor-runtime-tag" classNames={editorTagClassNames} color={statusColor(snapshot.status)}>{snapshot.status}</Tag>
+        <Tag className="xflow-editor-runtime-tag" classNames={editorTagClassNames} color={statusColor(snapshot.status)} data-status={snapshot.status}>{snapshot.status}</Tag>
       </div>
       <div>
         <span>尝试次数</span>
