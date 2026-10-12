@@ -1486,7 +1486,11 @@ func (s *memoryState) CompleteSubExecution(_ context.Context, parentExecID types
 			sub.Status = status
 			sub.Result = result
 		}
-		if sub.Status == types.ExecutionStatusRunning {
+		// The same rule the expansion path applies: only a terminal child is
+		// done. "Not running" also matches a child that is parked in a
+		// non-terminal state, and treating that as finished would hand the
+		// parent a batch with a hole in it.
+		if !types.IsTerminalExecutionStatus(sub.Status) {
 			allDone = false
 		}
 	}
