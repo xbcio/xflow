@@ -68,6 +68,19 @@ func admitForSweep(t *testing.T, ctx context.Context, state *Store, g *graph.Gra
 	return id
 }
 
+// chargeSlotForSweep writes the state a charge leaves behind: the workflow tag
+// registered first, exactly as admission writes it, then the slot itself. The
+// order is the point — a charged slot is always already discoverable by the
+// sweep, so nothing here can hide a leak from the mechanism that repairs it.
+func chargeSlotForSweep(t *testing.T, ctx context.Context, rdb *redis.Client, state *Store, tag string, member types.ExecutionID, limit int, score int64) {
+	t.Helper()
+	state.registerConcurrencyWorkflow(ctx, namespace.Default, tag)
+	if err := workflowAdmitLua.Run(ctx, rdb, []string{concurrencySlotKeyForTag(namespace.Default, tag)},
+		concurrencySlotMember(member), limit, score, 3600).Err(); err != nil {
+		t.Fatalf("charge slot for %q error = %v", member, err)
+	}
+}
+
 // TestSweepConcurrencySlotsRemovesLeakedCharge pins the leak the sweep exists
 // for: a slot charged for an execution that never landed. Without the sweep the
 // workflow runs one short of its limit forever, and nothing in the engine can
@@ -84,10 +97,7 @@ func TestSweepConcurrencySlotsRemovesLeakedCharge(t *testing.T) {
 	// window rather than as a submission in flight.
 	leaked := types.ExecutionID("leaked-execution")
 	old := time.Now().UTC().Add(-10 * time.Minute).Unix()
-	if err := workflowAdmitLua.Run(ctx, rdb, []string{slotKey, concurrencyWorkflowIndexKey(namespace.Default)},
-		concurrencySlotMember(leaked), 1, old, tag, 3600).Err(); err != nil {
-		t.Fatalf("admit leaked slot error = %v", err)
-	}
+	chargeSlotForSweep(t, ctx, rdb, state, tag, leaked, 1, old)
 
 	swept, err := state.ReconcileConcurrencySlots(ctx, 64)
 	if err != nil {
@@ -161,11 +171,7 @@ func TestSweepConcurrencySlotsRemovesLostRelease(t *testing.T) {
 		string(types.ExecutionStatusCanceled), 0).Err(); err != nil {
 		t.Fatalf("write terminal status error = %v", err)
 	}
-	if err := workflowAdmitLua.Run(ctx, rdb,
-		[]string{slotKey, concurrencyWorkflowIndexKey(namespace.Default)},
-		concurrencySlotMember(id), 1, time.Now().UTC().Unix(), tag, 3600).Err(); err != nil {
-		t.Fatalf("charge lost-release slot error = %v", err)
-	}
+	chargeSlotForSweep(t, ctx, rdb, state, tag, id, 1, time.Now().UTC().Unix())
 
 	swept, err := state.ReconcileConcurrencySlots(ctx, 64)
 	if err != nil {
@@ -191,10 +197,7 @@ func TestSweepConcurrencySlotsKeepsFreshPhantom(t *testing.T) {
 	tag := workflowDigestTag(namespace.Default, g.Name())
 
 	fresh := types.ExecutionID("fresh-execution")
-	if err := workflowAdmitLua.Run(ctx, rdb, []string{slotKey, concurrencyWorkflowIndexKey(namespace.Default)},
-		concurrencySlotMember(fresh), 1, time.Now().UTC().Unix(), tag, 3600).Err(); err != nil {
-		t.Fatalf("admit fresh slot error = %v", err)
-	}
+	chargeSlotForSweep(t, ctx, rdb, state, tag, fresh, 1, time.Now().UTC().Unix())
 
 	swept, err := state.ReconcileConcurrencySlots(ctx, 64)
 	if err != nil {
@@ -205,6 +208,30 @@ func TestSweepConcurrencySlotsKeepsFreshPhantom(t *testing.T) {
 	}
 	if n, err := rdb.ZCard(ctx, slotKey).Result(); err != nil || n != 1 {
 		t.Fatalf("slot ZSET size = %d (err %v), want the fresh member kept", n, err)
+	}
+}
+
+// TestSweepConcurrencySlotsDropsTagsForMissingSets keeps the index honest. A
+// tag is registered before the charge it announces, so a refused admission or a
+// crash in between leaves a tag whose set was never created; nothing else in
+// the store removes it, and an index that only grows sends every later sweep to
+// a key that does not exist.
+func TestSweepConcurrencySlotsDropsTagsForMissingSets(t *testing.T) {
+	ctx := context.Background()
+	_, rdb, state := newMiniredisStore(t)
+	g := sweepGraph(t, "conc-sweep-stale-tag")
+
+	state.registerConcurrencyWorkflow(ctx, namespace.Default, workflowDigestTag(namespace.Default, g.Name()))
+
+	swept, err := state.ReconcileConcurrencySlots(ctx, 64)
+	if err != nil {
+		t.Fatalf("ReconcileConcurrencySlots() error = %v", err)
+	}
+	if swept != 0 {
+		t.Fatalf("ReconcileConcurrencySlots() swept = %d, want 0 (there was no slot to release)", swept)
+	}
+	if n, err := rdb.SCard(ctx, concurrencyWorkflowIndexKey(namespace.Default)).Result(); err != nil || n != 0 {
+		t.Fatalf("workflow index size after sweep = %d (err %v), want the stale tag dropped", n, err)
 	}
 }
 
@@ -221,10 +248,7 @@ func TestSweepConcurrencySlotsStopsAtLimit(t *testing.T) {
 
 	for i := 0; i < 5; i++ {
 		id := types.ExecutionID("leaked-" + string(rune('a'+i)))
-		if err := workflowAdmitLua.Run(ctx, rdb, []string{slotKey, concurrencyWorkflowIndexKey(namespace.Default)},
-			concurrencySlotMember(id), 8, old, tag, 3600).Err(); err != nil {
-			t.Fatalf("admit leaked %d error = %v", i, err)
-		}
+		chargeSlotForSweep(t, ctx, rdb, state, tag, id, 8, old)
 	}
 
 	swept, err := state.ReconcileConcurrencySlots(ctx, 2)

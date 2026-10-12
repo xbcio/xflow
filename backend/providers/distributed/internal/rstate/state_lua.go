@@ -689,11 +689,18 @@ return anyFailed and -1 or 1
 // its limit. This is the whole limit: concurrent submissions from different
 // replicas serialize on the slot ZSET, so the check-and-charge cannot race.
 //
-// KEYS[1] = workflow slot ZSET, KEYS[2] = namespace workflow index SET
+// KEYS[1] = workflow slot ZSET
 // ARGV[1] = slot member (the execution ID), ARGV[2] = limit,
-// ARGV[3] = admission score (unix seconds), ARGV[4] = workflow tag,
-// ARGV[5] = TTL seconds for the set and index
+// ARGV[3] = admission score (unix seconds), ARGV[4] = TTL seconds for the set
 // Returns 1 admitted, 0 at the limit.
+//
+// The namespace workflow index is NOT written here, and that is the point: it
+// deliberately carries no {...} tag (it aggregates every workflow in the
+// namespace), so it can never share a slot with this script's key. Redis
+// Cluster refuses a script whose keys hash to different slots, so keeping the
+// index out is what makes this script runnable there at all. The caller
+// registers the tag beforehand — before the charge, not after, so a slot that
+// is charged is always already discoverable by the sweeper.
 //
 // Queue mode never reaches this script: the Go side refuses it, because a slot
 // charged for an execution the queue then fails to persist would be a phantom
@@ -704,9 +711,7 @@ if redis.call('ZCARD', KEYS[1]) >= limit then
     return 0
 end
 redis.call('ZADD', KEYS[1], tonumber(ARGV[3]), ARGV[1])
-redis.call('EXPIRE', KEYS[1], tonumber(ARGV[5]))
-redis.call('SADD', KEYS[2], ARGV[4])
-redis.call('EXPIRE', KEYS[2], tonumber(ARGV[5]))
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[4]))
 return 1
 `)
 
@@ -714,24 +719,28 @@ return 1
 // member that is already gone releases nothing and returns 0, which is what
 // lets every terminal writer call it unconditionally.
 //
-// KEYS[1] = workflow slot ZSET, KEYS[2] = namespace workflow index SET
-// ARGV[1] = slot member, ARGV[2] = workflow tag
-// Returns 1 released, 0 already absent.
+// KEYS[1] = workflow slot ZSET
+// ARGV[1] = slot member (the execution ID)
+// Returns {released, remaining}: released is 1 when this call removed the
+// member, and remaining is the set size afterwards (0 when the set is gone).
 //
-// The empty-set cleanup is what keeps the index honest: the namespace index
-// enumerates the workflow tags the reconciler has to sweep, so a tag left
-// behind by a drained set would send every sweep to a key that no longer
-// exists.
+// An emptied set is deleted here, at the same linearization point as the
+// removal, so no admit can find a set that is about to disappear. Its entry in
+// the namespace workflow index is removed by the caller instead — the index key
+// cannot share this script's slot (see workflowAdmitLua), so the two cannot be
+// joined atomically. The caller's removal is therefore best effort, and the
+// sweep drops a tag whose set is gone: a stale tag costs one read, while a lost
+// tag would hide a leaked slot.
 var workflowReleaseLua = redis.NewScript(`
 local removed = redis.call('ZREM', KEYS[1], ARGV[1])
 if removed == 0 then
-    return 0
+    return {0, redis.call('ZCARD', KEYS[1])}
 end
-if redis.call('ZCARD', KEYS[1]) == 0 then
+local card = redis.call('ZCARD', KEYS[1])
+if card == 0 then
     redis.call('DEL', KEYS[1])
-    redis.call('SREM', KEYS[2], ARGV[2])
 end
-return 1
+return {removed, card}
 `)
 
 // ---------------------------------------------------------------------------

@@ -101,6 +101,21 @@ func (s *Store) sweepConcurrencySlotSet(ctx context.Context, t namespace.Namespa
 		return 0, fmt.Errorf("read concurrency slots %q: %w", slotKey, err)
 	}
 	if len(members) == 0 {
+		// A tag whose set never materialized — a refused admission, or a crash
+		// between registering the tag and charging the slot — or whose set was
+		// emptied without its index entry being dropped. Either way the tag now
+		// points at nothing, and dropping it is what keeps the index
+		// proportional to the workflows that hold slots.
+		//
+		// The check is not atomic with the index removal: admission registers
+		// its tag before charging, so a submission landing between these two
+		// reads can have its tag removed. The failure mode is bounded and
+		// self-healing — that submission's slot is swept once the workflow is
+		// written to again, and every later admission or release registers the
+		// tag anew.
+		if exists, err := s.rdb.Exists(ctx, slotKey).Result(); err == nil && exists == 0 {
+			_ = s.rdb.SRem(ctx, concurrencyWorkflowIndexKey(t), tag).Err()
+		}
 		return 0, nil
 	}
 

@@ -3,6 +3,7 @@ package rstate
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -64,6 +65,52 @@ func concurrencyTagKey(t namespace.Namespace, id types.ExecutionID) string {
 
 var _ engine.ConcurrencyLimitedStateStore = (*Store)(nil)
 
+// registerConcurrencyWorkflow records that a workflow has slot state, so the
+// sweep can find the set it has to inspect.
+//
+// It runs BEFORE the charge it announces. That ordering is what makes the index
+// trustworthy: registering afterwards would leave a window in which a charged
+// slot is not discoverable, and a leak in that window is invisible to the only
+// mechanism that repairs leaks. Registering first instead can leave a tag whose
+// set never materialized (a refused admission, or a crash before the charge),
+// which costs the sweep one read and is dropped the next time the set is found
+// missing. A stale tag is a hint the sweep discards; a lost tag is a leak
+// nobody sweeps.
+//
+// The write cannot join the slot script — the index key carries no hash tag by
+// design, so Redis Cluster would refuse a script naming both it and the slot
+// set. It is therefore best effort, and a failure is logged rather than fatal:
+// the limit is enforced by the slot set, and the index only decides whether the
+// repair path can see it. A workflow that is written to again is registered
+// again, so a transient failure heals itself.
+func (s *Store) registerConcurrencyWorkflow(ctx context.Context, t namespace.Namespace, tag string) {
+	if tag == "" {
+		return
+	}
+	indexKey := concurrencyWorkflowIndexKey(t)
+	if err := s.rdb.SAdd(ctx, indexKey, tag).Err(); err != nil {
+		if s.logger != nil {
+			s.logger.Error("workflow_concurrency_index_add_failed", "namespace", string(t), "tag", tag, "err", err)
+		}
+		return
+	}
+	if err := s.rdb.Expire(ctx, indexKey, s.concurrencySlotTTL()).Err(); err != nil && s.logger != nil {
+		s.logger.Error("workflow_concurrency_index_expire_failed", "namespace", string(t), "tag", tag, "err", err)
+	}
+}
+
+// unregisterConcurrencyWorkflow removes a tag whose slot set is gone. Like the
+// registration it cannot be atomic with the set's deletion; a failure only
+// costs the sweep one read of a key that does not exist.
+func (s *Store) unregisterConcurrencyWorkflow(ctx context.Context, t namespace.Namespace, tag string) {
+	if tag == "" {
+		return
+	}
+	if err := s.rdb.SRem(ctx, concurrencyWorkflowIndexKey(t), tag).Err(); err != nil && s.logger != nil {
+		s.logger.Error("workflow_concurrency_index_remove_failed", "namespace", string(t), "tag", tag, "err", err)
+	}
+}
+
 // CreateExecutionWithConcurrency admits one submission against its workflow's
 // slot set, then persists it.
 //
@@ -83,10 +130,11 @@ func (s *Store) CreateExecutionWithConcurrency(ctx context.Context, execution *e
 	t := namespace.FromContext(ctx)
 	workflow := admission.Workflow
 	tag := workflowDigestTag(t, workflow)
+	s.registerConcurrencyWorkflow(ctx, t, tag)
 	admitted, err := workflowAdmitLua.Run(ctx, s.rdb,
-		[]string{concurrencySlotKey(t, workflow), concurrencyWorkflowIndexKey(t)},
+		[]string{concurrencySlotKey(t, workflow)},
 		concurrencySlotMember(execution.ID), admission.Limit,
-		time.Now().UTC().Unix(), tag, int(s.concurrencySlotTTL().Seconds()),
+		time.Now().UTC().Unix(), int(s.concurrencySlotTTL().Seconds()),
 	).Int64()
 	if err != nil && err != redis.Nil {
 		return engine.ConcurrencyAdmissionResult{}, fmt.Errorf("admit workflow %q: %w", workflow, err)
@@ -166,14 +214,43 @@ func (s *Store) releaseWorkflowSlot(ctx context.Context, id types.ExecutionID, t
 			return err
 		}
 	}
-	_, err := workflowReleaseLua.Run(ctx, s.rdb,
-		[]string{concurrencySlotKeyForTag(t, tag), concurrencyWorkflowIndexKey(t)},
-		concurrencySlotMember(id), tag,
-	).Int64()
+	// Registered before the release for the same reason admission registers
+	// before its charge: if this call turns out to drain the set, the tag has to
+	// be in the index for the sweep to notice anything the drain left behind,
+	// and registering after a failure here would leave nothing to notice with.
+	s.registerConcurrencyWorkflow(ctx, t, tag)
+	res, err := workflowReleaseLua.Run(ctx, s.rdb,
+		[]string{concurrencySlotKeyForTag(t, tag)},
+		concurrencySlotMember(id),
+	).Slice()
 	if err != nil && err != redis.Nil {
 		return fmt.Errorf("release workflow slot for %q: %w", id, err)
 	}
+	// A set this call emptied is gone, so its index entry is now a tag the
+	// sweep would follow to a key that does not exist. Dropping it keeps the
+	// index proportional to the workflows that actually hold slots.
+	if card, ok := secondLuaInt(res); ok && card == 0 {
+		s.unregisterConcurrencyWorkflow(ctx, t, tag)
+	}
 	return nil
+}
+
+// secondLuaInt reads the trailing integer of a Lua reply whose first element is
+// a count the caller does not need. Redis replies with strings, so the value
+// arrives as one and has to be parsed rather than asserted.
+func secondLuaInt(reply []any) (int64, bool) {
+	if len(reply) < 2 {
+		return 0, false
+	}
+	raw, ok := reply[1].(string)
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // workflowTagFor answers which workflow an execution was admitted under.
