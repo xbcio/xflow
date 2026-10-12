@@ -5,8 +5,11 @@ package redis
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -15,6 +18,7 @@ import (
 
 	"github.com/spf13/cast"
 	"github.com/xbcio/xflow/node/internal/utils/conv"
+	"github.com/xbcio/xflow/node/trigger/internal/seedadmit"
 
 	"github.com/xbcio/xflow/types"
 )
@@ -378,12 +382,38 @@ func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (ty
 	}), nil
 }
 
+// admitRetry is the retry policy one message's admission uses. It is a variable
+// so a test can shrink the window: the production cadence is 200ms per retry,
+// which no test should have to wait out.
+var admitRetry = seedadmit.DefaultRetry
+
 // emitMessage reports whether the message is finished with, which is what the
 // caller acknowledges on. A duplicate counts as finished — some earlier
 // delivery already reached the engine — while a dedup lookup that errored does
 // not, because the trigger cannot tell whether it emitted or not and leaving
 // the entry pending costs a redelivery rather than a lost message.
 func emitMessage(ctx context.Context, in *types.TriggerActivateInput, mode string, msg Message) bool {
+	event := newRedisTriggerEvent(in.NodeName, mode, msg)
+	if seedadmit.Enabled(in) {
+		return admitRedisMessage(ctx, in, mode, msg, event)
+	}
+	fresh, err := in.Runtime.Dedup(ctx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+event.ID, 24*time.Hour)
+	if err != nil {
+		return false
+	}
+	if !fresh {
+		return true
+	}
+	if _, err := in.Emit(ctx, event); err != nil {
+		return false
+	}
+	return true
+}
+
+// newRedisTriggerEvent builds the event for one delivered message. It is shared
+// by the two paths so the payload a downstream node sees cannot depend on which
+// one admitted the message.
+func newRedisTriggerEvent(nodeName, mode string, msg Message) *types.TriggerEvent {
 	eventID := msg.ID
 	if mode == "stream" {
 		eventID = msg.Stream + "/" + msg.ID
@@ -394,7 +424,7 @@ func emitMessage(ctx context.Context, in *types.TriggerActivateInput, mode strin
 	event := &types.TriggerEvent{
 		ID:     eventID,
 		Kind:   "redis",
-		Source: in.NodeName,
+		Source: nodeName,
 		Time:   msg.Time,
 		Data: map[string]any{
 			"mode":    mode,
@@ -408,17 +438,71 @@ func emitMessage(ctx context.Context, in *types.TriggerActivateInput, mode strin
 	if event.Time.IsZero() {
 		event.Time = time.Now()
 	}
-	fresh, err := in.Runtime.Dedup(ctx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+eventID, 24*time.Hour)
-	if err != nil {
+	return event
+}
+
+// admitRedisMessage admits one delivered message through the entry-seed path
+// and reports whether it is finished with.
+//
+// Only a complete admission — accepted, duplicate, queued or conflict — is
+// finished with. A refusal and a transport failure both leave the message
+// UNACKNOWLEDGED, which is what keeps it: an unacknowledged entry stays pending
+// and the consumer group's reclaim hands it back later, so the trigger gives up
+// the message to a redelivery rather than dropping it. The bounded retry around
+// the transport failure is what keeps a control plane that is down from parking
+// this consumer on one message forever.
+func admitRedisMessage(ctx context.Context, in *types.TriggerActivateInput, mode string, msg Message, event *types.TriggerEvent) bool {
+	rt, ok := in.Runtime.(types.EntrySeedRuntime)
+	if !ok {
+		// seedadmit.Enabled proved the capability; fail closed rather than
+		// fall back onto Emit, which this runtime cannot serve.
 		return false
 	}
-	if !fresh {
+	req := seedadmit.NewRequest(in, seedadmit.KindRedis, redisFireID(mode, msg, event), event)
+	result, err := seedadmit.Admit(ctx, rt, req, admitRetry)
+	switch result {
+	case seedadmit.Admitted:
 		return true
-	}
-	if _, err := in.Emit(ctx, event); err != nil {
+	case seedadmit.Refused:
+		// A refusal is a decision, not a fault: the workflow is at its own
+		// concurrency limit and nothing was persisted. Nothing durable recorded
+		// the attempt, so this line is the only evidence it happened — and the
+		// rate at which it repeats is how an operator sees that the trigger is
+		// feeding a workflow that cannot keep up.
+		slog.Warn("redis trigger message was refused; leaving it for redelivery",
+			"workflow_id", in.WorkflowID,
+			"node", in.NodeName,
+			"mode", mode,
+			"message", msg.ID,
+			"fire_key", req.AdmissionKey)
+		return false
+	default:
+		slog.Warn("redis trigger message admission failed; leaving it for redelivery",
+			"workflow_id", in.WorkflowID,
+			"node", in.NodeName,
+			"mode", mode,
+			"message", msg.ID,
+			"fire_key", req.AdmissionKey,
+			"err", err)
 		return false
 	}
-	return true
+}
+
+// redisFireID is the fire-key id of one delivered message.
+//
+// A stream entry ID is unique within its stream and the stream name makes it
+// unique across the deployment, so the pair is a faithful identity: the same
+// entry reclaimed by another consumer produces the same key and is admitted
+// once. A pub/sub delivery has no such identity — the same payload published
+// twice is two messages to Redis and one key here — so its key is a hash of the
+// channel and payload bucketed to the second, which merges only what a
+// subscriber cannot itself tell apart (spec §3).
+func redisFireID(mode string, msg Message, event *types.TriggerEvent) string {
+	if mode == "stream" {
+		return "stream/" + msg.Stream + "/" + msg.ID
+	}
+	sum := sha256.Sum256(append(append([]byte(nil), msg.Channel...), msg.Payload...))
+	return fmt.Sprintf("pubsub/%s/%d", hex.EncodeToString(sum[:]), event.Time.Unix())
 }
 
 // ackMessage tells the consumer the entry is done with. The capability is

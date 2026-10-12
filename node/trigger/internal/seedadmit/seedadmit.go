@@ -273,5 +273,14 @@ func eventMap(event *types.TriggerEvent) map[string]any {
 	if len(event.Data) > 0 {
 		out["data"] = event.Data
 	}
+	if len(event.Raw) > 0 {
+		// Carried as the payload's own bytes rather than as the base64 JSON
+		// would produce for a []byte field: on this path the raw bytes ARE the
+		// message the trigger consumed, and the kafka trigger's seed exits carry
+		// their payload the same way. A reader of $input.trigger.raw therefore
+		// sees the payload itself in both deployment modes, which a base64
+		// envelope would not give it.
+		out["raw"] = string(event.Raw)
+	}
 	return out
 }
