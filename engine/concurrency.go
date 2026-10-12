@@ -157,6 +157,41 @@ type ConcurrencyQueueInspector interface {
 	ConcurrencyQueuePosition(ctx context.Context, id types.ExecutionID) (int, error)
 }
 
+// ConcurrencyLimitedEntryAdmissionStore is the optional StateStore capability
+// that applies a workflow's concurrency policy to the entry-seed path.
+//
+// It is separate from EntryAdmissionStore for the same reason
+// ConcurrencyLimitedStateStore is separate from AtomicStateStore: the two are
+// independent capabilities, and a backend that can seed entries without being
+// able to enforce a limit must be able to say so rather than being forced to
+// implement both. The engine routes to it only when the seeded graph declares a
+// limit and fails closed when it is absent.
+//
+// An implementation owns the same contract as CreateExecutionWithConcurrency,
+// with the seed's own creation step in place of the ordinary one:
+//   - a REJECT-mode admission over the limit persists nothing and answers that
+//     it was refused (AdmissionStateOverLimit);
+//   - a QUEUE-mode admission over the limit persists the execution in the
+//     queued status with its intents held, exactly as a queued submission is
+//     persisted, and answers accepted;
+//   - a refused full queue persists nothing and answers
+//     AdmissionStateQueueFull;
+//   - an admission this call did not create — a duplicate or a conflict —
+//     leaves the slot state exactly as the admission that did create it left
+//     it, so a redelivered batch neither charges a second slot nor loses the
+//     original execution's place in line.
+//
+// Release needs no method here: the store's own terminal writers already
+// release whatever a seeded execution holds, because the seed writes the same
+// slot back-reference an ordinary admission writes.
+type ConcurrencyLimitedEntryAdmissionStore interface {
+	EntryAdmissionStore
+	// SeedExecutionFromEntryWithConcurrency admits one entry-unit seed under
+	// the supplied workflow's concurrency policy. See the interface doc for the
+	// atomicity contract.
+	SeedExecutionFromEntryWithConcurrency(ctx context.Context, req SeedExecutionFromEntryRequest, admission ConcurrencyAdmission) (SeedExecutionFromEntryResponse, error)
+}
+
 // concurrencyAdmissionFor builds the admission one submission contends for from
 // its own compiled graph, or nil when the graph declares no limit.
 //
