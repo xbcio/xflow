@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
@@ -35,6 +36,12 @@ func (f *stubFetcher) Fetch(_ context.Context, name string) ([]byte, string, uin
 	return c, "sha256:" + name, 7, nil
 }
 
+// defaultKey is the registry key for a supply node in the default namespace.
+// The gate reads its namespace from the context and namespace.FromContext
+// resolves an absent one to namespace.Default, so the tests that drive it with
+// a bare context.Background() must look the content up under that same key.
+func defaultKey(name string) supply.Key { return supply.KeyOf(namespace.Default, name) }
+
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
@@ -52,7 +59,7 @@ func TestAdmitFetchesMissingContentAndPasses(t *testing.T) {
 	}
 	// The content must land in the registry under the SUPPLY NODE name, which is
 	// what $supplies and the consumer registry key on — not the resource name.
-	got, ok := reg.Get("rules")
+	got, ok := reg.Get(defaultKey("rules"))
 	if !ok {
 		t.Fatal("content must be cached under the supply node name")
 	}
@@ -184,7 +191,7 @@ func (c *rejectingConsumer) OnSupplyChanged(_ context.Context, _ supply.Snapshot
 func TestAdmitDeclinesRepeatedlyWhenConsumerRejects(t *testing.T) {
 	rc := &rejectingConsumer{reject: true}
 	reg := supply.NewRegistry()
-	reg.RegisterConsumer("rules", "wasm/clean", rc)
+	reg.RegisterConsumer(defaultKey("rules"), "wasm/clean", rc)
 
 	f := &stubFetcher{content: map[string][]byte{"shared-rules": []byte(`{"rules":[]}`)}}
 	g := NewSupplyGate(f, reg, quietLogger())
@@ -244,7 +251,7 @@ func TestAdmitPassesWithNoConsumer(t *testing.T) {
 func TestAdmitAdmitsAfterConsumerStartsAccepting(t *testing.T) {
 	rc := &rejectingConsumer{reject: true}
 	reg := supply.NewRegistry()
-	reg.RegisterConsumer("rules", "wasm/clean", rc)
+	reg.RegisterConsumer(defaultKey("rules"), "wasm/clean", rc)
 
 	f := &stubFetcher{content: map[string][]byte{"shared-rules": []byte(`{"rules":[]}`)}}
 	g := NewSupplyGate(f, reg, quietLogger())
@@ -285,7 +292,7 @@ func TestAdmitAdmitsAfterConsumerStartsAccepting(t *testing.T) {
 func TestAdmitAdmitsAfterRejectingConsumerUnregistered(t *testing.T) {
 	rc := &rejectingConsumer{reject: true}
 	reg := supply.NewRegistry()
-	reg.RegisterConsumer("rules", "wasm/clean", rc)
+	reg.RegisterConsumer(defaultKey("rules"), "wasm/clean", rc)
 
 	f := &stubFetcher{content: map[string][]byte{"shared-rules": []byte(`{"rules":[]}`)}}
 	g := NewSupplyGate(f, reg, quietLogger())
@@ -302,7 +309,7 @@ func TestAdmitAdmitsAfterRejectingConsumerUnregistered(t *testing.T) {
 	}
 
 	// Unregister the consumer: no consumers left, supply should become ready.
-	reg.UnregisterConsumer("rules", "wasm/clean")
+	reg.UnregisterConsumer(defaultKey("rules"), "wasm/clean")
 
 	// Second Admit: IsReady returns true (unregister marked it accepted) → admits
 	// without fetching.

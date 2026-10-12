@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/supply"
 )
 
@@ -222,8 +223,15 @@ func (s SupplyMetrics) OnSupplyServingUnavailable(ctx context.Context, name stri
 // OnConsumerCount reports how many in-process consumers a supply has. Named
 // to satisfy supply.ConsumerCountObserver directly (see var _ assertion
 // below) rather than through a separate adapter type.
-func (s SupplyMetrics) OnConsumerCount(ctx context.Context, name string, n int) {
-	s.Metrics.Set(metricSupplyConsumers, withNamespace(ctx, map[string]string{"name": name}), float64(n))
+//
+// The namespace is taken from the argument, not from ctx: the registry calls
+// this from inside a registration, outside any request context, so a
+// ctx-derived label would always read "default" and misattribute every supply
+// hosted in another namespace.
+func (s SupplyMetrics) OnConsumerCount(ctx context.Context, ns namespace.Namespace, name string, n int) {
+	s.Metrics.Set(metricSupplyConsumers, map[string]string{
+		"namespace": string(ns), "name": name,
+	}, float64(n))
 }
 
 var _ supply.ConsumerCountObserver = SupplyMetrics{}

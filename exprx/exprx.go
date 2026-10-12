@@ -161,10 +161,16 @@ func BuildExprEnv(input *types.Input, extra map[string]any) map[string]any {
 	// tell apart. Merging them would also make name collisions unresolvable and
 	// would flatten the failure semantics.
 	//
-	// The value is the registry's published shared map, not a copy: this is one
-	// pointer assignment per message regardless of how large the content is.
-	// Decoding happened once, when the content changed.
-	env["$supplies"] = supply.Default.Decoded()
+	// The value is the registry's published shared map for the input's own
+	// namespace, not a copy: this is one pointer assignment per message
+	// regardless of how large the content is. Decoding happened once, when the
+	// content changed.
+	//
+	// The namespace comes from the input, which the runner fills from the
+	// lease's authoritative namespace before the handler runs. A cross-namespace
+	// supply reference is deliberately not expressible: $supplies only ever
+	// resolves names declared in the executing workflow's own namespace.
+	env["$supplies"] = supply.Default.Decoded(input.Namespace())
 	// $nodes holds the outputs of nodes referenced via $nodes['name'] in this
 	// node's parameters. Populated by buildInput from the compile-time reference
 	// set. nil when the node declares no $nodes references.

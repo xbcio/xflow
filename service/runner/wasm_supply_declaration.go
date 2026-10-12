@@ -8,6 +8,7 @@ import (
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/exprx"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/store"
@@ -34,6 +35,12 @@ import (
 // execution-time guard in node/internal/code/script still refuses to run a
 // module with no supply-borne configuration.
 type wasmWarmupConsumer struct {
+	// ns is the namespace of the activation whose declaration registered this
+	// consumer. It scopes both the $supplies view the digest expression is
+	// rendered against and the supply the module is registered as a consumer
+	// of: supply identity is (namespace, name), so the pointer supply this
+	// consumer resolves is the one in this activation's own namespace.
+	ns         namespace.Namespace
 	digestExpr string
 	supplyNode string
 	workflow   string
@@ -44,11 +51,12 @@ type wasmWarmupConsumer struct {
 var _ supply.Consumer = (*wasmWarmupConsumer)(nil)
 
 func (c *wasmWarmupConsumer) OnSupplyChanged(ctx context.Context, _ supply.Snapshot) error {
-	// Rendered against the registry's decoded view rather than the snapshot
-	// passed in, so an expression may reference any supply -- and so warm-up and
-	// boundary evaluation read the same source. Decoded() is one atomic load of
-	// a whole-table view, so a single render is internally consistent.
-	rendered, err := exprx.RenderTemplate(c.digestExpr, exprx.SuppliesEnv(supply.Default))
+	// Rendered against the registry's decoded view for this consumer's own
+	// namespace rather than the snapshot passed in, so an expression may
+	// reference any supply in that namespace -- and so warm-up and boundary
+	// evaluation read the same source. Decoded(ns) is one atomic load of a
+	// whole-table view, so a single render is internally consistent.
+	rendered, err := exprx.RenderTemplate(c.digestExpr, exprx.SuppliesEnv(supply.Default, c.ns))
 	if err != nil {
 		// err is deliberately NOT logged: exprx's underlying compiler echoes the
 		// expression source verbatim in its error text (e.g. "unknown name $input
@@ -107,7 +115,7 @@ func (c *wasmWarmupConsumer) OnSupplyChanged(ctx context.Context, _ supply.Snaps
 	// activation-identity owners the legacy binding uses (see
 	// trigger_activation_handler.go's registerSupplyConsumers), which is why both
 	// this and the execution-time guard use the same distinct prefix.
-	if err := node.RegisterWasmSupplyConsumerByDigest(digest, c.supplyNode, wasmSupplyConsumerOwner(c.workflow, c.node)); err != nil {
+	if err := node.RegisterWasmSupplyConsumerByDigest(c.ns, digest, c.supplyNode, wasmSupplyConsumerOwner(c.workflow, c.node)); err != nil {
 		return fmt.Errorf("warm-up registration of wasm module %s for supply %q: %w", digest, c.supplyNode, err)
 	}
 	return nil
@@ -125,16 +133,21 @@ func wasmSupplyConsumerOwner(workflowName, nodeName string) string {
 }
 
 // warmupConsumerKey namespaces warm-up registrations away from the wasm
-// package's own {supplyNode}@{moduleKey} keys, so the two never collide -- a
-// collision would silently replace one with the other (registry.go's
+// package's own {namespace}/{supplyNode}@{moduleKey} keys, so the two never
+// collide -- a collision would silently replace one with the other (registry.go's
 // RegisterConsumer overwrites a same-key entry unconditionally).
+//
+// The namespace is part of the key because the supply it identifies is
+// (namespace, name): two activations declaring the same (workflow, node,
+// supply name) in different namespaces are declaring two different supplies and
+// must not share one refcount.
 //
 // This key does NOT include activation or replica identity, so every replica
 // of the same (workflow, node, supply) declaration computes the identical
 // key -- see warmupConsumerRegistry for why that makes the registration a
 // refcount rather than a plain register/unregister pair.
-func warmupConsumerKey(b engine.SupplyConsumerBinding) string {
-	return "warmup/" + b.WorkflowName + "/" + b.NodeName + "@" + b.SupplyNode
+func warmupConsumerKey(ns namespace.Namespace, b engine.SupplyConsumerBinding) string {
+	return "warmup/" + string(ns) + "/" + b.WorkflowName + "/" + b.NodeName + "@" + b.SupplyNode
 }
 
 // warmupConsumerRegistry refcounts the warm-up consumer's registration on
@@ -166,16 +179,16 @@ type warmupConsumerRegistry struct {
 // they share must be equally global.
 var warmupConsumers = &warmupConsumerRegistry{counts: map[string]int{}}
 
-// acquire registers c under key against supplyNode on the 0->1 transition
-// only; every other call just increments the refcount, leaving the
+// acquire registers c under key against the supply identified by k on the 0->1
+// transition only; every other call just increments the refcount, leaving the
 // already-registered consumer (and its already-resolved warm-up verdict, if
 // any) untouched. Mirrors supplyDeclarationTable.declare.
-func (r *warmupConsumerRegistry) acquire(key, supplyNode string, c supply.Consumer) {
+func (r *warmupConsumerRegistry) acquire(key string, k supply.Key, c supply.Consumer) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.counts[key]++
 	if r.counts[key] == 1 {
-		supply.Default.RegisterConsumer(supplyNode, key, c)
+		supply.Default.RegisterConsumer(k, key, c)
 	}
 }
 
@@ -185,7 +198,7 @@ func (r *warmupConsumerRegistry) acquire(key, supplyNode string, c supply.Consum
 // supplyDeclarationTable.undeclare's floor-at-zero behavior, and keeps this
 // safe to call from a full-teardown path that does not track whether it has
 // already run for this key.
-func (r *warmupConsumerRegistry) release(key, supplyNode string) {
+func (r *warmupConsumerRegistry) release(key string, k supply.Key) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	n, ok := r.counts[key]
@@ -194,7 +207,7 @@ func (r *warmupConsumerRegistry) release(key, supplyNode string) {
 	}
 	if n == 1 {
 		delete(r.counts, key)
-		supply.Default.UnregisterConsumer(supplyNode, key)
+		supply.Default.UnregisterConsumer(k, key)
 		return
 	}
 	r.counts[key] = n - 1

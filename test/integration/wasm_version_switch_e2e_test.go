@@ -299,7 +299,7 @@ func TestExpressionDigestActivatesEndToEnd(t *testing.T) {
 	// and the execution-time guard both register/release under
 	// "node:" + WorkflowName + "/" + NodeName (spec Z.4/Z.8).
 	t.Cleanup(func() {
-		node.UnregisterWasmSupplyConsumerByDigest(digest, vswitchDeclareSupplyNode, "node:"+def.Name+"/"+taggerNode)
+		node.UnregisterWasmSupplyConsumerByDigest(namespace.Default, digest, vswitchDeclareSupplyNode, "node:"+def.Name+"/"+taggerNode)
 	})
 
 	putSupplyContent(t, supplies, supplyRes,
@@ -479,10 +479,10 @@ func TestPointerFlipIsObservedAsModuleReady(t *testing.T) {
 	// and the execution-time guard both register/release under
 	// "node:" + WorkflowName + "/" + NodeName (spec Z.4/Z.8).
 	t.Cleanup(func() {
-		node.UnregisterWasmSupplyConsumerByDigest(digestA, vswitchFlipSupplyNode, "node:"+def.Name+"/"+taggerNode)
+		node.UnregisterWasmSupplyConsumerByDigest(namespace.Default, digestA, vswitchFlipSupplyNode, "node:"+def.Name+"/"+taggerNode)
 	})
 	t.Cleanup(func() {
-		node.UnregisterWasmSupplyConsumerByDigest(digestB, vswitchFlipSupplyNode, "node:"+def.Name+"/"+taggerNode)
+		node.UnregisterWasmSupplyConsumerByDigest(namespace.Default, digestB, vswitchFlipSupplyNode, "node:"+def.Name+"/"+taggerNode)
 	})
 
 	putSupplyContent(t, supplies, supplyRes,
@@ -548,12 +548,12 @@ func TestPointerFlipIsObservedAsModuleReady(t *testing.T) {
 
 	deadline = time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		if supply.Default.IsReady(vswitchFlipSupplyNode) && node.WasmSupplyConfigured(digestA) {
+		if supply.Default.IsReady(supply.KeyOf(namespace.Default, vswitchFlipSupplyNode)) && node.WasmSupplyConfigured(digestA) {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if !(supply.Default.IsReady(vswitchFlipSupplyNode) && node.WasmSupplyConfigured(digestA)) {
+	if !(supply.Default.IsReady(supply.KeyOf(namespace.Default, vswitchFlipSupplyNode)) && node.WasmSupplyConfigured(digestA)) {
 		t.Fatalf("pointer A (%s) was never observed ready+configured within the deadline", digestA)
 	}
 
@@ -562,12 +562,12 @@ func TestPointerFlipIsObservedAsModuleReady(t *testing.T) {
 
 	deadline = time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		if supply.Default.IsReady(vswitchFlipSupplyNode) && node.WasmSupplyConfigured(digestB) {
+		if supply.Default.IsReady(supply.KeyOf(namespace.Default, vswitchFlipSupplyNode)) && node.WasmSupplyConfigured(digestB) {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if !(supply.Default.IsReady(vswitchFlipSupplyNode) && node.WasmSupplyConfigured(digestB)) {
+	if !(supply.Default.IsReady(supply.KeyOf(namespace.Default, vswitchFlipSupplyNode)) && node.WasmSupplyConfigured(digestB)) {
 		t.Fatalf("pointer flip from A (%s) to B (%s) was never observed ready+configured within "+
 			"the deadline -- a post-activation content change never reached the already-hosted "+
 			"runner", digestA, digestB)
@@ -867,10 +867,10 @@ func TestRollbackKeepsReceivingContentUpdates(t *testing.T) {
 	// and the execution-time guard both register/release under
 	// "node:" + WorkflowName + "/" + NodeName (spec Z.4/Z.8).
 	t.Cleanup(func() {
-		node.UnregisterWasmSupplyConsumerByDigest(digestA, vswitchRollbackSupplyNode, "node:"+def.Name+"/"+taggerNode)
+		node.UnregisterWasmSupplyConsumerByDigest(namespace.Default, digestA, vswitchRollbackSupplyNode, "node:"+def.Name+"/"+taggerNode)
 	})
 	t.Cleanup(func() {
-		node.UnregisterWasmSupplyConsumerByDigest(digestB, vswitchRollbackSupplyNode, "node:"+def.Name+"/"+taggerNode)
+		node.UnregisterWasmSupplyConsumerByDigest(namespace.Default, digestB, vswitchRollbackSupplyNode, "node:"+def.Name+"/"+taggerNode)
 	})
 
 	// --- Step 1: pointer -> A, revision 1. ---

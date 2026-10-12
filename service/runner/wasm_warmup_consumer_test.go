@@ -124,7 +124,7 @@ func TestPointerSupplyIsNotReadyUntilWarmupSucceeds(t *testing.T) {
 		SupplyConsumers: []engine.SupplyConsumerBinding{decl},
 	})
 
-	if supply.Default.IsReady(ptr) {
+	if supply.Default.IsReady(defaultKey(ptr)) {
 		t.Fatal("the pointer supply reads ready although its module could not be " +
 			"fetched; the run-state report would claim the new version is live")
 	}
@@ -174,7 +174,7 @@ func TestWarmupRetriesAfterFailure(t *testing.T) {
 		Supplies:        []engine.SupplyRequirement{{Node: ptr}},
 		SupplyConsumers: []engine.SupplyConsumerBinding{decl},
 	})
-	if supply.Default.IsReady(ptr) {
+	if supply.Default.IsReady(defaultKey(ptr)) {
 		t.Fatal("ready after the first (failing) warm-up")
 	}
 
@@ -186,7 +186,7 @@ func TestWarmupRetriesAfterFailure(t *testing.T) {
 		t.Fatalf("the resolver was called %d time(s); re-applying identical content did "+
 			"NOT re-notify, so a failed warm-up would never recover", calls)
 	}
-	if !supply.Default.IsReady(ptr) {
+	if !supply.Default.IsReady(defaultKey(ptr)) {
 		t.Fatal("still not ready after a successful retry")
 	}
 }
@@ -396,7 +396,7 @@ func TestWarmupConsumerSurvivesReplicaSiblingDeactivate(t *testing.T) {
 			"the warm-up consumer replica 1 still depends on was stripped by replica 0's "+
 			"Deactivate, so replica 1 silently reverts to bare L1 readiness", fb.digest)
 	}
-	if !supply.Default.IsReady(ptr) {
+	if !supply.Default.IsReady(defaultKey(ptr)) {
 		t.Fatal("pointer supply not ready although the surviving replica's warm-up " +
 			"consumer successfully compiled digest B")
 	}
@@ -494,7 +494,7 @@ func assertWarmupConsumerFullyReleased(t *testing.T, h *TriggerActivationHandler
 		Revision:  999,
 		FetchedAt: time.Now(),
 	})
-	if !supply.Default.IsReady(ptr) {
+	if !supply.Default.IsReady(defaultKey(ptr)) {
 		t.Fatalf("pointer supply %q is not ready after a clean Activate+Deactivate cycle -- "+
 			"a warm-up consumer reference from an earlier failed Activate is still "+
 			"registered and just failed to resolve an unrelated digest, which is "+

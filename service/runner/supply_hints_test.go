@@ -56,7 +56,7 @@ func TestApplyHintsFetchesOnHashMismatch(t *testing.T) {
 	if f.calls.Load() != callsAfterAdmit+1 {
 		t.Fatalf("fetch calls = %d, want %d (exactly one hint-triggered fetch)", f.calls.Load(), callsAfterAdmit+1)
 	}
-	got, ok := reg.Get("rules")
+	got, ok := reg.Get(defaultKey("rules"))
 	if !ok || string(got.Content) != `{"new":true,"v":2}` {
 		t.Fatalf("registry content = %+v, want the newly-fetched content under node name 'rules'", got)
 	}
@@ -78,7 +78,7 @@ func TestApplyHintsUsesResourceMappingFromAdmit(t *testing.T) {
 	f.content["shared-resource-name"] = []byte(`v2`)
 	g.ApplyHints(context.Background(), map[string]string{"local-alias": "sha256:different"})
 
-	got, ok := reg.Get("local-alias")
+	got, ok := reg.Get(defaultKey("local-alias"))
 	if !ok || string(got.Content) != `v2` {
 		t.Fatalf("registry['local-alias'] = %+v, want v2 (fetched via the mapped resource name)", got)
 	}
@@ -96,7 +96,7 @@ func TestApplyHintsFetchFailureIsNonFatal(t *testing.T) {
 
 	g.ApplyHints(context.Background(), map[string]string{"rules": "sha256:new-but-unreachable"})
 
-	got, ok := reg.Get("rules")
+	got, ok := reg.Get(defaultKey("rules"))
 	if !ok || string(got.Content) != `good` {
 		t.Fatalf("registry content = %+v, want last-good 'good' preserved after fetch failure", got)
 	}
@@ -108,7 +108,7 @@ func TestApplyHintsFetchFailureIsNonFatal(t *testing.T) {
 func TestApplyHintsRejectedContentPreservesLastGood(t *testing.T) {
 	reg := supply.NewRegistry()
 	rc := &rejectingConsumer{reject: false}
-	reg.RegisterConsumer("rules", "wasm/clean", rc)
+	reg.RegisterConsumer(defaultKey("rules"), "wasm/clean", rc)
 	if err := reg.Apply(context.Background(), supply.Snapshot{Name: "rules", Content: []byte(`good`), Hash: "h-good", Revision: 1}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -119,13 +119,13 @@ func TestApplyHintsRejectedContentPreservesLastGood(t *testing.T) {
 
 	g.ApplyHints(context.Background(), map[string]string{"rules": "sha256:bad-content"})
 
-	got, _ := reg.Get("rules")
+	got, _ := reg.Get(defaultKey("rules"))
 	if !rc.reject {
 		t.Fatal("test setup: consumer must be rejecting")
 	}
 	_ = got // content is cached regardless per Registry.Apply's documented contract;
 	// the important assertion is that IsReady reflects the rejection.
-	if reg.IsReady("rules") {
+	if reg.IsReady(defaultKey("rules")) {
 		t.Fatal("IsReady must be false: the consumer rejected the hinted content")
 	}
 }
@@ -203,7 +203,7 @@ func TestApplyHintsNilSafety(t *testing.T) {
 // recorded — the common case where node name and resource name coincide.
 func TestResourceForFallsBackToNameWhenUnrecorded(t *testing.T) {
 	g := NewSupplyGate(&stubFetcher{}, supply.NewRegistry(), quietLogger())
-	if got := g.resourceFor("never-admitted"); got != "never-admitted" {
+	if got := g.resourceFor(defaultKey("never-admitted")); got != "never-admitted" {
 		t.Fatalf("resourceFor = %q, want the name itself", got)
 	}
 }
@@ -285,7 +285,7 @@ func TestProcessSupplyHintsAppliesHintViaGate(t *testing.T) {
 	f := &stubFetcher{content: map[string][]byte{"shared-rules": []byte(`{"v":2}`)}}
 	g := NewSupplyGate(f, reg, quietLogger())
 	// Seed the node->resource mapping the way Admit would at activation time.
-	g.resources.Store("rules", "shared-rules")
+	g.resources.Store(defaultKey("rules"), "shared-rules")
 	r := &Runner{supplyGate: g}
 
 	r.processSupplyHints(context.Background(), protocol.HeartbeatResponse{
@@ -297,7 +297,7 @@ func TestProcessSupplyHintsAppliesHintViaGate(t *testing.T) {
 	// rather than asserting immediately.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if got, ok := reg.Get("rules"); ok && string(got.Content) == `{"v":2}` {
+		if got, ok := reg.Get(defaultKey("rules")); ok && string(got.Content) == `{"v":2}` {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)

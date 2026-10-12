@@ -9,6 +9,7 @@ import (
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/execution/subgraph"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/types"
 )
@@ -36,7 +37,7 @@ func (h *supplyReaderHandler) Descriptor() types.Descriptor {
 }
 
 func (h *supplyReaderHandler) Execute(_ context.Context, _ *types.Input) (*types.Output, error) {
-	snap, ok := supply.Default.Get(h.supplyName)
+	snap, ok := supply.Default.Get(supply.KeyOf(namespace.Default, h.supplyName))
 	if !ok {
 		return &types.Output{Data: map[string]any{"content": nil}}, nil
 	}

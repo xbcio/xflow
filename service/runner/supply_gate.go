@@ -12,6 +12,7 @@ import (
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/exprx"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/store"
 )
@@ -83,22 +84,23 @@ type SupplyGate struct {
 	// a second non-nil SetObserver call can panic rather than silently overwrite.
 	observerInstalled bool
 
-	// resources maps supply NODE name → resource name, recorded by Admit for
-	// every requirement it processes. A heartbeat hint carries only the node
-	// name (that is the identity $supplies and the consumer registry use), but
-	// SupplyFetcher.Fetch needs the resource name — they differ whenever a node
-	// overrides `resource`. This is populated at activation time, which is the
-	// only place the mapping is known; ApplyHints has no other way to recover
-	// it later.
-	resources sync.Map // string(node name) -> string(resource name)
+	// resources maps a supply KEY (namespace + node name) → resource name,
+	// recorded by Admit for every requirement it processes. A heartbeat hint
+	// carries the same key (that is the identity $supplies and the consumer
+	// registry use), but SupplyFetcher.Fetch needs the resource name — they
+	// differ whenever a node overrides `resource`. This is populated at
+	// activation time, which is the only place the mapping is known; the hint
+	// path has no other way to recover it later.
+	resources sync.Map // supply.Key -> string(resource name)
 
-	// hintsInFlight marks supply names currently being fetched by ApplyHints.
-	// The caller (Runner.processSupplyHints) runs ApplyHints in its own
-	// goroutine per heartbeat so a slow fetch cannot delay the next heartbeat;
-	// this map is what stops two overlapping heartbeat rounds from firing a
-	// second concurrent fetch for the same name while the first is still in
-	// flight (which would waste a fetch and could apply results out of order).
-	hintsInFlight sync.Map // string(node name) -> struct{}
+	// hintsInFlight marks supply keys currently being fetched. The caller
+	// (Runner.processSupplyHints) runs ApplyHints in its own goroutine per
+	// heartbeat so a slow fetch cannot delay the next heartbeat; this map is
+	// what stops two overlapping heartbeat rounds — or a heartbeat round and a
+	// TTL poll — from firing a second concurrent fetch for the same key while
+	// the first is still in flight (which would waste a fetch and could apply
+	// results out of order).
+	hintsInFlight sync.Map // supply.Key -> struct{}
 }
 
 func NewSupplyGate(f SupplyFetcher, reg *supply.Registry, logger *slog.Logger) *SupplyGate {
@@ -133,16 +135,16 @@ func (g *SupplyGate) SetObserver(o SupplyGateObserver) {
 // supply encryption keys on the HTTP fetcher after registration.
 func (g *SupplyGate) Fetcher() SupplyFetcher { return g.fetcher }
 
-// resourceFor returns the resource name recorded for a supply NODE name at a
-// prior Admit call, or name itself when never recorded (the common case: node
+// resourceFor returns the resource name recorded for a supply key at a prior
+// Admit call, or the key's own name when never recorded (the common case: node
 // name and resource name are equal unless a workflow overrides `resource`).
-func (g *SupplyGate) resourceFor(name string) string {
-	if v, ok := g.resources.Load(name); ok {
+func (g *SupplyGate) resourceFor(k supply.Key) string {
+	if v, ok := g.resources.Load(k); ok {
 		if s, ok := v.(string); ok && s != "" {
 			return s
 		}
 	}
-	return name
+	return k.Name
 }
 
 // Admit reports whether the activation may proceed. It returns *NotReadyError
@@ -188,18 +190,23 @@ func (g *SupplyGate) AdmitWithDeclarations(ctx context.Context, workflowID strin
 	if len(reqs) == 0 {
 		return nil
 	}
+	// The activation's namespace is the authority for every supply key below.
+	// It comes off ctx, which the activation path fills from the directive's own
+	// namespace — never from the requirement records, which carry names only.
+	ns := namespace.FromContext(ctx)
 	var missing []string
 	for _, req := range reqs {
-		// Record the node→resource mapping regardless of outcome below: a later
-		// heartbeat hint carries only the node name, and this is the only place
-		// the resource name is known. Recording it even when a fetch fails or a
-		// consumer rejects keeps ApplyHints able to retry with the right name.
-		g.resources.Store(req.Node, req.Resource)
+		k := supply.KeyOf(ns, req.Node)
+		// Record the key→resource mapping regardless of outcome below: a later
+		// heartbeat hint carries the same key, and this is the only place the
+		// resource name is known. Recording it even when a fetch fails or a
+		// consumer rejects keeps the hint path able to retry with the right name.
+		g.resources.Store(k, req.Resource)
 		declared := declaresFor(decls, req.Node)
 		// The ready fast path is only sound when nothing declares a node on this
 		// supply. With a declaration present the cached content must still be
 		// resolved below, because "cached" is not "complete".
-		if len(declared) == 0 && g.registry.IsReady(req.Node) {
+		if len(declared) == 0 && g.registry.IsReady(k) {
 			g.notifyNotReady(ctx, workflowID, req.Node, false)
 			continue
 		}
@@ -225,7 +232,8 @@ func (g *SupplyGate) AdmitWithDeclarations(ctx context.Context, workflowID strin
 		}
 		g.notifyFetch(ctx, req.Resource, "ok")
 		if err := g.registry.Apply(ctx, supply.Snapshot{
-			Name:      req.Node,
+			Namespace: k.Namespace,
+			Name:      k.Name,
 			Content:   content,
 			Hash:      hash,
 			Revision:  revision,
@@ -250,7 +258,7 @@ func (g *SupplyGate) AdmitWithDeclarations(ctx context.Context, workflowID strin
 		// at all on a first activation), so an expression would be validated
 		// against the wrong pointer — reporting a complete set as incomplete for
 		// one heartbeat, or accepting an incomplete one.
-		if nodeName, ok := g.unresolvableDeclaration(declared); ok {
+		if nodeName, ok := g.unresolvableDeclaration(k, declared); ok {
 			g.logDeclaredNodeUnusable(ctx, req, nodeName, hash)
 			if req.RequireReady {
 				missing = append(missing, req.Node)
@@ -264,7 +272,7 @@ func (g *SupplyGate) AdmitWithDeclarations(ctx context.Context, workflowID strin
 		// "content unchanged, no notification happened". Re-check IsReady to catch
 		// the case where the content is cached-but-rejected from a prior Apply
 		// with the same hash (a re-fetch that returned identical bytes).
-		if !g.registry.IsReady(req.Node) {
+		if !g.registry.IsReady(k) {
 			g.log(ctx, slog.LevelWarn, "supply content previously rejected, still not ready", req, hash)
 			if req.RequireReady {
 				missing = append(missing, req.Node)
@@ -316,11 +324,15 @@ func declaresFor(decls []engine.SupplyConsumerBinding, supply string) []engine.S
 // those would leave a correctly-configured node permanently not-ready. The
 // cost is that such a node keeps its consumer verdict as its only gate, which
 // is what it had before this check existed.
-func (g *SupplyGate) unresolvableDeclaration(decls []engine.SupplyConsumerBinding) (string, bool) {
+//
+// k identifies the supply the declarations belong to: the digest expressions
+// are rendered against that supply's own namespace's $supplies view, so a
+// pointer in namespace A can never resolve a digest published by namespace B.
+func (g *SupplyGate) unresolvableDeclaration(k supply.Key, decls []engine.SupplyConsumerBinding) (string, bool) {
 	if len(decls) == 0 {
 		return "", false
 	}
-	env := exprx.SuppliesEnv(g.registry)
+	env := exprx.SuppliesEnv(g.registry, k.Namespace)
 	for _, b := range decls {
 		rendered, err := exprx.RenderTemplate(b.DigestExpr, env)
 		if err != nil {
@@ -419,17 +431,16 @@ func hashPrefix(hash string) string {
 	return body
 }
 
-// ApplyHints reacts to the server's supply hints: for each name whose hinted
+// ApplyHints reacts to the server's supply hints: for each supply whose hinted
 // hash differs from what this process has, fetch once and publish.
 //
 // A hint is advisory. Losing one is not an error and is not retried here — the
-// activation-time fetch (Admit) is the only other convergence path. There is
-// no TTL poll loop today: a hint dropped while a consumer is already admitted
-// leaves that consumer on its last-good value until the next hint arrives.
-// Keeping the notification advisory is still deliberate: a design where the
-// piggybacked notification is the only channel keeps a stale value forever
-// the first time a message is dropped (network partition, runner restart,
-// server failover).
+// activation-time fetch (Admit) is the other convergence path. There is no TTL
+// poll loop today: a hint dropped while a consumer is already admitted leaves
+// that consumer on its last-good value until the next hint arrives. Keeping the
+// notification advisory is still deliberate: a design where the piggybacked
+// notification is the only channel keeps a stale value forever the first time a
+// message is dropped (network partition, runner restart, server failover).
 //
 // Scope note: this affects only WHEN an already-hosted runner refreshes
 // content it already consumes. It has nothing to do with whether an
@@ -441,52 +452,62 @@ func (g *SupplyGate) ApplyHints(ctx context.Context, hints map[string]string) {
 	if g == nil || len(hints) == 0 {
 		return
 	}
+	// The hint carries a node name only; the namespace comes from ctx, which on
+	// this path is the heartbeat's context.
+	ns := namespace.FromContext(ctx)
 	for name, hash := range hints {
-		if cur, ok := g.registry.Get(name); ok && cur.Hash == hash {
-			continue // already on this content: zero cost
-		}
-		// De-dupe: if a fetch for this name is already in flight (from an
+		k := supply.KeyOf(ns, name)
+		// De-dupe: if a fetch for this key is already in flight (from an
 		// overlapping ApplyHints call, e.g. two heartbeat rounds whose fetches
 		// both outlived the heartbeat interval), skip rather than fire a second
 		// concurrent fetch. The in-flight one will land the same content this
 		// hint is asking for.
-		if _, already := g.hintsInFlight.LoadOrStore(name, struct{}{}); already {
+		if _, already := g.hintsInFlight.LoadOrStore(k, struct{}{}); already {
 			continue
 		}
-		g.applyOneHint(ctx, name)
+		g.refreshOne(ctx, k, hash)
 	}
 }
 
-// applyOneHint fetches and applies a single hinted supply, always clearing its
-// in-flight marker on return (including on every early-return path, which is
-// why this is its own function rather than inlined into ApplyHints' loop).
-func (g *SupplyGate) applyOneHint(ctx context.Context, name string) {
-	defer g.hintsInFlight.Delete(name)
-	// The hint keys on the supply NODE name; the fetch needs the RESOURCE
+// refreshOne fetches and applies a single supply, always clearing its in-flight
+// marker on return (including on every early-return path, which is why this is
+// its own function rather than inlined into ApplyHints' loop).
+//
+// wantHash, when non-empty, is the content hash the caller was told is current:
+// the fetch is skipped when the cached content already matches it, which is the
+// "already on this content: zero cost" case for a hint.
+func (g *SupplyGate) refreshOne(ctx context.Context, k supply.Key, wantHash string) {
+	defer g.hintsInFlight.Delete(k)
+	if wantHash != "" {
+		if cur, ok := g.registry.Get(k); ok && cur.Hash == wantHash {
+			return
+		}
+	}
+	// The hint keys on the supply's own identity; the fetch needs the RESOURCE
 	// name. They are equal unless the node overrode `resource`, so the gate
 	// remembers the mapping when it admits an activation (see resources).
-	resource := g.resourceFor(name)
+	resource := g.resourceFor(k)
 	content, fetchedHash, revision, err := g.fetcher.Fetch(ctx, resource)
 	if err != nil {
 		g.notifyFetch(ctx, resource, "error")
-		g.logHintOutcome(slog.LevelWarn, "supply hint: fetch failed", name, resource, "")
+		g.logHintOutcome(slog.LevelWarn, "supply hint: fetch failed", k, resource, "")
 		return
 	}
 	g.notifyFetch(ctx, resource, "ok")
 	if err := g.registry.Apply(ctx, supply.Snapshot{
-		Name: name, Content: content, Hash: fetchedHash,
+		Namespace: k.Namespace, Name: k.Name, Content: content, Hash: fetchedHash,
 		Revision: revision, FetchedAt: time.Now(),
 	}); err != nil {
 		// A consumer rejected it (e.g. the wasm canary said no). last-good is
 		// preserved by construction; the next hint retries.
-		g.logHintOutcome(slog.LevelWarn, "supply hint: content rejected by a consumer", name, resource, fetchedHash)
+		g.logHintOutcome(slog.LevelWarn, "supply hint: content rejected by a consumer", k, resource, fetchedHash)
 		return
 	}
-	g.logHintOutcome(slog.LevelInfo, "supply hint: applied", name, resource, fetchedHash)
+	g.logHintOutcome(slog.LevelInfo, "supply hint: applied", k, resource, fetchedHash)
 }
 
-// logHintOutcome logs one ApplyHints outcome via the shared g.log formatter,
+// logHintOutcome logs one refresh outcome via the shared g.log formatter,
 // carrying only the supply name/resource and a hash PREFIX — never content.
-func (g *SupplyGate) logHintOutcome(level slog.Level, msg, node, resource, hash string) {
-	g.log(context.Background(), level, msg, engine.SupplyRequirement{Node: node, Resource: resource}, hash)
+func (g *SupplyGate) logHintOutcome(level slog.Level, msg string, k supply.Key, resource, hash string) {
+	g.log(context.Background(), level, msg, engine.SupplyRequirement{Node: k.Name, Resource: resource}, hash)
 }

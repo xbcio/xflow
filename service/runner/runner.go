@@ -905,11 +905,23 @@ func (r *Runner) supplyKeyID() string {
 // observedSupplies reports the content hashes currently in effect here. nil
 // when this runner has no SupplyRegistry configured or hosts no supply, so the
 // heartbeat body is unchanged for runners that consume none.
+//
+// The registry keys by (namespace, name); the heartbeat DTO still carries
+// name → hash, so this collapses the key back to the node name. Hashes only:
+// no content travels through this path.
 func (r *Runner) observedSupplies() map[string]string {
 	if r.supplyRegistry == nil {
 		return nil
 	}
-	return r.supplyRegistry.Observed()
+	observed := r.supplyRegistry.Observed()
+	if len(observed) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(observed))
+	for k, hash := range observed {
+		out[k.Name] = hash
+	}
+	return out
 }
 
 func runContextError(ctx context.Context, err error) error {

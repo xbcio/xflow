@@ -17,6 +17,7 @@ import (
 	"github.com/segmentio/kafka-go"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node"
 	nodesupply "github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/node/trigger"
@@ -82,7 +83,7 @@ func TestSASTrafficTaggingE2E(t *testing.T) {
 	// Z.4/Z.8); it need not match anything else here since this test never
 	// unregisters it (supplyName is unique per run, so leaving it registered
 	// leaks nothing another test could observe).
-	if err := node.RegisterWasmSupplyConsumerByDigest(taggerDigest, supplyName, "node:"+supplyName+"/tagger"); err != nil {
+	if err := node.RegisterWasmSupplyConsumerByDigest(namespace.Default, taggerDigest, supplyName, "node:"+supplyName+"/tagger"); err != nil {
 		t.Fatalf("register supply consumer: %v", err)
 	}
 

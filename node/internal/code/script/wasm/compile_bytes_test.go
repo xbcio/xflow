@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/supply"
 )
 
@@ -20,7 +21,7 @@ func TestCompileModuleBytesResolvesSourceDriven(t *testing.T) {
 	raw := decodeForTest(t, code)
 
 	reg := supply.NewRegistry()
-	if err := RegisterSupplyConsumer(code, "rules", reg); err != nil {
+	if err := RegisterSupplyConsumer(namespace.Default, code, "rules", reg); err != nil {
 		t.Fatalf("RegisterSupplyConsumer: %v", err)
 	}
 
