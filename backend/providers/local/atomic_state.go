@@ -712,20 +712,41 @@ func deadLetterIntent(entryID string) string {
 
 // ListOutboxExecutions identifies executions with at least one durable intent
 // so the background dispatcher can recover delivery after process restart.
+//
+// An execution parked by the workflow concurrency limit is deliberately not
+// reported: every intent it holds is scored at queuedOutboxHold until promotion,
+// so listing it would hand the dispatcher an execution that can produce nothing
+// — one no-op flush per drain pass, per parked submission, competing for the
+// same discovery page as the work that is actually due. Promotion releases the
+// hold, and the next drain finds the execution as usual.
 func (s *memoryState) ListOutboxExecutions(_ context.Context, limit int) ([]types.ExecutionID, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ids := make([]types.ExecutionID, 0, len(s.outbox))
 	for id, entries := range s.outbox {
-		if len(entries) > 0 {
-			ids = append(ids, id)
+		if len(entries) == 0 || allOutboxEntriesHeld(entries) {
+			continue
 		}
+		ids = append(ids, id)
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	if limit > 0 && len(ids) > limit {
 		ids = ids[:limit]
 	}
 	return ids, nil
+}
+
+// allOutboxEntriesHeld reports whether every intent belongs to an execution
+// that the concurrency limit has not promoted yet. A mixed set — the instant a
+// promotion leaves behind — is reported, because something in it is
+// deliverable and the dispatcher is the only reader that can say so.
+func allOutboxEntriesHeld(entries map[string]memoryOutboxEntry) bool {
+	for _, held := range entries {
+		if !held.entry.AvailableAt.Equal(queuedOutboxHold) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *memoryState) putOutboxLocked(id types.ExecutionID, entryID string, task engine.Task, availableAt time.Time) bool {
