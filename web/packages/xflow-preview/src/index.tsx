@@ -124,6 +124,7 @@ const danglingKey = (source: string, port: string) => `${source}\u0000${port}`;
 const statusLabel: Record<string, string> = {
   pending: "pending",
   running: "running",
+  committing: "committing",
   success: "success",
   failed: "failed",
   skipped: "skipped",
@@ -131,6 +132,7 @@ const statusLabel: Record<string, string> = {
   continued: "continued",
   suspended: "suspended",
   waiting: "waiting",
+  expired: "expired",
   canceled: "canceled",
   timeout: "timeout"
 };
@@ -179,11 +181,15 @@ function inputSummary(node: GraphNode): string | undefined {
 
 function miniMapNodeColor(node: Node<PreviewNodeData>): string {
   const status = node.data.runtime.status;
-  if (status === "running" || status === "waiting") return "var(--xflow-preview-status-running)";
+  if (status === "running" || status === "waiting" || status === "committing") {
+    return "var(--xflow-preview-status-running)";
+  }
   if (status === "success") return "var(--xflow-preview-status-success)";
   if (status === "failed") return "var(--xflow-preview-status-error)";
   if (status === "pinned" || status === "continued") return "var(--xflow-preview-status-warning)";
-  if (status === "skipped" || status === "canceled") return "var(--xflow-preview-status-disabled)";
+  if (status === "skipped" || status === "canceled" || status === "expired") {
+    return "var(--xflow-preview-status-disabled)";
+  }
   return "var(--xflow-preview-node-bg)";
 }
 
@@ -649,12 +655,14 @@ function SummaryPill({ label }: { label: string }): React.ReactElement {
 function RunSummary({ summary }: { summary: RuntimeSummary }): React.ReactElement {
   const statuses: NodeStatus[] = [
     "running",
+    "committing",
     "failed",
     "waiting",
     "suspended",
     "success",
     "skipped",
     "pending",
+    "expired",
     "canceled"
   ];
 
