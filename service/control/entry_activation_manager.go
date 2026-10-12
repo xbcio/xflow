@@ -26,6 +26,9 @@ const nodeTriggerPackageHashPrefix = "node-sha256:v1:"
 const (
 	scriptNodeType     = "xflow.script"
 	wasmScriptLanguage = "wasm"
+	// webhookTriggerType is the one entry-unit type the control plane hosts
+	// itself; see EntryUnitActivation.ServerHosted.
+	webhookTriggerType = "xflow.trigger.webhook"
 )
 
 // nodeTriggerPackageHash computes a deterministic content fingerprint of a single
@@ -92,6 +95,21 @@ type EntryUnitActivation struct {
 	ActivationReplicas uint32
 	// WorkflowTimezone is the graph's settings.timezone ("" when unset).
 	WorkflowTimezone string
+	// ServerHosted marks an entry unit the CONTROL PLANE hosts itself, so no
+	// ActivateDirective is ever delivered for it and no runner activation
+	// record is created.
+	//
+	// Today only the webhook trigger is such a unit. A runner is an outbound
+	// execution node: it has no stable address and no inbound port, so it
+	// cannot serve an HTTP route, and the agent that would serve it does not
+	// exist in cluster mode (the embedded runtime refuses with "webhook runtime
+	// is not available"). The control plane serves the route instead
+	// (POST /v1/hooks/{namespace}/{workflow_id}/{entry_unit}) and admits the
+	// request into the same entry-seed admission a runner would have used.
+	//
+	// It is an internal planning field, not a wire field: the directive DTO is
+	// unchanged, because a unit that is never delivered needs no way to say so.
+	ServerHosted bool
 }
 
 // projectGroupPackage indirects graph.ProjectGroupPackage so the derivation's
@@ -454,6 +472,7 @@ func DeriveEntryActivations(g *graph.Graph) ([]EntryUnitActivation, error) {
 				SupplyConsumers:    supplyConsumers,
 				ActivationReplicas: nm.ActivationReplicas,
 				WorkflowTimezone:   g.Timezone(),
+				ServerHosted:       nm.Type == webhookTriggerType,
 			})
 		}
 	}
@@ -500,6 +519,24 @@ func (m *EntryActivationManager) AddOrUpdateWorkflowRevision(ctx context.Context
 	}
 	desired := make(map[engine.EntryActivationKey]struct{})
 	for _, eu := range units {
+		if eu.ServerHosted {
+			// The control plane serves this unit's route itself, so no runner
+			// activation may be created for it. Any activation that already
+			// exists for it falls into the non-desired sweep below and is
+			// deactivated by the reconciler, which is what makes switching a
+			// unit to server-hosted (or shipping this release) release the
+			// runner that used to host it.
+			if eu.ActivationReplicas > 1 {
+				// Replicas are meaningless for a unit nobody activates: the
+				// control plane answers one route and admits once. Reported
+				// rather than rejected because the workflow is otherwise
+				// valid, and an operator reading a warning that names the node
+				// can fix the definition.
+				slog.Warn("server-hosted entry unit declares activation replicas, which are ignored",
+					"entry_unit", eu.EntryUnitID, "node_type", eu.NodeType, "replicas", eu.ActivationReplicas)
+			}
+			continue
+		}
 		for replica := uint32(0); replica < effectiveActivationReplicas(eu.ActivationReplicas); replica++ {
 			requirements := eu.Requirements
 			if replica > 0 {
