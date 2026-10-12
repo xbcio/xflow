@@ -212,6 +212,11 @@ var ErrExecutionNotPausable = errors.New("execution is not pausable")
 // Nothing was changed.
 var ErrExecutionNotPaused = errors.New("execution is not paused")
 
+// ErrPauseUnsupported reports a StateStore that has not implemented
+// ExecutionPauser. It is not a verdict about the execution: the store cannot
+// suspend anything, so no execution on it can be paused.
+var ErrPauseUnsupported = errors.New("state store does not support execution pause")
+
 // ExecutionStatusReader reads back only an execution's lifecycle status.
 //
 // This exists because the hot paths do not want a snapshot. loadActiveGraph
