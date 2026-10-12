@@ -215,7 +215,7 @@ func HeartbeatRequestToProto(req HeartbeatRequest) *runnerpb.HeartbeatRequest {
 		InFlight:          int32(req.InFlight),
 		Timestamp:         req.Timestamp,
 		SessionId:         req.SessionID,
-		SupplyObserved:    cloneLabels(req.SupplyObserved),
+		SupplyObserved:    SupplyObservationsToProto(req.SupplyObserved),
 		SupplyKeyId:       req.SupplyKeyID,
 		DrainObservation:  RunnerDrainObservationToProto(req.DrainObservation),
 		HostedActivations: HostedActivationsToProto(req.HostedActivations),
@@ -229,7 +229,7 @@ func HeartbeatRequestFromProto(req *runnerpb.HeartbeatRequest) HeartbeatRequest 
 		Capacity:          int(req.GetCapacity()),
 		InFlight:          int(req.GetInFlight()),
 		Timestamp:         req.GetTimestamp(),
-		SupplyObserved:    cloneLabels(req.GetSupplyObserved()),
+		SupplyObserved:    SupplyObservationsFromProto(req.GetSupplyObserved()),
 		SupplyKeyID:       req.GetSupplyKeyId(),
 		DrainObservation:  RunnerDrainObservationFromProto(req.GetDrainObservation()),
 		HostedActivations: HostedActivationsFromProto(req.GetHostedActivations()),
@@ -242,7 +242,7 @@ func HeartbeatRequestFromProto(req *runnerpb.HeartbeatRequest) HeartbeatRequest 
 func HeartbeatResponseToProto(resp HeartbeatResponse) (*runnerpb.HeartbeatResponse, error) {
 	out := &runnerpb.HeartbeatResponse{
 		ServerTime:        resp.ServerTime,
-		SupplyHints:       cloneLabels(resp.SupplyHints),
+		SupplyHints:       SupplyHintsToProto(resp.SupplyHints),
 		SupplyKeyRotation: resp.SupplyKeyRotation,
 		Control:           RunnerControlDirectiveToProto(resp.Control),
 	}
@@ -260,7 +260,7 @@ func HeartbeatResponseToProto(resp HeartbeatResponse) (*runnerpb.HeartbeatRespon
 func HeartbeatResponseFromProto(resp *runnerpb.HeartbeatResponse) (HeartbeatResponse, error) {
 	out := HeartbeatResponse{
 		ServerTime:        resp.GetServerTime(),
-		SupplyHints:       cloneLabels(resp.GetSupplyHints()),
+		SupplyHints:       SupplyHintsFromProto(resp.GetSupplyHints()),
 		SupplyKeyRotation: resp.GetSupplyKeyRotation(),
 		Control:           RunnerControlDirectiveFromProto(resp.GetControl()),
 	}
@@ -471,6 +471,69 @@ func RenewLeaseResponseFromProto(resp *runnerpb.RenewLeaseResponse) RenewLeaseRe
 	}
 	if n := resp.GetDeadlineUnixNano(); n != 0 {
 		out.Deadline = time.Unix(0, n).UTC()
+	}
+	return out
+}
+
+// SupplyObservationsToProto converts the runner's report for the wire. The
+// slice is rebuilt rather than aliased so a caller mutating its own report
+// afterwards cannot change what a marshaled message contains.
+func SupplyObservationsToProto(obs []SupplyObservation) []*runnerpb.SupplyObservation {
+	if len(obs) == 0 {
+		return nil
+	}
+	out := make([]*runnerpb.SupplyObservation, 0, len(obs))
+	for _, o := range obs {
+		out = append(out, &runnerpb.SupplyObservation{
+			Namespace: o.Namespace,
+			Node:      o.Node,
+			Hash:      o.Hash,
+		})
+	}
+	return out
+}
+
+func SupplyObservationsFromProto(obs []*runnerpb.SupplyObservation) []SupplyObservation {
+	if len(obs) == 0 {
+		return nil
+	}
+	out := make([]SupplyObservation, 0, len(obs))
+	for _, o := range obs {
+		out = append(out, SupplyObservation{
+			Namespace: o.GetNamespace(),
+			Node:      o.GetNode(),
+			Hash:      o.GetHash(),
+		})
+	}
+	return out
+}
+
+func SupplyHintsToProto(hints []SupplyHint) []*runnerpb.SupplyHint {
+	if len(hints) == 0 {
+		return nil
+	}
+	out := make([]*runnerpb.SupplyHint, 0, len(hints))
+	for _, h := range hints {
+		out = append(out, &runnerpb.SupplyHint{
+			Namespace: h.Namespace,
+			Node:      h.Node,
+			Hash:      h.Hash,
+		})
+	}
+	return out
+}
+
+func SupplyHintsFromProto(hints []*runnerpb.SupplyHint) []SupplyHint {
+	if len(hints) == 0 {
+		return nil
+	}
+	out := make([]SupplyHint, 0, len(hints))
+	for _, h := range hints {
+		out = append(out, SupplyHint{
+			Namespace: h.GetNamespace(),
+			Node:      h.GetNode(),
+			Hash:      h.GetHash(),
+		})
 	}
 	return out
 }

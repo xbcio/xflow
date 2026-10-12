@@ -330,6 +330,12 @@ runner 协议**不加 `trace_id` 字段**，链路透传走 OTel `traceparent` �
 `OpWorkflowRead` 被 GET `/v1/workflows/{id}` 消费——这两个是活的，不要删。
 `OpWorkflowRead` 在 `sqlaudit_test.go` 里还被当作任意占位值使用，那不是消费点。）
 
+**新增运维操作使用独立 scope，需要显式补授权**：`execution.control`（pause / resume）
+与 `execution.rerun`（rerun）都不在既有的 `execution` scope 内。对既有调用方而言，这意味着
+**只持有 `execution` 的 token 调用 pause 会得到 403**（rerun 同理），必须显式补授权——这是
+有意为之：暂停一条正在运行的流水线、从终态执行派生新执行，都比「读 / 信号 / 取消」更重，
+不应随 `execution` 一起被默认授予。
+
 ### 6.2 namespace 只能从认证主体取
 
 namespace **只能**由 authz 包装器从认证主体注入 request context，handler 通过

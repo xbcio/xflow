@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+
+	"github.com/xbcio/xflow/namespace"
 )
 
 // Default is the process-wide registry. The runner's supply activation handler
@@ -69,20 +71,33 @@ type consumerEntry struct {
 // import cycle risk and pull Prometheus into every caller of this package).
 type ConsumerCountObserver interface {
 	// OnConsumerCount reports the number of consumers currently registered for
-	// name, immediately after a registration or unregistration. Replacing an
-	// existing key (same name+key) does not change the count.
-	OnConsumerCount(ctx context.Context, name string, n int)
+	// the supply identified by (ns, name), immediately after a registration or
+	// unregistration. Replacing an existing key (same supply key and same
+	// consumer key) does not change the count.
+	//
+	// The namespace is passed explicitly rather than read off ctx: the call
+	// sites run outside any request context (RegisterConsumer's own notify runs
+	// on context.Background()), so a ctx-derived namespace would always be the
+	// fallback value and the metric would silently claim every supply lives in
+	// the default namespace.
+	OnConsumerCount(ctx context.Context, ns namespace.Namespace, name string, n int)
 }
 
 // Registry caches supply snapshots and fans changes out to the consumers that
-// registered against each name.
+// registered against each supply.
+//
+// Every lookup is keyed by Key — namespace plus name. A name alone is not an
+// identity: two namespaces may each declare a supply node with the same name,
+// and their contents, consumers, readiness verdicts and decoded views are
+// independent.
 type Registry struct {
 	mu        sync.RWMutex
-	snapshots map[string]Snapshot
-	// consumers maps supply name → consumer key → entry (the consumer plus its
+	snapshots map[Key]Snapshot
+	// consumers maps supply key → consumer key → entry (the consumer plus its
 	// last notification outcome). The key is the caller's stable identity (e.g.
-	// "workflow/node"), so re-registering after a re-activation replaces rather
-	// than duplicates — and replacing a key replaces that key's outcome too.
+	// "workflow/node" or "supply@module"), so re-registering after a
+	// re-activation replaces rather than duplicates — and replacing a key
+	// replaces that key's outcome too.
 	//
 	// Readiness is deliberately NOT a separate assigned flag. An earlier
 	// revision of this type tracked a single "accepted" bool per name, written
@@ -94,7 +109,7 @@ type Registry struct {
 	// per-consumer and deriving readiness as a live conjunction (see IsReady)
 	// makes that class of bug structurally impossible — there is no aggregate
 	// value left to race against itself.
-	consumers map[string]map[string]consumerEntry
+	consumers map[Key]map[string]consumerEntry
 
 	// regSeq issues consumerEntry.regSeq values. Guarded by mu.
 	regSeq uint64
@@ -105,17 +120,17 @@ type Registry struct {
 	// their write-backs race. Guarded by mu.
 	epoch uint64
 
-	// decoded is the published, READ-ONLY "name → decoded value" map handed to
-	// expression evaluation as $supplies. It is replaced wholesale on every
-	// content change (copy-on-write) and never mutated in place, because readers
-	// hold the reference without a lock.
+	// decoded is the published, READ-ONLY "namespace → (name → decoded value)"
+	// view handed to expression evaluation as $supplies. It is replaced wholesale
+	// on every content change (copy-on-write) and never mutated in place, because
+	// readers hold the reference without a lock.
 	//
 	// Decoding happens here — once per content change — rather than per message.
 	// expr's runtime.Fetch offers no lazy hook for a custom type (it only tries
 	// MethodByName and struct fields), so a plain map is the only shape that
 	// resolves a dynamic $supplies.<name>. Publishing a shared reference keeps
 	// per-message cost at one map assignment regardless of content size.
-	decoded atomic.Pointer[map[string]any]
+	decoded atomic.Pointer[map[namespace.Namespace]map[string]any]
 
 	// observer, when set, receives the running per-supply consumer count. nil
 	// (the default) means no observation — most Registry instances in tests
@@ -129,10 +144,10 @@ type Registry struct {
 
 func NewRegistry() *Registry {
 	r := &Registry{
-		snapshots: map[string]Snapshot{},
-		consumers: map[string]map[string]consumerEntry{},
+		snapshots: map[Key]Snapshot{},
+		consumers: map[Key]map[string]consumerEntry{},
 	}
-	empty := map[string]any{}
+	empty := map[namespace.Namespace]map[string]any{}
 	r.decoded.Store(&empty)
 	return r
 }
@@ -160,21 +175,53 @@ func (r *Registry) SetObserver(o ConsumerCountObserver) {
 	r.observerInstalled = true
 }
 
-// notifyConsumerCount reports the current consumer count for name. Caller
+// notifyConsumerCount reports the current consumer count for k. Caller
 // must NOT hold r.mu — it takes its own read lock, matching the convention
 // that consumer callbacks (safeNotify) also run outside the lock.
-func (r *Registry) notifyConsumerCount(ctx context.Context, name string) {
+func (r *Registry) notifyConsumerCount(ctx context.Context, k Key) {
 	r.mu.RLock()
 	o := r.observer
-	n := len(r.consumers[name])
+	n := len(r.consumers[k])
 	r.mu.RUnlock()
 	if o != nil {
-		o.OnConsumerCount(ctx, name, n)
+		o.OnConsumerCount(ctx, k.Namespace, k.Name, n)
 	}
+}
+
+// ConsumerCount reports how many consumers are currently registered for k.
+//
+// It is the read side of the value ConsumerCountObserver is pushed; the TTL
+// poller uses it to decide whether a supply this runner once admitted still has
+// anything to keep fresh.
+func (r *Registry) ConsumerCount(k Key) int {
+	k = k.normalized()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.consumers[k])
+}
+
+// normalized returns k with an empty namespace resolved to namespace.Default.
+//
+// KeyOf already does this, and every caller in this tree builds its keys
+// through it — but the registry is the one place where a key that skipped that
+// step would silently address a slot no lookup ever fills: Get/IsReady would
+// report "not cached" for content that IS cached under the default namespace,
+// and a consumer would be registered into a slot nothing notifies. Resolving it
+// here makes that mismatch unreachable rather than merely undocumented, the
+// same way IsReady derives readiness live instead of storing it.
+func (k Key) normalized() Key {
+	if k.Namespace == "" {
+		return Key{Namespace: namespace.Default, Name: k.Name}
+	}
+	return k
 }
 
 // Apply records a snapshot and notifies this supply's consumers when the content
 // hash changed. It never creates an execution or dispatches a task.
+//
+// The snapshot carries its own identity (Namespace + Name, see Snapshot.Key):
+// there is deliberately no separate Key parameter, which could disagree with the
+// snapshot about where the content is being stored.
 //
 // A revision bump with an unchanged hash updates the cached revision but skips
 // notification when every registered consumer has already accepted this exact
@@ -187,10 +234,11 @@ func (r *Registry) notifyConsumerCount(ctx context.Context, name string) {
 // Consumer errors are collected and returned joined; every consumer is called
 // regardless, and the cache is updated either way.
 func (r *Registry) Apply(ctx context.Context, snap Snapshot) error {
+	k := snap.Key()
 	r.mu.Lock()
-	prev, had := r.snapshots[snap.Name]
+	prev, had := r.snapshots[k]
 	changed := !had || prev.Hash != snap.Hash
-	r.snapshots[snap.Name] = cloneSnapshot(snap)
+	r.snapshots[k] = cloneSnapshot(snap)
 
 	needNotify := changed
 	if !needNotify {
@@ -199,7 +247,7 @@ func (r *Registry) Apply(ctx context.Context, snap Snapshot) error {
 		// may be about superseded content (a callback that was still in flight
 		// when this content was installed had its outcome dropped). Either way
 		// its readiness is unresolved, and only a fresh notification resolves it.
-		for _, entry := range r.consumers[snap.Name] {
+		for _, entry := range r.consumers[k] {
 			if entry.lastErr != nil || (entry.lastHash != "" && entry.lastHash != snap.Hash) {
 				needNotify = true
 				break
@@ -220,13 +268,13 @@ func (r *Registry) Apply(ctx context.Context, snap Snapshot) error {
 		// versus an earlier one of the same hash.
 		r.epoch++
 		ep := r.epoch
-		for k, entry := range r.consumers[snap.Name] {
-			targets = append(targets, target{key: k, regSeq: entry.regSeq, epoch: ep, consumer: entry.consumer})
+		for ck, entry := range r.consumers[k] {
+			targets = append(targets, target{key: ck, regSeq: entry.regSeq, epoch: ep, consumer: entry.consumer})
 			// Count in flight BEFORE releasing the lock, so no IsReady between
 			// here and the write-back can read this consumer as ready on a
 			// verdict it has not given yet.
 			entry.inFlight++
-			r.consumers[snap.Name][k] = entry
+			r.consumers[k][ck] = entry
 		}
 	}
 
@@ -252,7 +300,7 @@ func (r *Registry) Apply(ctx context.Context, snap Snapshot) error {
 	if needNotify {
 		r.mu.Lock()
 		for _, t := range targets {
-			r.recordOutcomeLocked(snap.Name, t.key, t.regSeq, t.epoch, snap.Hash, results[t.key])
+			r.recordOutcomeLocked(k, t.key, t.regSeq, t.epoch, snap.Hash, results[t.key])
 		}
 		r.mu.Unlock()
 	}
@@ -282,8 +330,8 @@ func (r *Registry) Apply(ctx context.Context, snap Snapshot) error {
 // newer content notifies every registered consumer itself.
 //
 // Caller must hold r.mu.
-func (r *Registry) recordOutcomeLocked(name, key string, regSeq, epoch uint64, hash string, err error) {
-	cur, ok := r.consumers[name][key]
+func (r *Registry) recordOutcomeLocked(k Key, key string, regSeq, epoch uint64, hash string, err error) {
+	cur, ok := r.consumers[k][key]
 	if !ok || cur.regSeq != regSeq {
 		return
 	}
@@ -300,20 +348,21 @@ func (r *Registry) recordOutcomeLocked(name, key string, regSeq, epoch uint64, h
 	// in-flight callback's hash match again, and without the epoch its stale
 	// acceptance overwrites the current rejection — the gate would then admit
 	// traffic against content this consumer refused.
-	if cached, cachedOK := r.snapshots[name]; cachedOK && cached.Hash == hash && epoch >= cur.lastEpoch {
+	if cached, cachedOK := r.snapshots[k]; cachedOK && cached.Hash == hash && epoch >= cur.lastEpoch {
 		cur.lastErr = err
 		cur.lastHash = hash
 		cur.lastEpoch = epoch
 	}
-	r.consumers[name][key] = cur
+	r.consumers[k][key] = cur
 }
 
-// Get returns the current snapshot for a name. The returned Content is a copy.
-// This is the lazy read path used by $supplies expression evaluation: no supply
-// content is ever placed into types.Input.
-func (r *Registry) Get(name string) (Snapshot, bool) {
+// Get returns the current snapshot for a supply key. The returned Content is a
+// copy. This is the lazy read path used by $supplies expression evaluation: no
+// supply content is ever placed into types.Input.
+func (r *Registry) Get(k Key) (Snapshot, bool) {
+	k = k.normalized()
 	r.mu.RLock()
-	snap, ok := r.snapshots[name]
+	snap, ok := r.snapshots[k]
 	r.mu.RUnlock()
 	if !ok {
 		return Snapshot{}, false
@@ -325,6 +374,10 @@ func (r *Registry) Get(name string) (Snapshot, bool) {
 // consumer has accepted THAT content. The gate uses this instead of a bare Get
 // to distinguish "cached but unusable" (some consumer rejected the content)
 // from "ready to serve traffic".
+//
+// The verdict is per supply key: a consumer registered for the same node name
+// in another namespace is a different supply and its verdicts are not
+// consulted.
 //
 // This is computed live as a conjunction over the consumer set on every call —
 // there is no separate stored flag to fall out of sync with that set. A supply
@@ -338,27 +391,28 @@ func (r *Registry) Get(name string) (Snapshot, bool) {
 // unverified assumption mis-serves silently. This state is transient — the
 // Apply that installed the newer content notifies every consumer, and its
 // outcome lands here.
-func (r *Registry) IsReady(name string) bool {
+func (r *Registry) IsReady(k Key) bool {
+	k = k.normalized()
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.isReadyLocked(name)
+	return r.isReadyLocked(k)
 }
 
 // isReadyLocked is IsReady's logic without acquiring the lock. Callers that
 // need readiness together with other locked state (e.g. Observed, which needs
-// both "is it ready" and "what hash is cached" for the same name) must call
+// both "is it ready" and "what hash is cached" for the same supply) must call
 // this under a single r.mu.RLock rather than calling IsReady and Get
 // separately — two separate lock acquisitions leave a window where content
 // changes between them, and the pairing (ready, hash) they observed was never
 // simultaneously true.
 //
 // Caller must hold r.mu (read or write).
-func (r *Registry) isReadyLocked(name string) bool {
-	cached, ok := r.snapshots[name]
+func (r *Registry) isReadyLocked(k Key) bool {
+	cached, ok := r.snapshots[k]
 	if !ok {
 		return false
 	}
-	for _, entry := range r.consumers[name] {
+	for _, entry := range r.consumers[k] {
 		if entry.lastErr != nil {
 			return false
 		}
@@ -381,10 +435,10 @@ func (r *Registry) isReadyLocked(name string) bool {
 	return true
 }
 
-// RegisterConsumer registers c under (name, key), replacing any consumer already
+// RegisterConsumer registers c under (k, key), replacing any consumer already
 // at that key — including that key's own last-outcome record, so a replacement
 // consumer starts without inheriting its predecessor's rejection. If a snapshot
-// for name is already cached, c is notified immediately — activation order
+// for k is already cached, c is notified immediately — activation order
 // between a supply and its consumer is not guaranteed, so a late-registering
 // consumer must not wait for the next change — and that immediate notify's
 // outcome is recorded under c's own key exactly like Apply's fan-out records
@@ -396,15 +450,16 @@ func (r *Registry) isReadyLocked(name string) bool {
 // The consumer callback itself keeps its documented best-effort semantics: a
 // rejection here leaves the consumer on its last-good state, and does not
 // prevent registration.
-func (r *Registry) RegisterConsumer(name, key string, c Consumer) {
+func (r *Registry) RegisterConsumer(k Key, key string, c Consumer) {
+	k = k.normalized()
 	r.mu.Lock()
-	if r.consumers[name] == nil {
-		r.consumers[name] = map[string]consumerEntry{}
+	if r.consumers[k] == nil {
+		r.consumers[k] = map[string]consumerEntry{}
 	}
 	r.regSeq++
 	seq := r.regSeq
 	entry := consumerEntry{consumer: c, regSeq: seq}
-	snap, has := r.snapshots[name]
+	snap, has := r.snapshots[k]
 	var ep uint64
 	if has {
 		// Content is already cached, so this registration WILL be notified below.
@@ -417,13 +472,13 @@ func (r *Registry) RegisterConsumer(name, key string, c Consumer) {
 		r.epoch++
 		ep = r.epoch
 	}
-	r.consumers[name][key] = entry
+	r.consumers[k][key] = entry
 	r.mu.Unlock()
 
 	// Reported on every call, including a same-key replace: replacing does not
 	// change the count (the key already occupied a slot), but the observer
 	// still gets a fresh reading rather than silence.
-	r.notifyConsumerCount(context.Background(), name)
+	r.notifyConsumerCount(context.Background(), k)
 
 	if !has {
 		return
@@ -434,53 +489,70 @@ func (r *Registry) RegisterConsumer(name, key string, c Consumer) {
 	// above — and only if this registration and this content are both still
 	// current. See recordOutcomeLocked.
 	r.mu.Lock()
-	r.recordOutcomeLocked(name, key, seq, ep, snap.Hash, err)
+	r.recordOutcomeLocked(k, key, seq, ep, snap.Hash, err)
 	r.mu.Unlock()
 }
 
-// UnregisterConsumer removes the consumer at (name, key). It is idempotent.
+// UnregisterConsumer removes the consumer at (k, key). It is idempotent.
 // Removing a rejecting consumer's entry is enough on its own to make IsReady's
 // conjunction true again (once no other registered consumer is rejecting) —
 // there is no separate aggregate state to update here.
-func (r *Registry) UnregisterConsumer(name, key string) {
+func (r *Registry) UnregisterConsumer(k Key, key string) {
+	k = k.normalized()
 	r.mu.Lock()
-	if m := r.consumers[name]; m != nil {
+	if m := r.consumers[k]; m != nil {
 		delete(m, key)
 		if len(m) == 0 {
-			delete(r.consumers, name)
+			delete(r.consumers, k)
 		}
 	}
 	r.mu.Unlock()
 
 	// Reported unconditionally, matching RegisterConsumer: a missing key is a
 	// harmless no-op delete, and the observer still gets a fresh reading (0 if
-	// name was never registered or is now empty).
-	r.notifyConsumerCount(context.Background(), name)
+	// the supply was never registered or is now empty).
+	r.notifyConsumerCount(context.Background(), k)
 }
 
-// republishDecodedLocked rebuilds the published decoded map from the current
+// republishDecodedLocked rebuilds the published decoded view from the current
 // snapshots and swaps it in. Caller must hold r.mu.
 //
-// A whole-map rebuild is affordable because it runs only on a content change,
+// A whole-view rebuild is affordable because it runs only on a content change,
 // and the number of supplies in one process is small. The alternative —
-// mutating the live map — would race with lock-free readers.
+// mutating the live maps — would race with lock-free readers.
 func (r *Registry) republishDecodedLocked() {
-	next := make(map[string]any, len(r.snapshots))
-	for name, s := range r.snapshots {
-		next[name] = decodeForExpr(s)
+	next := make(map[namespace.Namespace]map[string]any)
+	for k, s := range r.snapshots {
+		ns := next[k.Namespace]
+		if ns == nil {
+			ns = make(map[string]any)
+			next[k.Namespace] = ns
+		}
+		ns[k.Name] = decodeForExpr(s)
 	}
 	r.decoded.Store(&next)
 }
 
-// Decoded returns the published, read-only "name → decoded value" map. Callers
-// must NOT mutate it or anything reachable from it.
-func (r *Registry) Decoded() map[string]any {
-	return *r.decoded.Load()
+// Decoded returns the published, read-only "name → decoded value" map for one
+// namespace. Callers must NOT mutate it or anything reachable from it.
+//
+// A namespace with no supply content yields an empty non-nil map rather than
+// nil: $supplies always has to be a map for `$supplies.<name>` to resolve at
+// all, and a nil map would turn "this namespace has no supplies" into a
+// per-message evaluation error.
+func (r *Registry) Decoded(ns namespace.Namespace) map[string]any {
+	if ns == "" {
+		ns = namespace.Default
+	}
+	if view := (*r.decoded.Load())[ns]; view != nil {
+		return view
+	}
+	return map[string]any{}
 }
 
-// Observed returns "name → currently in-effect content hash" for every supply
-// this process reports as READY (see IsReady) — not merely cached. The runner
-// reports this on each heartbeat so the server can answer whether a new
+// Observed returns "supply key → currently in-effect content hash" for every
+// supply this process reports as READY (see IsReady) — not merely cached. The
+// runner reports this on each heartbeat so the server can answer whether a new
 // revision has reached every runner; it is the platform's analogue of
 // Kubernetes' observedGeneration.
 //
@@ -488,7 +560,7 @@ func (r *Registry) Decoded() map[string]any {
 // consumer (Task 15's gate exists precisely for this case): reporting a
 // rejected hash as "observed" would tell the server this runner has converged
 // on content it is actually refusing to use, silently masking the divergence
-// observedGeneration exists to surface. Only a name whose IsReady is true has
+// observedGeneration exists to surface. Only a supply whose IsReady is true has
 // actually taken effect here.
 //
 // Readiness and hash are read together under ONE lock acquisition
@@ -497,21 +569,21 @@ func (r *Registry) Decoded() map[string]any {
 // this method would then report was never simultaneously true.
 //
 // Hashes only: the content itself never leaves this process through this path.
-func (r *Registry) Observed() map[string]string {
+func (r *Registry) Observed() map[Key]string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if len(r.snapshots) == 0 {
 		return nil
 	}
-	var out map[string]string
-	for name, s := range r.snapshots {
-		if !r.isReadyLocked(name) {
+	var out map[Key]string
+	for k := range r.snapshots {
+		if !r.isReadyLocked(k) {
 			continue
 		}
 		if out == nil {
-			out = make(map[string]string, len(r.snapshots))
+			out = make(map[Key]string, len(r.snapshots))
 		}
-		out[name] = s.Hash
+		out[k] = r.snapshots[k].Hash
 	}
 	return out
 }

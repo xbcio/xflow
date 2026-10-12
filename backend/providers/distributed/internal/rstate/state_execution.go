@@ -236,6 +236,19 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 		pipe.Set(ctx, execKey(t, e.ID, "trace_carrier"), string(carrierJSON), ttl)
 		keys = append(keys, execKey(t, e.ID, "trace_carrier"))
 	}
+	// The execution this one derives from, and — for a rerun — the node it starts
+	// at. Immutable, written once with the execution itself: the link is what
+	// makes a derived execution traceable after the execution it derives from
+	// has expired, and a reader that found the execution without it could not
+	// tell a derived run from an original one.
+	if e.ParentID != "" {
+		pipe.Set(ctx, execKey(t, e.ID, "parent"), string(e.ParentID), ttl)
+		keys = append(keys, execKey(t, e.ID, "parent"))
+	}
+	if e.RerunFrom != "" {
+		pipe.Set(ctx, execKey(t, e.ID, "rerun_from"), e.RerunFrom, ttl)
+		keys = append(keys, execKey(t, e.ID, "rerun_from"))
+	}
 	// Acyclic executions use these counters as the O(1) completion source of
 	// truth. Cyclic graphs retain their activation-based completion protocol.
 	// UnitCount() is used instead of NodeCount() so that grouped nodes count as
@@ -470,6 +483,143 @@ func (s *Store) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID,
 	}
 	_ = s.PublishExecutionEvent(ctx, engine.ExecutionEvent{ExecutionID: id, Status: status, Error: errMsg})
 	return nil
+}
+
+// pauseExecutionLua suspends an execution's dispatch by moving its status to
+// paused, with the compare-and-set discipline of updateExecutionStatusLua and
+// one addition: it reports WHY it refused, so a caller retrying a pause whose
+// response was lost gets a success while a pause of a queued or finished
+// execution is refused.
+//
+// The status write IS the whole pause. Nothing in the outbox is moved, because
+// nothing needs to be: leaseOutboxLua and readOutboxLua refuse to name an
+// intent while this status stands, which is also what holds the work a task
+// already in flight appends after the pause landed — the case a "park the
+// intents I can see" pause would miss. A resume therefore reconstructs nothing,
+// and a delayed intent keeps the score it was written with. See
+// engine.ExecutionPauser for why the enforcement point is the store.
+//
+// The reply is {code, current}:
+//
+//	1  applied (running -> paused)
+//	2  already paused: a no-op success, not a conflict
+//	0  no status key: there is no execution to suspend
+//	-1 some other status, reported in current
+//
+// The TTL is refreshed rather than kept, matching every other status write: the
+// status key's expiry is the execution's lifetime, and a pause does not shorten
+// it.
+//
+// KEYS[1] = status key
+// ARGV[1] = status TTL in seconds
+var pauseExecutionLua = redis.NewScript(`
+local current = redis.call('GET', KEYS[1])
+if not current then
+    return {0, ''}
+end
+if current == 'paused' then
+    return {2, current}
+end
+if current ~= 'running' then
+    return {-1, current}
+end
+redis.call('SET', KEYS[1], 'paused', 'EX', tonumber(ARGV[1]))
+return {1, current}
+`)
+
+// resumeExecutionLua returns a paused execution to dispatch. Every other status
+// is refused — including the terminal one an execution can reach while paused,
+// because a task leased before the pause is allowed to finish it. A resume that
+// reported success there would promise work that is never going to run.
+//
+// Like the pause, this writes the status and nothing else. The ready set was
+// never moved, so the held work is due again the instant this lands; delivering
+// it is FlushOutbox's job, which the engine runs after this returns.
+//
+// The reply is {code, current}: 1 applied, 0 refused with the current status
+// ("" when there is no status key at all).
+//
+// KEYS[1] = status key
+// ARGV[1] = status TTL in seconds
+var resumeExecutionLua = redis.NewScript(`
+local current = redis.call('GET', KEYS[1])
+if current ~= 'paused' then
+    return {0, current or ''}
+end
+redis.call('SET', KEYS[1], 'running', 'EX', tonumber(ARGV[1]))
+return {1, current}
+`)
+
+var _ engine.ExecutionPauser = (*Store)(nil)
+
+// PauseExecution suspends dispatch of a running execution. See
+// engine.ExecutionPauser for the contract, pauseExecutionLua for where the hold
+// lives, and leaseOutboxLua for the read that enforces it.
+//
+// The transition is mirrored onto the SQL audit row for the same reason
+// UpdateExecutionStatus mirrors a terminal one: the operator's listing reads
+// that row, so without it a paused execution would read as running in every list
+// view and a filter for paused would return nothing — the one place an operator
+// looks to find what they just paused.
+func (s *Store) PauseExecution(ctx context.Context, id types.ExecutionID) error {
+	code, current, err := s.runPauseTransition(ctx, id, pauseExecutionLua)
+	if err != nil {
+		return err
+	}
+	switch {
+	case code == pauseTransitionApplied || code == pauseTransitionAlreadyPaused:
+		s.projectExecutionStatus(ctx, id, types.ExecutionStatusPaused, "")
+		return nil
+	case current == "":
+		return fmt.Errorf("pause execution %q: %w", id, engine.ErrExecutionNotPausable)
+	default:
+		return fmt.Errorf("pause execution %q in status %q: %w", id, current, engine.ErrExecutionNotPausable)
+	}
+}
+
+// ResumeExecution returns a paused execution to dispatch. Delivering the work
+// the pause held is not part of this call: the engine flushes the execution
+// after it returns, and the status is what makes that flush find anything.
+func (s *Store) ResumeExecution(ctx context.Context, id types.ExecutionID) error {
+	code, current, err := s.runPauseTransition(ctx, id, resumeExecutionLua)
+	if err != nil {
+		return err
+	}
+	if code != pauseTransitionApplied {
+		return fmt.Errorf("resume execution %q in status %q: %w", id, current, engine.ErrExecutionNotPaused)
+	}
+	s.projectExecutionStatus(ctx, id, types.ExecutionStatusRunning, "")
+	return nil
+}
+
+// The transition codes the two scripts share. They are named rather than
+// written as literals at each comparison so the pause's "already paused is a
+// success" cannot drift from the resume's "only paused is a success".
+const (
+	// pauseTransitionRefused is not read: a refusal is whatever is left after
+	// the two accepted codes, and the scripts report its reason in the status.
+	pauseTransitionApplied       = 1
+	pauseTransitionAlreadyPaused = 2
+)
+
+// runPauseTransition runs one of the two status transitions and decodes its
+// {code, current} reply. The two share this tail because they are one
+// mechanism — a status compare-and-set that reports why it refused — and a
+// backend that handled the reply differently per direction would answer a
+// retried pause and a retried resume with different verdicts.
+func (s *Store) runPauseTransition(ctx context.Context, id types.ExecutionID, script *redis.Script) (int64, string, error) {
+	t := namespace.FromContext(ctx)
+	ttl := s.getExecTTL(ctx, id)
+	reply, err := script.Run(ctx, s.rdb, []string{execKey(t, id, "status")}, int(ttl.Seconds())).Slice()
+	if err != nil && err != redis.Nil {
+		return 0, "", fmt.Errorf("pause transition for %q: %w", id, err)
+	}
+	if len(reply) < 2 {
+		return 0, "", nil
+	}
+	code, _ := reply[0].(int64)
+	current, _ := reply[1].(string)
+	return code, current, nil
 }
 
 // markExecutionTerminalBestEffort records the terminal marker that lets the
@@ -817,6 +967,8 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 	spanIDCmd := pipe.Get(ctx, execKey(t, id, "span_id"))
 	carrierCmd := pipe.Get(ctx, execKey(t, id, "trace_carrier"))
 	errorCmd := pipe.Get(ctx, execKey(t, id, "error"))
+	parentCmd := pipe.Get(ctx, execKey(t, id, "parent"))
+	rerunFromCmd := pipe.Get(ctx, execKey(t, id, "rerun_from"))
 	// Exec surfaces the first command error, and redis.Nil is the expected answer
 	// for most of these keys. The per-command results below are authoritative.
 	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
@@ -893,6 +1045,21 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 	} else if err != redis.Nil {
 		return nil, fmt.Errorf("get execution error %q: %w", id, err)
 	}
+	// The execution this one was derived from, and -- for a rerun -- the node it
+	// starts at. Absent for every execution an engine started itself, which is
+	// why both tolerate redis.Nil.
+	var parentID string
+	if raw, err := parentCmd.Result(); err == nil {
+		parentID = raw
+	} else if err != redis.Nil {
+		return nil, fmt.Errorf("get execution parent %q: %w", id, err)
+	}
+	var rerunFrom string
+	if raw, err := rerunFromCmd.Result(); err == nil {
+		rerunFrom = raw
+	} else if err != redis.Nil {
+		return nil, fmt.Errorf("get execution rerun origin %q: %w", id, err)
+	}
 	return &engine.ExecutionSnapshot{
 		ID:           id,
 		Graph:        g,
@@ -905,5 +1072,7 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 		SpanID:       spanID,
 		TraceCarrier: traceCarrier,
 		Error:        execErr,
+		ParentID:     types.ExecutionID(parentID),
+		RerunFrom:    rerunFrom,
 	}, nil
 }

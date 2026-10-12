@@ -39,6 +39,17 @@ type fakeControlFacade struct {
 	invokedEnt string
 
 	seedErr error
+
+	rerunReq engine.RerunRequest
+	rerunRes engine.RerunResult
+	rerunErr error
+}
+
+// Rerun supplies the optional execution-rerun capability, so the module's
+// capability assertion succeeds and the route can be driven end to end.
+func (f *fakeControlFacade) Rerun(_ context.Context, req engine.RerunRequest) (engine.RerunResult, error) {
+	f.rerunReq = req
+	return f.rerunRes, f.rerunErr
 }
 
 func (f *fakeControlFacade) Submit(ctx context.Context, _ *graph.Graph, _ map[string]any, _ ...*types.Runtime) (types.ExecutionID, error) {

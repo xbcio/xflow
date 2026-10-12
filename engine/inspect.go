@@ -19,8 +19,15 @@ type ExecutionDetail struct {
 	// best effort: a store that was asked and failed leaves this at 0 rather
 	// than failing the inspection, because the status and the nodes are the
 	// audit answer and the position is an extra.
-	QueuePosition int          `json:"queue_position,omitempty"`
-	Nodes         []NodeDetail `json:"nodes,omitempty"`
+	QueuePosition int `json:"queue_position,omitempty"`
+	// ParentID and RerunFrom are the rerun link: the execution this one was
+	// derived from and the node it starts at. Both are empty for an execution an
+	// engine started itself (and for a sub-execution, whose source is not a
+	// node). They are the only durable answer to "what is this execution a
+	// rerun of" once the parent's own keys have expired.
+	ParentID  types.ExecutionID `json:"parent_execution_id,omitempty"`
+	RerunFrom string            `json:"rerun_from,omitempty"`
+	Nodes     []NodeDetail      `json:"nodes,omitempty"`
 }
 
 // NodeDetail is an audit snapshot for a workflow node.
@@ -64,6 +71,8 @@ func (e *Engine) InspectStatus(ctx context.Context, id types.ExecutionID) (Execu
 		ExecutionID: id,
 		Status:      snap.Status,
 		Error:       snap.Error,
+		ParentID:    snap.ParentID,
+		RerunFrom:   snap.RerunFrom,
 	}
 	if snap.Status == types.ExecutionStatusQueued {
 		// Best effort, and deliberately not an error when it fails: the caller

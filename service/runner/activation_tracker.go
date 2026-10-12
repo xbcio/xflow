@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/service/protocol"
 )
 
@@ -53,6 +54,20 @@ type activationID struct {
 func (id activationID) supplyConsumerOwner() string {
 	return fmt.Sprintf("activation:%s/%s/%s/%s/%d",
 		id.Namespace, id.WorkflowID, id.WorkflowVersion, id.EntryUnitID, id.ReplicaIndex)
+}
+
+// supplyNamespace is the namespace this activation's supply content and
+// registrations are keyed under.
+//
+// An empty directive namespace resolves to namespace.Default — the same
+// single-namespace fallback namespace.FromContext applies — so the registration
+// and release paths of one activation can never disagree about the key they
+// operate on.
+func (id activationID) supplyNamespace() namespace.Namespace {
+	if id.Namespace == "" {
+		return namespace.Default
+	}
+	return namespace.Namespace(id.Namespace)
 }
 
 func activationIDFromActivate(d protocol.ActivateDirective) activationID {

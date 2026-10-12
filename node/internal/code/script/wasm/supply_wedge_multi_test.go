@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/supply"
 )
 
@@ -62,10 +63,10 @@ func TestMultiSupplyInstallsOnlyTheConfigSupply(t *testing.T) {
 			code := testReactorCode(t)
 			digest := "sha256:" + mustModuleKey(t, code)
 
-			if err := registerSupplyConsumerByDigestOn(h, digest, rules, owner, reg); err != nil {
+			if err := registerSupplyConsumerByDigestOn(h, namespace.Default, digest, rules, owner, reg); err != nil {
 				t.Fatalf("register rules supply: %v", err)
 			}
-			if err := registerSupplyConsumerByDigestOn(h, digest, ptr, owner, reg); err != nil {
+			if err := registerSupplyConsumerByDigestOn(h, namespace.Default, digest, ptr, owner, reg); err != nil {
 				t.Fatalf("register pointer supply: %v", err)
 			}
 			if err := reg.Apply(ctx, order.first); err != nil {
@@ -103,10 +104,10 @@ func TestMultipleConfigSuppliesFailClosed(t *testing.T) {
 	code := testReactorCode(t)
 	digest := "sha256:" + mustModuleKey(t, code)
 
-	if err := registerSupplyConsumerByDigestOn(h, digest, "rules-a", owner, reg); err != nil {
+	if err := registerSupplyConsumerByDigestOn(h, namespace.Default, digest, "rules-a", owner, reg); err != nil {
 		t.Fatalf("register rules-a: %v", err)
 	}
-	if err := registerSupplyConsumerByDigestOn(h, digest, "rules-b", owner, reg); err != nil {
+	if err := registerSupplyConsumerByDigestOn(h, namespace.Default, digest, "rules-b", owner, reg); err != nil {
 		t.Fatalf("register rules-b: %v", err)
 	}
 	for _, name := range []string{"rules-a", "rules-b"} {
@@ -159,10 +160,10 @@ func TestSupplyRefsPrunedOnLastOwnerRelease(t *testing.T) {
 	digest := "sha256:" + mustModuleKey(t, code)
 	key := mustModuleKey(t, code)
 
-	if err := registerSupplyConsumerByDigestOn(h, digest, supplyNode, ownerA, reg); err != nil {
+	if err := registerSupplyConsumerByDigestOn(h, namespace.Default, digest, supplyNode, ownerA, reg); err != nil {
 		t.Fatalf("register A: %v", err)
 	}
-	if err := registerSupplyConsumerByDigestOn(h, digest, supplyNode, ownerB, reg); err != nil {
+	if err := registerSupplyConsumerByDigestOn(h, namespace.Default, digest, supplyNode, ownerB, reg); err != nil {
 		t.Fatalf("register B: %v", err)
 	}
 	if got := len(h.supplyRefsFor(key)); got != 1 {
@@ -174,16 +175,16 @@ func TestSupplyRefsPrunedOnLastOwnerRelease(t *testing.T) {
 		t.Fatalf("apply: %v", err)
 	}
 
-	unregisterSupplyConsumerByDigestOn(h, digest, supplyNode, ownerA, reg)
+	unregisterSupplyConsumerByDigestOn(h, namespace.Default, digest, supplyNode, ownerA, reg)
 	if got := len(h.supplyRefsFor(key)); got != 1 {
 		t.Fatalf("refs = %d after releasing one of two owners, want 1 (the slot is still held)", got)
 	}
 
-	unregisterSupplyConsumerByDigestOn(h, digest, supplyNode, ownerB, reg)
+	unregisterSupplyConsumerByDigestOn(h, namespace.Default, digest, supplyNode, ownerB, reg)
 	if got := len(h.supplyRefsFor(key)); got != 0 {
 		t.Fatalf("refs = %d after the last owner released, want 0", got)
 	}
-	if _, ok := reg.Get(supplyNode); !ok {
+	if _, ok := reg.Get(supply.KeyOf(namespace.Default, supplyNode)); !ok {
 		t.Fatal("precondition: UnregisterConsumer only drops the consumer, never the " +
 			"applied Snapshot; the ref must be pruned without the content vanishing")
 	}

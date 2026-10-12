@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/xbcio/xflow/namespace"
 )
 
 type recordingConsumer struct {
@@ -62,7 +64,7 @@ func TestConsumerReceivesSnapshotContent(t *testing.T) {
 	t.Run("ApplyFanOut", func(t *testing.T) {
 		r := NewRegistry()
 		c := &recordingConsumer{}
-		r.RegisterConsumer("rules", "node/clean", c)
+		r.RegisterConsumer(key("rules"), "node/clean", c)
 		if err := r.Apply(context.Background(), snap("rules", content, 7)); err != nil {
 			t.Fatalf("Apply: %v", err)
 		}
@@ -77,7 +79,7 @@ func TestConsumerReceivesSnapshotContent(t *testing.T) {
 			t.Fatalf("Apply: %v", err)
 		}
 		c := &recordingConsumer{}
-		r.RegisterConsumer("rules", "node/clean", c)
+		r.RegisterConsumer(key("rules"), "node/clean", c)
 		assertDelivered(t, c.last(t), content, 7)
 	})
 }
@@ -111,12 +113,12 @@ func snap(name, content string, rev uint64) Snapshot {
 func TestApplyStoresAndNotifies(t *testing.T) {
 	r := NewRegistry()
 	c := &recordingConsumer{}
-	r.RegisterConsumer("rules", "node/clean", c)
+	r.RegisterConsumer(key("rules"), "node/clean", c)
 
 	if err := r.Apply(context.Background(), snap("rules", "v1", 1)); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	got, ok := r.Get("rules")
+	got, ok := r.Get(key("rules"))
 	if !ok || string(got.Content) != "v1" || got.Revision != 1 {
 		t.Fatalf("Get = %+v ok=%v", got, ok)
 	}
@@ -130,7 +132,7 @@ func TestApplyStoresAndNotifies(t *testing.T) {
 func TestApplySkipsNotifyOnUnchangedHash(t *testing.T) {
 	r := NewRegistry()
 	c := &recordingConsumer{}
-	r.RegisterConsumer("rules", "node/clean", c)
+	r.RegisterConsumer(key("rules"), "node/clean", c)
 
 	ctx := context.Background()
 	_ = r.Apply(ctx, snap("rules", "v1", 1))
@@ -139,7 +141,7 @@ func TestApplySkipsNotifyOnUnchangedHash(t *testing.T) {
 	if c.count() != 1 {
 		t.Fatalf("consumer notified %d times, want 1", c.count())
 	}
-	got, _ := r.Get("rules")
+	got, _ := r.Get(key("rules"))
 	if got.Revision != 2 {
 		t.Fatalf("revision = %d, want 2 (cache must still record the newer revision)", got.Revision)
 	}
@@ -151,8 +153,8 @@ func TestApplySurfacesConsumerError(t *testing.T) {
 	r := NewRegistry()
 	bad := &recordingConsumer{fail: errors.New("configure returned -1")}
 	good := &recordingConsumer{}
-	r.RegisterConsumer("rules", "node/a", bad)
-	r.RegisterConsumer("rules", "node/b", good)
+	r.RegisterConsumer(key("rules"), "node/a", bad)
+	r.RegisterConsumer(key("rules"), "node/b", good)
 
 	err := r.Apply(context.Background(), snap("rules", "v1", 1))
 	if err == nil || !strings.Contains(err.Error(), "configure returned -1") {
@@ -161,7 +163,7 @@ func TestApplySurfacesConsumerError(t *testing.T) {
 	if good.count() != 1 {
 		t.Fatal("a failing consumer must not stop the others")
 	}
-	if got, ok := r.Get("rules"); !ok || string(got.Content) != "v1" {
+	if got, ok := r.Get(key("rules")); !ok || string(got.Content) != "v1" {
 		t.Fatalf("cache must still hold the new content: %+v ok=%v", got, ok)
 	}
 }
@@ -169,8 +171,8 @@ func TestApplySurfacesConsumerError(t *testing.T) {
 func TestRegisterConsumerReplacesSameKey(t *testing.T) {
 	r := NewRegistry()
 	first, second := &recordingConsumer{}, &recordingConsumer{}
-	r.RegisterConsumer("rules", "node/clean", first)
-	r.RegisterConsumer("rules", "node/clean", second)
+	r.RegisterConsumer(key("rules"), "node/clean", first)
+	r.RegisterConsumer(key("rules"), "node/clean", second)
 
 	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
 	if first.count() != 0 || second.count() != 1 {
@@ -182,8 +184,8 @@ func TestRegisterConsumerReplacesSameKey(t *testing.T) {
 func TestUnregisterConsumerStopsNotifications(t *testing.T) {
 	r := NewRegistry()
 	c := &recordingConsumer{}
-	r.RegisterConsumer("rules", "node/clean", c)
-	r.UnregisterConsumer("rules", "node/clean")
+	r.RegisterConsumer(key("rules"), "node/clean", c)
+	r.UnregisterConsumer(key("rules"), "node/clean")
 	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
 	if c.count() != 0 {
 		t.Fatalf("unregistered consumer notified %d times", c.count())
@@ -197,7 +199,7 @@ func TestRegisterConsumerReceivesCurrentSnapshot(t *testing.T) {
 	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
 
 	c := &recordingConsumer{}
-	r.RegisterConsumer("rules", "node/clean", c)
+	r.RegisterConsumer(key("rules"), "node/clean", c)
 	if c.count() != 1 {
 		t.Fatalf("late consumer got %d notifications, want the current snapshot", c.count())
 	}
@@ -206,9 +208,9 @@ func TestRegisterConsumerReceivesCurrentSnapshot(t *testing.T) {
 func TestGetReturnsCopiedContent(t *testing.T) {
 	r := NewRegistry()
 	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
-	got, _ := r.Get("rules")
+	got, _ := r.Get(key("rules"))
 	got.Content[0] = 'X'
-	again, _ := r.Get("rules")
+	again, _ := r.Get(key("rules"))
 	if string(again.Content) != "v1" {
 		t.Fatalf("caller mutated the cached content: %s", again.Content)
 	}
@@ -229,9 +231,9 @@ func TestApplyRecoversPanickingConsumer(t *testing.T) {
 	// Register three consumers: two panicking and one good. Because map iteration
 	// order is non-deterministic, having two panicking consumers ensures that the
 	// good one is reached regardless of ordering.
-	r.RegisterConsumer("rules", "panic/1", panickingConsumer{})
-	r.RegisterConsumer("rules", "panic/2", panickingConsumer{})
-	r.RegisterConsumer("rules", "good", good)
+	r.RegisterConsumer(key("rules"), "panic/1", panickingConsumer{})
+	r.RegisterConsumer(key("rules"), "panic/2", panickingConsumer{})
+	r.RegisterConsumer(key("rules"), "good", good)
 
 	err := r.Apply(context.Background(), snap("rules", "v1", 1))
 	// The error must surface (same path as a returned error).
@@ -243,7 +245,7 @@ func TestApplyRecoversPanickingConsumer(t *testing.T) {
 		t.Fatalf("good consumer notified %d times, want 1", good.count())
 	}
 	// Cache must still hold the value.
-	if got, ok := r.Get("rules"); !ok || string(got.Content) != "v1" {
+	if got, ok := r.Get(key("rules")); !ok || string(got.Content) != "v1" {
 		t.Fatalf("cache must hold content after panic: %+v ok=%v", got, ok)
 	}
 }
@@ -255,11 +257,11 @@ func TestRegisterConsumerRecoversPanic(t *testing.T) {
 	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
 
 	// Must not panic-escape.
-	r.RegisterConsumer("rules", "panic/late", panickingConsumer{})
+	r.RegisterConsumer(key("rules"), "panic/late", panickingConsumer{})
 
 	// Registry still functional after the recovered panic.
 	good := &recordingConsumer{}
-	r.RegisterConsumer("rules", "good", good)
+	r.RegisterConsumer(key("rules"), "good", good)
 	if good.count() != 1 {
 		t.Fatalf("good consumer not notified after panic recovery: %d", good.count())
 	}
@@ -270,7 +272,7 @@ func TestRegisterConsumerRecoversPanic(t *testing.T) {
 func TestConcurrentApplyAndGet(t *testing.T) {
 	r := NewRegistry()
 	c := &recordingConsumer{}
-	r.RegisterConsumer("rules", "node/clean", c)
+	r.RegisterConsumer(key("rules"), "node/clean", c)
 
 	const iterations = 500
 	var wg sync.WaitGroup
@@ -298,7 +300,7 @@ func TestConcurrentApplyAndGet(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < iterations; i++ {
-				_, _ = r.Get("rules")
+				_, _ = r.Get(key("rules"))
 			}
 		}()
 	}
@@ -306,7 +308,7 @@ func TestConcurrentApplyAndGet(t *testing.T) {
 	wg.Wait()
 
 	// Final state: last Apply wrote revision=iterations.
-	got, ok := r.Get("rules")
+	got, ok := r.Get(key("rules"))
 	if !ok {
 		t.Fatal("Get returned !ok after concurrent writes")
 	}
@@ -320,7 +322,7 @@ func TestConcurrentApplyAndGet(t *testing.T) {
 func TestIsReadyTrueWhenNoConsumers(t *testing.T) {
 	r := NewRegistry()
 	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
-	if !r.IsReady("rules") {
+	if !r.IsReady(key("rules")) {
 		t.Fatal("IsReady must be true when content is cached and no consumers exist")
 	}
 }
@@ -328,17 +330,17 @@ func TestIsReadyTrueWhenNoConsumers(t *testing.T) {
 func TestIsReadyFalseWhenConsumerRejects(t *testing.T) {
 	r := NewRegistry()
 	bad := &recordingConsumer{fail: errors.New("reject")}
-	r.RegisterConsumer("rules", "node/a", bad)
+	r.RegisterConsumer(key("rules"), "node/a", bad)
 
 	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
-	if r.IsReady("rules") {
+	if r.IsReady(key("rules")) {
 		t.Fatal("IsReady must be false when a consumer rejected")
 	}
 }
 
 func TestIsReadyFalseWhenNoSnapshot(t *testing.T) {
 	r := NewRegistry()
-	if r.IsReady("rules") {
+	if r.IsReady(key("rules")) {
 		t.Fatal("IsReady must be false when no snapshot exists")
 	}
 }
@@ -346,9 +348,9 @@ func TestIsReadyFalseWhenNoSnapshot(t *testing.T) {
 func TestIsReadyBecomesTrue_AfterReapplyWithAcceptingConsumer(t *testing.T) {
 	r := NewRegistry()
 	bad := &recordingConsumer{fail: errors.New("reject")}
-	r.RegisterConsumer("rules", "node/a", bad)
+	r.RegisterConsumer(key("rules"), "node/a", bad)
 	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
-	if r.IsReady("rules") {
+	if r.IsReady(key("rules")) {
 		t.Fatal("precondition: must be not-ready")
 	}
 
@@ -357,7 +359,7 @@ func TestIsReadyBecomesTrue_AfterReapplyWithAcceptingConsumer(t *testing.T) {
 	// Re-apply the same content: the consumer's last outcome for it was a
 	// rejection, so Apply re-notifies rather than skipping.
 	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
-	if !r.IsReady("rules") {
+	if !r.IsReady(key("rules")) {
 		t.Fatal("IsReady must become true after consumer accepts on re-apply")
 	}
 }
@@ -365,14 +367,14 @@ func TestIsReadyBecomesTrue_AfterReapplyWithAcceptingConsumer(t *testing.T) {
 func TestIsReadyBecomesTrueAfterUnregister(t *testing.T) {
 	r := NewRegistry()
 	bad := &recordingConsumer{fail: errors.New("reject")}
-	r.RegisterConsumer("rules", "node/a", bad)
+	r.RegisterConsumer(key("rules"), "node/a", bad)
 	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
-	if r.IsReady("rules") {
+	if r.IsReady(key("rules")) {
 		t.Fatal("precondition: must be not-ready")
 	}
 
-	r.UnregisterConsumer("rules", "node/a")
-	if !r.IsReady("rules") {
+	r.UnregisterConsumer(key("rules"), "node/a")
+	if !r.IsReady(key("rules")) {
 		t.Fatal("IsReady must become true after the rejecting consumer is unregistered")
 	}
 }
@@ -382,7 +384,7 @@ func TestIsReadyBecomesTrueAfterUnregister(t *testing.T) {
 func TestApplySkipsNotifyOnUnchangedHashWhenAccepted(t *testing.T) {
 	r := NewRegistry()
 	c := &recordingConsumer{}
-	r.RegisterConsumer("rules", "node/clean", c)
+	r.RegisterConsumer(key("rules"), "node/clean", c)
 
 	ctx := context.Background()
 	_ = r.Apply(ctx, snap("rules", "v1", 1))
@@ -398,7 +400,7 @@ func TestApplySkipsNotifyOnUnchangedHashWhenAccepted(t *testing.T) {
 func TestApplyRenotifiesOnUnchangedHashWhenRejected(t *testing.T) {
 	r := NewRegistry()
 	bad := &recordingConsumer{fail: errors.New("reject")}
-	r.RegisterConsumer("rules", "node/a", bad)
+	r.RegisterConsumer(key("rules"), "node/a", bad)
 
 	ctx := context.Background()
 	_ = r.Apply(ctx, snap("rules", "v1", 1))
@@ -424,14 +426,14 @@ func TestRegisterConsumerRejectionMakesSupplyUnready(t *testing.T) {
 
 	// Step 1: Apply caches content while no consumer is registered.
 	_ = r.Apply(ctx, snap("rules", "v1", 1))
-	if !r.IsReady("rules") {
+	if !r.IsReady(key("rules")) {
 		t.Fatal("step 1: no consumer yet, must be ready")
 	}
 
 	// Step 2: A consumer registers and its immediate-notify rejects.
 	bad := &recordingConsumer{fail: errors.New("configure returned -1")}
-	r.RegisterConsumer("rules", "node/a", bad)
-	if r.IsReady("rules") {
+	r.RegisterConsumer(key("rules"), "node/a", bad)
+	if r.IsReady(key("rules")) {
 		t.Fatal("step 2: rejecting consumer's immediate notify must mark the supply NOT ready")
 	}
 
@@ -445,7 +447,7 @@ func TestRegisterConsumerRejectionMakesSupplyUnready(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "configure returned -1") {
 		t.Fatalf("step 3: Apply err = %v, want the consumer's rejection surfaced, not nil", err)
 	}
-	if r.IsReady("rules") {
+	if r.IsReady(key("rules")) {
 		t.Fatal("step 3: must remain NOT ready — the state must not self-heal on its own without an actual acceptance")
 	}
 }
@@ -458,8 +460,8 @@ func TestRegisterConsumerRejectionRecoversOnReapply(t *testing.T) {
 
 	_ = r.Apply(ctx, snap("rules", "v1", 1))
 	bad := &recordingConsumer{fail: errors.New("configure returned -1")}
-	r.RegisterConsumer("rules", "node/a", bad)
-	if r.IsReady("rules") {
+	r.RegisterConsumer(key("rules"), "node/a", bad)
+	if r.IsReady(key("rules")) {
 		t.Fatal("precondition: must be not-ready after rejecting register")
 	}
 
@@ -468,7 +470,7 @@ func TestRegisterConsumerRejectionRecoversOnReapply(t *testing.T) {
 	if err := r.Apply(ctx, snap("rules", "v1", 2)); err != nil {
 		t.Fatalf("Apply after consumer fixed: %v", err)
 	}
-	if !r.IsReady("rules") {
+	if !r.IsReady(key("rules")) {
 		t.Fatal("IsReady must become true once the consumer accepts on re-apply")
 	}
 }
@@ -482,14 +484,14 @@ func TestRegisterConsumerReplacementAcceptsMarksReady(t *testing.T) {
 
 	_ = r.Apply(ctx, snap("rules", "v1", 1))
 	bad := &recordingConsumer{fail: errors.New("configure returned -1")}
-	r.RegisterConsumer("rules", "node/a", bad)
-	if r.IsReady("rules") {
+	r.RegisterConsumer(key("rules"), "node/a", bad)
+	if r.IsReady(key("rules")) {
 		t.Fatal("precondition: must be not-ready")
 	}
 
 	good := &recordingConsumer{}
-	r.RegisterConsumer("rules", "node/a", good) // same key, replaces bad
-	if !r.IsReady("rules") {
+	r.RegisterConsumer(key("rules"), "node/a", good) // same key, replaces bad
+	if !r.IsReady(key("rules")) {
 		t.Fatal("IsReady must become true once the replacement consumer accepts on immediate notify")
 	}
 }
@@ -499,7 +501,7 @@ func TestRegisterConsumerReplacementAcceptsMarksReady(t *testing.T) {
 func TestRegisterConsumerNoConsumerStaysReady(t *testing.T) {
 	r := NewRegistry()
 	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
-	if !r.IsReady("rules") {
+	if !r.IsReady(key("rules")) {
 		t.Fatal("no consumer at all: must stay ready")
 	}
 }
@@ -511,8 +513,8 @@ func TestRegisterConsumerAcceptingStaysReady(t *testing.T) {
 	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
 
 	good := &recordingConsumer{}
-	r.RegisterConsumer("rules", "node/a", good)
-	if !r.IsReady("rules") {
+	r.RegisterConsumer(key("rules"), "node/a", good)
+	if !r.IsReady(key("rules")) {
 		t.Fatal("an accepting consumer's immediate notify must not mark the supply unready")
 	}
 }
@@ -534,15 +536,15 @@ func TestRejectedConsumerMakesSupplyNotReady(t *testing.T) {
 	_ = r.Apply(ctx, snap("tags", "v1", 1))
 
 	bad := &recordingConsumer{fail: errors.New("reject")}
-	r.RegisterConsumer("rules", "node/a", bad) // rejects -> rules becomes unready
+	r.RegisterConsumer(key("rules"), "node/a", bad) // rejects -> rules becomes unready
 
-	if r.IsReady("rules") {
+	if r.IsReady(key("rules")) {
 		t.Fatal("a supply whose consumer rejected the cached content must not be ready")
 	}
-	if !r.IsReady("tags") {
+	if !r.IsReady(key("tags")) {
 		t.Fatal("an untouched supply with content and no consumer must stay ready")
 	}
-	if r.IsReady("absent") {
+	if r.IsReady(key("absent")) {
 		t.Fatal("a supply with no snapshot at all must not be ready")
 	}
 }
@@ -559,16 +561,16 @@ func TestRegisterConsumerLostUpdate_SecondAcceptingDoesNotMaskFirstRejecting(t *
 	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
 
 	bad := &recordingConsumer{fail: errors.New("configure returned -1")}
-	r.RegisterConsumer("rules", "a", bad)
-	if r.IsReady("rules") {
+	r.RegisterConsumer(key("rules"), "a", bad)
+	if r.IsReady(key("rules")) {
 		t.Fatal("step: after bad 'a' registers, IsReady must be false")
 	}
 
 	good := &recordingConsumer{}
-	r.RegisterConsumer("rules", "b", good)
+	r.RegisterConsumer(key("rules"), "b", good)
 	// THE regression: registering an unrelated accepting consumer must not
 	// resurrect readiness while 'a' is still registered and still rejecting.
-	if r.IsReady("rules") {
+	if r.IsReady(key("rules")) {
 		t.Fatal("step: after good 'b' registers, IsReady must STILL be false — 'a' is still rejecting")
 	}
 }
@@ -581,10 +583,10 @@ func TestIsReadyOrderIndependent(t *testing.T) {
 		r := NewRegistry()
 		_ = r.Apply(context.Background(), snap("rules", "v1", 1))
 		good := &recordingConsumer{}
-		r.RegisterConsumer("rules", "a", good)
+		r.RegisterConsumer(key("rules"), "a", good)
 		bad := &recordingConsumer{fail: errors.New("reject")}
-		r.RegisterConsumer("rules", "b", bad)
-		if r.IsReady("rules") {
+		r.RegisterConsumer(key("rules"), "b", bad)
+		if r.IsReady(key("rules")) {
 			t.Fatal("must be false: b rejects regardless of order")
 		}
 	})
@@ -592,10 +594,10 @@ func TestIsReadyOrderIndependent(t *testing.T) {
 		r := NewRegistry()
 		_ = r.Apply(context.Background(), snap("rules", "v1", 1))
 		bad := &recordingConsumer{fail: errors.New("reject")}
-		r.RegisterConsumer("rules", "a", bad)
+		r.RegisterConsumer(key("rules"), "a", bad)
 		good := &recordingConsumer{}
-		r.RegisterConsumer("rules", "b", good)
-		if r.IsReady("rules") {
+		r.RegisterConsumer(key("rules"), "b", good)
+		if r.IsReady(key("rules")) {
 			t.Fatal("must be false: a rejects regardless of order")
 		}
 	})
@@ -609,15 +611,15 @@ func TestUnregisterOnlyRejectorAmongOthersMakesReadyImmediately(t *testing.T) {
 	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
 
 	good := &recordingConsumer{}
-	r.RegisterConsumer("rules", "a", good)
+	r.RegisterConsumer(key("rules"), "a", good)
 	bad := &recordingConsumer{fail: errors.New("reject")}
-	r.RegisterConsumer("rules", "b", bad)
-	if r.IsReady("rules") {
+	r.RegisterConsumer(key("rules"), "b", bad)
+	if r.IsReady(key("rules")) {
 		t.Fatal("precondition: b rejects, must be not-ready")
 	}
 
-	r.UnregisterConsumer("rules", "b")
-	if !r.IsReady("rules") {
+	r.UnregisterConsumer(key("rules"), "b")
+	if !r.IsReady(key("rules")) {
 		t.Fatal("unregistering the only rejector (others accepting) must make IsReady true immediately")
 	}
 }
@@ -632,20 +634,20 @@ func TestRegisterConsumerSameKeyReplacementOverwritesEntry(t *testing.T) {
 	_ = r.Apply(context.Background(), snap("rules", "v1", 1))
 
 	bad := &recordingConsumer{fail: errors.New("reject")}
-	r.RegisterConsumer("rules", "a", bad)
+	r.RegisterConsumer(key("rules"), "a", bad)
 	stillBad := &recordingConsumer{fail: errors.New("also rejects")}
-	r.RegisterConsumer("rules", "b", stillBad)
-	if r.IsReady("rules") {
+	r.RegisterConsumer(key("rules"), "b", stillBad)
+	if r.IsReady(key("rules")) {
 		t.Fatal("precondition: must be not-ready")
 	}
 
-	r.RegisterConsumer("rules", "a", &recordingConsumer{}) // same key, now accepting
-	if r.IsReady("rules") {
+	r.RegisterConsumer(key("rules"), "a", &recordingConsumer{}) // same key, now accepting
+	if r.IsReady(key("rules")) {
 		t.Fatal("replacing 'a' must not mask 'b', which is still registered and still rejecting")
 	}
 
-	r.RegisterConsumer("rules", "b", &recordingConsumer{}) // now both accept
-	if !r.IsReady("rules") {
+	r.RegisterConsumer(key("rules"), "b", &recordingConsumer{}) // now both accept
+	if !r.IsReady(key("rules")) {
 		t.Fatal("once every key's consumer accepts, IsReady must be true")
 	}
 }
@@ -686,8 +688,8 @@ func TestConcurrentMutationsKeepIsReadyConsistent(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < iterations; i++ {
-			r.RegisterConsumer("rules", "flaky", &recordingConsumer{fail: errors.New("flaky reject")})
-			r.UnregisterConsumer("rules", "flaky")
+			r.RegisterConsumer(key("rules"), "flaky", &recordingConsumer{fail: errors.New("flaky reject")})
+			r.UnregisterConsumer(key("rules"), "flaky")
 		}
 	}()
 
@@ -696,7 +698,7 @@ func TestConcurrentMutationsKeepIsReadyConsistent(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < iterations; i++ {
-			r.RegisterConsumer("rules", "steady", &recordingConsumer{})
+			r.RegisterConsumer(key("rules"), "steady", &recordingConsumer{})
 		}
 	}()
 
@@ -706,8 +708,8 @@ func TestConcurrentMutationsKeepIsReadyConsistent(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < iterations; i++ {
-			_ = r.IsReady("rules")
-			_, _ = r.Get("rules")
+			_ = r.IsReady(key("rules"))
+			_, _ = r.Get(key("rules"))
 		}
 	}()
 
@@ -715,15 +717,15 @@ func TestConcurrentMutationsKeepIsReadyConsistent(t *testing.T) {
 
 	// Settle to a single, deterministic, known-good consumer set before the
 	// final assertions: only "steady" (accepting) remains registered.
-	r.UnregisterConsumer("rules", "flaky")
-	r.RegisterConsumer("rules", "steady", &recordingConsumer{})
+	r.UnregisterConsumer(key("rules"), "flaky")
+	r.RegisterConsumer(key("rules"), "steady", &recordingConsumer{})
 
-	if !r.IsReady("rules") {
+	if !r.IsReady(key("rules")) {
 		t.Fatal("after settling to a single accepting consumer, IsReady must be true")
 	}
 
-	r.RegisterConsumer("rules", "steady", &recordingConsumer{fail: errors.New("final reject")})
-	if r.IsReady("rules") {
+	r.RegisterConsumer(key("rules"), "steady", &recordingConsumer{fail: errors.New("final reject")})
+	if r.IsReady(key("rules")) {
 		t.Fatal("after replacing the sole consumer with a rejecting one, IsReady must be false")
 	}
 }
@@ -777,7 +779,7 @@ func TestStaleAcceptMustNotMaskCurrentReject(t *testing.T) {
 	c.verdict["h-B"] = errors.New("B rejected") // current content: rejected
 	close(c.release["h-B"])                     // B's callback never blocks
 
-	r.RegisterConsumer("rules", "node/a", c)
+	r.RegisterConsumer(key("rules"), "node/a", c)
 
 	applyA := make(chan error, 1)
 	go func() { applyA <- r.Apply(ctx, snap("rules", "A", 1)) }()
@@ -786,17 +788,17 @@ func TestStaleAcceptMustNotMaskCurrentReject(t *testing.T) {
 	if err := r.Apply(ctx, snap("rules", "B", 2)); err == nil {
 		t.Fatal("Apply(B) must surface the consumer's rejection")
 	}
-	if r.IsReady("rules") {
+	if r.IsReady(key("rules")) {
 		t.Fatal("precondition: B is cached and was rejected, so not ready")
 	}
 
 	close(c.release["h-A"]) // A's callback now returns, accepting stale content
 	<-applyA
 
-	if got, _ := r.Get("rules"); got.Hash != "h-B" {
+	if got, _ := r.Get(key("rules")); got.Hash != "h-B" {
 		t.Fatalf("cached hash = %q, want h-B", got.Hash)
 	}
-	if r.IsReady("rules") {
+	if r.IsReady(key("rules")) {
 		t.Fatal("a stale acceptance of superseded content must not make the rejected current content ready")
 	}
 }
@@ -813,7 +815,7 @@ func TestStaleRejectMustNotMaskCurrentAccept(t *testing.T) {
 	c.verdict["h-B"] = nil                      // current content: accepted
 	close(c.release["h-B"])
 
-	r.RegisterConsumer("rules", "node/a", c)
+	r.RegisterConsumer(key("rules"), "node/a", c)
 
 	applyA := make(chan error, 1)
 	go func() { applyA <- r.Apply(ctx, snap("rules", "A", 1)) }()
@@ -826,10 +828,10 @@ func TestStaleRejectMustNotMaskCurrentAccept(t *testing.T) {
 	close(c.release["h-A"])
 	<-applyA
 
-	if got, _ := r.Get("rules"); got.Hash != "h-B" {
+	if got, _ := r.Get(key("rules")); got.Hash != "h-B" {
 		t.Fatalf("cached hash = %q, want h-B", got.Hash)
 	}
-	if !r.IsReady("rules") {
+	if !r.IsReady(key("rules")) {
 		t.Fatal("a stale rejection of superseded content must not keep the accepted current content unready")
 	}
 }
@@ -848,7 +850,7 @@ func TestRegisterConsumerStaleNotifyMustNotMaskCurrentReject(t *testing.T) {
 
 	registered := make(chan struct{})
 	go func() {
-		r.RegisterConsumer("rules", "node/a", c)
+		r.RegisterConsumer(key("rules"), "node/a", c)
 		close(registered)
 	}()
 	<-c.entered["h-A"] // the immediate notify for A is in flight
@@ -860,7 +862,7 @@ func TestRegisterConsumerStaleNotifyMustNotMaskCurrentReject(t *testing.T) {
 	close(c.release["h-A"])
 	<-registered
 
-	if r.IsReady("rules") {
+	if r.IsReady(key("rules")) {
 		t.Fatal("a stale registration notify must not mask the current content's rejection")
 	}
 }
@@ -877,8 +879,8 @@ func TestUncomparableConsumerDoesNotPanic(t *testing.T) {
 	ctx := context.Background()
 	_ = r.Apply(ctx, snap("rules", "v1", 1)) // cached, so registering notifies immediately
 
-	r.RegisterConsumer("rules", "node/a", uncomparableConsumer{tags: []string{"x"}})
-	if !r.IsReady("rules") {
+	r.RegisterConsumer(key("rules"), "node/a", uncomparableConsumer{tags: []string{"x"}})
+	if !r.IsReady(key("rules")) {
 		t.Fatal("an accepting uncomparable consumer must leave the supply ready")
 	}
 	if err := r.Apply(ctx, snap("rules", "v2", 2)); err != nil {
@@ -908,19 +910,19 @@ func TestRegisterConsumerInFlightVerdictIsNotReady(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		r.RegisterConsumer("rules", "k", c)
+		r.RegisterConsumer(key("rules"), "k", c)
 		close(done)
 	}()
 
 	<-c.entered["h-A"]
 	// Registered, content cached, callback running, verdict not yet given.
-	if r.IsReady("rules") {
+	if r.IsReady(key("rules")) {
 		t.Fatal("a consumer whose verdict is still in flight must not read as ready")
 	}
 	close(c.release["h-A"])
 	<-done
 
-	if r.IsReady("rules") {
+	if r.IsReady(key("rules")) {
 		t.Fatal("after the rejection was recorded, IsReady must be false")
 	}
 }
@@ -934,8 +936,8 @@ func TestApplyFanOutInFlightVerdictIsNotReady(t *testing.T) {
 	c := newBlockingConsumer("h-A")
 	c.verdict["h-A"] = errors.New("A rejected")
 
-	r.RegisterConsumer("rules", "k", c) // no snapshot yet: returns without notifying
-	if r.IsReady("rules") {
+	r.RegisterConsumer(key("rules"), "k", c) // no snapshot yet: returns without notifying
+	if r.IsReady(key("rules")) {
 		t.Fatal("no snapshot cached: IsReady must be false")
 	}
 
@@ -946,13 +948,13 @@ func TestApplyFanOutInFlightVerdictIsNotReady(t *testing.T) {
 	}()
 
 	<-c.entered["h-A"]
-	if r.IsReady("rules") {
+	if r.IsReady(key("rules")) {
 		t.Fatal("during Apply's fan-out the verdict is unresolved; IsReady must be false")
 	}
 	close(c.release["h-A"])
 	<-done
 
-	if r.IsReady("rules") {
+	if r.IsReady(key("rules")) {
 		t.Fatal("after the rejection was recorded, IsReady must be false")
 	}
 }
@@ -972,7 +974,7 @@ func TestOverlappingNotificationsNeverReadReady(t *testing.T) {
 	c := newBlockingConsumer("h-A", "h-B")
 	c.verdict["h-A"] = nil // both accept: readiness must still be withheld
 	c.verdict["h-B"] = nil // while h-B's verdict is outstanding
-	r.RegisterConsumer("rules", "k", c)
+	r.RegisterConsumer(key("rules"), "k", c)
 
 	doneA := make(chan struct{})
 	go func() {
@@ -992,13 +994,13 @@ func TestOverlappingNotificationsNeverReadReady(t *testing.T) {
 	// in-flight count released — but h-B's is not.
 	close(c.release["h-A"])
 	<-doneA
-	if r.IsReady("rules") {
+	if r.IsReady(key("rules")) {
 		t.Fatal("h-B's verdict is still in flight; IsReady must be false")
 	}
 
 	close(c.release["h-B"])
 	<-doneB
-	if !r.IsReady("rules") {
+	if !r.IsReady(key("rules")) {
 		t.Fatal("h-B was accepted and is the cached content; IsReady must be true")
 	}
 }
@@ -1010,19 +1012,19 @@ func TestOverlappingNotificationsNeverReadReady(t *testing.T) {
 func TestPanickingConsumerDoesNotStrandInFlight(t *testing.T) {
 	r := NewRegistry()
 	ctx := context.Background()
-	r.RegisterConsumer("rules", "boom", panickingConsumer{})
+	r.RegisterConsumer(key("rules"), "boom", panickingConsumer{})
 
 	if err := r.Apply(ctx, snap("rules", "v1", 1)); err == nil {
 		t.Fatal("a panicking consumer must surface as an error")
 	}
-	if r.IsReady("rules") {
+	if r.IsReady(key("rules")) {
 		t.Fatal("the panic is an error outcome: IsReady must be false")
 	}
 	// Removing it must restore readiness with no further Apply. If the in-flight
 	// count had leaked it would survive on no entry at all, but a leak on any
 	// REMAINING entry is what this guards.
-	r.UnregisterConsumer("rules", "boom")
-	if !r.IsReady("rules") {
+	r.UnregisterConsumer(key("rules"), "boom")
+	if !r.IsReady(key("rules")) {
 		t.Fatal("with no consumers left, IsReady must be true")
 	}
 }
@@ -1049,7 +1051,7 @@ func TestObservedReportsReadyContent(t *testing.T) {
 		t.Fatalf("Apply: %v", err)
 	}
 	got := r.Observed()
-	if len(got) != 1 || got["rules"] != "h-v1" {
+	if len(got) != 1 || got[key("rules")] != "h-v1" {
 		t.Fatalf("Observed() = %#v, want {rules: h-v1}", got)
 	}
 }
@@ -1064,7 +1066,7 @@ func TestObservedExcludesRejectedContent(t *testing.T) {
 	r := NewRegistry()
 	ctx := context.Background()
 	c := &recordingConsumer{fail: errors.New("configure returned -1")}
-	r.RegisterConsumer("rules", "wasm/clean", c)
+	r.RegisterConsumer(key("rules"), "wasm/clean", c)
 
 	if err := r.Apply(ctx, snap("rules", "v1", 1)); err == nil {
 		t.Fatal("expected the rejecting consumer's error to surface")
@@ -1081,7 +1083,7 @@ func TestObservedReportsOnceConsumerAccepts(t *testing.T) {
 	r := NewRegistry()
 	ctx := context.Background()
 	c := &recordingConsumer{fail: errors.New("boom")}
-	r.RegisterConsumer("rules", "wasm/clean", c)
+	r.RegisterConsumer(key("rules"), "wasm/clean", c)
 	if err := r.Apply(ctx, snap("rules", "v1", 1)); err == nil {
 		t.Fatal("expected rejection")
 	}
@@ -1096,8 +1098,8 @@ func TestObservedReportsOnceConsumerAccepts(t *testing.T) {
 	// the SAME content without a new Apply call (mirrors
 	// TestRegisterConsumerRejectionRecoversOnReapply's pattern elsewhere in
 	// this file, adapted to avoid a second unrelated snapshot).
-	r.UnregisterConsumer("rules", "wasm/clean")
-	if got := r.Observed(); len(got) != 1 || got["rules"] != "h-v1" {
+	r.UnregisterConsumer(key("rules"), "wasm/clean")
+	if got := r.Observed(); len(got) != 1 || got[key("rules")] != "h-v1" {
 		t.Fatalf("Observed() after unregistering the rejector = %#v, want {rules: h-v1}", got)
 	}
 }
@@ -1110,13 +1112,13 @@ func TestObservedReportsOnlyReadySubset(t *testing.T) {
 		t.Fatalf("Apply ready-one: %v", err)
 	}
 	c := &recordingConsumer{fail: errors.New("boom")}
-	r.RegisterConsumer("not-ready", "wasm/clean", c)
+	r.RegisterConsumer(key("not-ready"), "wasm/clean", c)
 	if err := r.Apply(ctx, snap("not-ready", "v1", 1)); err == nil {
 		t.Fatal("expected rejection for not-ready")
 	}
 
 	got := r.Observed()
-	if len(got) != 1 || got["ready-one"] != "h-v1" {
+	if len(got) != 1 || got[key("ready-one")] != "h-v1" {
 		t.Fatalf("Observed() = %#v, want exactly {ready-one: h-v1}", got)
 	}
 }
@@ -1173,7 +1175,7 @@ func TestStaleAcceptForRecycledHashCannotOverwriteRejection(t *testing.T) {
 			3: errors.New("rollback to A rejected"), // hash A again: REJECTS
 		},
 	}
-	r.RegisterConsumer("rules", "k", c)
+	r.RegisterConsumer(key("rules"), "k", c)
 
 	apply := func(h string, rev uint64, body string) {
 		go func() { _ = r.Apply(ctx, Snapshot{Name: "rules", Content: []byte(body), Hash: h, Revision: rev}) }()
@@ -1192,7 +1194,7 @@ func TestStaleAcceptForRecycledHashCannotOverwriteRejection(t *testing.T) {
 	close(c.gate[3]) // A-again's REJECTION lands
 	time.Sleep(50 * time.Millisecond)
 
-	if r.IsReady("rules") {
+	if r.IsReady(key("rules")) {
 		t.Fatal("precondition: the rejection of the rolled-back content must make IsReady false")
 	}
 
@@ -1200,7 +1202,158 @@ func TestStaleAcceptForRecycledHashCannotOverwriteRejection(t *testing.T) {
 	close(c.gate[1])
 	time.Sleep(100 * time.Millisecond)
 
-	if r.IsReady("rules") {
+	if r.IsReady(key("rules")) {
 		t.Fatal("a stale acceptance from an earlier dispatch of the same hash overwrote the current rejection; the gate would admit traffic the consumer refused")
+	}
+}
+
+// key builds the default-namespace key for a supply name. Most cases in this
+// package exercise one namespace; the cross-namespace cases build their keys
+// explicitly.
+func key(name string) Key { return KeyOf(namespace.Default, name) }
+
+// --- namespace isolation ---
+
+// snapIn builds a snapshot for an explicit namespace.
+func snapIn(ns namespace.Namespace, name, content string, rev uint64) Snapshot {
+	s := snap(name, content, rev)
+	s.Namespace = ns
+	return s
+}
+
+// A supply's identity is (namespace, name): two namespaces may each declare a
+// supply node called "rules" and they are two supplies with two contents. Every
+// read path must keep them apart — a name-only lookup is what let one tenant's
+// content answer another tenant's reference.
+func TestSameNameInTwoNamespacesIsTwoSupplies(t *testing.T) {
+	r := NewRegistry()
+	ctx := context.Background()
+	a, b := KeyOf("tenant-a", "rules"), KeyOf("tenant-b", "rules")
+
+	if err := r.Apply(ctx, snapIn("tenant-a", "rules", "a-v1", 1)); err != nil {
+		t.Fatalf("Apply tenant-a: %v", err)
+	}
+	if got, ok := r.Get(b); ok {
+		t.Fatalf("Get(%v) = %#v, ok=true before tenant-b wrote anything; want not-cached", b, got)
+	}
+	if r.IsReady(b) {
+		t.Fatal("IsReady(tenant-b) = true with no content cached for that namespace")
+	}
+	if err := r.Apply(ctx, snapIn("tenant-b", "rules", "b-v1", 1)); err != nil {
+		t.Fatalf("Apply tenant-b: %v", err)
+	}
+
+	gotA, ok := r.Get(a)
+	if !ok || string(gotA.Content) != "a-v1" {
+		t.Fatalf("Get(tenant-a) = %#v, ok=%v, want a-v1", gotA, ok)
+	}
+	gotB, ok := r.Get(b)
+	if !ok || string(gotB.Content) != "b-v1" {
+		t.Fatalf("Get(tenant-b) = %#v, ok=%v, want b-v1", gotB, ok)
+	}
+
+	// The decoded $supplies view is per namespace for the same reason. Neither
+	// content is JSON, so Decoded falls back to the raw bytes; the claim under
+	// test is which snapshot answered, not how it was decoded.
+	decA := r.Decoded("tenant-a")["rules"]
+	if b, ok := decA.([]byte); !ok || string(b) != "a-v1" {
+		t.Fatalf("Decoded(tenant-a)[rules] = %#v, want raw bytes a-v1", decA)
+	}
+	decB := r.Decoded("tenant-b")["rules"]
+	if b, ok := decB.([]byte); !ok || string(b) != "b-v1" {
+		t.Fatalf("Decoded(tenant-b)[rules] = %#v, want raw bytes b-v1", decB)
+	}
+	if _, present := r.Decoded("tenant-c")["rules"]; present {
+		t.Fatal("Decoded(tenant-c) resolved a supply that namespace never declared")
+	}
+}
+
+// A consumer that rejects content in one namespace must not make the same-named
+// supply in another namespace unready: readiness is a conjunction over ONE
+// supply's consumers, and a name-only key would merge the two.
+func TestConsumerRejectionDoesNotCrossNamespaces(t *testing.T) {
+	r := NewRegistry()
+	ctx := context.Background()
+	a, b := KeyOf("tenant-a", "rules"), KeyOf("tenant-b", "rules")
+
+	if err := r.Apply(ctx, snapIn("tenant-a", "rules", "v1", 1)); err != nil {
+		t.Fatalf("Apply tenant-a: %v", err)
+	}
+	if err := r.Apply(ctx, snapIn("tenant-b", "rules", "v1", 1)); err != nil {
+		t.Fatalf("Apply tenant-b: %v", err)
+	}
+	r.RegisterConsumer(a, "wasm/rejector", &recordingConsumer{fail: errors.New("configure returned -1")})
+
+	if r.IsReady(a) {
+		t.Fatal("IsReady(tenant-a) = true with a registered consumer rejecting the content")
+	}
+	if !r.IsReady(b) {
+		t.Fatal("IsReady(tenant-b) = false: a rejection in another namespace must not decide this supply's readiness")
+	}
+	// Observed reports readiness per supply, so only tenant-b's hash travels.
+	got := r.Observed()
+	if len(got) != 1 {
+		t.Fatalf("Observed() = %#v, want exactly tenant-b's entry", got)
+	}
+	if hash, ok := got[b]; !ok || hash != "h-v1" {
+		t.Fatalf("Observed()[tenant-b] = %q, ok=%v; want h-v1", hash, ok)
+	}
+	if _, ok := got[a]; ok {
+		t.Fatal("Observed() reported the rejected tenant-a content")
+	}
+}
+
+// Registration keys are scoped to a supply key, so the same consumer key in two
+// namespaces is two registrations and unregistering one leaves the other alone.
+func TestConsumerKeysAreScopedByNamespace(t *testing.T) {
+	r := NewRegistry()
+	ctx := context.Background()
+	a, b := KeyOf("tenant-a", "rules"), KeyOf("tenant-b", "rules")
+	for _, k := range []Key{a, b} {
+		if err := r.Apply(ctx, Snapshot{Namespace: k.Namespace, Name: k.Name,
+			Content: []byte("v1"), Hash: "h-v1", Revision: 1}); err != nil {
+			t.Fatalf("Apply %v: %v", k, err)
+		}
+	}
+	r.RegisterConsumer(a, "wasm/clean", &recordingConsumer{})
+	r.RegisterConsumer(b, "wasm/clean", &recordingConsumer{})
+	if n := r.ConsumerCount(a); n != 1 {
+		t.Fatalf("ConsumerCount(tenant-a) = %d, want 1", n)
+	}
+	r.UnregisterConsumer(a, "wasm/clean")
+	if n := r.ConsumerCount(a); n != 0 {
+		t.Fatalf("ConsumerCount(tenant-a) after unregister = %d, want 0", n)
+	}
+	if n := r.ConsumerCount(b); n != 1 {
+		t.Fatalf("ConsumerCount(tenant-b) = %d, want 1: releasing one namespace's registration must not touch the other", n)
+	}
+}
+
+// A Key built without KeyOf — a literal with an empty namespace — must address
+// the same supply as the normalized one. Nothing else in the tree builds keys
+// that way today, but a lookup that silently reports "not cached" for content
+// that IS cached is the exact failure this identity change exists to remove, so
+// the registry resolves it instead of trusting every caller to remember.
+func TestUnnormalizedKeyAddressesTheDefaultNamespace(t *testing.T) {
+	r := NewRegistry()
+	ctx := context.Background()
+	if err := r.Apply(ctx, Snapshot{Name: "rules", Content: []byte("v1"), Hash: "h-v1", Revision: 1}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	raw := Key{Name: "rules"} // namespace deliberately left empty
+	if _, ok := r.Get(raw); !ok {
+		t.Fatal("Get with an empty-namespace key did not find content cached under the default namespace")
+	}
+	if !r.IsReady(raw) {
+		t.Fatal("IsReady with an empty-namespace key must consult the default namespace's supply")
+	}
+	r.RegisterConsumer(raw, "wasm/clean", &recordingConsumer{})
+	if n := r.ConsumerCount(KeyOf(namespace.Default, "rules")); n != 1 {
+		t.Fatalf("consumer registered under an empty-namespace key is not visible to the normalized key: count = %d, want 1", n)
+	}
+	r.UnregisterConsumer(raw, "wasm/clean")
+	if n := r.ConsumerCount(key("rules")); n != 0 {
+		t.Fatalf("consumer count = %d after unregistering through the empty-namespace key, want 0", n)
 	}
 }

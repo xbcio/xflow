@@ -8,6 +8,9 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/node/supply"
+	"github.com/xbcio/xflow/service/protocol"
 )
 
 const (
@@ -89,7 +92,7 @@ func (s *RedisSupplyObserved) warn(msg string, err error) {
 // member that Snapshot prunes, which is cheaper and simpler than trying to keep
 // a collection's expiry in step with its members' (the same trade
 // RedisMetricsStore.Put makes).
-func (s *RedisSupplyObserved) Record(runnerID string, observed map[string]string) {
+func (s *RedisSupplyObserved) Record(runnerID string, observed []protocol.SupplyObservation) {
 	if s == nil || s.rdb == nil || runnerID == "" {
 		return
 	}
@@ -106,7 +109,7 @@ func (s *RedisSupplyObserved) Record(runnerID string, observed map[string]string
 	}
 	payload, err := json.Marshal(observed)
 	if err != nil {
-		// Unreachable for map[string]string, but a sink that discards a report
+		// Unreachable for a slice of strings, but a sink that discards a report
 		// without saying so is the failure mode this type exists to avoid.
 		s.warn("supply observed: encode report failed", err)
 		return
@@ -118,7 +121,7 @@ func (s *RedisSupplyObserved) Record(runnerID string, observed map[string]string
 	}
 }
 
-// Snapshot returns runner ID → (supply name → applied hash) for the whole
+// Snapshot returns runner ID → (supply key → applied hash) for the whole
 // fleet in one round trip after the index read, rather than one GET per
 // runner. A failure degrades to nil, never to a partial fleet view: the caller
 // is deciding "has everyone converged", and an answer built from some runners
@@ -128,7 +131,7 @@ func (s *RedisSupplyObserved) Record(runnerID string, observed map[string]string
 // a read prunes what it finds. That is the same read-path write
 // RedisMetricsStore.List performs, and it is idempotent for the same reason:
 // concurrent Snapshot calls across replicas cannot corrupt each other.
-func (s *RedisSupplyObserved) Snapshot() map[string]map[string]string {
+func (s *RedisSupplyObserved) Snapshot() map[string]map[supply.Key]string {
 	if s == nil || s.rdb == nil {
 		return nil
 	}
@@ -140,7 +143,7 @@ func (s *RedisSupplyObserved) Snapshot() map[string]map[string]string {
 		return nil
 	}
 	if len(ids) == 0 {
-		return map[string]map[string]string{}
+		return map[string]map[supply.Key]string{}
 	}
 	keys := make([]string, 0, len(ids))
 	for _, id := range ids {
@@ -151,7 +154,7 @@ func (s *RedisSupplyObserved) Snapshot() map[string]map[string]string {
 		s.warn("supply observed: read reports failed", err)
 		return nil
 	}
-	out := make(map[string]map[string]string, len(ids))
+	out := make(map[string]map[supply.Key]string, len(ids))
 	var stale []any
 	for i, id := range ids {
 		if i >= len(vals) || vals[i] == nil {
@@ -168,15 +171,24 @@ func (s *RedisSupplyObserved) Snapshot() map[string]map[string]string {
 			stale = append(stale, id)
 			continue
 		}
-		var report map[string]string
+		var report []protocol.SupplyObservation
 		if err := json.Unmarshal([]byte(raw), &report); err != nil {
-			// A payload this store did not write is not worth failing the whole
-			// snapshot over; drop the member like an expired payload, and the
-			// runner's next heartbeat restores a well-formed one.
+			// A payload this store did not write — including one written by a
+			// build whose report was a name-keyed map — is not worth failing the
+			// whole snapshot over; drop the member like an expired payload. The
+			// runner's next heartbeat restores a well-formed one well inside the
+			// retention window, so the fleet view is never wrong for long.
 			stale = append(stale, id)
 			continue
 		}
-		out[id] = report
+		byKey := make(map[supply.Key]string, len(report))
+		for _, o := range report {
+			if o.Node == "" {
+				continue
+			}
+			byKey[supply.KeyOf(namespace.Namespace(o.Namespace), o.Node)] = o.Hash
+		}
+		out[id] = byKey
 	}
 	if len(stale) > 0 {
 		// Best effort: a failed prune only means the next Snapshot prunes again.

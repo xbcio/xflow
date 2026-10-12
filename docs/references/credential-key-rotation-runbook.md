@@ -761,9 +761,9 @@ the table below and the note after it. What exists and is relevant:
 
 | Metric | Type | What it tells you here |
 |---|---|---|
-| `xflow_supply_fetch_total{name,result}` | counter | A fetch attempt per supply, `result` = `ok` or `error` (`observability/metrics/supply.go:182-186`). A decrypt failure on either axis surfaces as `error`. |
-| `xflow_supply_not_ready{workflow,supply}` | gauge | An activation is currently being declined for a missing required supply (`observability/metrics/supply.go:196-204`). This is the fleet-impact signal for an axis-2 mistake. |
-| `xflow_supply_unavailable_serving{name}` | gauge | Traffic is being served with content that was never successfully fetched, for `require_ready:false` supplies (`observability/metrics/supply.go:214-220`). |
+| `xflow_supply_fetch_total{name,result,source}` | counter | A fetch attempt per supply, `result` = `ok` or `error`, `source` = `admission`, `hint`, or `poll` (`observability/metrics/supply.go:191-195`). A decrypt failure on either axis surfaces as `error`. |
+| `xflow_supply_not_ready{workflow,supply}` | gauge | An activation is currently being declined for a missing required supply (`observability/metrics/supply.go:205-213`). This is the fleet-impact signal for an axis-2 mistake. |
+| `xflow_supply_unavailable_serving{name}` | gauge | Traffic is being served with content that was never successfully fetched, for `require_ready:false` supplies (`observability/metrics/supply.go:223-229`). |
 | `xflow_supply_hint_read_errors_total{namespace,cause}` | counter | Supply reads that failed while the control plane computed heartbeat hints, `cause` = `decrypt` or `other` (the `SupplyHintMetrics` method in `observability/metrics/control.go`). The expected "not written yet" case is excluded. The only direct decryption-failure signal in the tree. |
 | `xflow_runner_auth_decisions_total{result,auth_mode}` | counter | Runner authorization outcomes (`observability/metrics/control.go:21`, `:103`). Axis-3 verification signal. |
 | `xflow_runner_up` | gauge | Runner liveness by heartbeat TTL (`observability/metrics/metrics.go:428`) — distinguishes "runner gone" from "runner healthy but hosting nothing". |

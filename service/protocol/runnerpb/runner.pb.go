@@ -504,14 +504,143 @@ func (x *RegisterResponse) GetControl() *RunnerControlDirective {
 	return nil
 }
 
+// SupplyObservation is one entry of a runner's "this is the content I have in
+// effect" report. The namespace is part of the entry, not of the request: a
+// runner hosts supplies from every namespace it has activations in, so one
+// heartbeat reports entries from several namespaces at once.
+//
+// Only the hash travels, never content.
+type SupplyObservation struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Namespace     string                 `protobuf:"bytes,1,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	Node          string                 `protobuf:"bytes,2,opt,name=node,proto3" json:"node,omitempty"`
+	Hash          string                 `protobuf:"bytes,3,opt,name=hash,proto3" json:"hash,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SupplyObservation) Reset() {
+	*x = SupplyObservation{}
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SupplyObservation) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SupplyObservation) ProtoMessage() {}
+
+func (x *SupplyObservation) ProtoReflect() protoreflect.Message {
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SupplyObservation.ProtoReflect.Descriptor instead.
+func (*SupplyObservation) Descriptor() ([]byte, []int) {
+	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *SupplyObservation) GetNamespace() string {
+	if x != nil {
+		return x.Namespace
+	}
+	return ""
+}
+
+func (x *SupplyObservation) GetNode() string {
+	if x != nil {
+		return x.Node
+	}
+	return ""
+}
+
+func (x *SupplyObservation) GetHash() string {
+	if x != nil {
+		return x.Hash
+	}
+	return ""
+}
+
+// SupplyHint is one "the content you host under this identity is now this
+// hash" instruction. Same shape as SupplyObservation, opposite direction: the
+// hash is what the server has, and a differing hash tells the runner to fetch
+// once.
+type SupplyHint struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Namespace     string                 `protobuf:"bytes,1,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	Node          string                 `protobuf:"bytes,2,opt,name=node,proto3" json:"node,omitempty"`
+	Hash          string                 `protobuf:"bytes,3,opt,name=hash,proto3" json:"hash,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SupplyHint) Reset() {
+	*x = SupplyHint{}
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SupplyHint) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SupplyHint) ProtoMessage() {}
+
+func (x *SupplyHint) ProtoReflect() protoreflect.Message {
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SupplyHint.ProtoReflect.Descriptor instead.
+func (*SupplyHint) Descriptor() ([]byte, []int) {
+	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *SupplyHint) GetNamespace() string {
+	if x != nil {
+		return x.Namespace
+	}
+	return ""
+}
+
+func (x *SupplyHint) GetNode() string {
+	if x != nil {
+		return x.Node
+	}
+	return ""
+}
+
+func (x *SupplyHint) GetHash() string {
+	if x != nil {
+		return x.Hash
+	}
+	return ""
+}
+
 type HeartbeatRequest struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	RunnerId       string                 `protobuf:"bytes,1,opt,name=runner_id,json=runnerId,proto3" json:"runner_id,omitempty"`
-	Capacity       int32                  `protobuf:"varint,2,opt,name=capacity,proto3" json:"capacity,omitempty"`
-	InFlight       int32                  `protobuf:"varint,3,opt,name=in_flight,json=inFlight,proto3" json:"in_flight,omitempty"`
-	Timestamp      int64                  `protobuf:"varint,4,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
-	SessionId      string                 `protobuf:"bytes,5,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	SupplyObserved map[string]string      `protobuf:"bytes,6,rep,name=supply_observed,json=supplyObserved,proto3" json:"supply_observed,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	RunnerId  string                 `protobuf:"bytes,1,opt,name=runner_id,json=runnerId,proto3" json:"runner_id,omitempty"`
+	Capacity  int32                  `protobuf:"varint,2,opt,name=capacity,proto3" json:"capacity,omitempty"`
+	InFlight  int32                  `protobuf:"varint,3,opt,name=in_flight,json=inFlight,proto3" json:"in_flight,omitempty"`
+	Timestamp int64                  `protobuf:"varint,4,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	SessionId string                 `protobuf:"bytes,5,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	// supply_key_id is the 4-byte fingerprint (not key material) of the supply
 	// encryption key this runner holds. The server returns supply_key_rotation
 	// only when it differs from its own, making rotation delivery convergent.
@@ -523,13 +652,16 @@ type HeartbeatRequest struct {
 	// runner so reconciliation can redeliver an Activate whose directive never
 	// reached the runner instead of renewing an assignment that hosts nothing.
 	HostedActivations *HostedActivationsReport `protobuf:"bytes,9,opt,name=hosted_activations,json=hostedActivations,proto3" json:"hosted_activations,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// supply_observed reports the content hash currently in effect for each
+	// supply this runner hosts a consumer for, identified by (namespace, name).
+	SupplyObserved []*SupplyObservation `protobuf:"bytes,10,rep,name=supply_observed,json=supplyObserved,proto3" json:"supply_observed,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *HeartbeatRequest) Reset() {
 	*x = HeartbeatRequest{}
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[7]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -541,7 +673,7 @@ func (x *HeartbeatRequest) String() string {
 func (*HeartbeatRequest) ProtoMessage() {}
 
 func (x *HeartbeatRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[7]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -554,7 +686,7 @@ func (x *HeartbeatRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatRequest.ProtoReflect.Descriptor instead.
 func (*HeartbeatRequest) Descriptor() ([]byte, []int) {
-	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{7}
+	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *HeartbeatRequest) GetRunnerId() string {
@@ -592,13 +724,6 @@ func (x *HeartbeatRequest) GetSessionId() string {
 	return ""
 }
 
-func (x *HeartbeatRequest) GetSupplyObserved() map[string]string {
-	if x != nil {
-		return x.SupplyObserved
-	}
-	return nil
-}
-
 func (x *HeartbeatRequest) GetSupplyKeyId() string {
 	if x != nil {
 		return x.SupplyKeyId
@@ -620,23 +745,32 @@ func (x *HeartbeatRequest) GetHostedActivations() *HostedActivationsReport {
 	return nil
 }
 
+func (x *HeartbeatRequest) GetSupplyObserved() []*SupplyObservation {
+	if x != nil {
+		return x.SupplyObserved
+	}
+	return nil
+}
+
 type HeartbeatResponse struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
 	ServerTime        int64                  `protobuf:"varint,1,opt,name=server_time,json=serverTime,proto3" json:"server_time,omitempty"`
-	SupplyHints       map[string]string      `protobuf:"bytes,2,rep,name=supply_hints,json=supplyHints,proto3" json:"supply_hints,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	SupplyKeyRotation string                 `protobuf:"bytes,3,opt,name=supply_key_rotation,json=supplyKeyRotation,proto3" json:"supply_key_rotation,omitempty"`
 	// activations_json carries the JSON-encoded HeartbeatActivations struct
 	// (activate/deactivate directives). Using JSON bytes avoids modeling
 	// map[string]any params in proto — same pattern as lease_json.
 	ActivationsJson []byte                  `protobuf:"bytes,4,opt,name=activations_json,json=activationsJson,proto3" json:"activations_json,omitempty"`
 	Control         *RunnerControlDirective `protobuf:"bytes,5,opt,name=control,proto3" json:"control,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// supply_hints carries the current content hash for every supply this runner
+	// hosts a consumer for, identified by (namespace, name).
+	SupplyHints   []*SupplyHint `protobuf:"bytes,6,rep,name=supply_hints,json=supplyHints,proto3" json:"supply_hints,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *HeartbeatResponse) Reset() {
 	*x = HeartbeatResponse{}
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[8]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -648,7 +782,7 @@ func (x *HeartbeatResponse) String() string {
 func (*HeartbeatResponse) ProtoMessage() {}
 
 func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[8]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -661,7 +795,7 @@ func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatResponse.ProtoReflect.Descriptor instead.
 func (*HeartbeatResponse) Descriptor() ([]byte, []int) {
-	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{8}
+	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *HeartbeatResponse) GetServerTime() int64 {
@@ -669,13 +803,6 @@ func (x *HeartbeatResponse) GetServerTime() int64 {
 		return x.ServerTime
 	}
 	return 0
-}
-
-func (x *HeartbeatResponse) GetSupplyHints() map[string]string {
-	if x != nil {
-		return x.SupplyHints
-	}
-	return nil
 }
 
 func (x *HeartbeatResponse) GetSupplyKeyRotation() string {
@@ -695,6 +822,13 @@ func (x *HeartbeatResponse) GetActivationsJson() []byte {
 func (x *HeartbeatResponse) GetControl() *RunnerControlDirective {
 	if x != nil {
 		return x.Control
+	}
+	return nil
+}
+
+func (x *HeartbeatResponse) GetSupplyHints() []*SupplyHint {
+	if x != nil {
+		return x.SupplyHints
 	}
 	return nil
 }
@@ -719,7 +853,7 @@ type PollTaskRequest struct {
 
 func (x *PollTaskRequest) Reset() {
 	*x = PollTaskRequest{}
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[9]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -731,7 +865,7 @@ func (x *PollTaskRequest) String() string {
 func (*PollTaskRequest) ProtoMessage() {}
 
 func (x *PollTaskRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[9]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -744,7 +878,7 @@ func (x *PollTaskRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PollTaskRequest.ProtoReflect.Descriptor instead.
 func (*PollTaskRequest) Descriptor() ([]byte, []int) {
-	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{9}
+	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *PollTaskRequest) GetRunnerId() string {
@@ -811,7 +945,7 @@ type PollTaskResponse struct {
 
 func (x *PollTaskResponse) Reset() {
 	*x = PollTaskResponse{}
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[10]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -823,7 +957,7 @@ func (x *PollTaskResponse) String() string {
 func (*PollTaskResponse) ProtoMessage() {}
 
 func (x *PollTaskResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[10]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -836,7 +970,7 @@ func (x *PollTaskResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PollTaskResponse.ProtoReflect.Descriptor instead.
 func (*PollTaskResponse) Descriptor() ([]byte, []int) {
-	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{10}
+	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *PollTaskResponse) GetLeaseJson() []byte {
@@ -893,7 +1027,7 @@ type ReportResultRequest struct {
 
 func (x *ReportResultRequest) Reset() {
 	*x = ReportResultRequest{}
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[11]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -905,7 +1039,7 @@ func (x *ReportResultRequest) String() string {
 func (*ReportResultRequest) ProtoMessage() {}
 
 func (x *ReportResultRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[11]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -918,7 +1052,7 @@ func (x *ReportResultRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportResultRequest.ProtoReflect.Descriptor instead.
 func (*ReportResultRequest) Descriptor() ([]byte, []int) {
-	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{11}
+	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ReportResultRequest) GetRunnerId() string {
@@ -973,7 +1107,7 @@ type ReportResultResponse struct {
 
 func (x *ReportResultResponse) Reset() {
 	*x = ReportResultResponse{}
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[12]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -985,7 +1119,7 @@ func (x *ReportResultResponse) String() string {
 func (*ReportResultResponse) ProtoMessage() {}
 
 func (x *ReportResultResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[12]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -998,7 +1132,7 @@ func (x *ReportResultResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportResultResponse.ProtoReflect.Descriptor instead.
 func (*ReportResultResponse) Descriptor() ([]byte, []int) {
-	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{12}
+	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ReportResultResponse) GetAccepted() bool {
@@ -1039,7 +1173,7 @@ type ActivationAckRequest struct {
 
 func (x *ActivationAckRequest) Reset() {
 	*x = ActivationAckRequest{}
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[13]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1051,7 +1185,7 @@ func (x *ActivationAckRequest) String() string {
 func (*ActivationAckRequest) ProtoMessage() {}
 
 func (x *ActivationAckRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[13]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1064,7 +1198,7 @@ func (x *ActivationAckRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ActivationAckRequest.ProtoReflect.Descriptor instead.
 func (*ActivationAckRequest) Descriptor() ([]byte, []int) {
-	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{13}
+	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ActivationAckRequest) GetRunnerId() string {
@@ -1141,7 +1275,7 @@ type ActivationAckResponse struct {
 
 func (x *ActivationAckResponse) Reset() {
 	*x = ActivationAckResponse{}
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[14]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1153,7 +1287,7 @@ func (x *ActivationAckResponse) String() string {
 func (*ActivationAckResponse) ProtoMessage() {}
 
 func (x *ActivationAckResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[14]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1166,7 +1300,7 @@ func (x *ActivationAckResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ActivationAckResponse.ProtoReflect.Descriptor instead.
 func (*ActivationAckResponse) Descriptor() ([]byte, []int) {
-	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{14}
+	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{16}
 }
 
 // RenewLeaseRequest mirrors protocol.RenewLeaseRequest field-for-field.
@@ -1189,7 +1323,7 @@ type RenewLeaseRequest struct {
 
 func (x *RenewLeaseRequest) Reset() {
 	*x = RenewLeaseRequest{}
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[15]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1201,7 +1335,7 @@ func (x *RenewLeaseRequest) String() string {
 func (*RenewLeaseRequest) ProtoMessage() {}
 
 func (x *RenewLeaseRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[15]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1214,7 +1348,7 @@ func (x *RenewLeaseRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenewLeaseRequest.ProtoReflect.Descriptor instead.
 func (*RenewLeaseRequest) Descriptor() ([]byte, []int) {
-	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{15}
+	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *RenewLeaseRequest) GetRunnerId() string {
@@ -1273,7 +1407,7 @@ type RenewLeaseResponse struct {
 
 func (x *RenewLeaseResponse) Reset() {
 	*x = RenewLeaseResponse{}
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[16]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1285,7 +1419,7 @@ func (x *RenewLeaseResponse) String() string {
 func (*RenewLeaseResponse) ProtoMessage() {}
 
 func (x *RenewLeaseResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[16]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1298,7 +1432,7 @@ func (x *RenewLeaseResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenewLeaseResponse.ProtoReflect.Descriptor instead.
 func (*RenewLeaseResponse) Descriptor() ([]byte, []int) {
-	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{16}
+	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *RenewLeaseResponse) GetRenewed() bool {
@@ -1337,7 +1471,7 @@ type RunnerFrame struct {
 
 func (x *RunnerFrame) Reset() {
 	*x = RunnerFrame{}
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[17]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1349,7 +1483,7 @@ func (x *RunnerFrame) String() string {
 func (*RunnerFrame) ProtoMessage() {}
 
 func (x *RunnerFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[17]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1362,7 +1496,7 @@ func (x *RunnerFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunnerFrame.ProtoReflect.Descriptor instead.
 func (*RunnerFrame) Descriptor() ([]byte, []int) {
-	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{17}
+	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *RunnerFrame) GetFrame() isRunnerFrame_Frame {
@@ -1455,7 +1589,7 @@ type HelloFrame struct {
 
 func (x *HelloFrame) Reset() {
 	*x = HelloFrame{}
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[18]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1467,7 +1601,7 @@ func (x *HelloFrame) String() string {
 func (*HelloFrame) ProtoMessage() {}
 
 func (x *HelloFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[18]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1480,7 +1614,7 @@ func (x *HelloFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HelloFrame.ProtoReflect.Descriptor instead.
 func (*HelloFrame) Descriptor() ([]byte, []int) {
-	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{18}
+	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *HelloFrame) GetRunnerId() string {
@@ -1543,7 +1677,7 @@ type ResultFrame struct {
 
 func (x *ResultFrame) Reset() {
 	*x = ResultFrame{}
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[19]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1555,7 +1689,7 @@ func (x *ResultFrame) String() string {
 func (*ResultFrame) ProtoMessage() {}
 
 func (x *ResultFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[19]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1568,7 +1702,7 @@ func (x *ResultFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResultFrame.ProtoReflect.Descriptor instead.
 func (*ResultFrame) Descriptor() ([]byte, []int) {
-	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{19}
+	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *ResultFrame) GetLeaseId() string {
@@ -1600,7 +1734,7 @@ type ByeFrame struct {
 
 func (x *ByeFrame) Reset() {
 	*x = ByeFrame{}
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[20]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1612,7 +1746,7 @@ func (x *ByeFrame) String() string {
 func (*ByeFrame) ProtoMessage() {}
 
 func (x *ByeFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[20]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1625,7 +1759,7 @@ func (x *ByeFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ByeFrame.ProtoReflect.Descriptor instead.
 func (*ByeFrame) Descriptor() ([]byte, []int) {
-	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{20}
+	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{22}
 }
 
 // ControlObservationFrame is the stream equivalent of a heartbeat drain
@@ -1644,7 +1778,7 @@ type ControlObservationFrame struct {
 
 func (x *ControlObservationFrame) Reset() {
 	*x = ControlObservationFrame{}
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[21]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1656,7 +1790,7 @@ func (x *ControlObservationFrame) String() string {
 func (*ControlObservationFrame) ProtoMessage() {}
 
 func (x *ControlObservationFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[21]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1669,7 +1803,7 @@ func (x *ControlObservationFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ControlObservationFrame.ProtoReflect.Descriptor instead.
 func (*ControlObservationFrame) Descriptor() ([]byte, []int) {
-	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{21}
+	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *ControlObservationFrame) GetGeneration() uint64 {
@@ -1717,7 +1851,7 @@ type ServerFrame struct {
 
 func (x *ServerFrame) Reset() {
 	*x = ServerFrame{}
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[22]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1729,7 +1863,7 @@ func (x *ServerFrame) String() string {
 func (*ServerFrame) ProtoMessage() {}
 
 func (x *ServerFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[22]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1742,7 +1876,7 @@ func (x *ServerFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerFrame.ProtoReflect.Descriptor instead.
 func (*ServerFrame) Descriptor() ([]byte, []int) {
-	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{22}
+	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *ServerFrame) GetFrame() isServerFrame_Frame {
@@ -1859,7 +1993,7 @@ type WelcomeFrame struct {
 
 func (x *WelcomeFrame) Reset() {
 	*x = WelcomeFrame{}
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[23]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1871,7 +2005,7 @@ func (x *WelcomeFrame) String() string {
 func (*WelcomeFrame) ProtoMessage() {}
 
 func (x *WelcomeFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[23]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1884,7 +2018,7 @@ func (x *WelcomeFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WelcomeFrame.ProtoReflect.Descriptor instead.
 func (*WelcomeFrame) Descriptor() ([]byte, []int) {
-	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{23}
+	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *WelcomeFrame) GetRunnerId() string {
@@ -1918,7 +2052,7 @@ type ControlFrame struct {
 
 func (x *ControlFrame) Reset() {
 	*x = ControlFrame{}
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[24]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1930,7 +2064,7 @@ func (x *ControlFrame) String() string {
 func (*ControlFrame) ProtoMessage() {}
 
 func (x *ControlFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[24]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1943,7 +2077,7 @@ func (x *ControlFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ControlFrame.ProtoReflect.Descriptor instead.
 func (*ControlFrame) Descriptor() ([]byte, []int) {
-	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{24}
+	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *ControlFrame) GetDirective() *RunnerControlDirective {
@@ -1962,7 +2096,7 @@ type TaskFrame struct {
 
 func (x *TaskFrame) Reset() {
 	*x = TaskFrame{}
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[25]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1974,7 +2108,7 @@ func (x *TaskFrame) String() string {
 func (*TaskFrame) ProtoMessage() {}
 
 func (x *TaskFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[25]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1987,7 +2121,7 @@ func (x *TaskFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskFrame.ProtoReflect.Descriptor instead.
 func (*TaskFrame) Descriptor() ([]byte, []int) {
-	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{25}
+	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *TaskFrame) GetLeaseJson() []byte {
@@ -2008,7 +2142,7 @@ type AckFrame struct {
 
 func (x *AckFrame) Reset() {
 	*x = AckFrame{}
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[26]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2020,7 +2154,7 @@ func (x *AckFrame) String() string {
 func (*AckFrame) ProtoMessage() {}
 
 func (x *AckFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[26]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2033,7 +2167,7 @@ func (x *AckFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AckFrame.ProtoReflect.Descriptor instead.
 func (*AckFrame) Descriptor() ([]byte, []int) {
-	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{26}
+	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *AckFrame) GetLeaseId() string {
@@ -2066,7 +2200,7 @@ type BackoffFrame struct {
 
 func (x *BackoffFrame) Reset() {
 	*x = BackoffFrame{}
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[27]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2078,7 +2212,7 @@ func (x *BackoffFrame) String() string {
 func (*BackoffFrame) ProtoMessage() {}
 
 func (x *BackoffFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[27]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2091,7 +2225,7 @@ func (x *BackoffFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BackoffFrame.ProtoReflect.Descriptor instead.
 func (*BackoffFrame) Descriptor() ([]byte, []int) {
-	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{27}
+	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *BackoffFrame) GetWaitNanos() int64 {
@@ -2109,7 +2243,7 @@ type KeepaliveFrame struct {
 
 func (x *KeepaliveFrame) Reset() {
 	*x = KeepaliveFrame{}
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[28]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2121,7 +2255,7 @@ func (x *KeepaliveFrame) String() string {
 func (*KeepaliveFrame) ProtoMessage() {}
 
 func (x *KeepaliveFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[28]
+	mi := &file_service_protocol_runnerpb_runner_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2134,7 +2268,7 @@ func (x *KeepaliveFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KeepaliveFrame.ProtoReflect.Descriptor instead.
 func (*KeepaliveFrame) Descriptor() ([]byte, []int) {
-	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{28}
+	return file_service_protocol_runnerpb_runner_proto_rawDescGZIP(), []int{30}
 }
 
 var File_service_protocol_runnerpb_runner_proto protoreflect.FileDescriptor
@@ -2188,31 +2322,35 @@ const file_service_protocol_runnerpb_runner_proto_rawDesc = "" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x02 \x01(\tR\tsessionId\x12A\n" +
-	"\acontrol\x18\x03 \x01(\v2'.xflow.runner.v1.RunnerControlDirectiveR\acontrol\"\x9b\x04\n" +
+	"\acontrol\x18\x03 \x01(\v2'.xflow.runner.v1.RunnerControlDirectiveR\acontrol\"Y\n" +
+	"\x11SupplyObservation\x12\x1c\n" +
+	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x12\n" +
+	"\x04node\x18\x02 \x01(\tR\x04node\x12\x12\n" +
+	"\x04hash\x18\x03 \x01(\tR\x04hash\"R\n" +
+	"\n" +
+	"SupplyHint\x12\x1c\n" +
+	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x12\n" +
+	"\x04node\x18\x02 \x01(\tR\x04node\x12\x12\n" +
+	"\x04hash\x18\x03 \x01(\tR\x04hash\"\xcb\x03\n" +
 	"\x10HeartbeatRequest\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x05R\bcapacity\x12\x1b\n" +
 	"\tin_flight\x18\x03 \x01(\x05R\binFlight\x12\x1c\n" +
 	"\ttimestamp\x18\x04 \x01(\x03R\ttimestamp\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x05 \x01(\tR\tsessionId\x12^\n" +
-	"\x0fsupply_observed\x18\x06 \x03(\v25.xflow.runner.v1.HeartbeatRequest.SupplyObservedEntryR\x0esupplyObserved\x12\"\n" +
+	"session_id\x18\x05 \x01(\tR\tsessionId\x12\"\n" +
 	"\rsupply_key_id\x18\a \x01(\tR\vsupplyKeyId\x12T\n" +
 	"\x11drain_observation\x18\b \x01(\v2'.xflow.runner.v1.RunnerDrainObservationR\x10drainObservation\x12W\n" +
-	"\x12hosted_activations\x18\t \x01(\v2(.xflow.runner.v1.HostedActivationsReportR\x11hostedActivations\x1aA\n" +
-	"\x13SupplyObservedEntry\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xea\x02\n" +
+	"\x12hosted_activations\x18\t \x01(\v2(.xflow.runner.v1.HostedActivationsReportR\x11hostedActivations\x12K\n" +
+	"\x0fsupply_observed\x18\n" +
+	" \x03(\v2\".xflow.runner.v1.SupplyObservationR\x0esupplyObservedJ\x04\b\x06\x10\a\"\x98\x02\n" +
 	"\x11HeartbeatResponse\x12\x1f\n" +
 	"\vserver_time\x18\x01 \x01(\x03R\n" +
-	"serverTime\x12V\n" +
-	"\fsupply_hints\x18\x02 \x03(\v23.xflow.runner.v1.HeartbeatResponse.SupplyHintsEntryR\vsupplyHints\x12.\n" +
+	"serverTime\x12.\n" +
 	"\x13supply_key_rotation\x18\x03 \x01(\tR\x11supplyKeyRotation\x12)\n" +
 	"\x10activations_json\x18\x04 \x01(\fR\x0factivationsJson\x12A\n" +
-	"\acontrol\x18\x05 \x01(\v2'.xflow.runner.v1.RunnerControlDirectiveR\acontrol\x1a>\n" +
-	"\x10SupplyHintsEntry\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xfa\x02\n" +
+	"\acontrol\x18\x05 \x01(\v2'.xflow.runner.v1.RunnerControlDirectiveR\acontrol\x12>\n" +
+	"\fsupply_hints\x18\x06 \x03(\v2\x1b.xflow.runner.v1.SupplyHintR\vsupplyHintsJ\x04\b\x02\x10\x03\"\xfa\x02\n" +
 	"\x0fPollTaskRequest\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x05R\bcapacity\x12?\n" +
@@ -2368,78 +2506,78 @@ var file_service_protocol_runnerpb_runner_proto_goTypes = []any{
 	(*ActivationInventoryItem)(nil), // 4: xflow.runner.v1.ActivationInventoryItem
 	(*HostedActivationsReport)(nil), // 5: xflow.runner.v1.HostedActivationsReport
 	(*RegisterResponse)(nil),        // 6: xflow.runner.v1.RegisterResponse
-	(*HeartbeatRequest)(nil),        // 7: xflow.runner.v1.HeartbeatRequest
-	(*HeartbeatResponse)(nil),       // 8: xflow.runner.v1.HeartbeatResponse
-	(*PollTaskRequest)(nil),         // 9: xflow.runner.v1.PollTaskRequest
-	(*PollTaskResponse)(nil),        // 10: xflow.runner.v1.PollTaskResponse
-	(*ReportResultRequest)(nil),     // 11: xflow.runner.v1.ReportResultRequest
-	(*ReportResultResponse)(nil),    // 12: xflow.runner.v1.ReportResultResponse
-	(*ActivationAckRequest)(nil),    // 13: xflow.runner.v1.ActivationAckRequest
-	(*ActivationAckResponse)(nil),   // 14: xflow.runner.v1.ActivationAckResponse
-	(*RenewLeaseRequest)(nil),       // 15: xflow.runner.v1.RenewLeaseRequest
-	(*RenewLeaseResponse)(nil),      // 16: xflow.runner.v1.RenewLeaseResponse
-	(*RunnerFrame)(nil),             // 17: xflow.runner.v1.RunnerFrame
-	(*HelloFrame)(nil),              // 18: xflow.runner.v1.HelloFrame
-	(*ResultFrame)(nil),             // 19: xflow.runner.v1.ResultFrame
-	(*ByeFrame)(nil),                // 20: xflow.runner.v1.ByeFrame
-	(*ControlObservationFrame)(nil), // 21: xflow.runner.v1.ControlObservationFrame
-	(*ServerFrame)(nil),             // 22: xflow.runner.v1.ServerFrame
-	(*WelcomeFrame)(nil),            // 23: xflow.runner.v1.WelcomeFrame
-	(*ControlFrame)(nil),            // 24: xflow.runner.v1.ControlFrame
-	(*TaskFrame)(nil),               // 25: xflow.runner.v1.TaskFrame
-	(*AckFrame)(nil),                // 26: xflow.runner.v1.AckFrame
-	(*BackoffFrame)(nil),            // 27: xflow.runner.v1.BackoffFrame
-	(*KeepaliveFrame)(nil),          // 28: xflow.runner.v1.KeepaliveFrame
-	nil,                             // 29: xflow.runner.v1.RegisterRequest.LabelsEntry
-	nil,                             // 30: xflow.runner.v1.HeartbeatRequest.SupplyObservedEntry
-	nil,                             // 31: xflow.runner.v1.HeartbeatResponse.SupplyHintsEntry
+	(*SupplyObservation)(nil),       // 7: xflow.runner.v1.SupplyObservation
+	(*SupplyHint)(nil),              // 8: xflow.runner.v1.SupplyHint
+	(*HeartbeatRequest)(nil),        // 9: xflow.runner.v1.HeartbeatRequest
+	(*HeartbeatResponse)(nil),       // 10: xflow.runner.v1.HeartbeatResponse
+	(*PollTaskRequest)(nil),         // 11: xflow.runner.v1.PollTaskRequest
+	(*PollTaskResponse)(nil),        // 12: xflow.runner.v1.PollTaskResponse
+	(*ReportResultRequest)(nil),     // 13: xflow.runner.v1.ReportResultRequest
+	(*ReportResultResponse)(nil),    // 14: xflow.runner.v1.ReportResultResponse
+	(*ActivationAckRequest)(nil),    // 15: xflow.runner.v1.ActivationAckRequest
+	(*ActivationAckResponse)(nil),   // 16: xflow.runner.v1.ActivationAckResponse
+	(*RenewLeaseRequest)(nil),       // 17: xflow.runner.v1.RenewLeaseRequest
+	(*RenewLeaseResponse)(nil),      // 18: xflow.runner.v1.RenewLeaseResponse
+	(*RunnerFrame)(nil),             // 19: xflow.runner.v1.RunnerFrame
+	(*HelloFrame)(nil),              // 20: xflow.runner.v1.HelloFrame
+	(*ResultFrame)(nil),             // 21: xflow.runner.v1.ResultFrame
+	(*ByeFrame)(nil),                // 22: xflow.runner.v1.ByeFrame
+	(*ControlObservationFrame)(nil), // 23: xflow.runner.v1.ControlObservationFrame
+	(*ServerFrame)(nil),             // 24: xflow.runner.v1.ServerFrame
+	(*WelcomeFrame)(nil),            // 25: xflow.runner.v1.WelcomeFrame
+	(*ControlFrame)(nil),            // 26: xflow.runner.v1.ControlFrame
+	(*TaskFrame)(nil),               // 27: xflow.runner.v1.TaskFrame
+	(*AckFrame)(nil),                // 28: xflow.runner.v1.AckFrame
+	(*BackoffFrame)(nil),            // 29: xflow.runner.v1.BackoffFrame
+	(*KeepaliveFrame)(nil),          // 30: xflow.runner.v1.KeepaliveFrame
+	nil,                             // 31: xflow.runner.v1.RegisterRequest.LabelsEntry
 	nil,                             // 32: xflow.runner.v1.PollTaskRequest.LabelsEntry
 	nil,                             // 33: xflow.runner.v1.ReportResultRequest.TraceCarrierEntry
 	nil,                             // 34: xflow.runner.v1.HelloFrame.LabelsEntry
 }
 var file_service_protocol_runnerpb_runner_proto_depIdxs = []int32{
 	0,  // 0: xflow.runner.v1.RegisterRequest.capabilities:type_name -> xflow.runner.v1.Capability
-	29, // 1: xflow.runner.v1.RegisterRequest.labels:type_name -> xflow.runner.v1.RegisterRequest.LabelsEntry
+	31, // 1: xflow.runner.v1.RegisterRequest.labels:type_name -> xflow.runner.v1.RegisterRequest.LabelsEntry
 	4,  // 2: xflow.runner.v1.RegisterRequest.activations:type_name -> xflow.runner.v1.ActivationInventoryItem
 	4,  // 3: xflow.runner.v1.HostedActivationsReport.activations:type_name -> xflow.runner.v1.ActivationInventoryItem
 	1,  // 4: xflow.runner.v1.RegisterResponse.control:type_name -> xflow.runner.v1.RunnerControlDirective
-	30, // 5: xflow.runner.v1.HeartbeatRequest.supply_observed:type_name -> xflow.runner.v1.HeartbeatRequest.SupplyObservedEntry
-	2,  // 6: xflow.runner.v1.HeartbeatRequest.drain_observation:type_name -> xflow.runner.v1.RunnerDrainObservation
-	5,  // 7: xflow.runner.v1.HeartbeatRequest.hosted_activations:type_name -> xflow.runner.v1.HostedActivationsReport
-	31, // 8: xflow.runner.v1.HeartbeatResponse.supply_hints:type_name -> xflow.runner.v1.HeartbeatResponse.SupplyHintsEntry
-	1,  // 9: xflow.runner.v1.HeartbeatResponse.control:type_name -> xflow.runner.v1.RunnerControlDirective
+	2,  // 5: xflow.runner.v1.HeartbeatRequest.drain_observation:type_name -> xflow.runner.v1.RunnerDrainObservation
+	5,  // 6: xflow.runner.v1.HeartbeatRequest.hosted_activations:type_name -> xflow.runner.v1.HostedActivationsReport
+	7,  // 7: xflow.runner.v1.HeartbeatRequest.supply_observed:type_name -> xflow.runner.v1.SupplyObservation
+	1,  // 8: xflow.runner.v1.HeartbeatResponse.control:type_name -> xflow.runner.v1.RunnerControlDirective
+	8,  // 9: xflow.runner.v1.HeartbeatResponse.supply_hints:type_name -> xflow.runner.v1.SupplyHint
 	0,  // 10: xflow.runner.v1.PollTaskRequest.capabilities:type_name -> xflow.runner.v1.Capability
 	32, // 11: xflow.runner.v1.PollTaskRequest.labels:type_name -> xflow.runner.v1.PollTaskRequest.LabelsEntry
 	1,  // 12: xflow.runner.v1.PollTaskResponse.control:type_name -> xflow.runner.v1.RunnerControlDirective
 	33, // 13: xflow.runner.v1.ReportResultRequest.trace_carrier:type_name -> xflow.runner.v1.ReportResultRequest.TraceCarrierEntry
-	18, // 14: xflow.runner.v1.RunnerFrame.hello:type_name -> xflow.runner.v1.HelloFrame
-	19, // 15: xflow.runner.v1.RunnerFrame.result:type_name -> xflow.runner.v1.ResultFrame
-	20, // 16: xflow.runner.v1.RunnerFrame.bye:type_name -> xflow.runner.v1.ByeFrame
-	21, // 17: xflow.runner.v1.RunnerFrame.control_observation:type_name -> xflow.runner.v1.ControlObservationFrame
+	20, // 14: xflow.runner.v1.RunnerFrame.hello:type_name -> xflow.runner.v1.HelloFrame
+	21, // 15: xflow.runner.v1.RunnerFrame.result:type_name -> xflow.runner.v1.ResultFrame
+	22, // 16: xflow.runner.v1.RunnerFrame.bye:type_name -> xflow.runner.v1.ByeFrame
+	23, // 17: xflow.runner.v1.RunnerFrame.control_observation:type_name -> xflow.runner.v1.ControlObservationFrame
 	0,  // 18: xflow.runner.v1.HelloFrame.capabilities:type_name -> xflow.runner.v1.Capability
 	34, // 19: xflow.runner.v1.HelloFrame.labels:type_name -> xflow.runner.v1.HelloFrame.LabelsEntry
-	23, // 20: xflow.runner.v1.ServerFrame.welcome:type_name -> xflow.runner.v1.WelcomeFrame
-	25, // 21: xflow.runner.v1.ServerFrame.task:type_name -> xflow.runner.v1.TaskFrame
-	26, // 22: xflow.runner.v1.ServerFrame.ack:type_name -> xflow.runner.v1.AckFrame
-	27, // 23: xflow.runner.v1.ServerFrame.backoff:type_name -> xflow.runner.v1.BackoffFrame
-	28, // 24: xflow.runner.v1.ServerFrame.keepalive:type_name -> xflow.runner.v1.KeepaliveFrame
-	24, // 25: xflow.runner.v1.ServerFrame.control:type_name -> xflow.runner.v1.ControlFrame
+	25, // 20: xflow.runner.v1.ServerFrame.welcome:type_name -> xflow.runner.v1.WelcomeFrame
+	27, // 21: xflow.runner.v1.ServerFrame.task:type_name -> xflow.runner.v1.TaskFrame
+	28, // 22: xflow.runner.v1.ServerFrame.ack:type_name -> xflow.runner.v1.AckFrame
+	29, // 23: xflow.runner.v1.ServerFrame.backoff:type_name -> xflow.runner.v1.BackoffFrame
+	30, // 24: xflow.runner.v1.ServerFrame.keepalive:type_name -> xflow.runner.v1.KeepaliveFrame
+	26, // 25: xflow.runner.v1.ServerFrame.control:type_name -> xflow.runner.v1.ControlFrame
 	1,  // 26: xflow.runner.v1.WelcomeFrame.control:type_name -> xflow.runner.v1.RunnerControlDirective
 	1,  // 27: xflow.runner.v1.ControlFrame.directive:type_name -> xflow.runner.v1.RunnerControlDirective
-	17, // 28: xflow.runner.v1.RunnerProtocol.Connect:input_type -> xflow.runner.v1.RunnerFrame
+	19, // 28: xflow.runner.v1.RunnerProtocol.Connect:input_type -> xflow.runner.v1.RunnerFrame
 	3,  // 29: xflow.runner.v1.RunnerProtocol.Register:input_type -> xflow.runner.v1.RegisterRequest
-	7,  // 30: xflow.runner.v1.RunnerProtocol.Heartbeat:input_type -> xflow.runner.v1.HeartbeatRequest
-	9,  // 31: xflow.runner.v1.RunnerProtocol.PollTask:input_type -> xflow.runner.v1.PollTaskRequest
-	11, // 32: xflow.runner.v1.RunnerProtocol.ReportResult:input_type -> xflow.runner.v1.ReportResultRequest
-	13, // 33: xflow.runner.v1.RunnerProtocol.AckActivation:input_type -> xflow.runner.v1.ActivationAckRequest
-	15, // 34: xflow.runner.v1.RunnerProtocol.RenewLease:input_type -> xflow.runner.v1.RenewLeaseRequest
-	22, // 35: xflow.runner.v1.RunnerProtocol.Connect:output_type -> xflow.runner.v1.ServerFrame
+	9,  // 30: xflow.runner.v1.RunnerProtocol.Heartbeat:input_type -> xflow.runner.v1.HeartbeatRequest
+	11, // 31: xflow.runner.v1.RunnerProtocol.PollTask:input_type -> xflow.runner.v1.PollTaskRequest
+	13, // 32: xflow.runner.v1.RunnerProtocol.ReportResult:input_type -> xflow.runner.v1.ReportResultRequest
+	15, // 33: xflow.runner.v1.RunnerProtocol.AckActivation:input_type -> xflow.runner.v1.ActivationAckRequest
+	17, // 34: xflow.runner.v1.RunnerProtocol.RenewLease:input_type -> xflow.runner.v1.RenewLeaseRequest
+	24, // 35: xflow.runner.v1.RunnerProtocol.Connect:output_type -> xflow.runner.v1.ServerFrame
 	6,  // 36: xflow.runner.v1.RunnerProtocol.Register:output_type -> xflow.runner.v1.RegisterResponse
-	8,  // 37: xflow.runner.v1.RunnerProtocol.Heartbeat:output_type -> xflow.runner.v1.HeartbeatResponse
-	10, // 38: xflow.runner.v1.RunnerProtocol.PollTask:output_type -> xflow.runner.v1.PollTaskResponse
-	12, // 39: xflow.runner.v1.RunnerProtocol.ReportResult:output_type -> xflow.runner.v1.ReportResultResponse
-	14, // 40: xflow.runner.v1.RunnerProtocol.AckActivation:output_type -> xflow.runner.v1.ActivationAckResponse
-	16, // 41: xflow.runner.v1.RunnerProtocol.RenewLease:output_type -> xflow.runner.v1.RenewLeaseResponse
+	10, // 37: xflow.runner.v1.RunnerProtocol.Heartbeat:output_type -> xflow.runner.v1.HeartbeatResponse
+	12, // 38: xflow.runner.v1.RunnerProtocol.PollTask:output_type -> xflow.runner.v1.PollTaskResponse
+	14, // 39: xflow.runner.v1.RunnerProtocol.ReportResult:output_type -> xflow.runner.v1.ReportResultResponse
+	16, // 40: xflow.runner.v1.RunnerProtocol.AckActivation:output_type -> xflow.runner.v1.ActivationAckResponse
+	18, // 41: xflow.runner.v1.RunnerProtocol.RenewLease:output_type -> xflow.runner.v1.RenewLeaseResponse
 	35, // [35:42] is the sub-list for method output_type
 	28, // [28:35] is the sub-list for method input_type
 	28, // [28:28] is the sub-list for extension type_name
@@ -2452,13 +2590,13 @@ func file_service_protocol_runnerpb_runner_proto_init() {
 	if File_service_protocol_runnerpb_runner_proto != nil {
 		return
 	}
-	file_service_protocol_runnerpb_runner_proto_msgTypes[17].OneofWrappers = []any{
+	file_service_protocol_runnerpb_runner_proto_msgTypes[19].OneofWrappers = []any{
 		(*RunnerFrame_Hello)(nil),
 		(*RunnerFrame_Result)(nil),
 		(*RunnerFrame_Bye)(nil),
 		(*RunnerFrame_ControlObservation)(nil),
 	}
-	file_service_protocol_runnerpb_runner_proto_msgTypes[22].OneofWrappers = []any{
+	file_service_protocol_runnerpb_runner_proto_msgTypes[24].OneofWrappers = []any{
 		(*ServerFrame_Welcome)(nil),
 		(*ServerFrame_Task)(nil),
 		(*ServerFrame_Ack)(nil),

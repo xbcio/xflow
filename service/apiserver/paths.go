@@ -27,6 +27,9 @@ const (
 	PathExecutions          = "/v1/executions"
 	PathExecutionByID       = "/v1/executions/{id}"
 	PathExecutionCancel     = "/v1/executions/{id}/cancel"
+	PathExecutionPause      = "/v1/executions/{id}/pause"
+	PathExecutionResume     = "/v1/executions/{id}/resume"
+	PathExecutionRerun      = "/v1/executions/{id}/rerun"
 	PathExecutionSignals    = "/v1/executions/{id}/signals"
 	PathExecutionSignalByID = "/v1/executions/{id}/signals/{name}"
 	PathExecutionWait       = "/v1/executions/{id}/wait"
@@ -114,6 +117,9 @@ var UserFacingPaths = []string{
 	PathExecutions,
 	PathExecutionByID,
 	PathExecutionCancel,
+	PathExecutionPause,
+	PathExecutionResume,
+	PathExecutionRerun,
 	PathExecutionSignals,
 	PathExecutionSignalByID,
 	PathExecutionWait,

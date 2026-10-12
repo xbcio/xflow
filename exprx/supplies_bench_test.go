@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/types"
 )
@@ -28,7 +29,7 @@ func BenchmarkBuildExprEnvWithLargeSupply(b *testing.B) {
 	}); err != nil {
 		b.Fatalf("apply: %v", err)
 	}
-	extra := SuppliesEnv(reg)
+	extra := SuppliesEnv(reg, namespace.Default)
 	input := &types.Input{Data: map[string]any{"k": "v"}}
 
 	b.ReportAllocs()
@@ -39,7 +40,7 @@ func BenchmarkBuildExprEnvWithLargeSupply(b *testing.B) {
 
 // Baseline with no supply at all, to compare against.
 func BenchmarkBuildExprEnvNoSupply(b *testing.B) {
-	extra := SuppliesEnv(supply.NewRegistry())
+	extra := SuppliesEnv(supply.NewRegistry(), namespace.Default)
 	input := &types.Input{Data: map[string]any{"k": "v"}}
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {

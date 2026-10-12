@@ -10,6 +10,7 @@ import (
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/types"
@@ -144,7 +145,10 @@ func (r *triggerRuntime) ReconcileWorkflow(ctx context.Context, rec backend.Work
 			NodeName:   p.nd.Name,
 			Params:     params,
 			Runtime:    r,
-			Supplies:   supply.Default.Decoded(),
+			// The workflow definition's own namespace scopes the supply view: the
+			// in-process runtime may host workflows from more than one namespace,
+			// and a supply node name is only an identity within one of them.
+			Supplies: supply.Default.Decoded(namespace.Namespace(rec.Definition.Namespace)),
 
 			WorkflowTimezone: workflowTZ,
 		})

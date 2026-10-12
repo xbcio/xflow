@@ -88,6 +88,20 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 			},
 		},
 		{
+			// The derived shape: the same detail for an execution a rerun
+			// created. Both link fields are omitempty, so without this case a
+			// renamed or dropped tag would still validate against the schema.
+			name:   "execution detail of a rerun",
+			schema: "ExecutionDetail",
+			value: engine.ExecutionDetail{
+				ExecutionID: execID,
+				Status:      types.ExecutionStatusRunning,
+				ParentID:    "exec-parent",
+				RerunFrom:   "Fetch",
+				Nodes:       []engine.NodeDetail{{Name: "Fetch", Status: types.NodeStatusRunning}},
+			},
+		},
+		{
 			name:   "register workflow response",
 			schema: "RegisterWorkflowResponse",
 			value:  apiserver.ExampleRegisterWorkflowResponse("wf-01H8XG", []string{"node \"Fetch\" references unknown output \"missing\""}),
@@ -155,6 +169,16 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 			name:   "signal request",
 			schema: "SignalRequest",
 			value:  apiserver.ExampleSignalRequest("approve", map[string]any{"ok": true}),
+		},
+		{
+			name:   "rerun execution request",
+			schema: "RerunExecutionRequest",
+			value:  apiserver.ExampleRerunExecutionRequest(),
+		},
+		{
+			name:   "rerun execution response (queued)",
+			schema: "RerunExecutionResponse",
+			value:  apiserver.ExampleRerunExecutionResponse(execID, 2),
 		},
 		{
 			name:   "execute workflow request",
