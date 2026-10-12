@@ -55,6 +55,17 @@ const defaultGroupCompletionTTL = 30 * time.Second
 // to "nothing shortened" instead of enumerating the wrong keys — the same
 // degradation shortenTransientCompletionTTL makes for its node keys, and the
 // safe direction: the artifacts keep the longer retention.
+//
+// The mode is read off the persisted graph rather than off
+// GroupCommitRequest.Transient, even though the commit carries it. The commit is
+// not where the decision is applied: a group's artifacts are shortened when the
+// EXECUTION becomes terminal, which may happen in a later transition, on another
+// replica, or inside a script (a node commit, a cancel) where no commit request
+// exists. The graph is the compiled artifact both views derive from, it is
+// already persisted, and it covers the groups that never committed at all — a
+// canceled execution's leased group, whose keys are exactly the ones left
+// behind. The request flag remains the engine-side contract for backends that
+// consume it at commit time.
 func (s *Store) shortenTransientGroupCompletionTTL(ctx context.Context, id types.ExecutionID) error {
 	g, _ := s.LoadGraph(ctx, id)
 	if g == nil {
