@@ -203,6 +203,41 @@ func (e ScheduleExpression) Next(after time.Time) time.Time {
 	}
 }
 
+// Instants returns the schedule's instants in (from, to], oldest first, capped
+// at limit. It is what a backfill plans: the instants an operator asked to have
+// run, identified exactly as the trigger itself identifies the ones it fires.
+//
+// from is exclusive and to inclusive, matching the operator's mental model of
+// "everything after this moment up to that one": an instant exactly at from is
+// normally one that already fired — it is where a watermark sits — and asking
+// for its re-run is a different request than asking for a range.
+//
+// The cap is applied inside rather than by the caller so a range holding a
+// million instants is never materialized: a per-second schedule over a week is
+// 604800 of them, and building that slice before refusing it would be the denial
+// of service the cap exists to prevent.
+func (e ScheduleExpression) Instants(from, to time.Time, limit int) []time.Time {
+	if limit <= 0 || !to.After(from) {
+		return nil
+	}
+	out := make([]time.Time, 0, 16)
+	cur := from
+	for len(out) < limit {
+		next := e.Next(cur)
+		if next.IsZero() || !next.After(cur) {
+			// A schedule that cannot advance (an unparseable rule, or a
+			// pathological one) must stop rather than spin.
+			break
+		}
+		if next.After(to) {
+			break
+		}
+		out = append(out, next)
+		cur = next
+	}
+	return out
+}
+
 // MergeScheduleOverrideParams applies an override to a node's activation params
 // and returns the params the node must be activated with.
 //

@@ -458,6 +458,83 @@ func (p pausedRuntime) GetExecutionStatus(ctx context.Context, id types.Executio
 	return "", false, types.ErrExecutionStatusUnavailable
 }
 
+// emitScheduleInstant fires one instant of a schedule this process hosts. It is
+// what the schedule API's backfill calls, and the API reaches it through
+// Engine.EmitScheduleInstant.
+//
+// The firing is built by the node's own trigger kind (types.ScheduledTrigger),
+// so the event carries the identity a live firing of that instant would have —
+// the instant in the kind's own spelling. The deduplication, though, is the
+// BACKFILL's own, and deliberately not the key a live activation claims: that
+// key means "this instant has been decided", and it is claimed for the firings
+// the live trigger DROPS — while paused, while the overlap policy holds it back,
+// or when the workflow's concurrency limit refuses it. A backfill exists to run
+// exactly those instants, so sharing the key would answer "duplicate" to every
+// instant of a paused window, which is the case the API documents as the reason
+// backfill exists.
+func (r *triggerRuntime) emitScheduleInstant(ctx context.Context, ns namespace.Namespace, workflowID types.WorkflowID, node string, instant time.Time) (types.ExecutionID, bool, error) {
+	rec, hosted, err := r.hostedWorkflow(ctx, ns, workflowID)
+	if err != nil {
+		return "", false, err
+	}
+	if !hosted {
+		return "", false, fmt.Errorf("backfill %s/%s: workflow is not hosted by this process", workflowID, node)
+	}
+	nd, ok := triggerNodeDef(rec.Definition, node)
+	if !ok {
+		return "", false, fmt.Errorf("backfill %s/%s: not a trigger node of this workflow", workflowID, node)
+	}
+	h, ok := lookupTriggerForNode(nd)
+	if !ok {
+		return "", false, fmt.Errorf("trigger handler %q not registered", nd.Type)
+	}
+	builder, ok := h.(types.ScheduledTrigger)
+	if !ok {
+		return "", false, fmt.Errorf("trigger %q has no schedule to backfill", nd.Type)
+	}
+	// The activation parameters, overlay included: a node the operator retimed is
+	// backfilled against the schedule it is actually running, which is the same
+	// schedule the API plans the range from.
+	params, _, err := r.activationParams(ctx, rec, nd)
+	if err != nil {
+		return "", false, err
+	}
+	event, err := builder.ScheduledEvent(workflowID, node, params, instant)
+	if err != nil {
+		return "", false, err
+	}
+	ok, err = r.primitives.Dedup(ctx, backfillDedupKey(workflowID, node, event), backfillDedupTTL)
+	if err != nil {
+		return "", false, err
+	}
+	if !ok {
+		return "", true, nil
+	}
+	id, err := r.Emit(ctx, workflowID, node, event)
+	if err != nil {
+		return "", false, err
+	}
+	return id, false, nil
+}
+
+// backfillDedupTTL is how long one backfilled instant stays claimed.
+//
+// A day is longer than any backfill is re-run by hand and short enough that an
+// operator who deliberately wants to re-run a range a day later is not silently
+// refused: the claim expires and the instants run again. It is not a
+// correctness boundary — the executions themselves are the record — but a
+// mistake in a range (a typo'd `from`) is worth catching within the same working
+// session.
+const backfillDedupTTL = 24 * time.Hour
+
+// backfillDedupKey is the deduplicator key one backfilled instant claims. It is
+// namespaced apart from the live key (see emitScheduleInstant) so a repeated
+// backfill is idempotent per instant without ever standing in for the trigger's
+// own decision about that instant.
+func backfillDedupKey(workflowID types.WorkflowID, node string, event *types.TriggerEvent) string {
+	return "backfill:" + string(workflowID) + ":" + node + ":" + event.ID
+}
+
 // finishInflight decrements the in-flight counter and wakes a waiting Close
 // once no activations remain.
 func (r *triggerRuntime) finishInflight() {

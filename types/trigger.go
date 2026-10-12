@@ -69,6 +69,24 @@ type TriggerHandler interface {
 	Activate(ctx context.Context, input *TriggerActivateInput) (TriggerSubscription, error)
 }
 
+// ScheduledTrigger is a trigger kind whose timeline names instants in advance —
+// a cron expression, a fixed interval — and that can therefore be asked to
+// produce the firing of one of them outside a live activation.
+//
+// A backfill is the caller: an operator asks for the instants of a past range to
+// run, and the kind that owns the timeline is the only code that can spell a
+// firing of one of its own instants, because the event ID is the instant in that
+// kind's own format. params are the node's effective activation parameters, so a
+// node whose timing an operator has overridden produces the firing of the
+// schedule it is actually running.
+//
+// A trigger kind without a timeline (a webhook has a route, not a schedule) does
+// not implement this, and is not backfillable — which is the honest answer
+// rather than a limitation to route around.
+type ScheduledTrigger interface {
+	ScheduledEvent(workflowID WorkflowID, nodeName string, params map[string]any, instant time.Time) (*TriggerEvent, error)
+}
+
 type TriggerSubscription interface {
 	Close(ctx context.Context) error
 }

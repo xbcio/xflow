@@ -2,10 +2,12 @@ package xflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
@@ -226,6 +228,22 @@ func (e *Engine) ReloadSchedule(ctx context.Context, ns namespace.Namespace, wor
 		return nil
 	}
 	return e.triggerRuntime.ReloadSchedule(ctx, ns, workflowID, node)
+}
+
+// EmitScheduleInstant fires one instant of a workflow's schedule, as a backfill
+// asks for. It is the local trigger host's half of the schedule API's backfill:
+// the manager plans the instants and this process — the one hosting the trigger
+// — builds and admits the firing of each.
+//
+// An engine that hosts nothing reports that it cannot: unlike ReloadSchedule,
+// where "not hosted here" and "done" are the same non-event, a backfill asked of
+// a process that hosts no trigger is a request this deployment cannot serve, and
+// the API answers it as such rather than as a success that fired nothing.
+func (e *Engine) EmitScheduleInstant(ctx context.Context, ns namespace.Namespace, workflowID types.WorkflowID, node string, instant time.Time) (types.ExecutionID, bool, error) {
+	if e == nil || e.triggerRuntime == nil {
+		return "", false, errors.New("xflow: this engine hosts no triggers")
+	}
+	return e.triggerRuntime.emitScheduleInstant(ctx, ns, workflowID, node, instant)
 }
 
 // WebhookHandler returns the http.Handler that serves the routes this engine's

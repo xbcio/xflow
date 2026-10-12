@@ -241,7 +241,7 @@ func (n *Node) emitScheduledFire(ctx context.Context, in *types.TriggerActivateI
 	// watermark, so a firing that never happened is still visible to a later
 	// activation.
 	handled := false
-	if ok, err := in.Runtime.Dedup(ctx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+event.ID, fireDedupTTL(sched, fire.scheduled, cfg)); err == nil {
+	if ok, err := in.Runtime.Dedup(ctx, triggerDedupKey(in.WorkflowID, in.NodeName, event), fireDedupTTL(sched, fire.scheduled, cfg)); err == nil {
 		handled = true
 		if ok {
 			if !overlap.admits(ctx, watermark, in) {
@@ -416,6 +416,30 @@ func newCronTriggerEvent(workflowID types.WorkflowID, nodeName string, fire cron
 		Time:   fire.observed,
 		Data:   map[string]any{"scheduled_time": scheduled, "catchup": fire.catchup},
 	}
+}
+
+// ScheduledEvent builds the firing of one instant this node's schedule names, at
+// a moment that is not now — the instant a backfill was asked to run.
+//
+// It is a method on the node rather than a function the caller can reimplement
+// because a firing's identity is this package's to spell: the event ID is the
+// instant in this node's own format, and the schedule API's caller has no way to
+// reproduce it. The event is marked as a catch-up, since a firing that is not
+// happening at its own instant is exactly that, and Time carries the moment of
+// admission (now) while `scheduled_time` carries the instant itself.
+//
+// params is accepted and unused: the interface this implements is shared with
+// the kinds whose identity does depend on their parameters, and a schedule's
+// instant is spelled the same whatever else the node was configured with.
+func (n *Node) ScheduledEvent(workflowID types.WorkflowID, nodeName string, _ map[string]any, instant time.Time) (*types.TriggerEvent, error) {
+	return newCronTriggerEvent(workflowID, nodeName, cronFire{scheduled: instant, observed: time.Now(), catchup: true}), nil
+}
+
+// triggerDedupKey is the deduplicator key one firing claims. The event ID is the
+// identity; this is that identity qualified by the trigger it belongs to, so two
+// nodes of one workflow — or the same node of two workflows — never share a key.
+func triggerDedupKey(workflowID types.WorkflowID, nodeName string, event *types.TriggerEvent) string {
+	return "trigger:" + string(workflowID) + ":" + nodeName + ":" + event.ID
 }
 
 // cronFireID is the entry-seed fire-key id of one firing: the scheduled instant

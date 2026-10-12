@@ -194,6 +194,10 @@ type ScheduleManagerConfig struct {
 	Reloader ScheduleReloader
 	// State reads the scheduling watermark. May be nil.
 	State ScheduleStateReader
+	// Emitter fires one instant of a schedule's own timeline, for a backfill.
+	// May be nil, which is the deployment whose triggers are hosted elsewhere:
+	// it stores and displays schedules, and refuses to backfill them.
+	Emitter ScheduleEmitter
 	// Now supplies the instant next_fire is computed from. May be nil (time.Now);
 	// tests set it so a view is a function of the schedule rather than of the
 	// clock the test happens to run on.
@@ -214,6 +218,7 @@ type ScheduleManager struct {
 	overrides store.ScheduleOverrideStore
 	reloader  ScheduleReloader
 	state     ScheduleStateReader
+	emitter   ScheduleEmitter
 	now       func() time.Time
 }
 
@@ -229,7 +234,13 @@ func NewScheduleManager(cfg ScheduleManagerConfig) *ScheduleManager {
 	if now == nil {
 		now = time.Now
 	}
-	return &ScheduleManager{overrides: cfg.Overrides, reloader: cfg.Reloader, state: cfg.State, now: now}
+	return &ScheduleManager{
+		overrides: cfg.Overrides,
+		reloader:  cfg.Reloader,
+		state:     cfg.State,
+		emitter:   cfg.Emitter,
+		now:       now,
+	}
 }
 
 // List returns every schedule of a workflow: the trigger nodes it declares, each
@@ -589,7 +600,7 @@ func (m *ScheduleManager) view(ctx context.Context, wf ScheduleWorkflow, node st
 	kind, _ := ScheduleKindOf(nm.Type)
 	view.Kind = kind
 
-	params, err := graph.EvaluateActivationParams(wf.Graph, nm.Name, nm.Type, nm.Parameters)
+	params, err := m.params(wf, nm)
 	if err != nil {
 		return ScheduleView{}, err
 	}
