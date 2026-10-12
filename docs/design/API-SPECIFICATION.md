@@ -468,6 +468,14 @@ entry-seed 的 409 响应有**两种不同 body**，客户端据此决定是否�
 | REJECT 模式已达 limit | `{"state":"over_limit","error":"workflow_concurrency_limit"}` | **不提交 offset**（本次未持久化，结果仍属调用方，退避后重试） |
 | QUEUE 模式积压达 `max_queued` | `{"state":"queue_full","error":"workflow_concurrency_queue_full"}` | **不提交 offset**（同上；等的是队列排空而非槽位） |
 
+此外还有 503（**不可重试**，与上表两种 429 相反）：seed 的工作流声明了并发上限、
+而本部署的状态存储无法执行它——`{"error":"workflow_concurrency_unavailable"}`，
+裸 errorResponse，与用户面 execute 的同码 503 同义。引擎在这里 fail-closed（放行
+等于废掉作者用来保护下游的上限），因此没有 `Retry-After`：答案随部署改变，不随
+runner 重试改变。**调用方必须重试这一条记录直到它被接受**：一次 429 拒绝不提交
+offset，若直接跳过、让后面的记录提交，就等于静默丢掉它（见 §8.2 下方对逐条路径的
+说明）。
+
 两种状态分开是必要的：客户端动作相同（不提交、退避、重试），但要等的东西不同
 （等槽位 vs 等队列）。`Retry-After` 取值 1 秒，与用户面 execute 的同两种拒绝一致
 ——它是**下限**而非释放时间的承诺（槽位何时空出不可知）。仓库内自带的 runner 只读
