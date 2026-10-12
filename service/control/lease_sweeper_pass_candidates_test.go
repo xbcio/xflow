@@ -250,7 +250,13 @@ func TestLeaseSweeperRepairPassDoesNotReportCandidates(t *testing.T) {
 
 	h.RepairOnce(context.Background())
 
-	wantPass := []passEvent{{pass: SweepPassRepair, outcome: SweepPassOutcomeRan, released: 11}}
+	// RepairOnce also drives the workflow slot sweep, and these fakes have no
+	// reconciler, so the ride-along reports unsupported. The point of the
+	// assertion is unchanged: this pass publishes its releases and no candidates.
+	wantPass := []passEvent{
+		{pass: SweepPassRepair, outcome: SweepPassOutcomeRan, released: 11},
+		{pass: SweepPassConcurrencySlot, outcome: SweepPassOutcomeUnsupported},
+	}
 	if got := observer.snapshot(); !equalPassEvents(got, wantPass) {
 		t.Fatalf("pass events = %+v, want %+v", got, wantPass)
 	}

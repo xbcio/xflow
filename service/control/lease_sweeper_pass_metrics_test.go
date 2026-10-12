@@ -175,7 +175,7 @@ func TestLeaseSweeperReportsEveryMaintenancePassOutcome(t *testing.T) {
 
 				pass.run(h.LeaseSweeper)
 
-				want := []passEvent{{pass: pass.name, outcome: SweepPassOutcomeRan, released: 4}}
+				want := passEvents(pass.name, SweepPassOutcomeRan, 4)
 				if got := observer.snapshot(); !equalPassEvents(got, want) {
 					t.Fatalf("pass events = %+v, want %+v", got, want)
 				}
@@ -187,7 +187,7 @@ func TestLeaseSweeperReportsEveryMaintenancePassOutcome(t *testing.T) {
 
 				pass.run(h.LeaseSweeper)
 
-				want := []passEvent{{pass: pass.name, outcome: SweepPassOutcomeRan, released: 0}}
+				want := passEvents(pass.name, SweepPassOutcomeRan, 0)
 				if got := observer.snapshot(); !equalPassEvents(got, want) {
 					t.Fatalf("pass events = %+v, want %+v: a pass that ran and released "+
 						"nothing must still report a run", got, want)
@@ -203,10 +203,8 @@ func TestLeaseSweeperReportsEveryMaintenancePassOutcome(t *testing.T) {
 				*h.now = h.now.Add(30 * time.Second)
 				pass.run(h.LeaseSweeper)
 
-				want := []passEvent{
-					{pass: pass.name, outcome: SweepPassOutcomeRan, released: 4},
-					{pass: pass.name, outcome: SweepPassOutcomeSkippedCadence},
-				}
+				want := append(passEvents(pass.name, SweepPassOutcomeRan, 4),
+					passEvents(pass.name, SweepPassOutcomeSkippedCadence, 0)...)
 				if got := observer.snapshot(); !equalPassEvents(got, want) {
 					t.Fatalf("pass events = %+v, want %+v", got, want)
 				}
@@ -219,7 +217,7 @@ func TestLeaseSweeperReportsEveryMaintenancePassOutcome(t *testing.T) {
 
 				pass.run(h.LeaseSweeper)
 
-				want := []passEvent{{pass: pass.name, outcome: SweepPassOutcomeSkippedNotLeader}}
+				want := passEvents(pass.name, SweepPassOutcomeSkippedNotLeader, 0)
 				if got := observer.snapshot(); !equalPassEvents(got, want) {
 					t.Fatalf("pass events = %+v, want %+v", got, want)
 				}
@@ -232,7 +230,7 @@ func TestLeaseSweeperReportsEveryMaintenancePassOutcome(t *testing.T) {
 
 				pass.run(h.LeaseSweeper)
 
-				want := []passEvent{{pass: pass.name, outcome: SweepPassOutcomeUnsupported}}
+				want := passEvents(pass.name, SweepPassOutcomeUnsupported, 0)
 				if got := observer.snapshot(); !equalPassEvents(got, want) {
 					t.Fatalf("pass events = %+v, want %+v", got, want)
 				}
@@ -245,13 +243,33 @@ func TestLeaseSweeperReportsEveryMaintenancePassOutcome(t *testing.T) {
 
 				pass.run(h.LeaseSweeper)
 
-				want := []passEvent{{pass: pass.name, outcome: SweepPassOutcomeError, released: 2}}
+				want := passEvents(pass.name, SweepPassOutcomeError, 2)
 				if got := observer.snapshot(); !equalPassEvents(got, want) {
 					t.Fatalf("pass events = %+v, want %+v", got, want)
 				}
 			})
 		})
 	}
+}
+
+// passEvents is the event stream one run of pass produces, in order.
+//
+// RepairOnce is the one entry that drives a second pass: the workflow slot
+// sweep shares its cadence (see lease_sweeper.go). These fakes implement the
+// repair capability but not the reconciler, so the ride-along reports
+// unsupported — its capability check precedes its cadence check, exactly as the
+// other passes' do — except under the leader gate, which it applies first and
+// reports for itself.
+func passEvents(pass string, outcome string, released int) []passEvent {
+	events := []passEvent{{pass: pass, outcome: outcome, released: released}}
+	if pass != SweepPassRepair {
+		return events
+	}
+	slotOutcome := SweepPassOutcomeUnsupported
+	if outcome == SweepPassOutcomeSkippedNotLeader {
+		slotOutcome = SweepPassOutcomeSkippedNotLeader
+	}
+	return append(events, passEvent{pass: SweepPassConcurrencySlot, outcome: slotOutcome})
 }
 
 func equalPassEvents(got, want []passEvent) bool {
@@ -294,10 +312,10 @@ func TestLeaseSweeperPassMetricsAnswerWhetherAPassReleasedAnything(t *testing.T)
 		t.Fatalf("released_total{pass=stranded_lease} = %v, want a visible 0", got)
 	}
 
-	// The other three passes were never called on this sweeper, and that absence
-	// is exactly what "never ran" looks like — a different reading from the zero
-	// above.
-	for _, pass := range []string{SweepPassRepair, SweepPassLegacyLeaseMeta, SweepPassDeadQueuedAssignment} {
+	// Every other pass was never called on this sweeper, and that absence is
+	// exactly what "never ran" looks like — a different reading from the zero
+	// above. The slot sweep is included because nothing but RepairOnce drives it.
+	for _, pass := range []string{SweepPassRepair, SweepPassLegacyLeaseMeta, SweepPassDeadQueuedAssignment, SweepPassConcurrencySlot} {
 		if _, ok := findPassCounter(t, m, "xflow_lease_maintenance_pass_total",
 			map[string]string{"pass": pass}); ok {
 			t.Errorf("pass=%s has a series although nothing ran it", pass)
