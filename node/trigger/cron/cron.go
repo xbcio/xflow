@@ -21,6 +21,15 @@ type Node struct {
 	nodeinternal.BaseTrigger
 	Expression string
 	Timezone   string
+	// MisfireValue is the misfire policy name; empty means the default
+	// (misfireSkip).
+	MisfireValue string
+	// CatchupWindowValue bounds how far back a catch-up reaches; zero means
+	// defaultCatchupWindow.
+	CatchupWindowValue time.Duration
+	// MaxCatchupValue bounds how many firings one activation catches up; zero
+	// means defaultMaxCatchup.
+	MaxCatchupValue int
 }
 
 func New() *Node {
@@ -37,6 +46,25 @@ func (n *Node) InTimezone(timezone string) *Node {
 	return n
 }
 
+// Misfire sets what happens to the scheduled instants that passed while no
+// trigger was hosting this schedule.
+func (n *Node) Misfire(policy string) *Node {
+	n.MisfireValue = policy
+	return n
+}
+
+// CatchupWindow bounds how far back a catch-up reaches.
+func (n *Node) CatchupWindow(window time.Duration) *Node {
+	n.CatchupWindowValue = window
+	return n
+}
+
+// MaxCatchup bounds how many firings one activation catches up.
+func (n *Node) MaxCatchup(max int) *Node {
+	n.MaxCatchupValue = max
+	return n
+}
+
 func (n *Node) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.trigger.cron",
@@ -48,6 +76,23 @@ func (n *Node) Descriptor() types.Descriptor {
 			{Name: "expression", DisplayName: "Expression", Type: types.ParamString, Required: true, Description: "Cron schedule, five fields (e.g. \"*/5 * * * *\") or a descriptor such as \"@every 1m\"",
 				Widget: nodeinternal.WidgetCron, Constraints: nodeinternal.Format(nodeinternal.FormatCron)},
 			{Name: "timezone", DisplayName: "Timezone", Type: types.ParamString, Required: false, Default: "", Description: "IANA time zone name the schedule is evaluated in; empty inherits the workflow settings.timezone (UTC if none)"},
+			// The three catch-up params. None of them declares a Default: the
+			// handlers' fallbacks are declared in node/internal.BuiltinFallbacks
+			// instead, because a Default would be written into every workflow's
+			// params and move its definition hash.
+			{Name: "misfire", DisplayName: "Misfire Policy", Type: types.ParamString, Required: false,
+				Description: "What to do with the scheduled instants that passed while no trigger was hosting this schedule; empty is skip",
+				Enum: []types.EnumOption{
+					{Value: string(misfireSkip), DisplayName: "Skip", Description: "Acknowledge the missed instants and fire none of them (default)"},
+					{Value: string(misfireFireOnce), DisplayName: "Fire Once", Description: "Fire the most recent missed instant only"},
+					{Value: string(misfireFireAll), DisplayName: "Fire All", Description: "Fire the missed instants, oldest first, within the catch-up bounds"},
+				}},
+			{Name: "catchup_window", DisplayName: "Catch-up Window", Type: types.ParamString, Required: false,
+				Description: "How far back a catch-up reaches (e.g. \"1h\"); instants older than this are never fired",
+				Widget:      nodeinternal.WidgetDuration, Constraints: nodeinternal.Format(nodeinternal.FormatDuration)},
+			{Name: "max_catchup", DisplayName: "Max Catch-up", Type: types.ParamNumber, Required: false,
+				Description: "Most firings one activation catches up; the newest ones are kept",
+				Constraints: &types.Constraints{Min: nodeinternal.Float(1)}},
 		},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 	}
@@ -56,8 +101,21 @@ func (n *Node) Descriptor() types.Descriptor {
 func (n *Node) NodeType() string { return "xflow.trigger.cron" }
 func (n *Node) RawParams() any {
 	params := map[string]any{"expression": n.Expression}
+	// Every optional param is omitted when unset, like the webhook's secret
+	// supply and cron's own timezone: a definition that names no catch-up
+	// behaviour is a definition whose parameters — and therefore whose workflow
+	// hash — must stay what they were before these parameters existed.
 	if n.Timezone != "" {
 		params["timezone"] = n.Timezone
+	}
+	if n.MisfireValue != "" {
+		params["misfire"] = n.MisfireValue
+	}
+	if n.CatchupWindowValue > 0 {
+		params["catchup_window"] = n.CatchupWindowValue.String()
+	}
+	if n.MaxCatchupValue > 0 {
+		params["max_catchup"] = n.MaxCatchupValue
 	}
 	return params
 }
@@ -92,50 +150,32 @@ func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (ty
 	if err != nil {
 		return nil, err
 	}
+	// The catch-up settings are read before either path starts, so a definition
+	// with a mistyped policy is refused at activation rather than at the first
+	// restart that would have needed it.
+	cfg, err := catchupConfigFrom(in.Params)
+	if err != nil {
+		return nil, err
+	}
+	watermark := openActivationWatermark(ctx, in)
+	now := time.Now().In(loc)
+	// The plan is computed once, from the record the previous activation left
+	// and the instant this one started, and both hosting paths run the same
+	// plan: which of them admits the firings is the only difference.
+	last, recorded := readWatermark(ctx, watermark)
+	plan := missedFires(sched, last, recorded, now, cfg)
 	if seedadmit.Enabled(in) {
-		return n.activateEntrySeed(ctx, in, sched, loc)
+		return n.activateEntrySeed(ctx, in, sched, loc, plan, watermark, now)
 	}
 	runCtx, cancel := context.WithCancel(ctx)
-	cursor := newScheduleCursor(sched, time.Now().In(loc))
-	watermark := openActivationWatermark(ctx, in)
+	cursor := newScheduleCursor(sched, now)
 	c := cronlib.New(cronlib.WithLocation(loc))
+	applyCatchup(runCtx, in, plan, now, watermark, func(fire cronFire) {
+		n.emitScheduledFire(runCtx, in, sched, fire, cfg, watermark)
+	})
 	c.Schedule(sched, cronlib.FuncJob(func() {
 		observed := time.Now().In(loc)
-		fire := cursor.next(observed)
-		event := newCronTriggerEvent(in.WorkflowID, in.NodeName, fire)
-		// handled distinguishes "this instant has been decided" from "the store
-		// failed before anything was attempted": only the first moves the
-		// watermark, so a firing that never happened is still visible to a later
-		// activation.
-		handled := false
-		if ok, err := in.Runtime.Dedup(runCtx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+event.ID, 2*time.Minute); err == nil {
-			handled = true
-			if ok {
-				if _, err := in.Emit(runCtx, event); err != nil {
-					// A firing that was refused is DROPPED, and that is the whole
-					// handling: a schedule is a stream of moments, so the next firing
-					// is a fresh attempt and replaying this one would turn a busy
-					// workflow into a backlog of stale ticks. The refusal an operator
-					// will see here is the workflow's own concurrency limit
-					// (engine.ErrConcurrencyLimit); a QUEUE-mode workflow does not
-					// produce it, because its over-limit firings are parked and
-					// admitted later instead of refused.
-					//
-					// The log is not decoration. The watermark records which instant
-					// this was, but not that it was refused — so without this line a
-					// schedule that is being refused is indistinguishable from a
-					// schedule that never fired.
-					slog.Warn("cron trigger firing was not admitted; the tick is dropped",
-						"workflow_id", in.WorkflowID,
-						"node", in.NodeName,
-						"event", event.ID,
-						"err", err)
-				}
-			}
-		}
-		if handled {
-			recordFiring(runCtx, watermark, in, fire.scheduled)
-		}
+		n.emitScheduledFire(runCtx, in, sched, cursor.next(observed), cfg, watermark)
 	}))
 	c.Start()
 	return types.CloseFunc(func(context.Context) error {
@@ -149,6 +189,63 @@ func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (ty
 	}), nil
 }
 
+// emitScheduledFire admits one firing through the embedded engine: the local
+// path's own admission, as opposed to the control plane's entry seed.
+func (n *Node) emitScheduledFire(ctx context.Context, in *types.TriggerActivateInput, sched cronlib.Schedule, fire cronFire, cfg catchupConfig, watermark types.TriggerState) {
+	event := newCronTriggerEvent(in.WorkflowID, in.NodeName, fire)
+	// handled distinguishes "this instant has been decided" from "the store
+	// failed before anything was attempted": only the first moves the
+	// watermark, so a firing that never happened is still visible to a later
+	// activation.
+	handled := false
+	if ok, err := in.Runtime.Dedup(ctx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+event.ID, fireDedupTTL(sched, fire.scheduled, cfg)); err == nil {
+		handled = true
+		if ok {
+			if _, err := in.Emit(ctx, event); err != nil {
+				// A firing that was refused is DROPPED, and that is the whole
+				// handling: a schedule is a stream of moments, so the next firing
+				// is a fresh attempt and replaying this one would turn a busy
+				// workflow into a backlog of stale ticks. The refusal an operator
+				// will see here is the workflow's own concurrency limit
+				// (engine.ErrConcurrencyLimit); a QUEUE-mode workflow does not
+				// produce it, because its over-limit firings are parked and
+				// admitted later instead of refused.
+				//
+				// The log is not decoration. The watermark records which instant
+				// this was, but not that it was refused — so without this line a
+				// schedule that is being refused is indistinguishable from a
+				// schedule that never fired.
+				slog.Warn("cron trigger firing was not admitted; the tick is dropped",
+					"workflow_id", in.WorkflowID,
+					"node", in.NodeName,
+					"event", event.ID,
+					"err", err)
+			}
+		}
+	}
+	if handled {
+		recordFiring(ctx, watermark, in, fire.scheduled)
+	}
+}
+
+// fireDedupTTL is how long one firing's identity stays in the deduplicator.
+//
+// Two collisions need the key to be there, and they happen at very different
+// distances from the firing: two replicas observing the same instant (seconds
+// apart, which is what the cadence-doubled floor covers), and a catch-up firing
+// of an instant whose ORIGINAL firing was admitted by a process that died before
+// it could record the watermark (up to the whole catch-up window later). The
+// original firing's key is the one that must survive, so the window is the
+// floor, and it applies to every firing rather than to the catch-up ones alone —
+// a catch-up can only be folded if the key it collides with is still there.
+func fireDedupTTL(sched cronlib.Schedule, scheduled time.Time, cfg catchupConfig) time.Duration {
+	ttl := 2 * firingWindow(sched, scheduled)
+	if cfg.window > ttl {
+		ttl = cfg.window
+	}
+	return ttl
+}
+
 // admitRetry is the retry policy one firing's admission uses. It is a variable
 // so a test can shrink the window: the production cadence is 200ms per retry,
 // which no test should have to wait out.
@@ -160,7 +257,7 @@ var admitRetry = seedadmit.DefaultRetry
 // scheduled instant, and the server's admission-key deduplication is what turns
 // that into one execution per firing — so there is no leader election and no
 // runner-side lock (spec 2026-10-12 §4).
-func (n *Node) activateEntrySeed(ctx context.Context, in *types.TriggerActivateInput, sched cronlib.Schedule, loc *time.Location) (types.TriggerSubscription, error) {
+func (n *Node) activateEntrySeed(ctx context.Context, in *types.TriggerActivateInput, sched cronlib.Schedule, loc *time.Location, plan catchupPlan, watermark types.TriggerState, now time.Time) (types.TriggerSubscription, error) {
 	rt, ok := in.Runtime.(types.EntrySeedRuntime)
 	if !ok {
 		// seedadmit.Enabled proved the capability a moment ago; fail closed
@@ -168,9 +265,11 @@ func (n *Node) activateEntrySeed(ctx context.Context, in *types.TriggerActivateI
 		return nil, fmt.Errorf("cron trigger: entry-seed activation requires an entry-seed runtime")
 	}
 	runCtx, cancel := context.WithCancel(ctx)
-	cursor := newScheduleCursor(sched, time.Now().In(loc))
-	watermark := openActivationWatermark(ctx, in)
+	cursor := newScheduleCursor(sched, now)
 	c := cronlib.New(cronlib.WithLocation(loc))
+	applyCatchup(runCtx, in, plan, now, watermark, func(fire cronFire) {
+		n.admitScheduledFire(runCtx, in, rt, sched, fire, watermark)
+	})
 	c.Schedule(sched, cronlib.FuncJob(func() {
 		observed := time.Now().In(loc)
 		n.admitScheduledFire(runCtx, in, rt, sched, cursor.next(observed), watermark)
@@ -235,6 +334,11 @@ func (n *Node) admitScheduledFire(ctx context.Context, in *types.TriggerActivate
 // cross into the next minute. Publishing the scheduled instant as `scheduled_time`
 // and the observation as Time keeps both facts available instead of trading one
 // for the other.
+//
+// `catchup` says whether this firing is a moment the schedule named while no
+// trigger was hosting it. A workflow that must not confuse a catch-up with a
+// punctual firing — one that closes a book, or bills a period — branches on it;
+// everything else can ignore it.
 func newCronTriggerEvent(workflowID types.WorkflowID, nodeName string, fire cronFire) *types.TriggerEvent {
 	scheduled := fire.scheduled.Format(time.RFC3339Nano)
 	return &types.TriggerEvent{
@@ -242,7 +346,7 @@ func newCronTriggerEvent(workflowID types.WorkflowID, nodeName string, fire cron
 		Kind:   "cron",
 		Source: nodeName,
 		Time:   fire.observed,
-		Data:   map[string]any{"scheduled_time": scheduled},
+		Data:   map[string]any{"scheduled_time": scheduled, "catchup": fire.catchup},
 	}
 }
 

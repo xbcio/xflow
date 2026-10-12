@@ -43,6 +43,11 @@ var builtinFallbacks = []Fallback{
 	{Type: "xflow.switch", Version: 1, Param: "mode", Value: "rules"},
 	{Type: "xflow.wait", Version: 1, Param: "signal_name", Derived: "<node name>/signal, when signals is empty"},
 
+	// trigger.cron
+	{Type: "xflow.trigger.cron", Version: 1, Param: "catchup_window", Value: "1h"},
+	{Type: "xflow.trigger.cron", Version: 1, Param: "max_catchup", Value: float64(10)},
+	{Type: "xflow.trigger.cron", Version: 1, Param: "misfire", Value: "skip"},
+
 	// trigger.kafka
 	{Type: "xflow.trigger.kafka", Version: 1, Param: "aggregate.by", Value: "partition"},
 	{Type: "xflow.trigger.kafka", Version: 1, Param: "aggregate.dedup", Value: "message"},

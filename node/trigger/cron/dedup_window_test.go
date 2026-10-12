@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	cronlib "github.com/robfig/cron/v3"
 	"github.com/xbcio/xflow/node/trigger/triggertest"
 	"github.com/xbcio/xflow/types"
 )
@@ -13,8 +14,8 @@ import (
 // The cron package's only test that reaches the firing path installs a runtime
 // whose Dedup blocks forever, so Emit is never called and neither the event nor
 // the dedup arguments are ever read. Everything the firing decides — the
-// scheduled instant that gives replicas a shared identity, the 2-minute window,
-// the key that namespaces it — was unasserted.
+// scheduled instant that gives replicas a shared identity, the window a
+// duplicate can still be caught in, the key that namespaces it — was unasserted.
 
 func TestCronTriggerEventCarriesTheScheduledInstant(t *testing.T) {
 	// Driven by explicit instants rather than the wall clock: which instant a
@@ -88,19 +89,54 @@ func TestCronDedupWindowOutlivesTheCadence(t *testing.T) {
 		t.Fatal("no dedup call was recorded")
 	}
 
-	// The identity is the scheduled instant, so this window is a replica-skew
-	// allowance rather than a bucket width: two replicas of one schedule observe
-	// the same firing seconds apart at most, and 2m covers a replica whose clock
-	// or scheduling latency is far worse than that. It must not shrink to the
-	// cadence itself — the fastest cadence here is 1s, and a window that short
-	// would let a replica that fires a second late re-run the firing.
-	if got := calls[0].TTL; got != 2*time.Minute {
-		t.Fatalf("dedup TTL = %v, want 2m", got)
+	// The window is the catch-up window, not the cadence: a catch-up firing of
+	// an instant whose original firing was admitted but never recorded arrives
+	// up to one catch-up window later, and it can only be folded if the
+	// original's key is still there to fold it against. The cadence sets a floor
+	// under that (see TestFireDedupTTLBounds), which a one-second cadence does
+	// not reach here.
+	if got, want := calls[0].TTL, defaultCatchupWindow; got != want {
+		t.Fatalf("dedup TTL = %v, want %v", got, want)
 	}
 	if !strings.HasPrefix(calls[0].Key, "trigger:wf-1:cron:wf-1/cron/") {
 		t.Fatalf("dedup key = %q, want it namespaced by workflow and node and "+
 			"carrying the scheduled instant; without the instant the window covers the "+
 			"whole node and the next scheduled run is dropped as a duplicate",
 			calls[0].Key)
+	}
+}
+
+// TestFireDedupTTLBounds pins both halves of the rule: twice the distance to the
+// next firing, so two replicas that observe one instant seconds apart collide,
+// and never less than the catch-up window, so a catch-up collides with the
+// original firing it repeats.
+func TestFireDedupTTLBounds(t *testing.T) {
+	minute := mustSchedule(t, "*/1 * * * *")
+	hourly := mustSchedule(t, "0 * * * *")
+	// An instant on a minute boundary: the hourly schedule's next firing is
+	// then a full hour away and the cadence floor is legible.
+	at := time.Date(2026, 10, 12, 3, 0, 0, 0, time.UTC)
+	cfg := func(window time.Duration) catchupConfig {
+		return catchupConfig{policy: misfireSkip, window: window, max: defaultMaxCatchup}
+	}
+
+	cases := []struct {
+		name     string
+		sched    cronlib.Schedule
+		cfg      catchupConfig
+		want     time.Duration
+		explains string
+	}{
+		{"a window under the cadence leaves the cadence floor", minute, cfg(time.Second), 2 * time.Minute, "cadence"},
+		{"the window raises the floor when it is longer", minute, cfg(time.Hour), time.Hour, "catch-up window"},
+		{"an hourly schedule still takes a window longer than it", hourly, cfg(3 * time.Hour), 3 * time.Hour, "catch-up window"},
+		{"two cadences beat a window shorter than them", hourly, cfg(30 * time.Minute), 2 * time.Hour, "cadence"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := fireDedupTTL(tc.sched, at, tc.cfg); got != tc.want {
+				t.Fatalf("fireDedupTTL = %v, want %v (the %s)", got, tc.want, tc.explains)
+			}
+		})
 	}
 }

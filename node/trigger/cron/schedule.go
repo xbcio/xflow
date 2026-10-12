@@ -18,9 +18,15 @@ import (
 //   - observed is when the callback actually ran. It is what a workflow reads
 //     when it asks when this ran, and it is later than scheduled by however long
 //     the process took to get to the job.
+//   - catchup marks a firing of an instant that passed while this schedule was
+//     hosted by nobody: it is an admission the trigger made at activation, not
+//     one its own clock made. The instant is still the schedule's, so a catch-up
+//     and a punctual firing of the same moment share an identity and cannot both
+//     run.
 type cronFire struct {
 	scheduled time.Time
 	observed  time.Time
+	catchup   bool
 }
 
 // scheduleCursor derives each firing's scheduled instant from the schedule

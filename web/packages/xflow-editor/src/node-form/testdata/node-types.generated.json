@@ -2105,6 +2105,69 @@
           "expression": {
             "mode": "template"
           }
+        },
+        {
+          "name": "misfire",
+          "path": "/parameters/misfire",
+          "label": "Misfire Policy",
+          "type": "string",
+          "fallback": "skip",
+          "help": "What to do with the scheduled instants that passed while no trigger was hosting this schedule; empty is skip",
+          "expression": {
+            "mode": "template"
+          },
+          "options": [
+            {
+              "value": "skip",
+              "label": "Skip",
+              "description": "Acknowledge the missed instants and fire none of them (default)"
+            },
+            {
+              "value": "fire_once",
+              "label": "Fire Once",
+              "description": "Fire the most recent missed instant only"
+            },
+            {
+              "value": "fire_all",
+              "label": "Fire All",
+              "description": "Fire the missed instants, oldest first, within the catch-up bounds"
+            }
+          ]
+        },
+        {
+          "name": "catchup_window",
+          "path": "/parameters/catchup_window",
+          "label": "Catch-up Window",
+          "type": "string",
+          "widget": "duration",
+          "fallback": "1h",
+          "help": "How far back a catch-up reaches (e.g. \"1h\"); instants older than this are never fired",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "duration"
+            }
+          ]
+        },
+        {
+          "name": "max_catchup",
+          "path": "/parameters/max_catchup",
+          "label": "Max Catch-up",
+          "type": "number",
+          "fallback": 10,
+          "help": "Most firings one activation catches up; the newest ones are kept",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "min",
+              "value": 1
+            }
+          ]
         }
       ]
     },
