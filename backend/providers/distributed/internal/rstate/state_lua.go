@@ -685,6 +685,39 @@ redis.call('SET', KEYS[1], final, 'EX', tonumber(ARGV[1]))
 return anyFailed and -1 or 1
 `)
 
+// concurrencyIndexTouchLua adds a workflow tag to its namespace's index and
+// extends the index's expiry to cover it, never shortening what is there.
+//
+// The extend-only rule is shared with the entry-activation index
+// (prepareEntryActivationTransitionLua's touch_activation) and exists for the
+// same reason: two writers register here with different lifetimes — an
+// admission, which knows the queue wait it has to keep the line discoverable
+// for, and a release, which knows nothing about the waiters already in line —
+// and a plain EXPIRE from the shorter one would cut the index back under a
+// deadline that is still live.
+//
+// Unlike that index, this one is never deliberately permanent: every writer
+// registers with an expiry, so a PTTL of -1 means the SADD above just created
+// the key and it still needs one. Hence `<` rather than the entry-activation
+// form's "skip -1": skipping it here would leave a freshly created index with
+// no expiry at all — the opposite of the leak this script is closing.
+//
+// The index is a single key, so this script is Redis Cluster safe even though
+// the keys it indexes are not: the SADD and the expiry can never be split by a
+// concurrent registration.
+//
+// KEYS[1] = namespace workflow index, ARGV[1] = workflow tag,
+// ARGV[2] = how long the index has to survive, in milliseconds
+var concurrencyIndexTouchLua = redis.NewScript(`
+redis.call('SADD', KEYS[1], ARGV[1])
+local want = tonumber(ARGV[2])
+local current = redis.call('PTTL', KEYS[1])
+if current < want then
+    redis.call('PEXPIRE', KEYS[1], want)
+end
+return 1
+`)
+
 // workflowAdmitLua charges one workflow slot, refusing when the workflow is at
 // its limit. This is the whole limit: concurrent submissions from different
 // replicas serialize on the slot ZSET, so the check-and-charge cannot race.
@@ -695,7 +728,8 @@ return anyFailed and -1 or 1
 // ARGV[1] = slot member (the execution ID), ARGV[2] = limit,
 // ARGV[3] = admission score (unix seconds), ARGV[4] = TTL seconds for the keys,
 // ARGV[5] = 1 queue mode / 0 reject mode, ARGV[6] = max_queued (0 unbounded),
-// ARGV[7] = queue deadline (unix milliseconds, 0 = no bound)
+// ARGV[7] = queue deadline (unix milliseconds, 0 = no bound),
+// ARGV[8] = queue wait (milliseconds) this submission may spend in the line
 // Returns {code, position, added, promoted...}: code 1 admitted, 2 queued,
 // 0 refused at the limit, 3 refused because the queue is full. position is the
 // 1-based place in the line for a queued submission (0 otherwise), added is 1
@@ -735,7 +769,22 @@ local limit = tonumber(ARGV[2])
 local now = tonumber(ARGV[3])
 local ttl = tonumber(ARGV[4])
 local mode = tonumber(ARGV[5])
-redis.call('SET', KEYS[4], limit, 'EX', ttl)
+-- The line's own keys have to outlive the longest deadline they hold, and that
+-- is this submission's wait: expiring the line on the slot TTL alone takes the
+-- entry away before its deadline can be reached whenever a queue_timeout
+-- exceeds that TTL, and the parked execution then reads queued with nothing
+-- left to expire it. The execution's own keys are lengthened the same way
+-- (createExecution), so the two halves of one wait now share an outer bound.
+local waitMs = tonumber(ARGV[8]) or 0
+local lineTTL = ttl * 1000 + waitMs
+-- Never SHORTEN that bound either. A longer wait admitted earlier into this
+-- same line still holds a deadline further out than this submission's own, and
+-- lowering the keys' expiry to this one's would put that deadline back at risk.
+local current = redis.call('PTTL', KEYS[2])
+if current > 0 and current > lineTTL then
+    lineTTL = current
+end
+redis.call('SET', KEYS[4], limit, 'PX', lineTTL)
 -- Idempotency first, before the capacity check: a member that is already here
 -- was charged by an earlier attempt of the same admission, and re-deciding it
 -- would either charge twice or refuse a submission that already has its slot.
@@ -761,13 +810,13 @@ if maxQueued > 0 and waiting >= maxQueued then
     return {3, 0, 0}
 end
 local seq = redis.call('INCR', KEYS[3])
-redis.call('EXPIRE', KEYS[3], ttl)
+redis.call('PEXPIRE', KEYS[3], lineTTL)
 redis.call('ZADD', KEYS[2], seq, member)
-redis.call('EXPIRE', KEYS[2], ttl)
+redis.call('PEXPIRE', KEYS[2], lineTTL)
 local deadline = tonumber(ARGV[7])
 if deadline > 0 then
     redis.call('ZADD', KEYS[5], deadline, member)
-    redis.call('EXPIRE', KEYS[5], ttl)
+    redis.call('PEXPIRE', KEYS[5], lineTTL)
 end
 local position = redis.call('ZCARD', KEYS[2])
 local promoted = {}

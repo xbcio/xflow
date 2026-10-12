@@ -79,25 +79,30 @@ var _ engine.ConcurrencyQueueInspector = (*Store)(nil)
 // missing. A stale tag is a hint the sweep discards; a lost tag is a leak
 // nobody sweeps.
 //
+// wait is how long this call's state has to stay discoverable beyond the slot
+// TTL, and it is what keeps a long queue_timeout visible: the index is the only
+// path the expiry sweep has to a workflow's line, so an index expiring on the
+// slot TTL alone would hide waiters whose deadlines are further out than that
+// — the tag would lapse and nothing would ever expire them. Callers that
+// announce a release pass 0; the touch is extend-only, so they cannot shorten
+// what an admission asked for.
+//
 // The write cannot join the slot script — the index key carries no hash tag by
 // design, so Redis Cluster would refuse a script naming both it and the slot
 // set. It is therefore best effort, and a failure is logged rather than fatal:
 // the limit is enforced by the slot set, and the index only decides whether the
 // repair path can see it. A workflow that is written to again is registered
 // again, so a transient failure heals itself.
-func (s *Store) registerConcurrencyWorkflow(ctx context.Context, t namespace.Namespace, tag string) {
+func (s *Store) registerConcurrencyWorkflow(ctx context.Context, t namespace.Namespace, tag string, wait time.Duration) {
 	if tag == "" {
 		return
 	}
 	indexKey := concurrencyWorkflowIndexKey(t)
-	if err := s.rdb.SAdd(ctx, indexKey, tag).Err(); err != nil {
+	ttl := s.concurrencySlotTTL() + wait
+	if err := concurrencyIndexTouchLua.Run(ctx, s.rdb, []string{indexKey}, tag, ttl.Milliseconds()).Err(); err != nil {
 		if s.logger != nil {
 			s.logger.Error("workflow_concurrency_index_add_failed", "namespace", string(t), "tag", tag, "err", err)
 		}
-		return
-	}
-	if err := s.rdb.Expire(ctx, indexKey, s.concurrencySlotTTL()).Err(); err != nil && s.logger != nil {
-		s.logger.Error("workflow_concurrency_index_expire_failed", "namespace", string(t), "tag", tag, "err", err)
 	}
 }
 
@@ -187,18 +192,28 @@ type workflowAdmitResult struct {
 func (s *Store) admitWorkflowSlot(ctx context.Context, t namespace.Namespace, id types.ExecutionID, admission engine.ConcurrencyAdmission) (workflowAdmitResult, error) {
 	queueMode := admission.Mode == types.ConcurrencyModeQueue
 	deadlineMs := int64(0)
-	if queueMode && admission.QueueTimeout > 0 {
-		// The clock starts here, when the execution is parked. Measured from
-		// promotion it could never fire — a promoted execution is not waiting for
-		// anything — and a workflow whose limit never frees would hold
-		// submissions past their declared bound forever.
-		deadlineMs = time.Now().UTC().Add(admission.QueueTimeout).UnixMilli()
+	queueWaitMs := int64(0)
+	if queueMode {
+		// The line's keys are expired by the same wait the execution's own keys
+		// are lengthened by, so a queue_timeout longer than the slot TTL cannot
+		// take the parked entry away before its deadline. Passed in milliseconds
+		// because that is the granularity the script compares Redis's own PTTL
+		// in, and a wait rounded down to whole seconds would under-cover a
+		// sub-second one.
+		queueWaitMs = admission.QueueTimeout.Milliseconds()
+		if admission.QueueTimeout > 0 {
+			// The clock starts here, when the execution is parked. Measured from
+			// promotion it could never fire — a promoted execution is not waiting for
+			// anything — and a workflow whose limit never frees would hold
+			// submissions past their declared bound forever.
+			deadlineMs = time.Now().UTC().Add(admission.QueueTimeout).UnixMilli()
+		}
 	}
 	reply, err := workflowAdmitLua.Run(ctx, s.rdb,
 		concurrencyAdmitKeys(t, admission.Workflow),
 		concurrencySlotMember(id), admission.Limit,
 		time.Now().UTC().Unix(), int(s.concurrencySlotTTL().Seconds()),
-		concurrencyModeFlag(queueMode), admission.MaxQueued, deadlineMs,
+		concurrencyModeFlag(queueMode), admission.MaxQueued, deadlineMs, queueWaitMs,
 	).Slice()
 	if err != nil && err != redis.Nil {
 		return workflowAdmitResult{}, fmt.Errorf("admit workflow %q: %w", admission.Workflow, err)
@@ -209,6 +224,19 @@ func (s *Store) admitWorkflowSlot(ctx context.Context, t namespace.Namespace, id
 		added:    luaReplyInt(reply, 2) == 1,
 		promoted: luaReplyStrings(reply, 3),
 	}, nil
+}
+
+// concurrencyIndexWait is how long a workflow's index entry has to outlive the
+// slot TTL for one admission: its declared queue wait, and only in queue mode.
+// A REJECT-mode submission never takes a place in the line, so there is nothing
+// of its own waiting to be found; both admission paths ask the same question
+// through this one function so a seed cannot register a shorter index than a
+// submission of the same definition would.
+func concurrencyIndexWait(admission engine.ConcurrencyAdmission) time.Duration {
+	if admission.Mode != types.ConcurrencyModeQueue {
+		return 0
+	}
+	return admission.QueueTimeout
 }
 
 // concurrencyRefusal maps an admit reply code to the sentinel the caller
@@ -240,7 +268,11 @@ func (s *Store) CreateExecutionWithConcurrency(ctx context.Context, execution *e
 	// read back.
 	t := namespace.FromContext(ctx)
 	tag := workflowDigestTag(t, admission.Workflow)
-	s.registerConcurrencyWorkflow(ctx, t, tag)
+	// The index is registered for the whole declared wait, not just the slot TTL:
+	// a submission that ends up in the line has to stay discoverable to the
+	// expiry sweep for as long as it may wait, and for an over-limit submission
+	// the wait is exactly what it is about to be given.
+	s.registerConcurrencyWorkflow(ctx, t, tag, concurrencyIndexWait(admission))
 	admit, err := s.admitWorkflowSlot(ctx, t, execution.ID, admission)
 	if err != nil {
 		return engine.ConcurrencyAdmissionResult{}, err
@@ -399,7 +431,10 @@ func (s *Store) releaseWorkflowSlot(ctx context.Context, id types.ExecutionID, t
 	// before its charge: if this call turns out to drain the state, the tag has
 	// to be in the index for the sweep to notice anything the drain left behind,
 	// and registering after a failure here would leave nothing to notice with.
-	s.registerConcurrencyWorkflow(ctx, t, tag)
+	// No wait: a release announces nothing that has to outlive the slot TTL, and
+	// the touch is extend-only, so the waiters already in line keep the longer
+	// expiry they registered.
+	s.registerConcurrencyWorkflow(ctx, t, tag, 0)
 	reply, err := workflowReleaseLua.Run(ctx, s.rdb,
 		concurrencyReleaseKeys(t, tag),
 		concurrencySlotMember(id), time.Now().UTC().Unix(), int(s.concurrencySlotTTL().Seconds()),

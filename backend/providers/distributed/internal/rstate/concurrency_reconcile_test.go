@@ -74,9 +74,9 @@ func admitForSweep(t *testing.T, ctx context.Context, state *Store, g *graph.Gra
 // sweep, so nothing here can hide a leak from the mechanism that repairs it.
 func chargeSlotForSweep(t *testing.T, ctx context.Context, rdb *redis.Client, state *Store, workflow string, member types.ExecutionID, limit int, score int64) {
 	t.Helper()
-	state.registerConcurrencyWorkflow(ctx, namespace.Default, workflowDigestTag(namespace.Default, workflow))
+	state.registerConcurrencyWorkflow(ctx, namespace.Default, workflowDigestTag(namespace.Default, workflow), 0)
 	reply, err := workflowAdmitLua.Run(ctx, rdb, concurrencyAdmitKeys(namespace.Default, workflow),
-		concurrencySlotMember(member), limit, score, 3600, 0, 0, 0).Slice()
+		concurrencySlotMember(member), limit, score, 3600, 0, 0, 0, 0).Slice()
 	if err != nil {
 		t.Fatalf("charge slot for %q error = %v", member, err)
 	}
@@ -222,7 +222,7 @@ func TestSweepConcurrencySlotsDropsTagsForMissingSets(t *testing.T) {
 	_, rdb, state := newMiniredisStore(t)
 	g := sweepGraph(t, "conc-sweep-stale-tag")
 
-	state.registerConcurrencyWorkflow(ctx, namespace.Default, workflowDigestTag(namespace.Default, g.Name()))
+	state.registerConcurrencyWorkflow(ctx, namespace.Default, workflowDigestTag(namespace.Default, g.Name()), 0)
 
 	swept, err := state.ReconcileConcurrencySlots(ctx, 64)
 	if err != nil {

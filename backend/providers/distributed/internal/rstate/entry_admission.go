@@ -273,7 +273,10 @@ func (s *Store) seedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 	var admit workflowAdmitResult
 	if admission != nil {
 		concTag = workflowDigestTag(t, admission.Workflow)
-		s.registerConcurrencyWorkflow(ctx, t, concTag)
+		// Same wait as the submission path registers: a seed that ends up in the
+		// line has to stay discoverable to the expiry sweep for as long as it may
+		// wait, or its deadline passes with nothing left to notice it.
+		s.registerConcurrencyWorkflow(ctx, t, concTag, concurrencyIndexWait(*admission))
 		var err error
 		admit, err = s.admitWorkflowSlot(ctx, t, execID, *admission)
 		if err != nil {

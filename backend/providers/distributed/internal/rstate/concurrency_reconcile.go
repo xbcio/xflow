@@ -115,7 +115,7 @@ func (s *Store) sweepConcurrencySlotSet(ctx context.Context, t namespace.Namespa
 		// written to again, and every later admission or release registers the
 		// tag anew.
 		if exists, err := s.rdb.Exists(ctx, slotKey).Result(); err == nil && exists == 0 {
-			_ = s.rdb.SRem(ctx, concurrencyWorkflowIndexKey(t), tag).Err()
+			s.dropConcurrencyIndexIfIdle(ctx, t, tag)
 		}
 		return 0, s.fillConcurrencySlots(ctx, t, tag)
 	}
@@ -187,9 +187,33 @@ func (s *Store) sweepConcurrencySlotSet(ctx context.Context, t namespace.Namespa
 	}
 	if card == 0 {
 		_ = s.rdb.Del(ctx, slotKey).Err()
-		_ = s.rdb.SRem(ctx, concurrencyWorkflowIndexKey(t), tag).Err()
+		s.dropConcurrencyIndexIfIdle(ctx, t, tag)
 	}
 	return int(removed), s.fillConcurrencySlots(ctx, t, tag)
+}
+
+// dropConcurrencyIndexIfIdle removes a workflow's tag from its namespace index
+// once there is nothing left for a sweep to find, and keeps it while the
+// workflow still has a line.
+//
+// The line is why this is not a plain SRem. A non-empty queue is live state of
+// its own — waiters whose deadlines have not been reached — and it can outlive
+// the slot set: the set is only written while something holds a slot, while a
+// queue_timeout can be longer than the slot TTL. Dropping the tag in that window
+// would hide the line from the expiry sweep, which reaches every workflow
+// through this index and nowhere else, and the waiters would then sit queued
+// with nothing left to time them out — the failure the index's own wait-extended
+// expiry exists to prevent. An empty ZSET does not exist in Redis, so the key's
+// presence is exactly "the line is non-empty".
+//
+// A read failure keeps the tag for the same reason: a stale tag costs the sweep
+// one read, a lost one hides work.
+func (s *Store) dropConcurrencyIndexIfIdle(ctx context.Context, t namespace.Namespace, tag string) {
+	queued, err := s.rdb.Exists(ctx, concurrencyQueueKeyForTag(t, tag)).Result()
+	if err != nil || queued != 0 {
+		return
+	}
+	_ = s.rdb.SRem(ctx, concurrencyWorkflowIndexKey(t), tag).Err()
 }
 
 // fillConcurrencySlots hands free capacity to the head of the line, the repair
