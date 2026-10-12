@@ -2089,10 +2089,31 @@ func (m *workflowControlModule) handleSeedExecution(w http.ResponseWriter, r *ht
 		})
 		return
 	}
+	// A refused seed is not a failed call and not an admission either: the
+	// workflow's concurrency policy said no and nothing was persisted, so the
+	// entry-unit result is still the runner's. 429 with the state in the body —
+	// the same status, the same code vocabulary and the same Retry-After floor
+	// the execute path uses for the same two refusals — is what tells the runner
+	// to withhold the Kafka offset and retry rather than commit a batch no
+	// execution will ever run (decision 5).
+	if resp.State == engine.AdmissionStateOverLimit || resp.State == engine.AdmissionStateQueueFull {
+		w.Header().Set("Retry-After", strconv.Itoa(concurrencyRetryAfterSeconds))
+		code := "workflow_concurrency_limit"
+		if resp.State == engine.AdmissionStateQueueFull {
+			code = "workflow_concurrency_queue_full"
+		}
+		writeJSON(w, http.StatusTooManyRequests, protocol.SeedExecutionRefusal{
+			State: string(resp.State),
+			Error: code,
+		})
+		return
+	}
 	writeJSON(w, http.StatusOK, protocol.SeedExecutionResponse{
-		State:       string(resp.State),
-		ExecutionID: string(resp.ExecutionID),
-		Duplicate:   resp.Duplicate,
+		State:         string(resp.State),
+		ExecutionID:   string(resp.ExecutionID),
+		Duplicate:     resp.Duplicate,
+		Queued:        resp.Queued,
+		QueuePosition: resp.QueuePosition,
 	})
 }
 
