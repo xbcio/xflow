@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/xbcio/xflow/engine/graph"
@@ -129,14 +130,6 @@ func (e *Engine) startLimitedExecution(ctx context.Context, snap *ExecutionSnaps
 	if !ok {
 		return "", fmt.Errorf("workflow %q: %w", admission.Workflow, ErrConcurrencyUnsupported)
 	}
-	// QUEUE mode lands in a second phase. Until then it must be refused rather
-	// than downgraded: admitting an over-limit submission would silently break
-	// the limit the author declared, and queue mode is the DEFAULT mode of the
-	// bare-int shorthand, so "silently admit" would be wrong for most
-	// definitions that use it.
-	if admission.Mode == types.ConcurrencyModeQueue {
-		return "", fmt.Errorf("workflow %q: %w", admission.Workflow, ErrConcurrencyQueueUnsupported)
-	}
 
 	entries := make([]OutboxEntry, 0, len(tasks))
 	for _, initial := range tasks {
@@ -147,6 +140,14 @@ func (e *Engine) startLimitedExecution(ctx context.Context, snap *ExecutionSnaps
 	}
 	res, err := state.CreateExecutionWithConcurrency(ctx, snap, entries, *admission)
 	if err != nil {
+		// QUEUE mode is refused by the store, and it is refused before anything
+		// is written. Its sentinel is returned as-is rather than dressed up as a
+		// creation failure: a definition that uses the queue is not a broken
+		// submission, it is asking for a capability the store has said it lacks,
+		// and that distinction is what makes the refusal actionable.
+		if errors.Is(err, ErrConcurrencyQueueUnsupported) {
+			return "", fmt.Errorf("workflow %q: %w", admission.Workflow, ErrConcurrencyQueueUnsupported)
+		}
 		return "", fmt.Errorf("create execution: %w", err)
 	}
 	e.cacheExecutionGraph(snap.ID, snap.Graph)

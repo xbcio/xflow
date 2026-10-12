@@ -25,11 +25,14 @@ var ErrConcurrencyLimit = errors.New("workflow concurrency limit reached")
 var ErrConcurrencyUnsupported = errors.New("state store does not support execution concurrency limits")
 
 // ErrConcurrencyQueueUnsupported is returned when a workflow asks for QUEUE
-// mode on a backend that implements slot admission but not the queue.
+// mode, which no StateStore implements yet.
 //
 // It exists so queue mode can land in two phases without a release window in
 // which an over-limit submission is admitted: until the queue is implemented,
-// queue mode is refused rather than silently downgraded to admit-anyway.
+// queue mode is refused rather than silently downgraded to admit-anyway. That
+// refusal is the store's decision, not the engine's — only the store knows
+// whether it can park an execution — and it is what a store must return when
+// it cannot.
 var ErrConcurrencyQueueUnsupported = errors.New("state store does not support concurrency queue mode")
 
 // ConcurrencyAdmission describes the slot one submission contends for.
