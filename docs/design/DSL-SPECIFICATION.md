@@ -1630,6 +1630,7 @@ execID, err := eng.Invoke(ctx, workflowID, xflow.Trigger("order_created"), event
   - timer / cron 在调用 `Emit` 前做 dedup；如果 `Emit` 返回错误，当前 handler 不会在节点内部重试这次触发。
   - webhook 会先生成或提取 event ID，再做 dedup；如果 `Emit` 或 dedup 返回错误，错误会直接返回给调用方，后续是否重试取决于上游 HTTP caller / 网关，而不是由 XFlow webhook trigger 统一补偿。
   - 因此重复投递和遗漏都仍然可能发生；业务侧必须保持幂等，并按上游 source 的重试策略设计补偿。
+  - cron 另有 `misfire` / `catchup_window` / `max_catchup` / `overlap` 四个可选参数，分别决定"重启后是否补跑错过的计划时刻"和"上一次 run 未结束时是否丢弃本次投递"；被拒绝或被丢弃的投递本身仍然不重试。见下一节。
 
 - **Kafka / Redis Hub**
   - XFlow 会把收到的消息归一化为 `TriggerEvent`，并在 `Emit` 前按 event ID 做 dedup。
@@ -1640,6 +1641,52 @@ execID, err := eng.Invoke(ctx, workflowID, xflow.Trigger("order_created"), event
 - **节点作者约束**
   - 所有 trigger handler 必须可取消、非阻塞、幂等，并在 `Emit` 前执行 dedup / lock / state 协调。
   - 如需 stronger delivery guarantee，必须由具体 trigger adapter 和业务幂等键一起定义，而不是默认由 DSL 或 engine core 提供。
+
+#### Cron 触发的补跑与重叠策略
+
+`xflow.trigger.cron` 除 `expression` / `timezone` 外还有四个可选参数：三个回答"触发器没在托管这段时间里错过的计划时刻怎么办"，一个回答"上次那次还没跑完、下一个计划时刻又到了怎么办"。
+
+```yaml
+nodes:
+  - name: nightly
+    type: xflow.trigger.cron
+    kind: trigger
+    parameters:
+      expression: "0 3 * * *"
+      timezone: Asia/Shanghai
+      misfire: fire_all        # skip(默认) | fire_once | fire_all
+      catchup_window: 6h       # 默认 1h
+      max_catchup: 20          # 默认 10
+      overlap: skip            # allow(默认) | skip
+```
+
+判定"哪些时刻被错过了"的依据不是进程内状态，而是持久化在 `TriggerState` 里的水位：scope `cron:<workflow>:<node>`，键 `last_scheduled`，值是最近一次落地的计划时刻。它与投递用的 fire key 同一个渲染格式，便于把水位和 admission key 对着看。
+
+| `misfire` | 语义 |
+|---|---|
+| `skip`（默认） | 承认这些时刻已经过去，一个都不补；水位推进到不晚于激活时刻的最后一个计划时刻 |
+| `fire_once` | 只补最近的那一个 |
+| `fire_all` | 按计划顺序从旧到新逐个补，受窗口与上限截断 |
+
+- **首次激活不补跑**：没有任何水位记录意味着这些时刻从未属于这个触发器，不算 missed。
+- `catchup_window` 限制回看范围（更早的时刻根本不进入计算），`max_catchup` 限制一次激活最多补几个（保留最新的若干个，其余计入 missed）。
+- **补跑就是那次投递**：补跑事件的事件 ID 与计划时刻一致，因此与"那次准点投递"落在同一个去重键上，重启与多副本都不会把它执行两遍。
+- 补跑在 `Activate` 内、live schedule 启动之前同步发出，事件 `data.catchup` 为 `true`；`data.scheduled_time` 始终是**计划时刻**，事件的 `Time` 才是观测时刻。工作流若要区分"准点"与"补跑"（结账、按周期计费一类），读 `catchup`；其余场景可以忽略它。
+
+| `overlap` | 语义 |
+|---|---|
+| `allow`（默认） | 照常发起：同一个 schedule 的两个 run 可能同时在跑（该参数存在之前的行为） |
+| `skip` | 丢弃这次投递，水位照常推进（被丢弃的时刻不会在下次激活时被重新提出） |
+
+`overlap=queue` 被刻意拒绝，激活时直接报错并在错误信息里指出替代写法：把 run 串起来不是触发器有权承诺的事，它是工作流设置 `settings.concurrency` 的 `mode: queue` + `limit: 1`，对进入该工作流的所有入口生效；触发器参数只能约束本节点的投递，却要对着一个它并不拥有的设置去强制。
+
+`skip` 需要回答"上次那次执行是否已终态"，因此依赖运行时的一个可选能力 `types.ExecutionStatusReader`：触发器在 `TriggerState` 里记下最近一次投递返回的 execution id，下一个计划时刻之前问它的状态，只有"确实还没结束"才丢弃（排队中同样算没结束）。缺少该能力时（runtime 没有 execution 存储可以问），激活阶段打印一条 WARN 并降级为 `allow`——问不到的触发器不应声称自己做了决定，更不应因为问不到就让 schedule 停下来；状态读失败同样按"放行"处理。经控制面 entry-seed 投递时该策略无法执行（admission 的返回不携带 execution id），激活时同样打一条 WARN。
+
+被丢弃的投递（cron 的一次 firing、timer 的一次 tick）一律不重试：下一个计划时刻就是新的尝试，重放会把一个被限流的工作流变成一堆过期 tick 的积压。丢弃不是静默的——每个丢弃都有一条 WARN 日志和计数 `xflow_trigger_fire_dropped_total{reason}`：`overlap` 是策略按定义生效，`refused` 是工作流自身的并发策略拒绝了这次投递（预期内的限流，不是故障），`transport` 是控制面不可达且重试次数已用尽，`emit_error` 是内嵌引擎不收这次投递。这个计数器是这些丢弃唯一的持久痕迹：没有 execution、没有 offset，水位只说明那个时刻过去了。
+
+以上四个参数的默认值以 handler 解析时的兜底值形式存在，不写进 `ParamSpec.Default`——`Default` 会被 SDK 写进每个工作流的 params 并改变定义哈希，兜底值不会。因此既有定义的哈希不变。
+
+`xflow.trigger.timer` 没有对应的补跑参数：一次 tick 是一个时刻，晚到的 tick 不会因为补上而有意义，错过的就是错过了。它保证的是身份：事件 ID 与投递用的 fire key 都由**计划 tick**（`tick.Truncate(interval)`，UTC）派生，而不是由回调被调度到的时刻派生，因此几个副本观测到同一 tick 时落在同一个身份上，去重才是有效的。
 
 #### Supply 节点与 `dependency_edges`
 
