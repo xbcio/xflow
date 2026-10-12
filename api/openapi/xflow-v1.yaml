@@ -1273,10 +1273,14 @@ paths:
 
         **Event identity.** The event id is taken from the header the entry
         declares (`event_id_header`); without one it is `sha256(body)` bucketed
-        to the minute. A redelivery of the same event never creates a second
-        execution and is answered with the execution id that already exists —
-        409 `conflict` when the redelivered payload carries a different observed
-        time, `duplicate` on the accepted same-content case.
+        to the minute. A redelivery of the same event — one event id carrying
+        the same body, which is what a sender retries when it never saw an
+        answer — never creates a second execution: it is answered 200 with
+        `duplicate: true` and the execution id that already exists. The
+        comparison covers what the delivery IS (its id and its body), never what
+        the server happened to observe while receiving it, so a retry cannot be
+        mistaken for a different delivery. Reusing one event id for a different
+        body is the one genuine conflict: 409 `conflict`, same execution id.
 
         **Limits.** The body is read under the entry's declared
         `max_body_bytes` (default 1 MiB) and answered 413 when exceeded.
@@ -1310,8 +1314,11 @@ paths:
       responses:
         "200":
           description: |
-            The event was admitted (or was already admitted under this id). The
-            execution id is the same one a redelivery returns.
+            The event was admitted. A redelivery of the same event id with the
+            same body lands here too, with `duplicate: true` and the execution id
+            the first delivery created — the answer a retrying sender needs, and
+            the reason a reused event id is only a conflict when its content
+            differs.
           content:
             application/json:
               schema:
@@ -1344,8 +1351,9 @@ paths:
                 $ref: "#/components/schemas/WebhookEntryError"
         "409":
           description: |
-            The event id was already admitted with a different result. The body
-            still names the execution that exists.
+            The event id was already admitted carrying a different body, so this
+            is a different delivery wearing an identity that is taken. Nothing
+            was executed for it. The body still names the execution that exists.
           content:
             application/json:
               schema:
@@ -2535,10 +2543,11 @@ components:
         The bare (non-enveloped) entry-seed admission result, as the runner
         protocol face defines it (spec §0.1/§8.2). `state` is the discriminator:
         `accepted` (a new execution, or `duplicate: true` for a redelivery the
-        engine recognised as the same result), `queued` (accepted into the
-        workflow's concurrency queue), or `conflict` (the event id was already
-        admitted with a different result — the 409 case, which still carries the
-        existing execution id). A refusal is the separate 429 shape.
+        engine recognised as the same content under the same event id), `queued`
+        (accepted into the workflow's concurrency queue), or `conflict` (the
+        event id was already admitted carrying different content — the 409 case,
+        which still carries the existing execution id). A refusal is the
+        separate 429 shape.
       required: [state, execution_id]
       properties:
         state:
