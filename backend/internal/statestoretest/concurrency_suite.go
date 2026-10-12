@@ -11,6 +11,7 @@ package statestoretest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -46,6 +47,9 @@ func RunStateStoreConcurrencySuite(t *testing.T, newStore StoreFactory) {
 	})
 	t.Run("CheckCompletionConvergence", func(t *testing.T) {
 		checkCompletionConvergenceCase(t, newStore(t))
+	})
+	t.Run("ConcurrencyAdmissionAtomic", func(t *testing.T) {
+		concurrencyAdmissionAtomicCase(t, newStore(t))
 	})
 }
 
@@ -416,6 +420,90 @@ func checkCompletionConvergenceCase(t *testing.T, state engine.StateStore) {
 // node1Mode is the suspend mode used by suspendThenDeliverSignalCase. Kept as
 // a package-level var so the cases read cleanly.
 var node1Mode = types.ModeSignal
+
+// concurrencyAdmissionAtomicCase hammers admission with far more submitters
+// than slots, all released at once.
+//
+// The sequential contract cases prove the limit is checked before the
+// execution is persisted; this one proves the check-and-charge survives real
+// contention. The two failures it is looking for — a read-then-write that
+// admits two submissions past one slot, and a charge that is not paired with
+// exactly one release — only appear when the submitters actually overlap,
+// which is why it runs under -race with the barrier rather than with plain
+// goroutines.
+func concurrencyAdmissionAtomicCase(t *testing.T, state engine.StateStore) {
+	limited, ok := state.(engine.ConcurrencyLimitedStateStore)
+	if !ok {
+		t.Skipf("%T does not implement engine.ConcurrencyLimitedStateStore", state)
+	}
+	const (
+		limit      = 4
+		submitters = 32
+	)
+	ctx := context.Background()
+	g := concurrencyGraph(t, "conc-race")
+	admission := concurrencyAdmissionFor(t, g, limit)
+	admissionCtx := concurrencyAdmissionContext(ctx, admission)
+
+	// Snapshots are built up front: a worker must only do the one store call,
+	// and t.Fatalf from a non-test goroutine is not allowed.
+	snaps := make([]*engine.ExecutionSnapshot, submitters)
+	entries := make([][]engine.OutboxEntry, submitters)
+	for i := range snaps {
+		snaps[i], entries[i] = concurrencySnapshot(t, g)
+	}
+
+	errs := make([]error, submitters)
+	start, wait := barrier(submitters)
+	var wg sync.WaitGroup
+	wg.Add(submitters)
+	for i := range snaps {
+		go func(i int) {
+			defer wg.Done()
+			wait()
+			_, errs[i] = limited.CreateExecutionWithConcurrency(admissionCtx, snaps[i], entries[i], admission)
+		}(i)
+	}
+	start()
+	wg.Wait()
+
+	admitted := 0
+	for i, err := range errs {
+		switch {
+		case err == nil:
+			admitted++
+		case errors.Is(err, engine.ErrConcurrencyLimit):
+			// The expected outcome for every loser.
+		default:
+			t.Fatalf("submission %d error = %v, want admission or ErrConcurrencyLimit", i, err)
+		}
+	}
+	if admitted != limit {
+		t.Fatalf("admitted %d of %d submissions for %d slots", admitted, submitters, limit)
+	}
+
+	// Every admitted execution must release exactly one slot. If a charge were
+	// lost, fewer than `limit` slots come back; if one were double-charged, the
+	// limit is not actually reached either.
+	for i, err := range errs {
+		if err != nil {
+			continue
+		}
+		if err := state.UpdateExecutionStatus(admissionCtx, snaps[i].ID, types.ExecutionStatusSuccess, ""); err != nil {
+			t.Fatalf("UpdateExecutionStatus(%q) error = %v", snaps[i].ID, err)
+		}
+	}
+	for i := 0; i < limit; i++ {
+		snap, ents := concurrencySnapshot(t, g)
+		if _, err := limited.CreateExecutionWithConcurrency(admissionCtx, snap, ents, admission); err != nil {
+			t.Fatalf("submission %d after the slots were released error = %v, want admission", i, err)
+		}
+	}
+	snap, ents := concurrencySnapshot(t, g)
+	if _, err := limited.CreateExecutionWithConcurrency(admissionCtx, snap, ents, admission); !errors.Is(err, engine.ErrConcurrencyLimit) {
+		t.Fatalf("submission past the refilled limit error = %v, want ErrConcurrencyLimit", err)
+	}
+}
 
 // timeAfter and shortSleep are shimmed so callers can swap in fakes for very
 // long suites if needed; today they delegate to time.After.
