@@ -7,9 +7,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -456,6 +458,136 @@ func TestWebhookEntryUnknownTargetsAreNotFound(t *testing.T) {
 				t.Fatalf("status = %d (%s), want 404", rec.Code, rec.Body.String())
 			}
 		})
+	}
+}
+
+// recordingLogger captures every line the server logs, so a test can assert on
+// what did NOT reach the log. The webhook route's log lines are the only
+// operator-visible record of a rejected request, which makes them the one place
+// the secret and the signature could leak without failing anything else.
+type recordingLogger struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *recordingLogger) record(msg string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, fmt.Sprint(append([]any{msg}, args...)...))
+}
+
+func (l *recordingLogger) recordf(format string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, fmt.Sprintf(format, args...))
+}
+
+func (l *recordingLogger) Debug(msg string, args ...any) { l.record(msg, args...) }
+func (l *recordingLogger) Debugf(format string, args ...any) {
+	l.recordf(format, args...)
+}
+func (l *recordingLogger) Info(msg string, args ...any) { l.record(msg, args...) }
+func (l *recordingLogger) Infof(format string, args ...any) {
+	l.recordf(format, args...)
+}
+func (l *recordingLogger) Warn(msg string, args ...any) { l.record(msg, args...) }
+func (l *recordingLogger) Warnf(format string, args ...any) {
+	l.recordf(format, args...)
+}
+func (l *recordingLogger) Error(msg string, args ...any) { l.record(msg, args...) }
+func (l *recordingLogger) Errorf(format string, args ...any) {
+	l.recordf(format, args...)
+}
+func (l *recordingLogger) Panic(msg string, args ...any) { l.record(msg, args...) }
+func (l *recordingLogger) Panicf(format string, args ...any) {
+	l.recordf(format, args...)
+}
+
+// mentions reports whether any logged line contains needle.
+func (l *recordingLogger) mentions(needle string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, line := range l.lines {
+		if strings.Contains(line, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestWebhookEntryNeverLogsTheSecretOrTheSignature covers the half of the
+// route's confidentiality claim that a response body cannot: the log lines the
+// rejected paths emit. Every rejection is logged (that log line is the only
+// operator-visible record that the request happened), so the secret, the
+// signature and the supply name must not be among what is logged.
+//
+// The middle case is the sharp one: the request carries a signature computed
+// with the REAL secret — over a different body, so it fails — which is the only
+// way a log line could plausibly pick up the secret's bytes.
+func TestWebhookEntryNeverLogsTheSecretOrTheSignature(t *testing.T) {
+	log := &recordingLogger{}
+	supplies := memstore.New()
+	srv, err := New(Config{
+		PrincipalAuth: staticPrincipalAuth{err: errors.New("no principal")},
+		Authorizer:    ScopeAuthorizer{},
+		AuditSink:     NewInMemoryAuditSink(),
+		Supplies:      supplies,
+		Logger:        log,
+	})
+	if err != nil {
+		t.Fatalf("apiserver.New: %v", err)
+	}
+	id, _, err := srv.RegisterWorkflow(context.Background(), namespace.Default, webhookWorkflowDef(webhookTestParams()))
+	if err != nil {
+		t.Fatalf("RegisterWorkflow: %v", err)
+	}
+
+	body := []byte(`{"order":"A-1"}`)
+
+	// (1) The secret is not stored yet: the route fails closed and the operator
+	// is told which entry is unconfigured.
+	req := httptest.NewRequest(http.MethodPost, webhookHookPath(id, "in"), strings.NewReader(string(body)))
+	req.Header.Set("X-Event-Id", "evt-unconfigured")
+	signWebhookRequest(req, body, webhookTestSecret)
+	if rec := serveWebhook(t, srv, req); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d (%s), want 503", rec.Code, rec.Body.String())
+	}
+
+	putWebhookSecret(t, supplies, "hook-secret", webhookTestSecret)
+
+	// (2) The real secret signs a different body: a wrong signature whose bytes
+	// are derived from the secret.
+	mac := hmac.New(sha256.New, []byte(webhookTestSecret))
+	mac.Write([]byte(`{"order":"A-2"}`))
+	wrongSignature := webhookSignatureScheme + hex.EncodeToString(mac.Sum(nil))
+	req = httptest.NewRequest(http.MethodPost, webhookHookPath(id, "in"), strings.NewReader(string(body)))
+	req.Header.Set("X-Event-Id", "evt-wrong-signature")
+	req.Header.Set(webhookSignatureHeader, wrongSignature)
+	if rec := serveWebhook(t, srv, req); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d (%s), want 401", rec.Code, rec.Body.String())
+	}
+
+	// (3) A well-formed request, which logs nothing but must still not have
+	// logged the secret anywhere on the way through.
+	req = httptest.NewRequest(http.MethodPost, webhookHookPath(id, "in"), strings.NewReader(string(body)))
+	req.Header.Set("X-Event-Id", "evt-ok")
+	signWebhookRequest(req, body, webhookTestSecret)
+	rec := serveWebhook(t, srv, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s), want 200", rec.Code, rec.Body.String())
+	}
+
+	if len(log.lines) == 0 {
+		t.Fatal("no log lines were recorded, so this test proved nothing — the rejected paths must log")
+	}
+	if log.mentions(webhookTestSecret) {
+		t.Fatalf("a log line carried the signing secret: %q", log.lines)
+	}
+	if log.mentions(strings.TrimPrefix(wrongSignature, webhookSignatureScheme)) {
+		t.Fatalf("a log line carried the signature: %q", log.lines)
+	}
+	if log.mentions("hook-secret") {
+		t.Fatalf("a log line carried the supply resource name: %q", log.lines)
 	}
 }
 
