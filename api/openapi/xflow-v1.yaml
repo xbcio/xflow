@@ -518,13 +518,16 @@ paths:
                     trace_id: 0123456789abcdef0123456789abcdef
         "503":
           description: |
-            The workflow declares `mode: queue` and this server's state store
-            cannot park executions, so the submission was refused rather than
+            The definition declares a concurrency limit this server's state
+            store cannot honour, so the submission was refused rather than
             silently downgraded — admitting it would break the limit the
-            definition declared. The code is `workflow_concurrency_unavailable`
-            and it is not retryable in any useful sense: the answer changes when
-            the deployment does, not when the caller retries. There is no
-            `Retry-After` for that reason.
+            definition declared. Two causes share the code
+            `workflow_concurrency_unavailable`: the workflow asks for
+            `mode: queue` and the store cannot park executions, or the store
+            cannot enforce a limit at all. It is not retryable in any useful
+            sense: the answer changes when the deployment does, not when the
+            caller retries. There is no `Retry-After` for that reason, and
+            nothing was persisted in either case.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
@@ -539,6 +542,13 @@ paths:
                     success: false
                     code: workflow_concurrency_unavailable
                     message: workflow concurrency queue is not available on this server
+                    trace_id: 0123456789abcdef0123456789abcdef
+                workflowConcurrencyLimitsUnavailable:
+                  summary: The server's state store cannot enforce a concurrency limit at all.
+                  value:
+                    success: false
+                    code: workflow_concurrency_unavailable
+                    message: workflow concurrency is not available on this server
                     trace_id: 0123456789abcdef0123456789abcdef
         default:
           $ref: "#/components/responses/DefaultError"
@@ -613,10 +623,12 @@ paths:
                     trace_id: 0123456789abcdef0123456789abcdef
         "503":
           description: |
-            The workflow declares `mode: queue` and this server's state store
-            cannot park executions. Same contract as POST /v1/workflows/execute:
-            the code is `workflow_concurrency_unavailable`, nothing was
-            persisted, and retrying does not change the answer.
+            The definition declares a concurrency limit this server's state
+            store cannot honour — either it cannot park executions for
+            `mode: queue`, or it cannot enforce a limit at all. Same contract as
+            POST /v1/workflows/execute: the code is
+            `workflow_concurrency_unavailable`, nothing was persisted, and
+            retrying does not change the answer.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
@@ -631,6 +643,13 @@ paths:
                     success: false
                     code: workflow_concurrency_unavailable
                     message: workflow concurrency queue is not available on this server
+                    trace_id: 0123456789abcdef0123456789abcdef
+                workflowConcurrencyLimitsUnavailable:
+                  summary: The server's state store cannot enforce a concurrency limit at all.
+                  value:
+                    success: false
+                    code: workflow_concurrency_unavailable
+                    message: workflow concurrency is not available on this server
                     trace_id: 0123456789abcdef0123456789abcdef
         default:
           $ref: "#/components/responses/DefaultError"
