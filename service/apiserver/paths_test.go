@@ -131,6 +131,16 @@ var guardSamples = []guardSample{
 	{"PathCurrentUser", PathCurrentUser, http.MethodGet, "/v1/current-user"},
 
 	{"PathSupplyByName", PathSupplyByName, http.MethodGet, "/v1/supplies/rules"},
+
+	// PathWebhookEntry is the one user-facing path NOT behind the authz wrapper:
+	// its authentication is the per-entry HMAC signature (an external sender has
+	// no platform principal to present), so the behavioral guard below exempts it
+	// and TestWebhookEntryRejectsBadSignature proves the exemption is a different
+	// lock rather than a hole. The sample is a well-formed three-segment shape:
+	// the route is a path-only pattern (the HTTP method belongs to the entry's own
+	// webhook node), so the probe's method is immaterial.
+	{"PathWebhookEntry", PathWebhookEntry, http.MethodPost, "/v1/hooks/default/wf-1/entry"},
+
 	// The sample digest MUST be format-valid (sha256:<64 hex>): the artifact
 	// route validates the digest in the route resolver BEFORE authz, and an
 	// invalid digest yields 404 (route_not_found) from authzWrapResolved rather

@@ -398,6 +398,29 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 		art.runnerAuth = s.cp.Authenticator()
 		s.modules = append(s.modules, art)
 	}
+	// The webhook module is the other side of "the control plane hosts the entry
+	// units": wherever entry units are dispatched as durable activations, a
+	// webhook entry has no runner to live on, so this process serves its route.
+	// The gate is the same one the activation path uses (an EntryActivationStore
+	// is configured), so "no activation is written for a webhook unit" and "this
+	// route exists" cannot drift apart -- a deployment that hosts no activations
+	// keeps the embedded engine's WebhookRuntime and serves no such route.
+	//
+	// Unlike every other module this one is NOT gated on PrincipalAuth: its
+	// authentication is the per-entry HMAC signature, not a platform principal
+	// (see module_webhook.go). It is gated on the supplies store instead, since
+	// a deployment that cannot read the secret can never authenticate a caller
+	// and would serve a route that answers 503 to everything.
+	if s.cp.EntryActivationStore() != nil && cfg.Supplies != nil {
+		hook := newWebhookModule(s.cp)
+		hook.supplies = cfg.Supplies
+		hook.log = cfg.Logger
+		s.modules = append(s.modules, hook)
+		// Registration must refuse a server-hosted webhook entry that declares
+		// no secret. The flag is derived from the same predicate that mounted the
+		// route above, so "this process serves webhook routes" has one answer.
+		ctrlModule.webhookRoutesHosted = true
+	}
 	return s, nil
 }
 

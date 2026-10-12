@@ -46,6 +46,18 @@ const (
 	PathSupplyByName     = "/v1/supplies/{name}"
 	PathArtifactByDigest = "/v1/artifacts/{digest}"
 
+	// PathWebhookEntry is the server-hosted webhook entry route. The workflow
+	// id and entry unit are in the PATH rather than in a header or a query so
+	// the sender's URL is the whole address of one entry — the shape every
+	// webhook provider's configuration form expects. The HTTP method is NOT part
+	// of the pattern: it belongs to the entry's own webhook node (its `method`
+	// parameter), so the mux cannot select on it and the handler compares.
+	//
+	// It is registered OUTSIDE the authz wrapper on purpose: the authentication
+	// for this route is the per-entry HMAC signature, which is what an external
+	// sender can actually produce. See module_webhook.go.
+	PathWebhookEntry = "/v1/hooks/{namespace}/{workflow_id}/{entry_unit}"
+
 	PathManagementLeader     = "/v1/management/leader"
 	PathManagementRunners    = "/v1/management/runners"
 	PathManagementRunnerByID = "/v1/management/runners/{id}"
@@ -113,6 +125,8 @@ var UserFacingPaths = []string{
 
 	PathSupplyByName,
 	PathArtifactByDigest,
+
+	PathWebhookEntry,
 
 	PathManagementLeader,
 	PathManagementRunners,
