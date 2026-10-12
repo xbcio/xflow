@@ -206,7 +206,13 @@ func (e *Engine) commitGroup(ctx context.Context, g *graph.Graph, lease *GroupLe
 		Fatal:        fatal,
 		Error:        errMsg,
 		Exits:        reqExits,
-		Downstream:   downstream,
+		// The group's own declared mode, not the workflow's: a transient group
+		// inside a durable workflow is the case that needs the backend to apply
+		// a different retention, while a transient WORKFLOW already shortens
+		// every key it owns at completion (shortenTransientCompletionTTL), so
+		// the two never need to be summed.
+		Transient:  meta.Transient(),
+		Downstream: downstream,
 	})
 	if err != nil {
 		return fmt.Errorf("commit group %q: %w", meta.Name, err)

@@ -87,6 +87,17 @@ type GroupCommitRequest struct {
 	Exits        []GroupExitResult
 	Error        string
 	Fatal        bool
+	// Transient carries the group's declared mode (groups[].mode: transient)
+	// into the commit so the backend can hold the group's artifacts — boundary
+	// exits, unit status, lease keys — to the short completion retention instead
+	// of the execution TTL once the execution reaches a terminal state. While
+	// the execution runs, the keys keep the normal retention so downstream
+	// $('exit') reads stay valid; see the transient group design.
+	//
+	// The flag is engine-derived from the compiled graph, never
+	// runner-controlled. A backend that does not implement TTL-bounded
+	// retention treats it as a no-op.
+	Transient bool
 	// Downstream 是本次组执行点亮的下游 unit 到达描述（复用 DownstreamArrival，
 	// 见 atomic.go）。commit 在同一原子转换里对每个下游 unit 做 DECR in-degree +
 	// active 计数 + wait_all/wait_any 阈值判定，并按结果写 execute/skip outbox intent。

@@ -84,13 +84,22 @@ type GroupMeta struct {
 	// originates from the group's synthetic error output, not from any one
 	// member. Resolved once at compile time (compileOneGroup) and consumed by
 	// buildUnitEdges to synthesize the matching UnitEdge/BoundaryEdge pairs.
-	ErrorOutputs       []BoundaryEndpoint `json:",omitempty"`
-	Retry              *types.RetrySettings
-	Timeout            time.Duration
+	ErrorOutputs []BoundaryEndpoint `json:",omitempty"`
+	Retry        *types.RetrySettings
+	Timeout      time.Duration
+	// Mode is the group's declared group mode (types.GroupModeDurable or
+	// types.GroupModeTransient), carried verbatim from GroupDef.Mode. Read it
+	// through Transient rather than comparing it by hand.
 	Mode               string
 	PackageHash        string
 	ActivationReplicas uint32 `json:",omitempty"`
 }
+
+// Transient reports whether this group opted into the short-TTL mode
+// (groups[].mode: transient). The group commits like a durable one; the
+// retention difference — completion TTL instead of the execution TTL — is
+// applied by the backend.
+func (gm GroupMeta) Transient() bool { return gm.Mode == types.GroupModeTransient }
 
 // buildUnits constructs the durable unit graph. Ungrouped nodes become UnitNode
 // units (preserving original node index order); each group collapses into a
