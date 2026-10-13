@@ -860,7 +860,10 @@ func (r *Registry) AddWorkflow(ctx context.Context, rec backend.WorkflowRecord) 
 	existing, err := r.GetWorkflowByKey(ctx, rec.Key)
 	if err == nil {
 		if existing.DefinitionHash != rec.DefinitionHash {
-			return backend.WorkflowRecord{}, backend.ErrWorkflowConflict
+			// The fast path enforces the same rule as the add script: the
+			// (name, version) key is live under a different definition, so the
+			// label is already published and cannot resolve to two definitions.
+			return backend.WorkflowRecord{}, &backend.WorkflowVersionImmutableError{Version: rec.Version}
 		}
 		return existing, nil
 	}
