@@ -88,7 +88,7 @@ export function validateSpec(spec: unknown, registries: SpecRegistries = {}): Sp
   }
   const elements = spec.elements;
   const root = spec.root;
-  if (typeof root !== "string" || !Object.prototype.hasOwnProperty.call(elements, root)) {
+  if (typeof root !== "string" || root === "" || !Object.prototype.hasOwnProperty.call(elements, root)) {
     report("/root", "root", `root ${JSON.stringify(root)} does not name an element`);
   }
 
@@ -145,7 +145,7 @@ export function validateSpec(spec: unknown, registries: SpecRegistries = {}): Sp
     }
     state.set(id, 2);
   };
-  if (typeof root === "string" && Object.prototype.hasOwnProperty.call(elements, root)) visit(root, false);
+  if (typeof root === "string" && root !== "" && Object.prototype.hasOwnProperty.call(elements, root)) visit(root, false);
   for (const id of Object.keys(elements)) {
     if (!state.has(id)) {
       report(joinPointer("/elements", id), "orphan", `element ${JSON.stringify(id)} is not reachable from root`, "warning");
