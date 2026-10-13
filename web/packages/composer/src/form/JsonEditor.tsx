@@ -5,8 +5,8 @@
 // stays in the editor and shows the parse error. The draft survives
 // re-renders; it is dropped only when the value changes to something other
 // than what the draft says (an external edit wins). Empty text clears the
-// value (unset). Note that core never writes null: the text `null` also
-// clears the value (Doc B §6 rule 1).
+// value (unset); the text `""` writes the empty string. Note that core never
+// writes null: the text `null` also clears the value (Doc B §6 rule 1).
 
 import { Input as AntInput } from "antd";
 import { useState } from "react";
@@ -108,5 +108,7 @@ export const JsonEditor: ComposerComponent<JsonEditorProps> = {
   ),
   // Any JSON value: only undefined/null (the cleared text) count as empty.
   bindings: { value: "scalar" },
+  // The text `""` is the empty string, a real value; empty text still clears.
+  emptyAs: "keep",
   render: (p) => <JsonField {...p} />
 };
