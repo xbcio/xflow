@@ -247,7 +247,8 @@ function ObjectGroupView({
       {wrong ? (
         <RawValue value={value} expected="对象" readOnly={readOnly || onChange === undefined} onClear={() => onChange?.(undefined)} />
       ) : (
-        <FieldLayoutContext.Provider value={layout === "cell" ? "vertical" : layout}>{children}</FieldLayoutContext.Provider>
+        // Sub-fields are full fields again: their labels show inside a cell or an inline slot.
+        <FieldLayoutContext.Provider value={layout === "cell" || layout === "inline" ? "vertical" : layout}>{children}</FieldLayoutContext.Provider>
       )}
     </Section>
   );
