@@ -300,6 +300,42 @@ route 为 `execute`|`execution`|`webhook`）、`xflow_api_inflight{route_class}`
 `xflow_api_rate_limit_fallback_total{reason}`（reason=`redis_error`|`breaker_trip`|
 `breaker_open`，仅 redis 模式）。
 
+### 4.4 幂等提交（`Idempotency-Key`）
+
+网络重试不得变成第二次执行。三条发起执行的变更路由接受 `Idempotency-Key`
+请求头（IETF draft 命名）：`POST /v1/workflows/execute`（内联）、
+`POST /v1/workflows/{id}/execute`（已注册）、`POST /v1/executions/{id}/rerun`。
+键形状为 1–255 个 `[A-Za-z0-9._:-]`；越界**拒绝而非忽略**：
+400 `idempotency_key_invalid`。静默忽略一个键，等于对调用方的重试安全承诺
+不作数。
+
+| 情形 | 应答 |
+| --- | --- |
+| 首次请求 | 现有 2xx 不变（`duplicate` 缺省） |
+| 同键 + 同请求 | 200 `{execution_id, status, duplicate: true}`，**与 webhook duplicate 同形状**：给出首次创建的执行 id 与其**当前**状态（可能已 `queued`/`paused`/终态），不新建执行 |
+| 同键 + 不同请求 | 409 `idempotency_key_conflict`（调用方 bug，重试不解决） |
+| 同键 + 同请求并发 | 409 `idempotency_key_in_progress` + `Retry-After: 1`：首个请求仍在创建，等一拍重试即可 |
+| 后端不支持键 | 503 `idempotency_unsupported`（fail closed：静默忽略会让调用方误以为重试安全） |
+
+「同请求」由服务端指纹判定：op、定义版本与 digest、entry、params、test 标志，
+rerun 另含 parent 与 `from_node`/`include_success`；params 的 map 键顺序无关，
+trace_id 等运行时值不参与。键的作用域随路由：已注册工作流
+（`workflow:<id>`）、内联定义（`definition:<ns>/<name>`）、rerun
+（`rerun:<parent>`）——同一把键在不同工作流下互不相干。
+
+键保留 **24h**（默认 `engine.DefaultIdempotencyTTL`，SDK 可调；但被钳制为
+**不长于执行保留期**——键比执行活得久会指向已删执行）。键的认领**先于**
+持久化：claim 带 30s 租约，进程在创建中途崩溃后，同键重试会接管那个 claim
+而不是永久卡在 in-progress；提交在什么都没持久化前被拒（如工作流并发队列
+拒绝）则释放 claim，其重试不会被误判为 duplicate。§4.3 的准入拒绝发生在键
+被认领之前，429/503 后的重试同样安全。`FireAndForget` 不产生执行，携带键时
+直接拒绝而不是忽略。
+
+契约测试：`backend/internal/statestoretest` 的幂等契约对 local 与 rstate 两个
+后端各跑一遍（含过期 claim 释放、崩溃接管、并发只建一个）；路由面在
+`service/apiserver/idempotency_test.go`，openapi 描述见
+`api/openapi/xflow-v1.yaml` 的 `IdempotencyKey` 参数。
+
 ---
 
 ## 5. trace_id 与 X-Request-Id
