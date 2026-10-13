@@ -430,7 +430,7 @@ supply 侧（`node/supply/registry.go`/`service/runner/supply_gate.go` 触发，
 - **poolSize 调参**：内存（~5.5 MiB/实例）× 并发度。建议 = runner CPU 核数，与 `local.WithConcurrency` 对齐。配置切换瞬间为双份内存（§6.6），容量规划需留峰值。
 - **（探索项）实验性 `MemoryAllocator` + 手工 CoW 跳过 init**：wazero 无内置 CoW/pooling,但 `experimental.WithMemoryAllocator`(v1.7.1+,API 不稳定)可自建 mmap 池 + memcpy 恢复 post-init 内存镜像(issue #2499:3MB 模块 ~78µs)。这是唯一能真正跳过每实例 ~12ms Go bootstrap 的路子,但复杂度高、依赖实验 API。**仅当 P1/P2 后实例补建率高、bootstrap 成为瓶颈时才评估。**
 - **wazero pin 在 v1.9.0**（`go.mod:19`，因 `fastschema/qjs@v0.0.6` 依赖）。本方案所有 API（`CompilationCache`、`CompilationCacheWithDir`、`WithCloseOnContextDone`、`WithStartFunctions("_initialize")`、`//go:wasmexport` reactor）均在 v1.9.0 核实可用，**不需要升级 wazero**。
-- **批量快路径只在 `wazero-reactor` 上生效。** `reactorFacade` 实现了 `engine.BatchEngine`（host 循环复用池化实例逐条 eval），legacy `wasm/wazero` 没有，会静默回落到 `engine.ExecuteBatchSerial`（N 次独立 `Execute`）—— 结果正确但拿不到池化收益。workflow 的 `runtime` 参数配成 `wazero` 时不会有任何报错或告警，是个无声的性能陷阱。
+- **批量快路径只在 `wazero-reactor` 上生效。** `reactorFacade` 实现了 `engine.BatchEngine`（host 循环复用池化实例逐条 eval），legacy `wasm/wazero` 没有，会回落到 `engine.ExecuteBatchSerial`（N 次独立 `Execute`）—— 结果正确但拿不到池化收益。**已缓解，不再无声**：回落时打 `xflow_script_batch_serial_fallback_total{language,runtime}` counter，并按 (language, runtime) 每进程告警一次；`runtime` 参数的 ParamSpec 与 `wazero` 选项文案都标注了「无批量快路径」。给 legacy 补一个 host 循环版 `ExecuteBatch` 已评估并否决：command model 没有实例池可复用，省下的只有 module cache 查找，收益趋零，却会让用户误以为 legacy 已经拿到池化收益。
 
 ## 8.1 批处理：host 循环（技术债）
 

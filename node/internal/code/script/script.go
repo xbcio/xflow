@@ -59,6 +59,8 @@ type ScriptNode struct {
 //     scripts may be long-running or CPU-bound.
 //   - wasm/wazero: any language compiled to wasip1. Strictest sandbox,
 //     true ctx cancellation. Pick for untrusted code or non-JS guests.
+//     The legacy command model: a batch trigger evaluates its records one by
+//     one (no batch fast path) — use wazero-reactor for pooled batch traffic.
 func Script(code string) *ScriptNode {
 	return &ScriptNode{Code: code}
 }
@@ -123,7 +125,7 @@ func (n *ScriptNode) Descriptor() types.Descriptor {
 				}},
 			// The (language, runtime) pairs registered with engine.Register by
 			// js/goja.go, js/qjs.go, wasm/wazero.go, and wasm/reactor.go.
-			{Name: "runtime", DisplayName: "Runtime", Type: types.ParamString, Required: true, Description: "Engine: js->goja|qjs, wasm->wazero|wazero-reactor (no default — choose explicitly)",
+			{Name: "runtime", DisplayName: "Runtime", Type: types.ParamString, Required: true, Description: "Engine: js->goja|qjs, wasm->wazero|wazero-reactor (no default — choose explicitly); wazero has no batch fast path, so a Kafka batch evaluates serially",
 				Group: "source",
 				Enum:  append(append([]types.EnumOption{}, jsRuntimeOptions()...), wasmRuntimeOptions()...),
 				EnumWhen: []types.ConditionalEnum{
@@ -172,8 +174,8 @@ func jsRuntimeOptions() []types.EnumOption {
 
 func wasmRuntimeOptions() []types.EnumOption {
 	return []types.EnumOption{
-		{Value: "wazero", DisplayName: "wazero"},
-		{Value: "wazero-reactor", DisplayName: "wazero (reactor)", Description: "Pooled reactor-mode guest instances"},
+		{Value: "wazero", DisplayName: "wazero", Description: "Legacy command model; no batch fast path (a batch trigger evaluates records one by one)"},
+		{Value: "wazero-reactor", DisplayName: "wazero (reactor)", Description: "Pooled reactor-mode guest instances; the batch fast path"},
 	}
 }
 
