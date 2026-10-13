@@ -1,4 +1,4 @@
-// @xflow/composer/kernel-native — reference/fallback kernel (Doc B §7.3).
+// @xflow/composer/kernel-native — the default kernel (Doc B §7.3).
 //
 // A plain recursive renderer: for every node it renders the default-slot
 // children and each named slot first, then hands them to env.renderNode.

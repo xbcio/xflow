@@ -91,8 +91,8 @@ describe("createRegistry", () => {
 });
 
 describe("<Composer>", () => {
-  it("defaults to the json-render kernel", () => {
-    expect(defaultKernel).toBe(jsonRenderKernel);
+  it("defaults to the native kernel", () => {
+    expect(defaultKernel).toBe(nativeKernel);
     const { container } = render(
       <Composer spec={spec({ root: { type: "Typed", props: { label: "hello" } } })} registry={registry} value={{}} onChange={() => {}} />
     );

@@ -10,8 +10,8 @@ semantics (visibility, repeat, expressions, checks, write rules) live in
 | `@xflow/composer/core` | Spec types + JSON Schema, `validateSpec`, `resolve`, `write`, `applyPatches`, checks/expressions, `zodProps` (no React) |
 | `@xflow/composer/react` | `<Composer>`, `createRegistry`, component/kernel contracts, `defaultKernel` |
 | `@xflow/composer/form` | built-in AntD form components, `formComponents`, `createFormRegistry(extra?)`; styles in `@xflow/composer/form/styles.css` |
-| `@xflow/composer/kernel-json-render` | default kernel (on `@json-render/*` 0.21.0) |
-| `@xflow/composer/kernel-native` | reference / fallback kernel |
+| `@xflow/composer/kernel-json-render` | opt-in kernel on `@json-render/*` 0.21.0 |
+| `@xflow/composer/kernel-native` | default kernel (plain recursive renderer) |
 | `@xflow/composer/testing` | `kernelConformance(kernel)` and test helpers (needs `vitest`, `@testing-library/react`) |
 
 `react` (and `react-dom`) are peer dependencies (`^19.2.3`).
@@ -205,12 +205,15 @@ A kernel implements `RenderKernel.render(tree, env)`: walk the
 (component lookup, bindings, placeholders, error boundaries, memoisation) is
 done by `renderNode`.
 
-- `kernel-json-render` (default): converts the tree to json-render's flat
-  spec with a single `ComposerNode` type and static `{ id }` props; none of
-  json-render's state/visibility/validation/action semantics are used.
-- `kernel-native`: ~50-line recursive renderer; reference and fallback.
+- `kernel-native` (default): ~50-line recursive renderer; unchanged subtrees
+  are shared by reference, so one keystroke re-renders one path.
+- `kernel-json-render`: converts the tree to json-render's flat spec with a
+  single `ComposerNode` type and static `{ id }` props; none of json-render's
+  state/visibility/validation/action semantics are used. It rebuilds the
+  spec and one wrapper per node on every render (O(nodes)), which is why it
+  is opt-in.
 
-Pass `kernel={nativeKernel}` to use another kernel for one Composer. To
+Pass `kernel={jsonRenderKernel}` to use another kernel for one Composer. To
 switch the default, change the single re-export in
 `src/react/defaultKernel.ts`. A kernel qualifies only if it passes the
 conformance suite:
@@ -221,5 +224,6 @@ import { kernelConformance } from "@xflow/composer/testing";
 kernelConformance(myKernel);
 ```
 
-Only `kernel-json-render` and `react/defaultKernel` may import
-`@json-render/*` (ESLint rule + `src/boundary.test.ts`).
+Only `kernel-json-render` may import `@json-render/*`; `react/defaultKernel`
+is exempt so the default stays a one-line swap (ESLint rule +
+`src/boundary.test.ts`).
