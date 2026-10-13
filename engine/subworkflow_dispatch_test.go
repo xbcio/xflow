@@ -498,6 +498,45 @@ func TestSubWorkflowWaitDeadlineSurvivesAReclaim(t *testing.T) {
 	}
 }
 
+// TestSubWorkflowWaitTimeoutFailsTheNodeAndCancelsTheChild is the bound's other
+// end: a child that outlives the node's timeout ends the wait. The engine owns
+// this node type, so no runner is there to enforce the timeout — the reclaim
+// redelivery, the one clock a parked node has, is where the expiry is
+// observed, and the child it was waiting on must be stopped with it.
+func TestSubWorkflowWaitTimeoutFailsTheNodeAndCancelsTheChild(t *testing.T) {
+	def := subWorkflowParentDef()
+	def.Nodes[0].Timeout = time.Minute
+	g, err := graph.CompileWithResolver(context.Background(), def, subWorkflowStubResolver(t))
+	if err != nil {
+		t.Fatalf("CompileWithResolver: %v", err)
+	}
+	rig := newSubWorkflowRig(t, g, nil, subWorkflowStubResolver(t))
+	rig.dispatch(t, rig.task)
+	first := rig.link(t)
+	rig.queue.Drain()
+
+	// Age the wait past its bound, then let the sweeper reclaim it: the
+	// redelivery is what carries the news that the bound has passed.
+	key := string(rig.parentID) + "/sub"
+	expired := first
+	expired.WaitDeadline = time.Now().UTC().Add(-time.Second)
+	rig.state.links[key] = expired
+
+	rig.revoke(t)
+	rig.dispatch(t, rig.task)
+
+	node := rig.node(t)
+	if node.Status != types.NodeStatusFailed {
+		t.Fatalf("node status = %s, want failed after the wait's node timeout", node.Status)
+	}
+	if !strings.Contains(node.Error, "node timeout") {
+		t.Fatalf("node error = %q, want the timeout reason", node.Error)
+	}
+	if child := rig.child(t, first.ChildExecutionID); child.Status != types.ExecutionStatusCanceled {
+		t.Fatalf("child status = %s, want canceled: the wait that gave up must stop it", child.Status)
+	}
+}
+
 // TestSubWorkflowStartWithoutResolverFailsTheNodePermanently: an engine with no
 // resolver cannot run the node, so the dispatch must fail it through the normal
 // pipeline — visibly, with the reason — rather than treat it as a no-op.

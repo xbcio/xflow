@@ -396,7 +396,8 @@ type SubWorkflowLink struct {
 	// a timeout parks with that bound; one that declares none parks with the
 	// lease's own deadline, the reclaim clock that doubles as the notification
 	// budget. A re-park after a reclaim keeps the value it was parked with, so
-	// the wait's end does not move with the lease.
+	// the wait's end does not move with the lease — which is what lets the
+	// dispatch path fail a wait that has outlived its node timeout.
 	WaitDeadline time.Time
 	// LeaseID, LeaseToken, Attempt and ActivationID identify the lease the node
 	// parked under. The completion path commits with exactly these, which is

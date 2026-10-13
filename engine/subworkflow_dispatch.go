@@ -198,6 +198,17 @@ func (e *Engine) executeSubWorkflow(ctx context.Context, task *Task, g *graph.Gr
 	if concluded {
 		return nil
 	}
+	if nodeTimeout > 0 && resumed && !time.Now().UTC().Before(prev.WaitDeadline) {
+		// The wait has used up the node timeout while the child is still
+		// running: stop the child and fail the node through the ordinary
+		// pipeline — the conclusion a runner-executed node reaches when its
+		// handler outlives the same deadline. A retry then opens the next
+		// generation's child, as every retry of this node does.
+		e.cancelSubWorkflowChild(ctx, child.ID)
+		return e.failSubWorkflowStart(ctx, lease, g, meta, fmt.Errorf(
+			"node %q: the wait on child execution %q exceeded the node timeout %s",
+			task.NodeName, child.ID, nodeTimeout))
+	}
 	if accepted, err := e.parkSubWorkflowNode(ctx, lease, child, generation, waitEnd); err != nil {
 		return err
 	} else if accepted {
