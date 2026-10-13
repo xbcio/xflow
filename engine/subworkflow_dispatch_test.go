@@ -256,11 +256,18 @@ func TestSubWorkflowDispatchStartsChildAndParksParent(t *testing.T) {
 		link.Attempt != node.Attempt || link.ActivationID != node.ActivationID {
 		t.Fatalf("the link's lease identity %+v does not match the parked node %+v", link, node)
 	}
-	if want := node.LeaseIssuedAt.Add(node.LeaseTTL); !link.WaitDeadline.Equal(want) {
-		t.Fatalf("wait deadline = %s, want the lease deadline %s", link.WaitDeadline, want)
+	// Two clocks, two meanings. The lease is the reclaim/notification budget and
+	// is capped at the engine's wait TTL; the wait's end is the node's own
+	// bound, which for a node declaring no timeout is the resolved engine
+	// default that bounds every node type.
+	if want := node.LeaseIssuedAt.Add(node.LeaseTTL); !link.WaitDeadline.After(want) {
+		t.Fatalf("wait deadline = %s, want the node bound past the lease deadline %s", link.WaitDeadline, want)
 	}
-	if got := link.WaitDeadline.Sub(node.LeaseIssuedAt); got != subWorkflowWaitTTL {
-		t.Fatalf("wait lease TTL = %s, want the %s notification budget", got, subWorkflowWaitTTL)
+	if want := node.LeaseIssuedAt.Add(DefaultNodeTimeout); !link.WaitDeadline.Equal(want) {
+		t.Fatalf("wait deadline = %s, want the resolved node timeout %s", link.WaitDeadline, want)
+	}
+	if node.LeaseTTL != subWorkflowWaitTTL {
+		t.Fatalf("wait lease TTL = %s, want the %s notification budget", node.LeaseTTL, subWorkflowWaitTTL)
 	}
 	// The parent side of the drill-down: the parked node names its child, both
 	// on the record and through Inspect, which is how an operator finds the
@@ -405,6 +412,89 @@ func TestSubWorkflowRetryStartsAFreshChildGeneration(t *testing.T) {
 	}
 	if tasks := rig.queue.Drain(); len(tasks) != 1 {
 		t.Fatalf("the fresh generation delivered %d child tasks, want its one root", len(tasks))
+	}
+}
+
+// TestSubWorkflowReclaimKeepsTheWaitGeneration is the reclaim-after-retry
+// window. The retry moved the wait on to generation 2, then the sweeper
+// reclaimed that wait and re-delivered its task — which cannot carry the
+// generation, because a reclaim rebuilds the task from the lease and
+// Task.Generation is not wireable. The redelivery must resume generation 2's
+// child anyway: falling back to generation 1's id would re-park the node on
+// the child the retry abandoned, and that child's conclusion would then decide
+// the node.
+func TestSubWorkflowReclaimKeepsTheWaitGeneration(t *testing.T) {
+	g := subWorkflowParentWithRetry(t)
+	rig := newSubWorkflowRig(t, g, nil, subWorkflowStubResolver(t))
+	rig.dispatch(t, rig.task)
+	first := rig.link(t)
+	rig.queue.Drain()
+
+	rig.revoke(t)
+	retryTask := *rig.task
+	retryTask.Generation = 2 // what scheduleRetry stamps on the retry intent
+	rig.dispatch(t, &retryTask)
+	second := rig.link(t)
+	rig.queue.Drain()
+
+	// Exactly what the lease sweeper redelivers: the queued intent with no
+	// generation on it.
+	rig.revoke(t)
+	reclaimed := *rig.task
+	reclaimed.Generation = 0
+	rig.dispatch(t, &reclaimed)
+
+	third := rig.link(t)
+	if third.ChildExecutionID != second.ChildExecutionID {
+		t.Fatalf("the reclaim re-parked on child %q, want generation 2's %q",
+			third.ChildExecutionID, second.ChildExecutionID)
+	}
+	if third.ChildExecutionID == first.ChildExecutionID {
+		t.Fatal("the reclaim fell back to the child the retry abandoned")
+	}
+	if third.Generation != 2 {
+		t.Fatalf("reclaimed wait generation = %d, want 2 kept", third.Generation)
+	}
+	if len(rig.state.executions) != 3 {
+		t.Fatalf("executions = %d, want the parent and both generations' children", len(rig.state.executions))
+	}
+	if tasks := rig.queue.Drain(); len(tasks) != 0 {
+		t.Fatalf("resuming a live child re-delivered %d of its tasks", len(tasks))
+	}
+}
+
+// TestSubWorkflowWaitDeadlineSurvivesAReclaim pins the other half of the wait's
+// bound: a re-park keeps the deadline the wait was parked with. The new lease
+// starts its own clock, and adopting it would let a wait outlive its node
+// timeout for as long as the sweeper keeps reclaiming.
+func TestSubWorkflowWaitDeadlineSurvivesAReclaim(t *testing.T) {
+	def := subWorkflowParentDef()
+	def.Nodes[0].Timeout = time.Minute
+	g, err := graph.CompileWithResolver(context.Background(), def, subWorkflowStubResolver(t))
+	if err != nil {
+		t.Fatalf("CompileWithResolver: %v", err)
+	}
+	rig := newSubWorkflowRig(t, g, nil, subWorkflowStubResolver(t))
+	rig.dispatch(t, rig.task)
+	first := rig.link(t)
+	rig.queue.Drain()
+
+	// Shorten the parked wait's end, so a renewed deadline would be visibly
+	// later than the kept one.
+	key := string(rig.parentID) + "/sub"
+	shortened := first
+	shortened.WaitDeadline = time.Now().UTC().Add(30 * time.Second).Truncate(time.Millisecond)
+	rig.state.links[key] = shortened
+
+	rig.revoke(t)
+	rig.dispatch(t, rig.task)
+
+	second := rig.link(t)
+	if !second.WaitDeadline.Equal(shortened.WaitDeadline) {
+		t.Fatalf("wait deadline after a reclaim = %s, want the kept %s", second.WaitDeadline, shortened.WaitDeadline)
+	}
+	if node := rig.node(t); node.Status != types.NodeStatusWaiting {
+		t.Fatalf("node status = %s, want waiting: the wait has not outlived its bound", node.Status)
 	}
 }
 

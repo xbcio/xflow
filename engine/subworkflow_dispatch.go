@@ -129,7 +129,30 @@ func (e *Engine) executeSubWorkflow(ctx context.Context, task *Task, g *graph.Gr
 		// a terminal outcome. All are benign for this delivery.
 		return nil
 	}
-	child, cause := e.startSubWorkflowChild(ctx, task, g, meta)
+	// The generation this dispatch serves, and the wait it may already own. A
+	// task that carries no generation is either a first dispatch or a reclaim's
+	// redelivery, and a reclaim rebuilds its task from the lease — which cannot
+	// carry the generation, because Task.Generation is deliberately unwireable
+	// metadata (see queue/codec.go and the rstate outbox codec). The link is
+	// what remembers which generation's wait is live, so it supplies the
+	// generation for that case. That is what makes "a reclaim resumes the
+	// generation's own child" true after a retry has moved the wait on; without
+	// it the redelivery would re-derive the previous generation's child id and
+	// resume the child the retry abandoned — whose conclusion would then decide
+	// the node, which is exactly what the generation fence exists to prevent.
+	//
+	// A task that names a generation is authoritative over the link: that is
+	// the retry intent, and the link it should overwrite belongs to the
+	// generation being abandoned.
+	prev, linked, err := e.subWorkflowLink(ctx, task.ExecutionID, task.NodeName)
+	if err != nil {
+		return err
+	}
+	generation := subWorkflowGeneration(task.Generation)
+	if task.Generation == 0 && linked && prev.ActivationID == task.ActivationID && prev.Generation > 0 {
+		generation = prev.Generation
+	}
+	child, cause := e.startSubWorkflowChild(ctx, task, g, meta, generation)
 	if errors.Is(cause, errSubWorkflowParentCanceling) {
 		// The parent is on its way down: this delivery raced the inline cancel
 		// cascade, or the cancel landed before the child existed. Either way the
@@ -147,10 +170,27 @@ func (e *Engine) executeSubWorkflow(ctx context.Context, task *Task, g *graph.Gr
 	if cause != nil {
 		return e.failSubWorkflowStart(ctx, lease, g, meta, cause)
 	}
+	// A wait that this dispatch resumes keeps the deadline it was parked with.
+	// The reclaim renews the lease, and with it the notification budget, but it
+	// must not renew the wait's own end: otherwise a bounded wait could never
+	// reach its bound and the node timeout would be decorative. A node that
+	// declares no timeout runs under the resolved engine default, exactly as it
+	// does for every other node type — see resolveNodeTimeout.
+	nodeTimeout := e.resolveNodeTimeout(meta.Timeout)
+	resumed := linked && prev.ChildExecutionID == child.ID
+	waitEnd := lease.Deadline()
+	if nodeTimeout > 0 {
+		waitEnd = lease.IssuedAt.Add(nodeTimeout)
+		if resumed {
+			waitEnd = prev.WaitDeadline
+		}
+	}
 	// The child can already be concluded here: a redelivery after a reclaim
 	// that finds the completion notification was lost. Concluding now is the
 	// backstop's whole purpose; parking again would wait for a notification
-	// that has already been delivered and dropped.
+	// that has already been delivered and dropped. It is checked before the
+	// wait's deadline because a finished child is a result and not a timeout,
+	// however late this dispatch is.
 	concluded, err := e.concludeTerminalChild(ctx, lease, g, meta, child)
 	if err != nil {
 		return err
@@ -158,7 +198,7 @@ func (e *Engine) executeSubWorkflow(ctx context.Context, task *Task, g *graph.Gr
 	if concluded {
 		return nil
 	}
-	if accepted, err := e.parkSubWorkflowNode(ctx, lease, child); err != nil {
+	if accepted, err := e.parkSubWorkflowNode(ctx, lease, child, generation, waitEnd); err != nil {
 		return err
 	} else if accepted {
 		return nil
@@ -199,16 +239,32 @@ func (e *Engine) acquireSubWorkflowLease(ctx context.Context, task *Task, meta g
 	return lease, nil
 }
 
+// subWorkflowLink reads the link this node's wait may have recorded. A store
+// without the capability reports no link: the caller is on the dispatch path,
+// which refuses such a store before it creates anything.
+func (e *Engine) subWorkflowLink(ctx context.Context, id types.ExecutionID, nodeName string) (SubWorkflowLink, bool, error) {
+	store, ok := e.state.(SubWorkflowLinkStore)
+	if !ok {
+		return SubWorkflowLink{}, false, nil
+	}
+	link, found, err := store.GetSubWorkflowLink(ctx, id, nodeName)
+	if err != nil {
+		return SubWorkflowLink{}, false, fmt.Errorf("read sub-workflow link %q/%q: %w", id, nodeName, err)
+	}
+	return link, found, nil
+}
+
 // startSubWorkflowChild resolves the compiled binding, checks the runtime
 // bounds, evaluates the input map, and starts the child execution if this
-// generation has not already started it.
+// generation has not already started it. generation is the caller's resolved
+// generation, which is not always the task's own — see executeSubWorkflow.
 //
 // Every returned error is a node-start failure, and they are classified rather
 // than uniform: a missing binding, a missing capability, a depth overrun and a
 // definition-hash mismatch are permanent (retrying cannot change them), while a
 // resolver or store failure keeps its own classification so a transient outage
 // stays retriable.
-func (e *Engine) startSubWorkflowChild(ctx context.Context, task *Task, g *graph.Graph, meta graph.NodeMeta) (subWorkflowChild, error) {
+func (e *Engine) startSubWorkflowChild(ctx context.Context, task *Task, g *graph.Graph, meta graph.NodeMeta, generation int) (subWorkflowChild, error) {
 	binding := meta.SubWorkflow
 	if binding == nil {
 		return subWorkflowChild{}, fmt.Errorf("node %q: %w (%w)", task.NodeName, ErrSubWorkflowUnresolved, types.ErrPermanent)
@@ -232,7 +288,7 @@ func (e *Engine) startSubWorkflowChild(ctx context.Context, task *Task, g *graph
 	// branch below must be able to name the child an earlier dispatch may have
 	// started without resolving a target it is not going to run.
 	child := subWorkflowChild{
-		ID:    subWorkflowChildID(task.ExecutionID, task.NodeName, task.ActivationID, subWorkflowGeneration(task.Generation)),
+		ID:    subWorkflowChildID(task.ExecutionID, task.NodeName, task.ActivationID, generation),
 		Depth: snap.Depth + 1,
 	}
 	if snap.Status == types.ExecutionStatusCanceling {
@@ -446,9 +502,11 @@ func subWorkflowEvaluateParam(value any, env map[string]any) (any, error) {
 // the completion path will read back.
 //
 // The link's lease identity is the claim's, so the completion commits under the
-// same fence any other result does; the wait deadline mirrors the lease, which
-// is what the reclaim backstop fires on.
-func (e *Engine) parkSubWorkflowNode(ctx context.Context, lease *TaskLease, child subWorkflowChild) (bool, error) {
+// same fence any other result does. Its deadline is the caller's resolved wait
+// end — the node's own timeout when it declares one, the lease deadline
+// otherwise — because the reclaim re-parks under a fresh lease and must not
+// move the wait's end with it.
+func (e *Engine) parkSubWorkflowNode(ctx context.Context, lease *TaskLease, child subWorkflowChild, generation int, waitDeadline time.Time) (bool, error) {
 	store, ok := e.state.(SubWorkflowLinkStore)
 	if !ok {
 		// Unreachable: the plan checked the capability before creating anything.
@@ -457,9 +515,9 @@ func (e *Engine) parkSubWorkflowNode(ctx context.Context, lease *TaskLease, chil
 	link := SubWorkflowLink{
 		ChildExecutionID: child.ID,
 		ParentNode:       lease.Task.NodeName,
-		Generation:       subWorkflowGeneration(lease.Task.Generation),
+		Generation:       generation,
 		Depth:            child.Depth,
-		WaitDeadline:     lease.Deadline(),
+		WaitDeadline:     waitDeadline,
 		LeaseID:          lease.LeaseID,
 		LeaseToken:       lease.LeaseToken,
 		Attempt:          lease.Attempt,
