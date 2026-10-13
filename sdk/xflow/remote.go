@@ -1052,7 +1052,12 @@ func (r *Remote) Wait(ctx context.Context, id types.ExecutionID) (types.Result, 
 // The GET route has no node-selection parameter: the server always returns the
 // whole graph's view, so when nodeNames are given the filtering happens here,
 // on that same snapshot. The result is what Engine.Inspect documents — the
-// named nodes only, latest state — fetched with one request either way.
+// named nodes only, latest state — fetched with one request either way, with
+// one difference: a name with no row in the snapshot is DROPPED here, where
+// Engine.Inspect builds a placeholder row for it (pending, no output), because
+// the embedded side knows the graph and can tell "not run yet" from "not a
+// node", while this side sees only the rows the server sent. A caller that
+// needs one row per requested name must fill the gaps itself.
 func (r *Remote) Inspect(ctx context.Context, id types.ExecutionID, nodeNames ...string) (engine.ExecutionDetail, error) {
 	if id == "" {
 		return engine.ExecutionDetail{}, errors.New("xflow: Inspect requires an execution id")
