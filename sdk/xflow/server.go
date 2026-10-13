@@ -123,6 +123,9 @@ type serverConfig struct {
 	// paramValidation is WithServerParamValidation's mode; empty means
 	// types.DefaultParamValidationMode.
 	paramValidation types.ParamValidationMode
+	// apiLimits is WithServerAPILimits' admission configuration; the zero value
+	// is apiserver's default posture.
+	apiLimits apiserver.APILimits
 }
 
 // ServerOption configures a Server.
@@ -765,6 +768,7 @@ func buildServerAPIConfig(cfg ServerConfig, sc *serverConfig) apiserver.Config {
 		Logger:          sc.logger,
 		Metrics:         sc.metrics,
 		ParamValidation: sc.paramValidation,
+		APILimits:       sc.apiLimits,
 		HTTPAddr:        sc.httpAddr,
 		GRPCAddr:        sc.grpcAddr,
 		MetricsAddr:     sc.metricsAddr,
@@ -1156,6 +1160,21 @@ func WithServerParamValidation(mode types.ParamValidationMode) ServerOption {
 			c.paramValidation = mode
 		}
 	}
+}
+
+// WithServerAPILimits configures the admission layer in front of the mutating
+// workflow/execution routes (execute, execute-by-id, signal, revoke, cancel,
+// pause, resume, rerun) and the webhook entry route.
+//
+// The default posture, without this option, is no rate limit and at most
+// apiserver.DefaultAPIMaxInflight covered requests in flight per replica. A
+// rate refusal answers 429 rate_limited; a full inflight bound answers 503
+// server_overloaded; both carry Retry-After. With limits.Mode set to
+// apiserver.APIRateLimitModeRedis the rate is counted in the backend's Redis
+// and shared by every replica, and NewServer fails when the server has no
+// Redis. An invalid configuration fails NewServer rather than being ignored.
+func WithServerAPILimits(limits apiserver.APILimits) ServerOption {
+	return func(c *serverConfig) { c.apiLimits = limits }
 }
 
 // ErrSupplyContentTooLarge is returned by UpdateSupply and UpdateSupplyIfMatch
