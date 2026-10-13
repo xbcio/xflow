@@ -62,15 +62,23 @@ Node Group 组级 `on_error`、gRPC `AckActivation`、G1 clean-SHA 重签 `c39a2
    （`WorkflowDefinitionVersion`）。见
    [ADR-D4-runtime-editor-metadata-split.md](./ADR-D4-runtime-editor-metadata-split.md)。
 
+5. **Cancel 与子工作流 create→park 窗口的交错**（2026-10-13 验收记录，非阻塞）。
+   子执行已创建、park 尚未落盘时父执行被取消：级联取消按 link 找不到该子（首次
+   派发尚无 link），取消路径的 finalizer 只处理 Waiting 节点，该子因此不被取消、
+   继续跑完（真实副作用继续）；随后 park 落在 finalizer 之后，节点以等待态背靠
+   已取消执行，靠 reclaim 的 revoke 落到 pending（无租约，重投递按 inactive
+   丢弃）。窗口毫秒级、需精确交错，收敛无永久卡死。收紧方向：park 前复读执行
+   状态，或取消在标记 canceled 前后各做一次扫描。
+
 ### 需要真实环境或人工批准，不能靠改代码关闭
 
-5. **G2：多副本 control-plane HA soak 与真实多 namespace 隔离验收。** 要求见
+6. **G2：多副本 control-plane HA soak 与真实多 namespace 隔离验收。** 要求见
     [RELEASE-GATES.md](./RELEASE-GATES.md) 的 G2 定义；`make test-soak` 不是该证据
     （见 README 的说明）。
 
-6. **RELEASE-GATES §6 的 D1–D8** 全部为「OPEN — 未批准」，需要对应负责人裁定。
+7. **RELEASE-GATES §6 的 D1–D8** 全部为「OPEN — 未批准」，需要对应负责人裁定。
 
-7. **KEK 轮换（`xflow supply reseal`）与 server/runner 凭据热加载都没有在真实环境
+8. **KEK 轮换（`xflow supply reseal`）与 server/runner 凭据热加载都没有在真实环境
    演练过**，runbook 的 owner 与期限属于 D6。
 
 ## 已关闭
@@ -308,12 +316,18 @@ Node Group 组级 `on_error`、gRPC `AckActivation`、G1 clean-SHA 重签 `c39a2
   事实错误——节点 timeout 监视器并不覆盖 parked wait（timeout ZSET 只由 suspend 路径
   写），实现改为 `WaitDeadline` 跨重派发保留、到期取消子执行并按普通失败管道 fail
   节点；(ii) 原设计设想的「子工作流声明了工作流级 `outputs:` 时注册期告警」不可实现
-  （resolved graph 不携带工作流级 outputs），告警承诺删除并入新登记条目 3；(iii) 实现
-  中发现并修复 reclaim 丢失 generation 的缺陷（重派发任务不带 generation，链接记录是
-  唯一来源）。验证：`go build ./...`、`make vet`、engine 与两个后端 + `sdk/xflow` 触及
-  包测试、engine/两后端 `-race`、`make validate-openapi`；新增 store 契约用例在 memory、
-  miniredis、真 Redis（6380）三档通过；`sdk/xflow` 端到端 local 与 cluster 双路径
-  （含 Inspect/Cancel/Rerun）。未验证：全量 `make test`（本机规矩不跑）、WASM 包（未
-  触及）。遗留：无「列出某执行的全部子执行」查询（设计已列为后续）；UI 按名搜索工作流
-  的 API 不存在，编辑器暂用纯文本名 + 版本输入；跨 namespace 引用明确拒绝；父执行暂停
-  不向子传播（设计决策）。
+  （resolved graph 不携带工作流级 outputs），告警承诺删除并入新登记条目 3；(iii) generation
+  恢复机制经过一次验收修正：实现版在重派发时经链接记录推断 generation，2026-10-13
+  第二轮复核（FAIL）发现该推断在「子已建、park 未写」崩溃窗口跨代误判——reclaim 会按
+  链接推回上一代、用其已终态子执行定论节点，而本代子执行成孤儿继续跑——修复为
+  generation 随租约持久化（`ExpiredLease.Generation`、节点记录 `lease_generation`，
+  `71c8cd55`）并删除链接推断；同轮修复 local 重派发认领丢 `ChildExecutionID`
+  （`9da19356`，契约用例补 re-claim 断言）、取消未 finalize 停驻 subworkflow 节点
+  （`532fcb8a`，行为路径）。验证：`go build ./...`、`make vet`、engine 与两个后端 +
+  `sdk/xflow` 触及包测试、engine/两后端 `-race`、`make validate-openapi`；新增 store
+  契约用例在 memory、miniredis、真 Redis（6380）三档通过；`sdk/xflow` 端到端 local 与
+  cluster 双路径（含 Inspect/Cancel/Rerun）；修复轮复核在冻结 HEAD 重跑同一矩阵全绿，
+  且以修复前对照树红先复现（证据在各修复 commit）。未验证：全量 `make test`（本机规矩
+  不跑）、WASM 包（未触及）。遗留：无「列出某执行的全部子执行」查询（设计已列为后续）；
+  UI 按名搜索工作流的 API 不存在，编辑器暂用纯文本名 + 版本输入；跨 namespace 引用明确
+  拒绝；父执行暂停不向子传播（设计决策）；Cancel 与 create→park 窗口的交错（见待办 5）。
