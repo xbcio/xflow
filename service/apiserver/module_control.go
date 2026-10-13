@@ -532,6 +532,11 @@ type executeWorkflowResponse struct {
 	// ParamIssues is set only by the inline POST /v1/workflows/execute: a
 	// registered workflow was validated when it was registered.
 	ParamIssues []graph.ParamIssue `json:"param_issues,omitempty"`
+	// Duplicate is true when the request's Idempotency-Key had already started
+	// this execution: the answer is the original execution — its id and its
+	// current status, which may be queued, paused or terminal — and this request
+	// created nothing. It is the same answer a replayed webhook entry gives.
+	Duplicate bool `json:"duplicate,omitempty"`
 }
 
 // submissionResponse builds the answer to a submission that succeeded.
@@ -738,49 +743,39 @@ func (m *workflowControlModule) handleExecuteWorkflow(w http.ResponseWriter, r *
 	// NOT-NULL violation on xflow_executions.workflow_def.
 	ctx = engine.WithWorkflowDef(ctx, req.Workflow)
 	ctx = engine.WithTestRun(ctx, req.Test)
+	digest, err := definitionDigest(req.Workflow)
+	if err != nil {
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	idem, ok := keyedSubmission(w, r, inlineIdempotencyScope(ctx, req.Workflow), digest)
+	if !ok {
+		return
+	}
+	if idem != nil {
+		ctx = engine.WithIdempotency(ctx, idem)
+	}
 	var id types.ExecutionID
 	if req.Entry != "" {
 		id, err = m.eng.Invoke(ctx, g, req.Entry, req.Input)
-		// An unknown entry node is a client error (400): the missing resource is
-		// the entry in the submitted graph, not an execution in the store.
 		if err != nil {
-			if writeConcurrencyFailure(w, r, err) {
-				return
+			if !writeSubmitFailure(w, r, err) {
+				writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 			}
-			if errors.Is(err, engine.ErrFAFRequiresDirectDispatch) {
-				writeFail(w, r, http.StatusBadRequest, "workflow_faf_unsupported", "FAF workflows require direct dispatch")
-				return
-			}
-			if errors.Is(err, graph.ErrInvalidParams) {
-				writeFail(w, r, http.StatusBadRequest, "workflow_params_invalid", err.Error())
-				return
-			}
-			if errors.Is(err, engine.ErrEntryNotFound) {
-				writeFail(w, r, http.StatusBadRequest, "workflow_entry_not_found", err.Error())
-				return
-			}
-			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}
 	} else {
 		id, err = m.eng.Submit(ctx, g, req.Params)
 		if err != nil {
-			if writeConcurrencyFailure(w, r, err) {
-				return
+			if !writeSubmitFailure(w, r, err) {
+				writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 			}
-			if errors.Is(err, engine.ErrFAFRequiresDirectDispatch) {
-				writeFail(w, r, http.StatusBadRequest, "workflow_faf_unsupported", "FAF workflows require direct dispatch")
-				return
-			}
-			if errors.Is(err, graph.ErrInvalidParams) {
-				writeFail(w, r, http.StatusBadRequest, "workflow_params_invalid", err.Error())
-				return
-			}
-			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}
 	}
-	writeData(w, r, http.StatusOK, m.submissionResponse(ctx, id, paramIssues))
+	resp := m.submissionResponse(ctx, id, paramIssues)
+	resp.Duplicate = idem != nil && idem.Duplicate
+	writeData(w, r, http.StatusOK, resp)
 }
 
 // registerWorkflowResponse echoes the persisted workflow ID (server-assigned
@@ -1685,47 +1680,39 @@ func (m *workflowControlModule) handleExecuteWorkflowByID(w http.ResponseWriter,
 	ctx := engine.WithWorkflowDef(r.Context(), rec.Definition)
 	ctx = engine.WithTraceCarrier(ctx, tracing.InjectCarrier(ctx))
 	ctx = engine.WithTestRun(ctx, req.Test)
+	// A keyed request is scoped to the registered workflow, so one key means one
+	// execution whichever face (this route, the SDK) a retry comes in through.
+	// The version is not in the scope: a retry after an upgrade has to find the
+	// original execution, and the definition's version is part of the
+	// fingerprint instead.
+	idem, ok := keyedSubmission(w, r, engine.WorkflowIdempotencyScope(id), "")
+	if !ok {
+		return
+	}
+	if idem != nil {
+		ctx = engine.WithIdempotency(ctx, idem)
+	}
 	var execID types.ExecutionID
 	if req.Entry != "" {
 		execID, err = m.eng.Invoke(ctx, rec.Graph, req.Entry, req.Input)
 		if err != nil {
-			if writeConcurrencyFailure(w, r, err) {
-				return
+			if !writeSubmitFailure(w, r, err) {
+				writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 			}
-			if errors.Is(err, engine.ErrFAFRequiresDirectDispatch) {
-				writeFail(w, r, http.StatusBadRequest, "workflow_faf_unsupported", "FAF workflows require direct dispatch")
-				return
-			}
-			if errors.Is(err, graph.ErrInvalidParams) {
-				writeFail(w, r, http.StatusBadRequest, "workflow_params_invalid", err.Error())
-				return
-			}
-			if errors.Is(err, engine.ErrEntryNotFound) {
-				writeFail(w, r, http.StatusBadRequest, "workflow_entry_not_found", err.Error())
-				return
-			}
-			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}
 	} else {
 		execID, err = m.eng.Submit(ctx, rec.Graph, req.Params)
 		if err != nil {
-			if writeConcurrencyFailure(w, r, err) {
-				return
+			if !writeSubmitFailure(w, r, err) {
+				writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 			}
-			if errors.Is(err, engine.ErrFAFRequiresDirectDispatch) {
-				writeFail(w, r, http.StatusBadRequest, "workflow_faf_unsupported", "FAF workflows require direct dispatch")
-				return
-			}
-			if errors.Is(err, graph.ErrInvalidParams) {
-				writeFail(w, r, http.StatusBadRequest, "workflow_params_invalid", err.Error())
-				return
-			}
-			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}
 	}
-	writeData(w, r, http.StatusOK, m.submissionResponse(ctx, execID, nil))
+	resp := m.submissionResponse(ctx, execID, nil)
+	resp.Duplicate = idem != nil && idem.Duplicate
+	writeData(w, r, http.StatusOK, resp)
 }
 
 // deregisterWorkflow is the clear-activations -> remove-record path both entry
