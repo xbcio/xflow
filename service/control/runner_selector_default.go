@@ -226,8 +226,10 @@ func (d *RedisRunnerDirectory) matureGraceCandidates(ctx context.Context, candid
 	// A failed TIME degrades to the directory clock rather than failing the
 	// walk: the grace verdict is advisory-soft (the fallback is the permitted
 	// outcome), so a skew-sized error moves a window by milliseconds, while a
-	// walk error would strand the entry entirely.
-	now := d.clock()
+	// walk error would strand the entry entirely. clockNow, not a raw d.clock()
+	// call: real-Redis tests build the directory as a literal with a custom key
+	// prefix and no clock, and a nil function call would panic the walk.
+	now := d.clockNow()
 	if t, timeErr := serverTime.Result(); timeErr == nil && !t.IsZero() {
 		now = t
 	}
