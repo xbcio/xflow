@@ -62,6 +62,11 @@ type wireNodeMeta struct {
 	// (every cluster dispatch after a cache miss) would silently run a
 	// disabled node for real.
 	Disabled bool `json:"disabled,omitempty"`
+	// SubWorkflow carries NodeMeta.SubWorkflow. Without it a snapshot-loaded
+	// graph would lose the pinned (version, definition hash) and the engine
+	// would have to resolve the child at dispatch — the exact drift the pin
+	// exists to prevent.
+	SubWorkflow *SubWorkflowBinding `json:"sub_workflow,omitempty"`
 }
 
 func toWireNodeMeta(n NodeMeta) wireNodeMeta {
@@ -84,6 +89,7 @@ func toWireNodeMeta(n NodeMeta) wireNodeMeta {
 		ActivationReplicas: n.ActivationReplicas,
 		PinOutput:          n.PinOutput,
 		Disabled:           n.Disabled,
+		SubWorkflow:        n.SubWorkflow,
 	}
 }
 
@@ -149,6 +155,7 @@ func decodeWireNodes(raw []wireNodeMeta) ([]NodeMeta, bool, error) {
 			ActivationReplicas: w.ActivationReplicas,
 			PinOutput:          w.PinOutput,
 			Disabled:           w.Disabled,
+			SubWorkflow:        cloneSubWorkflowBinding(w.SubWorkflow),
 		}
 		if !p.present {
 			nodes[i].GroupIdx = -1

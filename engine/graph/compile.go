@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -170,7 +171,27 @@ func SubgraphBodyMembers(params map[string]any) (members []types.NodeDef, ok boo
 // Compile validates a WorkflowDef and builds an immutable Graph IR.
 // It returns an error if the definition is nil, has no nodes, contains
 // duplicate node names, references unknown nodes, or contains a cycle.
+//
+// It compiles with no sub-workflow resolver, so an xflow.subworkflow node in
+// the definition is compiled UNRESOLVED: the node is kept, and the engine
+// refuses to dispatch it (ErrSubWorkflowUnresolved). Registration paths must
+// use CompileWithResolver instead; see that function.
 func Compile(def *types.WorkflowDef) (*Graph, error) {
+	return compile(context.Background(), def, nil)
+}
+
+// CompileWithResolver compiles a definition that may contain xflow.subworkflow
+// nodes, resolving each reference to a concrete, pinned target through
+// resolver.
+//
+// A nil resolver is equivalent to Compile: the sub-workflow nodes compile
+// unresolved rather than failing here, because a definition is not invalid
+// just because this caller cannot look other workflows up.
+func CompileWithResolver(ctx context.Context, def *types.WorkflowDef, resolver SubWorkflowResolver) (*Graph, error) {
+	return compile(ctx, def, resolver)
+}
+
+func compile(ctx context.Context, def *types.WorkflowDef, resolver SubWorkflowResolver) (*Graph, error) {
 	if def == nil {
 		return nil, errors.New("workflow definition is nil")
 	}
@@ -337,6 +358,13 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	// compileTrusted, where the enclosing graph is a projected package rather
 	// than the real outer workflow.
 	if err := validateBodyOuterRefs(g); err != nil {
+		return nil, err
+	}
+	// Sub-workflow references resolve here: after every pure author-facing
+	// validation pass (so a malformed definition fails without a resolver
+	// round-trip) and before assignGraphHash, whose payload includes the
+	// pinned bindings this writes into the node metas.
+	if err := compileSubWorkflowRefs(ctx, g, resolver); err != nil {
 		return nil, err
 	}
 	// assignDisabledNodes before assignPinData: disabled takes precedence over
