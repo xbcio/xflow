@@ -681,17 +681,35 @@ func (e *RemoteError) Error() string {
 	return msg
 }
 
+// remoteCapabilityCodes are the server's answers that say "this deployment will
+// not do this", not "it cannot right now". Retrying one asks the same question
+// of the same process and gets the same answer, so a caller looping on
+// Retryable must treat them as terminal. They are also why the status alone is
+// not enough: the server answers 503 for idempotency_unsupported, which is
+// otherwise a transient class.
+var remoteCapabilityCodes = map[string]bool{
+	"idempotency_unsupported":       true, // 503: this server holds no idempotency claims
+	"execution_control_unsupported": true, // 501: pause/resume not implemented
+	"execution_rerun_unsupported":   true, // 501: rerun not implemented
+	"runner_listing_unsupported":    true, // 501: no runner directory
+	"runner_control_unsupported":    true, // 501: no runner control
+}
+
 // Retryable reports whether the failure is the server's own state rather than
-// this request's content: a 5xx, except 501.
+// this request's content: a 5xx, except a 501 or one of the capability answers
+// in remoteCapabilityCodes.
 //
-// 501 is a capability answer, not a state: a deployment that does not
-// implement a control answers execution_control_unsupported /
-// execution_rerun_unsupported the same way however often it is asked, so a
-// caller looping on Retryable must not include it. A 429 is excluded too, but
-// for the opposite reason: the server sent a Retry-After with it because
-// retrying is a decision about WHEN, and the caller is the only side that
-// knows whether it can wait.
+// 501 is a capability answer by status (and execution_control_unsupported /
+// execution_rerun_unsupported arrive that way), while idempotency_unsupported
+// arrives as a 503 that a bare status rule would call retryable — a caller
+// looping on Retryable would then retry "this server cannot hold idempotency
+// keys" forever. A 429 is excluded too, but for the opposite reason: the server
+// sent a Retry-After with it because retrying is a decision about WHEN, and the
+// caller is the only side that knows whether it can wait.
 func (e *RemoteError) Retryable() bool {
+	if remoteCapabilityCodes[e.Code] {
+		return false
+	}
 	return e.Status >= http.StatusInternalServerError && e.Status != http.StatusNotImplemented
 }
 

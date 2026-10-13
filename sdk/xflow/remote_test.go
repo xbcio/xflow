@@ -684,7 +684,10 @@ func TestRemoteErrorMappingTable(t *testing.T) {
 		{"workflow conflict", http.StatusConflict, "workflow_conflict", "", backend.ErrWorkflowConflict, false, false},
 		{"idempotency conflict", http.StatusConflict, "idempotency_key_conflict", "", engine.ErrIdempotencyConflict, false, false},
 		{"idempotency in progress", http.StatusConflict, "idempotency_key_in_progress", "1", engine.ErrIdempotencyInProgress, false, false},
-		{"idempotency unsupported", http.StatusBadRequest, "idempotency_unsupported", "", engine.ErrIdempotencyUnsupported, false, false},
+		// idempotency_unsupported is the capability answer a bare status rule
+		// would call retryable: it arrives as 503, and a caller looping on
+		// Retryable would ask this server for a key it cannot hold forever.
+		{"idempotency unsupported", http.StatusServiceUnavailable, "idempotency_unsupported", "", engine.ErrIdempotencyUnsupported, false, false},
 		{"concurrency limit", http.StatusTooManyRequests, "workflow_concurrency_limit", "3", engine.ErrConcurrencyLimit, false, false},
 		{"concurrency queue full", http.StatusTooManyRequests, "workflow_concurrency_queue_full", "3", engine.ErrConcurrencyQueueFull, false, false},
 		{"signal consumed", http.StatusConflict, "signal_consumed", "", engine.ErrSignalConsumed, false, false},
