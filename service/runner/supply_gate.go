@@ -347,14 +347,12 @@ func (g *SupplyGate) recordDeclaration(k supply.Key, workflowID string, req engi
 	}
 	prev, _ := existing.(supplyDeclaration)
 	if prev.WorkflowID == workflowID || sameSupplyOrigin(prev.PullSource, next.PullSource) {
-		// Same workflow (an upgrade: replace) or same origin (one cached
-		// snapshot serves both by design: keep the first record).
 		if prev.WorkflowID == workflowID {
 			g.declarations.Store(k, next)
 		}
 		return nil
 	}
-	return fmt.Errorf("%w: supply node %q in namespace %q is %s for workflow %s and %s for workflow %s",
+	return fmt.Errorf("%w: supply node %q in namespace %q is %s for workflow %s and %s for workflow %s; re-publish under the existing workflow id (PUT), rename the node, or restart the runner",
 		ErrSupplyPullSourceConflict, k.Name, k.Namespace,
 		describeSupplyOrigin(prev.PullSource), prev.WorkflowID,
 		describeSupplyOrigin(next.PullSource), next.WorkflowID)
