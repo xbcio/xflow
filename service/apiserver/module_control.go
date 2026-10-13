@@ -718,14 +718,16 @@ var errWorkflowIDMismatch = errors.New("workflow id does not match path")
 // has no retired versions" — a different and false statement.
 var errWorkflowVersionsUnsupported = errors.New("workflow registry does not support version history")
 
-// errWorkflowVersionUnavailable means an archived version's payload no longer
-// reproduces under the current compiler: recomputing the runtime hash from the
-// stored definition does not yield the hash the version was published with.
-// The version label is immutable, so installing or running "the same version"
-// with different semantics would silently break every pinned replay and
-// subworkflow reference that names it. Callers fail closed (409
+// backend.ErrWorkflowVersionUnavailable means an archived version's payload no
+// longer reproduces under the current compiler: recomputing the runtime hash
+// from the stored definition does not yield the hash the version was published
+// with. The version label is immutable, so installing or running "the same
+// version" with different semantics would silently break every pinned replay
+// and subworkflow reference that names it. Callers fail closed (409
 // workflow_version_unavailable) instead.
-var errWorkflowVersionUnavailable = errors.New("workflow version is not reproducible under the current compiler")
+//
+// The sentinel itself lives in backend because the embedded SDK raises the same
+// condition from the same recomputation; this module maps it to the wire code.
 
 var errFAFWorkflowRegistration = errors.New("workflow registration does not support options.faf")
 
@@ -1488,7 +1490,7 @@ func (m *workflowControlModule) handleRollbackWorkflow(w http.ResponseWriter, r 
 			writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
 		case errors.Is(err, backend.ErrWorkflowVersionNotFound):
 			writeFail(w, r, http.StatusNotFound, "workflow_version_not_found", "workflow version not found")
-		case errors.Is(err, errWorkflowVersionUnavailable):
+		case errors.Is(err, backend.ErrWorkflowVersionUnavailable):
 			writeFail(w, r, http.StatusConflict, "workflow_version_unavailable", "workflow version is not reproducible under the current compiler")
 		default:
 			if writeWorkflowConflict(w, r, err) {
@@ -1674,7 +1676,7 @@ func (m *workflowControlModule) getWorkflowVersion(ctx context.Context, ns names
 // payload would execute as the same label with different semantics. That is
 // exactly what the label promises will not happen, so both consumers of this
 // helper (execute-by-version and rollback) fail closed with
-// errWorkflowVersionUnavailable rather than silently install or run a
+// backend.ErrWorkflowVersionUnavailable rather than silently install or run a
 // divergent definition.
 //
 // Execution then proceeds from the archived graph snapshot (rec.Graph) as
@@ -1691,7 +1693,7 @@ func (m *workflowControlModule) archivedWorkflowVersion(ctx context.Context, ns 
 		if m.log != nil {
 			m.log.Error("archived_workflow_version_hash_failed", "workflow_id", string(id), "version", version, "err", err)
 		}
-		return backend.WorkflowRecord{}, fmt.Errorf("%w: version %q: %v", errWorkflowVersionUnavailable, version, err)
+		return backend.WorkflowRecord{}, fmt.Errorf("%w: version %q: %v", backend.ErrWorkflowVersionUnavailable, version, err)
 	}
 	if hash != rec.DefinitionHash {
 		if m.log != nil {
@@ -1699,7 +1701,7 @@ func (m *workflowControlModule) archivedWorkflowVersion(ctx context.Context, ns 
 				"workflow_id", string(id), "version", version,
 				"stored_hash", rec.DefinitionHash, "current_hash", hash)
 		}
-		return backend.WorkflowRecord{}, fmt.Errorf("%w: version %q", errWorkflowVersionUnavailable, version)
+		return backend.WorkflowRecord{}, fmt.Errorf("%w: version %q", backend.ErrWorkflowVersionUnavailable, version)
 	}
 	return rec, nil
 }
@@ -1857,7 +1859,7 @@ func (m *workflowControlModule) handleExecuteWorkflowByID(w http.ResponseWriter,
 				writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
 			case errors.Is(err, backend.ErrWorkflowVersionNotFound):
 				writeFail(w, r, http.StatusNotFound, "workflow_version_not_found", "workflow version not found")
-			case errors.Is(err, errWorkflowVersionUnavailable):
+			case errors.Is(err, backend.ErrWorkflowVersionUnavailable):
 				writeFail(w, r, http.StatusConflict, "workflow_version_unavailable", "workflow version is not reproducible under the current compiler")
 			default:
 				if m.log != nil {
@@ -2111,7 +2113,7 @@ func (m *workflowControlModule) replaceWorkflowByIDWithMetadata(ctx context.Cont
 // record currently holds. Its definition hash is the hash the version was
 // PUBLISHED with, never a recomputation — archivedWorkflowVersion has already
 // proven a recomputation yields that hash, and if it does not, this fails
-// closed with errWorkflowVersionUnavailable rather than installing a
+// closed with backend.ErrWorkflowVersionUnavailable rather than installing a
 // same-label-different-semantics definition.
 //
 // version empty or equal to the current version is the no-op branch: the

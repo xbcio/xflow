@@ -43,6 +43,23 @@ var ErrWorkflowVersionImmutable = errors.New("workflow version was already publi
 // workflow is gone" from "this workflow never published that version".
 var ErrWorkflowVersionNotFound = errors.New("workflow version not found")
 
+// ErrWorkflowVersionUnavailable is returned by a caller that resolved an
+// archived version and then failed to reproduce it: recomputing the runtime
+// hash from the stored payload no longer yields the hash that version was
+// PUBLISHED with, under the current compiler, hashing rules, or builtin
+// ParamSpec table.
+//
+// A version label is immutable, so such a payload is not the version it claims
+// to be. Every consumer — running an archived version, installing one by
+// rollback — fails closed with this error rather than serve a definition that
+// wears the label of another, which would silently break the promise a pinned
+// version makes.
+//
+// It is raised by the layers that execute or install a version (the HTTP
+// control module and the embedded SDK), not by the registry: only they hold the
+// compiler and the ParamSpec lookup the recomputation needs.
+var ErrWorkflowVersionUnavailable = errors.New("workflow version is not reproducible under the current compiler")
+
 // WorkflowNameConflictError reports the live record that already owns a
 // (namespace, name). The holder is carried for logs and callers that want to
 // point at the surviving record; it is never echoed to an unauthenticated
