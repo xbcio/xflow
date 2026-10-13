@@ -36,7 +36,9 @@ func TestAPIAdmissionMetricsGauges(t *testing.T) {
 	a.SetInflight("execute", 3)
 	a.SetInflight("execute", 2)
 	a.SetLimiterBuckets(7)
-	a.ObserveRateLimitFallback()
+	a.ObserveRateLimitFallback("redis_error")
+	a.ObserveRateLimitFallback("redis_error")
+	a.ObserveRateLimitFallback("breaker_trip")
 
 	inflight := gatherMetricFamily(t, m, metricAPIInflight).GetMetric()
 	if len(inflight) != 1 || inflight[0].GetGauge().GetValue() != 2 || labelValue(inflight[0], "route_class") != "execute" {
@@ -45,8 +47,17 @@ func TestAPIAdmissionMetricsGauges(t *testing.T) {
 	if v := gatherMetricFamily(t, m, metricAPILimiterBuckets).GetMetric()[0].GetGauge().GetValue(); v != 7 {
 		t.Fatalf("buckets = %v, want 7", v)
 	}
-	if v := gatherMetricFamily(t, m, metricAPIRateLimitFallback).GetMetric()[0].GetCounter().GetValue(); v != 1 {
-		t.Fatalf("fallback = %v, want 1", v)
+	// The reasons are separate series: a trip is an event, and the decisions
+	// that skip Redis while the breaker is open are not the same count.
+	fallbacks := gatherMetricFamily(t, m, metricAPIRateLimitFallback).GetMetric()
+	if len(fallbacks) != 2 {
+		t.Fatalf("fallback series = %v, want two (redis_error, breaker_trip)", fallbacks)
+	}
+	for _, metric := range fallbacks {
+		want, ok := map[string]float64{"redis_error": 2, "breaker_trip": 1}[labelValue(metric, "reason")]
+		if !ok || metric.GetCounter().GetValue() != want {
+			t.Fatalf("fallback series %q = %v, want %v", labelValue(metric, "reason"), metric.GetCounter().GetValue(), want)
+		}
 	}
 }
 
@@ -56,5 +67,6 @@ func TestAPIAdmissionMetricsNilRegistryIsNoOp(t *testing.T) {
 	a.ObserveRejected("execute", "rate")
 	a.SetInflight("execute", 1)
 	a.SetLimiterBuckets(1)
-	a.ObserveRateLimitFallback()
+	a.ObserveRateLimitFallback("redis_error")
+	a.ObserveRateLimitFallback("breaker_open")
 }

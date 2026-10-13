@@ -89,6 +89,20 @@ const (
 	// sharedRateLimitWarnEvery rate-limits the fallback warning: a Redis outage
 	// would otherwise log once per request.
 	sharedRateLimitWarnEvery = 30 * time.Second
+	// sharedRateLimitBreakerFailures is the run of consecutive Redis failures
+	// that opens the breaker.
+	sharedRateLimitBreakerFailures = 3
+	// sharedRateLimitBreakerCooldown is how long the open breaker decides from
+	// the local bucket without calling Redis before it probes again.
+	sharedRateLimitBreakerCooldown = 5 * time.Second
+)
+
+// Fallback reasons for xflow_api_rate_limit_fallback_total: why a shared-mode
+// decision did not come from Redis.
+const (
+	fallbackReasonRedisError  = "redis_error"
+	fallbackReasonBreakerTrip = "breaker_trip"
+	fallbackReasonBreakerOpen = "breaker_open"
 )
 
 // apiAdmission holds the admission gates. A nil *apiAdmission admits
@@ -293,6 +307,16 @@ func (l *localRateLimiter) size() int {
 // R1 decision: an unreachable limiter must not take the API down with it; the
 // cost is that the limit is per replica until Redis is back, which the
 // fallback counter and warning say.
+//
+// A short breaker sits in front of the Redis call. Without it a Redis that
+// black-holes (accepts the connection, never answers) would make every request
+// wait out sharedRateLimitTimeout while holding an inflight slot — the exact
+// load the inflight bound exists to shed. After sharedRateLimitBreakerFailures
+// consecutive failures the limiter stops calling Redis for
+// sharedRateLimitBreakerCooldown and decides from the local bucket; the first
+// request after the cooldown probes Redis again, and a failed probe starts a new
+// run rather than re-opening on the spot, so a Redis that is merely slow is not
+// shut out. A successful call resets the run.
 type sharedRateLimiter struct {
 	bucket  *ratelimit.TokenBucket
 	rate    float64
@@ -302,37 +326,90 @@ type sharedRateLimiter struct {
 	log     engine.Logger
 	now     func() time.Time
 
-	warnMu   sync.Mutex
-	lastWarn time.Time
+	mu        sync.Mutex
+	failures  int       // consecutive Redis failures
+	openUntil time.Time // breaker open while now is before this
+	lastWarn  time.Time
 }
 
 func (s *sharedRateLimiter) allow(ctx context.Context, key string) (bool, time.Duration) {
+	now := s.now()
+	if s.breakerOpen(now) {
+		s.metrics.ObserveRateLimitFallback(fallbackReasonBreakerOpen)
+		return s.local.allow(ctx, key)
+	}
 	rctx, cancel := context.WithTimeout(ctx, sharedRateLimitTimeout)
 	defer cancel()
 	ok, wait, err := s.bucket.Take(rctx, key, s.rate, s.burst)
 	if err == nil {
+		s.recordSuccess()
 		return ok, wait
 	}
-	s.metrics.ObserveRateLimitFallback()
-	s.warn(err)
+	s.metrics.ObserveRateLimitFallback(fallbackReasonRedisError)
+	if s.recordFailure(now) {
+		s.metrics.ObserveRateLimitFallback(fallbackReasonBreakerTrip)
+		s.warnBreakerOpen()
+	} else {
+		s.warn(err)
+	}
 	return s.local.allow(ctx, key)
+}
+
+func (s *sharedRateLimiter) breakerOpen(now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return now.Before(s.openUntil)
+}
+
+func (s *sharedRateLimiter) recordSuccess() {
+	s.mu.Lock()
+	s.failures = 0
+	s.mu.Unlock()
+}
+
+// recordFailure counts one failed Redis call; it reports whether this failure
+// opened the breaker.
+func (s *sharedRateLimiter) recordFailure(now time.Time) (tripped bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failures++
+	if s.failures >= sharedRateLimitBreakerFailures {
+		s.failures = 0
+		s.openUntil = now.Add(sharedRateLimitBreakerCooldown)
+		return true
+	}
+	return false
 }
 
 func (s *sharedRateLimiter) warn(err error) {
 	if s.log == nil {
 		return
 	}
-	s.warnMu.Lock()
+	s.mu.Lock()
 	now := s.now()
 	due := s.lastWarn.IsZero() || now.Sub(s.lastWarn) >= sharedRateLimitWarnEvery
 	if due {
 		s.lastWarn = now
 	}
-	s.warnMu.Unlock()
+	s.mu.Unlock()
 	if due {
 		s.log.Warn("api_rate_limit_redis_unavailable",
 			"fallback", "local", "err", err)
 	}
+}
+
+// warnBreakerOpen logs the trip and takes the warn slot, so the generic
+// unavailable message cannot follow it in the same window.
+func (s *sharedRateLimiter) warnBreakerOpen() {
+	if s.log == nil {
+		return
+	}
+	s.mu.Lock()
+	s.lastWarn = s.now()
+	s.mu.Unlock()
+	s.log.Warn("api_rate_limit_redis_breaker_open",
+		"failures", sharedRateLimitBreakerFailures,
+		"cooldown", sharedRateLimitBreakerCooldown.String())
 }
 
 // apiAdmissionFor builds the admission layer New installs. The shared mode

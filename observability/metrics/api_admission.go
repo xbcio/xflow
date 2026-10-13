@@ -51,8 +51,12 @@ func (a APIAdmissionMetrics) SetLimiterBuckets(n int) {
 	a.Metrics.Set(metricAPILimiterBuckets, map[string]string{}, float64(n))
 }
 
-// ObserveRateLimitFallback counts one shared-mode rate decision that could not
-// reach Redis and was made by this replica's local bucket instead.
-func (a APIAdmissionMetrics) ObserveRateLimitFallback() {
-	a.Metrics.Inc(metricAPIRateLimitFallback, map[string]string{})
+// ObserveRateLimitFallback counts one shared-mode rate decision that did not
+// consult Redis, by reason: "redis_error" (the Redis call failed and this
+// replica's local bucket decided instead), "breaker_trip" (the run of
+// consecutive failures opened the breaker — one increment per trip, not per
+// failed call), or "breaker_open" (the breaker skipped the Redis call during its
+// cooldown).
+func (a APIAdmissionMetrics) ObserveRateLimitFallback(reason string) {
+	a.Metrics.Inc(metricAPIRateLimitFallback, map[string]string{"reason": reason})
 }

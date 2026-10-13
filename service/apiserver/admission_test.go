@@ -251,7 +251,8 @@ func TestSharedRateLimiterSharesOneBudget(t *testing.T) {
 
 // TestSharedRateLimiterFailsOpenToLocal is the R1 fallback: with Redis gone the
 // decision is the local bucket's (so the limit still applies, per replica), each
-// fallback is counted, and the warning is rate-limited rather than per request.
+// fallback is counted by reason, and the warning is rate-limited rather than per
+// request.
 func TestSharedRateLimiterFailsOpenToLocal(t *testing.T) {
 	mr := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr(), MaxRetries: -1})
@@ -275,26 +276,144 @@ func TestSharedRateLimiterFailsOpenToLocal(t *testing.T) {
 	if !results[0] || !results[1] || results[2] {
 		t.Fatalf("fallback decisions = %v, want the local burst of 2 then a refusal", results)
 	}
-	if got := log.count(); got != 1 {
-		t.Fatalf("warnings = %d, want 1 (rate-limited)", got)
+	// Two warnings: the rate-limited unavailable message and the trip that the
+	// third failure opened (see the breaker test for the trip's own behavior).
+	if got := log.count(); got != 2 {
+		t.Fatalf("warnings = %d, want 2 (rate-limited unavailable + breaker trip)", got)
 	}
 	clk.advance(sharedRateLimitWarnEvery)
 	a.allowRate(ctx, routeClassExecute, "api:ns")
-	if got := log.count(); got != 2 {
-		t.Fatalf("warnings after the window = %d, want 2", got)
+	if got := log.count(); got != 3 {
+		t.Fatalf("warnings after the window = %d, want 3", got)
 	}
+	got := fallbackCounts(t, m)
+	want := map[string]float64{fallbackReasonRedisError: 4, fallbackReasonBreakerTrip: 1}
+	if len(got) != len(want) {
+		t.Fatalf("fallback series = %v, want %v", got, want)
+	}
+	for reason, v := range want {
+		if got[reason] != v {
+			t.Errorf("fallback %s = %v, want %v", reason, got[reason], v)
+		}
+	}
+}
+
+// fallbackCounts gathers xflow_api_rate_limit_fallback_total by reason.
+func fallbackCounts(t *testing.T, m *metrics.Metrics) map[string]float64 {
+	t.Helper()
 	families, err := m.Registry().Gather()
 	if err != nil {
 		t.Fatal(err)
 	}
-	var fallbacks float64
+	out := map[string]float64{}
 	for _, f := range families {
-		if f.GetName() == "xflow_api_rate_limit_fallback_total" {
-			fallbacks = f.GetMetric()[0].GetCounter().GetValue()
+		if f.GetName() != "xflow_api_rate_limit_fallback_total" {
+			continue
+		}
+		for _, metric := range f.GetMetric() {
+			for _, l := range metric.GetLabel() {
+				if l.GetName() == "reason" {
+					out[l.GetValue()] = metric.GetCounter().GetValue()
+				}
+			}
 		}
 	}
-	if fallbacks != 4 {
-		t.Fatalf("fallback counter = %v, want 4", fallbacks)
+	return out
+}
+
+// redisCountingHook counts the commands that reach the Redis client's process
+// path, so "the breaker skipped the call" is observed rather than inferred from
+// elapsed time.
+type redisCountingHook struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (h *redisCountingHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h *redisCountingHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		h.mu.Lock()
+		h.n++
+		h.mu.Unlock()
+		return next(ctx, cmd)
+	}
+}
+
+func (h *redisCountingHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+func (h *redisCountingHook) count() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.n
+}
+
+// TestSharedRateLimiterBreakerSkipsRedisWhileOpen pins the breaker: after
+// sharedRateLimitBreakerFailures consecutive failures the limiter stops calling
+// Redis for the cooldown (each skipped call would otherwise wait out the full
+// timeout while holding an inflight slot), the trips and skips are counted by
+// reason, and the first request after the cooldown probes Redis again. The
+// clock is the injectable one, so no test sleeps.
+func TestSharedRateLimiterBreakerSkipsRedisWhileOpen(t *testing.T) {
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr(), MaxRetries: -1})
+	t.Cleanup(func() { _ = client.Close() })
+	calls := &redisCountingHook{}
+	client.AddHook(calls)
+	mr.Close()
+
+	m := metrics.New()
+	clk := newFakeClock()
+	a := newAPIAdmission(APILimits{Rate: 1, Burst: 100, Mode: APIRateLimitModeRedis}, ratelimit.New(client, ""), m, &warnCountingLogger{})
+	shared := a.limiter.(*sharedRateLimiter)
+	shared.now = clk.now
+	shared.local.now = clk.now
+	ctx := context.Background()
+
+	// The failures the breaker tolerates each try Redis.
+	for i := 0; i < sharedRateLimitBreakerFailures; i++ {
+		if ok, _ := shared.allow(ctx, "api:ns"); !ok {
+			t.Fatalf("fallback decision %d refused inside the local burst", i)
+		}
+	}
+	if got := calls.count(); got != sharedRateLimitBreakerFailures {
+		t.Fatalf("Redis calls = %d, want %d", got, sharedRateLimitBreakerFailures)
+	}
+
+	// The breaker is open: decisions keep being made, but without Redis.
+	for i := 0; i < 5; i++ {
+		if ok, _ := shared.allow(ctx, "api:ns"); !ok {
+			t.Fatalf("breaker-open decision %d refused inside the local burst", i)
+		}
+	}
+	if got := calls.count(); got != sharedRateLimitBreakerFailures {
+		t.Fatalf("Redis calls while the breaker is open = %d, want still %d", got, sharedRateLimitBreakerFailures)
+	}
+
+	// The cooldown is a timer, not a permanent latch: the next request probes.
+	clk.advance(sharedRateLimitBreakerCooldown)
+	if ok, _ := shared.allow(ctx, "api:ns"); !ok {
+		t.Fatal("probe after the cooldown refused inside the local burst")
+	}
+	if got := calls.count(); got != sharedRateLimitBreakerFailures+1 {
+		t.Fatalf("Redis calls after the cooldown = %d, want one probe (%d)", got, sharedRateLimitBreakerFailures+1)
+	}
+
+	got := fallbackCounts(t, m)
+	want := map[string]float64{
+		fallbackReasonRedisError:  sharedRateLimitBreakerFailures + 1, // failed calls plus the probe
+		fallbackReasonBreakerTrip: 1,
+		fallbackReasonBreakerOpen: 5,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("fallback series = %v, want %v", got, want)
+	}
+	for reason, v := range want {
+		if got[reason] != v {
+			t.Errorf("fallback %s = %v, want %v", reason, got[reason], v)
+		}
 	}
 }
 

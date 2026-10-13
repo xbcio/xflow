@@ -287,12 +287,17 @@ rerun、schedule backfill（backfill 会发起执行）、dead-letter replay（r
 - `redis`：每个键一个 Redis 令牌桶（Lua 原子脚本，时钟取 Redis `TIME`），全部
   副本共享一份额度，代价是每个被限速的请求多一次 Redis 往返（250ms 超时）。
   Redis 不可达时**放行到本地桶**（fail open：限流器故障不得拖垮 API），
-  `xflow_api_rate_limit_fallback_total` 计数，告警日志每 30 秒至多一条。没有
+  `xflow_api_rate_limit_fallback_total` 按 reason 计数，告警日志每 30 秒至多一条。
+  连 Redis 都黑掉（连得上却不回话）时失败会等满超时：连续 3 次失败后**熔断 5 秒**，
+  期间直接本地判定、不再调用 Redis，也不让每个请求占着 inflight 槽等满 250ms；
+  冷却结束后的第一个请求探测 Redis，再失败重新计数。没有
   Redis 后端的部署选 `redis` 会在启动时失败。
 
 指标：`xflow_api_rate_limited_total{route,reason}`（reason=`rate`|`inflight`，
 route 为 `execute`|`execution`|`webhook`）、`xflow_api_inflight{route_class}`、
-`xflow_api_limiter_buckets`（本地桶数，观察空闲清扫）。
+`xflow_api_limiter_buckets`（本地桶数，观察空闲清扫）、
+`xflow_api_rate_limit_fallback_total{reason}`（reason=`redis_error`|`breaker_trip`|
+`breaker_open`，仅 redis 模式）。
 
 ---
 
