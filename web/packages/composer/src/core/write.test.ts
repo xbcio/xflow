@@ -203,6 +203,21 @@ describe("rule 8: /$ctx is read-only", () => {
   });
 });
 
+describe("prototype-polluting tokens", () => {
+  it("rejects __proto__ / constructor / prototype writes and keeps the value writable", () => {
+    const { write: w, warnings } = collect({ value: { a: {} } });
+    expect(w({ path: "/__proto__" }, { polluted: true }, "object")).toEqual([]);
+    expect(w({ path: "/a/constructor" }, "x")).toEqual([]);
+    expect(w({ path: "/a/prototype/x" }, 1)).toEqual([]);
+    expect(warnings.map((x) => x.code)).toEqual(["unsafe-path", "unsafe-path", "unsafe-path"]);
+    expect(() => applyPatches({}, [{ op: "set", path: "/__proto__", value: [] }])).toThrow(/unsafe/);
+    expect(() => applyPatches({}, [{ op: "set", path: "/a/constructor", value: 1 }])).toThrow(/unsafe/);
+    const next = applyPatches({ a: 1 }, [{ op: "set", path: "/b", value: 2 }]);
+    expect(Object.getPrototypeOf(next)).toBe(Object.prototype);
+    expect(next).toEqual({ a: 1, b: 2 });
+  });
+});
+
 describe("row targets", () => {
   it("resolve the row by uid in the current value and drop writes to removed rows", () => {
     const a = { name: "a" };
