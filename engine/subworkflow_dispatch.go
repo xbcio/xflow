@@ -86,6 +86,12 @@ type subWorkflowChild struct {
 // refusal (no resolver, unresolved binding, depth exceeded, resolution
 // mismatched, store failure) is a node failure through the ordinary retry and
 // on_error pipeline, never a task routed elsewhere and never a silent success.
+//
+// flush is accepted for the dispatcher's uniform signature and is deliberately
+// not threaded further: every commit on this path goes through the ordinary
+// node committers, which deliver their own outbox (finishAtomicCommit) — and
+// must, because these intents are written by a task type FlushOutbox's loop
+// does not handle, so no outer re-poll would pick them up.
 func (e *Engine) handleSubWorkflowNode(ctx context.Context, task *Task, flush bool) (bool, error) {
 	g, active, err := e.loadActiveGraph(ctx, task.ExecutionID)
 	if err != nil {
@@ -104,7 +110,7 @@ func (e *Engine) handleSubWorkflowNode(ctx context.Context, task *Task, flush bo
 	if meta.Type != types.SubWorkflowNodeType || meta.Name != task.NodeName {
 		return true, fmt.Errorf("task %q/%q is not a sub-workflow node", task.ExecutionID, task.NodeName)
 	}
-	return true, e.executeSubWorkflow(ctx, task, g, meta, flush)
+	return true, e.executeSubWorkflow(ctx, task, g, meta)
 }
 
 // executeSubWorkflow is the claim → start-child → park sequence. The three
@@ -113,7 +119,7 @@ func (e *Engine) handleSubWorkflowNode(ctx context.Context, task *Task, flush bo
 // the lease sweeper's redispatch replays the whole sequence: the derived child
 // id is found rather than re-created, and the park is re-written under the new
 // lease generation.
-func (e *Engine) executeSubWorkflow(ctx context.Context, task *Task, g *graph.Graph, meta graph.NodeMeta, flush bool) error {
+func (e *Engine) executeSubWorkflow(ctx context.Context, task *Task, g *graph.Graph, meta graph.NodeMeta) error {
 	lease, err := e.acquireSubWorkflowLease(ctx, task, meta)
 	if err != nil {
 		return err
@@ -125,6 +131,17 @@ func (e *Engine) executeSubWorkflow(ctx context.Context, task *Task, g *graph.Gr
 	}
 	child, cause := e.startSubWorkflowChild(ctx, task, g, meta)
 	if cause == nil {
+		// The child can already be concluded here: a redelivery after a reclaim
+		// that finds the completion notification was lost. Concluding now is the
+		// backstop's whole purpose; parking again would wait for a notification
+		// that has already been delivered and dropped.
+		concluded, err := e.concludeTerminalChild(ctx, lease, g, meta, child)
+		if err != nil {
+			return err
+		}
+		if concluded {
+			return nil
+		}
 		if accepted, err := e.parkSubWorkflowNode(ctx, lease, child); err != nil {
 			return err
 		} else if accepted {
@@ -135,7 +152,7 @@ func (e *Engine) executeSubWorkflow(ctx context.Context, task *Task, g *graph.Gr
 		// already running; whoever owns the node now owns the link.
 		return nil
 	}
-	return e.failSubWorkflowStart(ctx, lease, g, meta, cause, flush)
+	return e.failSubWorkflowStart(ctx, lease, g, meta, cause)
 }
 
 // acquireSubWorkflowLease claims the node for this dispatch, mirroring
@@ -440,7 +457,7 @@ func (e *Engine) parkSubWorkflowNode(ctx context.Context, lease *TaskLease, chil
 // a start failure either created nothing, or created a child under the current
 // generation's derived id — and a retry advances the generation, so it can
 // never re-enter the same child.
-func (e *Engine) failSubWorkflowStart(ctx context.Context, lease *TaskLease, g *graph.Graph, meta graph.NodeMeta, cause error, flush bool) error {
+func (e *Engine) failSubWorkflowStart(ctx context.Context, lease *TaskLease, g *graph.Graph, meta graph.NodeMeta, cause error) error {
 	if errors.Is(cause, ErrExecutionInactive) {
 		// The parent finished or was canceled under us; nothing to commit.
 		return nil
@@ -448,7 +465,7 @@ func (e *Engine) failSubWorkflowStart(ctx context.Context, lease *TaskLease, g *
 	privateOutput := privateOutputForTask(g, &lease.Task)
 	outcome, err := e.commitNodeErrorOutcome(ctx, lease, meta, privateOutput, cause, nil, nil,
 		e.commitLegacyNodeWithClassification)
-	if outcome == CommitOutcomeStaleToken || outcome == CommitOutcomeDuplicateTerminal || outcome == CommitOutcomeExecutionInactive {
+	if subWorkflowCommitDropped(outcome) {
 		return nil
 	}
 	if err != nil {
