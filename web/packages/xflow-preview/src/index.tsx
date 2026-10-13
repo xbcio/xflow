@@ -221,9 +221,9 @@ function nodeTone(type: string): "blue" | "cyan" | "green" | "amber" | "violet" 
   return "blue";
 }
 
-function inputSummary(node: GraphNode): string | undefined {
-  if (node.inputs.length === 0) return undefined;
-  return `input: ${node.inputs.map((input) => input.name).join(", ")}`;
+function elementCenter(element: Element): PreviewClientPosition {
+  const rect = element.getBoundingClientRect();
+  return { clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
 }
 
 function miniMapNodeColor(node: Node<PreviewNodeData>): string {
@@ -621,26 +621,41 @@ function activateHandle(
 }
 
 function PreviewNode({ data }: NodeProps<PreviewFlowNode>): React.ReactElement {
-  const { graphNode: node, runtime, sourcePorts, targetPorts, canConnect, selected, onSelect } = data;
-  const inputLabel = inputSummary(node);
+  const { graphNode: node, runtime, sourcePorts, targetPorts, canConnect, selected, onSelect, onContextMenuKey } = data;
   const visiblePorts = sourcePorts.filter((port) => port !== "main" && port !== "error");
+  // "pending" is also what runtimeForNode reports when there is no run at all,
+  // so the card only speaks about status once a run has moved the node.
+  const hasRunStatus = runtime.status !== "pending";
+  const runMeta = hasRunStatus ? nodeMeta(runtime) : undefined;
+  const nameTitle = node.label === node.name ? node.label : `${node.label} (${node.name})`;
 
   return (
     <article
       className="xflow-preview-node"
+      data-node-id={node.id}
       data-selected={selected}
       data-status={runtime.status}
+      data-disabled={node.disabled || undefined}
     >
       <div
         className="xflow-preview-node__select"
         role="button"
         tabIndex={0}
         aria-label={`${node.name} node ${runtime.status}`}
+        aria-keyshortcuts={onContextMenuKey ? "Shift+F10 ContextMenu" : undefined}
         onClick={() => onSelect(node.id)}
         onKeyDown={(event) => {
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
             onSelect(node.id);
+            return;
+          }
+          if (onContextMenuKey && isContextMenuKey(event)) {
+            event.preventDefault();
+            // The canvas listener would otherwise answer the same press for
+            // whichever node is selected, which need not be this focused one.
+            event.stopPropagation();
+            onContextMenuKey(node.id, event.currentTarget.closest(".xflow-preview-node") ?? event.currentTarget);
           }
         }}
       >
@@ -648,29 +663,31 @@ function PreviewNode({ data }: NodeProps<PreviewFlowNode>): React.ReactElement {
           <span className="xflow-preview-node__icon" data-tone={nodeTone(node.type)} aria-label={`${node.type} icon`}>
             {nodeIcon(node.type)}
           </span>
-          <div>
-            <strong>{node.label}</strong>
-            {node.label !== node.name ? <span>{node.name}</span> : null}
+          <div className="xflow-preview-node__title">
+            <strong title={nameTitle}>{node.label}</strong>
+            <span className="xflow-preview-node__subtitle">
+              <code className="xflow-preview-node__type" title={node.type}>{node.type}</code>
+              {node.disabled ? <span className="xflow-preview-node__badge">已禁用</span> : null}
+            </span>
           </div>
-          <span className="xflow-preview-node__status">{statusLabel[runtime.status]}</span>
-        </div>
-        <div className="xflow-preview-node__body">
-          <div className="xflow-preview-node__meta">
-            <span>{node.kind}</span>
-            <code>{node.type}</code>
-          </div>
-          <div className="xflow-preview-node__ports">
-            {inputLabel ? <span>{inputLabel}</span> : <span>input: -</span>}
-            <span>{nodeMeta(runtime)}</span>
-          </div>
-          {visiblePorts.length > 0 ? (
-            <div className="xflow-preview-node__port-chips">
-              {visiblePorts.map((port) => (
-                <span key={port}>{port}</span>
-              ))}
-            </div>
+          {hasRunStatus ? (
+            <span className="xflow-preview-node__status" data-status={runtime.status}>
+              {statusLabel[runtime.status]}
+            </span>
           ) : null}
         </div>
+        {runMeta || visiblePorts.length > 0 ? (
+          <div className="xflow-preview-node__body">
+            {visiblePorts.length > 0 ? (
+              <div className="xflow-preview-node__port-chips">
+                {visiblePorts.map((port) => (
+                  <span key={port}>{port}</span>
+                ))}
+              </div>
+            ) : null}
+            {runMeta ? <span className="xflow-preview-node__run-meta">{runMeta}</span> : null}
+          </div>
+        ) : null}
         {runtime.error ? <p className="xflow-preview-node__error">{runtime.error}</p> : null}
       </div>
       {targetPorts.map((port, index) => (
