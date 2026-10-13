@@ -3,7 +3,6 @@ package control
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strconv"
 	"time"
 
@@ -221,7 +220,14 @@ func (d *RedisRunnerDirectory) matureGraceCandidates(ctx context.Context, candid
 	serverTime := pipe.Time(ctx)
 	roundTrips = 2 // HMGET + TIME
 	if _, execErr := pipe.Exec(ctx); execErr != nil && !errors.Is(execErr, redis.Nil) {
-		return nil, nil, roundTrips, fmt.Errorf("read assignment queued-at stamps: %w", execErr)
+		// Degrade, never fail the walk: the stamp read is advisory — the
+		// fallback is the permitted outcome, so keeping the labels enforced one
+		// poll longer is the safe direction — while a walk error would strand
+		// every entry on the page, including ones that already waited out their
+		// window, for as long as this command misbehaves. The whole page counts
+		// as still pending, which is also where an unstamped entry lands; the
+		// next poll re-reads the stamps.
+		return nil, candidates, roundTrips, nil
 	}
 	// A failed TIME degrades to the directory clock rather than failing the
 	// walk: the grace verdict is advisory-soft (the fallback is the permitted
