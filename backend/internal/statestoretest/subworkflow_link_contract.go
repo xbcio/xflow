@@ -247,6 +247,28 @@ func RunSubWorkflowLinkContract(t *testing.T, newStore func(*testing.T) SubWorkf
 		if node == nil || node.ChildExecutionID != link.ChildExecutionID {
 			t.Fatalf("child id after a reclaim = %+v, want %q kept", node, link.ChildExecutionID)
 		}
+		// The back half: the redelivered task comes back through
+		// AcquireTaskLease, and the child id has to survive the re-claim too.
+		// The record is the only place the resumed wait's child is readable
+		// from — a backend that rebuilds the snapshot without it loses the
+		// drill-down at exactly the step the wait is redelivered.
+		reclaim := &engine.TaskLease{
+			LeaseID:    "sw-lease-reclaim",
+			LeaseToken: "sw-token-reclaim",
+			IssuedAt:   time.Now().UTC().Truncate(time.Millisecond),
+			TTL:        time.Minute,
+			Task: engine.Task{
+				ExecutionID: id, NodeName: "sub", NodeIdx: 0,
+				Type: engine.TaskTypeSubWorkflow, ActivationID: 1,
+			},
+		}
+		if _, acquired, err := store.AcquireTaskLease(ctx, reclaim); err != nil || !acquired {
+			t.Fatalf("AcquireTaskLease() acquired=%v err=%v, want true/nil", acquired, err)
+		}
+		node, _ = store.GetNode(ctx, id, "sub")
+		if node == nil || node.ChildExecutionID != link.ChildExecutionID {
+			t.Fatalf("child id after the re-claim = %+v, want %q kept", node, link.ChildExecutionID)
+		}
 	})
 
 	t.Run("LinkSurvivesRetryReset", func(t *testing.T) {

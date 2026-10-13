@@ -787,7 +787,7 @@ func (s *memoryState) AcquireTaskLease(_ context.Context, lease *engine.TaskLeas
 		attempt = current.Attempt + 1
 	}
 	privateOutput := s.preserveOutputPrivacyLocked(key, false)
-	s.nodes[key] = &engine.NodeSnapshot{
+	node := &engine.NodeSnapshot{
 		ExecutionID:     lease.Task.ExecutionID,
 		Name:            lease.Task.NodeName,
 		NodeIdx:         lease.Task.NodeIdx,
@@ -805,6 +805,16 @@ func (s *memoryState) AcquireTaskLease(_ context.Context, lease *engine.TaskLeas
 		LeaseGeneration: lease.Task.Generation,
 		PrivateOutput:   privateOutput,
 	}
+	// The re-claim rebuilds the record, so anything not carried over is dropped.
+	// The child a sub-workflow node waited on outlives the lease exactly as it
+	// outlives the commit (see CommitNode): the redelivered wait resumes that
+	// child, and the drill-down reads it from here, so a re-claim that cleared
+	// it would lose both. The rstate acquire works on the existing hash and
+	// never touches the field, which is the behavior this mirrors.
+	if current != nil {
+		node.ChildExecutionID = current.ChildExecutionID
+	}
+	s.nodes[key] = node
 	return s.publicNodeSnapshotLocked(key, current), true, nil
 }
 
