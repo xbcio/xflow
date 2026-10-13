@@ -2,16 +2,23 @@
 //
 // - Writes inside one microtask are merged (same path: last wins, via core
 //   createPatchBatch/mergePatches) into a single onChange call.
-// - The overlay is every patch written since the host last passed a new
-//   `value` reference. Until then resolve and later writes see
-//   "host value + overlay", so rapid edits never compute from stale data.
-// - A new host `value` reference drops the overlay: the host value wins
-//   (patches it rejected disappear). Patches not yet flushed are re-applied
-//   on top of the new host value, since the host has not seen them.
-// - If the host has not passed a new value within OVERLAY_TIMEOUT_MS of the
-//   first unacknowledged flush, the overlay is dropped with a warning.
+// - The overlay is every patch not yet acknowledged by the host: emitted
+//   patches (sent through onChange, in order) plus unflushed ones. Resolve
+//   and later writes see "host value + overlay", so rapid edits never
+//   compute from stale data.
+// - A new host `value` reference acknowledges emitted patches in order: find
+//   the newest emitted patch the value already reflects (set: the value at
+//   its path deep-equals the patch value; unset: the path is absent) and drop
+//   it together with every patch emitted before it. The remaining emitted
+//   patches and the unflushed ones are replayed on top of the new value, so a
+//   lagging or batching host never rolls back newer keystrokes.
+// - The timeout runs from the latest unacknowledged flush. If it passes
+//   OVERLAY_TIMEOUT_MS without an acknowledgement covering every emitted
+//   patch, all emitted patches are dropped with a warning (the host value
+//   wins, e.g. for a host that rejects or normalizes them); only unflushed
+//   patches are kept.
 
-import { applyPatches, createPatchBatch, write, type BindTarget, type Patch, type ResolvedTree, type ValueKind, type Warning } from "../core";
+import { applyPatches, createPatchBatch, deepEqual, getPointer, write, type BindTarget, type Patch, type ResolvedTree, type ValueKind, type Warning } from "../core";
 
 export const OVERLAY_TIMEOUT_MS = 1000;
 
@@ -27,7 +34,8 @@ export class OverlayController {
   private effective: object | undefined;
   private readonly batch = createPatchBatch();
   private unflushed: Patch[] = [];
-  private emitted = false;
+  /** Patches sent through onChange that the host has not reflected yet, in order. */
+  private emitted: Patch[] = [];
   private scheduled = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private active = true;
@@ -45,16 +53,11 @@ export class OverlayController {
   sync(hostValue: object): object {
     if (hostValue !== this.base) {
       this.base = hostValue;
-      this.emitted = false;
-      this.clearTimer();
-      this.effective = hostValue;
-      if (this.unflushed.length > 0) {
-        try {
-          this.effective = applyPatches(hostValue, this.unflushed);
-        } catch {
-          this.effective = hostValue;
-        }
-      }
+      let acked = this.emitted.length - 1;
+      while (acked >= 0 && !reflects(hostValue, this.emitted[acked])) acked--;
+      if (acked >= 0) this.emitted = this.emitted.slice(acked + 1);
+      if (this.emitted.length === 0) this.clearTimer();
+      this.rebase();
     }
     return this.effective!;
   }
@@ -88,17 +91,16 @@ export class OverlayController {
     this.unflushed = [];
     const patches = this.batch.flush();
     if (patches.length === 0) return;
-    this.emitted = true;
-    if (this.active && this.timer === undefined) {
-      this.timer = setTimeout(() => this.expire(), OVERLAY_TIMEOUT_MS);
-    }
+    this.emitted.push(...patches);
+    this.clearTimer();
+    if (this.active) this.timer = setTimeout(() => this.expire(), OVERLAY_TIMEOUT_MS);
     this.host.onChange(patches);
   }
 
   /** Re-enables the timeout/invalidation after a (StrictMode) remount. */
   activate(): void {
     this.active = true;
-    if (this.emitted && this.timer === undefined) {
+    if (this.emitted.length > 0 && this.timer === undefined) {
       this.timer = setTimeout(() => this.expire(), OVERLAY_TIMEOUT_MS);
     }
   }
@@ -111,21 +113,27 @@ export class OverlayController {
 
   private expire(): void {
     this.timer = undefined;
-    if (!this.emitted || this.base === undefined) return;
-    this.emitted = false;
+    if (this.emitted.length === 0 || this.base === undefined) return;
+    this.emitted = [];
     this.host.onWarning({
       code: "overlay-timeout",
-      message: `host did not pass a new value within ${OVERLAY_TIMEOUT_MS}ms of onChange; dropping the local overlay`
+      message: `host did not acknowledge onChange within ${OVERLAY_TIMEOUT_MS}ms of the latest flush; dropping the local overlay`
     });
-    this.effective = this.base;
-    if (this.unflushed.length > 0) {
-      try {
-        this.effective = applyPatches(this.base, this.unflushed);
-      } catch {
-        this.effective = this.base;
-      }
-    }
+    this.rebase();
     if (this.active) this.host.invalidate();
+  }
+
+  /** effective = base + every patch the host has not acknowledged. */
+  private rebase(): void {
+    const base = this.base!;
+    const pending = [...this.emitted, ...this.unflushed];
+    this.effective = base;
+    if (pending.length === 0) return;
+    try {
+      this.effective = applyPatches(base, pending);
+    } catch {
+      this.effective = base;
+    }
   }
 
   private clearTimer(): void {
@@ -134,4 +142,15 @@ export class OverlayController {
       this.timer = undefined;
     }
   }
+}
+
+/** True when `value` already shows the effect of `patch`. */
+export function reflects(value: object, patch: Patch): boolean {
+  // An append has no fixed path: it is reflected once the array ends with it.
+  if (patch.op === "set" && patch.path.endsWith("/-")) {
+    const list = getPointer(value, patch.path.slice(0, -2));
+    return Array.isArray(list) && list.length > 0 && deepEqual(list[list.length - 1], patch.value);
+  }
+  const current = getPointer(value, patch.path);
+  return patch.op === "set" ? deepEqual(current, patch.value) : current === undefined;
 }

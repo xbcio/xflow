@@ -68,7 +68,9 @@ const regexCache = new WeakMap<object, RegExp>();
 export function compilePattern(args: Record<string, unknown>): RegExp {
   let compiled = regexCache.get(args);
   if (!compiled) {
-    compiled = new RegExp(String(args.pattern), typeof args.flags === "string" ? args.flags : undefined);
+    // g / y are rejected by validateArgs; stripped here so an unvalidated spec still matches statelessly.
+    const flags = typeof args.flags === "string" ? args.flags.replace(/[gy]/g, "") : undefined;
+    compiled = new RegExp(String(args.pattern), flags);
     regexCache.set(args, compiled);
   }
   return compiled;
@@ -111,6 +113,11 @@ export const builtinChecks: readonly CheckDefinition[] = [
     {
       validateArgs: (args) => {
         if (typeof args.pattern !== "string") return ["args.pattern must be a string"];
+        if (args.flags !== undefined) {
+          if (typeof args.flags !== "string") return ["args.flags must be a string"];
+          // g / y make RegExp.test stateful through lastIndex on the cached instance.
+          if (/[gy]/.test(args.flags)) return ["args.flags must not contain g or y (stateful matching)"];
+        }
         try {
           compilePattern(args);
           return [];

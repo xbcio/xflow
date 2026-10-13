@@ -33,6 +33,9 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import {
+  isSupplyNode,
+  isTextEntryTarget,
+  runtimeForNode,
   toGraphModel,
   type GraphEdge,
   type GraphNode,
@@ -111,6 +114,41 @@ export interface XFlowPreviewProps {
    * owner decides when/whether to save it as part of `editor_metadata`.
    */
   onViewportChange?: (viewport: Viewport) => void;
+  /**
+   * Requests a context menu for a node, at viewport (client) coordinates. Fired
+   * by a right click on the node, or by Shift+F10 / the ContextMenu key while a
+   * node is focused or selected (anchored at the node's center). The node is
+   * selected first, so the owner's inspector already follows it. Omit it to
+   * leave the browser's native menu untouched.
+   */
+  onNodeContextMenu?: (nodeId: string, position: PreviewClientPosition) => void;
+  /**
+   * Requests a context menu for the empty canvas. `flowX`/`flowY` are the same
+   * point in canvas coordinates (pan and zoom folded in), suitable as a drop
+   * position for a node added from that menu. Omit it to leave the browser's
+   * native menu untouched.
+   */
+  onPaneContextMenu?: (position: PreviewClientPosition & { flowX: number; flowY: number }) => void;
+  /**
+   * Reports a handle once React Flow is live, for view commands the owner's own
+   * chrome has to trigger (a "fit view" or "center node" item in its context
+   * menu). The preview's built-in fit control keeps working unchanged, and
+   * nothing happens until the owner calls the handle.
+   */
+  onReady?: (handle: XFlowPreviewHandle) => void;
+}
+
+export interface PreviewClientPosition {
+  clientX: number;
+  clientY: number;
+}
+
+/** View commands the preview exposes to its owner; read-only, never mutating. */
+export interface XFlowPreviewHandle {
+  /** Fits the whole graph, exactly like the canvas's own fit control. */
+  fitView: (options?: { padding?: number }) => void;
+  /** Brings one node into view; an unknown node id is ignored. */
+  fitNode: (nodeId: string, options?: { padding?: number }) => void;
 }
 
 /** One output port of a node that the owner reports as no longer existing. */
@@ -137,19 +175,28 @@ const statusLabel: Record<string, string> = {
   timeout: "timeout"
 };
 
-function runtimeForNode(runtime: RuntimeSnapshot | undefined, node: GraphNode): RuntimeNodeSnapshot {
-  return runtime?.nodes?.[node.name] ?? runtime?.nodes?.[node.id] ?? { status: "pending" };
-}
-
-function nodeMeta(snapshot: RuntimeNodeSnapshot): string {
+/** Runtime detail worth a line on the card; nothing at all before a run. */
+function nodeMeta(snapshot: RuntimeNodeSnapshot): string | undefined {
   if (snapshot.attempts && snapshot.attempts > 1) {
     return `${snapshot.attempts} attempts`;
   }
   if (snapshot.durationMs !== undefined) {
     return `${snapshot.durationMs} ms`;
   }
-  return "ready";
+  return undefined;
 }
+
+/** Shift+F10 and the ContextMenu key are the platform keyboard routes to a context menu. */
+function isContextMenuKey(event: React.KeyboardEvent): boolean {
+  return event.key === "ContextMenu" || (event.shiftKey && event.key === "F10");
+}
+
+/**
+ * Browsers that map the ContextMenu key to a native `contextmenu` event fire it
+ * right after the keydown the preview already answered; this window swallows
+ * that echo so one press cannot open the menu twice.
+ */
+const KEYBOARD_MENU_ECHO_MS = 500;
 
 function nodeIcon(type: string): React.ReactNode {
   if (type.includes("start")) return <PlayCircleOutlined />;
@@ -174,9 +221,9 @@ function nodeTone(type: string): "blue" | "cyan" | "green" | "amber" | "violet" 
   return "blue";
 }
 
-function inputSummary(node: GraphNode): string | undefined {
-  if (node.inputs.length === 0) return undefined;
-  return `input: ${node.inputs.map((input) => input.name).join(", ")}`;
+function elementCenter(element: Element): PreviewClientPosition {
+  const rect = element.getBoundingClientRect();
+  return { clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
 }
 
 function miniMapNodeColor(node: Node<PreviewNodeData>): string {
@@ -201,6 +248,8 @@ interface PreviewNodeData extends Record<string, unknown> {
   canConnect: boolean;
   selected: boolean;
   onSelect: (nodeId: string) => void;
+  /** Set only while the owner listens for node context menus. */
+  onContextMenuKey?: (nodeId: string, anchor: Element) => void;
 }
 
 type PreviewFlowNode = Node<PreviewNodeData, "xflowPreviewNode">;
@@ -211,15 +260,55 @@ const nodeTypes = {
 
 const initialFitViewOptions = { padding: 0.18 };
 
-function fitMeasuredNodes(flow: ReactFlowInstance<PreviewFlowNode, Edge>): boolean {
+/** Padding for fitting a single node, looser than the whole-graph fit. */
+const nodeFitPadding = 0.28;
+
+/** Frames a fit may retry while its subject is still unmeasured. */
+const fitRetryLimit = 12;
+
+function fitMeasuredNodes(
+  flow: ReactFlowInstance<PreviewFlowNode, Edge>,
+  padding = initialFitViewOptions.padding
+): boolean {
   const nodes = flow.getNodes();
   if (nodes.length === 0) return false;
 
   const bounds = flow.getNodesBounds(nodes);
   if (bounds.width <= 0 || bounds.height <= 0) return false;
 
-  void flow.fitBounds(bounds, initialFitViewOptions);
+  void flow.fitBounds(bounds, { padding });
   return true;
+}
+
+/**
+ * Fits whatever `boundsOf` reports, waiting out a 0×0 box: a just-appended node
+ * has no measured size yet, and fitting that box would clamp the zoom to
+ * maxZoom. The first attempt is synchronous; later ones ride animation frames.
+ * Returns a cancel function for the retry still in flight, if any.
+ */
+function fitWhenMeasured(
+  boundsOf: () => { x: number; y: number; width: number; height: number },
+  fit: (bounds: { x: number; y: number; width: number; height: number }) => void
+): () => void {
+  let frame: number | undefined;
+  let attempts = 0;
+  const tryFit = () => {
+    frame = undefined;
+    const bounds = boundsOf();
+    if (bounds.width > 0 && bounds.height > 0) {
+      fit(bounds);
+      return;
+    }
+    attempts += 1;
+    if (attempts < fitRetryLimit) {
+      frame = requestAnimationFrame(tryFit);
+    }
+  };
+  tryFit();
+
+  return () => {
+    if (frame !== undefined) cancelAnimationFrame(frame);
+  };
 }
 
 /**
@@ -268,6 +357,8 @@ function InitialViewFitter({
   const hasFittedInitialView = React.useRef(false);
   const fitViewFrame = React.useRef<number | undefined>(undefined);
 
+  // `disabled` is a dependency so a viewport restored after mount cancels a
+  // pending retry; hasFittedInitialView keeps a re-run from fitting twice.
   React.useEffect(() => {
     if (!flow || disabled || hasFittedInitialView.current) return;
 
@@ -294,7 +385,7 @@ function InitialViewFitter({
         fitViewFrame.current = undefined;
       }
     };
-  }, [flow]);
+  }, [flow, disabled]);
 
   return null;
 }
@@ -337,16 +428,6 @@ function portsWithMain(...portGroups: string[][]): string[] {
 }
 
 /**
- * Whether a key event belongs to a text field that owns the keystroke. React
- * Flow skips its own Delete handling in exactly this case, so matching it keeps
- * "backspace while renaming a node" from deleting the node as well.
- */
-function isTextEntryTarget(target: EventTarget | null): boolean {
-  return target instanceof HTMLElement
-    && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
-}
-
-/**
  * Declared ports lead so a branch or error handle exists before anything is
  * wired to it. Edge ports follow: React Flow needs a handle for every edge it
  * has to draw, including one the node type does not declare (a hand-written
@@ -362,10 +443,6 @@ function mergeDeclaredPorts(declaredPorts: string[], edgePorts: string[]): strin
   return ports;
 }
 
-function isSupplyNode(node: GraphNode | undefined): boolean {
-  return node?.kind === "supply" || node?.type.startsWith("xflow.supply.") === true;
-}
-
 function toFlowNodes(
   graphNodes: GraphNode[],
   graphEdges: GraphEdge[],
@@ -373,7 +450,8 @@ function toFlowNodes(
   selectedNodeId: string | undefined,
   editable: boolean,
   canConnect: boolean,
-  onSelect: (nodeId: string) => void
+  onSelect: (nodeId: string) => void,
+  onContextMenuKey: ((nodeId: string, anchor: Element) => void) | undefined
 ): PreviewFlowNode[] {
   const sourcePortsByNode = new Map<string, string[]>();
   const targetPortsByNode = new Map<string, string[]>();
@@ -409,7 +487,8 @@ function toFlowNodes(
           ),
         canConnect: nodeCanConnect,
         selected: selectedNodeId === node.id,
-        onSelect
+        onSelect,
+        onContextMenuKey
       }
     };
   });
@@ -542,26 +621,41 @@ function activateHandle(
 }
 
 function PreviewNode({ data }: NodeProps<PreviewFlowNode>): React.ReactElement {
-  const { graphNode: node, runtime, sourcePorts, targetPorts, canConnect, selected, onSelect } = data;
-  const inputLabel = inputSummary(node);
+  const { graphNode: node, runtime, sourcePorts, targetPorts, canConnect, selected, onSelect, onContextMenuKey } = data;
   const visiblePorts = sourcePorts.filter((port) => port !== "main" && port !== "error");
+  // "pending" is also what runtimeForNode reports when there is no run at all,
+  // so the card only speaks about status once a run has moved the node.
+  const hasRunStatus = runtime.status !== "pending";
+  const runMeta = hasRunStatus ? nodeMeta(runtime) : undefined;
+  const nameTitle = node.label === node.name ? node.label : `${node.label} (${node.name})`;
 
   return (
     <article
       className="xflow-preview-node"
+      data-node-id={node.id}
       data-selected={selected}
       data-status={runtime.status}
+      data-disabled={node.disabled || undefined}
     >
       <div
         className="xflow-preview-node__select"
         role="button"
         tabIndex={0}
         aria-label={`${node.name} node ${runtime.status}`}
+        aria-keyshortcuts={onContextMenuKey ? "Shift+F10 ContextMenu" : undefined}
         onClick={() => onSelect(node.id)}
         onKeyDown={(event) => {
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
             onSelect(node.id);
+            return;
+          }
+          if (onContextMenuKey && isContextMenuKey(event)) {
+            event.preventDefault();
+            // The canvas listener would otherwise answer the same press for
+            // whichever node is selected, which need not be this focused one.
+            event.stopPropagation();
+            onContextMenuKey(node.id, event.currentTarget.closest(".xflow-preview-node") ?? event.currentTarget);
           }
         }}
       >
@@ -569,29 +663,31 @@ function PreviewNode({ data }: NodeProps<PreviewFlowNode>): React.ReactElement {
           <span className="xflow-preview-node__icon" data-tone={nodeTone(node.type)} aria-label={`${node.type} icon`}>
             {nodeIcon(node.type)}
           </span>
-          <div>
-            <strong>{node.label}</strong>
-            {node.label !== node.name ? <span>{node.name}</span> : null}
+          <div className="xflow-preview-node__title">
+            <strong title={nameTitle}>{node.label}</strong>
+            <span className="xflow-preview-node__subtitle">
+              <code className="xflow-preview-node__type" title={node.type}>{node.type}</code>
+              {node.disabled ? <span className="xflow-preview-node__badge">已禁用</span> : null}
+            </span>
           </div>
-          <span className="xflow-preview-node__status">{statusLabel[runtime.status]}</span>
-        </div>
-        <div className="xflow-preview-node__body">
-          <div className="xflow-preview-node__meta">
-            <span>{node.kind}</span>
-            <code>{node.type}</code>
-          </div>
-          <div className="xflow-preview-node__ports">
-            {inputLabel ? <span>{inputLabel}</span> : <span>input: -</span>}
-            <span>{nodeMeta(runtime)}</span>
-          </div>
-          {visiblePorts.length > 0 ? (
-            <div className="xflow-preview-node__port-chips">
-              {visiblePorts.map((port) => (
-                <span key={port}>{port}</span>
-              ))}
-            </div>
+          {hasRunStatus ? (
+            <span className="xflow-preview-node__status" data-status={runtime.status}>
+              {statusLabel[runtime.status]}
+            </span>
           ) : null}
         </div>
+        {runMeta || visiblePorts.length > 0 ? (
+          <div className="xflow-preview-node__body">
+            {visiblePorts.length > 0 ? (
+              <div className="xflow-preview-node__port-chips">
+                {visiblePorts.map((port) => (
+                  <span key={port}>{port}</span>
+                ))}
+              </div>
+            ) : null}
+            {runMeta ? <span className="xflow-preview-node__run-meta">{runMeta}</span> : null}
+          </div>
+        ) : null}
         {runtime.error ? <p className="xflow-preview-node__error">{runtime.error}</p> : null}
       </div>
       {targetPorts.map((port, index) => (
@@ -731,7 +827,10 @@ export function XFlowPreview({
   onDropNode,
   danglingPorts,
   defaultViewport,
-  onViewportChange
+  onViewportChange,
+  onNodeContextMenu,
+  onPaneContextMenu,
+  onReady
 }: XFlowPreviewProps): React.ReactElement {
   const graph = React.useMemo(() => toGraphModel(workflow), [workflow]);
   const [internalSelectedNodeId, setInternalSelectedNodeId] = React.useState<string | undefined>();
@@ -774,6 +873,80 @@ export function XFlowPreview({
   const handleFlowInit = React.useCallback((instance: ReactFlowInstance<PreviewFlowNode, Edge>) => {
     setFlowInstance(instance);
   }, []);
+  const lastKeyboardMenuAt = React.useRef(-Infinity);
+  const openNodeMenuFromKey = React.useCallback((nodeId: string, anchor: Element) => {
+    if (!onNodeContextMenu) return;
+    lastKeyboardMenuAt.current = Date.now();
+    handleSelectNode(nodeId);
+    onNodeContextMenu(nodeId, elementCenter(anchor));
+  }, [handleSelectNode, onNodeContextMenu]);
+  // A keyboard press yields at most one native echo, so the window closes the
+  // moment it is consumed: leaving it open would also swallow the next real
+  // right click inside it.
+  const isKeyboardMenuEcho = React.useCallback(() => {
+    if (Date.now() - lastKeyboardMenuAt.current >= KEYBOARD_MENU_ECHO_MS) return false;
+    lastKeyboardMenuAt.current = -Infinity;
+    return true;
+  }, []);
+  const handleNodeContextMenu = React.useCallback((event: React.MouseEvent, node: PreviewFlowNode) => {
+    if (!onNodeContextMenu) return;
+    event.preventDefault();
+    if (isKeyboardMenuEcho()) return;
+    handleSelectNode(node.id);
+    onNodeContextMenu(node.id, { clientX: event.clientX, clientY: event.clientY });
+  }, [handleSelectNode, isKeyboardMenuEcho, onNodeContextMenu]);
+  const handlePaneContextMenu = React.useCallback((event: MouseEvent | React.MouseEvent) => {
+    if (!onPaneContextMenu) return;
+    event.preventDefault();
+    if (isKeyboardMenuEcho()) return;
+    const flowPosition = flowInstance?.screenToFlowPosition({ x: event.clientX, y: event.clientY })
+      ?? { x: event.clientX, y: event.clientY };
+    onPaneContextMenu({
+      clientX: event.clientX,
+      clientY: event.clientY,
+      flowX: flowPosition.x,
+      flowY: flowPosition.y
+    });
+  }, [flowInstance, onPaneContextMenu]);
+  // Nodes are not focusable through React Flow (nodesFocusable is off), so the
+  // canvas answers the keyboard route for whichever node is selected; a focused
+  // node card answers first and stops the event, see PreviewNode.
+  const handleCanvasKeyDown = React.useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!onNodeContextMenu || !selectedNodeId || !isContextMenuKey(event)) return;
+    if (isTextEntryTarget(event.target)) return;
+    const anchor = [...event.currentTarget.querySelectorAll<HTMLElement>(".xflow-preview-node[data-node-id]")]
+      .find((element) => element.dataset.nodeId === selectedNodeId);
+    if (!anchor) return;
+    event.preventDefault();
+    openNodeMenuFromKey(selectedNodeId, anchor);
+  }, [onNodeContextMenu, openNodeMenuFromKey, selectedNodeId]);
+  const nodeFitCancelRef = React.useRef<(() => void) | undefined>(undefined);
+  React.useEffect(() => () => {
+    nodeFitCancelRef.current?.();
+  }, []);
+  // The view commands the owner's own chrome drives. Both reuse the same fit
+  // paths as the in-canvas control and the selection follow, so an unmeasured
+  // node is waited out identically.
+  const previewHandle = React.useMemo<XFlowPreviewHandle>(() => ({
+    fitView: (options) => {
+      if (flowInstance) fitMeasuredNodes(flowInstance, options?.padding);
+    },
+    fitNode: (nodeId, options) => {
+      if (!flowInstance) return;
+      const node = flowInstance.getNodes().find((candidate) => candidate.id === nodeId);
+      if (!node) return;
+      nodeFitCancelRef.current?.();
+      nodeFitCancelRef.current = fitWhenMeasured(
+        () => flowInstance.getNodesBounds([node]),
+        (bounds) => {
+          void flowInstance.fitBounds(bounds, { padding: options?.padding ?? nodeFitPadding });
+        }
+      );
+    }
+  }), [flowInstance]);
+  React.useEffect(() => {
+    if (flowInstance) onReady?.(previewHandle);
+  }, [flowInstance, onReady, previewHandle]);
   const handleMoveEnd = React.useCallback((_event: unknown, viewport: ReactFlowViewport) => {
     onViewportChange?.({ x: viewport.x, y: viewport.y, zoom: viewport.zoom });
   }, [onViewportChange]);
@@ -823,8 +996,16 @@ export function XFlowPreview({
     // dropped it.
     const canvas = canvasRef.current?.getBoundingClientRect();
     if (!canvas || isNodeAnchorOnScreen(flowInstance, selectedNode, canvas)) return;
-    const bounds = flowInstance.getNodesBounds([selectedNode]);
-    void flowInstance.fitBounds(bounds, { padding: 0.28 });
+
+    // A just-appended node has no measured size yet, and fitting its 0-size
+    // bounds would clamp the zoom to maxZoom; fitWhenMeasured retries until it
+    // is measured, exactly like fitMeasuredNodes does for the initial view.
+    return fitWhenMeasured(
+      () => flowInstance.getNodesBounds([selectedNode]),
+      (bounds) => {
+        void flowInstance.fitBounds(bounds, { padding: nodeFitPadding });
+      }
+    );
   }, [flowInstance, selectedNodeId]);
   const isValidConnection = React.useCallback<IsValidConnection<Edge>>((connection) => {
     const source = graphNodesById.get(connection.source);
@@ -910,8 +1091,17 @@ export function XFlowPreview({
     return () => window.removeEventListener("keydown", handleDeleteKey);
   }, [canDeleteNodes, onDeleteNode, selectedEdgeIds, selectedNodeId]);
   const flowNodes = React.useMemo(
-    () => toFlowNodes(graph.nodes, canvasGraphEdges, runtime, selectedNodeId, canDragNodes, canConnect, handleSelectNode),
-    [graph.nodes, canvasGraphEdges, runtime, selectedNodeId, canDragNodes, canConnect, handleSelectNode]
+    () => toFlowNodes(
+      graph.nodes,
+      canvasGraphEdges,
+      runtime,
+      selectedNodeId,
+      canDragNodes,
+      canConnect,
+      handleSelectNode,
+      onNodeContextMenu ? openNodeMenuFromKey : undefined
+    ),
+    [graph.nodes, canvasGraphEdges, runtime, selectedNodeId, canDragNodes, canConnect, handleSelectNode, onNodeContextMenu, openNodeMenuFromKey]
   );
   const danglingSet = React.useMemo(
     () => new Set((danglingPorts ?? []).map((port) => danglingKey(port.source, port.sourcePort))),
@@ -956,6 +1146,7 @@ export function XFlowPreview({
           ref={canvasRef}
           onDragOver={canDropNode ? handleDragOver : undefined}
           onDrop={canDropNode ? handleDrop : undefined}
+          onKeyDown={onNodeContextMenu ? handleCanvasKeyDown : undefined}
         >
           {/* React Flow mounts even with zero nodes so an empty canvas can still
               accept a dropped node; the note sits above it without intercepting
@@ -972,6 +1163,8 @@ export function XFlowPreview({
             maxZoom={1.6}
             defaultViewport={defaultViewport as ReactFlowViewport | undefined}
             onMoveEnd={onViewportChange ? handleMoveEnd : undefined}
+            onNodeContextMenu={onNodeContextMenu ? handleNodeContextMenu : undefined}
+            onPaneContextMenu={onPaneContextMenu ? handlePaneContextMenu : undefined}
             nodesDraggable={canDragNodes}
             nodesConnectable={canConnect}
             edgesFocusable={canDeleteConnections}

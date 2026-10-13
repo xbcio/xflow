@@ -115,7 +115,7 @@ export interface ValidationResult {
 export interface ComposerProps {
   spec: ComposerSpec;
   registry: Registry;
-  /** Defaults to `defaultKernel` (kernel-json-render). */
+  /** Defaults to `defaultKernel` (kernel-native). */
   kernel?: RenderKernel;
   /** Controlled value. */
   value: object;

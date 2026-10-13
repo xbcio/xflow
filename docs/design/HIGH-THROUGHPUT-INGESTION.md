@@ -206,6 +206,6 @@ CI 采样 job（`.github/workflows/perf-sample.yml`）每日与手动触发，�
 
 ## 8. 非目标
 
-- Relay Gateway / remote SDK 瘦客户端：仍是规划，不作为 D1 前置。
+- Relay Gateway：仍是规划，不作为 D1 前置。
 - streaming / credit-flow control 转生产：实验性传输优化，不作为容量证据。
 - handler exactly-once：当前不承诺；由业务幂等或未来 transactional inbox 解决。

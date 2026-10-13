@@ -68,6 +68,19 @@ func TestScriptMetricsNegativeBytesIgnored(t *testing.T) {
 	}
 }
 
+func TestScriptMetricsEmitsBatchSerialFallback(t *testing.T) {
+	metrics := New()
+	script := NewScriptMetrics(metrics)
+
+	script.OnScriptBatchSerialFallback(context.Background(), "wasm", "wazero")
+
+	body := gatherMetricsBody(t, metrics)
+	want := `xflow_script_batch_serial_fallback_total{language="wasm",namespace="default",runtime="wazero"} 1`
+	if !strings.Contains(body, want) {
+		t.Fatalf("metrics body missing %q:\n%s", want, body)
+	}
+}
+
 func gatherMetricsBody(t *testing.T, metrics *Metrics) string {
 	t.Helper()
 	req := httptest.NewRequest("GET", "/metrics", nil)

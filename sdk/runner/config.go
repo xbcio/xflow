@@ -81,6 +81,14 @@ type runnerConfigFile struct {
 		Allow *[]string `yaml:"allow"`
 		Deny  *[]string `yaml:"deny"`
 	} `yaml:"http_host_policy"`
+	// SupplyPullAllowedHosts is the runner-level allowlist for supply pull
+	// sources (xflow.supply.http). Nil keeps the default policy: only public
+	// addresses are dialed, loopback/private/link-local/unspecified refused at
+	// dial time. A non-empty list is an explicit operator decision to permit
+	// the listed hosts and whatever addresses they resolve to, private
+	// included. Host-only entries: an exact host, a ".suffix" (apex +
+	// descendants), or a "*.wildcard" (descendants only).
+	SupplyPullAllowedHosts *[]string `yaml:"supply_pull_allowed_hosts"`
 	// Credentials holds named credential maps (driver/dsn, token/base_url, …)
 	// consumed by resource-aware nodes via input.Credential(name). String leaves
 	// are expanded via os.Expand at load time so secrets are sourced from the
@@ -261,6 +269,9 @@ func loadRunnerConfigFromBytesForProfile(data []byte, profile Profile) (runnerCo
 	if file.HTTPHostPolicy.Deny != nil {
 		cfg.httpHostPolicyDeny = copyStringsPreservingEmpty(*file.HTTPHostPolicy.Deny)
 	}
+	if file.SupplyPullAllowedHosts != nil {
+		cfg.supplyPullAllowedHosts = copyTrimmedHosts(*file.SupplyPullAllowedHosts)
+	}
 
 	if len(file.Credentials) > 0 {
 		// Copy first so we never mutate the yaml-parsed map.
@@ -393,6 +404,9 @@ func applyLookupEnvOverrides(cfg runnerConfig, lookupEnv func(string) (string, b
 	}
 	if v, ok := lookupEnv("XFLOW_HTTP_HOST_POLICY_DENY"); ok {
 		cfg.httpHostPolicyDeny = splitCSVPreservingExplicitEmpty(v)
+	}
+	if v, ok := lookupEnv("XFLOW_SUPPLY_PULL_ALLOWED_HOSTS"); ok {
+		cfg.supplyPullAllowedHosts = splitCSV(v)
 	}
 	if v, ok := lookupEnv("XFLOW_RUNNER_CAP"); ok {
 		cfg.capRaw = v
@@ -619,6 +633,9 @@ func validateRunnerConfig(cfg runnerConfig) error {
 		return err
 	}
 	if err := validateHostOnlyList("HTTP host policy denylist", cfg.httpHostPolicyDeny); err != nil {
+		return err
+	}
+	if err := validateHostOnlyList("supply pull allowed hosts", cfg.supplyPullAllowedHosts); err != nil {
 		return err
 	}
 	if err := validatePositiveDuration("browser CDP queue timeout", cfg.browserCDPQueueTimeout); err != nil {
@@ -949,6 +966,9 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 	if base.changed["http-host-deny"] {
 		cfg.httpHostPolicyDeny = normalizeExplicitEmptyStringArray(base.httpHostPolicyDeny)
 	}
+	if base.changed["supply-pull-allowed-hosts"] {
+		cfg.supplyPullAllowedHosts = copyTrimmedHosts(base.supplyPullAllowedHosts)
+	}
 	if base.changed["cap"] {
 		clearRunnerConfigIssue(&cfg, "cap")
 		cfg.capRaw = base.capRaw
@@ -1178,6 +1198,16 @@ browser_cdp:
 #   # Exit if the control plane issues no supply encryption key at
 #   # registration, rather than fetching supply content in the clear.
 #   require_supply_encryption: false
+
+# Supply pull sources (xflow.supply.http) are dialed only over https and never
+# follow redirects. With no allowlist, loopback, private, link-local and
+# unspecified addresses are refused at dial time, after DNS resolution, so a
+# rebinding host cannot pass the check and then dial elsewhere. A non-empty
+# allowlist permits only matching hosts and is an explicit operator decision
+# to allow whatever addresses they resolve to, private included. Entries are
+# host-only: an exact host, a ".suffix" (apex + descendants), or a
+# "*.wildcard" (descendants only).
+# supply_pull_allowed_hosts: ["registry.internal", ".corp.example.com"]
 
 # Credentials: named maps consumed by resource-aware nodes via
 # input.Credential(name). String leaves are env-expanded at load time

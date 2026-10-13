@@ -128,6 +128,10 @@ type SupplyExternalNode = supplypkg.ExternalNode
 // SupplyStaticNode declares supply content carried by the definition itself.
 type SupplyStaticNode = supplypkg.StaticNode
 
+// SupplyPullNode declares supply content a runner fetches from an external
+// HTTPS source. Re-exported so callers outside the module can build one.
+type SupplyPullNode = supplypkg.PullNode
+
 // SupplyExternal declares that this workflow consumes the named SupplyResource.
 // The node never executes; it makes the dependency visible on the graph so the
 // activation-time readiness gate and the server-side reverse index can see it.
@@ -138,6 +142,11 @@ func SupplyExternal(resource string) *SupplyExternalNode { return supplypkg.Exte
 // when there is genuinely no remote source — NOT as a fallback for one that is
 // merely unavailable (see the readiness gate).
 func SupplyStatic(content []byte) *SupplyStaticNode { return supplypkg.Static(content) }
+
+// SupplyPull declares that the runner fetches this supply from url. The fetch
+// happens in the runner (its network position, its credentials); the content is
+// cached only in the runner's process and never written to the store.
+func SupplyPull(url string) *SupplyPullNode { return supplypkg.Pull(url) }
 
 // SetScriptObserver installs the global observer for xflow.script executions.
 func SetScriptObserver(o scriptpkg.Observer) {

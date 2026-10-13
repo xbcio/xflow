@@ -280,7 +280,7 @@ func TestDefaultContractApprovalTimeoutAction(t *testing.T) {
 // Supply nodes have no handler; supply.RequireReady is the one reader the
 // control plane uses when deriving activations.
 func TestDefaultContractSupplyRequireReady(t *testing.T) {
-	for _, typ := range []string{"xflow.supply.external", "xflow.supply.static"} {
+	for _, typ := range []string{"xflow.supply.external", "xflow.supply.static", "xflow.supply.http"} {
 		t.Run(typ, func(t *testing.T) {
 			def := descriptorDefault(t, typ, 0, supply.ParamRequireReady)
 			base := map[string]any{supply.ParamResource: "r"}

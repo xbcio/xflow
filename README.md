@@ -86,11 +86,12 @@ configuration you can enable.
   responses may both repeat; the host owns side-effect idempotency under the
   `execution_id` + `node_name` key. See [Delivery Semantics](#delivery-semantics)
   above.
-- **local, cluster, and the server + runner split** are implemented. The
-  split's durable Redis handoff (assignment claim, reconnect lease replay,
-  fenced release) is exercised end-to-end against a real Redis/Asynq backend by
-  the required integration shard (`make test-integration-required`), alongside
-  the runner-reconnect replay coverage in
+- **local, cluster, the server + runner split, and the `remote` thin client**
+  are implemented. The split's durable Redis handoff (assignment claim,
+  reconnect lease replay, fenced release) is exercised end-to-end against a real
+  Redis/Asynq backend by the required integration shard
+  (`make test-integration-required`), alongside the runner-reconnect replay
+  coverage in
   [DEPLOYMENT-TOPOLOGIES.md](docs/design/DEPLOYMENT-TOPOLOGIES.md) §4.2.
 - **HTTP long-poll is the production Runner Protocol channel**; gRPC is the
   experimental one (see below).
@@ -107,7 +108,7 @@ configuration you can enable.
 | SDK `cluster` — peer processes on Redis/Asynq | Supported | Every process submits and also executes; roles cannot be separated |
 | `server` + `runner` split via Runner Protocol | Supported | HTTP is the recommended production path (see the gRPC note below) |
 | Embedded `xflow.NewServer` / `xflow.NewRunner` | Supported | Same assembly as `cmd/server` / `cmd/runner` |
-| SDK `remote` thin client | **Planned** | No factory or client exists yet; use `cluster` or the server HTTP API |
+| SDK `remote` thin client | Supported | `xflow.NewRemote(endpoint, opts...)` drives the server's `/v1` HTTP surface; owns no engine, store, queue, or Redis. Covered against the route contract by unit tests, not yet by the integration shard |
 | Relay Gateway | **Planned** | No standalone process; runners must reach the server directly |
 | Leader election (Redis lease) | Implemented, **not** HA | Gates leader-only maintenance only; see below |
 
@@ -124,7 +125,7 @@ each are maintained in
 - **No multi-namespace production isolation claim.** The namespace boundary is
   implemented in code and contract-tested, but production isolation is not
   accepted until a real multi-namespace environment is exercised.
-- **Out of scope**: the remote SDK, the Relay Gateway, Raft, and any general
+- **Out of scope**: the Relay Gateway, Raft, and any general
   low-code / ETL / browser-automation platform.
 
 **What would be required to claim HA**

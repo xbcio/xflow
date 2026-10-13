@@ -98,10 +98,11 @@ type ReconcileObserver interface {
 	// OnReconcileScan reports one scan cycle: candidates found and the
 	// scan latency. err is non-nil when the pending-list query failed.
 	OnReconcileScan(ctx context.Context, candidates int, elapsed time.Duration, err error)
-	// OnReconcileSettled reports one admission settled: outcome is
-	// "reconciled" (mutation landed) or "failed" (no-effect/aborted).
-	// appended=false means a concurrent worker had already appended the
-	// outcome (idempotent skip).
+	// OnReconcileSettled reports one admission classified and settled: outcome
+	// is "reconciled" (mutation landed) or "failed" (no-effect/aborted).
+	// appended=false means no row was written by this worker: either a
+	// concurrent worker had already appended the outcome (idempotent skip) or
+	// the worker only classified it in DryRun mode.
 	OnReconcileSettled(ctx context.Context, outcome string, appended bool, ageMs int64)
 	// OnReconcileSkipped reports an admission left pending: effect was
 	// indeterminate (authority unreachable/ambiguous) and will be retried.
@@ -131,6 +132,15 @@ type AuditReconcileConfig struct {
 	// Elector gates leader-only execution: when set and IsLeader() is false,
 	// a sweep is a no-op. Nil means "always run" (single-replica / dev).
 	Elector LeaderGate
+	// DryRun classifies each candidate (probe + effect decision) and reports
+	// the classification through the observer, but appends no outcome row:
+	// every admission stays pending and ReconcileOnce returns 0. It exists for
+	// the `xflow audit reconcile --dry-run` preview, which uses the SAME scan
+	// and classification code as the real worker instead of a parallel query
+	// (a re-implementation would bypass the EffectIndeterminate "never
+	// fabricate" contract). Never set it on the long-running worker: it would
+	// classify forever and settle nothing.
+	DryRun bool
 }
 
 // AuditReconcileWorker is the crash-safe audit reconciliation worker (T9). It
@@ -160,6 +170,7 @@ type AuditReconcileWorker struct {
 	period    time.Duration
 	backlog   time.Duration
 	batch     int
+	dryRun    bool
 	clock     func() time.Time
 	sleepFunc func(context.Context, time.Duration) error
 	cursor    uint64 // in-memory cursor: advances past processed rows, wraps to 0 at tail
@@ -189,6 +200,7 @@ func NewAuditReconcileWorker(audit store.AuditReconciler, authority AdmissionAut
 		period:    cfg.Period,
 		backlog:   cfg.BacklogAge,
 		batch:     cfg.Batch,
+		dryRun:    cfg.DryRun,
 		clock:     func() time.Time { return time.Now().UTC() },
 		sleepFunc: sleepWithContext,
 	}
@@ -214,7 +226,9 @@ func (w *AuditReconcileWorker) Run(ctx context.Context) error {
 
 // ReconcileOnce executes exactly one sweep. Exported so tests and admin
 // tooling can trigger a reconcile without waiting for the next tick.
-// Returns the number of admissions settled (appended an outcome) this sweep.
+// Returns the number of admissions settled (appended an outcome) this sweep;
+// in DryRun mode nothing is appended, so the return is always 0 and the
+// classifications arrive through the observer instead.
 //
 // The worker advances an in-memory cursor (the SeqID of the last row seen)
 // so that permanently-Indeterminate rows near the head of the oldest-first
@@ -321,6 +335,16 @@ func (w *AuditReconcileWorker) settle(ctx context.Context, rec *store.AuditRecor
 		return 0
 	}
 	ageMs := w.clock().Sub(rec.Timestamp).Milliseconds()
+	if w.dryRun {
+		// Dry run: report the classification the worker WOULD have appended
+		// (appended=false, since nothing was written) and leave the admission
+		// pending. A later real run settles it exactly as this run predicted;
+		// nothing here changes what that run will see.
+		w.observe(func(o ReconcileObserver) {
+			o.OnReconcileSettled(recCtx, outcome, false, ageMs)
+		})
+		return 0
+	}
 	appended, err := w.audit.AppendOutcomeIfAbsent(ctx, &store.AuditRecord{
 		RequestID:   rec.RequestID,
 		Principal:   rec.Principal,

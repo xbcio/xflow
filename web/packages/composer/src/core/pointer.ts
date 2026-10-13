@@ -3,25 +3,31 @@
 
 import type { JsonPointer } from "./types";
 
-const parseCache = new Map<string, string[]>();
+const parseCache = new Map<string, readonly string[]>();
+const NO_TOKENS: readonly string[] = Object.freeze([]);
 
-/** Parses a JSON Pointer into unescaped reference tokens. Throws on syntax errors. */
-export function parsePointer(pointer: JsonPointer): string[] {
+/**
+ * Parses a JSON Pointer into unescaped reference tokens. Throws on syntax
+ * errors. The result is cached and frozen: copy before mutating.
+ */
+export function parsePointer(pointer: JsonPointer): readonly string[] {
   const cached = parseCache.get(pointer);
   if (cached) return cached;
-  if (pointer === "") return [];
+  if (pointer === "") return NO_TOKENS;
   if (!pointer.startsWith("/")) {
     throw new Error(`invalid JSON Pointer ${JSON.stringify(pointer)}: must start with "/"`);
   }
-  const tokens = pointer
-    .slice(1)
-    .split("/")
-    .map((token) => {
-      if (/~[^01]|~$/.test(token)) {
-        throw new Error(`invalid JSON Pointer ${JSON.stringify(pointer)}: bad "~" escape`);
-      }
-      return token.replace(/~1/g, "/").replace(/~0/g, "~");
-    });
+  const tokens: readonly string[] = Object.freeze(
+    pointer
+      .slice(1)
+      .split("/")
+      .map((token) => {
+        if (/~[^01]|~$/.test(token)) {
+          throw new Error(`invalid JSON Pointer ${JSON.stringify(pointer)}: bad "~" escape`);
+        }
+        return token.replace(/~1/g, "/").replace(/~0/g, "~");
+      })
+  );
   if (parseCache.size > 10_000) parseCache.clear();
   parseCache.set(pointer, tokens);
   return tokens;

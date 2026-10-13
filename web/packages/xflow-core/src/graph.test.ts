@@ -175,6 +175,26 @@ describe("toGraphModel", () => {
     ]);
   });
 
+  it("keeps repeated identical targets as distinct edges with unique ids", () => {
+    const workflow: WorkflowDef = {
+      nodes: [
+        { name: "start", type: "xflow.start" },
+        { name: "charge", type: "xflow.http" }
+      ],
+      connections: {
+        start: {
+          main: [{ node: "charge" }, { node: "charge" }, { node: "charge" }]
+        }
+      }
+    };
+
+    expect(toGraphModel(workflow).edges.map((edge) => edge.id)).toEqual([
+      "start:main->charge:main",
+      "start:main->charge:main#2",
+      "start:main->charge:main#3"
+    ]);
+  });
+
   it("does not turn unknown typed connections into graph edges", () => {
     const workflow = {
       nodes: [

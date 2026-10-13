@@ -97,7 +97,8 @@ function TextField({
               <AntInput.Password
                 {...common}
                 rootClassName="xflow-composer-control"
-                autoComplete="off"
+                // Browsers ignore "off" on password inputs and autofill saved logins.
+                autoComplete="new-password"
                 onChange={(event) => onChange?.(event.target.value)}
               />
             );

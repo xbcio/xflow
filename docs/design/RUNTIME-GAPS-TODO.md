@@ -25,10 +25,13 @@ Node Group 组级 `on_error`、gRPC `AckActivation`、G1 clean-SHA 重签 `c39a2
 未验证：真实 Redis（8 个 RealRedis 用例环境门控 SKIP）与成本实测（仅结构性证据）——
 与全文件口径一致。
 
+2026-10-13：pull 模式的 `xflow.supply.http` 落地，P2-3 关闭（见「已关闭」），条目
+重排编号 1–7。
+
 每条都写明出处：缺口本身的现状说明留在所属设计文档里，这里只记「打算改的东西」。
 关闭一条时，把它移到文末「已关闭」并写上 commit。
 
-范围：只收运行时缺口。Relay Gateway / remote SDK（D1 支持矩阵已排除）与已被显式
+范围：只收运行时缺口。Relay Gateway（D1 支持矩阵已排除）与已被显式
 否决的设计（如 supply 的 `default: <bytes>`）不在此列；出处文档与实现之间的纯陈旧
 偏差也不单独立项，在关闭对应条目时顺带标注。
 
@@ -46,12 +49,7 @@ Node Group 组级 `on_error`、gRPC `AckActivation`、G1 clean-SHA 重签 `c39a2
    fail-closed（[NODE-GROUP-COLOCATION.md](./NODE-GROUP-COLOCATION.md)「Non-Kafka
    trigger types are fail-closed」一条）。
 
-3. **pull 模式的 `xflow.supply.http` 未实现。** runner 主动按计划拉取 supply 的路径
-   不存在，只能用 `xflow.supply.external` / `static`
-   （[DSL-SPECIFICATION.md](./DSL-SPECIFICATION.md) Supply 一节已标记「尚未实现，
-   不要在 DSL 里使用」）。
-
-4. **工作流级 `outputs:` 从未被求值。** `types.WorkflowDef.Outputs`
+3. **工作流级 `outputs:` 从未被求值。** `types.WorkflowDef.Outputs`
    （`types/workflow.go:33`）只进定义哈希（`backend/workflowhash/workflowhash.go:90`）；
    图 `Graph` 不携带它，全仓无求值/读取点（唯一相关的检查是 FAF 目标的编译拒绝）。
    声明了 `outputs:` 的工作流编译、注册、执行照常成功，但这些输出从不产生——属
@@ -60,22 +58,37 @@ Node Group 组级 `on_error`、gRPC `AckActivation`、G1 clean-SHA 重签 `c39a2
 
 ### P3 — 已知限制，记录在案
 
-5. **ADR-D4 刻意延后的两项：** 草稿与发布分离（`WorkflowDraft`）、定义版本历史
+4. **ADR-D4 刻意延后的两项：** 草稿与发布分离（`WorkflowDraft`）、定义版本历史
    （`WorkflowDefinitionVersion`）。见
    [ADR-D4-runtime-editor-metadata-split.md](./ADR-D4-runtime-editor-metadata-split.md)。
 
 ### 需要真实环境或人工批准，不能靠改代码关闭
 
-6. **G2：多副本 control-plane HA soak 与真实多 namespace 隔离验收。** 要求见
+5. **G2：多副本 control-plane HA soak 与真实多 namespace 隔离验收。** 要求见
     [RELEASE-GATES.md](./RELEASE-GATES.md) 的 G2 定义；`make test-soak` 不是该证据
     （见 README 的说明）。
 
-7. **RELEASE-GATES §6 的 D1–D8** 全部为「OPEN — 未批准」，需要对应负责人裁定。
+6. **RELEASE-GATES §6 的 D1–D8** 全部为「OPEN — 未批准」，需要对应负责人裁定。
 
-8. **KEK 轮换（`xflow supply reseal`）与 server/runner 凭据热加载都没有在真实环境
+7. **KEK 轮换（`xflow supply reseal`）与 server/runner 凭据热加载都没有在真实环境
    演练过**，runbook 的 owner 与期限属于 D6。
 
 ## 已关闭
+
+- **pull 模式的 `xflow.supply.http` 未实现**（原 P2-3）—— `02cbb580`、`ce1a8cb4`、
+  `9f03f2ae`、`dd4aa6ea`、`46778cf4`、`91e7ef97`、`10689c7a`、`3ba47816`（2026-10-13，
+  分支 `worktree-agent-acd6af5205745f065`）：新增第三种 supply 节点类型——参数解析与
+  编译期校验（`types/supply_pull.go`：仅 https、拒绝 `resource` 与未知参数、
+  `poll_interval` 下限 10s）、`SupplyRequirement.PullSource` 随 directive 下发、
+  `PullSupplyFetcher`（仅 https、不跟随重定向、dial 时按解析结果做私网阻断与 runner
+  级白名单、ETag/304、1 MiB/15s 上限）、gate 按声明路由并拒绝同 key 异源
+  （fail-closed）、`RunnerConfig.SupplyPullAllowedHosts` 接线、指标
+  `xflow_supply_pull_fetch_total`。已知代价与不落库/不适用 at-rest 记入
+  [SUPPLY-NODE.md](./SUPPLY-NODE.md) §9(e)/§10；DSL 参数与一致性语义记入
+  [DSL-SPECIFICATION.md](./DSL-SPECIFICATION.md)。测试：`types`、`engine/graph`、
+  `service/control`、`service/runner`、`sdk/xflow`、`observability/metrics` 均有
+  httptest/表驱动用例（含 SSRF 拒绝与同 key 冲突）；`make vet` 全绿。未验证：
+  真实外部 pull 源、全量 `make test` 门（按仓库纪律未跑）。
 
 - **两个目录后端的租约解析围栏不一致**（原 P3-6，2026-10-08 第三轮收口验证新登记）
   —— `aff9023`（2026-10-09）：(i) 已修：Redis `LookupLease` 在解析命中
@@ -280,7 +293,7 @@ Node Group 组级 `on_error`、gRPC `AckActivation`、G1 clean-SHA 重签 `c39a2
   （2026-10-08）：[NODE-GROUP-COLOCATION.md](./NODE-GROUP-COLOCATION.md) §12.2 的
   单副本说明已改为已实现。
 
-- **子工作流复用（`xflow.subworkflow`）未实现**（原 P2-4）—— `880e8470`…`1fa5fe7a`
+- **子工作流复用（`xflow.subworkflow`）未实现**（原 P2-3/4）—— `880e8470`…`1fa5fe7a`
   （2026-10-13，共 22 个 commit，含文档提交；连同本条移除提交）：节点 DSL（描述符 +
   fail-closed 桩 handler）、编译期目标解析（版本 + 定义哈希钉住，`latest` 只在注册期
   漂移一次）、静态环（按工作流名）/嵌套深度（默认 16）/FAF/transient/body/组内使用的
@@ -295,7 +308,7 @@ Node Group 组级 `on_error`、gRPC `AckActivation`、G1 clean-SHA 重签 `c39a2
   事实错误——节点 timeout 监视器并不覆盖 parked wait（timeout ZSET 只由 suspend 路径
   写），实现改为 `WaitDeadline` 跨重派发保留、到期取消子执行并按普通失败管道 fail
   节点；(ii) 原设计设想的「子工作流声明了工作流级 `outputs:` 时注册期告警」不可实现
-  （resolved graph 不携带工作流级 outputs），告警承诺删除并入新登记条目 4；(iii) 实现
+  （resolved graph 不携带工作流级 outputs），告警承诺删除并入新登记条目 3；(iii) 实现
   中发现并修复 reclaim 丢失 generation 的缺陷（重派发任务不带 generation，链接记录是
   唯一来源）。验证：`go build ./...`、`make vet`、engine 与两个后端 + `sdk/xflow` 触及
   包测试、engine/两后端 `-race`、`make validate-openapi`；新增 store 契约用例在 memory、

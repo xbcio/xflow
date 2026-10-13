@@ -231,6 +231,7 @@ exports[`A6-generated node-types fixture > xflow.approval@1 snapshot 1`] = `
           "g.type.default",
         ],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",
@@ -604,6 +605,7 @@ exports[`A6-generated node-types fixture > xflow.browser.cdp@1 snapshot 1`] = `
           "g.type.limits",
         ],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",
@@ -1035,6 +1037,7 @@ exports[`A6-generated node-types fixture > xflow.database@1 snapshot 1`] = `
           "g.type.default",
         ],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",
@@ -1071,6 +1074,7 @@ exports[`A6-generated node-types fixture > xflow.end@1 snapshot 1`] = `
       "form": {
         "children": [],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",
@@ -1192,6 +1196,7 @@ exports[`A6-generated node-types fixture > xflow.function@1 snapshot 1`] = `
           "g.type.default",
         ],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",
@@ -1434,6 +1439,7 @@ exports[`A6-generated node-types fixture > xflow.grpc@1 snapshot 1`] = `
           "g.type.advanced",
         ],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",
@@ -1827,6 +1833,7 @@ exports[`A6-generated node-types fixture > xflow.http@1 snapshot 1`] = `
           "g.type.advanced",
         ],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",
@@ -1906,6 +1913,7 @@ exports[`A6-generated node-types fixture > xflow.if@1 snapshot 1`] = `
           "g.type.default",
         ],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",
@@ -2131,6 +2139,7 @@ exports[`A6-generated node-types fixture > xflow.map@1 snapshot 1`] = `
           "g.type.default",
         ],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",
@@ -2264,6 +2273,7 @@ exports[`A6-generated node-types fixture > xflow.merge@1 snapshot 1`] = `
           "g.type.default",
         ],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",
@@ -2458,6 +2468,7 @@ exports[`A6-generated node-types fixture > xflow.notification@1 snapshot 1`] = `
           "g.type.default",
         ],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",
@@ -2817,6 +2828,7 @@ exports[`A6-generated node-types fixture > xflow.script@1 snapshot 1`] = `
           "g.type.environment",
         ],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",
@@ -2861,6 +2873,7 @@ exports[`A6-generated node-types fixture > xflow.start@1 snapshot 1`] = `
       "form": {
         "children": [],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",
@@ -3070,6 +3083,10 @@ exports[`A6-generated node-types fixture > xflow.switch@1 snapshot 1`] = `
         ],
         "props": {
           "addText": "添加",
+          "columns": [
+            "Condition",
+            "Output",
+          ],
           "label": "Rules",
           "value": {
             "$bindState": "/parameters/rules",
@@ -3141,6 +3158,7 @@ exports[`A6-generated node-types fixture > xflow.switch@1 snapshot 1`] = `
           "g.type.default",
         ],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",
@@ -3237,6 +3255,11 @@ exports[`A6-generated node-types fixture > xflow.transform.aggregate@1 snapshot 
         ],
         "props": {
           "addText": "添加",
+          "columns": [
+            "Kind",
+            "Field",
+            "As",
+          ],
           "label": "Operations",
           "required": true,
           "value": {
@@ -3381,6 +3404,7 @@ exports[`A6-generated node-types fixture > xflow.transform.aggregate@1 snapshot 
           "g.type.default",
         ],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",
@@ -3472,6 +3496,7 @@ exports[`A6-generated node-types fixture > xflow.transform.filter@1 snapshot 1`]
           "g.type.default",
         ],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",
@@ -3592,6 +3617,7 @@ exports[`A6-generated node-types fixture > xflow.transform.limit@1 snapshot 1`] 
           "g.type.default",
         ],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",
@@ -3663,6 +3689,7 @@ exports[`A6-generated node-types fixture > xflow.transform.pick@1 snapshot 1`] =
           "g.type.default",
         ],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",
@@ -3754,6 +3781,7 @@ exports[`A6-generated node-types fixture > xflow.transform.remove_duplicates@1 s
           "g.type.default",
         ],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",
@@ -3830,6 +3858,7 @@ exports[`A6-generated node-types fixture > xflow.transform.rename@1 snapshot 1`]
           "g.type.default",
         ],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",
@@ -3929,6 +3958,7 @@ exports[`A6-generated node-types fixture > xflow.transform.set@1 snapshot 1`] = 
           "g.type.default",
         ],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",
@@ -3992,6 +4022,10 @@ exports[`A6-generated node-types fixture > xflow.transform.sort@1 snapshot 1`] =
         ],
         "props": {
           "addText": "添加",
+          "columns": [
+            "Field",
+            "Descending",
+          ],
           "label": "Fields",
           "required": true,
           "value": {
@@ -4095,6 +4129,7 @@ exports[`A6-generated node-types fixture > xflow.transform.sort@1 snapshot 1`] =
           "g.type.default",
         ],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",
@@ -4123,6 +4158,47 @@ exports[`A6-generated node-types fixture > xflow.trigger.cron@1 snapshot 1`] = `
 {
   "spec": {
     "elements": {
+      "f.parameters.catchup_window": {
+        "checks": [
+          {
+            "args": {
+              "allowExpression": true,
+              "format": "duration",
+            },
+            "message": "需要 Go duration，例如 30s、5m",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "How far back a catch-up reaches (e.g. "1h"); instants older than this are never fired",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Catch-up Window",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/catchup_window",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.catchup_window:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.catchup_window:control": {
+        "props": {
+          "defaultHint": "1h",
+          "label": "Catch-up Window",
+          "unit": "string",
+          "value": {
+            "$bindState": "/parameters/catchup_window",
+          },
+        },
+        "type": "DurationInput",
+      },
       "f.parameters.expression": {
         "checks": [
           {
@@ -4168,6 +4244,148 @@ exports[`A6-generated node-types fixture > xflow.trigger.cron@1 snapshot 1`] = `
         },
         "type": "CronInput",
       },
+      "f.parameters.max_catchup": {
+        "checks": [
+          {
+            "args": {
+              "args": {
+                "value": 1,
+              },
+              "check": "min",
+            },
+            "message": "不能小于 1",
+            "type": "literalOnly",
+          },
+          {
+            "args": {
+              "args": {
+                "value": 1,
+              },
+              "check": "min",
+            },
+            "message": "不能小于 1",
+            "severity": "warning",
+            "type": "expressionOnly",
+          },
+        ],
+        "props": {
+          "description": "Most firings one activation catches up; the newest ones are kept",
+          "expect": {
+            "type": "number",
+          },
+          "fxToggle": true,
+          "label": "Max Catch-up",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/max_catchup",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.max_catchup:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.max_catchup:control": {
+        "props": {
+          "defaultHint": 10,
+          "label": "Max Catch-up",
+          "value": {
+            "$bindState": "/parameters/max_catchup",
+          },
+        },
+        "type": "InputNumber",
+      },
+      "f.parameters.misfire": {
+        "props": {
+          "description": "What to do with the scheduled instants that passed while no trigger was hosting this schedule; empty is skip",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Misfire Policy",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/misfire",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.misfire:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.misfire:control": {
+        "props": {
+          "defaultHint": "skip",
+          "label": "Misfire Policy",
+          "options": [
+            {
+              "description": "Acknowledge the missed instants and fire none of them (default)",
+              "label": "Skip",
+              "value": "skip",
+            },
+            {
+              "description": "Fire the most recent missed instant only",
+              "label": "Fire Once",
+              "value": "fire_once",
+            },
+            {
+              "description": "Fire the missed instants, oldest first, within the catch-up bounds",
+              "label": "Fire All",
+              "value": "fire_all",
+            },
+          ],
+          "value": {
+            "$bindState": "/parameters/misfire",
+          },
+        },
+        "type": "Select",
+      },
+      "f.parameters.overlap": {
+        "props": {
+          "description": "What to do when an instant arrives while the run this trigger started last has not finished; empty is allow",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Overlap Policy",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/overlap",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.overlap:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.overlap:control": {
+        "props": {
+          "defaultHint": "allow",
+          "label": "Overlap Policy",
+          "options": [
+            {
+              "description": "Start the run anyway; two runs of this schedule may be in flight at once (default)",
+              "label": "Allow",
+              "value": "allow",
+            },
+            {
+              "description": "Drop this firing if the execution this trigger started last has not finished",
+              "label": "Skip",
+              "value": "skip",
+            },
+          ],
+          "value": {
+            "$bindState": "/parameters/overlap",
+          },
+        },
+        "type": "Select",
+      },
       "f.parameters.timezone": {
         "props": {
           "description": "IANA time zone name the schedule is evaluated in; empty inherits the workflow settings.timezone (UTC if none)",
@@ -4203,6 +4421,7 @@ exports[`A6-generated node-types fixture > xflow.trigger.cron@1 snapshot 1`] = `
           "g.type.default",
         ],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",
@@ -4211,6 +4430,10 @@ exports[`A6-generated node-types fixture > xflow.trigger.cron@1 snapshot 1`] = `
         "children": [
           "f.parameters.expression",
           "f.parameters.timezone",
+          "f.parameters.misfire",
+          "f.parameters.catchup_window",
+          "f.parameters.max_catchup",
+          "f.parameters.overlap",
         ],
         "props": {
           "collapsible": true,
@@ -5273,6 +5496,7 @@ exports[`A6-generated node-types fixture > xflow.trigger.kafka@1 snapshot 1`] = 
           "g.type.advanced",
         ],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",
@@ -5882,6 +6106,7 @@ exports[`A6-generated node-types fixture > xflow.trigger.redis@1 snapshot 1`] = 
           "g.type.advanced",
         ],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",
@@ -5976,6 +6201,7 @@ exports[`A6-generated node-types fixture > xflow.trigger.timer@1 snapshot 1`] = 
           "g.type.default",
         ],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",
@@ -6132,11 +6358,40 @@ exports[`A6-generated node-types fixture > xflow.trigger.webhook@1 snapshot 1`] 
         },
         "type": "Input",
       },
+      "f.parameters.secret_supply": {
+        "props": {
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Secret Supply",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/secret_supply",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.secret_supply:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.secret_supply:control": {
+        "props": {
+          "label": "Secret Supply",
+          "value": {
+            "$bindState": "/parameters/secret_supply",
+          },
+        },
+        "type": "Input",
+      },
       "form": {
         "children": [
           "g.type.default",
         ],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",
@@ -6147,6 +6402,7 @@ exports[`A6-generated node-types fixture > xflow.trigger.webhook@1 snapshot 1`] 
           "f.parameters.path",
           "f.parameters.event_id_header",
           "f.parameters.max_body_bytes",
+          "f.parameters.secret_supply",
         ],
         "props": {
           "collapsible": true,
@@ -6546,6 +6802,7 @@ exports[`A6-generated node-types fixture > xflow.wait@1 snapshot 1`] = `
           "g.type.default",
         ],
         "props": {
+          "descriptionPlacement": "tooltip",
           "layout": "vertical",
         },
         "type": "Form",

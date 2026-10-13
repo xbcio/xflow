@@ -41,13 +41,18 @@ export function createConformanceRegistry(probe: RenderProbe = createProbe()) {
   const Box: ComposerComponent<Record<string, unknown>> = {
     type: "Box",
     props: loose,
-    render: ({ node, children, slots }) => (
-      <div className="box" data-node={node.id}>
-        {slots.header !== undefined && <div data-slot="header">{slots.header}</div>}
-        {children}
-        {slots.footer !== undefined && <div data-slot="footer">{slots.footer}</div>}
-      </div>
-    )
+    render: ({ node, children, slots }) => {
+      // Containers record too: re-render-scope assertions must see that an
+      // unrelated subtree's container is skipped, not just its leaves.
+      probe.renders.push(node.id);
+      return (
+        <div className="box" data-node={node.id}>
+          {slots.header !== undefined && <div data-slot="header">{slots.header}</div>}
+          {children}
+          {slots.footer !== undefined && <div data-slot="footer">{slots.footer}</div>}
+        </div>
+      );
+    }
   };
 
   const Text: ComposerComponent<{ text?: unknown }> = {

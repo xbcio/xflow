@@ -181,6 +181,20 @@ type SupplyRequirement struct {
 	// the DSL) means it declines instead — traffic stays in Kafka, the offset does
 	// not advance, and consumer-group lag is the operator-visible signal.
 	RequireReady bool `json:"require_ready"`
+	// PullSource, when non-nil, says this content is fetched by the RUNNER from
+	// an external HTTPS source rather than read from the control plane's store.
+	// It is the parsed xflow.supply.http declaration (see
+	// types.ParseSupplyPullSource), carried here so the runner never has to look
+	// the definition up again — and so the URL an author wrote is what the runner
+	// fetches, at the version the graph was compiled from.
+	//
+	// A pull requirement has no store record at all: Resource then names the
+	// runner-local key the fetched content is cached under (the node name, since
+	// a pull node rejects the `resource` override), and nothing here is written
+	// back to the store. Absent (nil) on every store-backed requirement, which
+	// is what makes the wire format backward compatible: an older record decodes
+	// to nil and keeps its store-backed behaviour.
+	PullSource *types.SupplyPullSource `json:"pull_source,omitempty"`
 }
 
 // SupplyConsumerBinding tells a runner that one wasm script node consumes one

@@ -1,7 +1,9 @@
-// Doc B §7.2 / B2 acceptance: only kernel-json-render and react/defaultKernel
-// may import @json-render/*; components (composer/form, testing components)
-// and kernel-native never import a kernel. composer/form reaches the engine
-// only through the component contract (react) and core.
+// Doc B §7.2 / B2 acceptance: the default kernel is kernel-native, so only
+// kernel-json-render (the opt-in kernel) may import @json-render/*;
+// react/defaultKernel stays exempt so the one-line swap back is possible.
+// Components (composer/form, testing components) and kernel-native never
+// import a kernel. composer/form reaches the engine only through the
+// component contract (react) and core.
 
 import { describe, expect, it } from "vitest";
 
@@ -16,6 +18,7 @@ const importsOf = (text: string) =>
   [...text.matchAll(/(?:from|import)\s*\(?\s*["']([^"']+)["']/g)].map((match) => match[1]);
 
 const JSON_RENDER_ALLOWED = new Set(["./kernel-json-render/index.tsx", "./react/defaultKernel.ts"]);
+const isJsonRender = (spec: string) => spec.startsWith("@json-render/");
 
 describe("composer import boundaries", () => {
   const files = Object.entries(sources).filter(
@@ -28,12 +31,17 @@ describe("composer import boundaries", () => {
     }
   });
 
-  it("only kernel-json-render and react/defaultKernel import @json-render/*", () => {
+  it("only kernel-json-render imports @json-render/*, and the default kernel avoids it", () => {
     const offenders = files
-      .filter(([file, text]) => !JSON_RENDER_ALLOWED.has(file) && importsOf(text).some((spec) => spec.startsWith("@json-render/")))
+      .filter(([file, text]) => !JSON_RENDER_ALLOWED.has(file) && importsOf(text).some(isJsonRender))
       .map(([file]) => file);
     expect(offenders).toEqual([]);
     expect(importsOf(sources["./kernel-json-render/index.tsx"])).toContain("@json-render/react");
+    // defaultKernel.ts is in the allow-set only so a swap back needs no
+    // config change; while the default is native it must not import it.
+    const defaultKernel = sources["./react/defaultKernel.ts"];
+    expect(defaultKernel).toContain('"../kernel-native"');
+    expect(importsOf(defaultKernel).some(isJsonRender)).toBe(false);
   });
 
   it("kernel-native and components do not import kernels; react imports kernels only via defaultKernel", () => {

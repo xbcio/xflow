@@ -94,9 +94,9 @@ func runReconcile(opts *deadLetterOptions, redisAddr string, dryRun bool) error 
 		return fmt.Errorf("connect redis %q: %w", redisAddr, err)
 	}
 	defer closeRedis(b)
-	reader, ok := b.State().(engine.ReplayReceiptReader)
-	if !ok {
-		return fmt.Errorf("StateStore %T does not implement ReplayReceiptReader", b.State())
+	reader, err := receiptReaderFor(b.State())
+	if err != nil {
+		return err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -135,4 +135,21 @@ func runReconcile(opts *deadLetterOptions, redisAddr string, dryRun bool) error 
 		return err
 	}
 	return writeJSONLines(opts.out, stats)
+}
+
+// receiptReaderFor narrows a StateStore to the authoritative receipt reader the
+// reconcile scan needs. Only the distributed backend implements it; the local
+// backend's receipts live in process memory, so a separate process can never
+// see them and reconcile cannot repair that gap. The error says so instead of
+// merely reporting a missing interface, because the interface name alone sends
+// the operator looking for a bug rather than at the projector they should be
+// running in-process.
+func receiptReaderFor(state any) (engine.ReplayReceiptReader, error) {
+	reader, ok := state.(engine.ReplayReceiptReader)
+	if !ok {
+		return nil, fmt.Errorf("StateStore %T does not implement ReplayReceiptReader: "+
+			"local backend state is process-local, so its replay receipts cannot reach this "+
+			"command; project them in-process with control.NewReceiptProjector", state)
+	}
+	return reader, nil
 }

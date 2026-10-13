@@ -64,13 +64,18 @@ function all(conds: unknown[], scope: CondScope, errors: string[]): boolean {
 
 function leaf(cond: Record<string, unknown>, scope: CondScope, errors: string[]): boolean {
   let actual: unknown;
-  if (typeof cond.$state === "string") {
-    actual = scope.get(cond.$state);
-  } else if (typeof cond.$item === "string") {
-    if (!scope.item) return fail(errors, "$item used outside a repeat");
-    actual = scope.item(cond.$item);
-  } else {
-    return fail(errors, "condition leaf needs $state or $item");
+  try {
+    if (typeof cond.$state === "string") {
+      actual = scope.get(cond.$state);
+    } else if (typeof cond.$item === "string") {
+      if (!scope.item) return fail(errors, "$item used outside a repeat");
+      actual = scope.item(cond.$item);
+    } else {
+      return fail(errors, "condition leaf needs $state or $item");
+    }
+  } catch (err) {
+    // An invalid pointer is an evaluation error, not a crash (Doc B §3.3).
+    return fail(errors, (err as Error).message);
   }
   const ops = Object.keys(cond).filter((key) => LEAF_OP_SET.has(key)) as LeafOp[];
   if (ops.length !== 1) return fail(errors, `condition leaf needs exactly one operator, got ${ops.length}`);

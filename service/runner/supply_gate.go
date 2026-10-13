@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -17,10 +18,14 @@ import (
 	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/store"
+	"github.com/xbcio/xflow/types"
 )
 
-// SupplyFetcher retrieves one supply's current content. The runner uses it at
-// activation time; a second implementation will serve pull mode.
+// SupplyFetcher retrieves one supply's current content from the control
+// plane's store-backed supply API (GET /v1/supplies/{name}). It is the fetcher
+// for every requirement that does NOT declare a pull source; a requirement that
+// does is routed to PullSupplyFetcher by the gate, because only the gate knows
+// the recorded declaration for a supply key (see SupplyGate.fetchSupply).
 type SupplyFetcher interface {
 	// Fetch returns the content, its content hash, and the server-side revision.
 	// A missing resource must return ErrSupplyNotFound so the gate can tell
@@ -116,6 +121,24 @@ type SupplyGate struct {
 	// "hosts" are exactly the ones some activation required here (see
 	// hostedKeys).
 	resources sync.Map // supply.Key -> string(resource name)
+
+	// declarations records, per supply key, the last declaration this runner
+	// admitted for it: which workflow declared it, and — for a pull node — the
+	// parsed fetch source. The registry cache is keyed by (namespace, node name)
+	// and shared by every consumer of that key, so two declarations that
+	// disagree about where the content comes from are a conflict rather than a
+	// last-writer-wins race; see recordDeclaration.
+	declarations sync.Map // supply.Key -> supplyDeclaration
+	// declMu serializes declaration recording. Admit runs concurrently for
+	// different activations, and a load-then-store on declarations must not
+	// interleave.
+	declMu sync.Mutex
+
+	// pullFetcher fetches supplies whose declaration carries a pull source. nil
+	// (a runner that hosts no triggers, so no wiring ran) makes such an
+	// activation fail with ErrSupplyPullUnavailable rather than fall back to the
+	// store-backed path. Set once before Run; never swapped at runtime.
+	pullFetcher *PullSupplyFetcher
 
 	// newPollTicker builds the tick source RunPoller waits on. nil (the
 	// production value) means time.NewTicker. Tests replace it to drive ticks
@@ -253,6 +276,149 @@ func (g *SupplyGate) SetObserver(o SupplyGateObserver) {
 // supply encryption keys on the HTTP fetcher after registration.
 func (g *SupplyGate) Fetcher() SupplyFetcher { return g.fetcher }
 
+// SetPullFetcher installs the fetcher used for requirements that declare a pull
+// source (xflow.supply.http). Call it before Run: it is read by the activation
+// and poll paths and never swapped at runtime. nil (the default) leaves pull
+// requirements failing closed with ErrSupplyPullUnavailable.
+func (g *SupplyGate) SetPullFetcher(f *PullSupplyFetcher) { g.pullFetcher = f }
+
+// PullFetcher returns the installed pull fetcher, or nil when pull mode is not
+// wired. Nothing in the runtime reads it: it exists so the assembly that sets
+// the fetcher can be tested against the gate it built (sdk/xflow's wiring
+// assertions), the same way Fetcher serves the encryption install path.
+func (g *SupplyGate) PullFetcher() *PullSupplyFetcher { return g.pullFetcher }
+
+// supplyDeclaration is what the gate remembers about one supply key's
+// declaration.
+type supplyDeclaration struct {
+	// WorkflowID is the id that declared the key. It is NOT a stable identity
+	// across registrations: the server mints a fresh uuid per registration, so
+	// republishing a workflow under a new version (nightly@2 after nightly@1)
+	// arrives here with a DIFFERENT id even though a human calls it the same
+	// workflow. What equality below actually covers is re-admissions of one
+	// registration (several entry units, a retried activation — the definition
+	// is immutable, so the requirement is identical) and a PUT replacement,
+	// which keeps the path id and may legitimately move the URL. A re-registered
+	// id that moves the URL lands in the conflict branch, deliberately: see
+	// recordDeclaration for why that is fail-closed, and for the recovery.
+	WorkflowID string
+	// PullSource is non-nil when the declaring node is xflow.supply.http.
+	PullSource *types.SupplyPullSource
+}
+
+// recordDeclaration notes how the declaring workflow says k's content is
+// obtained, and refuses a second, DIFFERENT origin for the same key.
+//
+// The refusal is the P9 fail-closed rule, and it is the whole reason this
+// record exists: content is cached per (namespace, node name) and read by every
+// consumer of that key, so if workflow B could re-point a key workflow A
+// declared, A's nodes would start reading B's source — the same key serving two
+// different definitions with no error anywhere. Nothing is switched silently;
+// the activation is declined with an error naming both origins.
+//
+// Two declarations agree when they have the same origin: both store-backed, or
+// both pull with the same URL. Anything else about a pull source (credential
+// name, poll interval) is not part of the origin: the first record's values
+// stay in force, since the content they describe is the same. When the same id
+// re-declares the key at a different origin (the PUT-replace path), the record
+// is replaced AND the pull fetcher's cached validator is dropped — an ETag must
+// never validate the old source's bytes against the new source's declaration.
+//
+// # Recovery from a conflict
+//
+// This record lives for the runner's lifetime; there is no delete path. So a
+// registration that mints a new id and moves the same supply key's URL is
+// declined for as long as this runner runs, and publishing it again changes
+// nothing. Three ways out, in order of preference:
+//
+//   - PUT the new definition to the EXISTING id (PUT /v1/workflows/{id}): the
+//     id is preserved, so the record is replaced in place;
+//   - rename the supply node — a new key gets a fresh declaration;
+//   - restart the runner, which clears every record.
+func (g *SupplyGate) recordDeclaration(k supply.Key, workflowID string, req engine.SupplyRequirement) error {
+	next := supplyDeclaration{WorkflowID: workflowID, PullSource: req.PullSource}
+
+	g.declMu.Lock()
+	defer g.declMu.Unlock()
+	existing, ok := g.declarations.Load(k)
+	if !ok {
+		g.declarations.Store(k, next)
+		return nil
+	}
+	prev, _ := existing.(supplyDeclaration)
+	if prev.WorkflowID == workflowID || sameSupplyOrigin(prev.PullSource, next.PullSource) {
+		if prev.WorkflowID == workflowID {
+			if !sameSupplyOrigin(prev.PullSource, next.PullSource) {
+				// Same id, moved origin (a PUT replacement): the fetcher's
+				// ETag belongs to the old URL and must not answer the new one.
+				g.pullFetcher.Invalidate(k)
+			}
+			g.declarations.Store(k, next)
+		}
+		return nil
+	}
+	return fmt.Errorf("%w: supply node %q in namespace %q is %s for workflow %s and %s for workflow %s; re-publish under the existing workflow id (PUT), rename the node, or restart the runner",
+		ErrSupplyPullSourceConflict, k.Name, k.Namespace,
+		describeSupplyOrigin(prev.PullSource), prev.WorkflowID,
+		describeSupplyOrigin(next.PullSource), next.WorkflowID)
+}
+
+// sameSupplyOrigin reports whether two declarations name the same content
+// origin: both store-backed, or both pull from the same URL.
+func sameSupplyOrigin(a, b *types.SupplyPullSource) bool {
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	if a == nil {
+		return true
+	}
+	return a.URL == b.URL
+}
+
+// describeSupplyOrigin names a declaration's origin for the conflict error.
+// A pull source is named by HOST: this message reaches logs, and a URL may
+// carry a query string the operator did not intend as log content.
+func describeSupplyOrigin(src *types.SupplyPullSource) string {
+	if src == nil {
+		return "store-backed"
+	}
+	u, err := url.Parse(src.URL)
+	if err != nil || u.Host == "" {
+		return "a pull source with an unparseable URL"
+	}
+	return "pulled from " + u.Host
+}
+
+// pullSourceFor returns the recorded pull source for k, if k's declaration is a
+// pull node.
+func (g *SupplyGate) pullSourceFor(k supply.Key) (types.SupplyPullSource, bool) {
+	v, ok := g.declarations.Load(k)
+	if !ok {
+		return types.SupplyPullSource{}, false
+	}
+	d, ok := v.(supplyDeclaration)
+	if !ok || d.PullSource == nil {
+		return types.SupplyPullSource{}, false
+	}
+	return *d.PullSource, true
+}
+
+// fetchSupply routes one fetch by the key's recorded declaration: a pull source
+// goes to the pull fetcher under the key's identity, everything else to the
+// store-backed fetcher under the resource name.
+//
+// Routing lives here rather than inside a composite fetcher because the
+// declaration — not the caller — decides, and the gate is what records it.
+func (g *SupplyGate) fetchSupply(ctx context.Context, k supply.Key, resource string) ([]byte, string, uint64, error) {
+	if src, ok := g.pullSourceFor(k); ok {
+		if g.pullFetcher == nil {
+			return nil, "", 0, fmt.Errorf("%w (supply %q in namespace %q)", ErrSupplyPullUnavailable, k.Name, k.Namespace)
+		}
+		return g.pullFetcher.Fetch(ctx, k, src)
+	}
+	return g.fetcher.Fetch(ctx, resource)
+}
+
 // resourceFor returns the resource name recorded for a supply key at a prior
 // Admit call, or the key's own name when never recorded (the common case: node
 // name and resource name are equal unless a workflow overrides `resource`).
@@ -330,6 +496,18 @@ func (g *SupplyGate) AdmitWithDeclarations(ctx context.Context, workflowID strin
 		// resource name is known. Recording it even when a fetch fails or a
 		// consumer rejects keeps the hint path able to retry with the right name.
 		g.resources.Store(k, req.Resource)
+		// Record how this key's content is obtained before fetching it: the
+		// fetch below is routed by that record, and a conflicting declaration
+		// (another workflow pointing this key at a different source) declines
+		// the whole activation rather than letting one workflow's consumers read
+		// the other's source.
+		if err := g.recordDeclaration(k, workflowID, req); err != nil {
+			if g.logger != nil {
+				g.logger.Error("supply declaration conflict: refusing the activation",
+					"supply_node", req.Node, "namespace", string(ns), "error", err.Error())
+			}
+			return err
+		}
 		declared := declaresFor(decls, req.Node)
 		// The ready fast path is only sound when nothing declares a node on this
 		// supply. With a declaration present the cached content must still be
@@ -338,7 +516,7 @@ func (g *SupplyGate) AdmitWithDeclarations(ctx context.Context, workflowID strin
 			g.notifyNotReady(supplyCtx, workflowID, req.Node, false)
 			continue
 		}
-		content, hash, revision, err := g.fetcher.Fetch(supplyCtx, req.Resource)
+		content, hash, revision, err := g.fetchSupply(supplyCtx, k, req.Resource)
 		if err != nil {
 			g.notifyFetch(supplyCtx, req.Resource, "error", supplySourceAdmission)
 			// Both "never written" and "cannot reach the server" mean the same
@@ -348,6 +526,15 @@ func (g *SupplyGate) AdmitWithDeclarations(ctx context.Context, workflowID strin
 				g.log(supplyCtx, slog.LevelInfo, "supply has no content yet", req, "")
 			} else {
 				g.log(supplyCtx, slog.LevelWarn, "supply fetch failed", req, "")
+				// The cause of a generic fetch failure stays out of the log (the
+				// gate's log lines are deliberately content-free), so a pull
+				// requirement on a runner with no pull wiring would otherwise be
+				// indistinguishable from an unreachable source. This one case is a
+				// wiring/config error an operator must be able to see.
+				if errors.Is(err, ErrSupplyPullUnavailable) && g.logger != nil {
+					g.logger.Warn("supply pull is not wired on this runner",
+						"supply_node", req.Node, "error", err.Error())
+				}
 			}
 			if req.RequireReady {
 				missing = append(missing, req.Node)
@@ -577,11 +764,13 @@ func hashPrefix(hash string) string {
 // publish one tenant's content under another tenant's supply.
 //
 // Scope note: this affects only WHEN an already-hosted runner refreshes
-// content it already consumes. It has nothing to do with whether an
-// activation gets hosted in the first place — a gate-declined activation
-// staying declined is a separate, currently-open gap (see the Task 18
-// addendum) that ApplyHints neither causes nor fixes; there is no hint for a
-// supply this process has no requirement for at all.
+// content it already consumes. Whether an activation gets hosted at all is a
+// separate path, and a declined one is not stranded here: AdmitWithDeclarations
+// records every required key in g.resources BEFORE it decides (see the
+// resources.Store above its fetch), so the TTL poll re-reads a declined
+// supply's content too — the next delivery of the directive then passes the
+// gate. What no hint can reach is a supply this process has no requirement for
+// at all.
 func (g *SupplyGate) ApplyHints(ctx context.Context, hints []protocol.SupplyHint) {
 	if g == nil || len(hints) == 0 {
 		return
@@ -640,9 +829,11 @@ func (g *SupplyGate) refreshOne(ctx context.Context, k supply.Key, wantHash, sou
 	}
 	// The hint keys on the supply's own identity; the fetch needs the RESOURCE
 	// name. They are equal unless the node overrode `resource`, so the gate
-	// remembers the mapping when it admits an activation (see resources).
+	// remembers the mapping when it admits an activation (see resources). A pull
+	// key fetches from its recorded source instead, which is why the fetch goes
+	// through fetchSupply rather than straight to g.fetcher.
 	resource := g.resourceFor(k)
-	content, fetchedHash, revision, err := g.fetcher.Fetch(ctx, resource)
+	content, fetchedHash, revision, err := g.fetchSupply(ctx, k, resource)
 	if err != nil {
 		g.notifyFetch(ctx, resource, "error", source)
 		g.logRefreshOutcome(slog.LevelWarn, "supply refresh: fetch failed", k, resource, "")
@@ -684,6 +875,12 @@ func (g *SupplyGate) logRefreshOutcome(level slog.Level, msg string, k supply.Ke
 // The caller runs this in its own goroutine. ttl goes through
 // resolveSupplyPollInterval first, so neither an unset nor a nonsensical
 // interval can leave this runner without a poller.
+//
+// A pull node's declared poll_interval can shorten the period (see pollPeriod):
+// the period is re-derived before every round, so a supply declared after this
+// call started polling still speeds the cadence up. Each round waits on its own
+// ticker and stops it before polling, so a slow poll round cannot queue up
+// ticks.
 func (g *SupplyGate) RunPoller(ctx context.Context, ttl time.Duration) {
 	if g == nil {
 		return
@@ -692,16 +889,58 @@ func (g *SupplyGate) RunPoller(ctx context.Context, ttl time.Duration) {
 	if newTicker == nil {
 		newTicker = newRealPollTicker
 	}
-	ticker := newTicker(supplyPollJitter(resolveSupplyPollInterval(ttl, g.logger)))
-	defer ticker.Stop()
+	base := resolveSupplyPollInterval(ttl, g.logger)
 	for {
+		ticker := newTicker(supplyPollJitter(g.pollPeriod(base)))
 		select {
 		case <-ctx.Done():
+			ticker.Stop()
 			return
 		case <-ticker.C():
-			g.pollHosted(ctx)
+			ticker.Stop()
 		}
+		g.pollHosted(ctx)
 	}
+}
+
+// pollPeriod is the tick period for the next round: the runner's resolved
+// interval, or the fastest per-node poll_interval declared so far, whichever is
+// shorter.
+//
+// A pull node's poll_interval can only make the runner's poll FASTER — its
+// declared value is bounded below by MinSupplyPollInterval, the same floor the
+// runner's own interval obeys, so it can neither disable the poll nor turn it
+// into a hammering cadence.
+//
+// The loop runs at one cadence, so a fast declaration also re-reads this
+// runner's store-backed supplies early. That is the cost of keeping the poll a
+// single serial loop, it is bounded by the floor, and the alternative —
+// per-key schedules inside the poller — is more machinery on a path whose job
+// is to be the boring backstop. The declared cadence affects only this runner;
+// nothing is written back to the declaration.
+func (g *SupplyGate) pollPeriod(base time.Duration) time.Duration {
+	period := base
+	g.declarations.Range(func(_, v any) bool {
+		d, ok := v.(supplyDeclaration)
+		if !ok || d.PullSource == nil {
+			return true
+		}
+		p := d.PullSource.PollInterval
+		if p <= 0 {
+			return true
+		}
+		// Clamp rather than drop: a requirement written by another version (the
+		// wire is not re-validated on decode) must not be able to poll below the
+		// floor, and honoring the clamped value keeps the author's intent.
+		if p < MinSupplyPollInterval {
+			p = MinSupplyPollInterval
+		}
+		if p < period {
+			period = p
+		}
+		return true
+	})
+	return period
 }
 
 // pollHosted refreshes each hosted supply once, serially.

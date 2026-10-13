@@ -31,6 +31,7 @@ const (
 	metricAssignmentQueueOldestAge   = "xflow_assignment_queue_oldest_age_seconds"
 	metricRunnerClaimPollTargets     = "xflow_runner_claim_poll_targets"
 	metricRunnerClaimPollRoundTrips  = "xflow_runner_claim_poll_round_trips"
+	metricRunnerSelectorRejected     = "xflow_runner_selector_rejected_total"
 	metricSupplyHintReadErrors       = "xflow_supply_hint_read_errors_total"
 )
 
@@ -325,6 +326,27 @@ func (r RunnerClaimMetrics) OnRunnerClaimPoll(_ context.Context, targets, roundT
 	r.Metrics.ObserveCount(metricRunnerClaimPollRoundTrips, nil, roundTrips)
 }
 
+// OnRunnerSelectorRejected counts one claim-path selector rejection, by
+// reason.
+//
+// reason is one of service/control's SelectorReject* values — label_pending,
+// label_required, capability, policy, namespace — so the label set is bounded
+// by the code, not by traffic. It answers the question the queue depth and
+// oldest-age series cannot on their own: a queue that is not draining because
+// no live runner satisfies its placement (label_*) looks nothing like one that
+// is not draining for want of capacity (capability/policy), and before this
+// counter the two were distinguished only by reading runner registrations by
+// hand. label_pending is the count of entries inside the default-mode grace
+// window, so a sustained high label_pending with a low claim rate is the
+// signal that the placement is waiting on a runner that is not there.
+//
+// Deliberately no namespace label, matching OnAssignmentQueueDepth: the
+// queues are cluster-wide, and the rejection is a property of the pairing
+// between a queued entry and the live runner fleet rather than of a tenant.
+func (r RunnerClaimMetrics) OnRunnerSelectorRejected(_ context.Context, reason string) {
+	r.Metrics.Inc(metricRunnerSelectorRejected, map[string]string{"reason": reason})
+}
+
 var _ runnerClaimObserver = RunnerClaimMetrics{}
 
 type runnerClaimPollObserver interface {
@@ -332,6 +354,15 @@ type runnerClaimPollObserver interface {
 }
 
 var _ runnerClaimPollObserver = RunnerClaimMetrics{}
+
+// runnerSelectorRejectObserver mirrors service/control's optional
+// RunnerClaimObserver extension of the same name: claim-path selector
+// rejections, partitioned by bounded reason.
+type runnerSelectorRejectObserver interface {
+	OnRunnerSelectorRejected(ctx context.Context, reason string)
+}
+
+var _ runnerSelectorRejectObserver = RunnerClaimMetrics{}
 
 // DispatcherMetrics observes retryable dispatcher placement failures.
 type DispatcherMetrics struct {

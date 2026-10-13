@@ -445,6 +445,10 @@ export function toGraphModel(workflow: WorkflowDef): GraphModel {
 
   const byName = new Map(nodes.map((node) => [node.name, node]));
   const edges: GraphEdge[] = [];
+  // The engine compiles every repeated identical target as its own edge (each
+  // one adds to the target's in-degree), so duplicates are kept rather than
+  // deduped; later occurrences get a "#n" suffix so ids stay unique.
+  const idOccurrences = new Map<string, number>();
 
   for (const [sourceName, ports] of Object.entries(workflow.connections ?? {})) {
     const source = byName.get(sourceName);
@@ -453,8 +457,11 @@ export function toGraphModel(workflow: WorkflowDef): GraphModel {
         const targetName = targetRef.node ?? "unknown";
         const target = byName.get(targetName);
         const targetPort = targetRef.input ?? "main";
+        const baseId = `${sourceName}:${sourcePort}->${targetName}:${targetPort}`;
+        const occurrence = (idOccurrences.get(baseId) ?? 0) + 1;
+        idOccurrences.set(baseId, occurrence);
         edges.push({
-          id: `${sourceName}:${sourcePort}->${targetName}:${targetPort}`,
+          id: occurrence === 1 ? baseId : `${baseId}#${occurrence}`,
           source: source?.id ?? sourceName,
           sourceName,
           sourcePort,
@@ -476,3 +483,4 @@ export function toGraphModel(workflow: WorkflowDef): GraphModel {
 
 export * from "./nodeForm";
 export * from "./editorMetadata";
+export * from "./nodeHelpers";

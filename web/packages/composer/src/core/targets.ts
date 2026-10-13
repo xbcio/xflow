@@ -4,7 +4,7 @@ import { formatPointer, getPointer, parsePointer } from "./pointer";
 import { rowUids } from "./rows";
 import type { BindTarget, JsonPointer, RepeatInfo } from "./types";
 
-export function fieldTokens(field: string): string[] {
+export function fieldTokens(field: string): readonly string[] {
   if (field === "") return [];
   return field.startsWith("/") ? parsePointer(field) : [field];
 }

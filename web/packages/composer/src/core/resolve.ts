@@ -316,13 +316,14 @@ export function resolve(input: ResolveInput): ResolvedTree {
         if (match.kind === "known" && match.def.writable) {
           const args = raw as Record<string, unknown>;
           const target = match.def.writable(args, scope.expr);
+          // Computed first: an invalid field pointer must not leave a binding behind.
+          const concrete = concretePointer(target, row);
           const binding: ResolvedBinding = {
             target,
             value: match.def.resolve(args, scope.expr),
             valueKind: kinds?.[key] ?? "scalar"
           };
           draft.bindings[key] = binding;
-          const concrete = concretePointer(target, row);
           if (concrete !== null) draft.paths.push(concrete);
           if (binding.valueKind === "object") objectTargets.push(target);
         } else if (key === "defaultHint") {
@@ -382,19 +383,25 @@ export function resolve(input: ResolveInput): ResolvedTree {
   ): { source: BindTarget; pointer: JsonPointer; rows: unknown[] } | null {
     const statePath = element.repeat!.statePath;
     let source: BindTarget;
-    let pointer: JsonPointer | null;
     if (typeof statePath === "string") {
       source = { path: statePath };
-      pointer = statePath;
     } else if (isPlainObject(statePath) && typeof statePath.$item === "string" && row) {
       source = { repeat: row.repeat, row: row.uid, field: statePath.$item };
-      pointer = concretePointer(source, row);
     } else {
       setError({ code: "repeat", message: "repeat.statePath must be a JSON Pointer or {$item} inside a repeat" });
       return null;
     }
-    if (pointer === null) return null;
-    const list = get(pointer);
+    let pointer: JsonPointer | null;
+    let list: unknown;
+    try {
+      // Invalid pointers (validateSpec reports them non-fatally) isolate to this element.
+      pointer = concretePointer(source, row);
+      if (pointer === null) return null;
+      list = get(pointer);
+    } catch (err) {
+      setError({ code: "repeat", message: `repeat.statePath: ${(err as Error).message}` });
+      return null;
+    }
     if (list === undefined || list === null) return { source, pointer, rows: [] };
     if (!Array.isArray(list)) {
       setError({ code: "repeat", message: `repeat.statePath ${pointer} is not an array` });

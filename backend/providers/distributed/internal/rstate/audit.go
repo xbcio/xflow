@@ -72,9 +72,12 @@ func (c *auditCounters) snapshot() AuditStats {
 // authoritative. Callers that need transactional rollback (e.g.
 // CreateExecution) must NOT use auditWrite — they keep their explicit
 // error-path handling. A failed audit is permanently divergent from Redis
-// until an out-of-band reconcile runs; the `xflow-server audit reconcile` CLI
-// for this is planned, not yet implemented — until then, divergence surfaces
-// only via the audit-failed counters/observer.
+// until an out-of-band reconcile runs, and no such reconcile exists for the
+// projection rows written here. The shipped `xflow audit reconcile` command
+// (cmd/xflow) settles the audit EVENT stream instead — admitted mutations
+// whose outcome row was lost (the one-shot face of
+// control.AuditReconcileWorker) — so a failed write from this path still
+// surfaces only via the audit-failed counters/observer.
 func (s *Store) auditWrite(ctx context.Context, op string, fn func(context.Context) error) {
 	if s.transient {
 		// Transient executions are fire-and-forget: skip the MySQL audit mirror

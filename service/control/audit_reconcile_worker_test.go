@@ -696,6 +696,117 @@ func TestReconcileCursorDoesNotWrapOnFullBatch(t *testing.T) {
 	}
 }
 
+// TestReconcileDryRunClassifiesWithoutAppending is the #33 contract for the
+// `xflow audit reconcile --dry-run` preview: candidates are probed and
+// classified exactly as a real sweep would, the classifications are reported
+// through the observer with appended=false (reconciled / failed / skipped-
+// indeterminate), and NOTHING is written — the same admissions stay pending
+// and a real run afterwards settles them identically.
+func TestReconcileDryRunClassifiesWithoutAppending(t *testing.T) {
+	audit := &fakeAuditReconciler{}
+	authority := &fakeAuthority{effects: map[string]MutationEffect{
+		"req-dry-1": EffectConfirmed,
+		"req-dry-2": EffectAbsent,
+		"req-dry-3": EffectIndeterminate,
+	}}
+	old := time.Now().Add(-time.Minute)
+	audit.addAdmission(admissionForRow("req-dry-1", "namespace-a", opWorkflowCreate, "exec-dry-1", old))
+	audit.addAdmission(admissionForRow("req-dry-2", "namespace-a", opWorkflowCreate, "exec-dry-2", old))
+	audit.addAdmission(admissionForRow("req-dry-3", "namespace-a", opExecutionSignal, "exec-dry-3", old))
+
+	obs := &dryRunObserver{}
+	w := NewAuditReconcileWorker(audit, authority, AuditReconcileConfig{
+		Period:     10 * time.Millisecond,
+		BacklogAge: 1 * time.Millisecond,
+		Batch:      64,
+		Elector:    backend.AlwaysLeader{},
+		Observer:   obs,
+		DryRun:     true,
+	})
+
+	if n := w.ReconcileOnce(context.Background()); n != 0 {
+		t.Fatalf("dry-run settled = %d, want 0 (a dry run appends nothing)", n)
+	}
+	if got := audit.outcomeCount(); got != 0 {
+		t.Fatalf("outcome rows after dry run = %d, want 0", got)
+	}
+	if got := authority.probeCount(); got != 3 {
+		t.Fatalf("probes during dry run = %d, want 3 (every candidate is still probed)", got)
+	}
+
+	reconciled, failed, skipped, skippedReasons := obs.snapshot()
+	if reconciled != 1 {
+		t.Fatalf("dry-run reconciled classifications = %d, want 1", reconciled)
+	}
+	if failed != 1 {
+		t.Fatalf("dry-run failed classifications = %d, want 1", failed)
+	}
+	if skipped != 1 || len(skippedReasons) != 1 || skippedReasons[0] != "indeterminate" {
+		t.Fatalf("dry-run skips = %v, want one indeterminate", skippedReasons)
+	}
+	if obs.anyAppended() {
+		t.Fatal("dry run reported appended=true; it never writes a row")
+	}
+
+	// The dry run left every admission pending: a real worker settles the two
+	// classifiable ones with exactly the outcomes the preview classified.
+	real := newWorkerForTest(audit, authority, backend.AlwaysLeader{}, nil)
+	if n := real.ReconcileOnce(context.Background()); n != 2 {
+		t.Fatalf("real settle after dry run = %d, want 2 (dry run consumed nothing)", n)
+	}
+	gotOutcomes := map[string]int{}
+	for _, o := range audit.outcomes() {
+		gotOutcomes[o.Outcome]++
+	}
+	if gotOutcomes[store.AuditOutcomeReconciled] != 1 || gotOutcomes[store.AuditOutcomeFailed] != 1 {
+		t.Fatalf("outcome rows after real run = %v, want one reconciled + one failed", gotOutcomes)
+	}
+}
+
+// dryRunObserver records settle classifications and skip reasons so the DryRun
+// test can assert the preview reported what a real sweep would have written.
+type dryRunObserver struct {
+	mu       sync.Mutex
+	settled  []string
+	appended bool
+	skips    []string
+}
+
+func (o *dryRunObserver) OnReconcileScan(context.Context, int, time.Duration, error) {}
+func (o *dryRunObserver) OnReconcileSettled(_ context.Context, outcome string, appended bool, _ int64) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.settled = append(o.settled, outcome)
+	o.appended = o.appended || appended
+}
+func (o *dryRunObserver) OnReconcileSkipped(_ context.Context, reason string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.skips = append(o.skips, reason)
+}
+func (o *dryRunObserver) OnReconcileError(context.Context, string, error)        {}
+func (o *dryRunObserver) OnReconcileBacklog(context.Context, time.Duration, int) {}
+
+func (o *dryRunObserver) snapshot() (reconciled, failed, skipped int, skipReasons []string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for _, outcome := range o.settled {
+		switch outcome {
+		case store.AuditOutcomeReconciled:
+			reconciled++
+		case store.AuditOutcomeFailed:
+			failed++
+		}
+	}
+	return reconciled, failed, len(o.skips), append([]string(nil), o.skips...)
+}
+
+func (o *dryRunObserver) anyAppended() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.appended
+}
+
 // TestReconcileBacklogMetricsEmitted proves that the worker emits full-table
 // backlog metrics (pending count + oldest age) via CountUnreconciledAdmissions,
 // independent of the cursor position.

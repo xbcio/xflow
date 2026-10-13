@@ -215,7 +215,7 @@ func selectRunnerDirectory(cfg Config, observer RunnerClaimObserver) RunnerDirec
 	}
 	if provider, ok := cfg.Backend.(redisClientProvider); ok {
 		if client := provider.RedisClient(); client != nil {
-			opts := []RedisRunnerDirectoryOption{WithRedisRunnerDirectoryObserver(observer)}
+			opts := []RedisRunnerDirectoryOption{WithRedisRunnerDirectoryObserver(observer), WithRedisRunnerDirectoryLogger(cfg.Logger)}
 			// The queued-assignment reaper asks whether an assignment's
 			// execution can still be leased, and that answer belongs to the
 			// engine's state store rather than to the directory's key space.
@@ -242,8 +242,12 @@ func selectRunnerDirectory(cfg Config, observer RunnerClaimObserver) RunnerDirec
 	// The memory directory backs single-node deployments and tests; it serves
 	// the same lanes from the same Config fields, through the shared placement
 	// and mode resolvers, so the two backends cannot disagree about where an
-	// entry goes or which entry a runner may claim.
+	// entry goes or which entry a runner may claim. It takes the same observer
+	// and logger, so the claim-path selector rejection counter and the
+	// grace-fallback log are wired identically on both backends.
 	return NewMemoryRunnerDirectory(
+		WithMemoryRunnerDirectoryObserver(observer),
+		WithMemoryRunnerDirectoryLogger(cfg.Logger),
 		WithMemoryRunnerDirectoryLanes(cfg.AssignmentQueueLanes),
 		WithMemoryRunnerDirectoryLaneWriteMode(cfg.AssignmentQueueLaneWriteMode),
 	)

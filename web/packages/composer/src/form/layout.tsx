@@ -2,11 +2,24 @@
 
 import { DownOutlined, RightOutlined } from "@ant-design/icons";
 import { Button } from "antd";
-import { useId, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useContext, useId, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { z } from "zod";
 import { zodProps, type Issue } from "../core";
 import type { ComposerComponent } from "../react";
-import { cx, FieldLayoutContext, IssueList, isPlainObject, isWrongShape, RawValue, useFieldLayout, worstSeverity } from "./shared";
+import {
+  cx,
+  DescriptionPlacementContext,
+  FieldLayoutContext,
+  IssueList,
+  isPlainObject,
+  isWrongShape,
+  RawValue,
+  SectionIssuesContext,
+  useFieldLayout,
+  worstSeverity,
+  type DescriptionPlacement,
+  type IssueReporter
+} from "./shared";
 
 // ------------------------------------------------------------------- Form
 
@@ -14,6 +27,11 @@ export interface FormProps {
   layout?: "horizontal" | "vertical";
   /** Label column width (px) for the horizontal layout. */
   labelWidth?: number;
+  /**
+   * Where field descriptions show: "below" the control (default) or
+   * "tooltip" behind a help icon next to the label.
+   */
+  descriptionPlacement?: DescriptionPlacement;
   /** Accessible name of the form region. */
   title?: string;
 }
@@ -24,6 +42,7 @@ export const Form: ComposerComponent<FormProps> = {
     z.strictObject({
       layout: z.enum(["horizontal", "vertical"]).optional(),
       labelWidth: z.number().positive().optional(),
+      descriptionPlacement: z.enum(["below", "tooltip"]).optional(),
       title: z.string().optional()
     })
   ),
@@ -40,11 +59,13 @@ export const Form: ComposerComponent<FormProps> = {
         aria-label={props.title}
         style={style}
       >
-        <FieldLayoutContext.Provider value={layout}>
-          {slots.header}
-          {children}
-          {slots.footer}
-        </FieldLayoutContext.Provider>
+        <DescriptionPlacementContext.Provider value={props.descriptionPlacement ?? "below"}>
+          <FieldLayoutContext.Provider value={layout}>
+            {slots.header}
+            {children}
+            {slots.footer}
+          </FieldLayoutContext.Provider>
+        </DescriptionPlacementContext.Provider>
       </div>
     );
   }
@@ -64,18 +85,51 @@ interface SectionProps {
   children: ReactNode;
 }
 
+/**
+ * Collects the issues FieldFrames below a section report and returns the
+ * number of distinct errors among them. Reports are forwarded to an
+ * enclosing section, so an outer group also counts its nested groups.
+ */
+function useHiddenErrors(): [IssueReporter, number] {
+  const parent = useContext(SectionIssuesContext);
+  const byFrame = useRef(new Map<string, readonly Issue[]>());
+  const [count, setCount] = useState(0);
+  const report = useCallback<IssueReporter>(
+    (key, issues) => {
+      if (issues === null || issues.length === 0) byFrame.current.delete(key);
+      else byFrame.current.set(key, issues);
+      // An issue reaches every element bound to its path (e.g. ExpressionInput
+      // and its literal control), so count each path/check/message once.
+      const errors = new Set<string>();
+      for (const [frame, list] of byFrame.current) {
+        for (const issue of list) {
+          if (issue.severity !== "error") continue;
+          errors.add(`${issue.path ?? frame}\u0000${issue.check ?? ""}\u0000${issue.message}`);
+        }
+      }
+      setCount(errors.size);
+      parent?.(key, issues);
+    },
+    [parent]
+  );
+  return [report, count];
+}
+
 /** Titled, optionally collapsible section. Collapsed content stays mounted (drafts survive). */
 function Section(props: SectionProps) {
   const base = useId();
   const [collapsed, setCollapsed] = useState(props.defaultCollapsed === true);
+  const [report, hiddenErrors] = useHiddenErrors();
   const titleId = `${base}title`;
   const bodyId = `${base}body`;
   const issuesId = `${base}issues`;
+  const badgeId = `${base}badge`;
   const status = worstSeverity(props.issues);
   const open = !props.collapsible || !collapsed;
+  const badge = !open && hiddenErrors > 0;
   return (
     <section
-      className={cx("xflow-composer-section", props.className, status && `is-${status}`, !open && "is-collapsed")}
+      className={cx("xflow-composer-section", props.className, status && `is-${status}`, !open && "is-collapsed", badge && "has-hidden-errors")}
       data-composer-node={props.nodeId}
       aria-labelledby={props.title ? titleId : undefined}
       aria-describedby={props.issues.length > 0 ? issuesId : undefined}
@@ -88,6 +142,7 @@ function Section(props: SectionProps) {
               className="xflow-composer-section-toggle"
               aria-expanded={open}
               aria-controls={bodyId}
+              aria-describedby={badge ? badgeId : undefined}
               onClick={() => setCollapsed((value) => !value)}
             >
               {open ? <DownOutlined aria-hidden /> : <RightOutlined aria-hidden />}
@@ -100,13 +155,18 @@ function Section(props: SectionProps) {
               {props.title}
             </h3>
           )}
+          {badge ? (
+            <span id={badgeId} className="xflow-composer-section-badge" role="status">
+              {hiddenErrors} 个错误
+            </span>
+          ) : null}
           {props.actions ? <div className="xflow-composer-section-actions">{props.actions}</div> : null}
         </header>
       ) : null}
       {props.description ? <p className="xflow-composer-section-description">{props.description}</p> : null}
       <IssueList id={issuesId} issues={props.issues} />
       <div id={bodyId} className="xflow-composer-section-body" hidden={!open}>
-        {props.children}
+        <SectionIssuesContext.Provider value={report}>{props.children}</SectionIssuesContext.Provider>
       </div>
     </section>
   );
@@ -187,7 +247,8 @@ function ObjectGroupView({
       {wrong ? (
         <RawValue value={value} expected="对象" readOnly={readOnly || onChange === undefined} onClear={() => onChange?.(undefined)} />
       ) : (
-        <FieldLayoutContext.Provider value={layout === "cell" ? "vertical" : layout}>{children}</FieldLayoutContext.Provider>
+        // Sub-fields are full fields again: their labels show inside a cell or an inline slot.
+        <FieldLayoutContext.Provider value={layout === "cell" || layout === "inline" ? "vertical" : layout}>{children}</FieldLayoutContext.Provider>
       )}
     </Section>
   );

@@ -72,7 +72,7 @@
       "label": "Runtime",
       "type": "string",
       "required": true,
-      "help": "Engine: js-\u003egoja|qjs, wasm-\u003ewazero|wazero-reactor (no default — choose explicitly)",
+      "help": "Engine: js-\u003egoja|qjs, wasm-\u003ewazero|wazero-reactor (no default — choose explicitly); wazero has no batch fast path, so a Kafka batch evaluates serially",
       "group": "source",
       "expression": {
         "mode": "template"
@@ -90,12 +90,13 @@
         },
         {
           "value": "wazero",
-          "label": "wazero"
+          "label": "wazero",
+          "description": "Legacy command model; no batch fast path (a batch trigger evaluates records one by one)"
         },
         {
           "value": "wazero-reactor",
           "label": "wazero (reactor)",
-          "description": "Pooled reactor-mode guest instances"
+          "description": "Pooled reactor-mode guest instances; the batch fast path"
         }
       ],
       "options_when": [
@@ -125,12 +126,13 @@
           "options": [
             {
               "value": "wazero",
-              "label": "wazero"
+              "label": "wazero",
+              "description": "Legacy command model; no batch fast path (a batch trigger evaluates records one by one)"
             },
             {
               "value": "wazero-reactor",
               "label": "wazero (reactor)",
-              "description": "Pooled reactor-mode guest instances"
+              "description": "Pooled reactor-mode guest instances; the batch fast path"
             }
           ]
         }

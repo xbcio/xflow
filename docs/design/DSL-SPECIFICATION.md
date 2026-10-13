@@ -108,7 +108,9 @@ description: string       # 描述（可选）
 
 # runner 选择器（顶层，可选；节点级 runner_selector 同结构，优先级高于顶层）
 runner_selector:
-  mode: string            # default | required；required 时 runner 必须满足 match_labels
+  mode: string            # default | required；required 时 runner 必须满足 match_labels（硬性，永不回落）
+                          # default（缺省即 default）时 match_labels 为软偏好：优先匹配，无匹配时
+                          # 30s 宽限后在 claim 与 entry activation 两条路径均可回落至任意 capable runner
   match_labels: object    # 标签选择器，key/value 均为 string
 
 # 上下文（全局变量、配置）
@@ -1692,11 +1694,12 @@ nodes:
 
 Supply 节点（`kind: supply`）声明工作流消费一份**长期存活的共享内容**（当前用于 wasm 节点的规则/配置），与 trigger/action 是完全不同的语义维度：它永不推进 execution，图上只是一个可被依赖引用的声明。详细设计见 [SUPPLY-NODE.md](./SUPPLY-NODE.md)。
 
-两种节点类型：
+三种节点类型：
 
 | 类型 | 标识符 | 内容来源 | `require_ready` 默认 |
 |------|--------|---------|----|
-| 外部 Supply | `xflow.supply.external` | 由嵌入方通过 SDK 调用 `sdk/xflow.Server.UpdateSupply`/`UpdateSupplyIfMatch` 写入的 `SupplyResource`（HTTP `PUT /v1/supplies/{name}` 写动词已封，仅剩 GET）；pull 模式的 `xflow.supply.http`（runner 主动按计划拉取）**尚未实现**，不要在 DSL 里使用 | `true` |
+| 外部 Supply | `xflow.supply.external` | 由嵌入方通过 SDK 调用 `sdk/xflow.Server.UpdateSupply`/`UpdateSupplyIfMatch` 写入的 `SupplyResource`（HTTP `PUT /v1/supplies/{name}` 写动词已封，仅剩 GET） | `true` |
+| 拉取 Supply | `xflow.supply.http` | 由持有该 entry unit 的 runner 按计划从节点声明的 URL 主动拉取（见下方「拉取 Supply 模式」） | `true` |
 | 静态 Supply | `xflow.supply.static` | 字面量内容，随工作流定义一起提交、一起哈希 | `true`（内容随定义存在，天然就绪） |
 
 ```yaml
@@ -1742,6 +1745,36 @@ dependency_edges:
 规范曾讨论过第三档「`default: <bytes>`」（无内容时退回一份内嵌默认规则），**已被显式否决并未实现**：用过期的内嵌规则处理线上流量会产出「看起来正常但错误」的数据，一旦写入下游数仓不可逆，比直接停止服务更危险。
 
 **`$supplies` 表达式根**（§4.2 变量总览已收录）：一个声明了 `dependency_edges` 的消费节点，可以用 `$supplies.<supply节点名>` 读取该 supply 当前内容。`$supplies` 与 `$config` 分工不同：`$config` 不可变、随工作流定义版本走；`$supplies` 可变、有版本、可能未就绪，因此二者刻意不合并成一个命名空间（合并后名字冲突无解、且会抹平"这份内容可能取不到"的失败语义）。
+
+**拉取 Supply 模式（`xflow.supply.http`）**：
+
+```yaml
+- name: rules
+  type: xflow.supply.http
+  kind: supply
+  parameters:
+    url: https://config.example.com/rules.json   # 必填，仅 https
+    authentication: rules_token                  # 可选：runner 侧凭据名
+    poll_interval: 60s                           # 可选，>= 10s
+    require_ready: true                          # 与 external 同义，默认 true
+```
+
+参数只有这四项。`resource` 在拉取节点上**编译期报错**：它是 store 记录的键，而拉取不产生 store 记录（与 `validateGroupRetry` 同理——写了一个不生效的参数却静默忽略，比报错危险）。`url` 必须可解析且 scheme 为 https；`poll_interval` 是 duration 字符串、下限 10s；未知参数一律编译期报错。
+
+两条与外部 Supply 结构不同的语义：
+
+- **内容不落库，由 runner 自拉自用。** 抓取发生在持有该 entry unit 的 runner 进程内：URL 由该 runner 自己访问，`authentication` 是 runner 进程配置里的凭据**名**（解析不到即抓取失败，绝不降级为匿名请求），内容只进本进程的 registry——`SupplyResource` 与落库的 at-rest 加密不适用（[SUPPLY-NODE.md](./SUPPLY-NODE.md) §10）。多个 runner 各自拉取，变更传播是**跨 runner 最终一致**，没有全局屏障，skew 由各 runner 的轮询周期界定。
+- **没有 hint 快路径。** 心跳 hint 由控制面按 store 内容计算，拉取没有 store 记录，因此一致性只靠 runner 的 TTL 轮询：收敛上界 = 轮询周期 + 单次抓取超时（默认 60s + 15s）。`poll_interval` 只允许**调快**该 runner 的轮询（下限 10s），不允许关闭；源不可达期间保留 last-good 内容，`require_ready` 的两档语义与外部 Supply 完全一致。
+
+源地址仅 https，且默认只允许公网主机：环回/私网/link-local 及保留地址段（如 100.64.0.0/10，含阿里云元数据地址 100.100.100.200）由 runner 在 dial 时按解析结果拒绝，内网源需要 operator 在 runner 配置（`RunnerConfig.SupplyPullAllowedHosts`）显式放行。
+
+**同一个 supply key 的两次声明必须同源（P9 fail-closed 规则）**：key 是 (namespace, supply 节点名)，内容按 key 缓存、被该 key 的所有消费者共享；第二个 workflow 把同一个 key 指向不同的 URL（或一边是 store、一边是 pull）时，**整个 activation 被拒绝**，错误里同时给出两个来源的 host——否则先声明的 workflow 会在无任何报错的情况下读到另一个来源的内容。
+
+注意这条规则在**重新注册**时也会触发：同名但版本不同的重新注册（POST `/v1/workflows`，如 `nightly@1` → `nightly@2`）会铸出新的 workflow id，而 runner 侧的声明记录按 workflow id 区分"同一工作流"，且没有删除路径。因此把一个已有 workflow 的 supply URL 改掉再重新注册，这个 runner 会**持续拒绝**该 activation，直到：
+
+- 用 PUT 覆盖**原 workflow id**（id 不变，记录原地替换，这是改 URL 的推荐做法）；或
+- 把 supply 节点改名（新 key，新声明）；或
+- 重启 runner（清空所有声明记录）。
 
 **标识空间只有一个：supply 节点名。** 没有第二套命名（例如 `config_refs`）——`dependency_edges[].supply`、`$supplies.<name>` 里的 `<name>`、以及心跳/门控日志里报告的名字，三处用的都是同一个 supply 节点在图上的名字。
 

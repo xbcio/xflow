@@ -1,8 +1,11 @@
 package control
 
 import (
+	"context"
 	"testing"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/service/protocol"
@@ -169,5 +172,39 @@ func TestMatchCapabilities_VersionMismatch(t *testing.T) {
 
 	if MatchCapabilities(caps, routing) {
 		t.Error("version mismatch on requirement should reject")
+	}
+}
+
+// TestRedisMatureGraceCandidatesDegradesWhenTheStampReadFails pins the failure
+// direction of the advisory stamp read: when Redis cannot answer the batched
+// HMGET/TIME at all, the page degrades to "everything is still waiting" instead
+// of failing the walk. A walk error there would strand every entry on the page
+// — including ones that already waited out their window — for as long as the
+// command misbehaves.
+func TestRedisMatureGraceCandidatesDegradesWhenTheStampReadFails(t *testing.T) {
+	dead := redis.NewClient(&redis.Options{
+		Addr:        "127.0.0.1:1",
+		DialTimeout: 250 * time.Millisecond,
+		MaxRetries:  -1,
+	})
+	t.Cleanup(func() { _ = dead.Close() })
+	directory := NewRedisRunnerDirectory(dead, WithRedisRunnerDirectorySelector(RunnerSelector{FallbackGrace: time.Minute}))
+
+	candidates := []redisClaimCandidate{
+		{assignmentID: "a", assignment: immatureLabelMissAssignment("a")},
+		{assignmentID: "b", assignment: immatureLabelMissAssignment("b")},
+	}
+	matured, pending, trips, err := directory.matureGraceCandidates(context.Background(), candidates)
+	if err != nil {
+		t.Fatalf("a failed stamp read failed the walk (%v); the page would be stranded while Redis misbehaves on this command", err)
+	}
+	if len(matured) != 0 {
+		t.Fatalf("matured = %+v, want none: with no readable stamp nothing has proven its window elapsed", matured)
+	}
+	if len(pending) != len(candidates) {
+		t.Fatalf("pending = %+v, want every candidate still pending", pending)
+	}
+	if trips != 2 {
+		t.Fatalf("roundTrips = %d, want 2 (the batched HMGET + TIME attempt)", trips)
 	}
 }

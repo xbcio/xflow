@@ -73,6 +73,13 @@ describe("validateSpec", () => {
     expect(codes(validateSpec(spec, { schemas }))).toContain("error:root@/root");
   });
 
+  it("rejects an empty root id even when an element is keyed by it", () => {
+    const spec = validSpec();
+    spec.elements[""] = { type: "Form" };
+    spec.root = "";
+    expect(codes(validateSpec(spec, { schemas }))).toContain("error:root@/root");
+  });
+
   it("reports dangling references, cycles, multi-parent and orphans with pointers", () => {
     const spec = validSpec();
     spec.elements.form.children = ["mode", "ghost", "signal", "rules", "mode"];

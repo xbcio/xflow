@@ -130,16 +130,17 @@ func (h *SupplyHinter) notifyReadError(ctx context.Context, ns, cause string) {
 // tenant's node fetch content it never referenced.
 //
 // Hints are an optimization, never a correctness guarantee: they can be lost to a
-// partition, a runner restart, or a leader change. The activation-time fetch is
-// the only other refresh path — there is no TTL watcher, so a lost hint leaves an
-// already-hosted consumer on its last-good value until a later hint lands.
-// Making a hint the only notification channel is how a stale value survives
-// indefinitely.
+// partition, a runner restart, or a leader change. The other two convergence
+// paths are the activation-time fetch and the runner's TTL poll
+// (SupplyGate.RunPoller), which re-reads every hosted supply once per interval
+// unconditionally — so a lost hint leaves an already-hosted consumer on its
+// last-good value only until the next poll tick, not indefinitely.
 //
 // NOTE on scope: this only affects WHEN an already-hosted runner refreshes its
 // content. It has nothing to do with whether an activation ever GETS hosted in
-// the first place — a gate-declined activation is a separate, currently-open
-// gap (see the Task 18 addendum) that this method neither causes nor fixes.
+// the first place — a gate-declined activation is a separate path (the gate
+// records every required key before deciding, so its supply is polled like any
+// other and the next delivery of the directive passes once content exists).
 func (h *SupplyHinter) HintsForRunner(ctx context.Context, runnerID string) []protocol.SupplyHint {
 	if h == nil || h.activations == nil || h.supplies == nil || runnerID == "" {
 		return nil

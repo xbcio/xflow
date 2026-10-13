@@ -1,18 +1,23 @@
 package xflow
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/net/http/httpproxy"
 	"google.golang.org/grpc/credentials"
 )
 
@@ -257,51 +262,255 @@ func newReloadableHTTPTransport(r *CredentialReloader, baseTLSCfg *tls.Config) *
 	base.Certificates = nil
 	base.RootCAs = nil
 	base.GetClientCertificate = r.GetClientCertificate
-	// Start from http.DefaultTransport's timeouts and idle-pool limits, but
-	// dial the control plane directly (no environment proxy): net/http
-	// tunnels an HTTPS request through a proxy itself and verifies it against
-	// TLSClientConfig, bypassing DialTLSContext and therefore the live CA pool.
+	// Start from http.DefaultTransport's timeouts and idle-pool limits. The
+	// environment proxy is honoured through DialTLSContext, not through
+	// http.Transport.Proxy: net/http's own proxy path tunnels an HTTPS request
+	// itself and verifies it against TLSClientConfig, which would bypass this
+	// dial and therefore the live CA pool this transport exists to provide.
+	// dialRunnerTLSConn performs the CONNECT handshake by hand and then runs
+	// the same per-dial TLS setup (ServerName, handshake deadline, live
+	// RootCAs), so "reloadable CA" and "dials through $HTTPS_PROXY" hold at
+	// the same time instead of trading one away for the other. Proxy = nil is
+	// what keeps net/http from double-tunnelling.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	transport.TLSClientConfig = base
-	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	dialer := newRunnerDialer()
 	transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		cfg := base.Clone()
-		cfg.RootCAs = r.rootCAs()
-		// http.Transport's own TLS dial path derives ServerName from the
-		// dial address when the config leaves it empty; DialTLSContext
-		// bypasses that derivation entirely (per net/http's docs: "it is
-		// the caller's responsibility to set up ServerName"), so this
-		// must do it explicitly or every handshake fails verification
-		// with "either ServerName or InsecureSkipVerify must be
-		// specified" regardless of how correct the RootCAs pool is.
-		if cfg.ServerName == "" {
-			if host, _, splitErr := net.SplitHostPort(addr); splitErr == nil {
-				cfg.ServerName = host
-			} else {
-				cfg.ServerName = addr
-			}
-		}
-		rawConn, err := dialer.DialContext(ctx, network, addr)
-		if err != nil {
-			return nil, err
-		}
-		tlsConn := tls.Client(rawConn, cfg)
-		handshakeCtx := ctx
-		if timeout := transport.TLSHandshakeTimeout; timeout > 0 {
-			var cancel context.CancelFunc
-			handshakeCtx, cancel = context.WithTimeout(ctx, timeout)
-			defer cancel()
-		}
-		if err := tlsConn.HandshakeContext(handshakeCtx); err != nil {
-			_ = rawConn.Close()
-			return nil, err
-		}
-		return tlsConn, nil
+		return dialRunnerTLSConn(ctx, dialer, network, addr, base, r.rootCAs, transport.TLSHandshakeTimeout)
 	}
 	r.trackTransport(transport)
 	return transport
 }
+
+// newRunnerDialer is the shared TCP dialer for every runner-side transport:
+// the same connect and keep-alive timeouts http.DefaultTransport uses.
+func newRunnerDialer() *net.Dialer {
+	return &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+}
+
+// dialRunnerTLSConn dials addr — directly, or through the environment's HTTP
+// proxy when one is configured — and completes the TLS handshake against
+// liveRootCAs() (nil means the system pool). It is the one place every runner
+// HTTP client gets its TLS dial from, so the reloadable and static clients
+// cannot disagree about proxy handling.
+//
+// liveRootCAs is a function rather than a pool because the reloadable client's
+// pool is swapped by CredentialReloader.Reload: reading it at dial time is what
+// lets a connection made after a rotation verify against the new CA. A static
+// caller simply passes a closure over its fixed pool.
+//
+// The proxy is resolved from the process environment per dial
+// (httpproxy.FromEnvironment, so HTTP_PROXY/HTTPS_PROXY/NO_PROXY semantics are
+// exactly net/http's, including case-insensitivity and CIDR entries), never
+// cached: a long-lived process must notice a proxy configuration change the
+// same way it notices a credential rotation. An HTTPS proxy is dialled with
+// the system roots and no client certificate — the runner's mTLS material is
+// for the control plane, not for its proxy.
+//
+// Error messages name host:port only. A proxy URL may carry userinfo, and a
+// credential must never reach a log or an error string.
+func dialRunnerTLSConn(ctx context.Context, dialer *net.Dialer, network, addr string, baseTLSCfg *tls.Config, liveRootCAs func() *x509.CertPool, handshakeTimeout time.Duration) (net.Conn, error) {
+	rawConn, err := dialRunnerConn(ctx, dialer, network, addr, baseTLSCfg)
+	if err != nil {
+		return nil, err
+	}
+	cfg := baseTLSCfg.Clone()
+	if liveRootCAs != nil {
+		cfg.RootCAs = liveRootCAs()
+	}
+	// http.Transport's own TLS dial path derives ServerName from the dial
+	// address when the config leaves it empty; DialTLSContext bypasses that
+	// derivation entirely (per net/http's docs: "it is the caller's
+	// responsibility to set up ServerName"), so this must do it explicitly or
+	// every handshake fails verification with "either ServerName or
+	// InsecureSkipVerify must be specified" regardless of how correct the
+	// RootCAs pool is.
+	if cfg.ServerName == "" {
+		if host, _, splitErr := net.SplitHostPort(addr); splitErr == nil {
+			cfg.ServerName = host
+		} else {
+			cfg.ServerName = addr
+		}
+	}
+	tlsConn := tls.Client(rawConn, cfg)
+	handshakeCtx := ctx
+	if handshakeTimeout > 0 {
+		var cancel context.CancelFunc
+		handshakeCtx, cancel = context.WithTimeout(ctx, handshakeTimeout)
+		defer cancel()
+	}
+	if err := tlsConn.HandshakeContext(handshakeCtx); err != nil {
+		_ = rawConn.Close()
+		return nil, err
+	}
+	return tlsConn, nil
+}
+
+// dialRunnerConn dials addr directly or opens a CONNECT tunnel through the
+// environment's proxy first, returning the raw (untunnelled-TLS) connection.
+//
+// A plaintext configuration passes baseTLSCfg == nil. The proxy is then not
+// consulted, exactly as before this change: a plain http:// origin through a
+// proxy is net/http's own business (it rewrites the request line to absolute
+// form and never calls DialTLSContext), and stepping in here would only
+// produce a tunnel for a request that asks for none.
+func dialRunnerConn(ctx context.Context, dialer *net.Dialer, network, addr string, baseTLSCfg *tls.Config) (net.Conn, error) {
+	if baseTLSCfg == nil {
+		return dialer.DialContext(ctx, network, addr)
+	}
+	proxyURL, err := runnerProxyFor(addr)
+	if err != nil {
+		return nil, err
+	}
+	if proxyURL == nil {
+		return dialer.DialContext(ctx, network, addr)
+	}
+	return dialConnectTunnel(ctx, dialer, network, addr, proxyURL)
+}
+
+// runnerProxyFor resolves the environment proxy for one HTTPS destination,
+// with NO_PROXY honoured, and refuses schemes this client cannot speak.
+//
+// socks5 is rejected explicitly rather than silently ignored: grpc-go's
+// environment proxy support does not carry socks5 either, so the two runner
+// transports stay consistent — and a deployment that set ALL_PROXY expecting
+// it to work gets an error instead of a runner that quietly bypasses its
+// egress control.
+func runnerProxyFor(addr string) (*url.URL, error) {
+	reqURL := &url.URL{Scheme: "https", Host: addr}
+	proxyURL, err := httpproxy.FromEnvironment().ProxyFunc()(reqURL)
+	if err != nil {
+		return nil, fmt.Errorf("resolve environment proxy for %s: %s", addr, runnerProxyErrorText(err))
+	}
+	if proxyURL == nil {
+		return nil, nil
+	}
+	if proxyURL.Scheme != "http" && proxyURL.Scheme != "https" {
+		return nil, fmt.Errorf("environment proxy for %s has unsupported scheme %q (only http and https are supported)", addr, proxyURL.Scheme)
+	}
+	return proxyURL, nil
+}
+
+// runnerProxyErrorText strips credentials from an error produced while
+// resolving a proxy from the environment. httpproxy's parse failure quotes the
+// raw value — "invalid proxy address %q" — and a proxy URL may carry userinfo,
+// so everything from the scheme separator on is replaced. A credential must
+// never travel through an error string to a log.
+//
+// Defensive rather than currently reachable: the httpproxy in use reports no
+// error for a value it cannot parse (init drops the proxy and the result is a
+// direct dial, matching http.ProxyFromEnvironment), but ProxyFunc's error
+// return is the documented channel for a malformed value, and a version that
+// starts using it must not leak userinfo through a caller that logs this error.
+func runnerProxyErrorText(err error) string {
+	text := err.Error()
+	if idx := strings.Index(text, "://"); idx >= 0 {
+		return text[:idx+3] + "<redacted>"
+	}
+	return text
+}
+
+// dialConnectTunnel dials the proxy, issues CONNECT for target, and asserts a
+// 2xx reply before returning the tunnel. The caller layers TLS on the returned
+// connection; this function never sees the tunnel's plaintext.
+func dialConnectTunnel(ctx context.Context, dialer *net.Dialer, network, target string, proxyURL *url.URL) (net.Conn, error) {
+	proxyAddr := proxyURL.Host
+	if !strings.Contains(proxyAddr, ":") {
+		if proxyURL.Scheme == "https" {
+			proxyAddr = net.JoinHostPort(proxyAddr, "443")
+		} else {
+			proxyAddr = net.JoinHostPort(proxyAddr, "80")
+		}
+	}
+	conn, err := dialer.DialContext(ctx, network, proxyAddr)
+	if err != nil {
+		// Only the proxy's host:port, never the URL: it may carry userinfo.
+		return nil, fmt.Errorf("dial proxy %s: %w", proxyAddr, err)
+	}
+	if proxyURL.Scheme == "https" {
+		// The proxy leg uses the system roots and presents no client
+		// certificate: the runner's private CA and leaf are the control
+		// plane's, and sending them to a proxy would leak them.
+		proxyTLS := tls.Client(conn, &tls.Config{
+			ServerName: proxyURL.Hostname(),
+			MinVersion: tls.VersionTLS12,
+		})
+		handshakeCtx := ctx
+		if dialer.Timeout > 0 {
+			var cancel context.CancelFunc
+			handshakeCtx, cancel = context.WithTimeout(ctx, dialer.Timeout)
+			defer cancel()
+		}
+		if err := proxyTLS.HandshakeContext(handshakeCtx); err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("tls handshake with proxy %s: %w", proxyAddr, err)
+		}
+		conn = proxyTLS
+	}
+
+	connectReq := &http.Request{
+		Method: "CONNECT",
+		URL:    &url.URL{Opaque: target},
+		Host:   target,
+		Header: make(http.Header),
+	}
+	if proxyURL.User != nil {
+		password, _ := proxyURL.User.Password()
+		connectReq.Header.Set("Proxy-Authorization",
+			"Basic "+base64.StdEncoding.EncodeToString([]byte(proxyURL.User.Username()+":"+password)))
+	}
+	if err := connectReq.Write(conn); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("write CONNECT %s to proxy %s: %w", target, proxyAddr, err)
+	}
+	// The response is read from a buffered reader because the proxy may have
+	// pipelined bytes after the CONNECT reply — the tunnel's first TLS records
+	// can already be in that buffer, and a bare conn would lose them.
+	//
+	// The read carries its own deadline: a proxy that accepts the connection
+	// and then says nothing would otherwise hold this dial open until the
+	// caller's request context dies, pinning a runner connection per attempt.
+	// dialer.Timeout is the budget the dial itself already used — a proxy that
+	// cannot answer CONNECT within it is not usable — with newRunnerDialer's
+	// 30s as the floor when the caller configured none. The bound is cleared
+	// before the tunnel is handed back: the caller keeps this connection for
+	// the whole request lifetime, so the CONNECT read's ceiling must not
+	// become the tunnel's.
+	readTimeout := dialer.Timeout
+	if readTimeout <= 0 {
+		readTimeout = 30 * time.Second
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, connectReq)
+	_ = conn.SetReadDeadline(time.Time{})
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("read CONNECT response from proxy %s: %w", proxyAddr, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_ = conn.Close()
+		return nil, fmt.Errorf("proxy %s refused CONNECT %s: %s", proxyAddr, target, resp.Status)
+	}
+	if br.Buffered() == 0 {
+		return conn, nil
+	}
+	// Leftover bytes exist, so hand the caller a connection that returns them
+	// first. Only the buffered count is wrapped: after it drains the underlying
+	// reader is already position-correct.
+	return &bufferedConn{Conn: conn, reader: br}, nil
+}
+
+// bufferedConn is a net.Conn whose Read drains a bufio.Reader before touching
+// the socket, so bytes the CONNECT response reader consumed are not lost.
+type bufferedConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *bufferedConn) Read(b []byte) (int, error) { return c.reader.Read(b) }
 
 // reloadedBearerTransport attaches the reloader's live bearer token to every
 // request bound for the control-plane origin. It serves the clients whose

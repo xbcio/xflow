@@ -9,6 +9,8 @@
 //   5. only paths whose value actually changes produce patches.
 //   7. applyPatches copies only the objects along changed paths.
 //   8. `/$ctx` is read-only: writes are rejected with a warning.
+// Tokens that would reach Object.prototype (`__proto__`, `constructor`,
+// `prototype`) are rejected by write() and applyPatches().
 // Rule 6 (microtask batching + overlay) lives in composer/react; the
 // same-path merge it relies on is mergePatches/createPatchBatch below.
 
@@ -28,6 +30,11 @@ export interface WriteState {
 }
 
 const CTX = "$ctx";
+const UNSAFE_TOKENS: ReadonlySet<string> = new Set(["__proto__", "constructor", "prototype"]);
+
+function hasUnsafeToken(tokens: readonly string[]): boolean {
+  return tokens.some((token) => UNSAFE_TOKENS.has(token));
+}
 
 /** Empty per rule 1: null/undefined always; "" for scalars; [] for arrays; {} for objects. */
 export function isEmptyValue(next: unknown, valueKind: ValueKind, emptyAs: "unset" | "keep" = "unset"): boolean {
@@ -58,6 +65,10 @@ export function write(target: BindTarget, next: unknown, valueKind: ValueKind, s
   }
   if (tokens.length === 0) {
     warn("root-write", "write to the value root rejected", path);
+    return [];
+  }
+  if (hasUnsafeToken(tokens)) {
+    warn("unsafe-path", "write rejected: __proto__, constructor and prototype are not writable keys", path);
     return [];
   }
   const current = getIn(state.value, tokens);
@@ -123,7 +134,8 @@ function canStep(container: unknown, token: string): boolean {
 /**
  * Applies patches immutably. Only objects on changed paths are copied; the
  * copies inherit repeat row identity from their originals. Throws on
- * /$ctx, root, array-index unset and non-container paths.
+ * /$ctx, root, unsafe (__proto__/constructor/prototype), array-index unset
+ * and non-container paths.
  */
 export function applyPatches<T>(value: T, patches: readonly Patch[]): T {
   let result: unknown = value;
@@ -131,6 +143,7 @@ export function applyPatches<T>(value: T, patches: readonly Patch[]): T {
     const tokens = parsePointer(patch.path);
     if (tokens[0] === CTX) throw new Error("applyPatches: /$ctx is read-only");
     if (tokens.length === 0) throw new Error("applyPatches: cannot replace the value root");
+    if (hasUnsafeToken(tokens)) throw new Error(`applyPatches: unsafe key in ${patch.path}`);
     result = patch.op === "set" ? setIn(result, tokens, 0, patch.value) : unsetIn(result, tokens, 0);
   }
   return result as T;
@@ -142,7 +155,7 @@ function copy<C extends object>(container: C): C {
   return clone;
 }
 
-function setIn(container: unknown, tokens: string[], depth: number, value: unknown): unknown {
+function setIn(container: unknown, tokens: readonly string[], depth: number, value: unknown): unknown {
   const token = tokens[depth];
   const last = depth === tokens.length - 1;
   const created = container === undefined || container === null;
@@ -162,11 +175,12 @@ function setIn(container: unknown, tokens: string[], depth: number, value: unkno
   const child = last ? value : setIn(existing, tokens, depth + 1, value);
   if (!created && has && Object.is(existing, child)) return base;
   const clone = created ? base : copy(base);
-  clone[token] = child;
+  // Define, not assign: an own data property never triggers an inherited setter.
+  Object.defineProperty(clone, token, { value: child, writable: true, enumerable: true, configurable: true });
   return clone;
 }
 
-function unsetIn(container: unknown, tokens: string[], depth: number): unknown {
+function unsetIn(container: unknown, tokens: readonly string[], depth: number): unknown {
   const token = tokens[depth];
   const last = depth === tokens.length - 1;
   if (Array.isArray(container)) {
@@ -195,19 +209,25 @@ function unsetIn(container: unknown, tokens: string[], depth: number): unknown {
 
 /**
  * Merges a sequence of patches: a patch is dropped when a later patch
- * writes the same path or an ancestor of it (the later write wins). The
- * surviving patches keep their relative order.
+ * writes the same path or an ancestor of it (the later write wins). An
+ * append ("/-") names a new element each time, so it never supersedes and
+ * is never superseded by another append; a later write to the array itself
+ * still supersedes it. The surviving patches keep their relative order.
  */
 export function mergePatches(patches: readonly Patch[]): Patch[] {
   const out: Patch[] = [];
   for (let i = 0; i < patches.length; i++) {
     let superseded = false;
     for (let j = i + 1; j < patches.length && !superseded; j++) {
-      superseded = isWithin(patches[i].path, patches[j].path);
+      superseded = isWithin(patches[i].path, patches[j].path) && !isAppend(patches[j].path);
     }
     if (!superseded) out.push(patches[i]);
   }
   return out;
+}
+
+function isAppend(path: string): boolean {
+  return path.endsWith("/-");
 }
 
 export interface PatchBatch {

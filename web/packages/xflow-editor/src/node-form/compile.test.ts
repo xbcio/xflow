@@ -623,6 +623,66 @@ describe("commonSchema (Doc C §4.2)", () => {
   });
 });
 
+describe("section (Inspector 参数 / 设置 tabs)", () => {
+  /** Every JSON Pointer a value-binding element writes (or, for NodeNameInput, reads). */
+  function writtenPaths(spec: ComposerSpec): string[] {
+    const paths: string[] = [];
+    for (const element of Object.values(spec.elements)) {
+      const value = element.props?.value as Record<string, unknown> | undefined;
+      const pointer = value?.$bindState ?? (element.type === "NodeNameInput" ? value?.$state : undefined);
+      if (typeof pointer === "string") paths.push(pointer);
+    }
+    return paths.sort();
+  }
+
+  const cases: [string, NodeFormSchema | null][] = [...fixtureSchemas.map((s): [string, NodeFormSchema] => [s.node_type, s]), ["<no schema>", null]];
+
+  it.each(cases)("%s: parameters and settings partition the paths of all", (_name, schema) => {
+    const options = { parameters: { extra: 1 }, hasTemplate: true };
+    const all = compileNodeForm(schema, options).spec;
+    const parameters = compileNodeForm(schema, { ...options, section: "parameters" }).spec;
+    const settings = compileNodeForm(schema, { ...options, section: "settings" }).spec;
+    const p = writtenPaths(parameters);
+    const s = writtenPaths(settings);
+    expect(p.filter((path) => s.includes(path))).toEqual([]);
+    expect([...p, ...s].sort()).toEqual(writtenPaths(all));
+    // The element sets partition too (apart from the shared root).
+    const ids = (spec: ComposerSpec) => Object.keys(spec.elements).filter((id) => id !== ROOT_ID);
+    expect([...ids(parameters), ...ids(settings)].sort()).toEqual(ids(all).sort());
+    for (const spec of [parameters, settings]) {
+      expect(validateSpec(spec, { schemas, checks, expressions })).toEqual([]);
+      expect(resolveWith(spec, { name: "n1", parameters: {} }).specErrors).toEqual([]);
+    }
+  });
+
+  it("settings holds only the common execution group", () => {
+    const { spec, warnings } = compileNodeForm(waitSchema, { section: "settings", hasTemplate: true, parameters: { legacy: 1 } });
+    expect(warnings).toEqual([]);
+    expect(spec.elements[ROOT_ID].children).toEqual(["g.common.execution"]);
+    expect(spec.elements[ROOT_ID].checks).toBeUndefined();
+    for (const pointer of ["/on_error", "/timeout", "/retry", "/runner_selector"]) expect(writtenPaths(spec)).toContain(pointer);
+    expect(writtenPaths(spec).some((path) => path.startsWith("/parameters/"))).toBe(false);
+  });
+
+  it("parameters holds the notices, the general group, the type groups and the root checks", () => {
+    const schema = fixtureSchemas.find((s) => (s.one_of ?? []).length > 0) ?? httpSchema;
+    const all = compileNodeForm(schema, { hasTemplate: true }).spec;
+    const { spec } = compileNodeForm(schema, { section: "parameters", hasTemplate: true });
+    expect(spec.elements[ROOT_ID].children).toEqual(all.elements[ROOT_ID].children?.filter((id) => id !== "g.common.execution"));
+    expect(spec.elements[ROOT_ID].children?.[0]).toBe("n.node-template");
+    expect(spec.elements[ROOT_ID].children).toContain("g.common.general");
+    expect(spec.elements[ROOT_ID].checks).toEqual(all.elements[ROOT_ID].checks);
+  });
+
+  it('"all" is the default and emits both', () => {
+    expect(compileNodeForm(waitSchema, { section: "all" })).toEqual(compileNodeForm(waitSchema));
+  });
+
+  it("the root Form shows descriptions as tooltips", () => {
+    expect(compileNodeForm(waitSchema).spec.elements[ROOT_ID].props).toEqual({ layout: "vertical", descriptionPlacement: "tooltip" });
+  });
+});
+
 describe("notices", () => {
   it("a missing schema shows the unregistered-type notice and common fields only", () => {
     const { spec } = compileNodeForm(null);
@@ -640,5 +700,108 @@ describe("notices", () => {
 
   it("shows the node-template notice", () => {
     expect(compile(waitSchema, { hasTemplate: true }).spec.elements["n.node-template"].props).toMatchObject({ tone: "warning" });
+  });
+});
+
+// ------------------------------------------------------------ form-layer regressions
+
+describe("ArrayTable columns", () => {
+  it("names one column per row cell, in child order, from the item field labels", () => {
+    const { spec } = compile(switchSchema);
+    const table = Object.values(spec.elements).find((element) => element.type === "ArrayTable");
+    expect(table?.props?.columns).toEqual(["Condition", "Output"]);
+    expect(table?.children).toHaveLength(2);
+    const ops = Object.values(compile(aggregateSchema).spec.elements).find((element) => element.type === "ArrayTable");
+    expect(ops?.props?.columns).toEqual(["Kind", "Field", "As"]);
+  });
+
+  it("falls back to the humanized name and skips statically hidden sub-fields", () => {
+    const schema: NodeFormSchema = {
+      ...waitSchema,
+      fields: [
+        {
+          name: "t",
+          path: "/parameters/t",
+          type: "array",
+          item: {
+            type: "object",
+            fields: [
+              { name: "second", path: "second", type: "string", order: 2 },
+              { name: "first_col", path: "first_col", type: "string", order: 1 },
+              { name: "gone", path: "gone", type: "string", visible_when: { any_of: [] } }
+            ]
+          }
+        }
+      ]
+    };
+    const { spec } = compile(schema);
+    const table = Object.values(spec.elements).find((element) => element.type === "ArrayTable");
+    expect(table?.props?.columns).toEqual(["First col", "Second"]);
+    expect(table?.children).toHaveLength(2);
+  });
+});
+
+describe("item rules (NodeFormItem.rules)", () => {
+  const tagsSchema: NodeFormSchema = {
+    ...waitSchema,
+    fields: [
+      {
+        name: "tags",
+        path: "/parameters/tags",
+        type: "array",
+        item: { type: "string", rules: [{ type: "pattern", pattern: "^[a-z]+$" }, { type: "max_length", value: 5, advisory: true }, { type: "required" }] }
+      }
+    ]
+  };
+
+  it("compiles every non-required item rule to an eachItem check on the array", () => {
+    const { spec, warnings } = compile(tagsSchema);
+    expect(warnings).toEqual([]);
+    expect(validateSpec(spec, { schemas, checks, expressions })).toEqual([]);
+    const eachItem = Object.values(spec.elements).flatMap((element) => element.checks ?? []).filter((check) => check.type === "eachItem");
+    expect(eachItem).toEqual([
+      { type: "eachItem", args: { check: "pattern", args: { pattern: "^[a-z]+$" } }, message: "需要匹配 ^[a-z]+$" },
+      { type: "eachItem", args: { check: "maxLength", args: { value: 5 } }, message: "长度不能超过 5", severity: "warning" }
+    ]);
+  });
+
+  it("reports a failing element at its own pointer; templates and other elements pass", () => {
+    const { spec } = compile(tagsSchema);
+    const issues = resolveWith(spec, { parameters: { tags: ["ok", "Bad", "${{ $vars.t }}", "toolong"] } }).issues.filter(
+      (issue) => issue.check === "eachItem"
+    );
+    expect(issues.map((issue) => [issue.path, issue.severity])).toEqual([
+      ["/parameters/tags/1", "error"],
+      ["/parameters/tags/3", "warning"]
+    ]);
+  });
+});
+
+describe("RE2 pattern flags", () => {
+  const withPattern = (pattern: string): NodeFormSchema => ({
+    ...waitSchema,
+    fields: [{ name: "s", path: "/parameters/s", type: "string", rules: [{ type: "pattern", pattern }] }]
+  });
+
+  it("translates a leading (?i) / (?s) / (?m) group into JS flags", () => {
+    const { spec, warnings } = compile(withPattern("(?is)^abc.d$"));
+    expect(warnings).toEqual([]);
+    expect(validateSpec(spec, { schemas, checks, expressions })).toEqual([]);
+    const pattern = (spec.elements["f.parameters.s"].checks ?? []).find((check) => check.type === "literalOnly");
+    expect(pattern?.args).toEqual({ check: "pattern", args: { pattern: "^abc.d$", flags: "is" } });
+    expect(issuesAt(spec, { parameters: { s: "ABC\nD" } }, "/parameters/s")).toEqual([]);
+    expect(issuesAt(spec, { parameters: { s: "xyz" } }, "/parameters/s").map((issue) => issue.message)).toEqual(["需要匹配 (?is)^abc.d$"]);
+  });
+
+  it("drops a pattern JS cannot compile with a warning instead of breaking the field", () => {
+    for (const pattern of ["(?U)a+", "a(?i)b", "(?P<n>a)"]) {
+      const { spec, warnings } = compile(withPattern(pattern));
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("skipped");
+      expect(validateSpec(spec, { schemas, checks, expressions })).toEqual([]);
+      const errors: unknown[] = [];
+      walk(resolveWith(spec, { parameters: { s: "x" } }).root, (node) => node.error && errors.push(node.id));
+      expect(errors).toEqual([]);
+    }
   });
 });

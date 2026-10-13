@@ -24,6 +24,9 @@ type memoryRunnerDirectoryConfig struct {
 	clock                     func() time.Time
 	lanes                     []string
 	laneWriteMode             LaneWriteMode
+	observer                  RunnerClaimObserver
+	log                       engine.Logger
+	selector                  RunnerSelector
 }
 
 // WithMemoryRunnerDirectoryLanes configures the node-type queue lanes this
@@ -76,6 +79,41 @@ func WithMemoryRunnerDirectoryDrainDeadline(deadline time.Duration) MemoryRunner
 		if deadline > 0 {
 			cfg.drainDeadline = deadline
 		}
+	}
+}
+
+// WithMemoryRunnerDirectoryObserver installs an optional observer for claim
+// events. It mirrors WithRedisRunnerDirectoryObserver so the two directories
+// have the same extension surface: RunnerSelectorRejectObserver (claim-path
+// selector rejections) is discovered from this value on both.
+func WithMemoryRunnerDirectoryObserver(observer RunnerClaimObserver) MemoryRunnerDirectoryOption {
+	return func(cfg *memoryRunnerDirectoryConfig) {
+		if observer != nil {
+			cfg.observer = observer
+		}
+	}
+}
+
+// WithMemoryRunnerDirectoryLogger installs the logger that records
+// default-mode selector grace fallbacks on the claim path
+// (logSelectorGraceFallback). Optional: without one the fallback is still
+// counted through the observer, just not attributable to a concrete
+// assignment in the log.
+func WithMemoryRunnerDirectoryLogger(log engine.Logger) MemoryRunnerDirectoryOption {
+	return func(cfg *memoryRunnerDirectoryConfig) {
+		if log != nil {
+			cfg.log = log
+		}
+	}
+}
+
+// WithMemoryRunnerDirectorySelector overrides the selector policy (liveness
+// TTL and default-mode fallback grace) the claim path applies. Zero keeps
+// DefaultRunnerSelector. It exists so a deployment — or a test — can shorten
+// the grace window without waiting 30 seconds per assertion.
+func WithMemoryRunnerDirectorySelector(selector RunnerSelector) MemoryRunnerDirectoryOption {
+	return func(cfg *memoryRunnerDirectoryConfig) {
+		cfg.selector = selector
 	}
 }
 
@@ -136,6 +174,9 @@ type MemoryRunnerDirectory struct {
 	drainObservationFreshness time.Duration
 	drainDeadline             time.Duration
 	clock                     func() time.Time
+	observer                  RunnerClaimObserver
+	log                       engine.Logger
+	selector                  RunnerSelector
 }
 
 type memoryRunnerState struct {
@@ -191,6 +232,7 @@ func NewMemoryRunnerDirectory(opts ...MemoryRunnerDirectoryOption) *MemoryRunner
 		drainObservationFreshness: defaultRunnerDrainObservationFreshness,
 		drainDeadline:             defaultRunnerDrainDeadline,
 		clock:                     time.Now,
+		selector:                  DefaultRunnerSelector(),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -218,6 +260,9 @@ func NewMemoryRunnerDirectory(opts ...MemoryRunnerDirectoryOption) *MemoryRunner
 		drainObservationFreshness: cfg.drainObservationFreshness,
 		drainDeadline:             cfg.drainDeadline,
 		clock:                     cfg.clock,
+		observer:                  cfg.observer,
+		log:                       cfg.log,
+		selector:                  cfg.selector,
 	}
 }
 
@@ -633,7 +678,7 @@ func (d *MemoryRunnerDirectory) assignmentLiveLocked(assignmentID AssignmentID) 
 
 // ClaimForRunner reserves the first compatible assignment for the runner's
 // current session.
-func (d *MemoryRunnerDirectory) ClaimForRunner(_ context.Context, req ClaimRequest) (Claim, bool, error) {
+func (d *MemoryRunnerDirectory) ClaimForRunner(ctx context.Context, req ClaimRequest) (Claim, bool, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -676,6 +721,10 @@ func (d *MemoryRunnerDirectory) ClaimForRunner(_ context.Context, req ClaimReque
 		return Claim{}, false, nil
 	}
 
+	// One clock reading for the whole walk: the grace decision below compares
+	// queuedAt against it, and re-reading the clock per assignment would let a
+	// slow walk see different "now"s for entries queued at the same instant.
+	now := d.clockNow()
 	for _, target := range d.memoryQueueTargets(state.snapshot.Capabilities) {
 		queue := d.memoryQueueLocked(target)
 		for i, assignment := range queue {
@@ -683,21 +732,46 @@ func (d *MemoryRunnerDirectory) ClaimForRunner(_ context.Context, req ClaimReque
 				continue
 			}
 			if !MatchCapabilities(state.snapshot.Capabilities, assignment.Routing) {
+				d.observeSelectorReject(ctx, SelectorRejectCapability)
 				continue
 			}
 			if !state.policy.Allows(assignment.Routing.NodeType) {
+				d.observeSelectorReject(ctx, SelectorRejectPolicy)
 				continue
 			}
 			if !state.canServeNamespace(assignment.Namespace) {
+				d.observeSelectorReject(ctx, SelectorRejectNamespace)
 				continue
 			}
+			graceFallback := false
 			if rs := assignment.Routing.RunnerSelector; rs != nil && !MatchLabels(state.snapshot.Labels, rs.MatchLabels) {
-				continue
+				// Mode semantics are shared with entry activation: a
+				// "default"-mode selector is a preference whose labels stop
+				// being enforced once the grace window has elapsed, while
+				// "required" never relaxes. Capability, policy and namespace
+				// above are authorization and are never relaxed by this
+				// fallback.
+				queuedAt := d.queuedAt[assignment.AssignmentID]
+				if !d.selector.selectorGraceElapsed(rs, queuedAt, now) {
+					if selectorIsDefault(rs) {
+						d.observeSelectorReject(ctx, SelectorRejectLabelPending)
+					} else {
+						d.observeSelectorReject(ctx, SelectorRejectLabelRequired)
+					}
+					continue
+				}
+				graceFallback = true
 			}
 
 			claimID := ClaimID(uuid.NewString())
 			d.setMemoryQueueLocked(target, append(queue[:i], queue[i+1:]...))
 			delete(d.queuedAt, assignment.AssignmentID)
+			if graceFallback {
+				// Emitted after the seat is actually taken: a fallback that
+				// races a matching runner and loses never reaches this line,
+				// so the log cannot claim a placement that did not happen.
+				d.logSelectorGraceFallback(ctx, assignment)
+			}
 			d.claims[claimID] = memoryClaim{runnerID: req.RunnerID, assignment: assignment}
 			generation := uint64(0)
 			if control != nil {

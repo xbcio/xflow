@@ -426,7 +426,17 @@
   --xflow-field-height: 24px;
   --xflow-control-radius: 6px;
   --xflow-control-radius-sm: 4px;
+  /* Badges and pills (node type, template, section-card tag). */
+  --xflow-control-radius-pill: 999px;
   --xflow-popup-shadow: 0 12px 30px var(--xflow-node-shadow);
+  /* Section cards inside a panel body (variables, workflow settings); derived
+     from the theme surfaces so all four themes get them without overrides. */
+  --xflow-section-card-bg: color-mix(in srgb, var(--xflow-surface-panel-raised) 70%, var(--xflow-surface-panel));
+  --xflow-section-card-border: var(--xflow-border);
+  --xflow-section-card-header-bg: var(--xflow-surface-overlay-subtle);
+  --xflow-section-card-radius: var(--xflow-control-radius);
+  --xflow-variable-row-bg: var(--xflow-surface-panel);
+  --xflow-variable-row-hover-border: var(--xflow-border-strong);
   /* Node-library source badge ("Runner"); follows the active theme's cyan tone.
      The light themes override --xflow-node-source-text above for contrast. */
   --xflow-node-source-text: var(--xflow-node-tone-cyan-text);
@@ -819,6 +829,13 @@
   color: var(--xflow-editor-text);
 }
 
+/* A section that does not exist in the current mode (the node library while
+ * previewing) is disabled rather than a key that quietly does nothing. */
+.xflow-editor-rail button:disabled {
+  color: var(--xflow-status-disabled-text);
+  cursor: not-allowed;
+}
+
 /* Pinned to the bottom of the rail so it reads as a workbench utility rather
  * than a third navigation section alongside 节点 / 大纲. */
 .xflow-editor-rail .xflow-editor-rail-help {
@@ -889,7 +906,7 @@
 .xflow-editor-left__content {
   display: grid;
   flex: 1 1 auto;
-  grid-template-rows: minmax(0, 1.06fr) minmax(0, .94fr);
+  grid-template-rows: minmax(0, 1fr);
   min-height: 0;
   min-width: 0;
   overflow: hidden;
@@ -1002,18 +1019,6 @@
   line-height: 13px;
 }
 
-.xflow-editor-library.ant-card {
-  border-bottom: 1px solid var(--xflow-border) !important;
-}
-
-.xflow-editor-outline.ant-card > .ant-card-head {
-  min-height: 40px;
-}
-
-.xflow-editor-outline.ant-card > .ant-card-head > .ant-card-head-wrapper {
-  min-height: 40px;
-}
-
 .xflow-editor-pane {
   min-height: 0;
   overflow: auto;
@@ -1055,12 +1060,12 @@
 
 .xflow-editor .xflow-editor-block-title .anticon {
   color: var(--xflow-text-tertiary);
-  display: inline-flex !important;
+  display: inline-flex;
   flex: 0 0 auto;
   font-size: 12px;
-  min-width: 12px !important;
-  overflow: visible !important;
-  text-overflow: clip !important;
+  min-width: 12px;
+  overflow: visible;
+  text-overflow: clip;
 }
 
 .xflow-editor-library-title,
@@ -1078,11 +1083,11 @@
   border: 1px solid var(--xflow-focus-border);
   border-radius: 5px;
   color: var(--xflow-focus-text);
-  display: inline-flex !important;
+  display: inline-flex;
   flex: 0 0 24px;
   height: 24px;
   justify-content: center;
-  margin-top: 0 !important;
+  margin-top: 0;
   width: 24px;
 }
 
@@ -1302,106 +1307,6 @@
   line-height: 14px;
   margin-inline-end: 0;
   padding-inline: 4px;
-}
-
-.xflow-editor-outline-list {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.xflow-editor-outline-row {
-  align-items: center;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  color: var(--xflow-text-tertiary);
-  cursor: pointer;
-  display: grid;
-  font-size: 11px;
-  gap: 6px;
-  grid-template-columns: 6px minmax(0, 1fr) auto;
-  min-height: 28px;
-  padding: 3px 6px;
-  text-align: left;
-}
-
-.xflow-editor-outline-row:hover {
-  background: var(--xflow-surface-hover);
-  border-color: var(--xflow-border-strong);
-  color: var(--xflow-text);
-}
-
-.xflow-editor-outline-row:focus-visible {
-  background: var(--xflow-focus-subtle);
-  border-color: var(--xflow-focus-border-strong);
-  box-shadow: 0 0 0 2px var(--xflow-focus-ring);
-  color: var(--xflow-text);
-  outline: none;
-}
-
-.xflow-editor-outline-row[data-selected="true"] {
-  background: var(--xflow-focus-subtle);
-  border-color: var(--xflow-focus-border-strong);
-  color: var(--xflow-text);
-}
-
-.xflow-editor-outline-row[data-selected="true"]:focus-visible {
-  box-shadow: 0 0 0 2px var(--xflow-focus-ring);
-  outline: none;
-}
-
-.xflow-editor-outline-row > span:nth-child(2) {
-  line-height: 16px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.xflow-editor-outline-status {
-  color: var(--xflow-text-tertiary);
-}
-
-.xflow-editor-outline-row[data-selected="true"] .xflow-editor-outline-status {
-  color: var(--xflow-text-secondary);
-}
-
-.xflow-editor-outline-row .ant-tag {
-  font-size: 10px;
-  line-height: 16px;
-  margin-inline-end: 0;
-  padding: 0 5px;
-}
-
-/* The base tone is the pending/unknown gray. `expired` is deliberately the same
- * muted gray — its records are gone and nothing about it is in flight — but is
- * stated explicitly so a later change to the fallback cannot move it. */
-.xflow-editor-status-dot {
-  background: var(--xflow-status-disabled);
-  border-radius: 999px;
-  height: 6px;
-  width: 6px;
-}
-
-.xflow-editor-status-dot[data-status="expired"] {
-  background: var(--xflow-status-disabled);
-}
-
-.xflow-editor-status-dot[data-status="success"] {
-  background: var(--xflow-status-success);
-}
-
-/* `committing` is in flight — the lease holder is writing the result — so it
- * carries the running tone rather than the gray it would otherwise inherit. */
-.xflow-editor-status-dot[data-status="running"],
-.xflow-editor-status-dot[data-status="waiting"],
-.xflow-editor-status-dot[data-status="committing"] {
-  background: var(--xflow-editor-blue);
-}
-
-.xflow-editor-status-dot[data-status="failed"],
-.xflow-editor-status-dot[data-status="canceled"] {
-  background: var(--xflow-status-error);
 }
 
 .xflow-editor-canvas {
@@ -1746,35 +1651,32 @@
   background: transparent;
 }
 
+/* The node card itself is owned by @xflow/preview; the editor only maps its
+   palette onto the card's tokens and adds a run-status strip. */
 .xflow-editor-preview .xflow-preview-node {
-  background: var(--xflow-node-bg);
-  border-color: var(--xflow-node-border);
-  border-radius: 6px;
-  box-shadow: 0 10px 24px var(--xflow-node-shadow);
-  min-width: 164px;
-  padding: 8px;
-  position: relative;
-  width: 164px;
+  --xflow-preview-node-bg: var(--xflow-node-bg);
+  --xflow-preview-node-border: var(--xflow-node-border);
+  --xflow-preview-node-shadow: 0 10px 24px var(--xflow-node-shadow);
 }
 
-.xflow-editor-preview .xflow-preview-node::before {
+/* Status strip only once a run reported something: an idle canvas stays quiet. */
+.xflow-editor-preview .xflow-preview-node:is(
+    [data-status="success"],
+    [data-status="running"],
+    [data-status="waiting"],
+    [data-status="committing"],
+    [data-status="expired"],
+    [data-status="failed"]
+  )::before {
   background: var(--xflow-status-disabled);
-  border-radius: 6px 6px 0 0;
+  /* Inherits the card's own radius: the editor does not own that value. */
+  border-radius: inherit;
   content: "";
   height: 2px;
   left: 0;
   position: absolute;
   right: 0;
   top: 0;
-}
-
-.xflow-editor-preview .xflow-preview-node[data-status="success"],
-.xflow-editor-preview .xflow-preview-node[data-status="running"],
-.xflow-editor-preview .xflow-preview-node[data-status="waiting"],
-.xflow-editor-preview .xflow-preview-node[data-status="committing"],
-.xflow-editor-preview .xflow-preview-node[data-status="expired"],
-.xflow-editor-preview .xflow-preview-node[data-status="failed"] {
-  border-color: var(--xflow-node-border);
 }
 
 .xflow-editor-preview .xflow-preview-node[data-status="success"]::before {
@@ -1787,87 +1689,13 @@
   background: var(--xflow-status-running);
 }
 
-.xflow-editor-preview .xflow-preview-node[data-status="expired"]::before {
-  background: var(--xflow-status-disabled);
-}
-
 .xflow-editor-preview .xflow-preview-node[data-status="failed"]::before {
   background: var(--xflow-status-error);
-}
-
-.xflow-editor-preview .xflow-preview-node__header strong {
-  font-size: 11px;
-}
-
-.xflow-editor-preview .xflow-preview-node__header > div > span,
-.xflow-editor-preview .xflow-preview-node__status,
-.xflow-editor-preview .xflow-preview-node__meta span,
-.xflow-editor-preview .xflow-preview-node__ports span {
-  font-size: 10px;
-}
-
-.xflow-editor-preview .xflow-preview-node__icon {
-  background: transparent;
-  border-color: transparent;
-  color: var(--xflow-port-text);
-  flex-basis: 20px;
-  height: 20px;
-  width: 20px;
-}
-
-.xflow-editor-preview .xflow-preview-node__icon .anticon {
-  font-size: 12px;
-}
-
-.xflow-editor-preview .xflow-preview-node__icon[data-tone] {
-  background: transparent;
-  border-color: transparent;
-  color: var(--xflow-port-text);
-}
-
-.xflow-editor-preview .xflow-preview-node__status {
-  background: var(--xflow-node-meta-bg);
-  border: 0;
-  border-radius: 3px;
-  color: var(--xflow-text-tertiary);
-  padding: 1px 4px;
-}
-
-.xflow-editor-preview .xflow-preview-node[data-status="running"] .xflow-preview-node__status,
-.xflow-editor-preview .xflow-preview-node[data-status="waiting"] .xflow-preview-node__status,
-.xflow-editor-preview .xflow-preview-node[data-status="committing"] .xflow-preview-node__status {
-  color: var(--xflow-status-running-text);
-}
-
-.xflow-editor-preview .xflow-preview-node[data-status="expired"] .xflow-preview-node__status {
-  color: var(--xflow-status-disabled-text);
-}
-
-.xflow-editor-preview .xflow-preview-node[data-status="success"] .xflow-preview-node__status {
-  color: var(--xflow-status-success-text);
-}
-
-.xflow-editor-preview .xflow-preview-node[data-status="failed"] .xflow-preview-node__status {
-  color: var(--xflow-status-error-text);
-}
-
-.xflow-editor-preview .xflow-preview-node__body {
-  border-top-color: var(--xflow-node-border);
-  gap: 5px;
-  margin-top: 7px;
-  padding-top: 7px;
-}
-
-.xflow-editor-preview .xflow-preview-node__body code {
-  font-size: 10px;
 }
 
 .xflow-editor-preview .xflow-preview-node__port-chips span {
   background: var(--xflow-port-chip-bg);
   border-color: var(--xflow-port-chip-border);
-  font-size: 9px;
-  line-height: 16px;
-  padding: 0 4px;
 }
 
 .xflow-editor-preview .react-flow__edge-text {
@@ -1875,19 +1703,22 @@
   font-weight: 700;
 }
 
-.xflow-editor-preview .react-flow__minimap {
-  background: var(--xflow-canvas-minimap-mask) !important;
-  border: 1px solid var(--xflow-border-strong) !important;
-  border-radius: 6px !important;
-  bottom: 16px !important;
-  height: 104px !important;
-  right: 16px !important;
-  width: 160px !important;
+/* .xflow-editor scope out-weighs xyflow's .react-flow__panel.bottom/.right and
+ * the preview's .xflow-preview-canvas rules (both 0,2,0). */
+.xflow-editor .xflow-editor-preview .react-flow__minimap {
+  background: var(--xflow-canvas-minimap-mask);
+  border: 1px solid var(--xflow-border-strong);
+  border-radius: var(--xflow-control-radius);
+  bottom: 16px;
+  height: 104px;
+  right: 16px;
+  width: 160px;
 }
 
-.xflow-editor-preview .react-flow__minimap-svg {
-  height: 100% !important;
-  width: 100% !important;
+/* The svg's width/height are presentation attributes, which any rule overrides. */
+.xflow-editor .xflow-editor-preview .react-flow__minimap-svg {
+  height: 100%;
+  width: 100%;
 }
 
 .xflow-editor-preview .react-flow__controls {
@@ -1897,10 +1728,13 @@
   box-shadow: none;
 }
 
-.xflow-editor-preview .react-flow__controls-button {
-  background: transparent !important;
-  border-bottom-color: var(--xflow-editor-line) !important;
-  color: var(--xflow-editor-text) !important;
+/* :hover is listed so the preview's .xflow-preview-canvas .react-flow__controls
+ * button:hover (0,3,1) cannot repaint the button either. */
+.xflow-editor .xflow-editor-preview .react-flow__controls-button,
+.xflow-editor .xflow-editor-preview .react-flow__controls-button:hover {
+  background: transparent;
+  border-bottom-color: var(--xflow-editor-line);
+  color: var(--xflow-editor-text);
 }
 
 .xflow-editor-preview .react-flow__attribution {
@@ -1960,14 +1794,161 @@
   min-width: 0;
 }
 
-.xflow-editor-inspector-header-meta {
-  color: var(--xflow-text-tertiary);
-  display: block;
-  font-family: SFMono-Regular, Consolas, monospace;
-  font-size: 9px;
-  max-width: 158px;
+/* Node identity: icon tile, display name, type/template badges, run status. */
+.xflow-editor .xflow-editor-inspector-node {
+  align-items: flex-start;
+  border-bottom: 1px solid var(--xflow-border);
+  display: flex;
+  gap: 10px;
+  padding: 11px 11px 10px;
+}
+
+.xflow-editor .xflow-editor-inspector-node__icon {
+  align-items: center;
+  background: var(--xflow-node-tone-blue-bg);
+  border: 1px solid var(--xflow-node-tone-blue-border);
+  border-radius: var(--xflow-control-radius);
+  color: var(--xflow-node-tone-blue-text);
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: 15px;
+  height: 30px;
+  justify-content: center;
+  width: 30px;
+}
+
+.xflow-editor .xflow-editor-inspector-node__icon[data-tone="green"] {
+  background: var(--xflow-node-tone-green-bg);
+  border-color: var(--xflow-node-tone-green-border);
+  color: var(--xflow-node-tone-green-text);
+}
+
+.xflow-editor .xflow-editor-inspector-node__icon[data-tone="cyan"] {
+  background: var(--xflow-node-tone-cyan-bg);
+  border-color: var(--xflow-node-tone-cyan-border);
+  color: var(--xflow-node-tone-cyan-text);
+}
+
+.xflow-editor .xflow-editor-inspector-node__icon[data-tone="amber"] {
+  background: var(--xflow-node-tone-amber-bg);
+  border-color: var(--xflow-node-tone-amber-border);
+  color: var(--xflow-node-tone-amber-text);
+}
+
+.xflow-editor .xflow-editor-inspector-node__icon[data-tone="violet"] {
+  background: var(--xflow-node-tone-violet-bg);
+  border-color: var(--xflow-node-tone-violet-border);
+  color: var(--xflow-node-tone-violet-text);
+}
+
+.xflow-editor .xflow-editor-inspector-node__text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.xflow-editor .xflow-editor-inspector-node__text strong {
+  color: var(--xflow-text);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 18px;
   overflow: hidden;
-  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xflow-editor .xflow-editor-inspector-node__badges {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+
+.xflow-editor .xflow-editor-inspector-node__type {
+  background: var(--xflow-surface-field);
+  border: 1px solid var(--xflow-border);
+  border-radius: var(--xflow-control-radius-pill);
+  color: var(--xflow-text-tertiary);
+  font-family: var(--xflow-font-mono);
+  font-size: 10px;
+  line-height: 15px;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 0 6px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xflow-editor .xflow-editor-inspector-node__template {
+  background: var(--xflow-node-tone-violet-bg);
+  border: 1px solid var(--xflow-node-tone-violet-border);
+  border-radius: var(--xflow-control-radius-pill);
+  color: var(--xflow-node-tone-violet-text);
+  font-size: 10px;
+  font-style: normal;
+  line-height: 15px;
+  padding: 0 6px;
+  white-space: nowrap;
+}
+
+.xflow-editor .xflow-editor-inspector-node__status {
+  flex: 0 0 auto;
+  margin-inline-start: auto;
+}
+
+/* The parameters / settings cards: a little more air than the left panel. */
+.xflow-editor .xflow-editor-config > .xflow-editor-section-card > .xflow-editor-section-card__body {
+  padding: 10px 10px 11px;
+}
+
+.xflow-editor .xflow-editor-param-source {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.xflow-editor .xflow-editor-param-source__hint {
+  color: var(--xflow-text-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+  margin: 0;
+}
+
+.xflow-editor .xflow-editor-param-source .xflow-editor-textarea--code {
+  font-family: var(--xflow-font-mono);
+  font-size: 11px;
+  line-height: 17px;
+}
+
+.xflow-editor .xflow-editor-param-source__footer {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.xflow-editor .xflow-editor-param-source__actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 4px;
+}
+
+.xflow-editor .xflow-editor-param-source__action.ant-btn {
+  color: var(--xflow-text-secondary);
+  font-size: 11px;
+}
+
+.xflow-editor .xflow-editor-param-source__error {
+  color: var(--xflow-status-error-text);
+  font-size: 11px;
+  line-height: 16px;
+  overflow: hidden;
+  text-align: end;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1978,7 +1959,10 @@
   display: grid;
   flex: 0 0 36px;
   gap: 2px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  /* One column per tab, whatever the host or a future tab set adds: the
+     panel is narrow, so a fourth tab must not spill onto a second row. */
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
   margin: 0;
   padding: 5px 9px;
 }
@@ -1987,7 +1971,7 @@
   align-items: center;
   background: transparent;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--xflow-control-radius-sm);
   color: var(--xflow-text-tertiary);
   cursor: pointer;
   display: inline-flex;
@@ -2287,7 +2271,7 @@
 
 .xflow-editor-inspector-delete.ant-btn {
   align-items: center;
-  color: var(--xflow-text-secondary) !important;
+  color: var(--xflow-text-secondary);
   display: inline-flex;
   height: 22px;
   justify-content: center;
@@ -2295,7 +2279,8 @@
   padding: 0;
 }
 
-.xflow-editor-inspector-delete.ant-btn:hover {
+/* Out-weighs antd's .ant-btn:not(:disabled):not(.ant-btn-disabled):hover (0,4,0). */
+.xflow-editor .xflow-editor-inspector-delete.ant-btn:not(:disabled):hover {
   background: var(--xflow-status-error-subtle);
   color: var(--xflow-status-error-text);
 }
@@ -2360,13 +2345,26 @@
 }
 
 .xflow-editor-diagnostics__tabs {
-  gap: 4px;
+  gap: 6px;
 }
 
-.xflow-editor-diagnostics__tabs strong {
+/* Out-weighs .xflow-editor .xflow-editor-block-title (gap) and the narrow-viewport margin. */
+.xflow-editor .xflow-editor-diagnostics__tabs strong {
   color: var(--xflow-text);
-  font-size: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  gap: 6px;
   margin-right: 8px;
+}
+
+.xflow-editor .xflow-editor-diagnostics__tab {
+  align-items: center;
+  border-radius: var(--xflow-control-radius-sm);
+  display: inline-flex;
+  font-size: 11px;
+  gap: 4px;
+  height: 20px;
+  padding: 0 8px;
 }
 
 .xflow-editor-diagnostics__tabs button {
@@ -2377,9 +2375,9 @@
   color: var(--xflow-text-tertiary);
   cursor: pointer;
   display: inline-flex;
-  font-size: 12px;
+  font-size: 11px;
   gap: 5px;
-  height: 24px;
+  height: 20px;
   padding: 0 8px;
 }
 
@@ -2401,10 +2399,11 @@
   outline: none;
 }
 
-.xflow-editor-diagnostics__status {
+/* Scoped so the narrow-viewport gap override does not shrink the status row. */
+.xflow-editor .xflow-editor-diagnostics__status {
   color: var(--xflow-text-tertiary);
-  font-size: 11px;
-  gap: 10px;
+  font-size: 10.5px;
+  gap: 12px;
 }
 
 .xflow-editor-diagnostics__status > span {
@@ -2469,7 +2468,7 @@
   grid-template-columns: minmax(0, 1fr) 310px 300px;
   height: calc(100% - 36px);
   overflow: hidden;
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .xflow-editor-diagnostics__body section {
@@ -2511,13 +2510,53 @@
   color: var(--xflow-text-tertiary);
 }
 
+/* The issue pane sits flush: its title spans the pane and the list carries the
+ * padding, so it opts out of the generic section padding and gap. */
+.xflow-editor .xflow-editor-diagnostics-log {
+  gap: 0;
+  padding: 0;
+}
+
+.xflow-editor .xflow-editor-diagnostics-summary,
+.xflow-editor .xflow-editor-diagnostics-run {
+  padding: 8px 12px;
+}
+
+.xflow-editor-diagnostics-log__list {
+  padding: 8px 12px;
+}
+
+.xflow-editor .xflow-editor-diagnostics-waiting {
+  border-bottom-width: 0;
+  padding-block: 4px;
+}
+
+.xflow-editor .xflow-editor-diagnostics-log__row {
+  display: grid;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 10.5px;
+  gap: 8px;
+  grid-template-columns: 74px 74px minmax(0, 1fr);
+  line-height: 16px;
+  padding-block: 4px;
+}
+
+.xflow-editor .xflow-editor-diagnostics-log__row:last-child {
+  border-bottom-width: 0;
+}
+
+/* Status and area cells fit their grid tracks instead of the 78px inline cells. */
+.xflow-editor .xflow-editor-diagnostics-log__row > span:not(:last-child) {
+  min-width: 0;
+}
+
 .xflow-editor-diagnostics-section-title {
   align-items: center;
   color: var(--xflow-text-tertiary);
   display: flex;
-  font-size: 11px;
+  font-size: 10.5px;
   justify-content: space-between;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 
 .xflow-editor-diagnostics__body .xflow-editor-diagnostics-section-title {
@@ -2526,8 +2565,19 @@
   color: var(--xflow-text-secondary);
 }
 
+.xflow-editor .xflow-editor-diagnostics-log > .xflow-editor-diagnostics-section-title {
+  border-bottom: 1px solid var(--xflow-border);
+  height: 28px;
+  margin-bottom: 0;
+  padding: 0 12px;
+}
+
+.xflow-editor .xflow-editor-diagnostics-run > .xflow-editor-diagnostics-section-title {
+  margin-bottom: 4px;
+}
+
 .xflow-editor-diagnostics-meter {
-  margin-bottom: 12px;
+  margin-bottom: 8px;
 }
 
 .xflow-editor-diagnostics-meter div {
@@ -2571,10 +2621,10 @@
   border-top: 1px solid var(--xflow-border);
   color: var(--xflow-text-tertiary);
   display: flex;
-  font-size: 11px;
+  font-size: 10.5px;
   justify-content: space-between;
   margin-top: 8px;
-  padding-top: 9px;
+  padding-top: 8px;
 }
 
 .xflow-editor-diagnostics-kv strong {
@@ -2613,13 +2663,13 @@
 .xflow-editor-diagnostics-run {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 6px;
 }
 
 .xflow-editor-diagnostics-run > div:not(.xflow-editor-diagnostics-section-title) {
   align-items: center;
   display: flex;
-  font-size: 11px;
+  font-size: 10.5px;
   justify-content: space-between;
 }
 
@@ -2650,9 +2700,10 @@
   align-items: center;
   border-top: 1px solid var(--xflow-border);
   display: flex;
+  font-size: 10px;
   gap: 6px;
-  margin-top: 2px;
-  padding-top: 9px;
+  margin-top: 4px;
+  padding-top: 8px;
 }
 
 /* Keep the desktop workspace dense, but let the editor become a vertical document
@@ -2705,7 +2756,7 @@
   }
 
   .xflow-editor-toolbar-actions .ant-space {
-    display: flex !important;
+    display: flex;
     flex: 1 1 auto;
     flex-wrap: wrap;
     min-width: 0;
@@ -2744,7 +2795,7 @@
   }
 
   .xflow-editor-left__content {
-    grid-template-rows: auto auto;
+    grid-template-rows: auto;
     min-width: 0;
   }
 
@@ -2923,11 +2974,11 @@
     min-height: 320px;
   }
 
-  .xflow-editor-preview .react-flow__minimap {
-    bottom: 8px !important;
-    height: 72px !important;
-    right: 8px !important;
-    width: 112px !important;
+  .xflow-editor .xflow-editor-preview .react-flow__minimap {
+    bottom: 8px;
+    height: 72px;
+    right: 8px;
+    width: 112px;
   }
 
   .xflow-editor-connection-selectors {
@@ -3022,12 +3073,12 @@
 
 /* Compact mode keeps canvas controls usable while the less frequent workflow
  * actions remain available on wider desktop workspaces. */
-.xflow-editor[data-layout="c"] .xflow-editor-operation-status,
-.xflow-editor[data-layout="c"] .xflow-editor-layout-toggle,
-.xflow-editor[data-layout="c"] .xflow-editor-new-button,
-.xflow-editor[data-layout="c"] .xflow-editor-validate-button,
-.xflow-editor[data-layout="c"] .xflow-editor-publish-button {
-  display: none !important;
+.xflow-editor[data-layout="c"] .xflow-editor-toolbar-actions .xflow-editor-operation-status,
+.xflow-editor[data-layout="c"] .xflow-editor-toolbar-actions .xflow-editor-layout-toggle,
+.xflow-editor[data-layout="c"] .xflow-editor-toolbar-actions .xflow-editor-new-button,
+.xflow-editor[data-layout="c"] .xflow-editor-toolbar-actions .xflow-editor-validate-button,
+.xflow-editor[data-layout="c"] .xflow-editor-toolbar-actions .xflow-editor-publish-button {
+  display: none;
 }
 
 .xflow-editor[data-layout="c"] .xflow-editor-main,
@@ -3132,32 +3183,8 @@
   z-index: 12;
 }
 
-.xflow-editor-compact-drawer .ant-drawer-content-wrapper {
-  box-shadow: 0 10px 36px rgba(0, 0, 0, .28);
-}
-
-.xflow-editor-compact-drawer .ant-drawer-content {
-  background: var(--xflow-surface-panel);
-}
-
-.xflow-editor-compact-drawer .ant-drawer-header {
-  background: var(--xflow-surface-panel-raised);
-  border-bottom-color: var(--xflow-border);
-}
-
-.xflow-editor-compact-drawer .ant-drawer-title,
-.xflow-editor-compact-drawer .ant-drawer-close {
-  color: var(--xflow-text);
-}
-
-.xflow-editor-compact-drawer .ant-drawer-body {
-  min-height: 0;
-  overflow: hidden;
-  padding: 0;
-}
-
 .xflow-editor-compact-drawer .xflow-editor-panel-card.ant-card,
-.xflow-editor-compact-drawer .xflow-editor-outline,
+.xflow-editor-compact-drawer .xflow-editor-variables,
 .xflow-editor-compact-drawer .xflow-editor-library,
 .xflow-editor-compact-drawer .xflow-editor-inspector {
   height: 100%;
@@ -3167,32 +3194,6 @@
 
 .xflow-editor-compact-drawer .xflow-editor-inspector.ant-card {
   border: 0;
-}
-
-.xflow-editor-outline-node {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-}
-
-.xflow-editor-outline-node > strong {
-  overflow: hidden;
-  text-align: left;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.xflow-editor-outline-meta {
-  color: var(--xflow-text-tertiary);
-  display: flex;
-  flex-wrap: wrap;
-  font-size: 9px;
-  gap: 2px 7px;
-  text-align: left;
-}
-
-.xflow-editor-outline-meta span {
-  white-space: nowrap;
 }
 
 .xflow-editor-diagnostics-locate {
@@ -3422,8 +3423,6 @@
 /* Same specificity as the rule above and later, so the source line keeps its tone. */
 .xflow-editor .xflow-editor-node-tile__tooltip > span.xflow-editor-node-tile__tooltip-source {
   color: var(--xflow-node-source-text);
-}
-  box-shadow: var(--xflow-popup-shadow);
 }
 
 .xflow-editor .xflow-editor-compact-drawer__wrapper {
@@ -3779,28 +3778,77 @@
   min-width: 0;
 }
 
-.xflow-editor .xflow-editor-param-tabs {
-  min-width: 0;
-}
-
-.xflow-editor .xflow-editor-param-tabs__header {
-  margin: 0 0 10px;
-}
-
-.xflow-editor .xflow-editor-param-tabs__item {
-  font-size: 12px;
-  padding-block: 5px;
-}
-
-.xflow-editor .xflow-editor-param-tabs__content {
-  min-width: 0;
-}
-
 .xflow-editor .xflow-editor-node-form {
+  --xflow-composer-field-gap: 12px;
   display: flex;
   flex-direction: column;
   gap: 10px;
   min-width: 0;
+}
+
+/* Each composer group is a card: raised surface, header row with the collapse
+ * chevron, comfortable padding. The composer's own "sibling" separator is
+ * neutralized so the cards (not a divider line) carry the structure. */
+.xflow-editor .xflow-editor-node-form .xflow-composer-field-group {
+  background: var(--xflow-section-card-bg);
+  border: 1px solid var(--xflow-section-card-border);
+  border-radius: var(--xflow-section-card-radius);
+  gap: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.xflow-editor .xflow-editor-node-form .xflow-composer-field-group + .xflow-composer-field-group {
+  border-top: 1px solid var(--xflow-section-card-border);
+  padding-top: 0;
+}
+
+.xflow-editor .xflow-editor-node-form .xflow-composer-section-header {
+  background: var(--xflow-section-card-header-bg);
+  border-bottom: 1px solid var(--xflow-section-card-border);
+  border-radius: var(--xflow-section-card-radius) var(--xflow-section-card-radius) 0 0;
+  min-height: 30px;
+  padding: 0 9px;
+}
+
+.xflow-editor .xflow-editor-node-form .xflow-composer-section-title {
+  color: var(--xflow-text);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 16px;
+}
+
+.xflow-editor .xflow-editor-node-form .xflow-composer-section-description {
+  color: var(--xflow-text-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+  margin: 0;
+  padding: 8px 10px 0;
+}
+
+.xflow-editor .xflow-editor-node-form .xflow-composer-section-body {
+  padding: 10px 10px 12px;
+}
+
+.xflow-editor .xflow-editor-node-form .xflow-composer-field-label {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+/* The fx toggle rides on the control's trailing edge, like an input suffix. */
+.xflow-editor .xflow-editor-nodeform-expression-row {
+  gap: 0;
+}
+
+.xflow-editor .xflow-editor-nodeform-expression-body .xflow-composer-control {
+  border-end-end-radius: 0;
+  border-start-end-radius: 0;
+}
+
+.xflow-editor .xflow-editor-nodeform-expression-row .xflow-editor-nodeform-fx.ant-btn {
+  border-end-start-radius: 0;
+  border-start-start-radius: 0;
+  width: 26px;
 }
 
 .xflow-editor .xflow-editor-node-form__notice {
@@ -3852,4 +3900,423 @@
   background: var(--xflow-status-error-subtle);
   border-color: var(--xflow-status-error-border);
   color: var(--xflow-status-error-text);
+}
+
+/* ---- Left column: variables panel, section cards, node search ---------- */
+
+.xflow-editor .xflow-editor-variables__body,
+.xflow-editor-workflow-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.xflow-editor-section-card {
+  background: var(--xflow-section-card-bg);
+  border: 1px solid var(--xflow-section-card-border);
+  border-radius: var(--xflow-section-card-radius);
+  min-width: 0;
+}
+
+.xflow-editor-section-card__header {
+  align-items: center;
+  background: var(--xflow-section-card-header-bg);
+  border-bottom: 1px solid var(--xflow-section-card-border);
+  border-radius: var(--xflow-section-card-radius) var(--xflow-section-card-radius) 0 0;
+  display: flex;
+  gap: 6px;
+  justify-content: space-between;
+  min-height: 30px;
+  padding: 0 4px 0 9px;
+}
+
+.xflow-editor-section-card__title {
+  align-items: center;
+  color: var(--xflow-text-secondary);
+  display: inline-flex;
+  font-size: 11px;
+  gap: 6px;
+  min-width: 0;
+}
+
+.xflow-editor-section-card__title .anticon {
+  color: var(--xflow-text-tertiary);
+  font-size: 12px;
+}
+
+.xflow-editor-section-card__title strong {
+  color: var(--xflow-text);
+  font-weight: 650;
+}
+
+.xflow-editor-section-card__title em {
+  background: var(--xflow-surface-field);
+  border: 1px solid var(--xflow-border);
+  border-radius: var(--xflow-control-radius-pill);
+  color: var(--xflow-text-tertiary);
+  font-size: 9px;
+  font-style: normal;
+  line-height: 14px;
+  padding: 0 5px;
+}
+
+.xflow-editor-section-card__actions {
+  align-items: center;
+  display: inline-flex;
+  gap: 2px;
+}
+
+.xflow-editor-section-card__body {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 9px 9px;
+}
+
+.xflow-editor-variable-list {
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* A labelled sub-section inside a settings card (the Runner's match labels). */
+.xflow-editor-variable-block {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.xflow-editor-variable-block__title {
+  color: var(--xflow-text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.xflow-editor-variable-row {
+  background: var(--xflow-variable-row-bg);
+  border: 1px solid var(--xflow-border);
+  border-radius: var(--xflow-control-radius-sm);
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 5px;
+}
+
+.xflow-editor-variable-row:hover,
+.xflow-editor-variable-row:focus-within {
+  border-color: var(--xflow-variable-row-hover-border);
+}
+
+.xflow-editor-variable-row--pair {
+  align-items: start;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr) auto;
+}
+
+.xflow-editor-variable-row__line {
+  align-items: start;
+  display: grid;
+  gap: 5px;
+  grid-template-columns: minmax(0, 1fr) 84px auto;
+  min-width: 0;
+}
+
+.xflow-editor-variable-row__line--details {
+  align-items: center;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+}
+
+.xflow-editor-variable-row__actions {
+  align-items: center;
+  display: inline-flex;
+  gap: 0;
+  height: var(--xflow-field-height);
+}
+
+.xflow-editor-variable-field {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.xflow-editor .xflow-editor-variable-key.ant-input,
+.xflow-editor .xflow-editor-variable-value.ant-input {
+  font-family: SFMono-Regular, Consolas, monospace;
+}
+
+.xflow-editor-variable-error {
+  color: var(--xflow-status-error-text);
+  font-size: 10px;
+  line-height: 13px;
+}
+
+.xflow-editor .xflow-editor-variable-type.ant-select {
+  min-width: 0;
+  width: 100%;
+}
+
+.xflow-editor .xflow-editor-variable-type .ant-select-selector {
+  font-size: 11px;
+  height: var(--xflow-field-height);
+}
+
+.xflow-editor-variable-required {
+  align-items: center;
+  color: var(--xflow-text-tertiary);
+  display: inline-flex;
+  font-size: 10px;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.xflow-editor-variable-action-wrap {
+  display: inline-flex;
+}
+
+.xflow-editor .xflow-editor-variable-action.ant-btn {
+  align-items: center;
+  border-radius: var(--xflow-control-radius-sm);
+  color: var(--xflow-text-tertiary);
+  display: inline-flex;
+  height: 22px;
+  justify-content: center;
+  min-width: 22px;
+  padding: 0;
+  width: 22px;
+}
+
+/* Out-weighs antd's .ant-btn:not(:disabled):not(.ant-btn-disabled):hover (0,4,0). */
+.xflow-editor .xflow-editor-variable-action.ant-btn:not(:disabled):hover {
+  background: var(--xflow-surface-hover);
+  color: var(--xflow-text);
+}
+
+.xflow-editor .xflow-editor-variable-action--danger.ant-btn:not(:disabled):hover {
+  background: var(--xflow-status-error-subtle);
+  color: var(--xflow-status-error-text);
+}
+
+.xflow-editor .xflow-editor-source-toggle.ant-btn.is-active,
+.xflow-editor .xflow-editor-source-toggle.ant-btn.is-active:not(:disabled):hover {
+  background: var(--xflow-focus-subtle);
+  color: var(--xflow-focus-text);
+}
+
+.xflow-editor .xflow-editor-variable-add.ant-btn {
+  background: transparent;
+  border-color: var(--xflow-border-strong);
+  border-radius: var(--xflow-control-radius-sm);
+  color: var(--xflow-text-secondary);
+  font-size: 11px;
+  height: var(--xflow-field-height);
+  justify-self: start;
+}
+
+.xflow-editor .xflow-editor-variable-add.ant-btn:not(:disabled):hover {
+  border-color: var(--xflow-focus-border-strong);
+  color: var(--xflow-focus-text);
+}
+
+.xflow-editor-variable-empty,
+.xflow-editor-variable-hint {
+  color: var(--xflow-text-tertiary);
+  font-size: 10.5px;
+  line-height: 15px;
+  margin: 0;
+}
+
+.xflow-editor-variable-empty {
+  border: 1px dashed var(--xflow-border);
+  border-radius: var(--xflow-control-radius-sm);
+  padding: 8px;
+  text-align: center;
+}
+
+.xflow-editor-variable-notice {
+  background: var(--xflow-status-error-subtle);
+  border: 1px solid var(--xflow-status-error-border);
+  border-radius: var(--xflow-control-radius-sm);
+  color: var(--xflow-status-error-text);
+  font-size: 10.5px;
+  line-height: 15px;
+  margin: 0;
+  padding: 5px 7px;
+}
+
+/* The label column sizes to the longest row name (错误策略, Pin 数据, ...)
+   instead of a fixed 40px, which wrapped the two-character rows onto a second
+   line and clipped them inside the row's height. */
+.xflow-editor-workflow-settings .xflow-editor-form-row--workflow {
+  grid-template-columns: minmax(40px, max-content) minmax(0, 1fr);
+}
+
+.xflow-editor-workflow-settings .xflow-editor-form-row > span {
+  color: var(--xflow-text-tertiary);
+  font-size: 11px;
+}
+
+/* A switch is a control, not a field: it keeps its own size at the start of
+   the value column instead of stretching to fill it. */
+.xflow-editor-workflow-settings .xflow-editor-setting-switch {
+  justify-self: start;
+}
+
+.xflow-editor .xflow-editor-inspector-workflow.ant-btn {
+  align-items: center;
+  border-radius: var(--xflow-control-radius-sm);
+  color: var(--xflow-text-secondary);
+  display: inline-flex;
+  height: 22px;
+  justify-content: center;
+  min-width: 22px;
+  padding: 0;
+}
+
+.xflow-editor .xflow-editor-inspector-workflow.ant-btn:not(:disabled):hover {
+  background: var(--xflow-surface-hover);
+  color: var(--xflow-text);
+}
+
+.xflow-editor-tool-group--search {
+  padding: 0 2px;
+}
+
+.xflow-editor .xflow-editor-node-search.ant-select {
+  width: 168px;
+}
+
+.xflow-editor .xflow-editor-node-search .ant-select-selector {
+  font-size: 11px;
+  height: 22px;
+}
+
+.xflow-editor .xflow-editor-node-search .ant-select-prefix {
+  color: var(--xflow-text-tertiary);
+}
+
+.xflow-editor-node-search__option {
+  align-items: baseline;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.xflow-editor-node-search__option strong {
+  color: var(--xflow-text);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xflow-editor-node-search__option em {
+  color: var(--xflow-text-tertiary);
+  flex: 0 0 auto;
+  font-family: SFMono-Regular, Consolas, monospace;
+  font-size: 10px;
+  font-style: normal;
+}
+
+.xflow-editor-node-search__empty {
+  color: var(--xflow-text-tertiary);
+  font-size: 11px;
+}
+
+@media (max-width: 1120px) {
+  .xflow-editor .xflow-editor-node-search.ant-select {
+    width: 120px;
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * Canvas context menu: an antd Menu anchored to the pointer (node or empty
+ * canvas), so it brings its own surface, density and shortcut hints. The
+ * anchor is fixed-positioned, which also keeps the submenu popups clear of
+ * the panels' overflow boundaries.
+ * ------------------------------------------------------------------------ */
+.xflow-editor .xflow-editor-context-menu__anchor {
+  position: fixed;
+  z-index: 1200;
+}
+
+.xflow-editor .xflow-editor-context-menu.ant-menu,
+.xflow-editor .xflow-editor-context-menu__list.ant-menu {
+  background: var(--xflow-surface-panel-raised);
+  border: 1px solid var(--xflow-border);
+  border-radius: var(--xflow-control-radius);
+  box-shadow: var(--xflow-popup-shadow);
+  min-width: 208px;
+  padding: 4px;
+}
+
+.xflow-editor .xflow-editor-context-menu__popup .ant-menu {
+  background: var(--xflow-surface-panel-raised);
+  border: 1px solid var(--xflow-border);
+  border-radius: var(--xflow-control-radius);
+  box-shadow: var(--xflow-popup-shadow);
+  /* The node library is long: cap the submenu so the popup can still be
+     placed above or below its parent row instead of running off-screen. */
+  max-height: min(420px, calc(100vh - 48px));
+  overscroll-behavior: contain;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+/* antd lays an item's icon and title out as inline content, so our label (a
+   block-level flex row) would be pushed onto a second line inside the item's
+   fixed height and clipped away. Lay the row out as a flex box instead: icon,
+   label, hint on one line. */
+.xflow-editor .xflow-editor-context-menu.ant-menu .ant-menu-item,
+.xflow-editor .xflow-editor-context-menu.ant-menu .ant-menu-submenu-title,
+.xflow-editor .xflow-editor-context-menu__popup .ant-menu .ant-menu-item,
+.xflow-editor .xflow-editor-context-menu__popup .ant-menu .ant-menu-submenu-title {
+  align-items: center;
+  border-radius: var(--xflow-control-radius-sm);
+  display: flex;
+  font-size: 12px;
+  gap: 8px;
+  min-height: 28px;
+}
+
+.xflow-editor .xflow-editor-context-menu.ant-menu .ant-menu-item .ant-menu-title-content,
+.xflow-editor .xflow-editor-context-menu.ant-menu .ant-menu-submenu-title .ant-menu-title-content,
+.xflow-editor .xflow-editor-context-menu__popup .ant-menu .ant-menu-item .ant-menu-title-content,
+.xflow-editor .xflow-editor-context-menu__popup .ant-menu .ant-menu-submenu-title .ant-menu-title-content {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.xflow-editor .xflow-editor-context-menu__label {
+  align-items: center;
+  display: flex;
+  gap: 18px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.xflow-editor .xflow-editor-context-menu__text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xflow-editor .xflow-editor-context-menu__hint {
+  background: var(--xflow-surface-field);
+  border: 1px solid var(--xflow-border);
+  border-radius: var(--xflow-control-radius-sm);
+  color: var(--xflow-text-tertiary);
+  flex: 0 0 auto;
+  font-family: var(--xflow-font-mono);
+  font-size: 9px;
+  line-height: 15px;
+  padding: 0 4px;
+}
+
+.xflow-editor .xflow-editor-context-menu__note {
+  color: var(--xflow-text-tertiary);
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-style: normal;
 }

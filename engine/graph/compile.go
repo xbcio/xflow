@@ -547,6 +547,9 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 			return 0, fmt.Errorf("node %q: xflow.split was removed and cannot run: "+
 				"use xflow.map with a body instead", nd.Name)
 		}
+		if err := validateSupplyPullNode(nd); err != nil {
+			return 0, err
+		}
 		if err := validateNodeBody(nd); err != nil {
 			return 0, err
 		}

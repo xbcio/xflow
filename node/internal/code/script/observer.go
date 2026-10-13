@@ -2,6 +2,7 @@ package script
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -12,6 +13,18 @@ import (
 type Observer interface {
 	OnScriptExecute(ctx context.Context, language, runtime, outcome string, duration time.Duration)
 	OnScriptOutputBytes(ctx context.Context, language, runtime string, size int)
+}
+
+// BatchFallbackObserver is an optional extension of Observer, discovered by
+// type assertion on the installed observer: it reports one batch execution
+// that had to run record-by-record because the engine implements no
+// engine.BatchEngine.
+//
+// It is a separate interface rather than a third method on Observer so that
+// existing implementations keep compiling; observability/metrics mirrors it
+// for the same reason the other metrics adapters do.
+type BatchFallbackObserver interface {
+	OnScriptBatchSerialFallback(ctx context.Context, language, runtime string)
 }
 
 type noopObserver struct{}
@@ -60,4 +73,44 @@ func observeOutputBytes(ctx context.Context, language, runtime string, size int)
 	o := observer
 	observerMu.RUnlock()
 	o.OnScriptOutputBytes(ctx, language, runtime, size)
+}
+
+// batchSerialFallbackKey is the once-per-process warning key: one warning per
+// (language, runtime) is enough to point an operator at the placement, while a
+// batch trigger would otherwise re-log it for every batch it delivers.
+type batchSerialFallbackKey struct{ language, runtime string }
+
+var batchSerialFallbackWarned sync.Map
+
+// observeBatchSerialFallback counts one batch execution that fell back to
+// engine.ExecuteBatchSerial and warns about the runtime once per
+// (language, runtime) per process.
+//
+// The fallback is not an error — the results are the same, only the cost
+// differs, and for wazero's legacy command runtime the difference is the
+// pooled-instance fast path (runtime=wazero-reactor) not being used at all. It
+// was silent, so a node paying 18x per record looked identical to one on the
+// pooled runtime. The counter is the durable half of that signal; the warning
+// is the one a developer sees while wiring a Kafka batch trigger.
+//
+// The counter is emitted on every fallback (it is the volume), the log line
+// only on the first one (it is the placement). Both labels come from the node's
+// parameters, so the label set is bounded by what the DSL can spell.
+func observeBatchSerialFallback(ctx context.Context, language, runtime string) {
+	observerMu.RLock()
+	o := observer
+	observerMu.RUnlock()
+	if b, ok := o.(BatchFallbackObserver); ok {
+		b.OnScriptBatchSerialFallback(ctx, language, runtime)
+	}
+	if _, loaded := batchSerialFallbackWarned.LoadOrStore(batchSerialFallbackKey{language: language, runtime: runtime}, struct{}{}); loaded {
+		return
+	}
+	attrs := []any{"language", language, "runtime", runtime}
+	if language == wasmScriptLanguage {
+		// The only runtime with a pooled batch path, so the hint is wasm-only;
+		// on js the same fallback is the intended path, just serial.
+		attrs = append(attrs, "hint", "runtime=wazero-reactor evaluates a batch through pooled instances")
+	}
+	slog.Warn("script: runtime has no batch fast path; executing the batch serially", attrs...)
 }

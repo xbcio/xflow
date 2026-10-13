@@ -16,7 +16,7 @@ import { Button, Input as AntInput } from "antd";
 import { useState } from "react";
 import { z } from "zod";
 import { zodProps } from "@xflow/composer/core";
-import { FieldFrame } from "@xflow/composer/form";
+import { FieldFrame, FieldLayoutContext } from "@xflow/composer/form";
 import type { ComposerComponent, ComposerComponentProps } from "@xflow/composer/react";
 import { EXPRESSION_LITERAL_SLOT, type ShapeExpectation } from "../components";
 import { chromeShape, cx, expectationSchema, hintText, isExpressionString, matchesShape, NODEFORM, RawNotice, type ChromeProps } from "./shared";
@@ -104,7 +104,12 @@ function ExpressionField({ node, props, value, onChange, defaultHint, issues, re
             }}
           />
         ) : (
-          <div className={`${NODEFORM}-expression-literal`}>{literal}</div>
+          // The literal control shares this frame's label and cell: "inline"
+          // keeps its label for assistive technology only and never makes it
+          // a second (nested) table cell inside an ArrayTable row.
+          <div className={`${NODEFORM}-expression-literal`}>
+            <FieldLayoutContext.Provider value="inline">{literal}</FieldLayoutContext.Provider>
+          </div>
         );
         return (
           <div className={`${NODEFORM}-expression-row`}>

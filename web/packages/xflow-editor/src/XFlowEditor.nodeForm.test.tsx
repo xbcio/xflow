@@ -11,22 +11,35 @@ import type { NodeFormField } from "./node-form/schema";
 import generated from "./node-form/testdata/node-types.generated.json";
 import { change, fieldOf, one, pickOption } from "./node-form/testdata/testkit";
 
+/** The canvas node's own select button (the outline is gone; the canvas is the list). */
+const canvasNode = (name: string): HTMLElement => {
+  const node = document.querySelector<HTMLElement>(`.xflow-preview-node__select[aria-label^="${name} node "]`);
+  if (!node) throw new Error(`canvas node ${name} not found`);
+  return node;
+};
+
 const nodeTypes = generated as unknown as NodeTypesResponse;
 const enforce: NodeTypesResponse = { ...nodeTypes, param_validation_mode: "enforce" };
 
 const serialize = (value: unknown) => JSON.stringify(value);
 const inspector = () => screen.getByRole("region", { name: "属性" });
 const selectNode = (name: string) => {
-  fireEvent.click(screen.getByRole("button", { name: `选择节点 ${name}` }));
+  fireEvent.click(canvasNode(name));
   return inspector();
 };
 const undoButton = () => within(screen.getByRole("group", { name: "常用画布与历史工具" })).getByRole("button", { name: "撤销" });
+/** The parameters JSON lives behind the 节点参数 card's </> toggle. */
+const jsonSourceButton = (root: HTMLElement = inspector()) =>
+  within(root).getByRole("button", { name: "以 JSON 编辑参数" });
 const jsonTab = (root: HTMLElement = inspector()) => {
-  const tab = within(root).getByRole("tab", { name: "JSON" });
-  if (tab.getAttribute("aria-selected") !== "true") fireEvent.click(tab);
+  if (jsonSourceButton(root).getAttribute("aria-pressed") !== "true") fireEvent.click(jsonSourceButton(root));
   return within(root).getByLabelText("参数 JSON") as HTMLTextAreaElement;
 };
-const formTab = (root: HTMLElement = inspector()) => fireEvent.click(within(root).getByRole("tab", { name: "表单" }));
+/** Leaves the JSON source view, where it is open. */
+const formTab = (root: HTMLElement = inspector()) => {
+  if (jsonSourceButton(root).getAttribute("aria-pressed") !== "true") return;
+  fireEvent.click(within(root).getByRole("button", { name: "返回表单" }));
+};
 /** Lets composer's microtask batch and React effects run. */
 const settle = () => act(async () => {
   await Promise.resolve();
@@ -132,7 +145,7 @@ describe("node form: opening every builtin node writes nothing (Doc C §5.1 #1)"
 
       for (const node of workflow.nodes ?? []) {
         const root = selectNode(node.name!);
-        expect(within(root).getByRole("tab", { name: "表单" }).getAttribute("aria-selected")).toBe("true");
+        expect(within(root).getByRole("button", { name: "以 JSON 编辑参数" }).getAttribute("aria-pressed")).toBe("false");
         expect(root.querySelector(`[data-node-form-schema="${node.type}@1"]`)).not.toBeNull();
         expect(root.querySelectorAll("[data-composer-placeholder]").length, node.type).toBe(0);
         await settle();
@@ -233,7 +246,9 @@ describe("node form: the patch reducer (Doc C §6.1)", () => {
     expect(lastWorkflow(handleChange).nodes?.[1]?.name).toBe("hold");
     expect(lastWorkflow(handleChange).connections).toEqual({ start: { main: [{ node: "hold" }] } });
     expect((within(inspector()).getByLabelText("节点名称") as HTMLInputElement).value).toBe("hold");
-    expect(within(inspector()).getAllByText(/hold · xflow\.wait/).length).toBeGreaterThan(0);
+    // The header follows the rename: the display name and the type badge.
+    expect(within(inspector()).getByText("hold", { selector: ".xflow-editor-inspector-node__text strong" })).toBeTruthy();
+    expect(within(inspector()).getByText("xflow.wait · v1", { selector: ".xflow-editor-inspector-node__type" })).toBeTruthy();
   });
 });
 
@@ -420,9 +435,11 @@ describe("node form: the JSON tab (Doc C §6.2)", () => {
     selectNode("tail");
     fireEvent.click(screen.getByRole("button", { name: "修正 api 的参数 JSON" }));
     const root = inspector();
-    expect(within(root).getByRole("tab", { name: "JSON" }).getAttribute("aria-selected")).toBe("true");
+    expect(within(root).getByRole("button", { name: "以 JSON 编辑参数" }).getAttribute("aria-pressed")).toBe("true");
     expect((within(root).getByLabelText("参数 JSON") as HTMLTextAreaElement).value).toBe("{ broken");
-    expect(within(root).getAllByText(/api · xflow\.http/).length).toBeGreaterThan(0);
+    // The header names the node the JSON view belongs to.
+    expect(within(root).getByText("api", { selector: ".xflow-editor-inspector-node__text strong" })).toBeTruthy();
+    expect(within(root).getByText("xflow.http · v1", { selector: ".xflow-editor-inspector-node__type" })).toBeTruthy();
   });
 
   it("keeps drafts across a real unmount: panel collapse and the compact drawer", async () => {

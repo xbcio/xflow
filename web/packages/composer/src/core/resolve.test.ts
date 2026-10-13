@@ -181,6 +181,30 @@ describe("resolve: element-level isolation", () => {
     expect(find(tree, "ok")!.error).toBeUndefined();
   });
 
+  it("invalid JSON Pointers in visible / repeat.statePath / $item isolate to the element", () => {
+    const s = spec({
+      form: { type: "Form", children: ["badVisible", "badRepeat", "rows", "ok"] },
+      badVisible: { type: "Input", visible: { $state: "mode", eq: "x" } },
+      badRepeat: { type: "Table", repeat: { statePath: "rules" }, children: ["cell"] },
+      cell: { type: "Input" },
+      rows: { type: "Table", repeat: { statePath: "/rows" }, children: ["itemCond", "inner"] },
+      itemCond: { type: "Input", visible: { $item: "/~x", truthy: true }, props: { label: { $item: "/~x" } } },
+      inner: { type: "Table", repeat: { statePath: { $item: "/~x" } }, children: ["leaf"] },
+      leaf: { type: "Input" },
+      ok: { type: "Input", props: { label: "fine" } }
+    });
+    const tree = run(s, { mode: "x", rules: [1], rows: [{ a: 1 }] });
+    expect(tree.root).not.toBeNull();
+    expect(find(tree, "badVisible")!.error?.code).toBe("cond");
+    const badRepeat = find(tree, "badRepeat")!;
+    expect(badRepeat.error?.code).toBe("repeat");
+    expect(badRepeat.children).toEqual([]);
+    const row = find(tree, "rows")!.children[0];
+    expect(row.children[0].error?.code).toBe("cond");
+    expect(row.children[1].error?.code).toBe("repeat");
+    expect(find(tree, "ok")!.error).toBeUndefined();
+  });
+
   it("guards cycles without recursing forever", () => {
     const tree = run(spec({ form: { type: "Form", children: ["a"] }, a: { type: "Group", children: ["form"] } }), {});
     expect(find(tree, "a")!.children[0].error?.code).toBe("cycle");
