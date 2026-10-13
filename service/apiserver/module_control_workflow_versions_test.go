@@ -2,6 +2,7 @@ package apiserver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/getkin/kin-openapi/openapi3"
 
 	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/service/control"
@@ -391,6 +393,103 @@ func TestGetWorkflowVersionDistinguishesUnknownVersionFromUnknownWorkflow(t *tes
 				t.Fatalf("envelope = %+v, want code %q", env, tc.wantCode)
 			}
 		})
+	}
+}
+
+// TestWorkflowVersionContractBindsToHandler is the spec↔implementation binding
+// for the version routes, the same in spirit as
+// TestWorkflowListContractBindsToHandler: it checks the contract declares each
+// route with its operation id and envelope wiring, then marshals the REAL Go
+// values the handlers serialize and validates them against the published
+// schemas, so a drifted json tag or a required property that no longer exists
+// fails here rather than shipping.
+func TestWorkflowVersionContractBindsToHandler(t *testing.T) {
+	loader := openapi3.NewLoader()
+	loader.IsExternalRefsAllowed = false
+	spec, err := loader.LoadFromFile("../../api/openapi/xflow-v1.yaml")
+	if err != nil {
+		t.Fatalf("load spec: %v", err)
+	}
+	if err := spec.Validate(context.Background()); err != nil {
+		t.Fatalf("validate spec: %v", err)
+	}
+
+	routes := []struct {
+		path        string
+		operationID string
+		get         *openapi3.Operation
+		wantData    string
+	}{
+		{path: PathWorkflowVersions, operationID: "listWorkflowVersions", wantData: "WorkflowVersionListResponse"},
+		{path: PathWorkflowVersionByID, operationID: "getWorkflowVersion", wantData: "WorkflowDefWithEditorMetadata"},
+		{path: PathWorkflowRollback, operationID: "rollbackWorkflow", wantData: "RollbackWorkflowResponse"},
+	}
+	for _, tc := range routes {
+		item := spec.Paths.Value(tc.path)
+		if item == nil {
+			t.Fatalf("path %q is missing from the contract", tc.path)
+		}
+		var op *openapi3.Operation
+		if tc.path == PathWorkflowRollback {
+			op = item.Post
+		} else {
+			op = item.Get
+		}
+		if op == nil {
+			t.Fatalf("the method for %q is missing from the contract", tc.path)
+		}
+		if op.OperationID != tc.operationID {
+			t.Errorf("%s operationId = %q, want %q", tc.path, op.OperationID, tc.operationID)
+		}
+		response := op.Responses.Value("200")
+		if response == nil || response.Value == nil {
+			t.Fatalf("%s has no 200 response", tc.path)
+		}
+		media := response.Value.Content.Get("application/json")
+		if media == nil || media.Schema == nil || media.Schema.Value == nil || len(media.Schema.Value.AllOf) < 2 {
+			t.Fatalf("%s 200 application/json schema is missing", tc.path)
+		}
+		data := media.Schema.Value.AllOf[1].Value.Properties["data"]
+		if data == nil || data.Ref != "#/components/schemas/"+tc.wantData {
+			t.Errorf("%s 200 data schema = %#v, want %s", tc.path, data, tc.wantData)
+		}
+	}
+
+	realItem := workflowVersionItem{
+		Version:          "v1",
+		DefinitionHash:   "9f2f",
+		RegistryRevision: 7,
+		Current:          true,
+		Archived:         false,
+	}
+	realPage := listPage{List: []workflowVersionItem{realItem}, Total: 3}
+	realRollback := rollbackWorkflowResponse{WorkflowID: "wf-01H8XG", Version: "v1", Unchanged: false}
+	for _, tc := range []struct {
+		name   string
+		schema string
+		value  any
+	}{
+		{name: "WorkflowVersionListItem", schema: "WorkflowVersionListItem", value: realItem},
+		{name: "WorkflowVersionListResponse", schema: "WorkflowVersionListResponse", value: realPage},
+		{name: "RollbackWorkflowRequest", schema: "RollbackWorkflowRequest", value: rollbackWorkflowRequest{Version: "v1"}},
+		{name: "RollbackWorkflowResponse", schema: "RollbackWorkflowResponse", value: realRollback},
+		{name: "ExecuteRegisteredRequest", schema: "ExecuteRegisteredRequest", value: executeRegisteredRequest{Version: "v1"}},
+	} {
+		ref := spec.Components.Schemas[tc.schema]
+		if ref == nil || ref.Value == nil {
+			t.Fatalf("schema %q not found in spec", tc.schema)
+		}
+		raw, err := json.Marshal(tc.value)
+		if err != nil {
+			t.Fatalf("marshal %s: %v", tc.schema, err)
+		}
+		var v any
+		if err := json.Unmarshal(raw, &v); err != nil {
+			t.Fatalf("unmarshal %s: %v", tc.schema, err)
+		}
+		if err := ref.Value.VisitJSON(v); err != nil {
+			t.Fatalf("%s: schema %q does not match marshaled %T: %v\nbody: %s", tc.name, tc.schema, tc.value, err, raw)
+		}
 	}
 }
 

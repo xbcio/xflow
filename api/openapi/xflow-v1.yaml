@@ -136,17 +136,31 @@ paths:
                     trace_id: 0123456789abcdef0123456789abcdef
         "409":
           description: |
-            A different definition already occupies the (namespace, name,
-            version) key. Registration identity is the runtime-semantic
-            definition: a definition that differs from the stored one only in
-            its description, ids or editor metadata (node position, UI, notes)
-            is not a conflict, and a builtin node parameter left out counts as
-            its declared default. An explicit empty value (for example
-            `"method": ""`) is a value, not an omission: it is not filled with
-            the default, so it conflicts with a stored definition that leaves
-            the parameter out or spells out its default. A custom node type's
-            defaults are never filled. Use `PUT /v1/workflows/{id}` to change the
-            stored definition.
+            The registration cannot be installed as presented. The code says
+            which constraint refused it, because each sends the caller to a
+            different fix:
+
+            - `workflow_conflict` — a different definition already occupies the
+              (namespace, name, version) key. Registration identity is the
+              runtime-semantic definition: a definition that differs from the
+              stored one only in its description, ids or editor metadata (node
+              position, UI, notes) is not a conflict, and a builtin node
+              parameter left out counts as its declared default. An explicit
+              empty value (for example `"method": ""`) is a value, not an
+              omission: it is not filled with the default, so it conflicts with
+              a stored definition that leaves the parameter out or spells out
+              its default. A custom node type's defaults are never filled. Use
+              `PUT /v1/workflows/{id}` to change the stored definition.
+            - `workflow_version_immutable` — this version label is already
+              published with a different definition. A version label is a
+              promise about semantics: it is what a pinned replay and a
+              subworkflow reference resolve to. Publish a new label instead.
+            - `workflow_name_conflict` — another live workflow already holds
+              this (namespace, name). Two live records sharing a name share an
+              activation key space and silently split the workflow the name
+              refers to, so only one may exist. Address the existing record
+              (`PUT /v1/workflows/{id}`) or delete it; changing the definition
+              does not resolve this.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
@@ -161,6 +175,20 @@ paths:
                     success: false
                     code: workflow_conflict
                     message: workflow definition conflicts with an existing registration
+                    trace_id: 0123456789abcdef0123456789abcdef
+                workflowVersionImmutable:
+                  summary: This version label was already published with a different definition.
+                  value:
+                    success: false
+                    code: workflow_version_immutable
+                    message: workflow version was already published with a different definition
+                    trace_id: 0123456789abcdef0123456789abcdef
+                workflowNameConflict:
+                  summary: Another live workflow already holds this (namespace, name).
+                  value:
+                    success: false
+                    code: workflow_name_conflict
+                    message: another live workflow already holds this namespace and name
                     trace_id: 0123456789abcdef0123456789abcdef
         default:
           $ref: "#/components/responses/DefaultError"
@@ -276,6 +304,15 @@ paths:
         destination key is free. If another workflow owns that key, the request
         fails with 409 (`workflow_conflict`). PUT never deletes or overwrites a
         different workflow merely because its key is named by the body.
+
+        Two further constraints guard version identity: the destination name
+        must not be held by another live workflow, even when the key is free
+        (409 `workflow_name_conflict` — two live records sharing a name would
+        host both definitions' entry activations side by side), and a version
+        label already published with a different definition cannot be
+        re-installed through PUT (409 `workflow_version_immutable`; use
+        `POST /v1/workflows/{id}/rollback` to install a retired version with
+        the payload it was published with).
       tags: [Workflows]
       parameters:
         - $ref: "#/components/parameters/WorkflowId"
@@ -365,7 +402,17 @@ paths:
                     message: workflow not found
                     trace_id: 0123456789abcdef0123456789abcdef
         "409":
-          description: Another workflow owns the replacement's destination (namespace, name, version) key; neither workflow is replaced.
+          description: |
+            The replacement cannot be installed as presented. `workflow_conflict`
+            means another workflow owns the replacement's destination
+            (namespace, name, version) key; neither workflow is replaced.
+            `workflow_name_conflict` means the rename target's (namespace, name)
+            is held by another live workflow at a different version — the
+            destination KEY is free, but two live records sharing a name are
+            refused. `workflow_version_immutable` means the replacement would
+            install a retired version label with a payload it was not published
+            with (install it via `POST /v1/workflows/{id}/rollback` instead,
+            which carries the published payload).
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
@@ -380,6 +427,20 @@ paths:
                     success: false
                     code: workflow_conflict
                     message: workflow definition conflicts with an existing registration
+                    trace_id: 0123456789abcdef0123456789abcdef
+                workflowNameConflict:
+                  summary: The rename target's name is held by another live workflow.
+                  value:
+                    success: false
+                    code: workflow_name_conflict
+                    message: another live workflow already holds this namespace and name
+                    trace_id: 0123456789abcdef0123456789abcdef
+                workflowVersionImmutable:
+                  summary: The replacement would rewrite a retired version label.
+                  value:
+                    success: false
+                    code: workflow_version_immutable
+                    message: workflow version was already published with a different definition
                     trace_id: 0123456789abcdef0123456789abcdef
         default:
           $ref: "#/components/responses/DefaultError"
@@ -479,7 +540,19 @@ paths:
     post:
       operationId: executeRegisteredWorkflow
       summary: Execute an already-registered workflow by id
-      description: Resolves the stored compiled graph and submits it. The body is optional.
+      description: |
+        Resolves the stored compiled graph and submits it. The body is optional.
+
+        `version` selects which version of the ADDRESSED workflow to run. It is
+        omitted (or equal to the current version) by default, which runs the
+        live record — the behavior this route had before versions existed. A
+        retired version runs from the graph snapshot captured when it was
+        retired, never a recompile. The name always comes from the path record,
+        so a version string can never redirect the call to another workflow,
+        and an unknown version is 404 `workflow_version_not_found`. A retired
+        payload that no longer reproduces under the current compiler fails
+        closed with 409 `workflow_version_unavailable` rather than running
+        same-label-different-semantics code.
       tags: [Workflows]
       parameters:
         - $ref: "#/components/parameters/WorkflowId"
@@ -505,8 +578,309 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/ExecuteWorkflowResponse"
+        "404":
+          description: |
+            No workflow with the path id exists in the authenticated namespace
+            (`workflow_not_found`), or the addressed workflow never published
+            the requested `version` (`workflow_version_not_found`).
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                workflowNotFound:
+                  summary: Missing and cross-namespace targets are indistinguishable.
+                  value:
+                    success: false
+                    code: workflow_not_found
+                    message: workflow not found
+                    trace_id: 0123456789abcdef0123456789abcdef
+                workflowVersionNotFound:
+                  summary: The workflow exists but has no such version, current or archived.
+                  value:
+                    success: false
+                    code: workflow_version_not_found
+                    message: workflow version not found
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "409":
+          description: |
+            The requested `version` is retired and its stored payload does not
+            reproduce under the current compiler (`workflow_version_unavailable`).
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                workflowVersionUnavailable:
+                  summary: Fail closed rather than run a same-label-different-semantics definition.
+                  value:
+                    success: false
+                    code: workflow_version_unavailable
+                    message: workflow version is not reproducible under the current compiler
+                    trace_id: 0123456789abcdef0123456789abcdef
         default:
           $ref: "#/components/responses/DefaultError"
+
+  /v1/workflows/{id}/versions:
+    get:
+      operationId: listWorkflowVersions
+      summary: List a workflow's versions
+      description: |
+        One offset-paginated page of the addressed workflow's version history:
+        the current version first, then retired versions newest-retirement
+        first. A version is a label on one workflow; version ownership follows
+        the workflow id, so a rename or replace that preserves the id preserves
+        the history.
+
+        `list` holds label rows, not definitions — read one version's definition
+        with `GET /v1/workflows/{id}/versions/{version}`. `total` is the exact
+        size of the history (bounded by the registry's retention limit plus the
+        live record), independent of the page requested. A workflow that was
+        never replaced lists exactly its current version.
+
+        Namespace is resolved server-side from the authenticated principal; a
+        cross-namespace id and an unknown id both answer 404
+        `workflow_not_found`, never an empty history.
+      tags: [Workflows]
+      parameters:
+        - $ref: "#/components/parameters/WorkflowId"
+        - name: page
+          in: query
+          required: false
+          description: |
+            1-based page number (spec §3.3); `page=1` is the first page.
+            Malformed pagination input is never a business error: an absent,
+            empty, non-numeric, zero, or negative value falls back to 1.
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: page_size
+          in: query
+          required: false
+          description: |
+            Rows per page (spec §3.3). Defaults to 20. The server enforces a
+            hard ceiling of 200 and CLAMPS a larger request to 200 rather than
+            rejecting it. An absent, empty, non-numeric, zero, or negative
+            value falls back to 20.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 20
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: One page of the workflow's versions.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/WorkflowVersionListResponse"
+        "404":
+          description: No workflow with the path id exists in the authenticated namespace.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                workflowNotFound:
+                  summary: Missing and cross-namespace targets are indistinguishable.
+                  value:
+                    success: false
+                    code: workflow_not_found
+                    message: workflow not found
+                    trace_id: 0123456789abcdef0123456789abcdef
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/workflows/{id}/versions/{version}:
+    get:
+      operationId: getWorkflowVersion
+      summary: Read one workflow version
+      description: |
+        Returns one version's full record in the same wire shape as
+        `GET /v1/workflows/{id}` — this is where the definition the version list
+        deliberately omits is read back, one version at a time.
+
+        The current version resolves to the live record; a retired version
+        resolves to the payload captured when it was retired, so a version
+        remains readable (and pinnable for a replay) after it has been replaced.
+        An unknown version is 404 `workflow_version_not_found` — deliberately
+        distinct from `workflow_not_found` so a caller can tell "this workflow
+        is gone" from "this workflow never published that version". A
+        cross-namespace id is reported as `workflow_not_found`.
+      tags: [Workflows]
+      parameters:
+        - $ref: "#/components/parameters/WorkflowId"
+        - $ref: "#/components/parameters/WorkflowVersion"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: The version's stored record.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/WorkflowDefWithEditorMetadata"
+        "404":
+          description: |
+            No workflow with the path id exists in the authenticated namespace
+            (`workflow_not_found`), or it never published that version
+            (`workflow_version_not_found`).
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                workflowNotFound:
+                  summary: Missing and cross-namespace targets are indistinguishable.
+                  value:
+                    success: false
+                    code: workflow_not_found
+                    message: workflow not found
+                    trace_id: 0123456789abcdef0123456789abcdef
+                workflowVersionNotFound:
+                  summary: The workflow exists but has no such version.
+                  value:
+                    success: false
+                    code: workflow_version_not_found
+                    message: workflow version not found
+                    trace_id: 0123456789abcdef0123456789abcdef
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/workflows/{id}/rollback:
+    post:
+      operationId: rollbackWorkflow
+      summary: Roll a workflow back to an archived version
+      description: |
+        Installs a retired version of the addressed workflow as its current
+        record, under the same id, atomically: the live record is replaced in
+        one compare-and-swap and the replaced current version is appended to
+        history — the exact dual of the retirement that put the target version
+        there. History is never rewritten, so the version rolled back FROM
+        remains readable and selectable.
+
+        The installed record carries the definition hash the target version was
+        PUBLISHED with; if recomputing that hash under the current compiler does
+        not reproduce it, the rollback fails closed with 409
+        `workflow_version_unavailable` rather than publishing the same version
+        label with different semantics.
+
+        An omitted `version`, or one equal to the current version, is the
+        idempotent no-op: nothing is written and the response is
+        `{unchanged: true}`. Supplying `X-Request-Id` makes a retry of a
+        response-lost rollback replay instead of writing a second revision.
+      tags: [Workflows]
+      parameters:
+        - $ref: "#/components/parameters/WorkflowId"
+        - $ref: "#/components/parameters/XRequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RollbackWorkflowRequest"
+      responses:
+        "200":
+          description: The version is now current (or already was).
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/RollbackWorkflowResponse"
+        "404":
+          description: |
+            No workflow with the path id exists in the authenticated namespace
+            (`workflow_not_found`), or it never published the requested version
+            (`workflow_version_not_found`).
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                workflowNotFound:
+                  summary: Missing and cross-namespace targets are indistinguishable.
+                  value:
+                    success: false
+                    code: workflow_not_found
+                    message: workflow not found
+                    trace_id: 0123456789abcdef0123456789abcdef
+                workflowVersionNotFound:
+                  summary: The workflow exists but has no such version.
+                  value:
+                    success: false
+                    code: workflow_version_not_found
+                    message: workflow version not found
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "409":
+          description: |
+            The requested version's stored payload does not reproduce under the
+            current compiler (`workflow_version_unavailable`), or the
+            replacement cannot be installed because its destination key is
+            occupied (`workflow_conflict`).
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                workflowVersionUnavailable:
+                  summary: Fail closed rather than install a same-label-different-semantics definition.
+                  value:
+                    success: false
+                    code: workflow_version_unavailable
+                    message: workflow version is not reproducible under the current compiler
+                    trace_id: 0123456789abcdef0123456789abcdef
+                workflowConflict:
+                  summary: The destination key is occupied by another workflow.
+                  value:
+                    success: false
+                    code: workflow_conflict
+                    message: workflow definition conflicts with an existing registration
+                    trace_id: 0123456789abcdef0123456789abcdef
+        default:
+          $ref: "#/components/responses/DefaultError"
+
 
   /v1/executions:
     get:
@@ -1800,6 +2174,16 @@ components:
       description: Server-assigned workflow id.
       schema:
         type: string
+    WorkflowVersion:
+      name: version
+      in: path
+      required: true
+      description: |
+        Version label of the addressed workflow — the current version or a
+        retired one. A version label is immutable: it always resolves to the
+        definition it was published with.
+      schema:
+        type: string
     ExecutionId:
       name: id
       in: path
@@ -2098,6 +2482,18 @@ components:
             Run as a test execution. Under settings.pin_data_mode test_only
             (the default), only test executions serve pin_data mocks for the
             pinned nodes instead of running them.
+        version:
+          type: string
+          description: |
+            Which version of the addressed workflow to run. Omitted or equal to
+            the current version runs the live record; a retired version runs
+            from the graph snapshot captured when it was retired. The name is
+            always taken from the path record, so this field can never select
+            another workflow; an unknown version is 404
+            `workflow_version_not_found`, and a retired payload that no longer
+            reproduces under the current compiler is 409
+            `workflow_version_unavailable`.
+          example: v2
 
     ExecuteWorkflowResponse:
       type: object
@@ -2875,6 +3271,92 @@ components:
             The registry's monotonically increasing revision for this record.
             Opaque except for ordering and equality; it is the compare-and-swap
             token a replacement must present.
+
+    WorkflowVersionListResponse:
+      type: object
+      description: |
+        The `data` payload of `GET /v1/workflows/{id}/versions` — the mandated
+        `{list, total}` shape (spec §3.3), never a bare array.
+      required: [list, total]
+      properties:
+        list:
+          type: array
+          description: |
+            The requested page, ordered current version first, then retired
+            versions newest-retirement first. Empty pages are `[]`, never
+            `null`.
+          items:
+            $ref: "#/components/schemas/WorkflowVersionListItem"
+        total:
+          type: integer
+          description: |
+            The exact size of the workflow's version history — the current
+            version plus every retained retired version — independent of the
+            page requested.
+          example: 3
+
+    WorkflowVersionListItem:
+      type: object
+      description: |
+        One row of a workflow's version list: a label, not a definition. The
+        definition and compiled graph are deliberately absent, for the same
+        reason a `WorkflowListItem` omits them; read one version's definition
+        via `GET /v1/workflows/{id}/versions/{version}`.
+      required: [version, definition_hash, registry_revision, current, archived]
+      properties:
+        version:
+          type: string
+          description: The version label. Immutable once published.
+        definition_hash:
+          type: string
+          description: |
+            Opaque identifier of this version's stored definition — the hash
+            the version was published with. Compare it only for equality; its
+            format is not part of the contract.
+        registry_revision:
+          type: integer
+          format: uint64
+          description: |
+            For the current row, the live record's compare-and-swap revision.
+            For an archived row, the revision the version was retired at, which
+            is also its retirement order (newest first down the list).
+        current:
+          type: boolean
+          description: Whether this is the version the live record represents.
+        archived:
+          type: boolean
+          description: |
+            Whether this version is a retired history entry. Complementary to
+            `current`; both are carried so a row's state is readable without
+            inferring it from position.
+
+    RollbackWorkflowRequest:
+      type: object
+      description: Body of `POST /v1/workflows/{id}/rollback`.
+      properties:
+        version:
+          type: string
+          description: |
+            The version to install as the current record. An omitted or empty
+            value means the current version, which is the no-op branch.
+          example: v1
+
+    RollbackWorkflowResponse:
+      type: object
+      description: The outcome of a rollback.
+      required: [workflow_id, version, unchanged]
+      properties:
+        workflow_id:
+          type: string
+          description: The workflow id — unchanged by a rollback (version ownership follows the id).
+        version:
+          type: string
+          description: The version that is now current.
+        unchanged:
+          type: boolean
+          description: |
+            True when nothing was written because the requested version already
+            was the current one (including on a replayed request).
 
     WorkflowDef:
       type: object
