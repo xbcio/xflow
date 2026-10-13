@@ -49,6 +49,7 @@ type workflowRegistry struct {
 	mu                 sync.Mutex
 	byID               map[types.WorkflowID]backend.WorkflowRecord
 	byKey              map[string]types.WorkflowID
+	byName             map[string]types.WorkflowID
 	versions           map[types.WorkflowID][]workflowVersionEntry
 	retention          int
 	mutations          map[workflowMutationKey]workflowMutation
@@ -73,6 +74,7 @@ func newWorkflowRegistryWithRetention(retention int) *workflowRegistry {
 	return &workflowRegistry{
 		byID:        make(map[types.WorkflowID]backend.WorkflowRecord),
 		byKey:       make(map[string]types.WorkflowID),
+		byName:      make(map[string]types.WorkflowID),
 		versions:    make(map[types.WorkflowID][]workflowVersionEntry),
 		retention:   retention,
 		mutations:   make(map[workflowMutationKey]workflowMutation),
@@ -104,6 +106,11 @@ func (r *workflowRegistry) AddWorkflow(ctx context.Context, rec backend.Workflow
 			// a conflict.
 			return backend.WorkflowRecord{}, &backend.WorkflowVersionImmutableError{Version: rec.Version}
 		}
+		// Repair a name index entry an idempotent add would otherwise never
+		// write (a record registered before the index existed).
+		if index := workflowNameIndexID(rec); index != "" {
+			r.byName[index] = id
+		}
 		return existing, nil
 	}
 	if rec.ID == "" {
@@ -111,12 +118,23 @@ func (r *workflowRegistry) AddWorkflow(ctx context.Context, rec backend.Workflow
 	} else if _, ok := r.byID[rec.ID]; ok {
 		return backend.WorkflowRecord{}, backend.ErrWorkflowConflict
 	}
+	// At most one live record may hold a (namespace, name). A record with no
+	// name to index (a test fixture or a caller that never set one) is exempt
+	// because it has no name identity to enforce.
+	if index := workflowNameIndexID(rec); index != "" {
+		if holder, ok := r.byName[index]; ok && holder != rec.ID {
+			return backend.WorkflowRecord{}, &backend.WorkflowNameConflictError{Holder: holder}
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return backend.WorkflowRecord{}, err
 	}
 	rec.RegistryRevision = r.nextRevisionLocked()
 	r.byKey[rec.Key] = rec.ID
 	r.byID[rec.ID] = rec
+	if index := workflowNameIndexID(rec); index != "" {
+		r.byName[index] = rec.ID
+	}
 	return rec, nil
 }
 
@@ -269,9 +287,14 @@ func (r *workflowRegistry) RemoveWorkflow(ctx context.Context, id types.Workflow
 	}
 	delete(r.byID, id)
 	delete(r.byKey, rec.Key)
-	// Version history is reachable only through the id, and ids are never
-	// reused, so a removed workflow takes its history with it. Keeping it would
-	// leak payloads nobody can address.
+	// Removing a workflow removes its identity: the freed name may be taken by
+	// a later registration, and retired versions are addressed through the id,
+	// so keeping them would leak payloads nobody can reach.
+	if index := workflowNameIndexID(rec); index != "" {
+		if holder, ok := r.byName[index]; ok && holder == id {
+			delete(r.byName, index)
+		}
+	}
 	delete(r.versions, id)
 	return nil
 }
@@ -398,6 +421,11 @@ func (r *workflowRegistry) CompareAndReplaceWorkflow(ctx context.Context, req ba
 			Previous: previous,
 			Current:  current,
 		}
+		// Repair a name index entry an idempotent no-op would otherwise never
+		// write (a record registered before the index existed).
+		if index := workflowNameIndexID(current); index != "" {
+			r.byName[index] = current.ID
+		}
 		if err := ctx.Err(); err != nil {
 			return backend.WorkflowReplaceResult{}, err
 		}
@@ -406,6 +434,15 @@ func (r *workflowRegistry) CompareAndReplaceWorkflow(ctx context.Context, req ba
 		return result, nil
 	}
 
+	// At most one live record may hold a (namespace, name): a second one is
+	// hosted beside the first and silently splits the workflow the name refers
+	// to. An index entry pointing at either the source or the destination id is
+	// not a second record.
+	if index := workflowNameIndexID(replacement); index != "" {
+		if holder, ok := r.byName[index]; ok && holder != current.ID && holder != replacement.ID {
+			return backend.WorkflowReplaceResult{}, &backend.WorkflowNameConflictError{Holder: holder}
+		}
+	}
 	// A retired version label is immutable: its payload is what a pinned replay
 	// or a subworkflow reference resolves to. Re-installing the label with the
 	// payload it was retired with (a rollback) is allowed; a replace that keeps
@@ -425,6 +462,7 @@ func (r *workflowRegistry) CompareAndReplaceWorkflow(ctx context.Context, req ba
 	r.byID[replacement.ID] = replacement
 	r.byKey[replacement.Key] = replacement.ID
 	r.retireVersionLocked(current, replacement)
+	r.updateNameIndexLocked(current, replacement)
 
 	result := backend.WorkflowReplaceResult{
 		Status:   backend.WorkflowReplaceReplaced,
@@ -467,6 +505,21 @@ func (r *workflowRegistry) retireVersionLocked(current, replacement backend.Work
 	}
 }
 
+// updateNameIndexLocked points the destination name at the surviving record and
+// drops the source name's entry when a rename freed it.
+func (r *workflowRegistry) updateNameIndexLocked(current, replacement backend.WorkflowRecord) {
+	if index := workflowNameIndexID(replacement); index != "" {
+		r.byName[index] = replacement.ID
+	}
+	if current.Name != replacement.Name {
+		if index := workflowNameIndexID(current); index != "" {
+			if holder, ok := r.byName[index]; ok && holder == current.ID {
+				delete(r.byName, index)
+			}
+		}
+	}
+}
+
 // retiredVersionLocked returns the history entry holding version, if any.
 func (r *workflowRegistry) retiredVersionLocked(id types.WorkflowID, version string) (workflowVersionEntry, bool) {
 	for _, entry := range r.versions[id] {
@@ -485,6 +538,16 @@ func (r *workflowRegistry) dropVersionLocked(id types.WorkflowID, version string
 			return
 		}
 	}
+}
+
+// workflowNameIndexID keys one (namespace, name) pair to the id that holds it.
+// An empty name has no index entry: a record that never set one has no name
+// identity to enforce.
+func workflowNameIndexID(rec backend.WorkflowRecord) string {
+	if rec.Name == "" {
+		return ""
+	}
+	return string(workflowProjectionNamespace(rec.Namespace)) + "\x00" + rec.Name
 }
 
 // ListWorkflowActivationProjectionNamespaces returns every namespace that has committed a workflow
