@@ -154,16 +154,50 @@ type SupplyPullObserver interface {
 // credential): to an operator watching xflow_supply_pull_fetch_total, a source
 // this runner refuses to contact and a source that timed out are the same
 // event — the pull did not produce content.
+//
+// A failure is also logged through Logger, with the reason. That line is the
+// only place a refusal is explained: the gate's own log is deliberately
+// cause-free, and a fetch this runner declined to make (a blocked address, a
+// missing credential) has no request and therefore no access log anywhere
+// else. See logFailure for exactly what it carries and what it refuses to.
 func (f *PullSupplyFetcher) Fetch(ctx context.Context, k supply.Key, src types.SupplyPullSource) ([]byte, string, uint64, error) {
 	content, hash, revision, err := f.fetch(ctx, k, src)
-	if f != nil && f.Observer != nil {
-		result := "ok"
+	if f != nil {
 		if err != nil {
-			result = "error"
+			f.logFailure(ctx, k, err)
 		}
-		f.Observer.OnSupplyPullFetch(ctx, result)
+		if f.Observer != nil {
+			result := "ok"
+			if err != nil {
+				result = "error"
+			}
+			f.Observer.OnSupplyPullFetch(ctx, result)
+		}
 	}
 	return content, hash, revision, err
+}
+
+// logFailure records one failed or refused pull: the supply key, and the
+// reason an operator needs. Never the URL (a query string may carry a token the
+// operator did not intend as log content), never a credential value, never
+// content, never a response body — the fetcher's errors are built to that rule
+// (pullReason strips the URL out of the ones net/http echoes).
+//
+// The two errors the gate logs itself are skipped, so one event is one line
+// where both loggers are installed: ErrSupplyNotFound is the ordinary cold
+// start (the gate logs it at info), and ErrSupplyPullUnavailable is already
+// reported by the gate with its own message.
+func (f *PullSupplyFetcher) logFailure(ctx context.Context, k supply.Key, err error) {
+	if f == nil || f.Logger == nil {
+		return
+	}
+	if errors.Is(err, ErrSupplyNotFound) || errors.Is(err, ErrSupplyPullUnavailable) {
+		return
+	}
+	f.Logger.WarnContext(ctx, "supply pull: fetch failed",
+		slog.String("supply", k.Name),
+		slog.String("namespace", string(k.Namespace)),
+		slog.String("error", err.Error()))
 }
 
 // fetch is Fetch's body; the split exists only so every return path is observed
@@ -174,7 +208,15 @@ func (f *PullSupplyFetcher) fetch(ctx context.Context, k supply.Key, src types.S
 	}
 	u, err := url.Parse(src.URL)
 	if err != nil {
-		return nil, "", 0, fmt.Errorf("supply pull: parse source url: %w", err)
+		return nil, "", 0, fmt.Errorf("supply pull: source URL for %q is not a URL: %w", k.Name, pullReason(err))
+	}
+	if u.User != nil {
+		// The compiler refuses userinfo, but a requirement can also arrive from a
+		// stored activation written by another version. Both directions leak:
+		// net/http echoes the URL in its errors, and this fetcher's errors reach
+		// operators' logs. A source that needs a credential names one through the
+		// node's `authentication` field, which sets a header and never the URL.
+		return nil, "", 0, fmt.Errorf("supply pull: source for %q carries userinfo in its URL; name a credential in the node's authentication field instead", k.Name)
 	}
 	if !strings.EqualFold(u.Scheme, "https") {
 		// Unreachable through the compiler, which rejects non-https at
@@ -191,7 +233,7 @@ func (f *PullSupplyFetcher) fetch(ctx context.Context, k supply.Key, src types.S
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src.URL, nil)
 	if err != nil {
-		return nil, "", 0, fmt.Errorf("supply pull: build request: %w", err)
+		return nil, "", 0, fmt.Errorf("supply pull: build request for %q: %w", k.Name, pullReason(err))
 	}
 	if src.Authentication != "" {
 		cred := f.resolveCredential(k.Namespace, src.Authentication)
@@ -210,7 +252,7 @@ func (f *PullSupplyFetcher) fetch(ctx context.Context, k supply.Key, src types.S
 
 	resp, err := f.httpClient().Do(req)
 	if err != nil {
-		return nil, "", 0, fmt.Errorf("supply pull: fetch %s: %w", host, err)
+		return nil, "", 0, fmt.Errorf("supply pull: fetch %s: %w", host, pullReason(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -348,6 +390,20 @@ func (f *PullSupplyFetcher) storeCache(k supply.Key, etag string, content []byte
 		f.etagCache = make(map[supply.Key]pullCachedContent)
 	}
 	f.etagCache[k] = pullCachedContent{etag: etag, content: content, hash: hash}
+}
+
+// pullReason strips the URL out of an error the net/http stack built from one.
+// Every *url.Error's text starts `Get "<full url>":` or `parse "<full url>":` —
+// URL, query string and any userinfo included — and these errors become
+// caller-visible results and log lines (see logFailure). The underlying cause
+// ("dial tcp 10.0.0.7:443: connect: connection refused") is what an operator
+// needs; where the URL pointed is already in the declaration they wrote.
+func pullReason(err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return urlErr.Err
+	}
+	return err
 }
 
 // applyPullAuth sets the request's credential header from a credential map.

@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -708,5 +709,144 @@ func TestPullFetchObservesEveryAttempt(t *testing.T) {
 
 	if got, want := rec.snapshot(), []string{"ok", "ok", "ok", "error", "error"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("observed results = %v, want %v", got, want)
+	}
+}
+
+// --- diagnostics, policy breadth, cache invalidation ---
+
+// recordingLogHandler captures one rendered line per log record so a test can
+// assert what a line carries — and, more importantly here, what it does not.
+type recordingLogHandler struct {
+	mu   sync.Mutex
+	text []string
+}
+
+func (h *recordingLogHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *recordingLogHandler) Handle(_ context.Context, r slog.Record) error {
+	var b strings.Builder
+	b.WriteString(r.Message)
+	r.Attrs(func(a slog.Attr) bool {
+		b.WriteString(" " + a.Key + "=" + a.Value.String())
+		return true
+	})
+	h.mu.Lock()
+	h.text = append(h.text, b.String())
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *recordingLogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *recordingLogHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *recordingLogHandler) joined() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return strings.Join(h.text, "\n")
+}
+
+// A refusal that happens before any request — a host outside the allowlist, a
+// blocked address — has no access log anywhere to find it in. The fetcher's own
+// line is the only place the reason is visible, so it must name the supply and
+// the policy, and must not carry the URL: query strings can hold tokens the
+// operator never meant as log content.
+func TestPullLogsARefusalWithTheHostOnly(t *testing.T) {
+	logs := &recordingLogHandler{}
+	pf, err := NewPullSupplyFetcher([]string{"config.example.com"}, nil, slog.New(logs))
+	if err != nil {
+		t.Fatalf("NewPullSupplyFetcher: %v", err)
+	}
+
+	_, _, _, err = pf.Fetch(context.Background(), defaultKey("rules"),
+		types.SupplyPullSource{URL: "https://127.0.0.1:8443/rules.json?token=sekrit"})
+	if err == nil {
+		t.Fatal("the fetch of a loopback source succeeded under the default policy")
+	}
+	line := logs.joined()
+	if !strings.Contains(line, "supply pull: fetch failed") || !strings.Contains(line, "supply=rules") {
+		t.Fatalf("no pull failure line naming the supply was logged; got:\n%s", line)
+	}
+	if !strings.Contains(line, "not in the runner's pull allowlist") {
+		t.Fatalf("the log line does not carry the refusal reason; got:\n%s", line)
+	}
+	if strings.Contains(line, "sekrit") || strings.Contains(line, "rules.json") {
+		t.Fatalf("the log line carries the URL; got:\n%s", line)
+	}
+}
+
+// The transport failure is the path where net/http hands back an error whose
+// text begins with the whole URL (query string included). Both the returned
+// error and the log line must be URL-free: they go to callers and operators,
+// not back to the source.
+func TestPullTransportFailureNeverCarriesTheURL(t *testing.T) {
+	src := newPullTestSource(t, "x", "")
+	pool := x509.NewCertPool()
+	pool.AddCert(src.srv.Certificate())
+	logs := &recordingLogHandler{}
+	pf, err := NewPullSupplyFetcher([]string{src.host()}, nil, slog.New(logs))
+	if err != nil {
+		t.Fatalf("NewPullSupplyFetcher: %v", err)
+	}
+	pf.TLSClientConfig = &tls.Config{RootCAs: pool}
+	// The port closes; the next dial is refused, which is the failure class the
+	// client wraps in a *url.Error.
+	src.srv.Close()
+
+	_, _, _, err = pf.Fetch(context.Background(), defaultKey("rules"),
+		types.SupplyPullSource{URL: src.url() + "/rules.json?token=sekrit"})
+	if err == nil {
+		t.Fatal("Fetch succeeded against a closed source")
+	}
+	if !strings.Contains(err.Error(), "supply pull: fetch") {
+		t.Fatalf("error %q does not name the failed fetch", err)
+	}
+	if strings.Contains(err.Error(), "sekrit") || strings.Contains(err.Error(), "rules.json") {
+		t.Fatalf("the error carries the URL: %v", err)
+	}
+	if line := logs.joined(); strings.Contains(line, "sekrit") || strings.Contains(line, "rules.json") {
+		t.Fatalf("the log line carries the URL:\n%s", line)
+	}
+}
+
+// The ordinary cold start is not a failure the fetcher reports: the gate logs
+// it at info, and duplicating it as a warning would make a first deployment
+// look broken.
+func TestPullFetchDoesNotLogTheOrdinaryColdStart(t *testing.T) {
+	src := newPullTestSource(t, "x", "")
+	src.setStatus(http.StatusNotFound)
+	logs := &recordingLogHandler{}
+	pf := newPullFetcher(t, src, []string{src.host()}, nil)
+	pf.Logger = slog.New(logs)
+
+	_, _, _, err := pf.Fetch(context.Background(), defaultKey("rules"), types.SupplyPullSource{URL: src.url()})
+	if !errors.Is(err, ErrSupplyNotFound) {
+		t.Fatalf("Fetch against a 404 = %v, want ErrSupplyNotFound", err)
+	}
+	if line := logs.joined(); line != "" {
+		t.Fatalf("the fetcher logged a cold start the gate already reports at info:\n%s", line)
+	}
+}
+
+// Userinfo in the URL is refused here as well as at compile time: a requirement
+// can arrive from a stored activation written by another version, and a
+// credential embedded in the URL leaks into every error and log line that
+// echoes it.
+func TestPullRejectsUserinfoInTheSourceURL(t *testing.T) {
+	src := newPullTestSource(t, "x", "")
+	pf := newPullFetcher(t, src, []string{src.host()}, nil)
+
+	_, _, _, err := pf.Fetch(context.Background(), defaultKey("rules"),
+		types.SupplyPullSource{URL: "https://alice:hunter2@" + src.host() + "/rules.json"})
+	if err == nil {
+		t.Fatal("a source URL with userinfo was fetched")
+	}
+	if !strings.Contains(err.Error(), "authentication") {
+		t.Fatalf("error %q does not point at the authentication field", err)
+	}
+	if strings.Contains(err.Error(), "hunter2") {
+		t.Fatalf("the error carries the embedded credential: %v", err)
+	}
+	if n := src.requests(); n != 0 {
+		t.Fatalf("source saw %d requests; userinfo must be refused before the request is sent", n)
 	}
 }
