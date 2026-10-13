@@ -289,7 +289,7 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	// branch below serves no identity at all), which is why it has no
 	// counterpart registration there.
 	mux.HandleFunc("GET "+PathCurrentUser, authz(OpCurrentUserRead, false, m.handleCurrentUser, nil))
-	mux.HandleFunc("POST "+PathWorkflowExecute, authz(OpWorkflowCreate, true, m.handleExecuteWorkflow, newExecutionIDResolver()))
+	mux.HandleFunc("POST "+PathWorkflowExecute, authz(OpWorkflowCreate, true, m.handleExecuteWorkflow, inlineExecutionIDResolver()))
 	mux.HandleFunc("POST "+PathWorkflowExecuteByID, authz(OpWorkflowInvoke, true, m.handleExecuteWorkflowByID, invokeByIDResolver()))
 	// Entry-seed endpoint (exact path, POST only). The authz wrapper injects
 	// the principal's namespace into the request context; handleSeedExecution
@@ -435,34 +435,70 @@ func (m *workflowControlModule) handleRevokeSignalByID(w http.ResponseWriter, r 
 	m.handleRevokeSignal(w, r, types.ExecutionID(r.PathValue("id")))
 }
 
-// newExecutionIDResolver is the resource resolver for the workflow create/invoke
-// routes. Unlike the /v1/executions/ subtree — which resolves the targeted
-// execution id from the path — create/invoke have no path id, so the resolver
-// pre-allocates a fresh execution id (R3.1). That id is stamped onto the
+// newExecutionIDResolver is the resource resolver for the entry-seed route
+// POST /v1/executions. Unlike the /v1/executions/{id}/ subtree — which resolves
+// the targeted execution id from the path — a seed has no path id, so the
+// resolver pre-allocates a fresh execution id (R3.1). That id is stamped onto the
 // admission audit row by authzWrap and, via engine.WithExecutionID injected by
-// the same wrapper, reused by engine Submit/Invoke, so the audit row and the
-// persisted execution share one id (closing the audit↔execution correlation
-// gap that left reconcile Probe reading an empty ExecutionID).
+// the same wrapper, reused by the engine, so the audit row and the persisted
+// execution share one id (closing the audit↔execution correlation gap that left
+// reconcile Probe reading an empty ExecutionID).
 //
-// One request shape does NOT follow this id: a submission carrying an
-// Idempotency-Key runs under engine.IdempotentExecutionID, derived from the key
-// so a retry finds the claim, which wins over the ctx-pre-allocated id. For
-// those requests the admission/outcome rows carry this allocated id while the
-// execution carries the derived one; reconcile Probe on the allocated id finds
-// no execution. The derived id cannot be computed here: it needs the principal's
-// namespace (not yet on the request when resolvers run — authzWrap attaches it
-// after authorize) and, for the inline route, the definition name from a body
-// this resolver does not parse — so the divergence is accepted knowingly. If
-// audit↔execution correlation for keyed requests becomes a requirement, the
-// resolver (or the audit row) has to derive the id the way the engine does.
+// It is NOT the resolver of the execute routes: a submission carrying an
+// Idempotency-Key runs under engine.IdempotentExecutionID rather than a fresh id,
+// so the execute routes resolve through inlineExecutionIDResolver and
+// invokeByIDResolver, which derive the same keyed id the engine will (see
+// resolveExecutionID); entry-seed accepts no key, so a fresh id is exact here.
 //
-// resource/workflowID/namespace stay empty: create/invoke authz was decided on
-// operation alone before this change, and this resolver only supplies the
-// correlation id, not authz inputs.
+// resource/workflowID/namespace stay empty: seed authz was decided on operation
+// alone, and this resolver only supplies the correlation id, not authz inputs.
 func newExecutionIDResolver() func(*http.Request) (string, string, string, string) {
 	return func(*http.Request) (string, string, string, string) {
 		return "", "", string(engine.NewExecutionID()), ""
 	}
+}
+
+// inlineExecutionIDResolver is the resource resolver for the inline direct-run
+// route POST /v1/workflows/execute. Like newExecutionIDResolver it hands the
+// wrapper a fresh pre-allocated id (R3.1) — except for a keyed submission, which
+// runs under engine.IdempotentExecutionID: the resolver then derives that id
+// itself, from the same namespace, scope and key the engine will (see
+// resolveExecutionID), so the admission/outcome rows and the execution stay one
+// id instead of the rows naming a phantom no execution ever runs under.
+//
+// The scope is the handler's own (inlineIdempotencyScope over the definition
+// name in the request body), so resolver and handler cannot drift. Deriving it
+// needs the body, which the handler reads after this resolver ran — hence the
+// read-and-restore; on any body that does not decode the handler will refuse the
+// request before it can claim anything, and a fresh id is the right shape for a
+// submission that creates no execution.
+func inlineExecutionIDResolver() func(*http.Request) (string, string, string, string) {
+	return func(r *http.Request) (string, string, string, string) {
+		if idempotencyKeyForResolve(r) == "" {
+			return "", "", string(engine.NewExecutionID()), ""
+		}
+		var req executeWorkflowRequest
+		if !peekJSONBody(r, &req) || req.Workflow == nil {
+			return "", "", string(engine.NewExecutionID()), ""
+		}
+		return "", "", string(resolveExecutionID(r, inlineIdempotencyScope(r.Context(), req.Workflow))), ""
+	}
+}
+
+// peekJSONBody decodes the request body into dst and puts the bytes back for the
+// handler. A resource resolver runs before the handler and the body is a single
+// stream, so a resolver that needs a field must restore what it read. Decoding
+// mirrors the handler exactly — same bytes, same json.Decoder.Decode acceptance —
+// so whatever decodes here decodes there; a read error is not fatal either,
+// because the truncated bytes are restored and handed to the same decoder, and
+// the handler then fails precisely the cases the peek fails.
+func peekJSONBody(r *http.Request, dst any) bool {
+	if r.Body == nil {
+		return false
+	}
+	raw, _ := io.ReadAll(r.Body)
+	r.Body = io.NopCloser(bytes.NewReader(raw))
+	return json.NewDecoder(bytes.NewReader(raw)).Decode(dst) == nil
 }
 
 // invokeByIDResolver is the resource resolver for POST /v1/workflows/{id}/execute
@@ -482,14 +518,18 @@ func newExecutionIDResolver() func(*http.Request) (string, string, string, strin
 // once per batch (executor/remote.go), and a map node claimed as a single group
 // lease serves a whole batch, so any scan wider than one batch hits it.
 //
-// A fresh pre-allocated id keeps engine semantics (Submit/Invoke are "start a NEW
-// execution") and stays coherent with what the engine now does, without giving up
-// the resource/workflow dimensions an audit row is meant to carry. A keyed
-// submission is the exception to that coherence — see newExecutionIDResolver.
+// A fresh id keeps engine semantics (Submit/Invoke are "start a NEW execution")
+// and stays coherent with what the engine now does, without giving up the
+// resource/workflow dimensions an audit row is meant to carry — except when the
+// request is keyed: the engine then runs the submission under
+// engine.IdempotentExecutionID (derived so a retry finds the claim), and
+// resolveExecutionID derives the same id here so the audit rows still name the
+// execution that runs.
 func invokeByIDResolver() func(*http.Request) (string, string, string, string) {
 	return func(r *http.Request) (string, string, string, string) {
 		id := r.PathValue("id")
-		return "workflow/" + id, id, string(engine.NewExecutionID()), ""
+		return "workflow/" + id, id,
+			string(resolveExecutionID(r, engine.WorkflowIdempotencyScope(types.WorkflowID(id)))), ""
 	}
 }
 

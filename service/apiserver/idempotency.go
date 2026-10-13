@@ -37,6 +37,41 @@ func idempotencyKeyFromRequest(w http.ResponseWriter, r *http.Request) (string, 
 	return key, true
 }
 
+// idempotencyKeyForResolve returns the request's Idempotency-Key when it is
+// present and well-formed, and "" otherwise. Unlike idempotencyKeyFromRequest it
+// writes nothing: it is called by resource resolvers, which run before the
+// handler and must not answer the request. A malformed key falls through to the
+// handler's 400 and to a fresh, unused execution id on the audit rows — deriving
+// an id from a key the server refuses would put that made-up id on the admission
+// row.
+func idempotencyKeyForResolve(r *http.Request) string {
+	key := strings.TrimSpace(r.Header.Get(IdempotencyKeyHeader))
+	if key == "" || engine.ValidateIdempotencyKey(key) != nil {
+		return ""
+	}
+	return key
+}
+
+// resolveExecutionID is the execution id a submission will run under, decided
+// before the handler runs so the admission audit row can carry it (R3.1): the id
+// derived from the request's Idempotency-Key when it carries a usable one, and a
+// fresh id otherwise.
+//
+// The keyed case must be engine.IdempotentExecutionID over the same namespace,
+// scope and key the engine will use — the engine derives the id itself when it
+// claims the key, so anything else here would leave the audit rows naming an id
+// no execution ever runs under (reconcile Probe would settle the submission as
+// absent while its execution ran). scope is the exact scope this route's handler
+// passes to keyedSubmission; both sides call the same scope constructor. The
+// namespace is the verified principal's, attached to the request by authzWrap
+// before resolvers run.
+func resolveExecutionID(r *http.Request, scope string) types.ExecutionID {
+	if key := idempotencyKeyForResolve(r); key != "" {
+		return engine.IdempotentExecutionID(namespace.FromContext(r.Context()), scope, key)
+	}
+	return engine.NewExecutionID()
+}
+
 // keyedSubmission builds the keyed-submission request for one route, or nil when
 // the request carries no key — the same submission every caller sent before the
 // header existed.
