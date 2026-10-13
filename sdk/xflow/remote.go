@@ -255,6 +255,14 @@ type remoteEnvelope struct {
 	Data    json.RawMessage `json:"data"`
 }
 
+// remoteResponse is a decoded success: the status (the envelope's code is
+// always "200" on success, so the HTTP status is what carries the finer
+// distinction — 201 created, 202 the wait hold expiring) plus the envelope.
+type remoteResponse struct {
+	status   int
+	envelope remoteEnvelope
+}
+
 // remoteRequest is one call's shape.
 type remoteRequest struct {
 	method string
@@ -284,7 +292,7 @@ type remoteRequest struct {
 // reset) where a second attempt plausibly succeeds. A response of any status
 // is never retried here: whether a status is worth retrying is the caller's
 // decision, made from the returned *RemoteError.
-func (r *Remote) send(ctx context.Context, req remoteRequest) (remoteEnvelope, error) {
+func (r *Remote) send(ctx context.Context, req remoteRequest) (remoteResponse, error) {
 	if !req.noTimeout && r.requestTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, r.requestTimeout)
@@ -295,23 +303,23 @@ func (r *Remote) send(ctx context.Context, req remoteRequest) (remoteEnvelope, e
 		return env, nil
 	}
 	if !req.retryTransport || !isRemoteTransportError(err) {
-		return remoteEnvelope{}, err
+		return remoteResponse{}, err
 	}
 	return r.do(ctx, req)
 }
 
-func (r *Remote) do(ctx context.Context, req remoteRequest) (remoteEnvelope, error) {
+func (r *Remote) do(ctx context.Context, req remoteRequest) (remoteResponse, error) {
 	var body io.Reader
 	if req.body != nil {
 		encoded, err := json.Marshal(req.body)
 		if err != nil {
-			return remoteEnvelope{}, fmt.Errorf("xflow: encode request body: %w", err)
+			return remoteResponse{}, fmt.Errorf("xflow: encode request body: %w", err)
 		}
 		body = bytes.NewReader(encoded)
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, req.method, r.endpoint+req.path, body)
 	if err != nil {
-		return remoteEnvelope{}, fmt.Errorf("xflow: build remote request: %w", err)
+		return remoteResponse{}, fmt.Errorf("xflow: build remote request: %w", err)
 	}
 	if req.body != nil {
 		httpReq.Header.Set("Content-Type", "application/json")
@@ -329,24 +337,24 @@ func (r *Remote) do(ctx context.Context, req remoteRequest) (remoteEnvelope, err
 
 	resp, err := r.client.Do(httpReq)
 	if err != nil {
-		return remoteEnvelope{}, &remoteTransportError{err: fmt.Errorf("xflow: remote %s %s: %w", req.method, req.path, err)}
+		return remoteResponse{}, &remoteTransportError{err: fmt.Errorf("xflow: remote %s %s: %w", req.method, req.path, err)}
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return remoteEnvelope{}, &remoteTransportError{err: fmt.Errorf("xflow: read remote response: %w", err)}
+		return remoteResponse{}, &remoteTransportError{err: fmt.Errorf("xflow: read remote response: %w", err)}
 	}
 	var env remoteEnvelope
 	decoded := json.Unmarshal(raw, &env) == nil && env.Code != ""
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return remoteEnvelope{}, remoteErrorFrom(resp, raw, decoded, env)
+		return remoteResponse{}, remoteErrorFrom(resp, raw, decoded, env)
 	}
 	if !decoded {
 		// A 2xx that is not an envelope means something between the client and
 		// the server answered — a proxy's captive page, a misrouted host. The
 		// caller must not read a success out of it.
-		return remoteEnvelope{}, &RemoteError{
+		return remoteResponse{}, &RemoteError{
 			Status:  resp.StatusCode,
 			Message: fmt.Sprintf("unexpected non-envelope response: %s", summarizeRemoteBody(raw)),
 		}
@@ -354,9 +362,9 @@ func (r *Remote) do(ctx context.Context, req remoteRequest) (remoteEnvelope, err
 	if !env.Success {
 		// An envelope with success:false on a 2xx is a contract violation, but
 		// the envelope is the server speaking, so its code and message stand.
-		return remoteEnvelope{}, &RemoteError{Status: resp.StatusCode, Code: env.Code, Message: env.Message}
+		return remoteResponse{}, &RemoteError{Status: resp.StatusCode, Code: env.Code, Message: env.Message}
 	}
-	return env, nil
+	return remoteResponse{status: resp.StatusCode, envelope: env}, nil
 }
 
 // remoteErrorFrom builds the error for a non-2xx answer. An enveloped failure
@@ -552,7 +560,7 @@ func (r *Remote) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.Wo
 		return "", err
 	}
 	var out remoteWorkflowRegistration
-	if err := json.Unmarshal(env.Data, &out); err != nil {
+	if err := json.Unmarshal(env.envelope.Data, &out); err != nil {
 		return "", fmt.Errorf("xflow: decode workflow registration: %w", err)
 	}
 	return out.WorkflowID, nil
@@ -583,7 +591,7 @@ func (r *Remote) ReplaceWorkflow(ctx context.Context, workflowID types.WorkflowI
 		return "", err
 	}
 	var out remoteWorkflowRegistration
-	if err := json.Unmarshal(env.Data, &out); err != nil {
+	if err := json.Unmarshal(env.envelope.Data, &out); err != nil {
 		return "", fmt.Errorf("xflow: decode workflow replacement: %w", err)
 	}
 	return out.WorkflowID, nil
@@ -601,4 +609,182 @@ func (r *Remote) RemoveWorkflow(ctx context.Context, workflowID types.WorkflowID
 		path:   "/v1/workflows/" + url.PathEscape(string(workflowID)),
 	})
 	return err
+}
+
+// remoteSubmissionResult is what the execute and rerun routes report about the
+// execution they created (executeWorkflowResponse / rerunExecutionResponse on
+// the server).
+type remoteSubmissionResult struct {
+	ExecutionID   types.ExecutionID     `json:"execution_id"`
+	Status        types.ExecutionStatus `json:"status"`
+	QueuePosition int                   `json:"queue_position"`
+	Duplicate     bool                  `json:"duplicate"`
+}
+
+// remoteExecuteRequest is the body of POST /v1/workflows/{id}/execute. An
+// empty entry would run the default start node, but Invoke requires an entry
+// exactly as Engine.Invoke does, so it is always set here.
+type remoteExecuteRequest struct {
+	Entry string         `json:"entry,omitempty"`
+	Input map[string]any `json:"input,omitempty"`
+	Test  bool           `json:"test,omitempty"`
+}
+
+// Invoke submits a run of a registered workflow, addressed by id, starting at
+// the given entry node. It returns the execution the server created.
+//
+// The signature is Engine.Invoke's, with two options the execute routes cannot
+// express refused rather than dropped: WithExecutionTTL (no TTL field on the
+// route) and WithRuntime (no runtime field). Silently ignoring either would
+// promise a run whose lifetime or inputs differ from what the caller asked
+// for. WithTraceID is refused for the same reason.
+func (r *Remote) Invoke(ctx context.Context, workflowID types.WorkflowID, entry Entry, input map[string]any, opts ...InvokeOption) (types.ExecutionID, error) {
+	res, err := r.invoke(ctx, workflowID, entry, input, opts...)
+	return res.ExecutionID, err
+}
+
+func (r *Remote) invoke(ctx context.Context, workflowID types.WorkflowID, entry Entry, input map[string]any, opts ...InvokeOption) (remoteSubmissionResult, error) {
+	if workflowID == "" {
+		return remoteSubmissionResult{}, errors.New("xflow: Invoke requires a workflow id")
+	}
+	if entry.nodeName == "" {
+		return remoteSubmissionResult{}, errors.New("entry node name is required")
+	}
+	cfg := &invokeConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+	if err := checkRemoteInvokeOptions(cfg); err != nil {
+		return remoteSubmissionResult{}, err
+	}
+	headers := map[string]string{}
+	if cfg.idempotencyKey != "" {
+		headers["Idempotency-Key"] = cfg.idempotencyKey
+	}
+	env, err := r.send(ctx, remoteRequest{
+		method:  http.MethodPost,
+		path:    "/v1/workflows/" + url.PathEscape(string(workflowID)) + "/execute",
+		body:    remoteExecuteRequest{Entry: entry.nodeName, Input: input, Test: cfg.testRun},
+		headers: headers,
+	})
+	if err != nil {
+		return remoteSubmissionResult{}, err
+	}
+	var out remoteSubmissionResult
+	if err := json.Unmarshal(env.envelope.Data, &out); err != nil {
+		return remoteSubmissionResult{}, fmt.Errorf("xflow: decode execute response: %w", err)
+	}
+	return out, nil
+}
+
+// checkRemoteInvokeOptions refuses the InvokeOptions the HTTP execute route has
+// no field for. Each message names the option, so a caller that expected it to
+// work learns which call it cannot make remotely instead of getting a run
+// whose TTL or runtime differs from the request.
+func checkRemoteInvokeOptions(cfg *invokeConfig) error {
+	switch {
+	case cfg.execTTL > 0:
+		return errors.New("xflow: WithExecutionTTL has no remote equivalent: the execute route carries no execution TTL")
+	case cfg.runtime != nil:
+		return errors.New("xflow: WithRuntime has no remote equivalent: the execute route carries no runtime payload")
+	case cfg.traceID != "" || cfg.spanID != "":
+		return errors.New("xflow: WithTraceID has no remote equivalent: trace context travels in HTTP headers, not in the execute body")
+	}
+	return nil
+}
+
+// remoteWaitHold is the hold Wait asks the server for on each request.
+//
+// The route's own default is 5s, which would turn a long wait into a stream of
+// requests; its cap is 10m, which would make ctx cancellation wait out the
+// hold before it is noticed. 30s is the design's recommended middle: few
+// requests, prompt cancellation at the next boundary.
+const remoteWaitHold = 30 * time.Second
+
+// Wait blocks until the execution reaches a terminal state or ctx is canceled.
+//
+// It is a loop over the server's wait route (GET /v1/executions/{id}/wait):
+// 200 carries the terminal detail, 202 means the server's hold expired with
+// the execution still running, and the loop asks again. Cancellation is
+// promptly visible: the in-flight request is aborted by ctx, and ctx.Err() is
+// what the caller gets.
+//
+// The result is rebuilt through resultFromDetail, the same conversion the
+// embedded engine's Wait applies to the same detail — so a remote wait and a
+// local wait return the same Result shape for the same execution.
+func (r *Remote) Wait(ctx context.Context, id types.ExecutionID) (types.Result, error) {
+	if id == "" {
+		return types.Result{}, errors.New("xflow: Wait requires an execution id")
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return types.Result{}, err
+		}
+		env, err := r.send(ctx, remoteRequest{
+			method:         http.MethodGet,
+			path:           "/v1/executions/" + url.PathEscape(string(id)) + "/wait?timeout=" + url.QueryEscape(remoteWaitHold.String()),
+			noTimeout:      true,
+			retryTransport: true,
+		})
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return types.Result{}, ctxErr
+			}
+			return types.Result{}, err
+		}
+		if env.status == http.StatusAccepted {
+			continue
+		}
+		var detail engine.ExecutionDetail
+		if err := json.Unmarshal(env.envelope.Data, &detail); err != nil {
+			return types.Result{}, fmt.Errorf("xflow: decode wait response: %w", err)
+		}
+		if !types.IsTerminalExecutionStatus(detail.Status) {
+			// A 200 that is not terminal should not happen (the route writes
+			// 200 only for a terminal detail). Treating it as terminal would
+			// hand the caller a Result that claims a finished execution, so
+			// the loop asks again instead.
+			continue
+		}
+		return resultFromDetail(detail), nil
+	}
+}
+
+// Inspect returns execution and node status details for audit and UI flows.
+//
+// The GET route has no node-selection parameter: the server always returns the
+// whole graph's view, so when nodeNames are given the filtering happens here,
+// on that same snapshot. The result is what Engine.Inspect documents — the
+// named nodes only, latest state — fetched with one request either way.
+func (r *Remote) Inspect(ctx context.Context, id types.ExecutionID, nodeNames ...string) (engine.ExecutionDetail, error) {
+	if id == "" {
+		return engine.ExecutionDetail{}, errors.New("xflow: Inspect requires an execution id")
+	}
+	env, err := r.send(ctx, remoteRequest{
+		method:         http.MethodGet,
+		path:           "/v1/executions/" + url.PathEscape(string(id)),
+		retryTransport: true,
+	})
+	if err != nil {
+		return engine.ExecutionDetail{}, err
+	}
+	var detail engine.ExecutionDetail
+	if err := json.Unmarshal(env.envelope.Data, &detail); err != nil {
+		return engine.ExecutionDetail{}, fmt.Errorf("xflow: decode execution detail: %w", err)
+	}
+	if len(nodeNames) == 0 {
+		return detail, nil
+	}
+	wanted := make(map[string]bool, len(nodeNames))
+	for _, n := range nodeNames {
+		wanted[n] = true
+	}
+	kept := make([]engine.NodeDetail, 0, len(nodeNames))
+	for _, n := range detail.Nodes {
+		if wanted[n.Name] {
+			kept = append(kept, n)
+		}
+	}
+	detail.Nodes = kept
+	return detail, nil
 }
