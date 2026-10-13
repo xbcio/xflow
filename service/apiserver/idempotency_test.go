@@ -283,6 +283,48 @@ func TestIdempotencyFailuresMapToStableCodes(t *testing.T) {
 	}
 }
 
+// TestRerunIdempotencyKeyReachesTheEngineAndTheResponse pins both halves of the
+// rerun route's keyed behaviour: the header becomes the engine's IdempotencyKey,
+// and an engine-reported duplicate is what the caller reads.
+func TestRerunIdempotencyKeyReachesTheEngineAndTheResponse(t *testing.T) {
+	fake := &fakeControlFacade{rerunRes: engine.RerunResult{ExecutionID: "exec-rerun", Duplicate: true}}
+	m := &workflowControlModule{eng: fake}
+	mux := http.NewServeMux()
+	m.RegisterHTTP(mux)
+
+	resp := doKeyed(t, mux, http.MethodPost, "/v1/executions/exec-parent/rerun",
+		rerunRequest{FromNode: "start"}, "rerun-1")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if fake.rerunReq.IdempotencyKey != "rerun-1" {
+		t.Fatalf("engine saw IdempotencyKey = %q, want rerun-1", fake.rerunReq.IdempotencyKey)
+	}
+	var body rerunExecutionResponse
+	decodeEnvelope(t, resp, &body)
+	if !body.Duplicate || body.ExecutionID != "exec-rerun" {
+		t.Fatalf("rerun response = %+v, want the duplicate of exec-rerun", body)
+	}
+
+	// A rerun without the header is the unkeyed rerun it always was.
+	fake.rerunRes = engine.RerunResult{ExecutionID: "exec-fresh"}
+	plain := doKeyed(t, mux, http.MethodPost, "/v1/executions/exec-parent/rerun",
+		rerunRequest{FromNode: "start"}, "")
+	defer func() { _ = plain.Body.Close() }()
+	if plain.StatusCode != http.StatusOK {
+		t.Fatalf("unkeyed rerun status = %d, want 200", plain.StatusCode)
+	}
+	if fake.rerunReq.IdempotencyKey != "" {
+		t.Fatalf("unkeyed rerun carried IdempotencyKey = %q, want none", fake.rerunReq.IdempotencyKey)
+	}
+	var plainBody rerunExecutionResponse
+	decodeEnvelope(t, plain, &plainBody)
+	if plainBody.Duplicate {
+		t.Fatal("unkeyed rerun reported duplicate")
+	}
+}
+
 // TestSubmitFailureMappingIsShared: every refusal the engine can raise for a
 // submission reaches the caller through one mapper, so a route cannot answer
 // internal_error for a refusal another route names. These are the pre-existing

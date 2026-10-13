@@ -2419,17 +2419,30 @@ func (m *workflowControlModule) handleRerun(w http.ResponseWriter, r *http.Reque
 	// path does. It is the one submission hook a rerun needs from the API
 	// layer: the definition is the parent's already, and the identity is the
 	// engine's to attach.
+	//
+	// An Idempotency-Key makes the rerun safe to retry: the engine scopes the key
+	// to the parent execution, and the fingerprint covers the parent, the
+	// from-node and include_success, so a retry of the same request is answered
+	// with the rerun it already created, and the same key on a different request
+	// is a conflict.
+	idemKey, ok := idempotencyKeyFromRequest(w, r)
+	if !ok {
+		return
+	}
 	ctx := engine.WithTraceCarrier(r.Context(), tracing.InjectCarrier(r.Context()))
 	res, err := rerunner.Rerun(ctx, engine.RerunRequest{
 		ExecutionID:    id,
 		FromNode:       req.FromNode,
 		IncludeSuccess: req.IncludeSuccess,
+		IdempotencyKey: idemKey,
 	})
 	if err != nil {
 		writeExecutionRerunFail(w, r, err)
 		return
 	}
-	writeData(w, r, http.StatusOK, m.rerunResponse(ctx, res))
+	resp := m.rerunResponse(ctx, res)
+	resp.Duplicate = res.Duplicate
+	writeData(w, r, http.StatusOK, resp)
 }
 
 // rerunRequest is the body for POST /v1/executions/{id}/rerun (design §3 API).
@@ -2450,6 +2463,10 @@ type rerunExecutionResponse struct {
 	// QueuePosition is the new execution's place in its workflow's line, 0 when
 	// it started immediately.
 	QueuePosition int `json:"queue_position,omitempty"`
+	// Duplicate is true when the request's Idempotency-Key had already created
+	// this rerun: nothing was created by this call, and the answer is the
+	// original rerun execution's id and current status.
+	Duplicate bool `json:"duplicate,omitempty"`
 }
 
 // rerunResponse builds the reply from what the rerun reported plus a status
@@ -2486,6 +2503,8 @@ func (m *workflowControlModule) rerunResponse(ctx context.Context, res engine.Re
 // reached limit is a retry, not a failed rerun.
 func writeExecutionRerunFail(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+	case writeIdempotencyFailure(w, r, err):
+		return
 	case writeConcurrencyFailure(w, r, err):
 		return
 	case errors.Is(err, engine.ErrExecutionNotRerunnable):
