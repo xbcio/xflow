@@ -148,7 +148,13 @@ func admissionRouteClass(op string) (string, bool) {
 	case OpWorkflowCreate, OpWorkflowInvoke, "execute_workflow", "execute_workflow_by_id":
 		return routeClassExecute, true
 	case OpExecutionSignal, OpExecutionRevoke, OpExecutionCancel,
-		OpExecutionPause, OpExecutionResume, OpExecutionRerun:
+		OpExecutionPause, OpExecutionResume, OpExecutionRerun,
+		// Replay and backfill both create work: a replay starts a new attempt, a
+		// backfill starts an execution per missed occurrence. The bare path's
+		// backfill label is the same string as OpScheduleBackfill, so one case
+		// covers both paths; dead-letter replay has no bare dispatch (its prefix
+		// handler answers 404 without an authenticator).
+		OpDeadLetterReplay, OpScheduleBackfill:
 		return routeClassExecution, true
 	}
 	return "", false

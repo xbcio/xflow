@@ -386,6 +386,10 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 	if s.enableManagement {
 		mgmt := newManagementModule(s.cp)
 		mgmt.metrics = cfg.Metrics
+		// The dead-letter replay dispatch inside the module's prefix handler
+		// creates work, so it passes through the same admission layer as the
+		// execution routes (the shared authz wrapper consults the holder).
+		mgmt.admission = admission
 		mgmt.ready = s.readiness
 		// Runner-pool token and issued-identity management dependencies are
 		// injected after construction so unrelated management-module tests keep

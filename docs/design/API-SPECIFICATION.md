@@ -266,9 +266,13 @@ GET /v1/workflows?page=1&page_size=20
 立即拒绝，不排队。
 
 覆盖范围：execute、execute-by-id、signals、revoke-signal、cancel、pause、resume、
-rerun，以及 webhook 入口。**不覆盖**：`POST /v1/executions`（entry-seed，trigger 已有
+rerun、schedule backfill（backfill 会发起执行）、dead-letter replay（replay 会重投），
+以及 webhook 入口。**不覆盖**：`POST /v1/executions`（entry-seed，trigger 已有
 自己的 429 与重投，再限会叠加退避）、`GET .../wait`（长轮询会占满 inflight）、读接口、
-注册与 schedule 管理。webhook 只对**签名正确**的请求计费，否则知道路径的人就能花掉
+注册与 schedule 管理。覆盖集合不是手写清单：`admission_routes_test.go` 枚举生产 mux
+上每个 POST/PUT/PATCH/DELETE 可达的路由，要求逐条要么归入覆盖（并驱动到拒绝），
+要么豁免并给出理由；新路由未归类会让该守卫直接失败。webhook 只对**签名正确**的请求
+计费，否则知道路径的人就能花掉
 合法发送方的额度；未签名洪峰交给 inflight 上限。webhook 的拒绝沿用其裸
 `{"error": code}` 形状。
 

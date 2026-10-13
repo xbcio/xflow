@@ -1566,6 +1566,10 @@ paths:
                     code: schedules_unavailable
                     message: the schedules API is not configured on this server
                     trace_id: 0123456789abcdef0123456789abcdef
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/ServerOverloaded"
         default:
           $ref: "#/components/responses/DefaultError"
 
@@ -3059,6 +3063,10 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/DeadLetterReplayResponse"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/ServerOverloaded"
         default:
           $ref: "#/components/responses/DefaultError"
 
