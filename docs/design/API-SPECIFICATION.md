@@ -249,8 +249,46 @@ GET /v1/workflows?page=1&page_size=20
 | 409 | 状态冲突、幂等重放、栅栏拒绝 |
 | 412 / 428 | 条件请求失败 / 要求条件请求 |
 | 413 | 请求体超限 |
-| 429 | 限流 |
-| 503 | 后端依赖不可用 |
+| 429 | 限流：API 准入层的 `rate_limited`，或工作流 `settings.concurrency` 的 `workflow_concurrency_*`（§4.3） |
+| 503 | 后端依赖不可用；或本副本过载 `server_overloaded`（§4.3） |
+
+### 4.3 API 准入（限速与背压）
+
+变更类路由在认证之后、admission 审计之前过两道闸。被拒的请求**不写审计行、
+不触达 store、不执行**，两种拒绝都带整数秒 `Retry-After`（≥1）：
+
+| 闸 | 状态码 / code | 维度 | 默认 | `Retry-After` |
+| --- | --- | --- | --- | --- |
+| inflight 上限 | 503 `server_overloaded` | 每副本，全部覆盖路由共用一个上限 | 1024（`--api-max-inflight`；负数关闭） | 1，下限而非承诺 |
+| 令牌桶限速 | 429 `rate_limited` | 每 namespace（认证主体的）；webhook 为 namespace+workflow | 关闭（`--api-rate` 为 0） | 桶补出一个令牌的时间，向上取整 |
+
+先查 inflight 再查速率：过载副本不必多一次 Redis 往返就能卸载。非阻塞——满了
+立即拒绝，不排队。
+
+覆盖范围：execute、execute-by-id、signals、revoke-signal、cancel、pause、resume、
+rerun，以及 webhook 入口。**不覆盖**：`POST /v1/executions`（entry-seed，trigger 已有
+自己的 429 与重投，再限会叠加退避）、`GET .../wait`（长轮询会占满 inflight）、读接口、
+注册与 schedule 管理。webhook 只对**签名正确**的请求计费，否则知道路径的人就能花掉
+合法发送方的额度；未签名洪峰交给 inflight 上限。webhook 的拒绝沿用其裸
+`{"error": code}` 形状。
+
+`rate_limited` 与 `workflow_concurrency_*` 同为 429 但互不相干：前者保护控制面，
+在请求被准入之前判定，与工作流无关；后者是工作流自己声明的业务容量，在准入之后
+判定。客户端按 `code` 区分，二者都可重试。
+
+计数位置（`--api-rate-limit-mode`）：
+
+- `local`（默认）：每副本内存令牌桶，配置值是**单副本**额度，全舰队放行
+  rate×副本数。不增加任何网络往返。
+- `redis`：每个键一个 Redis 令牌桶（Lua 原子脚本，时钟取 Redis `TIME`），全部
+  副本共享一份额度，代价是每个被限速的请求多一次 Redis 往返（250ms 超时）。
+  Redis 不可达时**放行到本地桶**（fail open：限流器故障不得拖垮 API），
+  `xflow_api_rate_limit_fallback_total` 计数，告警日志每 30 秒至多一条。没有
+  Redis 后端的部署选 `redis` 会在启动时失败。
+
+指标：`xflow_api_rate_limited_total{route,reason}`（reason=`rate`|`inflight`，
+route 为 `execute`|`execution`|`webhook`）、`xflow_api_inflight{route_class}`、
+`xflow_api_limiter_buckets`（本地桶数，观察空闲清扫）。
 
 ---
 
