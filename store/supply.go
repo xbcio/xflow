@@ -37,6 +37,14 @@ type SupplyResource struct {
 	UpdatedBy   string
 	// LastFetchAt and LastError describe the most recent collection attempt in
 	// pull mode. They are observability fields only; nothing schedules off them.
+	//
+	// Nothing writes them today. Content reaches the store only through
+	// PutSupply — the control plane persisting what a publisher sent — and
+	// runner-side pull mode fetches into the runner's own registry, which has no
+	// store write path at all, so both fields are zero on every record a current
+	// version writes. They stay in the schema because a future design that
+	// collects on the control plane would want them; storetest pins their round
+	// trip, not their population.
 	LastFetchAt time.Time
 	LastError   string
 }
