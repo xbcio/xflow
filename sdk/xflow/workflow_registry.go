@@ -85,7 +85,11 @@ func (e *Engine) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.Wo
 			}
 		}
 	}
-	g, err := graph.Compile(def)
+	// Compiled against the registry so an xflow.subworkflow node's reference is
+	// pinned to a (version, definition hash) here, at registration: a target
+	// that is not registered is refused now rather than stored as a node that
+	// can never resolve.
+	g, err := graph.CompileWithResolver(ctx, def, e.compileSubWorkflowResolver(def.Namespace))
 	if err != nil {
 		return "", err
 	}

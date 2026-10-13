@@ -26,6 +26,13 @@ const (
 	TaskTypeNodeBatch
 	// TaskTypeGroupExec 把一整个 co-location 组作为单元派发给 runner 执行。
 	TaskTypeGroupExec
+	// TaskTypeSubWorkflow runs one xflow.subworkflow node: the engine resolves
+	// the node's pinned target, starts a child execution, and waits for it. Like
+	// the engine-internal types above, it never reaches a handler or a remote
+	// runner — no runner declares the capability, and TaskRouting refuses it
+	// permanently — but unlike them it names a real node of the parent graph and
+	// completes through the ordinary commit path.
+	TaskTypeSubWorkflow
 	// 6 曾是 TaskTypeGroupResume（durable group suspend，已随该子系统一并移除）。
 	// TaskType 是落进 outbox 的持久化数值，契约是 append-only：下一个新类型从 7
 	// 起，不要回收 6。生产从未产生过值为 6 的任务，所以存量数据里没有它。
@@ -105,6 +112,22 @@ type Task struct {
 	// It is internal queue metadata, not part of the public runner JSON
 	// contract, exactly like the fields above.
 	IntentCreatedAt time.Time `json:"-"`
+
+	// Generation selects which child execution a sub-workflow node wants within
+	// one activation. Like the fields above it is internal scheduling metadata,
+	// carried out-of-band by the backends, and never part of the public runner
+	// JSON contract.
+	//
+	// No persisted counter can stand in for it. The node's Attempt is bumped by
+	// every re-acquisition, and a reclaim re-acquires exactly like a retry
+	// does, so a redelivery after a reclaim must derive the SAME generation to
+	// resume the same child while a retry must derive the NEXT one to start a
+	// new child. The only place that difference is recorded is the task the
+	// engine enqueued, which is why it travels here.
+	//
+	// Zero means "not carried" — a first dispatch, or a payload written before
+	// this field existed — and normalizes to generation 1.
+	Generation int `json:"-"`
 }
 
 // UnitIdxUnknown is the sentinel value for Task.UnitIdx meaning "the durable
@@ -282,6 +305,19 @@ type ExecutionSnapshot struct {
 	// tracestate and the sampled flag.
 	TraceCarrier map[string]string `json:"trace_carrier,omitempty"`
 	ParentID     types.ExecutionID // non-empty for sub-executions
+	// ParentNode is the parent execution's node that started this execution,
+	// non-empty only on a sub-workflow child. It is what tells a reader which
+	// node of the parent to inspect for the wait, and its presence is what
+	// distinguishes a sub-workflow child from a rerun (which carries ParentID
+	// and RerunFrom, never ParentNode).
+	ParentNode string `json:"parent_node,omitempty"`
+	// Depth is this execution's sub-workflow nesting depth: 0 for an execution
+	// nobody's child, parent's Depth + 1 for a child. It is the runtime bound
+	// WithMaxSubWorkflowDepth enforces, and it exists precisely because the
+	// compile-time cycle and depth checks only see the static reference graph —
+	// a chain through dynamically resolved or cross-namespace references is
+	// caught here or not at all.
+	Depth int `json:"depth,omitempty"`
 	// RerunFrom is the node a rerun-derived execution starts at: the node whose
 	// result the parent execution did not reuse, and upstream of which every
 	// unit was copied from the parent's own result. Empty for an execution this
@@ -350,6 +386,12 @@ type NodeSnapshot struct {
 	// task without silently dropping its signal payload.
 	LeaseTaskType TaskType
 	LeasePayload  *types.SignalPayload
+	// LeaseGeneration preserves Task.Generation with the lease, for the same
+	// reason LeaseTaskType/LeasePayload are preserved: the sweeper rebuilds the
+	// redelivered task from the lease record alone, so a generation that only
+	// lived in the queue entry would come back as 0 and read as "first
+	// generation" — resurrecting an abandoned generation's child on a reclaim.
+	LeaseGeneration int
 	// CommittedLeaseToken identifies the lease that produced the current
 	// terminal state. It lets a retry after a lost commit response receive a
 	// stable duplicate outcome without allowing a stale lease to advance the
@@ -382,6 +424,16 @@ type NodeSnapshot struct {
 	// single read surface (engine/inspect.go), not here, so that a stored
 	// snapshot never has to be rewritten to change what is publicly visible.
 	ErrorDetails map[string]any
+	// ChildExecutionID is the child execution this node waited on, written by
+	// the sub-workflow wait transition. It deliberately outlives the wait: a
+	// finished node keeps it so an inspector can drill into the child a
+	// completed (or failed) node ran, which is what makes the parent side of
+	// the relationship auditable without a separate child index.
+	//
+	// Empty for every node that never waited on a child, and it names the LAST
+	// child: a retried node's next park overwrites it, so it is never a mixture
+	// of two attempts.
+	ChildExecutionID types.ExecutionID
 }
 
 // ExpiredLease describes a node whose lease has passed its deadline and is
@@ -405,6 +457,11 @@ type ExpiredLease struct {
 	// running or committing lease is reclaimed after a process crash.
 	TaskType TaskType
 	Payload  *types.SignalPayload
+	// Generation is the reclaimed task's generation. Like TaskType/Payload it
+	// comes from the lease record itself (written by AcquireTaskLease and read
+	// back by ListExpiredLeases), so a rebuild preserves whichever generation
+	// claimed the node. Zero means "first generation", exactly as in Task.
+	Generation int
 }
 
 // SubExecution tracks a child execution spawned by a loop/split node.

@@ -175,6 +175,95 @@ func (s clearFailingEntryStore) AdvanceWorkflowRevision(ctx context.Context, ns 
 	return revisions.AdvanceWorkflowRevision(ctx, ns, workflowID, revision)
 }
 
+// subWorkflowParentDef is a registration-shaped parent: a start node feeding an
+// xflow.subworkflow node that references childName.
+func subWorkflowParentDef(childName string) *types.WorkflowDef {
+	return &types.WorkflowDef{
+		Name:    "sw-parent",
+		Version: "v1",
+		Nodes: []types.NodeDef{
+			{Name: "start", Type: "xflow.start"},
+			{Name: "child", Type: types.SubWorkflowNodeType, Parameters: map[string]any{"workflow": childName}},
+		},
+		Connections: types.Connections{
+			"start": {"main": types.PortConnections{Targets: []types.Connection{{Node: "child", Input: "main"}}}},
+		},
+	}
+}
+
+// TestRegisterWorkflowPinsSubWorkflowReferences is the registration wiring end
+// to end over HTTP: the child is registered first, then a parent whose
+// xflow.subworkflow node names it — and the parent's PERSISTED graph carries
+// the resolved (version, definition hash) binding, which is what every later
+// dispatch of that node is fenced by.
+//
+// The child is registered without a version, which is what the HTTP path stores
+// (the SDK defaults to v1 before registering); the binding must therefore come
+// out normalized to v1, or the dispatch-time lookup would pin a version no key
+// carries.
+func TestRegisterWorkflowPinsSubWorkflowReferences(t *testing.T) {
+	srv, cp := newRegisterTestServer(t)
+
+	child := validWorkflow()
+	child.Name = "sw-child"
+	childResp := postRegister(t, srv.URL, "tok-full", child)
+	defer func() { _ = childResp.Body.Close() }()
+	if childResp.StatusCode != http.StatusCreated {
+		t.Fatalf("child status = %d, want 201", childResp.StatusCode)
+	}
+	var childOut registerWorkflowResponse
+	decodeRegisterData(t, childResp, &childOut)
+	childRec, err := cp.WorkflowRegistry().GetWorkflow(context.Background(), childOut.WorkflowID)
+	if err != nil {
+		t.Fatalf("GetWorkflow(child): %v", err)
+	}
+
+	parentResp := postRegister(t, srv.URL, "tok-full", subWorkflowParentDef("sw-child"))
+	defer func() { _ = parentResp.Body.Close() }()
+	if parentResp.StatusCode != http.StatusCreated {
+		t.Fatalf("parent status = %d, want 201", parentResp.StatusCode)
+	}
+	var parentOut registerWorkflowResponse
+	decodeRegisterData(t, parentResp, &parentOut)
+
+	rec, err := cp.WorkflowRegistry().GetWorkflow(context.Background(), parentOut.WorkflowID)
+	if err != nil {
+		t.Fatalf("GetWorkflow(parent): %v", err)
+	}
+	if rec.Graph == nil {
+		t.Fatal("persisted parent record must carry a compiled Graph")
+	}
+	idx, ok := rec.Graph.NodeIndex("child")
+	if !ok {
+		t.Fatal("persisted parent graph lost the sub-workflow node")
+	}
+	binding := rec.Graph.NodeAt(idx).SubWorkflow
+	if binding == nil {
+		t.Fatal("the persisted parent graph carries an unresolved sub-workflow node")
+	}
+	if binding.Name != "sw-child" || binding.Version != "v1" || binding.DefinitionHash != childRec.DefinitionHash {
+		t.Fatalf("binding = %+v, want sw-child@v1 pinned to %q", binding, childRec.DefinitionHash)
+	}
+}
+
+// TestRegisterWorkflowRefusesAnUnresolvableSubWorkflowReference pins the
+// registration half of the fail-closed rule: a reference to a workflow that is
+// not registered is refused at registration, not stored as a graph whose node
+// can never run.
+func TestRegisterWorkflowRefusesAnUnresolvableSubWorkflowReference(t *testing.T) {
+	srv, _ := newRegisterTestServer(t)
+
+	resp := postRegister(t, srv.URL, "tok-full", subWorkflowParentDef("absent-child"))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for an unresolvable sub-workflow reference", resp.StatusCode)
+	}
+	env := decodeEnvelope(t, resp, &registerWorkflowResponse{})
+	if env.Success || env.Code != "workflow_compile_failed" {
+		t.Fatalf("envelope = %+v, want a workflow_compile_failed error", env)
+	}
+}
+
 // triggerWorkflow is a workflow whose entry is a single remote-hosted trigger
 // node carrying a RunnerSelector, so registering it derives an EntryActivation
 // and deregistering it must clear that desired-state.

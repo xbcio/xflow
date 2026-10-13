@@ -40,6 +40,10 @@ type redisOutboxEntry struct {
 	Port        *string `json:"port,omitempty"`
 	AvailableAt int64   `json:"available_at_ms,omitempty"`
 	CreatedAt   int64   `json:"created_at_ms,omitempty"`
+	// Generation carries engine.Task.Generation under the same internal-metadata
+	// rule as the fields above. Zero and absent mean the same thing ("generation
+	// 1" after normalization), so it needs no has-flag.
+	Generation int `json:"generation,omitempty"`
 }
 
 // leaseOutboxLua claims ready entries by pushing their ready-ZSET score forward
@@ -757,6 +761,7 @@ func marshalRedisOutboxEntry(id string, task engine.Task, availableAt time.Time)
 		Port:        task.Port,
 		AvailableAt: availableAt.UnixMilli(),
 		CreatedAt:   time.Now().UTC().UnixMilli(),
+		Generation:  task.Generation,
 	}
 	if availableAt.IsZero() {
 		entry.AvailableAt = 0
@@ -787,6 +792,7 @@ func unmarshalRedisOutboxEntry(raw string) (engine.OutboxEntry, error) {
 	encoded.Task.AutoDepth = encoded.AutoDepth
 	encoded.Task.ActivationID = encoded.Activation
 	encoded.Task.Port = encoded.Port
+	encoded.Task.Generation = encoded.Generation
 	if encoded.UnitIdx != nil {
 		encoded.Task.UnitIdx = *encoded.UnitIdx
 	} else {

@@ -816,7 +816,10 @@ func (m *workflowControlModule) handleExecuteWorkflow(w http.ResponseWriter, r *
 		writeFail(w, r, http.StatusBadRequest, "workflow_invalid", "workflow is required")
 		return
 	}
-	g, err := graph.Compile(req.Workflow)
+	// Compiled in the caller's namespace (server-issued by the authz wrapper,
+	// never the body): an inline definition carrying an xflow.subworkflow node
+	// pins its reference against the same registry the register path uses.
+	g, err := graph.CompileWithResolver(r.Context(), req.Workflow, m.subWorkflowResolver(namespace.FromContext(r.Context())))
 	if err != nil {
 		writeFail(w, r, http.StatusBadRequest, "workflow_compile_failed", err.Error())
 		return
@@ -1141,7 +1144,7 @@ func (m *workflowControlModule) buildWorkflowRecord(ctx context.Context, ns name
 		// identity rather than an untrusted body value.
 		def.Namespace = string(ns)
 	}
-	g, err := graph.Compile(def)
+	g, err := graph.CompileWithResolver(ctx, def, m.subWorkflowResolver(ns))
 	if err != nil {
 		return backend.WorkflowRecord{}, registrationDiagnostics{}, &WorkflowCompileError{err: err}
 	}
@@ -2560,6 +2563,24 @@ func (m *workflowControlModule) registry() backend.WorkflowRegistry {
 		return nil
 	}
 	return m.cp.WorkflowRegistry()
+}
+
+// subWorkflowResolver returns the compile-time resolver for definitions
+// registered in ns, or nil when no registry is wired (an engine-less unit-test
+// facade).
+//
+// The registration compile is where an xflow.subworkflow reference is pinned:
+// the resolver turns the author's reference into a (version, definition hash)
+// binding, and the persisted graph carries it. Nil is not a silent pass — a
+// definition with such a node then compiles unresolved and the engine refuses
+// to run it — but with no registry there is nothing to resolve against, which
+// is the same posture every other registry-dependent registration step takes.
+func (m *workflowControlModule) subWorkflowResolver(ns namespace.Namespace) graph.SubWorkflowResolver {
+	registry := m.registry()
+	if registry == nil {
+		return nil
+	}
+	return control.NewSubWorkflowResolver(registry).BoundToNamespace(ns)
 }
 
 // entryActivationManager returns the control plane's node-generic

@@ -168,6 +168,15 @@ func compileOneGroup(g *Graph, def *types.WorkflowDef, gd types.GroupDef, groupI
 		if g.nodes[idx].Kind == types.NodeKindSupply {
 			return GroupMeta{}, fmt.Errorf("member %q is a supply node; supply node may not be a group member", name)
 		}
+		// A group is dispatched as one unit into a runner, which then runs its
+		// members on the embedded engine. That engine has no control plane, so a
+		// member of this type could never create the child execution it needs;
+		// reject it at compile time rather than at group dispatch.
+		if g.nodes[idx].Type == types.SubWorkflowNodeType {
+			return GroupMeta{}, fmt.Errorf("member %q is a %s node, which is not allowed inside a group: "+
+				"a group runs inside a runner, which cannot create the child execution the node needs",
+				name, types.SubWorkflowNodeType)
+		}
 		set[idx] = true
 		members = append(members, idx)
 	}

@@ -18,6 +18,7 @@ func TestQueuedTaskPayloadKeepsSchedulerMetadataPrivate(t *testing.T) {
 		Type:         engine.TaskTypeNodeExec,
 		AutoDepth:    8,
 		ActivationID: 13,
+		Generation:   4,
 	}
 
 	payload, err := MarshalWithNamespace(task, namespace.Namespace("acme"))
@@ -28,12 +29,12 @@ func TestQueuedTaskPayloadKeepsSchedulerMetadataPrivate(t *testing.T) {
 	if err := json.Unmarshal(payload, &wire); err != nil {
 		t.Fatalf("payload unmarshal error = %v", err)
 	}
-	for _, key := range []string{"auto_depth", "activation_id"} {
+	for _, key := range []string{"auto_depth", "activation_id", "generation"} {
 		if _, ok := wire[key]; ok {
 			t.Fatalf("public scheduler key %q leaked into queue payload: %s", key, payload)
 		}
 	}
-	for _, key := range []string{"_auto_depth", "_activation_id", "_namespace"} {
+	for _, key := range []string{"_auto_depth", "_activation_id", "_generation", "_namespace"} {
 		if _, ok := wire[key]; !ok {
 			t.Fatalf("internal queue key %q missing from payload: %s", key, payload)
 		}
@@ -45,6 +46,9 @@ func TestQueuedTaskPayloadKeepsSchedulerMetadataPrivate(t *testing.T) {
 	}
 	if got.AutoDepth != task.AutoDepth || got.ActivationID != task.ActivationID {
 		t.Fatalf("scheduler metadata = %d/%d, want %d/%d", got.AutoDepth, got.ActivationID, task.AutoDepth, task.ActivationID)
+	}
+	if got.Generation != task.Generation {
+		t.Fatalf("generation = %d, want the carried %d", got.Generation, task.Generation)
 	}
 	if namespaceID != "acme" {
 		t.Fatalf("namespace = %q, want %q", namespaceID, "acme")

@@ -150,6 +150,13 @@ func (s *memoryState) CommitNode(_ context.Context, req engine.CommitNodeRequest
 		node.Attempt = current.Attempt
 		node.AutoDepth = current.AutoDepth
 	}
+	// The child a sub-workflow node waited on outlives its commit, like the
+	// privacy marker above: the record is rebuilt here, so without this the
+	// drill-down would exist only while the node was parked, and the exact
+	// child a finished node ran would be unreadable.
+	if current != nil {
+		node.ChildExecutionID = current.ChildExecutionID
+	}
 	s.nodes[key] = node
 	if req.StoreOutput {
 		s.outputs[key] = cloneData(req.Output)

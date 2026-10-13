@@ -482,6 +482,15 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 			engine.WithNodeSkipObserver(metrics.NewNodeSkipMetrics(cfg.Metrics)),
 		)
 	}
+	// Resolved before the engine is built: the engine needs the registry too,
+	// as the dispatch-time half of the sub-workflow resolver. Without the
+	// option an xflow.subworkflow node would fail at dispatch even though this
+	// plane is the process that owns the registry the reference is pinned to.
+	workflowRegistry := selectWorkflowRegistry(cfg)
+	if workflowRegistry != nil {
+		engOpts = append(engOpts, engine.WithSubWorkflowResolver(NewSubWorkflowResolver(workflowRegistry)))
+	}
+
 	eng := engine.New(cfg.Backend.State(), cfg.Backend.Queue(), engOpts...)
 
 	var runnerClaimObserver RunnerClaimObserver
@@ -550,7 +559,6 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	if cfg.EntryActivationStore != nil {
 		serverOpts = append(serverOpts, WithEntryActivationStore(cfg.EntryActivationStore))
 	}
-	workflowRegistry := selectWorkflowRegistry(cfg)
 	if workflowRegistry != nil {
 		serverOpts = append(serverOpts, WithWorkflowRegistry(workflowRegistry))
 	}

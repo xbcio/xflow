@@ -46,7 +46,7 @@ if tonumber(ARGV[#ARGV] or '0') == 1 then
     redis.call('HSET', KEYS[2], 'private_output', '1')
 end
 redis.call('SET', KEYS[1], 'suspended', 'EX', ttl)
-redis.call('HSET', KEYS[2], 'lease_id', '', 'lease_token', '', 'lease_issued_at_ms', '0', 'lease_ttl_ms', '0', 'lease_deadline_ms', '0', 'lease_task_type', '0', 'lease_payload', '')
+redis.call('HSET', KEYS[2], 'lease_id', '', 'lease_token', '', 'lease_issued_at_ms', '0', 'lease_ttl_ms', '0', 'lease_deadline_ms', '0', 'lease_task_type', '0', 'lease_payload', '', 'lease_generation', '0')
 redis.call('EXPIRE', KEYS[2], ttl)
 redis.call('ZREM', KEYS[4], ARGV[6])
 redis.call('DEL', KEYS[6], KEYS[7], KEYS[8], KEYS[9])

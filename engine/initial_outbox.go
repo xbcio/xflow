@@ -25,7 +25,7 @@ func submitInitialTasks(id types.ExecutionID, g *graph.Graph) []initialTask {
 				ExecutionID:  id,
 				NodeName:     start.Name,
 				NodeIdx:      g.StartIndex(),
-				Type:         TaskTypeNodeExec,
+				Type:         execTaskTypeForNode(start),
 				ActivationID: 1,
 			},
 			operation: fmt.Sprintf("enqueue start node %q", start.Name),
@@ -59,7 +59,7 @@ func submitInitialTasks(id types.ExecutionID, g *graph.Graph) []initialTask {
 				NodeName:    node.Name,
 				NodeIdx:     nodeIdx,
 				UnitIdx:     unitIdx,
-				Type:        TaskTypeNodeExec,
+				Type:        execTaskTypeForNode(node),
 			},
 			operation: fmt.Sprintf("enqueue root node %q", node.Name),
 		})
@@ -74,8 +74,13 @@ func submitInitialTasks(id types.ExecutionID, g *graph.Graph) []initialTask {
 // original create-then-enqueue semantics for backwards compatibility.
 //
 // A graph that declares settings.concurrency takes the concurrency admission
-// path instead, and fails closed when the StateStore cannot enforce one.
+// path instead, and fails closed when the StateStore cannot enforce one. A
+// graph containing sub-workflow nodes fails closed even earlier, when the
+// engine cannot resolve or park one (admitSubWorkflows).
 func (e *Engine) startExecution(ctx context.Context, snap *ExecutionSnapshot, tasks []initialTask) (types.ExecutionID, error) {
+	if err := e.admitSubWorkflows(snap.Graph); err != nil {
+		return "", err
+	}
 	admission := concurrencyAdmissionFor(ctx, snap.Graph)
 	if admission != nil {
 		return e.startLimitedExecution(ctx, snap, tasks, admission)

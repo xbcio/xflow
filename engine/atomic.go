@@ -570,11 +570,9 @@ func (e *Engine) afterAtomicCommitWithFlush(ctx context.Context, req CommitNodeR
 		})
 	}
 	if result.ExecutionDone {
-		if e.hooks != nil {
-			safeHook(ctx, e.logger, func(hookCtx context.Context) {
-				e.hooks.OnExecutionComplete(hookCtx, req.ExecutionID, result.ExecutionStatus)
-			})
-		}
+		// Through the shared funnel rather than the hook directly: the funnel is
+		// also where a concluded CHILD execution notifies its parent's wait.
+		e.notifyExecutionComplete(ctx, req.ExecutionID, result.ExecutionStatus)
 		e.EvictExecution(req.ExecutionID)
 	}
 	if flush && (result.Outcome == CommitOutcomeAccepted || result.Outcome == CommitOutcomeDuplicateTerminal) {
@@ -794,6 +792,11 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 			return handled, err
 		}
 		return e.handlePinnedNode(ctx, task, flush)
+	case TaskTypeSubWorkflow:
+		// Always consumed here: no runner declares a handler for it, and
+		// TaskRouting refuses the type permanently, so there is no escape to
+		// route to. Failures are node failures, not tasks handed on.
+		return e.handleSubWorkflowNode(ctx, task, flush)
 	case TaskTypeGroupExec:
 		if e.groupExecutor == nil {
 			// No local executor — let the Dispatcher route this to a remote runner.
@@ -815,7 +818,7 @@ func downstreamArrivals(g *graph.Graph, sourceIdx int, activePort string) []Down
 		if arrival.ArrivalCount == 0 {
 			meta := g.NodeAt(edge.DstIdx)
 			dstUnit := g.UnitIndexForNode(edge.DstIdx)
-			execType := TaskTypeNodeExec
+			execType := execTaskTypeForNode(meta)
 			if g.UnitKindAt(dstUnit) == graph.UnitGroup {
 				execType = TaskTypeGroupExec
 			}

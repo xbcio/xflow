@@ -79,6 +79,7 @@ func (f *fakeState) SuspendTaskLease(_ context.Context, lease *TaskLease, output
 	copy.LeaseTTL = 0
 	copy.LeaseTaskType = TaskTypeNodeExec
 	copy.LeasePayload = nil
+	copy.LeaseGeneration = 0
 	copy.PrivateOutput = privateOutput
 	if privateOutput {
 		copy.Output = nil
@@ -149,6 +150,7 @@ func (f *fakeState) ResetNodeForRetryWithOutbox(_ context.Context, id types.Exec
 	copy.LeaseTTL = 0
 	copy.LeaseTaskType = TaskTypeNodeExec
 	copy.LeasePayload = nil
+	copy.LeaseGeneration = 0
 	f.nodes[key] = &copy
 	f.putAtomicOutboxLocked(id, entry.ID, entry.Task, entry.AvailableAt)
 	return true, nil
@@ -170,6 +172,7 @@ func (f *fakeState) RevokeLeaseWithOutbox(_ context.Context, id types.ExecutionI
 	copy.LeaseTTL = 0
 	copy.LeaseTaskType = TaskTypeNodeExec
 	copy.LeasePayload = nil
+	copy.LeaseGeneration = 0
 	f.nodes[key] = &copy
 	f.putAtomicOutboxLocked(id, entry.ID, entry.Task, entry.AvailableAt)
 	return true, nil
@@ -244,6 +247,11 @@ func (f *fakeState) CommitNode(_ context.Context, req CommitNodeRequest) (Commit
 	if req.System && current != nil {
 		node.Attempt = current.Attempt
 		node.AutoDepth = current.AutoDepth
+	}
+	// Mirrors the real backends: the child a waiting node ran outlives its
+	// commit, so the drill-down survives the conclusion of the wait.
+	if current != nil {
+		node.ChildExecutionID = current.ChildExecutionID
 	}
 	f.nodes[key] = node
 	if req.StoreOutput {

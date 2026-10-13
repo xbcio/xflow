@@ -57,6 +57,7 @@ type MergeNode = flow.MergeNode
 type MapNode = flow.MapNode
 type WaitMode = flow.WaitMode
 type WaitNode = flow.WaitNode
+type SubWorkflowNode = flow.SubWorkflowNode
 
 type ApprovalMode = group.ApprovalMode
 type ApprovalParams = group.ApprovalParams
@@ -76,6 +77,8 @@ const (
 	WaitNodeType   = flow.WaitNodeType
 	WaitModeSignal = flow.WaitModeSignal
 	WaitModeTimer  = flow.WaitModeTimer
+
+	SubWorkflowNodeType = flow.SubWorkflowNodeType
 
 	ApprovalNodeType   = group.ApprovalNodeType
 	ApprovalAny        = group.ApprovalAny
@@ -345,6 +348,12 @@ func Merge(mode MergeMode) *MergeNode { return flow.Merge(mode) }
 func Map(itemsExpr string, batchSize int) *MapNode { return flow.Map(itemsExpr, batchSize) }
 func Wait(signalName string) *WaitNode             { return flow.Wait(signalName) }
 func WaitDuration(duration string) *WaitNode       { return flow.WaitDuration(duration) }
+
+// SubWorkflow runs another workflow as a child execution of this node's
+// execution; the node's output is the child's conclusion. The node is
+// engine-owned: it is compiled with its target version resolved, and its wait
+// and completion are engine state transitions rather than runner work.
+func SubWorkflow(workflow string) *SubWorkflowNode { return flow.SubWorkflow(workflow) }
 
 func Approval(approvers []string, mode ApprovalMode) *ApprovalNode {
 	return group.Approval(approvers, mode)

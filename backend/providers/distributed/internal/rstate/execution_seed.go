@@ -354,14 +354,22 @@ func (s *Store) SeedExecution(ctx context.Context, req engine.SeedExecutionReque
 	// at (see the ExecutionSeeder contract, step 2). Written before the Lua, with
 	// the retention record above and for the same reason: it is immutable
 	// metadata about the execution, and a projection that reads the execution
-	// must never find it without the origin it was created from.
-	if req.Execution.ParentID != "" || req.Execution.RerunFrom != "" {
+	// must never find it without the origin it was created from. parent_node and
+	// depth are the sub-workflow half of the same link.
+	if req.Execution.ParentID != "" || req.Execution.RerunFrom != "" ||
+		req.Execution.ParentNode != "" || req.Execution.Depth > 0 {
 		linkPipe := s.rdb.TxPipeline()
 		if req.Execution.ParentID != "" {
 			linkPipe.Set(ctx, execKey(t, execID, "parent"), string(req.Execution.ParentID), ttl)
 		}
 		if req.Execution.RerunFrom != "" {
 			linkPipe.Set(ctx, execKey(t, execID, "rerun_from"), req.Execution.RerunFrom, ttl)
+		}
+		if req.Execution.ParentNode != "" {
+			linkPipe.Set(ctx, execKey(t, execID, "parent_node"), req.Execution.ParentNode, ttl)
+		}
+		if req.Execution.Depth > 0 {
+			linkPipe.Set(ctx, execKey(t, execID, "depth"), strconv.Itoa(req.Execution.Depth), ttl)
 		}
 		if _, err := linkPipe.Exec(ctx); err != nil {
 			return engine.SeedExecutionResponse{}, fmt.Errorf("persist rerun origin for %q: %w", execID, err)

@@ -92,6 +92,7 @@ func builtinDescribers() []types.DescriptorProvider {
 		&flow.MergeNode{},
 		&flow.MapNode{},
 		&flow.WaitNode{},
+		&flow.SubWorkflowNode{},
 		&group.ApprovalNode{},
 		&group.NotificationNode{},
 		&timer.Node{},

@@ -136,6 +136,35 @@ func WithSuspendDisabled(err error) Option {
 	}
 }
 
+// WithSubWorkflowResolver wires the resolver an xflow.subworkflow node uses at
+// dispatch to fetch the target workflow revision its compiled binding pinned.
+//
+// Without one, a graph containing sub-workflow nodes is refused at submission
+// (ErrSubWorkflowUnsupported) rather than run: the resolver is both how the
+// child execution gets its graph and how the pinned definition hash is
+// re-verified before the child starts, so there is no reduced mode to fall back
+// to. The compile-time half of the same dependency is
+// graph.CompileWithResolver, which records the pin this resolver later serves.
+func WithSubWorkflowResolver(r graph.SubWorkflowResolver) Option {
+	return func(e *Engine) { e.subWorkflowResolver = r }
+}
+
+// WithMaxSubWorkflowDepth overrides the runtime bound on sub-workflow
+// child-execution nesting depth. The default is
+// graph.DefaultMaxSubWorkflowDepth; choose values by that constant's reasoning
+// (a bound no real orchestration reaches, and not an unlimited one).
+//
+// Values below 1 are ignored rather than clamped: zero would refuse every
+// sub-workflow node, which is a deployment that should say so by not wiring a
+// resolver at all, not by silently configuring a bound of zero.
+func WithMaxSubWorkflowDepth(depth int) Option {
+	return func(e *Engine) {
+		if depth > 0 {
+			e.maxSubWorkflowDepth = depth
+		}
+	}
+}
+
 // DefaultLeaseTTL is the lease deadline applied when an Engine is constructed
 // without an explicit override. It is intentionally short enough that crashed
 // runners are reclaimed within a minute while leaving slow handlers (e.g.
@@ -177,6 +206,8 @@ type Engine struct {
 	groupExecutor            GroupExecutor
 	batchBodyExecutor        BatchBodyExecutor
 	remoteBatchExecution     bool
+	subWorkflowResolver      graph.SubWorkflowResolver
+	maxSubWorkflowDepth      int
 	outerDeadline            time.Time
 	artifactUses             *types.ArtifactUseCollector
 
@@ -197,6 +228,7 @@ func New(state StateStore, queue TaskQueue, opts ...Option) *Engine {
 		defaultNodeTimeout:       DefaultNodeTimeout,
 		idempotencyTTL:           DefaultIdempotencyTTL,
 		idempotencyLease:         DefaultIdempotencyClaimLease,
+		maxSubWorkflowDepth:      graph.DefaultMaxSubWorkflowDepth,
 	}
 	for _, opt := range opts {
 		opt(e)
@@ -321,7 +353,7 @@ func (e *Engine) Invoke(ctx context.Context, g *graph.Graph, entryName string, p
 			ExecutionID:  id,
 			NodeName:     entry.Name,
 			NodeIdx:      entryIdx,
-			Type:         TaskTypeNodeExec,
+			Type:         execTaskTypeForNode(entry),
 			ActivationID: 1,
 		},
 		operation: fmt.Sprintf("enqueue entry node %q", entry.Name),

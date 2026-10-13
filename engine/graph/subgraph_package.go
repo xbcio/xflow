@@ -597,6 +597,17 @@ func compileTrusted(def *types.WorkflowDef, visibleSupplies, visibleOuterNodes [
 			// explicit-rejection rule as assignDisabledNodes.
 			return nil, fmt.Errorf("projected package %q: node %q: disabled is not supported in projected packages", def.Name, nd.Name)
 		}
+		if nd.Type == types.SubWorkflowNodeType {
+			// This path has its own field-by-field NodeDef -> NodeMeta copy and
+			// never runs the resolution pass, so a sub-workflow node here would
+			// silently lose its pinned binding and reach a runner's embedded
+			// engine as an engine-owned type. Unreachable through Compile (the
+			// type is banned from bodies and groups, the only projected
+			// contexts), but CompileProjectedPackage is public: reject rather
+			// than compile a package that cannot run.
+			return nil, fmt.Errorf("projected package %q: node %q is a %s node, which cannot run inside a projected package",
+				def.Name, nd.Name, types.SubWorkflowNodeType)
+		}
 		g.index[nd.Name] = i
 		g.nodes[i] = NodeMeta{
 			Name:               nd.Name,

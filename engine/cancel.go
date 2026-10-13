@@ -8,7 +8,9 @@ import (
 )
 
 // Cancel marks an execution as canceled, transitions all suspended nodes to
-// canceled status, and removes the execution from the in-memory cache.
+// canceled status, cancels the child executions its sub-workflow nodes are
+// waiting on and finalizes those parked nodes, and removes the execution from
+// the in-memory cache.
 func (e *Engine) Cancel(ctx context.Context, id types.ExecutionID) error {
 	// The graph cache is shared across namespaces, so a cache hit alone is not
 	// sufficient to authorize a cancel. loadActiveGraph confirms the execution
@@ -81,6 +83,20 @@ func (e *Engine) Cancel(ctx context.Context, id types.ExecutionID) error {
 		if err := e.state.UpsertNode(ctx, cancelSnap); err != nil {
 			return fmt.Errorf("mark suspended node %q/%q canceled: %w", id, nodeName, err)
 		}
+	}
+
+	// The children must stop too, and they stop BEFORE the parent is marked
+	// canceled: each child's own cancellation notifies this execution's node,
+	// and the canceling status set above is what keeps that notification from
+	// concluding the node with a failure this cancel already supersedes.
+	e.cancelSubWorkflowChildren(ctx, id, g)
+
+	// With the children stopping, the nodes they were parked under have no
+	// completion left to wait for: the completion path refuses them while this
+	// execution is canceling, so the cancel finalizes them here rather than
+	// leaving a waiting node for the sweeper to reclaim once per wait TTL.
+	if err := e.finalizeParkedSubWorkflowNodes(ctx, id, g); err != nil {
+		return err
 	}
 
 	if err := e.state.UpdateExecutionStatus(ctx, id, types.ExecutionStatusCanceled, ""); err != nil {

@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -79,6 +80,11 @@ var fanOutNodeTypes = map[string]bool{
 //     but the ban stays type-level rather than form-level: a member's form is
 //     one edit away from changing, and a ban that a parameter tweak can lift
 //     silently is not a ban.
+//   - xflow.subworkflow creates and waits on a child execution, which only the
+//     engine's own control path can do. A body member runs inside the runner's
+//     embedded engine, which has no execution-creation capability at all — a
+//     task carrying this type there would fail at dispatch. Type-level like
+//     xflow.map's, and for the same reason.
 //
 // The recursion ban that must stay extensible — a member that itself carries a
 // sub-graph body, making the sub-execution tree unbounded — is NOT expressed
@@ -87,8 +93,9 @@ var fanOutNodeTypes = map[string]bool{
 // that grows a body tomorrow is banned from nesting the day it lands, with no
 // list to update.
 var bannedBodyMemberTypes = map[string]bool{
-	"xflow.map":      true,
-	subgraphNodeType: true,
+	"xflow.map":               true,
+	types.SubWorkflowNodeType: true,
+	subgraphNodeType:          true,
 }
 
 // declaresSubgraphBody reports whether a node's parameters carry a "body" that
@@ -164,7 +171,27 @@ func SubgraphBodyMembers(params map[string]any) (members []types.NodeDef, ok boo
 // Compile validates a WorkflowDef and builds an immutable Graph IR.
 // It returns an error if the definition is nil, has no nodes, contains
 // duplicate node names, references unknown nodes, or contains a cycle.
+//
+// It compiles with no sub-workflow resolver, so an xflow.subworkflow node in
+// the definition is compiled UNRESOLVED: the node is kept, and the engine
+// refuses to dispatch it (ErrSubWorkflowUnresolved). Registration paths must
+// use CompileWithResolver instead; see that function.
 func Compile(def *types.WorkflowDef) (*Graph, error) {
+	return compile(context.Background(), def, nil)
+}
+
+// CompileWithResolver compiles a definition that may contain xflow.subworkflow
+// nodes, resolving each reference to a concrete, pinned target through
+// resolver.
+//
+// A nil resolver is equivalent to Compile: the sub-workflow nodes compile
+// unresolved rather than failing here, because a definition is not invalid
+// just because this caller cannot look other workflows up.
+func CompileWithResolver(ctx context.Context, def *types.WorkflowDef, resolver SubWorkflowResolver) (*Graph, error) {
+	return compile(ctx, def, resolver)
+}
+
+func compile(ctx context.Context, def *types.WorkflowDef, resolver SubWorkflowResolver) (*Graph, error) {
 	if def == nil {
 		return nil, errors.New("workflow definition is nil")
 	}
@@ -333,6 +360,23 @@ func Compile(def *types.WorkflowDef) (*Graph, error) {
 	if err := validateBodyOuterRefs(g); err != nil {
 		return nil, err
 	}
+	// Sub-workflow references resolve here: after every pure author-facing
+	// validation pass (so a malformed definition fails without a resolver
+	// round-trip) and before assignGraphHash, whose payload includes the
+	// pinned bindings this writes into the node metas.
+	var subWorkflows *subWorkflowResolverMemo
+	if resolver != nil {
+		subWorkflows = newSubWorkflowResolverMemo(resolver)
+	}
+	if err := compileSubWorkflowRefs(ctx, g, subWorkflows); err != nil {
+		return nil, err
+	}
+	// The reference walk runs after the binding pass: it follows each hop's
+	// pinned revision, and it needs this graph's node metas (which the pass
+	// above just wrote) to start from.
+	if err := checkSubWorkflowReferences(ctx, g, subWorkflows); err != nil {
+		return nil, err
+	}
 	// assignDisabledNodes before assignPinData: disabled takes precedence over
 	// a pin on the same node, so the flag is resolved first.
 	if err := assignDisabledNodes(def, g); err != nil {
@@ -439,6 +483,15 @@ func validateFAF(def *types.WorkflowDef) error {
 	if declaresSubgraphBody(node.Parameters) {
 		return fmt.Errorf("faf workflow node %q cannot define a subgraph body", node.Name)
 	}
+	// Unlike the kind check above, this one cannot rely on the node's declared
+	// Kind: xflow.subworkflow's kind is empty, which normalizes to action. FAF
+	// persists nothing, so there would be no node state to hold the waiting
+	// verdict and no execution record for the child to report its conclusion to.
+	if node.Type == types.SubWorkflowNodeType {
+		return fmt.Errorf("faf workflow node %q cannot be a %s node: an faf execution persists no state, "+
+			"so there is nowhere to record the child execution or the node's wait on it",
+			node.Name, types.SubWorkflowNodeType)
+	}
 	if refs := deriveNodesRefs(node.Parameters); len(refs) != 0 {
 		return fmt.Errorf("faf workflow node %q cannot reference $nodes statically: %s", node.Name, strings.Join(refs, ", "))
 	}
@@ -498,6 +551,9 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 			return 0, err
 		}
 		if err := validateNodeBody(nd); err != nil {
+			return 0, err
+		}
+		if err := validateSubWorkflowParams(nd); err != nil {
 			return 0, err
 		}
 		if err := validateTriggerReplicaCardinality(fmt.Sprintf("node %q", nd.Name), nd.Type, nd.Parameters, nd.ActivationReplicas); err != nil {

@@ -135,6 +135,16 @@ func (e *Engine) Rerun(ctx context.Context, req RerunRequest) (RerunResult, erro
 		return RerunResult{}, err
 	}
 
+	// Fail closed, like every other creation path. A rerun copies a prefix, and
+	// the copied nodes' results are all it reuses — but the plan's to-run set is
+	// not inspected here for the same reason the concurrency gate below does not
+	// inspect it: the graph declares what the deployment must be able to run,
+	// and an engine that cannot run it at all should refuse before a claim is
+	// taken rather than discover it one dispatch later.
+	if err := e.admitSubWorkflows(g); err != nil {
+		return RerunResult{}, fmt.Errorf("rerun %q: %w", req.ExecutionID, err)
+	}
+
 	admission := concurrencyAdmissionFor(ctx, g)
 	if admission != nil {
 		// Fail closed, like every other creation path: a store that cannot
@@ -354,7 +364,7 @@ func (e *Engine) rerunPlan(ctx context.Context, g *graph.Graph, req RerunRequest
 			NodeName: req.FromNode,
 			NodeIdx:  nodeIdx,
 			UnitIdx:  fromUnit,
-			Type:     TaskTypeNodeExec,
+			Type:     execTaskTypeForNode(g.NodeAt(nodeIdx)),
 		}
 	}
 	return plan, nil

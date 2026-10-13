@@ -165,6 +165,7 @@ func (g *Graph) NodeAt(i int) NodeMeta {
 	n.Retry = cloneRetry(n.Retry)
 	n.Output = cloneNodeOutputPolicy(n.Output)
 	n.PinOutput = cloneStringAnyMap(n.PinOutput)
+	n.SubWorkflow = cloneSubWorkflowBinding(n.SubWorkflow)
 	return n
 }
 
@@ -273,6 +274,24 @@ func (g *Graph) NodeDisabled(i int) bool {
 		return false
 	}
 	return g.nodes[i].Disabled
+}
+
+// SubWorkflowNodeIndexes returns the indexes of the nodes that name a child
+// execution to run (xflow.subworkflow), in declaration order, or nil when the
+// graph has none.
+//
+// It exists so the admission gate can ask whether this graph needs
+// sub-workflow support without walking NodeAt: NodeAt deep-copies the
+// node-attached compiled artifacts (Body, SubWorkflow), so a full scan would
+// allocate a copy of every node in order to find the few that matter.
+func (g *Graph) SubWorkflowNodeIndexes() []int {
+	var out []int
+	for i := range g.nodes {
+		if g.nodes[i].Type == types.SubWorkflowNodeType {
+			out = append(out, i)
+		}
+	}
+	return out
 }
 
 // TransientTTL returns the per-workflow transient active TTL override.
@@ -436,6 +455,22 @@ type NodeMeta struct {
 	// NodeMeta is hashed field-by-field, so a non-disabled node must not
 	// contribute a "Disabled":false and move every persisted graph's hash.
 	Disabled bool `json:",omitempty"`
+	// SubWorkflow is this node's compile-time resolved sub-workflow target, or
+	// nil when the node is not an xflow.subworkflow node — or when it is one
+	// that was compiled without a resolver, in which case the engine refuses to
+	// dispatch it rather than running it as an ordinary node.
+	//
+	// It rides on the node for the same reason Body does: the binding and the
+	// node are one wire object, so no snapshot can carry the node without the
+	// pin, and no separate graph-level field can be forgotten in
+	// Marshal/Unmarshal. Being part of NodeMeta also puts the pin into the
+	// graph hash, which makes "the same compiled graph" mean "the same child
+	// revisions" — exactly what a persisted execution's audit record needs.
+	//
+	// omitempty is load-bearing for the same reason as Body's: without it every
+	// node in every graph would contribute a "SubWorkflow":null and every
+	// already-persisted graph's hash would move.
+	SubWorkflow *SubWorkflowBinding `json:",omitempty"`
 }
 
 // Edge represents a directed connection between two nodes.

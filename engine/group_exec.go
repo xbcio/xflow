@@ -382,8 +382,8 @@ func (e *Engine) downstreamUnitArrivals(g *graph.Graph, srcUnit int, exits []Gro
 	for _, ue := range g.UnitOutEdges(srcUnit) {
 		a, ok := byDst[ue.DstUnit]
 		if !ok {
-			execType := TaskTypeNodeExec
 			target := g.UnitNodeIndex(ue.DstUnit)
+			execType := execTaskTypeForNode(g.NodeAt(target))
 			name := g.NodeAt(target).Name
 			if g.UnitKindAt(ue.DstUnit) == graph.UnitGroup {
 				gm := g.GroupMetaAt(ue.DstUnit)

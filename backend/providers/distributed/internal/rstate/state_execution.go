@@ -245,6 +245,19 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 		pipe.Set(ctx, execKey(t, e.ID, "parent"), string(e.ParentID), ttl)
 		keys = append(keys, execKey(t, e.ID, "parent"))
 	}
+	// The node of the parent execution that started this child, and the child's
+	// nesting depth. Immutable for the same reason the parent link is: they are
+	// what makes a sub-workflow child distinguishable from a rerun (which
+	// carries ParentID and RerunFrom, never ParentNode) and what the runtime
+	// depth bound reads on the next nest level.
+	if e.ParentNode != "" {
+		pipe.Set(ctx, execKey(t, e.ID, "parent_node"), e.ParentNode, ttl)
+		keys = append(keys, execKey(t, e.ID, "parent_node"))
+	}
+	if e.Depth > 0 {
+		pipe.Set(ctx, execKey(t, e.ID, "depth"), strconv.Itoa(e.Depth), ttl)
+		keys = append(keys, execKey(t, e.ID, "depth"))
+	}
 	if e.RerunFrom != "" {
 		pipe.Set(ctx, execKey(t, e.ID, "rerun_from"), e.RerunFrom, ttl)
 		keys = append(keys, execKey(t, e.ID, "rerun_from"))
@@ -969,6 +982,8 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 	errorCmd := pipe.Get(ctx, execKey(t, id, "error"))
 	parentCmd := pipe.Get(ctx, execKey(t, id, "parent"))
 	rerunFromCmd := pipe.Get(ctx, execKey(t, id, "rerun_from"))
+	parentNodeCmd := pipe.Get(ctx, execKey(t, id, "parent_node"))
+	depthCmd := pipe.Get(ctx, execKey(t, id, "depth"))
 	// Exec surfaces the first command error, and redis.Nil is the expected answer
 	// for most of these keys. The per-command results below are authoritative.
 	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
@@ -1060,6 +1075,24 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 	} else if err != redis.Nil {
 		return nil, fmt.Errorf("get execution rerun origin %q: %w", id, err)
 	}
+	// The sub-workflow link: which parent node started this child, and how deep
+	// it nests. Absent on every execution an engine started itself, hence the
+	// same redis.Nil tolerance as the origin above.
+	var parentNode string
+	if raw, err := parentNodeCmd.Result(); err == nil {
+		parentNode = raw
+	} else if err != redis.Nil {
+		return nil, fmt.Errorf("get execution parent node %q: %w", id, err)
+	}
+	var depth int
+	if raw, err := depthCmd.Result(); err == nil {
+		depth, err = strconv.Atoi(raw)
+		if err != nil {
+			return nil, fmt.Errorf("decode execution depth %q: %w", id, err)
+		}
+	} else if err != redis.Nil {
+		return nil, fmt.Errorf("get execution depth %q: %w", id, err)
+	}
 	return &engine.ExecutionSnapshot{
 		ID:           id,
 		Graph:        g,
@@ -1073,6 +1106,8 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 		TraceCarrier: traceCarrier,
 		Error:        execErr,
 		ParentID:     types.ExecutionID(parentID),
+		ParentNode:   parentNode,
+		Depth:        depth,
 		RerunFrom:    rerunFrom,
 	}, nil
 }

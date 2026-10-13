@@ -50,10 +50,16 @@ type memoryState struct {
 	suspended      map[string]*types.SuspendSpec // key: execID+"/"+nodeName
 	signals        map[string]map[string]any     // pre-delivered: key: execID+"/"+signalName
 	signalSets     map[string]map[string]map[string]any
-	resumed        map[string]bool                         // resume lock: key: execID+"/"+nodeName
-	subExecs       map[string][]*engine.SubExecution       // key: execID+"/"+nodeName
-	groupUnits     map[string]*groupUnitState              // key: "<execID>/<unitIdx>"
-	admissions     map[engine.AdmissionKey]*admissionEntry // trigger admission keys
+	resumed        map[string]bool                   // resume lock: key: execID+"/"+nodeName
+	subExecs       map[string][]*engine.SubExecution // key: execID+"/"+nodeName
+	// subWorkflowLinks is the parent-side record of each parked child
+	// execution, keyed like nodes. It is deliberately NOT cleared by
+	// RevokeLease/ResetNodeForRetry: the link outlives the wait so a reclaimed
+	// redelivery resumes the same child, and a retry overwrites it when the
+	// next generation parks.
+	subWorkflowLinks map[string]*engine.SubWorkflowLink      // key: execID+"/"+nodeName
+	groupUnits       map[string]*groupUnitState              // key: "<execID>/<unitIdx>"
+	admissions       map[engine.AdmissionKey]*admissionEntry // trigger admission keys
 	// idempotency holds the claims of keyed submissions, keyed by the
 	// deterministic execution ID the key derives (engine.IdempotentStateStore).
 	idempotency map[types.ExecutionID]*idempotencyClaim
@@ -79,28 +85,29 @@ type execEntry struct {
 
 func newMemoryState() *memoryState {
 	return &memoryState{
-		executions:     make(map[types.ExecutionID]*execEntry),
-		nodes:          make(map[string]*engine.NodeSnapshot),
-		inDegrees:      make(map[string]int),
-		activeIns:      make(map[string]int),
-		remaining:      make(map[types.ExecutionID]int),
-		failed:         make(map[types.ExecutionID]int),
-		advanced:       make(map[string]bool),
-		scheduled:      make(map[string]string),
-		outbox:         make(map[types.ExecutionID]map[string]memoryOutboxEntry),
-		deadOutbox:     make(map[types.ExecutionID]map[string]memoryOutboxEntry),
-		replayReceipts: make(map[types.ExecutionID]map[string]*memoryReplayReceipt),
-		replayEntryIdx: make(map[types.ExecutionID]map[string]string),
-		outputs:        make(map[string]map[string]any),
-		privateOutputs: make(map[string]bool),
-		suspended:      make(map[string]*types.SuspendSpec),
-		signals:        make(map[string]map[string]any),
-		signalSets:     make(map[string]map[string]map[string]any),
-		resumed:        make(map[string]bool),
-		subExecs:       make(map[string][]*engine.SubExecution),
-		groupUnits:     make(map[string]*groupUnitState),
-		doneCh:         make(map[types.ExecutionID]chan struct{}),
-		eventWatchers:  make(map[types.ExecutionID][]chan engine.ExecutionEvent),
+		executions:       make(map[types.ExecutionID]*execEntry),
+		nodes:            make(map[string]*engine.NodeSnapshot),
+		inDegrees:        make(map[string]int),
+		activeIns:        make(map[string]int),
+		remaining:        make(map[types.ExecutionID]int),
+		failed:           make(map[types.ExecutionID]int),
+		advanced:         make(map[string]bool),
+		scheduled:        make(map[string]string),
+		outbox:           make(map[types.ExecutionID]map[string]memoryOutboxEntry),
+		deadOutbox:       make(map[types.ExecutionID]map[string]memoryOutboxEntry),
+		replayReceipts:   make(map[types.ExecutionID]map[string]*memoryReplayReceipt),
+		replayEntryIdx:   make(map[types.ExecutionID]map[string]string),
+		outputs:          make(map[string]map[string]any),
+		privateOutputs:   make(map[string]bool),
+		suspended:        make(map[string]*types.SuspendSpec),
+		signals:          make(map[string]map[string]any),
+		signalSets:       make(map[string]map[string]map[string]any),
+		resumed:          make(map[string]bool),
+		subExecs:         make(map[string][]*engine.SubExecution),
+		subWorkflowLinks: make(map[string]*engine.SubWorkflowLink),
+		groupUnits:       make(map[string]*groupUnitState),
+		doneCh:           make(map[types.ExecutionID]chan struct{}),
+		eventWatchers:    make(map[types.ExecutionID][]chan engine.ExecutionEvent),
 	}
 }
 
@@ -780,23 +787,34 @@ func (s *memoryState) AcquireTaskLease(_ context.Context, lease *engine.TaskLeas
 		attempt = current.Attempt + 1
 	}
 	privateOutput := s.preserveOutputPrivacyLocked(key, false)
-	s.nodes[key] = &engine.NodeSnapshot{
-		ExecutionID:   lease.Task.ExecutionID,
-		Name:          lease.Task.NodeName,
-		NodeIdx:       lease.Task.NodeIdx,
-		UnitIdx:       lease.Task.UnitIdx,
-		Status:        types.NodeStatusRunning,
-		LeaseID:       lease.LeaseID,
-		LeaseToken:    lease.LeaseToken,
-		Attempt:       attempt,
-		ActivationID:  lease.Task.ActivationID,
-		AutoDepth:     lease.Task.AutoDepth,
-		LeaseIssuedAt: lease.IssuedAt,
-		LeaseTTL:      lease.TTL,
-		LeaseTaskType: lease.Task.Type,
-		LeasePayload:  cloneLeasePayload(lease.Task.Payload),
-		PrivateOutput: privateOutput,
+	node := &engine.NodeSnapshot{
+		ExecutionID:     lease.Task.ExecutionID,
+		Name:            lease.Task.NodeName,
+		NodeIdx:         lease.Task.NodeIdx,
+		UnitIdx:         lease.Task.UnitIdx,
+		Status:          types.NodeStatusRunning,
+		LeaseID:         lease.LeaseID,
+		LeaseToken:      lease.LeaseToken,
+		Attempt:         attempt,
+		ActivationID:    lease.Task.ActivationID,
+		AutoDepth:       lease.Task.AutoDepth,
+		LeaseIssuedAt:   lease.IssuedAt,
+		LeaseTTL:        lease.TTL,
+		LeaseTaskType:   lease.Task.Type,
+		LeasePayload:    cloneLeasePayload(lease.Task.Payload),
+		LeaseGeneration: lease.Task.Generation,
+		PrivateOutput:   privateOutput,
 	}
+	// The re-claim rebuilds the record, so anything not carried over is dropped.
+	// The child a sub-workflow node waited on outlives the lease exactly as it
+	// outlives the commit (see CommitNode): the redelivered wait resumes that
+	// child, and the drill-down reads it from here, so a re-claim that cleared
+	// it would lose both. The rstate acquire works on the existing hash and
+	// never touches the field, which is the behavior this mirrors.
+	if current != nil {
+		node.ChildExecutionID = current.ChildExecutionID
+	}
+	s.nodes[key] = node
 	return s.publicNodeSnapshotLocked(key, current), true, nil
 }
 
@@ -832,6 +850,7 @@ func (s *memoryState) resetNodeForRetryLocked(id types.ExecutionID, name string,
 	cp.LeaseTTL = 0
 	cp.LeaseTaskType = engine.TaskTypeNodeExec
 	cp.LeasePayload = nil
+	cp.LeaseGeneration = 0
 	cp.PrivateOutput = s.preserveOutputPrivacyLocked(key, cp.PrivateOutput)
 	if cp.PrivateOutput {
 		cp.Output = nil
@@ -867,6 +886,7 @@ func (s *memoryState) ListExpiredLeases(_ context.Context, before time.Time) ([]
 			AutoDepth:    ns.AutoDepth,
 			TaskType:     ns.LeaseTaskType,
 			Payload:      cloneLeasePayload(ns.LeasePayload),
+			Generation:   ns.LeaseGeneration,
 		})
 	}
 	// Group units lease through their own state map, not s.nodes. A sweeper
@@ -934,6 +954,7 @@ func (s *memoryState) revokeLeaseLocked(id types.ExecutionID, name string, token
 	cp.LeaseTTL = 0
 	cp.LeaseTaskType = engine.TaskTypeNodeExec
 	cp.LeasePayload = nil
+	cp.LeaseGeneration = 0
 	cp.PrivateOutput = s.preserveOutputPrivacyLocked(key, cp.PrivateOutput)
 	if cp.PrivateOutput {
 		cp.Output = nil
@@ -1045,6 +1066,7 @@ func (s *memoryState) SuspendTaskLease(_ context.Context, lease *engine.TaskLeas
 	cp.LeaseTTL = 0
 	cp.LeaseTaskType = engine.TaskTypeNodeExec
 	cp.LeasePayload = nil
+	cp.LeaseGeneration = 0
 	cp.PrivateOutput = privateOutput
 	if privateOutput {
 		cp.Output = nil
