@@ -16,6 +16,44 @@ var ErrWorkflowNotFound = errors.New("workflow not found")
 var ErrWorkflowReplaceUnsupported = errors.New("workflow registry does not support atomic replacement")
 var ErrWorkflowMutationIndeterminate = errors.New("workflow mutation outcome is indeterminate")
 
+// ErrWorkflowVersionImmutable is returned when a mutation would publish a
+// version label with a definition hash different from the one that label was
+// published with. Retiring a version (installing a different one, or rolling
+// back) appends it to the workflow's history, and a history entry is immutable:
+// it is the payload a pinned replay or a subworkflow reference resolves to.
+// Re-publishing the same label with the same hash is not a conflict.
+var ErrWorkflowVersionImmutable = errors.New("workflow version was already published with a different definition")
+
+// ErrWorkflowVersionNotFound is returned by GetWorkflowVersion when the
+// addressed workflow exists but holds no such version, current or archived. It
+// is deliberately distinct from ErrWorkflowNotFound so a caller can tell "this
+// workflow is gone" from "this workflow never published that version".
+var ErrWorkflowVersionNotFound = errors.New("workflow version not found")
+
+// WorkflowVersionImmutableError reports the version label whose published
+// definition hash the mutation would change. It satisfies errors.Is(err,
+// ErrWorkflowVersionImmutable) and, because every "this registration cannot
+// succeed as presented" classifier (the SDK's IsRetryableRegistrationError,
+// the registration-outcome metric, the legacy-hash reconciliation in
+// workflowhash.ReconcileAdd) already answers on ErrWorkflowConflict, it also
+// satisfies errors.Is(err, ErrWorkflowConflict).
+type WorkflowVersionImmutableError struct {
+	Version string
+}
+
+func (e *WorkflowVersionImmutableError) Error() string {
+	if e == nil || e.Version == "" {
+		return ErrWorkflowVersionImmutable.Error()
+	}
+	return fmt.Sprintf("%s: version %q", ErrWorkflowVersionImmutable, e.Version)
+}
+
+func (e *WorkflowVersionImmutableError) Is(target error) bool {
+	return target == ErrWorkflowVersionImmutable || target == ErrWorkflowConflict
+}
+
+func (e *WorkflowVersionImmutableError) Unwrap() error { return ErrWorkflowConflict }
+
 // WorkflowRecord is the authoritative persisted representation of a compiled
 // workflow. RegistryRevision is assigned by the registry and increases on every
 // successful mutation of the record. Callers must treat it as opaque except for
@@ -233,6 +271,56 @@ type WorkflowActivationProjectionOutbox interface {
 type DurableWorkflowReplaceCapability interface {
 	WorkflowReplaceCapability
 	WorkflowActivationProjectionOutbox
+}
+
+// DefaultWorkflowVersionRetention is how many retired versions a registry keeps
+// per workflow when no retention limit is configured. Retention bounds the
+// registry's growth (every retired version is a full record payload) and is
+// otherwise unobservable: no execution reads history after it is submitted, so
+// dropping the oldest entries only shortens how far back a rollback can reach.
+const DefaultWorkflowVersionRetention = 50
+
+// WorkflowVersionInfo is one row of a workflow's version list: the current
+// version (Current) or a retired one (Archived). It carries no definition —
+// a version list is a page of labels, and the definition is read one version
+// at a time via GetWorkflowVersion.
+//
+// RegistryRevision is the revision the record carried while it was live: for
+// the current row it is the live record's compare-and-swap token, for an
+// archived row it is the revision it was retired at. It orders retired rows
+// newest-first, which is also the order they were retired in.
+type WorkflowVersionInfo struct {
+	Version          string
+	DefinitionHash   string
+	RegistryRevision uint64
+	Current          bool
+	Archived         bool
+}
+
+// WorkflowVersionCapability is an optional capability implemented by registries
+// that keep a workflow's retired versions as an immutable history keyed by
+// workflow id. Version ownership follows the id (a rename preserves it), which
+// is why the history is addressed by id and never by (namespace, name).
+//
+// A registry without this capability serves no version history; callers that
+// need one must fail closed rather than treat "no such version" as "no
+// history".
+type WorkflowVersionCapability interface {
+	// ListWorkflowVersions returns every version of the addressed workflow:
+	// the current version first, then retired versions newest-retirement
+	// first. It returns ErrWorkflowNotFound when the workflow itself does not
+	// exist. Archived payloads are returned by GetWorkflowVersion, not here.
+	ListWorkflowVersions(ctx context.Context, id types.WorkflowID) ([]WorkflowVersionInfo, error)
+
+	// GetWorkflowVersion returns the addressed version, current or archived.
+	// The current version resolves to the same record GetWorkflow returns. An
+	// archived version resolves to the payload captured when it was retired,
+	// which is why its Key/Name may name the workflow as it was called then
+	// (a later rename does not rewrite history).
+	//
+	// ErrWorkflowNotFound means the workflow has no live record;
+	// ErrWorkflowVersionNotFound means it has no such version.
+	GetWorkflowVersion(ctx context.Context, id types.WorkflowID, version string) (WorkflowRecord, error)
 }
 
 // WorkflowListOptions bounds one enumeration page. It mirrors

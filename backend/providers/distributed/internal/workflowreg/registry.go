@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,6 +28,36 @@ const (
 
 type Registry struct {
 	rdb redis.UniversalClient
+	// versionRetention is how many retired versions one workflow keeps. Zero
+	// means unbounded; the default is backend.DefaultWorkflowVersionRetention.
+	versionRetention int
+}
+
+type Option func(*Registry)
+
+// WithWorkflowVersionRetention sets how many retired versions one workflow
+// keeps. Retiring beyond the limit evicts the oldest retired version, which
+// only shortens how far back a rollback can reach. A value <= 0 keeps every
+// retired version.
+func WithWorkflowVersionRetention(n int) Option {
+	return func(r *Registry) { r.versionRetention = n }
+}
+
+func New(rdb redis.UniversalClient, opts ...Option) *Registry {
+	r := &Registry{rdb: rdb, versionRetention: backend.DefaultWorkflowVersionRetention}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
+}
+
+// retentionScriptValue is the ARGV form of versionRetention: a negative limit
+// is sent as "0", which the scripts read as "keep every retired version".
+func (r *Registry) retentionScriptValue() string {
+	if r.versionRetention <= 0 {
+		return "0"
+	}
+	return strconv.Itoa(r.versionRetention)
 }
 
 type storedWorkflowRecord struct {
@@ -52,11 +83,8 @@ type storedWorkflowRecord struct {
 var (
 	_ backend.WorkflowReplaceCapability        = (*Registry)(nil)
 	_ backend.DurableWorkflowReplaceCapability = (*Registry)(nil)
+	_ backend.WorkflowVersionCapability        = (*Registry)(nil)
 )
-
-func New(rdb redis.UniversalClient) *Registry {
-	return &Registry{rdb: rdb}
-}
 
 // Registry v2 deliberately co-locates every mutable authority key for one
 // namespace in one Redis Cluster slot. The namespace itself is represented by
@@ -66,6 +94,8 @@ func New(rdb redis.UniversalClient) *Registry {
 //	xflow:wfreg:v2:{ns:<sha256(namespace)>}:bykey:<sha256(logical-key)>
 //	xflow:wfreg:v2:{ns:<sha256(namespace)>}:byid:<workflow-id>
 //	xflow:wfreg:v2:{ns:<sha256(namespace)>}:meta:<workflow-id>
+//	xflow:wfreg:v2:{ns:<sha256(namespace)>}:versions:<workflow-id>
+//	xflow:wfreg:v2:{ns:<sha256(namespace)>}:versions:<workflow-id>:meta
 //	xflow:wfreg:v2:{ns:<sha256(namespace)>}:revision
 //	xflow:wfreg:v2:{ns:<sha256(namespace)>}:op:<sha256(mutation-id)>
 //	xflow:wfreg:v2:{ns:<sha256(namespace)>}:projection:pending
@@ -79,6 +109,16 @@ func New(rdb redis.UniversalClient) *Registry {
 // under both lookup dimensions makes GetWorkflow and GetWorkflowByKey each a
 // single-snapshot HGET, while Lua can compare metadata without cjson-decoding a
 // potentially deeply nested Definition/Graph.
+//
+// name is the namespace's live-name index: one name maps to the one live
+// workflow id that holds it, so a mutation can refuse a second live record with
+// the same (namespace, name) inside the same atomic script.
+//
+// versions and versions:...:meta are one workflow id's retired-version history
+// (version label -> payload, version label -> "<definition-hash> <revision>").
+// The meta hash is small and carries everything the version list, the
+// immutability check, retention eviction and retirement ordering need, so none
+// of those has to read (or decode) a retired payload.
 func registryPrefix(t namespace.Namespace) string {
 	sum := sha256.Sum256([]byte(t))
 	return "xflow:wfreg:v2:{ns:" + hex.EncodeToString(sum[:]) + "}:"
@@ -121,6 +161,22 @@ func workflowDefHashKeyPrefix(t namespace.Namespace, _ string) string {
 
 func workflowRevisionKey(t namespace.Namespace) string {
 	return registryPrefix(t) + "revision"
+}
+
+// workflowVersionHistoryKey is one workflow id's retired-version history:
+// version label -> the complete record payload captured when that version was
+// retired. Keyed by id because the version line follows the workflow id, which
+// a rename or version change preserves.
+func workflowVersionHistoryKey(t namespace.Namespace, id types.WorkflowID) string {
+	return registryPrefix(t) + "versions:" + string(id)
+}
+
+// workflowVersionMetaKey is the compact sibling of the history hash:
+// version label -> "<definition-hash> <registry-revision>". The revision is the
+// retired payload's registry revision, which is allocated per install and is
+// therefore also the retirement order within one workflow.
+func workflowVersionMetaKey(t namespace.Namespace, id types.WorkflowID) string {
+	return registryPrefix(t) + "versions:" + string(id) + ":meta"
 }
 
 func workflowOperationKey(t namespace.Namespace, mutationID string) string {
@@ -205,7 +261,10 @@ if redis.call('EXISTS', KEYS[1]) == 1 then
 	if existingHash == ARGV[4] and existingPayload then
 		return {'existing', existingPayload}
 	end
-	return {'conflict', ''}
+	-- The (name, version) key is live under a different definition: the version
+	-- label is already published, and a label never resolves to two
+	-- definitions.
+	return {'version_immutable', ARGV[3]}
 end
 if redis.call('EXISTS', KEYS[2]) == 1 or redis.call('EXISTS', KEYS[3]) == 1 then
 	return {'id_conflict', ''}
@@ -340,6 +399,10 @@ redis.call('DEL', KEYS[1], KEYS[2], KEYS[3])
 if not hasByID and not hasByKey then
 	return {'notfound'}
 end
+-- Removing a workflow retires its identity: the live record is gone, ids are
+-- never reused, and its retired versions are addressed through the id, so
+-- keeping them would leak payloads nobody can reach.
+redis.call('DEL', KEYS[5], KEYS[6])
 redis.call('ZREM', KEYS[4], ARGV[1])
 return {'ok'}
 `)
@@ -403,6 +466,25 @@ end
 if not string.find(ARGV[12], '"registry_revision":0', 1, true) then
 	return redis.error_reply('workflow payload has no revision placeholder')
 end
+
+-- A retired version label is immutable: its stored payload is what a pinned
+-- replay or a subworkflow reference resolves to, so installing it under a
+-- different definition would silently repoint both. Re-installing the label
+-- with the payload it was retired with (a rollback) is allowed. A replace that
+-- keeps the current label retires nothing, so it is not checked here: the live
+-- record stays updatable in place.
+local retired = redis.call('HGET', KEYS[12], ARGV[9])
+if retired then
+	local separator = string.find(retired, ' ', 1, true)
+	local retiredHash = retired
+	if separator then
+		retiredHash = string.sub(retired, 1, separator - 1)
+	end
+	if retiredHash ~= ARGV[10] then
+		return {'version_immutable', ARGV[9], '', '', '', '', ''}
+	end
+end
+
 local revision = redis.call('INCR', KEYS[8])
 local payload = string.gsub(ARGV[12], '"registry_revision":0', '"registry_revision":' .. tostring(revision), 1)
 redis.call('DEL', KEYS[2], KEYS[3], KEYS[4])
@@ -415,6 +497,60 @@ redis.call('HSET', KEYS[6],
 redis.call('HSET', KEYS[7],
 	'id', ARGV[7], 'key', ARGV[8], 'version', ARGV[9], 'hash', ARGV[10],
 	'revision', tostring(revision), 'fingerprint', ARGV[11])
+
+-- History follows the surviving record id. A replace that keeps the label
+-- (an in-place update of the current version) retires nothing: writing the
+-- previous payload under the live label would leave one label resolving to two
+-- definitions and would trip the immutability check above on the next replace.
+if ARGV[15] ~= ARGV[9] then
+	if ARGV[3] ~= ARGV[7] then
+		local history = redis.call('HGETALL', KEYS[11])
+		if #history > 0 then
+			redis.call('HSET', KEYS[13], unpack(history))
+		end
+		redis.call('DEL', KEYS[11])
+		local meta = redis.call('HGETALL', KEYS[12])
+		if #meta > 0 then
+			redis.call('HSET', KEYS[14], unpack(meta))
+		end
+		redis.call('DEL', KEYS[12])
+	end
+	redis.call('HSET', KEYS[13], ARGV[15], previousPayload)
+	-- The retired payload's registry revision is allocated per install, so it
+	-- orders retirements within one workflow as well as reporting the revision
+	-- the row was retired at.
+	redis.call('HSET', KEYS[14], ARGV[15], ARGV[5] .. ' ' .. ARGV[6])
+end
+-- The installed version is live again, so it is no longer retired.
+redis.call('HDEL', KEYS[13], ARGV[9])
+redis.call('HDEL', KEYS[14], ARGV[9])
+
+-- Best-effort retention: evict the oldest retired versions beyond the limit.
+-- No reader of the live record depends on history, so a lost eviction only
+-- means a longer rollback reach, never a wrong answer.
+local retention = tonumber(ARGV[17]) or 0
+if retention > 0 then
+	local meta = redis.call('HGETALL', KEYS[14])
+	local retiredCount = #meta / 2
+	if retiredCount > retention then
+		local retiredVersions = {}
+		for index = 1, #meta, 2 do
+			local value = meta[index + 1]
+			local separator = string.find(value, ' ', 1, true)
+			local retiredRevision = 0
+			if separator then
+				retiredRevision = tonumber(string.sub(value, separator + 1)) or 0
+			end
+			retiredVersions[#retiredVersions + 1] = {version = meta[index], revision = retiredRevision}
+		end
+		table.sort(retiredVersions, function(a, b) return a.revision > b.revision end)
+		for index = retention + 1, #retiredVersions do
+			redis.call('HDEL', KEYS[13], retiredVersions[index].version)
+			redis.call('HDEL', KEYS[14], retiredVersions[index].version)
+		end
+	end
+end
+
 redis.call('HSET', KEYS[1],
 	'mutation_id', ARGV[1], 'fingerprint', ARGV[2], 'status', 'replaced',
 	'current_payload', payload, 'previous_id', ARGV[3],
@@ -779,8 +915,10 @@ func (r *Registry) addWorkflowV2(ctx context.Context, t namespace.Namespace, sto
 		return backend.WorkflowRecord{}, indeterminateMutation("add workflow "+strconv.Quote(stored.Key), err)
 	}
 	switch state {
-	case "conflict", "id_conflict":
+	case "id_conflict":
 		return backend.WorkflowRecord{}, backend.ErrWorkflowConflict
+	case "version_immutable":
+		return backend.WorkflowRecord{}, &backend.WorkflowVersionImmutableError{Version: stored.Version}
 	case "created", "existing":
 		record, decodeErr := unmarshalWorkflowRecord(payload)
 		if decodeErr != nil {
@@ -898,6 +1036,105 @@ func (r *Registry) GetWorkflowByKey(ctx context.Context, key string) (backend.Wo
 		return backend.WorkflowRecord{}, backend.ErrWorkflowNotFound
 	}
 	return record, nil
+}
+
+// ListWorkflowVersions returns the current version first, then every retired
+// version newest retirement first. Retired rows are ordered by the registry
+// revision the payload carried while it was live, which the retirement
+// recorded, so the order is the order the versions were retired in.
+func (r *Registry) ListWorkflowVersions(ctx context.Context, id types.WorkflowID) ([]backend.WorkflowVersionInfo, error) {
+	t := namespace.FromContext(ctx)
+	if err := namespace.Validate(t); err != nil {
+		return nil, fmt.Errorf("list workflow versions: %w", err)
+	}
+	// GetWorkflow, not a raw HGET: a workflow that still lives in v1 storage is
+	// imported on read, and the current row must describe the same record the
+	// caller would get from GetWorkflow.
+	current, err := r.GetWorkflow(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	meta, err := r.rdb.HGetAll(ctx, workflowVersionMetaKey(t, id)).Result()
+	if err != nil {
+		return nil, fmt.Errorf("list workflow versions %q: %w", id, err)
+	}
+	retired := make([]backend.WorkflowVersionInfo, 0, len(meta))
+	for version, value := range meta {
+		if version == current.Version {
+			// Promotion removes a label from history in the same script that
+			// installs it, so this can only describe a record written before
+			// that invariant existed. The current row already reports it.
+			continue
+		}
+		hash, revision := splitVersionMeta(value)
+		retired = append(retired, backend.WorkflowVersionInfo{
+			Version:          version,
+			DefinitionHash:   hash,
+			RegistryRevision: revision,
+			Archived:         true,
+		})
+	}
+	sort.Slice(retired, func(i, j int) bool {
+		if retired[i].RegistryRevision != retired[j].RegistryRevision {
+			return retired[i].RegistryRevision > retired[j].RegistryRevision
+		}
+		return retired[i].Version < retired[j].Version
+	})
+	rows := make([]backend.WorkflowVersionInfo, 0, len(retired)+1)
+	rows = append(rows, backend.WorkflowVersionInfo{
+		Version:          current.Version,
+		DefinitionHash:   current.DefinitionHash,
+		RegistryRevision: current.RegistryRevision,
+		Current:          true,
+	})
+	return append(rows, retired...), nil
+}
+
+// GetWorkflowVersion returns the addressed version of the workflow. The current
+// version (and an empty version, which callers use for "the current one")
+// resolves through GetWorkflow; anything else comes from the workflow's
+// retired-version history verbatim, including its Key and Name as they were
+// when it was retired.
+func (r *Registry) GetWorkflowVersion(ctx context.Context, id types.WorkflowID, version string) (backend.WorkflowRecord, error) {
+	t := namespace.FromContext(ctx)
+	if err := namespace.Validate(t); err != nil {
+		return backend.WorkflowRecord{}, fmt.Errorf("get workflow version: %w", err)
+	}
+	current, err := r.GetWorkflow(ctx, id)
+	if err != nil {
+		return backend.WorkflowRecord{}, err
+	}
+	if version == "" || version == current.Version {
+		return current, nil
+	}
+	raw, err := r.rdb.HGet(ctx, workflowVersionHistoryKey(t, id), version).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return backend.WorkflowRecord{}, backend.ErrWorkflowVersionNotFound
+	}
+	if err != nil {
+		return backend.WorkflowRecord{}, fmt.Errorf("get workflow version %q of %q: %w", version, id, err)
+	}
+	record, err := unmarshalWorkflowRecord(raw)
+	if err != nil {
+		return backend.WorkflowRecord{}, fmt.Errorf("get workflow version %q of %q: %w", version, id, err)
+	}
+	return record, nil
+}
+
+// splitVersionMeta decodes one retired-version meta entry, stored as
+// "<definition-hash> <registry-revision>". A value without a revision only
+// happens for a record written by an older script; its history row then sorts
+// last rather than being dropped.
+func splitVersionMeta(value string) (string, uint64) {
+	hash, revisionText, found := strings.Cut(value, " ")
+	if !found {
+		return value, 0
+	}
+	revision, err := strconv.ParseUint(revisionText, 10, 64)
+	if err != nil {
+		return hash, 0
+	}
+	return hash, revision
 }
 
 func (r *Registry) loadLegacyWorkflowByID(ctx context.Context, t namespace.Namespace, id types.WorkflowID) (backend.WorkflowRecord, bool, error) {
@@ -1110,6 +1347,8 @@ func (r *Registry) RemoveWorkflow(ctx context.Context, id types.WorkflowID) erro
 				workflowByKeyKey(t, key),
 				workflowIDMapKey(t, id),
 				workflowIndexKey(t),
+				workflowVersionHistoryKey(t, id),
+				workflowVersionMetaKey(t, id),
 			},
 			string(id),
 			key,
@@ -1240,6 +1479,10 @@ func (r *Registry) CompareAndReplaceWorkflow(ctx context.Context, req backend.Wo
 			workflowRevisionKey(t),
 			workflowProjectionPendingKey(t),
 			workflowIndexKey(t),
+			workflowVersionHistoryKey(t, req.Expected.ID),
+			workflowVersionMetaKey(t, req.Expected.ID),
+			workflowVersionHistoryKey(t, stored.ID),
+			workflowVersionMetaKey(t, stored.ID),
 		},
 		req.MutationID,
 		requestFingerprint,
@@ -1257,6 +1500,7 @@ func (r *Registry) CompareAndReplaceWorkflow(ctx context.Context, req backend.Wo
 		boolScriptValue(legacyIDOccupied),
 		req.Expected.Version,
 		string(t),
+		r.retentionScriptValue(),
 	).Result()
 	if err != nil {
 		return backend.WorkflowReplaceResult{}, indeterminateMutation("replace workflow "+strconv.Quote(req.MutationID), err)
@@ -1279,6 +1523,12 @@ func (r *Registry) CompareAndReplaceWorkflow(ctx context.Context, req backend.Wo
 		return backend.WorkflowReplaceResult{}, &backend.WorkflowReplaceConflictError{Kind: backend.WorkflowReplaceConflictDestinationID}
 	case "mutation_reused":
 		return backend.WorkflowReplaceResult{}, &backend.WorkflowReplaceConflictError{Kind: backend.WorkflowReplaceConflictMutationIDReuse}
+	case "version_immutable":
+		version, versionErr := scriptString(values[1])
+		if versionErr != nil {
+			return backend.WorkflowReplaceResult{}, indeterminateMutation("replace workflow "+strconv.Quote(req.MutationID), versionErr)
+		}
+		return backend.WorkflowReplaceResult{}, &backend.WorkflowVersionImmutableError{Version: version}
 	case string(backend.WorkflowReplaceUnchanged), string(backend.WorkflowReplaceReplaced):
 		return decodeWorkflowReplaceResult(state, values)
 	default:
