@@ -234,7 +234,7 @@ runner 可横向扩缩容：跑多个 runner 实例即可线性扩展执行吞�
 
 **MVP 现有边界**：
 - Runner Protocol 已提供 HTTP+JSON long polling 与 gRPC 通道；**streaming / credit-flow control 仍是实验性传输优化**，不应视为生产级可靠性承诺。
-- 没有 Relay Gateway；runner 必须能直接访问 server。
+- 没有 Relay Gateway；runner 必须能到达 server。runner 进程经环境代理的连接已支持：HTTP 传输按进程环境解析 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`（HTTPS 走 CONNECT 隧道），gRPC 通道使用 grpc-go 内建的环境代理支持。
 - 没有 remote SDK；提交、查询、信号 API 先由 `cmd/server` 或 `xflow.NewServer` 暴露的 server HTTP handler 提供。
 - **已实现** runner bearer token、mTLS、runner policy allowlist、dry-run rollout，以及 workflow-level namespace authorization、namespace 隔离边界和审计链路；G2 仍需在真实多 namespace、Redis HA 与多副本环境完成验收，而不是重新设计这些边界。
 - **已实现** runner matching 的 `node_type` / `node_version` 精确匹配、runner policy 过滤与容量 gating；tags / env / region / 权重调度仍在规划。
