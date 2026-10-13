@@ -50,6 +50,14 @@ type runnerConfigFile struct {
 	Seed struct {
 		RequestTimeout *string `yaml:"request_timeout"`
 	} `yaml:"seed"`
+	// Supply tunes the runner's own supply handling — the hosted supply cache
+	// that $supplies reads and the readiness gate consults.
+	Supply struct {
+		// PollInterval is how often every hosted supply is re-read from the
+		// control plane. Unset keeps the SDK default; the poll cannot be
+		// switched off.
+		PollInterval *string `yaml:"poll_interval"`
+	} `yaml:"supply"`
 	Metrics struct {
 		Addr           *string `yaml:"addr"`            // Prometheus scrape listen address
 		Report         *bool   `yaml:"report"`          // ship metrics to the server
@@ -211,6 +219,9 @@ func loadRunnerConfigFromBytesForProfile(data []byte, profile Profile) (runnerCo
 	if file.Seed.RequestTimeout != nil {
 		cfg.seedRequestTimeout = *file.Seed.RequestTimeout
 	}
+	if file.Supply.PollInterval != nil {
+		cfg.supplyPollInterval = *file.Supply.PollInterval
+	}
 	if file.Metrics.Addr != nil {
 		cfg.metricsAddr = *file.Metrics.Addr
 	}
@@ -319,6 +330,7 @@ var runnerConfigIssueOrder = []string{
 	"heartbeat-interval",
 	"poll-wait",
 	"seed-request-timeout",
+	"supply-poll-interval",
 	"allow-plaintext",
 	"require-supply-encryption",
 	"auto-labels",
@@ -403,6 +415,11 @@ func applyLookupEnvOverrides(cfg runnerConfig, lookupEnv func(string) (string, b
 	// in the SDK would no longer reach a runner configured through YAML.
 	if v, ok := lookupEnv("XFLOW_RUNNER_SEED_REQUEST_TIMEOUT"); ok {
 		cfg.seedRequestTimeout = v
+	}
+	// Same unset-stays-unset rule as the seed timeout: the supply poll's default
+	// and its floor belong to the runner service, not to this CLI layer.
+	if v, ok := lookupEnv("XFLOW_RUNNER_SUPPLY_POLL_INTERVAL"); ok {
+		cfg.supplyPollInterval = v
 	}
 	if v, ok := lookupEnv("XFLOW_RUNNER_TOKEN"); ok {
 		cfg.token = v
@@ -641,6 +658,17 @@ func validateRunnerConfig(cfg runnerConfig) error {
 	// fix, and accepting "60" (no unit) as unset would reproduce it exactly.
 	if cfg.seedRequestTimeout != "" {
 		if err := validatePositiveDuration("seed request timeout", cfg.seedRequestTimeout); err != nil {
+			return err
+		}
+	}
+	// Optional too, and validated only for shape here: whether the value is
+	// above the supply poll's floor is the SDK's rule (NewRunner refuses a
+	// shorter interval outright, because polling cannot be switched off), the
+	// same division of labor map_batch_concurrency uses. A missing unit is still
+	// caught here — accepting "60" as unset would silently pin the poll at the
+	// default the operator was trying to change.
+	if cfg.supplyPollInterval != "" {
+		if err := validatePositiveDuration("supply poll interval", cfg.supplyPollInterval); err != nil {
 			return err
 		}
 	}
@@ -945,6 +973,10 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 		clearRunnerConfigIssue(&cfg, "seed-request-timeout")
 		cfg.seedRequestTimeout = base.seedRequestTimeout
 	}
+	if base.changed["supply-poll-interval"] {
+		clearRunnerConfigIssue(&cfg, "supply-poll-interval")
+		cfg.supplyPollInterval = base.supplyPollInterval
+	}
 	// The credential-bearing flags. They were missing from this list, so they
 	// bound, parsed and validated and were then dropped here — only
 	// XFLOW_RUNNER_TOKEN and XFLOW_RUNNER_TLS_* ever took effect. Both halves
@@ -1097,6 +1129,16 @@ heartbeat:
 # headroom above its worst case, not merely above its mean.
 # seed:
 #   request_timeout: "60s"
+
+# How often this runner re-reads every supply it hosts, independently of the
+# control plane's supply hints. The hints are notification-only: a dropped
+# response, a runner restart, or a server failover loses one, and nothing else
+# re-reads a supply that already has content — the poll is what closes that gap,
+# so it cannot be switched off. Omitted keeps the 60s default. Lower it (down to
+# the 10s floor; anything below is refused) to shorten how long a supply change
+# can go unnoticed here.
+# supply:
+#   poll_interval: "60s"
 
 # Shared destination policy for xflow.http requests and Browser navigation.
 # Host patterns only: exact hosts, suffixes prefixed by ".", and wildcards

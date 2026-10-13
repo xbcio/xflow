@@ -386,11 +386,18 @@ type DependencyEdge struct {
 ### 9.2 执行状态（types/execution.go）
 
 ```go
-// ExecutionStatus 执行状态机：pending → running → [success|failed|canceling→canceled|timeout]
+// ExecutionStatus 执行状态机：pending → [queued →] running → [success|failed|canceling→canceled|timeout]
+// running 可与 paused 互相迁移（Pause: running→paused；Resume: paused→running）。
+// queued 只在 settings.concurrency 为 queue 模式且当前无槽位时出现；它是非终态，
+// 排队期间的信号先存、晋升后再投递。
 type ExecutionStatus string
 
 const (
     ExecutionStatusPending   ExecutionStatus = "pending"
+    ExecutionStatusQueued    ExecutionStatus = "queued"
+    // paused：运维暂停派发。已租出的任务跑完并提交，就绪集保留不派发；
+    // 非终态，且继续占用并发名额（与 queued 相反）。queued 不可 pause（409）。
+    ExecutionStatusPaused    ExecutionStatus = "paused"
     ExecutionStatusRunning   ExecutionStatus = "running"
     ExecutionStatusSuccess   ExecutionStatus = "success"
     ExecutionStatusFailed    ExecutionStatus = "failed"

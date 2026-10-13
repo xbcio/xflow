@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"context"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -538,4 +539,174 @@ func (r *entrySeedTestRuntime) State(_ context.Context, _ string) types.TriggerS
 // SeedExecutionFromEntry delegates to the embedded admitter.
 func (r *entrySeedTestRuntime) SeedExecutionFromEntry(ctx context.Context, req types.EntrySeedRequest) (types.EntrySeedResponse, error) {
 	return r.admitter.SeedExecutionFromEntry(ctx, req)
+}
+
+// --- concurrency refusal on the per-record path ---
+
+// refusingAdmitter refuses the first refuseFor admissions and accepts every one
+// after that, standing in for a REJECT-mode workflow whose slot frees.
+//
+// It records the arrival time and admission key of every attempt, which is what
+// lets a test read the retry cadence and prove a retry is a retry of the SAME
+// record rather than a fresh admission.
+//
+// onCall, when set, runs inside the admission call before the response is
+// returned, so a test can assert on the world as it stands at that attempt.
+// refuseFor and onCall are read-only once the activation starts.
+type refusingAdmitter struct {
+	refuseFor int32
+	onCall    func(attempt int)
+	calls     atomic.Int32
+
+	mu   sync.Mutex
+	at   []time.Time
+	keys []string
+}
+
+func (a *refusingAdmitter) SeedExecutionFromEntry(_ context.Context, req types.EntrySeedRequest) (types.EntrySeedResponse, error) {
+	n := int(a.calls.Add(1))
+	a.mu.Lock()
+	a.at = append(a.at, time.Now())
+	a.keys = append(a.keys, req.AdmissionKey)
+	a.mu.Unlock()
+	if a.onCall != nil {
+		a.onCall(n)
+	}
+	if int32(n) <= a.refuseFor {
+		return types.EntrySeedResponse{Refused: true}, nil
+	}
+	return types.EntrySeedResponse{Accepted: true, ExecutionID: "exec-admitted"}, nil
+}
+
+func (a *refusingAdmitter) snapshot() ([]time.Time, []string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]time.Time(nil), a.at...), append([]string(nil), a.keys...)
+}
+
+// TestKafkaEntrySeed_RefusedRecordIsRetriedNotSkipped is the offset half of the
+// concurrency refusal on the per-record path, and the property the retry loop
+// exists for.
+//
+// This path is the DEFAULT entry-seed shape — aggregation is opt-in — and its
+// worker is serial per partition. Returning on a refusal would let the worker
+// take the NEXT record, and that record's commit would advance the partition's
+// offset past one nothing persisted: Kafka redelivers strictly past the
+// committed offset, so nothing would ever bring the refused record back. The
+// test drives two records through a real per-message activation, has the
+// control plane refuse the first record twice, and asserts that
+//
+//   - the refused record is attempted again: three admissions for offset 800,
+//     two refusals then an acceptance;
+//   - every one of those attempts carries the identical admission key, so the
+//     retry is that record's retry and not a new admission;
+//   - nothing is committed at all while the refusal stands, so no commit can
+//     have skipped the held record;
+//   - the record behind it is admitted and committed only afterwards, in order
+//     (800 then 801); and
+//   - the wait between attempts is the batch path's backoff rather than a spin,
+//     and the partition reports itself blocked for exactly that window.
+func TestKafkaEntrySeed_RefusedRecordIsRetriedNotSkipped(t *testing.T) {
+	msgs := []Message{
+		{Topic: "orders", Partition: 3, Offset: 800, Value: []byte("held")},
+		{Topic: "orders", Partition: 3, Offset: 801, Value: []byte("behind")},
+	}
+	consumer := &commitRecordingConsumer{inner: newScriptedConsumer(msgs)}
+
+	admitter := &refusingAdmitter{refuseFor: 2}
+	admitter.onCall = func(attempt int) {
+		// The first three attempts are the held record's (two refusals and the
+		// acceptance). A commit visible at any of them would mean an offset
+		// advanced while the record in front of it was still unpersisted.
+		if attempt <= 3 {
+			if commits := consumer.getCommits(); len(commits) != 0 {
+				t.Errorf("attempt %d: %v committed while offset 800 was still held; "+
+					"a commit behind a held record skips it permanently", attempt, commits)
+			}
+		}
+	}
+
+	rt := &entrySeedTestRuntime{admitter: admitter}
+	in := &types.TriggerActivateInput{
+		WorkflowID: "wf1",
+		NodeName:   "trigger",
+		Params:     map[string]any{"entry_unit_id": "g1", "workflow_version": "v1"},
+		Runtime:    rt,
+	}
+
+	o := &recordingBatchObserver{}
+	SetObserver(o)
+	defer SetObserver(nil)
+
+	sub := activatePerMessage(context.Background(), in, ConsumerConfig{}, consumer, nil)
+	defer func() { _ = sub.Close(context.Background()) }()
+
+	// Generous: the test's own subject is a two-second refusal, and a cadence
+	// that regressed past this bound would fail here rather than hang.
+	deadline := time.Now().Add(15 * time.Second)
+	for len(consumer.getCommits()) < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	commits := consumer.getCommits()
+	if len(commits) != 2 {
+		at, keys := admitter.snapshot()
+		t.Fatalf("commit count = %d, want 2 ([800] then [801]); attempts=%v gaps=%v",
+			len(commits), keys, gaps(at))
+	}
+	if commits[0][0].Offset != 800 || commits[1][0].Offset != 801 {
+		t.Fatalf("commit order = %d then %d, want 800 then 801: a commit behind the "+
+			"held record would have skipped it", commits[0][0].Offset, commits[1][0].Offset)
+	}
+
+	at, keys := admitter.snapshot()
+	wantKeys := []string{
+		"/wf1/v1/g1/orders/3/800-800",
+		"/wf1/v1/g1/orders/3/800-800",
+		"/wf1/v1/g1/orders/3/800-800",
+		"/wf1/v1/g1/orders/3/801-801",
+	}
+	if !reflect.DeepEqual(keys, wantKeys) {
+		t.Fatalf("admission keys = %v, want %v — the retry must repeat the same "+
+			"admission, and the second record must not be admitted before the first",
+			keys, wantKeys)
+	}
+
+	// The cadence: aggregateRetryDelay's flat window, one second in entry-seed
+	// mode (defaultEntrySeedFlushInterval). Only the lower bound is asserted —
+	// "it waited" is the property that distinguishes a backoff from a spin, and
+	// the attempt count above already rules the spin out. No upper bound: a
+	// loaded machine can stretch a 1s timer, and the total wait above is the
+	// bound that matters.
+	for i := 1; i < 3; i++ {
+		if gap := at[i].Sub(at[i-1]); gap < 900*time.Millisecond {
+			t.Errorf("gap between attempt %d and %d = %v, want >= the 1s flat retry "+
+				"window: a refusal must be backed off, not spun on", i, i+1, gap)
+		}
+	}
+
+	if pairs := o.admissionPairs(); !reflect.DeepEqual(pairs, []string{
+		"refused/concurrency_limit", "refused/concurrency_limit",
+		"accepted/none", "accepted/none",
+	}) {
+		t.Errorf("admissions = %v, want each attempt counted, refusals included: "+
+			"an attempt only the retry loop saw would make a throttled partition "+
+			"read as an idle one", pairs)
+	}
+	// The gauge says the partition STOPPED, which is the half the refusal
+	// counter cannot report — and it is cleared on the way out, so a resumed
+	// partition does not stay blocked in the metric forever.
+	if got := o.blockedTransitions(); !reflect.DeepEqual(got, []string{"orders/3=true", "orders/3=false"}) {
+		t.Errorf("blocked transitions = %v, want [orders/3=true orders/3=false]", got)
+	}
+}
+
+// gaps renders the intervals between attempts, for a failure message that says
+// whether the loop was retrying or spinning.
+func gaps(at []time.Time) []time.Duration {
+	out := make([]time.Duration, 0, len(at))
+	for i := 1; i < len(at); i++ {
+		out = append(out, at[i].Sub(at[i-1]))
+	}
+	return out
 }

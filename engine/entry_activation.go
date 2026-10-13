@@ -81,7 +81,12 @@ type EntryActivation struct {
 	// existed (decodes to nil), which leaves the runner registering no consumers —
 	// exactly the behaviour that preceded this field.
 	SupplyConsumers []SupplyConsumerBinding
-	Desired         bool
+	// WorkflowTimezone is the workflow's validated settings.timezone, or ""
+	// when unset. The hosting runner hands it to the trigger so wall-clock
+	// schedules can default to it. Desired-state, owned by Upsert. Absent on
+	// records written before this field existed (decodes to "").
+	WorkflowTimezone string
+	Desired          bool
 	// RegistryRevision fences desired-state projection writes. A non-zero value
 	// is the authoritative workflow registry revision that produced this record.
 	// Upsert ignores a lower revision, and revision zero is the legacy mode: it

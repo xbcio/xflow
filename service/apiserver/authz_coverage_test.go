@@ -170,16 +170,31 @@ func TestEveryOperationHasRouteConsumer(t *testing.T) {
 // is an authorization hole — this is the half a static scan cannot prove
 // because bare-mode routes use string op labels, not Op constants.
 //
-// Coverage: every entry in guardSamples except PathHealthz/PathReadyz. The
-// entry-seed route POST /v1/executions is deliberately absent from
-// UserFacingPaths (spec §0.1, runner protocol face) so it is not exercised
-// here; it is behind the same authz wrapper in module_control.registerAuthzRoutes
-// and is covered by entry_seed_endpoint_test.go.
+// Coverage: every entry in guardSamples except PathHealthz/PathReadyz and
+// PathWebhookEntry. The entry-seed route POST /v1/executions is deliberately
+// absent from UserFacingPaths (spec §0.1, runner protocol face) so it is not
+// exercised here; it is behind the same authz wrapper in
+// module_control.registerAuthzRoutes and is covered by
+// entry_seed_endpoint_test.go. PathWebhookEntry is exempted above.
 func TestEveryProtectedUserPathRejectsUnauthenticated(t *testing.T) {
 	mux := newFullGuardMux(t)
 
 	for _, gs := range guardSamples {
 		if gs.pathConst == PathHealthz || gs.pathConst == PathReadyz {
+			continue
+		}
+		// PathWebhookEntry is exempt for a different reason than the probes: it is
+		// NOT an unauthenticated route, it is a route authenticated by a mechanism
+		// other than the principal. An external webhook sender has no platform
+		// credential to present, so the entry's own HMAC signature (over the
+		// request body, under a secret the workflow's definition names) is the
+		// authentication, and an unsigned request is refused by the handler with
+		// 401. TestWebhookEntryRejectsBadSignature is the half that keeps this
+		// exemption from being a hole: every missing, malformed and mismatched
+		// signature answers 401. Nothing else about this route is open — the
+		// workflow, the entry unit and the namespace are all resolved from the
+		// definition, never from the request.
+		if gs.pathConst == PathWebhookEntry {
 			continue
 		}
 		req := httptest.NewRequest(gs.method, gs.sample, nil)

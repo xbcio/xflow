@@ -38,6 +38,18 @@ func activationWithSupply(t *testing.T, unitID, runnerID string, desired bool, n
 // The server must only hint a runner about supplies that runner actually hosts a
 // consumer for. Broadcasting every supply to every runner would make each one
 // fetch content it has no use for.
+
+// hintFor returns the hint entry for (ns, node). A hint slice carries each
+// supply's own namespace, so a lookup must name both halves of the identity.
+func hintFor(hints []protocol.SupplyHint, ns namespace.Namespace, node string) (protocol.SupplyHint, bool) {
+	for _, h := range hints {
+		if h.Namespace == string(ns) && h.Node == node {
+			return h, true
+		}
+	}
+	return protocol.SupplyHint{}, false
+}
+
 func TestSupplyHintsOnlyForRunnersThatHostTheConsumer(t *testing.T) {
 	ctx := context.Background()
 	store_ := NewMemoryEntryActivationStore()
@@ -70,8 +82,9 @@ func TestSupplyHintsOnlyForRunnersThatHostTheConsumer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSupply shared-rules: %v", err)
 	}
-	if len(hintsA) != 1 || hintsA["rules"] != wantA.ContentHash {
-		t.Fatalf("hintsA = %#v, want {rules: %s}", hintsA, wantA.ContentHash)
+	gotA, okA := hintFor(hintsA, namespace.Default, "rules")
+	if len(hintsA) != 1 || !okA || gotA.Hash != wantA.ContentHash {
+		t.Fatalf("hintsA = %#v, want one entry for (default, rules) with hash %s", hintsA, wantA.ContentHash)
 	}
 
 	hintsB := h.HintsForRunner(ctx, "runner-b")
@@ -79,8 +92,9 @@ func TestSupplyHintsOnlyForRunnersThatHostTheConsumer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSupply other-resource: %v", err)
 	}
-	if len(hintsB) != 1 || hintsB["other"] != wantB.ContentHash {
-		t.Fatalf("hintsB = %#v, want {other: %s}", hintsB, wantB.ContentHash)
+	gotB, okB := hintFor(hintsB, namespace.Default, "other")
+	if len(hintsB) != 1 || !okB || gotB.Hash != wantB.ContentHash {
+		t.Fatalf("hintsB = %#v, want one entry for (default, other) with hash %s", hintsB, wantB.ContentHash)
 	}
 
 	hintsC := h.HintsForRunner(ctx, "runner-c")
@@ -152,10 +166,11 @@ func TestHintCarriesCurrentContentHash(t *testing.T) {
 
 	h := NewSupplyHinter(store_, supplies, []namespace.Namespace{namespace.Default}, nil)
 	hints := h.HintsForRunner(ctx, "runner-a")
-	if len(hints) != 1 || hints["rules"] != rec2.ContentHash {
-		t.Fatalf("hints = %#v, want {rules: %s} (current hash)", hints, rec2.ContentHash)
+	got, ok := hintFor(hints, namespace.Default, "rules")
+	if len(hints) != 1 || !ok || got.Hash != rec2.ContentHash {
+		t.Fatalf("hints = %#v, want one entry for (default, rules) with the current hash %s", hints, rec2.ContentHash)
 	}
-	if hints["rules"] == store.ContentHash([]byte(`v1`)) {
+	if got.Hash == store.ContentHash([]byte(`v1`)) {
 		t.Fatal("hint carries the STALE v1 hash, not the current one")
 	}
 }
@@ -194,16 +209,16 @@ func TestHintsAreEmptyMapNotNilWhenNothingChanged(t *testing.T) {
 // stopped) must not linger from a previous heartbeat's report.
 func TestMemorySupplyObservedRecordReplacesNotMerges(t *testing.T) {
 	s := NewMemorySupplyObserved()
-	s.Record("runner-a", map[string]string{"rules": "hash1", "other": "hash2"})
-	s.Record("runner-a", map[string]string{"rules": "hash3"}) // "other" dropped this round
+	s.Record("runner-a", []protocol.SupplyObservation{obs("rules", "hash1"), obs("other", "hash2")})
+	s.Record("runner-a", []protocol.SupplyObservation{obs("rules", "hash3")}) // "other" dropped this round
 
 	snap := s.Snapshot()
 	got, ok := snap["runner-a"]
 	if !ok {
 		t.Fatal("runner-a missing from snapshot")
 	}
-	if len(got) != 1 || got["rules"] != "hash3" {
-		t.Fatalf("got = %#v, want exactly {rules: hash3} (merge would leave 'other' behind)", got)
+	if len(got) != 1 || got[okey("rules")] != "hash3" {
+		t.Fatalf("got = %#v, want exactly {default/rules: hash3} (merge would leave 'other' behind)", got)
 	}
 }
 
@@ -211,7 +226,7 @@ func TestMemorySupplyObservedRecordReplacesNotMerges(t *testing.T) {
 // hosts any supply-dependent activation).
 func TestMemorySupplyObservedEmptyReportClears(t *testing.T) {
 	s := NewMemorySupplyObserved()
-	s.Record("runner-a", map[string]string{"rules": "hash1"})
+	s.Record("runner-a", []protocol.SupplyObservation{obs("rules", "hash1")})
 	s.Record("runner-a", nil)
 
 	snap := s.Snapshot()
@@ -224,13 +239,13 @@ func TestMemorySupplyObservedEmptyReportClears(t *testing.T) {
 // the sink's internal state.
 func TestMemorySupplyObservedSnapshotIsIndependentCopy(t *testing.T) {
 	s := NewMemorySupplyObserved()
-	s.Record("runner-a", map[string]string{"rules": "hash1"})
+	s.Record("runner-a", []protocol.SupplyObservation{obs("rules", "hash1")})
 
 	snap := s.Snapshot()
-	snap["runner-a"]["rules"] = "corrupted"
+	snap["runner-a"][okey("rules")] = "corrupted"
 
 	snap2 := s.Snapshot()
-	if snap2["runner-a"]["rules"] != "hash1" {
+	if snap2["runner-a"][okey("rules")] != "hash1" {
 		t.Fatalf("internal state corrupted via returned map: %#v", snap2)
 	}
 }
@@ -279,7 +294,7 @@ func TestHeartbeatAcceptsObservedWithNilSink(t *testing.T) {
 
 	core := &Core{runners: dir, pollWait: time.Second}
 	req := heartbeatReq("runner-a", sess.SessionID)
-	req.SupplyObserved = map[string]string{"rules": "hash1"}
+	req.SupplyObserved = []protocol.SupplyObservation{obs("rules", "hash1")}
 	if _, err := core.heartbeat(ctx, req, TransportInfo{}); err != nil {
 		t.Fatalf("heartbeat with observed report and nil sink must succeed: %v", err)
 	}
@@ -314,18 +329,21 @@ func TestHeartbeatWiresHinterAndObservedSink(t *testing.T) {
 
 	core := &Core{runners: dir, pollWait: time.Second, supplyHinter: hinter, supplyObserved: observed}
 	req := heartbeatReq("runner-a", sess.SessionID)
-	req.SupplyObserved = map[string]string{"rules": rec.ContentHash}
+	req.SupplyObserved = []protocol.SupplyObservation{
+		{Namespace: string(namespace.Default), Node: "rules", Hash: rec.ContentHash},
+	}
 	resp, err := core.heartbeat(ctx, req, TransportInfo{})
 	if err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
-	if len(resp.SupplyHints) != 1 || resp.SupplyHints["rules"] != rec.ContentHash {
-		t.Fatalf("SupplyHints = %#v, want {rules: %s}", resp.SupplyHints, rec.ContentHash)
+	hint, ok := hintFor(resp.SupplyHints, namespace.Default, "rules")
+	if len(resp.SupplyHints) != 1 || !ok || hint.Hash != rec.ContentHash {
+		t.Fatalf("SupplyHints = %#v, want one entry for (default, rules) with hash %s", resp.SupplyHints, rec.ContentHash)
 	}
 
 	snap := observed.Snapshot()
-	if snap["runner-a"]["rules"] != rec.ContentHash {
-		t.Fatalf("observed snapshot = %#v, want runner-a/rules = %s", snap, rec.ContentHash)
+	if snap["runner-a"][okey("rules")] != rec.ContentHash {
+		t.Fatalf("observed snapshot = %#v, want runner-a/(default, rules) = %s", snap, rec.ContentHash)
 	}
 }
 
@@ -476,10 +494,11 @@ func TestOneUnreadableSupplyDoesNotSuppressTheOthers(t *testing.T) {
 
 	h := NewSupplyHinter(store_, src, []namespace.Namespace{namespace.Default}, logger)
 	got := h.HintsForRunner(ctx, "runner-a")
-	if len(got) != 1 || got["good"] != rec.ContentHash {
-		t.Fatalf("hints = %#v, want {good: %s}: one bad row must not suppress the rest", got, rec.ContentHash)
+	goodHint, ok := hintFor(got, namespace.Default, "good")
+	if len(got) != 1 || !ok || goodHint.Hash != rec.ContentHash {
+		t.Fatalf("hints = %#v, want one entry for (default, good) with hash %s: one bad row must not suppress the rest", got, rec.ContentHash)
 	}
-	if _, bad := got["broken"]; bad {
+	if _, bad := hintFor(got, namespace.Default, "broken"); bad {
 		t.Errorf("hints = %#v, want no hint for the unreadable supply", got)
 	}
 	if len(logger.msgs) != 1 {
@@ -646,5 +665,62 @@ func TestHintsWithNoObserverStillReportByLogOnly(t *testing.T) {
 	}
 	if len(logger.msgs) != 1 {
 		t.Errorf("Warn calls = %v, want 1: the log half must not depend on the observer", logger.msgs)
+	}
+}
+
+// --- namespaces ---
+
+// Two namespaces may each host a supply node called "rules", and the hint set
+// must keep them apart: the runner would otherwise be told to fetch one
+// namespace's hash for the other namespace's supply, and the last namespace
+// enumerated would silently decide which. This is a regression test — the
+// dedupe used to key on the node name alone, so the second namespace's entry
+// was dropped as a duplicate.
+func TestSupplyHintsCarryNamespaceAndDoNotMergeAcrossNamespaces(t *testing.T) {
+	ctx := context.Background()
+	store_ := NewMemoryEntryActivationStore()
+
+	a := activationWithSupply(t, "unit-a", "runner-a", true, "rules", "shared-rules")
+	a.Namespace = "tenant-a"
+	b := activationWithSupply(t, "unit-b", "runner-a", true, "rules", "shared-rules")
+	b.Namespace = "tenant-b"
+	for _, act := range []engine.EntryActivation{a, b} {
+		if err := store_.Upsert(ctx, act); err != nil {
+			t.Fatalf("Upsert %s: %v", act.Namespace, err)
+		}
+	}
+
+	// The SAME resource name in both namespaces, with different content: the
+	// hashes must differ, which is what makes a merged hint detectable.
+	supplies := memstore.New()
+	recA, err := supplies.PutSupply(ctx, &store.SupplyResource{
+		Namespace: "tenant-a", Name: "shared-rules", Content: []byte(`{"tenant":"a"}`),
+	}, nil)
+	if err != nil {
+		t.Fatalf("PutSupply tenant-a: %v", err)
+	}
+	recB, err := supplies.PutSupply(ctx, &store.SupplyResource{
+		Namespace: "tenant-b", Name: "shared-rules", Content: []byte(`{"tenant":"b"}`),
+	}, nil)
+	if err != nil {
+		t.Fatalf("PutSupply tenant-b: %v", err)
+	}
+	if recA.ContentHash == recB.ContentHash {
+		t.Fatal("test setup: the two namespaces' content hashes must differ for a merge to be observable")
+	}
+
+	h := NewSupplyHinter(store_, supplies, []namespace.Namespace{"tenant-a", "tenant-b"}, nil)
+	hints := h.HintsForRunner(ctx, "runner-a")
+
+	if len(hints) != 2 {
+		t.Fatalf("hints = %#v, want one entry per namespace: a name-keyed dedupe collapses them into one", hints)
+	}
+	gotA, okA := hintFor(hints, "tenant-a", "rules")
+	if !okA || gotA.Hash != recA.ContentHash {
+		t.Fatalf("hint for (tenant-a, rules) = %#v, ok=%v; want tenant-a's hash %s", gotA, okA, recA.ContentHash)
+	}
+	gotB, okB := hintFor(hints, "tenant-b", "rules")
+	if !okB || gotB.Hash != recB.ContentHash {
+		t.Fatalf("hint for (tenant-b, rules) = %#v, ok=%v; want tenant-b's hash %s", gotB, okB, recB.ContentHash)
 	}
 }

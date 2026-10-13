@@ -412,7 +412,7 @@ func TestCompileSnapshotsMutableDefinition(t *testing.T) {
 			},
 		},
 		Settings: &types.WorkflowSettings{
-			Retry: &types.RetrySettings{Enabled: true, MaxAttempts: 2, Strategy: "exponential"},
+			Retry: &types.RetrySettings{MaxAttempts: 2, Strategy: "exponential"},
 		},
 		Nodes: []types.NodeDef{
 			{Name: "start", Type: "xflow.start"},
@@ -429,7 +429,7 @@ func TestCompileSnapshotsMutableDefinition(t *testing.T) {
 						[]string{"one", "two"},
 					},
 				},
-				Retry: &types.RetrySettings{Enabled: true, MaxAttempts: 4, Strategy: "linear"},
+				Retry: &types.RetrySettings{MaxAttempts: 4, Strategy: "fixed"},
 			},
 		},
 		Connections: types.Connections{

@@ -98,6 +98,32 @@ CREATE TABLE IF NOT EXISTS xflow_supplies (
     INDEX idx_updated_at (updated_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- 调度覆盖层（#9）：运营者对某个 trigger 节点的运行时覆盖，不改工作流定义。
+-- 五个可覆盖字段（expression/timezone/misfire/overlap/paused）全部 NULLable，
+-- NULL =「未覆盖，跟随定义」。这与「覆盖成空值」是两回事：前者在定义变更时跟着
+-- 走，后者把值钉住。DELETE .../override（恢复 DSL 原值）的语义就建立在这个区分上，
+-- 所以这一列集不能用 NOT NULL DEFAULT '' 表达。
+-- revision 每次写入 +1（即使内容未变）用于写侧 CAS（If-Match）；updated_by 是
+-- 审计之外的第二处记录，权限判定永远来自调用方 scope，不来自这一列。
+-- 没有外键：工作流删除时的级联由应用层显式调用（store.ScheduleOverrideStore
+-- 的 DeleteScheduleOverridesForWorkflow），与其余表一样不做 DB 级联。
+CREATE TABLE IF NOT EXISTS xflow_schedule_overrides (
+    id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    namespace   VARCHAR(64)     NOT NULL              COMMENT '租户/命名空间，服务端注入',
+    workflow_id VARCHAR(64)     NOT NULL              COMMENT '工作流 id，namespace 内唯一性由 registry 保证',
+    node        VARCHAR(255)    NOT NULL              COMMENT 'trigger 节点名（入口单元 id）',
+    expression  VARCHAR(255)    NULL                  COMMENT 'cron 表达式覆盖；NULL 表示未覆盖',
+    timezone    VARCHAR(64)     NULL                  COMMENT 'IANA 时区覆盖；NULL 表示未覆盖',
+    misfire     VARCHAR(32)     NULL                  COMMENT 'misfire 策略覆盖；NULL 表示未覆盖',
+    overlap     VARCHAR(32)     NULL                  COMMENT 'overlap 策略覆盖；NULL 表示未覆盖',
+    paused      TINYINT(1)      NULL                  COMMENT '暂停覆盖；NULL 表示未覆盖',
+    revision    BIGINT UNSIGNED NOT NULL DEFAULT 0    COMMENT '单调递增，写侧 CAS',
+    updated_by  VARCHAR(255)    NOT NULL DEFAULT ''   COMMENT '写入方 principal',
+    created_at  DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    updated_at  DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+    UNIQUE INDEX uk_schedule_override (namespace, workflow_id, node)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- 字节层：全局按内容寻址，不可变，跨 namespace 去重
 -- content 使用 LONGTEXT 而非 blob：下游 schema 审核拒绝 blob 类型。应用层将
 -- 字节 base64 编码；utf8mb4_bin 是强制的，以保持 base64 的大小写敏感性。

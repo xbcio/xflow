@@ -114,6 +114,18 @@ var guardSamples = []guardSample{
 	{"PathWorkflowVersionByID", PathWorkflowVersionByID, http.MethodGet, "/v1/workflows/wf-1/versions/v1"},
 	{"PathWorkflowRollback", PathWorkflowRollback, http.MethodPost, "/v1/workflows/wf-1/rollback"},
 
+	// The schedule routes are probed on the production-shape mux, which is built
+	// WITHOUT a schedule manager: that is deliberate and is what keeps the guard
+	// honest — the routes are registered unconditionally, so a deployment with no
+	// overlay store still resolves them (and answers 501) instead of 404-ing as
+	// if the server were older than the route.
+	{"PathWorkflowSchedules", PathWorkflowSchedules, http.MethodGet, "/v1/workflows/wf-1/schedules"},
+	{"PathWorkflowScheduleByNode", PathWorkflowScheduleByNode, http.MethodGet, "/v1/workflows/wf-1/schedules/nightly"},
+	{"PathWorkflowScheduleOverride", PathWorkflowScheduleOverride, http.MethodDelete, "/v1/workflows/wf-1/schedules/nightly/override"},
+	{"PathWorkflowSchedulePause", PathWorkflowSchedulePause, http.MethodPost, "/v1/workflows/wf-1/schedules/nightly/pause"},
+	{"PathWorkflowScheduleResume", PathWorkflowScheduleResume, http.MethodPost, "/v1/workflows/wf-1/schedules/nightly/resume"},
+	{"PathWorkflowScheduleBackfill", PathWorkflowScheduleBackfill, http.MethodPost, "/v1/workflows/wf-1/schedules/nightly/backfill"},
+
 	// PathExecutions is shared by two methods on the same path. The sample is
 	// the GET (the offset-paginated collection read, spec §3.3) rather than the
 	// POST entry-seed: both are registered on this fixture's production mux, so
@@ -124,6 +136,9 @@ var guardSamples = []guardSample{
 
 	{"PathExecutionByID", PathExecutionByID, http.MethodGet, "/v1/executions/ex-1"},
 	{"PathExecutionCancel", PathExecutionCancel, http.MethodPost, "/v1/executions/ex-1/cancel"},
+	{"PathExecutionPause", PathExecutionPause, http.MethodPost, "/v1/executions/ex-1/pause"},
+	{"PathExecutionResume", PathExecutionResume, http.MethodPost, "/v1/executions/ex-1/resume"},
+	{"PathExecutionRerun", PathExecutionRerun, http.MethodPost, "/v1/executions/ex-1/rerun"},
 	{"PathExecutionSignals", PathExecutionSignals, http.MethodPost, "/v1/executions/ex-1/signals"},
 	{"PathExecutionSignalByID", PathExecutionSignalByID, http.MethodDelete, "/v1/executions/ex-1/signals/s1"},
 	{"PathExecutionWait", PathExecutionWait, http.MethodGet, "/v1/executions/ex-1/wait"},
@@ -134,6 +149,16 @@ var guardSamples = []guardSample{
 	{"PathCurrentUser", PathCurrentUser, http.MethodGet, "/v1/current-user"},
 
 	{"PathSupplyByName", PathSupplyByName, http.MethodGet, "/v1/supplies/rules"},
+
+	// PathWebhookEntry is the one user-facing path NOT behind the authz wrapper:
+	// its authentication is the per-entry HMAC signature (an external sender has
+	// no platform principal to present), so the behavioral guard below exempts it
+	// and TestWebhookEntryRejectsBadSignature proves the exemption is a different
+	// lock rather than a hole. The sample is a well-formed three-segment shape:
+	// the route is a path-only pattern (the HTTP method belongs to the entry's own
+	// webhook node), so the probe's method is immaterial.
+	{"PathWebhookEntry", PathWebhookEntry, http.MethodPost, "/v1/hooks/default/wf-1/entry"},
+
 	// The sample digest MUST be format-valid (sha256:<64 hex>): the artifact
 	// route validates the digest in the route resolver BEFORE authz, and an
 	// invalid digest yields 404 (route_not_found) from authzWrapResolved rather

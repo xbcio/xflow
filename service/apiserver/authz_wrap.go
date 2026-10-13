@@ -20,6 +20,9 @@ type authzHolder struct {
 	principalAuth PrincipalAuthenticator
 	authorizer    Authorizer
 	audit         AuditSink
+	// admission gates the operations admissionRouteClass covers. Nil (every
+	// module but workflow-control) admits everything.
+	admission *apiAdmission
 }
 
 // auditedPerRequest reports whether one operation's admission and outcome are
@@ -87,6 +90,20 @@ func (h *authzHolder) authzWrapWithPreAdmission(op string, isMutation bool, fn h
 			writeFail(w, r, http.StatusUnauthorized, "unauthenticated", "unauthorized")
 			return
 		}
+		// Namespace boundary (Task 7.3/7.4): inject the verified principal's namespace
+		// into the request context before anything resolves against the request, so
+		// every downstream read and the audit sink draw namespace from the same
+		// source: namespace.FromContext(ctx).
+		//
+		// It sits ahead of the resource resolver — not only ahead of the handler —
+		// because a resolver that pre-allocates a submission's execution id derives
+		// a KEYED submission's id from this namespace (engine.IdempotentExecutionID):
+		// resolving against an unattached namespace would put an id no execution
+		// runs under on the audit admission row. The shipped authorizers decide
+		// from the AuthorizationRequest alone (they ignore the ctx parameter), so
+		// the move is invisible to the authorize decision.
+		r = r.WithContext(namespace.WithNamespace(context.WithValue(r.Context(), authzContextKey{}, principal), namespace.Namespace(principal.Namespace)))
+
 		resource, wfID, execID, resNamespace := "", "", "", ""
 		if resourceResolver != nil {
 			resource, wfID, execID, resNamespace = resourceResolver(r)
@@ -107,14 +124,17 @@ func (h *authzHolder) authzWrapWithPreAdmission(op string, isMutation bool, fn h
 			writeFail(w, r, http.StatusForbidden, "forbidden", "forbidden")
 			return
 		}
-		// Namespace boundary (Task 7.3/7.4): inject the verified principal's namespace
-		// into the request context before audit and handler execution so every
-		// downstream read and the audit sink draw namespace from the same source:
-		// namespace.FromContext(ctx).
-		r = r.WithContext(namespace.WithNamespace(context.WithValue(r.Context(), authzContextKey{}, principal), namespace.Namespace(principal.Namespace)))
-
 		if preAdmission != nil && !preAdmission(w, r) {
 			return
+		}
+		// API admission (inflight bound, namespace rate): after the namespace is
+		// known, before the audit admission and the handler.
+		if class, covered := admissionRouteClass(op); covered {
+			release, ok := h.admission.enter(w, r, class)
+			if !ok {
+				return
+			}
+			defer release()
 		}
 
 		// R3.1: when the resolver carried an execution id (pre-allocated for

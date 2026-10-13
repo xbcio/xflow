@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/internal/code/script/engine"
 	"github.com/xbcio/xflow/node/supply"
 )
@@ -195,11 +196,11 @@ func TestConfigAgeReportsTheStalestModule(t *testing.T) {
 	fresh := testReactorCode(t)
 
 	staleReg := supply.NewRegistry()
-	if err := RegisterSupplyConsumer(stale, "rules", staleReg); err != nil {
+	if err := RegisterSupplyConsumer(namespace.Default, stale, "rules", staleReg); err != nil {
 		t.Fatalf("register stale: %v", err)
 	}
 	freshReg := supply.NewRegistry()
-	if err := RegisterSupplyConsumer(fresh, "rules", freshReg); err != nil {
+	if err := RegisterSupplyConsumer(namespace.Default, fresh, "rules", freshReg); err != nil {
 		t.Fatalf("register fresh: %v", err)
 	}
 

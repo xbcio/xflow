@@ -14,6 +14,29 @@ const (
 	ExecutionStatusCanceling ExecutionStatus = "canceling"
 	ExecutionStatusCanceled  ExecutionStatus = "canceled"
 	ExecutionStatusTimeout   ExecutionStatus = "timeout"
+	// ExecutionStatusQueued is a queue-mode submission waiting for a
+	// concurrency slot. It is persisted in full — snapshot, outbox, node
+	// rows — but nothing of it is deliverable until a slot is released and the
+	// execution is promoted.
+	//
+	// It is deliberately not terminal. Wait and Cancel treat a live execution
+	// as one whose status is non-terminal, which is what lets a caller wait on
+	// a queued execution or give up on it, and what makes a queued execution
+	// still hold its place in line.
+	ExecutionStatusQueued ExecutionStatus = "queued"
+	// ExecutionStatusPaused is an operator-suspended execution. Work already
+	// leased to a runner runs to completion and commits its result; nothing in
+	// the ready set is delivered until the execution is resumed, and suspended
+	// nodes stay suspended — an arriving signal is still stored but does not
+	// advance anything.
+	//
+	// It is deliberately not terminal, and it deliberately keeps its workflow
+	// concurrency slot. The execution holds intermediate state that only a
+	// resume can put back to work, so releasing the slot would admit a
+	// replacement that competes with the work Resume restarts. A queued
+	// execution holds no such state and must not be paused at all — it is
+	// refused, because a submission that never started has nothing to suspend.
+	ExecutionStatusPaused ExecutionStatus = "paused"
 )
 
 // NodeStatus represents the lifecycle state of a workflow node.
@@ -34,6 +57,15 @@ const (
 	// pin_data instead of running its handler: its output is the pinned mock
 	// value and downstream treats it exactly like success.
 	NodeStatusPinned NodeStatus = "pinned"
+	// NodeStatusExpired is a read-side-only verdict for a member of a transient
+	// group (groups[].mode: transient) whose records are gone rather than never
+	// written: the execution is terminal and the group's artifacts — boundary
+	// exits, unit status, lease fence — have passed the completion TTL that the
+	// mode applies. The member ran, or may have; nothing about it is readable
+	// any more, and reporting "pending" would assert the one thing that is
+	// false. Nothing stores this status: it is derived at inspect time from the
+	// group unit's own record (engine.GroupUnitPhaseReader).
+	NodeStatusExpired NodeStatus = "expired"
 )
 
 // IsTerminalExecutionStatus reports whether s is an execution terminal state.

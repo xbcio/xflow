@@ -59,6 +59,15 @@ func (e *Engine) Invoke(ctx context.Context, workflowID types.WorkflowID, entry 
 	if cfg.spanID != "" {
 		ctx = enginecore.WithSpanID(ctx, cfg.spanID)
 	}
+	if cfg.idempotencyKey != "" {
+		// The scope is the registered workflow, so the key means one execution of
+		// this workflow whichever face a retry comes in through (this SDK call,
+		// the by-id HTTP route).
+		ctx = enginecore.WithIdempotency(ctx, &enginecore.Idempotency{
+			Key:   cfg.idempotencyKey,
+			Scope: enginecore.WorkflowIdempotencyScope(workflowID),
+		})
+	}
 	ctx = enginecore.WithWorkflowDef(ctx, rec.Definition)
 	return e.eng.Invoke(ctx, rec.Graph, entry.nodeName, input, cfg.runtime)
 }

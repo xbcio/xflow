@@ -55,6 +55,18 @@ type Graph struct {
 	// snapshot of every graph without pins.
 	pinDataMode string
 
+	// timezone is the validated settings.timezone (IANA name), or empty when
+	// the workflow declares none. Triggers that evaluate wall-clock schedules
+	// (xflow.trigger.cron) fall back to it when their own timezone is unset.
+	timezone string
+	// concurrency is the normalized settings.concurrency block. Nil for a graph
+	// that sets no limit, which keeps it out of the hash payload and the
+	// snapshot of every unlimited graph. It is resolved at compile time so the
+	// admission path never re-validates a mode string, and it is keyed by
+	// namespace+workflow NAME rather than version (see ConcurrencyKey), so a
+	// version bump does not orphan the slots its predecessor's executions hold.
+	concurrency *types.ConcurrencySettings
+
 	// hasDisabled reports whether any node carries NodeMeta.Disabled. It is a
 	// derived cache -- true iff at least one node has the flag -- and is
 	// deliberately neither serialized nor hashed: NodeMeta.Disabled already
@@ -97,6 +109,17 @@ type Graph struct {
 	// and re-extracting from parameters would be maintaining a second
 	// implementation of the extraction logic.
 	nodesRefs map[int][]string
+
+	// params is the workflow's top-level params schema (WorkflowDef.Params),
+	// enforced at Submit/Invoke by ApplyParams. It travels in the snapshot so
+	// a decoded graph enforces the same schema, but stays out of the hash
+	// payload so graphs without params keep their existing hash.
+	params map[string]types.ParamDef
+
+	// expandedDef is the definition Compile actually compiled: the caller's
+	// def after node_templates expansion. Like warnings it belongs to one
+	// compilation, so it is neither serialized nor hashed.
+	expandedDef *types.WorkflowDef
 }
 
 // BodyAt returns the projected body package for the node at nodeIdx, or nil
@@ -212,6 +235,20 @@ func (g *Graph) Transient() bool { return g.transient }
 // least one pinned node (PinDataModeTestOnly or PinDataModeAlways), and "" for
 // a graph with none.
 func (g *Graph) PinDataMode() string { return g.pinDataMode }
+
+// Timezone returns the workflow-level settings.timezone, or "" when unset.
+func (g *Graph) Timezone() string { return g.timezone }
+
+// Concurrency returns a copy of the graph's normalized settings.concurrency
+// block, or nil when the graph declares no limit. A copy rather than the
+// pointer so a caller cannot mutate the immutable Graph through it.
+func (g *Graph) Concurrency() *types.ConcurrencySettings {
+	if g.concurrency == nil {
+		return nil
+	}
+	cp := *g.concurrency
+	return &cp
+}
 
 // PinnedOutput returns a deep copy of the mock output pinned on node i and
 // whether the node is pinned at all. It does not decide whether the pin applies
@@ -515,5 +552,11 @@ func (g *Graph) SupplyNodeIndexes() map[string]int {
 
 // Warnings returns the non-fatal diagnostics collected during compilation.
 func (g *Graph) Warnings() []string { return g.warnings }
+
+// ExpandedDefinition returns the definition this graph was compiled from after
+// node_templates expansion -- the caller's own def when no node uses a
+// template. Nil for a graph decoded from a snapshot. Callers must treat it as
+// read-only.
+func (g *Graph) ExpandedDefinition() *types.WorkflowDef { return g.expandedDef }
 
 func (g *Graph) addWarning(msg string) { g.warnings = append(g.warnings, msg) }

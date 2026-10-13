@@ -3,6 +3,7 @@ package script
 import (
 	"context"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/internal/code/script/engine"
 	"github.com/xbcio/xflow/node/internal/code/script/wasm"
 	"github.com/xbcio/xflow/node/supply"
@@ -31,19 +32,22 @@ func PrewarmWasm(code string, cfg any) { wasm.Prewarm(code, cfg) }
 // content change rebuilds its instance pool. Call it when the workflow arrives
 // (activation time) — NOT before Warmup: at process start the runner does not yet
 // know which workflows it will host.
-func RegisterWasmSupplyConsumer(code string, supplyNode string) error {
-	return wasm.RegisterSupplyConsumer(code, supplyNode, supply.Default)
+//
+// ns is the namespace the supply belongs to; see wasm.RegisterSupplyConsumer for
+// why the caller supplies it rather than this package deriving it.
+func RegisterWasmSupplyConsumer(ns namespace.Namespace, code string, supplyNode string) error {
+	return wasm.RegisterSupplyConsumer(ns, code, supplyNode, supply.Default)
 }
 
 // RegisterWasmSupplyConsumerByDigest is the artifact-digest variant: the module
 // is identified by its sha256 digest rather than a base64 code string.
 //
 // owner identifies the caller establishing this registration (spec Z.4 / Z.8):
-// the registry stores one consumer per (digest, supplyNode), and three
+// the registry stores one consumer per (namespace, digest, supplyNode), and three
 // independent call sites in this codebase compete to install that one slot, so
 // each must release only its own hold — see wasm.RegisterSupplyConsumerByDigest.
-func RegisterWasmSupplyConsumerByDigest(digest string, supplyNode string, owner string) error {
-	return wasm.RegisterSupplyConsumerByDigest(digest, supplyNode, owner, supply.Default)
+func RegisterWasmSupplyConsumerByDigest(ns namespace.Namespace, digest string, supplyNode string, owner string) error {
+	return wasm.RegisterSupplyConsumerByDigest(ns, digest, supplyNode, owner, supply.Default)
 }
 
 // UnregisterWasmSupplyConsumerByDigest removes owner's hold on a registration
@@ -51,9 +55,10 @@ func RegisterWasmSupplyConsumerByDigest(digest string, supplyNode string, owner 
 // this process (deactivation), so a module that is no longer hosted here stops
 // rebuilding its pool on every content change. It is a no-op when this owner
 // never registered, and it leaves the registration in place for any OTHER
-// owner still holding it.
-func UnregisterWasmSupplyConsumerByDigest(digest string, supplyNode string, owner string) {
-	wasm.UnregisterSupplyConsumerByDigest(digest, supplyNode, owner, supply.Default)
+// owner still holding it. ns must be the same namespace the registration was
+// made under, or the release targets a slot nobody holds.
+func UnregisterWasmSupplyConsumerByDigest(ns namespace.Namespace, digest string, supplyNode string, owner string) {
+	wasm.UnregisterSupplyConsumerByDigest(ns, digest, supplyNode, owner, supply.Default)
 }
 
 // CompileWasmModule eagerly compiles a wasm module (base64 code string) into the

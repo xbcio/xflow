@@ -19,8 +19,11 @@ type Store struct {
 	nodes      map[string]*store.NodeRecord     // key: "execID/nodeName"
 	signals    map[string]*signalEntry          // key: "execID/signalName"
 	supplies   map[string]*store.SupplyResource // key: "namespace/name"
-	audit      []*store.AuditRecord
-	nextID     uint64
+	// scheduleOverrides keyed by "namespace/workflowID/node" — see
+	// scheduleOverrideKey.
+	scheduleOverrides map[string]*store.ScheduleOverride
+	audit             []*store.AuditRecord
+	nextID            uint64
 }
 
 type signalEntry struct {
@@ -30,19 +33,21 @@ type signalEntry struct {
 
 // compile-time interface checks
 var (
-	_ store.Store           = (*Store)(nil)
-	_ store.Transactor      = (*Store)(nil)
-	_ store.AuditReconciler = (*Store)(nil)
-	_ store.Supplies        = (*Store)(nil)
+	_ store.Store                 = (*Store)(nil)
+	_ store.Transactor            = (*Store)(nil)
+	_ store.AuditReconciler       = (*Store)(nil)
+	_ store.Supplies              = (*Store)(nil)
+	_ store.ScheduleOverrideStore = (*Store)(nil)
 )
 
 // New creates a new in-memory store.
 func New() *Store {
 	return &Store{
-		executions: make(map[types.ExecutionID]*store.ExecutionRecord),
-		nodes:      make(map[string]*store.NodeRecord),
-		signals:    make(map[string]*signalEntry),
-		supplies:   make(map[string]*store.SupplyResource),
+		executions:        make(map[types.ExecutionID]*store.ExecutionRecord),
+		nodes:             make(map[string]*store.NodeRecord),
+		signals:           make(map[string]*signalEntry),
+		supplies:          make(map[string]*store.SupplyResource),
+		scheduleOverrides: make(map[string]*store.ScheduleOverride),
 	}
 }
 
@@ -56,6 +61,7 @@ func (s *Store) Transaction(_ context.Context, fn func(st store.Set) error) erro
 	snapNodes := cloneNodes(s.nodes)
 	snapSignals := cloneSignals(s.signals)
 	snapSupplies := cloneSupplies(s.supplies)
+	snapOverrides := cloneScheduleOverrides(s.scheduleOverrides)
 	snapAudit := cloneAudit(s.audit)
 	snapID := s.nextID
 	s.mu.Unlock()
@@ -67,6 +73,7 @@ func (s *Store) Transaction(_ context.Context, fn func(st store.Set) error) erro
 		s.nodes = snapNodes
 		s.signals = snapSignals
 		s.supplies = snapSupplies
+		s.scheduleOverrides = snapOverrides
 		s.audit = snapAudit
 		s.nextID = snapID
 		s.mu.Unlock()

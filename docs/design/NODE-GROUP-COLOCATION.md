@@ -1,6 +1,6 @@
 # Node Group Co-location
 
-> Status: Implemented, experimental/limited (Milestones A–J + Phase 5 remote-runner trigger hosting; see §12.2)
+> Status: Implemented, experimental/limited (Milestones A–J + Phase 5 remote-runner trigger hosting + `groups[].mode: transient`; see §12.2)
 
 ## 1. Overview
 
@@ -40,9 +40,13 @@ type GroupDef struct {
     ErrorOutputs   []Connection       // required iff OnError == "error_output"; routing targets for the group's synthesized "error" port
     Retry          *RetrySettings     // group-level retry = replay from entry
     Timeout        time.Duration      // business deadline (not lease TTL)
-    Mode           string             // "" = durable | "transient"
+    Mode           string             // "" = durable | "transient" (see §3.5)
 }
 ```
+
+`Mode` is the only field that changes retention rather than behavior: a
+transient group runs, commits, and replays exactly like a durable one. What
+differs is how long its artifacts stay in Redis — §3.5.
 
 ### 3.2 Compiled IR (`engine/graph/`)
 
@@ -69,6 +73,76 @@ type GroupAuditObserver interface {
 ```
 
 Operations: `lease_acquired`, `lease_expired`, `committed`, `admission_accepted`, `admission_conflict`, `activation_changed`.
+
+### 3.5 Retention modes (`mode`)
+
+`Mode` selects the retention policy for a group's Redis artifacts. It is a
+workflow-author declaration and is independent of the deployment's execution
+mode: `mode: transient` works in a durable workflow, and that combination — a
+latency-sensitive group inside an otherwise durable orchestration — is the
+shape it exists for.
+
+| `mode` | Retention of the group's artifacts |
+|--------|-------------------------------------|
+| `""` (default) | Same as the execution's own retention. |
+| `"transient"` | Shortened to a completion TTL when the **execution** reaches a terminal status — not when the group commits. |
+
+Covered artifacts: every member's boundary exit output and its `node_meta`
+pair (the meta carries the private-output marker, so the two must expire
+together), the group name itself (an `error_output` payload is stored under
+the group name, not a member's), and the group unit's own fence keys
+(`group:<unitIdx>:status`, `group:<unitIdx>:meta`).
+
+Rules the runtime applies:
+
+- **Shortening never runs before the execution is terminal**, so downstream
+  `$('<member>')` reads during the run are unaffected. The mode is not a
+  shorter active TTL; it changes only what happens after the execution ends.
+- **The completion TTL resolves in this order**: the workflow's
+  `Options.TransientCompletionTTL` → the per-execution transient marker or the
+  store-wide `WithTransientMode` completion TTL → **30s**
+  (`defaultGroupCompletionTTL`, mirroring the SDK's
+  `defaultTransientCompletionTTL`). The fallback exists so the mode cannot
+  silently do nothing in a deployment that configured no transient retention.
+  The result is capped at the execution's active TTL: shortening never extends.
+- **Fence keys are floored at two lease windows**: `max(completionTTL,
+  2 × lease_ttl_ms)`, where `lease_ttl_ms` is the lease TTL the group's last
+  acquisition recorded. A stale runner holding a token from that lease cannot
+  present it after the record that would reject its commit has expired.
+- **The mode is read from the persisted graph, not from the commit request.**
+  The shortening runs at each execution-terminal transition (`CommitNode`,
+  `CommitGroup`, `UpdateExecutionStatus`), which may be a later transition, on
+  another replica, or a cancel — cases where no group commit request exists.
+  Deriving the mode from the compiled graph also covers a group that never
+  committed at all: a canceled execution's leased group.
+- **A transient group under a transient workflow is redundant, not
+  contradictory**: the backend applies the shorter of the two retentions, so
+  `GroupMeta.Transient()` is then a no-op.
+- **`Inspect` after the artifacts expire** reports the member as `expired`
+  (`types.NodeStatusExpired`) instead of `pending`: for a terminal execution,
+  "no unit record" means the records lapsed rather than "never ran". The
+  verdict is read-only — nothing persists it — and it is what
+  `engine.GroupUnitPhaseReader` exists for: group members do not write
+  per-node state to Redis, so absence alone cannot distinguish the two.
+- **The local backend has no TTLs**, so retention there is a documented no-op:
+  the exits stay readable for the process lifetime. Evicting them at execution
+  end would delete the results `Wait`/`GetOutput` read for group-only
+  workflows. The shared contract test
+  (`backend/internal/statestoretest/group_state_contract.go`) pins the rule
+  that holds for both backends: the retention may change, the committed data
+  may not.
+- **Replay is unaffected.** A crash or lease expiry still restarts from the
+  group entry; the completion TTL only reclaims the artifacts of an execution
+  that already reached terminal.
+- **Residual, stated rather than hidden**: the shortening enumerates the
+  group's keys from the execution's persisted graph, so an execution that
+  outlived its `:graph` key (possible for a durable execution whose wall-clock
+  exceeds the exec TTL — the status key is re-`EXPIRE`d on every transition,
+  the graph key is not) degrades to "nothing shortened". The artifacts then
+  keep the longer retention, which is the safe direction and the same
+  degradation the execution-level shortening already makes.
+
+Compile-time restrictions on the mode are in §7.
 
 ## 4. Lifecycle: Normal Group (Lease-Based)
 
@@ -173,6 +247,10 @@ Operations: `lease_acquired`, `lease_expired`, `committed`, `admission_accepted`
 - Secret literals rejected in group members
 - `OnError` restricted to `""` | `stop` | `continue` | `error_output` (`validateGroupOnError`); `main_output` and unknown values rejected
 - `ErrorOutputs` required iff `OnError == error_output`, and rejected otherwise (`validateGroupErrorOutputs`); each target must be a real node outside the group, not a supply node, and must respect the target's own declared input ports (`resolveGroupErrorOutputs`)
+- `mode` restricted to `""` | `"transient"` (`validateGroupMode` in `engine/graph/group_mode.go`); any other value is rejected. The field was previously free-form and unread, so a typo compiled clean and ran with the durable retention the author was trying to avoid
+- Transient groups reject suspending members (`xflow.wait`, `xflow.approval`), including a suspending node nested anywhere inside a member's sub-graph body (`nestedSuspendingMember`). A suspended member parks a sub-execution the group's own lease cannot resume, and the runtime already disables suspend inside every group; a transient group must not compile at all, because "short TTL, replay from the entry" is incompatible with a resume point held in external state
+- Transient groups reject `activation_replicas > 1` on a trigger-entry group: sibling replicas admit independent executions from the same source consumer group, so the retention window would not cover all of them
+- A transient group under a workflow-level `Options.Transient` is accepted — redundant with the workflow, not contradictory
 
 ## 8. Capability and Routing
 
@@ -220,6 +298,8 @@ Group execution requires the `group.exec.v1` feature capability. Runners that do
 | `error_output` is a synthetic unit-level edge, not a `BoundaryOutputs` entry | A group has no member edge to derive a failure port from; `GroupMeta.ErrorOutputs` + a `UnitEdge.ErrorEdge` flag keep the synthetic route in the same scheduling machinery as a real boundary edge without polluting `BoundaryOutputs`'s "derived purely from real member edges" invariant |
 | Routed `error_output` commit reports `GroupOutcomeSuccess`, not `GroupOutcomeFailed` | Every backend's failed-unit counter fires on `Outcome==Failed` regardless of `Fatal`, and finalizes the WHOLE EXECUTION as Failed once remaining-units hits zero; mirrors `ApplyOnError`'s node-level `error_output`, which sets `NodeStatus: types.NodeStatusSuccess` for the same reason |
 | `fatal`/`routeToErrorOutput` are caller-decided in `commitGroup`, never re-derived from `execErr != nil` | `CommitGroupResult`'s canceled/timeout outcome must stay unconditionally fatal even under `on_error: continue`/`error_output`; re-deriving from `execErr != nil` cannot distinguish that case from an ordinary tolerated/routed failure |
+| `mode: transient` retention starts at the **execution's** terminal status, not at the group's commit | Downstream `$('<member>')` reads and `Inspect` keep working until the execution ends; shortening at commit would reclaim exits an in-flight sibling or the caller still reads. The cost is that the group's fence keys can outlive a terminal execution, which the `max(completionTTL, 2 × lease_ttl)` floor covers |
+| Transient group retention is derived from the compiled graph, not from `GroupCommitRequest.Transient` | The shortening is applied at the execution-terminal transition, which can happen on another replica, in a later transition, or in a cancel where no commit request exists; the graph is persisted, covers groups that never committed, and is what both backends compile from. The request flag stays the engine-side contract for backends that consume it at commit time |
 
 ## 12. Known Limitations & Future Work
 
@@ -299,6 +379,20 @@ items listed below under §12.1. What remains open is in §12.2.
   unit. `required` mode still fail-closes. Capability matching is never relaxed
   by the fallback. An empty `Mode` counts as `default`, matching the compiler's
   normalization in `engine/graph/compile.go`.
+- **`groups[].mode: transient` is implemented end to end** (§3.5). `validateGroupMode`
+  rejects unknown values and the two shapes the mode cannot serve (§7); the
+  Redis backend shortens a transient group's artifacts at each
+  execution-terminal transition (`backend/providers/distributed/internal/rstate/group_transient.go`);
+  the local backend's no-op is documented and pinned by the shared contract test
+  (`backend/internal/statestoretest/group_state_contract.go`); `Inspect` reports
+  a lapsed member as `expired` through the new `engine.GroupUnitPhaseReader`
+  capability. Two implementation notes worth keeping: the shortening is a
+  post-commit pipelined `EXPIRE` pass keyed off the persisted graph rather than
+  Lua arguments on the commit script, and it is the first pass that also covers
+  the group unit's own fence keys in a transient **workflow**, which
+  `transientExecutionKeys` never enumerated. The residual gap is stated in §3.5:
+  a durable execution that outlives its `:graph` key degrades to "nothing
+  shortened", the safe direction.
 
 ### 12.2 Open items
 

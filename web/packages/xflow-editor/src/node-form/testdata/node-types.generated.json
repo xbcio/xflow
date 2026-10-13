@@ -2100,11 +2100,97 @@
           "path": "/parameters/timezone",
           "label": "Timezone",
           "type": "string",
-          "default": "UTC",
-          "help": "IANA time zone name the schedule is evaluated in",
+          "default": "",
+          "help": "IANA time zone name the schedule is evaluated in; empty inherits the workflow settings.timezone (UTC if none)",
           "expression": {
             "mode": "template"
           }
+        },
+        {
+          "name": "misfire",
+          "path": "/parameters/misfire",
+          "label": "Misfire Policy",
+          "type": "string",
+          "fallback": "skip",
+          "help": "What to do with the scheduled instants that passed while no trigger was hosting this schedule; empty is skip",
+          "expression": {
+            "mode": "template"
+          },
+          "options": [
+            {
+              "value": "skip",
+              "label": "Skip",
+              "description": "Acknowledge the missed instants and fire none of them (default)"
+            },
+            {
+              "value": "fire_once",
+              "label": "Fire Once",
+              "description": "Fire the most recent missed instant only"
+            },
+            {
+              "value": "fire_all",
+              "label": "Fire All",
+              "description": "Fire the missed instants, oldest first, within the catch-up bounds"
+            }
+          ]
+        },
+        {
+          "name": "catchup_window",
+          "path": "/parameters/catchup_window",
+          "label": "Catch-up Window",
+          "type": "string",
+          "widget": "duration",
+          "fallback": "1h",
+          "help": "How far back a catch-up reaches (e.g. \"1h\"); instants older than this are never fired",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "duration"
+            }
+          ]
+        },
+        {
+          "name": "max_catchup",
+          "path": "/parameters/max_catchup",
+          "label": "Max Catch-up",
+          "type": "number",
+          "fallback": 10,
+          "help": "Most firings one activation catches up; the newest ones are kept",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "min",
+              "value": 1
+            }
+          ]
+        },
+        {
+          "name": "overlap",
+          "path": "/parameters/overlap",
+          "label": "Overlap Policy",
+          "type": "string",
+          "fallback": "allow",
+          "help": "What to do when an instant arrives while the run this trigger started last has not finished; empty is allow",
+          "expression": {
+            "mode": "template"
+          },
+          "options": [
+            {
+              "value": "allow",
+              "label": "Allow",
+              "description": "Start the run anyway; two runs of this schedule may be in flight at once (default)"
+            },
+            {
+              "value": "skip",
+              "label": "Skip",
+              "description": "Drop this firing if the execution this trigger started last has not finished"
+            }
+          ]
         }
       ]
     },
@@ -2902,6 +2988,15 @@
           "label": "Max Body Bytes",
           "type": "number",
           "default": 1048576,
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "secret_supply",
+          "path": "/parameters/secret_supply",
+          "label": "Secret Supply",
+          "type": "string",
           "expression": {
             "mode": "template"
           }

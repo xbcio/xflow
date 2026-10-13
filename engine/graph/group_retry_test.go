@@ -23,7 +23,7 @@ import (
 // group fails in production and nothing reruns it.
 func TestGroupRetryIsRejectedAtCompile(t *testing.T) {
 	def := mkGroupDef([]string{"ingest", "analyze"})
-	def.Groups[0].Retry = &types.RetrySettings{Enabled: true, MaxAttempts: 3}
+	def.Groups[0].Retry = &types.RetrySettings{MaxAttempts: 3}
 	_, err := Compile(def)
 	if err == nil {
 		t.Fatal("group-level retry compiled clean; it has no runtime enforcement " +
@@ -55,7 +55,7 @@ func TestGroupRetryNilStillCompiles(t *testing.T) {
 // happens to be a group member.
 func TestMemberNodeRetryUnaffectedByGroupRetryRejection(t *testing.T) {
 	def := mkGroupDef([]string{"ingest", "analyze"})
-	def.Nodes[1].Retry = &types.RetrySettings{Enabled: true, MaxAttempts: 5}
+	def.Nodes[1].Retry = &types.RetrySettings{MaxAttempts: 5}
 	if _, err := Compile(def); err != nil {
 		t.Fatalf("member node-level retry must compile even inside a group: %v", err)
 	}

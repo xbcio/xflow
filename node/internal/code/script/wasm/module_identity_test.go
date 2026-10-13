@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/supply"
 )
 
@@ -224,7 +225,7 @@ func TestUnregisterUnderAnotherEncodingRemovesTheConsumer(t *testing.T) {
 	obs := &countingConsumerObserver{}
 	reg.SetObserver(obs)
 
-	if err := RegisterSupplyConsumer(code, "rules", reg); err != nil {
+	if err := RegisterSupplyConsumer(namespace.Default, code, "rules", reg); err != nil {
 		t.Fatalf("RegisterSupplyConsumer: %v", err)
 	}
 	if got := obs.last(); got != 1 {
@@ -232,7 +233,7 @@ func TestUnregisterUnderAnotherEncodingRemovesTheConsumer(t *testing.T) {
 	}
 
 	// Unregister naming the module by a DIFFERENT encoding of the same bytes.
-	UnregisterSupplyConsumer(alt, "rules", reg)
+	UnregisterSupplyConsumer(namespace.Default, alt, "rules", reg)
 
 	if got := obs.last(); got != 0 {
 		t.Fatalf("consumer count after unregistering under another encoding of the "+
@@ -249,7 +250,9 @@ type countingConsumerObserver struct {
 	n  int
 }
 
-func (o *countingConsumerObserver) OnConsumerCount(_ context.Context, _ string, n int) {
+// OnConsumerCount ignores the namespace: this observer records only the most
+// recent count, and every case in this file drives the default namespace.
+func (o *countingConsumerObserver) OnConsumerCount(_ context.Context, _ namespace.Namespace, _ string, n int) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.n = n
@@ -318,7 +321,7 @@ func TestSourceDrivenFlipSurvivesCodeCacheEviction(t *testing.T) {
 // production, as untagged traffic.
 func TestRegisterSupplyConsumerRejectsUndecodableCode(t *testing.T) {
 	reg := supply.NewRegistry()
-	if err := RegisterSupplyConsumer("!!!not base64!!!", "rules", reg); err == nil {
+	if err := RegisterSupplyConsumer(namespace.Default, "!!!not base64!!!", "rules", reg); err == nil {
 		t.Fatal("RegisterSupplyConsumer accepted an undecodable module; it must fail at " +
 			"registration rather than register under a key no module can ever match")
 	}

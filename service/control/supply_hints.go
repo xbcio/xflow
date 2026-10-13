@@ -7,7 +7,9 @@ import (
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/service/crypto/supplyenc"
+	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/store"
 )
 
@@ -115,25 +117,35 @@ func (h *SupplyHinter) notifyReadError(ctx context.Context, ns, cause string) {
 	}
 }
 
-// HintsForRunner returns "supply node name → current content hash" for every
-// supply the runner hosts a consumer for. It returns nil — not an empty map — when
-// there is nothing, so omitempty drops the field and heartbeat bodies stay
-// byte-identical for runners with no supplies.
+// HintsForRunner returns one entry per supply the runner hosts a consumer for,
+// each carrying that supply's (namespace, node) identity and its current content
+// hash. It returns nil — not an empty slice — when there is nothing, so
+// omitempty drops the field and heartbeat bodies stay byte-identical for runners
+// with no supplies.
+//
+// The namespace is part of the entry, and the dedupe below is keyed by the same
+// pair. A name-only hint set would silently merge two namespaces' same-named
+// supplies: whichever namespace happened to be enumerated last would decide the
+// hash the runner was told to fetch, so one tenant's publish could make another
+// tenant's node fetch content it never referenced.
 //
 // Hints are an optimization, never a correctness guarantee: they can be lost to a
-// partition, a runner restart, or a leader change. The activation-time fetch and
-// the TTL watcher are what actually guarantee convergence. Making a hint the only
-// notification channel is how a stale value survives indefinitely.
+// partition, a runner restart, or a leader change. The activation-time fetch is
+// the only other refresh path — there is no TTL watcher, so a lost hint leaves an
+// already-hosted consumer on its last-good value until a later hint lands.
+// Making a hint the only notification channel is how a stale value survives
+// indefinitely.
 //
 // NOTE on scope: this only affects WHEN an already-hosted runner refreshes its
 // content. It has nothing to do with whether an activation ever GETS hosted in
 // the first place — a gate-declined activation is a separate, currently-open
 // gap (see the Task 18 addendum) that this method neither causes nor fixes.
-func (h *SupplyHinter) HintsForRunner(ctx context.Context, runnerID string) map[string]string {
+func (h *SupplyHinter) HintsForRunner(ctx context.Context, runnerID string) []protocol.SupplyHint {
 	if h == nil || h.activations == nil || h.supplies == nil || runnerID == "" {
 		return nil
 	}
-	var out map[string]string
+	var out []protocol.SupplyHint
+	seen := map[supply.Key]struct{}{}
 	for _, ns := range h.namespaces {
 		acts, err := h.activations.List(ctx, ns)
 		if err != nil {
@@ -151,7 +163,8 @@ func (h *SupplyHinter) HintsForRunner(ctx context.Context, runnerID string) map[
 				continue
 			}
 			for _, req := range act.Supplies {
-				if _, seen := out[req.Node]; seen {
+				k := supply.KeyOf(ns, req.Node)
+				if _, dup := seen[k]; dup {
 					continue
 				}
 				rec, err := h.supplies.GetSupply(ctx, string(ns), req.Resource)
@@ -199,10 +212,12 @@ func (h *SupplyHinter) HintsForRunner(ctx context.Context, runnerID string) map[
 					// than inventing one.
 					continue
 				}
-				if out == nil {
-					out = map[string]string{}
-				}
-				out[req.Node] = rec.ContentHash
+				seen[k] = struct{}{}
+				out = append(out, protocol.SupplyHint{
+					Namespace: string(k.Namespace),
+					Node:      k.Name,
+					Hash:      rec.ContentHash,
+				})
 			}
 		}
 	}
@@ -217,9 +232,12 @@ func (h *SupplyHinter) HintsForRunner(ctx context.Context, runnerID string) map[
 // only knows this process's heartbeats answers for a fraction of the fleet.
 // See selectSupplyObserved for how a backend picks an implementation.
 type SupplyObservedSink interface {
-	Record(runnerID string, observed map[string]string)
-	// Snapshot returns runner ID → (supply name → applied hash).
-	Snapshot() map[string]map[string]string
+	// Record replaces runnerID's entire reported set. Each entry carries the
+	// supply's (namespace, node) identity, because a name alone is not one.
+	Record(runnerID string, observed []protocol.SupplyObservation)
+	// Snapshot returns runner ID → (supply key → applied hash), where the key is
+	// the (namespace, name) pair.
+	Snapshot() map[string]map[supply.Key]string
 }
 
 // MemorySupplyObserved is the process-local SupplyObservedSink, the fallback
@@ -232,12 +250,12 @@ type SupplyObservedSink interface {
 // the load balancer.
 type MemorySupplyObserved struct {
 	mu   sync.Mutex
-	byRn map[string]map[string]string
+	byRn map[string]map[supply.Key]string
 }
 
 // NewMemorySupplyObserved returns a ready-to-use MemorySupplyObserved.
 func NewMemorySupplyObserved() *MemorySupplyObserved {
-	return &MemorySupplyObserved{byRn: map[string]map[string]string{}}
+	return &MemorySupplyObserved{byRn: map[string]map[supply.Key]string{}}
 }
 
 // Record replaces runnerID's entire reported set with observed. It is a whole
@@ -245,33 +263,41 @@ func NewMemorySupplyObserved() *MemorySupplyObserved {
 // stopped hosting its consumer, or the workflow was removed), its old hash must
 // not linger — a merge would leave a permanently stale entry that nothing ever
 // clears.
-func (s *MemorySupplyObserved) Record(runnerID string, observed map[string]string) {
+func (s *MemorySupplyObserved) Record(runnerID string, observed []protocol.SupplyObservation) {
 	if s == nil || runnerID == "" {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(observed) == 0 {
+	cp := make(map[supply.Key]string, len(observed))
+	for _, o := range observed {
+		// A node name is the identity's other half: without one there is nothing
+		// a reader could match this hash against, so the entry is dropped rather
+		// than stored under a key nothing can look up. A runner never sends one
+		// (it builds its report from the registry), so this only absorbs a
+		// malformed or truncated report.
+		if o.Node == "" {
+			continue
+		}
+		cp[supply.KeyOf(namespace.Namespace(o.Namespace), o.Node)] = o.Hash
+	}
+	if len(cp) == 0 {
 		delete(s.byRn, runnerID)
 		return
-	}
-	cp := make(map[string]string, len(observed))
-	for k, v := range observed {
-		cp[k] = v
 	}
 	s.byRn[runnerID] = cp
 }
 
-// Snapshot returns a deep copy of the current runner → (supply → hash) view.
-func (s *MemorySupplyObserved) Snapshot() map[string]map[string]string {
+// Snapshot returns a deep copy of the current runner → (supply key → hash) view.
+func (s *MemorySupplyObserved) Snapshot() map[string]map[supply.Key]string {
 	if s == nil {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make(map[string]map[string]string, len(s.byRn))
+	out := make(map[string]map[supply.Key]string, len(s.byRn))
 	for runnerID, m := range s.byRn {
-		cp := make(map[string]string, len(m))
+		cp := make(map[supply.Key]string, len(m))
 		for k, v := range m {
 			cp[k] = v
 		}

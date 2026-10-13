@@ -13,7 +13,7 @@ func TestGroupDefJSONRoundTrip(t *testing.T) {
 		Members:            []string{"ingest", "analyze"},
 		RunnerSelector:     &RunnerSelector{Mode: RunnerSelectorModeRequired, MatchLabels: map[string]string{"cloud": "tencent"}},
 		OnError:            string(OnErrorStop),
-		Retry:              &RetrySettings{Enabled: true, MaxAttempts: 3},
+		Retry:              &RetrySettings{MaxAttempts: 3},
 		Timeout:            30 * time.Second,
 		Mode:               "transient",
 		ActivationReplicas: 3,

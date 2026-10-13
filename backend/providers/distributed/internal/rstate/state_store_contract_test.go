@@ -7,6 +7,8 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 	"github.com/xbcio/xflow/backend/internal/statestoretest"
+	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/types"
 )
 
 // TestMiniredisStateStoreContract runs the shared StateStore contract suite
@@ -88,4 +90,39 @@ func TestRedisNodeLeaseRenewContract(t *testing.T) {
 	statestoretest.RunNodeLeaseRenewContract(t, func(t *testing.T) statestoretest.NodeLeaseRenewStore {
 		return New(freshRealRedis(t, addr), nil, time.Minute)
 	})
+}
+
+// Dead-letter replay is decided inside replayDeadLetterLua; the shared
+// contract keeps the memory backend's replay verdicts identical to it.
+func TestMiniredisDeadLetterReplayContract(t *testing.T) {
+	statestoretest.RunDeadLetterReplayContract(t, func(t *testing.T) statestoretest.DeadLetterReplayBackend {
+		srv, err := miniredis.Run()
+		if err != nil {
+			t.Fatalf("miniredis.Run() error = %v", err)
+		}
+		t.Cleanup(srv.Close)
+		rdb := redis.NewClient(&redis.Options{Addr: srv.Addr()})
+		t.Cleanup(func() { _ = rdb.Close() })
+		return deadLetterReplayBackend(New(rdb, nil, time.Minute))
+	})
+}
+
+func TestRedisDeadLetterReplayContract(t *testing.T) {
+	addr := realRedisAddr(t)
+	statestoretest.RunDeadLetterReplayContract(t, func(t *testing.T) statestoretest.DeadLetterReplayBackend {
+		return deadLetterReplayBackend(New(freshRealRedis(t, addr), nil, time.Minute))
+	})
+}
+
+// deadLetterReplayBackend expires an execution the way Redis loses one: its
+// status key is gone.
+func deadLetterReplayBackend(state *Store) statestoretest.DeadLetterReplayBackend {
+	return statestoretest.DeadLetterReplayBackend{
+		Store: state,
+		ExpireExecution: func(t *testing.T, id types.ExecutionID) {
+			if err := state.rdb.Del(t.Context(), execKey(namespace.Default, id, "status")).Err(); err != nil {
+				t.Fatalf("delete execution status: %v", err)
+			}
+		},
+	}
 }

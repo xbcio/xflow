@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/supply"
 )
 
@@ -45,15 +46,15 @@ func TestUnregisterByDigestKeepsOtherOwnerRegistered(t *testing.T) {
 		ownerA = "activation:ns/wf-1/v1/entry/0"
 		ownerB = "node:wf-1/tagger"
 	)
-	if err := RegisterSupplyConsumerByDigest(digest, "rules", ownerA, reg); err != nil {
-		t.Fatalf("RegisterSupplyConsumerByDigest(ownerA): %v", err)
+	if err := RegisterSupplyConsumerByDigest(namespace.Default, digest, "rules", ownerA, reg); err != nil {
+		t.Fatalf("RegisterSupplyConsumerByDigest(namespace.Default, ownerA): %v", err)
 	}
-	if err := RegisterSupplyConsumerByDigest(digest, "rules", ownerB, reg); err != nil {
-		t.Fatalf("RegisterSupplyConsumerByDigest(ownerB): %v", err)
+	if err := RegisterSupplyConsumerByDigest(namespace.Default, digest, "rules", ownerB, reg); err != nil {
+		t.Fatalf("RegisterSupplyConsumerByDigest(namespace.Default, ownerB): %v", err)
 	}
 	t.Cleanup(func() {
-		UnregisterSupplyConsumerByDigest(digest, "rules", ownerA, reg)
-		UnregisterSupplyConsumerByDigest(digest, "rules", ownerB, reg)
+		UnregisterSupplyConsumerByDigest(namespace.Default, digest, "rules", ownerA, reg)
+		UnregisterSupplyConsumerByDigest(namespace.Default, digest, "rules", ownerB, reg)
 	})
 
 	e, err := sharedReactorHost.engineForCode(ctx, code)
@@ -74,7 +75,7 @@ func TestUnregisterByDigestKeepsOtherOwnerRegistered(t *testing.T) {
 
 	// Owner A releases. Owner B never does. The underlying registry
 	// registration must survive, because it is still owned.
-	UnregisterSupplyConsumerByDigest(digest, "rules", ownerA, reg)
+	UnregisterSupplyConsumerByDigest(namespace.Default, digest, "rules", ownerA, reg)
 
 	if err := reg.Apply(ctx, supply.Snapshot{
 		Name: "rules", Content: contentWithRule("r2", "true"), Hash: "h2", Revision: 2,
@@ -113,13 +114,13 @@ func TestUnregisterByDigestIsIdempotentPerOwnerNotARefcount(t *testing.T) {
 
 	// The SAME owner registers twice -- e.g. two generations of the same
 	// activation re-sending an identical binding.
-	if err := RegisterSupplyConsumerByDigest(digest, "rules", owner, reg); err != nil {
+	if err := RegisterSupplyConsumerByDigest(namespace.Default, digest, "rules", owner, reg); err != nil {
 		t.Fatalf("RegisterSupplyConsumerByDigest (1st): %v", err)
 	}
-	if err := RegisterSupplyConsumerByDigest(digest, "rules", owner, reg); err != nil {
+	if err := RegisterSupplyConsumerByDigest(namespace.Default, digest, "rules", owner, reg); err != nil {
 		t.Fatalf("RegisterSupplyConsumerByDigest (2nd, same owner): %v", err)
 	}
-	t.Cleanup(func() { UnregisterSupplyConsumerByDigest(digest, "rules", owner, reg) })
+	t.Cleanup(func() { UnregisterSupplyConsumerByDigest(namespace.Default, digest, "rules", owner, reg) })
 
 	e, err := sharedReactorHost.engineForCode(ctx, code)
 	if err != nil {
@@ -139,7 +140,7 @@ func TestUnregisterByDigestIsIdempotentPerOwnerNotARefcount(t *testing.T) {
 
 	// ONE release for an owner that registered TWICE must fully unregister:
 	// membership in a set is binary, not a count.
-	UnregisterSupplyConsumerByDigest(digest, "rules", owner, reg)
+	UnregisterSupplyConsumerByDigest(namespace.Default, digest, "rules", owner, reg)
 
 	if err := reg.Apply(ctx, supply.Snapshot{
 		Name: "rules", Content: contentWithRule("r2", "true"), Hash: "h2", Revision: 2,

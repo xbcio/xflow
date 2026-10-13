@@ -78,6 +78,14 @@
     color-mix(in srgb, var(--xflow-preview-status-error) 58%, transparent)
   );
   --xflow-preview-status-disabled: var(--xflow-status-disabled, #747b86);
+  --xflow-preview-status-disabled-text: var(
+    --xflow-status-disabled-text,
+    var(--xflow-preview-status-disabled)
+  );
+  --xflow-preview-status-disabled-border: var(
+    --xflow-status-disabled-border,
+    color-mix(in srgb, var(--xflow-preview-status-disabled) 58%, transparent)
+  );
 
   /* Nodes / ports / edges */
   --xflow-preview-node-bg: var(--xflow-node-bg, #292b2f);
@@ -424,6 +432,14 @@
   border-color: var(--xflow-preview-status-error);
 }
 
+.xflow-preview-node[data-status="committing"] {
+  border-color: var(--xflow-preview-status-running);
+}
+
+.xflow-preview-node[data-status="expired"] {
+  border-color: var(--xflow-preview-status-disabled);
+}
+
 .xflow-preview-node__header {
   align-items: center;
   display: flex;
@@ -515,6 +531,16 @@
 .xflow-preview-node[data-status="failed"] .xflow-preview-node__status {
   border-color: var(--xflow-preview-status-error-border);
   color: var(--xflow-preview-status-error-text);
+}
+
+.xflow-preview-node[data-status="committing"] .xflow-preview-node__status {
+  border-color: var(--xflow-preview-status-running-border);
+  color: var(--xflow-preview-status-running-text);
+}
+
+.xflow-preview-node[data-status="expired"] .xflow-preview-node__status {
+  border-color: var(--xflow-preview-status-disabled-border);
+  color: var(--xflow-preview-status-disabled-text);
 }
 
 .xflow-preview-node__body {

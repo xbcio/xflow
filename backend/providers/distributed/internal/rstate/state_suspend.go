@@ -13,6 +13,8 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
+var _ engine.DurableSignalDeliverer = (*Store)(nil)
+
 func (s *Store) SuspendOrConsume(ctx context.Context, id types.ExecutionID, name string, spec *types.SuspendSpec) (*types.SignalPayload, error) {
 	if s.transient {
 		// Store-wide transient mode disables suspend at the engine layer
@@ -334,7 +336,16 @@ func (s *Store) PeekResumeTarget(ctx context.Context, id types.ExecutionID, sign
 // deliverSignalWithOutboxLua for the single/multi-signal semantics.
 func (s *Store) DeliverSignalWithOutbox(ctx context.Context, id types.ExecutionID, signalName string, data map[string]any, intent engine.ResumeIntent) (string, *types.SignalPayload, bool, error) {
 	dataJSON, _ := json.Marshal(data) // json.Marshal of map[string]any cannot fail
-	ttl := s.ttlSec()
+	// The execution's own retention, not the store default. A signal can arrive
+	// before the execution runs at all — a queued execution has no waiter, so the
+	// payload is stored for the promoted run to consume — and the retention a
+	// queued execution is created with is exactly the one that covers its queue
+	// wait. Under the default, a wait longer than the base retention expires the
+	// buffered signal while the execution it belongs to is still in line, and the
+	// loss is silent: the node that waits for the signal parks at promotion and
+	// the caller that delivered it is never told. When the signal does find a
+	// waiter, the park's extendExecTTL raises this further (suspendTTL).
+	ttl := int(s.getExecTTL(ctx, id).Seconds())
 	nowMs := time.Now().UTC().UnixMilli()
 	timeoutMemberStr := ""
 	if intent.NodeName != "" {

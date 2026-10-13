@@ -37,7 +37,7 @@ func (r *recordingLifecycleObserver) OnSupplyGateWired(present bool) {
 	r.gateWired = append(r.gateWired, present)
 }
 
-func (r *recordingLifecycleObserver) OnSupplyFetch(_ context.Context, name, result string) {
+func (r *recordingLifecycleObserver) OnSupplyFetch(_ context.Context, name, result, _ string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.supplyFetchLog = append(r.supplyFetchLog, name+"="+result)

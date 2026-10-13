@@ -180,7 +180,7 @@ func TestSupplyConsumerBindingReachesMapBodyModule(t *testing.T) {
 	// the workflow's own name (types.Input.WorkflowName's contract; see
 	// wantBinding below) -- "node:" + mapNode + "/" + bodyMember.
 	t.Cleanup(func() {
-		node.UnregisterWasmSupplyConsumerByDigest(digest, mapBodySupplyNode, "node:"+mapNode+"/"+bodyMember)
+		node.UnregisterWasmSupplyConsumerByDigest(namespace.Default, digest, mapBodySupplyNode, "node:"+mapNode+"/"+bodyMember)
 	})
 
 	def := &types.WorkflowDef{
@@ -338,7 +338,7 @@ func TestSupplyConsumerBindingReachesMapBodyModule(t *testing.T) {
 	// :94) so the module keeps receiving content directly. Both keys are real,
 	// distinct, intentional registrations against the SAME supply name -- this
 	// assertion predates the warm-up consumer and asserted 1 before it existed.
-	if got := obs.get(mapBodySupplyNode); got != 2 {
+	if got := obs.get(namespace.Default, mapBodySupplyNode); got != 2 {
 		t.Fatalf("(b) consumers for %q = %d, want 2 (warm-up consumer + module "+
 			"consumer) — without a registration the content reaches nobody and the "+
 			"body's module evaluates against no rules",

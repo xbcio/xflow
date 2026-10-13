@@ -65,6 +65,9 @@ type ActivateDirective struct {
 	// recognize this field (old binary) registers nothing — byte-identical to
 	// the behavior before this field existed, where nothing registered either.
 	SupplyConsumers []engine.SupplyConsumerBinding `json:"supply_consumers,omitempty"`
+	// WorkflowTimezone is the workflow's settings.timezone ("" when unset),
+	// passed to the trigger as TriggerActivateInput.WorkflowTimezone.
+	WorkflowTimezone string `json:"workflow_timezone,omitempty"`
 }
 
 // ActivationKind values for ActivateDirective.Kind.

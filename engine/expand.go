@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
@@ -161,6 +162,13 @@ func expansionBatchTask(lease *TaskLease, childID types.ExecutionID, batchIndex 
 	}
 	if size, err := batchPayloadInt(data, "batch_size"); err == nil && size > 0 {
 		payload["batch_size"] = size
+	}
+	// The parent's issue time anchors the batch deadline (batchDeadline). It
+	// travels on the task, not read back from node state, so every rebuild of
+	// the batch lease -- first issue or response-loss recovery -- derives the
+	// same instant instead of granting itself a fresh budget from now.
+	if !lease.IssuedAt.IsZero() {
+		payload["parent_issued_at"] = lease.IssuedAt.UTC().Format(time.RFC3339Nano)
 	}
 	if all, ok := data["items"].([]any); ok {
 		payload["all_items"] = all
@@ -338,6 +346,9 @@ func (e *Engine) runBatchBody(ctx context.Context, g *graph.Graph, lease *TaskLe
 		OuterNodes:      outerNodes,
 		TraceID:         submission.TraceID,
 		SpanID:          submission.SpanID,
+		// The same bound BuildSubgraphLease ships to a runner, so an in-process
+		// body cannot outlive the map node either.
+		Deadline: batchDeadline(batchParentIssuedAt(t), e.resolveNodeTimeout(meta.Timeout), e.outerDeadline),
 	})
 	if err != nil {
 		// The body could not be RUN — compile failure, missing handler, backend
@@ -467,6 +478,43 @@ func batchPayloadInt(data map[string]any, name string) (int, error) {
 	default:
 		return 0, fmt.Errorf("batch task has invalid %s", name)
 	}
+}
+
+// batchParentIssuedAt reads the parent map node's lease issue time that
+// expansionBatchTask stamped on the batch. Zero when absent or unparseable, in
+// which case batchDeadline drops the node-timeout half of the bound.
+func batchParentIssuedAt(t *Task) time.Time {
+	if t == nil || t.Payload == nil || t.Payload.Data == nil {
+		return time.Time{}
+	}
+	raw, _ := t.Payload.Data["parent_issued_at"].(string)
+	if raw == "" {
+		return time.Time{}
+	}
+	issuedAt, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}
+	}
+	return issuedAt
+}
+
+// batchDeadline is the absolute instant past which a batch's body must stop:
+// the parent map node's timeout measured from the parent lease's ORIGINAL issue
+// time, tightened by the engine's outer deadline. Zero means unbounded.
+//
+// Without it a map node's timeout bounded only the node's own handler run; the
+// expansion that follows had no bound at all, so a body could outlive the node
+// that spawned it. It mirrors BuildTaskLease's ExecutionDeadline arithmetic so
+// the batch inherits exactly the budget the parent lease was issued with.
+func batchDeadline(parentIssuedAt time.Time, timeout time.Duration, outer time.Time) time.Time {
+	var deadline time.Time
+	if !parentIssuedAt.IsZero() && timeout > 0 {
+		deadline = parentIssuedAt.Add(timeout)
+	}
+	if !outer.IsZero() && (deadline.IsZero() || outer.Before(deadline)) {
+		deadline = outer
+	}
+	return deadline
 }
 
 func expansionBatchLease(t *Task) (*TaskLease, types.ExecutionID, []any, error) {

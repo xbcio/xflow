@@ -88,12 +88,51 @@ const (
 	OpExecutionSignal          = "execution.signal"
 	OpExecutionRevoke          = "execution.revoke"
 	OpExecutionCancel          = "execution.cancel"
+	// OpExecutionPause and OpExecutionResume suspend and release dispatch of a
+	// running execution. They are separate operations from cancel — and from
+	// each other — because each is its own state transition with its own
+	// refusal (a queued execution cannot be paused; a running one cannot be
+	// resumed), so a caller auditing a denial needs to know which one was
+	// attempted. Both map to the "execution.control" scope.
+	OpExecutionPause  = "execution.pause"
+	OpExecutionResume = "execution.resume"
 	// OpExecutionSeed is the mutation that seeds an execution from an entry unit
 	// (single node or group node) result via POST /v1/executions. It maps to the
 	// "execution" scope like the other execution operations.
-	OpExecutionSeed    = "execution.seed"
+	OpExecutionSeed = "execution.seed"
+	// OpExecutionRerun derives a new execution from a terminal one, starting at
+	// a node. It is a creation operation, not a control on the execution it
+	// reads: the execution it derives from is never modified. Its scope is its
+	// own (execution.rerun) rather than execution.control, because the trust a
+	// rerun needs is "may start this work again" — which the population that
+	// owns the definition already has — not "may stop what is running".
+	OpExecutionRerun   = "execution.rerun"
 	OpDeadLetterList   = "deadletter.list"
 	OpDeadLetterReplay = "deadletter.replay"
+	// Schedule operations are the runtime overlay surface over a workflow's
+	// cron and timer trigger nodes. They are three operations with three scopes,
+	// not one operation with a read/write split, because the three carry
+	// genuinely different trust:
+	//
+	//   - OpScheduleRead (schedule.read) shows when a workflow's schedules fire.
+	//     A principal that may read the workflow definition may not automatically
+	//     read its schedules: the effective schedule and the last fire time are
+	//     operational facts about a running system, and a read-only definition
+	//     reviewer has no business with them.
+	//   - OpScheduleWrite (schedule.write) retimes, pauses, and resumes. It is
+	//     the trust to change WHEN a workflow runs, deliberately not bundled with
+	//     workflow.register: retiming a schedule is a smaller, reversible change
+	//     than publishing a new version, and a deployment that hands out the
+	//     former must not have to hand out the latter.
+	//   - OpScheduleBackfill (schedule.backfill) STARTS EXECUTIONS. It is not a
+	//     variant of write: a write changes what will happen next, while a
+	//     backfill runs history now, on demand, in a burst — bounded by the
+	//     workflow's own admission, but still a different act, and a deployment
+	//     can grant retiming to an operator while withholding the ability to
+	//     replay.
+	OpScheduleRead     = "schedule.read"
+	OpScheduleWrite    = "schedule.write"
+	OpScheduleBackfill = "schedule.backfill"
 	// OpCurrentUserRead serves GET /v1/current-user: the caller's OWN verified
 	// identity. It reports what the presented credential already carries — the
 	// subject the server authenticated, the namespace it is bound to, and the
@@ -186,6 +225,23 @@ func scopeForOperation(op string) string {
 		return "workflow"
 	case OpExecutionRead, OpExecutionSignal, OpExecutionRevoke, OpExecutionCancel, OpExecutionSeed:
 		return "execution"
+	case OpExecutionRerun:
+		// A scope of its own: starting a new execution from a terminal one is
+		// not the same trust as suspending a running pipeline (execution.control)
+		// nor as signaling one (execution). It is a creation, so it rides the
+		// narrower grant a deployment can hand to the population allowed to
+		// re-run work without letting it stop anything.
+		return "execution.rerun"
+	case OpExecutionPause, OpExecutionResume:
+		// Deliberately NOT the "execution" scope that signal/cancel/read ride.
+		// Suspending a running execution is a dispatch-level control, not just
+		// another way to address one: a paused execution keeps its concurrency
+		// slot and stops making progress until an operator releases it, so the
+		// population trusted with "look at and signal an execution" is not
+		// automatically the population trusted to stop the pipeline. The scope
+		// is a new grant, and a token that predates it is refused (403) rather
+		// than silently granted the control.
+		return "execution.control"
 	case OpCurrentUserRead:
 		// Deliberately the console's baseline read scope rather than a scope of
 		// its own. The response is the caller's own credential, so a scope here
@@ -200,6 +256,12 @@ func scopeForOperation(op string) string {
 		return "deadletter.list"
 	case OpDeadLetterReplay:
 		return "deadletter.replay"
+	case OpScheduleRead:
+		return "schedule.read"
+	case OpScheduleWrite:
+		return "schedule.write"
+	case OpScheduleBackfill:
+		return "schedule.backfill"
 	case OpManagementRead:
 		return "management.read"
 	case OpManagementLeaderRead:

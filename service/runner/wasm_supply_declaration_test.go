@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
@@ -194,7 +195,7 @@ func TestLegacyDigestBindingStillCompilesAtActivation(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("activate: %v", err)
 	}
-	if got := obs.get(f.supplyName); got != 1 {
+	if got := obs.get(namespace.Default, f.supplyName); got != 1 {
 		t.Fatalf("consumers for %q = %d, want 1; the legacy digest path regressed",
 			f.supplyName, got)
 	}

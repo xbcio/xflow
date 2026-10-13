@@ -398,6 +398,12 @@ const flowAdvance = "advance"
 // commit transition rather than by a subsequent advance.
 const flowGroup = "group"
 
+// flowRerun is the OnNodeSkip flow label for the fan-in a rerun seed applies
+// while copying a terminal execution's prefix into a new one: the branches the
+// copied prefix did not take are resolved as skip in that single transition,
+// which is neither an advance nor an entry admission.
+const flowRerun = "rerun"
+
 // notifySkip reports the downstream units one transition resolved as skip.
 //
 // An empty list is not reported: an execute-only transition is the common case,

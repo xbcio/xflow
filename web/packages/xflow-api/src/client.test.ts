@@ -1,10 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
+import type { RuntimeSnapshot } from "@xflow/core";
 import {
   createXFlowApiClient,
   executionDetailToRuntimeSnapshot,
+  executionStatusToRuntimeStatus,
   XFlowApiError,
   type ExecuteWorkflowResult,
   type ExecutionDetail,
+  type ExecutionStatus,
   type RegisterWorkflowResult,
   type WaitExecutionTimeout,
   type WorkflowListPage,
@@ -621,6 +624,70 @@ describe("executionDetailToRuntimeSnapshot", () => {
 
     expect(detail.nodes).toEqual([{ name: "fetch", status: "pinned", output: { value: "mock" } }]);
     expect(executionDetailToRuntimeSnapshot(detail).nodes).toEqual({ fetch: { status: "success" } });
+  });
+
+  it("accepts a queued execution and projects it as not yet started", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () =>
+        success({
+          execution_id: "exec-queued",
+          status: "queued",
+          nodes: [{ name: "ingest", status: "pending" }]
+        })
+    });
+
+    const detail = await client.getExecution("exec-queued");
+
+    // `queued` is in the OpenAPI ExecutionStatus enum and is what a queue-mode
+    // submission reports until a concurrency slot frees.
+    expect(detail.status).toBe("queued");
+    expect(executionDetailToRuntimeSnapshot(detail).status).toBe("pending");
+  });
+
+  it("accepts an expired node and keeps it in the runtime projection", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () =>
+        success({
+          execution_id: "exec-expired",
+          status: "success",
+          nodes: [{ name: "ingest", status: "expired" }]
+        })
+    });
+
+    const detail = await client.getExecution("exec-expired");
+
+    expect(detail.nodes).toEqual([{ name: "ingest", status: "expired" }]);
+    // A node whose records are gone must not be reported as pending: that is
+    // the one thing the status exists to deny (types/execution.go).
+    expect(executionDetailToRuntimeSnapshot(detail).nodes).toEqual({ ingest: { status: "expired" } });
+  });
+});
+
+describe("executionStatusToRuntimeStatus", () => {
+  it("projects every execution status for hosts that hold no node list", () => {
+    // A host that renders a timed-out `waitExecution` has a bare status and no
+    // detail to hand to executionDetailToRuntimeSnapshot. The table it uses is
+    // this one, so every member of the server vocabulary is pinned here: a
+    // status added upstream without a projection has to fail this test rather
+    // than reach a renderer as an unhandled value.
+    const projections: Record<ExecutionStatus, RuntimeSnapshot["status"]> = {
+      pending: "pending",
+      queued: "pending",
+      running: "running",
+      canceling: "running",
+      success: "success",
+      failed: "failed",
+      canceled: "canceled",
+      timeout: "timeout"
+    };
+
+    const projected = Object.fromEntries(
+      Object.keys(projections).map((status) => [status, executionStatusToRuntimeStatus(status as ExecutionStatus)])
+    );
+
+    expect(projected).toEqual(projections);
   });
 });
 

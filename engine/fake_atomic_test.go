@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -102,6 +103,34 @@ func (f *fakeState) CreateExecutionWithOutbox(_ context.Context, execution *Exec
 		f.putAtomicOutboxLocked(execution.ID, entry.ID, entry.Task, entry.AvailableAt)
 	}
 	return nil
+}
+
+var _ ConcurrencyLimitedStateStore = (*fakeState)(nil)
+
+// CreateExecutionWithConcurrency is the test reference implementation of slot
+// admission: the limit check, the slot charge, the execution write and its
+// initial outbox all happen under one mutex acquisition, which is the same
+// atomicity the production backends get from a single Lua script.
+func (f *fakeState) CreateExecutionWithConcurrency(_ context.Context, execution *ExecutionSnapshot, entries []OutboxEntry, admission ConcurrencyAdmission) (ConcurrencyAdmissionResult, error) {
+	if admission.Mode == types.ConcurrencyModeQueue {
+		return ConcurrencyAdmissionResult{}, ErrConcurrencyQueueUnsupported
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := graph.ConcurrencyKey(admission.Namespace, admission.Workflow)
+	if len(f.concurrencySlots[key]) >= admission.Limit {
+		return ConcurrencyAdmissionResult{}, ErrConcurrencyLimit
+	}
+	if f.concurrencySlots[key] == nil {
+		f.concurrencySlots[key] = make(map[types.ExecutionID]bool)
+	}
+	f.concurrencySlots[key][execution.ID] = true
+	f.concurrencyHolders[execution.ID] = key
+	f.createExecutionLocked(execution)
+	for _, entry := range entries {
+		f.putAtomicOutboxLocked(execution.ID, entry.ID, entry.Task, entry.AvailableAt)
+	}
+	return ConcurrencyAdmissionResult{}, nil
 }
 
 func (f *fakeState) ResetNodeForRetryWithOutbox(_ context.Context, id types.ExecutionID, nodeName string, token LeaseToken, entry OutboxEntry) (bool, error) {
@@ -379,6 +408,13 @@ func (f *fakeState) ListOutbox(_ context.Context, id types.ExecutionID, before t
 	if limit <= 0 {
 		return nil, nil
 	}
+	// A paused execution's ready set is held, at any horizon. This fake is the
+	// store the engine's pause tests drive, and it is deliberately NOT an
+	// OutboxLeaser: claimOutbox therefore falls back to this method, which is
+	// how the engine's fallback branch gets covered by the pause too.
+	if e, ok := f.executions[id]; ok && e.Status == types.ExecutionStatusPaused {
+		return nil, nil
+	}
 	entries := f.atomicOutbox[id]
 	ids := make([]string, 0, len(entries))
 	for entryID, entry := range entries {
@@ -459,4 +495,44 @@ func cloneAtomicTask(task Task) Task {
 	}
 	copy.Payload = &payload
 	return copy
+}
+
+var _ ExecutionPauser = (*fakeState)(nil)
+
+// PauseExecution mirrors the backends' dispatch hold so the engine's own pause
+// path can be driven here. The store-level semantics — idempotence, the refused
+// statuses, the deadlines a resume preserves — are pinned once, against both
+// real backends, in backend/internal/statestoretest; this exists so the engine
+// test can make the store hold and release, not to restate that contract.
+func (f *fakeState) PauseExecution(_ context.Context, id types.ExecutionID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	e, ok := f.executions[id]
+	if !ok {
+		return ErrExecutionNotPausable
+	}
+	switch e.Status {
+	case types.ExecutionStatusPaused:
+		return nil
+	case types.ExecutionStatusRunning:
+		// The held ready set is the status: ListOutbox refuses while it stands,
+		// so nothing is moved and a resume reconstructs nothing.
+		e.Status = types.ExecutionStatusPaused
+		return nil
+	default:
+		return ErrExecutionNotPausable
+	}
+}
+
+// ResumeExecution is the mirror image: only a paused execution can be resumed,
+// and the status is again the whole of the release.
+func (f *fakeState) ResumeExecution(_ context.Context, id types.ExecutionID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	e, ok := f.executions[id]
+	if !ok || e.Status != types.ExecutionStatusPaused {
+		return ErrExecutionNotPaused
+	}
+	e.Status = types.ExecutionStatusRunning
+	return nil
 }

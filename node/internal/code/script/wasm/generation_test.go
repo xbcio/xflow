@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/internal/code/script/engine"
 	"github.com/xbcio/xflow/node/supply"
 )
@@ -14,7 +15,7 @@ import (
 func TestEvalResultCarriesConfigGeneration(t *testing.T) {
 	code := testReactorCode(t)
 	reg := supply.NewRegistry()
-	if err := RegisterSupplyConsumer(code, "rules", reg); err != nil {
+	if err := RegisterSupplyConsumer(namespace.Default, code, "rules", reg); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	ctx := context.Background()

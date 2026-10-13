@@ -45,6 +45,12 @@ type EngineFacade interface {
 	// by *engine.Engine (engine.go).
 	Invoke(ctx context.Context, g *graph.Graph, entryNode string, input map[string]any, runtime ...*types.Runtime) (types.ExecutionID, error)
 	Inspect(ctx context.Context, id types.ExecutionID, nodeNames ...string) (engine.ExecutionDetail, error)
+	// InspectStatus returns the execution-level half of Inspect — status, error
+	// and, for a queued execution, its place in line — without loading the graph
+	// or any node. Implemented by *engine.Engine (inspect.go). The submission
+	// path uses it to report where a submission landed without paying a graph
+	// walk for one field.
+	InspectStatus(ctx context.Context, id types.ExecutionID) (engine.ExecutionDetail, error)
 	DeliverSignal(ctx context.Context, id types.ExecutionID, name string, data map[string]any) error
 	// RevokeSignal atomically revokes a delivered-but-unconsumed signal.
 	// Implemented by *engine.Engine (engine.go).

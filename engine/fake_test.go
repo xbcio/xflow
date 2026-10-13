@@ -31,24 +31,32 @@ type fakeState struct {
 	atomicOutbox   map[types.ExecutionID]map[string]OutboxEntry
 	atomicAdvanced map[string]bool
 	atomicSchedule map[string]string
+	// concurrencySlots is the workflow-scoped slot set the concurrency
+	// capability test reference implementation admits against, and
+	// concurrencyHolders records which set each execution was charged to so a
+	// terminal transition can release it without consulting a graph.
+	concurrencySlots   map[string]map[types.ExecutionID]bool
+	concurrencyHolders map[types.ExecutionID]string
 }
 
 func newFakeState() *fakeState {
 	return &fakeState{
-		executions:     make(map[types.ExecutionID]*ExecutionSnapshot),
-		nodes:          make(map[string]*NodeSnapshot),
-		inDegrees:      make(map[string]int),
-		activeIns:      make(map[string]int),
-		outputs:        make(map[string]map[string]any),
-		suspended:      make(map[string]*types.SuspendSpec),
-		signals:        make(map[string]map[string]any),
-		signalSets:     make(map[string]map[string]map[string]any),
-		resumed:        make(map[string]bool),
-		subExecs:       make(map[string][]*SubExecution),
-		watchers:       make(map[types.ExecutionID][]chan ExecutionEvent),
-		atomicOutbox:   make(map[types.ExecutionID]map[string]OutboxEntry),
-		atomicAdvanced: make(map[string]bool),
-		atomicSchedule: make(map[string]string),
+		executions:         make(map[types.ExecutionID]*ExecutionSnapshot),
+		nodes:              make(map[string]*NodeSnapshot),
+		inDegrees:          make(map[string]int),
+		activeIns:          make(map[string]int),
+		outputs:            make(map[string]map[string]any),
+		suspended:          make(map[string]*types.SuspendSpec),
+		signals:            make(map[string]map[string]any),
+		signalSets:         make(map[string]map[string]map[string]any),
+		resumed:            make(map[string]bool),
+		subExecs:           make(map[string][]*SubExecution),
+		watchers:           make(map[types.ExecutionID][]chan ExecutionEvent),
+		atomicOutbox:       make(map[types.ExecutionID]map[string]OutboxEntry),
+		atomicAdvanced:     make(map[string]bool),
+		atomicSchedule:     make(map[string]string),
+		concurrencySlots:   make(map[string]map[types.ExecutionID]bool),
+		concurrencyHolders: make(map[types.ExecutionID]string),
 	}
 }
 
@@ -81,8 +89,31 @@ func (f *fakeState) UpdateExecutionStatus(_ context.Context, id types.ExecutionI
 		// inherit a stale reason.
 		e.Error = TerminalExecutionError(status, errMsg, "")
 	}
+	f.releaseConcurrencySlotLocked(id, status)
 	f.publishLocked(ExecutionEvent{ExecutionID: id, Status: status, Error: errMsg})
 	return nil
+}
+
+// releaseConcurrencySlotLocked frees the slot an execution was admitted under.
+// It lives in the terminal writer, not in the engine, because a release placed
+// at one engine call site would be missed by every other path into a terminal
+// status. Non-terminal transitions (canceling) leave the slot charged: the
+// execution still holds its resources until it actually stops.
+func (f *fakeState) releaseConcurrencySlotLocked(id types.ExecutionID, status types.ExecutionStatus) {
+	if !types.IsTerminalExecutionStatus(status) {
+		return
+	}
+	key, held := f.concurrencyHolders[id]
+	if !held {
+		return
+	}
+	delete(f.concurrencyHolders, id)
+	if slots := f.concurrencySlots[key]; slots != nil {
+		delete(slots, id)
+		if len(slots) == 0 {
+			delete(f.concurrencySlots, key)
+		}
+	}
 }
 
 func (f *fakeState) GetExecution(_ context.Context, id types.ExecutionID) (*ExecutionSnapshot, error) {

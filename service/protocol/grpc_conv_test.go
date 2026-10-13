@@ -561,3 +561,58 @@ func TestActivationAckRequestToProtoDoesNotCarryAuthToken(t *testing.T) {
 		}
 	}
 }
+
+// The gRPC path must carry the namespace of each supply entry too. The JSON
+// round-trips above cover the HTTP/DTO shape; this covers the conversion the
+// gRPC heartbeat actually uses, where a lost namespace would be invisible until
+// two namespaces happened to publish the same supply node name.
+func TestHeartbeatSupplyEntriesRoundTripThroughProto(t *testing.T) {
+	req := HeartbeatRequest{
+		RunnerID: "runner-1", SessionID: "sess-1",
+		SupplyObserved: []SupplyObservation{
+			{Namespace: "tenant-a", Node: "rules", Hash: "sha256:abc"},
+			{Namespace: "tenant-b", Node: "rules", Hash: "sha256:xyz"},
+		},
+	}
+	gotReq := HeartbeatRequestFromProto(HeartbeatRequestToProto(req))
+	if !reflect.DeepEqual(gotReq.SupplyObserved, req.SupplyObserved) {
+		t.Fatalf("SupplyObserved round-trip = %#v, want %#v", gotReq.SupplyObserved, req.SupplyObserved)
+	}
+
+	resp := HeartbeatResponse{
+		ServerTime: 100,
+		SupplyHints: []SupplyHint{
+			{Namespace: "tenant-a", Node: "rules", Hash: "sha256:def"},
+			{Namespace: "tenant-b", Node: "rules", Hash: "sha256:ghi"},
+		},
+	}
+	pb, err := HeartbeatResponseToProto(resp)
+	if err != nil {
+		t.Fatalf("to proto: %v", err)
+	}
+	gotResp, err := HeartbeatResponseFromProto(pb)
+	if err != nil {
+		t.Fatalf("from proto: %v", err)
+	}
+	if !reflect.DeepEqual(gotResp.SupplyHints, resp.SupplyHints) {
+		t.Fatalf("SupplyHints round-trip = %#v, want %#v", gotResp.SupplyHints, resp.SupplyHints)
+	}
+}
+
+// An empty report must stay empty (nil), not become a one-element slice holding
+// a zero entry: the heartbeat body's "this runner hosts no supply" shape is what
+// keeps bodies byte-identical for runners that consume none.
+func TestHeartbeatSupplyEntriesEmptyStayNil(t *testing.T) {
+	if got := SupplyObservationsToProto(nil); got != nil {
+		t.Fatalf("SupplyObservationsToProto(nil) = %#v, want nil", got)
+	}
+	if got := SupplyHintsToProto(nil); got != nil {
+		t.Fatalf("SupplyHintsToProto(nil) = %#v, want nil", got)
+	}
+	if got := SupplyObservationsFromProto(nil); got != nil {
+		t.Fatalf("SupplyObservationsFromProto(nil) = %#v, want nil", got)
+	}
+	if got := SupplyHintsFromProto(nil); got != nil {
+		t.Fatalf("SupplyHintsFromProto(nil) = %#v, want nil", got)
+	}
+}

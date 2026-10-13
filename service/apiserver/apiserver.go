@@ -41,6 +41,19 @@ type Config struct {
 	// Supplies backs the /v1/supplies endpoints. When nil the supply module is
 	// not registered at all (the routes 404). A *sqlstore.Provider satisfies it.
 	Supplies store.Supplies
+	// Schedules serves the /v1/workflows/{id}/schedules endpoints: the runtime
+	// overlays on a workflow's cron and timer trigger nodes. When nil the routes
+	// are still registered but answer 501 — a deployment without an overlay
+	// store still HAS the API, it just cannot serve it, and a 404 would read as
+	// "this server is older than the route".
+	//
+	// The manager's host callbacks (reload, backfill) are the trigger host's
+	// half of the contract: a control plane whose triggers run on runners has
+	// none to wire yet (see control.ScheduleManagerConfig). What such a server
+	// serves is the overlay itself — list, inspect, retime, pause, resume — and
+	// it reports "stored, not announced" (202) rather than claiming an
+	// immediacy it cannot deliver.
+	Schedules *control.ScheduleManager
 	// Artifacts backs GET/HEAD /v1/artifacts/{digest}, the endpoint runners use
 	// to fetch script bytes they have not cached. When nil the artifact module
 	// is not registered at all (the route 404s). Build it with
@@ -189,6 +202,11 @@ type Config struct {
 	// (currently Redis-backed control-plane backends). Leave nil for embedded/local
 	// deployments that have no external dependency to probe.
 	ReadinessChecker ReadinessChecker
+	// APILimits configures the admission layer in front of the mutating
+	// workflow/execution routes and the webhook entry route: a per-namespace
+	// rate limit (off by default) and a per-replica inflight bound (on by
+	// default). See APILimits.
+	APILimits APILimits
 
 	// Production turns on the production posture gate in New: the server
 	// refuses to start unless every ProductionRequirement is met. Off by
@@ -268,6 +286,9 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 	if cfg.ParamValidation != "" && !cfg.ParamValidation.Valid() {
 		return nil, fmt.Errorf("apiserver: invalid ParamValidation %q: want off, warn, or enforce", cfg.ParamValidation)
 	}
+	if err := cfg.APILimits.validate(); err != nil {
+		return nil, err
+	}
 	// B3 production fail-closed: when PrincipalAuth is configured for the
 	// resource/operation authz path, an Authorizer and a durable AuditSink are
 	// also required. A missing authorizer would default-deny everything; a
@@ -306,6 +327,11 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 	for _, o := range opts {
 		o(s)
 	}
+	// Refused before a control plane is built, so a mis-configured shared mode
+	// opens no Redis connection it would then have to unwind.
+	if s.cp == nil && cfg.APILimits.Mode == APIRateLimitModeRedis && cfg.RedisConfig == nil && cfg.RedisAddr == "" {
+		return nil, errAPIRateLimitNoRedis
+	}
 	if s.cp == nil {
 		cp, err := buildControlPlane(cfg)
 		if err != nil {
@@ -328,10 +354,16 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 	// store.Executions field the module declares. Nil stays nil and the handler
 	// answers 500 rather than an empty page.
 	ctrlModule.executions = cfg.Store
+	ctrlModule.schedules = cfg.Schedules
 	ctrlModule.registrationMetrics = metrics.NewWorkflowRegistrationMetrics(cfg.Metrics)
 	ctrlModule.paramValidation = cfg.ParamValidation.OrDefault()
 	ctrlModule.paramValidationMetrics = metrics.NewParamValidationMetrics(cfg.Metrics)
 	ctrlModule.descriptorLookup = execution.RegistryDescriptorLookup
+	admission, err := apiAdmissionFor(cfg, s.cp)
+	if err != nil {
+		return nil, err
+	}
+	ctrlModule.admission = admission
 	if cfg.PrincipalAuth != nil {
 		ctrlModule.principalAuth = cfg.PrincipalAuth
 		ctrlModule.authorizer = cfg.Authorizer
@@ -354,6 +386,10 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 	if s.enableManagement {
 		mgmt := newManagementModule(s.cp)
 		mgmt.metrics = cfg.Metrics
+		// The dead-letter replay dispatch inside the module's prefix handler
+		// creates work, so it passes through the same admission layer as the
+		// execution routes (the shared authz wrapper consults the holder).
+		mgmt.admission = admission
 		mgmt.ready = s.readiness
 		// Runner-pool token and issued-identity management dependencies are
 		// injected after construction so unrelated management-module tests keep
@@ -397,6 +433,30 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 		// ControlPlane.Authenticator's doc comment.
 		art.runnerAuth = s.cp.Authenticator()
 		s.modules = append(s.modules, art)
+	}
+	// The webhook module is the other side of "the control plane hosts the entry
+	// units": wherever entry units are dispatched as durable activations, a
+	// webhook entry has no runner to live on, so this process serves its route.
+	// The gate is the same one the activation path uses (an EntryActivationStore
+	// is configured), so "no activation is written for a webhook unit" and "this
+	// route exists" cannot drift apart -- a deployment that hosts no activations
+	// keeps the embedded engine's WebhookRuntime and serves no such route.
+	//
+	// Unlike every other module this one is NOT gated on PrincipalAuth: its
+	// authentication is the per-entry HMAC signature, not a platform principal
+	// (see module_webhook.go). It is gated on the supplies store instead, since
+	// a deployment that cannot read the secret can never authenticate a caller
+	// and would serve a route that answers 503 to everything.
+	if s.cp.EntryActivationStore() != nil && cfg.Supplies != nil {
+		hook := newWebhookModule(s.cp)
+		hook.supplies = cfg.Supplies
+		hook.log = cfg.Logger
+		hook.admission = admission
+		s.modules = append(s.modules, hook)
+		// Registration must refuse a server-hosted webhook entry that declares
+		// no secret. The flag is derived from the same predicate that mounted the
+		// route above, so "this process serves webhook routes" has one answer.
+		ctrlModule.webhookRoutesHosted = true
 	}
 	return s, nil
 }
@@ -637,9 +697,9 @@ func (s *APIServer) ControlServer() *control.Server { return s.cp.RunnerServer()
 // both sides are the same string, so no hashing is involved.
 //
 // Two properties a consumer must not design around:
-//   - The inner key is the supply NODE name, not the resource name
-//     (service/control/supply_hints.go:96 keys on req.Node while the hash comes
-//     from req.Resource).
+//   - The inner key is the supply's (namespace, name) identity, not the resource
+//     name: the reports key on the identity the runner applies content under,
+//     while the hash itself comes from the resource the node names.
 //   - Record is whole-replacement, not merge, and leader failover legitimately
 //     clears the whole thing. Display it; never gate publishing on it, or a
 //     routine failover wedges the publish path.

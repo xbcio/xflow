@@ -1,6 +1,6 @@
 import { history, useIntl, useModel, useParams } from '@umijs/max';
 import { App, Button, Result, Spin } from 'antd';
-import { createXFlowApiClient, executionDetailToRuntimeSnapshot } from '@xflow/api';
+import { createXFlowApiClient, executionDetailToRuntimeSnapshot, executionStatusToRuntimeStatus } from '@xflow/api';
 import { XFlowEditor, type XFlowEditorSaveResult } from '@xflow/editor';
 import type { NodeTypesResponse, RuntimeSnapshot, Viewport, WorkflowDef } from '@xflow/core';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -138,9 +138,7 @@ export default function WorkflowDetailPage() {
     const execution = await api.runWorkflow(nextWorkflow.id);
     const result = await api.waitExecution(execution.executionId, { timeout: '10s' });
     if ('timedOut' in result) {
-      return {
-        status: result.status === 'canceling' ? 'running' : result.status,
-      };
+      return { status: executionStatusToRuntimeStatus(result.status) };
     }
     return executionDetailToRuntimeSnapshot(result);
   }, [api]);

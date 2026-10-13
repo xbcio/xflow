@@ -256,11 +256,16 @@ func TestOldServerHeartbeatResponseDecodesOnNewRunner(t *testing.T) {
 }
 
 // A NEW runner's heartbeat body, when it DOES have supplies, must round-trip
-// SupplyObserved through JSON so a new server can read it back intact.
+// SupplyObserved through JSON so a new server can read it back intact — with the
+// namespace of each entry preserved, since two namespaces may each host a supply
+// node of the same name and the pair is the only thing that tells them apart.
 func TestHeartbeatRequestRoundTripsSupplyObserved(t *testing.T) {
 	req := HeartbeatRequest{
 		RunnerID: "runner-1", SessionID: "sess-1", Capacity: 1,
-		SupplyObserved: map[string]string{"rules": "sha256:abc"},
+		SupplyObserved: []SupplyObservation{
+			{Namespace: "tenant-a", Node: "rules", Hash: "sha256:abc"},
+			{Namespace: "tenant-b", Node: "rules", Hash: "sha256:xyz"},
+		},
 	}
 	data, err := json.Marshal(req)
 	if err != nil {
@@ -270,14 +275,28 @@ func TestHeartbeatRequestRoundTripsSupplyObserved(t *testing.T) {
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if got.SupplyObserved["rules"] != "sha256:abc" {
-		t.Fatalf("SupplyObserved = %#v, want {rules: sha256:abc}", got.SupplyObserved)
+	if len(got.SupplyObserved) != 2 {
+		t.Fatalf("SupplyObserved = %#v, want both namespaces' entries", got.SupplyObserved)
+	}
+	byNS := map[string]SupplyObservation{}
+	for _, o := range got.SupplyObserved {
+		byNS[o.Namespace] = o
+	}
+	if o := byNS["tenant-a"]; o.Node != "rules" || o.Hash != "sha256:abc" {
+		t.Fatalf("SupplyObserved[tenant-a] = %#v, want {rules sha256:abc}", o)
+	}
+	if o := byNS["tenant-b"]; o.Node != "rules" || o.Hash != "sha256:xyz" {
+		t.Fatalf("SupplyObserved[tenant-b] = %#v, want {rules sha256:xyz}: the same node "+
+			"name in two namespaces must survive as two entries", o)
 	}
 }
 
-// Symmetric round-trip for SupplyHints on the response side.
+// Symmetric round-trip for SupplyHints on the response side, namespace included.
 func TestHeartbeatResponseRoundTripsSupplyHints(t *testing.T) {
-	resp := HeartbeatResponse{ServerTime: 100, SupplyHints: map[string]string{"rules": "sha256:def"}}
+	resp := HeartbeatResponse{ServerTime: 100, SupplyHints: []SupplyHint{
+		{Namespace: "tenant-a", Node: "rules", Hash: "sha256:def"},
+		{Namespace: "tenant-b", Node: "rules", Hash: "sha256:ghi"},
+	}}
 	data, err := json.Marshal(resp)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -286,8 +305,18 @@ func TestHeartbeatResponseRoundTripsSupplyHints(t *testing.T) {
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if got.SupplyHints["rules"] != "sha256:def" {
-		t.Fatalf("SupplyHints = %#v, want {rules: sha256:def}", got.SupplyHints)
+	if len(got.SupplyHints) != 2 {
+		t.Fatalf("SupplyHints = %#v, want both namespaces' entries", got.SupplyHints)
+	}
+	byNS := map[string]SupplyHint{}
+	for _, h := range got.SupplyHints {
+		byNS[h.Namespace] = h
+	}
+	if h := byNS["tenant-a"]; h.Node != "rules" || h.Hash != "sha256:def" {
+		t.Fatalf("SupplyHints[tenant-a] = %#v, want {rules sha256:def}", h)
+	}
+	if h := byNS["tenant-b"]; h.Node != "rules" || h.Hash != "sha256:ghi" {
+		t.Fatalf("SupplyHints[tenant-b] = %#v, want {rules sha256:ghi}", h)
 	}
 }
 

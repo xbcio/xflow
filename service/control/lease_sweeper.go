@@ -62,6 +62,17 @@ type LeaseIndexRepairer interface {
 	RepairLeaseIndex(ctx context.Context, limit int) (reconciled int, err error)
 }
 
+// ConcurrencySlotReconciler is an optional backend capability that reconciles
+// workflow concurrency slot sets against the executions that hold them.
+//
+// It is a separate capability from LeaseIndexRepairer because the two back up
+// different invariants: a repair index is derived state that can be rebuilt at
+// any time, while a slot set is the limit itself. A backend that can do one
+// without the other must still be able to say so.
+type ConcurrencySlotReconciler interface {
+	ReconcileConcurrencySlots(ctx context.Context, limit int) (swept int, err error)
+}
+
 // LeaseSweeper periodically reclaims task leases whose runner crashed
 // mid-execute. The engine writes IssuedAt+TTL on every lease it hands out; the
 // sweeper scans for leases whose deadline has passed, revokes them atomically
@@ -88,6 +99,13 @@ type LeaseSweeper struct {
 	repairBatch  int
 	repairMu     sync.Mutex
 	lastRepair   time.Time
+
+	// The concurrency maintenance (slot reconciliation and queue-timeout
+	// expiry) shares the repair period but keeps its own timestamp: it must not
+	// inherit the repair pass's gates, only its cadence. The two concurrency
+	// passes share ONE window, because they are one pass's worth of work.
+	slotSweepMu   sync.Mutex
+	lastSlotSweep time.Time
 
 	reapPeriod time.Duration
 	reapBatch  int
@@ -137,6 +155,19 @@ const (
 	SweepPassStrandedLease        = "stranded_lease"
 	SweepPassDeadQueuedAssignment = "dead_queued_assignment"
 	SweepPassOrphanedHandoff      = "orphaned_handoff"
+	// SweepPassConcurrencySlot is the workflow slot-set reconciliation. It is
+	// its own pass rather than part of SweepPassRepair because the two back up
+	// different invariants: a lease repair index is derived state that can be
+	// rebuilt at any time, while a slot set IS the limit, and an operator has to
+	// be able to tell them apart.
+	SweepPassConcurrencySlot = "concurrency_slot"
+	// SweepPassConcurrencyQueue is the queue-timeout expiry: queued executions
+	// past their queue_timeout are driven into the timeout terminal state. It
+	// rides the same gate as SweepPassConcurrencySlot — one maintenance window,
+	// one batch bound — but reports separately, because a queued submission
+	// giving up and a leaked slot being reclaimed are different events with
+	// different causes.
+	SweepPassConcurrencyQueue = "concurrency_queue"
 )
 
 // Outcomes a maintenance pass reports.
@@ -681,6 +712,24 @@ func (s *LeaseSweeper) ReapLegacyLeaseMetaOnce(ctx context.Context) int {
 // reconciled but not the candidates it examined, so this pass has no honest
 // inspected count to publish. A zero there would be an invented measurement.
 func (s *LeaseSweeper) RepairOnce(ctx context.Context) int {
+	reconciled := s.repairLeaseIndexOnce(ctx)
+	// Workflow slot reconciliation rides the repair cadence rather than getting
+	// one of its own: the two are the same kind of work — bounded maintenance
+	// over a Redis index — and both are no-ops for backends that do not
+	// implement them.
+	//
+	// It deliberately runs whatever the repair did, including when the repair
+	// capability is missing or the repair failed: the two reconcile unrelated
+	// structures, and a lease index that keeps failing must not also stop
+	// leaked slots from being reclaimed. The slot sweep applies its own leader
+	// gate, so a non-leader replica still reports a skip for it.
+	s.SweepConcurrencySlotsOnce(ctx)
+	return reconciled
+}
+
+// repairLeaseIndexOnce is the lease-index half of RepairOnce, kept separate so
+// the slot sweep that rides along cannot be skipped by any of its exits.
+func (s *LeaseSweeper) repairLeaseIndexOnce(ctx context.Context) int {
 	if s.elector != nil && !s.elector.IsLeader() {
 		s.observePassReleased(ctx, SweepPassRepair, SweepPassOutcomeSkippedNotLeader, 0)
 		return 0
@@ -715,6 +764,104 @@ func (s *LeaseSweeper) RepairOnce(ctx context.Context) int {
 	}
 	s.observePassReleased(ctx, SweepPassRepair, SweepPassOutcomeRan, reconciled)
 	return reconciled
+}
+
+// SweepConcurrencySlotsOnce runs the concurrency maintenance passes at the
+// lease-repair cadence: workflow slot sets are reconciled against the
+// executions that hold them, and queued executions past their queue_timeout are
+// driven into the timeout terminal state.
+//
+// Like RepairOnce it is leader-gated: the slot sets and the queues are
+// cluster-wide, so every replica sweeping them would multiply the work without
+// changing the outcome. It is deliberately not folded into the repair count — a
+// slot set is the limit itself, not derived state, and an operator has to be
+// able to tell a lease index that was repaired from a slot that was leaked, or
+// a queued submission that gave up from either.
+//
+// It shares the repair period but not the repair pass's gates: running it from
+// SweepOnce's much shorter period would re-read every workflow's slot set every
+// few seconds, and routing it through the repair's cadence check would let a
+// missing or failing repair stop it entirely.
+func (s *LeaseSweeper) SweepConcurrencySlotsOnce(ctx context.Context) int {
+	if s.elector != nil && !s.elector.IsLeader() {
+		s.observePassReleased(ctx, SweepPassConcurrencySlot, SweepPassOutcomeSkippedNotLeader, 0)
+		s.observePassReleased(ctx, SweepPassConcurrencyQueue, SweepPassOutcomeSkippedNotLeader, 0)
+		return 0
+	}
+
+	// One window, two passes: they are the same maintenance of the same
+	// subsystem and run back to back, but each reports under its own name, so a
+	// queue timeout that fired is never read as a slot that leaked.
+	due := s.concurrencySweepDue(s.clock())
+
+	// The pass observer carries the timing and the count. The timing observer is
+	// deliberately not used: its repair series is keyed by result alone, so
+	// reporting a second reconciliation through it would double-count the lease
+	// index's own repairs in the same series.
+	swept := 0
+	reconciler, ok := s.state.(ConcurrencySlotReconciler)
+	switch {
+	case !ok:
+		s.observePassReleased(ctx, SweepPassConcurrencySlot, SweepPassOutcomeUnsupported, 0)
+	case !due:
+		s.observePassReleased(ctx, SweepPassConcurrencySlot, SweepPassOutcomeSkippedCadence, 0)
+	default:
+		var err error
+		swept, err = reconciler.ReconcileConcurrencySlots(ctx, s.repairBatch)
+		if err != nil {
+			// Same rule as the lease-index repair: a leaked slot costs the
+			// workflow capacity, it does not corrupt it, so a failed sweep is
+			// retried on the next cadence rather than surfaced as a sweep error.
+			if s.log != nil {
+				s.log.Error("reconcile workflow concurrency slots", "err", err)
+			}
+			s.observePassReleased(ctx, SweepPassConcurrencySlot, SweepPassOutcomeError, 0)
+			break
+		}
+		s.observePassReleased(ctx, SweepPassConcurrencySlot, SweepPassOutcomeRan, swept)
+	}
+	s.expireConcurrencyQueueOnce(ctx, due)
+	return swept
+}
+
+// expireConcurrencyQueueOnce is the queue-timeout half of the maintenance.
+//
+// Its capability is checked separately from the slot reconciler's because the
+// two are separate interfaces: a backend that can expire a queued submission
+// but not reconcile slot sets still has to expire, and a missing slot
+// reconciler must not silently stop the queue's clocks.
+func (s *LeaseSweeper) expireConcurrencyQueueOnce(ctx context.Context, due bool) {
+	expirer, ok := s.state.(engine.ConcurrencyQueueExpirer)
+	switch {
+	case !ok:
+		s.observePassReleased(ctx, SweepPassConcurrencyQueue, SweepPassOutcomeUnsupported, 0)
+	case !due:
+		s.observePassReleased(ctx, SweepPassConcurrencyQueue, SweepPassOutcomeSkippedCadence, 0)
+	default:
+		expired, err := expirer.ExpireQueuedExecutions(ctx, s.repairBatch)
+		if err != nil {
+			if s.log != nil {
+				s.log.Error("expire queued executions past their queue timeout", "err", err)
+			}
+			s.observePassReleased(ctx, SweepPassConcurrencyQueue, SweepPassOutcomeError, expired)
+			return
+		}
+		s.observePassReleased(ctx, SweepPassConcurrencyQueue, SweepPassOutcomeRan, expired)
+	}
+}
+
+// concurrencySweepDue reports whether the concurrency maintenance is due, and
+// stamps the window when it is. Both halves read the same decision: they are one
+// pass's worth of work, and a second half that re-checked the clock would run a
+// cadence behind the first.
+func (s *LeaseSweeper) concurrencySweepDue(now time.Time) bool {
+	s.slotSweepMu.Lock()
+	defer s.slotSweepMu.Unlock()
+	if !s.lastSlotSweep.IsZero() && now.Sub(s.lastSlotSweep) < s.repairPeriod {
+		return false
+	}
+	s.lastSlotSweep = now
+	return true
 }
 
 // SweepOnce executes exactly one sweep pass. Returns the number of leases the

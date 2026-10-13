@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/supply"
 )
 
@@ -49,7 +50,7 @@ func TestReclaimedEngineLosesSupplyConfigWedge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("engineForCode: %v", err)
 	}
-	if err := registerSupplyConsumerByDigestOn(h, digest, supplyNode, owner, reg); err != nil {
+	if err := registerSupplyConsumerByDigestOn(h, namespace.Default, digest, supplyNode, owner, reg); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	if err := reg.Apply(ctx, supply.Snapshot{

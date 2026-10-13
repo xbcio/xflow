@@ -47,6 +47,13 @@ type engineConfig struct {
 	// at Execute time. nil = feature disabled.
 	artifactStore *store.ArtifactStore
 
+	// scheduleOverrides holds the runtime overlays an operator has placed on
+	// trigger nodes (a retimed cron expression, a pause). Read by the
+	// in-process trigger host at activation time — see WithScheduleOverrides.
+	// nil = no overlays, i.e. every trigger runs exactly what its definition
+	// says.
+	scheduleOverrides store.ScheduleOverrideStore
+
 	executionMode             ExecutionMode
 	executionModeSet          bool
 	transientTTL              time.Duration
@@ -171,6 +178,26 @@ func WithArtifactStore(s *store.ArtifactStore) Option {
 	return func(c *engineConfig) { c.artifactStore = s }
 }
 
+// WithScheduleOverrides provides the store holding trigger-node overlays: the
+// per-node runtime overrides that retime a cron schedule, or pause it, without
+// re-registering the workflow.
+//
+// The engine reads it in the trigger host, at activation time: an overlay is
+// merged into the node's activation parameters (a cron node's `expression`, its
+// `timezone` and policies; a timer node's `interval`) on top of the values the
+// definition rendered.
+//
+// It is the SAME store the schedule API writes through (control.ScheduleManager),
+// and that is the point: a process that serves the API and hosts its own
+// triggers must hand both the same store, or an operator's change is stored
+// where nothing reads it.
+//
+// nil (the default) means no overlays exist: every trigger activates with
+// exactly the parameters its definition declares.
+func WithScheduleOverrides(overrides store.ScheduleOverrideStore) Option {
+	return func(c *engineConfig) { c.scheduleOverrides = overrides }
+}
+
 // InvokeOption configures a single workflow invocation.
 type InvokeOption func(*invokeConfig)
 
@@ -180,8 +207,35 @@ type invokeConfig struct {
 	fafRuntime      *types.Runtime
 	traceID         string
 	spanID          string
+	idempotencyKey  string
 	testRun         bool
 	workflowVersion string
+}
+
+// WithIdempotencyKey makes this invocation safe to retry: a second Invoke of the
+// same workflow, entry, input and key returns the execution the first one
+// created instead of starting another.
+//
+// The key is scoped to the workflow, so one key means one execution of one
+// workflow; the same key with a different entry or different input is refused
+// (engine.ErrIdempotencyConflict) rather than answered with an execution of
+// other work. A server whose state store cannot hold the claim refuses the
+// keyed invocation (engine.ErrIdempotencyUnsupported) rather than silently
+// dropping the key.
+//
+// A key stays valid for the execution's own retention (engine.WithIdempotencyTTL
+// adjusts it), so a retry within that window — including after the execution
+// reached a terminal status — is answered with the original execution.
+//
+// The fingerprint is taken from the graph the call actually runs, so combining
+// it with WithWorkflowVersion is what makes a retry survive an intervening
+// publish: a pinned retry resolves the same version and its original execution
+// is returned, while an unpinned retry resolves the new version and is refused
+// as a conflict.
+func WithIdempotencyKey(key string) InvokeOption {
+	return func(c *invokeConfig) {
+		c.idempotencyKey = key
+	}
 }
 
 // WithWorkflowVersion pins this invocation to one published version of the

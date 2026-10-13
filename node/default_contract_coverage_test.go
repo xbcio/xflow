@@ -67,6 +67,7 @@ var fallbackContractCases = map[string]contractCase{
 	"xflow.merge@1":         {"handler", ".", "TestFallbackContractMerge"},
 	"xflow.switch@1":        {"handler", ".", "TestFallbackContractSwitch"},
 	"xflow.wait@1":          {"handler", ".", "TestFallbackContractWait"},
+	"xflow.trigger.cron@1":  {"trigger", "trigger/cron", "TestFallbackContractCron"},
 	"xflow.trigger.kafka@1": {"trigger", "trigger/kafka", "TestFallbackContractKafka"},
 	"xflow.trigger.redis@1": {"trigger", "trigger/redis", "TestFallbackContractRedis"},
 }

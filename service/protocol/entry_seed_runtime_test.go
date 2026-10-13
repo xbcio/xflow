@@ -201,6 +201,180 @@ func TestHTTPEntrySeed_ServerError_ReturnsErr(t *testing.T) {
 	}
 }
 
+// TestHTTPEntrySeed_RefusedOverLimit verifies that a 429 carrying
+// state="over_limit" maps to Refused:true with a NIL error. That combination is
+// the whole point of the mapping: the admission was declined by a decision
+// (the workflow is at its concurrency limit), not by a fault, so the caller
+// withholds the Kafka offset and retries rather than treating the batch as
+// broken. Reporting it as an error would be indistinguishable from a network
+// failure at the call site, and reporting it as accepted would commit an offset
+// for a result that was never persisted — silent loss.
+func TestHTTPEntrySeed_RefusedOverLimit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(SeedExecutionRefusal{
+			State:             SeedStateOverLimit,
+			Error:             "workflow_concurrency_limit",
+			RetryAfterSeconds: 1,
+		})
+	}))
+	defer srv.Close()
+
+	rt := &HTTPEntrySeedRuntime{BaseURL: srv.URL, Client: srv.Client()}
+	resp, err := rt.SeedExecutionFromEntry(context.Background(), types.EntrySeedRequest{
+		AdmissionKey: "ak-limit", WorkflowID: "wf1", EntryUnitID: "g1", Outcome: "success",
+	})
+	if err != nil {
+		t.Fatalf("a refusal is an answer, not a failure; got err: %v", err)
+	}
+	if !resp.Refused {
+		t.Fatalf("Refused = false, want true")
+	}
+	if resp.QueueFull {
+		t.Fatalf("QueueFull = true, want false (the limit refusal is not a full queue)")
+	}
+	if resp.Accepted || resp.Duplicate || resp.Conflict {
+		t.Fatalf("a refusal must not set any handled flag, got %+v", resp)
+	}
+	// The body's floor reaches the caller as a duration. A caller that reads it
+	// (a webhook route admitting in process) has no header of its own to copy.
+	if resp.RetryAfter != time.Second {
+		t.Fatalf("RetryAfter = %v, want 1s", resp.RetryAfter)
+	}
+}
+
+// TestHTTPEntrySeed_RefusedQueueFull verifies the queue-full refusal maps to
+// Refused+QueueFull. The two refusals withhold the offset identically; keeping
+// them apart is what lets the runner say WHICH wait is holding the batch back —
+// a slot to free or a backlog to drain.
+func TestHTTPEntrySeed_RefusedQueueFull(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(SeedExecutionRefusal{
+			State:             SeedStateQueueFull,
+			Error:             "workflow_concurrency_queue_full",
+			RetryAfterSeconds: 1,
+		})
+	}))
+	defer srv.Close()
+
+	rt := &HTTPEntrySeedRuntime{BaseURL: srv.URL, Client: srv.Client()}
+	resp, err := rt.SeedExecutionFromEntry(context.Background(), types.EntrySeedRequest{
+		AdmissionKey: "ak-full", WorkflowID: "wf1", EntryUnitID: "g1", Outcome: "success",
+	})
+	if err != nil {
+		t.Fatalf("a refusal is an answer, not a failure; got err: %v", err)
+	}
+	if !resp.Refused || !resp.QueueFull {
+		t.Fatalf("Refused/QueueFull = %v/%v, want true/true", resp.Refused, resp.QueueFull)
+	}
+	if resp.Accepted || resp.Duplicate || resp.Conflict {
+		t.Fatalf("a refusal must not set any handled flag, got %+v", resp)
+	}
+	if resp.RetryAfter != time.Second {
+		t.Fatalf("RetryAfter = %v, want 1s", resp.RetryAfter)
+	}
+}
+
+// TestHTTPEntrySeed_RefusalWithoutRetryAfter verifies the absence of the body's
+// floor stays "not stated" rather than becoming a deadline. Zero is the value a
+// caller must be able to recognise: an older control plane does not send the
+// field, and a caller that treated zero as "retry immediately" would spin
+// against a workflow that is already at its limit.
+func TestHTTPEntrySeed_RefusalWithoutRetryAfter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(SeedExecutionRefusal{
+			State: SeedStateOverLimit,
+			Error: "workflow_concurrency_limit",
+		})
+	}))
+	defer srv.Close()
+
+	rt := &HTTPEntrySeedRuntime{BaseURL: srv.URL, Client: srv.Client()}
+	resp, err := rt.SeedExecutionFromEntry(context.Background(), types.EntrySeedRequest{
+		AdmissionKey: "ak-limit-old", WorkflowID: "wf1", EntryUnitID: "g1", Outcome: "success",
+	})
+	if err != nil {
+		t.Fatalf("a refusal is an answer, not a failure; got err: %v", err)
+	}
+	if !resp.Refused {
+		t.Fatalf("Refused = false, want true")
+	}
+	if resp.RetryAfter != 0 {
+		t.Fatalf("RetryAfter = %v, want 0 when the control plane states no floor", resp.RetryAfter)
+	}
+}
+
+// TestHTTPEntrySeed_Unknown429State_ReturnsErr verifies a 429 whose state this
+// build does not classify is an ERROR, not a refusal and not a handled outcome.
+// The failure directions are not symmetric: reporting it as handled commits an
+// offset for a result the control plane may never have persisted (loss), while
+// reporting it as an error only costs a redelivery. A newer control plane that
+// adds a refusal state is therefore safe against an older runner.
+func TestHTTPEntrySeed_Unknown429State_ReturnsErr(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(SeedExecutionRefusal{
+			State: "throttled_v2",
+			Error: "workflow_concurrency_something_new",
+		})
+	}))
+	defer srv.Close()
+
+	rt := &HTTPEntrySeedRuntime{BaseURL: srv.URL, Client: srv.Client()}
+	resp, err := rt.SeedExecutionFromEntry(context.Background(), types.EntrySeedRequest{
+		AdmissionKey: "ak-unknown", WorkflowID: "wf1", EntryUnitID: "g1", Outcome: "success",
+	})
+	if err == nil {
+		t.Fatal("expected non-nil error on an unclassified 429, got nil")
+	}
+	if resp.Refused || resp.QueueFull || resp.Accepted || resp.Duplicate || resp.Conflict {
+		t.Fatalf("expected zero-value response on an unclassified 429, got %+v", resp)
+	}
+}
+
+// TestHTTPEntrySeed_QueuedPositionOnTheWire pins the queued/queue_position
+// fields of a 200 body: their json names are the wire contract the apiserver
+// writes and the runner decodes, so a rename here would silently drop them from
+// the face. A parked admission is still a complete one, so it must map to the
+// same Accepted response as a direct one — the runner's offset decision does not
+// depend on these fields.
+func TestHTTPEntrySeed_QueuedPositionOnTheWire(t *testing.T) {
+	// The JSON literal is deliberate: it is what the field tags must decode, not
+	// what a re-encode of the struct would produce.
+	body := `{"state":"accepted","execution_id":"exec-q","queued":true,"queue_position":3}`
+	var wire SeedExecutionResponse
+	if err := json.Unmarshal([]byte(body), &wire); err != nil {
+		t.Fatalf("decode queued 200 body: %v", err)
+	}
+	if !wire.Queued || wire.QueuePosition != 3 {
+		t.Fatalf("wire queued/position = %v/%d, want true/3 (json tags drifted?)",
+			wire.Queued, wire.QueuePosition)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	rt := &HTTPEntrySeedRuntime{BaseURL: srv.URL, Client: srv.Client()}
+	resp, err := rt.SeedExecutionFromEntry(context.Background(), types.EntrySeedRequest{
+		AdmissionKey: "ak-q", WorkflowID: "wf1", EntryUnitID: "g1", Outcome: "success",
+	})
+	if err != nil {
+		t.Fatalf("a parked admission is a complete one; got err: %v", err)
+	}
+	if !resp.Accepted || resp.ExecutionID != "exec-q" {
+		t.Fatalf("parked admission not mapped to accepted: %+v", resp)
+	}
+}
+
 // TestHTTPEntrySeed_NoToken_OmitsAuthHeader verifies that when Token is empty no
 // Authorization header is sent.
 func TestHTTPEntrySeed_NoToken_OmitsAuthHeader(t *testing.T) {
@@ -416,6 +590,8 @@ func TestAdmissionOutcomeClassification(t *testing.T) {
 		{"accepted", types.EntrySeedResponse{Accepted: true}, nil, "accepted"},
 		{"duplicate", types.EntrySeedResponse{Accepted: true, Duplicate: true}, nil, "duplicate"},
 		{"conflict", types.EntrySeedResponse{Conflict: true}, nil, "conflict"},
+		{"refused at the limit", types.EntrySeedResponse{Refused: true}, nil, "refused"},
+		{"refused with a full queue", types.EntrySeedResponse{Refused: true, QueueFull: true}, nil, "queue_full"},
 		{"timeout", types.EntrySeedResponse{}, context.DeadlineExceeded, "timeout"},
 		{"wrapped timeout", types.EntrySeedResponse{},
 			fmt.Errorf("entry-seed: request failed: %w", context.DeadlineExceeded), "timeout"},

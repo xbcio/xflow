@@ -92,7 +92,7 @@ func (s *lifecycleState) OnSupplyGateWired(present bool) {
 	s.supplyGatePresent = present
 }
 
-func (s *lifecycleState) OnSupplyFetch(_ context.Context, _, result string) {
+func (s *lifecycleState) OnSupplyFetch(_ context.Context, _, result, _ string) {
 	if result != "ok" {
 		return
 	}

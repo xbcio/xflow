@@ -76,19 +76,22 @@ type bindCountingObserver struct {
 	counts map[string]int
 }
 
-func (o *bindCountingObserver) OnConsumerCount(_ context.Context, name string, n int) {
+// OnConsumerCount keys by namespace AND name: the same supply node name in two
+// namespaces is two supplies, and a name-only key would report one series for
+// both.
+func (o *bindCountingObserver) OnConsumerCount(_ context.Context, ns namespace.Namespace, name string, n int) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.counts == nil {
 		o.counts = map[string]int{}
 	}
-	o.counts[name] = n
+	o.counts[string(ns)+"/"+name] = n
 }
 
-func (o *bindCountingObserver) get(name string) int {
+func (o *bindCountingObserver) get(ns namespace.Namespace, name string) int {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	return o.counts[name]
+	return o.counts[string(ns)+"/"+name]
 }
 
 // buildReactorSeamWasm compiles the reactorseam guest and returns its bytes. The
@@ -230,7 +233,7 @@ func TestSupplyConsumerBindingReachesRunner(t *testing.T) {
 	// "node:" + WorkflowName + "/" + NodeName (spec Z.4/Z.8); a mismatched owner
 	// here would make this release a no-op against a set that never held it.
 	t.Cleanup(func() {
-		node.UnregisterWasmSupplyConsumerByDigest(digest, wasmBindSupplyNode, "node:"+def.Name+"/"+taggerNode)
+		node.UnregisterWasmSupplyConsumerByDigest(namespace.Default, digest, wasmBindSupplyNode, "node:"+def.Name+"/"+taggerNode)
 	})
 
 	// Two PUTs so the revision the module reports is 2. Revision 1 would still
@@ -344,7 +347,7 @@ func TestSupplyConsumerBindingReachesRunner(t *testing.T) {
 	// :94) so the module keeps receiving content directly. Both keys are real,
 	// distinct, intentional registrations against the SAME supply name -- this
 	// assertion predates the warm-up consumer and asserted 1 before it existed.
-	if got := obs.get(wasmBindSupplyNode); got != 2 {
+	if got := obs.get(namespace.Default, wasmBindSupplyNode); got != 2 {
 		t.Fatalf("(b) consumers for %q = %d, want 2 (warm-up consumer + module "+
 			"consumer) — without a registration the content reaches nobody and the "+
 			"module evaluates against no rules",
