@@ -2,6 +2,7 @@ package apiserver
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -140,4 +141,37 @@ func TestKeyedSubmissionAuditRowsNameTheExecutionThatRuns(t *testing.T) {
 		}
 		requireKeyedRows(t, events[4:], first.ExecutionID)
 	})
+}
+
+// TestOversizedKeyedBodyReachesTheHandler is the bound's other half: the peek
+// reads a keyed request's body before authorize, so it is capped
+// (inlineResolveBodyLimit) — and a body past the cap must not reach the handler
+// truncated. Description is free-form and unread by the compiler, so the request
+// below is valid while larger than the cap: the resolver falls back to the fresh
+// id, and the request still runs under its key — the engine derives that id from
+// the header, not from the resolver — with its retry answering duplicate.
+func TestOversizedKeyedBodyReachesTheHandler(t *testing.T) {
+	const ns = "ns-oversized-body"
+	nsCtx := namespace.WithNamespace(context.Background(), namespace.Namespace(ns))
+	mux, be, _ := keyedAuditModule(t, ns)
+
+	def := idempotencyInlineDef()
+	def.Description = strings.Repeat("d", inlineResolveBodyLimit+1)
+	body := executeWorkflowRequest{Workflow: def}
+	if raw, err := json.Marshal(body); err != nil || len(raw) <= inlineResolveBodyLimit {
+		t.Fatalf("test body = %d bytes (err %v), want more than the %d-byte resolver bound", len(raw), err, inlineResolveBodyLimit)
+	}
+
+	first := executionData(t, doKeyed(t, mux, http.MethodPost, PathWorkflowExecute, body, "oversized-1"))
+	if first.ExecutionID == "" || first.Duplicate {
+		t.Fatalf("keyed execute with an oversized body = %+v, want a new execution", first)
+	}
+	if _, err := be.State().GetExecution(nsCtx, first.ExecutionID); err != nil {
+		t.Fatalf("GetExecution(%q) error = %v", first.ExecutionID, err)
+	}
+
+	retry := executionData(t, doKeyed(t, mux, http.MethodPost, PathWorkflowExecute, body, "oversized-1"))
+	if !retry.Duplicate || retry.ExecutionID != first.ExecutionID {
+		t.Fatalf("retry = %+v, want the duplicate of %q", retry, first.ExecutionID)
+	}
 }

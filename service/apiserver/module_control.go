@@ -469,9 +469,10 @@ func newExecutionIDResolver() func(*http.Request) (string, string, string, strin
 // The scope is the handler's own (inlineIdempotencyScope over the definition
 // name in the request body), so resolver and handler cannot drift. Deriving it
 // needs the body, which the handler reads after this resolver ran — hence the
-// read-and-restore; on any body that does not decode the handler will refuse the
-// request before it can claim anything, and a fresh id is the right shape for a
-// submission that creates no execution.
+// read-and-restore, bounded by inlineResolveBodyLimit because this runs before
+// authorize; on any body that does not decode, or exceeds the bound, the
+// handler will refuse the request before it can claim anything, and a fresh id
+// is the right shape for a submission that creates no execution.
 func inlineExecutionIDResolver() func(*http.Request) (string, string, string, string) {
 	return func(r *http.Request) (string, string, string, string) {
 		if idempotencyKeyForResolve(r) == "" {
@@ -485,6 +486,18 @@ func inlineExecutionIDResolver() func(*http.Request) (string, string, string, st
 	}
 }
 
+// inlineResolveBodyLimit bounds how many body bytes the inline resolver buffers
+// before authorize runs. The resolver reads a keyed request's definition to name
+// its key scope, and it runs before the authorizer decides, so a principal that
+// may not even hold workflow.create must not be able to park an unbounded body
+// in memory for the length of a decision. The bound matches
+// MaxEditorMetadataBytes, the size the server already accepts for one
+// definition's editor payload. A body over the bound falls back to the fresh id
+// — restoring the body whole so the handler still serves it — which costs the
+// keyed request's audit rows the derived id (they name the fresh one), a
+// bounded, deliberate trade.
+const inlineResolveBodyLimit = 1 << 20
+
 // peekJSONBody decodes the request body into dst and puts the bytes back for the
 // handler. A resource resolver runs before the handler and the body is a single
 // stream, so a resolver that needs a field must restore what it read. Decoding
@@ -492,11 +505,20 @@ func inlineExecutionIDResolver() func(*http.Request) (string, string, string, st
 // so whatever decodes here decodes there; a read error is not fatal either,
 // because the truncated bytes are restored and handed to the same decoder, and
 // the handler then fails precisely the cases the peek fails.
+//
+// The read is bounded by inlineResolveBodyLimit: one byte past the bound is
+// enough to detect an oversized body without buffering it, and an oversized body
+// is still handed back whole — consumed prefix in front of the unread remainder
+// — with a false result.
 func peekJSONBody(r *http.Request, dst any) bool {
 	if r.Body == nil {
 		return false
 	}
-	raw, _ := io.ReadAll(r.Body)
+	raw, _ := io.ReadAll(io.LimitReader(r.Body, inlineResolveBodyLimit+1))
+	if len(raw) > inlineResolveBodyLimit {
+		r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(raw), r.Body))
+		return false
+	}
 	r.Body = io.NopCloser(bytes.NewReader(raw))
 	return json.NewDecoder(bytes.NewReader(raw)).Decode(dst) == nil
 }
