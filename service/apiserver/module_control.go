@@ -663,8 +663,7 @@ func (m *workflowControlModule) handleRegisterWorkflow(w http.ResponseWriter, r 
 			writeFail(w, r, http.StatusBadRequest, "workflow_compile_failed", compileErr.Unwrap().Error())
 			return
 		}
-		if errors.Is(err, backend.ErrWorkflowConflict) {
-			writeFail(w, r, http.StatusConflict, "workflow_conflict", "workflow definition conflicts with an existing registration")
+		if writeWorkflowConflict(w, r, err) {
 			return
 		}
 		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
@@ -672,6 +671,33 @@ func (m *workflowControlModule) handleRegisterWorkflow(w http.ResponseWriter, r 
 	}
 	w.Header().Set("Location", "/v1/workflows/"+string(id))
 	writeData(w, r, http.StatusCreated, registerWorkflowResponse{WorkflowID: id, Warnings: diag.Warnings, ParamIssues: diag.ParamIssues})
+}
+
+// writeWorkflowConflict maps a registration or replacement conflict to its
+// faithful 409 code and reports whether it wrote a response.
+//
+// The three conflict kinds send the caller to different fixes, so they are not
+// collapsed into one code. A key conflict is resolved by changing the
+// definition; a name conflict by addressing the record that already holds the
+// name (PUT its id, or delete it); a version conflict by publishing under a
+// new label. The typed errors unwrap to ErrWorkflowConflict for the
+// classifiers that only need "this cannot succeed as presented", so the
+// specific checks MUST run first and the generic one last.
+func writeWorkflowConflict(w http.ResponseWriter, r *http.Request, err error) bool {
+	switch {
+	case errors.Is(err, backend.ErrWorkflowNameConflict):
+		// The holder id is deliberately not echoed: it is another record's
+		// identity and this response may reach a caller that cannot read it.
+		writeFail(w, r, http.StatusConflict, "workflow_name_conflict", "another live workflow already holds this namespace and name")
+		return true
+	case errors.Is(err, backend.ErrWorkflowVersionImmutable):
+		writeFail(w, r, http.StatusConflict, "workflow_version_immutable", "workflow version was already published with a different definition")
+		return true
+	case errors.Is(err, backend.ErrWorkflowConflict):
+		writeFail(w, r, http.StatusConflict, "workflow_conflict", "workflow definition conflicts with an existing registration")
+		return true
+	}
+	return false
 }
 
 // WorkflowCompileError marks a registration failure that the caller can fix by
@@ -1464,9 +1490,10 @@ func (m *workflowControlModule) handleRollbackWorkflow(w http.ResponseWriter, r 
 			writeFail(w, r, http.StatusNotFound, "workflow_version_not_found", "workflow version not found")
 		case errors.Is(err, errWorkflowVersionUnavailable):
 			writeFail(w, r, http.StatusConflict, "workflow_version_unavailable", "workflow version is not reproducible under the current compiler")
-		case errors.Is(err, backend.ErrWorkflowConflict):
-			writeFail(w, r, http.StatusConflict, "workflow_conflict", "workflow definition conflicts with an existing registration")
 		default:
+			if writeWorkflowConflict(w, r, err) {
+				return
+			}
 			if m.log != nil {
 				m.log.Error("rollback_workflow_failed", "workflow_id", string(id), "version", req.Version, "err", err)
 			}
@@ -1764,8 +1791,7 @@ func (m *workflowControlModule) handleReplaceWorkflow(w http.ResponseWriter, r *
 			writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
 			return
 		}
-		if errors.Is(err, backend.ErrWorkflowConflict) {
-			writeFail(w, r, http.StatusConflict, "workflow_conflict", "workflow definition conflicts with an existing registration")
+		if writeWorkflowConflict(w, r, err) {
 			return
 		}
 		if errors.Is(err, errWorkflowIDMismatch) {
