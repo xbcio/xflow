@@ -209,19 +209,20 @@ func (f *fakeState) AcquireTaskLease(_ context.Context, lease *TaskLease) (*Node
 		attempt = current.Attempt + 1
 	}
 	f.nodes[key] = &NodeSnapshot{
-		ExecutionID:   lease.Task.ExecutionID,
-		Name:          lease.Task.NodeName,
-		NodeIdx:       lease.Task.NodeIdx,
-		Status:        types.NodeStatusRunning,
-		LeaseID:       lease.LeaseID,
-		LeaseToken:    lease.LeaseToken,
-		Attempt:       attempt,
-		ActivationID:  lease.Task.ActivationID,
-		AutoDepth:     lease.Task.AutoDepth,
-		LeaseIssuedAt: lease.IssuedAt,
-		LeaseTTL:      lease.TTL,
-		LeaseTaskType: lease.Task.Type,
-		LeasePayload:  cloneFakeLeasePayload(lease.Task.Payload),
+		ExecutionID:     lease.Task.ExecutionID,
+		Name:            lease.Task.NodeName,
+		NodeIdx:         lease.Task.NodeIdx,
+		Status:          types.NodeStatusRunning,
+		LeaseID:         lease.LeaseID,
+		LeaseToken:      lease.LeaseToken,
+		Attempt:         attempt,
+		ActivationID:    lease.Task.ActivationID,
+		AutoDepth:       lease.Task.AutoDepth,
+		LeaseIssuedAt:   lease.IssuedAt,
+		LeaseTTL:        lease.TTL,
+		LeaseTaskType:   lease.Task.Type,
+		LeasePayload:    cloneFakeLeasePayload(lease.Task.Payload),
+		LeaseGeneration: lease.Task.Generation,
 	}
 	return cloneNodeSnapshot(current), true, nil
 }
@@ -252,6 +253,7 @@ func (f *fakeState) ListExpiredLeases(_ context.Context, before time.Time) ([]Ex
 			AutoDepth:    ns.AutoDepth,
 			TaskType:     ns.LeaseTaskType,
 			Payload:      cloneFakeLeasePayload(ns.LeasePayload),
+			Generation:   ns.LeaseGeneration,
 		})
 	}
 	return out, nil
@@ -279,6 +281,7 @@ func (f *fakeState) RevokeLease(_ context.Context, id types.ExecutionID, name st
 	cp.LeaseTTL = 0
 	cp.LeaseTaskType = TaskTypeNodeExec
 	cp.LeasePayload = nil
+	cp.LeaseGeneration = 0
 	f.nodes[key] = &cp
 	return true, nil
 }

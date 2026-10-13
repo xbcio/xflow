@@ -129,29 +129,24 @@ func (e *Engine) executeSubWorkflow(ctx context.Context, task *Task, g *graph.Gr
 		// a terminal outcome. All are benign for this delivery.
 		return nil
 	}
-	// The generation this dispatch serves, and the wait it may already own. A
-	// task that carries no generation is either a first dispatch or a reclaim's
-	// redelivery, and a reclaim rebuilds its task from the lease — which cannot
-	// carry the generation, because Task.Generation is deliberately unwireable
-	// metadata (see queue/codec.go and the rstate outbox codec). The link is
-	// what remembers which generation's wait is live, so it supplies the
-	// generation for that case. That is what makes "a reclaim resumes the
-	// generation's own child" true after a retry has moved the wait on; without
-	// it the redelivery would re-derive the previous generation's child id and
-	// resume the child the retry abandoned — whose conclusion would then decide
-	// the node, which is exactly what the generation fence exists to prevent.
-	//
-	// A task that names a generation is authoritative over the link: that is
-	// the retry intent, and the link it should overwrite belongs to the
-	// generation being abandoned.
+	// The generation this dispatch serves, and the wait it may already own. The
+	// task's Generation is wired through every path a dispatch arrives by: a
+	// first delivery carries no generation (read as generation 1), a retry
+	// intent carries the next generation in its encoded task, and a reclaim's
+	// redelivery carries what the lease persisted — AcquireTaskLease stores the
+	// generation with the lease (lease_generation in rstate, LeaseGeneration in
+	// the local store) and ListExpiredLeases reads it back, so ReclaimLease
+	// rebuilds the task with the generation that actually claimed the node.
+	// The link is NOT a source for this value: inside the "child minted, park
+	// not yet written" window it still names the PREVIOUS generation's child,
+	// and inferring from it would re-derive that child's id, resume it, and let
+	// its terminal verdict decide the node — exactly what the generation fence
+	// exists to prevent.
 	prev, linked, err := e.subWorkflowLink(ctx, task.ExecutionID, task.NodeName)
 	if err != nil {
 		return err
 	}
 	generation := subWorkflowGeneration(task.Generation)
-	if task.Generation == 0 && linked && prev.ActivationID == task.ActivationID && prev.Generation > 0 {
-		generation = prev.Generation
-	}
 	child, cause := e.startSubWorkflowChild(ctx, task, g, meta, generation)
 	if errors.Is(cause, errSubWorkflowParentCanceling) {
 		// The parent is on its way down: this delivery raced the inline cancel

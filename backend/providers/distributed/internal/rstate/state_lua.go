@@ -403,7 +403,7 @@ if tonumber(ARGV[#ARGV] or '0') == 1 then
     redis.call('HSET', KEYS[2], 'private_output', '1')
 end
 redis.call('SET', KEYS[1], 'suspended', 'EX', ttl)
-redis.call('HSET', KEYS[2], 'lease_id', '', 'lease_token', '', 'lease_issued_at_ms', '0', 'lease_ttl_ms', '0', 'lease_deadline_ms', '0', 'lease_task_type', '0', 'lease_payload', '')
+redis.call('HSET', KEYS[2], 'lease_id', '', 'lease_token', '', 'lease_issued_at_ms', '0', 'lease_ttl_ms', '0', 'lease_deadline_ms', '0', 'lease_task_type', '0', 'lease_payload', '', 'lease_generation', '0')
 redis.call('EXPIRE', KEYS[2], ttl)
 redis.call('ZREM', KEYS[4], ARGV[6])
 redis.call('DEL', KEYS[6], KEYS[7], KEYS[8], KEYS[9])
@@ -481,6 +481,8 @@ return {1, '', '', ''}
 // ARGV[9] = queued task type
 // ARGV[10] = queued resume payload JSON (or empty)
 // ARGV[11] = queued task node index
+// ARGV[12] = queued task unit index
+// ARGV[13] = queued task generation
 // Returns {acquired, prev_status, prev_attempt, prev_activation_id,
 // prev_auto_depth, prev_lease_token, prev_issued_at_ms, prev_lease_ttl_ms}.
 var acquireTaskLeaseLua = redis.NewScript(`
@@ -554,6 +556,7 @@ redis.call('HSET', KEYS[2],
 	'lease_deadline_ms', nowMs + tonumber(ARGV[7] or '0'),
 	'lease_task_type', tonumber(ARGV[9] or '0'),
 	'lease_payload', ARGV[10] or '',
+	'lease_generation', tonumber(ARGV[13] or '0'),
 	'node_idx', tonumber(ARGV[11] or '0'),
 	'unit_idx', tonumber(ARGV[12] or '-1'))
 redis.call('EXPIRE', KEYS[2], tonumber(ARGV[4]))
@@ -594,7 +597,7 @@ if not token or token == '' or token ~= ARGV[1] then
     return 0
 end
 redis.call('SET', KEYS[1], 'pending', 'EX', tonumber(ARGV[2]))
-redis.call('HSET', KEYS[2], 'lease_token', '', 'lease_id', '', 'lease_issued_at_ms', '0', 'lease_ttl_ms', '0', 'lease_deadline_ms', '0', 'lease_task_type', '0', 'lease_payload', '')
+redis.call('HSET', KEYS[2], 'lease_token', '', 'lease_id', '', 'lease_issued_at_ms', '0', 'lease_ttl_ms', '0', 'lease_deadline_ms', '0', 'lease_task_type', '0', 'lease_payload', '', 'lease_generation', '0')
 redis.call('EXPIRE', KEYS[2], tonumber(ARGV[2]))
 redis.call('ZREM', KEYS[3], ARGV[3])
 return 1

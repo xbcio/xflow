@@ -130,14 +130,15 @@ func (s *Store) UpsertNode(ctx context.Context, n *engine.NodeSnapshot) error {
 		refreshMeta := n.PrivateOutput
 		if n.LeaseID != "" || n.LeaseToken != "" || n.Attempt != 0 || n.ActivationID != 0 || n.AutoDepth != 0 || !n.LeaseIssuedAt.IsZero() || n.Port != "" || n.Error != "" || errorDetailsJSON != "" || n.CommittedLeaseToken != "" || n.CommittedAttempt != 0 {
 			meta := map[string]any{
-				"lease_id":        string(n.LeaseID),
-				"lease_token":     string(n.LeaseToken),
-				"attempt":         n.Attempt,
-				"activation_id":   n.ActivationID,
-				"auto_depth":      n.AutoDepth,
-				"node_idx":        n.NodeIdx,
-				"lease_task_type": int(n.LeaseTaskType),
-				"lease_payload":   leasePayloadJSON,
+				"lease_id":         string(n.LeaseID),
+				"lease_token":      string(n.LeaseToken),
+				"attempt":          n.Attempt,
+				"activation_id":    n.ActivationID,
+				"auto_depth":       n.AutoDepth,
+				"node_idx":         n.NodeIdx,
+				"lease_task_type":  int(n.LeaseTaskType),
+				"lease_payload":    leasePayloadJSON,
+				"lease_generation": n.LeaseGeneration,
 			}
 			if !n.LeaseIssuedAt.IsZero() {
 				meta["lease_issued_at_ms"] = n.LeaseIssuedAt.UnixMilli()
@@ -324,6 +325,12 @@ func (s *Store) GetNode(ctx context.Context, id types.ExecutionID, name string) 
 			return nil, fmt.Errorf("decode node lease payload %q/%q: %w", id, name, err)
 		}
 		ns.LeasePayload = &payload
+	}
+	if generation := meta["lease_generation"]; generation != "" {
+		var parsed int
+		if _, scanErr := fmt.Sscanf(generation, "%d", &parsed); scanErr == nil {
+			ns.LeaseGeneration = parsed
+		}
 	}
 	ns.Port = meta["port"]
 	ns.Error = meta["error"]

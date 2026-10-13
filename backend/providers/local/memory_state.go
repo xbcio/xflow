@@ -788,21 +788,22 @@ func (s *memoryState) AcquireTaskLease(_ context.Context, lease *engine.TaskLeas
 	}
 	privateOutput := s.preserveOutputPrivacyLocked(key, false)
 	s.nodes[key] = &engine.NodeSnapshot{
-		ExecutionID:   lease.Task.ExecutionID,
-		Name:          lease.Task.NodeName,
-		NodeIdx:       lease.Task.NodeIdx,
-		UnitIdx:       lease.Task.UnitIdx,
-		Status:        types.NodeStatusRunning,
-		LeaseID:       lease.LeaseID,
-		LeaseToken:    lease.LeaseToken,
-		Attempt:       attempt,
-		ActivationID:  lease.Task.ActivationID,
-		AutoDepth:     lease.Task.AutoDepth,
-		LeaseIssuedAt: lease.IssuedAt,
-		LeaseTTL:      lease.TTL,
-		LeaseTaskType: lease.Task.Type,
-		LeasePayload:  cloneLeasePayload(lease.Task.Payload),
-		PrivateOutput: privateOutput,
+		ExecutionID:     lease.Task.ExecutionID,
+		Name:            lease.Task.NodeName,
+		NodeIdx:         lease.Task.NodeIdx,
+		UnitIdx:         lease.Task.UnitIdx,
+		Status:          types.NodeStatusRunning,
+		LeaseID:         lease.LeaseID,
+		LeaseToken:      lease.LeaseToken,
+		Attempt:         attempt,
+		ActivationID:    lease.Task.ActivationID,
+		AutoDepth:       lease.Task.AutoDepth,
+		LeaseIssuedAt:   lease.IssuedAt,
+		LeaseTTL:        lease.TTL,
+		LeaseTaskType:   lease.Task.Type,
+		LeasePayload:    cloneLeasePayload(lease.Task.Payload),
+		LeaseGeneration: lease.Task.Generation,
+		PrivateOutput:   privateOutput,
 	}
 	return s.publicNodeSnapshotLocked(key, current), true, nil
 }
@@ -839,6 +840,7 @@ func (s *memoryState) resetNodeForRetryLocked(id types.ExecutionID, name string,
 	cp.LeaseTTL = 0
 	cp.LeaseTaskType = engine.TaskTypeNodeExec
 	cp.LeasePayload = nil
+	cp.LeaseGeneration = 0
 	cp.PrivateOutput = s.preserveOutputPrivacyLocked(key, cp.PrivateOutput)
 	if cp.PrivateOutput {
 		cp.Output = nil
@@ -874,6 +876,7 @@ func (s *memoryState) ListExpiredLeases(_ context.Context, before time.Time) ([]
 			AutoDepth:    ns.AutoDepth,
 			TaskType:     ns.LeaseTaskType,
 			Payload:      cloneLeasePayload(ns.LeasePayload),
+			Generation:   ns.LeaseGeneration,
 		})
 	}
 	// Group units lease through their own state map, not s.nodes. A sweeper
@@ -941,6 +944,7 @@ func (s *memoryState) revokeLeaseLocked(id types.ExecutionID, name string, token
 	cp.LeaseTTL = 0
 	cp.LeaseTaskType = engine.TaskTypeNodeExec
 	cp.LeasePayload = nil
+	cp.LeaseGeneration = 0
 	cp.PrivateOutput = s.preserveOutputPrivacyLocked(key, cp.PrivateOutput)
 	if cp.PrivateOutput {
 		cp.Output = nil
@@ -1052,6 +1056,7 @@ func (s *memoryState) SuspendTaskLease(_ context.Context, lease *engine.TaskLeas
 	cp.LeaseTTL = 0
 	cp.LeaseTaskType = engine.TaskTypeNodeExec
 	cp.LeasePayload = nil
+	cp.LeaseGeneration = 0
 	cp.PrivateOutput = privateOutput
 	if privateOutput {
 		cp.Output = nil

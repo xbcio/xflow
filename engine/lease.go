@@ -421,6 +421,7 @@ func (e *Engine) ReclaimLease(ctx context.Context, lease ExpiredLease) (bool, er
 		UnitIdx:      lease.UnitIdx,
 		Type:         lease.TaskType,
 		Payload:      cloneSignalPayload(lease.Payload),
+		Generation:   lease.Generation,
 		ActivationID: lease.ActivationID,
 		AutoDepth:    lease.AutoDepth,
 	}

@@ -29,6 +29,13 @@ type Nodes interface {
 	// supplied lease. On success it returns the previous snapshot (or nil when
 	// no snapshot existed) and acquired=true. On failure it returns the current
 	// conflicting snapshot and acquired=false without mutating state.
+	//
+	// Implementations MUST persist lease.Task's replayable fields with the
+	// lease: Type, Payload, and Generation. ReclaimLease rebuilds the redelivery
+	// task from what ListExpiredLeases returns, so a field dropped here comes
+	// back zeroed and silently misroutes the redelivery — a lost Generation
+	// reads as "first generation" and resurrects an abandoned generation's
+	// child.
 	AcquireTaskLease(ctx context.Context, lease *TaskLease) (*NodeSnapshot, bool, error)
 	ClaimTaskLease(ctx context.Context, lease *TaskLease) (*NodeSnapshot, bool, error)
 	// ResetNodeForRetry was an unfenced retry-reset method with no production
@@ -38,9 +45,12 @@ type Nodes interface {
 	// ListExpiredLeases returns every Running, Committing, or expansion-Waiting
 	// node whose lease deadline has passed (LeaseIssuedAt+LeaseTTL <= before).
 	// Committing and Waiting claims retain the same token/deadline so a crash
-	// before finalization is swept by the normal recovery path. Implementations may return at most a reasonable
-	// per-call batch to avoid OOM on large backlogs; the sweeper will re-poll
-	// until the list drains.
+	// before finalization is swept by the normal recovery path. Each returned
+	// ExpiredLease must carry the claiming task's Type, Payload, and Generation
+	// as stored by AcquireTaskLease, because ReclaimLease rebuilds the
+	// redelivery from this record alone. Implementations may return at most a
+	// reasonable per-call batch to avoid OOM on large backlogs; the sweeper
+	// will re-poll until the list drains.
 	ListExpiredLeases(ctx context.Context, before time.Time) ([]ExpiredLease, error)
 	// RevokeLease atomically clears an active lease and rolls the node back to
 	// Pending so the task can be re-enqueued. It is used both by the expired

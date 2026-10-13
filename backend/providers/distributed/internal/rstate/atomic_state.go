@@ -715,7 +715,7 @@ if token == '' or token ~= ARGV[1] then
 end
 local ttl = tonumber(ARGV[2])
 redis.call('SET', KEYS[1], 'pending', 'EX', ttl)
-redis.call('HSET', KEYS[2], 'lease_token', '', 'lease_id', '', 'lease_issued_at_ms', '0', 'lease_ttl_ms', '0', 'lease_deadline_ms', '0', 'lease_task_type', '0', 'lease_payload', '')
+redis.call('HSET', KEYS[2], 'lease_token', '', 'lease_id', '', 'lease_issued_at_ms', '0', 'lease_ttl_ms', '0', 'lease_deadline_ms', '0', 'lease_task_type', '0', 'lease_payload', '', 'lease_generation', '0')
 redis.call('EXPIRE', KEYS[2], ttl)
 redis.call('ZREM', KEYS[3], ARGV[3])
 redis.call('HSETNX', KEYS[5], ARGV[4], ARGV[5])
@@ -738,7 +738,7 @@ if not token or token == '' or token ~= ARGV[1] then
 end
 local ttl = tonumber(ARGV[2])
 redis.call('SET', KEYS[1], 'pending', 'EX', ttl)
-redis.call('HSET', KEYS[2], 'lease_token', '', 'lease_id', '', 'lease_issued_at_ms', '0', 'lease_ttl_ms', '0', 'lease_deadline_ms', '0', 'lease_task_type', '0', 'lease_payload', '')
+redis.call('HSET', KEYS[2], 'lease_token', '', 'lease_id', '', 'lease_issued_at_ms', '0', 'lease_ttl_ms', '0', 'lease_deadline_ms', '0', 'lease_task_type', '0', 'lease_payload', '', 'lease_generation', '0')
 redis.call('EXPIRE', KEYS[2], ttl)
 redis.call('ZREM', KEYS[3], ARGV[3])
 redis.call('HSETNX', KEYS[5], ARGV[4], ARGV[5])

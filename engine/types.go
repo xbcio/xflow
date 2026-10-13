@@ -386,6 +386,12 @@ type NodeSnapshot struct {
 	// task without silently dropping its signal payload.
 	LeaseTaskType TaskType
 	LeasePayload  *types.SignalPayload
+	// LeaseGeneration preserves Task.Generation with the lease, for the same
+	// reason LeaseTaskType/LeasePayload are preserved: the sweeper rebuilds the
+	// redelivered task from the lease record alone, so a generation that only
+	// lived in the queue entry would come back as 0 and read as "first
+	// generation" — resurrecting an abandoned generation's child on a reclaim.
+	LeaseGeneration int
 	// CommittedLeaseToken identifies the lease that produced the current
 	// terminal state. It lets a retry after a lost commit response receive a
 	// stable duplicate outcome without allowing a stale lease to advance the
@@ -451,6 +457,11 @@ type ExpiredLease struct {
 	// running or committing lease is reclaimed after a process crash.
 	TaskType TaskType
 	Payload  *types.SignalPayload
+	// Generation is the reclaimed task's generation. Like TaskType/Payload it
+	// comes from the lease record itself (written by AcquireTaskLease and read
+	// back by ListExpiredLeases), so a rebuild preserves whichever generation
+	// claimed the node. Zero means "first generation", exactly as in Task.
+	Generation int
 }
 
 // SubExecution tracks a child execution spawned by a loop/split node.

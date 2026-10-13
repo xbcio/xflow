@@ -229,4 +229,51 @@ func RunNodeLeaseRenewContract(t *testing.T, newStore func(*testing.T) NodeLease
 			t.Fatal("renewal revived a revoked lease — its task is already queued for another runner")
 		}
 	})
+
+	// The sweeper rebuilds the redelivery task from the ExpiredLease record, so
+	// a field the acquire stores but the expiry scan drops comes back zeroed on
+	// the reclaim. Task.Generation is the one that silently misroutes: a
+	// sub-workflow wait reclaimed as generation 0 reads as "first generation"
+	// and resumes the child a retry abandoned. Both ends of the round trip —
+	// the acquire write and the scan read — have to agree on it.
+	t.Run("ExpiredLeaseCarriesTheClaimingGeneration", func(t *testing.T) {
+		s := newStore(t)
+		id := types.ExecutionID("e-" + t.Name())
+		if err := s.CreateExecution(ctx, &engine.ExecutionSnapshot{
+			ID: id, Graph: ContractGraph(), Status: types.ExecutionStatusRunning}); err != nil {
+			t.Fatalf("create execution: %v", err)
+		}
+		lease := &engine.TaskLease{
+			LeaseID:    "L-gen",
+			LeaseToken: "T-gen",
+			IssuedAt:   time.Now().UTC().Add(-90 * time.Second),
+			TTL:        time.Minute,
+			Task: engine.Task{
+				ExecutionID: id,
+				NodeName:    "start",
+				NodeIdx:     0,
+				Type:        engine.TaskTypeNodeExec,
+				Generation:  2,
+			},
+		}
+		if _, acquired, err := s.AcquireTaskLease(ctx, lease); err != nil || !acquired {
+			t.Fatalf("acquire node lease: acquired=%v err=%v", acquired, err)
+		}
+
+		expired, err := s.ListExpiredLeases(ctx, time.Now())
+		if err != nil {
+			t.Fatalf("ListExpiredLeases: %v", err)
+		}
+		for i := range expired {
+			if expired[i].ExecutionID == id && expired[i].NodeName == "start" {
+				if expired[i].Generation != 2 {
+					t.Fatalf("ExpiredLease.Generation = %d, want 2: the sweeper rebuilds the "+
+						"redelivery task from this record, so a generation dropped here comes "+
+						"back as 0 and reads as the first generation", expired[i].Generation)
+				}
+				return
+			}
+		}
+		t.Fatal("the expired lease for the acquired node was not reported")
+	})
 }

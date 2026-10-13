@@ -417,12 +417,11 @@ func TestSubWorkflowRetryStartsAFreshChildGeneration(t *testing.T) {
 
 // TestSubWorkflowReclaimKeepsTheWaitGeneration is the reclaim-after-retry
 // window. The retry moved the wait on to generation 2, then the sweeper
-// reclaimed that wait and re-delivered its task — which cannot carry the
-// generation, because a reclaim rebuilds the task from the lease and
-// Task.Generation is not wireable. The redelivery must resume generation 2's
-// child anyway: falling back to generation 1's id would re-park the node on
-// the child the retry abandoned, and that child's conclusion would then decide
-// the node.
+// reclaimed that wait. The redelivery carries the generation the lease
+// persisted (ReclaimLease rebuilds the task from ExpiredLease.Generation), and
+// the dispatch must resume generation 2's child: falling back to generation 1's
+// id would re-park the node on the child the retry abandoned, and that child's
+// conclusion would then decide the node.
 func TestSubWorkflowReclaimKeepsTheWaitGeneration(t *testing.T) {
 	g := subWorkflowParentWithRetry(t)
 	rig := newSubWorkflowRig(t, g, nil, subWorkflowStubResolver(t))
@@ -437,11 +436,11 @@ func TestSubWorkflowReclaimKeepsTheWaitGeneration(t *testing.T) {
 	second := rig.link(t)
 	rig.queue.Drain()
 
-	// Exactly what the lease sweeper redelivers: the queued intent with no
-	// generation on it.
+	// Exactly what the lease sweeper redelivers: the task ReclaimLease rebuilt
+	// from the expired lease, generation included.
 	rig.revoke(t)
 	reclaimed := *rig.task
-	reclaimed.Generation = 0
+	reclaimed.Generation = 2
 	rig.dispatch(t, &reclaimed)
 
 	third := rig.link(t)
@@ -460,6 +459,105 @@ func TestSubWorkflowReclaimKeepsTheWaitGeneration(t *testing.T) {
 	}
 	if tasks := rig.queue.Drain(); len(tasks) != 0 {
 		t.Fatalf("resuming a live child re-delivered %d of its tasks", len(tasks))
+	}
+}
+
+// TestSubWorkflowReclaimServesTheGenerationOnTheLease is the crash-window
+// repro: generation 2's child exists, the process dies before the park is
+// written, and the link the sweeper's redelivery reads still names generation
+// 1's child. The link cannot tell the redelivery which generation is live — it
+// is exactly the stale record the crash left behind — so the generation has to
+// travel with the task. It is persisted on the lease, rebuilt by the sweeper,
+// and served as-is: inferring from the link instead would re-derive generation
+// 1's child id and commit the node from the terminal verdict of the child the
+// retry already abandoned, leaving generation 2's child orphaned.
+func TestSubWorkflowReclaimServesTheGenerationOnTheLease(t *testing.T) {
+	ctx := context.Background()
+	g := subWorkflowParentWithRetry(t)
+	rig := newSubWorkflowRig(t, g, nil, subWorkflowStubResolver(t))
+
+	// Generation 1: park on the first child, then conclude it failed so the
+	// node's retry mints generation 2.
+	rig.dispatch(t, rig.task)
+	first := rig.link(t)
+	child1 := first.ChildExecutionID
+	rig.queue.Drain()
+	concludeChild(t, rig, child1, types.ExecutionStatusFailed, "boom", nil)
+	notifyCompletion(t, rig, child1)
+
+	// Generation 2: dispatch the retry's task, then consume the delayed intent
+	// it was rebuilt from. The backoff is not this test's subject, and leaving
+	// the intent pending would put a second task in the queue when the reclaim
+	// below flushes the outbox — the redelivery is what this test reads.
+	retryTask := *rig.task
+	retryTask.Generation = 2 // what scheduleRetry stamps on the retry intent
+	rig.dispatch(t, &retryTask)
+	pending, err := rig.state.ListOutbox(ctx, rig.parentID, time.Now().UTC().Add(time.Minute), 16)
+	if err != nil {
+		t.Fatalf("ListOutbox (retry intent): %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("recorded %d retry intents, want 1", len(pending))
+	}
+	if err := rig.state.AckOutbox(ctx, rig.parentID, pending[0].ID); err != nil {
+		t.Fatalf("AckOutbox (retry intent): %v", err)
+	}
+	second := rig.link(t)
+	child2 := second.ChildExecutionID
+	if child2 == child1 {
+		t.Fatal("the retry did not start a new child")
+	}
+	rig.queue.Drain()
+
+	// The crash window: generation 2's child exists, the park that would have
+	// named it does not. The link the sweeper reads is generation 1's.
+	key := string(rig.parentID) + "/sub"
+	rig.state.links[key] = first
+
+	// The sweeper: it finds the wait's expired lease and rebuilds the task.
+	// Passing a `before` beyond the wait TTL makes the parked wait due now.
+	expired, err := rig.state.ListExpiredLeases(ctx, time.Now().UTC().Add(subWorkflowWaitTTL+time.Minute))
+	if err != nil {
+		t.Fatalf("ListExpiredLeases: %v", err)
+	}
+	var waitLease ExpiredLease
+	for _, candidate := range expired {
+		if candidate.ExecutionID == rig.parentID && candidate.NodeName == "sub" {
+			waitLease = candidate
+		}
+	}
+	if waitLease.LeaseToken == "" {
+		t.Fatal("the sweeper did not see the parked wait's lease as expired")
+	}
+	if _, err := rig.eng.ReclaimLease(ctx, waitLease); err != nil {
+		t.Fatalf("ReclaimLease: %v", err)
+	}
+	reclaimedTasks := rig.queue.Drain()
+	if len(reclaimedTasks) != 1 {
+		t.Fatalf("reclaim delivered %d tasks, want exactly the redelivery", len(reclaimedTasks))
+	}
+	if reclaimedTasks[0].Generation != 2 {
+		t.Fatalf("reclaimed task generation = %d, want 2: the sweeper rebuilds the task "+
+			"from the lease, so the lease is where the generation must survive",
+			reclaimedTasks[0].Generation)
+	}
+	rig.dispatch(t, reclaimedTasks[0])
+
+	// The redelivery must resume generation 2's child rather than conclude the
+	// node from the generation 1 child the crash left named in the link.
+	third := rig.link(t)
+	if third.ChildExecutionID != child2 {
+		t.Fatalf("the reclaim re-parked on child %q, want generation 2's %q",
+			third.ChildExecutionID, child2)
+	}
+	if node := rig.node(t); node.Status != types.NodeStatusWaiting {
+		t.Fatalf("node status = %s, want waiting: generation 2's child is still running", node.Status)
+	}
+	if child := rig.child(t, child2); child.Status != types.ExecutionStatusRunning {
+		t.Fatalf("generation 2's child = %s, want still running: the redelivery must resume it, not abandon it", child.Status)
+	}
+	if len(rig.state.executions) != 3 {
+		t.Fatalf("executions = %d, want the parent and both generations' children", len(rig.state.executions))
 	}
 }
 
