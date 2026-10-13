@@ -100,12 +100,21 @@ func retryFor(meta graph.NodeMeta) *types.RetrySettings {
 // stores retain the historical direct queue fallback.
 func (e *Engine) scheduleRetry(ctx context.Context, task *Task, attempt int, settings *types.RetrySettings, token LeaseToken) (bool, error) {
 	delay := retryBackoff(attempt, settings, task.ExecutionID, task.NodeName)
+	// A retry re-enters the same node, so an engine-owned node keeps its task
+	// type: a sub-workflow retry scheduled as TaskTypeNodeExec would be routed
+	// to a runner that cannot run it, and would come back as a no-handler
+	// failure instead of the child execution the retry exists to start. Every
+	// other task type retries as a plain node execution, exactly as before.
+	retryType := TaskTypeNodeExec
+	if task.Type == TaskTypeSubWorkflow {
+		retryType = TaskTypeSubWorkflow
+	}
 	retryTask := Task{
 		ExecutionID:  task.ExecutionID,
 		NodeName:     task.NodeName,
 		NodeIdx:      task.NodeIdx,
 		UnitIdx:      task.UnitIdx,
-		Type:         TaskTypeNodeExec,
+		Type:         retryType,
 		ActivationID: task.ActivationID,
 		AutoDepth:    task.AutoDepth,
 	}

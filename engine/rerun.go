@@ -364,7 +364,7 @@ func (e *Engine) rerunPlan(ctx context.Context, g *graph.Graph, req RerunRequest
 			NodeName: req.FromNode,
 			NodeIdx:  nodeIdx,
 			UnitIdx:  fromUnit,
-			Type:     TaskTypeNodeExec,
+			Type:     execTaskTypeForNode(g.NodeAt(nodeIdx)),
 		}
 	}
 	return plan, nil

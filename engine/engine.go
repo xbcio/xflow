@@ -335,7 +335,7 @@ func (e *Engine) Invoke(ctx context.Context, g *graph.Graph, entryName string, p
 			ExecutionID:  id,
 			NodeName:     entry.Name,
 			NodeIdx:      entryIdx,
-			Type:         TaskTypeNodeExec,
+			Type:         execTaskTypeForNode(entry),
 			ActivationID: 1,
 		},
 		operation: fmt.Sprintf("enqueue entry node %q", entry.Name),

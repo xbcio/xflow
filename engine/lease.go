@@ -216,6 +216,20 @@ func (e *Engine) RecoverTaskLease(ctx context.Context, task *Task) (*TaskLease, 
 // TaskRouting returns runner placement metadata for a queued task without
 // issuing a lease or mutating node attempt state.
 func (e *Engine) TaskRouting(ctx context.Context, t *Task) (TaskRouting, error) {
+	// Engine-owned task types must never reach a runner. No runner declares
+	// these node types, so routing one would degrade into an unbounded
+	// ErrNoMatchingRunner retry loop; the permanent marker gives the delivery
+	// sink the one answer that ends it — dead-letter, do not retry. NodeAdvance
+	// and NodeSkip already have no routable state to read, and TaskTypeSubWorkflow
+	// is the engine's own child-execution start. The two service TaskRouting
+	// callers ask this before any assignment is built, so a sub-workflow task
+	// that somehow reached the queue dies loudly here instead of hanging a
+	// parent on a child that was never created.
+	switch t.Type {
+	case TaskTypeNodeAdvance, TaskTypeNodeSkip, TaskTypeSubWorkflow:
+		return TaskRouting{}, fmt.Errorf("task type %d for %q/%q: %w: engine-owned tasks are consumed by the engine, never routed to a runner",
+			t.Type, t.ExecutionID, t.NodeName, types.ErrPermanent)
+	}
 	g, active, err := e.loadActiveGraph(ctx, t.ExecutionID)
 	if err != nil {
 		return TaskRouting{}, err

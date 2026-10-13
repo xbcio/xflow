@@ -26,6 +26,13 @@ const (
 	TaskTypeNodeBatch
 	// TaskTypeGroupExec 把一整个 co-location 组作为单元派发给 runner 执行。
 	TaskTypeGroupExec
+	// TaskTypeSubWorkflow runs one xflow.subworkflow node: the engine resolves
+	// the node's pinned target, starts a child execution, and waits for it. Like
+	// the engine-internal types above, it never reaches a handler or a remote
+	// runner — no runner declares the capability, and TaskRouting refuses it
+	// permanently — but unlike them it names a real node of the parent graph and
+	// completes through the ordinary commit path.
+	TaskTypeSubWorkflow
 	// 6 曾是 TaskTypeGroupResume（durable group suspend，已随该子系统一并移除）。
 	// TaskType 是落进 outbox 的持久化数值，契约是 append-only：下一个新类型从 7
 	// 起，不要回收 6。生产从未产生过值为 6 的任务，所以存量数据里没有它。

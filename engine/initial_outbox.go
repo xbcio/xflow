@@ -25,7 +25,7 @@ func submitInitialTasks(id types.ExecutionID, g *graph.Graph) []initialTask {
 				ExecutionID:  id,
 				NodeName:     start.Name,
 				NodeIdx:      g.StartIndex(),
-				Type:         TaskTypeNodeExec,
+				Type:         execTaskTypeForNode(start),
 				ActivationID: 1,
 			},
 			operation: fmt.Sprintf("enqueue start node %q", start.Name),
@@ -59,7 +59,7 @@ func submitInitialTasks(id types.ExecutionID, g *graph.Graph) []initialTask {
 				NodeName:    node.Name,
 				NodeIdx:     nodeIdx,
 				UnitIdx:     unitIdx,
-				Type:        TaskTypeNodeExec,
+				Type:        execTaskTypeForNode(node),
 			},
 			operation: fmt.Sprintf("enqueue root node %q", node.Name),
 		})

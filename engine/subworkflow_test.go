@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
@@ -190,5 +191,115 @@ func TestRerunRefusesSubWorkflowWithoutResolver(t *testing.T) {
 	}
 	if len(seeder.requests) != 0 {
 		t.Fatal("a rerun an engine cannot run seeded an execution anyway")
+	}
+}
+
+// subWorkflowSchedulingEngine builds a legacy (non-atomic) capable engine so
+// the scheduled task lands directly in the fake queue, where its type is
+// readable without driving the execution.
+func subWorkflowSchedulingEngine(t *testing.T) (*Engine, *fakeState, *fakeQueue) {
+	t.Helper()
+	inner := newFakeState()
+	eng := New(&subWorkflowCapableState{StateStore: inner}, &fakeQueue{}, WithSubWorkflowResolver(subWorkflowStubResolver(t)))
+	queue := eng.queue.(*fakeQueue)
+	testRegistries.Store(eng, &fakeRegistry{handlers: map[string]types.ActionHandler{}})
+	t.Cleanup(func() { testRegistries.Delete(eng) })
+	return eng, inner, queue
+}
+
+// TestScheduledSubWorkflowNodeGetsItsOwnTaskType pins the scheduler half: the
+// root task of a sub-workflow node is stamped TaskTypeSubWorkflow, which is
+// what keeps it off the runner routes.
+func TestScheduledSubWorkflowNodeGetsItsOwnTaskType(t *testing.T) {
+	eng, _, queue := subWorkflowSchedulingEngine(t)
+
+	if _, err := eng.Submit(context.Background(), resolvedSubWorkflowParent(t), nil); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	tasks := queue.Drain()
+	if len(tasks) != 1 {
+		t.Fatalf("queued %d tasks, want the one root task", len(tasks))
+	}
+	if tasks[0].Type != TaskTypeSubWorkflow {
+		t.Fatalf("root task type = %d, want TaskTypeSubWorkflow", tasks[0].Type)
+	}
+}
+
+// TestDownstreamArrivalOfSubWorkflowNodeGetsItsOwnTaskType pins the downstream
+// half: a node reached by an advance is stamped by its own type, not by the
+// default.
+func TestDownstreamArrivalOfSubWorkflowNodeGetsItsOwnTaskType(t *testing.T) {
+	def := &types.WorkflowDef{
+		Name: "advance-to-sub",
+		Nodes: []types.NodeDef{
+			{Name: "start", Type: "xflow.start"},
+			{Name: "sub", Type: types.SubWorkflowNodeType, Parameters: map[string]any{"workflow": "child"}},
+		},
+		Connections: types.Connections{
+			"start": {"main": {Targets: []types.Connection{{Node: "sub"}}}},
+		},
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	startIdx, _ := g.NodeIndex("start")
+	arrivals := downstreamArrivals(g, startIdx, "main")
+	if len(arrivals) != 1 {
+		t.Fatalf("downstreamArrivals returned %d arrivals, want 1", len(arrivals))
+	}
+	if arrivals[0].ExecTaskType != TaskTypeSubWorkflow {
+		t.Fatalf("arrival task type = %d, want TaskTypeSubWorkflow", arrivals[0].ExecTaskType)
+	}
+}
+
+// TestTaskRoutingRefusesEngineOwnedTasks is the architecture pin: no runner
+// may ever be offered a task type that only the engine knows how to consume,
+// and the refusal must be permanent so a retry-capable transport dead-letters
+// instead of replaying it forever.
+func TestTaskRoutingRefusesEngineOwnedTasks(t *testing.T) {
+	ctx := context.Background()
+	eng, _, _ := subWorkflowSchedulingEngine(t)
+
+	for _, taskType := range []TaskType{TaskTypeSubWorkflow, TaskTypeNodeAdvance, TaskTypeNodeSkip} {
+		_, err := eng.TaskRouting(ctx, &Task{
+			ExecutionID: "exec-1",
+			NodeName:    "sub",
+			Type:        taskType,
+		})
+		if err == nil {
+			t.Fatalf("TaskRouting(type %d) was accepted; no runner can run it", taskType)
+		}
+		if !errors.Is(err, types.ErrPermanent) {
+			t.Fatalf("TaskRouting(type %d) error = %v, want a permanent refusal", taskType, err)
+		}
+	}
+}
+
+// TestScheduleRetryKeepsSubWorkflowTaskType pins the retry half: the retry of a
+// sub-workflow node re-enters the engine-owned path, not the runner path.
+func TestScheduleRetryKeepsSubWorkflowTaskType(t *testing.T) {
+	ctx := context.Background()
+	eng, state, queue := subWorkflowSchedulingEngine(t)
+
+	task := &Task{ExecutionID: "exec-retry", NodeName: "sub", NodeIdx: 0, Type: TaskTypeSubWorkflow, ActivationID: 1}
+	leaseID, token := newLeaseCredentials()
+	if _, acquired, err := state.AcquireTaskLease(ctx, &TaskLease{
+		LeaseID: leaseID, LeaseToken: token, Task: *task,
+		IssuedAt: time.Now().UTC(), TTL: time.Minute,
+	}); err != nil || !acquired {
+		t.Fatalf("AcquireTaskLease: acquired=%v err=%v", acquired, err)
+	}
+
+	scheduled, err := eng.scheduleRetry(ctx, task, 1, &types.RetrySettings{MaxAttempts: 3, InitialInterval: 1}, token)
+	if err != nil || !scheduled {
+		t.Fatalf("scheduleRetry: scheduled=%v err=%v", scheduled, err)
+	}
+	tasks := queue.Drain()
+	if len(tasks) != 1 {
+		t.Fatalf("queued %d retry tasks, want 1", len(tasks))
+	}
+	if tasks[0].Type != TaskTypeSubWorkflow {
+		t.Fatalf("retry task type = %d, want TaskTypeSubWorkflow", tasks[0].Type)
 	}
 }

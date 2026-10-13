@@ -815,7 +815,7 @@ func downstreamArrivals(g *graph.Graph, sourceIdx int, activePort string) []Down
 		if arrival.ArrivalCount == 0 {
 			meta := g.NodeAt(edge.DstIdx)
 			dstUnit := g.UnitIndexForNode(edge.DstIdx)
-			execType := TaskTypeNodeExec
+			execType := execTaskTypeForNode(meta)
 			if g.UnitKindAt(dstUnit) == graph.UnitGroup {
 				execType = TaskTypeGroupExec
 			}

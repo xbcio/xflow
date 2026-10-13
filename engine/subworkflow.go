@@ -5,7 +5,24 @@ import (
 	"fmt"
 
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/types"
 )
+
+// execTaskTypeForNode returns the task type an ordinary (non-group) node is
+// scheduled as: TaskTypeSubWorkflow for a node the engine resolves and waits on
+// itself, TaskTypeNodeExec for everything else.
+//
+// Every scheduling site goes through this rather than deciding per site. The
+// task type is what keeps a sub-workflow node off the runner routes — a node
+// type no runner declares the capability for would otherwise degrade into an
+// unbounded ErrNoMatchingRunner retry — so a site that forgot it would look
+// correct until the first dispatch.
+func execTaskTypeForNode(meta graph.NodeMeta) TaskType {
+	if meta.Type == types.SubWorkflowNodeType {
+		return TaskTypeSubWorkflow
+	}
+	return TaskTypeNodeExec
+}
 
 // ErrSubWorkflowUnsupported is returned when a workflow contains an
 // xflow.subworkflow node but the wired engine or StateStore cannot run one:

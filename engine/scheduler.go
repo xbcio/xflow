@@ -57,7 +57,7 @@ func (e *Engine) planCyclicDownstream(g *graph.Graph, task *Task, activePort str
 				ExecutionID:  task.ExecutionID,
 				NodeName:     dstMeta.Name,
 				NodeIdx:      edge.DstIdx,
-				Type:         TaskTypeNodeExec,
+				Type:         execTaskTypeForNode(dstMeta),
 				AutoDepth:    nextDepth,
 				ActivationID: nextActivationID,
 			},
