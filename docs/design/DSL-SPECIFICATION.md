@@ -1768,7 +1768,7 @@ dependency_edges:
 
 **同一个 supply key 的两次声明必须同源（P9 fail-closed 规则）**：key 是 (namespace, supply 节点名)，内容按 key 缓存、被该 key 的所有消费者共享；第二个 workflow 把同一个 key 指向不同的 URL（或一边是 store、一边是 pull）时，**整个 activation 被拒绝**，错误里同时给出两个来源的 host——否则先声明的 workflow 会在无任何报错的情况下读到另一个来源的内容。
 
-注意这条规则在**重新注册**时也会触发：server 每次注册都新铸一个 workflow id（POST `/v1/workflows`，即使是同名同版本的新版本，如 `nightly@1` → `nightly@2`），而 runner 侧的声明记录按 workflow id 区分"同一工作流"，且没有删除路径。因此把一个已有 workflow 的 supply URL 改掉再重新注册，这个 runner 会**持续拒绝**该 activation，直到：
+注意这条规则在**重新注册**时也会触发：同名但版本不同的重新注册（POST `/v1/workflows`，如 `nightly@1` → `nightly@2`）会铸出新的 workflow id，而 runner 侧的声明记录按 workflow id 区分"同一工作流"，且没有删除路径。因此把一个已有 workflow 的 supply URL 改掉再重新注册，这个 runner 会**持续拒绝**该 activation，直到：
 
 - 用 PUT 覆盖**原 workflow id**（id 不变，记录原地替换，这是改 URL 的推荐做法）；或
 - 把 supply 节点改名（新 key，新声明）；或
