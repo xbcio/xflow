@@ -49,6 +49,7 @@ var defaultContractCases = map[string]contractCase{
 	"xflow.map@1/continue_on_error":          {"engine", "../engine", "TestDefaultContractMapContinueOnError"},
 	"xflow.merge@1/on_others":                {"handler", ".", "TestDefaultContractMergeOnOthers"},
 	"xflow.supply.external@0/require_ready":  {"handler", ".", "TestDefaultContractSupplyRequireReady"},
+	"xflow.supply.http@0/require_ready":      {"handler", ".", "TestDefaultContractSupplyRequireReady"},
 	"xflow.supply.static@0/require_ready":    {"handler", ".", "TestDefaultContractSupplyRequireReady"},
 	"xflow.trigger.cron@1/timezone":          {"trigger", "trigger/cron", "TestDefaultContractCronTimezone"},
 	"xflow.trigger.kafka@1/max_inflight":     {"trigger", "trigger/kafka", "TestDefaultContractKafkaActivate"},

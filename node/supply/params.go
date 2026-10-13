@@ -7,13 +7,30 @@ import (
 	"github.com/spf13/cast"
 )
 
-// Parameter names shared by both supply node types. They live in this exported
+// Parameter names shared by the supply node types. They live in this exported
 // package rather than next to the node types because the control plane reads
 // them when deriving activations, and node/internal/... is invisible to service/.
 const (
 	ParamResource     = "resource"
 	ParamRequireReady = "require_ready"
 	ParamContent      = "content"
+)
+
+// NodeTypeHTTPPull is the DSL node type of a runner-side pull supply: content
+// fetched by the runner from an external HTTPS source. It is declared here
+// (rather than only inside node/internal/supply) because the graph compiler and
+// the control plane must recognize the same string.
+const NodeTypeHTTPPull = "xflow.supply.http"
+
+// Parameters of an xflow.supply.http node beyond the shared require_ready.
+// ParamURL is required and https-only; ParamAuthentication names a credential
+// in the RUNNER's process configuration (the definition never carries the
+// credential itself); ParamPollInterval is an optional Go duration string that
+// may only speed the runner's poll up.
+const (
+	ParamURL            = "url"
+	ParamAuthentication = "authentication"
+	ParamPollInterval   = "poll_interval"
 )
 
 // RequireReady reads the readiness policy. It defaults to TRUE — and the default
