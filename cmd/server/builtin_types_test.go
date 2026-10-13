@@ -28,6 +28,7 @@ var builtinNodeTypes = []string{
 	"xflow.notification",
 	"xflow.script",
 	"xflow.start",
+	"xflow.subworkflow",
 	"xflow.switch",
 	"xflow.transform.aggregate",
 	"xflow.transform.filter",
