@@ -31,7 +31,7 @@ Node Group 组级 `on_error`、gRPC `AckActivation`、G1 clean-SHA 重签 `c39a2
 每条都写明出处：缺口本身的现状说明留在所属设计文档里，这里只记「打算改的东西」。
 关闭一条时，把它移到文末「已关闭」并写上 commit。
 
-范围：只收运行时缺口。Relay Gateway / remote SDK（D1 支持矩阵已排除）与已被显式
+范围：只收运行时缺口。Relay Gateway（D1 支持矩阵已排除）与已被显式
 否决的设计（如 supply 的 `default: <bytes>`）不在此列；出处文档与实现之间的纯陈旧
 偏差也不单独立项，在关闭对应条目时顺带标注。
 

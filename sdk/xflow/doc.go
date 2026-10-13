@@ -38,6 +38,33 @@
 // it through WithServerMetrics; WithServerMetricsAddr optionally serves that
 // collector from Server.Run when a collector was supplied.
 //
+// # Remote control client
+//
+// NewRemote is the out-of-process client for a standalone server: it drives the
+// public /v1 HTTP surface (register, invoke, wait, signal, cancel, pause,
+// resume, rerun, inspect, list) over an endpoint and a bearer token. It is the
+// fourth mode next to NewLocal, NewCluster and NewServer, and owns none of what
+// those own: no engine, no store, no queue, no Redis, no node registration. The
+// server is the only holder of state.
+//
+// Identity is the token's, server-side: a Remote carries no namespace knob, so
+// two tenants are two tokens. Every Invoke carries an Idempotency-Key —
+// WithIdempotencyKey's when the caller set one, a fresh random key otherwise —
+// and a transport failure (no response at all) is retried once with the same
+// key, so a lost response cannot create a second execution. A response of any
+// status is never retried: the server has decided. Failures are *RemoteError,
+// whose Is maps the server's stable codes onto the SDK's sentinels
+// (store.ErrNotFound, engine.ErrConcurrencyLimit, ...), so errors.Is reads the
+// same against a Remote as against an Engine.
+//
+// Three methods deviate from the in-process faces because the HTTP routes
+// force it, each documented on the method: ReplaceWorkflow takes the workflow
+// id explicitly (server-minted ids are uuids and PUT addresses the resource by
+// id), Invoke refuses WithExecutionTTL, WithRuntime and WithTraceID (the
+// execute route has no fields for them, and silently dropping one would
+// promise a run with different semantics), and ListExecutions exists only here,
+// because an embedded engine has no execution collection to page.
+//
 // # Runner operation control
 //
 // The management drain operation stops new task claims for one runner while
