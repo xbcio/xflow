@@ -406,17 +406,19 @@ func (e *Engine) claimIdempotency(ctx context.Context, g *graph.Graph, scope, ke
 	if err := ValidateIdempotencyKey(key); err != nil {
 		return idempotentStart{}, err
 	}
+	id := IdempotentExecutionID(namespace.FromContext(ctx), scope, key)
 	if scope == "" {
 		// Refused rather than defaulted: an empty scope would silently make one
 		// key mean one execution across every workflow of the namespace, which is
-		// a caller's wiring bug, not a request this engine can honor.
-		return idempotentStart{}, fmt.Errorf("idempotency key %q: %w", key, errIdempotencyScopeMissing)
+		// a caller's wiring bug, not a request this engine can honor. The error
+		// names the derived id, never the key: the key is client-supplied, and an
+		// error string is one log line away from carrying it out of the process.
+		return idempotentStart{}, fmt.Errorf("claim idempotency key for %q: %w", id, errIdempotencyScopeMissing)
 	}
 	store, ok := e.state.(IdempotentStateStore)
 	if !ok {
 		return idempotentStart{}, ErrIdempotencyUnsupported
 	}
-	id := IdempotentExecutionID(namespace.FromContext(ctx), scope, key)
 	token := uuid.NewString()
 	claim, err := store.ClaimIdempotency(ctx, IdempotencyClaimRequest{
 		ExecutionID: id,
