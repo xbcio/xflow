@@ -98,6 +98,20 @@ func TestSubWorkflowCompletionConcludesWithTheChildResult(t *testing.T) {
 	if node.Status != types.NodeStatusSuccess || node.Port != "main" {
 		t.Fatalf("node = (%s, port %q), want (success, main)", node.Status, node.Port)
 	}
+	// The child outlives the wait it ran: a finished node must still name the
+	// child execution its result was projected from, through Inspect as well as
+	// on the record, or the drill-down would close exactly when an operator
+	// reads it.
+	if node.ChildExecutionID != link.ChildExecutionID {
+		t.Fatalf("child id after the commit = %q, want %q kept", node.ChildExecutionID, link.ChildExecutionID)
+	}
+	detail, err := rig.eng.Inspect(ctx, rig.parentID, "sub")
+	if err != nil {
+		t.Fatalf("Inspect(parent): %v", err)
+	}
+	if len(detail.Nodes) != 1 || detail.Nodes[0].ChildExecutionID != link.ChildExecutionID {
+		t.Fatalf("Inspected node after the commit = %+v, want child %q kept", detail.Nodes, link.ChildExecutionID)
+	}
 	output, err := rig.state.GetOutput(ctx, rig.parentID, "sub")
 	if err != nil {
 		t.Fatalf("GetOutput(sub): %v", err)

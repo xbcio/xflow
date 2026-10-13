@@ -40,6 +40,10 @@ func (s *memoryState) BeginSubWorkflowWait(_ context.Context, lease *engine.Task
 	}
 	nodeCopy := *node
 	nodeCopy.Status = types.NodeStatusWaiting
+	// The node record carries the child too (design §6): it is the parent-side
+	// half of the drill-down, and unlike the link it survives the commit that
+	// concludes the node, so a finished wait is still auditable.
+	nodeCopy.ChildExecutionID = link.ChildExecutionID
 	s.nodes[key] = &nodeCopy
 	linkCopy := link
 	s.subWorkflowLinks[key] = &linkCopy

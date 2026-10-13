@@ -245,6 +245,11 @@ func (f *fakeState) CommitNode(_ context.Context, req CommitNodeRequest) (Commit
 		node.Attempt = current.Attempt
 		node.AutoDepth = current.AutoDepth
 	}
+	// Mirrors the real backends: the child a waiting node ran outlives its
+	// commit, so the drill-down survives the conclusion of the wait.
+	if current != nil {
+		node.ChildExecutionID = current.ChildExecutionID
+	}
 	f.nodes[key] = node
 	if req.StoreOutput {
 		f.outputs[key] = cloneMap(req.Output)

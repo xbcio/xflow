@@ -272,6 +272,10 @@ func (s *Store) GetNode(ctx context.Context, id types.ExecutionID, name string) 
 	ns := &engine.NodeSnapshot{ExecutionID: id, Name: name, Status: types.NodeStatus(val), PrivateOutput: privateOutput}
 	ns.LeaseID = engine.LeaseID(meta["lease_id"])
 	ns.LeaseToken = engine.LeaseToken(meta["lease_token"])
+	// Written by the sub-workflow park transition, kept by every later meta
+	// write: the child a waiting (or finished) node ran, for the parent-side
+	// drill-down. Absent on every node that never waited on a child.
+	ns.ChildExecutionID = types.ExecutionID(meta["child_execution_id"])
 	if nodeIdx := meta["node_idx"]; nodeIdx != "" {
 		var parsed int
 		if _, scanErr := fmt.Sscanf(nodeIdx, "%d", &parsed); scanErr == nil {

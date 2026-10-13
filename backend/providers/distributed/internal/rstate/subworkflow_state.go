@@ -42,9 +42,15 @@ end
 local ttl = tonumber(ARGV[5])
 redis.call('SET', KEYS[1], 'waiting', 'EX', ttl)
 redis.call('EXPIRE', KEYS[2], ttl)
+-- The node record carries the child too (design §6): the parent-side half of
+-- the drill-down. It is a meta field rather than part of the status string so
+-- it survives the commit that concludes the node — commitNodeLua HSETs its own
+-- fields and never removes this one — which is what keeps a finished wait
+-- auditable.
+redis.call('HSET', KEYS[2], 'child_execution_id', ARGV[8])
 redis.call('SET', KEYS[3], ARGV[6], 'EX', ttl)
 local count = tonumber(ARGV[7])
-local position = 8
+local position = 9
 for i = 1, count do
     local outboxID = ARGV[position]
     local outboxBody = ARGV[position + 1]
@@ -71,10 +77,10 @@ func (s *Store) BeginSubWorkflowWait(ctx context.Context, lease *engine.TaskLeas
 	}
 	ttl := s.getExecTTL(ctx, lease.Task.ExecutionID)
 	t := namespace.FromContext(ctx)
-	args := make([]any, 0, 7+len(entries)*3)
+	args := make([]any, 0, 8+len(entries)*3)
 	args = append(args,
 		string(lease.LeaseID), string(lease.LeaseToken), lease.Attempt, lease.Task.ActivationID,
-		int(ttl.Seconds()), string(linkJSON), len(entries))
+		int(ttl.Seconds()), string(linkJSON), len(entries), string(link.ChildExecutionID))
 	for index, entry := range entries {
 		if entry.ID == "" {
 			return false, engine.ErrInvalidLeaseToken

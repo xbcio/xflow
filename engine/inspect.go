@@ -27,7 +27,13 @@ type ExecutionDetail struct {
 	// rerun of" once the parent's own keys have expired.
 	ParentID  types.ExecutionID `json:"parent_execution_id,omitempty"`
 	RerunFrom string            `json:"rerun_from,omitempty"`
-	Nodes     []NodeDetail      `json:"nodes,omitempty"`
+	// ParentNode is the parent execution's node that started this execution,
+	// non-empty only on a sub-workflow child. It shares ParentID with the rerun
+	// link and is what tells the two apart: a rerun carries RerunFrom, a
+	// sub-workflow child carries ParentNode. It is the child-side half of the
+	// drill-down whose parent-side half is NodeDetail.ChildExecutionID.
+	ParentNode string       `json:"parent_node,omitempty"`
+	Nodes      []NodeDetail `json:"nodes,omitempty"`
 }
 
 // NodeDetail is an audit snapshot for a workflow node.
@@ -47,6 +53,12 @@ type NodeDetail struct {
 	// deliberately NOT covered by Output's own redaction: see inspectNode.
 	ErrorDetails map[string]any `json:"error_details,omitempty"`
 	Output       map[string]any `json:"output,omitempty"`
+	// ChildExecutionID is the child execution a sub-workflow node waited on,
+	// empty on every other node. It survives the node's commit, so a finished
+	// node's child is still drillable, and it is metadata rather than node
+	// content: it is published under the same policy as Status and Error, not
+	// under Output's.
+	ChildExecutionID types.ExecutionID `json:"child_execution_id,omitempty"`
 }
 
 // InspectStatus returns the execution-level half of Inspect: status, error and,
@@ -73,6 +85,7 @@ func (e *Engine) InspectStatus(ctx context.Context, id types.ExecutionID) (Execu
 		Error:       snap.Error,
 		ParentID:    snap.ParentID,
 		RerunFrom:   snap.RerunFrom,
+		ParentNode:  snap.ParentNode,
 	}
 	if snap.Status == types.ExecutionStatusQueued {
 		// Best effort, and deliberately not an error when it fails: the caller
@@ -220,6 +233,12 @@ func (e *Engine) inspectNode(
 		detail.Attempt = snap.Attempt
 		detail.Port = snap.Port
 		detail.Error = snap.Error
+		// The child a sub-workflow node waited on. Not gated by the privacy
+		// policy below: it is an execution id, not node output, and it is the
+		// parent-side handle the child-side ExecutionDetail.ParentNode exists to
+		// complete — withholding it would make a privacy-marked wait
+		// undrillable with nothing gained, since the id names no content.
+		detail.ChildExecutionID = snap.ChildExecutionID
 	}
 
 	// A resolved graph is authoritative. If it is unavailable or does not know

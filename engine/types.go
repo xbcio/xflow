@@ -418,6 +418,16 @@ type NodeSnapshot struct {
 	// single read surface (engine/inspect.go), not here, so that a stored
 	// snapshot never has to be rewritten to change what is publicly visible.
 	ErrorDetails map[string]any
+	// ChildExecutionID is the child execution this node waited on, written by
+	// the sub-workflow wait transition. It deliberately outlives the wait: a
+	// finished node keeps it so an inspector can drill into the child a
+	// completed (or failed) node ran, which is what makes the parent side of
+	// the relationship auditable without a separate child index.
+	//
+	// Empty for every node that never waited on a child, and it names the LAST
+	// child: a retried node's next park overwrites it, so it is never a mixture
+	// of two attempts.
+	ChildExecutionID types.ExecutionID
 }
 
 // ExpiredLease describes a node whose lease has passed its deadline and is

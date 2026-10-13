@@ -101,6 +101,12 @@ func RunSubWorkflowLinkContract(t *testing.T, newStore func(*testing.T) SubWorkf
 			node.Attempt != lease.Attempt || node.ActivationID != lease.Task.ActivationID {
 			t.Fatalf("parked node lost its lease identity: %+v", node)
 		}
+		// The parent-side drill-down: an inspector reads the child from the
+		// node record, so the park has to write it there and not only into the
+		// link.
+		if node.ChildExecutionID != link.ChildExecutionID {
+			t.Fatalf("parked node child = %q, want %q", node.ChildExecutionID, link.ChildExecutionID)
+		}
 		got, ok, err := store.GetSubWorkflowLink(ctx, id, "sub")
 		if err != nil || !ok {
 			t.Fatalf("GetSubWorkflowLink() ok=%v err=%v, want true/nil", ok, err)
@@ -234,6 +240,13 @@ func RunSubWorkflowLinkContract(t *testing.T, newStore func(*testing.T) SubWorkf
 		if got, ok, _ := store.GetSubWorkflowLink(ctx, id, "sub"); !ok || got != link {
 			t.Fatalf("link after a reclaim = %+v ok=%v, want the parked link", got, ok)
 		}
+		// The front half of a re-park's story: the child id the last wait
+		// wrote stays on the record across the reclaim, and the next park
+		// overwrites it (see ReparkMovesTheChildExecutionID).
+		node, _ := store.GetNode(ctx, id, "sub")
+		if node == nil || node.ChildExecutionID != link.ChildExecutionID {
+			t.Fatalf("child id after a reclaim = %+v, want %q kept", node, link.ChildExecutionID)
+		}
 	})
 
 	t.Run("LinkSurvivesRetryReset", func(t *testing.T) {
@@ -259,6 +272,61 @@ func RunSubWorkflowLinkContract(t *testing.T, newStore func(*testing.T) SubWorkf
 		// the next one", and a cleared link would read as "no child yet".
 		if got, ok, _ := store.GetSubWorkflowLink(ctx, id, "sub"); !ok || got != link {
 			t.Fatalf("link after a retry reset = %+v ok=%v, want the stale link kept", got, ok)
+		}
+	})
+
+	t.Run("ReparkMovesTheChildExecutionID", func(t *testing.T) {
+		store := newStore(t)
+		id := engine.NewExecutionID()
+		lease := leasedSubWorkflowNode(t, ctx, store, id, types.NodeStatusRunning)
+		first := contractSubWorkflowLink("child-exec-gen1")
+		if accepted, err := store.BeginSubWorkflowWait(ctx, lease, first, nil); err != nil || !accepted {
+			t.Fatalf("first park accepted=%v err=%v", accepted, err)
+		}
+		// The retry path end to end: reset the node, re-claim it under a new
+		// lease identity (a plain UpsertNode, which is how a second dispatch
+		// arrives), and park on the next generation's child.
+		if reset, err := store.ResetNodeForRetryWithOutbox(ctx, id, "sub", lease.LeaseToken, engine.OutboxEntry{
+			ID: "retry/sub/gen2",
+			Task: engine.Task{
+				ExecutionID: id, NodeName: "sub", NodeIdx: 0,
+				Type: engine.TaskTypeSubWorkflow, ActivationID: 1,
+			},
+		}); err != nil || !reset {
+			t.Fatalf("ResetNodeForRetryWithOutbox() reset=%v err=%v, want true/nil", reset, err)
+		}
+		if err := store.UpsertNode(ctx, &engine.NodeSnapshot{
+			ExecutionID: id, Name: "sub", NodeIdx: 0,
+			Status:        types.NodeStatusRunning,
+			LeaseID:       "sw-lease-2",
+			LeaseToken:    "sw-token-2",
+			Attempt:       2,
+			ActivationID:  1,
+			LeaseIssuedAt: time.Now().UTC().Truncate(time.Millisecond),
+			LeaseTTL:      time.Minute,
+		}); err != nil {
+			t.Fatalf("UpsertNode(second claim) error = %v", err)
+		}
+		second := &engine.TaskLease{
+			LeaseID: "sw-lease-2", LeaseToken: "sw-token-2", Attempt: 2,
+			Task: engine.Task{
+				ExecutionID: id, NodeName: "sub", NodeIdx: 0,
+				Type: engine.TaskTypeSubWorkflow, ActivationID: 1,
+			},
+		}
+		next := contractSubWorkflowLink("child-exec-gen2")
+		next.LeaseID, next.LeaseToken, next.Attempt = "sw-lease-2", "sw-token-2", 2
+		if accepted, err := store.BeginSubWorkflowWait(ctx, second, next, nil); err != nil || !accepted {
+			t.Fatalf("second park accepted=%v err=%v", accepted, err)
+		}
+		// Last write wins: the id names the child of the generation that is
+		// waiting, never a mixture of the two.
+		node, err := store.GetNode(ctx, id, "sub")
+		if err != nil || node == nil {
+			t.Fatalf("GetNode(sub) node=%+v err=%v", node, err)
+		}
+		if node.ChildExecutionID != "child-exec-gen2" {
+			t.Fatalf("child id after the second park = %q, want child-exec-gen2", node.ChildExecutionID)
 		}
 	})
 

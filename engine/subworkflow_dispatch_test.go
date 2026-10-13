@@ -55,6 +55,7 @@ func (s *subWorkflowLinkState) BeginSubWorkflowWait(_ context.Context, lease *Ta
 	}
 	copy := *node
 	copy.Status = types.NodeStatusWaiting
+	copy.ChildExecutionID = link.ChildExecutionID
 	s.nodes[key] = &copy
 	s.links[key] = link
 	return true, nil
@@ -260,6 +261,32 @@ func TestSubWorkflowDispatchStartsChildAndParksParent(t *testing.T) {
 	}
 	if got := link.WaitDeadline.Sub(node.LeaseIssuedAt); got != subWorkflowWaitTTL {
 		t.Fatalf("wait lease TTL = %s, want the %s notification budget", got, subWorkflowWaitTTL)
+	}
+	// The parent side of the drill-down: the parked node names its child, both
+	// on the record and through Inspect, which is how an operator finds the
+	// child execution to inspect next.
+	if node.ChildExecutionID != wantChild {
+		t.Fatalf("parked node child = %q, want the derived %q", node.ChildExecutionID, wantChild)
+	}
+	detail, err := rig.eng.Inspect(context.Background(), rig.parentID, "sub")
+	if err != nil {
+		t.Fatalf("Inspect(parent): %v", err)
+	}
+	if len(detail.Nodes) != 1 || detail.Nodes[0].ChildExecutionID != wantChild {
+		t.Fatalf("Inspected parent nodes = %+v, want sub carrying child %q", detail.Nodes, wantChild)
+	}
+	if detail.ParentNode != "" {
+		t.Fatalf("Inspected parent shows ParentNode %q, want empty on a root execution", detail.ParentNode)
+	}
+	// The child side of the same drill-down, and the field that tells a
+	// sub-workflow child (ParentNode) apart from a rerun (RerunFrom).
+	childDetail, err := rig.eng.Inspect(context.Background(), wantChild, "start")
+	if err != nil {
+		t.Fatalf("Inspect(child): %v", err)
+	}
+	if childDetail.ParentID != rig.parentID || childDetail.ParentNode != "sub" || childDetail.RerunFrom != "" {
+		t.Fatalf("Inspected child linkage = (%q, %q, %q), want (%q, %q, empty)",
+			childDetail.ParentID, childDetail.ParentNode, childDetail.RerunFrom, rig.parentID, "sub")
 	}
 
 	child := rig.child(t, wantChild)
