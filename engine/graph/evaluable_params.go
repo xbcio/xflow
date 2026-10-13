@@ -53,6 +53,15 @@ var evaluableParams = map[string]map[string]bool{
 	"xflow.transform.limit":             {"items": true},
 	"xflow.transform.aggregate":         {"items": true},
 	"xflow.transform.remove_duplicates": {"items": true},
+	// xflow.subworkflow's input/output are evaluated by the ENGINE at dispatch,
+	// not by a runner boundary: the type is engine-owned and never reaches
+	// execution/params.go. Exempting them keeps the single evaluation in the one
+	// place that can build the environment they name -- "input" is evaluated
+	// against the parent's params and "output" against the child execution's
+	// public node outputs ($child), a root no boundary env has. A boundary
+	// render would freeze every value against the wrong env before the engine
+	// ever saw it, and would reject $child as an unknown root at compile time.
+	"xflow.subworkflow": {"input": true, "output": true},
 	// The following types evaluate NO parameter themselves -- their handlers
 	// use every value verbatim (xflow.http ships it as a header/body,
 	// xflow.start ignores params entirely, triggers use them as configuration
