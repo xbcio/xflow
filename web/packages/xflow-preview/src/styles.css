@@ -334,6 +334,7 @@
 
 .xflow-preview-canvas .react-flow__background {
   /* Override the Background color prop so an embedding theme controls the grid. */
+  /* !important: xyflow's <Background> writes this variable as an inline style from its color prop. */
   --xy-background-pattern-color-props: var(--xflow-preview-canvas-grid-major) !important;
 }
 
@@ -354,7 +355,6 @@
 }
 
 .xflow-preview-canvas .react-flow__minimap {
-  --xy-minimap-mask-background-color-props: var(--xflow-preview-minimap-mask) !important;
   background: var(--xflow-preview-surface-panel);
   border: 1px solid var(--xflow-preview-border);
   border-radius: 4px;
@@ -366,6 +366,7 @@
 
 .xflow-preview-canvas .react-flow__edge:focus-visible .react-flow__edge-path,
 .xflow-preview-canvas .react-flow__edge.selected .react-flow__edge-path {
+  /* !important: xyflow renders the edge's style.stroke as an inline style on the path. */
   stroke: var(--xflow-preview-edge-selected) !important;
   stroke-width: 2.4;
 }
