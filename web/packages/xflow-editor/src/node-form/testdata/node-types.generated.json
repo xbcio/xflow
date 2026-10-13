@@ -1424,6 +1424,86 @@
     },
     {
       "spec": "node-form/v1",
+      "node_type": "xflow.subworkflow",
+      "node_version": 1,
+      "kind": "action",
+      "display_name": "Sub-workflow",
+      "ports": {
+        "inputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "main",
+            "display_name": "Main"
+          },
+          {
+            "name": "error",
+            "display_name": "Error"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "name": "workflow",
+          "path": "/parameters/workflow",
+          "label": "Workflow",
+          "type": "string",
+          "required": true,
+          "help": "Name of the workflow to run, in the same namespace",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "version",
+          "path": "/parameters/version",
+          "label": "Version",
+          "type": "string",
+          "help": "Version to pin; empty resolves to the latest version at registration time",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "entry",
+          "path": "/parameters/entry",
+          "label": "Entry",
+          "type": "string",
+          "help": "Entry node of the child workflow; empty uses its default start",
+          "expression": {
+            "mode": "template"
+          }
+        },
+        {
+          "name": "input",
+          "path": "/parameters/input",
+          "label": "Input",
+          "type": "object",
+          "widget": "key-expression",
+          "help": "Expressions producing the child execution's params",
+          "expression": {
+            "mode": "pure"
+          }
+        },
+        {
+          "name": "output",
+          "path": "/parameters/output",
+          "label": "Output",
+          "type": "object",
+          "widget": "key-expression",
+          "help": "Expressions over the child execution's public node outputs ($child) producing this node's output",
+          "expression": {
+            "mode": "pure"
+          }
+        }
+      ]
+    },
+    {
+      "spec": "node-form/v1",
       "node_type": "xflow.switch",
       "node_version": 1,
       "kind": "action",
