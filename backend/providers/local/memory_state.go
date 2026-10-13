@@ -50,10 +50,16 @@ type memoryState struct {
 	suspended      map[string]*types.SuspendSpec // key: execID+"/"+nodeName
 	signals        map[string]map[string]any     // pre-delivered: key: execID+"/"+signalName
 	signalSets     map[string]map[string]map[string]any
-	resumed        map[string]bool                         // resume lock: key: execID+"/"+nodeName
-	subExecs       map[string][]*engine.SubExecution       // key: execID+"/"+nodeName
-	groupUnits     map[string]*groupUnitState              // key: "<execID>/<unitIdx>"
-	admissions     map[engine.AdmissionKey]*admissionEntry // trigger admission keys
+	resumed        map[string]bool                   // resume lock: key: execID+"/"+nodeName
+	subExecs       map[string][]*engine.SubExecution // key: execID+"/"+nodeName
+	// subWorkflowLinks is the parent-side record of each parked child
+	// execution, keyed like nodes. It is deliberately NOT cleared by
+	// RevokeLease/ResetNodeForRetry: the link outlives the wait so a reclaimed
+	// redelivery resumes the same child, and a retry overwrites it when the
+	// next generation parks.
+	subWorkflowLinks map[string]*engine.SubWorkflowLink      // key: execID+"/"+nodeName
+	groupUnits       map[string]*groupUnitState              // key: "<execID>/<unitIdx>"
+	admissions       map[engine.AdmissionKey]*admissionEntry // trigger admission keys
 	// idempotency holds the claims of keyed submissions, keyed by the
 	// deterministic execution ID the key derives (engine.IdempotentStateStore).
 	idempotency map[types.ExecutionID]*idempotencyClaim
@@ -79,28 +85,29 @@ type execEntry struct {
 
 func newMemoryState() *memoryState {
 	return &memoryState{
-		executions:     make(map[types.ExecutionID]*execEntry),
-		nodes:          make(map[string]*engine.NodeSnapshot),
-		inDegrees:      make(map[string]int),
-		activeIns:      make(map[string]int),
-		remaining:      make(map[types.ExecutionID]int),
-		failed:         make(map[types.ExecutionID]int),
-		advanced:       make(map[string]bool),
-		scheduled:      make(map[string]string),
-		outbox:         make(map[types.ExecutionID]map[string]memoryOutboxEntry),
-		deadOutbox:     make(map[types.ExecutionID]map[string]memoryOutboxEntry),
-		replayReceipts: make(map[types.ExecutionID]map[string]*memoryReplayReceipt),
-		replayEntryIdx: make(map[types.ExecutionID]map[string]string),
-		outputs:        make(map[string]map[string]any),
-		privateOutputs: make(map[string]bool),
-		suspended:      make(map[string]*types.SuspendSpec),
-		signals:        make(map[string]map[string]any),
-		signalSets:     make(map[string]map[string]map[string]any),
-		resumed:        make(map[string]bool),
-		subExecs:       make(map[string][]*engine.SubExecution),
-		groupUnits:     make(map[string]*groupUnitState),
-		doneCh:         make(map[types.ExecutionID]chan struct{}),
-		eventWatchers:  make(map[types.ExecutionID][]chan engine.ExecutionEvent),
+		executions:       make(map[types.ExecutionID]*execEntry),
+		nodes:            make(map[string]*engine.NodeSnapshot),
+		inDegrees:        make(map[string]int),
+		activeIns:        make(map[string]int),
+		remaining:        make(map[types.ExecutionID]int),
+		failed:           make(map[types.ExecutionID]int),
+		advanced:         make(map[string]bool),
+		scheduled:        make(map[string]string),
+		outbox:           make(map[types.ExecutionID]map[string]memoryOutboxEntry),
+		deadOutbox:       make(map[types.ExecutionID]map[string]memoryOutboxEntry),
+		replayReceipts:   make(map[types.ExecutionID]map[string]*memoryReplayReceipt),
+		replayEntryIdx:   make(map[types.ExecutionID]map[string]string),
+		outputs:          make(map[string]map[string]any),
+		privateOutputs:   make(map[string]bool),
+		suspended:        make(map[string]*types.SuspendSpec),
+		signals:          make(map[string]map[string]any),
+		signalSets:       make(map[string]map[string]map[string]any),
+		resumed:          make(map[string]bool),
+		subExecs:         make(map[string][]*engine.SubExecution),
+		subWorkflowLinks: make(map[string]*engine.SubWorkflowLink),
+		groupUnits:       make(map[string]*groupUnitState),
+		doneCh:           make(map[types.ExecutionID]chan struct{}),
+		eventWatchers:    make(map[types.ExecutionID][]chan engine.ExecutionEvent),
 	}
 }
 
