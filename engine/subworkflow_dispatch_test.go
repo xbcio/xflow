@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -801,5 +802,66 @@ func TestSubWorkflowInputEvaluatesIntoChildParams(t *testing.T) {
 	}
 	if nested["matches"] != true {
 		t.Fatalf("nested.matches = %#v, want true", nested["matches"])
+	}
+}
+
+// TestSubWorkflowChildOccupiesTheTargetsConcurrencySlot pins the design §5
+// promise at the child boundary: the child execution is admitted under the
+// TARGET workflow's settings.concurrency, so a reject-mode limit refuses the
+// start instead of running the target unlimited. The refusal must be a node
+// failure — never a child left running past the limit its own definition
+// declared.
+func TestSubWorkflowChildOccupiesTheTargetsConcurrencySlot(t *testing.T) {
+	ctx := context.Background()
+	// The target itself declares the limit; the parent does not.
+	limited := compileConcurrencyGraph(t, "child", "v1", &types.ConcurrencySettings{
+		Limit: 1,
+		Mode:  types.ConcurrencyModeReject,
+	})
+	// The same pinned hash the standard stub serves: the binding is the pin,
+	// and the dispatcher rejects a resolver that answers a different revision.
+	resolver := stubSubWorkflowResolver{target: graph.SubWorkflowTarget{
+		Version:        "v1",
+		DefinitionHash: "sha256:child",
+		Graph:          limited,
+	}}
+	g, err := graph.CompileWithResolver(ctx, subWorkflowParentDef(), resolver)
+	if err != nil {
+		t.Fatalf("CompileWithResolver: %v", err)
+	}
+	rig := newSubWorkflowRig(t, g, nil, resolver)
+
+	// The occupant holds the target's only slot, admitted through the same path
+	// a real submission takes.
+	if _, err := rig.state.CreateExecutionWithConcurrency(ctx, &ExecutionSnapshot{
+		ID: "slot-occupant", Graph: limited, Status: types.ExecutionStatusRunning,
+	}, nil, ConcurrencyAdmission{
+		Namespace: string(namespace.FromContext(ctx)),
+		Workflow:  "child",
+		Limit:     1,
+		Mode:      types.ConcurrencyModeReject,
+	}); err != nil {
+		t.Fatalf("admit the slot occupant: %v", err)
+	}
+
+	rig.dispatch(t, rig.task)
+
+	// No retry policy on this node, so the refusal is terminal: the node fails
+	// with the store's sentinel text.
+	node := rig.node(t)
+	if node.Status != types.NodeStatusFailed {
+		t.Fatalf("node status = %s, want failed: the child start that cannot hold a slot is a node failure", node.Status)
+	}
+	if !strings.Contains(node.Error, ErrConcurrencyLimit.Error()) {
+		t.Fatalf("node error = %q, want the concurrency refusal", node.Error)
+	}
+	// The refusal persisted nothing: the derived child of this activation and
+	// generation does not exist, and nothing parked the node.
+	childID := subWorkflowChildID(rig.parentID, "sub", 1, 1)
+	if child, err := rig.state.GetExecution(ctx, childID); err != nil || child != nil {
+		t.Fatalf("the refused child was persisted: child=%+v err=%v", child, err)
+	}
+	if _, ok, _ := rig.state.GetSubWorkflowLink(ctx, rig.parentID, "sub"); ok {
+		t.Fatal("a refused child start parked the node")
 	}
 }
