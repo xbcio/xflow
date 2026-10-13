@@ -355,6 +355,91 @@ type DurableLeaseExpander interface {
 	BeginTaskExpansionWithOutbox(ctx context.Context, lease *TaskLease, children []SubExecution, entries []OutboxEntry) (started bool, err error)
 }
 
+// SubWorkflowLink is the parent-side record of one xflow.subworkflow node's
+// child execution: which execution the node is waiting on, and the lease it
+// parked under.
+//
+// It is written once per node generation, in the same transition that moves the
+// node to Waiting (BeginSubWorkflowWait), and it outlives that wait for two
+// callers that cannot reconstruct it otherwise:
+//
+//   - the completion path, which commits the parent node from the child's
+//     terminal verdict. The commit is fenced by the ORIGINAL lease identity, not
+//     a freshly acquired one, so a late notification cannot commit a node that
+//     has since been reclaimed or retried; the link is the only place that
+//     identity is still recorded once the node itself has moved on.
+//   - the redelivery path after a reclaim, which must resume the SAME child
+//     rather than mint a second one. Re-deriving the child id from the lease
+//     would not do: a reclaimed redelivery acquires a new lease, so the
+//     derivation inputs are not stable across generations. The link is.
+//
+// Generation is what separates the two cases that both present as "a task for a
+// node that already has a link": a reclaim redelivers the generation's own task
+// (task generation == link generation: resume the same child), while a retry
+// schedules a new one (task generation > link generation: mint the next child
+// and overwrite the link). It is a monotonic counter local to (execution, node,
+// activation), not a clock and not the lease attempt.
+type SubWorkflowLink struct {
+	// ChildExecutionID is the execution this node started and is waiting on.
+	ChildExecutionID types.ExecutionID
+	// ParentNode is the node that owns the link. It is redundant with the read
+	// key on purpose: a link read back during recovery is validated against the
+	// node it claims to belong to.
+	ParentNode string
+	// Generation is the child generation this link belongs to, starting at 1.
+	Generation int
+	// Depth is the child execution's sub-workflow nesting depth, so a
+	// redelivery after a reclaim can re-check the runtime bound without
+	// re-deriving it from a snapshot that may be gone.
+	Depth int
+	// WaitDeadline is the absolute instant the wait was parked with:
+	// min(node timeout, the engine's wait TTL). The lease's own deadline is what
+	// expires; this records the business bound the lease was chosen for.
+	WaitDeadline time.Time
+	// LeaseID, LeaseToken, Attempt and ActivationID identify the lease the node
+	// parked under. The completion path commits with exactly these, which is
+	// what makes a stale notification a stale-token refusal rather than a
+	// second commit.
+	LeaseID      LeaseID
+	LeaseToken   LeaseToken
+	Attempt      int
+	ActivationID int
+}
+
+// SubWorkflowLinkStore is the optional StateStore capability an
+// xflow.subworkflow node needs: a single-slot transition that parks a claimed
+// node on a child execution and records the link, and a read of that link.
+//
+// It is deliberately not "begin the wait and create the child" in one
+// transaction. The child lives in its own execution slot — a different key, and
+// on the Redis backend a different hash tag — so the two writes can never be
+// atomic (the concurrency design hit the same wall for slot keys). What
+// replaces atomicity is idempotence: the child id is derived from the parent,
+// node and generation, so recreating it is a no-op after a crash, and a
+// redelivery reads the link to resume exactly the child it parked on.
+//
+// A store that does not implement this cannot run a graph containing
+// sub-workflow nodes, and the engine refuses such a submission up front with
+// ErrSubWorkflowUnsupported rather than degrading to "create the child and move
+// on without a link", which would strand the node Pending with a live child.
+type SubWorkflowLinkStore interface {
+	// BeginSubWorkflowWait atomically moves a claimed node to Waiting, preserving
+	// the lease identity it parked under, and stores link. Implementations MUST
+	// fence on the lease (LeaseID/LeaseToken/Attempt/ActivationID) and on the
+	// node being in a claimable state — Running or Committing — exactly as
+	// DurableLeaseExpander fences its parent. entries are delivery intents
+	// written in the same transition when the backend supports an outbox.
+	//
+	// accepted=false means the fence refused: the task was reclaimed, retried,
+	// or committed under a newer lease, and the caller must discard its work
+	// rather than create a child nothing is waiting for.
+	BeginSubWorkflowWait(ctx context.Context, lease *TaskLease, link SubWorkflowLink, entries []OutboxEntry) (accepted bool, err error)
+	// GetSubWorkflowLink returns the link recorded for a node. ok=false means no
+	// link exists — the node never parked, or the execution is gone. An
+	// implementation must not error on absence.
+	GetSubWorkflowLink(ctx context.Context, id types.ExecutionID, nodeName string) (SubWorkflowLink, bool, error)
+}
+
 // DurableSignalDeliverer atomically consumes an external signal that wakes a
 // suspended waiter and records the resume delivery intent in the same state
 // transition. This closes the window where the legacy two-step

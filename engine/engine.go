@@ -136,6 +136,19 @@ func WithSuspendDisabled(err error) Option {
 	}
 }
 
+// WithSubWorkflowResolver wires the resolver an xflow.subworkflow node uses at
+// dispatch to fetch the target workflow revision its compiled binding pinned.
+//
+// Without one, a graph containing sub-workflow nodes is refused at submission
+// (ErrSubWorkflowUnsupported) rather than run: the resolver is both how the
+// child execution gets its graph and how the pinned definition hash is
+// re-verified before the child starts, so there is no reduced mode to fall back
+// to. The compile-time half of the same dependency is
+// graph.CompileWithResolver, which records the pin this resolver later serves.
+func WithSubWorkflowResolver(r graph.SubWorkflowResolver) Option {
+	return func(e *Engine) { e.subWorkflowResolver = r }
+}
+
 // DefaultLeaseTTL is the lease deadline applied when an Engine is constructed
 // without an explicit override. It is intentionally short enough that crashed
 // runners are reclaimed within a minute while leaving slow handlers (e.g.
@@ -177,6 +190,7 @@ type Engine struct {
 	groupExecutor            GroupExecutor
 	batchBodyExecutor        BatchBodyExecutor
 	remoteBatchExecution     bool
+	subWorkflowResolver      graph.SubWorkflowResolver
 	outerDeadline            time.Time
 	artifactUses             *types.ArtifactUseCollector
 

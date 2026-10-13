@@ -108,3 +108,39 @@ func TestCompileFAFRejectsSubWorkflowNode(t *testing.T) {
 		t.Fatalf("rejection message %q does not name %s", err, types.SubWorkflowNodeType)
 	}
 }
+
+func TestSubWorkflowNodeIndexes(t *testing.T) {
+	plain, err := Compile(&types.WorkflowDef{
+		Name:  "plain",
+		Nodes: []types.NodeDef{{Name: "work", Type: "xflow.noop"}},
+	})
+	if err != nil {
+		t.Fatalf("compile plain graph: %v", err)
+	}
+	if got := plain.SubWorkflowNodeIndexes(); got != nil {
+		t.Fatalf("plain graph returned sub-workflow indexes %v, want nil", got)
+	}
+
+	// Two sub-workflow nodes with an ordinary node between them, so the
+	// accessor's result is not just "every index" in declaration order.
+	mixed, err := Compile(&types.WorkflowDef{
+		Name: "mixed",
+		Nodes: []types.NodeDef{
+			{Name: "one", Type: types.SubWorkflowNodeType, Parameters: map[string]any{"workflow": "a"}},
+			{Name: "work", Type: "xflow.noop"},
+			{Name: "two", Type: types.SubWorkflowNodeType, Parameters: map[string]any{"workflow": "b"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("compile mixed graph: %v", err)
+	}
+	got := mixed.SubWorkflowNodeIndexes()
+	if len(got) != 2 {
+		t.Fatalf("SubWorkflowNodeIndexes() = %v, want the two sub-workflow nodes", got)
+	}
+	oneIdx, _ := mixed.NodeIndex("one")
+	twoIdx, _ := mixed.NodeIndex("two")
+	if got[0] != oneIdx || got[1] != twoIdx {
+		t.Fatalf("SubWorkflowNodeIndexes() = %v, want [%d %d]", got, oneIdx, twoIdx)
+	}
+}
