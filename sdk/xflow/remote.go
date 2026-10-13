@@ -12,9 +12,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/xbcio/xflow/backend"
+	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -359,13 +363,39 @@ func (r *Remote) do(ctx context.Context, req remoteRequest) (remoteEnvelope, err
 // carries the server's stable code and message; anything else (a proxy's 502,
 // an HTML error page) keeps only the status and a bounded excerpt.
 func remoteErrorFrom(resp *http.Response, raw []byte, decoded bool, env remoteEnvelope) *RemoteError {
+	err := &RemoteError{
+		Status:     resp.StatusCode,
+		RetryAfter: parseRemoteRetryAfter(resp.Header.Get("Retry-After")),
+	}
 	if decoded {
-		return &RemoteError{Status: resp.StatusCode, Code: env.Code, Message: env.Message}
+		err.Code = env.Code
+		err.Message = env.Message
+		return err
 	}
-	return &RemoteError{
-		Status:  resp.StatusCode,
-		Message: fmt.Sprintf("unexpected response: %s", summarizeRemoteBody(raw)),
+	err.Message = fmt.Sprintf("unexpected response: %s", summarizeRemoteBody(raw))
+	return err
+}
+
+// parseRemoteRetryAfter reads a Retry-After as either the delay-seconds form
+// (what this server sends) or an HTTP-date. An unparseable value is zero: the
+// caller then paces itself instead of reading a garbage duration out of a
+// header.
+func parseRemoteRetryAfter(v string) time.Duration {
+	if v == "" {
+		return 0
 	}
+	if secs, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+		if secs < 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if when, err := http.ParseTime(v); err == nil {
+		if d := time.Until(when); d > 0 {
+			return d
+		}
+	}
+	return 0
 }
 
 // summarizeRemoteBody renders a bounded, trimmed excerpt of a body that was
@@ -403,22 +433,100 @@ func isRemoteTransportError(err error) bool {
 //
 // Status is the HTTP status; Code is the server's stable snake_case business
 // code when the response was enveloped; Message is the server's message (for
-// an enveloped failure) or a bounded excerpt of a non-enveloped body.
+// an enveloped failure) or a bounded excerpt of a non-enveloped body;
+// RetryAfter carries the Retry-After the server sent with a refusal that is
+// worth waiting out (a concurrency limit, an idempotency claim still in
+// progress), zero when it sent none.
+//
+// Is maps the server's stable codes onto the SDK's sentinels, so a caller can
+// keep writing errors.Is(err, engine.ErrConcurrencyLimit) against a Remote
+// exactly as it does against an Engine — the two backends answer one question
+// with the same vocabulary.
 type RemoteError struct {
-	Status  int
-	Code    string
-	Message string
+	Status     int
+	Code       string
+	Message    string
+	RetryAfter time.Duration
 }
 
 func (e *RemoteError) Error() string {
+	msg := fmt.Sprintf("xflow: remote %d", e.Status)
 	if e.Code != "" {
-		return fmt.Sprintf("xflow: remote %d %s: %s", e.Status, e.Code, e.Message)
+		msg += " " + e.Code
 	}
 	if e.Message != "" {
-		return fmt.Sprintf("xflow: remote %d: %s", e.Status, e.Message)
+		msg += ": " + e.Message
 	}
-	return fmt.Sprintf("xflow: remote %d", e.Status)
+	if e.RetryAfter > 0 {
+		msg += fmt.Sprintf(" (retry after %s)", e.RetryAfter)
+	}
+	return msg
 }
+
+// Retryable reports whether the failure is the server's own state rather than
+// this request's content: a 5xx. A 429 is deliberately NOT included — the
+// server sent a Retry-After with it because retrying it is a decision about
+// WHEN, and the caller is the only side that knows whether it can wait.
+func (e *RemoteError) Retryable() bool { return e.Status >= http.StatusInternalServerError }
+
+// Is maps the failure onto the SDK's sentinels by the server's stable code
+// (and, for authentication, the status — the 401/403 codes differ across the
+// API's auth paths, the statuses do not).
+//
+// Unmapped codes match nothing: the caller still has the *RemoteError itself
+// for Status/Code/Message/RetryAfter, and an invented correspondence would be
+// worse than none.
+func (e *RemoteError) Is(target error) bool {
+	switch target {
+	case ErrRemoteUnauthenticated:
+		return e.Status == http.StatusUnauthorized
+	case ErrRemoteForbidden:
+		return e.Status == http.StatusForbidden
+	}
+	switch e.Code {
+	case "workflow_not_found", "execution_not_found", "route_not_found":
+		return target == store.ErrNotFound
+	case "workflow_conflict":
+		return target == backend.ErrWorkflowConflict
+	case "idempotency_key_conflict":
+		return target == engine.ErrIdempotencyConflict
+	case "idempotency_key_in_progress":
+		return target == engine.ErrIdempotencyInProgress
+	case "idempotency_unsupported":
+		return target == engine.ErrIdempotencyUnsupported
+	case "workflow_concurrency_limit":
+		return target == engine.ErrConcurrencyLimit
+	case "workflow_concurrency_queue_full":
+		return target == engine.ErrConcurrencyQueueFull
+	case "signal_consumed":
+		return target == engine.ErrSignalConsumed
+	case "execution_not_pausable":
+		return target == engine.ErrExecutionNotPausable
+	case "execution_not_paused":
+		return target == engine.ErrExecutionNotPaused
+	case "execution_control_unsupported":
+		return target == engine.ErrPauseUnsupported
+	case "execution_not_rerunnable":
+		return target == engine.ErrExecutionNotRerunnable
+	case "rerun_node_not_found":
+		return target == engine.ErrRerunNodeNotFound
+	case "rerun_upstream_incomplete":
+		return target == engine.ErrRerunUpstreamIncomplete
+	case "rerun_graph_unsupported":
+		return target == engine.ErrRerunGraphUnsupported
+	case "execution_rerun_unsupported":
+		return target == engine.ErrRerunUnsupported
+	}
+	return false
+}
+
+// ErrRemoteUnauthenticated reports a token the server would not accept (401):
+// absent, expired, or unknown.
+var ErrRemoteUnauthenticated = errors.New("xflow: remote server rejected the token")
+
+// ErrRemoteForbidden reports a token the server accepted but that does not
+// carry the scope this operation needs (403).
+var ErrRemoteForbidden = errors.New("xflow: remote token lacks the required scope")
 
 // remoteWorkflowRegistration is the answer to POST /v1/workflows and PUT
 // /v1/workflows/{id}.
