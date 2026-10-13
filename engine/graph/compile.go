@@ -79,6 +79,11 @@ var fanOutNodeTypes = map[string]bool{
 //     but the ban stays type-level rather than form-level: a member's form is
 //     one edit away from changing, and a ban that a parameter tweak can lift
 //     silently is not a ban.
+//   - xflow.subworkflow creates and waits on a child execution, which only the
+//     engine's own control path can do. A body member runs inside the runner's
+//     embedded engine, which has no execution-creation capability at all — a
+//     task carrying this type there would fail at dispatch. Type-level like
+//     xflow.map's, and for the same reason.
 //
 // The recursion ban that must stay extensible — a member that itself carries a
 // sub-graph body, making the sub-execution tree unbounded — is NOT expressed
@@ -87,8 +92,9 @@ var fanOutNodeTypes = map[string]bool{
 // that grows a body tomorrow is banned from nesting the day it lands, with no
 // list to update.
 var bannedBodyMemberTypes = map[string]bool{
-	"xflow.map":      true,
-	subgraphNodeType: true,
+	"xflow.map":               true,
+	types.SubWorkflowNodeType: true,
+	subgraphNodeType:          true,
 }
 
 // declaresSubgraphBody reports whether a node's parameters carry a "body" that
@@ -439,6 +445,15 @@ func validateFAF(def *types.WorkflowDef) error {
 	if declaresSubgraphBody(node.Parameters) {
 		return fmt.Errorf("faf workflow node %q cannot define a subgraph body", node.Name)
 	}
+	// Unlike the kind check above, this one cannot rely on the node's declared
+	// Kind: xflow.subworkflow's kind is empty, which normalizes to action. FAF
+	// persists nothing, so there would be no node state to hold the waiting
+	// verdict and no execution record for the child to report its conclusion to.
+	if node.Type == types.SubWorkflowNodeType {
+		return fmt.Errorf("faf workflow node %q cannot be a %s node: an faf execution persists no state, "+
+			"so there is nowhere to record the child execution or the node's wait on it",
+			node.Name, types.SubWorkflowNodeType)
+	}
 	if refs := deriveNodesRefs(node.Parameters); len(refs) != 0 {
 		return fmt.Errorf("faf workflow node %q cannot reference $nodes statically: %s", node.Name, strings.Join(refs, ", "))
 	}
@@ -495,6 +510,9 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 				"use xflow.map with a body instead", nd.Name)
 		}
 		if err := validateNodeBody(nd); err != nil {
+			return 0, err
+		}
+		if err := validateSubWorkflowParams(nd); err != nil {
 			return 0, err
 		}
 		if err := validateTriggerReplicaCardinality(fmt.Sprintf("node %q", nd.Name), nd.Type, nd.Parameters, nd.ActivationReplicas); err != nil {
