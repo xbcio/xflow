@@ -3,19 +3,24 @@ package engine
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/types"
 )
 
 // TestSubWorkflowCancelCascadesToTheChild is the inline half of the cascade: a
 // canceled parent must not be outlived by the child its node started, so Cancel
-// cancels the child before it finalizes itself.
+// cancels the child before it finalizes itself — and it must finalize the
+// parked node too.
 //
 // The node-status assertion is the ordering pin. The child's own cancellation
 // notifies the parent — the notification funnel has no way to know the cancel is
 // in flight — and the parent's canceling status is the only thing that keeps
 // that notification from concluding the node with a failure the cancel already
-// supersedes. Waiting is what the parked node must therefore still be.
+// supersedes. That is also why the node ends up canceled by the cancel path
+// rather than by the notification: a node left Waiting keeps its lease, and the
+// sweeper then reclaims it once per wait TTL, each redelivery dropped as
+// inactive until the execution keys expire.
 func TestSubWorkflowCancelCascadesToTheChild(t *testing.T) {
 	g := resolvedSubWorkflowParent(t)
 	rig := newSubWorkflowRig(t, g, nil, subWorkflowStubResolver(t))
@@ -30,8 +35,24 @@ func TestSubWorkflowCancelCascadesToTheChild(t *testing.T) {
 	if child := rig.child(t, link.ChildExecutionID); child.Status != types.ExecutionStatusCanceled {
 		t.Fatalf("child status = %s, want canceled: the parent's cancel must cascade", child.Status)
 	}
-	if node := rig.node(t); node.Status != types.NodeStatusWaiting {
-		t.Fatalf("node status = %s, want waiting: the child's cancellation is not a node failure", node.Status)
+	node := rig.node(t)
+	if node.Status != types.NodeStatusCanceled {
+		t.Fatalf("node status = %s, want canceled: the cancel path itself must finalize the parked wait", node.Status)
+	}
+	// The canceled node keeps the child it waited on: the drill-down is the
+	// same for a canceled wait as for a finished one, and the cascade above
+	// just canceled that exact child.
+	if node.ChildExecutionID != link.ChildExecutionID {
+		t.Fatalf("canceled node child = %q, want %q kept", node.ChildExecutionID, link.ChildExecutionID)
+	}
+	expired, err := rig.state.ListExpiredLeases(context.Background(), time.Now().UTC().Add(subWorkflowWaitTTL+time.Minute))
+	if err != nil {
+		t.Fatalf("ListExpiredLeases: %v", err)
+	}
+	for _, lease := range expired {
+		if lease.ExecutionID == rig.parentID && lease.NodeName == "sub" {
+			t.Fatalf("the sweeper still sees the canceled wait's lease: %+v", lease)
+		}
 	}
 	if exec := rig.child(t, rig.parentID); exec.Status != types.ExecutionStatusCanceled {
 		t.Fatalf("parent status = %s, want canceled", exec.Status)

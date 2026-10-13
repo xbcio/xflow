@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
@@ -65,4 +66,40 @@ func (e *Engine) cancelSubWorkflowChild(ctx context.Context, childID types.Execu
 		e.logger.Error("cancel sub-workflow child failed",
 			"child_execution_id", string(childID), "err", err)
 	}
+}
+
+// finalizeParkedSubWorkflowNodes marks this execution's still-parked
+// sub-workflow nodes canceled. The completion path deliberately refuses to
+// decide these nodes while the parent is canceling (the notification the
+// child's own cancellation fires carries no way to know this cancel
+// supersedes it — see completeSubWorkflowNode), so the cancel is the only path
+// left to close the wait. A node left Waiting would keep its lease, and the
+// sweeper would then reclaim it once per wait TTL, each redelivery dropped as
+// inactive until the execution keys expire.
+//
+// A node is finalized only while it is still Waiting: a concurrent completion
+// or a sweeper reclaim that already moved it (committed, pending) is left
+// alone, and the losing race is benign — a reclaim whose revoke lands after
+// this write finds no claimable status and answers false, and a redelivery of
+// a canceled node's task finds the execution inactive. The snapshot keeps the
+// lease identity and the child id for the same reason the suspended-node
+// rewrite keeps them: the write must not erase the record it is closing, and
+// the terminal status is what fences later work off.
+func (e *Engine) finalizeParkedSubWorkflowNodes(ctx context.Context, id types.ExecutionID, g *graph.Graph) error {
+	for _, idx := range g.SubWorkflowNodeIndexes() {
+		nodeName := g.NodeName(idx)
+		current, err := e.state.GetNode(ctx, id, nodeName)
+		if err != nil {
+			return fmt.Errorf("read parked sub-workflow node %q/%q for cancel: %w", id, nodeName, err)
+		}
+		if current == nil || current.Status != types.NodeStatusWaiting {
+			continue
+		}
+		cancelSnap := *current
+		cancelSnap.Status = types.NodeStatusCanceled
+		if err := e.state.UpsertNode(ctx, &cancelSnap); err != nil {
+			return fmt.Errorf("mark parked sub-workflow node %q/%q canceled: %w", id, nodeName, err)
+		}
+	}
+	return nil
 }

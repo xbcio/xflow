@@ -78,7 +78,8 @@ func (e *Engine) completeSubWorkflowNode(ctx context.Context, parentID types.Exe
 	if snap == nil || snap.Status == types.ExecutionStatusCanceling {
 		// Canceling: the cascade owns the node now, and a completion racing it
 		// must not decide the node's outcome from a child the cancel is about to
-		// kill. The cancel path finalizes the node itself.
+		// kill. The cancel path finalizes the node itself
+		// (finalizeParkedSubWorkflowNodes).
 		return false, nil
 	}
 	idx, ok := g.NodeIndex(nodeName)
