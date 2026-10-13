@@ -203,6 +203,20 @@ func compileSubWorkflowRefs(ctx context.Context, g *Graph, memo *subWorkflowReso
 			return fmt.Errorf("node %q: resolve sub-workflow %q: resolver returned neither a version nor a definition hash, "+
 				"so the reference would be pinned to whatever is current at dispatch", nd.Name, name)
 		}
+		// Two shapes a parent can never wait on. Both are checked on the DIRECT
+		// target only, and that is enough: a workflow that is itself FAF cannot
+		// contain a sub-workflow node at all (validateFAF rejects it), and a
+		// transient target would have failed its own registration had any of its
+		// own references been transient — so membership in the registry already
+		// proves the property inductively for everything further down.
+		if target.Graph.FAF() {
+			return fmt.Errorf("node %q: sub-workflow %q is a fire-and-forget workflow: it persists no state, "+
+				"so nothing could ever report the child's conclusion back to this node", nd.Name, name)
+		}
+		if target.Graph.Transient() {
+			return fmt.Errorf("node %q: sub-workflow %q is transient: its state expires on a TTL, "+
+				"so a wait on it could outlive the records that would resolve the wait", nd.Name, name)
+		}
 		if entry, _ := nd.Parameters["entry"].(string); entry != "" {
 			if _, ok := target.Graph.EntryIndex(entry); !ok {
 				return fmt.Errorf("node %q: sub-workflow %q has no entry node %q", nd.Name, name, entry)

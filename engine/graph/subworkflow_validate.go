@@ -37,6 +37,16 @@ func validateSubWorkflowParams(nd types.NodeDef) error {
 			}
 		}
 	}
+	// Same namespace is a hard boundary, and the reference syntax has no way to
+	// cross it: a resolver is bound to one namespace by its adapter. A
+	// parameters.namespace would therefore be ignored, and the author would get
+	// a same-namespace lookup that either misses (confusing) or silently names
+	// their own workflow's twin (worse). Reject the attempt instead.
+	if _, ok := nd.Parameters["namespace"]; ok {
+		return fmt.Errorf("node %q: %s does not support parameters.namespace: "+
+			"a sub-workflow reference is always resolved in the parent execution's namespace",
+			nd.Name, types.SubWorkflowNodeType)
+	}
 	// input and output are expression maps. A non-map (a bare template string
 	// is the tempting mistake) would be traversed by the engine's evaluation
 	// pass as an opaque value and land in the child's params, or in the node's

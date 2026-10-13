@@ -208,6 +208,55 @@ func TestCompileWithResolverPassesPinnedVersion(t *testing.T) {
 	}
 }
 
+// TestCompileWithResolverRejectsUnrunnableTargets pins the two target shapes a
+// parent may never wait on: fire-and-forget (nothing persisted to report a
+// conclusion through) and transient (the records that would resolve the wait
+// can expire out from under it).
+func TestCompileWithResolverRejectsUnrunnableTargets(t *testing.T) {
+	fafGraph, err := Compile(validFAFDef())
+	if err != nil {
+		t.Fatalf("compile faf fixture: %v", err)
+	}
+	if !fafGraph.FAF() {
+		t.Fatal("fixture: validFAFDef did not compile to a FAF graph")
+	}
+	transientGraph, err := Compile(&types.WorkflowDef{
+		Name:    "ephemeral",
+		Options: &types.WorkflowOptions{Transient: true},
+		Nodes:   []types.NodeDef{{Name: "work", Type: "xflow.noop"}},
+	})
+	if err != nil {
+		t.Fatalf("compile transient fixture: %v", err)
+	}
+	if !transientGraph.Transient() {
+		t.Fatal("fixture: the transient definition did not compile to a transient graph")
+	}
+
+	tests := []struct {
+		name    string
+		ref     string
+		graph   *Graph
+		wantErr string
+	}{
+		{"faf target", "faf", fafGraph, "fire-and-forget"},
+		{"transient target", "ephemeral", transientGraph, "transient"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := CompileWithResolver(context.Background(), subWorkflowRefDef("parent", tt.ref, ""),
+				&fakeSubWorkflowResolver{targets: map[string]SubWorkflowTarget{
+					tt.ref: {Version: "v1", DefinitionHash: "sha256:target", Graph: tt.graph},
+				}})
+			if err == nil {
+				t.Fatalf("a %s was accepted as a sub-workflow target", tt.name)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error %q does not contain %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestCompileTrustedRejectsSubWorkflowNode(t *testing.T) {
 	_, err := compileTrusted(&types.WorkflowDef{
 		Name: "pkg",

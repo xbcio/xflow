@@ -32,6 +32,7 @@ func TestCompileSubWorkflowParamShape(t *testing.T) {
 		{"non-string workflow", map[string]any{"workflow": 7}, "workflow"},
 		{"non-string version", map[string]any{"workflow": "other", "version": 1}, "version"},
 		{"non-string entry", map[string]any{"workflow": "other", "entry": true}, "entry"},
+		{"namespace param", map[string]any{"workflow": "other", "namespace": "tenant-b"}, "namespace"},
 		{"non-map input", map[string]any{"workflow": "other", "input": "${{ $params.x }}"}, "input"},
 		{"non-map output", map[string]any{"workflow": "other", "output": []any{"a"}}, "output"},
 		{
