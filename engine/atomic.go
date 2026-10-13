@@ -570,11 +570,9 @@ func (e *Engine) afterAtomicCommitWithFlush(ctx context.Context, req CommitNodeR
 		})
 	}
 	if result.ExecutionDone {
-		if e.hooks != nil {
-			safeHook(ctx, e.logger, func(hookCtx context.Context) {
-				e.hooks.OnExecutionComplete(hookCtx, req.ExecutionID, result.ExecutionStatus)
-			})
-		}
+		// Through the shared funnel rather than the hook directly: the funnel is
+		// also where a concluded CHILD execution notifies its parent's wait.
+		e.notifyExecutionComplete(ctx, req.ExecutionID, result.ExecutionStatus)
 		e.EvictExecution(req.ExecutionID)
 	}
 	if flush && (result.Outcome == CommitOutcomeAccepted || result.Outcome == CommitOutcomeDuplicateTerminal) {
