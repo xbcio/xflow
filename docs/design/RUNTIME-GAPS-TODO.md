@@ -51,8 +51,12 @@ Node Group 组级 `on_error`、gRPC `AckActivation`、G1 clean-SHA 重签 `c39a2
    （[DSL-SPECIFICATION.md](./DSL-SPECIFICATION.md) Supply 一节已标记「尚未实现，
    不要在 DSL 里使用」）。
 
-4. **子工作流复用（`xflow.subworkflow`）未实现。**
-   [DSL-SPECIFICATION.md](./DSL-SPECIFICATION.md) §6.4 标为「计划扩展，当前版本未实现」。
+4. **工作流级 `outputs:` 从未被求值。** `types.WorkflowDef.Outputs`
+   （`types/workflow.go:33`）只进定义哈希（`backend/workflowhash/workflowhash.go:90`）；
+   图 `Graph` 不携带它，全仓无求值/读取点（唯一相关的检查是 FAF 目标的编译拒绝）。
+   声明了 `outputs:` 的工作流编译、注册、执行照常成功，但这些输出从不产生——属
+   「接受字段但静默忽略」类；仓库对该类已有正确先例（`validateGroupRetry` 式编译
+   拒绝）。修法二选一：实现求值并把它落到执行结果/API 面，或编译期明确拒绝。
 
 ### P3 — 已知限制，记录在案
 
@@ -275,3 +279,28 @@ Node Group 组级 `on_error`、gRPC `AckActivation`、G1 clean-SHA 重签 `c39a2
   见 `5520a01`（2026-09-01），该 commit 在 clean 候选 `c39a271` 之内。出处文档已同步
   （2026-10-08）：[NODE-GROUP-COLOCATION.md](./NODE-GROUP-COLOCATION.md) §12.2 的
   单副本说明已改为已实现。
+
+- **子工作流复用（`xflow.subworkflow`）未实现**（原 P2-4）—— `880e8470`…`1fa5fe7a`
+  （2026-10-13，共 22 个 commit，含文档提交；连同本条移除提交）：节点 DSL（描述符 +
+  fail-closed 桩 handler）、编译期目标解析（版本 + 定义哈希钉住，`latest` 只在注册期
+  漂移一次）、静态环（按工作流名）/嵌套深度（默认 16）/FAF/transient/body/组内使用的
+  注册期拒绝、引擎自有任务类型（不下发 runner）、子执行独立占目标工作流的并发槽、
+  新增可选 store 能力 `SubWorkflowLinkStore`（`BeginSubWorkflowWait` +
+  `GetSubWorkflowLink`，local 与 rstate 双实现，无能力后端 fail closed）、以 generation
+  区分认领重派发与重试（重派发续等同一子执行，重试起新子）、子终态按原租约身份提交
+  父节点（迟到通知为 stale-token 拒绝）、级联取消（内联 + 重派发兜底）、SDK
+  local/cluster resolver 接线、下钻字段（`NodeDetail.child_execution_id`、
+  `ExecutionDetail.parent_node`，OpenAPI additive 并过 `make validate-openapi`）；
+  DSL-SPECIFICATION §6.4 与 STORAGE-CONTRACT 已同步。与设计的偏差：(i) 原设计的一处
+  事实错误——节点 timeout 监视器并不覆盖 parked wait（timeout ZSET 只由 suspend 路径
+  写），实现改为 `WaitDeadline` 跨重派发保留、到期取消子执行并按普通失败管道 fail
+  节点；(ii) 原设计设想的「子工作流声明了工作流级 `outputs:` 时注册期告警」不可实现
+  （resolved graph 不携带工作流级 outputs），告警承诺删除并入新登记条目 4；(iii) 实现
+  中发现并修复 reclaim 丢失 generation 的缺陷（重派发任务不带 generation，链接记录是
+  唯一来源）。验证：`go build ./...`、`make vet`、engine 与两个后端 + `sdk/xflow` 触及
+  包测试、engine/两后端 `-race`、`make validate-openapi`；新增 store 契约用例在 memory、
+  miniredis、真 Redis（6380）三档通过；`sdk/xflow` 端到端 local 与 cluster 双路径
+  （含 Inspect/Cancel/Rerun）。未验证：全量 `make test`（本机规矩不跑）、WASM 包（未
+  触及）。遗留：无「列出某执行的全部子执行」查询（设计已列为后续）；UI 按名搜索工作流
+  的 API 不存在，编辑器暂用纯文本名 + 版本输入；跨 namespace 引用明确拒绝；父执行暂停
+  不向子传播（设计决策）。
