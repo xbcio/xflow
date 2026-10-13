@@ -46,7 +46,21 @@ export interface CompileNodeFormOptions {
    * components.ts. A widget whose component is missing degrades (Doc C §3.2).
    */
   registeredTypes?: Iterable<string>;
+  /**
+   * Which part of the form to emit (the Inspector's 参数 / 设置 tabs).
+   * "settings" is the common schema's execution group (错误处理、超时、重试、
+   * Runner 选择); "parameters" is everything else: the other common groups,
+   * the notices, the type schema and its root checks. Every path lands in
+   * exactly one of the two, so one writer per path holds across tabs.
+   * Defaults to "all".
+   */
+  section?: NodeFormSection;
 }
+
+export type NodeFormSection = "all" | "parameters" | "settings";
+
+/** Common-schema groups shown under the "settings" section. */
+const SETTINGS_GROUPS: ReadonlySet<string> = new Set(["execution"]);
 
 export interface CompiledNodeForm {
   spec: ComposerSpec;
@@ -499,6 +513,22 @@ class Compiler {
         checks.push({ type: "expressionOnly", args: wrapped, message: compiled.message, severity: "warning" });
       }
     }
+    // Item rules apply to every set, template-free element (Go
+    // paramValidator.value recursing into Item); elements are never required.
+    if (type === "array" && field.item) {
+      const itemType = normalizeType(field.item.type, () => undefined);
+      for (const rule of field.item.rules ?? []) {
+        if (rule.type === "required") continue;
+        const compiled = compileRule(rule, itemType, warn);
+        if (!compiled) continue;
+        checks.push({
+          type: "eachItem",
+          args: { check: compiled.type, args: compiled.args ?? {} },
+          message: compiled.message,
+          ...(compiled.severity && { severity: compiled.severity })
+        });
+      }
+    }
     return checks;
   }
 
@@ -587,7 +617,15 @@ class Compiler {
         element.repeat = { statePath: scope.kind === "absolute" ? fieldPointer(field, scope) : { $item: rowField(scope, field.name) } };
         const parentSegs = scope.kind === "absolute" ? pointerSegments(fieldPointer(field, scope)) : [...scope.segs, field.name];
         const row: Scope = { kind: "row", prefix: "", segs: [...parentSegs, "*"], idBase: `${idBase}[]` };
-        element.children = sortFields(fields).flatMap((sub) => this.field(sub, row, target));
+        // Row cells hide their labels, so the headers name the columns; a
+        // statically hidden sub-field has no cell and no column.
+        const columns: string[] = [];
+        element.children = sortFields(fields).flatMap((sub) => {
+          const ids = this.field(sub, row, target);
+          if (ids.length > 0) columns.push(sub.label || humanize(sub.name));
+          return ids;
+        });
+        props.columns = columns;
         break;
       }
       default:
@@ -637,8 +675,16 @@ class Compiler {
     return out;
   }
 
-  /** Compiles a schema's fields into FieldGroup elements; returns their ids. */
-  groups(schema: NodeFormSchema, prefix: string, implicitTitle: string): { ids: string[]; hidden: Set<string> } {
+  /**
+   * Compiles a schema's fields into FieldGroup elements; returns their ids.
+   * `include` filters by group key ("" is the implicit default group).
+   */
+  groups(
+    schema: NodeFormSchema,
+    prefix: string,
+    implicitTitle: string,
+    include: (key: string) => boolean = () => true
+  ): { ids: string[]; hidden: Set<string> } {
     const target: Target = { kind: schema.kind, nodeType: schema.node_type, ports: portsFor(schema) };
     const declared = schema.groups ?? [];
     const known = new Set(declared.map((group) => group.key));
@@ -655,6 +701,7 @@ class Compiler {
     const hidden = new Set<string>();
     const ids: string[] = [];
     const emit = (key: string, title: string, fields: NodeFormField[], extra: { description?: string; collapsed?: boolean }) => {
+      if (!include(key)) return;
       const children: string[] = [];
       for (const field of sortFields(fields)) {
         const fieldScope: Scope = field.path.startsWith("/parameters/") ? scope : { kind: "absolute", base: "", segs: [], idBase: "f" };
@@ -773,14 +820,20 @@ function compileRule(rule: FieldRule, _type: FieldType, warn: (message: string) 
         }[rule.type];
       break;
     }
-    case "pattern":
+    case "pattern": {
       if (typeof rule.pattern !== "string") {
         warn("pattern rule without a pattern; skipped");
         return undefined;
       }
-      args = { pattern: rule.pattern };
+      const translated = toJsPattern(rule.pattern);
+      if (typeof translated === "string") {
+        warn(`pattern ${JSON.stringify(rule.pattern)} ${translated}; skipped`);
+        return undefined;
+      }
+      args = { pattern: translated.source, ...(translated.flags && { flags: translated.flags }) };
       message = `需要匹配 ${rule.pattern}`;
       break;
+    }
     case "format": {
       const format = rule.format ?? "";
       if (ADVISORY_FORMATS.has(format)) advisory = true;
@@ -809,6 +862,29 @@ function compileRule(rule: FieldRule, _type: FieldType, warn: (message: string) 
   };
 }
 
+/**
+ * Rewrites an RE2 pattern (Go Constraints.Pattern) for JS RegExp: a leading
+ * inline flag group `(?ims)` becomes RegExp flags. Returns a reason string
+ * when the result still does not compile in JS (e.g. `(?U)`, mid-pattern
+ * flags), so the rule is dropped instead of breaking the field.
+ */
+function toJsPattern(pattern: string): { source: string; flags: string } | string {
+  let source = pattern;
+  let flags = "";
+  const leading = /^\(\?([a-zA-Z]+)\)/.exec(pattern);
+  if (leading) {
+    if (!/^[ims]+$/.test(leading[1])) return `uses RE2 flags (?${leading[1]}) JavaScript lacks`;
+    source = pattern.slice(leading[0].length);
+    flags = [...new Set(leading[1])].sort().join("");
+  }
+  try {
+    new RegExp(source, flags);
+  } catch {
+    return "is not a valid JavaScript regular expression";
+  }
+  return { source, flags };
+}
+
 function oneOfMessage(labels: string[], mode: string): string {
   const list = labels.join("、");
   if (mode === "at_most") return `${list} 最多只能设置一个`;
@@ -824,11 +900,14 @@ export function compileNodeForm(schema: NodeFormSchema | null | undefined, optio
   const registered = new Set<string>(options.registeredTypes ?? NODE_FORM_COMPONENT_TYPES);
   const compiler = new Compiler(registered);
   if (!registered.has("Form") || !registered.has("FieldGroup")) compiler.warn("Form / FieldGroup are not registered");
+  const section = options.section ?? "all";
+  // The notices and the type schema belong to the parameters section.
+  const withType = section !== "settings";
   const children: string[] = [];
 
-  if (!schema) {
+  if (withType && !schema) {
     if (registered.has("FormNotice")) children.push(compiler.notice("unregistered-type", "warning", MSG.unregistered));
-  } else {
+  } else if (withType && schema) {
     if (schema.spec !== "node-form/v1") compiler.warn(`${schema.node_type}: unexpected schema spec ${JSON.stringify(schema.spec)}`);
     if (options.hasTemplate && registered.has("FormNotice")) children.push(compiler.notice("node-template", "warning", MSG.template));
     if (isPlainObject(options.parameters) && registered.has("FormNotice")) {
@@ -841,10 +920,13 @@ export function compileNodeForm(schema: NodeFormSchema | null | undefined, optio
   }
 
   const common = options.common === undefined ? commonSchema : options.common;
-  if (common) children.push(...compiler.groups(common, "common", "通用").ids);
+  if (common) {
+    const include = section === "all" ? undefined : (key: string) => SETTINGS_GROUPS.has(key) === (section === "settings");
+    children.push(...compiler.groups(common, "common", "通用", include).ids);
+  }
 
   const rootChecks: CheckDef[] = [];
-  if (schema) {
+  if (schema && withType) {
     const { ids, hidden } = compiler.groups(schema, "type", "参数");
     children.push(...ids);
     for (const group of schema.one_of ?? []) {
@@ -868,7 +950,7 @@ export function compileNodeForm(schema: NodeFormSchema | null | undefined, optio
     }
   }
 
-  const root: ElementDef = { type: "Form", props: { layout: "vertical" }, children };
+  const root: ElementDef = { type: "Form", props: { layout: "vertical", descriptionPlacement: "tooltip" }, children };
   if (rootChecks.length > 0) root.checks = rootChecks;
   const elements = { [ROOT_ID]: root, ...compiler.elements };
   return { spec: { spec: "composer/v1", minor: 0, root: ROOT_ID, elements }, warnings: compiler.warnings };

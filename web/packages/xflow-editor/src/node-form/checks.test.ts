@@ -1,6 +1,7 @@
 import { createCheckRegistry } from "@xflow/composer/core";
 import { describe, expect, it } from "vitest";
 import {
+  eachItemCheck,
   expressionOnlyCheck,
   literalOnlyCheck,
   looksLikeSecret,
@@ -16,7 +17,7 @@ const pattern = { check: "pattern", args: { pattern: "^[a-z]+$" } };
 describe("node-form checks", () => {
   it("registers alongside the composer builtins", () => {
     const registry = createCheckRegistry(nodeFormChecks);
-    for (const type of ["literalOnly", "expressionOnly", "noTemplateInCode", "notEvaluated", "secretLike", "required"]) {
+    for (const type of ["literalOnly", "expressionOnly", "eachItem", "noTemplateInCode", "notEvaluated", "secretLike", "required"]) {
       expect(registry.has(type)).toBe(true);
     }
   });
@@ -35,6 +36,17 @@ describe("node-form checks", () => {
     expect(literalOnlyCheck.validateArgs?.({ check: "required" })).toHaveLength(1);
     expect(literalOnlyCheck.validateArgs?.({ check: "pattern", args: { pattern: "(" } })).toHaveLength(1);
     expect(literalOnlyCheck.validateArgs?.({ check: "min", args: { value: 1 }, extra: true })).toHaveLength(1);
+  });
+
+  it("eachItem runs the wrapped rule per set, template-free element at the element pointer", () => {
+    const at = { ...ctx, path: "/parameters/tags" };
+    expect(eachItemCheck.fn(["abc", "ABC", null, "${{ $vars.x }}", "X"], pattern, at)).toEqual([
+      { path: "/parameters/tags/1", detail: "第 2 项" },
+      { path: "/parameters/tags/4", detail: "第 5 项" }
+    ]);
+    expect(eachItemCheck.fn("not a list", pattern, at)).toEqual([]);
+    expect(eachItemCheck.validateArgs?.({ check: "required" })).toHaveLength(1);
+    expect(eachItemCheck.validateArgs?.(pattern)).toEqual([]);
   });
 
   it("template detectors flag any ${{ }} / {{ }}", () => {

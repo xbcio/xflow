@@ -25,7 +25,7 @@ import {
 import type { Registry } from "@xflow/composer/react";
 import type { ParamIssue, WorkflowDef, WorkflowNode } from "@xflow/core";
 import { commonSchema } from "./commonSchema";
-import { compileNodeForm } from "./compile";
+import { compileNodeForm, type NodeFormSection } from "./compile";
 import type { PortItem } from "./components";
 import { isExpressionString } from "./components/shared";
 import type { Condition, EnumOption, NodeFormField, NodeFormSchema, NodeTypesResponse } from "./schema";
@@ -259,6 +259,8 @@ export interface NodeFormFlags {
    * on the server", so that notice is left out; the editor shows its own.
    */
   schemasLoaded?: boolean;
+  /** Part of the form to compile (compileNodeForm `section`); default "all". */
+  section?: NodeFormSection;
 }
 
 function undeclaredKey(schema: NodeFormSchema | null, parameters: unknown): string {
@@ -273,10 +275,10 @@ function undeclaredKey(schema: NodeFormSchema | null, parameters: unknown): stri
 const NO_SCHEMA = { node_type: "$none" } as unknown as NodeFormSchema;
 
 /**
- * compileNodeForm memoised per (schema object, hasTemplate, undeclared-param
- * key set): the compiled Spec keeps its identity while the user types, so
- * <Composer> never re-analyses the spec per keystroke. `parameters` only
- * feeds the undeclared-params notice (Doc C §3.2).
+ * compileNodeForm memoised per (schema object, section, hasTemplate,
+ * undeclared-param key set): the compiled Spec keeps its identity while the
+ * user types, so <Composer> never re-analyses the spec per keystroke.
+ * `parameters` only feeds the undeclared-params notice (Doc C §3.2).
  */
 export class NodeFormCompiler {
   private readonly cache = new WeakMap<NodeFormSchema, Map<string, ComposerSpec>>();
@@ -288,7 +290,8 @@ export class NodeFormCompiler {
 
   spec(schema: NodeFormSchema | null, flags: NodeFormFlags): ComposerSpec {
     const unknownSchemas = !schema && flags.schemasLoaded === false;
-    const key = `${flags.hasTemplate ? 1 : 0}|${unknownSchemas ? 1 : 0}|${undeclaredKey(schema, flags.parameters)}`;
+    const section = flags.section ?? "all";
+    const key = `${section}|${flags.hasTemplate ? 1 : 0}|${unknownSchemas ? 1 : 0}|${undeclaredKey(schema, flags.parameters)}`;
     const holder = schema ?? NO_SCHEMA;
     let byFlags = this.cache.get(holder);
     if (!byFlags) {
@@ -301,7 +304,8 @@ export class NodeFormCompiler {
         common: commonSchema,
         parameters: flags.parameters,
         hasTemplate: flags.hasTemplate,
-        registeredTypes: this.registeredTypes
+        registeredTypes: this.registeredTypes,
+        section
       }).spec;
       if (unknownSchemas) spec = withoutNotice(spec, "unregistered-type");
       byFlags.set(key, spec);

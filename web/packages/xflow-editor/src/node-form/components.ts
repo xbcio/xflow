@@ -75,7 +75,7 @@ interface ValueProps {
 
 export interface NodeFormComponentProps {
   // ------------------------------------------------ engine (composer/form, B4)
-  Form: { layout?: "vertical" | "horizontal"; labelWidth?: number; title?: string };
+  Form: { layout?: "vertical" | "horizontal"; labelWidth?: number; descriptionPlacement?: "below" | "tooltip"; title?: string };
   FieldGroup: { title?: string; description?: string; collapsible?: boolean; defaultCollapsed?: boolean };
   Input: FieldChrome & ValueProps & { placeholder?: string };
   /** Also the `base64` widget when Base64Input is not registered (see compile.ts). */

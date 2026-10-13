@@ -45,6 +45,29 @@ export const expressionOnlyCheck = defineCheck(
 
 const noArgs = (args: Record<string, unknown>) => Object.keys(args).map((key) => `unexpected args.${key}`);
 
+/**
+ * NodeFormItem.rules: runs the builtin named by `args.check` on every set,
+ * template-free array element, as Go paramValidator.value does for Item.
+ * Issues land on the element pointer (`<path>/<index>`), like the backend's.
+ */
+export const eachItemCheck = defineCheck(
+  "eachItem",
+  (value, args, ctx) => {
+    if (!Array.isArray(value)) return [];
+    const def = builtinByType.get(args.check as string);
+    if (!def) return [];
+    const inner = innerArgs(args);
+    const issues: { path?: string; detail: string }[] = [];
+    value.forEach((item, index) => {
+      if (item === undefined || item === null || containsExpression(item)) return;
+      if (def.fn(item, inner, ctx).length === 0) return;
+      issues.push({ ...(ctx.path !== undefined && { path: `${ctx.path}/${index}` }), detail: `第 ${index + 1} 项` });
+    });
+    return issues;
+  },
+  { validateArgs: validateWrapped }
+);
+
 /** `literal` mode (host source, e.g. script.code): `${{ }}` in code is not rendered (Doc C §4.1). */
 export const noTemplateInCodeCheck = defineCheck(
   "noTemplateInCode",
@@ -90,6 +113,7 @@ export const secretLikeCheck = defineCheck(
 export const nodeFormChecks: readonly CheckDefinition[] = [
   literalOnlyCheck,
   expressionOnlyCheck,
+  eachItemCheck,
   noTemplateInCodeCheck,
   notEvaluatedCheck,
   secretLikeCheck
