@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/backend"
+	enginecore "github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node"
@@ -30,7 +31,11 @@ import (
 //     fails closed (backend.ErrWorkflowVersionUnavailable) instead of running
 //     under another version's label;
 //   - a registry with no version history refuses a pin rather than silently
-//     running the current version.
+//     running the current version;
+//   - a pin and an idempotency key compose: the key's fingerprint comes from
+//     the version the call resolved, so a pinned retry after an intervening
+//     publish is answered as a duplicate while an unpinned one is refused as
+//     engine.ErrIdempotencyConflict.
 
 // pinVersionWorkflow builds the two-version shape the tests below publish:
 // same name, different version and a differently named work node, so the node
@@ -254,6 +259,102 @@ func TestInvokeWithWorkflowVersionFailsClosedOnDrift(t *testing.T) {
 // wrapper does not satisfy backend.WorkflowVersionCapability even though the
 // registry behind it does.
 type versionlessRegistry struct{ backend.WorkflowRegistry }
+
+// TestInvokeWorkflowVersionIdempotencyReplay pins the user-visible contract of
+// a pinned version composed with an idempotency key (versioning design §5): the
+// key is scoped to the workflow — never to a version, so a retry after an
+// upgrade still finds its original execution — while the request's fingerprint
+// includes the version the call RESOLVED, so the same key against a moved live
+// record is a conflict rather than a silent duplicate of other work.
+//
+// Phase A (pinned): a keyed call pinned to v1 creates an execution; v2 is then
+// published; the retry, still pinned to v1, resolves the same archived version
+// and is answered with the original execution. Phase B (unpinned): a keyed call
+// runs the live v2; v3 is published; the retry now resolves v3, whose
+// fingerprint differs, and is refused with engine.ErrIdempotencyConflict —
+// while a pinned retry to v2 recovers the original execution, which is the
+// whole point of having the version in the fingerprint and not in the scope.
+func TestInvokeWorkflowVersionIdempotencyReplay(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	eng, err := NewLocal()
+	if err != nil {
+		t.Fatalf("NewLocal: %v", err)
+	}
+	defer eng.Stop()
+
+	id, err := eng.AddWorkflow(ctx, pinVersionWorkflow("sdk-pin-replay", "v1", "only-v1"))
+	if err != nil {
+		t.Fatalf("AddWorkflow: %v", err)
+	}
+
+	// Phase A: the pinned retry survives an intervening publish.
+	first, err := eng.Invoke(ctx, id, Start(), nil, WithWorkflowVersion("v1"), WithIdempotencyKey("replay-pinned"))
+	if err != nil {
+		t.Fatalf("first pinned keyed Invoke: %v", err)
+	}
+	if _, err := eng.Wait(ctx, first); err != nil {
+		t.Fatalf("Wait(%q): %v", first, err)
+	}
+	if got := executedGraph(t, ctx, eng, first).WorkflowVersion(); got != "v1" {
+		t.Fatalf("first execution graph version = %q, want v1", got)
+	}
+
+	publishWorkflowVersion(t, ctx, eng.workflowRegistry, id, pinVersionWorkflow("sdk-pin-replay", "v2", "only-v2"))
+
+	replay, err := eng.Invoke(ctx, id, Start(), nil, WithWorkflowVersion("v1"), WithIdempotencyKey("replay-pinned"))
+	if err != nil {
+		t.Fatalf("pinned replay after the publish: %v, want the duplicate answer", err)
+	}
+	if replay != first {
+		t.Fatalf("pinned replay returned %q, want the original %q", replay, first)
+	}
+	if got := executedGraph(t, ctx, eng, replay).WorkflowVersion(); got != "v1" {
+		t.Fatalf("after the replay the execution graph version = %q, want v1", got)
+	}
+
+	// Phase B: unpinned, the retry resolves the new live version and conflicts.
+	second, err := eng.Invoke(ctx, id, Start(), nil, WithIdempotencyKey("replay-unpinned"))
+	if err != nil {
+		t.Fatalf("first unpinned keyed Invoke: %v", err)
+	}
+	if _, err := eng.Wait(ctx, second); err != nil {
+		t.Fatalf("Wait(%q): %v", second, err)
+	}
+	if got := executedGraph(t, ctx, eng, second).WorkflowVersion(); got != "v2" {
+		t.Fatalf("second execution graph version = %q, want v2", got)
+	}
+	if second == first {
+		t.Fatal("a different key returned the other key's execution")
+	}
+
+	publishWorkflowVersion(t, ctx, eng.workflowRegistry, id, pinVersionWorkflow("sdk-pin-replay", "v3", "only-v3"))
+
+	if _, err := eng.Invoke(ctx, id, Start(), nil, WithIdempotencyKey("replay-unpinned")); !errors.Is(err, enginecore.ErrIdempotencyConflict) {
+		t.Fatalf("unpinned replay after the publish error = %v, want engine.ErrIdempotencyConflict", err)
+	}
+
+	// The version lives in the fingerprint, not in the key scope: pinning the
+	// version the keyed execution ran recovers that execution.
+	recovered, err := eng.Invoke(ctx, id, Start(), nil, WithWorkflowVersion("v2"), WithIdempotencyKey("replay-unpinned"))
+	if err != nil {
+		t.Fatalf("pinned replay to the keyed execution's version: %v", err)
+	}
+	if recovered != second {
+		t.Fatalf("pinned replay returned %q, want the keyed execution %q", recovered, second)
+	}
+
+	// The workflow is not wedged by the conflict: a fresh key runs the new live
+	// version.
+	third, err := eng.Invoke(ctx, id, Start(), nil, WithIdempotencyKey("replay-v3"))
+	if err != nil {
+		t.Fatalf("fresh keyed Invoke on the new version: %v", err)
+	}
+	if got := executedGraph(t, ctx, eng, third).WorkflowVersion(); got != "v3" {
+		t.Fatalf("third execution graph version = %q, want v3", got)
+	}
+}
 
 // TestInvokeWithWorkflowVersionRequiresHistoryCapability pins the fail-closed
 // answer for a registry that serves no history: a pin must be refused, because
