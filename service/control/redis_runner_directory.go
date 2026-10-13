@@ -975,26 +975,37 @@ func (d *RedisRunnerDirectory) walkClaimTarget(
 			if err != nil {
 				return claimTargetWalk{}, err
 			}
-			if len(matured) == 0 {
-				// Nothing has matured yet. Do NOT advance past this page: the
-				// entries on it become claimable the moment their window
-				// elapses, and stepping the cursor forward would strand them
-				// behind every entry queued after them until the sweep wraps.
-				// Re-reading this page per poll is the cost of that, and it is
-				// what the short cadence is for.
-				for range pendingGrace {
-					d.observeSelectorReject(ctx, SelectorRejectLabelPending)
-				}
-				return claimTargetWalk{pending: true, roundTrips: trips}, nil
+			// Every entry still inside its window — or carrying no stamp to
+			// measure, which stays pending by contract (see
+			// matureGraceCandidates) — is one label_pending rejection, whether or
+			// not a sibling on the same page matured: the matured ones are
+			// attempted below, and hiding the rest until the whole page matured
+			// undercounted exactly the state this counter exists to surface.
+			for range pendingGrace {
+				d.observeSelectorReject(ctx, SelectorRejectLabelPending)
 			}
-			candidates = matured
-			assignments = maturedAssignments(matured)
-			// graceFallback marks that the candidate set below comes from the
-			// default-mode grace relaxation rather than a label match. Only the
-			// successful claim of such a candidate emits the fallback log line: a
-			// candidate that loses its claim race (or whose execution is gone)
-			// must not be reported as a placement that happened.
-			graceFallback = true
+			if len(matured) > 0 {
+				candidates = matured
+				assignments = maturedAssignments(matured)
+				// graceFallback marks that the candidate set below comes from the
+				// default-mode grace relaxation rather than a label match. Only the
+				// successful claim of such a candidate emits the fallback log line: a
+				// candidate that loses its claim race (or whose execution is gone)
+				// must not be reported as a placement that happened.
+				graceFallback = true
+			}
+			// len(matured) == 0 falls through with no candidates, exactly as a page
+			// holding nothing claimable does: the shared footer below advances the
+			// cursor and either scans on or wraps to the head. That is the grace
+			// rule the design pins — the verdict is taken after candidate
+			// collection, before the return, and it leaves the walk's cursor and
+			// budget semantics untouched. Holding the cursor here instead pinned
+			// every poll to this page: an immature page head blocked every
+			// claimable entry queued behind it for as long as its window ran, and
+			// an unstamped entry, which never matures, pinned it without bound.
+			// The advance strands nothing — the footer's wrap revisits this page
+			// once the sweep comes around, and a stamped entry matures on the
+			// wall-clock schedule its stamp already fixed.
 		}
 
 		stopped := false
