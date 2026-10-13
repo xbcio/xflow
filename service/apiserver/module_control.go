@@ -480,6 +480,19 @@ type executeRegisteredRequest struct {
 	Input  map[string]any `json:"input,omitempty"`
 	Params map[string]any `json:"params,omitempty"`
 	Test   bool           `json:"test,omitempty"`
+	// Version selects which version of the ADDRESSED workflow to run
+	// (versioning design §2.3). It is a body field rather than a query
+	// parameter or header because it belongs with entry/params/test — "what to
+	// run this time" — and the idempotency fingerprint already covers the body
+	// plus the resolved graph version.
+	//
+	// Omitted or equal to the current version runs the live record, i.e. the
+	// behavior this route had before versions existed. A retired version runs
+	// from the graph snapshot captured when it was retired, never a recompile.
+	// The NAME is always the path record's: (namespace, rec.Name, version), so
+	// a version string can never redirect the call to another workflow, and an
+	// unknown version is 404 workflow_version_not_found.
+	Version string `json:"version,omitempty"`
 }
 
 type signalRequest struct {
@@ -671,6 +684,15 @@ var errWorkflowIDMismatch = errors.New("workflow id does not match path")
 // 500 rather than serving an empty history, which would read as "this workflow
 // has no retired versions" — a different and false statement.
 var errWorkflowVersionsUnsupported = errors.New("workflow registry does not support version history")
+
+// errWorkflowVersionUnavailable means an archived version's payload no longer
+// reproduces under the current compiler: recomputing the runtime hash from the
+// stored definition does not yield the hash the version was published with.
+// The version label is immutable, so installing or running "the same version"
+// with different semantics would silently break every pinned replay and
+// subworkflow reference that names it. Callers fail closed (409
+// workflow_version_unavailable) instead.
+var errWorkflowVersionUnavailable = errors.New("workflow version is not reproducible under the current compiler")
 
 var errFAFWorkflowRegistration = errors.New("workflow registration does not support options.faf")
 
@@ -1544,6 +1566,46 @@ func (m *workflowControlModule) getWorkflowVersion(ctx context.Context, ns names
 	return versions.GetWorkflowVersion(ctx, id, version)
 }
 
+// archivedWorkflowVersion resolves a retired version of the workflow addressed
+// by id, verified against the current compiler before any caller acts on it: it
+// recomputes the runtime hash from the stored definition and requires it to
+// equal the hash the version was published with (versioning design Q10).
+//
+// A version label is immutable, so a mismatch means hashing or compilation
+// semantics have drifted since the version was published — the archived
+// payload would execute as the same label with different semantics. That is
+// exactly what the label promises will not happen, so both consumers of this
+// helper (execute-by-version and rollback) fail closed with
+// errWorkflowVersionUnavailable rather than silently install or run a
+// divergent definition.
+//
+// Execution then proceeds from the archived graph snapshot (rec.Graph) as
+// captured at retirement; the payload is never recompiled.
+func (m *workflowControlModule) archivedWorkflowVersion(ctx context.Context, ns namespace.Namespace, id types.WorkflowID, version string) (backend.WorkflowRecord, error) {
+	rec, err := m.getWorkflowVersion(ctx, ns, id, version)
+	if err != nil {
+		return backend.WorkflowRecord{}, err
+	}
+	hash, err := workflowhash.Runtime(rec.Definition, hashParamSpecs)
+	if err != nil {
+		// A definition the current compiler cannot even hash cannot be
+		// confirmed as the published one; that is the same fail-closed answer.
+		if m.log != nil {
+			m.log.Error("archived_workflow_version_hash_failed", "workflow_id", string(id), "version", version, "err", err)
+		}
+		return backend.WorkflowRecord{}, fmt.Errorf("%w: version %q: %v", errWorkflowVersionUnavailable, version, err)
+	}
+	if hash != rec.DefinitionHash {
+		if m.log != nil {
+			m.log.Error("archived_workflow_version_hash_drift",
+				"workflow_id", string(id), "version", version,
+				"stored_hash", rec.DefinitionHash, "current_hash", hash)
+		}
+		return backend.WorkflowRecord{}, fmt.Errorf("%w: version %q", errWorkflowVersionUnavailable, version)
+	}
+	return rec, nil
+}
+
 // handleGetWorkflowVersion serves GET /v1/workflows/{id}/versions/{version}
 // (versioning design §2.2): one version's full record, in the same wire shape
 // as GET /v1/workflows/{id} — this is where the definition the version list
@@ -1682,6 +1744,32 @@ func (m *workflowControlModule) handleExecuteWorkflowByID(w http.ResponseWriter,
 	if rec.Namespace != "" && ns != "" && rec.Namespace != string(ns) {
 		writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
 		return
+	}
+	// An archived version runs from its history payload instead of the live
+	// record (versioning design §2.3). req.Version empty or equal to the
+	// current version keeps the live record above — byte-for-byte the behavior
+	// this route had before versions existed — and only a version the live
+	// record does not carry reaches the history lookup, whose failure codes the
+	// switch maps. The model name in every branch is rec.Name's, never the
+	// body's, so the version field cannot point the call at another workflow.
+	if req.Version != "" && req.Version != rec.Version {
+		rec, err = m.archivedWorkflowVersion(r.Context(), ns, id, req.Version)
+		if err != nil {
+			switch {
+			case errors.Is(err, backend.ErrWorkflowNotFound):
+				writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
+			case errors.Is(err, backend.ErrWorkflowVersionNotFound):
+				writeFail(w, r, http.StatusNotFound, "workflow_version_not_found", "workflow version not found")
+			case errors.Is(err, errWorkflowVersionUnavailable):
+				writeFail(w, r, http.StatusConflict, "workflow_version_unavailable", "workflow version is not reproducible under the current compiler")
+			default:
+				if m.log != nil {
+					m.log.Error("execute_workflow_version_failed", "workflow_id", string(id), "version", req.Version, "err", err)
+				}
+				writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+			}
+			return
+		}
 	}
 	// Attach the stored definition so the durable SQL execution projection can
 	// persist workflow_def (NOT NULL) — mirroring the inline-execute path.
