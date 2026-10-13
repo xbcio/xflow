@@ -682,10 +682,18 @@ func (e *RemoteError) Error() string {
 }
 
 // Retryable reports whether the failure is the server's own state rather than
-// this request's content: a 5xx. A 429 is deliberately NOT included — the
-// server sent a Retry-After with it because retrying it is a decision about
-// WHEN, and the caller is the only side that knows whether it can wait.
-func (e *RemoteError) Retryable() bool { return e.Status >= http.StatusInternalServerError }
+// this request's content: a 5xx, except 501.
+//
+// 501 is a capability answer, not a state: a deployment that does not
+// implement a control answers execution_control_unsupported /
+// execution_rerun_unsupported the same way however often it is asked, so a
+// caller looping on Retryable must not include it. A 429 is excluded too, but
+// for the opposite reason: the server sent a Retry-After with it because
+// retrying is a decision about WHEN, and the caller is the only side that
+// knows whether it can wait.
+func (e *RemoteError) Retryable() bool {
+	return e.Status >= http.StatusInternalServerError && e.Status != http.StatusNotImplemented
+}
 
 // Is maps the failure onto the SDK's sentinels by the server's stable code
 // (and, for authentication, the status — the 401/403 codes differ across the
