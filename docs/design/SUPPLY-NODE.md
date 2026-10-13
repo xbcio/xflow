@@ -154,13 +154,18 @@ this property):
 
 The design has two structurally different halves, joined by one storage type.
 
-- **Collection** — getting content *into* the platform. Today this is push
-  mode only: an embedder writes through the in-process SDK call
-  (`sdk/xflow.Server.UpdateSupply` / `UpdateSupplyIfMatch`, which reaches
-  `Supplies.PutSupply`); the HTTP write verb (`PUT /v1/supplies/{name}`) is
-  sealed (spec appendix Z.5) — `service/apiserver/module_supply.go` serves GET
-  only now. Or the content is literal bytes in a
-  `xflow.supply.static` node. There is no runtime pull loop yet (see §9).
+- **Collection** — getting content *into* the platform. Push mode: an embedder
+  writes through the in-process SDK call (`sdk/xflow.Server.UpdateSupply` /
+  `UpdateSupplyIfMatch`, which reaches `Supplies.PutSupply`); the HTTP write
+  verb (`PUT /v1/supplies/{name}`) is sealed (spec appendix Z.5) —
+  `service/apiserver/module_supply.go` serves GET only now. Or the content is
+  literal bytes in a `xflow.supply.static` node. Runner-side pull mode: an
+  `xflow.supply.http` node declares an HTTPS URL, and the runner holding the
+  entry unit fetches it (`PullSupplyFetcher`, `service/runner/supply_pull.go`)
+  straight into its local registry — no store record is written and no
+  `SupplyResource` handoff happens on that path; the URL, the runner's network
+  position, and its credentials never leave the runner process (see (e) below
+  for the costs this knowingly accepts).
   Activation-time collection at the runner — fetching content this runner
   does not yet have — happens through `SupplyGate.Admit`
   (`service/runner/supply_gate.go`, `Admit` method), which is exclusive per entry unit:
@@ -608,9 +613,27 @@ retention runs out. This is a genuine trade-off this design makes, not an
 oversight: declining immediately is strictly safer than serving wrong data
 (see §6's discussion of the removed `default:` tier), but it is not free.
 
-(a) 已关闭（`fix/activation-ack-retry`）。(b)–(d) 仍是 knowingly accepted 的代价，
-不是 blocking defect。未来关闭其中任何一项（`.http` pull-mode collector、gRPC
-proto 更新、cross-runner swap barrier）必须更新本节，不是在旁边加新一节。
+**(e) Pull-mode content never exists in the store — only in each runner's
+memory.** An `xflow.supply.http` node is fetched by the runner that holds the
+entry unit (`PullSupplyFetcher`, `service/runner/supply_pull.go`), over HTTPS,
+with that runner's network position and credentials; the content lands in the
+in-process registry and nothing is written back. Three consequences, all
+knowingly accepted. The at-rest encryption of §10 does not apply: there is no
+`content` column on this path, and the point of runner-side pull is precisely
+that the content and the source URL never reach the control plane. There is no
+`SupplyResource.Revision`, so the registry records revision 0 for it —
+`config_generation` on produced results and `$supplies.<name>.$revision` are
+therefore 0, and a downstream grouping on `config_generation` cannot separate
+versions of pulled content the way (c) promises for store-backed supplies.
+And because every runner pulls for itself, cross-runner swap skew is bounded
+per runner by its own poll cadence (default 60s, `poll_interval` can only
+shorten it, floor 10s) rather than by one hint broadcast. What (b) says about
+the notification channel not being the only channel still holds — for pull,
+the TTL poll is the only channel: a source that changes and then goes down
+serves last-good content until it recovers.
+
+(a) 已关闭（`fix/activation-ack-retry`）。(b)、(c)、(d)、(e) 仍是 knowingly accepted 的代价，
+不是 blocking defect。未来关闭其中任何一项（gRPC proto 更新、cross-runner swap barrier）必须更新本节，不是在旁边加新一节。
 
 ## 10. Supply 内容加密
 
@@ -654,6 +677,13 @@ consumer 侧「hash 未变不重建」同时失效。守护测试见
 `xflow.WithServerProduction(apiserver.ProductionDeclaration{SupplyEncryptionAtRest: ...})`
 声明 store 构造时是否带了静态加密。`store.Store` 接口不暴露这件事，所以只能由
 构造它的那一方来说。
+
+**pull 模式（`xflow.supply.http`）不经过这一层。** 它的内容由 runner 直接拉进
+本进程内存（§3、(e)），既不写 `content` 列，at-rest 加密与传输 key 对它都不适用
+——这是选择 runner 侧拉取必须接受的交换。生产姿态检查
+（`service/apiserver/production.go` 的 `supply-encryption-at-rest`）覆盖的是落库
+路径；一份既可能是规则、也可能是凭据的 pull 内容只存在于 runner 进程里，其保护
+手段是该 runner 的进程环境本身。
 
 ### 10.1 传输 key 轮换
 

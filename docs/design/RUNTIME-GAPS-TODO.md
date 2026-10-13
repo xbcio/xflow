@@ -25,6 +25,9 @@ Node Group 组级 `on_error`、gRPC `AckActivation`、G1 clean-SHA 重签 `c39a2
 未验证：真实 Redis（8 个 RealRedis 用例环境门控 SKIP）与成本实测（仅结构性证据）——
 与全文件口径一致。
 
+2026-10-13：pull 模式的 `xflow.supply.http` 落地，P2-3 关闭（见「已关闭」），条目
+重排编号 1–7。
+
 每条都写明出处：缺口本身的现状说明留在所属设计文档里，这里只记「打算改的东西」。
 关闭一条时，把它移到文末「已关闭」并写上 commit。
 
@@ -46,32 +49,42 @@ Node Group 组级 `on_error`、gRPC `AckActivation`、G1 clean-SHA 重签 `c39a2
    fail-closed（[NODE-GROUP-COLOCATION.md](./NODE-GROUP-COLOCATION.md)「Non-Kafka
    trigger types are fail-closed」一条）。
 
-3. **pull 模式的 `xflow.supply.http` 未实现。** runner 主动按计划拉取 supply 的路径
-   不存在，只能用 `xflow.supply.external` / `static`
-   （[DSL-SPECIFICATION.md](./DSL-SPECIFICATION.md) Supply 一节已标记「尚未实现，
-   不要在 DSL 里使用」）。
-
-4. **子工作流复用（`xflow.subworkflow`）未实现。**
+3. **子工作流复用（`xflow.subworkflow`）未实现。**
    [DSL-SPECIFICATION.md](./DSL-SPECIFICATION.md) §6.4 标为「计划扩展，当前版本未实现」。
 
 ### P3 — 已知限制，记录在案
 
-5. **ADR-D4 刻意延后的两项：** 草稿与发布分离（`WorkflowDraft`）、定义版本历史
+4. **ADR-D4 刻意延后的两项：** 草稿与发布分离（`WorkflowDraft`）、定义版本历史
    （`WorkflowDefinitionVersion`）。见
    [ADR-D4-runtime-editor-metadata-split.md](./ADR-D4-runtime-editor-metadata-split.md)。
 
 ### 需要真实环境或人工批准，不能靠改代码关闭
 
-6. **G2：多副本 control-plane HA soak 与真实多 namespace 隔离验收。** 要求见
+5. **G2：多副本 control-plane HA soak 与真实多 namespace 隔离验收。** 要求见
     [RELEASE-GATES.md](./RELEASE-GATES.md) 的 G2 定义；`make test-soak` 不是该证据
     （见 README 的说明）。
 
-7. **RELEASE-GATES §6 的 D1–D8** 全部为「OPEN — 未批准」，需要对应负责人裁定。
+6. **RELEASE-GATES §6 的 D1–D8** 全部为「OPEN — 未批准」，需要对应负责人裁定。
 
-8. **KEK 轮换（`xflow supply reseal`）与 server/runner 凭据热加载都没有在真实环境
+7. **KEK 轮换（`xflow supply reseal`）与 server/runner 凭据热加载都没有在真实环境
    演练过**，runbook 的 owner 与期限属于 D6。
 
 ## 已关闭
+
+- **pull 模式的 `xflow.supply.http` 未实现**（原 P2-3）—— `02cbb580`、`ce1a8cb4`、
+  `9f03f2ae`、`dd4aa6ea`、`46778cf4`、`91e7ef97`、`10689c7a`、`3ba47816`（2026-10-13，
+  分支 `worktree-agent-acd6af5205745f065`）：新增第三种 supply 节点类型——参数解析与
+  编译期校验（`types/supply_pull.go`：仅 https、拒绝 `resource` 与未知参数、
+  `poll_interval` 下限 10s）、`SupplyRequirement.PullSource` 随 directive 下发、
+  `PullSupplyFetcher`（仅 https、不跟随重定向、dial 时按解析结果做私网阻断与 runner
+  级白名单、ETag/304、1 MiB/15s 上限）、gate 按声明路由并拒绝同 key 异源
+  （fail-closed）、`RunnerConfig.SupplyPullAllowedHosts` 接线、指标
+  `xflow_supply_pull_fetch_total`。已知代价与不落库/不适用 at-rest 记入
+  [SUPPLY-NODE.md](./SUPPLY-NODE.md) §9(e)/§10；DSL 参数与一致性语义记入
+  [DSL-SPECIFICATION.md](./DSL-SPECIFICATION.md)。测试：`types`、`engine/graph`、
+  `service/control`、`service/runner`、`sdk/xflow`、`observability/metrics` 均有
+  httptest/表驱动用例（含 SSRF 拒绝与同 key 冲突）；`make vet` 全绿。未验证：
+  真实外部 pull 源、全量 `make test` 门（按仓库纪律未跑）。
 
 - **两个目录后端的租约解析围栏不一致**（原 P3-6，2026-10-08 第三轮收口验证新登记）
   —— `aff9023`（2026-10-09）：(i) 已修：Redis `LookupLease` 在解析命中
