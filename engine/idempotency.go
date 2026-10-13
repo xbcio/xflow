@@ -389,6 +389,19 @@ func (e *Engine) beginSubmission(ctx context.Context, g *graph.Graph, entry stri
 // succeeded, it just created nothing. A conflict, an in-progress claim and a
 // store without the capability are errors, because the caller has nothing to
 // act on but the refusal.
+//
+// Residual window: the claim is not atomic with the execution's creation. A
+// request can claim, stall past the lease without creating anything, lose the
+// claim to a takeover, and then resume and create anyway. Its create names the
+// SAME derived id (the key determines it), and every backend's create is an
+// unconditional write (local's CreateExecution / CreateExecutionWithOutbox,
+// rstate's createExecution), so the late write lands on top of the execution the
+// takeover request already created and confirmed. The claim token guards
+// settling — a stale token can neither confirm nor release — but not creating,
+// so the overwrite is a deliberate, documented residual window until a store
+// offers a token-conditional create (create only while the claim still holds
+// this request's token; on refusal, re-read and answer duplicate) and the
+// engine asks for it.
 func (e *Engine) claimIdempotency(ctx context.Context, g *graph.Graph, scope, key string, fp IdempotencyFingerprint) (idempotentStart, error) {
 	if err := ValidateIdempotencyKey(key); err != nil {
 		return idempotentStart{}, err
