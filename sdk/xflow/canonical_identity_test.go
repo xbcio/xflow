@@ -59,6 +59,7 @@ func canonicalCorpus() map[string]func(*WorkflowBuilder) {
 		"xflow.map with nested body":      nestedMap(bodyOf),
 		"xflow.wait signal":               func(w *WorkflowBuilder) { w.Node("n", node.Wait("go")) },
 		"xflow.wait timer":                func(w *WorkflowBuilder) { w.Node("n", node.WaitDuration("1m")) },
+		"xflow.subworkflow":               func(w *WorkflowBuilder) { w.Node("n", node.SubWorkflow("child-workflow")) },
 		"xflow.approval":                  func(w *WorkflowBuilder) { w.Node("n", node.Approval([]string{"u1"}, node.ApprovalAll)) },
 		"xflow.approval empty mode":       func(w *WorkflowBuilder) { w.Node("n", node.Approval([]string{"u1"}, "")) },
 		"xflow.notification":              func(w *WorkflowBuilder) { w.Node("n", node.Notification("email", "a@example.invalid")) },
