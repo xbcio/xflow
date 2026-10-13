@@ -121,6 +121,16 @@ func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error
 		engOpts = append(engOpts, engine.WithBatchBodyExecutor(bodies))
 	}
 
+	// The sub-workflow resolver is the dispatch-time half of an
+	// xflow.subworkflow node: the engine re-resolves each node's pinned
+	// reference against this registry before it starts a child. An engine with
+	// no registry resolves nothing, and such a node is then refused at
+	// submission rather than run against whatever registered later.
+	workflowRegistry := provider.WorkflowRegistry()
+	if workflowRegistry != nil {
+		engOpts = append(engOpts, engine.WithSubWorkflowResolver(newSubWorkflowResolver(workflowRegistry)))
+	}
+
 	eng := engine.New(cfg.state, cfg.queue, engOpts...)
 
 	if vc, ok := cfg.registry.(execution.VersionConfigurator); ok {
@@ -135,7 +145,7 @@ func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error
 	e := &Engine{
 		eng:                 eng,
 		registry:            cfg.registry,
-		workflowRegistry:    provider.WorkflowRegistry(),
+		workflowRegistry:    workflowRegistry,
 		waiter:              cfg.waiter,
 		stopFns:             cfg.stopFns,
 		allowDirectHandlers: cfg.allowDirectHandlers,
