@@ -289,7 +289,7 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	// branch below serves no identity at all), which is why it has no
 	// counterpart registration there.
 	mux.HandleFunc("GET "+PathCurrentUser, authz(OpCurrentUserRead, false, m.handleCurrentUser, nil))
-	mux.HandleFunc("POST "+PathWorkflowExecute, authz(OpWorkflowCreate, true, m.handleExecuteWorkflow, newExecutionIDResolver()))
+	mux.HandleFunc("POST "+PathWorkflowExecute, authz(OpWorkflowCreate, true, m.handleExecuteWorkflow, inlineExecutionIDResolver()))
 	mux.HandleFunc("POST "+PathWorkflowExecuteByID, authz(OpWorkflowInvoke, true, m.handleExecuteWorkflowByID, invokeByIDResolver()))
 	// Entry-seed endpoint (exact path, POST only). The authz wrapper injects
 	// the principal's namespace into the request context; handleSeedExecution
@@ -435,22 +435,92 @@ func (m *workflowControlModule) handleRevokeSignalByID(w http.ResponseWriter, r 
 	m.handleRevokeSignal(w, r, types.ExecutionID(r.PathValue("id")))
 }
 
-// newExecutionIDResolver is the resource resolver for the workflow create/invoke
-// routes. Unlike the /v1/executions/ subtree — which resolves the targeted
-// execution id from the path — create/invoke have no path id, so the resolver
-// pre-allocates a fresh execution id (R3.1). That id is stamped onto the
+// newExecutionIDResolver is the resource resolver for the entry-seed route
+// POST /v1/executions. Unlike the /v1/executions/{id}/ subtree — which resolves
+// the targeted execution id from the path — a seed has no path id, so the
+// resolver pre-allocates a fresh execution id (R3.1). That id is stamped onto the
 // admission audit row by authzWrap and, via engine.WithExecutionID injected by
-// the same wrapper, reused by engine Submit/Invoke, so the audit row and the
-// persisted execution share one id (closing the audit↔execution correlation
-// gap that left reconcile Probe reading an empty ExecutionID).
+// the same wrapper, reused by the engine, so the audit row and the persisted
+// execution share one id (closing the audit↔execution correlation gap that left
+// reconcile Probe reading an empty ExecutionID).
 //
-// resource/workflowID/namespace stay empty: create/invoke authz was decided on
-// operation alone before this change, and this resolver only supplies the
-// correlation id, not authz inputs.
+// It is NOT the resolver of the execute routes: a submission carrying an
+// Idempotency-Key runs under engine.IdempotentExecutionID rather than a fresh id,
+// so the execute routes resolve through inlineExecutionIDResolver and
+// invokeByIDResolver, which derive the same keyed id the engine will (see
+// resolveExecutionID); entry-seed accepts no key, so a fresh id is exact here.
+//
+// resource/workflowID/namespace stay empty: seed authz was decided on operation
+// alone, and this resolver only supplies the correlation id, not authz inputs.
 func newExecutionIDResolver() func(*http.Request) (string, string, string, string) {
 	return func(*http.Request) (string, string, string, string) {
 		return "", "", string(engine.NewExecutionID()), ""
 	}
+}
+
+// inlineExecutionIDResolver is the resource resolver for the inline direct-run
+// route POST /v1/workflows/execute. Like newExecutionIDResolver it hands the
+// wrapper a fresh pre-allocated id (R3.1) — except for a keyed submission, which
+// runs under engine.IdempotentExecutionID: the resolver then derives that id
+// itself, from the same namespace, scope and key the engine will (see
+// resolveExecutionID), so the admission/outcome rows and the execution stay one
+// id instead of the rows naming a phantom no execution ever runs under.
+//
+// The scope is the handler's own (inlineIdempotencyScope over the definition
+// name in the request body), so resolver and handler cannot drift. Deriving it
+// needs the body, which the handler reads after this resolver ran — hence the
+// read-and-restore, bounded by inlineResolveBodyLimit because this runs before
+// authorize; on any body that does not decode, or exceeds the bound, the
+// handler will refuse the request before it can claim anything, and a fresh id
+// is the right shape for a submission that creates no execution.
+func inlineExecutionIDResolver() func(*http.Request) (string, string, string, string) {
+	return func(r *http.Request) (string, string, string, string) {
+		if idempotencyKeyForResolve(r) == "" {
+			return "", "", string(engine.NewExecutionID()), ""
+		}
+		var req executeWorkflowRequest
+		if !peekJSONBody(r, &req) || req.Workflow == nil {
+			return "", "", string(engine.NewExecutionID()), ""
+		}
+		return "", "", string(resolveExecutionID(r, inlineIdempotencyScope(r.Context(), req.Workflow))), ""
+	}
+}
+
+// inlineResolveBodyLimit bounds how many body bytes the inline resolver buffers
+// before authorize runs. The resolver reads a keyed request's definition to name
+// its key scope, and it runs before the authorizer decides, so a principal that
+// may not even hold workflow.create must not be able to park an unbounded body
+// in memory for the length of a decision. The bound matches
+// MaxEditorMetadataBytes, the size the server already accepts for one
+// definition's editor payload. A body over the bound falls back to the fresh id
+// — restoring the body whole so the handler still serves it — which costs the
+// keyed request's audit rows the derived id (they name the fresh one), a
+// bounded, deliberate trade.
+const inlineResolveBodyLimit = 1 << 20
+
+// peekJSONBody decodes the request body into dst and puts the bytes back for the
+// handler. A resource resolver runs before the handler and the body is a single
+// stream, so a resolver that needs a field must restore what it read. Decoding
+// mirrors the handler exactly — same bytes, same json.Decoder.Decode acceptance —
+// so whatever decodes here decodes there; a read error is not fatal either,
+// because the truncated bytes are restored and handed to the same decoder, and
+// the handler then fails precisely the cases the peek fails.
+//
+// The read is bounded by inlineResolveBodyLimit: one byte past the bound is
+// enough to detect an oversized body without buffering it, and an oversized body
+// is still handed back whole — consumed prefix in front of the unread remainder
+// — with a false result.
+func peekJSONBody(r *http.Request, dst any) bool {
+	if r.Body == nil {
+		return false
+	}
+	raw, _ := io.ReadAll(io.LimitReader(r.Body, inlineResolveBodyLimit+1))
+	if len(raw) > inlineResolveBodyLimit {
+		r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(raw), r.Body))
+		return false
+	}
+	r.Body = io.NopCloser(bytes.NewReader(raw))
+	return json.NewDecoder(bytes.NewReader(raw)).Decode(dst) == nil
 }
 
 // invokeByIDResolver is the resource resolver for POST /v1/workflows/{id}/execute
@@ -470,13 +540,18 @@ func newExecutionIDResolver() func(*http.Request) (string, string, string, strin
 // once per batch (executor/remote.go), and a map node claimed as a single group
 // lease serves a whole batch, so any scan wider than one batch hits it.
 //
-// A fresh pre-allocated id keeps engine semantics (Submit/Invoke are "start a NEW
-// execution") and stays coherent with what the engine now does, without giving up
-// the resource/workflow dimensions an audit row is meant to carry.
+// A fresh id keeps engine semantics (Submit/Invoke are "start a NEW execution")
+// and stays coherent with what the engine now does, without giving up the
+// resource/workflow dimensions an audit row is meant to carry — except when the
+// request is keyed: the engine then runs the submission under
+// engine.IdempotentExecutionID (derived so a retry finds the claim), and
+// resolveExecutionID derives the same id here so the audit rows still name the
+// execution that runs.
 func invokeByIDResolver() func(*http.Request) (string, string, string, string) {
 	return func(r *http.Request) (string, string, string, string) {
 		id := r.PathValue("id")
-		return "workflow/" + id, id, string(engine.NewExecutionID()), ""
+		return "workflow/" + id, id,
+			string(resolveExecutionID(r, engine.WorkflowIdempotencyScope(types.WorkflowID(id)))), ""
 	}
 }
 
@@ -532,6 +607,11 @@ type executeWorkflowResponse struct {
 	// ParamIssues is set only by the inline POST /v1/workflows/execute: a
 	// registered workflow was validated when it was registered.
 	ParamIssues []graph.ParamIssue `json:"param_issues,omitempty"`
+	// Duplicate is true when the request's Idempotency-Key had already started
+	// this execution: the answer is the original execution — its id and its
+	// current status, which may be queued, paused or terminal — and this request
+	// created nothing. It is the same answer a replayed webhook entry gives.
+	Duplicate bool `json:"duplicate,omitempty"`
 }
 
 // submissionResponse builds the answer to a submission that succeeded.
@@ -738,49 +818,39 @@ func (m *workflowControlModule) handleExecuteWorkflow(w http.ResponseWriter, r *
 	// NOT-NULL violation on xflow_executions.workflow_def.
 	ctx = engine.WithWorkflowDef(ctx, req.Workflow)
 	ctx = engine.WithTestRun(ctx, req.Test)
+	digest, err := definitionDigest(req.Workflow)
+	if err != nil {
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	idem, ok := keyedSubmission(w, r, inlineIdempotencyScope(ctx, req.Workflow), digest)
+	if !ok {
+		return
+	}
+	if idem != nil {
+		ctx = engine.WithIdempotency(ctx, idem)
+	}
 	var id types.ExecutionID
 	if req.Entry != "" {
 		id, err = m.eng.Invoke(ctx, g, req.Entry, req.Input)
-		// An unknown entry node is a client error (400): the missing resource is
-		// the entry in the submitted graph, not an execution in the store.
 		if err != nil {
-			if writeConcurrencyFailure(w, r, err) {
-				return
+			if !writeSubmitFailure(w, r, err) {
+				writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 			}
-			if errors.Is(err, engine.ErrFAFRequiresDirectDispatch) {
-				writeFail(w, r, http.StatusBadRequest, "workflow_faf_unsupported", "FAF workflows require direct dispatch")
-				return
-			}
-			if errors.Is(err, graph.ErrInvalidParams) {
-				writeFail(w, r, http.StatusBadRequest, "workflow_params_invalid", err.Error())
-				return
-			}
-			if errors.Is(err, engine.ErrEntryNotFound) {
-				writeFail(w, r, http.StatusBadRequest, "workflow_entry_not_found", err.Error())
-				return
-			}
-			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}
 	} else {
 		id, err = m.eng.Submit(ctx, g, req.Params)
 		if err != nil {
-			if writeConcurrencyFailure(w, r, err) {
-				return
+			if !writeSubmitFailure(w, r, err) {
+				writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 			}
-			if errors.Is(err, engine.ErrFAFRequiresDirectDispatch) {
-				writeFail(w, r, http.StatusBadRequest, "workflow_faf_unsupported", "FAF workflows require direct dispatch")
-				return
-			}
-			if errors.Is(err, graph.ErrInvalidParams) {
-				writeFail(w, r, http.StatusBadRequest, "workflow_params_invalid", err.Error())
-				return
-			}
-			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}
 	}
-	writeData(w, r, http.StatusOK, m.submissionResponse(ctx, id, paramIssues))
+	resp := m.submissionResponse(ctx, id, paramIssues)
+	resp.Duplicate = idem != nil && idem.Duplicate
+	writeData(w, r, http.StatusOK, resp)
 }
 
 // registerWorkflowResponse echoes the persisted workflow ID (server-assigned
@@ -1685,47 +1755,39 @@ func (m *workflowControlModule) handleExecuteWorkflowByID(w http.ResponseWriter,
 	ctx := engine.WithWorkflowDef(r.Context(), rec.Definition)
 	ctx = engine.WithTraceCarrier(ctx, tracing.InjectCarrier(ctx))
 	ctx = engine.WithTestRun(ctx, req.Test)
+	// A keyed request is scoped to the registered workflow, so one key means one
+	// execution whichever face (this route, the SDK) a retry comes in through.
+	// The version is not in the scope: a retry after an upgrade has to find the
+	// original execution, and the definition's version is part of the
+	// fingerprint instead.
+	idem, ok := keyedSubmission(w, r, engine.WorkflowIdempotencyScope(id), "")
+	if !ok {
+		return
+	}
+	if idem != nil {
+		ctx = engine.WithIdempotency(ctx, idem)
+	}
 	var execID types.ExecutionID
 	if req.Entry != "" {
 		execID, err = m.eng.Invoke(ctx, rec.Graph, req.Entry, req.Input)
 		if err != nil {
-			if writeConcurrencyFailure(w, r, err) {
-				return
+			if !writeSubmitFailure(w, r, err) {
+				writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 			}
-			if errors.Is(err, engine.ErrFAFRequiresDirectDispatch) {
-				writeFail(w, r, http.StatusBadRequest, "workflow_faf_unsupported", "FAF workflows require direct dispatch")
-				return
-			}
-			if errors.Is(err, graph.ErrInvalidParams) {
-				writeFail(w, r, http.StatusBadRequest, "workflow_params_invalid", err.Error())
-				return
-			}
-			if errors.Is(err, engine.ErrEntryNotFound) {
-				writeFail(w, r, http.StatusBadRequest, "workflow_entry_not_found", err.Error())
-				return
-			}
-			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}
 	} else {
 		execID, err = m.eng.Submit(ctx, rec.Graph, req.Params)
 		if err != nil {
-			if writeConcurrencyFailure(w, r, err) {
-				return
+			if !writeSubmitFailure(w, r, err) {
+				writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 			}
-			if errors.Is(err, engine.ErrFAFRequiresDirectDispatch) {
-				writeFail(w, r, http.StatusBadRequest, "workflow_faf_unsupported", "FAF workflows require direct dispatch")
-				return
-			}
-			if errors.Is(err, graph.ErrInvalidParams) {
-				writeFail(w, r, http.StatusBadRequest, "workflow_params_invalid", err.Error())
-				return
-			}
-			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}
 	}
-	writeData(w, r, http.StatusOK, m.submissionResponse(ctx, execID, nil))
+	resp := m.submissionResponse(ctx, execID, nil)
+	resp.Duplicate = idem != nil && idem.Duplicate
+	writeData(w, r, http.StatusOK, resp)
 }
 
 // deregisterWorkflow is the clear-activations -> remove-record path both entry
@@ -2432,17 +2494,30 @@ func (m *workflowControlModule) handleRerun(w http.ResponseWriter, r *http.Reque
 	// path does. It is the one submission hook a rerun needs from the API
 	// layer: the definition is the parent's already, and the identity is the
 	// engine's to attach.
+	//
+	// An Idempotency-Key makes the rerun safe to retry: the engine scopes the key
+	// to the parent execution, and the fingerprint covers the parent, the
+	// from-node and include_success, so a retry of the same request is answered
+	// with the rerun it already created, and the same key on a different request
+	// is a conflict.
+	idemKey, ok := idempotencyKeyFromRequest(w, r)
+	if !ok {
+		return
+	}
 	ctx := engine.WithTraceCarrier(r.Context(), tracing.InjectCarrier(r.Context()))
 	res, err := rerunner.Rerun(ctx, engine.RerunRequest{
 		ExecutionID:    id,
 		FromNode:       req.FromNode,
 		IncludeSuccess: req.IncludeSuccess,
+		IdempotencyKey: idemKey,
 	})
 	if err != nil {
 		writeExecutionRerunFail(w, r, err)
 		return
 	}
-	writeData(w, r, http.StatusOK, m.rerunResponse(ctx, res))
+	resp := m.rerunResponse(ctx, res)
+	resp.Duplicate = res.Duplicate
+	writeData(w, r, http.StatusOK, resp)
 }
 
 // rerunRequest is the body for POST /v1/executions/{id}/rerun (design §3 API).
@@ -2463,6 +2538,10 @@ type rerunExecutionResponse struct {
 	// QueuePosition is the new execution's place in its workflow's line, 0 when
 	// it started immediately.
 	QueuePosition int `json:"queue_position,omitempty"`
+	// Duplicate is true when the request's Idempotency-Key had already created
+	// this rerun: nothing was created by this call, and the answer is the
+	// original rerun execution's id and current status.
+	Duplicate bool `json:"duplicate,omitempty"`
 }
 
 // rerunResponse builds the reply from what the rerun reported plus a status
@@ -2499,6 +2578,8 @@ func (m *workflowControlModule) rerunResponse(ctx context.Context, res engine.Re
 // reached limit is a retry, not a failed rerun.
 func writeExecutionRerunFail(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+	case writeIdempotencyFailure(w, r, err):
+		return
 	case writeConcurrencyFailure(w, r, err):
 		return
 	case errors.Is(err, engine.ErrExecutionNotRerunnable):

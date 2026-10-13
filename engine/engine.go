@@ -170,6 +170,8 @@ type Engine struct {
 	outboxMaxDeliveryAttempt int
 	defaultLeaseTTL          time.Duration
 	defaultNodeTimeout       time.Duration
+	idempotencyTTL           time.Duration
+	idempotencyLease         time.Duration
 	suspendDisabled          bool
 	suspendDisabledErr       error
 	groupExecutor            GroupExecutor
@@ -193,6 +195,8 @@ func New(state StateStore, queue TaskQueue, opts ...Option) *Engine {
 		outboxMaxDeliveryAttempt: DefaultOutboxMaxDeliveryAttempts,
 		defaultLeaseTTL:          DefaultLeaseTTL,
 		defaultNodeTimeout:       DefaultNodeTimeout,
+		idempotencyTTL:           DefaultIdempotencyTTL,
+		idempotencyLease:         DefaultIdempotencyClaimLease,
 	}
 	for _, opt := range opts {
 		opt(e)
@@ -239,6 +243,10 @@ func preallocOrNewExecutionID(ctx context.Context) types.ExecutionID {
 // It persists the execution snapshot, caches the graph, and schedules all
 // root nodes (in-degree == 0) through a durable outbox when the StateStore
 // implements AtomicStateStore.
+//
+// A submission context carrying an idempotency key (WithIdempotency) starts —
+// or, on a retry, finds — the execution the key derives its ID from; see
+// Idempotency.
 func (e *Engine) Submit(ctx context.Context, g *graph.Graph, params map[string]any, runtime ...*types.Runtime) (types.ExecutionID, error) {
 	if g != nil && g.FAF() {
 		return "", ErrFAFRequiresDirectDispatch
@@ -247,7 +255,14 @@ func (e *Engine) Submit(ctx context.Context, g *graph.Graph, params map[string]a
 	if err != nil {
 		return "", err
 	}
-	id := preallocOrNewExecutionID(ctx)
+	start, err := e.beginSubmission(ctx, g, "", params)
+	if err != nil {
+		return "", err
+	}
+	if start.duplicate {
+		return start.id, nil
+	}
+	id := start.id
 	snap := &ExecutionSnapshot{
 		ID:     id,
 		Graph:  g,
@@ -259,10 +274,15 @@ func (e *Engine) Submit(ctx context.Context, g *graph.Graph, params map[string]a
 		snap.Runtime = cloneRuntime(runtime[0])
 	}
 	ctx = attachTransientHint(ctx, g)
-	return e.startExecution(ctx, snap, submitInitialTasks(id, g))
+	id, err = e.startExecution(ctx, snap, submitInitialTasks(id, g))
+	e.settleIdempotency(ctx, start, err)
+	return id, err
 }
 
 // Invoke starts a new execution from one explicit entry node.
+//
+// Like Submit it honors an idempotency key on the context; the entry node is
+// part of the request's fingerprint, so the same key must name the same entry.
 func (e *Engine) Invoke(ctx context.Context, g *graph.Graph, entryName string, params map[string]any, runtime ...*types.Runtime) (types.ExecutionID, error) {
 	if g != nil && g.FAF() {
 		return "", ErrFAFRequiresDirectDispatch
@@ -276,7 +296,14 @@ func (e *Engine) Invoke(ctx context.Context, g *graph.Graph, entryName string, p
 		return "", err
 	}
 
-	id := preallocOrNewExecutionID(ctx)
+	start, err := e.beginSubmission(ctx, g, entryName, params)
+	if err != nil {
+		return "", err
+	}
+	if start.duplicate {
+		return start.id, nil
+	}
+	id := start.id
 	snap := &ExecutionSnapshot{
 		ID:     id,
 		Graph:  g,
@@ -307,7 +334,9 @@ func (e *Engine) Invoke(ctx context.Context, g *graph.Graph, entryName string, p
 			operation: fmt.Sprintf("skip unselected root %q", skip.NodeName),
 		})
 	}
-	return e.startExecution(ctx, snap, tasks)
+	id, err = e.startExecution(ctx, snap, tasks)
+	e.settleIdempotency(ctx, start, err)
+	return id, err
 }
 
 // failInitialExecution marks an execution failed after its initial task could

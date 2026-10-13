@@ -51,6 +51,12 @@ type RerunRequest struct {
 	// IncludeSuccess accepts a successful parent. Failed, canceled and timeout
 	// parents are always accepted.
 	IncludeSuccess bool
+	// IdempotencyKey, when set, makes the rerun safe to retry: the new
+	// execution's ID is derived from the parent and the key, and a retry with
+	// the same key and the same request returns the execution the first attempt
+	// created instead of creating another. The same key with a different
+	// from-node or IncludeSuccess is refused with ErrIdempotencyConflict.
+	IdempotencyKey string
 }
 
 // RerunResult reports the execution the rerun created.
@@ -65,6 +71,10 @@ type RerunResult struct {
 	// QueuePosition is the parked execution's 1-based place in line, 0
 	// otherwise.
 	QueuePosition int
+	// Duplicate is true when the request's IdempotencyKey had already created
+	// this execution: nothing was created by this call, and Queued and
+	// QueuePosition are not reported.
+	Duplicate bool
 }
 
 // Rerun derives a new execution from a terminal one, starting at FromNode.
@@ -143,6 +153,33 @@ func (e *Engine) Rerun(ctx context.Context, req RerunRequest) (RerunResult, erro
 	// being rerun, so adopting that id would make this method write over the
 	// very execution it exists to leave untouched.
 	newID := NewExecutionID()
+	var idem idempotentStart
+	if req.IdempotencyKey != "" {
+		fp, err := rerunFingerprint(req)
+		if err != nil {
+			return RerunResult{}, err
+		}
+		// The claim is taken once every refusal that depends only on the
+		// request has been made, so a rerun the engine would refuse never holds
+		// a key; and before anything is written, so a retry finds either the
+		// execution or a claim it can take over.
+		idem, err = e.claimIdempotency(ctx, g, rerunIdempotencyScope(req.ExecutionID), req.IdempotencyKey, fp)
+		if err != nil {
+			return RerunResult{}, fmt.Errorf("rerun %q: %w", req.ExecutionID, err)
+		}
+		if idem.duplicate {
+			return RerunResult{ExecutionID: idem.id, Duplicate: true}, nil
+		}
+		newID = idem.id
+	}
+	res, err := e.seedRerun(ctx, seeder, req, parent, g, plan, admission, newID)
+	e.settleIdempotency(ctx, idem, err)
+	return res, err
+}
+
+// seedRerun creates the rerun's execution under newID: the snapshot, the
+// seeded prefix and the start intent, in one store transition.
+func (e *Engine) seedRerun(ctx context.Context, seeder ExecutionSeeder, req RerunRequest, parent *ExecutionSnapshot, g *graph.Graph, plan rerunPlan, admission *ConcurrencyAdmission, newID types.ExecutionID) (RerunResult, error) {
 	snap := &ExecutionSnapshot{
 		ID:      newID,
 		Graph:   g,
