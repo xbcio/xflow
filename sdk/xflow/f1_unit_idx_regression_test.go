@@ -49,17 +49,26 @@ func TestClusterMixedGraphResolvesUnitIndexAfterDurableRoundTrip(t *testing.T) {
 		t.Fatalf("Invoke() error = %v", err)
 	}
 
-	waitForTransientCondition(t, 5*time.Second, func() bool {
+	waitForTransientCondition(t, 10*time.Second, func() bool {
 		snap, err := eng.eng.State().GetExecution(context.Background(), id)
 		if err != nil || snap == nil {
 			return false
 		}
-		return isTerminalStatus(snap.Status)
+		if !isTerminalStatus(snap.Status) {
+			return false
+		}
+		// Terminal in the store and the hooks do not land at the same instant:
+		// the commit script finalizes the execution inside Redis, and the
+		// OnNodeComplete/OnExecutionComplete callbacks fire on the engine's
+		// post-commit path after the script returns. Waiting only for the store
+		// state races that gap and reads an empty node status while the run
+		// itself succeeded, so wait for the last hook too.
+		return hooks.nodeCompleteStatus("step2") != "" && hooks.executionCompleteStatus(id) != ""
 	})
 
 	for _, name := range []string{"start", "step1", "step2"} {
 		if hooks.nodeCompleteStatus(name) != types.NodeStatusSuccess {
-			t.Fatalf("node %q status = %q, want success (node never scheduled means UnitIdx resolution regressed)", name, hooks.nodeCompleteStatus(name))
+			t.Fatalf("node %q status = %q, want success (the execution reached a terminal state without this node succeeding)", name, hooks.nodeCompleteStatus(name))
 		}
 	}
 	if hooks.executionCompleteStatus(id) != types.ExecutionStatusSuccess {
