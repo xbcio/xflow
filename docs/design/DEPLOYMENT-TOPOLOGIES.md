@@ -234,7 +234,7 @@ runner 可横向扩缩容：跑多个 runner 实例即可线性扩展执行吞�
 
 **MVP 现有边界**：
 - Runner Protocol 已提供 HTTP+JSON long polling 与 gRPC 通道；**streaming / credit-flow control 仍是实验性传输优化**，不应视为生产级可靠性承诺。
-- 没有 Relay Gateway；runner 必须能到达 server。runner 进程经环境代理的连接已支持：HTTP 传输按进程环境解析 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`（HTTPS 走 CONNECT 隧道），gRPC 通道使用 grpc-go 内建的环境代理支持。
+- 没有 Relay Gateway；runner 必须能到达 server。runner 进程经环境代理的连接已支持：HTTPS 出站由 runner 自己的拨号层解析 `HTTPS_PROXY` / `NO_PROXY` 并完成 CONNECT 隧道（x/net/httpproxy 语义：https 目标不回落 `HTTP_PROXY`；代理本身是 `https://` 时以系统根校验其 TLS，且不向代理出示客户端证书），明文 http 请求不进该隧道层（静态明文客户端沿用 net/http 自身的 `HTTP_PROXY` 解析，reloadable 传输显式直连），gRPC 通道使用 grpc-go 内建的环境代理支持。
 - 没有 remote SDK；提交、查询、信号 API 先由 `cmd/server` 或 `xflow.NewServer` 暴露的 server HTTP handler 提供。
 - **已实现** runner bearer token、mTLS、runner policy allowlist、dry-run rollout，以及 workflow-level namespace authorization、namespace 隔离边界和审计链路；G2 仍需在真实多 namespace、Redis HA 与多副本环境完成验收，而不是重新设计这些边界。
 - **已实现** runner matching 的 `node_type` / `node_version` 精确匹配、`match_labels` 放置标签（`default` 模式为软偏好：无匹配时 30s 宽限后在 claim 与 entry activation 两条路径上均可回落至任意 capable runner；`required` 模式硬性、永不回落）、runner policy 过滤与容量 gating。标签由运维显式提供（YAML `labels` / `--label`）；`auto_labels` 只探测 os / arch / env(bare|kubernetes) / hostname，不做云元数据调用，region / env 放置维度需以显式标签表达。**权重调度仍在规划**，当前 claim 路径无权重语义。
