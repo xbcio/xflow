@@ -1273,16 +1273,15 @@ func selectorMatches(sel *types.RunnerSelector, runnerLabels map[string]string) 
 	return MatchLabels(runnerLabels, sel.MatchLabels)
 }
 
-// selectorIsDefault reports whether the activation's selector uses "default"
-// mode semantics. Per engine/graph/compile.go:resolveRunnerSelector, an empty
-// Mode ("") is equivalent to RunnerSelectorModeDefault — the compiler defaults
-// to "default" when no explicit mode is set. A nil selector means "any capable
-// runner" (no labels to match), so fallback is irrelevant.
+// selectorIsDefault is the shared default-mode predicate
+// (service/control/runner_selector_default.go). It is used here for entry
+// activation placement and, through RunnerSelector, by the claim path's grace
+// fallback — one definition, so the two enforcement points cannot disagree
+// about what "default" means. An empty Mode is RunnerSelectorModeDefault
+// (engine/graph/compile.go:resolveRunnerSelector defaults to it), and a nil
+// selector is "any capable runner" (false — no labels to relax).
 func (r *EntryActivationReconciler) selectorIsDefault(sel *types.RunnerSelector) bool {
-	if sel == nil {
-		return false
-	}
-	return sel.Mode == types.RunnerSelectorModeDefault || sel.Mode == ""
+	return selectorIsDefault(sel)
 }
 
 // fallbackChooseRunner implements the default-selector grace fallback (spec
@@ -1301,10 +1300,7 @@ func (r *EntryActivationReconciler) fallbackChooseRunner(act *engine.EntryActiva
 	}
 	r.mu.Unlock()
 
-	grace := r.selector.FallbackGrace
-	if grace <= 0 {
-		grace = DefaultSelectorFallback
-	}
+	grace := r.selector.selectorEffectiveGrace()
 	if now.Sub(firstSeen) < grace {
 		// Grace window not yet elapsed — wait for a matching runner to appear.
 		return RunnerSnapshot{}, false
