@@ -440,6 +440,7 @@ paths:
       tags: [Workflows]
       parameters:
         - $ref: "#/components/parameters/XRequestId"
+        - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         required: true
         content:
@@ -453,6 +454,12 @@ paths:
             `running` for an execution that started, `queued` for one waiting
             for a workflow concurrency slot, in which case
             `data.queue_position` carries its 1-based place in line.
+
+            When the request carried an Idempotency-Key that had already started
+            this execution, `data.duplicate` is true: the execution id and
+            status are the ORIGINAL execution's, and this request created
+            nothing. The status is read back, so a duplicate of an execution
+            that has since been paused or finished reports that status.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
@@ -495,6 +502,48 @@ paths:
                           code: required
                           message: duration is required
                           severity: error
+                    trace_id: 0123456789abcdef0123456789abcdef
+                idempotencyKeyInvalid:
+                  summary: The Idempotency-Key is outside the accepted shape, so it was refused rather than ignored.
+                  value:
+                    success: false
+                    code: idempotency_key_invalid
+                    message: 'Idempotency-Key must be 1-255 characters of A-Za-z0-9._:-'
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "409":
+          description: |
+            The request's Idempotency-Key is not usable for it. Two codes share
+            this status: `idempotency_key_conflict` when the key already started
+            a DIFFERENT request (a different definition, params, entry or test
+            flag) — reusing a key for other work is a caller bug, and answering
+            it with the original execution would hand back the result of work
+            the caller did not ask for — and `idempotency_key_in_progress` when
+            another request with the same key and the same request is still
+            creating its execution. Nothing was persisted by the refused
+            request either way.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+            Retry-After:
+              $ref: "#/components/headers/RetryAfter"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                idempotencyKeyConflict:
+                  summary: The key was already used for a different request.
+                  value:
+                    success: false
+                    code: idempotency_key_conflict
+                    message: the idempotency key was already used for a different request
+                    trace_id: 0123456789abcdef0123456789abcdef
+                idempotencyKeyInProgress:
+                  summary: A concurrent request with the same key and request is still creating its execution.
+                  value:
+                    success: false
+                    code: idempotency_key_in_progress
+                    message: a request with this idempotency key is still in progress
                     trace_id: 0123456789abcdef0123456789abcdef
         "429":
           description: |
@@ -559,6 +608,12 @@ paths:
             sense: the answer changes when the deployment does, not when the
             caller retries. There is no `Retry-After` for that reason, and
             nothing was persisted in either case.
+
+            `idempotency_unsupported` is the same kind of refusal for a keyed
+            request: the store cannot hold a claim, so the key cannot be
+            honoured, and accepting the request would make the caller believe a
+            retry is safe when it is not. Nothing was persisted.
+
             The API admission layer answers this status too, with
             `server_overloaded` and a `Retry-After` floor, when this replica is
             at its inflight bound; that refusal is retryable and is described
@@ -587,6 +642,13 @@ paths:
                     code: workflow_concurrency_unavailable
                     message: workflow concurrency is not available on this server
                     trace_id: 0123456789abcdef0123456789abcdef
+                idempotencyUnsupported:
+                  summary: The server's state store cannot hold an idempotency claim.
+                  value:
+                    success: false
+                    code: idempotency_unsupported
+                    message: idempotency keys are not available on this server
+                    trace_id: 0123456789abcdef0123456789abcdef
                 serverOverloaded:
                   summary: The replica's inflight bound is full.
                   value:
@@ -606,6 +668,7 @@ paths:
       parameters:
         - $ref: "#/components/parameters/WorkflowId"
         - $ref: "#/components/parameters/XRequestId"
+        - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         required: false
         content:
@@ -619,6 +682,10 @@ paths:
             `running` for an execution that started, `queued` for one waiting
             for a workflow concurrency slot, in which case
             `data.queue_position` carries its 1-based place in line.
+
+            When the request carried an Idempotency-Key that had already started
+            this execution for this workflow, `data.duplicate` is true and the
+            execution id and status are the ORIGINAL execution's.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
@@ -631,6 +698,56 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/ExecuteWorkflowResponse"
+        "400":
+          description: |
+            The Idempotency-Key header is outside the accepted shape
+            (`idempotency_key_invalid`). It is refused rather than ignored: the
+            caller must not believe a retry is safe when the server cannot
+            recognize it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                idempotencyKeyInvalid:
+                  summary: The key does not match 1-255 characters of [A-Za-z0-9._:-].
+                  value:
+                    success: false
+                    code: idempotency_key_invalid
+                    message: 'Idempotency-Key must be 1-255 characters of A-Za-z0-9._:-'
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "409":
+          description: |
+            The request's Idempotency-Key is not usable for it: it already
+            started a different request for this workflow
+            (`idempotency_key_conflict`), or another request with the same key
+            and the same request is still creating its execution
+            (`idempotency_key_in_progress`). Nothing was persisted by the
+            refused request.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+            Retry-After:
+              $ref: "#/components/headers/RetryAfter"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                idempotencyKeyConflict:
+                  summary: The key was already used for a different request.
+                  value:
+                    success: false
+                    code: idempotency_key_conflict
+                    message: the idempotency key was already used for a different request
+                    trace_id: 0123456789abcdef0123456789abcdef
+                idempotencyKeyInProgress:
+                  summary: A concurrent request with the same key and request is still creating its execution.
+                  value:
+                    success: false
+                    code: idempotency_key_in_progress
+                    message: a request with this idempotency key is still in progress
+                    trace_id: 0123456789abcdef0123456789abcdef
         "429":
           description: |
             The workflow refused the submission because of its own declared
@@ -684,6 +801,10 @@ paths:
             POST /v1/workflows/execute: the code is
             `workflow_concurrency_unavailable`, nothing was persisted, and
             retrying does not change the answer.
+
+            `idempotency_unsupported` is the same kind of refusal for a keyed
+            request: this server's store cannot hold the claim the key needs.
+            Nothing was persisted.
             The API admission layer answers this status too, with
             `server_overloaded` and a `Retry-After` floor, when this replica is
             at its inflight bound; that refusal is retryable and is described
@@ -711,6 +832,13 @@ paths:
                     success: false
                     code: workflow_concurrency_unavailable
                     message: workflow concurrency is not available on this server
+                    trace_id: 0123456789abcdef0123456789abcdef
+                idempotencyUnsupported:
+                  summary: The server's state store cannot hold an idempotency claim.
+                  value:
+                    success: false
+                    code: idempotency_unsupported
+                    message: idempotency keys are not available on this server
                     trace_id: 0123456789abcdef0123456789abcdef
                 serverOverloaded:
                   summary: The replica's inflight bound is full.
@@ -1995,10 +2123,18 @@ paths:
         Requires the `execution.rerun` scope — deliberately not
         `execution.control`: suspending a running pipeline and deriving a new
         execution from a terminal one are different trust.
+
+        An Idempotency-Key makes the rerun safe to retry: the key is scoped to
+        the execution being rerun, and the fingerprint covers that execution,
+        `from_node` and `include_success`, so a retry of the same request is
+        answered with the rerun the first attempt created
+        (`data.duplicate: true`) and the same key on a different request is 409
+        `idempotency_key_conflict`.
       tags: [Executions]
       parameters:
         - $ref: "#/components/parameters/ExecutionId"
         - $ref: "#/components/parameters/XRequestId"
+        - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         required: true
         content:
@@ -2010,6 +2146,10 @@ paths:
           description: |
             The rerun was admitted. `data.execution_id` is the NEW execution;
             the execution this call addressed is unchanged.
+
+            When the request carried an Idempotency-Key that had already
+            created this rerun, `data.duplicate` is true: the execution id and
+            status are the ORIGINAL rerun's, and this request created nothing.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
@@ -2024,8 +2164,9 @@ paths:
                         $ref: "#/components/schemas/RerunExecutionResponse"
         "400":
           description: |
-            The request names no rerun point, or names one the execution's graph
-            does not define.
+            The request names no rerun point, names one the execution's graph
+            does not define, or carries an Idempotency-Key outside the accepted
+            shape.
           content:
             application/json:
               schema:
@@ -2044,6 +2185,13 @@ paths:
                     success: false
                     code: rerun_node_not_found
                     message: from_node is not in the execution's graph
+                    trace_id: 0123456789abcdef0123456789abcdef
+                idempotencyKeyInvalid:
+                  summary: The Idempotency-Key does not match 1-255 characters of [A-Za-z0-9._:-].
+                  value:
+                    success: false
+                    code: idempotency_key_invalid
+                    message: 'Idempotency-Key must be 1-255 characters of A-Za-z0-9._:-'
                     trace_id: 0123456789abcdef0123456789abcdef
         "404":
           description: |
@@ -2064,9 +2212,12 @@ paths:
                     trace_id: 0123456789abcdef0123456789abcdef
         "409":
           description: |
-            The execution cannot be rerun from that node. Three codes share this
-            status: `execution_not_rerunnable` for a source whose status is not
-            an acceptable one (pass `include_success` to accept a successful
+            The execution cannot be rerun from that node, or the request's
+            Idempotency-Key is not usable for it.
+
+            Four codes describe an unusable rerun source:
+            `execution_not_rerunnable` for a source whose status is not an
+            acceptable one (pass `include_success` to accept a successful
             source), `rerun_upstream_incomplete` when a node above the rerun
             point has no result to copy — rerun from that node instead, which is
             where the missing result stops being an input — and
@@ -2074,6 +2225,13 @@ paths:
             from a node (a cyclic graph, or a group unit outside the rerun
             subtree). The last is a property of the definition, so retrying
             changes nothing.
+
+            Two describe the key: `idempotency_key_conflict` when the key
+            already created a rerun of a DIFFERENT request from this same
+            execution (a different from_node or include_success), and
+            `idempotency_key_in_progress` when a concurrent request with the
+            same key and request is still creating its execution. Nothing was
+            persisted by the refused request in any of the six cases.
           content:
             application/json:
               schema:
@@ -2099,6 +2257,20 @@ paths:
                     success: false
                     code: rerun_graph_unsupported
                     message: the execution's graph does not support rerun from a node
+                    trace_id: 0123456789abcdef0123456789abcdef
+                idempotencyKeyConflict:
+                  summary: The key was already used for a different rerun of this execution.
+                  value:
+                    success: false
+                    code: idempotency_key_conflict
+                    message: the idempotency key was already used for a different request
+                    trace_id: 0123456789abcdef0123456789abcdef
+                idempotencyKeyInProgress:
+                  summary: A concurrent request with the same key and request is still creating its rerun.
+                  value:
+                    success: false
+                    code: idempotency_key_in_progress
+                    message: a request with this idempotency key is still in progress
                     trace_id: 0123456789abcdef0123456789abcdef
         "429":
           description: |
@@ -3516,6 +3688,41 @@ components:
       schema:
         type: string
         pattern: '^[A-Za-z0-9._-]{1,128}$'
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Makes the submission safe to retry. A retry carrying the same key and
+        the same request (for an inline definition: the same definition, params,
+        entry and test flag; for a registered workflow: the same workflow
+        version; for a rerun: the same execution, from_node and
+        include_success) is answered 200 with `data.duplicate: true`, the
+        execution the first attempt created and its current status. Nothing is
+        created by the retry.
+
+        The same key with a *different* request is 409
+        `idempotency_key_conflict`, and a concurrent request still working on
+        the same key and request is 409 `idempotency_key_in_progress` (retry
+        it). A key is scoped to the workflow for a submission, and to the parent
+        execution for a rerun, below the caller's namespace.
+
+        The shape is 1-255 characters of [A-Za-z0-9._:-]; anything else is 400
+        `idempotency_key_invalid` rather than silently ignored. A server whose
+        state store cannot hold the claim refuses the keyed request with 503
+        `idempotency_unsupported`: a key the server cannot honor must not be
+        answered as if it could.
+
+        The key answers for 24 hours by default, capped so it never outlives
+        the execution's retention: a retry with the same key while the window
+        lasts returns that execution instead of starting the work again, and
+        after it lapses the key is free and the same key starts a new
+        execution.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9._:-]{1,255}$'
+        maxLength: 255
+        example: order-1
     RunnerControlRequestId:
       name: X-Request-Id
       in: header
@@ -3885,6 +4092,15 @@ components:
             (POST /v1/workflows/execute only; a registered workflow was
             validated at registration). Same semantics as
             RegisterWorkflowResponse.param_issues.
+        duplicate:
+          type: boolean
+          description: |
+            Present and true when the request carried an Idempotency-Key that
+            was already used for the same request: no new execution was
+            started, and `execution_id` and `status` describe the execution the
+            first request created. `status` is that execution's status read
+            now, so it may be `queued`, `paused` or terminal. Absent (or false)
+            on a fresh submission and on every request without a key.
 
     SignalRequest:
       type: object
@@ -3929,6 +4145,14 @@ components:
             queue while it is `queued`, 0 once it has started. Like the detail's
             `queue_position` it is a snapshot of a line that moves, and it is
             absent for an execution that never queued.
+        duplicate:
+          type: boolean
+          description: |
+            Present and true when the request carried an Idempotency-Key that
+            was already used for the same rerun of this execution: no new
+            execution was created, and `execution_id` and `status` describe the
+            rerun the first request created. Absent (or false) on a fresh
+            rerun and on every request without a key.
 
     AcceptedResponse:
       type: object
