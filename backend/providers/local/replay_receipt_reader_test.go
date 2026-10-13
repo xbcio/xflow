@@ -94,17 +94,19 @@ func replayReceiptEntry(t *testing.T, state *memoryState, id types.ExecutionID, 
 
 // TestMemoryScanReplayReceiptsCarriesEveryReceiptInOrder is the local
 // implementation of the engine.ReplayReceiptReader contract: every receipt the
-// backend stored is handed to fn exactly once, carrying the correlation fields
-// the SQL projector needs, in execution-then-request order (the local mirror of
-// the Redis reader's sorted-key order), and with the empty namespace the local
-// backend's absent namespace dimension must produce.
+// backend stored — a successful replay's and a decidable rejection's alike,
+// since every decided replay leaves one — is handed to fn exactly once,
+// carrying the correlation fields the SQL projector needs, in
+// execution-then-request order (the local mirror of the Redis reader's
+// sorted-key order), and with the empty namespace the local backend's absent
+// namespace dimension must produce.
 func TestMemoryScanReplayReceiptsCarriesEveryReceiptInOrder(t *testing.T) {
 	ctx := context.Background()
 	state := newMemoryState()
 	execA := types.ExecutionID("receipt-scan-a")
 	execB := types.ExecutionID("receipt-scan-b")
 	finishA, verifyA := seedReceiptReaderExecution(t, state, execA)
-	finishB, _ := seedReceiptReaderExecution(t, state, execB)
+	finishB, verifyB := seedReceiptReaderExecution(t, state, execB)
 
 	first := replayReceiptEntry(t, state, execA, finishA, "req-01")
 	second := replayReceiptEntry(t, state, execA, verifyA, "req-02")
@@ -114,6 +116,29 @@ func TestMemoryScanReplayReceiptsCarriesEveryReceiptInOrder(t *testing.T) {
 	// within one execution must be told apart by it.
 	if first.AuditID == second.AuditID {
 		t.Fatalf("two replays in one execution share audit id %q; receipts must be per-replay", first.AuditID)
+	}
+
+	// Terminalize execB's verify node, then replay that entry: a decidable
+	// rejection must leave a receipt too, so the scan must carry it exactly
+	// like a success — an operator's audit trail has to show what was refused.
+	if err := state.UpsertNode(ctx, &engine.NodeSnapshot{
+		ExecutionID: execB, Name: "verify", NodeIdx: 1,
+		Status: types.NodeStatusSuccess, ActivationID: 1,
+	}); err != nil {
+		t.Fatalf("UpsertNode(verify terminal): %v", err)
+	}
+	rejected, err := state.ReplayDeadLetter(ctx, engine.ReplayDeadLetterRequest{
+		ExecutionID: execB, EntryID: verifyB, RequestID: "req-02",
+		Operator: "cli:tester", Reason: "operator replay after root-cause",
+	})
+	if err != nil {
+		t.Fatalf("ReplayDeadLetter(rejected): %v", err)
+	}
+	if rejected.Outcome != engine.ReplayRejectedNodeTerminal {
+		t.Fatalf("terminal-node replay outcome = %q, want rejected_node_terminal", rejected.Outcome)
+	}
+	if rejected.AuditID == "" {
+		t.Fatalf("rejected result %+v carries no AuditID; a decidable rejection must leave a receipt too", rejected)
 	}
 
 	var got []engine.ReplayReceipt
@@ -127,6 +152,7 @@ func TestMemoryScanReplayReceiptsCarriesEveryReceiptInOrder(t *testing.T) {
 		{string(execA), "req-01"},
 		{string(execA), "req-02"},
 		{string(execB), "req-01"},
+		{string(execB), "req-02"},
 	}
 	if len(got) != len(order) {
 		t.Fatalf("scanned %d receipts, want %d: %+v", len(got), len(order), got)
@@ -169,6 +195,24 @@ func TestMemoryScanReplayReceiptsCarriesEveryReceiptInOrder(t *testing.T) {
 	}
 	if got[1].NodeID != "verify" {
 		t.Fatalf("receipt[1].NodeID = %q, want verify (the second entry's node)", got[1].NodeID)
+	}
+
+	last := got[3]
+	if last.AuditID != rejected.AuditID {
+		t.Fatalf("rejected receipt AuditID = %q, want %q (the rejection result's id — the SQL idempotency key)", last.AuditID, rejected.AuditID)
+	}
+	if last.Outcome != engine.ReplayRejectedNodeTerminal {
+		t.Fatalf("rejected receipt Outcome = %q, want rejected_node_terminal: a decidable "+
+			"rejection must appear in the audit trail, not only the successes", last.Outcome)
+	}
+	if last.NodeID != "verify" || last.EntryID != verifyB {
+		t.Fatalf("rejected receipt node/entry = %q/%q, want verify/%q", last.NodeID, last.EntryID, verifyB)
+	}
+	if last.Operator != "cli:tester" || last.Reason != "operator replay after root-cause" {
+		t.Fatalf("rejected receipt operator/reason = %q/%q, want the request's values", last.Operator, last.Reason)
+	}
+	if last.TimestampMs <= 0 {
+		t.Fatalf("rejected receipt TimestampMs = %d, want the replay wall-clock time", last.TimestampMs)
 	}
 }
 

@@ -447,4 +447,4 @@ per-record env 构造是 `engine.BuildRecordGlobals` 一处共享实现，`Execu
 本设计是流量采集迁移的**使能项之一**，但两者可解耦推进：
 
 - wasm 池化让「清洗打标跑在 node group 的 wasm 节点里」性能达标（12508 msg/s 池化实测）。
-- 迁移原受三条独立阻塞制约，其中两条已关闭：**Kafka SASL/SCRAM** 已实现，**aggregate 模式在远程托管被硬禁用**已解除（entry-seed 批量 admission，交付语义 at-least-once，见 NODE-GROUP-COLOCATION.md §12.1）。仍开放的是**每 entry unit 单活跃 runner**。这些与 wasm 引擎无关。
+- 迁移原受三条独立阻塞制约，现已全部关闭：**Kafka SASL/SCRAM** 已实现，**aggregate 模式在远程托管被硬禁用**已解除（entry-seed 批量 admission，交付语义 at-least-once，见 NODE-GROUP-COLOCATION.md §12.1），**每 entry unit 单活跃 runner** 已由 activation 副本机制解除（`service/control/entry_activation_manager.go` 逐副本下发，runner 侧以 `engine.FeatureEntryActivationReplicaV1` 声明能力）。这些与 wasm 引擎无关。

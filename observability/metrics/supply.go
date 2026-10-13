@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/supply"
 )
 
@@ -179,9 +180,17 @@ func (s SupplyMetrics) OnEngineCount(ctx context.Context, n int) {
 // --- supply gate observer surface ---
 
 // OnSupplyFetch records one content fetch attempt. result is "ok" or "error".
-func (s SupplyMetrics) OnSupplyFetch(ctx context.Context, name, result string) {
+// source is what asked for the fetch: "admission", "hint", or "poll".
+//
+// The source label is what separates "this runner is current because the
+// control plane's hints are reaching it" from "this runner is current because
+// it re-reads everything on a timer". Both are healthy, but a fleet where
+// almost every fetch says poll is a fleet whose hints are being lost, and the
+// fix for that is on the control-plane side, where no other series here would
+// point.
+func (s SupplyMetrics) OnSupplyFetch(ctx context.Context, name, result, source string) {
 	s.Metrics.Inc(metricSupplyFetchTotal, withNamespace(ctx, map[string]string{
-		"name": name, "result": result,
+		"name": name, "result": result, "source": source,
 	}))
 }
 
@@ -222,8 +231,15 @@ func (s SupplyMetrics) OnSupplyServingUnavailable(ctx context.Context, name stri
 // OnConsumerCount reports how many in-process consumers a supply has. Named
 // to satisfy supply.ConsumerCountObserver directly (see var _ assertion
 // below) rather than through a separate adapter type.
-func (s SupplyMetrics) OnConsumerCount(ctx context.Context, name string, n int) {
-	s.Metrics.Set(metricSupplyConsumers, withNamespace(ctx, map[string]string{"name": name}), float64(n))
+//
+// The namespace is taken from the argument, not from ctx: the registry calls
+// this from inside a registration, outside any request context, so a
+// ctx-derived label would always read "default" and misattribute every supply
+// hosted in another namespace.
+func (s SupplyMetrics) OnConsumerCount(ctx context.Context, ns namespace.Namespace, name string, n int) {
+	s.Metrics.Set(metricSupplyConsumers, map[string]string{
+		"namespace": string(ns), "name": name,
+	}, float64(n))
 }
 
 var _ supply.ConsumerCountObserver = SupplyMetrics{}

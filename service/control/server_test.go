@@ -537,6 +537,16 @@ func (f *fakeControlEngine) Inspect(context.Context, types.ExecutionID, ...strin
 	return f.inspectDetail, nil
 }
 
+// InspectStatus answers from the same fixture as Inspect: the two share one
+// detail, so a caller cannot get a status from one and a different one from the
+// other in the same test.
+func (f *fakeControlEngine) InspectStatus(context.Context, types.ExecutionID) (engine.ExecutionDetail, error) {
+	if f.inspectErr != nil {
+		return engine.ExecutionDetail{}, f.inspectErr
+	}
+	return f.inspectDetail, nil
+}
+
 func (f *fakeControlEngine) DeliverSignal(_ context.Context, _ types.ExecutionID, name string, data map[string]any) error {
 	f.signalName = name
 	f.signalData = data

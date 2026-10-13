@@ -110,6 +110,7 @@ func (s *MemoryEntryActivationStore) Upsert(_ context.Context, act engine.EntryA
 	existing.Requirements = act.Requirements
 	existing.Supplies = act.Supplies
 	existing.SupplyConsumers = act.SupplyConsumers
+	existing.WorkflowTimezone = act.WorkflowTimezone
 	existing.Desired = act.Desired
 	existing.RegistryRevision = act.RegistryRevision
 	return nil

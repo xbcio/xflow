@@ -460,8 +460,14 @@ func (s *Store) CommitGroup(ctx context.Context, req engine.GroupCommitRequest) 
 		// transient decision this needs. The terminal marker goes in the same
 		// transient window, right after shortening has resolved that decision.
 		s.shortenTransientCompletionTTLBestEffort(ctx, req.ExecutionID)
+		// The group whose commit just finalized the execution may itself be a
+		// transient group — the shape this exists for — so the group-key pass
+		// runs in the same window, before evictExecutionCaches drops the graph
+		// it enumerates from.
+		s.shortenTransientGroupCompletionTTLBestEffort(ctx, req.ExecutionID)
 		s.markExecutionTerminalBestEffort(ctx, req.ExecutionID, out.ExecutionStatus)
 		s.evictExecutionCaches(req.ExecutionID)
+		s.releaseWorkflowSlotAfterTerminal(ctx, req.ExecutionID, out.ExecutionStatus)
 		// commitGroupLua finalizes the execution itself, so this is the only
 		// place the terminal state can reach the SQL audit trail.
 		s.projectExecutionStatus(ctx, req.ExecutionID, out.ExecutionStatus,
@@ -477,6 +483,26 @@ func (s *Store) CommitGroup(ctx context.Context, req engine.GroupCommitRequest) 
 var _ engine.GroupLeaseReader = (*Store)(nil)
 var _ engine.GroupLeaseExpirer = (*Store)(nil)
 var _ engine.GroupLeaseReclaimer = (*Store)(nil)
+var _ engine.GroupUnitPhaseReader = (*Store)(nil)
+
+// GetGroupUnitPhase reads the unit's status key alone. found=false covers both
+// "never leased or seeded" and "the key expired" — the two states a transient
+// group's completion TTL deliberately collapses Redis-side; the caller
+// (engine.Inspect) tells them apart from the execution's own state. The lease
+// meta hash is deliberately not consulted: its fields are cleared on commit, so
+// it cannot answer the phase, and a read across two keys would not be atomic
+// anyway.
+func (s *Store) GetGroupUnitPhase(ctx context.Context, id types.ExecutionID, unitIdx int) (engine.GroupUnitPhase, bool, error) {
+	t := namespace.FromContext(ctx)
+	val, err := s.rdb.Get(ctx, groupUnitStatusKey(t, id, unitIdx)).Result()
+	if err == redis.Nil {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("get group unit phase %q/#%d: %w", id, unitIdx, err)
+	}
+	return engine.GroupUnitPhase(val), true, nil
+}
 
 func (s *Store) GetGroupLease(ctx context.Context, id types.ExecutionID, unitIdx int) (*engine.GroupLease, error) {
 	t := namespace.FromContext(ctx)

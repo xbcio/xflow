@@ -31,8 +31,8 @@ func WithGroupExecutor(ge GroupExecutor) Option {
 }
 
 // executeGroup handles a TaskTypeGroupExec task: acquires a group lease, calls
-// the GroupExecutor, and commits the result. commitGroup (Task 12) will
-// implement the actual downstream propagation; for now it is a stub.
+// the GroupExecutor, and commits the result (commitGroup below propagates the
+// group's exits, or its error_outputs route, downstream).
 func (e *Engine) executeGroup(ctx context.Context, task *Task, flush bool) error {
 	if e.groupExecutor == nil {
 		return fmt.Errorf("no group executor configured for group %q", task.NodeName)
@@ -206,7 +206,13 @@ func (e *Engine) commitGroup(ctx context.Context, g *graph.Graph, lease *GroupLe
 		Fatal:        fatal,
 		Error:        errMsg,
 		Exits:        reqExits,
-		Downstream:   downstream,
+		// The group's own declared mode, not the workflow's: a transient group
+		// inside a durable workflow is the case that needs the backend to apply
+		// a different retention, while a transient WORKFLOW already shortens
+		// every key it owns at completion (shortenTransientCompletionTTL), so
+		// the two never need to be summed.
+		Transient:  meta.Transient(),
+		Downstream: downstream,
 	})
 	if err != nil {
 		return fmt.Errorf("commit group %q: %w", meta.Name, err)

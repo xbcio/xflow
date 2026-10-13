@@ -123,6 +123,9 @@ type serverConfig struct {
 	// paramValidation is WithServerParamValidation's mode; empty means
 	// types.DefaultParamValidationMode.
 	paramValidation types.ParamValidationMode
+	// apiLimits is WithServerAPILimits' admission configuration; the zero value
+	// is apiserver's default posture.
+	apiLimits apiserver.APILimits
 }
 
 // ServerOption configures a Server.
@@ -720,12 +723,26 @@ func buildServerAPIConfig(cfg ServerConfig, sc *serverConfig) apiserver.Config {
 	if cfg.Store != nil {
 		supplies = cfg.Store
 	}
+	// The same store satisfies the schedule overlay contract when the backend
+	// has one (sqlstore does; the in-memory dev store does too). No trigger host
+	// is wired here: this process serves the control plane, and the triggers are
+	// hosted by runners (or by an embedded engine), so the overlays this server
+	// stores are read by whoever hosts the workflow — see control.ScheduleManager
+	// and apiserver.Config.Schedules. The manager is nil when the store has no
+	// overlay support, and the routes then answer 501 rather than pretending the
+	// resource does not exist.
+	var overrides store.ScheduleOverrideStore
+	if s, ok := cfg.Store.(store.ScheduleOverrideStore); ok {
+		overrides = s
+	}
+	schedules := control.NewScheduleManager(control.ScheduleManagerConfig{Overrides: overrides})
 
 	return apiserver.Config{
 		RedisAddr:                   cfg.RedisAddr,
 		RedisConfig:                 cfg.RedisConfig,
 		Store:                       cfg.Store,
 		Supplies:                    supplies,
+		Schedules:                   schedules,
 		Artifacts:                   sc.artifacts,
 		Auth:                        sc.auth,
 		RegistrationCodes:           sc.registrationCodes,
@@ -751,6 +768,7 @@ func buildServerAPIConfig(cfg ServerConfig, sc *serverConfig) apiserver.Config {
 		Logger:          sc.logger,
 		Metrics:         sc.metrics,
 		ParamValidation: sc.paramValidation,
+		APILimits:       sc.apiLimits,
 		HTTPAddr:        sc.httpAddr,
 		GRPCAddr:        sc.grpcAddr,
 		MetricsAddr:     sc.metricsAddr,
@@ -853,10 +871,11 @@ func (s *Server) IsLeader() bool { return s.api.IsLeader() }
 // just published": compare the hash here against the ContentHash returned by
 // GetSupply for the same supply. Both are the same string.
 //
-// The inner key is the supply NODE name, not the resource name. Record is
-// whole-replacement rather than merge, and leader failover legitimately clears
-// the state — surface it as information, never as a precondition for
-// publishing.
+// The inner key is the supply's (namespace, name) identity — not the resource
+// name, and not the node name alone: two namespaces may each declare a supply
+// node of the same name, and they are two supplies. Record is whole-replacement
+// rather than merge, and leader failover legitimately clears the state — surface
+// it as information, never as a precondition for publishing.
 func (s *Server) SupplyObserved() control.SupplyObservedSink { return s.api.SupplyObserved() }
 
 // RegisterGRPC registers the Runner Protocol gRPC service onto g, matching
@@ -1141,6 +1160,21 @@ func WithServerParamValidation(mode types.ParamValidationMode) ServerOption {
 			c.paramValidation = mode
 		}
 	}
+}
+
+// WithServerAPILimits configures the admission layer in front of the mutating
+// workflow/execution routes (execute, execute-by-id, signal, revoke, cancel,
+// pause, resume, rerun) and the webhook entry route.
+//
+// The default posture, without this option, is no rate limit and at most
+// apiserver.DefaultAPIMaxInflight covered requests in flight per replica. A
+// rate refusal answers 429 rate_limited; a full inflight bound answers 503
+// server_overloaded; both carry Retry-After. With limits.Mode set to
+// apiserver.APIRateLimitModeRedis the rate is counted in the backend's Redis
+// and shared by every replica, and NewServer fails when the server has no
+// Redis. An invalid configuration fails NewServer rather than being ignored.
+func WithServerAPILimits(limits apiserver.APILimits) ServerOption {
+	return func(c *serverConfig) { c.apiLimits = limits }
 }
 
 // ErrSupplyContentTooLarge is returned by UpdateSupply and UpdateSupplyIfMatch

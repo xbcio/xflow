@@ -39,6 +39,12 @@ var (
 	// ErrFAFPayloadSnapshotUnsupported is returned before asynchronous work starts
 	// when a caller-owned payload contains a value that FAF cannot isolate.
 	ErrFAFPayloadSnapshotUnsupported = errors.New("xflow: FireAndForget payload cannot be safely snapshotted")
+
+	// ErrFAFIdempotencyUnsupported is returned when an idempotency key is passed
+	// to FireAndForget. A key promises that a retry finds the work the first
+	// attempt started, and FAF deliberately persists nothing to find — accepting
+	// the key would answer a retry the same way twice.
+	ErrFAFIdempotencyUnsupported = errors.New("xflow: FireAndForget does not support idempotency keys")
 )
 
 // fafHandlerBinding is the immutable local callback identity captured after a
@@ -90,6 +96,11 @@ func (e *Engine) FireAndForget(ctx context.Context, workflowID types.WorkflowID,
 	cfg := &invokeConfig{}
 	for _, opt := range opts {
 		opt(cfg)
+	}
+	if cfg.idempotencyKey != "" {
+		// Refused rather than ignored: FAF persists no execution to look up, so a
+		// key would promise a retry guarantee this path cannot make.
+		return fmt.Errorf("%w: FireAndForget creates no execution to be idempotent about", ErrFAFIdempotencyUnsupported)
 	}
 	if cfg.execTTL > 0 {
 		ctx = enginecore.WithExecutionTTL(ctx, cfg.execTTL)

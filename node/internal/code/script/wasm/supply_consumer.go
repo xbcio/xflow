@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/supply"
 )
 
@@ -72,7 +73,12 @@ func (c *supplyConsumer) OnSupplyChanged(ctx context.Context, snap supply.Snapsh
 // so a content change rebuilds its pool. It may be called at any time — the
 // activation path calls it when a workflow arrives, long after warmup.
 //
-// The key is (module, supplyNode) so re-activating the same workflow replaces the
+// ns is the namespace the supply belongs to. Supply identity is (namespace,
+// name), so the caller must pass the namespace of the activation that declares
+// the dependency: a module hosted for namespace A must not be rebuilt from
+// namespace B's content that happens to share the node name.
+//
+// The key is (module, supply key) so re-activating the same workflow replaces the
 // registration instead of accumulating duplicates.
 //
 // An undecodable code is rejected here rather than registered. Unlike the prewarm
@@ -82,7 +88,7 @@ func (c *supplyConsumer) OnSupplyChanged(ctx context.Context, snap supply.Snapsh
 // module permanently on the legacy globals path, evaluating against no rules and
 // passing every record through untagged and uncleansed, with no diagnostic
 // anywhere. This function can return an error, so it does.
-func RegisterSupplyConsumer(code string, supplyNode string, reg *supply.Registry) error {
+func RegisterSupplyConsumer(ns namespace.Namespace, code string, supplyNode string, reg *supply.Registry) error {
 	if code == "" || supplyNode == "" {
 		return fmt.Errorf("wasm: RegisterSupplyConsumer requires both code and supply node name")
 	}
@@ -93,6 +99,7 @@ func RegisterSupplyConsumer(code string, supplyNode string, reg *supply.Registry
 	if reg == nil {
 		reg = supply.Default
 	}
+	k := supply.KeyOf(ns, supplyNode)
 	c := &supplyConsumer{code: code, host: sharedReactorHost}
 	// Mark the module source-driven BEFORE registering: RegisterConsumer notifies
 	// immediately when content is already cached, and that notification builds the
@@ -102,14 +109,14 @@ func RegisterSupplyConsumer(code string, supplyNode string, reg *supply.Registry
 	// Record the slot for the creation-time resolver, for the same reason the
 	// digest path does: an engine created after the notification missed it holds
 	// no pool and would otherwise never be handed this content.
-	sharedReactorHost.noteSupplyRef(key, moduleSupplyRef{reg: reg, name: supplyNode})
-	reg.RegisterConsumer(supplyNode, consumerKeyFor(key, supplyNode), c)
+	sharedReactorHost.noteSupplyRef(key, moduleSupplyRef{reg: reg, key: k})
+	reg.RegisterConsumer(k, consumerKeyFor(k, key), c)
 	return nil
 }
 
 // UnregisterSupplyConsumer removes the registration. Idempotent. An undecodable
 // code is a no-op: RegisterSupplyConsumer rejected it, so nothing is installed.
-func UnregisterSupplyConsumer(code string, supplyNode string, reg *supply.Registry) {
+func UnregisterSupplyConsumer(ns namespace.Namespace, code string, supplyNode string, reg *supply.Registry) {
 	key, err := moduleKey(code)
 	if err != nil {
 		return
@@ -117,16 +124,21 @@ func UnregisterSupplyConsumer(code string, supplyNode string, reg *supply.Regist
 	if reg == nil {
 		reg = supply.Default
 	}
-	reg.UnregisterConsumer(supplyNode, consumerKeyFor(key, supplyNode))
-	sharedReactorHost.forgetSupplyRef(key, moduleSupplyRef{reg: reg, name: supplyNode})
+	k := supply.KeyOf(ns, supplyNode)
+	reg.UnregisterConsumer(k, consumerKeyFor(k, key))
+	sharedReactorHost.forgetSupplyRef(key, moduleSupplyRef{reg: reg, key: k})
 }
 
-// consumerKeyFor builds the registration key from a module identity. Register and
-// unregister must derive it the same way, or an unregister silently leaves the
-// consumer installed and content changes keep rebuilding the pool of a module
-// nothing executes any more.
-func consumerKeyFor(moduleKey, supplyNode string) string {
-	return supplyNode + "@" + moduleKey
+// consumerKeyFor builds the registration key from a supply key and a module
+// identity. Register and unregister must derive it the same way, or an
+// unregister silently leaves the consumer installed and content changes keep
+// rebuilding the pool of a module nothing executes any more.
+//
+// The namespace is part of the key so the two namespaces' registrations of the
+// same node name cannot displace each other in the registry's per-supply
+// consumer map.
+func consumerKeyFor(k supply.Key, moduleKey string) string {
+	return string(k.Namespace) + "/" + k.Name + "@" + moduleKey
 }
 
 // supplyConsumerByDigest is a variant of supplyConsumer for modules identified
@@ -251,6 +263,9 @@ type consumerOwnerKey struct {
 //
 // The function strips the "sha256:" prefix itself; callers pass the full digest.
 //
+// ns is the namespace of the supply node being consumed — see
+// RegisterSupplyConsumer for why the caller, not this package, supplies it.
+//
 // owner identifies the caller establishing this registration (spec Z.4 / Z.8).
 // It must be a stable, non-empty string that is unique to the caller's own
 // lifecycle — an activation identity (including ReplicaIndex) for the
@@ -259,11 +274,11 @@ type consumerOwnerKey struct {
 // namespaces cannot collide (see the two forwarders in
 // service/runner/trigger_activation_handler.go and
 // node/internal/code/script/script.go for the exact values). Registering the
-// same owner twice against the same (digest, supplyNode) is idempotent: the
-// underlying registry registration is installed at most once per key
-// regardless of how many times the same owner calls this.
-func RegisterSupplyConsumerByDigest(digest string, supplyNode string, owner string, reg *supply.Registry) error {
-	return registerSupplyConsumerByDigestOn(sharedReactorHost, digest, supplyNode, owner, reg)
+// same owner twice against the same (namespace, digest, supplyNode) is
+// idempotent: the underlying registry registration is installed at most once
+// per key regardless of how many times the same owner calls this.
+func RegisterSupplyConsumerByDigest(ns namespace.Namespace, digest string, supplyNode string, owner string, reg *supply.Registry) error {
+	return registerSupplyConsumerByDigestOn(sharedReactorHost, ns, digest, supplyNode, owner, reg)
 }
 
 // registerSupplyConsumerByDigestOn is RegisterSupplyConsumerByDigest against a
@@ -271,7 +286,7 @@ func RegisterSupplyConsumerByDigest(digest string, supplyNode string, owner stri
 // resolution against a private reactorHost without touching the process-wide
 // one; production always passes sharedReactorHost. See
 // RegisterSupplyConsumerByDigest for the contract.
-func registerSupplyConsumerByDigestOn(h *reactorHost, digest string, supplyNode string, owner string, reg *supply.Registry) error {
+func registerSupplyConsumerByDigestOn(h *reactorHost, ns namespace.Namespace, digest string, supplyNode string, owner string, reg *supply.Registry) error {
 	if digest == "" || supplyNode == "" {
 		return fmt.Errorf("wasm: RegisterSupplyConsumerByDigest requires both digest and supply node name")
 	}
@@ -285,7 +300,8 @@ func registerSupplyConsumerByDigestOn(h *reactorHost, digest string, supplyNode 
 	if reg == nil {
 		reg = supply.Default
 	}
-	ownerKey := consumerOwnerKey{reg: reg, key: consumerKeyFor(key, supplyNode)}
+	k := supply.KeyOf(ns, supplyNode)
+	ownerKey := consumerOwnerKey{reg: reg, key: consumerKeyFor(k, key)}
 
 	// Record the SLOT before the owner short-circuit below, and unconditionally:
 	// this is the fact engine creation resolves config from, and it must be
@@ -293,7 +309,7 @@ func registerSupplyConsumerByDigestOn(h *reactorHost, digest string, supplyNode 
 	// therefore does nothing further. Ordering against the creation path does not
 	// matter — an engine created before this line is handed the content by the
 	// registry's own immediate notify, and one created after reads the index.
-	h.noteSupplyRef(key, moduleSupplyRef{reg: reg, name: supplyNode})
+	h.noteSupplyRef(key, moduleSupplyRef{reg: reg, key: k})
 
 	consumerOwnersMu.Lock()
 	set, exists := consumerOwners[ownerKey]
@@ -323,7 +339,7 @@ func registerSupplyConsumerByDigestOn(h *reactorHost, digest string, supplyNode 
 	}
 	c := &supplyConsumerByDigest{moduleKey: key, host: h}
 	h.seedSourceDrivenByKey(key)
-	reg.RegisterConsumer(supplyNode, ownerKey.key, c)
+	reg.RegisterConsumer(k, ownerKey.key, c)
 	return nil
 }
 
@@ -333,14 +349,14 @@ func registerSupplyConsumerByDigestOn(h *reactorHost, digest string, supplyNode 
 // registration is only actually removed (reg.UnregisterConsumer) when the
 // LAST owner releases — see consumerOwners for why this must be set
 // membership rather than a count.
-func UnregisterSupplyConsumerByDigest(digest string, supplyNode string, owner string, reg *supply.Registry) {
-	unregisterSupplyConsumerByDigestOn(sharedReactorHost, digest, supplyNode, owner, reg)
+func UnregisterSupplyConsumerByDigest(ns namespace.Namespace, digest string, supplyNode string, owner string, reg *supply.Registry) {
+	unregisterSupplyConsumerByDigestOn(sharedReactorHost, ns, digest, supplyNode, owner, reg)
 }
 
 // unregisterSupplyConsumerByDigestOn is UnregisterSupplyConsumerByDigest against
 // a caller-chosen host, mirroring registerSupplyConsumerByDigestOn so a test's
 // private-host registration is released from the same host it was recorded on.
-func unregisterSupplyConsumerByDigestOn(h *reactorHost, digest string, supplyNode string, owner string, reg *supply.Registry) {
+func unregisterSupplyConsumerByDigestOn(h *reactorHost, ns namespace.Namespace, digest string, supplyNode string, owner string, reg *supply.Registry) {
 	if owner == "" {
 		// No identity to release — cannot be anyone's registration under the
 		// owner-set contract, so there is nothing safe to do but no-op. See
@@ -355,7 +371,8 @@ func unregisterSupplyConsumerByDigestOn(h *reactorHost, digest string, supplyNod
 	if reg == nil {
 		reg = supply.Default
 	}
-	ownerKey := consumerOwnerKey{reg: reg, key: consumerKeyFor(key, supplyNode)}
+	k := supply.KeyOf(ns, supplyNode)
+	ownerKey := consumerOwnerKey{reg: reg, key: consumerKeyFor(k, key)}
 
 	consumerOwnersMu.Lock()
 	set, exists := consumerOwners[ownerKey]
@@ -375,11 +392,11 @@ func unregisterSupplyConsumerByDigestOn(h *reactorHost, digest string, supplyNod
 		// registry entry must survive this release untouched.
 		return
 	}
-	reg.UnregisterConsumer(supplyNode, ownerKey.key)
+	reg.UnregisterConsumer(k, ownerKey.key)
 	// The last owner is gone, so this module must stop resolving its config from
 	// this supply: a later engine creation would otherwise install content for a
 	// dependency nothing hosts here any more.
-	h.forgetSupplyRef(key, moduleSupplyRef{reg: reg, name: supplyNode})
+	h.forgetSupplyRef(key, moduleSupplyRef{reg: reg, key: k})
 }
 
 // SupplyConfiguredByDigest reports whether the module named by digest is both

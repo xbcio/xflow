@@ -48,6 +48,13 @@ apiserver 的用户面模块里、走 principal/authz 认证，但它的响应�
 认证与「面」正交：entry-seed 用 principal/authz 是因为它需要 namespace 防伪造
 （§6.3），这不影响它的响应契约归属。
 
+第二个需要这条判据的端点是 server 托管的 webhook 入口
+（`POST|{method} /v1/hooks/{namespace}/{workflow_id}/{entry_unit}`，§6.3）：它由
+apiserver 托管、注册在用户面模块里，认证却是入口自己的 HMAC 签名（外部发送方没有
+平台 principal 可出示），而响应类型仍是 `protocol.SeedExecutionResponse`。按同一条
+判据，它同样属于 runner 协议面、不包信封——「用哪套认证」从来不是判据，这个端点是把
+这句话逼到极限的例子。
+
 ---
 
 ## 1. 路径语法（用户面）
@@ -242,8 +249,95 @@ GET /v1/workflows?page=1&page_size=20
 | 409 | 状态冲突、幂等重放、栅栏拒绝 |
 | 412 / 428 | 条件请求失败 / 要求条件请求 |
 | 413 | 请求体超限 |
-| 429 | 限流 |
-| 503 | 后端依赖不可用 |
+| 429 | 限流：API 准入层的 `rate_limited`，或工作流 `settings.concurrency` 的 `workflow_concurrency_*`（§4.3） |
+| 503 | 后端依赖不可用；或本副本过载 `server_overloaded`（§4.3） |
+
+### 4.3 API 准入（限速与背压）
+
+变更类路由在认证之后、admission 审计之前过两道闸。被拒的请求**不写审计行、
+不触达 store、不执行**，两种拒绝都带整数秒 `Retry-After`（≥1）：
+
+| 闸 | 状态码 / code | 维度 | 默认 | `Retry-After` |
+| --- | --- | --- | --- | --- |
+| inflight 上限 | 503 `server_overloaded` | 每副本，全部覆盖路由共用一个上限；webhook 类另有 1/4 子上限（至少 1） | 1024（`--api-max-inflight`；负数关闭） | 1，下限而非承诺 |
+| 令牌桶限速 | 429 `rate_limited` | 每 namespace（认证主体的）；webhook 为 namespace+workflow | 关闭（`--api-rate` 为 0） | 桶补出一个令牌的时间，向上取整 |
+
+先查 inflight 再查速率：过载副本不必多一次 Redis 往返就能卸载。非阻塞——满了
+立即拒绝，不排队。
+
+覆盖范围：execute、execute-by-id、signals、revoke-signal、cancel、pause、resume、
+rerun、schedule backfill（backfill 会发起执行）、dead-letter replay（replay 会重投），
+以及 webhook 入口。**不覆盖**：`POST /v1/executions`（entry-seed，trigger 已有
+自己的 429 与重投，再限会叠加退避）、`GET .../wait`（长轮询会占满 inflight）、读接口、
+注册与 schedule 管理。覆盖集合不是手写清单：`admission_routes_test.go` 枚举生产 mux
+上每个 POST/PUT/PATCH/DELETE 可达的路由，要求逐条要么归入覆盖（并驱动到拒绝），
+要么豁免并给出理由；新路由未归类会让该守卫直接失败。webhook 只对**签名正确**的请求
+计费，否则知道路径的人就能花掉
+合法发送方的额度；未签名洪峰在签名校验**之前**就占 inflight 槽，所以 webhook 类另有
+1/4 上限（派生，至少 1）：unsigned 洪峰被子上限削掉，认证过的 execute 仍拿得到容量。
+webhook 的拒绝沿用其裸 `{"error": code}` 形状。
+
+`rate_limited` 与 `workflow_concurrency_*` 同为 429 但互不相干：前者保护控制面，
+在请求被准入之前判定，与工作流无关；后者是工作流自己声明的业务容量，在准入之后
+判定。客户端按 `code` 区分，二者都可重试。
+
+计数位置（`--api-rate-limit-mode`）：
+
+- `local`（默认）：每副本内存令牌桶，配置值是**单副本**额度，全舰队放行
+  rate×副本数。不增加任何网络往返。
+- `redis`：每个键一个 Redis 令牌桶（Lua 原子脚本，时钟取 Redis `TIME`），全部
+  副本共享一份额度，代价是每个被限速的请求多一次 Redis 往返（250ms 超时）。
+  Redis 不可达时**放行到本地桶**（fail open：限流器故障不得拖垮 API），
+  `xflow_api_rate_limit_fallback_total` 按 reason 计数，告警日志每 30 秒至多一条。
+  连 Redis 都黑掉（连得上却不回话）时失败会等满超时：连续 3 次失败后**熔断 5 秒**，
+  期间直接本地判定、不再调用 Redis，也不让每个请求占着 inflight 槽等满 250ms；
+  冷却结束后的第一个请求探测 Redis，再失败重新计数。没有
+  Redis 后端的部署选 `redis` 会在启动时失败。
+
+指标：`xflow_api_rate_limited_total{route,reason}`（reason=`rate`|`inflight`，
+route 为 `execute`|`execution`|`webhook`）、`xflow_api_inflight{route_class}`、
+`xflow_api_limiter_buckets`（本地桶数，观察空闲清扫）、
+`xflow_api_rate_limit_fallback_total{reason}`（reason=`redis_error`|`breaker_trip`|
+`breaker_open`，仅 redis 模式）。
+
+### 4.4 幂等提交（`Idempotency-Key`）
+
+网络重试不得变成第二次执行。三条发起执行的变更路由接受 `Idempotency-Key`
+请求头（IETF draft 命名）：`POST /v1/workflows/execute`（内联）、
+`POST /v1/workflows/{id}/execute`（已注册）、`POST /v1/executions/{id}/rerun`。
+键形状为 1–255 个 `[A-Za-z0-9._:-]`；越界**拒绝而非忽略**：
+400 `idempotency_key_invalid`。静默忽略一个键，等于对调用方的重试安全承诺
+不作数。
+
+| 情形 | 应答 |
+| --- | --- |
+| 首次请求 | 现有 2xx 不变（`duplicate` 缺省） |
+| 同键 + 同请求 | 200 `{execution_id, status, duplicate: true}`，**与 webhook duplicate 同形状**：给出首次创建的执行 id 与其**当前**状态（可能已 `queued`/`paused`/终态），不新建执行 |
+| 同键 + 不同请求 | 409 `idempotency_key_conflict`（调用方 bug，重试不解决） |
+| 同键 + 同请求并发 | 409 `idempotency_key_in_progress` + `Retry-After: 1`：首个请求仍在创建，等一拍重试即可 |
+| 后端不支持键 | 503 `idempotency_unsupported`（fail closed：静默忽略会让调用方误以为重试安全） |
+
+「同请求」由服务端指纹判定：op、定义版本与 digest、entry、params、test 标志，
+rerun 另含 parent 与 `from_node`/`include_success`；params 的 map 键顺序无关，
+trace_id 等运行时值不参与。键的作用域随路由：已注册工作流
+（`workflow:<id>`）、内联定义（`definition:<ns>/<name>`）、rerun
+（`rerun:<parent>`）——同一把键在不同工作流下互不相干。
+
+键的 claim 窗口默认 **24h**（`engine.DefaultIdempotencyTTL`，SDK 可调；且被钳制
+为**不长于执行保留期**——claim 比执行活得久会指向已删执行）。窗口过后键并不
+立即自由：只要它创建的那个执行还在保留期内，同键请求仍答 duplicate（后端以
+执行记录兜底——在原处重建等于覆写它），claim 与执行都消失后同键才开启新执行。
+键的认领**先于**
+持久化：claim 带 30s 租约，进程在创建中途崩溃后，同键重试会接管那个 claim
+而不是永久卡在 in-progress；提交在什么都没持久化前被拒（如工作流并发队列
+拒绝）则释放 claim，其重试不会被误判为 duplicate。§4.3 的准入拒绝发生在键
+被认领之前，429/503 后的重试同样安全。`FireAndForget` 不产生执行，携带键时
+直接拒绝而不是忽略。
+
+契约测试：`backend/internal/statestoretest` 的幂等契约对 local 与 rstate 两个
+后端各跑一遍（含过期 claim 释放、崩溃接管、并发只建一个）；路由面在
+`service/apiserver/idempotency_test.go`，openapi 描述见
+`api/openapi/xflow-v1.yaml` 的 `IdempotencyKey` 参数。
 
 ---
 
@@ -307,6 +401,14 @@ runner 协议**不加 `trace_id` 字段**，链路透传走 OTel `traceparent` �
 
 配守卫测试：**所有已注册路由都有对应 Op，且所有 Op 都有路由消费**。
 
+例外只有一条，且必须是显式的：server 托管的 webhook 入口
+（`/v1/hooks/{namespace}/{workflow_id}/{entry_unit}`）**不在 authz 包装器之内**，
+因此没有 Op，也不进 `scopeForOperation`——它的认证是入口自己的 HMAC 签名（§6.3）。
+`TestEveryProtectedUserPathRejectsUnauthenticated` 对这唯一一条路径显式豁免，并配了
+反向测试 `TestWebhookEntryRejectsBadSignature`：缺失、格式错、签名不匹配一律 401。
+豁免与「漏登记」在语句上无法区分，能区分它们的是那条反向测试；删掉它，这个豁免就
+退化成 §6.1 要防的那个洞。
+
 反向的死代码同样要防：`OpWorkflowDefinitionCreate`、`OpWorkflowDefinitionRead`、
 `OpWorkflowDefinitionValidate`、`OpWorkflowDefinitionPublish`、
 `OpWorkflowExecutionInvoke` 这 5 个 Op 常量除 `authz.go` 自身外**没有任何路由
@@ -314,6 +416,12 @@ runner 协议**不加 `trace_id` 字段**，链路透传走 OTel `traceparent` �
 引用。（`OpWorkflowDefinitionUpdate` 被 PUT `/v1/workflows/{id}` 消费，
 `OpWorkflowRead` 被 GET `/v1/workflows/{id}` 消费——这两个是活的，不要删。
 `OpWorkflowRead` 在 `sqlaudit_test.go` 里还被当作任意占位值使用，那不是消费点。）
+
+**新增运维操作使用独立 scope，需要显式补授权**：`execution.control`（pause / resume）
+与 `execution.rerun`（rerun）都不在既有的 `execution` scope 内。对既有调用方而言，这意味着
+**只持有 `execution` 的 token 调用 pause 会得到 403**（rerun 同理），必须显式补授权——这是
+有意为之：暂停一条正在运行的流水线、从终态执行派生新执行，都比「读 / 信号 / 取消」更重，
+不应随 `execution` 一起被默认授予。
 
 ### 6.2 namespace 只能从认证主体取
 
@@ -324,12 +432,18 @@ entry-seed 端点（`handleSeedExecution`）目前做对了这一点，本规范
 携带的 `admission_key` 是幂等键，其命名空间归属由服务端裁定，防止伪造跨命名空间
 的 admission key。
 
-### 6.3 两套认证体系不混
+webhook 入口是唯一的例外，且是有意的：路径里的 namespace 是**声明**而不是来源，
+服务端把它与记录比对、不一致按 404 处理，准入跑在记录的 namespace 下（§6.3）。
+新增端点不得以它为范例——这条例外成立的前提是「外部发送方没有平台身份可出示」，
+没有这个前提的端点必须走 §6.2 的主规则。
+
+### 6.3 认证体系不混（三套，各有适用面）
 
 | 面 | 认证机制 |
 | --- | --- |
 | 用户面 / 管理面 | apiserver 的 principal/authz 体系，Bearer token，Op + scope |
 | runner 协议面 | `Core.authn()` 的 runner directory 认证，`AuthToken` 字段 + SessionID |
+| server 托管的 webhook 入口 | 入口自己的 HMAC 签名（`X-XFlow-Signature: sha256=<hex>`，常量时间比较），密钥取自 `secret_supply` 指向的 supply 资源；不在 authz 包装器内 |
 
 **跨界端点必须显式记录选了哪套及理由。** 现存三条跨界端点——runner 用同一个
 `--token` 走 principal/authz 打它们：
@@ -346,6 +460,20 @@ runner directory 认证只回答「这是不是一台已注册的 runner」。�
 
 推论：runner 进程同时持有两种身份（runner session + principal token），这是设计
 使然，不是配置错误。任何简化认证的提案必须先解释这三条端点的 namespace 从哪来。
+
+**第三套认证：server 托管的 webhook 入口（§7）。** 它既不是 principal/authz 也不是
+runner directory——发送方是外部系统（代码托管、支付回调），没有平台身份可出示。
+它的认证是**入口自己的 HMAC 签名**：密钥由工作流定义里的 `secret_supply` 指定、服务端
+从 supply 读取，签名覆盖原始 body 并用常量时间比较；请求既不能携带密钥，也不能选择
+用哪个密钥，未配密钥的定义在注册期就被拒。因为没有认证主体，它拿不到上面那条
+「namespace 从认证主体注入」的防伪造机制：路径里的 namespace 只是**声明**，服务端把
+它与记录里的 namespace 比对，不一致按 404 处理，而准入始终跑在**记录的** namespace 下。
+
+审计上的差别要写清楚：entry-seed 的准入不写每请求账本，那是被显式豁免的吞吐决定
+（见 `auditedPerRequest`），但它仍由包装器认证授权，**拒绝照旧入账**；webhook 入口在
+包装器之外，认证由 handler 自己完成，因此**签名被拒这条路径没有任何审计行**，只有一条
+不含密钥、不含签名的错误日志。这是「用签名换掉平台身份」必须付的代价，部署方若要
+审计这个入口，目前只能靠 apiserver 的日志。
 
 ---
 
@@ -369,11 +497,34 @@ GET    /v1/executions/{id}/wait             等待完成
 
 POST   /v1/executions                       entry-seed（runner 调用）
 
+POST|{method} /v1/hooks/{namespace}/{workflow_id}/{entry_unit}
+                                            server 托管 webhook 入口——已实现；
+                                            方法取自入口节点自己的 method 参数；
+                                            响应形状与 entry-seed 同面（§0.1），不包信封
+
+GET    /v1/node-types                       已注册节点类型的 NodeFormSchema 列表
+GET    /v1/node-types/{type}                单个节点类型（?version= 选版本，缺省取最新）
+GET    /v1/current-user                     调用方自身的已验证身份（仅 principal 认证路径注册）
+
 GET    /v1/supplies/{name}                  取 supply 内容（裸流）
 GET    /v1/artifacts/{digest}               取产物字节（裸流，另支持 HEAD）
 
 GET    /v1/management/leader                leader 状态
+GET    /v1/management/runners               runner 列表
 GET    /v1/management/runners/{id}          单 runner 查询
+POST   /v1/management/runners/{id}/drain    排空（不远程停进程，不强取消已租任务）
+POST   /v1/management/runners/{id}/resume   恢复接单
+POST   /v1/management/runners/{id}/revoke-identity  吊销该 runner 已签发的身份
+POST   /v1/management/runner-pools          创建 runner 池
+GET    /v1/management/runner-pools          池列表
+GET    /v1/management/runner-pools/{id}     读取池
+PATCH  /v1/management/runner-pools/{id}     更新池
+DELETE /v1/management/runner-pools/{id}     删除池
+POST   /v1/management/runner-pools/{id}/tokens                    签发注册 token
+GET    /v1/management/runner-pools/{id}/tokens                    token 列表
+DELETE /v1/management/runner-pools/{id}/tokens/{token_id}         吊销 token
+GET    /v1/management/runner-pools/{id}/tokens/{token_id}/audit   token 审计
+GET    /v1/management/runner-pools/{id}/runners                   池内 runner 实例
 GET    /v1/management/executions/{id}       execution 查询（管理视角）
 GET    /v1/management/dead-letters/{execID}          列表（游标分页，保持不动）
 POST   /v1/management/dead-letters/{execID}/replay   重放
@@ -442,9 +593,44 @@ entry-seed 的 409 响应有**两种不同 body**，客户端据此决定是否�
 
 判错方向会导致 **generation 升级期间静默丢消息**。
 
+同一个端点还有第三种承重形状：**429 拒绝**。工作流自己的并发策略（`settings.concurrency`）
+拒绝了这次 seed，服务端什么都没持久化，entry-unit 的结果仍然属于 runner：
+
+| 情形 | body | 客户端行为 |
+| --- | --- | --- |
+| REJECT 模式已达 limit | `{"state":"over_limit","error":"workflow_concurrency_limit"}` | **不提交 offset**（本次未持久化，结果仍属调用方，退避后重试） |
+| QUEUE 模式积压达 `max_queued` | `{"state":"queue_full","error":"workflow_concurrency_queue_full"}` | **不提交 offset**（同上；等的是队列排空而非槽位） |
+
+此外还有 503（**不可重试**，与上表两种 429 相反）：seed 的工作流声明了并发上限、
+而本部署的状态存储无法执行它——`{"error":"workflow_concurrency_unavailable"}`，
+裸 errorResponse，与用户面 execute 的同码 503 同义。引擎在这里 fail-closed（放行
+等于废掉作者用来保护下游的上限），因此没有 `Retry-After`：答案随部署改变，不随
+runner 重试改变。**调用方必须重试这一条记录直到它被接受**：一次 429 拒绝不提交
+offset，若直接跳过、让后面的记录提交，就等于静默丢掉它（见 §8.2 下方对逐条路径的
+说明）。
+
+两种状态分开是必要的：客户端动作相同（不提交、退避、重试），但要等的东西不同
+（等槽位 vs 等队列）。`Retry-After` 取值 1 秒，与用户面 execute 的同两种拒绝一致
+——它是**下限**而非释放时间的承诺（槽位何时空出不可知）。仓库内自带的 runner 只读
+状态码、不读该头，两条路径都自己重投，且共用同一套节奏（`aggregateRetryDelay`：
+前八次按 flush 间隔，entry-seed 形态下为 1 秒；之后翻倍，上限 30 秒）。差别只在
+**手里攥着什么**：批次路径把整批留在手里重推整批；逐条路径（未开 `aggregate` 的
+默认形态）的 worker 在同一个分区上原地重试**同一条记录**，重试携带同一个 admission
+key——key 由记录自身身份（topic/partition/offset）构造，所以第二次尝试是重试，
+不是一次新准入。阻塞这条路径是**要害**而非副作用：worker 每分区串行，等待期间该
+分区不会准入后面的记录，也就没有任何后续 commit 能越过被拒的那条——这正是「不提交」
+等于「会被重投」而不是「被跳过」的原因。反过来，两条路径都只重投**拒绝**：传输错误
+与未知状态立即让位给 Kafka 重投，因为其中有些（generation 栅栏、协议分歧）重试永远
+不会成功，无界重试比一次重投更糟。拒绝本身必须**被计数和记录**
+（`xflow_trigger_batch_admissions_total{state="refused"}`，其 `reason` 区分
+`concurrency_limit` 与 `queue_full`；分区停摆由 `xflow_trigger_consumption_blocked`
+报出），否则一次限流读起来和「这个 topic 没流量」完全一样。客户端必须把这个 429
+判成**决定**而不是故障——判成故障会把它记进错误率，掩盖「配置正确、正在限流」这一
+事实；判成成功则会为一条从不存在的 execution 提交 offset，等于静默丢消息。
+
 这个判别目前依赖「`state` 字段存不存在」这一隐式契约。**本规范明确该端点不信封化**
-（理由见 §0.1），因此这个判别保持原样。任何要给它加信封的提案，必须同时把判别改为
-看 `code` 值，并在真实的 generation 升级场景下验证——不能只跑单测。
+（理由见 §0.1），因此 409 的那个判别保持原样。任何要给它加信封的提案，必须同时把
+判别改为看 `code` 值，并在真实的 generation 升级场景下验证——不能只跑单测。
 
 ### 8.3 纪律要求
 
@@ -477,11 +663,10 @@ entry-seed 的 409 响应有**两种不同 body**，客户端据此决定是否�
 
 前端 `web/packages/xflow-api/src/index.ts` 已在调用、服务端**不存在**的路由：
 
-- `GET /workflows`（列表）
 - `GET /workflows/{id}/runtime` → **废除**，无服务端对应概念
 
-（`GET /workflows/{id}`、`PUT /workflows/{id}`、`POST /workflows/{id}/runs`→`POST /v1/workflows/{id}/execute`
-已在 workflows 路由迁移中实现。）
+（`GET /workflows`（列表，见 §9.6）、`GET /workflows/{id}`、`PUT /workflows/{id}`、
+`POST /workflows/{id}/runs`→`POST /v1/workflows/{id}/execute` 已在 workflows 路由迁移中实现。）
 
 ### 9.3 响应形状
 

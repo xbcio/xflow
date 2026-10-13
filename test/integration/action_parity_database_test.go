@@ -103,6 +103,7 @@ func TestDatabaseActionErrorParity(t *testing.T) {
 				InitialInterval: 50,
 			}
 			def := ParityWorkflow(source, retry)
+			def.Credentials = map[string]types.CredentialDef{"db": {Name: "db"}}
 
 			var cur *databaseParityHandler
 			register := func(reg engine.HandlerRegistrar) {

@@ -78,7 +78,7 @@ func TestTimerTriggerEventTruncatesToTheInterval(t *testing.T) {
 	// boundary.
 	const interval = time.Minute
 	tick := time.Date(2026, 8, 26, 13, 47, 29, 500_000_000, time.UTC)
-	event := newTimerTriggerEvent("wf-1", "timer", interval, tick)
+	event := newTimerTriggerEvent("wf-1", "timer", interval, tick, tick)
 
 	scheduled := time.Date(2026, 8, 26, 13, 47, 0, 0, time.UTC)
 	wantID := fmt.Sprintf("wf-1/timer/%d", scheduled.UnixNano())

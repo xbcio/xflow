@@ -95,6 +95,7 @@ type Backend struct {
 	triggerRuntime   *triggerPrimitives
 	resourcePool     types.ResourcePool
 	artifactCode     func(ctx context.Context, digest string) ([]byte, error)
+	logger           engine.Logger
 }
 
 // New creates a memory backend with its components but does NOT start the queue.
@@ -113,14 +114,17 @@ func New(opts ...Option) *Backend {
 	q := newMemoryQueueWithCapacity(cfg.concurrency, cfg.queueCapacity)
 	q.SetLogger(cfg.logger)
 
+	state := newMemoryState()
+
 	return &Backend{
-		state:            newMemoryState(),
+		state:            state,
 		queue:            q,
 		registry:         reg,
 		workflowRegistry: newWorkflowRegistry(),
-		triggerRuntime:   newTriggerPrimitives(),
+		triggerRuntime:   newTriggerPrimitives(state),
 		resourcePool:     cfg.resourcePool,
 		artifactCode:     cfg.artifactCode,
+		logger:           cfg.logger,
 	}
 }
 
@@ -224,10 +228,52 @@ func (b *Backend) bindHandlerWithOutbox(eng *engine.Engine, handler func(context
 		engine.NewOutboxDispatcher(eng, interval).Run(outboxCtx)
 	}()
 
+	queueTimeoutDone := make(chan struct{})
+	go func() {
+		defer close(queueTimeoutDone)
+		b.runQueueTimeoutSweeper(outboxCtx, interval)
+	}()
+
 	return func() {
 		cancelOutbox()
 		<-outboxDone
+		<-queueTimeoutDone
 		b.queue.Stop()
+	}
+}
+
+// queueTimeoutSweepInterval is how often queue_timeout is enforced when the
+// caller does not say otherwise. One second, matching the outbox dispatcher's
+// default tick: a coarser sweep would stretch a short queue_timeout into a wait
+// nobody could explain from the definition.
+const queueTimeoutSweepInterval = time.Second
+
+// runQueueTimeoutSweeper drives the store's queue-timeout expiry on a clock.
+//
+// Queue timeouts are enforced by whichever background loop the deployment owns.
+// Cluster mode has the control plane's concurrency maintenance; the in-process
+// backend has no control plane, so without this loop queue_timeout would be
+// enforced in one deployment and silently ignored in the other — and a
+// submission waiting forever for a slot is not a failure any caller can
+// distinguish from a busy workflow.
+//
+// It holds no state: the deadlines live in the store, and every tick asks the
+// store to advance the ones that passed.
+func (b *Backend) runQueueTimeoutSweeper(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = queueTimeoutSweepInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if _, err := b.state.ExpireQueuedExecutions(ctx, 0); err != nil && b.logger != nil {
+				b.logger.Error("concurrency_queue_timeout_sweep_failed", "err", err)
+			}
+		}
 	}
 }
 

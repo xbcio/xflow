@@ -16,6 +16,7 @@ type GroupStore interface {
 	engine.GroupStateStore
 	engine.GroupLeaseReader
 	engine.GroupLeaseExpirer
+	engine.GroupUnitPhaseReader
 }
 
 // singleGroupGraph: ingest(trigger)->analyze, both in same group, no external nodes => UnitCount=1.
@@ -54,6 +55,28 @@ func twoUnitGraph(t *testing.T) *graph.Graph {
 	})
 	if err != nil {
 		t.Fatalf("compile two-unit graph: %v", err)
+	}
+	return g
+}
+
+// transientGroupGraph: singleGroupGraph with the group declared transient. The
+// workflow itself stays durable on purpose — a transient group inside an
+// otherwise durable workflow is the case the mode exists for, and the case
+// where the execution-level transient machinery answers "durable" and cannot
+// stand in for it.
+func transientGroupGraph(t *testing.T) *graph.Graph {
+	t.Helper()
+	g, err := graph.Compile(&types.WorkflowDef{
+		Name: "single-transient",
+		Nodes: []types.NodeDef{
+			{Name: "ingest", Kind: types.NodeKindTrigger},
+			{Name: "analyze", Kind: types.NodeKindAction},
+		},
+		Connections: types.Connections{"ingest": {"main": {Targets: []types.Connection{{Node: "analyze", Input: "main"}}}}},
+		Groups:      []types.GroupDef{{Name: "edge", Members: []string{"ingest", "analyze"}, Mode: types.GroupModeTransient}},
+	})
+	if err != nil {
+		t.Fatalf("compile transient-group graph: %v", err)
 	}
 	return g
 }
@@ -685,6 +708,77 @@ func RunGroupStateContract(t *testing.T, newStore func(*testing.T) GroupStore) {
 		res2, err := s.CommitGroup(ctx, c)
 		if err != nil || !res2.Applied {
 			t.Fatalf("commit with current token: %+v err=%v", res2, err)
+		}
+	})
+
+	// groups[].mode: transient changes RETENTION, never the commit contract.
+	// What every backend must get right is that a transient group still
+	// acquires, still commits, still finalizes the execution, and still lets the
+	// caller read what it committed. That last one is the load-bearing
+	// assertion: "transient" must not be read as "expendable once terminal". A
+	// backend with no TTL to shorten (the local backend's process-local map)
+	// would have to DELETE the exits to expire them, and the deletions would
+	// take the workflow's result with them — for a group-only workflow the
+	// boundary exits ARE the output Wait reads after the run.
+	//
+	// The retention difference itself is backend-specific and is pinned where it
+	// lives (rstate's group_transient_test.go asserts the shortened TTLs; local
+	// asserts none).
+	t.Run("TransientGroupCommitKeepsExitsReadable", func(t *testing.T) {
+		s, id, gu := seed(t, transientGroupGraph(t))
+		if ok, _ := s.AcquireGroupLease(ctx, lease(id, gu, "T1")); !ok {
+			t.Fatal("acquire must succeed")
+		}
+		req := commit(id, gu, "T1")
+		req.Transient = true
+		res, err := s.CommitGroup(ctx, req)
+		if err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		if !res.Applied || res.Outcome != engine.CommitOutcomeAccepted {
+			t.Fatalf("transient group commit must be accepted exactly like a durable one: %+v", res)
+		}
+		if !res.ExecutionDone || res.ExecutionStatus != types.ExecutionStatusSuccess {
+			t.Fatalf("transient group commit must complete the execution: done=%v status=%v",
+				res.ExecutionDone, res.ExecutionStatus)
+		}
+		out, err := s.GetOutput(ctx, id, "analyze")
+		if err != nil {
+			t.Fatalf("GetOutput: %v", err)
+		}
+		if out == nil || out["k"] != "v" {
+			t.Fatalf("GetOutput after a transient group's terminal commit = %+v, want k=v: "+
+				"the mode changes retention, not the data", out)
+		}
+	})
+
+	// GetGroupUnitPhase is what lets a reader tell "this unit has a record" from
+	// "there is nothing left" — the distinction engine.Inspect needs to report a
+	// member of a transient group as expired instead of pending after the
+	// completion TTL. The contract is only about the record: phase values, and
+	// whether anything ever expires, differ per backend (the local backend has no
+	// TTL at all).
+	t.Run("GroupUnitPhaseReflectsRecordPresence", func(t *testing.T) {
+		s, id, gu := seed(t, twoUnitGraph(t))
+
+		if _, found, err := s.GetGroupUnitPhase(ctx, id, gu); err != nil || found {
+			t.Fatalf("phase before any lease/seed = (found:%v err:%v), want found=false, nil", found, err)
+		}
+
+		if ok, _ := s.AcquireGroupLease(ctx, lease(id, gu, "T1")); !ok {
+			t.Fatal("acquire must succeed")
+		}
+		if phase, found, err := s.GetGroupUnitPhase(ctx, id, gu); err != nil || !found || phase != engine.GroupUnitPhaseRunning {
+			t.Fatalf("phase while leased = (%q found:%v err:%v), want (%q true nil)",
+				phase, found, err, engine.GroupUnitPhaseRunning)
+		}
+
+		if _, err := s.CommitGroup(ctx, commit(id, gu, "T1")); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		if phase, found, err := s.GetGroupUnitPhase(ctx, id, gu); err != nil || !found || phase != engine.GroupUnitPhaseDone {
+			t.Fatalf("phase after commit = (%q found:%v err:%v), want (%q true nil)",
+				phase, found, err, engine.GroupUnitPhaseDone)
 		}
 	})
 }

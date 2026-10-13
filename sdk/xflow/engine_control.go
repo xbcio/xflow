@@ -2,6 +2,7 @@ package xflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -120,6 +121,90 @@ func (e *Engine) RevokeSignal(ctx context.Context, id types.ExecutionID, name st
 // fenced by the engine/state store.
 func (e *Engine) Cancel(ctx context.Context, id types.ExecutionID) error {
 	return e.eng.Cancel(ctx, id)
+}
+
+// Pause suspends dispatch of a running execution.
+//
+// The execution's status becomes types.ExecutionStatusPaused and it keeps its
+// concurrency slot: it is still holding the run it was admitted for, and giving
+// the slot back would leave a resume with nowhere to return. Work already leased
+// to a runner runs to completion and commits, so a pause is not an instant stop;
+// what it stops is the dispatch of anything new. Suspended nodes stay suspended
+// and arriving signals are still recorded, they just do not advance the run.
+//
+// Resume is the way back. Cancel also accepts a paused execution, which is the
+// only escape from a pause that would otherwise hold its slot forever.
+func (e *Engine) Pause(ctx context.Context, id types.ExecutionID) error {
+	if e.executionMode == ExecutionModeTransient {
+		return ErrTransientPauseUnsupported
+	}
+	return e.eng.Pause(ctx, id)
+}
+
+// Resume returns a paused execution to dispatch and queues what the pause held.
+//
+// The work is delivered as soon as this returns, so the caller can inspect the
+// execution immediately afterwards and see it moving.
+func (e *Engine) Resume(ctx context.Context, id types.ExecutionID) error {
+	if e.executionMode == ExecutionModeTransient {
+		return ErrTransientPauseUnsupported
+	}
+	return e.eng.Resume(ctx, id)
+}
+
+// Rerun derives a new execution from a terminal one, starting at fromNode.
+//
+// The new execution is not a retry of a node inside the old one: it is a new
+// execution that copies every result upstream of fromNode and runs fromNode and
+// everything downstream of it again. The execution it derives from is left
+// exactly as it was, so its leases, its fences and its audit history stay
+// intact, and the new execution carries parent_execution_id and rerun_from to
+// say what it came from.
+//
+// Only a failed, canceled or timeout execution can be rerun; a successful one
+// needs RerunIncludeSuccess. The new execution contends for its workflow's
+// concurrency slot like any submission, so a reached limit comes back as
+// engine.ErrConcurrencyLimit (a 429 at the HTTP layer), not as a failed rerun.
+// Transient mode declines the operation outright: see
+// ErrTransientRerunUnsupported.
+func (e *Engine) Rerun(ctx context.Context, id types.ExecutionID, fromNode string, opts ...RerunOption) (engine.RerunResult, error) {
+	if e.executionMode == ExecutionModeTransient {
+		return engine.RerunResult{}, ErrTransientRerunUnsupported
+	}
+	if fromNode == "" {
+		return engine.RerunResult{}, errors.New("xflow: rerun requires a from node")
+	}
+	req := engine.RerunRequest{ExecutionID: id, FromNode: fromNode}
+	for _, opt := range opts {
+		opt(&req)
+	}
+	return e.eng.Rerun(ctx, req)
+}
+
+// RerunOption adjusts one rerun request.
+type RerunOption func(*engine.RerunRequest)
+
+// RerunIncludeSuccess accepts a successful execution as a rerun source. Failed,
+// canceled and timeout executions are always accepted; a success is refused
+// without this option, because re-running work that finished cleanly is a
+// deliberate act rather than a recovery.
+func RerunIncludeSuccess() RerunOption {
+	return func(req *engine.RerunRequest) {
+		req.IncludeSuccess = true
+	}
+}
+
+// RerunIdempotencyKey makes this rerun safe to retry: a second Rerun with the
+// same execution, from-node, include_success and key returns the rerun the first
+// one created instead of deriving another.
+//
+// The key is scoped to the execution being rerun, so the same key on two
+// different parents is two different reruns. The retry is answered through
+// engine.RerunResult.Duplicate.
+func RerunIdempotencyKey(key string) RerunOption {
+	return func(req *engine.RerunRequest) {
+		req.IdempotencyKey = key
+	}
 }
 
 // Inspect returns execution and node status details for audit and UI flows.

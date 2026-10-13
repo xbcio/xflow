@@ -73,6 +73,11 @@ type runnerConfig struct {
 	// as a string until precedence resolution completes, like every other
 	// duration here.
 	seedRequestTimeout string
+	// supplyPollInterval is how often the runner re-reads every supply it
+	// hosts, independently of the control plane's hints. Empty means "unset":
+	// the SDK applies its own default. It cannot be set low enough to switch
+	// the poll off — the SDK refuses anything below its floor.
+	supplyPollInterval string
 	// browserCDP* is kept in the raw CLI/YAML representation until precedence
 	// resolution and validation complete, then converted in toSDKRunnerConfig.
 	browserCDPEndpoints      []string
@@ -182,6 +187,8 @@ func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
 	cmd.Flags().StringVar(&cfg.pollWait, "poll-wait", cfg.pollWait, "Poll wait duration when no task is available")
 	cmd.Flags().StringVar(&cfg.seedRequestTimeout, "seed-request-timeout", cfg.seedRequestTimeout,
 		"Deadline for one entry-seed admission (one Kafka batch); raise it when a large batch exceeds the 15s default")
+	cmd.Flags().StringVar(&cfg.supplyPollInterval, "supply-poll-interval", cfg.supplyPollInterval,
+		"How often this runner re-reads every supply it hosts; empty uses the SDK default (60s), and a value below the 10s floor is refused (polling cannot be disabled)")
 	cmd.Flags().StringArrayVar(&cfg.browserCDPEndpoints, "browser-cdp-endpoints", cfg.browserCDPEndpoints, "Allowlisted Browser CDP host rule: exact host, .suffix (apex + descendants), or *.wildcard (descendants only); repeatable")
 	cmd.Flags().IntVar(&cfg.browserCDPMaxContexts, "browser-cdp-max-contexts", cfg.browserCDPMaxContexts, "Maximum concurrent Browser CDP contexts")
 	cmd.Flags().StringVar(&cfg.browserCDPQueueTimeout, "browser-cdp-queue-timeout", cfg.browserCDPQueueTimeout, "Browser CDP context queue timeout")
@@ -544,6 +551,15 @@ func toSDKRunnerConfig(cfg runnerConfig) (xflowsdk.RunnerConfig, error) {
 			return xflowsdk.RunnerConfig{}, err
 		}
 	}
+	// Empty stays empty here too, for the same reason: the SDK owns the supply
+	// poll's default and floor, so an unset CLI value must reach it as zero.
+	supplyPollInterval := time.Duration(0)
+	if cfg.supplyPollInterval != "" {
+		supplyPollInterval, err = parsePositiveDuration("supply poll interval", cfg.supplyPollInterval)
+		if err != nil {
+			return xflowsdk.RunnerConfig{}, err
+		}
+	}
 	// supplyPullAllowedHosts is parsed and validated above but not passed on:
 	// xflow.RunnerConfig gains its SupplyPullAllowedHosts field with the
 	// supply-pull fetcher, and this literal gains the pass-through then.
@@ -565,6 +581,7 @@ func toSDKRunnerConfig(cfg runnerConfig) (xflowsdk.RunnerConfig, error) {
 		HeartbeatInterval:   heartbeat,
 		PollWait:            pollWait,
 		SeedRequestTimeout:  seedRequestTimeout,
+		SupplyPollInterval:  supplyPollInterval,
 		BrowserCDP: xnode.BrowserCDPConfig{
 			Endpoints:      copyTrimmedHosts(cfg.browserCDPEndpoints),
 			MaxContexts:    cfg.browserCDPMaxContexts,

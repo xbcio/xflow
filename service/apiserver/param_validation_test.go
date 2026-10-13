@@ -325,3 +325,45 @@ func TestNewRejectsInvalidParamValidationMode(t *testing.T) {
 		t.Fatal("New must reject an unknown ParamValidation mode")
 	}
 }
+
+// templatedWorkflow takes its wait node's type and mode from a node template;
+// withDuration decides whether the expanded node is valid.
+func templatedWorkflow(name string, withDuration bool) *types.WorkflowDef {
+	params := map[string]any{}
+	if withDuration {
+		params["duration"] = "1s"
+	}
+	return &types.WorkflowDef{
+		Name:          name,
+		Version:       "v1",
+		NodeTemplates: map[string]types.NodeTemplate{"timer": {Type: "xflow.wait", Parameters: map[string]any{"mode": "timer"}}},
+		Nodes: []types.NodeDef{
+			{Name: "start", Type: "xflow.start"},
+			{Name: "pause", Template: "timer", Parameters: params},
+		},
+		Connections: types.Connections{
+			"start": {"main": types.PortConnections{Targets: []types.Connection{{Node: "pause", Input: "main"}}}},
+		},
+	}
+}
+
+func TestRegisterTemplatedWorkflowValidatesExpandedNodes(t *testing.T) {
+	srv, _, _ := newParamValidationServer(t, types.ParamValidationEnforce)
+
+	resp := postRegister(t, srv.URL, "tok-full", templatedWorkflow("tpl-ok", true))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 for a valid templated workflow", resp.StatusCode)
+	}
+
+	bad := postRegister(t, srv.URL, "tok-full", templatedWorkflow("tpl-bad", false))
+	defer func() { _ = bad.Body.Close() }()
+	if bad.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: the expanded wait node lacks duration/until", bad.StatusCode)
+	}
+	var body paramInvalidBody
+	if env := decodeEnvelope(t, bad, &body); env.Code != "workflow_param_invalid" {
+		t.Fatalf("code = %q, want workflow_param_invalid", env.Code)
+	}
+	assertSummary(t, body.ParamIssues, waitTimerIssues...)
+}

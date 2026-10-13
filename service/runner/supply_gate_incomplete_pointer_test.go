@@ -198,7 +198,7 @@ func TestIncompletePointerReadinessMatrix(t *testing.T) {
 				SupplyConsumers: decls,
 			})
 
-			if got := supply.Default.IsReady(ptr); got != tc.want {
+			if got := supply.Default.IsReady(defaultKey(ptr)); got != tc.want {
 				t.Errorf("IsReady = %v, want %v for pointer content %s", got, tc.want, tc.content(f.digest))
 			}
 		})

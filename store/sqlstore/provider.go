@@ -24,6 +24,7 @@ type Provider struct {
 	*signalRepo
 	*auditRepo
 	*supplyRepo
+	*scheduleOverrideRepo
 	artifactBlobs *artifactBlobRepo
 	artifactIndex *artifactIndexRepo
 }
@@ -48,8 +49,9 @@ func (parameterizedSQLLogger) ParamsFilter(_ context.Context, sql string, _ ...i
 
 // compile-time interface checks
 var (
-	_ store.Store      = (*Provider)(nil)
-	_ store.Transactor = (*Provider)(nil)
+	_ store.Store                 = (*Provider)(nil)
+	_ store.Transactor            = (*Provider)(nil)
+	_ store.ScheduleOverrideStore = (*Provider)(nil)
 )
 
 // SupplyEncryption is the minimal at-rest transform required by the supply
@@ -112,14 +114,15 @@ func New(db *gorm.DB, opts ...Option) *Provider {
 		})
 	}
 	return &Provider{
-		db:            db,
-		executionRepo: &executionRepo{db: db},
-		nodeRepo:      &nodeRepo{db: db},
-		signalRepo:    &signalRepo{db: db},
-		auditRepo:     &auditRepo{db: db},
-		supplyRepo:    &supplyRepo{db: db, atRest: o.supplyAtRest},
-		artifactBlobs: &artifactBlobRepo{db: db},
-		artifactIndex: &artifactIndexRepo{db: db},
+		db:                   db,
+		executionRepo:        &executionRepo{db: db},
+		nodeRepo:             &nodeRepo{db: db},
+		signalRepo:           &signalRepo{db: db},
+		auditRepo:            &auditRepo{db: db},
+		supplyRepo:           &supplyRepo{db: db, atRest: o.supplyAtRest},
+		scheduleOverrideRepo: &scheduleOverrideRepo{db: db},
+		artifactBlobs:        &artifactBlobRepo{db: db},
+		artifactIndex:        &artifactIndexRepo{db: db},
 	}
 }
 
@@ -196,6 +199,7 @@ var autoMigrateModels = []any{
 	&dbSignal{},
 	&dbAuditEvent{},
 	&dbSupply{},
+	&dbScheduleOverride{},
 	&dbArtifactBlob{},
 	&dbArtifact{},
 	&dbRegistrationCode{},

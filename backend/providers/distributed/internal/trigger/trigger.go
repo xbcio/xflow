@@ -13,7 +13,17 @@ import (
 )
 
 type Primitives struct {
-	rdb redis.UniversalClient
+	rdb    redis.UniversalClient
+	status ExecutionStatusReader
+}
+
+// ExecutionStatusReader is the one method these primitives need from the
+// execution store to answer the optional types.ExecutionStatusReader capability.
+// Declared here rather than imported from rstate so the trigger package keeps
+// depending on Redis and the public contracts alone; the store satisfies it by
+// having the same method.
+type ExecutionStatusReader interface {
+	GetExecutionStatus(ctx context.Context, id types.ExecutionID) (types.ExecutionStatus, bool, error)
 }
 
 const (
@@ -21,8 +31,12 @@ const (
 	minRedisTriggerLockTTL = time.Millisecond
 )
 
-func New(rdb redis.UniversalClient) *Primitives {
-	return &Primitives{rdb: rdb}
+// New builds the Redis-backed trigger primitives. status is the execution store
+// they read statuses from; a nil status makes that capability answer
+// ErrExecutionStatusUnavailable (a test-only arrangement, since every provider
+// has a store).
+func New(rdb redis.UniversalClient, status ExecutionStatusReader) *Primitives {
+	return &Primitives{rdb: rdb, status: status}
 }
 
 // Key schema (Redis Cluster-safe, G2 Phase 2 / Task 2.2 + Task 7.2 namespace scope).
@@ -92,6 +106,20 @@ func normalizeTriggerLockTTL(ttl time.Duration) time.Duration {
 func (p *Primitives) State(ctx context.Context, scope string) types.TriggerState {
 	t := namespace.FromContext(ctx)
 	return &triggerState{rdb: p.rdb, namespace: t, scope: scope}
+}
+
+// GetExecutionStatus implements the optional types.ExecutionStatusReader
+// capability by forwarding to the execution store. Without one the honest answer
+// is ErrExecutionStatusUnavailable — not a status, and not found=false, which
+// means the execution is gone.
+//
+// The status key lives in the namespace carried by ctx, so this reads the same
+// record the engine wrote for that namespace's execution.
+func (p *Primitives) GetExecutionStatus(ctx context.Context, id types.ExecutionID) (types.ExecutionStatus, bool, error) {
+	if p.status == nil {
+		return "", false, types.ErrExecutionStatusUnavailable
+	}
+	return p.status.GetExecutionStatus(ctx, id)
 }
 
 type triggerLock struct {

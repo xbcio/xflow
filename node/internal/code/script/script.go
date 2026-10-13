@@ -9,6 +9,7 @@ import (
 	"github.com/xbcio/xflow/types"
 
 	"github.com/xbcio/xflow/exprx"
+	"github.com/xbcio/xflow/namespace"
 	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/internal/code/script/engine"
 	"github.com/xbcio/xflow/node/registry"
@@ -337,7 +338,7 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 				return nil, types.NewTransientError("script.supply_consumer", fmt.Sprintf(
 					"node declares supply consumers %v but artifact_digest resolved to empty; refusing to evaluate against an empty rule set", declared))
 			}
-			if err := ensureWasmSupplyConsumers(ctx, digest, code, declared, input.WorkflowName, input.NodeName); err != nil {
+			if err := ensureWasmSupplyConsumers(ctx, input.Namespace(), digest, code, declared, input.WorkflowName, input.NodeName); err != nil {
 				observeExecute(ctx, language, runtime, "config", time.Since(start))
 				// Transient, not Permanent: a supply that has not arrived yet is
 				// self-healing on redelivery, and a Permanent verdict would make
@@ -733,9 +734,9 @@ const wasmScriptLanguage = "wasm"
 //
 // workflowName and nodeName identify the node THIS guard is running for, and
 // become the wasm-side registration's owner (spec Z.4 / Z.8): the registry
-// stores one consumer per (digest, supplyNode), and this call site is one of
-// three across the codebase that register against that same slot (the other
-// two are the activation-time legacy binding and the warm-up declaration
+// stores one consumer per (namespace, digest, supplyNode), and this call site is
+// one of three across the codebase that register against that same slot (the
+// other two are the activation-time legacy binding and the warm-up declaration
 // consumer). Without a distinct owner per call site, one site's release would
 // silently erase the registrations the other two installed. This site itself
 // never releases -- a script node's registration lives for the process, and
@@ -743,9 +744,13 @@ const wasmScriptLanguage = "wasm"
 // activation-identity owners the legacy binding uses (see
 // service/runner/trigger_activation_handler.go).
 //
+// ns is the executing input's namespace: the supplies this guard registers
+// against are the ones declared in this node's own namespace, and they must be
+// the same namespace the runner's gate cached content under.
+//
 // Errors name the digest and the supply node and nothing else. The module code
 // and the node's params never appear: this error is logged.
-func ensureWasmSupplyConsumers(ctx context.Context, digest, code string, supplies []string, workflowName, nodeName string) error {
+func ensureWasmSupplyConsumers(ctx context.Context, ns namespace.Namespace, digest, code string, supplies []string, workflowName, nodeName string) error {
 	if wasm.SupplyConfiguredByDigest(digest) {
 		return nil
 	}
@@ -757,7 +762,7 @@ func ensureWasmSupplyConsumers(ctx context.Context, digest, code string, supplie
 	}
 	owner := "node:" + workflowName + "/" + nodeName
 	for _, supplyNode := range supplies {
-		if err := wasm.RegisterSupplyConsumerByDigest(digest, supplyNode, owner, supply.Default); err != nil {
+		if err := wasm.RegisterSupplyConsumerByDigest(ns, digest, supplyNode, owner, supply.Default); err != nil {
 			return fmt.Errorf("register wasm module %s as consumer of supply %q: %w",
 				digest, supplyNode, err)
 		}

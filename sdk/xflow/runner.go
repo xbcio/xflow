@@ -30,7 +30,9 @@ import (
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/node/resource"
 	"github.com/xbcio/xflow/node/supply"
+	crontrigger "github.com/xbcio/xflow/node/trigger/cron"
 	kafkatrigger "github.com/xbcio/xflow/node/trigger/kafka"
+	timertrigger "github.com/xbcio/xflow/node/trigger/timer"
 	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/control"
@@ -148,6 +150,15 @@ type RunnerConfig struct {
 	// non-zero.
 	HeartbeatInterval time.Duration
 	PollWait          time.Duration
+
+	// SupplyPollInterval is how often this runner re-reads every supply it
+	// hosts, independently of the control plane's supply hints. Zero uses
+	// runnersvc.DefaultSupplyPollInterval (60s); a non-zero value below
+	// runnersvc.MinSupplyPollInterval (10s) is rejected by NewRunner rather
+	// than silently raised. The poll cannot be switched off: it is the
+	// convergence path for a supply whose hint was never delivered, and
+	// nothing else re-reads a supply that already has content.
+	SupplyPollInterval time.Duration
 
 	// SeedRequestTimeout bounds one entry-seed admission round trip — the POST
 	// to /v1/executions that admits a whole trigger batch's results. Zero (the
@@ -363,6 +374,13 @@ func NewRunner(cfg RunnerConfig, opts ...RunnerOption) (*Runner, error) {
 	if strings.TrimSpace(cfg.ServerURL) == "" && cfg.Transport != RunnerTransportInProc {
 		return nil, fmt.Errorf("xflow: RunnerConfig.ServerURL is required: it is the " +
 			"control plane server origin for leases, entry seeding, and artifact fetch")
+	}
+	// A supply poll interval is refused here rather than raised to the floor
+	// later: polling is always on, so an explicitly configured value below the
+	// floor is a mistake the caller should see at construction, not a cadence
+	// it silently does not get. Zero (unset) keeps the service default.
+	if err := runnersvc.ValidateSupplyPollInterval(cfg.SupplyPollInterval); err != nil {
+		return nil, fmt.Errorf("xflow: RunnerConfig.SupplyPollInterval: %w", err)
 	}
 	o := runnerOptionsFrom(opts)
 
@@ -834,6 +852,10 @@ func buildRunnerServiceConfig(cfg RunnerConfig, opts ...RunnerOption) (runnersvc
 		ArtifactCodeResolver: artifactCode,
 		SupportsEncryption:   true,
 		LifecycleObserver:    o.lifecycleObserver,
+		// Passed through verbatim, zero included: the service resolves unset to
+		// its own default, so the default lives in one place rather than being
+		// frozen into every caller's config.
+		SupplyPollInterval: cfg.SupplyPollInterval,
 	}
 	if cfg.HeartbeatInterval > 0 {
 		svcCfg.HeartbeatInterval = cfg.HeartbeatInterval
@@ -1022,12 +1044,12 @@ type supplyGateFanout struct {
 	lifecycle runnersvc.LifecycleObserver
 }
 
-func (f supplyGateFanout) OnSupplyFetch(ctx context.Context, name, result string) {
+func (f supplyGateFanout) OnSupplyFetch(ctx context.Context, name, result, source string) {
 	if f.metrics != nil {
-		f.metrics.OnSupplyFetch(ctx, name, result)
+		f.metrics.OnSupplyFetch(ctx, name, result, source)
 	}
 	if f.lifecycle != nil {
-		f.lifecycle.OnSupplyFetch(ctx, name, result)
+		f.lifecycle.OnSupplyFetch(ctx, name, result, source)
 	}
 }
 
@@ -1065,7 +1087,7 @@ func installProcessObservers(o *runnerOptions) (release func()) {
 	// Each successful setter adds its inverse immediately. If a later setter
 	// panics because that slot already belongs to another live runner, unwind
 	// only the slots installed by this attempt and re-panic unchanged.
-	releases := make([]func(), 0, 4)
+	releases := make([]func(), 0, 7)
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			releaseProcessObservers(releases)
@@ -1086,6 +1108,18 @@ func installProcessObservers(o *runnerOptions) (release func()) {
 	// committed, so consumer-group lag stays at zero.
 	kafkatrigger.SetObserver(metrics.NewTriggerMetrics(o.metrics))
 	releases = append(releases, func() { kafkatrigger.SetObserver(nil) })
+	// The same observer covers the firings cron and timer drop: a refused or
+	// unadmitted firing produces no execution, so without the counter a
+	// schedule throttled by its own workflow is indistinguishable from one that
+	// never fired. Installed here rather than in the trigger packages because
+	// the counter lives above them (observability imports the trigger packages,
+	// so they cannot import it) — and for the same reason it is this observer,
+	// not the trigger, that names the engine's concurrency limit out of the
+	// emit failures they report unclassified.
+	crontrigger.SetObserver(metrics.NewTriggerMetrics(o.metrics))
+	releases = append(releases, func() { crontrigger.SetObserver(nil) })
+	timertrigger.SetObserver(metrics.NewTriggerMetrics(o.metrics))
+	releases = append(releases, func() { timertrigger.SetObserver(nil) })
 	return func() { releaseProcessObservers(releases) }
 }
 

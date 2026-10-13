@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/xbcio/xflow/namespace"
 )
 
 func TestSupplyMetricsOnPoolSwapAppliedRecordsRuleCountAndGeneration(t *testing.T) {
@@ -155,13 +157,15 @@ func TestSupplyMetricsOnSupplyFetch(t *testing.T) {
 	s := NewSupplyMetrics(m)
 	ctx := context.Background()
 
-	s.OnSupplyFetch(ctx, "rules", "ok")
-	s.OnSupplyFetch(ctx, "rules", "error")
+	s.OnSupplyFetch(ctx, "rules", "ok", "admission")
+	s.OnSupplyFetch(ctx, "rules", "error", "hint")
+	s.OnSupplyFetch(ctx, "rules", "ok", "poll")
 
 	body := gatherMetricsBody(t, m)
 	for _, want := range []string{
-		`xflow_supply_fetch_total{name="rules",namespace="default",result="ok"} 1`,
-		`xflow_supply_fetch_total{name="rules",namespace="default",result="error"} 1`,
+		`xflow_supply_fetch_total{name="rules",namespace="default",result="ok",source="admission"} 1`,
+		`xflow_supply_fetch_total{name="rules",namespace="default",result="error",source="hint"} 1`,
+		`xflow_supply_fetch_total{name="rules",namespace="default",result="ok",source="poll"} 1`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("metrics body missing %q:\n%s", want, body)
@@ -215,10 +219,31 @@ func TestSupplyMetricsOnConsumerCount(t *testing.T) {
 	s := NewSupplyMetrics(m)
 	ctx := context.Background()
 
-	s.OnConsumerCount(ctx, "rules", 2)
+	s.OnConsumerCount(ctx, namespace.Default, "rules", 2)
 
 	body := gatherMetricsBody(t, m)
 	if !strings.Contains(body, `xflow_supply_consumers{name="rules",namespace="default"} 2`) {
 		t.Fatalf("metrics body missing supply_consumers:\n%s", body)
+	}
+}
+
+// The namespace label must come from the observer's namespace argument, not be
+// hard-coded to the default: two namespaces each hosting a supply node called
+// "rules" are two supplies, and folding them into one series would report their
+// counts as one series that oscillates with whichever namespace reported last.
+func TestSupplyMetricsOnConsumerCountLabelsNamespace(t *testing.T) {
+	m := New()
+	s := NewSupplyMetrics(m)
+	ctx := context.Background()
+
+	s.OnConsumerCount(ctx, "tenant-a", "rules", 1)
+	s.OnConsumerCount(ctx, "tenant-b", "rules", 3)
+
+	body := gatherMetricsBody(t, m)
+	if !strings.Contains(body, `xflow_supply_consumers{name="rules",namespace="tenant-a"} 1`) {
+		t.Fatalf("metrics body missing the tenant-a series:\n%s", body)
+	}
+	if !strings.Contains(body, `xflow_supply_consumers{name="rules",namespace="tenant-b"} 3`) {
+		t.Fatalf("metrics body missing the tenant-b series:\n%s", body)
 	}
 }

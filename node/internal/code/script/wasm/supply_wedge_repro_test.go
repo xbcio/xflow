@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/supply"
 )
 
@@ -58,7 +59,7 @@ func TestSupplyAppliedBeforeEngineExistsWedge(t *testing.T) {
 	// Registration arrives first, from the warm-up owner — the module is not
 	// compiled yet, so the notify handler records the content as accepted
 	// without configuring anything.
-	if err := RegisterSupplyConsumerByDigest(digest, "wasm-artifacts", "node:collect/decode", reg); err != nil {
+	if err := RegisterSupplyConsumerByDigest(namespace.Default, digest, "wasm-artifacts", "node:collect/decode", reg); err != nil {
 		t.Fatalf("first register: %v", err)
 	}
 	if SupplyConfiguredByDigest(digest) {

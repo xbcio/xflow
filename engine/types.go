@@ -282,6 +282,12 @@ type ExecutionSnapshot struct {
 	// tracestate and the sampled flag.
 	TraceCarrier map[string]string `json:"trace_carrier,omitempty"`
 	ParentID     types.ExecutionID // non-empty for sub-executions
+	// RerunFrom is the node a rerun-derived execution starts at: the node whose
+	// result the parent execution did not reuse, and upstream of which every
+	// unit was copied from the parent's own result. Empty for an execution this
+	// engine started itself, and for a sub-execution, whose source is ParentID
+	// rather than a node.
+	RerunFrom string `json:"rerun_from,omitempty"`
 	// Error is the execution-level failure reason recorded by
 	// UpdateExecutionStatus. It is the ONLY carrier when no node holds the
 	// reason: a cyclic execution that trips MaxAutoDepth fails with every node

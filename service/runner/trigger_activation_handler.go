@@ -316,7 +316,8 @@ func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.Acti
 			RequestTimeout: h.seedRequestTimeoutOrDefault(),
 			Observer:       h.seedObserver,
 		},
-		Supplies: resolveSuppliesForTrigger(d.Supplies),
+		Supplies:         resolveSuppliesForTrigger(d.Supplies, id.supplyNamespace()),
+		WorkflowTimezone: d.WorkflowTimezone,
 	}
 
 	sub, err := handler.Activate(ctx, input)
@@ -380,7 +381,8 @@ func (h *TriggerActivationHandler) activateGroup(ctx context.Context, d protocol
 			pkg:         pkg,
 			packageHash: d.PackageHash,
 		},
-		Supplies: resolveSuppliesForTrigger(d.Supplies),
+		Supplies:         resolveSuppliesForTrigger(d.Supplies, activationIDFromActivate(d).supplyNamespace()),
+		WorkflowTimezone: d.WorkflowTimezone,
 	}
 
 	sub, err := handler.Activate(ctx, input)
@@ -485,6 +487,11 @@ func (h *TriggerActivationHandler) registerSupplyConsumers(ctx context.Context, 
 		return fmt.Errorf("supply consumer registration requires an artifact code resolver (%d binding(s), first: %s -> supply %q)",
 			len(bindings), bindingIdentity(bindings[0]), bindings[0].SupplyNode)
 	}
+	// Every registration below is keyed by the activation's namespace: supply
+	// identity is (namespace, name), and unregisterSupplyConsumers derives the
+	// same value from the same id, so acquire and release can never target
+	// different keys.
+	ns := id.supplyNamespace()
 	compiled := make(map[string]bool, len(bindings))
 	// acquired tracks every binding THIS call has already registered/declared/
 	// warmed, in order, so a later binding's failure can roll all of them
@@ -513,7 +520,8 @@ func (h *TriggerActivationHandler) registerSupplyConsumers(ctx context.Context, 
 			// because several replicas of this same activation may declare the
 			// identical (workflow, node, supply) pair on this runner and compute
 			// the identical warmupConsumerKey — see warmupConsumerRegistry.
-			warmupConsumers.acquire(warmupConsumerKey(b), b.SupplyNode, &wasmWarmupConsumer{
+			warmupConsumers.acquire(warmupConsumerKey(ns, b), supply.KeyOf(ns, b.SupplyNode), &wasmWarmupConsumer{
+				ns:         ns,
 				digestExpr: b.DigestExpr,
 				supplyNode: b.SupplyNode,
 				workflow:   b.WorkflowName,
@@ -533,7 +541,7 @@ func (h *TriggerActivationHandler) registerSupplyConsumers(ctx context.Context, 
 			}
 			compiled[b.ModuleDigest] = true
 		}
-		if err := node.RegisterWasmSupplyConsumerByDigest(b.ModuleDigest, b.SupplyNode, owner); err != nil {
+		if err := node.RegisterWasmSupplyConsumerByDigest(ns, b.ModuleDigest, b.SupplyNode, owner); err != nil {
 			return fmt.Errorf("register wasm module %s as consumer of supply %q: %w", b.ModuleDigest, b.SupplyNode, err)
 		}
 		acquired = append(acquired, b)
@@ -622,7 +630,7 @@ func (h *TriggerActivationHandler) storeSubscription(ctx context.Context, id act
 		// old entry — see the doc comment above for why difference does not
 		// apply here.
 		for _, b := range oldDeclarations {
-			warmupConsumers.release(warmupConsumerKey(b), b.SupplyNode)
+			warmupConsumers.release(warmupConsumerKey(id.supplyNamespace(), b), supply.KeyOf(id.supplyNamespace(), b.SupplyNode))
 			node.UndeclareWasmSupplyConsumers(b.WorkflowName, b.NodeName, []string{b.SupplyNode})
 		}
 		if old.sub != nil {
@@ -679,13 +687,14 @@ func removedBindings(old, next []engine.SupplyConsumerBinding) []engine.SupplyCo
 // declaration side needs its own inlined loop instead.
 func unregisterSupplyConsumers(id activationID, bindings []engine.SupplyConsumerBinding) {
 	owner := id.supplyConsumerOwner()
+	ns := id.supplyNamespace()
 	for _, b := range bindings {
 		if b.IsDeclaration() {
-			warmupConsumers.release(warmupConsumerKey(b), b.SupplyNode)
+			warmupConsumers.release(warmupConsumerKey(ns, b), supply.KeyOf(ns, b.SupplyNode))
 			node.UndeclareWasmSupplyConsumers(b.WorkflowName, b.NodeName, []string{b.SupplyNode})
 			continue
 		}
-		node.UnregisterWasmSupplyConsumerByDigest(b.ModuleDigest, b.SupplyNode, owner)
+		node.UnregisterWasmSupplyConsumerByDigest(ns, b.ModuleDigest, b.SupplyNode, owner)
 	}
 }
 
@@ -778,14 +787,18 @@ func withEntrySeedParams(d protocol.ActivateDirective) map[string]any {
 // resolveSuppliesForTrigger reads decoded supply content from the process-wide
 // registry for each supply requirement the trigger declares. The SupplyGate has
 // already admitted (fetched + applied) these before this call, so
-// supply.Default.Decoded() is guaranteed to contain them when RequireReady was
+// supply.Default.Decoded(ns) is guaranteed to contain them when RequireReady was
 // true. nil is returned when there are no supply requirements (the common
 // case for triggers without a DependsOn edge to a supply node).
-func resolveSuppliesForTrigger(reqs []engine.SupplyRequirement) map[string]any {
+//
+// ns is the activation's own namespace: the decoded view is per namespace, so a
+// trigger activated for namespace A reads A's content even when namespace B
+// hosts a supply node of the same name on this runner.
+func resolveSuppliesForTrigger(reqs []engine.SupplyRequirement, ns namespace.Namespace) map[string]any {
 	if len(reqs) == 0 {
 		return nil
 	}
-	decoded := supply.Default.Decoded()
+	decoded := supply.Default.Decoded(ns)
 	if len(decoded) == 0 {
 		return nil
 	}

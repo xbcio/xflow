@@ -272,7 +272,7 @@ const messages: Record<string, string> = {
   // ---------------------------------------------------------- trigger.cron / timer / webhook
   "Cron schedule, five fields (e.g. \"*/5 * * * *\") or a descriptor such as \"@every 1m\"": "Cron 调度，五段式（如 \"*/5 * * * *\"）或 \"@every 1m\" 这样的描述符",
   "Timezone": "时区",
-  "IANA time zone name the schedule is evaluated in": "计算调度所用的 IANA 时区名",
+  "IANA time zone name the schedule is evaluated in; empty inherits the workflow settings.timezone (UTC if none)": "计算调度所用的 IANA 时区名；留空则继承工作流 settings.timezone（未设置时为 UTC）",
   "Interval": "间隔",
   "Positive tick interval (e.g. \"1m\")": "正的触发间隔（如 \"1m\"）",
   "Path": "路径",

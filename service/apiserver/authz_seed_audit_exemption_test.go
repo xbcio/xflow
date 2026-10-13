@@ -171,6 +171,7 @@ func TestAuditedPerRequest(t *testing.T) {
 	}
 	for _, op := range []string{
 		OpExecutionRead, OpExecutionSignal, OpExecutionRevoke, OpExecutionCancel,
+		OpExecutionPause, OpExecutionResume, OpExecutionRerun,
 		OpDeadLetterList, OpDeadLetterReplay, OpManagementRead, OpWorkflowRegister,
 	} {
 		if !auditedPerRequest(op) {

@@ -60,6 +60,13 @@ export interface WorkflowListPage {
 /** The status values returned by execution-detail and wait endpoints. */
 export type ExecutionStatus =
   | "pending"
+  /**
+   * A queue-mode submission waiting for a workflow concurrency slot: persisted
+   * in full, but nothing of it is deliverable until a slot frees. Deliberately
+   * not terminal — a queued execution can still be waited on and canceled
+   * (`types.ExecutionStatusQueued`).
+   */
+  | "queued"
   | "running"
   | "success"
   | "failed"
@@ -77,6 +84,12 @@ export type ExecutionNodeStatus =
   | "skipped"
   /** Served from pin_data: the handler did not run; output is the mock. */
   | "pinned"
+  /**
+   * A member of a transient group whose records expired: the execution is
+   * terminal and the group's artifacts have passed their completion TTL, so
+   * nothing about the node is readable any more.
+   */
+  | "expired"
   | "suspended"
   | "continued"
   | "canceled"
@@ -256,6 +269,7 @@ const INVALID_RESPONSE_MESSAGE = "invalid API response";
 
 const executionStatuses = new Set<string>([
   "pending",
+  "queued",
   "running",
   "success",
   "failed",
@@ -272,6 +286,7 @@ const executionNodeStatuses = new Set<string>([
   "failed",
   "skipped",
   "pinned",
+  "expired",
   "suspended",
   "continued",
   "canceled",
@@ -767,9 +782,13 @@ function createListWorkflows(
 
 /**
  * Converts an execution-detail response into the runtime projection consumed by
- * `@xflow/core` renderers. The execution service exposes two transitional
- * statuses that the core projection does not: `canceling` and `committing` are
- * represented as `running` until their terminal state is observed.
+ * `@xflow/core` renderers. Three transitional statuses are collapsed:
+ * `canceling` (execution) and `committing` (node) are represented as `running`
+ * until their terminal state is observed, and `queued` (execution) as
+ * `pending`, since a parked submission has run nothing yet. Every other status
+ * is carried through unchanged, `expired` included: reporting it as `pending`
+ * would assert that a node whose records are gone never ran, which is the one
+ * thing the status exists to deny (types/execution.go).
  */
 export function executionDetailToRuntimeSnapshot(detail: ExecutionDetail): RuntimeSnapshot {
   const snapshot: RuntimeSnapshot = {
@@ -796,9 +815,22 @@ export function executionDetailToRuntimeSnapshot(detail: ExecutionDetail): Runti
   return snapshot;
 }
 
-function executionStatusToRuntimeStatus(status: ExecutionStatus): RuntimeWorkflowStatus {
+/**
+ * Projects one server-side execution status into the runtime vocabulary. It is
+ * exported for hosts that hold an execution response without a node list — a
+ * `waitExecution` call that timed out, for instance — so the collapse table
+ * lives in one place instead of being re-stated per host, where a status added
+ * later would be silently missed.
+ */
+export function executionStatusToRuntimeStatus(status: ExecutionStatus): RuntimeWorkflowStatus {
   switch (status) {
     case "pending":
+      return "pending";
+    case "queued":
+      // Accepted but parked behind the workflow's concurrency limit: nothing
+      // has run, so the runtime vocabulary's "not started yet" value is the
+      // honest projection. It stays a distinct server-side status because the
+      // queue is what a caller waits on or cancels.
       return "pending";
     case "running":
     case "canceling":
@@ -821,11 +853,19 @@ function executionNodeStatusToRuntimeStatus(status: ExecutionNodeStatus): Runtim
     case "running":
     case "committing":
       return "running";
-    case "success":
     // A pinned node completed with its pin_data mock as output; the runtime
-    // status vocabulary has no separate state for it.
+    // status vocabulary has no separate state for it. The comment sits above
+    // the group rather than between the two clauses: an empty clause followed
+    // by a comment reads as a fallthrough to `no-fallthrough`.
+    case "success":
     case "pinned":
       return "success";
+    case "expired":
+      // The node's records are gone (a transient group past its completion
+      // TTL). The member ran, or may have; nothing about it is readable any
+      // more, and "pending" would assert precisely the thing that is not
+      // known, so the status is carried through for the renderers to show.
+      return "expired";
     case "failed":
       return "failed";
     case "skipped":

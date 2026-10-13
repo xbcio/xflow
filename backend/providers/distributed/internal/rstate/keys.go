@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
@@ -190,6 +191,91 @@ func suspendedNodesKey(t namespace.Namespace, id types.ExecutionID) string {
 
 func subExecutionKey(t namespace.Namespace, id types.ExecutionID, parentNode string) string {
 	return fmt.Sprintf("xflow:ns:%s:exec:{%s}:subs:%s", t, id, parentNode)
+}
+
+// ---------------------------------------------------------------------------
+// Workflow-scoped keys — these carry NO {id} tag, because they are shared by
+// every execution of one workflow across the cluster.
+//
+// They are deliberately in a different slot from the execution keys they
+// reason about. Redis Cluster hashes a key by its first {...} pair, so an
+// execution's keys land in slot {<id>} while a workflow's land in
+// slot {<workflow digest>}; no Lua script may touch both. That is why slot
+// admission and terminal release are separate transitions from the execution
+// writes they bracket, and why a reconciler (not a rollback) is the recovery
+// path for the window between them.
+// ---------------------------------------------------------------------------
+
+// workflowDigestTag builds the hash tag for a workflow's shared keys. It is
+// length-prefixed so ("a", "bc") and ("ab", "c") cannot collide, and hashed so
+// caller-controlled braces cannot change which slot is selected. The hash
+// treats the (namespace, name) pair exactly as graph.ConcurrencyKey does, so
+// the tag one side persists and the other recomputes agree.
+//
+// The tag deliberately carries no version: slots are keyed by workflow NAME,
+// so a version bump cannot orphan the slots the previous version's executions
+// still hold.
+func workflowDigestTag(ns namespace.Namespace, workflow string) string {
+	return graph.ConcurrencyKey(string(ns), workflow)
+}
+
+// concurrencySlotKey is the workflow's in-flight slot set: a ZSET whose members
+// are execution IDs and whose scores are admission times. A ZSET rather than a
+// counter because a counter cannot be reconciled — the members are what let the
+// reconciler tell a leaked slot from a live one.
+func concurrencySlotKey(ns namespace.Namespace, workflow string) string {
+	return concurrencySlotKeyForTag(ns, workflowDigestTag(ns, workflow))
+}
+
+// concurrencySlotKeyForTag builds the same key from an already-computed tag,
+// which is all a release has after the execution's back-reference told it which
+// workflow to leave.
+func concurrencySlotKeyForTag(ns namespace.Namespace, workflowTag string) string {
+	return fmt.Sprintf("xflow:ns:%s:conc:{%s}:slots", entryActivationNamespacePath(ns), workflowTag)
+}
+
+// concurrencyQueueKeyForTag is the workflow's FIFO line: a ZSET whose members
+// are execution IDs and whose scores are a monotonic sequence, so promotion
+// order is admission order and not the order Redis happens to return members
+// in. Everything the line needs to be promoted shares this key's hash slot —
+// the sequence it draws from, the capacity it fills to, and the deadlines that
+// expire it — which is what lets one script do all of it at once.
+func concurrencyQueueKeyForTag(ns namespace.Namespace, workflowTag string) string {
+	return fmt.Sprintf("xflow:ns:%s:conc:{%s}:queue", entryActivationNamespacePath(ns), workflowTag)
+}
+
+// concurrencyQueueSeqKeyForTag is the line's monotonic sequence counter. Scores
+// drawn from it never repeat, which is what makes FIFO order survive members
+// added and removed concurrently.
+func concurrencyQueueSeqKeyForTag(ns namespace.Namespace, workflowTag string) string {
+	return fmt.Sprintf("xflow:ns:%s:conc:{%s}:seq", entryActivationNamespacePath(ns), workflowTag)
+}
+
+// concurrencyCapacityKeyForTag is the capacity the workflow was last submitted
+// with, as a plain string. Promotion happens at release time, when the graph
+// that declared the limit is long gone, so the number has to be remembered
+// somewhere the release can reach — and it is written on every admission, so a
+// re-published definition's new limit takes effect on the next submission, as
+// the design requires.
+func concurrencyCapacityKeyForTag(ns namespace.Namespace, workflowTag string) string {
+	return fmt.Sprintf("xflow:ns:%s:conc:{%s}:limit", entryActivationNamespacePath(ns), workflowTag)
+}
+
+// concurrencyDeadlineKeyForTag indexes the queued executions that declared a
+// queue_timeout, scored by the instant they expire. A separate ZSET from the
+// line because a member's position is its wait order and its deadline is not:
+// two submissions with different timeouts keep their arrival order in the line
+// while their deadlines sort independently here.
+func concurrencyDeadlineKeyForTag(ns namespace.Namespace, workflowTag string) string {
+	return fmt.Sprintf("xflow:ns:%s:conc:{%s}:dl", entryActivationNamespacePath(ns), workflowTag)
+}
+
+// concurrencyWorkflowIndexKey enumerates the workflow tags that have a slot
+// ZSET in this namespace, so the reconciler can find the sets to sweep. It
+// deliberately carries no hash tag: it aggregates every workflow in the
+// namespace, so it cannot belong to any single workflow's slot.
+func concurrencyWorkflowIndexKey(ns namespace.Namespace) string {
+	return fmt.Sprintf("xflow:ns:%s:conc:wfs", entryActivationNamespacePath(ns))
 }
 
 // leaseExpiryZSetKey is the execution-scoped lease-deadline index used by

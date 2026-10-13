@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/internal/code/script/engine"
 	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/types"
@@ -19,7 +20,7 @@ import (
 func TestRegisterSupplyConsumerBeforeCompileMarksSourceDriven(t *testing.T) {
 	code := testReactorCode(t)
 	reg := supply.NewRegistry()
-	if err := RegisterSupplyConsumer(code, "rules", reg); err != nil {
+	if err := RegisterSupplyConsumer(namespace.Default, code, "rules", reg); err != nil {
 		t.Fatalf("RegisterSupplyConsumer: %v", err)
 	}
 	if !sharedReactorHost.isSourceDriven(code) {
@@ -39,7 +40,7 @@ func TestRegisterSupplyConsumerBeforeCompileMarksSourceDriven(t *testing.T) {
 func TestOnSupplyChangedCarriesServerRevision(t *testing.T) {
 	code := testReactorCode(t)
 	reg := supply.NewRegistry()
-	if err := RegisterSupplyConsumer(code, "rules", reg); err != nil {
+	if err := RegisterSupplyConsumer(namespace.Default, code, "rules", reg); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	if err := reg.Apply(context.Background(), supply.Snapshot{
@@ -155,7 +156,7 @@ func TestConcurrentRegisterAndEngineCreateIsRaceFree(t *testing.T) {
 func TestOnSupplyChangedRejectsBadContentKeepsLastGood(t *testing.T) {
 	code := testReactorCode(t)
 	reg := supply.NewRegistry()
-	if err := RegisterSupplyConsumer(code, "rules", reg); err != nil {
+	if err := RegisterSupplyConsumer(namespace.Default, code, "rules", reg); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	if err := reg.Apply(context.Background(), supply.Snapshot{
@@ -201,10 +202,10 @@ func TestSupplyConsumerIsNoOpForIdenticalContent(t *testing.T) {
 	// stripped on the source-driven branch and the stale pool answered instead.
 	code := testReactorCode(t)
 	reg := supply.NewRegistry()
-	if err := RegisterSupplyConsumer(code, "rules", reg); err != nil {
+	if err := RegisterSupplyConsumer(namespace.Default, code, "rules", reg); err != nil {
 		t.Fatalf("RegisterSupplyConsumer: %v", err)
 	}
-	t.Cleanup(func() { UnregisterSupplyConsumer(code, "rules", reg) })
+	t.Cleanup(func() { UnregisterSupplyConsumer(namespace.Default, code, "rules", reg) })
 
 	content := []byte(`{"rules":[{"name":"r1","expr":"true","tag":"t1"}]}`)
 	if err := reg.Apply(ctx, supply.Snapshot{Name: "rules", Content: content, Hash: "h1", Revision: 1}); err != nil {
@@ -221,7 +222,7 @@ func TestSupplyConsumerIsNoOpForIdenticalContent(t *testing.T) {
 
 	// Re-registering is what a workflow re-activation does; it notifies
 	// immediately with the already-cached content.
-	if err := RegisterSupplyConsumer(code, "rules", reg); err != nil {
+	if err := RegisterSupplyConsumer(namespace.Default, code, "rules", reg); err != nil {
 		t.Fatalf("re-register: %v", err)
 	}
 	if got := e.active.Load(); got != first {
@@ -255,10 +256,10 @@ func TestSupplyConsumerAcceptsEmptyRuleset(t *testing.T) {
 	ctx := context.Background()
 	code := testReactorCode(t)
 	reg := supply.NewRegistry()
-	if err := RegisterSupplyConsumer(code, "rules", reg); err != nil {
+	if err := RegisterSupplyConsumer(namespace.Default, code, "rules", reg); err != nil {
 		t.Fatalf("RegisterSupplyConsumer: %v", err)
 	}
-	t.Cleanup(func() { UnregisterSupplyConsumer(code, "rules", reg) })
+	t.Cleanup(func() { UnregisterSupplyConsumer(namespace.Default, code, "rules", reg) })
 
 	if err := reg.Apply(ctx, supply.Snapshot{
 		Name: "rules", Content: emptyContent(), Hash: "h-empty", Revision: 1,
@@ -288,10 +289,10 @@ func TestSourceDrivenWithNoContentFailsRetryably(t *testing.T) {
 	ctx := context.Background()
 	code := testReactorCode(t)
 	reg := supply.NewRegistry()
-	if err := RegisterSupplyConsumer(code, "rules", reg); err != nil {
+	if err := RegisterSupplyConsumer(namespace.Default, code, "rules", reg); err != nil {
 		t.Fatalf("RegisterSupplyConsumer: %v", err)
 	}
-	t.Cleanup(func() { UnregisterSupplyConsumer(code, "rules", reg) })
+	t.Cleanup(func() { UnregisterSupplyConsumer(namespace.Default, code, "rules", reg) })
 
 	// No Apply: the module is source-driven with nothing ever installed.
 	e, err := sharedReactorHost.engineForCode(ctx, code)
@@ -325,10 +326,10 @@ func TestSupplyConsumerRecoversAfterFirstContentRejected(t *testing.T) {
 	ctx := context.Background()
 	code := testReactorCode(t)
 	reg := supply.NewRegistry()
-	if err := RegisterSupplyConsumer(code, "rules", reg); err != nil {
+	if err := RegisterSupplyConsumer(namespace.Default, code, "rules", reg); err != nil {
 		t.Fatalf("RegisterSupplyConsumer: %v", err)
 	}
-	t.Cleanup(func() { UnregisterSupplyConsumer(code, "rules", reg) })
+	t.Cleanup(func() { UnregisterSupplyConsumer(namespace.Default, code, "rules", reg) })
 
 	if err := reg.Apply(ctx, supply.Snapshot{
 		Name: "rules", Content: badContent(), Hash: "h-bad", Revision: 1,

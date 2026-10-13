@@ -27,9 +27,31 @@ const (
 	PathExecutions          = "/v1/executions"
 	PathExecutionByID       = "/v1/executions/{id}"
 	PathExecutionCancel     = "/v1/executions/{id}/cancel"
+	PathExecutionPause      = "/v1/executions/{id}/pause"
+	PathExecutionResume     = "/v1/executions/{id}/resume"
+	PathExecutionRerun      = "/v1/executions/{id}/rerun"
 	PathExecutionSignals    = "/v1/executions/{id}/signals"
 	PathExecutionSignalByID = "/v1/executions/{id}/signals/{name}"
 	PathExecutionWait       = "/v1/executions/{id}/wait"
+
+	// Schedules are the runtime overlays on a workflow's cron and timer trigger
+	// nodes: what an operator may retime or pause WITHOUT registering a new
+	// workflow version. They live under the workflow because a schedule has no
+	// existence apart from the node that declares it — there is no /v1/schedules
+	// collection, and no way to address one without naming its workflow. The
+	// {node} segment is the trigger node's name, the same identity the
+	// definition and the entry unit use.
+	//
+	// PathWorkflowScheduleByNode serves GET (one schedule) and PATCH (write its
+	// overlay); the verbs that are not the overlay itself — pause, resume,
+	// backfill, dropping the overlay — are separate paths, because each is a
+	// distinct operation with its own scope decision in the audit trail.
+	PathWorkflowSchedules        = "/v1/workflows/{id}/schedules"
+	PathWorkflowScheduleByNode   = "/v1/workflows/{id}/schedules/{node}"
+	PathWorkflowScheduleOverride = "/v1/workflows/{id}/schedules/{node}/override"
+	PathWorkflowSchedulePause    = "/v1/workflows/{id}/schedules/{node}/pause"
+	PathWorkflowScheduleResume   = "/v1/workflows/{id}/schedules/{node}/resume"
+	PathWorkflowScheduleBackfill = "/v1/workflows/{id}/schedules/{node}/backfill"
 
 	// PathNodeTypes lists the NodeFormSchema of every node type registered in
 	// the server process; PathNodeTypeByType serves one (?version= selects a
@@ -45,6 +67,18 @@ const (
 
 	PathSupplyByName     = "/v1/supplies/{name}"
 	PathArtifactByDigest = "/v1/artifacts/{digest}"
+
+	// PathWebhookEntry is the server-hosted webhook entry route. The workflow
+	// id and entry unit are in the PATH rather than in a header or a query so
+	// the sender's URL is the whole address of one entry — the shape every
+	// webhook provider's configuration form expects. The HTTP method is NOT part
+	// of the pattern: it belongs to the entry's own webhook node (its `method`
+	// parameter), so the mux cannot select on it and the handler compares.
+	//
+	// It is registered OUTSIDE the authz wrapper on purpose: the authentication
+	// for this route is the per-entry HMAC signature, which is what an external
+	// sender can actually produce. See module_webhook.go.
+	PathWebhookEntry = "/v1/hooks/{namespace}/{workflow_id}/{entry_unit}"
 
 	PathManagementLeader     = "/v1/management/leader"
 	PathManagementRunners    = "/v1/management/runners"
@@ -99,9 +133,19 @@ var UserFacingPaths = []string{
 	PathWorkflowExecute,
 	PathWorkflowExecuteByID,
 
+	PathWorkflowSchedules,
+	PathWorkflowScheduleByNode,
+	PathWorkflowScheduleOverride,
+	PathWorkflowSchedulePause,
+	PathWorkflowScheduleResume,
+	PathWorkflowScheduleBackfill,
+
 	PathExecutions,
 	PathExecutionByID,
 	PathExecutionCancel,
+	PathExecutionPause,
+	PathExecutionResume,
+	PathExecutionRerun,
 	PathExecutionSignals,
 	PathExecutionSignalByID,
 	PathExecutionWait,
@@ -113,6 +157,8 @@ var UserFacingPaths = []string{
 
 	PathSupplyByName,
 	PathArtifactByDigest,
+
+	PathWebhookEntry,
 
 	PathManagementLeader,
 	PathManagementRunners,

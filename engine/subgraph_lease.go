@@ -36,7 +36,15 @@ type SubgraphLeasePayload struct {
 	// child generation.
 	ChildExecID types.ExecutionID `json:"child_exec_id"`
 	Items       []any             `json:"items,omitempty"`
-	Deadline    time.Time         `json:"deadline,omitempty"`
+	// Deadline is the absolute instant the batch's body must stop by: the map
+	// node's timeout from the parent lease's original issue time, tightened by
+	// the issuing engine's outer deadline (batchDeadline). Zero means unbounded.
+	//
+	// It is deliberately NOT TaskLease.ExecutionDeadline. That field feeds the
+	// control plane's renewal backstop, whose timeout commit is a node commit
+	// path; a batch commits through the expansion barrier instead, so its bound
+	// is enforced where the body runs.
+	Deadline time.Time `json:"deadline,omitempty"`
 	// Package and PackageHash are the map node's projected body and its hash,
 	// both computed once at compile time. A runner has no compiled graph — it
 	// never saw the workflow definition — so the body must travel to it, exactly
@@ -163,6 +171,11 @@ func (e *Engine) BuildSubgraphLease(ctx context.Context, t *Task) (*TaskLease, *
 		Items:           items,
 		ContinueOnError: mapContinueOnError(meta),
 		BodyConcurrency: mapBodyConcurrency(meta),
+		// Anchored on the parent lease's issue time carried by the task, never
+		// on lease.IssuedAt above: that is now, and a recovery rebuild must not
+		// hand the batch a fresh budget. This is what stops a body outliving
+		// the map node's own timeout.
+		Deadline: batchDeadline(batchParentIssuedAt(t), e.resolveNodeTimeout(meta.Timeout), e.outerDeadline),
 	}
 	// The body and the batching context are what turn this lease from a
 	// pass-through into runnable work. They come from two different places: the

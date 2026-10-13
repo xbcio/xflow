@@ -86,9 +86,9 @@ func TestTimerTriggerEventUsesDeterministicIntervalBucket(t *testing.T) {
 	secondTick := firstTick.Add(700 * time.Millisecond)
 	thirdTick := firstTick.Add(interval)
 
-	firstEvent := newTimerTriggerEvent("wf-1", "timer", interval, firstTick)
-	secondEvent := newTimerTriggerEvent("wf-1", "timer", interval, secondTick)
-	thirdEvent := newTimerTriggerEvent("wf-1", "timer", interval, thirdTick)
+	firstEvent := newTimerTriggerEvent("wf-1", "timer", interval, firstTick, firstTick)
+	secondEvent := newTimerTriggerEvent("wf-1", "timer", interval, secondTick, secondTick)
+	thirdEvent := newTimerTriggerEvent("wf-1", "timer", interval, thirdTick, thirdTick)
 
 	if firstEvent.ID != secondEvent.ID {
 		t.Fatalf("same bucket IDs = %q/%q, want equal", firstEvent.ID, secondEvent.ID)

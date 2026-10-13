@@ -44,23 +44,18 @@ type MapBodyExecutor struct {
 	// item with no external identity to resume against, so a suspended body item
 	// would park a sub-execution nothing can ever signal.
 	suspendDisabled bool
-	// deadline bounds every item's nested Executor.Execute call. Zero means no
-	// bound, which is what the two long-lived callers (sdk/xflow's engine-startup
-	// wiring, service/runner's SubgraphRuntime) always pass: they construct their
-	// MapBodyExecutor once at startup, before any per-call deadline exists, and a
-	// top-level map's body cannot itself contain another xflow.map/split/subgraph
-	// (bannedBodyMemberTypes in engine/graph/compile.go), so there is no further
-	// recursion from those two paths for a deadline to bound anyway.
+	// deadline is the constructor-time bound on every item's nested
+	// Executor.Execute call; zero means none. It combines with the per-batch
+	// engine.BatchBodyRequest.Deadline, and the earlier of the two wins
+	// (itemDeadline).
 	//
-	// The one caller that DOES have a real per-call deadline to give is
-	// Executor.Execute itself (subgraph.go): when req.Package is a projected GROUP
-	// package and a member is an xflow.map, that member's batch recurses back into
-	// a fresh Executor.Execute call for each item, and Execute already knows
-	// req.Deadline at the moment it builds this type's constructor call — see the
-	// WithBatchBodyExecutor wiring comment in subgraph.go for why this is the ONLY
-	// place a deadline can be captured, since ExecuteBatchBody's own signature
-	// (ctx, engine.BatchBodyRequest) carries no Deadline field to read one back
-	// from.
+	// The two long-lived callers (sdk/xflow's engine-startup wiring,
+	// service/runner's SubgraphRuntime) pass zero: they construct their
+	// MapBodyExecutor once at startup, before any deadline exists, and their
+	// per-batch bound -- the map node's timeout -- arrives on each request. The
+	// one caller with a bound of its own is Executor.Execute (subgraph.go): a
+	// group-member xflow.map recurses back into it per item, and the group's
+	// req.Deadline is captured here so the member map cannot outlive the group.
 	deadline time.Time
 }
 
@@ -150,14 +145,10 @@ func (x *MapBodyExecutor) runItem(ctx context.Context, req engine.BatchBodyReque
 		Input:           bodyItemInput(req),
 		Scope:           bodyItemScope(req, item, index),
 		SuspendDisabled: x.suspendDisabled,
-		// Zero when this MapBodyExecutor was built with no outer deadline (the
-		// sdk/xflow and SubgraphRuntime constructors both do this today, since
-		// neither has one to give -- see the deadline field's doc on why that is
-		// fine). Forwarding it here rather than dropping it is what closes the
-		// gap for the one caller that DOES have one: a group-member map's item
-		// must not be able to keep running after the enclosing group execution's
-		// own deadline has passed.
-		Deadline: x.deadline,
+		// The earlier of the constructor-time bound (a group-member map's
+		// enclosing group deadline) and the batch's own (the map node's
+		// timeout): an item must not keep running past either.
+		Deadline: itemDeadline(x.deadline, req.Deadline),
 	})
 	if err != nil {
 		return engine.BatchItemResult{}, err
@@ -321,6 +312,15 @@ func (x *MapBodyExecutor) executeConcurrently(ctx context.Context, req engine.Ba
 		out = append(out, results[pos])
 	}
 	return out, nil
+}
+
+// itemDeadline returns the earlier of two optional absolute deadlines, where
+// zero means unbounded.
+func itemDeadline(a, b time.Time) time.Time {
+	if a.IsZero() || (!b.IsZero() && b.Before(a)) {
+		return b
+	}
+	return a
 }
 
 // mapBatchWidth is the most item workers this batch may use. The runner-scoped

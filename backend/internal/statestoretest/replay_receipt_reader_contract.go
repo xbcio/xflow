@@ -45,12 +45,11 @@ type ReplayReceiptReaderBackend struct {
 // seeding backend internals, so what the scan returns is exactly what a real
 // operator's replays left behind.
 //
-// The rejection case asserts both branches of the replay-writer contract: a
-// backend whose decidable rejections write a receipt (the Redis backend; the
-// shared replay contract pins this behavior) must have that receipt scanned
-// back; a backend that reports the rejection without an AuditID must not have
-// one. The replay contract owns which branch a backend is on; this contract
-// owns that the scan reflects the stored receipts exactly.
+// A decidable rejection is driven on purpose: the replay-writer contract
+// requires every decidable rejection to leave a receipt too — both backends
+// write one — so the scan must hand it back exactly like a successful
+// replay's. An operator's audit trail has to show what was refused, not only
+// what was done.
 func RunReplayReceiptReaderContract(t *testing.T, newBackend func(*testing.T) ReplayReceiptReaderBackend) {
 	t.Helper()
 	ctx := context.Background()
@@ -135,7 +134,7 @@ func RunReplayReceiptReaderContract(t *testing.T, newBackend func(*testing.T) Re
 
 	// Two receipts in one execution and one in a second execution pin the
 	// execution-then-request ordering; a decidable rejection (terminal node)
-	// exercises the rejection-receipt branch.
+	// pins that rejections leave receipts too.
 	replayedA1 := replay(t, execA, finishA.ID, "req-01")
 	replayedA2 := replay(t, execA, verifyA.ID, "req-02")
 	replayedB1 := replay(t, execB, finishB.ID, "req-01")
@@ -157,11 +156,14 @@ func RunReplayReceiptReaderContract(t *testing.T, newBackend func(*testing.T) Re
 	if rejectedB2.Outcome != engine.ReplayRejectedNodeTerminal {
 		t.Fatalf("terminal-node replay outcome = %q, want rejected_node_terminal", rejectedB2.Outcome)
 	}
+	if rejectedB2.AuditID == "" {
+		t.Fatalf("rejected result %+v carries no AuditID; a decidable rejection must leave a receipt too", rejectedB2)
+	}
 
 	type wantReceipt struct {
 		exec       string
 		requestID  string
-		auditID    string // "" = the backend stored no receipt for this replay
+		auditID    string
 		node       string
 		activation string
 		entryID    string
@@ -187,8 +189,8 @@ func RunReplayReceiptReaderContract(t *testing.T, newBackend func(*testing.T) Re
 		}
 	}
 
-	// Exactly the receipts with an audit id must appear, each once, in
-	// (execution, request) order.
+	// Every replay that decided — success or decidable rejection — must appear,
+	// each once, in (execution, request) order.
 	var wantOrder []string
 	seen := make(map[string]engine.ReplayReceipt, len(got))
 	var gotOrder []string
@@ -201,9 +203,7 @@ func RunReplayReceiptReaderContract(t *testing.T, newBackend func(*testing.T) Re
 		gotOrder = append(gotOrder, key)
 	}
 	for _, w := range wants {
-		if w.auditID != "" {
-			wantOrder = append(wantOrder, w.exec+"/"+w.requestID)
-		}
+		wantOrder = append(wantOrder, w.exec+"/"+w.requestID)
 	}
 	if !slices.Equal(gotOrder, wantOrder) {
 		t.Fatalf("scan order = %v, want %v\n(interface: namespace-then-execution / sorted-key order)", gotOrder, wantOrder)
@@ -212,13 +212,6 @@ func RunReplayReceiptReaderContract(t *testing.T, newBackend func(*testing.T) Re
 	for _, w := range wants {
 		key := w.exec + "/" + w.requestID
 		r, ok := seen[key]
-		if w.auditID == "" {
-			if ok {
-				t.Fatalf("receipt %s was scanned with audit id %q, but its replay result carried none; "+
-					"a receipt without an idempotency key cannot be projected", key, r.AuditID)
-			}
-			continue
-		}
 		if !ok {
 			t.Fatalf("receipt %s missing from the scan (its replay carried audit id %q)", key, w.auditID)
 		}

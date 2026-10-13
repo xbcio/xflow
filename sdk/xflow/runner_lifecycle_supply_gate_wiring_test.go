@@ -37,7 +37,7 @@ func (s *lifecycleObserverSpy) OnSupplyGateWired(present bool) {
 	s.wiredPresent = present
 }
 
-func (s *lifecycleObserverSpy) OnSupplyFetch(_ context.Context, name, result string) {
+func (s *lifecycleObserverSpy) OnSupplyFetch(_ context.Context, name, result, _ string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.fetches = append(s.fetches, lifecycleFetchCall{name: name, result: result})

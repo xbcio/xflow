@@ -199,14 +199,9 @@ func cloneStringSlice(src []string) []string {
 }
 
 // cloneRetry returns a fresh *types.RetrySettings so callers cannot mutate the
-// Graph's internal value. RetrySettings is a value-only struct (no maps/slices/
-// pointers), so a shallow pointer copy is a complete deep copy.
+// Graph's internal value.
 func cloneRetry(r *types.RetrySettings) *types.RetrySettings {
-	if r == nil {
-		return nil
-	}
-	cp := *r
-	return &cp
+	return r.Clone()
 }
 
 func cloneNodeOutputPolicy(policy *types.NodeOutputPolicy) *types.NodeOutputPolicy {
@@ -396,6 +391,8 @@ func assignGraphHash(g *Graph) error {
 		TransientTTL:           g.transientTTL,
 		TransientCompletionTTL: g.transientCompletionTTL,
 		PinDataMode:            g.pinDataMode,
+		Timezone:               g.timezone,
+		Concurrency:            g.concurrency,
 		Groups:                 g.groups,
 		Units:                  g.units,
 		UnitOutEdges:           g.unitOutEdges,
@@ -435,7 +432,14 @@ type graphHashPayload struct {
 	TransientCompletionTTL time.Duration `json:",omitempty"`
 	// PinDataMode is empty for every graph without a pinned node, so omitempty
 	// keeps those hashes unchanged.
-	PinDataMode  string `json:",omitempty"`
+	PinDataMode string `json:",omitempty"`
+	// Timezone is empty unless settings.timezone is set; omitempty keeps
+	// every other graph hash unchanged.
+	Timezone string `json:",omitempty"`
+	// Concurrency is nil for every graph without a limit, so omitempty keeps
+	// those hashes unchanged. A graph that declares one hashes differently,
+	// which is correct: the limit is part of what the graph means.
+	Concurrency  *types.ConcurrencySettings `json:",omitempty"`
 	Groups       []GroupMeta
 	Units        []UnitMeta
 	UnitOutEdges [][]UnitEdge
@@ -503,7 +507,11 @@ type graphSerializedForm struct {
 	TransientTTL           time.Duration `json:"transient_ttl,omitempty"`
 	TransientCompletionTTL time.Duration `json:"transient_completion_ttl,omitempty"`
 	PinDataMode            string        `json:"pin_data_mode,omitempty"`
-	Groups                 []GroupMeta   `json:"groups,omitempty"`
+	Timezone               string        `json:"timezone,omitempty"`
+	// Concurrency is omitempty so a snapshot written before this setting existed
+	// decodes with a nil block, and a graph without a limit writes no field.
+	Concurrency *types.ConcurrencySettings `json:"concurrency,omitempty"`
+	Groups      []GroupMeta                `json:"groups,omitempty"`
 	// SupplyRefs maps a consumer node index to the supply node names it depends
 	// on. Unlike the unit IR it cannot be re-derived on decode: it comes from
 	// WorkflowDef.DependencyEdges, which is not part of the snapshot. The
@@ -513,6 +521,8 @@ type graphSerializedForm struct {
 	// $nodes['name'] in its parameters. Cannot be re-derived on decode because
 	// the extraction is a compile-time pass that UnmarshalJSON does not run.
 	NodesRefs map[int][]string `json:"nodes_refs,omitempty"`
+	// Params carries the top-level params schema; see Graph.params.
+	Params map[string]types.ParamDef `json:"params,omitempty"`
 }
 
 // MarshalJSON implements json.Marshaler so that encoding/json can serialize a
@@ -547,9 +557,12 @@ func (g *Graph) MarshalJSON() ([]byte, error) {
 		TransientTTL:           g.transientTTL,
 		TransientCompletionTTL: g.transientCompletionTTL,
 		PinDataMode:            g.pinDataMode,
+		Timezone:               g.timezone,
+		Concurrency:            g.concurrency,
 		Groups:                 g.groups,
 		SupplyRefs:             g.supplyRefs,
 		NodesRefs:              g.nodesRefs,
+		Params:                 g.params,
 	})
 }
 
@@ -670,9 +683,12 @@ func (g *Graph) UnmarshalJSON(data []byte) error {
 	g.transientTTL = sf.TransientTTL
 	g.transientCompletionTTL = sf.TransientCompletionTTL
 	g.pinDataMode = sf.PinDataMode
+	g.timezone = sf.Timezone
+	g.concurrency = sf.Concurrency
 	g.groups = sf.Groups
 	g.supplyRefs = sf.SupplyRefs
 	g.nodesRefs = sf.NodesRefs
+	g.params = sf.Params
 	// Bodies need no line here: they travel inside Nodes as NodeMeta.Body.
 	// Rebuild supplyIndexes from node kinds — the same deterministic derivation
 	// Compile performs, so a round-tripped graph needs no WorkflowDef. The

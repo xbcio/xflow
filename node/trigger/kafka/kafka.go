@@ -738,6 +738,12 @@ func (w *partitionWorker) run() {
 				// Entry-seed mode: admission drives the seed, which commits the
 				// offset internally on accept/duplicate/conflict. Do NOT
 				// double-commit here.
+				//
+				// This call blocks while the workflow's concurrency policy refuses
+				// the record: it retries the same record with backoff rather than
+				// returning, so this worker — serial per partition — is what keeps a
+				// later record from committing past a refused one. It still returns
+				// promptly on errors and on cancellation.
 				_ = seedEntryBatch(w.rt.runCtx, w.rt.in, w.rt.consumer, msg)
 			} else if emitMessage(w.rt.runCtx, w.rt.in, msg) {
 				_ = commitMessages(w.rt.baseCtx, w.rt.consumer, msg)
@@ -773,6 +779,18 @@ func emitMessage(ctx context.Context, in *types.TriggerActivateInput, msg Messag
 		event.Time = time.Now()
 	}
 	if _, err := in.Emit(ctx, event); err != nil {
+		// The offset stays uncommitted, and this line is the only record that
+		// the message was refused: the worker moves on, so without it a
+		// workflow refusing its trigger traffic — a REJECT-mode concurrency
+		// limit is the ordinary case — looks exactly like a topic with no
+		// messages. A QUEUE-mode workflow does not reach here: its over-limit
+		// firings are parked and admitted later instead of refused.
+		slog.Warn("kafka trigger emit did not succeed; the offset is not committed",
+			"topic", msg.Topic,
+			"partition", msg.Partition,
+			"offset", msg.Offset,
+			"node", in.NodeName,
+			"err", err)
 		return false
 	}
 	return true

@@ -7,10 +7,13 @@ import (
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
+	crontrigger "github.com/xbcio/xflow/node/trigger/cron"
 	kafkatrigger "github.com/xbcio/xflow/node/trigger/kafka"
+	timertrigger "github.com/xbcio/xflow/node/trigger/timer"
 	"github.com/xbcio/xflow/observability/metrics"
 	"github.com/xbcio/xflow/service/protocol"
 	runnersvc "github.com/xbcio/xflow/service/runner"
+	"github.com/xbcio/xflow/types"
 )
 
 // An operator who has heard of group execution declares it by hand. A bare
@@ -300,6 +303,73 @@ func (probeKafkaObserver) OnBatchFlushOutcome(context.Context, string, string, s
 func (probeKafkaObserver) OnBatchAdmission(context.Context, string, string, string) {}
 func (probeKafkaObserver) OnOffsetCommit(context.Context, string, string, int, time.Duration) {
 }
+
+// The cron and timer triggers install their fire-drop counter through the same
+// kind of process-global install-once slot as the Kafka observer above, so the
+// panic is the same usable seam — and here the data path is entirely
+// package-private (a firing goroutine calls the counter directly), so there is no
+// other way to see the wiring at all from outside the trigger packages.
+//
+// It is worth probing per package rather than once, because the three installs
+// are three separate lines in installProcessObservers: a copy of the mechanism
+// that is wired for cron and forgotten for timer drops exactly the ticks the
+// counter was added to expose, and nothing else in the build says so.
+func TestNewRunnerWiresTheTriggerFireObservers(t *testing.T) {
+	cases := []struct {
+		name    string
+		capab   string
+		install func(types.TriggerFireObserver)
+		drops   string
+	}{
+		{"cron", "xflow.trigger.cron", crontrigger.SetObserver, "firing"},
+		{"timer", "xflow.trigger.timer", timertrigger.SetObserver, "tick"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Clear any leftover install before asserting, so a failure here is
+			// about this test's runner and not about another test's teardown.
+			tc.install(nil)
+
+			r, err := NewRunner(RunnerConfig{
+				ServerURL:    "http://127.0.0.1:1",
+				Token:        "t",
+				RunnerID:     "fire-observer-probe-" + tc.name,
+				Capabilities: []string{tc.capab},
+			}, WithRunnerMetrics(metrics.New()))
+			if err != nil {
+				t.Fatalf("NewRunner: %v", err)
+			}
+			defer func() {
+				if err := r.Close(); err != nil {
+					t.Fatalf("Close: %v", err)
+				}
+			}()
+
+			func() {
+				defer func() {
+					if rec := recover(); rec == nil {
+						t.Errorf("the %s trigger's SetObserver did not panic on a second "+
+							"non-nil install; NewRunner did not wire a live fire-drop "+
+							"observer, so every %s that trigger drops is invisible",
+							tc.name, tc.drops)
+					}
+					// Whether the probe landed or was refused, put the slot back:
+					// a probe left installed would make the next test in this
+					// package see the guard already taken.
+					tc.install(nil)
+				}()
+				tc.install(probeTriggerFireObserver{})
+			}()
+		})
+	}
+}
+
+// probeTriggerFireObserver is a minimal types.TriggerFireObserver used only to
+// probe each trigger package's install-once guard; its method is never expected
+// to be called.
+type probeTriggerFireObserver struct{}
+
+func (probeTriggerFireObserver) OnTriggerFireDropped(context.Context, string, error) {}
 
 func TestRunnerMapBatchConcurrencyRejectsNegativeValues(t *testing.T) {
 	_, err := buildRunnerServiceConfig(RunnerConfig{
