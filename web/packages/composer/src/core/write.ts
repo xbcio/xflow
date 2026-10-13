@@ -209,19 +209,25 @@ function unsetIn(container: unknown, tokens: readonly string[], depth: number): 
 
 /**
  * Merges a sequence of patches: a patch is dropped when a later patch
- * writes the same path or an ancestor of it (the later write wins). The
- * surviving patches keep their relative order.
+ * writes the same path or an ancestor of it (the later write wins). An
+ * append ("/-") names a new element each time, so it never supersedes and
+ * is never superseded by another append; a later write to the array itself
+ * still supersedes it. The surviving patches keep their relative order.
  */
 export function mergePatches(patches: readonly Patch[]): Patch[] {
   const out: Patch[] = [];
   for (let i = 0; i < patches.length; i++) {
     let superseded = false;
     for (let j = i + 1; j < patches.length && !superseded; j++) {
-      superseded = isWithin(patches[i].path, patches[j].path);
+      superseded = isWithin(patches[i].path, patches[j].path) && !isAppend(patches[j].path);
     }
     if (!superseded) out.push(patches[i]);
   }
   return out;
+}
+
+function isAppend(path: string): boolean {
+  return path.endsWith("/-");
 }
 
 export interface PatchBatch {

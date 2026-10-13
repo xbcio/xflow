@@ -261,6 +261,19 @@ describe("batching", () => {
     expect(applyPatches(value, mergePatches(patches))).toEqual(applyPatches(value, patches));
   });
 
+  it("appends to the same array never supersede each other; a later parent set still wins", () => {
+    const batch = createPatchBatch();
+    batch.push({ op: "set", path: "/list/-", value: "a" }, { op: "set", path: "/list/-", value: "b" });
+    expect(applyPatches({ list: [] as string[] }, batch.flush())).toEqual({ list: ["a", "b"] });
+    expect(
+      mergePatches([
+        { op: "set", path: "/list/-", value: "a" },
+        { op: "set", path: "/list/-", value: "b" },
+        { op: "set", path: "/list", value: ["z"] }
+      ])
+    ).toEqual([{ op: "set", path: "/list", value: ["z"] }]);
+  });
+
   it("createPatchBatch accumulates and flushes", () => {
     const batch = createPatchBatch();
     batch.push({ op: "set", path: "/a", value: 1 });
