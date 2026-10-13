@@ -4323,6 +4323,16 @@ components:
             copied from `parent_execution_id` rather than run again. Set
             together with `parent_execution_id`, absent on every other
             execution.
+        parent_node:
+          type: string
+          description: |
+            The `xflow.subworkflow` node of `parent_execution_id` whose wait
+            this child execution satisfies. Set only on a sub-workflow child,
+            which shares the `parent_execution_id` field with the rerun link —
+            the two are told apart by which companion field is present: a rerun
+            carries `rerun_from`, a sub-workflow child carries `parent_node`.
+            The child-side half of the drill-down; the parent-side half is the
+            node's `child_execution_id`.
         error:
           type: string
         queue_position:
@@ -4364,6 +4374,14 @@ components:
         output:
           type: object
           additionalProperties: true
+        child_execution_id:
+          type: string
+          description: |
+            The child execution an `xflow.subworkflow` node started and waited
+            on; absent on every other node. It survives the node's commit, so a
+            finished node's child is still drillable. The parent-side half of
+            the drill-down; the child-side half is the child execution's
+            `parent_node`.
 
     ExecutionStatus:
       type: string

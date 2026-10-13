@@ -36,6 +36,33 @@ fencing and repair, durable outbox/dead-letter, suspend/signal, audit
 projection, and namespace isolation. Changes to one area should update the
 matching state-store contract tests.
 
+`engine.SubWorkflowLinkStore` is the optional capability added for the
+`xflow.subworkflow` node: one fenced transition and one read.
+`BeginSubWorkflowWait` moves a claimed parent node to `waiting` while
+preserving the lease identity it parked under and records the link to the
+child execution the node started (child execution ID, parent node, generation,
+nesting depth, wait deadline, and that lease identity); `GetSubWorkflowLink`
+reads the link back for the completion and reclaim paths.
+
+The link outlives the wait on purpose. Completion commits the parent node with
+the **original** lease identity — a stale notification is then a stale-token
+refusal rather than a second commit — and a redelivery after a reclaim resumes
+the child recorded in the link instead of minting a second one. Generation is
+what separates the two cases that both present as "a task for a node that
+already has a link": a reclaim redelivers the generation's own task and
+resumes the same child, while a retry schedules a new one and mints the next
+child.
+
+Child creation and the parent park cannot share a Lua script: a child
+execution lives in its own key and hash tag, so the two writes are separate
+single-slot transitions. Idempotence replaces atomicity — the child ID is
+derived from the parent, node name, activation, and generation, so a repeated
+creation is a no-op. The node commit fence already accepts `waiting` as a
+predecessor state, so no second transition is needed. A store without this
+capability cannot run a graph containing sub-workflow nodes; the engine refuses
+such a submission with `ErrSubWorkflowUnsupported` rather than degrading to
+"create the child and drop the link".
+
 For an acyclic execution, `CommitNode` is the durable linearization point. The
 Redis Lua transition validates the active lease identity (lease ID, token,
 attempt, and activation), then atomically:

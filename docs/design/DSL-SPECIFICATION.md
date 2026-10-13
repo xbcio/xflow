@@ -2469,24 +2469,55 @@ nodes:
 
 > **注意**：`output_schema` 是可选的，不填写不影响运行时行为。仅用于提升开发体验，建议在复杂工作流中为关键节点填写。
 
-### 6.4 计划扩展：子工作流
+### 6.4 子工作流（`xflow.subworkflow`）
 
-当前 `node_templates` 解决节点级复用，但不支持**流程级复用**（将一段节点 + connections 子图封装为可引用的单元）。对于大型工作流，计划引入 `xflow.subworkflow` 节点：
+`node_templates` 解决节点级复用，但不支持**流程级复用**（将一段节点 + connections 子图封装为可引用的单元）。`xflow.subworkflow` 节点把一次已注册的工作流执行为**独立子执行**，并把它的结论作为本节点的输出：
 
 ```yaml
 - name: payment_flow
   type: xflow.subworkflow
+  timeout: 300s                     # 节点时限：父节点等待子执行的上限（既有字段）
+  retry: { max_attempts: 2 }        # 节点级重试：每次重试重开一个新的子执行
+  on_error: error_output            # 节点级错误策略，与普通节点一致
   parameters:
-    workflow: "payment-processing"   # 引用已注册的工作流名称
-    version: "1.x"                   # 版本约束（语义化版本范围）
-    input:                           # 映射当前上下文到子工作流 $params
+    workflow: "payment-processing"  # 必填；同 namespace 内已注册的工作流名
+    version: "v1"                   # 可选；省略 = 注册期解析为当时最新，并钉住该版本
+    entry: "start_node"             # 可选；子执行入口节点，省略用子工作流的默认入口
+    input:                          # 可选；表达式映射 → 子执行 $params
       order_id: "${{ $params.order_id }}"
       amount: "${{ $nodes['calculate'].total }}"
-    timeout: 300s                    # 子工作流级超时
+    output:                         # 可选；表达式映射 → 本节点输出，求值根为 $child
+      receipt: "${{ $child['charge'].receipt_id }}"
+      status:  "${{ $child['charge'].status }}"
 ```
 
-> 子工作流作为独立 Execution 运行，拥有独立的状态和生命周期。父工作流通过 `$nodes['payment_flow']` 访问子工作流的 `outputs`。
-> 此特性为计划扩展，当前版本未实现。
+**参数**
+
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `workflow` | 是 | 子工作流名，同 namespace |
+| `version` | 否 | 省略 = 注册期解析为当时最新版本；解析结果（版本 + 定义哈希）写进编译产物，之后的注册不再影响本节点 |
+| `entry` | 否 | 子执行入口节点名；省略用子工作流的默认入口 |
+| `input` | 否 | 表达式映射，求值结果是子执行的 `$params`；父的 `$vars`/runtime 不继承 |
+| `output` | 否 | 表达式映射，覆盖默认输出映射；求值根为 `$child`（子执行的公开节点输出） |
+
+**输出**：未写 `output` 时，本节点输出 = 子执行的公开节点输出映射（节点名 → 输出），与 SDK `Wait` 的 `Result.Output` 同形；声明了 `private: true` 的子节点输出不在其中。写了 `output` 时按表达式映射求值，根为 `$child`。工作流级 `outputs:`（§3.1）本期不参与该映射——它的求值本身是另一项独立缺口，因此子工作流自己不产工作流级输出，父节点也不需要（也无法）从那里取结果。
+
+**执行语义**
+
+- 子工作流作为**独立 Execution** 运行，拥有独立的状态、节点、租约与生命周期：`Inspect` / `Wait` / `Cancel` / `Rerun` 对它和任何执行一样可用。父节点在自己的执行里停在 `waiting`，子终态后沿 `main`（成功）或 `error` 端口推进。
+- **命名空间是硬边界**：只能引用同 namespace 的工作流；跨 namespace 引用在注册期报错。
+- **版本钉住**：`latest` 只在注册期漂移一次。运行期按编译期写下的定义哈希校验目标，哈希不符即拒绝（fail closed），不会静默升级到较新版本。
+- **并发**：子执行按**子工作流自己的** `settings.concurrency` 计槽（与 subgraph/map 子执行不同，后者在父槽位内运行）。`reject` 模式下超限即节点失败（交 `retry`/`on_error`）；`queue` 模式下子执行排队，父节点停在 `waiting`，Inspect 可见子执行的 `queued` 与队列位置。
+- **失败与重试按单节点**：子的终态映射为节点结论（success → `main`；failed/timeout/canceled → 节点 failed，走 `on_error`）；节点 `retry` 每次重开一个新的子执行。
+- **超时**：节点的 `timeout` 是父等待的上限（未声明时用引擎默认节点时限）。到期后节点按失败结论处理并**级联 cancel 子执行**；子工作流自己的节点时限照常生效。
+- **暂停**：暂停父执行只停父的派发，不暂停已在运行的子执行。
+- **取消**：cancel 父执行会级联 cancel 它正在等待的子执行。
+- **重跑**：`Rerun(P, from=子节点)` 产生新执行并起一个**新子执行**；旧子执行不动。重跑子执行（`Rerun(C)`）不会唤醒等待它的父——父等的是原来那个子执行，要继续父必须重跑父。
+- **不变量**：静态引用环（按工作流名判定，版本不敏感）在注册期报错；动态嵌套深度上限默认 16（引擎选项可调）；目标是 FAF/transient 工作流，或 `xflow.subworkflow` 出现在 map body / co-location 组内，均在注册期报错。
+
+> `xflow.subworkflow` 由引擎自己派发，不下发给 runner；工作流里使用它不需要（也不可能）自定义 handler。
+> 本期不包含：跨 namespace 子工作流、子工作流的独立调度/触发器语义、「列出某执行的全部子执行」的查询，以及父执行暂停向子执行的传播。
 
 ## 7. Pin Data（测试数据钉住）
 
