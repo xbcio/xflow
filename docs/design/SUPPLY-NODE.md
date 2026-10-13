@@ -632,6 +632,19 @@ the notification channel not being the only channel still holds — for pull,
 the TTL poll is the only channel: a source that changes and then goes down
 serves last-good content until it recovers.
 
+One more rule is specific to this path: a supply key — (namespace, node name) —
+has exactly one origin, and a second declaration that points the same key at a
+different URL refuses the whole activation (fail-closed: content is cached per
+key and read by every consumer, so re-pointing it would feed one workflow's
+source to another workflow's nodes with no error anywhere). Because the server
+mints a workflow id per registration, that refusal survives the ordinary
+version bump: re-publishing `nightly@2` with a moved URL arrives as a
+*different* workflow id, and the runner's declaration record — which has no
+delete path — keeps declining it. The ways out are to PUT the new definition to
+the existing workflow id (the id is preserved, the record is replaced in place,
+and the fetcher's cached validator for the old URL is dropped), to rename the
+supply node, or to restart the runner.
+
 (a) 已关闭（`fix/activation-ack-retry`）。(b)、(c)、(d)、(e) 仍是 knowingly accepted 的代价，
 不是 blocking defect。未来关闭其中任何一项（gRPC proto 更新、cross-runner swap barrier）必须更新本节，不是在旁边加新一节。
 

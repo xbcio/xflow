@@ -1764,7 +1764,15 @@ dependency_edges:
 - **内容不落库，由 runner 自拉自用。** 抓取发生在持有该 entry unit 的 runner 进程内：URL 由该 runner 自己访问，`authentication` 是 runner 进程配置里的凭据**名**（解析不到即抓取失败，绝不降级为匿名请求），内容只进本进程的 registry——`SupplyResource` 与落库的 at-rest 加密不适用（[SUPPLY-NODE.md](./SUPPLY-NODE.md) §10）。多个 runner 各自拉取，变更传播是**跨 runner 最终一致**，没有全局屏障，skew 由各 runner 的轮询周期界定。
 - **没有 hint 快路径。** 心跳 hint 由控制面按 store 内容计算，拉取没有 store 记录，因此一致性只靠 runner 的 TTL 轮询：收敛上界 = 轮询周期 + 单次抓取超时（默认 60s + 15s）。`poll_interval` 只允许**调快**该 runner 的轮询（下限 10s），不允许关闭；源不可达期间保留 last-good 内容，`require_ready` 的两档语义与外部 Supply 完全一致。
 
-源地址仅 https，且默认只允许公网主机：环回/私网/link-local 地址由 runner 在 dial 时按解析结果拒绝，内网源需要 operator 在 runner 配置（`RunnerConfig.SupplyPullAllowedHosts`）显式放行。
+源地址仅 https，且默认只允许公网主机：环回/私网/link-local 及保留地址段（如 100.64.0.0/10，含阿里云元数据地址 100.100.100.200）由 runner 在 dial 时按解析结果拒绝，内网源需要 operator 在 runner 配置（`RunnerConfig.SupplyPullAllowedHosts`）显式放行。
+
+**同一个 supply key 的两次声明必须同源（P9 fail-closed 规则）**：key 是 (namespace, supply 节点名)，内容按 key 缓存、被该 key 的所有消费者共享；第二个 workflow 把同一个 key 指向不同的 URL（或一边是 store、一边是 pull）时，**整个 activation 被拒绝**，错误里同时给出两个来源的 host——否则先声明的 workflow 会在无任何报错的情况下读到另一个来源的内容。
+
+注意这条规则在**重新注册**时也会触发：server 每次注册都新铸一个 workflow id（POST `/v1/workflows`，即使是同名同版本的新版本，如 `nightly@1` → `nightly@2`），而 runner 侧的声明记录按 workflow id 区分"同一工作流"，且没有删除路径。因此把一个已有 workflow 的 supply URL 改掉再重新注册，这个 runner 会**持续拒绝**该 activation，直到：
+
+- 用 PUT 覆盖**原 workflow id**（id 不变，记录原地替换，这是改 URL 的推荐做法）；或
+- 把 supply 节点改名（新 key，新声明）；或
+- 重启 runner（清空所有声明记录）。
 
 **标识空间只有一个：supply 节点名。** 没有第二套命名（例如 `config_refs`）——`dependency_edges[].supply`、`$supplies.<name>` 里的 `<name>`、以及心跳/门控日志里报告的名字，三处用的都是同一个 supply 节点在图上的名字。
 
