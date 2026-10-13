@@ -3,6 +3,7 @@ package apiserver
 import (
 	"context"
 	"errors"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/xbcio/xflow/backend"
@@ -74,6 +75,55 @@ func TestAPIServerWorkflowVersionFacadesListRegisteredWorkflow(t *testing.T) {
 	}
 	if !res.Unchanged || res.WorkflowID != id || res.Version != "v1" {
 		t.Fatalf("rollback result = %+v, want unchanged current v1", res)
+	}
+}
+
+// TestAPIServerReplaceWorkflowSameVersionIDChangeKeepsHistory pins the
+// in-process replace path an embedded host uses, in the shape where the
+// definition changes but its (namespace, name, version) key does not:
+// APIServer.ReplaceWorkflow gives the changed definition a NEW workflow id,
+// and the retired versions of the id it supersedes must move to that new id.
+// A fix that migrates history only when the version label changes strands them
+// on the retired id — v1 then answers not-found while the list shows only the
+// current v2.
+func TestAPIServerReplaceWorkflowSameVersionIDChangeKeepsHistory(t *testing.T) {
+	api, _ := newWorkflowVersionFacadeAPI(t)
+	ctx := context.Background()
+	httpSrv := httptest.NewServer(api.Handler())
+	defer httpSrv.Close()
+
+	id, _, err := api.RegisterWorkflow(ctx, "namespaceA", listTestWorkflow("facade-idchange", "v1"))
+	if err != nil {
+		t.Fatalf("RegisterWorkflow(v1): %v", err)
+	}
+	// Publish v2 under the SAME id, so the lineage holds [v2 current, v1 retired].
+	publishRun(t, httpSrv.URL, "tok-a", string(id), "facade-idchange", "v2")
+
+	// The same key with a changed definition is what ReplaceWorkflow exists for.
+	changed := listTestWorkflow("facade-idchange", "v2")
+	changed.Nodes[1].Parameters = map[string]any{"marker": "rewrite"}
+	newID, _, err := api.ReplaceWorkflow(ctx, "namespaceA", changed)
+	if err != nil {
+		t.Fatalf("ReplaceWorkflow(changed v2): %v", err)
+	}
+	if newID == id {
+		t.Fatalf("same-version replace kept id %q, want a new id for the rewritten definition", id)
+	}
+
+	rows, err := api.ListWorkflowVersions(ctx, "namespaceA", newID)
+	if err != nil {
+		t.Fatalf("ListWorkflowVersions after replace: %v", err)
+	}
+	if len(rows) != 2 || rows[0].Version != "v2" || !rows[0].Current || rows[1].Version != "v1" || !rows[1].Archived {
+		t.Fatalf("version rows = %+v, want current v2 plus archived v1 carried to the new id", rows)
+	}
+
+	archived, err := api.GetWorkflowVersion(ctx, "namespaceA", newID, "v1")
+	if err != nil {
+		t.Fatalf("GetWorkflowVersion(v1) after the id change error = %v; the retired version was stranded on the superseded id", err)
+	}
+	if archived.DefinitionHash != rows[1].DefinitionHash {
+		t.Fatalf("archived v1 hash = %q, want the listed %q", archived.DefinitionHash, rows[1].DefinitionHash)
 	}
 }
 
