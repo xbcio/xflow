@@ -85,7 +85,7 @@ export default [
       "**/coverage/**",
       "**/playwright-report/**",
       "**/test-results/**",
-      "**/src/.umi/**",
+      "**/.umi/**",
       "**/src/.umi-production/**",
       "**/src/.umi-test/**",
       "**/*.d.ts"
