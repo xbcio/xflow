@@ -3713,11 +3713,14 @@ components:
         `idempotency_unsupported`: a key the server cannot honor must not be
         answered as if it could.
 
-        The key answers for 24 hours by default, capped so it never outlives
-        the execution's retention: a retry with the same key while the window
-        lasts returns that execution instead of starting the work again, and
-        after it lapses the key is free and the same key starts a new
-        execution.
+        The key answers for 24 hours by default (the claim window), capped so
+        it never outlives the execution's retention: a retry with the same key
+        while the claim is held returns that execution instead of starting the
+        work again. After the claim lapses the key is not immediately free: as
+        long as the execution it created is still retained, the same key still
+        answers `data.duplicate` with that execution — creating it again would
+        write over it in place. The key starts a new execution only once both
+        the claim and the execution are gone.
       schema:
         type: string
         pattern: '^[A-Za-z0-9._:-]{1,255}$'

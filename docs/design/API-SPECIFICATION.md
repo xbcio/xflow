@@ -323,8 +323,11 @@ trace_id 等运行时值不参与。键的作用域随路由：已注册工作�
 （`workflow:<id>`）、内联定义（`definition:<ns>/<name>`）、rerun
 （`rerun:<parent>`）——同一把键在不同工作流下互不相干。
 
-键保留 **24h**（默认 `engine.DefaultIdempotencyTTL`，SDK 可调；但被钳制为
-**不长于执行保留期**——键比执行活得久会指向已删执行）。键的认领**先于**
+键的 claim 窗口默认 **24h**（`engine.DefaultIdempotencyTTL`，SDK 可调；且被钳制
+为**不长于执行保留期**——claim 比执行活得久会指向已删执行）。窗口过后键并不
+立即自由：只要它创建的那个执行还在保留期内，同键请求仍答 duplicate（后端以
+执行记录兜底——在原处重建等于覆写它），claim 与执行都消失后同键才开启新执行。
+键的认领**先于**
 持久化：claim 带 30s 租约，进程在创建中途崩溃后，同键重试会接管那个 claim
 而不是永久卡在 in-progress；提交在什么都没持久化前被拒（如工作流并发队列
 拒绝）则释放 claim，其重试不会被误判为 duplicate。§4.3 的准入拒绝发生在键
