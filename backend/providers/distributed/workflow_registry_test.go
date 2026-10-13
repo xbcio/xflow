@@ -11,11 +11,32 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/xbcio/xflow/backend"
+	"github.com/xbcio/xflow/backend/internal/workflowregtest"
 	"github.com/xbcio/xflow/backend/providers/distributed/internal/workflowreg"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
+
+// TestWorkflowRegistryVersionHistoryContract runs the shared version-history
+// suite (backend/internal/workflowregtest) against the Redis registry. Like the
+// other cases in this file it needs a real Redis: set XFLOW_TEST_REDIS_ADDR
+// (the harness here uses 127.0.0.1:6380) together with
+// XFLOW_REQUIRE_REDIS_INTEGRATION=1 to make an unset address fail instead of
+// skip.
+func TestWorkflowRegistryVersionHistoryContract(t *testing.T) {
+	if addr := os.Getenv("XFLOW_TEST_REDIS_ADDR"); addr == "" {
+		if os.Getenv("XFLOW_REQUIRE_REDIS_INTEGRATION") == "1" {
+			t.Fatal("XFLOW_REQUIRE_REDIS_INTEGRATION=1: XFLOW_TEST_REDIS_ADDR not set (use 127.0.0.1:6380)")
+		}
+		t.Skip("XFLOW_TEST_REDIS_ADDR not set; skipping real-Redis workflow registry test")
+	}
+	workflowregtest.RunVersionHistoryContract(t, func(t *testing.T, retention int) (workflowregtest.Registry, context.Context) {
+		b := newWorkflowRegistryTestBackend(t)
+		return workflowreg.New(b.rdb, workflowreg.WithWorkflowVersionRetention(retention)),
+			namespace.WithNamespace(context.Background(), namespace.Default)
+	})
+}
 
 func TestWorkflowRegistryIsSharedAcrossInstances(t *testing.T) {
 	ctx := namespace.WithNamespace(context.Background(), namespace.Default)
