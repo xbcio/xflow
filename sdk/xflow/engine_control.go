@@ -194,6 +194,19 @@ func RerunIncludeSuccess() RerunOption {
 	}
 }
 
+// RerunIdempotencyKey makes this rerun safe to retry: a second Rerun with the
+// same execution, from-node, include_success and key returns the rerun the first
+// one created instead of deriving another.
+//
+// The key is scoped to the execution being rerun, so the same key on two
+// different parents is two different reruns. The retry is answered through
+// engine.RerunResult.Duplicate.
+func RerunIdempotencyKey(key string) RerunOption {
+	return func(req *engine.RerunRequest) {
+		req.IdempotencyKey = key
+	}
+}
+
 // Inspect returns execution and node status details for audit and UI flows.
 //
 // When nodeNames are omitted, Inspect loads the stored graph and returns every
