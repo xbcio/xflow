@@ -35,10 +35,23 @@ type workflowActivationProjection struct {
 	leaseDeadline time.Time
 }
 
+// workflowVersionEntry is one retired version of a workflow, kept in
+// retirement order. record is the payload the version carried while it was
+// live, which is what GetWorkflowVersion returns for an archived version.
+type workflowVersionEntry struct {
+	version  string
+	hash     string
+	revision uint64
+	record   backend.WorkflowRecord
+}
+
 type workflowRegistry struct {
 	mu                 sync.Mutex
 	byID               map[types.WorkflowID]backend.WorkflowRecord
 	byKey              map[string]types.WorkflowID
+	byName             map[string]types.WorkflowID
+	versions           map[types.WorkflowID][]workflowVersionEntry
+	retention          int
 	mutations          map[workflowMutationKey]workflowMutation
 	projections        map[workflowMutationKey]*workflowActivationProjection
 	projectionNS       map[namespace.Namespace]struct{}
@@ -48,11 +61,22 @@ type workflowRegistry struct {
 }
 
 var _ backend.DurableWorkflowReplaceCapability = (*workflowRegistry)(nil)
+var _ backend.WorkflowVersionCapability = (*workflowRegistry)(nil)
 
 func newWorkflowRegistry() *workflowRegistry {
+	return newWorkflowRegistryWithRetention(backend.DefaultWorkflowVersionRetention)
+}
+
+// newWorkflowRegistryWithRetention builds an in-memory registry that keeps at
+// most retention retired versions per workflow. A value <= 0 keeps every
+// retired version, matching WithWorkflowVersionRetention.
+func newWorkflowRegistryWithRetention(retention int) *workflowRegistry {
 	return &workflowRegistry{
 		byID:        make(map[types.WorkflowID]backend.WorkflowRecord),
 		byKey:       make(map[string]types.WorkflowID),
+		byName:      make(map[string]types.WorkflowID),
+		versions:    make(map[types.WorkflowID][]workflowVersionEntry),
+		retention:   retention,
 		mutations:   make(map[workflowMutationKey]workflowMutation),
 		projections: make(map[workflowMutationKey]*workflowActivationProjection),
 		projectionNS: map[namespace.Namespace]struct{}{
@@ -76,7 +100,16 @@ func (r *workflowRegistry) AddWorkflow(ctx context.Context, rec backend.Workflow
 	if id, ok := r.byKey[rec.Key]; ok {
 		existing := r.byID[id]
 		if existing.DefinitionHash != rec.DefinitionHash {
-			return backend.WorkflowRecord{}, backend.ErrWorkflowConflict
+			// The key is live under a different definition: the version label
+			// is already published, and a label never resolves to two
+			// definitions. Re-publishing it with the stored definition is not
+			// a conflict.
+			return backend.WorkflowRecord{}, &backend.WorkflowVersionImmutableError{Version: rec.Version}
+		}
+		// Repair a name index entry an idempotent add would otherwise never
+		// write (a record registered before the index existed).
+		if index := workflowNameIndexID(rec); index != "" {
+			r.byName[index] = id
 		}
 		return existing, nil
 	}
@@ -85,12 +118,23 @@ func (r *workflowRegistry) AddWorkflow(ctx context.Context, rec backend.Workflow
 	} else if _, ok := r.byID[rec.ID]; ok {
 		return backend.WorkflowRecord{}, backend.ErrWorkflowConflict
 	}
+	// At most one live record may hold a (namespace, name). A record with no
+	// name to index (a test fixture or a caller that never set one) is exempt
+	// because it has no name identity to enforce.
+	if index := workflowNameIndexID(rec); index != "" {
+		if holder, ok := r.byName[index]; ok && holder != rec.ID {
+			return backend.WorkflowRecord{}, &backend.WorkflowNameConflictError{Holder: holder}
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return backend.WorkflowRecord{}, err
 	}
 	rec.RegistryRevision = r.nextRevisionLocked()
 	r.byKey[rec.Key] = rec.ID
 	r.byID[rec.ID] = rec
+	if index := workflowNameIndexID(rec); index != "" {
+		r.byName[index] = rec.ID
+	}
 	return rec, nil
 }
 
@@ -114,6 +158,79 @@ func (r *workflowRegistry) GetWorkflowByKey(_ context.Context, key string) (back
 		return backend.WorkflowRecord{}, backend.ErrWorkflowNotFound
 	}
 	return r.byID[id], nil
+}
+
+// ListWorkflowVersions returns the current version first, then every retired
+// version newest retirement first.
+func (r *workflowRegistry) ListWorkflowVersions(ctx context.Context, id types.WorkflowID) ([]backend.WorkflowVersionInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	current, ok := r.byID[id]
+	if !ok {
+		return nil, backend.ErrWorkflowNotFound
+	}
+	rows := make([]backend.WorkflowVersionInfo, 0, len(r.versions[id])+1)
+	rows = append(rows, backend.WorkflowVersionInfo{
+		Version:          current.Version,
+		DefinitionHash:   current.DefinitionHash,
+		RegistryRevision: current.RegistryRevision,
+		Current:          true,
+	})
+	retired := make([]backend.WorkflowVersionInfo, 0, len(r.versions[id]))
+	for _, entry := range r.versions[id] {
+		if entry.version == current.Version {
+			continue
+		}
+		retired = append(retired, backend.WorkflowVersionInfo{
+			Version:          entry.version,
+			DefinitionHash:   entry.hash,
+			RegistryRevision: entry.revision,
+			Archived:         true,
+		})
+	}
+	sort.Slice(retired, func(i, j int) bool {
+		if retired[i].RegistryRevision != retired[j].RegistryRevision {
+			return retired[i].RegistryRevision > retired[j].RegistryRevision
+		}
+		return retired[i].Version < retired[j].Version
+	})
+	return append(rows, retired...), nil
+}
+
+// GetWorkflowVersion returns the addressed version: the current one (an empty
+// version means "current") from the live record, anything else from the
+// retired-version history verbatim.
+func (r *workflowRegistry) GetWorkflowVersion(ctx context.Context, id types.WorkflowID, version string) (backend.WorkflowRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return backend.WorkflowRecord{}, err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return backend.WorkflowRecord{}, err
+	}
+	current, ok := r.byID[id]
+	if !ok {
+		return backend.WorkflowRecord{}, backend.ErrWorkflowNotFound
+	}
+	if version == "" || version == current.Version {
+		return current, nil
+	}
+	entry, ok := r.retiredVersionLocked(id, version)
+	if !ok {
+		return backend.WorkflowRecord{}, backend.ErrWorkflowVersionNotFound
+	}
+	return entry.record, nil
 }
 
 // UpdateDefinitionHash atomically updates the DefinitionHash of the record
@@ -170,6 +287,15 @@ func (r *workflowRegistry) RemoveWorkflow(ctx context.Context, id types.Workflow
 	}
 	delete(r.byID, id)
 	delete(r.byKey, rec.Key)
+	// Removing a workflow removes its identity: the freed name may be taken by
+	// a later registration, and retired versions are addressed through the id,
+	// so keeping them would leak payloads nobody can reach.
+	if index := workflowNameIndexID(rec); index != "" {
+		if holder, ok := r.byName[index]; ok && holder == id {
+			delete(r.byName, index)
+		}
+	}
+	delete(r.versions, id)
 	return nil
 }
 
@@ -295,12 +421,36 @@ func (r *workflowRegistry) CompareAndReplaceWorkflow(ctx context.Context, req ba
 			Previous: previous,
 			Current:  current,
 		}
+		// Repair a name index entry an idempotent no-op would otherwise never
+		// write (a record registered before the index existed).
+		if index := workflowNameIndexID(current); index != "" {
+			r.byName[index] = current.ID
+		}
 		if err := ctx.Err(); err != nil {
 			return backend.WorkflowReplaceResult{}, err
 		}
 		r.mutations[mutationKey] = workflowMutation{fingerprint: fingerprint, result: result}
 		r.addWorkflowActivationProjectionLocked(mutationKey, result)
 		return result, nil
+	}
+
+	// At most one live record may hold a (namespace, name): a second one is
+	// hosted beside the first and silently splits the workflow the name refers
+	// to. An index entry pointing at either the source or the destination id is
+	// not a second record.
+	if index := workflowNameIndexID(replacement); index != "" {
+		if holder, ok := r.byName[index]; ok && holder != current.ID && holder != replacement.ID {
+			return backend.WorkflowReplaceResult{}, &backend.WorkflowNameConflictError{Holder: holder}
+		}
+	}
+	// A retired version label is immutable: its payload is what a pinned replay
+	// or a subworkflow reference resolves to. Re-installing the label with the
+	// payload it was retired with (a rollback) is allowed; a replace that keeps
+	// the current label retires nothing and stays updatable in place.
+	if current.Version != replacement.Version {
+		if entry, ok := r.retiredVersionLocked(current.ID, replacement.Version); ok && entry.hash != replacement.DefinitionHash {
+			return backend.WorkflowReplaceResult{}, &backend.WorkflowVersionImmutableError{Version: replacement.Version}
+		}
 	}
 
 	if err := ctx.Err(); err != nil {
@@ -311,6 +461,8 @@ func (r *workflowRegistry) CompareAndReplaceWorkflow(ctx context.Context, req ba
 	delete(r.byKey, current.Key)
 	r.byID[replacement.ID] = replacement
 	r.byKey[replacement.Key] = replacement.ID
+	r.retireVersionLocked(current, replacement)
+	r.updateNameIndexLocked(current, replacement)
 
 	result := backend.WorkflowReplaceResult{
 		Status:   backend.WorkflowReplaceReplaced,
@@ -320,6 +472,87 @@ func (r *workflowRegistry) CompareAndReplaceWorkflow(ctx context.Context, req ba
 	r.mutations[mutationKey] = workflowMutation{fingerprint: fingerprint, result: result}
 	r.addWorkflowActivationProjectionLocked(mutationKey, result)
 	return result, nil
+}
+
+// retireVersionLocked applies one committed replacement to the workflow's
+// version history, mirroring the registry script: history follows the surviving
+// record id, a replace that changes the version retires the previous payload
+// under its own label, the installed label is promoted out of history, and
+// retention evicts the oldest retirements beyond the limit.
+//
+// The id guard and the version guard are deliberately separate: a replace that
+// keeps the live label still moves the history when the id changes, and a
+// replace that keeps the id still retires the previous payload when the label
+// changes.
+func (r *workflowRegistry) retireVersionLocked(current, replacement backend.WorkflowRecord) {
+	if current.ID != replacement.ID {
+		if entries, ok := r.versions[current.ID]; ok {
+			r.versions[replacement.ID] = entries
+			delete(r.versions, current.ID)
+		}
+	}
+	if current.Version != replacement.Version {
+		entries := r.versions[replacement.ID]
+		entries = append(entries, workflowVersionEntry{
+			version:  current.Version,
+			hash:     current.DefinitionHash,
+			revision: current.RegistryRevision,
+			record:   current,
+		})
+		r.versions[replacement.ID] = entries
+	}
+	// The installed version is live again, so it is no longer retired.
+	r.dropVersionLocked(replacement.ID, replacement.Version)
+	if r.retention > 0 {
+		if entries := r.versions[replacement.ID]; len(entries) > r.retention {
+			r.versions[replacement.ID] = entries[len(entries)-r.retention:]
+		}
+	}
+}
+
+// updateNameIndexLocked points the destination name at the surviving record and
+// drops the source name's entry when a rename freed it.
+func (r *workflowRegistry) updateNameIndexLocked(current, replacement backend.WorkflowRecord) {
+	if index := workflowNameIndexID(replacement); index != "" {
+		r.byName[index] = replacement.ID
+	}
+	if current.Name != replacement.Name {
+		if index := workflowNameIndexID(current); index != "" {
+			if holder, ok := r.byName[index]; ok && holder == current.ID {
+				delete(r.byName, index)
+			}
+		}
+	}
+}
+
+// retiredVersionLocked returns the history entry holding version, if any.
+func (r *workflowRegistry) retiredVersionLocked(id types.WorkflowID, version string) (workflowVersionEntry, bool) {
+	for _, entry := range r.versions[id] {
+		if entry.version == version {
+			return entry, true
+		}
+	}
+	return workflowVersionEntry{}, false
+}
+
+func (r *workflowRegistry) dropVersionLocked(id types.WorkflowID, version string) {
+	entries := r.versions[id]
+	for i, entry := range entries {
+		if entry.version == version {
+			r.versions[id] = append(entries[:i:i], entries[i+1:]...)
+			return
+		}
+	}
+}
+
+// workflowNameIndexID keys one (namespace, name) pair to the id that holds it.
+// An empty name has no index entry: a record that never set one has no name
+// identity to enforce.
+func workflowNameIndexID(rec backend.WorkflowRecord) string {
+	if rec.Name == "" {
+		return ""
+	}
+	return string(workflowProjectionNamespace(rec.Namespace)) + "\x00" + rec.Name
 }
 
 // ListWorkflowActivationProjectionNamespaces returns every namespace that has committed a workflow

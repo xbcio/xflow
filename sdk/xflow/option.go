@@ -202,13 +202,14 @@ func WithScheduleOverrides(overrides store.ScheduleOverrideStore) Option {
 type InvokeOption func(*invokeConfig)
 
 type invokeConfig struct {
-	execTTL        time.Duration
-	runtime        *types.Runtime
-	fafRuntime     *types.Runtime
-	traceID        string
-	spanID         string
-	idempotencyKey string
-	testRun        bool
+	execTTL         time.Duration
+	runtime         *types.Runtime
+	fafRuntime      *types.Runtime
+	traceID         string
+	spanID          string
+	idempotencyKey  string
+	testRun         bool
+	workflowVersion string
 }
 
 // WithIdempotencyKey makes this invocation safe to retry: a second Invoke of the
@@ -225,10 +226,36 @@ type invokeConfig struct {
 // A key stays valid for the execution's own retention (engine.WithIdempotencyTTL
 // adjusts it), so a retry within that window — including after the execution
 // reached a terminal status — is answered with the original execution.
+//
+// The fingerprint is taken from the graph the call actually runs, so combining
+// it with WithWorkflowVersion is what makes a retry survive an intervening
+// publish: a pinned retry resolves the same version and its original execution
+// is returned, while an unpinned retry resolves the new version and is refused
+// as a conflict.
 func WithIdempotencyKey(key string) InvokeOption {
 	return func(c *invokeConfig) {
 		c.idempotencyKey = key
 	}
+}
+
+// WithWorkflowVersion pins this invocation to one published version of the
+// workflow addressed by the call.
+//
+// Omitted (the default) runs the addressed record — its current version — which
+// is what Invoke did before versions existed. A version equal to the current
+// one resolves to that same live record. A RETIRED version runs from the graph
+// snapshot captured when it was retired, never a recompile, after its stored
+// payload has been verified to hash to the value the version was published
+// with; when the current compiler cannot reproduce that hash the call fails
+// with backend.ErrWorkflowVersionUnavailable rather than execute a definition
+// wearing the label of another. An unknown version fails with
+// backend.ErrWorkflowVersionNotFound.
+//
+// Pinning is what makes a call independent of an intervening publish: the
+// execution runs the named version, and the graph snapshot it records carries
+// that version.
+func WithWorkflowVersion(version string) InvokeOption {
+	return func(c *invokeConfig) { c.workflowVersion = version }
 }
 
 // WithTestRun marks this invocation as a test run.

@@ -6,7 +6,17 @@ import (
 	"testing"
 
 	"github.com/xbcio/xflow/backend"
+	"github.com/xbcio/xflow/backend/internal/workflowregtest"
+	"github.com/xbcio/xflow/namespace"
 )
+
+// TestWorkflowRegistryVersionHistoryContract runs the shared version-history
+// suite (backend/internal/workflowregtest) against the in-memory registry.
+func TestWorkflowRegistryVersionHistoryContract(t *testing.T) {
+	workflowregtest.RunVersionHistoryContract(t, func(t *testing.T, retention int) (workflowregtest.Registry, context.Context) {
+		return newWorkflowRegistryWithRetention(retention), namespace.WithNamespace(context.Background(), namespace.Default)
+	})
+}
 
 func TestWorkflowRegistryAddIsIdempotentByKeyAndHash(t *testing.T) {
 	reg := newWorkflowRegistry()

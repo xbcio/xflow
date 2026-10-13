@@ -770,6 +770,73 @@ func (s *APIServer) ReplaceWorkflow(ctx context.Context, ns namespace.Namespace,
 	return id, diag.Warnings, err
 }
 
+// ListWorkflowVersions returns the version history of the workflow addressed by
+// id — the in-process entry point behind GET /v1/workflows/{id}/versions, for
+// an embedded host whose own process holds the control plane.
+//
+// It delegates to the module that serves the HTTP route, so the two cannot
+// disagree on the contents, the order (current version first, then retired
+// versions newest-retirement first), or the distinction between an id that
+// names no workflow (backend.ErrWorkflowNotFound) and a registry without
+// version history. ns is the scope to resolve the record in, and is used as
+// given — an embedded host that addresses the workflow by id alone passes the
+// namespace its context carries (namespace.FromContext), exactly as an
+// in-process registration would.
+func (s *APIServer) ListWorkflowVersions(ctx context.Context, ns namespace.Namespace, id types.WorkflowID) ([]backend.WorkflowVersionInfo, error) {
+	if s.ctrl == nil {
+		return nil, errors.New("apiserver: workflow control module not initialized")
+	}
+	if id == "" {
+		return nil, backend.ErrWorkflowNotFound
+	}
+	return s.ctrl.listWorkflowVersions(ctx, ns, id)
+}
+
+// RollbackWorkflow installs a retired version of the workflow addressed by id
+// as its current record, under the same id — the in-process entry point behind
+// POST /v1/workflows/{id}/rollback, and the same single implementation:
+// an atomic compare-and-swap that appends the version it replaces to history.
+//
+// An empty or current version is the idempotent no-op (Unchanged in the
+// result); an unknown one is backend.ErrWorkflowVersionNotFound; a payload the
+// current compiler no longer reproduces is
+// backend.ErrWorkflowVersionUnavailable. ns has the same meaning as on
+// ListWorkflowVersions.
+func (s *APIServer) RollbackWorkflow(ctx context.Context, ns namespace.Namespace, id types.WorkflowID, version string) (WorkflowRollbackResult, error) {
+	if s.ctrl == nil {
+		return WorkflowRollbackResult{}, errors.New("apiserver: workflow control module not initialized")
+	}
+	if id == "" {
+		return WorkflowRollbackResult{}, backend.ErrWorkflowNotFound
+	}
+	return s.ctrl.rollbackWorkflow(ctx, ns, id, version, "")
+}
+
+// GetWorkflowVersion returns one version of the workflow addressed by id —
+// current or retired — with its full definition, behind
+// GET /v1/workflows/{id}/versions/{version}. The current version resolves to
+// the live record and a retired one to the payload captured when it was
+// retired; an unknown version is backend.ErrWorkflowVersionNotFound and an id
+// that names no workflow is backend.ErrWorkflowNotFound. ns has the same
+// meaning as on ListWorkflowVersions.
+//
+// The result is not verified against the current compiler; a caller that is
+// about to EXECUTE the version must go through a path that verifies it (the
+// execute-by-version route, or the SDK's WithWorkflowVersion), which is where
+// fail-closed lives.
+func (s *APIServer) GetWorkflowVersion(ctx context.Context, ns namespace.Namespace, id types.WorkflowID, version string) (backend.WorkflowRecord, error) {
+	if s.ctrl == nil {
+		return backend.WorkflowRecord{}, errors.New("apiserver: workflow control module not initialized")
+	}
+	if id == "" {
+		return backend.WorkflowRecord{}, backend.ErrWorkflowNotFound
+	}
+	if version == "" {
+		return backend.WorkflowRecord{}, backend.ErrWorkflowVersionNotFound
+	}
+	return s.ctrl.getWorkflowVersion(ctx, ns, id, version)
+}
+
 // hasHTTPModule reports whether any registered module implements HTTPModule.
 func hasHTTPModule(modules []Module) bool {
 	for _, m := range modules {

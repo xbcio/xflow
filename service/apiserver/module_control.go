@@ -187,6 +187,13 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+PathNodeTypeByType, wrap("read_node_types", m.handleGetNodeType))
 	mux.HandleFunc("POST "+PathWorkflowExecute, wrap("execute_workflow", m.handleExecuteWorkflow))
 	mux.HandleFunc("POST "+PathWorkflowExecuteByID, wrap("execute_workflow_by_id", m.handleExecuteWorkflowByID))
+	// GET /v1/workflows/{id}/versions is the version-history read (versioning
+	// design §2.2). It is mounted in this legacy branch as well as in
+	// registerAuthzRoutes, like the other workflow reads: here the namespace is
+	// namespace.FromContext's Default, exactly as in handleGetWorkflow.
+	mux.HandleFunc("GET "+PathWorkflowVersions, wrap("list_workflow_versions", m.handleListWorkflowVersions))
+	mux.HandleFunc("GET "+PathWorkflowVersionByID, wrap("read_workflow_version", m.handleGetWorkflowVersion))
+	mux.HandleFunc("POST "+PathWorkflowRollback, wrap("rollback_workflow", m.handleRollbackWorkflow))
 	// POST /v1/executions is the entry-seed endpoint (runner protocol face,
 	// spec §0.1); the per-execution GET/signal/cancel/wait surface is the
 	// method-qualified patterns below. ServeMux treats exact and {id} patterns
@@ -291,6 +298,20 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+PathCurrentUser, authz(OpCurrentUserRead, false, m.handleCurrentUser, nil))
 	mux.HandleFunc("POST "+PathWorkflowExecute, authz(OpWorkflowCreate, true, m.handleExecuteWorkflow, inlineExecutionIDResolver()))
 	mux.HandleFunc("POST "+PathWorkflowExecuteByID, authz(OpWorkflowInvoke, true, m.handleExecuteWorkflowByID, invokeByIDResolver()))
+	// GET /v1/workflows/{id}/versions (the version-history read, versioning
+	// design §2.2) reuses OpWorkflowRead — the operation GET /v1/workflows/{id}
+	// carries — so the two scopes cannot drift: a principal that may read one
+	// workflow may read its version history, and one that may not is refused by
+	// the same default-deny check. The resolver scopes the audit row to the
+	// workflow id the route addresses, like the by-id read above.
+	mux.HandleFunc("GET "+PathWorkflowVersions, authz(OpWorkflowRead, false, m.handleListWorkflowVersions, workflowIDResolver()))
+	mux.HandleFunc("GET "+PathWorkflowVersionByID, authz(OpWorkflowRead, false, m.handleGetWorkflowVersion, workflowIDResolver()))
+	// POST /v1/workflows/{id}/rollback (versioning design §2.4) reuses
+	// OpWorkflowDefinitionUpdate — a rollback IS a definition update, and giving
+	// it an operation of its own would take it away from every deployment token
+	// that can already replace a definition, a silent UI degradation for a route
+	// that grants no more than PUT /v1/workflows/{id} does.
+	mux.HandleFunc("POST "+PathWorkflowRollback, authz(OpWorkflowDefinitionUpdate, true, m.handleRollbackWorkflow, workflowIDResolver()))
 	// Entry-seed endpoint (exact path, POST only). The authz wrapper injects
 	// the principal's namespace into the request context; handleSeedExecution
 	// reads it via namespace.FromContext — never from the client body.
@@ -652,6 +673,19 @@ type executeRegisteredRequest struct {
 	Input  map[string]any `json:"input,omitempty"`
 	Params map[string]any `json:"params,omitempty"`
 	Test   bool           `json:"test,omitempty"`
+	// Version selects which version of the ADDRESSED workflow to run
+	// (versioning design §2.3). It is a body field rather than a query
+	// parameter or header because it belongs with entry/params/test — "what to
+	// run this time" — and the idempotency fingerprint already covers the body
+	// plus the resolved graph version.
+	//
+	// Omitted or equal to the current version runs the live record, i.e. the
+	// behavior this route had before versions existed. A retired version runs
+	// from the graph snapshot captured when it was retired, never a recompile.
+	// The NAME is always the path record's: (namespace, rec.Name, version), so
+	// a version string can never redirect the call to another workflow, and an
+	// unknown version is 404 workflow_version_not_found.
+	Version string `json:"version,omitempty"`
 }
 
 type signalRequest struct {
@@ -908,8 +942,7 @@ func (m *workflowControlModule) handleRegisterWorkflow(w http.ResponseWriter, r 
 			writeFail(w, r, http.StatusBadRequest, "workflow_compile_failed", compileErr.Unwrap().Error())
 			return
 		}
-		if errors.Is(err, backend.ErrWorkflowConflict) {
-			writeFail(w, r, http.StatusConflict, "workflow_conflict", "workflow definition conflicts with an existing registration")
+		if writeWorkflowConflict(w, r, err) {
 			return
 		}
 		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
@@ -917,6 +950,33 @@ func (m *workflowControlModule) handleRegisterWorkflow(w http.ResponseWriter, r 
 	}
 	w.Header().Set("Location", "/v1/workflows/"+string(id))
 	writeData(w, r, http.StatusCreated, registerWorkflowResponse{WorkflowID: id, Warnings: diag.Warnings, ParamIssues: diag.ParamIssues})
+}
+
+// writeWorkflowConflict maps a registration or replacement conflict to its
+// faithful 409 code and reports whether it wrote a response.
+//
+// The three conflict kinds send the caller to different fixes, so they are not
+// collapsed into one code. A key conflict is resolved by changing the
+// definition; a name conflict by addressing the record that already holds the
+// name (PUT its id, or delete it); a version conflict by publishing under a
+// new label. The typed errors unwrap to ErrWorkflowConflict for the
+// classifiers that only need "this cannot succeed as presented", so the
+// specific checks MUST run first and the generic one last.
+func writeWorkflowConflict(w http.ResponseWriter, r *http.Request, err error) bool {
+	switch {
+	case errors.Is(err, backend.ErrWorkflowNameConflict):
+		// The holder id is deliberately not echoed: it is another record's
+		// identity and this response may reach a caller that cannot read it.
+		writeFail(w, r, http.StatusConflict, "workflow_name_conflict", "another live workflow already holds this namespace and name")
+		return true
+	case errors.Is(err, backend.ErrWorkflowVersionImmutable):
+		writeFail(w, r, http.StatusConflict, "workflow_version_immutable", "workflow version was already published with a different definition")
+		return true
+	case errors.Is(err, backend.ErrWorkflowConflict):
+		writeFail(w, r, http.StatusConflict, "workflow_conflict", "workflow definition conflicts with an existing registration")
+		return true
+	}
+	return false
 }
 
 // WorkflowCompileError marks a registration failure that the caller can fix by
@@ -929,6 +989,24 @@ func (e *WorkflowCompileError) Error() string { return e.err.Error() }
 func (e *WorkflowCompileError) Unwrap() error { return e.err }
 
 var errWorkflowIDMismatch = errors.New("workflow id does not match path")
+
+// errWorkflowVersionsUnsupported means the configured workflow registry does
+// not implement backend.WorkflowVersionCapability. That is a server-side
+// misconfiguration, not a client error: the version routes fail closed with a
+// 500 rather than serving an empty history, which would read as "this workflow
+// has no retired versions" — a different and false statement.
+var errWorkflowVersionsUnsupported = errors.New("workflow registry does not support version history")
+
+// backend.ErrWorkflowVersionUnavailable means an archived version's payload no
+// longer reproduces under the current compiler: recomputing the runtime hash
+// from the stored definition does not yield the hash the version was published
+// with. The version label is immutable, so installing or running "the same
+// version" with different semantics would silently break every pinned replay
+// and subworkflow reference that names it. Callers fail closed (409
+// workflow_version_unavailable) instead.
+//
+// The sentinel itself lives in backend because the embedded SDK raises the same
+// condition from the same recomputation; this module maps it to the wire code.
 
 var errFAFWorkflowRegistration = errors.New("workflow registration does not support options.faf")
 
@@ -1655,6 +1733,318 @@ func (m *workflowControlModule) handleGetWorkflow(w http.ResponseWriter, r *http
 	writeData(w, r, http.StatusOK, workflowResponseBody(rec))
 }
 
+// rollbackWorkflowRequest is the body of POST /v1/workflows/{id}/rollback
+// (versioning design §2.4). An omitted or empty version means the current
+// version, which is the no-op branch.
+type rollbackWorkflowRequest struct {
+	Version string `json:"version,omitempty"`
+}
+
+// WorkflowRollbackResult reports the outcome of a rollback. Unchanged is the
+// idempotent no-op — the requested version already is the current one, or a
+// replayed rollback found it installed — mirroring the identical-PUT no-op.
+//
+// It is exported and shared by the HTTP route and APIServer.RollbackWorkflow,
+// so the wire shape and the in-process result cannot drift apart.
+type WorkflowRollbackResult struct {
+	WorkflowID types.WorkflowID `json:"workflow_id"`
+	Version    string           `json:"version"`
+	Unchanged  bool             `json:"unchanged"`
+}
+
+// handleRollbackWorkflow serves POST /v1/workflows/{id}/rollback (versioning
+// design §2.4): install a retired version of the addressed workflow as its
+// current record, under the same id.
+//
+// The namespace comes from the verified principal, the version from the body,
+// and the mutation id from X-Request-Id when the client supplies one — exactly
+// like PUT /v1/workflows/{id}, because a rollback IS a replacement and inherits
+// that route's idempotent-replay contract: replaying the same request with the
+// same X-Request-Id does not produce a second revision.
+func (m *workflowControlModule) handleRollbackWorkflow(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	id := types.WorkflowID(r.PathValue("id"))
+	if id == "" {
+		writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
+		return
+	}
+	var req rollbackWorkflowRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	mutationID := sanitizeRequestID(r.Header.Get("X-Request-Id"))
+	if mutationID != "" {
+		mutationID = "http:" + mutationID
+	}
+	out, err := m.rollbackWorkflow(r.Context(), namespace.FromContext(r.Context()), id, req.Version, mutationID)
+	if err != nil {
+		switch {
+		case errors.Is(err, backend.ErrWorkflowNotFound):
+			writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
+		case errors.Is(err, backend.ErrWorkflowVersionNotFound):
+			writeFail(w, r, http.StatusNotFound, "workflow_version_not_found", "workflow version not found")
+		case errors.Is(err, backend.ErrWorkflowVersionUnavailable):
+			writeFail(w, r, http.StatusConflict, "workflow_version_unavailable", "workflow version is not reproducible under the current compiler")
+		default:
+			if writeWorkflowConflict(w, r, err) {
+				return
+			}
+			if m.log != nil {
+				m.log.Error("rollback_workflow_failed", "workflow_id", string(id), "version", req.Version, "err", err)
+			}
+			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		}
+		return
+	}
+	writeData(w, r, http.StatusOK, out)
+}
+
+// workflowVersionItem is one row of the GET /v1/workflows/{id}/versions page.
+// It is a label projection of backend.WorkflowVersionInfo, mirroring the
+// workflowListItem/workflowRecord split.
+//
+// The definition and the compiled graph are deliberately absent, for the same
+// reason a workflow list row omits them: a page of full definitions is
+// O(page × definition size) on the wire, and the version list exists to show
+// which labels exist and which one is live. What a row needs is the label
+// (version), a change detector (definition_hash), the revision the version was
+// live at (registry_revision, which is also its retirement order), and the two
+// state flags. The definition of one version is read with the detail route
+// GET /v1/workflows/{id}/versions/{version}.
+type workflowVersionItem struct {
+	Version          string `json:"version"`
+	DefinitionHash   string `json:"definition_hash"`
+	RegistryRevision uint64 `json:"registry_revision"`
+	// Current marks the single version the live record represents; Archived
+	// marks a retired version held in history. They are complementary, and
+	// both are carried so a row's state is readable without inferring it from
+	// position.
+	Current  bool `json:"current"`
+	Archived bool `json:"archived"`
+}
+
+// listWorkflowVersions resolves the version history of the workflow addressed
+// by id, in the registry capability's order: current version first, then
+// retired versions newest-retirement first.
+//
+// It is the one implementation behind the HTTP route and
+// APIServer.ListWorkflowVersions, for the same reason registerWorkflow is:
+// the namespace scope check and the capability assertion are policy, and a
+// second copy would be free to skip one.
+func (m *workflowControlModule) listWorkflowVersions(ctx context.Context, ns namespace.Namespace, id types.WorkflowID) ([]backend.WorkflowVersionInfo, error) {
+	registry := m.registry()
+	if registry == nil {
+		if m.log != nil {
+			m.log.Error("list_workflow_versions_no_registry", "workflow_id", string(id))
+		}
+		return nil, errors.New("apiserver: no workflow registry configured")
+	}
+	// Resolve the live record first, exactly as handleGetWorkflow does: the
+	// namespace comparison below is the authoritative IDOR defense and has to
+	// happen before any history is read. It cannot be delegated to the
+	// capability — the in-memory registry's GetWorkflow ignores the context
+	// namespace, so its history would otherwise be readable across namespaces
+	// by anyone who guessed or leaked an id.
+	rec, err := registry.GetWorkflow(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if rec.Namespace != "" && ns != "" && rec.Namespace != string(ns) {
+		return nil, backend.ErrWorkflowNotFound
+	}
+	versions, ok := registry.(backend.WorkflowVersionCapability)
+	if !ok {
+		if m.log != nil {
+			m.log.Error("list_workflow_versions_capability_missing", "workflow_id", string(id))
+		}
+		return nil, errWorkflowVersionsUnsupported
+	}
+	return versions.ListWorkflowVersions(ctx, id)
+}
+
+// handleListWorkflowVersions serves GET /v1/workflows/{id}/versions (versioning
+// design §2.2): the version history of one registered workflow.
+//
+// Namespace: resolved server-side from the authenticated principal
+// (namespace.FromContext), never from the query string; a cross-namespace id
+// resolves to 404 workflow_not_found, same as GET /v1/workflows/{id}.
+//
+// Pagination: offset, 1-based, through the shared pageParams/pageOffset helpers
+// (default 20, hard cap 200). The history is bounded by the registry's
+// retention limit (backend.DefaultWorkflowVersionRetention plus the live
+// record), so paging is a presentation concern, not a traversal guard — but it
+// is the same dialect as every other page list, not a second one.
+//
+// Envelope: writeList — the mandated {list,total} collection shape. total is
+// the exact history size, independent of the page requested.
+func (m *workflowControlModule) handleListWorkflowVersions(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+	id := types.WorkflowID(r.PathValue("id"))
+	if id == "" {
+		writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
+		return
+	}
+	versions, err := m.listWorkflowVersions(r.Context(), namespace.FromContext(r.Context()), id)
+	if err != nil {
+		if errors.Is(err, backend.ErrWorkflowNotFound) {
+			writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
+			return
+		}
+		if m.log != nil {
+			m.log.Error("list_workflow_versions_failed", "workflow_id", string(id), "err", err)
+		}
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	page, pageSize := pageParams(r)
+	start := pageOffset(page, pageSize)
+	if start > len(versions) {
+		start = len(versions)
+	}
+	end := start + pageSize
+	if end > len(versions) {
+		end = len(versions)
+	}
+	items := make([]workflowVersionItem, 0, end-start)
+	for _, v := range versions[start:end] {
+		items = append(items, workflowVersionItem{
+			Version:          v.Version,
+			DefinitionHash:   v.DefinitionHash,
+			RegistryRevision: v.RegistryRevision,
+			Current:          v.Current,
+			Archived:         v.Archived,
+		})
+	}
+	writeList(w, r, items, len(versions))
+}
+
+// getWorkflowVersion resolves one version of the workflow addressed by id.
+// version may name the current version — which resolves to the live record
+// itself — or a retired one, which resolves to the payload captured when it
+// was retired. An empty version is treated as the current one.
+//
+// It is listWorkflowVersions' read-one sibling, and carries the same namespace
+// scope check for the same reason: the in-memory registry does not scope its
+// lookups by the context namespace, so the IDOR defense has to sit above the
+// capability. The capability's own contract distinguishes ErrWorkflowNotFound
+// (the workflow has no live record) from ErrWorkflowVersionNotFound (it exists
+// but never published that version), and both pass through unwrapped.
+func (m *workflowControlModule) getWorkflowVersion(ctx context.Context, ns namespace.Namespace, id types.WorkflowID, version string) (backend.WorkflowRecord, error) {
+	registry := m.registry()
+	if registry == nil {
+		if m.log != nil {
+			m.log.Error("get_workflow_version_no_registry", "workflow_id", string(id))
+		}
+		return backend.WorkflowRecord{}, errors.New("apiserver: no workflow registry configured")
+	}
+	rec, err := registry.GetWorkflow(ctx, id)
+	if err != nil {
+		return backend.WorkflowRecord{}, err
+	}
+	if rec.Namespace != "" && ns != "" && rec.Namespace != string(ns) {
+		return backend.WorkflowRecord{}, backend.ErrWorkflowNotFound
+	}
+	if version == "" || version == rec.Version {
+		return rec, nil
+	}
+	versions, ok := registry.(backend.WorkflowVersionCapability)
+	if !ok {
+		if m.log != nil {
+			m.log.Error("get_workflow_version_capability_missing", "workflow_id", string(id))
+		}
+		return backend.WorkflowRecord{}, errWorkflowVersionsUnsupported
+	}
+	return versions.GetWorkflowVersion(ctx, id, version)
+}
+
+// archivedWorkflowVersion resolves a retired version of the workflow addressed
+// by id, verified against the current compiler before any caller acts on it: it
+// recomputes the runtime hash from the stored definition and requires it to
+// equal the hash the version was published with (versioning design Q10).
+//
+// A version label is immutable, so a mismatch means hashing or compilation
+// semantics have drifted since the version was published — the archived
+// payload would execute as the same label with different semantics. That is
+// exactly what the label promises will not happen, so both consumers of this
+// helper (execute-by-version and rollback) fail closed with
+// backend.ErrWorkflowVersionUnavailable rather than silently install or run a
+// divergent definition.
+//
+// Execution then proceeds from the archived graph snapshot (rec.Graph) as
+// captured at retirement; the payload is never recompiled.
+func (m *workflowControlModule) archivedWorkflowVersion(ctx context.Context, ns namespace.Namespace, id types.WorkflowID, version string) (backend.WorkflowRecord, error) {
+	rec, err := m.getWorkflowVersion(ctx, ns, id, version)
+	if err != nil {
+		return backend.WorkflowRecord{}, err
+	}
+	hash, err := workflowhash.Runtime(rec.Definition, hashParamSpecs)
+	if err != nil {
+		// A definition the current compiler cannot even hash cannot be
+		// confirmed as the published one; that is the same fail-closed answer.
+		if m.log != nil {
+			m.log.Error("archived_workflow_version_hash_failed", "workflow_id", string(id), "version", version, "err", err)
+		}
+		return backend.WorkflowRecord{}, fmt.Errorf("%w: version %q: %v", backend.ErrWorkflowVersionUnavailable, version, err)
+	}
+	if hash != rec.DefinitionHash {
+		if m.log != nil {
+			m.log.Error("archived_workflow_version_hash_drift",
+				"workflow_id", string(id), "version", version,
+				"stored_hash", rec.DefinitionHash, "current_hash", hash)
+		}
+		return backend.WorkflowRecord{}, fmt.Errorf("%w: version %q", backend.ErrWorkflowVersionUnavailable, version)
+	}
+	return rec, nil
+}
+
+// handleGetWorkflowVersion serves GET /v1/workflows/{id}/versions/{version}
+// (versioning design §2.2): one version's full record, in the same wire shape
+// as GET /v1/workflows/{id} — this is where the definition the version list
+// deliberately omits is read back.
+//
+// The current version resolves to the live record; a retired version resolves
+// to the payload captured when it was retired, so a version remains readable
+// (and pinnable for a replay) after it has been replaced. An unknown version is
+// 404 workflow_version_not_found — deliberately distinct from workflow_not_found
+// so a caller can tell "this workflow is gone" from "this workflow never
+// published that version". A cross-namespace id is reported as
+// workflow_not_found, exactly as the by-id read does.
+func (m *workflowControlModule) handleGetWorkflowVersion(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+	id := types.WorkflowID(r.PathValue("id"))
+	version := r.PathValue("version")
+	if id == "" {
+		writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
+		return
+	}
+	if version == "" {
+		writeFail(w, r, http.StatusNotFound, "workflow_version_not_found", "workflow version not found")
+		return
+	}
+	rec, err := m.getWorkflowVersion(r.Context(), namespace.FromContext(r.Context()), id, version)
+	if err != nil {
+		switch {
+		case errors.Is(err, backend.ErrWorkflowNotFound):
+			writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
+		case errors.Is(err, backend.ErrWorkflowVersionNotFound):
+			writeFail(w, r, http.StatusNotFound, "workflow_version_not_found", "workflow version not found")
+		default:
+			if m.log != nil {
+				m.log.Error("get_workflow_version_failed", "workflow_id", string(id), "version", version, "err", err)
+			}
+			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		}
+		return
+	}
+	writeData(w, r, http.StatusOK, workflowResponseBody(rec))
+}
+
 // handleReplaceWorkflow serves PUT /v1/workflows/{id} (spec §7 + Addition 1):
 // a full update of the resource identified by the path id. The path id is the
 // authoritative target; the body may omit id, but if it supplies one, it must
@@ -1698,8 +2088,7 @@ func (m *workflowControlModule) handleReplaceWorkflow(w http.ResponseWriter, r *
 			writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
 			return
 		}
-		if errors.Is(err, backend.ErrWorkflowConflict) {
-			writeFail(w, r, http.StatusConflict, "workflow_conflict", "workflow definition conflicts with an existing registration")
+		if writeWorkflowConflict(w, r, err) {
 			return
 		}
 		if errors.Is(err, errWorkflowIDMismatch) {
@@ -1749,6 +2138,37 @@ func (m *workflowControlModule) handleExecuteWorkflowByID(w http.ResponseWriter,
 	if rec.Namespace != "" && ns != "" && rec.Namespace != string(ns) {
 		writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
 		return
+	}
+	// An archived version runs from its history payload instead of the live
+	// record (versioning design §2.3). req.Version empty or equal to the
+	// current version keeps the live record above — byte-for-byte the behavior
+	// this route had before versions existed — and only a version the live
+	// record does not carry reaches the history lookup, whose failure codes the
+	// switch maps. The model name in every branch is rec.Name's, never the
+	// body's, so the version field cannot point the call at another workflow.
+	// Retention may evict the oldest retired versions, so the lookup can also
+	// fail for a version that once existed: workflow_version_not_found is the
+	// designed answer there, and because this resolution precedes the
+	// idempotency lookup below, a keyed retry pinned to an evicted version
+	// fails closed instead of replaying the original execution as a duplicate.
+	if req.Version != "" && req.Version != rec.Version {
+		rec, err = m.archivedWorkflowVersion(r.Context(), ns, id, req.Version)
+		if err != nil {
+			switch {
+			case errors.Is(err, backend.ErrWorkflowNotFound):
+				writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
+			case errors.Is(err, backend.ErrWorkflowVersionNotFound):
+				writeFail(w, r, http.StatusNotFound, "workflow_version_not_found", "workflow version not found")
+			case errors.Is(err, backend.ErrWorkflowVersionUnavailable):
+				writeFail(w, r, http.StatusConflict, "workflow_version_unavailable", "workflow version is not reproducible under the current compiler")
+			default:
+				if m.log != nil {
+					m.log.Error("execute_workflow_version_failed", "workflow_id", string(id), "version", req.Version, "err", err)
+				}
+				writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+			}
+			return
+		}
 	}
 	// Attach the stored definition so the durable SQL execution projection can
 	// persist workflow_def (NOT NULL) — mirroring the inline-execute path.
@@ -2006,6 +2426,65 @@ func (m *workflowControlModule) replaceWorkflowByIDWithMetadata(ctx context.Cont
 		mutationID = "http:" + uuid.NewString()
 	}
 	return m.compareAndReplaceWorkflow(ctx, ns, registry, existing, replacement, mutationID, diag)
+}
+
+// rollbackWorkflow installs a retired version as the workflow's current
+// record, under the same id, through the same atomic compare-and-swap PUT
+// /v1/workflows/{id} uses (versioning design §2.4). Reusing the CAS is the
+// point: activation projection, index rescoring, and idempotent mutation replay
+// all come for free, and the replaced current version is appended to history by
+// the same script — the exact dual of the retirement that put the target there.
+//
+// The installed record is the archived payload with only its identity fixed to
+// the live record: same id, key ns/<live name>@<version>, the name the live
+// record currently holds. Its definition hash is the hash the version was
+// PUBLISHED with, never a recomputation — archivedWorkflowVersion has already
+// proven a recomputation yields that hash, and if it does not, this fails
+// closed with backend.ErrWorkflowVersionUnavailable rather than installing a
+// same-label-different-semantics definition.
+//
+// version empty or equal to the current version is the no-op branch: the
+// requested version already is the current record, so nothing is written.
+func (m *workflowControlModule) rollbackWorkflow(ctx context.Context, ns namespace.Namespace, id types.WorkflowID, version, mutationID string) (WorkflowRollbackResult, error) {
+	registry := m.registry()
+	if registry == nil {
+		if m.log != nil {
+			m.log.Error("rollback_workflow_no_registry", "workflow_id", string(id))
+		}
+		return WorkflowRollbackResult{}, errors.New("apiserver: no workflow registry configured")
+	}
+	ctx = namespace.WithNamespace(ctx, ns)
+	existing, err := registry.GetWorkflow(ctx, id)
+	if err != nil {
+		return WorkflowRollbackResult{}, err
+	}
+	if existing.Namespace != "" && ns != "" && existing.Namespace != string(ns) {
+		return WorkflowRollbackResult{}, backend.ErrWorkflowNotFound
+	}
+	if version == "" || version == existing.Version {
+		return WorkflowRollbackResult{WorkflowID: existing.ID, Version: existing.Version, Unchanged: true}, nil
+	}
+	archived, err := m.archivedWorkflowVersion(ctx, ns, id, version)
+	if err != nil {
+		return WorkflowRollbackResult{}, err
+	}
+	replacement := archived
+	replacement.ID = existing.ID
+	replacement.Namespace = string(ns)
+	replacement.Name = existing.Name
+	replacement.Key = workflowRegistryKey(string(ns), existing.Name, version)
+	// A caller-supplied mutation id (X-Request-Id, prefixed by the handler)
+	// makes the retry of a response-lost rollback replay instead of writing a
+	// second revision; without one, each attempt is its own mutation, exactly
+	// as on PUT /v1/workflows/{id}.
+	if mutationID == "" {
+		mutationID = "http:" + uuid.NewString()
+	}
+	newID, _, err := m.compareAndReplaceWorkflow(ctx, ns, registry, existing, replacement, mutationID, registrationDiagnostics{})
+	if err != nil {
+		return WorkflowRollbackResult{}, err
+	}
+	return WorkflowRollbackResult{WorkflowID: newID, Version: version, Unchanged: false}, nil
 }
 
 func (m *workflowControlModule) compareAndReplaceWorkflow(

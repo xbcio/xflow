@@ -143,6 +143,10 @@ var admissionRoutes = append([]admissionRouteRow{
 		name: "deregister", method: http.MethodDelete, pattern: PathWorkflowByID,
 		reason: "definition write: deregistering starts no execution",
 	},
+	{
+		name: "rollback", method: http.MethodPost, pattern: PathWorkflowRollback,
+		reason: "definition write: installing an archived version starts no execution",
+	},
 
 	// ---- exempt: runner admission and fallbacks ----
 	{
