@@ -84,6 +84,9 @@ func RunIdempotencyContract(t *testing.T, newStore IdempotencyStoreFactory) {
 	t.Run("RerunRetryReturnsTheOriginalRerun", func(t *testing.T) {
 		idempotencyRerunRetryReturnsTheOriginal(t, newStore(t))
 	})
+	t.Run("RerunFromNodeIsPartOfTheFingerprint", func(t *testing.T) {
+		idempotencyRerunFromNodeIsPartOfTheFingerprint(t, newStore(t))
+	})
 }
 
 // discardQueue accepts every task and delivers none: the cases are about what
@@ -116,6 +119,27 @@ func idempotencyGraph(t *testing.T, name string, conc *types.ConcurrencySettings
 	}
 	if conc != nil {
 		def.Settings = &types.WorkflowSettings{Concurrency: conc}
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatalf("Compile(%s) error = %v", name, err)
+	}
+	return g
+}
+
+// idempotencyTwoRootGraph compiles a workflow with two entry roots, so one
+// parent can be rerun from either of them: the shape the from_node fingerprint
+// case needs, two requests that are individually valid reruns of the same
+// parent and differ only in where they start.
+func idempotencyTwoRootGraph(t *testing.T, name string) *graph.Graph {
+	t.Helper()
+	def := &types.WorkflowDef{
+		Name:    name,
+		Version: "1",
+		Nodes: []types.NodeDef{
+			{Name: "start", Type: "xflow.start"},
+			{Name: "other", Type: "xflow.start"},
+		},
 	}
 	g, err := graph.Compile(def)
 	if err != nil {
@@ -547,5 +571,48 @@ func idempotencyRerunRetryReturnsTheOriginal(t *testing.T, h IdempotencyHarness)
 	res, err := eng.Rerun(context.Background(), engine.RerunRequest{ExecutionID: other, FromNode: "start", IdempotencyKey: "rerun-1"})
 	if err != nil || res.Duplicate || res.ExecutionID == first.ExecutionID {
 		t.Fatalf("same key on another parent = (%+v, %v), want a new execution", res, err)
+	}
+}
+
+// idempotencyRerunFromNodeIsPartOfTheFingerprint: FromNode picks which work a
+// rerun re-does, so two keyed reruns of one parent starting at different nodes
+// are different requests, not a retry of one. The second must be refused as a
+// conflict — answering duplicate would hand the caller a rerun that starts
+// somewhere it did not ask for.
+func idempotencyRerunFromNodeIsPartOfTheFingerprint(t *testing.T, h IdempotencyHarness) {
+	if _, ok := h.State.(engine.ExecutionSeeder); !ok {
+		t.Skip("store cannot seed a rerun")
+	}
+	eng := engine.New(h.State, discardQueue{})
+	g := idempotencyTwoRootGraph(t, "idem-rerun-from")
+	parent, err := eng.Submit(context.Background(), g, nil)
+	if err != nil {
+		t.Fatalf("parent Submit error = %v", err)
+	}
+	if err := h.State.UpdateExecutionStatus(context.Background(), parent, types.ExecutionStatusFailed, "boom"); err != nil {
+		t.Fatalf("UpdateExecutionStatus(parent) error = %v", err)
+	}
+
+	first, err := eng.Rerun(context.Background(), engine.RerunRequest{ExecutionID: parent, FromNode: "start", IdempotencyKey: "rerun-from-1"})
+	if err != nil {
+		t.Fatalf("keyed Rerun error = %v", err)
+	}
+	if first.Duplicate || first.ExecutionID == parent {
+		t.Fatalf("first keyed rerun = %+v, want a new execution", first)
+	}
+	if snap := mustExecution(t, h.State, first.ExecutionID); snap.RerunFrom != "start" {
+		t.Fatalf("rerun starts at %q, want %q", snap.RerunFrom, "start")
+	}
+
+	// Same key, same parent, a different starting node: a different rerun.
+	if _, err := eng.Rerun(context.Background(), engine.RerunRequest{ExecutionID: parent, FromNode: "other", IdempotencyKey: "rerun-from-1"}); !errors.Is(err, engine.ErrIdempotencyConflict) {
+		t.Fatalf("same key from another node error = %v, want ErrIdempotencyConflict", err)
+	}
+
+	// The original request still answers duplicate with the rerun it started: the
+	// refusal above left the claim as it was.
+	again, err := eng.Rerun(context.Background(), engine.RerunRequest{ExecutionID: parent, FromNode: "start", IdempotencyKey: "rerun-from-1"})
+	if err != nil || !again.Duplicate || again.ExecutionID != first.ExecutionID {
+		t.Fatalf("retried rerun = (%+v, %v), want duplicate of %q", again, err, first.ExecutionID)
 	}
 }
