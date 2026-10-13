@@ -438,6 +438,214 @@ func isRemoteTransportError(err error) bool {
 	return errors.As(err, &transportErr)
 }
 
+// remoteSignalRequest is the body of POST /v1/executions/{id}/signals.
+type remoteSignalRequest struct {
+	Name string         `json:"name"`
+	Data map[string]any `json:"data,omitempty"`
+}
+
+// Signal delivers a named signal to a suspended node within the execution.
+// Signal names and their meaning are the workflow's (see Engine.Signal); the
+// server records the authenticated caller as the signal's verified actor.
+func (r *Remote) Signal(ctx context.Context, id types.ExecutionID, name string, data map[string]any) error {
+	if id == "" {
+		return errors.New("xflow: Signal requires an execution id")
+	}
+	if name == "" {
+		return errors.New("xflow: Signal requires a signal name")
+	}
+	_, err := r.send(ctx, remoteRequest{
+		method: http.MethodPost,
+		path:   "/v1/executions/" + url.PathEscape(string(id)) + "/signals",
+		body:   remoteSignalRequest{Name: name, Data: data},
+	})
+	return err
+}
+
+// RevokeSignal revokes a pre-delivered signal that has not yet been consumed.
+// A signal that already resumed a node is 409 signal_consumed
+// (errors.Is(err, engine.ErrSignalConsumed)).
+func (r *Remote) RevokeSignal(ctx context.Context, id types.ExecutionID, name string) error {
+	if id == "" {
+		return errors.New("xflow: RevokeSignal requires an execution id")
+	}
+	if name == "" {
+		return errors.New("xflow: RevokeSignal requires a signal name")
+	}
+	_, err := r.send(ctx, remoteRequest{
+		method: http.MethodDelete,
+		path:   "/v1/executions/" + url.PathEscape(string(id)) + "/signals/" + url.PathEscape(name),
+	})
+	return err
+}
+
+// Cancel cancels a running execution and releases suspended nodes. Like
+// Engine.Cancel it is best-effort for work already leased to a runner.
+func (r *Remote) Cancel(ctx context.Context, id types.ExecutionID) error {
+	return r.executionAction(ctx, id, "cancel")
+}
+
+// Pause suspends dispatch of a running execution. The server answers with the
+// execution view, which is deliberately not returned here: Engine.Pause
+// reports the outcome as an error and callers that want the view call
+// Inspect.
+func (r *Remote) Pause(ctx context.Context, id types.ExecutionID) error {
+	return r.executionAction(ctx, id, "pause")
+}
+
+// Resume returns a paused execution to dispatch and queues what the pause
+// held.
+func (r *Remote) Resume(ctx context.Context, id types.ExecutionID) error {
+	return r.executionAction(ctx, id, "resume")
+}
+
+// executionAction posts one of the parameterless execution controls and
+// discards its body. The failures come back through the mapped sentinels:
+// engine.ErrExecutionNotPausable / ErrExecutionNotPaused for the two 409s,
+// engine.ErrPauseUnsupported for a deployment without pause.
+func (r *Remote) executionAction(ctx context.Context, id types.ExecutionID, verb string) error {
+	if id == "" {
+		return fmt.Errorf("xflow: %s requires an execution id", verb)
+	}
+	_, err := r.send(ctx, remoteRequest{
+		method: http.MethodPost,
+		path:   "/v1/executions/" + url.PathEscape(string(id)) + "/" + verb,
+	})
+	return err
+}
+
+// remoteRerunRequest is the body of POST /v1/executions/{id}/rerun. The
+// idempotency key is not a body field: the route reads it from the
+// Idempotency-Key header, exactly as the execute route does.
+type remoteRerunRequest struct {
+	FromNode       string `json:"from_node"`
+	IncludeSuccess bool   `json:"include_success,omitempty"`
+}
+
+// Rerun derives a new execution from a terminal one, starting at fromNode; see
+// Engine.Rerun for the semantics, which are the server's here.
+//
+// RerunIdempotencyKey, when given, travels as the Idempotency-Key header and
+// makes the call safe to retry: a transport failure (no response) is then
+// retried once with the same key, and a replayed request returns the rerun the
+// first one created with Duplicate set. Without a key nothing is retried —
+// deriving a second execution from one lost response is the outcome the key
+// exists to prevent.
+func (r *Remote) Rerun(ctx context.Context, id types.ExecutionID, fromNode string, opts ...RerunOption) (engine.RerunResult, error) {
+	if id == "" {
+		return engine.RerunResult{}, errors.New("xflow: Rerun requires an execution id")
+	}
+	if fromNode == "" {
+		return engine.RerunResult{}, errors.New("xflow: rerun requires a from node")
+	}
+	req := engine.RerunRequest{ExecutionID: id, FromNode: fromNode}
+	for _, opt := range opts {
+		opt(&req)
+	}
+	headers := map[string]string{}
+	if req.IdempotencyKey != "" {
+		headers["Idempotency-Key"] = req.IdempotencyKey
+	}
+	env, err := r.send(ctx, remoteRequest{
+		method:  http.MethodPost,
+		path:    "/v1/executions/" + url.PathEscape(string(id)) + "/rerun",
+		body:    remoteRerunRequest{FromNode: req.FromNode, IncludeSuccess: req.IncludeSuccess},
+		headers: headers,
+		// Only a keyed rerun is safe to repeat.
+		retryTransport: req.IdempotencyKey != "",
+	})
+	if err != nil {
+		return engine.RerunResult{}, err
+	}
+	var out remoteSubmissionResult
+	if err := json.Unmarshal(env.envelope.Data, &out); err != nil {
+		return engine.RerunResult{}, fmt.Errorf("xflow: decode rerun response: %w", err)
+	}
+	res := engine.RerunResult{ExecutionID: out.ExecutionID, QueuePosition: out.QueuePosition, Duplicate: out.Duplicate}
+	if out.Status == types.ExecutionStatusQueued {
+		res.Queued = true
+	}
+	return res, nil
+}
+
+// RemoteExecution is one row of the execution collection (GET /v1/executions).
+//
+// WorkflowName, not a workflow id: the server's executions table stores no
+// workflow id column, so a name is the only workflow identity a row carries —
+// and a display string, not an identity (two namespaces can share one).
+type RemoteExecution struct {
+	ExecutionID  types.ExecutionID     `json:"execution_id"`
+	Namespace    string                `json:"namespace"`
+	WorkflowName string                `json:"workflow_name"`
+	Status       types.ExecutionStatus `json:"status"`
+	Error        string                `json:"error"`
+	CreatedAt    time.Time             `json:"created_at"`
+	UpdatedAt    time.Time             `json:"updated_at"`
+}
+
+// RemoteExecutionQuery narrows ListExecutions. The zero value pages from the
+// start with the server's default page size and applies no filter — the four
+// filters the route supports, and nothing more.
+//
+// Status, when set, must be a lifecycle status (pending, queued, paused,
+// running, success, failed, canceling, canceled, timeout); anything else is
+// refused by the server with 400 execution_status_invalid rather than served
+// as an empty page. The time bounds are exclusive at both ends.
+type RemoteExecutionQuery struct {
+	Status        types.ExecutionStatus
+	CreatedAfter  time.Time
+	CreatedBefore time.Time
+	Page          int
+	PageSize      int
+}
+
+// RemoteExecutionPage is one page of the collection plus the total matching
+// the filter (not just this page).
+type RemoteExecutionPage struct {
+	Executions []RemoteExecution
+	Total      int
+}
+
+// ListExecutions returns one page of this token's namespace's executions.
+//
+// There is no *Engine counterpart — an embedded engine has no execution
+// collection to page — so this is Remote's own surface. The namespace is the
+// token's, server-side; there is no parameter for it anywhere, by design.
+func (r *Remote) ListExecutions(ctx context.Context, query RemoteExecutionQuery) (RemoteExecutionPage, error) {
+	q := url.Values{}
+	if query.Status != "" {
+		q.Set("status", string(query.Status))
+	}
+	if !query.CreatedAfter.IsZero() {
+		q.Set("created_after", query.CreatedAfter.Format(time.RFC3339Nano))
+	}
+	if !query.CreatedBefore.IsZero() {
+		q.Set("created_before", query.CreatedBefore.Format(time.RFC3339Nano))
+	}
+	if query.Page > 0 {
+		q.Set("page", strconv.Itoa(query.Page))
+	}
+	if query.PageSize > 0 {
+		q.Set("page_size", strconv.Itoa(query.PageSize))
+	}
+	path := "/v1/executions"
+	if encoded := q.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	env, err := r.send(ctx, remoteRequest{method: http.MethodGet, path: path, retryTransport: true})
+	if err != nil {
+		return RemoteExecutionPage{}, err
+	}
+	var out struct {
+		List  []RemoteExecution `json:"list"`
+		Total int               `json:"total"`
+	}
+	if err := json.Unmarshal(env.envelope.Data, &out); err != nil {
+		return RemoteExecutionPage{}, fmt.Errorf("xflow: decode execution list: %w", err)
+	}
+	return RemoteExecutionPage{Executions: out.List, Total: out.Total}, nil
+}
+
 // RemoteError is a failure the remote server reported (or, for a body that was
 // not an envelope, that the client observed on the wire).
 //
