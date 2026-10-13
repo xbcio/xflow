@@ -202,6 +202,11 @@ type Config struct {
 	// (currently Redis-backed control-plane backends). Leave nil for embedded/local
 	// deployments that have no external dependency to probe.
 	ReadinessChecker ReadinessChecker
+	// APILimits configures the admission layer in front of the mutating
+	// workflow/execution routes and the webhook entry route: a per-namespace
+	// rate limit (off by default) and a per-replica inflight bound (on by
+	// default). See APILimits.
+	APILimits APILimits
 
 	// Production turns on the production posture gate in New: the server
 	// refuses to start unless every ProductionRequirement is met. Off by
@@ -281,6 +286,9 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 	if cfg.ParamValidation != "" && !cfg.ParamValidation.Valid() {
 		return nil, fmt.Errorf("apiserver: invalid ParamValidation %q: want off, warn, or enforce", cfg.ParamValidation)
 	}
+	if err := cfg.APILimits.validate(); err != nil {
+		return nil, err
+	}
 	// B3 production fail-closed: when PrincipalAuth is configured for the
 	// resource/operation authz path, an Authorizer and a durable AuditSink are
 	// also required. A missing authorizer would default-deny everything; a
@@ -319,6 +327,11 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 	for _, o := range opts {
 		o(s)
 	}
+	// Refused before a control plane is built, so a mis-configured shared mode
+	// opens no Redis connection it would then have to unwind.
+	if s.cp == nil && cfg.APILimits.Mode == APIRateLimitModeRedis && cfg.RedisConfig == nil && cfg.RedisAddr == "" {
+		return nil, errAPIRateLimitNoRedis
+	}
 	if s.cp == nil {
 		cp, err := buildControlPlane(cfg)
 		if err != nil {
@@ -346,6 +359,11 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 	ctrlModule.paramValidation = cfg.ParamValidation.OrDefault()
 	ctrlModule.paramValidationMetrics = metrics.NewParamValidationMetrics(cfg.Metrics)
 	ctrlModule.descriptorLookup = execution.RegistryDescriptorLookup
+	admission, err := apiAdmissionFor(cfg, s.cp)
+	if err != nil {
+		return nil, err
+	}
+	ctrlModule.admission = admission
 	if cfg.PrincipalAuth != nil {
 		ctrlModule.principalAuth = cfg.PrincipalAuth
 		ctrlModule.authorizer = cfg.Authorizer

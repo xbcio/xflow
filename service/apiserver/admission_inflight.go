@@ -70,21 +70,36 @@ func (g *inflightGuard) inUse() int {
 	return g.total
 }
 
-// guard wraps next in the inflight bound. The acquire never blocks: a full
-// replica answers at once through reject rather than queueing work it cannot
-// start. A nil admission, or one with the bound disabled, returns next as is.
+func noRelease() {}
+
+// acquire takes one inflight slot for class without blocking. A full replica
+// answers at once rather than queueing work it cannot start. A nil admission,
+// or one with the bound disabled, always admits.
+func (a *apiAdmission) acquire(class string) (release func(), ok bool) {
+	if a == nil || a.inflight == nil {
+		return noRelease, true
+	}
+	g := a.inflight
+	if !g.acquire(class) {
+		a.metrics.ObserveRejected(class, "inflight")
+		return nil, false
+	}
+	return func() { g.release(class) }, true
+}
+
+// guard wraps next in the inflight bound, answering a full replica through
+// reject. The release is deferred, so a panicking handler still frees its slot.
 func (a *apiAdmission) guard(class string, reject func(http.ResponseWriter, *http.Request), next http.HandlerFunc) http.HandlerFunc {
 	if a == nil || a.inflight == nil {
 		return next
 	}
-	g := a.inflight
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !g.acquire(class) {
-			a.metrics.ObserveRejected(class, "inflight")
+		release, ok := a.acquire(class)
+		if !ok {
 			reject(w, r)
 			return
 		}
-		defer g.release(class)
+		defer release()
 		next(w, r)
 	}
 }

@@ -20,6 +20,9 @@ type authzHolder struct {
 	principalAuth PrincipalAuthenticator
 	authorizer    Authorizer
 	audit         AuditSink
+	// admission gates the operations admissionRouteClass covers. Nil (every
+	// module but workflow-control) admits everything.
+	admission *apiAdmission
 }
 
 // auditedPerRequest reports whether one operation's admission and outcome are
@@ -115,6 +118,15 @@ func (h *authzHolder) authzWrapWithPreAdmission(op string, isMutation bool, fn h
 
 		if preAdmission != nil && !preAdmission(w, r) {
 			return
+		}
+		// API admission (inflight bound, namespace rate): after the namespace is
+		// known, before the audit admission and the handler.
+		if class, covered := admissionRouteClass(op); covered {
+			release, ok := h.admission.enter(w, r, class)
+			if !ok {
+				return
+			}
+			defer release()
 		}
 
 		// R3.1: when the resolver carried an execution id (pre-allocated for

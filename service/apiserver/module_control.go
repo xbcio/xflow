@@ -138,6 +138,7 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 		auth = DisabledWorkflowAuth{}
 	}
 	wrap := func(op string, h http.HandlerFunc) http.HandlerFunc {
+		class, admitted := admissionRouteClass(op)
 		return func(w http.ResponseWriter, r *http.Request) {
 			if err := auth.AuthenticateRequest(r); err != nil {
 				if m.log != nil {
@@ -147,6 +148,13 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 				// §7: the presented credential is never echoed; the message is generic.
 				writeFail(w, r, http.StatusUnauthorized, "unauthorized", "unauthorized")
 				return
+			}
+			if admitted {
+				release, ok := m.admission.enter(w, r, class)
+				if !ok {
+					return
+				}
+				defer release()
 			}
 			h(w, r)
 		}

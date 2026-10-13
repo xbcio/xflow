@@ -10,12 +10,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"golang.org/x/time/rate"
 
 	"github.com/xbcio/xflow/backend/providers/distributed/ratelimit"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/observability/metrics"
+	"github.com/xbcio/xflow/service/control"
 )
 
 // API rate limit modes: where the rate is counted.
@@ -135,31 +137,42 @@ func (a *apiAdmission) allowRate(ctx context.Context, class, key string) (bool, 
 	return false, retryAfterSeconds(wait)
 }
 
-// rateGate is the user-face rate check for a request whose namespace is already
-// in its context: the authz wrapper's pre-admission hook, so a refused request
-// writes no audit row and touches no store.
-func (a *apiAdmission) rateGate(class string) func(http.ResponseWriter, *http.Request) bool {
-	return func(w http.ResponseWriter, r *http.Request) bool {
-		ok, retry := a.allowRate(r.Context(), class, namespaceRateKey(r.Context()))
-		if !ok {
-			writeRateLimited(w, r, retry)
-		}
-		return ok
+// admissionRouteClass maps an operation to the route class the admission
+// layer covers, or reports that the operation is not covered. Both auth paths
+// key on it: the authz wrapper with its Op constants, the bare wrapper with
+// its op labels (two of which differ from the Op constants). Entry seed, wait,
+// reads, registration and schedules are deliberately absent: see the
+// API-SPECIFICATION admission section for why each is excluded.
+func admissionRouteClass(op string) (string, bool) {
+	switch op {
+	case OpWorkflowCreate, OpWorkflowInvoke, "execute_workflow", "execute_workflow_by_id":
+		return routeClassExecute, true
+	case OpExecutionSignal, OpExecutionRevoke, OpExecutionCancel,
+		OpExecutionPause, OpExecutionResume, OpExecutionRerun:
+		return routeClassExecution, true
 	}
+	return "", false
 }
 
-// rated wraps a bare-mode handler (no principal; the namespace is the
-// context's default) in the same rate check.
-func (a *apiAdmission) rated(class string, next http.HandlerFunc) http.HandlerFunc {
-	if a == nil {
-		return next
+// enter runs both user-face gates for one request whose namespace is already in
+// its context: the inflight bound first (it needs no Redis, so an overloaded
+// replica sheds load without a round trip), then the namespace rate. On a
+// refusal it has written the 503 or 429 and returns ok=false; otherwise the
+// caller must call release once the handler returns. Called after
+// authentication and before the audit admission, so a refused request writes
+// no audit row and touches no store.
+func (a *apiAdmission) enter(w http.ResponseWriter, r *http.Request, class string) (release func(), ok bool) {
+	release, ok = a.acquire(class)
+	if !ok {
+		writeServerOverloaded(w, r)
+		return nil, false
 	}
-	gate := a.rateGate(class)
-	return func(w http.ResponseWriter, r *http.Request) {
-		if gate(w, r) {
-			next(w, r)
-		}
+	if allowed, retry := a.allowRate(r.Context(), class, namespaceRateKey(r.Context())); !allowed {
+		release()
+		writeRateLimited(w, r, retry)
+		return nil, false
 	}
+	return release, true
 }
 
 func namespaceRateKey(ctx context.Context) string {
@@ -314,6 +327,27 @@ func (s *sharedRateLimiter) warn(err error) {
 		s.log.Warn("api_rate_limit_redis_unavailable",
 			"fallback", "local", "err", err)
 	}
+}
+
+// apiAdmissionFor builds the admission layer New installs. The shared mode
+// counts through the control plane's own Redis (the distributed backend's
+// client), so it shares one connection pool and one failure domain with the
+// state it protects.
+func apiAdmissionFor(cfg Config, cp *control.ControlPlane) (*apiAdmission, error) {
+	var shared *ratelimit.TokenBucket
+	if cfg.APILimits.Mode == APIRateLimitModeRedis {
+		var client redis.Cmdable
+		if cp != nil {
+			if provider, ok := cp.Backend().(redisReadinessProvider); ok {
+				client = provider.RedisClient()
+			}
+		}
+		if client == nil {
+			return nil, errAPIRateLimitNoRedis
+		}
+		shared = ratelimit.New(client, "")
+	}
+	return newAPIAdmission(cfg.APILimits, shared, cfg.Metrics, cfg.Logger), nil
 }
 
 // errAPIRateLimitNoRedis is returned by New when the shared mode was asked for
