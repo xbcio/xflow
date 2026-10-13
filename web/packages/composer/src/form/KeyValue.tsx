@@ -13,7 +13,7 @@
 
 import { DeleteOutlined, PlusOutlined } from "@ant-design/icons";
 import { Button, Input as AntInput } from "antd";
-import { useRef, useState, type ReactNode } from "react";
+import { useId, useRef, useState, type ReactNode } from "react";
 import { z } from "zod";
 import { deepEqual, zodProps } from "../core";
 import { useComposerRegistry, type ComposerComponent, type ComposerComponentProps } from "../react";
@@ -46,18 +46,25 @@ function toEntries(value: unknown, nextId: () => number): Entry[] {
   return isPlainObject(value) ? Object.entries(value).map(([key, item]) => ({ id: nextId(), key, value: item })) : [];
 }
 
-/** The map the rows stand for; `complete` is false while a key is empty-with-value or duplicated. */
-function toMap(entries: readonly Entry[]): { map: Record<string, unknown>; duplicates: Set<string> } {
+/**
+ * Keys core refuses to address (write rejects __proto__ / constructor /
+ * prototype pointer tokens), and `map["__proto__"] = v` would set the
+ * prototype instead of a key. Such rows stay drafts with a row error.
+ */
+const RESERVED_KEYS: ReadonlySet<string> = new Set(["__proto__", "constructor", "prototype"]);
+
+/** The map the rows stand for; nothing is written while a key is duplicated or reserved. */
+function toMap(entries: readonly Entry[]): { map: Record<string, unknown>; duplicates: Set<string>; reserved: boolean } {
   const map: Record<string, unknown> = {};
   const seen = new Set<string>();
   const duplicates = new Set<string>();
   for (const entry of entries) {
-    if (entry.key === "") continue;
+    if (entry.key === "" || RESERVED_KEYS.has(entry.key)) continue;
     if (seen.has(entry.key)) duplicates.add(entry.key);
     seen.add(entry.key);
     if (entry.value !== undefined && !duplicates.has(entry.key)) map[entry.key] = entry.value;
   }
-  return { map, duplicates };
+  return { map, duplicates, reserved: entries.some((entry) => RESERVED_KEYS.has(entry.key)) };
 }
 
 /** Whether the value is what the rows say ({} and unset are the same map). */
@@ -65,6 +72,7 @@ const sameMap = (map: Record<string, unknown>, value: unknown) => deepEqual(map,
 
 function KeyValueField({ node, props, value, onChange, defaultHint, issues, readOnly }: ComposerComponentProps<KeyValueProps>) {
   const registry = useComposerRegistry();
+  const baseId = useId();
   const idRef = useRef(0);
   const nextId = () => ++idRef.current;
   const [rows, setRows] = useState<Rows>(() => ({ source: value, entries: toEntries(value, nextId) }));
@@ -85,8 +93,8 @@ function KeyValueField({ node, props, value, onChange, defaultHint, issues, read
 
   const commit = (entries: Entry[]) => {
     setRows({ source: value, entries });
-    const { map, duplicates } = toMap(entries);
-    if (duplicates.size > 0) return;
+    const { map, duplicates, reserved } = toMap(entries);
+    if (duplicates.size > 0 || reserved) return;
     if (sameMap(map, value)) return;
     onChange?.(map);
   };
@@ -96,14 +104,15 @@ function KeyValueField({ node, props, value, onChange, defaultHint, issues, read
   const { duplicates } = toMap(current.entries);
   const unset = value === undefined;
   const editable = !readOnly && !props.disabled;
-  const valueEditor = (entry: Entry): ReactNode => {
+  const valueEditor = (entry: Entry, index: number): ReactNode => {
+    const valueLabel = entry.key ? `${entry.key} 的值` : `第 ${index + 1} 行的值`;
     // Scalar-empty values ("" / null) leave the entry without a value (a draft).
     const onValue = (next: unknown) => update(entry.id, { value: next === "" || next === null ? undefined : next });
     if (!props.valueType) {
       return (
         <AntInput
           rootClassName="xflow-composer-control"
-          aria-label={entry.key ? `${entry.key} 的值` : "值"}
+          aria-label={valueLabel}
           value={typeof entry.value === "string" ? entry.value : ""}
           placeholder={props.valuePlaceholder ?? "值"}
           readOnly={readOnly}
@@ -129,7 +138,7 @@ function KeyValueField({ node, props, value, onChange, defaultHint, issues, read
     }
     const Render = renderableOf(editor);
     return (
-      <div role="group" aria-label={entry.key ? `${entry.key} 的值` : "值"} className="xflow-composer-key-value-editor">
+      <div role="group" aria-label={valueLabel} className="xflow-composer-key-value-editor">
         <FieldLayoutContext.Provider value="inline">
           <Render
             node={{ id: `${node.id}/${entry.id}`, type: editor.type }}
@@ -167,36 +176,40 @@ function KeyValueField({ node, props, value, onChange, defaultHint, issues, read
           />
         ) : (
           <div className="xflow-composer-key-value-list">
-            {current.entries.map((entry) => {
+            {current.entries.map((entry, index) => {
               const duplicate = entry.key !== "" && duplicates.has(entry.key);
               const orphan = entry.key === "" && entry.value !== undefined;
+              const reserved = RESERVED_KEYS.has(entry.key);
+              const rowError = reserved ? "保留键名，未保存" : duplicate ? "键重复，未保存" : orphan ? "键为空，未保存" : undefined;
+              const errorId = `${baseId}row${entry.id}error`;
               return (
-                <div key={entry.id} className={cx("xflow-composer-key-value-row", (duplicate || orphan) && "is-error")}>
+                <div key={entry.id} className={cx("xflow-composer-key-value-row", rowError && "is-error")}>
                   <AntInput
                     rootClassName="xflow-composer-control xflow-composer-key-value-key"
-                    aria-label="键"
+                    aria-label={`第 ${index + 1} 行的键`}
+                    aria-describedby={rowError ? errorId : undefined}
                     value={entry.key}
                     placeholder={props.keyPlaceholder ?? "键"}
                     readOnly={readOnly}
                     disabled={props.disabled}
-                    status={duplicate || orphan ? "error" : undefined}
-                    aria-invalid={duplicate || orphan || undefined}
+                    status={rowError ? "error" : undefined}
+                    aria-invalid={rowError ? true : undefined}
                     onChange={(event) => update(entry.id, { key: event.target.value })}
                   />
-                  <div className="xflow-composer-key-value-value">{valueEditor(entry)}</div>
+                  <div className="xflow-composer-key-value-value">{valueEditor(entry, index)}</div>
                   {editable ? (
                     <Button
                       size="small"
                       type="text"
                       className="xflow-composer-icon-button"
                       icon={<DeleteOutlined />}
-                      aria-label={entry.key ? `删除 ${entry.key}` : "删除此行"}
+                      aria-label={entry.key ? `删除 ${entry.key}` : `删除第 ${index + 1} 行`}
                       onClick={() => commit(current.entries.filter((item) => item.id !== entry.id))}
                     />
                   ) : null}
-                  {duplicate || orphan ? (
-                    <span className="xflow-composer-row-error" role="alert">
-                      {duplicate ? "键重复，未保存" : "键为空，未保存"}
+                  {rowError ? (
+                    <span id={errorId} className="xflow-composer-row-error" role="alert">
+                      {rowError}
                     </span>
                   ) : null}
                 </div>

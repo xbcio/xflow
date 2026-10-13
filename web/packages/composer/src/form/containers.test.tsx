@@ -188,7 +188,7 @@ for (const kernel of kernels) {
       clickButton(field, "添加");
       await m.flush();
       expect(m.log).toEqual([]);
-      const keys = () => within(field).getAllByLabelText("键") as HTMLInputElement[];
+      const keys = () => within(field).getAllByLabelText(/^第 \d+ 行的键$/) as HTMLInputElement[];
       change(keys()[1], "a"); // duplicate key
       await m.flush();
       expect(m.log).toEqual([]);

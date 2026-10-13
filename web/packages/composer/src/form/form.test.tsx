@@ -139,7 +139,7 @@ const cases: FieldCase[] = [
     normal: { a: "1" },
     wrong: { a: 1 },
     shows: (field) => {
-      expect(within(field).getByLabelText("键")).toHaveProperty("value", "a");
+      expect(within(field).getByLabelText("第 1 行的键")).toHaveProperty("value", "a");
       expect(within(field).getByLabelText("a 的值")).toHaveProperty("value", "1");
     },
     edit: (field) => change(within(field).getByLabelText("a 的值"), "2"),
@@ -147,7 +147,7 @@ const cases: FieldCase[] = [
     clear: (field) => clickButton(field, "删除 a"),
     hint: { value: { h: "v" }, text: '默认：{"h":"v"}' },
     locked: (field) => {
-      expect((within(field).getByLabelText("键") as HTMLInputElement).readOnly).toBe(true);
+      expect((within(field).getByLabelText("第 1 行的键") as HTMLInputElement).readOnly).toBe(true);
       expect(field.querySelector(".xflow-composer-add")).toBeNull();
     }
   },
