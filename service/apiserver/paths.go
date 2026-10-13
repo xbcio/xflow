@@ -17,6 +17,12 @@ const (
 	PathWorkflowByID        = "/v1/workflows/{id}"
 	PathWorkflowExecute     = "/v1/workflows/execute"
 	PathWorkflowExecuteByID = "/v1/workflows/{id}/execute"
+	// PathWorkflowVersions lists one workflow's version history (the versioning
+	// design §2.2): the current version first, then retired versions
+	// newest-retirement first. Rows are labels — version, definition hash,
+	// registry revision, current/archived — and deliberately carry no
+	// definition body, for the same reason a workflow list row does not.
+	PathWorkflowVersions = "/v1/workflows/{id}/versions"
 
 	// PathExecutions serves both POST (the entry-seed endpoint, runner protocol
 	// face, spec §0.1) and GET (the offset-paginated execution collection read,
@@ -98,6 +104,7 @@ var UserFacingPaths = []string{
 	PathWorkflowByID,
 	PathWorkflowExecute,
 	PathWorkflowExecuteByID,
+	PathWorkflowVersions,
 
 	PathExecutions,
 	PathExecutionByID,

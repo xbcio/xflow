@@ -1,0 +1,355 @@
+package apiserver
+
+import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"sort"
+	"testing"
+
+	"github.com/alicebob/miniredis/v2"
+
+	"github.com/xbcio/xflow/backend/providers/distributed"
+	"github.com/xbcio/xflow/service/control"
+)
+
+// This file covers GET /v1/workflows/{id}/versions — the version-history read
+// (versioning design §2.2). The properties pinned here are the ones a mistake
+// would not surface as a compile error:
+//
+//   - the row content of each state: the live record's current row first, then
+//     retired versions newest-retirement first, each with the hash and revision
+//     that version carried;
+//   - a workflow that was never replaced lists exactly its single current
+//     version (the zero-backfill claim: old workflows have no history);
+//   - the {list,total} envelope with the shared pagination dialect, including
+//     a past-the-end page that is [] rather than null;
+//   - a row carries no definition body;
+//   - namespace isolation and an unknown id both answer 404
+//     workflow_not_found, never an empty history.
+
+// versionListBody is the decoded data of GET /v1/workflows/{id}/versions.
+type versionListBody struct {
+	List  []workflowVersionItem `json:"list"`
+	Total int                   `json:"total"`
+}
+
+type versionListEnvelope struct {
+	Success bool             `json:"success"`
+	Code    string           `json:"code"`
+	Message string           `json:"message"`
+	Data    *versionListBody `json:"data"`
+}
+
+// getWorkflowVersions issues GET /v1/workflows/{id}/versions with the given raw
+// query string (including its leading "?") and returns the status plus the raw
+// body, mirroring getWorkflowList.
+func getWorkflowVersions(t *testing.T, base, token, id, query string) (int, []byte) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, base+"/v1/workflows/"+id+"/versions"+query, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /v1/workflows/%s/versions%s: %v", id, query, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	return resp.StatusCode, body
+}
+
+func decodeVersionListEnvelope(t *testing.T, body []byte) versionListEnvelope {
+	t.Helper()
+	var env versionListEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("decode versions envelope: %v (body=%s)", err, body)
+	}
+	return env
+}
+
+// versionRowKeys returns the JSON key set of the first raw row, so a test can
+// pin the row shape without depending on field order.
+func versionRowKeys(t *testing.T, body []byte) []string {
+	t.Helper()
+	var raw struct {
+		Data struct {
+			List []map[string]json.RawMessage `json:"list"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("decode raw list: %v (body=%s)", err, body)
+	}
+	if len(raw.Data.List) == 0 {
+		t.Fatalf("no version rows to inspect (body=%s)", body)
+	}
+	keys := make([]string, 0, len(raw.Data.List[0]))
+	for k := range raw.Data.List[0] {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// publishRun replaces the workflow's definition with the same name under a new
+// version label over the real PUT route. The version label is part of the
+// runtime hash, so each call publishes a distinct definition hash.
+func publishRun(t *testing.T, base, token, id, name, version string) {
+	t.Helper()
+	resp := putWorkflow(t, base, token, id, listTestWorkflow(name, version))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("PUT %s version %s: status = %d, want 200 (body=%s)", id, version, resp.StatusCode, body)
+	}
+}
+
+// TestListWorkflowVersionsListsCurrentThenRetiredNewestFirst pins the row
+// content and order of the history: the current version first, then each
+// retired version newest-retirement first, with the hash each version was
+// published with.
+func TestListWorkflowVersionsListsCurrentThenRetiredNewestFirst(t *testing.T) {
+	srv, _ := newWorkflowReplaceDependencyTestServer(t, nil, nil, listTestPrincipals())
+	id := registerListWorkflow(t, srv.URL, "tok-a", "vlist", "v1")
+	publishRun(t, srv.URL, "tok-a", id, "vlist", "v2")
+	publishRun(t, srv.URL, "tok-a", id, "vlist", "v3")
+
+	status, body := getWorkflowVersions(t, srv.URL, "tok-a", id, "")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", status, body)
+	}
+	env := decodeVersionListEnvelope(t, body)
+	if !env.Success || env.Code != "200" {
+		t.Fatalf("envelope = %+v, want success with code 200", env)
+	}
+	if env.Data == nil {
+		t.Fatalf("data is absent on a success response (body=%s)", body)
+	}
+	if env.Data.Total != 3 || len(env.Data.List) != 3 {
+		t.Fatalf("history = %+v, want 3 versions (v1 retired, v2 retired, v3 current)", env.Data)
+	}
+
+	rows := env.Data.List
+	if rows[0].Version != "v3" || !rows[0].Current || rows[0].Archived {
+		t.Fatalf("row 0 = %+v, want the current version v3 (current=true archived=false)", rows[0])
+	}
+	if rows[1].Version != "v2" || rows[1].Current || !rows[1].Archived {
+		t.Fatalf("row 1 = %+v, want v2 retired (current=false archived=true)", rows[1])
+	}
+	if rows[2].Version != "v1" || rows[2].Current || !rows[2].Archived {
+		t.Fatalf("row 2 = %+v, want v1 retired (current=false archived=true)", rows[2])
+	}
+	for _, row := range rows {
+		if row.DefinitionHash == "" {
+			t.Errorf("version %q carries an empty definition_hash; the row is the change detector for the version", row.Version)
+		}
+		if row.RegistryRevision == 0 {
+			t.Errorf("version %q carries registry_revision 0; it is the version's retirement order", row.Version)
+		}
+	}
+	// Retirement order: the newest-retired version carries the larger revision,
+	// so revisions strictly decrease down the archived tail.
+	if rows[1].RegistryRevision <= rows[2].RegistryRevision {
+		t.Fatalf("archived revisions = %d then %d, want strictly decreasing (newest retirement first)",
+			rows[1].RegistryRevision, rows[2].RegistryRevision)
+	}
+
+	// The row's key set is exact: a definition on a list row would be the
+	// O(page × definition size) payload regression the summary projection exists
+	// to prevent.
+	wantKeys := []string{"archived", "current", "definition_hash", "registry_revision", "version"}
+	got := versionRowKeys(t, body)
+	if len(got) != len(wantKeys) {
+		t.Fatalf("row keys = %v, want %v", got, wantKeys)
+	}
+	for i := range wantKeys {
+		if got[i] != wantKeys[i] {
+			t.Fatalf("row keys = %v, want %v", got, wantKeys)
+		}
+	}
+	for _, forbidden := range []string{`"definition"`, `"graph"`, `"nodes"`, `"connections"`} {
+		if bytes.Contains(body, []byte(forbidden)) {
+			t.Errorf("versions body contains %s; the history list must not project definitions or graphs", forbidden)
+		}
+	}
+}
+
+// TestListWorkflowVersionsSingleVersionWhenNeverReplaced pins the zero-backfill
+// claim: a workflow that was only ever registered lists exactly one row — its
+// current version — with an empty archived tail.
+func TestListWorkflowVersionsSingleVersionWhenNeverReplaced(t *testing.T) {
+	srv, _ := newWorkflowReplaceDependencyTestServer(t, nil, nil, listTestPrincipals())
+	id := registerListWorkflow(t, srv.URL, "tok-a", "vlist-single", "v1")
+
+	status, body := getWorkflowVersions(t, srv.URL, "tok-a", id, "")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", status, body)
+	}
+	env := decodeVersionListEnvelope(t, body)
+	if env.Data == nil || env.Data.Total != 1 || len(env.Data.List) != 1 {
+		t.Fatalf("history = %+v, want exactly the current version", env.Data)
+	}
+	row := env.Data.List[0]
+	if row.Version != "v1" || !row.Current || row.Archived {
+		t.Fatalf("row = %+v, want the current version v1 with no history", row)
+	}
+}
+
+// TestListWorkflowVersionsPaginationEnvelope pins the shared pagination dialect
+// on this route: 1-based pages, exact total independent of the page, order
+// preserved across pages, and a past-the-end page that is [] rather than null.
+func TestListWorkflowVersionsPaginationEnvelope(t *testing.T) {
+	srv, _ := newWorkflowReplaceDependencyTestServer(t, nil, nil, listTestPrincipals())
+	id := registerListWorkflow(t, srv.URL, "tok-a", "vlist-page", "v1")
+	publishRun(t, srv.URL, "tok-a", id, "vlist-page", "v2")
+	publishRun(t, srv.URL, "tok-a", id, "vlist-page", "v3")
+
+	status, body := getWorkflowVersions(t, srv.URL, "tok-a", id, "?page=1&page_size=2")
+	if status != http.StatusOK {
+		t.Fatalf("page 1 status = %d, want 200 (body=%s)", status, body)
+	}
+	env := decodeVersionListEnvelope(t, body)
+	if env.Data == nil || env.Data.Total != 3 || len(env.Data.List) != 2 {
+		t.Fatalf("page 1 = %+v, want 2 rows with total 3", env.Data)
+	}
+	if env.Data.List[0].Version != "v3" || env.Data.List[1].Version != "v2" {
+		t.Fatalf("page 1 versions = [%s %s], want [v3 v2]",
+			env.Data.List[0].Version, env.Data.List[1].Version)
+	}
+
+	status, body = getWorkflowVersions(t, srv.URL, "tok-a", id, "?page=2&page_size=2")
+	if status != http.StatusOK {
+		t.Fatalf("page 2 status = %d, want 200 (body=%s)", status, body)
+	}
+	env = decodeVersionListEnvelope(t, body)
+	if env.Data == nil || env.Data.Total != 3 || len(env.Data.List) != 1 {
+		t.Fatalf("page 2 = %+v, want 1 row with total 3", env.Data)
+	}
+	if env.Data.List[0].Version != "v1" {
+		t.Fatalf("page 2 version = %q, want v1", env.Data.List[0].Version)
+	}
+
+	status, body = getWorkflowVersions(t, srv.URL, "tok-a", id, "?page=9&page_size=5")
+	if status != http.StatusOK {
+		t.Fatalf("past-the-end status = %d, want 200 (body=%s)", status, body)
+	}
+	if !bytes.Contains(body, []byte(`"list":[]`)) {
+		t.Fatalf("past-the-end body = %s, want data.list to be [] (never null)", body)
+	}
+	env = decodeVersionListEnvelope(t, body)
+	if env.Data == nil || env.Data.Total != 3 || len(env.Data.List) != 0 {
+		t.Fatalf("past-the-end data = %+v, want total 3 with an empty list", env.Data)
+	}
+}
+
+// TestListWorkflowVersionsNeverRevealsAnotherNamespaceOrMissingWorkflow pins
+// the failure modes: a cross-namespace id and an unknown id are both reported
+// as 404 workflow_not_found — never as an empty history, which would confirm
+// the id names a workflow in some other namespace.
+func TestListWorkflowVersionsNeverRevealsAnotherNamespaceOrMissingWorkflow(t *testing.T) {
+	srv, _ := newWorkflowReplaceDependencyTestServer(t, nil, nil, listTestPrincipals())
+	idA := registerListWorkflow(t, srv.URL, "tok-a", "vlist-scoped", "v1")
+	idB := registerListWorkflow(t, srv.URL, "tok-b", "vlist-scoped-b", "v1")
+
+	// Sanity: the owner sees its own history, so the 404s below are the
+	// namespace check, not a broken fixture.
+	if status, body := getWorkflowVersions(t, srv.URL, "tok-a", idA, ""); status != http.StatusOK {
+		t.Fatalf("owner status = %d, want 200 (body=%s)", status, body)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		token string
+		id    string
+	}{
+		{name: "cross-namespace id", token: "tok-b", id: idA},
+		{name: "unknown id", token: "tok-a", id: "wf-does-not-exist"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body := getWorkflowVersions(t, srv.URL, tc.token, tc.id, "")
+			if status != http.StatusNotFound {
+				t.Fatalf("status = %d, want 404 (body=%s)", status, body)
+			}
+			env := decodeVersionListEnvelope(t, body)
+			if env.Success || env.Code != "workflow_not_found" {
+				t.Fatalf("envelope = %+v, want code workflow_not_found", env)
+			}
+			if env.Data != nil {
+				t.Fatalf("refusal carried data = %+v, want none", env.Data)
+			}
+			// The foreign namespace's workflow must not leak through the refusal.
+			if bytes.Contains(body, []byte(idB)) {
+				t.Errorf("refusal body leaks namespaceB workflow %q", idB)
+			}
+		})
+	}
+}
+
+// TestListWorkflowVersionsEndToEndAgainstDistributedRegistry exercises the
+// route over HTTP against the REAL Redis-backed registry (miniredis) rather
+// than the in-memory provider, so the history hash, the CAS that appends to it,
+// and the projection the handler reads are all the producing implementations.
+func TestListWorkflowVersionsEndToEndAgainstDistributedRegistry(t *testing.T) {
+	redisServer, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	t.Cleanup(redisServer.Close)
+
+	be, err := distributed.New(redisServer.Addr(), nil, distributed.WithConsumer(false))
+	if err != nil {
+		t.Fatalf("distributed.New: %v", err)
+	}
+	cp, err := control.NewControlPlane(control.Config{Backend: be})
+	if err != nil {
+		t.Fatalf("NewControlPlane: %v", err)
+	}
+	srv, err := New(Config{
+		Concurrency:   1,
+		PrincipalAuth: NewBearerPrincipalAuthMulti(listTestPrincipals()),
+		Authorizer:    NamespaceAwareAuthorizer{},
+		AuditSink:     NewInMemoryAuditSink(),
+	}, WithControlPlane(cp))
+	if err != nil {
+		t.Fatalf("apiserver.New: %v", err)
+	}
+	httpSrv := httptest.NewServer(srv.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	id := registerListWorkflow(t, httpSrv.URL, "tok-a", "vlist-redis", "v1")
+	publishRun(t, httpSrv.URL, "tok-a", id, "vlist-redis", "v2")
+
+	status, body := getWorkflowVersions(t, httpSrv.URL, "tok-a", id, "")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", status, body)
+	}
+	env := decodeVersionListEnvelope(t, body)
+	if env.Data == nil || env.Data.Total != 2 || len(env.Data.List) != 2 {
+		t.Fatalf("history = %+v, want [v2 current, v1 archived] (body=%s)", env.Data, body)
+	}
+	if env.Data.List[0].Version != "v2" || !env.Data.List[0].Current {
+		t.Fatalf("row 0 = %+v, want current v2", env.Data.List[0])
+	}
+	if env.Data.List[1].Version != "v1" || !env.Data.List[1].Archived {
+		t.Fatalf("row 1 = %+v, want archived v1", env.Data.List[1])
+	}
+	t.Logf("GET /v1/workflows/%s/versions (tok-a) -> %d %s", id, status, body)
+
+	// The other namespace is refused, and the refusal is the by-id read's 404,
+	// not an empty history.
+	status, body = getWorkflowVersions(t, httpSrv.URL, "tok-b", id, "")
+	if status != http.StatusNotFound {
+		t.Fatalf("cross-namespace status = %d, want 404 (body=%s)", status, body)
+	}
+	if env := decodeVersionListEnvelope(t, body); env.Code != "workflow_not_found" {
+		t.Fatalf("cross-namespace code = %q, want workflow_not_found (body=%s)", env.Code, body)
+	}
+}

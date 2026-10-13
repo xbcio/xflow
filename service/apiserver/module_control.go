@@ -160,6 +160,11 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+PathNodeTypeByType, wrap("read_node_types", m.handleGetNodeType))
 	mux.HandleFunc("POST "+PathWorkflowExecute, wrap("execute_workflow", m.handleExecuteWorkflow))
 	mux.HandleFunc("POST "+PathWorkflowExecuteByID, wrap("execute_workflow_by_id", m.handleExecuteWorkflowByID))
+	// GET /v1/workflows/{id}/versions is the version-history read (versioning
+	// design §2.2). It is mounted in this legacy branch as well as in
+	// registerAuthzRoutes, like the other workflow reads: here the namespace is
+	// namespace.FromContext's Default, exactly as in handleGetWorkflow.
+	mux.HandleFunc("GET "+PathWorkflowVersions, wrap("list_workflow_versions", m.handleListWorkflowVersions))
 	// POST /v1/executions is the entry-seed endpoint (runner protocol face,
 	// spec §0.1); the per-execution GET/signal/cancel/wait surface is the
 	// method-qualified patterns below. ServeMux treats exact and {id} patterns
@@ -258,6 +263,13 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+PathCurrentUser, authz(OpCurrentUserRead, false, m.handleCurrentUser, nil))
 	mux.HandleFunc("POST "+PathWorkflowExecute, authz(OpWorkflowCreate, true, m.handleExecuteWorkflow, newExecutionIDResolver()))
 	mux.HandleFunc("POST "+PathWorkflowExecuteByID, authz(OpWorkflowInvoke, true, m.handleExecuteWorkflowByID, invokeByIDResolver()))
+	// GET /v1/workflows/{id}/versions (the version-history read, versioning
+	// design §2.2) reuses OpWorkflowRead — the operation GET /v1/workflows/{id}
+	// carries — so the two scopes cannot drift: a principal that may read one
+	// workflow may read its version history, and one that may not is refused by
+	// the same default-deny check. The resolver scopes the audit row to the
+	// workflow id the route addresses, like the by-id read above.
+	mux.HandleFunc("GET "+PathWorkflowVersions, authz(OpWorkflowRead, false, m.handleListWorkflowVersions, workflowIDResolver()))
 	// Entry-seed endpoint (exact path, POST only). The authz wrapper injects
 	// the principal's namespace into the request context; handleSeedExecution
 	// reads it via namespace.FromContext — never from the client body.
@@ -650,6 +662,13 @@ func (e *WorkflowCompileError) Error() string { return e.err.Error() }
 func (e *WorkflowCompileError) Unwrap() error { return e.err }
 
 var errWorkflowIDMismatch = errors.New("workflow id does not match path")
+
+// errWorkflowVersionsUnsupported means the configured workflow registry does
+// not implement backend.WorkflowVersionCapability. That is a server-side
+// misconfiguration, not a client error: the version routes fail closed with a
+// 500 rather than serving an empty history, which would read as "this workflow
+// has no retired versions" — a different and false statement.
+var errWorkflowVersionsUnsupported = errors.New("workflow registry does not support version history")
 
 var errFAFWorkflowRegistration = errors.New("workflow registration does not support options.faf")
 
@@ -1361,6 +1380,127 @@ func (m *workflowControlModule) handleGetWorkflow(w http.ResponseWriter, r *http
 		return
 	}
 	writeData(w, r, http.StatusOK, workflowResponseBody(rec))
+}
+
+// workflowVersionItem is one row of the GET /v1/workflows/{id}/versions page.
+// It is a label projection of backend.WorkflowVersionInfo, mirroring the
+// workflowListItem/workflowRecord split.
+//
+// The definition and the compiled graph are deliberately absent, for the same
+// reason a workflow list row omits them: a page of full definitions is
+// O(page × definition size) on the wire, and the version list exists to show
+// which labels exist and which one is live. What a row needs is the label
+// (version), a change detector (definition_hash), the revision the version was
+// live at (registry_revision, which is also its retirement order), and the two
+// state flags. The definition of one version is read with the detail route
+// GET /v1/workflows/{id}/versions/{version}.
+type workflowVersionItem struct {
+	Version          string `json:"version"`
+	DefinitionHash   string `json:"definition_hash"`
+	RegistryRevision uint64 `json:"registry_revision"`
+	// Current marks the single version the live record represents; Archived
+	// marks a retired version held in history. They are complementary, and
+	// both are carried so a row's state is readable without inferring it from
+	// position.
+	Current  bool `json:"current"`
+	Archived bool `json:"archived"`
+}
+
+// listWorkflowVersions resolves the version history of the workflow addressed
+// by id, in the registry capability's order: current version first, then
+// retired versions newest-retirement first.
+//
+// It is the one implementation behind the HTTP route and
+// APIServer.ListWorkflowVersions, for the same reason registerWorkflow is:
+// the namespace scope check and the capability assertion are policy, and a
+// second copy would be free to skip one.
+func (m *workflowControlModule) listWorkflowVersions(ctx context.Context, ns namespace.Namespace, id types.WorkflowID) ([]backend.WorkflowVersionInfo, error) {
+	registry := m.registry()
+	if registry == nil {
+		if m.log != nil {
+			m.log.Error("list_workflow_versions_no_registry", "workflow_id", string(id))
+		}
+		return nil, errors.New("apiserver: no workflow registry configured")
+	}
+	// Resolve the live record first, exactly as handleGetWorkflow does: the
+	// namespace comparison below is the authoritative IDOR defense and has to
+	// happen before any history is read. It cannot be delegated to the
+	// capability — the in-memory registry's GetWorkflow ignores the context
+	// namespace, so its history would otherwise be readable across namespaces
+	// by anyone who guessed or leaked an id.
+	rec, err := registry.GetWorkflow(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if rec.Namespace != "" && ns != "" && rec.Namespace != string(ns) {
+		return nil, backend.ErrWorkflowNotFound
+	}
+	versions, ok := registry.(backend.WorkflowVersionCapability)
+	if !ok {
+		if m.log != nil {
+			m.log.Error("list_workflow_versions_capability_missing", "workflow_id", string(id))
+		}
+		return nil, errWorkflowVersionsUnsupported
+	}
+	return versions.ListWorkflowVersions(ctx, id)
+}
+
+// handleListWorkflowVersions serves GET /v1/workflows/{id}/versions (versioning
+// design §2.2): the version history of one registered workflow.
+//
+// Namespace: resolved server-side from the authenticated principal
+// (namespace.FromContext), never from the query string; a cross-namespace id
+// resolves to 404 workflow_not_found, same as GET /v1/workflows/{id}.
+//
+// Pagination: offset, 1-based, through the shared pageParams/pageOffset helpers
+// (default 20, hard cap 200). The history is bounded by the registry's
+// retention limit (backend.DefaultWorkflowVersionRetention plus the live
+// record), so paging is a presentation concern, not a traversal guard — but it
+// is the same dialect as every other page list, not a second one.
+//
+// Envelope: writeList — the mandated {list,total} collection shape. total is
+// the exact history size, independent of the page requested.
+func (m *workflowControlModule) handleListWorkflowVersions(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+	id := types.WorkflowID(r.PathValue("id"))
+	if id == "" {
+		writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
+		return
+	}
+	versions, err := m.listWorkflowVersions(r.Context(), namespace.FromContext(r.Context()), id)
+	if err != nil {
+		if errors.Is(err, backend.ErrWorkflowNotFound) {
+			writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
+			return
+		}
+		if m.log != nil {
+			m.log.Error("list_workflow_versions_failed", "workflow_id", string(id), "err", err)
+		}
+		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	page, pageSize := pageParams(r)
+	start := pageOffset(page, pageSize)
+	if start > len(versions) {
+		start = len(versions)
+	}
+	end := start + pageSize
+	if end > len(versions) {
+		end = len(versions)
+	}
+	items := make([]workflowVersionItem, 0, end-start)
+	for _, v := range versions[start:end] {
+		items = append(items, workflowVersionItem{
+			Version:          v.Version,
+			DefinitionHash:   v.DefinitionHash,
+			RegistryRevision: v.RegistryRevision,
+			Current:          v.Current,
+			Archived:         v.Archived,
+		})
+	}
+	writeList(w, r, items, len(versions))
 }
 
 // handleReplaceWorkflow serves PUT /v1/workflows/{id} (spec §7 + Addition 1):
