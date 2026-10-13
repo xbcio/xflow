@@ -52,6 +52,10 @@ type webhookModule struct {
 	cp       *control.ControlPlane
 	supplies store.Supplies
 	log      engine.Logger
+	// admission is the server's API admission layer, shared with the
+	// workflow-control routes so the inflight bound is one per replica. Nil
+	// admits everything.
+	admission *apiAdmission
 }
 
 func newWebhookModule(cp *control.ControlPlane) *webhookModule {
@@ -68,7 +72,7 @@ func (m *webhookModule) RegisterHTTP(mux *http.ServeMux) {
 	if m.cp == nil {
 		return
 	}
-	mux.HandleFunc(PathWebhookEntry, m.handleWebhookEntry)
+	mux.HandleFunc(PathWebhookEntry, m.admission.guard(routeClassWebhook, writeWebhookServerOverloaded, m.handleWebhookEntry))
 }
 
 const (
@@ -174,6 +178,13 @@ func (m *webhookModule) handleWebhookEntry(w http.ResponseWriter, r *http.Reques
 		m.logError("webhook_entry_signature_rejected",
 			"namespace", rec.Namespace, "workflow_id", string(workflowID), "entry_unit", entryUnitID)
 		writeWebhookError(w, http.StatusUnauthorized, "signature_invalid")
+		return
+	}
+	// The rate is charged only to a signed request: charging before the
+	// signature check would let anyone who knows the path spend a legitimate
+	// sender's budget. Unsigned floods are the inflight bound's to shed.
+	if ok, retry := m.admission.allowRate(r.Context(), routeClassWebhook, webhookRateKey(rec.Namespace, string(workflowID))); !ok {
+		writeWebhookRateLimited(w, retry)
 		return
 	}
 

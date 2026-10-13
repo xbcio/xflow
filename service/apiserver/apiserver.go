@@ -447,6 +447,7 @@ func New(cfg Config, opts ...Option) (*APIServer, error) {
 		hook := newWebhookModule(s.cp)
 		hook.supplies = cfg.Supplies
 		hook.log = cfg.Logger
+		hook.admission = admission
 		s.modules = append(s.modules, hook)
 		// Registration must refuse a server-hosted webhook entry that declares
 		// no secret. The flag is derived from the same predicate that mounted the
