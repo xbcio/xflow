@@ -348,6 +348,11 @@ func (g *SupplyGate) recordDeclaration(k supply.Key, workflowID string, req engi
 	prev, _ := existing.(supplyDeclaration)
 	if prev.WorkflowID == workflowID || sameSupplyOrigin(prev.PullSource, next.PullSource) {
 		if prev.WorkflowID == workflowID {
+			if !sameSupplyOrigin(prev.PullSource, next.PullSource) {
+				// Same id, moved origin (a PUT replacement): the fetcher's
+				// ETag belongs to the old URL and must not answer the new one.
+				g.pullFetcher.Invalidate(k)
+			}
 			g.declarations.Store(k, next)
 		}
 		return nil

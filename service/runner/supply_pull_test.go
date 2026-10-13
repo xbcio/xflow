@@ -262,8 +262,9 @@ func TestPullDeclarationConflictFailsClosed(t *testing.T) {
 		t.Fatalf("conflict error %q does not name both origins", err)
 	}
 
-	// The SAME workflow may move the URL: that is a version upgrade, and
-	// refusing it would make a source immutable until this runner restarted.
+	// The same workflow ID may move the URL: within one registration the
+	// definition is immutable, so this is the PUT-replacement path — the id is
+	// preserved and the record is replaced rather than conflicting.
 	if err := g.Admit(context.Background(), "wf-a", []engine.SupplyRequirement{pullReq("rules", srcTwo.url())}); err != nil {
 		t.Fatalf("same-workflow upgrade must be accepted: %v", err)
 	}
@@ -278,6 +279,59 @@ func TestPullDeclarationConflictFailsClosed(t *testing.T) {
 	storeReq := engine.SupplyRequirement{Node: "rules", Resource: "rules", RequireReady: true}
 	if err := g.Admit(context.Background(), "wf-d", []engine.SupplyRequirement{storeReq}); !errors.Is(err, ErrSupplyPullSourceConflict) {
 		t.Fatalf("store-backed declaration for a pull key = %v, want ErrSupplyPullSourceConflict", err)
+	}
+}
+
+// A moved URL on the same workflow ID (the PUT-replacement path) replaces the
+// declaration, and the fetcher's cached validator must go with it: the old
+// source's ETag must never validate the new source's representation. The gate
+// is the only caller that knows both declarations share an id, so the
+// invalidation lives there, and this asserts the wiring end to end.
+func TestPullMovedSourceOnTheSameWorkflowIDInvalidatesTheCache(t *testing.T) {
+	urlA := newPullTestSource(t, "one", `"v1"`)
+	urlB := newPullTestSource(t, "two", `"v2"`)
+	g := NewSupplyGate(&stubFetcher{}, supply.NewRegistry(), quietLogger())
+	pf, err := NewPullSupplyFetcher([]string{"127.0.0.1"}, nil, quietLogger())
+	if err != nil {
+		t.Fatalf("NewPullSupplyFetcher: %v", err)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(urlA.srv.Certificate())
+	pool.AddCert(urlB.srv.Certificate())
+	pf.TLSClientConfig = &tls.Config{RootCAs: pool}
+	g.SetPullFetcher(pf)
+
+	key := defaultKey("rules")
+	if err := g.Admit(context.Background(), "wf-1", []engine.SupplyRequirement{pullReq("rules", urlA.url())}); err != nil {
+		t.Fatalf("first Admit: %v", err)
+	}
+	if _, ok := pf.cachedContent(key); !ok {
+		t.Fatal("a full fetch with an ETag must leave a cache entry for the key")
+	}
+	if err := g.Admit(context.Background(), "wf-1", []engine.SupplyRequirement{pullReq("rules", urlB.url())}); err != nil {
+		t.Fatalf("moved source on the same workflow id: %v", err)
+	}
+	if _, ok := pf.cachedContent(key); ok {
+		t.Fatal("a moved source on the same id must drop the cached validator")
+	}
+}
+
+// Invalidate itself: the cached entry exists after a full fetch and is gone
+// after the call. Separate from the gate test above because it pins the
+// fetcher's own contract, which the gate test only exercises through one path.
+func TestPullInvalidateDropsTheCachedValidator(t *testing.T) {
+	src := newPullTestSource(t, "one", `"v1"`)
+	pf := newPullFetcher(t, src, []string{src.host()}, nil)
+	key := defaultKey("rules")
+	if _, _, _, err := pf.Fetch(context.Background(), key, types.SupplyPullSource{URL: src.url()}); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if _, ok := pf.cachedContent(key); !ok {
+		t.Fatal("a full fetch with an ETag must leave a cache entry")
+	}
+	pf.Invalidate(key)
+	if _, ok := pf.cachedContent(key); ok {
+		t.Fatal("Invalidate must drop the cached validator")
 	}
 }
 

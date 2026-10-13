@@ -393,6 +393,20 @@ func (f *PullSupplyFetcher) storeCache(k supply.Key, etag string, content []byte
 	f.etagCache[k] = pullCachedContent{etag: etag, content: content, hash: hash}
 }
 
+// Invalidate drops the cached content and validator for k. An ETag validates
+// ONE representation of ONE URL, so when a key's declaration moves to a
+// different source (the PUT-replace path in the supply gate) the cached entry
+// belongs to the old source and must not answer a conditional request sent to
+// the new one.
+func (f *PullSupplyFetcher) Invalidate(k supply.Key) {
+	if f == nil {
+		return
+	}
+	f.cacheMu.Lock()
+	defer f.cacheMu.Unlock()
+	delete(f.etagCache, k)
+}
+
 // pullReason strips the URL out of an error the net/http stack built from one.
 // Every *url.Error's text starts `Get "<full url>":` or `parse "<full url>":` —
 // URL, query string and any userinfo included — and these errors become
