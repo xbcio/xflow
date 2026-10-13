@@ -409,3 +409,11 @@ func (f *reactorFacade) ExecuteBatch(ctx context.Context, src engine.Source, rec
 	}
 	return out, nil
 }
+
+// The reactor is the ONLY runtime with a batch fast path: ScriptNode reaches it
+// through an interface assertion (eng.(engine.BatchEngine)) and falls back to
+// engine.ExecuteBatchSerial for every other runtime, so a refactor that renames
+// this method or changes its signature would silently move the busiest wasm
+// deployments back onto per-record execution — a ~18x cost on the measured
+// pipeline — with no compile error anywhere. This makes that a build failure.
+var _ engine.BatchEngine = (*reactorFacade)(nil)
