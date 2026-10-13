@@ -130,29 +130,43 @@ func (e *Engine) executeSubWorkflow(ctx context.Context, task *Task, g *graph.Gr
 		return nil
 	}
 	child, cause := e.startSubWorkflowChild(ctx, task, g, meta)
-	if cause == nil {
-		// The child can already be concluded here: a redelivery after a reclaim
-		// that finds the completion notification was lost. Concluding now is the
-		// backstop's whole purpose; parking again would wait for a notification
-		// that has already been delivered and dropped.
-		concluded, err := e.concludeTerminalChild(ctx, lease, g, meta, child)
-		if err != nil {
-			return err
+	if errors.Is(cause, errSubWorkflowParentCanceling) {
+		// The parent is on its way down: this delivery raced the inline cancel
+		// cascade, or the cancel landed before the child existed. Either way the
+		// node is not going to run, so this dispatch stops the child this
+		// generation started (if any) and releases its claim — leaving the node
+		// Running would hand the sweeper a lease it can only reclaim into the
+		// same abandoned path, once per TTL, until the execution expires.
+		e.cancelSubWorkflowChild(ctx, child.ID)
+		if _, err := e.state.RevokeLease(ctx, lease.Task.ExecutionID, lease.Task.NodeName, lease.LeaseToken); err != nil && e.logger != nil {
+			e.logger.Error("release sub-workflow claim for a canceling parent failed",
+				"execution_id", string(lease.Task.ExecutionID), "node_name", lease.Task.NodeName, "err", err)
 		}
-		if concluded {
-			return nil
-		}
-		if accepted, err := e.parkSubWorkflowNode(ctx, lease, child); err != nil {
-			return err
-		} else if accepted {
-			return nil
-		}
-		// Refused by the fence: the node moved on (revoked, committed by a
-		// newer generation) between the claim and the park. The child is
-		// already running; whoever owns the node now owns the link.
 		return nil
 	}
-	return e.failSubWorkflowStart(ctx, lease, g, meta, cause)
+	if cause != nil {
+		return e.failSubWorkflowStart(ctx, lease, g, meta, cause)
+	}
+	// The child can already be concluded here: a redelivery after a reclaim
+	// that finds the completion notification was lost. Concluding now is the
+	// backstop's whole purpose; parking again would wait for a notification
+	// that has already been delivered and dropped.
+	concluded, err := e.concludeTerminalChild(ctx, lease, g, meta, child)
+	if err != nil {
+		return err
+	}
+	if concluded {
+		return nil
+	}
+	if accepted, err := e.parkSubWorkflowNode(ctx, lease, child); err != nil {
+		return err
+	} else if accepted {
+		return nil
+	}
+	// Refused by the fence: the node moved on (revoked, committed by a
+	// newer generation) between the claim and the park. The child is
+	// already running; whoever owns the node now owns the link.
+	return nil
 }
 
 // acquireSubWorkflowLease claims the node for this dispatch, mirroring
@@ -213,14 +227,27 @@ func (e *Engine) startSubWorkflowChild(ctx context.Context, task *Task, g *graph
 	if snap == nil {
 		return subWorkflowChild{}, ErrExecutionInactive
 	}
-	childDepth := snap.Depth + 1
-	if childDepth > e.maxSubWorkflowDepth {
+	// The child identity is derived before the resolution — deliberately, not
+	// incidentally: it needs nothing the resolver answers, and the canceling
+	// branch below must be able to name the child an earlier dispatch may have
+	// started without resolving a target it is not going to run.
+	child := subWorkflowChild{
+		ID:    subWorkflowChildID(task.ExecutionID, task.NodeName, task.ActivationID, subWorkflowGeneration(task.Generation)),
+		Depth: snap.Depth + 1,
+	}
+	if snap.Status == types.ExecutionStatusCanceling {
+		// The reclaim backstop's half of the cancel cascade: the parent was
+		// canceled after this task was queued and before it was consumed, so no
+		// child of this generation may start (or keep running) now.
+		return child, errSubWorkflowParentCanceling
+	}
+	if child.Depth > e.maxSubWorkflowDepth {
 		// Degraded to a node failure rather than a submission refusal: the
 		// compiler bounds the static reference chain, and this is the bound for
 		// the chains it cannot see. Fail closed — the alternative is running an
 		// unbounded recursion.
 		return subWorkflowChild{}, fmt.Errorf("node %q: child execution depth %d exceeds the limit %d: %w (%w)",
-			task.NodeName, childDepth, e.maxSubWorkflowDepth, graph.ErrSubWorkflowDepth, types.ErrPermanent)
+			task.NodeName, child.Depth, e.maxSubWorkflowDepth, graph.ErrSubWorkflowDepth, types.ErrPermanent)
 	}
 	// The namespace is filled in here rather than recorded at compile time: a
 	// WorkflowDef carries none, and a resolver is bound to one namespace by its
@@ -257,10 +284,6 @@ func (e *Engine) startSubWorkflowChild(ctx context.Context, task *Task, g *graph
 		return subWorkflowChild{}, err
 	}
 
-	child := subWorkflowChild{
-		ID:    subWorkflowChildID(task.ExecutionID, task.NodeName, task.ActivationID, subWorkflowGeneration(task.Generation)),
-		Depth: childDepth,
-	}
 	existing, err := e.state.GetExecution(ctx, child.ID)
 	if err != nil {
 		return subWorkflowChild{}, fmt.Errorf("read child execution %q: %w", child.ID, err)
@@ -287,7 +310,7 @@ func (e *Engine) startSubWorkflowChild(ctx context.Context, task *Task, g *graph
 		// node whose wait this child satisfies.
 		ParentID:   task.ExecutionID,
 		ParentNode: task.NodeName,
-		Depth:      childDepth,
+		Depth:      child.Depth,
 		// Trace identity is inherited so the child's spans land on the parent's
 		// trace. Runtime and scope deliberately are NOT: $vars belongs to the
 		// child's own definition, and its two sources would be indistinguishable
