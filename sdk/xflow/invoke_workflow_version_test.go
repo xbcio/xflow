@@ -35,7 +35,9 @@ import (
 //   - a pin and an idempotency key compose: the key's fingerprint comes from
 //     the version the call resolved, so a pinned retry after an intervening
 //     publish is answered as a duplicate while an unpinned one is refused as
-//     engine.ErrIdempotencyConflict.
+//     engine.ErrIdempotencyConflict;
+//   - a retry whose pinned version retention has evicted fails closed with
+//     backend.ErrWorkflowVersionNotFound, never a duplicate.
 
 // pinVersionWorkflow builds the two-version shape the tests below publish:
 // same name, different version and a differently named work node, so the node
@@ -386,5 +388,87 @@ func TestInvokeWithWorkflowVersionRequiresHistoryCapability(t *testing.T) {
 	_, err = eng.Invoke(ctx, id, Start(), nil, WithWorkflowVersion("v1"))
 	if err == nil || !strings.Contains(err.Error(), "does not support version history") {
 		t.Fatalf("Invoke(pinned, no history) error = %v, want a version-history capability refusal", err)
+	}
+}
+
+// evictedVersionRegistry hides one version from the history the way retention
+// eviction does (registry contract: RetentionEvictsOldestRetired drops the
+// oldest retirements once the limit is exceeded): GetWorkflowVersion answers
+// backend.ErrWorkflowVersionNotFound for it. Every other method stays the real
+// registry's, so the engine sees an otherwise healthy workflow whose pinned
+// version has aged out. Both capability methods are declared explicitly
+// because an embedded interface only promotes its own method set.
+type evictedVersionRegistry struct {
+	backend.WorkflowRegistry
+	evicted string
+}
+
+func (r evictedVersionRegistry) GetWorkflowVersion(ctx context.Context, id types.WorkflowID, version string) (backend.WorkflowRecord, error) {
+	if version == r.evicted {
+		return backend.WorkflowRecord{}, backend.ErrWorkflowVersionNotFound
+	}
+	versions, ok := r.WorkflowRegistry.(backend.WorkflowVersionCapability)
+	if !ok {
+		return backend.WorkflowRecord{}, backend.ErrWorkflowVersionNotFound
+	}
+	return versions.GetWorkflowVersion(ctx, id, version)
+}
+
+func (r evictedVersionRegistry) ListWorkflowVersions(ctx context.Context, id types.WorkflowID) ([]backend.WorkflowVersionInfo, error) {
+	versions, ok := r.WorkflowRegistry.(backend.WorkflowVersionCapability)
+	if !ok {
+		return nil, backend.ErrWorkflowNotFound
+	}
+	return versions.ListWorkflowVersions(ctx, id)
+}
+
+// TestInvokePinnedVersionEvictedFailsClosed pins the answer when a keyed
+// retry's version pin has aged out of history: retention evicted the oldest
+// retired versions, so the archived payload that would verify the retry is
+// gone. The pin is resolved before the idempotency lookup (invoke.go), so the
+// retry fails closed with backend.ErrWorkflowVersionNotFound — the HTTP face's
+// 404 workflow_version_not_found — instead of answering duplicate for an
+// execution the call can no longer verify.
+func TestInvokePinnedVersionEvictedFailsClosed(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	eng, err := NewLocal()
+	if err != nil {
+		t.Fatalf("NewLocal: %v", err)
+	}
+	defer eng.Stop()
+
+	id, err := eng.AddWorkflow(ctx, pinVersionWorkflow("sdk-pin-evicted", "v1", "only-v1"))
+	if err != nil {
+		t.Fatalf("AddWorkflow: %v", err)
+	}
+	first, err := eng.Invoke(ctx, id, Start(), nil, WithWorkflowVersion("v1"), WithIdempotencyKey("evicted-pin"))
+	if err != nil {
+		t.Fatalf("first pinned keyed Invoke: %v", err)
+	}
+	if _, err := eng.Wait(ctx, first); err != nil {
+		t.Fatalf("Wait(%q): %v", first, err)
+	}
+
+	publishWorkflowVersion(t, ctx, eng.workflowRegistry, id, pinVersionWorkflow("sdk-pin-evicted", "v2", "only-v2"))
+	eng.workflowRegistry = evictedVersionRegistry{eng.workflowRegistry, "v1"}
+
+	replay, err := eng.Invoke(ctx, id, Start(), nil, WithWorkflowVersion("v1"), WithIdempotencyKey("evicted-pin"))
+	if !errors.Is(err, backend.ErrWorkflowVersionNotFound) {
+		t.Fatalf("retry pinned to an evicted version = (%q, %v), want backend.ErrWorkflowVersionNotFound", replay, err)
+	}
+	if replay != "" {
+		t.Fatalf("evicted pin returned execution %q, want none", replay)
+	}
+
+	// The failure is the pin resolution, not a broken engine after the swap: a
+	// fresh unpinned key still runs the live version.
+	live, err := eng.Invoke(ctx, id, Start(), nil, WithIdempotencyKey("evicted-pin-live"))
+	if err != nil {
+		t.Fatalf("unpinned keyed Invoke after the eviction: %v", err)
+	}
+	if got := executedGraph(t, ctx, eng, live).WorkflowVersion(); got != "v2" {
+		t.Fatalf("live execution graph version = %q, want v2", got)
 	}
 }

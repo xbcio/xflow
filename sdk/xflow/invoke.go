@@ -89,7 +89,8 @@ func (e *Engine) Invoke(ctx context.Context, workflowID types.WorkflowID, entry 
 // all; that is a wiring error, not "no such version", and is refused as one.
 // Whether version names the current version is decided by the caller (it is
 // not archived), so this is only reached for a version the live record does not
-// carry; an unknown one comes back as backend.ErrWorkflowVersionNotFound.
+// carry; an unknown one — including one retention has evicted from the oldest
+// retirements — comes back as backend.ErrWorkflowVersionNotFound.
 func (e *Engine) archivedWorkflowVersion(ctx context.Context, id types.WorkflowID, version string) (backend.WorkflowRecord, error) {
 	versions, ok := e.workflowRegistry.(backend.WorkflowVersionCapability)
 	if !ok {
