@@ -175,12 +175,33 @@ func WithArtifactStore(s *store.ArtifactStore) Option {
 type InvokeOption func(*invokeConfig)
 
 type invokeConfig struct {
-	execTTL    time.Duration
-	runtime    *types.Runtime
-	fafRuntime *types.Runtime
-	traceID    string
-	spanID     string
-	testRun    bool
+	execTTL         time.Duration
+	runtime         *types.Runtime
+	fafRuntime      *types.Runtime
+	traceID         string
+	spanID          string
+	testRun         bool
+	workflowVersion string
+}
+
+// WithWorkflowVersion pins this invocation to one published version of the
+// workflow addressed by the call.
+//
+// Omitted (the default) runs the addressed record — its current version — which
+// is what Invoke did before versions existed. A version equal to the current
+// one resolves to that same live record. A RETIRED version runs from the graph
+// snapshot captured when it was retired, never a recompile, after its stored
+// payload has been verified to hash to the value the version was published
+// with; when the current compiler cannot reproduce that hash the call fails
+// with backend.ErrWorkflowVersionUnavailable rather than execute a definition
+// wearing the label of another. An unknown version fails with
+// backend.ErrWorkflowVersionNotFound.
+//
+// Pinning is what makes a call independent of an intervening publish: the
+// execution runs the named version, and the graph snapshot it records carries
+// that version.
+func WithWorkflowVersion(version string) InvokeOption {
+	return func(c *invokeConfig) { c.workflowVersion = version }
 }
 
 // WithTestRun marks this invocation as a test run.
