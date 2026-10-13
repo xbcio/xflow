@@ -509,6 +509,10 @@ paths:
             the server has no release time to promise (the submission is not
             queued when it is refused), and the header exists so a client can
             back off instead of spinning.
+            The API admission layer answers this status too, with
+            `rate_limited`, when the caller's namespace has spent its API rate
+            budget; that refusal precedes the workflow and is described by
+            the RateLimited response.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
@@ -536,6 +540,13 @@ paths:
                     code: workflow_concurrency_queue_full
                     message: workflow concurrency queue is full
                     trace_id: 0123456789abcdef0123456789abcdef
+                rateLimited:
+                  summary: The namespace's API rate budget is spent (admission, before the workflow is consulted).
+                  value:
+                    success: false
+                    code: rate_limited
+                    message: rate limit exceeded
+                    trace_id: 0123456789abcdef0123456789abcdef
         "503":
           description: |
             The definition declares a concurrency limit this server's state
@@ -548,9 +559,15 @@ paths:
             sense: the answer changes when the deployment does, not when the
             caller retries. There is no `Retry-After` for that reason, and
             nothing was persisted in either case.
+            The API admission layer answers this status too, with
+            `server_overloaded` and a `Retry-After` floor, when this replica is
+            at its inflight bound; that refusal is retryable and is described
+            by the ServerOverloaded response.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
+            Retry-After:
+              $ref: "#/components/headers/RetryAfter"
           content:
             application/json:
               schema:
@@ -569,6 +586,13 @@ paths:
                     success: false
                     code: workflow_concurrency_unavailable
                     message: workflow concurrency is not available on this server
+                    trace_id: 0123456789abcdef0123456789abcdef
+                serverOverloaded:
+                  summary: The replica's inflight bound is full.
+                  value:
+                    success: false
+                    code: server_overloaded
+                    message: server is overloaded
                     trace_id: 0123456789abcdef0123456789abcdef
         default:
           $ref: "#/components/responses/DefaultError"
@@ -614,6 +638,10 @@ paths:
             POST /v1/workflows/execute: nothing was persisted, `Retry-After` is
             a floor, and the code is `workflow_concurrency_limit` for a reached
             limit or `workflow_concurrency_queue_full` for a full queue.
+            The API admission layer answers this status too, with
+            `rate_limited`, when the caller's namespace has spent its API rate
+            budget; that refusal precedes the workflow and is described by
+            the RateLimited response.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
@@ -641,6 +669,13 @@ paths:
                     code: workflow_concurrency_queue_full
                     message: workflow concurrency queue is full
                     trace_id: 0123456789abcdef0123456789abcdef
+                rateLimited:
+                  summary: The namespace's API rate budget is spent (admission, before the workflow is consulted).
+                  value:
+                    success: false
+                    code: rate_limited
+                    message: rate limit exceeded
+                    trace_id: 0123456789abcdef0123456789abcdef
         "503":
           description: |
             The definition declares a concurrency limit this server's state
@@ -649,9 +684,15 @@ paths:
             POST /v1/workflows/execute: the code is
             `workflow_concurrency_unavailable`, nothing was persisted, and
             retrying does not change the answer.
+            The API admission layer answers this status too, with
+            `server_overloaded` and a `Retry-After` floor, when this replica is
+            at its inflight bound; that refusal is retryable and is described
+            by the ServerOverloaded response.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
+            Retry-After:
+              $ref: "#/components/headers/RetryAfter"
           content:
             application/json:
               schema:
@@ -670,6 +711,13 @@ paths:
                     success: false
                     code: workflow_concurrency_unavailable
                     message: workflow concurrency is not available on this server
+                    trace_id: 0123456789abcdef0123456789abcdef
+                serverOverloaded:
+                  summary: The replica's inflight bound is full.
+                  value:
+                    success: false
+                    code: server_overloaded
+                    message: server is overloaded
                     trace_id: 0123456789abcdef0123456789abcdef
         default:
           $ref: "#/components/responses/DefaultError"
@@ -1518,6 +1566,10 @@ paths:
                     code: schedules_unavailable
                     message: the schedules API is not configured on this server
                     trace_id: 0123456789abcdef0123456789abcdef
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/ServerOverloaded"
         default:
           $ref: "#/components/responses/DefaultError"
 
@@ -1715,6 +1767,10 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/AcceptedResponse"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/ServerOverloaded"
         default:
           $ref: "#/components/responses/DefaultError"
 
@@ -1809,6 +1865,10 @@ paths:
                     code: execution_control_unsupported
                     message: execution control is not supported
                     trace_id: 0123456789abcdef0123456789abcdef
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/ServerOverloaded"
         default:
           $ref: "#/components/responses/DefaultError"
 
@@ -1890,6 +1950,10 @@ paths:
                     code: execution_control_unsupported
                     message: execution control is not supported
                     trace_id: 0123456789abcdef0123456789abcdef
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/ServerOverloaded"
         default:
           $ref: "#/components/responses/DefaultError"
 
@@ -2043,6 +2107,10 @@ paths:
             POST /v1/workflows/execute: nothing was persisted, `Retry-After` is
             a floor, and the code is `workflow_concurrency_limit` for a reached
             limit or `workflow_concurrency_queue_full` for a full queue.
+            The API admission layer answers this status too, with
+            `rate_limited`, when the caller's namespace has spent its API rate
+            budget; that refusal precedes the workflow and is described by
+            the RateLimited response.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
@@ -2063,6 +2131,13 @@ paths:
                     code: workflow_concurrency_limit
                     message: workflow is at its concurrency limit
                     trace_id: 0123456789abcdef0123456789abcdef
+                rateLimited:
+                  summary: The namespace's API rate budget is spent (admission, before the workflow is consulted).
+                  value:
+                    success: false
+                    code: rate_limited
+                    message: rate limit exceeded
+                    trace_id: 0123456789abcdef0123456789abcdef
         "501":
           description: |
             This deployment cannot seed an execution (no rerun capability), so
@@ -2080,6 +2155,8 @@ paths:
                     code: execution_rerun_unsupported
                     message: execution rerun is not supported
                     trace_id: 0123456789abcdef0123456789abcdef
+        "503":
+          $ref: "#/components/responses/ServerOverloaded"
         default:
           $ref: "#/components/responses/DefaultError"
 
@@ -2113,6 +2190,10 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/AcceptedResponse"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/ServerOverloaded"
         default:
           $ref: "#/components/responses/DefaultError"
 
@@ -2141,6 +2222,10 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/RevokedResponse"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/ServerOverloaded"
         default:
           $ref: "#/components/responses/DefaultError"
 
@@ -2584,21 +2669,37 @@ paths:
                 $ref: "#/components/schemas/WebhookEntryError"
         "429":
           description: |
-            The workflow's concurrency policy refused the event. Nothing was
-            persisted; retry after the floor stated in `Retry-After` and in the
-            body's `retry_after_seconds`.
+            The event was refused before anything was persisted; retry after
+            `Retry-After`. Two refusals share the status. The workflow's
+            concurrency policy answers with the WebhookEntryRefusal body, which
+            repeats the floor in `retry_after_seconds`. The API rate limit
+            answers `{"error": "rate_limited"}` once the namespace+workflow
+            pair has spent its budget (`--api-rate` / `--api-burst`); only a
+            correctly signed request is charged.
           headers:
             Retry-After:
-              schema:
-                type: integer
+              $ref: "#/components/headers/RetryAfter"
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/WebhookEntryRefusal"
+                oneOf:
+                  - $ref: "#/components/schemas/WebhookEntryRefusal"
+                  - $ref: "#/components/schemas/WebhookEntryError"
         "503":
           description: |
-            The entry's signing secret could not be resolved, so no caller can be
-            authenticated. Nothing was admitted.
+            Nothing was admitted. `entry_unavailable`: the entry's signing
+            secret could not be resolved, so no caller can be authenticated.
+            `server_overloaded`: this replica is at its inflight bound
+            (`--api-max-inflight`) — for this route the webhook class's own
+            sub-limit (a quarter of the bound, at least 1) answers it first, so a
+            webhook flood cannot consume the capacity authenticated execute work
+            needs; retryable, with a `Retry-After` floor.
+          headers:
+            Retry-After:
+              description: Present on `server_overloaded` only.
+              schema:
+                type: integer
+                minimum: 1
           content:
             application/json:
               schema:
@@ -2965,6 +3066,10 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/DeadLetterReplayResponse"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/ServerOverloaded"
         default:
           $ref: "#/components/responses/DefaultError"
 
@@ -3504,6 +3609,12 @@ components:
       schema:
         type: string
         example: '"sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"'
+    RetryAfter:
+      description: Whole seconds to wait before retrying; at least 1.
+      schema:
+        type: integer
+        minimum: 1
+        example: 1
 
   responses:
     DefaultError:
@@ -3515,6 +3626,54 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
+    RateLimited:
+      description: |
+        `rate_limited`: the caller's namespace spent its API rate budget
+        (`--api-rate` / `--api-burst`). Nothing was audited, persisted or
+        executed. `Retry-After` is the time until the bucket holds a token
+        again, rounded up to whole seconds. It is distinct from the
+        `workflow_concurrency_*` 429s, which a workflow's own
+        `settings.concurrency` produces after the request was admitted.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          examples:
+            rateLimited:
+              summary: The namespace's API rate budget is spent.
+              value:
+                success: false
+                code: rate_limited
+                message: rate limit exceeded
+                trace_id: 0123456789abcdef0123456789abcdef
+    ServerOverloaded:
+      description: |
+        `server_overloaded`: this replica is already serving its bound of
+        concurrent covered requests (`--api-max-inflight`, default 1024).
+        Nothing was audited, persisted or executed. `Retry-After` is a floor;
+        the server has no release time to promise.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          examples:
+            serverOverloaded:
+              summary: The replica's inflight bound is full.
+              value:
+                success: false
+                code: server_overloaded
+                message: server is overloaded
+                trace_id: 0123456789abcdef0123456789abcdef
 
   schemas:
     Envelope:
@@ -3898,6 +4057,8 @@ components:
             - payload_too_large
             - body_unreadable
             - entry_unavailable
+            - rate_limited
+            - server_overloaded
             - route_not_found
             - internal server error
           example: signature_invalid

@@ -26,9 +26,11 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"net/netip"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -135,6 +137,11 @@ type serverConfig struct {
 	// warn, so an upgrade of this binary never starts rejecting definitions
 	// it accepted before; enforce is a deliberate operator act.
 	paramValidation xflowsdk.ParamValidationMode
+	// apiLimits is the admission layer in front of the mutating workflow /
+	// execution routes and the webhook entry: --api-rate, --api-burst,
+	// --api-max-inflight and --api-rate-limit-mode, each also settable through
+	// its XFLOW_ environment variable (see applyAPILimitEnv).
+	apiLimits apiserver.APILimits
 	// apiAuthToken, when non-empty, enables BearerTokenAuth on the workflow/
 	// control API (/v1/workflows, /v1/executions/*). The same token must be
 	// supplied by callers in the Authorization: Bearer <token> header. When set
@@ -255,6 +262,14 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	var paramValidation string
 	fs.StringVar(&paramValidation, "param-validation", "",
 		"What workflow registration does with node param issues: off|warn|enforce (default warn; enforce rejects with 400 workflow_param_invalid)")
+	fs.Float64Var(&cfg.apiLimits.Rate, "api-rate", 0,
+		"Per-namespace rate limit on the mutating workflow/execution routes and the webhook entry, in requests/s (0 = no limit; env XFLOW_API_RATE)")
+	fs.IntVar(&cfg.apiLimits.Burst, "api-burst", 0,
+		"Requests a namespace may make at once on top of --api-rate (0 = derived from the rate, at least 1; env XFLOW_API_BURST)")
+	fs.IntVar(&cfg.apiLimits.MaxInflight, "api-max-inflight", 0,
+		"Covered requests this replica serves at once before answering 503 server_overloaded (0 = 1024; negative disables; env XFLOW_API_MAX_INFLIGHT)")
+	fs.StringVar(&cfg.apiLimits.Mode, "api-rate-limit-mode", "",
+		"Where --api-rate is counted: local (per replica, default) or redis (shared by every replica; needs --redis; falls back to local while Redis is unreachable; env XFLOW_API_RATE_LIMIT_MODE)")
 	fs.StringVar(&cfg.apiAuthToken, "api-auth-token", "", "Static bearer token for workflow API authentication (sets Authorization: Bearer guard on /v1/workflows and /v1/executions/*); single-namespace → default namespace. For multi-namespace use --auth-tokens-file.")
 	fs.StringVar(&cfg.authTokensFile, "auth-tokens-file", "", "JSON file of [{token,subject,namespace,scopes}] mappings; each token binds to its own namespace (multi-namespace). Takes precedence over --api-auth-token. File must be 0600.")
 	fs.BoolVar(&cfg.requireAPIAuth, "require-api-auth", false, "Fail to start if no workflow API authenticator is configured (production fail-closed)")
@@ -285,6 +300,12 @@ func parseServerConfig(args []string) (serverConfig, error) {
 		args = os.Args[1:]
 	}
 	if err := fs.Parse(args); err != nil {
+		return serverConfig{}, err
+	}
+	if err := applyAPILimitEnv(&cfg.apiLimits, os.LookupEnv); err != nil {
+		return serverConfig{}, err
+	}
+	if err := validateAPILimitFlags(cfg.apiLimits); err != nil {
 		return serverConfig{}, err
 	}
 	trustedProxies, err := parseTrustedProxyPrefixes(trustedProxyCIDRs)
@@ -338,7 +359,67 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	if cfg.redis == "" && !haConfigured {
 		cfg.memory = true
 	}
+	if cfg.apiLimits.Mode == apiserver.APIRateLimitModeRedis && cfg.memory {
+		return serverConfig{}, fmt.Errorf("--api-rate-limit-mode=redis needs a Redis backend (--redis or --redis-mode); it cannot share a rate through --memory")
+	}
 	return cfg, nil
+}
+
+// apiLimitEnv names the environment variables that set the API admission
+// limits. Each overrides its flag when set to a non-empty value, the same
+// precedence XFLOW_MASTER_KEY has over --master-key-file: a container
+// platform's environment is the operator's last word over an image's baked-in
+// argv.
+const (
+	envAPIRate          = "XFLOW_API_RATE"
+	envAPIBurst         = "XFLOW_API_BURST"
+	envAPIMaxInflight   = "XFLOW_API_MAX_INFLIGHT"
+	envAPIRateLimitMode = "XFLOW_API_RATE_LIMIT_MODE"
+)
+
+// applyAPILimitEnv overlays the XFLOW_API_* environment onto l. A value that
+// does not parse fails startup rather than silently keeping the flag's value.
+func applyAPILimitEnv(l *apiserver.APILimits, lookup func(string) (string, bool)) error {
+	if v, ok := lookup(envAPIRate); ok && v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return fmt.Errorf("%s: %q is not a number", envAPIRate, v)
+		}
+		l.Rate = f
+	}
+	for _, e := range []struct {
+		name string
+		dst  *int
+	}{{envAPIBurst, &l.Burst}, {envAPIMaxInflight, &l.MaxInflight}} {
+		if v, ok := lookup(e.name); ok && v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				return fmt.Errorf("%s: %q is not an integer", e.name, v)
+			}
+			*e.dst = n
+		}
+	}
+	if v, ok := lookup(envAPIRateLimitMode); ok && v != "" {
+		l.Mode = v
+	}
+	return nil
+}
+
+// validateAPILimitFlags reports a limit this binary cannot honour in the flag
+// vocabulary; apiserver.New checks the same rules again for embedders.
+func validateAPILimitFlags(l apiserver.APILimits) error {
+	if l.Rate < 0 || math.IsNaN(l.Rate) || math.IsInf(l.Rate, 0) {
+		return fmt.Errorf("--api-rate must be a finite number no less than 0 (0 disables the limit)")
+	}
+	if l.Burst < 0 {
+		return fmt.Errorf("--api-burst must not be negative (0 derives it from --api-rate)")
+	}
+	switch l.Mode {
+	case "", apiserver.APIRateLimitModeLocal, apiserver.APIRateLimitModeRedis:
+	default:
+		return fmt.Errorf("--api-rate-limit-mode must be one of: local|redis")
+	}
+	return nil
 }
 
 // buildRedisConfig assembles a distributed.RedisConfig from CLI flags. It
@@ -576,6 +657,9 @@ func buildServerOptions(cfg serverConfig, deps serverDeps) []xflowsdk.ServerOpti
 	serverOpts = append(serverOpts, xflowsdk.WithServerRegistrationCodeTTL(cfg.registrationCodeTTL))
 	// Unconditional: an empty mode is the SDK default (warn).
 	serverOpts = append(serverOpts, xflowsdk.WithServerParamValidation(cfg.paramValidation))
+	// Unconditional: the zero value is the default admission posture (no rate
+	// limit, a 1024 inflight bound).
+	serverOpts = append(serverOpts, xflowsdk.WithServerAPILimits(cfg.apiLimits))
 	// Production posture (Task 8 blocker 3), enforced by apiserver.New — the
 	// one layer both this binary and every SDK embedder pass through. The
 	// declaration carries the three facts that layer cannot see for itself:
