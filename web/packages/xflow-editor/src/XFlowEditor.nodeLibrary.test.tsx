@@ -13,6 +13,13 @@ import { zhCN } from "./node-form/locales/zh-CN";
 import type { NodeFormSchema } from "./node-form/schema";
 import generated from "./node-form/testdata/node-types.generated.json";
 
+/** The canvas node's own select button (the outline is gone; the canvas is the list). */
+const canvasNode = (name: string): HTMLElement => {
+  const node = document.querySelector<HTMLElement>(`.xflow-preview-node__select[aria-label^="${name} node "]`);
+  if (!node) throw new Error(`canvas node ${name} not found`);
+  return node;
+};
+
 // Pass-through wrapper so a test can reach the canvas's drop callback: React
 // Flow never initialises in jsdom, so a real DOM drop cannot resolve a position.
 const preview = vi.hoisted(() => ({ props: undefined as undefined | Record<string, unknown> }));
@@ -158,10 +165,10 @@ describe("node library from /v1/node-types (Doc C §6.3)", () => {
     };
     render(<XFlowEditor nodeTypes={nodeTypes} value={custom} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "选择节点 fax" }));
+    fireEvent.click(canvasNode("fax"));
     const inspector = screen.getByRole("region", { name: "属性" });
     expect(within(inspector).getByText("该节点类型未在 server 注册，参数按 JSON 编辑")).toBeTruthy();
-    expect(within(inspector).getByRole("tab", { name: "JSON" })).toBeTruthy();
+    expect(within(inspector).getByRole("button", { name: "以 JSON 编辑参数" })).toBeTruthy();
     // Diagnosed as a warning, not an error: the type may be registered on a runner.
     const toggle = screen.queryByRole("button", { name: "展开诊断台" });
     if (toggle) fireEvent.click(toggle);
