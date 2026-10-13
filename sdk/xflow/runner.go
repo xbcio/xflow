@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -1430,6 +1431,12 @@ func buildRunnerTLSConfig(cfg RunnerConfig) (*tls.Config, error) {
 // all. Inside NewRunner they are built over the CredentialReloader instead
 // (newReloadableRunnerHTTPClient, newRunnerOriginHTTPClient); this static form
 // remains for NewRunnerHTTPClient and for assemblies with no reloader.
+//
+// The environment proxy is honoured the same way the reloadable transport
+// honours it — through the shared dialRunnerTLSConn, which tunnels CONNECT
+// itself so the TLS handshake stays under this client's control. A static
+// client that silently dialled direct while the reloadable one tunnelled would
+// make enrollment fail on exactly the deployments that need the proxy.
 func newRunnerHTTPClient(cfg RunnerConfig, timeout time.Duration) (*http.Client, error) {
 	tlsCfg, err := buildRunnerTLSConfig(cfg)
 	if err != nil {
@@ -1437,7 +1444,14 @@ func newRunnerHTTPClient(cfg RunnerConfig, timeout time.Duration) (*http.Client,
 	}
 	c := &http.Client{Timeout: timeout}
 	if tlsCfg != nil {
-		c.Transport = &http.Transport{TLSClientConfig: tlsCfg}
+		dialer := newRunnerDialer()
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = nil
+		transport.TLSClientConfig = tlsCfg
+		transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialRunnerTLSConn(ctx, dialer, network, addr, tlsCfg, func() *x509.CertPool { return tlsCfg.RootCAs }, transport.TLSHandshakeTimeout)
+		}
+		c.Transport = transport
 	}
 	return c, nil
 }

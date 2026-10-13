@@ -42,9 +42,11 @@ type redisRunnerDirectoryConfig struct {
 	drainDeadline             time.Duration
 	clock                     func() time.Time
 	observer                  RunnerClaimObserver
+	log                       engine.Logger
 	executions                engine.ExecutionStatusReader
 	lanes                     []string
 	laneWriteMode             LaneWriteMode
+	selector                  RunnerSelector
 }
 
 // WithRedisRunnerDirectoryClaimTTL sets the maximum time a poll claim can
@@ -136,12 +138,38 @@ func WithRedisRunnerDirectoryClock(clock func() time.Time) RedisRunnerDirectoryO
 }
 
 // WithRedisRunnerDirectoryObserver installs an optional observer for durable
-// claim reclamation and lease replay events.
+// claim reclamation and lease replay events, the claim poll cost, and — via
+// the RunnerSelectorRejectObserver extension — claim-path selector rejections.
+// One observer value carries all of them, so a host cannot install half.
 func WithRedisRunnerDirectoryObserver(observer RunnerClaimObserver) RedisRunnerDirectoryOption {
 	return func(cfg *redisRunnerDirectoryConfig) {
 		if observer != nil {
 			cfg.observer = observer
 		}
+	}
+}
+
+// WithRedisRunnerDirectoryLogger installs the logger that records default-mode
+// selector grace fallbacks on the claim path (logSelectorGraceFallback).
+// Optional: without one the fallback is still counted through the observer,
+// just not attributable to a concrete assignment in the log.
+func WithRedisRunnerDirectoryLogger(log engine.Logger) RedisRunnerDirectoryOption {
+	return func(cfg *redisRunnerDirectoryConfig) {
+		if log != nil {
+			cfg.log = log
+		}
+	}
+}
+
+// WithRedisRunnerDirectorySelector overrides the selector policy (liveness
+// TTL and default-mode fallback grace) the claim path applies. Zero keeps
+// DefaultRunnerSelector. It exists so a deployment — or a test — can shorten
+// the grace window without waiting 30 seconds per assertion; the grace is
+// measured against the Redis server clock and the assignment:queued_at stamp,
+// never a local clock.
+func WithRedisRunnerDirectorySelector(selector RunnerSelector) RedisRunnerDirectoryOption {
+	return func(cfg *redisRunnerDirectoryConfig) {
+		cfg.selector = selector
 	}
 }
 
@@ -174,9 +202,11 @@ type RedisRunnerDirectory struct {
 	drainDeadline             time.Duration
 	clock                     func() time.Time
 	observer                  RunnerClaimObserver
+	log                       engine.Logger
 	executions                engine.ExecutionStatusReader
 	lanes                     []string
 	laneWriteMode             LaneWriteMode
+	selector                  RunnerSelector
 	keys                      redisRunnerDirectoryKeys
 
 	// claimCursorMu guards claimCursors and claimWalks, the per-runner resume
@@ -217,6 +247,7 @@ func NewRedisRunnerDirectory(rdb redis.Cmdable, opts ...RedisRunnerDirectoryOpti
 		drainObservationFreshness: defaultRunnerDrainObservationFreshness,
 		drainDeadline:             defaultRunnerDrainDeadline,
 		clock:                     time.Now,
+		selector:                  DefaultRunnerSelector(),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -232,9 +263,11 @@ func NewRedisRunnerDirectory(rdb redis.Cmdable, opts ...RedisRunnerDirectoryOpti
 		drainDeadline:             cfg.drainDeadline,
 		clock:                     cfg.clock,
 		observer:                  cfg.observer,
+		log:                       cfg.log,
 		executions:                cfg.executions,
 		lanes:                     normalizeLaneNodeTypes(cfg.lanes),
 		laneWriteMode:             cfg.laneWriteMode,
+		selector:                  cfg.selector,
 		keys:                      newRedisRunnerDirectoryKeys(redisRunnerDirectoryKeyPrefix),
 		claimCursors:              make(map[string]int),
 		claimWalks:                make(map[string]bool),
@@ -848,6 +881,10 @@ func (d *RedisRunnerDirectory) walkClaimTarget(
 	attempts := 0
 	scanned := 0
 	trips := 0
+	// graceFallback is set when this page's fallback selection (below) produced
+	// the candidates the claim loop attempts. It scopes the fallback log line
+	// to the claim that actually used the relaxation.
+	graceFallback := false
 	for scanned < redisClaimScanBudget {
 		page := redisClaimQueuePage
 		if remaining := redisClaimScanBudget - scanned; remaining < page {
@@ -873,13 +910,14 @@ func (d *RedisRunnerDirectory) walkClaimTarget(
 		// to run inside the claim loop, which made their cost invisible; hoisting them
 		// out is what lets the liveness question below be asked once for the page
 		// instead of once per attempt.
-		type claimCandidate struct {
-			assignmentID string
-			raw          string
-			assignment   Assignment
-		}
-		candidates := make([]claimCandidate, 0, len(assignmentIDs))
+		candidates := make([]redisClaimCandidate, 0, len(assignmentIDs))
 		assignments := make([]Assignment, 0, len(assignmentIDs))
+		// labelMisses are the page's assignments this runner may not claim on
+		// labels alone. They are held back rather than dropped so the
+		// default-mode grace fallback below can reconsider them, after the
+		// ordinary candidates (label-matching ones) have had their attempt.
+		labelMisses := make([]redisClaimCandidate, 0, len(assignmentIDs))
+		graceFallback = false
 		for i, assignmentID := range assignmentIDs {
 			raw, _ := raws[i].(string)
 			if raw == "" {
@@ -891,17 +929,83 @@ func (d *RedisRunnerDirectory) walkClaimTarget(
 			if err != nil {
 				return claimTargetWalk{}, err
 			}
-			if !MatchCapabilities(capabilities, assignment.Routing) || !runner.policy.Allows(assignment.Routing.NodeType) {
+			if !MatchCapabilities(capabilities, assignment.Routing) {
+				d.observeSelectorReject(ctx, SelectorRejectCapability)
+				continue
+			}
+			if !runner.policy.Allows(assignment.Routing.NodeType) {
+				d.observeSelectorReject(ctx, SelectorRejectPolicy)
 				continue
 			}
 			if !canServeNamespace(runner.namespaces, assignment.Namespace) {
+				d.observeSelectorReject(ctx, SelectorRejectNamespace)
 				continue
 			}
+			candidate := redisClaimCandidate{assignmentID: assignmentID, raw: raw, assignment: assignment}
 			if rs := assignment.Routing.RunnerSelector; rs != nil && !MatchLabels(labels, rs.MatchLabels) {
+				if selectorIsDefault(rs) {
+					// Soft mode: the labels are a preference. Keep the entry as a
+					// fallback candidate; the grace decision needs the queued-at
+					// stamp, which is one batched read taken only if the ordinary
+					// candidates below claim nothing.
+					labelMisses = append(labelMisses, candidate)
+				} else {
+					// Required mode never relaxes: reported as this runner's
+					// hard-filter rejection.
+					d.observeSelectorReject(ctx, SelectorRejectLabelRequired)
+				}
 				continue
 			}
-			candidates = append(candidates, claimCandidate{assignmentID: assignmentID, raw: raw, assignment: assignment})
+			candidates = append(candidates, candidate)
 			assignments = append(assignments, assignment)
+		}
+		if len(candidates) == 0 && len(labelMisses) > 0 {
+			// The page offered this runner nothing it may claim on labels. Before
+			// giving up on it, apply the SAME default-mode grace the entry
+			// activation path applies: an assignment whose selector is a
+			// preference and whose grace window (anchored on the queued-at stamp)
+			// has elapsed may be claimed on capability/policy/namespace alone —
+			// those are authorization and are never relaxed.
+			//
+			// The window is measured against the Redis server clock and the stamp
+			// the queue transitions wrote, never a local clock, so every
+			// control-plane replica computes the same verdict.
+			matured, pendingGrace, fallbackTrips, err := d.matureGraceCandidates(ctx, labelMisses)
+			trips += fallbackTrips
+			if err != nil {
+				return claimTargetWalk{}, err
+			}
+			// Every entry still inside its window — or carrying no stamp to
+			// measure, which stays pending by contract (see
+			// matureGraceCandidates) — is one label_pending rejection, whether or
+			// not a sibling on the same page matured: the matured ones are
+			// attempted below, and hiding the rest until the whole page matured
+			// undercounted exactly the state this counter exists to surface.
+			for range pendingGrace {
+				d.observeSelectorReject(ctx, SelectorRejectLabelPending)
+			}
+			if len(matured) > 0 {
+				candidates = matured
+				assignments = maturedAssignments(matured)
+				// graceFallback marks that the candidate set below comes from the
+				// default-mode grace relaxation rather than a label match. Only the
+				// successful claim of such a candidate emits the fallback log line: a
+				// candidate that loses its claim race (or whose execution is gone)
+				// must not be reported as a placement that happened.
+				graceFallback = true
+			}
+			// len(matured) == 0 falls through with no candidates, exactly as a page
+			// holding nothing claimable does: the shared footer below advances the
+			// cursor and either scans on or wraps to the head. That is the grace
+			// rule the design pins — the verdict is taken after candidate
+			// collection, before the return, and it leaves the walk's cursor and
+			// budget semantics untouched. Holding the cursor here instead pinned
+			// every poll to this page: an immature page head blocked every
+			// claimable entry queued behind it for as long as its window ran, and
+			// an unstamped entry, which never matures, pinned it without bound.
+			// The advance strands nothing — the footer's wrap revisits this page
+			// once the sweep comes around, and a stamped entry matures on the
+			// wall-clock schedule its stamp already fixed.
 		}
 
 		stopped := false
@@ -951,6 +1055,9 @@ func (d *RedisRunnerDirectory) walkClaimTarget(
 					// re-walked that whole prefix before it could claim anything, and an
 					// unadvanced cursor cannot step over a prefix the way a skipped page can.
 					d.storeClaimWalk(req.RunnerID, false)
+					if graceFallback {
+						d.logSelectorGraceFallback(ctx, c.assignment)
+					}
 					return claimTargetWalk{claim: Claim{ClaimID: claimID, Assignment: c.assignment}, resolved: true, roundTrips: trips}, nil
 				case "retry":
 					// 'retry' is a verdict on the entry, not a transient hold: the

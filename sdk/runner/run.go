@@ -89,6 +89,13 @@ type runnerConfig struct {
 	// empty slice is an explicit empty list from YAML, env, or CLI.
 	httpHostPolicyAllow []string
 	httpHostPolicyDeny  []string
+	// supplyPullAllowedHosts is the runner-level allowlist for supply pull
+	// sources (xflow.supply.http). Non-empty means only matching hosts may be
+	// pulled and whatever addresses they resolve to are permitted (private
+	// ranges included, an explicit operator decision); empty keeps the default
+	// policy, which refuses loopback, private, link-local and unspecified
+	// addresses at dial time.
+	supplyPullAllowedHosts []string
 	// autoLabels adds environment-derived xflow.io/* labels to the manual set.
 	autoLabels bool
 	// token is the runner's bearer token (matched against the server's
@@ -197,6 +204,7 @@ func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
 	cmd.Flags().StringVar(&cfg.registrationToken, "registration-token", cfg.registrationToken, "Registration token used to enroll when no identity is stored (reusable unless the server capped its max_uses); enrollment dials --server over HTTP regardless of --transport (prefer XFLOW_RUNNER_REGISTRATION_TOKEN)")
 	cmd.Flags().BoolVar(&cfg.allowPlaintext, "allow-plaintext", cfg.allowPlaintext, "Permit an unencrypted control-plane connection (no TLS material configured)")
 	cmd.Flags().BoolVar(&cfg.requireSupplyEncryption, "require-supply-encryption", cfg.requireSupplyEncryption, "Exit if the control plane issues no supply encryption key at registration")
+	cmd.Flags().StringArrayVar(&cfg.supplyPullAllowedHosts, "supply-pull-allowed-hosts", cfg.supplyPullAllowedHosts, "Allowlisted supply pull source host rule: exact host, .suffix (apex + descendants), or *.wildcard (descendants only); repeatable")
 	cmd.Flags().StringVar(&cfg.traceMode, "trace", "disabled", "Tracing mode: disabled|stdout|otlp")
 	cmd.Flags().StringVar(&cfg.traceEndpoint, "trace-endpoint", "localhost:4317", "OTLP collector gRPC endpoint (--trace=otlp)")
 	cmd.Flags().BoolVar(&cfg.traceInsecure, "trace-insecure", false, "Disable TLS verification for OTLP connection")
@@ -552,25 +560,33 @@ func toSDKRunnerConfig(cfg runnerConfig) (xflowsdk.RunnerConfig, error) {
 			return xflowsdk.RunnerConfig{}, err
 		}
 	}
+	// The allowlist travels to the SDK exactly as the other host-rule fields
+	// do — copied with surrounding whitespace trimmed — because the SDK
+	// compiles it into the pull fetcher's destination policy, where a padded
+	// entry would otherwise never match the host it names. An unset allowlist
+	// stays nil: that is the SDK's documented "default public-only policy",
+	// and a blank entry is rejected at validation, so there is no other
+	// empty state to preserve.
 	return xflowsdk.RunnerConfig{
-		ServerURL:           cfg.serverURL,
-		Transport:           cfg.transport,
-		GRPCTarget:          cfg.grpcTarget,
-		RunnerID:            cfg.runnerID,
-		Concurrency:         cfg.concurrency,
-		MapBatchConcurrency: cfg.mapBatchConcurrency,
-		MapItemConcurrency:  cfg.mapItemConcurrency,
-		Capabilities:        capabilityNodeTypes(cfg.capabilities),
-		Labels:              cloneStringMap(cfg.labels),
-		Namespaces:          cfg.namespaces,
-		Token:               cfg.token,
-		TLSServerCA:         cfg.tlsServerCA,
-		TLSClientCert:       cfg.tlsClientCert,
-		TLSClientKey:        cfg.tlsClientKey,
-		HeartbeatInterval:   heartbeat,
-		PollWait:            pollWait,
-		SeedRequestTimeout:  seedRequestTimeout,
-		SupplyPollInterval:  supplyPollInterval,
+		ServerURL:              cfg.serverURL,
+		Transport:              cfg.transport,
+		GRPCTarget:             cfg.grpcTarget,
+		RunnerID:               cfg.runnerID,
+		Concurrency:            cfg.concurrency,
+		MapBatchConcurrency:    cfg.mapBatchConcurrency,
+		MapItemConcurrency:     cfg.mapItemConcurrency,
+		Capabilities:           capabilityNodeTypes(cfg.capabilities),
+		Labels:                 cloneStringMap(cfg.labels),
+		Namespaces:             cfg.namespaces,
+		Token:                  cfg.token,
+		TLSServerCA:            cfg.tlsServerCA,
+		TLSClientCert:          cfg.tlsClientCert,
+		TLSClientKey:           cfg.tlsClientKey,
+		HeartbeatInterval:      heartbeat,
+		PollWait:               pollWait,
+		SeedRequestTimeout:     seedRequestTimeout,
+		SupplyPollInterval:     supplyPollInterval,
+		SupplyPullAllowedHosts: copyTrimmedHosts(cfg.supplyPullAllowedHosts),
 		BrowserCDP: xnode.BrowserCDPConfig{
 			Endpoints:      copyTrimmedHosts(cfg.browserCDPEndpoints),
 			MaxContexts:    cfg.browserCDPMaxContexts,

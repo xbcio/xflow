@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/store/memstore"
 )
 
 // TestHTTPStatusErrorMessagesMapStatusToOperatorText pins the status->message
@@ -102,4 +104,54 @@ func TestAPIDeadLetterClientErrorMessagesRedactCursorFromRealFailure(t *testing.
 	if !strings.Contains(err.Error(), "500") {
 		t.Fatalf("error = %q, want it to surface the actual status code 500 (default httpStatusError branch)", err.Error())
 	}
+}
+
+// TestReconcileReceiptReaderErrorExplainsTheLocalGap pins the one branch of the
+// reconcile command that the shipped distributed backend can never reach: a
+// StateStore without the engine.ReplayReceiptReader capability. The two CLI
+// tests that drive reconcile end-to-end are MySQL-gated and skip wherever MySQL
+// is unreachable, so without this test the message an operator actually sees is
+// never executed in CI. The message must explain WHY the local backend cannot
+// be reconciled by this command (its state is process-local, so a separate
+// process cannot read the receipts) and name the in-process alternative
+// (control.NewReceiptProjector) — a bare "does not implement" sends the
+// operator hunting for a bug instead.
+func TestReconcileReceiptReaderErrorExplainsTheLocalGap(t *testing.T) {
+	_, err := receiptReaderFor(memstore.New())
+	if err == nil {
+		t.Fatal("receiptReaderFor(memstore): err = nil, want the missing-capability error")
+	}
+	got := err.Error()
+	for _, want := range []string{"process-local", "control.NewReceiptProjector", "*memstore.Store"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("receiptReaderFor error = %q, want it to contain %q", got, want)
+		}
+	}
+}
+
+// TestReconcileReceiptReaderAcceptsAReader is the paired positive branch: a
+// store that does implement the capability must be returned usable, with no
+// error. The MySQL-gated CLI tests are the only other caller, so a regression
+// that rejects every store (e.g. a future guard added to the wrong side of the
+// type assertion) would otherwise surface only on a machine with MySQL.
+func TestReconcileReceiptReaderAcceptsAReader(t *testing.T) {
+	sentinel := errors.New("stub scan refuses")
+	reader, err := receiptReaderFor(reconcileReaderStub{err: sentinel})
+	if err != nil {
+		t.Fatalf("receiptReaderFor(reconcileReaderStub): unexpected error: %v", err)
+	}
+	if reader == nil {
+		t.Fatal("receiptReaderFor(reconcileReaderStub) = nil reader, want the store back")
+	}
+	if err := reader.ScanReplayReceipts(context.Background(), nil); err != sentinel {
+		t.Fatalf("returned reader's scan error = %v, want %v (the exact store must come back)", err, sentinel)
+	}
+}
+
+// reconcileReaderStub is a minimal engine.ReplayReceiptReader: the capability
+// is a single-method interface, so no full StateStore double is needed.
+type reconcileReaderStub struct{ err error }
+
+func (s reconcileReaderStub) ScanReplayReceipts(context.Context, func(engine.ReplayReceipt) error) error {
+	return s.err
 }

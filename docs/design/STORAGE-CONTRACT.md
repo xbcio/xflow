@@ -297,12 +297,20 @@ interfaces and can be adapted to Prometheus outside `engine/`. Engine-owned
 spans may use the narrow tracing facade, but concrete metrics, logging, and
 exporter setup must stay outside `engine/`.
 
-Three tools exist today: the in-process `control.AuditReconcileWorker`
-(leader-gated, reconciles admission/outcome phases), the one-shot
-`xflow dead-letter reconcile` command, and the strictly read-only
+Four reconciliation paths already exist: the in-process
+`control.AuditReconcileWorker` (leader-gated, reconciles admission/outcome
+phases), the one-shot `xflow audit reconcile` command (the same worker run
+single-shot from the operator CLI; `--dry-run` classifies without writing),
+the one-shot `xflow dead-letter reconcile` command, and the strictly read-only
 `xflow execution diff` (`cmd/xflow/execution_diff.go`), which compares the
 Redis-authoritative execution state of one execution against its SQL projection
-and reports drift without writing either side. What remains **planned** is an
-active job that scans execution state for drift continuously. Until it exists,
-audit failure counters and observers are the operational signal that a
-projection needs investigation; they do not alter Redis authority.
+and reports drift without writing either side. The dead-letter scan
+goes through the optional `engine.ReplayReceiptReader` capability, whose
+surface differs per backend: the distributed backend reports each receipt's
+namespace, while the local backend has no namespace dimension and reports the
+empty string (its receipts are process-local, so only an in-process projector
+— `control.NewReceiptProjector` — can read them). What remains
+**planned** is an active job that scans execution state for drift continuously.
+Until it exists, audit failure counters and observers are the operational
+signal that a projection needs investigation; they do not alter Redis
+authority.

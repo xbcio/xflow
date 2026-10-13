@@ -540,10 +540,12 @@ func TestReloadableHTTPTransportPresentsReloadedRootCAs(t *testing.T) {
 }
 
 // The reloadable transport replaces http.DefaultTransport for the Runner
-// Protocol client, so it must keep its dial, handshake and idle limits, and it
-// must not route through an environment proxy, whose HTTPS tunnel would verify
-// against TLSClientConfig instead of the live CA pool.
-func TestReloadableHTTPTransportKeepsDefaultLimitsWithoutProxy(t *testing.T) {
+// Protocol client, so it must keep its dial, handshake and idle limits, and
+// its Proxy field must stay nil: the environment proxy is honoured inside
+// DialTLSContext instead (dialRunnerTLSConn tunnels CONNECT by hand), and
+// leaving net/http's own proxy path enabled would tunnel a second time and
+// verify the handshake against TLSClientConfig rather than the live CA pool.
+func TestReloadableHTTPTransportKeepsDefaultLimitsWithoutATransportProxy(t *testing.T) {
 	reloader, err := newCredentialReloader(RunnerConfig{})
 	if err != nil {
 		t.Fatalf("newCredentialReloader: %v", err)
@@ -551,7 +553,7 @@ func TestReloadableHTTPTransportKeepsDefaultLimitsWithoutProxy(t *testing.T) {
 	transport := newReloadableHTTPTransport(reloader, &tls.Config{MinVersion: tls.VersionTLS12})
 	def := http.DefaultTransport.(*http.Transport)
 	if transport.Proxy != nil {
-		t.Fatal("Proxy is set, want a direct dial to the control plane")
+		t.Fatal("Proxy is set, want the environment proxy to be resolved inside DialTLSContext")
 	}
 	if transport.TLSHandshakeTimeout != def.TLSHandshakeTimeout || transport.TLSHandshakeTimeout == 0 {
 		t.Fatalf("TLSHandshakeTimeout = %v, want the default %v", transport.TLSHandshakeTimeout, def.TLSHandshakeTimeout)

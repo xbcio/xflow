@@ -22,6 +22,7 @@ func newRootCommand(out io.Writer) *cobra.Command {
 	root.AddCommand(newDeadLetterCommand(out))
 	root.AddCommand(newSupplyCommand(out))
 	root.AddCommand(newExecutionCommand(out))
+	root.AddCommand(newAuditCommand(out))
 	return root
 }
 

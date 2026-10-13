@@ -58,6 +58,7 @@ var _ engine.OutboxLeaser = (*memoryState)(nil)
 var _ engine.OutboxReleaser = (*memoryState)(nil)
 var _ engine.OutboxMetricsReader = (*memoryState)(nil)
 var _ engine.DeadLetterStore = (*memoryState)(nil)
+var _ engine.ReplayReceiptReader = (*memoryState)(nil)
 
 // CommitLeasedNode shares the storage fence used by CommitNode while callers
 // retain legacy cycle/expansion scheduling outside the static-DAG counter.
@@ -715,6 +716,71 @@ func deadLetterIntent(entryID string) string {
 		return entryID[:i]
 	}
 	return ""
+}
+
+// ScanReplayReceipts iterates every authoritative in-memory replay receipt,
+// invoking fn once per receipt. It is the local backend's half of the
+// engine.ReplayReceiptReader capability (the Redis backend implements the other
+// half): the receipt projector + reconcile tooling that can see this process's
+// state — control.NewReceiptProjector used in-process — reads receipts through
+// it. It is read-only: nothing here mutates a receipt or an execution.
+//
+// Namespace is the empty string. The local backend has no namespace dimension
+// — ReplayDeadLetterRequest carries none and every execution is addressed by
+// ID alone — so naming the default namespace here would attribute an operator's
+// replay to a tenant that never made it, and a fabricated name would be written
+// into the durable SQL projection as if it were real. A projector consuming a
+// local scan must treat "" as "the local backend's single unnamed scope".
+//
+// Order: execution id, then request id, both lexicographic. The Redis reader
+// visits receipts in namespace-then-execution (sorted-key) order; local's
+// empty namespace collapses that to execution-then-request.
+func (s *memoryState) ScanReplayReceipts(ctx context.Context, fn func(engine.ReplayReceipt) error) error {
+	// Snapshot under the lock, emit outside it: fn is caller code that may
+	// block (SQL projection) or call back into the store, and no receipt is
+	// mutated in place after being written, so copies are stable.
+	s.mu.Lock()
+	snapshot := make([]engine.ReplayReceipt, 0, len(s.replayReceipts))
+	for execID, receipts := range s.replayReceipts {
+		for requestID, r := range receipts {
+			if r == nil || r.auditID == "" {
+				// No idempotency key means nothing is projectable (the SQL
+				// projector keys on audit_id). Mirror the Redis reader, which
+				// skips an audit-less hash rather than emitting it.
+				continue
+			}
+			snapshot = append(snapshot, engine.ReplayReceipt{
+				Namespace:    "", // local has no namespace dimension; see the doc comment
+				ExecutionID:  string(execID),
+				RequestID:    requestID,
+				AuditID:      r.auditID,
+				NodeID:       r.node,
+				ActivationID: r.activation,
+				Outcome:      r.outcome,
+				Operator:     r.operator,
+				Reason:       r.reason,
+				EntryID:      r.entryID,
+				TimestampMs:  r.occurredAtMs,
+			})
+		}
+	}
+	s.mu.Unlock()
+	sort.Slice(snapshot, func(i, j int) bool {
+		if snapshot[i].ExecutionID != snapshot[j].ExecutionID {
+			return snapshot[i].ExecutionID < snapshot[j].ExecutionID
+		}
+		return snapshot[i].RequestID < snapshot[j].RequestID
+	})
+
+	for _, r := range snapshot {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := fn(r); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ListOutboxExecutions identifies executions with at least one durable intent
