@@ -141,9 +141,14 @@ func (r *SubWorkflowResolver) scope(refNamespace string) (namespace.Namespace, e
 }
 
 // latest resolves a version-less reference to the most recently registered
-// revision of name: the registry enumerates newest registry revision first, so
-// the first name match is the answer. Compile time only — the engine always
-// dispatches a pinned version.
+// revision of name: the registry enumerates live records newest registry
+// revision first, so the first name match is the answer. Compile time only —
+// the engine always dispatches a pinned version.
+//
+// Keyed versioning keeps the scan unambiguous: revisions are labels of one
+// workflow id, and a second live record with the same (namespace, name) is
+// refused (backend.ErrWorkflowNameConflict), so at most one live record can
+// carry the name — the first match is also the only match.
 func (r *SubWorkflowResolver) latest(ctx context.Context, ns namespace.Namespace, name string) (backend.WorkflowRecord, error) {
 	for offset := 0; ; offset += subWorkflowLatestPageSize {
 		ids, err := r.registry.ListWorkflows(ctx, ns, backend.WorkflowListOptions{

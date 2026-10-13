@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/backend/providers/local"
 	"github.com/xbcio/xflow/engine/graph"
@@ -66,11 +68,17 @@ func TestSubWorkflowResolverServesAPinnedRevision(t *testing.T) {
 // TestSubWorkflowResolverServesTheLatestForAVersionlessReference is the
 // compile-time shape: an author reference with no version resolves to the most
 // recently registered revision of that NAME, and only that name.
+//
+// Revisions are published the way keyed versioning provides — onto the same
+// workflow id, retiring the previous label — because a second live record with
+// the same name is refused (backend.ErrWorkflowNameConflict). That invariant is
+// what makes the version-less lookup unambiguous: the name owns exactly one
+// live record, and the resolver's enumeration finds it.
 func TestSubWorkflowResolverServesTheLatestForAVersionlessReference(t *testing.T) {
 	ctx := context.Background()
 	reg := local.New().WorkflowRegistry()
 	g := subWorkflowResolverTestGraph(t)
-	registerSubWorkflowTestRecord(t, reg, backend.WorkflowRecord{
+	child := registerSubWorkflowTestRecord(t, reg, backend.WorkflowRecord{
 		Key: "ns/child@v1", Namespace: "ns", Name: "child", Version: "v1",
 		DefinitionHash: "sha256:h1", Graph: g,
 	})
@@ -78,10 +86,36 @@ func TestSubWorkflowResolverServesTheLatestForAVersionlessReference(t *testing.T
 		Key: "ns/other@v1", Namespace: "ns", Name: "other", Version: "v1",
 		DefinitionHash: "sha256:ho", Graph: g,
 	})
-	newest := registerSubWorkflowTestRecord(t, reg, backend.WorkflowRecord{
-		Key: "ns/child@v2", Namespace: "ns", Name: "child", Version: "v2",
-		DefinitionHash: "sha256:h2", Graph: g,
-	})
+
+	// child@v2 is the same workflow's next revision, not a second workflow: the
+	// atomic replace is how a publish moves the live label and retires v1 into
+	// history (the same call PUT /v1/workflows/{id} makes).
+	replacer, ok := reg.(backend.WorkflowReplaceCapability)
+	if !ok {
+		t.Fatal("the local workflow registry does not support atomic replacement")
+	}
+	replaced, err := replacer.CompareAndReplaceWorkflow(
+		namespace.WithNamespace(ctx, "ns"),
+		backend.WorkflowReplaceRequest{
+			MutationID: uuid.NewString(),
+			Expected:   backend.RevisionOfWorkflow(child),
+			Replacement: backend.WorkflowRecord{
+				ID:             child.ID,
+				Key:            "ns/child@v2",
+				Namespace:      "ns",
+				Name:           "child",
+				Version:        "v2",
+				DefinitionHash: "sha256:h2",
+				Graph:          g,
+			},
+		})
+	if err != nil {
+		t.Fatalf("publish child@v2: %v", err)
+	}
+	newest := replaced.Current
+	if newest.ID != child.ID || newest.Version != "v2" {
+		t.Fatalf("published record = id %q version %q, want id %q at v2", newest.ID, newest.Version, child.ID)
+	}
 	resolver := NewSubWorkflowResolver(reg).BoundToNamespace("ns")
 
 	target, err := resolver.ResolveSubWorkflow(ctx, graph.SubWorkflowRef{Name: "child"})
