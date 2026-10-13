@@ -560,28 +560,33 @@ func toSDKRunnerConfig(cfg runnerConfig) (xflowsdk.RunnerConfig, error) {
 			return xflowsdk.RunnerConfig{}, err
 		}
 	}
-	// supplyPullAllowedHosts is parsed and validated above but not passed on:
-	// xflow.RunnerConfig gains its SupplyPullAllowedHosts field with the
-	// supply-pull fetcher, and this literal gains the pass-through then.
+	// The allowlist travels to the SDK exactly as the other host-rule fields
+	// do — copied with surrounding whitespace trimmed — because the SDK
+	// compiles it into the pull fetcher's destination policy, where a padded
+	// entry would otherwise never match the host it names. An unset allowlist
+	// stays nil: that is the SDK's documented "default public-only policy",
+	// and a blank entry is rejected at validation, so there is no other
+	// empty state to preserve.
 	return xflowsdk.RunnerConfig{
-		ServerURL:           cfg.serverURL,
-		Transport:           cfg.transport,
-		GRPCTarget:          cfg.grpcTarget,
-		RunnerID:            cfg.runnerID,
-		Concurrency:         cfg.concurrency,
-		MapBatchConcurrency: cfg.mapBatchConcurrency,
-		MapItemConcurrency:  cfg.mapItemConcurrency,
-		Capabilities:        capabilityNodeTypes(cfg.capabilities),
-		Labels:              cloneStringMap(cfg.labels),
-		Namespaces:          cfg.namespaces,
-		Token:               cfg.token,
-		TLSServerCA:         cfg.tlsServerCA,
-		TLSClientCert:       cfg.tlsClientCert,
-		TLSClientKey:        cfg.tlsClientKey,
-		HeartbeatInterval:   heartbeat,
-		PollWait:            pollWait,
-		SeedRequestTimeout:  seedRequestTimeout,
-		SupplyPollInterval:  supplyPollInterval,
+		ServerURL:              cfg.serverURL,
+		Transport:              cfg.transport,
+		GRPCTarget:             cfg.grpcTarget,
+		RunnerID:               cfg.runnerID,
+		Concurrency:            cfg.concurrency,
+		MapBatchConcurrency:    cfg.mapBatchConcurrency,
+		MapItemConcurrency:     cfg.mapItemConcurrency,
+		Capabilities:           capabilityNodeTypes(cfg.capabilities),
+		Labels:                 cloneStringMap(cfg.labels),
+		Namespaces:             cfg.namespaces,
+		Token:                  cfg.token,
+		TLSServerCA:            cfg.tlsServerCA,
+		TLSClientCert:          cfg.tlsClientCert,
+		TLSClientKey:           cfg.tlsClientKey,
+		HeartbeatInterval:      heartbeat,
+		PollWait:               pollWait,
+		SeedRequestTimeout:     seedRequestTimeout,
+		SupplyPollInterval:     supplyPollInterval,
+		SupplyPullAllowedHosts: copyTrimmedHosts(cfg.supplyPullAllowedHosts),
 		BrowserCDP: xnode.BrowserCDPConfig{
 			Endpoints:      copyTrimmedHosts(cfg.browserCDPEndpoints),
 			MaxContexts:    cfg.browserCDPMaxContexts,
