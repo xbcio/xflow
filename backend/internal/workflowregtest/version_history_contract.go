@@ -61,6 +61,9 @@ func RunVersionHistoryContract(t *testing.T, newRegistry Factory) {
 	t.Run("HistoryFollowsTheSurvivingID", func(t *testing.T) {
 		historyFollowsTheSurvivingIDCase(t, newRegistry)
 	})
+	t.Run("SameVersionIDChangeKeepsHistory", func(t *testing.T) {
+		sameVersionIDChangeKeepsHistoryCase(t, newRegistry)
+	})
 	t.Run("RollbackReinstallsArchivedVersion", func(t *testing.T) {
 		rollbackReinstallsArchivedVersionCase(t, newRegistry)
 	})
@@ -255,6 +258,8 @@ func failedReplaceLeavesNoHistoryCase(t *testing.T, newRegistry Factory) {
 
 // historyFollowsTheSurvivingIDCase: a replace that installs a new id takes the
 // retired versions with it, so history stays reachable through the live record.
+// This case covers the shape where the version moves too; the label-kept shape
+// is SameVersionIDChangeKeepsHistory.
 func historyFollowsTheSurvivingIDCase(t *testing.T, newRegistry Factory) {
 	reg, ctx := newRegistry(t, 0)
 	v1 := versionRecord(t, uniqueName("shipment"), "v1", "")
@@ -291,6 +296,61 @@ func historyFollowsTheSurvivingIDCase(t *testing.T, newRegistry Factory) {
 		{Version: "v2", DefinitionHash: current.DefinitionHash, RegistryRevision: current.RegistryRevision, Archived: true},
 		{Version: "v1", DefinitionHash: created.DefinitionHash, RegistryRevision: created.RegistryRevision, Archived: true},
 	})
+}
+
+// sameVersionIDChangeKeepsHistoryCase: a replace that installs a new id while
+// keeping the live label still takes the retired versions with it. History
+// belongs to the record id, not to the label transition: a live label may be
+// rewritten in place (the rewritten definition replaces the old one, which is
+// deliberately not retired — one label never resolves to two definitions), but
+// that decision must not strand the id's existing retired versions on the id
+// the replace just retired.
+func sameVersionIDChangeKeepsHistoryCase(t *testing.T, newRegistry Factory) {
+	reg, ctx := newRegistry(t, 0)
+	v1 := versionRecord(t, uniqueName("settlement"), "v1", "")
+	created := addVersionRecord(t, ctx, reg, v1)
+	v2 := nextVersionRecord(t, created, "v2", "")
+	current := replaceVersionRecord(t, ctx, reg, created, v2)
+
+	rewrite := nextVersionRecord(t, current, current.Version, "rewrite")
+	rewrite.ID = ""
+	result, err := reg.CompareAndReplaceWorkflow(ctx, backend.WorkflowReplaceRequest{
+		MutationID:  uuid.NewString(),
+		Expected:    backend.RevisionOfWorkflow(current),
+		Replacement: rewrite,
+	})
+	if err != nil {
+		t.Fatalf("same-version id-changing compare-and-replace error = %v", err)
+	}
+	if result.Status != backend.WorkflowReplaceReplaced {
+		t.Fatalf("same-version id-changing compare-and-replace status = %v, want replaced", result.Status)
+	}
+	if result.Current.ID == current.ID {
+		t.Fatalf("same-version id-changing replace kept id %q", current.ID)
+	}
+	if result.Current.Version != current.Version || result.Current.DefinitionHash == current.DefinitionHash {
+		t.Fatalf("replacement = version %q hash %q, want version %q with the rewritten definition",
+			result.Current.Version, result.Current.DefinitionHash, current.Version)
+	}
+
+	archived, err := reg.GetWorkflowVersion(ctx, result.Current.ID, "v1")
+	if err != nil {
+		t.Fatalf("GetWorkflowVersion(v1) after the id change error = %v", err)
+	}
+	if archived.DefinitionHash != created.DefinitionHash || archived.Version != "v1" {
+		t.Fatalf("archived v1 = version %q hash %q, want version v1 hash %q",
+			archived.Version, archived.DefinitionHash, created.DefinitionHash)
+	}
+	assertVersionRows(t, reg, ctx, result.Current.ID, []backend.WorkflowVersionInfo{
+		{Version: "v2", DefinitionHash: result.Current.DefinitionHash, RegistryRevision: result.Current.RegistryRevision, Current: true},
+		{Version: "v1", DefinitionHash: created.DefinitionHash, RegistryRevision: created.RegistryRevision, Archived: true},
+	})
+
+	// The retired id's history is not reachable any more: it moved with the
+	// record, it was not copied beside the abandoned id.
+	if _, err := reg.GetWorkflowVersion(ctx, current.ID, "v1"); !errors.Is(err, backend.ErrWorkflowNotFound) {
+		t.Fatalf("GetWorkflowVersion(v1) under the retired id error = %v, want ErrWorkflowNotFound", err)
+	}
 }
 
 // rollbackReinstallsArchivedVersionCase: re-installing an archived version

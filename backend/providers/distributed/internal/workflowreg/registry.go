@@ -550,23 +550,27 @@ redis.call('HSET', KEYS[7],
 	'id', ARGV[7], 'key', ARGV[8], 'version', ARGV[9], 'hash', ARGV[10], 'name', ARGV[17],
 	'revision', tostring(revision), 'fingerprint', ARGV[11])
 
--- History follows the surviving record id. A replace that keeps the label
--- (an in-place update of the current version) retires nothing: writing the
--- previous payload under the live label would leave one label resolving to two
--- definitions and would trip the immutability check above on the next replace.
-if ARGV[15] ~= ARGV[9] then
-	if ARGV[3] ~= ARGV[7] then
-		local history = redis.call('HGETALL', KEYS[13])
-		if #history > 0 then
-			redis.call('HSET', KEYS[15], unpack(history))
-		end
-		redis.call('DEL', KEYS[13])
-		local meta = redis.call('HGETALL', KEYS[14])
-		if #meta > 0 then
-			redis.call('HSET', KEYS[16], unpack(meta))
-		end
-		redis.call('DEL', KEYS[14])
+-- History follows the surviving record id: a replace that installs a new id
+-- takes the retired versions with it. The two guards are deliberately
+-- separate: a replace that keeps the label (an in-place update of the current
+-- version) still moves the history when the id changes, and a replace that
+-- keeps the id still retires the previous payload when the label changes.
+if ARGV[3] ~= ARGV[7] then
+	local history = redis.call('HGETALL', KEYS[13])
+	if #history > 0 then
+		redis.call('HSET', KEYS[15], unpack(history))
 	end
+	redis.call('DEL', KEYS[13])
+	local meta = redis.call('HGETALL', KEYS[14])
+	if #meta > 0 then
+		redis.call('HSET', KEYS[16], unpack(meta))
+	end
+	redis.call('DEL', KEYS[14])
+end
+-- A replace that keeps the label retires nothing: writing the previous payload
+-- under the live label would leave one label resolving to two definitions and
+-- would trip the immutability check above on the next replace.
+if ARGV[15] ~= ARGV[9] then
 	redis.call('HSET', KEYS[15], ARGV[15], previousPayload)
 	-- The retired payload's registry revision is allocated per install, so it
 	-- orders retirements within one workflow as well as reporting the revision

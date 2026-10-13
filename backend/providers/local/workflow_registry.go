@@ -479,14 +479,19 @@ func (r *workflowRegistry) CompareAndReplaceWorkflow(ctx context.Context, req ba
 // record id, a replace that changes the version retires the previous payload
 // under its own label, the installed label is promoted out of history, and
 // retention evicts the oldest retirements beyond the limit.
+//
+// The id guard and the version guard are deliberately separate: a replace that
+// keeps the live label still moves the history when the id changes, and a
+// replace that keeps the id still retires the previous payload when the label
+// changes.
 func (r *workflowRegistry) retireVersionLocked(current, replacement backend.WorkflowRecord) {
-	if current.Version != replacement.Version {
-		if current.ID != replacement.ID {
-			if entries, ok := r.versions[current.ID]; ok {
-				r.versions[replacement.ID] = entries
-				delete(r.versions, current.ID)
-			}
+	if current.ID != replacement.ID {
+		if entries, ok := r.versions[current.ID]; ok {
+			r.versions[replacement.ID] = entries
+			delete(r.versions, current.ID)
 		}
+	}
+	if current.Version != replacement.Version {
 		entries := r.versions[replacement.ID]
 		entries = append(entries, workflowVersionEntry{
 			version:  current.Version,
