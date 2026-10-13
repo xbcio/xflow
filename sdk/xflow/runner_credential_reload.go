@@ -467,8 +467,24 @@ func dialConnectTunnel(ctx context.Context, dialer *net.Dialer, network, target 
 	// The response is read from a buffered reader because the proxy may have
 	// pipelined bytes after the CONNECT reply — the tunnel's first TLS records
 	// can already be in that buffer, and a bare conn would lose them.
+	//
+	// The read carries its own deadline: a proxy that accepts the connection
+	// and then says nothing would otherwise hold this dial open until the
+	// caller's request context dies, pinning a runner connection per attempt.
+	// dialer.Timeout is the budget the dial itself already used — a proxy that
+	// cannot answer CONNECT within it is not usable — with newRunnerDialer's
+	// 30s as the floor when the caller configured none. The bound is cleared
+	// before the tunnel is handed back: the caller keeps this connection for
+	// the whole request lifetime, so the CONNECT read's ceiling must not
+	// become the tunnel's.
+	readTimeout := dialer.Timeout
+	if readTimeout <= 0 {
+		readTimeout = 30 * time.Second
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
 	br := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(br, connectReq)
+	_ = conn.SetReadDeadline(time.Time{})
 	if err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("read CONNECT response from proxy %s: %w", proxyAddr, err)
