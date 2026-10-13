@@ -375,6 +375,43 @@ func TestRemoteInvokeRetriesATransportFailureWithTheSameKey(t *testing.T) {
 	}
 }
 
+func TestRemoteNeverRetriesANonIdempotentCall(t *testing.T) {
+	var attempts int32
+	f := newRemoteFakeServer(t, func(w http.ResponseWriter, r *http.Request, body []byte) {
+		atomic.AddInt32(&attempts, 1)
+		// Same dropped connection as the invoke retry test: the client learns
+		// nothing about whether the signal was delivered.
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			t.Errorf("fake server does not support hijacking")
+			return
+		}
+		conn, _, err := hijacker.Hijack()
+		if err != nil {
+			t.Errorf("fake server: hijack: %v", err)
+			return
+		}
+		_ = conn.Close()
+	})
+	r := newRemoteForTest(t, f)
+
+	err := r.Signal(context.Background(), "exec-1", "approve", nil)
+	if err == nil {
+		t.Fatal("Signal succeeded against a dropped connection")
+	}
+	// The failure must be reported as the transport failure it was — not
+	// swallowed, and not turned into an invented server answer.
+	if !isRemoteTransportError(err) {
+		t.Fatalf("Signal returned %v, want a transport failure", err)
+	}
+	// One request. Signal has no idempotency key, so a retry could deliver the
+	// same signal twice — a side effect the caller never consented to. The
+	// retry is the invoke path's property, not a general one.
+	if got := f.callCount(); got != 1 {
+		t.Fatalf("Signal sent %d requests against a dropped connection, want 1", got)
+	}
+}
+
 func TestRemoteWaitLoopsUntilTerminal(t *testing.T) {
 	var calls int32
 	f := newRemoteFakeServer(t, func(w http.ResponseWriter, r *http.Request, body []byte) {
