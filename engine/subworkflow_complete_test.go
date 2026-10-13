@@ -184,8 +184,10 @@ func TestSubWorkflowCompletionFailsTheNodeWithTheChildReason(t *testing.T) {
 
 // TestSubWorkflowReclaimConcludesAFinishedChild is the lost-notification
 // backstop: the child concluded while nothing delivered the notification, the
-// wait lease expired, and the reclaim redelivery concludes the node under its
-// fresh claim instead of parking again.
+// wait lease expired, and the reclaim redelivery concludes the node. The
+// redelivery parks again before it concludes (see the ordering invariant in
+// executeSubWorkflow), which is what moves the link onto the claim the commit
+// then fences on.
 func TestSubWorkflowReclaimConcludesAFinishedChild(t *testing.T) {
 	g := subWorkflowParentWithDownstream(t)
 	rig := newSubWorkflowRig(t, g, nil, subWorkflowStubResolver(t))
@@ -203,9 +205,82 @@ func TestSubWorkflowReclaimConcludesAFinishedChild(t *testing.T) {
 	if node.Status != types.NodeStatusSuccess {
 		t.Fatalf("node status = %s, want success: the redelivery must conclude the finished child", node.Status)
 	}
+	// The distinguishing assertion for the park-first order: the successful
+	// commit can only have been fenced on the node's current claim, so the link
+	// must carry that claim afterwards. Concluding before the park would have
+	// left it on the revoked identity — a record the completion path would then
+	// fence against for nothing.
+	refreshed := rig.link(t)
+	if refreshed.LeaseID == link.LeaseID || refreshed.LeaseToken == link.LeaseToken {
+		t.Fatalf("the link still carries the revoked claim: %+v -> %+v", link, refreshed)
+	}
+	if refreshed.ChildExecutionID != link.ChildExecutionID || refreshed.Generation != link.Generation {
+		t.Fatalf("the reclaim re-pointed the link at another wait: %+v -> %+v", link, refreshed)
+	}
+	if node.ChildExecutionID != refreshed.ChildExecutionID {
+		t.Fatalf("concluded node child = %q, want the wait's child %q",
+			node.ChildExecutionID, refreshed.ChildExecutionID)
+	}
 	if len(rig.state.executions) != 2 {
 		t.Fatalf("executions = %d, want the parent and its one child: the redelivery must not start a second",
 			len(rig.state.executions))
+	}
+	if tasks := rig.queue.Drain(); len(tasks) != 1 || tasks[0].NodeName != "after" {
+		t.Fatalf("delivered tasks = %+v, want the downstream node's exec intent", tasks)
+	}
+}
+
+// TestSubWorkflowFirstDispatchConcludesAPrefinishedChild pins the same ordering
+// from the side the reclaim test cannot reach: a dispatch whose node has no link
+// and no ChildExecutionID yet, looking at a child that is already terminal.
+// That is the first-dispatch race the high-load report caught — a fast child can
+// finish between the start and the conclusion check, and load widens the window
+// — and it is exactly where concluding before parking loses the drill-down id
+// for good: the commit preserves the claimed node's ChildExecutionID, and a node
+// that never parked has none. The seeded terminal child makes that state
+// deterministic; from the acquire onward the dispatch reads the same state the
+// race produces.
+func TestSubWorkflowFirstDispatchConcludesAPrefinishedChild(t *testing.T) {
+	ctx := context.Background()
+	resolver := subWorkflowStubResolver(t)
+	g := subWorkflowParentWithDownstream(t)
+	rig := newSubWorkflowRig(t, g, nil, resolver)
+
+	// The child the wait is about to look for, created under its derived id and
+	// already finished, with nothing delivering the completion.
+	childID := subWorkflowChildID(rig.parentID, "sub", 1, 1)
+	if err := rig.state.CreateExecution(ctx, &ExecutionSnapshot{
+		ID:         childID,
+		Graph:      resolver.target.Graph,
+		Status:     types.ExecutionStatusRunning,
+		ParentID:   rig.parentID,
+		ParentNode: "sub",
+		Depth:      1,
+	}); err != nil {
+		t.Fatalf("seed the finished child: %v", err)
+	}
+	concludeChild(t, rig, childID, types.ExecutionStatusSuccess, "", nil)
+
+	rig.dispatch(t, rig.task)
+
+	node := rig.node(t)
+	if node.Status != types.NodeStatusSuccess {
+		t.Fatalf("node status = %s, want success: the dispatch must conclude the finished child", node.Status)
+	}
+	if node.ChildExecutionID != childID {
+		t.Fatalf("concluded node child = %q, want %q: the conclusion must be committed over a record that names it",
+			node.ChildExecutionID, childID)
+	}
+	link := rig.link(t)
+	if link.ChildExecutionID != childID {
+		t.Fatalf("link child = %q, want %q", link.ChildExecutionID, childID)
+	}
+	if link.Attempt != 1 || link.ActivationID != 1 || link.Generation != 1 {
+		t.Fatalf("link identity = (attempt %d, activation %d, generation %d), want this dispatch's first claim (1, 1, 1)",
+			link.Attempt, link.ActivationID, link.Generation)
+	}
+	if len(rig.state.executions) != 2 {
+		t.Fatalf("executions = %d, want the parent and its one child", len(rig.state.executions))
 	}
 	if tasks := rig.queue.Drain(); len(tasks) != 1 || tasks[0].NodeName != "after" {
 		t.Fatalf("delivered tasks = %+v, want the downstream node's exec intent", tasks)

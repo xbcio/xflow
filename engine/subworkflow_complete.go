@@ -121,15 +121,16 @@ func (e *Engine) completeSubWorkflowNode(ctx context.Context, parentID types.Exe
 }
 
 // concludeTerminalChild is the reclaim side of the completion: a redelivery
-// that finds its child already concluded commits the node under the CURRENT
-// claim instead of parking again. This is the backstop a lost completion
-// notification falls back to (after the wait lease expires and the sweeper
-// redelivers the task), and it is why a lost notification costs latency rather
-// than correctness.
+// that finds its child already concluded commits the node under the claim the
+// caller holds. This is the backstop a lost completion notification falls back
+// to (after the wait lease expires and the sweeper redelivers the task), and it
+// is why a lost notification costs latency rather than correctness.
 //
-// It commits under the fresh claim rather than the link's identity because the
-// link — if one exists at all — was written by the claim the sweeper just
-// revoked, and a commit fenced on it would be refused forever, livelocking the
+// The commit is fenced on the caller's lease rather than on the link's
+// identity, and the caller parks first (see the ordering invariant in
+// executeSubWorkflow): by the time this runs, that claim is exactly what the
+// link and the node's ChildExecutionID record, while a commit fenced on a link
+// that predates the current claim would be refused forever, livelocking the
 // node between reclaims.
 func (e *Engine) concludeTerminalChild(ctx context.Context, lease *TaskLease, g *graph.Graph, meta graph.NodeMeta, child subWorkflowChild) (bool, error) {
 	snap, err := e.state.GetExecution(ctx, child.ID)

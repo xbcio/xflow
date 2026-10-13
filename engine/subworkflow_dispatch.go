@@ -180,12 +180,33 @@ func (e *Engine) executeSubWorkflow(ctx context.Context, task *Task, g *graph.Gr
 			waitEnd = prev.WaitDeadline
 		}
 	}
+	// Park first, conclude second — the order is the invariant every
+	// conclusion below depends on: the park is what writes the link and the
+	// node's ChildExecutionID, and a commit preserves the claimed node's id, so
+	// a conclusion may only run once the child is on the record. A FIRST
+	// dispatch can reach the conclusion (a fast child can finish between the
+	// start and the check, and under load that window is wide) and it is
+	// exactly that dispatch which has nothing recorded yet: concluding first
+	// would commit the node with an empty ChildExecutionID and no link, and a
+	// finished node keeps its child id for the drill-down — losing it there
+	// loses it for good. Parking first also re-points the link at this claim's
+	// lease identity on a redelivery, so the conclusion here, a notification
+	// racing it, and a later redelivery all fence on one identity.
+	if accepted, err := e.parkSubWorkflowNode(ctx, lease, child, generation, waitEnd); err != nil {
+		return err
+	} else if !accepted {
+		// Refused by the fence: the node moved on (revoked, committed under a
+		// newer lease) between the claim and the park. Whoever owns the node
+		// now owns the link and the child; do not gamble a conclusion commit on
+		// a fence that has already refused this claim.
+		return nil
+	}
 	// The child can already be concluded here: a redelivery after a reclaim
 	// that finds the completion notification was lost. Concluding now is the
-	// backstop's whole purpose; parking again would wait for a notification
-	// that has already been delivered and dropped. It is checked before the
-	// wait's deadline because a finished child is a result and not a timeout,
-	// however late this dispatch is.
+	// backstop's whole purpose; parking without concluding would wait on a
+	// notification that has already been delivered and dropped. It is checked
+	// before the wait's deadline because a finished child is a result and not a
+	// timeout, however late this dispatch is.
 	concluded, err := e.concludeTerminalChild(ctx, lease, g, meta, child)
 	if err != nil {
 		return err
@@ -195,23 +216,27 @@ func (e *Engine) executeSubWorkflow(ctx context.Context, task *Task, g *graph.Gr
 	}
 	if nodeTimeout > 0 && resumed && !time.Now().UTC().Before(prev.WaitDeadline) {
 		// The wait has used up the node timeout while the child is still
-		// running: stop the child and fail the node through the ordinary
-		// pipeline — the conclusion a runner-executed node reaches when its
-		// handler outlives the same deadline. A retry then opens the next
-		// generation's child, as every retry of this node does.
-		e.cancelSubWorkflowChild(ctx, child.ID)
-		return e.failSubWorkflowStart(ctx, lease, g, meta, fmt.Errorf(
+		// running: fail the node through the ordinary pipeline — the conclusion
+		// a runner-executed node reaches when its handler outlives the same
+		// deadline. A retry then opens the next generation's child, as every
+		// retry of this node does. The node is parked by now, and every
+		// backend's commit fence accepts a commit from waiting — the completion
+		// path commits from there as a matter of course.
+		//
+		// The node's verdict is committed BEFORE the child is stopped, which is
+		// the one order that keeps the reason deterministic: the cancel
+		// finalizes the child and fires the completion notification, and with
+		// the wait parked under a live link that notification could otherwise
+		// get its commit in first and report this node's own timeout as "the
+		// child was canceled". Committing first fences the notification out —
+		// the node is terminal, so its commit is dropped — and the abandoned
+		// child is stopped either way.
+		err := e.failSubWorkflowStart(ctx, lease, g, meta, fmt.Errorf(
 			"node %q: the wait on child execution %q exceeded the node timeout %s",
 			task.NodeName, child.ID, nodeTimeout))
-	}
-	if accepted, err := e.parkSubWorkflowNode(ctx, lease, child, generation, waitEnd); err != nil {
+		e.cancelSubWorkflowChild(ctx, child.ID)
 		return err
-	} else if accepted {
-		return nil
 	}
-	// Refused by the fence: the node moved on (revoked, committed by a
-	// newer generation) between the claim and the park. The child is
-	// already running; whoever owns the node now owns the link.
 	return nil
 }
 
