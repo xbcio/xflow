@@ -166,6 +166,7 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 	// namespace.FromContext's Default, exactly as in handleGetWorkflow.
 	mux.HandleFunc("GET "+PathWorkflowVersions, wrap("list_workflow_versions", m.handleListWorkflowVersions))
 	mux.HandleFunc("GET "+PathWorkflowVersionByID, wrap("read_workflow_version", m.handleGetWorkflowVersion))
+	mux.HandleFunc("POST "+PathWorkflowRollback, wrap("rollback_workflow", m.handleRollbackWorkflow))
 	// POST /v1/executions is the entry-seed endpoint (runner protocol face,
 	// spec §0.1); the per-execution GET/signal/cancel/wait surface is the
 	// method-qualified patterns below. ServeMux treats exact and {id} patterns
@@ -272,6 +273,12 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	// workflow id the route addresses, like the by-id read above.
 	mux.HandleFunc("GET "+PathWorkflowVersions, authz(OpWorkflowRead, false, m.handleListWorkflowVersions, workflowIDResolver()))
 	mux.HandleFunc("GET "+PathWorkflowVersionByID, authz(OpWorkflowRead, false, m.handleGetWorkflowVersion, workflowIDResolver()))
+	// POST /v1/workflows/{id}/rollback (versioning design §2.4) reuses
+	// OpWorkflowDefinitionUpdate — a rollback IS a definition update, and giving
+	// it an operation of its own would take it away from every deployment token
+	// that can already replace a definition, a silent UI degradation for a route
+	// that grants no more than PUT /v1/workflows/{id} does.
+	mux.HandleFunc("POST "+PathWorkflowRollback, authz(OpWorkflowDefinitionUpdate, true, m.handleRollbackWorkflow, workflowIDResolver()))
 	// Entry-seed endpoint (exact path, POST only). The authz wrapper injects
 	// the principal's namespace into the request context; handleSeedExecution
 	// reads it via namespace.FromContext — never from the client body.
@@ -1406,6 +1413,70 @@ func (m *workflowControlModule) handleGetWorkflow(w http.ResponseWriter, r *http
 	writeData(w, r, http.StatusOK, workflowResponseBody(rec))
 }
 
+// rollbackWorkflowRequest is the body of POST /v1/workflows/{id}/rollback
+// (versioning design §2.4). An omitted or empty version means the current
+// version, which is the no-op branch.
+type rollbackWorkflowRequest struct {
+	Version string `json:"version,omitempty"`
+}
+
+// rollbackWorkflowResponse reports the outcome of a rollback. Unchanged is the
+// idempotent no-op — the requested version already is the current one, or a
+// replayed rollback found it installed — mirroring the identical-PUT no-op.
+type rollbackWorkflowResponse struct {
+	WorkflowID types.WorkflowID `json:"workflow_id"`
+	Version    string           `json:"version"`
+	Unchanged  bool             `json:"unchanged"`
+}
+
+// handleRollbackWorkflow serves POST /v1/workflows/{id}/rollback (versioning
+// design §2.4): install a retired version of the addressed workflow as its
+// current record, under the same id.
+//
+// The namespace comes from the verified principal, the version from the body,
+// and the mutation id from X-Request-Id when the client supplies one — exactly
+// like PUT /v1/workflows/{id}, because a rollback IS a replacement and inherits
+// that route's idempotent-replay contract: replaying the same request with the
+// same X-Request-Id does not produce a second revision.
+func (m *workflowControlModule) handleRollbackWorkflow(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	id := types.WorkflowID(r.PathValue("id"))
+	if id == "" {
+		writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
+		return
+	}
+	var req rollbackWorkflowRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	mutationID := sanitizeRequestID(r.Header.Get("X-Request-Id"))
+	if mutationID != "" {
+		mutationID = "http:" + mutationID
+	}
+	out, err := m.rollbackWorkflow(r.Context(), namespace.FromContext(r.Context()), id, req.Version, mutationID)
+	if err != nil {
+		switch {
+		case errors.Is(err, backend.ErrWorkflowNotFound):
+			writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
+		case errors.Is(err, backend.ErrWorkflowVersionNotFound):
+			writeFail(w, r, http.StatusNotFound, "workflow_version_not_found", "workflow version not found")
+		case errors.Is(err, errWorkflowVersionUnavailable):
+			writeFail(w, r, http.StatusConflict, "workflow_version_unavailable", "workflow version is not reproducible under the current compiler")
+		case errors.Is(err, backend.ErrWorkflowConflict):
+			writeFail(w, r, http.StatusConflict, "workflow_conflict", "workflow definition conflicts with an existing registration")
+		default:
+			if m.log != nil {
+				m.log.Error("rollback_workflow_failed", "workflow_id", string(id), "version", req.Version, "err", err)
+			}
+			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		}
+		return
+	}
+	writeData(w, r, http.StatusOK, out)
+}
+
 // workflowVersionItem is one row of the GET /v1/workflows/{id}/versions page.
 // It is a label projection of backend.WorkflowVersionInfo, mirroring the
 // workflowListItem/workflowRecord split.
@@ -2000,6 +2071,65 @@ func (m *workflowControlModule) replaceWorkflowByIDWithMetadata(ctx context.Cont
 		mutationID = "http:" + uuid.NewString()
 	}
 	return m.compareAndReplaceWorkflow(ctx, ns, registry, existing, replacement, mutationID, diag)
+}
+
+// rollbackWorkflow installs a retired version as the workflow's current
+// record, under the same id, through the same atomic compare-and-swap PUT
+// /v1/workflows/{id} uses (versioning design §2.4). Reusing the CAS is the
+// point: activation projection, index rescoring, and idempotent mutation replay
+// all come for free, and the replaced current version is appended to history by
+// the same script — the exact dual of the retirement that put the target there.
+//
+// The installed record is the archived payload with only its identity fixed to
+// the live record: same id, key ns/<live name>@<version>, the name the live
+// record currently holds. Its definition hash is the hash the version was
+// PUBLISHED with, never a recomputation — archivedWorkflowVersion has already
+// proven a recomputation yields that hash, and if it does not, this fails
+// closed with errWorkflowVersionUnavailable rather than installing a
+// same-label-different-semantics definition.
+//
+// version empty or equal to the current version is the no-op branch: the
+// requested version already is the current record, so nothing is written.
+func (m *workflowControlModule) rollbackWorkflow(ctx context.Context, ns namespace.Namespace, id types.WorkflowID, version, mutationID string) (rollbackWorkflowResponse, error) {
+	registry := m.registry()
+	if registry == nil {
+		if m.log != nil {
+			m.log.Error("rollback_workflow_no_registry", "workflow_id", string(id))
+		}
+		return rollbackWorkflowResponse{}, errors.New("apiserver: no workflow registry configured")
+	}
+	ctx = namespace.WithNamespace(ctx, ns)
+	existing, err := registry.GetWorkflow(ctx, id)
+	if err != nil {
+		return rollbackWorkflowResponse{}, err
+	}
+	if existing.Namespace != "" && ns != "" && existing.Namespace != string(ns) {
+		return rollbackWorkflowResponse{}, backend.ErrWorkflowNotFound
+	}
+	if version == "" || version == existing.Version {
+		return rollbackWorkflowResponse{WorkflowID: existing.ID, Version: existing.Version, Unchanged: true}, nil
+	}
+	archived, err := m.archivedWorkflowVersion(ctx, ns, id, version)
+	if err != nil {
+		return rollbackWorkflowResponse{}, err
+	}
+	replacement := archived
+	replacement.ID = existing.ID
+	replacement.Namespace = string(ns)
+	replacement.Name = existing.Name
+	replacement.Key = workflowRegistryKey(string(ns), existing.Name, version)
+	// A caller-supplied mutation id (X-Request-Id, prefixed by the handler)
+	// makes the retry of a response-lost rollback replay instead of writing a
+	// second revision; without one, each attempt is its own mutation, exactly
+	// as on PUT /v1/workflows/{id}.
+	if mutationID == "" {
+		mutationID = "http:" + uuid.NewString()
+	}
+	newID, _, err := m.compareAndReplaceWorkflow(ctx, ns, registry, existing, replacement, mutationID, registrationDiagnostics{})
+	if err != nil {
+		return rollbackWorkflowResponse{}, err
+	}
+	return rollbackWorkflowResponse{WorkflowID: newID, Version: version, Unchanged: false}, nil
 }
 
 func (m *workflowControlModule) compareAndReplaceWorkflow(

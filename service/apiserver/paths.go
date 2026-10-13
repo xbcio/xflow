@@ -29,6 +29,11 @@ const (
 	// definition the version list deliberately omits is read back, one version
 	// at a time.
 	PathWorkflowVersionByID = "/v1/workflows/{id}/versions/{version}"
+	// PathWorkflowRollback installs a retired version as the workflow's current
+	// record under the same id, atomically (versioning design §2.4). It is a
+	// definition update — that is what a rollback changes — so its operation is
+	// the same workflowdefinition.update PUT /v1/workflows/{id} carries.
+	PathWorkflowRollback = "/v1/workflows/{id}/rollback"
 
 	// PathExecutions serves both POST (the entry-seed endpoint, runner protocol
 	// face, spec §0.1) and GET (the offset-paginated execution collection read,
@@ -112,6 +117,7 @@ var UserFacingPaths = []string{
 	PathWorkflowExecuteByID,
 	PathWorkflowVersions,
 	PathWorkflowVersionByID,
+	PathWorkflowRollback,
 
 	PathExecutions,
 	PathExecutionByID,
