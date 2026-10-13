@@ -16,6 +16,19 @@ var ErrWorkflowNotFound = errors.New("workflow not found")
 var ErrWorkflowReplaceUnsupported = errors.New("workflow registry does not support atomic replacement")
 var ErrWorkflowMutationIndeterminate = errors.New("workflow mutation outcome is indeterminate")
 
+// ErrWorkflowNameConflict is returned when a mutation would create a second
+// live record with the same (namespace, name). Version is a dimension of one
+// workflow's history, not a way to fork the workflow: two live records sharing
+// a name share an activation key space, so an entry activation derived from
+// one of them keeps being hosted beside the other (and a Kafka activation
+// shares its consumer GroupID with its sibling), silently splitting the
+// version the name refers to.
+//
+// It is distinct from ErrWorkflowConflict because the caller's fix is
+// different: a name conflict is resolved by addressing the existing record
+// (PUT its id) or deleting it, never by changing the definition.
+var ErrWorkflowNameConflict = errors.New("another live workflow already holds this namespace and name")
+
 // ErrWorkflowVersionImmutable is returned when a mutation would publish a
 // version label with a definition hash different from the one that label was
 // published with. Retiring a version (installing a different one, or rolling
@@ -30,13 +43,37 @@ var ErrWorkflowVersionImmutable = errors.New("workflow version was already publi
 // workflow is gone" from "this workflow never published that version".
 var ErrWorkflowVersionNotFound = errors.New("workflow version not found")
 
+// WorkflowNameConflictError reports the live record that already owns a
+// (namespace, name). The holder is carried for logs and callers that want to
+// point at the surviving record; it is never echoed to an unauthenticated
+// caller.
+//
+// It satisfies errors.Is(err, ErrWorkflowConflict) so every "this registration
+// cannot succeed as presented" classifier (the SDK's
+// IsRetryableRegistrationError, the registration-outcome metric, the
+// legacy-hash reconciliation in workflowhash.ReconcileAdd) keeps answering the
+// same way it does for a key conflict.
+type WorkflowNameConflictError struct {
+	Holder types.WorkflowID
+}
+
+func (e *WorkflowNameConflictError) Error() string {
+	if e == nil || e.Holder == "" {
+		return ErrWorkflowNameConflict.Error()
+	}
+	return fmt.Sprintf("%s: held by workflow %q", ErrWorkflowNameConflict, e.Holder)
+}
+
+func (e *WorkflowNameConflictError) Is(target error) bool {
+	return target == ErrWorkflowNameConflict || target == ErrWorkflowConflict
+}
+
+func (e *WorkflowNameConflictError) Unwrap() error { return ErrWorkflowConflict }
+
 // WorkflowVersionImmutableError reports the version label whose published
 // definition hash the mutation would change. It satisfies errors.Is(err,
-// ErrWorkflowVersionImmutable) and, because every "this registration cannot
-// succeed as presented" classifier (the SDK's IsRetryableRegistrationError,
-// the registration-outcome metric, the legacy-hash reconciliation in
-// workflowhash.ReconcileAdd) already answers on ErrWorkflowConflict, it also
-// satisfies errors.Is(err, ErrWorkflowConflict).
+// ErrWorkflowVersionImmutable) and, for the same reason as
+// WorkflowNameConflictError, errors.Is(err, ErrWorkflowConflict).
 type WorkflowVersionImmutableError struct {
 	Version string
 }
