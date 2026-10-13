@@ -128,6 +128,8 @@ interface MockFlowProps extends Record<string, unknown> {
   }) => void;
   onEdgesChange?: (changes: Array<{ id: string; type: "select"; selected: boolean }>) => void;
   onEdgesDelete?: (edges: MockFlowEdge[]) => void;
+  onNodeContextMenu?: (event: MockMouseEvent, node: { id: string }) => void;
+  onPaneContextMenu?: (event: MockMouseEvent) => void;
   onBeforeDelete?: (elements: {
     nodes: Array<Record<string, unknown>>;
     edges: MockFlowEdge[];
@@ -139,6 +141,29 @@ interface MockFlowProps extends Record<string, unknown> {
     targetHandle?: string | null;
   }) => boolean;
 }
+
+interface MockMouseEvent {
+  clientX: number;
+  clientY: number;
+  preventDefault: () => void;
+}
+
+function mouseEventStub(clientX: number, clientY: number): MockMouseEvent {
+  return { clientX, clientY, preventDefault: vi.fn() };
+}
+
+const contextMenuWorkflow = {
+  name: "Menu flow",
+  nodes: [
+    { id: "start-id", name: "start", type: "xflow.start" },
+    { id: "http-id", name: "http_1", type: "xflow.http" }
+  ],
+  connections: {
+    start: {
+      main: [{ node: "http_1" }]
+    }
+  }
+} satisfies WorkflowDef;
 
 function latestFlowProps(): MockFlowProps {
   expect(reactFlowMock.latestProps).toBeTruthy();
@@ -573,6 +598,89 @@ describe("XFlowPreview", () => {
     expect(getNodesBounds).toHaveBeenLastCalledWith([sourceNode]);
     expect(fitBounds).toHaveBeenLastCalledWith(sourceBounds, { padding: 0.28 });
     expect(fitBounds).toHaveBeenCalledTimes(2);
+  });
+
+  it("waits for a newly selected node to be measured before fitting it", () => {
+    const frameCallbacks: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frameCallbacks.push(callback);
+      return frameCallbacks.length;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+
+    const targetNode = { id: "target-id" };
+    const measuredBounds = { x: 680, y: 240, width: 240, height: 96 };
+    const fitBounds = vi
+      .fn<(bounds: unknown, options?: { padding?: number }) => Promise<boolean>>()
+      .mockResolvedValue(true);
+    // The first read is the unmeasured 0x0 box a just-appended node reports.
+    const getNodesBounds = vi
+      .fn((_nodes: Array<{ id: string }>) => measuredBounds)
+      .mockReturnValueOnce({ x: 680, y: 240, width: 0, height: 0 });
+    const flowInstance: MockFlowInstance = {
+      fitBounds,
+      getNodes: vi.fn(() => [{ id: "source-id" }, targetNode]),
+      getNodesBounds,
+      getViewport: () => ({ x: 0, y: 0, zoom: 1 })
+    };
+    const { rerender } = render(<XFlowPreview workflow={portWorkflow} defaultViewport={{ x: 0, y: 0, zoom: 1 }} />);
+
+    act(() => {
+      latestFlowProps().onInit?.(flowInstance);
+    });
+    rerender(
+      <XFlowPreview workflow={portWorkflow} defaultViewport={{ x: 0, y: 0, zoom: 1 }} selectedNodeId={targetNode.id} />
+    );
+
+    // A 0-size box would clamp the zoom to maxZoom, so it must not be fitted.
+    expect(fitBounds).not.toHaveBeenCalled();
+    expect(frameCallbacks).toHaveLength(1);
+
+    act(() => {
+      frameCallbacks.shift()?.(0);
+    });
+
+    expect(fitBounds).toHaveBeenCalledTimes(1);
+    expect(fitBounds).toHaveBeenCalledWith(measuredBounds, { padding: 0.28 });
+  });
+
+  it("cancels a pending initial fit when a viewport to restore arrives after mount", () => {
+    const frameCallbacks = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      nextFrame += 1;
+      frameCallbacks.set(nextFrame, callback);
+      return nextFrame;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (frame: number) => {
+      frameCallbacks.delete(frame);
+    });
+    reactFlowMock.fitBounds.mockResolvedValue(true);
+
+    const workflow = {
+      id: "wf-late-viewport",
+      name: "Late viewport flow",
+      nodes: [{ name: "start", type: "xflow.start" }],
+      connections: {}
+    } satisfies WorkflowDef;
+    const { rerender } = render(<XFlowPreview workflow={workflow} />);
+
+    act(() => {
+      latestFlowProps().onInit?.({
+        fitBounds: reactFlowMock.fitBounds,
+        getNodes: () => [{ id: "source-id" }],
+        getNodesBounds: reactFlowMock.getNodesBounds
+      });
+    });
+    expect(frameCallbacks.size).toBe(1);
+
+    rerender(<XFlowPreview workflow={workflow} defaultViewport={{ x: 10, y: 20, zoom: 1.5 }} />);
+
+    act(() => {
+      for (const callback of [...frameCallbacks.values()]) callback(0);
+    });
+
+    expect(reactFlowMock.fitBounds).not.toHaveBeenCalled();
   });
 
   it("leaves a selected node alone when it is already on screen", () => {
