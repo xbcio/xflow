@@ -33,6 +33,9 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import {
+  isSupplyNode,
+  isTextEntryTarget,
+  runtimeForNode,
   toGraphModel,
   type GraphEdge,
   type GraphNode,
@@ -137,19 +140,28 @@ const statusLabel: Record<string, string> = {
   timeout: "timeout"
 };
 
-function runtimeForNode(runtime: RuntimeSnapshot | undefined, node: GraphNode): RuntimeNodeSnapshot {
-  return runtime?.nodes?.[node.name] ?? runtime?.nodes?.[node.id] ?? { status: "pending" };
-}
-
-function nodeMeta(snapshot: RuntimeNodeSnapshot): string {
+/** Runtime detail worth a line on the card; nothing at all before a run. */
+function nodeMeta(snapshot: RuntimeNodeSnapshot): string | undefined {
   if (snapshot.attempts && snapshot.attempts > 1) {
     return `${snapshot.attempts} attempts`;
   }
   if (snapshot.durationMs !== undefined) {
     return `${snapshot.durationMs} ms`;
   }
-  return "ready";
+  return undefined;
 }
+
+/** Shift+F10 and the ContextMenu key are the platform keyboard routes to a context menu. */
+function isContextMenuKey(event: React.KeyboardEvent): boolean {
+  return event.key === "ContextMenu" || (event.shiftKey && event.key === "F10");
+}
+
+/**
+ * Browsers that map the ContextMenu key to a native `contextmenu` event fire it
+ * right after the keydown the preview already answered; this window swallows
+ * that echo so one press cannot open the menu twice.
+ */
+const KEYBOARD_MENU_ECHO_MS = 500;
 
 function nodeIcon(type: string): React.ReactNode {
   if (type.includes("start")) return <PlayCircleOutlined />;
@@ -337,16 +349,6 @@ function portsWithMain(...portGroups: string[][]): string[] {
 }
 
 /**
- * Whether a key event belongs to a text field that owns the keystroke. React
- * Flow skips its own Delete handling in exactly this case, so matching it keeps
- * "backspace while renaming a node" from deleting the node as well.
- */
-function isTextEntryTarget(target: EventTarget | null): boolean {
-  return target instanceof HTMLElement
-    && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
-}
-
-/**
  * Declared ports lead so a branch or error handle exists before anything is
  * wired to it. Edge ports follow: React Flow needs a handle for every edge it
  * has to draw, including one the node type does not declare (a hand-written
@@ -360,10 +362,6 @@ function mergeDeclaredPorts(declaredPorts: string[], edgePorts: string[]): strin
     }
   }
   return ports;
-}
-
-function isSupplyNode(node: GraphNode | undefined): boolean {
-  return node?.kind === "supply" || node?.type.startsWith("xflow.supply.") === true;
 }
 
 function toFlowNodes(
