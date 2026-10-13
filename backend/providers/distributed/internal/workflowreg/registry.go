@@ -16,6 +16,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/xbcio/xflow/backend"
+	"github.com/xbcio/xflow/backend/providers/distributed/internal/redisx"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
@@ -24,6 +25,10 @@ import (
 const (
 	revisionPlaceholder               = `"registry_revision":0`
 	workflowProjectionNamespaceSetKey = "xflow:wfreg:v2:projection:namespaces"
+	// legacyNameProbeScanCount is the SCAN COUNT hint while probing the v1 key
+	// space for an un-migrated same-name record. The probe only runs while the
+	// name index is unheld, and Redis treats the value as a hint.
+	legacyNameProbeScanCount = 128
 )
 
 type Registry struct {
@@ -931,8 +936,11 @@ func (r *Registry) AddWorkflow(ctx context.Context, rec backend.WorkflowRecord) 
 			return backend.WorkflowRecord{}, &backend.WorkflowVersionImmutableError{Version: rec.Version}
 		}
 		// Repair a name index entry an idempotent add would otherwise never
-		// write (a record registered before the index existed).
-		if rec.Name != "" {
+		// write (a record registered before the index existed). Only a v2
+		// record has an index claim to repair: a legacy record read through
+		// without being imported (revision zero) holds no entry, and writing
+		// one would steal the name from the record that legitimately holds it.
+		if rec.Name != "" && existing.RegistryRevision != 0 {
 			if err := r.rdb.Set(ctx, workflowNameIndexKey(t, rec.Name), string(existing.ID), 0).Err(); err != nil {
 				return backend.WorkflowRecord{}, indeterminateMutation("add workflow "+strconv.Quote(rec.Key), err)
 			}
@@ -944,6 +952,20 @@ func (r *Registry) AddWorkflow(ctx context.Context, rec backend.WorkflowRecord) 
 			return backend.WorkflowRecord{}, err
 		}
 		return backend.WorkflowRecord{}, indeterminateMutation("add workflow "+strconv.Quote(rec.Key), err)
+	}
+
+	// A v1 record that has never been read has no name index entry, so the add
+	// script alone would accept a second live record under the same name and
+	// split the workflow the name refers to. Refuse instead, with the same
+	// answer the index check would have given had the legacy record imported.
+	if rec.Name != "" {
+		holder, found, probeErr := r.findLegacyNameHolder(ctx, t, rec.Name, rec.Key, rec.ID)
+		if probeErr != nil {
+			return backend.WorkflowRecord{}, indeterminateMutation("add workflow "+strconv.Quote(rec.Key), probeErr)
+		}
+		if found {
+			return backend.WorkflowRecord{}, &backend.WorkflowNameConflictError{Holder: holder}
+		}
 	}
 
 	stored, err := marshalWorkflowRecord(rec)
@@ -1277,6 +1299,13 @@ func (r *Registry) loadLegacyWorkflowRecord(ctx context.Context, t namespace.Nam
 	return record, true, nil
 }
 
+// importLegacyWorkflow installs the v2 form of a v1 record read through Get or
+// GetWorkflowByKey. When another live record already holds the record's name
+// the import is abandoned and the v1 record is returned unchanged: the
+// alternative — failing the read — would turn a workflow that was readable
+// before the upgrade into a permanent read error. The record keeps its v1 keys
+// and markers, so every read stays correct until one of the two records is
+// removed.
 func (r *Registry) importLegacyWorkflow(ctx context.Context, t namespace.Namespace, rec backend.WorkflowRecord) (backend.WorkflowRecord, error) {
 	if rec.ID == "" || rec.Key == "" {
 		return backend.WorkflowRecord{}, errors.New("import legacy workflow: record identity is empty")
@@ -1325,17 +1354,93 @@ func (r *Registry) importLegacyWorkflow(ctx context.Context, t namespace.Namespa
 	case "key_conflict", "id_conflict":
 		return backend.WorkflowRecord{}, backend.ErrWorkflowConflict
 	case "name_conflict":
-		holder, holderErr := scriptString(payload)
-		if holderErr != nil {
-			return backend.WorkflowRecord{}, indeterminateMutation("import legacy workflow "+strconv.Quote(stored.Key), holderErr)
-		}
-		return backend.WorkflowRecord{}, &backend.WorkflowNameConflictError{Holder: types.WorkflowID(holder)}
+		// Another live record holds the name, so importing would repoint the
+		// name index away from its holder. The record stays in v1 storage and
+		// is served as-is instead of turning a previously readable workflow
+		// into a read failure.
+		return rec, nil
 	default:
 		return backend.WorkflowRecord{}, indeterminateMutation(
 			"import legacy workflow "+strconv.Quote(stored.Key),
 			fmt.Errorf("unexpected script state %q", state),
 		)
 	}
+}
+
+// findLegacyNameHolder reports the id of an un-migrated v1 record that calls
+// itself by the given name, so an Add or a rename cannot install a second live
+// record beside it. The name index has no v1 counterpart: a record deployed
+// before registry v2 appears there only after its first read imports it.
+// Without this probe the index is empty during that window, a fresh
+// registration of the same name is accepted, and the legacy record's own first
+// read then hits an index entry it never claimed.
+//
+// The v1 identity of a record is its by-key pointer, so the probe scans the
+// namespace's legacy pointers and matches the name against each pointer's key
+// in Go: the name is caller input and must not steer a Redis glob pattern (the
+// namespace is metacharacter-free by validation, see namespace.Validate).
+// skipKey and skipID exempt the caller's own identity — the record being added
+// or the source being superseded — and a candidate whose payload name is empty
+// is exempt exactly as the import scripts exempt it, because it has no name
+// identity to collide with. A migration marker means the identity was already
+// imported, renamed, or removed, so it is no longer un-migrated state and is
+// skipped as well.
+func (r *Registry) findLegacyNameHolder(ctx context.Context, t namespace.Namespace, name, skipKey string, skipID types.WorkflowID) (types.WorkflowID, bool, error) {
+	if name == "" {
+		return "", false, nil
+	}
+	// When a v2 record already owns the name the index is authoritative: the
+	// mutation scripts decide the outcome and report that holder, so probing
+	// the legacy space would only risk answering with a stale holder.
+	holder, err := r.rdb.Get(ctx, workflowNameIndexKey(t, name)).Result()
+	if err == nil && holder != "" {
+		return "", false, nil
+	}
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return "", false, err
+	}
+	pointerPrefix := "xflow:ns:" + string(t) + ":workflow:{"
+	innerPrefix := string(t) + "/" + name + "@"
+	pointers, err := redisx.ScanAll(ctx, r.rdb, pointerPrefix+"*}:bykey", legacyNameProbeScanCount)
+	if err != nil {
+		return "", false, err
+	}
+	for _, pointerKey := range pointers {
+		inner, ok := strings.CutPrefix(pointerKey, pointerPrefix)
+		if !ok {
+			continue
+		}
+		inner, ok = strings.CutSuffix(inner, "}:bykey")
+		if !ok || !strings.HasPrefix(inner, innerPrefix) || inner == skipKey {
+			continue
+		}
+		migrated, err := r.rdb.Exists(ctx, workflowLegacyByKeyMarker(t, inner)).Result()
+		if err != nil {
+			return "", false, err
+		}
+		if migrated != 0 {
+			continue
+		}
+		idText, err := r.rdb.Get(ctx, pointerKey).Result()
+		if errors.Is(err, redis.Nil) {
+			continue
+		}
+		if err != nil {
+			return "", false, err
+		}
+		if idText == "" || types.WorkflowID(idText) == skipID {
+			continue
+		}
+		record, found, err := r.loadLegacyWorkflowRecord(ctx, t, inner, types.WorkflowID(idText))
+		if err != nil {
+			return "", false, err
+		}
+		if !found || record.Name != name {
+			continue
+		}
+		return record.ID, true, nil
+	}
+	return "", false, nil
 }
 
 // UpdateDefinitionHash upgrades the stored hash only if expectedOldHash and the
@@ -1587,6 +1692,21 @@ func (r *Registry) CompareAndReplaceWorkflow(ctx context.Context, req backend.Wo
 		}
 	} else {
 		sourceName = source.Name
+	}
+
+	// A rename into a name an un-migrated v1 record calls its own is the same
+	// hazard the add path refuses: the fresh index entry would sit beside the
+	// legacy identity, and the legacy record's first read would then hit an
+	// index entry it never claimed. Only a rename is probed — an in-place
+	// replace keeps its own name, whose index entry is the script's answer.
+	if sourceErr == nil && stored.Name != "" && stored.Name != sourceName {
+		holder, found, probeErr := r.findLegacyNameHolder(ctx, t, stored.Name, stored.Key, stored.ID)
+		if probeErr != nil {
+			return backend.WorkflowReplaceResult{}, indeterminateMutation("replace workflow "+strconv.Quote(req.MutationID), probeErr)
+		}
+		if found {
+			return backend.WorkflowReplaceResult{}, &backend.WorkflowNameConflictError{Holder: holder}
+		}
 	}
 
 	result, err := compareAndReplaceWorkflowLua.Run(
