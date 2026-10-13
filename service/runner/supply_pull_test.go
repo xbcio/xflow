@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -304,6 +305,51 @@ func TestPullDefaultPolicyBlocksLoopback(t *testing.T) {
 	}
 	if n := src.requests(); n != 0 {
 		t.Fatalf("source saw %d requests; the refusal must happen before the request is sent", n)
+	}
+}
+
+// The default policy is not just the stdlib predicates: reserved ranges that
+// are routable on real networks (shared address space, benchmarking space,
+// IETF protocol assignments, 240/4) are refused too, because several of them
+// hold cloud metadata services that would otherwise be a server-side request
+// forgery target. Public addresses stay permitted.
+func TestPullDefaultPolicyBlocksReservedRanges(t *testing.T) {
+	blocked := []string{
+		"100.64.0.1",      // RFC 6598 shared address space
+		"100.100.100.200", // Alibaba Cloud metadata service
+		"198.18.0.1",      // benchmarking
+		"192.0.0.5",       // IETF protocol assignments
+		"240.0.0.1",       // reserved
+		"255.255.255.255", // broadcast
+		"169.254.169.254", // link-local metadata
+		"10.0.0.1",        // private
+		"127.0.0.1",       // loopback
+		"::1",             // IPv6 loopback
+		"fe80::1",         // IPv6 link-local
+		"0.0.0.0",         // unspecified
+	}
+	for _, addr := range blocked {
+		ip := net.ParseIP(addr)
+		if ip == nil {
+			t.Fatalf("bad test address %q", addr)
+		}
+		if !pullIPBlocked(ip) {
+			t.Errorf("pullIPBlocked(%s) = false, want true", addr)
+		}
+	}
+	allowed := []string{
+		"93.184.216.34",                      // example.com
+		"8.8.8.8",                            // public DNS
+		"2606:2800:220:1:248:1893:25c8:1946", // example.com v6
+	}
+	for _, addr := range allowed {
+		ip := net.ParseIP(addr)
+		if ip == nil {
+			t.Fatalf("bad test address %q", addr)
+		}
+		if pullIPBlocked(ip) {
+			t.Errorf("pullIPBlocked(%s) = true, want false", addr)
+		}
 	}
 }
 

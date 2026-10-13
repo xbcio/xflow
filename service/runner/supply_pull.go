@@ -58,17 +58,18 @@ const (
 //   - redirects are NOT followed (a 3xx is a fetch failure), so every request
 //     goes to the configured URL and one SSRF check covers the whole fetch;
 //   - the resolved IP is validated AT DIAL TIME, after resolution, against the
-//     operator's allowlist (or the default private/loopback/link-local block),
-//     which is what makes DNS rebinding harmless: the address that was checked
-//     is the address that is dialed;
+//     operator's allowlist (or the default reserved/private/loopback/link-local
+//     block, see pullBlockedRanges), which is what makes DNS rebinding
+//     harmless: the address that was checked is the address that is dialed;
 //   - no proxy: an environment proxy would make the dial guard inspect the
 //     proxy's address instead of the target's.
 type PullSupplyFetcher struct {
 	// AllowedHosts is the operator's runner-level allowlist (RunnerConfig.
-	// SupplyPullAllowedHosts). Empty means "any public host": loopback, private,
-	// link-local and unspecified addresses are then refused at dial time. A
-	// non-empty list permits only matching hosts and is an explicit operator
-	// decision to allow whatever address they resolve to, private included.
+	// SupplyPullAllowedHosts). Empty means "any public host": reserved,
+	// loopback, private, link-local and unspecified addresses are then refused
+	// at dial time. A non-empty list permits only matching hosts and is an
+	// explicit operator decision to allow whatever address they resolve to,
+	// private included.
 	// Entries mirror the node host-policy forms: an exact host, a suffix
 	// prefixed with '.', or a wildcard prefixed with '*.', matched
 	// case-insensitively against the hostname only (no port, no scheme).
@@ -561,22 +562,43 @@ func (p pullHostPolicy) checkIP(host string, ip net.IP) error {
 		return nil
 	}
 	if pullIPBlocked(ip) {
-		return fmt.Errorf("address %s of host %q is blocked by the runner's default pull policy (loopback, private, link-local, or unspecified); add the host to SupplyPullAllowedHosts to permit it", ip, host)
+		return fmt.Errorf("address %s of host %q is blocked by the runner's default pull policy (a reserved, loopback, private, link-local, or unspecified address); add the host to SupplyPullAllowedHosts to permit it", ip, host)
 	}
 	return nil
+}
+
+// pullBlockedRanges are the ranges the stdlib predicates do not cover but that
+// cannot be a public config source: 100.64.0.0/10 (RFC 6598 shared address
+// space, which contains 100.100.100.200, the Alibaba Cloud metadata service),
+// 198.18.0.0/15 and 192.0.0.0/24 (benchmarking / IETF protocol assignments,
+// which include 192.0.0.192 and the metadata addresses some clouds use), and
+// 240.0.0.0/4 (reserved, which contains the 255.255.255.255 broadcast).
+var pullBlockedRanges = []*net.IPNet{
+	{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)},
+	{IP: net.IPv4(198, 18, 0, 0), Mask: net.CIDRMask(15, 32)},
+	{IP: net.IPv4(192, 0, 0, 0), Mask: net.CIDRMask(24, 32)},
+	{IP: net.IPv4(240, 0, 0, 0), Mask: net.CIDRMask(4, 32)},
 }
 
 // pullIPBlocked reports whether an address is unreachable-by-design from a
 // runner under the default policy. Multicast and the unspecified address are
 // included as destinations that cannot be a config source at all.
 func pullIPBlocked(ip net.IP) bool {
-	return ip.IsLoopback() ||
+	if ip.IsLoopback() ||
 		ip.IsPrivate() ||
 		ip.IsLinkLocalUnicast() || // includes 169.254.169.254, the metadata service
 		ip.IsLinkLocalMulticast() ||
 		ip.IsInterfaceLocalMulticast() ||
 		ip.IsUnspecified() ||
-		ip.IsMulticast()
+		ip.IsMulticast() {
+		return true
+	}
+	for _, r := range pullBlockedRanges {
+		if r.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // normalizePullHost canonicalizes a hostname for matching. It mirrors
