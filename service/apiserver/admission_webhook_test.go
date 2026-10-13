@@ -75,13 +75,14 @@ func TestAPIAdmissionWebhookEntry(t *testing.T) {
 		t.Fatalf("another workflow in the namespace was charged: status = %d", rec.Code)
 	}
 
-	// The webhook shares the control routes' bound: one replica, one bound.
+	// The webhook shares the control routes' global bound: one replica, one bound.
+	var execReleases []func()
 	for i := 0; i < 2; i++ {
 		release, ok := srv.ctrl.admission.acquire(routeClassExecute)
 		if !ok {
-			t.Fatalf("slot %d refused below the bound", i)
+			t.Fatalf("execute slot %d refused below the bound", i)
 		}
-		defer release()
+		execReleases = append(execReleases, release)
 	}
 	rec = send(wfB, "evt-4", true)
 	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "1" {
@@ -90,4 +91,27 @@ func TestAPIAdmissionWebhookEntry(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body.Error != "server_overloaded" {
 		t.Fatalf("webhook 503 body = %q, want {\"error\":\"server_overloaded\"}", rec.Body.String())
 	}
+	for _, release := range execReleases {
+		release()
+	}
+
+	// And it has its own sub-limit — a quarter of the bound, at least 1 — so a
+	// webhook flood is shed while authenticated execute work still has room.
+	webRelease, ok := srv.ctrl.admission.acquire(routeClassWebhook)
+	if !ok {
+		t.Fatal("webhook slot refused on an idle replica")
+	}
+	rec = send(wfB, "evt-5", true)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("webhook past its sub-limit = %d (%s), want 503", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body.Error != "server_overloaded" {
+		t.Fatalf("webhook sub-limit 503 body = %q, want {\"error\":\"server_overloaded\"}", rec.Body.String())
+	}
+	execRelease, ok := srv.ctrl.admission.acquire(routeClassExecute)
+	if !ok {
+		t.Fatal("the webhook sub-limit consumed the execute class's share of the bound")
+	}
+	execRelease()
+	webRelease()
 }

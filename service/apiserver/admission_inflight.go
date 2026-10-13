@@ -28,11 +28,16 @@ func (l APILimits) maxInflight() int {
 // because it answers for this process's own capacity, which no caller quota
 // can.
 type inflightGuard struct {
-	max      int
-	mu       sync.Mutex
-	total    int
-	perClass map[string]int
-	metrics  metrics.APIAdmissionMetrics
+	max int
+	// webhookMax bounds the webhook class below max. The webhook route is
+	// unauthenticated until its body has been read and its HMAC verified, so
+	// without a sub-limit an unsigned flood would hold every slot an
+	// authenticated execute needs. Derived, not configured: max/4, at least 1.
+	webhookMax int
+	mu         sync.Mutex
+	total      int
+	perClass   map[string]int
+	metrics    metrics.APIAdmissionMetrics
 }
 
 // newInflightGuard returns a guard admitting at most limit requests; a
@@ -41,13 +46,21 @@ func newInflightGuard(limit int, m metrics.APIAdmissionMetrics) *inflightGuard {
 	if limit <= 0 {
 		return nil
 	}
-	return &inflightGuard{max: limit, perClass: make(map[string]int), metrics: m}
+	return &inflightGuard{
+		max:        limit,
+		webhookMax: max(1, limit/4),
+		perClass:   make(map[string]int),
+		metrics:    m,
+	}
 }
 
 func (g *inflightGuard) acquire(class string) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.total >= g.max {
+		return false
+	}
+	if class == routeClassWebhook && g.perClass[class] >= g.webhookMax {
 		return false
 	}
 	g.total++

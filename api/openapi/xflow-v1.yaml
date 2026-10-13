@@ -2690,7 +2690,10 @@ paths:
             Nothing was admitted. `entry_unavailable`: the entry's signing
             secret could not be resolved, so no caller can be authenticated.
             `server_overloaded`: this replica is at its inflight bound
-            (`--api-max-inflight`); retryable, with a `Retry-After` floor.
+            (`--api-max-inflight`) — for this route the webhook class's own
+            sub-limit (a quarter of the bound, at least 1) answers it first, so a
+            webhook flood cannot consume the capacity authenticated execute work
+            needs; retryable, with a `Retry-After` floor.
           headers:
             Retry-After:
               description: Present on `server_overloaded` only.

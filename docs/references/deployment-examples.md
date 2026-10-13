@@ -43,7 +43,7 @@ xflow-server \
 | `--require-api-auth` | `false` | **必设** | 无 `--api-auth-token` 时启动失败（fail-closed） |
 | `--api-rate` | `0`（不限） | 按容量调 | 每 namespace 的 API 限速（请求/秒），作用于 execute / execute-by-id / signals / revoke / cancel / pause / resume / rerun / schedule backfill / dead-letter replay 与 webhook 入口；超限 429 `rate_limited` + `Retry-After`。`XFLOW_API_RATE` 环境变量优先于它。见 [API-SPECIFICATION.md](../design/API-SPECIFICATION.md) §4.3 |
 | `--api-burst` | `0`（取 `ceil(rate)`，至少 1） | 按容量调 | 空闲桶可一次放行的请求数；`XFLOW_API_BURST` 优先 |
-| `--api-max-inflight` | `0`（即 1024） | 默认 | 本副本同时处理的覆盖路由请求上限，满则 503 `server_overloaded` + `Retry-After: 1`；负数关闭。`XFLOW_API_MAX_INFLIGHT` 优先 |
+| `--api-max-inflight` | `0`（即 1024） | 默认 | 本副本同时处理的覆盖路由请求上限，满则 503 `server_overloaded` + `Retry-After: 1`；webhook 类另有 1/4 子上限（至少 1），unsigned 洪峰占不满 execute 的容量；负数关闭。`XFLOW_API_MAX_INFLIGHT` 优先 |
 | `--api-rate-limit-mode` | `local` | 多副本需要全局额度时 `redis` | `local`：每副本计数，全舰队额度 = rate×副本数；`redis`：经 Redis 共享计数（需 `--redis`/`--redis-mode`），Redis 不可达时退回本地桶，连续 3 次失败后熔断 5 秒，按 reason 计 `xflow_api_rate_limit_fallback_total`。`XFLOW_API_RATE_LIMIT_MODE` 优先 |
 | `--tls-cert` | `""` | **必设** | server TLS 证书；启用 TLS |
 | `--tls-key` | `""` | **必设** | server TLS 私钥；须与 `--tls-cert` 成对 |

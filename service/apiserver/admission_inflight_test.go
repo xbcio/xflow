@@ -117,6 +117,9 @@ func TestInflightGuardDefaultsAndDisable(t *testing.T) {
 	if got := newAPIAdmission(APILimits{}, nil, nil, nil).inflight.max; got != DefaultAPIMaxInflight {
 		t.Fatalf("default bound = %d, want %d", got, DefaultAPIMaxInflight)
 	}
+	if got := newAPIAdmission(APILimits{}, nil, nil, nil).inflight.webhookMax; got != DefaultAPIMaxInflight/4 {
+		t.Fatalf("default webhook sub-limit = %d, want %d", got, DefaultAPIMaxInflight/4)
+	}
 	a := newAPIAdmission(APILimits{MaxInflight: -1}, nil, nil, nil)
 	if a.inflight != nil {
 		t.Fatal("negative MaxInflight did not disable the bound")
@@ -126,5 +129,56 @@ func TestInflightGuardDefaultsAndDisable(t *testing.T) {
 		httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", nil))
 	if !called {
 		t.Fatal("disabled guard did not pass through")
+	}
+}
+
+// TestInflightGuardWebhookSubLimit pins the webhook's own share of the bound: a
+// webhook flood must be shed before it consumes the capacity authenticated
+// execute work needs, while the global bound still applies on top.
+func TestInflightGuardWebhookSubLimit(t *testing.T) {
+	a := newAPIAdmission(APILimits{MaxInflight: 8}, nil, nil, nil)
+	if got := a.inflight.webhookMax; got != 2 {
+		t.Fatalf("webhookMax = %d, want 8/4 = 2", got)
+	}
+
+	var releases []func()
+	for i := 0; i < 2; i++ {
+		release, ok := a.acquire(routeClassWebhook)
+		if !ok {
+			t.Fatalf("webhook slot %d refused below its sub-limit", i)
+		}
+		releases = append(releases, release)
+	}
+	if _, ok := a.acquire(routeClassWebhook); ok {
+		t.Fatal("webhook admitted past its sub-limit while the replica had room")
+	}
+
+	// The rest of the replica's capacity is still the execute class's.
+	for i := 0; i < 6; i++ {
+		release, ok := a.acquire(routeClassExecute)
+		if !ok {
+			t.Fatalf("execute slot %d refused below the replica bound (%d total held)", i, a.inflight.inUse())
+		}
+		releases = append(releases, release)
+	}
+	if _, ok := a.acquire(routeClassExecute); ok {
+		t.Fatal("global bound admitted past the replica limit")
+	}
+	for _, release := range releases {
+		release()
+	}
+	if got := a.inflight.inUse(); got != 0 {
+		t.Fatalf("in use after release = %d, want 0", got)
+	}
+}
+
+// TestInflightGuardWebhookSubLimitFloor keeps a tiny bound useful: a fractional
+// quarter rounds down to nothing, so it floors at one slot.
+func TestInflightGuardWebhookSubLimitFloor(t *testing.T) {
+	for _, c := range []struct{ limit, want int }{{1, 1}, {3, 1}, {4, 1}, {5, 1}, {8, 2}} {
+		got := newAPIAdmission(APILimits{MaxInflight: c.limit}, nil, nil, nil).inflight.webhookMax
+		if got != c.want {
+			t.Errorf("MaxInflight %d: webhookMax = %d, want %d", c.limit, got, c.want)
+		}
 	}
 }

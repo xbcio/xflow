@@ -259,7 +259,7 @@ GET /v1/workflows?page=1&page_size=20
 
 | 闸 | 状态码 / code | 维度 | 默认 | `Retry-After` |
 | --- | --- | --- | --- | --- |
-| inflight 上限 | 503 `server_overloaded` | 每副本，全部覆盖路由共用一个上限 | 1024（`--api-max-inflight`；负数关闭） | 1，下限而非承诺 |
+| inflight 上限 | 503 `server_overloaded` | 每副本，全部覆盖路由共用一个上限；webhook 类另有 1/4 子上限（至少 1） | 1024（`--api-max-inflight`；负数关闭） | 1，下限而非承诺 |
 | 令牌桶限速 | 429 `rate_limited` | 每 namespace（认证主体的）；webhook 为 namespace+workflow | 关闭（`--api-rate` 为 0） | 桶补出一个令牌的时间，向上取整 |
 
 先查 inflight 再查速率：过载副本不必多一次 Redis 往返就能卸载。非阻塞——满了
@@ -273,8 +273,9 @@ rerun、schedule backfill（backfill 会发起执行）、dead-letter replay（r
 上每个 POST/PUT/PATCH/DELETE 可达的路由，要求逐条要么归入覆盖（并驱动到拒绝），
 要么豁免并给出理由；新路由未归类会让该守卫直接失败。webhook 只对**签名正确**的请求
 计费，否则知道路径的人就能花掉
-合法发送方的额度；未签名洪峰交给 inflight 上限。webhook 的拒绝沿用其裸
-`{"error": code}` 形状。
+合法发送方的额度；未签名洪峰在签名校验**之前**就占 inflight 槽，所以 webhook 类另有
+1/4 上限（派生，至少 1）：unsigned 洪峰被子上限削掉，认证过的 execute 仍拿得到容量。
+webhook 的拒绝沿用其裸 `{"error": code}` 形状。
 
 `rate_limited` 与 `workflow_concurrency_*` 同为 429 但互不相干：前者保护控制面，
 在请求被准入之前判定，与工作流无关；后者是工作流自己声明的业务容量，在准入之后
