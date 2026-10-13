@@ -2,11 +2,15 @@
 // pass before it may become the default. Registers vitest blocks; every
 // case renders under React.StrictMode through the real <Composer>.
 
-import { fireEvent } from "@testing-library/react";
+import { act, fireEvent, render } from "@testing-library/react";
+import { StrictMode, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { RenderKernel } from "../react/contract";
+import { applyPatches, type Patch, type Warning } from "../core";
+import { Composer } from "../react/Composer";
+import type { Registry, RenderKernel } from "../react/contract";
+import { OVERLAY_TIMEOUT_MS } from "../react/overlay";
 import { createConformanceRegistry, createProbe } from "./components";
-import { errorSpec, fieldsSpec, rowsSpec, slotSpec, toggleSpec, treeSpec } from "./fixtures";
+import { errorSpec, fieldsSpec, rowsSpec, slotSpec, toggleSpec, treeSpec, wideSpec } from "./fixtures";
 import { allPatches, mountComposer, type MountOptions } from "./harness";
 
 type Row = { name: string };
@@ -25,6 +29,48 @@ function texts(container: HTMLElement): string[] {
   return [...container.querySelectorAll(".text")].map((el) => el.textContent ?? "");
 }
 
+type Commit = (update: (value: object) => object) => void;
+
+/**
+ * Mounts <Composer> under a host whose onChange policy is supplied by the
+ * test (debounce, normalization, ...). `commit` replaces the host value.
+ */
+function mountHost(kernel: RenderKernel, registry: Registry, initial: object, onPatches: (patches: Patch[], commit: Commit) => void) {
+  const warnings: Warning[] = [];
+  let current = initial;
+  let setHost: ((update: (value: object) => object) => void) | undefined;
+  const commit: Commit = (update) => act(() => setHost!(update));
+  function Host() {
+    const [value, setValue] = useState<object>(initial);
+    current = value;
+    setHost = setValue;
+    return (
+      <Composer
+        spec={fieldsSpec}
+        registry={registry}
+        kernel={kernel}
+        value={value}
+        onChange={(patches) => onPatches(patches, commit)}
+        onWarning={(warning) => warnings.push(warning)}
+      />
+    );
+  }
+  const utils = render(
+    <StrictMode>
+      <Host />
+    </StrictMode>
+  );
+  return {
+    container: utils.container,
+    warnings,
+    get value() {
+      return current;
+    }
+  };
+}
+
+const advance = (ms: number) => act(async () => vi.advanceTimersByTime(ms));
+
 export function kernelConformance(kernel: RenderKernel): void {
   describe(`kernel conformance: ${kernel.name}`, () => {
     let probe = createProbe();
@@ -37,7 +83,10 @@ export function kernelConformance(kernel: RenderKernel): void {
       // Error-boundary cases make React log the caught error; keep output clean.
       consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     });
-    afterEach(() => consoleError.mockRestore());
+    afterEach(() => {
+      consoleError.mockRestore();
+      vi.useRealTimers();
+    });
 
     const mount = (options: Omit<MountOptions, "kernel" | "registry">) => mountComposer({ kernel, registry, ...options });
 
@@ -182,15 +231,33 @@ export function kernelConformance(kernel: RenderKernel): void {
       expect(m.log.length).toBe(before);
     });
 
-    it("re-renders only the edited leaf on a keystroke", async () => {
+    it("re-renders the edited path and no other leaf on a keystroke", async () => {
       const m = mount({ spec: fieldsSpec, value: { f0: "zero" } });
       await m.flush();
       probe.reset();
       fireEvent.change(inputOf(m.container, "f3"), { target: { value: "x" } });
       await m.flush();
       expect(m.log).toEqual([[{ op: "set", path: "/g/f3", value: "x" }]]);
-      expect(new Set(probe.renders)).toEqual(new Set(["f3"]));
+      // "root" and "grp" are f3's ancestor boxes: React re-renders the edited
+      // path. No sibling leaf may re-render.
+      const rendered = new Set(probe.renders);
+      expect(rendered.has("f3")).toBe(true);
+      expect(["f0", "f1", "f2", "f4", "t"].filter((id) => rendered.has(id))).toEqual([]);
       expect(inputOf(m.container, "f3").value).toBe("x");
+    });
+
+    it("skips an unrelated container subtree on a keystroke", async () => {
+      const m = mount({ spec: wideSpec, value: {} });
+      await m.flush();
+      probe.reset();
+      fireEvent.change(inputOf(m.container, "f3"), { target: { value: "x" } });
+      await m.flush();
+      expect(allPatches(m.log)).toEqual([{ op: "set", path: "/g/f3", value: "x" }]);
+      // The whole "side" subtree is unrelated: neither its container render
+      // function nor any of its components may run again.
+      const rendered = new Set(probe.renders);
+      expect(rendered.has("f3")).toBe(true);
+      expect(["side", "s1", "s2", "s3"].filter((id) => rendered.has(id))).toEqual([]);
     });
 
     it("keeps IME composition and fast typing intact through batching", async () => {
@@ -230,6 +297,104 @@ export function kernelConformance(kernel: RenderKernel): void {
       await m.flush();
       expect(m.value).toEqual({ f0: "abc" });
       expect(input.value).toBe("abc");
+    });
+
+    it("keeps newer keystrokes while a lagging host acknowledges older batches", async () => {
+      vi.useFakeTimers();
+      const m = mount({ spec: fieldsSpec, value: {}, ackDelayMs: 30 });
+      await m.flush();
+      const input = inputOf(m.container, "f0");
+      for (const step of ["a", "ab", "abc"]) {
+        fireEvent.change(input, { target: { value: step } });
+        await m.flush();
+        await advance(10);
+      }
+      expect(m.log).toHaveLength(3);
+      // t=30: the host has applied batch 1 only; batches 2 and 3 are in flight.
+      expect(m.value).toEqual({ f0: "a" });
+      expect(input.value).toBe("abc");
+      await advance(10);
+      expect(m.value).toEqual({ f0: "ab" });
+      expect(input.value).toBe("abc");
+      await advance(10);
+      expect(m.value).toEqual({ f0: "abc" });
+      expect(input.value).toBe("abc");
+      await advance(OVERLAY_TIMEOUT_MS * 2);
+      expect(input.value).toBe("abc");
+      expect(m.warnings).toEqual([]);
+    });
+
+    it("reverts to the host value with a warning when the host never applies", async () => {
+      vi.useFakeTimers();
+      const m = mount({ spec: fieldsSpec, value: { f0: "a" }, ignoreChanges: true });
+      await m.flush();
+      const input = inputOf(m.container, "f0");
+      fireEvent.change(input, { target: { value: "ab" } });
+      await m.flush();
+      await advance(OVERLAY_TIMEOUT_MS - 10);
+      expect(input.value).toBe("ab");
+      expect(m.warnings).toEqual([]);
+      await advance(20);
+      expect(input.value).toBe("a");
+      expect(m.warnings.map((w) => w.code)).toEqual(["overlay-timeout"]);
+    });
+
+    it("measures the timeout from the latest flush during continuous typing", async () => {
+      vi.useFakeTimers();
+      // A debouncing host: applies everything 800ms after the last onChange.
+      let pending: Patch[] = [];
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const h = mountHost(kernel, registry, {}, (patches, commit) => {
+        pending.push(...patches);
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          const batch = pending;
+          pending = [];
+          commit((value) => applyPatches(value, batch));
+        }, 800);
+      });
+      await act(async () => {});
+      const input = inputOf(h.container, "f0");
+      let text = "";
+      for (let t = 0; t <= 3000; t += 600) {
+        text += "x";
+        fireEvent.change(input, { target: { value: text } });
+        await act(async () => {});
+        expect(input.value).toBe(text);
+        await advance(600);
+      }
+      // The host catches up 800ms after the last keystroke (t=3800).
+      await advance(200);
+      expect(h.value).toEqual({ f0: text });
+      await advance(OVERLAY_TIMEOUT_MS * 2);
+      expect(input.value).toBe(text);
+      expect(h.warnings).toEqual([]);
+    });
+
+    it("lets a normalizing host win once its value is acknowledged or the timeout passes", async () => {
+      vi.useFakeTimers();
+      const trim = (patches: Patch[]) => patches.map((p) => (p.op === "set" && typeof p.value === "string" ? { ...p, value: p.value.trim() } : p));
+      const h = mountHost(kernel, registry, {}, (patches, commit) => commit((value) => applyPatches(value, trim(patches))));
+      await act(async () => {});
+      const input = inputOf(h.container, "f0");
+
+      // A later write the host reflects acknowledges the earlier normalized one.
+      fireEvent.change(input, { target: { value: "x " } });
+      await act(async () => {});
+      expect(h.value).toEqual({ f0: "x" });
+      expect(input.value).toBe("x ");
+      fireEvent.change(input, { target: { value: "x y" } });
+      await act(async () => {});
+      expect(input.value).toBe("x y");
+
+      // A normalized write nothing reflects: the host value wins at the timeout.
+      fireEvent.change(input, { target: { value: "x y " } });
+      await act(async () => {});
+      expect(h.value).toEqual({ f0: "x y" });
+      expect(input.value).toBe("x y ");
+      await advance(OVERLAY_TIMEOUT_MS + 10);
+      expect(input.value).toBe("x y");
+      expect(h.warnings.map((w) => w.code)).toEqual(["overlay-timeout"]);
     });
   });
 }

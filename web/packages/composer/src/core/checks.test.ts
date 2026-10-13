@@ -45,6 +45,16 @@ describe("built-in checks", () => {
     expect(run("pattern", "ab1", { pattern: "^[a-z]+$" })).toBe(false);
   });
 
+  it("pattern rejects stateful g / y flags and never alternates results", () => {
+    const validate = registry.get("pattern")!.validateArgs!;
+    expect(validate({ pattern: "^a", flags: "g" })).toEqual([expect.stringMatching(/g or y/)]);
+    expect(validate({ pattern: "^a", flags: "iy" })).toEqual([expect.stringMatching(/g or y/)]);
+    expect(validate({ pattern: "^a", flags: 1 })).toEqual(["args.flags must be a string"]);
+    expect(validate({ pattern: "^a", flags: "i" })).toEqual([]);
+    const args = { pattern: "^a", flags: "g" };
+    expect([run("pattern", "abc", args), run("pattern", "abc", args), run("pattern", "abc", args)]).toEqual([true, true, true]);
+  });
+
   it("minItems / maxItems / uniqueItems", () => {
     expect(run("minItems", [1], { value: 2 })).toBe(false);
     expect(run("maxItems", [1, 2, 3], { value: 2 })).toBe(false);

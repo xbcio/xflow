@@ -2,6 +2,25 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { XFlowEditor } from "./index";
 
+/** The canvas node's own select button (the outline is gone; the canvas is the list). */
+const canvasNode = (name: string): HTMLElement => {
+  const node = document.querySelector<HTMLElement>(`.xflow-preview-node__select[aria-label^="${name} node "]`);
+  if (!node) throw new Error(`canvas node ${name} not found`);
+  return node;
+};
+/** Deselects the node (the Inspector header button) so the Inspector shows the workflow settings. */
+const workflowSettings = (): HTMLElement => {
+  const inspector = screen.getByRole("region", { name: "属性" });
+  const deselect = within(inspector).queryByRole("button", { name: "工作流设置" });
+  if (deselect) fireEvent.click(deselect);
+  return screen.getByRole("region", { name: "属性" });
+};
+/** Opens the left column's 变量 panel from the desktop rail. */
+const variablesPanel = (): HTMLElement => {
+  fireEvent.click(screen.getByRole("button", { name: "变量" }));
+  return screen.getByRole("region", { name: "变量" });
+};
+
 describe("XFlowEditor", () => {
   const originalMatchMedia = window.matchMedia;
   const workflow = {
@@ -182,7 +201,8 @@ describe("XFlowEditor", () => {
     expect(screen.getByRole("region", { name: "Purchase approval editor" })).toBeTruthy();
     expect(screen.getByRole("toolbar", { name: "编辑器工具栏" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "节点" })).toBeTruthy();
-    expect(screen.getByRole("region", { name: "大纲" })).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "大纲" })).toBeNull();
+    expect(screen.getByRole("combobox", { name: "定位节点" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "画布" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "属性" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "诊断台" })).toBeTruthy();
@@ -198,18 +218,14 @@ describe("XFlowEditor", () => {
 
   it("exposes the new node statuses on the hooks the token rules target", () => {
     // The fixture's `route_by_amount` is a switch node, which is what the
-    // editor selects by default, so one runtime entry drives both the outline
-    // row and the inspector's run panel.
+    // editor selects by default, so one runtime entry drives both the canvas
+    // node and the inspector's run panel.
     const { rerender } = render(
       <XFlowEditor value={workflow} runtime={{ nodes: { route_by_amount: { status: "committing" } } }} />
     );
 
-    const outlineRow = within(screen.getByRole("region", { name: "大纲" })).getByRole("button", {
-      name: "选择节点 route_by_amount"
-    });
-    expect(outlineRow.querySelector(".xflow-editor-status-dot")?.getAttribute("data-status")).toBe(
-      "committing"
-    );
+    const canvasCard = () => canvasNode("route_by_amount").closest(".xflow-preview-node");
+    expect(canvasCard()?.getAttribute("data-status")).toBe("committing");
 
     fireEvent.click(screen.getByRole("tab", { name: "运行" }));
     expect(
@@ -224,9 +240,7 @@ describe("XFlowEditor", () => {
       <XFlowEditor value={workflow} runtime={{ nodes: { route_by_amount: { status: "expired" } } }} />
     );
 
-    expect(outlineRow.querySelector(".xflow-editor-status-dot")?.getAttribute("data-status")).toBe(
-      "expired"
-    );
+    expect(canvasCard()?.getAttribute("data-status")).toBe("expired");
     expect(
       screen.getByRole("tabpanel").querySelector(".xflow-editor-runtime-tag")?.getAttribute("data-status")
     ).toBe("expired");
@@ -434,11 +448,11 @@ describe("XFlowEditor", () => {
       expect(document.activeElement).toBe(search);
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "大纲" }));
+    fireEvent.click(screen.getByRole("button", { name: "变量" }));
     await waitFor(() => {
-      expect(screen.getByRole("region", { name: "大纲" })).toBeTruthy();
+      expect(screen.getByRole("region", { name: "变量" })).toBeTruthy();
       expect(screen.queryByRole("region", { name: "节点" })).toBeNull();
-      expect(screen.getByRole("button", { name: "选择节点 route_by_amount" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "添加输入参数" })).toBeTruthy();
     });
 
     const propertyRail = screen.getByRole("button", { name: "属性" });
@@ -449,6 +463,23 @@ describe("XFlowEditor", () => {
     });
     expect(nodesRail.className).not.toContain("active");
     expect(propertyRail.className).toContain("active");
+  });
+
+  it("disables the compact 节点 rail key outside edit mode", async () => {
+    mockSystemColorScheme(false, true);
+    render(<XFlowEditor value={workflow} />);
+
+    fireEvent.click(screen.getByRole("radio", { name: /预览/ }));
+
+    const nodesRail = screen.getByRole("button", { name: "节点" }) as HTMLButtonElement;
+    // Preview keeps the rail in place, but the node library is an edit-mode
+    // surface: the key says so instead of opening an empty drawer.
+    expect(nodesRail.disabled).toBe(true);
+    expect(nodesRail.title).toContain("预览模式为只读");
+
+    fireEvent.click(nodesRail);
+    await waitFor(() => expect(screen.getByRole("button", { name: "变量" })).toBeTruthy());
+    expect(screen.queryByRole("region", { name: "节点" })).toBeNull();
   });
 
   it("preserves the canvas while manually entering and leaving the compact layout", async () => {
@@ -484,7 +515,7 @@ describe("XFlowEditor", () => {
     expect(screen.getByRole("region", { name: "Purchase approval preview" })).toBe(preview);
   });
 
-  it("provides outline metadata and keyboard roving selection without dirtying the workflow", () => {
+  it("locates a node from the ⌘K node search without dirtying the workflow", async () => {
     const handleChange = vi.fn();
     render(
       <XFlowEditor
@@ -498,29 +529,22 @@ describe("XFlowEditor", () => {
       />
     );
 
-    const outline = screen.getByRole("region", { name: "大纲" });
-    const start = within(outline).getByRole("button", { name: "选择节点 start" });
-    const route = within(outline).getByRole("button", { name: "选择节点 route_by_amount" });
-    const manager = within(outline).getByRole("button", { name: "选择节点 l1_manager" });
-    expect(within(route).getByText("xflow.switch")).toBeTruthy();
-    expect(within(route).getByText("running")).toBeTruthy();
-    expect(within(route).getByText("入 1 / 出 1")).toBeTruthy();
-    expect(within(route).getByText("诊断 0")).toBeTruthy();
-    expect(start.tabIndex).toBe(-1);
-    expect(route.tabIndex).toBe(0);
+    // The canvas carries what the outline row used to: status and selection.
+    expect(canvasNode("route_by_amount").closest(".xflow-preview-node")?.getAttribute("data-status")).toBe("running");
+    expect(canvasNode("route_by_amount").closest(".xflow-preview-node")?.getAttribute("data-selected")).toBe("true");
 
-    start.focus();
-    fireEvent.keyDown(start, { key: "ArrowDown" });
-    expect(document.activeElement).toBe(route);
-    expect(route.tabIndex).toBe(0);
+    fireEvent.keyDown(window, { key: "k", metaKey: true });
+    const search = screen.getByRole("combobox", { name: "定位节点" });
+    await waitFor(() => expect(document.activeElement).toBe(search));
+    fireEvent.change(search, { target: { value: "manager" } });
+    const option = await screen.findByText("l1_manager", { selector: ".xflow-editor-node-search__option strong" });
+    expect(screen.queryByText("start", { selector: ".xflow-editor-node-search__option strong" })).toBeNull();
+    fireEvent.click(option);
 
-    fireEvent.keyDown(route, { key: "End" });
-    expect(document.activeElement).toBe(manager);
-    fireEvent.keyDown(manager, { key: "Home" });
-    expect(document.activeElement).toBe(start);
-    fireEvent.keyDown(start, { key: "r" });
-    expect(document.activeElement).toBe(route);
-
+    await waitFor(() =>
+      expect(canvasNode("l1_manager").closest(".xflow-preview-node")?.getAttribute("data-selected")).toBe("true")
+    );
+    expect(within(screen.getByRole("region", { name: "属性" })).getByDisplayValue("l1_manager")).toBeTruthy();
     expect(handleChange).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "保存" }).className).not.toContain("ant-btn-variant-solid");
   });
@@ -529,24 +553,29 @@ describe("XFlowEditor", () => {
     render(<XFlowEditor value={workflow} />);
 
     const inspector = screen.getByRole("region", { name: "属性" });
-    const config = within(inspector).getByRole("tab", { name: "配置" });
+    const parameters = within(inspector).getByRole("tab", { name: "参数" });
+    const settings = within(inspector).getByRole("tab", { name: "设置" });
     const connections = within(inspector).getByRole("tab", { name: "连接" });
     const run = within(inspector).getByRole("tab", { name: "运行" });
-    expect(config.getAttribute("aria-controls")).toBe("xflow-editor-inspector-panel-config");
-    expect(within(inspector).getAllByRole("tabpanel")[0].getAttribute("aria-labelledby")).toBe(config.id);
+    expect(parameters.getAttribute("aria-controls")).toBe("xflow-editor-inspector-panel-parameters");
+    expect(within(inspector).getAllByRole("tabpanel")[0].getAttribute("aria-labelledby")).toBe(parameters.id);
 
-    config.focus();
-    fireEvent.keyDown(config, { key: "ArrowRight" });
+    parameters.focus();
+    fireEvent.keyDown(parameters, { key: "ArrowRight" });
+    expect(document.activeElement).toBe(settings);
+    expect(settings.getAttribute("aria-selected")).toBe("true");
+    expect(within(inspector).getAllByRole("tabpanel")[0].getAttribute("aria-labelledby")).toBe(settings.id);
+
+    fireEvent.keyDown(settings, { key: "ArrowRight" });
     expect(document.activeElement).toBe(connections);
     expect(connections.getAttribute("aria-selected")).toBe("true");
-    expect(within(inspector).getAllByRole("tabpanel")[0].getAttribute("aria-labelledby")).toBe(connections.id);
 
     fireEvent.keyDown(connections, { key: "End" });
     expect(document.activeElement).toBe(run);
     expect(run.getAttribute("aria-selected")).toBe("true");
     fireEvent.keyDown(run, { key: "Home" });
-    expect(document.activeElement).toBe(config);
-    expect(config.getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(parameters);
+    expect(parameters.getAttribute("aria-selected")).toBe("true");
   });
 
   it("keeps matching parent echoes dirty and lets diagnostics locate a node without editing", async () => {
@@ -566,7 +595,7 @@ describe("XFlowEditor", () => {
       <XFlowEditor value={invalidWorkflow} onChange={handleChange} onSave={handleSave} />
     );
 
-    const inspector = screen.getByRole("region", { name: "属性" });
+    const inspector = workflowSettings();
     fireEvent.change(within(inspector).getByLabelText("工作流名称"), {
       target: { value: "Locally dirty workflow" }
     });
@@ -584,7 +613,11 @@ describe("XFlowEditor", () => {
     const locate = await screen.findByRole("button", { name: "定位节点 route_by_amount" });
     fireEvent.click(locate);
 
-    expect(within(screen.getByRole("region", { name: "属性" })).getByDisplayValue("xflow.switch")).toBeTruthy();
+    expect(
+      within(screen.getByRole("region", { name: "属性" })).getByText("xflow.switch", {
+        selector: ".xflow-editor-inspector-node__type"
+      })
+    ).toBeTruthy();
     expect(handleChange).toHaveBeenCalledTimes(1);
     expect(screen.getByText("未保存")).toBeTruthy();
   });
@@ -629,18 +662,19 @@ describe("XFlowEditor", () => {
     expect(screen.getByText("DSL 摘要")).toBeTruthy();
   });
 
-  it("selects outline nodes and exposes the editable node configuration", () => {
+  it("selects a canvas node and exposes the editable node configuration", () => {
     render(<XFlowEditor value={workflow} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "选择节点 route_by_amount" }));
+    fireEvent.click(canvasNode("route_by_amount"));
 
     const inspector = screen.getByRole("region", { name: "属性" });
     expect(within(inspector).getByText("属性")).toBeTruthy();
     expect(within(inspector).getAllByText(/route_by_amount/).length).toBeGreaterThan(0);
     expect(within(inspector).queryByText("running")).toBeNull();
-    expect(within(inspector).getByDisplayValue("xflow.switch")).toBeTruthy();
+    expect(within(inspector).getByText("xflow.switch", { selector: ".xflow-editor-inspector-node__type" })).toBeTruthy();
     expect(within(inspector).getByLabelText("节点名称").className).toContain("ant-input-sm");
-    expect(within(inspector).getByRole("tab", { name: "配置" }).getAttribute("aria-selected")).toBe("true");
+    expect(within(inspector).getByRole("tab", { name: "参数" }).getAttribute("aria-selected")).toBe("true");
+    expect(within(inspector).getByRole("tab", { name: "设置" })).toBeTruthy();
     expect(within(inspector).getByRole("tab", { name: "连接" })).toBeTruthy();
     expect(within(inspector).getByRole("tab", { name: "运行" })).toBeTruthy();
     expect(within(inspector).getByDisplayValue("Route purchase requests by amount")).toBeTruthy();
@@ -682,7 +716,7 @@ describe("XFlowEditor", () => {
 
     render(<XFlowEditor value={referencedWorkflow} onChange={handleChange} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "选择节点 worker" }));
+    fireEvent.click(canvasNode("worker"));
     const inspector = screen.getByRole("region", { name: "属性" });
     const nodeName = within(inspector).getByLabelText("节点名称");
     fireEvent.change(nodeName, { target: { value: "executor" } });
@@ -725,7 +759,7 @@ describe("XFlowEditor", () => {
 
     render(<XFlowEditor value={workflow} onChange={handleChange} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "选择节点 route_by_amount" }));
+    fireEvent.click(canvasNode("route_by_amount"));
     const inspector = screen.getByRole("region", { name: "属性" });
     const nodeName = within(inspector).getByLabelText("节点名称");
 
@@ -745,7 +779,7 @@ describe("XFlowEditor", () => {
 
     render(<XFlowEditor value={workflow} onChange={handleChange} />);
 
-    const inspector = screen.getByRole("region", { name: "属性" });
+    const inspector = workflowSettings();
     fireEvent.change(within(inspector).getByLabelText("工作流名称"), {
       target: { value: "purchase-approval-v2" }
     });
@@ -767,7 +801,7 @@ describe("XFlowEditor", () => {
     };
     const { rerender } = render(<XFlowEditor value={workflow} onChange={handleChange} />);
 
-    const inspector = screen.getByRole("region", { name: "属性" });
+    const inspector = workflowSettings();
     fireEvent.change(within(inspector).getByLabelText("工作流名称"), {
       target: { value: "Local unsaved draft" }
     });
@@ -779,9 +813,9 @@ describe("XFlowEditor", () => {
     await waitFor(() => {
       expect(screen.getByRole("region", { name: "Parent replacement editor" })).toBeTruthy();
       expect(within(screen.getByRole("region", { name: "属性" })).getByDisplayValue("Parent replacement")).toBeTruthy();
-      expect(screen.getByRole("button", { name: "选择节点 external_start" })).toBeTruthy();
+      expect(canvasNode("external_start")).toBeTruthy();
     });
-    expect(screen.queryByRole("button", { name: "选择节点 route_by_amount" })).toBeNull();
+    expect(document.querySelector('[aria-label^="route_by_amount node "]')).toBeNull();
     expect(handleChange).toHaveBeenCalledTimes(1);
   });
 
@@ -790,7 +824,9 @@ describe("XFlowEditor", () => {
 
     render(<XFlowEditor value={workflow} onChange={handleChange} />);
 
-    const inspector = screen.getByRole("region", { name: "属性" });
+    const inspector = workflowSettings();
+    // Runner is a structured row now; the JSON box is behind its `</>` toggle.
+    fireEvent.click(within(inspector).getByRole("button", { name: "以 JSON 编辑 Runner 选择" }));
     fireEvent.change(within(inspector).getByLabelText("工作流 Runner 选择 JSON"), {
       target: {
         value: '{ "mode": "required", "match_labels": { "env": "prod", "region": "cn" } }'
@@ -808,7 +844,9 @@ describe("XFlowEditor", () => {
       }
     });
 
-    fireEvent.change(within(inspector).getByLabelText("工作流输入参数 JSON"), {
+    const variables = variablesPanel();
+    fireEvent.click(within(variables).getByRole("button", { name: "以 JSON 编辑输入参数" }));
+    fireEvent.change(within(variables).getByLabelText("工作流输入参数 JSON"), {
       target: {
         value: '{ "amount": { "type": "number", "required": true, "display_name": "金额" } }'
       }
@@ -838,15 +876,16 @@ describe("XFlowEditor", () => {
 
     render(<XFlowEditor value={workflow} onChange={handleChange} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "选择节点 l1_manager" }));
+    fireEvent.click(canvasNode("l1_manager"));
     const inspector = screen.getByRole("region", { name: "属性" });
     // The form owns /runner_selector (Doc C §4.2); node-level `mode` is a
     // compile error, so only match_labels is offered. The legacy JSON box is gone.
     expect(within(inspector).queryByLabelText("节点 Runner 选择 JSON")).toBeNull();
+    fireEvent.click(within(inspector).getByRole("tab", { name: "设置" }));
     fireEvent.click(within(inspector).getByRole("button", { name: "执行策略" }));
     const labels = within(inspector).getByRole("group", { name: "匹配标签" });
     fireEvent.click(within(labels).getByRole("button", { name: /添加/ }));
-    fireEvent.change(within(labels).getByLabelText("键"), { target: { value: "env" } });
+    fireEvent.change(within(labels).getByLabelText("第 1 行的键"), { target: { value: "env" } });
     await act(async () => {
       fireEvent.change(within(labels).getByLabelText("env 的值"), { target: { value: "prod" } });
     });
@@ -861,14 +900,14 @@ describe("XFlowEditor", () => {
     });
   });
 
-  it("edits node parameters as JSON on the JSON tab and reports invalid JSON", async () => {
+  it("edits node parameters in the JSON source view and reports invalid JSON", async () => {
     const handleChange = vi.fn();
 
     render(<XFlowEditor value={workflow} onChange={handleChange} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "选择节点 route_by_amount" }));
+    fireEvent.click(canvasNode("route_by_amount"));
     const inspector = screen.getByRole("region", { name: "属性" });
-    fireEvent.click(within(inspector).getByRole("tab", { name: "JSON" }));
+    fireEvent.click(within(inspector).getByRole("button", { name: "以 JSON 编辑参数" }));
     const parameters = within(inspector).getByLabelText("参数 JSON");
 
     fireEvent.change(parameters, {
@@ -924,7 +963,7 @@ describe("XFlowEditor", () => {
         }
       }
     });
-    expect(screen.getByRole("button", { name: "选择节点 http_1" })).toBeTruthy();
+    expect(canvasNode("http_1")).toBeTruthy();
   });
 
   it("adds trigger nodes without creating invalid data connections", () => {
@@ -996,7 +1035,7 @@ describe("XFlowEditor", () => {
       expect(handleSave).toHaveBeenCalledWith(workflow);
     });
 
-    const inspector = screen.getByRole("region", { name: "属性" });
+    const inspector = workflowSettings();
     fireEvent.change(within(inspector).getByLabelText("工作流名称"), {
       target: { value: "Edited while save is pending" }
     });
@@ -1032,7 +1071,7 @@ describe("XFlowEditor", () => {
 
     render(<XFlowEditor value={workflow} onChange={handleChange} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "选择节点 route_by_amount" }));
+    fireEvent.click(canvasNode("route_by_amount"));
     const inspector = screen.getByRole("region", { name: "属性" });
     fireEvent.click(within(inspector).getByRole("tab", { name: "连接" }));
     fireEvent.click(within(inspector).getByRole("button", { name: "连接到 l1_manager" }));
@@ -1068,7 +1107,7 @@ describe("XFlowEditor", () => {
 
     render(<XFlowEditor value={objectConnectionWorkflow} onChange={handleChange} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "选择节点 start" }));
+    fireEvent.click(canvasNode("start"));
     const inspector = screen.getByRole("region", { name: "属性" });
     fireEvent.click(within(inspector).getByRole("tab", { name: "连接" }));
     fireEvent.click(within(inspector).getByRole("button", { name: "连接到 worker" }));
@@ -1105,7 +1144,7 @@ describe("XFlowEditor", () => {
 
     render(<XFlowEditor value={workflow} onChange={handleChange} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "选择节点 route_by_amount" }));
+    fireEvent.click(canvasNode("route_by_amount"));
     const inspector = screen.getByRole("region", { name: "属性" });
     fireEvent.click(within(inspector).getByRole("tab", { name: "连接" }));
     fireEvent.click(within(inspector).getByRole("button", { name: "删除连接 route_by_amount level_1 到 l1_manager main" }));
@@ -1141,7 +1180,7 @@ describe("XFlowEditor", () => {
 
     render(<XFlowEditor value={dependencyWorkflow} onChange={handleChange} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "选择节点 rules" }));
+    fireEvent.click(canvasNode("rules"));
     const inspector = screen.getByRole("region", { name: "属性" });
     fireEvent.click(within(inspector).getByRole("tab", { name: "连接" }));
 
@@ -1185,7 +1224,7 @@ describe("XFlowEditor", () => {
 
     render(<XFlowEditor value={dualRepresentationWorkflow} onChange={handleChange} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "选择节点 rules" }));
+    fireEvent.click(canvasNode("rules"));
     const inspector = screen.getByRole("region", { name: "属性" });
     fireEvent.click(within(inspector).getByRole("tab", { name: "连接" }));
     expect(within(inspector).queryByText("dependency (legacy)")).toBeNull();
@@ -1221,7 +1260,7 @@ describe("XFlowEditor", () => {
 
     render(<XFlowEditor value={legacyOnlyDependencyWorkflow} onChange={handleChange} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "选择节点 worker" }));
+    fireEvent.click(canvasNode("worker"));
     const inspector = screen.getByRole("region", { name: "属性" });
     fireEvent.click(within(inspector).getByRole("tab", { name: "连接" }));
     expect(within(inspector).getByText("dependency (legacy)")).toBeTruthy();
@@ -1241,7 +1280,7 @@ describe("XFlowEditor", () => {
 
     render(<XFlowEditor value={workflow} onChange={handleChange} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "选择节点 l1_manager" }));
+    fireEvent.click(canvasNode("l1_manager"));
     fireEvent.click(within(screen.getByRole("region", { name: "属性" })).getByRole("button", { name: "删除节点" }));
 
     expect(handleChange).toHaveBeenCalledWith({
@@ -1256,7 +1295,7 @@ describe("XFlowEditor", () => {
         }
       }
     });
-    expect(screen.queryByRole("button", { name: "选择节点 l1_manager" })).toBeNull();
+    expect(document.querySelector('[aria-label^="l1_manager node "]')).toBeNull();
   });
 
   it("cleans pin data, groups, dependency edges, and both connection directions when deleting a node", () => {
@@ -1299,7 +1338,7 @@ describe("XFlowEditor", () => {
 
     render(<XFlowEditor value={workflowWithReferences} onChange={handleChange} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "选择节点 worker" }));
+    fireEvent.click(canvasNode("worker"));
     fireEvent.click(
       within(screen.getByRole("region", { name: "属性" })).getByRole("button", {
         name: "删除节点"
@@ -1475,7 +1514,7 @@ describe("XFlowEditor", () => {
     fireEvent.click(within(screen.getByRole("region", { name: "节点" })).getByRole("button", { name: "HTTP" }));
     const changeCountBefore = handleChange.mock.calls.length;
 
-    const nameField = within(screen.getByRole("region", { name: "属性" })).getByLabelText("工作流名称");
+    const nameField = within(workflowSettings()).getByLabelText("工作流名称");
     fireEvent.keyDown(nameField, { key: "z", metaKey: true });
     expect(handleChange.mock.calls).toHaveLength(changeCountBefore);
 

@@ -9,6 +9,8 @@ import type { ElementDef, Patch } from "@xflow/composer/core";
 import { allPatches, mountComposer } from "@xflow/composer/testing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nodeFormChecks } from "../checks";
+import { compileNodeForm } from "../compile";
+import { switchSchema } from "../testdata/nodeTypes";
 import { change, clickButton, fieldOf, formSpec, kernels, one, pickOption, shownText } from "../testdata/testkit";
 import { createNodeFormRegistry, formatGoDuration, humanizeNs, isRfc3339, matchesShape, parseGoDuration } from "./index";
 
@@ -355,6 +357,54 @@ for (const kernel of kernels) {
         expect(named).toContain(input(field));
         expect(named.some((el) => el.getAttribute("role") === "group")).toBe(true);
         expect(one(field, ".xflow-editor-nodeform-expression-literal")).toBeTruthy();
+      });
+
+      it("inside an ArrayTable row the literal control is not a second, nested cell", async () => {
+        const m = mountComposer({
+          kernel,
+          registry,
+          spec: formSpec(
+            {
+              t: {
+                type: "ArrayTable",
+                props: { label: "Rows", columns: ["Name"], value: { $bindState: "/rows" } },
+                repeat: { statePath: "/rows" },
+                children: ["name"]
+              },
+              name: {
+                type: "ExpressionInput",
+                props: { label: "Name", value: { $bindItem: "name" }, mode: "template", fxToggle: true, expect: { type: "string" } },
+                slots: { literal: ["lit"] }
+              },
+              lit: { type: "Input", props: { label: "Name", value: { $bindItem: "name" } } }
+            },
+            ["t"]
+          ),
+          value: { rows: [{ name: "a" }] }
+        });
+        await m.flush();
+        const row = one<HTMLElement>(m.container, "[data-composer-row]");
+        const cells = [...row.querySelectorAll('[role="cell"]')];
+        expect(cells.filter((cell) => cell.parentElement?.closest('[role="cell"]'))).toEqual([]);
+        expect(within(row).getAllByLabelText("Name")).toContain(input(row));
+        expect(m.log).toEqual([]);
+      });
+
+      it("a compiled array-table shows its item labels as visible column headers", async () => {
+        const { spec } = compileNodeForm(switchSchema, { common: null });
+        const m = mountComposer({
+          kernel,
+          registry,
+          spec,
+          value: { name: "n1", parameters: { mode: "rules", rules: [{ condition: "${{ $input.ok }}", output: "a" }] } },
+          context: { ports: [{ name: "a" }], credentials: [] }
+        });
+        await m.flush();
+        const grid = within(m.container).getByRole("table");
+        const headers = within(grid).getAllByRole("columnheader");
+        expect(headers.map((el) => el.textContent)).toEqual(["Condition", "Output", "操作"]);
+        expect(headers.slice(0, 2).every((el) => !el.closest(".xflow-composer-visually-hidden"))).toBe(true);
+        expect(m.log).toEqual([]);
       });
     });
 

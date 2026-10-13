@@ -128,6 +128,8 @@ interface MockFlowProps extends Record<string, unknown> {
   }) => void;
   onEdgesChange?: (changes: Array<{ id: string; type: "select"; selected: boolean }>) => void;
   onEdgesDelete?: (edges: MockFlowEdge[]) => void;
+  onNodeContextMenu?: (event: MockMouseEvent, node: { id: string }) => void;
+  onPaneContextMenu?: (event: MockMouseEvent) => void;
   onBeforeDelete?: (elements: {
     nodes: Array<Record<string, unknown>>;
     edges: MockFlowEdge[];
@@ -139,6 +141,29 @@ interface MockFlowProps extends Record<string, unknown> {
     targetHandle?: string | null;
   }) => boolean;
 }
+
+interface MockMouseEvent {
+  clientX: number;
+  clientY: number;
+  preventDefault: () => void;
+}
+
+function mouseEventStub(clientX: number, clientY: number): MockMouseEvent {
+  return { clientX, clientY, preventDefault: vi.fn() };
+}
+
+const contextMenuWorkflow = {
+  name: "Menu flow",
+  nodes: [
+    { id: "start-id", name: "start", type: "xflow.start" },
+    { id: "http-id", name: "http_1", type: "xflow.http" }
+  ],
+  connections: {
+    start: {
+      main: [{ node: "http_1" }]
+    }
+  }
+} satisfies WorkflowDef;
 
 function latestFlowProps(): MockFlowProps {
   expect(reactFlowMock.latestProps).toBeTruthy();
@@ -378,8 +403,17 @@ describe("XFlowPreview", () => {
     expect(screen.getByText("success")).toBeTruthy();
     expect(screen.getAllByText("charge")).toHaveLength(3);
     expect(screen.getByLabelText("xflow.http icon")).toBeTruthy();
-    expect(screen.getAllByText("action").length).toBeGreaterThan(0);
-    expect(screen.getByText("input: main")).toBeTruthy();
+    expect(container.querySelector('[data-node-id="charge"] .xflow-preview-node__type')?.textContent).toBe("xflow.http");
+    expect(container.querySelector('[data-node-id="approval"]')?.getAttribute("data-disabled")).toBe("true");
+    expect(screen.getByText("已禁用")).toBeTruthy();
+    // The badge sits on the type line, never beside the name, so it cannot cost
+    // the name any width.
+    expect(container.querySelector(
+      '[data-node-id="approval"] .xflow-preview-node__subtitle .xflow-preview-node__badge'
+    )).toBeTruthy();
+    expect(container.querySelector(
+      '[data-node-id="approval"] .xflow-preview-node__header > .xflow-preview-node__badge'
+    )).toBeNull();
     expect(screen.getByText("2 attempts")).toBeTruthy();
     expect(screen.getByLabelText("start main to charge main")).toBeTruthy();
 
@@ -573,6 +607,89 @@ describe("XFlowPreview", () => {
     expect(getNodesBounds).toHaveBeenLastCalledWith([sourceNode]);
     expect(fitBounds).toHaveBeenLastCalledWith(sourceBounds, { padding: 0.28 });
     expect(fitBounds).toHaveBeenCalledTimes(2);
+  });
+
+  it("waits for a newly selected node to be measured before fitting it", () => {
+    const frameCallbacks: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frameCallbacks.push(callback);
+      return frameCallbacks.length;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+
+    const targetNode = { id: "target-id" };
+    const measuredBounds = { x: 680, y: 240, width: 240, height: 96 };
+    const fitBounds = vi
+      .fn<(bounds: unknown, options?: { padding?: number }) => Promise<boolean>>()
+      .mockResolvedValue(true);
+    // The first read is the unmeasured 0x0 box a just-appended node reports.
+    const getNodesBounds = vi
+      .fn((_nodes: Array<{ id: string }>) => measuredBounds)
+      .mockReturnValueOnce({ x: 680, y: 240, width: 0, height: 0 });
+    const flowInstance: MockFlowInstance = {
+      fitBounds,
+      getNodes: vi.fn(() => [{ id: "source-id" }, targetNode]),
+      getNodesBounds,
+      getViewport: () => ({ x: 0, y: 0, zoom: 1 })
+    };
+    const { rerender } = render(<XFlowPreview workflow={portWorkflow} defaultViewport={{ x: 0, y: 0, zoom: 1 }} />);
+
+    act(() => {
+      latestFlowProps().onInit?.(flowInstance);
+    });
+    rerender(
+      <XFlowPreview workflow={portWorkflow} defaultViewport={{ x: 0, y: 0, zoom: 1 }} selectedNodeId={targetNode.id} />
+    );
+
+    // A 0-size box would clamp the zoom to maxZoom, so it must not be fitted.
+    expect(fitBounds).not.toHaveBeenCalled();
+    expect(frameCallbacks).toHaveLength(1);
+
+    act(() => {
+      frameCallbacks.shift()?.(0);
+    });
+
+    expect(fitBounds).toHaveBeenCalledTimes(1);
+    expect(fitBounds).toHaveBeenCalledWith(measuredBounds, { padding: 0.28 });
+  });
+
+  it("cancels a pending initial fit when a viewport to restore arrives after mount", () => {
+    const frameCallbacks = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      nextFrame += 1;
+      frameCallbacks.set(nextFrame, callback);
+      return nextFrame;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (frame: number) => {
+      frameCallbacks.delete(frame);
+    });
+    reactFlowMock.fitBounds.mockResolvedValue(true);
+
+    const workflow = {
+      id: "wf-late-viewport",
+      name: "Late viewport flow",
+      nodes: [{ name: "start", type: "xflow.start" }],
+      connections: {}
+    } satisfies WorkflowDef;
+    const { rerender } = render(<XFlowPreview workflow={workflow} />);
+
+    act(() => {
+      latestFlowProps().onInit?.({
+        fitBounds: reactFlowMock.fitBounds,
+        getNodes: () => [{ id: "source-id" }],
+        getNodesBounds: reactFlowMock.getNodesBounds
+      });
+    });
+    expect(frameCallbacks.size).toBe(1);
+
+    rerender(<XFlowPreview workflow={workflow} defaultViewport={{ x: 10, y: 20, zoom: 1.5 }} />);
+
+    act(() => {
+      for (const callback of [...frameCallbacks.values()]) callback(0);
+    });
+
+    expect(reactFlowMock.fitBounds).not.toHaveBeenCalled();
   });
 
   it("leaves a selected node alone when it is already on screen", () => {
@@ -1112,5 +1229,278 @@ describe("XFlowPreview", () => {
       target: "regular_target",
       targetPort: "main"
     });
+  });
+
+  it("hides the run status on a card until a run has moved the node", () => {
+    const { container, rerender } = render(<XFlowPreview workflow={contextMenuWorkflow} />);
+
+    expect(container.querySelector(".xflow-preview-node__status")).toBeNull();
+    expect(screen.queryByText("ready")).toBeNull();
+
+    rerender(
+      <XFlowPreview
+        workflow={contextMenuWorkflow}
+        runtime={{ status: "running", nodes: { http_1: { status: "failed", durationMs: 40 } } }}
+      />
+    );
+
+    const statuses = container.querySelectorAll(".xflow-preview-node__status");
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]!.textContent).toBe("failed");
+    expect(screen.getByText("40 ms")).toBeTruthy();
+  });
+
+  it("keeps the full node name in a title so a truncated card stays readable", () => {
+    const { container } = render(
+      <XFlowPreview
+        workflow={{
+          name: "Long flow",
+          nodes: [{ name: "fetch-pull-request-metadata", type: "xflow.http", ui: { label: "Fetch PR" } }]
+        }}
+      />
+    );
+
+    const title = container.querySelector(".xflow-preview-node__title strong");
+    expect(title?.textContent).toBe("Fetch PR");
+    expect(title?.getAttribute("title")).toBe("Fetch PR (fetch-pull-request-metadata)");
+  });
+
+  it("selects a right-clicked node and requests its context menu at the pointer", () => {
+    const onSelectNode = vi.fn();
+    const onNodeContextMenu = vi.fn();
+    render(
+      <XFlowPreview
+        workflow={contextMenuWorkflow}
+        onSelectNode={onSelectNode}
+        onNodeContextMenu={onNodeContextMenu}
+      />
+    );
+
+    const event = mouseEventStub(120, 240);
+    act(() => {
+      latestFlowProps().onNodeContextMenu?.(event, { id: "http-id" });
+    });
+
+    expect(event.preventDefault).toHaveBeenCalled();
+    expect(onSelectNode).toHaveBeenCalledWith("http-id");
+    expect(onNodeContextMenu).toHaveBeenCalledWith("http-id", { clientX: 120, clientY: 240 });
+  });
+
+  it("requests a pane context menu with both client and canvas coordinates", () => {
+    const onPaneContextMenu = vi.fn();
+    const screenToFlowPosition = vi.fn((point: { x: number; y: number }) => ({ x: point.x / 2, y: point.y / 2 }));
+    render(<XFlowPreview workflow={contextMenuWorkflow} onPaneContextMenu={onPaneContextMenu} />);
+
+    act(() => {
+      latestFlowProps().onInit?.({
+        fitBounds: reactFlowMock.fitBounds,
+        getNodes: () => [],
+        getNodesBounds: reactFlowMock.getNodesBounds,
+        screenToFlowPosition
+      });
+    });
+    const event = mouseEventStub(300, 500);
+    act(() => {
+      latestFlowProps().onPaneContextMenu?.(event);
+    });
+
+    expect(event.preventDefault).toHaveBeenCalled();
+    expect(screenToFlowPosition).toHaveBeenCalledWith({ x: 300, y: 500 });
+    expect(onPaneContextMenu).toHaveBeenCalledWith({ clientX: 300, clientY: 500, flowX: 150, flowY: 250 });
+  });
+
+  it("leaves the native context menu alone when no menu callback is supplied", () => {
+    const { container } = render(<XFlowPreview workflow={contextMenuWorkflow} selectedNodeId="http-id" />);
+
+    const flow = latestFlowProps();
+    expect(flow.onNodeContextMenu).toBeUndefined();
+    expect(flow.onPaneContextMenu).toBeUndefined();
+
+    const httpNode = container.querySelector('[aria-label="http_1 node pending"]')!;
+    expect(httpNode.getAttribute("aria-keyshortcuts")).toBeNull();
+    // fireEvent returns false only when a handler called preventDefault.
+    expect(fireEvent.keyDown(httpNode, { key: "ContextMenu" })).toBe(true);
+    expect(fireEvent.keyDown(httpNode, { key: "F10", shiftKey: true })).toBe(true);
+  });
+
+  it("opens a node menu from the keyboard at the focused card's center", () => {
+    const onSelectNode = vi.fn();
+    const onNodeContextMenu = vi.fn();
+    const { container } = render(
+      <XFlowPreview
+        workflow={contextMenuWorkflow}
+        onSelectNode={onSelectNode}
+        onNodeContextMenu={onNodeContextMenu}
+      />
+    );
+
+    const card = container.querySelector('[data-node-id="http-id"]') as HTMLElement;
+    vi.spyOn(card, "getBoundingClientRect").mockReturnValue(
+      { left: 100, top: 50, width: 232, height: 60, right: 332, bottom: 110, x: 100, y: 50, toJSON: () => ({}) }
+    );
+    const httpNode = container.querySelector('[aria-label="http_1 node pending"]')!;
+    expect(httpNode.getAttribute("aria-keyshortcuts")).toBe("Shift+F10 ContextMenu");
+
+    expect(fireEvent.keyDown(httpNode, { key: "F10", shiftKey: true })).toBe(false);
+    expect(onSelectNode).toHaveBeenCalledWith("http-id");
+    expect(onNodeContextMenu).toHaveBeenCalledTimes(1);
+    expect(onNodeContextMenu).toHaveBeenCalledWith("http-id", { clientX: 216, clientY: 80 });
+
+    // A plain F10 is not the context-menu chord.
+    fireEvent.keyDown(httpNode, { key: "F10" });
+    expect(onNodeContextMenu).toHaveBeenCalledTimes(1);
+
+    // The native contextmenu echo of that key press must not open a second menu.
+    act(() => {
+      latestFlowProps().onNodeContextMenu?.(mouseEventStub(0, 0), { id: "http-id" });
+    });
+    expect(onNodeContextMenu).toHaveBeenCalledTimes(1);
+
+    // ...but consuming that echo closes the window, so a real right click in the
+    // same 500ms still opens a menu instead of being swallowed as another echo.
+    const nextClick = mouseEventStub(40, 60);
+    act(() => {
+      latestFlowProps().onNodeContextMenu?.(nextClick, { id: "start-id" });
+    });
+    expect(nextClick.preventDefault).toHaveBeenCalled();
+    expect(onNodeContextMenu).toHaveBeenCalledTimes(2);
+    expect(onNodeContextMenu).toHaveBeenLastCalledWith("start-id", { clientX: 40, clientY: 60 });
+  });
+
+  it("opens the selected node's menu from the ContextMenu key anywhere on the canvas", () => {
+    const onNodeContextMenu = vi.fn();
+    const { container } = render(
+      <XFlowPreview
+        workflow={contextMenuWorkflow}
+        selectedNodeId="start-id"
+        onNodeContextMenu={onNodeContextMenu}
+      />
+    );
+
+    const canvas = container.querySelector(".xflow-preview-canvas")!;
+    expect(fireEvent.keyDown(canvas, { key: "ContextMenu" })).toBe(false);
+    expect(onNodeContextMenu).toHaveBeenCalledWith("start-id", { clientX: 0, clientY: 0 });
+  });
+
+  it("does not open a keyboard menu from the canvas with nothing selected", () => {
+    const onNodeContextMenu = vi.fn();
+    const { container } = render(
+      <XFlowPreview workflow={contextMenuWorkflow} onNodeContextMenu={onNodeContextMenu} />
+    );
+
+    const canvas = container.querySelector(".xflow-preview-canvas")!;
+    expect(fireEvent.keyDown(canvas, { key: "ContextMenu" })).toBe(true);
+    expect(onNodeContextMenu).not.toHaveBeenCalled();
+  });
+
+  it("exposes fit-view and center-node commands once the canvas is ready", () => {
+    const frameCallbacks: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frameCallbacks.push(callback);
+      return frameCallbacks.length;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+
+    const onReady = vi.fn();
+    const sourceNode = { id: "source-id" };
+    const targetNode = { id: "target-id" };
+    const graphBounds = { x: 0, y: 0, width: 900, height: 400 };
+    const targetBounds = { x: 680, y: 240, width: 240, height: 96 };
+    const fitBounds = vi
+      .fn<(bounds: unknown, options?: { padding?: number }) => Promise<boolean>>()
+      .mockResolvedValue(true);
+    const getNodesBounds = vi.fn((nodes: Array<{ id: string }>) => (
+      nodes.length === 1 && nodes[0]?.id === targetNode.id ? targetBounds : graphBounds
+    ));
+    const flowInstance: MockFlowInstance = {
+      fitBounds,
+      getNodes: vi.fn(() => [sourceNode, targetNode]),
+      getNodesBounds,
+      getViewport: () => ({ x: 0, y: 0, zoom: 1 })
+    };
+    render(<XFlowPreview workflow={portWorkflow} onReady={onReady} />);
+
+    expect(onReady).not.toHaveBeenCalled();
+
+    act(() => {
+      latestFlowProps().onInit?.(flowInstance);
+    });
+
+    expect(onReady).toHaveBeenCalledTimes(1);
+    const handle = onReady.mock.calls[0]![0] as {
+      fitView: (options?: { padding?: number }) => void;
+      fitNode: (nodeId: string, options?: { padding?: number }) => void;
+    };
+
+    act(() => {
+      handle.fitView();
+    });
+
+    expect(getNodesBounds).toHaveBeenLastCalledWith([sourceNode, targetNode]);
+    expect(fitBounds).toHaveBeenLastCalledWith(graphBounds, { padding: 0.18 });
+
+    act(() => {
+      handle.fitView({ padding: 0.4 });
+    });
+
+    expect(fitBounds).toHaveBeenLastCalledWith(graphBounds, { padding: 0.4 });
+
+    act(() => {
+      handle.fitNode("target-id");
+    });
+
+    expect(getNodesBounds).toHaveBeenLastCalledWith([targetNode]);
+    expect(fitBounds).toHaveBeenLastCalledWith(targetBounds, { padding: 0.28 });
+
+    act(() => {
+      handle.fitNode("missing-node");
+    });
+
+    expect(fitBounds).toHaveBeenCalledTimes(3);
+  });
+
+  it("waits for an unmeasured node before centering on it from the handle", () => {
+    const frameCallbacks: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frameCallbacks.push(callback);
+      return frameCallbacks.length;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+
+    const onReady = vi.fn();
+    const targetNode = { id: "target-id" };
+    const measuredBounds = { x: 680, y: 240, width: 240, height: 96 };
+    const fitBounds = vi
+      .fn<(bounds: unknown, options?: { padding?: number }) => Promise<boolean>>()
+      .mockResolvedValue(true);
+    // The first read is the unmeasured 0x0 box a just-appended node reports.
+    const getNodesBounds = vi
+      .fn((_nodes: Array<{ id: string }>) => measuredBounds)
+      .mockReturnValueOnce({ x: 680, y: 240, width: 0, height: 0 });
+    render(<XFlowPreview workflow={portWorkflow} onReady={onReady} />);
+
+    act(() => {
+      latestFlowProps().onInit?.({
+        fitBounds,
+        getNodes: () => [targetNode],
+        getNodesBounds,
+        getViewport: () => ({ x: 0, y: 0, zoom: 1 })
+      });
+    });
+
+    const handle = onReady.mock.calls[0]![0] as { fitNode: (nodeId: string) => void };
+    act(() => {
+      handle.fitNode("target-id");
+    });
+
+    expect(getNodesBounds).toHaveBeenCalledTimes(1);
+    expect(fitBounds).not.toHaveBeenCalled();
+
+    act(() => {
+      frameCallbacks.at(-1)?.(0);
+    });
+
+    expect(fitBounds).toHaveBeenCalledTimes(1);
+    expect(fitBounds).toHaveBeenCalledWith(measuredBounds, { padding: 0.28 });
   });
 });

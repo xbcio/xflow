@@ -14,7 +14,7 @@ xflow 是一个通用、可嵌入的工作流引擎 SDK：用户用 DAG 编排�
 |---|---|---|---|---|---|---|
 | **local** | 本进程 | 本进程（goroutine 池） | 进程内存 | 无 | 开发、测试、单进程嵌入 | 已实现 |
 | **cluster** | 每个对等进程 | 每个对等进程（自带 Asynq server） | Redis（+ 可选持久化 Store） | Redis | 多副本对等部署、需要持久化与挂起/信号 | 已实现 |
-| **remote** | SDK 瘦客户端 | 远端 runner 集群 | 远端（server 管理） | 网络可达的 server | 轻量嵌入、客户端不愿引入 Redis/执行负载 | 规划 |
+| **remote** | SDK 瘦客户端 | 远端 runner 集群 | 远端（server 管理） | 网络可达的 server | 轻量嵌入、客户端不愿引入 Redis/执行负载 | 已实现 |
 | **server**（Control Plane） | 接受外部提交 | 不执行 handler | 通过 StateStore | Redis / 持久化 Store / Asynq | 集群控制面、调度权威 | MVP 已实现 |
 | **embedded server** (`xflow.NewServer`) | 宿主进程 HTTP/gRPC 或 mounted handler | 不执行 handler | 内存或 Redis-backed server state | 无或 Redis / 持久化 Store / Asynq | 应用进程内嵌控制面，但执行仍交给 runner | MVP 已实现 |
 | **runner protocol**（执行协议） | 不提交 | 不执行 handler | server 持有最终状态 | HTTP+JSON long poll / gRPC | server 与 runner 的统一执行协议 | MVP 已实现（HTTP/gRPC）；streaming / credit-flow 为实验性 |
@@ -76,23 +76,30 @@ xflow 是一个通用、可嵌入的工作流引擎 SDK：用户用 DAG 编排�
 - 无 `Waiter` 实现，`Wait()` 退化为按 500ms 轮询 `StateStore`。
 - 角色无法分离（见上），控制面与执行面耦合在同一进程。
 
-### 2.3 remote（规划）
+### 2.3 remote（已实现）
 
 SDK 作为**瘦客户端**：自己不执行节点、不需要 Redis，通过网络把工作流提交给远端的 server / runner 集群，只做提交 + 查询状态 + 投递信号。这是「轻量嵌入」的目标形态。
 
-| 维度 | 规划说明 |
+| 维度 | 现状 |
 |---|---|
-| 工厂 | 待定（如 `xflow.NewRemote(endpoint, opts...)`） |
-| StateStore | 无本地状态；状态由远端 server 持有，客户端经 API 查询 |
-| TaskQueue | 无本地队列；提交即转为对 server 的网络调用 |
-| Registry | 客户端无需 handler；handler 由 runner 侧持有 |
+| 工厂 | `xflow.NewRemote(endpoint, opts...) (*Remote, error)`（`sdk/xflow/remote.go`）；endpoint 是 server 基址，路由挂在 `<endpoint>/v1/...` |
+| 认证 / 身份 | `WithRemoteToken` 的 bearer token 只走 `Authorization` 头（不进 URL，不进日志）；租户是 token 在 server 侧绑定的 namespace，客户端没有 namespace 参数 |
+| 传输 | `WithRemoteHTTPClient`（自备 transport）或 `WithRemoteCA` / `WithRemoteTLSCert`（私有 CA / mTLS）；`WithRemoteTimeout` 只约束普通请求，Wait 的 hold 不受它限制 |
+| StateStore / TaskQueue / Registry | 全部没有：客户端不装配 engine，无本地状态、无本地队列、不注册 handler |
 | 外部依赖 | 网络可达的 server（不依赖 Redis、不承担执行负载） |
 
-**执行模型（规划）**：客户端 `AddWorkflow` 把 `WorkflowDef` 注册到 server，`Invoke` 指定 `xflow.start` 或 trigger entry 创建 execution；server 编译、派发；runner 执行；客户端通过 `Status` / `Wait` 查询、通过 `Signal` 投递信号。SDK 的 remote 模式即 server / runner 集群的客户端。
+**执行模型（已实现）**：客户端 `AddWorkflow` 把 `WorkflowDef` POST 到 `/v1/workflows`，server 编译、发 id；`Invoke`（按 workflow id）走 `/v1/workflows/{id}/execute` 创建 execution；`Wait` 循环请求 `/v1/executions/{id}/wait?timeout=30s`（200 终态 detail，202 表示服务端 hold 到期、继续轮询，ctx 取消即刻返回 `ctx.Err()`）；`Signal` / `RevokeSignal`、`Cancel` / `Pause` / `Resume`、`Rerun`、`Inspect` 与集合读取 `ListExecutions`（`GET /v1/executions`，Remote 独有，engine 无对应物）各对应一条 `/v1` 路由。
+
+**与 in-process 调用点的三处刻意偏差**（都写在方法文档里）：
+
+- `ReplaceWorkflow` 显式接收 workflow id：server 发的 id 是 uuid、PUT 按 id 寻址，`*Server.ReplaceWorkflow` 按 (name, version) 在进程内解析、手上没有 id。
+- `Invoke` 拒绝 `WithExecutionTTL` / `WithRuntime` / `WithTraceID`：execute 路由没有这些字段，静默丢弃会承诺一个语义不同的运行。
+- 每次 `Invoke` 都带 `Idempotency-Key`（调用方未给则客户端生成 128 位随机 hex）；传输失败（无任何响应）用同一 key 重试一次。已拿到响应——无论什么状态码——不重试，由调用方按 `*RemoteError` 决定。
+- 错误经 `*RemoteError`（`Status` / `Code` / `Message` / `RetryAfter`）映射到 SDK 既有 sentinel：`errors.Is(err, engine.ErrConcurrencyLimit)`、`store.ErrNotFound` 等写法对 Remote 与对 Engine 一致；401/403 映射为 `ErrRemoteUnauthenticated` / `ErrRemoteForbidden`。`Retryable()` 只认 5xx 且排除 501（能力性答复，重试不会改变答案）。
 
 **何时用**：嵌入方不愿引入 Redis 依赖、不愿承担节点执行负载，只想把工作流「托管」给集群运行。
 
-**当前状态**：本地内存后端位于 `backend/providers/local/`；当前 embedded cluster backend 位于 `backend/providers/distributed/`；**没有 remote 实现**；代码中也无 remote 工厂或客户端实现。属于规划，尚未落地。后续实现 remote 时应按客户端能力命名，不必延续 `adapter` 叫法。
+**当前边界**：客户端面已有 httptest 契约测试（`sdk/xflow/remote_test.go`）；尚未纳入 `make test-integration-required` 的真实集群 shard。
 
 ### 2.4 embedded server
 
@@ -218,7 +225,7 @@ SAS 是第一个宿主：它此前手工装配，配置里漏了 `SupportsEncryp
 
 ## 3. server + runner 集群架构（MVP 已实现）
 
-面向「用户通过 UI 定义工作流」的集群服务，由两个角色构成。当前已落地第一版 MVP：`cmd/server` 或 `xflow.NewServer` 提供 HTTP/gRPC 控制面，`cmd/runner` 或嵌入式 runner 通过 Runner Protocol（HTTP+JSON long polling，另有 gRPC 通道，见 `service/protocol/grpc_client.go`）领取 lease、执行 handler、回传 result。SDK 的 remote 模式仍是后续计划。
+面向「用户通过 UI 定义工作流」的集群服务，由两个角色构成。当前已落地第一版 MVP：`cmd/server` 或 `xflow.NewServer` 提供 HTTP/gRPC 控制面，`cmd/runner` 或嵌入式 runner 通过 Runner Protocol（HTTP+JSON long polling，另有 gRPC 通道，见 `service/protocol/grpc_client.go`）领取 lease、执行 handler、回传 result。SDK 的 remote 模式已落地为这套集群的 HTTP 客户端（`xflow.NewRemote`，见 §2.3）。
 
 ### 3.1 角色职责
 
@@ -235,7 +242,7 @@ runner 可横向扩缩容：跑多个 runner 实例即可线性扩展执行吞�
 **MVP 现有边界**：
 - Runner Protocol 已提供 HTTP+JSON long polling 与 gRPC 通道；**streaming / credit-flow control 仍是实验性传输优化**，不应视为生产级可靠性承诺。
 - 没有 Relay Gateway；runner 必须能到达 server。runner 进程经环境代理的连接已支持：HTTPS 出站由 runner 自己的拨号层解析 `HTTPS_PROXY` / `NO_PROXY` 并完成 CONNECT 隧道（x/net/httpproxy 语义：https 目标不回落 `HTTP_PROXY`；代理本身是 `https://` 时以系统根校验其 TLS，且不向代理出示客户端证书），明文 http 请求不进该隧道层（静态明文客户端沿用 net/http 自身的 `HTTP_PROXY` 解析，reloadable 传输显式直连），gRPC 通道使用 grpc-go 内建的环境代理支持。
-- 没有 remote SDK；提交、查询、信号 API 先由 `cmd/server` 或 `xflow.NewServer` 暴露的 server HTTP handler 提供。
+- remote SDK 已实现（`xflow.NewRemote`，§2.3）：提交、查询、信号走 server 的 `/v1` HTTP 面，与 `cmd/server` / `xflow.NewServer` 暴露的 handler 是同一套路由。
 - **已实现** runner bearer token、mTLS、runner policy allowlist、dry-run rollout，以及 workflow-level namespace authorization、namespace 隔离边界和审计链路；G2 仍需在真实多 namespace、Redis HA 与多副本环境完成验收，而不是重新设计这些边界。
 - **已实现** runner matching 的 `node_type` / `node_version` 精确匹配、`match_labels` 放置标签（`default` 模式为软偏好：无匹配时 30s 宽限后在 claim 与 entry activation 两条路径上均可回落至任意 capable runner；`required` 模式硬性、永不回落）、runner policy 过滤与容量 gating。标签由运维显式提供（YAML `labels` / `--label`）；`auto_labels` 只探测 os / arch / env(bare|kubernetes) / hostname，不做云元数据调用，region / env 放置维度需以显式标签表达。**权重调度仍在规划**，当前 claim 路径无权重语义。
 - **已实现** Redis-backed durable assignment / claim / leased handoff、claim expiry 回收、重连 lease replay（按 runner 上报的 `active_lease_ids` 排除在执行中的 lease），以及 lease TTL + sweeper 回收与 re-enqueue。handler 与协议响应仍是 at-least-once，必须使用业务幂等键。
@@ -260,7 +267,7 @@ server 和 runner 共享同一套 `engine/` 核心语义，但不共享 Redis �
 - `BuildTaskLease(ctx, task)`：server / dispatcher 根据队列任务构建 runner 所需的 `TaskLease`，写入新的 lease token，但不执行 handler。
 - `CommitTaskResult(ctx, lease, result)`：server / dispatcher 接收 runner result 后，校验 `LeaseToken`，写入节点结果并推进 DAG。
 
-`execution/` 承接 `TaskLease -> Executor -> TaskResult` 的通用运行时。SDK `local` / `cluster` 已切到 embedded `execution.Dispatcher` / `execution.Runner`；未来 `remote` 的差异应收敛到 protocol / backend / registry 装配方式，而不是分叉 engine 调度语义。
+`execution/` 承接 `TaskLease -> Executor -> TaskResult` 的通用运行时。SDK `local` / `cluster` 已切到 embedded `execution.Dispatcher` / `execution.Runner`；`remote` 不装配 engine，只经 server 的 `/v1` HTTP 面提交与查询（§2.3），差异收敛在客户端而不分叉 engine 调度语义。
 
 ### 3.3 与 SDK remote 的关系
 
@@ -684,7 +691,7 @@ Relay Gateway 用于 runner 无法直连 server、不能互相直连或需要本
 |---|---|---|
 | local 模式 | **已实现** | `backend/providers/local/` 完整：内存 state/queue + reusable `execution.Registry` + Waiter |
 | cluster 模式 | **已实现** | `backend/providers/distributed/` 完整：Redis state + Asynq queue + reusable `execution.Dispatcher` / `execution.Runner` / `execution.Registry` + TimeoutMonitor |
-| remote 模式 | **规划** | 无 remote SDK client/backend，无 remote 工厂 |
+| remote 模式 | **已实现** | `sdk/xflow/remote.go` 的 `NewRemote` 客户端只打 server 的 `/v1` HTTP 面：无本地 engine/state/queue/registry；`ReplaceWorkflow` 按 id、`Invoke` 每次带 Idempotency-Key 并对传输失败同 key 重试一次、`Wait` 走 wait 路由的 hold 轮询；错误映射到 SDK sentinel（§2.3）。契约由 `sdk/xflow/remote_test.go` 的 httptest 用例固定，尚未纳入真实集群 integration shard |
 | embedded server | **已实现** | `xflow.NewServer`（§2.4）；`cmd/server` 即其调用方，装配单一路径 |
 | embedded runner | **已实现** | `xflow.NewRunner`（§2.5）；`cmd/runner` 即其调用方；`Run` 自带重连 |
 | server 管理面 | **MVP 已实现** | `cmd/server` 可启动 HTTP 控制面，支持 workflow invoke、inspect、signal、cancel、runner register/heartbeat/poll/result |
@@ -698,7 +705,7 @@ Relay Gateway 用于 runner 无法直连 server、不能互相直连或需要本
 | 批次任务队列隔离 | **已实现** | 两个后端各自分离批次通道并加权调度（§4.3）；升级须 consumer 先于 producer |
 | 控制面 HA / 多 namespace 生产隔离 | **未验收** | leader election 只 gate maintenance（§4.5）；G2 仍需真实环境报告；对外声明见 [RELEASE-GATES.md](./RELEASE-GATES.md) §4.2 与 §6 |
 
-一句话：**local / cluster 已可用；server / runner 的 durable handoff MVP 已落地；remote SDK、Relay Gateway、Loop 正式版与 streaming / credit-flow control 仍在规划或实验阶段。完整 control-plane HA 仍需独立验证与设计。**
+一句话：**local / cluster / remote 已可用；server / runner 的 durable handoff MVP 已落地；Relay Gateway、Loop 正式版与 streaming / credit-flow control 仍在规划或实验阶段。完整 control-plane HA 仍需独立验证与设计。**
 
 ### 7.1 实验性功能与非承诺（对外声明口径）
 
@@ -712,9 +719,9 @@ Relay Gateway 用于 runner 无法直连 server、不能互相直连或需要本
 | Kafka aggregate `on_overflow` | 默认 `discard` 是**永久丢弃**；三个取值 `discard` / `block` / `dead_letter`，未识别取值使 activation 失败而非回退 | `node/trigger/kafka/aggregate.go:116-122,1326-1335`；`observability/metrics/metrics.go:446-447,454`（`xflow_trigger_messages_discarded_total`、`xflow_trigger_messages_dead_lettered_total`、`xflow_trigger_consumption_blocked`） |
 | server 托管 webhook 入口的认证 | **只有每入口的 HMAC 签名**：该路由不在 principal/authz 包装器内（外部发送方没有平台身份）；密钥缺失时注册期即拒、运行期 503，不 fail open | §3.4；`service/apiserver/module_webhook.go`（`hmac.Equal` 常量时间比较、`secret_supply` 读 supply）；`service/apiserver/module_webhook_test.go`（401 / 404 / 405 / 413 / 503 与注册期拒绝） |
 | leader election | 只协调 leader-only maintenance，**不是** control-plane HA / failover SLO | §4.5；[RELEASE-GATES.md](./RELEASE-GATES.md) §4 反声明 |
-| Remote SDK / Relay Gateway / Raft | **规划或不建设**：remote 与 Relay Gateway 无实现，Raft 明确不引入 | §7 本表对应行；[CORE-COMPONENTS.md](./CORE-COMPONENTS.md):5 |
+| Relay Gateway / Raft | **规划或不建设**：Relay Gateway 无实现，Raft 明确不引入 | §7 本表对应行；[CORE-COMPONENTS.md](./CORE-COMPONENTS.md):5 |
 
-> 本阶段的**非范围**：Remote SDK、Relay Gateway、Raft，以及通用低代码 / ETL / 浏览器自动化平台。
+> 本阶段的**非范围**：Relay Gateway、Raft，以及通用低代码 / ETL / 浏览器自动化平台。
 > 面向使用者的合并版声明（含支持矩阵与待批准事项）见
 > [README「Supported Topologies and Guarantees」](../../README.md#supported-topologies-and-guarantees)；
 > 本文档与 [RELEASE-GATES.md §6](./RELEASE-GATES.md#6-open-approvals未批准事项支持矩阵--迁移停机窗口--runbook-owner)
@@ -730,7 +737,7 @@ Relay Gateway 用于 runner 无法直连 server、不能互相直连或需要本
 | 嵌入单进程应用、无外部依赖要求 | **local** |
 | 需要内联直挂 handler（闭包/匿名函数） | **local**（仅此模式支持） |
 | 需要持久化、挂起/信号、多副本对等部署 | **cluster** |
-| 嵌入方不想引入 Redis、不想承担执行负载 | **remote**（待落地；当前只能退回 cluster 或 local） |
+| 嵌入方不想引入 Redis、不想承担执行负载 | **remote**（已实现：`xflow.NewRemote`，§2.3） |
 | 面向 UI 定义工作流、控制面与执行面分离扩缩容 | **server + Task Dispatcher + Runner Protocol + runner**（MVP 已实现） |
 | runner 能访问 server，但不应直连 Redis | **server + Runner Protocol + runner**（MVP 已实现，推荐主路径） |
 | runner 无法直连 server，且不应直连 Redis | **server + Relay Gateway + runner**（规划） |
@@ -743,7 +750,7 @@ Relay Gateway 用于 runner 无法直连 server、不能互相直连或需要本
 └─ 是
    ├─ 客户端能接受引入 Redis 且参与执行？
    │   ├─ 是 ─────────────────────► cluster
-   │   └─ 否 ─────────────────────► remote（规划，暂不可用）或 server HTTP API
+   │   └─ 否 ─────────────────────► remote（`xflow.NewRemote`，§2.3）或 server HTTP API
    └─ 需要控制面 / 执行面独立扩缩容？ ─► server + runner（MVP）
 ```
 

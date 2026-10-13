@@ -125,12 +125,26 @@ var projectGroupPackage = graph.ProjectGroupPackage
 // same unit depending on one supply yield one requirement. It returns nil (not an
 // empty slice) when the unit depends on nothing — the wire format's omitempty and
 // the byte-for-byte stability of existing directives both depend on that.
-func SuppliesForEntryUnit(g *graph.Graph, unitIdx int) []engine.SupplyRequirement {
+//
+// A pull supply (xflow.supply.http) additionally carries its parsed fetch source:
+// the runner must not have to look the definition up again, and the parse is the
+// same one the graph compiler ran at registration, so the two can never disagree.
+// A parse failure here is returned rather than downgraded. The compiler already
+// rejected the node, so this is unreachable for a graph that was compiled by this
+// version — but the alternative on a graph that arrives from anywhere else is a
+// requirement that reads as store-backed while the author meant a pull source:
+// the runner would find no store record and, with require_ready false, happily
+// serve empty content.
+func SuppliesForEntryUnit(g *graph.Graph, unitIdx int) ([]engine.SupplyRequirement, error) {
 	if g == nil {
-		return nil
+		return nil, nil
 	}
 	byNode := map[string]engine.SupplyRequirement{}
+	var pullErr error
 	walkEntryUnitNodes(g, unitIdx, func(nodeIdx int) {
+		if pullErr != nil {
+			return
+		}
 		for _, supplyName := range g.SupplyRefsFor(nodeIdx) {
 			if _, seen := byNode[supplyName]; seen {
 				continue
@@ -141,17 +155,29 @@ func SuppliesForEntryUnit(g *graph.Graph, unitIdx int) []engine.SupplyRequiremen
 				// is unreachable; skip rather than panic if it ever is.
 				continue
 			}
-			params := g.NodeAt(si).Parameters
-			byNode[supplyName] = engine.SupplyRequirement{
+			meta := g.NodeAt(si)
+			req := engine.SupplyRequirement{
 				Node:         supplyName,
-				Resource:     supply.ResourceName(supplyName, params),
-				RequireReady: supply.RequireReady(params),
+				Resource:     supply.ResourceName(supplyName, meta.Parameters),
+				RequireReady: supply.RequireReady(meta.Parameters),
 			}
+			if meta.Type == types.SupplyPullNodeType {
+				src, err := types.ParseSupplyPullSource(meta.Parameters)
+				if err != nil {
+					pullErr = fmt.Errorf("supply node %q: %w", supplyName, err)
+					return
+				}
+				req.PullSource = &src
+			}
+			byNode[supplyName] = req
 		}
 	})
+	if pullErr != nil {
+		return nil, pullErr
+	}
 
 	if len(byNode) == 0 {
-		return nil
+		return nil, nil
 	}
 	names := make([]string, 0, len(byNode))
 	for n := range byNode {
@@ -162,7 +188,7 @@ func SuppliesForEntryUnit(g *graph.Graph, unitIdx int) []engine.SupplyRequiremen
 	for _, n := range names {
 		out = append(out, byNode[n])
 	}
-	return out
+	return out, nil
 }
 
 // walkEntryUnitNodes calls visit once for every node reachable from entry unit
@@ -426,13 +452,17 @@ func DeriveEntryActivations(g *graph.Graph) ([]EntryUnitActivation, error) {
 			reqs := engine.RequirementsFromGraphPackage(pkg.Requirements)
 			supplyConsumers := SupplyConsumerBindingsForEntryUnit(g, i)
 			reqs = requireDeclarationCapability(reqs, engine.GroupNodeType, supplyConsumers)
+			supplies, err := SuppliesForEntryUnit(g, i)
+			if err != nil {
+				return nil, fmt.Errorf("derive supplies for group entry unit %q: %w", gm.Name, err)
+			}
 			out = append(out, EntryUnitActivation{
 				EntryUnitID:        gm.Name,
 				NodeType:           engine.GroupNodeType,
 				PackageHash:        gm.PackageHash,
 				Selector:           gm.RunnerSelector,
 				Requirements:       reqs,
-				Supplies:           SuppliesForEntryUnit(g, i),
+				Supplies:           supplies,
 				SupplyConsumers:    supplyConsumers,
 				ActivationReplicas: gm.ActivationReplicas,
 				WorkflowTimezone:   g.Timezone(),
@@ -461,6 +491,10 @@ func DeriveEntryActivations(g *graph.Graph) ([]EntryUnitActivation, error) {
 				NodeVersion: nm.Version,
 			}})
 			reqs = requireDeclarationCapability(reqs, nm.Type, supplyConsumers)
+			supplies, err := SuppliesForEntryUnit(g, i)
+			if err != nil {
+				return nil, fmt.Errorf("derive supplies for trigger entry unit %q: %w", nm.Name, err)
+			}
 			out = append(out, EntryUnitActivation{
 				EntryUnitID:        nm.Name,
 				NodeType:           nm.Type,
@@ -468,7 +502,7 @@ func DeriveEntryActivations(g *graph.Graph) ([]EntryUnitActivation, error) {
 				PackageHash:        nodeTriggerPackageHash(nm.Type, nm.Version, params, g.Timezone()),
 				Selector:           nm.RunnerSelector,
 				Requirements:       reqs,
-				Supplies:           SuppliesForEntryUnit(g, i),
+				Supplies:           supplies,
 				SupplyConsumers:    supplyConsumers,
 				ActivationReplicas: nm.ActivationReplicas,
 				WorkflowTimezone:   g.Timezone(),

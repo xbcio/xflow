@@ -54,6 +54,18 @@ export const fieldsSpec = spec({
   t: { type: "Text", props: { text: "static" } }
 });
 
+// A bound leaf next to an unrelated container subtree: the shape the
+// re-render-scope assertions need (a foreign container that must not re-render).
+export const wideSpec = spec({
+  root: { type: "Box", children: ["side", "grp"] },
+  side: { type: "Box", children: ["s1", "s2", "s3"] },
+  grp: { type: "Box", children: ["f3"] },
+  s1: { type: "Text", props: { text: "s1" } },
+  s2: { type: "Text", props: { text: "s2" } },
+  s3: { type: "Text", props: { text: "s3" } },
+  f3: { type: "Input", props: { value: { $bindState: "/g/f3" } } }
+});
+
 export const toggleSpec = spec({
   root: { type: "Box", children: ["mode", "a", "b"] },
   mode: { type: "Toggle", props: { value: { $bindState: "/mode" }, options: ["a", "b"] } },
@@ -80,6 +92,7 @@ export function parityFixtures(): ConformanceFixture[] {
     { name: "rows (keyed)", spec: rowsSpec("LocalInput", "name"), value: { rows: rows() } },
     { name: "empty rows", spec: rowsSpec("Input"), value: {} },
     { name: "fields", spec: fieldsSpec, value: { f0: "zero", g: { f3: "three" } } },
+    { name: "wide", spec: wideSpec, value: { g: { f3: "three" } } },
     { name: "visible", spec: toggleSpec, value: { mode: "b", x: "shared" } },
     { name: "placeholders", spec: errorSpec, value: { fail: false } },
     {

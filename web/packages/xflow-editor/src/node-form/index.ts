@@ -4,7 +4,7 @@
 export * from "./schema";
 export * from "./components";
 export { commonSchema } from "./commonSchema";
-export { compileNodeForm, JSON_EDITOR_PARAMS, ROOT_ID, type CompileNodeFormOptions, type CompiledNodeForm } from "./compile";
+export { compileNodeForm, JSON_EDITOR_PARAMS, ROOT_ID, type CompileNodeFormOptions, type CompiledNodeForm, type NodeFormSection } from "./compile";
 export { nodeFormChecks, looksLikeSecret } from "./checks";
 export { deriveExpressionMode, deriveExpressionModeForPointer } from "./expressionMode";
 export * from "./components/index";

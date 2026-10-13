@@ -163,6 +163,16 @@ describe("NodeFormCompiler", () => {
     expect(compiler.spec(schema, { hasTemplate: false, parameters: { zz: 1 } })).not.toBe(a);
   });
 
+  it("memoises each section separately", () => {
+    const flags = { hasTemplate: false, parameters: {} };
+    const all = compiler.spec(schema, flags);
+    const settings = compiler.spec(schema, { ...flags, section: "settings" });
+    expect(compiler.spec(schema, { ...flags, section: "all" })).toBe(all);
+    expect(settings).not.toBe(all);
+    expect(compiler.spec(schema, { ...flags, section: "settings" })).toBe(settings);
+    expect(settings.elements.form.children).toEqual(["g.common.execution"]);
+  });
+
   it("leaves out the unregistered-type notice when schemas were never loaded", () => {
     const notices = (spec: ReturnType<NodeFormCompiler["spec"]>) =>
       Object.values(spec.elements).filter((element) => element.type === "FormNotice").length;

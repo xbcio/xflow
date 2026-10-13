@@ -46,7 +46,7 @@ const composerCoreRestrictedImports = {
 
 const jsonRenderPattern = {
   group: ["@json-render/*"],
-  message: "Only composer/kernel-json-render and composer/react/defaultKernel may import @json-render/* (Doc B §7.2)."
+  message: "Only composer/kernel-json-render may import @json-render/*; composer/react/defaultKernel is exempt so the default stays a one-line swap (Doc B §7.2)."
 };
 
 const composerRestrictedImports = {
@@ -85,7 +85,7 @@ export default [
       "**/coverage/**",
       "**/playwright-report/**",
       "**/test-results/**",
-      "**/src/.umi/**",
+      "**/.umi/**",
       "**/src/.umi-production/**",
       "**/src/.umi-test/**",
       "**/*.d.ts"

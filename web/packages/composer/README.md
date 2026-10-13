@@ -10,8 +10,8 @@ semantics (visibility, repeat, expressions, checks, write rules) live in
 | `@xflow/composer/core` | Spec types + JSON Schema, `validateSpec`, `resolve`, `write`, `applyPatches`, checks/expressions, `zodProps` (no React) |
 | `@xflow/composer/react` | `<Composer>`, `createRegistry`, component/kernel contracts, `defaultKernel` |
 | `@xflow/composer/form` | built-in AntD form components, `formComponents`, `createFormRegistry(extra?)`; styles in `@xflow/composer/form/styles.css` |
-| `@xflow/composer/kernel-json-render` | default kernel (on `@json-render/*` 0.21.0) |
-| `@xflow/composer/kernel-native` | reference / fallback kernel |
+| `@xflow/composer/kernel-json-render` | opt-in kernel on `@json-render/*` 0.21.0 |
+| `@xflow/composer/kernel-native` | default kernel (plain recursive renderer) |
 | `@xflow/composer/testing` | `kernelConformance(kernel)` and test helpers (needs `vitest`, `@testing-library/react`) |
 
 `react` (and `react-dom`) are peer dependencies (`^19.2.3`).
@@ -43,11 +43,15 @@ function Panel({ spec }) {
 - Apply patches with core `applyPatches` (it keeps row identity). A host with
   its own reducer must call `adoptRowIdentity(prev, next)` for edited rows.
 - Writes of one microtask arrive as **one** `onChange` call (same path: last
-  wins). Until the host passes a new `value` reference, Composer renders
-  "host value + pending patches" (the overlay), so fast typing and IME input
-  never see stale values. A new `value` always wins (a host may reject patches
-  by not applying them). If no new `value` arrives within 1s, the overlay is
-  dropped with an `overlay-timeout` warning.
+  wins). Composer renders "host value + pending patches" (the overlay), so fast
+  typing and IME input never see stale values. Emitted patches stay pending
+  until a host `value` reflects them (a `set` path deep-equals its value, an
+  `unset` path is absent); the newest reflected patch acknowledges every patch
+  emitted before it, and the rest is replayed on top, so an async or batching
+  host never rolls back newer edits. If 1s passes after the latest `onChange`
+  without full acknowledgement, all emitted patches are dropped with an
+  `overlay-timeout` warning and the host value wins (a host rejects or
+  normalizes patches this way).
 - Warnings (dropped writes, `/$ctx` writes, overlay timeout, `emit`) go to
   `onWarning`, default `console.warn`.
 
@@ -205,12 +209,15 @@ A kernel implements `RenderKernel.render(tree, env)`: walk the
 (component lookup, bindings, placeholders, error boundaries, memoisation) is
 done by `renderNode`.
 
-- `kernel-json-render` (default): converts the tree to json-render's flat
-  spec with a single `ComposerNode` type and static `{ id }` props; none of
-  json-render's state/visibility/validation/action semantics are used.
-- `kernel-native`: ~50-line recursive renderer; reference and fallback.
+- `kernel-native` (default): ~50-line recursive renderer; unchanged subtrees
+  are shared by reference, so one keystroke re-renders one path.
+- `kernel-json-render`: converts the tree to json-render's flat spec with a
+  single `ComposerNode` type and static `{ id }` props; none of json-render's
+  state/visibility/validation/action semantics are used. It rebuilds the
+  spec and one wrapper per node on every render (O(nodes)), which is why it
+  is opt-in.
 
-Pass `kernel={nativeKernel}` to use another kernel for one Composer. To
+Pass `kernel={jsonRenderKernel}` to use another kernel for one Composer. To
 switch the default, change the single re-export in
 `src/react/defaultKernel.ts`. A kernel qualifies only if it passes the
 conformance suite:
@@ -221,5 +228,6 @@ import { kernelConformance } from "@xflow/composer/testing";
 kernelConformance(myKernel);
 ```
 
-Only `kernel-json-render` and `react/defaultKernel` may import
-`@json-render/*` (ESLint rule + `src/boundary.test.ts`).
+Only `kernel-json-render` may import `@json-render/*`; `react/defaultKernel`
+is exempt so the default stays a one-line swap (ESLint rule +
+`src/boundary.test.ts`).

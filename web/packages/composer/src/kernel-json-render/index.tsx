@@ -1,5 +1,5 @@
-// @xflow/composer/kernel-json-render — default kernel on @json-render 0.21.0
-// (Doc B §7.2).
+// @xflow/composer/kernel-json-render — opt-in kernel on @json-render 0.21.0
+// (Doc B §7.2; the default is kernel-native).
 //
 // json-render only renders the tree. Every render converts the ResolvedTree
 // into json-render's flat spec: one element per ResolvedNode, keyed by the
@@ -11,7 +11,11 @@
 // None of json-render's semantics are used: the spec never carries
 // `visible`, `repeat`, `on`, `watch`, `$state`/`$bind*` expressions or
 // validation, and the StateProvider / VisibilityProvider / ActionProvider
-// below are the empty providers its Renderer requires to mount.
+// below are the empty providers its Renderer requires to mount. The cost of
+// that indirection is O(nodes) per render (spec rebuild + id index + one
+// ComposerNode render per node); unchanged components still skip via
+// renderNode's element cache, but the surrounding work does not, which is
+// why this kernel is not the default.
 
 import { ActionProvider, Renderer, StateProvider, VisibilityProvider, type ComponentRegistry, type ComponentRenderProps, type Spec } from "@json-render/react";
 import { createContext, useContext, useMemo, type ReactNode } from "react";
