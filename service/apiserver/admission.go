@@ -33,7 +33,8 @@ const (
 // APILimits configures the API admission layer in front of the mutating
 // workflow/execution routes and the webhook entry route.
 //
-// The zero value is the default posture: no rate limit.
+// The zero value is the default posture: no rate limit, and at most
+// DefaultAPIMaxInflight requests in flight per replica.
 type APILimits struct {
 	// Rate is the sustained requests per second one namespace may make. Zero
 	// disables rate limiting.
@@ -41,6 +42,9 @@ type APILimits struct {
 	// Burst is how many requests a namespace may make at once on top of an idle
 	// bucket. Zero derives it from Rate (at least 1).
 	Burst int
+	// MaxInflight bounds the covered requests this replica serves concurrently.
+	// Zero means DefaultAPIMaxInflight; negative disables the bound.
+	MaxInflight int
 	// Mode is APIRateLimitModeLocal (the default when empty) or
 	// APIRateLimitModeRedis.
 	Mode string
@@ -88,8 +92,9 @@ const (
 // apiAdmission holds the admission gates. A nil *apiAdmission admits
 // everything, so a module built without New (unit tests) is unaffected.
 type apiAdmission struct {
-	limiter rateDecider
-	metrics metrics.APIAdmissionMetrics
+	inflight *inflightGuard
+	limiter  rateDecider
+	metrics  metrics.APIAdmissionMetrics
 }
 
 // rateDecider decides one request against key's bucket and, when it refuses,
@@ -102,6 +107,7 @@ type rateDecider interface {
 // APIRateLimitModeRedis and is ignored otherwise.
 func newAPIAdmission(l APILimits, shared *ratelimit.TokenBucket, m *metrics.Metrics, log engine.Logger) *apiAdmission {
 	a := &apiAdmission{metrics: metrics.NewAPIAdmissionMetrics(m)}
+	a.inflight = newInflightGuard(l.maxInflight(), a.metrics)
 	if l.Rate > 0 {
 		local := newLocalRateLimiter(rate.Limit(l.Rate), l.burst(), a.metrics)
 		a.limiter = local
