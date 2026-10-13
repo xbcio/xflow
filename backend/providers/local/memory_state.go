@@ -54,6 +54,9 @@ type memoryState struct {
 	subExecs       map[string][]*engine.SubExecution       // key: execID+"/"+nodeName
 	groupUnits     map[string]*groupUnitState              // key: "<execID>/<unitIdx>"
 	admissions     map[engine.AdmissionKey]*admissionEntry // trigger admission keys
+	// idempotency holds the claims of keyed submissions, keyed by the
+	// deterministic execution ID the key derives (engine.IdempotentStateStore).
+	idempotency map[types.ExecutionID]*idempotencyClaim
 	// workflowSlots is the workflow-scoped concurrency slot set, keyed by
 	// graph.ConcurrencyKey(ns, workflow name), and slotHolders records which set
 	// each admitted execution was charged to so a terminal transition can
