@@ -2,6 +2,7 @@ package graph
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -69,6 +70,27 @@ type SubWorkflowResolver interface {
 	ResolveSubWorkflow(ctx context.Context, ref SubWorkflowRef) (SubWorkflowTarget, error)
 }
 
+// DefaultMaxSubWorkflowDepth bounds how deep sub-workflow references may nest.
+// It is a COMPILE-TIME bound on the static reference graph: a chain longer than
+// this is rejected at registration rather than discovered one execution at a
+// time. The engine enforces the same number as a runtime bound on actual
+// child-execution depth (WithMaxSubWorkflowDepth), which is what catches a
+// chain the compiler could not see; the static bound stays a constant because
+// it exists to reject a definition no deployment should run.
+const DefaultMaxSubWorkflowDepth = 16
+
+var (
+	// ErrSubWorkflowCycle marks a reference cycle: a workflow whose
+	// sub-workflow references lead back to a workflow already on the chain.
+	// Cycles are judged by NAME, deliberately ignoring the version, because
+	// what a cycle deadlocks is the concurrency slot — which is keyed by
+	// namespace+name — so P@v1 -> P@v2 is the same cycle as P -> P.
+	ErrSubWorkflowCycle = errors.New("sub-workflow reference cycle")
+	// ErrSubWorkflowDepth marks a static reference chain deeper than
+	// DefaultMaxSubWorkflowDepth.
+	ErrSubWorkflowDepth = errors.New("sub-workflow reference chain exceeds the depth limit")
+)
+
 // SubWorkflowBinding is the compile-time resolution of one xflow.subworkflow
 // node's target, stored on NodeMeta so it travels with the graph through the
 // wire format and into the graph hash automatically (the same placement rule
@@ -96,21 +118,71 @@ func cloneSubWorkflowBinding(b *SubWorkflowBinding) *SubWorkflowBinding {
 	return &c
 }
 
-// compileSubWorkflowRefs resolves every xflow.subworkflow node's target through
-// resolver and records the pinned binding on the node's NodeMeta.
+// subWorkflowRefKey identifies one resolver answer: the reference as the
+// resolver sees it. Not the node — two nodes referencing the same revision
+// share one answer, exactly as the registry would serve them.
+type subWorkflowRefKey struct{ name, version string }
+
+// subWorkflowResolverMemo memoizes resolver answers for the duration of one
+// compile, and is shared by the binding pass and the reference walk.
 //
-// A nil resolver is not an error and not a silent pass: the node compiles
+// The walk revisits every direct reference the binding pass just resolved, so
+// without the memo one reference would be resolved twice — and the two answers
+// could differ if the registry changed in between, leaving the graph pinned to
+// one revision while the walk judged a different one. One reference, one
+// answer, one revision.
+type subWorkflowResolverMemo struct {
+	resolver SubWorkflowResolver
+	answers  map[subWorkflowRefKey]SubWorkflowTarget
+}
+
+func newSubWorkflowResolverMemo(resolver SubWorkflowResolver) *subWorkflowResolverMemo {
+	return &subWorkflowResolverMemo{
+		resolver: resolver,
+		answers:  make(map[subWorkflowRefKey]SubWorkflowTarget),
+	}
+}
+
+func (m *subWorkflowResolverMemo) resolve(ctx context.Context, name, version string) (SubWorkflowTarget, error) {
+	key := subWorkflowRefKey{name: name, version: version}
+	if t, ok := m.answers[key]; ok {
+		return t, nil
+	}
+	t, err := m.resolver.ResolveSubWorkflow(ctx, SubWorkflowRef{Name: name, Version: version})
+	if err != nil {
+		return SubWorkflowTarget{}, err
+	}
+	if t.Graph == nil {
+		return SubWorkflowTarget{}, errors.New("resolver returned no graph")
+	}
+	m.answers[key] = t
+	// Seed the PINNED form of the same reference as well. The walk reads a
+	// node's binding (the resolved version) where the binding pass read the
+	// author's request (often empty = latest), so without this the same
+	// reference would be resolved a second time under its pinned version — the
+	// exact re-resolution the memo exists to prevent.
+	if t.Version != "" && t.Version != version {
+		m.answers[subWorkflowRefKey{name: name, version: t.Version}] = t
+	}
+	return t, nil
+}
+
+// compileSubWorkflowRefs resolves every xflow.subworkflow node's target through
+// the memo's resolver and records the pinned binding on the node's NodeMeta.
+//
+// A nil memo is not an error and not a silent pass: the node compiles
 // UNRESOLVED (SubWorkflow stays nil), and the engine refuses to dispatch such a
 // node with ErrSubWorkflowUnresolved. That is the deliberate difference from
 // "treat it as an ordinary node" — an unresolved reference that runs as a plain
 // no-op node would report success for work that never happened.
 //
-// The rules checked here are the ones that need the target definition: the
-// entry exists, and (a later pass) the reference graph is acyclic and shallow
-// enough. Rules decidable from the node itself live in
-// validateSubWorkflowParams, which runs even without a resolver.
-func compileSubWorkflowRefs(ctx context.Context, g *Graph, resolver SubWorkflowResolver) error {
-	if resolver == nil {
+// The rules checked here are the ones that need the target definition: it
+// exists, the entry exists, and the target is a shape a parent may wait on.
+// Rules decidable from the node itself live in validateSubWorkflowParams, which
+// runs even without a resolver; rules about the whole reference CHAIN live in
+// checkSubWorkflowReferences.
+func compileSubWorkflowRefs(ctx context.Context, g *Graph, memo *subWorkflowResolverMemo) error {
+	if memo == nil {
 		return nil
 	}
 	for i := range g.nodes {
@@ -123,12 +195,9 @@ func compileSubWorkflowRefs(ctx context.Context, g *Graph, resolver SubWorkflowR
 		name, _ := nd.Parameters["workflow"].(string)
 		name = strings.TrimSpace(name)
 		version, _ := nd.Parameters["version"].(string)
-		target, err := resolver.ResolveSubWorkflow(ctx, SubWorkflowRef{Name: name, Version: strings.TrimSpace(version)})
+		target, err := memo.resolve(ctx, name, strings.TrimSpace(version))
 		if err != nil {
 			return fmt.Errorf("node %q: resolve sub-workflow %q: %w", nd.Name, name, err)
-		}
-		if target.Graph == nil {
-			return fmt.Errorf("node %q: resolve sub-workflow %q: resolver returned no graph", nd.Name, name)
 		}
 		if target.Version == "" && target.DefinitionHash == "" {
 			return fmt.Errorf("node %q: resolve sub-workflow %q: resolver returned neither a version nor a definition hash, "+
@@ -146,4 +215,86 @@ func compileSubWorkflowRefs(ctx context.Context, g *Graph, resolver SubWorkflowR
 		}
 	}
 	return nil
+}
+
+// subWorkflowHop returns a sub-workflow node's referenced workflow name and
+// version. It prefers the compiled binding — the version that was actually
+// pinned — over the author's parameters, so the reference walk follows the
+// same revision the node will run.
+func subWorkflowHop(nd NodeMeta) (name, version string) {
+	if nd.SubWorkflow != nil {
+		return nd.SubWorkflow.Name, nd.SubWorkflow.Version
+	}
+	name, _ = nd.Parameters["workflow"].(string)
+	version, _ = nd.Parameters["version"].(string)
+	return strings.TrimSpace(name), strings.TrimSpace(version)
+}
+
+// checkSubWorkflowReferences walks the reference graph reachable from g and
+// rejects a cycle (by name) or a chain deeper than DefaultMaxSubWorkflowDepth.
+//
+// The walk follows each referenced workflow's COMPILED graph, so it sees what
+// the child will actually run: a hop is read off the target's own sub-workflow
+// nodes, whose bindings were pinned when that target was registered. This is
+// the static half of the deadlock story — a cycle P -> Q -> P would have each
+// execution waiting on a child that can never start, because the concurrency
+// slot it needs is held by its own ancestor. The runtime depth bound
+// (WithMaxSubWorkflowDepth) is the other half, for chains the compiler cannot
+// see.
+//
+// A nil memo skips the walk entirely, like compileSubWorkflowRefs: with no way
+// to see the other side of a reference there is no cycle to find, and the node
+// compiles unresolved (which the engine refuses to dispatch).
+func checkSubWorkflowReferences(ctx context.Context, g *Graph, memo *subWorkflowResolverMemo) error {
+	if memo == nil {
+		return nil
+	}
+	// path holds the workflow names on the current chain, starting with this
+	// graph's own name, so a reference back to the root is the shortest cycle.
+	path := map[string]bool{}
+	if name := g.Name(); name != "" {
+		path[name] = true
+	}
+	chain := []string{g.Name()}
+
+	var walk func(from *Graph, depth int) error
+	walk = func(from *Graph, depth int) error {
+		for i := 0; i < from.NodeCount(); i++ {
+			nd := from.NodeAt(i)
+			if nd.Type != types.SubWorkflowNodeType {
+				continue
+			}
+			name, version := subWorkflowHop(nd)
+			if name == "" {
+				// Unreachable for a graph this compiler built (the parameter
+				// shape is validated in registerNodes), but a projected or
+				// foreign graph could carry one; there is no reference to
+				// follow and nothing to resolve.
+				continue
+			}
+			if path[name] {
+				return fmt.Errorf("%w: %s", ErrSubWorkflowCycle,
+					strings.Join(append(chain, name), " -> "))
+			}
+			if depth+1 > DefaultMaxSubWorkflowDepth {
+				return fmt.Errorf("%w: %s would exceed %d",
+					ErrSubWorkflowDepth, strings.Join(append(chain, name), " -> "), DefaultMaxSubWorkflowDepth)
+			}
+			target, err := memo.resolve(ctx, name, version)
+			if err != nil {
+				return fmt.Errorf("node %q of workflow %q: resolve sub-workflow %q: %w",
+					nd.Name, from.Name(), name, err)
+			}
+			path[name] = true
+			chain = append(chain, name)
+			err = walk(target.Graph, depth+1)
+			chain = chain[:len(chain)-1]
+			delete(path, name)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return walk(g, 0)
 }

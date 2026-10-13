@@ -364,7 +364,17 @@ func compile(ctx context.Context, def *types.WorkflowDef, resolver SubWorkflowRe
 	// validation pass (so a malformed definition fails without a resolver
 	// round-trip) and before assignGraphHash, whose payload includes the
 	// pinned bindings this writes into the node metas.
-	if err := compileSubWorkflowRefs(ctx, g, resolver); err != nil {
+	var subWorkflows *subWorkflowResolverMemo
+	if resolver != nil {
+		subWorkflows = newSubWorkflowResolverMemo(resolver)
+	}
+	if err := compileSubWorkflowRefs(ctx, g, subWorkflows); err != nil {
+		return nil, err
+	}
+	// The reference walk runs after the binding pass: it follows each hop's
+	// pinned revision, and it needs this graph's node metas (which the pass
+	// above just wrote) to start from.
+	if err := checkSubWorkflowReferences(ctx, g, subWorkflows); err != nil {
 		return nil, err
 	}
 	// assignDisabledNodes before assignPinData: disabled takes precedence over
