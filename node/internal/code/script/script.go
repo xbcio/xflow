@@ -358,6 +358,11 @@ func (n *ScriptNode) Execute(ctx context.Context, input *types.Input) (*types.Ou
 		if be, hasBatch := eng.(engine.BatchEngine); hasBatch {
 			results, batchErr = be.ExecuteBatch(ctx, src, records, globals)
 		} else {
+			// Counted and warned about BEFORE the serial loop runs: the
+			// observation is about the fallback decision, which is already made,
+			// and a batch that later times out should still be visible as "this
+			// runtime has no batch fast path" rather than as a bare timeout.
+			observeBatchSerialFallback(ctx, language, runtime)
 			results, batchErr = engine.ExecuteBatchSerial(ctx, eng, src, records, globals)
 		}
 		if batchErr != nil {
