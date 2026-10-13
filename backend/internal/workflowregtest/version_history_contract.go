@@ -67,6 +67,9 @@ func RunVersionHistoryContract(t *testing.T, newRegistry Factory) {
 	t.Run("RetentionEvictsOldestRetired", func(t *testing.T) {
 		retentionEvictsOldestRetiredCase(t, newRegistry)
 	})
+	t.Run("SecondLiveRecordWithSameNameIsRejected", func(t *testing.T) {
+		secondLiveRecordWithSameNameIsRejectedCase(t, newRegistry)
+	})
 	t.Run("UnknownVersionIsNotFound", func(t *testing.T) {
 		unknownVersionIsNotFoundCase(t, newRegistry)
 	})
@@ -355,6 +358,47 @@ func retentionEvictsOldestRetiredCase(t *testing.T, newRegistry Factory) {
 	}
 	if len(rows) != 3 {
 		t.Fatalf("version rows = %d, want 3 (current plus the two retained retirements)", len(rows))
+	}
+}
+
+// secondLiveRecordWithSameNameIsRejectedCase: version is a label of one
+// workflow's lineage, never a way to fork it. Two live records sharing a
+// (namespace, name) would share one activation key space, so both would keep
+// being hosted and the name would silently resolve to two versions.
+func secondLiveRecordWithSameNameIsRejectedCase(t *testing.T, newRegistry Factory) {
+	reg, ctx := newRegistry(t, 0)
+	name := uniqueName("shared")
+	v1 := versionRecord(t, name, "v1", "")
+	created := addVersionRecord(t, ctx, reg, v1)
+
+	other := versionRecord(t, name, "v2", "")
+	_, err := reg.AddWorkflow(ctx, other)
+	if !errors.Is(err, backend.ErrWorkflowNameConflict) {
+		t.Fatalf("AddWorkflow(second record with the same name) error = %v, want ErrWorkflowNameConflict", err)
+	}
+	if !errors.Is(err, backend.ErrWorkflowConflict) {
+		t.Fatalf("AddWorkflow(same name) error = %v, want it to also satisfy ErrWorkflowConflict", err)
+	}
+
+	// The rejected add created nothing: no record at its key, no second
+	// version, no history entry.
+	if _, err := reg.GetWorkflowByKey(ctx, other.Key); !errors.Is(err, backend.ErrWorkflowNotFound) {
+		t.Fatalf("GetWorkflowByKey(rejected key) error = %v, want ErrWorkflowNotFound", err)
+	}
+	assertVersionRows(t, reg, ctx, created.ID, []backend.WorkflowVersionInfo{
+		{Version: "v1", DefinitionHash: created.DefinitionHash, RegistryRevision: created.RegistryRevision, Current: true},
+	})
+
+	// Removing the holder frees the name for a later registration.
+	if err := reg.RemoveWorkflow(ctx, created.ID); err != nil {
+		t.Fatalf("RemoveWorkflow(holder) error = %v", err)
+	}
+	recreated := addVersionRecord(t, ctx, reg, versionRecord(t, name, "v2", ""))
+	if recreated.ID == created.ID {
+		t.Fatalf("recreated id = %q, want a new workflow id", recreated.ID)
+	}
+	if recreated.RegistryRevision <= created.RegistryRevision {
+		t.Fatalf("recreated revision = %d, want it above the removed record's %d", recreated.RegistryRevision, created.RegistryRevision)
 	}
 }
 
