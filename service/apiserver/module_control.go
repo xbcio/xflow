@@ -444,6 +444,18 @@ func (m *workflowControlModule) handleRevokeSignalByID(w http.ResponseWriter, r 
 // persisted execution share one id (closing the audit↔execution correlation
 // gap that left reconcile Probe reading an empty ExecutionID).
 //
+// One request shape does NOT follow this id: a submission carrying an
+// Idempotency-Key runs under engine.IdempotentExecutionID, derived from the key
+// so a retry finds the claim, which wins over the ctx-pre-allocated id. For
+// those requests the admission/outcome rows carry this allocated id while the
+// execution carries the derived one; reconcile Probe on the allocated id finds
+// no execution. The derived id cannot be computed here: it needs the principal's
+// namespace (not yet on the request when resolvers run — authzWrap attaches it
+// after authorize) and, for the inline route, the definition name from a body
+// this resolver does not parse — so the divergence is accepted knowingly. If
+// audit↔execution correlation for keyed requests becomes a requirement, the
+// resolver (or the audit row) has to derive the id the way the engine does.
+//
 // resource/workflowID/namespace stay empty: create/invoke authz was decided on
 // operation alone before this change, and this resolver only supplies the
 // correlation id, not authz inputs.
@@ -472,7 +484,8 @@ func newExecutionIDResolver() func(*http.Request) (string, string, string, strin
 //
 // A fresh pre-allocated id keeps engine semantics (Submit/Invoke are "start a NEW
 // execution") and stays coherent with what the engine now does, without giving up
-// the resource/workflow dimensions an audit row is meant to carry.
+// the resource/workflow dimensions an audit row is meant to carry. A keyed
+// submission is the exception to that coherence — see newExecutionIDResolver.
 func invokeByIDResolver() func(*http.Request) (string, string, string, string) {
 	return func(r *http.Request) (string, string, string, string) {
 		id := r.PathValue("id")
