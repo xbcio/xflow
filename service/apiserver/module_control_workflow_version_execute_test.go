@@ -14,6 +14,7 @@ import (
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/service/control"
+	"github.com/xbcio/xflow/types"
 )
 
 // This file covers the version field of POST /v1/workflows/{id}/execute
@@ -31,7 +32,11 @@ import (
 //   - an archived version whose stored payload no longer reproduces under the
 //     current compiler is refused with 409 workflow_version_unavailable
 //     (fail closed, never silently recompiled), while the current version of
-//     the same workflow still runs.
+//     the same workflow still runs;
+//   - the version field and the Idempotency-Key header compose (design §2.7):
+//     a keyed retry pinned to a retired version replays the original execution
+//     even after an intervening publish, while an unpinned retry that now
+//     resolves another version is 409 idempotency_key_conflict.
 
 // newVersionExecuteTestServer builds the local-provider server fixture that can
 // both register/replace workflows and record their executions, so a test can
@@ -59,6 +64,13 @@ func newVersionExecuteTestServer(t *testing.T) (*httptest.Server, *local.Backend
 
 func postExecuteByID(t *testing.T, base, token, id string, body any) *http.Response {
 	t.Helper()
+	return postExecuteByIDKeyed(t, base, token, id, "", body)
+}
+
+// postExecuteByIDKeyed is postExecuteByID with an Idempotency-Key header; an
+// empty key sends the header-less request the original helper sends.
+func postExecuteByIDKeyed(t *testing.T, base, token, id, key string, body any) *http.Response {
+	t.Helper()
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(body); err != nil {
 		t.Fatalf("encode request: %v", err)
@@ -68,6 +80,9 @@ func postExecuteByID(t *testing.T, base, token, id string, body any) *http.Respo
 		t.Fatalf("new request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if key != "" {
+		req.Header.Set(IdempotencyKeyHeader, key)
+	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -236,5 +251,84 @@ func TestExecuteWorkflowByIDRefusesAnArchivedVersionThatNoLongerReproduces(t *te
 	resp = postExecuteByID(t, srv.URL, "tok-a", driftID, executeRegisteredRequest{})
 	if got := executedWorkflowVersion(t, provider, resp); got != "v2" {
 		t.Fatalf("current version executed as %q, want v2 (the drift check must not leak to the live record)", got)
+	}
+}
+
+// executeByIDOutcome is what a successful execute response says: which
+// execution answered, whether the answer replayed an earlier keyed submission,
+// and which version actually ran, read from the execution's own graph snapshot.
+type executeByIDOutcome struct {
+	executionID types.ExecutionID
+	duplicate   bool
+	version     string
+}
+
+func readExecuteByIDOutcome(t *testing.T, provider *local.Backend, resp *http.Response) executeByIDOutcome {
+	t.Helper()
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("execute status = %d, want 200 (body=%s)", resp.StatusCode, body)
+	}
+	var out executeWorkflowResponse
+	if env := decodeEnvelope(t, resp, &out); !env.Success {
+		t.Fatalf("execute envelope = %+v, want success", env)
+	}
+	if out.ExecutionID == "" {
+		t.Fatal("execute returned an empty execution_id")
+	}
+	snap, err := provider.State().GetExecution(context.Background(), out.ExecutionID)
+	if err != nil {
+		t.Fatalf("GetExecution(%q): %v", out.ExecutionID, err)
+	}
+	if snap == nil || snap.Graph == nil {
+		t.Fatalf("execution %q has no graph snapshot", out.ExecutionID)
+	}
+	return executeByIDOutcome{executionID: out.ExecutionID, duplicate: out.Duplicate, version: snap.Graph.WorkflowVersion()}
+}
+
+// TestExecuteWorkflowByIDVersionWithIdempotencyKeyPinsReplays pins the
+// interaction of the version field with the Idempotency-Key header on this
+// route (versioning design §2.7). The key's fingerprint comes from the version
+// the request resolved, so a pinned retry replays the original execution even
+// after an intervening publish — duplicate=true, same execution id — while an
+// unpinned retry that now resolves a newer version is refused with 409
+// idempotency_key_conflict. These are the same two answers the SDK's keyed
+// Invoke gives (TestInvokeWorkflowVersionIdempotencyReplay); it is the same
+// submission underneath.
+func TestExecuteWorkflowByIDVersionWithIdempotencyKeyPinsReplays(t *testing.T) {
+	srv, provider := newVersionExecuteTestServer(t)
+	id := registerListWorkflow(t, srv.URL, "tok-a", "vreplay", "v1")
+
+	// Pinned v1, keyed: the first submission runs v1 and opens the key.
+	first := readExecuteByIDOutcome(t, provider, postExecuteByIDKeyed(t, srv.URL, "tok-a", id, "http-pinned", executeRegisteredRequest{Version: "v1"}))
+	if first.duplicate || first.version != "v1" {
+		t.Fatalf("first keyed pinned execute = %+v, want a fresh v1 execution", first)
+	}
+
+	// Publishing v2 retires v1; the pinned retry resolves the same archived
+	// payload, so the fingerprint matches and the answer is the original run.
+	publishRun(t, srv.URL, "tok-a", id, "vreplay", "v2")
+	replay := readExecuteByIDOutcome(t, provider, postExecuteByIDKeyed(t, srv.URL, "tok-a", id, "http-pinned", executeRegisteredRequest{Version: "v1"}))
+	if !replay.duplicate || replay.executionID != first.executionID || replay.version != "v1" {
+		t.Fatalf("pinned keyed replay = %+v, want a duplicate of %+v", replay, first)
+	}
+
+	// Unpinned, a fresh key: the first submission runs v2; publishing v3 makes
+	// the retry resolve v3, whose fingerprint differs, so it is a conflict.
+	second := readExecuteByIDOutcome(t, provider, postExecuteByIDKeyed(t, srv.URL, "tok-a", id, "http-unpinned", executeRegisteredRequest{}))
+	if second.duplicate || second.version != "v2" || second.executionID == first.executionID {
+		t.Fatalf("first keyed unpinned execute = %+v, want a fresh v2 execution", second)
+	}
+	publishRun(t, srv.URL, "tok-a", id, "vreplay", "v3")
+
+	resp := postExecuteByIDKeyed(t, srv.URL, "tok-a", id, "http-unpinned", executeRegisteredRequest{})
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusConflict {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unpinned keyed retry status = %d, want 409 (body=%s)", resp.StatusCode, body)
+	}
+	if env := decodeEnvelope(t, resp, nil); env.Success || env.Code != "idempotency_key_conflict" {
+		t.Fatalf("unpinned keyed retry envelope = %+v, want idempotency_key_conflict", env)
 	}
 }

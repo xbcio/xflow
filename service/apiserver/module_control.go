@@ -2146,6 +2146,11 @@ func (m *workflowControlModule) handleExecuteWorkflowByID(w http.ResponseWriter,
 	// record does not carry reaches the history lookup, whose failure codes the
 	// switch maps. The model name in every branch is rec.Name's, never the
 	// body's, so the version field cannot point the call at another workflow.
+	// Retention may evict the oldest retired versions, so the lookup can also
+	// fail for a version that once existed: workflow_version_not_found is the
+	// designed answer there, and because this resolution precedes the
+	// idempotency lookup below, a keyed retry pinned to an evicted version
+	// fails closed instead of replaying the original execution as a duplicate.
 	if req.Version != "" && req.Version != rec.Version {
 		rec, err = m.archivedWorkflowVersion(r.Context(), ns, id, req.Version)
 		if err != nil {
