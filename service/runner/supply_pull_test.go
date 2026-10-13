@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -647,4 +648,65 @@ func TestRunPollerAdoptsTheDeclaredPullInterval(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+// --- metrics ---
+
+type recordingPullObserver struct {
+	mu      sync.Mutex
+	results []string
+}
+
+func (r *recordingPullObserver) OnSupplyPullFetch(_ context.Context, result string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.results = append(r.results, result)
+}
+
+func (r *recordingPullObserver) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.results...)
+}
+
+// Every attempt is observed exactly once, on the success and the failure paths
+// alike. The failures matter most: an observation that only fired on success
+// would leave xflow_supply_pull_fetch_total flat while every source is down,
+// which is precisely the condition the metric exists to show.
+func TestPullFetchObservesEveryAttempt(t *testing.T) {
+	src := newPullTestSource(t, "v1", "")
+	pf := newPullFetcher(t, src, []string{src.host()}, nil)
+	rec := &recordingPullObserver{}
+	pf.Observer = rec
+	ctx := context.Background()
+
+	// 200, then 200 with a validator, then 304: all three produced content, so
+	// all three are "ok" — a 304 is the source answering, not a failure.
+	if _, _, _, err := pf.Fetch(ctx, defaultKey("rules"), types.SupplyPullSource{URL: src.url()}); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	src.setETag(`"e1"`)
+	if _, _, _, err := pf.Fetch(ctx, defaultKey("rules"), types.SupplyPullSource{URL: src.url()}); err != nil {
+		t.Fatalf("Fetch with validator: %v", err)
+	}
+	if _, _, _, err := pf.Fetch(ctx, defaultKey("rules"), types.SupplyPullSource{URL: src.url()}); err != nil {
+		t.Fatalf("Fetch served from the 304 cache: %v", err)
+	}
+	if n := src.requests(); n != 3 {
+		t.Fatalf("source requests = %d, want 3", n)
+	}
+
+	src.setStatus(http.StatusInternalServerError)
+	if _, _, _, err := pf.Fetch(ctx, defaultKey("rules"), types.SupplyPullSource{URL: src.url()}); err == nil {
+		t.Fatal("Fetch succeeded against a 500")
+	}
+	// Refused before any request is sent (host outside the allowlist), which is
+	// still an attempt that produced no content and must be counted as one.
+	if _, _, _, err := pf.Fetch(ctx, defaultKey("rules"), types.SupplyPullSource{URL: "https://blocked.invalid/rules.json"}); err == nil {
+		t.Fatal("Fetch succeeded against a host outside the allowlist")
+	}
+
+	if got, want := rec.snapshot(), []string{"ok", "ok", "ok", "error", "error"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("observed results = %v, want %v", got, want)
+	}
 }

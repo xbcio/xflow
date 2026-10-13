@@ -89,6 +89,12 @@ type PullSupplyFetcher struct {
 	TLSClientConfig *tls.Config
 	// Logger receives pull-level diagnostics. nil disables logging.
 	Logger *slog.Logger
+	// Observer, when non-nil, receives one observation per Fetch attempt:
+	// result "ok" or "error". It feeds xflow_supply_pull_fetch_total, a series
+	// separate from the gate's fetch counter — the gate counts who asked for a
+	// fetch, this counts whether the EXTERNAL source answered it (see
+	// observability/metrics.SupplyMetrics.OnSupplyPullFetch).
+	Observer SupplyPullObserver
 
 	policy pullHostPolicy
 
@@ -130,12 +136,39 @@ func ValidateSupplyPullAllowedHosts(hosts []string) error {
 	return err
 }
 
+// SupplyPullObserver receives one observation per pull fetch attempt, with
+// result "ok" or "error". It is satisfied by the metrics observer; a caller
+// that wires none leaves the metric unrecorded rather than recording zero.
+type SupplyPullObserver interface {
+	OnSupplyPullFetch(ctx context.Context, result string)
+}
+
 // Fetch retrieves the current content of k from src. The returned hash is
 // computed from the content (store.ContentHash), so it is identical whether the
 // body arrived on a 200 or from the 304 cache. revision is always 0: a pull
 // source has no cluster-wide version, and the field exists for the store-backed
 // path's X-Supply-Revision.
+//
+// Fetch observes every attempt exactly once, on every return path, including
+// the ones that fail before a request is sent (a blocked host, an unresolvable
+// credential): to an operator watching xflow_supply_pull_fetch_total, a source
+// this runner refuses to contact and a source that timed out are the same
+// event — the pull did not produce content.
 func (f *PullSupplyFetcher) Fetch(ctx context.Context, k supply.Key, src types.SupplyPullSource) ([]byte, string, uint64, error) {
+	content, hash, revision, err := f.fetch(ctx, k, src)
+	if f != nil && f.Observer != nil {
+		result := "ok"
+		if err != nil {
+			result = "error"
+		}
+		f.Observer.OnSupplyPullFetch(ctx, result)
+	}
+	return content, hash, revision, err
+}
+
+// fetch is Fetch's body; the split exists only so every return path is observed
+// in one place (see Fetch).
+func (f *PullSupplyFetcher) fetch(ctx context.Context, k supply.Key, src types.SupplyPullSource) ([]byte, string, uint64, error) {
 	if f == nil {
 		return nil, "", 0, ErrSupplyPullUnavailable
 	}

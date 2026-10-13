@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/xbcio/xflow/observability/metrics"
 )
 
 // TestRunnerWiringInstallsThePullFetcher pins that a trigger-capable runner's
@@ -16,7 +18,7 @@ func TestRunnerWiringInstallsThePullFetcher(t *testing.T) {
 		ServerURL:              "http://127.0.0.1:1",
 		Capabilities:           []string{"xflow.trigger.kafka"},
 		SupplyPullAllowedHosts: []string{".corp.example", "config.example.com"},
-	})
+	}, WithRunnerMetrics(metrics.New()))
 	if err != nil {
 		t.Fatalf("buildRunnerServiceConfig: %v", err)
 	}
@@ -30,6 +32,12 @@ func TestRunnerWiringInstallsThePullFetcher(t *testing.T) {
 	}
 	if want := []string{".corp.example", "config.example.com"}; !reflect.DeepEqual(pf.AllowedHosts, want) {
 		t.Fatalf("pull fetcher AllowedHosts = %v, want %v", pf.AllowedHosts, want)
+	}
+	// Without the observer the pull counter is never incremented and a fleet
+	// pulling from a dead source reports nothing anywhere.
+	if pf.Observer == nil {
+		t.Fatal("WithRunnerMetrics installed no observer on the pull fetcher; " +
+			"xflow_supply_pull_fetch_total would never be written")
 	}
 }
 

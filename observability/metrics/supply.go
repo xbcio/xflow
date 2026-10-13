@@ -12,6 +12,7 @@ import (
 const (
 	metricSupplyAgeSeconds         = "xflow_supply_age_seconds"
 	metricSupplyFetchTotal         = "xflow_supply_fetch_total"
+	metricSupplyPullFetchTotal     = "xflow_supply_pull_fetch_total"
 	metricSupplyNotReady           = "xflow_supply_not_ready"
 	metricSupplyUnavailableServing = "xflow_supply_unavailable_serving"
 	metricSupplyConsumers          = "xflow_supply_consumers"
@@ -192,6 +193,27 @@ func (s SupplyMetrics) OnSupplyFetch(ctx context.Context, name, result, source s
 	s.Metrics.Inc(metricSupplyFetchTotal, withNamespace(ctx, map[string]string{
 		"name": name, "result": result, "source": source,
 	}))
+}
+
+// OnSupplyPullFetch records one pull-mode fetch attempt (xflow.supply.http),
+// result "ok" or "error".
+//
+// This is a SEPARATE series from OnSupplyFetch, and deliberately not a label on
+// it. The two answer different questions: OnSupplyFetch is the gate's view of
+// who asked for a fetch (admission, hint, or poll), and its failure mode is a
+// control-plane problem — hints not landing. This one is the pull fetcher's view
+// of whether the EXTERNAL source is healthy, which fails for reasons the
+// control plane knows nothing about (the source is down, slow, or refusing this
+// runner's credential). Folding it in as another label value would also change
+// the identity of an existing series, which resets every dashboard and alert
+// built on it.
+//
+// There is no name label: unlike a store-backed supply, a pull source has no
+// server-side record whose name an operator could look up, and a per-name
+// series would fragment the one sentence this metric says — "the sources these
+// runners pull from are failing".
+func (s SupplyMetrics) OnSupplyPullFetch(ctx context.Context, result string) {
+	s.Metrics.Inc(metricSupplyPullFetchTotal, withNamespace(ctx, map[string]string{"result": result}))
 }
 
 // OnSupplyNotReady reports whether an activation is currently being declined

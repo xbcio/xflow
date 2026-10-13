@@ -963,6 +963,12 @@ func wireRunnerTriggerHosting(svcCfg *runnersvc.Config, cfg RunnerConfig, o *run
 	if err != nil {
 		return err
 	}
+	// The pull counter is recorded by the fetcher, not by the gate's fanout:
+	// the gate counts who asked for a fetch, the fetcher counts whether the
+	// external source answered (xflow_supply_pull_fetch_total).
+	if o.metrics != nil {
+		pullFetcher.Observer = metrics.NewSupplyMetrics(o.metrics)
+	}
 	gate.SetPullFetcher(pullFetcher)
 
 	handler := runnersvc.NewTriggerActivationHandler(seedBaseURL, seedToken, runnerTriggerLookup{},
