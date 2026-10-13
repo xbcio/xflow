@@ -1448,10 +1448,13 @@ type rollbackWorkflowRequest struct {
 	Version string `json:"version,omitempty"`
 }
 
-// rollbackWorkflowResponse reports the outcome of a rollback. Unchanged is the
+// WorkflowRollbackResult reports the outcome of a rollback. Unchanged is the
 // idempotent no-op — the requested version already is the current one, or a
 // replayed rollback found it installed — mirroring the identical-PUT no-op.
-type rollbackWorkflowResponse struct {
+//
+// It is exported and shared by the HTTP route and APIServer.RollbackWorkflow,
+// so the wire shape and the in-process result cannot drift apart.
+type WorkflowRollbackResult struct {
 	WorkflowID types.WorkflowID `json:"workflow_id"`
 	Version    string           `json:"version"`
 	Unchanged  bool             `json:"unchanged"`
@@ -2118,28 +2121,28 @@ func (m *workflowControlModule) replaceWorkflowByIDWithMetadata(ctx context.Cont
 //
 // version empty or equal to the current version is the no-op branch: the
 // requested version already is the current record, so nothing is written.
-func (m *workflowControlModule) rollbackWorkflow(ctx context.Context, ns namespace.Namespace, id types.WorkflowID, version, mutationID string) (rollbackWorkflowResponse, error) {
+func (m *workflowControlModule) rollbackWorkflow(ctx context.Context, ns namespace.Namespace, id types.WorkflowID, version, mutationID string) (WorkflowRollbackResult, error) {
 	registry := m.registry()
 	if registry == nil {
 		if m.log != nil {
 			m.log.Error("rollback_workflow_no_registry", "workflow_id", string(id))
 		}
-		return rollbackWorkflowResponse{}, errors.New("apiserver: no workflow registry configured")
+		return WorkflowRollbackResult{}, errors.New("apiserver: no workflow registry configured")
 	}
 	ctx = namespace.WithNamespace(ctx, ns)
 	existing, err := registry.GetWorkflow(ctx, id)
 	if err != nil {
-		return rollbackWorkflowResponse{}, err
+		return WorkflowRollbackResult{}, err
 	}
 	if existing.Namespace != "" && ns != "" && existing.Namespace != string(ns) {
-		return rollbackWorkflowResponse{}, backend.ErrWorkflowNotFound
+		return WorkflowRollbackResult{}, backend.ErrWorkflowNotFound
 	}
 	if version == "" || version == existing.Version {
-		return rollbackWorkflowResponse{WorkflowID: existing.ID, Version: existing.Version, Unchanged: true}, nil
+		return WorkflowRollbackResult{WorkflowID: existing.ID, Version: existing.Version, Unchanged: true}, nil
 	}
 	archived, err := m.archivedWorkflowVersion(ctx, ns, id, version)
 	if err != nil {
-		return rollbackWorkflowResponse{}, err
+		return WorkflowRollbackResult{}, err
 	}
 	replacement := archived
 	replacement.ID = existing.ID
@@ -2155,9 +2158,9 @@ func (m *workflowControlModule) rollbackWorkflow(ctx context.Context, ns namespa
 	}
 	newID, _, err := m.compareAndReplaceWorkflow(ctx, ns, registry, existing, replacement, mutationID, registrationDiagnostics{})
 	if err != nil {
-		return rollbackWorkflowResponse{}, err
+		return WorkflowRollbackResult{}, err
 	}
-	return rollbackWorkflowResponse{WorkflowID: newID, Version: version, Unchanged: false}, nil
+	return WorkflowRollbackResult{WorkflowID: newID, Version: version, Unchanged: false}, nil
 }
 
 func (m *workflowControlModule) compareAndReplaceWorkflow(

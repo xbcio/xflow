@@ -11,6 +11,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
@@ -1045,6 +1046,60 @@ func (s *Server) AddWorkflowWithReport(ctx context.Context, wf *WorkflowBuilder)
 // warnings and ParamSpec issues the registration produced.
 func (s *Server) ReplaceWorkflowWithReport(ctx context.Context, wf *WorkflowBuilder) (WorkflowRegistration, error) {
 	return s.addWorkflow(ctx, wf, true)
+}
+
+// ListWorkflowVersions returns one registered workflow's version history: the
+// current version first, then retired versions newest-retirement first.
+//
+// It is the embedded face of GET /v1/workflows/{id}/versions and shares that
+// route's implementation, so the two cannot disagree on order or contents.
+// The namespace is taken from ctx (namespace.FromContext; the default when
+// unset), which is also how Engine.Invoke resolves a workflow id — an embedded
+// host whose workflows live in another namespace sets it on the context.
+//
+// Like the HTTP route, a row intentionally carries no definition: read one
+// version's payload back with GetWorkflowVersion.
+func (s *Server) ListWorkflowVersions(ctx context.Context, id types.WorkflowID) ([]backend.WorkflowVersionInfo, error) {
+	return s.api.ListWorkflowVersions(ctx, namespace.FromContext(ctx), id)
+}
+
+// GetWorkflowVersion returns ONE version of a registered workflow — current or
+// retired — with its full definition, the in-process counterpart of
+// GET /v1/workflows/{id}/versions/{version}.
+//
+// The current version resolves to the live record; a retired version resolves
+// to the payload captured when it was retired, so a version stays readable
+// after it has been replaced. An unknown version is
+// backend.ErrWorkflowVersionNotFound; a version of a workflow that does not
+// exist in ctx's namespace is backend.ErrWorkflowNotFound. The returned record
+// is not re-verified against the current compiler — pinning it for execution
+// (WithWorkflowVersion) is what fails closed.
+func (s *Server) GetWorkflowVersion(ctx context.Context, id types.WorkflowID, version string) (backend.WorkflowRecord, error) {
+	if id == "" {
+		return backend.WorkflowRecord{}, backend.ErrWorkflowNotFound
+	}
+	return s.api.GetWorkflowVersion(ctx, namespace.FromContext(ctx), id, version)
+}
+
+// RollbackWorkflow installs a retired version of the workflow addressed by id
+// as its current record, under the same id — the embedded face of
+// POST /v1/workflows/{id}/rollback.
+//
+// The write is the same atomic compare-and-swap the HTTP route performs: the
+// version being replaced is appended to history (so a rollback can be rolled
+// back), entry activations follow the committed record, and a result with
+// Unchanged set means the requested version already was current and nothing was
+// written. version may be empty, which is that same no-op for the current
+// version.
+//
+// The namespace comes from ctx exactly as on ListWorkflowVersions. Errors are
+// the registry's: backend.ErrWorkflowVersionNotFound for a version the workflow
+// never published, backend.ErrWorkflowVersionUnavailable for a retired payload
+// the current compiler no longer reproduces (which fails closed rather than
+// install another definition under the version's label), and
+// backend.ErrWorkflowNotFound for an id that resolves in no namespace.
+func (s *Server) RollbackWorkflow(ctx context.Context, id types.WorkflowID, version string) (apiserver.WorkflowRollbackResult, error) {
+	return s.api.RollbackWorkflow(ctx, namespace.FromContext(ctx), id, version)
 }
 
 func (s *Server) addWorkflow(ctx context.Context, wf *WorkflowBuilder, replace bool) (WorkflowRegistration, error) {

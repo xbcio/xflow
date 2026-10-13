@@ -463,7 +463,7 @@ func TestWorkflowVersionContractBindsToHandler(t *testing.T) {
 		Archived:         false,
 	}
 	realPage := listPage{List: []workflowVersionItem{realItem}, Total: 3}
-	realRollback := rollbackWorkflowResponse{WorkflowID: "wf-01H8XG", Version: "v1", Unchanged: false}
+	realRollback := WorkflowRollbackResult{WorkflowID: "wf-01H8XG", Version: "v1", Unchanged: false}
 	for _, tc := range []struct {
 		name   string
 		schema string

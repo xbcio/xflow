@@ -45,10 +45,10 @@ func pinVersionWorkflow(name, version, workNode string) *WorkflowBuilder {
 
 // publishWorkflowVersion retires the current record of id and installs wf's
 // definition as the next one, through the same atomic compare-and-swap the
-// HTTP PUT /v1/workflows/{id} uses. It is the test-side stand-in for a publish:
-// the SDK has no by-id replace of its own, and this is exactly the call that
-// creates history.
-func publishWorkflowVersion(t *testing.T, ctx context.Context, eng *Engine, id types.WorkflowID, wf *WorkflowBuilder) {
+// HTTP PUT /v1/workflows/{id} uses. It is how a publish creates history: the
+// SDK has no by-id replace of its own, so the test drives the registry call
+// that route makes.
+func publishWorkflowVersion(t *testing.T, ctx context.Context, registry backend.WorkflowRegistry, id types.WorkflowID, wf *WorkflowBuilder) {
 	t.Helper()
 	def, err := wf.build()
 	if err != nil {
@@ -66,11 +66,11 @@ func publishWorkflowVersion(t *testing.T, ctx context.Context, eng *Engine, id t
 	if err != nil {
 		t.Fatalf("audit hash %s: %v", def.Version, err)
 	}
-	existing, err := eng.workflowRegistry.GetWorkflow(ctx, id)
+	existing, err := registry.GetWorkflow(ctx, id)
 	if err != nil {
 		t.Fatalf("GetWorkflow(%q): %v", id, err)
 	}
-	replacer, ok := eng.workflowRegistry.(backend.DurableWorkflowReplaceCapability)
+	replacer, ok := registry.(backend.DurableWorkflowReplaceCapability)
 	if !ok {
 		t.Fatal("the local workflow registry does not support atomic replacement")
 	}
@@ -130,7 +130,7 @@ func TestInvokeWithWorkflowVersionRunsThePinnedGraph(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddWorkflow: %v", err)
 	}
-	publishWorkflowVersion(t, ctx, eng, id, pinVersionWorkflow("sdk-pin", "v2", "only-v2"))
+	publishWorkflowVersion(t, ctx, eng.workflowRegistry, id, pinVersionWorkflow("sdk-pin", "v2", "only-v2"))
 
 	cases := []struct {
 		name    string
@@ -231,7 +231,7 @@ func TestInvokeWithWorkflowVersionFailsClosedOnDrift(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed drifted v1: %v", err)
 	}
-	publishWorkflowVersion(t, ctx, eng, driftID, pinVersionWorkflow("sdk-pin-drift", "v2", "only-v2"))
+	publishWorkflowVersion(t, ctx, eng.workflowRegistry, driftID, pinVersionWorkflow("sdk-pin-drift", "v2", "only-v2"))
 
 	_, err = eng.Invoke(ctx, driftID, Start(), nil, WithWorkflowVersion("v1"))
 	if !errors.Is(err, backend.ErrWorkflowVersionUnavailable) {
@@ -273,7 +273,7 @@ func TestInvokeWithWorkflowVersionRequiresHistoryCapability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddWorkflow: %v", err)
 	}
-	publishWorkflowVersion(t, ctx, eng, id, pinVersionWorkflow("sdk-pin-history", "v2", "only-v2"))
+	publishWorkflowVersion(t, ctx, eng.workflowRegistry, id, pinVersionWorkflow("sdk-pin-history", "v2", "only-v2"))
 
 	// Baseline: with the real registry the retired pin resolves.
 	if _, err := eng.Invoke(ctx, id, Start(), nil, WithWorkflowVersion("v1")); err != nil {

@@ -89,7 +89,7 @@ func TestRollbackWorkflowInstallsTheArchivedVersionUnderTheSameID(t *testing.T) 
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("rollback status = %d, want 200 (body=%s)", resp.StatusCode, body)
 	}
-	var out rollbackWorkflowResponse
+	var out WorkflowRollbackResult
 	if env := decodeEnvelope(t, resp, &out); !env.Success {
 		t.Fatalf("rollback envelope = %+v, want success", env)
 	}
@@ -171,7 +171,7 @@ func TestRollbackWorkflowToTheCurrentVersionIsANoOp(t *testing.T) {
 				body, _ := io.ReadAll(resp.Body)
 				t.Fatalf("status = %d, want 200 (body=%s)", resp.StatusCode, body)
 			}
-			var out rollbackWorkflowResponse
+			var out WorkflowRollbackResult
 			env := decodeEnvelope(t, resp, &out)
 			if !env.Success || !out.Unchanged || out.Version != "v2" {
 				t.Fatalf("response = %+v (envelope %+v), want version v2 unchanged=true", out, env)
