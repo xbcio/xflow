@@ -112,6 +112,22 @@ type Task struct {
 	// It is internal queue metadata, not part of the public runner JSON
 	// contract, exactly like the fields above.
 	IntentCreatedAt time.Time `json:"-"`
+
+	// Generation selects which child execution a sub-workflow node wants within
+	// one activation. Like the fields above it is internal scheduling metadata,
+	// carried out-of-band by the backends, and never part of the public runner
+	// JSON contract.
+	//
+	// No persisted counter can stand in for it. The node's Attempt is bumped by
+	// every re-acquisition, and a reclaim re-acquires exactly like a retry
+	// does, so a redelivery after a reclaim must derive the SAME generation to
+	// resume the same child while a retry must derive the NEXT one to start a
+	// new child. The only place that difference is recorded is the task the
+	// engine enqueued, which is why it travels here.
+	//
+	// Zero means "not carried" — a first dispatch, or a payload written before
+	// this field existed — and normalizes to generation 1.
+	Generation int `json:"-"`
 }
 
 // UnitIdxUnknown is the sentinel value for Task.UnitIdx meaning "the durable
@@ -289,6 +305,19 @@ type ExecutionSnapshot struct {
 	// tracestate and the sampled flag.
 	TraceCarrier map[string]string `json:"trace_carrier,omitempty"`
 	ParentID     types.ExecutionID // non-empty for sub-executions
+	// ParentNode is the parent execution's node that started this execution,
+	// non-empty only on a sub-workflow child. It is what tells a reader which
+	// node of the parent to inspect for the wait, and its presence is what
+	// distinguishes a sub-workflow child from a rerun (which carries ParentID
+	// and RerunFrom, never ParentNode).
+	ParentNode string `json:"parent_node,omitempty"`
+	// Depth is this execution's sub-workflow nesting depth: 0 for an execution
+	// nobody's child, parent's Depth + 1 for a child. It is the runtime bound
+	// WithMaxSubWorkflowDepth enforces, and it exists precisely because the
+	// compile-time cycle and depth checks only see the static reference graph —
+	// a chain through dynamically resolved or cross-namespace references is
+	// caught here or not at all.
+	Depth int `json:"depth,omitempty"`
 	// RerunFrom is the node a rerun-derived execution starts at: the node whose
 	// result the parent execution did not reuse, and upstream of which every
 	// unit was copied from the parent's own result. Empty for an execution this

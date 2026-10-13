@@ -419,9 +419,10 @@ func seedFinalizesWhenEverythingIsResolved(t *testing.T, state engine.StateStore
 }
 
 // seedRecordsTheRerunOrigin pins the link a seeded execution carries: the
-// execution it derives from and the node it starts at. Both are what an
-// operator reads to tell a rerun from an original run, and the seed is the only
-// creation path that produces them.
+// execution it derives from, the node it starts at, and — for a sub-workflow
+// child — the parent node and nesting depth. All of them are what an operator
+// reads to tell a derived execution from an original one, and the seed is the
+// only creation path that produces the rerun half.
 func seedRecordsTheRerunOrigin(t *testing.T, state engine.StateStore) {
 	ctx := context.Background()
 	g := seedContractGraph(t, "seed-origin")
@@ -429,6 +430,8 @@ func seedRecordsTheRerunOrigin(t *testing.T, state engine.StateStore) {
 	snap := seedSnapshot(t, g)
 	snap.ParentID = "exec-seed-parent"
 	snap.RerunFrom = "mid"
+	snap.ParentNode = "collect"
+	snap.Depth = 2
 
 	if _, err := seeder.SeedExecution(ctx, engine.SeedExecutionRequest{
 		Execution: snap,
@@ -449,6 +452,12 @@ func seedRecordsTheRerunOrigin(t *testing.T, state engine.StateStore) {
 	}
 	if persisted.RerunFrom != snap.RerunFrom {
 		t.Fatalf("RerunFrom = %q, want %q", persisted.RerunFrom, snap.RerunFrom)
+	}
+	if persisted.ParentNode != snap.ParentNode {
+		t.Fatalf("ParentNode = %q, want %q", persisted.ParentNode, snap.ParentNode)
+	}
+	if persisted.Depth != snap.Depth {
+		t.Fatalf("Depth = %d, want %d", persisted.Depth, snap.Depth)
 	}
 }
 

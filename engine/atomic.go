@@ -794,6 +794,11 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 			return handled, err
 		}
 		return e.handlePinnedNode(ctx, task, flush)
+	case TaskTypeSubWorkflow:
+		// Always consumed here: no runner declares a handler for it, and
+		// TaskRouting refuses the type permanently, so there is no escape to
+		// route to. Failures are node failures, not tasks handed on.
+		return e.handleSubWorkflowNode(ctx, task, flush)
 	case TaskTypeGroupExec:
 		if e.groupExecutor == nil {
 			// No local executor — let the Dispatcher route this to a remote runner.

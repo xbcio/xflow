@@ -1,0 +1,458 @@
+package engine
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"strconv"
+	"time"
+
+	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/exprx"
+	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/types"
+)
+
+// subWorkflowWaitTTL is the ceiling on the lease one parked sub-workflow node
+// holds. It is deliberately not DefaultLeaseTTL: the sweeper that reclaims an
+// expired wait is also the only backstop for a lost completion notification, so
+// the TTL is the notification's worst-case latency — and a 60-second clock would
+// make a parent waiting on a 30-minute child pay ~30 write-amplifying reclaims
+// to learn a result it could not have learned sooner.
+//
+// A node whose own timeout is shorter parks for the shorter value: the node
+// deadline, not the notification budget, is what that author asked to bound.
+const subWorkflowWaitTTL = 5 * time.Minute
+
+// subWorkflowChildID derives the child execution id for one generation of one
+// node. Deterministic and collision-free across replicas, in the same family as
+// the other derived ids (IdempotentExecutionID, DeterministicExecutionID), and
+// it deliberately includes the activation so that a cyclic re-entry of the same
+// node starts its own child rather than resuming the previous activation's.
+//
+// Sibling of the derived-id rule in the design: the id used to say "attempt",
+// but the node's Attempt is re-bumped by a reclaim, so a redelivery would have
+// minted a second child for the same logical wait. The generation carried on
+// the task is the stable value; see Task.Generation.
+func subWorkflowChildID(parent types.ExecutionID, nodeName string, activationID, generation int) types.ExecutionID {
+	h := sha256.New()
+	h.Write([]byte(parent))
+	h.Write([]byte{0})
+	h.Write([]byte(nodeName))
+	h.Write([]byte{0})
+	h.Write([]byte(strconv.Itoa(activationID)))
+	h.Write([]byte{0})
+	h.Write([]byte(strconv.Itoa(generation)))
+	sum := h.Sum(nil)
+	return types.ExecutionID("exec-sw-" + hex.EncodeToString(sum[:16]))
+}
+
+// subWorkflowGeneration normalizes the absent-generation encoding: a task that
+// predates Task.Generation, or a first dispatch, wants child 1.
+func subWorkflowGeneration(generation int) int {
+	if generation <= 0 {
+		return 1
+	}
+	return generation
+}
+
+// subWorkflowWaitLeaseTTL is min(node timeout, subWorkflowWaitTTL), with an
+// unbounded or unset node timeout reading as the ceiling.
+func subWorkflowWaitLeaseTTL(nodeTimeout time.Duration) time.Duration {
+	if nodeTimeout > 0 && nodeTimeout < subWorkflowWaitTTL {
+		return nodeTimeout
+	}
+	return subWorkflowWaitTTL
+}
+
+// subWorkflowChild is one dispatch's decision: the child execution it owns and
+// the depth that child runs at.
+type subWorkflowChild struct {
+	ID    types.ExecutionID
+	Depth int
+}
+
+// handleSubWorkflowNode consumes one TaskTypeSubWorkflow task: it claims the
+// node, resolves the compiled binding, starts (or resumes) the child execution,
+// and parks the node at waiting until the child concludes.
+//
+// Like the other engine-owned task types the task never had a lease when it
+// arrived, so this handler acquires its own — the park is fenced on that lease
+// identity, and so is the completion that later commits under it.
+//
+// The handled return is always true: the type is engine-owned, and every
+// refusal (no resolver, unresolved binding, depth exceeded, resolution
+// mismatched, store failure) is a node failure through the ordinary retry and
+// on_error pipeline, never a task routed elsewhere and never a silent success.
+func (e *Engine) handleSubWorkflowNode(ctx context.Context, task *Task, flush bool) (bool, error) {
+	g, active, err := e.loadActiveGraph(ctx, task.ExecutionID)
+	if err != nil {
+		return true, err
+	}
+	if !active {
+		// Same classification rule as the advance and skip branches: an intent
+		// the engine owns but cannot apply is a classified drop, not a handled
+		// task.
+		return true, e.inactiveExecutionError(ctx, task.ExecutionID, task.provabilityAnchor())
+	}
+	if task.NodeIdx < 0 || task.NodeIdx >= g.NodeCount() {
+		return true, fmt.Errorf("sub-workflow node index %d is out of range", task.NodeIdx)
+	}
+	meta := g.NodeAt(task.NodeIdx)
+	if meta.Type != types.SubWorkflowNodeType || meta.Name != task.NodeName {
+		return true, fmt.Errorf("task %q/%q is not a sub-workflow node", task.ExecutionID, task.NodeName)
+	}
+	return true, e.executeSubWorkflow(ctx, task, g, meta, flush)
+}
+
+// executeSubWorkflow is the claim → start-child → park sequence. The three
+// steps are deliberately not atomic with each other (they cannot be: the child
+// lives under another execution's Redis hash tag), so each is idempotent and
+// the lease sweeper's redispatch replays the whole sequence: the derived child
+// id is found rather than re-created, and the park is re-written under the new
+// lease generation.
+func (e *Engine) executeSubWorkflow(ctx context.Context, task *Task, g *graph.Graph, meta graph.NodeMeta, flush bool) error {
+	lease, err := e.acquireSubWorkflowLease(ctx, task, meta)
+	if err != nil {
+		return err
+	}
+	if lease == nil {
+		// Another dispatch owns the node — a live park, a commit in flight, or
+		// a terminal outcome. All are benign for this delivery.
+		return nil
+	}
+	child, cause := e.startSubWorkflowChild(ctx, task, g, meta)
+	if cause == nil {
+		if accepted, err := e.parkSubWorkflowNode(ctx, lease, child); err != nil {
+			return err
+		} else if accepted {
+			return nil
+		}
+		// Refused by the fence: the node moved on (revoked, committed by a
+		// newer generation) between the claim and the park. The child is
+		// already running; whoever owns the node now owns the link.
+		return nil
+	}
+	return e.failSubWorkflowStart(ctx, lease, g, meta, cause, flush)
+}
+
+// acquireSubWorkflowLease claims the node for this dispatch, mirroring
+// BuildTaskLease's identity and attempt accounting: the attempt counts retries
+// within one activation and restarts on a cyclic re-entry.
+//
+// A nil lease with a nil error means the store refused the claim, which is
+// benign here: the node is running under a live lease, already parked, or
+// terminal, and every one of those is another dispatch's business.
+func (e *Engine) acquireSubWorkflowLease(ctx context.Context, task *Task, meta graph.NodeMeta) (*TaskLease, error) {
+	leaseID, leaseToken := newLeaseCredentials()
+	lease := &TaskLease{
+		LeaseID:    leaseID,
+		LeaseToken: leaseToken,
+		Task:       *task,
+		IssuedAt:   time.Now().UTC(),
+		TTL:        subWorkflowWaitLeaseTTL(e.resolveNodeTimeout(meta.Timeout)),
+	}
+	prev, acquired, err := e.state.AcquireTaskLease(ctx, lease)
+	if err != nil {
+		return nil, fmt.Errorf("acquire sub-workflow lease %q/%q: %w", task.ExecutionID, task.NodeName, err)
+	}
+	if !acquired {
+		return nil, nil
+	}
+	lease.Attempt = 1
+	if prev != nil && prev.ActivationID == task.ActivationID {
+		lease.Attempt = prev.Attempt + 1
+	}
+	return lease, nil
+}
+
+// startSubWorkflowChild resolves the compiled binding, checks the runtime
+// bounds, evaluates the input map, and starts the child execution if this
+// generation has not already started it.
+//
+// Every returned error is a node-start failure, and they are classified rather
+// than uniform: a missing binding, a missing capability, a depth overrun and a
+// definition-hash mismatch are permanent (retrying cannot change them), while a
+// resolver or store failure keeps its own classification so a transient outage
+// stays retriable.
+func (e *Engine) startSubWorkflowChild(ctx context.Context, task *Task, g *graph.Graph, meta graph.NodeMeta) (subWorkflowChild, error) {
+	binding := meta.SubWorkflow
+	if binding == nil {
+		return subWorkflowChild{}, fmt.Errorf("node %q: %w (%w)", task.NodeName, ErrSubWorkflowUnresolved, types.ErrPermanent)
+	}
+	if e.subWorkflowResolver == nil {
+		return subWorkflowChild{}, fmt.Errorf("node %q: %w (%w)", task.NodeName, ErrSubWorkflowUnsupported, types.ErrPermanent)
+	}
+	if _, ok := e.state.(SubWorkflowLinkStore); !ok {
+		return subWorkflowChild{}, fmt.Errorf("node %q: state store does not implement SubWorkflowLinkStore: %w (%w)",
+			task.NodeName, ErrSubWorkflowUnsupported, types.ErrPermanent)
+	}
+	snap, err := e.state.GetExecution(ctx, task.ExecutionID)
+	if err != nil {
+		return subWorkflowChild{}, fmt.Errorf("read parent execution %q: %w", task.ExecutionID, err)
+	}
+	if snap == nil {
+		return subWorkflowChild{}, ErrExecutionInactive
+	}
+	childDepth := snap.Depth + 1
+	if childDepth > e.maxSubWorkflowDepth {
+		// Degraded to a node failure rather than a submission refusal: the
+		// compiler bounds the static reference chain, and this is the bound for
+		// the chains it cannot see. Fail closed — the alternative is running an
+		// unbounded recursion.
+		return subWorkflowChild{}, fmt.Errorf("node %q: child execution depth %d exceeds the limit %d: %w (%w)",
+			task.NodeName, childDepth, e.maxSubWorkflowDepth, graph.ErrSubWorkflowDepth, types.ErrPermanent)
+	}
+	// The namespace is filled in here rather than recorded at compile time: a
+	// WorkflowDef carries none, and a resolver is bound to one namespace by its
+	// adapter. This call is the adapter's one chance to reject a mismatch, which
+	// is what makes cross-namespace references unreachable by construction.
+	target, err := e.subWorkflowResolver.ResolveSubWorkflow(ctx, graph.SubWorkflowRef{
+		Namespace:      string(namespace.FromContext(ctx)),
+		Name:           binding.Name,
+		Version:        binding.Version,
+		DefinitionHash: binding.DefinitionHash,
+	})
+	if err != nil {
+		return subWorkflowChild{}, fmt.Errorf("resolve sub-workflow %q@%q: %w", binding.Name, binding.Version, err)
+	}
+	// Re-verified rather than trusted: the binding is the pin, and a resolver
+	// that quietly served a newer revision would turn this node into "whatever
+	// is latest", which is exactly what pinning exists to prevent.
+	if target.DefinitionHash != binding.DefinitionHash {
+		return subWorkflowChild{}, fmt.Errorf("sub-workflow %q@%q: resolver returned definition %q, the compiled binding pins %q: %w",
+			binding.Name, binding.Version, target.DefinitionHash, binding.DefinitionHash, types.ErrPermanent)
+	}
+	if target.Graph == nil {
+		return subWorkflowChild{}, fmt.Errorf("sub-workflow %q@%q: resolver returned no graph: %w (%w)",
+			binding.Name, binding.Version, ErrSubWorkflowUnresolved, types.ErrPermanent)
+	}
+	if target.Graph.FAF() {
+		// The compiler already rejects this shape; the check is repeated because
+		// a FAF graph has no persisted state for a child to run in.
+		return subWorkflowChild{}, fmt.Errorf("sub-workflow %q@%q is a FAF workflow, which cannot run as a child execution: %w",
+			binding.Name, binding.Version, types.ErrPermanent)
+	}
+	params, err := e.subWorkflowParams(ctx, task, g, meta)
+	if err != nil {
+		return subWorkflowChild{}, err
+	}
+
+	child := subWorkflowChild{
+		ID:    subWorkflowChildID(task.ExecutionID, task.NodeName, task.ActivationID, subWorkflowGeneration(task.Generation)),
+		Depth: childDepth,
+	}
+	existing, err := e.state.GetExecution(ctx, child.ID)
+	if err != nil {
+		return subWorkflowChild{}, fmt.Errorf("read child execution %q: %w", child.ID, err)
+	}
+	if existing != nil {
+		// An earlier dispatch of this generation already created the child — a
+		// crash between the create and the park, or a reclaim. Creating again
+		// would overwrite its live state, because every backend's create is an
+		// unconditional write, so this is a resume and not a create.
+		return child, nil
+	}
+
+	entries, err := e.subWorkflowChildTasks(binding, subWorkflowEntry(meta), target.Graph, child.ID)
+	if err != nil {
+		return subWorkflowChild{}, err
+	}
+	childSnap := &ExecutionSnapshot{
+		ID:     child.ID,
+		Graph:  target.Graph,
+		Status: types.ExecutionStatusRunning,
+		Params: params,
+		// The link back to the parent. ParentID reuses the field the snapshot
+		// already reserved for a sub-execution; ParentNode is what names the
+		// node whose wait this child satisfies.
+		ParentID:   task.ExecutionID,
+		ParentNode: task.NodeName,
+		Depth:      childDepth,
+		// Trace identity is inherited so the child's spans land on the parent's
+		// trace. Runtime and scope deliberately are NOT: $vars belongs to the
+		// child's own definition, and its two sources would be indistinguishable
+		// if the parent's were merged in. What the parent wants to pass travels
+		// in params, evaluated from the node's input map.
+		TraceID:      snap.TraceID,
+		SpanID:       snap.SpanID,
+		TraceCarrier: snap.TraceCarrier,
+	}
+	if _, err := e.startExecution(ctx, childSnap, entries); err != nil {
+		return subWorkflowChild{}, fmt.Errorf("start child execution %q: %w", child.ID, err)
+	}
+	return child, nil
+}
+
+// subWorkflowChildTasks assembles the child's initial tasks, mirroring Invoke
+// when the node names an entry and Submit otherwise: the named entry node runs
+// and every other root is resolved as skipped, so the unselected roots neither
+// hold the completion counter open nor block a fan-in they share with the entry.
+func (e *Engine) subWorkflowChildTasks(binding *graph.SubWorkflowBinding, entry string, target *graph.Graph, childID types.ExecutionID) ([]initialTask, error) {
+	if entry == "" {
+		return submitInitialTasks(childID, target), nil
+	}
+	idx, ok := target.EntryIndex(entry)
+	if !ok {
+		// The compiler validated the entry against the target it resolved; a
+		// miss here means the resolver answered with a different revision than
+		// the pin, which the hash check above should have caught first.
+		return nil, fmt.Errorf("sub-workflow %q@%q: entry node %q is not an entry of the resolved definition: %w",
+			binding.Name, binding.Version, entry, types.ErrPermanent)
+	}
+	unitIdx := target.UnitIndexForNode(idx)
+	var first Task
+	if target.UnitKindAt(unitIdx) == graph.UnitGroup {
+		gm := target.GroupMetaAt(unitIdx)
+		first = Task{ExecutionID: childID, NodeName: gm.Name, NodeIdx: gm.EntryIdx, UnitIdx: unitIdx, Type: TaskTypeGroupExec}
+	} else {
+		node := target.NodeAt(idx)
+		first = Task{ExecutionID: childID, NodeName: node.Name, NodeIdx: idx, UnitIdx: unitIdx, Type: execTaskTypeForNode(node)}
+	}
+	first.ActivationID = 1
+	tasks := []initialTask{{
+		task:      first,
+		operation: fmt.Sprintf("enqueue entry node %q", first.NodeName),
+	}}
+	for _, skip := range UnselectedRootSkips(childID, target, unitIdx) {
+		tasks = append(tasks, initialTask{
+			task:      skip,
+			operation: fmt.Sprintf("skip unselected root %q", skip.NodeName),
+		})
+	}
+	return tasks, nil
+}
+
+// subWorkflowEntry reads the optional entry node out of the node's parameters.
+//
+// The binding deliberately does not carry it: an entry was never part of the pin
+// (the same pinned revision serves an entry and a default start), and the
+// compiler validated it against the resolved target, so the parameters remain
+// its one source of truth.
+func subWorkflowEntry(meta graph.NodeMeta) string {
+	entry, _ := meta.Parameters["entry"].(string)
+	return entry
+}
+
+// subWorkflowParams evaluates the node's "input" map into the child's
+// submission params.
+//
+// The environment is the exact one the runner boundary would build for this
+// node — buildInput plus exprx.BuildExprEnv — because "input" is a boundary
+// parameter in every other respect (it is exempted from runner-side evaluation
+// in graph.evaluableParams precisely so this single evaluation is the only
+// one). Evaluating it against a different environment here would make the same
+// expression mean two things depending on which side of the engine it ran on.
+func (e *Engine) subWorkflowParams(ctx context.Context, task *Task, g *graph.Graph, meta graph.NodeMeta) (map[string]any, error) {
+	raw, present := meta.Parameters["input"]
+	if !present || raw == nil {
+		return nil, nil
+	}
+	input, err := e.buildInput(ctx, task, g)
+	if err != nil {
+		return nil, fmt.Errorf("build sub-workflow input for %q/%q: %w", task.ExecutionID, task.NodeName, err)
+	}
+	env := exprx.BuildExprEnv(input, nil)
+	evaluated, err := subWorkflowEvaluateParam(raw, env)
+	if err != nil {
+		return nil, fmt.Errorf("evaluate sub-workflow input for %q/%q: %w", task.ExecutionID, task.NodeName, err)
+	}
+	params, ok := evaluated.(map[string]any)
+	if !ok {
+		// The compiler requires a map, so this is a malformed compiled artifact
+		// rather than author error; fail closed instead of running a child with
+		// unbindable params.
+		return nil, fmt.Errorf("node %q: parameters.input evaluated to %T, want a map: %w", task.NodeName, evaluated, types.ErrPermanent)
+	}
+	return params, nil
+}
+
+// subWorkflowEvaluateParam recursively renders templates in an expression map.
+// It mirrors execution.evaluateParamValue deliberately — the two must agree on
+// what a nested template means, and the engine/evaluation-parity test pins that
+// agreement rather than trusting two copies to stay in step.
+func subWorkflowEvaluateParam(value any, env map[string]any) (any, error) {
+	switch v := value.(type) {
+	case string:
+		return exprx.RenderTemplate(v, env)
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for k, child := range v {
+			evaluated, err := subWorkflowEvaluateParam(child, env)
+			if err != nil {
+				return nil, err
+			}
+			out[k] = evaluated
+		}
+		return out, nil
+	case []any:
+		out := make([]any, len(v))
+		for i, child := range v {
+			evaluated, err := subWorkflowEvaluateParam(child, env)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = evaluated
+		}
+		return out, nil
+	default:
+		return value, nil
+	}
+}
+
+// parkSubWorkflowNode moves the claimed node to waiting and records the link
+// the completion path will read back.
+//
+// The link's lease identity is the claim's, so the completion commits under the
+// same fence any other result does; the wait deadline mirrors the lease, which
+// is what the reclaim backstop fires on.
+func (e *Engine) parkSubWorkflowNode(ctx context.Context, lease *TaskLease, child subWorkflowChild) (bool, error) {
+	store, ok := e.state.(SubWorkflowLinkStore)
+	if !ok {
+		// Unreachable: the plan checked the capability before creating anything.
+		return false, fmt.Errorf("state store does not implement SubWorkflowLinkStore: %w", ErrSubWorkflowUnsupported)
+	}
+	link := SubWorkflowLink{
+		ChildExecutionID: child.ID,
+		ParentNode:       lease.Task.NodeName,
+		Generation:       subWorkflowGeneration(lease.Task.Generation),
+		Depth:            child.Depth,
+		WaitDeadline:     lease.Deadline(),
+		LeaseID:          lease.LeaseID,
+		LeaseToken:       lease.LeaseToken,
+		Attempt:          lease.Attempt,
+		ActivationID:     lease.Task.ActivationID,
+	}
+	accepted, err := store.BeginSubWorkflowWait(ctx, lease, link, nil)
+	if err != nil {
+		return false, fmt.Errorf("park sub-workflow node %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
+	}
+	return accepted, nil
+}
+
+// failSubWorkflowStart turns a start failure into the node's normal failure
+// pipeline: retry if the node's policy allows and the cause is retriable, else
+// on_error, else a failed node that aborts the execution.
+//
+// Retrying is safe here in a way it is not for a partially applied expansion:
+// a start failure either created nothing, or created a child under the current
+// generation's derived id — and a retry advances the generation, so it can
+// never re-enter the same child.
+func (e *Engine) failSubWorkflowStart(ctx context.Context, lease *TaskLease, g *graph.Graph, meta graph.NodeMeta, cause error, flush bool) error {
+	if errors.Is(cause, ErrExecutionInactive) {
+		// The parent finished or was canceled under us; nothing to commit.
+		return nil
+	}
+	privateOutput := privateOutputForTask(g, &lease.Task)
+	outcome, err := e.commitNodeErrorOutcome(ctx, lease, meta, privateOutput, cause, nil, nil,
+		e.commitLegacyNodeWithClassification)
+	if outcome == CommitOutcomeStaleToken || outcome == CommitOutcomeDuplicateTerminal || outcome == CommitOutcomeExecutionInactive {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("fail sub-workflow start %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
+	}
+	return nil
+}

@@ -45,6 +45,7 @@ func TestOutboxEntryCarriesTheFieldsHiddenFromRunnerJSON(t *testing.T) {
 		ActivationID: 5,
 		UnitIdx:      2,
 		Port:         &port,
+		Generation:   5,
 	})
 
 	if got.AutoDepth != 7 {
@@ -61,6 +62,26 @@ func TestOutboxEntryCarriesTheFieldsHiddenFromRunnerJSON(t *testing.T) {
 	}
 	if *got.Port != port {
 		t.Errorf("Port = %q, want %q", *got.Port, port)
+	}
+	if got.Generation != 5 {
+		t.Errorf("Generation = %d, want 5", got.Generation)
+	}
+}
+
+// TestOutboxEntryKeepsAbsentGenerationAtZero pins the zero value as the "not
+// carried" encoding: a task that predates the field, or a node's first
+// dispatch, round-trips as zero and must not come back as an invented
+// generation. The engine normalizes zero to generation 1 where it is read
+// (subWorkflowGeneration), so a codec that "helpfully" rewrote it here would
+// move the decision into the wire format.
+func TestOutboxEntryKeepsAbsentGenerationAtZero(t *testing.T) {
+	got := roundTripOutboxTask(t, engine.Task{
+		ExecutionID: types.ExecutionID("exec-1"),
+		NodeName:    "review",
+		Type:        engine.TaskTypeSubWorkflow,
+	})
+	if got.Generation != 0 {
+		t.Errorf("Generation = %d for a task carrying none, want 0", got.Generation)
 	}
 }
 

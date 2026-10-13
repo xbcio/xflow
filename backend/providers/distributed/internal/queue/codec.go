@@ -34,6 +34,12 @@ type queuedTask struct {
 	// as DeliverableAtMs: absent means "not carried", and the classifier then
 	// falls back to DeliverableAt rather than fabricating an age.
 	IntentCreatedAtMs int64 `json:"_intent_created_at_ms,omitempty"`
+	// Generation is Task.Generation, the child-execution generation a
+	// sub-workflow task wants. Absent and zero mean the same thing ("generation
+	// 1" after normalization), so unlike UnitIdx it needs no has-flag: a task
+	// written before the field existed and a first dispatch are the same
+	// request.
+	Generation int `json:"_generation,omitempty"`
 }
 
 // Marshal encodes a task into a transport payload, preserving the scheduler
@@ -49,6 +55,7 @@ func Marshal(t *engine.Task) ([]byte, error) {
 		UnitIdx:           unitIdxPtr(t.UnitIdx),
 		DeliverableAtMs:   timeMillis(t.DeliverableAt),
 		IntentCreatedAtMs: timeMillis(t.IntentCreatedAt),
+		Generation:        t.Generation,
 	})
 }
 
@@ -65,6 +72,7 @@ func MarshalWithNamespace(t *engine.Task, namespaceID namespace.Namespace) ([]by
 		UnitIdx:           unitIdxPtr(t.UnitIdx),
 		DeliverableAtMs:   timeMillis(t.DeliverableAt),
 		IntentCreatedAtMs: timeMillis(t.IntentCreatedAt),
+		Generation:        t.Generation,
 	})
 }
 
@@ -105,6 +113,7 @@ func Unmarshal(data []byte) (*engine.Task, namespace.Namespace, error) {
 	task := qt.Task
 	task.AutoDepth = qt.AutoDepth
 	task.ActivationID = qt.ActivationID
+	task.Generation = qt.Generation
 	if qt.DeliverableAtMs > 0 {
 		task.DeliverableAt = time.UnixMilli(qt.DeliverableAtMs).UTC()
 	}

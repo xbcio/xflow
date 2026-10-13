@@ -30,15 +30,17 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 	g := ContractGraph()
 
 	if err := state.CreateExecution(ctx, &engine.ExecutionSnapshot{
-		ID:        id,
-		Graph:     g,
-		Status:    types.ExecutionStatusRunning,
-		Params:    map[string]any{"claim_id": "c-1", "retry_budget": float64(2)},
-		Runtime:   &types.Runtime{Vars: map[string]any{"namespace_id": "namespace-a"}},
-		Scope:     map[string]any{"$index": float64(3)},
-		TestRun:   true,
-		ParentID:  "exec-contract-parent",
-		RerunFrom: "start",
+		ID:         id,
+		Graph:      g,
+		Status:     types.ExecutionStatusRunning,
+		Params:     map[string]any{"claim_id": "c-1", "retry_budget": float64(2)},
+		Runtime:    &types.Runtime{Vars: map[string]any{"namespace_id": "namespace-a"}},
+		Scope:      map[string]any{"$index": float64(3)},
+		TestRun:    true,
+		ParentID:   "exec-contract-parent",
+		ParentNode: "collect",
+		Depth:      3,
+		RerunFrom:  "start",
 	}); err != nil {
 		t.Fatalf("CreateExecution() error = %v", err)
 	}
@@ -93,6 +95,16 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 	}
 	if snap.RerunFrom != "start" {
 		t.Fatalf("RerunFrom = %q, want %q", snap.RerunFrom, "start")
+	}
+	// The sub-workflow link: which parent node started this child, and how deep
+	// it nests. parent_node is what distinguishes a sub-workflow child from a
+	// rerun on the same ParentID, and depth is the value the engine's runtime
+	// nesting bound reads from the parent before starting the next level.
+	if snap.ParentNode != "collect" {
+		t.Fatalf("ParentNode = %q, want %q", snap.ParentNode, "collect")
+	}
+	if snap.Depth != 3 {
+		t.Fatalf("Depth = %d, want 3", snap.Depth)
 	}
 
 	loaded, err := state.LoadGraph(ctx, id)
