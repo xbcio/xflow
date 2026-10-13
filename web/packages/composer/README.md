@@ -43,11 +43,15 @@ function Panel({ spec }) {
 - Apply patches with core `applyPatches` (it keeps row identity). A host with
   its own reducer must call `adoptRowIdentity(prev, next)` for edited rows.
 - Writes of one microtask arrive as **one** `onChange` call (same path: last
-  wins). Until the host passes a new `value` reference, Composer renders
-  "host value + pending patches" (the overlay), so fast typing and IME input
-  never see stale values. A new `value` always wins (a host may reject patches
-  by not applying them). If no new `value` arrives within 1s, the overlay is
-  dropped with an `overlay-timeout` warning.
+  wins). Composer renders "host value + pending patches" (the overlay), so fast
+  typing and IME input never see stale values. Emitted patches stay pending
+  until a host `value` reflects them (a `set` path deep-equals its value, an
+  `unset` path is absent); the newest reflected patch acknowledges every patch
+  emitted before it, and the rest is replayed on top, so an async or batching
+  host never rolls back newer edits. If 1s passes after the latest `onChange`
+  without full acknowledgement, all emitted patches are dropped with an
+  `overlay-timeout` warning and the host value wins (a host rejects or
+  normalizes patches this way).
 - Warnings (dropped writes, `/$ctx` writes, overlay timeout, `emit`) go to
   `onWarning`, default `console.warn`.
 

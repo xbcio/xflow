@@ -178,7 +178,8 @@ describe("<Composer>", () => {
     expect(m.value).toEqual({ p: { keep: "" } });
   });
 
-  it("drops the overlay when the host passes a value without the patches (rejection)", async () => {
+  it("drops a rejected overlay at the timeout even if the host passed a new value", async () => {
+    vi.useFakeTimers();
     let setHost: (value: object) => void = () => {};
     const onChange = vi.fn();
     function Host() {
@@ -206,6 +207,8 @@ describe("<Composer>", () => {
     expect(onChange).toHaveBeenCalledWith([{ op: "set", path: "/name", value: "ab" }]);
     expect(input.value).toBe("ab"); // still the overlay: host has not answered
     await act(async () => setHost({ name: "rejected" }));
+    expect(input.value).toBe("ab"); // reflects no emitted patch: not an acknowledgement
+    await act(async () => vi.advanceTimersByTime(OVERLAY_TIMEOUT_MS));
     expect(input.value).toBe("rejected");
   });
 
