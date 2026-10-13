@@ -202,12 +202,33 @@ func WithScheduleOverrides(overrides store.ScheduleOverrideStore) Option {
 type InvokeOption func(*invokeConfig)
 
 type invokeConfig struct {
-	execTTL    time.Duration
-	runtime    *types.Runtime
-	fafRuntime *types.Runtime
-	traceID    string
-	spanID     string
-	testRun    bool
+	execTTL        time.Duration
+	runtime        *types.Runtime
+	fafRuntime     *types.Runtime
+	traceID        string
+	spanID         string
+	idempotencyKey string
+	testRun        bool
+}
+
+// WithIdempotencyKey makes this invocation safe to retry: a second Invoke of the
+// same workflow, entry, input and key returns the execution the first one
+// created instead of starting another.
+//
+// The key is scoped to the workflow, so one key means one execution of one
+// workflow; the same key with a different entry or different input is refused
+// (engine.ErrIdempotencyConflict) rather than answered with an execution of
+// other work. A server whose state store cannot hold the claim refuses the
+// keyed invocation (engine.ErrIdempotencyUnsupported) rather than silently
+// dropping the key.
+//
+// A key stays valid for the execution's own retention (engine.WithIdempotencyTTL
+// adjusts it), so a retry within that window — including after the execution
+// reached a terminal status — is answered with the original execution.
+func WithIdempotencyKey(key string) InvokeOption {
+	return func(c *invokeConfig) {
+		c.idempotencyKey = key
+	}
 }
 
 // WithTestRun marks this invocation as a test run.
