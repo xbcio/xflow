@@ -85,18 +85,51 @@ interface SectionProps {
   children: ReactNode;
 }
 
+/**
+ * Collects the issues FieldFrames below a section report and returns the
+ * number of distinct errors among them. Reports are forwarded to an
+ * enclosing section, so an outer group also counts its nested groups.
+ */
+function useHiddenErrors(): [IssueReporter, number] {
+  const parent = useContext(SectionIssuesContext);
+  const byFrame = useRef(new Map<string, readonly Issue[]>());
+  const [count, setCount] = useState(0);
+  const report = useCallback<IssueReporter>(
+    (key, issues) => {
+      if (issues === null || issues.length === 0) byFrame.current.delete(key);
+      else byFrame.current.set(key, issues);
+      // An issue reaches every element bound to its path (e.g. ExpressionInput
+      // and its literal control), so count each path/check/message once.
+      const errors = new Set<string>();
+      for (const [frame, list] of byFrame.current) {
+        for (const issue of list) {
+          if (issue.severity !== "error") continue;
+          errors.add(`${issue.path ?? frame}\u0000${issue.check ?? ""}\u0000${issue.message}`);
+        }
+      }
+      setCount(errors.size);
+      parent?.(key, issues);
+    },
+    [parent]
+  );
+  return [report, count];
+}
+
 /** Titled, optionally collapsible section. Collapsed content stays mounted (drafts survive). */
 function Section(props: SectionProps) {
   const base = useId();
   const [collapsed, setCollapsed] = useState(props.defaultCollapsed === true);
+  const [report, hiddenErrors] = useHiddenErrors();
   const titleId = `${base}title`;
   const bodyId = `${base}body`;
   const issuesId = `${base}issues`;
+  const badgeId = `${base}badge`;
   const status = worstSeverity(props.issues);
   const open = !props.collapsible || !collapsed;
+  const badge = !open && hiddenErrors > 0;
   return (
     <section
-      className={cx("xflow-composer-section", props.className, status && `is-${status}`, !open && "is-collapsed")}
+      className={cx("xflow-composer-section", props.className, status && `is-${status}`, !open && "is-collapsed", badge && "has-hidden-errors")}
       data-composer-node={props.nodeId}
       aria-labelledby={props.title ? titleId : undefined}
       aria-describedby={props.issues.length > 0 ? issuesId : undefined}
@@ -109,6 +142,7 @@ function Section(props: SectionProps) {
               className="xflow-composer-section-toggle"
               aria-expanded={open}
               aria-controls={bodyId}
+              aria-describedby={badge ? badgeId : undefined}
               onClick={() => setCollapsed((value) => !value)}
             >
               {open ? <DownOutlined aria-hidden /> : <RightOutlined aria-hidden />}
@@ -121,13 +155,18 @@ function Section(props: SectionProps) {
               {props.title}
             </h3>
           )}
+          {badge ? (
+            <span id={badgeId} className="xflow-composer-section-badge" role="status">
+              {hiddenErrors} 个错误
+            </span>
+          ) : null}
           {props.actions ? <div className="xflow-composer-section-actions">{props.actions}</div> : null}
         </header>
       ) : null}
       {props.description ? <p className="xflow-composer-section-description">{props.description}</p> : null}
       <IssueList id={issuesId} issues={props.issues} />
       <div id={bodyId} className="xflow-composer-section-body" hidden={!open}>
-        {props.children}
+        <SectionIssuesContext.Provider value={report}>{props.children}</SectionIssuesContext.Provider>
       </div>
     </section>
   );

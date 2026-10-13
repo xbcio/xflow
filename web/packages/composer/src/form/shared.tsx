@@ -182,6 +182,17 @@ export function FieldFrame(props: FieldFrameProps) {
   const issuesId = `${base}issues`;
   const issues = props.localIssues?.length ? [...props.localIssues, ...props.issues] : props.issues;
   const status = worstSeverity(issues);
+  const report = useContext(SectionIssuesContext);
+  // Report errors only (all a collapsed section shows), keyed by content so a
+  // re-render that rebuilds the same issue list does not re-report.
+  const errors = issues.filter((issue) => issue.severity === "error");
+  const errorKey = errors.map((issue) => `${issue.path ?? ""}\u0000${issue.check ?? ""}\u0000${issue.message}`).join("\u0001");
+  useEffect(() => {
+    if (!report) return;
+    report(base, errorKey === "" ? null : errors);
+    return () => report(base, null);
+    // `errors` is intentionally captured through errorKey.
+  }, [report, base, errorKey]);
   const describedBy =
     [props.hint ? hintId : "", props.description ? descriptionId : "", issues.length > 0 ? issuesId : ""]
       .filter(Boolean)

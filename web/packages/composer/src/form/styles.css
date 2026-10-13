@@ -85,6 +85,18 @@
   display: none;
 }
 
+/* Collapsed section hiding errors: count next to the title. */
+.xflow-composer-section-badge {
+  flex: 0 0 auto;
+  margin-right: auto;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--xflow-status-error-bg, #fdecee);
+  color: var(--xflow-status-error-text, #b4232b);
+  font-size: 12px;
+  line-height: 18px;
+}
+
 .xflow-composer-object-group {
   padding: 10px 12px;
   border: 1px solid var(--xflow-border, #d9dee7);
