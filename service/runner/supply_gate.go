@@ -291,10 +291,16 @@ func (g *SupplyGate) PullFetcher() *PullSupplyFetcher { return g.pullFetcher }
 // supplyDeclaration is what the gate remembers about one supply key's
 // declaration.
 type supplyDeclaration struct {
-	// WorkflowID is the workflow that declared the key. A re-declaration by the
-	// SAME workflow is an upgrade — a new version may legitimately move the URL —
-	// and replaces the record; refusing it would make a source immutable until
-	// this runner restarted. A different workflow disagreeing is a conflict.
+	// WorkflowID is the id that declared the key. It is NOT a stable identity
+	// across registrations: the server mints a fresh uuid per registration, so
+	// republishing a workflow under a new version (nightly@2 after nightly@1)
+	// arrives here with a DIFFERENT id even though a human calls it the same
+	// workflow. What equality below actually covers is re-admissions of one
+	// registration (several entry units, a retried activation — the definition
+	// is immutable, so the requirement is identical) and a PUT replacement,
+	// which keeps the path id and may legitimately move the URL. A re-registered
+	// id that moves the URL lands in the conflict branch, deliberately: see
+	// recordDeclaration for why that is fail-closed, and for the recovery.
 	WorkflowID string
 	// PullSource is non-nil when the declaring node is xflow.supply.http.
 	PullSource *types.SupplyPullSource
@@ -308,12 +314,27 @@ type supplyDeclaration struct {
 // consumer of that key, so if workflow B could re-point a key workflow A
 // declared, A's nodes would start reading B's source — the same key serving two
 // different definitions with no error anywhere. Nothing is switched silently;
-// the second activation is declined with an error naming both origins.
+// the activation is declined with an error naming both origins.
 //
 // Two declarations agree when they have the same origin: both store-backed, or
 // both pull with the same URL. Anything else about a pull source (credential
 // name, poll interval) is not part of the origin: the first record's values
-// stay in force, since the content they describe is the same.
+// stay in force, since the content they describe is the same. When the same id
+// re-declares the key at a different origin (the PUT-replace path), the record
+// is replaced AND the pull fetcher's cached validator is dropped — an ETag must
+// never validate the old source's bytes against the new source's declaration.
+//
+// # Recovery from a conflict
+//
+// This record lives for the runner's lifetime; there is no delete path. So a
+// registration that mints a new id and moves the same supply key's URL is
+// declined for as long as this runner runs, and publishing it again changes
+// nothing. Three ways out, in order of preference:
+//
+//   - PUT the new definition to the EXISTING id (PUT /v1/workflows/{id}): the
+//     id is preserved, so the record is replaced in place;
+//   - rename the supply node — a new key gets a fresh declaration;
+//   - restart the runner, which clears every record.
 func (g *SupplyGate) recordDeclaration(k supply.Key, workflowID string, req engine.SupplyRequirement) error {
 	next := supplyDeclaration{WorkflowID: workflowID, PullSource: req.PullSource}
 
