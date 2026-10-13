@@ -3,8 +3,10 @@ package xflow
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -638,9 +640,53 @@ type remoteExecuteRequest struct {
 // route) and WithRuntime (no runtime field). Silently ignoring either would
 // promise a run whose lifetime or inputs differ from what the caller asked
 // for. WithTraceID is refused for the same reason.
+//
+// # Idempotency is not optional here
+//
+// Every Invoke carries an Idempotency-Key: WithIdempotencyKey's when the
+// caller set one, a fresh 128-bit random key otherwise. On a network, "the
+// request went out but the response never came back" is an ordinary outcome,
+// and without a key the retry it invites creates a second execution nobody can
+// reconcile. With one, the retry is answered with the first execution
+// (Duplicate: true in InvokeWithResult).
+//
+// A transport failure — no response at all — is retried once with the same
+// key; a response of any status is not retried, because the server has
+// decided and a repeat would only ask the same question again. Callers that
+// want a key spanning several of their own retries pass WithIdempotencyKey.
 func (r *Remote) Invoke(ctx context.Context, workflowID types.WorkflowID, entry Entry, input map[string]any, opts ...InvokeOption) (types.ExecutionID, error) {
 	res, err := r.invoke(ctx, workflowID, entry, input, opts...)
 	return res.ExecutionID, err
+}
+
+// InvokeResult is what InvokeWithResult reports about a submission: the
+// execution id Invoke also returns, plus the fields the server sends and
+// Invoke has no place for. Duplicate is true when the Idempotency-Key had
+// already started this execution — the id is then the ORIGINAL execution and
+// this call created nothing.
+type InvokeResult struct {
+	ExecutionID   types.ExecutionID
+	Status        types.ExecutionStatus
+	QueuePosition int
+	Duplicate     bool
+}
+
+// InvokeWithResult is Invoke, additionally reporting where the submission
+// landed. It exists because "queued behind the workflow's own concurrency
+// limit" and "running" are indistinguishable from an execution id, and
+// Duplicate is the only way a caller can tell its own replay from a first
+// submission.
+func (r *Remote) InvokeWithResult(ctx context.Context, workflowID types.WorkflowID, entry Entry, input map[string]any, opts ...InvokeOption) (InvokeResult, error) {
+	res, err := r.invoke(ctx, workflowID, entry, input, opts...)
+	if err != nil {
+		return InvokeResult{}, err
+	}
+	return InvokeResult{
+		ExecutionID:   res.ExecutionID,
+		Status:        res.Status,
+		QueuePosition: res.QueuePosition,
+		Duplicate:     res.Duplicate,
+	}, nil
 }
 
 func (r *Remote) invoke(ctx context.Context, workflowID types.WorkflowID, entry Entry, input map[string]any, opts ...InvokeOption) (remoteSubmissionResult, error) {
@@ -657,15 +703,20 @@ func (r *Remote) invoke(ctx context.Context, workflowID types.WorkflowID, entry 
 	if err := checkRemoteInvokeOptions(cfg); err != nil {
 		return remoteSubmissionResult{}, err
 	}
-	headers := map[string]string{}
-	if cfg.idempotencyKey != "" {
-		headers["Idempotency-Key"] = cfg.idempotencyKey
+	key := cfg.idempotencyKey
+	if key == "" {
+		var err error
+		key, err = remoteIdempotencyKey()
+		if err != nil {
+			return remoteSubmissionResult{}, err
+		}
 	}
 	env, err := r.send(ctx, remoteRequest{
-		method:  http.MethodPost,
-		path:    "/v1/workflows/" + url.PathEscape(string(workflowID)) + "/execute",
-		body:    remoteExecuteRequest{Entry: entry.nodeName, Input: input, Test: cfg.testRun},
-		headers: headers,
+		method:         http.MethodPost,
+		path:           "/v1/workflows/" + url.PathEscape(string(workflowID)) + "/execute",
+		body:           remoteExecuteRequest{Entry: entry.nodeName, Input: input, Test: cfg.testRun},
+		headers:        map[string]string{"Idempotency-Key": key},
+		retryTransport: true,
 	})
 	if err != nil {
 		return remoteSubmissionResult{}, err
@@ -675,6 +726,18 @@ func (r *Remote) invoke(ctx context.Context, workflowID types.WorkflowID, entry 
 		return remoteSubmissionResult{}, fmt.Errorf("xflow: decode execute response: %w", err)
 	}
 	return out, nil
+}
+
+// remoteIdempotencyKey returns a fresh key: 128 bits of crypto/rand as 32 hex
+// characters, the shape the design specifies. Collision is not a concern at
+// this width, and the key is scoped server-side to one workflow, so a
+// collision across workflows would not matter either.
+func remoteIdempotencyKey() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("xflow: generate idempotency key: %w", err)
+	}
+	return hex.EncodeToString(b[:]), nil
 }
 
 // checkRemoteInvokeOptions refuses the InvokeOptions the HTTP execute route has
