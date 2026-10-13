@@ -111,6 +111,7 @@ var guardSamples = []guardSample{
 	{"PathWorkflowExecute", PathWorkflowExecute, http.MethodPost, "/v1/workflows/execute"},
 	{"PathWorkflowExecuteByID", PathWorkflowExecuteByID, http.MethodPost, "/v1/workflows/wf-1/execute"},
 	{"PathWorkflowVersions", PathWorkflowVersions, http.MethodGet, "/v1/workflows/wf-1/versions"},
+	{"PathWorkflowVersionByID", PathWorkflowVersionByID, http.MethodGet, "/v1/workflows/wf-1/versions/v1"},
 
 	// PathExecutions is shared by two methods on the same path. The sample is
 	// the GET (the offset-paginated collection read, spec §3.3) rather than the

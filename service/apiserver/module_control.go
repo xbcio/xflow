@@ -165,6 +165,7 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 	// registerAuthzRoutes, like the other workflow reads: here the namespace is
 	// namespace.FromContext's Default, exactly as in handleGetWorkflow.
 	mux.HandleFunc("GET "+PathWorkflowVersions, wrap("list_workflow_versions", m.handleListWorkflowVersions))
+	mux.HandleFunc("GET "+PathWorkflowVersionByID, wrap("read_workflow_version", m.handleGetWorkflowVersion))
 	// POST /v1/executions is the entry-seed endpoint (runner protocol face,
 	// spec §0.1); the per-execution GET/signal/cancel/wait surface is the
 	// method-qualified patterns below. ServeMux treats exact and {id} patterns
@@ -270,6 +271,7 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	// the same default-deny check. The resolver scopes the audit row to the
 	// workflow id the route addresses, like the by-id read above.
 	mux.HandleFunc("GET "+PathWorkflowVersions, authz(OpWorkflowRead, false, m.handleListWorkflowVersions, workflowIDResolver()))
+	mux.HandleFunc("GET "+PathWorkflowVersionByID, authz(OpWorkflowRead, false, m.handleGetWorkflowVersion, workflowIDResolver()))
 	// Entry-seed endpoint (exact path, POST only). The authz wrapper injects
 	// the principal's namespace into the request context; handleSeedExecution
 	// reads it via namespace.FromContext — never from the client body.
@@ -1501,6 +1503,89 @@ func (m *workflowControlModule) handleListWorkflowVersions(w http.ResponseWriter
 		})
 	}
 	writeList(w, r, items, len(versions))
+}
+
+// getWorkflowVersion resolves one version of the workflow addressed by id.
+// version may name the current version — which resolves to the live record
+// itself — or a retired one, which resolves to the payload captured when it
+// was retired. An empty version is treated as the current one.
+//
+// It is listWorkflowVersions' read-one sibling, and carries the same namespace
+// scope check for the same reason: the in-memory registry does not scope its
+// lookups by the context namespace, so the IDOR defense has to sit above the
+// capability. The capability's own contract distinguishes ErrWorkflowNotFound
+// (the workflow has no live record) from ErrWorkflowVersionNotFound (it exists
+// but never published that version), and both pass through unwrapped.
+func (m *workflowControlModule) getWorkflowVersion(ctx context.Context, ns namespace.Namespace, id types.WorkflowID, version string) (backend.WorkflowRecord, error) {
+	registry := m.registry()
+	if registry == nil {
+		if m.log != nil {
+			m.log.Error("get_workflow_version_no_registry", "workflow_id", string(id))
+		}
+		return backend.WorkflowRecord{}, errors.New("apiserver: no workflow registry configured")
+	}
+	rec, err := registry.GetWorkflow(ctx, id)
+	if err != nil {
+		return backend.WorkflowRecord{}, err
+	}
+	if rec.Namespace != "" && ns != "" && rec.Namespace != string(ns) {
+		return backend.WorkflowRecord{}, backend.ErrWorkflowNotFound
+	}
+	if version == "" || version == rec.Version {
+		return rec, nil
+	}
+	versions, ok := registry.(backend.WorkflowVersionCapability)
+	if !ok {
+		if m.log != nil {
+			m.log.Error("get_workflow_version_capability_missing", "workflow_id", string(id))
+		}
+		return backend.WorkflowRecord{}, errWorkflowVersionsUnsupported
+	}
+	return versions.GetWorkflowVersion(ctx, id, version)
+}
+
+// handleGetWorkflowVersion serves GET /v1/workflows/{id}/versions/{version}
+// (versioning design §2.2): one version's full record, in the same wire shape
+// as GET /v1/workflows/{id} — this is where the definition the version list
+// deliberately omits is read back.
+//
+// The current version resolves to the live record; a retired version resolves
+// to the payload captured when it was retired, so a version remains readable
+// (and pinnable for a replay) after it has been replaced. An unknown version is
+// 404 workflow_version_not_found — deliberately distinct from workflow_not_found
+// so a caller can tell "this workflow is gone" from "this workflow never
+// published that version". A cross-namespace id is reported as
+// workflow_not_found, exactly as the by-id read does.
+func (m *workflowControlModule) handleGetWorkflowVersion(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+	id := types.WorkflowID(r.PathValue("id"))
+	version := r.PathValue("version")
+	if id == "" {
+		writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
+		return
+	}
+	if version == "" {
+		writeFail(w, r, http.StatusNotFound, "workflow_version_not_found", "workflow version not found")
+		return
+	}
+	rec, err := m.getWorkflowVersion(r.Context(), namespace.FromContext(r.Context()), id, version)
+	if err != nil {
+		switch {
+		case errors.Is(err, backend.ErrWorkflowNotFound):
+			writeFail(w, r, http.StatusNotFound, "workflow_not_found", "workflow not found")
+		case errors.Is(err, backend.ErrWorkflowVersionNotFound):
+			writeFail(w, r, http.StatusNotFound, "workflow_version_not_found", "workflow version not found")
+		default:
+			if m.log != nil {
+				m.log.Error("get_workflow_version_failed", "workflow_id", string(id), "version", version, "err", err)
+			}
+			writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		}
+		return
+	}
+	writeData(w, r, http.StatusOK, workflowResponseBody(rec))
 }
 
 // handleReplaceWorkflow serves PUT /v1/workflows/{id} (spec §7 + Addition 1):

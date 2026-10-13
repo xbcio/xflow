@@ -13,6 +13,7 @@ import (
 
 	"github.com/xbcio/xflow/backend/providers/distributed"
 	"github.com/xbcio/xflow/service/control"
+	"github.com/xbcio/xflow/types"
 )
 
 // This file covers GET /v1/workflows/{id}/versions — the version-history read
@@ -293,6 +294,106 @@ func TestListWorkflowVersionsNeverRevealsAnotherNamespaceOrMissingWorkflow(t *te
 	}
 }
 
+// getWorkflowVersionDetail issues GET /v1/workflows/{id}/versions/{version}.
+func getWorkflowVersionDetail(t *testing.T, base, token, id, version string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, base+"/v1/workflows/"+id+"/versions/"+version, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /v1/workflows/%s/versions/%s: %v", id, version, err)
+	}
+	return resp
+}
+
+// TestGetWorkflowVersionServesTheArchivedDefinitionFromHistory pins the detail
+// route as the way to read a retired version's definition: after v1 is replaced
+// by v2, GET …/versions/v1 must return the v1 payload captured at retirement —
+// not the live record, and not a 404. The same route on the current version
+// resolves to the live record.
+func TestGetWorkflowVersionServesTheArchivedDefinitionFromHistory(t *testing.T) {
+	srv, _ := newWorkflowReplaceDependencyTestServer(t, nil, nil, listTestPrincipals())
+	id := registerListWorkflow(t, srv.URL, "tok-a", "vdetail", "v1")
+	publishRun(t, srv.URL, "tok-a", id, "vdetail", "v2")
+
+	// The retired version reads back as itself.
+	resp := getWorkflowVersionDetail(t, srv.URL, "tok-a", id, "v1")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("archived detail status = %d, want 200 (body=%s)", resp.StatusCode, body)
+	}
+	var archived types.WorkflowDef
+	if env := decodeEnvelope(t, resp, &archived); !env.Success {
+		t.Fatalf("archived detail envelope = %+v, want success", env)
+	}
+	if archived.Version != "v1" {
+		t.Fatalf("archived detail version = %q, want v1 (the live record is v2; the handler must not fold them)", archived.Version)
+	}
+	if archived.Name != "vdetail" {
+		t.Fatalf("archived detail name = %q, want vdetail", archived.Name)
+	}
+	if len(archived.Nodes) == 0 {
+		t.Fatal("archived detail carries no nodes; the history payload must be the full record")
+	}
+
+	// The current version resolves to the live record: same version label and
+	// same definition the by-id read serves.
+	resp = getWorkflowVersionDetail(t, srv.URL, "tok-a", id, "v2")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("current detail status = %d, want 200 (body=%s)", resp.StatusCode, body)
+	}
+	var current types.WorkflowDef
+	if env := decodeEnvelope(t, resp, &current); !env.Success {
+		t.Fatalf("current detail envelope = %+v, want success", env)
+	}
+	if current.Version != "v2" {
+		t.Fatalf("current detail version = %q, want v2", current.Version)
+	}
+}
+
+// TestGetWorkflowVersionDistinguishesUnknownVersionFromUnknownWorkflow pins the
+// two 404 codes apart — a caller must be able to tell "never published that
+// version" from "this workflow is gone" — and that a cross-namespace id is
+// reported as the workflow being gone, never as a version lookup failure.
+func TestGetWorkflowVersionDistinguishesUnknownVersionFromUnknownWorkflow(t *testing.T) {
+	srv, _ := newWorkflowReplaceDependencyTestServer(t, nil, nil, listTestPrincipals())
+	idA := registerListWorkflow(t, srv.URL, "tok-a", "vdiff", "v1")
+
+	cases := []struct {
+		name     string
+		token    string
+		id       string
+		version  string
+		wantCode string
+	}{
+		{name: "unknown version on a known workflow", token: "tok-a", id: idA, version: "v9", wantCode: "workflow_version_not_found"},
+		{name: "unknown workflow", token: "tok-a", id: "wf-does-not-exist", version: "v1", wantCode: "workflow_not_found"},
+		{name: "cross-namespace workflow", token: "tok-b", id: idA, version: "v1", wantCode: "workflow_not_found"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := getWorkflowVersionDetail(t, srv.URL, tc.token, tc.id, tc.version)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusNotFound {
+				body, _ := io.ReadAll(resp.Body)
+				t.Fatalf("status = %d, want 404 (body=%s)", resp.StatusCode, body)
+			}
+			env := decodeEnvelope(t, resp, nil)
+			if env.Success || env.Code != tc.wantCode {
+				t.Fatalf("envelope = %+v, want code %q", env, tc.wantCode)
+			}
+		})
+	}
+}
+
 // TestListWorkflowVersionsEndToEndAgainstDistributedRegistry exercises the
 // route over HTTP against the REAL Redis-backed registry (miniredis) rather
 // than the in-memory provider, so the history hash, the CAS that appends to it,
@@ -342,6 +443,19 @@ func TestListWorkflowVersionsEndToEndAgainstDistributedRegistry(t *testing.T) {
 		t.Fatalf("row 1 = %+v, want archived v1", env.Data.List[1])
 	}
 	t.Logf("GET /v1/workflows/%s/versions (tok-a) -> %d %s", id, status, body)
+
+	// The detail route reads the retired version's definition back out of the
+	// same history hash the CAS wrote.
+	resp := getWorkflowVersionDetail(t, httpSrv.URL, "tok-a", id, "v1")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		detail, _ := io.ReadAll(resp.Body)
+		t.Fatalf("archived detail status = %d, want 200 (body=%s)", resp.StatusCode, detail)
+	}
+	var archived types.WorkflowDef
+	if env := decodeEnvelope(t, resp, &archived); !env.Success || archived.Version != "v1" {
+		t.Fatalf("archived detail = %+v (envelope %+v), want version v1", archived, env)
+	}
 
 	// The other namespace is refused, and the refusal is the by-id read's 404,
 	// not an empty history.

@@ -23,6 +23,12 @@ const (
 	// registry revision, current/archived — and deliberately carry no
 	// definition body, for the same reason a workflow list row does not.
 	PathWorkflowVersions = "/v1/workflows/{id}/versions"
+	// PathWorkflowVersionByID reads one version of a workflow: the current
+	// version resolves to the live record, a retired one to the payload
+	// captured when it was retired (versioning design §2.2). It is where the
+	// definition the version list deliberately omits is read back, one version
+	// at a time.
+	PathWorkflowVersionByID = "/v1/workflows/{id}/versions/{version}"
 
 	// PathExecutions serves both POST (the entry-seed endpoint, runner protocol
 	// face, spec §0.1) and GET (the offset-paginated execution collection read,
@@ -105,6 +111,7 @@ var UserFacingPaths = []string{
 	PathWorkflowExecute,
 	PathWorkflowExecuteByID,
 	PathWorkflowVersions,
+	PathWorkflowVersionByID,
 
 	PathExecutions,
 	PathExecutionByID,
