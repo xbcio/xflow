@@ -101,6 +101,7 @@ func builtinDescribers() []types.DescriptorProvider {
 		&redis.Node{},
 		supplypkg.External(""),
 		supplypkg.Static(nil),
+		supplypkg.Pull(""),
 	}
 }
 

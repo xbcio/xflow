@@ -34,9 +34,11 @@ const BodyParam = "body"
 const SubgraphNodeType = types.SubgraphNodeType
 
 // DeclarationOnlyNodeTypes are node types a definition may carry that the
-// handler registry never lists. Both supply kinds are declarations: neither
-// registers a handler and the engine skips both at execution, so they are absent
-// from registry.Types() by design rather than by omission.
+// handler registry never lists. Supply kinds are declarations: none registers a
+// handler and the engine skips all of them at execution, so they are absent
+// from registry.Types() by design rather than by omission. The list holds the
+// ones FullWorkflow exercises; xflow.supply.http is left out until a workflow
+// with a reachable pull source can be part of the suite.
 //
 // The coverage suite subtracts these before checking that every type a
 // definition names is registered, so the exception is stated once here instead

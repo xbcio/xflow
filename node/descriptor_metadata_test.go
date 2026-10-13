@@ -66,6 +66,7 @@ func builtinDescriptors(t *testing.T) []versionedDescriptor {
 	}
 	add(0, node.SupplyExternal("").Descriptor())
 	add(0, node.SupplyStatic(nil).Descriptor())
+	add(0, node.SupplyPull("").Descriptor())
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].desc.Type != out[j].desc.Type {
 			return out[i].desc.Type < out[j].desc.Type
@@ -126,6 +127,7 @@ func TestBuiltinDefaultsGolden(t *testing.T) {
 		"xflow.map@1/continue_on_error":          "bool:false",
 		"xflow.merge@1/on_others":                "string:cancel",
 		"xflow.supply.external@0/require_ready":  "bool:true",
+		"xflow.supply.http@0/require_ready":      "bool:true",
 		"xflow.supply.static@0/require_ready":    "bool:true",
 		"xflow.trigger.cron@1/timezone":          "string:",
 		"xflow.trigger.kafka@1/max_inflight":     "float64:64",

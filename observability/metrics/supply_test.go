@@ -173,6 +173,28 @@ func TestSupplyMetricsOnSupplyFetch(t *testing.T) {
 	}
 }
 
+// The pull counter is a series of its own: a pull failure must not be
+// indistinguishable from a store-backed fetch failure, because the two have
+// different owners (the source operator vs the control plane).
+func TestSupplyMetricsOnSupplyPullFetch(t *testing.T) {
+	m := New()
+	s := NewSupplyMetrics(m)
+	ctx := context.Background()
+
+	s.OnSupplyPullFetch(ctx, "ok")
+	s.OnSupplyPullFetch(ctx, "error")
+
+	body := gatherMetricsBody(t, m)
+	for _, want := range []string{
+		`xflow_supply_pull_fetch_total{namespace="default",result="ok"} 1`,
+		`xflow_supply_pull_fetch_total{namespace="default",result="error"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics body missing %q:\n%s", want, body)
+		}
+	}
+}
+
 // The gauge must go both ways: set to 1 while declining, and back to 0 once
 // admitted. A metric that only ever sets 1 would leave an alert stuck forever
 // after the underlying condition clears.

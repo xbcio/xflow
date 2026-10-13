@@ -157,7 +157,27 @@ type RunnerConfig struct {
 	// than silently raised. The poll cannot be switched off: it is the
 	// convergence path for a supply whose hint was never delivered, and
 	// nothing else re-reads a supply that already has content.
+	//
+	// A pull supply (xflow.supply.http) that declares its own poll_interval can
+	// shorten this runner's whole poll period, never lengthen it: the effective
+	// period is the shorter of this value and the fastest declared interval.
 	SupplyPollInterval time.Duration
+
+	// SupplyPullAllowedHosts is the operator's runner-level allowlist for pull
+	// sources (xflow.supply.http): the hosts this runner may fetch supply
+	// content from. Empty means "any public host" — loopback, private,
+	// link-local (including the cloud metadata address), and unspecified
+	// destinations are refused at dial time against the resolved address — and
+	// a non-empty list permits only matching hosts, which is an explicit
+	// operator decision to allow whatever address they resolve to, private
+	// networks included.
+	//
+	// Entries mirror the node host policy's forms: an exact host, a suffix
+	// prefixed with '.', or a wildcard prefixed with '*.', matched
+	// case-insensitively against the hostname only (no port, no scheme), and
+	// IP literals only as exact entries. NewRunner rejects a malformed entry
+	// rather than letting it silently deny every fetch.
+	SupplyPullAllowedHosts []string
 
 	// SeedRequestTimeout bounds one entry-seed admission round trip — the POST
 	// to /v1/executions that admits a whole trigger batch's results. Zero (the
@@ -380,6 +400,13 @@ func NewRunner(cfg RunnerConfig, opts ...RunnerOption) (*Runner, error) {
 	// it silently does not get. Zero (unset) keeps the service default.
 	if err := runnersvc.ValidateSupplyPollInterval(cfg.SupplyPollInterval); err != nil {
 		return nil, fmt.Errorf("xflow: RunnerConfig.SupplyPollInterval: %w", err)
+	}
+	// The pull allowlist is refused here for the same reason: a malformed entry
+	// cannot be allowed to degrade into a policy that denies every host, which
+	// would look like an unreachable source at activation time instead of the
+	// configuration error it is.
+	if err := runnersvc.ValidateSupplyPullAllowedHosts(cfg.SupplyPullAllowedHosts); err != nil {
+		return nil, fmt.Errorf("xflow: RunnerConfig.SupplyPullAllowedHosts: %w", err)
 	}
 	o := runnerOptionsFrom(opts)
 
@@ -927,6 +954,22 @@ func wireRunnerTriggerHosting(svcCfg *runnersvc.Config, cfg RunnerConfig, o *run
 		RunnerID: cfg.RunnerID,
 		Client:   seedClient,
 	}, supply.Default, o.logger)
+	// Pull mode: a requirement declared as xflow.supply.http is fetched by THIS
+	// runner from the declared source, using this process's network position and
+	// credentials; the content goes into the local registry and is never written
+	// to the store. The gate routes each fetch by the declaration it recorded at
+	// admission, so installing the fetcher here is all the wiring there is.
+	pullFetcher, err := runnersvc.NewPullSupplyFetcher(cfg.SupplyPullAllowedHosts, svcCfg.CredentialResolver, o.logger)
+	if err != nil {
+		return err
+	}
+	// The pull counter is recorded by the fetcher, not by the gate's fanout:
+	// the gate counts who asked for a fetch, the fetcher counts whether the
+	// external source answered (xflow_supply_pull_fetch_total).
+	if o.metrics != nil {
+		pullFetcher.Observer = metrics.NewSupplyMetrics(o.metrics)
+	}
+	gate.SetPullFetcher(pullFetcher)
 
 	handler := runnersvc.NewTriggerActivationHandler(seedBaseURL, seedToken, runnerTriggerLookup{},
 		runnersvc.WithSeedHTTPClient(seedClient),
