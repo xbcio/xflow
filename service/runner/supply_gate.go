@@ -577,11 +577,13 @@ func hashPrefix(hash string) string {
 // publish one tenant's content under another tenant's supply.
 //
 // Scope note: this affects only WHEN an already-hosted runner refreshes
-// content it already consumes. It has nothing to do with whether an
-// activation gets hosted in the first place — a gate-declined activation
-// staying declined is a separate, currently-open gap (see the Task 18
-// addendum) that ApplyHints neither causes nor fixes; there is no hint for a
-// supply this process has no requirement for at all.
+// content it already consumes. Whether an activation gets hosted at all is a
+// separate path, and a declined one is not stranded here: AdmitWithDeclarations
+// records every required key in g.resources BEFORE it decides (see the
+// resources.Store above its fetch), so the TTL poll re-reads a declined
+// supply's content too — the next delivery of the directive then passes the
+// gate. What no hint can reach is a supply this process has no requirement for
+// at all.
 func (g *SupplyGate) ApplyHints(ctx context.Context, hints []protocol.SupplyHint) {
 	if g == nil || len(hints) == 0 {
 		return
