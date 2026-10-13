@@ -3,7 +3,7 @@
 // controlled read/write, clear => unset, zero patches on mount (normal,
 // unset, null and wrong-shape values), defaultHint, readOnly, props errors.
 
-import { fireEvent, within } from "@testing-library/react";
+import { fireEvent, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ElementDef, Patch } from "../core";
 import { createRegistry, type ComposerComponent } from "../react";
@@ -350,6 +350,53 @@ for (const kernel of kernels) {
         clickButton(fieldOf(m.container, "g"), /基础/);
         expect(control.isConnected).toBe(true);
         expect(one<HTMLElement>(fieldOf(m.container, "g"), ".xflow-composer-section-body").hidden).toBe(true);
+      });
+
+      const describedSpec = (descriptionPlacement?: "below" | "tooltip") => ({
+        spec: "composer/v1" as const,
+        root: "form",
+        elements: {
+          form: { type: "Form", props: descriptionPlacement ? { descriptionPlacement } : {}, children: ["f", "bare"] },
+          f: { type: "Input", props: { label: "Name", description: "说明", value: { $bindState: "/v" } } },
+          // No label: nothing to put the help icon next to, so it stays below.
+          bare: { type: "Input", props: { description: "无标签说明", value: { $bindState: "/w" } } }
+        }
+      });
+
+      it('descriptionPlacement "below" (default) shows the description under the control', async () => {
+        for (const placement of [undefined, "below"] as const) {
+          const m = mountComposer({ kernel, registry, spec: describedSpec(placement), value: {} });
+          await m.flush();
+          const field = fieldOf(m.container, "f");
+          const description = one<HTMLElement>(field, ".xflow-composer-field-description");
+          expect(description.textContent).toBe("说明");
+          expect(description.classList.contains("xflow-composer-visually-hidden")).toBe(false);
+          expect(field.querySelector(".xflow-composer-field-help")).toBeNull();
+          expect(m.log).toEqual([]);
+          m.unmount();
+        }
+      });
+
+      it('descriptionPlacement "tooltip" moves the description behind a help icon by the label', async () => {
+        const m = mountComposer({ kernel, registry, spec: describedSpec("tooltip"), value: {} });
+        await m.flush();
+        expect(m.log).toEqual([]);
+        const field = fieldOf(m.container, "f");
+        const help = one<HTMLButtonElement>(field, ".xflow-composer-field-label-row > .xflow-composer-field-help");
+        expect(help.getAttribute("aria-label")).toBe("Name说明");
+        expect(help.type).toBe("button");
+        // Not rendered visibly below the control, but still the control's description.
+        const description = one<HTMLElement>(field, ".xflow-composer-field-description");
+        expect(description.classList.contains("xflow-composer-visually-hidden")).toBe(true);
+        const control = within(field).getByLabelText("Name");
+        const described = (control.getAttribute("aria-describedby") ?? "").split(" ").map((id) => document.getElementById(id)?.textContent);
+        expect(described).toEqual(["说明"]);
+        fireEvent.mouseEnter(help);
+        await waitFor(() => expect(document.querySelector(".xflow-composer-field-help-tooltip")?.textContent).toBe("说明"));
+        // A label-less field keeps the description below.
+        const bare = fieldOf(m.container, "bare");
+        expect(bare.querySelector(".xflow-composer-field-help")).toBeNull();
+        expect(one<HTMLElement>(bare, ".xflow-composer-field-description").classList.contains("xflow-composer-visually-hidden")).toBe(false);
       });
 
       it("renders warnings under the field", async () => {

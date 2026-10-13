@@ -7,8 +7,9 @@
 // Nothing here writes on mount: every onChange call is the direct result of
 // a user event.
 
-import { Button } from "antd";
-import { createContext, useContext, useId, type CSSProperties, type ReactNode } from "react";
+import { QuestionCircleOutlined } from "@ant-design/icons";
+import { Button, Tooltip } from "antd";
+import { createContext, useContext, useEffect, useId, type CSSProperties, type ReactNode } from "react";
 import { z } from "zod";
 import { deepEqual, type Issue } from "../core";
 
@@ -27,6 +28,24 @@ export const FieldLayoutContext = createContext<FieldLayout>("vertical");
 export function useFieldLayout(): FieldLayout {
   return useContext(FieldLayoutContext);
 }
+
+/**
+ * Where a field's `description` shows, from `Form.props.descriptionPlacement`:
+ * "below" the control, or "tooltip" behind a help icon next to the label.
+ * Fields with a hidden label (cell / inline layouts) always use "below".
+ */
+export type DescriptionPlacement = "below" | "tooltip";
+
+export const DescriptionPlacementContext = createContext<DescriptionPlacement>("below");
+
+/**
+ * Set by a Section (FieldGroup / ObjectGroup): every FieldFrame below it
+ * reports its issues (null on unmount) so a collapsed section can show that
+ * it hides errors. `key` identifies the reporting frame.
+ */
+export type IssueReporter = (key: string, issues: readonly Issue[] | null) => void;
+
+export const SectionIssuesContext = createContext<IssueReporter | null>(null);
 
 // ----------------------------------------------------------- prop schemas
 
@@ -170,6 +189,9 @@ export function FieldFrame(props: FieldFrameProps) {
   const ids: FieldIds = { controlId, labelId, describedBy, invalid: status === "error", status };
   const groupMode = props.labelMode === "group";
   const hiddenLabel = layout === "cell" || layout === "inline";
+  // Tooltip mode needs a visible label to sit next to; the description then
+  // stays in the DOM (visually hidden) so aria-describedby still reaches it.
+  const tooltipHelp = useContext(DescriptionPlacementContext) === "tooltip" && !hiddenLabel && Boolean(props.label);
 
   const labelContent = props.label ? (
     <>
@@ -196,6 +218,21 @@ export function FieldFrame(props: FieldFrameProps) {
       </label>
     )
   ) : null;
+  // The help button sits beside (not inside) the <label>, so clicking it does
+  // not activate the control.
+  const labelRow =
+    tooltipHelp && props.description ? (
+      <div className="xflow-composer-field-label-row">
+        {label}
+        <Tooltip title={props.description} rootClassName="xflow-composer-field-help-tooltip">
+          <button type="button" className="xflow-composer-field-help" aria-label={`${props.label}说明`}>
+            <QuestionCircleOutlined aria-hidden="true" />
+          </button>
+        </Tooltip>
+      </div>
+    ) : (
+      label
+    );
 
   const control = props.children(ids);
   return (
@@ -212,7 +249,7 @@ export function FieldFrame(props: FieldFrameProps) {
       data-composer-node={props.nodeId}
       style={props.style}
     >
-      {label}
+      {labelRow}
       <div className="xflow-composer-field-body">
         {groupMode && props.groupRole !== null ? (
           <div
@@ -234,7 +271,10 @@ export function FieldFrame(props: FieldFrameProps) {
           </div>
         ) : null}
         {props.description ? (
-          <div id={descriptionId} className="xflow-composer-field-description">
+          <div
+            id={descriptionId}
+            className={cx("xflow-composer-field-description", tooltipHelp && "xflow-composer-visually-hidden")}
+          >
             {props.description}
           </div>
         ) : null}

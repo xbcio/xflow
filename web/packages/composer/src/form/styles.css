@@ -131,6 +131,45 @@
   color: var(--xflow-status-error-text, #b4232b);
 }
 
+/* descriptionPlacement="tooltip": label + help icon on one row. */
+.xflow-composer-field-label-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.xflow-composer-form--horizontal .xflow-composer-field--horizontal > .xflow-composer-field-label-row {
+  padding-top: 5px;
+}
+
+.xflow-composer-field-help {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  color: var(--xflow-text-tertiary, #86909c);
+  font-size: 12px;
+  line-height: 1;
+  background: none;
+  border: 0;
+  border-radius: var(--xflow-control-radius-sm, 4px);
+  cursor: help;
+}
+
+.xflow-composer-field-help:hover {
+  color: var(--xflow-text-secondary, #4e5969);
+}
+
+.xflow-composer-field-help:focus-visible {
+  outline: 2px solid var(--xflow-focus, #2f7cff);
+  outline-offset: 1px;
+}
+
 .xflow-composer-field-body {
   display: flex;
   flex-direction: column;

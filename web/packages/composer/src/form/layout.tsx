@@ -2,11 +2,24 @@
 
 import { DownOutlined, RightOutlined } from "@ant-design/icons";
 import { Button } from "antd";
-import { useId, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useContext, useId, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { z } from "zod";
 import { zodProps, type Issue } from "../core";
 import type { ComposerComponent } from "../react";
-import { cx, FieldLayoutContext, IssueList, isPlainObject, isWrongShape, RawValue, useFieldLayout, worstSeverity } from "./shared";
+import {
+  cx,
+  DescriptionPlacementContext,
+  FieldLayoutContext,
+  IssueList,
+  isPlainObject,
+  isWrongShape,
+  RawValue,
+  SectionIssuesContext,
+  useFieldLayout,
+  worstSeverity,
+  type DescriptionPlacement,
+  type IssueReporter
+} from "./shared";
 
 // ------------------------------------------------------------------- Form
 
@@ -14,6 +27,11 @@ export interface FormProps {
   layout?: "horizontal" | "vertical";
   /** Label column width (px) for the horizontal layout. */
   labelWidth?: number;
+  /**
+   * Where field descriptions show: "below" the control (default) or
+   * "tooltip" behind a help icon next to the label.
+   */
+  descriptionPlacement?: DescriptionPlacement;
   /** Accessible name of the form region. */
   title?: string;
 }
@@ -24,6 +42,7 @@ export const Form: ComposerComponent<FormProps> = {
     z.strictObject({
       layout: z.enum(["horizontal", "vertical"]).optional(),
       labelWidth: z.number().positive().optional(),
+      descriptionPlacement: z.enum(["below", "tooltip"]).optional(),
       title: z.string().optional()
     })
   ),
@@ -40,11 +59,13 @@ export const Form: ComposerComponent<FormProps> = {
         aria-label={props.title}
         style={style}
       >
-        <FieldLayoutContext.Provider value={layout}>
-          {slots.header}
-          {children}
-          {slots.footer}
-        </FieldLayoutContext.Provider>
+        <DescriptionPlacementContext.Provider value={props.descriptionPlacement ?? "below"}>
+          <FieldLayoutContext.Provider value={layout}>
+            {slots.header}
+            {children}
+            {slots.footer}
+          </FieldLayoutContext.Provider>
+        </DescriptionPlacementContext.Provider>
       </div>
     );
   }
