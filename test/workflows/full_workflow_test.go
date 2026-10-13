@@ -26,6 +26,12 @@ import (
 //
 // The expected set is read from the registry, not written down, so a newly
 // registered node type fails this test until FullWorkflow uses it.
+//
+// The definition's one xflow.subworkflow node names a companion definition
+// (FullEscalationWorkflow), which the runtime tests below register first
+// because a sub-workflow reference resolves at registration time. This bare
+// compile resolves nothing and is still valid: an unresolved sub-workflow node
+// is kept, and the engine refuses to dispatch it (engine/graph.Compile).
 func TestFullWorkflowCoversEveryNodeType(t *testing.T) {
 	def, err := workflows.FullWorkflow(workflows.DefaultFullTriggerConfig()).Definition()
 	if err != nil {
@@ -142,6 +148,12 @@ func TestFullWorkflowRunsLocally(t *testing.T) {
 	}
 	t.Cleanup(eng.Stop)
 	ctx := context.Background()
+	// FullWorkflow's escalate node names FullEscalationWorkflow, and a
+	// sub-workflow reference resolves at registration time: the child must be
+	// registered in the same namespace first.
+	if _, err := eng.AddWorkflow(ctx, workflows.FullEscalationWorkflow()); err != nil {
+		t.Fatalf("AddWorkflow(escalation): %v", err)
+	}
 	id, err := eng.AddWorkflow(ctx, workflows.FullWorkflow(workflows.DefaultFullTriggerConfig()))
 	if err != nil {
 		t.Fatalf("AddWorkflow: %v", err)

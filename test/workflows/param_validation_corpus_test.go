@@ -299,7 +299,19 @@ func TestTierDefinitionsRegisterUnderEnforce(t *testing.T) {
 				t.Fatalf("build: %v", err)
 			}
 			// A fresh server per definition: tiers may share a name@version.
-			registerUnderEnforce(t, newEnforceAPIServer(t), jsonRoundTrip(t, def), nil, "")
+			srv := newEnforceAPIServer(t)
+			if d.Name == "full" {
+				// FullWorkflow carries an xflow.subworkflow node, and the
+				// registration path resolves that reference: the child it names
+				// must be registered on the same server first (see
+				// FullEscalationWorkflow).
+				esc, err := workflows.FullEscalationWorkflow().Definition()
+				if err != nil {
+					t.Fatalf("build escalation: %v", err)
+				}
+				registerUnderEnforce(t, srv, jsonRoundTrip(t, esc), nil, "")
+			}
+			registerUnderEnforce(t, srv, jsonRoundTrip(t, def), nil, "")
 		})
 	}
 }

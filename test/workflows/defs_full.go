@@ -25,6 +25,9 @@ const (
 	// differs from WebhookPath so the full and the single-trigger definitions
 	// can be hosted by the same engine without a route conflict.
 	FullWebhookPath = "/qa/full/webhook"
+	// FullEscalationName is the name of the child workflow FullWorkflow's
+	// xflow.subworkflow node names (see FullEscalationWorkflow).
+	FullEscalationName = "full-escalation"
 )
 
 // Entry node names of FullWorkflow.
@@ -87,7 +90,7 @@ func DefaultFullTriggerConfig() FullTriggerConfig {
 //	              └ error → risk_gap ──┴→ browse(browser.cdp) ─ main ──────────────┐
 //	                                                          └ error → browser_denied ┴→ gate(approval)
 //	gate ─ approved → hold(wait signal) ─ main → tick(wait timer) → approved(set) ─┐
-//	     │                              └ timeout → timed_out(set) ─────────────────┤
+//	     │                              └ timeout → escalate(sub) → timed_out(set) ─┤
 //	     └ rejected → rejected(set) ────────────────────────────────────────────────┴→ join_gate(merge any)
 //	  → summarize(set) → brief(pick) → verdict(if) ─ true  → notify(notification) ─┐
 //	                                               └ false → quiet(set) ───────────┴→ join_out(merge any) → done(end)
@@ -101,6 +104,14 @@ func DefaultFullTriggerConfig() FullTriggerConfig {
 // reach. A start run therefore skips the whole trigger lane, and a trigger run
 // skips the whole main lane and the four sibling triggers — which is what lets
 // one wait-any merge and one recording node serve all five kinds.
+//
+// The gate-timeout arm's escalate node is the definition's one
+// xflow.subworkflow node, and FullEscalationWorkflow is the child it names. An
+// xflow.subworkflow reference resolves at REGISTRATION time, so a host must
+// register the child in the same namespace before registering this definition
+// (see FullEscalationWorkflow for the contract). The node sits on the arm no
+// run below takes, so the child is never executed by the suites that drive
+// this definition.
 //
 // Branch coverage per run: the switch and the if both branch on amount, so
 // AboveThresholdInput takes bulk+notify and BelowThresholdInput takes
@@ -178,6 +189,9 @@ func FullWorkflow(tc FullTriggerConfig) *xflow.WorkflowBuilder {
 	// --- main lane: human gate ---
 	gate := wf.Node("gate", node.Approval([]string{FullApprover}, node.ApprovalAny))
 	hold := wf.Node("hold", node.Wait(FullReleaseSignal).WithTimeout("10s"))
+	// The timeout arm escalates through a child execution before the gate
+	// outcome is recorded: the definition's one xflow.subworkflow node.
+	escalate := wf.Node("escalate", node.SubWorkflow(FullEscalationName))
 	tick := wf.Node("tick", node.WaitDuration("200ms"))
 	approved := wf.Node("approved", node.Set(map[string]any{"decision": "approved"}))
 	timedOut := wf.Node("timed_out", node.Set(map[string]any{"decision": "wait_timeout"}))
@@ -230,7 +244,8 @@ func FullWorkflow(tc FullTriggerConfig) *xflow.WorkflowBuilder {
 		Connect(gate.Output("approved"), hold).
 		Connect(gate.Output("rejected"), rejected).
 		Connect(hold.Output("main"), tick).
-		Connect(hold.Output("timeout"), timedOut).
+		Connect(hold.Output("timeout"), escalate).
+		Connect(escalate.Output("main"), timedOut).
 		Connect(tick.Output("main"), approved).
 		Connect(approved.Output("main"), joinGate).
 		Connect(timedOut.Output("main"), joinGate).
@@ -290,6 +305,24 @@ func FullWorkflow(tc FullTriggerConfig) *xflow.WorkflowBuilder {
 	return wf
 }
 
+// FullEscalationWorkflow builds the child FullWorkflow's escalate node runs.
+//
+// It is a companion, not a tier: it exists because an xflow.subworkflow
+// reference is resolved at registration time, so every host that registers
+// FullWorkflow must first register this definition in the same namespace (the
+// same ordering the sub-workflow tier uses — see
+// TestSubWorkflowRegistrationPinsTheReference in sdk/xflow). Registering the
+// child pins the node to this definition's (name, version, definition hash),
+// which is why the child stays non-executed in the suites: the escalate node
+// sits on the gate-timeout arm, and no suite takes that arm.
+func FullEscalationWorkflow() *xflow.WorkflowBuilder {
+	wf := xflow.Workflow(FullEscalationName)
+	start := wf.Node("start", node.Start())
+	record := wf.Node("record", node.Expr(`{"escalated": true}`))
+	wf.Connect(start, record)
+	return wf
+}
+
 // FullTriggerNodeNames lists the trigger lane's nodes, entries first.
 func FullTriggerNodeNames() []string {
 	return []string{
@@ -316,8 +349,8 @@ func FullMainNodeNames() []string {
 		"start", "seed", "tag", "enrich", "rehydrate", "normalize", "dedupe",
 		"ordered", "capped", "rollup", "renamed", "script", "route", "fan", "dq",
 		"single_lane", "join_lane", "db_insert", "db_load", "risk", "risk_gap",
-		"browse", "browser_denied", "gate", "hold", "tick", "approved", "timed_out",
-		"rejected", "join_gate", "summarize", "brief", "verdict", "notify", "quiet",
-		"join_out", "done",
+		"browse", "browser_denied", "gate", "hold", "tick", "approved", "escalate",
+		"timed_out", "rejected", "join_gate", "summarize", "brief", "verdict",
+		"notify", "quiet", "join_out", "done",
 	}
 }

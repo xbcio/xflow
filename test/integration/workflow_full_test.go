@@ -85,7 +85,7 @@ func TestWorkflowFullDistributed(t *testing.T) {
 			decisionNode: "approved",
 			wantDecision: "approved",
 			ran:          []string{"fan", "hold", "tick", "approved", "notify"},
-			skipped:      []string{"single_lane", "rejected", "timed_out", "quiet"},
+			skipped:      []string{"single_lane", "rejected", "escalate", "timed_out", "quiet"},
 		},
 		{
 			name:         "single_reject_quiet",
@@ -94,7 +94,7 @@ func TestWorkflowFullDistributed(t *testing.T) {
 			decisionNode: "rejected",
 			wantDecision: "rejected",
 			ran:          []string{"single_lane", "rejected", "quiet"},
-			skipped:      []string{"fan", "hold", "tick", "approved", "timed_out", "notify"},
+			skipped:      []string{"fan", "hold", "tick", "approved", "escalate", "timed_out", "notify"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -106,6 +106,14 @@ func TestWorkflowFullDistributed(t *testing.T) {
 			workflows.WithVars(def, workflows.FullVars(enrich.URL, "qa@example.test", grpcHost, table, rowID))
 
 			h := newServerRunnerHarnessAs(t, addr, workflows.FullApprover)
+			// FullWorkflow's escalate node names FullEscalationWorkflow, and the
+			// inline-execute path resolves that reference at compile time: the
+			// child must be registered on the same server first.
+			escalation, err := workflows.FullEscalationWorkflow().Definition()
+			if err != nil {
+				t.Fatalf("Definition(escalation): %v", err)
+			}
+			registerWorkflowHTTP(t, h.httpSrv.URL, h.httpSrv.Client(), escalation)
 			startWorkflowRunner(t, h, "runner-full-"+tc.name, def, pool, resolver)
 
 			// Invoke, not Submit: Submit schedules every root, and five of this
@@ -215,6 +223,12 @@ func TestWorkflowFullTriggersFire(t *testing.T) {
 
 	eng, obs := triggerEngine(t)
 	ctx := context.Background()
+	// FullWorkflow's escalate node names FullEscalationWorkflow, and a
+	// sub-workflow reference resolves at registration time: the child must be
+	// registered in the same namespace first.
+	if _, err := eng.AddWorkflow(ctx, workflows.FullEscalationWorkflow()); err != nil {
+		t.Fatalf("AddWorkflow(escalation): %v", err)
+	}
 	if _, err := eng.AddWorkflow(ctx, workflows.FullWorkflow(cfg)); err != nil {
 		t.Fatalf("AddWorkflow: %v", err)
 	}
