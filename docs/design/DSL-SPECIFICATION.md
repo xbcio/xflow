@@ -108,7 +108,9 @@ description: string       # 描述（可选）
 
 # runner 选择器（顶层，可选；节点级 runner_selector 同结构，优先级高于顶层）
 runner_selector:
-  mode: string            # default | required；required 时 runner 必须满足 match_labels
+  mode: string            # default | required；required 时 runner 必须满足 match_labels（硬性，永不回落）
+                          # default（缺省即 default）时 match_labels 为软偏好：优先匹配，无匹配时
+                          # 30s 宽限后在 claim 与 entry activation 两条路径均可回落至任意 capable runner
   match_labels: object    # 标签选择器，key/value 均为 string
 
 # 上下文（全局变量、配置）
