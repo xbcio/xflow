@@ -114,13 +114,17 @@ type serverConfig struct {
 	// directory's node-type queue lanes; see WithServerAssignmentQueueLanes.
 	assignmentQueueLanes         []string
 	assignmentQueueLaneWriteMode control.LaneWriteMode
-	outboxDiscoveryPage          int
-	outputCompression            bool
-	enableRunnerMetricsProxy     bool
-	runnerMetricsInterval        time.Duration
-	enableManagement             bool
-	supplyKeyRotation            time.Duration
-	middleware                   []func(http.Handler) http.Handler
+	// entryNamespaces is the entry-activation namespace set the control plane
+	// reconciles and the supply hinter enumerates; nil keeps {namespace.Default}.
+	// Set only by WithServerEntryNamespaces.
+	entryNamespaces          []namespace.Namespace
+	outboxDiscoveryPage      int
+	outputCompression        bool
+	enableRunnerMetricsProxy bool
+	runnerMetricsInterval    time.Duration
+	enableManagement         bool
+	supplyKeyRotation        time.Duration
+	middleware               []func(http.Handler) http.Handler
 	// paramValidation is WithServerParamValidation's mode; empty means
 	// types.DefaultParamValidationMode.
 	paramValidation types.ParamValidationMode
@@ -446,6 +450,26 @@ func WithServerAssignmentQueueLanes(lanes []string) ServerOption {
 func WithServerAssignmentQueueLaneWriteMode(mode control.LaneWriteMode) ServerOption {
 	return func(c *serverConfig) {
 		c.assignmentQueueLaneWriteMode = mode
+	}
+}
+
+// WithServerEntryNamespaces declares the namespace set whose entry activations
+// this server's control-plane reconciler owns and whose supplies the heartbeat
+// hinter enumerates. Unset (the default) keeps the single-namespace behavior:
+// both fall back to {namespace.Default}, exactly as before this option
+// existed.
+//
+// Set it when the embedder registers workflows outside the default namespace.
+// A workflow in a namespace the reconciler does not own is never assigned a
+// live runner — no runner is told to activate it, and the workflow silently
+// never runs with nothing on the registration path reporting why. The hinter
+// enumerates the same set (both consumers are fed from the one field this
+// option fills), or heartbeat supply hints go missing for exactly those
+// workflows. The runners meant to serve these namespaces must have declared
+// them at registration (an empty declaration means default only).
+func WithServerEntryNamespaces(ns []namespace.Namespace) ServerOption {
+	return func(c *serverConfig) {
+		c.entryNamespaces = append([]namespace.Namespace(nil), ns...)
 	}
 }
 
@@ -783,6 +807,7 @@ func buildServerAPIConfig(cfg ServerConfig, sc *serverConfig) apiserver.Config {
 		DeadQueuedAssignmentReapBatch:  sc.deadQueuedReapBatch,
 		AssignmentQueueLanes:           sc.assignmentQueueLanes,
 		AssignmentQueueLaneWriteMode:   sc.assignmentQueueLaneWriteMode,
+		EntryNamespaces:                sc.entryNamespaces,
 
 		OutboxDiscoveryPage: sc.outboxDiscoveryPage,
 

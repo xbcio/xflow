@@ -364,6 +364,28 @@ func NewEntryActivationReconciler(cfg EntryActivationReconcilerConfig) *EntryAct
 	if cfg.RetryBackoffMax <= 0 {
 		cfg.RetryBackoffMax = DefaultActivationRetryBackoffMax
 	}
+	// Normalize the namespace list before it is stored: drop empty entries and
+	// collapse duplicates in first-seen order, then fall back to
+	// {namespace.Default}. The filtering is load-bearing, not tidiness — the
+	// write side normalizes an empty namespace to default, so a surviving ""
+	// entry would scan the empty namespace, find nothing, and silently
+	// reconcile NOTHING at all (not even default); the dedup only spares the
+	// reconcile loop a repeated list of the same records.
+	if len(cfg.Namespaces) > 0 {
+		deduped := make([]namespace.Namespace, 0, len(cfg.Namespaces))
+		seen := make(map[namespace.Namespace]struct{}, len(cfg.Namespaces))
+		for _, ns := range cfg.Namespaces {
+			if ns == "" {
+				continue
+			}
+			if _, dup := seen[ns]; dup {
+				continue
+			}
+			seen[ns] = struct{}{}
+			deduped = append(deduped, ns)
+		}
+		cfg.Namespaces = deduped
+	}
 	if len(cfg.Namespaces) == 0 {
 		cfg.Namespaces = []namespace.Namespace{namespace.Default}
 	}
@@ -378,6 +400,20 @@ func NewEntryActivationReconciler(cfg EntryActivationReconcilerConfig) *EntryAct
 		noMatchSince: make(map[engine.EntryActivationKey]time.Time),
 		retryBackoff: make(map[engine.EntryActivationKey]activationRetryState),
 	}
+}
+
+// Namespaces returns the namespace set this reconciler owns: what
+// NewEntryActivationReconciler normalized from
+// EntryActivationReconcilerConfig.Namespaces — empty entries dropped,
+// duplicates collapsed, {namespace.Default} when nothing remains — so a
+// reconciler built through the constructor always reports a non-empty set.
+// (Only a reconciler assembled by hand can hold an empty one.) It is the
+// read-only seam tests use to pin that a configured namespace actually arrived
+// here — a value lost at any earlier config layer leaves the reconciler
+// silently default-only, and every activation outside the default namespace
+// silently never gets a runner.
+func (r *EntryActivationReconciler) Namespaces() []namespace.Namespace {
+	return append([]namespace.Namespace(nil), r.cfg.Namespaces...)
 }
 
 // leaseGrace is the configured revive grace with its default applied, read

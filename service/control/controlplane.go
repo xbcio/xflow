@@ -101,6 +101,27 @@ type Config struct {
 	// drive the node-generic EntryActivationReconciler. Optional; nil disables
 	// generation fencing on the seed path.
 	EntryActivationStore engine.EntryActivationStore
+	// EntryNamespaces, when non-empty, is the namespace set whose entry
+	// activations the EntryActivationReconciler owns and whose supplies the
+	// heartbeat hinter enumerates. nil (the default) keeps the
+	// single-namespace behavior: both fall back to {namespace.Default},
+	// exactly as before this field existed. Empty entries are dropped and
+	// duplicates collapsed when the control plane is constructed.
+	//
+	// Set it when registered workflows live outside the default namespace. A
+	// workflow in a namespace this list omits is never assigned a live
+	// runner — no runner is told to activate it and its collection silently
+	// never starts, with nothing on the registration path reporting why. The
+	// hinter must enumerate the same set or heartbeat supply hints go missing
+	// for exactly those workflows, which is why both consumers are fed from
+	// this one field rather than each having its own knob.
+	//
+	// One prerequisite is outside this field's reach: a runner only serves
+	// namespaces it declared when it registered (an empty declaration means
+	// default only). Configuring a namespace here without a runner that
+	// declared it leaves its activations just as unassigned — same silent
+	// symptom, different cause.
+	EntryNamespaces []namespace.Namespace
 	// WorkflowRegistry, when non-nil, is the durable registry that persists
 	// compiled workflow graphs (by WorkflowID+Version). When nil, NewControlPlane
 	// falls back to a registry exposed by the backend provider (if any). It backs
@@ -641,9 +662,10 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	var entryReconciler *EntryActivationReconciler
 	// entryNamespaces is the reconciler's namespace list, captured outside the
 	// block below so the supply hinter (assembled after) can enumerate the
-	// SAME namespaces without a second configuration knob. nil here defaults
-	// to {namespace.Default} in both NewEntryActivationReconciler and
-	// NewSupplyHinter identically.
+	// SAME namespaces the reconciler was configured with (cfg.EntryNamespaces
+	// — see its doc comment for why the two must not diverge). nil here
+	// defaults to {namespace.Default} in both NewEntryActivationReconciler
+	// and NewSupplyHinter identically.
 	var entryNamespaces []namespace.Namespace
 	if cfg.EntryActivationStore != nil {
 		entryManager = NewEntryActivationManager(cfg.EntryActivationStore)
@@ -653,6 +675,7 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 			Selector:         &entrySelector,
 			Logger:           cfg.Logger,
 			WorkflowRegistry: workflowRegistry,
+			Namespaces:       cfg.EntryNamespaces,
 		}
 		if cfg.Metrics != nil {
 			recCfg.Metrics = metrics.NewGroupMetrics(cfg.Metrics)
@@ -675,7 +698,15 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		entryReconciler = NewEntryActivationReconciler(recCfg)
 		httpServer.core.entryReconciler = entryReconciler
 		grpcServer.core.entryReconciler = entryReconciler
-		entryNamespaces = recCfg.Namespaces
+		// Captured from the constructed reconciler, not from recCfg: the
+		// constructor normalizes the list (empty entries dropped, duplicates
+		// collapsed, {namespace.Default} fallback), and the hinter must
+		// enumerate exactly the set the reconciler scans. Reading the
+		// pre-normalization config would leave the two equal only as long as
+		// both normalizations stay identical by convention — the day one of
+		// them grows, they diverge silently, which is the failure family this
+		// whole wiring exists to close.
+		entryNamespaces = entryReconciler.Namespaces()
 	}
 
 	var workflowProjectionWorker *WorkflowActivationProjectionWorker

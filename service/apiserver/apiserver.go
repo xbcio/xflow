@@ -122,6 +122,15 @@ type Config struct {
 	// RunnerInstancePruneInterval is the leader-only prune cadence. Zero uses
 	// the control-plane default.
 	RunnerInstancePruneInterval time.Duration
+	// EntryNamespaces is the namespace set whose entry activations the control
+	// plane reconciles and whose supplies the heartbeat hinter enumerates (see
+	// control.Config.EntryNamespaces, which this threads to verbatim). Empty
+	// keeps the single-namespace default: an embedder that registers workflows
+	// outside the default namespace should set this, or those workflows are
+	// never assigned a runner and silently never activate. The runners meant
+	// to serve those namespaces must have declared them at registration (an
+	// empty declaration means default only).
+	EntryNamespaces []namespace.Namespace
 	// TrustedProxies contains direct-peer CIDRs allowed to supply
 	// X-Forwarded-For to the runner protocol. Empty ignores forwarding headers.
 	TrustedProxies []netip.Prefix
@@ -521,6 +530,7 @@ func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 		RunnerPools:                    cfg.RunnerPools,
 		RunnerInstanceIdleTTL:          cfg.RunnerInstanceIdleTTL,
 		RunnerInstancePruneInterval:    cfg.RunnerInstancePruneInterval,
+		EntryNamespaces:                cfg.EntryNamespaces,
 		TrustedProxies:                 cfg.TrustedProxies,
 		IdentityTTL:                    cfg.IdentityTTL,
 		LeaseTTL:                       cfg.LeaseTTL,
