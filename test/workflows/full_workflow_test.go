@@ -20,7 +20,7 @@ import (
 
 // TestFullWorkflowCoversEveryNodeType asserts FullWorkflow ALONE carries every
 // registered action type the compiler accepts, every registered trigger kind,
-// and both declaration-only supply kinds. The integration coverage suite
+// and all three declaration-only supply kinds. The integration coverage suite
 // measures the union of all tiers; this pins the single-definition claim, and
 // runs without a build tag so it gates ordinary `go test`.
 //

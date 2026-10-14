@@ -79,7 +79,7 @@ func DefaultFullTriggerConfig() FullTriggerConfig {
 //
 // Main lane (entry: start):
 //
-//	policy(supply.static) ┐ rules(supply.external) ┐  (DependsOn summarize)
+//	policy(supply.static) ┐ rules(supply.external) ┐ pull(supply.http) ┐  (DependsOn summarize)
 //	start → seed(function) → tag(set) → enrich(http) → rehydrate(set)
 //	  → normalize(filter) → dedupe(remove_duplicates) → ordered(sort)
 //	  → capped(limit) → rollup(aggregate) → renamed(rename) → script(js)
@@ -127,6 +127,13 @@ func FullWorkflow(tc FullTriggerConfig) *xflow.WorkflowBuilder {
 	// --- declarations ---
 	policy := wf.Node("policy", node.SupplyStatic([]byte(`{"max_amount": 1000}`)))
 	rules := wf.Node("rules", node.SupplyExternal("qa_rules"))
+	// The pull source is a compile-time literal on purpose: the URL is parsed,
+	// never rendered. A template in the scheme or host is rejected at compile;
+	// one in the path would compile and then be fetched literally at runtime
+	// (types.ParseSupplyPullSource). The runner-side fetch is covered by
+	// service/runner's supply tests; this suite pins the declaration →
+	// compile → register chain.
+	pull := wf.Node("pull", node.SupplyPull("https://config.example.com/qa-full-rules.json").PollInterval("30s"))
 
 	// --- main lane: data shaping ---
 	start := wf.Node(FullEntryStart, node.Start())
@@ -260,9 +267,12 @@ func FullWorkflow(tc FullTriggerConfig) *xflow.WorkflowBuilder {
 		Connect(joinOut.Output("main"), done)
 
 	// Supply nodes have no output ports; the dependency edge is their whole
-	// contribution (see defs_high.go).
+	// contribution (see defs_high.go). All three supply kinds are here:
+	// static content travels with the definition, external names a stored
+	// SupplyResource, and http names a source the runner pulls.
 	wf.DependsOn(summarize, policy)
 	wf.DependsOn(summarize, rules)
+	wf.DependsOn(summarize, pull)
 
 	// --- trigger lane ---
 	onTimer := wf.Node(FullEntryTimer, trigger.Timer().Every(tc.TimerInterval))

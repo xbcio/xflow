@@ -37,14 +37,23 @@ const SubgraphNodeType = types.SubgraphNodeType
 // handler registry never lists. Supply kinds are declarations: none registers a
 // handler and the engine skips all of them at execution, so they are absent
 // from registry.Types() by design rather than by omission. The list holds the
-// ones FullWorkflow exercises; xflow.supply.http is left out until a workflow
-// with a reachable pull source can be part of the suite.
+// ones FullWorkflow exercises — all three kinds: static content carried by the
+// definition, an external SupplyResource looked up in the store, and an http
+// source the runner pulls.
+//
+// The pull kind is present although nothing in this suite reaches its source:
+// the URL is a compile-time literal, and the fetch path is covered by
+// service/runner's supply tests — a real HTTPS fetcher in supply_pull_test.go,
+// the full runner-and-gate path in supply_poller_test.go. What this suite
+// validates is the declaration → compile → register chain, which is exactly
+// what the other two kinds are here for.
 //
 // The coverage suite subtracts these before checking that every type a
 // definition names is registered, so the exception is stated once here instead
 // of being open-coded as an allowlist in the assertion.
 var DeclarationOnlyNodeTypes = []string{
 	"xflow.supply.external",
+	"xflow.supply.http",
 	"xflow.supply.static",
 }
 
