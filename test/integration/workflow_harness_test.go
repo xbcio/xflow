@@ -123,6 +123,15 @@ func startWorkflowRunner(t *testing.T, h *serverRunnerHarness, runnerID string, 
 			PollWait:           5 * time.Millisecond,
 			ResourcePool:       pool,
 			CredentialResolver: resolver,
+			// The full tier declares selectors: the workflow-level default-mode
+			// {"qa":"full"} sinks onto every node, and db_insert/db_load replace
+			// it with {"role":"db"}. A runner without matching labels has every
+			// claim rejected until the 30s default-mode grace window expires
+			// (service/control runner_selector_default.go), which is longer
+			// than these tests wait, so this runner advertises both sets. The
+			// other tiers declare no selector, which makes the labels inert
+			// for them.
+			Labels: map[string]string{"qa": "full", "role": "db"},
 			// A map node dispatches one synthetic batch lease per item and the
 			// lease names a node with no handler, so the runner needs the
 			// subgraph runtime to resolve the body's members. Production

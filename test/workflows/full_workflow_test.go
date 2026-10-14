@@ -100,6 +100,61 @@ func TestFullWorkflowEntries(t *testing.T) {
 	}
 }
 
+// TestFullWorkflowCarriesRunnerSelectors asserts both selector levels of the
+// definition and the way compile resolves them: the workflow-level default-mode
+// {"qa":"full"} sinks onto every node that declares none, while a node-level
+// selector REPLACES it for that node rather than being unioned with it
+// (engine/graph.resolveRunnerSelector). The claim path reads exactly what these
+// assertions read, so a drift here is a placement change for the
+// integration-tier runner (see workflow_harness_test.go).
+func TestFullWorkflowCarriesRunnerSelectors(t *testing.T) {
+	def, err := workflows.FullWorkflow(workflows.DefaultFullTriggerConfig()).Definition()
+	if err != nil {
+		t.Fatalf("Definition: %v", err)
+	}
+	if def.RunnerSelector == nil {
+		t.Fatal("workflow RunnerSelector is nil; FullWorkflow declares {\"qa\":\"full\"}")
+	}
+	if got := def.RunnerSelector.MatchLabels["qa"]; got != "full" {
+		t.Errorf("workflow RunnerSelector matchLabels[qa] = %q, want full", got)
+	}
+	if m := def.RunnerSelector.Mode; m != "" && m != types.RunnerSelectorModeDefault {
+		t.Errorf("workflow RunnerSelector mode = %q, want empty or default", m)
+	}
+	g, err := graph.Compile(def)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	nodeSelector := func(name string) *types.RunnerSelector {
+		t.Helper()
+		i, ok := g.NodeIndex(name)
+		if !ok {
+			t.Fatalf("node %q is not in the compiled graph", name)
+		}
+		return g.NodeAt(i).RunnerSelector
+	}
+
+	// Nodes carrying their own selector: only the node-level labels apply.
+	for _, name := range []string{"db_insert", "db_load"} {
+		sel := nodeSelector(name)
+		if sel == nil {
+			t.Fatalf("node %q: compiled RunnerSelector is nil, want {\"role\":\"db\"}", name)
+		}
+		if len(sel.MatchLabels) != 1 || sel.MatchLabels["role"] != "db" {
+			t.Errorf("node %q matchLabels = %v, want exactly {role: db}", name, sel.MatchLabels)
+		}
+	}
+
+	// Nodes declaring none: the workflow-level selector sinks to every one of
+	// them, supply declarations included.
+	for _, name := range []string{"seed", "summarize", "pull"} {
+		sel := nodeSelector(name)
+		if sel == nil || sel.MatchLabels["qa"] != "full" {
+			t.Errorf("node %q RunnerSelector = %+v, want the workflow-level {qa: full}", name, sel)
+		}
+	}
+}
+
 // completionRecorder records the terminal status of every execution.
 type completionRecorder struct {
 	engine.BaseHooks

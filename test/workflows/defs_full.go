@@ -99,6 +99,20 @@ func DefaultFullTriggerConfig() FullTriggerConfig {
 //
 //	on_* ─→ trigger_join(merge any) → trigger_record(function) → trigger_done(end)
 //
+// Runner selectors: the workflow-level selector is default-mode
+// {"qa":"full"}, which compile sinks onto every node that declares none.
+// db_insert and db_load declare {"role":"db"} and get exactly that — a
+// node-level selector REPLACES the workflow-level one for its node rather
+// than being unioned with it (engine/graph.resolveRunnerSelector). The
+// integration harness runner advertises both label sets (see
+// workflow_harness_test.go), so every claim matches immediately instead of
+// waiting out the 30s default-mode grace window; the other half of
+// default-mode semantics — a non-matching runner may still claim once the
+// grace has expired — is covered by service/control's selector unit tests,
+// not by this suite. Groups carry no selector on purpose: a group-level
+// selector changes the scheduling unit to a group lease, which has its own
+// e2e.
+//
 // An execution starts from exactly one of the six entries; the engine resolves
 // the other five as skipped, and the skip cascades through every node only they
 // reach. A start run therefore skips the whole trigger lane, and a trigger run
@@ -122,7 +136,8 @@ func DefaultFullTriggerConfig() FullTriggerConfig {
 // Input: `amount` (number). Runtime vars: VarHTTPURL, VarRecipient,
 // VarGRPCHost, VarDBTable, VarDBRowID (see FullVars). Credential: CredentialDB.
 func FullWorkflow(tc FullTriggerConfig) *xflow.WorkflowBuilder {
-	wf := xflow.Workflow("full-coverage").Credential(CredentialDB, "database")
+	wf := xflow.Workflow("full-coverage").Credential(CredentialDB, "database").
+		RunnerSelector(xflow.RunnerSelector(map[string]string{"qa": "full"}))
 
 	// --- declarations ---
 	policy := wf.Node("policy", node.SupplyStatic([]byte(`{"max_amount": 1000}`)))
@@ -178,9 +193,11 @@ func FullWorkflow(tc FullTriggerConfig) *xflow.WorkflowBuilder {
 		SetData(map[string]any{
 			"id":  `${{ $vars.db_row_id }}`,
 			"qty": 7,
-		}))
+		})).
+		RunnerSelector(xflow.RunnerSelector(map[string]string{"role": "db"}))
 	dbLoad := wf.Node("db_load", node.Database("select", `{{ $vars.db_table }}`, CredentialDB).
-		SetWhere(map[string]any{"id": `${{ $vars.db_row_id }}`}))
+		SetWhere(map[string]any{"id": `${{ $vars.db_row_id }}`})).
+		RunnerSelector(xflow.RunnerSelector(map[string]string{"role": "db"}))
 	risk := wf.Node("risk", node.GRPC("qa.RiskService", "Score", `{{ $vars.grpc_host }}`).
 		SetRequest(map[string]any{"subject": "qa-full"}).
 		Timeout("5s")).
