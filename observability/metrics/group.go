@@ -16,19 +16,25 @@ func NewGroupMetrics(m *Metrics) *GroupMetrics {
 	return &GroupMetrics{m: m}
 }
 
+// The lease, commit, admission and renewal families below take the namespace as
+// a parameter and always emit the namespace label, so every emitter of one
+// family shares one label set (the registry drops a registration whose label set
+// conflicts with an earlier one). GroupObserverAdapter supplies it from the
+// hook's ctx; summing over it recovers the deployment-wide total.
+
 // OnGroupLeaseAcquired increments the group lease acquired counter.
-func (g *GroupMetrics) OnGroupLeaseAcquired() {
-	g.m.Inc("xflow_group_lease_acquired_total", nil)
+func (g *GroupMetrics) OnGroupLeaseAcquired(ns namespace.Namespace) {
+	g.m.Inc("xflow_group_lease_acquired_total", map[string]string{"namespace": string(ns)})
 }
 
 // OnGroupCommit increments the group commit counter with the outcome label.
-func (g *GroupMetrics) OnGroupCommit(outcome string) {
-	g.m.Inc("xflow_group_commit_total", map[string]string{"outcome": outcome})
+func (g *GroupMetrics) OnGroupCommit(ns namespace.Namespace, outcome string) {
+	g.m.Inc("xflow_group_commit_total", map[string]string{"namespace": string(ns), "outcome": outcome})
 }
 
 // OnGroupLeaseExpired increments the group lease expiry counter.
-func (g *GroupMetrics) OnGroupLeaseExpired() {
-	g.m.Inc("xflow_group_lease_expired_total", nil)
+func (g *GroupMetrics) OnGroupLeaseExpired(ns namespace.Namespace) {
+	g.m.Inc("xflow_group_lease_expired_total", map[string]string{"namespace": string(ns)})
 }
 
 // OnGroupSelectorFallback increments the selector fallback counter. The
@@ -59,21 +65,21 @@ func (g *GroupMetrics) OnGroupPackageCache(result string) {
 }
 
 // OnGroupExecDuration records the group execution duration.
-func (g *GroupMetrics) OnGroupExecDuration(d time.Duration) {
-	g.m.Observe("xflow_group_exec_duration_seconds", nil, d)
+func (g *GroupMetrics) OnGroupExecDuration(ns namespace.Namespace, d time.Duration) {
+	g.m.Observe("xflow_group_exec_duration_seconds", map[string]string{"namespace": string(ns)}, d)
 }
 
 // --- Trigger admission metrics ---
 
 // OnGroupAdmission increments the group admission counter with the outcome label.
 // Outcome values: accepted, duplicate, conflict, error.
-func (g *GroupMetrics) OnGroupAdmission(outcome string) {
-	g.m.Inc("xflow_group_admission_total", map[string]string{"outcome": outcome})
+func (g *GroupMetrics) OnGroupAdmission(ns namespace.Namespace, outcome string) {
+	g.m.Inc("xflow_group_admission_total", map[string]string{"namespace": string(ns), "outcome": outcome})
 }
 
 // OnGroupAdmissionDuration records the duration of a trigger admission attempt.
-func (g *GroupMetrics) OnGroupAdmissionDuration(d time.Duration) {
-	g.m.Observe("xflow_group_admission_duration_seconds", nil, d)
+func (g *GroupMetrics) OnGroupAdmissionDuration(ns namespace.Namespace, d time.Duration) {
+	g.m.Observe("xflow_group_admission_duration_seconds", map[string]string{"namespace": string(ns)}, d)
 }
 
 // --- Activation controller metrics ---
@@ -136,11 +142,11 @@ func (g *GroupMetrics) SetGroupActivationActive(ns namespace.Namespace, value fl
 // as the same (false, nil). The producer (engine.RenewGroupLease) names that
 // ambiguity "not_renewed" rather than inventing a distinction the backend never
 // gave it.
-func (g *GroupMetrics) OnGroupLeaseRenew(result string) {
-	g.m.Inc("xflow_group_lease_renew_total", map[string]string{"result": result})
+func (g *GroupMetrics) OnGroupLeaseRenew(ns namespace.Namespace, result string) {
+	g.m.Inc("xflow_group_lease_renew_total", map[string]string{"namespace": string(ns), "result": result})
 }
 
 // OnGroupLeaseRenewDuration records the duration of a lease renewal attempt.
-func (g *GroupMetrics) OnGroupLeaseRenewDuration(d time.Duration) {
-	g.m.Observe("xflow_group_lease_renew_duration_seconds", nil, d)
+func (g *GroupMetrics) OnGroupLeaseRenewDuration(ns namespace.Namespace, d time.Duration) {
+	g.m.Observe("xflow_group_lease_renew_duration_seconds", map[string]string{"namespace": string(ns)}, d)
 }
