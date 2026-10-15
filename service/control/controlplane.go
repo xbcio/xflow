@@ -122,6 +122,21 @@ type Config struct {
 	// declared it leaves its activations just as unassigned — same silent
 	// symptom, different cause.
 	EntryNamespaces []namespace.Namespace
+	// OwnedNamespaces declares the namespace set this deployment owns on shared
+	// infrastructure. nil (the default) is the legacy unscoped process: every
+	// leader-gated worker sweeps all namespaces and the runner directory keeps
+	// its original Redis keys, exactly as before this field existed.
+	//
+	// When set, it scopes the audit reconciler, the workflow projection worker
+	// and the runner instance pruner to these namespaces, moves a dedicated
+	// (single non-default) deployment's runner directory onto its own key
+	// prefix, and becomes the default for EntryNamespaces. A backend that
+	// carries its own owned set (the distributed backend) supplies it when this
+	// field is empty; a set that contradicts the backend's is rejected.
+	//
+	// Two deployments on one Redis/MySQL must own disjoint sets; nothing at
+	// runtime detects an overlap.
+	OwnedNamespaces []namespace.Namespace
 	// WorkflowRegistry, when non-nil, is the durable registry that persists
 	// compiled workflow graphs (by WorkflowID+Version). When nil, NewControlPlane
 	// falls back to a registry exposed by the backend provider (if any). It backs
@@ -237,6 +252,14 @@ func selectRunnerDirectory(cfg Config, observer RunnerClaimObserver) RunnerDirec
 	if provider, ok := cfg.Backend.(redisClientProvider); ok {
 		if client := provider.RedisClient(); client != nil {
 			opts := []RedisRunnerDirectoryOption{WithRedisRunnerDirectoryObserver(observer), WithRedisRunnerDirectoryLogger(cfg.Logger)}
+			// cfg.OwnedNamespaces is already resolved and validated by
+			// NewControlPlane, so a suffix error here means a caller bypassed
+			// that; failing loudly beats falling back to the shared legacy keys.
+			suffix, err := namespace.DeploymentSuffix(cfg.OwnedNamespaces)
+			if err != nil {
+				panic(fmt.Sprintf("control: runner directory scope: %v", err))
+			}
+			opts = append(opts, WithRedisRunnerDirectoryScope(suffix))
 			// The queued-assignment reaper asks whether an assignment's
 			// execution can still be leased, and that answer belongs to the
 			// engine's state store rather than to the directory's key space.
@@ -419,6 +442,15 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 	if cfg.Backend == nil {
 		return nil, errors.New("control: Config.Backend is required")
 	}
+	// Resolved first and written back into cfg: every consumer below (runner
+	// directory prefix, entry reconciler, hinter, scoped workers) then reads the
+	// one answer instead of re-deriving it from the raw fields.
+	scope, err := resolveDeploymentScope(cfg)
+	if err != nil {
+		return nil, err
+	}
+	cfg.OwnedNamespaces = scope.owned
+	cfg.EntryNamespaces = scope.entry
 	prefix, err := normalizeEnrollmentRunnerIDPrefix(cfg.EnrollmentRunnerIDPrefix)
 	if err != nil {
 		return nil, err
@@ -647,7 +679,8 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		instancePruner = NewRunnerInstancePruner(RunnerInstancePrunerConfig{
 			Pools: cfg.RunnerPools, IssuedIdentities: cfg.IssuedIdentities,
 			Directory: runners, Leader: elector, Logger: cfg.Logger,
-			IdleTTL: cfg.RunnerInstanceIdleTTL,
+			IdleTTL:    cfg.RunnerInstanceIdleTTL,
+			Namespaces: cfg.OwnedNamespaces,
 		})
 	}
 
@@ -716,6 +749,10 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 			Projector: NewWorkflowActivationProjector(entryManager),
 			Leader:    elector,
 			Logger:    cfg.Logger,
+			// Owned, not entry: the projection outbox is cross-namespace shared
+			// state, and a dedicated deployment must not project (and thereby
+			// advance) another deployment's intents.
+			Namespaces: cfg.OwnedNamespaces,
 		})
 	}
 

@@ -39,6 +39,10 @@ type WorkflowActivationProjectionWorkerConfig struct {
 	ProjectionTimeout time.Duration
 	ClaimTTL          time.Duration
 	Token             func() string
+	// Namespaces restricts recovery to the intersection of this set and the
+	// namespaces the outbox knows. nil (or only empty entries) keeps the legacy
+	// behavior of draining every namespace the outbox lists.
+	Namespaces []namespace.Namespace
 }
 
 // WorkflowActivationProjectionWorker drains workflow-registry projection
@@ -55,6 +59,9 @@ type WorkflowActivationProjectionWorker struct {
 	claimTTL          time.Duration
 	token             func() string
 	cursors           map[namespace.Namespace]uint64
+	// scope is nil for an unscoped worker; non-nil is a hard filter on the
+	// namespaces ReconcileOnce visits.
+	scope map[namespace.Namespace]struct{}
 }
 
 // NewWorkflowActivationProjectionWorker constructs a recovery worker.
@@ -93,6 +100,7 @@ func NewWorkflowActivationProjectionWorker(cfg WorkflowActivationProjectionWorke
 		claimTTL:          claimTTL,
 		token:             token,
 		cursors:           make(map[namespace.Namespace]uint64),
+		scope:             scopeSet(cfg.Namespaces),
 	}
 }
 
@@ -133,6 +141,11 @@ func (w *WorkflowActivationProjectionWorker) ReconcileOnce(ctx context.Context) 
 	for _, ns := range namespaces {
 		if ctx.Err() != nil {
 			break
+		}
+		if w.scope != nil {
+			if _, owned := w.scope[ns]; !owned {
+				continue
+			}
 		}
 		cursor := w.cursors[ns]
 		refs, next, listErr := w.outbox.ListPendingWorkflowActivationProjections(ctx, ns, cursor, w.batch)
