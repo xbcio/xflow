@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/xbcio/xflow/namespace"
 )
 
 // Runner pools (design: runner-config spec §6.5, stage 3.5).
@@ -206,4 +208,61 @@ type RunnerPoolStore interface {
 	TransitionInstance(ctx context.Context, runnerID string, from, to InstanceState, now time.Time) error
 	// ListInstances returns the instances of the pool visible under scope.
 	ListInstances(ctx context.Context, poolID string, scope OwnerScope) ([]RunnerInstance, error)
+}
+
+// ScopedRunnerInstance is a RunnerInstance together with the owner kind of its
+// pool. The prune worker needs the kind to treat platform instances differently
+// from tenant ones, and the instance row alone does not carry it.
+type ScopedRunnerInstance struct {
+	RunnerInstance
+	PoolOwnerKind PoolOwnerKind
+}
+
+// RunnerInstanceScope is the set of pools a deployment is responsible for:
+// tenant pools owned by one of TenantNamespaces, and — only for the deployment
+// that owns the default namespace — the platform pools, which have no owning
+// namespace of their own.
+type RunnerInstanceScope struct {
+	TenantNamespaces []string
+	IncludePlatform  bool
+}
+
+// Empty reports whether the scope covers no pool at all.
+func (s RunnerInstanceScope) Empty() bool {
+	return len(s.TenantNamespaces) == 0 && !s.IncludePlatform
+}
+
+// RunnerInstanceScopeFor derives the pool scope of an owned namespace set. It
+// is the single definition of that rule for every ScopedRunnerInstanceLister:
+// each owned namespace covers the tenant pools it owns, and platform pools are
+// covered only when namespace.Default is owned — a dedicated deployment must
+// not manage shared infrastructure. An empty or nil set covers nothing.
+func RunnerInstanceScopeFor(owned []namespace.Namespace) RunnerInstanceScope {
+	var scope RunnerInstanceScope
+	seen := make(map[string]struct{}, len(owned))
+	for _, ns := range owned {
+		if _, dup := seen[string(ns)]; dup {
+			continue
+		}
+		seen[string(ns)] = struct{}{}
+		scope.TenantNamespaces = append(scope.TenantNamespaces, string(ns))
+		if ns == namespace.Default {
+			scope.IncludePlatform = true
+		}
+	}
+	return scope
+}
+
+// ScopedRunnerInstanceLister is an optional RunnerPoolStore capability: the
+// lifecycle listing restricted to the pools of an owned namespace set. A
+// deployment that shares the pool tables with another one must not drain,
+// revoke or prune the other's runners — the unscoped ListInstancesByState is
+// cross-deployment by design.
+//
+// Instances are matched through their pool's owner, and a soft-deleted pool's
+// instances stay in scope: they still hold credentials and directory state that
+// the prune saga has to clear. An empty or nil owned set matches nothing (fail
+// closed); callers that want every pool use ListInstancesByState explicitly.
+type ScopedRunnerInstanceLister interface {
+	ListInstancesByStateIn(ctx context.Context, owned []namespace.Namespace, state InstanceState) ([]ScopedRunnerInstance, error)
 }
