@@ -131,6 +131,15 @@ type Config struct {
 	// to serve those namespaces must have declared them at registration (an
 	// empty declaration means default only).
 	EntryNamespaces []namespace.Namespace
+	// OwnedNamespaces declares the namespace set this deployment owns on shared
+	// infrastructure (see control.Config.OwnedNamespaces, which this threads to
+	// verbatim). The same set is also handed to the distributed backend, so the
+	// leader lease, maintenance sweeps and queue names it derives agree with the
+	// control plane's workers and runner directory: passing it to only one of
+	// the two would be rejected by control.NewControlPlane as inconsistent. Empty
+	// keeps the legacy unscoped behavior, byte for byte. It has no effect on the
+	// in-memory backend, which has no shared infrastructure to isolate.
+	OwnedNamespaces []namespace.Namespace
 	// TrustedProxies contains direct-peer CIDRs allowed to supply
 	// X-Forwarded-For to the runner protocol. Empty ignores forwarding headers.
 	TrustedProxies []netip.Prefix
@@ -531,6 +540,7 @@ func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 		RunnerInstanceIdleTTL:          cfg.RunnerInstanceIdleTTL,
 		RunnerInstancePruneInterval:    cfg.RunnerInstancePruneInterval,
 		EntryNamespaces:                cfg.EntryNamespaces,
+		OwnedNamespaces:                cfg.OwnedNamespaces,
 		TrustedProxies:                 cfg.TrustedProxies,
 		IdentityTTL:                    cfg.IdentityTTL,
 		LeaseTTL:                       cfg.LeaseTTL,
@@ -569,6 +579,9 @@ func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 			distributed.WithConsumer(true),
 			distributed.WithOutboxDiscoveryPage(cfg.OutboxDiscoveryPage),
 			distributed.WithOutputCompression(cfg.OutputCompression),
+			// The backend derives the leader key, sweep scope and queue names
+			// from the same set the control plane filters its workers by.
+			distributed.WithOwnedNamespaces(cfg.OwnedNamespaces),
 		}
 		if cfg.Metrics != nil {
 			opts = append(opts,
