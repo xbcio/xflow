@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -184,9 +185,15 @@ type MetricsHooks struct {
 // created — measured as a 25% regression on the node hook path when every
 // message is its own execution. A linear scan over single digits is cheaper than
 // the hash, and the slice does not allocate at all until the first node starts.
+//
+// ns is the namespace the first recorded start ran in, kept once per execution
+// (an execution lives in exactly one namespace) so the age sweep can attribute
+// what it drops. Empty on a tombstone and on an entry that has not recorded a
+// start yet.
 type execNodeStarts struct {
 	mu    sync.Mutex
 	ended bool
+	ns    namespace.Namespace
 	at    []nodeStart
 }
 
@@ -210,7 +217,7 @@ func NewSubgraphMetricsHooks(metrics *Metrics) *MetricsHooks {
 
 func (h *MetricsHooks) OnNodeStart(ctx context.Context, id types.ExecutionID, name string) {
 	h.Metrics.Inc(h.names.nodeStarted, h.nodeLabels(ctx, id, name, ""))
-	h.storeNodeStartAt(id, name, time.Now())
+	h.storeNodeStartAt(id, namespace.FromContext(ctx), name, time.Now())
 	h.maybeSweepNodeStarts(time.Now())
 }
 
@@ -226,12 +233,18 @@ func (h *MetricsHooks) OnNodeComplete(ctx context.Context, id types.ExecutionID,
 // been released. Dropping the start time in that case costs one duration
 // observation for a node that was never going to report one anyway; keeping it
 // would cost an entry that nothing removes.
-func (h *MetricsHooks) storeNodeStartAt(id types.ExecutionID, name string, at time.Time) {
+//
+// ns is remembered on the execution's entry the first time a start is recorded,
+// so the age sweep can attribute what it drops.
+func (h *MetricsHooks) storeNodeStartAt(id types.ExecutionID, ns namespace.Namespace, name string, at time.Time) {
 	e := h.entryFor(id)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.ended {
 		return
+	}
+	if e.ns == "" {
+		e.ns = ns
 	}
 	// A re-lease fires OnNodeStart again for a node already running — after a
 	// runner died, say. Overwrite rather than append, so the entry does not grow
@@ -358,14 +371,13 @@ func (h *MetricsHooks) maybeSweepNodeStarts(now time.Time) {
 // ended without notifying, and a silent sweep would hide that behind a duration
 // series that is quietly missing observations.
 //
-// The count carries an empty namespace rather than the namespace of whichever
-// execution happened to trigger the sweep. Those are unrelated — the sweep runs
-// from an arbitrary caller's OnNodeStart and drops entries belonging to any
-// namespace — and attributing the count to the trigger would name the wrong
-// tenant. Storing a namespace alongside every start time to make this
-// attributable is not worth the memory for a series expected to stay at zero.
+// The count is attributed to the namespace each dropped start ran in (recorded
+// once per execution, see execNodeStarts.ns), not to whichever execution
+// happened to trigger the sweep: the sweep runs from an arbitrary caller's
+// OnNodeStart and drops entries belonging to any namespace, so naming the
+// trigger's namespace would blame the wrong tenant.
 func (h *MetricsHooks) sweepStaleNodeStarts(now time.Time) {
-	swept := 0
+	var swept map[namespace.Namespace]int
 	h.started.Range(func(key, value any) bool {
 		e := value.(*execNodeStarts)
 		e.mu.Lock()
@@ -384,7 +396,10 @@ func (h *MetricsHooks) sweepStaleNodeStarts(now time.Time) {
 			e.at[i] = e.at[last]
 			e.at[last] = nodeStart{}
 			e.at = e.at[:last]
-			swept++
+			if swept == nil {
+				swept = make(map[namespace.Namespace]int)
+			}
+			swept[e.ns]++
 			// No i++: the slot now holds the element moved from the tail, which
 			// has not been examined yet.
 		}
@@ -398,8 +413,8 @@ func (h *MetricsHooks) sweepStaleNodeStarts(now time.Time) {
 		}
 		return true
 	})
-	if swept > 0 {
-		h.Metrics.Add(h.names.nodeStartsSwept, map[string]string{"namespace": ""}, float64(swept))
+	for ns, n := range swept {
+		h.Metrics.Add(h.names.nodeStartsSwept, map[string]string{"namespace": string(ns)}, float64(n))
 	}
 }
 
