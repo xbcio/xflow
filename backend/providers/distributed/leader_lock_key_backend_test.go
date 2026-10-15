@@ -74,6 +74,53 @@ func TestBackendCampaignsOnKeyDerivedFromOwnedSet(t *testing.T) {
 	}
 }
 
+// LeaderLockKey is exported so embedders can derive the key their backend will
+// hold; that only works if it agrees with what New really campaigns on, also
+// for the raw sets New normalises (duplicates, empty entries). Comparing
+// against the lease key in Redis ties the helper to the backend instead of to
+// a literal the helper's own author chose.
+// Mutation: dropping NormalizeOwned from LeaderLockKey turns {"",""}, {x,x} and
+// {"",x} red (the helper errors where the backend does not); making New skip
+// its own normalisation turns the same three red (construction fails).
+func TestLeaderLockKeyMatchesTheKeyTheBackendHolds(t *testing.T) {
+	cases := []struct {
+		name  string
+		owned []namespace.Namespace
+	}{
+		{"unconfigured", nil},
+		{"only empty entries", []namespace.Namespace{"", ""}},
+		{"default", []namespace.Namespace{namespace.Default}},
+		{"default and dedicated", []namespace.Namespace{namespace.Default, "local-jack"}},
+		{"dedicated", []namespace.Namespace{"local-jack"}},
+		{"duplicate dedicated", []namespace.Namespace{"local-jack", "local-jack"}},
+		{"empty entry beside dedicated", []namespace.Namespace{"", "local-jack"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			want, err := LeaderLockKey(tc.owned)
+			if err != nil {
+				t.Fatalf("LeaderLockKey(%v) error = %v", tc.owned, err)
+			}
+			mr, err := miniredis.Run()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer mr.Close()
+
+			b := newOwnedTestBackend(t, mr.Addr(), tc.owned)
+			if err := campaignWithin(t, b, time.Second); err != nil {
+				t.Fatalf("Campaign() error = %v", err)
+			}
+			if !mr.Exists(want) {
+				t.Fatalf("backend for %v does not hold LeaderLockKey %q; Redis keys: %v", tc.owned, want, mr.Keys())
+			}
+			if got := len(mr.Keys()); got != 1 {
+				t.Fatalf("backend for %v holds %d keys %v, want exactly the lease key", tc.owned, got, mr.Keys())
+			}
+		})
+	}
+}
+
 // Mutation note: collapsing both deployments onto one key (the bug this whole
 // change exists to fix: a local dev process stuck in Campaign behind the
 // deployed leader) must turn this red.

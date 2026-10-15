@@ -65,8 +65,9 @@ func TestLeaderLockKeySuffixIsKeySafe(t *testing.T) {
 // A namespace that could corrupt the key schema must never reach the key: ':'
 // would forge a longer path, '{' '}' would add a hash tag, and the glob
 // metacharacters would widen any pattern built from the key.
-// Mutation: removing the Validate call from NormalizeOwned and DeploymentSuffix
-// lets one of these through and turns the matching case red.
+// Both NormalizeOwned and DeploymentSuffix validate, so removing Validate from
+// only one of them leaves these green; removing it from both turns every case
+// red. The test pins Validate's character set, not either layer on its own.
 func TestLeaderLockKeyRejectsKeyUnsafeNamespaces(t *testing.T) {
 	for _, bad := range []namespace.Namespace{
 		"a:b", "a{b", "a}b", "a*b", "a?b", "a[b", "a]b", `a\b`,
@@ -83,8 +84,11 @@ func TestLeaderLockKeyRejectsKeyUnsafeNamespaces(t *testing.T) {
 // owned set (drops empty entries, removes duplicates) before deriving the key,
 // so a caller handing LeaderLockKey the same raw set has to land on the same
 // key rather than on an ambiguity error the backend would never raise.
-// Mutation: dropping the NormalizeOwned call from LeaderLockKey turns the
-// duplicate and empty-entry cases red.
+// Mutation: dropping the NormalizeOwned call from LeaderLockKey turns the first
+// three cases red; "duplicate default" stays green on purpose, because
+// DeploymentSuffix already maps any default-containing set to the legacy key.
+// Agreement with the key New really campaigns on is pinned separately by
+// TestLeaderLockKeyMatchesTheKeyTheBackendHolds.
 func TestLeaderLockKeyNormalisesLikeTheBackend(t *testing.T) {
 	tests := []struct {
 		name  string

@@ -505,7 +505,9 @@ func WithServerNamespaces(ns []namespace.Namespace) ServerOption {
 
 // LeaderLockKey returns the Redis key under which a server owning ns campaigns
 // for control-plane leadership. It exists so tests and tooling derive the key
-// from the same rule the server uses instead of hard-coding the literal.
+// from the same rule the server uses instead of hard-coding the literal. The
+// set is normalised the way the server does it (empty entries dropped,
+// duplicates removed); a set with no usable entry derives the legacy key.
 func LeaderLockKey(ns []namespace.Namespace) (string, error) {
 	return distributed.LeaderLockKey(ns)
 }

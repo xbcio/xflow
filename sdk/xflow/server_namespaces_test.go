@@ -55,6 +55,9 @@ func TestLeaderLockKey(t *testing.T) {
 		{"default", []namespace.Namespace{"default"}, distributed.LegacyLeaderLockKey, false},
 		{"default plus another", []namespace.Namespace{"default", "x"}, distributed.LegacyLeaderLockKey, false},
 		{"dedicated", []namespace.Namespace{"local-jack"}, distributed.LegacyLeaderLockKey + ":ns:local-jack", false},
+		{"duplicate dedicated", []namespace.Namespace{"local-jack", "local-jack"}, distributed.LegacyLeaderLockKey + ":ns:local-jack", false},
+		{"empty entry beside dedicated", []namespace.Namespace{"", "local-jack"}, distributed.LegacyLeaderLockKey + ":ns:local-jack", false},
+		{"only empty entries", []namespace.Namespace{"", ""}, distributed.LegacyLeaderLockKey, false},
 		{"ambiguous", []namespace.Namespace{"a", "b"}, "", true},
 	}
 	for _, tc := range tests {

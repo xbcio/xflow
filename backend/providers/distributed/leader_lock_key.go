@@ -30,6 +30,11 @@ const LegacyLeaderLockKey = "xflow:leader:control-plane"
 //	                                   namespace.DeploymentSuffix; rejected at
 //	                                   construction)
 //
+// The set is normalised first (empty entries dropped, duplicates removed), so
+// {"", "x"} and {"x", "x"} derive the same key as {"x"}, and a set holding only
+// empty entries is unscoped and derives the legacy key. This is the same
+// normalisation New applies, so the result is the key the backend holds.
+//
 // The ":ns:<ns>" suffix sits outside the "xflow:ns:<ns>:" SCAN prefix on
 // purpose: namespace.Validate rejects ':' and the glob metacharacters, so the
 // suffix cannot corrupt the key schema, and leader keys are not part of any
