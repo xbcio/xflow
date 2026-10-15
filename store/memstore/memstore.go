@@ -36,6 +36,7 @@ var (
 	_ store.Store                 = (*Store)(nil)
 	_ store.Transactor            = (*Store)(nil)
 	_ store.AuditReconciler       = (*Store)(nil)
+	_ store.ScopedAuditReconciler = (*Store)(nil)
 	_ store.Supplies              = (*Store)(nil)
 	_ store.ScheduleOverrideStore = (*Store)(nil)
 )
@@ -454,6 +455,42 @@ func (s *Store) AppendAudit(_ context.Context, rec *store.AuditRecord) error {
 // unit tests. Rows are returned oldest-first. When afterSeqID > 0 only rows
 // with ID > afterSeqID are considered (cursor pagination).
 func (s *Store) ListUnreconciledAdmissions(_ context.Context, before time.Time, afterSeqID uint64, limit int) ([]*store.AuditRecord, error) {
+	return s.listUnreconciled(before, afterSeqID, limit, nil)
+}
+
+// ListUnreconciledAdmissionsIn is ListUnreconciledAdmissions restricted to the
+// rows of an owned namespace set (store.ScopedAuditReconciler). An empty owned
+// set matches nothing. The outcome check keeps its (namespace, request_id)
+// correlation, so a request id reused in another namespace never settles this
+// scope's admission.
+func (s *Store) ListUnreconciledAdmissionsIn(_ context.Context, owned []namespace.Namespace, before time.Time, afterSeqID uint64, limit int) ([]*store.AuditRecord, error) {
+	inScope := auditScopeMatcher(owned)
+	if inScope == nil {
+		return nil, nil
+	}
+	return s.listUnreconciled(before, afterSeqID, limit, inScope)
+}
+
+// auditScopeMatcher turns an owned set into a row-namespace predicate using the
+// shared store.AuditScopeValues rule (empty-namespace rows belong to the
+// default namespace). nil means the set matches nothing.
+func auditScopeMatcher(owned []namespace.Namespace) func(string) bool {
+	values := store.AuditScopeValues(owned)
+	if len(values) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(values))
+	for _, v := range values {
+		set[v] = struct{}{}
+	}
+	return func(ns string) bool {
+		_, ok := set[ns]
+		return ok
+	}
+}
+
+// listUnreconciled is the shared scan. inScope == nil means every namespace.
+func (s *Store) listUnreconciled(before time.Time, afterSeqID uint64, limit int, inScope func(string) bool) ([]*store.AuditRecord, error) {
 	if limit <= 0 {
 		limit = 256
 	}
@@ -470,6 +507,9 @@ func (s *Store) ListUnreconciledAdmissions(_ context.Context, before time.Time, 
 	var out []*store.AuditRecord
 	for _, r := range s.audit {
 		if afterSeqID > 0 && r.SeqID <= afterSeqID {
+			continue
+		}
+		if inScope != nil && !inScope(r.Namespace) {
 			continue
 		}
 		if r.Phase != store.AuditPhaseAdmission || r.Outcome != store.AuditOutcomeAdmitted {
@@ -525,6 +565,22 @@ func (s *Store) AppendOutcomeIfAbsent(_ context.Context, rec *store.AuditRecord)
 // metrics, independent of the cursor). When no pending rows exist, pending=0
 // and oldest is the zero time.
 func (s *Store) CountUnreconciledAdmissions(_ context.Context, before time.Time) (int, time.Time, error) {
+	return s.countUnreconciled(before, nil)
+}
+
+// CountUnreconciledAdmissionsIn is CountUnreconciledAdmissions restricted to
+// the rows of an owned namespace set (store.ScopedAuditReconciler). An empty
+// owned set reports zero pending and the zero time.
+func (s *Store) CountUnreconciledAdmissionsIn(_ context.Context, owned []namespace.Namespace, before time.Time) (int, time.Time, error) {
+	inScope := auditScopeMatcher(owned)
+	if inScope == nil {
+		return 0, time.Time{}, nil
+	}
+	return s.countUnreconciled(before, inScope)
+}
+
+// countUnreconciled is the shared count. inScope == nil means every namespace.
+func (s *Store) countUnreconciled(before time.Time, inScope func(string) bool) (int, time.Time, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	hasOutcome := make(map[string]bool, len(s.audit))
@@ -537,6 +593,9 @@ func (s *Store) CountUnreconciledAdmissions(_ context.Context, before time.Time)
 	var oldest time.Time
 	for _, r := range s.audit {
 		if r.Phase != store.AuditPhaseAdmission || r.Outcome != store.AuditOutcomeAdmitted {
+			continue
+		}
+		if inScope != nil && !inScope(r.Namespace) {
 			continue
 		}
 		if !r.Timestamp.IsZero() && !r.Timestamp.Before(before) {

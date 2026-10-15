@@ -154,6 +154,53 @@ type AuditReconciler interface {
 	CountUnreconciledAdmissions(ctx context.Context, before time.Time) (pending int, oldest time.Time, err error)
 }
 
+// ScopedAuditReconciler is an optional AuditReconciler capability: the same
+// pending scan and backlog count, restricted to the audit rows of an owned
+// namespace set. A deployment that shares its audit table with another one
+// (a local dev process on the shared test database) must not settle the other
+// deployment's admissions — the unscoped scan is cross-namespace by design,
+// and settling means probing authoritative state that belongs to someone else.
+//
+// The scope is a hard filter on the row's own namespace; the NOT EXISTS
+// outcome check keeps its (namespace, request_id) correlation, so a request id
+// reused across namespaces never lets one scope's outcome settle another's
+// admission. An empty or nil owned set matches nothing (fail closed): callers
+// that want every namespace use the unscoped AuditReconciler methods
+// explicitly rather than by passing an empty set. Rows with an empty namespace
+// are the default namespace's (see AuditScopeValues).
+type ScopedAuditReconciler interface {
+	ListUnreconciledAdmissionsIn(ctx context.Context, owned []namespace.Namespace, before time.Time, afterSeqID uint64, limit int) ([]*AuditRecord, error)
+	CountUnreconciledAdmissionsIn(ctx context.Context, owned []namespace.Namespace, before time.Time) (pending int, oldest time.Time, err error)
+}
+
+// AuditScopeValues expands an owned namespace set into the values of the audit
+// row's namespace column it covers. It is the single definition of that rule
+// for every ScopedAuditReconciler: audit rows written without a namespace
+// carry the empty string and are the default namespace's, so they are covered
+// only when namespace.Default is owned — a dedicated deployment must not
+// inherit them. An empty or nil set expands to nothing.
+func AuditScopeValues(owned []namespace.Namespace) []string {
+	if len(owned) == 0 {
+		return nil
+	}
+	values := make([]string, 0, len(owned)+1)
+	seen := make(map[string]struct{}, len(owned)+1)
+	add := func(v string) {
+		if _, dup := seen[v]; dup {
+			return
+		}
+		seen[v] = struct{}{}
+		values = append(values, v)
+	}
+	for _, ns := range owned {
+		add(string(ns))
+		if ns == namespace.Default {
+			add("")
+		}
+	}
+	return values
+}
+
 // Audit phase constants (T9). Each audit row belongs to exactly one
 // immutable phase; the (Namespace, RequestID, Phase) triple is the reconcile
 // worker's idempotency key.
