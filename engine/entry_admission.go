@@ -273,8 +273,17 @@ func (e *Engine) SeedExecutionFromEntry(ctx context.Context, req SeedExecutionFr
 	resp, err := e.seedEntryAdmission(ctx, store, admissionReq, admission)
 	d := time.Since(start)
 
+	// The backend resolves the admission's namespace from the request first and
+	// only falls back to ctx, so an embedded caller can name a namespace the
+	// context does not carry. Observers read the namespace from ctx; hand them
+	// the one the admission actually used.
+	notifyCtx := ctx
+	if req.Namespace != "" {
+		notifyCtx = namespace.WithNamespace(ctx, req.Namespace)
+	}
+
 	if isGroupEntry {
-		e.notifyGroupAdmission(ctx, classifyAdmissionOutcome(resp, err), d)
+		e.notifyGroupAdmission(notifyCtx, classifyAdmissionOutcome(resp, err), d)
 	}
 	// Only on a real admission. A duplicate retry applied no transition, so its
 	// response carries no skips; a conflict or a transport error applied
@@ -283,7 +292,7 @@ func (e *Engine) SeedExecutionFromEntry(ctx context.Context, req SeedExecutionFr
 	// applies nothing either, for the same reason and one more: nothing exists
 	// on the execution side of it yet.
 	if err == nil && !resp.Duplicate && resp.State == AdmissionStateAccepted {
-		e.notifySkip(ctx, flowEntry, resp.Skipped)
+		e.notifySkip(notifyCtx, flowEntry, resp.Skipped)
 	}
 
 	return resp, err
