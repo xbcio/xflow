@@ -317,5 +317,5 @@ func (r *EntryActivationReconciler) recordGroupActivationRedelivered(act *engine
 	if r.cfg.Metrics == nil || act.NodeType != engine.GroupNodeType {
 		return
 	}
-	r.cfg.Metrics.OnGroupActivationRedelivered(action)
+	r.cfg.Metrics.OnGroupActivationRedelivered(act.Namespace, action)
 }

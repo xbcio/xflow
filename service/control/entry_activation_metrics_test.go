@@ -13,39 +13,76 @@ import (
 // fakeEntryActivationMetrics implements EntryActivationMetrics for tests. It
 // is a plain counter with no synchronization: every test using it drives the
 // reconciler from a single goroutine.
+//
+// The unlabeled fields (actionCounts, fenced, activeSets, selectorFallback,
+// redeliveries) aggregate across namespaces so single-namespace tests read the
+// same as before the series gained a namespace label; the *ByNS fields keep the
+// per-namespace view the label-attribution tests assert on.
 type fakeEntryActivationMetrics struct {
 	actionCounts     map[string]int
 	fenced           int
 	activeSets       []float64
 	selectorFallback int
 	redeliveries     map[string]int
+
+	actionByNS     map[nsAction]int
+	fencedByNS     map[namespace.Namespace]int
+	activeByNS     map[namespace.Namespace][]float64
+	fallbackByNS   map[namespace.Namespace]int
+	redeliveryByNS map[nsAction]int
+}
+
+// nsAction keys a counter by the namespace label and the action label.
+type nsAction struct {
+	ns     namespace.Namespace
+	action string
 }
 
 func newFakeEntryActivationMetrics() *fakeEntryActivationMetrics {
 	return &fakeEntryActivationMetrics{
-		actionCounts: make(map[string]int),
-		redeliveries: make(map[string]int),
+		actionCounts:   make(map[string]int),
+		redeliveries:   make(map[string]int),
+		actionByNS:     make(map[nsAction]int),
+		fencedByNS:     make(map[namespace.Namespace]int),
+		activeByNS:     make(map[namespace.Namespace][]float64),
+		fallbackByNS:   make(map[namespace.Namespace]int),
+		redeliveryByNS: make(map[nsAction]int),
 	}
 }
 
-func (f *fakeEntryActivationMetrics) OnGroupActivation(action string) {
+func (f *fakeEntryActivationMetrics) OnGroupActivation(ns namespace.Namespace, action string) {
 	f.actionCounts[action]++
+	f.actionByNS[nsAction{ns, action}]++
 }
 
-func (f *fakeEntryActivationMetrics) OnGroupActivationFenced() {
+func (f *fakeEntryActivationMetrics) OnGroupActivationFenced(ns namespace.Namespace) {
 	f.fenced++
+	f.fencedByNS[ns]++
 }
 
-func (f *fakeEntryActivationMetrics) SetGroupActivationActive(value float64) {
+func (f *fakeEntryActivationMetrics) SetGroupActivationActive(ns namespace.Namespace, value float64) {
 	f.activeSets = append(f.activeSets, value)
+	f.activeByNS[ns] = append(f.activeByNS[ns], value)
 }
 
-func (f *fakeEntryActivationMetrics) OnGroupSelectorFallback() {
+func (f *fakeEntryActivationMetrics) OnGroupSelectorFallback(ns namespace.Namespace) {
 	f.selectorFallback++
+	f.fallbackByNS[ns]++
 }
 
-func (f *fakeEntryActivationMetrics) OnGroupActivationRedelivered(action string) {
+func (f *fakeEntryActivationMetrics) OnGroupActivationRedelivered(ns namespace.Namespace, action string) {
 	f.redeliveries[action]++
+	f.redeliveryByNS[nsAction{ns, action}]++
+}
+
+// lastActiveIn returns the most recent gauge value Set for ns, or -1 if Set was
+// never called for it.
+func (f *fakeEntryActivationMetrics) lastActiveIn(ns namespace.Namespace) float64 {
+	sets := f.activeByNS[ns]
+	if len(sets) == 0 {
+		return -1
+	}
+	return sets[len(sets)-1]
 }
 
 // lastActive returns the most recently Set gauge value, or -1 if Set was
@@ -547,40 +584,41 @@ func TestEntryActivationReconciler_ActiveGaugeExcludesNonGroupAndLegacy(t *testi
 	}
 }
 
-// TestEntryActivationReconciler_ActiveGaugeSetOncePerPassAcrossNamespaces pins
-// the gauge trap called out in the task brief: SetGroupActivationActive
-// carries no namespace label, so it must be Set exactly once per Reconcile
-// pass with the total summed across every configured namespace. Moving the
-// Set call into the per-namespace loop (M-5) must turn this red.
-func TestEntryActivationReconciler_ActiveGaugeSetOncePerPassAcrossNamespaces(t *testing.T) {
+// TestEntryActivationReconciler_ActiveGaugeIsSetPerNamespace pins the gauge's
+// namespace dimension. The series is keyed by namespace, so each configured
+// namespace is written exactly once per Reconcile pass with its OWN count:
+//   - ns-a holds two active groups and ns-b one, so a single summed value (the
+//     old unlabeled behavior) or one value copied to every namespace cannot
+//     satisfy both assertions;
+//   - ns-c holds none and must still be written with 0 — a namespace skipped
+//     when empty would keep exporting its last non-zero value after draining.
+//
+// Removing the explicit zero write, or bucketing counts under the wrong
+// namespace, must turn this red.
+func TestEntryActivationReconciler_ActiveGaugeIsSetPerNamespace(t *testing.T) {
 	ctx := context.Background()
 	store := NewMemoryEntryActivationStore()
 	nsA := namespace.Namespace("ns-a")
 	nsB := namespace.Namespace("ns-b")
+	nsC := namespace.Namespace("ns-c")
 	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
 	deadline := now.Add(time.Hour)
 
-	actA := groupTestActivation(engine.GroupNodeType)
-	actA.Namespace = nsA
-	actA.WorkflowID = "wf-a"
-	if err := store.Upsert(ctx, actA); err != nil {
-		t.Fatal(err)
+	seed := func(ns namespace.Namespace, workflow, runner string) {
+		t.Helper()
+		act := groupTestActivation(engine.GroupNodeType)
+		act.Namespace = ns
+		act.WorkflowID = types.WorkflowID(workflow)
+		if err := store.Upsert(ctx, act); err != nil {
+			t.Fatal(err)
+		}
+		if ok, err := store.Assign(ctx, keyOfActivation(act), runner, "", 1, deadline); err != nil || !ok {
+			t.Fatalf("Assign %s: ok=%v err=%v", workflow, ok, err)
+		}
 	}
-	keyA := keyOfActivation(actA)
-	if ok, err := store.Assign(ctx, keyA, "runner-a", "", 1, deadline); err != nil || !ok {
-		t.Fatalf("Assign A: ok=%v err=%v", ok, err)
-	}
-
-	actB := groupTestActivation(engine.GroupNodeType)
-	actB.Namespace = nsB
-	actB.WorkflowID = "wf-b"
-	if err := store.Upsert(ctx, actB); err != nil {
-		t.Fatal(err)
-	}
-	keyB := keyOfActivation(actB)
-	if ok, err := store.Assign(ctx, keyB, "runner-b", "", 1, deadline); err != nil || !ok {
-		t.Fatalf("Assign B: ok=%v err=%v", ok, err)
-	}
+	seed(nsA, "wf-a1", "runner-a")
+	seed(nsA, "wf-a2", "runner-a")
+	seed(nsB, "wf-b", "runner-b")
 
 	lister := &mockRunnerLister{runners: []RunnerSnapshot{
 		{RunnerID: "runner-a", Capacity: 4, LastHeartbeat: now},
@@ -590,7 +628,7 @@ func TestEntryActivationReconciler_ActiveGaugeSetOncePerPassAcrossNamespaces(t *
 	fm := newFakeEntryActivationMetrics()
 	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
 		Store: store, Lister: lister, Selector: &sel,
-		Namespaces: []namespace.Namespace{nsA, nsB}, LeaseTTL: time.Minute,
+		Namespaces: []namespace.Namespace{nsA, nsB, nsC}, LeaseTTL: time.Minute,
 		Metrics: fm,
 	})
 
@@ -598,15 +636,61 @@ func TestEntryActivationReconciler_ActiveGaugeSetOncePerPassAcrossNamespaces(t *
 		t.Fatalf("Reconcile: %v", err)
 	}
 
-	// Exactly one Set call for the whole pass — never one per namespace.
-	if len(fm.activeSets) != 1 {
-		t.Fatalf("SetGroupActivationActive called %d times, want exactly 1 (once per Reconcile pass, not per namespace): %v", len(fm.activeSets), fm.activeSets)
+	want := map[namespace.Namespace]float64{nsA: 2, nsB: 1, nsC: 0}
+	for ns, wantValue := range want {
+		if sets := fm.activeByNS[ns]; len(sets) != 1 {
+			t.Fatalf("namespace %q: SetGroupActivationActive called %d times, want exactly 1 per pass: %v", ns, len(sets), sets)
+		}
+		if got := fm.lastActiveIn(ns); got != wantValue {
+			t.Fatalf("namespace %q: active gauge = %v, want %v", ns, got, wantValue)
+		}
 	}
-	// Both namespaces' active group activations must be summed. A
-	// per-namespace Set (the bug this test pins) would report 1 — whichever
-	// namespace iterated last — silently undercounting.
-	if got := fm.lastActive(); got != 2 {
-		t.Fatalf("active gauge = %v, want 2 (summed across ns-a and ns-b)", got)
+	if len(fm.activeByNS) != len(want) {
+		t.Fatalf("gauge written for %d namespaces, want only the %d configured: %v", len(fm.activeByNS), len(want), fm.activeByNS)
+	}
+}
+
+// A namespace that drains must be driven back to 0 on the next pass: the gauge
+// holds its last written value, so only an explicit write clears it.
+func TestEntryActivationReconciler_ActiveGaugeDrainsToZero(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryEntryActivationStore()
+	ns := namespace.Namespace("ns-drain")
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+
+	act := groupTestActivation(engine.GroupNodeType)
+	act.Namespace = ns
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := store.Assign(ctx, keyOfActivation(act), "runner-d", "", 1, now.Add(time.Hour)); err != nil || !ok {
+		t.Fatalf("Assign: ok=%v err=%v", ok, err)
+	}
+
+	lister := &mockRunnerLister{runners: []RunnerSnapshot{{RunnerID: "runner-d", Capacity: 4, LastHeartbeat: now}}}
+	sel := DefaultRunnerSelector()
+	fm := newFakeEntryActivationMetrics()
+	r := NewEntryActivationReconciler(EntryActivationReconcilerConfig{
+		Store: store, Lister: lister, Selector: &sel,
+		Namespaces: []namespace.Namespace{ns}, LeaseTTL: time.Minute, Metrics: fm,
+	})
+
+	if err := r.Reconcile(ctx, now); err != nil {
+		t.Fatalf("first Reconcile: %v", err)
+	}
+	if got := fm.lastActiveIn(ns); got != 1 {
+		t.Fatalf("active gauge after first pass = %v, want 1", got)
+	}
+
+	act.Desired = false
+	if err := store.Upsert(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Reconcile(ctx, now.Add(time.Second)); err != nil {
+		t.Fatalf("second Reconcile: %v", err)
+	}
+	if got := fm.lastActiveIn(ns); got != 0 {
+		t.Fatalf("active gauge after the namespace drained = %v, want 0 (an unwritten series would keep exporting 1)", got)
 	}
 }
 
