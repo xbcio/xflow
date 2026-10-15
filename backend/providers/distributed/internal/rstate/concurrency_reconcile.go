@@ -52,7 +52,7 @@ func (s *Store) ReconcileConcurrencySlots(ctx context.Context, limit int) (int, 
 	s.concurrencySweepMu.Lock()
 	defer s.concurrencySweepMu.Unlock()
 
-	namespaces, err := s.listNamespaces(ctx)
+	namespaces, err := s.scopedNamespaces(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("list namespaces for concurrency sweep: %w", err)
 	}

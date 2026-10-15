@@ -70,3 +70,18 @@ func ListNamespaces(ctx context.Context, rdb redis.Cmdable) ([]namespace.Namespa
 func (s *Store) listNamespaces(ctx context.Context) ([]namespace.Namespace, error) {
 	return ListNamespaces(ctx, s.rdb)
 }
+
+// scopedNamespaces returns the set of namespaces every maintenance sweep on
+// this store may touch. When ConfigureOwnedNamespaces installed a set, it is
+// returned directly — no registry read, and deliberately no default-namespace
+// injection, because a non-default deployment's scope is exactly the set its
+// embedder declared. nil (legacy mode) falls back to the registry so that
+// unscoped processes keep scanning every namespace as before.
+func (s *Store) scopedNamespaces(ctx context.Context) ([]namespace.Namespace, error) {
+	if s.ownedNamespaces != nil {
+		out := make([]namespace.Namespace, len(s.ownedNamespaces))
+		copy(out, s.ownedNamespaces)
+		return out, nil
+	}
+	return s.listNamespaces(ctx)
+}

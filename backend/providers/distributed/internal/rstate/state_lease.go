@@ -164,7 +164,7 @@ func (s *Store) ListExpiredLeases(ctx context.Context, before time.Time) (expire
 	out := make([]engine.ExpiredLease, 0, leaseIndexBatchLimit)
 	seenIndexes := make(map[string]struct{})
 
-	namespaces, err := s.listNamespaces(ctx)
+	namespaces, err := s.scopedNamespaces(ctx)
 	if err != nil {
 		return out, fmt.Errorf("list namespaces for lease scan: %w", err)
 	}

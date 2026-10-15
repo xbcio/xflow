@@ -444,7 +444,7 @@ func (s *Store) RecordOutboxFailure(ctx context.Context, id types.ExecutionID, e
 // the task-delivery hot path.
 func (s *Store) OutboxMetrics(ctx context.Context) (engine.OutboxMetricsSnapshot, error) {
 	var snapshot engine.OutboxMetricsSnapshot
-	namespaces, err := s.listNamespaces(ctx)
+	namespaces, err := s.scopedNamespaces(ctx)
 	if err != nil {
 		return engine.OutboxMetricsSnapshot{}, fmt.Errorf("list namespaces for outbox metrics: %w", err)
 	}
@@ -635,7 +635,7 @@ func (s *Store) ListOutboxExecutions(ctx context.Context, limit int) ([]types.Ex
 	}
 	s.outboxDiscoveryMu.Lock()
 	defer s.outboxDiscoveryMu.Unlock()
-	namespaces, err := s.listNamespaces(ctx)
+	namespaces, err := s.scopedNamespaces(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list namespaces for outbox discovery: %w", err)
 	}

@@ -26,6 +26,16 @@ type Store struct {
 	transientTTL           time.Duration
 	transientCompletionTTL time.Duration
 
+	// ownedNamespaces scopes every maintenance sweep (lease expiry, lease
+	// repair, outbox discovery/metrics, concurrency reconciliation, dead-letter
+	// receipts) to exactly this set when non-nil. It is the embedder's declared
+	// namespace scope — a process must never touch another deployment's
+	// namespaces even when they share one Redis. nil preserves the legacy
+	// behavior of iterating the append-only xflow:namespaces registry (always
+	// including the default namespace). Written once via ConfigureOwnedNamespaces
+	// before the store starts serving; read-only afterwards, hence no lock.
+	ownedNamespaces []namespace.Namespace
+
 	// in-memory graph cache for CheckCompletion (avoids Redis round-trips per node)
 	mu     sync.RWMutex
 	graphs map[types.ExecutionID]*graph.Graph

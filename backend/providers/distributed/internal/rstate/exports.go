@@ -48,6 +48,29 @@ func (s *Store) ConfigureTransient(enabled bool, activeTTL, completionTTL time.D
 	s.transientCompletionTTL = completionTTL
 }
 
+// ConfigureOwnedNamespaces scopes every maintenance sweep on this store to
+// exactly the given set. The input must already be normalized
+// (namespace.NormalizeOwned): nil restores legacy behavior — iterating the
+// append-only xflow:namespaces registry with the default namespace always
+// included — while a non-nil set is iterated directly, without consulting the
+// registry and without injecting the default namespace.
+//
+// This is the static scope half of deployment isolation: a process that owns
+// only its own namespaces never reads or repairs another deployment's keys
+// even when both deployments share one Redis. Call it once before the store
+// starts serving; the field is read without a lock afterwards.
+//
+// The set is copied, so later mutation of the caller's slice does not
+// retroactively change the store's scope.
+func (s *Store) ConfigureOwnedNamespaces(owned []namespace.Namespace) {
+	if owned == nil {
+		s.ownedNamespaces = nil
+		return
+	}
+	s.ownedNamespaces = make([]namespace.Namespace, len(owned))
+	copy(s.ownedNamespaces, owned)
+}
+
 // ConfigureOutboxReadyIndex enables or disables the best-effort outbox
 // readiness index.
 //
