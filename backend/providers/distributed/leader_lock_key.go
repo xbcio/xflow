@@ -35,6 +35,15 @@ const LegacyLeaderLockKey = "xflow:leader:control-plane"
 // suffix cannot corrupt the key schema, and leader keys are not part of any
 // namespace-scoped SCAN family.
 func LeaderLockKey(owned []namespace.Namespace) (string, error) {
+	// Normalise first, exactly as New does before deriving the key: a caller
+	// that passes the set it gave WithOwnedNamespaces (duplicates, an empty
+	// entry) must get the key the backend actually campaigns on, not an
+	// ambiguity error the backend would never raise. Normalisation is
+	// idempotent, so a pre-normalised set is unaffected.
+	owned, err := namespace.NormalizeOwned(owned)
+	if err != nil {
+		return "", err
+	}
 	suffix, err := namespace.DeploymentSuffix(owned)
 	if err != nil {
 		return "", err

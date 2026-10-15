@@ -61,3 +61,50 @@ func TestLeaderLockKeySuffixIsKeySafe(t *testing.T) {
 		t.Fatalf("derived key %q does not sit under the legacy prefix", got)
 	}
 }
+
+// A namespace that could corrupt the key schema must never reach the key: ':'
+// would forge a longer path, '{' '}' would add a hash tag, and the glob
+// metacharacters would widen any pattern built from the key.
+// Mutation: removing the Validate call from NormalizeOwned and DeploymentSuffix
+// lets one of these through and turns the matching case red.
+func TestLeaderLockKeyRejectsKeyUnsafeNamespaces(t *testing.T) {
+	for _, bad := range []namespace.Namespace{
+		"a:b", "a{b", "a}b", "a*b", "a?b", "a[b", "a]b", `a\b`,
+	} {
+		t.Run(string(bad), func(t *testing.T) {
+			if got, err := LeaderLockKey([]namespace.Namespace{bad}); err == nil {
+				t.Fatalf("LeaderLockKey({%q}) = %q, want a validation error", bad, got)
+			}
+		})
+	}
+}
+
+// The helper must return the key the backend campaigns on. New normalises the
+// owned set (drops empty entries, removes duplicates) before deriving the key,
+// so a caller handing LeaderLockKey the same raw set has to land on the same
+// key rather than on an ambiguity error the backend would never raise.
+// Mutation: dropping the NormalizeOwned call from LeaderLockKey turns the
+// duplicate and empty-entry cases red.
+func TestLeaderLockKeyNormalisesLikeTheBackend(t *testing.T) {
+	tests := []struct {
+		name  string
+		owned []namespace.Namespace
+		want  string
+	}{
+		{"duplicate dedicated namespace", []namespace.Namespace{"x", "x"}, LegacyLeaderLockKey + ":ns:x"},
+		{"empty entry beside a dedicated namespace", []namespace.Namespace{"", "x"}, LegacyLeaderLockKey + ":ns:x"},
+		{"only empty entries are unscoped", []namespace.Namespace{"", ""}, LegacyLeaderLockKey},
+		{"duplicate default stays legacy", []namespace.Namespace{namespace.Default, namespace.Default}, LegacyLeaderLockKey},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := LeaderLockKey(tc.owned)
+			if err != nil {
+				t.Fatalf("LeaderLockKey(%v) = %v, want nil", tc.owned, err)
+			}
+			if got != tc.want {
+				t.Fatalf("LeaderLockKey(%v) = %q, want %q", tc.owned, got, tc.want)
+			}
+		})
+	}
+}

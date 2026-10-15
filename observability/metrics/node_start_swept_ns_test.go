@@ -48,15 +48,17 @@ func TestSweptNodeStartsAreAttributedToTheirNamespace(t *testing.T) {
 			b := namespace.WithNamespace(context.Background(), "ns-b")
 			bare := context.Background()
 
-			// ns-a: two executions, three starts. ns-b: one execution, one start.
-			// bare ctx: one start, which must land on "default".
+			// ns-a: two executions, three starts. ns-b: one execution, two starts.
+			// bare ctx: one start, which must land on "default". 3/2/1 keeps every
+			// pair of buckets distinguishable if two of them were swapped.
 			hooks.OnNodeStart(a, types.ExecutionID("a-1"), "n1")
 			hooks.OnNodeStart(a, types.ExecutionID("a-1"), "n2")
 			hooks.OnNodeStart(a, types.ExecutionID("a-2"), "n1")
 			hooks.OnNodeStart(b, types.ExecutionID("b-1"), "n1")
+			hooks.OnNodeStart(b, types.ExecutionID("b-1"), "n2")
 			hooks.OnNodeStart(bare, types.ExecutionID("d-1"), "n1")
-			if got := hooks.liveNodeStarts(); got != 5 {
-				t.Fatalf("seeded starts = %d, want 5", got)
+			if got := hooks.liveNodeStarts(); got != 6 {
+				t.Fatalf("seeded starts = %d, want 6", got)
 			}
 
 			hooks.sweepStaleNodeStarts(time.Now().Add(2 * nodeStartMaxAge))
@@ -65,7 +67,7 @@ func TestSweptNodeStartsAreAttributedToTheirNamespace(t *testing.T) {
 				t.Fatalf("starts after the sweep = %d, want 0", got)
 			}
 			got := sweptByNamespace(t, m, tc.family)
-			want := map[string]float64{"ns-a": 3, "ns-b": 1, "default": 1}
+			want := map[string]float64{"ns-a": 3, "ns-b": 2, "default": 1}
 			if len(got) != len(want) {
 				t.Fatalf("swept series = %v, want %v", got, want)
 			}
