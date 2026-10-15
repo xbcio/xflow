@@ -1735,7 +1735,19 @@ func (r *EntryActivationReconciler) projectPackageForGroup(ctx context.Context, 
 	if r.cfg.WorkflowRegistry == nil {
 		return nil
 	}
-	rec, err := r.cfg.WorkflowRegistry.GetWorkflow(ctx, act.WorkflowID)
+	// The registry scopes its records by the context namespace (the distributed
+	// registry derives its key from namespace.FromContext), and this function's
+	// ctx is the control-plane reconcile loop's, which carries no namespace —
+	// FromContext falls back to Default. Reading without attaching the
+	// activation's namespace therefore looks the workflow up in the wrong
+	// deployment: invisible for a control plane that owns only Default (the
+	// fallback happens to be the truth there, which is why this survived until
+	// a dedicated namespace actually reconciled), fatal for a dedicated one,
+	// where every group activation would decline on the runner with "directive
+	// carries no package" because the projection found no workflow. Same trap
+	// the subworkflow resolver documents; same fix.
+	nsCtx := namespace.WithNamespace(ctx, act.Namespace)
+	rec, err := r.cfg.WorkflowRegistry.GetWorkflow(nsCtx, act.WorkflowID)
 	if err != nil {
 		if r.cfg.Logger != nil {
 			r.cfg.Logger.Warn("entry activation: resolve workflow for group package projection failed",
