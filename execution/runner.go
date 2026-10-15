@@ -150,6 +150,20 @@ func (r *Runner) Execute(ctx context.Context, lease *engine.TaskLease) (engine.T
 	// is the last host-controlled point before handler.Execute. Nil for every
 	// task that is not part of a collected map batch, which is most of them.
 	ctx = types.ContextWithArtifactUseCollector(ctx, lease.ArtifactUses)
+	// Bind the input's namespace UNCONDITIONALLY. It used to be set only
+	// inside the credential-resolver branch below, on the reading that a
+	// namespace is only needed to scope credential lookups. It is not:
+	// exprx.BuildExprEnv resolves $supplies and the script handler keys the
+	// artifact-code cache through Input.Namespace() too, and neither has
+	// anything to do with credentials. An embedded engine (local backend)
+	// installs no credential resolver, so under the old shape its inputs
+	// stayed namespace-less and every $supplies read resolved against
+	// Default — invisible in a Default-namespace deployment, and a hard
+	// failure in a dedicated one. FromContext keeps the previous default
+	// semantics for a ctx with no namespace.
+	if lease.Input != nil {
+		lease.Input.SetNamespace(namespace.FromContext(ctx))
+	}
 	// Apply the credential resolver to the input the handler sees. This covers
 	// both the non-suspending Execute path and the suspending path
 	// (OnResume/PrepareSuspend). The resolver is a pure, idempotent closure;
@@ -157,7 +171,6 @@ func (r *Runner) Execute(ctx context.Context, lease *engine.TaskLease) (engine.T
 	// test wrappers do and is safe because the same resolver applies to every
 	// call. cloneInputWithData preserves it via the shallow struct copy.
 	if r.credentialResolver != nil && lease.Input != nil {
-		lease.Input.SetNamespace(namespace.FromContext(ctx))
 		lease.Input.SetCredentialResolver(r.credentialResolver)
 	}
 	if r.artifactCode != nil && lease.Input != nil {

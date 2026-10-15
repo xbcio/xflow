@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -210,6 +211,20 @@ func (e *Engine) ExecuteBatch(ctx context.Context, t *Task) error {
 	lease, childExecID, items, err := expansionBatchLease(t)
 	if err != nil {
 		return err
+	}
+	// Re-anchor the batch's namespace onto this ctx. It was already lost once:
+	// this task came off the local queue, whose worker starts from
+	// context.Background(), so the map node's own execution ctx — which did
+	// carry the namespace — is not an ancestor of this one. The parent lease
+	// carries it as data (stamped when the parent's lease was built); the
+	// engine's own namespace is the fallback for a parent that predates the
+	// field. The body runtime below reads the namespace back off this ctx to
+	// seed the inner engine, whose own queue will drop it again — this is the
+	// chain of custody, not a convenience.
+	if lease.Namespace != "" {
+		ctx = namespace.WithNamespace(ctx, lease.Namespace)
+	} else if e.namespace != "" {
+		ctx = namespace.WithNamespace(ctx, e.namespace)
 	}
 	batchIndex, err := batchIndexOf(t)
 	if err != nil {

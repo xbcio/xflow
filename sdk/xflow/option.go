@@ -6,6 +6,7 @@ import (
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
 )
@@ -27,6 +28,10 @@ type engineConfig struct {
 	logger      engine.Logger
 	waiter      backend.Waiter
 	concurrency int
+	// namespace is the deployment's namespace for a single-namespace embedded
+	// engine (see WithNamespace). Empty = unstamped, the multi-namespace
+	// default where the control plane namespaces each lease per claim.
+	namespace namespace.Namespace
 	nodes       []types.Handler
 	stopFns     []func()
 	// subgraphHooks observes the inner engine a map body item runs on. Kept
@@ -90,6 +95,24 @@ func WithConcurrency(n int) Option {
 // should be handed off to another goroutine or queue.
 func WithHooks(h engine.Hooks) Option {
 	return func(c *engineConfig) { c.hooks = h }
+}
+
+// WithNamespace declares the namespace this engine's executions belong to.
+//
+// For an embedded single-namespace deployment — the process reads its tenant
+// from configuration (xflow.namespace), never from a request — this is the
+// only channel that can put one on a lease: the local queue's worker rebuilds
+// ctx from context.Background(), so the submitting request's namespace is
+// gone by the time the engine builds the lease, and a local engine has no
+// claim record to read it from. Every lease this engine issues (and every
+// inner lease its batch-body executor re-stamps) then carries the namespace,
+// which is what scopes $supplies and the artifact-reference check on the
+// executing side.
+//
+// Leave unset in a multi-namespace deployment: there the control plane names
+// each lease per claim, and one engine-wide value would collapse them.
+func WithNamespace(ns namespace.Namespace) Option {
+	return func(c *engineConfig) { c.namespace = ns }
 }
 
 // WithSubgraphHooks sets the lifecycle hook receiver for the inner engine that

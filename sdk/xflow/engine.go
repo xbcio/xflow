@@ -105,6 +105,13 @@ func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error
 	if cfg.logger != nil {
 		engOpts = append(engOpts, engine.WithLogger(cfg.logger))
 	}
+	// Single-namespace embedded deployments: stamp the configured tenant onto
+	// every lease so it survives the local queue's context.Background()
+	// worker (see sdk WithNamespace). Unset in multi-namespace deployments,
+	// where the control plane names each lease per claim.
+	if cfg.namespace != "" {
+		engOpts = append(engOpts, engine.WithNamespace(cfg.namespace))
+	}
 	if cfg.executionMode == ExecutionModeTransient {
 		engOpts = append(engOpts, engine.WithSuspendDisabled(ErrTransientSuspendUnsupported))
 	}

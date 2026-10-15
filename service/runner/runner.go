@@ -594,6 +594,17 @@ func (r *Runner) executeAndReport(ctx context.Context, sessionID string, lease *
 	)
 	defer span.End()
 
+	// Thread the lease's authoritative namespace onto the execute context,
+	// mirroring execution/runner.go's injection for handler tasks: the group
+	// and batch runtimes below read it from here (subgraph re-encodes it as
+	// an engine option before entering the inner engine, whose queue drops
+	// ctx), and the handler path re-applies the same value downstream.
+	// Without it, a group or batch executing in a dedicated namespace leaves
+	// its members' $supplies and artifact lookups resolving against Default.
+	if lease.Namespace != "" {
+		execCtx = namespace.WithNamespace(execCtx, lease.Namespace)
+	}
+
 	// The renewal loop needs its own cancel handle over the execute context so
 	// a lost lease stops the handler. It is stopped unconditionally when the
 	// work returns, so a finished task's lease stops being extended and the
