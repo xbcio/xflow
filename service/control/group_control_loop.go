@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
@@ -273,6 +274,14 @@ func (c *Core) renewLease(ctx context.Context, req protocol.RenewLeaseRequest, i
 	}
 	if !found {
 		return protocol.RenewLeaseResponse{Renewed: false, Error: "lease not found"}, nil
+	}
+	// The runner-protocol request context carries no namespace, and the lease
+	// stores derive their keys from it, so a lease owned by another namespace
+	// would otherwise be renewed against the default namespace's key. The
+	// resolved lease's namespace is authoritative, as on the poll and report
+	// paths.
+	if resolved.Namespace != "" {
+		ctx = namespace.WithNamespace(ctx, resolved.Namespace)
 	}
 
 	// Refuse to renew past the execution deadline, and terminate the task on the
