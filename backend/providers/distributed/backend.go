@@ -455,8 +455,24 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 		o(cfg)
 	}
 
+	// The owned set fixes this process's deployment identity, and every derived
+	// surface (leader key, queue suffix, sweep scope) is computed from it here,
+	// before any connection is opened: an ambiguous or invalid set must fail
+	// construction without leaving a Redis client or asynq producer behind.
+	owned, err := namespace.NormalizeOwned(cfg.ownedNamespaces)
+	if err != nil {
+		return nil, fmt.Errorf("owned namespaces: %w", err)
+	}
+	deploymentSuffix, err := namespace.DeploymentSuffix(owned)
+	if err != nil {
+		return nil, fmt.Errorf("owned namespaces: %w", err)
+	}
+	leaderKey, err := LeaderLockKey(owned)
+	if err != nil {
+		return nil, fmt.Errorf("leader lock key: %w", err)
+	}
+
 	var rdb redis.UniversalClient
-	var err error
 	if cfg.redisConfig != nil {
 		if err := cfg.redisConfig.validate(); err != nil {
 			return nil, fmt.Errorf("redis config: %w", err)
@@ -487,10 +503,20 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 	// connection option (single/sentinel/cluster) and use NewWithConnOpt.
 	// Otherwise keep the legacy single-address string path via New(redisAddr).
 	transport := cfg.transport
+	if transport != nil && deploymentSuffix != "" && cfg.logger != nil {
+		// An injected transport owns its own queue names, so the per-deployment
+		// queue separation cannot be applied to it. Leader lock and sweep scope
+		// still follow the owned set; queues do not.
+		cfg.logger.Warn("distributed backend: injected transport bypasses per-deployment queue separation",
+			"deployment", deploymentSuffix)
+	}
 	if transport == nil {
 		var topts []asynqtransport.Option
 		if cfg.queueObserver != nil {
 			topts = append(topts, asynqtransport.WithObserver(cfg.queueObserver))
+		}
+		if deploymentSuffix != "" {
+			topts = append(topts, asynqtransport.WithQueueSuffix(deploymentSuffix))
 		}
 		if cfg.redisConfig != nil {
 			connOpt, err := cfg.redisConfig.AsAsynqConnOpt()
@@ -508,21 +534,8 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 
 	registry := execution.NewRegistry()
 
-	owned, err := namespace.NormalizeOwned(cfg.ownedNamespaces)
-	if err != nil {
-		return nil, fmt.Errorf("owned namespaces: %w", err)
-	}
-	// Reject ambiguous sets at construction: every derived surface below
-	// (leader key, queues, directory prefix) assumes one deployment identity.
-	if _, err := namespace.DeploymentSuffix(owned); err != nil {
-		return nil, fmt.Errorf("owned namespaces: %w", err)
-	}
 	state.ConfigureOwnedNamespaces(owned)
 
-	leaderKey, err := LeaderLockKey(owned)
-	if err != nil {
-		return nil, fmt.Errorf("leader lock key: %w", err)
-	}
 	leaderElector := NewRedisLeaderElector(rdb, leaderKey, defaultLeaderLeaseTTL)
 
 	return &Backend{
