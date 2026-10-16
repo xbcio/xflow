@@ -555,7 +555,7 @@ func TestCachedIssuedIdentityStoreSweepsExpiredEntries(t *testing.T) {
 	_, survivor := cached.entries[runnerIDForIndex(5)]
 	cached.mu.Unlock()
 	if survivor {
-		t.Fatalf("an expired entry survived the sweep; reclamation has to scale with the "+
+		t.Fatalf("an expired entry survived the sweep; reclamation has to scale with the " +
 			"expired set, not merely happen")
 	}
 }
@@ -600,7 +600,9 @@ type recordingCacheObserver struct {
 	counts  []int
 }
 
-func (o *recordingCacheObserver) OnIssuedIdentityCache(result string) { o.results = append(o.results, result) }
+func (o *recordingCacheObserver) OnIssuedIdentityCache(result string) {
+	o.results = append(o.results, result)
+}
 func (o *recordingCacheObserver) OnIssuedIdentityCacheEntries(count int) {
 	o.counts = append(o.counts, count)
 }
@@ -759,7 +761,7 @@ func TestCachedIssuedIdentityStoreSweepRespectsItsGates(t *testing.T) {
 	swept := !cached.lastSweep.IsZero()
 	cached.mu.Unlock()
 	if swept {
-		t.Fatalf("a sweep ran with only 11 entries in the map: walking the whole map on "+
+		t.Fatalf("a sweep ran with only 11 entries in the map: walking the whole map on " +
 			"every miss below the threshold would put an O(n) cost on the auth hot path")
 	}
 }

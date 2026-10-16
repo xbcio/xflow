@@ -32,8 +32,8 @@ type engineConfig struct {
 	// engine (see WithNamespace). Empty = unstamped, the multi-namespace
 	// default where the control plane namespaces each lease per claim.
 	namespace namespace.Namespace
-	nodes       []types.Handler
-	stopFns     []func()
+	nodes     []types.Handler
+	stopFns   []func()
 	// subgraphHooks observes the inner engine a map body item runs on. Kept
 	// apart from hooks so the two populations stay in separate series: a map
 	// over N items is N inner executions beneath one outer one.
