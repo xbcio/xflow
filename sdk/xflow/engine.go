@@ -81,6 +81,23 @@ type Engine struct {
 	resourcePool types.ResourcePool
 }
 
+// validateNamespaceConfig rejects a namespace that the key schema cannot
+// safely embed. It runs in the constructors, before any provider (and, for
+// NewCluster, its Redis client) is constructed, so a misconfigured namespace
+// fails without leaving resources nothing would close behind. The value ends
+// up in Redis keys, queue names and directory prefixes: one carrying the
+// schema's own delimiters would mint colliding keys silently, long after the
+// misconfiguration is out of sight.
+func validateNamespaceConfig(cfg *engineConfig) error {
+	if cfg.namespace == "" {
+		return nil
+	}
+	if err := namespace.Validate(cfg.namespace); err != nil {
+		return fmt.Errorf("invalid namespace: %w", err)
+	}
+	return nil
+}
+
 // newFromConfig assembles an Engine from a resolved engineConfig and a backend provider.
 func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error) {
 	if cfg.state == nil {
@@ -108,7 +125,9 @@ func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error
 	// Single-namespace embedded deployments: stamp the configured tenant onto
 	// every lease so it survives the local queue's context.Background()
 	// worker (see sdk WithNamespace). Unset in multi-namespace deployments,
-	// where the control plane names each lease per claim.
+	// where the control plane names each lease per claim. The value was
+	// validated by the constructor (validateNamespaceConfig) before any
+	// provider was built.
 	if cfg.namespace != "" {
 		engOpts = append(engOpts, engine.WithNamespace(cfg.namespace))
 	}

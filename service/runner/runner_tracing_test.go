@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -158,6 +159,69 @@ func spanNames(spans []sdktrace.ReadOnlySpan) []string {
 		out = append(out, s.Name())
 	}
 	return out
+}
+
+// TestExecuteSpanCarriesLeaseNamespace pins the ORDER of the namespace
+// injection relative to the span start: the OTel tracer reads
+// namespace.FromContext(ctx) when it starts the span, so the injection must
+// run BEFORE tracer.Start. In the pre-fix order it ran after, and every
+// xflow.task.execute span was stamped with the namespace the ctx happened to
+// carry — Default on a runner whose ctx never had one — while the work below
+// ran under the lease's namespace. The span graph then attributes a tenant's
+// task to the wrong (or no) tenant.
+//
+// Mutation: move the namespace injection in executeAndReport after the
+// tracer.Start call — the recorded attribute reads "default" and the
+// assertion fails.
+func TestExecuteSpanCarriesLeaseNamespace(t *testing.T) {
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSpanProcessor(rec),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	)
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+	tracer := tracing.NewOTelTracer(tp.Tracer("xflow-test"))
+
+	registry := execution.NewRegistry()
+	registry.RegisterGlobal("test.function", functionHandler{})
+
+	lease := &engine.TaskLease{
+		LeaseID:   engine.LeaseID("lease-ns-span"),
+		Namespace: "tenant-b",
+		Task:      engine.Task{ExecutionID: types.ExecutionID("exec-ns-span"), NodeName: "start"},
+		Input:     &types.Input{Data: map[string]any{"claim_id": "c-ns-span"}},
+		NodeType:  "test.function",
+	}
+	client := &fakeProtocolClient{cancel: func() {}}
+	r := New(client, registry, Config{
+		RunnerID:          "runner-ns-span",
+		HeartbeatInterval: time.Hour,
+		PollWait:          time.Millisecond,
+		Tracer:            tracer,
+	})
+
+	r.executeAndReport(context.Background(), "session-ns-span", lease, &atomic.Int32{}, newActiveLeases(), func(error) {})
+
+	var executeSpan sdktrace.ReadOnlySpan
+	for _, s := range rec.Ended() {
+		if s.Name() == "xflow.task.execute" {
+			executeSpan = s
+		}
+	}
+	if executeSpan == nil {
+		t.Fatalf("xflow.task.execute span not recorded; spans=%v", spanNames(rec.Ended()))
+	}
+	got := ""
+	for _, kv := range executeSpan.Attributes() {
+		if string(kv.Key) == "namespace" {
+			got = kv.Value.AsString()
+		}
+	}
+	if got != "tenant-b" {
+		t.Fatalf("execute span namespace attribute = %q, want tenant-b — the injection must precede tracer.Start, "+
+			"because the tracer reads the namespace off ctx at start time", got)
+	}
 }
 
 // TestRunnerReportPreservesSpanContextOnCancelledContext proves that when the

@@ -67,6 +67,9 @@ func NewCluster(clusterCfg ClusterConfig, opts ...Option) (*Engine, error) {
 	if err := validateExecutionModeConfig(cfg); err != nil {
 		return nil, err
 	}
+	if err := validateNamespaceConfig(cfg); err != nil {
+		return nil, err
+	}
 	if clusterCfg.RedisAddr == "" {
 		return nil, errors.New("xflow.NewCluster: RedisAddr is required")
 	}

@@ -585,7 +585,21 @@ func (r *Runner) executeAndReport(ctx context.Context, sessionID string, lease *
 	// Extract the remote parent from the lease carrier (injected by the
 	// control plane at dispatch). Creates an xflow.task.execute span as a
 	// child of the dispatch span — same trace, remote parent.
+	//
+	// Thread the lease's authoritative namespace onto the execute context
+	// BEFORE the span starts: the tracer reads the span's namespace attribute
+	// off the ctx, so injecting afterwards would stamp the span with the
+	// parent's (or no) namespace while the work below runs under the lease's.
+	// Mirrors execution/runner.go's injection for handler tasks: the group and
+	// batch runtimes below read it from here (subgraph re-encodes it as an
+	// engine option before entering the inner engine, whose queue drops ctx),
+	// and the handler path re-applies the same value downstream. Without it, a
+	// group or batch executing in a dedicated namespace leaves its members'
+	// $supplies and artifact lookups resolving against Default.
 	execCtx := tracing.ExtractCarrier(ctx, lease.TraceCarrier)
+	if lease.Namespace != "" {
+		execCtx = namespace.WithNamespace(execCtx, lease.Namespace)
+	}
 	execCtx, span := r.tracer.Start(execCtx, "xflow.task.execute",
 		"execution_id", string(lease.Task.ExecutionID),
 		"node_name", lease.Task.NodeName,
@@ -593,17 +607,6 @@ func (r *Runner) executeAndReport(ctx context.Context, sessionID string, lease *
 		"attempt", lease.Attempt,
 	)
 	defer span.End()
-
-	// Thread the lease's authoritative namespace onto the execute context,
-	// mirroring execution/runner.go's injection for handler tasks: the group
-	// and batch runtimes below read it from here (subgraph re-encodes it as
-	// an engine option before entering the inner engine, whose queue drops
-	// ctx), and the handler path re-applies the same value downstream.
-	// Without it, a group or batch executing in a dedicated namespace leaves
-	// its members' $supplies and artifact lookups resolving against Default.
-	if lease.Namespace != "" {
-		execCtx = namespace.WithNamespace(execCtx, lease.Namespace)
-	}
 
 	// The renewal loop needs its own cancel handle over the execute context so
 	// a lost lease stops the handler. It is stopped unconditionally when the

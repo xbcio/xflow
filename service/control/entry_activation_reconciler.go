@@ -1751,7 +1751,7 @@ func (r *EntryActivationReconciler) projectPackageForGroup(ctx context.Context, 
 	if err != nil {
 		if r.cfg.Logger != nil {
 			r.cfg.Logger.Warn("entry activation: resolve workflow for group package projection failed",
-				"workflow_id", act.WorkflowID, "entry_unit_id", act.EntryUnitID, "err", err)
+				"namespace", act.Namespace, "workflow_id", act.WorkflowID, "entry_unit_id", act.EntryUnitID, "err", err)
 		}
 		return nil
 	}
@@ -1772,7 +1772,7 @@ func (r *EntryActivationReconciler) projectPackageForGroup(ctx context.Context, 
 	if err != nil {
 		if r.cfg.Logger != nil {
 			r.cfg.Logger.Warn("entry activation: project group package failed",
-				"workflow_id", act.WorkflowID, "entry_unit_id", act.EntryUnitID, "err", err)
+				"namespace", act.Namespace, "workflow_id", act.WorkflowID, "entry_unit_id", act.EntryUnitID, "err", err)
 		}
 		return nil
 	}
@@ -1782,7 +1782,7 @@ func (r *EntryActivationReconciler) projectPackageForGroup(ctx context.Context, 
 		// activation here instead, with both values recorded.
 		if r.cfg.Logger != nil {
 			r.cfg.Logger.Error("entry activation: group package hash drift; refusing to ship package",
-				"workflow_id", act.WorkflowID, "entry_unit_id", act.EntryUnitID,
+				"namespace", act.Namespace, "workflow_id", act.WorkflowID, "entry_unit_id", act.EntryUnitID,
 				"stored_hash", act.PackageHash, "projected_hash", hash)
 		}
 		return nil

@@ -161,16 +161,17 @@ func TestNodeReadsSupplyInTheEnginesNamespace(t *testing.T) {
 // the engine itself (no remote batch execution), and the body member's
 // $supplies expression is evaluated by the INNER execution's boundary.
 //
-// This path crosses two more context resets than the direct one, and each
-// has its own hop of the fix:
-//   - ExecuteBatch re-anchors lease.Namespace (stamped by WithNamespace onto
-//     the parent lease) onto the batch ctx — the task came off the local
-//     queue, whose worker starts from context.Background();
+// This path crosses more context resets than the direct one, and each has
+// its own hop of the fix:
+//   - runBatchBody re-anchors the BODY ctx to lease.Namespace (stamped by
+//     WithNamespace onto the parent lease and carried onto the batch
+//     payload) — the task came off the local queue, whose worker starts
+//     from context.Background();
 //   - subgraph.Executor re-encodes that ctx namespace as engine.WithNamespace
 //     before building the inner engine, whose queue will drop ctx again.
 //
 // Mutation: drop any of the three (WithNamespace at construction, the
-// ExecuteBatch re-anchor, the subgraph ctx-to-option conversion) — the body
+// runBatchBody re-anchor, the subgraph ctx-to-option conversion) — the body
 // member resolves against Default, reads 1, and the value assertion fails.
 func TestMapBodyMemberReadsSupplyInTheEnginesNamespace(t *testing.T) {
 	seedNamespaceSupplies(t)
