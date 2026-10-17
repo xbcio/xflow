@@ -336,12 +336,17 @@ func (e *Engine) startSubWorkflowChild(ctx context.Context, task *Task, g *graph
 		return subWorkflowChild{}, fmt.Errorf("node %q: child execution depth %d exceeds the limit %d: %w (%w)",
 			task.NodeName, child.Depth, e.maxSubWorkflowDepth, graph.ErrSubWorkflowDepth, types.ErrPermanent)
 	}
-	// The namespace is filled in here rather than recorded at compile time: a
-	// WorkflowDef carries none, and a resolver is bound to one namespace by its
-	// adapter. This call is the adapter's one chance to reject a mismatch, which
-	// is what makes cross-namespace references unreachable by construction.
+	// Resolve the binding against the namespace the PARENT was registered under,
+	// carried on its snapshot. The ctx namespace is not usable here: this task
+	// came off a queue whose worker starts from context.Background(), so ctx
+	// only names the deployment. A snapshot written before the field existed
+	// carries no namespace; fall back to the ctx behavior it was created with.
+	refNamespace := snap.Namespace
+	if refNamespace == "" {
+		refNamespace = string(namespace.FromContext(ctx))
+	}
 	target, err := e.subWorkflowResolver.ResolveSubWorkflow(ctx, graph.SubWorkflowRef{
-		Namespace:      string(namespace.FromContext(ctx)),
+		Namespace:      refNamespace,
 		Name:           binding.Name,
 		Version:        binding.Version,
 		DefinitionHash: binding.DefinitionHash,
@@ -398,6 +403,9 @@ func (e *Engine) startSubWorkflowChild(ctx context.Context, task *Task, g *graph
 		ParentID:   task.ExecutionID,
 		ParentNode: task.NodeName,
 		Depth:      child.Depth,
+		// The child is registered under the same namespace as its parent: the
+		// binding that created it was resolved in that namespace.
+		Namespace: snap.Namespace,
 		// Trace identity is inherited so the child's spans land on the parent's
 		// trace. Runtime and scope deliberately are NOT: $vars belongs to the
 		// child's own definition, and its two sources would be indistinguishable

@@ -516,6 +516,13 @@ func attachSubmissionMetadata(ctx context.Context, snap *ExecutionSnapshot) {
 		snap.Scope = cloneMap(scope)
 	}
 	snap.TestRun = TestRunFromContext(ctx)
+	// Carry the REGISTRATION namespace with the execution. Dispatch runs off a
+	// queue whose worker starts from context.Background(), so its ctx namespace
+	// is the deployment namespace, not the one the definition was registered
+	// under; the snapshot is the only carrier that survives the hop.
+	if def, ok := WorkflowDefFromContext(ctx); ok && def.Namespace != "" {
+		snap.Namespace = def.Namespace
+	}
 }
 
 // attachTransientHint enriches the submission context with the per-workflow
