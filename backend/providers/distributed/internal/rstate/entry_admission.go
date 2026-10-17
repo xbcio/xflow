@@ -355,7 +355,11 @@ func (s *Store) seedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 	// sub-workflows, and dispatch resolves them by this value. It is the
 	// admission's own namespace — the request's when supplied, the authenticated
 	// ctx otherwise — never the queue ctx dispatch will later run under.
-	if err := s.rdb.Set(ctx, execKey(t, execID, "namespace"), string(t), ttl).Err(); err != nil {
+	//
+	// SetNX, not Set: a duplicate admission finds the execution already there,
+	// and rewriting this key would reset its TTL past the retention the original
+	// creation granted. The value it would write is the same one.
+	if err := s.rdb.SetNX(ctx, execKey(t, execID, "namespace"), string(t), ttl).Err(); err != nil {
 		return engine.SeedExecutionFromEntryResponse{}, fmt.Errorf("persist namespace for %q: %w", execID, err)
 	}
 
