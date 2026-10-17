@@ -105,7 +105,13 @@ func DeterministicExecutionID(key AdmissionKey) types.ExecutionID {
 // entry-unit (single node or group node) runner to the control plane. It seeds
 // an execution + commits the entry-unit result in a single fenced transition.
 type SeedExecutionFromEntryRequest struct {
-	AdmissionKey    AdmissionKey
+	AdmissionKey AdmissionKey
+	// Namespace is the ADMISSION namespace: the request's when supplied, the
+	// authenticated ctx's otherwise. It is recorded on the execution snapshot as
+	// the registration namespace sub-workflow dispatch resolves bindings in. It
+	// is not read from a WorkflowDef — the entry-seed path has no definition in
+	// hand — and for an HTTP-registered workflow the value is the same one the
+	// definition was registered under.
 	Namespace       namespace.Namespace
 	WorkflowID      types.WorkflowID
 	WorkflowVersion string
