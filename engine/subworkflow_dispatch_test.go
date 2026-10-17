@@ -865,3 +865,49 @@ func TestSubWorkflowChildOccupiesTheTargetsConcurrencySlot(t *testing.T) {
 		t.Fatal("a refused child start parked the node")
 	}
 }
+
+// recordingSubWorkflowResolver answers like the stub but records the
+// namespace the dispatch asked the binding for.
+type recordingSubWorkflowResolver struct {
+	target    graph.SubWorkflowTarget
+	namespace string
+}
+
+func (r *recordingSubWorkflowResolver) ResolveSubWorkflow(_ context.Context, ref graph.SubWorkflowRef) (graph.SubWorkflowTarget, error) {
+	r.namespace = ref.Namespace
+	return r.target, nil
+}
+
+// TestSubWorkflowDispatchFallsBackToTheContextNamespace pins the compatibility
+// branch for snapshots written before the registration namespace was persisted:
+// an empty snapshot namespace must leave the dispatch resolving in the ctx
+// namespace, the behavior such an execution was created with. Dropping the
+// fallback would hand a real registry an empty namespace, which is not the
+// deployment namespace it ran under and would miss.
+func TestSubWorkflowDispatchFallsBackToTheContextNamespace(t *testing.T) {
+	resolver := &recordingSubWorkflowResolver{target: subWorkflowStubResolver(t).target}
+	// The rig seeds its parent with no Namespace — the pre-change snapshot shape.
+	rig := newSubWorkflowRig(t, resolvedSubWorkflowParent(t), nil, resolver)
+
+	nsCtx := namespace.WithNamespace(context.Background(), "tenant-x")
+	handled, err := rig.eng.handleSystemTask(nsCtx, rig.task, true)
+	if err != nil {
+		t.Fatalf("handleSystemTask: %v", err)
+	}
+	if !handled {
+		t.Fatal("the engine did not claim its own sub-workflow task")
+	}
+
+	if want := string(namespace.FromContext(nsCtx)); resolver.namespace != want {
+		t.Fatalf("resolved namespace = %q, want the ctx namespace %q", resolver.namespace, want)
+	}
+	// The fallback is a compatibility path, not a degraded one: the child still
+	// starts and the parent still parks.
+	child := rig.child(t, subWorkflowChildID(rig.parentID, "sub", 1, 1))
+	if child.Status != types.ExecutionStatusRunning {
+		t.Fatalf("child status = %s, want running", child.Status)
+	}
+	if node := rig.node(t); node.Status != types.NodeStatusWaiting {
+		t.Fatalf("node status = %s, want waiting", node.Status)
+	}
+}
