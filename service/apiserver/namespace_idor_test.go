@@ -405,3 +405,53 @@ func TestDeadLetterReplayNotFoundIsAFailureEnvelope(t *testing.T) {
 		t.Fatalf("code = %v, want dead_letter_not_found, body=%s", env["code"], raw)
 	}
 }
+
+// TestNamespaceORInlineWorkflowDefinitionNamespaceIgnored pins the registration
+// namespace of an INLINE definition to the principal. The body's
+// workflow.namespace used to be written onto the execution snapshot verbatim,
+// and the asynchronous sub-workflow dispatch resolves bindings by that value —
+// so a namespaceA principal could steer its executions' sub-workflows into
+// namespaceB's registry (the definition-hash pin was the only thing left in the
+// way). The sibling request-body test forges a top-level field the request
+// struct does not decode; this one forges the field inside the WorkflowDef,
+// which it does.
+func TestNamespaceORInlineWorkflowDefinitionNamespaceIgnored(t *testing.T) {
+	f := newNamespaceORFixture(t)
+	raw := map[string]any{
+		"workflow": map[string]any{
+			"name":      "idor-inline-wf",
+			"namespace": "namespaceB",
+			"nodes":     []map[string]any{{"name": "start", "type": "test.echo"}},
+		},
+	}
+	var buf bytes.Buffer
+	_ = json.NewEncoder(&buf).Encode(raw)
+	req, _ := http.NewRequest(http.MethodPost, f.httpSrv.URL+"/v1/workflows/execute", &buf)
+	req.Header.Set("Authorization", "Bearer tok-a")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		rawBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("submit status = %d, want 200 (the forged workflow namespace must not fail the submission), body=%s", resp.StatusCode, rawBody)
+	}
+	var out executeWorkflowResponse
+	decodeEnvelopeData(t, resp, &out)
+	if out.ExecutionID == "" {
+		t.Fatal("submit returned no execution id")
+	}
+
+	// The snapshot's registration namespace is what dispatch resolves
+	// sub-workflow bindings in; it must be the principal's, not the body's.
+	ctxA := namespace.WithNamespace(context.Background(), namespace.Namespace("namespaceA"))
+	snap, err := f.backend.State().GetExecution(ctxA, out.ExecutionID)
+	if err != nil || snap == nil {
+		t.Fatalf("read execution %q: snap=%v err=%v", out.ExecutionID, snap, err)
+	}
+	if snap.Namespace != "namespaceA" {
+		t.Fatalf("snapshot registration namespace = %q, want the principal's namespaceA (the body is not authoritative)", snap.Namespace)
+	}
+}
