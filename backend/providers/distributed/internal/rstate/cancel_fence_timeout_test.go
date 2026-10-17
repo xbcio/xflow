@@ -177,3 +177,19 @@ func TestTimeoutZSetInTransientKeys(t *testing.T) {
 		t.Fatalf("transientExecutionKeys does not include timeoutZSetKey %q", want)
 	}
 }
+
+// TestNamespaceKeyInTransientKeys: completion-time TTL shortening enumerates
+// every structural key an execution owns, and the registration namespace key is
+// one of them. A pass that missed it would leave that key holding the full
+// active retention on an execution that declared itself ephemeral.
+func TestNamespaceKeyInTransientKeys(t *testing.T) {
+	id := types.ExecutionID("namespace-transient-1")
+	keys := transientExecutionKeys(namespace.Default, id, nil)
+	want := execKey(namespace.Default, id, "namespace")
+	for _, k := range keys {
+		if k == want {
+			return
+		}
+	}
+	t.Fatalf("transientExecutionKeys does not include the registration namespace key %q", want)
+}

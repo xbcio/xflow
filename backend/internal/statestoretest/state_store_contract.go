@@ -41,6 +41,7 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 		ParentNode: "collect",
 		Depth:      3,
 		RerunFrom:  "start",
+		Namespace:  "tenant-x",
 	}); err != nil {
 		t.Fatalf("CreateExecution() error = %v", err)
 	}
@@ -105,6 +106,35 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 	}
 	if snap.Depth != 3 {
 		t.Fatalf("Depth = %d, want 3", snap.Depth)
+	}
+	// The registration namespace is what dispatch resolves a sub-workflow
+	// binding against. Dispatch runs off a queue whose worker starts from
+	// context.Background(), so the ctx namespace there names the deployment, not
+	// the registration; a backend that drops this field sends every
+	// non-default-namespace sub-workflow back to the ctx fallback and the
+	// lookup misses.
+	if snap.Namespace != "tenant-x" {
+		t.Fatalf("Namespace = %q, want %q", snap.Namespace, "tenant-x")
+	}
+
+	// An execution created without a registration namespace — a pre-change row,
+	// or an embedded submission with no definition in context — must read back
+	// as empty rather than erroring on the absent key: dispatch treats empty as
+	// "fall back to the ctx namespace".
+	legacyID := types.ExecutionID("exec-contract-no-namespace")
+	if err := state.CreateExecution(ctx, &engine.ExecutionSnapshot{
+		ID:     legacyID,
+		Graph:  g,
+		Status: types.ExecutionStatusRunning,
+	}); err != nil {
+		t.Fatalf("CreateExecution(no namespace) error = %v", err)
+	}
+	legacy, err := state.GetExecution(ctx, legacyID)
+	if err != nil {
+		t.Fatalf("GetExecution(no namespace) error = %v", err)
+	}
+	if legacy.Namespace != "" {
+		t.Fatalf("Namespace = %q on an execution created without one, want empty", legacy.Namespace)
 	}
 
 	loaded, err := state.LoadGraph(ctx, id)
