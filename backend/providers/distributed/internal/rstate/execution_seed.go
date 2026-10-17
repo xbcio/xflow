@@ -355,12 +355,18 @@ func (s *Store) SeedExecution(ctx context.Context, req engine.SeedExecutionReque
 	// the retention record above and for the same reason: it is immutable
 	// metadata about the execution, and a projection that reads the execution
 	// must never find it without the origin it was created from. parent_node and
-	// depth are the sub-workflow half of the same link.
+	// depth are the sub-workflow half of the same link. The registration
+	// namespace is immutable metadata too, and the seed path is the only one a
+	// rerun takes — a rerun's dispatch resolves its sub-workflows from it.
 	if req.Execution.ParentID != "" || req.Execution.RerunFrom != "" ||
-		req.Execution.ParentNode != "" || req.Execution.Depth > 0 {
+		req.Execution.ParentNode != "" || req.Execution.Depth > 0 ||
+		req.Execution.Namespace != "" {
 		linkPipe := s.rdb.TxPipeline()
 		if req.Execution.ParentID != "" {
 			linkPipe.Set(ctx, execKey(t, execID, "parent"), string(req.Execution.ParentID), ttl)
+		}
+		if req.Execution.Namespace != "" {
+			linkPipe.Set(ctx, execKey(t, execID, "namespace"), req.Execution.Namespace, ttl)
 		}
 		if req.Execution.RerunFrom != "" {
 			linkPipe.Set(ctx, execKey(t, execID, "rerun_from"), req.Execution.RerunFrom, ttl)

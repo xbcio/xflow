@@ -430,6 +430,7 @@ func transientExecutionKeys(t namespace.Namespace, id types.ExecutionID, g *grap
 	keys := []string{
 		execKey(t, id, "status"),
 		execKey(t, id, "graph"),
+		execKey(t, id, "namespace"),
 		execKey(t, id, "error"),
 		execKey(t, id, "params"),
 		execKey(t, id, "runtime"),

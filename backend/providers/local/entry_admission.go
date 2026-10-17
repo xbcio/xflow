@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -43,11 +44,18 @@ func (s *memoryState) SeedExecutionFromEntryWithConcurrency(ctx context.Context,
 // admission is nil when the seeded graph declares no concurrency limit, which
 // is the plain admission: no slot is consulted and the execution starts
 // running.
-func (s *memoryState) seedExecutionFromEntry(_ context.Context, req engine.SeedExecutionFromEntryRequest, admission *engine.ConcurrencyAdmission) (engine.SeedExecutionFromEntryResponse, error) {
+func (s *memoryState) seedExecutionFromEntry(ctx context.Context, req engine.SeedExecutionFromEntryRequest, admission *engine.ConcurrencyAdmission) (engine.SeedExecutionFromEntryResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	execID := engine.DeterministicExecutionID(req.AdmissionKey)
+	// The admission's namespace is the registration namespace dispatch resolves
+	// sub-workflows with: the request's when supplied, the ctx otherwise — never
+	// the queue ctx dispatch will later run under.
+	registrationNamespace := req.Namespace
+	if registrationNamespace == "" {
+		registrationNamespace = namespace.FromContext(ctx)
+	}
 
 	// Step 1: Check admission key occupancy. This runs before the slot decision
 	// because it must be the first thing a retry meets: a redelivered batch
@@ -99,10 +107,11 @@ func (s *memoryState) seedExecutionFromEntry(_ context.Context, req engine.SeedE
 		status = types.ExecutionStatusQueued
 	}
 	snap := &engine.ExecutionSnapshot{
-		ID:     execID,
-		Graph:  req.Graph,
-		Status: status,
-		Params: req.Params,
+		ID:        execID,
+		Graph:     req.Graph,
+		Status:    status,
+		Params:    req.Params,
+		Namespace: string(registrationNamespace),
 	}
 	s.createExecutionLocked(snap)
 

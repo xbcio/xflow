@@ -349,6 +349,16 @@ func (s *Store) seedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 		s.ttlMu.Unlock()
 	}
 
+	// The registration namespace is immutable metadata about the execution and is
+	// written before the Lua for the same reason the retention record below is:
+	// from the instant the execution exists another replica can dispatch its
+	// sub-workflows, and dispatch resolves them by this value. It is the
+	// admission's own namespace — the request's when supplied, the authenticated
+	// ctx otherwise — never the queue ctx dispatch will later run under.
+	if err := s.rdb.Set(ctx, execKey(t, execID, "namespace"), string(t), ttl).Err(); err != nil {
+		return engine.SeedExecutionFromEntryResponse{}, fmt.Errorf("persist namespace for %q: %w", execID, err)
+	}
+
 	// Persist the retention record for the same reason createExecution does:
 	// GetExecutionRetention treats its absence as "window unknown", so a
 	// creation path that skips the record would degrade every later no-evidence

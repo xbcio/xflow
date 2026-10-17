@@ -185,6 +185,12 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 	keys := []string{execKey(t, e.ID, "status"), execKey(t, e.ID, "graph")}
 	pipe.Set(ctx, execKey(t, e.ID, "status"), string(e.Status), ttl)
 	pipe.Set(ctx, execKey(t, e.ID, "graph"), string(graphJSON), ttl)
+	// The registration namespace rides with the execution's immutable metadata.
+	// Dispatch reads it back because the queue worker's ctx starts from
+	// context.Background() and names the deployment, not the registration.
+	if e.Namespace != "" {
+		pipe.Set(ctx, execKey(t, e.ID, "namespace"), e.Namespace, ttl)
+	}
 	if e.Params != nil {
 		paramsJSON, err := json.Marshal(e.Params)
 		if err != nil {
@@ -357,6 +363,7 @@ func (s *Store) cleanupCreatedExecution(ctx context.Context, e *engine.Execution
 	pipe.Del(ctx,
 		execKey(t, e.ID, "status"),
 		execKey(t, e.ID, "graph"),
+		execKey(t, e.ID, "namespace"),
 		execKey(t, e.ID, "error"),
 		execKey(t, e.ID, "params"),
 		execKey(t, e.ID, "runtime"),
@@ -984,6 +991,7 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 	rerunFromCmd := pipe.Get(ctx, execKey(t, id, "rerun_from"))
 	parentNodeCmd := pipe.Get(ctx, execKey(t, id, "parent_node"))
 	depthCmd := pipe.Get(ctx, execKey(t, id, "depth"))
+	namespaceCmd := pipe.Get(ctx, execKey(t, id, "namespace"))
 	// Exec surfaces the first command error, and redis.Nil is the expected answer
 	// for most of these keys. The per-command results below are authoritative.
 	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
@@ -1093,6 +1101,14 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 	} else if err != redis.Nil {
 		return nil, fmt.Errorf("get execution depth %q: %w", id, err)
 	}
+	// The registration namespace; absent on executions created before it was
+	// persisted, which readers must treat as "fall back to the ctx namespace".
+	var namespaceVal string
+	if raw, err := namespaceCmd.Result(); err == nil {
+		namespaceVal = raw
+	} else if err != redis.Nil {
+		return nil, fmt.Errorf("get execution namespace %q: %w", id, err)
+	}
 	return &engine.ExecutionSnapshot{
 		ID:           id,
 		Graph:        g,
@@ -1109,5 +1125,6 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 		ParentNode:   parentNode,
 		Depth:        depth,
 		RerunFrom:    rerunFrom,
+		Namespace:    namespaceVal,
 	}, nil
 }
