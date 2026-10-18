@@ -36,6 +36,23 @@ type Consumer interface {
 	Close() error
 }
 
+// redisSubscription is the subscription handle Activate returns: the Close
+// surface every trigger provides, plus the optional health surface declared by
+// types.SubscriptionHealth. done closes when the reader loop exits for any
+// reason (Close, parent cancellation, consumer stream end, or the renewable
+// lock being lost), which lets the runner's activation tracker stop reporting
+// an activation whose subscription died on its own.
+type redisSubscription struct {
+	closeFn types.CloseFunc
+	done    <-chan struct{}
+}
+
+func (s *redisSubscription) Close(ctx context.Context) error { return s.closeFn(ctx) }
+
+func (s *redisSubscription) Done() <-chan struct{} { return s.done }
+
+var _ types.SubscriptionHealth = (*redisSubscription)(nil)
+
 // Message is one Redis Stream entry or Pub/Sub delivery.
 type Message struct {
 	ID      string
@@ -381,16 +398,19 @@ func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (ty
 			}
 		}()
 	}
-	return types.CloseFunc(func(context.Context) error {
-		err := stop(context.Background())
-		// Wait for in-flight emit goroutines to finish so shutdown does not
-		// drop events still being processed. done is closed by the main loop
-		// once it returns from runCtx.Done() (cancelled by stop above), but
-		// emitWG.Wait() is the real barrier for the worker goroutines.
-		emitWG.Wait()
-		<-done
-		return err
-	}), nil
+	return &redisSubscription{
+		closeFn: types.CloseFunc(func(context.Context) error {
+			err := stop(context.Background())
+			// Wait for in-flight emit goroutines to finish so shutdown does not
+			// drop events still being processed. done is closed by the main loop
+			// once it returns from runCtx.Done() (cancelled by stop above), but
+			// emitWG.Wait() is the real barrier for the worker goroutines.
+			emitWG.Wait()
+			<-done
+			return err
+		}),
+		done: done,
+	}, nil
 }
 
 // admitRetry is the retry policy one message's admission uses. It is a variable

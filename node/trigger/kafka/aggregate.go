@@ -267,8 +267,13 @@ func activateAggregate(ctx context.Context, in *types.TriggerActivateInput, cfg 
 	rt.valueJSON = resolveValueJSON(cfg, in, rt.entrySeed)
 	done := make(chan struct{})
 	go func() {
-		defer close(done)
+		// Registered in this order so close(done) runs FIRST: Done is the
+		// "no longer consuming" signal the activation tracker acts on, and it
+		// must not wait behind teardown I/O (dead-letter writes, writer close)
+		// that rt.close performs. The reverse order lets a stuck teardown
+		// suppress the very health signal this exists to deliver.
 		defer rt.close(context.Background())
+		defer close(done)
 		for {
 			select {
 			case <-runCtx.Done():
@@ -283,19 +288,22 @@ func activateAggregate(ctx context.Context, in *types.TriggerActivateInput, cfg 
 			}
 		}
 	}()
-	return types.CloseFunc(func(closeCtx context.Context) error {
-		// Cancel first so any submit blocked on a full aggregator channel wakes.
-		cancel()
-		err := consumer.Close()
-		waitCtx, waitCancel := context.WithTimeout(closeCtx, aggregateCloseDrainTimeout)
-		defer waitCancel()
-		select {
-		case <-done:
-		case <-waitCtx.Done():
-		}
-		rt.close(waitCtx)
-		return err
-	})
+	return &consumerSubscription{
+		closeFn: types.CloseFunc(func(closeCtx context.Context) error {
+			// Cancel first so any submit blocked on a full aggregator channel wakes.
+			cancel()
+			err := consumer.Close()
+			waitCtx, waitCancel := context.WithTimeout(closeCtx, aggregateCloseDrainTimeout)
+			defer waitCancel()
+			select {
+			case <-done:
+			case <-waitCtx.Done():
+			}
+			rt.close(waitCtx)
+			return err
+		}),
+		done: done,
+	}
 }
 
 // submit hands a message to its partition coordinator, retrying against a

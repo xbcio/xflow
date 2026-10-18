@@ -32,6 +32,24 @@ type Consumer interface {
 	Close() error
 }
 
+// consumerSubscription is the subscription handle both Kafka activation shapes
+// return: the Close surface every trigger provides, plus the optional health
+// surface declared by types.SubscriptionHealth. done closes when the reader
+// goroutine exits for any reason (Close, parent cancellation, or the consumer's
+// message stream closing), which is what lets the runner's activation tracker
+// notice a subscription that died on its own instead of continuing to report it
+// as hosted.
+type consumerSubscription struct {
+	closeFn types.CloseFunc
+	done    <-chan struct{}
+}
+
+func (s *consumerSubscription) Close(ctx context.Context) error { return s.closeFn(ctx) }
+
+func (s *consumerSubscription) Done() <-chan struct{} { return s.done }
+
+var _ types.SubscriptionHealth = (*consumerSubscription)(nil)
+
 type messageCommitter interface {
 	CommitMessages(context.Context, ...Message) error
 }
@@ -474,8 +492,11 @@ func activatePerMessage(ctx context.Context, in *types.TriggerActivateInput, cfg
 	rt.valueJSON = resolveValueJSON(cfg, in, rt.entrySeed)
 	done := make(chan struct{})
 	go func() {
-		defer close(done)
+		// Registered in this order so close(done) runs FIRST — see the same
+		// ordering note in activateAggregate: Done must not wait behind
+		// teardown I/O.
 		defer rt.close(context.Background())
+		defer close(done)
 		for {
 			select {
 			case <-runCtx.Done():
@@ -490,18 +511,21 @@ func activatePerMessage(ctx context.Context, in *types.TriggerActivateInput, cfg
 			}
 		}
 	}()
-	return types.CloseFunc(func(closeCtx context.Context) error {
-		// Cancel first so any submit blocked on a full worker/aggregator channel
-		// wakes immediately rather than waiting for consumer.Close to drain it.
-		cancel()
-		err := consumer.Close()
-		select {
-		case <-done:
-		case <-time.After(time.Second):
-		}
-		rt.close(closeCtx)
-		return err
-	})
+	return &consumerSubscription{
+		closeFn: types.CloseFunc(func(closeCtx context.Context) error {
+			// Cancel first so any submit blocked on a full worker/aggregator channel
+			// wakes immediately rather than waiting for consumer.Close to drain it.
+			cancel()
+			err := consumer.Close()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+			}
+			rt.close(closeCtx)
+			return err
+		}),
+		done: done,
+	}
 }
 
 // perMessageRuntime routes each message to a per-partition worker that
