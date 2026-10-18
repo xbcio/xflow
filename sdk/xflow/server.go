@@ -1094,6 +1094,36 @@ func (s *Server) ReplaceWorkflow(ctx context.Context, wf *WorkflowBuilder) (type
 	return res.ID, err
 }
 
+// RemoveWorkflow deregisters the workflow addressed by id — the embedded
+// counterpart of DELETE /v1/workflows/{id}.
+//
+// The namespace comes from ctx exactly as on ListWorkflowVersions. Not-found is
+// backend.ErrWorkflowNotFound, which callers that treat "already gone" as
+// success should check with errors.Is. The desired entry activations are
+// cleared before the registry record is removed (see APIServer.RemoveWorkflow),
+// so a partially failed removal is retryable and never leaves a Desired
+// activation behind that the reconciler would keep delivering.
+func (s *Server) RemoveWorkflow(ctx context.Context, id types.WorkflowID) error {
+	if id == "" {
+		return backend.ErrWorkflowNotFound
+	}
+	return s.api.RemoveWorkflow(ctx, namespace.FromContext(ctx), id)
+}
+
+// RemoveWorkflowByName is RemoveWorkflow for a host that knows the identity it
+// registered under — the (name, version) pair it derives from its own
+// configuration — but not the server-issued id. version must be the value that
+// was registered; a builder that never calls Version registers under "v1".
+//
+// Resolution is scoped to ctx's namespace, so a workflow carrying the same
+// name in another namespace is reported as backend.ErrWorkflowNotFound.
+func (s *Server) RemoveWorkflowByName(ctx context.Context, name, version string) error {
+	if name == "" || version == "" {
+		return backend.ErrWorkflowNotFound
+	}
+	return s.api.RemoveWorkflowByName(ctx, namespace.FromContext(ctx), name, version)
+}
+
 // ReplaceWorkflowWithMetadata is ReplaceWorkflow, additionally carrying an
 // explicit editor_metadata sibling through to the stored record instead of
 // clearing it. A nil metadata behaves exactly like ReplaceWorkflow (clears

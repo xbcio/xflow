@@ -793,6 +793,51 @@ func (s *APIServer) ReplaceWorkflow(ctx context.Context, ns namespace.Namespace,
 	return id, diag.Warnings, err
 }
 
+// RemoveWorkflow deregisters the workflow addressed by id — the in-process
+// entry point behind DELETE /v1/workflows/{id}, for an embedded host whose own
+// process holds the control plane.
+//
+// It delegates to the module method that serves the HTTP route, so the
+// ordering contract is identical: the workflow's desired entry activations are
+// cleared BEFORE the registry record is removed, making a partial failure
+// retryable and leaving no orphaned Desired activation that the reconciler
+// would keep honoring. Removing an id that names no workflow in ns is
+// backend.ErrWorkflowNotFound.
+//
+// Like RegisterWorkflow and ReplaceWorkflow, it bypasses the authz wrapper by
+// construction: the caller is the host process, which already has full control
+// of the server. ns is authoritative and defaults to namespace.Default when
+// empty.
+func (s *APIServer) RemoveWorkflow(ctx context.Context, ns namespace.Namespace, id types.WorkflowID) error {
+	if s.ctrl == nil {
+		return errors.New("apiserver: workflow control module not initialized")
+	}
+	if id == "" {
+		return backend.ErrWorkflowNotFound
+	}
+	if ns == "" {
+		ns = namespace.Default
+	}
+	return s.ctrl.deregisterWorkflow(ctx, ns, id)
+}
+
+// RemoveWorkflowByName is RemoveWorkflow for an embedded host that knows the
+// (name, version) identity it registered under but not the server-issued id.
+// Resolution and removal are both scoped to ns; a name that exists only in
+// another namespace is backend.ErrWorkflowNotFound.
+//
+// version must be the value that was registered. The builder's default is
+// "v1", so a host that never calls Version registers and removes under "v1".
+func (s *APIServer) RemoveWorkflowByName(ctx context.Context, ns namespace.Namespace, name, version string) error {
+	if s.ctrl == nil {
+		return errors.New("apiserver: workflow control module not initialized")
+	}
+	if ns == "" {
+		ns = namespace.Default
+	}
+	return s.ctrl.deregisterWorkflowByKey(ctx, ns, name, version)
+}
+
 // ListWorkflowVersions returns the version history of the workflow addressed by
 // id — the in-process entry point behind GET /v1/workflows/{id}/versions, for
 // an embedded host whose own process holds the control plane.

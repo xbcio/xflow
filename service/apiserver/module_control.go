@@ -2331,6 +2331,39 @@ func sameWorkflowRevision(a, b backend.WorkflowRecord) bool {
 		a.RegistryRevision == b.RegistryRevision
 }
 
+// deregisterWorkflowByKey resolves (ns, name, version) through the registry's
+// key index and removes the record by id.
+//
+// It exists for an embedded host that knows the identity it registered under —
+// the name and version it derives from its own configuration — but not the id,
+// which the server issues as a UUID. Resolution is scoped to ns and matched on
+// the exact key the registration path writes, so a host can never reach another
+// namespace's record by name. An unknown key is backend.ErrWorkflowNotFound.
+//
+// The removal itself is deregisterWorkflow, so the
+// clear-activations-before-remove ordering contract is identical to
+// DELETE /v1/workflows/{id}.
+func (m *workflowControlModule) deregisterWorkflowByKey(ctx context.Context, ns namespace.Namespace, name, version string) error {
+	if name == "" || version == "" {
+		return backend.ErrWorkflowNotFound
+	}
+	registry := m.registry()
+	if registry == nil {
+		if m.log != nil {
+			m.log.Error("deregister_workflow_no_registry")
+		}
+		return errors.New("apiserver: no workflow registry configured")
+	}
+	rec, err := registry.GetWorkflowByKey(ctx, workflowRegistryKey(string(ns), name, version))
+	if err != nil {
+		if !errors.Is(err, backend.ErrWorkflowNotFound) && m.log != nil {
+			m.log.Error("deregister_workflow_key_lookup_failed", "err", err)
+		}
+		return err
+	}
+	return m.deregisterWorkflow(ctx, ns, rec.ID)
+}
+
 // replaceWorkflow registers def, and if a DIFFERENT definition already occupies
 // its (namespace, name, version) key, atomically supersedes it. The embedded API
 // deliberately gives a changed definition a new ID; HTTP PUT, by contrast,
