@@ -415,28 +415,49 @@ func TestKafkaTriggerRealReplicasSharePartitions(t *testing.T) {
 func writeKafkaMessagesByPartition(t *testing.T, brokers []string, topic string, partitionCount, messagesPerPartition int) {
 	t.Helper()
 	for partition := 0; partition < partitionCount; partition++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		conn, err := kafka.DialLeader(ctx, "tcp", brokers[0], topic, partition)
-		cancel()
-		if err != nil {
-			t.Fatalf("dial partition %d leader: %v", partition, err)
-		}
-		if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
-			_ = conn.Close()
-			t.Fatalf("set partition %d write deadline: %v", partition, err)
-		}
 		messages := make([]kafka.Message, messagesPerPartition)
 		for sequence := range messages {
 			messages[sequence] = kafka.Message{Value: []byte(fmt.Sprintf("p%02d-m%02d", partition, sequence))}
 		}
-		if _, err := conn.WriteMessages(messages...); err != nil {
-			_ = conn.Close()
-			t.Fatalf("write partition %d: %v", partition, err)
-		}
-		if err := conn.Close(); err != nil {
-			t.Fatalf("close partition %d producer: %v", partition, err)
-		}
+		writeKafkaPartition(t, brokers, topic, partition, messages)
 	}
+}
+
+// writeKafkaPartition writes one partition's records through a raw leader
+// connection, retrying until the broker accepts them.
+//
+// DialLeader resolves the leader from the metadata the bootstrap broker returns,
+// and a raw *kafka.Conn never refreshes that metadata: unlike kafka.Writer it has
+// no retry of its own. A topic created moments earlier can still answer the
+// produce with NOT_LEADER_FOR_PARTITION while the broker's own view catches up;
+// that is what failed CI on 2026-10-20 at kafka_trigger_real_test.go:372. Each
+// attempt re-dials, which re-resolves the leader. Conn.WriteMessages is atomic
+// ("it either fully succeeds or fails"), so resending after a failed attempt
+// cannot duplicate an earlier partial append.
+func writeKafkaPartition(t *testing.T, brokers []string, topic string, partition int, messages []kafka.Message) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		conn, err := kafka.DialLeader(ctx, "tcp", brokers[0], topic, partition)
+		cancel()
+		if err == nil {
+			if err = conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err == nil {
+				_, err = conn.WriteMessages(messages...)
+			}
+			if err == nil {
+				if closeErr := conn.Close(); closeErr != nil {
+					t.Fatalf("close partition %d producer: %v", partition, closeErr)
+				}
+				return
+			}
+			_ = conn.Close()
+		}
+		lastErr = err
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("write partition %d: %v (retried for 20s)", partition, lastErr)
 }
 
 func waitForKafkaPartitionLeaders(t *testing.T, brokers []string, topic string, partitionCount int) {
