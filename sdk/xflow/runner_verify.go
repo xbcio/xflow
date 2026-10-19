@@ -8,6 +8,12 @@ import (
 	runnersvc "github.com/xbcio/xflow/service/runner"
 )
 
+// verifyRPCTimeout bounds each of the preflight's two unary RPCs. VerifyRunner
+// is driven by a CLI command whose caller context has no deadline; without this
+// a half-open connection would hang the command instead of reporting the
+// configuration problem it was run to find.
+const verifyRPCTimeout = 15 * time.Second
+
 // VerifyResult is what a preflight learned about this runner's connection.
 // It exists because the answer "did the control plane issue a supply
 // encryption key" is only observable at registration, and verify is the one
@@ -64,7 +70,8 @@ func VerifyRunner(ctx context.Context, cfg RunnerConfig) (VerifyResult, error) {
 	// resolvers, a node registry and the group/subgraph runtimes, and may
 	// create the artifact cache directory. A preflight must not leave those
 	// behind on a host that is only checking its configuration.
-	registered, err := client.Register(ctx, protocol.RegisterRunnerRequest{
+	registerCtx, registerCancel := context.WithTimeout(ctx, verifyRPCTimeout)
+	registered, err := client.Register(registerCtx, protocol.RegisterRunnerRequest{
 		RunnerID:     cfg.RunnerID,
 		Concurrency:  cfg.Concurrency,
 		Capabilities: runnerCapabilities(cfg.Capabilities),
@@ -75,17 +82,21 @@ func VerifyRunner(ctx context.Context, cfg RunnerConfig) (VerifyResult, error) {
 		// is left empty: a preflight has no prior session to renew.
 		SupportsEncryption: true,
 	})
+	registerCancel()
 	if err != nil {
 		return VerifyResult{}, err
 	}
 
-	if _, err = client.Heartbeat(ctx, protocol.HeartbeatRequest{
+	heartbeatCtx, heartbeatCancel := context.WithTimeout(ctx, verifyRPCTimeout)
+	_, err = client.Heartbeat(heartbeatCtx, protocol.HeartbeatRequest{
 		RunnerID:  cfg.RunnerID,
 		SessionID: registered.SessionID,
 		Capacity:  cfg.Concurrency,
 		InFlight:  0,
 		Timestamp: time.Now().Unix(),
-	}); err != nil {
+	})
+	heartbeatCancel()
+	if err != nil {
 		return VerifyResult{}, err
 	}
 	return VerifyResult{
