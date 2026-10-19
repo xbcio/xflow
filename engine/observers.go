@@ -199,6 +199,14 @@ type ObservedNodeFailure struct {
 
 // NodeFailureObserver receives per-node failure observations from the engine.
 // Only Fatal==true observations are actionable for group outcome classification.
+//
+// An observation is delivered before the fenced commit that could make the
+// execution's failed status visible to a waiter, so a consumer that reads a
+// terminal execution and then consults the observer cannot miss the failure
+// that caused it. The consequence is that an observation may describe a commit
+// the store did not apply (a retried or superseded attempt); consumers decide
+// from the execution's own outcome, and a last-failure-wins reader only
+// consults the observation once the execution has actually failed.
 type NodeFailureObserver interface {
 	ObserveNodeFailure(execID types.ExecutionID, f ObservedNodeFailure)
 }
