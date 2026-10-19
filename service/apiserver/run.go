@@ -42,6 +42,36 @@ func defaultHTTPTimeouts() HTTPTimeouts {
 	}
 }
 
+// grpcGracefulStopTimeout bounds the gRPC graceful-drain phase. GracefulStop
+// blocks until every in-flight RPC returns, and the Runner Connect stream is
+// long-lived by design, so one stuck stream could otherwise hold shutdown open
+// forever. On expiry the server is stopped forcibly (which cancels the
+// remaining RPCs and unblocks GracefulStop).
+const grpcGracefulStopTimeout = 5 * time.Second
+
+// stopGRPC drains s gracefully, falling back to a forced Stop when the drain
+// exceeds grace. Stop also unblocks a concurrent GracefulStop, so the
+// goroutine spawned here always exits before stopGRPC returns.
+func stopGRPC(s *grpc.Server, grace time.Duration) {
+	if s == nil {
+		return
+	}
+	drained := make(chan struct{})
+	go func() {
+		s.GracefulStop()
+		close(drained)
+	}()
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-drained:
+	case <-timer.C:
+		log.Printf("apiserver: gRPC graceful drain exceeded %s; forcing stop", grace)
+		s.Stop()
+		<-drained
+	}
+}
+
 // WithHTTPTimeouts overrides the HTTP server's timeouts. Defaults are sane for
 // the control-plane workload; only override if a deployment needs different
 // bounds.
@@ -171,9 +201,7 @@ func (s *APIServer) Run(ctx context.Context) error {
 		} else {
 			stop, err := s.serveMetrics()
 			if err != nil {
-				if grpcServer != nil {
-					grpcServer.GracefulStop()
-				}
+				stopGRPC(grpcServer, grpcGracefulStopTimeout)
 				_ = s.Shutdown(ctx)
 				return fmt.Errorf("metrics listen: %w", err)
 			}
@@ -208,9 +236,7 @@ func (s *APIServer) Run(ctx context.Context) error {
 		log.Println("apiserver: shutdown signal received, draining...")
 	case err := <-listenErr:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			if grpcServer != nil {
-				grpcServer.GracefulStop()
-			}
+			stopGRPC(grpcServer, grpcGracefulStopTimeout)
 			if metricsStop != nil {
 				metricsStop()
 			}
@@ -237,9 +263,7 @@ func (s *APIServer) Run(ctx context.Context) error {
 		log.Printf("apiserver: http shutdown error: %v", err)
 		errs = append(errs, err)
 	}
-	if grpcServer != nil {
-		grpcServer.GracefulStop()
-	}
+	stopGRPC(grpcServer, grpcGracefulStopTimeout)
 	if metricsStop != nil {
 		metricsStop()
 	}
