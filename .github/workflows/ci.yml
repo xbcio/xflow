@@ -213,6 +213,13 @@ jobs:
           restore-keys: |
             wasm-cache-${{ runner.os }}-${{ runner.arch }}-
 
+      # The service containers publish health-cmd probes, but the wait loop
+      # below still needs clients on the runner. Neither redis-cli nor
+      # mysqladmin is installed on ubuntu-latest, so the loop used to fail
+      # with "command not found" before either service was ever polled.
+      - name: Install service clients
+        run: sudo apt-get update && sudo apt-get install -y redis-tools mysql-client
+
       - name: Wait for services
         run: |
           ok=0
