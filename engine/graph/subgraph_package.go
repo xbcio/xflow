@@ -617,6 +617,13 @@ func compileTrusted(def *types.WorkflowDef, visibleSupplies, visibleOuterNodes [
 			return nil, fmt.Errorf("projected package %q: node %q is a %s node, which cannot run inside a projected package",
 				def.Name, nd.Name, types.SubWorkflowNodeType)
 		}
+		// This loop is the trusted path's hand-written parallel of registerNodes
+		// and does not call it, so it must repeat the node-level on_error check:
+		// without it a projected member's misspelled policy would again compile
+		// clean and silently become "stop" at runtime.
+		if err := validateOnError(fmt.Sprintf("projected package %q: node %q: on_error", def.Name, nd.Name), nd.OnError); err != nil {
+			return nil, err
+		}
 		g.index[nd.Name] = i
 		g.nodes[i] = NodeMeta{
 			Name:               nd.Name,

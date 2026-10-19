@@ -528,6 +528,15 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 		if err := validateRetryStrategy(fmt.Sprintf("node %q", nd.Name), nd.Retry); err != nil {
 			return 0, err
 		}
+		// A node-level on_error used to be copied straight into NodeMeta with no
+		// validation, so a misspelled value silently became "stop" through
+		// ApplyOnError's default branch -- a fail-closed outcome, but with no
+		// diagnostic saying the author's policy was never in effect. Validate it
+		// at the same point as the retry strategy, and with the same policy set
+		// ApplyOnError implements.
+		if err := validateOnError(fmt.Sprintf("node %q: on_error", nd.Name), nd.OnError); err != nil {
+			return 0, err
+		}
 		g.index[nd.Name] = i
 		g.nodes[i] = NodeMeta{
 			Name:               nd.Name,
@@ -843,15 +852,24 @@ func resolveOnError(node string, settings *types.WorkflowSettings) string {
 	return settings.OnError
 }
 
-// validateSettingsOnError rejects a workflow default on_error the engine does
-// not implement.
-func validateSettingsOnError(onErr string) error {
+// validateOnError rejects an on_error value the engine does not implement.
+// where names the declaring site in the message, so a misspelled node-level
+// value names the node rather than reporting a settings field that was never
+// written: "settings.on_error" for the workflow default, or
+// `node "worker": on_error` for a node.
+func validateOnError(where, onErr string) error {
 	switch types.OnError(onErr) {
 	case "", types.OnErrorStop, types.OnErrorOutput, types.OnErrorMainOutput, types.OnErrorContinue:
 		return nil
 	}
-	return fmt.Errorf("settings.on_error %q must be one of %q, %q, %q, %q",
-		onErr, types.OnErrorStop, types.OnErrorOutput, types.OnErrorMainOutput, types.OnErrorContinue)
+	return fmt.Errorf("%s %q must be one of %q, %q, %q, %q",
+		where, onErr, types.OnErrorStop, types.OnErrorOutput, types.OnErrorMainOutput, types.OnErrorContinue)
+}
+
+// validateSettingsOnError rejects a workflow default on_error the engine does
+// not implement.
+func validateSettingsOnError(onErr string) error {
+	return validateOnError("settings.on_error", onErr)
 }
 
 // validateRetryStrategy rejects a retry strategy the engine does not implement.

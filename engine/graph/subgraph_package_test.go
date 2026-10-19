@@ -366,6 +366,28 @@ func TestCompileProjectedPackage_AcceptsReservedTypes(t *testing.T) {
 	}
 }
 
+// TestCompileProjectedPackageRejectsInvalidNodeOnError pins the node-level
+// check on the trusted compile path: compileTrusted hand-copies NodeDef into
+// NodeMeta and never calls registerNodes, so without its own check a projected
+// member's misspelled on_error would again compile clean and silently become
+// "stop".
+func TestCompileProjectedPackageRejectsInvalidNodeOnError(t *testing.T) {
+	pkg := &SubgraphPackage{Def: &types.WorkflowDef{
+		Name:  "pkg-on-error",
+		Nodes: []types.NodeDef{{Name: "member", Type: "http.request", OnError: "retry"}},
+	}}
+	_, err := CompileProjectedPackage(pkg)
+	if err == nil {
+		t.Fatal(`projected node on_error "retry" compiled clean`)
+	}
+	msg := err.Error()
+	for _, want := range []string{`node "member"`, "on_error", `"retry"`} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q does not mention %q", msg, want)
+		}
+	}
+}
+
 // TestCompileProjectedPackageRejectsWorkflowOutputs pins the trusted path to
 // Compile's rule: WorkflowDef.Outputs is declarative only and nothing evaluates
 // it, so accepting it in a projected package would register a declaration that
