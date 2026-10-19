@@ -35,7 +35,9 @@
 #   - 宿主注册 collectApprovalTrail 与 buildErrorContext 两个 Go function
 #     （xflow.function 按 function_name 查找，节点本身不带实现）。
 #   - db_conn / internal_api 凭证与 org_service 地址是占位值，需替换。
-#   - xflow.notification 只记录通知请求（输出 data.sent=true），不真正投递。
+#   - xflow.notification 尚未实现投递：节点执行会返回 not implemented 错误。
+#     样例对其设置 on_error: continue，错误不会中断流程；需要真实投递时请改用
+#     xflow.http 或 webhook trigger。
 
 spec: "1.0"
 name: "purchase-approval"
@@ -296,6 +298,8 @@ nodes:
 
   - name: notify_approved
     type: xflow.notification
+    # 投递尚未实现，执行会报错；continue 让审批通过后的流程走完。
+    on_error: continue
     parameters:
       channel: email
       to: "${{ $params.applicant_id }}"
@@ -356,6 +360,8 @@ nodes:
 
   - name: notify_rejected
     type: xflow.notification
+    # 投递尚未实现，执行会报错；continue 让驳回后的流程走完。
+    on_error: continue
     parameters:
       channel: email
       to: "${{ $params.applicant_id }}"
@@ -416,6 +422,8 @@ nodes:
 
   - name: notify_error
     type: xflow.notification
+    # 投递尚未实现，执行会报错；continue 让异常处理流程走完。
+    on_error: continue
     parameters:
       channel: email
       to: "${{ $params.applicant_id }}"

@@ -6,13 +6,14 @@ import (
 
 	"github.com/xbcio/xflow/types"
 
-	"github.com/spf13/cast"
 	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/registry"
 )
 
-// NotificationNode implements xflow.notification — records a normalized
-// notification request for downstream workflow steps.
+// NotificationNode is the xflow.notification action. It stays registered so
+// definitions that name the type still compile and appear in the catalog, but
+// it has no delivery backend: Execute fails rather than reporting a
+// notification that was never sent.
 type NotificationNode struct {
 	nodeinternal.BaseNode
 	Channel string
@@ -83,53 +84,8 @@ func (n *NotificationNode) RawParams() any {
 	return params
 }
 
-func (n *NotificationNode) Execute(_ context.Context, input *types.Input) (*types.Output, error) {
-	if input == nil {
-		input = &types.Input{}
-	}
-	channel := cast.ToString(input.Params["channel"])
-	if channel == "" {
-		return nil, fmt.Errorf("xflow.notification: channel parameter is required")
-	}
-	to := input.Params["to"]
-	if isEmptyNotificationRecipient(to) {
-		return nil, fmt.Errorf("xflow.notification: to parameter is required")
-	}
-
-	data := make(map[string]any)
-	if input.Data != nil {
-		for k, v := range input.Data {
-			data[k] = v
-		}
-	}
-	if extra, ok := input.Params["data"].(map[string]any); ok {
-		for k, v := range extra {
-			data[k] = v
-		}
-	}
-
-	data["channel"] = channel
-	data["to"] = to
-	data["subject"] = cast.ToString(input.Params["subject"])
-	data["message"] = cast.ToString(input.Params["message"])
-	data["sent"] = true
-
-	return &types.Output{Data: data, Port: "main"}, nil
-}
-
-func isEmptyNotificationRecipient(v any) bool {
-	switch t := v.(type) {
-	case nil:
-		return true
-	case string:
-		return t == ""
-	case []string:
-		return len(t) == 0
-	case []any:
-		return len(t) == 0
-	default:
-		return cast.ToString(t) == ""
-	}
+func (n *NotificationNode) Execute(_ context.Context, _ *types.Input) (*types.Output, error) {
+	return nil, fmt.Errorf("xflow.notification is not implemented; use xflow.http or a webhook trigger")
 }
 
 func init() { registry.Register(&NotificationNode{}) }

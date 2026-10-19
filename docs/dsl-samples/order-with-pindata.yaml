@@ -129,8 +129,11 @@ nodes:
         amount: "${{ $input.price }}"
 
   # 7. 库存不足通知
+  #    xflow.notification 尚未实现投递，节点执行会返回 not implemented 错误；
+  #    on_error: continue 让库存不足分支仍能正常结束。真实投递请改用 xflow.http。
   - name: notify_out_of_stock
     type: xflow.notification
+    on_error: continue
     parameters:
       channel: email
       to: "${{ $nodes['fetch_order'].user_email }}"

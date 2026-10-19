@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -76,6 +77,7 @@ func TestWorkflowFullDistributed(t *testing.T) {
 		wantDecision string // node carrying the gate outcome, and its decision
 		decisionNode string
 		ran          []string
+		continued    []string // ran nodes whose on_error: continue makes them "continued"
 		skipped      []string
 	}{
 		{
@@ -85,7 +87,11 @@ func TestWorkflowFullDistributed(t *testing.T) {
 			decisionNode: "approved",
 			wantDecision: "approved",
 			ran:          []string{"fan", "hold", "tick", "approved", "notify"},
-			skipped:      []string{"single_lane", "rejected", "escalate", "timed_out", "quiet"},
+			// xflow.notification has no delivery backend and fails at execution;
+			// its on_error: continue keeps the happy path alive, which the engine
+			// records as "continued" rather than "success".
+			continued: []string{"notify"},
+			skipped:   []string{"single_lane", "rejected", "escalate", "timed_out", "quiet"},
 		},
 		{
 			name:         "single_reject_quiet",
@@ -168,9 +174,13 @@ func TestWorkflowFullDistributed(t *testing.T) {
 			}
 
 			for _, name := range tc.ran {
-				if st := nodeStatus(t, h, execID, name); st != types.NodeStatusSuccess {
+				want := types.NodeStatusSuccess
+				if slices.Contains(tc.continued, name) {
+					want = types.NodeStatusContinued
+				}
+				if st := nodeStatus(t, h, execID, name); st != want {
 					dumpNodes(t, h, execID, workflows.FullMainNodeNames()...)
-					t.Fatalf("node %q status = %s, want success", name, st)
+					t.Fatalf("node %q status = %s, want %s", name, st, want)
 				}
 			}
 			// The trigger lane was not selected, so it is skipped end to end.

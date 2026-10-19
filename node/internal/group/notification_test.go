@@ -2,11 +2,12 @@ package group_test
 
 import (
 	"context"
-	"github.com/xbcio/xflow/node/registry"
-	"github.com/xbcio/xflow/types"
+	"strings"
 	"testing"
 
 	"github.com/xbcio/xflow/node"
+	"github.com/xbcio/xflow/node/registry"
+	"github.com/xbcio/xflow/types"
 )
 
 func TestNotification_Factory(t *testing.T) {
@@ -34,61 +35,48 @@ func TestNotification_Factory(t *testing.T) {
 	}
 }
 
-func TestNotification_ExecuteReturnsDeterministicPayload(t *testing.T) {
+// xflow.notification has no delivery backend. Returning success would claim a
+// notification that was never sent, so every invocation must fail — even one
+// with otherwise valid parameters.
+func TestNotification_ExecuteAlwaysFails(t *testing.T) {
 	h, found := registry.Lookup("xflow.notification")
 	if !found {
 		t.Fatal("expected xflow.notification to be registered")
 	}
 
-	b := node.Notification("email", "ops@example.com").
-		Subject("Order blocked").
-		Message("inventory unavailable").
-		SetData(map[string]any{"order_id": "ord-1"})
-	input := &types.Input{
-		Params: b.RawParams().(map[string]any),
-		Data:   map[string]any{"status": "out_of_stock"},
-	}
-
-	out, err := h.Execute(context.Background(), input)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if out.Port != "main" {
-		t.Fatalf("expected port main, got %q", out.Port)
-	}
-	if out.Data["channel"] != "email" {
-		t.Fatalf("expected channel=email, got %v", out.Data["channel"])
-	}
-	if out.Data["to"] != "ops@example.com" {
-		t.Fatalf("expected to=ops@example.com, got %v", out.Data["to"])
-	}
-	if out.Data["subject"] != "Order blocked" {
-		t.Fatalf("expected subject, got %v", out.Data["subject"])
-	}
-	if out.Data["message"] != "inventory unavailable" {
-		t.Fatalf("expected message, got %v", out.Data["message"])
-	}
-	if out.Data["status"] != "out_of_stock" {
-		t.Fatalf("expected upstream status to be preserved, got %v", out.Data["status"])
-	}
-	if out.Data["sent"] != true {
-		t.Fatalf("expected sent=true, got %v", out.Data["sent"])
-	}
-}
-
-func TestNotification_RequiresChannelAndRecipient(t *testing.T) {
-	h, found := registry.Lookup("xflow.notification")
-	if !found {
-		t.Fatal("expected xflow.notification to be registered")
-	}
-
-	_, err := h.Execute(context.Background(), &types.Input{Params: map[string]any{"to": "ops@example.com"}})
-	if err == nil {
-		t.Fatal("expected error for missing channel")
-	}
-
-	_, err = h.Execute(context.Background(), &types.Input{Params: map[string]any{"channel": "email"}})
-	if err == nil {
-		t.Fatal("expected error for missing recipient")
+	for _, tc := range []struct {
+		name  string
+		input *types.Input
+	}{
+		{name: "nil input", input: nil},
+		{name: "missing params", input: &types.Input{}},
+		{
+			name: "valid params",
+			input: &types.Input{
+				Params: map[string]any{
+					"channel": "email",
+					"to":      "ops@example.com",
+					"subject": "Order blocked",
+					"message": "inventory unavailable",
+					"data":    map[string]any{"order_id": "ord-1"},
+				},
+				Data: map[string]any{"status": "out_of_stock"},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := h.Execute(context.Background(), tc.input)
+			if err == nil {
+				t.Fatalf("out = %#v, want error: a successful return claims a notification that was never sent", out)
+			}
+			if out != nil {
+				t.Fatalf("out = %#v, want nil on failure", out)
+			}
+			for _, want := range []string{"not implemented", "xflow.http", "webhook"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("error = %q, want it to mention %q", err, want)
+				}
+			}
+		})
 	}
 }
