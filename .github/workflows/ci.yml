@@ -78,10 +78,15 @@ jobs:
           fi
 
       - name: Lint
-        uses: golangci/golangci-lint-action@55c2c1448f86e01eaae002a5a3a9624417608d84 # v6.5.2
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: latest
+          # golangci-lint v1 is built with Go 1.24 and refuses a go.mod that
+          # targets 1.25; v2 is the first line built with a newer toolchain.
+          version: v2.15.0
           args: ./...
+          # The repository predates a clean v2 run (v1 lint never executed
+          # against go1.25), so gate the diff, not the whole backlog.
+          only-new-issues: true
 
       # `make vet` is a strict superset of `go vet ./...`: it also builds
       # five build-tag configurations (integration/perf/soak/stress/
