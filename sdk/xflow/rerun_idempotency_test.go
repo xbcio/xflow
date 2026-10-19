@@ -2,9 +2,12 @@ package xflow
 
 import (
 	"context"
+	"errors"
 	"testing"
 
+	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/node"
+	"github.com/xbcio/xflow/types"
 )
 
 // TestRerunIdempotencyKeyReturnsTheSameRerun: the rerun option is scoped to the
@@ -31,8 +34,22 @@ func TestRerunIdempotencyKeyReturnsTheSameRerun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Invoke() error = %v", err)
 	}
+	// The two-node workflow can finish before this cancel lands, and the rerun
+	// only needs the parent to be terminal. Accept "inactive" after confirming
+	// that is what happened: tolerating it blindly would also hide a Cancel
+	// broken for an unrelated reason, and the rerun below would still fail on a
+	// running parent.
 	if err := eng.Cancel(ctx, parent); err != nil {
-		t.Fatalf("Cancel() error = %v", err)
+		if !errors.Is(err, engine.ErrExecutionInactive) {
+			t.Fatalf("Cancel() error = %v", err)
+		}
+		res, waitErr := eng.Wait(ctx, parent)
+		if waitErr != nil {
+			t.Fatalf("Wait() after inactive Cancel error = %v", waitErr)
+		}
+		if !types.IsTerminalExecutionStatus(res.Status) {
+			t.Fatalf("parent status = %s after inactive Cancel, want a terminal status", res.Status)
+		}
 	}
 
 	first, err := eng.Rerun(ctx, parent, "start", RerunIdempotencyKey("rerun-1"))
