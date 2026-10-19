@@ -52,6 +52,15 @@ func (p *triggerPrimitives) Dedup(_ context.Context, key string, ttl time.Durati
 	return true, nil
 }
 
+// ReleaseDedup removes a claim whose emission failed, so a redelivery is
+// admitted instead of being answered as a duplicate for the rest of the TTL.
+func (p *triggerPrimitives) ReleaseDedup(_ context.Context, key string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.dedup, key)
+	return nil
+}
+
 func (p *triggerPrimitives) TryLock(_ context.Context, key string, ttl time.Duration) (types.TriggerLock, bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

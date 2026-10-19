@@ -22,10 +22,12 @@ type FakeRuntime struct {
 	callbackMu  sync.Mutex
 	emits       []*types.TriggerEvent
 	dedups      []DedupCall
+	releases    []string
 	emitSignal  chan struct{}
 	dedupSignal chan struct{}
 	emitFunc    func(context.Context, types.WorkflowID, string, *types.TriggerEvent) (types.ExecutionID, error)
 	dedupFunc   func(context.Context, string, time.Duration) (bool, error)
+	releaseFunc func(context.Context, string) error
 }
 
 // DedupCall is one Dedup invocation. Both fields carry a decision the trigger
@@ -86,6 +88,30 @@ func (r *FakeRuntime) Dedup(ctx context.Context, key string, ttl time.Duration) 
 
 func (r *FakeRuntime) TryLock(context.Context, string, time.Duration) (types.TriggerLock, bool, error) {
 	return FakeLock{}, true, nil
+}
+
+// ReleaseDedup implements the optional dedup-release capability a trigger's
+// deduplicate-then-emit path discovers. It records the key and delegates to an
+// installed callback; with none installed the release succeeds, so a test that
+// does not model a claim store still exercises the call.
+func (r *FakeRuntime) ReleaseDedup(ctx context.Context, key string) error {
+	r.mu.Lock()
+	r.releases = append(r.releases, key)
+	r.mu.Unlock()
+	r.callbackMu.Lock()
+	fn := r.releaseFunc
+	r.callbackMu.Unlock()
+	if fn != nil {
+		return fn(ctx, key)
+	}
+	return nil
+}
+
+// ReleaseCalls returns a copy of the released dedup keys, in call order.
+func (r *FakeRuntime) ReleaseCalls() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.releases...)
 }
 
 func (r *FakeRuntime) State(context.Context, string) types.TriggerState { return nil }
@@ -157,6 +183,14 @@ func (r *FakeRuntime) SetDedupFunc(fn func(context.Context, string, time.Duratio
 	r.callbackMu.Lock()
 	defer r.callbackMu.Unlock()
 	r.dedupFunc = fn
+}
+
+// SetReleaseDedupFunc installs a release callback. Same locking rationale as
+// SetEmitFunc.
+func (r *FakeRuntime) SetReleaseDedupFunc(fn func(context.Context, string) error) {
+	r.callbackMu.Lock()
+	defer r.callbackMu.Unlock()
+	r.releaseFunc = fn
 }
 
 // RecordEmit appends event to the recorded list and signals a waiter. Exported
