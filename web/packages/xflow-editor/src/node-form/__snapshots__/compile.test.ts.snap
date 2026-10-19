@@ -1721,7 +1721,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
           },
         ],
         "props": {
-          "description": "Engine: js->goja|qjs, wasm->wazero|wazero-reactor (no default — choose explicitly)",
+          "description": "Engine: js->goja|qjs, wasm->wazero|wazero-reactor (no default — choose explicitly); wazero has no batch fast path, so a Kafka batch evaluates serially",
           "expect": {
             "type": "string",
           },
@@ -1755,32 +1755,34 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
               },
               "else": [
                 {
-                  "description": "Fastest cold start; cannot interrupt tight loops",
+                  "description": "Fastest cold start; interruptible, but no heap cap (trusted scripts only)",
                   "label": "goja",
                   "value": "goja",
                 },
                 {
-                  "description": "Slower first load; genuine mid-execution termination",
+                  "description": "Slower first load; interruptible, 16 MiB heap cap",
                   "label": "QuickJS",
                   "value": "qjs",
                 },
                 {
+                  "description": "Legacy command model; no batch fast path (a batch trigger evaluates records one by one)",
                   "label": "wazero",
                   "value": "wazero",
                 },
                 {
-                  "description": "Pooled reactor-mode guest instances",
+                  "description": "Pooled reactor-mode guest instances; the batch fast path",
                   "label": "wazero (reactor)",
                   "value": "wazero-reactor",
                 },
               ],
               "then": [
                 {
+                  "description": "Legacy command model; no batch fast path (a batch trigger evaluates records one by one)",
                   "label": "wazero",
                   "value": "wazero",
                 },
                 {
-                  "description": "Pooled reactor-mode guest instances",
+                  "description": "Pooled reactor-mode guest instances; the batch fast path",
                   "label": "wazero (reactor)",
                   "value": "wazero-reactor",
                 },
@@ -1788,12 +1790,12 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
             },
             "then": [
               {
-                "description": "Fastest cold start; cannot interrupt tight loops",
+                "description": "Fastest cold start; interruptible, but no heap cap (trusted scripts only)",
                 "label": "goja",
                 "value": "goja",
               },
               {
-                "description": "Slower first load; genuine mid-execution termination",
+                "description": "Slower first load; interruptible, 16 MiB heap cap",
                 "label": "QuickJS",
                 "value": "qjs",
               },
