@@ -160,7 +160,7 @@ func TestStopGRPCForcesStopWhenDrainExceedsGrace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err := conn.NewStream(context.Background(), &grpc.StreamDesc{ServerStreams: true}, "/test.Blocked/Stream"); err != nil {
 		t.Fatalf("new stream: %v", err)
 	}
