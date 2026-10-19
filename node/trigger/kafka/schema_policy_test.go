@@ -84,9 +84,21 @@ func (o *recordingObserver) snapshot() (discarded, deadLettered []string) {
 }
 
 // waitFor blocks until pred is satisfied by the current snapshot, or timeout.
+//
+// pred may depend on state this observer never records — the retained-bound
+// test asks whether the emit goroutines have started, which is an atomic outside
+// the observer. Waking only on observer notifications would then sleep through a
+// satisfied predicate whenever that external state changes last: under the
+// coverage gate the partition loop can finish all of its discards before the
+// emit goroutines are scheduled, so the final notification arrives while the
+// predicate is still false and no later notification ever comes. The poll keeps
+// that from turning a satisfied predicate into a timeout; notifications still
+// provide the immediate wake for the common all-observer case.
 func (o *recordingObserver) waitFor(timeout time.Duration, pred func(discarded, deadLettered []string) bool) bool {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
+	poll := time.NewTicker(10 * time.Millisecond)
+	defer poll.Stop()
 	for {
 		o.mu.Lock()
 		d := append([]string(nil), o.discarded...)
@@ -98,6 +110,7 @@ func (o *recordingObserver) waitFor(timeout time.Duration, pred func(discarded, 
 		}
 		select {
 		case <-notify:
+		case <-poll.C:
 		case <-deadline.C:
 			return false
 		}
