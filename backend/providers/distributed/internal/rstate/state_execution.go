@@ -91,10 +91,11 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 	//
 	// createExecution is authoritative for this execution: it knows whether the
 	// graph asked to be transient. Without priming, the projection guard below
-	// would ask isTransient, find no marker (none is written yet), and fall
-	// through to the SQL confirmation -- which would report "no row" because
-	// this very call has not created it yet, so every execution would be
-	// misread as transient and silently stop being projected.
+	// would ask isTransient before this call's pipeline has run -- so Redis has
+	// no marker yet -- and fall through to the SQL confirmation, which would
+	// report "no row" because this very call has not created it yet. Every
+	// execution would then be misread as transient and silently stop being
+	// projected.
 	//
 	// Store-wide transient mode is folded in here: it writes no per-execution
 	// marker at all, so priming "durable" for it would override the mode.
@@ -140,12 +141,22 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 
 	pipe := s.rdb.TxPipeline()
 	t := namespace.FromContext(ctx)
-	// The transient marker joins the same transaction as the structural keys.
-	// Written afterwards, it would leave a window in which another replica sees
-	// a running execution with no marker and resolves it as durable -- long
-	// enough for the first node commit to project its payload into SQL.
+	// The mode marker joins the same transaction as the structural keys. Written
+	// afterwards, it would leave a window in which another replica sees a
+	// running execution with no marker, has to fall back to SQL, and finds no
+	// row -- this very call writes that row only after the pipeline commits.
+	//
+	// Every execution gets a marker, not just transient ones. "No marker" is
+	// also the shape of a lapsed transient marker, so it cannot be read as
+	// "durable"; and a bare SQL miss cannot be read as "transient", because the
+	// projection is a best-effort follow-up, not an admission witness.
 	if perExecTransient {
 		s.markExecutionTransient(ctx, pipe, e.ID, hint.TTL, hint.CompletionTTL, ttl)
+	} else if !s.transient {
+		// Store-wide transient mode writes no per-execution marker at all: the
+		// flag is the answer on every replica, and a durable marker here would
+		// outlive a runtime reconfiguration as a false verdict.
+		s.markExecutionDurable(ctx, pipe, e.ID, ttl)
 	}
 	// Persist the retention this execution was created with so
 	// GetExecutionRetention can still answer with the TTL the writes actually

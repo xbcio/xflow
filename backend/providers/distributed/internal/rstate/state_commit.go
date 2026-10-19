@@ -221,10 +221,11 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 		// skip, and left the execution running with every executed node reporting
 		// success.
 		scheduleKey(t, req.ExecutionID, req.UnitIdx),
-		// KEYS[12]: re-EXPIREd by the script so the per-execution transient
-		// marker cannot lapse while the execution is still committing. See the
-		// note in commitNodeLua — a lapsed marker makes a transient execution
-		// read as durable, which projects its node output into SQL.
+		// KEYS[12]: re-EXPIREd by the script so the per-execution mode marker
+		// (transient or durable) cannot lapse while the execution is still
+		// committing. See the note in commitNodeLua — a lapsed transient marker
+		// makes a transient execution read as durable, which projects its node
+		// output into SQL.
 		transientMarkKey(t, req.ExecutionID),
 	}
 	// KEYS[13...] are source outputs that the engine proved have no remaining
