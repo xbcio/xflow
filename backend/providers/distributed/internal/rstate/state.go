@@ -416,10 +416,75 @@ func (s *Store) refreshTransientTTL(_ context.Context, _ types.ExecutionID, _ ..
 	return nil
 }
 
+// createdExecutionKeys enumerates every key createExecution writes for an
+// execution, before any node/outbox transition runs. Creation used to enumerate
+// its optional keys inline while cleanupCreatedExecution and completion-time TTL
+// shortening each re-derived the set by hand; the three drifted, so scope/
+// parent/parent_node/depth/rerun_from were written but never rolled back or
+// shortened. Both paths now share this single inventory.
+//
+// The inventory is derived from the id and graph rather than from the full
+// snapshot because rollback and TTL shortening only still hold those. Fields
+// that creation writes conditionally (params, scope, trace ids, derived-run
+// links, the transient marker) are therefore enumerated unconditionally, and
+// per-unit keys cover every unit rather than only the skip entries that write a
+// schedule key. That is a superset: DEL and EXPIRE on a missing key are no-ops,
+// and every key here is scoped to this execution's {id} hash tag, so
+// over-enumeration cannot touch another execution or a shared index.
+//
+// The transient marker and retention record ARE part of this inventory (creation
+// writes them), but completion-time shortening deliberately skips them; their
+// lifetime follows its own rules (see transientMarkKey and retentionRecordKey).
+func createdExecutionKeys(t namespace.Namespace, id types.ExecutionID, g *graph.Graph) []string {
+	keys := []string{
+		execKey(t, id, "status"),
+		execKey(t, id, "graph"),
+		execKey(t, id, "namespace"),
+		execKey(t, id, "params"),
+		execKey(t, id, "runtime"),
+		execKey(t, id, "scope"),
+		execKey(t, id, "test_run"),
+		execKey(t, id, "trace_id"),
+		execKey(t, id, "span_id"),
+		execKey(t, id, "trace_carrier"),
+		execKey(t, id, "parent"),
+		execKey(t, id, "parent_node"),
+		execKey(t, id, "depth"),
+		execKey(t, id, "rerun_from"),
+		transientMarkKey(t, id),
+		retentionRecordKey(t, id),
+		// Enumerated even when this execution was created without outbox entries:
+		// DEL/EXPIRE on the then-absent keys is a no-op.
+		outboxReadyKey(t, id),
+		outboxBodyKey(t, id),
+	}
+	if g == nil {
+		return keys
+	}
+	// Creation writes the counters only for acyclic graphs, gating its SETs on
+	// this same !AllowCycles() check (see createExecution). Mirroring that gate
+	// here keeps the inventory exactly in step with what creation wrote: a
+	// cyclic execution never has these keys, so listing them would describe a
+	// write that does not happen. (EXPIRing or DELeting a missing key is a
+	// no-op, so the gate is about accuracy, not safety.)
+	if !g.AllowCycles() {
+		keys = append(keys, remainingNodesKey(t, id), failedNodesKey(t, id))
+	}
+	// Creation seeds an in-degree key only for units with in-degree > 0 and a
+	// schedule key only for skip intents, but both families are unit-scoped and
+	// execution-owned, so covering every unit is a safe superset. Later
+	// transitions write these same families. UnitCount bounds every index
+	// creation writes (UnitCount <= NodeCount).
+	for i := 0; i < g.UnitCount(); i++ {
+		keys = append(keys, inDegreeKey(t, id, i), scheduleKey(t, id, i))
+	}
+	return keys
+}
+
 // transientExecutionKeys enumerates every Redis key an execution can own,
-// derived deterministically from its graph (mirrors cleanupCreatedExecution).
-// It replaces the per-mutation-maintained :keys set as the source of truth for
-// completion-time TTL shortening.
+// derived deterministically from its graph (the creation inventory plus keys
+// written by later transitions). It replaces the per-mutation-maintained :keys
+// set as the source of truth for completion-time TTL shortening.
 func transientExecutionKeys(t namespace.Namespace, id types.ExecutionID, g *graph.Graph) []string {
 	// NOTE: the terminal marker (terminalMarkKey) is deliberately ABSENT from
 	// this list. It is written with the execution's ACTIVE retention and exists
@@ -427,70 +492,77 @@ func transientExecutionKeys(t namespace.Namespace, id types.ExecutionID, g *grap
 	// TTL would re-create the exact gap it closes, where a backlogged task
 	// consumed after the completion TTL reads an execution that finished
 	// normally as lost work.
-	keys := []string{
-		execKey(t, id, "status"),
-		execKey(t, id, "graph"),
-		execKey(t, id, "namespace"),
+	//
+	// The transient marker and the retention record are absent for their own
+	// reasons (see below), and both ARE part of createdExecutionKeys -- creation
+	// writes them and rollback must remove them -- so they are filtered out of
+	// the creation inventory here. The terminal marker is not: creation does not
+	// write it (setTerminalMark does, on terminalization), cleanupCreatedExecution
+	// appends it separately, and it is never shortened here.
+	transientKey, retentionKey := transientMarkKey(t, id), retentionRecordKey(t, id)
+	keys := make([]string, 0, 32)
+	for _, key := range createdExecutionKeys(t, id, g) {
+		if key == transientKey || key == retentionKey {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	keys = append(keys,
 		execKey(t, id, "error"),
-		execKey(t, id, "params"),
-		execKey(t, id, "runtime"),
-		execKey(t, id, "trace_id"),
-		execKey(t, id, "span_id"),
-		execKey(t, id, "trace_carrier"),
-		execKey(t, id, "test_run"),
-		// NOTE: the transient marker is deliberately ABSENT from this list.
-		//
-		// It used to be included, so that completion shortened the marker along
-		// with the data -- the intent being that a marker must not outlive its
-		// execution and answer for a recycled ID. That intent is sound but the
-		// cost was the opposite failure, and the opposite failure is worse:
-		//
-		//   shortening is a one-way door. Once the marker is dropped to the
-		//   completion TTL it dies ahead of the node keys, because a late or
-		//   duplicate CommitNode for a terminal execution still re-EXPIREs its
-		//   node keys via getExecTTL -- and with the marker gone that call
-		//   returns the DURABLE ttl, so the keys are extended to the long
-		//   lifetime while isTransient now answers "durable". The projection
-		//   then runs and persists output from an execution declared ephemeral.
-		//   Measured on a real deployment: xflow_nodes rows with no matching
-		//   xflow_executions row, one per completed transient execution.
-		//
-		// The marker is a handful of bytes with no payload, and its own TTL is
-		// bounded by transientMarkerTTLFactor, so leaving it to expire on its
-		// own keeps it alive at least as long as every key above and costs
-		// nothing. The recycled-ID concern needs an ID to be reused within one
-		// TTL while the original keys are still alive, which is not a scenario
-		// this codebase's ID generation produces; the leak above is observed,
-		// not theoretical.
+		// The completion counters are execution-scoped and safe to expire: a
+		// finished execution's remaining/failed counts are never consulted again.
+		// They are listed unconditionally, unlike in the creation inventory, so a
+		// completion whose cached graph is missing or unreadable cannot leave
+		// them behind on the active TTL. EXPIRE on an absent key (the cyclic-graph
+		// case) is a no-op; the duplicate EXPIRE for an acyclic graph is harmless.
 		remainingNodesKey(t, id),
 		failedNodesKey(t, id),
-		leaseExpiryZSetKey(t, id),
-		outboxReadyKey(t, id),
-		outboxBodyKey(t, id),
 		// The outbox dead-letter keys are enumerated here even though transient
 		// mode does not produce suspend-related keys: an outbox entry that
 		// exhausts its retries still lands on the attempts counter and the
 		// dead-letter/body hashes regardless of mode, so completion-time TTL
 		// shortening must cover them or they outlive the execution's shortened
 		// completion TTL.
+		leaseExpiryZSetKey(t, id),
 		outboxAttemptsKey(t, id),
 		outboxDeadKey(t, id),
 		outboxDeadBodyKey(t, id),
 		timeoutZSetKey(t, id),
-	}
+	)
+	// NOTE: the transient marker is deliberately ABSENT from this list.
+	//
+	// It used to be included, so that completion shortened the marker along
+	// with the data -- the intent being that a marker must not outlive its
+	// execution and answer for a recycled ID. That intent is sound but the
+	// cost was the opposite failure, and the opposite failure is worse:
+	//
+	//   shortening is a one-way door. Once the marker is dropped to the
+	//   completion TTL it dies ahead of the node keys, because a late or
+	//   duplicate CommitNode for a terminal execution still re-EXPIREs its
+	//   node keys via getExecTTL -- and with the marker gone that call
+	//   returns the DURABLE ttl, so the keys are extended to the long
+	//   lifetime while isTransient now answers "durable". The projection
+	//   then runs and persists output from an execution declared ephemeral.
+	//   Measured on a real deployment: xflow_nodes rows with no matching
+	//   xflow_executions row, one per completed transient execution.
+	//
+	// The marker is a handful of bytes with no payload, and its own TTL is
+	// bounded by transientMarkerTTLFactor, so leaving it to expire on its
+	// own keeps it alive at least as long as every key above and costs
+	// nothing. The recycled-ID concern needs an ID to be reused within one
+	// TTL while the original keys are still alive, which is not a scenario
+	// this codebase's ID generation produces; the leak above is observed,
+	// not theoretical.
 	if g != nil {
-		// The counter triplet is keyed by UNIT index, but the loop walks node
-		// indices. That is safe because UnitCount <= NodeCount — a supply node
-		// takes a node index and no unit, and a group collapses many nodes into
-		// one unit — so 0..NodeCount-1 is a superset of every unit key and the
-		// surplus iterations are no-ops. It would under-delete only if a unit
-		// index could exceed every node index, which the unit builder forbids.
+		// activeInputsKey is unit-indexed while this loop walks node indices.
+		// That is safe because UnitCount <= NodeCount — a supply node takes a
+		// node index and no unit, and a group collapses many nodes into one unit
+		// — so 0..NodeCount-1 is a superset of every unit key. The in-degree and
+		// schedule keys are already covered by createdExecutionKeys.
 		for i := 0; i < g.NodeCount(); i++ {
 			node := g.NodeAt(i)
 			keys = append(keys,
-				inDegreeKey(t, id, i),
 				activeInputsKey(t, id, i),
-				scheduleKey(t, id, i),
 				nodeStatusKey(t, id, node.Name),
 				nodeMetaKey(t, id, node.Name),
 				outputKey(t, id, node.Name),
