@@ -1231,10 +1231,19 @@ func (cp *ControlPlane) runLeaderCampaign(ctx context.Context) {
 	}
 }
 
+// shutdownResignTimeout bounds the leadership-release call made during
+// Shutdown. Resign runs on its own deadline rather than the caller's shutdown
+// context: a slow preceding drain (for example, waiting on background
+// goroutines until the shutdown context expires) would otherwise starve it,
+// leaving the lease to lapse by TTL and delaying takeover by another replica.
+const shutdownResignTimeout = 5 * time.Second
+
 // Shutdown cancels all background workers, including workflow activation
 // projection recovery, resigns leadership (if held), and unwinds the backend
 // queue binding. It attempts every step even if an earlier one fails,
-// aggregating all errors encountered.
+// aggregating all errors encountered. Caller ctx bounds the wait for background
+// workers; Resign gets its own short, independent budget so an exhausted
+// shutdown deadline cannot skip the lease release.
 func (cp *ControlPlane) Shutdown(ctx context.Context) error {
 	var errs []error
 	cp.lifecycleMu.Lock()
@@ -1277,7 +1286,12 @@ func (cp *ControlPlane) Shutdown(ctx context.Context) error {
 	case <-waitDone:
 	case <-ctx.Done():
 	}
-	if err := cp.elector.Resign(ctx); err != nil {
+	// Independent, short budget: ctx may already be exhausted by the wait
+	// above, and a cancelled context would turn the release into an instant
+	// error instead of freeing the lease for the next replica.
+	resignCtx, resignCancel := context.WithTimeout(context.Background(), shutdownResignTimeout)
+	defer resignCancel()
+	if err := cp.elector.Resign(resignCtx); err != nil {
 		errs = append(errs, err)
 	}
 	if cp.unbind != nil {
