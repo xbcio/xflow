@@ -368,6 +368,17 @@ func TestProfileRunRestoresStoredIdentityBeforeRunnerCreation(t *testing.T) {
 
 func TestProfileRunEnrollsBeforeRunnerCreation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The identity-renewal loop calls this same server right after
+		// enrollment: its first attempt is deliberate, not a tick (see
+		// runIdentityRenewal), and it races the end of this test. That request
+		// is not what this test is about, so answer it as unsupported instead
+		// of failing on a path this server is legitimately asked for. Enrollment
+		// itself is still pinned to EnrollPath: a client that sent enrollment
+		// anywhere else would get this same 404 and fail the run below.
+		if r.URL.Path == protocol.RenewIdentityPath {
+			http.NotFound(w, r)
+			return
+		}
 		if r.URL.Path != protocol.EnrollPath {
 			t.Errorf("path = %q, want enrollment path", r.URL.Path)
 			http.NotFound(w, r)
