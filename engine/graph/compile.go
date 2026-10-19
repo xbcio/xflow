@@ -206,6 +206,17 @@ func compile(ctx context.Context, def *types.WorkflowDef, resolver SubWorkflowRe
 	if err := validateFAF(def); err != nil {
 		return nil, err
 	}
+	// Workflow-level outputs are declared by the DSL but never evaluated: no
+	// runtime consumer reads WorkflowDef.Outputs, so a definition carrying them
+	// used to register cleanly and silently expose nothing. Reject at compile
+	// time instead of accepting a declaration that does not work.
+	//
+	// This runs after validateFAF so an FAF definition keeps its more specific
+	// rejection ("faf workflow cannot define workflow outputs").
+	if len(def.Outputs) != 0 {
+		return nil, fmt.Errorf("workflow-level outputs are not supported: %d output(s) declared; "+
+			"remove the top-level \"outputs\" block (node outputs are read via $nodes)", len(def.Outputs))
+	}
 	if err := validateWorkflowRunnerSelector(def.RunnerSelector); err != nil {
 		return nil, err
 	}

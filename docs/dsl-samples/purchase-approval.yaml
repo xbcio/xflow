@@ -579,15 +579,7 @@ connections:
 # ──────────────────────────────────────
 # 输出定义
 # ──────────────────────────────────────
-# 注：outputs 目前是声明性定义，运行时消费者尚未接线。status 想读的是
-# log_result 的输出，而数据库 insert 的输出只有 last_insert_id/rows_affected，
-# 真正的取值会落到 ?? 的兜底 'completed'；等 outputs 接线时应改读携带决策
-# 结果的来源。
-outputs:
-  status:
-    value: "${{ $nodes['log_result'].status ?? 'completed' }}"
-    display_name: "审批结果"
-
-  approval_chain:
-    value: "${{ $nodes['collect_approved_trail'].chain ?? $nodes['collect_rejected_trail'].chain ?? [] }}"
-    display_name: "审批链"
+# 注：工作流级 outputs 尚未实现，编译期会被拒绝；节点输出通过 $nodes 读取。
+# 原先声明的 status / approval_chain 输出已移除。status 想读的是 log_result 的
+# 输出，而数据库 insert 的输出只有 last_insert_id/rows_affected，真正的取值需要
+# 落到携带决策结果的来源。

@@ -568,6 +568,15 @@ func compileTrusted(def *types.WorkflowDef, visibleSupplies, visibleOuterNodes [
 	if n == 0 {
 		return nil, fmt.Errorf("workflow has no nodes")
 	}
+	// Workflow-level outputs are declared by the DSL but never evaluated, so the
+	// same rejection Compile applies must fire on this trusted path too: a
+	// projected package accepted with them would register a declaration that
+	// silently exposes nothing. Compile's pass list is hand-rewritten here, and
+	// that is exactly where a check goes missing.
+	if len(def.Outputs) != 0 {
+		return nil, fmt.Errorf("workflow-level outputs are not supported: %d output(s) declared; "+
+			"remove the top-level \"outputs\" block (node outputs are read via $nodes)", len(def.Outputs))
+	}
 
 	g := &Graph{
 		name:            def.Name,
