@@ -11,7 +11,7 @@ import (
 // ConcurrencyLimitedStateStore contract against the in-memory backend, so the
 // slot semantics the engine relies on cannot drift from the Redis backend's.
 func TestMemoryConcurrencyAdmissionContract(t *testing.T) {
-	statestoretest.RunConcurrencyAdmissionContract(t, func(t *testing.T) engine.StateStore {
+	statestoretest.RunConcurrencyAdmissionContract(t, memoryCapabilityManifest(), func(t *testing.T) engine.StateStore {
 		return New().State()
 	})
 }
@@ -21,7 +21,7 @@ func TestMemoryConcurrencyAdmissionContract(t *testing.T) {
 // suite because a store can enforce a limit without being able to queue, and
 // this backend can.
 func TestMemoryConcurrencyQueueContract(t *testing.T) {
-	statestoretest.RunConcurrencyQueueContract(t, func(t *testing.T) engine.StateStore {
+	statestoretest.RunConcurrencyQueueContract(t, memoryCapabilityManifest(), func(t *testing.T) engine.StateStore {
 		return New().State()
 	})
 }
@@ -30,7 +30,7 @@ func TestMemoryConcurrencyQueueContract(t *testing.T) {
 // contract: a trigger-group seed contends for a slot, and queues, exactly as a
 // submission does.
 func TestMemoryConcurrencySeedContract(t *testing.T) {
-	statestoretest.RunConcurrencySeedContract(t, func(t *testing.T) engine.StateStore {
+	statestoretest.RunConcurrencySeedContract(t, memoryCapabilityManifest(), func(t *testing.T) engine.StateStore {
 		return New().State()
 	})
 }

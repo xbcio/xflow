@@ -116,7 +116,15 @@ func fanInGraph(t *testing.T) *graph.Graph {
 // RunGroupStateContract exercises the GroupStateStore contract (acquire, renew,
 // commit, fence, downstream) against a concrete backend. Every backend
 // implementing GroupStateStore should call this.
-func RunGroupStateContract(t *testing.T, newStore func(*testing.T) GroupStore) {
+func RunGroupStateContract(t *testing.T, manifest *Manifest, newStore func(*testing.T) GroupStore) {
+	t.Helper()
+	manifest.Report(t)
+	manifest.RequireDeclared(t,
+		CapabilityGroupStateStore,
+		CapabilityGroupLeaseExpirer,
+		CapabilityGroupLeaseReader,
+		CapabilityGroupUnitPhaseReader,
+	)
 	ctx := context.Background()
 	seed := func(t *testing.T, g *graph.Graph) (GroupStore, types.ExecutionID, int) {
 		s := newStore(t)
@@ -412,9 +420,9 @@ func RunGroupStateContract(t *testing.T, newStore func(*testing.T) GroupStore) {
 		// entire ./backend/... tree green. Nor did the count say WHAT was
 		// scheduled -- a skip intent is also an outbox entry, and a wait_any
 		// fan-in that skips instead of executing drops the branch silently.
-		atomic, ok := s.(engine.AtomicStateStore)
+		atomic, ok := OptionalCapability[engine.AtomicStateStore](t, manifest, CapabilityAtomicStateStore, s)
 		if !ok {
-			t.Skip("store does not expose ListOutbox")
+			return
 		}
 		entries, err := atomic.ListOutbox(ctx, id, time.Now().Add(time.Minute), 16)
 		if err != nil {
@@ -623,13 +631,13 @@ func RunGroupStateContract(t *testing.T, newStore func(*testing.T) GroupStore) {
 	// crash in the gap would strand the unit permanently.
 	t.Run("RevokeGroupLeaseWithOutboxIsAtomic", func(t *testing.T) {
 		s, id, gu := seed(t, twoUnitGraph(t))
-		reclaimer, ok := s.(engine.GroupLeaseReclaimer)
+		reclaimer, ok := OptionalCapability[engine.GroupLeaseReclaimer](t, manifest, CapabilityGroupLeaseReclaimer, s)
 		if !ok {
-			t.Skip("backend does not implement GroupLeaseReclaimer")
+			return
 		}
-		atomic, ok := s.(engine.AtomicStateStore)
+		atomic, ok := OptionalCapability[engine.AtomicStateStore](t, manifest, CapabilityAtomicStateStore, s)
 		if !ok {
-			t.Skip("backend does not implement AtomicStateStore")
+			return
 		}
 		if ok, err := s.AcquireGroupLease(ctx, lease(id, gu, "T1")); err != nil || !ok {
 			t.Fatalf("acquire: ok=%v err=%v", ok, err)

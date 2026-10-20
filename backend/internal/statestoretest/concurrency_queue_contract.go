@@ -24,8 +24,13 @@ import (
 // deliverable starts work while holding no slot, and a promotion that starts
 // the wrong execution breaks the FIFO order the queue exists to provide. Both
 // are invisible from the engine — it sees a status and an outbox, not a line.
-func RunConcurrencyQueueContract(t *testing.T, newStore ConcurrencyStoreFactory) {
+func RunConcurrencyQueueContract(t *testing.T, manifest *Manifest, newStore ConcurrencyStoreFactory) {
 	t.Helper()
+	manifest.Report(t)
+	manifest.RequireDeclared(t,
+		CapabilityConcurrencyLimitedStateStore,
+		CapabilityConcurrencyQueueExpirer,
+	)
 	t.Run("QueuesOverTheLimit", func(t *testing.T) {
 		queueQueuesOverTheLimit(t, newStore(t))
 	})
@@ -48,10 +53,10 @@ func RunConcurrencyQueueContract(t *testing.T, newStore ConcurrencyStoreFactory)
 		queueExpiresAQueuedExecutionPastItsTimeout(t, newStore(t))
 	})
 	t.Run("ReportsThePositionOfAQueuedExecution", func(t *testing.T) {
-		queueReportsThePositionOfAQueuedExecution(t, newStore(t))
+		queueReportsThePositionOfAQueuedExecution(t, manifest, newStore(t))
 	})
 	t.Run("BuffersSignalsUntilPromotion", func(t *testing.T) {
-		queueBuffersSignalsUntilPromotion(t, newStore(t))
+		queueBuffersSignalsUntilPromotion(t, manifest, newStore(t))
 	})
 }
 
@@ -103,7 +108,10 @@ func readyOutbox(t *testing.T, state engine.StateStore, ctx context.Context, id 
 	t.Helper()
 	atomic, ok := state.(engine.AtomicStateStore)
 	if !ok {
-		t.Skipf("%T does not implement AtomicStateStore", state)
+		// ConcurrencyLimitedStateStore embeds AtomicStateStore and this suite
+		// requires it, so a store reaching here must have it. Not a skip: the
+		// outbox read is the only way this suite can observe what was parked.
+		t.Fatalf("%T implements ConcurrencyLimitedStateStore but not AtomicStateStore", state)
 	}
 	entries, err := atomic.ListOutbox(ctx, id, time.Now().UTC(), 32)
 	if err != nil {
@@ -120,7 +128,9 @@ func parkedOutbox(t *testing.T, state engine.StateStore, ctx context.Context, id
 	t.Helper()
 	atomic, ok := state.(engine.AtomicStateStore)
 	if !ok {
-		t.Skipf("%T does not implement AtomicStateStore", state)
+		// See readyOutbox: AtomicStateStore is implied by the suite's required
+		// ConcurrencyLimitedStateStore, so this is a failure, not a skip.
+		t.Fatalf("%T implements ConcurrencyLimitedStateStore but not AtomicStateStore", state)
 	}
 	horizon := time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
 	entries, err := atomic.ListOutbox(ctx, id, horizon, 32)
@@ -356,10 +366,10 @@ func queueExpiresAQueuedExecutionPastItsTimeout(t *testing.T, state engine.State
 // the store can say where it stands now. The position has to be the line's own
 // order — the execution the next release will promote is 1 — and it has to be
 // 0, not an error and not 1, for an execution that is not waiting at all.
-func queueReportsThePositionOfAQueuedExecution(t *testing.T, state engine.StateStore) {
-	inspector, ok := state.(engine.ConcurrencyQueueInspector)
+func queueReportsThePositionOfAQueuedExecution(t *testing.T, manifest *Manifest, state engine.StateStore) {
+	inspector, ok := OptionalCapability[engine.ConcurrencyQueueInspector](t, manifest, CapabilityConcurrencyQueueInspector, state)
 	if !ok {
-		t.Skipf("%T does not implement engine.ConcurrencyQueueInspector", state)
+		return
 	}
 	ctx := context.Background()
 	g := concurrencyGraph(t, "conc-queue-position")
@@ -422,10 +432,10 @@ func queueReportsThePositionOfAQueuedExecution(t *testing.T, state engine.StateS
 // which is the invariant the whole queue exists to keep. The queued execution
 // here has not run a single unit, so no waiter exists and "stored" is the only
 // correct verdict.
-func queueBuffersSignalsUntilPromotion(t *testing.T, state engine.StateStore) {
-	durable, ok := state.(engine.DurableSignalDeliverer)
+func queueBuffersSignalsUntilPromotion(t *testing.T, manifest *Manifest, state engine.StateStore) {
+	durable, ok := OptionalCapability[engine.DurableSignalDeliverer](t, manifest, CapabilityDurableSignalDeliverer, state)
 	if !ok {
-		t.Skipf("%T does not implement engine.DurableSignalDeliverer", state)
+		return
 	}
 	ctx := context.Background()
 	g := concurrencyGraph(t, "conc-queue-signal")

@@ -23,8 +23,23 @@ import (
 // suspend/consume → resume lock → pub/sub) against a concrete backend. Every
 // backend implementation should run this so semantic drift between e.g. the
 // in-memory and Redis/Lua backends is caught by a shared assertion.
-func RunStateStoreContract(t *testing.T, state engine.StateStore) {
+//
+// The manifest must declare the optional interfaces this base contract treats
+// as required (atomic commits/outbox, delivery leasing, the narrow status
+// read, suspended-node cancellation, durable signal delivery). Those are not
+// skippable here: a backend that cannot satisfy them does not implement the
+// scheduling contract the engine is built on.
+func RunStateStoreContract(t *testing.T, manifest *Manifest, state engine.StateStore) {
 	t.Helper()
+	manifest.Report(t)
+	manifest.RequireDeclared(t,
+		CapabilityAtomicStateStore,
+		CapabilityOutboxLeaser,
+		CapabilityOutboxReleaser,
+		CapabilityExecutionStatusReader,
+		CapabilitySuspendedNodeCanceler,
+		CapabilityDurableSignalDeliverer,
+	)
 	ctx := context.Background()
 	id := types.ExecutionID("exec-contract")
 	g := ContractGraph()

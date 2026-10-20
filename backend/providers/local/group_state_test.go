@@ -7,7 +7,7 @@ import (
 )
 
 func TestLocalGroupStateContract(t *testing.T) {
-	statestoretest.RunGroupStateContract(t, func(t *testing.T) statestoretest.GroupStore {
+	statestoretest.RunGroupStateContract(t, memoryCapabilityManifest(), func(t *testing.T) statestoretest.GroupStore {
 		return New().State().(statestoretest.GroupStore)
 	})
 }

@@ -13,11 +13,11 @@ import (
 // resume lock, pub/sub).
 func TestMemoryStateStoreContract(t *testing.T) {
 	state := New().State()
-	statestoretest.RunStateStoreContract(t, state)
+	statestoretest.RunStateStoreContract(t, memoryCapabilityManifest(), state)
 }
 
 func TestMemoryNodeLeaseRenewContract(t *testing.T) {
-	statestoretest.RunNodeLeaseRenewContract(t, func(t *testing.T) statestoretest.NodeLeaseRenewStore {
+	statestoretest.RunNodeLeaseRenewContract(t, memoryCapabilityManifest(), func(t *testing.T) statestoretest.NodeLeaseRenewStore {
 		return New().State().(statestoretest.NodeLeaseRenewStore)
 	})
 }

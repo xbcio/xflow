@@ -13,8 +13,15 @@ import (
 
 // EntryAdmissionTestStore is a backend implementing both state and entry
 // admission capabilities.
+//
+// AtomicStateStore is part of the required surface, not an accident of the two
+// in-tree backends: the contract reads the outbox and drives a CommitNode to
+// prove an admission schedules (and only schedules) what it should. Those
+// calls used to be unchecked type assertions, which made a backend without the
+// atomic interface panic instead of failing with a readable reason.
 type EntryAdmissionTestStore interface {
 	engine.StateStore
+	engine.AtomicStateStore
 	engine.EntryAdmissionStore
 }
 

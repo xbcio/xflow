@@ -46,8 +46,10 @@ type IdempotencyStoreFactory func(t *testing.T) IdempotencyHarness
 // between claim and creation), answer for work it was not asked to do (a
 // conflicting reuse of a key), or answer for work that never happened (a
 // claim left behind by a refusal that created nothing).
-func RunIdempotencyContract(t *testing.T, newStore IdempotencyStoreFactory) {
+func RunIdempotencyContract(t *testing.T, manifest *Manifest, newStore IdempotencyStoreFactory) {
 	t.Helper()
+	manifest.Report(t)
+	manifest.RequireDeclared(t, CapabilityIdempotentStateStore)
 	t.Run("RetryReturnsTheOriginalExecution", func(t *testing.T) {
 		idempotencyRetryReturnsTheOriginal(t, newStore(t))
 	})
@@ -67,7 +69,7 @@ func RunIdempotencyContract(t *testing.T, newStore IdempotencyStoreFactory) {
 		idempotencyLiveClaimIsInProgress(t, newStore(t))
 	})
 	t.Run("QueuedDuplicateReportsQueued", func(t *testing.T) {
-		idempotencyQueuedDuplicateReportsQueued(t, newStore(t))
+		idempotencyQueuedDuplicateReportsQueued(t, manifest, newStore(t))
 	})
 	t.Run("ExecutionWithoutClaimIsADuplicate", func(t *testing.T) {
 		idempotencyExecutionWithoutClaimIsADuplicate(t, newStore(t))
@@ -82,10 +84,10 @@ func RunIdempotencyContract(t *testing.T, newStore IdempotencyStoreFactory) {
 		idempotencyConcurrentRequestsCreateOne(t, newStore(t))
 	})
 	t.Run("RerunRetryReturnsTheOriginalRerun", func(t *testing.T) {
-		idempotencyRerunRetryReturnsTheOriginal(t, newStore(t))
+		idempotencyRerunRetryReturnsTheOriginal(t, manifest, newStore(t))
 	})
 	t.Run("RerunFromNodeIsPartOfTheFingerprint", func(t *testing.T) {
-		idempotencyRerunFromNodeIsPartOfTheFingerprint(t, newStore(t))
+		idempotencyRerunFromNodeIsPartOfTheFingerprint(t, manifest, newStore(t))
 	})
 }
 
@@ -361,10 +363,13 @@ func idempotencyLiveClaimIsInProgress(t *testing.T, h IdempotencyHarness) {
 	}
 }
 
-func idempotencyQueuedDuplicateReportsQueued(t *testing.T, h IdempotencyHarness) {
+func idempotencyQueuedDuplicateReportsQueued(t *testing.T, manifest *Manifest, h IdempotencyHarness) {
 	store := idempotencyCapability(t, h.State)
-	if _, ok := h.State.(engine.ConcurrencyLimitedStateStore); !ok {
-		t.Skip("store cannot limit concurrency")
+	if _, ok := OptionalCapability[engine.ConcurrencyLimitedStateStore](t, manifest, CapabilityConcurrencyLimitedStateStore, h.State); !ok {
+		return
+	}
+	if !manifest.SkipUnlessDeclared(t, CapabilityConcurrencyQueueMode) {
+		return
 	}
 	eng := engine.New(h.State, discardQueue{})
 	g := idempotencyGraph(t, "idem-queued", &types.ConcurrencySettings{Limit: 1, Mode: types.ConcurrencyModeQueue})
@@ -375,7 +380,11 @@ func idempotencyQueuedDuplicateReportsQueued(t *testing.T, h IdempotencyHarness)
 	ctx, _ := keyedContext("workflow:wf-queued", "k")
 	id, err := eng.Submit(ctx, g, nil)
 	if errors.Is(err, engine.ErrConcurrencyQueueUnsupported) {
-		t.Skip("store cannot queue")
+		// The manifest declares queue mode, and the queue suite is what proves
+		// the parking/promotion behaviour. A refusal here contradicts the
+		// declaration, so it is a failure rather than a quiet skip.
+		t.Fatalf("backend %q declares %s but keyed Submit refused a queue-mode graph with "+
+			"ErrConcurrencyQueueUnsupported", manifest.Backend(), CapabilityConcurrencyQueueMode)
 	}
 	if err != nil {
 		t.Fatalf("keyed queued Submit error = %v", err)
@@ -519,9 +528,9 @@ func idempotencyConcurrentRequestsCreateOne(t *testing.T, h IdempotencyHarness) 
 	mustExecution(t, h.State, want)
 }
 
-func idempotencyRerunRetryReturnsTheOriginal(t *testing.T, h IdempotencyHarness) {
-	if _, ok := h.State.(engine.ExecutionSeeder); !ok {
-		t.Skip("store cannot seed a rerun")
+func idempotencyRerunRetryReturnsTheOriginal(t *testing.T, manifest *Manifest, h IdempotencyHarness) {
+	if _, ok := OptionalCapability[engine.ExecutionSeeder](t, manifest, CapabilityExecutionSeeder, h.State); !ok {
+		return
 	}
 	eng := engine.New(h.State, discardQueue{})
 	g := idempotencyGraph(t, "idem-rerun", nil)
@@ -579,9 +588,9 @@ func idempotencyRerunRetryReturnsTheOriginal(t *testing.T, h IdempotencyHarness)
 // are different requests, not a retry of one. The second must be refused as a
 // conflict — answering duplicate would hand the caller a rerun that starts
 // somewhere it did not ask for.
-func idempotencyRerunFromNodeIsPartOfTheFingerprint(t *testing.T, h IdempotencyHarness) {
-	if _, ok := h.State.(engine.ExecutionSeeder); !ok {
-		t.Skip("store cannot seed a rerun")
+func idempotencyRerunFromNodeIsPartOfTheFingerprint(t *testing.T, manifest *Manifest, h IdempotencyHarness) {
+	if _, ok := OptionalCapability[engine.ExecutionSeeder](t, manifest, CapabilityExecutionSeeder, h.State); !ok {
+		return
 	}
 	eng := engine.New(h.State, discardQueue{})
 	g := idempotencyTwoRootGraph(t, "idem-rerun-from")

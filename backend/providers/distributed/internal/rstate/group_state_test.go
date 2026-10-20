@@ -18,7 +18,7 @@ func TestMiniredisGroupStateContract(t *testing.T) {
 	}
 	t.Cleanup(srv.Close)
 
-	statestoretest.RunGroupStateContract(t, func(t *testing.T) statestoretest.GroupStore {
+	statestoretest.RunGroupStateContract(t, rstateCapabilityManifest(), func(t *testing.T) statestoretest.GroupStore {
 		rdb := redis.NewClient(&redis.Options{Addr: srv.Addr()})
 		t.Cleanup(func() { _ = rdb.Close() })
 		return New(rdb, nil, time.Minute)
@@ -47,7 +47,7 @@ func freshRealRedis(t *testing.T, addr string) *redis.Client {
 // against a real Redis instance when XFLOW_TEST_REDIS_ADDR is set.
 func TestRedisGroupStateContract(t *testing.T) {
 	addr := realRedisAddr(t)
-	statestoretest.RunGroupStateContract(t, func(t *testing.T) statestoretest.GroupStore {
+	statestoretest.RunGroupStateContract(t, rstateCapabilityManifest(), func(t *testing.T) statestoretest.GroupStore {
 		return New(freshRealRedis(t, addr), nil, time.Minute)
 	})
 }

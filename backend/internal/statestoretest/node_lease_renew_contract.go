@@ -26,7 +26,9 @@ type NodeLeaseRenewStore interface {
 // user-supplied options.timeout above the TTL therefore gets reclaimed and
 // redelivered while its runner is healthily working — two runners then execute
 // the same node.
-func RunNodeLeaseRenewContract(t *testing.T, newStore func(*testing.T) NodeLeaseRenewStore) {
+func RunNodeLeaseRenewContract(t *testing.T, manifest *Manifest, newStore func(*testing.T) NodeLeaseRenewStore) {
+	t.Helper()
+	manifest.Report(t)
 	ctx := context.Background()
 
 	seed := func(t *testing.T) (NodeLeaseRenewStore, types.ExecutionID, *engine.TaskLease) {
@@ -211,9 +213,9 @@ func RunNodeLeaseRenewContract(t *testing.T, newStore func(*testing.T) NodeLease
 	// item has already been requeued to another runner.
 	t.Run("RenewRejectedAfterLeaseRevoked", func(t *testing.T) {
 		s, id, lease := seed(t)
-		atomic, ok := s.(engine.AtomicStateStore)
+		atomic, ok := OptionalCapability[engine.AtomicStateStore](t, manifest, CapabilityAtomicStateStore, s)
 		if !ok {
-			t.Skip("backend does not implement AtomicStateStore")
+			return
 		}
 		revoked, err := atomic.RevokeLeaseWithOutbox(ctx, id, "start", lease.LeaseToken, engine.OutboxEntry{
 			ID: "requeue/" + string(id), Task: lease.Task})

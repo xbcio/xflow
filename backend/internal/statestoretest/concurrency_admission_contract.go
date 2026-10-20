@@ -27,8 +27,10 @@ type ConcurrencyStoreFactory func(t *testing.T) engine.StateStore
 // zero-node execution), and a release that is wired at one engine call site
 // instead of into the store's terminal writers (slots that leak until restart,
 // silently lowering the effective limit).
-func RunConcurrencyAdmissionContract(t *testing.T, newStore ConcurrencyStoreFactory) {
+func RunConcurrencyAdmissionContract(t *testing.T, manifest *Manifest, newStore ConcurrencyStoreFactory) {
 	t.Helper()
+	manifest.Report(t)
+	manifest.RequireDeclared(t, CapabilityConcurrencyLimitedStateStore)
 	t.Run("AdmitsUntilTheLimit", func(t *testing.T) {
 		admissionAdmitsUntilTheLimit(t, newStore(t))
 	})
@@ -388,7 +390,11 @@ func admissionReleasesOnAtomicCompletion(t *testing.T, state engine.StateStore) 
 	limited := concurrencyCapability(t, state)
 	atomic, ok := state.(engine.AtomicStateStore)
 	if !ok {
-		t.Skipf("%T does not implement AtomicStateStore", state)
+		// ConcurrencyLimitedStateStore embeds AtomicStateStore, so the failure
+		// above would already have fired. Keep this as a hard failure rather
+		// than a skip: the atomic release path is part of what this suite
+		// covers, not an optional extra.
+		t.Fatalf("%T implements ConcurrencyLimitedStateStore but not AtomicStateStore", state)
 	}
 	ctx := context.Background()
 	g := concurrencyGraph(t, "conc-atomic-release")
