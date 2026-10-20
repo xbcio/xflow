@@ -19,7 +19,8 @@
   "dependencies": {
     "@ant-design/icons": "6.3.2",
     "@xflow/core": "workspace:*",
-    "@xyflow/react": "12.5.0"
+    "@xyflow/react": "12.5.0",
+    "antd": "6.5.2"
   },
   "devDependencies": {
     "@types/react": "19.2.18",

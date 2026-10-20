@@ -1,786 +1,1100 @@
-.xflow-preview {
-  /*
-   * Theme contract: an embedding XFlow surface may provide the public
-   * --xflow-* semantic tokens. Keep those tokens outside this scope so the
-   * preview can inherit them; these private aliases retain its dark standalone
-   * appearance when it is rendered without an editor shell.
-   */
+@layer xflow.preview {
+  .xflow-preview {
+    /*
+     * Component-level variables. They resolve from the shared --xflow-* tokens
+     * (@xflow/core tokens.css), which the embedding surface provides: the editor
+     * root, or a `.xflow-preview-root[data-theme]` host. The preview carries no
+     * palette of its own, so a host restyles it by overriding these
+     * --xflow-preview-* variables.
+     */
+
+    /* Surfaces / canvas */
+    --xflow-preview-surface-app: var(--xflow-app);
+    --xflow-preview-surface-toolbar: var(--xflow-panel);
+    --xflow-preview-surface-panel: var(--xflow-panel);
+    --xflow-preview-surface-panel-raised: var(--xflow-panel-raised);
+    --xflow-preview-surface-canvas: var(--xflow-canvas);
+    --xflow-preview-surface-control: var(--xflow-field);
+    --xflow-preview-surface-hover: var(--xflow-hover);
+    --xflow-preview-minimap-mask: var(--xflow-minimap-mask);
+    /* The viewport frame on the minimap: the baseline's 1.5px primary outline. */
+    --xflow-preview-minimap-view: var(--xflow-primary);
+
+    /* Text / borders / focus */
+    --xflow-preview-text: var(--xflow-text);
+    --xflow-preview-text-secondary: var(--xflow-text-secondary);
+    --xflow-preview-text-muted: var(--xflow-text-tertiary);
+    --xflow-preview-text-pill: var(--xflow-text-secondary);
+    --xflow-preview-border: var(--xflow-border);
+    --xflow-preview-focus-subtle: var(--xflow-primary-bg-subtle);
+    --xflow-preview-focus-ring: var(--xflow-primary-ring);
+
+    /* Runtime status */
+    --xflow-preview-status-running: var(--xflow-info);
+    --xflow-preview-status-warning: var(--xflow-warning);
+    --xflow-preview-status-error: var(--xflow-danger);
+
+    /* Nodes / ports / edges */
+    --xflow-preview-node-bg: var(--xflow-panel);
+    --xflow-preview-node-border: var(--xflow-border);
+    --xflow-preview-node-shadow: var(--xflow-elev-1);
+    --xflow-preview-node-meta-bg: var(--xflow-panel-raised);
+    --xflow-preview-node-width: var(--xflow-node-width);
+    /* Defaults for values index.tsx writes at runtime: the category colour is set
+       inline on each card, the zoom divisor on the canvas (see LodScaleVariables). */
+    --xflow-preview-node-category: var(--xflow-neutral);
+    --xflow-preview-lod: 1;
+    --xflow-preview-node-selected-border: var(--xflow-primary);
+    --xflow-preview-node-selected-ring: var(--xflow-primary-ring);
+    --xflow-preview-port: var(--xflow-panel);
+    --xflow-preview-port-border: var(--xflow-border-strong);
+    --xflow-preview-port-chip-bg: var(--xflow-primary-bg-subtle);
+    --xflow-preview-port-chip-border: var(--xflow-primary-border);
+    --xflow-preview-port-chip-text: var(--xflow-text-tertiary);
+    --xflow-preview-edge: var(--xflow-border-strong);
+    --xflow-preview-edge-error: var(--xflow-danger);
+    --xflow-preview-edge-selected: var(--xflow-primary);
+    --xflow-preview-edge-running: var(--xflow-info);
+    --xflow-preview-edge-label: var(--xflow-text-secondary);
+    /* An edge whose source port no longer exists (danglingPorts prop). */
+    --xflow-preview-edge-dangling: var(--xflow-warning);
+    --xflow-preview-edge-dangling-label: var(--xflow-warning-fg);
+    --xflow-preview-edge-label-bg: var(--xflow-canvas);
+
+    background: var(--xflow-preview-surface-app);
+    border: 1px solid var(--xflow-preview-border);
+    color: var(--xflow-preview-text);
+    display: flex;
+    flex-direction: column;
+    font-family: var(--xflow-font-sans);
+    min-height: 420px;
+  }
+
+  .xflow-preview * {
+    box-sizing: border-box;
+  }
+
+  .xflow-preview-toolbar {
+    align-items: center;
+    background: var(--xflow-preview-surface-toolbar);
+    border-bottom: 1px solid var(--xflow-preview-border);
+    display: flex;
+    justify-content: space-between;
+    min-height: 48px;
+    padding: 8px 14px;
+  }
+
+  .xflow-preview-toolbar p,
+  .xflow-preview-toolbar h2 {
+    margin: 0;
+  }
+
+  .xflow-preview-toolbar p {
+    color: var(--xflow-preview-text-muted);
+    font-size: 11px;
+  }
+
+  .xflow-preview-toolbar h2 {
+    font-size: 14px;
+    font-weight: 650;
+  }
+
+  /* Same shape as the baseline chip (.xflow-pv-chip) and the node's status chip:
+     pill, 20px tall, 0 8px padding, 11px type. */
+  .xflow-preview-status {
+    align-items: center;
+    border: 1px solid var(--xflow-preview-border);
+    border-radius: var(--xflow-radius-pill);
+    color: var(--xflow-preview-text-muted);
+    display: inline-flex;
+    font-size: var(--xflow-font-xs);
+    font-weight: 500;
+    height: 20px;
+    padding: 0 8px;
+    white-space: nowrap;
+  }
+
+  /* The workflow pill takes the tone of its status from core's table (data-tone):
+     fill, border and text all derive from the one semantic colour, as the baseline's
+     run-bar chip does. */
+  .xflow-preview-status[data-tone] {
+    background: var(--xflow-preview-t-bg);
+    border-color: var(--xflow-preview-t-border);
+    color: var(--xflow-preview-t-fg);
+  }
 
-  /* Surfaces / canvas */
-  --xflow-preview-surface-app: var(--xflow-surface-app, #171717);
-  --xflow-preview-surface-toolbar: var(--xflow-surface-toolbar, #1f1f1f);
-  --xflow-preview-surface-panel: var(--xflow-surface-panel, #202020);
-  --xflow-preview-surface-panel-raised: var(--xflow-surface-panel-raised, #262626);
-  --xflow-preview-surface-field: var(--xflow-surface-field, #1f2125);
-  --xflow-preview-surface-canvas: var(--xflow-surface-canvas, #222);
-  --xflow-preview-surface-control: var(
-    --xflow-surface-control,
-    var(--xflow-surface-field, #252525)
-  );
-  --xflow-preview-surface-hover: var(--xflow-surface-hover, #303030);
-  --xflow-preview-canvas-grid: var(--xflow-canvas-grid-minor, #3b3b3b);
-  --xflow-preview-canvas-grid-major: var(
-    --xflow-canvas-grid-major,
-    var(--xflow-canvas-grid-minor, #3b3b3b)
-  );
-  --xflow-preview-minimap-mask: var(--xflow-canvas-minimap-mask, rgba(16, 18, 20, .58));
-
-  /* Text / borders / focus */
-  --xflow-preview-text: var(--xflow-text, #f2f2f2);
-  --xflow-preview-text-secondary: var(--xflow-text-secondary, #c7c7c7);
-  --xflow-preview-text-muted: var(--xflow-text-tertiary, #9b9b9b);
-  --xflow-preview-text-meta: var(--xflow-text-secondary, #cfd4dc);
-  --xflow-preview-text-pill: var(--xflow-text-secondary, #cfcfcf);
-  --xflow-preview-border: var(--xflow-border, #343434);
-  --xflow-preview-border-strong: var(--xflow-border-strong, #454951);
-  --xflow-preview-focus-base: var(--xflow-focus, #2878ff);
-  --xflow-preview-focus: var(--xflow-focus, #8db5ff);
-  --xflow-preview-focus-subtle: var(
-    --xflow-focus-subtle,
-    color-mix(in srgb, var(--xflow-preview-focus-base) 9%, transparent)
-  );
-  --xflow-preview-focus-border-strong: var(
-    --xflow-focus-border-strong,
-    color-mix(in srgb, var(--xflow-preview-focus-base) 42%, transparent)
-  );
-  --xflow-preview-focus-ring: var(
-    --xflow-focus-ring,
-    color-mix(in srgb, var(--xflow-preview-focus-base) 58%, transparent)
-  );
-
-  /* Runtime status */
-  --xflow-preview-status-running: var(--xflow-status-running, var(--xflow-focus, #2878ff));
-  --xflow-preview-status-running-text: var(
-    --xflow-status-running-text,
-    var(--xflow-status-running, var(--xflow-focus, #8db5ff))
-  );
-  --xflow-preview-status-running-border: var(
-    --xflow-status-running-border,
-    color-mix(in srgb, var(--xflow-preview-status-running) 58%, transparent)
-  );
-  --xflow-preview-status-success: var(--xflow-status-success, #35c98b);
-  --xflow-preview-status-success-text: var(
-    --xflow-status-success-text,
-    var(--xflow-preview-status-success)
-  );
-  --xflow-preview-status-success-border: var(
-    --xflow-status-success-border,
-    color-mix(in srgb, var(--xflow-preview-status-success) 56%, transparent)
-  );
-  --xflow-preview-status-warning: var(--xflow-status-warning, #f7b955);
-  --xflow-preview-status-error: var(--xflow-status-error, #ff5f57);
-  --xflow-preview-status-error-text: var(
-    --xflow-status-error-text,
-    var(--xflow-preview-status-error)
-  );
-  --xflow-preview-status-error-border: var(
-    --xflow-status-error-border,
-    color-mix(in srgb, var(--xflow-preview-status-error) 58%, transparent)
-  );
-  --xflow-preview-status-disabled: var(--xflow-status-disabled, #747b86);
-  --xflow-preview-status-disabled-text: var(
-    --xflow-status-disabled-text,
-    var(--xflow-preview-status-disabled)
-  );
-  --xflow-preview-status-disabled-border: var(
-    --xflow-status-disabled-border,
-    color-mix(in srgb, var(--xflow-preview-status-disabled) 58%, transparent)
-  );
-
-  /* Nodes / ports / edges */
-  --xflow-preview-node-bg: var(--xflow-node-bg, #292b2f);
-  --xflow-preview-node-border: var(
-    --xflow-node-border,
-    var(--xflow-preview-border-strong)
-  );
-  --xflow-preview-node-shadow: var(--xflow-node-shadow, 0 12px 28px rgba(0, 0, 0, .24));
-  --xflow-preview-node-meta-bg: var(
-    --xflow-node-meta-bg,
-    var(--xflow-preview-surface-field)
-  );
-  --xflow-preview-node-width: var(--xflow-node-width, 232px);
-  --xflow-preview-node-selected-border: var(
-    --xflow-node-selected-border,
-    var(--xflow-preview-focus-base)
-  );
-  --xflow-preview-node-selected-ring: var(
-    --xflow-node-selected-ring,
-    color-mix(in srgb, var(--xflow-preview-focus-base) 22%, transparent)
-  );
-  --xflow-preview-node-disabled-opacity: var(--xflow-node-disabled-opacity, 0.55);
-  --xflow-preview-port: var(--xflow-port-bg, var(--xflow-preview-focus));
-  --xflow-preview-port-border: var(--xflow-port-border, var(--xflow-surface-canvas, #202226));
-  --xflow-preview-port-disabled: var(
-    --xflow-port-disabled,
-    var(--xflow-preview-status-disabled)
-  );
-  --xflow-preview-port-chip-bg: var(
-    --xflow-port-chip-bg,
-    color-mix(in srgb, var(--xflow-preview-focus-base) 18%, transparent)
-  );
-  --xflow-preview-port-chip-border: var(
-    --xflow-port-chip-border,
-    var(--xflow-preview-focus-border-strong)
-  );
-  --xflow-preview-port-chip-text: var(--xflow-port-text, var(--xflow-preview-focus));
-  --xflow-preview-edge: var(--xflow-edge, #5b5b5b);
-  --xflow-preview-edge-error: var(
-    --xflow-edge-error,
-    var(--xflow-preview-status-error)
-  );
-  --xflow-preview-edge-selected: var(
-    --xflow-edge-selected,
-    var(--xflow-preview-focus)
-  );
-  --xflow-preview-edge-running: var(
-    --xflow-edge-running,
-    var(--xflow-status-running, var(--xflow-focus, #2878ff))
-  );
-  --xflow-preview-edge-label: var(--xflow-edge-label, var(--xflow-status-warning, #f7b955));
-  /* An edge whose source port no longer exists (danglingPorts prop). */
-  --xflow-preview-edge-dangling: var(
-    --xflow-edge-dangling,
-    var(--xflow-preview-status-warning)
-  );
-  --xflow-preview-edge-dangling-label: var(
-    --xflow-edge-dangling-label,
-    var(--xflow-status-warning-text, var(--xflow-preview-status-warning))
-  );
-  --xflow-preview-edge-label-bg: var(
-    --xflow-edge-label-bg,
-    var(--xflow-surface-canvas, #202020)
-  );
-
-  /* Node type tones */
-  --xflow-preview-tone-blue-base: var(--xflow-node-tone-blue, var(--xflow-focus, #2878ff));
-  --xflow-preview-tone-blue: var(
-    --xflow-node-tone-blue-text,
-    var(--xflow-node-tone-blue, var(--xflow-focus, #8db5ff))
-  );
-  --xflow-preview-tone-blue-bg: var(
-    --xflow-node-tone-blue-bg,
-    color-mix(in srgb, var(--xflow-preview-tone-blue-base) 9%, transparent)
-  );
-  --xflow-preview-tone-blue-border: var(
-    --xflow-node-tone-blue-border,
-    color-mix(in srgb, var(--xflow-preview-tone-blue-base) 20%, transparent)
-  );
-  --xflow-preview-tone-cyan-base: var(--xflow-node-tone-cyan, #19c2d6);
-  --xflow-preview-tone-cyan: var(--xflow-node-tone-cyan-text, var(--xflow-node-tone-cyan, #55d7e6));
-  --xflow-preview-tone-cyan-bg: var(
-    --xflow-node-tone-cyan-bg,
-    color-mix(in srgb, var(--xflow-preview-tone-cyan-base) 8%, transparent)
-  );
-  --xflow-preview-tone-cyan-border: var(
-    --xflow-node-tone-cyan-border,
-    color-mix(in srgb, var(--xflow-preview-tone-cyan-base) 18%, transparent)
-  );
-  --xflow-preview-tone-green-base: var(--xflow-node-tone-green, #35c98b);
-  --xflow-preview-tone-green: var(
-    --xflow-node-tone-green-text,
-    var(--xflow-node-tone-green, #67d9a7)
-  );
-  --xflow-preview-tone-green-bg: var(
-    --xflow-node-tone-green-bg,
-    color-mix(in srgb, var(--xflow-preview-tone-green-base) 8%, transparent)
-  );
-  --xflow-preview-tone-green-border: var(
-    --xflow-node-tone-green-border,
-    color-mix(in srgb, var(--xflow-preview-tone-green-base) 18%, transparent)
-  );
-  --xflow-preview-tone-amber-base: var(--xflow-node-tone-amber, #f7b955);
-  --xflow-preview-tone-amber: var(
-    --xflow-node-tone-amber-text,
-    var(--xflow-node-tone-amber, #f7b955)
-  );
-  --xflow-preview-tone-amber-bg: var(
-    --xflow-node-tone-amber-bg,
-    color-mix(in srgb, var(--xflow-preview-tone-amber-base) 8%, transparent)
-  );
-  --xflow-preview-tone-amber-border: var(
-    --xflow-node-tone-amber-border,
-    color-mix(in srgb, var(--xflow-preview-tone-amber-base) 20%, transparent)
-  );
-  --xflow-preview-tone-violet-base: var(--xflow-node-tone-violet, #8b6dff);
-  --xflow-preview-tone-violet: var(
-    --xflow-node-tone-violet-text,
-    var(--xflow-node-tone-violet, #a99bff)
-  );
-  --xflow-preview-tone-violet-bg: var(
-    --xflow-node-tone-violet-bg,
-    color-mix(in srgb, var(--xflow-preview-tone-violet-base) 9%, transparent)
-  );
-  --xflow-preview-tone-violet-border: var(
-    --xflow-node-tone-violet-border,
-    color-mix(in srgb, var(--xflow-preview-tone-violet-base) 20%, transparent)
-  );
-
-  background: var(--xflow-preview-surface-app);
-  border: 1px solid var(--xflow-preview-border);
-  color: var(--xflow-preview-text);
-  display: flex;
-  flex-direction: column;
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  min-height: 420px;
-}
-
-.xflow-preview * {
-  box-sizing: border-box;
-}
-
-.xflow-preview-toolbar {
-  align-items: center;
-  background: var(--xflow-preview-surface-toolbar);
-  border-bottom: 1px solid var(--xflow-preview-border);
-  display: flex;
-  justify-content: space-between;
-  min-height: 48px;
-  padding: 8px 14px;
-}
-
-.xflow-preview-toolbar p,
-.xflow-preview-toolbar h2 {
-  margin: 0;
-}
-
-.xflow-preview-toolbar p {
-  color: var(--xflow-preview-text-muted);
-  font-size: 11px;
-}
-
-.xflow-preview-toolbar h2 {
-  font-size: 14px;
-  font-weight: 650;
-}
-
-.xflow-preview-status {
-  border: 1px solid var(--xflow-preview-border);
-  border-radius: 4px;
-  color: var(--xflow-preview-text-muted);
-  font-size: 12px;
-  padding: 4px 8px;
-}
-
-.xflow-preview-status[data-status="running"] {
-  border-color: var(--xflow-preview-status-running);
-  color: var(--xflow-preview-status-running-text);
-}
-
-.xflow-preview-status[data-status="success"] {
-  border-color: var(--xflow-preview-status-success);
-  color: var(--xflow-preview-status-success-text);
-}
-
-.xflow-preview-status[data-status="failed"] {
-  border-color: var(--xflow-preview-status-error);
-  color: var(--xflow-preview-status-error-text);
-}
-
-.xflow-preview-shell {
-  display: grid;
-  flex: 1;
-  grid-template-columns: 88px minmax(0, 1fr) 240px;
-  min-height: 0;
-}
-
-.xflow-preview-sidebar,
-.xflow-preview-panel {
-  background: var(--xflow-preview-surface-panel);
-  border-color: var(--xflow-preview-border);
-  color: var(--xflow-preview-text-muted);
-  font-size: 12px;
-  padding: 14px;
-}
-
-.xflow-preview-sidebar {
-  border-right: 1px solid var(--xflow-preview-border);
-}
-
-.xflow-preview-sidebar strong {
-  color: var(--xflow-preview-text);
-  display: block;
-  font-size: 24px;
-  margin-top: 8px;
-}
-
-.xflow-preview-panel {
-  border-left: 1px solid var(--xflow-preview-border);
-}
-
-.xflow-preview-panel > span {
-  color: var(--xflow-preview-text);
-  display: block;
-  font-weight: 650;
-  margin-bottom: 10px;
-}
-
-.xflow-preview-canvas {
-  background: var(--xflow-preview-surface-canvas);
-  min-height: 360px;
-  min-width: 0;
-  position: relative;
-}
-
-.xflow-preview-canvas .react-flow {
-  --xy-background-color: var(--xflow-preview-surface-canvas);
-  --xy-background-pattern-color: var(--xflow-preview-canvas-grid);
-  --xy-edge-stroke: var(--xflow-preview-edge);
-  --xy-edge-stroke-selected: var(--xflow-preview-edge-selected);
-  --xy-connectionline-stroke: var(--xflow-preview-edge-running);
-  --xy-selection-background-color: var(--xflow-preview-focus-subtle);
-  --xy-selection-border: 1px dotted var(--xflow-preview-focus-ring);
-  --xy-handle-background-color: var(--xflow-preview-port);
-  --xy-handle-border-color: var(--xflow-preview-port-border);
-  --xy-controls-button-background-color: var(--xflow-preview-surface-control);
-  --xy-controls-button-background-color-hover: var(--xflow-preview-surface-hover);
-  --xy-controls-button-color: var(--xflow-preview-text);
-  --xy-controls-button-color-hover: var(--xflow-preview-text);
-  --xy-controls-button-border-color: var(--xflow-preview-border);
-  --xy-edge-label-background-color: var(--xflow-preview-edge-label-bg);
-  --xy-edge-label-color: var(--xflow-preview-edge-label);
-  background: var(--xflow-preview-surface-canvas);
-}
-
-.xflow-preview-canvas .react-flow__background {
-  /* Override the Background color prop so an embedding theme controls the grid. */
-  /* !important: xyflow's <Background> writes this variable as an inline style from its color prop. */
-  --xy-background-pattern-color-props: var(--xflow-preview-canvas-grid-major) !important;
-}
-
-.xflow-preview-canvas .react-flow__controls {
-  background: var(--xflow-preview-surface-control);
-  border: 1px solid var(--xflow-preview-border);
-  box-shadow: none;
-}
-
-.xflow-preview-canvas .react-flow__controls button {
-  background: var(--xflow-preview-surface-control);
-  border-bottom: 1px solid var(--xflow-preview-border);
-  color: var(--xflow-preview-text);
-}
-
-.xflow-preview-canvas .react-flow__controls button:hover {
-  background: var(--xflow-preview-surface-hover);
-}
-
-.xflow-preview-canvas .react-flow__minimap {
-  background: var(--xflow-preview-surface-panel);
-  border: 1px solid var(--xflow-preview-border);
-  border-radius: 4px;
-}
-
-.xflow-preview-canvas .react-flow__edge-path {
-  stroke-linecap: round;
-}
-
-.xflow-preview-canvas .react-flow__edge:focus-visible .react-flow__edge-path,
-.xflow-preview-canvas .react-flow__edge.selected .react-flow__edge-path {
-  /* !important: xyflow renders the edge's style.stroke as an inline style on the path. */
-  stroke: var(--xflow-preview-edge-selected) !important;
-  stroke-width: 2.4;
-}
-
-.xflow-preview-canvas .react-flow__edge-textbg {
-  fill: var(--xflow-preview-edge-label-bg);
-}
-
-.xflow-preview-canvas .react-flow__edge-text {
-  fill: var(--xflow-preview-edge-label);
-  font-size: 11px;
-}
-
-.xflow-preview-node {
-  background: var(--xflow-preview-node-bg);
-  border: 1px solid var(--xflow-preview-node-border);
-  border-radius: 8px;
-  box-shadow: var(--xflow-preview-node-shadow);
-  max-width: var(--xflow-preview-node-width);
-  min-width: var(--xflow-preview-node-width);
-  padding: 10px 12px;
-  position: relative;
-  transition: border-color 120ms ease, box-shadow 120ms ease, opacity 120ms ease;
-}
-
-.xflow-preview-node[data-selected="true"] {
-  border-color: var(--xflow-preview-node-selected-border);
-  box-shadow: var(--xflow-preview-node-shadow), 0 0 0 3px var(--xflow-preview-node-selected-ring);
-}
-
-.xflow-preview-node[data-disabled="true"] {
-  opacity: var(--xflow-preview-node-disabled-opacity);
-}
-
-.xflow-preview-node[data-disabled="true"] .xflow-preview-node__icon {
-  filter: grayscale(1);
-}
-
-.xflow-preview-node__select {
-  border-radius: inherit;
-  cursor: pointer;
-  outline: none;
-}
-
-.xflow-preview-node:has(.xflow-preview-node__select:focus-visible) {
-  outline: 2px solid var(--xflow-preview-focus-ring);
-  outline-offset: 2px;
-}
-
-.xflow-preview-canvas .xflow-preview-node__handle {
-  background: var(--xflow-preview-port);
-  border: 2px solid var(--xflow-preview-port-border);
-  height: 10px;
-  transition: height 120ms ease, width 120ms ease, box-shadow 120ms ease;
-  width: 10px;
-  z-index: 2;
-}
-
-.xflow-preview-canvas .xflow-preview-node__handle--target {
-  left: -6px;
-}
-
-.xflow-preview-canvas .xflow-preview-node__handle--source {
-  right: -6px;
-}
-
-.xflow-preview-canvas .xflow-preview-node:hover .xflow-preview-node__handle,
-.xflow-preview-canvas .xflow-preview-node__handle:hover {
-  height: 13px;
-  width: 13px;
-}
-
-.xflow-preview-canvas .xflow-preview-node__handle:hover {
-  box-shadow: 0 0 0 3px var(--xflow-preview-focus-subtle);
-}
-
-.xflow-preview-canvas .xflow-preview-node__handle[aria-disabled="true"] {
-  background: var(--xflow-preview-port-disabled);
-  cursor: not-allowed;
-  opacity: 0.65;
-}
-
-.xflow-preview-canvas .xflow-preview-node__handle:focus-visible {
-  box-shadow: 0 0 0 3px var(--xflow-preview-focus-ring);
-  outline: none;
-}
-
-.xflow-preview-node[data-status="running"],
-.xflow-preview-node[data-status="committing"] {
-  border-color: var(--xflow-preview-status-running);
-}
-
-.xflow-preview-node[data-status="success"] {
-  border-color: var(--xflow-preview-status-success);
-}
-
-.xflow-preview-node[data-status="failed"] {
-  border-color: var(--xflow-preview-status-error);
-}
-
-.xflow-preview-node[data-status="expired"] {
-  border-color: var(--xflow-preview-status-disabled);
-}
-
-/* Selection outranks run status: the border is how the author finds the node
- * the inspector is showing. */
-.xflow-preview-node[data-selected="true"][data-status] {
-  border-color: var(--xflow-preview-node-selected-border);
-}
-
-.xflow-preview-node__header {
-  align-items: center;
-  display: flex;
-  gap: 10px;
-  min-width: 0;
-}
-
-.xflow-preview-node__title {
-  display: grid;
-  flex: 1;
-  gap: 2px;
-  min-width: 0;
-}
-
-.xflow-preview-node__title strong {
-  color: var(--xflow-preview-text);
-  display: block;
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 18px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* The type and the disabled badge share the line under the name, so neither
- * competes with it for width; only the type gives ground when they collide. */
-.xflow-preview-node__subtitle {
-  align-items: center;
-  display: flex;
-  gap: 6px;
-  min-width: 0;
-}
-
-.xflow-preview-node__type {
-  color: var(--xflow-preview-text-muted);
-  flex: 0 1 auto;
-  font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 10.5px;
-  line-height: 14px;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.xflow-preview-node__icon {
-  align-items: center;
-  background: var(--xflow-preview-tone-blue-bg);
-  border: 1px solid var(--xflow-preview-tone-blue-border);
-  border-radius: 7px;
-  color: var(--xflow-preview-tone-blue);
-  display: inline-flex;
-  flex: 0 0 32px;
-  height: 32px;
-  justify-content: center;
-  width: 32px;
-}
-
-.xflow-preview-node__icon .anticon {
-  font-size: 16px;
-}
-
-.xflow-preview-node__icon[data-tone="green"] {
-  background: var(--xflow-preview-tone-green-bg);
-  border-color: var(--xflow-preview-tone-green-border);
-  color: var(--xflow-preview-tone-green);
-}
-
-.xflow-preview-node__icon[data-tone="cyan"] {
-  background: var(--xflow-preview-tone-cyan-bg);
-  border-color: var(--xflow-preview-tone-cyan-border);
-  color: var(--xflow-preview-tone-cyan);
-}
-
-.xflow-preview-node__icon[data-tone="amber"] {
-  background: var(--xflow-preview-tone-amber-bg);
-  border-color: var(--xflow-preview-tone-amber-border);
-  color: var(--xflow-preview-tone-amber);
-}
-
-.xflow-preview-node__icon[data-tone="violet"] {
-  background: var(--xflow-preview-tone-violet-bg);
-  border-color: var(--xflow-preview-tone-violet-border);
-  color: var(--xflow-preview-tone-violet);
-}
-
-.xflow-preview-node__status {
-  border: 1px solid var(--xflow-preview-border);
-  border-radius: 999px;
-  color: var(--xflow-preview-text-muted);
-  flex: 0 0 auto;
-  font-size: 10.5px;
-  line-height: 16px;
-  padding: 0 7px;
-  white-space: nowrap;
-}
-
-.xflow-preview-node__badge {
-  background: var(--xflow-preview-node-meta-bg);
-  border: 1px solid var(--xflow-preview-border);
-  border-radius: 4px;
-  color: var(--xflow-preview-status-disabled-text);
-  flex: 0 0 auto;
-  font-size: 10px;
-  line-height: 14px;
-  padding: 0 5px;
-  white-space: nowrap;
-}
-
-.xflow-preview-node__status::before {
-  background: currentcolor;
-  border-radius: 50%;
-  content: "";
-  display: inline-block;
-  height: 6px;
-  margin-right: 5px;
-  vertical-align: 1px;
-  width: 6px;
-}
-
-.xflow-preview-node__status[data-status="running"],
-.xflow-preview-node__status[data-status="committing"],
-.xflow-preview-node__status[data-status="waiting"] {
-  border-color: var(--xflow-preview-status-running-border);
-  color: var(--xflow-preview-status-running-text);
-}
-
-.xflow-preview-node__status[data-status="success"] {
-  border-color: var(--xflow-preview-status-success-border);
-  color: var(--xflow-preview-status-success-text);
-}
-
-.xflow-preview-node__status[data-status="failed"] {
-  border-color: var(--xflow-preview-status-error-border);
-  color: var(--xflow-preview-status-error-text);
-}
-
-.xflow-preview-node__status[data-status="expired"],
-.xflow-preview-node__status[data-status="skipped"],
-.xflow-preview-node__status[data-status="canceled"] {
-  border-color: var(--xflow-preview-status-disabled-border);
-  color: var(--xflow-preview-status-disabled-text);
-}
-
-.xflow-preview-node__body {
-  align-items: center;
-  border-top: 1px solid var(--xflow-preview-border);
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  justify-content: space-between;
-  margin-top: 9px;
-  padding-top: 8px;
-}
-
-.xflow-preview-node__port-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  min-width: 0;
-}
-
-.xflow-preview-node__port-chips span {
-  background: var(--xflow-preview-port-chip-bg);
-  border: 1px solid var(--xflow-preview-port-chip-border);
-  border-radius: 4px;
-  color: var(--xflow-preview-port-chip-text);
-  font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 10px;
-  line-height: 18px;
-  padding: 0 5px;
-}
-
-.xflow-preview-node__run-meta {
-  color: var(--xflow-preview-text-muted);
-  font-size: 11px;
-  margin-left: auto;
-  white-space: nowrap;
-}
-
-.xflow-preview-node__error {
-  color: var(--xflow-preview-status-error-text);
-  font-size: 12px;
-  margin: 8px 0 0;
-  overflow-wrap: anywhere;
-}
-
-.xflow-preview-summary,
-.xflow-preview-details {
-  border-bottom: 1px solid var(--xflow-preview-border);
-  margin-bottom: 12px;
-  padding-bottom: 12px;
-}
-
-.xflow-preview-summary > span,
-.xflow-preview-details > span {
-  color: var(--xflow-preview-text);
-  display: block;
-  font-weight: 650;
-  margin-bottom: 10px;
-}
-
-.xflow-preview-summary > div {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.xflow-preview-summary__pill {
-  background: var(--xflow-preview-surface-panel-raised);
-  border: 1px solid var(--xflow-preview-border);
-  border-radius: 4px;
-  color: var(--xflow-preview-text-pill);
-  font-size: 11px;
-  padding: 4px 7px;
-}
-
-.xflow-preview-details strong,
-.xflow-preview-details code,
-.xflow-preview-details p {
-  display: block;
-  margin: 0 0 7px;
-}
-
-.xflow-preview-details strong {
-  color: var(--xflow-preview-text);
-  font-size: 13px;
-}
-
-.xflow-preview-details code {
-  color: var(--xflow-preview-text-secondary);
-  font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 11px;
-}
-
-.xflow-preview-details p {
-  color: var(--xflow-preview-text-muted);
-  font-size: 12px;
-}
-
-.xflow-preview-edges {
-  display: grid;
-  gap: 8px;
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.xflow-preview-edges li {
-  background: var(--xflow-preview-surface-panel-raised);
-  border: 1px solid var(--xflow-preview-border);
-  border-radius: 4px;
-  display: grid;
-  gap: 5px;
-  grid-template-columns: minmax(0, 1fr) auto auto minmax(0, 1fr) auto;
-  padding: 8px;
-}
-
-.xflow-preview-edges span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.xflow-preview-edges span:nth-child(2),
-.xflow-preview-edges span:nth-child(5) {
-  color: var(--xflow-preview-status-warning);
-}
-
-.xflow-preview-empty {
-  color: var(--xflow-preview-text-muted);
-  font-size: 13px;
-  margin: 0;
-  /* The empty canvas stays a drop target, so the note may not swallow the
-     pointer; it only needs to be readable above the mounted React Flow. */
-  left: 50%;
-  pointer-events: none;
-  position: absolute;
-  text-align: center;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  z-index: 1;
-}
-
-@media (max-width: 860px) {
   .xflow-preview-shell {
-    grid-template-columns: 1fr;
+    display: grid;
+    flex: 1;
+    grid-template-columns: 88px minmax(0, 1fr) 240px;
+    min-height: 0;
   }
 
   .xflow-preview-sidebar,
   .xflow-preview-panel {
-    border: 0;
+    background: var(--xflow-preview-surface-panel);
+    border-color: var(--xflow-preview-border);
+    color: var(--xflow-preview-text-muted);
+    font-size: 12px;
+    padding: 14px;
+  }
+
+  .xflow-preview-sidebar {
+    border-right: 1px solid var(--xflow-preview-border);
+  }
+
+  .xflow-preview-sidebar strong {
+    color: var(--xflow-preview-text);
+    display: block;
+    font-size: 24px;
+    margin-top: 8px;
+  }
+
+  .xflow-preview-panel {
+    border-left: 1px solid var(--xflow-preview-border);
+  }
+
+  .xflow-preview-panel > span {
+    color: var(--xflow-preview-text);
+    display: block;
+    font-weight: 650;
+    margin-bottom: 10px;
+  }
+
+  .xflow-preview-canvas {
+    background: var(--xflow-preview-surface-canvas);
+    min-height: 360px;
+    min-width: 0;
+    position: relative;
+  }
+
+  .xflow-preview-canvas .react-flow {
+    --xy-background-color: var(--xflow-preview-surface-canvas);
+    --xy-edge-stroke: var(--xflow-preview-edge);
+    --xy-edge-stroke-selected: var(--xflow-preview-edge-selected);
+    --xy-connectionline-stroke: var(--xflow-preview-edge-running);
+    --xy-selection-background-color: var(--xflow-preview-focus-subtle);
+    --xy-selection-border: 1px dotted var(--xflow-preview-focus-ring);
+    --xy-handle-background-color: var(--xflow-preview-port);
+    --xy-handle-border-color: var(--xflow-preview-port-border);
+    --xy-controls-button-background-color: var(--xflow-preview-surface-control);
+    --xy-controls-button-background-color-hover: var(--xflow-preview-surface-hover);
+    --xy-controls-button-color: var(--xflow-preview-text);
+    --xy-controls-button-color-hover: var(--xflow-preview-text);
+    --xy-controls-button-border-color: var(--xflow-preview-border);
+    --xy-edge-label-background-color: var(--xflow-preview-edge-label-bg);
+    --xy-edge-label-color: var(--xflow-preview-edge-label);
+    background: var(--xflow-preview-surface-canvas);
+  }
+
+  /* ---- Canvas chrome (§6.2): rulers, zoom bar, minimap ----
+     Floating layers are measured from the ruler's inner edge, so turning the
+     rulers off moves them out to the canvas edge. */
+  .xflow-preview-canvas {
+    --xflow-preview-ruler-inset: 0px;
+    --xflow-preview-float-inset: 16px;
+  }
+
+  .xflow-preview-canvas[data-ruler="true"] {
+    --xflow-preview-ruler-inset: var(--xflow-ruler);
+  }
+
+  .xflow-preview-ruler,
+  .xflow-preview-ruler__corner {
+    background-color: var(--xflow-panel);
+    pointer-events: none;
+    position: absolute;
+    z-index: 5;
+  }
+
+  .xflow-preview-ruler {
+    color: var(--xflow-text-tertiary);
+    font: 10px / 1 var(--xflow-font-mono);
+    overflow: hidden;
+  }
+
+  .xflow-preview-ruler--x {
+    background-image:
+      linear-gradient(90deg, var(--xflow-border-strong) 1px, transparent 1px),
+      linear-gradient(90deg, var(--xflow-border) 1px, transparent 1px);
+    background-position: var(--xflow-preview-ruler-origin, 0px) 0, var(--xflow-preview-ruler-origin, 0px) 100%;
+    background-repeat: repeat-x;
+    background-size: var(--xflow-preview-ruler-major, 100px) 100%, var(--xflow-preview-ruler-minor, 10px) 5px;
+    border-bottom: 1px solid var(--xflow-border);
+    height: var(--xflow-ruler);
+    left: var(--xflow-ruler);
+    right: 0;
+    top: 0;
+  }
+
+  .xflow-preview-ruler--y {
+    background-image:
+      linear-gradient(180deg, var(--xflow-border-strong) 1px, transparent 1px),
+      linear-gradient(180deg, var(--xflow-border) 1px, transparent 1px);
+    background-position: 0 var(--xflow-preview-ruler-origin, 0px), 100% var(--xflow-preview-ruler-origin, 0px);
+    background-repeat: repeat-y;
+    background-size: 100% var(--xflow-preview-ruler-major, 100px), 5px var(--xflow-preview-ruler-minor, 10px);
+    border-right: 1px solid var(--xflow-border);
+    bottom: 0;
+    left: 0;
+    top: var(--xflow-ruler);
+    width: var(--xflow-ruler);
+  }
+
+  .xflow-preview-ruler__tick,
+  .xflow-preview-ruler__highlight {
+    position: absolute;
+  }
+
+  .xflow-preview-ruler--x .xflow-preview-ruler__tick {
+    padding-left: 3px;
+    top: 3px;
+  }
+
+  .xflow-preview-ruler--y .xflow-preview-ruler__tick {
+    left: 3px;
+    padding-top: 3px;
+    transform: rotate(180deg);
+    writing-mode: vertical-rl;
+  }
+
+  .xflow-preview-ruler__highlight {
+    background: color-mix(in srgb, var(--xflow-primary) 16%, transparent);
+  }
+
+  .xflow-preview-ruler--x .xflow-preview-ruler__highlight {
+    bottom: 0;
+    top: 0;
+  }
+
+  .xflow-preview-ruler--y .xflow-preview-ruler__highlight {
+    left: 0;
+    right: 0;
+  }
+
+  .xflow-preview-ruler__corner {
+    border-bottom: 1px solid var(--xflow-border);
+    border-right: 1px solid var(--xflow-border);
+    height: var(--xflow-ruler);
+    left: 0;
+    top: 0;
+    width: var(--xflow-ruler);
+  }
+
+  /* The shared floating-bar shell: 34px, 1px border, 4px padding, radius-md, elev-2. */
+  .xflow-preview-zoombar {
+    align-items: center;
+    background: var(--xflow-panel);
+    border: 1px solid var(--xflow-border);
+    border-radius: var(--xflow-radius-md);
+    bottom: var(--xflow-preview-float-inset);
+    box-shadow: var(--xflow-elev-2);
+    display: flex;
+    gap: 4px;
+    height: var(--xflow-float-height);
+    left: calc(var(--xflow-preview-ruler-inset) + var(--xflow-preview-float-inset));
+    padding: 4px;
+    position: absolute;
+    white-space: nowrap;
+    z-index: 5;
+  }
+
+  .xflow-preview-zoombar__button {
+    color: var(--xflow-text-secondary);
+    font-size: 16px;
+    height: var(--xflow-control-height-sm);
+    padding: 0;
+    width: var(--xflow-control-height-sm);
+  }
+
+  .xflow-preview-zoombar__button[data-active="true"] {
+    background: color-mix(in srgb, var(--xflow-primary) 14%, transparent);
+    color: var(--xflow-primary);
+  }
+
+  .xflow-preview-zoombar__slider {
+    margin: 0 4px;
+    width: 96px;
+  }
+
+  .xflow-preview-zoombar__value {
+    color: var(--xflow-text-secondary);
+    font-size: var(--xflow-font-sm);
+    font-variant-numeric: tabular-nums;
+    min-width: 44px;
+    text-align: center;
+  }
+
+  .xflow-preview-zoombar__separator {
+    height: 20px;
+    margin-inline: 0;
+  }
+
+  /* The owner's top-left float (§6.2: 添加节点), in the zoom bar's float chrome. */
+  .xflow-preview-canvas-float {
+    align-items: center;
+    background: var(--xflow-panel);
+    border: 1px solid var(--xflow-border);
+    border-radius: var(--xflow-radius-md);
+    box-shadow: var(--xflow-elev-2);
+    display: flex;
+    gap: 4px;
+    height: var(--xflow-float-height);
+    left: calc(var(--xflow-preview-ruler-inset) + var(--xflow-preview-float-inset));
+    padding: 4px;
+    position: absolute;
+    top: calc(var(--xflow-preview-ruler-inset) + 12px);
+    white-space: nowrap;
+    z-index: 5;
+  }
+
+  /* §6.2: 200x100, smaller than xyflow's 200x150 default, tucked under the canvas
+     rule's floating layers. */
+  /* The right-hand float (inspector reopen): same chrome, one float inset in from
+     the canvas edge, like the minimap and ZoomBar. Rulers are drawn top/left
+     only, so this side has no ruler to clear and must not add the ruler inset. */
+  .xflow-preview-canvas-float--end {
+    left: auto;
+    right: var(--xflow-preview-float-inset);
+  }
+
+  .xflow-preview-canvas .react-flow__minimap {
+    background: var(--xflow-preview-surface-panel);
+    border: 1px solid var(--xflow-preview-border);
+    border-radius: var(--xflow-radius-md);
+    bottom: var(--xflow-preview-float-inset);
+    box-shadow: var(--xflow-elev-2);
+    height: 100px;
+    margin: 0;
+    overflow: hidden;
+    right: var(--xflow-preview-float-inset);
+    width: 200px;
+  }
+
+  .xflow-preview-canvas .react-flow__edge-path {
+    stroke-linecap: round;
+    stroke-width: 1.5;
+  }
+
+  /* §6.2: hovering an edge draws it 2px primary, as the baseline's hover sample.
+     Port-semantic strokes keep their inline colour. */
+  .xflow-preview-canvas .react-flow__edge:hover .react-flow__edge-path {
+    stroke: var(--xflow-preview-edge-selected);
+    stroke-width: 2;
+  }
+
+  .xflow-preview-canvas .react-flow__edge:focus-visible .react-flow__edge-path,
+  .xflow-preview-canvas .react-flow__edge.selected .react-flow__edge-path {
+    /* No !important: no edge carries an inline stroke any more, and this rule
+       outranks the port-semantic strokes below by specificity — four class-like
+       selectors to their three — whatever the source order. */
+    stroke: var(--xflow-preview-edge-selected);
+    stroke-width: 2;
+  }
+
+  /* Port-semantic strokes are CSS like every other stroke, so hover and
+     selection can outrank them (§6.2). The dashes survive selection, as in the
+     baseline: the selected rule touches stroke and width only. */
+  .xflow-preview-canvas .xflow-preview-edge--dangling .react-flow__edge-path {
+    stroke: var(--xflow-preview-edge-dangling);
+    stroke-dasharray: 2 4;
+    stroke-width: 1.8;
+  }
+
+  .xflow-preview-canvas .xflow-preview-edge--error .react-flow__edge-path {
+    stroke: var(--xflow-preview-edge-error);
+    stroke-dasharray: 5 4;
+  }
+
+  .xflow-preview-canvas .react-flow__edge-textbg {
+    fill: var(--xflow-preview-edge-label-bg);
+  }
+
+  .xflow-preview-canvas .react-flow__edge-text {
+    fill: var(--xflow-preview-edge-label);
+    font-size: 11px;
+    font-weight: 700;
+  }
+
+  /* Port-semantic labels are styled here, not inline: selection has to outrank
+     them, and an inline fill cannot be outranked by a plain rule. */
+  .xflow-preview-canvas .xflow-preview-edge--dangling .react-flow__edge-text {
+    fill: var(--xflow-preview-edge-dangling-label);
+  }
+
+  .xflow-preview-canvas .xflow-preview-edge--error .react-flow__edge-text {
+    fill: var(--xflow-preview-edge-error);
+  }
+
+  /* §6.2: the selected edge's label turns primary (the section's own proposal). */
+  .xflow-preview-canvas .react-flow__edge:focus-visible .react-flow__edge-text,
+  .xflow-preview-canvas .react-flow__edge.selected .react-flow__edge-text {
+    fill: var(--xflow-preview-edge-selected);
+  }
+
+  /* ---- Node card: body ---- */
+  .xflow-preview-node {
+    background: var(--xflow-preview-node-bg);
+    border: 1px solid var(--xflow-preview-node-border);
+    border-radius: var(--xflow-radius-md);
+    box-shadow: var(--xflow-preview-node-shadow);
+    /* The card states its own type scale (the baseline sets it on its root); inheriting
+       from the host made the title row 2px taller inside the editor. */
+    font: 400 var(--xflow-font-md) / 20px var(--xflow-font-sans);
+    position: relative;
+    width: var(--xflow-preview-node-width);
+  }
+
+  /* A card with runtime status takes the tone's border; the tone variables are
+     defined with the status chip below, keyed on data-tone only. */
+  .xflow-preview-node[data-tone] {
+    border-color: var(--xflow-preview-t-border);
+  }
+
+  .xflow-preview-node[data-selected="true"] {
+    outline: 2px solid var(--xflow-preview-node-selected-border);
+    outline-offset: 2px;
+  }
+
+  /* ---- Node card: header, category icon, title, type id ---- */
+  .xflow-preview-node__select {
+    border-radius: inherit;
+    cursor: pointer;
+    outline: none;
+  }
+
+  .xflow-preview-node:has(.xflow-preview-node__select:focus-visible) {
+    outline: 2px solid var(--xflow-preview-focus-ring);
+    outline-offset: 2px;
+  }
+
+  .xflow-preview-node__header {
+    align-items: center;
+    display: flex;
+    gap: 10px;
+    padding: 10px 12px;
+  }
+
+  /* The block's colour is one variable, written inline by index.tsx from core's
+     category table; background and glyph are both derived from it. */
+  .xflow-preview-node__icon {
+    background: color-mix(in srgb, var(--xflow-preview-node-category) 14%, transparent);
+    border-radius: var(--xflow-radius-sm);
+    color: var(--xflow-preview-node-category);
+    display: grid;
+    flex: none;
+    font-size: 15px;
+    height: 28px;
+    place-items: center;
+    width: 28px;
+  }
+
+  .xflow-preview-node__title {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .xflow-preview-node__title strong {
+    display: block;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .xflow-preview-node__type {
+    color: var(--xflow-text-tertiary);
+    display: block;
+    font: 400 var(--xflow-font-xs) / 16px var(--xflow-font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* ---- Node card: configuration summary (spec §6.1.1) ---- */
+  /* 标签 · 值 rows, max three lines (the +n row is the third). Values are
+     single-line and ellipsize; the full value stays reachable via the field. */
+  .xflow-preview-node__summary {
+    display: grid;
+    font-size: var(--xflow-font-xs);
+    gap: 3px 10px;
+    grid-template-columns: auto minmax(0, 1fr);
+    line-height: 18px;
+    margin: 0;
+    padding: 0 12px 10px;
+  }
+
+  .xflow-preview-node__summary dt {
+    color: var(--xflow-text-tertiary);
+    white-space: nowrap;
+  }
+
+  .xflow-preview-node__summary dd {
+    color: var(--xflow-text-secondary);
+    margin: 0;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .xflow-preview-node__summary dd[data-kind="mono"],
+  .xflow-preview-node__summary dd[data-kind="expr"] {
+    font-family: var(--xflow-font-mono);
+  }
+
+  .xflow-preview-node__summary dd[data-kind="expr"] {
+    color: var(--xflow-accent);
+  }
+
+  /* The baseline's fx badge: a small italic tag ahead of an expression. */
+  .xflow-preview-node__summary dd[data-kind="expr"]::before {
+    background: color-mix(in srgb, currentColor 14%, transparent);
+    border-radius: var(--xflow-radius-xs);
+    content: "fx";
+    font-family: var(--xflow-font-sans);
+    font-size: var(--xflow-font-xs);
+    font-style: italic;
+    font-weight: 600;
+    margin-right: 4px;
+    padding: 0 3px;
+  }
+
+  .xflow-preview-node__summary dd[data-kind="secret"] {
+    color: var(--xflow-text-tertiary);
+    letter-spacing: 1px;
+  }
+
+  /* A required value the form would also flag: the card states it in danger. */
+  .xflow-preview-node__summary dd[data-kind="missing"] {
+    color: var(--xflow-danger);
+  }
+
+  /* An a+b row keeps each half's own formatting (mono URL beside a plain method). */
+  .xflow-preview-node__summary-mono,
+  .xflow-preview-node__summary-expr {
+    font-family: var(--xflow-font-mono);
+  }
+
+  .xflow-preview-node__summary-expr {
+    color: var(--xflow-accent);
+  }
+
+  .xflow-preview-node__summary dd[role="button"] {
+    cursor: pointer;
+  }
+
+  .xflow-preview-node__summary-ref {
+    color: var(--xflow-text-tertiary);
+    display: inline-flex;
+    font-size: var(--xflow-font-sm);
+    margin-right: 4px;
+  }
+
+  .xflow-preview-node__summary-more {
+    color: var(--xflow-text-tertiary);
+  }
+
+  /* ---- Node card: status chip and tone ---- */
+  /* Status colour is keyed on data-tone only, never on the status name. The card, its
+     chip and the toolbar's workflow pill all carry the attribute. Foreground, fill and
+     border derive from one semantic colour, as in the design baseline (ui-preview). */
+  :is(.xflow-preview-node, .xflow-preview-node__status, .xflow-preview-status)[data-tone] {
+    --xflow-preview-t: var(--xflow-neutral);
+    --xflow-preview-t-fg: var(--xflow-neutral-fg);
+    --xflow-preview-t-bg: color-mix(in srgb, var(--xflow-preview-t) 12%, transparent);
+    --xflow-preview-t-border: color-mix(in srgb, var(--xflow-preview-t) 55%, transparent);
+  }
+
+  /* Text foreground reads core's -fg (semantic colour 70% + text 30%) so the chip clears
+     4.5:1 on a light surface; fill and border keep reading the raw semantic colour. */
+  :is(.xflow-preview-node, .xflow-preview-node__status, .xflow-preview-status)[data-tone="info"] {
+    --xflow-preview-t: var(--xflow-info);
+    --xflow-preview-t-fg: var(--xflow-info-fg);
+  }
+
+  :is(.xflow-preview-node, .xflow-preview-node__status, .xflow-preview-status)[data-tone="success"] {
+    --xflow-preview-t: var(--xflow-success);
+    --xflow-preview-t-fg: var(--xflow-success-fg);
+  }
+
+  :is(.xflow-preview-node, .xflow-preview-node__status, .xflow-preview-status)[data-tone="warning"] {
+    --xflow-preview-t: var(--xflow-warning);
+    --xflow-preview-t-fg: var(--xflow-warning-fg);
+  }
+
+  :is(.xflow-preview-node, .xflow-preview-node__status, .xflow-preview-status)[data-tone="danger"] {
+    --xflow-preview-t: var(--xflow-danger);
+    --xflow-preview-t-fg: var(--xflow-danger-fg);
+  }
+
+  :is(.xflow-preview-node, .xflow-preview-node__status, .xflow-preview-status)[data-tone="suspend"] {
+    --xflow-preview-t: var(--xflow-suspend);
+    --xflow-preview-t-fg: var(--xflow-suspend-fg);
+  }
+
+  :is(.xflow-preview-node, .xflow-preview-node__status, .xflow-preview-status)[data-tone="neutral"] {
+    --xflow-preview-t: var(--xflow-neutral);
+    --xflow-preview-t-fg: var(--xflow-neutral-fg);
+  }
+
+  .xflow-preview-node__status {
+    align-items: center;
+    background: var(--xflow-preview-t-bg);
+    border: 1px solid var(--xflow-preview-t-border);
+    border-radius: var(--xflow-radius-pill);
+    color: var(--xflow-preview-t-fg);
+    display: inline-flex;
+    flex: none;
+    font-size: var(--xflow-font-xs);
+    font-weight: 500;
+    gap: 4px;
+    height: 20px;
+    padding: 0 8px;
+    white-space: nowrap;
+  }
+
+  .xflow-preview-node__status-icon {
+    display: inline-flex;
+    font-size: 12px;
+  }
+
+  /* ---- Node card: state shapes (dashed / stripes / pulse) ---- */
+  /* data-status is "pending" even when no runtime was passed, so the dashed
+     outline also needs data-tone (only present once a status chip is drawn). A
+     disabled card gets stripes instead. */
+  .xflow-preview-node[data-status="pending"][data-tone]:not([data-disabled]),
+  .xflow-preview-node[data-status="skipped"] {
+    border-style: dashed;
+  }
+
+  /* Skipped / disabled cards are dimmed by their border, fill and icon only. A
+     whole-card opacity dimmed the text too (2.36:1 on light once composited) and
+     made the edges the card covers show through. The fill therefore mixes the
+     panel 55% toward the canvas colour and stays fully opaque. */
+  .xflow-preview-node[data-status="skipped"],
+  .xflow-preview-node[data-disabled] {
+    background-color: color-mix(in srgb, var(--xflow-preview-node-bg) 55%, var(--xflow-canvas));
+    /* An editing-time disabled node has no runtime, hence no chip and no data-tone,
+       so the tone border is undefined there; fall back to the plain card border. */
+    border-color: color-mix(in srgb, var(--xflow-preview-t-border, var(--xflow-preview-node-border)) 55%, transparent);
+  }
+
+  .xflow-preview-node[data-status="skipped"] .xflow-preview-node__icon,
+  .xflow-preview-node[data-disabled] .xflow-preview-node__icon {
+    opacity: 0.55;
+  }
+
+  .xflow-preview-node[data-disabled] {
+    background-image: repeating-linear-gradient(
+      135deg,
+      transparent 0 6px,
+      color-mix(in srgb, var(--xflow-neutral) 9%, transparent) 6px 7px
+    );
+  }
+
+  /* Only `running` pulses, as in the baseline (ui-preview). `committing` keeps its tone
+     border like any other status; the baseline draws no shared pulse for it. */
+  .xflow-preview-node[data-status="running"] {
+    animation: xflow-preview-pulse 1.6s ease-in-out infinite;
+    border-color: var(--xflow-preview-status-running);
+  }
+
+  @keyframes xflow-preview-pulse {
+    0%,
+    100% {
+      box-shadow:
+        0 0 0 0 color-mix(in srgb, var(--xflow-info) 40%, transparent),
+        var(--xflow-preview-node-shadow);
+    }
+
+    50% {
+      box-shadow:
+        0 0 0 4px color-mix(in srgb, var(--xflow-info) 18%, transparent),
+        var(--xflow-preview-node-shadow);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .xflow-preview-node[data-status="running"] {
+      animation: none;
+    }
+  }
+
+  /* ---- Node card: port row ---- */
+  .xflow-preview-node__ports {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 0 12px 10px;
+    position: relative;
+  }
+
+  /* After a suspended card's note the row needs a little more air above it. */
+  .xflow-preview-node__note + .xflow-preview-node__ports {
+    padding-top: 8px;
+  }
+
+  /* Positioned so each chip's own bottom handle anchors to the chip. */
+  .xflow-preview-node__port {
+    align-items: center;
+    background: var(--xflow-preview-surface-panel-raised);
+    border: 1px solid var(--xflow-preview-border);
+    border-radius: var(--xflow-radius-xs);
+    color: var(--xflow-preview-text-secondary);
+    display: inline-flex;
+    font-size: var(--xflow-font-xs);
+    height: 18px;
+    line-height: 16px;
+    padding: 0 6px;
+    position: relative;
+  }
+
+  /* The error outlet is danger whatever tone the card is in, as in the baseline: the
+     border is the same 55% danger mix a danger card draws, not the card's own variable. */
+  .xflow-preview-node__port--error {
+    border-color: color-mix(in srgb, var(--xflow-danger) 55%, transparent);
+    color: var(--xflow-preview-status-error);
+  }
+
+  /* ---- Node card: handles ---- */
+  .xflow-preview-node__handle {
+    background: var(--xflow-preview-port);
+    border: 2px solid var(--xflow-preview-port-border);
+    border-radius: 50%;
+    height: 10px;
+    width: 10px;
+    z-index: 2;
+  }
+
+  /* 10px dot, 24px hit target. The pseudo-element belongs to the handle, so a press
+     on it starts the connection. Inset = (24 - 6px padding box) / 2. */
+  .xflow-preview-node__handle::after {
+    border-radius: 50%;
+    content: "";
+    inset: -9px;
+    position: absolute;
+  }
+
+  /* Single main handles are placed as in the baseline: the 10px dot's centre sits 30px
+     below the card's top edge and exactly on the left/right edge. xyflow's own translate
+     centres the dot on the offset, so each value is the centre in padding-box terms
+     (29px = 30px less the 1px border; -1px = on the border-box edge). Several inputs
+     carry an inline top, which wins over this. */
+  .xflow-preview-node > .xflow-preview-node__handle--target,
+  .xflow-preview-node > .xflow-preview-node__handle--source {
+    top: 29px;
+  }
+
+  .xflow-preview-node > .xflow-preview-node__handle--target {
+    left: -1px;
+  }
+
+  .xflow-preview-node > .xflow-preview-node__handle--source {
+    right: -1px;
+  }
+
+  /* The error exit lives in the port row, level with the error chip:
+     10px row padding + (18px chip - 10px handle) / 2 = 14px from the bottom. */
+  .xflow-preview-node__handle--error {
+    border-color: var(--xflow-preview-edge-error);
+    bottom: 14px;
+    right: -6px;
+    top: auto;
+    transform: none;
+  }
+
+  /* Same hollow ring as an editable handle (baseline): a read-only handle says so
+     through the cursor and tabIndex, never through a filled or faded dot. */
+  .xflow-preview-node__handle[aria-disabled="true"] {
+    cursor: not-allowed;
+  }
+
+  .xflow-preview-node__handle:focus-visible {
+    box-shadow: 0 0 0 3px var(--xflow-preview-focus-ring);
+    outline: none;
+  }
+
+  /* ---- Node card: run-meta, error, suspended note, pin ---- */
+  .xflow-preview-node__run-meta {
     border-top: 1px solid var(--xflow-preview-border);
+    color: var(--xflow-preview-text-secondary);
+    display: flex;
+    font-size: var(--xflow-font-xs);
+    gap: 8px;
+    justify-content: space-between;
+    padding: 6px 12px;
+  }
+
+  /* Scoped to the card: the details panel reuses the class on a plain paragraph. */
+  .xflow-preview-node > .xflow-preview-node__error {
+    border-top: 1px solid color-mix(in srgb, var(--xflow-danger) 25%, transparent);
+    color: var(--xflow-preview-status-error);
+    font-size: var(--xflow-font-sm);
+    margin: 0;
+    overflow: hidden;
+    padding: 6px 12px 8px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .xflow-preview-node__note {
+    align-items: center;
+    border-top: 1px solid color-mix(in srgb, var(--xflow-suspend) 25%, transparent);
+    color: var(--xflow-suspend);
+    display: flex;
+    font-size: var(--xflow-font-sm);
+    gap: 8px;
+    justify-content: space-between;
+    padding: 6px 12px 8px;
+  }
+
+  /* The note's 处理 action, when the owner supplies one (§6.12). */
+  .xflow-preview-node__note-action {
+    background: var(--xflow-preview-surface-control);
+    border: 1px solid var(--xflow-preview-border);
+    border-radius: var(--xflow-radius-xs);
+    color: var(--xflow-preview-text-secondary);
+    cursor: pointer;
+    flex: none;
+    font: inherit;
+    font-size: var(--xflow-font-xs);
+    line-height: var(--xflow-control-height-sm);
+    padding: 0 8px;
+  }
+
+  .xflow-preview-node__note-action:hover {
+    border-color: var(--xflow-suspend);
+    color: var(--xflow-suspend);
+  }
+
+  .xflow-preview-node__note-action:focus-visible {
+    outline: 2px solid var(--xflow-primary);
+    outline-offset: 1px;
+  }
+
+  .xflow-preview-node__pin {
+    background: var(--xflow-success);
+    border-radius: 50%;
+    color: var(--xflow-on-primary);
+    display: grid;
+    font-size: 11px;
+    height: 18px;
+    place-items: center;
+    position: absolute;
+    right: -7px;
+    top: -7px;
+    width: 18px;
+  }
+
+  /* ---- Node card: level of detail (zoom < 0.5) ---- */
+  /* index.tsx already drops the type id, run-meta, error, note and chip text at low
+     detail; what is left is sized against --xflow-preview-lod so it stays readable
+     once the viewport's transform shrinks it again. The chip keeps only its icon and
+     leaves the flow, pinned to the card corner, so the name keeps the width. */
+  .xflow-preview-node[data-lod="low"] .xflow-preview-node__header {
+    gap: calc(8px / var(--xflow-preview-lod));
+    padding: calc(10px / var(--xflow-preview-lod));
+    position: relative;
+  }
+
+  .xflow-preview-node[data-lod="low"] .xflow-preview-node__title strong {
+    font-size: calc(var(--xflow-font-md) / var(--xflow-preview-lod));
+    line-height: calc(20px / var(--xflow-preview-lod));
+  }
+
+  .xflow-preview-node[data-lod="low"] .xflow-preview-node__icon {
+    font-size: calc(16px / var(--xflow-preview-lod));
+    height: calc(28px / var(--xflow-preview-lod));
+    width: calc(28px / var(--xflow-preview-lod));
+  }
+
+  .xflow-preview-node[data-lod="low"] .xflow-preview-node__status {
+    background: transparent;
+    border-color: transparent;
+    font-size: calc(12px / var(--xflow-preview-lod));
+    height: calc(20px / var(--xflow-preview-lod));
+    padding: 0 calc(4px / var(--xflow-preview-lod));
+    position: absolute;
+    right: 0;
+    top: 0;
+  }
+
+  .xflow-preview-node[data-lod="low"] .xflow-preview-node__handle {
+    height: calc(10px / var(--xflow-preview-lod));
+    width: calc(10px / var(--xflow-preview-lod));
+  }
+
+  /* The spread handles that replace the port row hang on the card's bottom edge. */
+  .xflow-preview-node__ports--handles {
+    height: 0;
+    left: 0;
+    padding: 0;
+    position: absolute;
+    right: 0;
+    top: 100%;
+  }
+
+  /* ---- Incoming edges, by the target node's status (edgeVariant) ---- */
+  /* xyflow puts the className on the edge group. `default` (pending, failed) has no
+     rule of its own: it is the resting stroke above. `error` and `dangling` are
+     port-semantic: their strokes are inline from index.tsx, their labels are the
+     two rules above. */
+  .xflow-preview-canvas {
+    --xflow-preview-flow-period: 0.8s;
+    --xflow-preview-flow-slow-factor: 2.5;
+  }
+
+  .xflow-preview-canvas .xflow-preview-edge--flow .react-flow__edge-path,
+  .xflow-preview-canvas .xflow-preview-edge--flow-slow .react-flow__edge-path {
+    stroke: var(--xflow-preview-edge-running);
+    stroke-dasharray: 6 4;
+  }
+
+  .xflow-preview-canvas .xflow-preview-edge--flow .react-flow__edge-path {
+    animation: xflow-preview-dash var(--xflow-preview-flow-period) linear infinite;
+  }
+
+  /* waiting: the same dashed stroke as `flow`, drawn at 1/2.5 of its speed. */
+  .xflow-preview-canvas .xflow-preview-edge--flow-slow .react-flow__edge-path {
+    animation: xflow-preview-dash
+      calc(var(--xflow-preview-flow-period) * var(--xflow-preview-flow-slow-factor)) linear infinite;
+  }
+
+  .xflow-preview-canvas .xflow-preview-edge--success .react-flow__edge-path {
+    stroke: color-mix(in srgb, var(--xflow-success) 70%, transparent);
+  }
+
+  .xflow-preview-canvas .xflow-preview-edge--skipped .react-flow__edge-path {
+    opacity: 0.5;
+    stroke-dasharray: 2 4;
+  }
+
+  @keyframes xflow-preview-dash {
+    to {
+      stroke-dashoffset: -20;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .xflow-preview-canvas .xflow-preview-edge--flow .react-flow__edge-path,
+    .xflow-preview-canvas .xflow-preview-edge--flow-slow .react-flow__edge-path {
+      animation: none;
+    }
+  }
+
+  .xflow-preview-summary,
+  .xflow-preview-details {
+    border-bottom: 1px solid var(--xflow-preview-border);
+    margin-bottom: 12px;
+    padding-bottom: 12px;
+  }
+
+  .xflow-preview-summary > span,
+  .xflow-preview-details > span {
+    color: var(--xflow-preview-text);
+    display: block;
+    font-weight: 650;
+    margin-bottom: 10px;
+  }
+
+  .xflow-preview-summary > div {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .xflow-preview-summary__pill {
+    background: var(--xflow-preview-surface-panel-raised);
+    border: 1px solid var(--xflow-preview-border);
+    border-radius: 4px;
+    color: var(--xflow-preview-text-pill);
+    font-size: 11px;
+    padding: 4px 7px;
+  }
+
+  .xflow-preview-details strong,
+  .xflow-preview-details code,
+  .xflow-preview-details p {
+    display: block;
+    margin: 0 0 7px;
+  }
+
+  .xflow-preview-details strong {
+    color: var(--xflow-preview-text);
+    font-size: 13px;
+  }
+
+  .xflow-preview-details code {
+    color: var(--xflow-preview-text-secondary);
+    font-family: "SFMono-Regular", Consolas, monospace;
+    font-size: 11px;
+  }
+
+  .xflow-preview-details p {
+    color: var(--xflow-preview-text-muted);
+    font-size: 12px;
+  }
+
+  .xflow-preview-edges {
+    display: grid;
+    gap: 8px;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .xflow-preview-edges li {
+    background: var(--xflow-preview-surface-panel-raised);
+    border: 1px solid var(--xflow-preview-border);
+    border-radius: 4px;
+    display: grid;
+    gap: 5px;
+    grid-template-columns: minmax(0, 1fr) auto auto minmax(0, 1fr) auto;
+    padding: 8px;
+  }
+
+  .xflow-preview-edges span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .xflow-preview-edges span:nth-child(2),
+  .xflow-preview-edges span:nth-child(5) {
+    color: var(--xflow-preview-status-warning);
+  }
+
+  .xflow-preview-empty {
+    color: var(--xflow-preview-text-muted);
+    font-size: 13px;
+    margin: 0;
+    /* The empty canvas stays a drop target, so the note may not swallow the
+       pointer; it only needs to be readable above the mounted React Flow. */
+    left: 50%;
+    pointer-events: none;
+    position: absolute;
+    text-align: center;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 1;
+  }
+
+  /* An owner's empty state: the box lets drops through, its own content does not. */
+  .xflow-preview-empty--custom > * {
+    pointer-events: auto;
+  }
+
+  @media (max-width: 860px) {
+    .xflow-preview-shell {
+      grid-template-columns: 1fr;
+    }
+
+    .xflow-preview-sidebar,
+    .xflow-preview-panel {
+      border: 0;
+      border-top: 1px solid var(--xflow-preview-border);
+    }
   }
 }

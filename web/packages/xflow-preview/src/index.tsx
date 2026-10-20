@@ -1,26 +1,13 @@
 import * as React from "react";
-import {
-  AuditOutlined,
-  BranchesOutlined,
-  ClockCircleOutlined,
-  CloudServerOutlined,
-  CodeOutlined,
-  DatabaseOutlined,
-  GlobalOutlined,
-  LinkOutlined,
-  PlayCircleOutlined,
-  QuestionCircleOutlined,
-  ThunderboltOutlined
-} from "@ant-design/icons";
+import { KeyOutlined, PushpinOutlined } from "@ant-design/icons";
 import {
   Background,
-  ControlButton,
-  Controls,
   Handle,
   MiniMap,
   Position,
   ReactFlow,
   type Connection as ReactFlowConnection,
+  type BuiltInEdge,
   type Edge,
   type EdgeChange,
   type IsValidConnection,
@@ -28,24 +15,35 @@ import {
   type NodeProps,
   type OnBeforeDelete,
   type ReactFlowInstance,
+  type ReactFlowState,
   type Viewport as ReactFlowViewport,
-  useReactFlow
+  useStore,
+  useStoreApi
 } from "@xyflow/react";
-import "@xyflow/react/dist/style.css";
 import {
+  categoryOf,
+  edgeVariant,
   isSupplyNode,
   isTextEntryTarget,
+  nodeCategoryMeta,
+  nodeStatusMeta,
   runtimeForNode,
   toGraphModel,
+  workflowStatusMeta,
+  type EdgeVariant,
   type GraphEdge,
   type GraphNode,
-  type NodeStatus,
+  type NodeStatusKey,
   type Position as NodePosition,
+  type CardSummaryRow,
   type RuntimeNodeSnapshot,
   type RuntimeSnapshot,
   type Viewport,
   type WorkflowDef
 } from "@xflow/core";
+import { CanvasRulers, FLOAT_ATTRIBUTE, MAX_ZOOM, MINIMAP_SIZE, MIN_ZOOM, ZoomBar, measureSurface } from "./canvasChrome";
+import { fitViewportClearOf } from "./fit";
+import { categoryGlyph, statusGlyph } from "./icons";
 import "./styles.css";
 
 /**
@@ -65,6 +63,16 @@ export interface PreviewConnection {
 
 export type XFlowPreviewInteractionMode = "select" | "connect";
 
+/**
+ * One node's wait note (§6.12). `text` replaces the generic 等待信号 line on a
+ * suspended card; `action` renders a button beside it and requires
+ * {@link XFlowPreviewProps.onNodeAction}.
+ */
+export interface XFlowPreviewNodeNote {
+  text: string;
+  action?: string;
+}
+
 export interface XFlowPreviewProps {
   workflow: WorkflowDef;
   runtime?: RuntimeSnapshot;
@@ -75,8 +83,83 @@ export interface XFlowPreviewProps {
    * Omit it to retain the package's legacy editable behavior (drag + connect).
    */
   interactionMode?: XFlowPreviewInteractionMode;
+  /**
+   * Draws the §6.2 minimap in the canvas's bottom-right corner at 200x100. Off by
+   * default. The zoom bar's toggle (and ⇧M) flips it from there; a new value of
+   * this prop wins over the toggle again. Every flip re-fits the graph, so the
+   * minimap never lands on top of content.
+   */
+  minimap?: boolean;
+  /**
+   * Draws the §6.2 rulers along the canvas's top and left edges. On by default,
+   * toggled like `minimap` (⇧R), and never drawn while the workflow has no nodes.
+   */
+  ruler?: boolean;
+  /** Shows the §6.2 bottom-left zoom bar, which also carries the two toggles. On by default. */
+  zoomBar?: boolean;
+  /**
+   * Adds 自动布局 to the zoom bar. The preview never moves a node itself: the owner
+   * lays the graph out and echoes the new positions back through `workflow`.
+   */
+  onAutoLayout?: () => void;
+  /**
+   * Replaces the "No nodes to preview" note shown on a canvas with no nodes. The
+   * canvas stays a drop target underneath; only the content itself takes the pointer.
+   */
+  emptyState?: React.ReactNode;
+  /**
+   * The §6.2 top-left float: the editor's 添加节点, or its read-only notice. Drawn clear
+   * of the rulers in the zoom bar's float chrome, and kept clear by every fit like
+   * the other floating layers.
+   */
+  canvasFloat?: React.ReactNode;
+  /**
+   * The §6.2 top-right float: the editor's inspector reopen chip. Same chrome as
+   * `canvasFloat`, parked 12px inside the rulers (or the canvas edge without them),
+   * so the two slots cannot drift apart.
+   */
+  canvasFloatEnd?: React.ReactNode;
   selectedNodeId?: string;
   onSelectNode?: (nodeId: string) => void;
+  /**
+   * Per-node wait notes for suspended cards, keyed by node name. The approval
+   * flow uses it to show the chain and progress instead of the generic
+   * 等待信号 line (§6.12). A missing entry keeps the generic line.
+   */
+  nodeNotes?: Readonly<Record<string, XFlowPreviewNodeNote>>;
+  /**
+   * Per-node run-record annotations for the card's meta line, keyed by node
+   * name (重跑起点 / 沿用原执行结果, §6.8). A value takes the meta line's left
+   * slot; without one the slot keeps the node duration (or stays empty).
+   */
+  nodeMetaNotes?: Readonly<Record<string, string>>;
+  /**
+   * A press on a wait note's action button (e.g. 处理 on an approval card).
+   * Without it the action button is not drawn: the preview never pretends a
+   * gesture it cannot deliver.
+   */
+  onNodeAction?: (nodeName: string, action: string) => void;
+  /**
+   * The category each node type's descriptor declares (spec §6.13), from the
+   * host's `/v1/node-types` response. A type missing here keeps the prefix
+   * fallback; a declared value wins over it in `categoryOf`.
+   */
+  nodeCategories?: Readonly<Record<string, string>>;
+  /**
+   * Card-summary rows per node key (`id ?? name`), already resolved from the
+   * type's `card_summary` and the node's parameters by core's
+   * `cardSummaryRows` (spec §6.1.1). The preview only draws them: formatting and
+   * the localized display names belong to the owner holding the schemas.
+   */
+  nodeSummaries?: Readonly<Record<string, readonly CardSummaryRow[]>>;
+  /**
+   * A press on one card-summary row (spec §6.1.1): the owner selects the node
+   * and reveals that parameter in its editor. Without it the rows stay plain
+   * text — the preview never pretends a gesture it cannot deliver.
+   */
+  onLocateParameter?: (nodeId: string, fieldPath: string) => void;
+  /** A click on the empty canvas (not a card or a connection): the owner clears its selection. */
+  onPaneClick?: () => void;
   onNodePositionChange?: (nodeId: string, position: { x: number; y: number }) => void;
   /** Requests that the owner add a data-flow connection. The preview never mutates the workflow. */
   onConnect?: (connection: PreviewConnection) => void;
@@ -159,31 +242,54 @@ export interface DanglingPort {
 
 const danglingKey = (source: string, port: string) => `${source}\u0000${port}`;
 
-const statusLabel: Record<string, string> = {
-  pending: "pending",
-  running: "running",
-  committing: "committing",
-  success: "success",
-  failed: "failed",
-  skipped: "skipped",
-  pinned: "pinned",
-  continued: "continued",
-  suspended: "suspended",
-  waiting: "waiting",
-  expired: "expired",
-  canceled: "canceled",
-  timeout: "timeout"
-};
+/**
+ * Zoom below which a card keeps only its category icon, name and status icon
+ * (spec §6.2 细节层级). Cards subscribe to the boolean `zoom < LOD_ZOOM`, never to
+ * the zoom value, so a pinch across 0.5 re-renders the graph once and every other
+ * zoom step not at all.
+ */
+const LOD_ZOOM = 0.5;
 
-/** Runtime detail worth a line on the card; nothing at all before a run. */
-function nodeMeta(snapshot: RuntimeNodeSnapshot): string | undefined {
-  if (snapshot.attempts && snapshot.attempts > 1) {
-    return `${snapshot.attempts} attempts`;
-  }
-  if (snapshot.durationMs !== undefined) {
-    return `${snapshot.durationMs} ms`;
-  }
-  return undefined;
+/**
+ * §6.1.1: a card shows at most three summary lines. The rows past the second
+ * fold into the third line's "+n 项", so a five-field node still keeps the
+ * promise instead of growing without bound.
+ */
+const SUMMARY_ROWS = 3;
+
+/** Duration the way the card prints it: "86 ms" under a second, "1.2 s" above. */
+function formatDuration(ms: number): string {
+  return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;
+}
+
+/**
+ * What a card knows about its run. `undefined` means the preview was given no
+ * `runtime` at all (edit mode): the card then draws no status chip. A passed
+ * `runtime` gives every node a snapshot — one that the run has not reached is
+ * `{ status: "pending" }` — so "no run" and "run, but this node is queued" stay
+ * distinguishable, which core's `runtimeForNode` alone cannot express.
+ *
+ * `runtimeForNode` pads a node the run never reported with `pending`, so it cannot
+ * tell that from a snapshot that says `pending`; presence is read from the keys
+ * (name first, then id, the same order). A disabled node is never queued: the
+ * engine commits it as skipped when its turn comes, so while the run has not
+ * reported it, it keeps its edit-mode `disabled` face instead of turning pending.
+ */
+function nodeSnapshot(runtime: RuntimeSnapshot | undefined, node: GraphNode): RuntimeNodeSnapshot | undefined {
+  if (!runtime) return undefined;
+  const nodes = runtime.nodes;
+  const own = (key: string | undefined) => (key && nodes && Object.hasOwn(nodes, key) ? nodes[key] : undefined);
+  const reported = own(node.name) ?? own(node.id);
+  if (!reported && node.disabled) return undefined;
+  return reported ?? runtimeForNode(runtime, node);
+}
+
+/**
+ * The status a card, its chip and its minimap swatch speak: the run's status when
+ * there is one, otherwise `disabled` for a disabled node, otherwise nothing.
+ */
+function displayStatus(node: GraphNode, snapshot: RuntimeNodeSnapshot | undefined): NodeStatusKey | undefined {
+  return snapshot?.status ?? (node.disabled ? "disabled" : undefined);
 }
 
 /** Shift+F10 and the ContextMenu key are the platform keyboard routes to a context menu. */
@@ -198,65 +304,59 @@ function isContextMenuKey(event: React.KeyboardEvent): boolean {
  */
 const KEYBOARD_MENU_ECHO_MS = 500;
 
-function nodeIcon(type: string): React.ReactNode {
-  if (type.includes("start")) return <PlayCircleOutlined />;
-  if (type.includes("webhook")) return <LinkOutlined />;
-  if (type.includes("kafka")) return <CloudServerOutlined />;
-  if (type.includes("cron") || type.includes("wait")) return <ClockCircleOutlined />;
-  if (type.includes("signal")) return <ThunderboltOutlined />;
-  if (type.includes("switch")) return <BranchesOutlined />;
-  if (type.includes("database")) return <DatabaseOutlined />;
-  if (type.includes("approval")) return <AuditOutlined />;
-  if (type.includes("function")) return <CodeOutlined />;
-  if (type.includes("http")) return <GlobalOutlined />;
-  if (type.includes("code")) return <CodeOutlined />;
-  return <QuestionCircleOutlined />;
-}
-
-function nodeTone(type: string): "blue" | "cyan" | "green" | "amber" | "violet" {
-  if (type.includes("kafka") || type.includes("merge")) return "cyan";
-  if (type.includes("start") || type.includes("database")) return "green";
-  if (type.includes("cron") || type.includes("wait") || type.includes("approval")) return "amber";
-  if (type.includes("signal") || type.includes("function") || type.includes("code")) return "violet";
-  return "blue";
-}
-
 function elementCenter(element: Element): PreviewClientPosition {
   const rect = element.getBoundingClientRect();
   return { clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
 }
 
+/**
+ * Minimap swatch: the node's status tone when it has a status, else its category
+ * colour. Both come from core's tables, so no status or type name is guessed here.
+ * The 55% mix is the one the preview page paints its minimap nodes with.
+ */
 function miniMapNodeColor(node: Node<PreviewNodeData>): string {
-  const status = node.data.runtime.status;
-  if (status === "running" || status === "waiting" || status === "committing") {
-    return "var(--xflow-preview-status-running)";
+  const status = displayStatus(node.data.graphNode, node.data.runtime);
+  if (status) {
+    return `color-mix(in srgb, var(--xflow-${nodeStatusMeta[status].tone}) 55%, var(--xflow-border-strong))`;
   }
-  if (status === "success") return "var(--xflow-preview-status-success)";
-  if (status === "failed") return "var(--xflow-preview-status-error)";
-  if (status === "pinned" || status === "continued") return "var(--xflow-preview-status-warning)";
-  if (status === "skipped" || status === "canceled" || status === "expired") {
-    return "var(--xflow-preview-status-disabled)";
-  }
-  return "var(--xflow-preview-node-bg)";
+  return `var(--xflow-${nodeCategoryMeta[categoryOf(node.data.graphNode.type, node.data.category)].color})`;
 }
 
+/**
+ * Everything a card needs, and nothing that changes with selection: `selected`
+ * rides on the xyflow node itself (`NodeProps.selected`), so picking another node
+ * leaves every other card's `data` reference — and with it React.memo — intact.
+ */
 interface PreviewNodeData extends Record<string, unknown> {
   graphNode: GraphNode;
-  runtime: RuntimeNodeSnapshot;
+  /** Absent when the preview got no `runtime`; see {@link nodeSnapshot}. */
+  runtime?: RuntimeNodeSnapshot;
   sourcePorts: string[];
   targetPorts: string[];
   canConnect: boolean;
-  selected: boolean;
+  /** Stable for the life of the preview. */
   onSelect: (nodeId: string) => void;
-  /** Set only while the owner listens for node context menus. */
+  /** Set only while the owner listens for node context menus; stable while set. */
   onContextMenuKey?: (nodeId: string, anchor: Element) => void;
+  /** The owner's wait-note override for this node, if any. */
+  note?: XFlowPreviewNodeNote;
+  /**
+   * A run-record annotation for the card's meta line (重跑起点 / 沿用原执行
+   * 结果). It takes the left-hand slot ahead of a duration: the replay explains
+   * the derivation, which is what that line is for in §6.8.
+   */
+  metaNote?: string;
+  /** The type's declared descriptor category, when the host knows one. */
+  category?: string;
+  /** Resolved card-summary rows for this node (spec §6.1.1); absent means none. */
+  summary?: readonly CardSummaryRow[];
+  /** Set only while the owner listens for note actions; stable while set. */
+  onNodeAction?: (nodeName: string, action: string) => void;
+  /** Set only while the owner locates a summary row's field; stable while set. */
+  onLocateParameter?: (nodeId: string, fieldPath: string) => void;
 }
 
 type PreviewFlowNode = Node<PreviewNodeData, "xflowPreviewNode">;
-
-const nodeTypes = {
-  xflowPreviewNode: PreviewNode
-};
 
 const initialFitViewOptions = { padding: 0.18 };
 
@@ -266,9 +366,32 @@ const nodeFitPadding = 0.28;
 /** Frames a fit may retry while its subject is still unmeasured. */
 const fitRetryLimit = 12;
 
+/**
+ * Fits `bounds` the way fitBounds would, but clear of the canvas's floating layers
+ * (rulers, zoom bar, minimap) by at least FLOAT_GAP. Without a measurable canvas
+ * — before layout, or in a test DOM — it is exactly fitBounds.
+ */
+function fitBoundsClear(
+  flow: ReactFlowInstance<PreviewFlowNode, Edge>,
+  bounds: { x: number; y: number; width: number; height: number },
+  padding: number,
+  canvas: HTMLElement | null | undefined
+): void {
+  const surface = measureSurface(canvas ?? null);
+  const viewport = surface
+    ? fitViewportClearOf(bounds, surface.area, surface.layers, { minZoom: MIN_ZOOM, maxZoom: MAX_ZOOM, padding })
+    : undefined;
+  if (viewport) {
+    void flow.setViewport(viewport);
+    return;
+  }
+  void flow.fitBounds(bounds, { padding });
+}
+
 function fitMeasuredNodes(
   flow: ReactFlowInstance<PreviewFlowNode, Edge>,
-  padding = initialFitViewOptions.padding
+  padding = initialFitViewOptions.padding,
+  canvas?: HTMLElement | null
 ): boolean {
   const nodes = flow.getNodes();
   if (nodes.length === 0) return false;
@@ -276,8 +399,51 @@ function fitMeasuredNodes(
   const bounds = flow.getNodesBounds(nodes);
   if (bounds.width <= 0 || bounds.height <= 0) return false;
 
-  void flow.fitBounds(bounds, { padding });
+  fitBoundsClear(flow, bounds, padding, canvas);
   return true;
+}
+
+const sameBounds = (a: { x: number; y: number; width: number; height: number }, b: typeof a) =>
+  Math.abs(a.x - b.x) < 0.5 && Math.abs(a.y - b.y) < 0.5
+  && Math.abs(a.width - b.width) < 0.5 && Math.abs(a.height - b.height) < 0.5;
+
+/** Frames without a bounds change after which a fit counts as settled. */
+const fitSettleFrames = 4;
+
+/**
+ * fitMeasuredNodes, then follows the cards as they re-measure: a fit that crosses
+ * LOD_ZOOM resizes them (low detail scales the header by 1/zoom), so the bounds it
+ * used are stale a frame later and the content would run under the chrome. Refits
+ * while the bounds keep changing, for at most fitRetryLimit frames. Returns a
+ * cancel function for the follow-up still in flight; false when nothing was fitted.
+ */
+function fitMeasuredNodesSettled(
+  flow: ReactFlowInstance<PreviewFlowNode, Edge>,
+  padding: number | undefined,
+  canvas: HTMLElement | null | undefined
+): (() => void) | false {
+  if (!fitMeasuredNodes(flow, padding, canvas)) return false;
+  let fitted = flow.getNodesBounds(flow.getNodes());
+  let frame: number | undefined;
+  let quiet = 0;
+  let frames = 0;
+  const check = () => {
+    frame = undefined;
+    const bounds = flow.getNodesBounds(flow.getNodes());
+    if (bounds.width > 0 && bounds.height > 0 && !sameBounds(bounds, fitted)) {
+      fitBoundsClear(flow, bounds, padding ?? initialFitViewOptions.padding, canvas);
+      fitted = bounds;
+      quiet = 0;
+    } else {
+      quiet += 1;
+    }
+    frames += 1;
+    if (quiet < fitSettleFrames && frames < fitRetryLimit) frame = requestAnimationFrame(check);
+  };
+  frame = requestAnimationFrame(check);
+  return () => {
+    if (frame !== undefined) cancelAnimationFrame(frame);
+  };
 }
 
 /**
@@ -333,14 +499,6 @@ function isNodeAnchorOnScreen(
   return left >= canvas.left && left <= canvas.right && top >= canvas.top && top <= canvas.bottom;
 }
 
-function useFitMeasuredNodes(): () => void {
-  const flow = useReactFlow<PreviewFlowNode, Edge>();
-
-  return React.useCallback(() => {
-    fitMeasuredNodes(flow);
-  }, [flow]);
-}
-
 /**
  * Fits once after the controlled nodes have received measured dimensions.
  * Disabled entirely when the owner supplied a `defaultViewport` to restore
@@ -349,13 +507,16 @@ function useFitMeasuredNodes(): () => void {
  */
 function InitialViewFitter({
   flow,
-  disabled
+  disabled,
+  canvas
 }: {
   flow: ReactFlowInstance<PreviewFlowNode, Edge> | null;
   disabled?: boolean;
+  canvas: React.RefObject<HTMLDivElement | null>;
 }): null {
   const hasFittedInitialView = React.useRef(false);
   const fitViewFrame = React.useRef<number | undefined>(undefined);
+  const settleCancel = React.useRef<(() => void) | undefined>(undefined);
 
   // `disabled` is a dependency so a viewport restored after mount cancels a
   // pending retry; hasFittedInitialView keeps a re-run from fitting twice.
@@ -367,8 +528,10 @@ function InitialViewFitter({
       fitViewFrame.current = undefined;
       if (hasFittedInitialView.current) return;
 
-      if (fitMeasuredNodes(flow)) {
+      const settling = fitMeasuredNodesSettled(flow, undefined, canvas.current);
+      if (settling) {
         hasFittedInitialView.current = true;
+        settleCancel.current = settling;
         return;
       }
 
@@ -384,27 +547,12 @@ function InitialViewFitter({
         cancelAnimationFrame(fitViewFrame.current);
         fitViewFrame.current = undefined;
       }
+      settleCancel.current?.();
+      settleCancel.current = undefined;
     };
-  }, [flow, disabled]);
+  }, [flow, disabled, canvas]);
 
   return null;
-}
-
-/** Uses fitBounds so the control works with the preview's controlled nodes. */
-function PreviewControls(): React.ReactElement {
-  const fitMeasuredNodes = useFitMeasuredNodes();
-
-  return (
-    <Controls showFitView={false} showInteractive={false}>
-      <ControlButton
-        aria-label="fit view"
-        title="fit view"
-        onClick={fitMeasuredNodes}
-      >
-        <span aria-hidden="true">⌗</span>
-      </ControlButton>
-    </Controls>
-  );
 }
 
 function addPort(portsByNode: Map<string, string[]>, nodeId: string, port: string): void {
@@ -443,6 +591,15 @@ function mergeDeclaredPorts(declaredPorts: string[], edgePorts: string[]): strin
   return ports;
 }
 
+/**
+ * Own-property read. Node keys are user data: a node named `constructor` must
+ * not inherit `Object.prototype.constructor` from a plain record (the card
+ * would then call `.map` on a function and the whole canvas would fail).
+ */
+function own<T>(map: Readonly<Record<string, T>> | undefined, key: string): T | undefined {
+  return map && Object.hasOwn(map, key) ? map[key] : undefined;
+}
+
 function toFlowNodes(
   graphNodes: GraphNode[],
   graphEdges: GraphEdge[],
@@ -451,7 +608,13 @@ function toFlowNodes(
   editable: boolean,
   canConnect: boolean,
   onSelect: (nodeId: string) => void,
-  onContextMenuKey: ((nodeId: string, anchor: Element) => void) | undefined
+  onContextMenuKey: ((nodeId: string, anchor: Element) => void) | undefined,
+  nodeNotes: Readonly<Record<string, XFlowPreviewNodeNote>> | undefined,
+  onNodeAction: ((nodeName: string, action: string) => void) | undefined,
+  nodeCategories: Readonly<Record<string, string>> | undefined,
+  nodeSummaries: Readonly<Record<string, readonly CardSummaryRow[]>> | undefined,
+  onLocateParameter: ((nodeId: string, fieldPath: string) => void) | undefined,
+  nodeMetaNotes: Readonly<Record<string, string>> | undefined
 ): PreviewFlowNode[] {
   const sourcePortsByNode = new Map<string, string[]>();
   const targetPortsByNode = new Map<string, string[]>();
@@ -461,21 +624,25 @@ function toFlowNodes(
   }
 
   return graphNodes.map((node) => {
-    const nodeRuntime = runtimeForNode(runtime, node);
+    const snapshot = nodeSnapshot(runtime, node);
     const isSupply = isSupplyNode(node);
     const nodeCanConnect = canConnect && !isSupply;
+    const summaryRows = own(nodeSummaries, node.id);
     return {
       id: node.id,
       type: "xflowPreviewNode",
       position: node.position,
       draggable: editable,
+      // xyflow does not manage selection here (the owner does); the field is
+      // still set so the card reads it as `NodeProps.selected` rather than `data`.
       selectable: false,
+      selected: selectedNodeId === node.id,
       connectable: nodeCanConnect,
       deletable: false,
-      ariaLabel: `${node.name} node ${nodeRuntime.status}`,
+      ariaLabel: `${node.name} node ${displayStatus(node, snapshot) ?? "pending"}`,
       data: {
         graphNode: node,
-        runtime: nodeRuntime,
+        runtime: snapshot,
         // Read-only data edges still need their handles for React Flow to locate them.
         // Supply nodes intentionally have neither source nor target data handles.
         sourcePorts: isSupply ? [] : mergeDeclaredPorts(node.outputs, sourcePortsByNode.get(node.id) ?? []),
@@ -486,12 +653,146 @@ function toFlowNodes(
             targetPortsByNode.get(node.id) ?? []
           ),
         canConnect: nodeCanConnect,
-        selected: selectedNodeId === node.id,
         onSelect,
-        onContextMenuKey
+        onContextMenuKey,
+        note: own(nodeNotes, node.name),
+        metaNote: own(nodeMetaNotes, node.name),
+        category: own(nodeCategories, node.type),
+        summary: Array.isArray(summaryRows) ? summaryRows : undefined,
+        onNodeAction,
+        onLocateParameter
       }
     };
   });
+}
+
+function sameStrings(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
+function sameSnapshot(a: RuntimeNodeSnapshot | undefined, b: RuntimeNodeSnapshot | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.status === b.status && a.attempts === b.attempts && a.durationMs === b.durationMs && a.error === b.error;
+}
+
+/** Field-wise, because `toGraphModel` rebuilds every GraphNode on any workflow edit. */
+function sameGraphNode(a: GraphNode, b: GraphNode): boolean {
+  if (a === b) return true;
+  return (
+    a.id === b.id
+    && a.name === b.name
+    && a.type === b.type
+    && a.kind === b.kind
+    && a.label === b.label
+    && a.disabled === b.disabled
+    && a.position.x === b.position.x
+    && a.position.y === b.position.y
+    && sameStrings(a.outputs, b.outputs)
+    && sameStrings(a.inputs.map((input) => input.name), b.inputs.map((input) => input.name))
+  );
+}
+
+function sameNodeData(a: PreviewNodeData, b: PreviewNodeData): boolean {
+  return (
+    a.canConnect === b.canConnect
+    && a.onSelect === b.onSelect
+    && a.onContextMenuKey === b.onContextMenuKey
+    && a.onNodeAction === b.onNodeAction
+    && a.onLocateParameter === b.onLocateParameter
+    && a.category === b.category
+    && sameSummaries(a.summary, b.summary)
+    && sameNote(a.note, b.note)
+    && a.metaNote === b.metaNote
+    && sameSnapshot(a.runtime, b.runtime)
+    && sameStrings(a.sourcePorts, b.sourcePorts)
+    && sameStrings(a.targetPorts, b.targetPorts)
+    && sameGraphNode(a.graphNode, b.graphNode)
+  );
+}
+
+/** Row-wise, because the owner rebuilds the summary arrays whenever the draft moves. */
+function sameSummaries(a: readonly CardSummaryRow[] | undefined, b: readonly CardSummaryRow[] | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.length === b.length
+    && a.every((row, index) => {
+      const other = b[index];
+      if (row.label !== other.label || row.value !== other.value || row.kind !== other.kind) return false;
+      if (!row.parts || !other.parts) return row.parts === other.parts;
+      return row.parts.length === other.parts.length
+        && row.parts.every((part, at) => part.text === other.parts![at].text && part.kind === other.parts![at].kind);
+    });
+}
+
+function sameNote(a: XFlowPreviewNodeNote | undefined, b: XFlowPreviewNodeNote | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.text === b.text && a.action === b.action;
+}
+
+function sameFlowNode(a: PreviewFlowNode, b: PreviewFlowNode): boolean {
+  return (
+    a.data === b.data
+    && a.selected === b.selected
+    && a.draggable === b.draggable
+    && a.connectable === b.connectable
+    && a.ariaLabel === b.ariaLabel
+    && a.position.x === b.position.x
+    && a.position.y === b.position.y
+  );
+}
+
+/**
+ * Hands back last render's node objects wherever nothing a card shows has
+ * changed. xyflow keeps an internal node per user node and re-adopts it only when
+ * the user node's reference changes; a card re-renders only when its `data` or
+ * its own props change. So the unit of reuse is the object: a selection change
+ * produces new objects for the two nodes whose `selected` flipped, a workflow edit
+ * for the nodes it touched, and every other card keeps both references — which is
+ * what lets `React.memo` skip it. When nothing at all changed the array itself is
+ * returned, so xyflow sees no new `nodes` prop either.
+ */
+function reuseFlowNodes(previous: readonly PreviewFlowNode[], next: PreviewFlowNode[]): PreviewFlowNode[] {
+  const previousById = new Map(previous.map((node) => [node.id, node]));
+  const reused = next.map((node) => {
+    const before = previousById.get(node.id);
+    if (!before) return node;
+    const data = sameNodeData(before.data, node.data) ? before.data : node.data;
+    const candidate = data === node.data ? node : { ...node, data };
+    return sameFlowNode(before, candidate) ? before : candidate;
+  });
+  return reused.length === previous.length && reused.every((node, index) => node === previous[index])
+    ? (previous as PreviewFlowNode[])
+    : reused;
+}
+
+/**
+ * A callback with a permanent identity that always runs the latest closure. The
+ * card's `onSelect` / `onContextMenuKey` live in `data`, so a changing identity
+ * would invalidate every card on each parent render.
+ */
+/**
+ * A switch the user flips locally, seeded by a prop. A new prop value overrides
+ * the local flip; re-rendering with the same value leaves it alone. (State is
+ * adjusted during render, React's documented pattern for deriving from a prop.)
+ */
+function useToggleSeededBy(seed: boolean): [boolean, (next: boolean) => void] {
+  const [state, setState] = React.useState({ seed, value: seed });
+  const current = state.seed === seed ? state : { seed, value: seed };
+  if (current !== state) setState(current);
+  const set = React.useCallback((value: boolean) => setState({ seed, value }), [seed]);
+  return [current.value, set];
+}
+
+function useStableCallback<Args extends unknown[], Result>(
+  callback: (...args: Args) => Result
+): (...args: Args) => Result {
+  const latest = React.useRef(callback);
+  React.useLayoutEffect(() => {
+    latest.current = callback;
+  });
+  return React.useCallback((...args: Args) => latest.current(...args), []);
 }
 
 function edgeConnection(edge: GraphEdge): PreviewConnection {
@@ -522,32 +823,60 @@ function previewConnectionFromFlow(
   };
 }
 
+/**
+ * How an edge is stroked, from its TARGET node's status (spec §4 入边 column):
+ * the same edge on the same graph cannot be solid in one view and dashed in
+ * another. A target with no run status is `default`, or the faint `disabled`
+ * stroke when the node is disabled.
+ */
+function targetEdgeVariant(
+  edge: GraphEdge,
+  runtime: RuntimeSnapshot | undefined,
+  graphNodesById: ReadonlyMap<string, GraphNode>
+): EdgeVariant {
+  const target = graphNodesById.get(edge.target);
+  const snapshot = target ? nodeSnapshot(runtime, target) : undefined;
+  const status = target ? displayStatus(target, snapshot) : undefined;
+  return status ? edgeVariant(status) : "default";
+}
+
 function toFlowEdges(
   graphEdges: GraphEdge[],
   runtime: RuntimeSnapshot | undefined,
+  graphNodesById: ReadonlyMap<string, GraphNode>,
   canDeleteConnections: boolean,
   selectedEdgeIds: ReadonlySet<string>,
   dangling: ReadonlySet<string>
 ): Edge[] {
-  return graphEdges.map((edge) => {
-    const targetRuntime = runtime?.nodes?.[edge.targetName] ?? runtime?.nodes?.[edge.target];
-    const isActive = targetRuntime?.status === "running" || targetRuntime?.status === "waiting";
+  const edges: Edge[] = [];
+  for (const edge of graphEdges) {
     const isDangling = dangling.has(danglingKey(edge.sourceName, edge.sourcePort));
+    // Dangling and error are about the source *port*, so they outrank whatever
+    // the target's status says about the line.
     const isError = !isDangling && edge.sourcePort === "error";
+    const variant = targetEdgeVariant(edge, runtime, graphNodesById);
+    // §4 「—」: nothing follows a canceled or expired node, so no line is drawn.
+    if (!isDangling && !isError && variant === "none") continue;
+
     const showLabel = isDangling || edge.sourcePort !== "main";
     const connectionLabel = `Connection from ${edge.sourceName} ${edge.sourcePort} to ${edge.targetName} ${edge.targetPort}${
       isDangling ? " (port no longer exists)" : ""
     }`;
 
-    return {
+    const flowEdge: BuiltInEdge = {
       id: edge.id,
       source: edge.source,
       target: edge.target,
       sourceHandle: edge.sourcePort,
       targetHandle: edge.targetPort,
       type: "smoothstep",
-      className: isDangling ? "xflow-preview-edge--dangling" : undefined,
-      animated: isActive && !isDangling,
+      // §6.2: orthogonal routing with 8px rounded corners (xyflow's default is 5).
+      pathOptions: { borderRadius: 8 },
+      className: isDangling
+        ? "xflow-preview-edge--dangling"
+        : isError
+          ? "xflow-preview-edge--error"
+          : `xflow-preview-edge--${variant}`,
       label: showLabel ? (isDangling ? `${edge.sourcePort} · missing` : edge.sourcePort) : undefined,
       selectable: canDeleteConnections,
       focusable: canDeleteConnections,
@@ -557,31 +886,17 @@ function toFlowEdges(
         ? `${connectionLabel}; press Enter to select, then Delete or Backspace to remove`
         : connectionLabel,
       interactionWidth: 16,
-      style: {
-        stroke: isDangling
-          ? "var(--xflow-preview-edge-dangling)"
-          : isError
-            ? "var(--xflow-preview-edge-error)"
-            : isActive
-              ? "var(--xflow-preview-edge-running)"
-              : "var(--xflow-preview-edge)",
-        strokeDasharray: isDangling ? "2 4" : isError ? "5 4" : undefined,
-        opacity: isError ? 0.78 : 1,
-        strokeWidth: isActive || isError || isDangling ? 1.8 : 1.2
-      },
-      labelStyle: {
-        fill: isDangling
-          ? "var(--xflow-preview-edge-dangling-label)"
-          : isError
-            ? "var(--xflow-preview-status-error)"
-            : "var(--xflow-preview-edge-label)",
-        fontWeight: 700
-      },
+      // Every stroke — port-semantic ones included — lives in styles.css under
+      // `.xflow-preview-edge--*`. Nothing inline: an inline stroke would outrank
+      // both the hover rule and the selected rule (and the label colour moved to
+      // CSS for the same reason).
       labelBgStyle: {
         fill: "var(--xflow-preview-edge-label-bg)"
       }
     };
-  });
+    edges.push(flowEdge);
+  }
+  return edges;
 }
 
 function EdgeList({ edges }: { edges: GraphEdge[] }): React.ReactElement {
@@ -620,34 +935,135 @@ function activateHandle(
   event.currentTarget.click();
 }
 
-function PreviewNode({ data }: NodeProps<PreviewFlowNode>): React.ReactElement {
-  const { graphNode: node, runtime, sourcePorts, targetPorts, canConnect, selected, onSelect, onContextMenuKey } = data;
-  const visiblePorts = sourcePorts.filter((port) => port !== "main" && port !== "error");
-  // "pending" is also what runtimeForNode reports when there is no run at all,
-  // so the card only speaks about status once a run has moved the node.
-  const hasRunStatus = runtime.status !== "pending";
-  const runMeta = hasRunStatus ? nodeMeta(runtime) : undefined;
+/**
+ * §6.2: below the LOD threshold the chip loses its text and floats to the card's
+ * right edge, the name scales by 1/zoom, and every row but the head leaves the
+ * DOM (the ports row stays mounted but empty: xyflow still needs the handles to
+ * place its edges).
+ */
+const lodSelector = (state: ReactFlowState): boolean => state.transform[2] < LOD_ZOOM;
+
+/**
+ * Writes the zoom scale the LOD rules divide by (`--xflow-preview-lod`) straight
+ * onto the canvas element. A store subscription, not a selector: the value moves
+ * with every pinch step and must never re-render a single card.
+ */
+function LodScaleVariables({ target }: { target: React.RefObject<HTMLDivElement | null> }): null {
+  const store = useStoreApi();
+  React.useEffect(() => {
+    const element = target.current;
+    if (!element) return;
+    let last: string | undefined;
+    return store.subscribe((state) => {
+      const zoom = state.transform[2];
+      // Above the threshold no rule reads the variable; pinning it to 1 stops
+      // the writes once the user is zoomed in.
+      const value = zoom < LOD_ZOOM ? String(zoom) : "1";
+      if (value === last) return;
+      last = value;
+      element.style.setProperty("--xflow-preview-lod", value);
+    });
+  }, [store, target]);
+  return null;
+}
+
+/**
+ * Ports drawn in the card-bottom port row: everything but a lone main outlet,
+ * with the error port last (it is the one danger-toned port, and its handle
+ * hangs off the row's right end per §6.2).
+ */
+function portsForRow(ports: string[]): string[] {
+  if (ports.length === 1 && ports[0] === "main") return [];
+  const rest = ports.filter((port) => port !== "error");
+  return ports.includes("error") ? [...rest, "error"] : rest;
+}
+
+const PreviewNode = React.memo(function PreviewNode({
+  data,
+  selected
+}: NodeProps<PreviewFlowNode>): React.ReactElement {
+  const { graphNode: node, runtime, sourcePorts, targetPorts, canConnect, onSelect, onContextMenuKey, note, metaNote, category: declaredCategory, summary, onNodeAction, onLocateParameter } = data;
+  const lowDetail = useStore(lodSelector);
+  const category = categoryOf(node.type, declaredCategory);
+  const categoryMeta = nodeCategoryMeta[category];
+  const status = displayStatus(node, runtime);
+  const statusMeta = status ? nodeStatusMeta[status] : undefined;
+  const statusLabel = statusMeta?.label;
   const nameTitle = node.label === node.name ? node.label : `${node.label} (${node.name})`;
+  const rowPorts = portsForRow(sourcePorts);
+  const runMetaLeft = metaNote ?? (runtime?.durationMs !== undefined ? formatDuration(runtime.durationMs) : undefined);
+  const runMetaRight = runtime?.attempts !== undefined ? `第 ${runtime.attempts} 次` : undefined;
+  const error = lowDetail ? undefined : runtime?.error;
+
+  const activate = (): void => onSelect(node.id);
 
   return (
     <article
       className="xflow-preview-node"
       data-node-id={node.id}
       data-selected={selected}
-      data-status={runtime.status}
+      data-status={status ?? "pending"}
+      data-tone={statusMeta?.tone}
       data-disabled={node.disabled || undefined}
+      data-lod={lowDetail ? "low" : undefined}
+      // The category colour comes from core's table (§5); CSS derives the block's
+      // background and icon colour from this one variable.
+      style={{ "--xflow-preview-node-category": `var(--xflow-${categoryMeta.color})` } as React.CSSProperties}
+      onClick={(event) => {
+        // Handles start connections; a press there must not also pick the node.
+        if ((event.target as Element).closest(".xflow-preview-node__handle")) return;
+        activate();
+      }}
     >
+      {status === "pinned" ? (
+        <span className="xflow-preview-node__pin" aria-hidden="true">
+          <PushpinOutlined />
+        </span>
+      ) : null}
+      {targetPorts.map((port, index) => (
+        <Handle
+          key={`target:${port}`}
+          id={port}
+          type="target"
+          position={Position.Left}
+          className="xflow-preview-node__handle xflow-preview-node__handle--target"
+          style={targetPorts.length === 1 ? undefined : { top: handleTop(index, targetPorts.length) }}
+          isConnectable={canConnect}
+          isConnectableStart={false}
+          isConnectableEnd={canConnect}
+          role="button"
+          tabIndex={canConnect ? 0 : -1}
+          aria-disabled={!canConnect}
+          aria-label={`${node.name} input ${port}; press Enter or Space to complete a connection`}
+          onKeyDown={(event) => activateHandle(event, canConnect)}
+        />
+      ))}
+      {sourcePorts.length > 0 && rowPorts.length === 0 ? (
+        <Handle
+          id="main"
+          type="source"
+          position={Position.Right}
+          className="xflow-preview-node__handle xflow-preview-node__handle--source"
+          isConnectable={canConnect}
+          isConnectableStart={canConnect}
+          isConnectableEnd={false}
+          role="button"
+          tabIndex={canConnect ? 0 : -1}
+          aria-disabled={!canConnect}
+          aria-label={`${node.name} output main; press Enter or Space to start a connection`}
+          onKeyDown={(event) => activateHandle(event, canConnect)}
+        />
+      ) : null}
       <div
         className="xflow-preview-node__select"
         role="button"
         tabIndex={0}
-        aria-label={`${node.name} node ${runtime.status}`}
+        aria-label={`${node.name} node ${status ?? "pending"}`}
         aria-keyshortcuts={onContextMenuKey ? "Shift+F10 ContextMenu" : undefined}
-        onClick={() => onSelect(node.id)}
         onKeyDown={(event) => {
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
-            onSelect(node.id);
+            activate();
             return;
           }
           if (onContextMenuKey && isContextMenuKey(event)) {
@@ -660,85 +1076,204 @@ function PreviewNode({ data }: NodeProps<PreviewFlowNode>): React.ReactElement {
         }}
       >
         <div className="xflow-preview-node__header">
-          <span className="xflow-preview-node__icon" data-tone={nodeTone(node.type)} aria-label={`${node.type} icon`}>
-            {nodeIcon(node.type)}
+          <span className="xflow-preview-node__icon" aria-label={`${node.type} icon`} data-cat={category}>
+            {categoryGlyph[categoryMeta.icon]}
           </span>
           <div className="xflow-preview-node__title">
             <strong title={nameTitle}>{node.label}</strong>
-            <span className="xflow-preview-node__subtitle">
-              <code className="xflow-preview-node__type" title={node.type}>{node.type}</code>
-              {node.disabled ? <span className="xflow-preview-node__badge">已禁用</span> : null}
-            </span>
+            {lowDetail ? null : <code className="xflow-preview-node__type" title={node.type}>{node.type}</code>}
           </div>
-          {hasRunStatus ? (
-            <span className="xflow-preview-node__status" data-status={runtime.status}>
-              {statusLabel[runtime.status]}
+          {status && statusMeta ? (
+            <span
+              className="xflow-preview-node__status"
+              data-tone={statusMeta.tone}
+              data-status={status}
+              title={lowDetail ? statusLabel : undefined}
+            >
+              <span className="xflow-preview-node__status-icon" aria-hidden="true">
+                {statusGlyph[statusMeta.icon]}
+              </span>
+              {lowDetail ? null : <span>{statusLabel}</span>}
             </span>
           ) : null}
         </div>
-        {runMeta || visiblePorts.length > 0 ? (
-          <div className="xflow-preview-node__body">
-            {visiblePorts.length > 0 ? (
-              <div className="xflow-preview-node__port-chips">
-                {visiblePorts.map((port) => (
-                  <span key={port}>{port}</span>
-                ))}
-              </div>
-            ) : null}
-            {runMeta ? <span className="xflow-preview-node__run-meta">{runMeta}</span> : null}
-          </div>
-        ) : null}
-        {runtime.error ? <p className="xflow-preview-node__error">{runtime.error}</p> : null}
       </div>
-      {targetPorts.map((port, index) => (
-        <Handle
-          key={`target:${port}`}
-          id={port}
-          type="target"
-          position={Position.Left}
-          className="xflow-preview-node__handle xflow-preview-node__handle--target"
-          style={{ top: handleTop(index, targetPorts.length) }}
-          isConnectable={canConnect}
-          isConnectableStart={false}
-          isConnectableEnd={canConnect}
-          role="button"
-          tabIndex={canConnect ? 0 : -1}
-          aria-disabled={!canConnect}
-          aria-label={`${node.name} input ${port}; press Enter or Space to complete a connection`}
-          onKeyDown={(event) => activateHandle(event, canConnect)}
-        />
-      ))}
-      {sourcePorts.map((port, index) => (
-        <Handle
-          key={`source:${port}`}
-          id={port}
-          type="source"
-          position={Position.Right}
-          className="xflow-preview-node__handle xflow-preview-node__handle--source"
-          style={{ top: handleTop(index, sourcePorts.length) }}
-          isConnectable={canConnect}
-          isConnectableStart={canConnect}
-          isConnectableEnd={false}
-          role="button"
-          tabIndex={canConnect ? 0 : -1}
-          aria-disabled={!canConnect}
-          aria-label={`${node.name} output ${port}; press Enter or Space to start a connection`}
-          onKeyDown={(event) => activateHandle(event, canConnect)}
-        />
-      ))}
+      {!lowDetail && runtime?.status === "suspended" ? (
+        <div className="xflow-preview-node__note">
+          <span>{note?.text ?? "等待信号"}</span>
+          {note?.action && onNodeAction ? (
+            <button
+              className="xflow-preview-node__note-action"
+              type="button"
+              onClick={(event) => {
+                // The card's own click selects the node; the note's action is a
+                // separate gesture and must not also change the selection.
+                event.stopPropagation();
+                onNodeAction(node.name, note.action as string);
+              }}
+            >
+              {note.action}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {/*
+        §6.1.1 configuration summary: 标签 · 值 rows between the header and the
+        card's other states. Empty values were already dropped by the owner, so
+        every row drawn here has something behind it.
+      */}
+      {!lowDetail && summary && summary.length > 0 ? (
+        <dl className="xflow-preview-node__summary">
+          {(summary.length > SUMMARY_ROWS ? summary.slice(0, SUMMARY_ROWS - 1) : summary).map((row, index) => {
+            // §6.1.1: a press on a row selects the node and reveals that field;
+            // without an owner callback the row stays plain text.
+            const locate = onLocateParameter && row.path
+              ? () => onLocateParameter(node.id, row.path as string)
+              : undefined;
+            return (
+              <React.Fragment key={`${index}:${row.label}`}>
+                <dt>{row.label}</dt>
+                <dd
+                  data-summary-row={row.label}
+                  data-kind={row.kind}
+                  role={locate ? "button" : undefined}
+                  tabIndex={locate ? 0 : undefined}
+                  onClick={locate ? (event) => { event.stopPropagation(); locate(); } : undefined}
+                  onKeyDown={locate ? (event) => {
+                    if (event.key !== "Enter" && event.key !== " ") return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    locate();
+                  } : undefined}
+                >
+                  {row.kind === "ref" ? (
+                    <span aria-hidden="true" className="xflow-preview-node__summary-ref">
+                      <KeyOutlined />
+                    </span>
+                  ) : null}
+                  {row.parts
+                    ? row.parts.map((part, at) => (
+                        <React.Fragment key={`${at}:${part.text}`}>
+                          {at > 0 ? " " : null}
+                          {part.kind === "mono" ? (
+                            <span className="xflow-preview-node__summary-mono">{part.text}</span>
+                          ) : part.kind === "expr" ? (
+                            <span className="xflow-preview-node__summary-expr">{part.text}</span>
+                          ) : (
+                            part.text
+                          )}
+                        </React.Fragment>
+                      ))
+                    : row.value}
+                </dd>
+              </React.Fragment>
+            );
+          })}
+          {summary.length > SUMMARY_ROWS ? (
+            <>
+              <dt>更多</dt>
+              <dd className="xflow-preview-node__summary-more">+{summary.length - (SUMMARY_ROWS - 1)} 项</dd>
+            </>
+          ) : null}
+        </dl>
+      ) : null}
+      {/*
+        Run meta and the error line sit above the port row: the row is the card's
+        last line, so the outlets leave as close to the bottom edge as the row's
+        own padding allows (baseline /ui-preview §6.1).
+      */}
+      {!lowDetail && (runMetaLeft || runMetaRight) ? (
+        <div className="xflow-preview-node__run-meta">
+          {runMetaLeft ? <span>{runMetaLeft}</span> : null}
+          {runMetaRight ? <span>{runMetaRight}</span> : null}
+        </div>
+      ) : null}
+      {error ? <p className="xflow-preview-node__error" title={error}>{error}</p> : null}
+      {rowPorts.length > 0 ? (
+        lowDetail ? (
+          <div className="xflow-preview-node__ports xflow-preview-node__ports--handles" aria-hidden="true">
+            {rowPorts.map((port, index) => (
+              <Handle
+                key={`source:${port}`}
+                id={port}
+                type="source"
+                position={Position.Bottom}
+                className="xflow-preview-node__handle xflow-preview-node__handle--source xflow-preview-node__handle--spread"
+                style={{ left: handleTop(index, rowPorts.length) }}
+                isConnectable={canConnect}
+                isConnectableStart={canConnect}
+                isConnectableEnd={false}
+                aria-hidden="true"
+              />
+            ))}
+          </div>
+        ) : (
+          <div className="xflow-preview-node__ports">
+            {rowPorts.map((port) => (
+              <span
+                key={port}
+                className={
+                  port === "error"
+                    ? "xflow-preview-node__port xflow-preview-node__port--error"
+                    : "xflow-preview-node__port"
+                }
+              >
+                {port}
+                {port !== "error" ? (
+                  <Handle
+                    id={port}
+                    type="source"
+                    position={Position.Bottom}
+                    className="xflow-preview-node__handle xflow-preview-node__handle--source xflow-preview-node__handle--port"
+                    isConnectable={canConnect}
+                    isConnectableStart={canConnect}
+                    isConnectableEnd={false}
+                    role="button"
+                    tabIndex={canConnect ? 0 : -1}
+                    aria-disabled={!canConnect}
+                    aria-label={`${node.name} output ${port}; press Enter or Space to start a connection`}
+                    onKeyDown={(event) => activateHandle(event, canConnect)}
+                  />
+                ) : null}
+              </span>
+            ))}
+            {rowPorts.includes("error") ? (
+              <Handle
+                id="error"
+                type="source"
+                position={Position.Right}
+                className="xflow-preview-node__handle xflow-preview-node__handle--source xflow-preview-node__handle--error"
+                isConnectable={canConnect}
+                isConnectableStart={canConnect}
+                isConnectableEnd={false}
+                role="button"
+                tabIndex={canConnect ? 0 : -1}
+                aria-disabled={!canConnect}
+                aria-label={`${node.name} output error; press Enter or Space to start a connection`}
+                onKeyDown={(event) => activateHandle(event, canConnect)}
+              />
+            ) : null}
+          </div>
+        )
+      ) : null}
     </article>
   );
-}
+});
+
+const nodeTypes = {
+  xflowPreviewNode: PreviewNode
+};
 
 interface RuntimeSummary {
   total: number;
-  counts: Partial<Record<NodeStatus, number>>;
+  counts: Partial<Record<NodeStatusKey, number>>;
 }
 
+/** Counts what each card shows, so a disabled node the run never reported reads as disabled here too. */
 function summarizeRuntime(nodes: GraphNode[], runtime?: RuntimeSnapshot): RuntimeSummary {
-  const counts: Partial<Record<NodeStatus, number>> = {};
+  const counts: Partial<Record<NodeStatusKey, number>> = {};
   for (const node of nodes) {
-    const status = runtimeForNode(runtime, node).status;
+    const status = displayStatus(node, nodeSnapshot(runtime, node)) ?? "pending";
     counts[status] = (counts[status] ?? 0) + 1;
   }
   return { total: nodes.length, counts };
@@ -749,9 +1284,9 @@ function SummaryPill({ label }: { label: string }): React.ReactElement {
 }
 
 /**
- * Run-summary pill order. Total over `NodeStatus` on purpose: a status missing
+ * Run-summary pill order. Total over `NodeStatusKey` on purpose: a status missing
  * from this list is silently dropped from the summary (its nodes show no pill
- * at all), so `satisfies Record<NodeStatus, true>` turns an omission into a
+ * at all), so `satisfies Record<NodeStatusKey, true>` turns an omission into a
  * compile error instead of a UI gap.
  */
 const summaryStatusOrder = {
@@ -766,10 +1301,11 @@ const summaryStatusOrder = {
   skipped: true,
   pending: true,
   expired: true,
-  canceled: true
-} satisfies Record<NodeStatus, true>;
+  canceled: true,
+  disabled: true
+} satisfies Record<NodeStatusKey, true>;
 
-const summaryStatuses = Object.keys(summaryStatusOrder) as NodeStatus[];
+const summaryStatuses = Object.keys(summaryStatusOrder) as NodeStatusKey[];
 
 function RunSummary({ summary }: { summary: RuntimeSummary }): React.ReactElement {
   return (
@@ -779,7 +1315,7 @@ function RunSummary({ summary }: { summary: RuntimeSummary }): React.ReactElemen
         <SummaryPill label={`${summary.total} nodes`} />
         {summaryStatuses.map((status) => {
           const count = summary.counts[status] ?? 0;
-          return count > 0 ? <SummaryPill key={status} label={`${count} ${status}`} /> : null;
+          return count > 0 ? <SummaryPill key={status} label={`${count} ${nodeStatusMeta[status].label}`} /> : null;
         })}
       </div>
     </div>
@@ -801,7 +1337,7 @@ function SelectedNodeDetails({
       <strong>{node.name}</strong>
       <code>{node.type}</code>
       <p>{node.kind}</p>
-      <p>{statusLabel[runtime.status]}</p>
+      <p>{nodeStatusMeta[runtime.status].label}</p>
       {node.disabled ? <p>Disabled</p> : null}
       {node.notes ? <p>{node.notes}</p> : null}
       <p>Inputs {node.inputs.length}</p>
@@ -818,8 +1354,22 @@ export function XFlowPreview({
   className,
   editable = false,
   interactionMode,
+  minimap = false,
+  ruler = true,
+  zoomBar = true,
+  onAutoLayout,
+  emptyState,
+  canvasFloat,
+  canvasFloatEnd,
   selectedNodeId: selectedNodeIdProp,
   onSelectNode,
+  nodeNotes,
+  nodeMetaNotes,
+  onNodeAction,
+  nodeCategories,
+  nodeSummaries,
+  onLocateParameter,
+  onPaneClick,
   onNodePositionChange,
   onConnect,
   onDeleteConnection,
@@ -842,6 +1392,8 @@ export function XFlowPreview({
   }>({ flow: null, selectedNodeId: undefined });
   const canvasRef = React.useRef<HTMLDivElement | null>(null);
   const selectedNodeId = selectedNodeIdProp ?? internalSelectedNodeId;
+  const [rulerShown, setRulerShown] = useToggleSeededBy(ruler);
+  const [minimapShown, setMinimapShown] = useToggleSeededBy(minimap);
   // Preserve the original standalone API when no mode is supplied. The editor
   // opts into a mode explicitly so selecting nodes never accidentally starts a
   // connection, and connecting never drags a node.
@@ -864,22 +1416,24 @@ export function XFlowPreview({
     () => new Map(canvasGraphEdges.map((edge) => [edge.id, edge])),
     [canvasGraphEdges]
   );
-  const handleSelectNode = React.useCallback((nodeId: string) => {
+  // Stable on purpose: it travels in every card's `data`, so a new identity per
+  // render (it used to follow `selectedNodeIdProp`) would invalidate all cards.
+  const handleSelectNode = useStableCallback((nodeId: string) => {
     if (selectedNodeIdProp === undefined) {
       setInternalSelectedNodeId(nodeId);
     }
     onSelectNode?.(nodeId);
-  }, [onSelectNode, selectedNodeIdProp]);
+  });
   const handleFlowInit = React.useCallback((instance: ReactFlowInstance<PreviewFlowNode, Edge>) => {
     setFlowInstance(instance);
   }, []);
   const lastKeyboardMenuAt = React.useRef(-Infinity);
-  const openNodeMenuFromKey = React.useCallback((nodeId: string, anchor: Element) => {
+  const openNodeMenuFromKey = useStableCallback((nodeId: string, anchor: Element) => {
     if (!onNodeContextMenu) return;
     lastKeyboardMenuAt.current = Date.now();
     handleSelectNode(nodeId);
     onNodeContextMenu(nodeId, elementCenter(anchor));
-  }, [handleSelectNode, onNodeContextMenu]);
+  });
   // A keyboard press yields at most one native echo, so the window closes the
   // moment it is consumed: leaving it open would also swallow the next real
   // right click inside it.
@@ -895,6 +1449,11 @@ export function XFlowPreview({
     handleSelectNode(node.id);
     onNodeContextMenu(node.id, { clientX: event.clientX, clientY: event.clientY });
   }, [handleSelectNode, isKeyboardMenuEcho, onNodeContextMenu]);
+  // Controlled owners keep their own selection; the uncontrolled one clears too.
+  const handlePaneClick = React.useCallback(() => {
+    if (selectedNodeIdProp === undefined) setInternalSelectedNodeId(undefined);
+    onPaneClick?.();
+  }, [onPaneClick, selectedNodeIdProp]);
   const handlePaneContextMenu = React.useCallback((event: MouseEvent | React.MouseEvent) => {
     if (!onPaneContextMenu) return;
     event.preventDefault();
@@ -921,15 +1480,19 @@ export function XFlowPreview({
     openNodeMenuFromKey(selectedNodeId, anchor);
   }, [onNodeContextMenu, openNodeMenuFromKey, selectedNodeId]);
   const nodeFitCancelRef = React.useRef<(() => void) | undefined>(undefined);
+  const viewFitCancelRef = React.useRef<(() => void) | undefined>(undefined);
   React.useEffect(() => () => {
     nodeFitCancelRef.current?.();
+    viewFitCancelRef.current?.();
   }, []);
   // The view commands the owner's own chrome drives. Both reuse the same fit
   // paths as the in-canvas control and the selection follow, so an unmeasured
   // node is waited out identically.
   const previewHandle = React.useMemo<XFlowPreviewHandle>(() => ({
     fitView: (options) => {
-      if (flowInstance) fitMeasuredNodes(flowInstance, options?.padding);
+      if (!flowInstance) return;
+      viewFitCancelRef.current?.();
+      viewFitCancelRef.current = fitMeasuredNodesSettled(flowInstance, options?.padding, canvasRef.current) || undefined;
     },
     fitNode: (nodeId, options) => {
       if (!flowInstance) return;
@@ -939,7 +1502,7 @@ export function XFlowPreview({
       nodeFitCancelRef.current = fitWhenMeasured(
         () => flowInstance.getNodesBounds([node]),
         (bounds) => {
-          void flowInstance.fitBounds(bounds, { padding: options?.padding ?? nodeFitPadding });
+          fitBoundsClear(flowInstance, bounds, options?.padding ?? nodeFitPadding, canvasRef.current);
         }
       );
     }
@@ -947,6 +1510,39 @@ export function XFlowPreview({
   React.useEffect(() => {
     if (flowInstance) onReady?.(previewHandle);
   }, [flowInstance, onReady, previewHandle]);
+  const handleFit = React.useCallback(() => previewHandle.fitView(), [previewHandle]);
+  // §6.2: switching the minimap or the rulers changes what the content has to stay
+  // clear of, so the graph is re-fitted. The first render is not a switch.
+  const fittedFloats = React.useRef({ minimap: minimapShown, ruler: rulerShown });
+  React.useEffect(() => {
+    const fitted = fittedFloats.current;
+    if (fitted.minimap === minimapShown && fitted.ruler === rulerShown) return;
+    fittedFloats.current = { minimap: minimapShown, ruler: rulerShown };
+    handleFit();
+  }, [handleFit, minimapShown, rulerShown]);
+  // §6.2: a click on the minimap centres the canvas there, at the current zoom.
+  const handleMiniMapClick = React.useCallback((_event: React.MouseEvent, position: { x: number; y: number }) => {
+    flowInstance?.setCenter(position.x, position.y, { zoom: flowInstance.getZoom() });
+  }, [flowInstance]);
+  // ⇧R / ⇧M, advertised on the zoom bar, so only bound while it is shown. Keys aimed
+  // at a text field, or at an element outside this preview, are left alone.
+  const sectionRef = React.useRef<HTMLElement | null>(null);
+  React.useEffect(() => {
+    if (!zoomBar) return undefined;
+    const handleToggleKey = (event: KeyboardEvent) => {
+      if (!event.shiftKey || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (event.defaultPrevented || event.repeat || isTextEntryTarget(event.target)) return;
+      const target = event.target;
+      if (target instanceof Node && target !== document.body && !sectionRef.current?.contains(target)) return;
+      const key = event.key.toLowerCase();
+      if (key !== "r" && key !== "m") return;
+      event.preventDefault();
+      if (key === "r") setRulerShown(!rulerShown);
+      else setMinimapShown(!minimapShown);
+    };
+    window.addEventListener("keydown", handleToggleKey);
+    return () => window.removeEventListener("keydown", handleToggleKey);
+  }, [minimapShown, rulerShown, setMinimapShown, setRulerShown, zoomBar]);
   const handleMoveEnd = React.useCallback((_event: unknown, viewport: ReactFlowViewport) => {
     onViewportChange?.({ x: viewport.x, y: viewport.y, zoom: viewport.zoom });
   }, [onViewportChange]);
@@ -1003,7 +1599,7 @@ export function XFlowPreview({
     return fitWhenMeasured(
       () => flowInstance.getNodesBounds([selectedNode]),
       (bounds) => {
-        void flowInstance.fitBounds(bounds, { padding: nodeFitPadding });
+        fitBoundsClear(flowInstance, bounds, nodeFitPadding, canvasRef.current);
       }
     );
   }, [flowInstance, selectedNodeId]);
@@ -1090,26 +1686,50 @@ export function XFlowPreview({
     window.addEventListener("keydown", handleDeleteKey);
     return () => window.removeEventListener("keydown", handleDeleteKey);
   }, [canDeleteNodes, onDeleteNode, selectedEdgeIds, selectedNodeId]);
-  const flowNodes = React.useMemo(
-    () => toFlowNodes(
-      graph.nodes,
-      canvasGraphEdges,
-      runtime,
-      selectedNodeId,
-      canDragNodes,
-      canConnect,
-      handleSelectNode,
-      onNodeContextMenu ? openNodeMenuFromKey : undefined
-    ),
-    [graph.nodes, canvasGraphEdges, runtime, selectedNodeId, canDragNodes, canConnect, handleSelectNode, onNodeContextMenu, openNodeMenuFromKey]
-  );
+  // Last render's node objects, kept so unchanged cards hand React.memo the
+  // same references (see reuseFlowNodes).
+  const previousFlowNodes = React.useRef<PreviewFlowNode[]>([]);
+  const hasNodeContextMenu = Boolean(onNodeContextMenu);
+  // Permanent identity, like the other card callbacks: a new closure on every
+  // owner render would rebuild every card's data object.
+  const handleNodeAction = useStableCallback((nodeName: string, action: string) => {
+    onNodeAction?.(nodeName, action);
+  });
+  const hasNodeAction = Boolean(onNodeAction);
+  const handleLocateParameter = useStableCallback((nodeId: string, fieldPath: string) => {
+    onLocateParameter?.(nodeId, fieldPath);
+  });
+  const hasLocateParameter = Boolean(onLocateParameter);
+  const flowNodes = React.useMemo(() => {
+    const next = reuseFlowNodes(
+      previousFlowNodes.current,
+      toFlowNodes(
+        graph.nodes,
+        canvasGraphEdges,
+        runtime,
+        selectedNodeId,
+        canDragNodes,
+        canConnect,
+        handleSelectNode,
+        hasNodeContextMenu ? openNodeMenuFromKey : undefined,
+        nodeNotes,
+        hasNodeAction ? handleNodeAction : undefined,
+        nodeCategories,
+        nodeSummaries,
+        hasLocateParameter ? handleLocateParameter : undefined,
+        nodeMetaNotes
+      )
+    );
+    previousFlowNodes.current = next;
+    return next;
+  }, [graph.nodes, canvasGraphEdges, runtime, selectedNodeId, canDragNodes, canConnect, handleSelectNode, hasNodeContextMenu, openNodeMenuFromKey, nodeNotes, nodeMetaNotes, hasNodeAction, handleNodeAction, nodeCategories, nodeSummaries, hasLocateParameter, handleLocateParameter]);
   const danglingSet = React.useMemo(
     () => new Set((danglingPorts ?? []).map((port) => danglingKey(port.source, port.sourcePort))),
     [danglingPorts]
   );
   const flowEdges = React.useMemo(
-    () => toFlowEdges(canvasGraphEdges, runtime, canDeleteConnections, selectedEdgeIds, danglingSet),
-    [canvasGraphEdges, runtime, canDeleteConnections, selectedEdgeIds, danglingSet]
+    () => toFlowEdges(canvasGraphEdges, runtime, graphNodesById, canDeleteConnections, selectedEdgeIds, danglingSet),
+    [canvasGraphEdges, runtime, graphNodesById, canDeleteConnections, selectedEdgeIds, danglingSet]
   );
   const summary = React.useMemo(() => summarizeRuntime(graph.nodes, runtime), [graph.nodes, runtime]);
   const selectedNode = React.useMemo(
@@ -1117,11 +1737,14 @@ export function XFlowPreview({
     [graph.nodes, selectedNodeId]
   );
   const selectedRuntime = selectedNode ? runtimeForNode(runtime, selectedNode) : undefined;
+  // An empty canvas has nothing to measure, so §6.2 draws no rulers on it.
+  const rulersDrawn = rulerShown && graph.nodes.length > 0;
   const title = workflow.name ?? "Untitled workflow";
   const workflowStatus = runtime?.status ?? "pending";
 
   return (
     <section
+      ref={sectionRef}
       className={["xflow-preview", className].filter(Boolean).join(" ")}
       aria-label={`${title} preview`}
     >
@@ -1130,8 +1753,12 @@ export function XFlowPreview({
           <p>Preview</p>
           <h2>{title}</h2>
         </div>
-        <span className="xflow-preview-status" data-status={workflowStatus}>
-          {statusLabel[workflowStatus]}
+        <span
+          className="xflow-preview-status"
+          data-status={workflowStatus}
+          data-tone={workflowStatusMeta[workflowStatus].tone}
+        >
+          {workflowStatusMeta[workflowStatus].label}
         </span>
       </header>
 
@@ -1144,27 +1771,33 @@ export function XFlowPreview({
         <div
           className="xflow-preview-canvas"
           ref={canvasRef}
+          data-ruler={String(rulersDrawn)}
           onDragOver={canDropNode ? handleDragOver : undefined}
           onDrop={canDropNode ? handleDrop : undefined}
           onKeyDown={onNodeContextMenu ? handleCanvasKeyDown : undefined}
         >
           {/* React Flow mounts even with zero nodes so an empty canvas can still
-              accept a dropped node; the note sits above it without intercepting
-              the pointer, and the editor's own empty state covers it visually. */}
+              accept a dropped node; the empty state sits above it, and only the
+              owner's own content (its buttons) takes the pointer. */}
           {graph.nodes.length === 0 ? (
-            <p className="xflow-preview-empty">No nodes to preview</p>
+            emptyState === undefined ? (
+              <p className="xflow-preview-empty">No nodes to preview</p>
+            ) : (
+              <div className="xflow-preview-empty xflow-preview-empty--custom">{emptyState}</div>
+            )
           ) : null}
           <ReactFlow
             nodes={flowNodes}
             edges={flowEdges}
             nodeTypes={nodeTypes}
             onInit={handleFlowInit}
-            minZoom={0.4}
-            maxZoom={1.6}
+            minZoom={MIN_ZOOM}
+            maxZoom={MAX_ZOOM}
             defaultViewport={defaultViewport as ReactFlowViewport | undefined}
             onMoveEnd={onViewportChange ? handleMoveEnd : undefined}
             onNodeContextMenu={onNodeContextMenu ? handleNodeContextMenu : undefined}
             onPaneContextMenu={onPaneContextMenu ? handlePaneContextMenu : undefined}
+            onPaneClick={onPaneClick ? handlePaneClick : undefined}
             nodesDraggable={canDragNodes}
             nodesConnectable={canConnect}
             edgesFocusable={canDeleteConnections}
@@ -1181,19 +1814,49 @@ export function XFlowPreview({
             onNodeDragStop={canDragNodes ? (_, node) => {
               onNodePositionChange?.(node.id, node.position);
             } : undefined}
-            attributionPosition="bottom-left"
+            // Bottom-left is the zoom bar's, bottom-right the minimap's.
+            attributionPosition="bottom-center"
           >
-            <InitialViewFitter flow={flowInstance} disabled={defaultViewport !== undefined} />
-            <Background color="var(--xflow-preview-canvas-grid)" gap={20} size={1} />
-            <PreviewControls />
-            <MiniMap
-              pannable
-              zoomable
-              maskColor="var(--xflow-preview-minimap-mask)"
-              nodeColor={miniMapNodeColor}
-              nodeStrokeColor="var(--xflow-preview-node-border)"
-              nodeStrokeWidth={2}
-            />
+            <InitialViewFitter flow={flowInstance} disabled={defaultViewport !== undefined} canvas={canvasRef} />
+            <LodScaleVariables target={canvasRef} />
+            {/* §6.2: a 16px dot grid in the canvas-dot colour, not the old
+                minor/major line grid. */}
+            <Background color="var(--xflow-canvas-dot)" gap={16} size={1} />
+            {rulersDrawn ? <CanvasRulers selectedNodeId={selectedNodeId} /> : null}
+            {canvasFloat ? (
+              <div className="xflow-preview-canvas-float" {...{ [FLOAT_ATTRIBUTE]: "" }}>
+                {canvasFloat}
+              </div>
+            ) : null}
+            {canvasFloatEnd ? (
+              <div className="xflow-preview-canvas-float xflow-preview-canvas-float--end" {...{ [FLOAT_ATTRIBUTE]: "" }}>
+                {canvasFloatEnd}
+              </div>
+            ) : null}
+            {zoomBar ? (
+              <ZoomBar
+                onFit={handleFit}
+                onAutoLayout={onAutoLayout}
+                ruler={rulerShown}
+                onRulerChange={setRulerShown}
+                minimap={minimapShown}
+                onMinimapChange={setMinimapShown}
+              />
+            ) : null}
+            {minimapShown ? (
+              <MiniMap
+                pannable
+                zoomable
+                style={MINIMAP_SIZE}
+                maskColor="var(--xflow-preview-minimap-mask)"
+                maskStrokeColor="var(--xflow-preview-minimap-view)"
+                maskStrokeWidth={1.5}
+                onClick={handleMiniMapClick}
+                nodeColor={miniMapNodeColor}
+                nodeStrokeColor="var(--xflow-preview-node-border)"
+                nodeStrokeWidth={2}
+              />
+            ) : null}
           </ReactFlow>
         </div>
 

@@ -1,17 +1,78 @@
 import * as React from "react";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { NodeStatus, WorkflowDef } from "@xflow/core";
+import {
+  edgeVariant,
+  nodeStatusMeta,
+  workflowStatusMeta,
+  type ExecutionStatusKey,
+  type NodeStatus,
+  type RuntimeSnapshot,
+  type WorkflowDef,
+  type WorkflowStatus
+} from "@xflow/core";
 import { XFlowPreview } from "./index";
 
-const reactFlowMock = vi.hoisted(() => ({
-  latestProps: undefined as Record<string, unknown> | undefined,
-  fitBounds: vi.fn<(bounds: unknown, options?: { padding?: number }) => Promise<boolean>>(),
-  getNodesBounds: vi.fn(() => ({ x: 0, y: 0, width: 500, height: 200 }))
-}));
+const reactFlowMock = vi.hoisted(() => {
+  // A stand-in for xyflow's store: just the transform the card reads, a way to
+  // change zoom, and subscribers. `cardRenders` counts calls of the mocked
+  // `useStore`, which only `PreviewNode` makes, so it is exactly the number of
+  // card renders without a test switch in production code.
+  type FlowState = {
+    transform: [number, number, number];
+    width?: number;
+    height?: number;
+    nodeLookup?: Map<string, unknown>;
+  };
+  const flowStore = {
+    state: { transform: [0, 0, 1] } as FlowState,
+    listeners: new Set<() => void>(),
+    cardRenders: 0,
+    setZoom(zoom: number): void {
+      flowStore.setState({ transform: [0, 0, zoom] });
+    },
+    /** Merges into the state, as xyflow's setState does, and notifies. */
+    setState(partial: Partial<FlowState>): void {
+      flowStore.state = { ...flowStore.state, ...partial };
+      flowStore.listeners.forEach((listener) => listener());
+    },
+    reset(): void {
+      flowStore.state = { transform: [0, 0, 1] };
+      flowStore.cardRenders = 0;
+    }
+  };
+  return {
+    latestProps: undefined as Record<string, unknown> | undefined,
+    // What the mocked MiniMap last received; its `nodeColor` is the swatch rule.
+    miniMapProps: undefined as { nodeColor?: (node: unknown) => string } | undefined,
+    fitBounds: vi.fn<(bounds: unknown, options?: { padding?: number }) => Promise<boolean>>(),
+    getNodesBounds: vi.fn(() => ({ x: 0, y: 0, width: 500, height: 200 })),
+    zoomTo: vi.fn<(zoom: number) => Promise<boolean>>(),
+    flowStore
+  };
+});
 
 vi.mock("@xyflow/react", async () => {
   const React = await import("react");
+  const { flowStore } = reactFlowMock;
+
+  const subscribeToFlowStore = (listener: () => void): (() => void) => {
+    flowStore.listeners.add(listener);
+    return () => {
+      flowStore.listeners.delete(listener);
+    };
+  };
+  // Stable object, like xyflow's: effects keyed on it must not re-subscribe.
+  const flowStoreApi = {
+    getState: () => flowStore.state,
+    subscribe: (listener: (state: typeof flowStore.state) => void): (() => void) => {
+      const notify = (): void => listener(flowStore.state);
+      flowStore.listeners.add(notify);
+      return () => {
+        flowStore.listeners.delete(notify);
+      };
+    }
+  };
 
   const Handle = ({
     id,
@@ -72,20 +133,39 @@ vi.mock("@xyflow/react", async () => {
   };
 
   return {
-    Background: () => null,
+    // The grid props land on the DOM so a test can read what the canvas asked
+    // for; in jsdom xyflow's own pattern svg is never measurable.
+    Background: ({ color, gap, size }: Record<string, unknown>) => React.createElement("div", {
+      className: "react-flow__background",
+      "data-color": String(color),
+      "data-gap": String(gap),
+      "data-size": String(size)
+    }),
     ControlButton: ({ children, ...props }: { children?: React.ReactNode } & Record<string, unknown>) => (
       React.createElement("button", props, children)
     ),
     Controls: ({ children }: { children?: React.ReactNode }) => React.createElement(React.Fragment, null, children),
     Handle,
-    MiniMap: () => null,
+    MiniMap: (props: Record<string, unknown>) => {
+      reactFlowMock.miniMapProps = props as { nodeColor?: (node: unknown) => string };
+      return React.createElement("div", { className: "react-flow__minimap" });
+    },
     Position: { Left: "left", Right: "right" },
     ReactFlow,
     useReactFlow: () => ({
       fitBounds: reactFlowMock.fitBounds,
       getNodes: () => [{ id: "source-id" }],
-      getNodesBounds: reactFlowMock.getNodesBounds
-    })
+      getNodesBounds: reactFlowMock.getNodesBounds,
+      zoomTo: reactFlowMock.zoomTo
+    }),
+    // `PreviewNode` is the only caller, so each call is one card render. A
+    // boolean selector snapshot keeps useSyncExternalStore from re-rendering the
+    // card on zoom steps that leave the selected value unchanged, as xyflow does.
+    useStore: <Selected,>(selector: (state: typeof flowStore.state) => Selected): Selected => {
+      flowStore.cardRenders += 1;
+      return React.useSyncExternalStore(subscribeToFlowStore, () => selector(flowStore.state));
+    },
+    useStoreApi: () => flowStoreApi
   };
 });
 
@@ -108,6 +188,8 @@ interface MockFlowInstance {
   getNodesBounds: (nodes: Array<{ id: string }>) => unknown;
   getViewport?: () => { x: number; y: number; zoom: number };
   screenToFlowPosition?: (clientPosition: { x: number; y: number }) => { x: number; y: number };
+  getZoom?: () => number;
+  setCenter?: (x: number, y: number, options?: { zoom?: number }) => void;
 }
 
 interface MockFlowProps extends Record<string, unknown> {
@@ -223,6 +305,8 @@ const portWorkflow = {
 afterEach(() => {
   cleanup();
   reactFlowMock.latestProps = undefined;
+  reactFlowMock.miniMapProps = undefined;
+  reactFlowMock.flowStore.reset();
   vi.clearAllMocks();
   vi.unstubAllGlobals();
 });
@@ -310,6 +394,50 @@ describe("XFlowPreview", () => {
     expect(reactFlowMock.fitBounds).toHaveBeenCalledTimes(1);
   });
 
+  it("refits while the cards re-measure after the initial fit, then stops", () => {
+    // A fit that crosses the LOD zoom resizes every card a frame later; the fit
+    // follows the new bounds instead of leaving content under the chrome.
+    const frameCallbacks: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
+      frameCallbacks.push(callback);
+      return frameCallbacks.length;
+    }));
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    reactFlowMock.fitBounds.mockResolvedValue(true);
+    const measured = { x: 0, y: 0, width: 500, height: 200 };
+    reactFlowMock.getNodesBounds.mockImplementation(() => ({ ...measured }));
+
+    render(
+      <XFlowPreview
+        workflow={{ id: "wf-settle", name: "Settle flow", nodes: [{ name: "start", type: "xflow.start" }], connections: {} }}
+      />
+    );
+    act(() => {
+      latestFlowProps().onInit?.({
+        fitBounds: reactFlowMock.fitBounds,
+        getNodes: () => [{ id: "source-id" }],
+        getNodesBounds: reactFlowMock.getNodesBounds
+      });
+    });
+    const runFrame = () => act(() => {
+      frameCallbacks.shift()?.(0);
+    });
+
+    runFrame();
+    expect(reactFlowMock.fitBounds).toHaveBeenCalledTimes(1);
+    measured.height = 260;
+    runFrame();
+    expect(reactFlowMock.fitBounds).toHaveBeenCalledTimes(2);
+    expect(reactFlowMock.fitBounds).toHaveBeenLastCalledWith(
+      { x: 0, y: 0, width: 500, height: 260 },
+      expect.objectContaining({ padding: expect.any(Number) })
+    );
+    // Stable bounds: a few quiet frames, then no more frames are asked for.
+    for (let frame = 0; frame < 8 && frameCallbacks.length > 0; frame += 1) runFrame();
+    expect(frameCallbacks).toHaveLength(0);
+    expect(reactFlowMock.fitBounds).toHaveBeenCalledTimes(2);
+  });
+
   it("reports the settled viewport through onMoveEnd, not before", () => {
     const onViewportChange = vi.fn();
     render(
@@ -394,27 +522,29 @@ describe("XFlowPreview", () => {
     expect(screen.getByRole("region", { name: "Payment flow preview" })).toBeTruthy();
     expect(container.querySelector(".react-flow")).toBeTruthy();
     expect(screen.getByText("Payment flow")).toBeTruthy();
-    expect(screen.getAllByText("running")).toHaveLength(2);
+    // Chip text and summary pills both come from core's status table. The bare
+    // label also names the run in the page header, so scope the card chip by node.
+    expect(container.querySelector('[data-node-id="charge"] .xflow-preview-node__status')?.textContent)
+      .toBe(nodeStatusMeta.running.label);
+    expect(screen.getAllByText(nodeStatusMeta.running.label)).toHaveLength(2);
     expect(screen.getByText("3 nodes")).toBeTruthy();
-    expect(screen.getByText("1 running")).toBeTruthy();
-    expect(screen.getByText("1 success")).toBeTruthy();
-    expect(screen.getByText("1 skipped")).toBeTruthy();
+    expect(screen.getByText(`1 ${nodeStatusMeta.running.label}`)).toBeTruthy();
+    expect(screen.getByText(`1 ${nodeStatusMeta.success.label}`)).toBeTruthy();
+    expect(screen.getByText(`1 ${nodeStatusMeta.skipped.label}`)).toBeTruthy();
     expect(screen.getAllByText("start")).toHaveLength(2);
-    expect(screen.getByText("success")).toBeTruthy();
+    expect(screen.getByText(nodeStatusMeta.success.label)).toBeTruthy();
     expect(screen.getAllByText("charge")).toHaveLength(3);
     expect(screen.getByLabelText("xflow.http icon")).toBeTruthy();
     expect(container.querySelector('[data-node-id="charge"] .xflow-preview-node__type')?.textContent).toBe("xflow.http");
     expect(container.querySelector('[data-node-id="approval"]')?.getAttribute("data-disabled")).toBe("true");
-    expect(screen.getByText("已禁用")).toBeTruthy();
-    // The badge sits on the type line, never beside the name, so it cannot cost
-    // the name any width.
-    expect(container.querySelector(
-      '[data-node-id="approval"] .xflow-preview-node__subtitle .xflow-preview-node__badge'
-    )).toBeTruthy();
-    expect(container.querySelector(
-      '[data-node-id="approval"] .xflow-preview-node__header > .xflow-preview-node__badge'
-    )).toBeNull();
-    expect(screen.getByText("2 attempts")).toBeTruthy();
+    // A disabled node has no badge of its own: it speaks through its status chip
+    // (here the run's "skipped"), and the stripes/55% are CSS on data-disabled.
+    expect(container.querySelector('[data-node-id="approval"] .xflow-preview-node__badge')).toBeNull();
+    expect(container.querySelector('[data-node-id="approval"] .xflow-preview-node__status')?.textContent)
+      .toBe(nodeStatusMeta.skipped.label);
+    // The attempt count rides in the card's run-meta row, after the duration.
+    expect(container.querySelector('[data-node-id="charge"] .xflow-preview-node__run-meta')?.textContent)
+      .toContain("2");
     expect(screen.getByLabelText("start main to charge main")).toBeTruthy();
 
     const chargeNode = container.querySelector('[aria-label="charge node running"]');
@@ -425,6 +555,88 @@ describe("XFlowPreview", () => {
     expect(screen.getByText("Calls payment gateway")).toBeTruthy();
     expect(screen.getByText("Inputs 1")).toBeTruthy();
     expect(screen.getByText("Attempts 2")).toBeTruthy();
+  });
+
+  it("keeps a disabled node the run has not reported as disabled, not pending", () => {
+    const { container } = render(
+      <XFlowPreview
+        minimap
+        workflow={{
+          id: "wf-disabled",
+          name: "Disabled flow",
+          nodes: [
+            { name: "start", type: "xflow.start" },
+            { name: "approval", type: "xflow.wait", disabled: true },
+            { name: "notify", type: "xflow.http" }
+          ],
+          connections: { start: { main: [{ node: "approval" }, { node: "notify" }] } }
+        }}
+        runtime={{ status: "running", nodes: { start: { status: "success" } } }}
+      />
+    );
+
+    // The engine never queues a disabled node, so the run's silence about it is not
+    // "pending": the card keeps the edit-mode face, and the label follows the chip.
+    const disabled = container.querySelector('[data-node-id="approval"]');
+    expect(disabled?.getAttribute("data-status")).toBe("disabled");
+    expect(disabled?.querySelector(".xflow-preview-node__status")?.textContent)
+      .toBe(nodeStatusMeta.disabled.label);
+    expect(container.querySelector('[aria-label="approval node disabled"]')).toBeTruthy();
+    // An enabled node the run has not reached is still queued.
+    expect(container.querySelector('[data-node-id="notify"]')?.getAttribute("data-status")).toBe("pending");
+    // The minimap swatch speaks the disabled tone, not the pending one's.
+    const flowNode = latestFlowProps().nodes!.find((node) => node.id === "approval");
+    expect(reactFlowMock.miniMapProps?.nodeColor?.(flowNode)).toContain(`--xflow-${nodeStatusMeta.disabled.tone}`);
+    // The inbound edge reads the same status: the disabled node's own stroke, while
+    // the edge into the still-queued node keeps the resting line.
+    const edges = latestFlowProps().edges;
+    expect(edges.find((edge) => edge.target === "approval")?.className)
+      .toBe(`xflow-preview-edge--${edgeVariant("disabled")}`);
+    expect(edges.find((edge) => edge.target === "notify")?.className)
+      .toBe(`xflow-preview-edge--${edgeVariant("pending")}`);
+  });
+
+  it("shows the status the run reports for a disabled node", () => {
+    const { container } = render(
+      <XFlowPreview
+        workflow={{
+          id: "wf-disabled-skipped",
+          name: "Disabled skipped flow",
+          nodes: [{ name: "approval", type: "xflow.wait", disabled: true }]
+        }}
+        runtime={{ status: "success", nodes: { approval: { status: "skipped" } } }}
+      />
+    );
+
+    const card = container.querySelector('[data-node-id="approval"]');
+    expect(card?.getAttribute("data-status")).toBe("skipped");
+    expect(card?.querySelector(".xflow-preview-node__status")?.textContent).toBe(nodeStatusMeta.skipped.label);
+    expect(container.querySelector('[aria-label="approval node skipped"]')).toBeTruthy();
+  });
+
+  it("draws the pin badge on a pinned node only", () => {
+    const { container } = render(
+      <XFlowPreview
+        workflow={{
+          id: "wf-pin",
+          name: "Pin flow",
+          nodes: [
+            { name: "fixture", type: "xflow.http" },
+            { name: "live", type: "xflow.http" }
+          ]
+        }}
+        runtime={{
+          status: "success",
+          nodes: { fixture: { status: "pinned" }, live: { status: "success" } }
+        }}
+      />
+    );
+
+    const pinned = container.querySelector('[data-node-id="fixture"]');
+    expect(pinned?.getAttribute("data-status")).toBe("pinned");
+    expect(pinned?.querySelector(".xflow-preview-node__pin")).toBeTruthy();
+    // A success card is the same tone but carries no badge.
+    expect(container.querySelector('[data-node-id="live"] .xflow-preview-node__pin')).toBeNull();
   });
 
   it("labels the committing and expired node statuses", () => {
@@ -450,12 +662,12 @@ describe("XFlowPreview", () => {
 
     expect(container.querySelector('[aria-label="ingest node committing"]')).toBeTruthy();
     expect(container.querySelector('[aria-label="archive node expired"]')).toBeTruthy();
-    expect(screen.getByText("committing")).toBeTruthy();
-    expect(screen.getByText("expired")).toBeTruthy();
+    expect(screen.getByText(nodeStatusMeta.committing.label)).toBeTruthy();
+    expect(screen.getByText(nodeStatusMeta.expired.label)).toBeTruthy();
     // Both statuses are shown by the run summary too; a status missing from its
     // ordering list silently drops every node carrying it.
-    expect(screen.getByText("1 committing")).toBeTruthy();
-    expect(screen.getByText("1 expired")).toBeTruthy();
+    expect(screen.getByText(`1 ${nodeStatusMeta.committing.label}`)).toBeTruthy();
+    expect(screen.getByText(`1 ${nodeStatusMeta.expired.label}`)).toBeTruthy();
   });
 
   it("counts every node status in the run summary", () => {
@@ -493,8 +705,32 @@ describe("XFlowPreview", () => {
 
     expect(screen.getByText(`${statuses.length} nodes`)).toBeTruthy();
     for (const status of statuses) {
-      expect(screen.getByText(`1 ${status}`)).toBeTruthy();
+      expect(screen.getByText(`1 ${nodeStatusMeta[status].label}`)).toBeTruthy();
     }
+  });
+
+  it("counts a disabled node the run has not reported as disabled, not pending", () => {
+    render(
+      <XFlowPreview
+        workflow={{
+          id: "wf-summary-disabled",
+          name: "Summary disabled",
+          nodes: [
+            { name: "start", type: "xflow.start" },
+            { name: "approval", type: "xflow.wait", disabled: true },
+            { name: "notify", type: "xflow.http" }
+          ]
+        }}
+        runtime={{ status: "running", nodes: { start: { status: "success" } } }}
+      />
+    );
+
+    // Same face as the card: the silent disabled node is disabled, and only the
+    // enabled node the run has not reached is still queued.
+    expect(screen.getByText(`1 ${nodeStatusMeta.disabled.label}`)).toBeTruthy();
+    expect(screen.getByText(`1 ${nodeStatusMeta.pending.label}`)).toBeTruthy();
+    expect(screen.getByText(`1 ${nodeStatusMeta.success.label}`)).toBeTruthy();
+    expect(screen.queryByText(`2 ${nodeStatusMeta.pending.label}`)).toBeNull();
   });
 
   it("retries the initial canvas fit until controlled nodes have measured dimensions", () => {
@@ -753,11 +989,18 @@ describe("XFlowPreview", () => {
     expect(handles.filter((handle) => handle.type === "target").map((handle) => handle.id)).toEqual(["main", "main"]);
   });
 
-  it("fits measured nodes when the fit-view control is used", () => {
+  it("fits measured nodes when the zoom bar's fit control is used", () => {
     reactFlowMock.fitBounds.mockResolvedValue(true);
     render(<XFlowPreview workflow={portWorkflow} />);
+    act(() => {
+      latestFlowProps().onInit?.({
+        fitBounds: reactFlowMock.fitBounds,
+        getNodes: () => [{ id: "source-id" }],
+        getNodesBounds: reactFlowMock.getNodesBounds
+      });
+    });
 
-    fireEvent.click(screen.getByRole("button", { name: "fit view" }));
+    fireEvent.click(screen.getByRole("button", { name: "适应画布" }));
 
     expect(reactFlowMock.getNodesBounds).toHaveBeenCalledWith([{ id: "source-id" }]);
     expect(reactFlowMock.fitBounds).toHaveBeenCalledWith(
@@ -951,14 +1194,20 @@ describe("XFlowPreview", () => {
     const [edge] = latestFlowProps().edges;
     expect(edge.className).toBe("xflow-preview-edge--dangling");
     expect(edge.label).toBe("success · missing");
-    expect(edge.style).toMatchObject({ stroke: "var(--xflow-preview-edge-dangling)", strokeDasharray: "2 4" });
+    // The dashed stroke lives in styles.css (pinned by styleClasses.test.ts);
+    // the edge object must carry no inline style, or it would outrank hover
+    // and the selected rule.
+    expect(edge.style).toBeUndefined();
     expect(edge.ariaLabel).toContain("(port no longer exists)");
     expect(onDeleteConnection).not.toHaveBeenCalled();
 
-    // Without the prop the same edge is ordinary.
+    // Without the prop the same edge is ordinary: the resting stroke, which core's
+    // table gives a target with no run status.
     render(<XFlowPreview workflow={portWorkflow} editable onDeleteConnection={onDeleteConnection} />);
     const [plain] = latestFlowProps().edges;
-    expect(plain.className).toBeUndefined();
+    expect(plain.className).toBe("xflow-preview-edge--default");
+    // §6.2: orthogonal routing with 8px corners, as the baseline's edge-path.ts.
+    expect(plain).toMatchObject({ type: "smoothstep", pathOptions: { borderRadius: 8 } });
     expect(plain.label).toBe("success");
   });
 
@@ -1231,11 +1480,11 @@ describe("XFlowPreview", () => {
     });
   });
 
-  it("hides the run status on a card until a run has moved the node", () => {
+  it("shows a status chip on every node once a runtime is passed, and on none without one", () => {
     const { container, rerender } = render(<XFlowPreview workflow={contextMenuWorkflow} />);
 
+    // No `runtime` prop at all: edit mode, so no chip.
     expect(container.querySelector(".xflow-preview-node__status")).toBeNull();
-    expect(screen.queryByText("ready")).toBeNull();
 
     rerender(
       <XFlowPreview
@@ -1244,10 +1493,19 @@ describe("XFlowPreview", () => {
       />
     );
 
-    const statuses = container.querySelectorAll(".xflow-preview-node__status");
-    expect(statuses).toHaveLength(1);
-    expect(statuses[0]!.textContent).toBe("failed");
+    // With a runtime every node has a status, the one the run has not reached
+    // included: `start` is absent from `nodes` and reads as pending.
+    const chip = (nodeId: string) =>
+      container.querySelector(`[data-node-id="${nodeId}"] .xflow-preview-node__status`);
+    expect(container.querySelectorAll(".xflow-preview-node__status")).toHaveLength(2);
+    expect(chip("http-id")?.textContent).toBe(nodeStatusMeta.failed.label);
+    expect(chip("start-id")?.textContent).toBe(nodeStatusMeta.pending.label);
+    expect(chip("start-id")?.getAttribute("data-tone")).toBe(nodeStatusMeta.pending.tone);
     expect(screen.getByText("40 ms")).toBeTruthy();
+
+    // Dropping the runtime again takes every chip away.
+    rerender(<XFlowPreview workflow={contextMenuWorkflow} />);
+    expect(container.querySelector(".xflow-preview-node__status")).toBeNull();
   });
 
   it("keeps the full node name in a title so a truncated card stays readable", () => {
@@ -1502,5 +1760,670 @@ describe("XFlowPreview", () => {
 
     expect(fitBounds).toHaveBeenCalledTimes(1);
     expect(fitBounds).toHaveBeenCalledWith(measuredBounds, { padding: 0.28 });
+  });
+});
+
+// §6.2's canvas surface: the dot grid, the minimap switch and the zoom domain.
+describe("XFlowPreview canvas surface", () => {
+  const surfaceWorkflow = {
+    id: "wf-surface",
+    name: "Surface flow",
+    nodes: [
+      { name: "start", type: "xflow.start" },
+      { name: "http_1", type: "xflow.http" }
+    ],
+    connections: { start: { main: [{ node: "http_1" }] } }
+  } satisfies WorkflowDef;
+
+  it("draws the §6.2 dot grid: 16px in core's canvas-dot colour", () => {
+    const { container } = render(<XFlowPreview workflow={surfaceWorkflow} />);
+    const background = container.querySelector(".react-flow__background");
+    expect(background?.getAttribute("data-color")).toBe("var(--xflow-canvas-dot)");
+    expect(background?.getAttribute("data-gap")).toBe("16");
+    // The dot stays 1px; only the pitch and the colour moved.
+    expect(background?.getAttribute("data-size")).toBe("1");
+  });
+
+  it("keeps the minimap off the canvas until the owner turns it on", () => {
+    const { container, rerender } = render(<XFlowPreview workflow={surfaceWorkflow} />);
+    expect(container.querySelector(".react-flow__minimap")).toBeNull();
+    expect(reactFlowMock.miniMapProps).toBeUndefined();
+
+    rerender(<XFlowPreview workflow={surfaceWorkflow} minimap />);
+    expect(container.querySelector(".react-flow__minimap")).toBeTruthy();
+    // Turning it on keeps the interactions and the swatch colour rule.
+    expect(reactFlowMock.miniMapProps).toMatchObject({
+      pannable: true,
+      zoomable: true,
+      nodeColor: expect.any(Function),
+      // xyflow sizes the svg viewBox from style, so the 200x100 box is passed in,
+      // not left to CSS (which would crop a 200x150 map).
+      style: { width: 200, height: 100 },
+      // §6.2's viewport frame: the baseline's 1.5px primary outline.
+      maskStrokeColor: "var(--xflow-preview-minimap-view)",
+      maskStrokeWidth: 1.5
+    });
+  });
+
+  it("centres the canvas where the minimap is clicked, keeping the zoom", () => {
+    const setCenter = vi.fn();
+    render(<XFlowPreview workflow={surfaceWorkflow} minimap />);
+    act(() => {
+      latestFlowProps().onInit?.({
+        fitBounds: reactFlowMock.fitBounds,
+        getNodes: () => [],
+        getNodesBounds: reactFlowMock.getNodesBounds,
+        getZoom: () => 0.6,
+        setCenter
+      });
+    });
+    const onClick = (reactFlowMock.miniMapProps as { onClick?: (event: unknown, position: { x: number; y: number }) => void })
+      .onClick;
+    expect(onClick).toEqual(expect.any(Function));
+    act(() => onClick!({}, { x: 420, y: -80 }));
+    expect(setCenter).toHaveBeenCalledWith(420, -80, { zoom: 0.6 });
+  });
+
+  it("spans the 10%-200% zoom domain §6.2's slider offers", () => {
+    render(<XFlowPreview workflow={surfaceWorkflow} />);
+    expect(latestFlowProps().minZoom).toBe(0.1);
+    expect(latestFlowProps().maxZoom).toBe(2);
+  });
+});
+
+describe("XFlowPreview status chip rule", () => {
+  const chipWorkflow = {
+    name: "Chip flow",
+    nodes: [
+      { id: "queued-id", name: "queued", type: "xflow.http" },
+      { id: "absent-id", name: "absent", type: "xflow.http" }
+    ]
+  } satisfies WorkflowDef;
+  const chipText = (container: HTMLElement, nodeId: string) =>
+    container.querySelector(`[data-node-id="${nodeId}"] .xflow-preview-node__status`)?.textContent;
+
+  it("gives every node a chip once a runtime is passed, a queued or unreported node included", () => {
+    const { container } = render(
+      <XFlowPreview
+        workflow={chipWorkflow}
+        runtime={{ status: "running", nodes: { queued: { status: "pending" } } }}
+      />
+    );
+
+    // `queued` is reported as pending, `absent` is not reported at all: both are
+    // part of a run, so both read as pending rather than as "no run".
+    expect(chipText(container, "queued-id")).toBe(nodeStatusMeta.pending.label);
+    expect(chipText(container, "absent-id")).toBe(nodeStatusMeta.pending.label);
+  });
+
+  it("draws no chip on any node when no runtime is passed", () => {
+    const { container } = render(<XFlowPreview workflow={chipWorkflow} />);
+
+    expect(container.querySelector(".xflow-preview-node__status")).toBeNull();
+  });
+});
+
+describe("XFlowPreview card re-rendering", () => {
+  // Built once: a new workflow object per render would rebuild every card's data.
+  const bigWorkflow = {
+    name: "Big flow",
+    nodes: Array.from({ length: 200 }, (_, index) => ({
+      id: `n${index}`,
+      name: `n${index}`,
+      type: "xflow.http"
+    }))
+  } satisfies WorkflowDef;
+  const { flowStore } = reactFlowMock;
+
+  it("re-renders at most the previous and the new selection when the selection moves", () => {
+    const { rerender } = render(<XFlowPreview workflow={bigWorkflow} selectedNodeId="n0" />);
+    // Guard: the counter must see the first paint, or a count of 0 proves nothing.
+    expect(flowStore.cardRenders).toBeGreaterThanOrEqual(200);
+
+    flowStore.cardRenders = 0;
+    rerender(<XFlowPreview workflow={bigWorkflow} selectedNodeId="n1" />);
+
+    expect(flowStore.cardRenders).toBeGreaterThan(0);
+    expect(flowStore.cardRenders).toBeLessThanOrEqual(2);
+  });
+});
+
+describe("XFlowPreview level of detail", () => {
+  const lodWorkflow = {
+    name: "Lod flow",
+    nodes: [
+      { id: "a-id", name: "a", type: "xflow.http" },
+      { id: "b-id", name: "b", type: "xflow.http" }
+    ]
+  } satisfies WorkflowDef;
+  const lodRuntime = { status: "failed", nodes: { a: { status: "failed", durationMs: 40, error: "boom" } } } as const;
+  const { flowStore } = reactFlowMock;
+
+  // What a card shows, as a set: flips with the level, and with nothing else.
+  const shown = (container: HTMLElement) => ({
+    lod: [...container.querySelectorAll(".xflow-preview-node")].map((card) => card.getAttribute("data-lod")),
+    types: container.querySelectorAll(".xflow-preview-node__type").length,
+    runMeta: container.querySelectorAll(".xflow-preview-node__run-meta").length,
+    errors: container.querySelectorAll(".xflow-preview-node__error").length,
+    chipLabels: [...container.querySelectorAll(".xflow-preview-node__status")].map((chip) => chip.textContent)
+  });
+
+  it("drops type, run meta, error and chip text below 50% zoom and restores them above", () => {
+    const { container } = render(<XFlowPreview workflow={lodWorkflow} runtime={lodRuntime} />);
+    const full = shown(container);
+    expect(full).toMatchObject({ lod: [null, null], types: 2, runMeta: 1, errors: 1 });
+    expect(full.chipLabels.every((label) => label)).toBe(true);
+
+    act(() => flowStore.setZoom(0.4));
+    expect(shown(container)).toEqual({
+      lod: ["low", "low"],
+      types: 0,
+      runMeta: 0,
+      errors: 0,
+      chipLabels: ["", ""]
+    });
+
+    act(() => flowStore.setZoom(0.5));
+    expect(shown(container)).toEqual(full);
+  });
+
+  it("re-renders no card while the zoom moves above 50%", () => {
+    render(<XFlowPreview workflow={lodWorkflow} runtime={lodRuntime} />);
+    expect(flowStore.cardRenders).toBeGreaterThan(0);
+
+    flowStore.cardRenders = 0;
+    for (const zoom of [0.9, 1.4, 0.7, 2, 0.5]) {
+      act(() => flowStore.setZoom(zoom));
+    }
+    expect(flowStore.cardRenders).toBe(0);
+
+    // Crossing the threshold is the one thing that re-renders: once per card.
+    act(() => flowStore.setZoom(0.3));
+    expect(flowStore.cardRenders).toBe(2);
+  });
+});
+
+describe("XFlowPreview card layout", () => {
+  // An `xflow.http` node under an `error_output` policy declares a main and an error
+  // outlet, so its card draws the port row; the run reports a duration, an attempt count and an error, so the
+  // run-meta row and the error line are drawn too. One card carries all three.
+  const lastLineWorkflow = {
+    name: "Last line flow",
+    nodes: [{ id: "charge-id", name: "charge", type: "xflow.http", on_error: "error_output" }]
+  } satisfies WorkflowDef;
+  const lastLineRuntime = {
+    status: "failed",
+    nodes: { charge: { status: "failed", durationMs: 40, attempts: 2, error: "boom" } }
+  } as const;
+
+  it("draws the port row as the card's last line, under run meta and the error", () => {
+    const { container } = render(<XFlowPreview workflow={lastLineWorkflow} runtime={lastLineRuntime} />);
+    const card = container.querySelector('[data-node-id="charge-id"]');
+    const kids = [...(card?.children ?? [])];
+    const at = (name: string) => kids.findIndex((kid) => kid.classList.contains(name));
+
+    const meta = at("xflow-preview-node__run-meta");
+    const error = at("xflow-preview-node__error");
+    const ports = at("xflow-preview-node__ports");
+    // Guard: each row must actually be drawn, or the order below proves nothing.
+    expect([meta, error, ports].every((index) => index >= 0), `run-meta ${meta}, error ${error}, ports ${ports}`).toBe(true);
+
+    expect(error).toBeGreaterThan(meta);
+    expect(ports).toBeGreaterThan(error);
+    expect(ports).toBe(kids.length - 1);
+    // The error outlet's handle rides in the port row, not in the error line.
+    expect(kids[ports]?.querySelector('.xflow-preview-node__handle[data-handle-id="error"]')).not.toBeNull();
+  });
+});
+
+describe("XFlowPreview toolbar status pill", () => {
+  const pillWorkflow = {
+    name: "Pill flow",
+    nodes: [{ id: "only-id", name: "only", type: "xflow.http" }]
+  } satisfies WorkflowDef;
+  const executionStatuses = Object.keys(workflowStatusMeta) as ExecutionStatusKey[];
+  // RuntimeSnapshot.status is the six-value WorkflowStatus. queued, paused and
+  // canceling are ExecutionStatus values the prop type does not cover yet (P3 aligns
+  // them), so those three are cast in; the pill reads all nine through the same table.
+  const acceptedByProp = new Set<string>(["pending", "running", "success", "failed", "canceled", "timeout"]);
+  const runtimeFor = (status: ExecutionStatusKey): RuntimeSnapshot =>
+    acceptedByProp.has(status)
+      ? { status: status as WorkflowStatus }
+      : ({ status } as unknown as RuntimeSnapshot);
+
+  it.each(executionStatuses)("colours the %s pill by the tone core's table assigns", (status) => {
+    const { container } = render(<XFlowPreview workflow={pillWorkflow} runtime={runtimeFor(status)} />);
+
+    const pill = container.querySelector(".xflow-preview-toolbar .xflow-preview-status");
+    expect(pill?.getAttribute("data-tone")).toBe(workflowStatusMeta[status].tone);
+    expect(pill?.textContent).toBe(workflowStatusMeta[status].label);
+  });
+
+  it("covers every execution status, and more than one tone", () => {
+    expect(executionStatuses).toHaveLength(9);
+    expect(new Set(executionStatuses.map((status) => workflowStatusMeta[status].tone)).size).toBeGreaterThan(1);
+  });
+});
+
+// §6.2's canvas chrome: the rulers, the bottom-left zoom bar and its toggles.
+describe("XFlowPreview canvas chrome", () => {
+  const chromeWorkflow = {
+    id: "wf-chrome",
+    name: "Chrome flow",
+    nodes: [
+      { id: "start-id", name: "start", type: "xflow.start" },
+      { id: "http-id", name: "http_1", type: "xflow.http" }
+    ],
+    connections: { start: { main: [{ node: "http_1" }] } }
+  } satisfies WorkflowDef;
+  const { flowStore } = reactFlowMock;
+  const ticks = (container: HTMLElement, axis: "x" | "y") =>
+    [...container.querySelectorAll<HTMLElement>(`.xflow-preview-ruler--${axis} .xflow-preview-ruler__tick`)]
+      .map((tick) => [tick.textContent, tick.style.getPropertyValue(axis === "x" ? "left" : "top")]);
+  const highlight = (container: HTMLElement, axis: "x" | "y") =>
+    container.querySelector<HTMLElement>(`.xflow-preview-ruler--${axis} .xflow-preview-ruler__highlight`);
+  const pressShift = (key: string, target: EventTarget = document.body) =>
+    fireEvent.keyDown(target, { key, shiftKey: true });
+
+  it("draws both rulers by default, and none on a canvas with no nodes", () => {
+    const { container, rerender } = render(<XFlowPreview workflow={chromeWorkflow} />);
+    expect(container.querySelector(".xflow-preview-ruler--x")).toBeTruthy();
+    expect(container.querySelector(".xflow-preview-ruler--y")).toBeTruthy();
+    expect(container.querySelector(".xflow-preview-ruler__corner")).toBeTruthy();
+    expect(container.querySelector(".xflow-preview-canvas")?.getAttribute("data-ruler")).toBe("true");
+
+    rerender(<XFlowPreview workflow={{ name: "Empty", nodes: [] }} />);
+    expect(container.querySelector(".xflow-preview-ruler")).toBeNull();
+    expect(container.querySelector(".xflow-preview-canvas")?.getAttribute("data-ruler")).toBe("false");
+  });
+
+  it("labels every 100 canvas units where pan and zoom put them, and highlights the selected node", () => {
+    flowStore.setState({
+      transform: [130, 60, 0.5],
+      width: 420,
+      height: 300,
+      nodeLookup: new Map([["http-id", {
+        internals: { positionAbsolute: { x: 100, y: 40 } },
+        measured: { width: 264, height: 80 }
+      }]])
+    });
+    const { container } = render(<XFlowPreview workflow={chromeWorkflow} selectedNodeId="http-id" />);
+
+    // 100 units at 50% are 50px; the canvas origin sits at pan − 20px ruler.
+    expect(ticks(container, "x")).toEqual([
+      ["-200", "10px"], ["-100", "60px"], ["0", "110px"], ["100", "160px"],
+      ["200", "210px"], ["300", "260px"], ["400", "310px"], ["500", "360px"]
+    ]);
+    expect(ticks(container, "y")[0]).toEqual(["0", "40px"]);
+    const x = container.querySelector<HTMLElement>(".xflow-preview-ruler--x")!;
+    expect(x.style.getPropertyValue("--xflow-preview-ruler-major")).toBe("50px");
+    expect(x.style.getPropertyValue("--xflow-preview-ruler-minor")).toBe("5px");
+    expect(x.style.getPropertyValue("--xflow-preview-ruler-origin")).toBe("110px");
+
+    // The node's screen extent along each ruler: 130 + 100×0.5 − 20 = 160, 264×0.5 wide.
+    expect(highlight(container, "x")?.style.left).toBe("160px");
+    expect(highlight(container, "x")?.style.width).toBe("132px");
+    expect(highlight(container, "y")?.style.top).toBe("60px");
+    expect(highlight(container, "y")?.style.height).toBe("40px");
+
+    // The rulers follow a pan without a re-render of the preview.
+    act(() => flowStore.setState({ transform: [30, 60, 0.5] }));
+    expect(ticks(container, "x")[0]).toEqual(["0", "10px"]);
+    expect(highlight(container, "x")?.style.left).toBe("60px");
+  });
+
+  it("widens the labelled step once 100 units would crowd the labels", () => {
+    flowStore.setState({ transform: [20, 20, 0.1], width: 600, height: 300 });
+    const { container } = render(<XFlowPreview workflow={chromeWorkflow} />);
+    // 100 units at 10% would be 10px apart; 500 units (50px) is the first step that fits.
+    expect(ticks(container, "x").slice(0, 3)).toEqual([["0", "0px"], ["500", "50px"], ["1000", "100px"]]);
+    expect(highlight(container, "x")).toBeNull();
+    // 100 units keep their labels as long as they are 36px apart: 40px at 40% …
+    act(() => flowStore.setState({ transform: [20, 20, 0.4] }));
+    expect(ticks(container, "x").slice(0, 2)).toEqual([["0", "0px"], ["100", "40px"]]);
+    // … but not 35px at 35%, where 200 units (70px) take over.
+    act(() => flowStore.setState({ transform: [20, 20, 0.35] }));
+    expect(ticks(container, "x").slice(0, 2)).toEqual([["0", "0px"], ["200", "70px"]]);
+  });
+
+  it("toggles the rulers from the zoom bar and with ⇧R, but not while typing", () => {
+    const { container } = render(
+      <>
+        <input aria-label="outside field" />
+        <button type="button">outside button</button>
+        <XFlowPreview workflow={chromeWorkflow} />
+      </>
+    );
+    const button = screen.getByRole("button", { name: "标尺 (⇧R)" });
+    expect(button.getAttribute("aria-pressed")).toBe("true");
+
+    fireEvent.click(button);
+    expect(container.querySelector(".xflow-preview-ruler")).toBeNull();
+    expect(button.getAttribute("aria-pressed")).toBe("false");
+
+    pressShift("R");
+    expect(container.querySelector(".xflow-preview-ruler")).toBeTruthy();
+
+    // A key aimed at something outside this preview is someone else's.
+    pressShift("R", screen.getByRole("textbox", { name: "outside field" }));
+    expect(container.querySelector(".xflow-preview-ruler")).toBeTruthy();
+    pressShift("R", screen.getByRole("button", { name: "outside button" }));
+    expect(container.querySelector(".xflow-preview-ruler")).toBeTruthy();
+    // ⌘⇧R is the browser's, not the canvas's.
+    fireEvent.keyDown(document.body, { key: "R", shiftKey: true, metaKey: true });
+    expect(container.querySelector(".xflow-preview-ruler")).toBeTruthy();
+  });
+
+  it("toggles the minimap with ⇧M and re-fits the graph on every flip, as the rulers do", () => {
+    reactFlowMock.fitBounds.mockResolvedValue(true);
+    const { container } = render(<XFlowPreview workflow={chromeWorkflow} />);
+    act(() => {
+      latestFlowProps().onInit?.({
+        fitBounds: reactFlowMock.fitBounds,
+        getNodes: () => [{ id: "start-id" }],
+        getNodesBounds: reactFlowMock.getNodesBounds
+      });
+    });
+    reactFlowMock.fitBounds.mockClear();
+    const button = screen.getByRole("button", { name: "缩略图 (⇧M)" });
+    expect(button.getAttribute("aria-pressed")).toBe("false");
+
+    pressShift("M");
+    expect(container.querySelector(".react-flow__minimap")).toBeTruthy();
+    expect(button.getAttribute("aria-pressed")).toBe("true");
+    expect(reactFlowMock.fitBounds).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(button);
+    expect(container.querySelector(".react-flow__minimap")).toBeNull();
+    expect(reactFlowMock.fitBounds).toHaveBeenCalledTimes(2);
+
+    // The rulers are floating layers too: switching them re-fits the same way.
+    pressShift("R");
+    expect(container.querySelector(".xflow-preview-ruler")).toBeNull();
+    expect(reactFlowMock.fitBounds).toHaveBeenCalledTimes(3);
+  });
+
+  it("lets a new prop value override the local toggle", () => {
+    const { container, rerender } = render(<XFlowPreview workflow={chromeWorkflow} minimap />);
+    fireEvent.click(screen.getByRole("button", { name: "缩略图 (⇧M)" }));
+    expect(container.querySelector(".react-flow__minimap")).toBeNull();
+    // The same value again is not a new instruction.
+    rerender(<XFlowPreview workflow={chromeWorkflow} minimap />);
+    expect(container.querySelector(".react-flow__minimap")).toBeNull();
+
+    rerender(<XFlowPreview workflow={chromeWorkflow} minimap={false} ruler={false} />);
+    rerender(<XFlowPreview workflow={chromeWorkflow} minimap ruler={false} />);
+    expect(container.querySelector(".react-flow__minimap")).toBeTruthy();
+    expect(container.querySelector(".xflow-preview-ruler")).toBeNull();
+  });
+
+  it("steps the zoom by 10% within 10%–200% and shows the current percent", () => {
+    flowStore.setState({ transform: [0, 0, 0.5] });
+    render(<XFlowPreview workflow={chromeWorkflow} />);
+    const bar = screen.getByRole("toolbar", { name: "画布缩放" });
+    expect(bar.textContent).toContain("50%");
+
+    fireEvent.click(screen.getByRole("button", { name: "放大" }));
+    expect(reactFlowMock.zoomTo).toHaveBeenLastCalledWith(0.6);
+    fireEvent.click(screen.getByRole("button", { name: "缩小" }));
+    expect(reactFlowMock.zoomTo).toHaveBeenLastCalledWith(0.4);
+
+    act(() => flowStore.setState({ transform: [0, 0, 0.1] }));
+    expect(bar.textContent).toContain("10%");
+    fireEvent.click(screen.getByRole("button", { name: "缩小" }));
+    expect(reactFlowMock.zoomTo).toHaveBeenLastCalledWith(0.1);
+
+    act(() => flowStore.setState({ transform: [0, 0, 1.95] }));
+    fireEvent.click(screen.getByRole("button", { name: "放大" }));
+    expect(reactFlowMock.zoomTo).toHaveBeenLastCalledWith(2);
+
+    const slider = screen.getByRole("slider", { name: "缩放比例" });
+    expect(slider.getAttribute("aria-valuemin")).toBe("10");
+    expect(slider.getAttribute("aria-valuemax")).toBe("200");
+  });
+
+  it("offers 自动布局 only when the owner can lay the graph out", () => {
+    const onAutoLayout = vi.fn();
+    const { rerender } = render(<XFlowPreview workflow={chromeWorkflow} />);
+    expect(screen.queryByRole("button", { name: "自动布局" })).toBeNull();
+
+    rerender(<XFlowPreview workflow={chromeWorkflow} onAutoLayout={onAutoLayout} />);
+    fireEvent.click(screen.getByRole("button", { name: "自动布局" }));
+    expect(onAutoLayout).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops the zoom bar and its shortcuts when the owner turns it off", () => {
+    const { container } = render(<XFlowPreview workflow={chromeWorkflow} zoomBar={false} />);
+    expect(screen.queryByRole("toolbar", { name: "画布缩放" })).toBeNull();
+    pressShift("M");
+    expect(container.querySelector(".react-flow__minimap")).toBeNull();
+    // The rulers do not depend on the bar.
+    expect(container.querySelector(".xflow-preview-ruler")).toBeTruthy();
+  });
+
+  it("leaves ⇧M alone while a field inside the preview has the keyboard", () => {
+    const { container } = render(
+      <XFlowPreview workflow={{ name: "Empty", nodes: [] }} emptyState={<input aria-label="trigger search" />} />
+    );
+    pressShift("M", screen.getByRole("textbox", { name: "trigger search" }));
+    expect(container.querySelector(".react-flow__minimap")).toBeNull();
+    pressShift("M", container.querySelector(".xflow-preview-canvas")!);
+    expect(container.querySelector(".react-flow__minimap")).toBeTruthy();
+  });
+
+  it("shows the owner's empty state in place of the default note", () => {
+    render(
+      <XFlowPreview
+        workflow={{ name: "Empty", nodes: [] }}
+        emptyState={<button type="button">选择触发器</button>}
+      />
+    );
+    expect(screen.queryByText("No nodes to preview")).toBeNull();
+    expect(screen.getByRole("button", { name: "选择触发器" })).toBeTruthy();
+  });
+
+  it("draws the owner's top-left float as a floating layer, only when given", () => {
+    const flow = { name: "Float", nodes: [{ name: "start", type: "xflow.start" }] };
+    const { container, rerender } = render(<XFlowPreview workflow={flow} />);
+    expect(container.querySelector(".xflow-preview-canvas-float")).toBeNull();
+    rerender(<XFlowPreview workflow={flow} canvasFloat={<button type="button">添加节点</button>} />);
+    const float = container.querySelector(".xflow-preview-canvas-float")!;
+    // Marked like the zoom bar, so every fit keeps the content clear of it.
+    expect(float.hasAttribute("data-xflow-float")).toBe(true);
+    expect(within(float as HTMLElement).getByRole("button", { name: "添加节点" })).toBeTruthy();
+  });
+
+  it("draws the owner's top-right float as its own marked layer, only when given", () => {
+    const flow = { name: "FloatEnd", nodes: [{ name: "start", type: "xflow.start" }] };
+    const { container, rerender } = render(<XFlowPreview workflow={flow} />);
+    expect(container.querySelector(".xflow-preview-canvas-float--end")).toBeNull();
+
+    rerender(
+      <XFlowPreview
+        workflow={flow}
+        canvasFloatEnd={<button type="button">属性</button>}
+      />
+    );
+    const end = container.querySelector(".xflow-preview-canvas-float--end")!;
+    expect(end.classList.contains("xflow-preview-canvas-float")).toBe(true);
+    expect(end.hasAttribute("data-xflow-float")).toBe(true);
+    expect(within(end as HTMLElement).getByRole("button", { name: "属性" })).toBeTruthy();
+    // The end variant is its own slot: the top-left float stays empty.
+    expect(container.querySelector(".xflow-preview-canvas-float:not(.xflow-preview-canvas-float--end)")).toBeNull();
+  });
+});
+
+describe("XFlowPreview wait notes (§6.12)", () => {
+  const approvalFlow: WorkflowDef = {
+    name: "Approval",
+    nodes: [{ name: "manager_approval", type: "xflow.approval" }],
+    connections: {}
+  };
+  const suspended: RuntimeSnapshot = {
+    status: "running",
+    nodes: { manager_approval: { status: "suspended" } }
+  };
+  const note = { text: "依次审批 2/3 · 等待 finance-mgr", action: "处理" };
+  const cardOf = (container: HTMLElement): HTMLElement => {
+    const card = container.querySelector<HTMLElement>('[data-node-id="manager_approval"]');
+    if (!card) throw new Error("approval card not found");
+    return card;
+  };
+
+  it("keeps the generic line without an override and shows the owner's note with one", () => {
+    const { container, rerender } = render(<XFlowPreview runtime={suspended} workflow={approvalFlow} />);
+    expect(cardOf(container).querySelector(".xflow-preview-node__note")?.textContent).toBe("等待信号");
+
+    rerender(
+      <XFlowPreview nodeNotes={{ manager_approval: note }} runtime={suspended} workflow={approvalFlow} />
+    );
+    const line = cardOf(container).querySelector(".xflow-preview-node__note");
+    expect(line?.textContent).toContain(note.text);
+    // An action without a listener is not drawn: no button that does nothing.
+    expect(within(line as HTMLElement).queryByRole("button", { name: "处理" })).toBeNull();
+  });
+
+  it("reports the action with the node name and does not also select the node", () => {
+    const onNodeAction = vi.fn();
+    const onSelectNode = vi.fn();
+    const { container } = render(
+      <XFlowPreview
+        nodeNotes={{ manager_approval: note }}
+        onNodeAction={onNodeAction}
+        onSelectNode={onSelectNode}
+        runtime={suspended}
+        workflow={approvalFlow}
+      />
+    );
+
+    fireEvent.click(within(cardOf(container)).getByRole("button", { name: "处理" }));
+    expect(onNodeAction).toHaveBeenCalledWith("manager_approval", "处理");
+    expect(onSelectNode).not.toHaveBeenCalled();
+  });
+});
+
+describe("XFlowPreview node categories and card summaries (§6.13 / §6.1.1)", () => {
+  const categoryFlow = {
+    id: "wf-category",
+    name: "Category flow",
+    nodes: [{ id: "review-id", name: "review", type: "acme.review" }],
+    connections: {}
+  } satisfies WorkflowDef;
+
+  const icon = (container: HTMLElement): HTMLElement => {
+    const block = container.querySelector<HTMLElement>(".xflow-preview-node__icon");
+    if (!block) throw new Error("category icon block not found");
+    return block;
+  };
+
+  it("draws the category the descriptor declares, and keeps the prefix map for everything else", () => {
+    const { container, rerender } = render(<XFlowPreview workflow={categoryFlow} />);
+    // A custom type with no declaration is unknown (the grid icon), never "?".
+    expect(icon(container).dataset.cat).toBe("unknown");
+
+    rerender(<XFlowPreview nodeCategories={{ "acme.review": "human" }} workflow={categoryFlow} />);
+    expect(icon(container).dataset.cat).toBe("human");
+
+    // A declaration the table does not know does not beat the type's own prefix.
+    const builtin = { ...categoryFlow, nodes: [{ id: "http-id", name: "http", type: "xflow.http" }] };
+    rerender(<XFlowPreview nodeCategories={{ "xflow.http": "bogus" }} workflow={builtin} />);
+    expect(icon(container).dataset.cat).toBe("action");
+  });
+
+  it("uses the declared category for the minimap swatch too", () => {
+    render(<XFlowPreview minimap nodeCategories={{ "acme.review": "human" }} workflow={categoryFlow} />);
+    const nodeColor = reactFlowMock.miniMapProps?.nodeColor;
+    expect(nodeColor).toBeTruthy();
+    expect(nodeColor?.({ data: latestFlowProps().nodes[0].data })).toBe("var(--xflow-warning)");
+  });
+
+  it("draws the summary rows it was handed, with expression and credential kinds", () => {
+    const rows = [
+      { label: "审批人", value: "ops-lead → cfo", kind: "plain" as const },
+      { label: "条件", value: "$json.tier == \"vip\"", kind: "expr" as const },
+      { label: "认证", value: "crm_token", kind: "ref" as const }
+    ];
+    const { container } = render(<XFlowPreview nodeSummaries={{ "review-id": rows }} workflow={categoryFlow} />);
+    const summary = container.querySelector<HTMLElement>(".xflow-preview-node__summary");
+    expect(summary).toBeTruthy();
+    expect([...summary!.querySelectorAll("dt")].map((cell) => cell.textContent)).toEqual(["审批人", "条件", "认证"]);
+    const values = [...summary!.querySelectorAll("dd")];
+    expect(values.map((cell) => cell.textContent)).toEqual(["ops-lead → cfo", "$json.tier == \"vip\"", "crm_token"]);
+    expect(values.map((cell) => cell.dataset.kind)).toEqual(["plain", "expr", "ref"]);
+    // The credential row carries the key glyph; its value is the reference name.
+    expect(values[2].querySelector(".xflow-preview-node__summary-ref")).toBeTruthy();
+  });
+
+  it("caps the card at three lines and folds the rest into +n 项", () => {
+    const rows = ["a", "b", "c", "d", "e"].map((label) => ({ label, value: `${label}-value`, kind: "plain" as const }));
+    const { container } = render(<XFlowPreview nodeSummaries={{ "review-id": rows }} workflow={categoryFlow} />);
+    const summary = container.querySelector<HTMLElement>(".xflow-preview-node__summary");
+    expect([...summary!.querySelectorAll("dt")].map((cell) => cell.textContent)).toEqual(["a", "b", "更多"]);
+    expect([...summary!.querySelectorAll("dd")].map((cell) => cell.textContent)).toEqual(["a-value", "b-value", "+3 项"]);
+  });
+
+  it("draws no summary without rows, and drops it below the level-of-detail threshold", () => {
+    const { container, rerender } = render(<XFlowPreview workflow={categoryFlow} />);
+    expect(container.querySelector(".xflow-preview-node__summary")).toBeNull();
+
+    rerender(
+      <XFlowPreview
+        nodeSummaries={{ "review-id": [{ label: "审批人", value: "alice", kind: "plain" }] }}
+        workflow={categoryFlow}
+      />
+    );
+    expect(container.querySelector(".xflow-preview-node__summary")).toBeTruthy();
+
+    act(() => reactFlowMock.flowStore.setZoom(0.4));
+    expect(container.querySelector(".xflow-preview-node__summary")).toBeNull();
+    act(() => reactFlowMock.flowStore.setZoom(1));
+    expect(container.querySelector(".xflow-preview-node__summary")).toBeTruthy();
+  });
+
+  it("draws a required missing value as a danger row", () => {
+    const rows = [{ label: "URL", value: "URL 未填写", kind: "missing" as const, path: "/parameters/url" }];
+    const { container } = render(<XFlowPreview nodeSummaries={{ "review-id": rows }} workflow={categoryFlow} />);
+    const value = container.querySelector<HTMLElement>(".xflow-preview-node__summary dd");
+    expect(value?.dataset.kind).toBe("missing");
+    expect(value?.textContent).toBe("URL 未填写");
+  });
+
+  it("renders each half of a joined row with its own kind", () => {
+    const rows = [{
+      label: "Method + URL",
+      value: "GET /hooks/{{id}}",
+      kind: "plain" as const,
+      path: "/parameters/method",
+      parts: [
+        { text: "GET", kind: "plain" as const },
+        { text: "/hooks/{{id}}", kind: "mono" as const }
+      ]
+    }];
+    const { container } = render(<XFlowPreview nodeSummaries={{ "review-id": rows }} workflow={categoryFlow} />);
+    expect(container.querySelector(".xflow-preview-node__summary-mono")?.textContent).toBe("/hooks/{{id}}");
+  });
+
+  it("does not read inherited members for a node keyed like Object.prototype", () => {
+    const flow = {
+      ...categoryFlow,
+      nodes: [{ id: "constructor", name: "constructor", type: "xflow.start" }]
+    };
+    const { container } = render(<XFlowPreview nodeSummaries={{}} workflow={flow} />);
+    expect(container.querySelector(".xflow-preview-node")).toBeTruthy();
+    expect(container.querySelector(".xflow-preview-node__summary")).toBeNull();
+  });
+
+  it("selects and locates the field when a summary row is pressed", () => {
+    const onLocateParameter = vi.fn();
+    const rows = [{ label: "URL", value: "https://a", kind: "plain" as const, path: "/parameters/url" }];
+    const { container } = render(
+      <XFlowPreview nodeSummaries={{ "review-id": rows }} onLocateParameter={onLocateParameter} workflow={categoryFlow} />
+    );
+    const row = container.querySelector<HTMLElement>(".xflow-preview-node__summary dd");
+    expect(row?.getAttribute("role")).toBe("button");
+    fireEvent.click(row as HTMLElement);
+    expect(onLocateParameter).toHaveBeenCalledWith("review-id", "/parameters/url");
+    fireEvent.keyDown(row as HTMLElement, { key: "Enter" });
+    expect(onLocateParameter).toHaveBeenCalledTimes(2);
   });
 });
