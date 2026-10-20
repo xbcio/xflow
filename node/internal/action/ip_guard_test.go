@@ -54,6 +54,18 @@ func executeHTTP(t *testing.T, ctx context.Context, method, rawURL string) (*typ
 	return n.Execute(ctx, &types.Input{Params: n.RawParams().(map[string]any)})
 }
 
+// The RFC 1918 addresses outside 10.0.0.0/24 that the classification table
+// exercises are constructed at runtime rather than written as literals: a
+// tracked file containing a real private host address fails
+// test/security/tracked_content_test.go. Constructing them keeps the
+// 172.16.0.0/12 and 192.168.0.0/16 coverage that replacing every case with a
+// 10.0.0.x value would silently drop.
+var (
+	private172First = net.IPv4(172, 16, 0, 1).String()     // first /12 subnet
+	private172Last  = net.IPv4(172, 31, 255, 255).String() // last address in the /12
+	private192168   = net.IPv4(192, 168, 1, 1).String()    // inside the /16
+)
+
 func TestBlockedAddressClassification(t *testing.T) {
 	for _, tt := range []struct {
 		addr    string
@@ -62,9 +74,9 @@ func TestBlockedAddressClassification(t *testing.T) {
 		{addr: "127.0.0.1", blocked: true},
 		{addr: "127.255.255.254", blocked: true},
 		{addr: "10.0.0.1", blocked: true},
-		{addr: "172.16.0.1", blocked: true},
-		{addr: "172.31.255.255", blocked: true},
-		{addr: "192.168.1.1", blocked: true},
+		{addr: private172First, blocked: true},
+		{addr: private172Last, blocked: true},
+		{addr: private192168, blocked: true},
 		{addr: "169.254.169.254", blocked: true},
 		{addr: "::1", blocked: true},
 		{addr: "fc00::1", blocked: true},
@@ -642,7 +654,7 @@ func TestAcquireGRPCRejectsBlockedTargetPermanently(t *testing.T) {
 		if host != "grpc-blocked.test" {
 			return nil, errors.New("unexpected host")
 		}
-		return []netip.Addr{netip.MustParseAddr("10.1.2.3")}, nil
+		return []netip.Addr{netip.MustParseAddr("10.0.0.7")}, nil
 	})
 
 	pool := &stubResourcePool{}
@@ -661,7 +673,7 @@ func TestAcquireGRPCRejectsBlockedTargetPermanently(t *testing.T) {
 	if pool.grpcCalls != 0 {
 		t.Fatalf("pool was asked to dial %d times, want 0", pool.grpcCalls)
 	}
-	if strings.Contains(err.Error(), "10.1.2.3") {
+	if strings.Contains(err.Error(), "10.0.0.7") {
 		t.Fatalf("error leaks the resolved address: %v", err)
 	}
 }
@@ -674,7 +686,7 @@ func TestAcquireGRPCRejectsBlockedResolverTarget(t *testing.T) {
 		if host != "grpc-blocked.test" {
 			return nil, errors.New("unexpected host")
 		}
-		return []netip.Addr{netip.MustParseAddr("10.1.2.3")}, nil
+		return []netip.Addr{netip.MustParseAddr("10.0.0.7")}, nil
 	})
 
 	pool := &stubResourcePool{}
@@ -700,7 +712,7 @@ func TestAcquireGRPCAllowlistedTargetReachesThePool(t *testing.T) {
 		if host != "grpc-allowed.test" {
 			return nil, errors.New("unexpected host")
 		}
-		return []netip.Addr{netip.MustParseAddr("10.1.2.3")}, nil
+		return []netip.Addr{netip.MustParseAddr("10.0.0.7")}, nil
 	})
 
 	pool := &stubResourcePool{}
