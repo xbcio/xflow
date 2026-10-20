@@ -139,6 +139,9 @@ func signalKey(id types.ExecutionID, name string) string {
 // ---------------------------------------------------------------------------
 
 func (s *Store) CreateExecution(_ context.Context, rec *store.ExecutionRecord) error {
+	if err := store.ValidateExecutionWorkflowID(string(rec.WorkflowID)); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec.ID = s.nextAutoID()
@@ -224,6 +227,12 @@ func (s *Store) scopedExecutions(ns namespace.Namespace, filter store.ExecutionF
 		if filter.Status != "" && rec.Status != filter.Status {
 			continue
 		}
+		// Exact equality against a value the caller asked for. An unattributed
+		// record (WorkflowID "") therefore matches no non-empty filter, the same
+		// fail-closed rule the namespace comparison above applies.
+		if filter.WorkflowID != "" && rec.WorkflowID != filter.WorkflowID {
+			continue
+		}
 		if !filter.CreatedAfter.IsZero() && !rec.CreatedAt.After(filter.CreatedAfter) {
 			continue
 		}
@@ -276,6 +285,16 @@ func (s *Store) UpsertNode(_ context.Context, rec *store.NodeRecord) error {
 		existing.SignalName = rec.SignalName
 		existing.SignalConfig = rec.SignalConfig
 		existing.Timeout = rec.Timeout
+		// Timing is write-once, matching sqlstore's COALESCE assignment: a retry
+		// must not move the start line and a duplicate terminal write must not
+		// move the end line. nil on the incoming record is "no new fact", never
+		// "clear the fact".
+		if existing.StartedAt == nil && rec.StartedAt != nil {
+			existing.StartedAt = copyTime(rec.StartedAt)
+		}
+		if existing.FinishedAt == nil && rec.FinishedAt != nil {
+			existing.FinishedAt = copyTime(rec.FinishedAt)
+		}
 		existing.UpdatedAt = time.Now()
 	} else {
 		rec.ID = s.nextAutoID()
@@ -283,9 +302,22 @@ func (s *Store) UpsertNode(_ context.Context, rec *store.NodeRecord) error {
 		rec.CreatedAt = now
 		rec.UpdatedAt = now
 		cp := *rec
+		cp.StartedAt = copyTime(rec.StartedAt)
+		cp.FinishedAt = copyTime(rec.FinishedAt)
 		s.nodes[key] = &cp
 	}
 	return nil
+}
+
+// copyTime detaches a shared *time.Time from the caller's record. The memstore
+// otherwise hands out shallow copies, so a caller that later mutates the value
+// it passed to UpsertNode would rewrite stored history.
+func copyTime(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	cp := *t
+	return &cp
 }
 
 func (s *Store) GetNode(_ context.Context, id types.ExecutionID, name string) (*store.NodeRecord, error) {
@@ -296,6 +328,8 @@ func (s *Store) GetNode(_ context.Context, id types.ExecutionID, name string) (*
 		return nil, store.ErrNotFound
 	}
 	cp := *rec
+	cp.StartedAt = copyTime(rec.StartedAt)
+	cp.FinishedAt = copyTime(rec.FinishedAt)
 	return &cp, nil
 }
 
