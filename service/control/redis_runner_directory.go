@@ -3440,6 +3440,20 @@ return 'enqueued'
 
 var redisEnqueueAssignmentScript = redis.NewScript(redisEnqueueAssignmentLua)
 
+// redisRecoverExpiredClaimsLua reclaims claims whose expiry index entry has
+// come due.
+//
+// The enumeration is driven by claim:expiry (KEYS[11]) and nothing else. That
+// is safe because claim:assignment (KEYS[7]) has exactly one writer:
+// redisClaimAssignmentLua HSETs the assignment hash and ZADDs the expiry entry
+// in the same atomic script, and every path that removes a claim —
+// FinalizeClaim, SettleClaimHandoff, ReleaseClaim, ClearAssignment and
+// Register — HDELs the hash and ZREMs the index entry inside its own single
+// script. "Claim present, expiry entry absent" is therefore not a reachable
+// state, and a HKEYS fallback here would only rescan every live claim on each
+// poll, Finalize, Release, Register and per-replica sweep. If tolerance for
+// that unreachable state is ever wanted, it belongs in a 5-minute,
+// leader-gated maintenance pass, never on this hot path.
 const redisRecoverExpiredClaimsLua = redisLaneRequeueLua + `
 local function deleteHandoff(claimID, assignmentID)
   redis.call('HDEL', KEYS[12], claimID)
@@ -3488,10 +3502,10 @@ local function reclaim(claimID)
   -- 'leased'. It would be dead code: a claim that reaches 'leased' has already
   -- had claim:assignment, claim:runner, claim:session and claim:expiry removed
   -- by redisFinalizeClaimLua in the same atomic step that writes 'leased', and
-  -- this loop is driven by ZRANGEBYSCORE claim:expiry and HKEYS claim:assignment
-  -- (KEYS[11], KEYS[7]) — both empty for a leased assignment, so reclaim() is
-  -- never invoked for one. A stranded 'leased' assignment is reclaimed by the
-  -- control plane's stranded-lease reaper instead; see StrandedLeaseReaper.
+  -- this loop is driven by ZRANGEBYSCORE claim:expiry (KEYS[11]), which is
+  -- empty for a leased assignment, so reclaim() is never invoked for one. A
+  -- stranded 'leased' assignment is reclaimed by the control plane's
+  -- stranded-lease reaper instead; see StrandedLeaseReaper.
   if assignmentID and redis.call('HGET', KEYS[3], assignmentID) == 'claimed' and redis.call('HGET', KEYS[4], assignmentID) == claimID then
     redis.call('HSET', KEYS[3], assignmentID, 'queued')
     redis.call('HDEL', KEYS[4], assignmentID)
@@ -3514,7 +3528,6 @@ local function reclaim(claimID)
 end
 local recovered = 0
 for _, claimID in ipairs(redis.call('ZRANGEBYSCORE', KEYS[11], '-inf', ARGV[1])) do if reclaim(claimID) then recovered = recovered + 1 end end
-for _, claimID in ipairs(redis.call('HKEYS', KEYS[7])) do if redis.call('ZSCORE', KEYS[11], claimID) == false and reclaim(claimID) then recovered = recovered + 1 end end
 return recovered
 `
 
