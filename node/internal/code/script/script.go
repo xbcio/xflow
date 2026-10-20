@@ -117,6 +117,8 @@ func (n *ScriptNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.script",
 		DisplayName: "Script",
+		Category:    "code",
+		CardSummary: []string{"language+runtime", "code"},
 		Params: []types.ParamSpec{
 			{Name: "language", DisplayName: "Language", Type: types.ParamString, Required: true, Description: "Language family: js | wasm (no default — choose explicitly)",
 				Group: "source",
