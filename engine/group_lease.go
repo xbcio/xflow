@@ -136,6 +136,12 @@ func (e *Engine) BuildGroupLease(ctx context.Context, t *Task) (*TaskLease, *Gro
 		IssuedAt:   issuedAt,
 		TTL:        ttl,
 		NodeType:   GroupNodeType,
+		// Stamped for parity with BuildTaskLease and BuildSubgraphLease, but
+		// currently inert: BuildGroupLease is called only by the control
+		// plane's dispatchGroupLease, which overwrites Namespace from the
+		// claim right after this returns — an embedded engine runs groups
+		// through executeGroup and never builds a group lease here.
+		Namespace: e.namespace,
 	}
 
 	var deadline time.Time

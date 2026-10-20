@@ -41,7 +41,7 @@ func (t *Transport) StartConsumer(cfg queue.ConsumerConfig, handler queue.TaskHa
 			// Without Queues, asynq falls back to its own config, which polls
 			// only asynq's bare "default" queue — so a task enqueued to any
 			// queue this transport actually uses sits unprocessed forever.
-			Queues: queueWeights(),
+			Queues: t.queues.Weights(),
 		},
 	)
 	mux := asynqlib.NewServeMux()
@@ -119,7 +119,7 @@ func (t *Transport) sampleQueueStats(inspector *asynqlib.Inspector, obs queue.St
 	for _, q := range existing {
 		known[q] = struct{}{}
 	}
-	for _, name := range []string{defaultQueueName, batchQueueName} {
+	for _, name := range t.queues.All() {
 		if _, ok := known[name]; !ok {
 			reportQueueStatsSafely(obs, name, 0, 0, 0, 0)
 			continue

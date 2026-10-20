@@ -96,10 +96,17 @@ func (e *Engine) completeExecution(ctx context.Context, id types.ExecutionID, st
 // isCancelingOrCanceled reports whether the execution is in (or past) the
 // cancellation path. Used to decide whether completeExecution should yield the
 // terminal transition to an in-flight Cancel.
+//
+// This asks only for the lifecycle status, so it goes through executionStatus:
+// the narrow ExecutionStatusReader read when the backend has it, and the
+// GetExecution fallback otherwise. Both are treated the same as a failed or
+// missing snapshot read was before — an unreadable or absent execution is not
+// evidence of cancellation, so the completion notification and eviction still
+// run.
 func (e *Engine) isCancelingOrCanceled(ctx context.Context, id types.ExecutionID) bool {
-	snap, err := e.state.GetExecution(ctx, id)
-	if err != nil || snap == nil {
+	status, found, err := e.executionStatus(ctx, id)
+	if err != nil || !found {
 		return false
 	}
-	return snap.Status == types.ExecutionStatusCanceling || snap.Status == types.ExecutionStatusCanceled
+	return status == types.ExecutionStatusCanceling || status == types.ExecutionStatusCanceled
 }

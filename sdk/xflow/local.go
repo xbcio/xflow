@@ -28,6 +28,9 @@ func NewLocal(opts ...Option) (*Engine, error) {
 	if err := validateExecutionModeConfig(cfg); err != nil {
 		return nil, err
 	}
+	if err := validateNamespaceConfig(cfg); err != nil {
+		return nil, err
+	}
 	if cfg.executionMode == ExecutionModeTransient {
 		return nil, ErrTransientRequiresCluster
 	}

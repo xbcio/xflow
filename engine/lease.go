@@ -123,6 +123,15 @@ func (e *Engine) BuildTaskLease(ctx context.Context, t *Task) (*TaskLease, error
 		}
 	}
 	lease.ArtifactUses = e.artifactUses
+	// Same reasoning as the deadline above, plus: the local queue's worker
+	// goroutine also drops the submitting request's namespace, and a local
+	// engine has no claim record to read it from. A stamped namespace is what
+	// execution/runner.go injects into the handler's ctx, which is how
+	// $supplies resolves against this deployment's tenant rather than
+	// Default.
+	if e.namespace != "" {
+		lease.Namespace = e.namespace
+	}
 
 	started := prev == nil || prev.Status != types.NodeStatusRunning
 	if started && e.hooks != nil {
@@ -210,6 +219,12 @@ func (e *Engine) RecoverTaskLease(ctx context.Context, task *Task) (*TaskLease, 
 		}
 	}
 	recovered.ArtifactUses = e.artifactUses
+	// Same as BuildTaskLease. The distributed control plane overwrites this
+	// with the claim's namespace after recovery (its engine carries no
+	// namespace of its own); an embedded engine has no caller to do that.
+	if e.namespace != "" {
+		recovered.Namespace = e.namespace
+	}
 	return recovered, nil
 }
 

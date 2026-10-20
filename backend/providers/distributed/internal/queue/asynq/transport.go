@@ -76,31 +76,70 @@ const (
 	batchQueueWeight   = 1
 )
 
-// queueWeights is the consumer's queue configuration, and the complete set of
-// queues this application reads.
+// queueNames resolves the queue names one deployment uses. suffix is the
+// deployment identity derived from the owned namespace set
+// (namespace.DeploymentSuffix): empty for the default deployment and for
+// processes that configure no owned set, which keeps every legacy queue name
+// byte-identical so a v0.0.47 and a v0.0.48 pod drain the same queues during a
+// rolling upgrade. A dedicated deployment (e.g. a local dev process sharing the
+// Redis) gets "<legacy>:ns:<suffix>" queues no legacy pod ever polls, so it
+// neither consumes the shared deployment's tasks nor has its own consumed.
 //
-// These names are constants rather than configuration on purpose. An operator-
-// supplied queue name is a name that can be set back to asynq's shared "default"
-// — silently reintroducing exactly the collision the prefix exists to prevent,
-// with no compile error and nothing in the logs to notice. Isolation that
-// depends on every deployment's config staying right is not isolation. A
-// deployment that needs to separate two xflow applications must do it at a
-// level that actually separates all of them: separate Redis instances, since a
-// Redis Cluster has a single database and no DB index to move one of them to.
-func queueWeights() map[string]int {
+// The suffix is appended to the constant prefix, never substituted for it, so
+// the isolation from other asynq applications (see above) is preserved. It is
+// not operator-supplied free text: it comes from a validated namespace
+// (namespace.Validate rejects ':', '{', '}' and the glob metacharacters), so it
+// cannot reintroduce the bare "default" queue or corrupt asynq's
+// asynq:{<queue>}:* hash tag.
+type queueNames struct {
+	suffix string
+}
+
+// name appends the deployment suffix to a legacy queue name.
+func (q queueNames) name(legacy string) string {
+	if q.suffix == "" {
+		return legacy
+	}
+	return legacy + ":ns:" + q.suffix
+}
+
+// For routes a task to its asynq queue.
+func (q queueNames) For(t *engine.Task) string {
+	if t != nil && t.Type == engine.TaskTypeNodeBatch {
+		return q.name(batchQueueName)
+	}
+	return q.name(defaultQueueName)
+}
+
+// Weights is the consumer's queue configuration, and the complete set of queues
+// this deployment reads.
+//
+// The base names are constants rather than configuration on purpose. An
+// operator-supplied queue name is a name that can be set back to asynq's shared
+// "default" — silently reintroducing exactly the collision the prefix exists to
+// prevent, with no compile error and nothing in the logs to notice. Isolation
+// that depends on every deployment's config staying right is not isolation. The
+// only variable part is the namespace-derived suffix above, which can only
+// narrow the queue set, never widen it onto a name another application owns.
+// Separating two xflow applications that have no namespace distinction still
+// needs separate Redis instances, since a Redis Cluster has a single database
+// and no DB index to move one of them to.
+func (q queueNames) Weights() map[string]int {
 	return map[string]int{
-		defaultQueueName: defaultQueueWeight,
-		batchQueueName:   batchQueueWeight,
+		q.name(defaultQueueName): defaultQueueWeight,
+		q.name(batchQueueName):   batchQueueWeight,
 	}
 }
 
-// queueFor routes a task to its asynq queue.
-func queueFor(t *engine.Task) string {
-	if t != nil && t.Type == engine.TaskTypeNodeBatch {
-		return batchQueueName
-	}
-	return defaultQueueName
+// All lists every queue this deployment reads, in a stable order.
+func (q queueNames) All() []string {
+	return []string{q.name(defaultQueueName), q.name(batchQueueName)}
 }
+
+// queueWeights and queueFor are the unsuffixed (legacy) deployment's names.
+func queueWeights() map[string]int { return queueNames{}.Weights() }
+
+func queueFor(t *engine.Task) string { return queueNames{}.For(t) }
 
 // Option configures an asynq Transport at construction time.
 type Option func(*Transport)
@@ -115,6 +154,16 @@ func WithObserver(obs queue.Observer) Option {
 	}
 }
 
+// WithQueueSuffix routes this transport's producer, consumer and stats sampler
+// onto the deployment's own queues (see queueNames). Pass the value from
+// namespace.DeploymentSuffix; empty keeps the legacy queue names. The same
+// suffix must reach all three halves — a producer on a suffixed queue with an
+// unsuffixed consumer strands every task — which is why it is one transport
+// option rather than three.
+func WithQueueSuffix(suffix string) Option {
+	return func(t *Transport) { t.queues = queueNames{suffix: suffix} }
+}
+
 // Transport is the Asynq-backed queue.Transport. The producer client is created
 // eagerly; the consumer server is created lazily in StartConsumer so API-only
 // instances pay no server cost.
@@ -123,6 +172,7 @@ type Transport struct {
 	redisAddr string
 	client    *asynqlib.Client
 	observer  queue.Observer
+	queues    queueNames
 }
 
 // New creates an Asynq transport connected to the given Redis address.

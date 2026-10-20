@@ -117,7 +117,11 @@ type serverConfig struct {
 	// entryNamespaces is the entry-activation namespace set the control plane
 	// reconciles and the supply hinter enumerates; nil keeps {namespace.Default}.
 	// Set only by WithServerEntryNamespaces.
-	entryNamespaces          []namespace.Namespace
+	entryNamespaces []namespace.Namespace
+	// ownedNamespaces is the namespace set this deployment owns on shared
+	// infrastructure; nil keeps the legacy unscoped behavior. Set only by
+	// WithServerNamespaces.
+	ownedNamespaces          []namespace.Namespace
 	outboxDiscoveryPage      int
 	outputCompression        bool
 	enableRunnerMetricsProxy bool
@@ -473,6 +477,41 @@ func WithServerEntryNamespaces(ns []namespace.Namespace) ServerOption {
 	}
 }
 
+// WithServerNamespaces declares the namespace set this server owns on
+// infrastructure it shares with other deployments (one MySQL, one Redis). It is
+// the single switch behind deployment isolation: the leader lease, the
+// maintenance sweeps, the queue names, the runner directory and the leader-gated
+// workers (audit reconcile, runner-instance prune, workflow-activation
+// projection) are all derived from it, so a process that owns {"local-dev"}
+// neither contends for nor sweeps the state of a process that owns "default".
+//
+// The entry-activation namespaces follow the owned set unless
+// WithServerEntryNamespaces narrows them; they may not name a namespace outside
+// it, since that namespace would be activated here and swept elsewhere.
+//
+// Unset (the default) keeps every legacy key and queue name byte for byte, which
+// is also what a set containing "default" produces: a default-owning process
+// campaigns the same leader key as a v0.0.47 process, so the two exclude each
+// other during a rolling upgrade. A set with two or more namespaces and no
+// "default" is ambiguous and rejected by NewServer.
+//
+// Deployments sharing infrastructure must own disjoint sets; nothing at runtime
+// detects an overlap.
+func WithServerNamespaces(ns []namespace.Namespace) ServerOption {
+	return func(c *serverConfig) {
+		c.ownedNamespaces = append([]namespace.Namespace(nil), ns...)
+	}
+}
+
+// LeaderLockKey returns the Redis key under which a server owning ns campaigns
+// for control-plane leadership. It exists so tests and tooling derive the key
+// from the same rule the server uses instead of hard-coding the literal. The
+// set is normalised the way the server does it (empty entries dropped,
+// duplicates removed); a set with no usable entry derives the legacy key.
+func LeaderLockKey(ns []namespace.Namespace) (string, error) {
+	return distributed.LeaderLockKey(ns)
+}
+
 // WithServerOutboxDiscoveryPage sizes the durable outbox dispatcher's per-drain
 // discovery page. Zero (the default) keeps engine.DefaultOutboxDiscoveryPage.
 //
@@ -718,6 +757,10 @@ func newAuditReconciler(st store.Store, api *apiserver.APIServer, sc *serverConf
 		// Leader-gated so only one replica scans. Idempotent appends make a
 		// leader switch safe; the gate is about not doing the work N times.
 		Elector: leaderGate(api.IsLeader),
+		// The audit table is shared like the rest of the infrastructure: a
+		// dedicated deployment must settle only the admissions of the
+		// namespaces it owns, not probe another deployment's.
+		Namespaces: sc.ownedNamespaces,
 	}
 	if sc.metrics != nil {
 		cfg.Observer = metrics.NewReconcileMetrics(sc.metrics)
@@ -808,6 +851,7 @@ func buildServerAPIConfig(cfg ServerConfig, sc *serverConfig) apiserver.Config {
 		AssignmentQueueLanes:           sc.assignmentQueueLanes,
 		AssignmentQueueLaneWriteMode:   sc.assignmentQueueLaneWriteMode,
 		EntryNamespaces:                sc.entryNamespaces,
+		OwnedNamespaces:                sc.ownedNamespaces,
 
 		OutboxDiscoveryPage: sc.outboxDiscoveryPage,
 
@@ -1048,6 +1092,36 @@ func (s *Server) AddWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.Wo
 func (s *Server) ReplaceWorkflow(ctx context.Context, wf *WorkflowBuilder) (types.WorkflowID, error) {
 	res, err := s.addWorkflow(ctx, wf, true)
 	return res.ID, err
+}
+
+// RemoveWorkflow deregisters the workflow addressed by id — the embedded
+// counterpart of DELETE /v1/workflows/{id}.
+//
+// The namespace comes from ctx exactly as on ListWorkflowVersions. Not-found is
+// backend.ErrWorkflowNotFound, which callers that treat "already gone" as
+// success should check with errors.Is. The desired entry activations are
+// cleared before the registry record is removed (see APIServer.RemoveWorkflow),
+// so a partially failed removal is retryable and never leaves a Desired
+// activation behind that the reconciler would keep delivering.
+func (s *Server) RemoveWorkflow(ctx context.Context, id types.WorkflowID) error {
+	if id == "" {
+		return backend.ErrWorkflowNotFound
+	}
+	return s.api.RemoveWorkflow(ctx, namespace.FromContext(ctx), id)
+}
+
+// RemoveWorkflowByName is RemoveWorkflow for a host that knows the identity it
+// registered under — the (name, version) pair it derives from its own
+// configuration — but not the server-issued id. version must be the value that
+// was registered; a builder that never calls Version registers under "v1".
+//
+// Resolution is scoped to ctx's namespace, so a workflow carrying the same
+// name in another namespace is reported as backend.ErrWorkflowNotFound.
+func (s *Server) RemoveWorkflowByName(ctx context.Context, name, version string) error {
+	if name == "" || version == "" {
+		return backend.ErrWorkflowNotFound
+	}
+	return s.api.RemoveWorkflowByName(ctx, namespace.FromContext(ctx), name, version)
 }
 
 // ReplaceWorkflowWithMetadata is ReplaceWorkflow, additionally carrying an

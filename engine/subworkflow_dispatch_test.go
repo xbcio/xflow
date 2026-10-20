@@ -26,6 +26,13 @@ import (
 type subWorkflowLinkState struct {
 	*fakeState
 	links map[string]SubWorkflowLink // key: execID+"/"+nodeName
+	// onExecutionCreated, when set, runs after an execution is durably created.
+	// It is how a test lands work in the create-then-park window, which has no
+	// link for any other actor to observe.
+	onExecutionCreated func(id types.ExecutionID)
+	// readError, when it answers an error for an id, makes GetExecution fail —
+	// the shape of a status read that cannot answer between start and park.
+	readError func(id types.ExecutionID) error
 }
 
 var _ SubWorkflowLinkStore = (*subWorkflowLinkState)(nil)
@@ -35,6 +42,29 @@ func newSubWorkflowLinkState() *subWorkflowLinkState {
 		fakeState: newFakeState(),
 		links:     make(map[string]SubWorkflowLink),
 	}
+}
+
+// CreateExecutionWithOutbox delegates to the embedded fake and then runs the
+// optional post-create hook. The atomic path is the one startExecution takes
+// with this store, so this is where a test can interleave a cancel after the
+// child record exists but before the dispatch parks the parent.
+func (s *subWorkflowLinkState) CreateExecutionWithOutbox(ctx context.Context, execution *ExecutionSnapshot, entries []OutboxEntry) error {
+	if err := s.fakeState.CreateExecutionWithOutbox(ctx, execution, entries); err != nil {
+		return err
+	}
+	if s.onExecutionCreated != nil {
+		s.onExecutionCreated(execution.ID)
+	}
+	return nil
+}
+
+func (s *subWorkflowLinkState) GetExecution(ctx context.Context, id types.ExecutionID) (*ExecutionSnapshot, error) {
+	if s.readError != nil {
+		if err := s.readError(id); err != nil {
+			return nil, err
+		}
+	}
+	return s.fakeState.GetExecution(ctx, id)
 }
 
 // BeginSubWorkflowWait fences on the documented lease identity and claimable
@@ -863,5 +893,51 @@ func TestSubWorkflowChildOccupiesTheTargetsConcurrencySlot(t *testing.T) {
 	}
 	if _, ok, _ := rig.state.GetSubWorkflowLink(ctx, rig.parentID, "sub"); ok {
 		t.Fatal("a refused child start parked the node")
+	}
+}
+
+// recordingSubWorkflowResolver answers like the stub but records the
+// namespace the dispatch asked the binding for.
+type recordingSubWorkflowResolver struct {
+	target    graph.SubWorkflowTarget
+	namespace string
+}
+
+func (r *recordingSubWorkflowResolver) ResolveSubWorkflow(_ context.Context, ref graph.SubWorkflowRef) (graph.SubWorkflowTarget, error) {
+	r.namespace = ref.Namespace
+	return r.target, nil
+}
+
+// TestSubWorkflowDispatchFallsBackToTheContextNamespace pins the compatibility
+// branch for snapshots written before the registration namespace was persisted:
+// an empty snapshot namespace must leave the dispatch resolving in the ctx
+// namespace, the behavior such an execution was created with. Dropping the
+// fallback would hand a real registry an empty namespace, which is not the
+// deployment namespace it ran under and would miss.
+func TestSubWorkflowDispatchFallsBackToTheContextNamespace(t *testing.T) {
+	resolver := &recordingSubWorkflowResolver{target: subWorkflowStubResolver(t).target}
+	// The rig seeds its parent with no Namespace — the pre-change snapshot shape.
+	rig := newSubWorkflowRig(t, resolvedSubWorkflowParent(t), nil, resolver)
+
+	nsCtx := namespace.WithNamespace(context.Background(), "tenant-x")
+	handled, err := rig.eng.handleSystemTask(nsCtx, rig.task, true)
+	if err != nil {
+		t.Fatalf("handleSystemTask: %v", err)
+	}
+	if !handled {
+		t.Fatal("the engine did not claim its own sub-workflow task")
+	}
+
+	if want := string(namespace.FromContext(nsCtx)); resolver.namespace != want {
+		t.Fatalf("resolved namespace = %q, want the ctx namespace %q", resolver.namespace, want)
+	}
+	// The fallback is a compatibility path, not a degraded one: the child still
+	// starts and the parent still parks.
+	child := rig.child(t, subWorkflowChildID(rig.parentID, "sub", 1, 1))
+	if child.Status != types.ExecutionStatusRunning {
+		t.Fatalf("child status = %s, want running", child.Status)
+	}
+	if node := rig.node(t); node.Status != types.NodeStatusWaiting {
+		t.Fatalf("node status = %s, want waiting", node.Status)
 	}
 }

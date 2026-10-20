@@ -206,6 +206,17 @@ func compile(ctx context.Context, def *types.WorkflowDef, resolver SubWorkflowRe
 	if err := validateFAF(def); err != nil {
 		return nil, err
 	}
+	// Workflow-level outputs are declared by the DSL but never evaluated: no
+	// runtime consumer reads WorkflowDef.Outputs, so a definition carrying them
+	// used to register cleanly and silently expose nothing. Reject at compile
+	// time instead of accepting a declaration that does not work.
+	//
+	// This runs after validateFAF so an FAF definition keeps its more specific
+	// rejection ("faf workflow cannot define workflow outputs").
+	if len(def.Outputs) != 0 {
+		return nil, fmt.Errorf("workflow-level outputs are not supported: %d output(s) declared; "+
+			"remove the top-level \"outputs\" block (node outputs are read via $nodes)", len(def.Outputs))
+	}
 	if err := validateWorkflowRunnerSelector(def.RunnerSelector); err != nil {
 		return nil, err
 	}
@@ -515,6 +526,15 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 			return 0, fmt.Errorf("node %q: %w", nd.Name, err)
 		}
 		if err := validateRetryStrategy(fmt.Sprintf("node %q", nd.Name), nd.Retry); err != nil {
+			return 0, err
+		}
+		// A node-level on_error used to be copied straight into NodeMeta with no
+		// validation, so a misspelled value silently became "stop" through
+		// ApplyOnError's default branch -- a fail-closed outcome, but with no
+		// diagnostic saying the author's policy was never in effect. Validate it
+		// at the same point as the retry strategy, and with the same policy set
+		// ApplyOnError implements.
+		if err := validateOnError(fmt.Sprintf("node %q: on_error", nd.Name), nd.OnError); err != nil {
 			return 0, err
 		}
 		g.index[nd.Name] = i
@@ -832,15 +852,24 @@ func resolveOnError(node string, settings *types.WorkflowSettings) string {
 	return settings.OnError
 }
 
-// validateSettingsOnError rejects a workflow default on_error the engine does
-// not implement.
-func validateSettingsOnError(onErr string) error {
+// validateOnError rejects an on_error value the engine does not implement.
+// where names the declaring site in the message, so a misspelled node-level
+// value names the node rather than reporting a settings field that was never
+// written: "settings.on_error" for the workflow default, or
+// `node "worker": on_error` for a node.
+func validateOnError(where, onErr string) error {
 	switch types.OnError(onErr) {
 	case "", types.OnErrorStop, types.OnErrorOutput, types.OnErrorMainOutput, types.OnErrorContinue:
 		return nil
 	}
-	return fmt.Errorf("settings.on_error %q must be one of %q, %q, %q, %q",
-		onErr, types.OnErrorStop, types.OnErrorOutput, types.OnErrorMainOutput, types.OnErrorContinue)
+	return fmt.Errorf("%s %q must be one of %q, %q, %q, %q",
+		where, onErr, types.OnErrorStop, types.OnErrorOutput, types.OnErrorMainOutput, types.OnErrorContinue)
+}
+
+// validateSettingsOnError rejects a workflow default on_error the engine does
+// not implement.
+func validateSettingsOnError(onErr string) error {
+	return validateOnError("settings.on_error", onErr)
 }
 
 // validateRetryStrategy rejects a retry strategy the engine does not implement.

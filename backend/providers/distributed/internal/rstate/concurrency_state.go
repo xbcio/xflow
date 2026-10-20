@@ -549,7 +549,7 @@ func (s *Store) ExpireQueuedExecutions(ctx context.Context, limit int) (int, err
 	s.concurrencySweepMu.Lock()
 	defer s.concurrencySweepMu.Unlock()
 
-	namespaces, err := s.listNamespaces(ctx)
+	namespaces, err := s.scopedNamespaces(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("list namespaces for queue expiry: %w", err)
 	}

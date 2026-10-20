@@ -72,7 +72,7 @@ func (s *Store) RepairLeaseIndex(ctx context.Context, limit int) (reconciled int
 	s.leaseRepairMu.Lock()
 	defer s.leaseRepairMu.Unlock()
 
-	namespaces, err := s.listNamespaces(ctx)
+	namespaces, err := s.scopedNamespaces(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("list namespaces for lease repair: %w", err)
 	}

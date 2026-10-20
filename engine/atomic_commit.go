@@ -262,10 +262,16 @@ func (e *Engine) commitAcyclicNodeWithReclaimEligibility(ctx context.Context, le
 		Fatal:        fatal,
 		AdvanceTask:  advanceTask,
 	}
-	result, err := e.commitNode(ctx, req)
-	if err != nil {
-		return CommitOutcomeTransientError, fmt.Errorf("atomic commit node %q/%q: %w", task.ExecutionID, task.NodeName, err)
-	}
+	// Observed before the fenced transition, not after it. CommitNode makes the
+	// execution's terminal failed status visible to waiters — both backends
+	// close their done channel inside that transition — so a consumer that
+	// pairs WaitDone with this observer could otherwise read the failure in
+	// between and see a failed execution with no observed fatal failure (the
+	// group runtime reports FailedMember="" exactly that way). Emitting first
+	// reorders only this side channel: an observation whose commit is not
+	// applied belongs to an attempt that is retried or superseded, and a reader
+	// that takes the last fatal failure only consults it when the execution
+	// actually ended failed.
 	if fatal && status == types.NodeStatusFailed && e.nodeFailureObserver != nil {
 		e.nodeFailureObserver.ObserveNodeFailure(task.ExecutionID, ObservedNodeFailure{
 			NodeName: task.NodeName,
@@ -280,6 +286,10 @@ func (e *Engine) commitAcyclicNodeWithReclaimEligibility(ctx context.Context, le
 			// classification still exists.
 			Permanent: cls.Permanent != nil && *cls.Permanent,
 		})
+	}
+	result, err := e.commitNode(ctx, req)
+	if err != nil {
+		return CommitOutcomeTransientError, fmt.Errorf("atomic commit node %q/%q: %w", task.ExecutionID, task.NodeName, err)
 	}
 	e.publishCommitReceipt(ctx, req, result, cls)
 	return e.finishAtomicCommit(ctx, req, result)

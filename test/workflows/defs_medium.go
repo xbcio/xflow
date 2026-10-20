@@ -3,6 +3,7 @@ package workflows
 import (
 	"github.com/xbcio/xflow/node"
 	"github.com/xbcio/xflow/sdk/xflow"
+	"github.com/xbcio/xflow/types"
 )
 
 // Runtime variable names the medium and high tiers read at execution time. They
@@ -87,9 +88,13 @@ func MediumWorkflow() *xflow.WorkflowBuilder {
 
 	single := wf.Node("single_lane", node.Set(map[string]any{"lane": "single"}))
 	join := wf.Node("join", node.Merge(node.MergeWaitAny))
+	// xflow.notification has no delivery backend and fails at execution.
+	// Continue-on-error keeps the tier's happy path traversing the node so the
+	// rest of the graph is still exercised end to end.
 	notify := wf.Node("notify", node.Notification("email", `${{ $vars.recipient }}`).
 		Subject("medium tier done").
-		Message(`${{ sprintf("count=%v", $nodes['renamed'].count) }}`))
+		Message(`${{ sprintf("count=%v", $nodes['renamed'].count) }}`)).
+		OnError(types.OnErrorContinue)
 	done := wf.Node("done", node.End())
 
 	wf.Connect(start, seed).

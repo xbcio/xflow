@@ -20,6 +20,7 @@ import (
 	"github.com/xbcio/xflow/backend/providers/distributed/internal/workflowreg"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
 )
@@ -99,6 +100,7 @@ type config struct {
 	outboxDiscoveryPage    int
 	outboxReadyIndex       bool
 	outputCompression      bool
+	ownedNamespaces        []namespace.Namespace
 }
 
 // WithConcurrency sets the number of task consumer goroutines. Default is 10.
@@ -317,6 +319,20 @@ func WithRedisConfig(rc RedisConfig) Option {
 	return func(c *config) { c.redisConfig = &rc }
 }
 
+// WithOwnedNamespaces declares the set of namespaces this deployment owns. It
+// is the single switch behind deployment isolation: the leader-lock key, the
+// rstate maintenance-sweep scope, the asynq queue names, and the runner
+// directory prefix are all derived from it (see LeaderLockKey and
+// namespace.DeploymentSuffix for the derivation rules).
+//
+// The set is normalized when New runs; an ambiguous set (two or more
+// non-default namespaces without the default) fails construction rather than
+// silently sharing one deployment identity. Passing nothing preserves legacy
+// behavior: every legacy key and queue name stays byte-identical.
+func WithOwnedNamespaces(ns []namespace.Namespace) Option {
+	return func(c *config) { c.ownedNamespaces = ns }
+}
+
 // Backend wires the Engine Core to Redis state (internal/rstate) and a
 // pluggable task transport (default: Asynq). It is a thin facade over the
 // internal state, timeout, trigger, and workflow-registry subpackages.
@@ -333,6 +349,12 @@ type Backend struct {
 	consumer       bool
 	transient      bool
 	resourcePool   types.ResourcePool
+
+	// ownedNamespaces is the normalized owned-namespace set (nil for a legacy
+	// unscoped process) from which the leader key, sweep scope, and — in later
+	// commits — queue names and the runner directory prefix derive. Set once
+	// by New; OwnedNamespaces hands out defensive copies.
+	ownedNamespaces []namespace.Namespace
 
 	// queueStatsObserver/queueStatsInterval drive the consumer's periodic
 	// queue-depth samples. Nil observer disables sampling.
@@ -407,6 +429,19 @@ func (b *Backend) IsLeader() bool                     { return b.leaderElector.I
 func (b *Backend) Resign(ctx context.Context) error   { return b.leaderElector.Resign(ctx) }
 func (b *Backend) Notify() <-chan bool                { return b.leaderElector.Notify() }
 
+// OwnedNamespaces returns the normalized owned-namespace set this backend was
+// constructed with, or nil for a legacy unscoped process. The control plane
+// uses it to inherit the embedder's scope when its own config leaves it
+// unset, and to reject a mismatch between the two.
+func (b *Backend) OwnedNamespaces() []namespace.Namespace {
+	if b.ownedNamespaces == nil {
+		return nil
+	}
+	out := make([]namespace.Namespace, len(b.ownedNamespaces))
+	copy(out, b.ownedNamespaces)
+	return out
+}
+
 var _ backend.LeaderElector = (*Backend)(nil)
 var _ backend.TaskHandlerBinder = (*Backend)(nil)
 var _ backend.StartBinder = (*Backend)(nil)
@@ -420,8 +455,24 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 		o(cfg)
 	}
 
+	// The owned set fixes this process's deployment identity, and every derived
+	// surface (leader key, queue suffix, sweep scope) is computed from it here,
+	// before any connection is opened: an ambiguous or invalid set must fail
+	// construction without leaving a Redis client or asynq producer behind.
+	owned, err := namespace.NormalizeOwned(cfg.ownedNamespaces)
+	if err != nil {
+		return nil, fmt.Errorf("owned namespaces: %w", err)
+	}
+	deploymentSuffix, err := namespace.DeploymentSuffix(owned)
+	if err != nil {
+		return nil, fmt.Errorf("owned namespaces: %w", err)
+	}
+	leaderKey, err := LeaderLockKey(owned)
+	if err != nil {
+		return nil, fmt.Errorf("leader lock key: %w", err)
+	}
+
 	var rdb redis.UniversalClient
-	var err error
 	if cfg.redisConfig != nil {
 		if err := cfg.redisConfig.validate(); err != nil {
 			return nil, fmt.Errorf("redis config: %w", err)
@@ -452,10 +503,20 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 	// connection option (single/sentinel/cluster) and use NewWithConnOpt.
 	// Otherwise keep the legacy single-address string path via New(redisAddr).
 	transport := cfg.transport
+	if transport != nil && deploymentSuffix != "" && cfg.logger != nil {
+		// An injected transport owns its own queue names, so the per-deployment
+		// queue separation cannot be applied to it. Leader lock and sweep scope
+		// still follow the owned set; queues do not.
+		cfg.logger.Warn("distributed backend: injected transport bypasses per-deployment queue separation",
+			"deployment", deploymentSuffix)
+	}
 	if transport == nil {
 		var topts []asynqtransport.Option
 		if cfg.queueObserver != nil {
 			topts = append(topts, asynqtransport.WithObserver(cfg.queueObserver))
+		}
+		if deploymentSuffix != "" {
+			topts = append(topts, asynqtransport.WithQueueSuffix(deploymentSuffix))
 		}
 		if cfg.redisConfig != nil {
 			connOpt, err := cfg.redisConfig.AsAsynqConnOpt()
@@ -473,7 +534,8 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 
 	registry := execution.NewRegistry()
 
-	leaderKey := "xflow:leader:control-plane"
+	state.ConfigureOwnedNamespaces(owned)
+
 	leaderElector := NewRedisLeaderElector(rdb, leaderKey, defaultLeaderLeaseTTL)
 
 	return &Backend{
@@ -489,6 +551,7 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 		resourcePool:     cfg.resourcePool,
 		artifactCode:     cfg.artifactCode,
 		leaderElector:    leaderElector,
+		ownedNamespaces:  owned,
 		shutdownObserver: cfg.shutdownObserver,
 		logger:           cfg.logger,
 
@@ -835,6 +898,9 @@ func (b *Backend) bindHandler(eng *engine.Engine, handler func(context.Context, 
 	tmDone := make(chan struct{})
 	if !b.transient {
 		tm = timeout.New(b.rdb, eng, nil, b.logger, 5*time.Second)
+		if b.ownedNamespaces != nil {
+			tm.SetNamespaces(b.ownedNamespaces)
+		}
 		b.timeoutMonitor = tm
 		go func() {
 			defer close(tmDone)

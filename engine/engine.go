@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -124,6 +125,26 @@ func WithArtifactUseCollector(c *types.ArtifactUseCollector) Option {
 	return func(e *Engine) { e.artifactUses = c }
 }
 
+// WithNamespace stamps this engine's namespace onto every lease it issues
+// (BuildTaskLease, RecoverTaskLease, BuildSubgraphLease). It exists for
+// single-namespace embedded engines — the SDK's NewLocal in a process whose
+// xflow.namespace is set — where nothing else can supply one: the local
+// queue's worker starts from context.Background(), so the submitting
+// request's namespace cannot travel as context lineage, and unlike the
+// distributed control plane there is no claim record to read it from.
+// Without it, lease.Namespace stays empty and execution/runner.go falls back
+// to namespace.Default for SetNamespace, which resolves $supplies and the
+// artifact-reference check against the Default tenant in a process whose
+// supplies and artifacts live under a dedicated one.
+//
+// Empty (the default) leaves leases unstamped, preserving the deployed
+// multi-namespace behaviour where the control plane sets lease.Namespace
+// per claim: a whole-engine stamp would collapse per-tenant routing to one
+// value. Read at lease-build time; not mutated afterwards.
+func WithNamespace(ns namespace.Namespace) Option {
+	return func(e *Engine) { e.namespace = ns }
+}
+
 // WithSuspendDisabled makes runtime suspend requests fail the leased task
 // instead of parking it. If err is nil, ErrSuspendUnsupported is used.
 func WithSuspendDisabled(err error) Option {
@@ -210,6 +231,7 @@ type Engine struct {
 	maxSubWorkflowDepth      int
 	outerDeadline            time.Time
 	artifactUses             *types.ArtifactUseCollector
+	namespace                namespace.Namespace
 
 	mu     sync.RWMutex
 	graphs map[types.ExecutionID]*graph.Graph
@@ -503,6 +525,13 @@ func attachSubmissionMetadata(ctx context.Context, snap *ExecutionSnapshot) {
 		snap.WorkflowVersion = def.Version
 	}
 	snap.TestRun = TestRunFromContext(ctx)
+	// Carry the REGISTRATION namespace with the execution. Dispatch runs off a
+	// queue whose worker starts from context.Background(), so its ctx namespace
+	// is the deployment namespace, not the one the definition was registered
+	// under; the snapshot is the only carrier that survives the hop.
+	if def, ok := WorkflowDefFromContext(ctx); ok && def.Namespace != "" {
+		snap.Namespace = def.Namespace
+	}
 }
 
 // attachTransientHint enriches the submission context with the per-workflow

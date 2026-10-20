@@ -328,11 +328,12 @@ func (b *leaderBackend) Resign(ctx context.Context) error   { return b.elector.R
 func (b *leaderBackend) Notify() <-chan bool                { return b.elector.Notify() }
 
 type countingElector struct {
-	campaigns atomic.Int64
-	leader    atomic.Bool
-	notifyCh  chan bool
-	mu        sync.Mutex
-	resigned  bool
+	campaigns    atomic.Int64
+	leader       atomic.Bool
+	notifyCh     chan bool
+	mu           sync.Mutex
+	resigned     bool
+	resignCtxErr error
 }
 
 func newCountingElector() *countingElector {
@@ -348,12 +349,40 @@ func (e *countingElector) Campaign(context.Context) error {
 
 func (e *countingElector) IsLeader() bool { return e.leader.Load() }
 
-func (e *countingElector) Resign(context.Context) error {
+func (e *countingElector) Resign(ctx context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.resigned = true
+	e.resignCtxErr = ctx.Err()
 	e.leader.Store(false)
 	return nil
+}
+
+// TestShutdownResignsWithExpiredCallerContext pins the independent Resign
+// budget: a shutdown caller whose context is already exhausted (a slow
+// transport drain can consume the whole deadline) must still release the
+// lease, and Resign must see a live context rather than context.Canceled.
+func TestShutdownResignsWithExpiredCallerContext(t *testing.T) {
+	elector := newCountingElector()
+	elector.leader.Store(true)
+	cp, err := NewControlPlane(Config{Backend: &leaderBackend{Backend: backendlocal.New(), elector: elector}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := cp.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	elector.mu.Lock()
+	defer elector.mu.Unlock()
+	if !elector.resigned {
+		t.Fatal("Resign was skipped under an expired shutdown context")
+	}
+	if elector.resignCtxErr != nil {
+		t.Fatalf("Resign context error = %v, want an independent live context", elector.resignCtxErr)
+	}
 }
 
 func (e *countingElector) Notify() <-chan bool { return e.notifyCh }

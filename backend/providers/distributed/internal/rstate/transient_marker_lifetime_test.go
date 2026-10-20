@@ -96,11 +96,14 @@ func TestTransientMarkerOutlivesTheExecutionItDescribes(t *testing.T) {
 	}
 }
 
-// TestDurableExecutionGetsNoMarker is the negative control: the refresh is
-// EXISTS-guarded, so a durable execution must not acquire a transient marker
-// through this path. If it did, the execution would silently stop projecting
-// its node output and its audit trail would go dark.
-func TestDurableExecutionGetsNoMarker(t *testing.T) {
+// TestDurableExecutionGetsDurableMarker is the negative control: the refresh in
+// commitNodeLua is EXISTS-guarded, so it must not turn a durable execution
+// transient. A durable execution must never carry the "transient" field -- it
+// would silently stop projecting node output and its audit trail would go dark.
+// It must carry the explicit "durable" field instead: that is what lets another
+// replica classify the execution as durable before SQL has a row for it,
+// instead of reading the projection lag as transience.
+func TestDurableExecutionGetsDurableMarker(t *testing.T) {
 	mr, err := miniredis.Run()
 	if err != nil {
 		t.Fatal(err)
@@ -138,9 +141,18 @@ func TestDurableExecutionGetsNoMarker(t *testing.T) {
 	}
 
 	marker := transientMarkKey(namespace.FromContext(ctx), id)
-	if mr.Exists(marker) {
-		t.Fatalf("a durable execution acquired a transient marker at %s; it would "+
+	fields, err := rdb.HGetAll(ctx, marker).Result()
+	if err != nil {
+		t.Fatalf("read mode marker at %s: %v", marker, err)
+	}
+	if _, isTransient := fields["transient"]; isTransient {
+		t.Fatalf("a durable execution acquired the transient field at %s; it would "+
 			"stop projecting node output and its audit trail would go dark", marker)
+	}
+	if fields["durable"] != "1" {
+		t.Fatalf("mode marker at %s = %v, want durable=1: a replica that sees the "+
+			"execution before its SQL row lands must be able to classify it as "+
+			"durable without asking the projection", marker, fields)
 	}
 	if state.isTransient(ctx, id) {
 		t.Fatal("isTransient returned true for a durable execution")

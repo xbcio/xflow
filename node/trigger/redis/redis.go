@@ -18,6 +18,7 @@ import (
 
 	"github.com/spf13/cast"
 	"github.com/xbcio/xflow/node/internal/utils/conv"
+	"github.com/xbcio/xflow/node/trigger/internal/emitonce"
 	"github.com/xbcio/xflow/node/trigger/internal/seedadmit"
 
 	"github.com/xbcio/xflow/types"
@@ -422,25 +423,18 @@ var admitRetry = seedadmit.DefaultRetry
 
 // emitMessage reports whether the message is finished with, which is what the
 // caller acknowledges on. A duplicate counts as finished — some earlier
-// delivery already reached the engine — while a dedup lookup that errored does
-// not, because the trigger cannot tell whether it emitted or not and leaving
-// the entry pending costs a redelivery rather than a lost message.
+// delivery already reached the engine — while a dedup lookup or an emit that
+// errored does not, because the trigger cannot tell whether it emitted or not
+// and leaving the entry pending costs a redelivery rather than a lost message.
+// A failed emit releases the dedup claim, so that redelivery is not mistaken
+// for a duplicate and dropped.
 func emitMessage(ctx context.Context, in *types.TriggerActivateInput, mode string, msg Message) bool {
 	event := newRedisTriggerEvent(in.NodeName, mode, msg)
 	if seedadmit.Enabled(in) {
 		return admitRedisMessage(ctx, in, mode, msg, event)
 	}
-	fresh, err := in.Runtime.Dedup(ctx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+event.ID, 24*time.Hour)
-	if err != nil {
-		return false
-	}
-	if !fresh {
-		return true
-	}
-	if _, err := in.Emit(ctx, event); err != nil {
-		return false
-	}
-	return true
+	_, err := emitonce.Emit(ctx, in, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+event.ID, 24*time.Hour, event)
+	return err == nil
 }
 
 // newRedisTriggerEvent builds the event for one delivered message. It is shared

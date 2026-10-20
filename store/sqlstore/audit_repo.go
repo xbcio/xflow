@@ -12,6 +12,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/store"
 )
 
@@ -27,6 +28,7 @@ type auditRepo struct {
 
 var _ store.AuditAppender = (*auditRepo)(nil)
 var _ store.AuditReconciler = (*auditRepo)(nil)
+var _ store.ScopedAuditReconciler = (*auditRepo)(nil)
 
 func (r *auditRepo) AppendAudit(ctx context.Context, rec *store.AuditRecord) error {
 	if rec == nil {
@@ -230,6 +232,45 @@ LIMIT ?`, store.AuditPhaseAdmission, store.AuditOutcomeAdmitted, before, afterSe
 	return out, nil
 }
 
+// ListUnreconciledAdmissionsIn is ListUnreconciledAdmissions restricted to the
+// rows of an owned namespace set (store.ScopedAuditReconciler). The scope is a
+// filter on the outer row only: the NOT EXISTS subquery keeps its
+// (namespace, request_id) correlation, so it still runs on
+// idx_namespace_request_phase and a request id reused in another namespace can
+// never settle this scope's admission. store.AuditScopeValues already folds the
+// default namespace's empty-namespace rows into the IN list, so no OR branch is
+// needed. An empty owned set matches nothing and issues no query.
+func (r *auditRepo) ListUnreconciledAdmissionsIn(ctx context.Context, owned []namespace.Namespace, before time.Time, afterSeqID uint64, limit int) ([]*store.AuditRecord, error) {
+	scope := store.AuditScopeValues(owned)
+	if len(scope) == 0 {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 256
+	}
+	var rows []dbAuditEvent
+	err := r.db.WithContext(ctx).Raw(`
+SELECT a.* FROM xflow_audit_events a
+WHERE a.phase = ? AND a.outcome = ? AND a.created_at < ? AND a.id > ?
+  AND a.namespace IN ?
+  AND NOT EXISTS (
+      SELECT 1 FROM xflow_audit_events b
+      WHERE b.namespace = a.namespace
+        AND b.request_id = a.request_id
+        AND b.phase = ?
+  )
+ORDER BY a.id ASC
+LIMIT ?`, store.AuditPhaseAdmission, store.AuditOutcomeAdmitted, before, afterSeqID, scope, store.AuditPhaseOutcome, limit).Scan(&rows).Error
+	if err := wrapDBErr("list unreconciled admissions in scope", err); err != nil {
+		return nil, err
+	}
+	out := make([]*store.AuditRecord, len(rows))
+	for i, d := range rows {
+		out[i] = fromDBAudit(&d)
+	}
+	return out, nil
+}
+
 // AppendOutcomeIfAbsent idempotently appends an outcome-phase audit row. It
 // is the T9 reconcile worker's settle path: before appending, it checks that
 // no outcome row already exists for the same (namespace, request_id,
@@ -318,6 +359,36 @@ WHERE a.phase = ? AND a.outcome = ? AND a.created_at < ?
         AND b.phase = ?
   )`, store.AuditPhaseAdmission, store.AuditOutcomeAdmitted, before, store.AuditPhaseOutcome).Scan(&res).Error
 	if err := wrapDBErr("count unreconciled admissions", err); err != nil {
+		return 0, time.Time{}, err
+	}
+	return res.Cnt, res.Oldest, nil
+}
+
+// CountUnreconciledAdmissionsIn is CountUnreconciledAdmissions restricted to
+// the rows of an owned namespace set (store.ScopedAuditReconciler); see
+// ListUnreconciledAdmissionsIn for the scoping rules. An empty owned set
+// reports zero pending and the zero time without querying.
+func (r *auditRepo) CountUnreconciledAdmissionsIn(ctx context.Context, owned []namespace.Namespace, before time.Time) (int, time.Time, error) {
+	scope := store.AuditScopeValues(owned)
+	if len(scope) == 0 {
+		return 0, time.Time{}, nil
+	}
+	type result struct {
+		Cnt    int       `gorm:"column:cnt"`
+		Oldest time.Time `gorm:"column:oldest"`
+	}
+	var res result
+	err := r.db.WithContext(ctx).Raw(`
+SELECT COUNT(*) AS cnt, MIN(a.created_at) AS oldest FROM xflow_audit_events a
+WHERE a.phase = ? AND a.outcome = ? AND a.created_at < ?
+  AND a.namespace IN ?
+  AND NOT EXISTS (
+      SELECT 1 FROM xflow_audit_events b
+      WHERE b.namespace = a.namespace
+        AND b.request_id = a.request_id
+        AND b.phase = ?
+  )`, store.AuditPhaseAdmission, store.AuditOutcomeAdmitted, before, scope, store.AuditPhaseOutcome).Scan(&res).Error
+	if err := wrapDBErr("count unreconciled admissions in scope", err); err != nil {
 		return 0, time.Time{}, err
 	}
 	return res.Cnt, res.Oldest, nil

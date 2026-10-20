@@ -38,7 +38,7 @@ func TestMemoryWaitResultOmitsNodePrivateState(t *testing.T) {
 		Attempt:     1,
 		Status:      types.NodeStatusSuccess,
 		Output: map[string]any{
-			"visible":             "downstream",
+			"visible":           "downstream",
 			engine.NodeStateKey: map[string]any{"count": 3},
 		},
 		StoreOutput: true,

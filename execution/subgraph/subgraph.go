@@ -16,6 +16,7 @@ import (
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -286,6 +287,20 @@ func (e *Executor) Execute(ctx context.Context, req Request) (Result, error) {
 	if c := types.ArtifactUseCollectorFrom(ctx); c != nil {
 		engineOpts = append(engineOpts, engine.WithArtifactUseCollector(c))
 	}
+	// The namespace travels the same road and for the same reason: the inner
+	// queue's worker rebuilds ctx from context.Background(), so a namespace
+	// that lives only on ctx is gone exactly where it is needed —
+	// execution/runner.go binds Input.Namespace() from the ctx it is handed,
+	// and that value picks the $supplies view and the artifact-reference
+	// tenant. Stamping it onto every inner lease is what keeps a group or
+	// map body inside the namespace its outer lease was claimed in.
+	//
+	// Unconditional, because FromContext resolves an unscoped ctx to
+	// Default: for a caller that never carried a namespace this stamps
+	// exactly what every downstream fallback already chose, so single-tenant
+	// behaviour is unchanged. Only an explicitly scoped ctx changes anything
+	// — which is the point.
+	engineOpts = append(engineOpts, engine.WithNamespace(namespace.FromContext(ctx)))
 	if req.SuspendDisabled {
 		engineOpts = append(engineOpts, engine.WithSuspendDisabled(nil))
 	}

@@ -26,6 +26,16 @@ type Store struct {
 	transientTTL           time.Duration
 	transientCompletionTTL time.Duration
 
+	// ownedNamespaces scopes every maintenance sweep (lease expiry, lease
+	// repair, outbox discovery/metrics, concurrency reconciliation, dead-letter
+	// receipts) to exactly this set when non-nil. It is the embedder's declared
+	// namespace scope — a process must never touch another deployment's
+	// namespaces even when they share one Redis. nil preserves the legacy
+	// behavior of iterating the append-only xflow:namespaces registry (always
+	// including the default namespace). Written once via ConfigureOwnedNamespaces
+	// before the store starts serving; read-only afterwards, hence no lock.
+	ownedNamespaces []namespace.Namespace
+
 	// in-memory graph cache for CheckCompletion (avoids Redis round-trips per node)
 	mu     sync.RWMutex
 	graphs map[types.ExecutionID]*graph.Graph
@@ -36,7 +46,9 @@ type Store struct {
 
 	// per-execution transient overrides (set via per-workflow transient context).
 	// This is a read-through cache over the Redis marker, not the source of
-	// truth -- see lookupTransient. Negative entries are cached too.
+	// truth -- see lookupTransient. Only verdicts backed by durable evidence are
+	// cached: an explicit marker or a confirmed SQL row. A "no evidence" answer
+	// is deliberately re-derived.
 	transientMu   sync.RWMutex
 	execTransient map[types.ExecutionID]transientMark
 
@@ -204,9 +216,10 @@ type transientMark struct {
 	transient     bool
 	ttl           time.Duration
 	completionTTL time.Duration
-	// durableConfirmed records that SQL holds an execution row for this ID, so
-	// the "durable" verdict rests on a fact that cannot expire. See
-	// lookupTransient.
+	// durableConfirmed records that the "durable" verdict rests on evidence that
+	// cannot turn into its opposite: the explicit durable marker written in the
+	// execution's create transaction, or -- for an execution created before that
+	// marker existed -- an execution row in SQL. See lookupTransient.
 	durableConfirmed bool
 }
 
@@ -222,10 +235,27 @@ type transientMark struct {
 // durable workflows -- and projecting the node payload into SQL. Redis is the
 // only place all replicas can see.
 //
-// The cache holds negative entries too, so a durable execution pays the Redis
-// round-trip once per replica rather than once per state mutation. Entries are
-// dropped by evictExecutionCaches when the execution reaches a terminal state,
-// giving them the same lifetime as the graph and TTL caches beside them.
+// The authoritative evidence is the per-execution marker written while the
+// execution is created: field "transient" names an execution that opted out of
+// SQL projection, field "durable" an execution whose row is expected there. The
+// durable marker exists so transience is never inferred from a bare SQL miss.
+// The projection is a best-effort follow-up that lands after the Redis commit,
+// so during that lag the row's absence says nothing about the execution's mode;
+// inferring "transient" from it -- and caching that verdict -- made a
+// cross-replica execution skip its audit projection permanently once the row
+// did land.
+//
+// Marker absence is the only case that still asks SQL. Executions created
+// before the durable marker existed, and transient executions whose marker
+// lapsed, both look that way. A row confirms durable and is cached. No row
+// keeps the fail-closed transient answer for THIS call but is deliberately not
+// cached, because it becomes wrong as soon as the projection lands.
+//
+// The cache holds only verdicts backed by durable evidence, so a durable
+// execution pays the Redis round-trip once per replica rather than once per
+// state mutation. Entries are dropped by evictExecutionCaches when the
+// execution reaches a terminal state, giving them the same lifetime as the
+// graph and TTL caches beside them.
 //
 // A Redis read failure resolves to transient. Losing an audit row is a
 // best-effort miss the storage contract already permits; persisting the payload
@@ -235,10 +265,10 @@ func (s *Store) lookupTransient(ctx context.Context, id types.ExecutionID) trans
 	s.transientMu.RLock()
 	mark, ok := s.execTransient[id]
 	s.transientMu.RUnlock()
-	// A negative entry is only as trustworthy as the evidence behind it: the
-	// absence of a Redis marker is exactly what a lapsed transient marker looks
-	// like, so a bare "no marker" verdict is re-confirmed (below) rather than
-	// cached as final.
+	// Only a verdict backed by durable evidence is reusable: an explicit marker
+	// (either mode) or a confirmed SQL row. "Nothing says transient" is not
+	// evidence -- the marker can lapse and the SQL row can lag the create -- so
+	// that answer is re-derived instead of cached.
 	if ok && (mark.transient || mark.durableConfirmed) {
 		return mark
 	}
@@ -259,30 +289,42 @@ func (s *Store) lookupTransient(ctx context.Context, id types.ExecutionID) trans
 		return transientMark{transient: true, ttl: s.transientTTL, completionTTL: s.transientCompletionTTL}
 	}
 	resolved := transientMark{}
-	if len(fields) > 0 {
+	switch {
+	case fieldPresent(fields, "transient"):
+		// The explicit transient marker. Its presence is the signal; the TTL
+		// fields only carry per-workflow overrides.
 		resolved.transient = true
 		resolved.ttl = parseDurationMillis(fields["ttl_ms"])
 		resolved.completionTTL = parseDurationMillis(fields["completion_ttl_ms"])
+	case fieldPresent(fields, "durable"):
+		// The explicit durable marker. No SQL round-trip: it was written by the
+		// same creation that made the execution visible, so it is already on
+		// every replica -- and it cannot be contradicted by a slow projection.
+		resolved.durableConfirmed = true
+	case len(fields) > 0:
+		// A marker this code does not write. Fail closed rather than guess.
+		resolved.transient = true
+		resolved.ttl = s.transientTTL
+		resolved.completionTTL = s.transientCompletionTTL
 	}
-	// No marker is not proof of durability, and treating it as proof is how this
-	// went wrong. transientTTL bounds run time and nothing enforces it, so an
-	// execution that outlives its marker reads as durable and has its node
-	// output projected into SQL -- while the execution row it should have
-	// matched was never created, which is the observed shape (xflow_nodes > 0
-	// with xflow_executions = 0). The margin on the marker's TTL narrows that
-	// window; it cannot close it, because a long enough execution beats any TTL.
-	//
-	// The row's existence is the durable answer: admission writes the row for
-	// exactly the executions that are not transient. So when Redis has no
-	// marker, ask SQL once and cache a verdict that cannot expire.
-	if !resolved.transient && s.db != nil {
+
+	// No marker at all: the execution was created before the durable marker
+	// existed, or its transient marker lapsed. SQL is a fallback for exactly
+	// this markerless case, never the authority.
+	if len(fields) == 0 && s.db != nil {
 		switch _, err := s.db.GetExecution(ctx, id); {
 		case err == nil:
 			resolved.durableConfirmed = true
 		case errors.Is(err, store.ErrNotFound):
+			// The row's absence is NOT evidence of transience: the projection is
+			// a best-effort follow-up that may not have landed yet (or ever, for
+			// a genuinely transient execution). Keep the fail-closed answer for
+			// this call and do NOT cache it; the next call re-asks, so the
+			// verdict repairs itself as soon as the row appears.
 			resolved.transient = true
 			resolved.ttl = s.transientTTL
 			resolved.completionTTL = s.transientCompletionTTL
+			return resolved
 		default:
 			// The store is unreadable, which is not evidence either way. Keep the
 			// durable verdict and proceed: the projection this unlocks writes to
@@ -297,10 +339,20 @@ func (s *Store) lookupTransient(ctx context.Context, id types.ExecutionID) trans
 			return resolved
 		}
 	}
-	s.transientMu.Lock()
-	s.execTransient[id] = resolved
-	s.transientMu.Unlock()
+	if resolved.transient || resolved.durableConfirmed {
+		s.transientMu.Lock()
+		s.execTransient[id] = resolved
+		s.transientMu.Unlock()
+	}
 	return resolved
+}
+
+// fieldPresent reports whether an HGETALL reply carries name. An empty hash
+// arrives as an empty map, so presence -- not truthiness -- is the marker's
+// signal.
+func fieldPresent(fields map[string]string, name string) bool {
+	_, ok := fields[name]
+	return ok
 }
 
 // rememberTransient records a verdict this replica established itself, so later
@@ -383,6 +435,32 @@ func (s *Store) markExecutionTransient(ctx context.Context, pipe redis.Pipeliner
 	s.transientMu.Unlock()
 }
 
+// markExecutionDurable records the explicit durable verdict in Redis so every
+// replica resolves the execution without consulting the SQL projection.
+//
+// The write belongs to creation, in the same transaction (or, on the seed
+// paths, before the script) that makes the execution visible: otherwise a
+// replica can observe the execution while SQL has no row for it and -- before
+// this marker existed -- cache the missing row as "transient" forever. The
+// projection is a best-effort follow-up by contract; it cannot be the witness
+// that decides whether projection may run.
+//
+// Invalidation: the marker uses the same key as the transient marker, so the
+// creation/rollback inventory (createdExecutionKeys) already covers it, and
+// commitNodeLua's exists-guarded EXPIRE keeps it alive alongside the node keys.
+// TTL follows markerTTL for the same reason the transient marker does: the
+// marker must outlive every execution-scoped key whose mode it qualifies, so its
+// absence never becomes evidence.
+//
+// The caller remains responsible for priming the local cache
+// (rememberTransient); this helper is the cross-replica half only.
+func (s *Store) markExecutionDurable(ctx context.Context, pipe redis.Pipeliner, id types.ExecutionID, keyTTL time.Duration) {
+	pipe.HSet(ctx, transientMarkKey(namespace.FromContext(ctx), id), "durable", 1)
+	if ttl := markerTTL(keyTTL); ttl > 0 {
+		pipe.Expire(ctx, transientMarkKey(namespace.FromContext(ctx), id), ttl)
+	}
+}
+
 func executionKeySetKey(t namespace.Namespace, id types.ExecutionID) string {
 	return execKey(t, id, "keys")
 }
@@ -406,10 +484,84 @@ func (s *Store) refreshTransientTTL(_ context.Context, _ types.ExecutionID, _ ..
 	return nil
 }
 
+// createdExecutionKeys enumerates every key createExecution writes for an
+// execution, before any node/outbox transition runs. Creation used to enumerate
+// its optional keys inline while cleanupCreatedExecution and completion-time TTL
+// shortening each re-derived the set by hand; the three drifted, so scope/
+// parent/parent_node/depth/rerun_from were written but never rolled back or
+// shortened. Both paths now share this single inventory.
+//
+// The inventory is derived from the id and graph rather than from the full
+// snapshot because rollback and TTL shortening only still hold those. Fields
+// that creation writes conditionally (params, scope, trace ids, derived-run
+// links, the transient marker) are therefore enumerated unconditionally, and
+// per-unit keys cover every unit rather than only the skip entries that write a
+// schedule key. That is a superset: DEL and EXPIRE on a missing key are no-ops,
+// and every key here is scoped to this execution's {id} hash tag, so
+// over-enumeration cannot touch another execution or a shared index.
+//
+// The transient marker and retention record ARE part of this inventory (creation
+// writes them), but completion-time shortening deliberately skips them; their
+// lifetime follows its own rules (see transientMarkKey and retentionRecordKey).
+func createdExecutionKeys(t namespace.Namespace, id types.ExecutionID, g *graph.Graph) []string {
+	keys := []string{
+		execKey(t, id, "status"),
+		execKey(t, id, "graph"),
+		execKey(t, id, "namespace"),
+		execKey(t, id, "params"),
+		execKey(t, id, "runtime"),
+		execKey(t, id, "scope"),
+		execKey(t, id, "test_run"),
+		execKey(t, id, "trace_id"),
+		execKey(t, id, "span_id"),
+		execKey(t, id, "trace_carrier"),
+		// The execution's identity and clock are written once with the
+		// execution itself. They belong to the creation inventory for the same
+		// reason status does: rollback must remove them and completion-time
+		// shortening must bound them with the payload keys they describe, or a
+		// reader that still finds the execution cannot name or time what it ran.
+		execKey(t, id, "workflow_id"),
+		execKey(t, id, "workflow_version"),
+		execKey(t, id, "created_at_ms"),
+		execKey(t, id, "updated_at_ms"),
+		execKey(t, id, "parent"),
+		execKey(t, id, "parent_node"),
+		execKey(t, id, "depth"),
+		execKey(t, id, "rerun_from"),
+		transientMarkKey(t, id),
+		retentionRecordKey(t, id),
+		// Enumerated even when this execution was created without outbox entries:
+		// DEL/EXPIRE on the then-absent keys is a no-op.
+		outboxReadyKey(t, id),
+		outboxBodyKey(t, id),
+	}
+	if g == nil {
+		return keys
+	}
+	// Creation writes the counters only for acyclic graphs, gating its SETs on
+	// this same !AllowCycles() check (see createExecution). Mirroring that gate
+	// here keeps the inventory exactly in step with what creation wrote: a
+	// cyclic execution never has these keys, so listing them would describe a
+	// write that does not happen. (EXPIRing or DELeting a missing key is a
+	// no-op, so the gate is about accuracy, not safety.)
+	if !g.AllowCycles() {
+		keys = append(keys, remainingNodesKey(t, id), failedNodesKey(t, id))
+	}
+	// Creation seeds an in-degree key only for units with in-degree > 0 and a
+	// schedule key only for skip intents, but both families are unit-scoped and
+	// execution-owned, so covering every unit is a safe superset. Later
+	// transitions write these same families. UnitCount bounds every index
+	// creation writes (UnitCount <= NodeCount).
+	for i := 0; i < g.UnitCount(); i++ {
+		keys = append(keys, inDegreeKey(t, id, i), scheduleKey(t, id, i))
+	}
+	return keys
+}
+
 // transientExecutionKeys enumerates every Redis key an execution can own,
-// derived deterministically from its graph (mirrors cleanupCreatedExecution).
-// It replaces the per-mutation-maintained :keys set as the source of truth for
-// completion-time TTL shortening.
+// derived deterministically from its graph (the creation inventory plus keys
+// written by later transitions). It replaces the per-mutation-maintained :keys
+// set as the source of truth for completion-time TTL shortening.
 func transientExecutionKeys(t namespace.Namespace, id types.ExecutionID, g *graph.Graph) []string {
 	// NOTE: the terminal marker (terminalMarkKey) is deliberately ABSENT from
 	// this list. It is written with the execution's ACTIVE retention and exists
@@ -417,81 +569,77 @@ func transientExecutionKeys(t namespace.Namespace, id types.ExecutionID, g *grap
 	// TTL would re-create the exact gap it closes, where a backlogged task
 	// consumed after the completion TTL reads an execution that finished
 	// normally as lost work.
-	keys := []string{
-		execKey(t, id, "status"),
-		execKey(t, id, "graph"),
+	//
+	// The transient marker and the retention record are absent for their own
+	// reasons (see below), and both ARE part of createdExecutionKeys -- creation
+	// writes them and rollback must remove them -- so they are filtered out of
+	// the creation inventory here. The terminal marker is not: creation does not
+	// write it (setTerminalMark does, on terminalization), cleanupCreatedExecution
+	// appends it separately, and it is never shortened here.
+	transientKey, retentionKey := transientMarkKey(t, id), retentionRecordKey(t, id)
+	keys := make([]string, 0, 32)
+	for _, key := range createdExecutionKeys(t, id, g) {
+		if key == transientKey || key == retentionKey {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	keys = append(keys,
 		execKey(t, id, "error"),
-		execKey(t, id, "params"),
-		execKey(t, id, "runtime"),
-		execKey(t, id, "trace_id"),
-		execKey(t, id, "span_id"),
-		execKey(t, id, "trace_carrier"),
-		execKey(t, id, "test_run"),
-		// The workflow identity is part of the execution's own key set for the
-		// same reason status is: completion-time shortening must not leave it
-		// outliving the shortened execution's payload keys, and a reader that
-		// found the execution must still be able to name what it ran.
-		execKey(t, id, "workflow_id"),
-		execKey(t, id, "workflow_version"),
-		// The execution's own clock belongs to the same key set: completion-time
-		// shortening must bound the timestamps with the payload they describe,
-		// or a transient execution leaves its two clock keys behind at the
-		// active TTL while everything else has already been shortened.
-		execKey(t, id, "created_at_ms"),
-		execKey(t, id, "updated_at_ms"),
-		// NOTE: the transient marker is deliberately ABSENT from this list.
-		//
-		// It used to be included, so that completion shortened the marker along
-		// with the data -- the intent being that a marker must not outlive its
-		// execution and answer for a recycled ID. That intent is sound but the
-		// cost was the opposite failure, and the opposite failure is worse:
-		//
-		//   shortening is a one-way door. Once the marker is dropped to the
-		//   completion TTL it dies ahead of the node keys, because a late or
-		//   duplicate CommitNode for a terminal execution still re-EXPIREs its
-		//   node keys via getExecTTL -- and with the marker gone that call
-		//   returns the DURABLE ttl, so the keys are extended to the long
-		//   lifetime while isTransient now answers "durable". The projection
-		//   then runs and persists output from an execution declared ephemeral.
-		//   Measured on a real deployment: xflow_nodes rows with no matching
-		//   xflow_executions row, one per completed transient execution.
-		//
-		// The marker is a handful of bytes with no payload, and its own TTL is
-		// bounded by transientMarkerTTLFactor, so leaving it to expire on its
-		// own keeps it alive at least as long as every key above and costs
-		// nothing. The recycled-ID concern needs an ID to be reused within one
-		// TTL while the original keys are still alive, which is not a scenario
-		// this codebase's ID generation produces; the leak above is observed,
-		// not theoretical.
+		// The completion counters are execution-scoped and safe to expire: a
+		// finished execution's remaining/failed counts are never consulted again.
+		// They are listed unconditionally, unlike in the creation inventory, so a
+		// completion whose cached graph is missing or unreadable cannot leave
+		// them behind on the active TTL. EXPIRE on an absent key (the cyclic-graph
+		// case) is a no-op; the duplicate EXPIRE for an acyclic graph is harmless.
 		remainingNodesKey(t, id),
 		failedNodesKey(t, id),
-		leaseExpiryZSetKey(t, id),
-		outboxReadyKey(t, id),
-		outboxBodyKey(t, id),
 		// The outbox dead-letter keys are enumerated here even though transient
 		// mode does not produce suspend-related keys: an outbox entry that
 		// exhausts its retries still lands on the attempts counter and the
 		// dead-letter/body hashes regardless of mode, so completion-time TTL
 		// shortening must cover them or they outlive the execution's shortened
 		// completion TTL.
+		leaseExpiryZSetKey(t, id),
 		outboxAttemptsKey(t, id),
 		outboxDeadKey(t, id),
 		outboxDeadBodyKey(t, id),
 		timeoutZSetKey(t, id),
-	}
+	)
+	// NOTE: the transient marker is deliberately ABSENT from this list.
+	//
+	// It used to be included, so that completion shortened the marker along
+	// with the data -- the intent being that a marker must not outlive its
+	// execution and answer for a recycled ID. That intent is sound but the
+	// cost was the opposite failure, and the opposite failure is worse:
+	//
+	//   shortening is a one-way door. Once the marker is dropped to the
+	//   completion TTL it dies ahead of the node keys, because a late or
+	//   duplicate CommitNode for a terminal execution still re-EXPIREs its
+	//   node keys via getExecTTL -- and with the marker gone that call
+	//   returns the DURABLE ttl, so the keys are extended to the long
+	//   lifetime while isTransient now answers "durable". The projection
+	//   then runs and persists output from an execution declared ephemeral.
+	//   Measured on a real deployment: xflow_nodes rows with no matching
+	//   xflow_executions row, one per completed transient execution.
+	//
+	// The marker is a handful of bytes with no payload, and its own TTL is
+	// bounded by transientMarkerTTLFactor, so leaving it to expire on its
+	// own keeps it alive at least as long as every key above and costs
+	// nothing. The recycled-ID concern needs an ID to be reused within one
+	// TTL while the original keys are still alive, which is not a scenario
+	// this codebase's ID generation produces; the leak above is observed,
+	// not theoretical.
 	if g != nil {
-		// The counter triplet is keyed by UNIT index, but the loop walks node
-		// indices. That is safe because UnitCount <= NodeCount — a supply node
-		// takes a node index and no unit, and a group collapses many nodes into
-		// one unit — so 0..NodeCount-1 is a superset of every unit key and the
-		// surplus iterations are no-ops. It would under-delete only if a unit
-		// index could exceed every node index, which the unit builder forbids.
+		// activeInputsKey is unit-indexed while this loop walks node indices.
+		// That is safe because UnitCount <= NodeCount — a supply node takes a
+		// node index and no unit, and a group collapses many nodes into one unit
+		// — so 0..NodeCount-1 is a superset of every unit key. The in-degree and
+		// schedule keys are already covered by createdExecutionKeys.
 		for i := 0; i < g.NodeCount(); i++ {
 			node := g.NodeAt(i)
 			keys = append(keys,
-				inDegreeKey(t, id, i),
 				activeInputsKey(t, id, i),
-				scheduleKey(t, id, i),
 				nodeStatusKey(t, id, node.Name),
 				nodeMetaKey(t, id, node.Name),
 				outputKey(t, id, node.Name),

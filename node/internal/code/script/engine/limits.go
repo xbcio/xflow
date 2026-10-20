@@ -37,10 +37,14 @@ const (
 
 	// DefaultScriptTimeout bounds how long a single script execution may run
 	// when the workflow does not specify a per-node timeout. It is enforced at
-	// the node layer via context.WithTimeout so runtimes that honour ctx
-	// cancellation (js/qjs, wasm/wazero) terminate a runaway script at the
-	// deadline. js/goja cannot interrupt tight pure-computation loops even with
-	// a deadline (see goja.go), so unbounded CPU scripts must run on qjs/wasm.
+	// the node layer via context.WithTimeout, and every runtime honours ctx
+	// cancellation: goja's interpreter checks its interrupt flag roughly every
+	// 100 VM instructions (tight `while(true){}` loops included), while qjs and
+	// wasm terminate the executing instance outright. js/goja has NO heap or
+	// allocation cap, however — DefaultGojaStackSize bounds recursion and
+	// DefaultMaxOutputBytes bounds the result, but neither bounds memory built
+	// up inside the script. Untrusted scripts must run on qjs or wasm, which
+	// cap memory at DefaultQJSMemoryLimit / DefaultWasmMemoryPages.
 	DefaultScriptTimeout = 30 * time.Second
 )
 

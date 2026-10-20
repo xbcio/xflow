@@ -50,6 +50,48 @@ func TestSettingsOnErrorInvalid(t *testing.T) {
 	}
 }
 
+// TestNodeOnErrorInvalidRejected pins the node-level check: a misspelled
+// node on_error used to compile clean and silently become "stop" through
+// ApplyOnError's default branch. The rejection must name the node and the
+// invalid value so the author can find the line that never took effect.
+func TestNodeOnErrorInvalidRejected(t *testing.T) {
+	_, err := Compile(onErrorDef("", "retry"))
+	if err == nil {
+		t.Fatal(`node on_error "retry" compiled clean`)
+	}
+	msg := err.Error()
+	for _, want := range []string{`node "worker"`, "on_error", `"retry"`} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q does not mention %q", msg, want)
+		}
+	}
+}
+
+// TestNodeOnErrorValidValuesAccepted is the positive half: every policy the
+// engine implements compiles at node level, including the empty value that
+// means "inherit settings.on_error".
+func TestNodeOnErrorValidValuesAccepted(t *testing.T) {
+	valid := []string{
+		"",
+		string(types.OnErrorStop),
+		string(types.OnErrorOutput),
+		string(types.OnErrorMainOutput),
+		string(types.OnErrorContinue),
+	}
+	for _, policy := range valid {
+		t.Run("policy="+policy, func(t *testing.T) {
+			g, err := Compile(onErrorDef("", policy))
+			if err != nil {
+				t.Fatalf("Compile(on_error=%q): %v", policy, err)
+			}
+			idx, _ := g.NodeIndex("worker")
+			if got := g.NodeAt(idx).OnError; got != policy {
+				t.Fatalf("OnError = %q, want %q", got, policy)
+			}
+		})
+	}
+}
+
 func TestSettingsOnErrorFAFRejected(t *testing.T) {
 	def := validFAFDef()
 	def.Settings = &types.WorkflowSettings{OnError: "continue"}

@@ -568,6 +568,15 @@ func compileTrusted(def *types.WorkflowDef, visibleSupplies, visibleOuterNodes [
 	if n == 0 {
 		return nil, fmt.Errorf("workflow has no nodes")
 	}
+	// Workflow-level outputs are declared by the DSL but never evaluated, so the
+	// same rejection Compile applies must fire on this trusted path too: a
+	// projected package accepted with them would register a declaration that
+	// silently exposes nothing. Compile's pass list is hand-rewritten here, and
+	// that is exactly where a check goes missing.
+	if len(def.Outputs) != 0 {
+		return nil, fmt.Errorf("workflow-level outputs are not supported: %d output(s) declared; "+
+			"remove the top-level \"outputs\" block (node outputs are read via $nodes)", len(def.Outputs))
+	}
 
 	g := &Graph{
 		name:            def.Name,
@@ -607,6 +616,13 @@ func compileTrusted(def *types.WorkflowDef, visibleSupplies, visibleOuterNodes [
 			// than compile a package that cannot run.
 			return nil, fmt.Errorf("projected package %q: node %q is a %s node, which cannot run inside a projected package",
 				def.Name, nd.Name, types.SubWorkflowNodeType)
+		}
+		// This loop is the trusted path's hand-written parallel of registerNodes
+		// and does not call it, so it must repeat the node-level on_error check:
+		// without it a projected member's misspelled policy would again compile
+		// clean and silently become "stop" at runtime.
+		if err := validateOnError(fmt.Sprintf("projected package %q: node %q: on_error", def.Name, nd.Name), nd.OnError); err != nil {
+			return nil, err
 		}
 		g.index[nd.Name] = i
 		g.nodes[i] = NodeMeta{

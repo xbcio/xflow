@@ -230,6 +230,16 @@ func TestScript_ArtifactCacheIsPerDigest(t *testing.T) {
 // TestScript_ArtifactCacheConcurrent runs the artifact path from several
 // goroutines at once, which is how it runs in production: a map node fans items
 // out across workers and every one of them lands on the same digest.
+//
+// The memo is warmed first, and the assertion is that the concurrent wave adds
+// NO resolver calls. Starting eight cold goroutines instead measures the
+// scheduler: every one of them can check the cache before the first store lands,
+// so the number of misses (and therefore the resolver-call count) ranges from 1
+// to 8. An earlier version bounded that count at 4, which held locally and read
+// "resolver called 6 times" under the coverage gate — a bound on a race, not on
+// sharing. With a warm entry, a shared memo means zero further calls no matter
+// how the goroutines interleave, and a per-execution memo still makes every call
+// resolve.
 func TestScript_ArtifactCacheConcurrent(t *testing.T) {
 	h, _ := registry.Lookup("xflow.script")
 
@@ -239,27 +249,46 @@ func TestScript_ArtifactCacheConcurrent(t *testing.T) {
 
 	var mu sync.Mutex
 	calls := 0
+	resolver := func(_ context.Context, _ string) ([]byte, error) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		return src, nil
+	}
+	newInput := func() *types.Input {
+		in := &types.Input{
+			Params: map[string]any{
+				"language":        "js",
+				"runtime":         "goja",
+				"artifact_digest": digest,
+			},
+			Data: map[string]any{"x": 21.0},
+		}
+		in.SetArtifactCodeResolver(resolver)
+		return in
+	}
+
+	warm := newInput()
+	if _, err := h.Execute(context.Background(), warm); err != nil {
+		t.Fatalf("warmup: %v", err)
+	}
+	mu.Lock()
+	warmCalls := calls
+	mu.Unlock()
+	// Zero is legitimate when the same process already ran this test (-count=N)
+	// and the process-wide memo still holds the digest; one means the warm-up
+	// resolved and stored it. More than one would mean the warm-up itself missed
+	// twice, which no cache state explains.
+	if warmCalls > 1 {
+		t.Fatalf("warmup resolver calls = %d, want at most 1", warmCalls)
+	}
 
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			in := &types.Input{
-				Params: map[string]any{
-					"language":        "js",
-					"runtime":         "goja",
-					"artifact_digest": digest,
-				},
-				Data: map[string]any{"x": 21.0},
-			}
-			in.SetArtifactCodeResolver(func(_ context.Context, _ string) ([]byte, error) {
-				mu.Lock()
-				calls++
-				mu.Unlock()
-				return src, nil
-			})
-			out, err := h.Execute(context.Background(), in)
+			out, err := h.Execute(context.Background(), newInput())
 			if err != nil {
 				t.Errorf("execute: %v", err)
 				return
@@ -271,11 +300,9 @@ func TestScript_ArtifactCacheConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Racing goroutines may each miss before the first store lands, so the bound
-	// is "not once per call" rather than exactly one.
 	mu.Lock()
 	defer mu.Unlock()
-	if calls > 4 {
-		t.Fatalf("artifact resolver called %d times across 8 concurrent executions; the memo is not shared", calls)
+	if calls != warmCalls {
+		t.Fatalf("artifact resolver called %d times across 8 concurrent executions after a warm entry; the memo is not shared", calls)
 	}
 }

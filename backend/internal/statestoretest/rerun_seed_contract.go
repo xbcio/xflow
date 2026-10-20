@@ -449,6 +449,10 @@ func seedRecordsTheRerunOrigin(t *testing.T, state engine.StateStore) {
 	snap.Depth = 2
 	snap.WorkflowID = "wf-seed"
 	snap.WorkflowVersion = "v5"
+	// The registration namespace must survive the seed path too: a rerun is
+	// created only here (never through CreateExecution), and its dispatch
+	// resolves sub-workflows by this value.
+	snap.Namespace = "tenant-x"
 
 	if _, err := seeder.SeedExecution(ctx, engine.SeedExecutionRequest{
 		Execution: snap,
@@ -484,6 +488,9 @@ func seedRecordsTheRerunOrigin(t *testing.T, state engine.StateStore) {
 	}
 	if persisted.WorkflowVersion != snap.WorkflowVersion {
 		t.Fatalf("WorkflowVersion = %q, want %q", persisted.WorkflowVersion, snap.WorkflowVersion)
+	}
+	if persisted.Namespace != snap.Namespace {
+		t.Fatalf("Namespace = %q, want %q", persisted.Namespace, snap.Namespace)
 	}
 }
 

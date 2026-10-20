@@ -19,6 +19,12 @@ type ActivationTracker struct {
 	handler ActivationHandler
 	logger  *slog.Logger
 
+	// installSeq identifies one installation of a subscription. It is separate
+	// from Generation because a same-generation reactivation after an exit must
+	// not be mistaken for the install that just died: a stale exit watcher
+	// compares this value, not the generation, before marking the entry exited.
+	installSeq uint64
+
 	// onActivateFailed, when set, is called for each directive whose activation
 	// failed. It is how a failure escapes this process: without it the failure
 	// stops at a local log line and the server never learns the activation was
@@ -95,6 +101,20 @@ type activeSubscription struct {
 	Generation uint64
 	// cancel is called to stop the subscription goroutine.
 	cancel context.CancelFunc
+	// install is this entry's identity within the tracker. See installSeq.
+	install uint64
+	// exited is true once the subscription's own health signal has fired. The
+	// entry stays in the map so Deactivate/Shutdown can still clean it up, but
+	// it is omitted from Inventory and ActiveCount: the runner must not claim
+	// to host an activation whose subscription has already stopped.
+	exited bool
+}
+
+// subscriptionDoneProvider is implemented by ActivationHandlers whose trigger
+// kinds can report that a subscription ended on its own. The tracker treats
+// the surfaced channel as the authoritative liveness signal for that install.
+type subscriptionDoneProvider interface {
+	SubscriptionDone(protocol.ActivateDirective) (<-chan struct{}, bool)
 }
 
 // ActivationHandler is the callback interface for actually starting/stopping
@@ -237,8 +257,11 @@ func (t *ActivationTracker) activateLocked(ctx context.Context, d protocol.Activ
 	id := activationIDFromActivate(d)
 	existing, ok := t.active[id]
 
-	if ok && existing.Generation == d.Generation {
-		// Same generation — idempotent, skip.
+	if ok && existing.Generation == d.Generation && !existing.exited {
+		// Same generation, still live — idempotent, skip. An entry that has
+		// already exited is NOT skipped: its subscription is gone, so the
+		// control plane's redelivery of the same generation must be allowed to
+		// install a fresh one.
 		return nil
 	}
 
@@ -257,21 +280,64 @@ func (t *ActivationTracker) activateLocked(ctx context.Context, d protocol.Activ
 	}
 
 	if ok {
-		t.logger.Info("upgrading activation generation",
+		t.logger.Info("replacing activation subscription",
 			"workflow_id", d.WorkflowID,
 			"group_id", d.EntryUnitID,
 			"old_generation", existing.Generation,
 			"new_generation", d.Generation,
+			"old_exited", existing.exited,
 		)
 		existing.cancel()
 	}
 
+	t.installSeq++
+	install := t.installSeq
 	t.active[id] = &activeSubscription{
 		Directive:  d,
 		Generation: d.Generation,
 		cancel:     cancel,
+		install:    install,
+	}
+
+	// Watch the subscription's own health when the trigger kind exposes it.
+	// A handler without the optional provider keeps the pre-existing
+	// behaviour: the entry is reported until Close or a restart.
+	if provider, ok := t.handler.(subscriptionDoneProvider); ok {
+		if done, ok := provider.SubscriptionDone(d); ok {
+			go t.watchSubscriptionExit(id, install, done)
+		}
 	}
 	return nil
+}
+
+// watchSubscriptionExit marks an entry exited when its subscription's own
+// health channel fires. It deliberately does not delete the entry: cleanup
+// (consumer Close, supply release) still has to run through Deactivate or
+// Shutdown, and an entry that vanishes would make that cleanup unreachable.
+//
+// install is the identity guard. A generation upgrade — or a same-generation
+// reactivation after an earlier exit — installs a new entry, and a watcher
+// from the old install must not mark the new one dead. Generation alone is
+// not enough because a reactivation can reuse the same generation.
+func (t *ActivationTracker) watchSubscriptionExit(id activationID, install uint64, done <-chan struct{}) {
+	<-done
+
+	t.mu.Lock()
+	cur, ok := t.active[id]
+	matched := ok && cur.install == install && !cur.exited
+	if matched {
+		cur.exited = true
+	}
+	t.mu.Unlock()
+
+	if !matched {
+		return
+	}
+	t.logger.Warn("trigger subscription exited while its activation was still hosted; removed from the inventory so the control plane can redeliver",
+		"workflow_id", cur.Directive.WorkflowID,
+		"group_id", cur.Directive.EntryUnitID,
+		"generation", cur.Generation,
+	)
 }
 
 // deactivateLocked returns true only when the directive's cleanup is known to
@@ -320,6 +386,13 @@ func (t *ActivationTracker) Inventory() []protocol.ActivationInventoryItem {
 
 	items := make([]protocol.ActivationInventoryItem, 0, len(t.active))
 	for id, sub := range t.active {
+		if sub.exited {
+			// The subscription's own health signal has fired: this runner is no
+			// longer hosting it. Reporting it would make the reconciler believe
+			// the assignment is healthy and suppress the redelivery that would
+			// repair it.
+			continue
+		}
 		items = append(items, protocol.ActivationInventoryItem{
 			WorkflowID:      id.WorkflowID,
 			WorkflowVersion: id.WorkflowVersion,
@@ -340,7 +413,13 @@ func (t *ActivationTracker) ActiveCount() uint32 {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return uint32(len(t.active))
+	var live uint32
+	for _, sub := range t.active {
+		if !sub.exited {
+			live++
+		}
+	}
+	return live
 }
 
 // Shutdown stops all active subscriptions.

@@ -371,6 +371,35 @@ func (s *Store) seedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 		s.ttlMu.Unlock()
 	}
 
+	// The explicit durable marker, written before the Lua creates the execution
+	// for the same reason the transient marker above is: from the instant the
+	// execution exists another replica can lease a node. Without a marker that
+	// replica asks SQL, whose row this path projects only after the Lua and
+	// best-effort even then, and caches the projection lag as "transient" --
+	// permanently skipping this execution's audit writes. Store-wide transient
+	// mode writes no marker, matching createExecution.
+	if !s.transient && (req.Graph == nil || !req.Graph.Transient()) {
+		pipe := s.rdb.TxPipeline()
+		s.markExecutionDurable(ctx, pipe, execID, ttl)
+		if _, err := pipe.Exec(ctx); err != nil {
+			return engine.SeedExecutionFromEntryResponse{}, fmt.Errorf("mark durable execution %q: %w", execID, err)
+		}
+	}
+
+	// The registration namespace is immutable metadata about the execution and is
+	// written before the Lua for the same reason the retention record below is:
+	// from the instant the execution exists another replica can dispatch its
+	// sub-workflows, and dispatch resolves them by this value. It is the
+	// admission's own namespace — the request's when supplied, the authenticated
+	// ctx otherwise — never the queue ctx dispatch will later run under.
+	//
+	// SetNX, not Set: a duplicate admission finds the execution already there,
+	// and rewriting this key would reset its TTL past the retention the original
+	// creation granted. The value it would write is the same one.
+	if err := s.rdb.SetNX(ctx, execKey(t, execID, "namespace"), string(t), ttl).Err(); err != nil {
+		return engine.SeedExecutionFromEntryResponse{}, fmt.Errorf("persist namespace for %q: %w", execID, err)
+	}
+
 	// Persist the retention record for the same reason createExecution does:
 	// GetExecutionRetention treats its absence as "window unknown", so a
 	// creation path that skips the record would degrade every later no-evidence
@@ -397,12 +426,10 @@ func (s *Store) seedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 
 	// Prime the verdict when the graph is NOT transient: admission is
 	// authoritative for this execution (it is the code that decided), and the
-	// projection below would otherwise ask isTransient, find no marker -- none
-	// is written for a durable execution -- and fall through to the SQL
-	// confirmation against a row that admission has not created yet, misreading
-	// every seeded execution as transient.
-	// Store-wide transient mode writes no per-execution marker, so it must not
-	// be primed as durable either.
+	// durable marker above is already in Redis, but priming keeps the projection
+	// below from paying a Redis round-trip to re-learn what this call already
+	// knows. Store-wide transient mode writes no per-execution marker, so it
+	// must not be primed as durable either.
 	if !s.transient && (req.Graph == nil || !req.Graph.Transient()) {
 		s.rememberTransient(execID, transientMark{durableConfirmed: true})
 	}

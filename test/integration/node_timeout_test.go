@@ -727,7 +727,7 @@ func TestGroupLeaseBackstopNonCollision(t *testing.T) {
 			lease.ExecutionDeadline.Format(time.RFC3339Nano))
 	}
 	if lease.Task.Type != engine.TaskTypeGroupExec {
-		t.Fatalf("captured lease is not a group task (Type=%q) -- the group was not dispatched as a "+
+		t.Fatalf("captured lease is not a group task (Type=%d) -- the group was not dispatched as a "+
 			"group unit; this test then proves nothing about the group path", lease.Task.Type)
 	}
 

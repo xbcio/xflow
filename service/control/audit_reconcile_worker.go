@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/xbcio/xflow/backend"
@@ -141,6 +142,13 @@ type AuditReconcileConfig struct {
 	// fabricate" contract). Never set it on the long-running worker: it would
 	// classify forever and settle nothing.
 	DryRun bool
+	// Namespaces restricts the sweep to the audit rows of these namespaces, so a
+	// deployment sharing its audit table with another one never probes and
+	// settles the other's admissions. nil (or only empty entries) is the legacy
+	// cross-namespace sweep. A non-nil set needs an audit store that implements
+	// store.ScopedAuditReconciler; one that does not is never swept at all
+	// (fail closed) rather than silently swept unscoped.
+	Namespaces []namespace.Namespace
 }
 
 // AuditReconcileWorker is the crash-safe audit reconciliation worker (T9). It
@@ -174,6 +182,11 @@ type AuditReconcileWorker struct {
 	clock     func() time.Time
 	sleepFunc func(context.Context, time.Duration) error
 	cursor    uint64 // in-memory cursor: advances past processed rows, wraps to 0 at tail
+	// owned is nil for the legacy unscoped sweep. scoped is the audit store's
+	// scoped capability, nil when owned is set but the store lacks it.
+	owned          []namespace.Namespace
+	scoped         store.ScopedAuditReconciler
+	unscopedLogged sync.Once
 }
 
 // NewAuditReconcileWorker builds a worker. audit and authority are required
@@ -191,6 +204,18 @@ func NewAuditReconcileWorker(audit store.AuditReconciler, authority AdmissionAut
 	if cfg.Batch <= 0 {
 		cfg.Batch = DefaultReconcileBatch
 	}
+	// Empty entries are dropped, and a set with nothing usable left is the
+	// legacy unscoped sweep — the same collapse namespace.NormalizeOwned applies.
+	var owned []namespace.Namespace
+	for _, ns := range cfg.Namespaces {
+		if ns != "" {
+			owned = append(owned, ns)
+		}
+	}
+	var scoped store.ScopedAuditReconciler
+	if owned != nil {
+		scoped, _ = audit.(store.ScopedAuditReconciler)
+	}
 	return &AuditReconcileWorker{
 		audit:     audit,
 		authority: authority,
@@ -203,6 +228,8 @@ func NewAuditReconcileWorker(audit store.AuditReconciler, authority AdmissionAut
 		dryRun:    cfg.DryRun,
 		clock:     func() time.Time { return time.Now().UTC() },
 		sleepFunc: sleepWithContext,
+		owned:     owned,
+		scoped:    scoped,
 	}
 }
 
@@ -241,10 +268,21 @@ func (w *AuditReconcileWorker) ReconcileOnce(ctx context.Context) int {
 	if w.elector != nil && !w.elector.IsLeader() {
 		return 0
 	}
+	if w.owned != nil && w.scoped == nil {
+		// Fail closed: sweeping this store unscoped would probe and settle other
+		// deployments' admissions, which is exactly what the scope forbids.
+		w.unscopedLogged.Do(func() {
+			if w.log != nil {
+				w.log.Error("audit reconcile: owned namespaces are set but the audit store does not implement store.ScopedAuditReconciler; sweeps are disabled",
+					"namespaces", w.owned)
+			}
+		})
+		return 0
+	}
 	before := w.clock().Add(-w.backlog)
 
 	// Emit full-table backlog metrics (independent of cursor position).
-	pending, oldest, countErr := w.audit.CountUnreconciledAdmissions(ctx, before)
+	pending, oldest, countErr := w.countUnreconciled(ctx, before)
 	if countErr == nil {
 		var oldestAge time.Duration
 		if !oldest.IsZero() {
@@ -258,7 +296,7 @@ func (w *AuditReconcileWorker) ReconcileOnce(ctx context.Context) int {
 	}
 
 	started := time.Now()
-	candidates, err := w.audit.ListUnreconciledAdmissions(ctx, before, w.cursor, w.batch)
+	candidates, err := w.listUnreconciled(ctx, before)
 	w.observe(func(o ReconcileObserver) {
 		o.OnReconcileScan(ctx, len(candidates), time.Since(started), err)
 	})
@@ -283,6 +321,24 @@ func (w *AuditReconcileWorker) ReconcileOnce(ctx context.Context) int {
 		settled += w.settle(ctx, rec)
 	}
 	return settled
+}
+
+// countUnreconciled and listUnreconciled are the only two places the worker
+// reads pending admissions, so the scope decision lives in exactly one spot.
+// ReconcileOnce has already refused to run when a scope is set without a scoped
+// store, so w.scoped is non-nil whenever w.owned is.
+func (w *AuditReconcileWorker) countUnreconciled(ctx context.Context, before time.Time) (int, time.Time, error) {
+	if w.owned != nil {
+		return w.scoped.CountUnreconciledAdmissionsIn(ctx, w.owned, before)
+	}
+	return w.audit.CountUnreconciledAdmissions(ctx, before)
+}
+
+func (w *AuditReconcileWorker) listUnreconciled(ctx context.Context, before time.Time) ([]*store.AuditRecord, error) {
+	if w.owned != nil {
+		return w.scoped.ListUnreconciledAdmissionsIn(ctx, w.owned, before, w.cursor, w.batch)
+	}
+	return w.audit.ListUnreconciledAdmissions(ctx, before, w.cursor, w.batch)
 }
 
 // settle probes authoritative state for one admission and appends the

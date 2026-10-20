@@ -365,10 +365,9 @@ connections:
         input: input_port # 可选，默认 main
 
 # 输出定义
-outputs:
-  output_name:
-    value: expression
-    display_name: string
+# 不支持工作流级 outputs：顶层出现 outputs 块会在编译期被明确拒绝
+# （"workflow-level outputs are not supported"）。节点的输出通过 $nodes 读取，
+# 例如 $nodes['node_name'].field；不要在工作流顶层声明 outputs。
 
 # 测试数据钉住（可选，调试用途）
 # 钉住的节点跳过实际执行，直接使用 mock 输出
@@ -690,15 +689,9 @@ connections:
     main:
       - node: log_result
 
-# 输出定义
-outputs:
-  status:
-    value: "${{ $nodes['payment_result'].output }}"
-    display_name: "最终状态"
-
-  transaction_id:
-    value: "${{ $nodes['process_payment'].transaction_id }}"
-    display_name: "交易ID"
+# 没有工作流级 outputs：顶层 outputs 块不受支持，出现即在编译期被拒绝。
+# 节点输出通过 $nodes 读取，例如 $nodes['payment_result'].output、
+# $nodes['process_payment'].transaction_id。
 ```
 
 ## 4. 表达式引擎
@@ -2534,7 +2527,7 @@ nodes:
 | `input` | 否 | 表达式映射，求值结果是子执行的 `$params`；父的 `$vars`/runtime 不继承 |
 | `output` | 否 | 表达式映射，覆盖默认输出映射；求值根为 `$child`（子执行的公开节点输出） |
 
-**输出**：未写 `output` 时，本节点输出 = 子执行的公开节点输出映射（节点名 → 输出），与 SDK `Wait` 的 `Result.Output` 同形；声明了 `private: true` 的子节点输出不在其中。写了 `output` 时按表达式映射求值，根为 `$child`。工作流级 `outputs:`（§3.1）本期不参与该映射——它的求值本身是另一项独立缺口，因此子工作流自己不产工作流级输出，父节点也不需要（也无法）从那里取结果。
+**输出**：未写 `output` 时，本节点输出 = 子执行的公开节点输出映射（节点名 → 输出），与 SDK `Wait` 的 `Result.Output` 同形；声明了 `private: true` 的子节点输出不在其中。写了 `output` 时按表达式映射求值，根为 `$child`。工作流级 `outputs:` 不受支持（§3.1）：含顶层 `outputs` 块的定义在编译期即被拒绝，因此子工作流只有上述公开节点输出映射，父节点也只能从这里取值。
 
 **执行语义**
 

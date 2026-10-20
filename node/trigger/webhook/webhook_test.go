@@ -3,6 +3,7 @@ package webhook
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -63,6 +64,121 @@ func TestWebhookTriggerRequestEmitsEventAndDedupsByHeader(t *testing.T) {
 	}
 }
 
+// TestWebhookTriggerSuccessfulEmitKeepsDedupKey is the other half of the
+// release contract: a claim whose emit SUCCEEDED must survive, or a sender's
+// retry starts a second execution.
+func TestWebhookTriggerSuccessfulEmitKeepsDedupKey(t *testing.T) {
+	rt := newFakeWebhookTriggerRuntime()
+	tr := New().Method(http.MethodPost).Path("/hooks/orders").EventIDHeader("X-Event-ID")
+	sub, err := tr.Activate(context.Background(), &types.TriggerActivateInput{
+		WorkflowID: "wf-1",
+		NodeName:   "webhook",
+		Params:     tr.RawParams().(map[string]any),
+		Runtime:    rt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sub.Close(context.Background()) }()
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/hooks/orders", bytes.NewBufferString(`{"id":1}`))
+		req.Header.Set("X-Event-ID", "evt-keep")
+		if _, err := rt.webhooks.invoke(req); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := len(rt.emits); got != 1 {
+		t.Fatalf("emits = %d, want 1: the successful emit's claim was released, so the retry re-ran the workflow", got)
+	}
+	if got := len(rt.releases); got != 0 {
+		t.Fatalf("released %d dedup keys after successful emits, want 0", got)
+	}
+}
+
+// TestWebhookTriggerEmitFailureReleasesDedupKey: the claim is taken before the
+// emit, so an emit failure must give it back. Otherwise a sender's retry is
+// answered as a duplicate and dropped for the whole 24h window — the trigger
+// would be at-most-once.
+func TestWebhookTriggerEmitFailureReleasesDedupKey(t *testing.T) {
+	rt := newFakeWebhookTriggerRuntime()
+	rt.emitErr = errors.New("boom")
+	tr := New().Method(http.MethodPost).Path("/hooks/orders").EventIDHeader("X-Event-ID")
+	sub, err := tr.Activate(context.Background(), &types.TriggerActivateInput{
+		WorkflowID: "wf-1",
+		NodeName:   "webhook",
+		Params:     tr.RawParams().(map[string]any),
+		Runtime:    rt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sub.Close(context.Background()) }()
+
+	req := httptest.NewRequest(http.MethodPost, "/hooks/orders", bytes.NewBufferString(`{"id":1}`))
+	req.Header.Set("X-Event-ID", "evt-retry")
+	if _, err := rt.webhooks.invoke(req); err == nil {
+		t.Fatal("emit failure was not reported to the caller")
+	}
+	const wantKey = "trigger:wf-1:webhook:evt-retry"
+	if got := rt.releases; len(got) != 1 || got[0] != wantKey {
+		t.Fatalf("released keys = %v, want [%s]: the failed emit left its claim set", got, wantKey)
+	}
+
+	// The same delivery must be processed, not folded into the failed attempt's
+	// claim.
+	rt.emitErr = nil
+	retry := httptest.NewRequest(http.MethodPost, "/hooks/orders", bytes.NewBufferString(`{"id":1}`))
+	retry.Header.Set("X-Event-ID", "evt-retry")
+	if _, err := rt.webhooks.invoke(retry); err != nil {
+		t.Fatalf("redelivery after a failed emit was not processed: %v", err)
+	}
+	if got := len(rt.emits); got != 2 {
+		t.Fatalf("emit attempts = %d, want 2 (one failed, one redelivered)", got)
+	}
+}
+
+// TestWebhookTriggerReleaseFailureReturnsEmitError: a release that fails is
+// logged, not surfaced in place of the emit error, and it must not make the
+// handler emit again.
+func TestWebhookTriggerReleaseFailureReturnsEmitError(t *testing.T) {
+	rt := newFakeWebhookTriggerRuntime()
+	emitErr := errors.New("emit boom")
+	rt.emitErr = emitErr
+	rt.releaseErr = errors.New("release boom")
+	tr := New().Method(http.MethodPost).Path("/hooks/orders").EventIDHeader("X-Event-ID")
+	sub, err := tr.Activate(context.Background(), &types.TriggerActivateInput{
+		WorkflowID: "wf-1",
+		NodeName:   "webhook",
+		Params:     tr.RawParams().(map[string]any),
+		Runtime:    rt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sub.Close(context.Background()) }()
+
+	req := httptest.NewRequest(http.MethodPost, "/hooks/orders", bytes.NewBufferString(`{"id":1}`))
+	req.Header.Set("X-Event-ID", "evt-release-fail")
+	if _, err := rt.webhooks.invoke(req); !errors.Is(err, emitErr) {
+		t.Fatalf("handler error = %v, want the original emit error %v", err, emitErr)
+	}
+	if got := len(rt.releases); got != 1 {
+		t.Fatalf("release attempts = %d, want 1", got)
+	}
+
+	// The release failed, so the claim is still held: the retry is a duplicate
+	// and must not reach Emit a second time.
+	retry := httptest.NewRequest(http.MethodPost, "/hooks/orders", bytes.NewBufferString(`{"id":1}`))
+	retry.Header.Set("X-Event-ID", "evt-release-fail")
+	if _, err := rt.webhooks.invoke(retry); err != nil {
+		t.Fatalf("duplicate retry after a failed release errored: %v", err)
+	}
+	if got := len(rt.emits); got != 1 {
+		t.Fatalf("emit attempts = %d after a failed release, want 1: the event was emitted twice", got)
+	}
+}
+
 type fakeWebhookTriggerRuntime struct {
 	webhooks *fakeWebhookRuntime
 	emits    []*types.TriggerEvent
@@ -71,6 +187,13 @@ type fakeWebhookTriggerRuntime struct {
 	// be named `_`, which made the TTL — the entire width of the replay window —
 	// unobservable to every test in this package.
 	dedups []triggertest.DedupCall
+	// emitErr makes the next emits fail, so a test can put the handler on the
+	// path where the dedup claim has to be released.
+	emitErr error
+	// releaseErr makes ReleaseDedup fail without releasing the claim; releases
+	// records every release attempt.
+	releases   []string
+	releaseErr error
 }
 
 func newFakeWebhookTriggerRuntime() *fakeWebhookTriggerRuntime {
@@ -79,7 +202,7 @@ func newFakeWebhookTriggerRuntime() *fakeWebhookTriggerRuntime {
 
 func (r *fakeWebhookTriggerRuntime) Emit(_ context.Context, _ types.WorkflowID, _ string, event *types.TriggerEvent) (types.ExecutionID, error) {
 	r.emits = append(r.emits, event)
-	return "exec-1", nil
+	return "exec-1", r.emitErr
 }
 
 func (r *fakeWebhookTriggerRuntime) Dedup(_ context.Context, key string, ttl time.Duration) (bool, error) {
@@ -89,6 +212,17 @@ func (r *fakeWebhookTriggerRuntime) Dedup(_ context.Context, key string, ttl tim
 	}
 	r.seen[key] = struct{}{}
 	return true, nil
+}
+
+// ReleaseDedup mirrors the primitives: the claim is removed only when the
+// release succeeds, so a test can model the failure that leaves it held.
+func (r *fakeWebhookTriggerRuntime) ReleaseDedup(_ context.Context, key string) error {
+	r.releases = append(r.releases, key)
+	if r.releaseErr != nil {
+		return r.releaseErr
+	}
+	delete(r.seen, key)
+	return nil
 }
 
 func (r *fakeWebhookTriggerRuntime) TryLock(context.Context, string, time.Duration) (types.TriggerLock, bool, error) {

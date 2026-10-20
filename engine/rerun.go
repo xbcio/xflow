@@ -202,6 +202,14 @@ func (e *Engine) seedRerun(ctx context.Context, seeder ExecutionSeeder, req Reru
 		RerunFrom: req.FromNode,
 	}
 	attachSubmissionMetadata(ctx, snap)
+	// A rerun resolves its graph from the parent's stored definition, so the
+	// definition is not on the ctx and the submission metadata cannot supply the
+	// registration namespace. The parent is the source for what a rerun inherits
+	// (TestRun and Scope below follow the same rule); an empty parent namespace
+	// is a pre-change execution and leaves dispatch on its ctx fallback.
+	if snap.Namespace == "" {
+		snap.Namespace = parent.Namespace
+	}
 	// A rerun of a test run stays a test run, and a rerun issued with no scope
 	// of its own keeps the parent's: the context is the newer authority (see
 	// attachSubmissionMetadata), and the parent is the only other source. Losing

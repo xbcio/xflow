@@ -127,18 +127,21 @@ if terminal(ARGV[1]) then
     redis.call('HSETNX', KEYS[6], 'finished_at_ms', tonumber(ARGV[18]))
 end
 redis.call('EXPIRE', KEYS[6], ttl)
--- Keep the per-execution transient marker alive for as long as this commit
--- keeps the node keys alive.
+-- Keep the per-execution mode marker alive for as long as this commit keeps
+-- the node keys alive.
 --
--- The marker is written once at CreateExecution and was never refreshed, while
--- the node keys are re-EXPIREd here on every commit. An execution that runs
--- longer than transientTTL therefore outlived its own marker, and isTransient
--- read the absent marker as "durable" -- the one answer that must never be
--- wrong, because it decides whether commit_node's SQL projection runs. Measured
--- on a real deployment: 187 rows in xflow_nodes with zero matching rows in
--- xflow_executions, i.e. raw traffic from transient executions persisted.
+-- The marker is written once at creation and would otherwise never be
+-- refreshed, while the node keys are re-EXPIREd here on every commit. An
+-- execution that runs longer than transientTTL therefore outlived its own
+-- marker, and isTransient read the absent marker as "durable" -- the one answer
+-- that must never be wrong, because it decides whether commit_node's SQL
+-- projection runs. Measured on a real deployment: 187 rows in xflow_nodes with
+-- zero matching rows in xflow_executions, i.e. raw traffic from transient
+-- executions persisted.
 --
--- EXISTS-guarded so a durable execution, which has no marker, is untouched.
+-- Creation now writes a marker for durable executions too, so this refresh is
+-- uniform: for a transient execution it is what keeps the payload out of SQL,
+-- and for a durable one it only extends a verdict that cannot change.
 -- The factor 2 mirrors transientMarkerTTLFactor in state.go: the marker must
 -- outlive the node keys it qualifies, so a path that extends node keys without
 -- refreshing the marker still cannot make it lapse first.
@@ -432,6 +435,7 @@ return {attempts, 0}
 // KEYS: 1=outbox:dead 2=outbox:dead:body 3=outbox:ready 4=outbox:body
 //
 //	5=outbox:attempts 6=exec:status 7=outbox:dead:meta 8=replay:entryidx
+//	9=replay:receipt (for this RequestID)
 //
 // ARGV: 1=entryID 2=now_ms 3=ttl_seconds 4=request_id 5=operator 6=reason 7=exec_id 8=namespace
 // Returns {outcome, audit_id, node, activation} where outcome:
@@ -474,6 +478,16 @@ return {attempts, 0}
 // carries the brace-less namespace prefix so the derived keys match the
 // caller's key schema (xflow:ns:<namespace>:exec:{<id>}:...). The namespace is
 // server-issued (from context), never trusted from a client request body.
+//
+// The receipt key for the caller's RequestID is NOT derived here: it is
+// computed by outboxReplayReceiptKey and declared as KEYS[9], so the client-
+// side key builder is the single definition of that key. The two remaining
+// derived key forms cannot be declared as KEYS without breaking atomicity --
+// priorKey depends on the RequestID stored under KEYS[8] and the node keys
+// depend on the node name stored under KEYS[7], both read inside the
+// transaction; pre-reading them in Go would race a concurrent replay. They are
+// derived from the same keyPrefix as every declared key and carry the same
+// execution hash tag, which is what keeps them in the execution's slot.
 var replayDeadLetterLua = redis.NewScript(`
 local entryID = ARGV[1]
 local nowMs = ARGV[2]
@@ -481,7 +495,7 @@ local requestID = ARGV[4]
 local execID = ARGV[7]
 local namespace = ARGV[8]
 local keyPrefix = 'xflow:ns:' .. namespace .. ':exec:{' .. execID .. '}:'
-local receiptKey = keyPrefix .. 'replay:receipt:' .. requestID
+local receiptKey = KEYS[9]
 local operator = ARGV[5]
 local reason = ARGV[6]
 local ttl = tonumber(ARGV[3])
@@ -545,6 +559,8 @@ end
 -- moved under another RequestID: collapse to that receipt.
 local priorReqID = redis.call('HGET', KEYS[8], entryID)
 if priorReqID and priorReqID ~= '' then
+    -- Derived, not declared: priorReqID is only known after reading KEYS[8]
+    -- inside this transaction, so it cannot be computed by the client.
     local priorKey = keyPrefix .. 'replay:receipt:' .. priorReqID
     local pr = readReceipt(priorKey)
     if pr then
@@ -596,6 +612,8 @@ end
 --    node:status yet; Suspend writes resume entries with node suspended. Each
 --    intent has a different "safe to replay" precondition, evaluated below.
 --    An empty/unknown intent is a legacy entry → fail-closed outcome 7.
+--    The node keys are derived from KEYS[7]'s node name because it is only
+--    known inside the transaction; see the declaration comment above.
 local nodeStatusKey = keyPrefix .. 'node:' .. nodeName .. ':status'
 local nodeMetaKey   = keyPrefix .. 'node:' .. nodeName .. ':meta'
 local nstatus = redis.call('GET', nodeStatusKey)

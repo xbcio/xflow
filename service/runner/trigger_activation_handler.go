@@ -698,6 +698,28 @@ func unregisterSupplyConsumers(id activationID, bindings []engine.SupplyConsumer
 	}
 }
 
+// SubscriptionDone exposes the health of the subscription installed for d,
+// when the trigger kind implements types.SubscriptionHealth.
+//
+// The activation tracker calls this after a successful Activate. A false
+// second return means the kind has no health surface, which is the normal
+// case for every trigger that cannot outlive its Close call; those
+// activations keep the pre-existing behaviour (reported until Close).
+func (h *TriggerActivationHandler) SubscriptionDone(d protocol.ActivateDirective) (<-chan struct{}, bool) {
+	id := activationIDFromActivate(d)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	st, ok := h.subs[id]
+	if !ok || st.sub == nil {
+		return nil, false
+	}
+	health, ok := st.sub.(types.SubscriptionHealth)
+	if !ok {
+		return nil, false
+	}
+	return health.Done(), true
+}
+
 // seedHTTPClient returns the configured client or http.DefaultClient when none
 // was injected. This matches the nil-fallback semantics of
 // protocol.HTTPEntrySeedRuntime.Client.

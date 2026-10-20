@@ -519,13 +519,12 @@ func (r *recordingObserver) recycledByCause(cause string) int {
 func TestReclaimReportsCountAndCause(t *testing.T) {
 	ctx := context.Background()
 	rec := &recordingObserver{}
-	// SetObserver panics on a second non-nil install, so nil first. This is the
-	// pattern observer_overwrite_test.go already uses.
-	SetObserver(nil)
-	SetObserver(rec)
-	defer SetObserver(nil)
-
 	h := newTestReactorHost(t)
+	// Per-host rather than SetObserver: a process-wide recorder also collects
+	// every other host's teardowns, and the assertions below are exact counts
+	// ("pool_swapped" is required to be 0, for one). See
+	// reactorHost.instanceRecycleObserver.
+	h.instanceRecycleObserver = rec
 	e := warmTestEngine(t, h, decodeForTest(t, testReactorCode(t)))
 	poolSize := int(e.active.Load().size)
 	e.lastUsed.Store(time.Now().Add(-time.Hour).UnixNano())
@@ -539,6 +538,30 @@ func TestReclaimReportsCountAndCause(t *testing.T) {
 	if got := rec.recycledByCause("pool_swapped"); got != 0 {
 		t.Fatalf("%d instances attributed to pool_swapped; reclamation is not a swap "+
 			"and must not hide inside a swap's cause", got)
+	}
+}
+
+// TestInstanceRecycleObserverIsPerHost pins the attribution seam itself. The
+// reclamation tests above assert exact recycle counts, which only mean
+// something if the recorder they install hears only its own host: with the
+// process-wide SetObserver, a lingering sweep from any other host adds a whole
+// pool to the count (observed as "= 10, want 6" under `-race`).
+func TestInstanceRecycleObserverIsPerHost(t *testing.T) {
+	ctx := context.Background()
+	rec := &recordingObserver{}
+	hostA := newTestReactorHost(t)
+	hostA.instanceRecycleObserver = rec
+
+	hostB := newTestReactorHost(t)
+	engineB := warmTestEngine(t, hostB, decodeForTest(t, testReactorCode(t)))
+	engineB.lastUsed.Store(time.Now().Add(-time.Hour).UnixNano())
+	if n := hostB.reclaimIdleEngines(ctx, time.Minute); n != 1 {
+		t.Fatalf("host B reclaimed %d engines, want 1", n)
+	}
+
+	if got := rec.recycledByCause("engine_reclaimed"); got != 0 {
+		t.Fatalf("host A's recorder saw %d recycles produced by host B; the seam is not "+
+			"per-host, so an exact-count assertion cannot attribute what it counts", got)
 	}
 }
 
@@ -813,11 +836,15 @@ func TestSweepSelfRearmsUntilEngineAges(t *testing.T) {
 func TestSupplyChangedOrphansNothingWhenReclaimWinsMidSwap(t *testing.T) {
 	ctx := context.Background()
 	rec := &recordingObserver{}
-	SetObserver(nil)
-	SetObserver(rec)
-	defer SetObserver(nil)
-
 	h := newTestReactorHost(t)
+	// Per-host rather than SetObserver. Both pools this test drains belong to
+	// this host (the one active at the simulated reclaim, and the orphan
+	// swapConfig builds and tears back down), so the exact count below is
+	// attributable — unless a process-wide recorder also catches some other
+	// host's lingering sweep, which is how this test failed under `-race` in a
+	// full-package run with "= 10, want 6". See
+	// reactorHost.instanceRecycleObserver.
+	h.instanceRecycleObserver = rec
 	mod := decodeForTest(t, testReactorCode(t))
 	key := moduleKeyOf(mod)
 	e := warmTestEngine(t, h, mod) // active pool: emptyContent(), size 2

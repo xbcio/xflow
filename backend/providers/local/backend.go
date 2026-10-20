@@ -155,6 +155,20 @@ func (b *Backend) Bind(eng *engine.Engine) func() {
 		opts = append(opts, execution.WithArtifactCodeResolver(b.artifactCode))
 	}
 	dispatcher := execution.NewEmbeddedDispatcher(eng, b.registry, opts...)
+	// The queue worker's ctx starts from context.Background() and is NOT
+	// re-anchored to the engine's namespace here. Anchoring it looks right
+	// for a single-namespace engine but is not: dispatch-time sub-workflow
+	// resolution keys the registry by the registration namespace
+	// (WorkflowDef.Namespace, default "default"), while an anchored ctx names
+	// the deployment — so the lookup would miss every child registered
+	// without an explicit namespace, and concurrency admission keys would
+	// split between children (queue ctx) and top-level executions (caller
+	// ctx). Dispatch now resolves sub-workflows from the registration
+	// namespace persisted on the execution snapshot
+	// (engine.ExecutionSnapshot.Namespace), which is what makes the ctx
+	// unnecessary on that path; a single-namespace engine's lease stamp
+	// (BuildTaskLease, see WithNamespace) remains the carrier for the
+	// handler's execution context.
 	queueStop := b.BindHandlerWithEngine(eng, dispatcher.HandleTask)
 	stop := func() {
 		queueStop()

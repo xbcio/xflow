@@ -23,6 +23,13 @@ type leaseRenewClient interface {
 	RenewLease(ctx context.Context, req protocol.RenewLeaseRequest) (protocol.RenewLeaseResponse, error)
 }
 
+// defaultLeaseRenewTimeout bounds one RenewLease RPC. The renewal loop cancels
+// the handler after MaxRetries consecutive transport failures, but a half-open
+// connection never returns an error at all: without a deadline the attempt
+// hangs, the failure count never advances, and a task whose lease the server
+// may already have reclaimed keeps running.
+const defaultLeaseRenewTimeout = 5 * time.Second
+
 // protocolLeaseRenewer adapts the wire client to LeaseRenewer by supplying the
 // identity the endpoint fences on. The server re-authenticates every call and
 // resolves the lease from its own directory, so runner and session travel with
@@ -31,9 +38,18 @@ type protocolLeaseRenewer struct {
 	client    leaseRenewClient
 	runnerID  string
 	sessionID string
+	// timeout bounds one RenewLease call. Zero uses defaultLeaseRenewTimeout;
+	// tests set it directly to avoid waiting out the production value.
+	timeout time.Duration
 }
 
 func (p protocolLeaseRenewer) RenewLease(ctx context.Context, leaseID, leaseToken string, extend time.Duration) (bool, error) {
+	timeout := p.timeout
+	if timeout <= 0 {
+		timeout = defaultLeaseRenewTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	resp, err := p.client.RenewLease(ctx, protocol.RenewLeaseRequest{
 		RunnerID:   p.runnerID,
 		SessionID:  p.sessionID,

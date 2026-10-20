@@ -70,6 +70,11 @@ id = "generic-api-key"
     # in-process httptest server. Sequential hex, minted for one test binary.
     '''^0123456789abcdef0123456789abcdef$''',
 
+    # The remote-client test asserts the generated Idempotency-Key is 32 hex
+    # characters by trimming this exact cutset; the heuristic reads the cutset
+    # itself as the secret. It is the 16-char half of the fixture above.
+    '''^0123456789abcdef$''',
+
     # The stub supply_key an httptest responder returns to the runner verify
     # command (base64 of "supply-key"), asserting only that an issued key is
     # accepted. It moved from cmd/runner to sdk/runner; pinning the value

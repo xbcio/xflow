@@ -233,9 +233,14 @@ func FullWorkflow(tc FullTriggerConfig) *xflow.WorkflowBuilder {
 	}))
 	brief := wf.Node("brief", node.Pick("amount", "count", "script_ok", "rows_loaded", "risk_ok", "browser_denied"))
 	verdict := wf.Node("verdict", node.IF(BranchCondition()))
+	// xflow.notification has no delivery backend and fails at execution.
+	// Continue-on-error lets the main lane finish through the node; the type
+	// stays here because the coverage guard requires FullWorkflow to carry
+	// every registered action.
 	notify := wf.Node("notify", node.Notification("email", `${{ $vars.recipient }}`).
 		Subject("full coverage done").
-		Message(`${{ sprintf("count=%v", $nodes['renamed'].count) }}`))
+		Message(`${{ sprintf("count=%v", $nodes['renamed'].count) }}`)).
+		OnError(types.OnErrorContinue)
 	quiet := wf.Node("quiet", node.Set(map[string]any{"notified": false}))
 	joinOut := wf.Node("join_out", node.Merge(node.MergeWaitAny))
 	done := wf.Node("done", node.End())

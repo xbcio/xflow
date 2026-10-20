@@ -39,7 +39,7 @@ const replayReceiptKeyPrefix = "xflow:ns:"
 //
 // fn returning a non-nil error aborts the scan and propagates the error.
 func (s *Store) ScanReplayReceipts(ctx context.Context, fn func(engine.ReplayReceipt) error) error {
-	namespaces, err := s.listNamespaces(ctx)
+	namespaces, err := s.scopedNamespaces(ctx)
 	if err != nil {
 		return fmt.Errorf("list namespaces for receipt scan: %w", err)
 	}

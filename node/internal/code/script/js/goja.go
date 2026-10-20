@@ -170,12 +170,18 @@ func (e *gojaEngine) Execute(ctx context.Context, src engine.Source, globals map
 	// non-nil per the Engine contract (context.Background().Done() is a nil
 	// channel that blocks forever, so the watcher simply parks on <-done).
 	//
-	// LIMITATION: goja's Interrupt is checked only at function-call boundaries
-	// in the interpreter, NOT inside tight pure-computation loops. A script
-	// like `while(true){}` or `for(let i=0;;i++){}` cannot be interrupted by
-	// this watcher — the ctx will expire but RunProgram never returns. CPU-
-	// heavy or potentially-unbounded scripts MUST run on js/qjs or
-	// wasm/wazero, which support true mid-execution termination.
+	// goja's interpreter loop checks the interrupt flag roughly every 100 VM
+	// instructions, so tight pure-computation loops (`while(true){}`,
+	// `for(let i=0;;i++){}`) DO stop at the deadline. Interrupt does not
+	// preempt native Go built-ins: a script blocked inside a long host call
+	// returns only when that call returns.
+	//
+	// LIMITATION: goja has NO heap/allocation cap. SetMaxCallStackSize bounds
+	// recursion (engine.DefaultGojaStackSize) and the node layer bounds the
+	// encoded result (engine.DefaultMaxOutputBytes), but a script that allocates
+	// host memory (large strings, arrays, objects) can grow the process heap
+	// without limit. js/qjs and wasm/wazero both enforce a 16 MiB memory cap;
+	// untrusted scripts belong there, not on js/goja.
 	done := make(chan struct{})
 	exited := make(chan struct{})
 	go func() {

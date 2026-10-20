@@ -102,6 +102,7 @@ func (s *Store) extendExecTTL(ctx context.Context, id types.ExecutionID, nodeNam
 	pipe.Expire(ctx, execKey(t, id, "trace_carrier"), ttl)
 	pipe.Expire(ctx, execKey(t, id, "test_run"), ttl)
 	pipe.Expire(ctx, execKey(t, id, "graph"), ttl)
+	pipe.Expire(ctx, execKey(t, id, "namespace"), ttl)
 	// The workflow identity is written once with the execution, so a suspended
 	// execution that outlives its initial TTL must renew it here too: otherwise
 	// the status survives the wait while Inspect reports the execution as

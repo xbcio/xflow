@@ -91,10 +91,11 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 	//
 	// createExecution is authoritative for this execution: it knows whether the
 	// graph asked to be transient. Without priming, the projection guard below
-	// would ask isTransient, find no marker (none is written yet), and fall
-	// through to the SQL confirmation -- which would report "no row" because
-	// this very call has not created it yet, so every execution would be
-	// misread as transient and silently stop being projected.
+	// would ask isTransient before this call's pipeline has run -- so Redis has
+	// no marker yet -- and fall through to the SQL confirmation, which would
+	// report "no row" because this very call has not created it yet. Every
+	// execution would then be misread as transient and silently stop being
+	// projected.
 	//
 	// Store-wide transient mode is folded in here: it writes no per-execution
 	// marker at all, so priming "durable" for it would override the mode.
@@ -140,12 +141,22 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 
 	pipe := s.rdb.TxPipeline()
 	t := namespace.FromContext(ctx)
-	// The transient marker joins the same transaction as the structural keys.
-	// Written afterwards, it would leave a window in which another replica sees
-	// a running execution with no marker and resolves it as durable -- long
-	// enough for the first node commit to project its payload into SQL.
+	// The mode marker joins the same transaction as the structural keys. Written
+	// afterwards, it would leave a window in which another replica sees a
+	// running execution with no marker, has to fall back to SQL, and finds no
+	// row -- this very call writes that row only after the pipeline commits.
+	//
+	// Every execution gets a marker, not just transient ones. "No marker" is
+	// also the shape of a lapsed transient marker, so it cannot be read as
+	// "durable"; and a bare SQL miss cannot be read as "transient", because the
+	// projection is a best-effort follow-up, not an admission witness.
 	if perExecTransient {
 		s.markExecutionTransient(ctx, pipe, e.ID, hint.TTL, hint.CompletionTTL, ttl)
+	} else if !s.transient {
+		// Store-wide transient mode writes no per-execution marker at all: the
+		// flag is the answer on every replica, and a durable marker here would
+		// outlive a runtime reconfiguration as a false verdict.
+		s.markExecutionDurable(ctx, pipe, e.ID, ttl)
 	}
 	// Persist the retention this execution was created with so
 	// GetExecutionRetention can still answer with the TTL the writes actually
@@ -197,6 +208,12 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 	pipe.Set(ctx, createdKey, createdAtMs, ttl)
 	pipe.Set(ctx, updatedKey, createdAtMs, ttl)
 	keys = append(keys, createdKey, updatedKey)
+	// The registration namespace rides with the execution's immutable metadata.
+	// Dispatch reads it back because the queue worker's ctx starts from
+	// context.Background() and names the deployment, not the registration.
+	if e.Namespace != "" {
+		pipe.Set(ctx, execKey(t, e.ID, "namespace"), e.Namespace, ttl)
+	}
 	if e.Params != nil {
 		paramsJSON, err := json.Marshal(e.Params)
 		if err != nil {
@@ -378,29 +395,16 @@ func (s *Store) cleanupCreatedExecution(ctx context.Context, e *engine.Execution
 	s.ttlMu.Unlock()
 
 	t := namespace.FromContext(ctx)
-	pipe := s.rdb.Pipeline()
-	pipe.Del(ctx,
-		execKey(t, e.ID, "status"),
-		execKey(t, e.ID, "graph"),
+	// Every key creation wrote, plus keys later transitions or caches may have
+	// added before the SQL failure was observed. All of them are execution-scoped:
+	// the namespace registry and the workflow-scoped outbox readiness index are
+	// maintained separately (refreshOutboxReadyIndex below), never by this
+	// rollback, so a failed create cannot perturb another execution's state.
+	keys := createdExecutionKeys(t, e.ID, e.Graph)
+	keys = append(keys,
 		execKey(t, e.ID, "error"),
-		execKey(t, e.ID, "params"),
-		execKey(t, e.ID, "runtime"),
-		execKey(t, e.ID, "trace_id"),
-		execKey(t, e.ID, "span_id"),
-		execKey(t, e.ID, "trace_carrier"),
-		execKey(t, e.ID, "test_run"),
-		execKey(t, e.ID, "workflow_id"),
-		execKey(t, e.ID, "workflow_version"),
-		execKey(t, e.ID, "created_at_ms"),
-		execKey(t, e.ID, "updated_at_ms"),
-		transientMarkKey(t, e.ID),
 		terminalMarkKey(t, e.ID),
-		retentionRecordKey(t, e.ID),
-		remainingNodesKey(t, e.ID),
-		failedNodesKey(t, e.ID),
 		leaseExpiryZSetKey(t, e.ID),
-		outboxReadyKey(t, e.ID),
-		outboxBodyKey(t, e.ID),
 		outboxAttemptsKey(t, e.ID),
 		outboxDeadKey(t, e.ID),
 		outboxDeadBodyKey(t, e.ID),
@@ -408,21 +412,21 @@ func (s *Store) cleanupCreatedExecution(ctx context.Context, e *engine.Execution
 		timeoutZSetKey(t, e.ID),
 	)
 	if e.Graph != nil {
-		// Same superset argument as the TTL-shortening walk in state.go: the
-		// counter keys are unit-indexed while this loop walks node indices, and
-		// UnitCount <= NodeCount makes the node range cover every unit key.
+		// Node keys can already exist when the SQL write fails: the outbox
+		// dispatcher may have picked an entry up during the SQL-call window. They
+		// are execution-scoped like everything above.
 		for i := 0; i < e.Graph.NodeCount(); i++ {
 			node := e.Graph.NodeAt(i)
-			pipe.Del(ctx,
-				inDegreeKey(t, e.ID, i),
+			keys = append(keys,
 				activeInputsKey(t, e.ID, i),
-				scheduleKey(t, e.ID, i),
 				nodeStatusKey(t, e.ID, node.Name),
 				nodeMetaKey(t, e.ID, node.Name),
 				outputKey(t, e.ID, node.Name),
 			)
 		}
 	}
+	pipe := s.rdb.Pipeline()
+	pipe.Del(ctx, keys...)
 	_, _ = pipe.Exec(ctx)
 	// The execution's ready set is gone, so its readiness-index member has to
 	// go with it. Leaving it would only cost a no-op drain that repairs it
@@ -1061,6 +1065,7 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 	workflowVersionCmd := pipe.Get(ctx, execKey(t, id, "workflow_version"))
 	createdAtCmd := pipe.Get(ctx, execKey(t, id, "created_at_ms"))
 	updatedAtCmd := pipe.Get(ctx, execKey(t, id, "updated_at_ms"))
+	namespaceCmd := pipe.Get(ctx, execKey(t, id, "namespace"))
 	// Exec surfaces the first command error, and redis.Nil is the expected answer
 	// for most of these keys. The per-command results below are authoritative.
 	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
@@ -1199,6 +1204,14 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 	} else if err != redis.Nil {
 		return nil, fmt.Errorf("get execution updated_at %q: %w", id, err)
 	}
+	// The registration namespace; absent on executions created before it was
+	// persisted, which readers must treat as "fall back to the ctx namespace".
+	var namespaceVal string
+	if raw, err := namespaceCmd.Result(); err == nil {
+		namespaceVal = raw
+	} else if err != redis.Nil {
+		return nil, fmt.Errorf("get execution namespace %q: %w", id, err)
+	}
 	return &engine.ExecutionSnapshot{
 		ID:              id,
 		Graph:           g,
@@ -1219,5 +1232,6 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 		ParentNode:      parentNode,
 		Depth:           depth,
 		RerunFrom:       rerunFrom,
+		Namespace:       namespaceVal,
 	}, nil
 }

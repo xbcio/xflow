@@ -15,6 +15,33 @@ import (
 // work it canceled.
 var errSubWorkflowParentCanceling = errors.New("parent execution is canceling")
 
+// subWorkflowParentCanceling re-reads the parent's lifecycle status after its
+// child has been started or resumed. It narrows the create-then-park window:
+// the check inside startSubWorkflowChild happens before the child exists, and
+// the inline cancel cascade (cancelSubWorkflowChildren) walks recorded links,
+// which this dispatch has not written yet, so a cancel landing in between is
+// visible to neither. The remaining gap is between this read and the park
+// write, which still relies on the wait's reclaim; parking without any read
+// would leave the child running for up to subWorkflowWaitTTL.
+//
+// An execution that is gone reads as canceling. Only the parent can conclude
+// this wait, so an execution that no longer exists can never consume the
+// child's result; stopping the child is the fail-closed answer.
+//
+// A read failure is returned rather than folded into "not canceling". Parking
+// on an unreadable status is exactly the blind wait this re-read exists to
+// prevent; the delivery can be retried, and the retry re-reads.
+func (e *Engine) subWorkflowParentCanceling(ctx context.Context, id types.ExecutionID) (bool, error) {
+	status, found, err := e.executionStatus(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return true, nil
+	}
+	return status == types.ExecutionStatusCanceling || status == types.ExecutionStatusCanceled, nil
+}
+
 // cancelSubWorkflowChildren cancels the child executions this execution's
 // sub-workflow nodes are waiting on, so a canceled parent is not outlived by
 // the children its nodes started.

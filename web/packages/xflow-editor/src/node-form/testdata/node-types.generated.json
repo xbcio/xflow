@@ -1327,12 +1327,12 @@
             {
               "value": "goja",
               "label": "goja",
-              "description": "Fastest cold start; cannot interrupt tight loops"
+              "description": "Fastest cold start; interruptible, but no heap cap (trusted scripts only)"
             },
             {
               "value": "qjs",
               "label": "QuickJS",
-              "description": "Slower first load; genuine mid-execution termination"
+              "description": "Slower first load; interruptible, 16 MiB heap cap"
             },
             {
               "value": "wazero",
@@ -1355,12 +1355,12 @@
                 {
                   "value": "goja",
                   "label": "goja",
-                  "description": "Fastest cold start; cannot interrupt tight loops"
+                  "description": "Fastest cold start; interruptible, but no heap cap (trusted scripts only)"
                 },
                 {
                   "value": "qjs",
                   "label": "QuickJS",
-                  "description": "Slower first load; genuine mid-execution termination"
+                  "description": "Slower first load; interruptible, 16 MiB heap cap"
                 }
               ]
             },

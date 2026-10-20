@@ -3,9 +3,11 @@ package control
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/store"
 )
 
@@ -216,6 +218,47 @@ func (s *MemoryRunnerPoolStore) ListInstancesByState(_ context.Context, state st
 			out = append(out, instance)
 		}
 	}
+	return out, nil
+}
+
+// ListInstancesByStateIn implements store.ScopedRunnerInstanceLister. Like the
+// SQL backend it matches through the owning pool — including a soft-deleted one
+// — and returns oldest state change first.
+func (s *MemoryRunnerPoolStore) ListInstancesByStateIn(_ context.Context, owned []namespace.Namespace, state store.InstanceState) ([]store.ScopedRunnerInstance, error) {
+	scope := store.RunnerInstanceScopeFor(owned)
+	if scope.Empty() {
+		return nil, nil
+	}
+	tenants := make(map[string]struct{}, len(scope.TenantNamespaces))
+	for _, ns := range scope.TenantNamespaces {
+		tenants[ns] = struct{}{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]store.ScopedRunnerInstance, 0)
+	for _, instance := range s.instances {
+		if instance.State != state {
+			continue
+		}
+		pool, ok := s.pools[instance.PoolID]
+		if !ok {
+			continue
+		}
+		_, tenantInScope := tenants[pool.OwnerNamespace]
+		switch {
+		case pool.OwnerKind == store.PoolOwnerTenant && tenantInScope:
+		case pool.OwnerKind == store.PoolOwnerPlatform && scope.IncludePlatform:
+		default:
+			continue
+		}
+		out = append(out, store.ScopedRunnerInstance{RunnerInstance: instance, PoolOwnerKind: pool.OwnerKind})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].StateChangedAt.Equal(out[j].StateChangedAt) {
+			return out[i].StateChangedAt.Before(out[j].StateChangedAt)
+		}
+		return out[i].RunnerID < out[j].RunnerID
+	})
 	return out, nil
 }
 

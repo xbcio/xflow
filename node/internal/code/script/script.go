@@ -53,13 +53,16 @@ type ScriptNode struct {
 //
 // Runtime selection guide:
 //   - js/goja: fastest cold start, pooled VMs, lowest per-call overhead.
-//     CANNOT interrupt tight pure-computation loops (e.g. `while(true){}`).
-//     Pick for short, well-bounded scripts.
+//     Interruptible at the execution deadline (the interpreter checks the
+//     interrupt flag roughly every 100 VM instructions, so even `while(true){}`
+//     stops), with stack and output limits — but NO heap/allocation cap.
+//     Pick only for trusted, well-bounded scripts.
 //   - js/qjs: QuickJS via wasm. ~330ms first-load (cached process-wide),
-//     ~3ms per call after. Genuine mid-execution termination. Pick when
-//     scripts may be long-running or CPU-bound.
+//     ~3ms per call after. Genuine mid-execution termination and a 16 MiB heap
+//     cap. Pick for untrusted, long-running, or memory-hungry scripts.
 //   - wasm/wazero: any language compiled to wasip1. Strictest sandbox,
-//     true ctx cancellation. Pick for untrusted code or non-JS guests.
+//     true ctx cancellation, 16 MiB linear-memory cap. Pick for untrusted code
+//     or non-JS guests.
 //     The legacy command model: a batch trigger evaluates its records one by
 //     one (no batch fast path) — use wazero-reactor for pooled batch traffic.
 func Script(code string) *ScriptNode {
@@ -170,8 +173,8 @@ const artifactFilePathParam = "__artifact_file_path"
 
 func jsRuntimeOptions() []types.EnumOption {
 	return []types.EnumOption{
-		{Value: "goja", DisplayName: "goja", Description: "Fastest cold start; cannot interrupt tight loops"},
-		{Value: "qjs", DisplayName: "QuickJS", Description: "Slower first load; genuine mid-execution termination"},
+		{Value: "goja", DisplayName: "goja", Description: "Fastest cold start; interruptible, but no heap cap (trusted scripts only)"},
+		{Value: "qjs", DisplayName: "QuickJS", Description: "Slower first load; interruptible, 16 MiB heap cap"},
 	}
 }
 

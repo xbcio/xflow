@@ -91,6 +91,30 @@ type TriggerSubscription interface {
 	Close(ctx context.Context) error
 }
 
+// SubscriptionHealth is an optional extension of TriggerSubscription for
+// subscriptions whose termination is observable without Close.
+//
+// The runner's activation tracker uses it to stop reporting an activation as
+// hosted once its subscription has exited on its own — the consumer's message
+// stream ending, a trigger-internal shutdown (a lost renewable lock), or the
+// parent context being cancelled. Without this signal the entry stays in the
+// inventory until Close or a restart, so the control plane believes the runner
+// still hosts it and never redelivers the activation, even though nothing is
+// consuming.
+//
+// It is optional per trigger kind; Kafka (both the aggregate and per-message
+// shapes) and Redis implement it today, and kinds that cannot outlive their
+// Close call have nothing to report. Done is NOT a liveness probe: it fires
+// when the subscription's own reading loop exits, not when deliveries merely
+// stop. A consumer stuck establishing its stream reports nothing here.
+//
+// Done is closed exactly once when the subscription stops, whether the stop
+// was requested through Close or happened on its own. Implementations must
+// not block in Done.
+type SubscriptionHealth interface {
+	Done() <-chan struct{}
+}
+
 type CloseFunc func(context.Context) error
 
 func (f CloseFunc) Close(ctx context.Context) error { return f(ctx) }

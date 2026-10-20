@@ -385,7 +385,6 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 				Spec:        "1",
 				Nodes:       []types.NodeDef{{ID: "n1", Name: "Start", Type: "http.request", Kind: types.NodeKindAction, Version: 1}},
 				Connections: types.Connections{"Start": {"default": types.PortConnections{Type: types.ConnectionTypeData, Targets: []types.Connection{{Node: "n1"}}}}},
-				Outputs:     map[string]types.WorkflowOutput{"out": {Value: "ok", DisplayName: "Result"}},
 			},
 		},
 		{

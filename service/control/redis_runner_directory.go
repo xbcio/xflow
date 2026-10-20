@@ -47,6 +47,44 @@ type redisRunnerDirectoryConfig struct {
 	lanes                     []string
 	laneWriteMode             LaneWriteMode
 	selector                  RunnerSelector
+	keyPrefix                 string
+}
+
+// RunnerDirectoryKeyPrefix returns the Redis key prefix of the runner
+// directory for a deployment suffix (namespace.DeploymentSuffix). The empty
+// suffix is the legacy prefix, byte-identical to what every earlier release
+// used, so a default-owning or unconfigured deployment keeps its keys. A
+// non-empty suffix moves the whole directory under
+// "xflow:runner-directory:ns:<suffix>:{control}": the "{control}" hash tag is
+// kept last so every key still hashes to one cluster slot, and the "ns:"
+// segment means the scoped prefix is never a string prefix of the legacy one
+// (or the reverse), so no prefix scan of either can reach the other's keys.
+func RunnerDirectoryKeyPrefix(suffix string) (string, error) {
+	if suffix == "" {
+		return redisRunnerDirectoryKeyPrefix, nil
+	}
+	if err := namespace.Validate(namespace.Namespace(suffix)); err != nil {
+		return "", fmt.Errorf("runner directory scope %q: %w", suffix, err)
+	}
+	return "xflow:runner-directory:ns:" + suffix + ":{control}", nil
+}
+
+// WithRedisRunnerDirectoryScope keeps the directory's keys apart from other
+// deployments sharing the same Redis: the argument is the deployment suffix
+// from namespace.DeploymentSuffix, and "" selects the legacy keys. A suffix
+// that is not a valid namespace name panics — the constructor has no error
+// path, and falling back to the legacy keys would silently put a dedicated
+// deployment back on the shared directory, which is the failure this option
+// exists to prevent. Callers derive the suffix from DeploymentSuffix, which
+// validates it, so reaching the panic is a programming error.
+func WithRedisRunnerDirectoryScope(suffix string) RedisRunnerDirectoryOption {
+	prefix, err := RunnerDirectoryKeyPrefix(suffix)
+	if err != nil {
+		panic(err)
+	}
+	return func(cfg *redisRunnerDirectoryConfig) {
+		cfg.keyPrefix = prefix
+	}
 }
 
 // WithRedisRunnerDirectoryClaimTTL sets the maximum time a poll claim can
@@ -248,6 +286,7 @@ func NewRedisRunnerDirectory(rdb redis.Cmdable, opts ...RedisRunnerDirectoryOpti
 		drainDeadline:             defaultRunnerDrainDeadline,
 		clock:                     time.Now,
 		selector:                  DefaultRunnerSelector(),
+		keyPrefix:                 redisRunnerDirectoryKeyPrefix,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -268,7 +307,7 @@ func NewRedisRunnerDirectory(rdb redis.Cmdable, opts ...RedisRunnerDirectoryOpti
 		lanes:                     normalizeLaneNodeTypes(cfg.lanes),
 		laneWriteMode:             cfg.laneWriteMode,
 		selector:                  cfg.selector,
-		keys:                      newRedisRunnerDirectoryKeys(redisRunnerDirectoryKeyPrefix),
+		keys:                      newRedisRunnerDirectoryKeys(cfg.keyPrefix),
 		claimCursors:              make(map[string]int),
 		claimWalks:                make(map[string]bool),
 	}

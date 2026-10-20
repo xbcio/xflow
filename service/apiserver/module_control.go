@@ -832,6 +832,14 @@ func (m *workflowControlModule) handleExecuteWorkflow(w http.ResponseWriter, r *
 			"workflow id is not accepted for an inline execute; use POST /v1/workflows/{id}/execute")
 		return
 	}
+	// Namespace is server-authoritative, exactly as on the register path
+	// (buildWorkflowRecord): the definition is compiled, hashed, and recorded
+	// under the caller's namespace, so the body's value is overwritten before
+	// any of them happen. Left as sent, an inline body naming another tenant
+	// would be hashed and persisted under that tenant, and the asynchronous
+	// dispatch of its sub-workflows would resolve them out of that tenant's
+	// registry.
+	req.Workflow.Namespace = string(namespace.FromContext(r.Context()))
 	// Compiled in the caller's namespace (server-issued by the authz wrapper,
 	// never the body): an inline definition carrying an xflow.subworkflow node
 	// pins its reference against the same registry the register path uses.

@@ -153,6 +153,37 @@ func RunEntryAdmissionContract(t *testing.T, newStore func(*testing.T) EntryAdmi
 		}
 	})
 
+	t.Run("RecordsTheAdmissionNamespace", func(t *testing.T) {
+		s := newStore(t)
+		g := triggerGroupOnlyGraph(t)
+		// The admission's namespace is the registration namespace; dispatch runs
+		// under a queue ctx that names the deployment instead. A backend that
+		// does not persist the admission's value sends a non-default-namespace
+		// execution's sub-workflow lookups back to the ctx fallback, which misses.
+		nsCtx := namespace.WithNamespace(ctx, namespace.Namespace("tenant-x"))
+		req := buildAdmissionRequest(t, g, "k-namespace", engine.GroupOutcomeSuccess,
+			[]engine.BoundaryExit{{NodeName: "body", Port: "main", Data: map[string]any{"x": 1}}},
+			nil)
+		req.Namespace = "tenant-x"
+		resp, err := s.SeedExecutionFromEntry(nsCtx, req)
+		if err != nil {
+			t.Fatalf("SeedExecutionFromEntry: %v", err)
+		}
+		if resp.State != engine.AdmissionStateAccepted {
+			t.Fatalf("state = %q, want accepted", resp.State)
+		}
+		snap, err := s.GetExecution(nsCtx, resp.ExecutionID)
+		if err != nil {
+			t.Fatalf("GetExecution(%q): %v", resp.ExecutionID, err)
+		}
+		if snap == nil {
+			t.Fatalf("GetExecution(%q) = nil, want the seeded execution", resp.ExecutionID)
+		}
+		if snap.Namespace != "tenant-x" {
+			t.Fatalf("Namespace = %q, want %q", snap.Namespace, "tenant-x")
+		}
+	})
+
 	t.Run("DuplicateAccepted_SameKeyAndHash", func(t *testing.T) {
 		s := newStore(t)
 		g := triggerGroupOnlyGraph(t)

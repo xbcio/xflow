@@ -9,6 +9,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
@@ -31,6 +32,25 @@ type GRPCServer struct {
 // GRPCServerOption configures a gRPC control-plane server.
 type GRPCServerOption func(*GRPCServer)
 
+// Runner-protocol keepalive. Without it a half-open connection (a silently
+// dropped TCP path, a suspended VM, a middlebox that forgot the flow) looks
+// established to both ends: writes buffer and reads block. The runner-side
+// per-RPC deadlines eventually fail an individual call, but only keepalive
+// turns the dead path into a closed connection that grpc-go re-establishes,
+// which is what every layer above needs to make progress again.
+const (
+	// runnerGRPCKeepaliveTime is the idle interval before a keepalive ping in
+	// both directions. Time+Timeout (20s+10s) equals protocol.RunnerLiveTTL
+	// (30s), so keepalive notices a dead peer only as the control plane stops
+	// counting it live; the runner-side heartbeat grace is what ends an
+	// unresponsive session sooner. PermitWithoutStream keeps that true between
+	// polls, when a runner can have no active stream at all.
+	runnerGRPCKeepaliveTime = 20 * time.Second
+	// runnerGRPCKeepaliveTimeout is how long a keepalive ping waits for its ack
+	// before the connection is declared dead.
+	runnerGRPCKeepaliveTimeout = 10 * time.Second
+)
+
 // RunnerGRPCServerOptions returns the grpc.ServerOptions every grpc.Server
 // hosting the runner protocol must be built with. Today that is a receive
 // limit of MaxRegisterRunnerBodyBytes, so a Register the HTTP transport
@@ -39,6 +59,12 @@ type GRPCServerOption func(*GRPCServer)
 // RunnerGRPCDialOptions accepts. Without the send limit grpc-go would send up
 // to MaxInt32, and an oversize message would fail on the runner as an opaque
 // ResourceExhausted instead of on the server, where it can be logged.
+//
+// It also installs keepalive: the server pings idle connections so a dead
+// runner is eventually dropped, and its enforcement policy admits the pings
+// RunnerGRPCDialOptions sends from an idle runner. The default enforcement
+// policy (MinTime 5m, no pings without a stream) would answer those pings with
+// too_many_pings and close a healthy runner between polls.
 //
 // PollTask does not rely on the send limit for leases: it measures the
 // encoded response itself and fails a lease too large to deliver (see
@@ -57,6 +83,14 @@ func RunnerGRPCServerOptions() []grpc.ServerOption {
 	return []grpc.ServerOption{
 		grpc.MaxRecvMsgSize(MaxRegisterRunnerBodyBytes),
 		grpc.MaxSendMsgSize(MaxRegisterRunnerBodyBytes),
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			Time:    runnerGRPCKeepaliveTime,
+			Timeout: runnerGRPCKeepaliveTimeout,
+		}),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             runnerGRPCKeepaliveTime / 2,
+			PermitWithoutStream: true,
+		}),
 	}
 }
 
@@ -66,11 +100,23 @@ func RunnerGRPCServerOptions() []grpc.ServerOption {
 // them grpc-go's 4 MiB default receive limit rejects a server message the
 // server is allowed to send, and the runner sees only an opaque
 // ResourceExhausted.
+//
+// It also enables keepalive with PermitWithoutStream. A unary-only runner has
+// no stream between calls, and an idle runner waiting for work is precisely
+// when a silently dropped connection would otherwise go unnoticed until the
+// next RPC deadline; the ping is what detects it and lets grpc-go reconnect.
 func RunnerGRPCDialOptions() []grpc.DialOption {
-	return []grpc.DialOption{grpc.WithDefaultCallOptions(
-		grpc.MaxCallRecvMsgSize(MaxRegisterRunnerBodyBytes),
-		grpc.MaxCallSendMsgSize(MaxRegisterRunnerBodyBytes),
-	)}
+	return []grpc.DialOption{
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(MaxRegisterRunnerBodyBytes),
+			grpc.MaxCallSendMsgSize(MaxRegisterRunnerBodyBytes),
+		),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:                runnerGRPCKeepaliveTime,
+			Timeout:             runnerGRPCKeepaliveTimeout,
+			PermitWithoutStream: true,
+		}),
+	}
 }
 
 // WithGRPCAuthenticator installs a runner-protocol authenticator on the gRPC

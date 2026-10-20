@@ -148,6 +148,26 @@ func (e *Engine) executeSubWorkflow(ctx context.Context, task *Task, g *graph.Gr
 	}
 	generation := subWorkflowGeneration(task.Generation)
 	child, cause := e.startSubWorkflowChild(ctx, task, g, meta, generation)
+	if cause == nil {
+		// The status read inside startSubWorkflowChild happened before the child
+		// existed, and the inline cancel cascade walks recorded links — which this
+		// dispatch has not written yet. A cancel landing between the two is
+		// therefore visible to neither, so the dispatch re-reads the parent here,
+		// before it commits to the park. Without this read the node would park and
+		// the child would run until the wait's reclaim (up to subWorkflowWaitTTL)
+		// rediscovered the parent, even though the answer is already decided.
+		canceling, err := e.subWorkflowParentCanceling(ctx, task.ExecutionID)
+		if err != nil {
+			// Fail the dispatch instead of parking on an unreadable status: a park
+			// commits the wait for a parent that may already be canceled, and undoing
+			// that commit is exactly the reclaim delay this check exists to avoid.
+			// The failed delivery is retried by the sweeper, and the retry re-reads.
+			return fmt.Errorf("re-read parent execution %q after starting child %q: %w", task.ExecutionID, child.ID, err)
+		}
+		if canceling {
+			cause = errSubWorkflowParentCanceling
+		}
+	}
 	if errors.Is(cause, errSubWorkflowParentCanceling) {
 		// The parent is on its way down: this delivery raced the inline cancel
 		// cascade, or the cancel landed before the child existed. Either way the
@@ -336,12 +356,17 @@ func (e *Engine) startSubWorkflowChild(ctx context.Context, task *Task, g *graph
 		return subWorkflowChild{}, fmt.Errorf("node %q: child execution depth %d exceeds the limit %d: %w (%w)",
 			task.NodeName, child.Depth, e.maxSubWorkflowDepth, graph.ErrSubWorkflowDepth, types.ErrPermanent)
 	}
-	// The namespace is filled in here rather than recorded at compile time: a
-	// WorkflowDef carries none, and a resolver is bound to one namespace by its
-	// adapter. This call is the adapter's one chance to reject a mismatch, which
-	// is what makes cross-namespace references unreachable by construction.
+	// Resolve the binding against the namespace the PARENT was registered under,
+	// carried on its snapshot. The ctx namespace is not usable here: this task
+	// came off a queue whose worker starts from context.Background(), so ctx
+	// only names the deployment. A snapshot written before the field existed
+	// carries no namespace; fall back to the ctx behavior it was created with.
+	refNamespace := snap.Namespace
+	if refNamespace == "" {
+		refNamespace = string(namespace.FromContext(ctx))
+	}
 	target, err := e.subWorkflowResolver.ResolveSubWorkflow(ctx, graph.SubWorkflowRef{
-		Namespace:      string(namespace.FromContext(ctx)),
+		Namespace:      refNamespace,
 		Name:           binding.Name,
 		Version:        binding.Version,
 		DefinitionHash: binding.DefinitionHash,
@@ -424,6 +449,9 @@ func (e *Engine) startSubWorkflowChild(ctx context.Context, task *Task, g *graph
 		ParentID:   task.ExecutionID,
 		ParentNode: task.NodeName,
 		Depth:      child.Depth,
+		// The child is registered under the same namespace as its parent: the
+		// binding that created it was resolved in that namespace.
+		Namespace: snap.Namespace,
 		// Trace identity is inherited so the child's spans land on the parent's
 		// trace. Runtime and scope deliberately are NOT: $vars belongs to the
 		// child's own definition, and its two sources would be indistinguishable

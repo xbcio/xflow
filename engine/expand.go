@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -170,6 +171,16 @@ func expansionBatchTask(lease *TaskLease, childID types.ExecutionID, batchIndex 
 	if !lease.IssuedAt.IsZero() {
 		payload["parent_issued_at"] = lease.IssuedAt.UTC().Format(time.RFC3339Nano)
 	}
+	// The parent's namespace travels the same way and for the same reason: the
+	// batch runs on the far side of a queue boundary whose worker ctx starts
+	// from context.Background() (or, on a runner, in another process), so the
+	// rebuilt lease is the only carrier left. runBatchBody re-anchors the body
+	// ctx off lease.Namespace; without this field that branch is dead and the
+	// re-anchor can only fall back to the engine's own namespace, which is not
+	// the parent's in a multi-namespace process.
+	if lease.Namespace != "" {
+		payload["parent_namespace"] = string(lease.Namespace)
+	}
 	if all, ok := data["items"].([]any); ok {
 		payload["all_items"] = all
 	}
@@ -211,6 +222,17 @@ func (e *Engine) ExecuteBatch(ctx context.Context, t *Task) error {
 	if err != nil {
 		return err
 	}
+	// Everything in this function runs on the TASK's ctx. Its namespace is
+	// the one the execution's records live under — the same namespace every
+	// other task path addresses them with. The batch lease's own namespace
+	// (the tenant the BODY resolves supplies and packages for) is deliberately
+	// NOT applied to it: the two can legitimately differ — a cluster engine
+	// whose SDK namespace differs from the namespace its executions are
+	// submitted under — and overriding the state ctx with the lease's would
+	// point loadActiveGraph and the lease fences below at a namespace where
+	// the execution does not exist, failing the batch as ErrExecutionInactive
+	// and stranding the map node. The re-anchor happens only where the body
+	// runtime is entered, in runBatchBody.
 	batchIndex, err := batchIndexOf(t)
 	if err != nil {
 		return err
@@ -331,7 +353,24 @@ func (e *Engine) runBatchBody(ctx context.Context, g *graph.Graph, lease *TaskLe
 	// is exactly one batch: the same ctx goes into the body and the same
 	// collector is read out below.
 	ctx, uses := types.WithArtifactUseCollector(ctx)
-	itemResults, err := e.batchBodyExecutor.ExecuteBatchBody(ctx, BatchBodyRequest{
+	// Re-anchor the batch's namespace onto the ctx the body runtime receives —
+	// and ONLY onto that one. It was already lost once: this task came off a
+	// queue whose worker starts from context.Background(), so the map node's
+	// own execution ctx — which did carry the namespace — is not an ancestor
+	// of this one. The parent lease carries it as data (stamped when the
+	// parent's lease was built, rebuilt from the batch payload); the engine's
+	// own namespace is the fallback for a parent that predates the field. The
+	// body runtime reads the namespace back off this ctx to seed the inner
+	// engine, whose own queue will drop it again — this is the chain of
+	// custody, not a convenience. The state reads above keep the task's
+	// original ctx, for the reason in ExecuteBatch.
+	bodyCtx := ctx
+	if lease.Namespace != "" {
+		bodyCtx = namespace.WithNamespace(bodyCtx, lease.Namespace)
+	} else if e.namespace != "" {
+		bodyCtx = namespace.WithNamespace(bodyCtx, e.namespace)
+	}
+	itemResults, err := e.batchBodyExecutor.ExecuteBatchBody(bodyCtx, BatchBodyRequest{
 		ExecutionID:     string(lease.Task.ExecutionID),
 		ParentNode:      lease.Task.NodeName,
 		Body:            body.Package,
@@ -567,11 +606,17 @@ func expansionBatchLease(t *Task) (*TaskLease, types.ExecutionID, []any, error) 
 	if err != nil {
 		return nil, "", nil, err
 	}
+	// Optional on purpose: a batch task queued before parent_namespace existed
+	// has no field, and an empty value means "unstamped" everywhere Namespace
+	// is read — runBatchBody then falls back to the engine's own namespace,
+	// exactly as it did when this field did not exist.
+	parentNamespace, _ := data["parent_namespace"].(string)
 	items, _ := data["items"].([]any)
 	return &TaskLease{
 		LeaseID:    LeaseID(leaseID),
 		LeaseToken: LeaseToken(leaseToken),
 		Attempt:    attempt,
+		Namespace:  namespace.Namespace(parentNamespace),
 		Task: Task{
 			ExecutionID:  types.ExecutionID(parentExecID),
 			NodeName:     parentNode,

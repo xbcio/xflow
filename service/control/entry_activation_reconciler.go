@@ -84,19 +84,19 @@ type EntryActivationMetrics interface {
 	// "deactivate". There is no "revoke" — protocol.DeactivateDirective carries
 	// no reason field, so every stop the reconciler produces is reported the
 	// same way.
-	OnGroupActivation(action string)
+	OnGroupActivation(ns namespace.Namespace, action string)
 	// OnGroupActivationFenced reports that an Assign call lost the generation
 	// race (Store.Assign returned assigned == false, err == nil): a concurrent
 	// writer already advanced the generation past the one this reconciler pass
 	// tried to claim.
-	OnGroupActivationFenced()
+	OnGroupActivationFenced(ns namespace.Namespace)
 	// SetGroupActivationActive sets the gauge of currently active GROUP
-	// activations. It carries NO label, so it must be called exactly once per
-	// Reconcile pass with the total summed across every configured namespace —
-	// never from inside a per-namespace loop, which would let the last
-	// namespace's count silently overwrite every prior namespace's
-	// contribution (an undercount, not an error).
-	SetGroupActivationActive(value float64)
+	// activations in ONE namespace. It is called once per configured namespace
+	// on every Reconcile pass, including with 0 for a namespace that has none:
+	// a gauge that is only written when non-zero would keep reporting the last
+	// non-zero value after the namespace drained. The deployment-wide figure is
+	// the sum over the namespace label.
+	SetGroupActivationActive(ns namespace.Namespace, value float64)
 	// OnGroupSelectorFallback reports that fallbackChooseRunner succeeded: a
 	// "default"-mode activation's grace window elapsed with no label-matching
 	// runner available, so it was assigned to a non-matching (but capable,
@@ -105,7 +105,7 @@ type EntryActivationMetrics interface {
 	// fallbackChooseRunner also returns false on every grace-window-pending
 	// poll, and counting those would report reconcile-pass frequency rather
 	// than fallback events.
-	OnGroupSelectorFallback()
+	OnGroupSelectorFallback(ns namespace.Namespace)
 	// OnGroupActivationRedelivered reports that the reconciler re-sent a
 	// directive from the runner's own hosted-activation report: action
 	// "activate" when the report showed the assigned activation was not
@@ -115,7 +115,7 @@ type EntryActivationMetrics interface {
 	// to make visible — and, unlike the counters above, it is reported for
 	// GROUP entry units only for the same reason they are: these are the
 	// xflow_group_* activation-controller series.
-	OnGroupActivationRedelivered(action string)
+	OnGroupActivationRedelivered(ns namespace.Namespace, action string)
 }
 
 // EntryActivationReconcilerConfig configures an EntryActivationReconciler.
@@ -483,21 +483,27 @@ func (r *EntryActivationReconciler) Reconcile(ctx context.Context, now time.Time
 	r.pruneNoMatch(seen)
 	r.pruneRetryBackoff(seen)
 
-	// The gauge is set exactly once per pass, here at the Reconcile driver —
-	// NEVER inside the per-namespace loop above (activations is already the
-	// union of every configured namespace by this point). SetGroupActivationActive
-	// carries no namespace label, so setting it once per namespace would let the
-	// last namespace's count silently overwrite every prior namespace's
-	// contribution: an undercount that looks like "only one namespace has
-	// groups," which is worse than not reporting at all.
+	// The gauge is written for EVERY configured namespace on every pass, not
+	// only for namespaces that currently hold an active group: the series is
+	// keyed by namespace, so a namespace that is skipped when empty would keep
+	// exporting its last non-zero value after its groups stopped. Counts are
+	// taken after both phases above so they reflect the assignments this pass
+	// just made, and are bucketed by the activation's own namespace.
 	if r.cfg.Metrics != nil {
-		active := 0
+		active := make(map[namespace.Namespace]int, len(r.cfg.Namespaces))
+		for _, ns := range r.cfg.Namespaces {
+			active[ns] = 0
+		}
 		for i := range activations {
 			if activations[i].NodeType == engine.GroupNodeType && activations[i].RunnerID != "" {
-				active++
+				if _, configured := active[activations[i].Namespace]; configured {
+					active[activations[i].Namespace]++
+				}
 			}
 		}
-		r.cfg.Metrics.SetGroupActivationActive(float64(active))
+		for _, ns := range r.cfg.Namespaces {
+			r.cfg.Metrics.SetGroupActivationActive(ns, float64(active[ns]))
+		}
 	}
 	return nil
 }
@@ -585,7 +591,7 @@ func (r *EntryActivationReconciler) recordGroupActivation(act *engine.EntryActiv
 	if r.cfg.Metrics == nil || act.NodeType != engine.GroupNodeType {
 		return
 	}
-	r.cfg.Metrics.OnGroupActivation(action)
+	r.cfg.Metrics.OnGroupActivation(act.Namespace, action)
 }
 
 // recordGroupActivationFenced reports a lost generation race to cfg.Metrics,
@@ -594,7 +600,7 @@ func (r *EntryActivationReconciler) recordGroupActivationFenced(act *engine.Entr
 	if r.cfg.Metrics == nil || act.NodeType != engine.GroupNodeType {
 		return
 	}
-	r.cfg.Metrics.OnGroupActivationFenced()
+	r.cfg.Metrics.OnGroupActivationFenced(act.Namespace)
 }
 
 // recordGroupSelectorFallback reports a successful default-selector fallback
@@ -607,7 +613,7 @@ func (r *EntryActivationReconciler) recordGroupSelectorFallback(act *engine.Entr
 	if r.cfg.Metrics == nil || act.NodeType != engine.GroupNodeType {
 		return
 	}
-	r.cfg.Metrics.OnGroupSelectorFallback()
+	r.cfg.Metrics.OnGroupSelectorFallback(act.Namespace)
 }
 
 func (r *EntryActivationReconciler) reconcileExisting(ctx context.Context, act *engine.EntryActivation, live []RunnerSnapshot, owners map[logicalActivationKey]map[string]struct{}, hosted hostedActivationsView, now time.Time) error {
@@ -1729,11 +1735,23 @@ func (r *EntryActivationReconciler) projectPackageForGroup(ctx context.Context, 
 	if r.cfg.WorkflowRegistry == nil {
 		return nil
 	}
-	rec, err := r.cfg.WorkflowRegistry.GetWorkflow(ctx, act.WorkflowID)
+	// The registry scopes its records by the context namespace (the distributed
+	// registry derives its key from namespace.FromContext), and this function's
+	// ctx is the control-plane reconcile loop's, which carries no namespace —
+	// FromContext falls back to Default. Reading without attaching the
+	// activation's namespace therefore looks the workflow up in the wrong
+	// deployment: invisible for a control plane that owns only Default (the
+	// fallback happens to be the truth there, which is why this survived until
+	// a dedicated namespace actually reconciled), fatal for a dedicated one,
+	// where every group activation would decline on the runner with "directive
+	// carries no package" because the projection found no workflow. Same trap
+	// the subworkflow resolver documents; same fix.
+	nsCtx := namespace.WithNamespace(ctx, act.Namespace)
+	rec, err := r.cfg.WorkflowRegistry.GetWorkflow(nsCtx, act.WorkflowID)
 	if err != nil {
 		if r.cfg.Logger != nil {
 			r.cfg.Logger.Warn("entry activation: resolve workflow for group package projection failed",
-				"workflow_id", act.WorkflowID, "entry_unit_id", act.EntryUnitID, "err", err)
+				"namespace", act.Namespace, "workflow_id", act.WorkflowID, "entry_unit_id", act.EntryUnitID, "err", err)
 		}
 		return nil
 	}
@@ -1754,7 +1772,7 @@ func (r *EntryActivationReconciler) projectPackageForGroup(ctx context.Context, 
 	if err != nil {
 		if r.cfg.Logger != nil {
 			r.cfg.Logger.Warn("entry activation: project group package failed",
-				"workflow_id", act.WorkflowID, "entry_unit_id", act.EntryUnitID, "err", err)
+				"namespace", act.Namespace, "workflow_id", act.WorkflowID, "entry_unit_id", act.EntryUnitID, "err", err)
 		}
 		return nil
 	}
@@ -1764,7 +1782,7 @@ func (r *EntryActivationReconciler) projectPackageForGroup(ctx context.Context, 
 		// activation here instead, with both values recorded.
 		if r.cfg.Logger != nil {
 			r.cfg.Logger.Error("entry activation: group package hash drift; refusing to ship package",
-				"workflow_id", act.WorkflowID, "entry_unit_id", act.EntryUnitID,
+				"namespace", act.Namespace, "workflow_id", act.WorkflowID, "entry_unit_id", act.EntryUnitID,
 				"stored_hash", act.PackageHash, "projected_hash", hash)
 		}
 		return nil

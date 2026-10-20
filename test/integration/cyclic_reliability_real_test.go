@@ -73,6 +73,28 @@ func (q *cyclicFakeQueue) count() int {
 	return len(q.tasks)
 }
 
+// waitForTasks drains the fake queue until at least want tasks have arrived, or
+// ten seconds pass, and returns everything it collected.
+//
+// The inline flush is not the only deliverer: Bind starts a background
+// OutboxDispatcher on a one-second tick, and its lease can win the claim between
+// the inline flush and this drain. The task then lands a moment later instead of
+// inside Submit/CommitTaskResult. These helpers assert what was delivered, not
+// which deliverer won, so they wait for the delivery itself.
+func (env *cyclicReliabilityEnv) waitForTasks(want int) []*engine.Task {
+	deadline := time.Now().Add(10 * time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	var tasks []*engine.Task
+	for {
+		tasks = append(tasks, env.queue.drain()...)
+		if len(tasks) >= want || time.Now().After(deadline) {
+			return tasks
+		}
+		<-ticker.C
+	}
+}
+
 // cyclicReliabilityGraph builds the start<->review cyclic graph used by the
 // engine's own cyclic durability unit test: start.main -> review,
 // review.reject -> start. AllowCycles is required so the legacy cyclic commit
@@ -168,8 +190,9 @@ func (env *cyclicReliabilityEnv) submitCyclic(t *testing.T, ctx context.Context,
 	if err != nil {
 		t.Fatalf("Submit() error = %v", err)
 	}
-	// Submit's inline flushInitialOutbox delivers the root start task; drain it.
-	tasks := env.queue.drain()
+	// Submit's inline flushInitialOutbox normally delivers the root start task,
+	// but the background dispatcher may win the claim; wait for the delivery.
+	tasks := env.waitForTasks(1)
 	if len(tasks) != 1 || tasks[0].NodeName != "start" {
 		t.Fatalf("after Submit delivered = %+v, want one start task", tasks)
 	}
@@ -188,7 +211,7 @@ func (env *cyclicReliabilityEnv) commitStart(t *testing.T, ctx context.Context, 
 	if err := env.eng.CommitTaskResult(ctx, startLease, engine.TaskResult{Output: &types.Output{Port: "main", Data: map[string]any{"round": 1}}}); err != nil {
 		t.Fatalf("CommitTaskResult(start) error = %v", err)
 	}
-	tasks := env.queue.drain()
+	tasks := env.waitForTasks(1)
 	if len(tasks) != 1 || tasks[0].NodeName != "review" {
 		t.Fatalf("after start commit delivered = %+v, want one review task", tasks)
 	}
@@ -413,7 +436,7 @@ func TestCyclicReliabilityRealRedis(t *testing.T) {
 		if outcome1 != engine.CommitOutcomeAccepted {
 			t.Fatalf("first commit outcome = %q, want %q", outcome1, engine.CommitOutcomeAccepted)
 		}
-		first := env.queue.drain()
+		first := env.waitForTasks(1)
 		if len(first) != 1 || first[0].NodeName != "start" {
 			t.Fatalf("first commit delivered = %+v, want one downstream start task", first)
 		}

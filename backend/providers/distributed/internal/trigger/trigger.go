@@ -78,6 +78,15 @@ func (p *Primitives) Dedup(ctx context.Context, key string, ttl time.Duration) (
 	return p.rdb.SetNX(ctx, triggerDedupKey(t, key), "1", ttl).Result()
 }
 
+// ReleaseDedup removes a claim whose emission failed, so a redelivery is
+// admitted instead of being answered as a duplicate for the rest of the TTL.
+// The key is namespaced exactly as Dedup namespaced it; the caller releases
+// only the claim it just won, so the delete is unconditional.
+func (p *Primitives) ReleaseDedup(ctx context.Context, key string) error {
+	t := namespace.FromContext(ctx)
+	return p.rdb.Del(ctx, triggerDedupKey(t, key)).Err()
+}
+
 func (p *Primitives) TryLock(ctx context.Context, key string, ttl time.Duration) (types.TriggerLock, bool, error) {
 	ttl = normalizeTriggerLockTTL(ttl)
 	t := namespace.FromContext(ctx)

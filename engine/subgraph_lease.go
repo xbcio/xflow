@@ -161,6 +161,18 @@ func (e *Engine) BuildSubgraphLease(ctx context.Context, t *Task) (*TaskLease, *
 		IssuedAt:    time.Now().UTC(),
 		TTL:         e.defaultLeaseTTL,
 	}
+	// The parent's namespace is the authoritative one — it was stamped where
+	// the parent's lease was built (the control plane's claim, or this
+	// engine's own WithNamespace). The engine's own namespace is the fallback
+	// for a parent lease that predates the field. Same reasoning as
+	// BuildTaskLease: the batch body's handler ctx is rebuilt from
+	// context.Background() on the runner, so the namespace must ride as lease
+	// data or $supplies resolves against Default.
+	if parentLease.Namespace != "" {
+		lease.Namespace = parentLease.Namespace
+	} else if e.namespace != "" {
+		lease.Namespace = e.namespace
+	}
 
 	payload := &SubgraphLeasePayload{
 		ProtocolVersion: 1,

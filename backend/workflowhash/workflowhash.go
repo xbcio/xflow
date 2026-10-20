@@ -154,7 +154,7 @@ func Audit(def *types.WorkflowDef, md *types.WorkflowEditorMetadata) (string, er
 // types.WorkflowDef itself (which would also require Runtime to grow an
 // exclusion for it).
 type auditPayload struct {
-	Definition     *types.WorkflowDef             `json:"definition,omitempty"`
+	Definition     *types.WorkflowDef            `json:"definition,omitempty"`
 	EditorMetadata *types.WorkflowEditorMetadata `json:"editor_metadata,omitempty"`
 }
 

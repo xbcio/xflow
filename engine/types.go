@@ -347,6 +347,12 @@ type ExecutionSnapshot struct {
 	// engine started itself, and for a sub-execution, whose source is ParentID
 	// rather than a node.
 	RerunFrom string `json:"rerun_from,omitempty"`
+	// Namespace is the namespace this execution was REGISTERED under (the
+	// WorkflowDef.Namespace at submission), persisted so an asynchronous
+	// dispatch can resolve sub-workflows without relying on the queue ctx.
+	// Empty on snapshots written before this field existed; readers must fall
+	// back to the ctx namespace in that case.
+	Namespace string `json:"namespace,omitempty"`
 	// Error is the execution-level failure reason recorded by
 	// UpdateExecutionStatus. It is the ONLY carrier when no node holds the
 	// reason: a cyclic execution that trips MaxAutoDepth fails with every node

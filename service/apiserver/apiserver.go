@@ -131,6 +131,15 @@ type Config struct {
 	// to serve those namespaces must have declared them at registration (an
 	// empty declaration means default only).
 	EntryNamespaces []namespace.Namespace
+	// OwnedNamespaces declares the namespace set this deployment owns on shared
+	// infrastructure (see control.Config.OwnedNamespaces, which this threads to
+	// verbatim). The same set is also handed to the distributed backend, so the
+	// leader lease, maintenance sweeps and queue names it derives agree with the
+	// control plane's workers and runner directory: passing it to only one of
+	// the two would be rejected by control.NewControlPlane as inconsistent. Empty
+	// keeps the legacy unscoped behavior, byte for byte. It has no effect on the
+	// in-memory backend, which has no shared infrastructure to isolate.
+	OwnedNamespaces []namespace.Namespace
 	// TrustedProxies contains direct-peer CIDRs allowed to supply
 	// X-Forwarded-For to the runner protocol. Empty ignores forwarding headers.
 	TrustedProxies []netip.Prefix
@@ -531,6 +540,7 @@ func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 		RunnerInstanceIdleTTL:          cfg.RunnerInstanceIdleTTL,
 		RunnerInstancePruneInterval:    cfg.RunnerInstancePruneInterval,
 		EntryNamespaces:                cfg.EntryNamespaces,
+		OwnedNamespaces:                cfg.OwnedNamespaces,
 		TrustedProxies:                 cfg.TrustedProxies,
 		IdentityTTL:                    cfg.IdentityTTL,
 		LeaseTTL:                       cfg.LeaseTTL,
@@ -569,6 +579,9 @@ func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 			distributed.WithConsumer(true),
 			distributed.WithOutboxDiscoveryPage(cfg.OutboxDiscoveryPage),
 			distributed.WithOutputCompression(cfg.OutputCompression),
+			// The backend derives the leader key, sweep scope and queue names
+			// from the same set the control plane filters its workers by.
+			distributed.WithOwnedNamespaces(cfg.OwnedNamespaces),
 		}
 		if cfg.Metrics != nil {
 			opts = append(opts,
@@ -778,6 +791,51 @@ func (s *APIServer) ReplaceWorkflow(ctx context.Context, ns namespace.Namespace,
 	}
 	id, diag, err := s.ctrl.replaceWorkflow(ctx, ns, def)
 	return id, diag.Warnings, err
+}
+
+// RemoveWorkflow deregisters the workflow addressed by id — the in-process
+// entry point behind DELETE /v1/workflows/{id}, for an embedded host whose own
+// process holds the control plane.
+//
+// It delegates to the module method that serves the HTTP route, so the
+// ordering contract is identical: the workflow's desired entry activations are
+// cleared BEFORE the registry record is removed, making a partial failure
+// retryable and leaving no orphaned Desired activation that the reconciler
+// would keep honoring. Removing an id that names no workflow in ns is
+// backend.ErrWorkflowNotFound.
+//
+// Like RegisterWorkflow and ReplaceWorkflow, it bypasses the authz wrapper by
+// construction: the caller is the host process, which already has full control
+// of the server. ns is authoritative and defaults to namespace.Default when
+// empty.
+func (s *APIServer) RemoveWorkflow(ctx context.Context, ns namespace.Namespace, id types.WorkflowID) error {
+	if s.ctrl == nil {
+		return errors.New("apiserver: workflow control module not initialized")
+	}
+	if id == "" {
+		return backend.ErrWorkflowNotFound
+	}
+	if ns == "" {
+		ns = namespace.Default
+	}
+	return s.ctrl.deregisterWorkflow(ctx, ns, id)
+}
+
+// RemoveWorkflowByName is RemoveWorkflow for an embedded host that knows the
+// (name, version) identity it registered under but not the server-issued id.
+// Resolution and removal are both scoped to ns; a name that exists only in
+// another namespace is backend.ErrWorkflowNotFound.
+//
+// version must be the value that was registered. The builder's default is
+// "v1", so a host that never calls Version registers and removes under "v1".
+func (s *APIServer) RemoveWorkflowByName(ctx context.Context, ns namespace.Namespace, name, version string) error {
+	if s.ctrl == nil {
+		return errors.New("apiserver: workflow control module not initialized")
+	}
+	if ns == "" {
+		ns = namespace.Default
+	}
+	return s.ctrl.deregisterWorkflowByKey(ctx, ns, name, version)
 }
 
 // ListWorkflowVersions returns the version history of the workflow addressed by

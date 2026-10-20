@@ -205,11 +205,13 @@ const messages: Record<string, string> = {
   "Language family: js | wasm (no default \u2014 choose explicitly)": "语言：js | wasm（无默认值，须显式选择）",
   "Base64 wasip1 module": "Base64 编码的 wasip1 模块",
   "Runtime": "运行时",
-  "Engine: js->goja|qjs, wasm->wazero|wazero-reactor (no default \u2014 choose explicitly)":
-    "引擎：js->goja|qjs，wasm->wazero|wazero-reactor（无默认值，须显式选择）",
-  "Fastest cold start; cannot interrupt tight loops": "冷启动最快；无法中断死循环",
-  "Slower first load; genuine mid-execution termination": "首次加载较慢；可在执行中真正终止",
-  "Pooled reactor-mode guest instances": "池化的 reactor 模式实例",
+  "Engine: js->goja|qjs, wasm->wazero|wazero-reactor (no default \u2014 choose explicitly); wazero has no batch fast path, so a Kafka batch evaluates serially":
+    "引擎：js->goja|qjs，wasm->wazero|wazero-reactor（无默认值，须显式选择）；wazero 没有批量快路径，因此 Kafka 批次会逐条串行求值",
+  "Fastest cold start; interruptible, but no heap cap (trusted scripts only)": "冷启动最快；可中断，但无堆上限（仅限可信脚本）",
+  "Slower first load; interruptible, 16 MiB heap cap": "首次加载较慢；可中断，堆上限 16 MiB",
+  "Legacy command model; no batch fast path (a batch trigger evaluates records one by one)":
+    "传统命令模式；没有批量快路径（批量触发器会逐条求值记录）",
+  "Pooled reactor-mode guest instances; the batch fast path": "池化的 reactor 模式实例；批量快路径",
   "JS source (js) or base64 wasm module (wasm); omit when artifact_digest is set": "JS 源码（js）或 base64 wasm 模块（wasm）；设置 artifact_digest 时省略",
   "Artifact Digest": "制品摘要",
   "Content-addressable digest (sha256:<hex>) of the script in the artifact store": "脚本在制品库中的内容寻址摘要（sha256:<hex>）",
@@ -220,6 +222,19 @@ const messages: Record<string, string> = {
   "Declared credential names injected as $credentials": "以 $credentials 注入的已声明凭据名",
   "Roots": "数据根",
   "Expression roots the script reads; omit to send the whole environment": "脚本读取的表达式根；不设置则传入完整环境",
+
+  // ---------------------------------------------------------- subworkflow
+  "Sub-workflow": "子工作流",
+  "Workflow": "工作流",
+  "Name of the workflow to run, in the same namespace": "要运行的工作流名称，须位于同一命名空间",
+  "Version": "版本",
+  "Version to pin; empty resolves to the latest version at registration time": "要固定的版本；留空则在注册时解析为最新版本",
+  "Entry": "入口",
+  "Entry node of the child workflow; empty uses its default start": "子工作流的入口节点；留空则使用其默认起点",
+  "Input": "输入",
+  "Expressions producing the child execution's params": "生成子执行参数的表达式",
+  "Expressions over the child execution's public node outputs ($child) producing this node's output":
+    "基于子执行的公开节点输出（$child）生成该节点输出的表达式",
 
   // ---------------------------------------------------------- switch
   "Routing mode: \"rules\" or \"expression\"": "路由模式：\"rules\" 或 \"expression\"",

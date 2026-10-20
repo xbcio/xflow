@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/store"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -15,6 +17,7 @@ import (
 type runnerPoolRepo struct{ db *gorm.DB }
 
 var _ store.RunnerPoolStore = (*runnerPoolRepo)(nil)
+var _ store.ScopedRunnerInstanceLister = (*runnerPoolRepo)(nil)
 
 // NewRunnerPoolStore returns the SQL-backed runner pool store.
 func NewRunnerPoolStore(db *gorm.DB) store.RunnerPoolStore {
@@ -316,6 +319,66 @@ func (r *runnerPoolRepo) ListInstancesByState(ctx context.Context, state store.I
 	out := make([]store.RunnerInstance, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, rowToRunnerInstance(row))
+	}
+	return out, nil
+}
+
+// ListInstancesByStateIn implements store.ScopedRunnerInstanceLister. The scope
+// is decided by the owning pool: tenant pools by owner_namespace, platform pools
+// only when the scope includes them. deleted_at is deliberately not filtered, so
+// the instances of a soft-deleted pool remain reachable to the prune saga. The
+// WHERE clause is assembled from fixed fragments with every value bound, and an
+// empty scope returns before any query.
+func (r *runnerPoolRepo) ListInstancesByStateIn(ctx context.Context, owned []namespace.Namespace, state store.InstanceState) ([]store.ScopedRunnerInstance, error) {
+	scope := store.RunnerInstanceScopeFor(owned)
+	if scope.Empty() {
+		return nil, nil
+	}
+	var conds []string
+	args := []any{state}
+	if len(scope.TenantNamespaces) > 0 {
+		conds = append(conds, "(p.owner_kind = ? AND p.owner_namespace IN ?)")
+		args = append(args, store.PoolOwnerTenant, scope.TenantNamespaces)
+	}
+	if scope.IncludePlatform {
+		conds = append(conds, "p.owner_kind = ?")
+		args = append(args, store.PoolOwnerPlatform)
+	}
+	// Flat rather than embedding dbRunnerInstance: GORM skips unexported field
+	// names, and an embedded unexported type is named after itself, so the
+	// embedded columns would scan into nothing.
+	type scopedRow struct {
+		PoolID         string              `gorm:"column:pool_id"`
+		SystemID       string              `gorm:"column:system_id"`
+		RunnerID       string              `gorm:"column:runner_id"`
+		InstanceUID    string              `gorm:"column:instance_uid"`
+		State          store.InstanceState `gorm:"column:state"`
+		CreatedAt      time.Time           `gorm:"column:created_at"`
+		LastEnrolledAt time.Time           `gorm:"column:last_enrolled_at"`
+		StateChangedAt time.Time           `gorm:"column:state_changed_at"`
+		PoolOwnerKind  store.PoolOwnerKind `gorm:"column:pool_owner_kind"`
+	}
+	var rows []scopedRow
+	err := r.db.WithContext(ctx).
+		Table("xflow_runner_instances AS i").
+		Select("i.*, p.owner_kind AS pool_owner_kind").
+		Joins("JOIN xflow_runner_pools p ON p.id = i.pool_id").
+		Where("i.state = ? AND ("+strings.Join(conds, " OR ")+")", args...).
+		Order("i.state_changed_at ASC, i.runner_id ASC").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("list runner instances by state in scope: %w", err)
+	}
+	out := make([]store.ScopedRunnerInstance, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, store.ScopedRunnerInstance{
+			RunnerInstance: rowToRunnerInstance(dbRunnerInstance{
+				PoolID: row.PoolID, SystemID: row.SystemID, RunnerID: row.RunnerID,
+				InstanceUID: row.InstanceUID, State: row.State, CreatedAt: row.CreatedAt,
+				LastEnrolledAt: row.LastEnrolledAt, StateChangedAt: row.StateChangedAt,
+			}),
+			PoolOwnerKind: row.PoolOwnerKind,
+		})
 	}
 	return out, nil
 }

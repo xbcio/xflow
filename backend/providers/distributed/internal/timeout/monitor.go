@@ -54,6 +54,28 @@ type Monitor struct {
 	cancel   context.CancelFunc // cancels the ctx used by processTimeouts (#8b)
 	mu       sync.Mutex
 	once     sync.Once
+
+	// ownedNamespaces scopes processTimeouts when non-nil: the monitor scans
+	// exactly this set instead of the global namespace registry. nil preserves
+	// legacy behavior (registry + default injection). Written once via
+	// SetNamespaces before Run; read-only afterwards, hence no lock.
+	ownedNamespaces []namespace.Namespace
+}
+
+// SetNamespaces scopes the monitor to exactly the given set. It is the
+// monitor-side counterpart of rstate's owned-namespace scope: a process that
+// owns only its own namespaces must not scan or deliver timeouts for another
+// deployment's namespaces even on a shared Redis. Pass a normalized set
+// (namespace.NormalizeOwned); nil restores legacy behavior. Call it before
+// Run starts polling. The set is copied, so later mutation of the caller's
+// slice does not retroactively change the monitor's scope.
+func (m *Monitor) SetNamespaces(owned []namespace.Namespace) {
+	if owned == nil {
+		m.ownedNamespaces = nil
+		return
+	}
+	m.ownedNamespaces = make([]namespace.Namespace, len(owned))
+	copy(m.ownedNamespaces, owned)
 }
 
 // New creates a ZSET-based timeout monitor.
@@ -118,7 +140,7 @@ func (m *Monitor) Stop() {
 func (m *Monitor) processTimeouts(ctx context.Context, now time.Time) {
 	nowUnix := fmt.Sprintf("%d", now.Unix())
 
-	namespaces, err := rstate.ListNamespaces(ctx, m.rdb)
+	namespaces, err := m.scopedNamespaces(ctx)
 	if err != nil {
 		if m.logger != nil {
 			m.logger.Error("timeout monitor: list namespaces failed", "error", err)
@@ -128,6 +150,18 @@ func (m *Monitor) processTimeouts(ctx context.Context, now time.Time) {
 	for _, t := range namespaces {
 		m.processTimeoutsForNamespace(ctx, t, now, nowUnix)
 	}
+}
+
+// scopedNamespaces mirrors rstate's owned-namespace scope: a non-nil owned
+// set is iterated directly (no registry read, no default injection); nil
+// falls back to the shared registry exactly as before.
+func (m *Monitor) scopedNamespaces(ctx context.Context) ([]namespace.Namespace, error) {
+	if m.ownedNamespaces != nil {
+		out := make([]namespace.Namespace, len(m.ownedNamespaces))
+		copy(out, m.ownedNamespaces)
+		return out, nil
+	}
+	return rstate.ListNamespaces(ctx, m.rdb)
 }
 
 func (m *Monitor) processTimeoutsForNamespace(ctx context.Context, t namespace.Namespace, now time.Time, nowUnix string) {

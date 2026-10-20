@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -115,8 +116,8 @@ func TestStaleNodeStartsAreSweptByAge(t *testing.T) {
 	hooks := NewMetricsHooks(New())
 
 	old := time.Now().Add(-2 * nodeStartMaxAge)
-	hooks.storeNodeStartAt(types.ExecutionID("exec-vanished"), "transform", old)
-	hooks.storeNodeStartAt(types.ExecutionID("exec-fresh"), "transform", time.Now())
+	hooks.storeNodeStartAt(types.ExecutionID("exec-vanished"), namespace.Default, "transform", old)
+	hooks.storeNodeStartAt(types.ExecutionID("exec-fresh"), namespace.Default, "transform", time.Now())
 	if got := hooks.liveNodeStarts(); got != 2 {
 		t.Fatalf("seeded entries = %d, want 2", got)
 	}

@@ -162,11 +162,21 @@ func (p *Provider) resealSupplyRow(ctx context.Context, resealer SupplyResealer,
 			fail(fmt.Sprintf("seal: %v", err))
 			return nil
 		}
-		// UpdateColumn skips hooks and updated_at tracking: the content did not
-		// change, only its envelope. b64Bytes keeps the driver.Valuer on the
+		// The stored bytes change even though the plaintext does not: a fresh
+		// nonce makes the ciphertext different, so the row is rewritten.
+		// UpdateColumns skips hooks and GORM's own UpdatedAt bookkeeping, but
+		// that is not enough: db/xflow_schema.sql declares updated_at with
+		// ON UPDATE CURRENT_TIMESTAMP(3), a column-level DDL rule that fires on
+		// any UPDATE changing another column. Assigning updated_at to itself in
+		// the same statement is MySQL's documented way to suppress that rule,
+		// so a reseal still does not look like a content change to consumers
+		// ordering by updated_at. b64Bytes keeps the driver.Valuer on the
 		// static type (see PutSupply).
 		if err := tx.Model(&dbSupply{}).Where("id = ?", id).
-			UpdateColumn("content", b64Bytes(sealed)).Error; err != nil {
+			UpdateColumns(map[string]any{
+				"content":    b64Bytes(sealed),
+				"updated_at": gorm.Expr("updated_at"),
+			}).Error; err != nil {
 			return fmt.Errorf("reseal supplies: write row %d: %w", id, err)
 		}
 		report.Resealed++

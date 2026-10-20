@@ -5697,10 +5697,6 @@ components:
             $ref: "#/components/schemas/GroupDef"
         connections:
           $ref: "#/components/schemas/Connections"
-        outputs:
-          type: object
-          additionalProperties:
-            $ref: "#/components/schemas/WorkflowOutput"
         pin_data:
           type: object
           additionalProperties: true
@@ -6127,13 +6123,6 @@ components:
         parameters:
           type: object
           additionalProperties: true
-
-    WorkflowOutput:
-      type: object
-      properties:
-        value: {}
-        display_name:
-          type: string
 
     ScheduleView:
       type: object
