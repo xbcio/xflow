@@ -3,8 +3,9 @@ import type { RequestConfig, RequestOptions } from '@umijs/max';
 import { history } from '@umijs/max';
 import type { ReactNode } from 'react';
 
-import { applyUnauthorizedRedirect, isAuthEntryPath } from './auth';
-import { clearToken, getToken } from './services/token';
+import { isAuthEntryPath } from './auth';
+import { handleRequestError } from './requestError';
+import { getToken } from './services/token';
 import type { CurrentIdentity } from './services/user';
 import { fetchCurrentUser } from './services/user';
 
@@ -37,23 +38,6 @@ export async function getInitialState(): Promise<InitialState> {
     return { fetchUserInfo };
   }
   return { currentUser: await fetchUserInfo(), fetchUserInfo };
-}
-
-/**
- * 401 统一处理：清空令牌后按构建期 XFLOW_AUTH_LOGIN_URL 决定去向。
- * 未配置时落到应用内的 /unauthorized，而不是跳不存在的 /login（见 src/auth.ts）。
- * 非 401 原样抛出，交由调用方处理。
- */
-export function handleRequestError(error: unknown): void {
-  const status = (error as { response?: { status?: number } })?.response?.status;
-  if (status === 401) {
-    clearToken();
-    applyUnauthorizedRedirect(history.location.pathname, {
-      replace: (path) => history.replace(path),
-      assign: (url) => window.location.assign(url),
-    });
-  }
-  throw error;
 }
 
 /**
