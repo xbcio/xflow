@@ -48,6 +48,8 @@ func (n *NotificationNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.notification",
 		DisplayName: "Notification",
+		Category:    "action",
+		CardSummary: []string{"channel", "to"},
 		Params: []types.ParamSpec{
 			{Name: "channel", DisplayName: "Channel", Type: types.ParamString, Required: true, Description: "Notification channel such as email, sms, slack, webhook"},
 			{Name: "to", DisplayName: "To", Type: types.ParamString, Required: true, Description: "Recipient address or identifier"},

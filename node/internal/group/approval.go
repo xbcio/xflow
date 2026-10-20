@@ -132,6 +132,8 @@ func (n *ApprovalNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        ApprovalNodeType,
 		DisplayName: "Approval",
+		Category:    "human",
+		CardSummary: []string{"approvers", "mode+timeout"},
 		Params: []types.ParamSpec{
 			{Name: "approvers", DisplayName: "Approvers", Type: types.ParamArray, Required: true, Description: "List of approver identifiers",
 				Item: nodeinternal.StringItem(), Constraints: &types.Constraints{MinItems: &minApprovers}},
