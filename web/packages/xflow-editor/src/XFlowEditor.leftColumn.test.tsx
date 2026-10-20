@@ -85,6 +85,9 @@ const originalResizeObserver = globalThis.ResizeObserver;
 beforeEach(() => {
   preview.handle.fitView.mockClear();
   preview.handle.fitNode.mockClear();
+  // Panel collapse is persisted per workflow id (§6.0); a case that ends with
+  // the rail collapsed must not hand that state to the next case.
+  window.localStorage?.clear();
 });
 
 afterEach(() => {

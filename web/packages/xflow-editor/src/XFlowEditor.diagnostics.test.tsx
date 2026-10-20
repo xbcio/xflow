@@ -34,6 +34,9 @@ vi.mock("@xflow/preview", async (importOriginal) => {
 beforeEach(() => {
   preview.handle.fitView.mockClear();
   preview.handle.fitNode.mockClear();
+  // Panel collapse is persisted per workflow id (§6.0); a case that ends with
+  // the inspector collapsed must not hand that state to the next case.
+  window.localStorage?.clear();
 });
 
 const workflow: WorkflowDef = {
