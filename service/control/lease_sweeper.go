@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/types"
 )
 
 // DefaultSweepPeriod is how often the sweeper scans for expired leases when
@@ -48,11 +50,38 @@ const DefaultDeadQueuedAssignmentReapPeriod = 5 * time.Minute
 // the least urgent — the debt it settles has already waited out a claim expiry.
 const DefaultOrphanedHandoffReapPeriod = 5 * time.Minute
 
+// DefaultCancelingExecutionReapPeriod bounds how often the leader looks for
+// executions left in canceling by an interrupted Cancel. It is deliberately
+// shorter than the stuck age so the worst-case recovery latency stays close to
+// one threshold rather than two; the scan itself reads a small index, not the
+// keyspace.
+const DefaultCancelingExecutionReapPeriod = 30 * time.Second
+
+// DefaultCancelingExecutionStuckAfter is how long an execution may sit in
+// canceling before the leader treats the cancel as interrupted and re-drives
+// it. Cancel's own steps are a handful of store round trips, so anything near
+// this age is not a slow request; the margin exists so the reaper never races a
+// Cancel that is merely slow, which would duplicate its completion notification
+// (the state transitions themselves are fenced and safe either way).
+const DefaultCancelingExecutionStuckAfter = time.Minute
+
+// defaultCancelingExecutionReapBatch bounds one reaper page.
+const defaultCancelingExecutionReapBatch = 64
+
 // LeaseLister is the subset of engine.StateStore used by the sweeper to find
 // candidates for reclamation. The full StateStore interface satisfies this
 // shape implicitly.
 type LeaseLister interface {
 	ListExpiredLeases(ctx context.Context, before time.Time) ([]engine.ExpiredLease, error)
+}
+
+// CancelingExecutionCanceler is the engine capability the sweeper drives to
+// finish an interrupted cancel. *engine.Engine implements it; the sweeper
+// reaches it through an optional assertion because its engine parameter is the
+// narrower execution.Engine, and a host whose engine cannot cancel simply
+// leaves the pass unsupported rather than failing to build.
+type CancelingExecutionCanceler interface {
+	Cancel(ctx context.Context, id types.ExecutionID) error
 }
 
 // LeaseIndexRepairer is an optional backend capability that reconciles lease
@@ -127,6 +156,12 @@ type LeaseSweeper struct {
 	orphanedHandoffBatch  int
 	orphanedHandoffMu     sync.Mutex
 	lastOrphanedHandoff   time.Time
+
+	cancelingPeriod time.Duration
+	cancelingBatch  int
+	cancelingAge    time.Duration
+	cancelingMu     sync.Mutex
+	lastCanceling   time.Time
 }
 
 // SweepObserver receives lease-sweep outcomes so observability layers can
@@ -168,6 +203,10 @@ const (
 	// giving up and a leaked slot being reclaimed are different events with
 	// different causes.
 	SweepPassConcurrencyQueue = "concurrency_queue"
+	// SweepPassCancelingExecution is the stale-canceling reaper: executions
+	// left in canceling by an interrupted Cancel are found through the store's
+	// canceling index and driven to completion by calling Cancel again.
+	SweepPassCancelingExecution = "canceling_execution"
 )
 
 // Outcomes a maintenance pass reports.
@@ -309,6 +348,16 @@ type LeaseSweeperConfig struct {
 	// OrphanedHandoffReapBatch bounds one reaper call. Zero defaults to
 	// defaultOrphanedHandoffReapBatch.
 	OrphanedHandoffReapBatch int
+	// CancelingExecutionReapPeriod controls the optional stale-canceling reaper
+	// rate. Zero defaults to DefaultCancelingExecutionReapPeriod.
+	CancelingExecutionReapPeriod time.Duration
+	// CancelingExecutionReapBatch bounds one reaper page. Zero defaults to
+	// defaultCancelingExecutionReapBatch.
+	CancelingExecutionReapBatch int
+	// CancelingExecutionStuckAfter is the minimum age an execution must have
+	// spent in canceling before its Cancel is considered interrupted and
+	// re-driven. Zero defaults to DefaultCancelingExecutionStuckAfter.
+	CancelingExecutionStuckAfter time.Duration
 }
 
 // OrphanedHandoffReclaimer is the control-plane capability the sweeper drives to
@@ -361,6 +410,15 @@ func NewLeaseSweeper(state LeaseLister, eng execution.Engine, cfg LeaseSweeperCo
 	if cfg.OrphanedHandoffReapBatch <= 0 {
 		cfg.OrphanedHandoffReapBatch = defaultOrphanedHandoffReapBatch
 	}
+	if cfg.CancelingExecutionReapPeriod <= 0 {
+		cfg.CancelingExecutionReapPeriod = DefaultCancelingExecutionReapPeriod
+	}
+	if cfg.CancelingExecutionReapBatch <= 0 {
+		cfg.CancelingExecutionReapBatch = defaultCancelingExecutionReapBatch
+	}
+	if cfg.CancelingExecutionStuckAfter <= 0 {
+		cfg.CancelingExecutionStuckAfter = DefaultCancelingExecutionStuckAfter
+	}
 	var timingObserver SweepTimingObserver
 	if observer, ok := cfg.Observer.(SweepTimingObserver); ok {
 		timingObserver = observer
@@ -409,6 +467,10 @@ func NewLeaseSweeper(state LeaseLister, eng execution.Engine, cfg LeaseSweeperCo
 		orphanedHandoff:       cfg.OrphanedHandoffReaper,
 		orphanedHandoffPeriod: cfg.OrphanedHandoffReapPeriod,
 		orphanedHandoffBatch:  cfg.OrphanedHandoffReapBatch,
+
+		cancelingPeriod: cfg.CancelingExecutionReapPeriod,
+		cancelingBatch:  cfg.CancelingExecutionReapBatch,
+		cancelingAge:    cfg.CancelingExecutionStuckAfter,
 	}
 }
 
@@ -422,6 +484,7 @@ func (s *LeaseSweeper) Run(ctx context.Context) {
 	s.ReapStrandedLeasesOnce(ctx)
 	s.ReapDeadQueuedAssignmentsOnce(ctx)
 	s.ReapOrphanedHandoffsOnce(ctx)
+	s.ReapStuckCancelingExecutionsOnce(ctx)
 	s.ReportQueueDepthsOnce(ctx)
 	for {
 		if err := s.sleepFunc(ctx, s.period); err != nil {
@@ -432,6 +495,7 @@ func (s *LeaseSweeper) Run(ctx context.Context) {
 		s.ReapStrandedLeasesOnce(ctx)
 		s.ReapDeadQueuedAssignmentsOnce(ctx)
 		s.ReapOrphanedHandoffsOnce(ctx)
+		s.ReapStuckCancelingExecutionsOnce(ctx)
 		s.ReportQueueDepthsOnce(ctx)
 	}
 }
@@ -649,6 +713,108 @@ func (s *LeaseSweeper) ReapOrphanedHandoffsOnce(ctx context.Context) int {
 		s.log.Info("reaped orphaned runner handoffs", "settled", result.Released)
 	}
 	s.observePass(ctx, SweepPassOrphanedHandoff, SweepPassOutcomeRan, result)
+	return result.Released
+}
+
+// ReapStuckCancelingExecutionsOnce re-drives executions that an interrupted
+// Cancel left in canceling past the stuck threshold. It is leader-gated and
+// cadence-bounded like the other maintenance passes: the candidates are
+// cluster-wide, so every replica re-driving them would multiply the work
+// without changing the outcome, and the state it repairs is stranded rather
+// than in flight.
+//
+// This closes the one gap Cancel itself cannot: Cancel is idempotent and
+// resumable (see engine/cancel.go), but it only runs while the request that
+// started it is alive. A crash, a canceled context, or one failed store step
+// between the canceling write and the canceled write leaves the execution
+// canceling forever — no other path transitions it, and while it sits there it
+// keeps its workflow concurrency slot. The store's canceling index
+// (engine.CancelingExecutionLister) makes those executions findable; calling
+// Cancel again resumes from wherever the first attempt stopped, because every
+// step is fenced and tolerates being applied twice.
+//
+// The threshold exists so the reaper does not race a Cancel that is merely
+// slow. The state transitions are safe under that race either way — the final
+// canceled write is fenced and applied once — but the completion notification
+// fired by the losing call would duplicate. The default threshold is far above
+// Cancel's handful of store round trips.
+//
+// The page is bounded and oldest-first. A cancel that fails again is logged and
+// left for the next pass; ErrExecutionInactive is the benign answer (the
+// execution concluded between the list and the call, or was already gone) and
+// is not an error. Reported through the pass observer as inspected/released so
+// "found nothing", "found candidates and fixed none" and "not the leader" stay
+// distinguishable.
+func (s *LeaseSweeper) ReapStuckCancelingExecutionsOnce(ctx context.Context) int {
+	if s.elector != nil && !s.elector.IsLeader() {
+		s.observePass(ctx, SweepPassCancelingExecution, SweepPassOutcomeSkippedNotLeader, ReapResult{})
+		return 0
+	}
+	lister, ok := s.state.(engine.CancelingExecutionLister)
+	if !ok {
+		s.observePass(ctx, SweepPassCancelingExecution, SweepPassOutcomeUnsupported, ReapResult{})
+		return 0
+	}
+	canceler, ok := s.engine.(CancelingExecutionCanceler)
+	if !ok {
+		s.observePass(ctx, SweepPassCancelingExecution, SweepPassOutcomeUnsupported, ReapResult{})
+		return 0
+	}
+
+	now := s.clock()
+	s.cancelingMu.Lock()
+	if !s.lastCanceling.IsZero() && now.Sub(s.lastCanceling) < s.cancelingPeriod {
+		s.cancelingMu.Unlock()
+		s.observePass(ctx, SweepPassCancelingExecution, SweepPassOutcomeSkippedCadence, ReapResult{})
+		return 0
+	}
+	s.lastCanceling = now
+	s.cancelingMu.Unlock()
+
+	candidates, err := lister.ListCancelingExecutions(ctx, now.Add(-s.cancelingAge), s.cancelingBatch)
+	if err != nil {
+		if s.log != nil {
+			s.log.Error("list executions stuck in canceling", "err", err)
+		}
+		s.observePass(ctx, SweepPassCancelingExecution, SweepPassOutcomeError, ReapResult{})
+		return 0
+	}
+	result := ReapResult{Inspected: len(candidates)}
+	for _, candidate := range candidates {
+		select {
+		case <-ctx.Done():
+			s.observePass(ctx, SweepPassCancelingExecution, SweepPassOutcomeRan, result)
+			return result.Released
+		default:
+		}
+		// The candidate names the namespace its keys live under; the sweeper's
+		// own context is namespace-less because the scan spans every namespace
+		// the process serves. A backend without a namespace dimension leaves it
+		// empty, and the cancel runs on the context as-is.
+		execCtx := ctx
+		if candidate.Namespace != "" {
+			execCtx = namespace.WithNamespace(ctx, candidate.Namespace)
+		}
+		if err := canceler.Cancel(execCtx, candidate.ExecutionID); err != nil {
+			if !errors.Is(err, engine.ErrExecutionInactive) && s.log != nil {
+				s.log.Error("re-drive interrupted cancel failed",
+					"ns", string(candidate.Namespace),
+					"exec", string(candidate.ExecutionID),
+					"stuck_since", candidate.Since,
+					"err", err,
+				)
+			}
+			// Inactive is benign: the execution reached a terminal state between
+			// the list and this call, and the lister drops the stale entry on
+			// its next read. Both outcomes are retried on the next cadence.
+			continue
+		}
+		result.Released++
+	}
+	if result.Released > 0 && s.log != nil {
+		s.log.Info("re-drove interrupted cancels", "completed", result.Released)
+	}
+	s.observePass(ctx, SweepPassCancelingExecution, SweepPassOutcomeRan, result)
 	return result.Released
 }
 
