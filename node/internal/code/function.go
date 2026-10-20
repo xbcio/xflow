@@ -40,6 +40,8 @@ func (n *FunctionNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.function",
 		DisplayName: "Function",
+		Category:    "code",
+		CardSummary: []string{"function_name", "code"},
 		Params: []types.ParamSpec{
 			{Name: "function_name", DisplayName: "Function Name", Type: types.ParamString, Required: false, Description: "Name of a pre-registered Go function to call"},
 			{Name: "code", DisplayName: "Code", Type: types.ParamString, Required: false, Description: "Inline Expr expression to evaluate; ignored when function_name is set",
