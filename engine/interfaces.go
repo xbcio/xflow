@@ -116,6 +116,68 @@ type BatchOutputReader interface {
 	GetOutputs(ctx context.Context, id types.ExecutionID, names []string) (map[string]map[string]any, error)
 }
 
+// ExecutionInputContext is the narrow slice of an execution's state that
+// buildInput needs to assemble one node's input.
+//
+// It exists because buildInput runs on every task — BuildTaskLease and
+// RecoverTaskLease both call it — and reads exactly these fields, while the
+// snapshot it used to ask for is assembled from fourteen keys: the parent and
+// rerun links, the terminal error, the test-run flag, the graph pointer and the
+// registration namespace were decoded on every task and then dropped on the
+// floor.
+//
+// Runtime is the SAME typed value GetExecution returns (types.Runtime marshals
+// to {"vars": ...}); decoding it any other way would make the narrow read
+// disagree with the full one for $vars, which every node reads.
+//
+// TraceID and SpanID are part of the slice even though they are not business
+// input: execution/subgraph re-submits a child execution with the entry input's
+// trace identity, so a narrow read that dropped them would detach a whole
+// sub-execution from the caller's trace. A caller that skipped them would have
+// to fall back to the full snapshot and lose the saving entirely.
+type ExecutionInputContext struct {
+	Status  types.ExecutionStatus
+	Params  map[string]any
+	Runtime *types.Runtime
+	Scope   map[string]any
+	TraceID string
+	SpanID  string
+}
+
+// ExecutionInputContextReader is the optional narrow form of
+// Executions.GetExecution used by buildInput.
+//
+// found=false means no such execution, which is the same signal GetExecution
+// encodes as a nil snapshot; it is deliberately distinct from a zero-valued
+// status so callers never mistake "gone" for "created but empty". A backend
+// that does not implement this interface is read through GetExecution, so the
+// two MUST agree field by field — a backend reporting different params, scope,
+// runtime or trace identity here than GetExecution would make a node's input
+// depend on which method the engine happened to call. The shared contract suite
+// pins that agreement.
+type ExecutionInputContextReader interface {
+	GetExecutionInputContext(ctx context.Context, id types.ExecutionID) (*ExecutionInputContext, bool, error)
+}
+
+// ExecutionTraceCarrierReader is the optional narrow read of the W3C
+// traceparent/tracestate carrier captured at submission.
+//
+// The control plane asks for this carrier on every dispatch to parent the
+// asynchronous xflow.task.dispatch span to the original submit/invoke trace.
+// Answering through GetExecution made that one question pay for the whole
+// snapshot; this reads the single carrier key instead.
+//
+// The carrier is written once, when the execution is created, and never
+// updated, which is what makes it safe for a caller to keep the answer. found=false
+// means no carrier — an execution submitted with tracing disabled, or one that
+// does not exist — and the engine treats both as nil, exactly as it does today
+// for a nil snapshot or an empty TraceCarrier. A backend that does not
+// implement this interface is read through GetExecution, so the two MUST agree
+// for an execution that has one.
+type ExecutionTraceCarrierReader interface {
+	GetExecutionTraceCarrier(ctx context.Context, id types.ExecutionID) (map[string]string, bool, error)
+}
+
 // Events publishes and watches execution lifecycle events.
 type Events interface {
 	PublishExecutionEvent(ctx context.Context, event ExecutionEvent) error

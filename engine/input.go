@@ -41,19 +41,72 @@ func (e *Engine) resolveNodeTimeout(raw time.Duration) time.Duration {
 	}
 }
 
+// inputExecutionState is the slice of an execution's state buildInput reads.
+// A backend implementing ExecutionInputContextReader fills it from the narrow
+// read; every other backend fills it from GetExecution. The fields are exactly
+// the ones buildInput consumed from the snapshot, so the two sources cannot
+// drift without a compile error here.
+type inputExecutionState struct {
+	status  types.ExecutionStatus
+	params  map[string]any
+	runtime *types.Runtime
+	scope   map[string]any
+	traceID string
+	spanID  string
+}
+
+// loadInputExecutionState prefers the backend's narrow input read and falls
+// back to the full snapshot when the capability is absent. Both sources return
+// nil for an absent execution, so buildInput's ErrExecutionInactive decision
+// does not depend on which path answered.
+func (e *Engine) loadInputExecutionState(ctx context.Context, id types.ExecutionID) (*inputExecutionState, error) {
+	if reader, ok := e.state.(ExecutionInputContextReader); ok {
+		narrow, found, err := reader.GetExecutionInputContext(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if !found || narrow == nil {
+			return nil, nil
+		}
+		return &inputExecutionState{
+			status:  narrow.Status,
+			params:  narrow.Params,
+			runtime: narrow.Runtime,
+			scope:   narrow.Scope,
+			traceID: narrow.TraceID,
+			spanID:  narrow.SpanID,
+		}, nil
+	}
+	snap, err := e.state.GetExecution(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if snap == nil {
+		return nil, nil
+	}
+	return &inputExecutionState{
+		status:  snap.Status,
+		params:  snap.Params,
+		runtime: snap.Runtime,
+		scope:   snap.Scope,
+		traceID: snap.TraceID,
+		spanID:  snap.SpanID,
+	}, nil
+}
+
 // buildInput assembles the types.Input from graph metadata and upstream outputs.
 // Backend read failures are authoritative failures: they must never be treated
 // as an empty execution or absent upstream business data.
 func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*types.Input, error) {
-	snap, err := e.state.GetExecution(ctx, t.ExecutionID)
+	state, err := e.loadInputExecutionState(ctx, t.ExecutionID)
 	if err != nil {
 		return nil, fmt.Errorf("get execution %q: %w", t.ExecutionID, err)
 	}
-	if snap == nil || types.IsTerminalExecutionStatus(snap.Status) {
+	if state == nil || types.IsTerminalExecutionStatus(state.status) {
 		return nil, ErrExecutionInactive
 	}
 
-	runtime := snap.Runtime
+	runtime := state.runtime
 	// NodeAt returns a defensive deep copy of NodeMeta, so the engine owns this
 	// copy. Call it once and reuse it for both Parameters and Timeout -- calling
 	// twice would mint a second independent copy whose Timeout we would then
@@ -69,8 +122,8 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 		Runtime:     cloneRuntime(runtime),
 		ExecutionID: string(t.ExecutionID),
 		NodeName:    t.NodeName,
-		TraceID:     snap.TraceID,
-		SpanID:      snap.SpanID,
+		TraceID:     state.traceID,
+		SpanID:      state.spanID,
 		// Graph identity, exposed to expressions as $workflow. Read from the
 		// graph being executed, so inside a sub-graph these are the INNER
 		// graph's values -- see the Input.WorkflowName field comment.
@@ -103,7 +156,7 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 			return nil, fmt.Errorf("get resumed node output %q/%q: %w", t.ExecutionID, t.NodeName, err)
 		}
 		input.State, input.Data = splitNodeState(outputs[t.NodeName])
-		applyExecutionScope(input, snap.Scope)
+		applyExecutionScope(input, state.scope)
 		mergeNodesRefs(input, refs, outputs)
 		stripNodeStateFromInput(input)
 		return input, nil
@@ -126,8 +179,8 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 	// for ?? to catch, so the guard the spec recommends for an unexecuted node
 	// could not fire and the whole node failed to evaluate its parameters.
 	if g.AllowCycles() && t.NodeIdx == g.StartIndex() && t.ActivationID == 1 {
-		input.Data = StripNodeState(cloneMap(snap.Params))
-		applyExecutionScope(input, snap.Scope)
+		input.Data = StripNodeState(cloneMap(state.params))
+		applyExecutionScope(input, state.scope)
 		if err := prefetchNodesRefs(ctx, e, t, g, input); err != nil {
 			return nil, err
 		}
@@ -138,7 +191,7 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 	case 0:
 		// Root node — inject workflow-level submission params as input.Data so
 		// source handlers can read them (mirrors ClusterRunner behaviour).
-		input.Data = StripNodeState(cloneMap(snap.Params))
+		input.Data = StripNodeState(cloneMap(state.params))
 	case 1:
 		name := g.NodeName(inEdges[0].SrcIdx)
 		// With no $nodes references this is one read either way, so it keeps
@@ -215,7 +268,7 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 			refOutputs = outputs
 		}
 	}
-	applyExecutionScope(input, snap.Scope)
+	applyExecutionScope(input, state.scope)
 	// The local $nodes merge runs after applyExecutionScope because a local name
 	// wins over a snapshotted outer one (see prefetchNodesRefs); a read the
 	// switch already performed is simply merged here instead of being repeated.

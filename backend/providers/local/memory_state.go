@@ -588,6 +588,57 @@ func (s *memoryState) GetExecution(_ context.Context, id types.ExecutionID) (*en
 	return &cp, nil
 }
 
+// GetExecutionInputContext implements engine.ExecutionInputContextReader.
+//
+// It reads the same in-memory snapshot GetExecution reads, so the saving here
+// is a snapshot copy rather than round trips — but the method is implemented
+// anyway so both backends answer buildInput's question through the same narrow
+// capability. If only the Redis backend implemented it, the engine would take a
+// different path per backend and the shared contract could not pin that the two
+// agree field by field.
+//
+// The maps and runtime are deliberately not copied: GetExecution returns a
+// shallow snapshot copy that shares them too, and buildInput clones every map it
+// mutates. A deep copy here would make the narrow read observably different from
+// the full one for no safety gain.
+func (s *memoryState) GetExecutionInputContext(_ context.Context, id types.ExecutionID) (*engine.ExecutionInputContext, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.executions[id]
+	if !ok {
+		return nil, false, nil
+	}
+	snap := &entry.snap
+	return &engine.ExecutionInputContext{
+		Status:  snap.Status,
+		Params:  snap.Params,
+		Runtime: snap.Runtime,
+		Scope:   snap.Scope,
+		TraceID: snap.TraceID,
+		SpanID:  snap.SpanID,
+	}, true, nil
+}
+
+// GetExecutionTraceCarrier implements engine.ExecutionTraceCarrierReader: the
+// carrier the execution was created with, or found=false when the execution is
+// absent or was submitted with tracing disabled.
+//
+// An empty carrier is reported as absent, not as a present empty map: the Redis
+// backend writes the key only when a carrier exists, so "present but empty" is
+// a state that backend cannot represent and the two must answer alike.
+func (s *memoryState) GetExecutionTraceCarrier(_ context.Context, id types.ExecutionID) (map[string]string, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.executions[id]
+	if !ok || len(entry.snap.TraceCarrier) == 0 {
+		return nil, false, nil
+	}
+	return entry.snap.TraceCarrier, true, nil
+}
+
+var _ engine.ExecutionInputContextReader = (*memoryState)(nil)
+var _ engine.ExecutionTraceCarrierReader = (*memoryState)(nil)
+
 // GetExecutionStatus reads back only the lifecycle status
 // (engine.ExecutionStatusReader). Here it saves a snapshot copy rather than
 // round trips — the win is on key-value backends — but it is implemented anyway

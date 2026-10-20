@@ -32,6 +32,25 @@ func TestMemoryBatchOutputContract(t *testing.T) {
 	})
 }
 
+// TestMemoryExecutionInputContextContract runs the shared narrow-input contract
+// against the in-memory backend. The narrow read saves a snapshot copy rather
+// than round trips here, but buildInput chooses it by capability, so it must
+// answer exactly as GetExecution does.
+func TestMemoryExecutionInputContextContract(t *testing.T) {
+	statestoretest.RunExecutionInputContextContract(t, memoryCapabilityManifest(), func(t *testing.T) statestoretest.ExecutionInputBackend {
+		return statestoretest.ExecutionInputBackend{Store: New().State(), Namespaced: false}
+	})
+}
+
+// TestMemoryExecutionTraceCarrierContract runs the shared carrier contract
+// against the in-memory backend. The backend has no namespace dimension, so the
+// shared isolation subtest is skipped explicitly rather than silently.
+func TestMemoryExecutionTraceCarrierContract(t *testing.T) {
+	statestoretest.RunExecutionTraceCarrierContract(t, memoryCapabilityManifest(), func(t *testing.T) statestoretest.ExecutionInputBackend {
+		return statestoretest.ExecutionInputBackend{Store: New().State(), Namespaced: false}
+	})
+}
+
 func TestMemoryDeadLetterReplayContract(t *testing.T) {
 	statestoretest.RunDeadLetterReplayContract(t, func(t *testing.T) statestoretest.DeadLetterReplayBackend {
 		state := newMemoryState()

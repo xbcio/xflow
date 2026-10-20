@@ -36,12 +36,14 @@ const (
 	CapabilityOutboxLeaser     Capability = "OutboxLeaser"
 	CapabilityOutboxReleaser   Capability = "OutboxReleaser"
 
-	CapabilityExecutionStatusReader    Capability = "ExecutionStatusReader"
-	CapabilitySuspendedNodeCanceler    Capability = "SuspendedNodeCanceler"
-	CapabilityDurableSignalDeliverer   Capability = "DurableSignalDeliverer"
-	CapabilityNodeLeaseRenewer         Capability = "NodeLeaseRenewer"
-	CapabilityCancelingExecutionLister Capability = "CancelingExecutionLister"
-	CapabilityBatchOutputReader        Capability = "BatchOutputReader"
+	CapabilityExecutionStatusReader       Capability = "ExecutionStatusReader"
+	CapabilitySuspendedNodeCanceler       Capability = "SuspendedNodeCanceler"
+	CapabilityDurableSignalDeliverer      Capability = "DurableSignalDeliverer"
+	CapabilityNodeLeaseRenewer            Capability = "NodeLeaseRenewer"
+	CapabilityCancelingExecutionLister    Capability = "CancelingExecutionLister"
+	CapabilityBatchOutputReader           Capability = "BatchOutputReader"
+	CapabilityExecutionInputContextReader Capability = "ExecutionInputContextReader"
+	CapabilityExecutionTraceCarrierReader Capability = "ExecutionTraceCarrierReader"
 
 	CapabilityGroupStateStore      Capability = "GroupStateStore"
 	CapabilityGroupLeaseExpirer    Capability = "GroupLeaseExpirer"
@@ -147,6 +149,22 @@ var capabilitySpecs = map[Capability]capabilitySpec{
 		summary: "reading many node outputs in one round trip (GetOutputs)",
 		implements: func(v any) bool {
 			_, ok := v.(engine.BatchOutputReader)
+			return ok
+		},
+	},
+	CapabilityExecutionInputContextReader: {
+		iface:   "engine.ExecutionInputContextReader",
+		summary: "narrow input read without loading the snapshot (GetExecutionInputContext)",
+		implements: func(v any) bool {
+			_, ok := v.(engine.ExecutionInputContextReader)
+			return ok
+		},
+	},
+	CapabilityExecutionTraceCarrierReader: {
+		iface:   "engine.ExecutionTraceCarrierReader",
+		summary: "single-key trace carrier read for dispatch (GetExecutionTraceCarrier)",
+		implements: func(v any) bool {
+			_, ok := v.(engine.ExecutionTraceCarrierReader)
 			return ok
 		},
 	},

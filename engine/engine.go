@@ -235,6 +235,12 @@ type Engine struct {
 
 	mu     sync.RWMutex
 	graphs map[types.ExecutionID]*graph.Graph
+	// traceCarriers memoizes ExecutionTraceCarrier's answer per execution. The
+	// carrier is written once at creation and never updated, so the memo cannot
+	// go stale; one entry with a nil carrier is the sentinel that keeps an
+	// execution without tracing from re-reading on every dispatch. Evicted
+	// together with the graph cache by EvictExecution.
+	traceCarriers map[types.ExecutionID]*traceCarrierCacheEntry
 
 	evidenceBuffer *RuntimeEvidenceBuffer
 }
@@ -245,6 +251,7 @@ func New(state StateStore, queue TaskQueue, opts ...Option) *Engine {
 		state:                    state,
 		queue:                    queue,
 		graphs:                   make(map[types.ExecutionID]*graph.Graph),
+		traceCarriers:            make(map[types.ExecutionID]*traceCarrierCacheEntry),
 		outboxMaxDeliveryAttempt: DefaultOutboxMaxDeliveryAttempts,
 		defaultLeaseTTL:          DefaultLeaseTTL,
 		defaultNodeTimeout:       DefaultNodeTimeout,
@@ -266,12 +273,14 @@ func (e *Engine) LeaseTTL() time.Duration { return e.defaultLeaseTTL }
 // Useful for callers that need to poll execution status (e.g. cluster Wait).
 func (e *Engine) State() StateStore { return e.state }
 
-// EvictExecution removes an execution's in-process graph cache. Backends that
-// expire runtime state independently can call this so late runner callbacks
-// observe the execution as inactive instead of using stale cached graph data.
+// EvictExecution removes an execution's in-process graph and trace-carrier
+// cache entries. Backends that expire runtime state independently can call this
+// so late runner callbacks observe the execution as inactive instead of using
+// stale cached graph data.
 func (e *Engine) EvictExecution(id types.ExecutionID) {
 	e.mu.Lock()
 	delete(e.graphs, id)
+	delete(e.traceCarriers, id)
 	e.mu.Unlock()
 }
 

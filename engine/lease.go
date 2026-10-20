@@ -10,21 +10,80 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
+// traceCarrierCacheEntry is one memoized ExecutionTraceCarrier answer. A
+// present entry with a nil carrier is the "no carrier" sentinel: tracing was
+// disabled at submission (or the execution was already gone when first asked),
+// and re-reading cannot change that, because the carrier is written once when
+// the execution is created and never updated.
+type traceCarrierCacheEntry struct {
+	carrier map[string]string
+}
+
 // ExecutionTraceCarrier returns the W3C traceparent/tracestate carrier
 // captured at submission and persisted on the execution snapshot. The control
 // plane uses it to parent the asynchronous dispatch span to the original
 // submit/invoke trace via a real W3C ExtractCarrier round-trip (not a
 // trace_id/span_id string parent). Returns nil when the execution is gone or
 // tracing was disabled at submission time.
+//
+// A backend implementing ExecutionTraceCarrierReader answers with one GET
+// instead of the whole snapshot, and the answer is memoized on the engine: this
+// is per-dispatch traffic, and a carrier that is written once and never updated
+// is exactly what a cache can hold without invalidation. EvictExecution clears
+// the memo alongside the graph cache. A hit returns a copy, so a caller that
+// mutates the map cannot poison later dispatches.
+//
+// A backend without the capability still reads through GetExecution, unchanged.
 func (e *Engine) ExecutionTraceCarrier(ctx context.Context, id types.ExecutionID) (map[string]string, error) {
-	snap, err := e.state.GetExecution(ctx, id)
+	reader, ok := e.state.(ExecutionTraceCarrierReader)
+	if !ok {
+		snap, err := e.state.GetExecution(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if snap == nil {
+			return nil, nil
+		}
+		return snap.TraceCarrier, nil
+	}
+
+	e.mu.RLock()
+	cached, hit := e.traceCarriers[id]
+	e.mu.RUnlock()
+	if hit {
+		return cloneTraceCarrier(cached.carrier), nil
+	}
+
+	carrier, found, err := reader.GetExecutionTraceCarrier(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if snap == nil {
-		return nil, nil
+	if !found {
+		carrier = nil
 	}
-	return snap.TraceCarrier, nil
+	// Store the backend's answer even when it is empty: the entry itself is the
+	// sentinel that stops a carrier-less execution from re-reading on every
+	// dispatch.
+	e.mu.Lock()
+	if e.traceCarriers == nil {
+		e.traceCarriers = make(map[types.ExecutionID]*traceCarrierCacheEntry)
+	}
+	e.traceCarriers[id] = &traceCarrierCacheEntry{carrier: carrier}
+	e.mu.Unlock()
+	return cloneTraceCarrier(carrier), nil
+}
+
+// cloneTraceCarrier copies a carrier map so the engine's cached entry is never
+// handed out for mutation.
+func cloneTraceCarrier(carrier map[string]string) map[string]string {
+	if carrier == nil {
+		return nil
+	}
+	cp := make(map[string]string, len(carrier))
+	for k, v := range carrier {
+		cp[k] = v
+	}
+	return cp
 }
 
 // BuildTaskLease assembles a runner-facing task lease from a queued task.
