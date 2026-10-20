@@ -7,6 +7,8 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 export default defineConfig({
   resolve: {
     alias: {
+      // Must precede "@xflow/core": aliases match by prefix, first wins.
+      "@xflow/core/tokens.css": path.resolve(root, "packages/xflow-core/src/tokens.css"),
       "@xflow/core": path.resolve(root, "packages/xflow-core/src/index.ts"),
       "@xflow/composer/core": path.resolve(root, "packages/composer/src/core/index.ts"),
       "@xflow/composer/react": path.resolve(root, "packages/composer/src/react/index.ts"),

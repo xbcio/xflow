@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { readdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -71,10 +72,14 @@ function runSelfTest() {
 
 async function productionSourceDirectories() {
   const packageEntries = await readdir(packagesDirectory, { withFileTypes: true });
+  // `web/packages/` also accumulates tool state directories (`.omc/`) that are
+  // not packages and carry no `src/`; only real workspace packages are scanned.
+  const isPackage = (entry) =>
+    entry.isDirectory() && existsSync(path.join(packagesDirectory, entry.name, "package.json"));
   return [
     adminSource,
     ...packageEntries
-      .filter((entry) => entry.isDirectory())
+      .filter(isPackage)
       .map((entry) => path.join(packagesDirectory, entry.name, "src"))
   ];
 }

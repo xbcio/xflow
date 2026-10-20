@@ -3,7 +3,8 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "outputs": ["dist/**"]
+      "outputs": ["dist/**"],
+      "env": ["XFLOW_UI_PREVIEW"]
     },
     "typecheck": {
       "dependsOn": ["^build"]
