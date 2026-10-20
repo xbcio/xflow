@@ -47,7 +47,7 @@ import (
 //     transaction with innodb_lock_wait_timeout=1 → MySQL 1205 (lock-wait
 //     timeout) → transient (attempt 2). 1205 shares the same classifier branch
 //     as the local fake's 1213 deadlock; the parity contract (transient +
-//     exhausted) is preserved. See .superpowers/sdd-remediation/task-39-design.md §5.3.
+//     exhausted) is preserved.
 //   - db_constraint_permanent       — pre-inserted row id=1 → MySQL 1062 (attempt 1)
 //
 // This test deliberately uses the databaseParityHandler wrapper path (injected
