@@ -558,3 +558,88 @@ func TestSeedExecutionFromEntryProjectionIsIdempotent(t *testing.T) {
 		t.Fatalf("SQL execution status after duplicate = %q, want success", rec.Status)
 	}
 }
+
+// TestSeededRerunProjectsSnapshotWorkflowIdentity pins agreement between the
+// two readers of one seeded execution: GetExecution serves the snapshot's
+// identity (inherited from the parent by a direct engine/SDK rerun), and the
+// SQL row behind GET /v1/executions must carry the same value even though the
+// seed's context attached no definition. A mismatch makes the detail and list
+// answers contradict each other for the same run.
+func TestSeededRerunProjectsSnapshotWorkflowIdentity(t *testing.T) {
+	state, db := newStateWithAuditStore(t)
+	tenant := namespace.Namespace("sql-projection-seed-identity")
+	ctx := namespace.WithNamespace(context.Background(), tenant)
+
+	g, err := graph.Compile(&types.WorkflowDef{
+		Name:  "sql-projection-seed-identity",
+		Nodes: []types.NodeDef{{Name: "start", Type: "test.echo"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	execID := types.ExecutionID("exec-seed-identity-1")
+	if _, err := state.SeedExecution(ctx, engine.SeedExecutionRequest{
+		Execution: &engine.ExecutionSnapshot{
+			ID: execID, Graph: g, Status: types.ExecutionStatusRunning,
+			WorkflowID: "wf-inherited", WorkflowVersion: "v2",
+		},
+	}); err != nil {
+		t.Fatalf("SeedExecution: %v", err)
+	}
+
+	snap, err := state.GetExecution(ctx, execID)
+	if err != nil || snap == nil {
+		t.Fatalf("GetExecution = (%+v, %v), want the seeded execution", snap, err)
+	}
+	if snap.WorkflowID != "wf-inherited" || snap.WorkflowVersion != "v2" {
+		t.Fatalf("snapshot identity = (%q, %q), want (%q, %q)",
+			snap.WorkflowID, snap.WorkflowVersion, "wf-inherited", "v2")
+	}
+	rec, err := db.GetExecution(ctx, execID)
+	if err != nil || rec == nil {
+		t.Fatalf("SQL GetExecution = (%+v, %v), want the projected row", rec, err)
+	}
+	if rec.WorkflowID != snap.WorkflowID {
+		t.Fatalf("SQL workflow_id = %q, want the snapshot's %q: the list row and the "+
+			"detail answer for one execution disagree", rec.WorkflowID, snap.WorkflowID)
+	}
+	listed, err := db.ListExecutions(ctx, tenant, store.ExecutionFilter{WorkflowID: snap.WorkflowID}, store.DefaultListOptions())
+	if err != nil {
+		t.Fatalf("ListExecutions: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ExecutionID != execID {
+		t.Fatalf("ListExecutions(workflow_id=%q) = %+v, want only %q", snap.WorkflowID, listed, execID)
+	}
+}
+
+// TestCreateExecutionProjectsSnapshotWorkflowIdentity pins the submit-path
+// projection when the creation context carries no definition: the snapshot is
+// still the identity source. Submit/Invoke attach both, so this guards the
+// fallback rather than changing those paths' behavior.
+func TestCreateExecutionProjectsSnapshotWorkflowIdentity(t *testing.T) {
+	state, db := newStateWithAuditStore(t)
+	tenant := namespace.Namespace("sql-projection-create-identity")
+	ctx := namespace.WithNamespace(context.Background(), tenant)
+
+	g, err := graph.Compile(&types.WorkflowDef{
+		Name:  "sql-projection-create-identity",
+		Nodes: []types.NodeDef{{Name: "start", Type: "test.echo"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := types.ExecutionID("exec-create-identity-1")
+	if err := state.CreateExecution(ctx, &engine.ExecutionSnapshot{
+		ID: id, Graph: g, Status: types.ExecutionStatusRunning,
+		WorkflowID: "wf-created", WorkflowVersion: "v4",
+	}); err != nil {
+		t.Fatalf("CreateExecution: %v", err)
+	}
+	rec, err := db.GetExecution(ctx, id)
+	if err != nil || rec == nil {
+		t.Fatalf("SQL GetExecution = (%+v, %v), want the projected row", rec, err)
+	}
+	if rec.WorkflowID != "wf-created" {
+		t.Fatalf("SQL workflow_id = %q, want the snapshot's %q", rec.WorkflowID, "wf-created")
+	}
+}

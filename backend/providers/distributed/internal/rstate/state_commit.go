@@ -274,6 +274,9 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 		s.markOutboxReadyIndex(ctx, t, req.ExecutionID)
 	}
 	if out.ExecutionDone {
+		// commitNodeLua finalizes the status inside the script, so this is the
+		// only place its updated_at can be stamped outside UpdateExecutionStatus.
+		s.touchExecutionUpdatedAt(ctx, req.ExecutionID)
 		// Apply the completion TTL HERE, not only in UpdateExecutionStatus:
 		// commitNodeLua finalizes the execution inside the script, so a terminal
 		// CommitNode never passes through that method. Omitting it leaves every
@@ -314,6 +317,12 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 			Output:      output,
 			Port:        req.Port,
 			UpdatedAt:   time.Now(),
+		}
+		// The terminal commit is the node's end line. started_at was written by
+		// the acquire projection; the column-level COALESCE keeps it.
+		if types.IsTerminalNodeStatus(req.Status) {
+			finishedAt := time.Now().UTC()
+			rec.FinishedAt = &finishedAt
 		}
 		s.auditWrite(ctx, "commit_node", func(ctx context.Context) error { return s.db.UpsertNode(ctx, rec) })
 		// The execution's terminal transition happens INSIDE commitNodeLua, so

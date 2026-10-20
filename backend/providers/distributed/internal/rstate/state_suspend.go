@@ -541,6 +541,11 @@ if status ~= 'suspended' then
     return 0
 end
 redis.call('SET', KEYS[1], ARGV[1], 'EX', tonumber(ARGV[2]))
+-- Cancel is a terminal transition, so it fixes the node's end line once. The
+-- HSETNX matches the other terminal writers: a later write cannot move it.
+if tonumber(ARGV[5] or '0') > 0 then
+    redis.call('HSETNX', KEYS[4], 'finished_at_ms', ARGV[5])
+end
 redis.call('SREM', KEYS[2], ARGV[3])
 redis.call('ZREM', KEYS[3], ARGV[4])
 return 1
@@ -555,13 +560,16 @@ return 1
 func (s *Store) CancelSuspendedNode(ctx context.Context, id types.ExecutionID, name string) (bool, error) {
 	t := namespace.FromContext(ctx)
 	ttl := s.getExecTTL(ctx, id)
+	finishedAt := time.Now().UTC()
 	res, err := cancelSuspendedNodeLua.Run(ctx, s.rdb,
 		[]string{
 			nodeStatusKey(t, id, name),
 			suspendedNodesKey(t, id),
 			leaseExpiryZSetKey(t, id),
+			nodeMetaKey(t, id, name),
 		},
 		string(types.NodeStatusCanceled), int(ttl.Seconds()), name, leaseExpiryMember(id, name),
+		finishedAt.UnixMilli(),
 	).Int64()
 	if err != nil && err != redis.Nil {
 		return false, fmt.Errorf("cancel suspended node %q/%q: %w", id, name, err)
@@ -572,6 +580,7 @@ func (s *Store) CancelSuspendedNode(ctx context.Context, id types.ExecutionID, n
 			ExecutionID: id,
 			NodeName:    name,
 			Status:      types.NodeStatusCanceled,
+			FinishedAt:  &finishedAt,
 			UpdatedAt:   time.Now(),
 		}
 		s.auditWrite(ctx, "cancel_suspended_node", func(ctx context.Context) error {

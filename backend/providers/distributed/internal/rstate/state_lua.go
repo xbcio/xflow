@@ -296,7 +296,8 @@ return nil
 
 // upsertNodeLua atomically checks if the node is in a terminal state before writing.
 // KEYS[1] = node status key, KEYS[2] = output key (optional, may be empty string), KEYS[3] = node meta hash
-// ARGV[1] = new status, ARGV[2] = output JSON (or ""), ARGV[3] = ttl seconds, ARGV[4] = activation id, ARGV[5] = private output (0|1)
+// ARGV[1] = new status, ARGV[2] = output JSON (or ""), ARGV[3] = ttl seconds, ARGV[4] = activation id, ARGV[5] = private output (0|1),
+// ARGV[6] = started_at milliseconds (0 = none), ARGV[7] = finished_at milliseconds (0 = none)
 // Returns {written, effectivePrivate}. effectivePrivate is a strict 0|1
 // decision made at the same linearization point as the snapshot write.
 var upsertNodeLua = redis.NewScript(`
@@ -329,6 +330,16 @@ if existing == 'committing' or existing == 'waiting' then
     end
 end
 redis.call('SET', KEYS[1], ARGV[1], 'EX', ttl)
+-- Timing is write-once: HSETNX only fills a missing field, so a retry keeps
+-- the first started_at and a duplicate terminal/cancel write keeps the first
+-- finished_at. This runs after the fence above, so a rejected stale snapshot
+-- cannot stamp either fact.
+if tonumber(ARGV[6] or '0') > 0 then
+    redis.call('HSETNX', KEYS[3], 'started_at_ms', ARGV[6])
+end
+if tonumber(ARGV[7] or '0') > 0 then
+    redis.call('HSETNX', KEYS[3], 'finished_at_ms', ARGV[7])
+end
 if ARGV[2] ~= '' then
     redis.call('SET', KEYS[2], ARGV[2], 'EX', ttl)
 end
@@ -559,6 +570,11 @@ redis.call('HSET', KEYS[2],
 	'lease_generation', tonumber(ARGV[13] or '0'),
 	'node_idx', tonumber(ARGV[11] or '0'),
 	'unit_idx', tonumber(ARGV[12] or '-1'))
+-- The first lease this node ever receives fixes started_at; a retry and a
+-- later cyclic activation re-enter here and must not move it.
+if nowMs > 0 then
+    redis.call('HSETNX', KEYS[2], 'started_at_ms', nowMs)
+end
 redis.call('EXPIRE', KEYS[2], tonumber(ARGV[4]))
 local leaseTTLms = tonumber(ARGV[7] or '0')
 if leaseTTLms > 0 and ARGV[2] ~= '' then
@@ -930,10 +946,10 @@ return out
 // with the CAS that found the execution unstartable.
 //
 // KEYS[1] = execution status key, KEYS[2] = execution outbox ready ZSET,
-// KEYS[3] = execution outbox body hash
+// KEYS[3] = execution outbox body hash, KEYS[4] = execution updated_at key
 // ARGV[1] = the queued status, ARGV[2] = the running status,
 // ARGV[3] = status TTL seconds, ARGV[4] = held score (the parked sentinel),
-// ARGV[5] = score to release the parked intents to
+// ARGV[5] = score to release the parked intents to (also the promotion instant)
 // Returns {started, released, dropped}.
 var promoteQueuedExecutionLua = redis.NewScript(`
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then
@@ -945,6 +961,10 @@ if redis.call('GET', KEYS[1]) ~= ARGV[1] then
     return {0, 0, 0}
 end
 redis.call('SET', KEYS[1], ARGV[2], 'EX', tonumber(ARGV[3]))
+-- Leaving the queue is an accepted status transition, so it advances the
+-- execution clock exactly like the pause/resume and terminal transitions do:
+-- inspect reports updated_at as the latest accepted transition.
+redis.call('SET', KEYS[4], ARGV[5], 'EX', tonumber(ARGV[3]))
 local due = redis.call('ZRANGEBYSCORE', KEYS[2], ARGV[4], ARGV[4])
 for _, member in ipairs(due) do
     redis.call('ZADD', KEYS[2], tonumber(ARGV[5]), member)

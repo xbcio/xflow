@@ -120,6 +120,12 @@ redis.call('HSET', KEYS[6],
     'error_details', errorDetails,
     'committed_lease_token', ARGV[3],
     'committed_attempt', ARGV[4])
+-- The first terminal commit fixes finished_at. HSETNX keeps a later accepted
+-- transition for the same node row (a cyclic re-entry) from moving the end
+-- line, matching started_at's write-once rule.
+if terminal(ARGV[1]) then
+    redis.call('HSETNX', KEYS[6], 'finished_at_ms', tonumber(ARGV[18]))
+end
 redis.call('EXPIRE', KEYS[6], ttl)
 -- Keep the per-execution transient marker alive for as long as this commit
 -- keeps the node keys alive.

@@ -49,7 +49,8 @@ var _ engine.ExecutionSeeder = (*Store)(nil)
 //	      marker (4 keys each), then that unit's arrivals: in-degree, active
 //	      inputs, scheduling marker (3 keys each)
 //	then one scheduling-marker key per entry that carries a skip intent,
-//	in entry order
+//	in entry order, and finally 2=the execution's own clock keys
+//	(created_at_ms, updated_at_ms)
 //
 // ARGV: 1=ttl_s 2=graphJSON 3=the status the execution starts at
 //
@@ -63,7 +64,9 @@ var _ engine.ExecutionSeeder = (*Store)(nil)
 //	      count, active count, merge mode, execute ID, execute body, skip ID,
 //	      skip body, node name (8 args each)
 //	then per entry: entry ID, entry body, scheduling-marker key number (0 when
-//	this entry carries no skip intent; 3 each)
+//	this entry carries no skip intent; 3 each), and finally the execution's
+//	creation time in unix milliseconds (created_at and updated_at start equal,
+//	exactly as createExecution writes them)
 //
 // Returns {code, finalStatus, skips}: code is always 1 (the script creates the
 // execution, so there is no admission key to collide on), finalStatus is the
@@ -82,6 +85,13 @@ local outboxScore = tonumber(ARGV[4] or '0')
 -- Step 1: create the execution, at the status its admission landed on.
 redis.call('SET', KEYS[1], ARGV[3], 'EX', ttl)
 redis.call('SET', KEYS[2], ARGV[2], 'EX', ttl)
+-- The execution's own clock, written with its creation: inspect exposes these
+-- as created_at/updated_at and a seeded execution (a rerun) must report the
+-- same lifetime as one created through CreateExecution. Both start at the
+-- creation instant; every later accepted transition advances updated_at.
+local createdAtMs = ARGV[#ARGV]
+redis.call('SET', KEYS[#KEYS - 1], createdAtMs, 'EX', ttl)
+redis.call('SET', KEYS[#KEYS], createdAtMs, 'EX', ttl)
 -- The workflow this execution contends for, so the release that follows its
 -- terminal status can find the slot set (or the place in line) to give back.
 if ARGV[5] ~= '' then
@@ -355,9 +365,12 @@ func (s *Store) SeedExecution(ctx context.Context, req engine.SeedExecutionReque
 	// the retention record above and for the same reason: it is immutable
 	// metadata about the execution, and a projection that reads the execution
 	// must never find it without the origin it was created from. parent_node and
-	// depth are the sub-workflow half of the same link.
+	// depth are the sub-workflow half of the same link. The workflow identity
+	// rides along for the same reason: a seeded rerun must name the definition
+	// it runs without the definition being re-read.
 	if req.Execution.ParentID != "" || req.Execution.RerunFrom != "" ||
-		req.Execution.ParentNode != "" || req.Execution.Depth > 0 {
+		req.Execution.ParentNode != "" || req.Execution.Depth > 0 ||
+		req.Execution.WorkflowID != "" || req.Execution.WorkflowVersion != "" {
 		linkPipe := s.rdb.TxPipeline()
 		if req.Execution.ParentID != "" {
 			linkPipe.Set(ctx, execKey(t, execID, "parent"), string(req.Execution.ParentID), ttl)
@@ -370,6 +383,12 @@ func (s *Store) SeedExecution(ctx context.Context, req engine.SeedExecutionReque
 		}
 		if req.Execution.Depth > 0 {
 			linkPipe.Set(ctx, execKey(t, execID, "depth"), strconv.Itoa(req.Execution.Depth), ttl)
+		}
+		if req.Execution.WorkflowID != "" {
+			linkPipe.Set(ctx, execKey(t, execID, "workflow_id"), string(req.Execution.WorkflowID), ttl)
+		}
+		if req.Execution.WorkflowVersion != "" {
+			linkPipe.Set(ctx, execKey(t, execID, "workflow_version"), req.Execution.WorkflowVersion, ttl)
 		}
 		if _, err := linkPipe.Exec(ctx); err != nil {
 			return engine.SeedExecutionResponse{}, fmt.Errorf("persist rerun origin for %q: %w", execID, err)
@@ -508,6 +527,11 @@ func (s *Store) SeedExecution(ctx context.Context, req engine.SeedExecutionReque
 		args = append(args, entry.ID, encoded, markerNum)
 	}
 
+	// The execution's own clock, appended last: the script reads both keys and
+	// the instant off the tail, so every positional slot above stays stable.
+	keys = append(keys, execKey(t, execID, "created_at_ms"), execKey(t, execID, "updated_at_ms"))
+	args = append(args, time.Now().UTC().UnixMilli())
+
 	res, err := seedExecutionLua.Run(ctx, s.rdb, keys, args...).Slice()
 	if err != nil {
 		return engine.SeedExecutionResponse{}, fmt.Errorf("seed execution %q: %w", execID, err)
@@ -575,6 +599,19 @@ func (s *Store) projectSeededRerun(ctx context.Context, execID types.ExecutionID
 	}
 	if req.Execution.Graph != nil {
 		rec.WorkflowName = req.Execution.Graph.Name()
+	}
+	// A seed carries only a compiled graph, so the workflow identity comes from
+	// the definition the caller attached (the rerun path inherits it from the
+	// parent). A direct engine/SDK rerun attaches no definition at all; its
+	// snapshot already carries the inherited identity, and that is the durable
+	// answer both GetExecution and this row must give. Absent both, the row
+	// stays unattributed rather than borrowing an owner from the graph name,
+	// which is not an identity.
+	if def, ok := engine.WorkflowDefFromContext(ctx); ok {
+		rec.WorkflowID = types.WorkflowID(def.ID)
+	}
+	if rec.WorkflowID == "" {
+		rec.WorkflowID = req.Execution.WorkflowID
 	}
 	rec.TraceID = req.Execution.TraceID
 	rec.SpanID = req.Execution.SpanID

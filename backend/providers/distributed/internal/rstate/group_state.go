@@ -449,6 +449,12 @@ func (s *Store) CommitGroup(ctx context.Context, req engine.GroupCommitRequest) 
 		s.markOutboxReadyIndex(ctx, t, req.ExecutionID)
 	}
 	if out.ExecutionDone {
+		// commitGroupLua finalizes the execution inside the script, exactly as
+		// commitNodeLua does, so this is the only place its updated_at can be
+		// stamped outside UpdateExecutionStatus. Inspect reads updated_at as the
+		// latest accepted transition — for a collection pipeline this one is
+		// also the run's end line.
+		s.touchExecutionUpdatedAt(ctx, req.ExecutionID)
 		// The same reason that brings the status projection here applies to the
 		// completion TTL: commitGroupLua finalizes the execution inside the
 		// script, so this hook is the only place completion-time work can run for

@@ -185,6 +185,18 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 	keys := []string{execKey(t, e.ID, "status"), execKey(t, e.ID, "graph")}
 	pipe.Set(ctx, execKey(t, e.ID, "status"), string(e.Status), ttl)
 	pipe.Set(ctx, execKey(t, e.ID, "graph"), string(graphJSON), ttl)
+	// The execution's own clock. Both keys are written with the execution so a
+	// reader can time a run — GET /v1/executions/{id} exposes them as
+	// created_at/updated_at, and §6.8 derives a terminal run's duration from
+	// them. They live in Redis (not only in the SQL projection) because inspect
+	// runs against the state store, including on deployments with no SQL at
+	// all. updated_at_ms is rewritten by every accepted status transition.
+	createdAtMs := time.Now().UTC().UnixMilli()
+	createdKey := execKey(t, e.ID, "created_at_ms")
+	updatedKey := execKey(t, e.ID, "updated_at_ms")
+	pipe.Set(ctx, createdKey, createdAtMs, ttl)
+	pipe.Set(ctx, updatedKey, createdAtMs, ttl)
+	keys = append(keys, createdKey, updatedKey)
 	if e.Params != nil {
 		paramsJSON, err := json.Marshal(e.Params)
 		if err != nil {
@@ -261,6 +273,19 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 	if e.RerunFrom != "" {
 		pipe.Set(ctx, execKey(t, e.ID, "rerun_from"), e.RerunFrom, ttl)
 		keys = append(keys, execKey(t, e.ID, "rerun_from"))
+	}
+	// The workflow identity captured at submission. Immutable, like the links
+	// above: a reader that found the execution must be able to name the
+	// definition it ran even after that definition (or version) is gone. Empty
+	// values write nothing and read back empty, which is the documented
+	// unattributed state.
+	if e.WorkflowID != "" {
+		pipe.Set(ctx, execKey(t, e.ID, "workflow_id"), string(e.WorkflowID), ttl)
+		keys = append(keys, execKey(t, e.ID, "workflow_id"))
+	}
+	if e.WorkflowVersion != "" {
+		pipe.Set(ctx, execKey(t, e.ID, "workflow_version"), e.WorkflowVersion, ttl)
+		keys = append(keys, execKey(t, e.ID, "workflow_version"))
 	}
 	// Acyclic executions use these counters as the O(1) completion source of
 	// truth. Cyclic graphs retain their activation-based completion protocol.
@@ -364,6 +389,10 @@ func (s *Store) cleanupCreatedExecution(ctx context.Context, e *engine.Execution
 		execKey(t, e.ID, "span_id"),
 		execKey(t, e.ID, "trace_carrier"),
 		execKey(t, e.ID, "test_run"),
+		execKey(t, e.ID, "workflow_id"),
+		execKey(t, e.ID, "workflow_version"),
+		execKey(t, e.ID, "created_at_ms"),
+		execKey(t, e.ID, "updated_at_ms"),
 		transientMarkKey(t, e.ID),
 		terminalMarkKey(t, e.ID),
 		retentionRecordKey(t, e.ID),
@@ -414,11 +443,25 @@ func buildExecutionRecord(ctx context.Context, e *engine.ExecutionSnapshot, now 
 	}
 	if def, ok := engine.WorkflowDefFromContext(ctx); ok {
 		rec.WorkflowName = def.Name
+		// The workflow identity, not the display name: an empty def.ID means the
+		// submission carried an inline definition with no server id, and the row
+		// stays unattributed (invisible to every workflow filter) rather than
+		// borrowing a name that is not an identity.
+		rec.WorkflowID = types.WorkflowID(def.ID)
 		defJSON, err := json.Marshal(def)
 		if err != nil {
 			return nil, fmt.Errorf("marshal workflow definition for %q: %w", e.ID, err)
 		}
 		rec.WorkflowDef = defJSON
+	}
+	// The snapshot is the durable identity the creation captured. The context
+	// definition is only the projection's input, and it is absent on a direct
+	// rerun seed (the engine attaches none there); without this fallback the
+	// list row would read unattributed while GetExecution names the parent's
+	// workflow. Submit/Invoke set both from the same definition, so preferring
+	// the context changes nothing on those paths.
+	if rec.WorkflowID == "" {
+		rec.WorkflowID = e.WorkflowID
 	}
 	if e.Params != nil {
 		paramsJSON, err := json.Marshal(e.Params)
@@ -460,6 +503,11 @@ func (s *Store) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID,
 	).Int64()
 	if err != nil && err != redis.Nil {
 		return fmt.Errorf("update execution status %q: %w", id, err)
+	}
+	if applied == 1 {
+		// The status key carries the transition; the timestamp is its wall
+		// clock for the inspect payload (§6.8 duration = updated − created).
+		s.touchExecutionUpdatedAt(ctx, id)
 	}
 	// Clean up timeout ZSET entries when execution is canceled.
 	if applied == 1 && status == types.ExecutionStatusCanceled {
@@ -581,6 +629,9 @@ func (s *Store) PauseExecution(ctx context.Context, id types.ExecutionID) error 
 	}
 	switch {
 	case code == pauseTransitionApplied || code == pauseTransitionAlreadyPaused:
+		if code == pauseTransitionApplied {
+			s.touchExecutionUpdatedAt(ctx, id)
+		}
 		s.projectExecutionStatus(ctx, id, types.ExecutionStatusPaused, "")
 		return nil
 	case current == "":
@@ -601,6 +652,7 @@ func (s *Store) ResumeExecution(ctx context.Context, id types.ExecutionID) error
 	if code != pauseTransitionApplied {
 		return fmt.Errorf("resume execution %q in status %q: %w", id, current, engine.ErrExecutionNotPaused)
 	}
+	s.touchExecutionUpdatedAt(ctx, id)
 	s.projectExecutionStatus(ctx, id, types.ExecutionStatusRunning, "")
 	return nil
 }
@@ -888,6 +940,27 @@ func (s *Store) writeExecutionStatusProjection(ctx context.Context, id types.Exe
 	s.auditWrite(ctx, "update_execution_status", func(context.Context) error { return err })
 }
 
+// touchExecutionUpdatedAt records the wall clock of the latest accepted status
+// transition on the execution's updated_at key, which GetExecution exposes as
+// UpdatedAt. It is best effort by design: the transition itself is already
+// durable and is the answer to "what happened", while this timestamp is a
+// convenience a reader must treat as unknown when absent. Failing the caller
+// would make it retry a transition Redis has already applied.
+func (s *Store) touchExecutionUpdatedAt(ctx context.Context, id types.ExecutionID) {
+	ttl := s.getExecTTL(ctx, id)
+	t := namespace.FromContext(ctx)
+	// A suspended execution's keys may have been renewed past the base
+	// retention (suspendTTL can exceed it; see extendExecTTL). The clock must
+	// live at least as long as the status key it annotates, or a resumed run
+	// outliving the base window loses updated_at while the status still reads.
+	if remaining, err := s.rdb.PTTL(ctx, execKey(t, id, "status")).Result(); err == nil && remaining > ttl {
+		ttl = remaining
+	}
+	if err := s.rdb.Set(ctx, execKey(t, id, "updated_at_ms"), time.Now().UTC().UnixMilli(), ttl).Err(); err != nil && s.logger != nil {
+		s.logger.Debug("touch_execution_updated_at_failed", "execution_id", string(id), "err", err)
+	}
+}
+
 // terminalExecutionError picks the reason to project for a terminal execution.
 // The rule is shared with the local backend, so it lives in engine; this is a
 // thin alias kept for call-site brevity.
@@ -956,18 +1029,18 @@ func (s *Store) GetExecutionStatuses(ctx context.Context, ids []types.ExecutionI
 	return out, nil
 }
 
-// GetExecution assembles a full snapshot from the eight per-field keys the
-// execution is stored across. They are read in one pipeline: they are
-// independent GETs of the same execution, so issuing them back to back — as
-// this did — cost eight sequential network round trips to answer one call.
+// GetExecution assembles a full snapshot from the per-field keys the execution
+// is stored across. They are read in one pipeline: they are independent GETs of
+// the same execution, so issuing them back to back — as this did — cost a
+// network round trip each to answer one call.
 //
 // It is worth the change because this is per-task traffic, not an occasional
 // read: engine's buildInput calls it on every BuildTaskLease and
 // RecoverTaskLease, and executionSubmissionContext calls it on every batch body.
 //
-// The absent-execution path now issues all eight commands where it used to stop
-// after the status GET. That is seven extra COMMANDs on a path that was one
-// round trip and still is; the returned snapshot is unchanged.
+// The absent-execution path now issues every command where it used to stop
+// after the status GET. That is a handful of extra COMMANDs on a path that was
+// one round trip and still is; the returned snapshot is unchanged.
 func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine.ExecutionSnapshot, error) {
 	t := namespace.FromContext(ctx)
 	pipe := s.rdb.Pipeline()
@@ -984,6 +1057,10 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 	rerunFromCmd := pipe.Get(ctx, execKey(t, id, "rerun_from"))
 	parentNodeCmd := pipe.Get(ctx, execKey(t, id, "parent_node"))
 	depthCmd := pipe.Get(ctx, execKey(t, id, "depth"))
+	workflowIDCmd := pipe.Get(ctx, execKey(t, id, "workflow_id"))
+	workflowVersionCmd := pipe.Get(ctx, execKey(t, id, "workflow_version"))
+	createdAtCmd := pipe.Get(ctx, execKey(t, id, "created_at_ms"))
+	updatedAtCmd := pipe.Get(ctx, execKey(t, id, "updated_at_ms"))
 	// Exec surfaces the first command error, and redis.Nil is the expected answer
 	// for most of these keys. The per-command results below are authoritative.
 	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
@@ -1093,21 +1170,54 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 	} else if err != redis.Nil {
 		return nil, fmt.Errorf("get execution depth %q: %w", id, err)
 	}
+	// The workflow identity is immutable metadata written with the execution;
+	// absent on every execution recorded without one, hence the same redis.Nil
+	// tolerance as the links above.
+	var workflowID string
+	if raw, err := workflowIDCmd.Result(); err == nil {
+		workflowID = raw
+	} else if err != redis.Nil {
+		return nil, fmt.Errorf("get execution workflow id %q: %w", id, err)
+	}
+	var workflowVersion string
+	if raw, err := workflowVersionCmd.Result(); err == nil {
+		workflowVersion = raw
+	} else if err != redis.Nil {
+		return nil, fmt.Errorf("get execution workflow version %q: %w", id, err)
+	}
+	// The execution's clock. Absent for executions created before these keys
+	// existed, which reads back as a zero time and is omitted from the inspect
+	// payload rather than guessed.
+	var createdAt, updatedAt time.Time
+	if raw, err := createdAtCmd.Int64(); err == nil {
+		createdAt = time.UnixMilli(raw).UTC()
+	} else if err != redis.Nil {
+		return nil, fmt.Errorf("get execution created_at %q: %w", id, err)
+	}
+	if raw, err := updatedAtCmd.Int64(); err == nil {
+		updatedAt = time.UnixMilli(raw).UTC()
+	} else if err != redis.Nil {
+		return nil, fmt.Errorf("get execution updated_at %q: %w", id, err)
+	}
 	return &engine.ExecutionSnapshot{
-		ID:           id,
-		Graph:        g,
-		Status:       types.ExecutionStatus(val),
-		Params:       params,
-		Runtime:      runtime,
-		Scope:        scope,
-		TestRun:      testRun,
-		TraceID:      traceID,
-		SpanID:       spanID,
-		TraceCarrier: traceCarrier,
-		Error:        execErr,
-		ParentID:     types.ExecutionID(parentID),
-		ParentNode:   parentNode,
-		Depth:        depth,
-		RerunFrom:    rerunFrom,
+		ID:              id,
+		Graph:           g,
+		Status:          types.ExecutionStatus(val),
+		Params:          params,
+		Runtime:         runtime,
+		Scope:           scope,
+		WorkflowID:      types.WorkflowID(workflowID),
+		WorkflowVersion: workflowVersion,
+		CreatedAt:       createdAt,
+		UpdatedAt:       updatedAt,
+		TestRun:         testRun,
+		TraceID:         traceID,
+		SpanID:          spanID,
+		TraceCarrier:    traceCarrier,
+		Error:           execErr,
+		ParentID:        types.ExecutionID(parentID),
+		ParentNode:      parentNode,
+		Depth:           depth,
+		RerunFrom:       rerunFrom,
 	}, nil
 }

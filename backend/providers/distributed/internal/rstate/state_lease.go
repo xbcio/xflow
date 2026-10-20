@@ -17,6 +17,17 @@ import (
 
 var _ engine.LeaseSuspender = (*Store)(nil)
 
+// startedAtPtr converts a lease issue time into the nullable column value the
+// SQL projection writes. A zero time means "unknown" and must stay NULL rather
+// than becoming the year 1 in MySQL.
+func startedAtPtr(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	v := t.UTC()
+	return &v
+}
+
 func (s *Store) AcquireTaskLease(ctx context.Context, lease *engine.TaskLease) (previous *engine.NodeSnapshot, acquired bool, err error) {
 	started := time.Now()
 	defer func() {
@@ -131,6 +142,7 @@ func (s *Store) AcquireTaskLease(ctx context.Context, lease *engine.TaskLease) (
 			LeaseID:     string(lease.LeaseID),
 			LeaseToken:  string(lease.LeaseToken),
 			Attempt:     attempt,
+			StartedAt:   startedAtPtr(lease.IssuedAt),
 			UpdatedAt:   time.Now(),
 		}
 		s.auditWrite(ctx, "acquire_task_lease", func(ctx context.Context) error {

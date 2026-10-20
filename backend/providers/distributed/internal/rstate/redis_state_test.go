@@ -55,6 +55,7 @@ func (q *StoreTestQueue) EnqueueDelayed(_ context.Context, task *engine.Task, _ 
 
 func TestBuildExecutionRecordPersistsWorkflowAuditContext(t *testing.T) {
 	def := &types.WorkflowDef{
+		ID:   "wf-vulnerability-approval",
 		Name: "vulnerability-approval",
 		Nodes: []types.NodeDef{{
 			Name:       "SecurityApproval",
@@ -81,6 +82,10 @@ func TestBuildExecutionRecordPersistsWorkflowAuditContext(t *testing.T) {
 	}
 	if rec.WorkflowName != "vulnerability-approval" {
 		t.Fatalf("WorkflowName = %q, want vulnerability-approval", rec.WorkflowName)
+	}
+	if rec.WorkflowID != "wf-vulnerability-approval" {
+		t.Fatalf("WorkflowID = %q, want wf-vulnerability-approval: the row must carry the "+
+			"workflow identity, not only its display name", rec.WorkflowID)
 	}
 
 	var gotDef types.WorkflowDef

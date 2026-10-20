@@ -510,7 +510,12 @@ func (s *Store) promoteExecution(ctx context.Context, t namespace.Namespace, id 
 		ttl = s.execTTL
 	}
 	reply, err := promoteQueuedExecutionLua.Run(ctx, s.rdb,
-		[]string{execKey(t, id, "status"), outboxReadyKey(t, id), outboxBodyKey(t, id)},
+		[]string{
+			execKey(t, id, "status"),
+			outboxReadyKey(t, id),
+			outboxBodyKey(t, id),
+			execKey(t, id, "updated_at_ms"),
+		},
 		string(types.ExecutionStatusQueued), string(types.ExecutionStatusRunning),
 		int(ttl.Seconds()), queuedOutboxHold.UnixMilli(), time.Now().UTC().UnixMilli(),
 	).Slice()

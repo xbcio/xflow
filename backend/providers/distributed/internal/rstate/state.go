@@ -427,6 +427,18 @@ func transientExecutionKeys(t namespace.Namespace, id types.ExecutionID, g *grap
 		execKey(t, id, "span_id"),
 		execKey(t, id, "trace_carrier"),
 		execKey(t, id, "test_run"),
+		// The workflow identity is part of the execution's own key set for the
+		// same reason status is: completion-time shortening must not leave it
+		// outliving the shortened execution's payload keys, and a reader that
+		// found the execution must still be able to name what it ran.
+		execKey(t, id, "workflow_id"),
+		execKey(t, id, "workflow_version"),
+		// The execution's own clock belongs to the same key set: completion-time
+		// shortening must bound the timestamps with the payload they describe,
+		// or a transient execution leaves its two clock keys behind at the
+		// active TTL while everything else has already been shortened.
+		execKey(t, id, "created_at_ms"),
+		execKey(t, id, "updated_at_ms"),
 		// NOTE: the transient marker is deliberately ABSENT from this list.
 		//
 		// It used to be included, so that completion shortened the marker along

@@ -34,9 +34,12 @@ var _ engine.ConcurrencyLimitedEntryAdmissionStore = (*Store)(nil)
 // KEYS: 1=admission 2=exec:status 3=exec:graph 4=remaining 5=failed
 //
 //	6=group:status 7=group:meta 8=outbox:ready 9=outbox:body
-//	10=concurrency back-reference (exec:conc_wf)
-//	11.. = per exit: output key + node meta key (2 keys each)
-//	11+2*exitCount..end = per downstream: inDegree, active, schedule (3 each)
+//	10=concurrency back-reference (exec:conc_wf) 11=exec:workflow_id
+//	12=exec:workflow_version
+//	13.. = per exit: output key + node meta key (2 keys each)
+//	13+2*exitCount..end = per downstream: inDegree, active, schedule (3 each),
+//	then ... and last 2 = the execution's own clock keys (created_at_ms,
+//	updated_at_ms)
 //
 // ARGV: 1=resultHash 2=ttl_s 3=graphJSON 4=outcome(success|failed)
 //
@@ -47,10 +50,14 @@ var _ engine.ConcurrencyLimitedEntryAdmissionStore = (*Store)(nil)
 //	  queued admission, 0 for work that is due now)
 //	9=the workflow's concurrency tag, storing which slot set this execution has
 //	  to leave when it finishes (empty when the workflow declares no limit)
-//	10.. = per exit: encoded exit data + private-output bit (2 args each)
-//	10+2*exitCount.. = per downstream: arrivalCount, activeCount, mergeMode,
+//	10=the execution's workflow id, 11=its workflow version (empty when the
+//	  admission carries no identity)
+//	12.. = per exit: encoded exit data + private-output bit (2 args each)
+//	12+2*exitCount.. = per downstream: arrivalCount, activeCount, mergeMode,
 //	                   executeID, executeBody, skipID, skipBody, nodeName (8 each)
-//	then rootSkipCount, then per unselected root: skipID, skipBody (2 each)
+//	then rootSkipCount, then per unselected root: skipID, skipBody (2 each),
+//	and finally the execution's creation time in unix milliseconds (created_at
+//	and updated_at start equal, exactly as createExecution writes them)
 //
 // The concurrency key is always declared, even by a caller that passes an empty
 // tag: it carries the execution's own hash tag, so naming it keeps every key in
@@ -89,10 +96,25 @@ redis.call('SET', KEYS[1], ARGV[1], 'EX', ttl)
 -- Step 2: Create execution, at the status its admission landed on.
 redis.call('SET', KEYS[2], ARGV[7], 'EX', ttl)
 redis.call('SET', KEYS[3], ARGV[3], 'EX', ttl)
+-- Step 2a: the execution's own clock, written with its creation. Inspect
+-- exposes these as created_at/updated_at, and an admission-created execution
+-- must report the same lifetime as one created through CreateExecution.
+local createdAtMs = ARGV[#ARGV]
+redis.call('SET', KEYS[#KEYS - 1], createdAtMs, 'EX', ttl)
+redis.call('SET', KEYS[#KEYS], createdAtMs, 'EX', ttl)
 -- Step 2b: The workflow this execution contends for, so the release that follows
 -- its terminal status can find the slot set (or the place in line) to give back.
 if ARGV[9] ~= '' then
     redis.call('SET', KEYS[10], ARGV[9], 'EX', ttl)
+end
+-- Step 2c: The workflow identity captured for this execution, with the same
+-- retention as its status. Empty values write nothing and read back empty,
+-- which is the documented unattributed state.
+if ARGV[10] ~= '' then
+    redis.call('SET', KEYS[11], ARGV[10], 'EX', ttl)
+end
+if ARGV[11] ~= '' then
+    redis.call('SET', KEYS[12], ARGV[11], 'EX', ttl)
 end
 -- Step 3: remaining/failed counters are pre-seeded via TxPipeline (see Go wrapper).
 -- Step 4: Mark group unit as done.
@@ -101,9 +123,9 @@ redis.call('HSET', KEYS[7], 'committed_lease_token', 'seed-triggered')
 redis.call('EXPIRE', KEYS[7], ttl)
 -- Step 5: Boundary outputs.
 local exitCount = tonumber(ARGV[5] or '0')
-local keypos = 11
+local keypos = 13
 for i = 1, exitCount do
-    local dataPos = 10 + (i - 1) * 2
+    local dataPos = 12 + (i - 1) * 2
     redis.call('SET', KEYS[keypos], ARGV[dataPos], 'EX', ttl)
     if tonumber(ARGV[dataPos + 1]) == 1 then
         redis.call('HSET', KEYS[keypos + 1], 'private_output', '1')
@@ -135,7 +157,7 @@ end
 local skips = {}
 if remaining > 0 then
     local n = tonumber(ARGV[6] or '0')
-    local argpos = 10 + 2 * exitCount
+    local argpos = 12 + 2 * exitCount
     for i = 1, n do
         local inDegreeKey = KEYS[keypos]
         local activeKey = KEYS[keypos + 1]
@@ -194,8 +216,8 @@ end
 -- They are not reported in skips: that list is the downstream fan-in decision.
 if remaining > 0 then
     local downstreamCount = tonumber(ARGV[6] or '0')
-    local rootArg = 10 + 2 * exitCount + 8 * downstreamCount
-    local rootKey = 11 + 2 * exitCount + 3 * downstreamCount
+    local rootArg = 12 + 2 * exitCount + 8 * downstreamCount
+    local rootKey = 13 + 2 * exitCount + 3 * downstreamCount
     local rootCount = tonumber(ARGV[rootArg] or '0')
     for i = 1, rootCount do
         local scheduleKey = KEYS[rootKey + i - 1]
@@ -424,6 +446,11 @@ func (s *Store) seedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 		// slot set to leave. Declared whether or not there is a limit: it carries
 		// the execution's own hash tag, so naming it keeps every key in one slot.
 		concurrencyTagKey(t, execID), // 10
+		// The workflow identity captured for this execution. Fixed slots in the
+		// same {execID} slot as every other execution key, so the Lua can write
+		// them atomically with the execution's creation.
+		execKey(t, execID, "workflow_id"),      // 11
+		execKey(t, execID, "workflow_version"), // 12
 	}
 
 	// Build ARGV.
@@ -437,6 +464,8 @@ func (s *Store) seedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 		string(status),         // 7
 		outboxScore,            // 8
 		concTag,                // 9
+		string(req.WorkflowID), // 10
+		req.WorkflowVersion,    // 11
 	}
 
 	// Exit outputs (keys + args).
@@ -507,6 +536,11 @@ func (s *Store) seedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 		keys = append(keys, scheduleKey(t, execID, skip.UnitIdx))
 		args = append(args, skipID, skipJSON)
 	}
+
+	// The execution's own clock, appended last: the script reads both keys and
+	// the instant off the tail, so every positional slot above stays stable.
+	keys = append(keys, execKey(t, execID, "created_at_ms"), execKey(t, execID, "updated_at_ms"))
+	args = append(args, time.Now().UTC().UnixMilli())
 
 	// Run Lua.
 	res, err := seedExecutionFromEntryLua.Run(ctx, s.rdb, keys, args...).Slice()
@@ -640,6 +674,16 @@ func (s *Store) projectSeededExecution(ctx context.Context, execID types.Executi
 	}
 	if req.Graph != nil {
 		rec.WorkflowName = req.Graph.Name()
+	}
+	// Workflow identity: prefer the definition attached to the seeding context
+	// (the control plane resolves it from the authoritative registry). A store
+	// reached without one — or with a stored definition written by POST, which
+	// carries no id — still has the request's own workflow id: the id the
+	// admission key was derived from. That is an identity, not a guess, so it is
+	// recorded rather than leaving a trigger-created execution unattributed.
+	rec.WorkflowID = req.WorkflowID
+	if def, ok := engine.WorkflowDefFromContext(ctx); ok && def.ID != "" {
+		rec.WorkflowID = types.WorkflowID(def.ID)
 	}
 	// An unencodable field drops only that field, never the row: this
 	// projection is the execution's last surviving record once its Redis keys

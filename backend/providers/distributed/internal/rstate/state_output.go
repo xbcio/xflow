@@ -102,6 +102,18 @@ func (s *Store) extendExecTTL(ctx context.Context, id types.ExecutionID, nodeNam
 	pipe.Expire(ctx, execKey(t, id, "trace_carrier"), ttl)
 	pipe.Expire(ctx, execKey(t, id, "test_run"), ttl)
 	pipe.Expire(ctx, execKey(t, id, "graph"), ttl)
+	// The workflow identity is written once with the execution, so a suspended
+	// execution that outlives its initial TTL must renew it here too: otherwise
+	// the status survives the wait while Inspect reports the execution as
+	// unattributed.
+	pipe.Expire(ctx, execKey(t, id, "workflow_id"), ttl)
+	pipe.Expire(ctx, execKey(t, id, "workflow_version"), ttl)
+	// The execution's clock is written once with the execution too, and must
+	// survive a wait that outlives the creation retention for the same reason
+	// the identity must: a resumed execution whose status lives on but whose
+	// timestamps expired reports no start line and no duration.
+	pipe.Expire(ctx, execKey(t, id, "created_at_ms"), ttl)
+	pipe.Expire(ctx, execKey(t, id, "updated_at_ms"), ttl)
 	pipe.Expire(ctx, suspendedNodesKey(t, id), ttl)
 	pipe.Expire(ctx, timeoutZSetKey(t, id), ttl)
 	for _, key := range suspendNodeTTLKeys(t, id, nodeName, spec) {

@@ -97,9 +97,26 @@ func (s *Store) UpsertNode(ctx context.Context, n *engine.NodeSnapshot) error {
 	if n.PrivateOutput {
 		privateOutput = 1
 	}
+	// Timing is written once. started_at comes from the first lease; an upsert
+	// that carries no start (the recovery/cancel snapshots that reach this path)
+	// leaves the existing value alone. finished_at is stamped by the upsert that
+	// first writes a terminal status, even when the caller did not compute it.
+	var startedAtMs int64
+	if !n.StartedAt.IsZero() {
+		startedAtMs = n.StartedAt.UTC().UnixMilli()
+	}
+	var finishedAtMs int64
+	if types.IsTerminalNodeStatus(n.Status) {
+		finishedAt := n.FinishedAt
+		if finishedAt.IsZero() {
+			finishedAt = time.Now().UTC()
+		}
+		finishedAtMs = finishedAt.UTC().UnixMilli()
+	}
 	result, err := upsertNodeLua.Run(ctx, s.rdb,
 		[]string{key, outKey, metaKey},
 		string(n.Status), outputJSON, int(ttl.Seconds()), n.ActivationID, privateOutput,
+		startedAtMs, finishedAtMs,
 	).Slice()
 	if err != nil {
 		return fmt.Errorf("upsert node %q/%q: %w", n.ExecutionID, n.Name, err)
@@ -217,6 +234,19 @@ func (s *Store) UpsertNode(ctx context.Context, n *engine.NodeSnapshot) error {
 			Port:        n.Port,
 			UpdatedAt:   time.Now(),
 		}
+		// Only an accepted write may establish a timing fact; a stale snapshot
+		// that Lua refused must not project one into the SQL history. The
+		// column-level COALESCE in sqlstore makes the write one-shot anyway.
+		if written {
+			if startedAtMs > 0 {
+				startedAt := time.UnixMilli(startedAtMs).UTC()
+				rec.StartedAt = &startedAt
+			}
+			if finishedAtMs > 0 {
+				finishedAt := time.UnixMilli(finishedAtMs).UTC()
+				rec.FinishedAt = &finishedAt
+			}
+		}
 		s.auditWrite(ctx, "upsert_node", func(ctx context.Context) error {
 			return s.db.UpsertNode(ctx, rec)
 		})
@@ -311,6 +341,21 @@ func (s *Store) GetNode(ctx context.Context, id types.ExecutionID, name string) 
 		var ms int64
 		if _, scanErr := fmt.Sscanf(ttlMs, "%d", &ms); scanErr == nil && ms > 0 {
 			ns.LeaseTTL = time.Duration(ms) * time.Millisecond
+		}
+	}
+	// Node timing: absent on a node that never started / has not finished, and
+	// on every node written before these fields existed. Zero is the documented
+	// "unknown" and inspect omits it.
+	if startedMs := meta["started_at_ms"]; startedMs != "" {
+		var ms int64
+		if _, scanErr := fmt.Sscanf(startedMs, "%d", &ms); scanErr == nil && ms > 0 {
+			ns.StartedAt = time.UnixMilli(ms).UTC()
+		}
+	}
+	if finishedMs := meta["finished_at_ms"]; finishedMs != "" {
+		var ms int64
+		if _, scanErr := fmt.Sscanf(finishedMs, "%d", &ms); scanErr == nil && ms > 0 {
+			ns.FinishedAt = time.UnixMilli(ms).UTC()
 		}
 	}
 	if taskType := meta["lease_task_type"]; taskType != "" {

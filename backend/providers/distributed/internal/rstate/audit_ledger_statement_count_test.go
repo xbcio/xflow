@@ -463,6 +463,47 @@ func TestSeedProjectionKeepsTheRowWhenAFieldIsUnencodable(t *testing.T) {
 	}
 }
 
+// TestSeedProjectionRecordsWorkflowIdentity: the seeded row is the execution's
+// durable identity once Redis expires, so it must carry the workflow it ran.
+// The request's id is the identity the admission key was derived from and
+// attributes the row when no definition reached the context; a definition the
+// control plane resolved from the registry is more specific and wins.
+func TestSeedProjectionRecordsWorkflowIdentity(t *testing.T) {
+	state, db := newSQLCountingState(t)
+	mem := db.Store
+	ctx := namespace.WithNamespace(context.Background(), "identity")
+
+	req := seedRequestFor(t, "identity", "identity-key")
+	resp, err := state.SeedExecutionFromEntry(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := mem.GetExecution(ctx, resp.ExecutionID)
+	if err != nil {
+		t.Fatalf("admitted execution has no SQL row: %v", err)
+	}
+	if rec.WorkflowID != req.WorkflowID {
+		t.Fatalf("WorkflowID = %q, want %q from the request: an advisory-only id leaves "+
+			"trigger-created executions unattributed and invisible to every workflow filter",
+			rec.WorkflowID, req.WorkflowID)
+	}
+
+	ctx = engine.WithWorkflowDef(ctx, &types.WorkflowDef{ID: "wf-from-context"})
+	req = seedRequestFor(t, "identity", "identity-key-2")
+	resp, err = state.SeedExecutionFromEntry(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err = mem.GetExecution(ctx, resp.ExecutionID)
+	if err != nil {
+		t.Fatalf("admitted execution has no SQL row: %v", err)
+	}
+	if rec.WorkflowID != "wf-from-context" {
+		t.Fatalf("WorkflowID = %q, want wf-from-context: the resolved definition is the "+
+			"authoritative identity and must override the request fallback", rec.WorkflowID)
+	}
+}
+
 // TestSeedProjectionSkipsTransientExecution guards the exclusion that this
 // change must not disturb: a transient execution gets no SQL row at all.
 func TestSeedProjectionSkipsTransientExecution(t *testing.T) {
