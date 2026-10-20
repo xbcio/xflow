@@ -30,6 +30,8 @@ func (n *IfNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.if",
 		DisplayName: "IF Condition",
+		Category:    "control",
+		CardSummary: []string{"condition"},
 		Params: []types.ParamSpec{
 			{Name: "condition", DisplayName: "Condition", Type: types.ParamString, Required: true, Description: "Boolean expression to evaluate",
 				Widget: nodeinternal.WidgetExpression, Constraints: nodeinternal.Format(nodeinternal.FormatExpression)},

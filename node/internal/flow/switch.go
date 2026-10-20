@@ -47,6 +47,8 @@ func (n *SwitchNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.switch",
 		DisplayName: "Switch",
+		Category:    "control",
+		CardSummary: []string{"rules", "expression"},
 		Params: []types.ParamSpec{
 			{Name: "mode", DisplayName: "Mode", Type: types.ParamString, Required: true, Description: "Routing mode: \"rules\" or \"expression\"",
 				Enum: []types.EnumOption{

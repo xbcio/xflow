@@ -84,6 +84,8 @@ func (n *MapNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.map",
 		DisplayName: "Map",
+		Category:    "control",
+		CardSummary: []string{"items", "batch_size"},
 		Params: []types.ParamSpec{
 			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to iterate",
 				Widget: nodeinternal.WidgetExpression, Constraints: nodeinternal.Format(nodeinternal.FormatExpression)},

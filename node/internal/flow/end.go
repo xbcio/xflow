@@ -26,6 +26,7 @@ func (n *EndNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.end",
 		DisplayName: "End",
+		Category:    "control",
 		Kind:        "action",
 		Inputs:      []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 		Outputs:     []types.PortSpec{},

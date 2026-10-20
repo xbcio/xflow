@@ -61,6 +61,8 @@ func (n *WaitNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        WaitNodeType,
 		DisplayName: "Wait",
+		Category:    "control",
+		CardSummary: []string{"mode", "signal_name", "timeout"},
 		Params: []types.ParamSpec{
 			{Name: "mode", DisplayName: "Mode", Type: types.ParamString, Required: false, Default: "signal", Description: "Trigger mode: \"signal\" (default) or \"timer\"",
 				Enum: []types.EnumOption{

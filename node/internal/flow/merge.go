@@ -28,6 +28,8 @@ func (n *MergeNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.merge",
 		DisplayName: "Merge",
+		Category:    "control",
+		CardSummary: []string{"mode", "on_others"},
 		Params: []types.ParamSpec{
 			{Name: "mode", DisplayName: "Mode", Type: types.ParamString, Required: true, Description: "Merge strategy: \"wait_all\" or \"wait_any\"",
 				Enum: []types.EnumOption{

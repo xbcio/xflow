@@ -37,6 +37,7 @@ func (n *StartNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.start",
 		DisplayName: "Start",
+		Category:    "control",
 		Kind:        "action",
 		Outputs:     []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 	}

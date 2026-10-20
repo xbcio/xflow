@@ -70,6 +70,8 @@ func (n *SubWorkflowNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        SubWorkflowNodeType,
 		DisplayName: "Sub-workflow",
+		Category:    "control",
+		CardSummary: []string{"workflow+version", "entry"},
 		Params: []types.ParamSpec{
 			{Name: "workflow", DisplayName: "Workflow", Type: types.ParamString, Required: true, Description: "Name of the workflow to run, in the same namespace"},
 			{Name: "version", DisplayName: "Version", Type: types.ParamString, Required: false, Description: "Version to pin; empty resolves to the latest version at registration time"},
