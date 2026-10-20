@@ -68,7 +68,19 @@ func (e *Engine) Invoke(ctx context.Context, workflowID types.WorkflowID, entry 
 			Scope: enginecore.WorkflowIdempotencyScope(workflowID),
 		})
 	}
-	ctx = enginecore.WithWorkflowDef(ctx, rec.Definition)
+	// The workflow id this call addresses is the identity of the execution: stamp
+	// it onto a copy of the stored definition so the durable execution
+	// projection records it, overriding any id a legacy stored definition still
+	// carries. Without the stamp, every execution of a POST-registered workflow
+	// would be unattributed and invisible to the workflow_id listing filter. The
+	// registry's record is never mutated.
+	var subDef *types.WorkflowDef
+	if rec.Definition != nil {
+		stamped := *rec.Definition
+		stamped.ID = string(workflowID)
+		subDef = &stamped
+	}
+	ctx = enginecore.WithWorkflowDef(ctx, subDef)
 	return e.eng.Invoke(ctx, rec.Graph, entry.nodeName, input, cfg.runtime)
 }
 

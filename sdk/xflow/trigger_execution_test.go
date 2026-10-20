@@ -28,7 +28,7 @@ func TestTriggerEmitRunsDownstreamNodes(t *testing.T) {
 	}
 	defer eng.Stop()
 
-	wf := Workflow("trigger_e2e")
+	wf := Workflow("trigger_e2e").Version("v3")
 	start := wf.Node("trigger", tr.New(nil))
 	capture := wf.Node("capture", action.New(nil))
 	wf.Connect(start, capture)
@@ -42,8 +42,22 @@ func TestTriggerEmitRunsDownstreamNodes(t *testing.T) {
 	}
 
 	event := &types.TriggerEvent{ID: "evt-1", Kind: "test"}
-	if _, err := capturedRuntime.Emit(context.Background(), workflowID, "trigger", event); err != nil {
+	execID, err := capturedRuntime.Emit(context.Background(), workflowID, "trigger", event)
+	if err != nil {
 		t.Fatal(err)
+	}
+	// A trigger execution is an SDK Invoke on the addressed workflow, so its
+	// audit snapshot must name that workflow and the version it ran — the
+	// identity the editor's run history resolves definitions by.
+	detail, err := eng.Inspect(context.Background(), execID)
+	if err != nil {
+		t.Fatalf("Inspect(trigger execution): %v", err)
+	}
+	if detail.WorkflowID != workflowID {
+		t.Fatalf("trigger execution WorkflowID = %q, want %q", detail.WorkflowID, workflowID)
+	}
+	if detail.WorkflowVersion != "v3" {
+		t.Fatalf("trigger execution WorkflowVersion = %q, want %q", detail.WorkflowVersion, "v3")
 	}
 
 	select {

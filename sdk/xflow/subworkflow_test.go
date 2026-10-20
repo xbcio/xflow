@@ -158,7 +158,8 @@ func TestSubWorkflowLocalEndToEnd(t *testing.T) {
 	}
 	defer eng.Stop()
 
-	if _, err := eng.AddWorkflow(ctx, subWorkflowChildBuilder(t)); err != nil {
+	childID, err := eng.AddWorkflow(ctx, subWorkflowChildBuilder(t))
+	if err != nil {
 		t.Fatalf("AddWorkflow(child) error = %v", err)
 	}
 	parentID, err := eng.AddWorkflow(ctx, subWorkflowParentBuilder("sdk-sw-child"))
@@ -211,6 +212,15 @@ func TestSubWorkflowLocalEndToEnd(t *testing.T) {
 	if child.Status != types.ExecutionStatusSuccess {
 		t.Fatalf("child status = %q, want success", child.Status)
 	}
+	// The child runs the definition the resolver read, so it must name that
+	// record. The registry compiles the graph before the record carries its id,
+	// which is why the identity cannot be read off the graph.
+	if child.WorkflowID != childID {
+		t.Fatalf("child WorkflowID = %q, want the registered child id %q", child.WorkflowID, childID)
+	}
+	if child.WorkflowVersion != "v1" {
+		t.Fatalf("child WorkflowVersion = %q, want %q", child.WorkflowVersion, "v1")
+	}
 }
 
 // TestSubWorkflowClusterEndToEnd is the same round trip on the cluster engine
@@ -232,7 +242,8 @@ func TestSubWorkflowClusterEndToEnd(t *testing.T) {
 	}
 	defer eng.Stop()
 
-	if _, err := eng.AddWorkflow(ctx, subWorkflowChildBuilder(t)); err != nil {
+	childID, err := eng.AddWorkflow(ctx, subWorkflowChildBuilder(t))
+	if err != nil {
 		t.Fatalf("AddWorkflow(child) error = %v", err)
 	}
 	parentID, err := eng.AddWorkflow(ctx, subWorkflowParentBuilder("sdk-sw-child"))
@@ -273,6 +284,15 @@ func TestSubWorkflowClusterEndToEnd(t *testing.T) {
 	}
 	if child.ParentID != id || child.ParentNode != "sub" {
 		t.Fatalf("child linkage = (%q, %q), want (%q, %q)", child.ParentID, child.ParentNode, id, "sub")
+	}
+	// The cluster registry round-trips the compiled graph through JSON, which
+	// does not preserve its definition; the identity must still come from the
+	// resolved record or every production child is unattributed.
+	if child.WorkflowID != childID {
+		t.Fatalf("child WorkflowID = %q, want the registered child id %q", child.WorkflowID, childID)
+	}
+	if child.WorkflowVersion != "v1" {
+		t.Fatalf("child WorkflowVersion = %q, want %q", child.WorkflowVersion, "v1")
 	}
 }
 
