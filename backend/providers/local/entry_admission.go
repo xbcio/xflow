@@ -103,6 +103,12 @@ func (s *memoryState) seedExecutionFromEntry(_ context.Context, req engine.SeedE
 		Graph:  req.Graph,
 		Status: status,
 		Params: req.Params,
+		// The admitted entry unit carries the workflow identity the control
+		// plane derived the admission key from. Persisting it here is what lets
+		// Inspect/GetExecution name the workflow a trigger-created execution
+		// ran, exactly as the submission path does.
+		WorkflowID:      req.WorkflowID,
+		WorkflowVersion: req.WorkflowVersion,
 	}
 	s.createExecutionLocked(snap)
 

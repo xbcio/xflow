@@ -156,6 +156,16 @@ func (s *memoryState) CommitNode(_ context.Context, req engine.CommitNodeRequest
 	// child a finished node ran would be unreadable.
 	if current != nil {
 		node.ChildExecutionID = current.ChildExecutionID
+		// Timing survives the rebuild. StartedAt is the first lease's issue
+		// time; FinishedAt is stamped exactly once, on the terminal commit, and
+		// carried forward by later writes rather than recomputed. A system
+		// commit (skip/pin) can have no current record, in which case there is
+		// no start line and only the end line is known.
+		node.StartedAt = current.StartedAt
+		node.FinishedAt = current.FinishedAt
+	}
+	if types.IsTerminalNodeStatus(req.Status) && node.FinishedAt.IsZero() {
+		node.FinishedAt = time.Now().UTC()
 	}
 	s.nodes[key] = node
 	if req.StoreOutput {
@@ -875,6 +885,7 @@ func (s *memoryState) finishExecutionLocked(id types.ExecutionID, entry *execEnt
 		return
 	}
 	entry.snap.Status = status
+	entry.snap.UpdatedAt = time.Now().UTC()
 	if status == types.ExecutionStatusFailed && errMsg != "" {
 		entry.snap.Error = errMsg
 	}

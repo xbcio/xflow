@@ -403,6 +403,9 @@ func (s *memoryState) promoteLocked(slot *workflowSlot) {
 func (s *memoryState) completePromotionLocked(id types.ExecutionID) {
 	if entry, ok := s.executions[id]; ok && entry.snap.Status == types.ExecutionStatusQueued {
 		entry.snap.Status = types.ExecutionStatusRunning
+		// Leaving the queue is an accepted status transition, so it advances
+		// the execution clock like every other accepted transition does.
+		entry.snap.UpdatedAt = time.Now().UTC()
 		s.publishLocked(engine.ExecutionEvent{ExecutionID: id, Status: types.ExecutionStatusRunning})
 	}
 	for entryID, held := range s.outbox[id] {
@@ -489,6 +492,16 @@ func (s *memoryState) ConcurrencyQueuePosition(_ context.Context, id types.Execu
 
 func (s *memoryState) createExecutionLocked(e *engine.ExecutionSnapshot) {
 	cp := *e
+	// The execution's clock belongs to the backend, not to the caller: every
+	// store stamps creation so the inspect API can time a run even when the
+	// submission carried no client timestamp. A snapshot that already carries
+	// one (a seeded execution copying its parent's metadata) keeps it.
+	if cp.CreatedAt.IsZero() {
+		cp.CreatedAt = time.Now().UTC()
+	}
+	if cp.UpdatedAt.IsZero() {
+		cp.UpdatedAt = cp.CreatedAt
+	}
 	s.executions[e.ID] = &execEntry{snap: cp}
 	// Reuse a pre-registered done channel from an early waitDone call (race with
 	// CreateExecution), or create a fresh one.
@@ -535,6 +548,10 @@ func (s *memoryState) updateExecutionStatusLocked(id types.ExecutionID, status t
 		return nil
 	}
 	entry.snap.Status = status
+	// Every accepted status transition, terminal or not, is the execution's
+	// "last update" for the inspect timing fields. Setting it only on terminal
+	// would make a paused/running run report a stale update time.
+	entry.snap.UpdatedAt = time.Now().UTC()
 	// Record the execution-level reason alongside the status, using the
 	// distributed backend's exact rule: updateExecutionStatusLua writes
 	// exec:<id>:error only when the reason argument is non-empty, and
@@ -629,6 +646,20 @@ func (s *memoryState) UpsertNode(_ context.Context, n *engine.NodeSnapshot) erro
 		return nil
 	}
 	cp := *n
+	// Timing is write-once. The caller's zero value means "no new fact", not
+	// "clear the fact", and the terminal write is what stamps the end line —
+	// the cancel/recovery snapshots that reach this path do not carry it.
+	if existing, ok := s.nodes[key]; ok {
+		if !existing.StartedAt.IsZero() {
+			cp.StartedAt = existing.StartedAt
+		}
+		if !existing.FinishedAt.IsZero() {
+			cp.FinishedAt = existing.FinishedAt
+		}
+	}
+	if types.IsTerminalNodeStatus(cp.Status) && cp.FinishedAt.IsZero() {
+		cp.FinishedAt = time.Now().UTC()
+	}
 	cp.PrivateOutput = privateOutput
 	if cp.PrivateOutput {
 		cp.Output = nil
@@ -714,6 +745,11 @@ func (s *memoryState) CancelSuspendedNode(_ context.Context, id types.ExecutionI
 	}
 	cp := *ns
 	cp.Status = types.NodeStatusCanceled
+	// Cancel is a terminal transition of a parked node: the first one stamps the
+	// end line, and the start line survives from the lease that parked it.
+	if cp.FinishedAt.IsZero() {
+		cp.FinishedAt = time.Now().UTC()
+	}
 	cp.PrivateOutput = s.preserveOutputPrivacyLocked(key, cp.PrivateOutput)
 	if cp.PrivateOutput {
 		cp.Output = nil
@@ -787,6 +823,13 @@ func (s *memoryState) AcquireTaskLease(_ context.Context, lease *engine.TaskLeas
 		attempt = current.Attempt + 1
 	}
 	privateOutput := s.preserveOutputPrivacyLocked(key, false)
+	// startedAt is the FIRST lease's issue time: a retry (same activation) and a
+	// later cyclic activation both re-claim through here, and only the first
+	// claim may set the start line.
+	startedAt := lease.IssuedAt
+	if current != nil && !current.StartedAt.IsZero() {
+		startedAt = current.StartedAt
+	}
 	node := &engine.NodeSnapshot{
 		ExecutionID:     lease.Task.ExecutionID,
 		Name:            lease.Task.NodeName,
@@ -800,6 +843,7 @@ func (s *memoryState) AcquireTaskLease(_ context.Context, lease *engine.TaskLeas
 		AutoDepth:       lease.Task.AutoDepth,
 		LeaseIssuedAt:   lease.IssuedAt,
 		LeaseTTL:        lease.TTL,
+		StartedAt:       startedAt,
 		LeaseTaskType:   lease.Task.Type,
 		LeasePayload:    cloneLeasePayload(lease.Task.Payload),
 		LeaseGeneration: lease.Task.Generation,
@@ -811,8 +855,15 @@ func (s *memoryState) AcquireTaskLease(_ context.Context, lease *engine.TaskLeas
 	// child, and the drill-down reads it from here, so a re-claim that cleared
 	// it would lose both. The rstate acquire works on the existing hash and
 	// never touches the field, which is the behavior this mirrors.
+	//
+	// The end line is carried for the same reason as StartedAt above: a node
+	// re-entered under a higher activation is a fresh run of the node, not a
+	// second chance to write history. The rstate acquire leaves finished_at in
+	// the existing hash untouched; dropping it here would let the next terminal
+	// commit stamp a new end line over the first one.
 	if current != nil {
 		node.ChildExecutionID = current.ChildExecutionID
+		node.FinishedAt = current.FinishedAt
 	}
 	s.nodes[key] = node
 	return s.publicNodeSnapshotLocked(key, current), true, nil

@@ -3,6 +3,7 @@ package local
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/types"
@@ -38,6 +39,7 @@ func (s *memoryState) PauseExecution(_ context.Context, id types.ExecutionID) er
 		return nil
 	case types.ExecutionStatusRunning:
 		entry.snap.Status = types.ExecutionStatusPaused
+		entry.snap.UpdatedAt = time.Now().UTC()
 		return nil
 	default:
 		// A queued execution holds no state to suspend and a terminal one is
@@ -64,6 +66,7 @@ func (s *memoryState) ResumeExecution(_ context.Context, id types.ExecutionID) e
 		return fmt.Errorf("resume execution %q: %w", id, engine.ErrExecutionNotPaused)
 	}
 	entry.snap.Status = types.ExecutionStatusRunning
+	entry.snap.UpdatedAt = time.Now().UTC()
 	return nil
 }
 
