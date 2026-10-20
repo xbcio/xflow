@@ -39,10 +39,12 @@ type Observer interface {
 	// OnMessageDeadLettered reports a dead-letter publish attempt. result is
 	// "ok" or "error".
 	//
-	// Both dead-letter axes report here, because both do the same thing to the
-	// record and fail in the same way: message_schema's on_invalid=dead_letter
-	// republishes records that failed validation, and the aggregator's
-	// on_overflow=dead_letter republishes records the buffer was at its cap for.
+	// All three dead-letter axes report here, because all do the same thing to
+	// the record and fail in the same way: message_schema's
+	// on_invalid=dead_letter republishes records that failed validation, the
+	// aggregator's on_overflow=dead_letter republishes records the buffer was
+	// at its cap for, and emit_retry's on_failure=dead_letter republishes a
+	// record the legacy emit path could not deliver within its retry budget.
 	// Which axis it was is in the published record's xflow-dlq-reason header and
 	// in the log line; the operational reading of result is identical either way
 	// — "error" means the record is being redelivered rather than parked, and the
@@ -68,15 +70,18 @@ type Observer interface {
 	// OnConsumptionBlocked reports a partition halting or resuming consumption.
 	// blocked is the new state, reported on transitions only.
 	//
-	// Three conditions set it, and all mean "this partition is not making
+	// Four conditions set it, and all mean "this partition is not making
 	// progress so that no record is lost": on_overflow=block sitting at its
 	// retained bound, on_overflow=dead_letter holding a record whose
-	// dead-letter publish has not succeeded, and a per-record entry seed whose
+	// dead-letter publish has not succeeded, a per-record entry seed whose
 	// workflow's concurrency policy refused it — that last one holds the
-	// record and retries it with backoff instead of stepping over it. They
+	// record and retries it with backoff instead of stepping over it — and a
+	// legacy emit that has failed and is being retried (deliverLegacy, the
+	// emit_retry policy), which holds the partition the same way because a later
+	// record's commit would otherwise sweep past the undelivered one. They
 	// share a series because an operator's question is the same one — has this
 	// partition stopped, and is that why my lag looks fine — and the log line at
-	// each transition names which of the three it is.
+	// each transition names which of the four it is.
 	//
 	// The seed case is the one that is not backpressure from this process: the
 	// partition is waiting on the CONTROL PLANE to have room. Its rate is also
@@ -289,8 +294,8 @@ const discardLogInterval = 30 * time.Second
 // That makes the inventory below load-bearing: it is the whole of the
 // no-collision argument. Re-derive it rather than trusting it — the criterion
 // is every non-test call site of discardLog.allow, and the discriminator is
-// the second \x00-separated segment each one builds. Today that is six call
-// sites across three files, yielding nine discriminators:
+// the second \x00-separated segment each one builds. Today that is seven call
+// sites across five files, yielding twelve discriminators:
 //
 //	entryseed.go  "admission_" + state   admission_error,
 //	                                     admission_deterministic_error
@@ -298,6 +303,9 @@ const discardLogInterval = 30 * time.Second
 //	aggregate.go  "stuck_batch"
 //	aggregate.go  "overflow_dlq"         (parked under on_overflow=dead_letter)
 //	aggregate.go  "overflow_dlq_failed"  (the same, with the publish failing)
+//	kafka.go      "emit_retry"           (each failed legacy emit attempt)
+//	emit_retry.go "emit_dlq"             (parked after the retry budget)
+//	emit_retry.go "emit_dlq_failed"      (the same, with the publish failing)
 //	schema.go     reason                 schema, schema_fail, dead_letter
 //
 // The two overflow_dlq keys are separate rather than one key with an outcome

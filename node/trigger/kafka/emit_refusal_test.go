@@ -29,8 +29,8 @@ func TestEmitMessageRefusalIsLogged(t *testing.T) {
 	})
 	in := &types.TriggerActivateInput{WorkflowID: "wf-1", NodeName: "kafka", Runtime: rt}
 
-	if emitMessage(context.Background(), in, Message{Topic: "orders", Partition: 3, Offset: 42}) {
-		t.Fatal("emitMessage() = true for a refused emit, want false: the caller commits on true")
+	if err := emitMessage(context.Background(), in, Message{Topic: "orders", Partition: 3, Offset: 42}); err == nil {
+		t.Fatal("emitMessage() = nil for a refused emit, want an error: the caller commits only on nil")
 	}
 
 	logged := buf.String()

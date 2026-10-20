@@ -331,6 +331,100 @@
       ]
     },
     {
+      "name": "emit_retry",
+      "path": "/parameters/emit_retry",
+      "label": "Emit Retry",
+      "type": "object",
+      "help": "Optional failure policy for the legacy per-message emit path (aggregation off and not entry-seed). A failed emit holds the partition and retries the SAME record with exponential backoff (100ms doubling, jittered, capped at 5s); nothing behind it is emitted, and no commit can pass its offset. With on_failure unset or \"retry\" the retry is UNBOUNDED and ends only when the trigger stops — the safe default, because a bounded retry with nowhere to put the record would have to lose it. \"dead_letter\" bounds the wait by max_attempts (default 10) and max_block (default 30s), whichever comes first, then republishes the record to dead_letter_topic (required) with the last emit error in xflow-dlq-reason and commits the offset only after the republish succeeds; a failing republish keeps the partition held and is retried. Retries are visible in xflow_trigger_consumption_blocked and the dead-letter outcome in xflow_trigger_messages_dead_lettered_total. Delivery stays at-least-once; consumers must be idempotent on (topic, partition, offset).",
+      "group": "processing",
+      "expression": {
+        "mode": "template"
+      },
+      "fields": [
+        {
+          "name": "on_failure",
+          "path": "/parameters/emit_retry/on_failure",
+          "label": "On Failure",
+          "type": "string",
+          "help": "Policy once emit keeps failing; unset means retry forever",
+          "expression": {
+            "mode": "template"
+          },
+          "options": [
+            {
+              "value": "retry",
+              "label": "Retry",
+              "description": "Retry the same record forever; only stopping the trigger ends it (never skips, so nothing is lost)"
+            },
+            {
+              "value": "dead_letter",
+              "label": "Dead Letter",
+              "description": "Retry within the bounds, then republish to dead_letter_topic before committing the offset"
+            }
+          ]
+        },
+        {
+          "name": "max_attempts",
+          "path": "/parameters/emit_retry/max_attempts",
+          "label": "Max Attempts",
+          "type": "number",
+          "help": "Failed emit attempts before the record is parked; default 10. Read only when on_failure is dead_letter",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "min",
+              "value": 1
+            }
+          ],
+          "visible_when": {
+            "param": "on_failure",
+            "eq": "dead_letter"
+          }
+        },
+        {
+          "name": "max_block",
+          "path": "/parameters/emit_retry/max_block",
+          "label": "Max Block",
+          "type": "string",
+          "widget": "duration",
+          "help": "Wall time this partition may hold one record before it is parked; default 30s. Read only when on_failure is dead_letter",
+          "expression": {
+            "mode": "template"
+          },
+          "rules": [
+            {
+              "type": "format",
+              "format": "duration"
+            }
+          ],
+          "visible_when": {
+            "param": "on_failure",
+            "eq": "dead_letter"
+          }
+        },
+        {
+          "name": "dead_letter_topic",
+          "path": "/parameters/emit_retry/dead_letter_topic",
+          "label": "Dead Letter Topic",
+          "type": "string",
+          "required_when": {
+            "param": "on_failure",
+            "eq": "dead_letter"
+          },
+          "help": "Where an undeliverable record is parked; read only when on_failure is dead_letter",
+          "expression": {
+            "mode": "template"
+          },
+          "visible_when": {
+            "param": "on_failure",
+            "eq": "dead_letter"
+          }
+        }
+      ]
+    },
+    {
       "name": "tuning",
       "path": "/parameters/tuning",
       "label": "Tuning",

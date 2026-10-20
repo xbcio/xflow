@@ -1564,6 +1564,30 @@ Kafka 聚合只保证同一 partition 内按消费顺序进入 batch 并按 batc
 
 DLQ writer 复用 consumer 的 broker 列表与 SASL 凭证，不接受独立配置——一个 trigger 本来就连不上的集群，会恰好在最需要它的时刻失效，而第二份 SASL 密码就是第二个泄漏面。原始 payload 按字节原样转发，来源信息（`xflow-dlq-source-topic`/`-partition`/`-offset`/`xflow-dlq-reason`）放在 header 里，便于重投时无需拆包。
 
+##### 单条 emit 失败处置（emit_retry）
+
+`emit_retry` 只作用于**未开启聚合、也不是 entry-seed** 的单条 emit 路径，回答一个问题：`Emit` 持续失败时，这条记录怎么办。默认是"重试到触发器停止"，因为另外两种有界结局都更糟：越过一条从未投递的记录提交 offset 就是丢失；在没有任何保留的情况下停掉消费则是需要人工介入的故障。
+
+```yaml
+    parameters:
+      emit_retry:
+        on_failure: dead_letter        # 空 / retry(默认) | dead_letter
+        dead_letter_topic: events-dlq  # on_failure: dead_letter 时必填
+        max_attempts: 10               # 默认 10，仅 dead_letter 生效
+        max_block: 30s                 # 默认 30s，仅 dead_letter 生效
+```
+
+| 取值 | 语义 |
+|---|---|
+| 空 / `retry`（默认） | 原地无限重试同一条记录：指数退避（100ms 起、带抖动、封顶 5s），该 partition 停住，后续记录不 emit、不提交。`max_attempts` / `max_block` 被忽略——没有目的地时，有界重试只能以丢数据收场 |
+| `dead_letter` | 重试预算耗尽后把记录原样重投到 `dead_letter_topic`（附加 `xflow-dlq-*` 来源与原因头），**写成功之后**才提交它的 offset；写失败视为背压：保持 hold 并继续重试，期间不提交、不推进后续记录 |
+
+预算取 `max_attempts` 与 `max_block` 中先到者：前者数失败次数，后者限制整条记录占住 partition 的墙钟时间（下游每次 emit 都很慢时，次数还没到也必须放手）。两者只在 `on_failure: dead_letter` 下被读取；未识别的 `on_failure`、非正的 `max_attempts` 或 `max_block` 都会让 activation 失败。
+
+`dead_letter` 必须配置非空的 `dead_letter_topic`：缺少（或为空）时 activation 失败，而不是静默回退到无限重试。这与 `aggregate.on_overflow` 和 `message_schema.on_invalid` 要求 `dead_letter_topic` 的处理一致；三个轴各读自己的 topic，互不继承。
+
+不配置 `emit_retry` 时不写入 `RawParams()`，既有 workflow 定义的 hash 不变；显式写 `on_failure: retry` 与省略整个对象等价。hold 与重投在指标上的可见性：`xflow_trigger_consumption_blocked{topic,partition}` 表示 partition 正在被一条失败记录占住，`xflow_trigger_messages_dead_lettered_total{result}` 记录 DLQ 结果。交付语义仍是 at-least-once，消费者需按 `(topic, partition, offset)` 幂等。
+
 ##### consumer 调优参数
 
 可选参数 `tuning` 暴露此前内联在 consumer 构造里的字面量。整个对象可省略；省略时的取值与外露之前逐字节一致，因此既有部署不受影响，`RawParams()` 也不会给已存的 workflow 定义多写一个键。

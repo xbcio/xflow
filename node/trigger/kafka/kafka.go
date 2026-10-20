@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 
@@ -79,6 +80,10 @@ type ConsumerConfig struct {
 	// When non-nil, messages that fail validation are handled per
 	// MessageSchema.OnInvalid.
 	MessageSchema *MessageSchema
+	// EmitRetry configures what the legacy per-message emit path does when Emit
+	// fails. The zero value retries the same record forever; see
+	// EmitRetryConfig and deliverLegacy.
+	EmitRetry EmitRetryConfig
 	// Tuning holds the consumer knobs (fetch sizing, dial timeout, group
 	// liveness windows). The zero value selects defaultTuning.
 	Tuning TuningConfig
@@ -99,6 +104,7 @@ type Node struct {
 	MaxInflightValue   int
 	AggregateValue     AggregateConfig
 	MessageSchemaValue *MessageSchema
+	EmitRetryValue     EmitRetryConfig
 	TuningValue        TuningConfig
 	ValueJSONValue     bool
 }
@@ -251,6 +257,52 @@ func (n *Node) DeadLetterInvalid(topic string) *Node {
 	return n
 }
 
+// DeadLetterOnEmitFailure switches the legacy per-message emit path (the one
+// used when aggregation is off and the trigger is not entry-seed) from
+// "retry the record forever" to "retry it for a bounded time, then park it on
+// topic and commit only after the park succeeded".
+//
+// It exists because failing to deliver a record must not skip it. Emit then
+// commit is the at-least-once rule: the offset advances only after the side
+// effect. When the side effect keeps failing, the partition has to stop, and
+// the only question is how it eventually resumes. Retrying forever (the
+// default) never loses anything but needs the downstream to recover; this
+// option bounds the wait and preserves the record durably instead, with the
+// source topic/partition/offset and the last emit error in xflow-dlq-* headers.
+//
+// The cost is the same shape as DeadLetterOnOverflow: the republish runs on the
+// partition's own worker, so a slow dead-letter topic stalls that partition and,
+// through the shared reader, backpressure reaches the others once its channel
+// fills. A FAILED republish is treated as backpressure — the record is held and
+// the republish retried — because committing past a record that is not durably
+// parked is the loss this option exists to avoid.
+//
+// topic must be non-empty: a node that selects this policy without a
+// destination fails activation rather than silently falling back to the
+// unbounded retry it was leaving. Bound the wait with EmitRetryPolicy.
+func (n *Node) DeadLetterOnEmitFailure(topic string) *Node {
+	n.EmitRetryValue.OnFailure = onEmitFailureDeadLetter
+	n.EmitRetryValue.DeadLetterTopic = topic
+	return n
+}
+
+// EmitRetryPolicy bounds how long the legacy emit path holds a partition for one
+// undeliverable record before DeadLetterOnEmitFailure parks it. maxAttempts is
+// the number of failed emit attempts; maxBlock bounds the wall time spent
+// holding the record. Whichever is reached first wins, and a zero field keeps
+// its default (10 attempts, 30s).
+//
+// It has NO effect unless DeadLetterOnEmitFailure is also set (or emit_retry
+// arrives with on_failure=dead_letter): with no destination there is no safe
+// bounded outcome, so the retry remains unbounded by design and these bounds are
+// ignored. Setting them without a dead-letter topic is therefore not an error —
+// it is simply not a policy this path can honour without losing the record.
+func (n *Node) EmitRetryPolicy(maxAttempts int, maxBlock time.Duration) *Node {
+	n.EmitRetryValue.MaxAttempts = maxAttempts
+	n.EmitRetryValue.MaxBlock = maxBlock
+	return n
+}
+
 func (n *Node) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.trigger.kafka",
@@ -309,6 +361,25 @@ func (n *Node) Descriptor() types.Descriptor {
 					{Name: "dead_letter_topic", DisplayName: "Dead Letter Topic", Type: types.ParamString, Description: "Read only when on_invalid is dead_letter",
 						VisibleWhen:  nodeinternal.CondEq("on_invalid", onInvalidDeadLetter),
 						RequiredWhen: nodeinternal.CondEq("on_invalid", onInvalidDeadLetter)},
+				}},
+			{Name: "emit_retry", DisplayName: "Emit Retry", Type: types.ParamObject, Description: "Optional failure policy for the legacy per-message emit path (aggregation off and not entry-seed). A failed emit holds the partition and retries the SAME record with exponential backoff (100ms doubling, jittered, capped at 5s); nothing behind it is emitted, and no commit can pass its offset. With on_failure unset or \"retry\" the retry is UNBOUNDED and ends only when the trigger stops — the safe default, because a bounded retry with nowhere to put the record would have to lose it. \"dead_letter\" bounds the wait by max_attempts (default 10) and max_block (default 30s), whichever comes first, then republishes the record to dead_letter_topic (required) with the last emit error in xflow-dlq-reason and commits the offset only after the republish succeeds; a failing republish keeps the partition held and is retried. Retries are visible in xflow_trigger_consumption_blocked and the dead-letter outcome in xflow_trigger_messages_dead_lettered_total. Delivery stays at-least-once; consumers must be idempotent on (topic, partition, offset).",
+				Group: "processing",
+				Fields: []types.ParamSpec{
+					{Name: "on_failure", DisplayName: "On Failure", Type: types.ParamString, Description: "Policy once emit keeps failing; unset means retry forever",
+						Enum: []types.EnumOption{
+							{Value: onEmitFailureRetry, DisplayName: "Retry", Description: "Retry the same record forever; only stopping the trigger ends it (never skips, so nothing is lost)"},
+							{Value: onEmitFailureDeadLetter, DisplayName: "Dead Letter", Description: "Retry within the bounds, then republish to dead_letter_topic before committing the offset"},
+						}},
+					{Name: "max_attempts", DisplayName: "Max Attempts", Type: types.ParamNumber, Description: "Failed emit attempts before the record is parked; default 10. Read only when on_failure is dead_letter",
+						VisibleWhen: nodeinternal.CondEq("on_failure", onEmitFailureDeadLetter),
+						Constraints: &types.Constraints{Min: nodeinternal.Float(1)}},
+					{Name: "max_block", DisplayName: "Max Block", Type: types.ParamString, Description: "Wall time this partition may hold one record before it is parked; default 30s. Read only when on_failure is dead_letter",
+						VisibleWhen: nodeinternal.CondEq("on_failure", onEmitFailureDeadLetter),
+						Widget:      nodeinternal.WidgetDuration,
+						Constraints: nodeinternal.Format(nodeinternal.FormatDuration)},
+					{Name: "dead_letter_topic", DisplayName: "Dead Letter Topic", Type: types.ParamString, Description: "Where an undeliverable record is parked; read only when on_failure is dead_letter",
+						VisibleWhen:  nodeinternal.CondEq("on_failure", onEmitFailureDeadLetter),
+						RequiredWhen: nodeinternal.CondEq("on_failure", onEmitFailureDeadLetter)},
 				}},
 			{Name: "tuning", DisplayName: "Tuning", Type: types.ParamObject, Description: "Optional consumer tuning: fetch_min_bytes (1), fetch_max_bytes (10000000), max_wait (10s), dial_timeout (10s), session_timeout (30s), heartbeat_interval (3s), rebalance_timeout (30s). Durations are strings (\"45s\"). heartbeat_interval must stay below session_timeout or the group rebalances continuously. Offsets always commit synchronously after the side effect; that is not tunable.",
 				Group: "advanced",
@@ -406,6 +477,15 @@ func (n *Node) RawParams() any {
 		}
 		params["message_schema"] = schema
 	}
+	// Omitted entirely when unset, for the same hash-stability reason tuning and
+	// value_json are. It must still be written whenever it is set: this map is
+	// rebuilt key by key and is the only way a DSL caller's policy reaches the
+	// runtime, so skipping it would make DeadLetterOnEmitFailure appear to take
+	// and then quietly not apply — the failure mode that loses the records the
+	// option exists to protect.
+	if !n.EmitRetryValue.isZero() {
+		params["emit_retry"] = n.EmitRetryValue.rawParams()
+	}
 	// Omitted entirely when unset, so definitions stored before tuning existed
 	// keep the same shape.
 	if !n.TuningValue.isZero() {
@@ -438,11 +518,12 @@ func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (ty
 	// should fail activation (which self-heals via retry) instead of surfacing
 	// as an unbounded redelivery loop the first time a malformed record arrives.
 	//
-	// Two axes can need it now — invalid messages (message_schema.on_invalid)
-	// and buffer overflow (aggregate.on_overflow) — and one publisher serves
-	// both: it is one Kafka writer, and each Publish call carries its own topic
-	// and reason. Building one per axis would open a second producer connection
-	// per trigger for a deployment that has both, which is the cost
+	// Three axes can need it now — invalid messages (message_schema.on_invalid),
+	// buffer overflow (aggregate.on_overflow) and undeliverable legacy emits
+	// (emit_retry.on_failure) — and one publisher serves all: it is one Kafka
+	// writer, and each Publish call carries its own topic and reason. Building
+	// one per axis would open a second producer connection per trigger for a
+	// deployment that has more than one, which is the cost
 	// TestKafkaActivateSkipsPublisherForDiscardPolicy exists to refuse.
 	var deadLetters DeadLetterPublisher
 	if needsDeadLetterPublisher(cfg) {
@@ -461,15 +542,19 @@ func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (ty
 // needsDeadLetterPublisher reports whether any configured policy republishes
 // records, and therefore whether activation must open a dead-letter writer.
 //
-// Both checks are on the VALUE, not on the presence of the config block: a
-// message_schema with on_invalid=discard and an aggregate with
-// on_overflow=block must open no writer at all. The aggregate arm additionally
-// requires a non-empty topic, so a config that reached this function without one
-// (only possible by constructing ConsumerConfig directly, since the params path
-// rejects it) yields no publisher — and the runtime then fails closed by holding
-// the record and stalling rather than by dropping it.
+// Every check is on the VALUE, not on the presence of the config block: a
+// message_schema with on_invalid=discard, an aggregate with on_overflow=block
+// and an emit_retry with on_failure=retry must open no writer at all. The
+// aggregate and emit axes additionally require a non-empty topic, so a config
+// that reached this function without one (only possible by constructing
+// ConsumerConfig directly, since the params path rejects it) yields no
+// publisher — and the runtime then fails closed by holding the record and
+// retrying rather than by dropping it.
 func needsDeadLetterPublisher(cfg ConsumerConfig) bool {
 	if cfg.MessageSchema != nil && cfg.MessageSchema.OnInvalid == onInvalidDeadLetter {
+		return true
+	}
+	if cfg.EmitRetry.deadLetterReady() {
 		return true
 	}
 	return cfg.Aggregate.Enabled && cfg.Aggregate.OnOverflow == onOverflowDeadLetter &&
@@ -487,6 +572,7 @@ func activatePerMessage(ctx context.Context, in *types.TriggerActivateInput, cfg
 		workers:             make(map[partitionKey]*partitionWorker),
 		entrySeed:           isEntrySeedActivation(in),
 		messageSchema:       cfg.MessageSchema,
+		emitRetry:           cfg.EmitRetry,
 		deadLetterPublisher: deadLetters,
 	}
 	rt.valueJSON = resolveValueJSON(cfg, in, rt.entrySeed)
@@ -557,8 +643,15 @@ type perMessageRuntime struct {
 	// messageSchema, when non-nil, validates each message before emit. Messages
 	// that fail validation are handled per messageSchema.OnInvalid.
 	messageSchema *MessageSchema
-	// deadLetterPublisher is non-nil only when messageSchema.OnInvalid is
-	// dead_letter. Owned by this runtime: closed by close().
+	// emitRetry is the legacy emit path's failure policy (retry forever, or
+	// retry within bounds and then park on the dead-letter topic). Set once at
+	// activation from the trigger params; unused on the entry-seed path, which
+	// has its own refusal loop.
+	emitRetry EmitRetryConfig
+	// deadLetterPublisher is non-nil when any configured policy republishes
+	// records: messageSchema.OnInvalid=dead_letter, emitRetry.on_failure=
+	// dead_letter, or (in the aggregate runtime) on_overflow=dead_letter. Owned
+	// by this runtime: closed by close().
 	deadLetterPublisher DeadLetterPublisher
 	// valueJSON splices a JSON payload into the item verbatim instead of
 	// escaping it into a string. Resolved once at activation by
@@ -737,46 +830,80 @@ func (w *partitionWorker) run() {
 			if !ok {
 				return
 			}
-			// Partition still assigned — reset the idle reap window.
-			if !idleTimer.Stop() {
-				select {
-				case <-idleTimer.C:
-				default:
-				}
-			}
-			idleTimer.Reset(w.idleTimeout)
-			// Serial per-partition processing: emit then commit in offset order so
-			// a rebalance can never skip a lower offset whose higher peer committed
-			// first. Emit failure skips commit, leaving the message redelivered.
-			//
-			// Schema validation runs BEFORE the mode split. An earlier revision
-			// chained it as `else if` after the entry-seed branch, so entry-seed
-			// activations silently ignored a declared schema — the one mode where
-			// invalid content is most expensive, because a seeded execution is
-			// durable.
-			if w.rt.messageSchema != nil && !validateMessageSchema(msg, w.rt.messageSchema) {
-				if handleInvalidMessage(w.rt.runCtx, w.rt, msg) {
-					_ = commitMessages(w.rt.baseCtx, w.rt.consumer, msg)
-				}
-			} else if w.rt.entrySeed {
-				// Entry-seed mode: admission drives the seed, which commits the
-				// offset internally on accept/duplicate/conflict. Do NOT
-				// double-commit here.
-				//
-				// This call blocks while the workflow's concurrency policy refuses
-				// the record: it retries the same record with backoff rather than
-				// returning, so this worker — serial per partition — is what keeps a
-				// later record from committing past a refused one. It still returns
-				// promptly on errors and on cancellation.
-				_ = seedEntryBatch(w.rt.runCtx, w.rt.in, w.rt.consumer, msg)
-			} else if emitMessage(w.rt.runCtx, w.rt.in, msg) {
-				_ = commitMessages(w.rt.baseCtx, w.rt.consumer, msg)
-			}
+			w.deliver(msg)
 		case <-idleTimer.C:
-			// No message for the idle window: assume the partition was revoked
-			// and self-terminate to reclaim the goroutine and map entry.
-			return
+			// The timer and a message can become ready at the same instant, and
+			// select chooses between ready cases at random. Reaping on the timer
+			// without looking at the channel would abandon records already
+			// buffered for this partition: they were fetched but never emitted
+			// and no commit covers them, so they would not come back until a
+			// rebalance or restart. Give a queued record priority over the reap;
+			// only a genuinely idle channel ends the worker.
+			select {
+			case msg, ok := <-w.ch:
+				if !ok {
+					return
+				}
+				w.deliver(msg)
+			default:
+				return
+			}
 		}
+		// Partition still assigned — restart the idle reap window only now that
+		// this record is done. Arming it BEFORE the work above (the previous
+		// shape) put a five-minute timer on processing that can legitimately
+		// outlast it: an entry-seed refusal loop or a legacy emit hold both
+		// retry until the record resolves. An expired timer would then be ready
+		// in the select above, and picking it would reap a worker whose channel
+		// still holds records for the partition — those records were fetched but
+		// never emitted, and no commit covers them, so they would not come back
+		// until a rebalance or restart.
+		if !idleTimer.Stop() {
+			select {
+			case <-idleTimer.C:
+			default:
+			}
+		}
+		idleTimer.Reset(w.idleTimeout)
+	}
+}
+
+// deliver runs one message through the activation's mode-specific path. It is
+// called from both the message branch and the timer branch of run (the latter
+// after a reap found a queued record), so the two paths cannot drift apart.
+func (w *partitionWorker) deliver(msg Message) {
+	// Serial per-partition processing: emit then commit in offset order so
+	// a rebalance can never skip a lower offset whose higher peer committed
+	// first. On the legacy emit path a failure does not move on to the next
+	// record: deliverLegacy holds this partition and retries the same
+	// record, because a later record's commit would sweep past the failed
+	// offset and that record would never be redelivered.
+	//
+	// Schema validation runs BEFORE the mode split. An earlier revision
+	// chained it as `else if` after the entry-seed branch, so entry-seed
+	// activations silently ignored a declared schema — the one mode where
+	// invalid content is most expensive, because a seeded execution is
+	// durable.
+	if w.rt.messageSchema != nil && !validateMessageSchema(msg, w.rt.messageSchema) {
+		if handleInvalidMessage(w.rt.runCtx, w.rt, msg) {
+			_ = commitMessages(w.rt.baseCtx, w.rt.consumer, msg)
+		}
+	} else if w.rt.entrySeed {
+		// Entry-seed mode: admission drives the seed, which commits the
+		// offset internally on accept/duplicate/conflict. Do NOT
+		// double-commit here.
+		//
+		// This call blocks while the workflow's concurrency policy refuses
+		// the record: it retries the same record with backoff rather than
+		// returning, so this worker — serial per partition — is what keeps a
+		// later record from committing past a refused one. It still returns
+		// promptly on errors and on cancellation.
+		_ = seedEntryBatch(w.rt.runCtx, w.rt.in, w.rt.consumer, msg)
+	} else {
+		// Legacy emit path. Returns only once the record is committed (after
+		// a successful emit or a successful dead-letter republish) or the
+		// activation is canceled; see deliverLegacy.
+		w.deliverLegacy(w.rt.runCtx, msg)
 	}
 }
 
@@ -785,39 +912,51 @@ type partitionKey struct {
 	partition int
 }
 
-// emitMessage is the legacy single-message emit path, used only when the
-// runtime does NOT implement types.EntrySeedRuntime (see isEntrySeedActivation).
-// It emits directly and lets the per-partition serial worker commit the offset
-// only after Emit succeeds (partitionWorker.run) — offset durability
-// follows the side effect, never precedes it.
+// emitMessage is one attempt at the legacy single-message emit, used only when
+// the runtime does NOT implement types.EntrySeedRuntime (see
+// isEntrySeedActivation). It returns the Emit error; the caller commits only on
+// nil. Partition-order and retry semantics live in deliverLegacy, which is the
+// only production caller: an error here means "this attempt failed", not "the
+// record is skipped".
 //
 // P0-1: the previous implementation ran a pre-emit Dedup SETNX here. If the
 // process crashed after the SETNX marked the message "seen" but before Emit, the
 // message was lost forever (redelivery saw the dedup marker and skipped it). The
 // SETNX has been removed: the ordered emit-then-commit is the at-least-once
 // guarantee. The downstream is idempotent (host idempotency contract), so a
-// possible duplicate on crash-after-emit-before-commit is safe.
-func emitMessage(ctx context.Context, in *types.TriggerActivateInput, msg Message) bool {
+// possible duplicate on crash-after-emit-before-commit is safe — and so is a
+// retry of the same record, which delivers the same event ID.
+func emitMessage(ctx context.Context, in *types.TriggerActivateInput, msg Message) error {
 	event := singleEvent(in.NodeName, msg)
 	if event.Time.IsZero() {
 		event.Time = time.Now()
 	}
-	if _, err := in.Emit(ctx, event); err != nil {
-		// The offset stays uncommitted, and this line is the only record that
-		// the message was refused: the worker moves on, so without it a
-		// workflow refusing its trigger traffic — a REJECT-mode concurrency
-		// limit is the ordinary case — looks exactly like a topic with no
-		// messages. A QUEUE-mode workflow does not reach here: its over-limit
-		// firings are parked and admitted later instead of refused.
+	_, err := in.Emit(ctx, event)
+	if err == nil {
+		return nil
+	}
+	// The offset stays uncommitted, and this line is the only record that the
+	// message was refused: without it a workflow refusing its trigger traffic —
+	// a REJECT-mode concurrency limit is the ordinary case — looks exactly like
+	// a topic with no messages. A QUEUE-mode workflow does not reach here: its
+	// over-limit firings are parked and admitted later instead of refused.
+	//
+	// Throttled per topic+partition because deliverLegacy now calls this once
+	// per backoff tick for as long as the record is held; an unthrottled line
+	// would be one per tick per partition for the length of an outage. The
+	// partition state is on xflow_trigger_consumption_blocked and in the
+	// transition log; this line carries the error and its occurrence count.
+	if emit, count := discardLog.allow(time.Now(),
+		msg.Topic+"\x00emit_retry\x00"+strconv.Itoa(msg.Partition)); emit {
 		slog.Warn("kafka trigger emit did not succeed; the offset is not committed",
 			"topic", msg.Topic,
 			"partition", msg.Partition,
 			"offset", msg.Offset,
 			"node", in.NodeName,
+			"occurrences", count,
 			"err", err)
-		return false
 	}
-	return true
+	return err
 }
 
 // commitMessages advances the committed offset for messages, and is the single
@@ -966,6 +1105,10 @@ func configFromParams(params map[string]any, supply map[string]any, entrySeed bo
 	if err != nil {
 		return ConsumerConfig{}, err
 	}
+	emitRetry, err := emitRetryFromParams(params["emit_retry"])
+	if err != nil {
+		return ConsumerConfig{}, err
+	}
 	cfg := ConsumerConfig{
 		Brokers:       conv.NonEmptyStringSlice(params["brokers"]),
 		Topic:         cast.ToString(params["topic"]),
@@ -974,6 +1117,7 @@ func configFromParams(params map[string]any, supply map[string]any, entrySeed bo
 		MaxInflight:   conv.PositiveInt(params["max_inflight"], defaultTriggerMaxInflight),
 		Aggregate:     aggregate,
 		MessageSchema: schema,
+		EmitRetry:     emitRetry,
 		Tuning:        tuning,
 		ValueJSON:     cast.ToBool(params["value_json"]),
 	}
