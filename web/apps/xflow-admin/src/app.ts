@@ -1,11 +1,10 @@
 import type { RequestConfig, RequestOptions } from '@umijs/max';
 import { history } from '@umijs/max';
 
-import { clearToken, getToken } from '@/services/token';
-import type { CurrentIdentity } from '@/services/user';
-import { fetchCurrentUser } from '@/services/user';
-
-const LOGIN_PATH = '/login';
+import { applyUnauthorizedRedirect, isAuthEntryPath } from './auth';
+import { clearToken, getToken } from './services/token';
+import type { CurrentIdentity } from './services/user';
+import { fetchCurrentUser } from './services/user';
 
 export interface InitialState {
   currentUser?: CurrentIdentity;
@@ -15,6 +14,9 @@ export interface InitialState {
 
 /**
  * initialState 插件契约：返回值即全局态，access.ts 与 useModel('@@initialState') 消费它。
+ *
+ * 入口页（未授权说明页 / 网关登录入口）没有可恢复的身份，直接跳过拉取——
+ * 判定见 src/auth.ts 的 isAuthEntryPath。
  */
 export async function getInitialState(): Promise<InitialState> {
   const fetchUserInfo = async (): Promise<CurrentIdentity | undefined> => {
@@ -29,16 +31,33 @@ export async function getInitialState(): Promise<InitialState> {
     }
   };
 
-  if (history.location.pathname === LOGIN_PATH) {
+  if (isAuthEntryPath(history.location.pathname)) {
     return { fetchUserInfo };
   }
   return { currentUser: await fetchUserInfo(), fetchUserInfo };
 }
 
 /**
+ * 401 统一处理：清空令牌后按构建期 XFLOW_AUTH_LOGIN_URL 决定去向。
+ * 未配置时落到应用内的 /unauthorized，而不是跳不存在的 /login（见 src/auth.ts）。
+ * 非 401 原样抛出，交由调用方处理。
+ */
+export function handleRequestError(error: unknown): void {
+  const status = (error as { response?: { status?: number } })?.response?.status;
+  if (status === 401) {
+    clearToken();
+    applyUnauthorizedRedirect(history.location.pathname, {
+      replace: (path) => history.replace(path),
+      assign: (url) => window.location.assign(url),
+    });
+  }
+  throw error;
+}
+
+/**
  * request 插件契约。
  *
- * 统一注入 Bearer token（OpenAPI 契约声明的 bearerAuth），并在 401 时清空令牌跳登录页。
+ * 统一注入 Bearer token（OpenAPI 契约声明的 bearerAuth），401 语义见 handleRequestError。
  */
 export const request: RequestConfig = {
   requestInterceptors: [
@@ -51,15 +70,6 @@ export const request: RequestConfig = {
     },
   ],
   errorConfig: {
-    errorHandler: (error: unknown) => {
-      const status = (error as { response?: { status?: number } })?.response?.status;
-      if (status === 401) {
-        clearToken();
-        if (history.location.pathname !== LOGIN_PATH) {
-          history.replace(LOGIN_PATH);
-        }
-      }
-      throw error;
-    },
+    errorHandler: handleRequestError,
   },
 };

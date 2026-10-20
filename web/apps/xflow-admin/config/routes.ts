@@ -11,5 +11,8 @@ export const routes = [
   { path: '/workflows', component: './workflows' },
   { path: '/workflows/:id', component: './workflows/detail' },
   { path: '/executions', component: './executions', access: 'canViewExecutions' },
+  // 401 的落地页。它不是登录页：本应用没有凭证入口，鉴权由部署网关提供，
+  // 页面内容与去向由 src/auth.ts 的构建期配置决定。
+  { path: '/unauthorized', component: './unauthorized' },
   { path: '*', component: './404' },
 ];
