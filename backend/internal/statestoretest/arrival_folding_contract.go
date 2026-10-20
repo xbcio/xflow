@@ -21,10 +21,11 @@ import (
 // two could disagree.
 //
 // The contract is what proves CapabilityAtomicArrivalFolding. The capability's
-// interface assertion cannot: engine.ArrivalFoldingCommitter reuses CommitNode's
-// signature, so every AtomicStateStore satisfies it structurally. A backend that
-// silently ignored the Arrivals field would pass the manifest check and fail
-// every case below.
+// interface assertion resolves engine.ArrivalFoldingCommitter — which requires
+// the explicit FoldsArrivalsIntoCommit marker, so a bare AtomicStateStore does
+// not satisfy it — but a marker is still only a declaration. A backend that
+// marks itself and then silently ignores the Arrivals field would pass the
+// manifest check and fail every case below, which is why both are required.
 func RunArrivalFoldingContract(t *testing.T, manifest *Manifest, state engine.StateStore) {
 	t.Helper()
 	manifest.Report(t)

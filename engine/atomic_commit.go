@@ -213,19 +213,36 @@ func (e *Engine) commitAcyclicNodeWithClassification(ctx context.Context, lease 
 // sufficient because error_output and main_output intentionally use success.
 func (e *Engine) commitAcyclicNodeWithReclaimEligibility(ctx context.Context, lease *TaskLease, g *graph.Graph, privateOutput bool, status types.NodeStatus, output map[string]any, port, errMsg string, fatal bool, cls EffectiveClassification, normalHandlerSuccess bool) (CommitOutcome, error) {
 	task := &lease.Task
+	// Acyclic downstream scheduling has two carriers, and the backend decides
+	// which one this commit uses. A folding-capable backend takes the arrivals
+	// and applies them inside the same fenced transition as the terminal write,
+	// so no advance intent exists and no second round trip is spent consuming
+	// one. A backend without the capability keeps the advance task, consumed by
+	// HandleSystemTask's advance branch -- the pre-S4b behaviour.
+	//
+	// They are alternatives, not companions: CommitNodeRequest.Validate rejects
+	// a request carrying both, because folding an arrival and then also running
+	// the advance task would consume the same destination in-degree twice and
+	// could schedule a unit from a branch the other path already resolved.
+	foldArrivals := !fatal && !g.AllowCycles() && e.supportsArrivalFolding()
 	var advanceTask *Task
+	var arrivals []DownstreamArrival
 	if !fatal {
-		advanceTask = &Task{
-			ExecutionID:  task.ExecutionID,
-			NodeName:     task.NodeName,
-			NodeIdx:      task.NodeIdx,
-			UnitIdx:      task.UnitIdx,
-			Type:         TaskTypeNodeAdvance,
-			ActivationID: task.ActivationID,
-			AutoDepth:    task.AutoDepth,
-			// Carried so the advance branch does not read the node back to
-			// learn the port we are about to write in the same commit.
-			Port: &port,
+		if foldArrivals {
+			arrivals = downstreamArrivals(g, task.NodeIdx, port)
+		} else {
+			advanceTask = &Task{
+				ExecutionID:  task.ExecutionID,
+				NodeName:     task.NodeName,
+				NodeIdx:      task.NodeIdx,
+				UnitIdx:      task.UnitIdx,
+				Type:         TaskTypeNodeAdvance,
+				ActivationID: task.ActivationID,
+				AutoDepth:    task.AutoDepth,
+				// Carried so the advance branch does not read the node back to
+				// learn the port we are about to write in the same commit.
+				Port: &port,
+			}
 		}
 	}
 	// A source output may be released only after the supported sink's handler
@@ -261,6 +278,7 @@ func (e *Engine) commitAcyclicNodeWithReclaimEligibility(ctx context.Context, le
 		ErrorDetails: cls.Details,
 		Fatal:        fatal,
 		AdvanceTask:  advanceTask,
+		Arrivals:     arrivals,
 	}
 	// Observed before the fenced transition, not after it. CommitNode makes the
 	// execution's terminal failed status visible to waiters — both backends
@@ -292,6 +310,24 @@ func (e *Engine) commitAcyclicNodeWithReclaimEligibility(ctx context.Context, le
 		return CommitOutcomeTransientError, fmt.Errorf("atomic commit node %q/%q: %w", task.ExecutionID, task.NodeName, err)
 	}
 	e.publishCommitReceipt(ctx, req, result, cls)
+	// When the downstream work rode the commit, this transition IS the advance
+	// the separate AdvanceNode call used to perform, so the advance receipt and
+	// the skip report are published from its result. The gate and shape mirror
+	// the cyclic path (engine/commit.go, publishCommitReceipt followed by a
+	// publishAdvanceReceipt when the transition applied and has outbox
+	// candidates); a fallback commit publishes neither here, because its advance
+	// task publishes them when HandleSystemTask consumes it.
+	//
+	// Only the commit's own result is reported. Every skipped unit is reported
+	// exactly once, by the transition that resolved it: the skip intent this
+	// commit may write is consumed later through handleSystemTask, and that
+	// commit reports the NEXT layer from its own result.
+	if foldArrivals && result.Outcome == CommitOutcomeAccepted {
+		if result.Applied && len(result.OutboxIDs) > 0 {
+			e.publishAdvanceReceipt(ctx, task, AdvanceNodeResult{Applied: true, OutboxIDs: result.OutboxIDs})
+		}
+		e.notifySkip(ctx, flowAdvance, result.Skipped)
+	}
 	return e.finishAtomicCommit(ctx, req, result)
 }
 

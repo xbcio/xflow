@@ -372,20 +372,23 @@ type AtomicStateStore interface {
 // intents are persisted, and the resolved skips are reported in
 // CommitNodeResult.Skipped, all atomically with the node's terminal state.
 //
-// It deliberately reuses AtomicStateStore.CommitNode's signature. Folding is
-// not a second operation a caller invokes; it is a semantic guarantee about
-// what the existing call does with a field every backend already accepts, so a
-// distinct method would only rename the same transaction. The consequence is
-// that the type assertion alone cannot distinguish an implementation that folds
-// from one that ignores the field — the shared arrival-folding contract is what
-// proves the claim, exactly as CapabilityConcurrencyQueueMode is proven by the
-// queue contract rather than by its interface check.
-//
-// The engine does not require this capability yet: the production commit path
-// still schedules through AdvanceNode, and this exists so backends can be
-// implemented and contract-tested before that switch (S4b).
+// The capability is an explicit opt-in, not a signature coincidence. CommitNode
+// already belongs to AtomicStateStore, so an assertion on its signature alone
+// would be satisfied by every atomic backend — including one that ignores
+// Arrivals — and the engine would stop emitting AdvanceTask for a store that
+// cannot do the work, silently dropping downstream scheduling.
+// FoldsArrivalsIntoCommit is the declaration that the field is honoured; the
+// shared arrival-folding contract (backend/internal/statestoretest) is what
+// proves the declaration, exactly as CapabilityConcurrencyQueueMode is proven by
+// the queue contract rather than by its interface check.
 type ArrivalFoldingCommitter interface {
-	CommitNode(ctx context.Context, req CommitNodeRequest) (CommitNodeResult, error)
+	AtomicStateStore
+	// FoldsArrivalsIntoCommit reports that this backend applies
+	// CommitNodeRequest.Arrivals inside CommitNode and reports the resolved
+	// skips in CommitNodeResult.Skipped. It is a static capability marker, not
+	// a per-call decision: a backend that cannot guarantee folding must not
+	// implement this method at all, so the type assertion stays a real gate.
+	FoldsArrivalsIntoCommit() bool
 }
 
 // OutboxDeliveryLeaseTTL is how long a delivery lease survives without renewal.
@@ -464,6 +467,23 @@ func (e *Engine) atomicState() (AtomicStateStore, error) {
 		return nil, ErrAtomicCommitUnsupported
 	}
 	return state, nil
+}
+
+// supportsArrivalFolding reports whether this store folds
+// CommitNodeRequest.Arrivals into the commit transition.
+//
+// The assertion is on the explicit opt-in marker, not on CommitNode's
+// signature: AtomicStateStore already requires CommitNode, so a signature-only
+// check would be true for every atomic backend and would send Arrivals to one
+// that ignores them — the engine would then emit no AdvanceTask and silently
+// drop downstream scheduling. A backend opts in by declaring
+// FoldsArrivalsIntoCommit; the shared arrival-folding contract is what proves
+// the declaration true. What this decides is which scheduling carrier the engine
+// sends: a capable backend gets Arrivals and no AdvanceTask, and a backend
+// without it keeps the pre-fold advance intent.
+func (e *Engine) supportsArrivalFolding() bool {
+	committer, ok := e.state.(ArrivalFoldingCommitter)
+	return ok && committer.FoldsArrivalsIntoCommit()
 }
 
 func (e *Engine) commitNode(ctx context.Context, req CommitNodeRequest) (CommitNodeResult, error) {
@@ -661,7 +681,24 @@ func (e *Engine) afterAtomicCommitWithFlush(ctx context.Context, req CommitNodeR
 		e.notifyExecutionComplete(ctx, req.ExecutionID, result.ExecutionStatus)
 		e.EvictExecution(req.ExecutionID)
 	}
-	if flush && (result.Outcome == CommitOutcomeAccepted || result.Outcome == CommitOutcomeDuplicateTerminal) {
+	// Flush only when the transition may have appended something: a duplicate
+	// terminal always replays (the original commit may have crashed before
+	// delivering), and an accepted commit names its outbox candidates.
+	//
+	// OutboxIDs is a candidate hint, not a write log (see CommitNodeResult). For
+	// a folded arrival both candidates are reported and only the backend knows
+	// which one it wrote, so a non-empty hint can still describe zero entries.
+	// That direction is accepted: one wasted empty claim costs one ListOutbox and
+	// changes no state.
+	//
+	// The other direction is the adopted default (S4b), not an oversight: a
+	// commit that appended nothing no longer consumes the execution's pending
+	// backlog as a side effect. Every outbox is a shared, per-execution queue, so
+	// flushing it from an unrelated completion delivered entries this commit
+	// never wrote. Those entries stay durable and the OutboxDispatcher's next
+	// tick recovers them; the extra latency is bounded by that interval, while
+	// the removed cost was a claim on every leaf and execution-finalizing commit.
+	if flush && (result.Outcome == CommitOutcomeDuplicateTerminal || len(result.OutboxIDs) > 0) {
 		if err := e.FlushOutbox(ctx, req.ExecutionID); err != nil {
 			return err
 		}
@@ -830,26 +867,36 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 		if task.UnitIdx < 0 || task.UnitIdx >= g.UnitCount() {
 			return true, fmt.Errorf("skip node unit index %d is out of range [0,%d)", task.UnitIdx, g.UnitCount())
 		}
-		// A skipped node commits with no active port (the CommitNodeRequest
-		// below sets none), and that empty port is what makes downstreamArrivals
-		// give every out-edge ActiveCount 0 and propagate the skip. Carry it
-		// explicitly rather than leaving Port nil: nil would send this advance
-		// down the legacy read-the-node path, which is the whole per-hop round
-		// trip the field exists to remove, and the skip cascade is the path that
-		// pays it most often.
+		// A skipped node commits with no active port, and that empty port is
+		// what makes downstreamArrivals give every out-edge ActiveCount 0 and
+		// propagate the skip.
+		//
+		// The downstream work rides the commit when the backend folds arrivals
+		// (S4b): the empty port is passed straight to downstreamArrivals and
+		// there is no advance intent. A backend without the capability keeps the
+		// synthetic advance task, whose explicitly carried empty port is what
+		// stops HandleSystemTask from reading the node back to learn it. The two
+		// carriers are mutually exclusive (CommitNodeRequest.Validate).
 		skippedPort := ""
-		advance := &Task{
-			ExecutionID:  task.ExecutionID,
-			NodeName:     task.NodeName,
-			NodeIdx:      task.NodeIdx,
-			UnitIdx:      task.UnitIdx,
-			Type:         TaskTypeNodeAdvance,
-			ActivationID: task.ActivationID,
-			AutoDepth:    task.AutoDepth,
-			Port:         &skippedPort,
+		foldArrivals := e.supportsArrivalFolding()
+		var advance *Task
+		var arrivals []DownstreamArrival
+		if foldArrivals {
+			arrivals = downstreamArrivals(g, task.NodeIdx, skippedPort)
+		} else {
+			advance = &Task{
+				ExecutionID:  task.ExecutionID,
+				NodeName:     task.NodeName,
+				NodeIdx:      task.NodeIdx,
+				UnitIdx:      task.UnitIdx,
+				Type:         TaskTypeNodeAdvance,
+				ActivationID: task.ActivationID,
+				AutoDepth:    task.AutoDepth,
+				Port:         &skippedPort,
+			}
 		}
 		privateOutput := privateOutputForTask(g, task)
-		result, err := e.commitNode(ctx, CommitNodeRequest{
+		req := CommitNodeRequest{
 			ExecutionID:   task.ExecutionID,
 			NodeName:      task.NodeName,
 			NodeIdx:       task.NodeIdx,
@@ -860,19 +907,24 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 			PrivateOutput: privateOutput,
 			System:        true,
 			AdvanceTask:   advance,
-		})
+			Arrivals:      arrivals,
+		}
+		result, err := e.commitNode(ctx, req)
 		if err != nil {
 			return true, fmt.Errorf("commit skipped node %q/%q: %w", task.ExecutionID, task.NodeName, err)
 		}
-		return true, e.afterAtomicCommitWithFlush(ctx, CommitNodeRequest{
-			ExecutionID:   task.ExecutionID,
-			NodeName:      task.NodeName,
-			NodeIdx:       task.NodeIdx,
-			ActivationID:  task.ActivationID,
-			AutoDepth:     task.AutoDepth,
-			Status:        types.NodeStatusSkipped,
-			PrivateOutput: privateOutput,
-		}, result, flush)
+		// The folded skip commit IS the advance this node used to emit, so the
+		// advance receipt and the skip report travel from its result instead of
+		// from a later AdvanceNode call. Same gate and same body as the folded
+		// node commit in atomic_commit.go; a fallback commit publishes nothing
+		// here because its advance task will.
+		if foldArrivals && result.Outcome == CommitOutcomeAccepted {
+			if result.Applied && len(result.OutboxIDs) > 0 {
+				e.publishAdvanceReceipt(ctx, task, AdvanceNodeResult{Applied: true, OutboxIDs: result.OutboxIDs})
+			}
+			e.notifySkip(ctx, flowAdvance, result.Skipped)
+		}
+		return true, e.afterAtomicCommitWithFlush(ctx, req, result, flush)
 	case TaskTypeNodeExec:
 		if handled, err := e.handleDisabledNode(ctx, task, flush); handled {
 			return handled, err

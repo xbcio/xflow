@@ -61,6 +61,14 @@ var _ engine.OutboxMetricsReader = (*memoryState)(nil)
 var _ engine.DeadLetterStore = (*memoryState)(nil)
 var _ engine.ReplayReceiptReader = (*memoryState)(nil)
 
+// FoldsArrivalsIntoCommit declares the arrival-folding capability: CommitNode
+// applies CommitNodeRequest.Arrivals in the same mutex-guarded transition as
+// the terminal node write. Without this explicit marker the engine treats the
+// store as unable to fold — CommitNode's signature alone is not a capability
+// signal — and keeps emitting AdvanceTask, so the declaration has to stay here
+// for as long as CommitNode honours the field.
+func (s *memoryState) FoldsArrivalsIntoCommit() bool { return true }
+
 // CommitLeasedNode shares the storage fence used by CommitNode while callers
 // retain legacy cycle/expansion scheduling outside the static-DAG counter.
 func (s *memoryState) CommitLeasedNode(ctx context.Context, req engine.CommitNodeRequest) (engine.CommitNodeResult, error) {

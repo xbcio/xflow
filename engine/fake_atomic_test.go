@@ -11,8 +11,15 @@ import (
 )
 
 var _ AtomicStateStore = (*fakeState)(nil)
+var _ ArrivalFoldingCommitter = (*fakeState)(nil)
 var _ LegacyNodeCommitter = (*fakeState)(nil)
 var _ DurableLeaseSuspender = (*fakeState)(nil)
+
+// FoldsArrivalsIntoCommit declares the arrival-folding capability that
+// fakeState.CommitNode implements below. The engine only sends Arrivals to a
+// store carrying this explicit marker, so removing it would silently move every
+// fold-path engine test onto the AdvanceTask fallback.
+func (f *fakeState) FoldsArrivalsIntoCommit() bool { return true }
 
 func (f *fakeState) CommitLeasedNode(ctx context.Context, req CommitNodeRequest) (CommitNodeResult, error) {
 	return f.CommitNode(ctx, req)
@@ -292,6 +299,18 @@ func (f *fakeState) CommitNode(_ context.Context, req CommitNodeRequest) (Commit
 		}
 	}
 
+	// Folded arrivals: the same counter rules the separate AdvanceNode path
+	// applies, in the same mutex-guarded transition as the terminal node write.
+	// The gate mirrors both real backends' — acyclic, not fatal, the execution
+	// did not just finalize, and not canceling. Scheduling downstream work for a
+	// finished execution would leave intents nothing can consume, and scheduling
+	// it during a Cancel races the teardown cleanup.
+	if !req.AllowCycles && !req.Fatal && !result.ExecutionDone && exec.Status != types.ExecutionStatusCanceling {
+		outboxIDs, skipped := f.applyArrivalsLocked(req.ExecutionID, req.ActivationID, req.AutoDepth, req.Arrivals)
+		result.OutboxIDs = append(result.OutboxIDs, outboxIDs...)
+		result.Skipped = skipped
+	}
+
 	// Reference mirror of the production cyclic path (#7): persist the
 	// engine-computed downstream intents, or finalize the execution when the
 	// active branch terminated, in the same mutex-guarded transition.
@@ -352,11 +371,25 @@ func (f *fakeState) AdvanceNode(_ context.Context, req AdvanceNodeRequest) (Adva
 	f.atomicAdvanced[advanceKey] = true
 
 	result := AdvanceNodeResult{Applied: true}
-	for _, arrival := range req.Arrivals {
+	result.OutboxIDs, result.Skipped = f.applyArrivalsLocked(req.ExecutionID, req.ActivationID, req.AutoDepth, req.Arrivals)
+	return result, nil
+}
+
+// applyArrivalsLocked converts one scheduling transition's downstream arrivals
+// into execute/skip intents. Callers must hold f.mu.
+//
+// CommitNode and AdvanceNode share it for the same reason the two real backends
+// do: one set of counter rules for both carriers keeps a folded commit from
+// drifting away from the advance it replaced. The counter key is the
+// destination's NodeIdx here because that is the keyspace this fake seeds in
+// createExecutionLocked/InitInDegrees; the production backends key by UnitIdx.
+// Tests that need unit-keyed counting drive drivingState instead.
+func (f *fakeState) applyArrivalsLocked(id types.ExecutionID, activationID, autoDepth int, arrivals []DownstreamArrival) (outboxIDs []string, skipped []SkippedUnit) {
+	for _, arrival := range arrivals {
 		if arrival.ArrivalCount <= 0 {
 			continue
 		}
-		counterKey := fakeAtomicCounterKey(req.ExecutionID, arrival.NodeIdx)
+		counterKey := fakeAtomicCounterKey(id, arrival.NodeIdx)
 		activeBefore := f.activeIns[counterKey]
 		f.inDegrees[counterKey] -= arrival.ArrivalCount
 		if arrival.ActiveCount > 0 {
@@ -380,30 +413,34 @@ func (f *fakeState) AdvanceNode(_ context.Context, req AdvanceNodeRequest) (Adva
 			continue
 		}
 		f.atomicSchedule[counterKey] = action
-		taskType := TaskTypeNodeExec
-		entryID := fmt.Sprintf("execute/%s/%s/%d", req.ExecutionID, arrival.NodeName, req.ActivationID)
+		taskType := arrival.ExecTaskType
+		if taskType == 0 {
+			taskType = TaskTypeNodeExec
+		}
+		entryID := fmt.Sprintf("execute/%s/%s/%d", id, arrival.NodeName, activationID)
 		if action == "skip" {
 			taskType = TaskTypeNodeSkip
-			entryID = fmt.Sprintf("skip/%s/%s/%d", req.ExecutionID, arrival.NodeName, req.ActivationID)
+			entryID = fmt.Sprintf("skip/%s/%s/%d", id, arrival.NodeName, activationID)
 		}
-		if f.putAtomicOutboxLocked(req.ExecutionID, entryID, Task{
-			ExecutionID:  req.ExecutionID,
+		if f.putAtomicOutboxLocked(id, entryID, Task{
+			ExecutionID:  id,
 			NodeName:     arrival.NodeName,
 			NodeIdx:      arrival.NodeIdx,
+			UnitIdx:      arrival.UnitIdx,
 			Type:         taskType,
-			ActivationID: req.ActivationID,
-			AutoDepth:    req.AutoDepth,
+			ActivationID: activationID,
+			AutoDepth:    autoDepth,
 		}, time.Time{}) {
-			result.OutboxIDs = append(result.OutboxIDs, entryID)
+			outboxIDs = append(outboxIDs, entryID)
 			// Reported only when the intent was written, exactly as both real
-			// backends do: a redelivered advance whose skip intent already
-			// exists applied nothing new and must not report a second skip.
+			// backends do: a redelivered transition whose intent already exists
+			// applied nothing new and must not report a second skip.
 			if action == "skip" {
-				result.Skipped = append(result.Skipped, SkippedUnit{NodeName: arrival.NodeName, Count: 1})
+				skipped = append(skipped, SkippedUnit{NodeName: arrival.NodeName, Count: 1})
 			}
 		}
 	}
-	return result, nil
+	return outboxIDs, skipped
 }
 
 // ListOutbox deliberately does not take the delivery lease a real store takes.

@@ -32,9 +32,11 @@ func (s *countingClaimState) ListOutbox(ctx context.Context, id types.ExecutionI
 // of them were outbox claims for two batches of one entry each. The third claim
 // is this test's subject.
 //
-// Two claims, not one: the first batch's advance intent is what appends the
-// downstream node's exec intent, so the loop genuinely has to come back for it.
-// Asserting 1 here would be asserting a bug.
+// One claim, not two: the commit folds its downstream arrival into the same
+// fenced transition (S4b), so the batch it is handed already contains the
+// downstream node's exec intent. The extra claim that used to append it — and
+// the re-poll the loop needed after handling that advance — are gone. Asserting
+// 2 here would be re-asserting the round trip this change removed.
 func TestFlushOutboxDoesNotPollAnEmptiedOutbox(t *testing.T) {
 	ctx := context.Background()
 	inner := newFakeState()
@@ -82,9 +84,10 @@ func TestFlushOutboxDoesNotPollAnEmptiedOutbox(t *testing.T) {
 	// the loop exited early and dropped the downstream task on the floor. The
 	// delivery assertion below is what makes the number mean "no wasted poll"
 	// rather than "stopped too soon".
-	if state.claims != 2 {
-		t.Errorf("outbox claims during commit = %d, want 2 (one batch per appended "+
-			"intent, and no trailing poll to be told the outbox is empty)", state.claims)
+	if state.claims != 1 {
+		t.Errorf("outbox claims during commit = %d, want 1 (the folded commit wrote "+
+			"the downstream intent into the same transition, so one short batch "+
+			"delivers it and no trailing poll is needed)", state.claims)
 	}
 	delivered := queue.Drain()
 	if len(delivered) != 1 || delivered[0].NodeName != "next" || delivered[0].Type != TaskTypeNodeExec {

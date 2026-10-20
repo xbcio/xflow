@@ -18,6 +18,14 @@ var _ engine.AtomicStateStore = (*Store)(nil)
 var _ engine.LegacyNodeCommitter = (*Store)(nil)
 var _ engine.ArrivalFoldingCommitter = (*Store)(nil)
 
+// FoldsArrivalsIntoCommit declares the arrival-folding capability: CommitNode
+// applies CommitNodeRequest.Arrivals inside commitNodeLua, in the same fenced
+// Redis transition as the terminal node write. Without this explicit marker the
+// engine treats the store as unable to fold — CommitNode's signature alone is
+// not a capability signal — and keeps emitting AdvanceTask, so the declaration
+// has to stay here for as long as the Lua transition honours the field.
+func (s *Store) FoldsArrivalsIntoCommit() bool { return true }
+
 // CommitLeasedNode reuses the fenced Redis node transition for legacy cycle
 // paths, whose follow-up scheduling remains outside CommitNode's DAG counter.
 func (s *Store) CommitLeasedNode(ctx context.Context, req engine.CommitNodeRequest) (engine.CommitNodeResult, error) {
