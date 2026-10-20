@@ -241,6 +241,21 @@ export interface RuntimeNodeSnapshot {
   attempts?: number;
   durationMs?: number;
   error?: string;
+  /**
+   * The output port that carried the node's result (the server's node `port`).
+   * `@xflow/api`'s `executionDetailToRuntimeSnapshot` copies it here so the
+   * Inspector's 运行 tab can name the port without its own execution model.
+   */
+  port?: string;
+  /** Structured failure detail (the server's `error_details`), rendered flat. */
+  errorDetails?: Record<string, unknown>;
+  /** The node's public output map (the server's `output`). */
+  output?: Record<string, unknown>;
+  /**
+   * The child execution a sub-workflow node waited on. Metadata, not node
+   * content: it survives the node's commit, so a finished node stays drillable.
+   */
+  childExecutionId?: string;
 }
 
 export interface RuntimeSnapshot {
@@ -429,6 +444,11 @@ export function toGraphModel(workflow: WorkflowDef): GraphModel {
   const nodes = (workflow.nodes ?? []).map<GraphNode>((node) => {
     const name = nodeName(node);
     const declared = declaredOutputPorts(node);
+    // §6.2: the red error outlet belongs to nodes whose effective policy routes
+    // failures there. An edge already leaving `error` keeps the port visible (the
+    // preview merges edge ports back in); declaredOutputPorts stays untouched
+    // because connection validation still accepts the port.
+    const errorOutput = (node.on_error ?? workflow.settings?.on_error) === "error_output";
     return {
       id: nodeKey(node),
       name,
@@ -439,7 +459,10 @@ export function toGraphModel(workflow: WorkflowDef): GraphModel {
       disabled: node.disabled ?? false,
       notes: node.notes,
       inputs: normalizeInputs(node.inputs),
-      outputs: [...(declared.hasMain ? ["main"] : []), ...declared.ports]
+      outputs: [
+        ...(declared.hasMain ? ["main"] : []),
+        ...declared.ports.filter((port) => port !== "error" || errorOutput)
+      ]
     };
   });
 
@@ -482,5 +505,13 @@ export function toGraphModel(workflow: WorkflowDef): GraphModel {
 }
 
 export * from "./nodeForm";
+export * from "./nodeSummary";
 export * from "./editorMetadata";
 export * from "./nodeHelpers";
+export * from "./tokens";
+export * from "./statusMeta";
+export * from "./categoryMeta";
+export * from "./breakpoints";
+export * from "./appearance";
+export * from "./capabilities";
+export * from "./approval";

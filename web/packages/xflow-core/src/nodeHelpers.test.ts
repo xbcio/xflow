@@ -59,4 +59,10 @@ describe("runtimeForNode", () => {
     expect(runtimeForNode(runtime, {})).toEqual({ status: "pending" });
     expect(runtimeForNode(undefined, { name: "fetch" })).toEqual({ status: "pending" });
   });
+
+  it("does not read Object.prototype members for a node named after one", () => {
+    const empty: RuntimeSnapshot = { nodes: {} };
+    expect(runtimeForNode(empty, { name: "constructor" })).toEqual({ status: "pending" });
+    expect(runtimeForNode(empty, { name: "hasOwnProperty", id: "toString" })).toEqual({ status: "pending" });
+  });
 });

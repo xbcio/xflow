@@ -49,9 +49,44 @@ describe("toGraphModel", () => {
 
     expect(graph.nodes.map((node) => [node.name, node.outputs])).toEqual([
       ["branch", ["true", "false"]],
-      ["call", ["main", "error"]],
+      ["call", ["main"]],
       ["done", []]
     ]);
+  });
+
+  // §6.2 / §6.1: the red error outlet is drawn only where failures are routed to
+  // it. A node-level policy wins over the workflow default, and the wait node
+  // keeps its timeout outlet either way.
+  it("declares the error outlet only under an effective error_output policy", () => {
+    const outputs = (workflow: WorkflowDef) =>
+      Object.fromEntries(toGraphModel(workflow).nodes.map((node) => [node.name, node.outputs]));
+
+    expect(
+      outputs({
+        nodes: [
+          { name: "own", type: "xflow.http", on_error: "error_output" },
+          { name: "inherits", type: "xflow.http" },
+          { name: "overrides", type: "xflow.http", on_error: "stop" },
+          { name: "waits", type: "xflow.wait" }
+        ],
+        settings: { on_error: "error_output" }
+      })
+    ).toEqual({
+      own: ["main", "error"],
+      inherits: ["main", "error"],
+      overrides: ["main"],
+      waits: ["main", "timeout", "error"]
+    });
+
+    expect(
+      outputs({
+        nodes: [
+          { name: "plain", type: "xflow.http" },
+          { name: "waits", type: "xflow.wait" },
+          { name: "main_out", type: "xflow.http", on_error: "main_output" }
+        ]
+      })
+    ).toEqual({ plain: ["main"], waits: ["main", "timeout"], main_out: ["main"] });
   });
 
   it("normalizes workflow nodes and connections into a stable graph model", () => {
@@ -101,7 +136,7 @@ describe("toGraphModel", () => {
         kind: "action",
         notes: "Calls payment gateway",
         inputs: [{ name: "main", required: true }],
-        outputs: ["main", "error"]
+        outputs: ["main"]
       }
     ]);
     expect(graph.edges).toEqual([

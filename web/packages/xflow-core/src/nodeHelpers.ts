@@ -30,7 +30,9 @@ export function runtimeForNode(
   node: { name?: string; id?: string }
 ): RuntimeNodeSnapshot {
   const nodes = runtime?.nodes;
-  return (node.name ? nodes?.[node.name] : undefined)
-    ?? (node.id ? nodes?.[node.id] : undefined)
-    ?? { status: "pending" };
+  // Own keys only: a node named `constructor` must not inherit a member of
+  // Object.prototype and be reported as if the run had reached it.
+  const own = (key: string | undefined) =>
+    key && nodes && Object.hasOwn(nodes, key) ? nodes[key] : undefined;
+  return own(node.name) ?? own(node.id) ?? { status: "pending" };
 }

@@ -9,14 +9,15 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    }
+    },
+    "./tokens.css": "./dist/tokens.css"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "build": "tsc -p tsconfig.json && cp src/tokens.css dist/tokens.css",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "tokens:generate": "tsc -p tsconfig.json && node scripts/generate-tokens.mjs"
   },
   "devDependencies": {
     "@xflow/typescript-config": "workspace:*"
   }
 }
-

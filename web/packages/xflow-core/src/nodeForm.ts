@@ -19,6 +19,8 @@
 // - Inside an array element (`item.fields`), `path` is relative to the
 //   element ("condition"); the compiler binds element fields by name.
 
+import type { NodeCategory } from "./categoryMeta";
+
 export type NodeFormSpecVersion = "node-form/v1";
 
 /** Mirrors Go types.NodeKind as projected (Doc C §2.1). */
@@ -187,6 +189,18 @@ export interface NodeFormSchema {
   docs?: string;
   capabilities?: string[];
   credentials?: string[];
+  /**
+   * The node category the descriptor declares (spec §5 / §6.13). Unknown values
+   * and absent ones both fall back to core's prefix map (`categoryOf`), so an
+   * older server keeps working.
+   */
+  category?: NodeCategory | string;
+  /**
+   * Parameter names whose runtime values are printed on the node card
+   * (spec §6.1.1). One entry may name two parameters joined with "+" so they
+   * share a row (`method+url`). Absent means the card draws no summary rows.
+   */
+  card_summary?: string[];
   ports?: NodeFormPorts;
   groups?: NodeFormGroup[];
   one_of?: NodeFormOneOf[];
