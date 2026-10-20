@@ -47,6 +47,11 @@ func ExecutionsContract(t *testing.T, s ExecutionsStore, nsPrefix string) {
 	nsA := namespace.Namespace(nsPrefix + "-a")
 	nsB := namespace.Namespace(nsPrefix + "-b")
 	nsEmpty := namespace.Namespace(nsPrefix + "-empty")
+	// nsC holds one namespace-attributed row whose WORKFLOW is unattributed
+	// (WorkflowID ""). It is what distinguishes the two fail-closed rules: a
+	// workflow filter must not match it, while an unfiltered listing must still
+	// show it.
+	nsC := namespace.Namespace(nsPrefix + "-c")
 
 	ids := contractExecIDs(nsPrefix)
 
@@ -60,9 +65,10 @@ func ExecutionsContract(t *testing.T, s ExecutionsStore, nsPrefix string) {
 	// expect rather than reusing this slice positionally.
 
 	// --- fixtures ---------------------------------------------------------
-	// Three rows in nsA, two in nsB, and one UNATTRIBUTED row (Namespace "")
-	// that must never be visible to anyone. Statuses and timestamps are chosen
-	// so every filter below has a discriminating answer.
+	// Three rows in nsA, two in nsB, one row in nsC whose namespace is set but
+	// whose workflow is not, and one UNATTRIBUTED row (Namespace "") that must
+	// never be visible to anyone. Statuses, timestamps and workflow ids are
+	// chosen so every filter below has a discriminating answer.
 	//
 	// ids[0..4] ascend with created_at, so a listing (newest first) reverses
 	// them; ids[5] is deliberately in the middle of the id range and outside
@@ -75,20 +81,45 @@ func ExecutionsContract(t *testing.T, s ExecutionsStore, nsPrefix string) {
 	// error that says nothing about listings. `{}` is the same placeholder
 	// test/integration's emptyJSON uses for the same reason.
 	seed := []*store.ExecutionRecord{
-		{ExecutionID: ids[0], Namespace: string(nsA), WorkflowName: "wf-alpha", WorkflowDef: emptyWorkflowDef, Status: types.ExecutionStatusSuccess, CreatedAt: base, UpdatedAt: base},
-		{ExecutionID: ids[1], Namespace: string(nsA), WorkflowName: "wf-alpha", WorkflowDef: emptyWorkflowDef, Status: types.ExecutionStatusFailed, CreatedAt: base.Add(time.Second), UpdatedAt: base.Add(time.Second)},
-		{ExecutionID: ids[2], Namespace: string(nsA), WorkflowName: "wf-beta", WorkflowDef: emptyWorkflowDef, Status: types.ExecutionStatusSuccess, CreatedAt: base.Add(2 * time.Second), UpdatedAt: base.Add(2 * time.Second)},
-		{ExecutionID: ids[3], Namespace: string(nsB), WorkflowName: "wf-alpha", WorkflowDef: emptyWorkflowDef, Status: types.ExecutionStatusSuccess, CreatedAt: base.Add(3 * time.Second), UpdatedAt: base.Add(3 * time.Second)},
-		{ExecutionID: ids[4], Namespace: string(nsB), WorkflowName: "wf-gamma", WorkflowDef: emptyWorkflowDef, Status: types.ExecutionStatusRunning, CreatedAt: base.Add(4 * time.Second), UpdatedAt: base.Add(4 * time.Second)},
+		{ExecutionID: ids[0], Namespace: string(nsA), WorkflowID: "wfid-alpha", WorkflowName: "wf-alpha", WorkflowDef: emptyWorkflowDef, Status: types.ExecutionStatusSuccess, CreatedAt: base, UpdatedAt: base},
+		{ExecutionID: ids[1], Namespace: string(nsA), WorkflowID: "wfid-alpha", WorkflowName: "wf-alpha", WorkflowDef: emptyWorkflowDef, Status: types.ExecutionStatusFailed, CreatedAt: base.Add(time.Second), UpdatedAt: base.Add(time.Second)},
+		{ExecutionID: ids[2], Namespace: string(nsA), WorkflowID: "wfid-beta", WorkflowName: "wf-beta", WorkflowDef: emptyWorkflowDef, Status: types.ExecutionStatusSuccess, CreatedAt: base.Add(2 * time.Second), UpdatedAt: base.Add(2 * time.Second)},
+		{ExecutionID: ids[3], Namespace: string(nsB), WorkflowID: "wfid-alpha", WorkflowName: "wf-alpha", WorkflowDef: emptyWorkflowDef, Status: types.ExecutionStatusSuccess, CreatedAt: base.Add(3 * time.Second), UpdatedAt: base.Add(3 * time.Second)},
+		{ExecutionID: ids[4], Namespace: string(nsB), WorkflowID: "wfid-gamma", WorkflowName: "wf-gamma", WorkflowDef: emptyWorkflowDef, Status: types.ExecutionStatusRunning, CreatedAt: base.Add(4 * time.Second), UpdatedAt: base.Add(4 * time.Second)},
 		// The unattributed row. Its execution_id is still readable through
 		// GetExecution — the row exists and is not hidden from a caller who
-		// already knows its id — it is only unreachable from any listing.
-		{ExecutionID: ids[5], Namespace: "", WorkflowName: "wf-alpha", WorkflowDef: emptyWorkflowDef, Status: types.ExecutionStatusSuccess, CreatedAt: base.Add(5 * time.Second), UpdatedAt: base.Add(5 * time.Second)},
+		// already knows its id — it is only unreachable from any listing. Its
+		// WorkflowID is deliberately empty too: a workflow filter must never
+		// attribute it.
+		{ExecutionID: ids[5], Namespace: "", WorkflowID: "", WorkflowName: "wf-alpha", WorkflowDef: emptyWorkflowDef, Status: types.ExecutionStatusSuccess, CreatedAt: base.Add(5 * time.Second), UpdatedAt: base.Add(5 * time.Second)},
+		// nsC's row is attributed to a namespace but NOT to a workflow. A
+		// workflow filter must never return it; an unfiltered listing must.
+		{ExecutionID: types.ExecutionID(fmt.Sprintf("%s-c1", nsPrefix)), Namespace: string(nsC), WorkflowID: "", WorkflowName: "wf-alpha", WorkflowDef: emptyWorkflowDef, Status: types.ExecutionStatusSuccess, CreatedAt: base.Add(6 * time.Second), UpdatedAt: base.Add(6 * time.Second)},
 	}
 	for _, rec := range seed {
 		if err := s.CreateExecution(ctx, rec); err != nil {
 			t.Fatalf("CreateExecution(%s, ns=%q): %v", rec.ExecutionID, rec.Namespace, err)
 		}
+	}
+
+	// --- a write refuses an id the identity column cannot hold -------------
+	// Truncating it (or relying on the database's own error) could attribute a
+	// row to another workflow; the refusal must be the same in every backend.
+	overlong := &store.ExecutionRecord{
+		ExecutionID: types.ExecutionID(nsPrefix + "-overlong"),
+		Namespace:   string(nsB),
+		WorkflowID:  types.WorkflowID(repeatByte('w', store.MaxExecutionWorkflowIDLen+1)),
+		WorkflowDef: emptyWorkflowDef,
+		Status:      types.ExecutionStatusSuccess,
+		CreatedAt:   base,
+		UpdatedAt:   base,
+	}
+	if err := s.CreateExecution(ctx, overlong); !errors.Is(err, store.ErrInvalidWorkflowID) {
+		t.Fatalf("CreateExecution with a %d-character workflow id error = %v, want store.ErrInvalidWorkflowID",
+			store.MaxExecutionWorkflowIDLen+1, err)
+	}
+	if _, err := s.GetExecution(ctx, overlong.ExecutionID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("rejected over-long workflow id left a row: GetExecution error = %v, want store.ErrNotFound", err)
 	}
 
 	// --- fail closed on an unusable scope ---------------------------------
@@ -342,6 +373,77 @@ func ExecutionsContract(t *testing.T, s ExecutionsStore, nsPrefix string) {
 				t.Fatalf("status filter in nsB: %v", err)
 			}
 			assertExactly(t, "successful executions in nsB", got, []types.ExecutionID{ids[3]})
+		})
+
+		t.Run("workflow_id", func(t *testing.T) {
+			got, err := s.ListExecutions(ctx, nsA, store.ExecutionFilter{WorkflowID: "wfid-alpha"}, store.DefaultListOptions())
+			if err != nil {
+				t.Fatalf("workflow filter: %v", err)
+			}
+			assertExactly(t, "wfid-alpha executions in nsA", got, []types.ExecutionID{ids[1], ids[0]})
+			if total := mustCount(t, s, ctx, nsA, store.ExecutionFilter{WorkflowID: "wfid-alpha"}); total != 2 {
+				t.Fatalf("CountExecutions(workflow_id=wfid-alpha) = %d, want 2", total)
+			}
+			// A real id with no matching row is an empty page, not an error.
+			empty, err := s.ListExecutions(ctx, nsA, store.ExecutionFilter{WorkflowID: "wfid-missing"}, store.DefaultListOptions())
+			if err != nil {
+				t.Fatalf("workflow filter with no match: %v", err)
+			}
+			if len(empty) != 0 {
+				t.Fatalf("workflow_id=wfid-missing returned %d rows, want 0", len(empty))
+			}
+			// The filter composes with the other filters rather than replacing
+			// them: alpha has one success and one failure in nsA.
+			composed, err := s.ListExecutions(ctx, nsA, store.ExecutionFilter{
+				WorkflowID: "wfid-alpha",
+				Status:     types.ExecutionStatusFailed,
+			}, store.DefaultListOptions())
+			if err != nil {
+				t.Fatalf("workflow+status filter: %v", err)
+			}
+			assertExactly(t, "failed wfid-alpha executions in nsA", composed, []types.ExecutionID{ids[1]})
+		})
+
+		t.Run("workflow_id_is_scoped_to_the_namespace", func(t *testing.T) {
+			// nsB holds a row under the SAME workflow id as nsA's rows. A
+			// workflow filter narrows within one namespace; it never reaches
+			// across one.
+			got, err := s.ListExecutions(ctx, nsB, store.ExecutionFilter{WorkflowID: "wfid-alpha"}, store.DefaultListOptions())
+			if err != nil {
+				t.Fatalf("workflow filter in nsB: %v", err)
+			}
+			assertExactly(t, "wfid-alpha executions in nsB", got, []types.ExecutionID{ids[3]})
+		})
+
+		t.Run("workflow_id_never_matches_an_unattributed_row", func(t *testing.T) {
+			// nsC's row has a namespace but no workflow id. It must be invisible
+			// to every non-empty workflow filter, while a listing without that
+			// filter still shows it — under-reporting a filtered answer is the
+			// intended fail-closed direction, hiding the row entirely is not.
+			got, err := s.ListExecutions(ctx, nsC, store.ExecutionFilter{WorkflowID: "wfid-alpha"}, store.DefaultListOptions())
+			if err != nil {
+				t.Fatalf("workflow filter in nsC: %v", err)
+			}
+			if len(got) != 0 {
+				t.Fatalf("workflow_id filter returned %d unattributed rows, want 0", len(got))
+			}
+			if total := mustCount(t, s, ctx, nsC, store.ExecutionFilter{WorkflowID: "wfid-alpha"}); total != 0 {
+				t.Fatalf("CountExecutions(workflow_id) = %d for unattributed rows, want 0", total)
+			}
+			all := mustListAll(t, s, ctx, nsC)
+			if len(all) != 1 {
+				t.Fatalf("unfiltered nsC listing = %d rows, want the one unattributed row", len(all))
+			}
+		})
+
+		t.Run("overlong_workflow_id_is_rejected", func(t *testing.T) {
+			long := types.WorkflowID(repeatByte('w', store.MaxExecutionWorkflowIDLen+1))
+			if _, err := s.ListExecutions(ctx, nsA, store.ExecutionFilter{WorkflowID: long}, store.DefaultListOptions()); err == nil {
+				t.Fatal("a workflow id filter longer than the column width was accepted; it can never match a stored id")
+			}
+			if _, err := s.CountExecutions(ctx, nsA, store.ExecutionFilter{WorkflowID: long}); err == nil {
+				t.Fatal("CountExecutions accepted an overlong workflow id filter that ListExecutions rejects")
+			}
 		})
 
 		t.Run("unknown_status_is_rejected", func(t *testing.T) {
