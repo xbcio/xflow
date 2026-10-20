@@ -316,6 +316,15 @@ func startR8Runner(t *testing.T, runnerBin, httpURL, id string) *r8Process {
 		"--poll-wait", "50ms",
 		"--concurrency", "1",
 		"--allow-plaintext",
+		// The mid-flight barrier is a test-owned httptest server on 127.0.0.1.
+		// The runner's dial-time address guard (http_host_policy.block_private_ips,
+		// enabled by default) refuses non-public destinations, so without this the
+		// xflow.http node never reaches the barrier. block_private_ips_allow is the
+		// guard's dedicated address-level exemption list: exempt exactly the
+		// loopback host the test itself listens on, and leave the guard enabled for
+		// every other destination. Using --http-host-allow here would instead put
+		// the name policy into allowlist-only mode.
+		"--http-block-private-ips-allow", "127.0.0.1",
 	)
 	cmd.Stdout = out
 	cmd.Stderr = out
