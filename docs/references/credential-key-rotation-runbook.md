@@ -339,17 +339,31 @@ xflow supply reseal --mysql-dsn "$XFLOW_MYSQL_DSN"
 The command prints a JSON report (`sqlstore.ResealReport`) with `scanned`,
 `resealed`, `already_current`, `failed`, `dry_run`, and — when `failed > 0` —
 a `failures` list naming each row's `namespace`, `name`, and `reason` (never
-the stored bytes, which may be ciphertext of a credential). It exits non-zero
-whenever `failed > 0`, specifically so a script cannot mistake a partial pass
-for a completed rotation.
+the stored bytes, which may be ciphertext of a credential). A real pass (not
+`--dry-run`) then immediately rescans every row with the **current key alone**
+and adds a `verification` object with `current_key_id`, `previous_key_id`,
+`by_key_id`, `plaintext`, `unparsable`, `needs_reseal`, `unreadable`, and
+`verified`. Verification requires each row to actually open and match its
+`content_hash` under the current key, not merely to report the current kid: a
+kid is self-reported, so a census alone cannot see a row whose ciphertext was
+sealed under another key.
 
-**Require `failed=0` before continuing.** If any row failed, it is still
-sealed under the previous key (or, for a genuinely corrupted row, under
-neither) — the previous key must stay configured, and the reseal command
-re-run, until this reports zero failures. `xflow supply reseal` is idempotent
-and resumable: rows already sealed under the current key are counted as
-`already_current` and left untouched, so re-running only touches what is
-still outstanding.
+The command exits non-zero whenever `failed > 0`, whenever any row still needs
+resealing (`verification.needs_reseal > 0`), or whenever any row cannot be
+opened under the current key (`verification.unreadable > 0`) — specifically so
+a script cannot mistake a partial pass for a completed rotation. The same
+read-only classification is available at any time as
+`xflow supply keys status --mysql-dsn "$XFLOW_MYSQL_DSN"` (add the
+previous-key flags during the window); it writes nothing and prints no key
+material.
+
+**Require `failed=0` and `verification.verified=true` before continuing.** If
+any row failed or is still outstanding, it is still sealed under the previous
+key (or, for a genuinely corrupted row, under neither) — the previous key must
+stay configured, and the reseal command re-run, until this reports a clean
+verification. `xflow supply reseal` is idempotent and resumable: rows already
+sealed under the current key are counted as `already_current` and left
+untouched, so re-running only touches what is still outstanding.
 
 Resealing leaves `content_hash` and `revision` unchanged — the reseal pass
 rewrites only the envelope, not the plaintext, so consumers that compare
@@ -363,14 +377,21 @@ itself.
 
 **(d) Restart without the previous key.**
 
-Once (c) has reported `failed=0`, restart every server again with
-`XFLOW_MASTER_KEY_PREVIOUS` / `--master-key-previous-file` removed. This
-closes the rotation window: from this point the previous key is no longer
-accepted for `Open`, and a stray row still sealed under it (there should be
-none, if (c) reported zero failures) becomes unreadable again.
+Once (c) has reported `failed=0` and `verification.verified=true`, restart
+every server again with `XFLOW_MASTER_KEY_PREVIOUS` /
+`--master-key-previous-file` removed. This closes the rotation window: from
+this point the previous key is no longer accepted for `Open`, and a stray row
+still sealed under it (there should be none, if (c) verified clean) becomes
+unreadable again.
 
 **(e) Verify.**
 
+- `xflow supply keys status --mysql-dsn "$XFLOW_MYSQL_DSN"` (with **no**
+  previous-key flags) exits 0 and reports `needs_reseal: 0`, `unreadable: 0`,
+  `verified: true`, and every row under `current_key_id`. This is the
+  post-retirement check that matters: without the previous key, any row still
+  sealed under it is a hard failure, so a zero exit proves the new key alone
+  can read the whole table.
 - `GET /v1/supplies/{name}` for a representative supply in each namespace
   returns 200, not 500.
 - Runner `/readyz` reports ready, not `no supply has been fetched yet`
@@ -379,9 +400,9 @@ none, if (c) reported zero failures) becomes unreadable again.
   `xflow_supply_not_ready` is at its pre-rotation baseline (§6).
 
 **Do not start another rotation before this one's reseal has reported
-`failed=0`.** Two keys cover exactly one rotation (§3.3); starting a second
-one while the first is still in its window stacks a third key against a
-keyring that only holds two.
+`failed=0` and `verification.verified=true`.** Two keys cover exactly one
+rotation (§3.3); starting a second one while the first is still in its window
+stacks a third key against a keyring that only holds two.
 
 ### 3.6 What this procedure does not give you
 
