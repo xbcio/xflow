@@ -443,7 +443,7 @@ func TestWithAddressGuardRefusesCustomTLSDialers(t *testing.T) {
 		},
 		{
 			name: "DialTLS",
-			base: &http.Transport{DialTLS: func(string, string) (net.Conn, error) {
+			base: &http.Transport{DialTLS: func(string, string) (net.Conn, error) { //nolint:staticcheck // deliberately covers the deprecated DialTLS compatibility branch
 				return nil, errors.New("unused")
 			}},
 		},

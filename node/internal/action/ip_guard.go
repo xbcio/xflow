@@ -457,7 +457,7 @@ func withAddressGuard(base http.RoundTripper, g *addressGuard) (*http.Transport,
 		return nil, types.NewPermanentError("http.address_guard_unavailable",
 			fmt.Sprintf("private-address blocking requires an http.Transport, got %T", base))
 	}
-	if baseTransport.DialTLSContext != nil || baseTransport.DialTLS != nil {
+	if baseTransport.DialTLSContext != nil || baseTransport.DialTLS != nil { //nolint:staticcheck // DialTLS is deprecated but net/http still consults it; a configured value must keep the guard from overwriting it
 		// A custom TLS dialer would bypass the guarded DialContext for https,
 		// which is exactly the case the guard exists to cover. DialTLS alone
 		// matters too: net/http's customDialTLS falls back to the deprecated
