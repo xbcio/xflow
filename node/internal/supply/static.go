@@ -29,6 +29,8 @@ func (n *StaticNode) Descriptor() types.Descriptor {
 		Type:        "xflow.supply.static",
 		Kind:        types.NodeKindSupply,
 		DisplayName: "Static Supply",
+		Category:    "unknown",
+		CardSummary: []string{"content"},
 		Params: []types.ParamSpec{
 			{Name: xsupply.ParamContent, DisplayName: "Content", Type: types.ParamString, Required: true,
 				Description: "Literal supply content"},

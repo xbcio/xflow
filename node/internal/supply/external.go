@@ -50,6 +50,8 @@ func (n *ExternalNode) Descriptor() types.Descriptor {
 		Type:        "xflow.supply.external",
 		Kind:        types.NodeKindSupply,
 		DisplayName: "External Supply",
+		Category:    "unknown",
+		CardSummary: []string{"resource"},
 		Params: []types.ParamSpec{
 			{Name: xsupply.ParamResource, DisplayName: "Resource", Type: types.ParamString,
 				Description: "SupplyResource name; defaults to the node name"},

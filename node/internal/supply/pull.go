@@ -70,6 +70,8 @@ func (n *PullNode) Descriptor() types.Descriptor {
 		Type:        xsupply.NodeTypeHTTPPull,
 		Kind:        types.NodeKindSupply,
 		DisplayName: "HTTP Supply (Runner Pull)",
+		Category:    "unknown",
+		CardSummary: []string{"url", "authentication", "poll_interval"},
 		Params: []types.ParamSpec{
 			{Name: xsupply.ParamURL, DisplayName: "URL", Type: types.ParamString, Required: true,
 				Description: "HTTPS source the runner fetches. Only https is accepted and redirects are not followed",
