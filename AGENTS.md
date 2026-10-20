@@ -89,11 +89,9 @@ places, both gitignored process artifacts:
 
 Do not create a third location, and do not put these in `docs/design/` — that
 is reserved for tracked, human-maintained architecture docs, alongside
-`docs/dsl-samples/` and `docs/references/`. Two things deliberately stay where
-they are: ADRs are durable tracked records of decisions the code already
-embodies (live in `docs/design/`, named `ADR-<id>-<topic>.md`), and
-`.claude/superpowers/sdd/` is per-run execution scratch owned by the
-orchestration tooling.
+`docs/dsl-samples/` and `docs/references/`. ADRs deliberately stay where they
+are: they are durable tracked records of decisions the code already embodies
+(live in `docs/design/`, named `ADR-<id>-<topic>.md`).
 
 Because `docs/specs/` and `docs/plans/` do not ship, a tracked file that cites a
 path under them hands the reader a dead link. Do not add such citations; promote
@@ -102,9 +100,8 @@ exception is `docs/design/RUNNER-IDENTITY-LIFECYCLE-TODO.md`, which names its
 source spec only to say that path is gitignored and transcribes the rulings in
 full — copy that shape when provenance is needed.
 
-Background only: six legacy locations were consolidated on 2026-09-10
-(`.claude/specs/`, `.claude/plans/`, `.claude/docs/specs/`, `.claude/decisions/`,
-`.claude/superpowers/{specs,plans}`, `docs/superpowers/{specs,plans,notes}`);
+Background only: four legacy locations were consolidated on 2026-09-10
+(`.claude/specs/`, `.claude/plans/`, `.claude/docs/specs/`, `.claude/decisions/`);
 their ignore rules remain only to catch tools still writing an old path. A
 related unfixed habit: some comments cite a bare `design §6.1` / `§4.2` / `§7.1`
 with no document named, and at least one matches no section anywhere.

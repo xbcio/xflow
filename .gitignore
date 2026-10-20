@@ -54,14 +54,12 @@ docs/plans.worktrees
 
 # Agent 产出的设计与计划文档的唯一归宿（AGENTS.md「AI-Generated Documentation
 # Placement」）。它们是过程产物，不对外发布，也不该散落在 .claude/specs、
-# .claude/plans、docs/superpowers 这些历史位置。尾斜杠只匹配目录，不会误伤
-# 同名文件。
+# .claude/plans 这些历史位置。尾斜杠只匹配目录，不会误伤同名文件。
 docs/specs/
 docs/plans/
 
 # 历史位置，目录已清空并迁入 docs/specs|plans（ADR 迁入 docs/design）。规则
 # 保留，防止旧工具或旧会话按老路径写入时悄悄入库。
-docs/superpowers
 .claude/plans/
 .claude/specs/
 .claude/docs/
@@ -77,16 +75,10 @@ data/
 
 # Claude Code local files
 .claude/worktrees/
-.claude/sdd/
-.claude/superpowers/
 .claude/mockups/
 .claude/settings.local.json
 .claude/archive-*.tar.gz
 .claude/.delete-list.txt
-
-# Superpowers internal reports (local-only; some historical files remain tracked
-# but new reports should not enter the repo).
-.superpowers/
 
 # Editor local settings
 .vscode/
