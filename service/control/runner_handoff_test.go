@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -341,12 +342,172 @@ func TestRedisHandoffExpiryNeverRequeuesUnknownLease(t *testing.T) {
 	if err := directory.ReclaimExpiredClaims(ctx); err != nil {
 		t.Fatalf("ReclaimExpiredClaims: %v", err)
 	}
+	// The due branch drops the index entry (the armed debt is reachable from the
+	// ledger) and arms recovery-ready, which is the precondition the take below
+	// needs.
+	if _, err := rdb.ZScore(ctx, directory.keys.claimsExpiry, string(claim.ClaimID)).Result(); !errors.Is(err, redis.Nil) {
+		t.Fatalf("claimsExpiry after sweep = %v, want the armed handoff dropped from the due index", err)
+	}
+	if ready, err := rdb.HGet(ctx, directory.keys.handoffRecoveryReady, string(claim.ClaimID)).Result(); err != nil || ready != "1" {
+		t.Fatalf("recovery ready after sweep = %q, %v; want the debt armed", ready, err)
+	}
 	recovery, ok, err := directory.ClaimForRunner(ctx, redisDirectoryClaimRequest(session, 1))
 	if err != nil || !ok || recovery.Handoff == nil || recovery.Handoff.State != HandoffDebtLeaseMayExist {
 		t.Fatalf("expired unknown handoff = %#v, ok=%v, err=%v", recovery, ok, err)
 	}
 	if err := directory.SettleClaimHandoff(ctx, recovery.ClaimID, HandoffDispositionDrop); err != nil {
 		t.Fatalf("settle: %v", err)
+	}
+}
+
+// TestReclaimParksResolverDebtAtItsRecoveryDeadline pins the sweep's upkeep of
+// the claim expiry index for unresolved handoffs. A lease_may_exist record used
+// to keep its past claim expiry forever, so every sweep selected it again and
+// re-read/re-wrote the ledger for a claim only the resolver can act on. The
+// sweep now moves the entry to the handoff deadline, which is the next moment
+// the record becomes resolver-eligible.
+func TestReclaimParksResolverDebtAtItsRecoveryDeadline(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	directory := NewRedisRunnerDirectory(rdb)
+	session := registerRedisDirectoryRunner(t, ctx, directory, "runner-debt", 1)
+	assignment := redisDirectoryTestAssignment("exec-debt/park/activation-1")
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
+	claim := claimRedisDirectoryAssignment(t, ctx, directory, session, 1)
+	if err := directory.MarkClaimLeaseMayExist(ctx, claim.ClaimID); err != nil {
+		t.Fatalf("MarkClaimLeaseMayExist: %v", err)
+	}
+
+	// The handoff deadline is an hour out while the claim expiry is already
+	// past: this is exactly the record the sweep used to re-process every pass.
+	deadline := time.Now().Add(time.Hour).UnixMilli()
+	if err := rdb.HSet(ctx, directory.keys.handoffRecoveryDeadline, string(claim.ClaimID), strconv.FormatInt(deadline, 10)).Err(); err != nil {
+		t.Fatalf("seed handoff deadline: %v", err)
+	}
+	if err := rdb.ZAdd(ctx, directory.keys.claimsExpiry, redis.Z{Score: float64(time.Now().Add(-time.Second).UnixMilli()), Member: string(claim.ClaimID)}).Err(); err != nil {
+		t.Fatalf("seed past claim expiry: %v", err)
+	}
+
+	if err := directory.ReclaimExpiredClaims(ctx); err != nil {
+		t.Fatalf("ReclaimExpiredClaims: %v", err)
+	}
+	if score, err := rdb.ZScore(ctx, directory.keys.claimsExpiry, string(claim.ClaimID)).Result(); err != nil || score != float64(deadline) {
+		t.Fatalf("claimsExpiry score after sweep = %v, %v; want the handoff deadline %d", score, err, deadline)
+	}
+	if ready, err := rdb.HGet(ctx, directory.keys.handoffRecoveryReady, string(claim.ClaimID)).Result(); !errors.Is(err, redis.Nil) {
+		t.Fatalf("recovery ready after sweep = %q, %v; want no resolver token before the deadline", ready, err)
+	}
+
+	// The parked entry must sit outside the sweep's -inf..now window, so a
+	// second pass cannot select it and repeat the ledger work.
+	due, err := rdb.ZRangeByScore(ctx, directory.keys.claimsExpiry, &redis.ZRangeBy{
+		Min: "-inf",
+		Max: strconv.FormatInt(time.Now().UnixMilli(), 10),
+	}).Result()
+	if err != nil {
+		t.Fatalf("read due claim expiries: %v", err)
+	}
+	for _, dueClaimID := range due {
+		if dueClaimID == string(claim.ClaimID) {
+			t.Fatalf("parked handoff %q is still in the sweep window %v", dueClaimID, due)
+		}
+	}
+	if err := directory.ReclaimExpiredClaims(ctx); err != nil {
+		t.Fatalf("second ReclaimExpiredClaims: %v", err)
+	}
+	if score, err := rdb.ZScore(ctx, directory.keys.claimsExpiry, string(claim.ClaimID)).Result(); err != nil || score != float64(deadline) {
+		t.Fatalf("claimsExpiry score after second sweep = %v, %v; want the handoff deadline %d", score, err, deadline)
+	}
+	if ready, err := rdb.HGet(ctx, directory.keys.handoffRecoveryReady, string(claim.ClaimID)).Result(); !errors.Is(err, redis.Nil) {
+		t.Fatalf("recovery ready after second sweep = %q, %v; want the handoff still parked", ready, err)
+	}
+}
+
+// TestTakeHandoffRecoveryRearmsExpiryAtTokenDeadline pins the crash-recovery
+// loop around the resolver token. The sweep removes claim:expiry when it arms
+// recovery-ready, and the take clears recovery-ready and fences the token on
+// handoffRecoveryDeadline. Without re-writing the index those two steps would
+// leave no periodic path back to recovery-ready, so a resolver that died after
+// the take (control-plane crash, OOM, rolling restart) would strand the
+// assignment in 'claimed' forever. The take now ZADDs claim:expiry at the same
+// token deadline in the same atomic step; once that deadline expires the sweep
+// arms recovery-ready again and the debt can be taken by a replacement.
+func TestTakeHandoffRecoveryRearmsExpiryAtTokenDeadline(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	const claimTTL = 40 * time.Millisecond
+	directory := NewRedisRunnerDirectory(rdb, WithRedisRunnerDirectoryClaimTTL(claimTTL))
+	session := registerRedisDirectoryRunner(t, ctx, directory, "runner-token", 1)
+	assignment := redisDirectoryTestAssignment("exec-token/node/activation-1")
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
+	claim := claimRedisDirectoryAssignment(t, ctx, directory, session, 1)
+	if err := directory.MarkClaimLeaseMayExist(ctx, claim.ClaimID); err != nil {
+		t.Fatalf("MarkClaimLeaseMayExist: %v", err)
+	}
+	// Reproduce exactly what the sweep's due branch leaves behind: recovery-ready
+	// armed, the token deadline cleared and claim:expiry removed.
+	if err := rdb.HSet(ctx, directory.keys.handoffRecoveryReady, string(claim.ClaimID), "1").Err(); err != nil {
+		t.Fatalf("seed recovery ready: %v", err)
+	}
+	if err := rdb.HDel(ctx, directory.keys.handoffRecoveryDeadline, string(claim.ClaimID)).Err(); err != nil {
+		t.Fatalf("clear token deadline: %v", err)
+	}
+	if err := rdb.ZRem(ctx, directory.keys.claimsExpiry, string(claim.ClaimID)).Err(); err != nil {
+		t.Fatalf("remove claim expiry: %v", err)
+	}
+
+	before := time.Now().UTC().UnixMilli()
+	recovery, ok, err := directory.ClaimForRunner(ctx, redisDirectoryClaimRequest(session, 1))
+	after := time.Now().UTC().UnixMilli()
+	if err != nil || !ok || recovery.Handoff == nil || recovery.ClaimID != claim.ClaimID {
+		t.Fatalf("take recovery = %#v, ok=%v, err=%v; want the parked handoff", recovery, ok, err)
+	}
+	deadlineRaw, err := rdb.HGet(ctx, directory.keys.handoffRecoveryDeadline, string(claim.ClaimID)).Result()
+	if err != nil {
+		t.Fatalf("read token deadline: %v", err)
+	}
+	deadline, err := strconv.ParseInt(deadlineRaw, 10, 64)
+	if err != nil {
+		t.Fatalf("token deadline %q: %v", deadlineRaw, err)
+	}
+	ttlMillis := claimTTL.Milliseconds()
+	if deadline < before+ttlMillis || deadline > after+ttlMillis {
+		t.Fatalf("token deadline = %d, want now+%d inside [%d, %d]", deadline, ttlMillis, before+ttlMillis, after+ttlMillis)
+	}
+	score, err := rdb.ZScore(ctx, directory.keys.claimsExpiry, string(claim.ClaimID)).Result()
+	if err != nil {
+		t.Fatalf("claim expiry index after take: %v", err)
+	}
+	if score != float64(deadline) {
+		t.Fatalf("claimsExpiry score after take = %v, want the token deadline %d", score, deadline)
+	}
+	if ready, err := rdb.HGet(ctx, directory.keys.handoffRecoveryReady, string(claim.ClaimID)).Result(); !errors.Is(err, redis.Nil) {
+		t.Fatalf("recovery ready after take = %q, %v; want the token held", ready, err)
+	}
+
+	// The sweep takes its cutoff from the caller's clock, not the Redis clock, so
+	// wait the token TTL out instead of trying to advance miniredis time.
+	if wait := time.Until(time.UnixMilli(deadline)); wait > 0 {
+		time.Sleep(wait + time.Millisecond)
+	}
+	if err := directory.ReclaimExpiredClaims(ctx); err != nil {
+		t.Fatalf("ReclaimExpiredClaims: %v", err)
+	}
+	if ready, err := rdb.HGet(ctx, directory.keys.handoffRecoveryReady, string(claim.ClaimID)).Result(); err != nil || ready != "1" {
+		t.Fatalf("recovery ready after token expiry = %q, %v; want the debt armed again", ready, err)
+	}
+	if _, err := rdb.ZScore(ctx, directory.keys.claimsExpiry, string(claim.ClaimID)).Result(); !errors.Is(err, redis.Nil) {
+		t.Fatalf("claimsExpiry after the re-arming sweep = %v, want the entry removed", err)
+	}
+
+	// Armed again is only half the loop: a second take must be able to claim the
+	// same debt, which is the path a crashed resolver's replacement follows.
+	recovery, ok, err = directory.ClaimForRunner(ctx, redisDirectoryClaimRequest(session, 1))
+	if err != nil || !ok || recovery.ClaimID != claim.ClaimID {
+		t.Fatalf("retake recovery = %#v, ok=%v, err=%v; want the re-armed debt", recovery, ok, err)
+	}
+	if err := directory.SettleClaimHandoff(ctx, recovery.ClaimID, HandoffDispositionDrop); err != nil {
+		t.Fatalf("SettleClaimHandoff(drop): %v", err)
 	}
 }
 

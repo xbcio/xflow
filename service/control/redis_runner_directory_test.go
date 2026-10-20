@@ -141,10 +141,13 @@ func TestRedisRunnerDirectoryReclaimsExpiredClaim(t *testing.T) {
 }
 
 // TestReclaimExpiredClaimsIgnoresUnindexedClaims pins the invariant that the
-// expired-claim sweep is driven by claim:expiry alone. A claim hash row with no
-// expiry entry cannot be produced by any transition — the claim script writes
-// both and every removing script clears both — so the sweep must not fall back
-// to scanning claim:assignment for one.
+// expired-claim sweep is driven by claim:expiry alone. An ordinary claim hash
+// row with no expiry entry cannot be produced by any claim transition — the
+// claim script writes both and every removing script clears both — so the sweep
+// must not fall back to scanning claim:assignment for one. (A lease_may_exist or
+// lease_created handoff can briefly hold the claim row without the entry while
+// it waits for a resolver take; that state already carries recovery-ready and
+// the take re-indexes it, so it is not a reason to scan either.)
 func TestReclaimExpiredClaimsIgnoresUnindexedClaims(t *testing.T) {
 	ctx := context.Background()
 	_, rdb := newRedisRunnerDirectoryTestClient(t)

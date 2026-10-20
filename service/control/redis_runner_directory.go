@@ -1431,12 +1431,18 @@ func (d *RedisRunnerDirectory) recoverableHandoff(ctx context.Context, runnerID,
 // resolves debt for one that is not. Both must go through the same fence: a
 // second take before the first token's deadline is a "busy", which is what keeps
 // two resolvers from settling the same claim against the engine twice.
+//
+// The take also re-arms claim:expiry (KEYS[5]) at the same token deadline. The
+// sweep removes that entry when it arms recovery-ready, so without the re-arm a
+// resolver that died after taking the token would leave the assignment in
+// 'claimed' with no periodic path back to recovery-ready.
 func (d *RedisRunnerDirectory) takeHandoffRecovery(ctx context.Context, claimID string) (string, error) {
 	return d.evalStatus(ctx, redisTakeHandoffRecoveryScript, []string{
 		d.keys.handoffState,
 		d.keys.handoffClaim,
 		d.keys.handoffRecoveryReady,
 		d.keys.handoffRecoveryDeadline,
+		d.keys.claimsExpiry,
 	}, claimID, strconv.FormatInt(time.Now().UTC().UnixMilli(), 10), strconv.FormatInt(d.claimTTLMillis(), 10))
 }
 
@@ -3443,16 +3449,26 @@ var redisEnqueueAssignmentScript = redis.NewScript(redisEnqueueAssignmentLua)
 // redisRecoverExpiredClaimsLua reclaims claims whose expiry index entry has
 // come due.
 //
-// The enumeration is driven by claim:expiry (KEYS[11]) and nothing else. That
-// is safe because claim:assignment (KEYS[7]) has exactly one writer:
-// redisClaimAssignmentLua HSETs the assignment hash and ZADDs the expiry entry
-// in the same atomic script, and every path that removes a claim —
-// FinalizeClaim, SettleClaimHandoff, ReleaseClaim, ClearAssignment and
-// Register — HDELs the hash and ZREMs the index entry inside its own single
-// script. "Claim present, expiry entry absent" is therefore not a reachable
-// state, and a HKEYS fallback here would only rescan every live claim on each
-// poll, Finalize, Release, Register and per-replica sweep. If tolerance for
-// that unreachable state is ever wanted, it belongs in a 5-minute,
+// The enumeration is driven by claim:expiry (KEYS[11]) and nothing else. The
+// index entry and the claim record are created together by
+// redisClaimAssignmentLua; every path that removes a claim — FinalizeClaim,
+// SettleClaimHandoff, ReleaseClaim, ClearAssignment and Register — HDELs the
+// hash and ZREMs the index entry inside its own single script; and when a
+// resolver takes a recoverable handoff, redisTakeHandoffRecoveryLua re-ZADDs
+// the entry at its token deadline in the same step that fences the token.
+//
+// The one intentional split is this sweep's due branch for a lease_may_exist or
+// lease_created record: it arms recovery-ready and ZREMs the entry, since the
+// debt is now reachable through the handoff ledger and re-reading it on every
+// pass would repeat ledger work. "Claim present, expiry entry absent" is
+// therefore reachable, but only for a handoff parked with recovery-ready=1 and
+// waiting for a take, and never permanently: a crash before the take leaves
+// ready set, which is exactly what the owning poll and the orphan reaper look
+// for, and a crash after it leaves an index entry at the token deadline that
+// this sweep turns back into recovery-ready. A HKEYS fallback here would only
+// rescan every live claim on each poll, Finalize, Release, Register and
+// per-replica sweep without covering any state this index cannot recover;
+// tolerance for a genuinely unindexed claim belongs in a 5-minute,
 // leader-gated maintenance pass, never on this hot path.
 const redisRecoverExpiredClaimsLua = redisLaneRequeueLua + `
 local function deleteHandoff(claimID, assignmentID)
@@ -3494,6 +3510,14 @@ local function reclaim(claimID)
     if deadline <= tonumber(ARGV[1]) then
       redis.call('HSET', KEYS[21], claimID, '1')
       redis.call('HDEL', KEYS[22], claimID)
+      -- A ready handoff is enumerated from the ledger by the owning poll and
+      -- the orphan reaper only; reclaim() can never requeue it. Drop the due
+      -- index entry so it is not re-read on every sweep.
+      redis.call('ZREM', KEYS[11], claimID)
+    else
+      -- Not due yet: park the entry at its handoff deadline instead of leaving
+      -- the past claim expiry in place, which would re-select it every sweep.
+      redis.call('ZADD', KEYS[11], deadline, claimID)
     end
     return false
   end
@@ -3683,7 +3707,14 @@ local deadline = tonumber(redis.call('HGET', KEYS[4], ARGV[1]) or '0')
 if deadline > now then return 'busy' end
 if redis.call('HGET', KEYS[3], ARGV[1]) ~= '1' then return 'noop' end
 redis.call('HDEL', KEYS[3], ARGV[1])
-redis.call('HSET', KEYS[4], ARGV[1], tostring(now + tonumber(ARGV[3])))
+local tokenDeadline = now + tonumber(ARGV[3])
+redis.call('HSET', KEYS[4], ARGV[1], tostring(tokenDeadline))
+-- The token fence and the claim expiry index entry are written together in
+-- this one step. redisRecoverExpiredClaimsLua ZREMs the entry when it arms
+-- recovery-ready, so without this ZADD a process that took the token and then
+-- died would leave the debt with no periodic path back to recovery-ready; the
+-- sweep re-arms it when the token deadline comes due.
+redis.call('ZADD', KEYS[5], tokenDeadline, ARGV[1])
 return 'taken'
 `
 
