@@ -331,12 +331,31 @@ func TestLeaseSweeperResumesInterruptedCancelEndToEnd(t *testing.T) {
 		t.Fatalf("UpdateExecutionStatus(canceling) error = %v", err)
 	}
 
+	// Drive the sweep off the age the backend actually recorded instead of a
+	// now captured here: the local backend stamps the canceling age with its own
+	// wall clock (time.Now().UTC(), no monotonic reading) and the lister keeps a
+	// candidate only while since <= now-threshold. A threshold at the clock's
+	// granularity made inclusion depend on whether the stamp and the test's now
+	// landed in the same tick, so the reap silently found nothing. Reading since
+	// back and placing the sweeper's clock a full threshold-plus-margin past it
+	// makes the comparison pure arithmetic on the recorded value; no sleep or
+	// wall-clock race is involved.
+	lister := state.(engine.CancelingExecutionLister)
+	recorded, err := lister.ListCancelingExecutions(ctx, time.Now().Add(time.Hour), 8)
+	if err != nil {
+		t.Fatalf("ListCancelingExecutions() before the sweep error = %v", err)
+	}
+	if len(recorded) != 1 || recorded[0].ExecutionID != id {
+		t.Fatalf("canceling index = %+v, want only %q", recorded, id)
+	}
+	stuckSince := recorded[0].Since
+
+	const stuckAfter = 5 * time.Millisecond
 	sw := NewLeaseSweeper(state, eng, LeaseSweeperConfig{
 		CancelingExecutionReapPeriod: time.Nanosecond,
-		CancelingExecutionStuckAfter: time.Nanosecond,
+		CancelingExecutionStuckAfter: stuckAfter,
 	})
-	now := time.Now()
-	sw.clock = func() time.Time { return now }
+	sw.clock = func() time.Time { return stuckSince.Add(stuckAfter + time.Millisecond) }
 	if got := sw.ReapStuckCancelingExecutionsOnce(ctx); got != 1 {
 		t.Fatalf("reap = %d, want the interrupted cancel re-driven", got)
 	}
